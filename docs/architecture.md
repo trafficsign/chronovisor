@@ -9,10 +9,14 @@ UserPromptSubmit
   -> inject bounded allowlisted core memory as non-executable JSON
   -> strip non-user blocks and trivial prompts
   -> load recall/sessions/<session_id>.json
+  -> update the private session/topic Recall Field and emit ordered events
   -> build queries, rewriting ambiguous references when needed
   -> exact anchors + inverted BM25 + semantic ANN + positive-use context seeds
   -> bounded two-hop associative expansion and full-vector verification
+  -> resident BGE reranker shadow/canary (when configured)
+  -> per-page Evidence Certificate and dynamic 0..6 pointer / 0..2 rich selection
   -> evidence gate (features -> none/cards/read)
+  -> queue teacher commits for the next Field turn; never current-turn leakage
   -> optional bounded RECALL_CONTEXT as untrusted JSON
   -> reserve a final model-free BM25 fallback inside the total deadline
   -> fail open to the host; breaker preserves BM25 degradation
@@ -73,7 +77,16 @@ Exceptional system repair
   only explicit `used` events are positive Recall feedback.
 - `recall/content-feedback.jsonl`: immutable audit records for applied content corrections.
 - `recall/calibration.json`: validated evidence-gate weights.
+- `recall/evidence-certificate-ledger.jsonl`: query/content/policy-bound private
+  page certificates. Raw prompts are not stored.
+- `recall/field/`: sealed sparse session snapshots plus ordered Field events.
+  Sessions are keyed by a host/session hash and never merged implicitly.
 - `runtime/`: status, events, and metrics for observability.
+- `runtime/recall-labels/ledger.jsonl`: derived silver/strong/gold supervision.
+  Certificate pass is silver, explicit `recall_used` is strong, reviewed eval
+  is gold, and read/reject exposure is never silently converted to a negative.
+- `runtime/recall-field/candidate-trace.jsonl`: privacy-safe Field/teacher
+  disagreement and fallback evidence.
 - `runtime/raw-projections/parents/`: small deterministic logical references
   used by Path-oriented queues. They contain stable Raw IDs, hashes, and commit
   evidence, not a physical locator or second transcript copy. Semantic projection resolves and verifies the
@@ -104,6 +117,26 @@ Exceptional system repair
   deterministic retrieval. Repeated failure opens a cooldown breaker that
   keeps only the cheap BM25 path active. Injected material is data, not an
   instruction channel.
+- **Resident reranker**: a mode-0600 Unix-socket BGE service keeps model load,
+  page text cache, and MPS warmup outside short-lived prompt hooks. `shadow`
+  records before/after/latency only; `canary`/`on` still fail open to the fused
+  teacher path. A shared foreground accelerator lease prevents Nemotron and BGE
+  from silently overcommitting MPS.
+- **Recall Processor**: owns candidate reranking, supporting-span selection,
+  Evidence Certificates, bounded judge escalation, marginal-utility stopping,
+  and commit. It is the retire/commit boundary: Field candidates can never
+  bypass certificates.
+- **Stateful Recall Field**: maintains deterministic sparse activation per
+  session/topic epoch. Exact prompt/entity hits and prior-turn teacher commits
+  provide direct stimulus; typed graph edges spread activation with decay,
+  refractory periods, capacity, and inhibition. Exposure co-fire is excluded
+  from authority. Modes are `off`, `shadow`, `candidate`, and `active`, with
+  deterministic session canaries. Missing/failed promotion evidence always
+  rolls candidate authority back to the full teacher.
+- **Recall Compiler**: a shadow-only meaning-address lookup over typed Claims.
+  It accepts only structured intents with an exact subject/page address, one
+  non-conflicting active value, matching time, and a current source digest.
+  Everything else falls back to Nemotron+BGE.
 - **Save harness**: host-specific transcript parser plus a deterministic,
   lossless delta writer. `legacy` keeps the Markdown writer, `shadow` keeps it
   authoritative while mirroring exact source lines, and `v2` appends original
@@ -247,16 +280,18 @@ exact page/title/tag/entity anchors + SQLite inverted BM25
   -> cached full-vector verification of graph candidates
   -> usage prior (production config only when usage_prior weight > 0)
   -> weighted fusion or plain RRF
-  -> negative feedback demotion
+  -> strong contextual Anti-Index evidence
   -> filter / sort / truncate
 ```
 
-The MCP `chronovisor_search` tool adds one post-search stage: exact tag filtering,
-then `apply_rerank_stage()` only when the optional reranker is enabled for
-relevance-sorted queries. The synchronous recall hook keeps using the faster
-fused search path and does not call the reranker. Folder/tag classification is
-a soft ranking signal; it never hard-routes the query away from the global
-lexical and semantic indexes.
+The MCP `chronovisor_search` tool adds exact tag filtering and the configured
+rerank stage for relevance-sorted queries. Automatic Recall may call the
+resident reranker in `shadow`, `canary`, or `on` mode within its remaining
+deadline; service failure keeps the fused result unchanged. Contextual
+Anti-Index uses only reviewed false-positive or hash-bound strong contradiction
+evidence. Hub suppression stays diagnostic/shadow while its hard-94 gate is
+unmet: degree alone never penalizes a page, exact matches are protected, and
+query specificity plus supporting-span coverage reduce the component.
 
 The five Recall layers, their budgets, and decision-trace semantics are defined
 in [Recall Orchestration](recall-orchestration.md).

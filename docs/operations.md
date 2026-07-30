@@ -59,6 +59,22 @@ runtime is active: it refuses incomplete/stale coverage, writes a mode-0600
 zstd archive, verifies a decompression checksum, and then removes the mutable
 BGE SQLite file. The service deletes that retirement archive after 14 days.
 
+### Resident reranker service
+
+```sh
+scripts/install-reranker-service
+chronovisor-reranker-service status
+chronovisor-reranker-service health
+chronovisor-reranker-service warm
+```
+
+The BGE service listens on the mode-0600
+`~/.chronovisor/runtime/reranker.sock`. `status` reads the last published
+artifact; `health` checks the live socket. A stale socket, killed service,
+timeout, or open breaker must leave the fused candidate order unchanged. The
+foreground accelerator lease is shared with Nemotron semantic queries; do not
+start a second ad-hoc MPS reranker beside the service.
+
 The local dashboard is the primary live operations view. `Current Work` shows
 the active ingest stage (`Raw -> Triage -> Generate -> Apply -> Index`), the
 current raw/job if one is running, and the last completed raw while idle. `Model
@@ -79,6 +95,16 @@ independently of the full snapshot, and replays unseen event IDs in durable
 order. The journal never contains prompts, schemas, raw model output, or vote
 payloads. Reduced-motion and background tabs skip animation and render the
 latest authoritative state immediately.
+
+The VS Code-style Activity Bar switches the Observatory and `/cortex` views.
+Cortex is the live Recall Field debugger: orange is direct stimulus, yellow is
+an actual edge-travel event, violet is retained activation, green is a teacher
+commit, blue is inhibition/reject, and red is reserved for faults. Its session
+selector never merges activation across session hashes. The right HUD exposes
+certificate/reason plus direct, spread, negative, inhibition, Anti-Index, and
+Hub components. `Pause motion`, keyboard navigation, the active-node table,
+ARIA summary, and reduced-motion static arrows are part of the operational
+contract, not demo-only behavior.
 
 ## Evidence Research
 
@@ -174,6 +200,29 @@ close normal false negatives automatically.
 `recall/feedback.jsonl`, then reruns the current gate without writing new
 decision logs. Use it before and after changing recall thresholds, fusion
 weights, rewrite settings, or context style.
+
+### Recall Field and Processor rollback
+
+Inspect these private artifacts together:
+
+```text
+~/.chronovisor/recall/evidence-certificate-ledger.jsonl
+~/.chronovisor/recall/field/sessions/*.json
+~/.chronovisor/recall/field/events/*.jsonl
+~/.chronovisor/runtime/recall-field/candidate-trace.jsonl
+~/.chronovisor/runtime/recall-labels/ledger.jsonl
+~/.chronovisor/runtime/recall-compiler/shadow-trace.jsonl
+```
+
+Rollback order is authority first: set `recall.field.mode = "shadow"`, set
+`recall.processor.enabled = false`, and set
+`search.reranker.service.mode = "shadow"` or `"off"`. Restart the affected
+GitHub-backed services, then verify the hook still returns cards through the
+full fused teacher. Never delete Field snapshots or certificate ledgers to
+roll back; they are evaluation evidence. Field learning remains disabled until
+there are at least 200 explicit strong positives across at least 20 sessions.
+Calibration additionally requires 500 deduplicated labels and a temporal
+holdout with zero session/query leakage.
 
 ## Local Decision Replay Gate
 
@@ -837,11 +886,13 @@ reason code. Weekly self-tune evaluates dev weights against an independent
 locked-test set, asks local consensus for the final veto, and atomically
 writes `recall/search-policy.json` only after both gates pass.
 
-The optional Hugging Face reranker is disabled in the normal local profile.
-Ranking still runs through BM25 + semantic fusion; enable `[search.reranker]`
-only for explicit MCP `chronovisor_search` after a reviewed locked-holdout experiment.
-The tuned starting point is `top_n = 10`, `max_length = 384`,
-`batch_size = 10`, and `weight = 1.0`; the hook path remains unchanged.
+The model contract and resident service rollout are separate switches.
+`[search.reranker].enabled` controls explicit MCP/eval use;
+`[search.reranker.service].mode` controls automatic Recall observation or
+rollout. Start with `shadow`, compare before/after scores and latency, and
+promote only after the manual-94/locked/full gates pass. The tuned starting
+point is `top_n = 10`, `max_length = 384`, `batch_size = 10`, and
+`weight = 1.0`.
 
 ## Calibration
 

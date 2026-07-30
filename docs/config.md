@@ -167,12 +167,11 @@ max_sample_rate = 0.10
 max_operations_without_audit = 4
 
 [search.negative_feedback]
-# Optional. Demotes pages recorded as page_ignored / injection_ignored /
-# false-positive feedback when the incoming query is lexically similar
-# (Jaccard over search tokens) to the feedback prompt. A correction classified
-# as wrong retrieval supplies an explicit negative_pages subset, so unrelated
-# candidates from the same recall decision are not penalized. Pages confirmed
-# relevant by reviewed golden labels for a similar query remain protected.
+# Optional. Only a reviewed false-positive, or a reviewed/hash-bound strong
+# contradiction, can demote a page for a similar query. read,
+# injection_ignored, page_ignored, and certificate reject are exposure/label
+# factory inputs, not standalone true negatives. Retractions and newer reviewed
+# positive labels are applied before any penalty.
 enabled = true
 similarity_threshold = 0.35
 penalty = 0.85
@@ -180,8 +179,7 @@ max_age_days = 180
 max_entries = 500
 
 [search.reranker]
-# Optional. Used by MCP chronovisor_search and the search-eval hybrid-rerank variant;
-# synchronous recall hooks keep using the faster BM25/dense fusion path.
+# Optional model contract shared by MCP, eval, and the resident service.
 enabled = false
 backend = "transformers"
 model = "BAAI/bge-reranker-v2-m3"
@@ -190,6 +188,15 @@ max_length = 384
 batch_size = 10
 device = "mps"
 weight = 1.0
+
+[search.reranker.service]
+enabled = true
+socket = "~/.chronovisor/runtime/reranker.sock"
+timeout_ms = 650
+# off | shadow | canary | on
+mode = "shadow"
+canary_percent = 0
+queue_size = 8
 
 [research]
 # Explicit keeps the bounded MCP/Sleep lane usable without automatic 35B work.
@@ -302,6 +309,40 @@ context_style = "cards"
 semantic = true
 judge_mode = "auto"
 session_ttl_seconds = 604800
+
+[recall.processor]
+# Keep false until pointer/rich precision and related-memory recall pass the
+# locked gate. A Field candidate never overrides this boundary.
+enabled = false
+max_candidates = 10
+max_pointer_cards = 6
+max_rich_evidence = 2
+injection_token_budget = 1200
+certificate_required = true
+judge_enabled = true
+judge_model = "ornith:9b-q4_K_M"
+judge_timeout_ms = 900
+escalation_model = "maxwell1500/ornith-35b:Q5_K_M"
+escalation_timeout_ms = 900
+
+[recall.field]
+# off | shadow | candidate | active. active still requires a sealed passing
+# promotion artifact and an enabled certificate boundary.
+mode = "shadow"
+canary_percent = 0
+working_set_size = 30
+max_active_nodes = 128
+max_active_edges = 256
+positive_learning = false
+wall_half_life_seconds = 300
+turn_decay = 0.82
+spread_gain = 0.35
+max_hops = 2
+global_inhibition = 0.08
+refractory_turns = 1
+topic_reset_similarity = 0.15
+session_ttl_seconds = 604800
+event_retention = 2000
 
 [recall.circuit_breaker]
 failures = 2

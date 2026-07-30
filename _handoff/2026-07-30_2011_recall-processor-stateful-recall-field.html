@@ -422,8 +422,8 @@ event types:
 <div class="phase">
 <h3>Phase 9 — ドキュメント、GitHub runtime、live完了確認</h3>
 <ol class="checklist">
-<li><input type="checkbox"><span><code>docs/architecture.md</code>、<code>docs/hooks.md</code>、<code>docs/config.md</code>、<code>docs/operations.md</code>へservice topology、budget、Field state、dashboard、rollbackを反映する。</span></li>
-<li><input type="checkbox"><span>各Phaseを意味のある単位でcommitし、計画書checkboxと実行ログを完了直後に更新する。ユーザー既存の未追跡ファイルをcommitへ混ぜない。</span></li>
+<li><input type="checkbox" checked><span><code>docs/architecture.md</code>、<code>docs/hooks.md</code>、<code>docs/config.md</code>、<code>docs/operations.md</code>へservice topology、budget、Field state、dashboard、rollbackを反映する。</span></li>
+<li><input type="checkbox" checked><span>各Phaseを意味のある単位でcommitし、計画書checkboxと実行ログを完了直後に更新する。ユーザー既存の未追跡ファイルをcommitへ混ぜない。</span></li>
 <li><input type="checkbox"><span>push/restartの明示許可後、GitHub-backed runtimeを更新し、Dashboard、Semantic、Reranker、Hook、必要なworkerを再起動する。</span></li>
 <li><input type="checkbox"><span>runtime archiveの<code>direct_url.json</code> commit、running process/module path、service health、socket、Dashboard runtime commitをGitHub HEADと照合する。</span></li>
 <li><input type="checkbox"><span>実会話でstimulus→spread→candidate→certificate→commit/rejectを発生させ、hook出力、certificate ledger、Field event、Cortex animationが同じdecision/seqを示すことを確認する。</span></li>
@@ -622,6 +622,7 @@ uv run chronovisor recall-field-replay --fixture &lt;field-events&gt; --json</co
 <li><time>2026-07-30 22:03</time><span>Phase 6実装完了、candidate/active昇格は保留。session hashの決定的5/25/100% canary、Field top30のNemotron verifyとfull teacher並列実行、privacy-safe disagreement/commit trace、hash-bound promotion artifact、active失敗時のteacher/shadow自動rollbackを追加。certificate boundaryが無効ならartifactがpassでもField authorityを拒否する。manual-94のprior-turn teacher commit 127件はField top30 coverage 100%、Field p95 21.4ms/max 75.1msだったが、Phase 2 selector品質不合格かつcandidateではfull teacher率/p95をまだ改善しないため既定shadowを維持。</span></li>
 <li><time>2026-07-30 22:18</time><span>Phase 7実装完了、学習/Compiler authorityは保留。certificate=銀、recall_used=強、reviewed eval=金、read/reject=exposureとして6,538 labelsへ統合し、query/session単位splitとdedupeを固定。実利用strong positive 31件・4 sessionsのため200件/分散gateでField学習を停止（calibration母数は500超）。変更幅cap、hash-chain policy history、leakage/teacher非劣化rollbackを追加。52,780 claimsへsource digestを付けるRecall Compilerをshadow接続し、矛盾/superseded/time/digest未検証はNemotron+BGEへfallback。manual-94はstructured 13件に対して安全側へ全fallback（exact coverage 0%）のため99% precision authorityは未評価・未昇格、fixture exact-hitのみ100%で通過。</span></li>
 <li><time>2026-07-30 22:24</time><span>Phase 8比較完了、採用winnerなし。production indexと分離したincremental MaxSim SQLite prototype、supporting span/fixed promptだけをdigest keyにするbounded prefix-handle LRU、teacher top50再現率99% gateを実装。現MacではColBERT dependency、coremltools/ANE student、Ollama reusable prefix handleが全て不在で、manual-94品質・MPS latency・実resourceの完全比較を成立させられないため全challengerをmissing-metricsで棄却。DSI、memory LoRA、先行注入はproduction候補から明示除外。artifact=<code>runtime/search-eval/phase8-challengers.json</code>。</span></li>
+<li><time>2026-07-30 22:26</time><span>Phase 9のローカル文書・commit項目を完了。architecture/hooks/config/operationsへservice topology、deadline、Field state、Cortex色・操作、label/rollback契約を反映。全Phaseを独立commitで封印し、巨大関数policy違反はevidence search抽出（411→263行）で修正。ユーザー所有の未追跡<code>2026-06-11_0042_recall-redesign.md</code>と<code>logs/</code>は非変更・非stageを維持。push/restart以降の3項目は明示許可待ち。</span></li>
 </ol>
 </section>
 

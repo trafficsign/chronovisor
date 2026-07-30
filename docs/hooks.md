@@ -36,8 +36,10 @@ rewrite, semantic search, and the local judge for 60 seconds while BM25 remains
 available. A successful normal run resets the breaker.
 
 The synchronous hook never starts `chronovisor_research`, Deep Recall, Web search,
-Web fetch, the 35B planner, or the cross-encoder reranker. Those lanes are
-explicit/background or Sleep work. Foreground Recall announces a short-lived
+Web fetch, or the 35B research planner. It may use the already-resident BGE
+reranker service within the same remaining deadline; it never loads the model
+inside the hook, and socket failure returns unchanged fused candidates. The
+research lanes are explicit/background or Sleep work. Foreground Recall announces a short-lived
 sync marker before local inference; a running research child observes that
 marker and is cancelled/deferred within its preemption budget. The scheduler
 tracks the isolated model worker separately from non-model research phases: a
@@ -45,6 +47,14 @@ foreground prompt kills only an overlapping stateless model worker, while
 search/checkpoint work never consumes the synchronous resource-wait budget.
 Automatic and shadow 35B research are rejected unless protected model capacity
 has been proved explicitly.
+
+Every eligible prompt also advances a private Stateful Recall Field. `shadow`
+only records candidate activation; `candidate` verifies the top 20–30 Field
+pages while the full teacher runs in parallel; `active` still requires a
+hash-bound non-degradation artifact. Topic reset, a missing semantic service,
+or a failed artifact immediately keeps the full teacher. Teacher commits enter
+the Field on the next turn only, so the current answer cannot leak into its own
+candidate measurement.
 
 Always-on memory and automatic Recall have independent budgets. L1 admits only
 the fixed system-page allowlist `current-state`, `user-profile`, and
