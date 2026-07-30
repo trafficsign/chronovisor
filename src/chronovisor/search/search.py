@@ -1464,63 +1464,7 @@ def graph_expand_results(
     expanded: dict[str, ScoredPage] = {}
     trace: dict[str, dict[str, object]] = {}
     visited_states = 0
-
-    def neighbors(page_id: str) -> list[tuple[str, float, str]]:
-        edges: dict[str, tuple[float, str]] = {}
-
-        def add(target: str, weight: float, signal: str) -> None:
-            if not target or target == page_id:
-                return
-            current = edges.get(target)
-            if current is None or weight > current[0]:
-                edges[target] = (max(0.0, min(1.0, weight)), signal)
-
-        for target in store.outlinks(page_id):
-            add(target, 1.0, "wikilink")
-        for target in store.backlinks(page_id):
-            add(target, 0.85, "backlink")
-        for tag in store.tags(page_id):
-            related = store.pages_for_tag(tag)
-            degree = max(1, len(related) - 1)
-            weight = 0.55 / math.sqrt(max(1.0, degree / 4.0))
-            for target in related[:12]:
-                add(target, weight, f"tag:{tag}")
-        meta = store.meta(page_id) or {}
-        for entity in meta.get("entities", []):
-            related = store.pages_for_entity(str(entity))
-            degree = max(1, len(related) - 1)
-            weight = 0.75 / math.sqrt(max(1.0, degree / 4.0))
-            for target in related[:12]:
-                add(target, weight, f"entity:{entity}")
-        try:
-            from chronovisor.search.cofire import neighbors as cofire_neighbors
-
-            for edge in cofire_neighbors(
-                page_id,
-                limit=8,
-                positive_weight=1.0,
-                exposure_weight=0.05,
-            ):
-                signals = edge.get("signals")
-                signal = (
-                    "cofire:positive_used"
-                    if isinstance(signals, list) and "positive_used" in signals
-                    else "cofire:exposure"
-                )
-                add(
-                    str(edge.get("page_id") or ""),
-                    float(edge.get("weight") or 0.0),
-                    signal,
-                )
-        except Exception:
-            pass
-        ranked = [
-            (target, weight, signal)
-            for target, (weight, signal) in edges.items()
-            if weight > 0
-        ]
-        ranked.sort(key=lambda edge: edge[1], reverse=True)
-        return ranked[:12]
+    from chronovisor.search.graph_edges import typed_neighbors
 
     while frontier and visited_states < 200:
         negative, hop, page_id, path, incoming_signal = heapq.heappop(frontier)
@@ -1530,7 +1474,14 @@ def graph_expand_results(
         visited_states += 1
         if hop >= 2:
             continue
-        for target, edge_weight, signal in neighbors(page_id):
+        for edge in typed_neighbors(store, page_id, limit=12):
+            target = edge.target
+            edge_weight = edge.weight
+            signal = (
+                f"{edge.edge_type}:{edge.supervision}"
+                if edge.supervision
+                else edge.edge_type
+            )
             next_hop = hop + 1
             next_activation = activation * edge_weight * (0.72**next_hop)
             if next_activation < 0.005:

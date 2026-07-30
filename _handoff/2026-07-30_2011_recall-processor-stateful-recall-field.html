@@ -325,13 +325,13 @@ event types:
 <div class="phase">
 <h3>Phase 3 — Stateful Recall Fieldをshadow実装</h3>
 <ol class="checklist">
-<li><input type="checkbox"><span><code>graph_expand_results()</code>内のneighbor生成・typed edge・traceを再利用可能なengineへ抽出し、現行stateless 2-hop挙動を回帰fixtureで固定する。</span></li>
-<li><input type="checkbox"><span><code>recall/recall_field.py</code>、<code>recall_field_schema.py</code>、<code>recall_field_store.py</code>を追加し、session hash/topic epoch単位でsparse activationを永続化する。</span></li>
-<li><input type="checkbox"><span>direct stimulus（prompt exact/entity、MCP search/read、record、certificate、commit）、typed spread、wall-clock/turn decay、global inhibition、capacity、不応期、negative activationを決定論的に実装する。</span></li>
-<li><input type="checkbox"><span>wikilink/backlink/entity/tagはdegree正規化する。positive co-fireだけを学習signalにし、exposure co-fireはauthority経路から除外する。</span></li>
-<li><input type="checkbox"><span>active/shadowの2 bufferとtopic epochを持ち、新entity・active centroid低一致・強いsemantic jumpでtopic reset/full-search fallbackする。</span></li>
-<li><input type="checkbox"><span>shadow評価ではteacher結果をField入力へ混ぜてから一致率を測る「答え漏洩」を禁止する。teacher commitは次turn以降の学習だけに使う。</span></li>
-<li><input type="checkbox"><span>ordered event log、sealed sparse snapshot、retention、session TTL、corrupt recovery、concurrent writerを実装する。</span></li>
+<li><input type="checkbox" checked><span><code>graph_expand_results()</code>内のneighbor生成・typed edge・traceを再利用可能なengineへ抽出し、現行stateless 2-hop挙動を回帰fixtureで固定する。</span></li>
+<li><input type="checkbox" checked><span><code>recall/recall_field.py</code>、<code>recall_field_schema.py</code>、<code>recall_field_store.py</code>を追加し、session hash/topic epoch単位でsparse activationを永続化する。</span></li>
+<li><input type="checkbox" checked><span>direct stimulus（prompt exact/entity、MCP search/read、record、certificate、commit）、typed spread、wall-clock/turn decay、global inhibition、capacity、不応期、negative activationを決定論的に実装する。</span></li>
+<li><input type="checkbox" checked><span>wikilink/backlink/entity/tagはdegree正規化する。positive co-fireだけを学習signalにし、exposure co-fireはauthority経路から除外する。</span></li>
+<li><input type="checkbox" checked><span>active/shadowの2 bufferとtopic epochを持ち、新entity・active centroid低一致・強いsemantic jumpでtopic reset/full-search fallbackする。</span></li>
+<li><input type="checkbox" checked><span>shadow評価ではteacher結果をField入力へ混ぜてから一致率を測る「答え漏洩」を禁止する。teacher commitは次turn以降の学習だけに使う。</span></li>
+<li><input type="checkbox" checked><span>ordered event log、sealed sparse snapshot、retention、session TTL、corrupt recovery、concurrent writerを実装する。</span></li>
 </ol>
 <pre><code>aᵢ(t+) = clamp(
   decay(aᵢ, Δt, turn)
@@ -616,6 +616,7 @@ uv run chronovisor recall-field-replay --fixture &lt;field-events&gt; --json</co
 <li><time>2026-07-30 20:50</time><span>Phase 0完了。manual 94件manifest sha256=<code>eb166ebb7c52</code>、query本文なし。現行実測はBM25 R@5 28.2%、hybrid 50.7%、BGE 56.3%、negative@20 22.9%。過去基準との差はlive golden/corpus更新後のcase indexとして固定。35B GPU常駐下Semantic 100件はp95 34.9ms/max 142.2ms/error 0、履歴max 602.6msのためRecall上限はremaining budget内650msを採用する。</span></li>
 <li><time>2026-07-30 22:01</time><span>Phase 1完了。常駐BGEのtop-10を35B GPU常駐下で100回実測し、p50 307.3ms / p95 437.7ms / max 501.2ms / error 0。in-process版と順位・raw scoreは完全一致。Nemotron同時負荷でMPS競合を再現したため、両serviceを横断するforeground accelerator leaseを追加。kill/restart、stale socket除去、breaker/fail-open、query非記録も確認した。</span></li>
 <li><time>2026-07-30 22:24</time><span>Phase 2実装完了、production昇格は保留。RRF飽和/hit-count floor/過去query混入/選択前session除外を修正し、page certificate、0〜6 pointer、rich最大2、token/冗長性停止、private ledger、9B→35B fail-closed judgeを追加。94件初回certificateはp95 614.1ms・4秒超過0だが、期待pageを正例とする厳しいproxyでPrecision 7.1% / case recall 26.6% / abstention 11.7%となり不合格。judge利用不能時に0件へ倒すだけの構成も不採用とし、<code>recall.processor.enabled=false</code>を維持。artifactは<code>runtime/search-eval/phase2-certificate-eval.json</code>。</span></li>
+<li><time>2026-07-30 22:41</time><span>Phase 3完了。typed neighborをSearchとFieldの共通engineへ抽出し、shadow/active buffer、session hash、topic epoch、decay、refractory、negative activation、degree正規化spread、positive-used co-fire限定、次turn teacher commit、sealed snapshot/event retention/TTL/corrupt recovery/concurrent writerを実装。実Wiki 100turnはp50 17.7ms / p95 19.5ms / max 72.9ms / error 0、artifactへのraw prompt漏洩なし。Fieldはshadowで注入経路を変更しない。</span></li>
 </ol>
 </section>
 

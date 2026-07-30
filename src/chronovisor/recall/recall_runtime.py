@@ -1908,6 +1908,25 @@ def _finalize_recall_result(
             )
         except Exception:
             pass
+    if result.context_items and active_request.session_id:
+        try:
+            from chronovisor.recall.recall_field import queue_teacher_commits
+
+            result.evidence_features["field_teacher_queue"] = queue_teacher_commits(
+                host=active_request.host,
+                session_id=active_request.session_id,
+                page_ids=[item.page_id for item in result.context_items],
+                certificate_ids={
+                    item.page_id: item.certificate_id
+                    for item in result.context_items
+                    if item.certificate_id
+                },
+            )
+        except Exception as exc:
+            result.evidence_features["field_teacher_queue"] = {
+                "status": "error",
+                "reason": type(exc).__name__,
+            }
     if policy.log_decisions:
         append_recall_log(request, result)
     return result
@@ -2022,6 +2041,7 @@ def _run_recall_impl(
     pre_results: list[Any] = []
     rewrite_metrics: dict[str, Any] = {}
     reranker_metadata: dict[str, Any] = {}
+    field_shadow_metadata: dict[str, Any] = {}
 
     if policy.gate_mode == "evidence" and perform_search:
         try:
@@ -2033,6 +2053,19 @@ def _run_recall_impl(
 
             cleanup_sessions(policy.session_ttl_seconds)
             session_state = load_session_state(active_request.session_id)
+            try:
+                from chronovisor.recall.recall_field import run_field_turn
+
+                field_shadow_metadata = run_field_turn(
+                    host=active_request.host,
+                    session_id=active_request.session_id,
+                    prompt=active_request.prompt,
+                )
+            except Exception as exc:
+                field_shadow_metadata = {
+                    "status": "error",
+                    "reason": type(exc).__name__,
+                }
             initial_queries = build_queries(
                 active_request, matched, [], policy, session_state=session_state
             )
@@ -2049,6 +2082,7 @@ def _run_recall_impl(
                 results=pre_results,
                 search_mode=search_mode,
             )
+            evidence_features["field_shadow"] = field_shadow_metadata
             preliminary_score = evidence_score(evidence_features, policy)
             evidence_features["evidence_score"] = preliminary_score
             if should_rewrite_query(
@@ -2105,6 +2139,7 @@ def _run_recall_impl(
                         search_mode=search_mode,
                         rewrite_confidence=rewrite_confidence,
                     )
+                    evidence_features["field_shadow"] = field_shadow_metadata
                     evidence_features.update(rewrite_metrics)
             remaining_for_reranker = _remaining_budget_ms(deadline_at)
             if remaining_for_reranker is not None and remaining_for_reranker >= 100:
@@ -2127,6 +2162,7 @@ def _run_recall_impl(
                 )
                 evidence_features.update(rewrite_metrics)
                 evidence_features["reranker"] = reranker_metadata
+                evidence_features["field_shadow"] = field_shadow_metadata
             score = evidence_score(evidence_features, policy)
             evidence_features["evidence_score"] = score
             evidence_features["decision_pre_judge"] = decision_from_score(score, policy)
