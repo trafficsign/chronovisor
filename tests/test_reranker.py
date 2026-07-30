@@ -52,6 +52,10 @@ def test_rerank_results_applies_scores_without_touching_tail(monkeypatch) -> Non
     assert [result.page_id for result in outcome.results] == ["b", "a", "c"]
     assert outcome.metadata["status"] == "applied"
     assert outcome.metadata["candidate_count"] == 2
+    assert outcome.metadata["execution"] == "in_process"
+    assert [row["page_id"] for row in outcome.metadata["scores"]] == ["b", "a"]
+    assert [detail.raw_score for detail in outcome.scores] == [0.9, 0.1]
+    assert round(outcome.scores[0].margin_to_next, 6) == 0.8
 
 
 def test_rerank_results_unavailable_preserves_order() -> None:

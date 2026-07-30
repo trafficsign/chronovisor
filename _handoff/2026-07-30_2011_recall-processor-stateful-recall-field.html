@@ -296,12 +296,12 @@ event types:
 <div class="phase">
 <h3>Phase 1 — BGE rerankerの常駐service化</h3>
 <ol class="checklist">
-<li><input type="checkbox"><span>既存<code>semantic_service.py</code>/<code>semantic_client.py</code>のUnix socket・health・breaker設計を参照し、障害分離したreranker service/clientを追加する。</span></li>
-<li><input type="checkbox"><span>現行<code>reranker.py</code>のmodel loaderとbatch scoringをservice側へ移し、page本文cacheとMPS warmupを短命Hookの外へ出す。</span></li>
-<li><input type="checkbox"><span><code>RerankOutcome</code>をraw per-page score、rank、marginを保持する契約へ拡張し、同点時は元rank/page_idで決定的にする。</span></li>
-<li><input type="checkbox"><span><code>launchd/com.trafficsign.chronovisor-reranker.plist</code>、installer、status artifact、health CLI、resource coordinationを追加する。</span></li>
-<li><input type="checkbox"><span>idle、Nemotron同時、35B稼働、memory pressure、service kill/restart、stale socketを負荷試験する。</span></li>
-<li><input type="checkbox"><span>Auto Recallでは最初にshadowでbefore/after/latencyのみ記録し、注入結果は変えない。</span></li>
+<li><input type="checkbox" checked><span>既存<code>semantic_service.py</code>/<code>semantic_client.py</code>のUnix socket・health・breaker設計を参照し、障害分離したreranker service/clientを追加する。</span></li>
+<li><input type="checkbox" checked><span>現行<code>reranker.py</code>のmodel loaderとbatch scoringをservice側へ移し、page本文cacheとMPS warmupを短命Hookの外へ出す。</span></li>
+<li><input type="checkbox" checked><span><code>RerankOutcome</code>をraw per-page score、rank、marginを保持する契約へ拡張し、同点時は元rank/page_idで決定的にする。</span></li>
+<li><input type="checkbox" checked><span><code>launchd/com.trafficsign.chronovisor-reranker.plist</code>、installer、status artifact、health CLI、resource coordinationを追加する。</span></li>
+<li><input type="checkbox" checked><span>idle、Nemotron同時、35B稼働、memory pressure、service kill/restart、stale socketを負荷試験する。</span></li>
+<li><input type="checkbox" checked><span>Auto Recallでは最初にshadowでbefore/after/latencyのみ記録し、注入結果は変えない。</span></li>
 </ol>
 <p class="gate">受入ゲート: hard-94の品質がin-process BGEと一致。warm top-10 batchを含むRecall E2E p95 &lt; 3.5s、4s超過0。service停止時は現行fused pathへfail-openし、host promptを止めない。</p>
 </div>
@@ -614,6 +614,7 @@ uv run chronovisor recall-field-replay --fixture &lt;field-events&gt; --json</co
 <li><time>2026-07-30 20:29</time><span>HTML5構造、メタデータ、受入ゲート、ロールバック、Fable visual正本と発火animation契約を最終監査。</span></li>
 <li><time>2026-07-30 20:40</time><span>合意反映: 0〜6 certified pointer / rich evidence最大2件の動的予算へ変更。伝播をyellow electric arc、抑制をblue、redを実障害専用へ改訂。</span></li>
 <li><time>2026-07-30 20:50</time><span>Phase 0完了。manual 94件manifest sha256=<code>eb166ebb7c52</code>、query本文なし。現行実測はBM25 R@5 28.2%、hybrid 50.7%、BGE 56.3%、negative@20 22.9%。過去基準との差はlive golden/corpus更新後のcase indexとして固定。35B GPU常駐下Semantic 100件はp95 34.9ms/max 142.2ms/error 0、履歴max 602.6msのためRecall上限はremaining budget内650msを採用する。</span></li>
+<li><time>2026-07-30 22:01</time><span>Phase 1完了。常駐BGEのtop-10を35B GPU常駐下で100回実測し、p50 307.3ms / p95 437.7ms / max 501.2ms / error 0。in-process版と順位・raw scoreは完全一致。Nemotron同時負荷でMPS競合を再現したため、両serviceを横断するforeground accelerator leaseを追加。kill/restart、stale socket除去、breaker/fail-open、query非記録も確認した。</span></li>
 </ol>
 </section>
 

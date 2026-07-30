@@ -25,6 +25,16 @@ _WARMUP_THREAD: threading.Thread | None = None
 class RerankOutcome:
     results: list[ScoredPage]
     metadata: dict[str, Any]
+    scores: tuple[RerankScore, ...] = ()
+
+
+@dataclass(frozen=True)
+class RerankScore:
+    page_id: str
+    raw_score: float
+    original_rank: int
+    rerank_rank: int
+    margin_to_next: float
 
 
 def _candidate_text(page: ScoredPage, *, max_chars: int = 2400) -> str:
@@ -212,6 +222,116 @@ def start_reranker_warmup(
         return _WARMUP_THREAD
 
 
+def apply_reranker_scores(
+    candidates: list[ScoredPage],
+    raw_scores: list[float],
+    *,
+    config: RerankerConfig,
+    metadata: dict[str, Any] | None = None,
+) -> RerankOutcome:
+    """Apply raw cross-encoder scores and preserve score/rank evidence."""
+
+    rerank_n = min(max(1, config.top_n), len(candidates))
+    head = candidates[:rerank_n]
+    tail = candidates[rerank_n:]
+    base_metadata = {
+        "model": config.model,
+        "backend": config.backend,
+        "candidate_count": rerank_n,
+        **(metadata or {}),
+    }
+    if len(raw_scores) != rerank_n or any(
+        not math.isfinite(float(score)) for score in raw_scores
+    ):
+        return RerankOutcome(
+            candidates,
+            {
+                **base_metadata,
+                "status": "unavailable",
+                "reason": (
+                    "reranker returned invalid score cardinality or "
+                    "non-finite scores"
+                ),
+                "score_count": len(raw_scores),
+            },
+        )
+
+    original_rank = {page.page_id: rank for rank, page in enumerate(head, start=1)}
+    reranked = sorted(
+        zip(head, (float(score) for score in raw_scores), strict=False),
+        key=lambda item: (
+            -item[1],
+            original_rank[item[0].page_id],
+            item[0].page_id,
+        ),
+    )
+    rerank_rank = {
+        page.page_id: rank for rank, (page, _score) in enumerate(reranked, start=1)
+    }
+    raw_by_page = {page.page_id: score for page, score in reranked}
+    score_details: list[RerankScore] = []
+    for index, (page, raw_score) in enumerate(reranked):
+        next_score = (
+            reranked[index + 1][1] if index + 1 < len(reranked) else raw_score
+        )
+        score_details.append(
+            RerankScore(
+                page_id=page.page_id,
+                raw_score=raw_score,
+                original_rank=original_rank[page.page_id],
+                rerank_rank=rerank_rank[page.page_id],
+                margin_to_next=max(0.0, raw_score - next_score),
+            )
+        )
+
+    rescored = []
+    for page in head:
+        original_score = 1.0 / (60 + original_rank[page.page_id])
+        rerank_score = 1.0 / (60 + rerank_rank[page.page_id])
+        blended_score = original_score + (max(0.0, config.weight) * rerank_score)
+        rescored.append(replace(page, score=blended_score))
+    rescored.sort(
+        key=lambda page: (
+            -page.score,
+            -raw_by_page[page.page_id],
+            original_rank[page.page_id],
+            page.page_id,
+        )
+    )
+    moved = sum(
+        original_rank[page.page_id] != rerank_rank[page.page_id] for page in head
+    )
+    max_rank_delta = max(
+        (
+            abs(original_rank[page.page_id] - rerank_rank[page.page_id])
+            for page in head
+        ),
+        default=0,
+    )
+    serialized_scores = [
+        {
+            "page_id": detail.page_id,
+            "raw_score": detail.raw_score,
+            "original_rank": detail.original_rank,
+            "rerank_rank": detail.rerank_rank,
+            "margin_to_next": detail.margin_to_next,
+        }
+        for detail in score_details
+    ]
+    return RerankOutcome(
+        rescored + tail,
+        {
+            **base_metadata,
+            "status": "applied",
+            "weight": config.weight,
+            "moved_candidates": moved,
+            "max_rank_delta": max_rank_delta,
+            "scores": serialized_scores,
+        },
+        tuple(score_details),
+    )
+
+
 def rerank_results(
     query: str,
     candidates: list[ScoredPage],
@@ -236,7 +356,6 @@ def rerank_results(
 
     rerank_n = min(max(1, cfg.top_n), len(candidates))
     head = candidates[:rerank_n]
-    tail = candidates[rerank_n:]
     passages = [_candidate_text(page) for page in head]
     started = time.perf_counter()
     try:
@@ -253,55 +372,10 @@ def rerank_results(
             },
         )
 
-    if len(scores) != rerank_n or any(
-        not math.isfinite(float(score)) for score in scores
-    ):
-        return RerankOutcome(
-            candidates,
-            {
-                "status": "unavailable",
-                "reason": "reranker returned invalid score cardinality or non-finite scores",
-                "model": cfg.model,
-                "backend": cfg.backend,
-                "candidate_count": rerank_n,
-                "score_count": len(scores),
-            },
-        )
-
-    original_rank = {page.page_id: rank for rank, page in enumerate(head, start=1)}
-    reranked = sorted(
-        zip(head, scores, strict=False),
-        key=lambda item: (-float(item[1]), original_rank[item[0].page_id]),
-    )
-    rerank_rank = {
-        page.page_id: rank for rank, (page, _score) in enumerate(reranked, start=1)
-    }
-
-    rescored = []
-    for page in head:
-        original_score = 1.0 / (60 + original_rank[page.page_id])
-        rerank_score = 1.0 / (60 + rerank_rank[page.page_id])
-        blended_score = original_score + (max(0.0, cfg.weight) * rerank_score)
-        rescored.append(replace(page, score=blended_score))
-    rescored.sort(key=lambda page: page.score, reverse=True)
     elapsed_ms = int(round((time.perf_counter() - started) * 1000))
-    moved = sum(
-        original_rank[page.page_id] != rerank_rank[page.page_id] for page in head
-    )
-    max_rank_delta = max(
-        (abs(original_rank[page.page_id] - rerank_rank[page.page_id]) for page in head),
-        default=0,
-    )
-    return RerankOutcome(
-        rescored + tail,
-        {
-            "status": "applied",
-            "model": cfg.model,
-            "backend": cfg.backend,
-            "candidate_count": rerank_n,
-            "weight": cfg.weight,
-            "latency_ms": elapsed_ms,
-            "moved_candidates": moved,
-            "max_rank_delta": max_rank_delta,
-        },
+    return apply_reranker_scores(
+        candidates,
+        [float(score) for score in scores],
+        config=cfg,
+        metadata={"latency_ms": elapsed_ms, "execution": "in_process"},
     )

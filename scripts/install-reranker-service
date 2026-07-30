@@ -1,0 +1,60 @@
+#!/bin/zsh
+set -euo pipefail
+
+readonly SCRIPT_DIR="${0:A:h}"
+readonly PROJECT_ROOT="${SCRIPT_DIR:h}"
+readonly LAUNCH_AGENT="$HOME/Library/LaunchAgents/com.trafficsign.chronovisor-reranker.plist"
+readonly LABEL="com.trafficsign.chronovisor-reranker"
+readonly DOMAIN="gui/$(/usr/bin/id -u)"
+
+mkdir -p "$HOME/.chronovisor/logs" "${LAUNCH_AGENT:h}"
+/usr/bin/install -m 0644 \
+  "$PROJECT_ROOT/launchd/com.trafficsign.chronovisor-reranker.plist" \
+  "$LAUNCH_AGENT"
+
+/bin/launchctl bootout "$DOMAIN/$LABEL" >/dev/null 2>&1 || true
+/bin/launchctl bootstrap "$DOMAIN" "$LAUNCH_AGENT"
+/bin/launchctl kickstart -k "$DOMAIN/$LABEL"
+
+status_matches_launchd() {
+  local pid
+  pid="$(
+    /bin/launchctl print "$DOMAIN/$LABEL" 2>/dev/null \
+      | /usr/bin/awk '$1 == "pid" && $2 == "=" { print $3; exit }'
+  )"
+  [[ "$pid" == <-> ]] || return 1
+  /bin/kill -0 "$pid" 2>/dev/null || return 1
+  /usr/bin/python3 - "$HOME/.chronovisor/runtime/reranker-service-status.json" "$pid" <<'PY'
+import json
+import sys
+import time
+from pathlib import Path
+
+path = Path(sys.argv[1])
+expected_pid = int(sys.argv[2])
+try:
+    status = json.loads(path.read_text(encoding="utf-8"))
+    age = time.time() - float(status["observed_at_epoch"])
+except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError):
+    raise SystemExit(1)
+if (
+    status.get("ready") is True
+    and int(status.get("pid") or 0) == expected_pid
+    and 0 <= age <= 30
+):
+    raise SystemExit(0)
+raise SystemExit(1)
+PY
+}
+
+for _attempt in {1..120}; do
+  if [[ -S "$HOME/.chronovisor/runtime/reranker.sock" ]] \
+    && status_matches_launchd; then
+    print "Chronovisor reranker service is ready."
+    exit 0
+  fi
+  /bin/sleep 0.5
+done
+
+print -u2 "Reranker service did not become ready; inspect ~/.chronovisor/logs/reranker.launchd.err.log"
+exit 1

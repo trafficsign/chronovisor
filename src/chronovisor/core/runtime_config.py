@@ -6,7 +6,7 @@ import json
 import os
 import subprocess
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from importlib import metadata
 from pathlib import Path
 from typing import Any
@@ -167,6 +167,16 @@ class SearchEmbeddingConfig:
 
 
 @dataclass(frozen=True)
+class RerankerServiceConfig:
+    enabled: bool = False
+    socket: str = "~/.chronovisor/runtime/reranker.sock"
+    timeout_ms: int = 1_500
+    mode: str = "off"
+    canary_percent: int = 0
+    queue_size: int = 8
+
+
+@dataclass(frozen=True)
 class RerankerConfig:
     enabled: bool = False
     model: str = "BAAI/bge-reranker-v2-m3"
@@ -176,6 +186,7 @@ class RerankerConfig:
     batch_size: int = 10
     device: str = ""
     weight: float = 1.0
+    service: RerankerServiceConfig = field(default_factory=RerankerServiceConfig)
 
 
 @dataclass(frozen=True)
@@ -911,6 +922,13 @@ def load_reranker_config(path: Path | str | None = None) -> RerankerConfig:
     model = reranker.get("model")
     backend = reranker.get("backend")
     device = reranker.get("device")
+    service_data = (
+        reranker.get("service") if isinstance(reranker.get("service"), dict) else {}
+    )
+    service_mode = str(service_data.get("mode") or "off").strip().lower()
+    if service_mode not in {"off", "shadow", "canary", "on"}:
+        service_mode = "off"
+    service_socket = service_data.get("socket")
     return RerankerConfig(
         enabled=reranker.get("enabled") is True,
         model=model
@@ -924,6 +942,28 @@ def load_reranker_config(path: Path | str | None = None) -> RerankerConfig:
         batch_size=_positive_int(reranker.get("batch_size"), RerankerConfig.batch_size),
         device=device if isinstance(device, str) else "",
         weight=_nonnegative_float(reranker.get("weight"), RerankerConfig.weight),
+        service=RerankerServiceConfig(
+            enabled=service_data.get("enabled") is True,
+            socket=service_socket
+            if isinstance(service_socket, str) and service_socket.strip()
+            else RerankerServiceConfig.socket,
+            timeout_ms=_positive_int(
+                service_data.get("timeout_ms"), RerankerServiceConfig.timeout_ms
+            ),
+            mode=service_mode,
+            canary_percent=_bounded_int(
+                service_data.get("canary_percent"),
+                RerankerServiceConfig.canary_percent,
+                minimum=0,
+                maximum=100,
+            ),
+            queue_size=_bounded_int(
+                service_data.get("queue_size"),
+                RerankerServiceConfig.queue_size,
+                minimum=1,
+                maximum=64,
+            ),
+        ),
     )
 
 

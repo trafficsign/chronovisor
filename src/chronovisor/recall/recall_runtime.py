@@ -1978,6 +1978,17 @@ def _run_recall_impl(
                         rewrite_confidence=rewrite_confidence,
                     )
                     evidence_features.update(rewrite_metrics)
+            remaining_for_shadow = _remaining_budget_ms(deadline_at)
+            if remaining_for_shadow is not None and remaining_for_shadow >= 900:
+                from chronovisor.recall.recall_processor import (
+                    shadow_rerank_candidates,
+                )
+
+                evidence_features["reranker_shadow"] = shadow_rerank_candidates(
+                    active_request.prompt,
+                    pre_results,
+                    timeout_ms=min(750, remaining_for_shadow - 100),
+                )
             score = evidence_score(evidence_features, policy)
             evidence_features["evidence_score"] = score
             evidence_features["decision_pre_judge"] = decision_from_score(score, policy)

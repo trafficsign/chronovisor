@@ -32,6 +32,7 @@ from chronovisor.core.runtime_config import (
     load_search_embedding_config,
 )
 from chronovisor.core.store import CHRONOVISOR_ROOT, SYSTEM_DIR, find_page
+from chronovisor.search.accelerator_lease import accelerator_lease
 from chronovisor.search.semantic_index import (
     SEMANTIC_ROOT,
     SemanticIndexError,
@@ -357,7 +358,8 @@ class SemanticServiceState:
 
     def _encode_queries(self, queries: list[str], batch_size: int) -> np.ndarray:
         with self._model_lock:
-            vectors = self._foreground.encode_queries(queries, batch_size)
+            with accelerator_lease(timeout_ms=self.config.query_timeout_ms):
+                vectors = self._foreground.encode_queries(queries, batch_size)
         now = time.monotonic()
         with self._query_cache_lock:
             for query, vector in zip(queries, vectors, strict=False):

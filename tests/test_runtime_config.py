@@ -388,6 +388,14 @@ max_length = 1024
 batch_size = 4
 device = "mps"
 weight = 0.4
+
+[search.reranker.service]
+enabled = true
+socket = "/tmp/chronovisor-reranker.sock"
+timeout_ms = 1700
+mode = "canary"
+canary_percent = 25
+queue_size = 12
 """,
         encoding="utf-8",
     )
@@ -403,3 +411,9 @@ weight = 0.4
     assert cfg.batch_size == 4
     assert cfg.device == "mps"
     assert cfg.weight == 0.4
+    assert cfg.service.enabled is True
+    assert cfg.service.socket == "/tmp/chronovisor-reranker.sock"
+    assert cfg.service.timeout_ms == 1700
+    assert cfg.service.mode == "canary"
+    assert cfg.service.canary_percent == 25
+    assert cfg.service.queue_size == 12
