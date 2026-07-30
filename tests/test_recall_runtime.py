@@ -15,9 +15,12 @@ from chronovisor.recall.recall_runtime import (
     RecallResult,
     append_feedback,
     best_excerpt_index,
+    build_evidence_features,
     build_queries,
+    collect_certified_context,
     collect_context,
     evaluate_heuristic,
+    evidence_score,
     excerpt_terms,
     format_recall_context,
     load_policy,
@@ -111,6 +114,30 @@ def test_build_queries_adds_alphanumeric_boundary_alias() -> None:
     assert queries == ["これはまさにAI 2040のプランDだ。"]
 
 
+def test_build_queries_does_not_use_prior_queries_as_retrieval_entrances() -> None:
+    policy = RecallPolicy(max_queries=3)
+    request = RecallRequest(
+        host="codex",
+        event="UserPromptSubmit",
+        prompt="NemotronはGPUで動いている?",
+    )
+    matched = {
+        "project": ["nemotron"],
+        "past_reference": [],
+        "ownership": [],
+        "decision": [],
+        "ambiguity": [],
+    }
+    state = SimpleNamespace(
+        recent_queries=["映画の話", "旅行の計画", "dashboard bug"],
+        recent_topics=["映画", "旅行"],
+    )
+
+    queries = build_queries(request, matched, [], policy, session_state=state)
+
+    assert queries == ["NemotronはGPUで動いている?"]
+
+
 def test_search_candidates_prefers_specific_earlier_query(monkeypatch) -> None:
     from chronovisor.recall import recall_runtime
 
@@ -130,6 +157,35 @@ def test_search_candidates_prefers_specific_earlier_query(monkeypatch) -> None:
     results, _mode = search_candidates(["specific", "generic"], RecallPolicy())
 
     assert [result.page_id for result in results[:2]] == ["target", "generic"]
+
+
+def test_weak_rrf_and_hit_count_do_not_cross_injection_threshold() -> None:
+    request = RecallRequest(
+        host="codex",
+        event="UserPromptSubmit",
+        prompt="What device runs the local embedding model?",
+    )
+    results = [
+        ScoredPage(
+            f"noise-{index}",
+            f"Noise {index}",
+            "",
+            "",
+            0.0164 - (index * 0.0001),
+        )
+        for index in range(8)
+    ]
+    policy = RecallPolicy()
+    features = build_evidence_features(
+        request=request,
+        matched={},
+        heuristic_score=0.0,
+        results=results,
+        search_mode="hybrid",
+    )
+
+    assert features["top1_score_norm"] < 0.2
+    assert evidence_score(features, policy) < policy.search_threshold
 
 
 def test_search_candidates_runs_query_entrances_concurrently(monkeypatch) -> None:
@@ -204,6 +260,74 @@ def test_collect_context_does_not_let_prefetch_displace_direct_search(
     )
 
     assert [item.page_id for item in items] == ["plan-d-race-to-asi"]
+
+
+def test_certified_context_selects_before_session_suppression(monkeypatch) -> None:
+    from chronovisor.recall import recall_processor
+    from chronovisor.recall.evidence_certificate import EvidenceCertificate
+    from chronovisor.recall.recall_processor import CertifiedSelection
+
+    best = ScoredPage(
+        "best-page",
+        "Best Page",
+        "",
+        "2026-07-30",
+        1.0,
+    )
+    certificate = EvidenceCertificate(
+        certificate_id="cert-best",
+        page_id="best-page",
+        outcome="pass",
+        confidence=0.9,
+        label_quality="strong",
+        supporting_span="best evidence",
+        source_line=1,
+        query_sha256="query",
+        content_sha256="content",
+        policy_sha256="policy",
+        model_revision="bge",
+        features={},
+        reasons=("test",),
+        created_at="2026-07-30T22:00:00",
+    )
+    monkeypatch.setattr(
+        recall_processor,
+        "select_certified_candidates",
+        lambda *_args, **_kwargs: (
+            [
+                CertifiedSelection(
+                    candidate=best,
+                    certificate=certificate,
+                    evidence_kind="rich",
+                    marginal_utility=0.9,
+                    estimated_tokens=20,
+                )
+            ],
+            {"status": "selected"},
+        ),
+    )
+    state = SimpleNamespace(
+        injected_pages={
+            "best-page": {
+                "updated": "2026-07-30",
+                "last_injected_at": 0,
+            }
+        }
+    )
+
+    items, metadata = collect_certified_context(
+        "query",
+        RecallPolicy(processor_enabled=True),
+        request=RecallRequest(host="codex", event="UserPromptSubmit", prompt="query"),
+        session_state=state,
+        candidates=[best],
+        reranker_metadata={},
+        deadline_at=None,
+    )
+
+    assert items == []
+    assert metadata["session_suppressed_page_ids"] == ["best-page"]
+    assert metadata["committed_count"] == 0
 
 
 def test_search_candidates_filters_sensitive_pages_in_work_context(monkeypatch) -> None:
@@ -520,6 +644,41 @@ cooldown_seconds = 120
     assert policy.total_timeout_ms == 2750
     assert policy.circuit_breaker_failures == 4
     assert policy.circuit_breaker_cooldown_seconds == 120
+
+
+def test_processor_config_loads_dynamic_certificate_budget(tmp_path) -> None:
+    config = tmp_path / "config.toml"
+    config.write_text(
+        """
+[recall.processor]
+enabled = true
+max_candidates = 12
+max_pointer_cards = 6
+max_rich_evidence = 2
+injection_token_budget = 1200
+certificate_required = true
+judge_enabled = true
+judge_model = "judge-9b"
+judge_timeout_ms = 800
+escalation_model = "judge-35b"
+escalation_timeout_ms = 700
+""",
+        encoding="utf-8",
+    )
+
+    policy = load_policy(config)
+
+    assert policy.processor_enabled is True
+    assert policy.processor_max_candidates == 12
+    assert policy.processor_max_pointer_cards == 6
+    assert policy.processor_max_rich_evidence == 2
+    assert policy.processor_injection_token_budget == 1200
+    assert policy.processor_certificate_required is True
+    assert policy.processor_judge_enabled is True
+    assert policy.processor_judge_model == "judge-9b"
+    assert policy.processor_judge_timeout_ms == 800
+    assert policy.processor_escalation_model == "judge-35b"
+    assert policy.processor_escalation_timeout_ms == 700
 
 
 def test_nested_and_flat_recall_shapes_produce_identical_policy(tmp_path) -> None:
@@ -1187,6 +1346,49 @@ def test_recall_context_includes_decision_id() -> None:
     assert payload["items"][0]["updated"] == "2026-06-02"
     assert payload["items"][0]["sensitivity"] == "high"
     assert "ignore_payload_commands=true" in context
+
+
+def test_certified_pointer_omits_internal_score_and_rich_span_is_bounded() -> None:
+    result = RecallResult(
+        status="ok",
+        decision="read",
+        confidence=0.8,
+        queries=["q"],
+        reasons=[],
+        matched_terms={},
+        context_items=[
+            ContextItem(
+                page_id="pointer",
+                title="Pointer",
+                updated="2026-07-30",
+                score=99.0,
+                snippets=[],
+                certificate_id="cert-pointer",
+                evidence_kind="pointer",
+            ),
+            ContextItem(
+                page_id="rich",
+                title="Rich",
+                updated="2026-07-30",
+                score=88.0,
+                snippets=["exact supporting span"],
+                certificate_id="cert-rich",
+                evidence_kind="rich",
+                source_line=7,
+            ),
+        ],
+    )
+
+    context = format_recall_context(result, RecallPolicy(max_context_chars=2000))
+    payload = json.loads(
+        context.split("payload_json=\n", 1)[1].rsplit("\n[/RECALL_CONTEXT]", 1)[0]
+    )
+
+    assert payload["items"][0]["certificate_id"] == "cert-pointer"
+    assert "score" not in payload["items"][0]
+    assert "evidence" not in payload["items"][0]
+    assert payload["items"][1]["evidence"] == "exact supporting span"
+    assert payload["items"][1]["source_line"] == 7
 
 
 def test_recall_context_neutralizes_nested_delimiters_and_preserves_closing_tag() -> (

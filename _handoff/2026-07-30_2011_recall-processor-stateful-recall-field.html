@@ -309,15 +309,15 @@ event types:
 <div class="phase">
 <h3>Phase 2 — Recall Processorとページ別Evidence Certificate</h3>
 <ol class="checklist">
-<li><input type="checkbox"><span><code>recall/recall_processor.py</code>（または同責務の小モジュール）を追加し、候補生成・rerank・page selection・certificate・commitを分離する。<code>_run_recall_impl</code>へ再び巨大責務を戻さない。</span></li>
-<li><input type="checkbox"><span><code>_score_norm</code>のRRF飽和とhit-count floorを廃止し、channel別raw featureと同一model revision内で較正可能なscoreへ置換する。</span></li>
-<li><input type="checkbox"><span>current promptを主queryにし、過去queryを直接候補へ混ぜない。曖昧な短文だけ直前1turn/episode stateで書き換える。</span></li>
-<li><input type="checkbox"><span>既出pageを候補選択前に除外しない。最良pageを先に決め、その後に「再注入不要」「更新されたので再提示」を判定する。</span></li>
-<li><input type="checkbox"><span><code>claims.py</code>の<code>evidence_span/source_line</code>、検索snippet、query termを使い、候補ごとにsupporting spanを選ぶ。必要ならspan chunkをBGEで再採点する。</span></li>
-<li><input type="checkbox"><span>明確なpass/rejectは決定論的に処理し、曖昧な1〜2件だけ9B judge、さらに必要な場合だけ35Bへ昇格する。</span></li>
-<li><input type="checkbox"><span>certificate通過後もintent coverage、claim/entityの新規性、既出カードとの冗長性、marginal utility、token budgetで順に選び、追加価値がなくなった時点で停止する。</span></li>
-<li><input type="checkbox"><span>certified pointerは最大6件、うちsupporting spanを表示するrich evidenceは最大2件、低信頼なら両方0件。全カードにcertificate idとpage idを付けるが、hostへ内部scoreや秘密情報を過剰注入しない。</span></li>
-<li><input type="checkbox"><span>certificate ledgerとlabel quality（silver/strong/gold）を実装し、teacher biasを監査できるようpolicy/model/content digestを保存する。</span></li>
+<li><input type="checkbox" checked><span><code>recall/recall_processor.py</code>（または同責務の小モジュール）を追加し、候補生成・rerank・page selection・certificate・commitを分離する。<code>_run_recall_impl</code>へ再び巨大責務を戻さない。</span></li>
+<li><input type="checkbox" checked><span><code>_score_norm</code>のRRF飽和とhit-count floorを廃止し、channel別raw featureと同一model revision内で較正可能なscoreへ置換する。</span></li>
+<li><input type="checkbox" checked><span>current promptを主queryにし、過去queryを直接候補へ混ぜない。曖昧な短文だけ直前1turn/episode stateで書き換える。</span></li>
+<li><input type="checkbox" checked><span>既出pageを候補選択前に除外しない。最良pageを先に決め、その後に「再注入不要」「更新されたので再提示」を判定する。</span></li>
+<li><input type="checkbox" checked><span><code>claims.py</code>の<code>evidence_span/source_line</code>、検索snippet、query termを使い、候補ごとにsupporting spanを選ぶ。必要ならspan chunkをBGEで再採点する。</span></li>
+<li><input type="checkbox" checked><span>明確なpass/rejectは決定論的に処理し、曖昧な1〜2件だけ9B judge、さらに必要な場合だけ35Bへ昇格する。</span></li>
+<li><input type="checkbox" checked><span>certificate通過後もintent coverage、claim/entityの新規性、既出カードとの冗長性、marginal utility、token budgetで順に選び、追加価値がなくなった時点で停止する。</span></li>
+<li><input type="checkbox" checked><span>certified pointerは最大6件、うちsupporting spanを表示するrich evidenceは最大2件、低信頼なら両方0件。全カードにcertificate idとpage idを付けるが、hostへ内部scoreや秘密情報を過剰注入しない。</span></li>
+<li><input type="checkbox" checked><span>certificate ledgerとlabel quality（silver/strong/gold）を実装し、teacher biasを監査できるようpolicy/model/content digestを保存する。</span></li>
 </ol>
 <p class="gate">受入ゲート: locked評価でpointer/rich evidence別の注入Precision目標90%以上、hard-94の関連記憶Recallと53.5% rerank Recall@5を非劣化、negative-hit ≤20%、pointer最大6件・rich evidence最大2件、無関係集合では0件。multi-intent fixtureでは必要な独立論点を落とさず、single-intent fixtureでは上限まで水増ししない。lower confidence boundとabstentionを併記し「0件だけでPrecisionを稼ぐ」設定を不採用にする。</p>
 </div>
@@ -615,6 +615,7 @@ uv run chronovisor recall-field-replay --fixture &lt;field-events&gt; --json</co
 <li><time>2026-07-30 20:40</time><span>合意反映: 0〜6 certified pointer / rich evidence最大2件の動的予算へ変更。伝播をyellow electric arc、抑制をblue、redを実障害専用へ改訂。</span></li>
 <li><time>2026-07-30 20:50</time><span>Phase 0完了。manual 94件manifest sha256=<code>eb166ebb7c52</code>、query本文なし。現行実測はBM25 R@5 28.2%、hybrid 50.7%、BGE 56.3%、negative@20 22.9%。過去基準との差はlive golden/corpus更新後のcase indexとして固定。35B GPU常駐下Semantic 100件はp95 34.9ms/max 142.2ms/error 0、履歴max 602.6msのためRecall上限はremaining budget内650msを採用する。</span></li>
 <li><time>2026-07-30 22:01</time><span>Phase 1完了。常駐BGEのtop-10を35B GPU常駐下で100回実測し、p50 307.3ms / p95 437.7ms / max 501.2ms / error 0。in-process版と順位・raw scoreは完全一致。Nemotron同時負荷でMPS競合を再現したため、両serviceを横断するforeground accelerator leaseを追加。kill/restart、stale socket除去、breaker/fail-open、query非記録も確認した。</span></li>
+<li><time>2026-07-30 22:24</time><span>Phase 2実装完了、production昇格は保留。RRF飽和/hit-count floor/過去query混入/選択前session除外を修正し、page certificate、0〜6 pointer、rich最大2、token/冗長性停止、private ledger、9B→35B fail-closed judgeを追加。94件初回certificateはp95 614.1ms・4秒超過0だが、期待pageを正例とする厳しいproxyでPrecision 7.1% / case recall 26.6% / abstention 11.7%となり不合格。judge利用不能時に0件へ倒すだけの構成も不採用とし、<code>recall.processor.enabled=false</code>を維持。artifactは<code>runtime/search-eval/phase2-certificate-eval.json</code>。</span></li>
 </ol>
 </section>
 

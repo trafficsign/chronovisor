@@ -201,6 +201,17 @@ class RecallPolicy:
     calibration_holdout_ratio: float = 0.2
     calibration_min_improvement: float = 0.02
     session_ttl_seconds: int = 7 * 24 * 60 * 60
+    processor_enabled: bool = False
+    processor_max_candidates: int = 10
+    processor_max_pointer_cards: int = 6
+    processor_max_rich_evidence: int = 2
+    processor_injection_token_budget: int = 1200
+    processor_certificate_required: bool = True
+    processor_judge_enabled: bool = True
+    processor_judge_model: str = ""
+    processor_judge_timeout_ms: int = 900
+    processor_escalation_model: str = "maxwell1500/ornith-35b:Q5_K_M"
+    processor_escalation_timeout_ms: int = 900
 
 
 @dataclass
@@ -222,6 +233,9 @@ class ContextItem:
     uid: str = ""
     snippets: list[str] = field(default_factory=list)
     sensitivity: str = "normal"
+    certificate_id: str = ""
+    evidence_kind: str = "legacy"
+    source_line: int = 0
 
 
 @dataclass
@@ -412,6 +426,47 @@ def _apply_config(policy: RecallPolicy, data: dict[str, Any]) -> None:
             policy.rewrite_model = rewrite["model"]
         if isinstance(rewrite.get("timeout_ms"), int):
             policy.rewrite_timeout_ms = max(200, rewrite["timeout_ms"])
+
+    processor = section("processor")
+    if processor:
+        if isinstance(processor.get("enabled"), bool):
+            policy.processor_enabled = processor["enabled"]
+        if isinstance(processor.get("max_candidates"), int):
+            policy.processor_max_candidates = max(1, processor["max_candidates"])
+        if isinstance(processor.get("max_pointer_cards"), int):
+            policy.processor_max_pointer_cards = max(
+                0, min(6, processor["max_pointer_cards"])
+            )
+        if isinstance(processor.get("max_rich_evidence"), int):
+            policy.processor_max_rich_evidence = max(
+                0,
+                min(
+                    policy.processor_max_pointer_cards,
+                    processor["max_rich_evidence"],
+                ),
+            )
+        if isinstance(processor.get("injection_token_budget"), int):
+            policy.processor_injection_token_budget = max(
+                64, processor["injection_token_budget"]
+            )
+        if isinstance(processor.get("certificate_required"), bool):
+            policy.processor_certificate_required = processor[
+                "certificate_required"
+            ]
+        if isinstance(processor.get("judge_enabled"), bool):
+            policy.processor_judge_enabled = processor["judge_enabled"]
+        if isinstance(processor.get("judge_model"), str):
+            policy.processor_judge_model = processor["judge_model"]
+        if isinstance(processor.get("judge_timeout_ms"), int):
+            policy.processor_judge_timeout_ms = max(
+                200, processor["judge_timeout_ms"]
+            )
+        if isinstance(processor.get("escalation_model"), str):
+            policy.processor_escalation_model = processor["escalation_model"]
+        if isinstance(processor.get("escalation_timeout_ms"), int):
+            policy.processor_escalation_timeout_ms = max(
+                300, processor["escalation_timeout_ms"]
+            )
 
     circuit_breaker = section("circuit_breaker")
     if circuit_breaker:
@@ -786,31 +841,19 @@ def build_queries(
     session_state: Any | None = None,
     rewrite_queries: list[str] | None = None,
 ) -> list[str]:
-    candidates: list[str] = []
-    candidates.extend(rewrite_queries or [])
-    candidates.extend(judge_queries)
-    candidates.append(_compact_query(request.prompt))
-    if session_state is not None:
-        candidates.extend(getattr(session_state, "recent_queries", [])[-3:])
+    # The current prompt is authoritative. Prior turns are episode context for
+    # rewriting ambiguous prompts, never independent retrieval entrances.
+    candidates: list[str] = [_compact_query(request.prompt)]
+    ambiguous = bool(matched.get("ambiguity") or matched.get("past_reference"))
+    if ambiguous:
+        candidates.extend(rewrite_queries or [])
+        candidates.extend(judge_queries)
+    if session_state is not None and ambiguous:
         recent_topics = getattr(session_state, "recent_topics", [])[-8:]
-        if recent_topics and matched.get("ambiguity"):
+        if recent_topics:
             candidates.append(
                 " ".join(recent_topics + [_compact_query(request.prompt, limit=80)])
             )
-
-    topic_terms = []
-    for key in ("project", "past_reference", "ownership"):
-        topic_terms.extend(matched.get(key, []))
-    decision_terms = matched.get("decision", [])
-    if topic_terms:
-        candidates.append(" ".join(topic_terms + decision_terms))
-    elif len(decision_terms) >= 2:
-        candidates.append(" ".join(decision_terms))
-
-    if request.cwd:
-        cwd_name = Path(request.cwd).name
-        if cwd_name and cwd_name not in {"new-chat", "Documents"}:
-            candidates.append(f"{cwd_name} {request.prompt}")
 
     return _dedupe_queries(candidates, limit=policy.max_queries)
 
@@ -985,12 +1028,13 @@ def decision_from_score(score: float, policy: RecallPolicy) -> str:
 
 
 def _score_norm(score: float) -> float:
-    # BM25 can be unbounded and RRF is tiny; this stable squashing keeps the
-    # evidence gate comparable across search modes.
+    # Reciprocal-rank fusion scores are intentionally tiny. Treating 0.016 as
+    # 0.48 made almost any retrieved page look like strong evidence. Preserve
+    # the weak absolute signal until a revision-specific calibrator replaces it.
     if score <= 0:
         return 0.0
     if score < 0.2:
-        return min(1.0, score * 30.0)
+        return min(0.5, score / 0.1)
     return score / (score + 3.0)
 
 
@@ -1066,16 +1110,13 @@ def evidence_score(features: dict[str, Any], policy: RecallPolicy) -> float:
         features["calibrated"] = True
         return calibrated
     score = (
-        0.52 * float(features.get("top1_score_norm", 0.0) or 0.0)
-        + 0.18 * float(features.get("margin_norm", 0.0) or 0.0)
-        + 0.12 * float(features.get("hit_count_norm", 0.0) or 0.0)
-        + 0.14 * float(features.get("heuristic_score", 0.0) or 0.0)
+        0.35 * float(features.get("top1_score_norm", 0.0) or 0.0)
+        + 0.12 * float(features.get("margin_norm", 0.0) or 0.0)
+        + 0.45 * float(features.get("heuristic_score", 0.0) or 0.0)
         + 0.08 * float(features.get("rewrite_confidence", 0.0) or 0.0)
     )
     if features.get("ambiguity") and features.get("hit_count", 0):
         score += 0.04
-    if features.get("hit_count", 0):
-        score = max(score, float(features.get("heuristic_score", 0.0) or 0.0) * 0.85)
     if not features.get("hit_count"):
         score = min(score, policy.search_threshold - 0.05)
     features["calibrated"] = False
@@ -1304,6 +1345,77 @@ def collect_context(
         if len(items) >= policy.max_pages:
             return items
     return items
+
+
+def collect_certified_context(
+    query: str,
+    policy: RecallPolicy,
+    *,
+    request: RecallRequest,
+    session_state: Any | None,
+    candidates: list[Any],
+    reranker_metadata: dict[str, Any] | None,
+    deadline_at: float | None,
+) -> tuple[list[ContextItem], dict[str, Any]]:
+    """Select first, then suppress unchanged session pages without backfill."""
+
+    from chronovisor.recall.recall_processor import select_certified_candidates
+
+    remaining_ms = _remaining_budget_ms(deadline_at)
+    judge_timeout_ms = (
+        max(0, min(1_800, remaining_ms - 100))
+        if remaining_ms is not None
+        else 1_800
+    )
+    selections, metadata = select_certified_candidates(
+        query,
+        candidates,
+        reranker_metadata=reranker_metadata,
+        max_candidates=policy.processor_max_candidates,
+        max_pointer_cards=policy.processor_max_pointer_cards,
+        max_rich_evidence=policy.processor_max_rich_evidence,
+        injection_token_budget=policy.processor_injection_token_budget,
+        certificate_required=policy.processor_certificate_required,
+        judge_policy=policy if policy.processor_judge_enabled else None,
+        judge_timeout_ms=judge_timeout_ms,
+    )
+    items: list[ContextItem] = []
+    suppressed: list[str] = []
+    for selection in selections:
+        candidate = selection.candidate
+        certificate = selection.certificate
+        if should_skip_session_page(
+            session_state,
+            str(candidate.page_id),
+            str(getattr(candidate, "updated", "") or ""),
+        ):
+            suppressed.append(str(candidate.page_id))
+            continue
+        if should_filter_sensitive_result(candidate, request):
+            suppressed.append(str(candidate.page_id))
+            continue
+        items.append(
+            ContextItem(
+                page_id=str(candidate.page_id),
+                title=str(getattr(candidate, "title", "") or candidate.page_id),
+                updated=str(getattr(candidate, "updated", "") or ""),
+                score=round(float(getattr(candidate, "score", 0.0) or 0.0), 4),
+                uid=page_uid_for_id(str(candidate.page_id)),
+                snippets=[certificate.supporting_span]
+                if selection.evidence_kind == "rich"
+                else [],
+                sensitivity=str(
+                    getattr(candidate, "sensitivity", "normal") or "normal"
+                ),
+                certificate_id=certificate.certificate_id,
+                evidence_kind=selection.evidence_kind,
+                source_line=certificate.source_line,
+            )
+        )
+    metadata["session_suppressed_page_ids"] = suppressed
+    metadata["committed_count"] = len(items)
+    metadata["committed_page_ids"] = [item.page_id for item in items]
+    return items, metadata
 
 
 def query_hint_page_ids(queries: list[str], *, limit: int) -> list[str]:
@@ -1548,19 +1660,30 @@ def _neutralize_context_delimiters(text: str) -> str:
 def _recall_payload(result: RecallResult, policy: RecallPolicy) -> dict[str, Any]:
     items: list[dict[str, Any]] = []
     for item in result.context_items:
-        evidence = item.snippets[0] if item.snippets else page_summary(item.page_id)
-        items.append(
-            {
-                "page_id": item.page_id,
-                "title": _neutralize_context_delimiters(_one_line(item.title, 160)),
-                "updated": item.updated,
-                "sensitivity": item.sensitivity,
-                "score": item.score,
-                "evidence": _neutralize_context_delimiters(_one_line(evidence, 220))
-                if evidence
-                else "",
-            }
-        )
+        evidence = item.snippets[0] if item.snippets else ""
+        payload_item: dict[str, Any] = {
+            "page_id": item.page_id,
+            "title": _neutralize_context_delimiters(_one_line(item.title, 160)),
+            "updated": item.updated,
+            "sensitivity": item.sensitivity,
+        }
+        if item.certificate_id:
+            payload_item["certificate_id"] = item.certificate_id
+            payload_item["evidence_kind"] = item.evidence_kind
+            if item.evidence_kind == "rich" and evidence:
+                payload_item["evidence"] = _neutralize_context_delimiters(
+                    _one_line(evidence, 220)
+                )
+                if item.source_line > 0:
+                    payload_item["source_line"] = item.source_line
+        else:
+            legacy_evidence = evidence or page_summary(item.page_id)
+            payload_item["score"] = item.score
+            if legacy_evidence:
+                payload_item["evidence"] = _neutralize_context_delimiters(
+                    _one_line(legacy_evidence, 220)
+                )
+        items.append(payload_item)
     return {
         "trace": {
             "decision_id": _neutralize_context_delimiters(
@@ -1632,7 +1755,11 @@ def _render_recall_payload(payload: dict[str, Any], max_chars: int) -> str:
             "trace": payload.get("trace", {}),
             "decision": payload.get("decision", "search"),
             "items": [
-                {"page_id": str(item.get("page_id") or "")}
+                {
+                    key: value
+                    for key, value in item.items()
+                    if key in {"page_id", "certificate_id", "evidence_kind"}
+                }
                 for item in items[:1]
                 if isinstance(item, dict)
             ],
@@ -1894,6 +2021,7 @@ def _run_recall_impl(
     session_state = None
     pre_results: list[Any] = []
     rewrite_metrics: dict[str, Any] = {}
+    reranker_metadata: dict[str, Any] = {}
 
     if policy.gate_mode == "evidence" and perform_search:
         try:
@@ -1978,17 +2106,27 @@ def _run_recall_impl(
                         rewrite_confidence=rewrite_confidence,
                     )
                     evidence_features.update(rewrite_metrics)
-            remaining_for_shadow = _remaining_budget_ms(deadline_at)
-            if remaining_for_shadow is not None and remaining_for_shadow >= 900:
+            remaining_for_reranker = _remaining_budget_ms(deadline_at)
+            if remaining_for_reranker is not None and remaining_for_reranker >= 100:
                 from chronovisor.recall.recall_processor import (
-                    shadow_rerank_candidates,
+                    rank_recall_candidates,
                 )
 
-                evidence_features["reranker_shadow"] = shadow_rerank_candidates(
+                pre_results, reranker_metadata = rank_recall_candidates(
                     active_request.prompt,
                     pre_results,
-                    timeout_ms=min(750, remaining_for_shadow - 100),
+                    timeout_ms=min(1_500, remaining_for_reranker - 50),
                 )
+                evidence_features = build_evidence_features(
+                    request=active_request,
+                    matched=matched,
+                    heuristic_score=score,
+                    results=pre_results,
+                    search_mode=search_mode,
+                    rewrite_confidence=rewrite_confidence,
+                )
+                evidence_features.update(rewrite_metrics)
+                evidence_features["reranker"] = reranker_metadata
             score = evidence_score(evidence_features, policy)
             evidence_features["evidence_score"] = score
             evidence_features["decision_pre_judge"] = decision_from_score(score, policy)
@@ -2002,7 +2140,9 @@ def _run_recall_impl(
             pre_results = []
             search_mode = "error"
 
-    if should_run_judge(score, policy, evidence_features):
+    if not policy.processor_enabled and should_run_judge(
+        score, policy, evidence_features
+    ):
         try:
             judge_timeout_ms = _require_remaining_budget(deadline_at, "judge")
         except RecallBudgetExhausted as exc:
@@ -2064,15 +2204,27 @@ def _run_recall_impl(
     if perform_search and decision != "none":
         try:
             _require_remaining_budget(deadline_at, "context")
-            context_items = collect_context(
-                queries,
-                decision,
-                policy,
-                request=active_request,
-                session_state=session_state,
-                pre_results=pre_results or None,
-                deadline_at=deadline_at,
-            )
+            if policy.processor_enabled:
+                context_items, processor_metadata = collect_certified_context(
+                    active_request.prompt,
+                    policy,
+                    request=active_request,
+                    session_state=session_state,
+                    candidates=pre_results,
+                    reranker_metadata=reranker_metadata,
+                    deadline_at=deadline_at,
+                )
+                evidence_features["processor"] = processor_metadata
+            else:
+                context_items = collect_context(
+                    queries,
+                    decision,
+                    policy,
+                    request=active_request,
+                    session_state=session_state,
+                    pre_results=pre_results or None,
+                    deadline_at=deadline_at,
+                )
             if not context_items:
                 reasons.append("no matching pages")
         except RecallBudgetExhausted as exc:
@@ -2088,6 +2240,8 @@ def _run_recall_impl(
         status="ok" if not error else "error",
         decision=decision
         if context_items or decision == "none" or not perform_search
+        else "none"
+        if policy.processor_enabled
         else "search",
         confidence=round(score, 3),
         queries=queries,
