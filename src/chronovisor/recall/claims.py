@@ -105,6 +105,7 @@ def page_claims(page_id: str, *, source_raw: str = "", op: str = "index") -> lis
     except OSError:
         return []
     meta, body = parse(text)
+    source_sha256 = hashlib.sha256(text.encode()).hexdigest()
     title = meta.get("title") if isinstance(meta.get("title"), str) else page_id
     summary = meta.get("summary") if isinstance(meta.get("summary"), str) else ""
     updated = str(meta.get("updated") or date.today().isoformat())
@@ -121,6 +122,7 @@ def page_claims(page_id: str, *, source_raw: str = "", op: str = "index") -> lis
         "valid_from": updated,
         "valid_to": None if status == "active" else updated,
         "status": "active" if status == "active" else "expired",
+        "source_sha256": source_sha256,
     }
     claims: list[dict[str, Any]] = [
         {

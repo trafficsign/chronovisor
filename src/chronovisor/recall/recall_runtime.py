@@ -2104,6 +2104,18 @@ def _run_recall_impl(
                     "status": "error",
                     "reason": type(exc).__name__,
                 }
+            try:
+                from chronovisor.recall.recall_compiler import compile_query
+
+                field_shadow_metadata["recall_compiler"] = compile_query(
+                    active_request.prompt
+                )
+            except Exception as exc:
+                field_shadow_metadata["recall_compiler"] = {
+                    "status": "error",
+                    "reason": type(exc).__name__,
+                    "page_ids": [],
+                }
             initial_queries = build_queries(
                 active_request, matched, [], policy, session_state=session_state
             )
@@ -2364,6 +2376,34 @@ def _run_recall_impl(
         latency_ms=_elapsed_ms(started),
         error=error,
     )
+    compiler_metadata = field_shadow_metadata.get("recall_compiler")
+    if isinstance(compiler_metadata, dict):
+        compiler_ids = {
+            str(value)
+            for value in compiler_metadata.get("page_ids", [])
+            if isinstance(value, str)
+        }
+        teacher_ids = [str(item.page_id) for item in pre_results[:30]]
+        committed_ids = [item.page_id for item in context_items]
+        evidence_features["shadow_teacher"] = {
+            "compiler_status": str(compiler_metadata.get("status") or ""),
+            "compiler_page_ids": sorted(compiler_ids),
+            "teacher_overlap": len(compiler_ids & set(teacher_ids)),
+            "commit_overlap": len(compiler_ids & set(committed_ids)),
+            "authority": "teacher",
+        }
+        if compiler_metadata.get("status") == "exact":
+            try:
+                from chronovisor.recall.recall_compiler import append_shadow_trace
+
+                append_shadow_trace(
+                    prompt=active_request.prompt,
+                    compiler=compiler_metadata,
+                    teacher_page_ids=teacher_ids,
+                    committed_page_ids=committed_ids,
+                )
+            except Exception:
+                pass
     return _finalize_recall_result(
         result,
         request=request,

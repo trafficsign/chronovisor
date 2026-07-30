@@ -398,12 +398,12 @@ event types:
 <div class="phase">
 <h3>Phase 7 — ラベル工場、学習Field、Recall Compiler</h3>
 <ol class="checklist">
-<li><input type="checkbox"><span>certificate、pull/read、recall_used、明示評価を一つのprovenance付きlabel ledgerへjoinし、silver/strong/goldの重みと重複排除を固定する。</span></li>
-<li><input type="checkbox"><span>strong positiveが200件未満、または十分なsession分散がない間はField edge weightを自動学習しない。gate/calibrationは既存どおり500件未満で適用しない。</span></li>
-<li><input type="checkbox"><span>時系列holdout、policy history、変更幅cap、last-known-good、自動rollbackをRecall Field/selectorにも適用する。</span></li>
-<li><input type="checkbox"><span><code>claims.py</code>を利用してentity/relation/value/time/sourceへ型付けするRecall Compilerをshadow追加し、構造化可能な質問は意味アドレスexact hitで候補化する。</span></li>
-<li><input type="checkbox"><span>Recall Compilerは矛盾・superseded・時制・source digestを検証し、曖昧な文章記憶は必ず通常のNemotron+BGE経路へfallbackする。</span></li>
-<li><input type="checkbox"><span>常時Shadow Teacherでfast pathと最高品質pathの不一致を収集し、採用ゲートを一度きりの94件から実trafficへ拡張する。</span></li>
+<li><input type="checkbox" checked><span>certificate、pull/read、recall_used、明示評価を一つのprovenance付きlabel ledgerへjoinし、silver/strong/goldの重みと重複排除を固定する。</span></li>
+<li><input type="checkbox" checked><span>strong positiveが200件未満、または十分なsession分散がない間はField edge weightを自動学習しない。gate/calibrationは既存どおり500件未満で適用しない。</span></li>
+<li><input type="checkbox" checked><span>時系列holdout、policy history、変更幅cap、last-known-good、自動rollbackをRecall Field/selectorにも適用する。</span></li>
+<li><input type="checkbox" checked><span><code>claims.py</code>を利用してentity/relation/value/time/sourceへ型付けするRecall Compilerをshadow追加し、構造化可能な質問は意味アドレスexact hitで候補化する。</span></li>
+<li><input type="checkbox" checked><span>Recall Compilerは矛盾・superseded・時制・source digestを検証し、曖昧な文章記憶は必ず通常のNemotron+BGE経路へfallbackする。</span></li>
+<li><input type="checkbox" checked><span>常時Shadow Teacherでfast pathと最高品質pathの不一致を収集し、採用ゲートを一度きりの94件から実trafficへ拡張する。</span></li>
 </ol>
 <p class="gate">受入ゲート: 学習とholdoutのsession/query漏洩なし。Recall Compiler exact-hitのPrecision 99%以上、coverageを別表示。fast pathはteacher非劣化を満たすまでproduction authorityにしない。</p>
 </div>
@@ -620,6 +620,7 @@ uv run chronovisor recall-field-replay --fixture &lt;field-events&gt; --json</co
 <li><time>2026-07-30 23:32</time><span>Phase 4完了。Cortexをsession-scoped Field projectionへ接続し、live乱数cascadeを廃止。orange stimulus、実edge限定yellow electric arc、violet activation、green commit、blue inhibit、red fault、seq gap/reconnect、HUD/ARIA/keyboard/reduced-motion、Observatory要約を実装。隔離2-node live eventでspread受信2/paint2、event-to-paint p95 13.6ms、queue max 1、実Wiki 3,348-node描画57.7fps/frame p95 17.6ms。1280/1024/920/680をDOM実測し横overflow 0、focused 74 tests passed。</span></li>
 <li><time>2026-07-30 21:55</time><span>Phase 5実装完了、authority昇格は保留。ignored/page_ignored/certificate rejectを単独負例から除外し、reviewed false-positiveまたはhash-bound strong contradictionだけをcontextual centroidへ採用。golden/retraction保護、query specificity・degree・support span・exact match保護付きHub shadow成分、pronoun continuationを壊さないtopic shift、certificate/Field/CortexのAnti-Index・Hub内訳を追加。focused 115 tests passed。manual-94はRecall@5 50.7%を維持したがnegative@20 22.9%で20%未満ゲート未達のため、rankingは変更せずshadowのまま。</span></li>
 <li><time>2026-07-30 22:03</time><span>Phase 6実装完了、candidate/active昇格は保留。session hashの決定的5/25/100% canary、Field top30のNemotron verifyとfull teacher並列実行、privacy-safe disagreement/commit trace、hash-bound promotion artifact、active失敗時のteacher/shadow自動rollbackを追加。certificate boundaryが無効ならartifactがpassでもField authorityを拒否する。manual-94のprior-turn teacher commit 127件はField top30 coverage 100%、Field p95 21.4ms/max 75.1msだったが、Phase 2 selector品質不合格かつcandidateではfull teacher率/p95をまだ改善しないため既定shadowを維持。</span></li>
+<li><time>2026-07-30 22:18</time><span>Phase 7実装完了、学習/Compiler authorityは保留。certificate=銀、recall_used=強、reviewed eval=金、read/reject=exposureとして6,538 labelsへ統合し、query/session単位splitとdedupeを固定。実利用strong positive 31件・4 sessionsのため200件/分散gateでField学習を停止（calibration母数は500超）。変更幅cap、hash-chain policy history、leakage/teacher非劣化rollbackを追加。52,780 claimsへsource digestを付けるRecall Compilerをshadow接続し、矛盾/superseded/time/digest未検証はNemotron+BGEへfallback。manual-94はstructured 13件に対して安全側へ全fallback（exact coverage 0%）のため99% precision authorityは未評価・未昇格、fixture exact-hitのみ100%で通過。</span></li>
 </ol>
 </section>
 
