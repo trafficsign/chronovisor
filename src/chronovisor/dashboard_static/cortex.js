@@ -18,6 +18,13 @@
   const RGB_INHIBIT = hexRgb(INHIBIT);
   const RGB_FAULT = hexRgb(FAULT);
   const TYPE_OFF = new Set([2]);
+  const ACTIVE_LABEL_LIMIT = 5;
+  const NODE_FLASH_ATTACK_MS = 90;
+  const NODE_FLASH_HOLD_MS = 150;
+  const NODE_FLASH_DECAY_MS = 1450;
+  const NODE_FLASH_DURATION_MS =
+    NODE_FLASH_ATTACK_MS + NODE_FLASH_HOLD_MS + NODE_FLASH_DECAY_MS;
+  const EDGE_AFTERGLOW_MS = 650;
 
   let data;
   let nodes = [];
@@ -49,6 +56,7 @@
   let alpha = 1;
   let spikes = 0;
   let lastInteraction = 0;
+  let lastVisualMetricsPublished = 0;
 
   const stage = document.getElementById("stage");
   const canvas = document.getElementById("gl");
@@ -74,15 +82,31 @@
     spread: [],
     frameDurations: [],
     maxPulseQueue: 0,
+    violetNodes: 0,
+    labelsPainted: 0,
+    afterglowEdges: 0,
+    flashPeak: 0,
   };
   window.chronovisorCortexMetrics = () => ({
     spread: cortexMetrics.spread.map((row) => ({ ...row })),
     frameDurations: cortexMetrics.frameDurations.slice(-240),
     maxPulseQueue: cortexMetrics.maxPulseQueue,
     pulseQueue: pulses.length,
+    visual: {
+      violetNodes: cortexMetrics.violetNodes,
+      labelsPainted: cortexMetrics.labelsPainted,
+      afterglowEdges: cortexMetrics.afterglowEdges,
+      flashPeak: cortexMetrics.flashPeak,
+      activeLabelLimit: ACTIVE_LABEL_LIMIT,
+      attackMs: NODE_FLASH_ATTACK_MS,
+      holdMs: NODE_FLASH_HOLD_MS,
+      decayMs: NODE_FLASH_DECAY_MS,
+      edgeAfterglowMs: EDGE_AFTERGLOW_MS,
+    },
   });
 
   const pulses = [];
+  const edgeAfterglows = [];
   const nodeEffects = [];
   const stars = Array.from({ length: 130 }, () => ({
     x: Math.random(),
@@ -118,6 +142,45 @@
 
   function mix(from, to, factor) {
     return from.map((channel, index) => channel + (to[index] - channel) * factor);
+  }
+
+  function clamp(value, minimum = 0, maximum = 1) {
+    return Math.max(minimum, Math.min(maximum, value));
+  }
+
+  function smoothstep(value) {
+    const unit = clamp(value);
+    return unit * unit * (3 - 2 * unit);
+  }
+
+  function excitationLevel(node, time) {
+    const age = time - node.flashStartedAt;
+    if (!Number.isFinite(age) || age < 0 || age >= NODE_FLASH_DURATION_MS) {
+      return 0;
+    }
+    if (age < NODE_FLASH_ATTACK_MS) {
+      const attack = 1 - Math.pow(1 - age / NODE_FLASH_ATTACK_MS, 3);
+      return node.flashBase + (node.flashPeak - node.flashBase) * attack;
+    }
+    if (age < NODE_FLASH_ATTACK_MS + NODE_FLASH_HOLD_MS) {
+      return node.flashPeak;
+    }
+    const decay =
+      (age - NODE_FLASH_ATTACK_MS - NODE_FLASH_HOLD_MS) / NODE_FLASH_DECAY_MS;
+    return node.flashPeak * (1 - smoothstep(decay));
+  }
+
+  function exciteNode(node, delta, time) {
+    const current = excitationLevel(node, time);
+    const strength = clamp(Math.abs(delta));
+    node.flashBase = current;
+    node.flashPeak = clamp(
+      current + strength * (1 - current * 0.35),
+      current,
+      1.25,
+    );
+    node.flashStartedAt = time;
+    node.firedAt = time;
   }
 
   function escapeHtml(value) {
@@ -197,8 +260,10 @@
       vx: 0,
       vy: 0,
       vz: 0,
-      potential: 0,
       firedAt: -1e9,
+      flashStartedAt: -1e9,
+      flashBase: 0,
+      flashPeak: 0,
       fieldActivation: 0,
       fieldComponents: { direct: 0, spread: 0, negative: 0, inhibition: 0 },
       fieldState: "inactive",
@@ -477,11 +542,13 @@
     const roots = scenarioNodes(name);
     const now = performance.now();
     roots.forEach((node, rootIndex) => {
+      const startedAt = now + rootIndex * 35;
+      exciteNode(node, 0.9, startedAt);
       nodeEffects.push({
         nodeIndex: node.index,
         kind: "stimulus",
-        startedAt: now + rootIndex * 35,
-        duration: 520,
+        startedAt,
+        duration: 900,
         delta: 0.9,
         seq: -(rootIndex + 1),
         demo: true,
@@ -520,6 +587,12 @@
     if (nodeEffects.length > window.CortexField.MAX_EVENTS) {
       nodeEffects.splice(0, nodeEffects.length - window.CortexField.MAX_EVENTS);
     }
+    if (edgeAfterglows.length > window.CortexField.MAX_EVENTS) {
+      edgeAfterglows.splice(
+        0,
+        edgeAfterglows.length - window.CortexField.MAX_EVENTS,
+      );
+    }
   }
 
   function publishCortexMetrics() {
@@ -550,6 +623,21 @@
     target.dataset.maxPulseQueue = String(cortexMetrics.maxPulseQueue);
     target.dataset.frameP95Ms = frameP95.toFixed(1);
     target.dataset.fps = frameMean ? (1000 / frameMean).toFixed(1) : "0.0";
+  }
+
+  function publishVisualMetrics(time) {
+    if (time - lastVisualMetricsPublished < 200) return;
+    lastVisualMetricsPublished = time;
+    const target = document.getElementById("fieldAria");
+    if (!target) return;
+    target.dataset.violetNodes = String(cortexMetrics.violetNodes);
+    target.dataset.labelsPainted = String(cortexMetrics.labelsPainted);
+    target.dataset.afterglowEdges = String(cortexMetrics.afterglowEdges);
+    target.dataset.flashPeak = cortexMetrics.flashPeak.toFixed(3);
+    target.dataset.activeLabelLimit = String(ACTIVE_LABEL_LIMIT);
+    target.dataset.flashTiming =
+      `${NODE_FLASH_ATTACK_MS}/${NODE_FLASH_HOLD_MS}/${NODE_FLASH_DECAY_MS}`;
+    target.dataset.edgeAfterglowMs = String(EDGE_AFTERGLOW_MS);
   }
 
   function ensureActualEdge(event) {
@@ -641,13 +729,14 @@
       spikes += 1;
       crackle(0.035 + strength * 0.08);
     } else if (node) {
-      node.potential = Math.max(node.potential, Math.abs(event.delta));
-      node.firedAt = now;
+      if (event.kind === "stimulus") {
+        exciteNode(node, event.delta, now);
+      }
       nodeEffects.push({
         nodeIndex: node.index,
         kind: event.kind,
         startedAt: now,
-        duration: event.kind === "stimulus" ? 620 : 720,
+        duration: event.kind === "stimulus" ? 900 : 820,
         delta: Math.abs(event.delta),
         seq: event.seq,
         reasonCode: event.reason_code,
@@ -745,6 +834,77 @@
     };
   }
 
+  function completePulse(pulse, target, time) {
+    target.arrivedAt = time;
+    exciteNode(target, pulse.delta, time);
+    nodeEffects.push({
+      nodeIndex: target.index,
+      kind: "arrival",
+      startedAt: time,
+      duration: 900,
+      delta: pulse.delta,
+      seq: pulse.seq,
+      demo: pulse.demo,
+    });
+    edgeAfterglows.push({
+      edgeIndex: pulse.edgeIndex,
+      startedAt: time,
+      duration: EDGE_AFTERGLOW_MS,
+      delta: pulse.delta,
+      seq: pulse.seq,
+    });
+    trimVisualQueues();
+    const metric = cortexMetrics.spread.find((row) => row.seq === pulse.seq);
+    if (metric) metric.arrivalAt = time;
+  }
+
+  function drawEdgeAfterglows(time) {
+    context.globalCompositeOperation = "lighter";
+    for (let index = edgeAfterglows.length - 1; index >= 0; index -= 1) {
+      const afterglow = edgeAfterglows[index];
+      const progress = (time - afterglow.startedAt) / afterglow.duration;
+      const link = links[afterglow.edgeIndex];
+      if (!link || progress >= 1) {
+        edgeAfterglows.splice(index, 1);
+        continue;
+      }
+      if (progress < 0) continue;
+      const source = nodes[link.source];
+      const target = nodes[link.target];
+      if (
+        !source
+        || !target
+        || source.viewDepth > 9e8
+        || target.viewDepth > 9e8
+      ) {
+        continue;
+      }
+      const depthFade = fog((source.viewDepth + target.viewDepth) / 2);
+      const fade = (1 - smoothstep(progress)) * depthFade;
+      context.strokeStyle = rgba(
+        RGB_ELECTRIC,
+        fade * (0.08 + afterglow.delta * 0.24),
+      );
+      context.lineWidth = 1.1 + afterglow.delta * 1.8;
+      context.beginPath();
+      context.moveTo(source.screenX, source.screenY);
+      context.lineTo(target.screenX, target.screenY);
+      context.stroke();
+      const glowSize = 10 + afterglow.delta * 12;
+      context.globalAlpha = fade * (0.18 + afterglow.delta * 0.32);
+      context.drawImage(
+        glowElectric,
+        target.screenX - glowSize / 2,
+        target.screenY - glowSize / 2,
+        glowSize,
+        glowSize,
+      );
+      context.globalAlpha = 1;
+      cortexMetrics.afterglowEdges += 1;
+    }
+    context.globalCompositeOperation = "source-over";
+  }
+
   function drawPulses(time) {
     context.globalCompositeOperation = "lighter";
     for (let index = pulses.length - 1; index >= 0; index -= 1) {
@@ -762,19 +922,7 @@
       if (rawProgress < 0) continue;
       if (progress >= 1) {
         pulses.splice(index, 1);
-        target.arrivedAt = time;
-        target.potential = Math.max(target.potential, pulse.delta);
-        nodeEffects.push({
-          nodeIndex: target.index,
-          kind: "arrival",
-          startedAt: time,
-          duration: 620,
-          delta: pulse.delta,
-          seq: pulse.seq,
-          demo: pulse.demo,
-        });
-        const metric = cortexMetrics.spread.find((row) => row.seq === pulse.seq);
-        if (metric) metric.arrivalAt = time;
+        completePulse(pulse, target, time);
         continue;
       }
       if (source.viewDepth > 9e8 || target.viewDepth > 9e8) continue;
@@ -868,17 +1016,7 @@
       publishCortexMetrics();
       if (staticMotion && time - pulse.startedAt >= 900) {
         pulses.splice(index, 1);
-        target.arrivedAt = time;
-        nodeEffects.push({
-          nodeIndex: target.index,
-          kind: "arrival",
-          startedAt: time,
-          duration: 850,
-          delta: pulse.delta,
-          seq: pulse.seq,
-          demo: pulse.demo,
-        });
-        if (metric) metric.arrivalAt = time;
+        completePulse(pulse, target, time);
       }
     }
   }
@@ -902,11 +1040,14 @@
         return;
       }
       const depthFade = fog(node.viewDepth);
-      const radius = Math.max(0.75, node.radius * node.screenScale);
       const dim = state === 1 ? 0.28 : 1;
-      const potential = node.potential;
       const fieldActivation = Math.max(0, Math.min(1, node.fieldActivation));
-      if (fieldActivation > 0.01) {
+      const isFieldActive = fieldActivation >= 0.05;
+      const excitation = excitationLevel(node, time);
+      const radius =
+        Math.max(0.75, node.radius * node.screenScale)
+        * (1 + (isFieldActive ? fieldActivation * 0.18 : 0) + excitation * 0.1);
+      if (isFieldActive) {
         const haloSize = radius * (4.8 + fieldActivation * 8);
         context.globalAlpha = (0.12 + fieldActivation * 0.4) * depthFade * dim;
         context.drawImage(
@@ -916,16 +1057,22 @@
           haloSize,
           haloSize,
         );
+        cortexMetrics.violetNodes += 1;
       }
-      if (potential > 0.03) {
-        const glowSize = radius * (4 + 10 * potential);
-        context.globalAlpha = Math.min(1, potential * 1.15) * depthFade * dim;
+      if (excitation > 0.01) {
+        const glowSize = radius * (5 + 12 * excitation);
+        context.globalAlpha =
+          Math.min(1, 0.12 + excitation * 0.88) * depthFade * dim;
         context.drawImage(
-          potential > 0.6 ? glowHot : glowFire,
+          excitation > 0.68 ? glowHot : glowViolet,
           node.screenX - glowSize / 2,
           node.screenY - glowSize / 2,
           glowSize,
           glowSize,
+        );
+        cortexMetrics.flashPeak = Math.max(
+          cortexMetrics.flashPeak,
+          excitation,
         );
       } else if (state === 3 || node.fanIn >= 38) {
         const glowSize = radius * 3.4;
@@ -940,36 +1087,50 @@
       }
       context.globalAlpha = 1;
 
-      let color = node.base;
-      if (potential > 0.5) {
-        color = mix(RGB_FIRE, RGB_HOT, (potential - 0.5) * 2);
-      } else if (potential > 0.04) {
-        color = mix(node.base, RGB_FIRE, potential * 2);
+      let color =
+        isFieldActive
+          ? mix(
+              node.base,
+              RGB_VIOLET,
+              0.5 + fieldActivation * 0.45,
+            )
+          : node.base;
+      if (excitation > 0.55) {
+        color = mix(color, RGB_HOT, (excitation - 0.55) / 0.7);
+      } else if (excitation > 0.03) {
+        color = mix(color, RGB_VIOLET, excitation * 0.72);
       }
       const coreOpacity =
         (state === 1
           ? 0.22
           : state === 3
             ? 1
-            : 0.62 + 0.38 * Math.min(1, potential * 3))
+            : 0.62
+              + 0.18 * fieldActivation
+              + 0.2 * Math.min(1, excitation * 2.5))
         * depthFade;
       context.globalCompositeOperation =
-        potential > 0.04 ? "lighter" : "source-over";
+        excitation > 0.03 || isFieldActive
+          ? "lighter"
+          : "source-over";
       context.fillStyle = rgba(color, coreOpacity);
       context.beginPath();
       context.arc(node.screenX, node.screenY, radius, 0, Math.PI * 2);
       context.fill();
-      if (potential > 0.35) {
-        context.fillStyle = rgba(RGB_HOT, potential * depthFade);
+      if (excitation > 0.35) {
+        context.fillStyle = rgba(RGB_HOT, excitation * depthFade);
         context.beginPath();
         context.arc(node.screenX, node.screenY, radius * 0.45, 0, Math.PI * 2);
         context.fill();
       }
       context.globalCompositeOperation = "lighter";
       const age = time - node.firedAt;
-      if (age < 450 && potential > 0.1) {
-        const progress = age / 450;
-        context.strokeStyle = rgba(RGB_FIRE, (1 - progress) * 0.55 * depthFade);
+      if (age < 900 && excitation > 0.08) {
+        const progress = age / 900;
+        context.strokeStyle = rgba(
+          RGB_VIOLET,
+          (1 - smoothstep(progress)) * 0.5 * depthFade,
+        );
         context.lineWidth = 1.2;
         context.beginPath();
         context.arc(
@@ -983,13 +1144,24 @@
       }
       context.globalCompositeOperation = "source-over";
       if (index === selected) {
-        context.strokeStyle = rgba(RGB_FIRE, 0.95);
-        context.lineWidth = 1.6;
+        context.strokeStyle = rgba(RGB_HOT, 0.92);
+        context.lineWidth = 1.5;
         context.beginPath();
         context.arc(
           node.screenX,
           node.screenY,
           radius + 5 + Math.sin(time * 0.005) * 1.5,
+          0,
+          Math.PI * 2,
+        );
+        context.stroke();
+        context.strokeStyle = rgba(RGB_VIOLET, 0.72);
+        context.lineWidth = 1;
+        context.beginPath();
+        context.arc(
+          node.screenX,
+          node.screenY,
+          radius + 8 + Math.sin(time * 0.005) * 1.2,
           0,
           Math.PI * 2,
         );
@@ -1062,22 +1234,39 @@
     context.globalCompositeOperation = "source-over";
   }
 
-  function drawLabels() {
+  function drawLabels(time) {
     context.font = `10.5px ${getComputedStyle(document.body).getPropertyValue("--mono")}`;
     context.textAlign = "center";
     const occupied = [];
+    const activeLabels = new Set(
+      nodes
+        .filter(
+          (node) =>
+            nodeState[node.index] >= 2
+            && node.viewDepth <= 9e8
+            && node.fieldActivation > 0.05,
+        )
+        .sort(
+          (left, right) =>
+            right.fieldActivation - left.fieldActivation
+            || right.fanIn - left.fanIn
+            || left.id.localeCompare(right.id),
+        )
+        .slice(0, ACTIVE_LABEL_LIMIT)
+        .map((node) => node.index),
+    );
     const candidates = nodes
       .filter((node) => {
         const state = nodeState[node.index];
-        const hot = node.potential > 0.5;
-        const fieldActive = node.fieldActivation > 0.05;
+        const focused = node.index === selected || node.index === hovered;
         return (
           state >= 2
           && node.viewDepth <= 9e8
           && (state === 3
-            || hot
-            || fieldActive
-            || (labelHubs.has(node.index)
+            || focused
+            || activeLabels.has(node.index)
+            || (!activeLabels.size
+              && labelHubs.has(node.index)
               && camera.distance < 1500
               && node.viewDepth < camera.distance))
         );
@@ -1085,19 +1274,21 @@
       .sort((left, right) => {
         const leftPriority =
           (left.index === selected ? 100000 : 0)
-          + left.potential * 1000
+          + (left.index === hovered ? 50000 : 0)
+          + excitationLevel(left, time) * 1000
           + left.fieldActivation * 900
           + left.fanIn;
         const rightPriority =
           (right.index === selected ? 100000 : 0)
-          + right.potential * 1000
+          + (right.index === hovered ? 50000 : 0)
+          + excitationLevel(right, time) * 1000
           + right.fieldActivation * 900
           + right.fanIn;
         return rightPriority - leftPriority;
       });
     candidates.forEach((node) => {
       const state = nodeState[node.index];
-      const hot = node.potential > 0.5;
+      const hot = excitationLevel(node, time) > 0.5;
       const fieldActive = node.fieldActivation > 0.05;
       const y = node.screenY - node.radius * node.screenScale - 7;
       if (
@@ -1125,19 +1316,31 @@
       );
       if (overlaps && state !== 3) return;
       occupied.push(bounds);
+      cortexMetrics.labelsPainted += 1;
       context.fillStyle = `rgba(3,5,10,${0.7 * depthFade})`;
       context.fillRect(node.screenX - labelWidth / 2 - 3, y - 9, labelWidth + 6, 12);
       context.fillStyle =
-        hot || state === 3
-          ? rgba(RGB_FIRE, Math.max(0.5, node.potential) * depthFade + 0.2)
-          : fieldActive
-            ? rgba(RGB_VIOLET, (0.55 + node.fieldActivation * 0.4) * depthFade)
-          : rgba([160, 178, 210], 0.8 * depthFade);
+        node.index === selected || node.index === hovered
+          ? rgba(RGB_HOT, 0.92 * depthFade)
+          : hot
+            ? rgba(RGB_VIOLET, 0.95 * depthFade)
+            : state === 3
+              ? rgba(RGB_FIRE, 0.85 * depthFade)
+              : fieldActive
+                ? rgba(
+                    RGB_VIOLET,
+                    (0.55 + node.fieldActivation * 0.4) * depthFade,
+                  )
+                : rgba([160, 178, 210], 0.8 * depthFade);
       context.fillText(node.name, node.screenX, y);
     });
   }
 
   function draw(time) {
+    cortexMetrics.violetNodes = 0;
+    cortexMetrics.labelsPainted = 0;
+    cortexMetrics.afterglowEdges = 0;
+    cortexMetrics.flashPeak = 0;
     context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
     context.clearRect(0, 0, width, height);
     context.fillStyle = STEEL;
@@ -1150,10 +1353,12 @@
     });
     context.globalAlpha = 1;
     drawEdges();
+    drawEdgeAfterglows(time);
     drawPulses(time);
     drawNodes(time);
     drawNodeEffects(time);
-    drawLabels();
+    drawLabels(time);
+    publishVisualMetrics(time);
   }
 
   let previousTime = performance.now();
@@ -1189,10 +1394,6 @@
       }
     }
     if (stateDirty) recomputeState();
-    const decay = Math.exp(-delta / 430);
-    nodes.forEach((node) => {
-      if (node.potential > 0.003) node.potential *= decay;
-    });
     projectAll();
     draw(now);
     requestAnimationFrame(frame);

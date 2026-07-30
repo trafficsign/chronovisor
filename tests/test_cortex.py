@@ -387,6 +387,17 @@ def test_cortex_static_view_preserves_fable_layout_and_uses_live_data() -> None:
     assert "function visualizeFieldEvent(event)" in script
     assert "function ensureActualEdge(event)" in script
     assert "function drawEdges()" in script
+    assert "const ACTIVE_LABEL_LIMIT = 5;" in script
+    assert "const NODE_FLASH_ATTACK_MS = 90;" in script
+    assert "const NODE_FLASH_HOLD_MS = 150;" in script
+    assert "const NODE_FLASH_DECAY_MS = 1450;" in script
+    assert "const EDGE_AFTERGLOW_MS = 650;" in script
+    assert "function excitationLevel(node, time)" in script
+    assert "function exciteNode(node, delta, time)" in script
+    assert "function drawEdgeAfterglows(time)" in script
+    assert "function publishVisualMetrics(time)" in script
+    assert "cortexMetrics.violetNodes += 1;" in script
+    assert ".slice(0, ACTIVE_LABEL_LIMIT)" in script
     assert "liveEventsEnabled = true" in script
     assert "window.CortexField.applyEvents(fieldState" in script
     assert "const MAX_EVENTS = 256;" in field_script
