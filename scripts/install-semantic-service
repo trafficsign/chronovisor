@@ -26,23 +26,48 @@ status_matches_launchd() {
   /bin/kill -0 "$pid" 2>/dev/null || return 1
   /usr/bin/python3 - "$HOME/.chronovisor/runtime/semantic-service-status.json" "$pid" <<'PY'
 import json
+import os
+import subprocess
 import sys
 import time
 from pathlib import Path
 
 path = Path(sys.argv[1])
-expected_pid = int(sys.argv[2])
+launchd_pid = int(sys.argv[2])
 try:
     status = json.loads(path.read_text(encoding="utf-8"))
     age = time.time() - float(status["observed_at_epoch"])
+    service_pid = int(status.get("pid") or 0)
 except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError):
     raise SystemExit(1)
-if (
-    status.get("ready") is True
-    and int(status.get("pid") or 0) == expected_pid
-    and 0 <= age <= 30
-):
-    raise SystemExit(0)
+if status.get("ready") is not True or not 0 <= age <= 30 or service_pid <= 0:
+    raise SystemExit(1)
+try:
+    os.kill(service_pid, 0)
+except OSError:
+    raise SystemExit(1)
+
+# uvx remains as launchd's direct child and starts the Python console script as
+# its child. Accept the service PID only when launchd's PID is in that live
+# ancestor chain, so a stale status file from another process cannot pass.
+pid = service_pid
+seen = set()
+for _depth in range(8):
+    if pid == launchd_pid:
+        raise SystemExit(0)
+    if pid <= 1 or pid in seen:
+        break
+    seen.add(pid)
+    try:
+        parent = subprocess.run(
+            ["/bin/ps", "-o", "ppid=", "-p", str(pid)],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        pid = int(parent)
+    except (OSError, subprocess.CalledProcessError, ValueError):
+        break
 raise SystemExit(1)
 PY
 }
