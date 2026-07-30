@@ -1938,6 +1938,33 @@ def _finalize_recall_result(
                 "status": "error",
                 "reason": type(exc).__name__,
             }
+    field_metadata = result.evidence_features.get("field_shadow")
+    observer = (
+        field_metadata.get("candidate_observer")
+        if isinstance(field_metadata, dict)
+        else None
+    )
+    if (
+        isinstance(observer, dict)
+        and observer.get("status") in {"observed", "active"}
+        and active_request.session_id
+    ):
+        try:
+            from chronovisor.recall.recall_field_candidate import (
+                append_candidate_trace,
+            )
+
+            append_candidate_trace(
+                session_hash=str(field_metadata.get("session_hash") or ""),
+                prompt=active_request.prompt,
+                observer=observer,
+                committed_page_ids=[
+                    item.page_id for item in result.context_items
+                ],
+                latency_ms=result.latency_ms,
+            )
+        except Exception:
+            pass
     if policy.log_decisions:
         append_recall_log(request, result)
     return result
@@ -2080,12 +2107,27 @@ def _run_recall_impl(
             initial_queries = build_queries(
                 active_request, matched, [], policy, session_state=session_state
             )
-            pre_results, search_mode = search_candidates(
-                initial_queries,
-                policy,
-                request=active_request,
-                deadline_at=deadline_at,
+            from chronovisor.recall.recall_field_candidate import (
+                run_candidate_teacher_pair,
             )
+            pre_results, search_mode, field_candidate_metadata = (
+                run_candidate_teacher_pair(
+                    query=active_request.prompt,
+                    field_turn=field_shadow_metadata,
+                    teacher_search=lambda: search_candidates(
+                        initial_queries,
+                        policy,
+                        request=active_request,
+                        deadline_at=deadline_at,
+                    ),
+                    timeout_ms=max(
+                        25,
+                        min(650, _remaining_budget_ms(deadline_at) or 650),
+                    ),
+                    certificate_boundary_enabled=policy.processor_enabled,
+                )
+            )
+            field_shadow_metadata["candidate_observer"] = field_candidate_metadata
             evidence_features = build_evidence_features(
                 request=active_request,
                 matched=matched,
@@ -2136,11 +2178,28 @@ def _run_recall_impl(
                         session_state=session_state,
                         rewrite_queries=rewrite_queries,
                     )
-                    pre_results, search_mode = search_candidates(
-                        queries_for_search,
-                        policy,
-                        request=active_request,
-                        deadline_at=deadline_at,
+                    pre_results, search_mode, field_candidate_metadata = (
+                        run_candidate_teacher_pair(
+                            query=" ".join(queries_for_search),
+                            field_turn=field_shadow_metadata,
+                            teacher_search=lambda: search_candidates(
+                                queries_for_search,
+                                policy,
+                                request=active_request,
+                                deadline_at=deadline_at,
+                            ),
+                            timeout_ms=max(
+                                25,
+                                min(
+                                    650,
+                                    _remaining_budget_ms(deadline_at) or 650,
+                                ),
+                            ),
+                            certificate_boundary_enabled=policy.processor_enabled,
+                        )
+                    )
+                    field_shadow_metadata["candidate_observer"] = (
+                        field_candidate_metadata
                     )
                     evidence_features = build_evidence_features(
                         request=active_request,

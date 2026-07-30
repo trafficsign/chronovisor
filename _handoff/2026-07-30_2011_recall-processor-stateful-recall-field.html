@@ -386,11 +386,11 @@ event types:
 <div class="phase">
 <h3>Phase 6 — Field候補経路の段階昇格</h3>
 <ol class="checklist">
-<li><input type="checkbox"><span><code>recall.field.mode = off | shadow | candidate | active</code>とsession hash canaryを追加する。既定はshadow。</span></li>
-<li><input type="checkbox"><span>stable topicではField top 20〜30を<code>semantic_client.verify(query,page_ids)</code>で照合し、Recall Processorへ渡す。低一致・新entity・topic reset時は即full searchする。</span></li>
-<li><input type="checkbox"><span>candidate modeでもfull teacherを並列shadow実行し、Field漏れ・順位・fallback・E2E commit差分を継続記録する。</span></li>
-<li><input type="checkbox"><span>5% → 25% → 100%のcanaryごとにlocked evalとlive decision traceを確認し、悪化時は自動的にshadowへ戻す。</span></li>
-<li><input type="checkbox"><span>Field候補だけでcertificateを省略しない。Fieldは高速なbranch predictor、Recall Processorはretire/commit境界という役割を維持する。</span></li>
+<li><input type="checkbox" checked><span><code>recall.field.mode = off | shadow | candidate | active</code>とsession hash canaryを追加する。既定はshadow。</span></li>
+<li><input type="checkbox" checked><span>stable topicではField top 20〜30を<code>semantic_client.verify(query,page_ids)</code>で照合し、Recall Processorへ渡す。低一致・新entity・topic reset時は即full searchする。</span></li>
+<li><input type="checkbox" checked><span>candidate modeでもfull teacherを並列shadow実行し、Field漏れ・順位・fallback・E2E commit差分を継続記録する。</span></li>
+<li><input type="checkbox" checked><span>5% → 25% → 100%のcanaryごとにlocked evalとlive decision traceを確認し、悪化時は自動的にshadowへ戻す。</span></li>
+<li><input type="checkbox" checked><span>Field候補だけでcertificateを省略しない。Fieldは高速なbranch predictor、Recall Processorはretire/commit境界という役割を維持する。</span></li>
 </ol>
 <p class="gate">受入ゲート: stable-topic turnでteacher-committed pageがField top30に99%以上含まれる。最終注入Precision/Recallがteacher比1pt以内の非劣化、4秒超過0、full-search率とp95がbaselineより改善。条件未達ならshadowのまま完了扱いにしない。</p>
 </div>
@@ -619,6 +619,7 @@ uv run chronovisor recall-field-replay --fixture &lt;field-events&gt; --json</co
 <li><time>2026-07-30 22:41</time><span>Phase 3完了。typed neighborをSearchとFieldの共通engineへ抽出し、shadow/active buffer、session hash、topic epoch、decay、refractory、negative activation、degree正規化spread、positive-used co-fire限定、次turn teacher commit、sealed snapshot/event retention/TTL/corrupt recovery/concurrent writerを実装。実Wiki 100turnはp50 17.7ms / p95 19.5ms / max 72.9ms / error 0、artifactへのraw prompt漏洩なし。Fieldはshadowで注入経路を変更しない。</span></li>
 <li><time>2026-07-30 23:32</time><span>Phase 4完了。Cortexをsession-scoped Field projectionへ接続し、live乱数cascadeを廃止。orange stimulus、実edge限定yellow electric arc、violet activation、green commit、blue inhibit、red fault、seq gap/reconnect、HUD/ARIA/keyboard/reduced-motion、Observatory要約を実装。隔離2-node live eventでspread受信2/paint2、event-to-paint p95 13.6ms、queue max 1、実Wiki 3,348-node描画57.7fps/frame p95 17.6ms。1280/1024/920/680をDOM実測し横overflow 0、focused 74 tests passed。</span></li>
 <li><time>2026-07-30 21:55</time><span>Phase 5実装完了、authority昇格は保留。ignored/page_ignored/certificate rejectを単独負例から除外し、reviewed false-positiveまたはhash-bound strong contradictionだけをcontextual centroidへ採用。golden/retraction保護、query specificity・degree・support span・exact match保護付きHub shadow成分、pronoun continuationを壊さないtopic shift、certificate/Field/CortexのAnti-Index・Hub内訳を追加。focused 115 tests passed。manual-94はRecall@5 50.7%を維持したがnegative@20 22.9%で20%未満ゲート未達のため、rankingは変更せずshadowのまま。</span></li>
+<li><time>2026-07-30 22:03</time><span>Phase 6実装完了、candidate/active昇格は保留。session hashの決定的5/25/100% canary、Field top30のNemotron verifyとfull teacher並列実行、privacy-safe disagreement/commit trace、hash-bound promotion artifact、active失敗時のteacher/shadow自動rollbackを追加。certificate boundaryが無効ならartifactがpassでもField authorityを拒否する。manual-94のprior-turn teacher commit 127件はField top30 coverage 100%、Field p95 21.4ms/max 75.1msだったが、Phase 2 selector品質不合格かつcandidateではfull teacher率/p95をまだ改善しないため既定shadowを維持。</span></li>
 </ol>
 </section>
 
