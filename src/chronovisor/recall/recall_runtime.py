@@ -949,10 +949,16 @@ def run_query_rewriter(
 def warm_recall_model(policy: RecallPolicy) -> dict[str, Any]:
     """Warm the gate/rewrite Ollama model so sync recall avoids cold starts."""
     started = time.monotonic()
-    models = _dedupe_queries(
-        [policy.judge_model, policy.rewrite_model or policy.judge_model],
-        limit=2,
-    )
+    models = list(
+        dict.fromkeys(
+            model.strip()
+            for model in (
+                policy.judge_model,
+                policy.rewrite_model or policy.judge_model,
+            )
+            if model.strip()
+        )
+    )[:2]
     warmed: list[str] = []
     errors: dict[str, str] = {}
     for model in models:

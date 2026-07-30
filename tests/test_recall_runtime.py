@@ -963,14 +963,14 @@ def test_warm_recall_model_uses_configured_keep_alive(monkeypatch) -> None:
 
     result = warm_recall_model(
         RecallPolicy(
-            judge_model="judge-model",
-            rewrite_model="rewrite-model",
+            judge_model="ornith:9b-q4_K_M",
+            rewrite_model="qwen3.5:4b-mlx",
             judge_keep_alive="1h",
         )
     )
 
     assert result["ok"] is True
-    assert result["models"] == ["judge-model", "rewrite-model"]
+    assert result["models"] == ["ornith:9b-q4_K_M", "qwen3.5:4b-mlx"]
     assert [session["keep_alive"] for session in captured] == ["1h", "1h"]
     assert [session["num_ctx"] for session in captured] == [4096, 4096]
     assert all(session["num_ctx"] != 128 for session in captured)
