@@ -5,8 +5,35 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Chronovisor Observatory</title>
   <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="/static/activity-bar.css">
 </head>
-<body>
+<body class="has-activity-bar">
+  <nav class="activity-bar" aria-label="Chronovisor views">
+    <div class="activity-brand" aria-hidden="true">
+      <span class="activity-brand-mark"></span>
+    </div>
+    <div class="activity-views">
+      <a class="activity-view is-active" data-view="observatory" href="/" aria-current="page" aria-label="Observatory" title="Observatory">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <rect x="3.5" y="3.5" width="7" height="7" rx="1"></rect>
+          <rect x="13.5" y="3.5" width="7" height="7" rx="1"></rect>
+          <rect x="3.5" y="13.5" width="7" height="7" rx="1"></rect>
+          <rect x="13.5" y="13.5" width="7" height="7" rx="1"></rect>
+        </svg>
+        <span class="activity-tooltip">Observatory</span>
+      </a>
+      <a class="activity-view" data-view="cortex" href="/cortex" aria-label="Synaptic Cortex" title="Synaptic Cortex">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M6.7 10.7 10.8 6.5M14.4 6.2l3.2 5.4M17.2 15.6l-4.1 2.1M9 17.3l-2.6-3.2"></path>
+          <circle cx="5.2" cy="12.2" r="2.2"></circle>
+          <circle cx="12.4" cy="5.2" r="2.2"></circle>
+          <circle cx="18.8" cy="13.5" r="2.2"></circle>
+          <circle cx="11" cy="18.8" r="2.2"></circle>
+        </svg>
+        <span class="activity-tooltip">Synaptic Cortex</span>
+      </a>
+    </div>
+  </nav>
   <main class="shell">
     <header class="topbar">
       <div class="brand">
@@ -17,7 +44,6 @@
         </div>
       </div>
       <div class="topbar-actions">
-        <a class="cortex-link" href="/cortex">Synaptic Cortex</a>
         <button class="lan-share-button" id="lan-share-button" type="button">Recovery link</button>
         <div class="status-pill" id="state-pill">
           <span class="pulse"></span>

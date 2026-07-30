@@ -216,6 +216,7 @@ def test_cortex_static_view_preserves_fable_layout_and_uses_live_data() -> None:
     style = (static / "cortex.css").read_text(encoding="utf-8")
     script = (static / "cortex.js").read_text(encoding="utf-8")
     observatory = (static / "index.html").read_text(encoding="utf-8")
+    activity_style = (static / "activity-bar.css").read_text(encoding="utf-8")
 
     assert "CHRONOVISOR // SYNAPTIC CORTEX" in html
     assert 'id="side"' in html
@@ -240,7 +241,21 @@ def test_cortex_static_view_preserves_fable_layout_and_uses_live_data() -> None:
     assert "if (performance.now() <= tickerHold) return;" in script
     assert "/static/cortex_graph.json" not in script
     assert "3d-force-graph" not in html
-    assert '<a class="cortex-link" href="/cortex">Synaptic Cortex</a>' in observatory
+    assert 'class="has-activity-bar"' in observatory
+    assert 'class="has-activity-bar"' in html
+    assert (
+        'class="activity-view is-active" data-view="observatory"'
+        in observatory
+    )
+    assert 'class="activity-view" data-view="cortex"' in observatory
+    assert 'class="activity-view" data-view="observatory"' in html
+    assert 'class="activity-view is-active" data-view="cortex"' in html
+    assert 'aria-label="Chronovisor views"' in observatory
+    assert 'aria-label="Chronovisor views"' in html
+    assert "--activity-bar-width: 48px;" in activity_style
+    assert "body.has-activity-bar {" in activity_style
+    assert ".activity-bar {" in activity_style
+    assert ".has-activity-bar .shell {" in activity_style
 
 
 def test_dashboard_serves_cortex_graph_api(monkeypatch) -> None:
