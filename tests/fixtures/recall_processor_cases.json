@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "id": "weak_rrf_saturation",
+      "prompt": "What device runs the local embedding model?",
+      "scores": [0.0164, 0.0161],
+      "expected": "abstain",
+      "reason": "Tiny reciprocal-rank scores must not saturate to strong evidence."
+    },
+    {
+      "id": "hit_count_floor",
+      "prompt": "What device runs the local embedding model?",
+      "scores": [0.0164, 0.0163, 0.0162, 0.0161, 0.016, 0.0159, 0.0158, 0.0157],
+      "expected": "abstain",
+      "reason": "Many weak candidates must not become evidence merely because the hit count is high."
+    },
+    {
+      "id": "prior_query_contamination",
+      "prompt": "Is the embedding model using the GPU?",
+      "recent_queries": [
+        "an unrelated film discussion",
+        "an unrelated travel plan",
+        "an unrelated dashboard bug"
+      ],
+      "expected_primary_query": "Is the embedding model using the GPU?",
+      "expected_recent_query_count": 0,
+      "reason": "The current prompt is authoritative; old queries are not independent retrieval entrances."
+    },
+    {
+      "id": "session_duplicate_selection",
+      "prompt": "How is reranking configured?",
+      "candidate_page_ids": ["best-page", "second-page", "noise-page"],
+      "already_injected_page_ids": ["best-page"],
+      "expected_selected_before_dedupe": ["best-page", "second-page"],
+      "reason": "Select the best evidence first, then decide whether an unchanged page needs reinjection."
+    }
+  ]
+}

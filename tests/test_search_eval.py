@@ -401,6 +401,34 @@ def test_run_report_can_filter_auto_golden_sources(tmp_path, monkeypatch) -> Non
     assert payload["dataset"]["sources"] == {"manual-curated-from-feedback": 1}
 
 
+def test_sealed_manifest_is_deterministic_and_never_contains_query(
+    tmp_path,
+) -> None:
+    examples = [
+        search_eval.SearchExample(
+            query="private query text",
+            expected_pages=("target",),
+            source="manual-curated-from-feedback",
+            ref="ref-1",
+            reviewed=True,
+        )
+    ]
+    first = tmp_path / "first.json"
+    second = tmp_path / "second.json"
+
+    first_result = search_eval.write_sealed_manifest(examples, first)
+    second_result = search_eval.write_sealed_manifest(examples, second)
+
+    assert first.read_bytes() == second.read_bytes()
+    assert first_result["manifest_sha256"] == second_result["manifest_sha256"]
+    assert "private query text" not in first.read_text(encoding="utf-8")
+    payload = json.loads(first.read_text(encoding="utf-8"))
+    assert payload["examples"] == 1
+    assert payload["entries"][0]["query_sha256"] == hashlib.sha256(
+        b"private query text"
+    ).hexdigest()
+
+
 def test_run_variant_filters_lifecycle_pages(monkeypatch) -> None:
     class FakeBM25:
         def build(self) -> None:
@@ -446,6 +474,10 @@ def test_run_variant_can_apply_hybrid_reranker(monkeypatch) -> None:
 
     assert [result.page_id for result in payload["results"]] == ["b", "a"]
     assert payload["channels"]["reranker"]["status"] == "applied"
+    assert payload["stages"]["candidate_union"] == ["a", "b"]
+    assert payload["stages"]["fused"] == ["a", "b"]
+    assert payload["stages"]["reranked"] == ["b", "a"]
+    assert payload["stages"]["page_gate"] is None
 
 
 def test_cli_build_golden_json(tmp_path, capsys) -> None:
@@ -1247,6 +1279,70 @@ def test_failure_index_records_missed_expected_pages(tmp_path) -> None:
     assert payload["failures"] == 1
     assert rows[0]["failed_stage"] == "fusion"
     assert rows[0]["reason_code"] == "fusion_missed"
+
+
+def test_failure_index_uses_explicit_stage_trace(tmp_path) -> None:
+    output_file = tmp_path / "failures.jsonl"
+    debug_rows = [
+        {
+            "variant": "hybrid-rerank",
+            "query": "query",
+            "split": "locked-test",
+            "language": "ja",
+            "kind": "question",
+            "expected_pages": ["target"],
+            "result_pages": ["other"],
+            "channels": {"bm25": ["target"], "semantic": ["other"]},
+            "stages": {
+                "candidate_union": ["target", "other"],
+                "fused": ["target", "other"],
+                "reranked": ["other"],
+                "page_gate": None,
+                "committed": None,
+                "host_used": None,
+            },
+        }
+    ]
+
+    search_eval.write_failure_index(debug_rows, output_file)
+
+    row = json.loads(output_file.read_text(encoding="utf-8").splitlines()[0])
+    assert row["failed_stage"] == "reranker"
+    assert row["reason_code"] == "reranker_missed"
+    assert row["fix_kind"] == "reranker"
+
+
+def test_failure_index_distinguishes_top_50_from_evaluation_cutoff(
+    tmp_path,
+) -> None:
+    output_file = tmp_path / "failures.jsonl"
+    below_cutoff = [f"noise-{index}" for index in range(20)] + ["target"]
+    debug_rows = [
+        {
+            "variant": "hybrid-rerank",
+            "query": "query",
+            "split": "locked-test",
+            "language": "ja",
+            "kind": "question",
+            "expected_pages": ["target"],
+            "result_pages": below_cutoff,
+            "channels": {"bm25": ["target"]},
+            "stages": {
+                "candidate_union": ["target"],
+                "fused": ["target"],
+                "reranked": below_cutoff,
+                "page_gate": None,
+                "committed": None,
+                "host_used": None,
+            },
+        }
+    ]
+
+    search_eval.write_failure_index(debug_rows, output_file)
+
+    row = json.loads(output_file.read_text(encoding="utf-8").splitlines()[0])
+    assert row["failed_stage"] == "rank_cutoff"
+    assert row["reason_code"] == "below_evaluation_cutoff"
 
 
 def test_self_tune_shadow_blocks_when_locked_regresses(tmp_path, monkeypatch) -> None:

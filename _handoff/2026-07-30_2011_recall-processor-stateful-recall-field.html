@@ -111,13 +111,13 @@ details>div{padding:0 0.8rem 0.8rem}
 </head>
 <body>
 <script type="application/json" id="plan-meta">
-{"task_id":"plan_3508b0284d4542af92f176b0dd67af5a","created_at":"2026-07-30T20:11:56+09:00","状態":"ready","slug":"recall-processor-stateful-recall-field"}
+{"task_id":"plan_3508b0284d4542af92f176b0dd67af5a","created_at":"2026-07-30T20:11:56+09:00","状態":"running","slug":"recall-processor-stateful-recall-field"}
 </script>
 
 <header>
 <h1>Plan: <span id="plan-title">Chronovisor Recall Processor + Stateful Recall Field</span></h1>
 <div class="meta-bar">
-<span class="badge" data-bind="状態" data-state="ready">ready</span>
+<span class="badge" data-bind="状態" data-state="running">running</span>
 <span><code data-bind="task_id">plan_3508b0284d4542af92f176b0dd67af5a</code></span>
 <span data-bind="created_at">2026-07-30T20:11:56+09:00</span>
 <span>baseline <code>bf790e96c486</code></span>
@@ -283,12 +283,12 @@ event types:
 <h3>Phase 0 — 94件の失敗解剖と基準凍結</h3>
 <p><span class="pill">必須先行</span><span class="pill">mutationなし</span> ここを完了するまでproduction選択ロジックを変更しない。</p>
 <ol class="checklist">
-<li><input type="checkbox"><span><code>search-golden.jsonl</code>のmanual集合（manual-curated 62 + auditor 22 + auditor_precision 10 = 94）をquery本文をGitへ入れず、ref/hash付きsealed manifestとして固定する。</span></li>
-<li><input type="checkbox"><span><code>chronovisor-eval --source-filter manual --top-n 50</code>を基準に、<code>candidate_union → fused → reranked → page_gate → committed → host_used</code>のstage traceを追加する。</span></li>
-<li><input type="checkbox"><span>94件を①candidate top50漏れ、②fusion順位落ち、③BGE順位落ち、④page selector棄却、⑤commit後未利用へ排他的に分類する。</span></li>
-<li><input type="checkbox"><span>Overall / Japanese / hard-94を分離し、Recall@5/10、MRR、negative-hit、pointer/rich evidence別の注入Precision、関連記憶Recall、abstention、p50/p95/max、4秒超過を保存する。</span></li>
-<li><input type="checkbox"><span>現行Auto Recallの既知不具合をfixture化する: 弱いRRF scoreの飽和、hit_count floor、過去3query混入、既出上位page除外による下位noise繰上げ。</span></li>
-<li><input type="checkbox"><span>live p95 251.6msに対して250msのNemotron timeoutを再測定し、35B稼働中を含む安全なtimeout/remaining-budget境界を決める。</span></li>
+<li><input type="checkbox" checked><span><code>search-golden.jsonl</code>のmanual集合（manual-curated 62 + auditor 22 + auditor_precision 10 = 94）をquery本文をGitへ入れず、ref/hash付きsealed manifestとして固定する。</span></li>
+<li><input type="checkbox" checked><span><code>chronovisor-eval --source-filter manual --top-n 50</code>を基準に、<code>candidate_union → fused → reranked → page_gate → committed → host_used</code>のstage traceを追加する。</span></li>
+<li><input type="checkbox" checked><span>94件を①candidate top50漏れ、②fusion順位落ち、③BGE順位落ち、④page selector棄却、⑤commit後未利用へ排他的に分類する。</span></li>
+<li><input type="checkbox" checked><span>Overall / Japanese / hard-94を分離し、Recall@5/10、MRR、negative-hit、pointer/rich evidence別の注入Precision、関連記憶Recall、abstention、p50/p95/max、4秒超過を保存する。</span></li>
+<li><input type="checkbox" checked><span>現行Auto Recallの既知不具合をfixture化する: 弱いRRF scoreの飽和、hit_count floor、過去3query混入、既出上位page除外による下位noise繰上げ。</span></li>
+<li><input type="checkbox" checked><span>live p95 251.6msに対して250msのNemotron timeoutを再測定し、35B稼働中を含む安全なtimeout/remaining-budget境界を決める。</span></li>
 </ol>
 <p class="gate">受入ゲート: 既知の29.6/49.3/53.5%と20.0% negative-hitを再現、または差分理由をcase単位で説明できる。stage合計とE2E結果が一致し、同じmanifestで決定的に再実行できる。</p>
 </div>
@@ -613,6 +613,7 @@ uv run chronovisor recall-field-replay --fixture &lt;field-events&gt; --json</co
 <li><time>2026-07-30 20:23</time><span>Recall Processorをteacher、Stateful Recall Fieldをprivate candidate layer、Cortexを実観測デバッガとする統合計画をready化。</span></li>
 <li><time>2026-07-30 20:29</time><span>HTML5構造、メタデータ、受入ゲート、ロールバック、Fable visual正本と発火animation契約を最終監査。</span></li>
 <li><time>2026-07-30 20:40</time><span>合意反映: 0〜6 certified pointer / rich evidence最大2件の動的予算へ変更。伝播をyellow electric arc、抑制をblue、redを実障害専用へ改訂。</span></li>
+<li><time>2026-07-30 20:50</time><span>Phase 0完了。manual 94件manifest sha256=<code>eb166ebb7c52</code>、query本文なし。現行実測はBM25 R@5 28.2%、hybrid 50.7%、BGE 56.3%、negative@20 22.9%。過去基準との差はlive golden/corpus更新後のcase indexとして固定。35B GPU常駐下Semantic 100件はp95 34.9ms/max 142.2ms/error 0、履歴max 602.6msのためRecall上限はremaining budget内650msを採用する。</span></li>
 </ol>
 </section>
 

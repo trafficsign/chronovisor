@@ -79,8 +79,10 @@ GOLDEN_FILE = RECALL_DIR / "search-golden.jsonl"
 LABEL_QUEUE_FILE = RECALL_DIR / "search-label-queue.jsonl"
 FAILURE_INDEX_FILE = RECALL_DIR / "search-failures.jsonl"
 BASELINE_DIR = CHRONOVISOR_ROOT / "runtime" / "search-eval"
+MANUAL_MANIFEST_FILE = BASELINE_DIR / "manual-94-manifest.json"
 SELF_TUNE_HISTORY_FILE = BASELINE_DIR / "self-tune-history.jsonl"
 SELF_TUNE_ATTEMPT_FILE = BASELINE_DIR / "self-tune-attempt.json"
+SEALED_MANIFEST_SCHEMA_VERSION = 1
 
 DEFAULT_VARIANTS = (
     "bm25",
@@ -161,6 +163,48 @@ class SearchExample:
     @property
     def bad_pages(self) -> tuple[str, ...]:
         return tuple(dict.fromkeys(self.negative_pages + self.stale_pages))
+
+
+def _sealed_manifest_entry(example: SearchExample) -> dict[str, Any]:
+    entry = {
+        "query_sha256": hashlib.sha256(example.query.encode("utf-8")).hexdigest(),
+        "ref": example.ref,
+        "source": example.source,
+        "split": example.split,
+        "language": example.language,
+        "kind": example.kind,
+        "reviewed": example.reviewed,
+        "expected_pages": list(example.expected_pages),
+        "negative_pages": list(example.negative_pages),
+        "stale_pages": list(example.stale_pages),
+    }
+    return {**entry, "entry_sha256": _canonical_json_sha256(entry)}
+
+
+def write_sealed_manifest(
+    examples: list[SearchExample], output_file: Path
+) -> dict[str, Any]:
+    """Write a deterministic evaluation manifest without raw query text."""
+
+    entries = sorted(
+        (_sealed_manifest_entry(example) for example in examples),
+        key=lambda row: (str(row["query_sha256"]), str(row["ref"])),
+    )
+    unsigned = {
+        "schema_version": SEALED_MANIFEST_SCHEMA_VERSION,
+        "examples": len(entries),
+        "entries": entries,
+    }
+    payload = {**unsigned, "manifest_sha256": _canonical_json_sha256(unsigned)}
+    _atomic_write_text(
+        output_file,
+        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+    )
+    return {
+        "output_file": str(output_file),
+        "examples": len(entries),
+        "manifest_sha256": payload["manifest_sha256"],
+    }
 
 
 def read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -767,12 +811,40 @@ def _variant_pipeline_config(
     raise ValueError(f"unknown search eval variant: {variant}")
 
 
+def _stage_page_ids(pages: list[Any], *, limit: int) -> list[str]:
+    return [
+        page.page_id
+        for page in pages[: max(0, limit)]
+        if isinstance(getattr(page, "page_id", None), str)
+    ]
+
+
+def _candidate_union(
+    pipeline_result: Any,
+    *,
+    limit: int,
+) -> list[str]:
+    ordered: dict[str, None] = {}
+    for pages in (
+        pipeline_result.anchor_results,
+        pipeline_result.bm25_results,
+        pipeline_result.semantic_results,
+        pipeline_result.graph_results,
+        pipeline_result.context_results,
+        pipeline_result.usage_results,
+    ):
+        for page_id in _stage_page_ids(pages, limit=limit):
+            ordered.setdefault(page_id, None)
+    return list(ordered)[: max(0, limit)]
+
+
 def run_variant(query: str, variant: str, *, top_n: int = 20) -> dict[str, Any]:
     started = time.perf_counter()
     config, needs_rerank = _variant_pipeline_config(variant, top_n=top_n)
     deps = _pipeline_dependencies()
     pipeline_result = run_search_pipeline(query, config=config, deps=deps)
     results = pipeline_result.results
+    fused_pages = _stage_page_ids(apply_filters(results), limit=top_n)
     reranker_meta: dict[str, Any] = {"status": "not_requested"}
     negative_meta = pipeline_result.negative_feedback
     if needs_rerank:
@@ -790,10 +862,19 @@ def run_variant(query: str, variant: str, *, top_n: int = 20) -> dict[str, Any]:
 
     elapsed_ms = int(round((time.perf_counter() - started) * 1000))
     out = apply_filters(results)[:top_n]
+    result_pages = [page.page_id for page in out]
     return {
         "variant": variant,
         "results": out,
         "latency_ms": elapsed_ms,
+        "stages": {
+            "candidate_union": _candidate_union(pipeline_result, limit=top_n),
+            "fused": fused_pages,
+            "reranked": result_pages if needs_rerank else fused_pages,
+            "page_gate": None,
+            "committed": None,
+            "host_used": None,
+        },
         "channels": {
             "anchor": [page.page_id for page in pipeline_result.anchor_results[:top_n]],
             "bm25": [page.page_id for page in pipeline_result.bm25_results[:top_n]],
@@ -932,7 +1013,12 @@ def evaluate_examples(
             }
             rows.append(row)
             debug_rows.append(
-                {**row, "variant": variant, "channels": result["channels"]}
+                {
+                    **row,
+                    "variant": variant,
+                    "channels": result["channels"],
+                    "stages": result.get("stages", {}),
+                }
             )
         by_variant[variant] = {
             "metrics": _metrics(rows),
@@ -2321,6 +2407,42 @@ def _failure_index_rows(debug_rows: list[dict[str, Any]]) -> list[dict[str, Any]
                 channel_hit = True
 
         failed_stage = "fusion" if channel_hit else "retrieval"
+        reason_code = "fusion_missed" if channel_hit else "retrieval_missed"
+        fix_kind = "fusion" if channel_hit else "data_or_rewrite"
+        stages = row.get("stages") if isinstance(row.get("stages"), dict) else {}
+        ordered_stages = (
+            ("candidate_union", "retrieval", "candidate_union_missed", "data_or_rewrite"),
+            ("fused", "fusion", "fusion_missed", "fusion"),
+            ("reranked", "reranker", "reranker_missed", "reranker"),
+            ("page_gate", "page_gate", "page_gate_rejected", "selector"),
+            ("committed", "commit", "commit_missed", "selector"),
+            ("host_used", "host_used", "host_did_not_use", "host_or_card"),
+        )
+        if stages:
+            trace_resolved = False
+            for stage_key, stage_name, stage_reason, stage_fix in ordered_stages:
+                values = stages.get(stage_key)
+                if values is None:
+                    break
+                if not isinstance(values, list):
+                    break
+                stage_pages = [
+                    page for page in values if isinstance(page, str)
+                ]
+                if not (set(expected) & set(stage_pages)):
+                    failed_stage = stage_name
+                    reason_code = stage_reason
+                    fix_kind = stage_fix
+                    trace_resolved = True
+                    break
+            if (
+                not trace_resolved
+                and isinstance(stages.get("reranked"), list)
+                and set(expected) & set(stages["reranked"])
+            ):
+                failed_stage = "rank_cutoff"
+                reason_code = "below_evaluation_cutoff"
+                fix_kind = "ranking"
         rows.append(
             {
                 "ts": datetime.now().isoformat(timespec="seconds"),
@@ -2332,9 +2454,10 @@ def _failure_index_rows(debug_rows: list[dict[str, Any]]) -> list[dict[str, Any]
                 "expected_pages": expected,
                 "result_pages": result_pages[:20],
                 "channel_candidates": channel_candidates,
+                "stages": stages,
                 "failed_stage": failed_stage,
-                "reason_code": "fusion_missed" if channel_hit else "retrieval_missed",
-                "fix_kind": "fusion" if channel_hit else "data_or_rewrite",
+                "reason_code": reason_code,
+                "fix_kind": fix_kind,
             }
         )
     return rows
@@ -3268,6 +3391,7 @@ def run_report(
     save: bool = False,
     debug_dump: Path | None = None,
     failure_index: Path | None = None,
+    sealed_manifest: Path | None = None,
 ) -> dict[str, Any]:
     examples = load_examples(
         golden_file, limit=max(0, limit), source_filter=source_filter
@@ -3295,6 +3419,10 @@ def run_report(
     if failure_index is not None:
         payload["failure_index"] = write_failure_index(
             result["debug_rows"], failure_index
+        )
+    if sealed_manifest is not None:
+        payload["sealed_manifest"] = write_sealed_manifest(
+            examples, sealed_manifest
         )
     if save:
         payload["baseline_file"] = str(save_baseline(payload))
@@ -3403,6 +3531,12 @@ def build_parser() -> argparse.ArgumentParser:
         nargs="?",
         const=str(FAILURE_INDEX_FILE),
         help="Write failed query index JSONL.",
+    )
+    parser.add_argument(
+        "--sealed-manifest",
+        nargs="?",
+        const=str(MANUAL_MANIFEST_FILE),
+        help="Write a deterministic manifest with query hashes, never query text.",
     )
     parser.add_argument("--build-golden", action="store_true")
     parser.add_argument("--build-label-queue", action="store_true")
@@ -3526,6 +3660,9 @@ def main(argv: list[str] | None = None) -> int:
         debug_dump=Path(args.debug_dump).expanduser() if args.debug_dump else None,
         failure_index=Path(args.failure_index).expanduser()
         if args.failure_index
+        else None,
+        sealed_manifest=Path(args.sealed_manifest).expanduser()
+        if args.sealed_manifest
         else None,
     )
     if args.ci:
