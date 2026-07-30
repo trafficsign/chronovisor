@@ -204,6 +204,39 @@ class RecallFieldStore:
                 events.append(row)
         return sorted(events, key=lambda row: int(row["seq"]))
 
+    def latest_session_hash(
+        self,
+        *,
+        host: str = "",
+        max_age_seconds: float = 180.0,
+        now: float | None = None,
+    ) -> str:
+        """Return the freshest valid Field session for an MCP client host."""
+
+        observed = time.time() if now is None else now
+        normalized_host = host.strip().casefold()
+        try:
+            paths = sorted(
+                self.session_root.glob("*.json"),
+                key=lambda path: path.stat().st_mtime,
+                reverse=True,
+            )
+        except OSError:
+            return ""
+        for path in paths[:24]:
+            try:
+                value = json.loads(path.read_text(encoding="utf-8"))
+                payload = self._verify_snapshot(value)
+                state = RecallFieldState.from_dict(payload, session_hash=path.stem)
+            except (OSError, json.JSONDecodeError, ValueError):
+                continue
+            if normalized_host and state.host != normalized_host:
+                continue
+            age = max(0.0, observed - state.updated_at_epoch)
+            if age <= max(0.0, max_age_seconds):
+                return state.session_hash
+        return ""
+
     def cleanup(self, *, now: float | None = None) -> int:
         observed = time.time() if now is None else now
         cutoff = observed - self.config.session_ttl_seconds

@@ -366,6 +366,48 @@ def test_store_separates_sessions_orders_events_and_expires_ttl(
     assert store.cleanup(now=161.0) == 2
 
 
+def test_mcp_activity_targets_latest_session_for_client_host(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from chronovisor.search import cofire
+
+    monkeypatch.setattr(cofire, "neighbors", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(recall_field, "get_store", FakeGraphStore)
+    cfg = config()
+    store = RecallFieldStore(tmp_path / "field", config=cfg)
+    codex_session = session_hash("codex", "codex-session")
+    claude_session = session_hash("claude-code", "claude-session")
+
+    def seed(host: str):
+        def mutate(state):
+            state.host = host
+            state.updated_at_epoch = 100.0
+            return state, []
+
+        return mutate
+
+    store.transact(codex_session, seed("codex"), now=100.0)
+    store.transact(claude_session, seed("claude-code"), now=101.0)
+
+    result = recall_field.record_mcp_activity(
+        host="claude-code",
+        page_ids=["a"],
+        activity_kind="read",
+        config=cfg,
+        store=store,
+        now=102.0,
+    )
+
+    assert result["status"] == "ok"
+    assert result["session_hash"] == claude_session
+    assert result["host"] == "claude-code"
+    assert result["stimulus_count"] == 1
+    assert store.load(claude_session, now=102.0).shadow["a"].activation > 0
+    assert "a" not in store.load(codex_session, now=102.0).shadow
+    assert store.latest_session_hash(host="codex", now=102.0) == codex_session
+
+
 def test_field_update_p95_is_below_50ms_and_has_no_prompt_body(
     monkeypatch,
 ) -> None:

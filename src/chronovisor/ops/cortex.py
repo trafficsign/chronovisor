@@ -455,6 +455,7 @@ def build_cortex_field_projection(
             (
                 {
                     "session_hash": path.stem,
+                    "host": str(payload.get("host") or ""),
                     "updated_at_epoch": updated,
                     "topic_epoch": int(payload.get("topic_epoch") or 0),
                     "turn": int(payload.get("turn") or 0),
@@ -542,6 +543,7 @@ def build_cortex_field_projection(
         "sessions": [row[0] for row in sessions[:12]],
         "snapshot": {
             "session_hash": session["session_hash"],
+            "host": session["host"],
             "topic_epoch": session["topic_epoch"],
             "turn": session["turn"],
             "seq": session["seq"],
@@ -607,6 +609,7 @@ class CortexEventCursor:
         pull_log: Path | None = None,
         activity_log: Path | None = None,
         field_session: str = "",
+        follow_field_sessions: bool = False,
     ) -> None:
         self.root = root.expanduser().resolve()
         self.recall_log = recall_log or self.root / "recall" / "recall-log.jsonl"
@@ -618,12 +621,10 @@ class CortexEventCursor:
             if _FIELD_SESSION_RE.fullmatch(field_session)
             else ""
         )
+        self.follow_field_sessions = bool(follow_field_sessions)
+        self.field_event_root = self.root / "recall" / "field" / "events"
         self.field_event_log = (
-            self.root
-            / "recall"
-            / "field"
-            / "events"
-            / f"{self.field_session}.jsonl"
+            self.field_event_root / f"{self.field_session}.jsonl"
             if self.field_session
             else None
         )
@@ -636,6 +637,9 @@ class CortexEventCursor:
             self._offsets[self.field_event_log] = self._file_size(
                 self.field_event_log
             )
+        if self.follow_field_sessions:
+            for path in self._field_event_paths():
+                self._offsets[path] = self._file_size(path)
         self._remainders: dict[Path, bytes] = {}
         self._raw_dir_mtime_ns = self._directory_mtime(self.raw_dir)
 
@@ -697,6 +701,36 @@ class CortexEventCursor:
                 continue
             events.append(event)
         return events
+
+    def _field_event_paths(self) -> list[Path]:
+        try:
+            return sorted(self.field_event_root.glob("*.jsonl"))
+        except OSError:
+            return []
+
+    def _followed_field_events(self) -> list[dict[str, Any]]:
+        events: list[dict[str, Any]] = []
+        for path in self._field_event_paths():
+            if not _FIELD_SESSION_RE.fullmatch(path.stem):
+                continue
+            if path not in self._offsets:
+                self._offsets[path] = 0
+            for line in self._tail_lines(path):
+                try:
+                    event = _project_field_event(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+                if event is None or event["session_hash"] != path.stem:
+                    continue
+                events.append(event)
+        return sorted(
+            events,
+            key=lambda event: (
+                float(event.get("timestamp_epoch") or 0.0),
+                str(event.get("session_hash") or ""),
+                int(event.get("seq") or 0),
+            ),
+        )
 
     def _automatic_recall_events(self) -> list[dict[str, Any]]:
         events: list[dict[str, Any]] = []
@@ -777,6 +811,8 @@ class CortexEventCursor:
         return events
 
     def poll(self) -> list[dict[str, Any]]:
+        if self.follow_field_sessions:
+            return self._followed_field_events()
         if self.field_session:
             return self._field_events()
         return [

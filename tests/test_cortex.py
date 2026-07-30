@@ -357,6 +357,58 @@ def test_cortex_event_cursor_tails_only_selected_field_session(
     ]
 
 
+def test_cortex_event_cursor_follows_activity_across_field_sessions(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "chronovisor"
+    event_root = root / "recall" / "field" / "events"
+    event_root.mkdir(parents=True)
+    first = event_root / "0123456789abcdef.jsonl"
+    first.write_text("", encoding="utf-8")
+    cursor = cortex.CortexEventCursor(root, follow_field_sessions=True)
+
+    first.write_text(
+        json.dumps(
+            {
+                "seq": 1,
+                "timestamp_epoch": 10.0,
+                "session_hash": first.stem,
+                "topic_epoch": 0,
+                "kind": "stimulus",
+                "page_id": "page-a",
+                "delta": 1.0,
+                "activation": 1.0,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    second = event_root / "fedcba9876543210.jsonl"
+    second.write_text(
+        json.dumps(
+            {
+                "seq": 1,
+                "timestamp_epoch": 11.0,
+                "session_hash": second.stem,
+                "topic_epoch": 0,
+                "kind": "stimulus",
+                "page_id": "page-b",
+                "delta": 1.0,
+                "activation": 1.0,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    events = cursor.poll()
+
+    assert [(event["session_hash"], event["page_id"]) for event in events] == [
+        (first.stem, "page-a"),
+        (second.stem, "page-b"),
+    ]
+
+
 def test_cortex_static_view_preserves_fable_layout_and_uses_live_data() -> None:
     static = dashboard.STATIC_DIR
     html = (static / "cortex.html").read_text(encoding="utf-8")
@@ -399,6 +451,9 @@ def test_cortex_static_view_preserves_fable_layout_and_uses_live_data() -> None:
     assert "cortexMetrics.violetNodes += 1;" in script
     assert ".slice(0, ACTIVE_LABEL_LIMIT)" in script
     assert "liveEventsEnabled = true" in script
+    assert "followLatestSession = true" in script
+    assert '"?follow=latest"' in script
+    assert "LIVE · follow activity" in script
     assert "window.CortexField.applyEvents(fieldState" in script
     assert "const MAX_EVENTS = 256;" in field_script
     assert "event.seq !== state.seq + 1" in field_script

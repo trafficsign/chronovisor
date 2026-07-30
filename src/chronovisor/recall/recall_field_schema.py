@@ -80,6 +80,7 @@ class ActivationNode:
 @dataclass
 class RecallFieldState:
     session_hash: str
+    host: str = ""
     topic_epoch: int = 0
     turn: int = 0
     seq: int = 0
@@ -95,6 +96,7 @@ class RecallFieldState:
         return {
             "schema_version": FIELD_SCHEMA_VERSION,
             "session_hash": self.session_hash,
+            "host": self.host,
             "topic_epoch": self.topic_epoch,
             "turn": self.turn,
             "seq": self.seq,
@@ -135,6 +137,7 @@ class RecallFieldState:
         pending = value.get("pending_teacher_commits")
         return cls(
             session_hash=session_hash,
+            host=str(value.get("host") or "").strip().casefold(),
             topic_epoch=_bounded_int(value.get("topic_epoch"), 0, 0, 1_000_000),
             turn=_bounded_int(value.get("turn"), 0, 0, 1_000_000_000),
             seq=_bounded_int(value.get("seq"), 0, 0, 10_000_000_000),

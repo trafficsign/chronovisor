@@ -4455,15 +4455,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.close_connection = True
 
+        params = dict(parse_qsl(query, keep_blank_values=False))
         cursor = CortexEventCursor(
             CHRONOVISOR_ROOT,
             recall_log=recall_runtime.RECALL_LOG_FILE,
             pull_log=recall_runtime.RECALL_PULL_LOG_FILE,
             activity_log=LOG_FILE,
-            field_session=str(
-                dict(parse_qsl(query, keep_blank_values=False)).get("session")
-                or ""
-            ),
+            field_session=str(params.get("session") or ""),
+            follow_field_sessions=params.get("follow") == "latest",
         )
         last_heartbeat = 0.0
         try:

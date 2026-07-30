@@ -25,6 +25,7 @@
   const NODE_FLASH_DURATION_MS =
     NODE_FLASH_ATTACK_MS + NODE_FLASH_HOLD_MS + NODE_FLASH_DECAY_MS;
   const EDGE_AFTERGLOW_MS = 650;
+  const LIVE_SESSION_VALUE = "__live__";
 
   let data;
   let nodes = [];
@@ -49,6 +50,7 @@
   const packageOff = new Set();
   let mode = "organic";
   let liveEventsEnabled = true;
+  let followLatestSession = true;
   let motionEnabled = true;
   let autoRotate = true;
   let soundOn = false;
@@ -2002,7 +2004,9 @@
       fitView();
     });
     document.getElementById("sessionSelect").addEventListener("change", (event) => {
-      loadField(event.target.value);
+      const value = event.target.value;
+      followLatestSession = value === LIVE_SESSION_VALUE;
+      loadField(followLatestSession ? "" : value);
     });
     stage.addEventListener("keydown", (event) => {
       if (!["ArrowDown", "ArrowUp", "ArrowLeft", "ArrowRight"].includes(event.key)) {
@@ -2114,10 +2118,16 @@
   function updateSessionControl() {
     const selectElement = document.getElementById("sessionSelect");
     selectElement.innerHTML = "";
+    const liveOption = document.createElement("option");
+    liveOption.value = LIVE_SESSION_VALUE;
+    liveOption.textContent = "LIVE · follow activity";
+    liveOption.selected = followLatestSession;
+    selectElement.appendChild(liveOption);
     if (!fieldState.sessions.length) {
       const option = document.createElement("option");
       option.value = "";
       option.textContent = "telemetry fallback";
+      option.selected = !followLatestSession;
       selectElement.appendChild(option);
       return;
     }
@@ -2125,13 +2135,16 @@
       const option = document.createElement("option");
       option.value = session.session_hash;
       const age = Math.max(0, Date.now() / 1000 - Number(session.updated_at_epoch || 0));
-      option.textContent = `${session.session_hash} · ${index ? `${Math.round(age / 60)}m` : "latest"}`;
-      option.selected = session.session_hash === fieldState.sessionHash;
+      const host = session.host || "unknown";
+      option.textContent =
+        `${host} · ${session.session_hash} · ${index ? `${Math.round(age / 60)}m` : "latest"}`;
+      option.selected =
+        !followLatestSession && session.session_hash === fieldState.sessionHash;
       selectElement.appendChild(option);
     });
   }
 
-  async function loadField(sessionHash = "") {
+  async function loadField(sessionHash = "", replayEvents = []) {
     const request = ++sessionRequest;
     const queryString = sessionHash
       ? `?session=${encodeURIComponent(sessionHash)}`
@@ -2150,6 +2163,11 @@
       setEventStatus(fieldState.status === "online");
       renderPanel();
       stateDirty = true;
+      if (liveEventsEnabled && replayEvents.length) {
+        replayEvents
+          .filter((event) => event.session_hash === fieldState.sessionHash)
+          .forEach(visualizeFieldEvent);
+      }
       connectEvents(fieldState.sessionHash);
     } catch (error) {
       fieldState.status = "fault";
@@ -2164,9 +2182,11 @@
     const generation = ++eventSocketGeneration;
     if (eventSocket) eventSocket.close();
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-    const queryString = sessionHash
-      ? `?session=${encodeURIComponent(sessionHash)}`
-      : "";
+    const queryString = followLatestSession
+      ? "?follow=latest"
+      : sessionHash
+        ? `?session=${encodeURIComponent(sessionHash)}`
+        : "";
     eventSocket = new WebSocket(
       `${protocol}//${window.location.host}/api/cortex/events${queryString}`,
     );
@@ -2184,8 +2204,21 @@
         return;
       }
       if (payload.type !== "events" || !Array.isArray(payload.events)) return;
+      const latestEvent = payload.events.at(-1);
+      if (
+        followLatestSession
+        && latestEvent?.session_hash
+        && latestEvent.session_hash !== fieldState.sessionHash
+      ) {
+        const targetSession = latestEvent.session_hash;
+        const replayEvents = payload.events.filter(
+          (event) => event.session_hash === targetSession,
+        );
+        loadField(targetSession, replayEvents);
+        return;
+      }
       if (!fieldState.sessionHash) {
-        const event = payload.events.at(-1);
+        const event = latestEvent;
         flashTicker(
           `TELEMETRY FALLBACK · ${event?.label || event?.kind || "activity"} · no synthetic firing`,
         );

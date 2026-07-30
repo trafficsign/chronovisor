@@ -98,3 +98,55 @@ def test_chronovisor_read_forwards_turn_trace_without_marking_page_used(
             "page_id": "page-a",
         }
     ]
+
+
+def test_mcp_client_host_and_read_field_attribution(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    page = tmp_path / "page-a.md"
+    page.write_text("# Page A\n\nEvidence only.", encoding="utf-8")
+    recorded: list[dict] = []
+
+    class FakeStore:
+        def refresh(self) -> None:
+            return None
+
+        def outlinks(self, _page: str) -> list[str]:
+            return []
+
+        def backlinks(self, _page: str) -> list[str]:
+            return []
+
+    class ClientInfo:
+        name = "Claude Code"
+
+    class ClientParams:
+        clientInfo = ClientInfo()
+
+    class Session:
+        client_params = ClientParams()
+
+    class Context:
+        client_id = ""
+        session = Session()
+
+    monkeypatch.setattr(server, "get_store", FakeStore)
+    monkeypatch.setattr(server, "find_page", lambda _page: page)
+    monkeypatch.setattr(server, "_append_pull_log", recorded.append)
+    monkeypatch.setattr(
+        server,
+        "_record_mcp_field_activity",
+        lambda **_kwargs: {
+            "status": "ok",
+            "host": "claude-code",
+            "session_hash": "0123456789abcdef",
+        },
+    )
+
+    result = json.loads(_tool(server.chronovisor_read)("page-a", ctx=Context()))
+
+    assert result["page_id"] == "page-a"
+    assert server._mcp_client_host(Context()) == "claude-code"
+    assert recorded[0]["host"] == "claude-code"
+    assert recorded[0]["field_session_hash"] == "0123456789abcdef"

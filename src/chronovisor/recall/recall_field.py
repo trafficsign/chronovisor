@@ -397,6 +397,7 @@ def run_field_turn(
     def mutate(
         state: RecallFieldState,
     ) -> tuple[RecallFieldState, list[FieldEvent]]:
+        state.host = host.strip().casefold()
         return update_field_state(
             state,
             stimuli=stimuli,
@@ -443,6 +444,99 @@ def run_field_turn(
             for page_id, node in top
         ],
         "full_search_fallback": state.full_search_fallback,
+        "latency_ms": int(round((time.perf_counter() - started) * 1_000)),
+    }
+
+
+def record_mcp_activity(
+    *,
+    host: str,
+    session_id: str = "",
+    page_ids: list[str],
+    activity_kind: str,
+    config: RecallFieldConfig | None = None,
+    store: RecallFieldStore | None = None,
+    now: float | None = None,
+) -> dict[str, Any]:
+    """Project an actual MCP search/read into the owning Recall Field session."""
+
+    started = time.perf_counter()
+    cfg = config or load_recall_field_config()
+    normalized_host = host.strip().casefold()
+    observed = time.time() if now is None else now
+    field_store = store or RecallFieldStore(config=cfg)
+    hashed_session = (
+        session_hash(normalized_host, session_id)
+        if normalized_host and session_id.strip()
+        else field_store.latest_session_hash(
+            host=normalized_host,
+            max_age_seconds=max(
+                60.0,
+                min(600.0, cfg.wall_half_life_seconds * 2.0),
+            ),
+            now=observed,
+        )
+    )
+    unique_pages = [
+        page_id
+        for page_id in dict.fromkeys(str(value).strip() for value in page_ids)
+        if page_id
+    ][:5]
+    if cfg.mode == "off" or not hashed_session or not unique_pages:
+        return {
+            "status": "skipped",
+            "mode": cfg.mode,
+            "reason": (
+                "mode_off"
+                if cfg.mode == "off"
+                else "missing_session"
+                if not hashed_session
+                else "missing_pages"
+            ),
+            "latency_ms": int(round((time.perf_counter() - started) * 1_000)),
+        }
+    reason_code = "mcp_read" if activity_kind == "read" else "mcp_search"
+    weights = (
+        [1.0] * len(unique_pages)
+        if activity_kind == "read"
+        else [max(0.58, 0.92 - index * 0.08) for index in range(len(unique_pages))]
+    )
+    stimuli = [
+        FieldStimulus(
+            page_id=page_id,
+            kind=reason_code,
+            weight=weight,
+            reason_code=reason_code,
+        )
+        for page_id, weight in zip(unique_pages, weights, strict=True)
+    ]
+
+    def mutate(
+        state: RecallFieldState,
+    ) -> tuple[RecallFieldState, list[FieldEvent]]:
+        if normalized_host and state.host and state.host != normalized_host:
+            return state, []
+        if normalized_host:
+            state.host = normalized_host
+        return update_field_state(
+            state,
+            stimuli=stimuli,
+            prompt_signature=state.topic_signature,
+            config=cfg,
+            now=observed,
+        )
+
+    state, events = field_store.transact(hashed_session, mutate, now=observed)
+    return {
+        "status": "ok" if events else "skipped",
+        "mode": cfg.mode,
+        "session_hash": hashed_session,
+        "host": state.host,
+        "turn": state.turn,
+        "seq": state.seq,
+        "stimulus_count": sum(event.kind == "stimulus" for event in events),
+        "event_count": len(events),
+        "page_ids": unique_pages,
         "latency_ms": int(round((time.perf_counter() - started) * 1_000)),
     }
 

@@ -12,10 +12,11 @@ from pathlib import Path
 from typing import Any
 
 try:
-    from mcp.server.fastmcp import FastMCP
+    from mcp.server.fastmcp import Context, FastMCP
 except ModuleNotFoundError:
     from mcp.server.mcpserver import MCPServer as FastMCP
 
+    Context = Any
 from chronovisor.core.durable_state import fsync_directory as _fsync_directory
 from chronovisor.core.frontmatter import parse as _frontmatter_parse
 from chronovisor.core.frontmatter import patch as _frontmatter_patch
@@ -40,6 +41,54 @@ mcp = FastMCP(
         "conversation, and chronovisor_read for full pages with backlinks."
     ),
 )
+
+
+def _mcp_client_host(ctx: Context | None) -> str:
+    """Map an MCP connection's client identity onto a Chronovisor host."""
+
+    if ctx is None:
+        return ""
+    candidates: list[str] = []
+    with contextlib.suppress(Exception):
+        candidates.append(str(ctx.client_id or ""))
+    with contextlib.suppress(Exception):
+        client_params = ctx.session.client_params
+        client_info = getattr(client_params, "clientInfo", None) or getattr(
+            client_params,
+            "client_info",
+            None,
+        )
+        candidates.append(str(getattr(client_info, "name", "") or ""))
+    folded = " ".join(candidates).casefold()
+    if "claude" in folded:
+        return "claude-code"
+    if "codex" in folded or "openai" in folded:
+        return "codex"
+    return ""
+
+
+def _record_mcp_field_activity(
+    *,
+    ctx: Context | None,
+    session_id: str | None,
+    page_ids: list[str],
+    activity_kind: str,
+) -> dict[str, Any]:
+    """Best-effort bridge from actual MCP use to the live Recall Field."""
+
+    if ctx is None:
+        return {}
+    try:
+        from chronovisor.recall.recall_field import record_mcp_activity
+
+        return record_mcp_activity(
+            host=_mcp_client_host(ctx),
+            session_id=session_id or "",
+            page_ids=page_ids,
+            activity_kind=activity_kind,
+        )
+    except Exception:
+        return {"status": "error"}
 
 
 def _parse_frontmatter(text: str) -> dict:
@@ -120,6 +169,7 @@ def chronovisor_read(
     page: str,
     session_id: str | None = None,
     decision_id: str | None = None,
+    ctx: Context = None,
 ) -> str:
     """Read a wiki page with outlinks and backlinks.
 
@@ -165,6 +215,12 @@ def chronovisor_read(
     content = path.read_text()
     outlinks = store.outlinks(canonical_page_id) or _extract_wiki_links(content)
     backlinks = store.backlinks(canonical_page_id)
+    field_activity = _record_mcp_field_activity(
+        ctx=ctx,
+        session_id=session_id,
+        page_ids=[canonical_page_id],
+        activity_kind="read",
+    )
     _append_pull_log(
         {
             "type": "read",
@@ -172,6 +228,16 @@ def chronovisor_read(
             "session_id": session_id or "",
             "decision_id": decision_id or "",
             "page_id": canonical_page_id,
+            **(
+                {"host": field_activity["host"]}
+                if field_activity.get("host")
+                else {}
+            ),
+            **(
+                {"field_session_hash": field_activity["session_hash"]}
+                if field_activity.get("session_hash")
+                else {}
+            ),
             **({"page_uid": canonical_uid} if canonical_uid else {}),
             **({"requested_page_id": page} if canonical_page_id != page else {}),
         }
@@ -378,6 +444,60 @@ def _append_pull_log(record: dict) -> bool:
         return True
     except Exception:
         return False
+
+
+def _record_search_pull(
+    *,
+    ctx: Context | None,
+    session_id: str | None,
+    decision_id: str | None,
+    query: str,
+    direct_hits: list[dict],
+    expanded_hits: list[dict],
+    provisional_hits: list[dict],
+    retrieval_trace: dict,
+) -> None:
+    """Record search telemetry and project returned pages into the live Field."""
+
+    direct_page_ids = [hit["page_id"] for hit in direct_hits]
+    all_hits = [*direct_hits, *expanded_hits]
+    field_activity = _record_mcp_field_activity(
+        ctx=ctx,
+        session_id=session_id,
+        page_ids=direct_page_ids,
+        activity_kind="search",
+    )
+    _append_pull_log(
+        {
+            "type": "search",
+            "stage": "returned",
+            "session_id": session_id or "",
+            "decision_id": decision_id or "",
+            "query": query,
+            "direct_pages": direct_page_ids,
+            "expanded_pages": [hit["page_id"] for hit in expanded_hits],
+            "returned_pages": [hit["page_id"] for hit in all_hits],
+            "direct_uids": [hit["uid"] for hit in direct_hits if hit.get("uid")],
+            "expanded_uids": [
+                hit["uid"] for hit in expanded_hits if hit.get("uid")
+            ],
+            "returned_uids": [hit["uid"] for hit in all_hits if hit.get("uid")],
+            "provisional_ids": [
+                hit["provisional_id"] for hit in provisional_hits
+            ],
+            "retrieval": retrieval_trace,
+            **(
+                {"host": field_activity["host"]}
+                if field_activity.get("host")
+                else {}
+            ),
+            **(
+                {"field_session_hash": field_activity["session_hash"]}
+                if field_activity.get("session_hash")
+                else {}
+            ),
+        }
+    )
 
 
 @mcp.tool()
@@ -647,6 +767,7 @@ def chronovisor_search(
     classification_status: str | None = None,
     session_id: str | None = None,
     decision_id: str | None = None,
+    ctx: Context = None,
 ) -> str:
     """Search wiki pages with BM25 + semantic search and link expansion.
     Returns direct_hits (pages matching query) and expanded_hits (linked pages).
@@ -784,32 +905,15 @@ def chronovisor_search(
         classification_notation=classification_notation,
         classification_status=classification_status,
     )
-    _append_pull_log(
-        {
-            "type": "search",
-            "stage": "returned",
-            "session_id": session_id or "",
-            "decision_id": decision_id or "",
-            "query": query,
-            "direct_pages": [hit["page_id"] for hit in direct_hits],
-            "expanded_pages": [hit["page_id"] for hit in expanded_hits],
-            "returned_pages": [
-                hit["page_id"] for hit in [*direct_hits, *expanded_hits]
-            ],
-            "direct_uids": [
-                hit["uid"] for hit in direct_hits if hit.get("uid")
-            ],
-            "expanded_uids": [
-                hit["uid"] for hit in expanded_hits if hit.get("uid")
-            ],
-            "returned_uids": [
-                hit["uid"]
-                for hit in [*direct_hits, *expanded_hits]
-                if hit.get("uid")
-            ],
-            "provisional_ids": [hit["provisional_id"] for hit in provisional_hits],
-            "retrieval": retrieval_trace,
-        }
+    _record_search_pull(
+        ctx=ctx,
+        session_id=session_id,
+        decision_id=decision_id,
+        query=query,
+        direct_hits=direct_hits,
+        expanded_hits=expanded_hits,
+        provisional_hits=provisional_hits,
+        retrieval_trace=retrieval_trace,
     )
 
     return json.dumps(
