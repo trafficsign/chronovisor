@@ -6,6 +6,12 @@ import threading
 from pathlib import Path
 
 from chronovisor.ops import cortex, dashboard
+from chronovisor.recall.recall_field_schema import (
+    ActivationNode,
+    FieldEvent,
+    RecallFieldConfig,
+)
+from chronovisor.recall.recall_field_store import RecallFieldStore
 
 
 def _write_page(
@@ -208,6 +214,143 @@ def test_cortex_event_cursor_maps_durable_activity_to_firing_events(
     assert events[3]["page_ids"] == ["page-b"]
     assert events[4]["page_ids"] == []
     assert events[5]["page_ids"] == ["page-c"]
+    assert all(event["source"] == "telemetry-fallback" for event in events)
+
+
+def test_cortex_field_projection_is_sealed_session_scoped_and_browser_safe(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    root = tmp_path / "chronovisor"
+    session = "0123456789abcdef"
+    field_root = root / "recall" / "field"
+    store = RecallFieldStore(
+        root=field_root,
+        config=RecallFieldConfig(mode="shadow"),
+    )
+
+    def mutate(state):
+        state.topic_epoch = 2
+        state.turn = 7
+        state.updated_at_epoch = 200.0
+        state.shadow["page-a"] = ActivationNode(
+            activation=0.72,
+            direct=0.6,
+            spread=0.2,
+            inhibition=0.08,
+            last_seq=2,
+        )
+        state.seq = 2
+        return state, [
+            FieldEvent(
+                seq=1,
+                timestamp_epoch=199.0,
+                session_hash=session,
+                topic_epoch=2,
+                kind="stimulus",
+                page_id="page-a",
+                delta=0.6,
+                activation=0.6,
+                reason_code="exact_page",
+            ),
+            FieldEvent(
+                seq=2,
+                timestamp_epoch=200.0,
+                session_hash=session,
+                topic_epoch=2,
+                kind="commit_queued",
+                page_id="page-a",
+                reason_code="teacher_commit_next_turn",
+                certificate_id="cert-safe",
+            ),
+        ]
+
+    store.transact(session, mutate, now=200.0)
+    monkeypatch.setattr(
+        "chronovisor.recall.recall_field_schema.load_recall_field_config",
+        lambda: RecallFieldConfig(mode="shadow"),
+    )
+
+    projection = cortex.build_cortex_field_projection(
+        root,
+        session_hash=session,
+        now=210.0,
+    )
+
+    assert projection["status"] == "online"
+    assert projection["session_hash"] == session
+    assert projection["snapshot"]["seq"] == 2
+    assert projection["snapshot"]["nodes"] == [
+        {
+            "page_id": "page-a",
+            "activation": 0.72,
+            "components": {
+                "direct": 0.6,
+                "spread": 0.2,
+                "negative": 0.0,
+                "inhibition": 0.08,
+            },
+            "last_seq": 2,
+        }
+    ]
+    assert projection["events"][-1]["certificate_id"] == "cert-safe"
+    encoded = json.dumps(projection)
+    assert "prompt" not in encoded
+    assert "body" not in encoded
+    assert projection["summary"]["commit"] == 1
+
+
+def test_cortex_event_cursor_tails_only_selected_field_session(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "chronovisor"
+    session = "0123456789abcdef"
+    event_path = root / "recall" / "field" / "events" / f"{session}.jsonl"
+    event_path.parent.mkdir(parents=True)
+    event_path.write_text("", encoding="utf-8")
+    cursor = cortex.CortexEventCursor(root, field_session=session)
+
+    event_path.write_text(
+        json.dumps(
+            {
+                "seq": 1,
+                "timestamp_epoch": 10.0,
+                "session_hash": session,
+                "topic_epoch": 0,
+                "kind": "spread",
+                "source_page_id": "page-a",
+                "target_page_id": "page-b",
+                "edge_type": "wikilink",
+                "delta": 0.4,
+                "activation": 0.5,
+                "components": {"spread": 0.5, "private": 99},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    assert cursor.poll() == [
+        {
+            "seq": 1,
+            "timestamp_epoch": 10.0,
+            "session_hash": session,
+            "topic_epoch": 0,
+            "kind": "spread",
+            "source_page_id": "page-a",
+            "target_page_id": "page-b",
+            "edge_type": "wikilink",
+            "delta": 0.4,
+            "activation": 0.5,
+            "components": {
+                "direct": 0.0,
+                "spread": 0.5,
+                "negative": 0.0,
+                "inhibition": 0.0,
+            },
+            "source": "stateful-recall-field",
+        }
+    ]
 
 
 def test_cortex_static_view_preserves_fable_layout_and_uses_live_data() -> None:
@@ -215,6 +358,7 @@ def test_cortex_static_view_preserves_fable_layout_and_uses_live_data() -> None:
     html = (static / "cortex.html").read_text(encoding="utf-8")
     style = (static / "cortex.css").read_text(encoding="utf-8")
     script = (static / "cortex.js").read_text(encoding="utf-8")
+    field_script = (static / "cortex-field.js").read_text(encoding="utf-8")
     observatory = (static / "index.html").read_text(encoding="utf-8")
     activity_style = (static / "activity-bar.css").read_text(encoding="utf-8")
 
@@ -225,16 +369,32 @@ def test_cortex_static_view_preserves_fable_layout_and_uses_live_data() -> None:
     assert 'id="mOrganic"' in html
     assert 'id="mCluster"' in html
     assert 'id="tLive"' in html
+    assert 'id="tMotion"' in html
+    assert 'id="sessionSelect"' in html
     assert 'id="tAuto"' not in html
     assert 'id="tSnd"' in html
     assert "grid-template-columns: 242px 1fr 296px;" in style
     assert "--amber: #ffb454;" in style
     assert "repeating-linear-gradient" in style
     assert 'fetch("/api/cortex/graph"' in script
-    assert 'new WebSocket(`${protocol}//${window.location.host}/api/cortex/events`)' in script
-    assert "function firePageIds(pageIds, kind, label)" in script
+    assert "/api/cortex/events${queryString}" in script
+    assert "function firePageIds(" not in script
+    assert "function fire(" not in script
+    assert "function visualizeFieldEvent(event)" in script
+    assert "function ensureActualEdge(event)" in script
     assert "function drawEdges()" in script
     assert "liveEventsEnabled = true" in script
+    assert "window.CortexField.applyEvents(fieldState" in script
+    assert "const MAX_EVENTS = 256;" in field_script
+    assert "event.seq !== state.seq + 1" in field_script
+    assert "/static/cortex-field.js" in html
+    assert html.index("/static/cortex-field.js") < html.index("/static/cortex.js")
+    assert "DEMO · RECALL" in html
+    assert "@media (prefers-reduced-motion: reduce)" in style
+    assert 'id="recall-field-summary"' in observatory
+    assert 'fetch("/api/cortex/field"' in (
+        static / "app.js"
+    ).read_text(encoding="utf-8")
     assert "function ambient(" not in script
     assert "function autoTick(" not in script
     assert 'setTimeout(() => stimulate("recall")' not in script
@@ -294,3 +454,48 @@ def test_dashboard_serves_cortex_graph_api(monkeypatch) -> None:
 
     assert response.status_code == 200
     assert response.json() == expected
+
+
+def test_dashboard_serves_session_scoped_cortex_field_api(monkeypatch) -> None:
+    expected = {
+        "status": "online",
+        "session_hash": "0123456789abcdef",
+        "snapshot": {"seq": 4},
+        "events": [],
+    }
+    observed: dict[str, object] = {}
+
+    def projection(root, *, session_hash="", event_limit=256):
+        observed.update(
+            root=root,
+            session_hash=session_hash,
+            event_limit=event_limit,
+        )
+        return expected
+
+    monkeypatch.setattr(dashboard, "build_cortex_field_projection", projection)
+    server = dashboard.ThreadingHTTPServer(
+        ("127.0.0.1", 0),
+        dashboard.DashboardHandler,
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    host, port = server.server_address
+    try:
+        response = dashboard.httpx.get(
+            f"http://{host}:{port}/api/cortex/field"
+            "?session=0123456789abcdef",
+            timeout=2,
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+    assert response.status_code == 200
+    assert response.json() == expected
+    assert observed == {
+        "root": dashboard.CHRONOVISOR_ROOT,
+        "session_hash": "0123456789abcdef",
+        "event_limit": 256,
+    }

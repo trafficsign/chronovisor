@@ -6,6 +6,7 @@
   <title>CHRONOVISOR // SYNAPTIC CORTEX</title>
   <link rel="stylesheet" href="/static/cortex.css">
   <link rel="stylesheet" href="/static/activity-bar.css">
+  <script src="/static/cortex-field.js" defer></script>
   <script src="/static/cortex.js" defer></script>
 </head>
 <body class="has-activity-bar">
@@ -62,6 +63,10 @@
         <span><b id="stE">—</b> SYNAPSES</span>
         <span><b id="stSp">0</b> SPIKES</span>
         <span class="badge" id="cortexStatus"><i></i>CORTEX ONLINE</span>
+        <label id="sessionControl">
+          <span>SESSION</span>
+          <select id="sessionSelect" aria-label="Recall Field session"></select>
+        </label>
         <span class="chip" id="stC">—</span>
       </div>
     </header>
@@ -72,8 +77,9 @@
         <div id="tree"></div>
       </nav>
 
-      <main id="stage">
-        <canvas id="gl"></canvas>
+      <main id="stage" tabindex="0" aria-label="Stateful Recall Field graph">
+        <canvas id="gl" aria-hidden="true"></canvas>
+        <div id="fieldAria" class="srOnly" aria-live="polite"></div>
         <div id="scan"></div>
         <div class="hudCorner" id="c1"></div>
         <div class="hudCorner" id="c2"></div>
@@ -85,11 +91,12 @@
             <button id="mCluster" type="button">CLUSTERS</button>
           </div>
           <div class="seg">
-            <button class="stim" data-s="recall" type="button">⚡ RECALL</button>
-            <button class="stim" data-s="save" type="button">⚡ SAVE</button>
-            <button class="stim" data-s="ingest" type="button">⚡ INGEST</button>
+            <button class="stim" data-s="recall" type="button">DEMO · RECALL</button>
+            <button class="stim" data-s="save" type="button">DEMO · SAVE</button>
+            <button class="stim" data-s="ingest" type="button">DEMO · INGEST</button>
           </div>
           <button class="tgl on" id="tLive" type="button"><i></i>live</button>
+          <button class="tgl on" id="tMotion" type="button"><i></i>motion</button>
           <button class="tgl on" id="tRot" type="button"><i></i>rotate</button>
           <button class="tgl" id="tSnd" type="button"><i></i>sound</button>
           <label id="visCtl"><span>synapses</span><input id="visSlider" type="range" min="30" max="420" value="160"></label>

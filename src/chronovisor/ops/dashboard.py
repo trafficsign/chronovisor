@@ -44,6 +44,7 @@ from chronovisor.ops import runtime_status
 from chronovisor.ops.convergence import is_human_required_result
 from chronovisor.ops.cortex import (
     CortexEventCursor,
+    build_cortex_field_projection,
     build_cortex_graph,
     websocket_accept,
     websocket_text_frame,
@@ -3061,6 +3062,10 @@ def _recall_snapshot(limit: int = 400) -> dict[str, Any]:
             "history": calibration_history,
             "last_applied": calibration_history[-1] if calibration_history else None,
         },
+        "field": build_cortex_field_projection(
+            CHRONOVISOR_ROOT,
+            event_limit=128,
+        ),
         "paths": {
             "recall_log": str(recall_dir / "recall-log.jsonl"),
             "pull_log": str(recall_dir / "pull-log.jsonl"),
@@ -4417,7 +4422,17 @@ class DashboardHandler(BaseHTTPRequestHandler):
             build_cortex_graph(CHRONOVISOR_ROOT, commit=commit),
         )
 
-    def _cortex_events_response(self) -> None:
+    def _cortex_field_response(self, query: str) -> None:
+        params = dict(parse_qsl(query, keep_blank_values=False))
+        _json_response(
+            self,
+            build_cortex_field_projection(
+                CHRONOVISOR_ROOT,
+                session_hash=str(params.get("session") or ""),
+            ),
+        )
+
+    def _cortex_events_response(self, query: str) -> None:
         upgrade = self.headers.get("Upgrade", "").casefold()
         connection = {
             item.strip().casefold()
@@ -4445,6 +4460,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
             recall_log=recall_runtime.RECALL_LOG_FILE,
             pull_log=recall_runtime.RECALL_PULL_LOG_FILE,
             activity_log=LOG_FILE,
+            field_session=str(
+                dict(parse_qsl(query, keep_blank_values=False)).get("session")
+                or ""
+            ),
         )
         last_heartbeat = 0.0
         try:
@@ -4566,8 +4585,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 )
             elif path == "/api/cortex/graph":
                 self._cortex_graph_response()
+            elif path == "/api/cortex/field":
+                self._cortex_field_response(parsed.query)
             elif path == "/api/cortex/events":
-                self._cortex_events_response()
+                self._cortex_events_response(parsed.query)
             elif path == "/api/model-status":
                 snapshot = _cached_snapshot(allow_stale=True)
                 _json_response(

@@ -2146,6 +2146,60 @@ canvas {
   grid-template-columns: repeat(4, minmax(0, 1fr));
 }
 
+.recall-field-summary {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 5px 12px;
+  align-items: center;
+  margin-top: 10px;
+  padding: 10px 12px;
+  overflow: hidden;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  text-decoration: none;
+  background: linear-gradient(135deg, rgba(155, 124, 255, 0.08), rgba(255, 216, 77, 0.025));
+  border: 1px solid rgba(155, 124, 255, 0.22);
+  border-radius: var(--radius-sm);
+}
+
+.recall-field-summary > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.recall-field-summary > span:nth-child(2),
+.recall-field-summary > span:nth-child(3) {
+  grid-column: 1;
+}
+
+.recall-field-summary > span:last-child {
+  grid-row: 1 / span 3;
+  grid-column: 2;
+  color: #b8a7ff;
+}
+
+.recall-field-summary:hover {
+  border-color: rgba(255, 216, 77, 0.42);
+}
+
+.recall-field-state {
+  color: #b8a7ff;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+
+.recall-field-summary.stale .recall-field-state {
+  color: #ffd84d;
+}
+
+.recall-field-summary.fault .recall-field-state,
+.recall-field-summary.offline .recall-field-state {
+  color: #ff6a75;
+}
+
 .recall-meta {
   margin-top: 10px;
   padding: 8px 12px;

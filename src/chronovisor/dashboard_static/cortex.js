@@ -4,9 +4,19 @@
   const STEEL = "#7d92b5";
   const FIRE = "#ffb454";
   const FIRE_HOT = "#fff3dd";
+  const ELECTRIC = "#ffd84d";
+  const VIOLET = "#9b7cff";
+  const COMMIT = "#45d49b";
+  const INHIBIT = "#54b9ff";
+  const FAULT = "#ff5d68";
   const RGB_STEEL = hexRgb(STEEL);
   const RGB_FIRE = hexRgb(FIRE);
   const RGB_HOT = hexRgb(FIRE_HOT);
+  const RGB_ELECTRIC = hexRgb(ELECTRIC);
+  const RGB_VIOLET = hexRgb(VIOLET);
+  const RGB_COMMIT = hexRgb(COMMIT);
+  const RGB_INHIBIT = hexRgb(INHIBIT);
+  const RGB_FAULT = hexRgb(FAULT);
   const TYPE_OFF = new Set([2]);
 
   let data;
@@ -32,6 +42,7 @@
   const packageOff = new Set();
   let mode = "organic";
   let liveEventsEnabled = true;
+  let motionEnabled = true;
   let autoRotate = true;
   let soundOn = false;
   let edgeVisibility = 1.6;
@@ -55,8 +66,24 @@
   let lastSound = 0;
   let eventSocket = null;
   let eventReconnect = null;
+  let eventSocketGeneration = 0;
+  let sessionRequest = 0;
+  const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+  const fieldState = window.CortexField.createState();
+  const cortexMetrics = {
+    spread: [],
+    frameDurations: [],
+    maxPulseQueue: 0,
+  };
+  window.chronovisorCortexMetrics = () => ({
+    spread: cortexMetrics.spread.map((row) => ({ ...row })),
+    frameDurations: cortexMetrics.frameDurations.slice(-240),
+    maxPulseQueue: cortexMetrics.maxPulseQueue,
+    pulseQueue: pulses.length,
+  });
 
   const pulses = [];
+  const nodeEffects = [];
   const stars = Array.from({ length: 130 }, () => ({
     x: Math.random(),
     y: Math.random(),
@@ -67,6 +94,11 @@
   const glowFire = makeGlow(RGB_FIRE);
   const glowSteel = makeGlow(RGB_STEEL);
   const glowHot = makeGlow(RGB_HOT);
+  const glowElectric = makeGlow(RGB_ELECTRIC);
+  const glowViolet = makeGlow(RGB_VIOLET);
+  const glowCommit = makeGlow(RGB_COMMIT);
+  const glowInhibit = makeGlow(RGB_INHIBIT);
+  const glowFault = makeGlow(RGB_FAULT);
 
   function hexRgb(hex) {
     return [
@@ -166,8 +198,13 @@
       vy: 0,
       vz: 0,
       potential: 0,
-      refractoryUntil: 0,
       firedAt: -1e9,
+      fieldActivation: 0,
+      fieldComponents: { direct: 0, spread: 0, negative: 0, inhibition: 0 },
+      fieldState: "inactive",
+      certificateId: "",
+      reasonCode: "",
+      arrivedAt: -1e9,
       screenX: 0,
       screenY: 0,
       screenScale: 0,
@@ -177,6 +214,8 @@
       source: row[0],
       target: row[1],
       kind: row[2] || 0,
+      edgeType: row[3] || "wikilink",
+      eventOnly: false,
     }));
     nodeCount = nodes.length;
     neighbors = Array.from({ length: nodeCount }, () => new Set());
@@ -409,55 +448,6 @@
     source.start();
   }
 
-  function fire(index, depth, budget, micro = false) {
-    const node = nodes[index];
-    const now = performance.now();
-    if (!node || nodeState[index] === 0 || now < node.refractoryUntil) return;
-    node.refractoryUntil = now + 360 + Math.random() * 340;
-    node.potential = 1;
-    node.firedAt = now;
-    spikes += 1;
-    if (!(spikes & 3)) {
-      document.getElementById("stSp").textContent = spikes.toLocaleString();
-    }
-    crackle(micro ? 0.03 : 0.1 * Math.min(1, node.radius / 7) + 0.04);
-    if (micro || depth >= 8 || budget.remaining <= 0) return;
-
-    const candidates = outgoing[index].filter(
-      (edgeIndex) => edgeState[edgeIndex] > 0,
-    );
-    for (let index = candidates.length - 1; index > 0; index -= 1) {
-      const swapIndex = (Math.random() * (index + 1)) | 0;
-      [candidates[index], candidates[swapIndex]] = [
-        candidates[swapIndex],
-        candidates[index],
-      ];
-    }
-    const probability = Math.pow(0.86, depth);
-    let branches = 0;
-    for (const edgeIndex of candidates) {
-      if (branches >= 4 || budget.remaining <= 0) break;
-      if (Math.random() > probability) continue;
-      const link = links[edgeIndex];
-      const target = nodes[link.target];
-      if (!target || performance.now() < target.refractoryUntil) continue;
-      budget.remaining -= 1;
-      branches += 1;
-      const distance = Math.hypot(
-        target.x - node.x,
-        target.y - node.y,
-        target.z - node.z,
-      );
-      pulses.push({
-        edgeIndex,
-        startedAt: now,
-        duration: Math.max(150, Math.min(560, distance * 2.1)),
-        depth: depth + 1,
-        budget,
-      });
-    }
-  }
-
   function visibleHub() {
     return nodes.reduce(
       (best, node) =>
@@ -484,34 +474,197 @@
   }
 
   function stimulate(name, label = "") {
-    const budget = { remaining: 150 };
-    scenarioNodes(name).forEach((node) => fire(node.index, 0, budget));
+    const roots = scenarioNodes(name);
+    const now = performance.now();
+    roots.forEach((node, rootIndex) => {
+      nodeEffects.push({
+        nodeIndex: node.index,
+        kind: "stimulus",
+        startedAt: now + rootIndex * 35,
+        duration: 520,
+        delta: 0.9,
+        seq: -(rootIndex + 1),
+        demo: true,
+      });
+      const candidates = outgoing[node.index]
+        .filter((edgeIndex) => edgeState[edgeIndex] > 0)
+        .sort((left, right) => left - right)
+        .slice(0, 3);
+      candidates.forEach((edgeIndex, branch) => {
+        pulses.push({
+          edgeIndex,
+          startedAt: now + 120 + branch * 80,
+          duration: 150 + branch * 25,
+          delta: 0.78 - branch * 0.12,
+          seq: -(rootIndex * 10 + branch + 1),
+          edgeType: links[edgeIndex].edgeType,
+          demo: true,
+          paintedAt: 0,
+        });
+      });
+    });
+    trimVisualQueues();
+    cortexMetrics.maxPulseQueue = Math.max(
+      cortexMetrics.maxPulseQueue,
+      pulses.length,
+    );
+    publishCortexMetrics();
     document.getElementById("stSp").textContent = spikes.toLocaleString();
-    flashTicker(label || `⚡ ${name.toUpperCase()} stimulus → cascade`);
+    flashTicker(label || `DEMO/REPLAY · ${name.toUpperCase()} · backend unchanged`);
   }
 
-  function firePageIds(pageIds, kind, label) {
-    const profile = {
-      auto_recall: { depth: 7, budget: 48, micro: false },
-      search: { depth: 8, budget: 0, micro: true },
-      read: { depth: 7, budget: 24, micro: false },
-      used: { depth: 7, budget: 48, micro: false },
-      ingest: { depth: 7, budget: 24, micro: false },
-    }[kind] || { depth: 8, budget: 0, micro: true };
-    const budget = { remaining: profile.budget };
-    let fired = 0;
-    pageIds.forEach((pageId) => {
-      const node = byId.get(pageId);
-      if (!node || nodeState[node.index] === 0) return;
-      fire(node.index, profile.depth, budget, profile.micro);
-      fired += 1;
-    });
-    document.getElementById("stSp").textContent = spikes.toLocaleString();
-    if (!fired) {
-      flashTicker(`◇ ${label} · no mapped page`);
-    } else {
-      flashTicker(`⚡ ${label} · ${fired} neuron${fired === 1 ? "" : "s"}`);
+  function trimVisualQueues() {
+    if (pulses.length > window.CortexField.MAX_EVENTS) {
+      pulses.splice(0, pulses.length - window.CortexField.MAX_EVENTS);
     }
+    if (nodeEffects.length > window.CortexField.MAX_EVENTS) {
+      nodeEffects.splice(0, nodeEffects.length - window.CortexField.MAX_EVENTS);
+    }
+  }
+
+  function publishCortexMetrics() {
+    const target = document.getElementById("fieldAria");
+    if (!target) return;
+    const painted = cortexMetrics.spread.filter(
+      (row) => Number.isFinite(row.paintedAt),
+    );
+    const latencies = painted
+      .map((row) => row.paintedAt - row.receivedAt)
+      .sort((left, right) => left - right);
+    const p95 = latencies.length
+      ? latencies[Math.min(latencies.length - 1, Math.round((latencies.length - 1) * 0.95))]
+      : 0;
+    const frames = cortexMetrics.frameDurations
+      .filter((value) => value > 0)
+      .slice(-120)
+      .sort((left, right) => left - right);
+    const frameP95 = frames.length
+      ? frames[Math.min(frames.length - 1, Math.round((frames.length - 1) * 0.95))]
+      : 0;
+    const frameMean = frames.length
+      ? frames.reduce((total, value) => total + value, 0) / frames.length
+      : 0;
+    target.dataset.spreadReceived = String(cortexMetrics.spread.length);
+    target.dataset.spreadPainted = String(painted.length);
+    target.dataset.paintP95Ms = p95.toFixed(1);
+    target.dataset.maxPulseQueue = String(cortexMetrics.maxPulseQueue);
+    target.dataset.frameP95Ms = frameP95.toFixed(1);
+    target.dataset.fps = frameMean ? (1000 / frameMean).toFixed(1) : "0.0";
+  }
+
+  function ensureActualEdge(event) {
+    const source = byId.get(event.source_page_id);
+    const target = byId.get(event.target_page_id);
+    if (!source || !target) return -1;
+    let edgeIndex = links.findIndex(
+      (link) => link.source === source.index && link.target === target.index,
+    );
+    if (edgeIndex >= 0) return edgeIndex;
+    edgeIndex = links.length;
+    links.push({
+      source: source.index,
+      target: target.index,
+      kind: 1,
+      edgeType: event.edge_type || "field",
+      eventOnly: true,
+    });
+    neighbors[source.index].add(target.index);
+    neighbors[target.index].add(source.index);
+    outgoing[source.index].push(edgeIndex);
+    const expanded = new Uint8Array(links.length);
+    expanded.set(edgeState);
+    expanded[edgeIndex] = 2;
+    edgeState = expanded;
+    stateDirty = true;
+    return edgeIndex;
+  }
+
+  function syncFieldNodes() {
+    nodes.forEach((node) => {
+      const field = fieldState.nodes.get(node.id);
+      node.fieldActivation = field?.activation || 0;
+      node.fieldComponents = field?.components || {
+        direct: 0,
+        spread: 0,
+        negative: 0,
+        inhibition: 0,
+      };
+      node.fieldState = field?.state || "inactive";
+      node.certificateId = field?.certificateId || "";
+      node.reasonCode = field?.reasonCode || "";
+    });
+  }
+
+  function effectNode(event) {
+    const pageId = window.CortexField.eventPageId(event);
+    return byId.get(pageId);
+  }
+
+  function visualizeFieldEvent(event) {
+    const now = performance.now();
+    const node = effectNode(event);
+    if (event.kind === "spread") {
+      const edgeIndex = ensureActualEdge(event);
+      if (edgeIndex < 0) {
+        flashTicker(`◇ seq ${event.seq} · unmapped ${event.source_page_id}→${event.target_page_id}`);
+        return;
+      }
+      const strength = Math.max(0, Math.min(1, Math.abs(event.delta)));
+      pulses.push({
+        edgeIndex,
+        startedAt: now,
+        duration: 250 - strength * 130,
+        delta: strength,
+        seq: event.seq,
+        edgeType: event.edge_type || "field",
+        demo: false,
+        paintedAt: 0,
+      });
+      cortexMetrics.spread.push({
+        seq: event.seq,
+        source: event.source_page_id,
+        target: event.target_page_id,
+        edge: event.edge_type || "field",
+        delta: strength,
+        receivedAt: now,
+        paintedAt: null,
+        arrivalAt: null,
+      });
+      if (cortexMetrics.spread.length > window.CortexField.MAX_EVENTS) {
+        cortexMetrics.spread.shift();
+      }
+      cortexMetrics.maxPulseQueue = Math.max(
+        cortexMetrics.maxPulseQueue,
+        pulses.length,
+      );
+      publishCortexMetrics();
+      spikes += 1;
+      crackle(0.035 + strength * 0.08);
+    } else if (node) {
+      node.potential = Math.max(node.potential, Math.abs(event.delta));
+      node.firedAt = now;
+      nodeEffects.push({
+        nodeIndex: node.index,
+        kind: event.kind,
+        startedAt: now,
+        duration: event.kind === "stimulus" ? 620 : 720,
+        delta: Math.abs(event.delta),
+        seq: event.seq,
+        reasonCode: event.reason_code,
+        demo: false,
+      });
+      spikes += 1;
+    } else if (event.kind === "fault") {
+      fieldState.fault = event.reason_code || "field fault";
+    }
+    trimVisualQueues();
+    document.getElementById("stSp").textContent = spikes.toLocaleString();
+    const route = event.kind === "spread"
+      ? `${event.source_page_id} → ${event.target_page_id}`
+      : window.CortexField.eventPageId(event) || "field";
+    flashTicker(`${event.kind.toUpperCase()} · seq ${event.seq} · ${route}`);
+    document.getElementById("fieldAria").textContent =
+      `${event.kind}, sequence ${event.seq}, ${route}, delta ${event.delta.toFixed(3)}`;
   }
 
   function drawEdges() {
@@ -597,46 +750,136 @@
     for (let index = pulses.length - 1; index >= 0; index -= 1) {
       const pulse = pulses[index];
       const link = links[pulse.edgeIndex];
+      if (!link) {
+        pulses.splice(index, 1);
+        continue;
+      }
       const source = nodes[link.source];
       const target = nodes[link.target];
-      const progress = (time - pulse.startedAt) / pulse.duration;
+      const staticMotion = reducedMotion.matches || !motionEnabled;
+      const rawProgress = (time - pulse.startedAt) / pulse.duration;
+      const progress = staticMotion ? 0.72 : rawProgress;
+      if (rawProgress < 0) continue;
       if (progress >= 1) {
         pulses.splice(index, 1);
-        fire(link.target, pulse.depth, pulse.budget);
+        target.arrivedAt = time;
+        target.potential = Math.max(target.potential, pulse.delta);
+        nodeEffects.push({
+          nodeIndex: target.index,
+          kind: "arrival",
+          startedAt: time,
+          duration: 620,
+          delta: pulse.delta,
+          seq: pulse.seq,
+          demo: pulse.demo,
+        });
+        const metric = cortexMetrics.spread.find((row) => row.seq === pulse.seq);
+        if (metric) metric.arrivalAt = time;
         continue;
       }
       if (source.viewDepth > 9e8 || target.viewDepth > 9e8) continue;
-      const tailProgress = Math.max(0, progress - 0.09);
-      const head = projectPoint(
-        source.x + (target.x - source.x) * progress,
-        source.y + (target.y - source.y) * progress,
-        source.z + (target.z - source.z) * progress,
+      const edgeId = `${source.id}>${target.id}:${pulse.edgeType}`;
+      const tailLength = 0.08 + deterministicUnit(edgeId, pulse.seq) * 0.07;
+      const tailProgress = Math.max(0, progress - tailLength);
+      const screenSource = { x: source.screenX, y: source.screenY };
+      const screenTarget = { x: target.screenX, y: target.screenY };
+      const dx = screenTarget.x - screenSource.x;
+      const dy = screenTarget.y - screenSource.y;
+      const length = Math.hypot(dx, dy) || 1;
+      const normalX = -dy / length;
+      const normalY = dx / length;
+      const points = [];
+      const pointCount = 5;
+      for (let pointIndex = 0; pointIndex < pointCount; pointIndex += 1) {
+        const unit = pointIndex / (pointCount - 1);
+        const edgeProgress = tailProgress + (progress - tailProgress) * unit;
+        const endpoint = pointIndex === 0 || pointIndex === pointCount - 1;
+        const jitter = endpoint
+          ? 0
+          : (deterministicUnit(edgeId, pulse.seq * 31 + pointIndex) - 0.5)
+            * (2.5 + pulse.delta * 5.5);
+        points.push({
+          x: screenSource.x + dx * edgeProgress + normalX * jitter,
+          y: screenSource.y + dy * edgeProgress + normalY * jitter,
+        });
+      }
+      const head = points[points.length - 1];
+      const depthFade = fog((source.viewDepth + target.viewDepth) / 2);
+      context.lineCap = "round";
+      context.lineJoin = "round";
+      context.beginPath();
+      points.forEach((point, pointIndex) => {
+        if (pointIndex) context.lineTo(point.x, point.y);
+        else context.moveTo(point.x, point.y);
+      });
+      context.strokeStyle = rgba(
+        RGB_ELECTRIC,
+        (0.38 + pulse.delta * 0.5) * depthFade,
       );
-      const tail = projectPoint(
-        source.x + (target.x - source.x) * tailProgress,
-        source.y + (target.y - source.y) * tailProgress,
-        source.z + (target.z - source.z) * tailProgress,
+      context.lineWidth = 2.1 + pulse.delta * 3.4;
+      context.stroke();
+      context.strokeStyle = rgba(
+        RGB_HOT,
+        (0.7 + pulse.delta * 0.3) * depthFade,
       );
-      if (!head) continue;
-      const amplitude = Math.sin(Math.PI * progress) * fog(head.viewDepth);
-      if (tail) {
-        context.strokeStyle = rgba(RGB_FIRE, 0.55 * amplitude);
-        context.lineWidth = 1.4;
+      context.lineWidth = 0.7 + pulse.delta * 1.25;
+      context.stroke();
+      const branchLength = 4 + pulse.delta * 8;
+      const branchSign = deterministicUnit(edgeId, pulse.seq + 991) > 0.5 ? 1 : -1;
+      context.strokeStyle = rgba(RGB_ELECTRIC, 0.45 + pulse.delta * 0.35);
+      context.lineWidth = 0.7 + pulse.delta * 0.5;
+      context.beginPath();
+      context.moveTo(head.x, head.y);
+      context.lineTo(
+        head.x - (dx / length) * branchLength + normalX * branchLength * branchSign,
+        head.y - (dy / length) * branchLength + normalY * branchLength * branchSign,
+      );
+      context.stroke();
+      if (staticMotion) {
+        const arrowLength = 7 + pulse.delta * 5;
+        context.strokeStyle = rgba(RGB_ELECTRIC, 0.75 + pulse.delta * 0.25);
+        context.lineWidth = 1.2 + pulse.delta;
         context.beginPath();
-        context.moveTo(tail.x, tail.y);
-        context.lineTo(head.x, head.y);
+        context.moveTo(head.x, head.y);
+        context.lineTo(
+          head.x - (dx / length) * arrowLength + normalX * arrowLength * 0.55,
+          head.y - (dy / length) * arrowLength + normalY * arrowLength * 0.55,
+        );
+        context.moveTo(head.x, head.y);
+        context.lineTo(
+          head.x - (dx / length) * arrowLength - normalX * arrowLength * 0.55,
+          head.y - (dy / length) * arrowLength - normalY * arrowLength * 0.55,
+        );
         context.stroke();
       }
-      const glowSize = (10 + 8 * amplitude) * head.scale * 1.6;
-      context.globalAlpha = 0.85 * amplitude;
+      const glowSize = 10 + 12 * pulse.delta;
+      context.globalAlpha = 0.7 + pulse.delta * 0.3;
       context.drawImage(
-        glowFire,
+        glowElectric,
         head.x - glowSize / 2,
         head.y - glowSize / 2,
         glowSize,
         glowSize,
       );
       context.globalAlpha = 1;
+      if (!pulse.paintedAt) pulse.paintedAt = time;
+      const metric = cortexMetrics.spread.find((row) => row.seq === pulse.seq);
+      if (metric && metric.paintedAt === null) metric.paintedAt = time;
+      publishCortexMetrics();
+      if (staticMotion && time - pulse.startedAt >= 900) {
+        pulses.splice(index, 1);
+        target.arrivedAt = time;
+        nodeEffects.push({
+          nodeIndex: target.index,
+          kind: "arrival",
+          startedAt: time,
+          duration: 850,
+          delta: pulse.delta,
+          seq: pulse.seq,
+          demo: pulse.demo,
+        });
+        if (metric) metric.arrivalAt = time;
+      }
     }
   }
 
@@ -662,6 +905,18 @@
       const radius = Math.max(0.75, node.radius * node.screenScale);
       const dim = state === 1 ? 0.28 : 1;
       const potential = node.potential;
+      const fieldActivation = Math.max(0, Math.min(1, node.fieldActivation));
+      if (fieldActivation > 0.01) {
+        const haloSize = radius * (4.8 + fieldActivation * 8);
+        context.globalAlpha = (0.12 + fieldActivation * 0.4) * depthFade * dim;
+        context.drawImage(
+          glowViolet,
+          node.screenX - haloSize / 2,
+          node.screenY - haloSize / 2,
+          haloSize,
+          haloSize,
+        );
+      }
       if (potential > 0.03) {
         const glowSize = radius * (4 + 10 * potential);
         context.globalAlpha = Math.min(1, potential * 1.15) * depthFade * dim;
@@ -743,6 +998,70 @@
     });
   }
 
+  function drawNodeEffects(time) {
+    context.globalCompositeOperation = "lighter";
+    for (let index = nodeEffects.length - 1; index >= 0; index -= 1) {
+      const effect = nodeEffects[index];
+      const node = nodes[effect.nodeIndex];
+      const progress = (time - effect.startedAt) / effect.duration;
+      if (!node || progress >= 1) {
+        nodeEffects.splice(index, 1);
+        continue;
+      }
+      if (progress < 0 || node.viewDepth > 9e8) continue;
+      const radius = Math.max(3, node.radius * node.screenScale);
+      const fade = 1 - progress;
+      if (effect.kind === "stimulus") {
+        [0, 0.24].forEach((delay) => {
+          const phase = Math.max(0, Math.min(1, (progress - delay) / 0.62));
+          if (!phase || phase >= 1) return;
+          context.strokeStyle = rgba(RGB_FIRE, (1 - phase) * 0.9);
+          context.lineWidth = 1.2 + effect.delta * 2;
+          context.beginPath();
+          context.arc(node.screenX, node.screenY, radius + phase * 24, 0, Math.PI * 2);
+          context.stroke();
+        });
+        context.globalAlpha = fade;
+        context.drawImage(glowFire, node.screenX - 18, node.screenY - 18, 36, 36);
+      } else if (effect.kind === "inhibit" || effect.kind === "reject") {
+        context.strokeStyle = rgba(RGB_INHIBIT, 0.35 + fade * 0.65);
+        context.lineWidth = 1.4 + effect.delta * 2;
+        context.beginPath();
+        context.arc(node.screenX, node.screenY, radius + (1 - progress) * 28, 0, Math.PI * 2);
+        context.stroke();
+        context.fillStyle = rgba(RGB_INHIBIT, fade);
+        context.font = `700 ${Math.max(9, radius * 1.2)}px ${getComputedStyle(document.body).getPropertyValue("--mono")}`;
+        context.textAlign = "center";
+        context.fillText("−", node.screenX, node.screenY + radius * 0.35);
+      } else if (effect.kind === "commit_queued" || effect.kind === "commit_applied") {
+        context.strokeStyle = rgba(RGB_COMMIT, 0.35 + fade * 0.65);
+        context.lineWidth = 1.5 + effect.delta * 1.6;
+        context.beginPath();
+        context.arc(node.screenX, node.screenY, radius + progress * 18, 0, Math.PI * 2);
+        context.stroke();
+        context.fillStyle = rgba(RGB_COMMIT, fade);
+        context.font = `700 ${Math.max(8, radius)}px ${getComputedStyle(document.body).getPropertyValue("--mono")}`;
+        context.textAlign = "center";
+        context.fillText("✓", node.screenX, node.screenY + radius * 0.35);
+      } else if (effect.kind === "fault") {
+        context.globalAlpha = fade;
+        context.drawImage(glowFault, node.screenX - 24, node.screenY - 24, 48, 48);
+        context.fillStyle = rgba(RGB_FAULT, fade);
+        context.fillText("×", node.screenX, node.screenY);
+      } else if (effect.kind === "arrival") {
+        context.strokeStyle = rgba(RGB_ELECTRIC, fade * 0.95);
+        context.lineWidth = 1 + effect.delta * 2;
+        context.beginPath();
+        context.arc(node.screenX, node.screenY, radius + progress * 20, 0, Math.PI * 2);
+        context.stroke();
+        context.globalAlpha = fade;
+        context.drawImage(glowElectric, node.screenX - 20, node.screenY - 20, 40, 40);
+      }
+      context.globalAlpha = 1;
+    }
+    context.globalCompositeOperation = "source-over";
+  }
+
   function drawLabels() {
     context.font = `10.5px ${getComputedStyle(document.body).getPropertyValue("--mono")}`;
     context.textAlign = "center";
@@ -751,11 +1070,13 @@
       .filter((node) => {
         const state = nodeState[node.index];
         const hot = node.potential > 0.5;
+        const fieldActive = node.fieldActivation > 0.05;
         return (
           state >= 2
           && node.viewDepth <= 9e8
           && (state === 3
             || hot
+            || fieldActive
             || (labelHubs.has(node.index)
               && camera.distance < 1500
               && node.viewDepth < camera.distance))
@@ -765,16 +1086,19 @@
         const leftPriority =
           (left.index === selected ? 100000 : 0)
           + left.potential * 1000
+          + left.fieldActivation * 900
           + left.fanIn;
         const rightPriority =
           (right.index === selected ? 100000 : 0)
           + right.potential * 1000
+          + right.fieldActivation * 900
           + right.fanIn;
         return rightPriority - leftPriority;
       });
     candidates.forEach((node) => {
       const state = nodeState[node.index];
       const hot = node.potential > 0.5;
+      const fieldActive = node.fieldActivation > 0.05;
       const y = node.screenY - node.radius * node.screenScale - 7;
       if (
         node.screenX < -40
@@ -806,6 +1130,8 @@
       context.fillStyle =
         hot || state === 3
           ? rgba(RGB_FIRE, Math.max(0.5, node.potential) * depthFade + 0.2)
+          : fieldActive
+            ? rgba(RGB_VIOLET, (0.55 + node.fieldActivation * 0.4) * depthFade)
           : rgba([160, 178, 210], 0.8 * depthFade);
       context.fillText(node.name, node.screenX, y);
     });
@@ -826,6 +1152,7 @@
     drawEdges();
     drawPulses(time);
     drawNodes(time);
+    drawNodeEffects(time);
     drawLabels();
   }
 
@@ -833,6 +1160,10 @@
   let simulationAccumulator = 0;
   function frame(now) {
     const delta = Math.min(60, now - previousTime);
+    cortexMetrics.frameDurations.push(delta);
+    if (cortexMetrics.frameDurations.length > 240) {
+      cortexMetrics.frameDurations.shift();
+    }
     previousTime = now;
     simulationAccumulator += delta;
     while (simulationAccumulator > 15) {
@@ -887,6 +1218,7 @@
     selected = index;
     stateDirty = true;
     renderPanel();
+    document.getElementById("panelBody").scrollTop = 0;
     renderTreeSelection();
     if (index >= 0) focusNode(index);
   }
@@ -938,7 +1270,6 @@
       if (!moved) {
         const index = pick(event.offsetX, event.offsetY);
         select(index);
-        if (index >= 0) fire(index, 0, { remaining: 90 });
       }
       downPoint = null;
       dragging = false;
@@ -1049,6 +1380,108 @@
     element.scrollIntoView({ block: "nearest" });
   }
 
+  function fieldValue(value, digits = 3) {
+    return Number.isFinite(Number(value)) ? Number(value).toFixed(digits) : "—";
+  }
+
+  function fieldStateHtml() {
+    const summary = fieldState.summary || {};
+    const latency = summary.latency_ms || {};
+    const agreement = summary.teacher_agreement !== null
+      && Number.isFinite(Number(summary.teacher_agreement))
+      ? `${(Number(summary.teacher_agreement) * 100).toFixed(1)}%`
+      : "collecting";
+    const active = window.CortexField.activeNodes(fieldState, 14);
+    const trace = [...fieldState.events].slice(-7).reverse();
+    const statusLabel = fieldState.fault
+      ? `FAULT · ${fieldState.fault}`
+      : fieldState.stale
+        ? "STALE"
+        : fieldState.status.toUpperCase();
+    return `
+      <div class="sec fieldStateSec"><h3>FIELD STATE</h3>
+        <div class="fieldStatus ${escapeHtml(fieldState.status)}">
+          <span class="stateGlyph" aria-hidden="true">${fieldState.fault ? "×" : fieldState.stale ? "◷" : "●"}</span>
+          <b>${escapeHtml(statusLabel)}</b>
+          <span>${escapeHtml(fieldState.mode)} · ${escapeHtml(fieldState.source)}</span>
+        </div>
+        <div class="fieldSession">${escapeHtml(fieldState.sessionHash || "no session")}</div>
+        <div class="fieldMetrics">
+          <div><span>active</span><b>${summary.active || 0}</b></div>
+          <div><span>candidate</span><b>${summary.candidate || 0}</b></div>
+          <div><span>commit</span><b>${summary.commit || 0}</b></div>
+          <div><span>reject</span><b>${summary.reject || 0}</b></div>
+          <div><span>agreement</span><b>${agreement}</b></div>
+          <div><span>field p95</span><b>${Number.isFinite(Number(latency.p95)) ? `${Math.round(latency.p95)}ms` : "—"}</b></div>
+        </div>
+      </div>
+      <div class="sec"><h3>DECISION TRACE · SEQ ${fieldState.seq}</h3>
+        <div class="decisionTrace">
+          ${trace.length
+            ? trace.map((event) => {
+                const route = event.kind === "spread"
+                  ? `${event.source_page_id} → ${event.target_page_id}`
+                  : window.CortexField.eventPageId(event) || "field";
+                return `<div class="traceRow ${escapeHtml(event.kind)}">
+                  <span class="traceGlyph" aria-hidden="true">${event.kind === "spread" ? "↝" : event.kind.includes("commit") ? "✓" : ["inhibit", "reject"].includes(event.kind) ? "−" : event.kind === "fault" ? "×" : "●"}</span>
+                  <b>${escapeHtml(event.kind)}</b>
+                  <span title="${escapeHtml(route)}">${escapeHtml(route)}</span>
+                  <small>#${event.seq} · Δ${fieldValue(event.delta)}</small>
+                </div>`;
+              }).join("")
+            : '<div class="ghost">No Field events for this session.</div>'}
+        </div>
+      </div>
+      <div class="sec"><h3>ACTIVE NODES · ${active.length}</h3>
+        <table class="activeTable">
+          <thead><tr><th>state</th><th>page</th><th>activation</th></tr></thead>
+          <tbody>${active.length
+            ? active.map((row) => {
+                const node = byId.get(row.pageId);
+                return `<tr>
+                  <td><span class="stateText">${escapeHtml(row.state)}</span></td>
+                  <td>${node ? `<button type="button" data-index="${node.index}">${escapeHtml(row.pageId)}</button>` : escapeHtml(row.pageId)}</td>
+                  <td>${fieldValue(row.activation)}</td>
+                </tr>`;
+              }).join("")
+            : '<tr><td colspan="3">No active nodes.</td></tr>'}</tbody>
+        </table>
+      </div>
+      <div class="sec"><h3>LEGEND</h3>
+        <div class="fieldLegend">
+          <span class="orange">◎ stimulus</span>
+          <span class="yellow">↝ spread</span>
+          <span class="violet">◉ active</span>
+          <span class="green">✓ commit</span>
+          <span class="blue">− inhibit</span>
+          <span class="red">× fault</span>
+        </div>
+      </div>`;
+  }
+
+  function selectedFieldHtml(node) {
+    const state = fieldState.nodes.get(node.id);
+    const components = state?.components || {
+      direct: 0,
+      spread: 0,
+      negative: 0,
+      inhibition: 0,
+    };
+    return `
+      <div class="sec"><h3>ACTIVATION</h3>
+        <div class="activationTotal">${fieldValue(state?.activation || 0)}</div>
+        <div class="componentGrid">
+          <div><span>direct</span><b>${fieldValue(components.direct)}</b></div>
+          <div><span>spread</span><b>${fieldValue(components.spread)}</b></div>
+          <div><span>negative</span><b>${fieldValue(components.negative)}</b></div>
+          <div><span>inhibition</span><b>${fieldValue(components.inhibition)}</b></div>
+        </div>
+        <div class="mrow"><span>state</span><b>${escapeHtml(state?.state || "inactive")}</b></div>
+        <div class="mrow"><span>reason</span><b>${escapeHtml(state?.reasonCode || "—")}</b></div>
+        <div class="mrow"><span>certificate</span><b title="${escapeHtml(state?.certificateId || "")}">${escapeHtml(state?.certificateId || "—")}</b></div>
+      </div>`;
+  }
+
   function overviewHtml() {
     const staticLinks = data.meta.static || 0;
     const deferredLinks = data.meta.deferred || 0;
@@ -1068,7 +1501,7 @@
       1,
       ...loadPackages.map((packageName) => packageStats[packageName].lines),
     );
-    return `
+    return `${fieldStateHtml()}
       <div class="sec"><h3>BINDING INTEGRITY</h3>
         <div id="gaugeWrap"><canvas id="gauge" width="236" height="236"></canvas>
           <div class="gLegend">
@@ -1106,7 +1539,7 @@
         <div class="mrow"><span>⚡ RECALL</span><b>read / search → pages</b></div>
         <div class="mrow"><span>⚡ SAVE</span><b>host records → raw</b></div>
         <div class="mrow"><span>⚡ INGEST</span><b>drain → pages</b></div>
-        <div class="ghost">クリックしたニューロンも発火し、wikilink沿いにスパイクが伝播します。</div>
+        <div class="ghost">Liveは実Field eventのみ。DEMO/REPLAYは表示専用でbackendへ書きません。</div>
       </div>`;
   }
 
@@ -1144,6 +1577,8 @@
           ${node.updated ? `<div class="mrow"><span>updated</span><b>${escapeHtml(node.updated)}</b></div>` : ""}
         </div>
       </div>
+      ${selectedFieldHtml(node)}
+      ${fieldStateHtml()}
       ${node.tags.length ? `<div class="sec"><h3>TAGS · ${node.tags.length}</h3><div class="tagChips">${node.tags.map((tag) => `<span>${escapeHtml(tag)}</span>`).join("")}</div></div>` : ""}
       <div class="sec"><h3>LINKS TO · ${dependsOn.length}</h3>
         <div class="depChips">${chips(dependsOn)}</div>
@@ -1247,6 +1682,15 @@
       const target = event.target.closest("[data-index]");
       if (target) select(Number(target.dataset.index));
     });
+    panel.addEventListener("keydown", (event) => {
+      if (!["ArrowDown", "ArrowUp"].includes(event.key)) return;
+      const buttons = [...panel.querySelectorAll(".activeTable button")];
+      const current = buttons.indexOf(document.activeElement);
+      if (current < 0 || !buttons.length) return;
+      event.preventDefault();
+      const offset = event.key === "ArrowDown" ? 1 : -1;
+      buttons[(current + offset + buttons.length) % buttons.length].focus();
+    });
 
     const search = document.getElementById("search");
     const searchHits = document.getElementById("searchHits");
@@ -1305,6 +1749,21 @@
     liveToggle.addEventListener("click", () => {
       liveEventsEnabled = !liveEventsEnabled;
       liveToggle.classList.toggle("on", liveEventsEnabled);
+      flashTicker(
+        liveEventsEnabled
+          ? "LIVE PAINT resumed · Field state stayed current"
+          : "LIVE PAINT paused · Field state still updating",
+      );
+    });
+    const motionToggle = document.getElementById("tMotion");
+    motionToggle.addEventListener("click", () => {
+      motionEnabled = !motionEnabled;
+      motionToggle.classList.toggle("on", motionEnabled);
+      flashTicker(
+        motionEnabled
+          ? "motion enabled"
+          : "motion paused · static edge arrows remain",
+      );
     });
     const rotateToggle = document.getElementById("tRot");
     rotateToggle.addEventListener("click", () => {
@@ -1336,6 +1795,32 @@
     document.getElementById("zFit").addEventListener("click", () => {
       select(-1);
       fitView();
+    });
+    document.getElementById("sessionSelect").addEventListener("change", (event) => {
+      loadField(event.target.value);
+    });
+    stage.addEventListener("keydown", (event) => {
+      if (!["ArrowDown", "ArrowUp", "ArrowLeft", "ArrowRight"].includes(event.key)) {
+        return;
+      }
+      const active = window.CortexField.activeNodes(fieldState, 30)
+        .map((row) => byId.get(row.pageId))
+        .filter(Boolean);
+      if (!active.length) return;
+      event.preventDefault();
+      const current = active.findIndex((node) => node.index === selected);
+      const backwards = event.key === "ArrowUp" || event.key === "ArrowLeft";
+      const next = current < 0
+        ? 0
+        : (current + (backwards ? -1 : 1) + active.length) % active.length;
+      select(active[next].index);
+    });
+    reducedMotion.addEventListener("change", () => {
+      flashTicker(
+        reducedMotion.matches
+          ? "reduced motion · static electric arrows"
+          : "electric arc motion restored",
+      );
     });
   }
 
@@ -1386,11 +1871,11 @@
       (left, right) => right.fanIn - left.fanIn,
     )[0];
     facts = [
-      "記憶皮質オンライン — wikilink沿いにスパイク伝播中",
+      "Stateful Recall Field — 実eventだけを可視化",
       `${topHub?.id || "—"} fan-in ${topHub?.fanIn || 0} — 最深部のハブニューロン`,
       `${nodeCount.toLocaleString()} neurons / ${((data.meta.static || 0) + (data.meta.deferred || 0)).toLocaleString()} synapses`,
-      "⚡ボタンで recall / save / ingest 経路を刺激",
-      "ニューロンをクリックすると発火して連鎖します",
+      "DEMOボタンは表示専用 — backend state / metricsは不変",
+      "orange=stimulus · yellow=spread · violet=activation",
       "ドラッグで回転 · ホイールでズーム · ⌘K で検索",
       `総行数 ${(data.meta.totalLines || 0).toLocaleString()} lines @ ${data.meta.commit || "local"}`,
     ];
@@ -1403,19 +1888,90 @@
   function setEventStatus(online) {
     const badge = document.getElementById("cortexStatus");
     const live = document.getElementById("eventLive");
-    badge.classList.toggle("offline", !online);
-    live.classList.toggle("offline", !online);
-    live.textContent = online ? "● LIVE" : "○ LINKING";
+    const fault = Boolean(fieldState.fault);
+    const stale = fieldState.stale && fieldState.sessionHash;
+    badge.classList.toggle("offline", !online || fault || stale);
+    badge.classList.toggle("fault", fault);
+    live.classList.toggle("offline", !online || fault || stale);
+    live.classList.toggle("fault", fault);
+    if (fault) {
+      badge.lastChild.textContent = "FIELD FAULT";
+      live.textContent = "× FAULT";
+    } else if (stale) {
+      badge.lastChild.textContent = "FIELD STALE";
+      live.textContent = "◷ STALE";
+    } else {
+      badge.lastChild.textContent = online ? "FIELD ONLINE" : "FIELD LINKING";
+      live.textContent = online ? "● LIVE" : "○ LINKING";
+    }
   }
 
-  function connectEvents() {
+  function updateSessionControl() {
+    const selectElement = document.getElementById("sessionSelect");
+    selectElement.innerHTML = "";
+    if (!fieldState.sessions.length) {
+      const option = document.createElement("option");
+      option.value = "";
+      option.textContent = "telemetry fallback";
+      selectElement.appendChild(option);
+      return;
+    }
+    fieldState.sessions.forEach((session, index) => {
+      const option = document.createElement("option");
+      option.value = session.session_hash;
+      const age = Math.max(0, Date.now() / 1000 - Number(session.updated_at_epoch || 0));
+      option.textContent = `${session.session_hash} · ${index ? `${Math.round(age / 60)}m` : "latest"}`;
+      option.selected = session.session_hash === fieldState.sessionHash;
+      selectElement.appendChild(option);
+    });
+  }
+
+  async function loadField(sessionHash = "") {
+    const request = ++sessionRequest;
+    const queryString = sessionHash
+      ? `?session=${encodeURIComponent(sessionHash)}`
+      : "";
+    try {
+      const response = await fetch(`/api/cortex/field${queryString}`, {
+        headers: { Accept: "application/json" },
+        cache: "no-store",
+      });
+      if (!response.ok) throw new Error(`field API returned HTTP ${response.status}`);
+      const projection = await response.json();
+      if (request !== sessionRequest) return;
+      window.CortexField.applyProjection(fieldState, projection);
+      syncFieldNodes();
+      updateSessionControl();
+      setEventStatus(fieldState.status === "online");
+      renderPanel();
+      stateDirty = true;
+      connectEvents(fieldState.sessionHash);
+    } catch (error) {
+      fieldState.status = "fault";
+      fieldState.fault = error.message || String(error);
+      fieldState.stale = true;
+      setEventStatus(false);
+      renderPanel();
+    }
+  }
+
+  function connectEvents(sessionHash = fieldState.sessionHash) {
+    const generation = ++eventSocketGeneration;
     if (eventSocket) eventSocket.close();
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-    eventSocket = new WebSocket(`${protocol}//${window.location.host}/api/cortex/events`);
+    const queryString = sessionHash
+      ? `?session=${encodeURIComponent(sessionHash)}`
+      : "";
+    eventSocket = new WebSocket(
+      `${protocol}//${window.location.host}/api/cortex/events${queryString}`,
+    );
     eventSocket.addEventListener("open", () => {
-      setEventStatus(true);
+      if (generation !== eventSocketGeneration) return;
+      window.CortexField.setConnection(fieldState, "online");
+      setEventStatus(fieldState.status === "online");
     });
     eventSocket.addEventListener("message", (message) => {
+      if (generation !== eventSocketGeneration) return;
       let payload;
       try {
         payload = JSON.parse(message.data);
@@ -1423,31 +1979,42 @@
         return;
       }
       if (payload.type !== "events" || !Array.isArray(payload.events)) return;
-      if (!liveEventsEnabled) return;
-      payload.events.forEach((event) => {
-        const kind = [
-          "auto_recall",
-          "search",
-          "read",
-          "used",
-          "save",
-          "ingest",
-        ].includes(event.kind)
-          ? event.kind
-          : "read";
-        firePageIds(
-          Array.isArray(event.page_ids) ? event.page_ids : [],
-          kind,
-          event.label || kind.toUpperCase(),
+      if (!fieldState.sessionHash) {
+        const event = payload.events.at(-1);
+        flashTicker(
+          `TELEMETRY FALLBACK · ${event?.label || event?.kind || "activity"} · no synthetic firing`,
         );
-      });
+        return;
+      }
+      const accepted = window.CortexField.applyEvents(fieldState, payload.events);
+      if (fieldState.seqGap) {
+        setEventStatus(false);
+        renderPanel();
+        window.setTimeout(() => loadField(fieldState.sessionHash), 250);
+        return;
+      }
+      syncFieldNodes();
+      if (liveEventsEnabled) accepted.forEach(visualizeFieldEvent);
+      if (accepted.length) {
+        fieldState.status = "online";
+        fieldState.stale = false;
+        setEventStatus(true);
+        renderPanel();
+        stateDirty = true;
+      }
     });
     eventSocket.addEventListener("close", () => {
+      if (generation !== eventSocketGeneration) return;
+      window.CortexField.setConnection(fieldState, "offline");
       setEventStatus(false);
       window.clearTimeout(eventReconnect);
-      eventReconnect = window.setTimeout(connectEvents, 2000);
+      eventReconnect = window.setTimeout(
+        () => connectEvents(fieldState.sessionHash),
+        2000,
+      );
     });
     eventSocket.addEventListener("error", () => {
+      if (generation !== eventSocketGeneration) return;
       setEventStatus(false);
     });
   }
@@ -1488,7 +2055,7 @@
       cameraTarget = null;
       previousTime = performance.now();
       requestAnimationFrame(frame);
-      connectEvents();
+      await loadField();
     } catch (error) {
       showBootError(error);
     }

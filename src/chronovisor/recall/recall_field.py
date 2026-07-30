@@ -199,6 +199,7 @@ def update_field_state(
             kind="teacher_commit",
             weight=0.45,
             reason_code="prior_turn_teacher_commit",
+            certificate_id=str(row.get("certificate_id") or ""),
         )
         for row in applicable_commits
     )
@@ -242,6 +243,7 @@ def update_field_state(
                 delta=round(-delta if stimulus.negative else delta, 6),
                 activation=round(node.activation, 6),
                 reason_code=stimulus.reason_code or stimulus.kind,
+                certificate_id=stimulus.certificate_id,
                 components={
                     "direct": round(node.direct, 6),
                     "negative": round(node.negative, 6),
@@ -462,6 +464,7 @@ def queue_teacher_commits(
                     "commit_queued",
                     page_id=page_id,
                     reason_code="teacher_commit_next_turn",
+                    certificate_id=certs.get(page_id, ""),
                 )
             )
         state.updated_at_epoch = observed

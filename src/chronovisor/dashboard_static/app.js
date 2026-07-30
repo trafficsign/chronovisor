@@ -160,6 +160,10 @@ const els = {
   recallP50: document.getElementById("recall-p50"),
   recallP95: document.getElementById("recall-p95"),
   recallCounts: document.getElementById("recall-counts"),
+  recallFieldSummary: document.getElementById("recall-field-summary"),
+  recallFieldState: document.getElementById("recall-field-state"),
+  recallFieldCounts: document.getElementById("recall-field-counts"),
+  recallFieldQuality: document.getElementById("recall-field-quality"),
   recallCalibration: document.getElementById("recall-calibration"),
   recallFeed: document.getElementById("recall-feed"),
   recallLabPanel: document.getElementById("recall-lab-panel"),
@@ -2570,6 +2574,27 @@ function msLabel(value) {
   return `${Math.round(value)}ms`;
 }
 
+function renderRecallField(fieldValue) {
+  const field = fieldValue || {};
+  const summary = field.summary || {};
+  const latency = summary.latency_ms || {};
+  const status = String(field.status || "offline");
+  els.recallFieldSummary.className = `recall-field-summary ${status}`;
+  els.recallFieldState.textContent =
+    `FIELD ${status.toUpperCase()} · ${String(field.mode || "off").toUpperCase()}`;
+  els.recallFieldCounts.textContent = [
+    `active ${summary.active || 0}`,
+    `candidate ${summary.candidate || 0}`,
+    `commit ${summary.commit || 0}`,
+    `reject ${summary.reject || 0}`,
+  ].join(" · ");
+  const agreement = numeric(summary.teacher_agreement)
+    ? pctLabel(summary.teacher_agreement)
+    : "collecting";
+  els.recallFieldQuality.textContent =
+    `agreement ${agreement} · p95 ${msLabel(latency.p95)}`;
+}
+
 function renderRecall(recall) {
   const data = recall || {};
   const decisions = data.decisions || {};
@@ -2578,6 +2603,7 @@ function renderRecall(recall) {
   const evalMetricsLatency = latestEval && latestEval.latency_ms ? latestEval.latency_ms : {};
   const calibration = data.calibration || {};
   const pulls = data.pulls || {};
+  const field = data.field || {};
 
   els.recallCaption.textContent = data.samples ? `${data.samples} decisions` : "quiet";
   els.recallR3.textContent = latestEval ? pctLabel(latestEval.recall_at_3) : "--";
@@ -2604,6 +2630,8 @@ function renderRecall(recall) {
     item.append(name, count);
     els.recallCounts.appendChild(item);
   });
+
+  renderRecallField(field);
 
   const lastApplied = calibration.last_applied || null;
   if (lastApplied) {
@@ -2969,6 +2997,18 @@ async function decisionTraceRefreshLoop() {
   }
 }
 
+async function refreshRecallFieldLoop() {
+  try {
+    const response = await fetch("/api/cortex/field", { cache: "no-store" });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    renderRecallField(await response.json());
+  } catch {
+    renderRecallField({ status: "offline", mode: "off", summary: {} });
+  } finally {
+    window.setTimeout(refreshRecallFieldLoop, IDLE_REFRESH_DELAY_MS);
+  }
+}
+
 els.saveModeButtons.forEach((button) => {
   button.addEventListener("click", () => {
     saveHistoryMode = button.dataset.saveMode || "daily";
@@ -3021,4 +3061,5 @@ els.lanShareButton.addEventListener("click", copyLanLink);
 
 void refreshLoop();
 void decisionTraceRefreshLoop();
+void refreshRecallFieldLoop();
 window.addEventListener("resize", refresh);

@@ -7,6 +7,7 @@ import hashlib
 import json
 import re
 import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -27,6 +28,24 @@ _ENTRYPOINT_PAGES = {
     "lessons-learned",
     "user-profile",
 }
+_FIELD_SESSION_RE = re.compile(r"^[0-9a-f]{16}$")
+_FIELD_EVENT_KEYS = {
+    "seq",
+    "timestamp_epoch",
+    "session_hash",
+    "topic_epoch",
+    "kind",
+    "page_id",
+    "source_page_id",
+    "target_page_id",
+    "edge_type",
+    "delta",
+    "activation",
+    "reason_code",
+    "certificate_id",
+    "components",
+}
+_FIELD_COMPONENT_KEYS = {"direct", "spread", "negative", "inhibition"}
 
 
 @dataclass(frozen=True)
@@ -243,6 +262,302 @@ def build_cortex_graph(
     return graph
 
 
+def _read_sealed_field_snapshot(path: Path) -> dict[str, Any]:
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(value, dict):
+        raise ValueError("field snapshot must be an object")
+    seal = value.get("snapshot_sha256")
+    payload = {
+        key: item for key, item in value.items() if key != "snapshot_sha256"
+    }
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    if not isinstance(seal, str) or seal != hashlib.sha256(encoded).hexdigest():
+        raise ValueError("field snapshot seal mismatch")
+    return payload
+
+
+def _project_field_event(value: Any) -> dict[str, Any] | None:
+    """Return the strict browser-safe subset of one durable Field event."""
+
+    if not isinstance(value, dict):
+        return None
+    session = value.get("session_hash")
+    seq = value.get("seq")
+    kind = value.get("kind")
+    if (
+        not isinstance(session, str)
+        or not _FIELD_SESSION_RE.fullmatch(session)
+        or not isinstance(seq, int)
+        or seq < 1
+        or not isinstance(kind, str)
+    ):
+        return None
+    projected = {
+        key: value.get(key)
+        for key in _FIELD_EVENT_KEYS
+        if key in value
+    }
+    components = value.get("components")
+    safe_components = components if isinstance(components, dict) else {}
+    projected["components"] = {
+        key: round(float(safe_components.get(key) or 0.0), 6)
+        for key in sorted(_FIELD_COMPONENT_KEYS)
+        if isinstance(safe_components.get(key, 0.0), int | float)
+    }
+    projected["source"] = "stateful-recall-field"
+    return projected
+
+
+def _read_field_events(
+    field_root: Path,
+    session_hash: str,
+    *,
+    limit: int = 256,
+) -> list[dict[str, Any]]:
+    if not _FIELD_SESSION_RE.fullmatch(session_hash):
+        return []
+    path = field_root / "events" / f"{session_hash}.jsonl"
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    events: list[dict[str, Any]] = []
+    for line in lines[-max(1, limit) :]:
+        try:
+            projected = _project_field_event(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+        if projected is not None and projected["session_hash"] == session_hash:
+            events.append(projected)
+    return sorted(events, key=lambda row: int(row["seq"]))
+
+
+def _field_recall_metrics(
+    root: Path,
+    session_hash: str,
+    *,
+    limit: int = 400,
+) -> dict[str, Any]:
+    """Aggregate Field latency and teacher agreement without exposing prompts."""
+
+    path = root / "recall" / "recall-log.jsonl"
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        lines = []
+    latencies: list[float] = []
+    teacher_total = 0
+    teacher_agreed = 0
+    for line in lines[-max(1, limit) :]:
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        features = row.get("evidence_features")
+        field = features.get("field_shadow") if isinstance(features, dict) else None
+        if not isinstance(field, dict) or field.get("session_hash") != session_hash:
+            continue
+        latency = field.get("latency_ms")
+        if isinstance(latency, int | float) and latency >= 0:
+            latencies.append(float(latency))
+        candidates = {
+            str(page_id)
+            for page_id in field.get("candidate_page_ids") or []
+            if isinstance(page_id, str)
+        }
+        pages = {
+            str(page_id)
+            for page_id in row.get("pages") or []
+            if isinstance(page_id, str)
+        }
+        if pages:
+            teacher_total += len(pages)
+            teacher_agreed += len(pages & candidates)
+    latencies.sort()
+
+    def percentile(fraction: float) -> float | None:
+        if not latencies:
+            return None
+        index = min(len(latencies) - 1, round((len(latencies) - 1) * fraction))
+        return round(latencies[index], 1)
+
+    return {
+        "samples": len(latencies),
+        "latency_ms": {
+            "p50": percentile(0.5),
+            "p95": percentile(0.95),
+            "max": round(max(latencies), 1) if latencies else None,
+        },
+        "teacher_agreement": (
+            round(teacher_agreed / teacher_total, 4)
+            if teacher_total
+            else None
+        ),
+        "teacher_pages": teacher_total,
+    }
+
+
+def build_cortex_field_projection(
+    root: Path,
+    *,
+    session_hash: str = "",
+    now: float | None = None,
+    event_limit: int = 256,
+) -> dict[str, Any]:
+    """Build a browser-safe projection of recent Stateful Recall Field state."""
+
+    from chronovisor.recall.recall_field_schema import load_recall_field_config
+
+    observed = time.time() if now is None else now
+    field_root = root.expanduser().resolve() / "recall" / "field"
+    session_root = field_root / "sessions"
+    config = load_recall_field_config()
+    sessions: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    corrupt_snapshots = 0
+    try:
+        paths = sorted(
+            session_root.glob("*.json"),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+    except OSError:
+        paths = []
+    for path in paths[:24]:
+        if not _FIELD_SESSION_RE.fullmatch(path.stem):
+            continue
+        try:
+            payload = _read_sealed_field_snapshot(path)
+        except (OSError, ValueError, json.JSONDecodeError):
+            corrupt_snapshots += 1
+            continue
+        if payload.get("session_hash") != path.stem:
+            corrupt_snapshots += 1
+            continue
+        mode = config.mode
+        buffer_name = "shadow" if mode == "shadow" else "active"
+        buffer = payload.get(buffer_name)
+        if not isinstance(buffer, dict):
+            buffer = {}
+        updated = float(payload.get("updated_at_epoch") or 0.0)
+        sessions.append(
+            (
+                {
+                    "session_hash": path.stem,
+                    "updated_at_epoch": updated,
+                    "topic_epoch": int(payload.get("topic_epoch") or 0),
+                    "turn": int(payload.get("turn") or 0),
+                    "seq": int(payload.get("seq") or 0),
+                    "mode": mode,
+                    "nodes": len(buffer),
+                },
+                payload,
+            )
+        )
+    requested = session_hash if _FIELD_SESSION_RE.fullmatch(session_hash) else ""
+    selected = next(
+        (row for row in sessions if row[0]["session_hash"] == requested),
+        sessions[0] if sessions else None,
+    )
+    if selected is None:
+        return {
+            "status": "fault" if corrupt_snapshots else "offline",
+            "source": "stateful-recall-field",
+            "mode": config.mode,
+            "session_hash": "",
+            "sessions": [],
+            "snapshot": None,
+            "events": [],
+            "summary": {
+                "active": 0,
+                "candidate": 0,
+                "commit": 0,
+                "reject": 0,
+                "teacher_agreement": None,
+                "latency_ms": {"p50": None, "p95": None, "max": None},
+                "stale": True,
+                "corrupt_snapshots": corrupt_snapshots,
+            },
+        }
+
+    session, payload = selected
+    mode = session["mode"]
+    buffer_name = "shadow" if mode == "shadow" else "active"
+    raw_buffer = payload.get(buffer_name)
+    buffer = raw_buffer if isinstance(raw_buffer, dict) else {}
+    nodes: list[dict[str, Any]] = []
+    for page_id, value in buffer.items():
+        if not isinstance(page_id, str) or not isinstance(value, dict):
+            continue
+        activation = value.get("activation")
+        if not isinstance(activation, int | float):
+            continue
+        components = {
+            key: round(float(value.get(key) or 0.0), 6)
+            for key in _FIELD_COMPONENT_KEYS
+        }
+        nodes.append(
+            {
+                "page_id": page_id,
+                "activation": round(float(activation), 6),
+                "components": components,
+                "last_seq": int(value.get("last_seq") or 0),
+            }
+        )
+    nodes.sort(key=lambda row: (-row["activation"], row["page_id"]))
+    nodes = nodes[: config.max_active_nodes]
+    events = _read_field_events(
+        field_root,
+        session["session_hash"],
+        limit=event_limit,
+    )
+    counts: dict[str, int] = {}
+    for event in events:
+        kind = str(event.get("kind") or "")
+        counts[kind] = counts.get(kind, 0) + 1
+    metrics = _field_recall_metrics(root, session["session_hash"])
+    stale_after_seconds = max(
+        60,
+        min(600, config.wall_half_life_seconds * 2),
+    )
+    age_seconds = max(0.0, observed - session["updated_at_epoch"])
+    stale = age_seconds > stale_after_seconds
+    status = "fault" if corrupt_snapshots else ("stale" if stale else "online")
+    return {
+        "status": status,
+        "source": "stateful-recall-field",
+        "mode": mode,
+        "session_hash": session["session_hash"],
+        "sessions": [row[0] for row in sessions[:12]],
+        "snapshot": {
+            "session_hash": session["session_hash"],
+            "topic_epoch": session["topic_epoch"],
+            "turn": session["turn"],
+            "seq": session["seq"],
+            "updated_at_epoch": session["updated_at_epoch"],
+            "full_search_fallback": payload.get("full_search_fallback") is not False,
+            "nodes": nodes,
+        },
+        "events": events,
+        "summary": {
+            "active": sum(node["activation"] >= 0.05 for node in nodes),
+            "candidate": min(len(nodes), config.working_set_size),
+            "commit": counts.get("commit_queued", 0)
+            + counts.get("commit_applied", 0),
+            "reject": counts.get("reject", 0) + counts.get("inhibit", 0),
+            "teacher_agreement": metrics["teacher_agreement"],
+            "latency_ms": metrics["latency_ms"],
+            "stale": stale,
+            "age_seconds": round(age_seconds, 1),
+            "corrupt_snapshots": corrupt_snapshots,
+        },
+    }
+
+
 def websocket_accept(key: str) -> str:
     """Return the RFC 6455 accept token for a validated browser key."""
 
@@ -284,17 +599,36 @@ class CortexEventCursor:
         recall_log: Path | None = None,
         pull_log: Path | None = None,
         activity_log: Path | None = None,
+        field_session: str = "",
     ) -> None:
         self.root = root.expanduser().resolve()
         self.recall_log = recall_log or self.root / "recall" / "recall-log.jsonl"
         self.pull_log = pull_log or self.root / "recall" / "pull-log.jsonl"
         self.activity_log = activity_log or self.root / "log.md"
         self.raw_dir = self.root / "raw"
+        self.field_session = (
+            field_session
+            if _FIELD_SESSION_RE.fullmatch(field_session)
+            else ""
+        )
+        self.field_event_log = (
+            self.root
+            / "recall"
+            / "field"
+            / "events"
+            / f"{self.field_session}.jsonl"
+            if self.field_session
+            else None
+        )
         self._offsets = {
             self.recall_log: self._file_size(self.recall_log),
             self.pull_log: self._file_size(self.pull_log),
             self.activity_log: self._file_size(self.activity_log),
         }
+        if self.field_event_log is not None:
+            self._offsets[self.field_event_log] = self._file_size(
+                self.field_event_log
+            )
         self._remainders: dict[Path, bytes] = {}
         self._raw_dir_mtime_ns = self._directory_mtime(self.raw_dir)
 
@@ -340,7 +674,22 @@ class CortexEventCursor:
             "page_ids": list(dict.fromkeys(page_ids))[:24],
             "label": label,
             "ts": datetime.now().astimezone().isoformat(timespec="seconds"),
+            "source": "telemetry-fallback",
         }
+
+    def _field_events(self) -> list[dict[str, Any]]:
+        if self.field_event_log is None:
+            return []
+        events: list[dict[str, Any]] = []
+        for line in self._tail_lines(self.field_event_log):
+            try:
+                event = _project_field_event(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+            if event is None or event["session_hash"] != self.field_session:
+                continue
+            events.append(event)
+        return events
 
     def _automatic_recall_events(self) -> list[dict[str, Any]]:
         events: list[dict[str, Any]] = []
@@ -421,6 +770,8 @@ class CortexEventCursor:
         return events
 
     def poll(self) -> list[dict[str, Any]]:
+        if self.field_session:
+            return self._field_events()
         return [
             *self._automatic_recall_events(),
             *self._pull_events(),
