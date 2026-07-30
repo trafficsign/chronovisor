@@ -1,0 +1,607 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>Chronovisor Recall Processor + Stateful Recall Field 実装計画</title>
+<style>
+:root{
+  --fg:#17191c; --muted:#666b73; --bg:#fafaf7; --panel:#fff;
+  --accent:#4858d8; --accent-soft:#eef0ff; --violet:#7957d5;
+  --orange:#d97706; --green:#16845b; --red:#c63b42;
+  --done:#888; --warn:#b54708; --ok:#16845b; --rule:#dedfd9;
+  --code-bg:#eeeee9;
+}
+*{box-sizing:border-box}
+body{
+  font-family:-apple-system,'Hiragino Kaku Gothic ProN','Yu Gothic',sans-serif;
+  color:var(--fg); background:var(--bg);
+  max-width:1080px; margin:2rem auto; padding:0 1.5rem;
+  line-height:1.7; font-size:15px;
+}
+header{
+  border-bottom:2px solid var(--rule); padding-bottom:1rem; margin-bottom:1.5rem;
+  position:sticky; top:0; background:var(--bg); z-index:10;
+}
+h1{font-size:1.6rem;margin:0 0 0.5rem 0;line-height:1.35}
+h2{font-size:1.15rem;margin:1.75rem 0 0.5rem 0;padding-bottom:0.25rem;border-bottom:1px solid var(--rule)}
+h3{font-size:1rem;margin:1.25rem 0 0.35rem 0}
+h4{font-size:0.93rem;margin:1rem 0 0.25rem 0}
+p{margin:0.45rem 0}
+.meta-bar{display:flex;gap:1rem;font-size:0.85rem;color:var(--muted);flex-wrap:wrap;align-items:center}
+.meta-bar code{background:transparent;color:var(--muted)}
+.badge{
+  display:inline-block;padding:0.15rem 0.7rem;border-radius:1rem;
+  background:var(--accent);color:#fff;font-weight:600;font-size:0.8rem;
+  letter-spacing:0.02em;
+}
+.badge[data-state="ready"]{background:#16a085}
+.badge[data-state="running"]{background:#e67e22}
+.badge[data-state="done"]{background:var(--ok)}
+.badge[data-state="blocked"]{background:var(--warn)}
+section{margin:0 0 0.5rem 0}
+ul,ol{padding-left:1.5rem;margin:0.5rem 0}
+li{margin:0.25rem 0}
+ol.checklist{list-style:none;padding-left:0}
+ol.checklist li{display:flex;align-items:flex-start;gap:0.6rem;padding:0.22rem 0}
+ol.checklist input[type=checkbox]{margin-top:0.4rem;flex-shrink:0}
+ol.checklist input[type=checkbox]:checked + span{color:var(--done);text-decoration:line-through}
+section.rules{background:#f3f1eb;padding:0.5rem 1rem;border-radius:6px;font-size:0.9rem;border-left:3px solid var(--accent)}
+section.rules h2{border:none;margin-top:0.5rem}
+section.blockers ul{color:var(--warn)}
+ol.log{list-style:none;padding-left:0;font-family:'SF Mono',Menlo,monospace;font-size:0.85rem}
+ol.log li{padding:0.3rem 0;border-bottom:1px dashed var(--rule);display:flex;gap:0.75rem}
+ol.log time{color:var(--muted);flex-shrink:0;min-width:9.5rem}
+code{
+  background:var(--code-bg);padding:0.1rem 0.35rem;border-radius:3px;
+  font-size:0.9em;font-family:'SF Mono',Menlo,monospace;
+  overflow-wrap:anywhere;
+}
+pre{
+  margin:0.7rem 0;padding:0.9rem 1rem;overflow:auto;border-radius:8px;
+  color:#e7e9ee;background:#17191d;border:1px solid #292d35;
+  line-height:1.55;font-size:0.84rem;
+}
+pre code{background:transparent;color:inherit;padding:0}
+table{
+  display:block;width:100%;max-width:100%;overflow-x:auto;
+  border-collapse:collapse;margin:0.7rem 0 1rem;font-size:0.9rem;
+}
+th,td{border:1px solid var(--rule);padding:0.5rem 0.6rem;text-align:left;vertical-align:top}
+th,td{overflow-wrap:anywhere}
+th{background:#f0f0eb;font-weight:650}
+.callout{
+  margin:0.8rem 0;padding:0.75rem 0.9rem;border:1px solid #d9dcff;
+  border-left:4px solid var(--accent);border-radius:7px;background:var(--accent-soft);
+}
+.callout.warn{background:#fff7e8;border-color:#f2d29d;border-left-color:var(--orange)}
+.callout.stop{background:#fff0f0;border-color:#efc6c8;border-left-color:var(--red)}
+.phase{
+  margin:1rem 0;padding:0.8rem 1rem;border:1px solid var(--rule);
+  border-radius:9px;background:var(--panel);
+}
+.phase h3{margin-top:0}
+.gate{color:var(--green);font-weight:700}
+.muted{color:var(--muted)}
+.pill{
+  display:inline-block;margin-right:0.3rem;padding:0.05rem 0.45rem;
+  border:1px solid var(--rule);border-radius:999px;background:#f5f5f1;
+  color:var(--muted);font-size:0.78rem;font-weight:600;
+}
+.legend{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:0.45rem;margin:0.7rem 0}
+.legend div{padding:0.5rem;border:1px solid var(--rule);border-radius:7px;background:var(--panel);font-size:0.82rem}
+.dot{display:inline-block;width:0.65rem;height:0.65rem;border-radius:50%;margin-right:0.3rem}
+.orange{background:#ffb454}.white{background:#fff;border:1px solid #aaa}.purple{background:#9b7cff}.green{background:#3dd68c}.red{background:#ff6166}
+details{margin:0.6rem 0;border:1px solid var(--rule);border-radius:7px;background:var(--panel)}
+summary{cursor:pointer;padding:0.55rem 0.7rem;font-weight:650}
+details>div{padding:0 0.8rem 0.8rem}
+@media (max-width:760px){
+  body{padding:0 0.8rem}
+  .legend{grid-template-columns:1fr 1fr}
+  table{font-size:0.82rem}
+  th,td{padding:0.4rem}
+}
+@media print{
+  body{font-size:11pt;max-width:none;margin:0;padding:1rem}
+  header{position:static}
+  .phase,.callout,details{break-inside:avoid}
+}
+</style>
+</head>
+<body>
+<script type="application/json" id="plan-meta">
+{"task_id":"plan_3508b0284d4542af92f176b0dd67af5a","created_at":"2026-07-30T20:11:56+09:00","状態":"ready","slug":"recall-processor-stateful-recall-field"}
+</script>
+
+<header>
+<h1>Plan: <span id="plan-title">Chronovisor Recall Processor + Stateful Recall Field</span></h1>
+<div class="meta-bar">
+<span class="badge" data-bind="状態" data-state="ready">ready</span>
+<span><code data-bind="task_id">plan_3508b0284d4542af92f176b0dd67af5a</code></span>
+<span data-bind="created_at">2026-07-30T20:11:56+09:00</span>
+<span>baseline <code>bf790e96c486</code></span>
+</div>
+</header>
+
+<section data-section="目的">
+<h2>目的</h2>
+<ul>
+<li>現行の最高品質経路 <code>BM25 + Nemotron 2048 → graph/fusion → BGE reranker</code> を同期Recallへ戻し、ページ単位で関連性を証明できる0〜2件だけを注入する。</li>
+<li><strong>Recall Processor</strong> を正確性の境界・teacher、<strong>Stateful Recall Field</strong> をセッション常駐の候補空間・高速なワーキングメモリとして統合する。</li>
+<li>投機結果は非公開で保持し、Evidence Certificateを通った記憶だけcommitする。誤った先行注入と次ターン訂正は禁止する。</li>
+<li>既存のSynaptic Cortexを、ランダムな発火演出から、実際の刺激・伝播・残留活性・抑制・棄却・commitを観測できるデバッガへ昇格する。</li>
+<li>最高精度を基準に、常駐化・候補照合・発火フィールド・Anti-Index・Recall Compilerでレイテンシを下げる。速度のための品質劣化は採用しない。</li>
+</ul>
+
+<div class="callout">
+<strong>最終判断:</strong>
+発火フィールド単独をauthorityにしない。Recall Processorが正解を作り、そのcertificate・実利用・明示評価でFieldの配線を育てる。
+ダッシュボード統合は付随作業ではなく、この設計の観測・評価・調整機構として完了条件に含める。
+</div>
+</section>
+
+<section data-section="現状">
+<h2>確認済みの現状と出発点</h2>
+<table>
+<thead><tr><th>項目</th><th>現状</th><th>計画上の意味</th></tr></thead>
+<tbody>
+<tr><td>Git / Dashboard</td><td><code>bf790e96c486</code>。Cortexは3,333 nodes / 13,332 links / 83 categories。</td><td>既存Activity Barと<code>/cortex</code>を正本として拡張する。</td></tr>
+<tr><td>Nemotron</td><td>MPS常駐、coverage 99.97%、30,365 documents。live p50 103.2ms / p95 251.6ms / max 602.6ms。</td><td><code>query_timeout_ms=250</code>はp95と衝突するため、Phase 0で再計測して安全余白を持たせる。</td></tr>
+<tr><td>BGE reranker</td><td>MCP検索では有効。短命な同期Hookでは未使用。model cacheはプロセス内だけ。</td><td>モデル計算を削る前にUnix socket常駐化し、top 10を一括MPS推論する。</td></tr>
+<tr><td>難しい94件</td><td>旧構成 Recall@5 29.6% / negative-hit 48.6%。Nemotron+BGEはRecall@5 53.5% / negative-hit 20.0%。</td><td>候補漏れ・fusion落ち・rerank落ち・page gate落ち・未利用を分解する基準集合。</td></tr>
+<tr><td>全体検索</td><td>Nemotron Overall Recall@5 93.45%、Recall@10 96.35%、日本語Recall@10 92.65%。</td><td>候補生成の強さと最終注入Precisionを混同しない。</td></tr>
+<tr><td>教師ラベル</td><td>pull-log used 18、auditor由来used 196、ignored 1,179。</td><td>「数千件の正例」は存在しない。certificateはsilver、実利用はstrong、明示評価はgoldに分離する。</td></tr>
+<tr><td>負例</td><td>page_ignored 154のうち112がretracted。false-positiveは3。</td><td>ignoredを真の負例として学習しない。query×page×session文脈の弱い反証としてのみ扱う。</td></tr>
+<tr><td>Prefetch / co-fire</td><td>exposure 4,376、positive 15。co-fire positive nodes/edgesは0/0。</td><td>露出グラフをFieldの学習authorityにしない。positive-usedとexposureを厳密に分離する。</td></tr>
+<tr><td>Claims</td><td>47,018 claims、39,339件に<code>evidence_span</code>。</td><td>Evidence Certificateと将来のRecall Compilerに再利用する。</td></tr>
+<tr><td>現行Cortex</td><td>server eventを起点に、ブラウザ側が乱数でwikilink伝播を生成し約430msで減衰。</td><td>live modeの偽伝播を廃止し、server-authored state/eventへ置換する。</td></tr>
+</tbody>
+</table>
+</section>
+
+<section data-section="アーキテクチャ">
+<h2>完成アーキテクチャ</h2>
+<pre><code>UserPromptSubmit
+  ├─ current prompt → entity / alias / exact-claim anchors
+  ├─ Stateful Recall Field (private working set, 20–30 pages)
+  │    └─ semantic verify(active page IDs) / topic-shift detection
+  └─ full BM25 + resident Nemotron (fallback / teacher)
+            ↓
+      channel union + graph/fusion
+            ↓
+      resident BGE reranker (top 10 batch)
+            ↓
+      page-level selector
+        ├─ deterministic evidence span / claim
+        ├─ raw reranker score + margin
+        └─ ambiguous pages only → bounded 9B / 35B judge
+            ↓
+      Evidence Certificate
+        ├─ pass → max 0–2 cards commit
+        └─ fail → private reject (host context is never polluted)
+            ↓
+      certificate / used receipt / explicit feedback
+            ↓
+      Field learning + Anti-Index + Recall Compiler
+
+Dashboard
+  Observatory Recall panel ← summary / health / latency
+  Synaptic Cortex          ← ordered Field events + sparse snapshot</code></pre>
+
+<h3>役割境界</h3>
+<table>
+<thead><tr><th>層</th><th>役割</th><th>authority</th></tr></thead>
+<tbody>
+<tr><td>Stateful Recall Field</td><td>セッション文脈、事前活性、候補20〜30件、topic epoch。</td><td>候補生成のみ。単独commit禁止。</td></tr>
+<tr><td>BM25 / Nemotron / graph</td><td>全体候補の回収。topic shift時の安全なfallbackとteacher。</td><td>候補生成のみ。</td></tr>
+<tr><td>BGE reranker</td><td>queryと候補本文を共同符号化して順位・raw scoreを出す。</td><td>重要証拠だが単独commit禁止。</td></tr>
+<tr><td>Page selector / Certificate</td><td>supporting span、時制、provenance、score、理由をページ別に検証。</td><td>commit境界。</td></tr>
+<tr><td>9B / 35B judge</td><td>決定論的証拠とBGEで決められない候補だけ棄却判定。</td><td>限定的な昇格先。常時使用禁止。</td></tr>
+<tr><td>Dashboard</td><td>read-only projection、Replay、Decision Trace、状態監視。</td><td>表示のみ。Recall状態を変更しない。</td></tr>
+</tbody>
+</table>
+</section>
+
+<section data-section="データ契約">
+<h2>先に固定するデータ契約</h2>
+
+<h3>1. Reranker service</h3>
+<ul>
+<li>新規: <code>search/reranker_service.py</code>、<code>search/reranker_client.py</code>、entrypoint <code>chronovisor-reranker-service</code>。</li>
+<li>Unix socketは<code>~/.chronovisor/runtime/reranker.sock</code>、socket/状態ファイルは所有者限定。query本文をログへ残さない。</li>
+<li>methods: <code>health</code>、<code>warm</code>、<code>rerank(query,page_ids)</code>。service側でページを解決し、本文cacheをcontent hashで無効化する。</li>
+<li>レスポンスはpage_idごとのraw score、rank、latency、model/revision、cache statusを保持する。現行のrank-only blendでraw scoreを捨てない。</li>
+<li>bounded queue、single MPS worker、top 10 batch、client circuit breaker、remaining hook budget伝播、unavailable時の現行fused path fail-openを必須とする。</li>
+</ul>
+
+<h3>2. Evidence Certificate</h3>
+<pre><code>{
+  "schema_version": 1,
+  "certificate_id": "...",
+  "decision_id": "...",
+  "page_id": "...",
+  "page_uid": "...",
+  "query_hash": "...",
+  "content_sha256": "...",
+  "supporting_span_hash": "...",
+  "source_line": 42,
+  "signals": {
+    "exact": false,
+    "bm25": 0.0,
+    "dense": 0.0,
+    "graph": 0.0,
+    "reranker_raw": 0.0,
+    "margin": 0.0,
+    "judge": "not_run"
+  },
+  "verdict": "pass | reject | abstain",
+  "reason_codes": ["..."],
+  "label_quality": "silver | strong | gold",
+  "policy_version": 1,
+  "created_at": "..."
+}</code></pre>
+<ul>
+<li>local durable ledger: <code>~/.chronovisor/recall/certificates.jsonl</code>。supporting span本文はDashboardへ渡さない。</li>
+<li><code>certificate pass + commit</code>はsilver。実<code>chronovisor_read</code>/<code>recall_used</code>はstrong。ユーザー明示評価またはlocked goldはgold。</li>
+<li>certificate fail、未commit、ignoredは自動的な負例にしない。</li>
+</ul>
+
+<h3>3. Stateful Recall Field artifacts</h3>
+<pre><code>~/.chronovisor/runtime/recall-field/
+  latest.json
+  events.jsonl
+  events.lock
+  sessions/&lt;session-hash&gt;.json
+
+event types:
+  stimulus / spread / inhibit / candidate / certificate_pass
+  certificate_fail / commit / reject / topic_reset / fallback / expired</code></pre>
+<ul>
+<li>eventは単調増加<code>seq</code>、timestamp、session hash、topic epoch、decision id、page UID、channel、delta、activation_after、reason codes、policy versionを持つ。</li>
+<li>snapshotはnon-resting nodesのみ（目安128 nodes / 256 edges上限）。raw prompt、query本文、supporting span、ページ本文を含めない。</li>
+<li>減衰を毎tick JSONLへ書かない。snapshotのtimestampとpolicyから補間し、閾値を跨いだ時だけ<code>expired</code>を記録する。</li>
+<li><code>core/durable_state.py</code>と<code>core/jsonl_write.py</code>の原則を再利用し、atomic/sealed snapshot、writer serialization、rotation/retentionを実装する。</li>
+</ul>
+
+<h3>4. Dashboard projection</h3>
+<ul>
+<li><code>GET /api/cortex/field?session=...</code>はsanitized snapshotを返す。</li>
+<li>WebSocketは接続直後にhello + snapshot、その後ordered event batches。seq gapはsnapshot再取得で回復する。</li>
+<li>Fieldが未作成・stale・corruptの場合は静的graphを表示しつつ<code>FIELD UNAVAILABLE/STALE</code>を明示し、偽の発火を生成しない。</li>
+</ul>
+</section>
+
+<section data-section="実行手順">
+<h2>実行手順</h2>
+
+<div class="phase">
+<h3>Phase 0 — 94件の失敗解剖と基準凍結</h3>
+<p><span class="pill">必須先行</span><span class="pill">mutationなし</span> ここを完了するまでproduction選択ロジックを変更しない。</p>
+<ol class="checklist">
+<li><input type="checkbox"><span><code>search-golden.jsonl</code>のmanual集合（manual-curated 62 + auditor 22 + auditor_precision 10 = 94）をquery本文をGitへ入れず、ref/hash付きsealed manifestとして固定する。</span></li>
+<li><input type="checkbox"><span><code>chronovisor-eval --source-filter manual --top-n 50</code>を基準に、<code>candidate_union → fused → reranked → page_gate → committed → host_used</code>のstage traceを追加する。</span></li>
+<li><input type="checkbox"><span>94件を①candidate top50漏れ、②fusion順位落ち、③BGE順位落ち、④page selector棄却、⑤commit後未利用へ排他的に分類する。</span></li>
+<li><input type="checkbox"><span>Overall / Japanese / hard-94を分離し、Recall@5/10、MRR、negative-hit、注入Precision、関連記憶Recall、abstention、p50/p95/max、4秒超過を保存する。</span></li>
+<li><input type="checkbox"><span>現行Auto Recallの既知不具合をfixture化する: 弱いRRF scoreの飽和、hit_count floor、過去3query混入、既出上位page除外による下位noise繰上げ。</span></li>
+<li><input type="checkbox"><span>live p95 251.6msに対して250msのNemotron timeoutを再測定し、35B稼働中を含む安全なtimeout/remaining-budget境界を決める。</span></li>
+</ol>
+<p class="gate">受入ゲート: 既知の29.6/49.3/53.5%と20.0% negative-hitを再現、または差分理由をcase単位で説明できる。stage合計とE2E結果が一致し、同じmanifestで決定的に再実行できる。</p>
+</div>
+
+<div class="phase">
+<h3>Phase 1 — BGE rerankerの常駐service化</h3>
+<ol class="checklist">
+<li><input type="checkbox"><span>既存<code>semantic_service.py</code>/<code>semantic_client.py</code>のUnix socket・health・breaker設計を参照し、障害分離したreranker service/clientを追加する。</span></li>
+<li><input type="checkbox"><span>現行<code>reranker.py</code>のmodel loaderとbatch scoringをservice側へ移し、page本文cacheとMPS warmupを短命Hookの外へ出す。</span></li>
+<li><input type="checkbox"><span><code>RerankOutcome</code>をraw per-page score、rank、marginを保持する契約へ拡張し、同点時は元rank/page_idで決定的にする。</span></li>
+<li><input type="checkbox"><span><code>launchd/com.trafficsign.chronovisor-reranker.plist</code>、installer、status artifact、health CLI、resource coordinationを追加する。</span></li>
+<li><input type="checkbox"><span>idle、Nemotron同時、35B稼働、memory pressure、service kill/restart、stale socketを負荷試験する。</span></li>
+<li><input type="checkbox"><span>Auto Recallでは最初にshadowでbefore/after/latencyのみ記録し、注入結果は変えない。</span></li>
+</ol>
+<p class="gate">受入ゲート: hard-94の品質がin-process BGEと一致。warm top-10 batchを含むRecall E2E p95 &lt; 3.5s、4s超過0。service停止時は現行fused pathへfail-openし、host promptを止めない。</p>
+</div>
+
+<div class="phase">
+<h3>Phase 2 — Recall Processorとページ別Evidence Certificate</h3>
+<ol class="checklist">
+<li><input type="checkbox"><span><code>recall/recall_processor.py</code>（または同責務の小モジュール）を追加し、候補生成・rerank・page selection・certificate・commitを分離する。<code>_run_recall_impl</code>へ再び巨大責務を戻さない。</span></li>
+<li><input type="checkbox"><span><code>_score_norm</code>のRRF飽和とhit-count floorを廃止し、channel別raw featureと同一model revision内で較正可能なscoreへ置換する。</span></li>
+<li><input type="checkbox"><span>current promptを主queryにし、過去queryを直接候補へ混ぜない。曖昧な短文だけ直前1turn/episode stateで書き換える。</span></li>
+<li><input type="checkbox"><span>既出pageを候補選択前に除外しない。最良pageを先に決め、その後に「再注入不要」「更新されたので再提示」を判定する。</span></li>
+<li><input type="checkbox"><span><code>claims.py</code>の<code>evidence_span/source_line</code>、検索snippet、query termを使い、候補ごとにsupporting spanを選ぶ。必要ならspan chunkをBGEで再採点する。</span></li>
+<li><input type="checkbox"><span>明確なpass/rejectは決定論的に処理し、曖昧な1〜2件だけ9B judge、さらに必要な場合だけ35Bへ昇格する。</span></li>
+<li><input type="checkbox"><span>最大2件、低信頼なら0件。commitした全カードにcertificate idとpage_idを付けるが、hostへ内部scoreや秘密情報を過剰注入しない。</span></li>
+<li><input type="checkbox"><span>certificate ledgerとlabel quality（silver/strong/gold）を実装し、teacher biasを監査できるようpolicy/model/content digestを保存する。</span></li>
+</ol>
+<p class="gate">受入ゲート: locked評価で注入Precision目標90%以上、hard-94の関連記憶Recallと53.5% rerank Recall@5を非劣化、negative-hit ≤20%、最大2件、無関係集合では0件。lower confidence boundとabstentionを併記し「0件だけでPrecisionを稼ぐ」設定を不採用にする。</p>
+</div>
+
+<div class="phase">
+<h3>Phase 3 — Stateful Recall Fieldをshadow実装</h3>
+<ol class="checklist">
+<li><input type="checkbox"><span><code>graph_expand_results()</code>内のneighbor生成・typed edge・traceを再利用可能なengineへ抽出し、現行stateless 2-hop挙動を回帰fixtureで固定する。</span></li>
+<li><input type="checkbox"><span><code>recall/recall_field.py</code>、<code>recall_field_schema.py</code>、<code>recall_field_store.py</code>を追加し、session hash/topic epoch単位でsparse activationを永続化する。</span></li>
+<li><input type="checkbox"><span>direct stimulus（prompt exact/entity、MCP search/read、record、certificate、commit）、typed spread、wall-clock/turn decay、global inhibition、capacity、不応期、negative activationを決定論的に実装する。</span></li>
+<li><input type="checkbox"><span>wikilink/backlink/entity/tagはdegree正規化する。positive co-fireだけを学習signalにし、exposure co-fireはauthority経路から除外する。</span></li>
+<li><input type="checkbox"><span>active/shadowの2 bufferとtopic epochを持ち、新entity・active centroid低一致・強いsemantic jumpでtopic reset/full-search fallbackする。</span></li>
+<li><input type="checkbox"><span>shadow評価ではteacher結果をField入力へ混ぜてから一致率を測る「答え漏洩」を禁止する。teacher commitは次turn以降の学習だけに使う。</span></li>
+<li><input type="checkbox"><span>ordered event log、sealed sparse snapshot、retention、session TTL、corrupt recovery、concurrent writerを実装する。</span></li>
+</ol>
+<pre><code>aᵢ(t+) = clamp(
+  decay(aᵢ, Δt, turn)
+  + directᵢ
+  + Σⱼ activationⱼ × typed_edgeⱼᵢ × degree_normalization
+  - contextual_negativeᵢ
+  - hub_penaltyᵢ
+  - lateral_inhibitionᵢ,
+  0, 1
+)</code></pre>
+<p class="gate">受入ゲート: shadow modeは注入を一切変更しない。固定event replayが決定的、session分離、TTL、topic reset、capacity上限、露出非学習をテスト。Field update p95 &lt; 50ms、artifactにprompt/page本文漏洩なし。</p>
+</div>
+
+<div class="phase">
+<h3>Phase 4 — Synaptic Cortexを「本物の脳」へ接続</h3>
+<ol class="checklist">
+<li><input type="checkbox"><span><code>_handoff/2026-07-29_2116_chronovisor-neural-graph-viewer_mockup.html</code>をvisual正本、既存<code>/cortex</code>とVS Code風Activity Barをintegration正本として、別画面を増やさずStateful Recall Field debuggerへ昇格する。</span></li>
+<li><input type="checkbox"><span><code>ops/cortex.py</code>はbrowser-safe projectionだけを担当し、Field engine/stateをDashboard層へ置かない。旧telemetry tailは<code>telemetry-fallback</code>と明示する。</span></li>
+<li><input type="checkbox"><span><code>dashboard_static/cortex-field.js</code>へsnapshot/event reducer、seq gap、reconnect、session切替を分離し、<code>cortex.js</code>を再巨大化させない。</span></li>
+<li><input type="checkbox"><span>live modeではブラウザ乱数cascadeを完全に止める。manual STIMULATEは<code>DEMO/REPLAY</code>と明示し、backend state/metricsへ絶対に書かない。</span></li>
+<li><input type="checkbox"><span>右HUDにFIELD STATE、DECISION TRACE、選択nodeのactivation内訳、certificate、reason code、LEGENDを追加する。</span></li>
+<li><input type="checkbox"><span>刺激はorange coreの二段pulse、伝播はedge上を移動する短いwhite comet、残留活性は強度連動のviolet halo、commitはgreen ring、reject/inhibitはred ring + reason glyphで描く。休止edge全体の白化は禁止する。</span></li>
+<li><input type="checkbox"><span>Observatoryの既存Recall panelへField mode、active/candidate/commit/reject、teacher agreement、field latency、stale/offlineを要約し、クリックでCortexへ移動する。</span></li>
+<li><input type="checkbox"><span>recent session selectorを追加し、session hashを表示する。異なるsessionの活性を暗黙に混ぜない。</span></li>
+<li><input type="checkbox"><span>reduced motion、Pause motion、keyboard Explorer、active-node table、ARIA summary、色以外のring/icon/state文字を実装する。</span></li>
+</ol>
+<div class="legend">
+<div><span class="dot orange"></span><strong>Orange</strong><br>直接刺激</div>
+<div><span class="dot white"></span><strong>White comet</strong><br>実際の伝播</div>
+<div><span class="dot purple"></span><strong>Violet</strong><br>残留活性</div>
+<div><span class="dot green"></span><strong>Green</strong><br>certificate / commit</div>
+<div><span class="dot red"></span><strong>Red</strong><br>棄却・抑制</div>
+</div>
+<p class="gate">受入ゲート: 受信eventと画面animationが1対1に追跡可能。白い線全体を「発火」に見せない。Field unavailable/stale/seq gapで偽発火なし。event-to-paint p95 ≤250ms、通常45fps以上、pulse queue ≤256。</p>
+</div>
+
+<div class="phase">
+<h3>Phase 5 — Contextual Anti-Index、Hub抑制、話題転換</h3>
+<ol class="checklist">
+<li><input type="checkbox"><span>現行query-conditioned Jaccard penaltyを基準に、reviewed false-positive/strong contradictionだけでcontextual negative centroidをshadow生成する。</span></li>
+<li><input type="checkbox"><span>ignored、page_ignored、certificate rejectを単独の真負例にしない。retractionとgolden positiveを適用前に照合する。</span></li>
+<li><input type="checkbox"><span>Hub penaltyはpageへの一律罰ではなく、query specificity、edge type、degree、supporting spanの有無で計算する。golden exact matchを保護する。</span></li>
+<li><input type="checkbox"><span>topic shift detectorをhard-94に加えて、stable topic / pronoun continuation / abrupt switch fixtureで評価する。</span></li>
+<li><input type="checkbox"><span>Anti-IndexとHub penaltyの寄与をcertificate/Field eventの<code>components</code>へ残し、Dashboardから理由を確認可能にする。</span></li>
+</ol>
+<p class="gate">受入ゲート: hard-94 negative-hitを20%未満へ改善し、Recall@5を1pt以上悪化させない。retracted feedbackや無関係sessionの負例がscoreへ影響しない。</p>
+</div>
+
+<div class="phase">
+<h3>Phase 6 — Field候補経路の段階昇格</h3>
+<ol class="checklist">
+<li><input type="checkbox"><span><code>recall.field.mode = off | shadow | candidate | active</code>とsession hash canaryを追加する。既定はshadow。</span></li>
+<li><input type="checkbox"><span>stable topicではField top 20〜30を<code>semantic_client.verify(query,page_ids)</code>で照合し、Recall Processorへ渡す。低一致・新entity・topic reset時は即full searchする。</span></li>
+<li><input type="checkbox"><span>candidate modeでもfull teacherを並列shadow実行し、Field漏れ・順位・fallback・E2E commit差分を継続記録する。</span></li>
+<li><input type="checkbox"><span>5% → 25% → 100%のcanaryごとにlocked evalとlive decision traceを確認し、悪化時は自動的にshadowへ戻す。</span></li>
+<li><input type="checkbox"><span>Field候補だけでcertificateを省略しない。Fieldは高速なbranch predictor、Recall Processorはretire/commit境界という役割を維持する。</span></li>
+</ol>
+<p class="gate">受入ゲート: stable-topic turnでteacher-committed pageがField top30に99%以上含まれる。最終注入Precision/Recallがteacher比1pt以内の非劣化、4秒超過0、full-search率とp95がbaselineより改善。条件未達ならshadowのまま完了扱いにしない。</p>
+</div>
+
+<div class="phase">
+<h3>Phase 7 — ラベル工場、学習Field、Recall Compiler</h3>
+<ol class="checklist">
+<li><input type="checkbox"><span>certificate、pull/read、recall_used、明示評価を一つのprovenance付きlabel ledgerへjoinし、silver/strong/goldの重みと重複排除を固定する。</span></li>
+<li><input type="checkbox"><span>strong positiveが200件未満、または十分なsession分散がない間はField edge weightを自動学習しない。gate/calibrationは既存どおり500件未満で適用しない。</span></li>
+<li><input type="checkbox"><span>時系列holdout、policy history、変更幅cap、last-known-good、自動rollbackをRecall Field/selectorにも適用する。</span></li>
+<li><input type="checkbox"><span><code>claims.py</code>を利用してentity/relation/value/time/sourceへ型付けするRecall Compilerをshadow追加し、構造化可能な質問は意味アドレスexact hitで候補化する。</span></li>
+<li><input type="checkbox"><span>Recall Compilerは矛盾・superseded・時制・source digestを検証し、曖昧な文章記憶は必ず通常のNemotron+BGE経路へfallbackする。</span></li>
+<li><input type="checkbox"><span>常時Shadow Teacherでfast pathと最高品質pathの不一致を収集し、採用ゲートを一度きりの94件から実trafficへ拡張する。</span></li>
+</ol>
+<p class="gate">受入ゲート: 学習とholdoutのsession/query漏洩なし。Recall Compiler exact-hitのPrecision 99%以上、coverageを別表示。fast pathはteacher非劣化を満たすまでproduction authorityにしない。</p>
+</div>
+
+<div class="phase">
+<h3>Phase 8 — 挑戦者比較（採用は勝ったものだけ）</h3>
+<ol class="checklist">
+<li><input type="checkbox"><span>ColBERT late-interactionを別index・別feature flagで実験し、BGE serviceと同じmanual-94/locked/full評価、MPS latency、index容量、incremental更新を比較する。</span></li>
+<li><input type="checkbox"><span>decoder judgeのprefix KV cacheはsupporting spanと固定promptだけをmodel/revision/template/position digest付きLRUで試す。全ページKV保存は禁止する。</span></li>
+<li><input type="checkbox"><span>ANE query encoder蒸留はteacher top-50再現率99%以上を採用条件とし、CPU BM25・ANE query・GPU BGEの同時実行が共有メモリ競合を含め本当に速いか計測する。</span></li>
+<li><input type="checkbox"><span>DSI、記憶LoRA、誤った先行注入はproduction候補から除外する。再検討する場合も独立lab planを要求する。</span></li>
+</ol>
+<p class="gate">受入ゲート: 挑戦者は品質非劣化かつE2E p95/資源使用量で明確に勝つ場合のみ採用。勝者なしを正当な結果として記録する。</p>
+</div>
+
+<div class="phase">
+<h3>Phase 9 — ドキュメント、GitHub runtime、live完了確認</h3>
+<ol class="checklist">
+<li><input type="checkbox"><span><code>docs/architecture.md</code>、<code>docs/hooks.md</code>、<code>docs/config.md</code>、<code>docs/operations.md</code>へservice topology、budget、Field state、dashboard、rollbackを反映する。</span></li>
+<li><input type="checkbox"><span>各Phaseを意味のある単位でcommitし、計画書checkboxと実行ログを完了直後に更新する。ユーザー既存の未追跡ファイルをcommitへ混ぜない。</span></li>
+<li><input type="checkbox"><span>push/restartの明示許可後、GitHub-backed runtimeを更新し、Dashboard、Semantic、Reranker、Hook、必要なworkerを再起動する。</span></li>
+<li><input type="checkbox"><span>runtime archiveの<code>direct_url.json</code> commit、running process/module path、service health、socket、Dashboard runtime commitをGitHub HEADと照合する。</span></li>
+<li><input type="checkbox"><span>実会話でstimulus→spread→candidate→certificate→commit/rejectを発生させ、hook出力、certificate ledger、Field event、Cortex animationが同じdecision/seqを示すことを確認する。</span></li>
+</ol>
+<p class="gate">受入ゲート: GitHub commit、runtime archive、running process、health、live Recall、live Cortexが一致。ローカルworktreeだけを見てproduction完了と報告しない。</p>
+</div>
+</section>
+
+<section class="rules" data-section="実行中更新ルール">
+<h2>実行中更新ルール</h2>
+<ul>
+<li>実行手順のチェックは、各手順の完了直後に更新する（まとめて更新しない）。</li>
+<li>チェックを更新したら、同時に <code>実行ログ</code> へ時刻付きで追記する。</li>
+<li>中断時は <code>状態</code>（<code>plan-meta</code> の JSON および <code>.badge</code> の <code>data-state</code>）を <code>blocked</code> にし、理由を <code>ブロッカー</code> に記入する。</li>
+<li>各Phase開始前に前Phaseの受入artifactを読み直す。前提数値を記憶や古いページから転記しない。</li>
+<li>品質契約、性能契約、UI契約を別々に検証し、「テストが通った」だけで品質・速度・見た目の完了を宣言しない。</li>
+<li>shadow/canary結果が悪い場合は、そのPhaseを無理にproductionへ昇格せず、失敗結果を計画書へ残す。</li>
+</ul>
+</section>
+
+<section data-section="やってはいけないこと">
+<h2>やってはいけないこと（必須）</h2>
+<ul>
+<li>発火値、co-fire exposure、prefetch exposure、カード表示回数を「正しい記憶」のラベルとして扱わない。</li>
+<li>未検証の投機候補をhost contextへ先行注入しない。次ターン訂正をrollbackとして扱わない。</li>
+<li>Field候補、BGE順位、9B judgeのいずれか一つだけでcommitしない。certificate境界を迂回しない。</li>
+<li>ignoredを無条件の負例、certificate passをgold、certificate failを真負例へ昇格しない。</li>
+<li>過去3発言を検索queryとしてそのまま混ぜない。異なるsessionやtopic epochの活性を暗黙に混ぜない。</li>
+<li>live Cortexでブラウザがランダム伝播を生成しない。demo/replayをlive表示に見せない。</li>
+<li>Dashboard artifactへraw prompt、query全文、supporting span、ページ本文、sensitive metadataを露出しない。</li>
+<li>BGEとNemotronを同じprocessへ詰め込み、障害・restart・resource pressureを連鎖させない。</li>
+<li>同期Hookの4秒deadline、600ms deterministic fallback、circuit breaker、fail-openを弱めない。</li>
+<li>既存BM25/Nemotron経路、旧selector、Field off/shadow fallbackをcanary完了前に削除しない。</li>
+<li>ColBERT、KV cache、ANE、学習rankerを「革命的だから」という理由だけでproduction採用しない。</li>
+<li>UI完了をスクリーンショットの印象だけで判定しない。指定viewportでDOM寸法・重なり・overflowを実測する。</li>
+</ul>
+</section>
+
+<section data-section="設定とロールバック">
+<h2>設定・canary・ロールバック</h2>
+<pre><code>[search.reranker.service]
+enabled = false
+socket = "~/.chronovisor/runtime/reranker.sock"
+timeout_ms = 1500
+mode = "shadow"                 # off | shadow | canary | on
+canary_percent = 0
+
+[recall.processor]
+enabled = false
+max_candidates = 10
+max_commits = 2
+certificate_required = true
+
+[recall.field]
+mode = "off"                   # off | shadow | candidate | active
+canary_percent = 0
+working_set_size = 30
+max_active_nodes = 128
+max_active_edges = 256
+positive_learning = false
+
+[recall.field.dashboard]
+enabled = false
+event_retention_days = 7
+
+[recall.compiler]
+mode = "off"                   # off | shadow | canary | on</code></pre>
+<ul>
+<li>各設定は独立してoffへ戻せる。Field failureはRecall Processorを止めず、Reranker failureは現行fusionを止めない。</li>
+<li>last-known-good artifactにpolicy/model/schema digestと評価結果を保存し、canary悪化時は一世代前へatomic rollbackする。</li>
+<li>Dashboardはread-only。表示層の故障やcorrupt eventでRecall本体のstateを変更・削除しない。</li>
+</ul>
+</section>
+
+<section data-section="変更対象">
+<h2>主な変更対象</h2>
+<table>
+<thead><tr><th>領域</th><th>既存</th><th>新規/変更候補</th></tr></thead>
+<tbody>
+<tr><td>Reranker</td><td><code>search/reranker.py</code><br><code>search/pipeline.py</code></td><td><code>search/reranker_service.py</code><br><code>search/reranker_client.py</code><br><code>tests/test_reranker_service.py</code></td></tr>
+<tr><td>Recall Processor</td><td><code>recall/recall_runtime.py</code><br><code>recall/claims.py</code><br><code>recall/recall_session.py</code></td><td><code>recall/recall_processor.py</code><br><code>recall/evidence_certificate.py</code><br><code>tests/test_recall_processor.py</code></td></tr>
+<tr><td>Field</td><td><code>search/search.py:graph_expand_results</code><br><code>search/cofire.py</code><br><code>search/prefetch.py</code></td><td><code>recall/recall_field.py</code><br><code>recall/recall_field_schema.py</code><br><code>recall/recall_field_store.py</code><br><code>tests/test_recall_field*.py</code></td></tr>
+<tr><td>評価</td><td><code>search/search_eval.py</code><br><code>recall/recall_eval.py</code></td><td>stage trace、manual-94 manifest、selector/Field shadow metrics、failure index拡張</td></tr>
+<tr><td>Dashboard backend</td><td><code>ops/cortex.py</code><br><code>ops/dashboard.py</code></td><td>Field snapshot endpoint、ordered WS events、sanitization、fallback</td></tr>
+<tr><td>Dashboard frontend</td><td><code>dashboard_static/cortex.*</code><br><code>index.html/app.js/style.css</code></td><td><code>cortex-field.js</code>、Decision Trace、Field summary、a11y、visual probes</td></tr>
+<tr><td>Runtime</td><td><code>launchd/com.trafficsign.chronovisor-semantic.plist</code><br><code>scripts/install-semantic-service</code></td><td>reranker plist/installer/status/health、runtime identity照合</td></tr>
+<tr><td>Docs</td><td><code>docs/architecture.md</code><br><code>docs/hooks.md</code><br><code>docs/config.md</code><br><code>docs/operations.md</code></td><td>新topology、event/certificate schema、runbook、rollback</td></tr>
+</tbody>
+</table>
+</section>
+
+<section data-section="検証手順">
+<h2>検証手順</h2>
+
+<h3>コード・契約</h3>
+<pre><code>uv run ruff check .
+uv run mypy src/chronovisor/core
+uv run lint-imports
+
+uv run pytest -q \
+  tests/test_reranker.py \
+  tests/test_reranker_service.py \
+  tests/test_recall_runtime.py \
+  tests/test_recall_processor.py \
+  tests/test_recall_field.py \
+  tests/test_cofire.py \
+  tests/test_prefetch.py \
+  tests/test_cortex.py \
+  tests/test_dashboard.py
+
+CHRONOVISOR_ROOT="$(mktemp -d -t chronovisor-test)" uv run pytest -q</code></pre>
+
+<h3>品質・性能</h3>
+<pre><code>uv run chronovisor-eval \
+  --source-filter manual \
+  --top-n 50 \
+  --variants bm25,hybrid-current,hybrid-graph,hybrid-rerank \
+  --debug-dump &lt;runtime-stage-trace.jsonl&gt; \
+  --failure-index \
+  --report --json
+
+uv run chronovisor-recall-eval --replay --json
+
+# 実装後に追加するField/Processor評価
+uv run chronovisor recall-processor-eval --manifest &lt;sealed-94-manifest&gt; --json
+uv run chronovisor recall-field-replay --fixture &lt;field-events&gt; --json</code></pre>
+
+<h3>Dashboard visual/DOM gate</h3>
+<ul>
+<li>viewports: 1280×720（Fable正本）、1024×720、1440×900、1920×1080、920×720、680×844、DPR 1/2。</li>
+<li><code>documentElement.scrollWidth &lt;= documentElement.clientWidth + 1</code>、Activity Bar/header/main/side/stage/HUDの矩形がviewport内、隣接矩形非重複、<code>canvas.width/height = CSS size × DPR</code>をDOM実測する。</li>
+<li>固定seedのsnapshot/eventsでstimulus、spread、active、commit、reject、offline、stale、reduced-motionを再生し、スクリーンショットとevent seqを照合する。</li>
+<li>1280×720では既存Fable mockup寸法を維持し、紫文字の見切れ、凡例重なり、sidebar/hud/canvasの枠外脱出を0にする。</li>
+</ul>
+
+<h3>Live runtime gate</h3>
+<ul>
+<li>Reranker/Semantic/Dashboardのsocket、PID、module path、status artifact、GitHub commitを照合する。</li>
+<li>35B稼働中・service停止・socket stale・WS切断・event gap・corrupt snapshotでfail-open/fallbackを確認する。</li>
+<li>同一decision idについてhook log、stage trace、certificate、Field events、Cortex Decision Traceが一致する。</li>
+</ul>
+</section>
+
+<section data-section="完了条件">
+<h2>完了条件</h2>
+<ul>
+<li>Recall Processorが常駐BGEとページ別Evidence Certificateを使い、0〜2件だけをcommitする。低信頼時は0件を返す。</li>
+<li>同期E2E p95 &lt; 3.5s、4秒超過0。Reranker/Field/model unavailable時もhost promptはfail-openで継続する。</li>
+<li>locked評価の注入Precision目標90%以上、hard-94のRecall/negative-hitが基準非劣化。abstentionと関連記憶Recallを同時に満たす。</li>
+<li>Fieldは最低shadowで全turnを追跡し、昇格条件を満たした場合のみcandidate/activeになる。単独commit経路は存在しない。</li>
+<li>Cortexの表示は実Field event/stateと一致し、live modeでランダム発火を生成しない。ObservatoryにもField健康状態が出る。</li>
+<li>刺激・伝播・残留活性・commit・rejectが色、形、ラベルで区別でき、指定viewport・reduced motion・keyboard/非Canvas経路を検証済み。</li>
+<li>certificate labelのsilver/strong/goldが分離され、サンプル不足時に学習・較正が走らない。</li>
+<li>各feature flag、last-known-good、service fallback、Field shadow rollbackが実際に動く。</li>
+<li>focused/full test、quality eval、performance、DOM、live runtime、GitHub-backed production確認の証拠が実行ログへ残る。</li>
+</ul>
+</section>
+
+<section class="blockers" data-section="ブロッカー">
+<h2>ブロッカー（発生時のみ）</h2>
+<ul>
+<li>なし。現時点の注意: manual 94件はlive golden由来なので、Phase 0でquery/ref/hashの再現性と個人情報非commit境界を最初に封印する。</li>
+</ul>
+</section>
+
+<section data-section="受け渡しメモ">
+<h2>受け渡しメモ（次担当へ）</h2>
+<ul>
+<li>この計画は既存の<code>2026-06-11_0042_recall-redesign.md</code>を否定せず、その実装済み部品を精度優先pipelineとstateful fieldへ接続する続編である。</li>
+<li>既存<code>graph_expand_results()</code>はstatelessなspreading activationとtraceを既に持つ。別engineを重複実装せず、typed neighbor/propagationを抽出して共有する。</li>
+<li>現行<code>RerankOutcome</code>はraw cross-encoder scoreをrankへ変換して捨てる。page selector/certificateにはraw scoreとmodel digestが必要。</li>
+<li>現行Cortexのambient auto-fireは削除済みだが、live eventの伝播は依然ブラウザ乱数。Field接続後はlive modeから除去する。</li>
+<li>visual基準は<code>_handoff/2026-07-29_2116_chronovisor-neural-graph-viewer_mockup.html</code>、既存統合の判断記録は<code>_handoff/2026-07-29_2116_chronovisor-neural-graph-viewer.html</code>。見た目を弱めず、データ源だけを実Fieldへ置換する。</li>
+<li>Dashboardには新ページを増やさない。<code>/</code>は要約、<code>/cortex</code>は詳細debuggerという二段構えを維持する。</li>
+<li>作業開始時点のworktreeにはユーザー所有の未追跡<code>_handoff/2026-06-11_0042_recall-redesign.md</code>と<code>logs/</code>がある。触らず、commitへ混ぜない。</li>
+<li>実装順は固定: Phase 0 → 1 → 2。Phase 3/4は2の後に並行可。Phase 5 → 6 → 7。Phase 8はproduction coreの後。</li>
+</ul>
+</section>
+
+<section data-section="実行ログ">
+<h2>実行ログ</h2>
+<ol class="log">
+<li><time>2026-07-30 20:11</time><span>Plan作成開始。保存先、HTMLテンプレート、baseline commitを固定。</span></li>
+<li><time>2026-07-30 20:20</time><span>現行Recall、Nemotron/BGE、prefetch/co-fire、評価資産、Cortex backend/frontend、live runtime baselineを調査。</span></li>
+<li><time>2026-07-30 20:23</time><span>Recall Processorをteacher、Stateful Recall Fieldをprivate candidate layer、Cortexを実観測デバッガとする統合計画をready化。</span></li>
+<li><time>2026-07-30 20:29</time><span>HTML5構造、メタデータ、受入ゲート、ロールバック、Fable visual正本と発火animation契約を最終監査。</span></li>
+</ol>
+</section>
+
+</body>
+</html>
