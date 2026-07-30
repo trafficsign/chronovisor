@@ -1921,6 +1921,17 @@ def _finalize_recall_result(
                     for item in result.context_items
                     if item.certificate_id
                 },
+                ranking_components=(
+                    result.evidence_features.get("processor", {}).get(
+                        "ranking_components",
+                        {},
+                    )
+                    if isinstance(
+                        result.evidence_features.get("processor"),
+                        dict,
+                    )
+                    else {}
+                ),
             )
         except Exception as exc:
             result.evidence_features["field_teacher_queue"] = {

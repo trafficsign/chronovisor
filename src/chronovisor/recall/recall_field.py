@@ -17,6 +17,7 @@ from chronovisor.recall.recall_field_schema import (
     load_recall_field_config,
     session_hash,
     topic_signature,
+    topic_transition,
 )
 from chronovisor.recall.recall_field_store import RecallFieldStore
 from chronovisor.search.graph_edges import typed_neighbors
@@ -25,14 +26,6 @@ from chronovisor.search.index_store import get_store
 
 def _clamp(value: float) -> float:
     return max(0.0, min(1.0, value))
-
-
-def _similarity(left: tuple[str, ...], right: tuple[str, ...]) -> float:
-    left_set = set(left)
-    right_set = set(right)
-    if not left_set or not right_set:
-        return 1.0 if left_set == right_set else 0.0
-    return len(left_set & right_set) / len(left_set | right_set)
 
 
 def _event(
@@ -134,6 +127,7 @@ def update_field_state(
     config: RecallFieldConfig,
     now: float,
     graph_store: Any | None = None,
+    prompt_text: str = "",
 ) -> tuple[RecallFieldState, list[FieldEvent]]:
     """Apply one turn of deterministic sparse activation dynamics."""
 
@@ -154,11 +148,14 @@ def update_field_state(
         config=config,
     )
 
-    similarity = _similarity(state.topic_signature, prompt_signature)
+    transition, similarity = topic_transition(
+        state.topic_signature,
+        prompt_signature,
+        prompt=prompt_text,
+        reset_similarity=config.topic_reset_similarity,
+    )
     topic_reset = bool(
-        state.topic_signature
-        and prompt_signature
-        and similarity < config.topic_reset_similarity
+        state.topic_signature and prompt_signature and transition == "reset"
     )
     if topic_reset:
         state.topic_epoch += 1
@@ -175,7 +172,15 @@ def update_field_state(
                 now,
                 "topic_reset",
                 delta=round(1.0 - similarity, 6),
-                reason_code="topic_signature_jump",
+                reason_code=(
+                    "explicit_topic_switch"
+                    if prompt_text
+                    and any(
+                        marker in prompt_text.casefold()
+                        for marker in ("別件", "ところで", "new topic", "switch topic")
+                    )
+                    else "topic_signature_jump"
+                ),
             )
         )
     else:
@@ -200,6 +205,12 @@ def update_field_state(
             weight=0.45,
             reason_code="prior_turn_teacher_commit",
             certificate_id=str(row.get("certificate_id") or ""),
+            components={
+                key: float(row["components"].get(key) or 0.0)
+                for key in ("anti_index", "hub_penalty")
+                if isinstance(row.get("components"), dict)
+                and isinstance(row["components"].get(key), int | float)
+            },
         )
         for row in applicable_commits
     )
@@ -232,6 +243,14 @@ def update_field_state(
                 if stimulus.kind == "teacher_commit"
                 else "stimulus"
             )
+        node.anti_index = max(
+            node.anti_index,
+            float(stimulus.components.get("anti_index") or 0.0),
+        )
+        node.hub_penalty = max(
+            node.hub_penalty,
+            float(stimulus.components.get("hub_penalty") or 0.0),
+        )
         node.last_turn = state.turn
         node.last_seq = state.seq + 1
         events.append(
@@ -247,6 +266,8 @@ def update_field_state(
                 components={
                     "direct": round(node.direct, 6),
                     "negative": round(node.negative, 6),
+                    "anti_index": round(node.anti_index, 6),
+                    "hub_penalty": round(node.hub_penalty, 6),
                 },
             )
         )
@@ -382,6 +403,7 @@ def run_field_turn(
             prompt_signature=signature,
             config=cfg,
             now=observed,
+            prompt_text=prompt,
         )
 
     state, events = field_store.transact(hashed_session, mutate, now=observed)
@@ -407,7 +429,15 @@ def run_field_turn(
                 "components": {
                     key: round(float(value), 6)
                     for key, value in asdict(node).items()
-                    if key in {"direct", "spread", "negative", "inhibition"}
+                    if key
+                    in {
+                        "direct",
+                        "spread",
+                        "negative",
+                        "inhibition",
+                        "anti_index",
+                        "hub_penalty",
+                    }
                 },
             }
             for page_id, node in top
@@ -423,6 +453,7 @@ def queue_teacher_commits(
     session_id: str,
     page_ids: list[str],
     certificate_ids: dict[str, str] | None = None,
+    ranking_components: dict[str, dict[str, Any]] | None = None,
     config: RecallFieldConfig | None = None,
     store: RecallFieldStore | None = None,
     now: float | None = None,
@@ -436,6 +467,7 @@ def queue_teacher_commits(
     observed = time.time() if now is None else now
     field_store = store or RecallFieldStore(config=cfg)
     certs = certificate_ids or {}
+    components_by_page = ranking_components or {}
 
     def mutate(
         state: RecallFieldState,
@@ -455,6 +487,18 @@ def queue_teacher_commits(
                     "certificate_id": certs.get(page_id, ""),
                     "topic_epoch": state.topic_epoch,
                     "available_turn": state.turn + 1,
+                    "components": {
+                        key: round(
+                            float(components_by_page[page_id].get(key) or 0.0),
+                            6,
+                        )
+                        for key in ("anti_index", "hub_penalty")
+                        if isinstance(components_by_page.get(page_id), dict)
+                        and isinstance(
+                            components_by_page[page_id].get(key),
+                            int | float,
+                        )
+                    },
                 }
             )
             events.append(
@@ -465,6 +509,18 @@ def queue_teacher_commits(
                     page_id=page_id,
                     reason_code="teacher_commit_next_turn",
                     certificate_id=certs.get(page_id, ""),
+                    components={
+                        key: round(
+                            float(components_by_page[page_id].get(key) or 0.0),
+                            6,
+                        )
+                        for key in ("anti_index", "hub_penalty")
+                        if isinstance(components_by_page.get(page_id), dict)
+                        and isinstance(
+                            components_by_page[page_id].get(key),
+                            int | float,
+                        )
+                    },
                 )
             )
         state.updated_at_epoch = observed

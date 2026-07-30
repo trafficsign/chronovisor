@@ -45,7 +45,14 @@ _FIELD_EVENT_KEYS = {
     "certificate_id",
     "components",
 }
-_FIELD_COMPONENT_KEYS = {"direct", "spread", "negative", "inhibition"}
+_FIELD_COMPONENT_KEYS = {
+    "direct",
+    "spread",
+    "negative",
+    "inhibition",
+    "anti_index",
+    "hub_penalty",
+}
 
 
 @dataclass(frozen=True)

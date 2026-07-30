@@ -52,6 +52,11 @@ class EvidenceCertificate:
             "content_sha256": self.content_sha256,
             "policy_sha256": self.policy_sha256,
             "model_revision": self.model_revision,
+            "components": {
+                key: self.features[key]
+                for key in ("anti_index", "hub_penalty")
+                if isinstance(self.features.get(key), int | float)
+            },
             "reasons": list(self.reasons),
         }
 
@@ -173,6 +178,7 @@ def certify_candidate(
     *,
     policy: dict[str, Any],
     reranker_score: dict[str, Any] | None = None,
+    ranking_components: dict[str, Any] | None = None,
 ) -> EvidenceCertificate:
     """Build a deterministic, auditable page certificate."""
 
@@ -248,6 +254,7 @@ def certify_candidate(
         if passed and reranker_support and lexical_support and source_line > 0
         else "silver"
     )
+    contextual = ranking_components or {}
     return EvidenceCertificate(
         certificate_id=certificate_id,
         page_id=str(candidate.page_id),
@@ -266,6 +273,22 @@ def certify_candidate(
             "lexical_coverage": round(lexical_coverage, 6),
             "reranker_raw": reranker_raw,
             "reranker_margin": round(reranker_margin, 6),
+            "anti_index": round(
+                float(contextual.get("anti_index") or 0.0), 6
+            ),
+            "hub_penalty": round(
+                float(contextual.get("hub_penalty") or 0.0), 6
+            ),
+            "hub_degree": int(float(contextual.get("hub_degree") or 0)),
+            "query_specificity": round(
+                float(contextual.get("query_specificity") or 0.0), 6
+            ),
+            "support_coverage": round(
+                float(contextual.get("support_coverage") or lexical_coverage), 6
+            ),
+            "exact_match_protected": (
+                contextual.get("exact_match_protected") is True
+            ),
         },
         reasons=tuple(reasons),
         created_at=datetime.now().isoformat(timespec="milliseconds"),

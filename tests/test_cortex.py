@@ -287,8 +287,10 @@ def test_cortex_field_projection_is_sealed_session_scoped_and_browser_safe(
             "components": {
                 "direct": 0.6,
                 "spread": 0.2,
-                "negative": 0.0,
-                "inhibition": 0.08,
+                    "negative": 0.0,
+                    "inhibition": 0.08,
+                    "anti_index": 0.0,
+                    "hub_penalty": 0.0,
             },
             "last_seq": 2,
         }
@@ -345,8 +347,10 @@ def test_cortex_event_cursor_tails_only_selected_field_session(
             "components": {
                 "direct": 0.0,
                 "spread": 0.5,
-                "negative": 0.0,
-                "inhibition": 0.0,
+                    "negative": 0.0,
+                    "inhibition": 0.0,
+                    "anti_index": 0.0,
+                    "hub_penalty": 0.0,
             },
             "source": "stateful-recall-field",
         }

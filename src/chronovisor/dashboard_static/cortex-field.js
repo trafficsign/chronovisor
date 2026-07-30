@@ -12,7 +12,14 @@
     "snapshot",
     "fault",
   ]);
-  const COMPONENTS = ["direct", "spread", "negative", "inhibition"];
+  const COMPONENTS = [
+    "direct",
+    "spread",
+    "negative",
+    "inhibition",
+    "anti_index",
+    "hub_penalty",
+  ];
   const MAX_EVENTS = 256;
 
   function finite(value, fallback = 0) {

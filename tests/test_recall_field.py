@@ -14,6 +14,7 @@ from chronovisor.recall.recall_field_schema import (
     load_recall_field_config,
     session_hash,
     topic_signature,
+    topic_transition,
 )
 from chronovisor.recall.recall_field_store import RecallFieldStore
 from chronovisor.search.graph_edges import typed_neighbors
@@ -179,6 +180,35 @@ def test_field_topic_reset_capacity_and_negative_activation(monkeypatch) -> None
     assert state.shadow["c"].negative > 0
     assert any(event.kind == "topic_reset" for event in events)
     assert any(event.kind == "inhibit" for event in events)
+
+
+def test_topic_shift_distinguishes_stable_pronoun_and_abrupt_switch() -> None:
+    previous = topic_signature("Chronovisor の Recall Field を実装する")
+
+    stable, stable_similarity = topic_transition(
+        previous,
+        topic_signature("Chronovisor Recall Field の実装を続ける"),
+        prompt="Chronovisor Recall Field の実装を続ける",
+        reset_similarity=0.15,
+    )
+    continuation, continuation_similarity = topic_transition(
+        previous,
+        topic_signature("それの続きはどうなった"),
+        prompt="それの続きはどうなった",
+        reset_similarity=0.15,
+    )
+    abrupt, _abrupt_similarity = topic_transition(
+        previous,
+        topic_signature("ところで旅行の航空券を比較したい"),
+        prompt="ところで旅行の航空券を比較したい",
+        reset_similarity=0.15,
+    )
+
+    assert stable == "stable"
+    assert stable_similarity >= 0.15
+    assert continuation == "continuation"
+    assert continuation_similarity < 0.15
+    assert abrupt == "reset"
 
 
 def test_exposure_cofire_is_not_an_authority_edge(monkeypatch) -> None:

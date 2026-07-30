@@ -440,6 +440,9 @@ def select_certified_candidates(
     """Certify and select a dynamic 0..N non-redundant evidence set."""
 
     metadata = reranker_metadata or {}
+    from chronovisor.recall.contextual_suppression import ranking_components
+
+    suppression_components = ranking_components(query, candidates)
     model_revision = str(metadata.get("model") or metadata.get("revision") or "")
     raw_scores = {
         str(row.get("page_id") or ""): {
@@ -463,6 +466,7 @@ def select_certified_candidates(
             candidate,
             policy=policy_payload,
             reranker_score=raw_scores.get(str(candidate.page_id)),
+            ranking_components=suppression_components.get(str(candidate.page_id)),
         )
         for candidate in candidates[: max(1, max_candidates)]
     ]
@@ -534,6 +538,7 @@ def select_certified_candidates(
         "estimated_tokens": used_tokens,
         "ledger_written": ledger_written,
         "judge": judge_metadata,
+        "ranking_components": suppression_components,
         "certificates": [certificate.public_summary() for certificate in certificates],
     }
 

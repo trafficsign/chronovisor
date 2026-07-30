@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from chronovisor.core.runtime_config import active_config_file, load_toml_file
+from chronovisor.search.search_types import tokenize
 
 FIELD_SCHEMA_VERSION = 1
 FIELD_EVENT_KINDS = frozenset(
@@ -52,6 +53,8 @@ class ActivationNode:
     spread: float = 0.0
     negative: float = 0.0
     inhibition: float = 0.0
+    anti_index: float = 0.0
+    hub_penalty: float = 0.0
     last_turn: int = 0
     last_seq: int = 0
 
@@ -65,6 +68,10 @@ class ActivationNode:
             spread=_bounded_float(value.get("spread"), 0.0, 0.0, 1.0),
             negative=_bounded_float(value.get("negative"), 0.0, 0.0, 1.0),
             inhibition=_bounded_float(value.get("inhibition"), 0.0, 0.0, 1.0),
+            anti_index=_bounded_float(value.get("anti_index"), 0.0, 0.0, 1.0),
+            hub_penalty=_bounded_float(
+                value.get("hub_penalty"), 0.0, 0.0, 1.0
+            ),
             last_turn=_bounded_int(value.get("last_turn"), 0, 0, 1_000_000_000),
             last_seq=_bounded_int(value.get("last_seq"), 0, 0, 10_000_000_000),
         )
@@ -166,6 +173,7 @@ class FieldStimulus:
     negative: bool = False
     reason_code: str = ""
     certificate_id: str = ""
+    components: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -198,19 +206,48 @@ def session_hash(host: str, session_id: str) -> str:
 
 
 def topic_signature(text: str) -> tuple[str, ...]:
-    tokens = {
-        match.group(0).casefold()
-        for match in re.finditer(
-            r"[a-z0-9_.+-]{3,}|[\u3040-\u30ff\u3400-\u9fff]{2,}",
-            text,
-        )
-    }
+    tokens = set(tokenize(text))
     return tuple(
         sorted(
             hashlib.sha256(token.encode("utf-8")).hexdigest()[:12]
             for token in tokens
         )
     )[:64]
+
+
+_PRONOUN_CONTINUATION_RE = re.compile(
+    r"(?:それ|その|これ|この|あれ|前の|さっきの|続き|"
+    r"\b(?:it|that|this|those|them|same)\b)",
+    re.IGNORECASE,
+)
+_ABRUPT_SWITCH_RE = re.compile(
+    r"(?:話(?:は|を)?変|別件|ところで|unrelated|new topic|switch topic)",
+    re.IGNORECASE,
+)
+
+
+def topic_transition(
+    previous: tuple[str, ...],
+    current: tuple[str, ...],
+    *,
+    prompt: str = "",
+    reset_similarity: float,
+) -> tuple[str, float]:
+    """Classify stable, pronoun continuation, or abrupt topic reset."""
+
+    previous_set = set(previous)
+    current_set = set(current)
+    if not previous_set or not current_set:
+        similarity = 1.0 if previous_set == current_set else 0.0
+        return "stable", similarity
+    similarity = len(previous_set & current_set) / len(previous_set | current_set)
+    if _ABRUPT_SWITCH_RE.search(prompt):
+        return "reset", similarity
+    if similarity >= reset_similarity:
+        return "stable", similarity
+    if _PRONOUN_CONTINUATION_RE.search(prompt) and len(current_set) <= 12:
+        return "continuation", similarity
+    return "reset", similarity
 
 
 def load_recall_field_config(

@@ -48,7 +48,8 @@ def test_similar_query_penalizes_feedback_pages(feedback_file) -> None:
     write_feedback(feedback_file, [
         {
             "ts": "2026-06-11T10:23:35",
-            "kind": "injection_ignored",
+            "kind": "false-positive",
+            "frontier_reviewed": True,
             "prompt": "メニューバーにショートカットを置く設定の話",
             "expected_pages": ["irrelevant-page"],
         },
@@ -76,12 +77,10 @@ def test_local_auditor_precision_label_cannot_penalize_without_frontier(
 
     write_feedback(feedback_file, [{**row, "frontier_reviewed": True}])
     negative_feedback._CACHE = negative_feedback._Cache()
-    assert negative_feedback.penalties_for_query(row["prompt"], CONFIG) == {
-        "possibly-relevant-page": pytest.approx(0.85)
-    }
+    assert negative_feedback.penalties_for_query(row["prompt"], CONFIG) == {}
 
 
-def test_page_ignored_penalizes_only_explicit_negative_page(feedback_file) -> None:
+def test_page_ignored_is_not_a_standalone_true_negative(feedback_file) -> None:
     write_feedback(feedback_file, [
         {
             "ts": "2026-06-11T10:23:35",
@@ -97,16 +96,27 @@ def test_page_ignored_penalizes_only_explicit_negative_page(feedback_file) -> No
         "G32P と P24U のレビューを比較して", CONFIG
     )
 
-    assert penalties == {"p24u-review": pytest.approx(0.85)}
-    adjusted = negative_feedback.apply_penalties(
-        [page("g32p-review", 0.8), page("p24u-review", 0.9)], penalties
+    assert penalties == {}
+
+
+def test_exact_page_ignored_retraction_preserves_other_feedback(
+    feedback_file,
+    tmp_path,
+    monkeypatch,
+) -> None:
+    legacy_path = tmp_path / "legacy-noise.md"
+    valid_path = tmp_path / "valid-noise.md"
+    legacy_path.write_text("legacy", encoding="utf-8")
+    valid_path.write_text("valid", encoding="utf-8")
+    page_paths = {
+        "legacy-noise": legacy_path,
+        "valid-noise": valid_path,
+    }
+    monkeypatch.setattr(
+        negative_feedback,
+        "find_mutation_page",
+        lambda page_id: page_paths.get(page_id),
     )
-    assert [item.page_id for item in adjusted] == ["g32p-review", "p24u-review"]
-    assert adjusted[0].score == pytest.approx(0.8)
-    assert adjusted[1].score == pytest.approx(0.9 * 0.15)
-
-
-def test_exact_page_ignored_retraction_preserves_other_feedback(feedback_file) -> None:
     legacy = {
         "ts": "2026-07-11T10:23:35Z",
         "kind": "page_ignored",
@@ -114,12 +124,19 @@ def test_exact_page_ignored_retraction_preserves_other_feedback(feedback_file) -
         "content_correction_key": "legacy-key",
         "prompt": "same query",
         "negative_pages": ["legacy-noise"],
+        "negative_page_hashes": {
+            "legacy-noise": hashlib.sha256(legacy_path.read_bytes()).hexdigest()
+        },
         "frontier_reviewed": True,
+        "label_quality": "strong",
     }
     valid = {
         **legacy,
         "content_correction_key": "valid-key",
         "negative_pages": ["valid-noise"],
+        "negative_page_hashes": {
+            "valid-noise": hashlib.sha256(valid_path.read_bytes()).hexdigest()
+        },
     }
     write_feedback(
         feedback_file,
@@ -163,8 +180,9 @@ def test_page_ignored_hash_binding_expires_when_page_content_changes(
                 "kind": "page_ignored",
                 "prompt": "G32P と P24U のレビューを比較して",
                 "negative_pages": ["p24u-review"],
-                "negative_page_hashes": {"p24u-review": original_hash},
-                "frontier_reviewed": True,
+                    "negative_page_hashes": {"p24u-review": original_hash},
+                    "frontier_reviewed": True,
+                    "label_quality": "strong",
             }
         ],
     )
@@ -227,9 +245,9 @@ def test_newer_frontier_page_ignored_overrides_older_positive_golden(feedback_fi
         [
             {
                 "ts": "2026-07-11T08:00:00Z",
-                "kind": "page_ignored",
+                "kind": "false-positive",
                 "prompt": "G32P と P24U のレビューを比較して",
-                "negative_pages": ["p24u-review"],
+                "expected_pages": ["p24u-review"],
                 "frontier_reviewed": True,
             }
         ],
@@ -335,7 +353,8 @@ def test_default_feedback_uses_process_shared_derived_cache(
     cache = tmp_path / "negative-feedback-cache.json"
     row = {
         "ts": "2026-06-11T10:23:35",
-        "kind": "injection_ignored",
+        "kind": "false-positive",
+        "frontier_reviewed": True,
         "prompt": "Chronovisor sync recall",
         "expected_pages": ["recall-page"],
     }
@@ -363,14 +382,16 @@ def test_reviewed_positive_protects_page_from_penalty(feedback_file, tmp_path) -
     write_feedback(feedback_file, [
         {
             "ts": "2026-06-11T10:23:35",
-            "kind": "injection_ignored",
+            "kind": "false-positive",
+            "frontier_reviewed": True,
             "prompt": "保存みたいに自律的に改善できるようになってほしい",
             "expected_pages": ["wiki-save-hook", "unrelated-noise"],
         },
     ])
     write_feedback(tmp_path / "golden.jsonl", [
-        {
-            "query": "保存みたいに自律的に改善できるようになってほしい",
+            {
+                "ts": "2026-06-12T10:23:35Z",
+                "query": "保存みたいに自律的に改善できるようになってほしい",
             "expected_pages": ["wiki-save-hook"],
             "negative_pages": [],
             "reviewed": True,
@@ -387,7 +408,8 @@ def test_unreviewed_golden_rows_do_not_protect(feedback_file, tmp_path) -> None:
     write_feedback(feedback_file, [
         {
             "ts": "2026-06-11T10:23:35",
-            "kind": "injection_ignored",
+            "kind": "false-positive",
+            "frontier_reviewed": True,
             "prompt": "保存みたいに自律的に改善できるようになってほしい",
             "expected_pages": ["wiki-save-hook"],
         },
@@ -422,7 +444,8 @@ def test_cache_invalidates_on_file_change(feedback_file) -> None:
     write_feedback(feedback_file, [
         {
             "ts": "2026-06-11T10:23:35",
-            "kind": "injection_ignored",
+            "kind": "false-positive",
+            "frontier_reviewed": True,
             "prompt": "メニューバーにショートカットを置く設定の話",
             "expected_pages": ["page-one"],
         },
@@ -436,7 +459,8 @@ def test_cache_invalidates_on_file_change(feedback_file) -> None:
     write_feedback(feedback_file, [
         {
             "ts": "2026-06-11T10:23:35",
-            "kind": "injection_ignored",
+            "kind": "false-positive",
+            "frontier_reviewed": True,
             "prompt": "メニューバーにショートカットを置く設定の話",
             "expected_pages": ["page-two"],
         },

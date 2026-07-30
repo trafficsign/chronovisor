@@ -1466,6 +1466,8 @@
       spread: 0,
       negative: 0,
       inhibition: 0,
+      anti_index: 0,
+      hub_penalty: 0,
     };
     return `
       <div class="sec"><h3>ACTIVATION</h3>
@@ -1475,6 +1477,8 @@
           <div><span>spread</span><b>${fieldValue(components.spread)}</b></div>
           <div><span>negative</span><b>${fieldValue(components.negative)}</b></div>
           <div><span>inhibition</span><b>${fieldValue(components.inhibition)}</b></div>
+          <div><span>anti-index</span><b>${fieldValue(components.anti_index)}</b></div>
+          <div><span>hub penalty</span><b>${fieldValue(components.hub_penalty)}</b></div>
         </div>
         <div class="mrow"><span>state</span><b>${escapeHtml(state?.state || "inactive")}</b></div>
         <div class="mrow"><span>reason</span><b>${escapeHtml(state?.reasonCode || "—")}</b></div>

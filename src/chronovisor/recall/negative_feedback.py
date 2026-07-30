@@ -20,6 +20,7 @@ import hashlib
 import json
 import os
 import threading
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -51,6 +52,7 @@ class _FeedbackEntry:
     kind: str = ""
     frontier_confirmed: bool = False
     page_hashes: tuple[tuple[str, str], ...] = ()
+    label_quality: str = ""
 
 
 @dataclass
@@ -132,6 +134,7 @@ def _entry_payload(entry: _FeedbackEntry) -> dict[str, object]:
         "kind": entry.kind,
         "frontier_confirmed": entry.frontier_confirmed,
         "page_hashes": [list(item) for item in entry.page_hashes],
+        "label_quality": entry.label_quality,
     }
 
 
@@ -159,6 +162,7 @@ def _entry_from_payload(value: object) -> _FeedbackEntry | None:
         kind=str(value.get("kind") or ""),
         frontier_confirmed=value.get("frontier_confirmed") is True,
         page_hashes=tuple(page_hashes),
+        label_quality=str(value.get("label_quality") or ""),
     )
 
 
@@ -256,17 +260,21 @@ def _load_entries(config: NegativeFeedbackConfig) -> list[_FeedbackEntry]:
         if not isinstance(row, dict) or row.get("kind") not in config.kinds:
             continue
         kind = str(row.get("kind") or "")
-        source = str(row.get("source") or "")
-        # The local recall auditor emits observational precision labels. Those
-        # rows remain useful evidence for replay/evaluation, but cannot alter
-        # production ranking until a frontier reviewer has confirmed them.
-        if (
-            kind == "injection_ignored"
-            and source in {"auditor", "auditor_precision"}
-            and row.get("frontier_reviewed") is not True
-        ):
-            continue
-        if kind == "page_ignored" and row.get("frontier_reviewed") is not True:
+        # Exposure outcomes are not relevance labels. Only a reviewed false
+        # positive or a hash-bound, strong contradiction may suppress ranking.
+        # ignored/page_ignored/certificate rejects remain label-factory inputs,
+        # never standalone production negatives.
+        label_quality = str(row.get("label_quality") or "")
+        reviewed_false_positive = (
+            kind == "false-positive" and row.get("frontier_reviewed") is True
+        )
+        strong_contradiction = (
+            kind in {"strong-contradiction", "contradiction", "page_ignored"}
+            and row.get("frontier_reviewed") is True
+            and label_quality == "strong"
+            and isinstance(row.get("negative_page_hashes"), dict)
+        )
+        if not (reviewed_false_positive or strong_contradiction):
             continue
         prompt = row.get("prompt")
         negative_pages = row.get("negative_pages")
@@ -309,6 +317,7 @@ def _load_entries(config: NegativeFeedbackConfig) -> list[_FeedbackEntry]:
                 kind=kind,
                 frontier_confirmed=(row.get("frontier_reviewed") is True),
                 page_hashes=page_hashes,
+                label_quality=label_quality,
             )
         )
 
@@ -380,18 +389,19 @@ def _load_protections() -> list[_FeedbackEntry]:
     return entries
 
 
-def penalties_for_query(
+def contextual_negative_trace(
     query: str,
     config: NegativeFeedbackConfig | None = None,
-) -> dict[str, float]:
-    """Return ``{page_id: penalty}`` with penalty in [0, config.penalty]."""
+) -> dict[str, dict[str, object]]:
+    """Build a query-conditioned centroid trace from strong negative evidence."""
+
     config = config or load_negative_feedback_config()
     if not config.enabled:
         return {}
     query_tokens = _tokenize(query)
     if not query_tokens:
         return {}
-    penalties: dict[str, float] = {}
+    matched_entries: dict[str, list[tuple[_FeedbackEntry, float]]] = {}
     # A frontier-confirmed page-scoped rejection is stronger than an older
     # reviewed positive label for the same query/page. Keep its newest
     # timestamp separately from penalty magnitude so a slightly different
@@ -404,7 +414,6 @@ def penalties_for_query(
         jaccard = len(query_tokens & entry.tokens) / union
         if jaccard < config.similarity_threshold:
             continue
-        page_penalty = config.penalty * jaccard
         expected_hashes = dict(entry.page_hashes)
         for page_id in entry.pages:
             expected_hash = expected_hashes.get(page_id)
@@ -420,18 +429,50 @@ def penalties_for_query(
                     current_hash = ""
                 if current_hash != expected_hash:
                     continue
-            if page_penalty > penalties.get(page_id, 0.0):
-                penalties[page_id] = page_penalty
+            matched_entries.setdefault(page_id, []).append((entry, jaccard))
             if entry.frontier_confirmed:
                 previous = newest_confirmed_ignored.get(page_id)
                 if page_id not in newest_confirmed_ignored or _ts_rank(entry.ts) > _ts_rank(previous):
                     newest_confirmed_ignored[page_id] = entry.ts
-    if not penalties:
+    if not matched_entries:
         return {}
+
+    trace: dict[str, dict[str, object]] = {}
+    for page_id, matches in matched_entries.items():
+        token_weights: Counter[str] = Counter()
+        strongest_jaccard = 0.0
+        newest_ts: datetime | None = None
+        evidence_kinds: set[str] = set()
+        for entry, jaccard in matches:
+            strongest_jaccard = max(strongest_jaccard, jaccard)
+            evidence_kinds.add(entry.kind)
+            if _ts_rank(entry.ts) > _ts_rank(newest_ts):
+                newest_ts = entry.ts
+            for token in entry.tokens:
+                token_weights[token] += jaccard
+        centroid_tokens = frozenset(
+            token
+            for token, _weight in token_weights.most_common(48)
+        )
+        centroid_union = len(query_tokens | centroid_tokens)
+        centroid_similarity = (
+            len(query_tokens & centroid_tokens) / centroid_union
+            if centroid_union
+            else 0.0
+        )
+        similarity = max(strongest_jaccard, centroid_similarity)
+        trace[page_id] = {
+            "penalty": min(config.penalty, config.penalty * similarity),
+            "similarity": round(similarity, 6),
+            "centroid_terms": len(centroid_tokens),
+            "evidence_count": len(matches),
+            "evidence_kinds": sorted(evidence_kinds),
+            "newest_ts": newest_ts,
+        }
 
     protected: dict[str, tuple[float, datetime | None]] = {}
     for entry in _load_protections():
-        if not set(entry.pages) & set(penalties):
+        if not set(entry.pages) & set(trace):
             continue
         union = len(query_tokens | entry.tokens)
         if union == 0:
@@ -448,7 +489,8 @@ def penalties_for_query(
             ):
                 protected[page_id] = (jaccard, entry.ts)
     for page_id, (pos_jaccard, positive_ts) in protected.items():
-        penalty = penalties.get(page_id)
+        row = trace.get(page_id)
+        penalty = float(row.get("penalty") or 0.0) if row else None
         confirmed_ts = newest_confirmed_ignored.get(page_id)
         confirmed_is_newer = (
             page_id in newest_confirmed_ignored
@@ -459,8 +501,20 @@ def penalties_for_query(
             and not confirmed_is_newer
             and pos_jaccard * config.penalty >= penalty
         ):
-            del penalties[page_id]
-    return penalties
+            del trace[page_id]
+    return trace
+
+
+def penalties_for_query(
+    query: str,
+    config: NegativeFeedbackConfig | None = None,
+) -> dict[str, float]:
+    """Return strong contextual penalties only; never infer from exposure."""
+
+    return {
+        page_id: float(row["penalty"])
+        for page_id, row in contextual_negative_trace(query, config).items()
+    }
 
 
 def apply_penalties(results, penalties: dict[str, float]):

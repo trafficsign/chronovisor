@@ -374,11 +374,11 @@ event types:
 <div class="phase">
 <h3>Phase 5 — Contextual Anti-Index、Hub抑制、話題転換</h3>
 <ol class="checklist">
-<li><input type="checkbox"><span>現行query-conditioned Jaccard penaltyを基準に、reviewed false-positive/strong contradictionだけでcontextual negative centroidをshadow生成する。</span></li>
-<li><input type="checkbox"><span>ignored、page_ignored、certificate rejectを単独の真負例にしない。retractionとgolden positiveを適用前に照合する。</span></li>
-<li><input type="checkbox"><span>Hub penaltyはpageへの一律罰ではなく、query specificity、edge type、degree、supporting spanの有無で計算する。golden exact matchを保護する。</span></li>
-<li><input type="checkbox"><span>topic shift detectorをhard-94に加えて、stable topic / pronoun continuation / abrupt switch fixtureで評価する。</span></li>
-<li><input type="checkbox"><span>Anti-IndexとHub penaltyの寄与をcertificate/Field eventの<code>components</code>へ残し、Dashboardから理由を確認可能にする。</span></li>
+<li><input type="checkbox" checked><span>現行query-conditioned Jaccard penaltyを基準に、reviewed false-positive/strong contradictionだけでcontextual negative centroidをshadow生成する。</span></li>
+<li><input type="checkbox" checked><span>ignored、page_ignored、certificate rejectを単独の真負例にしない。retractionとgolden positiveを適用前に照合する。</span></li>
+<li><input type="checkbox" checked><span>Hub penaltyはpageへの一律罰ではなく、query specificity、edge type、degree、supporting spanの有無で計算する。golden exact matchを保護する。</span></li>
+<li><input type="checkbox" checked><span>topic shift detectorをhard-94に加えて、stable topic / pronoun continuation / abrupt switch fixtureで評価する。</span></li>
+<li><input type="checkbox" checked><span>Anti-IndexとHub penaltyの寄与をcertificate/Field eventの<code>components</code>へ残し、Dashboardから理由を確認可能にする。</span></li>
 </ol>
 <p class="gate">受入ゲート: hard-94 negative-hitを20%未満へ改善し、Recall@5を1pt以上悪化させない。retracted feedbackや無関係sessionの負例がscoreへ影響しない。</p>
 </div>
@@ -618,6 +618,7 @@ uv run chronovisor recall-field-replay --fixture &lt;field-events&gt; --json</co
 <li><time>2026-07-30 22:24</time><span>Phase 2実装完了、production昇格は保留。RRF飽和/hit-count floor/過去query混入/選択前session除外を修正し、page certificate、0〜6 pointer、rich最大2、token/冗長性停止、private ledger、9B→35B fail-closed judgeを追加。94件初回certificateはp95 614.1ms・4秒超過0だが、期待pageを正例とする厳しいproxyでPrecision 7.1% / case recall 26.6% / abstention 11.7%となり不合格。judge利用不能時に0件へ倒すだけの構成も不採用とし、<code>recall.processor.enabled=false</code>を維持。artifactは<code>runtime/search-eval/phase2-certificate-eval.json</code>。</span></li>
 <li><time>2026-07-30 22:41</time><span>Phase 3完了。typed neighborをSearchとFieldの共通engineへ抽出し、shadow/active buffer、session hash、topic epoch、decay、refractory、negative activation、degree正規化spread、positive-used co-fire限定、次turn teacher commit、sealed snapshot/event retention/TTL/corrupt recovery/concurrent writerを実装。実Wiki 100turnはp50 17.7ms / p95 19.5ms / max 72.9ms / error 0、artifactへのraw prompt漏洩なし。Fieldはshadowで注入経路を変更しない。</span></li>
 <li><time>2026-07-30 23:32</time><span>Phase 4完了。Cortexをsession-scoped Field projectionへ接続し、live乱数cascadeを廃止。orange stimulus、実edge限定yellow electric arc、violet activation、green commit、blue inhibit、red fault、seq gap/reconnect、HUD/ARIA/keyboard/reduced-motion、Observatory要約を実装。隔離2-node live eventでspread受信2/paint2、event-to-paint p95 13.6ms、queue max 1、実Wiki 3,348-node描画57.7fps/frame p95 17.6ms。1280/1024/920/680をDOM実測し横overflow 0、focused 74 tests passed。</span></li>
+<li><time>2026-07-30 21:55</time><span>Phase 5実装完了、authority昇格は保留。ignored/page_ignored/certificate rejectを単独負例から除外し、reviewed false-positiveまたはhash-bound strong contradictionだけをcontextual centroidへ採用。golden/retraction保護、query specificity・degree・support span・exact match保護付きHub shadow成分、pronoun continuationを壊さないtopic shift、certificate/Field/CortexのAnti-Index・Hub内訳を追加。focused 115 tests passed。manual-94はRecall@5 50.7%を維持したがnegative@20 22.9%で20%未満ゲート未達のため、rankingは変更せずshadowのまま。</span></li>
 </ol>
 </section>
 
