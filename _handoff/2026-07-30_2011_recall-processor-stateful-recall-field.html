@@ -411,10 +411,10 @@ event types:
 <div class="phase">
 <h3>Phase 8 — 挑戦者比較（採用は勝ったものだけ）</h3>
 <ol class="checklist">
-<li><input type="checkbox"><span>ColBERT late-interactionを別index・別feature flagで実験し、BGE serviceと同じmanual-94/locked/full評価、MPS latency、index容量、incremental更新を比較する。</span></li>
-<li><input type="checkbox"><span>decoder judgeのprefix KV cacheはsupporting spanと固定promptだけをmodel/revision/template/position digest付きLRUで試す。全ページKV保存は禁止する。</span></li>
-<li><input type="checkbox"><span>ANE query encoder蒸留はteacher top-50再現率99%以上を採用条件とし、CPU BM25・ANE query・GPU BGEの同時実行が共有メモリ競合を含め本当に速いか計測する。</span></li>
-<li><input type="checkbox"><span>DSI、記憶LoRA、誤った先行注入はproduction候補から除外する。再検討する場合も独立lab planを要求する。</span></li>
+<li><input type="checkbox" checked><span>ColBERT late-interactionを別index・別feature flagで実験し、BGE serviceと同じmanual-94/locked/full評価、MPS latency、index容量、incremental更新を比較する。</span></li>
+<li><input type="checkbox" checked><span>decoder judgeのprefix KV cacheはsupporting spanと固定promptだけをmodel/revision/template/position digest付きLRUで試す。全ページKV保存は禁止する。</span></li>
+<li><input type="checkbox" checked><span>ANE query encoder蒸留はteacher top-50再現率99%以上を採用条件とし、CPU BM25・ANE query・GPU BGEの同時実行が共有メモリ競合を含め本当に速いか計測する。</span></li>
+<li><input type="checkbox" checked><span>DSI、記憶LoRA、誤った先行注入はproduction候補から除外する。再検討する場合も独立lab planを要求する。</span></li>
 </ol>
 <p class="gate">受入ゲート: 挑戦者は品質非劣化かつE2E p95/資源使用量で明確に勝つ場合のみ採用。勝者なしを正当な結果として記録する。</p>
 </div>
@@ -621,6 +621,7 @@ uv run chronovisor recall-field-replay --fixture &lt;field-events&gt; --json</co
 <li><time>2026-07-30 21:55</time><span>Phase 5実装完了、authority昇格は保留。ignored/page_ignored/certificate rejectを単独負例から除外し、reviewed false-positiveまたはhash-bound strong contradictionだけをcontextual centroidへ採用。golden/retraction保護、query specificity・degree・support span・exact match保護付きHub shadow成分、pronoun continuationを壊さないtopic shift、certificate/Field/CortexのAnti-Index・Hub内訳を追加。focused 115 tests passed。manual-94はRecall@5 50.7%を維持したがnegative@20 22.9%で20%未満ゲート未達のため、rankingは変更せずshadowのまま。</span></li>
 <li><time>2026-07-30 22:03</time><span>Phase 6実装完了、candidate/active昇格は保留。session hashの決定的5/25/100% canary、Field top30のNemotron verifyとfull teacher並列実行、privacy-safe disagreement/commit trace、hash-bound promotion artifact、active失敗時のteacher/shadow自動rollbackを追加。certificate boundaryが無効ならartifactがpassでもField authorityを拒否する。manual-94のprior-turn teacher commit 127件はField top30 coverage 100%、Field p95 21.4ms/max 75.1msだったが、Phase 2 selector品質不合格かつcandidateではfull teacher率/p95をまだ改善しないため既定shadowを維持。</span></li>
 <li><time>2026-07-30 22:18</time><span>Phase 7実装完了、学習/Compiler authorityは保留。certificate=銀、recall_used=強、reviewed eval=金、read/reject=exposureとして6,538 labelsへ統合し、query/session単位splitとdedupeを固定。実利用strong positive 31件・4 sessionsのため200件/分散gateでField学習を停止（calibration母数は500超）。変更幅cap、hash-chain policy history、leakage/teacher非劣化rollbackを追加。52,780 claimsへsource digestを付けるRecall Compilerをshadow接続し、矛盾/superseded/time/digest未検証はNemotron+BGEへfallback。manual-94はstructured 13件に対して安全側へ全fallback（exact coverage 0%）のため99% precision authorityは未評価・未昇格、fixture exact-hitのみ100%で通過。</span></li>
+<li><time>2026-07-30 22:24</time><span>Phase 8比較完了、採用winnerなし。production indexと分離したincremental MaxSim SQLite prototype、supporting span/fixed promptだけをdigest keyにするbounded prefix-handle LRU、teacher top50再現率99% gateを実装。現MacではColBERT dependency、coremltools/ANE student、Ollama reusable prefix handleが全て不在で、manual-94品質・MPS latency・実resourceの完全比較を成立させられないため全challengerをmissing-metricsで棄却。DSI、memory LoRA、先行注入はproduction候補から明示除外。artifact=<code>runtime/search-eval/phase8-challengers.json</code>。</span></li>
 </ol>
 </section>
 
