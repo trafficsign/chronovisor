@@ -30,6 +30,9 @@
   const MAX_ELECTRIC_PATHS = 12;
   const NODE_STIMULUS_SCALE = 0.38;
   const NODE_ARRIVAL_SCALE = 0.28;
+  const NODE_CORE_SCALE = 1;
+  const NODE_GLOW_MAX_PADDING_PX = 4;
+  const NODE_EFFECT_MAX_PADDING_PX = 3;
   const LIVE_SESSION_VALUE = "__live__";
   const VIEW_PREFERENCES_KEY = "chronovisor.cortex.preferences.v1";
   const VIEW_PREFERENCES_DEFAULTS = Object.freeze({
@@ -105,6 +108,8 @@
     electricEdges: 0,
     electricPeak: 0,
     flashPeak: 0,
+    maxCoreScale: 0,
+    maxGlowPadding: 0,
   };
   window.chronovisorCortexMetrics = () => ({
     spread: cortexMetrics.spread.map((row) => ({ ...row })),
@@ -118,6 +123,8 @@
       electricEdges: cortexMetrics.electricEdges,
       electricPeak: cortexMetrics.electricPeak,
       flashPeak: cortexMetrics.flashPeak,
+      maxCoreScale: cortexMetrics.maxCoreScale,
+      maxGlowPadding: cortexMetrics.maxGlowPadding,
       activeLabelLimit: ACTIVE_LABEL_LIMIT,
       electricPathLimit: MAX_ELECTRIC_PATHS,
       attackMs: NODE_FLASH_ATTACK_MS,
@@ -352,6 +359,25 @@
     spriteContext.fillStyle = gradient;
     spriteContext.fillRect(0, 0, 128, 128);
     return sprite;
+  }
+
+  function drawCompactGlow(sprite, x, y, radius, padding, opacity) {
+    const boundedPadding = clamp(padding, 0, NODE_GLOW_MAX_PADDING_PX);
+    const glowRadius = radius + boundedPadding;
+    const glowSize = glowRadius * 2;
+    context.globalAlpha = clamp(opacity);
+    context.drawImage(
+      sprite,
+      x - glowRadius,
+      y - glowRadius,
+      glowSize,
+      glowSize,
+    );
+    context.globalAlpha = 1;
+    cortexMetrics.maxGlowPadding = Math.max(
+      cortexMetrics.maxGlowPadding,
+      boundedPadding,
+    );
   }
 
   function resize() {
@@ -794,6 +820,9 @@
     target.dataset.electricEdges = String(cortexMetrics.electricEdges);
     target.dataset.electricPeak = cortexMetrics.electricPeak.toFixed(3);
     target.dataset.flashPeak = cortexMetrics.flashPeak.toFixed(3);
+    target.dataset.maxCoreScale = cortexMetrics.maxCoreScale.toFixed(3);
+    target.dataset.maxGlowPadding =
+      cortexMetrics.maxGlowPadding.toFixed(3);
     target.dataset.activeLabelLimit = String(ACTIVE_LABEL_LIMIT);
     target.dataset.electricPathLimit = String(MAX_ELECTRIC_PATHS);
     target.dataset.flashTiming =
@@ -1285,48 +1314,46 @@
       const fieldActivation = Math.max(0, Math.min(1, node.fieldActivation));
       const isFieldActive = fieldActivation >= 0.05;
       const excitation = excitationLevel(node, time);
-      const radius =
-        Math.max(0.75, node.radius * node.screenScale)
-        * (1 + (isFieldActive ? fieldActivation * 0.18 : 0) + excitation * 0.1);
+      const baseRadius = Math.max(0.75, node.radius * node.screenScale);
+      const radius = baseRadius * NODE_CORE_SCALE;
+      cortexMetrics.maxCoreScale = Math.max(
+        cortexMetrics.maxCoreScale,
+        radius / baseRadius,
+      );
       if (isFieldActive) {
-        const haloSize = radius * (4.8 + fieldActivation * 8);
-        context.globalAlpha = (0.12 + fieldActivation * 0.4) * depthFade * dim;
-        context.drawImage(
+        drawCompactGlow(
           glowViolet,
-          node.screenX - haloSize / 2,
-          node.screenY - haloSize / 2,
-          haloSize,
-          haloSize,
+          node.screenX,
+          node.screenY,
+          radius,
+          1.4 + fieldActivation * 2.2,
+          (0.14 + fieldActivation * 0.34) * depthFade * dim,
         );
         cortexMetrics.violetNodes += 1;
       }
       if (excitation > 0.01) {
-        const glowSize = radius * (5 + 12 * excitation);
-        context.globalAlpha =
-          Math.min(1, 0.12 + excitation * 0.88) * depthFade * dim;
-        context.drawImage(
+        drawCompactGlow(
           excitation > 0.68 ? glowHot : glowViolet,
-          node.screenX - glowSize / 2,
-          node.screenY - glowSize / 2,
-          glowSize,
-          glowSize,
+          node.screenX,
+          node.screenY,
+          radius,
+          1.5 + excitation * 2.5,
+          Math.min(0.82, 0.12 + excitation * 0.7) * depthFade * dim,
         );
         cortexMetrics.flashPeak = Math.max(
           cortexMetrics.flashPeak,
           excitation,
         );
       } else if (state === 3 || node.fanIn >= 38) {
-        const glowSize = radius * 3.4;
-        context.globalAlpha = (state === 3 ? 0.5 : 0.14) * depthFade * dim;
-        context.drawImage(
+        drawCompactGlow(
           glowSteel,
-          node.screenX - glowSize / 2,
-          node.screenY - glowSize / 2,
-          glowSize,
-          glowSize,
+          node.screenX,
+          node.screenY,
+          radius,
+          state === 3 ? 2.6 : 1.4,
+          (state === 3 ? 0.38 : 0.1) * depthFade * dim,
         );
       }
-      context.globalAlpha = 1;
 
       let color =
         isFieldActive
@@ -1370,14 +1397,14 @@
         const progress = age / 900;
         context.strokeStyle = rgba(
           RGB_VIOLET,
-          (1 - smoothstep(progress)) * 0.5 * depthFade,
+          (1 - smoothstep(progress)) * 0.42 * depthFade,
         );
-        context.lineWidth = 1.2;
+        context.lineWidth = 1;
         context.beginPath();
         context.arc(
           node.screenX,
           node.screenY,
-          radius + progress * 26 * Math.min(1.6, node.screenScale * 2),
+          radius + NODE_EFFECT_MAX_PADDING_PX,
           0,
           Math.PI * 2,
         );
@@ -1422,75 +1449,46 @@
         continue;
       }
       if (progress < 0 || node.viewDepth > 9e8) continue;
-      const radius = Math.max(3, node.radius * node.screenScale);
+      const radius =
+        Math.max(0.75, node.radius * node.screenScale) * NODE_CORE_SCALE;
       const fade = 1 - progress;
+      const effectPadding = Math.min(
+        NODE_EFFECT_MAX_PADDING_PX,
+        1.2 + effect.delta * 1.8,
+      );
+      let effectColor = RGB_FIRE;
+      let effectGlow = glowFire;
       if (effect.kind === "stimulus") {
-        [0, 0.24].forEach((delay) => {
-          const phase = Math.max(0, Math.min(1, (progress - delay) / 0.62));
-          if (!phase || phase >= 1) return;
-          context.strokeStyle = rgba(
-            RGB_FIRE,
-            (1 - phase) * (0.22 + effect.delta * 0.5),
-          );
-          context.lineWidth = 1.2 + effect.delta * 2;
-          context.beginPath();
-          context.arc(node.screenX, node.screenY, radius + phase * 16, 0, Math.PI * 2);
-          context.stroke();
-        });
-        const glowSize = 18 + effect.delta * 20;
-        context.globalAlpha = fade * (0.16 + effect.delta * 0.48);
-        context.drawImage(
-          glowFire,
-          node.screenX - glowSize / 2,
-          node.screenY - glowSize / 2,
-          glowSize,
-          glowSize,
-        );
+        effectColor = RGB_FIRE;
+        effectGlow = glowFire;
       } else if (effect.kind === "inhibit" || effect.kind === "reject") {
-        context.strokeStyle = rgba(RGB_INHIBIT, 0.35 + fade * 0.65);
-        context.lineWidth = 1.4 + effect.delta * 2;
-        context.beginPath();
-        context.arc(node.screenX, node.screenY, radius + (1 - progress) * 28, 0, Math.PI * 2);
-        context.stroke();
-        context.fillStyle = rgba(RGB_INHIBIT, fade);
-        context.font = `700 ${Math.max(9, radius * 1.2)}px ${getComputedStyle(document.body).getPropertyValue("--mono")}`;
-        context.textAlign = "center";
-        context.fillText("−", node.screenX, node.screenY + radius * 0.35);
+        effectColor = RGB_INHIBIT;
+        effectGlow = glowInhibit;
       } else if (effect.kind === "commit_queued" || effect.kind === "commit_applied") {
-        context.strokeStyle = rgba(RGB_COMMIT, 0.35 + fade * 0.65);
-        context.lineWidth = 1.5 + effect.delta * 1.6;
-        context.beginPath();
-        context.arc(node.screenX, node.screenY, radius + progress * 18, 0, Math.PI * 2);
-        context.stroke();
-        context.fillStyle = rgba(RGB_COMMIT, fade);
-        context.font = `700 ${Math.max(8, radius)}px ${getComputedStyle(document.body).getPropertyValue("--mono")}`;
-        context.textAlign = "center";
-        context.fillText("✓", node.screenX, node.screenY + radius * 0.35);
+        effectColor = RGB_COMMIT;
+        effectGlow = glowCommit;
       } else if (effect.kind === "fault") {
-        context.globalAlpha = fade;
-        context.drawImage(glowFault, node.screenX - 24, node.screenY - 24, 48, 48);
-        context.fillStyle = rgba(RGB_FAULT, fade);
-        context.fillText("×", node.screenX, node.screenY);
+        effectColor = RGB_FAULT;
+        effectGlow = glowFault;
       } else if (effect.kind === "arrival") {
-        context.strokeStyle = rgba(
-          RGB_ELECTRIC,
-          fade * (0.2 + effect.delta * 0.6),
-        );
-        context.lineWidth = 1 + effect.delta * 2;
-        context.beginPath();
-        context.arc(node.screenX, node.screenY, radius + progress * 13, 0, Math.PI * 2);
-        context.stroke();
-        const arrivalGlowSize = 14 + effect.delta * 24;
-        context.globalAlpha = fade * (0.12 + effect.delta * 0.55);
-        context.drawImage(
-          glowElectric,
-          node.screenX - arrivalGlowSize / 2,
-          node.screenY - arrivalGlowSize / 2,
-          arrivalGlowSize,
-          arrivalGlowSize,
-        );
+        effectColor = RGB_ELECTRIC;
+        effectGlow = glowElectric;
       }
-      context.globalAlpha = 1;
+      drawCompactGlow(
+        effectGlow,
+        node.screenX,
+        node.screenY,
+        radius,
+        effectPadding,
+        fade * (0.12 + effect.delta * 0.48),
+      );
+      context.fillStyle = rgba(
+        effectColor,
+        fade * Math.min(0.9, 0.38 + effect.delta * 0.46),
+      );
+      context.beginPath();
+      context.arc(node.screenX, node.screenY, radius, 0, Math.PI * 2);
+      context.fill();
     }
     context.globalCompositeOperation = "source-over";
   }
@@ -1604,6 +1602,8 @@
     cortexMetrics.electricEdges = 0;
     cortexMetrics.electricPeak = 0;
     cortexMetrics.flashPeak = 0;
+    cortexMetrics.maxCoreScale = 0;
+    cortexMetrics.maxGlowPadding = 0;
     context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
     context.clearRect(0, 0, width, height);
     context.fillStyle = STEEL;

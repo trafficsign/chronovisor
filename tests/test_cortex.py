@@ -450,6 +450,9 @@ def test_cortex_static_view_preserves_fable_layout_and_uses_live_data() -> None:
     assert "const MAX_ELECTRIC_PATHS = 12;" in script
     assert "const NODE_STIMULUS_SCALE = 0.38;" in script
     assert "const NODE_ARRIVAL_SCALE = 0.28;" in script
+    assert "const NODE_CORE_SCALE = 1;" in script
+    assert "const NODE_GLOW_MAX_PADDING_PX = 4;" in script
+    assert "const NODE_EFFECT_MAX_PADDING_PX = 3;" in script
     assert (
         'const VIEW_PREFERENCES_KEY = "chronovisor.cortex.preferences.v1";'
         in script
@@ -464,6 +467,15 @@ def test_cortex_static_view_preserves_fable_layout_and_uses_live_data() -> None:
     assert "window.addEventListener(\"pointerdown\", unlockSound" in script
     assert "function excitationLevel(node, time)" in script
     assert "function exciteNode(node, delta, time)" in script
+    assert "function drawCompactGlow(" in script
+    assert "const radius = baseRadius * NODE_CORE_SCALE;" in script
+    assert "radius + NODE_EFFECT_MAX_PADDING_PX" in script
+    assert "target.dataset.maxCoreScale" in script
+    assert "target.dataset.maxGlowPadding" in script
+    assert "radius + progress * 26" not in script
+    assert "radius + (1 - progress) * 28" not in script
+    assert "radius + progress * 18" not in script
+    assert "radius + progress * 13" not in script
     assert "function electricPathPoints(" in script
     assert "function electricPathPrefix(" in script
     assert "function queueElectricPulse(" in script
