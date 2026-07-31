@@ -1088,7 +1088,7 @@ def test_dashboard_lan_link_bootstraps_cookie_and_removes_query_token(
     }
 
 
-def test_dashboard_private_lan_uses_basic_auth_and_keeps_recovery_token(
+def test_dashboard_private_lan_basic_auth_establishes_session_cookie(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -1117,6 +1117,9 @@ def test_dashboard_private_lan_uses_basic_auth_and_keeps_recovery_token(
                 f"http://{host}:{port}/",
                 auth=("admin", "correct-pass"),
             )
+            page = client.get(f"http://{host}:{port}/")
+            cortex = client.get(f"http://{host}:{port}/cortex")
+            static = client.get(f"http://{host}:{port}/static/cortex.js")
         with dashboard.httpx.Client(follow_redirects=False, timeout=2) as recovery:
             bootstrap = recovery.get(
                 f"http://{host}:{port}/?access_token={token}&view=trace"
@@ -1132,7 +1135,17 @@ def test_dashboard_private_lan_uses_basic_auth_and_keeps_recovery_token(
         'Basic realm="Chronovisor Dashboard", charset="UTF-8"'
     )
     assert rejected.status_code == 401
-    assert accepted.status_code == 200
+    assert accepted.status_code == 303
+    assert accepted.headers["location"] == "/"
+    assert "HttpOnly" in accepted.headers["set-cookie"]
+    assert "SameSite=Strict" in accepted.headers["set-cookie"]
+    assert "Max-Age=31536000" in accepted.headers["set-cookie"]
+    assert page.status_code == 200
+    assert cortex.status_code == 200
+    assert static.status_code == 200
+    assert "www-authenticate" not in page.headers
+    assert "www-authenticate" not in cortex.headers
+    assert "www-authenticate" not in static.headers
     assert bootstrap.status_code == 303
     assert bootstrap.headers["location"] == "/?view=trace"
     assert recovered.status_code == 200

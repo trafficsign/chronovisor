@@ -4384,6 +4384,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._deny_basic_auth()
             return False
         self._clear_login_failures()
+        if token:
+            # Safari does not reliably reuse HTTP Basic credentials for every
+            # HTML, static asset, API, and WebSocket request. Promote the first
+            # successful login to the same scoped HttpOnly session used by the
+            # recovery link so navigation never triggers another challenge.
+            self._redirect_after_token(parsed, token)
+            return False
         return True
 
     def _lan_access_response(self) -> None:
