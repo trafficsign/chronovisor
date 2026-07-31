@@ -14,9 +14,8 @@ from typing import Any
 try:
     from mcp.server.fastmcp import Context, FastMCP
 except ModuleNotFoundError:
+    from mcp.server.mcpserver import Context
     from mcp.server.mcpserver import MCPServer as FastMCP
-
-    Context = Any
 from chronovisor.core.durable_state import fsync_directory as _fsync_directory
 from chronovisor.core.frontmatter import parse as _frontmatter_parse
 from chronovisor.core.frontmatter import patch as _frontmatter_patch
