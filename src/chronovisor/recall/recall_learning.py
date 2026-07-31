@@ -41,9 +41,7 @@ def decide_learning_update(
             "field_learning_allowed": False,
             "calibration_allowed": total >= 500,
         }
-    if metrics.get("session_leakage", 0.0) > 0 or metrics.get(
-        "query_leakage", 0.0
-    ) > 0:
+    if metrics.get("session_leakage", 0.0) > 0 or metrics.get("query_leakage", 0.0) > 0:
         return {
             "status": "rollback",
             "reason": "holdout_leakage",
@@ -107,11 +105,7 @@ def append_policy_history(
     }
     record["record_sha256"] = _sha(record)
     path.parent.mkdir(parents=True, exist_ok=True)
-    existing = (
-        path.read_text(encoding="utf-8")
-        if path.exists()
-        else ""
-    )
+    existing = path.read_text(encoding="utf-8") if path.exists() else ""
     atomic_write(
         path,
         existing
@@ -123,3 +117,70 @@ def append_policy_history(
         + "\n",
     )
     return record
+
+
+def verify_policy_history(path: Path) -> dict[str, Any]:
+    """Verify every link in an append-only policy chain."""
+
+    try:
+        rows = [
+            json.loads(line)
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+    except (OSError, json.JSONDecodeError):
+        rows = []
+    previous = ""
+    for index, row in enumerate(rows):
+        if not isinstance(row, dict):
+            return {"status": "invalid", "row": index, "reason": "not_object"}
+        digest = str(row.get("record_sha256") or "")
+        unsigned = {key: value for key, value in row.items() if key != "record_sha256"}
+        if row.get("previous_sha256") != previous or digest != _sha(unsigned):
+            return {"status": "invalid", "row": index, "reason": "chain_mismatch"}
+        previous = digest
+    return {"status": "ok", "records": len(rows), "head_sha256": previous}
+
+
+def write_last_known_good(
+    policy: dict[str, float],
+    *,
+    evaluation: dict[str, Any],
+    history_head_sha256: str,
+    path: Path,
+) -> dict[str, Any]:
+    """Atomically seal one runtime policy against its evaluation/history."""
+
+    unsigned = {
+        "schema_version": 1,
+        "status": "active",
+        "policy": {key: round(float(value), 6) for key, value in policy.items()},
+        "evaluation": evaluation,
+        "history_head_sha256": history_head_sha256,
+    }
+    payload = {**unsigned, "snapshot_sha256": _sha(unsigned)}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write(
+        path,
+        json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n",
+    )
+    return payload
+
+
+def load_last_known_good(path: Path) -> dict[str, Any]:
+    """Load only a valid sealed active policy; malformed files fail closed."""
+
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(payload, dict) or payload.get("status") != "active":
+        return {}
+    seal = str(payload.get("snapshot_sha256") or "")
+    unsigned = {
+        key: value for key, value in payload.items() if key != "snapshot_sha256"
+    }
+    if not seal or seal != _sha(unsigned):
+        return {}
+    policy = payload.get("policy")
+    return payload if isinstance(policy, dict) else {}

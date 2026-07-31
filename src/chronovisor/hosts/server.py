@@ -227,11 +227,7 @@ def chronovisor_read(
             "session_id": session_id or "",
             "decision_id": decision_id or "",
             "page_id": canonical_page_id,
-            **(
-                {"host": field_activity["host"]}
-                if field_activity.get("host")
-                else {}
-            ),
+            **({"host": field_activity["host"]} if field_activity.get("host") else {}),
             **(
                 {"field_session_hash": field_activity["session_hash"]}
                 if field_activity.get("session_hash")
@@ -477,19 +473,11 @@ def _record_search_pull(
             "expanded_pages": [hit["page_id"] for hit in expanded_hits],
             "returned_pages": [hit["page_id"] for hit in all_hits],
             "direct_uids": [hit["uid"] for hit in direct_hits if hit.get("uid")],
-            "expanded_uids": [
-                hit["uid"] for hit in expanded_hits if hit.get("uid")
-            ],
+            "expanded_uids": [hit["uid"] for hit in expanded_hits if hit.get("uid")],
             "returned_uids": [hit["uid"] for hit in all_hits if hit.get("uid")],
-            "provisional_ids": [
-                hit["provisional_id"] for hit in provisional_hits
-            ],
+            "provisional_ids": [hit["provisional_id"] for hit in provisional_hits],
             "retrieval": retrieval_trace,
-            **(
-                {"host": field_activity["host"]}
-                if field_activity.get("host")
-                else {}
-            ),
+            **({"host": field_activity["host"]} if field_activity.get("host") else {}),
             **(
                 {"field_session_hash": field_activity["session_hash"]}
                 if field_activity.get("session_hash")
@@ -602,21 +590,17 @@ def _filter_search_results(
         for result in results:
             row = registry_row(result.page_id)
             classification = row.get("classification")
-            classification = (
-                classification if isinstance(classification, dict) else {}
-            )
+            classification = classification if isinstance(classification, dict) else {}
             primary = classification.get("primary")
             primary = primary if isinstance(primary, dict) else {}
             if (
                 classification_notation
-                and str(primary.get("notation") or "")
-                != classification_notation
+                and str(primary.get("notation") or "") != classification_notation
             ):
                 continue
             if (
                 classification_status
-                and str(row.get("classification_status") or "")
-                != classification_status
+                and str(row.get("classification_status") or "") != classification_status
             ):
                 continue
             filtered.append(result)
@@ -823,9 +807,7 @@ def chronovisor_search(
             classification_authority_status,
         )
 
-        classification_authority = classification_authority_status(
-            CHRONOVISOR_ROOT
-        )
+        classification_authority = classification_authority_status(CHRONOVISOR_ROOT)
     except Exception:
         classification_authority = {
             "active": False,
@@ -1727,6 +1709,7 @@ def chronovisor_record(
     keywords: list[str] | None = None,
     trigger_ingest: bool = True,
     idempotency_key: str | None = None,
+    ctx: Context = None,
 ) -> str:
     """Save raw session data to raw/ for later ingest.
 
@@ -1797,6 +1780,18 @@ def chronovisor_record(
         result["ingest_triggered"] = ingest_result
     elif should:
         result["ingest_deferred"] = True
+
+    if ctx is not None:
+        try:
+            from chronovisor.recall.recall_field import record_mcp_content_activity
+
+            result["field_activity"] = record_mcp_content_activity(
+                host=_mcp_client_host(ctx),
+                session_id=session_id or "",
+                content="\n".join([*accepted, content]),
+            )
+        except Exception:
+            result["field_activity"] = {"status": "error"}
 
     return json.dumps(result, ensure_ascii=False)
 

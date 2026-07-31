@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import json
 
+import pytest
+
 from chronovisor.core.runtime_config import RerankerConfig
 from chronovisor.decision.decision_router import canonical_agreement_signature
 from chronovisor.decision.decision_schema_manifest import production_decision_schemas
@@ -424,9 +426,10 @@ def test_sealed_manifest_is_deterministic_and_never_contains_query(
     assert "private query text" not in first.read_text(encoding="utf-8")
     payload = json.loads(first.read_text(encoding="utf-8"))
     assert payload["examples"] == 1
-    assert payload["entries"][0]["query_sha256"] == hashlib.sha256(
-        b"private query text"
-    ).hexdigest()
+    assert (
+        payload["entries"][0]["query_sha256"]
+        == hashlib.sha256(b"private query text").hexdigest()
+    )
 
 
 def test_run_variant_filters_lifecycle_pages(monkeypatch) -> None:
@@ -477,7 +480,9 @@ def test_run_variant_can_apply_hybrid_reranker(monkeypatch) -> None:
     assert payload["stages"]["candidate_union"] == ["a", "b"]
     assert payload["stages"]["fused"] == ["a", "b"]
     assert payload["stages"]["reranked"] == ["b", "a"]
-    assert payload["stages"]["page_gate"] is None
+    assert payload["stages"]["page_gate"] == []
+    assert payload["stages"]["committed"] == []
+    assert payload["stages"]["observed"]["page_gate"] is True
 
 
 def test_cli_build_golden_json(tmp_path, capsys) -> None:
@@ -1343,6 +1348,117 @@ def test_failure_index_distinguishes_top_50_from_evaluation_cutoff(
     row = json.loads(output_file.read_text(encoding="utf-8").splitlines()[0])
     assert row["failed_stage"] == "rank_cutoff"
     assert row["reason_code"] == "below_evaluation_cutoff"
+
+
+@pytest.mark.parametrize(
+    ("stages", "failed_stage", "reason_code"),
+    [
+        (
+            {
+                "candidate_union": ["target"],
+                "fused": ["target"],
+                "reranked": ["target"],
+                "page_gate": [],
+                "committed": [],
+                "host_used": None,
+            },
+            "page_gate",
+            "page_gate_rejected",
+        ),
+        (
+            {
+                "candidate_union": ["target"],
+                "fused": ["target"],
+                "reranked": ["target"],
+                "page_gate": ["target"],
+                "committed": [],
+                "host_used": None,
+            },
+            "commit",
+            "commit_missed",
+        ),
+        (
+            {
+                "candidate_union": ["target"],
+                "fused": ["target"],
+                "reranked": ["target"],
+                "page_gate": ["target"],
+                "committed": ["target"],
+                "host_used": [],
+                "observed": {"host_used": True},
+            },
+            "host_used",
+            "host_did_not_use",
+        ),
+    ],
+)
+def test_failure_index_classifies_post_ranking_stages(
+    tmp_path, stages, failed_stage, reason_code
+) -> None:
+    output_file = tmp_path / "failures.jsonl"
+    debug_rows = [
+        {
+            "variant": "hybrid-rerank",
+            "query": "query",
+            "split": "locked-test",
+            "language": "ja",
+            "kind": "question",
+            "expected_pages": ["target"],
+            "result_pages": ["target"],
+            "channels": {"bm25": ["target"]},
+            "stages": stages,
+        }
+    ]
+
+    search_eval.write_failure_index(debug_rows, output_file)
+
+    row = json.loads(output_file.read_text(encoding="utf-8").splitlines()[0])
+    assert row["failed_stage"] == failed_stage
+    assert row["reason_code"] == reason_code
+
+
+def test_locked_e2e_artifact_seals_all_promotion_gates(tmp_path) -> None:
+    examples = [
+        search_eval.SearchExample(
+            query=f"query-{index}",
+            expected_pages=(f"page-{index}",),
+            ref=f"ref-{index}",
+            reviewed=True,
+        )
+        for index in range(94)
+    ]
+    metrics = {
+        "recall_at_5": 0.60,
+        "negative_hit_rate_at_20": 0.10,
+        "latency_ms": {"max": 900.0},
+        "processor": {
+            "precision": 0.95,
+            "related_recall": 0.60,
+            "labeled_selected_pages": 40,
+            "true_positive_pages": 38,
+            "evidence_kind": {
+                "rich": {"precision": 0.95},
+                "pointer": {"precision": 0.95},
+            },
+        },
+    }
+    path = tmp_path / "locked.json"
+
+    artifact = search_eval.write_locked_e2e_artifact(
+        {
+            "generated_at": "2026-07-31T00:00:00",
+            "variants": {"hybrid-rerank": {"metrics": metrics}},
+        },
+        examples,
+        path=path,
+    )
+
+    assert artifact["status"] == "passed"
+    assert all(artifact["gates"].values())
+    assert artifact["precision_lower_95"] is not None
+    assert (
+        json.loads(path.read_text())["snapshot_sha256"] == artifact["snapshot_sha256"]
+    )
 
 
 def test_self_tune_shadow_blocks_when_locked_regresses(tmp_path, monkeypatch) -> None:

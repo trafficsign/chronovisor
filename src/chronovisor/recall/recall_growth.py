@@ -19,6 +19,13 @@ from chronovisor.recall.recall_label_factory import (
     default_label_ledger_inputs,
     materialize_label_ledger,
 )
+from chronovisor.recall.recall_learning import (
+    append_policy_history,
+    decide_learning_update,
+    load_last_known_good,
+    verify_policy_history,
+    write_last_known_good,
+)
 from chronovisor.recall.recall_log_schema import join_used_recall_episodes
 
 RUNTIME_DIR = CHRONOVISOR_ROOT / "runtime" / "recall-field"
@@ -26,6 +33,14 @@ GROWTH_STATE_FILE = RUNTIME_DIR / "growth-state.json"
 GROWTH_HISTORY_FILE = RUNTIME_DIR / "growth-history.jsonl"
 CANDIDATE_TRACE_FILE = RUNTIME_DIR / "candidate-trace.jsonl"
 PROMOTION_ARTIFACT = RUNTIME_DIR / "promotion.json"
+POLICY_HISTORY_FILE = RUNTIME_DIR / "policy-history.jsonl"
+LAST_KNOWN_GOOD_POLICY_FILE = RUNTIME_DIR / "last-known-good-policy.json"
+LOCKED_E2E_ARTIFACT = (
+    CHRONOVISOR_ROOT / "runtime" / "search-eval" / "recall-field-locked-e2e.json"
+)
+COMPILER_TRACE_FILE = (
+    CHRONOVISOR_ROOT / "runtime" / "recall-compiler" / "shadow-trace.jsonl"
+)
 
 MIN_STRONG_POSITIVES = 200
 MIN_STRONG_SESSIONS = 20
@@ -78,10 +93,14 @@ def candidate_metrics(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     sessions: set[str] = set()
     teacher_pages = 0
     teacher_overlap = 0
+    field_pages = 0
     committed_pages = 0
     committed_overlap = 0
     latencies: list[float] = []
+    field_latencies: list[float] = []
+    teacher_latencies: list[float] = []
     over_4s = 0
+    full_searches = 0
     active_rows = 0
     for row in rows:
         session = str(row.get("session_hash") or "")
@@ -104,21 +123,40 @@ def candidate_metrics(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         }
         teacher_pages += len(teacher_ids)
         teacher_overlap += len(teacher_ids & field_ids)
+        field_pages += len(field_ids)
         committed_pages += len(committed_ids)
         committed_overlap += len(committed_ids & field_ids)
         latency = row.get("latency_ms")
         if isinstance(latency, int | float) and not isinstance(latency, bool):
             latencies.append(max(0.0, float(latency)))
+        field_latency = row.get("field_latency_ms")
+        if isinstance(field_latency, int | float) and not isinstance(
+            field_latency, bool
+        ):
+            field_latencies.append(max(0.0, float(field_latency)))
+        teacher_latency = row.get("teacher_latency_ms")
+        if isinstance(teacher_latency, int | float) and not isinstance(
+            teacher_latency, bool
+        ):
+            teacher_latencies.append(max(0.0, float(teacher_latency)))
         if row.get("over_4s") is True or (
             isinstance(latency, int | float) and float(latency) > 4_000
         ):
             over_4s += 1
+        if row.get("full_search_required") is True:
+            full_searches += 1
         if row.get("authority") == "field":
             active_rows += 1
     return {
         "traces": len(rows),
         "sessions": len(sessions),
         "teacher_pages": teacher_pages,
+        "field_pages": field_pages,
+        "field_teacher_overlap": teacher_overlap,
+        "field_precision_against_teacher": round(
+            teacher_overlap / field_pages if field_pages else 0.0,
+            6,
+        ),
         "teacher_top30_coverage": round(
             teacher_overlap / teacher_pages if teacher_pages else 0.0,
             6,
@@ -133,8 +171,124 @@ def candidate_metrics(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
             "p95": _percentile(latencies, 0.95),
             "max": round(max(latencies), 3) if latencies else None,
         },
+        "field_latency_ms": {
+            "p50": _percentile(field_latencies, 0.50),
+            "p95": _percentile(field_latencies, 0.95),
+            "max": round(max(field_latencies), 3) if field_latencies else None,
+        },
+        "teacher_latency_ms": {
+            "p50": _percentile(teacher_latencies, 0.50),
+            "p95": _percentile(teacher_latencies, 0.95),
+            "max": round(max(teacher_latencies), 3) if teacher_latencies else None,
+        },
+        "p95_improvement_ms": (
+            round(
+                float(_percentile(teacher_latencies, 0.95))
+                - float(_percentile(field_latencies, 0.95)),
+                3,
+            )
+            if field_latencies and teacher_latencies
+            else None
+        ),
         "over_4s": over_4s,
+        "full_searches": full_searches,
+        "full_search_rate": round(full_searches / len(rows) if rows else 0.0, 6),
         "active_traces": active_rows,
+    }
+
+
+def split_integrity(labels: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """Prove that neither a session nor a query spans evaluation splits."""
+
+    sessions: dict[str, set[str]] = {}
+    queries: dict[str, set[str]] = {}
+    for row in labels:
+        split = str(row.get("split") or "")
+        session = str(row.get("session_hash") or "")
+        query = str(row.get("query_sha256") or "")
+        if session and split:
+            sessions.setdefault(session, set()).add(split)
+        if query and split:
+            queries.setdefault(query, set()).add(split)
+    session_leaks = sum(len(values) > 1 for values in sessions.values())
+    query_leaks = sum(len(values) > 1 for values in queries.values())
+    return {
+        "sessions": len(sessions),
+        "queries": len(queries),
+        "session_leakage": session_leaks,
+        "query_leakage": query_leaks,
+        "passed": session_leaks == 0 and query_leaks == 0,
+    }
+
+
+def compiler_metrics(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """Measure exact fast-path precision separately from traffic coverage."""
+
+    exact = [row for row in rows if row.get("compiler_status") == "exact"]
+    predicted = sum(len(set(row.get("compiler_page_ids", []))) for row in exact)
+    overlap = sum(
+        len(
+            set(row.get("compiler_page_ids", [])) & set(row.get("teacher_page_ids", []))
+        )
+        for row in exact
+    )
+    commit_overlap = sum(
+        len(
+            set(row.get("compiler_page_ids", []))
+            & set(row.get("committed_page_ids", []))
+        )
+        for row in exact
+    )
+    return {
+        "traces": len(rows),
+        "exact_traces": len(exact),
+        "coverage": round(len(exact) / len(rows) if rows else 0.0, 6),
+        "predicted_pages": predicted,
+        "teacher_overlap": overlap,
+        "commit_overlap": commit_overlap,
+        "precision": round(overlap / predicted if predicted else 0.0, 6),
+        "authority_eligible": bool(predicted and overlap / predicted >= 0.99),
+    }
+
+
+def locked_e2e_status(path: Path) -> dict[str, Any]:
+    """Verify the sealed manual-94 E2E artifact used by promotion gates."""
+
+    payload = _read_json(path)
+    if not payload:
+        return {"status": "missing", "passed": False}
+    seal = str(payload.get("snapshot_sha256") or "")
+    unsigned = {
+        key: value for key, value in payload.items() if key != "snapshot_sha256"
+    }
+    if (
+        not seal
+        or seal
+        != hashlib.sha256(
+            json.dumps(
+                unsigned,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
+    ):
+        return {"status": "invalid", "passed": False}
+    gates = payload.get("gates")
+    passed = bool(
+        payload.get("status") == "passed"
+        and isinstance(gates, dict)
+        and gates
+        and all(value is True for value in gates.values())
+    )
+    return {
+        "status": str(payload.get("status") or "invalid"),
+        "passed": passed,
+        "manifest_sha256": str(payload.get("manifest_sha256") or ""),
+        "precision_delta_points": payload.get("precision_delta_points"),
+        "recall_delta_points": payload.get("recall_delta_points"),
+        "precision_lower_95": payload.get("precision_lower_95"),
+        "gates": gates if isinstance(gates, dict) else {},
     }
 
 
@@ -208,19 +362,16 @@ def processor_used_metrics(
 def _promotion_payload(metrics: dict[str, Any]) -> dict[str, Any]:
     candidate = metrics["candidate"]
     used = metrics["processor_used"]
-    coverage = min(
-        float(candidate["teacher_top30_coverage"]),
-        float(candidate["teacher_commit_coverage"]),
-        float(used["used_page_coverage"]),
-    )
+    learning = metrics["learning"]
     return {
         "schema_version": 1,
         "status": "passed",
         "metrics": {
             "teacher_commit_coverage": float(candidate["teacher_commit_coverage"]),
-            "precision_delta_points": round((coverage - 1.0) * 100.0, 6),
-            "recall_delta_points": round((coverage - 1.0) * 100.0, 6),
+            "precision_delta_points": float(learning["precision_delta_points"]),
+            "recall_delta_points": float(learning["recall_delta_points"]),
             "over_4s": int(candidate["over_4s"]),
+            "full_search_rate": float(candidate["full_search_rate"]),
             "processor_used_page_coverage": float(used["used_page_coverage"]),
             "processor_used_precision_proxy": float(used["used_precision_proxy"]),
         },
@@ -312,11 +463,26 @@ def run_growth_cycle(
     history_file: Path = GROWTH_HISTORY_FILE,
     candidate_trace_file: Path = CANDIDATE_TRACE_FILE,
     promotion_file: Path = PROMOTION_ARTIFACT,
+    policy_history_file: Path | None = None,
+    last_known_good_file: Path | None = None,
+    compiler_trace_file: Path | None = None,
+    locked_e2e_file: Path | None = None,
     label_inputs: dict[str, Path] | None = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
     """Refresh supervision and advance a fail-closed autonomous rollout."""
 
+    policy_history_file = (
+        policy_history_file or state_file.parent / POLICY_HISTORY_FILE.name
+    )
+    last_known_good_file = (
+        last_known_good_file or state_file.parent / LAST_KNOWN_GOOD_POLICY_FILE.name
+    )
+    compiler_trace_file = (
+        compiler_trace_file
+        or state_file.parent.parent / "recall-compiler" / COMPILER_TRACE_FILE.name
+    )
+    locked_e2e_file = locked_e2e_file or state_file.parent / LOCKED_E2E_ARTIFACT.name
     inputs = label_inputs or default_label_ledger_inputs()
     labels = (
         build_label_ledger(**inputs) if dry_run else materialize_label_ledger(**inputs)
@@ -336,8 +502,60 @@ def run_growth_cycle(
     processor = processor_used_metrics(recall_rows, pull_rows)
     counts = dict(labels["counts"])
     label_gate = bool(labels["gates"]["field_learning_allowed"])
+    integrity = split_integrity(labels["labels"])
+    compiler = compiler_metrics(_read_jsonl(compiler_trace_file))
+    locked_e2e = locked_e2e_status(locked_e2e_file)
+    last_known_good = load_last_known_good(last_known_good_file)
+    current_policy = {
+        "spread_gain": 0.35,
+        "global_inhibition": 0.08,
+        "turn_decay": 0.82,
+        **(
+            last_known_good.get("policy", {})
+            if isinstance(last_known_good.get("policy"), dict)
+            else {}
+        ),
+    }
+    proposed_policy = {
+        "spread_gain": current_policy["spread_gain"]
+        + (0.01 if candidate["teacher_commit_coverage"] >= 0.99 else -0.02),
+        "global_inhibition": current_policy["global_inhibition"]
+        + (0.01 if processor["used_precision_proxy"] < 0.90 else -0.005),
+        "turn_decay": current_policy["turn_decay"]
+        + (0.01 if candidate["full_search_rate"] > 0.25 else 0.0),
+    }
+    locked_precision_delta = locked_e2e.get("precision_delta_points")
+    locked_recall_delta = locked_e2e.get("recall_delta_points")
+    learning_metrics = {
+        "session_leakage": float(integrity["session_leakage"]),
+        "query_leakage": float(integrity["query_leakage"]),
+        "precision_delta_points": (
+            float(locked_precision_delta)
+            if isinstance(locked_precision_delta, int | float)
+            else round(
+                (float(candidate["field_precision_against_teacher"]) - 1.0) * 100.0,
+                6,
+            )
+        ),
+        "recall_delta_points": (
+            float(locked_recall_delta)
+            if isinstance(locked_recall_delta, int | float)
+            else round(
+                (float(candidate["teacher_commit_coverage"]) - 1.0) * 100.0,
+                6,
+            )
+        ),
+    }
+    learning_decision = decide_learning_update(
+        current={key: float(value) for key, value in current_policy.items()},
+        proposed={key: float(value) for key, value in proposed_policy.items()},
+        label_counts=counts,
+        metrics=learning_metrics,
+    )
     gates = {
         "labels": label_gate,
+        "split_integrity": integrity["passed"],
+        "locked_e2e": locked_e2e["passed"],
         "candidate_samples": candidate["traces"] >= MIN_CANDIDATE_TRACES,
         "candidate_sessions": candidate["sessions"] >= MIN_CANDIDATE_SESSIONS,
         "teacher_top30_coverage": (
@@ -347,6 +565,9 @@ def run_growth_cycle(
             candidate["teacher_commit_coverage"] >= MIN_TEACHER_COVERAGE
         ),
         "latency": candidate["over_4s"] == 0,
+        "full_search_rate": candidate["full_search_rate"] < 1.0,
+        "p95_improvement": isinstance(candidate["p95_improvement_ms"], int | float)
+        and float(candidate["p95_improvement_ms"]) > 0.0,
         "processor_used_samples": (
             processor["episodes"] >= MIN_PROCESSOR_USED_EPISODES
         ),
@@ -359,6 +580,9 @@ def run_growth_cycle(
         ),
     }
     authority_eligible = all(gates.values())
+    field_learning_allowed = bool(
+        authority_eligible and learning_decision.get("field_learning_allowed") is True
+    )
     previous = _read_json(state_file)
     effective_mode, canary_percent, stage_started = _advance_rollout(
         previous,
@@ -370,11 +594,15 @@ def run_growth_cycle(
     elif not all(
         gates[key]
         for key in (
+            "split_integrity",
+            "locked_e2e",
             "candidate_samples",
             "candidate_sessions",
             "teacher_top30_coverage",
             "teacher_commit_coverage",
             "latency",
+            "full_search_rate",
+            "p95_improvement",
         )
     ):
         stage = "collecting_candidate_evidence"
@@ -395,6 +623,7 @@ def run_growth_cycle(
         "labels": counts,
         "candidate": candidate,
         "processor_used": processor,
+        "learning": learning_metrics,
     }
     payload = {
         "schema_version": 1,
@@ -404,7 +633,8 @@ def run_growth_cycle(
         "effective_mode": effective_mode,
         "canary_percent": canary_percent,
         "stage_started_trace_count": stage_started,
-        "field_learning_allowed": label_gate,
+        "field_learning_allowed": field_learning_allowed,
+        "label_learning_gate": label_gate,
         "authority_enabled": authority_eligible,
         "gates": gates,
         "thresholds": {
@@ -419,6 +649,13 @@ def run_growth_cycle(
             "quality_window": QUALITY_WINDOW,
         },
         "metrics": metrics,
+        "learning": {
+            **learning_decision,
+            "metrics": learning_metrics,
+            "split_integrity": integrity,
+        },
+        "compiler": compiler,
+        "locked_e2e": locked_e2e,
     }
     promotion = (
         _seal(_promotion_payload(metrics))
@@ -435,14 +672,50 @@ def run_growth_cycle(
                 "stage": stage,
                 "effective_mode": effective_mode,
                 "canary_percent": canary_percent,
-                "field_learning_allowed": label_gate,
+                "field_learning_allowed": field_learning_allowed,
                 "authority_enabled": authority_eligible,
                 "gates": gates,
                 "labels": counts,
                 "candidate": candidate,
                 "processor_used": processor,
+                "learning": learning_metrics,
+                "compiler": compiler,
             },
         )
+        policy_record = append_policy_history(
+            {
+                "generated_at": generated_at,
+                "status": str(learning_decision.get("status") or "held"),
+                "reason": str(learning_decision.get("reason") or ""),
+                "policy": learning_decision.get("policy", current_policy),
+                "label_counts": counts,
+                "metrics": learning_metrics,
+                "split_integrity": integrity,
+                "authority_enabled": authority_eligible,
+            },
+            path=policy_history_file,
+        )
+        chain = verify_policy_history(policy_history_file)
+        if (
+            authority_eligible
+            and field_learning_allowed
+            and chain.get("status") == "ok"
+        ):
+            write_last_known_good(
+                {
+                    key: float(value)
+                    for key, value in learning_decision.get(
+                        "policy", current_policy
+                    ).items()
+                },
+                evaluation={
+                    "candidate": candidate,
+                    "processor_used": processor,
+                    "split_integrity": integrity,
+                },
+                history_head_sha256=str(policy_record["record_sha256"]),
+                path=last_known_good_file,
+            )
     return payload
 
 

@@ -16,9 +16,7 @@ from chronovisor.core.frontmatter import parse
 from chronovisor.core.store import CHRONOVISOR_ROOT, find_page
 from chronovisor.search.search_types import tokenize
 
-CERTIFICATE_LEDGER = (
-    CHRONOVISOR_ROOT / "recall" / "evidence-certificate-ledger.jsonl"
-)
+CERTIFICATE_LEDGER = CHRONOVISOR_ROOT / "recall" / "evidence-certificate-ledger.jsonl"
 CERTIFICATE_LEDGER_LOCK = CERTIFICATE_LEDGER.with_suffix(".lock")
 
 
@@ -54,7 +52,14 @@ class EvidenceCertificate:
             "model_revision": self.model_revision,
             "components": {
                 key: self.features[key]
-                for key in ("anti_index", "hub_penalty")
+                for key in (
+                    "anti_index",
+                    "hub_penalty",
+                    "lexical_coverage",
+                    "reranker_raw",
+                    "reranker_rank",
+                    "reranker_margin",
+                )
                 if isinstance(self.features.get(key), int | float)
             },
             "reasons": list(self.reasons),
@@ -93,7 +98,9 @@ def _span_score(query_tokens: set[str], text: str) -> tuple[int, float]:
     return overlap, coverage
 
 
-def supporting_span(page_id: str, query: str, snippet: str = "") -> tuple[str, int, float, str]:
+def supporting_span(
+    page_id: str, query: str, snippet: str = ""
+) -> tuple[str, int, float, str]:
     """Choose one exact, bounded span and return its content digest."""
 
     path = find_page(page_id)
@@ -190,6 +197,8 @@ def certify_candidate(
     fused_raw = max(0.0, float(getattr(candidate, "score", 0.0) or 0.0))
     fused_calibrated = min(1.0, fused_raw / 0.08)
     reranker_raw: float | None = None
+    reranker_rank = 0
+    reranker_count = 0
     reranker_margin = 0.0
     model_revision = ""
     if isinstance(reranker_score, dict):
@@ -198,21 +207,39 @@ def certify_candidate(
             reranker_margin = max(
                 0.0, float(reranker_score.get("margin_to_next") or 0.0)
             )
+            reranker_rank = max(0, int(reranker_score.get("rerank_rank") or 0))
+            reranker_count = max(
+                reranker_rank,
+                int(reranker_score.get("candidate_count") or 0),
+            )
             model_revision = str(reranker_score.get("model_revision") or "")
         except (TypeError, ValueError):
             reranker_raw = None
     if reranker_raw is None:
         confidence = (0.72 * lexical_coverage) + (0.28 * fused_calibrated)
     else:
+        rank_probability = (
+            1.0 - ((reranker_rank - 1) / max(1, reranker_count))
+            if reranker_rank > 0
+            else _reranker_probability(reranker_raw)
+        )
         confidence = (
-            (0.44 * lexical_coverage)
-            + (0.44 * _reranker_probability(reranker_raw))
-            + (0.12 * fused_calibrated)
+            (0.32 * lexical_coverage)
+            + (0.50 * max(_reranker_probability(reranker_raw), rank_probability))
+            + (0.18 * fused_calibrated)
         )
     confidence = max(0.0, min(1.0, confidence))
     independent_retrieval = fused_calibrated >= 0.12
     lexical_support = lexical_coverage >= 0.08
-    reranker_support = reranker_raw is not None and reranker_raw >= 0.0
+    # BGE v2-m3 logits are not zero-calibrated: a relevant conversational
+    # paraphrase can be rank 1 with a negative raw logit. Relative rank is the
+    # cross-query stable signal; the low raw floor only rejects a collapsed
+    # tail score.
+    reranker_support = bool(
+        reranker_raw is not None
+        and reranker_rank in range(1, min(5, max(1, reranker_count)) + 1)
+        and reranker_raw >= -12.0
+    )
     passed = bool(
         span
         and independent_retrieval
@@ -272,13 +299,11 @@ def certify_candidate(
             "fused_calibrated": round(fused_calibrated, 6),
             "lexical_coverage": round(lexical_coverage, 6),
             "reranker_raw": reranker_raw,
+            "reranker_rank": reranker_rank,
+            "reranker_count": reranker_count,
             "reranker_margin": round(reranker_margin, 6),
-            "anti_index": round(
-                float(contextual.get("anti_index") or 0.0), 6
-            ),
-            "hub_penalty": round(
-                float(contextual.get("hub_penalty") or 0.0), 6
-            ),
+            "anti_index": round(float(contextual.get("anti_index") or 0.0), 6),
+            "hub_penalty": round(float(contextual.get("hub_penalty") or 0.0), 6),
             "hub_degree": int(float(contextual.get("hub_degree") or 0)),
             "query_specificity": round(
                 float(contextual.get("query_specificity") or 0.0), 6
@@ -286,9 +311,7 @@ def certify_candidate(
             "support_coverage": round(
                 float(contextual.get("support_coverage") or lexical_coverage), 6
             ),
-            "exact_match_protected": (
-                contextual.get("exact_match_protected") is True
-            ),
+            "exact_match_protected": (contextual.get("exact_match_protected") is True),
         },
         reasons=tuple(reasons),
         created_at=datetime.now().isoformat(timespec="milliseconds"),

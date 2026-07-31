@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+import json
+
 from chronovisor.recall.recall_learning import (
     append_policy_history,
     decide_learning_update,
+    load_last_known_good,
+    verify_policy_history,
+    write_last_known_good,
 )
 
 
@@ -61,3 +66,19 @@ def test_policy_history_is_hash_chained(tmp_path) -> None:
 
     assert first["previous_sha256"] == ""
     assert second["previous_sha256"] == first["record_sha256"]
+    assert verify_policy_history(path)["head_sha256"] == second["record_sha256"]
+
+
+def test_last_known_good_is_sealed_and_tamper_evident(tmp_path) -> None:
+    path = tmp_path / "last-known-good.json"
+    written = write_last_known_good(
+        {"spread_gain": 0.36},
+        evaluation={"locked": "passed"},
+        history_head_sha256="a" * 64,
+        path=path,
+    )
+
+    assert load_last_known_good(path)["policy"]["spread_gain"] == 0.36
+    written["policy"]["spread_gain"] = 0.99
+    path.write_text(json.dumps(written), encoding="utf-8")
+    assert load_last_known_good(path) == {}

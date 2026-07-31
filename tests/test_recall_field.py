@@ -443,6 +443,42 @@ def test_mcp_activity_targets_latest_session_for_client_host(
     assert store.latest_session_hash(host="codex", now=102.0) == codex_session
 
 
+def test_mcp_record_stimulates_current_working_set_without_inventing_pages(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from chronovisor.search import cofire
+
+    monkeypatch.setattr(cofire, "neighbors", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(recall_field, "get_store", FakeGraphStore)
+    monkeypatch.setattr(recall_field, "prompt_stimuli", lambda *_args, **_kwargs: [])
+    cfg = config()
+    store = RecallFieldStore(tmp_path / "field", config=cfg)
+    hashed = session_hash("codex", "save-session")
+
+    def seed(state):
+        state.host = "codex"
+        state.shadow["a"] = ActivationNode(activation=0.7, direct=0.7)
+        state.updated_at_epoch = 100.0
+        return state, []
+
+    store.transact(hashed, seed, now=100.0)
+
+    result = recall_field.record_mcp_content_activity(
+        host="codex",
+        session_id="save-session",
+        content="saved payload without an exact page name",
+        config=cfg,
+        store=store,
+        now=101.0,
+    )
+
+    assert result["status"] == "ok"
+    assert result["page_ids"] == ["a"]
+    assert store.load(hashed, now=101.0).shadow["a"].direct > 0.7
+    assert any(row["reason_code"] == "mcp_record" for row in store.read_events(hashed))
+
+
 def test_field_update_p95_is_below_50ms_and_has_no_prompt_body(
     monkeypatch,
 ) -> None:

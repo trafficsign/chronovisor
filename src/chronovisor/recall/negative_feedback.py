@@ -63,6 +63,7 @@ class _Cache:
 
 _CACHE = _Cache()
 _PROTECT_CACHE = _Cache()
+_GOLD_NEGATIVE_CACHE = _Cache()
 _CACHE_LOCK = threading.Lock()
 
 
@@ -119,9 +120,7 @@ def _persistent_key(
         "max_age_days": config.max_age_days,
         "max_entries": config.max_entries,
         "utc_date": (
-            datetime.now(UTC).date().isoformat()
-            if config.max_age_days > 0
-            else ""
+            datetime.now(UTC).date().isoformat() if config.max_age_days > 0 else ""
         ),
     }
 
@@ -228,11 +227,7 @@ def _load_entries(config: NegativeFeedbackConfig) -> list[_FeedbackEntry]:
         config.kinds,
         config.max_age_days,
         config.max_entries,
-        (
-            datetime.now(UTC).date().isoformat()
-            if config.max_age_days > 0
-            else ""
-        ),
+        (datetime.now(UTC).date().isoformat() if config.max_age_days > 0 else ""),
     )
     with _CACHE_LOCK:
         if _CACHE.key == cache_key:
@@ -278,7 +273,11 @@ def _load_entries(config: NegativeFeedbackConfig) -> list[_FeedbackEntry]:
             continue
         prompt = row.get("prompt")
         negative_pages = row.get("negative_pages")
-        pages = negative_pages if isinstance(negative_pages, list) and negative_pages else None
+        pages = (
+            negative_pages
+            if isinstance(negative_pages, list) and negative_pages
+            else None
+        )
         if pages is None and row.get("kind") != "page_ignored":
             # Backward compatibility: the legacy prompt-scoped labels stored
             # injected pages in ``expected_pages``.
@@ -323,7 +322,7 @@ def _load_entries(config: NegativeFeedbackConfig) -> list[_FeedbackEntry]:
 
     # Keep the most recent entries when the file grows large.
     if len(entries) > config.max_entries:
-        entries = entries[-config.max_entries:]
+        entries = entries[-config.max_entries :]
 
     with _CACHE_LOCK:
         _CACHE.key = cache_key
@@ -364,9 +363,15 @@ def _load_protections() -> list[_FeedbackEntry]:
             continue
         if not isinstance(row, dict) or row.get("reviewed") is not True:
             continue
+        if str(row.get("split") or "train") != "train":
+            continue
         query = row.get("query")
         pages = row.get("expected_pages")
-        if not isinstance(query, str) or not query.strip() or not isinstance(pages, list):
+        if (
+            not isinstance(query, str)
+            or not query.strip()
+            or not isinstance(pages, list)
+        ):
             continue
         page_ids = tuple(p for p in pages if isinstance(p, str) and p)
         if not page_ids:
@@ -389,6 +394,62 @@ def _load_protections() -> list[_FeedbackEntry]:
     return entries
 
 
+def _load_reviewed_train_negatives() -> list[_FeedbackEntry]:
+    """Load only reviewed train-split negatives; holdout/locked stay unseen."""
+
+    path = _golden_file()
+    try:
+        stat = path.stat()
+    except OSError:
+        return []
+    cache_key = (str(path), stat.st_mtime_ns, stat.st_size, "train-negatives")
+    with _CACHE_LOCK:
+        if _GOLD_NEGATIVE_CACHE.key == cache_key:
+            return _GOLD_NEGATIVE_CACHE.entries
+    entries: list[_FeedbackEntry] = []
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    for line in lines:
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if (
+            not isinstance(row, dict)
+            or row.get("reviewed") is not True
+            or str(row.get("split") or "train") != "train"
+        ):
+            continue
+        query = row.get("query")
+        pages = row.get("negative_pages")
+        if (
+            not isinstance(query, str)
+            or not query.strip()
+            or not isinstance(pages, list)
+        ):
+            continue
+        page_ids = tuple(page for page in pages if isinstance(page, str) and page)
+        tokens = _tokenize(query)
+        if not page_ids or not tokens:
+            continue
+        entries.append(
+            _FeedbackEntry(
+                tokens=tokens,
+                pages=page_ids,
+                ts=_parse_ts(row.get("ts") or row.get("reviewed_at")),
+                kind="explicit_eval_negative",
+                frontier_confirmed=True,
+                label_quality="gold",
+            )
+        )
+    with _CACHE_LOCK:
+        _GOLD_NEGATIVE_CACHE.key = cache_key
+        _GOLD_NEGATIVE_CACHE.entries = entries
+    return entries
+
+
 def contextual_negative_trace(
     query: str,
     config: NegativeFeedbackConfig | None = None,
@@ -407,7 +468,7 @@ def contextual_negative_trace(
     # timestamp separately from penalty magnitude so a slightly different
     # wording cannot let stale golden data veto the newer correction.
     newest_confirmed_ignored: dict[str, datetime | None] = {}
-    for entry in _load_entries(config):
+    for entry in [*_load_entries(config), *_load_reviewed_train_negatives()]:
         union = len(query_tokens | entry.tokens)
         if union == 0:
             continue
@@ -432,7 +493,9 @@ def contextual_negative_trace(
             matched_entries.setdefault(page_id, []).append((entry, jaccard))
             if entry.frontier_confirmed:
                 previous = newest_confirmed_ignored.get(page_id)
-                if page_id not in newest_confirmed_ignored or _ts_rank(entry.ts) > _ts_rank(previous):
+                if page_id not in newest_confirmed_ignored or _ts_rank(
+                    entry.ts
+                ) > _ts_rank(previous):
                     newest_confirmed_ignored[page_id] = entry.ts
     if not matched_entries:
         return {}
@@ -451,8 +514,7 @@ def contextual_negative_trace(
             for token in entry.tokens:
                 token_weights[token] += jaccard
         centroid_tokens = frozenset(
-            token
-            for token, _weight in token_weights.most_common(48)
+            token for token, _weight in token_weights.most_common(48)
         )
         centroid_union = len(query_tokens | centroid_tokens)
         centroid_similarity = (
@@ -492,10 +554,9 @@ def contextual_negative_trace(
         row = trace.get(page_id)
         penalty = float(row.get("penalty") or 0.0) if row else None
         confirmed_ts = newest_confirmed_ignored.get(page_id)
-        confirmed_is_newer = (
-            page_id in newest_confirmed_ignored
-            and _ts_rank(confirmed_ts) >= _ts_rank(positive_ts)
-        )
+        confirmed_is_newer = page_id in newest_confirmed_ignored and _ts_rank(
+            confirmed_ts
+        ) >= _ts_rank(positive_ts)
         if (
             penalty is not None
             and not confirmed_is_newer

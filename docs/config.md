@@ -192,7 +192,7 @@ weight = 1.0
 [search.reranker.service]
 enabled = true
 socket = "~/.chronovisor/runtime/reranker.sock"
-timeout_ms = 650
+timeout_ms = 1000
 # off | shadow | canary | on
 mode = "shadow"
 canary_percent = 0

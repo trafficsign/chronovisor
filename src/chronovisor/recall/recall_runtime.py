@@ -1994,7 +1994,7 @@ def _finalize_recall_result(
     )
     if (
         isinstance(observer, dict)
-        and observer.get("status") in {"observed", "active"}
+        and observer.get("status") in {"fallback", "observed", "active"}
         and active_request.session_id
     ):
         try:
@@ -2588,18 +2588,17 @@ def _run_recall_impl(
             "commit_overlap": len(compiler_ids & set(committed_ids)),
             "authority": "teacher",
         }
-        if compiler_metadata.get("status") == "exact":
-            try:
-                from chronovisor.recall.recall_compiler import append_shadow_trace
+        try:
+            from chronovisor.recall.recall_compiler import append_shadow_trace
 
-                append_shadow_trace(
-                    prompt=active_request.prompt,
-                    compiler=compiler_metadata,
-                    teacher_page_ids=teacher_ids,
-                    committed_page_ids=committed_ids,
-                )
-            except Exception:
-                pass
+            append_shadow_trace(
+                prompt=active_request.prompt,
+                compiler=compiler_metadata,
+                teacher_page_ids=teacher_ids,
+                committed_page_ids=committed_ids,
+            )
+        except Exception:
+            pass
     return _finalize_recall_result(
         result,
         request=request,

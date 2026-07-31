@@ -85,18 +85,15 @@ def test_label_factory_keeps_exposure_non_negative_and_deduplicates(tmp_path) ->
     labels = payload["labels"]
 
     assert any(
-        row["page_id"] == "page-b" and row["polarity"] == "exposure"
-        for row in labels
+        row["page_id"] == "page-b" and row["polarity"] == "exposure" for row in labels
     )
     assert not any(
-        row["page_id"] == "page-b" and row["polarity"] == "negative"
-        for row in labels
+        row["page_id"] == "page-b" and row["polarity"] == "negative" for row in labels
     )
     used = [
         row
         for row in labels
-        if row["page_id"] == "page-a"
-        and row["provenance"]["source"] == "recall_used"
+        if row["page_id"] == "page-a" and row["provenance"]["source"] == "recall_used"
     ]
     assert used[0]["quality"] == "strong"
     assert any(
@@ -156,3 +153,33 @@ def test_same_session_never_crosses_temporal_split(tmp_path) -> None:
     assert len(used_splits) == 1
     assert payload["gates"]["field_learning_allowed"] is False
     assert payload["gates"]["calibration_allowed"] is False
+
+
+def test_same_query_across_sessions_never_crosses_temporal_split(tmp_path) -> None:
+    from chronovisor.recall.recall_label_factory import assign_temporal_splits
+
+    labels = [
+        {
+            "label_id": "one",
+            "session_hash": "session-a",
+            "query_sha256": "shared-query",
+            "observed_at": "2026-01-01T00:00:00Z",
+        },
+        {
+            "label_id": "two",
+            "session_hash": "session-b",
+            "query_sha256": "shared-query",
+            "observed_at": "2026-07-01T00:00:00Z",
+        },
+        {
+            "label_id": "three",
+            "session_hash": "session-c",
+            "query_sha256": "other-query",
+            "observed_at": "2026-07-02T00:00:00Z",
+        },
+    ]
+
+    assigned = assign_temporal_splits(labels)
+
+    shared = {row["split"] for row in assigned if row["query_sha256"] == "shared-query"}
+    assert len(shared) == 1

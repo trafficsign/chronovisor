@@ -51,7 +51,11 @@ def rank_recall_candidates(
     if mode not in {"canary", "on"}:
         return candidates, {"status": "disabled", "mode": mode}
     if not reranker_client.selected_for_rollout(query, config):
-        return candidates, {"status": "disabled", "mode": mode, "reason": "not_selected"}
+        return candidates, {
+            "status": "disabled",
+            "mode": mode,
+            "reason": "not_selected",
+        }
     started = time.perf_counter()
     try:
         outcome = reranker_client.rerank(
@@ -116,7 +120,9 @@ def _redundancy(
     )
 
 
-def _estimated_tokens(candidate: Any, certificate: EvidenceCertificate, kind: str) -> int:
+def _estimated_tokens(
+    candidate: Any, certificate: EvidenceCertificate, kind: str
+) -> int:
     title = str(getattr(candidate, "title", "") or "")
     chars = len(title) + len(certificate.certificate_id) + 32
     if kind == "rich":
@@ -176,7 +182,9 @@ def _run_certificate_judge(
             with lease:
                 current = ollama.resident_model_rows().get(request.model)
                 if current is None or current[1] < request.num_ctx:
-                    raise RuntimeError("resident model changed before certificate judge")
+                    raise RuntimeError(
+                        "resident model changed before certificate judge"
+                    )
                 return ollama.chat(
                     [dict(message) for message in request.messages],
                     model=request.model,
@@ -333,9 +341,7 @@ def judge_ambiguous_certificates(
     escalation_status = "not_needed"
     elapsed_ms = int(round((time.perf_counter() - started) * 1_000))
     remaining_ms = max(0, timeout_ms - elapsed_ms)
-    escalation_model = str(
-        getattr(policy, "processor_escalation_model", "") or ""
-    )
+    escalation_model = str(getattr(policy, "processor_escalation_model", "") or "")
     if unresolved and escalation_model and remaining_ms >= 300:
         escalation_verdicts, escalation_status = _run_certificate_judge(
             query,
@@ -448,6 +454,7 @@ def select_certified_candidates(
         str(row.get("page_id") or ""): {
             **row,
             "model_revision": model_revision,
+            "candidate_count": int(metadata.get("candidate_count") or 0),
         }
         for row in metadata.get("scores", [])
         if isinstance(row, dict) and row.get("page_id")

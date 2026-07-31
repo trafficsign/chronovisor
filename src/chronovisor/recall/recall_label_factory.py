@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from pathlib import Path
 from typing import Any
 
@@ -41,11 +42,6 @@ def _session_hash(value: object) -> str:
     return _digest(session)[:16] if session else ""
 
 
-def _split(identity: str) -> str:
-    bucket = int(_digest(identity)[:8], 16) % 10
-    return "train" if bucket < 7 else "holdout" if bucket < 9 else "locked-test"
-
-
 def _label(
     *,
     page_id: str,
@@ -54,6 +50,7 @@ def _label(
     polarity: str,
     quality: str,
     provenance: dict[str, Any],
+    observed_at: str = "",
 ) -> dict[str, Any]:
     identity = session_hash or query_sha256 or str(provenance.get("event_id") or "")
     stable = ":".join(
@@ -73,9 +70,72 @@ def _label(
         "polarity": polarity,
         "quality": quality,
         "weight": QUALITY_WEIGHTS.get(quality, 0.0),
-        "split": _split(identity or stable),
+        "split": "unassigned",
+        "observed_at": observed_at,
         "provenance": provenance,
     }
+
+
+def assign_temporal_splits(labels: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Assign chronological 70/20/10 splits without session/query leakage."""
+
+    parent: dict[str, str] = {}
+
+    def find(value: str) -> str:
+        parent.setdefault(value, value)
+        while parent[value] != value:
+            parent[value] = parent[parent[value]]
+            value = parent[value]
+        return value
+
+    def union(left: str, right: str) -> None:
+        left_root = find(left)
+        right_root = find(right)
+        if left_root != right_root:
+            parent[max(left_root, right_root)] = min(left_root, right_root)
+
+    row_keys: list[list[str]] = []
+    for row in labels:
+        keys = []
+        session = str(row.get("session_hash") or "")
+        query = str(row.get("query_sha256") or "")
+        if session:
+            keys.append(f"session:{session}")
+        if query:
+            keys.append(f"query:{query}")
+        if not keys:
+            keys.append(f"label:{row.get('label_id')}")
+        for key in keys:
+            find(key)
+        for key in keys[1:]:
+            union(keys[0], key)
+        row_keys.append(keys)
+
+    groups: dict[str, list[int]] = {}
+    for index, keys in enumerate(row_keys):
+        groups.setdefault(find(keys[0]), []).append(index)
+    ordered = sorted(
+        groups.values(),
+        key=lambda indexes: (
+            max(str(labels[index].get("observed_at") or "") for index in indexes),
+            min(str(labels[index].get("label_id") or "") for index in indexes),
+        ),
+    )
+    count = len(ordered)
+    train_end = max(1, math.ceil(count * 0.70)) if count else 0
+    holdout_end = max(train_end, math.ceil(count * 0.90))
+    assigned: list[dict[str, Any]] = [dict(row) for row in labels]
+    for group_index, indexes in enumerate(ordered):
+        split = (
+            "train"
+            if group_index < train_end
+            else "holdout"
+            if group_index < holdout_end
+            else "locked-test"
+        )
+        for index in indexes:
+            assigned[index]["split"] = split
+    return assigned
 
 
 def build_label_ledger(
@@ -105,12 +165,11 @@ def build_label_ledger(
                     "source": "certificate",
                     "certificate_id": str(row.get("certificate_id") or ""),
                     "outcome": outcome,
-                    "certificate_quality": str(
-                        row.get("label_quality") or "silver"
-                    ),
+                    "certificate_quality": str(row.get("label_quality") or "silver"),
                     "content_sha256": str(row.get("content_sha256") or ""),
                     "policy_sha256": str(row.get("policy_sha256") or ""),
                 },
+                observed_at=str(row.get("created_at") or ""),
             )
         )
 
@@ -139,6 +198,7 @@ def build_label_ledger(
                         "event_id": episode["event_id"],
                         "decision_id": episode["decision_id"],
                     },
+                    observed_at=str(episode.get("pull", {}).get("ts") or ""),
                 )
             )
     for row in pull_rows:
@@ -158,6 +218,7 @@ def build_label_ledger(
                     "source": "read",
                     "decision_id": str(row.get("decision_id") or ""),
                 },
+                observed_at=str(row.get("ts") or ""),
             )
         )
 
@@ -188,6 +249,7 @@ def build_label_ledger(
                             "ref": str(row.get("ref") or ""),
                             "reviewed": True,
                         },
+                        observed_at=str(row.get("ts") or ""),
                     )
                 )
 
@@ -198,8 +260,9 @@ def build_label_ledger(
         current = deduped.get(key)
         if current is None or float(label["weight"]) > float(current["weight"]):
             deduped[key] = label
+    rows = assign_temporal_splits(list(deduped.values()))
     rows = sorted(
-        deduped.values(),
+        rows,
         key=lambda row: (
             str(row["split"]),
             str(row["query_sha256"]),
@@ -210,16 +273,11 @@ def build_label_ledger(
     trusted_positive = [
         row
         for row in rows
-        if row["polarity"] == "positive"
-        and row["quality"] in {"strong", "gold"}
+        if row["polarity"] == "positive" and row["quality"] in {"strong", "gold"}
     ]
-    strong_positive = [
-        row for row in trusted_positive if row["quality"] == "strong"
-    ]
+    strong_positive = [row for row in trusted_positive if row["quality"] == "strong"]
     sessions = {
-        str(row["session_hash"])
-        for row in strong_positive
-        if row["session_hash"]
+        str(row["session_hash"]) for row in strong_positive if row["session_hash"]
     }
     return {
         "schema_version": 1,

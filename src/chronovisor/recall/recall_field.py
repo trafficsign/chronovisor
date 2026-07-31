@@ -8,6 +8,7 @@ from collections import deque
 from dataclasses import asdict, replace
 from typing import Any
 
+from chronovisor.core.store import CHRONOVISOR_ROOT
 from chronovisor.recall.recall_field_schema import (
     ActivationNode,
     FieldEvent,
@@ -31,16 +32,50 @@ def _clamp(value: float) -> float:
 def _effective_config(config: RecallFieldConfig) -> RecallFieldConfig:
     """Apply learned edges only after the autonomous supervision gate passes."""
 
-    if config.positive_learning or not config.auto_growth:
+    if not config.auto_growth:
         return config
+    effective = config
+    try:
+        from chronovisor.recall.recall_learning import load_last_known_good
+
+        lkg = load_last_known_good(
+            CHRONOVISOR_ROOT
+            / "runtime"
+            / "recall-field"
+            / "last-known-good-policy.json"
+        )
+        policy = lkg.get("policy") if isinstance(lkg, dict) else None
+        if isinstance(policy, dict):
+            effective = replace(
+                effective,
+                spread_gain=max(
+                    0.0,
+                    min(1.0, float(policy.get("spread_gain", effective.spread_gain))),
+                ),
+                global_inhibition=max(
+                    0.0,
+                    min(
+                        1.0,
+                        float(
+                            policy.get("global_inhibition", effective.global_inhibition)
+                        ),
+                    ),
+                ),
+                turn_decay=max(
+                    0.0,
+                    min(1.0, float(policy.get("turn_decay", effective.turn_decay))),
+                ),
+            )
+    except (TypeError, ValueError):
+        effective = config
     try:
         from chronovisor.recall.recall_growth import automatic_learning_allowed
 
-        if automatic_learning_allowed(enabled=True):
-            return replace(config, positive_learning=True)
+        if not effective.positive_learning and automatic_learning_allowed(enabled=True):
+            effective = replace(effective, positive_learning=True)
     except Exception:
         pass
-    return config
+    return effective
 
 
 def _event(
@@ -466,7 +501,7 @@ def record_mcp_activity(
     store: RecallFieldStore | None = None,
     now: float | None = None,
 ) -> dict[str, Any]:
-    """Project an actual MCP search/read into the owning Recall Field session."""
+    """Project an actual MCP search/read/record into the owning Field session."""
 
     started = time.perf_counter()
     cfg = _effective_config(config or load_recall_field_config())
@@ -503,12 +538,16 @@ def record_mcp_activity(
             ),
             "latency_ms": int(round((time.perf_counter() - started) * 1_000)),
         }
-    reason_code = "mcp_read" if activity_kind == "read" else "mcp_search"
-    weights = (
-        [1.0] * len(unique_pages)
-        if activity_kind == "read"
-        else [max(0.58, 0.92 - index * 0.08) for index in range(len(unique_pages))]
-    )
+    reason_code = {
+        "read": "mcp_read",
+        "record": "mcp_record",
+    }.get(activity_kind, "mcp_search")
+    if activity_kind == "read":
+        weights = [1.0] * len(unique_pages)
+    elif activity_kind == "record":
+        weights = [max(0.52, 0.84 - index * 0.08) for index in range(len(unique_pages))]
+    else:
+        weights = [max(0.58, 0.92 - index * 0.08) for index in range(len(unique_pages))]
     stimuli = [
         FieldStimulus(
             page_id=page_id,
@@ -547,6 +586,65 @@ def record_mcp_activity(
         "page_ids": unique_pages,
         "latency_ms": int(round((time.perf_counter() - started) * 1_000)),
     }
+
+
+def record_mcp_content_activity(
+    *,
+    host: str,
+    session_id: str = "",
+    content: str,
+    config: RecallFieldConfig | None = None,
+    store: RecallFieldStore | None = None,
+    now: float | None = None,
+) -> dict[str, Any]:
+    """Resolve a saved payload to bounded pages and emit a real record stimulus.
+
+    Exact page/entity hints from the saved payload win.  When a Stop/save payload
+    contains no exact hint, the current working set is used because that is the
+    memory state the save operation is persisting; no unrelated global page is
+    invented merely to create an animation.
+    """
+
+    cfg = _effective_config(config or load_recall_field_config())
+    field_store = store or RecallFieldStore(config=cfg)
+    observed = time.time() if now is None else now
+    normalized_host = host.strip().casefold()
+    hashed_session = (
+        session_hash(normalized_host, session_id)
+        if normalized_host and session_id.strip()
+        else field_store.latest_session_hash(
+            host=normalized_host,
+            max_age_seconds=max(
+                60.0,
+                min(600.0, cfg.wall_half_life_seconds * 2.0),
+            ),
+            now=observed,
+        )
+    )
+    if not hashed_session:
+        return {"status": "skipped", "mode": cfg.mode, "reason": "missing_session"}
+    exact_pages = [
+        stimulus.page_id for stimulus in prompt_stimuli(content[-12_000:], limit=5)
+    ]
+    if not exact_pages:
+        state = field_store.load(hashed_session, now=observed)
+        buffer = state.shadow if cfg.mode == "shadow" else state.active
+        exact_pages = [
+            page_id
+            for page_id, _node in sorted(
+                buffer.items(),
+                key=lambda item: (-item[1].activation, item[0]),
+            )[:3]
+        ]
+    return record_mcp_activity(
+        host=normalized_host,
+        session_id=session_id,
+        page_ids=exact_pages,
+        activity_kind="record",
+        config=cfg,
+        store=field_store,
+        now=observed,
+    )
 
 
 def queue_teacher_commits(

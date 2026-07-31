@@ -160,7 +160,10 @@ def run_candidate_teacher_pair(
     fallback = field_turn.get("full_search_fallback") is True
     selected = selected_for_canary(session, cfg)
     if not selected or fallback or not page_ids:
+        teacher_started = time.perf_counter()
         results, mode = teacher_search()
+        teacher_latency_ms = int(round((time.perf_counter() - teacher_started) * 1_000))
+        teacher_ids = [str(row.page_id) for row in results[:30]]
         return (
             results,
             mode,
@@ -174,22 +177,44 @@ def run_candidate_teacher_pair(
                     else "empty_field"
                 ),
                 "teacher_count": len(results),
+                "teacher_page_ids": teacher_ids,
+                "field_page_ids": page_ids,
+                "missed_page_ids": [
+                    page_id for page_id in teacher_ids if page_id not in set(page_ids)
+                ],
+                "teacher_top30_coverage": round(
+                    len(set(teacher_ids) & set(page_ids))
+                    / max(1, len(set(teacher_ids))),
+                    6,
+                ),
+                "full_search_required": True,
+                "field_latency_ms": None,
+                "teacher_latency_ms": teacher_latency_ms,
                 "authority": "teacher",
             },
+        )
+
+    def timed_teacher() -> tuple[list[Any], str, int]:
+        started = time.perf_counter()
+        teacher_results, teacher_mode = teacher_search()
+        return (
+            teacher_results,
+            teacher_mode,
+            int(round((time.perf_counter() - started) * 1_000)),
         )
 
     with ThreadPoolExecutor(
         max_workers=2,
         thread_name_prefix="recall-field-candidate",
     ) as executor:
-        teacher_future = executor.submit(teacher_search)
+        teacher_future = executor.submit(timed_teacher)
         field_future = executor.submit(
             _verify,
             query,
             page_ids,
             timeout_ms=max(25, timeout_ms),
         )
-        teacher_results, teacher_mode = teacher_future.result()
+        teacher_results, teacher_mode, teacher_latency_ms = teacher_future.result()
         verified, verify_meta = field_future.result()
 
     teacher_ids = [str(row.page_id) for row in teacher_results[:30]]
@@ -220,6 +245,9 @@ def run_candidate_teacher_pair(
                 if cfg.mode == "active" and not promoted
                 else ""
             ),
+            "full_search_required": False,
+            "field_latency_ms": int(verify_meta.get("latency_ms") or 0),
+            "teacher_latency_ms": teacher_latency_ms,
             "effective_mode": "active" if promoted else "shadow",
         },
     )
@@ -255,6 +283,7 @@ def append_candidate_trace(
         "status": str(observer.get("status") or ""),
         "authority": str(observer.get("authority") or "teacher"),
         "fallback_reason": str(observer.get("reason") or ""),
+        "full_search_required": observer.get("full_search_required") is True,
         "teacher_top30_coverage": float(observer.get("teacher_top30_coverage") or 0.0),
         "teacher_commit_coverage": round(commit_coverage, 6),
         "field_page_ids": field_ids,
@@ -262,6 +291,16 @@ def append_candidate_trace(
         "committed_page_ids": committed,
         "missed_page_ids": list(observer.get("missed_page_ids") or []),
         "latency_ms": max(0, int(latency_ms)),
+        "field_latency_ms": (
+            max(0, int(observer["field_latency_ms"]))
+            if isinstance(observer.get("field_latency_ms"), int | float)
+            else None
+        ),
+        "teacher_latency_ms": (
+            max(0, int(observer["teacher_latency_ms"]))
+            if isinstance(observer.get("teacher_latency_ms"), int | float)
+            else None
+        ),
         "over_4s": latency_ms > 4_000,
         "rollback": observer.get("rollback") is True,
         "rollback_reason": str(observer.get("rollback_reason") or ""),

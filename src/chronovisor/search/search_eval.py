@@ -80,6 +80,7 @@ LABEL_QUEUE_FILE = RECALL_DIR / "search-label-queue.jsonl"
 FAILURE_INDEX_FILE = RECALL_DIR / "search-failures.jsonl"
 BASELINE_DIR = CHRONOVISOR_ROOT / "runtime" / "search-eval"
 MANUAL_MANIFEST_FILE = BASELINE_DIR / "manual-94-manifest.json"
+LOCKED_E2E_ARTIFACT = BASELINE_DIR / "recall-field-locked-e2e.json"
 SELF_TUNE_HISTORY_FILE = BASELINE_DIR / "self-tune-history.jsonl"
 SELF_TUNE_ATTEMPT_FILE = BASELINE_DIR / "self-tune-attempt.json"
 SEALED_MANIFEST_SCHEMA_VERSION = 1
@@ -205,6 +206,94 @@ def write_sealed_manifest(
         "examples": len(entries),
         "manifest_sha256": payload["manifest_sha256"],
     }
+
+
+def _wilson_lower_bound(successes: int, total: int, z: float = 1.96) -> float | None:
+    if total <= 0:
+        return None
+    proportion = successes / total
+    denominator = 1.0 + (z * z / total)
+    centre = proportion + (z * z / (2.0 * total))
+    margin = z * math.sqrt(
+        (proportion * (1.0 - proportion) / total) + (z * z / (4.0 * total * total))
+    )
+    return round((centre - margin) / denominator, 6)
+
+
+def write_locked_e2e_artifact(
+    payload: dict[str, Any],
+    examples: list[SearchExample],
+    *,
+    path: Path = LOCKED_E2E_ARTIFACT,
+    variant: str = "hybrid-rerank",
+) -> dict[str, Any]:
+    """Seal the full retrieval→certificate→commit locked evaluation gate."""
+
+    variant_payload = payload.get("variants", {}).get(variant, {})
+    metrics = variant_payload.get("metrics", {})
+    processor = metrics.get("processor", {}) if isinstance(metrics, dict) else {}
+    evidence = processor.get("evidence_kind", {}) if isinstance(processor, dict) else {}
+    manifest_entries = sorted(
+        (_sealed_manifest_entry(example) for example in examples),
+        key=lambda row: (str(row["query_sha256"]), str(row["ref"])),
+    )
+    manifest_unsigned = {
+        "schema_version": SEALED_MANIFEST_SCHEMA_VERSION,
+        "examples": len(manifest_entries),
+        "entries": manifest_entries,
+    }
+    manifest_sha = _canonical_json_sha256(manifest_unsigned)
+    precision = processor.get("precision") if isinstance(processor, dict) else None
+    related_recall = (
+        float(processor.get("related_recall") or 0.0)
+        if isinstance(processor, dict)
+        else 0.0
+    )
+    labeled = int(processor.get("labeled_selected_pages") or 0)
+    true_positive = int(processor.get("true_positive_pages") or 0)
+    rich_precision = evidence.get("rich", {}).get("precision")
+    pointer_precision = evidence.get("pointer", {}).get("precision")
+    gates = {
+        "sealed_manual_94": len(examples) == 94,
+        "rerank_recall_at_5": float(metrics.get("recall_at_5") or 0.0) >= 0.535,
+        "negative_hit_rate": (
+            float(metrics.get("negative_hit_rate_at_20") or 0.0) <= 0.20
+        ),
+        "processor_precision": isinstance(precision, int | float)
+        and float(precision) >= 0.90,
+        "processor_related_recall": related_recall >= 0.535,
+        "rich_precision": isinstance(rich_precision, int | float)
+        and float(rich_precision) >= 0.90,
+        "pointer_precision": isinstance(pointer_precision, int | float)
+        and float(pointer_precision) >= 0.90,
+        "latency": float(metrics.get("latency_ms", {}).get("max") or 0.0) <= 4_000,
+    }
+    unsigned = {
+        "schema_version": 1,
+        "generated_at": str(payload.get("generated_at") or ""),
+        "variant": variant,
+        "manifest_sha256": manifest_sha,
+        "examples": len(examples),
+        "status": "passed" if all(gates.values()) else "failed",
+        "gates": gates,
+        "metrics": metrics,
+        "precision_lower_95": _wilson_lower_bound(true_positive, labeled),
+        "precision_delta_points": (
+            round((float(precision) - 1.0) * 100.0, 6)
+            if isinstance(precision, int | float)
+            else None
+        ),
+        "recall_delta_points": round(
+            (related_recall - float(metrics.get("recall_at_5") or 0.0)) * 100.0,
+            6,
+        ),
+    }
+    artifact = {**unsigned, "snapshot_sha256": _canonical_json_sha256(unsigned)}
+    _atomic_write_text(
+        path,
+        json.dumps(artifact, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+    )
+    return artifact
 
 
 def read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -838,6 +927,29 @@ def _candidate_union(
     return list(ordered)[: max(0, limit)]
 
 
+def _eval_rerank_results(
+    query: str,
+    candidates: list[Any],
+    *,
+    config: Any,
+) -> Any:
+    """Use the production resident service, with local inference as fallback."""
+
+    if config.service.enabled and config.service.mode in {"shadow", "canary", "on"}:
+        try:
+            from chronovisor.search import reranker_client
+
+            return reranker_client.rerank(
+                query,
+                candidates,
+                config=config,
+                timeout_ms=config.service.timeout_ms,
+            )
+        except Exception:
+            pass
+    return rerank_results(query, candidates, config=config)
+
+
 def run_variant(query: str, variant: str, *, top_n: int = 20) -> dict[str, Any]:
     started = time.perf_counter()
     config, needs_rerank = _variant_pipeline_config(variant, top_n=top_n)
@@ -852,7 +964,7 @@ def run_variant(query: str, variant: str, *, top_n: int = 20) -> dict[str, Any]:
             query,
             apply_filters(results),
             reranker_config=load_reranker_config(),
-            rerank_results=rerank_results,
+            rerank_results=_eval_rerank_results,
         )
         results = rerank_stage.results
         reranker_meta = rerank_stage.metadata
@@ -863,6 +975,37 @@ def run_variant(query: str, variant: str, *, top_n: int = 20) -> dict[str, Any]:
     elapsed_ms = int(round((time.perf_counter() - started) * 1000))
     out = apply_filters(results)[:top_n]
     result_pages = [page.page_id for page in out]
+    from chronovisor.recall.recall_processor import select_certified_candidates
+    from chronovisor.recall.recall_runtime import load_policy
+
+    policy = load_policy()
+    selections, processor = select_certified_candidates(
+        query,
+        out,
+        reranker_metadata=reranker_meta,
+        max_candidates=policy.processor_max_candidates,
+        max_pointer_cards=policy.processor_max_pointer_cards,
+        max_rich_evidence=policy.processor_max_rich_evidence,
+        injection_token_budget=policy.processor_injection_token_budget,
+        certificate_required=policy.processor_certificate_required,
+        ledger=False,
+        judge_policy=None,
+        judge_timeout_ms=0,
+    )
+    page_gate = [
+        str(row.get("page_id"))
+        for row in processor.get("certificates", [])
+        if isinstance(row, dict) and row.get("outcome") == "pass" and row.get("page_id")
+    ]
+    committed = [str(selection.candidate.page_id) for selection in selections]
+    processor["selected"] = [
+        {
+            "page_id": str(selection.candidate.page_id),
+            "evidence_kind": selection.evidence_kind,
+            "certificate_id": selection.certificate.certificate_id,
+        }
+        for selection in selections
+    ]
     return {
         "variant": variant,
         "results": out,
@@ -871,10 +1014,19 @@ def run_variant(query: str, variant: str, *, top_n: int = 20) -> dict[str, Any]:
             "candidate_union": _candidate_union(pipeline_result, limit=top_n),
             "fused": fused_pages,
             "reranked": result_pages if needs_rerank else fused_pages,
-            "page_gate": None,
-            "committed": None,
+            "page_gate": page_gate,
+            "committed": committed,
             "host_used": None,
+            "observed": {
+                "candidate_union": True,
+                "fused": True,
+                "reranked": True,
+                "page_gate": True,
+                "committed": True,
+                "host_used": False,
+            },
         },
+        "processor": processor,
         "channels": {
             "anchor": [page.page_id for page in pipeline_result.anchor_results[:top_n]],
             "bm25": [page.page_id for page in pipeline_result.bm25_results[:top_n]],
@@ -949,6 +1101,62 @@ def _metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
         if set(row["stale_pages"]) & set(row["result_pages"][:20]):
             stale_hits += 1
 
+    processor_rows = [
+        row
+        for row in rows
+        if isinstance(row.get("stages"), dict)
+        and isinstance(row["stages"].get("committed"), list)
+    ]
+    committed_pages = sum(len(row["stages"]["committed"]) for row in processor_rows)
+    committed_expected = sum(
+        len(set(row.get("expected_pages", [])) & set(row["stages"]["committed"]))
+        for row in processor_rows
+    )
+    committed_negative = sum(
+        len(set(row.get("bad_pages", [])) & set(row["stages"]["committed"]))
+        for row in processor_rows
+    )
+    processor_positives = [row for row in processor_rows if row["expected_pages"]]
+    processor_hits = sum(
+        bool(set(row["expected_pages"]) & set(row["stages"]["committed"]))
+        for row in processor_positives
+    )
+    host_rows = [
+        row
+        for row in processor_rows
+        if bool(row["stages"].get("observed", {}).get("host_used"))
+        and isinstance(row["stages"].get("host_used"), list)
+    ]
+    evidence_quality: dict[str, dict[str, int | float | None]] = {}
+    for evidence_kind in ("rich", "pointer"):
+        selected_ids: list[tuple[dict[str, Any], str]] = []
+        for row in processor_rows:
+            processor = row.get("processor")
+            selected = processor.get("selected") if isinstance(processor, dict) else []
+            if not isinstance(selected, list):
+                continue
+            selected_ids.extend(
+                (row, str(item.get("page_id")))
+                for item in selected
+                if isinstance(item, dict)
+                and item.get("evidence_kind") == evidence_kind
+                and item.get("page_id")
+            )
+        true_positive = sum(
+            page_id in set(row.get("expected_pages", []))
+            for row, page_id in selected_ids
+        )
+        false_positive = sum(
+            page_id in set(row.get("bad_pages", [])) for row, page_id in selected_ids
+        )
+        labeled = true_positive + false_positive
+        evidence_quality[evidence_kind] = {
+            "selected": len(selected_ids),
+            "labeled": labeled,
+            "true_positive": true_positive,
+            "false_positive": false_positive,
+            "precision": true_positive / labeled if labeled else None,
+        }
     return {
         "examples": len(rows),
         "positives": len(positives),
@@ -964,6 +1172,31 @@ def _metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "stale_hit_rate_at_20": (stale_hits / len(stale_labeled))
         if stale_labeled
         else 0.0,
+        "processor": {
+            "evaluated_examples": len(processor_rows),
+            "selected_pages": committed_pages,
+            "labeled_selected_pages": committed_expected + committed_negative,
+            "true_positive_pages": committed_expected,
+            "false_positive_pages": committed_negative,
+            "precision": (
+                committed_expected / (committed_expected + committed_negative)
+                if committed_expected + committed_negative
+                else None
+            ),
+            "related_recall": (
+                processor_hits / len(processor_positives)
+                if processor_positives
+                else 0.0
+            ),
+            "abstention_rate": (
+                sum(not row["stages"]["committed"] for row in processor_rows)
+                / len(processor_rows)
+                if processor_rows
+                else 0.0
+            ),
+            "host_used_observations": len(host_rows),
+            "evidence_kind": evidence_quality,
+        },
         "latency_ms": {
             "p50": float(statistics.median(latencies)) if latencies else 0.0,
             "p95": percentile(latencies, 0.95),
@@ -990,12 +1223,38 @@ def evaluate_examples(
     variants: tuple[str, ...] = DEFAULT_VARIANTS,
     top_n: int = 20,
 ) -> dict[str, Any]:
+    host_usage: dict[str, list[str]] = {}
+    try:
+        from chronovisor.recall.recall_runtime import RECALL_PULL_LOG_FILE
+
+        for feedback in read_jsonl(RECALL_PULL_LOG_FILE):
+            if feedback.get("type") != "used":
+                continue
+            decision_id = str(feedback.get("decision_id") or "")
+            if not decision_id:
+                continue
+            pages = [
+                str(page)
+                for page in feedback.get("page_ids", [])
+                if isinstance(page, str) and page
+            ]
+            host_usage[decision_id] = list(
+                dict.fromkeys([*host_usage.get(decision_id, []), *pages])
+            )
+    except Exception:
+        host_usage = {}
     by_variant: dict[str, Any] = {}
     debug_rows: list[dict[str, Any]] = []
     for variant in variants:
         rows: list[dict[str, Any]] = []
         for example in examples:
             result = run_variant(example.query, variant, top_n=top_n)
+            stages = result.get("stages", {})
+            if isinstance(stages, dict) and example.ref in host_usage:
+                stages["host_used"] = host_usage[example.ref]
+                observed = stages.get("observed")
+                if isinstance(observed, dict):
+                    observed["host_used"] = True
             result_pages = [page.page_id for page in result["results"]]
             row = {
                 "query": example.query,
@@ -1010,6 +1269,8 @@ def evaluate_examples(
                 "bad_pages": list(example.bad_pages),
                 "result_pages": result_pages,
                 "latency_ms": result["latency_ms"],
+                "stages": stages,
+                "processor": result.get("processor", {}),
             }
             rows.append(row)
             debug_rows.append(
@@ -1017,7 +1278,8 @@ def evaluate_examples(
                     **row,
                     "variant": variant,
                     "channels": result["channels"],
-                    "stages": result.get("stages", {}),
+                    "stages": stages,
+                    "processor": result.get("processor", {}),
                 }
             )
         by_variant[variant] = {
@@ -2393,8 +2655,7 @@ def _failure_index_rows(debug_rows: list[dict[str, Any]]) -> list[dict[str, Any]
         result_pages = [
             page for page in row.get("result_pages", []) if isinstance(page, str)
         ]
-        if set(expected) & set(result_pages[:20]):
-            continue
+        expected_set = set(expected)
         channels = row.get("channels") if isinstance(row.get("channels"), dict) else {}
         channel_candidates: dict[str, list[str]] = {}
         channel_hit = False
@@ -2410,39 +2671,61 @@ def _failure_index_rows(debug_rows: list[dict[str, Any]]) -> list[dict[str, Any]
         reason_code = "fusion_missed" if channel_hit else "retrieval_missed"
         fix_kind = "fusion" if channel_hit else "data_or_rewrite"
         stages = row.get("stages") if isinstance(row.get("stages"), dict) else {}
+        observed_stages = (
+            stages.get("observed") if isinstance(stages.get("observed"), dict) else {}
+        )
         ordered_stages = (
-            ("candidate_union", "retrieval", "candidate_union_missed", "data_or_rewrite"),
+            (
+                "candidate_union",
+                "retrieval",
+                "candidate_union_missed",
+                "data_or_rewrite",
+            ),
             ("fused", "fusion", "fusion_missed", "fusion"),
             ("reranked", "reranker", "reranker_missed", "reranker"),
             ("page_gate", "page_gate", "page_gate_rejected", "selector"),
             ("committed", "commit", "commit_missed", "selector"),
             ("host_used", "host_used", "host_did_not_use", "host_or_card"),
         )
+        trace_resolved = False
+        observed_trace = False
         if stages:
-            trace_resolved = False
             for stage_key, stage_name, stage_reason, stage_fix in ordered_stages:
+                if observed_stages.get(stage_key) is False:
+                    continue
                 values = stages.get(stage_key)
                 if values is None:
                     break
                 if not isinstance(values, list):
                     break
-                stage_pages = [
-                    page for page in values if isinstance(page, str)
-                ]
-                if not (set(expected) & set(stage_pages)):
-                    failed_stage = stage_name
-                    reason_code = stage_reason
-                    fix_kind = stage_fix
+                observed_trace = True
+                stage_pages = [page for page in values if isinstance(page, str)]
+                stage_limit = 20 if stage_key == "reranked" else len(stage_pages)
+                if not (expected_set & set(stage_pages[:stage_limit])):
+                    if stage_key == "reranked" and expected_set & set(stage_pages):
+                        failed_stage = "rank_cutoff"
+                        reason_code = "below_evaluation_cutoff"
+                        fix_kind = "ranking"
+                    else:
+                        failed_stage = stage_name
+                        reason_code = stage_reason
+                        fix_kind = stage_fix
                     trace_resolved = True
                     break
             if (
                 not trace_resolved
                 and isinstance(stages.get("reranked"), list)
-                and set(expected) & set(stages["reranked"])
+                and not (expected_set & set(result_pages[:20]))
+                and expected_set & set(stages["reranked"])
             ):
                 failed_stage = "rank_cutoff"
                 reason_code = "below_evaluation_cutoff"
                 fix_kind = "ranking"
+                trace_resolved = True
+        if not trace_resolved and (
+            observed_trace or expected_set & set(result_pages[:20])
+        ):
+            continue
         rows.append(
             {
                 "ts": datetime.now().isoformat(timespec="seconds"),
@@ -2455,6 +2738,7 @@ def _failure_index_rows(debug_rows: list[dict[str, Any]]) -> list[dict[str, Any]
                 "result_pages": result_pages[:20],
                 "channel_candidates": channel_candidates,
                 "stages": stages,
+                "observed_stages": observed_stages,
                 "failed_stage": failed_stage,
                 "reason_code": reason_code,
                 "fix_kind": fix_kind,
@@ -3392,6 +3676,7 @@ def run_report(
     debug_dump: Path | None = None,
     failure_index: Path | None = None,
     sealed_manifest: Path | None = None,
+    locked_e2e_artifact: Path | None = None,
 ) -> dict[str, Any]:
     examples = load_examples(
         golden_file, limit=max(0, limit), source_filter=source_filter
@@ -3421,8 +3706,12 @@ def run_report(
             result["debug_rows"], failure_index
         )
     if sealed_manifest is not None:
-        payload["sealed_manifest"] = write_sealed_manifest(
-            examples, sealed_manifest
+        payload["sealed_manifest"] = write_sealed_manifest(examples, sealed_manifest)
+    if locked_e2e_artifact is not None:
+        payload["locked_e2e"] = write_locked_e2e_artifact(
+            payload,
+            examples,
+            path=locked_e2e_artifact,
         )
     if save:
         payload["baseline_file"] = str(save_baseline(payload))
@@ -3537,6 +3826,12 @@ def build_parser() -> argparse.ArgumentParser:
         nargs="?",
         const=str(MANUAL_MANIFEST_FILE),
         help="Write a deterministic manifest with query hashes, never query text.",
+    )
+    parser.add_argument(
+        "--locked-e2e-artifact",
+        nargs="?",
+        const=str(LOCKED_E2E_ARTIFACT),
+        help="Seal the manual-94 retrieval through commit promotion gate.",
     )
     parser.add_argument("--build-golden", action="store_true")
     parser.add_argument("--build-label-queue", action="store_true")
@@ -3663,6 +3958,9 @@ def main(argv: list[str] | None = None) -> int:
         else None,
         sealed_manifest=Path(args.sealed_manifest).expanduser()
         if args.sealed_manifest
+        else None,
+        locked_e2e_artifact=Path(args.locked_e2e_artifact).expanduser()
+        if args.locked_e2e_artifact
         else None,
     )
     if args.ci:

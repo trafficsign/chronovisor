@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import datetime
 from pathlib import Path
@@ -22,6 +23,31 @@ def _label_inputs(tmp_path: Path) -> dict[str, Path]:
         "pull_log_file": tmp_path / "pull.jsonl",
         "golden_file": tmp_path / "golden.jsonl",
     }
+
+
+def _locked_gate(tmp_path: Path) -> Path:
+    path = tmp_path / "locked-e2e.json"
+    unsigned = {
+        "status": "passed",
+        "gates": {"quality": True},
+        "manifest_sha256": "a" * 64,
+        "precision_delta_points": 0.0,
+        "recall_delta_points": 0.0,
+        "precision_lower_95": 0.9,
+    }
+    payload = {
+        **unsigned,
+        "snapshot_sha256": hashlib.sha256(
+            json.dumps(
+                unsigned,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest(),
+    }
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path
 
 
 def test_growth_cycle_collects_without_authorizing_weak_evidence(
@@ -117,6 +143,9 @@ def test_growth_cycle_promotes_qualified_evidence_through_canary(
             "teacher_page_ids": [f"page-{index}"],
             "committed_page_ids": [f"page-{index}"],
             "latency_ms": 120,
+            "field_latency_ms": 20,
+            "teacher_latency_ms": 120,
+            "full_search_required": False,
             "over_4s": False,
             "authority": "teacher",
         }
@@ -132,6 +161,7 @@ def test_growth_cycle_promotes_qualified_evidence_through_canary(
         history_file=tmp_path / "history.jsonl",
         candidate_trace_file=candidate_trace,
         promotion_file=promotion,
+        locked_e2e_file=_locked_gate(tmp_path),
         label_inputs=inputs,
     )
 
@@ -160,6 +190,7 @@ def test_growth_cycle_promotes_qualified_evidence_through_canary(
         history_file=tmp_path / "history.jsonl",
         candidate_trace_file=candidate_trace,
         promotion_file=promotion,
+        locked_e2e_file=_locked_gate(tmp_path),
         label_inputs=inputs,
     )
 
@@ -183,6 +214,7 @@ def test_growth_cycle_promotes_qualified_evidence_through_canary(
         history_file=tmp_path / "history.jsonl",
         candidate_trace_file=candidate_trace,
         promotion_file=promotion,
+        locked_e2e_file=_locked_gate(tmp_path),
         label_inputs=inputs,
     )
 
@@ -271,6 +303,9 @@ def test_growth_quality_gate_uses_recent_window(tmp_path: Path) -> None:
             "teacher_page_ids": [f"page-{index}"],
             "committed_page_ids": [f"page-{index}"],
             "latency_ms": 100,
+            "field_latency_ms": 20,
+            "teacher_latency_ms": 100,
+            "full_search_required": False,
             "over_4s": False,
             "authority": "teacher",
         }
@@ -284,6 +319,7 @@ def test_growth_quality_gate_uses_recent_window(tmp_path: Path) -> None:
         history_file=tmp_path / "history.jsonl",
         candidate_trace_file=candidate_trace,
         promotion_file=tmp_path / "promotion.json",
+        locked_e2e_file=_locked_gate(tmp_path),
         label_inputs=inputs,
     )
 
