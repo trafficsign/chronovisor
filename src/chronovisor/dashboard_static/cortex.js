@@ -24,7 +24,12 @@
   const NODE_FLASH_DECAY_MS = 1450;
   const NODE_FLASH_DURATION_MS =
     NODE_FLASH_ATTACK_MS + NODE_FLASH_HOLD_MS + NODE_FLASH_DECAY_MS;
-  const EDGE_AFTERGLOW_MS = 650;
+  const EDGE_AFTERGLOW_MS = 1550;
+  const ELECTRIC_TRAVEL_MIN_MS = 420;
+  const ELECTRIC_TRAVEL_MAX_MS = 760;
+  const MAX_ELECTRIC_PATHS = 12;
+  const NODE_STIMULUS_SCALE = 0.38;
+  const NODE_ARRIVAL_SCALE = 0.28;
   const LIVE_SESSION_VALUE = "__live__";
 
   let data;
@@ -87,6 +92,8 @@
     violetNodes: 0,
     labelsPainted: 0,
     afterglowEdges: 0,
+    electricEdges: 0,
+    electricPeak: 0,
     flashPeak: 0,
   };
   window.chronovisorCortexMetrics = () => ({
@@ -98,12 +105,17 @@
       violetNodes: cortexMetrics.violetNodes,
       labelsPainted: cortexMetrics.labelsPainted,
       afterglowEdges: cortexMetrics.afterglowEdges,
+      electricEdges: cortexMetrics.electricEdges,
+      electricPeak: cortexMetrics.electricPeak,
       flashPeak: cortexMetrics.flashPeak,
       activeLabelLimit: ACTIVE_LABEL_LIMIT,
+      electricPathLimit: MAX_ELECTRIC_PATHS,
       attackMs: NODE_FLASH_ATTACK_MS,
       holdMs: NODE_FLASH_HOLD_MS,
       decayMs: NODE_FLASH_DECAY_MS,
       edgeAfterglowMs: EDGE_AFTERGLOW_MS,
+      electricTravelMinMs: ELECTRIC_TRAVEL_MIN_MS,
+      electricTravelMaxMs: ELECTRIC_TRAVEL_MAX_MS,
     },
   });
 
@@ -183,6 +195,13 @@
     );
     node.flashStartedAt = time;
     node.firedAt = time;
+  }
+
+  function electricTravelDuration(strength) {
+    return (
+      ELECTRIC_TRAVEL_MAX_MS
+      - clamp(strength) * (ELECTRIC_TRAVEL_MAX_MS - ELECTRIC_TRAVEL_MIN_MS)
+    );
   }
 
   function escapeHtml(value) {
@@ -545,13 +564,13 @@
     const now = performance.now();
     roots.forEach((node, rootIndex) => {
       const startedAt = now + rootIndex * 35;
-      exciteNode(node, 0.9, startedAt);
+      exciteNode(node, 0.9 * NODE_STIMULUS_SCALE, startedAt);
       nodeEffects.push({
         nodeIndex: node.index,
         kind: "stimulus",
         startedAt,
-        duration: 900,
-        delta: 0.9,
+        duration: 650,
+        delta: 0.9 * NODE_STIMULUS_SCALE,
         seq: -(rootIndex + 1),
         demo: true,
       });
@@ -560,10 +579,10 @@
         .sort((left, right) => left - right)
         .slice(0, 3);
       candidates.forEach((edgeIndex, branch) => {
-        pulses.push({
+        queueElectricPulse({
           edgeIndex,
           startedAt: now + 120 + branch * 80,
-          duration: 150 + branch * 25,
+          duration: electricTravelDuration(0.78 - branch * 0.12),
           delta: 0.78 - branch * 0.12,
           seq: -(rootIndex * 10 + branch + 1),
           edgeType: links[edgeIndex].edgeType,
@@ -582,18 +601,28 @@
     flashTicker(label || `DEMO/REPLAY · ${name.toUpperCase()} · backend unchanged`);
   }
 
+  function queueElectricPulse(pulse) {
+    pulses.push(pulse);
+    pulses.sort(
+      (left, right) =>
+        right.delta - left.delta
+        || right.startedAt - left.startedAt
+        || right.seq - left.seq,
+    );
+    if (pulses.length > MAX_ELECTRIC_PATHS) {
+      pulses.splice(MAX_ELECTRIC_PATHS);
+    }
+  }
+
   function trimVisualQueues() {
-    if (pulses.length > window.CortexField.MAX_EVENTS) {
-      pulses.splice(0, pulses.length - window.CortexField.MAX_EVENTS);
+    if (pulses.length > MAX_ELECTRIC_PATHS) {
+      pulses.splice(MAX_ELECTRIC_PATHS);
     }
     if (nodeEffects.length > window.CortexField.MAX_EVENTS) {
       nodeEffects.splice(0, nodeEffects.length - window.CortexField.MAX_EVENTS);
     }
-    if (edgeAfterglows.length > window.CortexField.MAX_EVENTS) {
-      edgeAfterglows.splice(
-        0,
-        edgeAfterglows.length - window.CortexField.MAX_EVENTS,
-      );
+    if (edgeAfterglows.length > MAX_ELECTRIC_PATHS) {
+      edgeAfterglows.splice(0, edgeAfterglows.length - MAX_ELECTRIC_PATHS);
     }
   }
 
@@ -635,11 +664,16 @@
     target.dataset.violetNodes = String(cortexMetrics.violetNodes);
     target.dataset.labelsPainted = String(cortexMetrics.labelsPainted);
     target.dataset.afterglowEdges = String(cortexMetrics.afterglowEdges);
+    target.dataset.electricEdges = String(cortexMetrics.electricEdges);
+    target.dataset.electricPeak = cortexMetrics.electricPeak.toFixed(3);
     target.dataset.flashPeak = cortexMetrics.flashPeak.toFixed(3);
     target.dataset.activeLabelLimit = String(ACTIVE_LABEL_LIMIT);
+    target.dataset.electricPathLimit = String(MAX_ELECTRIC_PATHS);
     target.dataset.flashTiming =
       `${NODE_FLASH_ATTACK_MS}/${NODE_FLASH_HOLD_MS}/${NODE_FLASH_DECAY_MS}`;
     target.dataset.edgeAfterglowMs = String(EDGE_AFTERGLOW_MS);
+    target.dataset.electricTravelMs =
+      `${ELECTRIC_TRAVEL_MIN_MS}/${ELECTRIC_TRAVEL_MAX_MS}`;
   }
 
   function ensureActualEdge(event) {
@@ -700,10 +734,10 @@
         return;
       }
       const strength = Math.max(0, Math.min(1, Math.abs(event.delta)));
-      pulses.push({
+      queueElectricPulse({
         edgeIndex,
         startedAt: now,
-        duration: 250 - strength * 130,
+        duration: electricTravelDuration(strength),
         delta: strength,
         seq: event.seq,
         edgeType: event.edge_type || "field",
@@ -731,15 +765,19 @@
       spikes += 1;
       crackle(0.035 + strength * 0.08);
     } else if (node) {
+      const nodeDelta =
+        event.kind === "stimulus"
+          ? event.delta * NODE_STIMULUS_SCALE
+          : event.delta;
       if (event.kind === "stimulus") {
-        exciteNode(node, event.delta, now);
+        exciteNode(node, nodeDelta, now);
       }
       nodeEffects.push({
         nodeIndex: node.index,
         kind: event.kind,
         startedAt: now,
-        duration: event.kind === "stimulus" ? 900 : 820,
-        delta: Math.abs(event.delta),
+        duration: event.kind === "stimulus" ? 650 : 820,
+        delta: Math.abs(nodeDelta),
         seq: event.seq,
         reasonCode: event.reason_code,
         demo: false,
@@ -836,15 +874,67 @@
     };
   }
 
+  function electricPathPoints(source, target, edgeId, seq, phase = 0) {
+    const dx = target.screenX - source.screenX;
+    const dy = target.screenY - source.screenY;
+    const length = Math.hypot(dx, dy) || 1;
+    const normalX = -dy / length;
+    const normalY = dx / length;
+    const pointCount = 10;
+    const jitterScale = Math.min(11, 3.5 + length * 0.018);
+    return Array.from({ length: pointCount }, (_value, pointIndex) => {
+      const unit = pointIndex / (pointCount - 1);
+      const envelope = Math.sin(Math.PI * unit);
+      const jitter =
+        (deterministicUnit(
+          edgeId,
+          seq * 131 + pointIndex * 31 + phase * 997,
+        ) - 0.5)
+        * jitterScale
+        * envelope;
+      return {
+        x: source.screenX + dx * unit + normalX * jitter,
+        y: source.screenY + dy * unit + normalY * jitter,
+      };
+    });
+  }
+
+  function electricPathPrefix(points, progress) {
+    const capped = clamp(progress);
+    if (!points.length || capped <= 0) return [];
+    if (capped >= 1) return points;
+    const scaled = capped * (points.length - 1);
+    const segment = Math.floor(scaled);
+    const partial = points.slice(0, segment + 1);
+    const unit = scaled - segment;
+    const start = points[segment];
+    const end = points[Math.min(points.length - 1, segment + 1)];
+    partial.push({
+      x: start.x + (end.x - start.x) * unit,
+      y: start.y + (end.y - start.y) * unit,
+    });
+    return partial;
+  }
+
+  function traceElectricPath(points) {
+    if (points.length < 2) return false;
+    context.beginPath();
+    points.forEach((point, pointIndex) => {
+      if (pointIndex) context.lineTo(point.x, point.y);
+      else context.moveTo(point.x, point.y);
+    });
+    return true;
+  }
+
   function completePulse(pulse, target, time) {
     target.arrivedAt = time;
-    exciteNode(target, pulse.delta, time);
+    exciteNode(target, pulse.delta * NODE_ARRIVAL_SCALE, time);
     nodeEffects.push({
       nodeIndex: target.index,
       kind: "arrival",
       startedAt: time,
-      duration: 900,
-      delta: pulse.delta,
+      duration: 620,
+      delta: pulse.delta * NODE_ARRIVAL_SCALE,
       seq: pulse.seq,
       demo: pulse.demo,
     });
@@ -883,17 +973,31 @@
       }
       const depthFade = fog((source.viewDepth + target.viewDepth) / 2);
       const fade = (1 - smoothstep(progress)) * depthFade;
+      const edgeId = `${source.id}>${target.id}:${link.edgeType || "field"}`;
+      const phase = Math.floor((time - afterglow.startedAt) / 135);
+      const points = electricPathPoints(
+        source,
+        target,
+        edgeId,
+        afterglow.seq,
+        phase,
+      );
+      if (!traceElectricPath(points)) continue;
       context.strokeStyle = rgba(
         RGB_ELECTRIC,
-        fade * (0.08 + afterglow.delta * 0.24),
+        fade * (0.22 + afterglow.delta * 0.48),
       );
-      context.lineWidth = 1.1 + afterglow.delta * 1.8;
-      context.beginPath();
-      context.moveTo(source.screenX, source.screenY);
-      context.lineTo(target.screenX, target.screenY);
+      context.lineWidth = 3.2 + afterglow.delta * 5.2;
       context.stroke();
-      const glowSize = 10 + afterglow.delta * 12;
-      context.globalAlpha = fade * (0.18 + afterglow.delta * 0.32);
+      traceElectricPath(points);
+      context.strokeStyle = rgba(
+        RGB_HOT,
+        fade * (0.42 + afterglow.delta * 0.5),
+      );
+      context.lineWidth = 0.8 + afterglow.delta * 1.45;
+      context.stroke();
+      const glowSize = 8 + afterglow.delta * 9;
+      context.globalAlpha = fade * (0.12 + afterglow.delta * 0.24);
       context.drawImage(
         glowElectric,
         target.screenX - glowSize / 2,
@@ -903,6 +1007,11 @@
       );
       context.globalAlpha = 1;
       cortexMetrics.afterglowEdges += 1;
+      cortexMetrics.electricEdges += 1;
+      cortexMetrics.electricPeak = Math.max(
+        cortexMetrics.electricPeak,
+        fade * (0.55 + afterglow.delta * 0.45),
+      );
     }
     context.globalCompositeOperation = "source-over";
   }
@@ -929,51 +1038,49 @@
       }
       if (source.viewDepth > 9e8 || target.viewDepth > 9e8) continue;
       const edgeId = `${source.id}>${target.id}:${pulse.edgeType}`;
-      const tailLength = 0.08 + deterministicUnit(edgeId, pulse.seq) * 0.07;
-      const tailProgress = Math.max(0, progress - tailLength);
-      const screenSource = { x: source.screenX, y: source.screenY };
-      const screenTarget = { x: target.screenX, y: target.screenY };
-      const dx = screenTarget.x - screenSource.x;
-      const dy = screenTarget.y - screenSource.y;
+      const dx = target.screenX - source.screenX;
+      const dy = target.screenY - source.screenY;
       const length = Math.hypot(dx, dy) || 1;
       const normalX = -dy / length;
       const normalY = dx / length;
-      const points = [];
-      const pointCount = 5;
-      for (let pointIndex = 0; pointIndex < pointCount; pointIndex += 1) {
-        const unit = pointIndex / (pointCount - 1);
-        const edgeProgress = tailProgress + (progress - tailProgress) * unit;
-        const endpoint = pointIndex === 0 || pointIndex === pointCount - 1;
-        const jitter = endpoint
-          ? 0
-          : (deterministicUnit(edgeId, pulse.seq * 31 + pointIndex) - 0.5)
-            * (2.5 + pulse.delta * 5.5);
-        points.push({
-          x: screenSource.x + dx * edgeProgress + normalX * jitter,
-          y: screenSource.y + dy * edgeProgress + normalY * jitter,
-        });
-      }
-      const head = points[points.length - 1];
       const depthFade = fog((source.viewDepth + target.viewDepth) / 2);
+      const phase = Math.floor((time - pulse.startedAt) / 55);
+      const fullPath = electricPathPoints(
+        source,
+        target,
+        edgeId,
+        pulse.seq,
+        phase,
+      );
+      const energizedPath = electricPathPrefix(fullPath, progress);
+      const head = energizedPath.at(-1) || fullPath[0];
+      const intensity =
+        (0.48 + pulse.delta * 0.52)
+        * depthFade;
       context.lineCap = "round";
       context.lineJoin = "round";
-      context.beginPath();
-      points.forEach((point, pointIndex) => {
-        if (pointIndex) context.lineTo(point.x, point.y);
-        else context.moveTo(point.x, point.y);
-      });
-      context.strokeStyle = rgba(
-        RGB_ELECTRIC,
-        (0.38 + pulse.delta * 0.5) * depthFade,
-      );
-      context.lineWidth = 2.1 + pulse.delta * 3.4;
-      context.stroke();
-      context.strokeStyle = rgba(
-        RGB_HOT,
-        (0.7 + pulse.delta * 0.3) * depthFade,
-      );
-      context.lineWidth = 0.7 + pulse.delta * 1.25;
-      context.stroke();
+      if (traceElectricPath(fullPath)) {
+        context.strokeStyle = rgba(
+          RGB_ELECTRIC,
+          (0.14 + pulse.delta * 0.28)
+          * depthFade
+          * (0.55 + progress * 0.45),
+        );
+        context.lineWidth = 3.8 + pulse.delta * 5.8;
+        context.stroke();
+      }
+      if (traceElectricPath(energizedPath)) {
+        context.strokeStyle = rgba(RGB_ELECTRIC, intensity);
+        context.lineWidth = 4.6 + pulse.delta * 5.4;
+        context.stroke();
+        traceElectricPath(energizedPath);
+        context.strokeStyle = rgba(
+          RGB_HOT,
+          (0.72 + pulse.delta * 0.28) * depthFade,
+        );
+        context.lineWidth = 0.9 + pulse.delta * 1.55;
+        context.stroke();
+      }
       const branchLength = 4 + pulse.delta * 8;
       const branchSign = deterministicUnit(edgeId, pulse.seq + 991) > 0.5 ? 1 : -1;
       context.strokeStyle = rgba(RGB_ELECTRIC, 0.45 + pulse.delta * 0.35);
@@ -1012,6 +1119,11 @@
         glowSize,
       );
       context.globalAlpha = 1;
+      cortexMetrics.electricEdges += 1;
+      cortexMetrics.electricPeak = Math.max(
+        cortexMetrics.electricPeak,
+        intensity,
+      );
       if (!pulse.paintedAt) pulse.paintedAt = time;
       const metric = cortexMetrics.spread.find((row) => row.seq === pulse.seq);
       if (metric && metric.paintedAt === null) metric.paintedAt = time;
@@ -1189,14 +1301,24 @@
         [0, 0.24].forEach((delay) => {
           const phase = Math.max(0, Math.min(1, (progress - delay) / 0.62));
           if (!phase || phase >= 1) return;
-          context.strokeStyle = rgba(RGB_FIRE, (1 - phase) * 0.9);
+          context.strokeStyle = rgba(
+            RGB_FIRE,
+            (1 - phase) * (0.22 + effect.delta * 0.5),
+          );
           context.lineWidth = 1.2 + effect.delta * 2;
           context.beginPath();
-          context.arc(node.screenX, node.screenY, radius + phase * 24, 0, Math.PI * 2);
+          context.arc(node.screenX, node.screenY, radius + phase * 16, 0, Math.PI * 2);
           context.stroke();
         });
-        context.globalAlpha = fade;
-        context.drawImage(glowFire, node.screenX - 18, node.screenY - 18, 36, 36);
+        const glowSize = 18 + effect.delta * 20;
+        context.globalAlpha = fade * (0.16 + effect.delta * 0.48);
+        context.drawImage(
+          glowFire,
+          node.screenX - glowSize / 2,
+          node.screenY - glowSize / 2,
+          glowSize,
+          glowSize,
+        );
       } else if (effect.kind === "inhibit" || effect.kind === "reject") {
         context.strokeStyle = rgba(RGB_INHIBIT, 0.35 + fade * 0.65);
         context.lineWidth = 1.4 + effect.delta * 2;
@@ -1223,13 +1345,23 @@
         context.fillStyle = rgba(RGB_FAULT, fade);
         context.fillText("×", node.screenX, node.screenY);
       } else if (effect.kind === "arrival") {
-        context.strokeStyle = rgba(RGB_ELECTRIC, fade * 0.95);
+        context.strokeStyle = rgba(
+          RGB_ELECTRIC,
+          fade * (0.2 + effect.delta * 0.6),
+        );
         context.lineWidth = 1 + effect.delta * 2;
         context.beginPath();
-        context.arc(node.screenX, node.screenY, radius + progress * 20, 0, Math.PI * 2);
+        context.arc(node.screenX, node.screenY, radius + progress * 13, 0, Math.PI * 2);
         context.stroke();
-        context.globalAlpha = fade;
-        context.drawImage(glowElectric, node.screenX - 20, node.screenY - 20, 40, 40);
+        const arrivalGlowSize = 14 + effect.delta * 24;
+        context.globalAlpha = fade * (0.12 + effect.delta * 0.55);
+        context.drawImage(
+          glowElectric,
+          node.screenX - arrivalGlowSize / 2,
+          node.screenY - arrivalGlowSize / 2,
+          arrivalGlowSize,
+          arrivalGlowSize,
+        );
       }
       context.globalAlpha = 1;
     }
@@ -1342,6 +1474,8 @@
     cortexMetrics.violetNodes = 0;
     cortexMetrics.labelsPainted = 0;
     cortexMetrics.afterglowEdges = 0;
+    cortexMetrics.electricEdges = 0;
+    cortexMetrics.electricPeak = 0;
     cortexMetrics.flashPeak = 0;
     context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
     context.clearRect(0, 0, width, height);

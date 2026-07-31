@@ -443,10 +443,20 @@ def test_cortex_static_view_preserves_fable_layout_and_uses_live_data() -> None:
     assert "const NODE_FLASH_ATTACK_MS = 90;" in script
     assert "const NODE_FLASH_HOLD_MS = 150;" in script
     assert "const NODE_FLASH_DECAY_MS = 1450;" in script
-    assert "const EDGE_AFTERGLOW_MS = 650;" in script
+    assert "const EDGE_AFTERGLOW_MS = 1550;" in script
+    assert "const ELECTRIC_TRAVEL_MIN_MS = 420;" in script
+    assert "const ELECTRIC_TRAVEL_MAX_MS = 760;" in script
+    assert "const MAX_ELECTRIC_PATHS = 12;" in script
+    assert "const NODE_STIMULUS_SCALE = 0.38;" in script
+    assert "const NODE_ARRIVAL_SCALE = 0.28;" in script
     assert "function excitationLevel(node, time)" in script
     assert "function exciteNode(node, delta, time)" in script
+    assert "function electricPathPoints(" in script
+    assert "function electricPathPrefix(" in script
+    assert "function queueElectricPulse(" in script
     assert "function drawEdgeAfterglows(time)" in script
+    assert "target.dataset.electricEdges" in script
+    assert "target.dataset.electricPeak" in script
     assert "function publishVisualMetrics(time)" in script
     assert "cortexMetrics.violetNodes += 1;" in script
     assert ".slice(0, ACTIVE_LABEL_LIMIT)" in script
