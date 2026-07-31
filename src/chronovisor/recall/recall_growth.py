@@ -482,7 +482,7 @@ def run_growth_cycle(
         compiler_trace_file
         or state_file.parent.parent / "recall-compiler" / COMPILER_TRACE_FILE.name
     )
-    locked_e2e_file = locked_e2e_file or state_file.parent / LOCKED_E2E_ARTIFACT.name
+    locked_e2e_file = locked_e2e_file or LOCKED_E2E_ARTIFACT
     inputs = label_inputs or default_label_ledger_inputs()
     labels = (
         build_label_ledger(**inputs) if dry_run else materialize_label_ledger(**inputs)

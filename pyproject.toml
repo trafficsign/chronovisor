@@ -21,6 +21,11 @@ semantic = [
     "sentence-transformers==5.6.1",
     "usearch>=2.20.0",
 ]
+recall-lab = [
+    "colbert-ai==0.2.22",
+    "faiss-cpu>=1.14.0",
+    "coremltools==9.0; sys_platform == 'darwin'",
+]
 
 [project.scripts]
 chronovisor = "chronovisor.hosts.cli:main"

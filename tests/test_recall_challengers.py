@@ -98,3 +98,33 @@ def test_report_never_adopts_unmeasured_challengers(tmp_path) -> None:
         "memory_lora",
         "speculative_injection",
     }
+
+
+def test_report_selects_only_a_measured_gate_winner(tmp_path) -> None:
+    baseline = {
+        "recall_at_5": 0.563,
+        "negative_hit_at_20": 0.229,
+        "p95_ms": 437.7,
+        "max_ms": 501.2,
+        "over_4s": 0.0,
+        "resource_bytes": 1.0,
+    }
+    report = run_report(
+        baseline=baseline,
+        measurements={
+            "colbert": {
+                "status": "measured",
+                "recall_at_5": 0.563,
+                "negative_hit_at_20": 0.20,
+                "p95_ms": 200.0,
+                "max_ms": 300.0,
+                "over_4s": 0.0,
+                "resource_bytes": 10.0,
+            }
+        },
+        output_file=tmp_path / "report.json",
+    )
+
+    assert report["winner"] == "colbert"
+    assert report["challengers"]["colbert"]["adopted"] is True
+    assert report["production_changed"] is False

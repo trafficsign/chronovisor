@@ -76,6 +76,27 @@ def test_growth_cycle_collects_without_authorizing_weak_evidence(
     assert json.loads(promotion.read_text())["status"] == "held"
 
 
+def test_growth_cycle_reads_default_locked_e2e_artifact(
+    tmp_path: Path, monkeypatch
+) -> None:
+    inputs = _label_inputs(tmp_path)
+    for path in inputs.values():
+        _write_jsonl(path, [])
+    locked = _locked_gate(tmp_path)
+    monkeypatch.setattr(recall_growth, "LOCKED_E2E_ARTIFACT", locked)
+
+    result = recall_growth.run_growth_cycle(
+        state_file=tmp_path / "growth-state.json",
+        history_file=tmp_path / "history.jsonl",
+        candidate_trace_file=tmp_path / "candidate.jsonl",
+        promotion_file=tmp_path / "promotion.json",
+        label_inputs=inputs,
+    )
+
+    assert result["locked_e2e"]["passed"] is True
+    assert result["gates"]["locked_e2e"] is True
+
+
 def test_processor_used_metrics_penalize_unused_shadow_cards() -> None:
     metrics = recall_growth.processor_used_metrics(
         [

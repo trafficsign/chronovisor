@@ -40,6 +40,7 @@ COMMANDS: Final[dict[str, tuple[str, bool]]] = {
     "local-model-eval": ("chronovisor.lab.local_model_eval", True),
     "model": ("chronovisor.lab.model_lab", True),
     "research-eval": ("chronovisor.lab.research_eval", True),
+    "recall-challengers": ("chronovisor.lab.recall_challengers", True),
 }
 
 
