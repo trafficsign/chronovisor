@@ -1857,6 +1857,12 @@
       : "collecting";
     const active = window.CortexField.activeNodes(fieldState, 14);
     const trace = [...fieldState.events].slice(-7).reverse();
+    const growth = summary.growth || {};
+    const growthProgress = growth.authority_enabled
+      ? `AUTH · ${growth.canary_percent || 0}%`
+      : growth.field_learning_allowed
+        ? "ON · AUTH HELD"
+        : `${growth.strong_positive || 0}/${growth.strong_positive_target || 200}`;
     const statusLabel = fieldState.fault
       ? `FAULT · ${fieldState.fault}`
       : fieldState.stale
@@ -1877,6 +1883,8 @@
           <div><span>reject</span><b>${summary.reject || 0}</b></div>
           <div><span>agreement</span><b>${agreement}</b></div>
           <div><span>field p95</span><b>${Number.isFinite(Number(latency.p95)) ? `${Math.round(latency.p95)}ms` : "—"}</b></div>
+          <div><span>learning</span><b>${escapeHtml(growthProgress)}</b></div>
+          <div><span>sessions</span><b>${growth.strong_sessions || 0}/${growth.strong_sessions_target || 20}</b></div>
         </div>
       </div>
       <div class="sec"><h3>DECISION TRACE · SEQ ${fieldState.seq}</h3>

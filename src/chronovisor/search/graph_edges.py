@@ -21,6 +21,7 @@ def typed_neighbors(
     *,
     limit: int = 12,
     include_exposure_cofire: bool = True,
+    include_positive_cofire: bool = True,
     degree_normalize: bool = False,
 ) -> list[TypedEdge]:
     """Return degree-normalized, deterministic neighbors for one page."""
@@ -101,6 +102,8 @@ def typed_neighbors(
         ):
             signals = row.get("signals")
             positive = isinstance(signals, list) and "positive_used" in signals
+            if positive and not include_positive_cofire:
+                continue
             if not positive and not include_exposure_cofire:
                 continue
             add(

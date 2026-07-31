@@ -133,6 +133,12 @@ Exceptional system repair
   from authority. Modes are `off`, `shadow`, `candidate`, and `active`, with
   deterministic session canaries. Missing/failed promotion evidence always
   rolls candidate authority back to the full teacher.
+- **Recall Growth Controller**: runs inside the sleep cycle, materializes the
+  provenance-preserving label ledger, measures Field/teacher coverage and
+  shadow-Processor coverage of explicitly used pages, unlocks positive co-fire
+  learning at 200 strong positives across 20 sessions, and advances or rolls
+  back 5%/25%/100% authority canaries without a remembered human action. Both
+  used-page coverage and used-card precision are required for authority.
 - **Recall Compiler**: a shadow-only meaning-address lookup over typed Claims.
   It accepts only structured intents with an exact subject/page address, one
   non-conflicting active value, matching time, and a current source digest.

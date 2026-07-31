@@ -155,6 +155,14 @@ def _patch_sleep_dependencies(monkeypatch) -> None:
         lambda write=True: {"edges": 2, "nodes": 2, "graph": {}},
     )
     monkeypatch.setattr(
+        "chronovisor.ops.sleep_cycle.run_growth_cycle",
+        lambda **kwargs: {
+            "status": "ok",
+            "stage": "collecting_labels",
+            "dry_run": kwargs["dry_run"],
+        },
+    )
+    monkeypatch.setattr(
         "chronovisor.search.prefetch.build_prefetch_cache",
         lambda write=True: {
             "status": "ok",
@@ -168,7 +176,8 @@ def _patch_sleep_dependencies(monkeypatch) -> None:
         lambda write=True: {"counts": {"pages": 2}, "pages": {}},
     )
     monkeypatch.setattr(
-        "chronovisor.recall.claims.rebuild_claim_index", lambda write=True: {"claims": 3}
+        "chronovisor.recall.claims.rebuild_claim_index",
+        lambda write=True: {"claims": 3},
     )
     monkeypatch.setattr(
         "chronovisor.recall.claims.review_claim_conflicts",
@@ -187,7 +196,7 @@ def _patch_sleep_dependencies(monkeypatch) -> None:
         lambda **kwargs: {"status": "ok", "dry_run": kwargs["dry_run"]},
     )
     monkeypatch.setattr(
-        'chronovisor.librarian.librarian.run_shadow',
+        "chronovisor.librarian.librarian.run_shadow",
         lambda **kwargs: {"status": "ok", "dry_run": kwargs["dry_run"]},
     )
     monkeypatch.setattr(
@@ -207,7 +216,8 @@ def _patch_sleep_dependencies(monkeypatch) -> None:
         lambda **kwargs: {"status": "ok", "dry_run": kwargs["dry_run"]},
     )
     monkeypatch.setattr(
-        "chronovisor.decision.frontier_review.run_frontier_preflight", lambda: {"ok": True}
+        "chronovisor.decision.frontier_review.run_frontier_preflight",
+        lambda: {"ok": True},
     )
     monkeypatch.setattr(
         "chronovisor.ops.convergence.ConvergenceStore.resume_due_quarantined",
@@ -229,7 +239,8 @@ def _patch_sleep_dependencies(monkeypatch) -> None:
         "chronovisor.ops.distill.export_distill_dataset", lambda write=True: {"rows": 5}
     )
     monkeypatch.setattr(
-        "chronovisor.ops.hubs.build_hub_pages", lambda write=True: {"hubs": 6, "paths": []}
+        "chronovisor.ops.hubs.build_hub_pages",
+        lambda write=True: {"hubs": 6, "paths": []},
     )
     monkeypatch.setattr(
         "chronovisor.ops.reflection.write_reflection_page",
@@ -341,6 +352,7 @@ def test_run_sleep_cycle_coordinates_safe_steps(monkeypatch) -> None:
     assert payload["snapshot"]["status"] == "clean"
     assert len(payload["run_id"]) == 32
     assert payload["cofire"]["edges"] == 2
+    assert payload["recall_growth"]["stage"] == "collecting_labels"
     assert payload["prefetch"]["buckets"] == 1
     assert payload["retention"]["counts"]["pages"] == 2
     assert payload["claims"]["claims"] == 3

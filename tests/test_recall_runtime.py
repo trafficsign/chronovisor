@@ -26,6 +26,7 @@ from chronovisor.recall.recall_runtime import (
     load_policy,
     main,
     merge_context_blocks,
+    processor_authority_for_request,
     render_output,
     request_from_hook_payload,
     run_local_judge,
@@ -652,6 +653,8 @@ def test_processor_config_loads_dynamic_certificate_budget(tmp_path) -> None:
         """
 [recall.processor]
 enabled = true
+shadow_enabled = true
+auto_enable = true
 max_candidates = 12
 max_pointer_cards = 6
 max_rich_evidence = 2
@@ -669,6 +672,8 @@ escalation_timeout_ms = 700
     policy = load_policy(config)
 
     assert policy.processor_enabled is True
+    assert policy.processor_shadow_enabled is True
+    assert policy.processor_auto_enable is True
     assert policy.processor_max_candidates == 12
     assert policy.processor_max_pointer_cards == 6
     assert policy.processor_max_rich_evidence == 2
@@ -679,6 +684,69 @@ escalation_timeout_ms = 700
     assert policy.processor_judge_timeout_ms == 800
     assert policy.processor_escalation_model == "judge-35b"
     assert policy.processor_escalation_timeout_ms == 700
+
+
+def test_processor_auto_authority_uses_same_session_canary(monkeypatch) -> None:
+    from chronovisor.recall import recall_field_candidate, recall_growth
+
+    monkeypatch.setattr(
+        recall_growth,
+        "automatic_processor_authority_allowed",
+        lambda **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        recall_growth,
+        "automatic_rollout",
+        lambda **_kwargs: ("active", 5),
+    )
+    monkeypatch.setattr(
+        recall_field_candidate,
+        "selected_for_canary",
+        lambda _session, config: config.canary_percent == 5,
+    )
+
+    assert processor_authority_for_request(
+        RecallPolicy(processor_auto_enable=True),
+        RecallRequest(
+            host="codex",
+            event="UserPromptSubmit",
+            prompt="query",
+            session_id="session",
+        ),
+    )
+
+
+def test_processor_shadow_collects_without_judge_or_authority(monkeypatch) -> None:
+    from chronovisor.recall import recall_runtime
+
+    observed: dict[str, object] = {}
+
+    def collect(_query, policy, **_kwargs):
+        observed["judge_enabled"] = policy.processor_judge_enabled
+        return [], {"status": "selected", "committed_page_ids": ["page-a"]}
+
+    monkeypatch.setattr(recall_runtime, "collect_certified_context", collect)
+    result = recall_runtime.observe_processor_shadow(
+        "query",
+        RecallPolicy(
+            processor_shadow_enabled=True,
+            processor_judge_enabled=True,
+        ),
+        request=RecallRequest(
+            host="codex",
+            event="UserPromptSubmit",
+            prompt="query",
+            session_id="session",
+        ),
+        session_state=None,
+        candidates=[object()],
+        reranker_metadata={},
+        deadline_at=None,
+    )
+
+    assert observed["judge_enabled"] is False
+    assert result["authority"] == "teacher"
+    assert result["shadow_only"] is True
 
 
 def test_nested_and_flat_recall_shapes_produce_identical_policy(tmp_path) -> None:
@@ -1199,7 +1267,9 @@ def test_claude_code_leading_system_reminder_keeps_user_request() -> None:
     assert all("internal project metadata" not in query for query in result.queries)
 
 
-def test_automation_heartbeat_extracts_instructions_without_transport_metadata() -> None:
+def test_automation_heartbeat_extracts_instructions_without_transport_metadata() -> (
+    None
+):
     policy = RecallPolicy(judge_mode="off", log_decisions=False)
     prompt = """
 <heartbeat>
@@ -1571,7 +1641,9 @@ def test_recall_log_also_writes_live_episode_snapshot(tmp_path, monkeypatch) -> 
         result,
     )
 
-    live_file = chronovisor_root / "runtime" / "recall-improvement" / "live-episodes.jsonl"
+    live_file = (
+        chronovisor_root / "runtime" / "recall-improvement" / "live-episodes.jsonl"
+    )
     live = json.loads(live_file.read_text(encoding="utf-8"))
     assert live["decision_id"] == "d1"
     assert live["quality"]["usefulness"] == "unknown"

@@ -312,8 +312,11 @@ session_ttl_seconds = 604800
 
 [recall.processor]
 # Keep false until pointer/rich precision and related-memory recall pass the
-# locked gate. A Field candidate never overrides this boundary.
+# locked gate. Shadow collection never changes injection, while auto_enable
+# delegates future authority to the sealed autonomous rollout.
 enabled = false
+shadow_enabled = true
+auto_enable = true
 max_candidates = 10
 max_pointer_cards = 6
 max_rich_evidence = 2
@@ -343,6 +346,11 @@ refractory_turns = 1
 topic_reset_similarity = 0.15
 session_ttl_seconds = 604800
 event_retention = 2000
+
+[recall.field.growth]
+# Sleep-cycle supervision advances 5% -> 25% -> 100% only after every gate.
+enabled = true
+auto_promote = true
 
 [recall.circuit_breaker]
 failures = 2

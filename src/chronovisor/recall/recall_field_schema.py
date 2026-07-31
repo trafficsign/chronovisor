@@ -31,6 +31,8 @@ FIELD_EVENT_KINDS = frozenset(
 class RecallFieldConfig:
     mode: str = "shadow"
     canary_percent: int = 0
+    auto_growth: bool = False
+    auto_promote: bool = False
     working_set_size: int = 30
     max_active_nodes: int = 128
     max_active_edges: int = 256
@@ -69,9 +71,7 @@ class ActivationNode:
             negative=_bounded_float(value.get("negative"), 0.0, 0.0, 1.0),
             inhibition=_bounded_float(value.get("inhibition"), 0.0, 0.0, 1.0),
             anti_index=_bounded_float(value.get("anti_index"), 0.0, 0.0, 1.0),
-            hub_penalty=_bounded_float(
-                value.get("hub_penalty"), 0.0, 0.0, 1.0
-            ),
+            hub_penalty=_bounded_float(value.get("hub_penalty"), 0.0, 0.0, 1.0),
             last_turn=_bounded_int(value.get("last_turn"), 0, 0, 1_000_000_000),
             last_seq=_bounded_int(value.get("last_seq"), 0, 0, 10_000_000_000),
         )
@@ -104,12 +104,10 @@ class RecallFieldState:
             "updated_at_epoch": self.updated_at_epoch,
             "topic_signature": list(self.topic_signature),
             "active": {
-                page_id: asdict(node)
-                for page_id, node in sorted(self.active.items())
+                page_id: asdict(node) for page_id, node in sorted(self.active.items())
             },
             "shadow": {
-                page_id: asdict(node)
-                for page_id, node in sorted(self.shadow.items())
+                page_id: asdict(node) for page_id, node in sorted(self.shadow.items())
             },
             "pending_teacher_commits": list(self.pending_teacher_commits),
             "full_search_fallback": self.full_search_fallback,
@@ -150,8 +148,7 @@ class RecallFieldState:
             topic_signature=tuple(
                 str(item)
                 for item in value.get("topic_signature", [])
-                if isinstance(item, str)
-                and re.fullmatch(r"[0-9a-f]{12}", item)
+                if isinstance(item, str) and re.fullmatch(r"[0-9a-f]{12}", item)
             )[:64],
             active=nodes("active"),
             shadow=nodes("shadow"),
@@ -212,8 +209,7 @@ def topic_signature(text: str) -> tuple[str, ...]:
     tokens = set(tokenize(text))
     return tuple(
         sorted(
-            hashlib.sha256(token.encode("utf-8")).hexdigest()[:12]
-            for token in tokens
+            hashlib.sha256(token.encode("utf-8")).hexdigest()[:12] for token in tokens
         )
     )[:64]
 
@@ -261,21 +257,19 @@ def load_recall_field_config(
     section = recall.get("field") if isinstance(recall, dict) else None
     if not isinstance(section, dict):
         return RecallFieldConfig()
+    growth = section.get("growth")
+    growth = growth if isinstance(growth, dict) else {}
     mode = str(section.get("mode") or "shadow").strip().lower()
     if mode not in {"off", "shadow", "candidate", "active"}:
         mode = "off"
     return RecallFieldConfig(
         mode=mode,
         canary_percent=_bounded_int(section.get("canary_percent"), 0, 0, 100),
-        working_set_size=_bounded_int(
-            section.get("working_set_size"), 30, 1, 100
-        ),
-        max_active_nodes=_bounded_int(
-            section.get("max_active_nodes"), 128, 1, 1_000
-        ),
-        max_active_edges=_bounded_int(
-            section.get("max_active_edges"), 256, 1, 5_000
-        ),
+        auto_growth=growth.get("enabled") is True,
+        auto_promote=growth.get("auto_promote") is True,
+        working_set_size=_bounded_int(section.get("working_set_size"), 30, 1, 100),
+        max_active_nodes=_bounded_int(section.get("max_active_nodes"), 128, 1, 1_000),
+        max_active_edges=_bounded_int(section.get("max_active_edges"), 256, 1, 5_000),
         positive_learning=section.get("positive_learning") is True,
         wall_half_life_seconds=_bounded_int(
             section.get("wall_half_life_seconds"), 300, 10, 86_400
@@ -286,9 +280,7 @@ def load_recall_field_config(
         global_inhibition=_bounded_float(
             section.get("global_inhibition"), 0.08, 0.0, 1.0
         ),
-        refractory_turns=_bounded_int(
-            section.get("refractory_turns"), 1, 0, 10
-        ),
+        refractory_turns=_bounded_int(section.get("refractory_turns"), 1, 0, 10),
         topic_reset_similarity=_bounded_float(
             section.get("topic_reset_similarity"), 0.15, 0.0, 1.0
         ),

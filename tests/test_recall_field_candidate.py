@@ -165,6 +165,27 @@ def test_canary_rollouts_are_deterministic_and_nested() -> None:
     assert len(selected_100) == len(sessions)
 
 
+def test_auto_rollout_uses_durable_growth_state(monkeypatch) -> None:
+    from chronovisor.recall import recall_growth
+
+    monkeypatch.setattr(
+        recall_growth,
+        "automatic_rollout",
+        lambda **_kwargs: ("active", 25),
+    )
+
+    effective = recall_field_candidate.effective_rollout(
+        RecallFieldConfig(
+            mode="candidate",
+            canary_percent=100,
+            auto_promote=True,
+        )
+    )
+
+    assert effective.mode == "active"
+    assert effective.canary_percent == 25
+
+
 def test_promotion_artifact_is_hash_bound_and_requires_nondegradation(
     tmp_path,
 ) -> None:
@@ -177,15 +198,14 @@ def test_promotion_artifact_is_hash_bound_and_requires_nondegradation(
             "precision_delta_points": -0.5,
             "recall_delta_points": -0.5,
             "over_4s": 0,
+            "processor_used_precision_proxy": 0.95,
         },
     }
     path.write_text(
         json.dumps(
             {
                 **payload,
-                "snapshot_sha256": recall_field_candidate._canonical_sha256(
-                    payload
-                ),
+                "snapshot_sha256": recall_field_candidate._canonical_sha256(payload),
             }
         ),
         encoding="utf-8",
@@ -195,6 +215,21 @@ def test_promotion_artifact_is_hash_bound_and_requires_nondegradation(
     tampered = json.loads(path.read_text(encoding="utf-8"))
     tampered["metrics"]["recall_delta_points"] = -2.0
     path.write_text(json.dumps(tampered), encoding="utf-8")
+    assert recall_field_candidate.authority_allowed(path) is False
+
+    malformed = {
+        **payload,
+        "metrics": {**payload["metrics"], "over_4s": {"invalid": True}},
+    }
+    path.write_text(
+        json.dumps(
+            {
+                **malformed,
+                "snapshot_sha256": recall_field_candidate._canonical_sha256(malformed),
+            }
+        ),
+        encoding="utf-8",
+    )
     assert recall_field_candidate.authority_allowed(path) is False
 
 

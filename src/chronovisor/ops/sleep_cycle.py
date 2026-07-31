@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from chronovisor.core.store import CHRONOVISOR_ROOT
+from chronovisor.recall.recall_growth import run_growth_cycle
 
 HISTORY_FILE = CHRONOVISOR_ROOT / "runtime" / "sleep-cycle-history.jsonl"
 LOCK_FILE = CHRONOVISOR_ROOT / "runtime" / "sleep-cycle.lock"
@@ -517,7 +518,7 @@ def _run_sleep_cycle(
         max_raw_bytes=2_000_000,
         max_elapsed_seconds=30 * 60,
     )
-    artifact_budget = cycle_budget.slice(max_mutations=15)
+    artifact_budget = cycle_budget.slice(max_mutations=16)
 
     def artifact_lane(name: str, fn, *, mutates: bool = True) -> dict[str, Any]:
         if dry_run or not mutates:
@@ -591,7 +592,8 @@ def _run_sleep_cycle(
     content_corrections = _run_lane(
         "content_corrections",
         lambda: __import__(
-            "chronovisor.recall.content_correction", fromlist=["run_pending_corrections"]
+            "chronovisor.recall.content_correction",
+            fromlist=["run_pending_corrections"],
         ).run_pending_corrections(
             max_items=6,
             budget=correction_budget,
@@ -599,6 +601,9 @@ def _run_sleep_cycle(
         ),
     )
     cofire = artifact_lane("cofire", lambda: build_cofire_graph(write=not dry_run))
+    recall_growth = artifact_lane(
+        "recall_growth", lambda: run_growth_cycle(dry_run=dry_run)
+    )
     prefetch = artifact_lane(
         "prefetch", lambda: build_prefetch_cache(write=not dry_run)
     )
@@ -681,21 +686,15 @@ def _run_sleep_cycle(
                 "release": __import__(
                     "chronovisor.librarian.librarian_release",
                     fromlist=["finalize_if_ready"],
-                ).finalize_if_ready(
-                    CHRONOVISOR_ROOT
-                ),
+                ).finalize_if_ready(CHRONOVISOR_ROOT),
                 "restore_points": __import__(
                     "chronovisor.ops.migration_snapshot",
                     fromlist=["cleanup_expired_restore_points"],
-                ).cleanup_expired_restore_points(
-                    CHRONOVISOR_ROOT
-                ),
+                ).cleanup_expired_restore_points(CHRONOVISOR_ROOT),
                 "transaction_preimages": __import__(
                     "chronovisor.librarian.merge_transaction",
                     fromlist=["cleanup_expired_preimages"],
-                ).cleanup_expired_preimages(
-                    CHRONOVISOR_ROOT
-                ),
+                ).cleanup_expired_preimages(CHRONOVISOR_ROOT),
             },
         )
     )
@@ -963,7 +962,8 @@ def _run_sleep_cycle(
     research_consolidation = _run_lane(
         "research_consolidation",
         lambda: __import__(
-            "chronovisor.research.research_consolidation", fromlist=["run_consolidation"]
+            "chronovisor.research.research_consolidation",
+            fromlist=["run_consolidation"],
         ).run_consolidation(dry_run=dry_run),
     )
     payload = {
@@ -980,6 +980,7 @@ def _run_sleep_cycle(
         "content_corrections": content_corrections,
         "health_before": before_health_result,
         "cofire": {k: v for k, v in cofire.items() if k != "graph"},
+        "recall_growth": recall_growth,
         "prefetch": {
             "status": prefetch.get("status"),
             "episodes": prefetch.get("episodes", 0),

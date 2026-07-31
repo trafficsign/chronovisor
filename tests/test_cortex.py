@@ -287,10 +287,10 @@ def test_cortex_field_projection_is_sealed_session_scoped_and_browser_safe(
             "components": {
                 "direct": 0.6,
                 "spread": 0.2,
-                    "negative": 0.0,
-                    "inhibition": 0.08,
-                    "anti_index": 0.0,
-                    "hub_penalty": 0.0,
+                "negative": 0.0,
+                "inhibition": 0.08,
+                "anti_index": 0.0,
+                "hub_penalty": 0.0,
             },
             "last_seq": 2,
         }
@@ -300,6 +300,49 @@ def test_cortex_field_projection_is_sealed_session_scoped_and_browser_safe(
     assert "prompt" not in encoded
     assert "body" not in encoded
     assert projection["summary"]["commit"] == 1
+
+
+def test_cortex_growth_summary_is_bounded_and_corruption_tolerant(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "chronovisor"
+    path = root / "runtime" / "recall-field" / "growth-state.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        json.dumps(
+            {
+                "stage": "canary",
+                "field_learning_allowed": True,
+                "authority_enabled": True,
+                "canary_percent": "5",
+                "thresholds": {
+                    "strong_positive": 200,
+                    "strong_positive_sessions": 20,
+                },
+                "metrics": {
+                    "labels": {
+                        "strong_positive": 210,
+                        "strong_positive_sessions": 21,
+                    },
+                    "candidate": {"traces": {"corrupt": True}},
+                },
+                "private": "must-not-leak",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert cortex._field_growth_summary(root) == {
+        "stage": "canary",
+        "field_learning_allowed": True,
+        "authority_enabled": True,
+        "canary_percent": 5,
+        "strong_positive": 210,
+        "strong_positive_target": 200,
+        "strong_sessions": 21,
+        "strong_sessions_target": 20,
+        "candidate_traces": 0,
+    }
 
 
 def test_cortex_event_cursor_tails_only_selected_field_session(
@@ -347,10 +390,10 @@ def test_cortex_event_cursor_tails_only_selected_field_session(
             "components": {
                 "direct": 0.0,
                 "spread": 0.5,
-                    "negative": 0.0,
-                    "inhibition": 0.0,
-                    "anti_index": 0.0,
-                    "hub_penalty": 0.0,
+                "negative": 0.0,
+                "inhibition": 0.0,
+                "anti_index": 0.0,
+                "hub_penalty": 0.0,
             },
             "source": "stateful-recall-field",
         }
@@ -453,18 +496,15 @@ def test_cortex_static_view_preserves_fable_layout_and_uses_live_data() -> None:
     assert "const NODE_CORE_SCALE = 1;" in script
     assert "const NODE_GLOW_MAX_PADDING_PX = 4;" in script
     assert "const NODE_EFFECT_MAX_PADDING_PX = 3;" in script
-    assert (
-        'const VIEW_PREFERENCES_KEY = "chronovisor.cortex.preferences.v1";'
-        in script
-    )
+    assert 'const VIEW_PREFERENCES_KEY = "chronovisor.cortex.preferences.v1";' in script
     assert "function sanitizeViewPreferences(candidate)" in script
     assert "function loadViewPreferences()" in script
     assert "function saveViewPreferences()" in script
     assert "function resetViewPreferences()" in script
     assert "applyViewPreferences(loadViewPreferences());" in script
-    assert 'window.localStorage.setItem(' in script
-    assert 'window.localStorage.removeItem(VIEW_PREFERENCES_KEY);' in script
-    assert "window.addEventListener(\"pointerdown\", unlockSound" in script
+    assert "window.localStorage.setItem(" in script
+    assert "window.localStorage.removeItem(VIEW_PREFERENCES_KEY);" in script
+    assert 'window.addEventListener("pointerdown", unlockSound' in script
     assert "function excitationLevel(node, time)" in script
     assert "function exciteNode(node, delta, time)" in script
     assert "function drawCompactGlow(" in script
@@ -497,9 +537,9 @@ def test_cortex_static_view_preserves_fable_layout_and_uses_live_data() -> None:
     assert "DEMO · RECALL" in html
     assert "@media (prefers-reduced-motion: reduce)" in style
     assert 'id="recall-field-summary"' in observatory
-    assert 'fetch("/api/cortex/field"' in (
-        static / "app.js"
-    ).read_text(encoding="utf-8")
+    assert 'fetch("/api/cortex/field"' in (static / "app.js").read_text(
+        encoding="utf-8"
+    )
     assert "function ambient(" not in script
     assert "function autoTick(" not in script
     assert 'setTimeout(() => stimulate("recall")' not in script
@@ -508,10 +548,7 @@ def test_cortex_static_view_preserves_fable_layout_and_uses_live_data() -> None:
     assert "3d-force-graph" not in html
     assert 'class="has-activity-bar"' in observatory
     assert 'class="has-activity-bar"' in html
-    assert (
-        'class="activity-view is-active" data-view="observatory"'
-        in observatory
-    )
+    assert 'class="activity-view is-active" data-view="observatory"' in observatory
     assert 'class="activity-view" data-view="cortex"' in observatory
     assert 'class="activity-view" data-view="observatory"' in html
     assert 'class="activity-view is-active" data-view="cortex"' in html
@@ -588,8 +625,7 @@ def test_dashboard_serves_session_scoped_cortex_field_api(monkeypatch) -> None:
     host, port = server.server_address
     try:
         response = dashboard.httpx.get(
-            f"http://{host}:{port}/api/cortex/field"
-            "?session=0123456789abcdef",
+            f"http://{host}:{port}/api/cortex/field?session=0123456789abcdef",
             timeout=2,
         )
     finally:

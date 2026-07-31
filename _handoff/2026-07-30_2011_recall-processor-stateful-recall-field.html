@@ -473,6 +473,8 @@ canary_percent = 0
 
 [recall.processor]
 enabled = false
+shadow_enabled = true
+auto_enable = true
 max_candidates = 10
 max_pointer_cards = 6
 max_rich_evidence = 2
@@ -480,12 +482,16 @@ injection_token_budget = 1200
 certificate_required = true
 
 [recall.field]
-mode = "off"                   # off | shadow | candidate | active
-canary_percent = 0
+mode = "candidate"             # off | shadow | candidate | active
+canary_percent = 100
 working_set_size = 30
 max_active_nodes = 128
 max_active_edges = 256
 positive_learning = false
+
+[recall.field.growth]
+enabled = true
+auto_promote = true
 
 [recall.field.dashboard]
 enabled = false
@@ -626,6 +632,7 @@ uv run chronovisor recall-field-replay --fixture &lt;field-events&gt; --json</co
 <li><time>2026-07-30 22:36</time><span>ローカル最終検証完了。隔離<code>CHRONOVISOR_ROOT</code>のfull suiteは<code>2886 passed, 1 skipped</code>（609.68秒）、ruffとfocused 112 testsも通過。Cortex選択HUDはdirect/spread/negative/inhibition/anti-index/hub penaltyの6成分を実DOMで確認し、1280×720はdocument横overflow 0・重なり0、680×720も横overflow 0・枠外要素0・重なり0、console error/warning 0。検証用Dashboardだけ停止し、production processは未変更。</span></li>
 <li><time>2026-07-30 23:00</time><span>Phase 9 production完了。全実装を<code>origin/main</code>へpushし、Dashboard、Semantic、Reranker、Ingest drainをGitHub-backed runtimeから再起動。デプロイ実測で判明したuvx子process PID判定、launchd bootstrap再試行、Recall warmupのmodel ID保持を修正し、Semantic/Reranker socket、self-test、warmup、archive identityを確認した。productionは品質gateに従いProcessor disabled・Field/Reranker shadowを維持する。</span></li>
 <li><time>2026-07-30 23:01</time><span>実会話live確認完了。通常Hookで関連カードを注入し、隔離した診断設定ではstimulus→spread→candidate→certificate→commit/reject→次turn commit_appliedを同一session/decision/seqで追跡。Cortexは最新sessionを選択し、active 14、candidate 30、commit 3、reject 155、teacher agreement 50%、Field p95 75ms、および選択nodeの6成分・certificate IDを表示。1280×720/680×720で横overflow・重なり・枠外脱出・console errorはいずれも0。計画書記録を含む最終GitHub HEADへ全service archiveを再同期して完了とする。</span></li>
+<li><time>2026-07-31 20:01</time><span>自律成長ループを閉じた。毎turnのProcessor shadow certificateとField/teacher比較を権限非変更で蓄積し、sleep cycleがlabel ledger・明示used保持率・直近200件の品質窓を再評価する。strong positive 200件/20 sessions、candidate 100件/20 sessions、teacher/used coverage 99%、Processor実利用precision 90%、4秒超過0をすべて満たした場合だけ5%→25%→100%へ自動昇格し、悪化時は即座にteacher authorityへrollbackする。現live-equivalent実測はstrong 33件/4 sessions、Field top30 coverage 77.8%、commit coverage 33.3%のためcandidate収集を継続し、注入権限は従来teacherのまま。ユーザーが後日手動で有効化する作業は不要になった。</span></li>
 </ol>
 </section>
 

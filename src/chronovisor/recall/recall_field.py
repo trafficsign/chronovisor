@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 import time
 from collections import deque
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from typing import Any
 
 from chronovisor.recall.recall_field_schema import (
@@ -26,6 +26,21 @@ from chronovisor.search.index_store import get_store
 
 def _clamp(value: float) -> float:
     return max(0.0, min(1.0, value))
+
+
+def _effective_config(config: RecallFieldConfig) -> RecallFieldConfig:
+    """Apply learned edges only after the autonomous supervision gate passes."""
+
+    if config.positive_learning or not config.auto_growth:
+        return config
+    try:
+        from chronovisor.recall.recall_growth import automatic_learning_allowed
+
+        if automatic_learning_allowed(enabled=True):
+            return replace(config, positive_learning=True)
+    except Exception:
+        pass
+    return config
 
 
 def _event(
@@ -134,6 +149,7 @@ def update_field_state(
     events: list[FieldEvent] = []
     previous_turn = state.turn
     state.turn += 1
+    buffer = state.shadow if config.mode == "shadow" else state.active
     elapsed = max(0.0, now - state.updated_at_epoch)
     _decay_buffer(
         state.active,
@@ -159,7 +175,7 @@ def update_field_state(
     )
     if topic_reset:
         state.topic_epoch += 1
-        state.shadow = {}
+        buffer.clear()
         state.full_search_fallback = True
         state.pending_teacher_commits = [
             row
@@ -184,10 +200,9 @@ def update_field_state(
             )
         )
     else:
-        state.full_search_fallback = not bool(state.shadow)
+        state.full_search_fallback = not bool(buffer)
     state.topic_signature = prompt_signature
 
-    buffer = state.shadow if config.mode == "shadow" else state.active
     applicable_commits: list[dict[str, Any]] = []
     pending: list[dict[str, Any]] = []
     for row in state.pending_teacher_commits:
@@ -238,11 +253,7 @@ def update_field_state(
         else:
             node.direct = _clamp(node.direct + delta)
             node.activation = _clamp(node.activation + delta)
-            kind = (
-                "commit_applied"
-                if stimulus.kind == "teacher_commit"
-                else "stimulus"
-            )
+            kind = "commit_applied" if stimulus.kind == "teacher_commit" else "stimulus"
         node.anti_index = max(
             node.anti_index,
             float(stimulus.components.get("anti_index") or 0.0),
@@ -293,6 +304,7 @@ def update_field_state(
             source,
             limit=12,
             include_exposure_cofire=False,
+            include_positive_cofire=config.positive_learning,
             degree_normalize=True,
         ):
             traversed += 1
@@ -331,11 +343,7 @@ def update_field_state(
                 break
 
     over_capacity = max(0, len(buffer) - config.working_set_size)
-    lateral = (
-        config.global_inhibition
-        * over_capacity
-        / max(1, config.working_set_size)
-    )
+    lateral = config.global_inhibition * over_capacity / max(1, config.working_set_size)
     if lateral > 0:
         for page_id, node in buffer.items():
             applied = min(node.activation, lateral)
@@ -380,7 +388,7 @@ def run_field_turn(
     """Run one private Field turn without changing Recall candidates."""
 
     started = time.perf_counter()
-    cfg = config or load_recall_field_config()
+    cfg = _effective_config(config or load_recall_field_config())
     hashed_session = session_hash(host, session_id)
     if cfg.mode == "off" or not hashed_session:
         return {
@@ -461,7 +469,7 @@ def record_mcp_activity(
     """Project an actual MCP search/read into the owning Recall Field session."""
 
     started = time.perf_counter()
-    cfg = config or load_recall_field_config()
+    cfg = _effective_config(config or load_recall_field_config())
     normalized_host = host.strip().casefold()
     observed = time.time() if now is None else now
     field_store = store or RecallFieldStore(config=cfg)
@@ -554,7 +562,7 @@ def queue_teacher_commits(
 ) -> dict[str, Any]:
     """Queue teacher commits for the next turn without current-turn activation."""
 
-    cfg = config or load_recall_field_config()
+    cfg = _effective_config(config or load_recall_field_config())
     hashed_session = session_hash(host, session_id)
     if cfg.mode == "off" or not hashed_session or not page_ids:
         return {"status": "skipped", "queued": 0}

@@ -202,6 +202,8 @@ class RecallPolicy:
     calibration_min_improvement: float = 0.02
     session_ttl_seconds: int = 7 * 24 * 60 * 60
     processor_enabled: bool = False
+    processor_shadow_enabled: bool = False
+    processor_auto_enable: bool = False
     processor_max_candidates: int = 10
     processor_max_pointer_cards: int = 6
     processor_max_rich_evidence: int = 2
@@ -431,6 +433,10 @@ def _apply_config(policy: RecallPolicy, data: dict[str, Any]) -> None:
     if processor:
         if isinstance(processor.get("enabled"), bool):
             policy.processor_enabled = processor["enabled"]
+        if isinstance(processor.get("shadow_enabled"), bool):
+            policy.processor_shadow_enabled = processor["shadow_enabled"]
+        if isinstance(processor.get("auto_enable"), bool):
+            policy.processor_auto_enable = processor["auto_enable"]
         if isinstance(processor.get("max_candidates"), int):
             policy.processor_max_candidates = max(1, processor["max_candidates"])
         if isinstance(processor.get("max_pointer_cards"), int):
@@ -450,17 +456,13 @@ def _apply_config(policy: RecallPolicy, data: dict[str, Any]) -> None:
                 64, processor["injection_token_budget"]
             )
         if isinstance(processor.get("certificate_required"), bool):
-            policy.processor_certificate_required = processor[
-                "certificate_required"
-            ]
+            policy.processor_certificate_required = processor["certificate_required"]
         if isinstance(processor.get("judge_enabled"), bool):
             policy.processor_judge_enabled = processor["judge_enabled"]
         if isinstance(processor.get("judge_model"), str):
             policy.processor_judge_model = processor["judge_model"]
         if isinstance(processor.get("judge_timeout_ms"), int):
-            policy.processor_judge_timeout_ms = max(
-                200, processor["judge_timeout_ms"]
-            )
+            policy.processor_judge_timeout_ms = max(200, processor["judge_timeout_ms"])
         if isinstance(processor.get("escalation_model"), str):
             policy.processor_escalation_model = processor["escalation_model"]
         if isinstance(processor.get("escalation_timeout_ms"), int):
@@ -1369,9 +1371,7 @@ def collect_certified_context(
 
     remaining_ms = _remaining_budget_ms(deadline_at)
     judge_timeout_ms = (
-        max(0, min(1_800, remaining_ms - 100))
-        if remaining_ms is not None
-        else 1_800
+        max(0, min(1_800, remaining_ms - 100)) if remaining_ms is not None else 1_800
     )
     selections, metadata = select_certified_candidates(
         query,
@@ -1422,6 +1422,52 @@ def collect_certified_context(
     metadata["committed_count"] = len(items)
     metadata["committed_page_ids"] = [item.page_id for item in items]
     return items, metadata
+
+
+def observe_processor_shadow(
+    query: str,
+    policy: RecallPolicy,
+    *,
+    request: RecallRequest,
+    session_state: Any | None,
+    candidates: list[Any],
+    reranker_metadata: dict[str, Any] | None,
+    deadline_at: float | None,
+) -> dict[str, Any]:
+    """Produce certificates and comparisons without changing injection."""
+
+    remaining_ms = _remaining_budget_ms(deadline_at)
+    if not policy.processor_shadow_enabled:
+        return {"status": "disabled", "shadow_only": True}
+    if not candidates:
+        return {"status": "skipped", "reason": "no_candidates", "shadow_only": True}
+    if remaining_ms is not None and remaining_ms < 100:
+        return {
+            "status": "skipped",
+            "reason": "insufficient_budget",
+            "shadow_only": True,
+        }
+    try:
+        shadow_policy = replace(policy, processor_judge_enabled=False)
+        _items, metadata = collect_certified_context(
+            query,
+            shadow_policy,
+            request=request,
+            session_state=session_state,
+            candidates=candidates,
+            reranker_metadata=reranker_metadata,
+            deadline_at=deadline_at,
+        )
+        metadata["authority"] = "teacher"
+        metadata["shadow_only"] = True
+        return metadata
+    except Exception as exc:
+        return {
+            "status": "error",
+            "reason": type(exc).__name__,
+            "authority": "teacher",
+            "shadow_only": True,
+        }
 
 
 def query_hint_page_ids(queries: list[str], *, limit: int) -> list[str]:
@@ -1918,6 +1964,12 @@ def _finalize_recall_result(
         try:
             from chronovisor.recall.recall_field import queue_teacher_commits
 
+            processor_features = result.evidence_features.get("processor")
+            if not isinstance(processor_features, dict):
+                processor_features = result.evidence_features.get("processor_shadow")
+            if not isinstance(processor_features, dict):
+                processor_features = {}
+
             result.evidence_features["field_teacher_queue"] = queue_teacher_commits(
                 host=active_request.host,
                 session_id=active_request.session_id,
@@ -1927,17 +1979,7 @@ def _finalize_recall_result(
                     for item in result.context_items
                     if item.certificate_id
                 },
-                ranking_components=(
-                    result.evidence_features.get("processor", {}).get(
-                        "ranking_components",
-                        {},
-                    )
-                    if isinstance(
-                        result.evidence_features.get("processor"),
-                        dict,
-                    )
-                    else {}
-                ),
+                ranking_components=(processor_features.get("ranking_components", {})),
             )
         except Exception as exc:
             result.evidence_features["field_teacher_queue"] = {
@@ -1964,9 +2006,7 @@ def _finalize_recall_result(
                 session_hash=str(field_metadata.get("session_hash") or ""),
                 prompt=active_request.prompt,
                 observer=observer,
-                committed_page_ids=[
-                    item.page_id for item in result.context_items
-                ],
+                committed_page_ids=[item.page_id for item in result.context_items],
                 latency_ms=result.latency_ms,
             )
         except Exception:
@@ -2027,6 +2067,7 @@ def _run_evidence_search(
     heuristic_score: float,
     reasons: list[str],
     deadline_at: float,
+    processor_authority: bool,
 ) -> _EvidenceSearchOutcome:
     """Run Field observation, teacher search, rewrite, rerank, and evidence score."""
 
@@ -2085,7 +2126,7 @@ def _run_evidence_search(
             25,
             min(650, _remaining_budget_ms(deadline_at) or 650),
         ),
-        certificate_boundary_enabled=policy.processor_enabled,
+        certificate_boundary_enabled=processor_authority,
     )
     field_metadata["candidate_observer"] = candidate_metadata
     evidence_features = build_evidence_features(
@@ -2141,22 +2182,20 @@ def _run_evidence_search(
                 session_state=session_state,
                 rewrite_queries=rewrite_queries,
             )
-            pre_results, search_mode, candidate_metadata = (
-                run_candidate_teacher_pair(
-                    query=" ".join(queries_for_search),
-                    field_turn=field_metadata,
-                    teacher_search=lambda: search_candidates(
-                        queries_for_search,
-                        policy,
-                        request=active_request,
-                        deadline_at=deadline_at,
-                    ),
-                    timeout_ms=max(
-                        25,
-                        min(650, _remaining_budget_ms(deadline_at) or 650),
-                    ),
-                    certificate_boundary_enabled=policy.processor_enabled,
-                )
+            pre_results, search_mode, candidate_metadata = run_candidate_teacher_pair(
+                query=" ".join(queries_for_search),
+                field_turn=field_metadata,
+                teacher_search=lambda: search_candidates(
+                    queries_for_search,
+                    policy,
+                    request=active_request,
+                    deadline_at=deadline_at,
+                ),
+                timeout_ms=max(
+                    25,
+                    min(650, _remaining_budget_ms(deadline_at) or 650),
+                ),
+                certificate_boundary_enabled=processor_authority,
             )
             field_metadata["candidate_observer"] = candidate_metadata
             evidence_features = build_evidence_features(
@@ -2206,6 +2245,96 @@ def _run_evidence_search(
     )
 
 
+def processor_authority_for_request(
+    policy: RecallPolicy,
+    request: RecallRequest,
+) -> bool:
+    """Select autonomous Processor authority at the same session canary."""
+
+    if policy.processor_enabled:
+        return True
+    if not policy.processor_auto_enable or not request.session_id:
+        return False
+    try:
+        from dataclasses import replace as dataclass_replace
+
+        from chronovisor.recall.recall_field_candidate import selected_for_canary
+        from chronovisor.recall.recall_field_schema import (
+            load_recall_field_config,
+            session_hash,
+        )
+        from chronovisor.recall.recall_growth import (
+            automatic_processor_authority_allowed,
+            automatic_rollout,
+        )
+
+        if not automatic_processor_authority_allowed(enabled=True):
+            return False
+        mode, percent = automatic_rollout(enabled=True)
+        if mode != "active":
+            return False
+        config = dataclass_replace(
+            load_recall_field_config(),
+            mode="active",
+            canary_percent=percent,
+        )
+        return selected_for_canary(
+            session_hash(request.host, request.session_id),
+            config,
+        )
+    except Exception:
+        return False
+
+
+def _prepare_recall_request(
+    request: RecallRequest,
+    policy: RecallPolicy,
+    *,
+    started: float,
+) -> tuple[RecallRequest | None, list[str], RecallResult | None]:
+    """Normalize the user prompt and return any deterministic early result."""
+
+    initial_skip = _initial_recall_skip(request, policy, started=started)
+    if initial_skip is not None:
+        return None, [], initial_skip
+
+    cleaned_prompt, stripped_reasons = strip_non_user_blocks(request.prompt)
+    if not cleaned_prompt:
+        skip_reason = classify_non_user_prompt(request.prompt, policy)
+        result = RecallResult(
+            status="skipped",
+            decision="none",
+            confidence=0.0,
+            queries=[],
+            reasons=[skip_reason] if skip_reason else stripped_reasons,
+            matched_terms={},
+            latency_ms=_elapsed_ms(started),
+        )
+        if policy.log_decisions:
+            append_recall_log(request, result)
+        return None, stripped_reasons, result
+
+    active_request = (
+        replace(request, prompt=cleaned_prompt) if stripped_reasons else request
+    )
+    skip_reason = classify_non_user_prompt(active_request.prompt, policy)
+    if not skip_reason:
+        return active_request, stripped_reasons, None
+
+    result = RecallResult(
+        status="skipped",
+        decision="none",
+        confidence=0.0,
+        queries=[],
+        reasons=stripped_reasons + [skip_reason],
+        matched_terms={},
+        latency_ms=_elapsed_ms(started),
+    )
+    if policy.log_decisions:
+        append_recall_log(request, result)
+    return None, stripped_reasons, result
+
+
 def _run_recall_impl(
     request: RecallRequest,
     policy: RecallPolicy | None = None,
@@ -2232,43 +2361,19 @@ def _run_recall_impl(
     )
     deadline_at = final_deadline_at - (reserve_ms / 1000.0)
 
-    initial_skip = _initial_recall_skip(request, policy, started=started)
-    if initial_skip is not None:
-        return initial_skip
+    active_request, stripped_reasons, early_result = _prepare_recall_request(
+        request,
+        policy,
+        started=started,
+    )
+    if early_result is not None:
+        return early_result
+    assert active_request is not None
 
-    active_request = request
-    cleaned_prompt, stripped_reasons = strip_non_user_blocks(request.prompt)
-    if not cleaned_prompt:
-        skip_reason = classify_non_user_prompt(request.prompt, policy)
-        result = RecallResult(
-            status="skipped",
-            decision="none",
-            confidence=0.0,
-            queries=[],
-            reasons=[skip_reason] if skip_reason else stripped_reasons,
-            matched_terms={},
-            latency_ms=_elapsed_ms(started),
-        )
-        if policy.log_decisions:
-            append_recall_log(request, result)
-        return result
-    if stripped_reasons:
-        active_request = replace(request, prompt=cleaned_prompt)
-
-    skip_reason = classify_non_user_prompt(active_request.prompt, policy)
-    if skip_reason:
-        result = RecallResult(
-            status="skipped",
-            decision="none",
-            confidence=0.0,
-            queries=[],
-            reasons=stripped_reasons + [skip_reason],
-            matched_terms={},
-            latency_ms=_elapsed_ms(started),
-        )
-        if policy.log_decisions:
-            append_recall_log(request, result)
-        return result
+    processor_authority = processor_authority_for_request(
+        policy,
+        active_request,
+    )
 
     score, reasons, matched = evaluate_heuristic(active_request, policy)
     reasons = stripped_reasons + reasons
@@ -2293,6 +2398,7 @@ def _run_recall_impl(
                 heuristic_score=score,
                 reasons=reasons,
                 deadline_at=deadline_at,
+                processor_authority=processor_authority,
             )
             score = evidence_outcome.score
             session_state = evidence_outcome.session_state
@@ -2304,23 +2410,44 @@ def _run_recall_impl(
             field_shadow_metadata = evidence_outcome.field_shadow_metadata
         except RecallBudgetExhausted as exc:
             return _fail_open_recall_budget(
-                str(exc), matched, request, policy,
-                started, final_deadline_at, _allow_timeout_fallback, perform_search,
+                str(exc),
+                matched,
+                request,
+                policy,
+                started,
+                final_deadline_at,
+                _allow_timeout_fallback,
+                perform_search,
             )
         except Exception as exc:
             reasons.append(f"evidence gate failed: {exc.__class__.__name__}")
             pre_results = []
             search_mode = "error"
 
-    if not policy.processor_enabled and should_run_judge(
-        score, policy, evidence_features
-    ):
+    if policy.processor_shadow_enabled and not processor_authority:
+        evidence_features["processor_shadow"] = observe_processor_shadow(
+            active_request.prompt,
+            policy,
+            request=active_request,
+            session_state=session_state,
+            candidates=pre_results,
+            reranker_metadata=reranker_metadata,
+            deadline_at=deadline_at,
+        )
+
+    if not processor_authority and should_run_judge(score, policy, evidence_features):
         try:
             judge_timeout_ms = _require_remaining_budget(deadline_at, "judge")
         except RecallBudgetExhausted as exc:
             return _fail_open_recall_budget(
-                str(exc), matched, request, policy,
-                started, final_deadline_at, _allow_timeout_fallback, perform_search,
+                str(exc),
+                matched,
+                request,
+                policy,
+                started,
+                final_deadline_at,
+                _allow_timeout_fallback,
+                perform_search,
             )
         judge_score, judge_queries, judge_reason = run_local_judge(
             active_request,
@@ -2351,11 +2478,20 @@ def _run_recall_impl(
                     used_judge=False,
                     judge_confidence=None,
                     judge_reason=judge_reason,
+                    session_id=active_request.session_id,
+                    evidence_features=evidence_features,
+                    search_mode=search_mode,
+                    context_style=policy.context_style,
                     latency_ms=_elapsed_ms(started),
                 )
-                if policy.log_decisions:
-                    append_recall_log(request, result)
-                return result
+                return _finalize_recall_result(
+                    result,
+                    request=request,
+                    active_request=active_request,
+                    policy=policy,
+                    session_state=session_state,
+                    queries=[],
+                )
 
     decision = decision_from_score(score, policy)
     queries = (
@@ -2376,7 +2512,7 @@ def _run_recall_impl(
     if perform_search and decision != "none":
         try:
             _require_remaining_budget(deadline_at, "context")
-            if policy.processor_enabled:
+            if processor_authority:
                 context_items, processor_metadata = collect_certified_context(
                     active_request.prompt,
                     policy,
@@ -2401,8 +2537,14 @@ def _run_recall_impl(
                 reasons.append("no matching pages")
         except RecallBudgetExhausted as exc:
             return _fail_open_recall_budget(
-                str(exc), matched, request, policy,
-                started, final_deadline_at, _allow_timeout_fallback, perform_search,
+                str(exc),
+                matched,
+                request,
+                policy,
+                started,
+                final_deadline_at,
+                _allow_timeout_fallback,
+                perform_search,
             )
         except Exception as exc:
             error = f"{exc.__class__.__name__}: {exc}"
@@ -2413,7 +2555,7 @@ def _run_recall_impl(
         decision=decision
         if context_items or decision == "none" or not perform_search
         else "none"
-        if policy.processor_enabled
+        if processor_authority
         else "search",
         confidence=round(score, 3),
         queries=queries,

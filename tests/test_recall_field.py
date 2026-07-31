@@ -8,6 +8,7 @@ from pathlib import Path
 
 from chronovisor.recall import recall_field
 from chronovisor.recall.recall_field_schema import (
+    ActivationNode,
     FieldStimulus,
     RecallFieldConfig,
     RecallFieldState,
@@ -32,11 +33,7 @@ class FakeGraphStore:
         return self.links.get(page_id, [])
 
     def backlinks(self, page_id: str) -> list[str]:
-        return [
-            source
-            for source, targets in self.links.items()
-            if page_id in targets
-        ]
+        return [source for source, targets in self.links.items() if page_id in targets]
 
     def tags(self, _page_id: str) -> list[str]:
         return []
@@ -49,9 +46,7 @@ class FakeGraphStore:
 
     def pages_for_entity(self, entity: str) -> list[str]:
         return [
-            page_id
-            for page_id, entities in self.entities.items()
-            if entity in entities
+            page_id for page_id, entities in self.entities.items() if entity in entities
         ]
 
 
@@ -63,9 +58,7 @@ def config(**overrides) -> RecallFieldConfig:
         working_set_size=overrides.get("working_set_size", 30),
         topic_reset_similarity=overrides.get("topic_reset_similarity", 0.15),
         event_retention=overrides.get("event_retention", 2_000),
-        session_ttl_seconds=overrides.get(
-            "session_ttl_seconds", 7 * 24 * 60 * 60
-        ),
+        session_ttl_seconds=overrides.get("session_ttl_seconds", 7 * 24 * 60 * 60),
     )
 
 
@@ -100,6 +93,9 @@ working_set_size = 24
 max_active_nodes = 64
 max_active_edges = 120
 positive_learning = false
+[recall.field.growth]
+enabled = true
+auto_promote = true
 """,
         encoding="utf-8",
     )
@@ -112,6 +108,8 @@ positive_learning = false
     assert loaded.max_active_nodes == 64
     assert loaded.max_active_edges == 120
     assert loaded.positive_learning is False
+    assert loaded.auto_growth is True
+    assert loaded.auto_promote is True
 
 
 def test_fixed_replay_is_deterministic_and_uses_shadow_buffer(monkeypatch) -> None:
@@ -146,6 +144,43 @@ def test_fixed_replay_is_deterministic_and_uses_shadow_buffer(monkeypatch) -> No
     assert left.active == {}
     assert left.shadow["a"].activation > left.shadow["b"].activation > 0
     assert any(event.kind == "spread" for event in left_events)
+
+
+def test_candidate_mode_uses_active_buffer_for_fallback_and_topic_reset() -> None:
+    graph = FakeGraphStore()
+    config = RecallFieldConfig(mode="candidate", max_hops=0)
+    state = RecallFieldState(
+        session_hash="0123456789abcdef",
+        topic_signature=topic_signature("stable field topic"),
+        active={"page-a": ActivationNode(activation=0.8)},
+        updated_at_epoch=100.0,
+    )
+
+    continued, _events = recall_field.update_field_state(
+        state,
+        stimuli=[],
+        prompt_signature=topic_signature("stable field topic"),
+        config=config,
+        now=101.0,
+        graph_store=graph,
+        prompt_text="stable field topic",
+    )
+
+    assert continued.full_search_fallback is False
+    assert "page-a" in continued.active
+
+    reset, _events = recall_field.update_field_state(
+        continued,
+        stimuli=[],
+        prompt_signature=topic_signature("unrelated completely new subject"),
+        config=config,
+        now=102.0,
+        graph_store=graph,
+        prompt_text="話を変える unrelated completely new subject",
+    )
+
+    assert reset.full_search_fallback is True
+    assert reset.active == {}
 
 
 def test_field_topic_reset_capacity_and_negative_activation(monkeypatch) -> None:

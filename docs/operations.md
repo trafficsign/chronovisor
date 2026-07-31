@@ -224,6 +224,18 @@ there are at least 200 explicit strong positives across at least 20 sessions.
 Calibration additionally requires 500 deduplicated labels and a temporal
 holdout with zero session/query leakage.
 
+The sleep cycle owns that waiting period; it is not a human reminder. Its
+`recall_growth` lane materializes `runtime/recall-labels/ledger.jsonl`, writes
+`runtime/recall-field/growth-state.json`, and keeps the promotion artifact
+fail-closed. With `recall.processor.shadow_enabled = true` and
+`recall.field.mode = "candidate"`, production injection remains teacher-owned
+while certificates, Field/teacher comparisons, and explicit-used coverage
+accrue. Once every gate passes, `auto_enable`/`auto_promote` advance authority
+through 5%, 25%, and 100% session canaries. A later failed gate resolves the
+effective mode back to candidate observation without a manual config edit.
+Processor authority additionally requires at least 90% explicit-used precision
+in the recent window, so selecting many cards to preserve recall cannot pass.
+
 ## Local Decision Replay Gate
 
 ```sh

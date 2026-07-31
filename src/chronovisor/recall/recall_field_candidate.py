@@ -23,9 +23,7 @@ from chronovisor.search import semantic_client
 CANDIDATE_TRACE_FILE = (
     CHRONOVISOR_ROOT / "runtime" / "recall-field" / "candidate-trace.jsonl"
 )
-PROMOTION_ARTIFACT = (
-    CHRONOVISOR_ROOT / "runtime" / "recall-field" / "promotion.json"
-)
+PROMOTION_ARTIFACT = CHRONOVISOR_ROOT / "runtime" / "recall-field" / "promotion.json"
 
 
 def _canonical_sha256(payload: dict[str, Any]) -> str:
@@ -49,13 +47,30 @@ def selected_for_canary(session_hash: str, config: RecallFieldConfig) -> bool:
         percent = 100
     if percent <= 0:
         return False
-    bucket = int(
-        hashlib.sha256(
-            f"recall-field:{session_hash}".encode()
-        ).hexdigest()[:8],
-        16,
-    ) % 100
+    bucket = (
+        int(
+            hashlib.sha256(f"recall-field:{session_hash}".encode()).hexdigest()[:8],
+            16,
+        )
+        % 100
+    )
     return bucket < percent
+
+
+def effective_rollout(config: RecallFieldConfig) -> RecallFieldConfig:
+    """Resolve autonomous rollout state without mutating the user config."""
+
+    if not config.auto_promote or config.mode in {"off", "shadow"}:
+        return config
+    try:
+        from dataclasses import replace
+
+        from chronovisor.recall.recall_growth import automatic_rollout
+
+        mode, percent = automatic_rollout(enabled=True)
+        return replace(config, mode=mode, canary_percent=percent)
+    except Exception:
+        return config
 
 
 def authority_allowed(path: Path | None = None) -> bool:
@@ -75,14 +90,18 @@ def authority_allowed(path: Path | None = None) -> bool:
     if expected_sha != _canonical_sha256(unsigned):
         return False
     metrics = payload.get("metrics")
-    return bool(
-        isinstance(metrics, dict)
-        and float(metrics.get("teacher_commit_coverage") or 0.0) >= 0.99
-        and float(metrics.get("precision_delta_points") or -100.0) >= -1.0
-        and float(metrics.get("recall_delta_points") or -100.0) >= -1.0
-        and int(metrics.get("over_4s") or 0) == 0
-        and expected_sha
-    )
+    try:
+        return bool(
+            isinstance(metrics, dict)
+            and float(metrics.get("teacher_commit_coverage") or 0.0) >= 0.99
+            and float(metrics.get("precision_delta_points") or -100.0) >= -1.0
+            and float(metrics.get("recall_delta_points") or -100.0) >= -1.0
+            and int(metrics.get("over_4s") or 0) == 0
+            and float(metrics.get("processor_used_precision_proxy") or 0.0) >= 0.90
+            and expected_sha
+        )
+    except (TypeError, ValueError):
+        return False
 
 
 def _verify(
@@ -131,7 +150,7 @@ def run_candidate_teacher_pair(
     artifact exists. Candidate mode therefore cannot bypass certificates.
     """
 
-    cfg = config or load_recall_field_config()
+    cfg = effective_rollout(config or load_recall_field_config())
     session = str(field_turn.get("session_hash") or "")
     page_ids = [
         str(page_id)
@@ -142,18 +161,22 @@ def run_candidate_teacher_pair(
     selected = selected_for_canary(session, cfg)
     if not selected or fallback or not page_ids:
         results, mode = teacher_search()
-        return results, mode, {
-            "status": "fallback",
-            "reason": (
-                "not_selected"
-                if not selected
-                else "topic_reset"
-                if fallback
-                else "empty_field"
-            ),
-            "teacher_count": len(results),
-            "authority": "teacher",
-        }
+        return (
+            results,
+            mode,
+            {
+                "status": "fallback",
+                "reason": (
+                    "not_selected"
+                    if not selected
+                    else "topic_reset"
+                    if fallback
+                    else "empty_field"
+                ),
+                "teacher_count": len(results),
+                "authority": "teacher",
+            },
+        )
 
     with ThreadPoolExecutor(
         max_workers=2,
@@ -174,9 +197,7 @@ def run_candidate_teacher_pair(
     overlap = len(set(teacher_ids) & set(field_ids))
     coverage = overlap / max(1, len(set(teacher_ids)))
     promoted = bool(
-        cfg.mode == "active"
-        and certificate_boundary_enabled
-        and authority_allowed()
+        cfg.mode == "active" and certificate_boundary_enabled and authority_allowed()
     )
     return (
         verified if promoted else teacher_results,
@@ -220,11 +241,11 @@ def append_candidate_trace(
         for value in observer.get("field_page_ids", [])
         if isinstance(value, str)
     ]
-    committed = list(dict.fromkeys(page_id for page_id in committed_page_ids if page_id))
+    committed = list(
+        dict.fromkeys(page_id for page_id in committed_page_ids if page_id)
+    )
     commit_coverage = (
-        len(set(field_ids) & set(committed)) / len(committed)
-        if committed
-        else 1.0
+        len(set(field_ids) & set(committed)) / len(committed) if committed else 1.0
     )
     record = {
         "schema_version": 1,
@@ -234,9 +255,7 @@ def append_candidate_trace(
         "status": str(observer.get("status") or ""),
         "authority": str(observer.get("authority") or "teacher"),
         "fallback_reason": str(observer.get("reason") or ""),
-        "teacher_top30_coverage": float(
-            observer.get("teacher_top30_coverage") or 0.0
-        ),
+        "teacher_top30_coverage": float(observer.get("teacher_top30_coverage") or 0.0),
         "teacher_commit_coverage": round(commit_coverage, 6),
         "field_page_ids": field_ids,
         "teacher_page_ids": list(observer.get("teacher_page_ids") or []),

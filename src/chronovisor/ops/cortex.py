@@ -258,7 +258,8 @@ def build_cortex_graph(
         resolved_root,
         sources,
         commit=commit,
-        generated=generated or datetime.now().astimezone().isoformat(timespec="seconds"),
+        generated=generated
+        or datetime.now().astimezone().isoformat(timespec="seconds"),
     )
     if use_cache:
         with _GRAPH_CACHE_LOCK:
@@ -274,9 +275,7 @@ def _read_sealed_field_snapshot(path: Path) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError("field snapshot must be an object")
     seal = value.get("snapshot_sha256")
-    payload = {
-        key: item for key, item in value.items() if key != "snapshot_sha256"
-    }
+    payload = {key: item for key, item in value.items() if key != "snapshot_sha256"}
     encoded = json.dumps(
         payload,
         ensure_ascii=False,
@@ -304,11 +303,7 @@ def _project_field_event(value: Any) -> dict[str, Any] | None:
         or not isinstance(kind, str)
     ):
         return None
-    projected = {
-        key: value.get(key)
-        for key in _FIELD_EVENT_KEYS
-        if key in value
-    }
+    projected = {key: value.get(key) for key in _FIELD_EVENT_KEYS if key in value}
     components = value.get("components")
     safe_components = components if isinstance(components, dict) else {}
     projected["components"] = {
@@ -401,11 +396,55 @@ def _field_recall_metrics(
             "max": round(max(latencies), 1) if latencies else None,
         },
         "teacher_agreement": (
-            round(teacher_agreed / teacher_total, 4)
-            if teacher_total
-            else None
+            round(teacher_agreed / teacher_total, 4) if teacher_total else None
         ),
         "teacher_pages": teacher_total,
+    }
+
+
+def _safe_metric_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _field_growth_summary(root: Path) -> dict[str, Any]:
+    path = root / "runtime" / "recall-field" / "growth-state.json"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        payload = {}
+    metrics = payload.get("metrics") if isinstance(payload, dict) else None
+    labels = metrics.get("labels") if isinstance(metrics, dict) else None
+    thresholds = payload.get("thresholds") if isinstance(payload, dict) else None
+    candidate = metrics.get("candidate") if isinstance(metrics, dict) else None
+    return {
+        "stage": str(payload.get("stage") or "not_started"),
+        "field_learning_allowed": payload.get("field_learning_allowed") is True,
+        "authority_enabled": payload.get("authority_enabled") is True,
+        "canary_percent": _safe_metric_int(payload.get("canary_percent")),
+        "strong_positive": _safe_metric_int(
+            labels.get("strong_positive") or 0 if isinstance(labels, dict) else 0
+        ),
+        "strong_positive_target": _safe_metric_int(
+            thresholds.get("strong_positive") or 200
+            if isinstance(thresholds, dict)
+            else 200
+        ),
+        "strong_sessions": _safe_metric_int(
+            labels.get("strong_positive_sessions") or 0
+            if isinstance(labels, dict)
+            else 0
+        ),
+        "strong_sessions_target": _safe_metric_int(
+            thresholds.get("strong_positive_sessions") or 20
+            if isinstance(thresholds, dict)
+            else 20
+        ),
+        "candidate_traces": _safe_metric_int(
+            candidate.get("traces") or 0 if isinstance(candidate, dict) else 0
+        ),
     }
 
 
@@ -424,6 +463,10 @@ def build_cortex_field_projection(
     field_root = root.expanduser().resolve() / "recall" / "field"
     session_root = field_root / "sessions"
     config = load_recall_field_config()
+    growth = _field_growth_summary(root)
+    effective_mode = config.mode
+    if config.auto_promote and config.mode not in {"off", "shadow"}:
+        effective_mode = "active" if growth["authority_enabled"] else "candidate"
     sessions: list[tuple[dict[str, Any], dict[str, Any]]] = []
     corrupt_snapshots = 0
     try:
@@ -445,7 +488,7 @@ def build_cortex_field_projection(
         if payload.get("session_hash") != path.stem:
             corrupt_snapshots += 1
             continue
-        mode = config.mode
+        mode = effective_mode
         buffer_name = "shadow" if mode == "shadow" else "active"
         buffer = payload.get(buffer_name)
         if not isinstance(buffer, dict):
@@ -475,7 +518,7 @@ def build_cortex_field_projection(
         return {
             "status": "fault" if corrupt_snapshots else "offline",
             "source": "stateful-recall-field",
-            "mode": config.mode,
+            "mode": effective_mode,
             "session_hash": "",
             "sessions": [],
             "snapshot": None,
@@ -489,6 +532,7 @@ def build_cortex_field_projection(
                 "latency_ms": {"p50": None, "p95": None, "max": None},
                 "stale": True,
                 "corrupt_snapshots": corrupt_snapshots,
+                "growth": growth,
             },
         }
 
@@ -505,8 +549,7 @@ def build_cortex_field_projection(
         if not isinstance(activation, int | float):
             continue
         components = {
-            key: round(float(value.get(key) or 0.0), 6)
-            for key in _FIELD_COMPONENT_KEYS
+            key: round(float(value.get(key) or 0.0), 6) for key in _FIELD_COMPONENT_KEYS
         }
         nodes.append(
             {
@@ -555,14 +598,14 @@ def build_cortex_field_projection(
         "summary": {
             "active": sum(node["activation"] >= 0.05 for node in nodes),
             "candidate": min(len(nodes), config.working_set_size),
-            "commit": counts.get("commit_queued", 0)
-            + counts.get("commit_applied", 0),
+            "commit": counts.get("commit_queued", 0) + counts.get("commit_applied", 0),
             "reject": counts.get("reject", 0) + counts.get("inhibit", 0),
             "teacher_agreement": metrics["teacher_agreement"],
             "latency_ms": metrics["latency_ms"],
             "stale": stale,
             "age_seconds": round(age_seconds, 1),
             "corrupt_snapshots": corrupt_snapshots,
+            "growth": growth,
         },
     }
 
@@ -617,9 +660,7 @@ class CortexEventCursor:
         self.activity_log = activity_log or self.root / "log.md"
         self.raw_dir = self.root / "raw"
         self.field_session = (
-            field_session
-            if _FIELD_SESSION_RE.fullmatch(field_session)
-            else ""
+            field_session if _FIELD_SESSION_RE.fullmatch(field_session) else ""
         )
         self.follow_field_sessions = bool(follow_field_sessions)
         self.field_event_root = self.root / "recall" / "field" / "events"
@@ -634,9 +675,7 @@ class CortexEventCursor:
             self.activity_log: self._file_size(self.activity_log),
         }
         if self.field_event_log is not None:
-            self._offsets[self.field_event_log] = self._file_size(
-                self.field_event_log
-            )
+            self._offsets[self.field_event_log] = self._file_size(self.field_event_log)
         if self.follow_field_sessions:
             for path in self._field_event_paths():
                 self._offsets[path] = self._file_size(path)
@@ -770,27 +809,19 @@ class CortexEventCursor:
                 continue
             event_type = row.get("type")
             if event_type == "read" and row.get("page_id"):
-                events.append(
-                    self._event("read", [str(row["page_id"])], "MCP READ")
-                )
+                events.append(self._event("read", [str(row["page_id"])], "MCP READ"))
             elif event_type == "search":
                 page_ids = [
-                    str(page_id)
-                    for page_id in row.get("direct_pages") or []
-                    if page_id
+                    str(page_id) for page_id in row.get("direct_pages") or [] if page_id
                 ]
                 if page_ids:
                     events.append(self._event("search", page_ids, "MCP SEARCH"))
             elif event_type == "used":
                 page_ids = [
-                    str(page_id)
-                    for page_id in row.get("page_ids") or []
-                    if page_id
+                    str(page_id) for page_id in row.get("page_ids") or [] if page_id
                 ]
                 if page_ids:
-                    events.append(
-                        self._event("used", page_ids, "RECALL USED")
-                    )
+                    events.append(self._event("used", page_ids, "RECALL USED"))
         return events
 
     def _save_events(self) -> list[dict[str, Any]]:

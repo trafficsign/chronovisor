@@ -2591,8 +2591,14 @@ function renderRecallField(fieldValue) {
   const agreement = numeric(summary.teacher_agreement)
     ? pctLabel(summary.teacher_agreement)
     : "collecting";
+  const growth = summary.growth || {};
+  const growthLabel = growth.authority_enabled
+    ? `authority · canary ${growth.canary_percent || 0}%`
+    : growth.field_learning_allowed
+      ? "learning on · authority held"
+      : `learning ${growth.strong_positive || 0}/${growth.strong_positive_target || 200}`;
   els.recallFieldQuality.textContent =
-    `agreement ${agreement} · p95 ${msLabel(latency.p95)}`;
+    `${growthLabel} · agreement ${agreement} · p95 ${msLabel(latency.p95)}`;
 }
 
 function renderRecall(recall) {
