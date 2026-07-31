@@ -31,6 +31,16 @@
   const NODE_STIMULUS_SCALE = 0.38;
   const NODE_ARRIVAL_SCALE = 0.28;
   const LIVE_SESSION_VALUE = "__live__";
+  const VIEW_PREFERENCES_KEY = "chronovisor.cortex.preferences.v1";
+  const VIEW_PREFERENCES_DEFAULTS = Object.freeze({
+    mode: "organic",
+    motion: true,
+    rotate: true,
+    sound: false,
+    synapseVisibility: 160,
+  });
+  const SYNAPSE_VISIBILITY_MIN = 30;
+  const SYNAPSE_VISIBILITY_MAX = 420;
 
   let data;
   let nodes = [];
@@ -53,13 +63,13 @@
   let matches = new Set();
   let stateDirty = true;
   const packageOff = new Set();
-  let mode = "organic";
+  let mode = VIEW_PREFERENCES_DEFAULTS.mode;
   let liveEventsEnabled = true;
   let followLatestSession = true;
-  let motionEnabled = true;
-  let autoRotate = true;
-  let soundOn = false;
-  let edgeVisibility = 1.6;
+  let motionEnabled = VIEW_PREFERENCES_DEFAULTS.motion;
+  let autoRotate = VIEW_PREFERENCES_DEFAULTS.rotate;
+  let soundOn = VIEW_PREFERENCES_DEFAULTS.sound;
+  let edgeVisibility = VIEW_PREFERENCES_DEFAULTS.synapseVisibility / 100;
   let alpha = 1;
   let spikes = 0;
   let lastInteraction = 0;
@@ -160,6 +170,113 @@
 
   function clamp(value, minimum = 0, maximum = 1) {
     return Math.max(minimum, Math.min(maximum, value));
+  }
+
+  function sanitizeViewPreferences(candidate) {
+    const value = candidate && typeof candidate === "object" ? candidate : {};
+    const rawVisibility = Number(value.synapseVisibility);
+    return {
+      mode: value.mode === "cluster" ? "cluster" : "organic",
+      motion:
+        typeof value.motion === "boolean"
+          ? value.motion
+          : VIEW_PREFERENCES_DEFAULTS.motion,
+      rotate:
+        typeof value.rotate === "boolean"
+          ? value.rotate
+          : VIEW_PREFERENCES_DEFAULTS.rotate,
+      sound:
+        typeof value.sound === "boolean"
+          ? value.sound
+          : VIEW_PREFERENCES_DEFAULTS.sound,
+      synapseVisibility: Number.isFinite(rawVisibility)
+        ? Math.round(
+          clamp(
+            rawVisibility,
+            SYNAPSE_VISIBILITY_MIN,
+            SYNAPSE_VISIBILITY_MAX,
+          ),
+        )
+        : VIEW_PREFERENCES_DEFAULTS.synapseVisibility,
+    };
+  }
+
+  function loadViewPreferences() {
+    try {
+      const stored = window.localStorage.getItem(VIEW_PREFERENCES_KEY);
+      return stored
+        ? sanitizeViewPreferences(JSON.parse(stored))
+        : { ...VIEW_PREFERENCES_DEFAULTS };
+    } catch {
+      return { ...VIEW_PREFERENCES_DEFAULTS };
+    }
+  }
+
+  function currentViewPreferences() {
+    return {
+      mode,
+      motion: motionEnabled,
+      rotate: autoRotate,
+      sound: soundOn,
+      synapseVisibility: Math.round(edgeVisibility * 100),
+    };
+  }
+
+  function saveViewPreferences() {
+    try {
+      window.localStorage.setItem(
+        VIEW_PREFERENCES_KEY,
+        JSON.stringify(currentViewPreferences()),
+      );
+    } catch {
+      // Private browsing or a locked-down webview may reject local storage.
+    }
+  }
+
+  function syncViewPreferenceControls() {
+    const controls = {
+      motion: document.getElementById("tMotion"),
+      rotate: document.getElementById("tRot"),
+      sound: document.getElementById("tSnd"),
+    };
+    for (const [name, control] of Object.entries(controls)) {
+      const enabled = { motion: motionEnabled, rotate: autoRotate, sound: soundOn }[
+        name
+      ];
+      control.classList.toggle("on", enabled);
+      control.setAttribute("aria-pressed", String(enabled));
+    }
+    document
+      .getElementById("mOrganic")
+      .classList.toggle("on", mode === "organic");
+    document
+      .getElementById("mCluster")
+      .classList.toggle("on", mode === "cluster");
+    document.getElementById("visSlider").value = String(
+      Math.round(edgeVisibility * 100),
+    );
+  }
+
+  function applyViewPreferences(candidate) {
+    const preferences = sanitizeViewPreferences(candidate);
+    mode = preferences.mode;
+    motionEnabled = preferences.motion;
+    autoRotate = preferences.rotate;
+    soundOn = preferences.sound;
+    edgeVisibility = preferences.synapseVisibility / 100;
+    syncViewPreferenceControls();
+  }
+
+  function resetViewPreferences() {
+    try {
+      window.localStorage.removeItem(VIEW_PREFERENCES_KEY);
+    } catch {
+      // Keep the in-memory reset even when storage access is unavailable.
+    }
+    applyViewPreferences(VIEW_PREFERENCES_DEFAULTS);
+    reheat(0.7);
+    window.setTimeout(fitView, 900);
+    flashTicker("view preferences reset");
   }
 
   function smoothstep(value) {
@@ -532,6 +649,16 @@
     filter.connect(gain);
     gain.connect(audioContext.destination);
     source.start();
+  }
+
+  function unlockSound() {
+    if (!soundOn) return;
+    const AudioContextType = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContextType) return;
+    if (!audioContext) audioContext = new AudioContextType();
+    if (audioContext.state === "suspended") {
+      audioContext.resume().catch(() => {});
+    }
   }
 
   function visibleHub() {
@@ -2100,6 +2227,8 @@
     motionToggle.addEventListener("click", () => {
       motionEnabled = !motionEnabled;
       motionToggle.classList.toggle("on", motionEnabled);
+      motionToggle.setAttribute("aria-pressed", String(motionEnabled));
+      saveViewPreferences();
       flashTicker(
         motionEnabled
           ? "motion enabled"
@@ -2110,20 +2239,36 @@
     rotateToggle.addEventListener("click", () => {
       autoRotate = !autoRotate;
       rotateToggle.classList.toggle("on", autoRotate);
+      rotateToggle.setAttribute("aria-pressed", String(autoRotate));
+      saveViewPreferences();
     });
     const soundToggle = document.getElementById("tSnd");
     soundToggle.addEventListener("click", () => {
       soundOn = !soundOn;
       soundToggle.classList.toggle("on", soundOn);
-      if (soundOn) {
-        if (!audioContext) {
-          audioContext = new (window.AudioContext || window.webkitAudioContext)();
-        }
-        if (audioContext.state === "suspended") audioContext.resume();
-      }
+      soundToggle.setAttribute("aria-pressed", String(soundOn));
+      saveViewPreferences();
+      unlockSound();
     });
     document.getElementById("visSlider").addEventListener("input", (event) => {
-      edgeVisibility = Number(event.target.value) / 100;
+      edgeVisibility =
+        clamp(
+          Number(event.target.value),
+          SYNAPSE_VISIBILITY_MIN,
+          SYNAPSE_VISIBILITY_MAX,
+        ) / 100;
+      saveViewPreferences();
+    });
+    document
+      .getElementById("tReset")
+      .addEventListener("click", resetViewPreferences);
+    window.addEventListener("pointerdown", unlockSound, {
+      capture: true,
+      once: true,
+    });
+    window.addEventListener("keydown", unlockSound, {
+      capture: true,
+      once: true,
     });
     document.getElementById("zIn").addEventListener("click", () => {
       camera.distance = Math.max(240, camera.distance / 1.4);
@@ -2168,7 +2313,7 @@
   }
 
   function setMode(nextMode) {
-    mode = nextMode;
+    mode = nextMode === "cluster" ? "cluster" : "organic";
     reheat(0.7);
     document
       .getElementById("mOrganic")
@@ -2176,6 +2321,7 @@
     document
       .getElementById("mCluster")
       .classList.toggle("on", mode === "cluster");
+    saveViewPreferences();
     window.setTimeout(fitView, 900);
   }
 
@@ -2417,6 +2563,7 @@
       buildTree();
       renderPanel();
       bindCanvasInteractions();
+      applyViewPreferences(loadViewPreferences());
       bindInterface();
       initializeHeader();
       recomputeState();

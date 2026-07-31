@@ -598,6 +598,16 @@ canvas#gl {
   background: var(--amber);
 }
 
+.tgl.prefsReset {
+  color: var(--tx3);
+}
+
+.tgl.prefsReset:hover,
+.tgl.prefsReset:focus-visible {
+  color: var(--amber);
+  border-color: rgba(255, 180, 84, 0.48);
+}
+
 #visCtl {
   display: flex;
   align-items: center;

@@ -429,6 +429,7 @@ def test_cortex_static_view_preserves_fable_layout_and_uses_live_data() -> None:
     assert 'id="sessionSelect"' in html
     assert 'id="tAuto"' not in html
     assert 'id="tSnd"' in html
+    assert 'id="tReset"' in html
     assert "grid-template-columns: 242px 1fr 296px;" in style
     assert "--amber: #ffb454;" in style
     assert "repeating-linear-gradient" in style
@@ -449,6 +450,18 @@ def test_cortex_static_view_preserves_fable_layout_and_uses_live_data() -> None:
     assert "const MAX_ELECTRIC_PATHS = 12;" in script
     assert "const NODE_STIMULUS_SCALE = 0.38;" in script
     assert "const NODE_ARRIVAL_SCALE = 0.28;" in script
+    assert (
+        'const VIEW_PREFERENCES_KEY = "chronovisor.cortex.preferences.v1";'
+        in script
+    )
+    assert "function sanitizeViewPreferences(candidate)" in script
+    assert "function loadViewPreferences()" in script
+    assert "function saveViewPreferences()" in script
+    assert "function resetViewPreferences()" in script
+    assert "applyViewPreferences(loadViewPreferences());" in script
+    assert 'window.localStorage.setItem(' in script
+    assert 'window.localStorage.removeItem(VIEW_PREFERENCES_KEY);' in script
+    assert "window.addEventListener(\"pointerdown\", unlockSound" in script
     assert "function excitationLevel(node, time)" in script
     assert "function exciteNode(node, delta, time)" in script
     assert "function electricPathPoints(" in script
