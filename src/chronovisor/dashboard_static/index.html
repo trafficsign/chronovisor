@@ -54,9 +54,9 @@
 
     <section class="metrics-grid" aria-label="Primary metrics">
       <article class="metric-card">
-        <span class="metric-label">Pending</span>
+        <span class="metric-label">Work Remaining</span>
         <strong id="pending-value">--</strong>
-        <small id="pending-sub">raw queue</small>
+        <small id="pending-sub">ready · semantic held · operational held</small>
       </article>
       <article class="metric-card">
         <span class="metric-label">Stage</span>
@@ -75,16 +75,18 @@
       </article>
     </section>
 
-    <section class="stage-flow" aria-label="Pipeline stage">
-      <div class="stage-node" data-stage="raw">Raw</div>
-      <div class="stage-line"></div>
-      <div class="stage-node" data-stage="triage">Triage</div>
-      <div class="stage-line"></div>
-      <div class="stage-node" data-stage="generate">Generate</div>
-      <div class="stage-line"></div>
-      <div class="stage-node" data-stage="apply">Apply</div>
-      <div class="stage-line"></div>
-      <div class="stage-node" data-stage="complete">Index</div>
+    <section class="processing-panel" id="processing-panel" aria-label="Live processing lanes">
+      <div class="processing-head">
+        <div>
+          <h2>Processing Lanes</h2>
+          <p>Live execution across local LLM workflows</p>
+        </div>
+        <span class="processing-connection" id="processing-connection" data-state="connecting">
+          <span aria-hidden="true"></span>
+          <strong>CONNECTING</strong>
+        </span>
+      </div>
+      <div class="processing-lanes" id="processing-lanes" aria-live="polite"></div>
     </section>
 
     <section class="dashboard-grid">

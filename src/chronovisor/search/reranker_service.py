@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from chronovisor.core.link_fix import atomic_write
+from chronovisor.core.ollama import model_activity
 from chronovisor.core.runtime_config import (
     RerankerConfig,
     load_reranker_config,
@@ -160,11 +161,16 @@ class RerankerServiceState:
                 with accelerator_lease(
                     timeout_ms=self.config.service.timeout_ms
                 ):
-                    scores = _score_fn(self.config)(
-                        query,
-                        [passage for passage, _digest in passages_and_hashes],
-                        self.config,
-                    )
+                    with model_activity(
+                        model=self.config.model,
+                        operation="rerank",
+                        pipeline="recall",
+                    ):
+                        scores = _score_fn(self.config)(
+                            query,
+                            [passage for passage, _digest in passages_and_hashes],
+                            self.config,
+                        )
         finally:
             self._slots.release()
         if len(scores) != len(page_ids):

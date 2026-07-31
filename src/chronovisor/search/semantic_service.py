@@ -27,6 +27,7 @@ from typing import Any
 import numpy as np
 
 from chronovisor.core.link_fix import atomic_write
+from chronovisor.core.ollama import model_activity
 from chronovisor.core.runtime_config import (
     SearchEmbeddingConfig,
     load_search_embedding_config,
@@ -359,7 +360,12 @@ class SemanticServiceState:
     def _encode_queries(self, queries: list[str], batch_size: int) -> np.ndarray:
         with self._model_lock:
             with accelerator_lease(timeout_ms=self.config.query_timeout_ms):
-                vectors = self._foreground.encode_queries(queries, batch_size)
+                with model_activity(
+                    model=self.config.model,
+                    operation="search",
+                    pipeline="recall",
+                ):
+                    vectors = self._foreground.encode_queries(queries, batch_size)
         now = time.monotonic()
         with self._query_cache_lock:
             for query, vector in zip(queries, vectors, strict=False):
@@ -528,9 +534,14 @@ class SemanticServiceState:
             return
         if documents:
             encoder = self._cpu()
-            vectors = encoder.encode_documents(
-                [document.text for document in documents], 1
-            )
+            with model_activity(
+                model=self.config.model,
+                operation="generate",
+                pipeline="improve",
+            ):
+                vectors = encoder.encode_documents(
+                    [document.text for document in documents], 1
+                )
             refreshed = extract_page_documents(path) if path is not None else []
             refreshed_hash = refreshed[0].source_sha256 if refreshed else ""
             if refreshed_hash != current_hash:
@@ -556,17 +567,22 @@ class SemanticServiceState:
                 document.page_id: document.source_sha256 for document in documents
             }
             with self._model_lock:
-                manifest = build_generation(
-                    documents,
-                    encode_documents=self._foreground.encode_documents,
+                with model_activity(
                     model=self.config.model,
-                    revision=self.config.revision,
-                    dimensions=self.config.dimensions,
-                    query_prefix=self.config.query_prefix,
-                    document_prefix=self.config.document_prefix,
-                    batch_size=self.config.maintenance_max_batch,
-                    root=self.root,
-                )
+                    operation="generate",
+                    pipeline="improve",
+                ):
+                    manifest = build_generation(
+                        documents,
+                        encode_documents=self._foreground.encode_documents,
+                        model=self.config.model,
+                        revision=self.config.revision,
+                        dimensions=self.config.dimensions,
+                        query_prefix=self.config.query_prefix,
+                        document_prefix=self.config.document_prefix,
+                        batch_size=self.config.maintenance_max_batch,
+                        root=self.root,
+                    )
             current = str(read_active(root=self.root).get("generation_id") or "")
             activate_generation(
                 manifest.generation_id,

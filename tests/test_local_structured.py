@@ -233,9 +233,10 @@ def test_active_marker_is_atomic_redacted_and_removed_after_session(
             "phase",
             "attempt",
             "started_at",
-            "updated_at",
-            "pid",
-        }
+                "updated_at",
+                "pid",
+                "thread_id",
+            }
         assert marker["phase"] == "generate"
         assert marker["attempt"] == 0
         return '{"decision":"apply","summary":"ok"}'

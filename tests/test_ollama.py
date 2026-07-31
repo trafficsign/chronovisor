@@ -319,6 +319,48 @@ def test_generate_forwards_per_request_runtime_overrides(monkeypatch) -> None:
     }
 
 
+def test_generate_publishes_redacted_model_activity(tmp_path, monkeypatch) -> None:
+    chronovisor_root = tmp_path / "wiki"
+    observed: dict = {}
+
+    def fake_generate(*_args: object, **_kwargs: object) -> str:
+        markers = list(
+            (chronovisor_root / "runtime" / "model-activity" / "active").glob(
+                "*.json"
+            )
+        )
+        assert len(markers) == 1
+        observed.update(json.loads(markers[0].read_text(encoding="utf-8")))
+        return "ok"
+
+    monkeypatch.setattr(ollama, "CHRONOVISOR_ROOT", chronovisor_root)
+    monkeypatch.setattr(ollama, "_generate_unlocked", fake_generate)
+
+    assert ollama.generate("secret prompt", model="ornith:test") == "ok"
+    assert observed["schema_version"] == 1
+    assert observed["model"] == "ornith:test"
+    assert observed["operation"] == "generate"
+    assert observed["component"] == __name__
+    assert observed["pipeline"] == "audit"
+    assert "prompt" not in observed
+    assert not list(
+        (chronovisor_root / "runtime" / "model-activity" / "active").glob(
+            "*.json"
+        )
+    )
+    recent = json.loads(
+        (
+            chronovisor_root
+            / "runtime"
+            / "model-activity"
+            / "recent"
+            / "audit.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert recent["activity_id"] == observed["activity_id"]
+    assert recent["finished_at"]
+
+
 def test_generate_can_return_explicit_completion_metadata(monkeypatch) -> None:
     client = _StreamClient()
     monkeypatch.setattr(ollama, "_client", lambda: client)

@@ -15,6 +15,7 @@ import math
 import os
 import re
 import tempfile
+import threading
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import ExitStack, contextmanager, suppress
 from dataclasses import dataclass
@@ -1098,6 +1099,7 @@ class LocalConsensusAuditStore:
                 "started_at": started_at,
                 "updated_at": started_at,
                 "pid": os.getpid(),
+                "thread_id": threading.get_ident(),
             }
             update("trigger", 0)
         except Exception:

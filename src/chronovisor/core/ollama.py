@@ -9,11 +9,13 @@ import os
 import platform
 import re
 import subprocess
+import sys
 import threading
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, replace
+from datetime import datetime
 from pathlib import Path
 from typing import Any, cast
 
@@ -48,6 +50,7 @@ _RESOURCE_LEASE_STATE = threading.local()
 _MODEL_FOOTPRINT_CALIBRATION: dict[tuple[str, int, int, str, str], int] = {}
 _CALIBRATION_IO_LOCK = threading.Lock()
 _CALIBRATION_SCHEMA_VERSION = 2
+_MODEL_ACTIVITY_SCHEMA_VERSION = 1
 
 
 class _ProcessResourceLock:
@@ -1242,6 +1245,103 @@ def _emit_progress(
         callback(payload)
 
 
+def _model_activity_caller() -> tuple[str, str]:
+    """Identify the first caller outside this adapter without recording prompts."""
+
+    frame = sys._getframe(1)
+    while frame is not None:
+        component = str(frame.f_globals.get("__name__") or "")
+        if component and component not in {__name__, "contextlib"}:
+            return component, frame.f_code.co_name
+        frame = frame.f_back
+    return "unknown", "unknown"
+
+
+def _model_activity_pipeline(component: str) -> str:
+    normalized = component.casefold()
+    if ".recall." in normalized:
+        return "recall"
+    if ".ingest." in normalized:
+        return "ingest"
+    if "repair" in normalized:
+        return "repair"
+    if ".lab." in normalized or ".autonomy." in normalized:
+        return "improve"
+    return "audit"
+
+
+@contextmanager
+def model_activity(
+    *,
+    model: str,
+    operation: str,
+    pipeline: str | None = None,
+) -> Iterator[None]:
+    """Publish one redacted live marker for a local model inference."""
+
+    component, caller = _model_activity_caller()
+    selected_pipeline = pipeline or _model_activity_pipeline(component)
+    started_at = datetime.now().astimezone().isoformat(timespec="milliseconds")
+    activity_id = f"{os.getpid()}-{threading.get_ident()}-{time.time_ns()}"
+    active_dir = CHRONOVISOR_ROOT / "runtime" / "model-activity" / "active"
+    marker_path = active_dir / f"{activity_id}.json"
+    marker_created = False
+    try:
+        active_dir.mkdir(parents=True, exist_ok=True)
+        with suppress(OSError):
+            active_dir.chmod(0o700)
+        _atomic_write_calibration_payload(
+            marker_path,
+            {
+                "schema_version": _MODEL_ACTIVITY_SCHEMA_VERSION,
+                "activity_id": activity_id,
+                "pipeline": selected_pipeline,
+                "component": component,
+                "caller": caller,
+                "operation": operation,
+                "model": model,
+                "pid": os.getpid(),
+                "thread_id": threading.get_ident(),
+                "started_at": started_at,
+                "updated_at": started_at,
+            },
+        )
+        marker_created = True
+    except (OSError, TypeError, ValueError):
+        log.debug("could not publish model activity marker", exc_info=True)
+    try:
+        yield
+    finally:
+        if marker_created:
+            with suppress(OSError):
+                marker_path.unlink(missing_ok=True)
+            finished_at = datetime.now().astimezone().isoformat(
+                timespec="milliseconds"
+            )
+            recent_path = active_dir.parent / "recent" / f"{selected_pipeline}.json"
+            try:
+                recent_path.parent.mkdir(parents=True, exist_ok=True)
+                _atomic_write_calibration_payload(
+                    recent_path,
+                    {
+                        "schema_version": _MODEL_ACTIVITY_SCHEMA_VERSION,
+                        "activity_id": activity_id,
+                        "pipeline": selected_pipeline,
+                        "component": component,
+                        "caller": caller,
+                        "operation": operation,
+                        "model": model,
+                        "pid": os.getpid(),
+                        "thread_id": threading.get_ident(),
+                        "started_at": started_at,
+                        "updated_at": finished_at,
+                        "finished_at": finished_at,
+                    },
+                )
+            except (OSError, TypeError, ValueError):
+                log.debug("could not publish recent model activity", exc_info=True)
+
+
 def ingest_model() -> str:
     return load_ingest_config().model
 
@@ -1499,20 +1599,26 @@ def generate(
     return_metadata: bool = False,
 ) -> str | GenerateResponse:
     with model_resource_lease(exclusive=False):
-        return _generate_unlocked(
-            prompt,
-            system,
-            format=format,
-            progress_callback=progress_callback,
-            model=model,
-            num_ctx=num_ctx,
-            num_predict=num_predict,
-            keep_alive=keep_alive,
-            read_timeout_ms=read_timeout_ms,
-            temperature=temperature,
-            seed=seed,
-            return_metadata=return_metadata,
+        selected_model = (
+            model.strip()
+            if isinstance(model, str) and model.strip()
+            else ingest_model()
         )
+        with model_activity(model=selected_model, operation="generate"):
+            return _generate_unlocked(
+                prompt,
+                system,
+                format=format,
+                progress_callback=progress_callback,
+                model=model,
+                num_ctx=num_ctx,
+                num_predict=num_predict,
+                keep_alive=keep_alive,
+                read_timeout_ms=read_timeout_ms,
+                temperature=temperature,
+                seed=seed,
+                return_metadata=return_metadata,
+            )
 
 
 def _chat_unlocked(
@@ -1627,20 +1733,21 @@ def chat(
     return_metadata: bool = False,
 ) -> str | ChatResponse:
     with model_resource_lease(exclusive=False):
-        return _chat_unlocked(
-            messages,
-            model=model,
-            format=format,
-            num_ctx=num_ctx,
-            num_predict=num_predict,
-            keep_alive=keep_alive,
-            read_timeout_ms=read_timeout_ms,
-            max_output_chars=max_output_chars,
-            temperature=temperature,
-            seed=seed,
-            think=think,
-            return_metadata=return_metadata,
-        )
+        with model_activity(model=model, operation="chat"):
+            return _chat_unlocked(
+                messages,
+                model=model,
+                format=format,
+                num_ctx=num_ctx,
+                num_predict=num_predict,
+                keep_alive=keep_alive,
+                read_timeout_ms=read_timeout_ms,
+                max_output_chars=max_output_chars,
+                temperature=temperature,
+                seed=seed,
+                think=think,
+                return_metadata=return_metadata,
+            )
 
 
 EMBED_MODEL = DEFAULT_EMBEDDING_MODEL
@@ -1662,23 +1769,31 @@ def embed(
         if isinstance(read_timeout_ms, int)
         else 120.0
     )
+    selected_model = model or embedding_model()
     with model_resource_lease(exclusive=False):
-        resp = _client().post(
-            "/api/embed",
-            json={"model": model or embedding_model(), "input": texts},
-            timeout=httpx.Timeout(
-                connect=min(10.0, timeout_seconds),
-                read=timeout_seconds,
-                write=min(10.0, timeout_seconds),
-                pool=min(10.0, timeout_seconds),
-            ),
-        )
-        resp.raise_for_status()
-        body = resp.json()
-        embeddings = body.get("embeddings") if isinstance(body, Mapping) else None
-        if not isinstance(embeddings, list):
-            raise RuntimeError("Ollama embed response is missing embeddings")
-        return cast(list[list[float]], embeddings)
+        with model_activity(
+            model=selected_model,
+            operation="search",
+            pipeline="recall",
+        ):
+            resp = _client().post(
+                "/api/embed",
+                json={"model": selected_model, "input": texts},
+                timeout=httpx.Timeout(
+                    connect=min(10.0, timeout_seconds),
+                    read=timeout_seconds,
+                    write=min(10.0, timeout_seconds),
+                    pool=min(10.0, timeout_seconds),
+                ),
+            )
+            resp.raise_for_status()
+            body = resp.json()
+            embeddings = (
+                body.get("embeddings") if isinstance(body, Mapping) else None
+            )
+            if not isinstance(embeddings, list):
+                raise RuntimeError("Ollama embed response is missing embeddings")
+            return cast(list[list[float]], embeddings)
 
 
 def unload_model() -> None:

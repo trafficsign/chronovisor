@@ -94,6 +94,8 @@ SELF_HEAL_FAILED_STATUSES = {
 }
 FRONTIER_ACTIVITY_STALE_SECONDS = 6 * 60 * 60
 LOCAL_CONSENSUS_ACTIVITY_STALE_SECONDS = 60 * 60
+MODEL_ACTIVITY_STALE_SECONDS = 6 * 60 * 60
+MODEL_ACTIVITY_VISIBLE_SECONDS = 1.25
 ACTIVE_BATCH_STAGES = {
     "batch",
     "raw",
@@ -117,6 +119,8 @@ DASHBOARD_MATERIALIZED_SCHEMA = "chronovisor.ops.dashboard-component.v1"
 DASHBOARD_COMPONENT_AUDIT_SECONDS = 300.0
 DASHBOARD_HEALTH_AUDIT_SECONDS = 60.0
 DASHBOARD_LOCAL_CONSENSUS_AUDIT_SECONDS = 300.0
+PROCESSING_ACTIVITY_POLL_SECONDS = 0.25
+PROCESSING_ACTIVITY_HEARTBEAT_SECONDS = 10.0
 _PROCESS_IDENTITY_MATCH = "match"
 _PROCESS_IDENTITY_MISMATCH = "mismatch"
 _PROCESS_IDENTITY_UNAVAILABLE = "unavailable"
@@ -1800,6 +1804,433 @@ def _activity_age_seconds(started_raw: object) -> float | None:
     return max(0.0, (now - started).total_seconds())
 
 
+def _local_consensus_activities() -> list[dict[str, Any]]:
+    """Read only live redacted markers, without scanning consensus history."""
+
+    active_dir = CHRONOVISOR_ROOT / "runtime" / "local-consensus" / "active"
+    activities: list[dict[str, Any]] = []
+    if active_dir.exists():
+        for path in sorted(active_dir.glob("*.json")):
+            row = _read_json_file(path)
+            pid = row.get("pid") if row else None
+            age_seconds = _activity_age_seconds(row.get("started_at")) if row else None
+            stale = (
+                not row
+                or not _job_process_identity_matches(pid, row.get("started_at"))
+                or age_seconds is None
+                or age_seconds > LOCAL_CONSENSUS_ACTIVITY_STALE_SECONDS
+            )
+            if stale:
+                with contextlib.suppress(OSError):
+                    path.unlink(missing_ok=True)
+                continue
+            activities.append(
+                {
+                    "request_sha256": row.get("request_sha256"),
+                    "role": row.get("role"),
+                    "model": row.get("model"),
+                    "phase": row.get("phase"),
+                    "attempt": row.get("attempt"),
+                    "started_at": row.get("started_at"),
+                    "updated_at": row.get("updated_at"),
+                    "pid": pid,
+                    "thread_id": row.get("thread_id"),
+                    "elapsed_seconds": age_seconds,
+                }
+            )
+    activities.sort(key=lambda row: str(row.get("started_at") or ""))
+    return activities
+
+
+def _model_activities() -> list[dict[str, Any]]:
+    """Read direct Ollama calls that do not have a consensus marker."""
+
+    root = CHRONOVISOR_ROOT / "runtime" / "model-activity"
+    active_dir = root / "active"
+    activities: list[dict[str, Any]] = []
+    if active_dir.exists():
+        for path in sorted(active_dir.glob("*.json")):
+            row = _read_json_file(path)
+            pid = row.get("pid") if row else None
+            age_seconds = _activity_age_seconds(row.get("started_at")) if row else None
+            stale = (
+                not row
+                or row.get("schema_version") != 1
+                or not _job_process_identity_matches(pid, row.get("started_at"))
+                or age_seconds is None
+                or age_seconds > MODEL_ACTIVITY_STALE_SECONDS
+            )
+            if stale:
+                with contextlib.suppress(OSError):
+                    path.unlink(missing_ok=True)
+                continue
+            activities.append(
+                {
+                    "activity_id": row.get("activity_id"),
+                    "pipeline": row.get("pipeline"),
+                    "component": row.get("component"),
+                    "caller": row.get("caller"),
+                    "operation": row.get("operation"),
+                    "model": row.get("model"),
+                    "started_at": row.get("started_at"),
+                    "updated_at": row.get("updated_at"),
+                    "pid": pid,
+                    "thread_id": row.get("thread_id"),
+                    "elapsed_seconds": age_seconds,
+                    "recent": False,
+                }
+            )
+    recent_dir = root / "recent"
+    if recent_dir.exists():
+        for path in sorted(recent_dir.glob("*.json")):
+            row = _read_json_file(path)
+            finished_age = (
+                _activity_age_seconds(row.get("finished_at")) if row else None
+            )
+            if (
+                not row
+                or row.get("schema_version") != 1
+                or finished_age is None
+                or finished_age > MODEL_ACTIVITY_VISIBLE_SECONDS
+            ):
+                continue
+            activities.append(
+                {
+                    "activity_id": row.get("activity_id"),
+                    "pipeline": row.get("pipeline"),
+                    "component": row.get("component"),
+                    "caller": row.get("caller"),
+                    "operation": row.get("operation"),
+                    "model": row.get("model"),
+                    "started_at": row.get("started_at"),
+                    "updated_at": row.get("updated_at"),
+                    "finished_at": row.get("finished_at"),
+                    "pid": row.get("pid"),
+                    "thread_id": row.get("thread_id"),
+                    "elapsed_seconds": _activity_age_seconds(row.get("started_at")),
+                    "recent": True,
+                }
+            )
+    activities.sort(key=lambda row: str(row.get("started_at") or ""))
+    return activities
+
+
+_PROCESSING_LANES: tuple[tuple[str, str, tuple[tuple[str, str], ...]], ...] = (
+    (
+        "ingest",
+        "Ingest",
+        (
+            ("raw", "Raw"),
+            ("triage", "Triage"),
+            ("generate", "Generate"),
+            ("consensus", "Consensus"),
+            ("apply", "Apply"),
+        ),
+    ),
+    (
+        "recall",
+        "Recall",
+        (
+            ("search", "Search"),
+            ("rerank", "Rerank"),
+            ("primary", "Primary"),
+            ("challenger", "Challenger"),
+            ("tie_break", "Tie-break"),
+            ("commit", "Commit"),
+        ),
+    ),
+    (
+        "audit",
+        "Audit",
+        (
+            ("select", "Select"),
+            ("inspect", "Inspect"),
+            ("consensus", "Consensus"),
+            ("report", "Report"),
+        ),
+    ),
+    (
+        "improve",
+        "Improve",
+        (
+            ("discover", "Discover"),
+            ("generate", "Generate"),
+            ("verify", "Verify"),
+            ("apply", "Apply"),
+        ),
+    ),
+    (
+        "repair",
+        "Repair",
+        (
+            ("detect", "Detect"),
+            ("local_fix", "Local fix"),
+            ("verify", "Verify"),
+            ("escalate", "Escalate"),
+        ),
+    ),
+)
+
+
+def _processing_pipeline_for_role(role: object) -> str:
+    normalized = str(role or "").casefold()
+    if normalized.startswith("recall"):
+        return "recall"
+    if normalized.startswith("ingest"):
+        return "ingest"
+    if normalized.startswith(("model_eval", "autonomy", "orphan_link")):
+        return "improve"
+    if "repair" in normalized:
+        return "repair"
+    return "audit"
+
+
+def _processing_consensus_step(pipeline: str, role: object, phase: object) -> str:
+    normalized_role = str(role or "").casefold()
+    normalized_phase = str(phase or "trigger").casefold()
+    if pipeline == "recall":
+        if normalized_role.endswith(":tie_break"):
+            return "tie_break"
+        if normalized_role.endswith(":challenger"):
+            return "challenger"
+        return "primary"
+    if pipeline == "ingest":
+        return "consensus"
+    if pipeline == "improve":
+        return "verify" if normalized_phase in {"validate", "vote"} else "generate"
+    if pipeline == "repair":
+        return "verify" if normalized_phase in {"validate", "vote"} else "local_fix"
+    return "consensus" if normalized_phase in {"validate", "vote"} else "inspect"
+
+
+def _processing_model_step(pipeline: str, operation: object) -> str:
+    if pipeline == "recall":
+        if operation == "rerank":
+            return "rerank"
+        if operation == "search":
+            return "search"
+        return "primary"
+    if pipeline == "ingest":
+        return "generate"
+    if pipeline == "improve":
+        return "generate"
+    if pipeline == "repair":
+        return "local_fix"
+    return "inspect"
+
+
+def _processing_component_label(component: object) -> str:
+    value = str(component or "model worker").rsplit(".", 1)[-1]
+    for suffix in ("_worker", "_runtime"):
+        if value.endswith(suffix):
+            value = value[: -len(suffix)]
+    return value.replace("_", " ").strip().title() or "Model Worker"
+
+
+def _processing_step_rows(
+    definitions: tuple[tuple[str, str], ...], current_step: str | None
+) -> list[dict[str, str]]:
+    keys = [key for key, _label in definitions]
+    active_index = keys.index(current_step) if current_step in keys else -1
+    return [
+        {
+            "key": key,
+            "label": label,
+            "status": (
+                "done"
+                if active_index >= 0 and index < active_index
+                else "active"
+                if index == active_index
+                else "pending"
+            ),
+        }
+        for index, (key, label) in enumerate(definitions)
+    ]
+
+
+def _processing_activity_snapshot() -> dict[str, Any]:
+    """Return a cheap live projection for the dashboard processing lanes."""
+
+    cached_status = runtime_status.read_status()
+    pending_value = cached_status.get("pending")
+    pending = (
+        int(pending_value)
+        if isinstance(pending_value, int) and not isinstance(pending_value, bool)
+        else 0
+    )
+    status = _canonicalize_runtime_status(
+        cached_status,
+        orchestrator._load_state(),
+        pending=max(0, pending),
+    )
+    _mark_batch_activity(status)
+    activities = _local_consensus_activities()
+    model_activities = _model_activities()
+    frontier_reviews = _frontier_activity_snapshot()
+    frontier_repair = _frontier_repair_snapshot(limit=8)
+
+    active_by_lane: dict[str, dict[str, Any]] = {}
+
+    llm = status.get("llm") if isinstance(status.get("llm"), dict) else {}
+    batch = status.get("batch") if isinstance(status.get("batch"), dict) else {}
+    ingest_active = bool(
+        status.get("current_job_id")
+        or status.get("current_raw")
+        or llm.get("active") is True
+        or batch.get("active") is True
+    )
+    if ingest_active:
+        raw_stage = str(status.get("stage") or status.get("current_op") or "raw")
+        stage_aliases = {
+            "batch": "raw",
+            "raw": "raw",
+            "triage": "triage",
+            "generate": "generate",
+            "local-regenerate": "generate",
+            "frontier-regenerate": "generate",
+            "authorization": "consensus",
+            "local-consensus-review": "consensus",
+            "frontier-review": "consensus",
+            "locked": "consensus",
+            "apply": "apply",
+        }
+        active_by_lane["ingest"] = {
+            "current_step": stage_aliases.get(raw_stage, "raw"),
+            "model": str(llm.get("model") or ingest_model()),
+            "role": str(status.get("current_op") or raw_stage),
+            "started_at": llm.get("started_at") or status.get("updated_at"),
+            "updated_at": llm.get("updated_at") or status.get("updated_at"),
+            "work_item": status.get("current_raw") or status.get("current_job_id"),
+            "active_jobs": 1,
+        }
+
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for activity in activities:
+        grouped.setdefault(
+            _processing_pipeline_for_role(activity.get("role")), []
+        ).append(activity)
+    for pipeline, rows in grouped.items():
+        latest = rows[-1]
+        current_step = _processing_consensus_step(
+            pipeline,
+            latest.get("role"),
+            latest.get("phase"),
+        )
+        active_by_lane[pipeline] = {
+            "current_step": current_step,
+            "model": latest.get("model"),
+            "role": latest.get("role"),
+            "phase": latest.get("phase"),
+            "started_at": latest.get("started_at"),
+            "updated_at": latest.get("updated_at"),
+            "work_item": latest.get("request_sha256"),
+            "active_jobs": len(rows),
+        }
+
+    consensus_calls = {
+        (activity.get("pid"), activity.get("thread_id"), activity.get("model"))
+        for activity in activities
+    }
+    legacy_consensus_calls = {
+        (activity.get("pid"), activity.get("model"))
+        for activity in activities
+        if activity.get("thread_id") is None
+    }
+    direct_grouped: dict[str, list[dict[str, Any]]] = {}
+    for activity in model_activities:
+        if activity.get("component") == "chronovisor.decision.local_structured":
+            continue
+        exact_call = (
+            activity.get("pid"),
+            activity.get("thread_id"),
+            activity.get("model"),
+        )
+        legacy_call = (activity.get("pid"), activity.get("model"))
+        if exact_call in consensus_calls or legacy_call in legacy_consensus_calls:
+            continue
+        pipeline = str(activity.get("pipeline") or "audit")
+        if pipeline not in {key for key, _label, _steps in _PROCESSING_LANES}:
+            pipeline = "audit"
+        direct_grouped.setdefault(pipeline, []).append(activity)
+    for pipeline, rows in direct_grouped.items():
+        if pipeline in grouped:
+            continue
+        live_rows = [row for row in rows if not row.get("recent")]
+        if pipeline in active_by_lane and not live_rows:
+            continue
+        visible_rows = live_rows or rows
+        latest = visible_rows[-1]
+        active_by_lane[pipeline] = {
+            "current_step": _processing_model_step(
+                pipeline, latest.get("operation")
+            ),
+            "model": latest.get("model"),
+            "role": _processing_component_label(latest.get("component")),
+            "phase": latest.get("caller") or latest.get("operation"),
+            "started_at": latest.get("started_at"),
+            "updated_at": latest.get("updated_at"),
+            "work_item": latest.get("activity_id"),
+            "active_jobs": len(visible_rows),
+            "recent": not live_rows,
+        }
+
+    repair_active = bool(
+        frontier_reviews.get("active") or frontier_repair.get("active")
+    )
+    if repair_active:
+        repair_row = (
+            frontier_reviews.get("latest")
+            or frontier_repair.get("active_incident")
+            or {}
+        )
+        repair_status = str(repair_row.get("status") or repair_row.get("phase") or "")
+        repair_step = "escalate" if "frontier" in repair_status else "local_fix"
+        active_by_lane["repair"] = {
+            "current_step": repair_step,
+            "model": repair_row.get("model"),
+            "role": repair_row.get("kind") or repair_row.get("component") or "repair",
+            "phase": repair_status or None,
+            "started_at": repair_row.get("started_at") or repair_row.get("reserved_at"),
+            "updated_at": repair_row.get("updated_at") or repair_row.get("started_at"),
+            "work_item": repair_row.get("incident_id"),
+            "active_jobs": int(frontier_reviews.get("count") or 1),
+        }
+
+    lanes: list[dict[str, Any]] = []
+    for key, label, steps in _PROCESSING_LANES:
+        active = active_by_lane.get(key)
+        current_step = str((active or {}).get("current_step") or "") or None
+        lanes.append(
+            {
+                "key": key,
+                "label": label,
+                "state": "active" if active else "idle",
+                "current_step": current_step,
+                "model": (active or {}).get("model"),
+                "role": (active or {}).get("role"),
+                "phase": (active or {}).get("phase"),
+                "started_at": (active or {}).get("started_at"),
+                "updated_at": (active or {}).get("updated_at"),
+                "work_item": (active or {}).get("work_item"),
+                "active_jobs": int((active or {}).get("active_jobs") or 0),
+                "recent": bool((active or {}).get("recent")),
+                "steps": _processing_step_rows(steps, current_step),
+            }
+        )
+
+    stable = {
+        "active_count": sum(1 for row in lanes if row["state"] == "active"),
+        "lanes": lanes,
+    }
+    revision = hashlib.sha256(_canonical_json_bytes(stable)).hexdigest()
+    return {
+        "schema_version": 1,
+        "generated_at": datetime.now().astimezone().isoformat(timespec="milliseconds"),
+        "revision": revision,
+        **stable,
+    }
+
+
 def _empty_local_consensus_summary() -> dict[str, Any]:
     sessions = {
         "total": 0,
@@ -2383,36 +2814,7 @@ def _local_consensus_snapshot(limit: int = 40) -> dict[str, Any]:
     """Return live local review truth plus a redacted bounded audit tail."""
 
     root = CHRONOVISOR_ROOT / "runtime" / "local-consensus"
-    active_dir = root / "active"
-    activities: list[dict[str, Any]] = []
-    if active_dir.exists():
-        for path in sorted(active_dir.glob("*.json")):
-            row = _read_json_file(path)
-            pid = row.get("pid") if row else None
-            age_seconds = _activity_age_seconds(row.get("started_at")) if row else None
-            stale = (
-                not row
-                or not _job_process_identity_matches(pid, row.get("started_at"))
-                or age_seconds is None
-                or age_seconds > LOCAL_CONSENSUS_ACTIVITY_STALE_SECONDS
-            )
-            if stale:
-                with contextlib.suppress(OSError):
-                    path.unlink(missing_ok=True)
-                continue
-            safe = {
-                "request_sha256": row.get("request_sha256"),
-                "role": row.get("role"),
-                "model": row.get("model"),
-                "phase": row.get("phase"),
-                "attempt": row.get("attempt"),
-                "started_at": row.get("started_at"),
-                "updated_at": row.get("updated_at"),
-                "pid": pid,
-                "elapsed_seconds": age_seconds,
-            }
-            activities.append(safe)
-    activities.sort(key=lambda row: str(row.get("started_at") or ""))
+    activities = _local_consensus_activities()
 
     summary = _read_json_file(root / "summary.json") or _empty_local_consensus_summary()
     history: list[dict[str, Any]] = []
@@ -4491,6 +4893,45 @@ class DashboardHandler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionError, OSError):
             return
 
+    def _processing_activity_stream_response(self) -> None:
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache, no-transform")
+        self.send_header("Connection", "keep-alive")
+        self.send_header("X-Accel-Buffering", "no")
+        _send_security_headers(self)
+        self.end_headers()
+        self.close_connection = True
+
+        last_revision = ""
+        last_heartbeat = 0.0
+        try:
+            self.wfile.write(b"retry: 1000\n\n")
+            self.wfile.flush()
+            while True:
+                snapshot = _processing_activity_snapshot()
+                revision = str(snapshot.get("revision") or "")
+                now = time.monotonic()
+                if revision != last_revision:
+                    encoded = json.dumps(
+                        snapshot,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                    self.wfile.write(f"id: {revision}\n".encode("ascii"))
+                    self.wfile.write(b"event: activity\n")
+                    self.wfile.write(b"data: " + encoded + b"\n\n")
+                    self.wfile.flush()
+                    last_revision = revision
+                    last_heartbeat = now
+                elif now - last_heartbeat >= PROCESSING_ACTIVITY_HEARTBEAT_SECONDS:
+                    self.wfile.write(b": heartbeat\n\n")
+                    self.wfile.flush()
+                    last_heartbeat = now
+                time.sleep(PROCESSING_ACTIVITY_POLL_SECONDS)
+        except (BrokenPipeError, ConnectionError, OSError):
+            return
+
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
         path = parsed.path
@@ -4521,6 +4962,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
                         "local_consensus": _local_consensus_snapshot()
                     },
                 )
+            elif path == "/api/activity":
+                _json_response(self, _processing_activity_snapshot())
+            elif path == "/api/activity-stream":
+                self._processing_activity_stream_response()
             elif path == "/api/frontier-repair":
                 _json_response(
                     self,

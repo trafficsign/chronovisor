@@ -273,6 +273,168 @@ def test_local_consensus_snapshot_removes_dead_markers_and_exposes_redacted_metr
     assert not (active_dir / "stale.json").exists()
 
 
+def test_processing_activity_projects_simultaneous_llm_workflows(monkeypatch) -> None:
+    status = {
+        "state": "running",
+        "stage": "apply",
+        "current_job_id": "ingest-job",
+        "current_raw": "raw.md",
+        "batch": {"active": True},
+        "llm": {
+            "active": True,
+            "model": "ingest:test",
+            "started_at": "2026-08-01T00:00:00+09:00",
+            "updated_at": "2026-08-01T00:00:01+09:00",
+        },
+    }
+    monkeypatch.setattr(runtime_status, "read_status", lambda: dict(status))
+    monkeypatch.setattr(orchestrator, "_load_state", lambda: {})
+    monkeypatch.setattr(
+        dashboard,
+        "_canonicalize_runtime_status",
+        lambda value, _orch, *, pending: dict(value),
+    )
+    monkeypatch.setattr(
+        dashboard,
+        "_local_consensus_activities",
+        lambda: [
+            {
+                "request_sha256": "a" * 64,
+                "role": "recall_auto_apply:challenger",
+                "model": "recall:test",
+                "phase": "generate",
+                "started_at": "2026-08-01T00:00:02+09:00",
+                "updated_at": "2026-08-01T00:00:03+09:00",
+                "pid": 42,
+                "thread_id": 84,
+            },
+            {
+                "request_sha256": "b" * 64,
+                "role": "model_eval:primary",
+                "model": "eval:test",
+                "phase": "validate",
+                "started_at": "2026-08-01T00:00:04+09:00",
+                "updated_at": "2026-08-01T00:00:05+09:00",
+            },
+        ],
+    )
+    monkeypatch.setattr(
+        dashboard,
+        "_model_activities",
+        lambda: [
+            {
+                "activity_id": "same-call",
+                "pipeline": "audit",
+                "component": "chronovisor.decision.local_structured",
+                "caller": "default_transport",
+                "operation": "chat",
+                "model": "recall:test",
+                "started_at": "2026-08-01T00:00:02+09:00",
+                "updated_at": "2026-08-01T00:00:03+09:00",
+                "pid": 42,
+                "thread_id": 84,
+            },
+            {
+                "activity_id": "recent-ingest-call",
+                "pipeline": "ingest",
+                "component": "chronovisor.ingest.ingest_generation",
+                "caller": "generate_page",
+                "operation": "generate",
+                "model": "stale-ingest:test",
+                "started_at": "2026-08-01T00:00:01+09:00",
+                "updated_at": "2026-08-01T00:00:02+09:00",
+                "recent": True,
+            },
+        ],
+    )
+    monkeypatch.setattr(
+        dashboard,
+        "_frontier_activity_snapshot",
+        lambda: {"active": False, "count": 0, "latest": None},
+    )
+    monkeypatch.setattr(
+        dashboard,
+        "_frontier_repair_snapshot",
+        lambda limit=40: {"active": False, "active_incident": None},
+    )
+
+    first = dashboard._processing_activity_snapshot()
+    second = dashboard._processing_activity_snapshot()
+    by_key = {lane["key"]: lane for lane in first["lanes"]}
+
+    assert first["active_count"] == 3
+    assert first["revision"] == second["revision"]
+    assert by_key["ingest"]["current_step"] == "apply"
+    assert by_key["ingest"]["model"] == "ingest:test"
+    assert by_key["recall"]["current_step"] == "challenger"
+    assert by_key["recall"]["role"] == "recall_auto_apply:challenger"
+    assert by_key["improve"]["current_step"] == "verify"
+    assert next(
+        step for step in by_key["recall"]["steps"] if step["key"] == "challenger"
+    )["status"] == "active"
+    assert by_key["audit"]["state"] == "idle"
+    assert by_key["repair"]["state"] == "idle"
+
+
+def test_processing_activity_projects_direct_ollama_calls(monkeypatch) -> None:
+    monkeypatch.setattr(runtime_status, "read_status", lambda: {})
+    monkeypatch.setattr(orchestrator, "_load_state", lambda: {})
+    monkeypatch.setattr(
+        dashboard,
+        "_canonicalize_runtime_status",
+        lambda value, _orch, *, pending: dict(value),
+    )
+    monkeypatch.setattr(dashboard, "_local_consensus_activities", lambda: [])
+    monkeypatch.setattr(
+        dashboard,
+        "_model_activities",
+        lambda: [
+            {
+                "activity_id": "activity-1",
+                "pipeline": "recall",
+                "component": "chronovisor.recall.recall_processor",
+                "caller": "judge_candidates",
+                "operation": "chat",
+                "model": "recall:test",
+                "started_at": "2026-08-01T00:00:00+09:00",
+                "updated_at": "2026-08-01T00:00:00+09:00",
+                "pid": 42,
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        dashboard,
+        "_frontier_activity_snapshot",
+        lambda: {"active": False, "count": 0, "latest": None},
+    )
+    monkeypatch.setattr(
+        dashboard,
+        "_frontier_repair_snapshot",
+        lambda limit=40: {"active": False, "active_incident": None},
+    )
+
+    snapshot = dashboard._processing_activity_snapshot()
+    by_key = {lane["key"]: lane for lane in snapshot["lanes"]}
+
+    assert snapshot["active_count"] == 1
+    assert by_key["recall"]["current_step"] == "primary"
+    assert by_key["recall"]["role"] == "Recall Processor"
+    assert by_key["recall"]["phase"] == "judge_candidates"
+    assert by_key["recall"]["model"] == "recall:test"
+
+
+def test_processing_role_projection_covers_dashboard_lanes() -> None:
+    assert dashboard._processing_pipeline_for_role("recall_judge") == "recall"
+    assert dashboard._processing_pipeline_for_role("ingest_reconciliation") == "ingest"
+    assert dashboard._processing_pipeline_for_role("model_eval:primary") == "improve"
+    assert dashboard._processing_pipeline_for_role("orphan_link:challenger") == "improve"
+    assert dashboard._processing_pipeline_for_role("content_correction_classification") == "audit"
+    assert dashboard._processing_pipeline_for_role("local_repair") == "repair"
+    assert dashboard._processing_model_step("recall", "search") == "search"
+    assert dashboard._processing_model_step("recall", "rerank") == "rerank"
+    assert dashboard._processing_model_step("recall", "chat") == "primary"
+
+
 def test_decision_trace_projects_live_phase_and_completed_vote(monkeypatch) -> None:
     monkeypatch.setattr(
         dashboard,
@@ -765,6 +927,10 @@ def test_dashboard_static_labels_routine_review_as_local_consensus() -> None:
     assert 'id="decision-transition-state"' in page
     assert 'id="decision-transition-feed"' in page
     assert 'id="lan-share-button"' in page
+    assert "Work Remaining" in page
+    assert 'id="processing-panel"' in page
+    assert 'id="processing-lanes"' in page
+    assert 'id="processing-connection"' in page
     assert "<span>Page changes</span>" in page
     assert "${pageChanges} changes" in app
     assert "${pages} pages" not in app
@@ -789,8 +955,16 @@ def test_dashboard_static_labels_routine_review_as_local_consensus() -> None:
     assert "const decisionTracePlayback" in app
     assert "const ACTIVE_DECISION_REFRESH_DELAY_MS = 800" in app
     assert 'fetch("/api/local-consensus"' in app
+    assert 'new EventSource("/api/activity-stream")' in app
+    assert 'fetch("/api/activity"' in app
+    assert "function renderProcessingActivity" in app
+    assert "ready} ready · ${semanticDeferred} semantic held" in app
     assert "No synthetic progress" in app
     assert ".decision-trace-panel" in style
+    assert ".processing-lane.active" in style
+    assert "processing-electric-pulse" in style
+    assert 'lane.recent ? "PULSE" : "ACTIVE"' in app
+    assert 'details.push("just completed")' in app
 
 
 def test_dashboard_static_layout_aligns_peer_panels_and_contains_event_badges() -> None:

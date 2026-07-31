@@ -9,6 +9,9 @@ const els = {
   batchSub: document.getElementById("batch-sub"),
   ollama: document.getElementById("ollama-value"),
   ollamaSub: document.getElementById("ollama-sub"),
+  processingPanel: document.getElementById("processing-panel"),
+  processingConnection: document.getElementById("processing-connection"),
+  processingLanes: document.getElementById("processing-lanes"),
   lanShareButton: document.getElementById("lan-share-button"),
   workOverview: document.getElementById("work-overview"),
   workSummary: document.getElementById("work-summary"),
@@ -377,6 +380,120 @@ function setState(state) {
   if (normalized === "running") els.statePill.classList.add("running");
   if (normalized === "error" || normalized === "blocked") els.statePill.classList.add("error");
   els.stateText.textContent = normalized;
+}
+
+const latestProcessingLanes = new Map();
+
+function setProcessingConnection(state, label) {
+  els.processingConnection.dataset.state = state;
+  els.processingConnection.querySelector("strong").textContent = label;
+}
+
+function reconcileProcessingLaneSteps(track, steps) {
+  const existing = new Map(
+    [...track.querySelectorAll(".processing-step")].map((node) => [
+      node.dataset.processingStep,
+      node,
+    ])
+  );
+  const rows = Array.isArray(steps) ? steps : [];
+  track.style.setProperty("--processing-step-count", String(Math.max(1, rows.length)));
+  rows.forEach((step) => {
+    const key = fmt(step.key, "step");
+    const node = existing.get(key) || document.createElement("span");
+    node.dataset.processingStep = key;
+    node.className = `processing-step ${fmt(step.status, "pending")}`;
+    let label = node.querySelector("span");
+    if (!label) {
+      label = document.createElement("span");
+      node.appendChild(label);
+    }
+    label.textContent = fmt(step.label, key);
+    track.appendChild(node);
+    existing.delete(key);
+  });
+  existing.forEach((node) => node.remove());
+}
+
+function processingElapsedText(lane, now = Date.now()) {
+  const started = parseMs(lane?.started_at);
+  if (started === null) return "--";
+  const finished = lane?.recent ? parseMs(lane?.updated_at) : null;
+  return preciseDuration(Math.max(0, ((finished ?? now) - started) / 1000));
+}
+
+function processingLaneDetail(lane, now = Date.now()) {
+  if (lane.state !== "active") return "waiting for work";
+  const role = fmt(lane.role || lane.phase || lane.current_step, "work");
+  const details = [lane.model, role, processingElapsedText(lane, now)].filter(Boolean);
+  if (lane.recent) details.push("just completed");
+  if (intValue(lane.active_jobs) > 1) details.push(`${intValue(lane.active_jobs)} jobs`);
+  return details.join(" · ");
+}
+
+function renderProcessingActivity(activity) {
+  const lanes = Array.isArray(activity?.lanes) ? activity.lanes : [];
+  const existing = new Map(
+    [...els.processingLanes.querySelectorAll(".processing-lane")].map((node) => [
+      node.dataset.processingLane,
+      node,
+    ])
+  );
+  lanes.forEach((lane) => {
+    const key = fmt(lane.key, "lane");
+    latestProcessingLanes.set(key, lane);
+    const row = existing.get(key) || document.createElement("section");
+    row.dataset.processingLane = key;
+    row.className = `processing-lane ${lane.state === "active" ? "active" : "idle"}`;
+
+    let label = row.querySelector(".processing-lane-label");
+    let track = row.querySelector(".processing-track");
+    let meta = row.querySelector(".processing-lane-meta");
+    if (!label) {
+      label = document.createElement("strong");
+      label.className = "processing-lane-label";
+      row.appendChild(label);
+    }
+    if (!track) {
+      track = document.createElement("div");
+      track.className = "processing-track";
+      row.appendChild(track);
+    }
+    if (!meta) {
+      meta = document.createElement("div");
+      meta.className = "processing-lane-meta";
+      meta.append(document.createElement("strong"), document.createElement("span"));
+      row.appendChild(meta);
+    }
+
+    label.textContent = fmt(lane.label, key);
+    reconcileProcessingLaneSteps(track, lane.steps);
+    meta.querySelector("strong").textContent = lane.state === "active"
+      ? lane.recent ? "PULSE" : "ACTIVE"
+      : "IDLE";
+    meta.querySelector("span").textContent = processingLaneDetail(lane);
+    meta.title = lane.work_item ? `work ${String(lane.work_item).slice(0, 20)}` : "";
+    els.processingLanes.appendChild(row);
+    existing.delete(key);
+  });
+  existing.forEach((node, key) => {
+    latestProcessingLanes.delete(key);
+    node.remove();
+  });
+  els.processingPanel.dataset.activeCount = String(intValue(activity?.active_count));
+  document.body.dataset.processingRevision = fmt(activity?.revision, "");
+}
+
+function updateProcessingElapsed() {
+  const now = Date.now();
+  latestProcessingLanes.forEach((lane, key) => {
+    if (lane.state !== "active") return;
+    const row = [...els.processingLanes.querySelectorAll(".processing-lane")].find(
+      (node) => node.dataset.processingLane === key
+    );
+    const detail = row?.querySelector(".processing-lane-meta span");
+    if (detail) detail.textContent = processingLaneDetail(lane, now);
+  });
 }
 
 function setLlmSignalClass(kind) {
@@ -1514,12 +1631,6 @@ function drawBatchChart(canvas, rows, status) {
     );
   });
   ctx.restore();
-}
-
-function updateStageFlow(stage) {
-  document.querySelectorAll(".stage-node").forEach((node) => {
-    node.classList.toggle("active", node.dataset.stage === stage);
-  });
 }
 
 function renderEvents(events) {
@@ -2822,11 +2933,14 @@ function render(snapshot) {
   const model = models.find((item) => !String(item.name || item.model || "").includes("embed")) || models[0] || {};
 
   setState(status.state);
-  els.pending.textContent = fmt(status.pending);
+  const ready = intValue(status.pending);
   const semanticDeferred = intValue(status.semantic_deferred?.count);
-  els.pendingSub.textContent = semanticDeferred
-    ? `${semanticDeferred} semantic held · updated ${timeLabel(status.updated_at)}`
-    : `updated ${timeLabel(status.updated_at)}`;
+  const operationalDeferred = intValue(status.operational_deferred?.count);
+  const workRemaining = numeric(status.raw_outstanding)
+    ? Math.max(0, status.raw_outstanding)
+    : ready + semanticDeferred + operationalDeferred;
+  els.pending.textContent = fmt(workRemaining);
+  els.pendingSub.textContent = `${ready} ready · ${semanticDeferred} semantic held · ${operationalDeferred} operational held`;
   const stageValue = fmt(status.stage, "idle");
   els.stage.textContent = stageMetricLabel(stageValue);
   els.stage.title = stageValue;
@@ -2865,7 +2979,6 @@ function render(snapshot) {
   els.lastSuccess.textContent = status.last_success
     ? `${shortName(status.last_success.raw)} -> ${shortName(lastSuccessTargets(status.last_success) || "none")}`
     : "--";
-  updateStageFlow(status.stage);
   renderSelfHeal(snapshot.self_heal || {});
   renderRecall(snapshot.recall || {});
   renderRecallImprovement(snapshot.recall_improvement || {});
@@ -2890,9 +3003,12 @@ const ERROR_REFRESH_DELAY_MS = 5000;
 const DECISION_REFRESH_TIMEOUT_MS = 2500;
 const ACTIVE_DECISION_REFRESH_DELAY_MS = 800;
 const IDLE_DECISION_REFRESH_DELAY_MS = 2500;
+const PROCESSING_FALLBACK_DELAY_MS = 1000;
 let nextRefreshDelayMs = IDLE_REFRESH_DELAY_MS;
 let decisionRefreshInFlight = false;
 let nextDecisionRefreshDelayMs = IDLE_DECISION_REFRESH_DELAY_MS;
+let processingRefreshInFlight = false;
+let processingEventSource = null;
 
 async function refreshFast() {
   const controller = new AbortController();
@@ -3015,6 +3131,55 @@ async function refreshRecallFieldLoop() {
   }
 }
 
+async function refreshProcessingActivity() {
+  if (processingRefreshInFlight) return;
+  processingRefreshInFlight = true;
+  try {
+    const response = await fetch("/api/activity", { cache: "no-store" });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    renderProcessingActivity(await response.json());
+    const streamOpen = processingEventSource
+      && processingEventSource.readyState === EventSource.OPEN;
+    setProcessingConnection(
+      streamOpen ? "live" : "polling",
+      streamOpen ? "LIVE · ≤250MS" : "POLLING"
+    );
+  } catch {
+    setProcessingConnection("connecting", "RECONNECTING");
+  } finally {
+    processingRefreshInFlight = false;
+  }
+}
+
+function connectProcessingActivityStream() {
+  if (!("EventSource" in window)) {
+    setProcessingConnection("polling", "POLLING");
+    return;
+  }
+  processingEventSource = new EventSource("/api/activity-stream");
+  processingEventSource.addEventListener("activity", (event) => {
+    try {
+      renderProcessingActivity(JSON.parse(event.data));
+      setProcessingConnection("live", "LIVE · ≤250MS");
+    } catch {
+      setProcessingConnection("polling", "POLLING");
+    }
+  });
+  processingEventSource.onopen = () => {
+    setProcessingConnection("live", "LIVE · ≤250MS");
+  };
+  processingEventSource.onerror = () => {
+    setProcessingConnection("connecting", "RECONNECTING");
+  };
+}
+
+async function processingFallbackLoop() {
+  const streamOpen = processingEventSource
+    && processingEventSource.readyState === EventSource.OPEN;
+  if (!streamOpen) await refreshProcessingActivity();
+  window.setTimeout(processingFallbackLoop, PROCESSING_FALLBACK_DELAY_MS);
+}
+
 els.saveModeButtons.forEach((button) => {
   button.addEventListener("click", () => {
     saveHistoryMode = button.dataset.saveMode || "daily";
@@ -3068,4 +3233,8 @@ els.lanShareButton.addEventListener("click", copyLanLink);
 void refreshLoop();
 void decisionTraceRefreshLoop();
 void refreshRecallFieldLoop();
+void refreshProcessingActivity();
+connectProcessingActivityStream();
+void processingFallbackLoop();
+window.setInterval(updateProcessingElapsed, 1000);
 window.addEventListener("resize", refresh);
