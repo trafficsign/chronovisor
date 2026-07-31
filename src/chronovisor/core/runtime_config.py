@@ -339,7 +339,11 @@ def load_search_embedding_config(
         rollout = {}
 
     def text(
-        source: dict[str, Any], name: str, default: str, *, choices: set[str] | None = None
+        source: dict[str, Any],
+        name: str,
+        default: str,
+        *,
+        choices: set[str] | None = None,
     ) -> str:
         value = source.get(name)
         if not isinstance(value, str) or not value.strip():
@@ -922,9 +926,8 @@ def load_reranker_config(path: Path | str | None = None) -> RerankerConfig:
     model = reranker.get("model")
     backend = reranker.get("backend")
     device = reranker.get("device")
-    service_data = (
-        reranker.get("service") if isinstance(reranker.get("service"), dict) else {}
-    )
+    raw_service = reranker.get("service")
+    service_data: dict[str, Any] = raw_service if isinstance(raw_service, dict) else {}
     service_mode = str(service_data.get("mode") or "off").strip().lower()
     if service_mode not in {"off", "shadow", "canary", "on"}:
         service_mode = "off"

@@ -81,9 +81,10 @@ def measure_colbert(
 ) -> dict[str, Any]:
     """Build a separate real ColBERT index and evaluate manual/locked rows."""
 
-    if importlib.util.find_spec("colbert") is None or importlib.util.find_spec(
-        "faiss"
-    ) is None:
+    if (
+        importlib.util.find_spec("colbert") is None
+        or importlib.util.find_spec("faiss") is None
+    ):
         return {"status": "unavailable", "reason": "colbert_or_faiss_missing"}
     from colbert import Indexer, Searcher
     from colbert.infra import ColBERTConfig, Run, RunConfig
@@ -184,7 +185,9 @@ def measure_colbert(
                 elapsed = (time.perf_counter() - started) * 1_000
                 latencies.append(elapsed)
                 over_4s += elapsed > 4_000
-                results = [page_ids[int(pid)] for pid in pids if int(pid) < len(page_ids)]
+                results = [
+                    page_ids[int(pid)] for pid in pids if int(pid) < len(page_ids)
+                ]
                 if example.expected_pages:
                     positives += 1
                     hits += bool(set(example.expected_pages) & set(results[:5]))
@@ -262,10 +265,7 @@ def adoption_gate(
     else:
         if challenger["recall_at_5"] < baseline["recall_at_5"] - 0.01:
             failures.append("recall_regression")
-        if (
-            challenger["negative_hit_at_20"]
-            > baseline["negative_hit_at_20"]
-        ):
+        if challenger["negative_hit_at_20"] > baseline["negative_hit_at_20"]:
             failures.append("negative_hit_regression")
         if challenger["p95_ms"] >= baseline["p95_ms"]:
             failures.append("no_p95_win")
@@ -300,9 +300,7 @@ def environment_probe() -> dict[str, Any]:
         "platform": platform.platform(),
         "colbert_dependency": importlib.util.find_spec("colbert") is not None,
         "faiss_dependency": importlib.util.find_spec("faiss") is not None,
-        "coremltools_dependency": (
-            importlib.util.find_spec("coremltools") is not None
-        ),
+        "coremltools_dependency": (importlib.util.find_spec("coremltools") is not None),
         "ollama_executable": ollama or "",
         "ollama_version": ollama_version,
         "decoder_prefix_handle_api": False,
@@ -416,9 +414,7 @@ def run_report(
             challenger["measurement"] = measurement
             challenger["status"] = str(measurement.get("status") or "measured")
             challenger["reason"] = str(measurement.get("reason") or "")
-        gate_metrics = (
-            measurement if measurement.get("status") == "measured" else {}
-        )
+        gate_metrics = measurement if measurement.get("status") == "measured" else {}
         challenger["gate"] = adoption_gate(baseline, gate_metrics)
         challenger["adopted"] = challenger["gate"]["status"] == "passed"
     winners = [
@@ -462,9 +458,7 @@ def _baseline_from_artifact(path: Path) -> dict[str, float]:
     latency = metrics.get("latency_ms", {})
     return {
         "recall_at_5": float(metrics.get("recall_at_5") or 0.0),
-        "negative_hit_at_20": float(
-            metrics.get("negative_hit_rate_at_20") or 0.0
-        ),
+        "negative_hit_at_20": float(metrics.get("negative_hit_rate_at_20") or 0.0),
         "p95_ms": float(latency.get("p95") or 0.0),
         "max_ms": float(latency.get("max") or 0.0),
         "over_4s": float(1 if float(latency.get("max") or 0.0) > 4_000 else 0),
@@ -490,9 +484,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--output", type=Path, default=DEFAULT_ARTIFACT)
     parser.add_argument("--measure-colbert", action="store_true")
-    parser.add_argument(
-        "--checkpoint", default="colbert-ir/colbertv2.0"
-    )
+    parser.add_argument("--checkpoint", default="colbert-ir/colbertv2.0")
     parser.add_argument("--limit", type=int, default=94)
     parser.add_argument("--collection-limit", type=int, default=0)
     parser.add_argument("--worker-output", type=Path, help=argparse.SUPPRESS)
