@@ -963,6 +963,9 @@ def test_dashboard_static_labels_routine_review_as_local_consensus() -> None:
     assert ".decision-trace-panel" in style
     assert ".processing-lane.active" in style
     assert "processing-electric-pulse" in style
+    assert "grid-template-columns: repeat(6, minmax(0, 1fr));" in style
+    assert "--processing-step-count" not in app
+    assert "place-items: start;" in style
     assert 'lane.recent ? "PULSE" : "ACTIVE"' in app
     assert 'details.push("just completed")' in app
 

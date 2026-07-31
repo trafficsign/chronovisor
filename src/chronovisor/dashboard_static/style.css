@@ -443,7 +443,7 @@ h2 {
 
 .processing-track {
   display: grid;
-  grid-template-columns: repeat(var(--processing-step-count), minmax(0, 1fr));
+  grid-template-columns: repeat(6, minmax(0, 1fr));
   align-items: start;
   min-width: 0;
 }
@@ -452,13 +452,13 @@ h2 {
   position: relative;
   display: grid;
   grid-template-rows: 15px 14px;
-  place-items: center;
+  place-items: start;
   min-width: 0;
   color: var(--dim);
   font-family: var(--font-mono);
   font-size: 8.5px;
   letter-spacing: 0.035em;
-  text-align: center;
+  text-align: left;
   text-transform: uppercase;
 }
 
@@ -479,7 +479,7 @@ h2 {
   position: absolute;
   z-index: 1;
   top: 21px;
-  left: calc(50% + 5px);
+  left: 10px;
   width: calc(100% - 10px);
   height: 1px;
   background: var(--line-strong);

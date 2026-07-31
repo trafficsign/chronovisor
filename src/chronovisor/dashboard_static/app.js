@@ -397,7 +397,6 @@ function reconcileProcessingLaneSteps(track, steps) {
     ])
   );
   const rows = Array.isArray(steps) ? steps : [];
-  track.style.setProperty("--processing-step-count", String(Math.max(1, rows.length)));
   rows.forEach((step) => {
     const key = fmt(step.key, "step");
     const node = existing.get(key) || document.createElement("span");
