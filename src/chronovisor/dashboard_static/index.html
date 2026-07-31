@@ -54,9 +54,14 @@
 
     <section class="metrics-grid" aria-label="Primary metrics">
       <article class="metric-card">
-        <span class="metric-label">Work Remaining</span>
+        <span class="metric-label">Runnable Work</span>
         <strong id="pending-value">--</strong>
-        <small id="pending-sub">ready · semantic held · operational held</small>
+        <small id="pending-sub">Raw ready for processing</small>
+      </article>
+      <article class="metric-card metric-card-held">
+        <span class="metric-label">Held</span>
+        <strong id="held-value">--</strong>
+        <small id="held-sub">semantic · operational</small>
       </article>
       <article class="metric-card">
         <span class="metric-label">Stage</span>

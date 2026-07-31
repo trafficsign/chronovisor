@@ -927,7 +927,9 @@ def test_dashboard_static_labels_routine_review_as_local_consensus() -> None:
     assert 'id="decision-transition-state"' in page
     assert 'id="decision-transition-feed"' in page
     assert 'id="lan-share-button"' in page
-    assert "Work Remaining" in page
+    assert "Runnable Work" in page
+    assert 'id="held-value"' in page
+    assert 'id="held-sub"' in page
     assert 'id="processing-panel"' in page
     assert 'id="processing-lanes"' in page
     assert 'id="processing-connection"' in page
@@ -958,7 +960,10 @@ def test_dashboard_static_labels_routine_review_as_local_consensus() -> None:
     assert 'new EventSource("/api/activity-stream")' in app
     assert 'fetch("/api/activity"' in app
     assert "function renderProcessingActivity" in app
-    assert "ready} ready · ${semanticDeferred} semantic held" in app
+    assert "els.pending.textContent = fmt(ready);" in app
+    assert "els.held.textContent = fmt(held);" in app
+    assert "${semanticDeferred} semantic · ${operationalDeferred} operational" in app
+    assert "grid-template-columns: repeat(5, minmax(0, 1fr));" in style
     assert "No synthetic progress" in app
     assert ".decision-trace-panel" in style
     assert ".processing-lane.active" in style

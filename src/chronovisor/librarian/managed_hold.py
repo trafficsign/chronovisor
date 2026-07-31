@@ -314,6 +314,81 @@ class ManagedHoldStore:
                 self._write(state)
         return resolved
 
+    def resolve_superseded_scheduled(
+        self,
+        superseded: Mapping[str, Iterable[str]],
+        *,
+        now: datetime | None = None,
+    ) -> list[str]:
+        """Close scheduled holds replaced by a newer current failure packet."""
+
+        current = _utc(now)
+        resolved: list[str] = []
+        with file_lock(self.lock_path, exclusive=True):
+            state = self._load()
+            for identity, packet_paths in sorted(superseded.items()):
+                entry = state["entries"].get(identity)
+                if not isinstance(entry, dict) or entry.get("state") != "scheduled":
+                    continue
+                evidence_paths = sorted(
+                    {
+                        str(path)
+                        for path in packet_paths
+                        if isinstance(path, str) and path
+                    }
+                )
+                if not evidence_paths:
+                    continue
+                attempt = int(entry.get("attempts") or 0) + 1
+                token = hashlib.sha256(
+                    canonical_bytes(
+                        {
+                            "identity": identity,
+                            "owner": "current-failure-supersession",
+                            "attempt": attempt,
+                            "resolved_at": _iso(current),
+                            "superseding_packets": evidence_paths,
+                        }
+                    )
+                ).hexdigest()
+                history = entry.get("transition_history")
+                history = list(history) if isinstance(history, list) else []
+                history.extend(
+                    [
+                        {
+                            "from": "scheduled",
+                            "to": "leased",
+                            "at": _iso(current),
+                            "lease_token_sha256": hashlib.sha256(
+                                token.encode("utf-8")
+                            ).hexdigest(),
+                        },
+                        {
+                            "from": "leased",
+                            "to": "resolved",
+                            "at": _iso(current),
+                            "evidence": "superseded_by_current_failure_packet",
+                            "superseding_packets": evidence_paths,
+                        },
+                    ]
+                )
+                entry.update(
+                    {
+                        "state": "resolved",
+                        "attempts": attempt,
+                        "lease_owner": None,
+                        "lease_token": None,
+                        "lease_expires_at": None,
+                        "finished_at": _iso(current),
+                        "updated_at": _iso(current),
+                        "transition_history": history[-20:],
+                    }
+                )
+                resolved.append(identity)
+            if resolved:
+                self._write(state)
+        return resolved
+
     def acquire(
         self,
         *,
@@ -545,6 +620,40 @@ def ingest_semantic_hold_inventory(chronovisor_root: Path) -> list[dict[str, Any
     return list(unique.values())
 
 
+def _superseded_hold_evidence(
+    inventory: Iterable[Mapping[str, Any]],
+    current_failures: Mapping[str, Mapping[str, Any]],
+) -> dict[str, set[str]]:
+    superseded: dict[str, set[str]] = {}
+    for row in inventory:
+        packet_path = row.get("packet_path")
+        row_raw_files = row.get("raw_files")
+        if not isinstance(packet_path, str) or not isinstance(row_raw_files, list):
+            continue
+        packet_identity = Path(packet_path).expanduser().resolve(strict=False)
+        current_packet_paths: set[str] = set()
+        for raw_file in row_raw_files:
+            current_entry = current_failures.get(str(raw_file))
+            current_packet = (
+                current_entry.get("packet_path")
+                if isinstance(current_entry, Mapping)
+                else None
+            )
+            if not isinstance(current_packet, str):
+                break
+            current_identity = Path(current_packet).expanduser().resolve(strict=False)
+            if current_identity == packet_identity:
+                break
+            current_packet_paths.add(str(current_identity))
+        else:
+            identity_fields = {
+                key: row[key]
+                for key in ("hold_sha256", "authority_epoch", "raw_sha256", "lane")
+            }
+            superseded[hold_identity(**identity_fields)] = current_packet_paths
+    return superseded
+
+
 def sync_ingest_semantic_holds(
     *,
     chronovisor_root: Path,
@@ -559,6 +668,19 @@ def sync_ingest_semantic_holds(
         current_authority = _current_adopted_authority_epoch()
     except Exception:
         current_authority = None
+    raw_files = {
+        raw_file
+        for row in inventory
+        for raw_file in row.get("raw_files", [])
+        if isinstance(raw_file, str)
+    }
+    try:
+        from chronovisor.decision.failure_supervisor import raw_failure_snapshot
+
+        current_failures = raw_failure_snapshot(raw_files)
+    except Exception:
+        current_failures = {}
+    superseded = _superseded_hold_evidence(inventory, current_failures)
     if dry_run:
         return {
             "status": "dry_run",
@@ -568,6 +690,7 @@ def sync_ingest_semantic_holds(
                 bool(current_authority and row["authority_epoch"] != current_authority)
                 for row in inventory
             ),
+            "would_supersede": len(superseded),
         }
     store = ManagedHoldStore(
         chronovisor_root / "runtime" / "managed-holds" / "state.json"
@@ -578,6 +701,7 @@ def sync_ingest_semantic_holds(
         if isinstance(current_authority, str)
         else {}
     )
+    superseded_resolved = store.resolve_superseded_scheduled(superseded)
     active_identities = {
         hold_identity(
             **{
@@ -592,7 +716,8 @@ def sync_ingest_semantic_holds(
         )
         for row in inventory
     }
-    resolved = store.resolve_absent_scheduled(active_identities)
+    absent_resolved = store.resolve_absent_scheduled(active_identities)
+    resolved = [*superseded_resolved, *absent_resolved]
     return {
         "status": "ok",
         "inventory": len(inventory),
@@ -600,5 +725,6 @@ def sync_ingest_semantic_holds(
         "current_authority_epoch": current_authority,
         "scheduled": scheduled["count"],
         "resolved": len(resolved),
+        "superseded": len(superseded_resolved),
         "snapshot": store.snapshot(),
     }

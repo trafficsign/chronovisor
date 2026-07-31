@@ -229,6 +229,60 @@ def operational_failure_group_snapshot(
     return _operational_failure_group_snapshot_unlocked(packet_path)
 
 
+def raw_failure_snapshot(raw_files: Iterable[str]) -> dict[str, dict[str, Any]]:
+    """Return durable failure ownership for an exact set of Raw filenames.
+
+    Current state is authoritative.  A latest terminal packet is used only
+    when crash recovery or legacy quarantine left no state row, so an older
+    semantic hold can still observe that its retry reached a newer outcome.
+    """
+
+    requested = {name for name in raw_files if isinstance(name, str) and name}
+    if not requested:
+        return {}
+    with _failure_state_lock(exclusive=False):
+        failures = _load_state().get("failures")
+        snapshot = {
+            raw_file: dict(entry)
+            for raw_file, entry in (failures.items() if isinstance(failures, dict) else ())
+            if raw_file in requested and isinstance(entry, dict)
+        }
+    missing = {
+        raw_file
+        for raw_file in requested
+        if not isinstance(snapshot.get(raw_file, {}).get("packet_path"), str)
+    }
+    if not missing:
+        return snapshot
+    packets_dir = _runtime_failures_dir() / "packets"
+    try:
+        packet_paths = sorted(packets_dir.glob("*.json"))
+    except OSError:
+        return snapshot
+    fallback: dict[str, dict[str, Any]] = {}
+    for packet_path in packet_paths:
+        packet = _read_packet_object(packet_path)
+        if packet is None or packet.get("status") != "local_quarantined":
+            continue
+        packet_raws = {packet.get("raw_file")}
+        sources = packet.get("source_raws")
+        if isinstance(sources, list):
+            packet_raws.update(
+                row.get("filename")
+                for row in sources
+                if isinstance(row, dict)
+            )
+        for raw_file in missing.intersection(packet_raws):
+            fallback[str(raw_file)] = {
+                "packet_path": str(packet_path),
+                "failure_class": packet.get("failure_class"),
+                "status": packet.get("status"),
+                "source": "terminal_packet_fallback",
+            }
+    snapshot.update(fallback)
+    return snapshot
+
+
 @contextmanager
 def lock_operational_failure_group(packet_path: Path):
     """Freeze raw attachment to one operational packet through caller commit.

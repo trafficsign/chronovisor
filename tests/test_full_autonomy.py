@@ -43,6 +43,7 @@ from chronovisor.ingest.read_back_integrity import (
     scan_jsonl_prefix,
     verify_prior_prefix,
 )
+from chronovisor.librarian import managed_hold
 from chronovisor.librarian.managed_hold import ManagedHoldStore
 from chronovisor.ops import burn_monitor, health, repair_runbook
 from chronovisor.ops.deadman import inspect_heartbeat, write_heartbeat
@@ -688,6 +689,140 @@ def test_managed_hold_resolves_once_from_retired_packet_evidence(tmp_path: Path)
     assert resolved == [entry["identity"]]
     assert repeated == []
     assert store.snapshot()["counts"]["resolved"] == 1
+
+
+def test_managed_hold_resolves_once_from_current_failure_supersession(
+    tmp_path: Path,
+) -> None:
+    store = ManagedHoldStore(tmp_path / "state.json")
+    entry = store.register(
+        hold_sha256="a" * 64,
+        authority_epoch="b" * 64,
+        raw_sha256="c" * 64,
+        lane="lane",
+        raw_files=["one.md"],
+    )
+    store.reconcile_authorities({"lane": "d" * 64})
+
+    resolved = store.resolve_superseded_scheduled(
+        {entry["identity"]: ["/runtime/failures/new-packet.json"]}
+    )
+    repeated = store.resolve_superseded_scheduled(
+        {entry["identity"]: ["/runtime/failures/new-packet.json"]}
+    )
+
+    assert resolved == [entry["identity"]]
+    assert repeated == []
+    state = read_sealed_json(tmp_path / "state.json")
+    current = state["entries"][entry["identity"]]
+    assert current["state"] == "resolved"
+    assert current["transition_history"][-1] == {
+        "from": "leased",
+        "to": "resolved",
+        "at": current["finished_at"],
+        "evidence": "superseded_by_current_failure_packet",
+        "superseding_packets": ["/runtime/failures/new-packet.json"],
+    }
+
+
+def test_managed_hold_sync_resolves_historical_packet_owned_by_new_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw_file = "one.md"
+    old_packet = str(tmp_path / "runtime" / "failures" / "old.json")
+    new_packet = str(tmp_path / "runtime" / "failures" / "new.json")
+    inventory = [
+        {
+            "hold_sha256": "a" * 64,
+            "authority_epoch": "b" * 64,
+            "raw_sha256": "c" * 64,
+            "lane": "ingest_reconciliation",
+            "raw_files": [raw_file],
+            "packet_path": old_packet,
+        }
+    ]
+    monkeypatch.setattr(
+        managed_hold,
+        "ingest_semantic_hold_inventory",
+        lambda _root: inventory,
+    )
+    monkeypatch.setattr(
+        failure_supervisor,
+        "_current_adopted_authority_epoch",
+        lambda: "d" * 64,
+    )
+    monkeypatch.setattr(
+        failure_supervisor,
+        "raw_failure_snapshot",
+        lambda _raw_files: {raw_file: {"packet_path": new_packet}},
+    )
+
+    dry_run = managed_hold.sync_ingest_semantic_holds(
+        chronovisor_root=tmp_path,
+        dry_run=True,
+    )
+    result = managed_hold.sync_ingest_semantic_holds(chronovisor_root=tmp_path)
+
+    assert dry_run["would_schedule"] == 1
+    assert dry_run["would_supersede"] == 1
+    assert result["scheduled"] == 1
+    assert result["superseded"] == 1
+    assert result["resolved"] == 1
+    assert result["snapshot"]["counts"] == {
+        "active": 0,
+        "leased": 0,
+        "reheld": 0,
+        "resolved": 1,
+        "scheduled": 0,
+    }
+
+
+def test_raw_failure_snapshot_uses_latest_terminal_packet_when_state_is_absent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        failure_supervisor.chronovisor_store,
+        "CHRONOVISOR_ROOT",
+        tmp_path,
+    )
+    packets = tmp_path / "runtime" / "failures" / "packets"
+    packets.mkdir(parents=True)
+    raw_file = "one.md"
+    old_packet = packets / "20260701-old.json"
+    new_packet = packets / "20260702-new.json"
+    old_packet.write_text(
+        json.dumps(
+            {
+                "status": "local_quarantined",
+                "failure_class": "ingest.semantic_no_quorum",
+                "raw_file": raw_file,
+            }
+        ),
+        encoding="utf-8",
+    )
+    new_packet.write_text(
+        json.dumps(
+            {
+                "status": "local_quarantined",
+                "failure_class": "unknown",
+                "raw_file": raw_file,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    snapshot = failure_supervisor.raw_failure_snapshot([raw_file])
+
+    assert snapshot == {
+        raw_file: {
+            "packet_path": str(new_packet),
+            "failure_class": "unknown",
+            "status": "local_quarantined",
+            "source": "terminal_packet_fallback",
+        }
+    }
 
 
 def test_provisional_recall_accepts_projection_only_and_caps_rank(

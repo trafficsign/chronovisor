@@ -3,6 +3,8 @@ const els = {
   stateText: document.getElementById("state-text"),
   pending: document.getElementById("pending-value"),
   pendingSub: document.getElementById("pending-sub"),
+  held: document.getElementById("held-value"),
+  heldSub: document.getElementById("held-sub"),
   stage: document.getElementById("stage-value"),
   raw: document.getElementById("raw-value"),
   batch: document.getElementById("batch-value"),
@@ -2935,11 +2937,11 @@ function render(snapshot) {
   const ready = intValue(status.pending);
   const semanticDeferred = intValue(status.semantic_deferred?.count);
   const operationalDeferred = intValue(status.operational_deferred?.count);
-  const workRemaining = numeric(status.raw_outstanding)
-    ? Math.max(0, status.raw_outstanding)
-    : ready + semanticDeferred + operationalDeferred;
-  els.pending.textContent = fmt(workRemaining);
-  els.pendingSub.textContent = `${ready} ready · ${semanticDeferred} semantic held · ${operationalDeferred} operational held`;
+  const held = semanticDeferred + operationalDeferred;
+  els.pending.textContent = fmt(ready);
+  els.pendingSub.textContent = ready === 1 ? "1 Raw ready for processing" : `${ready} Raw ready for processing`;
+  els.held.textContent = fmt(held);
+  els.heldSub.textContent = `${semanticDeferred} semantic · ${operationalDeferred} operational`;
   const stageValue = fmt(status.stage, "idle");
   els.stage.textContent = stageMetricLabel(stageValue);
   els.stage.title = stageValue;

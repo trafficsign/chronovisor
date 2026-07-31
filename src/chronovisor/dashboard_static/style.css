@@ -256,7 +256,7 @@ h2 {
 }
 
 .metrics-grid {
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   margin-bottom: 12px;
 }
 
@@ -310,6 +310,10 @@ h2 {
   letter-spacing: -0.02em;
   line-height: 1;
   font-variant-numeric: tabular-nums;
+}
+
+.metric-card-held strong {
+  color: var(--amber);
 }
 
 #stage-value {
