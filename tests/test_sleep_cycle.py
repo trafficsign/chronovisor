@@ -155,6 +155,16 @@ def _patch_sleep_dependencies(monkeypatch) -> None:
         lambda write=True: {"edges": 2, "nodes": 2, "graph": {}},
     )
     monkeypatch.setattr(
+        sleep_cycle,
+        "run_graph_maintenance",
+        lambda **kwargs: {
+            "status": "ok",
+            "relation_counts": {"proposed": 2},
+            "dry_run": kwargs["dry_run"],
+            "external_model_calls": 0,
+        },
+    )
+    monkeypatch.setattr(
         "chronovisor.ops.sleep_cycle.run_growth_cycle",
         lambda **kwargs: {
             "status": "ok",
@@ -352,6 +362,7 @@ def test_run_sleep_cycle_coordinates_safe_steps(monkeypatch) -> None:
     assert payload["snapshot"]["status"] == "clean"
     assert len(payload["run_id"]) == 32
     assert payload["cofire"]["edges"] == 2
+    assert payload["typed_graph"]["relation_counts"] == {"proposed": 2}
     assert payload["recall_growth"]["stage"] == "collecting_labels"
     assert payload["prefetch"]["buckets"] == 1
     assert payload["retention"]["counts"]["pages"] == 2

@@ -341,6 +341,8 @@ def update_field_state(
             include_exposure_cofire=False,
             include_positive_cofire=config.positive_learning,
             degree_normalize=True,
+            typed_relations_for_field=True,
+            rollout_key=state.session_hash,
         ):
             traversed += 1
             next_hop = hop + 1
@@ -370,7 +372,14 @@ def update_field_state(
                     delta=round(delta, 6),
                     activation=round(target.activation, 6),
                     reason_code=edge.supervision or edge.edge_type,
-                    components={"spread": round(target.spread, 6)},
+                    components={
+                        "spread": round(target.spread, 6),
+                        **(
+                            {"relation_id": edge.relation_id}
+                            if edge.relation_id
+                            else {}
+                        ),
+                    },
                 )
             )
             frontier.append((edge.target, next_hop, delta))

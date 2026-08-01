@@ -15,12 +15,14 @@ import tempfile
 import threading
 import time
 import uuid
+from collections.abc import Callable
 from contextlib import contextmanager, suppress
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from chronovisor.core.store import CHRONOVISOR_ROOT
+from chronovisor.knowledge_graph.runtime import run_graph_maintenance
 from chronovisor.recall.recall_growth import run_growth_cycle
 
 HISTORY_FILE = CHRONOVISOR_ROOT / "runtime" / "sleep-cycle-history.jsonl"
@@ -381,6 +383,21 @@ def _run_lane(
     return result
 
 
+def _graph_artifact_lanes(
+    artifact_lane: Callable[..., dict[str, Any]],
+    cofire_builder: Callable[..., dict[str, Any]],
+    *,
+    dry_run: bool,
+) -> dict[str, dict[str, Any]]:
+    cofire = artifact_lane("cofire", lambda: cofire_builder(write=not dry_run))
+    return {
+        "cofire": {key: value for key, value in cofire.items() if key != "graph"},
+        "typed_graph": artifact_lane(
+            "typed_graph", lambda: run_graph_maintenance(dry_run=dry_run)
+        ),
+    }
+
+
 def render_summary(payload: dict[str, Any]) -> str:
     """Render a compact status report that tolerates partial/skipped cycles."""
 
@@ -518,7 +535,7 @@ def _run_sleep_cycle(
         max_raw_bytes=2_000_000,
         max_elapsed_seconds=30 * 60,
     )
-    artifact_budget = cycle_budget.slice(max_mutations=16)
+    artifact_budget = cycle_budget.slice(max_mutations=17)
 
     def artifact_lane(name: str, fn, *, mutates: bool = True) -> dict[str, Any]:
         if dry_run or not mutates:
@@ -600,7 +617,7 @@ def _run_sleep_cycle(
             dry_run=dry_run,
         ),
     )
-    cofire = artifact_lane("cofire", lambda: build_cofire_graph(write=not dry_run))
+    graph_artifacts = _graph_artifact_lanes(artifact_lane, build_cofire_graph, dry_run=dry_run)
     recall_growth = artifact_lane(
         "recall_growth", lambda: run_growth_cycle(dry_run=dry_run)
     )
@@ -979,7 +996,7 @@ def _run_sleep_cycle(
         "external_queue_recovery": external_queue_recovery,
         "content_corrections": content_corrections,
         "health_before": before_health_result,
-        "cofire": {k: v for k, v in cofire.items() if k != "graph"},
+        **graph_artifacts,
         "recall_growth": recall_growth,
         "prefetch": {
             "status": prefetch.get("status"),

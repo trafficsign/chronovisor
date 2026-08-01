@@ -25,7 +25,12 @@ from typing import Any
 
 from chronovisor.core.jsonl_write import append_jsonl_durable
 from chronovisor.core.runtime_config import active_config_file
-from chronovisor.core.store import SYSTEM_DIR, find_page, init_chronovisor
+from chronovisor.core.store import (
+    CHRONOVISOR_ROOT,
+    SYSTEM_DIR,
+    find_page,
+    init_chronovisor,
+)
 from chronovisor.decision.local_structured import LocalStructuredSession
 from chronovisor.ops.state_register import format_state_context, should_inject_state
 from chronovisor.recall.recall_prompt import (
@@ -35,6 +40,7 @@ from chronovisor.recall.recall_prompt import (
 )
 from chronovisor.recall.recall_runtime_paths import RECALL_DIR
 from chronovisor.search.index_store import get_store
+from chronovisor.search.search import last_search_trace
 from chronovisor.search.search import search as run_search
 
 RECALL_LOG_FILE = RECALL_DIR / "recall-log.jsonl"
@@ -42,6 +48,9 @@ RECALL_FEEDBACK_FILE = RECALL_DIR / "feedback.jsonl"
 RECALL_CONFIG_FILE = active_config_file()
 RECALL_PULL_LOG_FILE = RECALL_DIR / "pull-log.jsonl"
 RECALL_CALIBRATION_FILE = RECALL_DIR / "calibration.json"
+TYPED_GRAPH_TRACE_FILE = (
+    CHRONOVISOR_ROOT / "runtime" / "typed-graph" / "candidate-trace.jsonl"
+)
 
 TRIVIAL_PROMPT_RE = re.compile(
     r"^\s*(はい|いいえ|うん|おう|ok|okay|yes|no|y|n|ありがとう|thanks|thx|了解|りょ)\s*[。.!！?？]*\s*$",
@@ -224,6 +233,7 @@ class RecallRequest:
     cwd: str = ""
     recent_context: str = ""
     session_id: str = ""
+    decision_id: str = ""
 
 
 @dataclass
@@ -1199,8 +1209,79 @@ def search_candidates(
     remaining_ms = _remaining_budget_ms(deadline_at)
     if remaining_ms is not None and remaining_ms <= 0:
         raise RecallBudgetExhausted("recall search budget exhausted")
+    trace_decision_id = (
+        request.decision_id if request is not None and request.decision_id else new_decision_id()
+    )
 
-    def search_one(query: str) -> tuple[list[Any], str]:
+    def trace_rows(
+        query: str,
+        paths: dict[str, Any],
+        *,
+        shadow: bool,
+        query_plan: str = "",
+    ) -> list[dict[str, Any]]:
+        if request is None:
+            return []
+        query_sha = hashlib.sha256(query.encode()).hexdigest()
+        session = (
+            hashlib.sha256(request.session_id.encode()).hexdigest()[:16]
+            if request.session_id
+            else ""
+        )
+        created_at = datetime.now().astimezone().isoformat(timespec="milliseconds")
+        output = []
+        for page_id, value in paths.items():
+            if not isinstance(value, dict):
+                continue
+            path_ids = [
+                str(item)
+                for item in value.get("relation_ids") or []
+                if isinstance(item, str)
+                and (item.startswith("rel_") or item.startswith("merge_"))
+            ]
+            relation_ids = [item for item in path_ids if item.startswith("rel_")]
+            entity_merge_ids = [
+                item for item in path_ids if item.startswith("merge_")
+            ]
+            if not path_ids:
+                continue
+            path_id = str(value.get("path_id") or "")
+            if not path_id:
+                path_id = "path_" + hashlib.sha256(
+                    "|".join([page_id, *path_ids]).encode()
+                ).hexdigest()[:24]
+            output.append(
+                {
+                    "schema_version": 1,
+                    "trace_id": hashlib.sha256(
+                        f"{trace_decision_id}:{path_id}:{page_id}:{shadow}".encode()
+                    ).hexdigest()[:24],
+                    "decision_id": trace_decision_id,
+                    "session_hash": session,
+                    "query_sha256": query_sha,
+                    "query_plan": str(value.get("query_plan") or query_plan),
+                    "page_id": str(page_id),
+                    "path_id": path_id,
+                    "page_ids": [
+                        str(item)
+                        for item in value.get("pages") or value.get("path") or []
+                        if isinstance(item, str)
+                    ],
+                    "relation_ids": relation_ids,
+                    "entity_merge_ids": entity_merge_ids,
+                    "relations": value.get("relations") or [],
+                    "community_id": str(value.get("community_id") or ""),
+                    "activation": float(value.get("activation") or 0.0),
+                    "shadow": shadow,
+                    "supervision": "exposure",
+                    "candidate_generated": True,
+                    "created_at": created_at,
+                    "external_model_calls": 0,
+                }
+            )
+        return output
+
+    def search_one(query: str) -> tuple[list[Any], str, list[dict[str, Any]]]:
         search_kwargs: dict[str, Any] = {
             "query": query,
             "top_n": max(policy.max_pages * 3, 8),
@@ -1226,7 +1307,27 @@ def search_candidates(
         }
         if remaining_ms is not None:
             search_kwargs["semantic_timeout_ms"] = remaining_ms
-        return run_search(**search_kwargs)
+        if request is not None and request.session_id:
+            search_kwargs["rollout_key"] = request.session_id
+        results, mode = run_search(**search_kwargs)
+        actual_trace = last_search_trace()
+        actual_paths = actual_trace.get("paths")
+        rows = trace_rows(
+            query,
+            actual_paths if isinstance(actual_paths, dict) else {},
+            shadow=False,
+            query_plan=str(actual_trace.get("query_plan") or ""),
+        )
+        try:
+            from chronovisor.knowledge_graph.retrieval import shadow_candidate_paths
+
+            shadow_paths = shadow_candidate_paths(
+                [str(result.page_id) for result in results[:20]], query=query
+            )
+        except Exception:
+            shadow_paths = {}
+        rows.extend(trace_rows(query, shadow_paths, shadow=True))
+        return results, mode, rows
 
     # Recall rewrites produce up to three independent entrances. Run them
     # together so the semantic service can embed them as one micro-batch while
@@ -1242,7 +1343,9 @@ def search_candidates(
 
     merged: dict[str, Any] = {}
     mode = "bm25"
-    for query_index, (results, search_mode) in enumerate(searched):
+    typed_trace_rows: list[dict[str, Any]] = []
+    for query_index, (results, search_mode, trace_values) in enumerate(searched):
+        typed_trace_rows.extend(trace_values)
         if search_mode != "bm25":
             mode = search_mode
         query_weight = max(0.50, 1.0 - (0.25 * query_index))
@@ -1258,6 +1361,16 @@ def search_candidates(
             existing = merged.get(result.page_id)
             if existing is None or adjusted.score > existing.score:
                 merged[result.page_id] = adjusted
+    if typed_trace_rows:
+        # Candidate-path telemetry is supervision input, never part of the
+        # synchronous recall authority path. A read-only filesystem or a
+        # damaged diagnostics ledger must therefore fail open.
+        try:
+            append_jsonl_durable(
+                TYPED_GRAPH_TRACE_FILE, typed_trace_rows, sort_keys=True
+            )
+        except OSError:
+            pass
     out = sorted(merged.values(), key=lambda item: item.score, reverse=True)
     return out, mode
 
@@ -1916,6 +2029,7 @@ def _fail_open_recall_budget(
         matched_terms=matched or {},
         latency_ms=_elapsed_ms(started),
         error=reason,
+        decision_id=request.decision_id or new_decision_id(),
     )
     result.state_context = state_context_for_request(request, policy)
     result.context = result.state_context
@@ -1937,6 +2051,8 @@ def _finalize_recall_result(
 ) -> RecallResult:
     """Attach bounded context, advance session state, and append one decision log."""
 
+    if request.decision_id:
+        result.decision_id = request.decision_id
     recall_context = format_recall_context(result, policy)
     result.state_context = state_context_for_request(active_request, policy)
     result.context = merge_context_blocks(
@@ -2343,6 +2459,8 @@ def _run_recall_impl(
     _allow_timeout_fallback: bool = True,
 ) -> RecallResult:
     started = time.monotonic()
+    if not request.decision_id:
+        request = replace(request, decision_id=new_decision_id())
     policy = policy or load_policy()
     policy.max_total_context_chars = max(
         policy.max_total_context_chars,
@@ -2571,6 +2689,7 @@ def _run_recall_impl(
         context_style=policy.context_style,
         latency_ms=_elapsed_ms(started),
         error=error,
+        decision_id=active_request.decision_id,
     )
     compiler_metadata = field_shadow_metadata.get("recall_compiler")
     if isinstance(compiler_metadata, dict):

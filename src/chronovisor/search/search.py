@@ -1,6 +1,7 @@
 """Search engine — BM25 + semantic search with RRF fusion."""
 
 import contextlib
+import hashlib
 import heapq
 import json
 import math
@@ -10,7 +11,9 @@ import sqlite3
 import struct
 import threading
 from collections import Counter, deque
+from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 from chronovisor.core.frontmatter import parse as parse_frontmatter
 from chronovisor.core.runtime_config import (
@@ -1429,10 +1432,25 @@ def fuse_results(
 
 
 _GRAPH_TRACE = threading.local()
+_GRAPH_QUERY = threading.local()
+_GRAPH_ROLLOUT = threading.local()
 
 
 def graph_expansion_trace() -> dict[str, dict[str, object]]:
     return dict(getattr(_GRAPH_TRACE, "paths", {}))
+
+
+@contextlib.contextmanager
+def graph_query_context(query: str, *, rollout_key: str = "") -> Iterator[None]:
+    previous_query = getattr(_GRAPH_QUERY, "value", "")
+    previous_rollout = getattr(_GRAPH_ROLLOUT, "value", "")
+    _GRAPH_QUERY.value = query
+    _GRAPH_ROLLOUT.value = rollout_key
+    try:
+        yield
+    finally:
+        _GRAPH_QUERY.value = previous_query
+        _GRAPH_ROLLOUT.value = previous_rollout
 
 
 def graph_expand_results(
@@ -1443,6 +1461,10 @@ def graph_expand_results(
     _GRAPH_TRACE.paths = {}
     if decay <= 0 or not results:
         return []
+    from chronovisor.knowledge_graph.retrieval import (
+        classify_query,
+        community_candidates,
+    )
     from chronovisor.search.index_store import get_store
 
     store = get_store()
@@ -1462,9 +1484,62 @@ def graph_expand_results(
         )
 
     expanded: dict[str, ScoredPage] = {}
-    trace: dict[str, dict[str, object]] = {}
+    trace: dict[str, dict[str, Any]] = {}
     visited_states = 0
     from chronovisor.search.graph_edges import typed_neighbors
+
+    query = str(getattr(_GRAPH_QUERY, "value", ""))
+    rollout_key = str(getattr(_GRAPH_ROLLOUT, "value", ""))
+    query_plan = classify_query(query)
+
+    if query_plan == "global":
+        for candidate in community_candidates(
+            [result.page_id for result in seeds],
+            query=query,
+            rollout_key=rollout_key,
+            limit=output_limit,
+        ):
+            if candidate.page_id in seed_ids or len(expanded) >= output_limit:
+                continue
+            meta = store.meta(candidate.page_id)
+            if meta is None:
+                continue
+            folder = _folder_from_meta(meta)
+            expanded[candidate.page_id] = ScoredPage(
+                page_id=candidate.page_id,
+                title=str(meta.get("title") or candidate.page_id),
+                folder=folder,
+                updated=str(meta.get("updated") or ""),
+                score=candidate.score * decay,
+                status=_normalize_lifecycle_status(meta.get("status")),
+                superseded_by=(
+                    str(meta.get("superseded_by") or "")
+                    if isinstance(meta.get("superseded_by"), str)
+                    else ""
+                ),
+                page_type=_meta_page_type(meta, folder=folder),
+                sensitivity=_meta_sensitivity(meta, folder=folder),
+            )
+            trace[candidate.page_id] = {
+                "path": [candidate.page_id],
+                "path_id": "path_"
+                + hashlib.sha256(
+                    "|".join(
+                        [
+                            candidate.community_id,
+                            candidate.page_id,
+                            *candidate.relation_ids,
+                        ]
+                    ).encode()
+                ).hexdigest()[:24],
+                "hops": 0,
+                "signal": "typed_community",
+                "activation": round(candidate.score, 6),
+                "community_id": candidate.community_id,
+                "relation_ids": list(candidate.relation_ids),
+                "source_digests": list(candidate.source_digests),
+                "summary_sha256": candidate.summary_sha256,
+            }
 
     while frontier and visited_states < 200:
         negative, hop, page_id, path, incoming_signal = heapq.heappop(frontier)
@@ -1474,7 +1549,13 @@ def graph_expand_results(
         visited_states += 1
         if hop >= 2:
             continue
-        for edge in typed_neighbors(store, page_id, limit=12):
+        for edge in typed_neighbors(
+            store,
+            page_id,
+            limit=12,
+            include_typed_relations=query_plan in {"local", "mixed"},
+            rollout_key=rollout_key,
+        ):
             target = edge.target
             edge_weight = edge.weight
             signal = (
@@ -1499,6 +1580,42 @@ def graph_expand_results(
                 continue
             best_activation[target] = next_activation
             next_path = (*path, target)
+            prior_trace = trace.get(page_id)
+            prior_relation_ids = (
+                list(prior_trace.get("relation_ids") or [])
+                if isinstance(prior_trace, dict)
+                else []
+            )
+            prior_relations = (
+                list(prior_trace.get("relations") or [])
+                if isinstance(prior_trace, dict)
+                else []
+            )
+            relation_ids = [
+                *prior_relation_ids,
+                *([edge.relation_id] if edge.relation_id else []),
+            ]
+            relation_steps = [
+                *prior_relations,
+                *(
+                    [
+                        {
+                            "relation_id": edge.relation_id,
+                            "predicate": edge.predicate,
+                            "direction": edge.direction,
+                            "lifecycle": edge.lifecycle,
+                            "evidence_refs": list(edge.evidence_refs),
+                            "weight_components": {
+                                "edge": round(edge_weight, 6),
+                                "hop_decay": round(0.72**next_hop, 6),
+                                "source_activation": round(activation, 6),
+                            },
+                        }
+                    ]
+                    if edge.relation_id
+                    else []
+                ),
+            ]
             heapq.heappush(
                 frontier,
                 (-next_activation, next_hop, target, next_path, signal),
@@ -1523,11 +1640,23 @@ def graph_expand_results(
             )
             trace[target] = {
                 "path": list(next_path),
+                "path_id": "path_"
+                + hashlib.sha256(
+                    "|".join([*next_path, *relation_ids]).encode()
+                ).hexdigest()[:24],
                 "hops": next_hop,
                 "signal": signal or incoming_signal,
                 "activation": round(next_activation, 6),
+                "relation_id": edge.relation_id,
+                "predicate": edge.predicate,
+                "direction": edge.direction,
+                "lifecycle": edge.lifecycle,
+                "evidence_refs": list(edge.evidence_refs),
+                "relation_ids": relation_ids,
+                "relations": relation_steps,
             }
     _GRAPH_TRACE.paths = trace
+    _GRAPH_TRACE.query_plan = query_plan
     return sorted(expanded.values(), key=lambda page: page.score, reverse=True)[
         :output_limit
     ]
@@ -1668,6 +1797,7 @@ def search(
     semantic: bool = True,
     fusion_weights: dict[str, float] | None = None,
     semantic_timeout_ms: int | None = None,
+    rollout_key: str = "",
 ) -> tuple[list[ScoredPage], str]:
     """Run search and return (results, search_mode)."""
     weights = (
@@ -1694,21 +1824,27 @@ def search(
                     ),
                 }
             )
-    result = run_search_pipeline(
-        query,
-        config=production_pipeline_config(
-            top_n=top_n,
-            folder=folder,
-            updated_after=updated_after,
-            updated_before=updated_before,
-            sort_by=sort_by,
-            semantic=semantic,
-            fusion_weights=weights,
-            include_reference=folder is not None,
-            semantic_timeout_ms=semantic_timeout_ms,
-        ),
-        deps=_pipeline_dependencies(),
-    )
+    _GRAPH_QUERY.value = query
+    _GRAPH_ROLLOUT.value = rollout_key
+    try:
+        result = run_search_pipeline(
+            query,
+            config=production_pipeline_config(
+                top_n=top_n,
+                folder=folder,
+                updated_after=updated_after,
+                updated_before=updated_before,
+                sort_by=sort_by,
+                semantic=semantic,
+                fusion_weights=weights,
+                include_reference=folder is not None,
+                semantic_timeout_ms=semantic_timeout_ms,
+            ),
+            deps=_pipeline_dependencies(),
+        )
+    finally:
+        _GRAPH_QUERY.value = ""
+        _GRAPH_ROLLOUT.value = ""
     graph_ids = {page.page_id for page in result.graph_results}
     semantic_ids = {page.page_id for page in result.semantic_results}
     _SEARCH_TRACE.value = {
@@ -1730,5 +1866,6 @@ def search(
         },
         "verified_graph": sorted(graph_ids & semantic_ids),
         "paths": graph_expansion_trace(),
+        "query_plan": getattr(_GRAPH_TRACE, "query_plan", "direct"),
     }
     return result.results, result.search_mode

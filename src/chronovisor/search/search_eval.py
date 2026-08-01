@@ -53,6 +53,8 @@ from chronovisor.search.search import (
     fuse_results,
     get_bm25,
     graph_expand_results,
+    graph_query_context,
+    last_search_trace,
     load_active_fusion_weights,
     semantic_search,
     semantic_verify,
@@ -950,11 +952,23 @@ def _eval_rerank_results(
     return rerank_results(query, candidates, config=config)
 
 
-def run_variant(query: str, variant: str, *, top_n: int = 20) -> dict[str, Any]:
+def run_variant(
+    query: str,
+    variant: str,
+    *,
+    top_n: int = 20,
+    typed_retrieval_mode: str | None = None,
+    calibrated_judge: bool = False,
+) -> dict[str, Any]:
     started = time.perf_counter()
     config, needs_rerank = _variant_pipeline_config(variant, top_n=top_n)
     deps = _pipeline_dependencies()
-    pipeline_result = run_search_pipeline(query, config=config, deps=deps)
+    from chronovisor.knowledge_graph.retrieval import retrieval_mode_override
+
+    typed_mode = typed_retrieval_mode or "shadow"
+    with retrieval_mode_override(typed_mode), graph_query_context(query):
+        pipeline_result = run_search_pipeline(query, config=config, deps=deps)
+        typed_search_trace = last_search_trace()
     results = pipeline_result.results
     fused_pages = _stage_page_ids(apply_filters(results), limit=top_n)
     reranker_meta: dict[str, Any] = {"status": "not_requested"}
@@ -989,8 +1003,8 @@ def run_variant(query: str, variant: str, *, top_n: int = 20) -> dict[str, Any]:
         injection_token_budget=policy.processor_injection_token_budget,
         certificate_required=policy.processor_certificate_required,
         ledger=False,
-        judge_policy=None,
-        judge_timeout_ms=0,
+        judge_policy=policy if calibrated_judge else None,
+        judge_timeout_ms=(policy.processor_judge_timeout_ms if calibrated_judge else 0),
     )
     page_gate = [
         str(row.get("page_id"))
@@ -1027,6 +1041,7 @@ def run_variant(query: str, variant: str, *, top_n: int = 20) -> dict[str, Any]:
             },
         },
         "processor": processor,
+        "search_trace": typed_search_trace,
         "channels": {
             "anchor": [page.page_id for page in pipeline_result.anchor_results[:top_n]],
             "bm25": [page.page_id for page in pipeline_result.bm25_results[:top_n]],

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 
+from chronovisor.recall.feedback_ledger import feedback_row_sha256
 from chronovisor.recall.recall_label_factory import build_label_ledger
 
 
@@ -183,3 +184,192 @@ def test_same_query_across_sessions_never_crosses_temporal_split(tmp_path) -> No
 
     shared = {row["split"] for row in assigned if row["query_sha256"] == "shared-query"}
     assert len(shared) == 1
+
+
+def test_relation_labels_cannot_inflate_page_learning_gate(tmp_path) -> None:
+    certificates = tmp_path / "certificates.jsonl"
+    recalls = tmp_path / "recall.jsonl"
+    pulls = tmp_path / "pull.jsonl"
+    golden = tmp_path / "golden.jsonl"
+    receipts = tmp_path / "receipts.jsonl"
+    paths = tmp_path / "paths.jsonl"
+    entities = tmp_path / "entities.jsonl"
+    rubrics = tmp_path / "rubrics.jsonl"
+    for path in (certificates, recalls, pulls, golden, paths, entities, rubrics):
+        write_rows(path, [])
+    write_rows(
+        receipts,
+        [
+            {
+                "relation_id": f"relation-{index}",
+                "receipt_id": f"receipt-{index}",
+                "outcome": "verified",
+            }
+            for index in range(500)
+        ],
+    )
+
+    payload = build_label_ledger(
+        certificate_file=certificates,
+        recall_log_file=recalls,
+        pull_log_file=pulls,
+        golden_file=golden,
+        relation_receipt_file=receipts,
+        relation_path_file=paths,
+        entity_decision_file=entities,
+        rubric_outcome_file=rubrics,
+    )
+
+    assert payload["counts"]["strong_positive"] == 0
+    assert payload["counts"]["by_subject_kind"]["relation"]["total"] == 500
+    assert payload["gates"]["field_learning_allowed"] is False
+    assert all(row["subject_kind"] == "relation" for row in payload["labels"])
+
+
+def test_used_entity_path_becomes_strong_without_inflating_page_gate(tmp_path) -> None:
+    certificates = tmp_path / "certificates.jsonl"
+    recalls = tmp_path / "recall.jsonl"
+    pulls = tmp_path / "pull.jsonl"
+    golden = tmp_path / "golden.jsonl"
+    receipts = tmp_path / "receipts.jsonl"
+    paths = tmp_path / "paths.jsonl"
+    entities = tmp_path / "entities.jsonl"
+    rubrics = tmp_path / "rubrics.jsonl"
+    for path in (certificates, recalls, golden, receipts, entities, rubrics):
+        write_rows(path, [])
+    write_rows(
+        pulls,
+        [
+            {
+                "type": "used",
+                "decision_id": "decision-entity",
+                "session_id": "session-entity",
+                "page_ids": ["target"],
+            }
+        ],
+    )
+    write_rows(
+        paths,
+        [
+            {
+                "decision_id": "decision-entity",
+                "page_id": "target",
+                "query_sha256": "q" * 64,
+                "relation_ids": [],
+                "entity_merge_ids": ["merge_entity"],
+            }
+        ],
+    )
+
+    payload = build_label_ledger(
+        certificate_file=certificates,
+        recall_log_file=recalls,
+        pull_log_file=pulls,
+        golden_file=golden,
+        relation_receipt_file=receipts,
+        relation_path_file=paths,
+        entity_decision_file=entities,
+        rubric_outcome_file=rubrics,
+    )
+
+    entity_labels = [
+        row for row in payload["labels"] if row["subject_kind"] == "entity_merge"
+    ]
+    assert entity_labels[0]["quality"] == "strong"
+    assert payload["counts"]["strong_positive"] == 0
+    assert payload["gates"]["field_learning_allowed"] is False
+
+
+def test_explicit_feedback_and_relation_retraction_remain_opposing_events(
+    tmp_path,
+) -> None:
+    inputs = {
+        name: tmp_path / f"{name}.jsonl"
+        for name in (
+            "certificate_file",
+            "recall_log_file",
+            "pull_log_file",
+            "golden_file",
+            "relation_receipt_file",
+            "relation_path_file",
+            "entity_decision_file",
+            "rubric_outcome_file",
+            "feedback_file",
+            "relation_event_file",
+        )
+    }
+    for path in inputs.values():
+        write_rows(path, [])
+    active = {
+        "kind": "page_ignored",
+        "prompt": "explicit bad recall",
+        "negative_pages": ["bad-page"],
+        "frontier_reviewed": True,
+        "content_correction_key": "active-key",
+        "ref": "active-ref",
+        "ts": "2026-08-01T00:00:00Z",
+    }
+    retracted = {
+        "kind": "page_ignored",
+        "prompt": "withdrawn feedback",
+        "negative_pages": ["withdrawn-page"],
+        "frontier_reviewed": True,
+        "content_correction_key": "withdrawn-key",
+        "ref": "withdrawn-ref",
+    }
+    write_rows(
+        inputs["feedback_file"],
+        [
+            active,
+            retracted,
+            {
+                "kind": "page_ignored_retracted",
+                "target_kind": "page_ignored",
+                "content_correction_key": "withdrawn-key",
+                "target_feedback_sha256": feedback_row_sha256(retracted),
+            },
+            {"kind": "injection_ignored", "negative_pages": ["not-explicit"]},
+        ],
+    )
+    write_rows(
+        inputs["relation_receipt_file"],
+        [
+            {
+                "relation_id": "relation-one",
+                "receipt_id": "receipt-one",
+                "outcome": "verified",
+            }
+        ],
+    )
+    write_rows(
+        inputs["relation_event_file"],
+        [
+            {
+                "event_id": "event-retract",
+                "event_hash": "a" * 64,
+                "action": "retract",
+                "reason_code": "source correction",
+                "created_at": "2026-08-01T00:00:01Z",
+                "relation": {"relation_id": "relation-one"},
+            }
+        ],
+    )
+
+    payload = build_label_ledger(**inputs)
+    labels = payload["labels"]
+
+    assert any(
+        row["page_id"] == "bad-page"
+        and row["polarity"] == "negative"
+        and row["quality"] == "strong"
+        for row in labels
+    )
+    assert not any(
+        row["page_id"] in {"withdrawn-page", "not-explicit"} for row in labels
+    )
+    relation_labels = [row for row in labels if row["subject_id"] == "relation-one"]
+    assert {row["polarity"] for row in relation_labels} == {"positive", "negative"}
+    assert any(
+        row["provenance"]["source"] == "relation_opposing_event"
+        for row in relation_labels
+    )

@@ -400,6 +400,49 @@ def test_search_candidates_allows_sensitive_pages_when_prompt_requests_it(
     assert [result.page_id for result in results] == ["career-note"]
 
 
+def test_typed_trace_write_failure_never_blocks_recall(monkeypatch) -> None:
+    from chronovisor.recall import recall_runtime
+
+    monkeypatch.setattr(
+        recall_runtime,
+        "run_search",
+        lambda **_kwargs: ([ScoredPage("work-note", "Work", "", "", 1.0)], "bm25"),
+    )
+    monkeypatch.setattr(
+        recall_runtime,
+        "last_search_trace",
+        lambda: {
+            "query_plan": "local",
+            "paths": {
+                "work-note": {
+                    "path_id": "path_test",
+                    "relation_ids": ["rel_123"],
+                    "pages": ["seed", "work-note"],
+                }
+            },
+        },
+    )
+    monkeypatch.setattr(
+        recall_runtime,
+        "append_jsonl_durable",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("read only")),
+    )
+
+    results, mode = search_candidates(
+        ["query"],
+        RecallPolicy(),
+        request=RecallRequest(
+            host="codex",
+            event="UserPromptSubmit",
+            prompt="query",
+            session_id="session-1",
+        ),
+    )
+
+    assert mode == "bm25"
+    assert [row.page_id for row in results] == ["work-note"]
+
+
 def test_best_excerpt_index_prefers_dense_query_terms() -> None:
     body = (
         "Chronovisor was mentioned near the top.\n"

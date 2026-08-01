@@ -7,6 +7,7 @@ import pytest
 
 from chronovisor.core import ollama
 from chronovisor.core.runtime_config import EmbeddingConfig, SearchEmbeddingConfig
+from chronovisor.knowledge_graph.retrieval import CommunityCandidate
 from chronovisor.search import index_store as index_store_mod
 from chronovisor.search import search
 from chronovisor.search.search import (
@@ -185,6 +186,62 @@ def test_associative_graph_reaches_two_hops_with_path_trace(monkeypatch) -> None
     assert [result.page_id for result in expanded] == ["middle", "target"]
     assert paths["target"]["path"] == ["seed", "middle", "target"]
     assert paths["target"]["hops"] == 2
+
+
+def test_global_query_uses_community_branch_without_relation_traversal(
+    monkeypatch,
+) -> None:
+    class FakeStore:
+        def refresh(self):
+            return None
+
+        def meta(self, page_id):
+            if page_id not in {"seed", "global-target"}:
+                return None
+            return {
+                "page_id": page_id,
+                "title": page_id,
+                "updated": "2026-08-01",
+                "path": f"/tmp/pages/{page_id}.md",
+                "status": "active",
+                "entities": [],
+            }
+
+    from chronovisor.knowledge_graph import retrieval
+    from chronovisor.search import graph_edges, index_store
+
+    monkeypatch.setattr(index_store, "get_store", lambda: FakeStore())
+    monkeypatch.setattr(
+        retrieval,
+        "community_candidates",
+        lambda *_args, **_kwargs: [
+            CommunityCandidate(
+                page_id="global-target",
+                score=0.8,
+                community_id="community-1",
+                relation_ids=("rel-1",),
+                source_digests=("a" * 64,),
+                summary_sha256="b" * 64,
+            )
+        ],
+    )
+    relation_flags: list[bool] = []
+
+    def no_relation_traversal(*_args, **kwargs):
+        relation_flags.append(bool(kwargs.get("include_typed_relations")))
+        return []
+
+    monkeypatch.setattr(graph_edges, "typed_neighbors", no_relation_traversal)
+    search._GRAPH_QUERY.value = "全体をまとめて"
+    try:
+        expanded = search.graph_expand_results([page("seed", 1.0)])
+    finally:
+        search._GRAPH_QUERY.value = ""
+    trace = search.graph_expansion_trace()
+
+    assert [row.page_id for row in expanded] == ["global-target"]
+    assert trace["global-target"]["community_id"] == "community-1"
+    assert relation_flags == [False]
 
 
 def test_fusion_bm25_bonus_is_parameterized() -> None:

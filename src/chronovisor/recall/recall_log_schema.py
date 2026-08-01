@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections import Counter
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -76,8 +76,8 @@ def pull_event_id(row: Mapping[str, Any]) -> str:
 
 
 def join_used_recall_episodes(
-    recall_rows: list[Mapping[str, Any]],
-    pull_rows: list[Mapping[str, Any]],
+    recall_rows: Sequence[Mapping[str, Any]],
+    pull_rows: Sequence[Mapping[str, Any]],
 ) -> dict[str, Any]:
     """Join explicit usage receipts to one unambiguous recall decision.
 

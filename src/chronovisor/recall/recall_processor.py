@@ -16,6 +16,7 @@ from chronovisor.recall.evidence_certificate import (
     append_certificates,
     certify_candidate,
 )
+from chronovisor.recall.rubric_calibration import load_active_rubric
 from chronovisor.search import reranker_client
 from chronovisor.search.search_types import tokenize
 
@@ -203,7 +204,8 @@ def _run_certificate_judge(
             raise RuntimeError("resident model resource is busy") from exc
 
     payload = {
-        "task": "Pass only answer-bearing evidence; reject topical overlap.",
+        "task": "Apply the adopted rubric to answer-bearing evidence.",
+        "rubric": load_active_rubric(),
         "query": query,
         "candidates": [
             {

@@ -13,6 +13,11 @@ class TypedEdge:
     weight: float
     edge_type: str
     supervision: str = ""
+    relation_id: str = ""
+    predicate: str = ""
+    direction: str = ""
+    lifecycle: str = ""
+    evidence_refs: tuple[dict[str, Any], ...] = ()
 
 
 def typed_neighbors(
@@ -23,6 +28,9 @@ def typed_neighbors(
     include_exposure_cofire: bool = True,
     include_positive_cofire: bool = True,
     degree_normalize: bool = False,
+    include_typed_relations: bool = True,
+    typed_relations_for_field: bool = False,
+    rollout_key: str = "",
 ) -> list[TypedEdge]:
     """Return degree-normalized, deterministic neighbors for one page."""
 
@@ -33,6 +41,12 @@ def typed_neighbors(
         weight: float,
         edge_type: str,
         supervision: str = "",
+        *,
+        relation_id: str = "",
+        predicate: str = "",
+        direction: str = "",
+        lifecycle: str = "",
+        evidence_refs: tuple[dict[str, Any], ...] = (),
     ) -> None:
         if not target or target == page_id:
             return
@@ -41,6 +55,11 @@ def typed_neighbors(
             weight=max(0.0, min(1.0, weight)),
             edge_type=edge_type,
             supervision=supervision,
+            relation_id=relation_id,
+            predicate=predicate,
+            direction=direction,
+            lifecycle=lifecycle,
+            evidence_refs=evidence_refs,
         )
         current = edges.get(target)
         if current is None or (edge.weight, edge.edge_type, edge.target) > (
@@ -114,6 +133,41 @@ def typed_neighbors(
             )
     except Exception:
         pass
+
+    if include_typed_relations:
+        try:
+            from chronovisor.knowledge_graph.retrieval import (
+                entity_merge_neighbors,
+                relation_neighbors,
+            )
+
+            relation_rows = relation_neighbors(
+                page_id,
+                for_field=typed_relations_for_field,
+                rollout_key=rollout_key,
+            )
+            entity_rows = entity_merge_neighbors(
+                page_id,
+                for_field=typed_relations_for_field,
+                rollout_key=rollout_key,
+            )
+            for typed_row in [*relation_rows, *entity_rows]:
+                add(
+                    typed_row.target,
+                    typed_row.weight,
+                    "typed_entity_merge"
+                    if typed_row.supervision == "entity_merge"
+                    else "typed_relation",
+                    typed_row.supervision,
+                    relation_id=typed_row.relation_id,
+                    predicate=typed_row.predicate,
+                    direction=typed_row.direction,
+                    lifecycle=typed_row.status,
+                    evidence_refs=typed_row.evidence_refs,
+                )
+        except Exception:
+            # A derived/candidate graph can never take down baseline search.
+            pass
 
     return sorted(
         (edge for edge in edges.values() if edge.weight > 0),

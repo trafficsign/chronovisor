@@ -191,7 +191,7 @@ class FieldEvent:
     activation: float = 0.0
     reason_code: str = ""
     certificate_id: str = ""
-    components: dict[str, float] = field(default_factory=dict)
+    components: dict[str, float | str] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

@@ -87,6 +87,14 @@ def _percentile(values: list[float], fraction: float) -> float | None:
     return round(ordered[max(0, index)], 3)
 
 
+def _p95_improvement(teacher: list[float], field: list[float]) -> float | None:
+    teacher_p95 = _percentile(teacher, 0.95)
+    field_p95 = _percentile(field, 0.95)
+    if teacher_p95 is None or field_p95 is None:
+        return None
+    return round(teacher_p95 - field_p95, 3)
+
+
 def candidate_metrics(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     """Aggregate privacy-safe Field/teacher comparisons."""
 
@@ -181,14 +189,8 @@ def candidate_metrics(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
             "p95": _percentile(teacher_latencies, 0.95),
             "max": round(max(teacher_latencies), 3) if teacher_latencies else None,
         },
-        "p95_improvement_ms": (
-            round(
-                float(_percentile(teacher_latencies, 0.95))
-                - float(_percentile(field_latencies, 0.95)),
-                3,
-            )
-            if field_latencies and teacher_latencies
-            else None
+        "p95_improvement_ms": _p95_improvement(
+            teacher_latencies, field_latencies
         ),
         "over_4s": over_4s,
         "full_searches": full_searches,
@@ -456,6 +458,87 @@ def _advance_rollout(
     return "active", next_percent, candidate_trace_count
 
 
+def _persist_growth_artifacts(
+    *,
+    state_file: Path,
+    promotion_file: Path,
+    history_file: Path,
+    policy_history_file: Path,
+    last_known_good_file: Path,
+    payload: dict[str, Any],
+    promotion: dict[str, Any],
+    learning_decision: dict[str, Any],
+    current_policy: dict[str, Any],
+    integrity: dict[str, Any],
+) -> None:
+    metrics = payload["metrics"]
+    extensions = payload["extensions"]
+    _write_json(state_file, payload)
+    _write_json(promotion_file, promotion)
+    _append_history(
+        history_file,
+        {
+            key: payload[key]
+            for key in (
+                "generated_at",
+                "stage",
+                "effective_mode",
+                "canary_percent",
+                "field_learning_allowed",
+                "positive_learning_allowed",
+                "policy_update_allowed",
+                "authority_enabled",
+                "gates",
+            )
+        }
+        | {
+            "labels": metrics["labels"],
+            "candidate": metrics["candidate"],
+            "processor_used": metrics["processor_used"],
+            "learning": metrics["learning"],
+            "compiler": payload["compiler"],
+            "extensions": {
+                "typed_graph": extensions["typed_graph"]["gates"],
+                "rubric": extensions["rubric"]["gates"],
+            },
+        },
+    )
+    policy_record = append_policy_history(
+        {
+            "generated_at": payload["generated_at"],
+            "status": str(learning_decision.get("status") or "held"),
+            "reason": str(learning_decision.get("reason") or ""),
+            "policy": learning_decision.get("policy", current_policy),
+            "label_counts": metrics["labels"],
+            "metrics": metrics["learning"],
+            "split_integrity": integrity,
+            "authority_enabled": payload["authority_enabled"],
+            "extensions": {
+                "typed_graph": extensions["typed_graph"]["gates"],
+                "rubric": extensions["rubric"]["gates"],
+            },
+        },
+        path=policy_history_file,
+    )
+    chain = verify_policy_history(policy_history_file)
+    if payload["policy_update_allowed"] and chain.get("status") == "ok":
+        write_last_known_good(
+            {
+                key: float(value)
+                for key, value in learning_decision.get(
+                    "policy", current_policy
+                ).items()
+            },
+            evaluation={
+                "candidate": metrics["candidate"],
+                "processor_used": metrics["processor_used"],
+                "split_integrity": integrity,
+            },
+            history_head_sha256=str(policy_record["record_sha256"]),
+            path=last_known_good_file,
+        )
+
+
 def run_growth_cycle(
     *,
     dry_run: bool = False,
@@ -502,6 +585,32 @@ def run_growth_cycle(
     processor = processor_used_metrics(recall_rows, pull_rows)
     counts = dict(labels["counts"])
     label_gate = bool(labels["gates"]["field_learning_allowed"])
+    subject_gate_value = labels.get("gates")
+    subject_gates = subject_gate_value if isinstance(subject_gate_value, dict) else {}
+    typed_graph_eval = _read_json(
+        state_file.parent.parent / "typed-graph" / "evaluation.json"
+    )
+    rubric_status = _read_json(
+        state_file.parent.parent / "recall-rubric" / "status.json"
+    )
+    rubric_state = rubric_status if isinstance(rubric_status, dict) else {}
+    graph_eval = typed_graph_eval if isinstance(typed_graph_eval, dict) else {}
+    comparison_value = graph_eval.get("comparison")
+    comparison = comparison_value if isinstance(comparison_value, dict) else {}
+    metric_value = comparison.get("metrics")
+    metrics = metric_value if isinstance(metric_value, dict) else {}
+    winner_metrics_value = metrics.get(str(graph_eval.get("winner") or "current"))
+    winner_metrics = (
+        winner_metrics_value if isinstance(winner_metrics_value, dict) else {}
+    )
+    extension_gates = {
+        "relation_learning": subject_gates.get("relation_learning_allowed") is True,
+        "entity_learning": subject_gates.get("entity_learning_allowed") is True,
+        "rubric_learning": subject_gates.get("rubric_learning_allowed") is True,
+        "rubric_adopted": rubric_state.get("status") == "adopted",
+        "four_arm_evaluation": graph_eval.get("status") == "passed",
+        "external_calls_zero": winner_metrics.get("external_model_calls", 0) == 0,
+    }
     integrity = split_integrity(labels["labels"])
     compiler = compiler_metrics(_read_jsonl(compiler_trace_file))
     locked_e2e = locked_e2e_status(locked_e2e_file)
@@ -673,6 +782,19 @@ def run_growth_cycle(
         },
         "compiler": compiler,
         "locked_e2e": locked_e2e,
+        "extensions": {
+            "typed_graph": {
+                "gates": extension_gates,
+                "authority_mature": all(extension_gates.values()),
+                "evaluation_status": str(
+                    typed_graph_eval.get("status") or "not_started"
+                ),
+            },
+            "rubric": {
+                "status": str(rubric_status.get("status") or "builtin"),
+                "gates": rubric_status.get("gates") or {},
+            },
+        },
     }
     promotion = (
         _seal(_promotion_payload(metrics))
@@ -680,57 +802,18 @@ def run_growth_cycle(
         else _failed_promotion(stage, metrics)
     )
     if not dry_run:
-        _write_json(state_file, payload)
-        _write_json(promotion_file, promotion)
-        _append_history(
-            history_file,
-            {
-                "generated_at": generated_at,
-                "stage": stage,
-                "effective_mode": effective_mode,
-                "canary_percent": canary_percent,
-                "field_learning_allowed": field_learning_allowed,
-                "positive_learning_allowed": positive_learning_allowed,
-                "policy_update_allowed": policy_update_allowed,
-                "authority_enabled": authority_eligible,
-                "gates": gates,
-                "labels": counts,
-                "candidate": candidate,
-                "processor_used": processor,
-                "learning": learning_metrics,
-                "compiler": compiler,
-            },
+        _persist_growth_artifacts(
+            state_file=state_file,
+            promotion_file=promotion_file,
+            history_file=history_file,
+            policy_history_file=policy_history_file,
+            last_known_good_file=last_known_good_file,
+            payload=payload,
+            promotion=promotion,
+            learning_decision=learning_decision,
+            current_policy=current_policy,
+            integrity=integrity,
         )
-        policy_record = append_policy_history(
-            {
-                "generated_at": generated_at,
-                "status": str(learning_decision.get("status") or "held"),
-                "reason": str(learning_decision.get("reason") or ""),
-                "policy": learning_decision.get("policy", current_policy),
-                "label_counts": counts,
-                "metrics": learning_metrics,
-                "split_integrity": integrity,
-                "authority_enabled": authority_eligible,
-            },
-            path=policy_history_file,
-        )
-        chain = verify_policy_history(policy_history_file)
-        if policy_update_allowed and chain.get("status") == "ok":
-            write_last_known_good(
-                {
-                    key: float(value)
-                    for key, value in learning_decision.get(
-                        "policy", current_policy
-                    ).items()
-                },
-                evaluation={
-                    "candidate": candidate,
-                    "processor_used": processor,
-                    "split_integrity": integrity,
-                },
-                history_head_sha256=str(policy_record["record_sha256"]),
-                path=last_known_good_file,
-            )
     return payload
 
 
