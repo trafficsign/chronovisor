@@ -157,12 +157,12 @@ def test_contract_cases_cover_every_model_backed_lane_independently() -> None:
     expected_lanes = set(model_backed_lane_names())
     counts = Counter(case.lane for case in cases)
 
-    assert len(cases) == 100
+    assert len(cases) == 120
     assert set(counts) == expected_lanes
     assert min(counts.values()) == CASES_PER_MODEL_BACKED_LANE
     assert counts["content_correction_classification"] == 6
     assert len({case.case_id for case in cases}) == len(cases)
-    assert all(case.case_id.startswith("lane-contract-v26:") for case in cases)
+    assert all(case.case_id.startswith("lane-contract-v28:") for case in cases)
 
 
 def test_contract_cases_bind_to_the_exact_live_lane_envelope() -> None:
@@ -365,10 +365,10 @@ def test_content_review_contracts_distinguish_three_nonapproval_evidence_states(
 
 
 def test_lane_contract_case_source_version_tracks_the_resealed_cases() -> None:
-    assert LANE_CONTRACT_POLICY_VERSION == 10
+    assert LANE_CONTRACT_POLICY_VERSION == 11
     assert INGEST_REPAIR_OPTION_POLICY_VERSION == 2
-    assert LANE_CONTRACT_CASE_VERSION == 26
-    assert LANE_CONTRACT_SOURCE == "deterministic_lane_contract_v26"
+    assert LANE_CONTRACT_CASE_VERSION == 28
+    assert LANE_CONTRACT_SOURCE == "deterministic_lane_contract_v27"
     assert set(LANE_PROMPT_POLICY_VERSIONS) == set(model_backed_lane_names())
     assert LANE_PROMPT_POLICY_VERSIONS["ingest_reconciliation"] == 16
     assert LANE_PROMPT_POLICY_VERSIONS["raw_replay_reconciliation"] == 9
@@ -1889,8 +1889,8 @@ def test_ingest_preflight_scopes_a_shared_tag_option_to_one_filename() -> None:
 
 def test_canonical_manifest_seals_all_effective_requests_and_outcomes() -> None:
     manifest = decision_lane_contract_case_manifest()
-    assert manifest["total_cases"] == 100
-    assert len(manifest["lanes"]) == 19
+    assert manifest["total_cases"] == 120
+    assert len(manifest["lanes"]) == 23
     assert len(decision_lane_contract_case_manifest_sha256()) == 64
     assert all(
         lane["case_count"] >= CASES_PER_MODEL_BACKED_LANE
@@ -1914,7 +1914,7 @@ def test_lane_overlay_excludes_the_infeasible_16k_bucket() -> None:
         for case in decision_lane_contract_case_specs()
     )
     assert buckets == {
-        32_768: 97,
+        32_768: 117,
         65_536: 1,
         98_304: 1,
         114_688: 1,

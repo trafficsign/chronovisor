@@ -1259,6 +1259,8 @@ def _model_activity_caller() -> tuple[str, str]:
 
 def _model_activity_pipeline(component: str) -> str:
     normalized = component.casefold()
+    if ".knowledge_graph." in normalized:
+        return "typed_graph"
     if ".recall." in normalized:
         return "recall"
     if ".ingest." in normalized:

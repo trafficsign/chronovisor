@@ -33,7 +33,9 @@ class DecisionPolicy:
         if self.default_mode not in VALID_MODES:
             raise ValueError(f"unsupported decision policy mode: {self.default_mode}")
         if self.kind in {"consensus", "local_batch"} and not self.schema_name:
-            raise ValueError(f"structured decision policy requires a schema: {self.lane}")
+            raise ValueError(
+                f"structured decision policy requires a schema: {self.lane}"
+            )
 
 
 DECISION_POLICIES: dict[str, DecisionPolicy] = {
@@ -60,7 +62,9 @@ DECISION_POLICIES: dict[str, DecisionPolicy] = {
     "lint_safe_semantic_mutation": DecisionPolicy(
         "lint_safe_semantic_mutation", "consensus", "lint_safe_semantic_mutation"
     ),
-    "lint_tag_repair": DecisionPolicy("lint_tag_repair", "consensus", "lint_tag_repair"),
+    "lint_tag_repair": DecisionPolicy(
+        "lint_tag_repair", "consensus", "lint_tag_repair"
+    ),
     "local_repair": DecisionPolicy("local_repair", "consensus", "local_repair"),
     "metadata_backfill": DecisionPolicy(
         "metadata_backfill", "consensus", "lint_safe_semantic_mutation"
@@ -83,6 +87,18 @@ DECISION_POLICIES: dict[str, DecisionPolicy] = {
     ),
     "recall_improvement": DecisionPolicy(
         "recall_improvement", "local_batch", "generic_decision"
+    ),
+    "relation_verification": DecisionPolicy(
+        "relation_verification", "consensus", "relation_verification"
+    ),
+    "entity_merge_verification": DecisionPolicy(
+        "entity_merge_verification", "consensus", "entity_merge_verification"
+    ),
+    "recall_usefulness_judgment": DecisionPolicy(
+        "recall_usefulness_judgment", "consensus", "recall_usefulness_judgment"
+    ),
+    "recall_rubric_calibration": DecisionPolicy(
+        "recall_rubric_calibration", "local_batch", "recall_rubric_calibration"
     ),
     "search_label": DecisionPolicy("search_label", "local_batch", "search_label"),
     "search_self_tune": DecisionPolicy(
@@ -154,7 +170,13 @@ def decision_policy_snapshot() -> dict[str, Any]:
             "mode": mode,
             "error": error,
         }
-    return {"lanes": lanes, "counts": {mode: sum(1 for row in lanes.values() if row["mode"] == mode) for mode in sorted(VALID_MODES)}}
+    return {
+        "lanes": lanes,
+        "counts": {
+            mode: sum(1 for row in lanes.values() if row["mode"] == mode)
+            for mode in sorted(VALID_MODES)
+        },
+    }
 
 
 __all__ = [

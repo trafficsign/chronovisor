@@ -26,11 +26,11 @@ from chronovisor.core.canonical_json import (
 # Registry/artifact identity.  This is deliberately not rendered into every
 # model request: a change in one lane must not perturb sampling in 18 unrelated
 # lanes or force their already-proven prompt contracts to drift.
-LANE_CONTRACT_POLICY_VERSION = 10
+LANE_CONTRACT_POLICY_VERSION = 11
 LANE_REQUEST_ENVELOPE_VERSION = 2
 MIN_CASES_PER_MODEL_BACKED_LANE = 5
-LANE_CONTRACT_SOURCE = "deterministic_lane_contract_v26"
-LANE_CONTRACT_CASE_VERSION = 26
+LANE_CONTRACT_SOURCE = "deterministic_lane_contract_v27"
+LANE_CONTRACT_CASE_VERSION = 28
 
 
 @dataclass(frozen=True)
@@ -141,6 +141,26 @@ _LANE_SEMANTICS: dict[str, LaneSemantics] = {
         "One search-ranking policy candidate with independent locked-test non-regression evidence.",
         "Approve only when every quality and safety guard passes without regression and the change is rollback-safe.",
         "approved replaces the active search policy artifact; rejected is no mutation; quarantined/needs_retry are holds.",
+    ),
+    "relation_verification": LaneSemantics(
+        "One evidence-bound typed relation with exact endpoint and digest receipts.",
+        "Verify only explicit source support with known endpoints and no contradiction; similarity is never truth evidence and the producer vote is not independent.",
+        "approved creates a silver verified-relation event; rejected/abstained/needs_retry preserve candidate state.",
+    ),
+    "entity_merge_verification": LaneSemantics(
+        "One reversible entity merge candidate with alias and source evidence.",
+        "Approve only the same identity; namesakes, version collisions, and person/product/organization ambiguity remain separate.",
+        "approved creates a silver merge decision; all other outcomes hold the candidate without modifying AliasStore.",
+    ),
+    "recall_usefulness_judgment": LaneSemantics(
+        "One page-recall candidate with redacted topic and evidence features under an adopted rubric.",
+        "Approve only relevant, marginally useful, read-worthy, non-harmful recall; exposure alone is not usefulness.",
+        "approved creates a silver usefulness label; strong authority still requires actual recall_used evidence.",
+    ),
+    "recall_rubric_calibration": LaneSemantics(
+        "One candidate rubric with time-ordered development and locked holdout metrics.",
+        "Approve only calibrated non-regression with coverage preserved and a sealed rollback target.",
+        "approved nominates a rubric artifact; adoption still requires the unified growth and canary gates.",
     ),
 }
 
@@ -263,6 +283,30 @@ _REQUIRED_COVERAGE_LABELS: dict[str, tuple[str, ...]] = {
         'decision="quarantined"',
         'decision="rejected"',
     ),
+    "relation_verification": (
+        'decision="approved"',
+        'decision="rejected"',
+        'decision="abstained"',
+        'decision="needs_retry"',
+    ),
+    "entity_merge_verification": (
+        'decision="approved"',
+        'decision="rejected"',
+        'decision="abstained"',
+        'decision="needs_retry"',
+    ),
+    "recall_usefulness_judgment": (
+        'decision="approved"',
+        'decision="rejected"',
+        'decision="abstained"',
+        'decision="needs_retry"',
+    ),
+    "recall_rubric_calibration": (
+        'decision="approved"',
+        'decision="rejected"',
+        'decision="abstained"',
+        'decision="needs_retry"',
+    ),
 }
 
 
@@ -332,6 +376,30 @@ _REQUIRED_EFFECTS: dict[str, tuple[str, ...]] = {
         "hold",
         "no_page_mutation",
         "policy_mutation:search_self_tune",
+    ),
+    "relation_verification": (
+        "decision:approved",
+        "decision:rejected",
+        "decision:abstained",
+        "decision:needs_retry",
+    ),
+    "entity_merge_verification": (
+        "decision:approved",
+        "decision:rejected",
+        "decision:abstained",
+        "decision:needs_retry",
+    ),
+    "recall_usefulness_judgment": (
+        "decision:approved",
+        "decision:rejected",
+        "decision:abstained",
+        "decision:needs_retry",
+    ),
+    "recall_rubric_calibration": (
+        "decision:approved",
+        "decision:rejected",
+        "decision:abstained",
+        "decision:needs_retry",
     ),
 }
 

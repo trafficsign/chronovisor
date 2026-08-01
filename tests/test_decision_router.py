@@ -658,7 +658,7 @@ def _adoption_artifact(
     path: Path,
     candidate: DecisionRouterConfig,
     *,
-    usable_cases: int = 100,
+    usable_cases: int | None = None,
     adopted: bool = True,
 ) -> Path:
     schemas_by_digest: dict[str, dict[str, object]] = {}
@@ -668,6 +668,8 @@ def _adoption_artifact(
         schemas_by_digest.setdefault(digest, copied)
     schema_items = sorted(schemas_by_digest.items())
     source_path = path.with_suffix(path.suffix + ".source.jsonl").resolve()
+    if usable_cases is None:
+        usable_cases = len(contract_candidates())
     source_rows: list[dict[str, object]] = [
         dict(candidate_row.row) for candidate_row in contract_candidates()
     ][:usable_cases]

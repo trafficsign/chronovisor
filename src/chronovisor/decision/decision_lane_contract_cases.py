@@ -42,9 +42,15 @@ from chronovisor.decision.decision_lane_prompts import (
     build_search_self_tune_prompt,
     validate_identity_preflight_receipt,
 )
+from chronovisor.decision.graph_decisions import (
+    build_entity_merge_verification_prompt,
+    build_recall_rubric_calibration_prompt,
+    build_recall_usefulness_prompt,
+    build_relation_verification_prompt,
+)
 
 CASES_PER_MODEL_BACKED_LANE = 5
-LANE_CONTRACT_CASE_ID_VERSION = 26
+LANE_CONTRACT_CASE_ID_VERSION = 28
 
 
 def _coverage_label(expected: dict[str, Any]) -> str | None:
@@ -2468,9 +2474,144 @@ def _search_self_tune_cases() -> list[tuple[str, str | None, dict[str, Any]]]:
     ]
 
 
+def _graph_expected(decision: str, **values: Any) -> dict[str, Any]:
+    return {
+        "decision": decision,
+        **values,
+        "confidence": 0.95 if decision != "abstained" else 0.5,
+        "summary": f"Typed graph contract resolves as {decision}.",
+    }
+
+
+def _relation_verification_cases() -> list[tuple[str, str | None, dict[str, Any]]]:
+    definitions = [
+        ("approved", True, False, False, True),
+        ("rejected", False, True, False, True),
+        ("needs_retry", False, False, False, False),
+        ("abstained", False, False, False, True),
+        ("rejected", False, False, True, True),
+    ]
+    return [
+        (
+            build_relation_verification_prompt(
+                {
+                    "relation_id": f"contract-relation-{index}",
+                    "evidence_state": decision,
+                    "content_sha256": str(index) * 64,
+                }
+            ),
+            None,
+            _graph_expected(
+                decision,
+                evidence_supported=supported,
+                contradiction_found=contradiction,
+                unknown_endpoint=unknown,
+                digest_valid=digest,
+            ),
+        )
+        for index, (decision, supported, contradiction, unknown, digest) in enumerate(
+            definitions, 1
+        )
+    ]
+
+
+def _entity_merge_verification_cases() -> list[tuple[str, str | None, dict[str, Any]]]:
+    definitions = [
+        ("exact_alias", "approved", True, True, False, False),
+        ("namesake", "rejected", False, False, True, True),
+        ("model_version_ambiguity", "needs_retry", False, False, False, False),
+        ("person_organization_collision", "abstained", False, True, False, False),
+        ("erroneous_merge_split", "rejected", False, True, True, True),
+    ]
+    return [
+        (
+            build_entity_merge_verification_prompt(
+                {
+                    "merge_candidate_id": f"contract-merge-{index}",
+                    "identity_state": scenario,
+                }
+            ),
+            None,
+            _graph_expected(
+                decision,
+                same_identity=same,
+                alias_supported=alias,
+                collision_risk=collision,
+                split_required=split,
+            ),
+        )
+        for index, (scenario, decision, same, alias, collision, split) in enumerate(
+            definitions, 1
+        )
+    ]
+
+
+def _recall_usefulness_cases() -> list[tuple[str, str | None, dict[str, Any]]]:
+    definitions = [
+        ("approved", True, True, True, False),
+        ("rejected", True, False, False, False),
+        ("rejected", False, False, False, True),
+        ("abstained", True, False, True, False),
+        ("needs_retry", False, False, False, False),
+    ]
+    rubric = "A card must be topically relevant, add information not already present, be worth a read, and not be stale or harmful."
+    return [
+        (
+            build_recall_usefulness_prompt(
+                {"candidate_id": f"contract-card-{index}", "state": decision},
+                rubric,
+            ),
+            None,
+            _graph_expected(
+                decision,
+                topically_relevant=relevant,
+                marginally_useful=marginal,
+                read_worthy=read_worthy,
+                stale_or_harmful=harmful,
+            ),
+        )
+        for index, (decision, relevant, marginal, read_worthy, harmful) in enumerate(
+            definitions, 1
+        )
+    ]
+
+
+def _recall_rubric_calibration_cases() -> list[tuple[str, str | None, dict[str, Any]]]:
+    definitions = [
+        ("approved", True, True, True, True),
+        ("rejected", False, True, True, True),
+        ("rejected", True, False, True, True),
+        ("abstained", True, True, True, True),
+        ("needs_retry", False, False, False, False),
+    ]
+    return [
+        (
+            build_recall_rubric_calibration_prompt(
+                {"rubric_id": f"contract-rubric-{index}", "state": decision}
+            ),
+            None,
+            _graph_expected(
+                decision,
+                rubric_id=f"contract-rubric-{index}",
+                holdout_non_regression=non_regression,
+                calibration_improved=improved,
+                coverage_preserved=coverage,
+                rollback_safe=rollback,
+            ),
+        )
+        for index, (
+            decision,
+            non_regression,
+            improved,
+            coverage,
+            rollback,
+        ) in enumerate(definitions, 1)
+    ]
+
+
 @lru_cache(maxsize=1)
 def decision_lane_contract_case_specs() -> tuple[DecisionLaneContractCase, ...]:
-    """Return at least five raw production contract cases for all 19 lanes."""
+    """Return at least five raw production contract cases for every lane."""
 
     from chronovisor.decision.decision_lane_contracts import model_backed_lane_names
     from chronovisor.decision.decision_policy import DECISION_POLICIES
@@ -2495,6 +2636,10 @@ def decision_lane_contract_case_specs() -> tuple[DecisionLaneContractCase, ...]:
         "recall_improvement": _recall_improvement_cases,
         "search_label": _search_label_cases,
         "search_self_tune": _search_self_tune_cases,
+        "relation_verification": _relation_verification_cases,
+        "entity_merge_verification": _entity_merge_verification_cases,
+        "recall_usefulness_judgment": _recall_usefulness_cases,
+        "recall_rubric_calibration": _recall_rubric_calibration_cases,
     }
     required = set(model_backed_lane_names())
     if set(builders) != required:
