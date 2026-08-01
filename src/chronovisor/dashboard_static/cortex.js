@@ -34,6 +34,7 @@
   const MAX_ELECTRIC_PATHS = 12;
   const MAX_TRANSPORT_EFFECTS = 18;
   const CAPTURE_COMET_DURATION_MS = 5200;
+  const PROCESSING_EFFECT_PULSE_MS = 1450;
   const NODE_STIMULUS_SCALE = 0.38;
   const NODE_ARRIVAL_SCALE = 0.28;
   const NODE_CORE_SCALE = 1;
@@ -112,6 +113,8 @@
   let eventSocket = null;
   let eventReconnect = null;
   let eventSocketGeneration = 0;
+  let processingActivitySource = null;
+  let processingPulseTimer = 0;
   let sessionRequest = 0;
   const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
   const fieldState = window.CortexField.createState();
@@ -129,6 +132,9 @@
     maxGlowPadding: 0,
     transportReceived: 0,
     transportPainted: 0,
+    processingEvents: 0,
+    activeProcessingLanes: 0,
+    processingActivityConnected: false,
     captureEvents: 0,
     ingestEvents: 0,
     applyEvents: 0,
@@ -182,6 +188,9 @@
       electricTravelMaxMs: ELECTRIC_TRAVEL_MAX_MS,
       transportReceived: cortexMetrics.transportReceived,
       transportPainted: cortexMetrics.transportPainted,
+      processingEvents: cortexMetrics.processingEvents,
+      activeProcessingLanes: cortexMetrics.activeProcessingLanes,
+      processingActivityConnected: cortexMetrics.processingActivityConnected,
       captureEvents: cortexMetrics.captureEvents,
       ingestEvents: cortexMetrics.ingestEvents,
       applyEvents: cortexMetrics.applyEvents,
@@ -217,6 +226,7 @@
   const edgeAfterglows = [];
   const nodeEffects = [];
   const transportEffects = [];
+  const activeProcessingLanes = new Map();
   const demoTransportTimers = [];
   const stars = Array.from({ length: 130 }, () => ({
     x: Math.random(),
@@ -1001,6 +1011,13 @@
     target.dataset.fps = frameMean ? (1000 / frameMean).toFixed(1) : "0.0";
     target.dataset.transportReceived = String(cortexMetrics.transportReceived);
     target.dataset.transportPainted = String(cortexMetrics.transportPainted);
+    target.dataset.processingEvents = String(cortexMetrics.processingEvents);
+    target.dataset.activeProcessingLanes = String(
+      cortexMetrics.activeProcessingLanes,
+    );
+    target.dataset.processingActivityConnected = String(
+      cortexMetrics.processingActivityConnected,
+    );
     target.dataset.captureEvents = String(cortexMetrics.captureEvents);
     target.dataset.ingestEvents = String(cortexMetrics.ingestEvents);
     target.dataset.applyEvents = String(cortexMetrics.applyEvents);
@@ -1121,14 +1138,22 @@
     const revision = ingressRevision;
     window.clearTimeout(ingressReset);
     root.dataset.phase = phase;
-    state.textContent = phase === "capture"
+    const processing = event.kind === "processing";
+    state.textContent = processing
+      ? `${String(event.lane_key || "PROCESS").toUpperCase()} · ${phase.toUpperCase()}`
+      : phase === "capture"
       ? "CAPTURING HOST MEMORY"
       : phase === "apply"
         ? "WRITING MEMORY GRAPH"
         : phase === "complete"
           ? "CONSOLIDATED"
           : `INGEST ${phase.toUpperCase()}`;
-    if (phase === "capture") {
+    if (processing) {
+      detail.textContent = [event.model, event.role]
+        .filter(Boolean)
+        .map(String)
+        .join(" · ") || String(event.label || "live processing");
+    } else if (phase === "capture") {
       const bytes = Number(event.byte_count || 0);
       const count = Math.max(1, Number(event.raw_count || 1));
       const captureId = String(event.capture_id || "pending").slice(0, 12);
@@ -1151,10 +1176,11 @@
         : 4800);
   }
 
-  function retireSupersededIngestEffects(pageId, now) {
+  function retireSupersededIngestEffects(pageId, now, channelKey) {
     transportEffects.forEach((effect) => {
       if (
         effect.phase === "capture"
+        || effect.channelKey !== channelKey
         || (pageId && effect.pageId && effect.pageId !== pageId)
       ) return;
       const elapsed = Math.max(0, now - effect.startedAt);
@@ -1169,7 +1195,15 @@
     const now = performance.now();
     const pageId = transportPageId(event);
     const node = pageId ? byId.get(pageId) : null;
-    if (phase !== "capture") retireSupersededIngestEffects(pageId, now);
+    const channelKey = String(
+      event.channel_key
+      || (event.kind === "processing"
+        ? `processing:${event.lane_key || "unknown"}`
+        : event.kind || "memory"),
+    );
+    if (phase !== "capture") {
+      retireSupersededIngestEffects(pageId, now, channelKey);
+    }
     const duration = phase === "capture"
       ? CAPTURE_COMET_DURATION_MS
       : phase === "apply" || phase === "complete"
@@ -1182,6 +1216,9 @@
     transportEffects.push({
       kind: event.kind,
       phase,
+      channelKey,
+      laneKey: String(event.lane_key || ""),
+      step: String(event.step || phase),
       pageId,
       nodeIndex: node?.index ?? -1,
       label: String(event.label || event.kind || "transport").slice(0, 160),
@@ -1198,6 +1235,7 @@
       transportEffects.splice(0, transportEffects.length - MAX_TRANSPORT_EFFECTS);
     }
     if (phase === "capture") cortexMetrics.captureEvents += 1;
+    else if (event.kind === "processing") cortexMetrics.processingEvents += 1;
     else cortexMetrics.ingestEvents += 1;
     if (phase === "apply" || phase === "complete") cortexMetrics.applyEvents += 1;
     crackle(
@@ -1208,7 +1246,11 @@
           : 0.04 + Math.min(0.035, cortexMetrics.ingestEvents * 0.006),
     );
     updateMemoryIngress(event, phase);
-    const prefix = event.source === "demo" ? "DEMO/REPLAY" : "MEMORY I/O";
+    const prefix = event.source === "demo"
+      ? "DEMO/REPLAY"
+      : event.kind === "processing"
+        ? "LIVE PROCESS"
+        : "MEMORY I/O";
     flashTicker(`${prefix} · ${String(event.label || phase).toUpperCase()}`);
     const aria = document.getElementById("fieldAria");
     if (aria) {
@@ -1937,10 +1979,16 @@
     ) {
       return { x: node.screenX, y: node.screenY, node };
     }
-    const fallback = nodes
+    const fallbacks = nodes
       .filter(visibleMemoryNode)
-      .sort((left, right) => right.fanIn + right.fanOut - left.fanIn - left.fanOut)
-      .at(0) || visibleHub();
+      .sort((left, right) => right.fanIn + right.fanOut - left.fanIn - left.fanOut);
+    const fallbackIndex = effect.kind === "processing" && fallbacks.length
+      ? Math.floor(
+          deterministicUnit(effect.channelKey, effect.laneKey.length + 17)
+          * Math.min(12, fallbacks.length),
+        )
+      : 0;
+    const fallback = fallbacks.at(fallbackIndex) || visibleHub();
     if (fallback) {
       return { x: fallback.screenX, y: fallback.screenY, node: fallback };
     }
@@ -2275,6 +2323,12 @@
     context.fill();
   }
 
+  function formationLabel(effect, fallback) {
+    if (effect.kind !== "processing") return fallback;
+    return `${effect.laneKey || "PROCESS"} · ${effect.step || effect.phase}`
+      .toUpperCase();
+  }
+
   function drawTriageFormation(effect, progress, fade, star, target) {
     const wave = reducedMotion.matches || !motionEnabled ? 0.68 : smoothstep(progress);
     const radius = star.radius * (0.12 + wave * 1.18);
@@ -2301,7 +2355,11 @@
     });
     context.fillStyle = rgba(RGB_FIRE, fade * 0.88);
     context.textAlign = "center";
-    context.fillText("EVALUATING CANDIDATES", star.x, star.y - 12);
+    context.fillText(
+      formationLabel(effect, "EVALUATING CANDIDATES"),
+      star.x,
+      star.y - 12,
+    );
   }
 
   function quadraticPoint(source, control, target, progress) {
@@ -2362,7 +2420,11 @@
     context.fill();
     context.fillStyle = rgba(RGB_VIOLET, fade * 0.9);
     context.textAlign = "left";
-    context.fillText("SYNTHESIZING MEMORY", target.x + 12, target.y - 10);
+    context.fillText(
+      formationLabel(effect, "SYNTHESIZING MEMORY"),
+      target.x + 12,
+      target.y - 10,
+    );
   }
 
   function drawConsensusFormation(effect, time, progress, fade, target) {
@@ -2397,7 +2459,11 @@
     drawCompactGlow(glowFire, target.x, target.y, 2.4, 3.2, fade * (0.28 + collapse * 0.55));
     context.fillStyle = rgba(RGB_CONSENSUS, fade * 0.92);
     context.textAlign = "left";
-    context.fillText("LOCAL CONSENSUS", target.x + 12, target.y - 10);
+    context.fillText(
+      formationLabel(effect, "LOCAL CONSENSUS"),
+      target.x + 12,
+      target.y - 10,
+    );
   }
 
   function visibleConsolidationNeighbors(node) {
@@ -2479,7 +2545,10 @@
     context.fillStyle = rgba(RGB_COMMIT, fade * 0.9);
     context.textAlign = "left";
     context.fillText(
-      `${effect.phase === "complete" ? "LOCKED" : "WRITE"} ${effect.pageId || "MEMORY"}`.slice(0, 42),
+      formationLabel(
+        effect,
+        `${effect.phase === "complete" ? "LOCKED" : "WRITE"} ${effect.pageId || "MEMORY"}`,
+      ).slice(0, 42),
       target.x + 10,
       target.y - 9,
     );
@@ -3594,6 +3663,137 @@
     });
   }
 
+  function processingEffectPhase(step) {
+    const normalized = String(step || "").toLowerCase();
+    if (
+      ["raw", "triage", "search", "select", "discover", "detect"].includes(
+        normalized,
+      )
+    ) {
+      return "triage";
+    }
+    if (
+      [
+        "generate",
+        "rerank",
+        "primary",
+        "challenger",
+        "inspect",
+        "extract",
+        "local_fix",
+      ].includes(normalized)
+    ) {
+      return "generate";
+    }
+    if (
+      ["consensus", "tie_break", "verify", "evaluate", "escalate"].includes(
+        normalized,
+      )
+    ) {
+      return "consensus";
+    }
+    if (["apply", "commit", "report", "consolidate", "promote"].includes(normalized)) {
+      return "apply";
+    }
+    return "generate";
+  }
+
+  function processingLaneEvent(lane, phase = processingEffectPhase(lane.current_step)) {
+    const laneKey = String(lane.key || "process");
+    const step = String(lane.current_step || lane.phase || "work");
+    const label = `${lane.label || laneKey} · ${step}`;
+    return {
+      kind: "processing",
+      phase,
+      source: "processing-activity",
+      lane_key: laneKey,
+      step,
+      channel_key: `processing:${laneKey}`,
+      label,
+      model: String(lane.model || ""),
+      role: String(lane.role || ""),
+      page_ids: [],
+    };
+  }
+
+  function pulseProcessingLane(state, now = performance.now()) {
+    if (!liveEventsEnabled || document.hidden) return;
+    visualizeTransportEvent(processingLaneEvent(state.lane, state.phase));
+    state.lastPulseAt = now;
+  }
+
+  function applyProcessingActivity(snapshot) {
+    if (!Array.isArray(snapshot?.lanes)) return;
+    const now = performance.now();
+    const activeKeys = new Set();
+    snapshot.lanes.forEach((lane) => {
+      const laneKey = String(lane.key || "process");
+      if (lane.state !== "active") return;
+      activeKeys.add(laneKey);
+      const phase = processingEffectPhase(lane.current_step);
+      const signature = [
+        lane.work_item,
+        lane.current_step,
+        lane.model,
+        lane.role,
+      ].map((value) => String(value || "")).join(":");
+      const previous = activeProcessingLanes.get(laneKey);
+      if (!previous || previous.signature !== signature) {
+        const state = { lane, phase, signature, lastPulseAt: 0 };
+        activeProcessingLanes.set(laneKey, state);
+        pulseProcessingLane(state, now);
+      } else {
+        previous.lane = lane;
+        previous.phase = phase;
+      }
+    });
+    [...activeProcessingLanes.entries()].forEach(([laneKey, state]) => {
+      if (activeKeys.has(laneKey)) return;
+      if (liveEventsEnabled) {
+        visualizeTransportEvent(processingLaneEvent(state.lane, "complete"));
+      }
+      activeProcessingLanes.delete(laneKey);
+    });
+    cortexMetrics.activeProcessingLanes = activeProcessingLanes.size;
+    publishCortexMetrics();
+  }
+
+  function pulseActiveProcessingLanes() {
+    const now = performance.now();
+    activeProcessingLanes.forEach((state) => {
+      if (now - state.lastPulseAt >= PROCESSING_EFFECT_PULSE_MS) {
+        pulseProcessingLane(state, now);
+      }
+    });
+  }
+
+  function connectProcessingActivity() {
+    if (!("EventSource" in window)) return;
+    if (processingActivitySource) processingActivitySource.close();
+    processingActivitySource = new EventSource("/api/activity-stream");
+    processingActivitySource.addEventListener("activity", (message) => {
+      try {
+        applyProcessingActivity(JSON.parse(message.data));
+      } catch (_error) {
+        return;
+      }
+    });
+    processingActivitySource.onopen = () => {
+      cortexMetrics.processingActivityConnected = true;
+      publishCortexMetrics();
+    };
+    processingActivitySource.onerror = () => {
+      cortexMetrics.processingActivityConnected = false;
+      publishCortexMetrics();
+    };
+    window.clearInterval(processingPulseTimer);
+    processingPulseTimer = window.setInterval(
+      pulseActiveProcessingLanes,
+      250,
+    );
+    document.addEventListener("visibilitychange", pulseActiveProcessingLanes);
+  }
+
   async function loadField(sessionHash = "", replayEvents = []) {
     const request = ++sessionRequest;
     const queryString = sessionHash
@@ -3763,6 +3963,7 @@
       cameraTarget = null;
       previousTime = performance.now();
       requestAnimationFrame(frame);
+      connectProcessingActivity();
       await loadField();
     } catch (error) {
       showBootError(error);

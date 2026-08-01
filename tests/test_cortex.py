@@ -692,6 +692,15 @@ def test_cortex_static_view_preserves_fable_layout_and_uses_live_data() -> None:
     assert "function visualizeFieldEvent(event)" in script
     assert "function visualizeTransportEvent(event)" in script
     assert "function drawTransportEffects(time)" in script
+    assert 'new EventSource("/api/activity-stream")' in script
+    assert "function connectProcessingActivity()" in script
+    assert "function applyProcessingActivity(snapshot)" in script
+    assert "function processingEffectPhase(step)" in script
+    assert "function pulseActiveProcessingLanes()" in script
+    assert "const PROCESSING_EFFECT_PULSE_MS = 1450;" in script
+    assert 'kind: "processing"' in script
+    assert "channel_key: `processing:${laneKey}`" in script
+    assert "connectProcessingActivity();" in script
     assert "function drawCaptureComets(" in script
     assert "function captureCometPoint(" in script
     assert "function memoryStarGeometry(" in script
