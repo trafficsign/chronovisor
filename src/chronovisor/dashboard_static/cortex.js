@@ -148,6 +148,13 @@
     cometSafeBottom: 0,
     cometTurns: 0,
     explorationArcs: 0,
+    triageCandidates: 0,
+    generateParticles: 0,
+    consensusOrbits: 0,
+    formationOriginX: 0,
+    formationOriginY: 0,
+    formationTargetX: 0,
+    formationTargetY: 0,
     consolidationEdges: 0,
     transportElectricPeak: 0,
   };
@@ -194,6 +201,13 @@
       cometSafeBottom: cortexMetrics.cometSafeBottom,
       cometTurns: cortexMetrics.cometTurns,
       explorationArcs: cortexMetrics.explorationArcs,
+      triageCandidates: cortexMetrics.triageCandidates,
+      generateParticles: cortexMetrics.generateParticles,
+      consensusOrbits: cortexMetrics.consensusOrbits,
+      formationOriginX: cortexMetrics.formationOriginX,
+      formationOriginY: cortexMetrics.formationOriginY,
+      formationTargetX: cortexMetrics.formationTargetX,
+      formationTargetY: cortexMetrics.formationTargetY,
       consolidationEdges: cortexMetrics.consolidationEdges,
       transportElectricPeak: cortexMetrics.transportElectricPeak,
     },
@@ -1024,6 +1038,13 @@
     target.dataset.cometTurns = cortexMetrics.cometTurns.toFixed(2);
     target.dataset.explorationArcs = String(cortexMetrics.explorationArcs);
     target.dataset.consolidationEdges = String(cortexMetrics.consolidationEdges);
+    target.dataset.triageCandidates = String(cortexMetrics.triageCandidates);
+    target.dataset.generateParticles = String(cortexMetrics.generateParticles);
+    target.dataset.consensusOrbits = String(cortexMetrics.consensusOrbits);
+    target.dataset.formationOriginX = cortexMetrics.formationOriginX.toFixed(1);
+    target.dataset.formationOriginY = cortexMetrics.formationOriginY.toFixed(1);
+    target.dataset.formationTargetX = cortexMetrics.formationTargetX.toFixed(1);
+    target.dataset.formationTargetY = cortexMetrics.formationTargetY.toFixed(1);
     target.dataset.transportElectricPeak =
       cortexMetrics.transportElectricPeak.toFixed(3);
     target.dataset.activeLabelLimit = String(ACTIVE_LABEL_LIMIT);
@@ -1902,13 +1923,6 @@
     context.globalCompositeOperation = "source-over";
   }
 
-  function transportAnchor() {
-    return {
-      x: Math.min(150, Math.max(88, width * 0.16)),
-      y: Math.max(96, height - 77),
-    };
-  }
-
   function transportTarget(effect) {
     const node = nodes[effect.nodeIndex];
     if (
@@ -1921,9 +1935,16 @@
     ) {
       return { x: node.screenX, y: node.screenY, node };
     }
+    const fallback = nodes
+      .filter(visibleMemoryNode)
+      .sort((left, right) => right.fanIn + right.fanOut - left.fanIn - left.fanOut)
+      .at(0) || visibleHub();
+    if (fallback) {
+      return { x: fallback.screenX, y: fallback.screenY, node: fallback };
+    }
     return {
-      x: width * (0.5 + deterministicUnit(effect.pageId || effect.label, effect.seq) * 0.22),
-      y: height * (0.34 + deterministicUnit(effect.label, effect.seq + 91) * 0.3),
+      x: width * 0.5,
+      y: height * 0.52,
       node: null,
     };
   }
@@ -2220,80 +2241,161 @@
     }
   }
 
-  function ingestProbeTargets(effect, target) {
-    const count = effect.phase === "triage" ? 6 : effect.phase === "generate" ? 4 : 3;
-    const radius = effect.phase === "triage" ? 150 : effect.phase === "generate" ? 82 : 38;
-    return Array.from({ length: count }, (_value, branch) => {
-      if (branch === 0 && effect.phase !== "triage") return target;
-      const angle =
-        deterministicUnit(effect.label, effect.seq + branch * 29) * Math.PI * 2
-        + branch * 1.7;
-      const spread = radius * (0.55 + deterministicUnit(effect.pageId, branch + 701) * 0.45);
-      return {
-        x: clamp(target.x + Math.cos(angle) * spread, 34, width - 34),
-        y: clamp(target.y + Math.sin(angle) * spread, 64, height - 64),
-      };
-    });
+  function ingestFormationCandidates(target, count, includeTarget = false) {
+    const selected = [];
+    const seen = new Set();
+    const add = (node) => {
+      if (!node || seen.has(node.index) || !visibleMemoryNode(node)) return;
+      seen.add(node.index);
+      selected.push(node);
+    };
+    if (includeTarget) add(target.node);
+    if (target.node) {
+      [...(neighbors[target.node.index] || [])]
+        .map((index) => nodes[index])
+        .filter(Boolean)
+        .sort((left, right) => right.fanIn + right.fanOut - left.fanIn - left.fanOut)
+        .forEach(add);
+    }
+    nodes
+      .filter(visibleMemoryNode)
+      .sort((left, right) => right.fanIn + right.fanOut - left.fanIn - left.fanOut)
+      .forEach(add);
+    return selected.slice(0, count);
   }
 
-  function ingestPhaseColor(phase) {
-    if (phase === "generate") return RGB_VIOLET;
-    if (phase === "consensus") return RGB_CONSENSUS;
-    return RGB_FIRE;
-  }
-
-  function drawIngestElectricity(effect, time, progress, fade, anchor, target) {
-    const probes = ingestProbeTargets(effect, target);
-    const phaseColor = ingestPhaseColor(effect.phase);
-    let primaryHead = target;
-    probes.forEach((probe, branch) => {
-      const branchProgress = reducedMotion.matches || !motionEnabled
-        ? 0.72
-        : clamp(progress * 1.5 - branch * 0.075);
-      const origin = effect.phase === "consensus" && branch
-        ? {
-            x: anchor.x + (branch % 2 ? -1 : 1) * (12 + branch * 7),
-            y: anchor.y - branch * 10,
-          }
-        : anchor;
-      const points = transportElectricPoints(origin, probe, effect, branch, time);
-      const head = strokeTransportBolt(
-        points,
-        branchProgress,
-        phaseColor,
-        fade * (branch === 0 ? 0.9 : 0.48),
-        branch === 0 ? 2.8 : 1.45,
-        branch === 0 ? 0.72 : 0.42,
-      );
-      if (branch === 0) primaryHead = head;
-      cortexMetrics.explorationArcs += 1;
-    });
-    const ringProgress = reducedMotion.matches || !motionEnabled
-      ? 0.58
-      : (progress * 1.75) % 1;
-    const scanRadius =
-      (effect.phase === "triage" ? 24 : effect.phase === "generate" ? 17 : 12)
-      + ringProgress * (effect.phase === "triage" ? 62 : 36);
-    context.setLineDash(effect.phase === "consensus" ? [2, 3] : [3, 7]);
-    context.lineDashOffset = -(time - effect.startedAt) * 0.028;
-    context.strokeStyle = rgba(phaseColor, fade * (1 - ringProgress) * 0.65);
-    context.lineWidth = effect.phase === "consensus" ? 1.4 : 0.8;
+  function drawFormationNodeGlow(node, color, glow, intensity, padding = 2.4) {
+    const radius = Math.max(0.75, node.radius * node.screenScale) * NODE_CORE_SCALE;
+    drawCompactGlow(glow, node.screenX, node.screenY, radius, padding, intensity * 0.58);
+    context.fillStyle = rgba(color, intensity * 0.9);
     context.beginPath();
-    context.arc(target.x, target.y, scanRadius, 0, Math.PI * 2);
+    context.arc(node.screenX, node.screenY, radius, 0, Math.PI * 2);
+    context.fill();
+  }
+
+  function drawTriageFormation(effect, progress, fade, star, target) {
+    const wave = reducedMotion.matches || !motionEnabled ? 0.68 : smoothstep(progress);
+    const radius = star.radius * (0.12 + wave * 1.18);
+    cortexMetrics.formationOriginX = star.x;
+    cortexMetrics.formationOriginY = star.y;
+    context.strokeStyle = rgba(RGB_FIRE, fade * (0.82 - wave * 0.42));
+    context.lineWidth = 1.35;
+    context.beginPath();
+    context.arc(star.x, star.y, radius, 0, Math.PI * 2);
     context.stroke();
-    context.setLineDash([]);
-    const phaseLabel = effect.phase === "triage"
-      ? "SCAN"
-      : effect.phase === "generate"
-        ? "SYNTH"
-        : "VERIFY";
-    context.fillStyle = rgba(phaseColor, fade * 0.88);
+    context.strokeStyle = rgba(RGB_HOT, fade * (0.42 - wave * 0.22));
+    context.lineWidth = 0.7;
+    context.beginPath();
+    context.arc(star.x, star.y, radius * 0.82, 0, Math.PI * 2);
+    context.stroke();
+    ingestFormationCandidates(target, 8, true).forEach((node, index) => {
+      const distance = Math.hypot(node.screenX - star.x, node.screenY - star.y);
+      const arrival = clamp((radius - distance + 34) / 58);
+      const shimmer = 0.62 + 0.38 * Math.sin(progress * 22 - index * 1.7);
+      const intensity = fade * arrival * shimmer;
+      if (intensity <= 0.04) return;
+      drawFormationNodeGlow(node, RGB_FIRE, glowFire, intensity);
+      cortexMetrics.triageCandidates += 1;
+    });
+    context.fillStyle = rgba(RGB_FIRE, fade * 0.88);
+    context.textAlign = "center";
+    context.fillText("EVALUATING CANDIDATES", star.x, star.y - 12);
+  }
+
+  function quadraticPoint(source, control, target, progress) {
+    const inverse = 1 - progress;
+    return {
+      x: inverse * inverse * source.x + 2 * inverse * progress * control.x + progress * progress * target.x,
+      y: inverse * inverse * source.y + 2 * inverse * progress * control.y + progress * progress * target.y,
+    };
+  }
+
+  function drawGenerateFormation(effect, progress, fade, target) {
+    const candidates = ingestFormationCandidates(target, 5, false);
+    cortexMetrics.formationTargetX = target.x;
+    cortexMetrics.formationTargetY = target.y;
+    candidates.forEach((node, branch) => {
+      const source = { x: node.screenX, y: node.screenY };
+      const bend = (branch % 2 ? -1 : 1) * (24 + branch * 5);
+      const control = {
+        x: (source.x + target.x) / 2 + bend,
+        y: (source.y + target.y) / 2 - 34 + branch * 7,
+      };
+      context.strokeStyle = rgba(RGB_VIOLET, fade * 0.16);
+      context.lineWidth = 0.7;
+      context.beginPath();
+      context.moveTo(source.x, source.y);
+      context.quadraticCurveTo(control.x, control.y, target.x, target.y);
+      context.stroke();
+      for (let particle = 0; particle < 3; particle += 1) {
+        const delay = branch * 0.045 + particle * 0.17;
+        const travel = reducedMotion.matches || !motionEnabled
+          ? 0.72
+          : clamp((progress - delay) / Math.max(0.1, 0.82 - delay));
+        if (travel <= 0 || travel >= 1) continue;
+        const point = quadraticPoint(source, control, target, smoothstep(travel));
+        const tail = quadraticPoint(source, control, target, smoothstep(Math.max(0, travel - 0.055)));
+        context.strokeStyle = rgba(RGB_VIOLET, fade * (0.34 + travel * 0.48));
+        context.lineWidth = 1.15;
+        context.beginPath();
+        context.moveTo(tail.x, tail.y);
+        context.lineTo(point.x, point.y);
+        context.stroke();
+        context.fillStyle = rgba(RGB_HOT, fade * 0.92);
+        context.beginPath();
+        context.arc(point.x, point.y, 1.15, 0, Math.PI * 2);
+        context.fill();
+        cortexMetrics.generateParticles += 1;
+      }
+    });
+    const protoPulse = 0.72 + 0.28 * Math.sin(progress * Math.PI * 10);
+    context.strokeStyle = rgba(RGB_VIOLET, fade * protoPulse * 0.88);
+    context.lineWidth = 1.2;
+    context.beginPath();
+    context.arc(target.x, target.y, 7 + progress * 3, 0, Math.PI * 2);
+    context.stroke();
+    context.fillStyle = rgba(RGB_VIOLET, fade * 0.34);
+    context.beginPath();
+    context.arc(target.x, target.y, 4.2, 0, Math.PI * 2);
+    context.fill();
+    context.fillStyle = rgba(RGB_VIOLET, fade * 0.9);
     context.textAlign = "left";
-    context.fillText(
-      `${phaseLabel} ${effect.pageId || "LOCAL"}`.slice(0, 42),
-      primaryHead.x + 7,
-      primaryHead.y - 7,
-    );
+    context.fillText("SYNTHESIZING MEMORY", target.x + 12, target.y - 10);
+  }
+
+  function drawConsensusFormation(effect, time, progress, fade, target) {
+    const collapse = reducedMotion.matches || !motionEnabled ? 0.38 : smoothstep(progress);
+    const orbitRadius = 35 - collapse * 22;
+    cortexMetrics.formationTargetX = target.x;
+    cortexMetrics.formationTargetY = target.y;
+    for (let orbit = 0; orbit < 3; orbit += 1) {
+      const rotation = orbit * Math.PI / 3 + 0.24;
+      context.save();
+      context.translate(target.x, target.y);
+      context.rotate(rotation);
+      context.scale(1, 0.42 + orbit * 0.08);
+      context.strokeStyle = rgba(RGB_CONSENSUS, fade * (0.3 + orbit * 0.12));
+      context.lineWidth = 1.05;
+      context.beginPath();
+      context.arc(0, 0, orbitRadius + orbit * 5, 0, Math.PI * 2);
+      context.stroke();
+      context.restore();
+      const angle = (time - effect.startedAt) * 0.0045 * (orbit % 2 ? -1 : 1) + orbit * 2.1;
+      const beadRadius = orbitRadius + orbit * 5;
+      const cos = Math.cos(angle) * beadRadius;
+      const sin = Math.sin(angle) * beadRadius * (0.42 + orbit * 0.08);
+      const beadX = target.x + cos * Math.cos(rotation) - sin * Math.sin(rotation);
+      const beadY = target.y + cos * Math.sin(rotation) + sin * Math.cos(rotation);
+      context.fillStyle = rgba(RGB_HOT, fade * 0.95);
+      context.beginPath();
+      context.arc(beadX, beadY, 1.8, 0, Math.PI * 2);
+      context.fill();
+      cortexMetrics.consensusOrbits += 1;
+    }
+    drawCompactGlow(glowFire, target.x, target.y, 2.4, 3.2, fade * (0.28 + collapse * 0.55));
+    context.fillStyle = rgba(RGB_CONSENSUS, fade * 0.92);
+    context.textAlign = "left";
+    context.fillText("LOCAL CONSENSUS", target.x + 12, target.y - 10);
   }
 
   function visibleConsolidationNeighbors(node) {
@@ -2314,18 +2416,12 @@
       .slice(0, 6);
   }
 
-  function drawApplyElectricity(effect, time, progress, fade, anchor, target) {
-    const mainPoints = transportElectricPoints(anchor, target, effect, 0, time);
-    const travel = reducedMotion.matches || !motionEnabled ? 0.86 : clamp(progress * 2.25);
-    const head = strokeTransportBolt(
-      mainPoints,
-      travel,
-      RGB_COMMIT,
-      fade * 0.98,
-      5.8,
-      1.15,
-    );
-    const arrival = clamp((progress - 0.18) / 0.82);
+  function drawApplyFormation(effect, time, progress, fade, target) {
+    const arrival = reducedMotion.matches || !motionEnabled
+      ? 0.72
+      : clamp(progress * 1.35);
+    cortexMetrics.formationTargetX = target.x;
+    cortexMetrics.formationTargetY = target.y;
     if (arrival > 0) {
       visibleConsolidationNeighbors(target.node).forEach((neighbor, branch) => {
         const branchProgress = reducedMotion.matches || !motionEnabled
@@ -2363,7 +2459,14 @@
     context.strokeStyle = rgba(RGB_COMMIT, fade * (0.55 + arrival * 0.4));
     context.lineWidth = 1.15;
     context.beginPath();
-    context.arc(target.x, target.y, radius + 2.5, 0, Math.PI * 2);
+    for (let corner = 0; corner < 6; corner += 1) {
+      const angle = corner * Math.PI / 3 - Math.PI / 6;
+      const x = target.x + Math.cos(angle) * (radius + 3.5);
+      const y = target.y + Math.sin(angle) * (radius + 3.5);
+      if (corner === 0) context.moveTo(x, y);
+      else context.lineTo(x, y);
+    }
+    context.closePath();
     context.stroke();
     if (!target.node) {
       context.fillStyle = rgba(RGB_COMMIT, fade * 0.88);
@@ -2375,8 +2478,8 @@
     context.textAlign = "left";
     context.fillText(
       `${effect.phase === "complete" ? "LOCKED" : "WRITE"} ${effect.pageId || "MEMORY"}`.slice(0, 42),
-      head.x + 7,
-      head.y - 8,
+      target.x + 10,
+      target.y - 9,
     );
   }
 
@@ -2400,15 +2503,19 @@
       const fade = effect.phase === "capture"
         ? 1 - smoothstep(clamp((rawProgress - 0.91) / 0.09))
         : 1 - smoothstep(clamp(rawProgress));
-      const anchor = transportAnchor();
       if (effect.phase === "capture") {
         drawCaptureComets(effect, progress, fade);
       } else {
         const target = transportTarget(effect);
+        const star = memoryStarGeometry();
         if (effect.phase === "apply" || effect.phase === "complete") {
-          drawApplyElectricity(effect, time, progress, fade, anchor, target);
+          drawApplyFormation(effect, time, progress, fade, target);
+        } else if (effect.phase === "consensus") {
+          drawConsensusFormation(effect, time, progress, fade, target);
+        } else if (effect.phase === "generate") {
+          drawGenerateFormation(effect, progress, fade, target);
         } else {
-          drawIngestElectricity(effect, time, progress, fade, anchor, target);
+          drawTriageFormation(effect, progress, fade, star, target);
         }
       }
       if (!effect.paintedAt) {
@@ -2547,6 +2654,13 @@
     cortexMetrics.cometSafeBottom = height;
     cortexMetrics.cometTurns = 0;
     cortexMetrics.explorationArcs = 0;
+    cortexMetrics.triageCandidates = 0;
+    cortexMetrics.generateParticles = 0;
+    cortexMetrics.consensusOrbits = 0;
+    cortexMetrics.formationOriginX = 0;
+    cortexMetrics.formationOriginY = 0;
+    cortexMetrics.formationTargetX = 0;
+    cortexMetrics.formationTargetY = 0;
     cortexMetrics.consolidationEdges = 0;
     cortexMetrics.transportElectricPeak = 0;
     context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);

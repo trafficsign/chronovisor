@@ -699,19 +699,23 @@ def test_cortex_static_view_preserves_fable_layout_and_uses_live_data() -> None:
     assert "const CAPTURE_COMET_DURATION_MS = 5200;" in script
     assert "turns: 2.85" in script
     assert "function drawCaptureElectricity(" not in script
-    assert "function drawIngestElectricity(" in script
-    assert "function ingestPhaseColor(" in script
+    assert "function drawTriageFormation(" in script
+    assert "function drawGenerateFormation(" in script
+    assert "function drawConsensusFormation(" in script
+    assert "function ingestFormationCandidates(" in script
+    assert "function drawIngestElectricity(" not in script
+    assert "function transportAnchor(" not in script
     assert "function retireSupersededIngestEffects(" in script
-    assert 'if (phase === "generate") return RGB_VIOLET;' in script
-    assert 'if (phase === "consensus") return RGB_CONSENSUS;' in script
-    assert "function drawApplyElectricity(" in script
+    assert "function drawApplyFormation(" in script
     assert "function visibleConsolidationNeighbors(node)" in script
     assert 'phase: "triage"' in script
     assert 'phase: "consensus"' in script
     assert "scheduleDemoTransport(3300" in script
     assert "cortexMetrics.cometTrailSegments += segmentCount;" in script
     assert "cortexMetrics.cometImpacts += 1;" in script
-    assert "cortexMetrics.explorationArcs += 1;" in script
+    assert "cortexMetrics.triageCandidates += 1;" in script
+    assert "cortexMetrics.generateParticles += 1;" in script
+    assert "cortexMetrics.consensusOrbits += 1;" in script
     assert "cortexMetrics.consolidationEdges += 1;" in script
     assert "transportEvents.forEach(visualizeTransportEvent)" in script
     assert 'event.kind === "save" || event.kind === "ingest"' in script
