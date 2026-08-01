@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from chronovisor.core.durable_state import read_sealed_json
+from chronovisor.core.durable_state import read_sealed_json, write_sealed_json
 from chronovisor.knowledge_graph import runtime
 from chronovisor.knowledge_graph.config import (
     GraphRetrievalConfig,
@@ -173,3 +173,43 @@ def test_resource_pause_preserves_existing_canary_artifact(
     assert paused["rollout"]["canary_percent"] == 5
     assert paused["rollout"]["maintenance_status"] == "paused"
     assert after["seal_sha256"] == before["seal_sha256"]
+
+
+def test_resource_pause_migrates_pre_contract_rollout_without_advancing(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    _capture_baseline(tmp_path)
+    promotion_file = tmp_path / "runtime" / "typed-graph" / "promotion.json"
+    write_sealed_json(
+        promotion_file,
+        {
+            "schema_version": 1,
+            "mode": "shadow",
+            "canary_percent": 0,
+            "sample_count": 12,
+            "gates": {"legacy": False},
+        },
+    )
+    _stub_lanes(monkeypatch, busy=True)
+
+    paused = runtime.run_graph_maintenance(root=tmp_path, config=_config())
+    migrated = read_sealed_json(promotion_file)
+
+    assert paused["engineering_complete"] is True
+    assert all(paused["engineering_gates"].values())
+    assert paused["rollout"]["maintenance_status"] == "paused"
+    assert migrated["canary_percent"] == 0
+    assert migrated["sample_count"] == 0
+    assert migrated["stage_started_sample_count"] == 0
+    assert migrated["sample_unit"] == "distinct_applied_session_hashes"
+    assert migrated["rollback_teacher"] == "current"
+    assert "maintenance_status" not in migrated
+    assert all(
+        len(migrated[key]) == 64
+        for key in (
+            "manifest_sha256",
+            "relation_snapshot_sha256",
+            "rubric_sha256",
+            "model_manifest_sha256",
+        )
+    )

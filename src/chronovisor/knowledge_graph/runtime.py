@@ -440,6 +440,53 @@ def _learning_extension_gates(root: Path) -> dict[str, Any]:
     return gates if isinstance(gates, dict) else {}
 
 
+def _paused_rollout(
+    *,
+    promotion_file: Path,
+    fallback: dict[str, Any],
+    manifest_sha256: str,
+    relation_snapshot_sha256: str,
+    rubric_sha256: str,
+    model_manifest_sha256: str,
+) -> dict[str, Any]:
+    """Preserve a valid canary while migrating pre-contract artifacts in place."""
+
+    try:
+        rollout = read_sealed_json(promotion_file, recover_backup=True)
+    except Exception:
+        rollout = dict(fallback)
+    migrated = False
+    digest_defaults = {
+        "manifest_sha256": manifest_sha256,
+        "relation_snapshot_sha256": relation_snapshot_sha256,
+        "rubric_sha256": rubric_sha256,
+        "model_manifest_sha256": model_manifest_sha256,
+    }
+    for key, value in digest_defaults.items():
+        if not _is_sha256(rollout.get(key)) and _is_sha256(value):
+            rollout[key] = value
+            migrated = True
+    if rollout.get("sample_unit") != CANARY_SAMPLE_UNIT:
+        sample_count = int(fallback.get("sample_count") or 0)
+        rollout["sample_count"] = sample_count
+        rollout["stage_started_sample_count"] = sample_count
+        rollout["sample_unit"] = CANARY_SAMPLE_UNIT
+        migrated = True
+    if rollout.get("rollback_teacher") != "current":
+        rollout["rollback_teacher"] = "current"
+        migrated = True
+    if not isinstance(rollout.get("gates"), dict):
+        rollout["gates"] = fallback["gates"]
+        migrated = True
+    if migrated:
+        rollout = write_sealed_json(promotion_file, rollout)
+    return {
+        **rollout,
+        "maintenance_status": "paused",
+        "maintenance_reason": "foreground_resource_busy",
+    }
+
+
 def _rollout_and_authority(
     *,
     root: Path,
@@ -518,15 +565,14 @@ def _rollout_and_authority(
     if dry_run:
         rollout = fallback
     elif busy:
-        try:
-            rollout = read_sealed_json(promotion_file, recover_backup=True)
-        except Exception:
-            rollout = fallback
-        rollout = {
-            **rollout,
-            "maintenance_status": "paused",
-            "maintenance_reason": "foreground_resource_busy",
-        }
+        rollout = _paused_rollout(
+            promotion_file=promotion_file,
+            fallback=fallback,
+            manifest_sha256=str(evaluation.get("manifest_sha256") or ""),
+            relation_snapshot_sha256=artifacts["relation_sha"],
+            rubric_sha256=artifacts["rubric_sha"],
+            model_manifest_sha256=sha256(sorted(artifacts["model_manifest"])),
+        )
     else:
         rollout = advance_rollout(
             gates=rollout_gates,
