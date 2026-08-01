@@ -588,7 +588,9 @@ def test_no_quorum_and_unknown_endpoint_are_held(tmp_path: Path) -> None:
     pages.mkdir()
     source = pages / "a.md"
     source.write_text("See [[b]].\n", encoding="utf-8")
-    (pages / "b.md").write_text("Target.\n", encoding="utf-8")
+    nested = pages / "nested"
+    nested.mkdir()
+    (nested / "b.md").write_text("Target.\n", encoding="utf-8")
     evidence = EvidenceRef(
         page_id="a",
         content_sha256=sha256(source.read_text(encoding="utf-8")),

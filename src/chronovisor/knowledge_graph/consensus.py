@@ -56,18 +56,25 @@ def _router_for_producer(
     )
 
 
-def _page_exists(root: Path, page_id: str) -> bool:
-    return any(
-        path.exists()
-        for path in (
-            root / "pages" / f"{page_id}.md",
-            root / "system" / f"{page_id}.md",
-        )
+def _page_paths(root: Path, page_id: str) -> tuple[Path, ...]:
+    direct = (
+        root / "pages" / f"{page_id}.md",
+        root / "system" / f"{page_id}.md",
     )
+    found = [path for path in direct if path.is_file()]
+    basename = Path(page_id).name
+    pages = root / "pages"
+    if pages.exists() and not found and basename not in {"", ".", ".."}:
+        found.extend(path for path in pages.rglob(f"{basename}.md") if path.is_file())
+    return tuple(dict.fromkeys(found))
+
+
+def _page_exists(root: Path, page_id: str) -> bool:
+    return bool(_page_paths(root, page_id))
 
 
 def _source_digest_valid(root: Path, page_id: str, digest: str) -> bool:
-    for path in (root / "pages" / f"{page_id}.md", root / "system" / f"{page_id}.md"):
+    for path in _page_paths(root, page_id):
         try:
             if hashlib.sha256(path.read_bytes()).hexdigest() == digest:
                 return True
