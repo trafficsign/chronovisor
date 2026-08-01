@@ -695,13 +695,20 @@ def test_cortex_static_view_preserves_fable_layout_and_uses_live_data() -> None:
     assert "function drawCaptureComets(" in script
     assert "function captureCometPoint(" in script
     assert "function memoryStarGeometry(" in script
+    assert "function captureSafeRect(" in script
+    assert "const CAPTURE_COMET_DURATION_MS = 5200;" in script
+    assert "turns: 2.85" in script
     assert "function drawCaptureElectricity(" not in script
     assert "function drawIngestElectricity(" in script
+    assert "function ingestPhaseColor(" in script
+    assert "function retireSupersededIngestEffects(" in script
+    assert 'if (phase === "generate") return RGB_VIOLET;' in script
+    assert 'if (phase === "consensus") return RGB_CONSENSUS;' in script
     assert "function drawApplyElectricity(" in script
     assert "function visibleConsolidationNeighbors(node)" in script
     assert 'phase: "triage"' in script
     assert 'phase: "consensus"' in script
-    assert "scheduleDemoTransport(2550" in script
+    assert "scheduleDemoTransport(3300" in script
     assert "cortexMetrics.cometTrailSegments += segmentCount;" in script
     assert "cortexMetrics.cometImpacts += 1;" in script
     assert "cortexMetrics.explorationArcs += 1;" in script
@@ -710,6 +717,14 @@ def test_cortex_static_view_preserves_fable_layout_and_uses_live_data() -> None:
     assert 'event.kind === "save" || event.kind === "ingest"' in script
     assert "drawTransportEffects(time);" in script
     assert "RAW BUFFER" in html
+    assert (
+        '#memoryIngress[data-phase="generate"] { --ingress-color: #9b7cff; }' in style
+    )
+    assert (
+        '#memoryIngress[data-phase="consensus"] { --ingress-color: #ffe6ae; }' in style
+    )
+    assert "violet · memory synthesis" in script
+    assert "platinum · local agreement" in script
     assert (
         '#memoryIngress:not([data-phase="idle"]):not([data-phase="capture"])' in style
     )

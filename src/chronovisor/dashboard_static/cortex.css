@@ -709,9 +709,9 @@ canvas#gl {
 }
 
 #memoryIngress[data-phase="capture"] { --ingress-color: #4fe4ff; }
-#memoryIngress[data-phase="triage"],
-#memoryIngress[data-phase="generate"],
-#memoryIngress[data-phase="consensus"] { --ingress-color: #ffb454; }
+#memoryIngress[data-phase="triage"] { --ingress-color: #ffb454; }
+#memoryIngress[data-phase="generate"] { --ingress-color: #9b7cff; }
+#memoryIngress[data-phase="consensus"] { --ingress-color: #ffe6ae; }
 #memoryIngress[data-phase="apply"],
 #memoryIngress[data-phase="complete"] { --ingress-color: #45d49b; }
 

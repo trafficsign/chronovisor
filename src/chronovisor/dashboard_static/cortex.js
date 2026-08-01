@@ -10,6 +10,7 @@
   const INHIBIT = "#54b9ff";
   const FAULT = "#ff5d68";
   const CAPTURE = "#4fe4ff";
+  const CONSENSUS = "#ffe6ae";
   const RGB_STEEL = hexRgb(STEEL);
   const RGB_FIRE = hexRgb(FIRE);
   const RGB_HOT = hexRgb(FIRE_HOT);
@@ -19,6 +20,7 @@
   const RGB_INHIBIT = hexRgb(INHIBIT);
   const RGB_FAULT = hexRgb(FAULT);
   const RGB_CAPTURE = hexRgb(CAPTURE);
+  const RGB_CONSENSUS = hexRgb(CONSENSUS);
   const TYPE_OFF = new Set([2]);
   const ACTIVE_LABEL_LIMIT = 5;
   const NODE_FLASH_ATTACK_MS = 90;
@@ -31,7 +33,7 @@
   const ELECTRIC_TRAVEL_MAX_MS = 760;
   const MAX_ELECTRIC_PATHS = 12;
   const MAX_TRANSPORT_EFFECTS = 18;
-  const CAPTURE_COMET_DURATION_MS = 4200;
+  const CAPTURE_COMET_DURATION_MS = 5200;
   const NODE_STIMULUS_SCALE = 0.38;
   const NODE_ARRIVAL_SCALE = 0.28;
   const NODE_CORE_SCALE = 1;
@@ -136,6 +138,15 @@
     maxCometHeadRadius: 0,
     cometCenterX: 0,
     cometCenterY: 0,
+    cometMinX: 0,
+    cometMaxX: 0,
+    cometMinY: 0,
+    cometMaxY: 0,
+    cometSafeLeft: 0,
+    cometSafeRight: 0,
+    cometSafeTop: 0,
+    cometSafeBottom: 0,
+    cometTurns: 0,
     explorationArcs: 0,
     consolidationEdges: 0,
     transportElectricPeak: 0,
@@ -173,6 +184,15 @@
       maxCometHeadRadius: cortexMetrics.maxCometHeadRadius,
       cometCenterX: cortexMetrics.cometCenterX,
       cometCenterY: cortexMetrics.cometCenterY,
+      cometMinX: cortexMetrics.cometMinX,
+      cometMaxX: cortexMetrics.cometMaxX,
+      cometMinY: cortexMetrics.cometMinY,
+      cometMaxY: cortexMetrics.cometMaxY,
+      cometSafeLeft: cortexMetrics.cometSafeLeft,
+      cometSafeRight: cortexMetrics.cometSafeRight,
+      cometSafeTop: cortexMetrics.cometSafeTop,
+      cometSafeBottom: cortexMetrics.cometSafeBottom,
+      cometTurns: cortexMetrics.cometTurns,
       explorationArcs: cortexMetrics.explorationArcs,
       consolidationEdges: cortexMetrics.consolidationEdges,
       transportElectricPeak: cortexMetrics.transportElectricPeak,
@@ -850,19 +870,19 @@
         label: "DEMO TRIAGE · scanning raw memory",
         page_ids: ["chronovisor-system"],
       });
-      scheduleDemoTransport(850, {
+      scheduleDemoTransport(1100, {
         kind: "ingest",
         phase: "generate",
         label: "DEMO GENERATE · semantic projection",
         page_ids: ["chronovisor-system"],
       });
-      scheduleDemoTransport(1700, {
+      scheduleDemoTransport(2200, {
         kind: "ingest",
         phase: "consensus",
         label: "DEMO CONSENSUS · local verification",
         page_ids: ["chronovisor-system"],
       });
-      scheduleDemoTransport(2550, {
+      scheduleDemoTransport(3300, {
         kind: "ingest",
         phase: "apply",
         operation: "updated",
@@ -993,6 +1013,15 @@
       cortexMetrics.maxCometHeadRadius.toFixed(3);
     target.dataset.cometCenterX = cortexMetrics.cometCenterX.toFixed(1);
     target.dataset.cometCenterY = cortexMetrics.cometCenterY.toFixed(1);
+    target.dataset.cometMinX = cortexMetrics.cometMinX.toFixed(1);
+    target.dataset.cometMaxX = cortexMetrics.cometMaxX.toFixed(1);
+    target.dataset.cometMinY = cortexMetrics.cometMinY.toFixed(1);
+    target.dataset.cometMaxY = cortexMetrics.cometMaxY.toFixed(1);
+    target.dataset.cometSafeLeft = cortexMetrics.cometSafeLeft.toFixed(1);
+    target.dataset.cometSafeRight = cortexMetrics.cometSafeRight.toFixed(1);
+    target.dataset.cometSafeTop = cortexMetrics.cometSafeTop.toFixed(1);
+    target.dataset.cometSafeBottom = cortexMetrics.cometSafeBottom.toFixed(1);
+    target.dataset.cometTurns = cortexMetrics.cometTurns.toFixed(2);
     target.dataset.explorationArcs = String(cortexMetrics.explorationArcs);
     target.dataset.consolidationEdges = String(cortexMetrics.consolidationEdges);
     target.dataset.transportElectricPeak =
@@ -1092,7 +1121,22 @@
       root.dataset.phase = "idle";
       state.textContent = "IDLE";
       detail.textContent = "awaiting host capture";
-    }, phase === "apply" || phase === "complete" ? 6200 : 4800);
+    }, phase === "capture"
+      ? CAPTURE_COMET_DURATION_MS + 400
+      : phase === "apply" || phase === "complete"
+        ? 6200
+        : 4800);
+  }
+
+  function retireSupersededIngestEffects(pageId, now) {
+    transportEffects.forEach((effect) => {
+      if (
+        effect.phase === "capture"
+        || (pageId && effect.pageId && effect.pageId !== pageId)
+      ) return;
+      const elapsed = Math.max(0, now - effect.startedAt);
+      effect.duration = Math.min(effect.duration, elapsed + 280);
+    });
   }
 
   function visualizeTransportEvent(event) {
@@ -1102,6 +1146,7 @@
     const now = performance.now();
     const pageId = transportPageId(event);
     const node = pageId ? byId.get(pageId) : null;
+    if (phase !== "capture") retireSupersededIngestEffects(pageId, now);
     const duration = phase === "capture"
       ? CAPTURE_COMET_DURATION_MS
       : phase === "apply" || phase === "complete"
@@ -1995,6 +2040,25 @@
     };
   }
 
+  function captureSafeRect() {
+    const top = clamp(height * 0.28, 156, 220);
+    return {
+      left: 34,
+      right: Math.max(35, width - 34),
+      top,
+      bottom: Math.max(top + 24, height - 46),
+    };
+  }
+
+  function recordCaptureCometBounds(points) {
+    points.forEach((point) => {
+      cortexMetrics.cometMinX = Math.min(cortexMetrics.cometMinX, point.x);
+      cortexMetrics.cometMaxX = Math.max(cortexMetrics.cometMaxX, point.x);
+      cortexMetrics.cometMinY = Math.min(cortexMetrics.cometMinY, point.y);
+      cortexMetrics.cometMaxY = Math.max(cortexMetrics.cometMaxY, point.y);
+    });
+  }
+
   function traceCaptureCometPoints(points, start = 0, end = points.length - 1) {
     if (end <= start || !points[start]) return false;
     context.beginPath();
@@ -2084,20 +2148,25 @@
     cortexMetrics.cometImpacts += 1;
   }
 
-  function captureCometOrbit(effect, comet, star) {
+  function captureCometOrbit(effect, comet, star, safe) {
     const seed = deterministicUnit(
       effect.captureId || effect.label,
       effect.seq * 101 + comet * 37,
     );
+    const headMargin = comet === 0 ? 22 : 14;
+    const availableX = Math.max(
+      8,
+      Math.min(star.x - safe.left, safe.right - star.x) - headMargin,
+    );
+    const availableY = Math.max(
+      8,
+      Math.min(star.y - safe.top, safe.bottom - star.y) - headMargin,
+    );
     return {
-      ellipse: 0.53 + seed * 0.15,
-      outerRadius: Math.max(
-        star.radius * (2.25 + seed * 0.35),
-        Math.hypot(width, height) * (0.52 + seed * 0.08),
-      ),
+      radiusX: availableX * (0.9 + seed * 0.09),
+      radiusY: availableY * (0.84 + seed * 0.14),
       startAngle: -0.62 + comet * 2.23 + (seed - 0.5) * 0.7,
-      tilt: (seed - 0.5) * 0.5,
-      turns: 1.08 + seed * 0.42 + (comet === 0 ? 0.2 : 0),
+      turns: 2.85 + seed * 0.25 + (comet === 0 ? 0.1 : 0),
     };
   }
 
@@ -2105,25 +2174,22 @@
     const journey = clamp(localProgress / 0.91);
     const accelerated = Math.pow(journey, 1.72);
     const angle = orbit.startAngle + accelerated * orbit.turns * Math.PI * 2;
-    const radius = orbit.outerRadius * (1 - smoothstep(accelerated));
-    const orbitX = Math.cos(angle) * radius;
-    const orbitY = Math.sin(angle) * radius * orbit.ellipse;
-    const cosTilt = Math.cos(orbit.tilt);
-    const sinTilt = Math.sin(orbit.tilt);
+    const contraction = 1 - smoothstep(accelerated);
     return {
-      x: star.x + orbitX * cosTilt - orbitY * sinTilt,
-      y: star.y + orbitX * sinTilt + orbitY * cosTilt,
+      x: star.x + Math.cos(angle) * orbit.radiusX * contraction,
+      y: star.y + Math.sin(angle) * orbit.radiusY * contraction,
       journey,
     };
   }
 
-  function drawCaptureComet(effect, comet, progress, fade, star) {
+  function drawCaptureComet(effect, comet, progress, fade, star, safe) {
     const count = captureCometCount(effect);
     const delay = comet * Math.min(0.055, 0.22 / Math.max(1, count - 1));
     const localProgress = clamp((progress - delay) / (1 - delay));
     if (progress < delay) return;
 
-    const orbit = captureCometOrbit(effect, comet, star);
+    const orbit = captureCometOrbit(effect, comet, star, safe);
+    if (comet === 0) cortexMetrics.cometTurns = orbit.turns;
     const head = captureCometPoint(orbit, localProgress, star);
     const tailSpan = 0.075 + head.journey * (comet === 0 ? 0.19 : 0.135);
     const segmentCount = comet === 0 ? 30 : 20;
@@ -2133,6 +2199,7 @@
       const tailProgress = Math.max(0, localProgress - tailSpan * tailRatio);
       points.push(captureCometPoint(orbit, tailProgress, star));
     }
+    recordCaptureCometBounds(points);
     drawCaptureCometTrail(points, comet, fade);
     drawCaptureCometHead(comet, head, fade);
     drawCaptureImpact(comet, localProgress, fade, star);
@@ -2140,11 +2207,16 @@
 
   function drawCaptureComets(effect, progress, fade) {
     const star = memoryStarGeometry();
+    const safe = captureSafeRect();
     cortexMetrics.cometCenterX = star.x;
     cortexMetrics.cometCenterY = star.y;
+    cortexMetrics.cometSafeLeft = safe.left;
+    cortexMetrics.cometSafeRight = safe.right;
+    cortexMetrics.cometSafeTop = safe.top;
+    cortexMetrics.cometSafeBottom = safe.bottom;
     const count = captureCometCount(effect);
     for (let comet = count - 1; comet >= 0; comet -= 1) {
-      drawCaptureComet(effect, comet, progress, fade, star);
+      drawCaptureComet(effect, comet, progress, fade, star, safe);
     }
   }
 
@@ -2164,8 +2236,15 @@
     });
   }
 
+  function ingestPhaseColor(phase) {
+    if (phase === "generate") return RGB_VIOLET;
+    if (phase === "consensus") return RGB_CONSENSUS;
+    return RGB_FIRE;
+  }
+
   function drawIngestElectricity(effect, time, progress, fade, anchor, target) {
     const probes = ingestProbeTargets(effect, target);
+    const phaseColor = ingestPhaseColor(effect.phase);
     let primaryHead = target;
     probes.forEach((probe, branch) => {
       const branchProgress = reducedMotion.matches || !motionEnabled
@@ -2181,7 +2260,7 @@
       const head = strokeTransportBolt(
         points,
         branchProgress,
-        RGB_FIRE,
+        phaseColor,
         fade * (branch === 0 ? 0.9 : 0.48),
         branch === 0 ? 2.8 : 1.45,
         branch === 0 ? 0.72 : 0.42,
@@ -2197,7 +2276,7 @@
       + ringProgress * (effect.phase === "triage" ? 62 : 36);
     context.setLineDash(effect.phase === "consensus" ? [2, 3] : [3, 7]);
     context.lineDashOffset = -(time - effect.startedAt) * 0.028;
-    context.strokeStyle = rgba(RGB_FIRE, fade * (1 - ringProgress) * 0.65);
+    context.strokeStyle = rgba(phaseColor, fade * (1 - ringProgress) * 0.65);
     context.lineWidth = effect.phase === "consensus" ? 1.4 : 0.8;
     context.beginPath();
     context.arc(target.x, target.y, scanRadius, 0, Math.PI * 2);
@@ -2208,7 +2287,7 @@
       : effect.phase === "generate"
         ? "SYNTH"
         : "VERIFY";
-    context.fillStyle = rgba(RGB_FIRE, fade * 0.88);
+    context.fillStyle = rgba(phaseColor, fade * 0.88);
     context.textAlign = "left";
     context.fillText(
       `${phaseLabel} ${effect.pageId || "LOCAL"}`.slice(0, 42),
@@ -2458,6 +2537,15 @@
     cortexMetrics.maxCometHeadRadius = 0;
     cortexMetrics.cometCenterX = 0;
     cortexMetrics.cometCenterY = 0;
+    cortexMetrics.cometMinX = width;
+    cortexMetrics.cometMaxX = 0;
+    cortexMetrics.cometMinY = height;
+    cortexMetrics.cometMaxY = 0;
+    cortexMetrics.cometSafeLeft = 0;
+    cortexMetrics.cometSafeRight = width;
+    cortexMetrics.cometSafeTop = 0;
+    cortexMetrics.cometSafeBottom = height;
+    cortexMetrics.cometTurns = 0;
     cortexMetrics.explorationArcs = 0;
     cortexMetrics.consolidationEdges = 0;
     cortexMetrics.transportElectricPeak = 0;
@@ -2952,7 +3040,9 @@
       <div class="sec"><h3>STIMULUS PATHWAYS</h3>
         <div class="mrow"><span style="color:#ffd84d">⚡ RECALL</span><b>yellow · synaptic firing</b></div>
         <div class="mrow"><span style="color:#4fe4ff">☄ SAVE</span><b>cyan · comet capture → memory core</b></div>
-        <div class="mrow"><span style="color:#ffb454">⌁ INGEST</span><b>orange · local analysis</b></div>
+        <div class="mrow"><span style="color:#ffb454">⌁ TRIAGE</span><b>orange · candidate evaluation</b></div>
+        <div class="mrow"><span style="color:#9b7cff">✦ GENERATE</span><b>violet · memory synthesis</b></div>
+        <div class="mrow"><span style="color:#ffe6ae">◎ CONSENSUS</span><b>platinum · local agreement</b></div>
         <div class="mrow"><span style="color:#45d49b">● APPLY</span><b>green · graph consolidation</b></div>
         <div class="ghost">Liveは実Field eventと実SAVE/INGEST telemetryのみ。Memory I/Oは発火と区別し、DEMO/REPLAYはbackendへ書きません。</div>
       </div>`;
