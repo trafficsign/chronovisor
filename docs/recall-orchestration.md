@@ -12,8 +12,11 @@ they do not weaken the store's provenance, review, or adoption gates.
    and a separate context budget.
 3. **Model-directed Recall (L3)** uses `chronovisor_search` and `chronovisor_read` when the
    initial context is insufficient. The model should forward the injected
-   `decision_id` and `session_id`, then call `chronovisor_recall_used` only for pages
-   that materially influenced the answer.
+   `decision_id` and `session_id`, then, before finishing the answer, call
+   `chronovisor_recall_used` only for pages that materially influenced it. The
+   tool validates the turn identity immediately, treats retries as idempotent,
+   and merges later newly used pages into the same decision episode, so an
+   acknowledged receipt is guaranteed to reach the label factory exactly once.
 4. **Deep Recall (L4)** is an explicit, asynchronous investigation across
    related pages, prior conversations, and lossless Raw evidence. It is not
    allowed on the prompt hook's critical path. The current synchronous

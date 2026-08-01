@@ -1860,8 +1860,8 @@
     const growth = summary.growth || {};
     const growthProgress = growth.authority_enabled
       ? `AUTH · ${growth.canary_percent || 0}%`
-      : growth.field_learning_allowed
-        ? "ON · AUTH HELD"
+      : growth.positive_learning_allowed || growth.field_learning_allowed
+        ? "COFIRE ON · AUTH HELD"
         : `${growth.strong_positive || 0}/${growth.strong_positive_target || 200}`;
     const statusLabel = fieldState.fault
       ? `FAULT · ${fieldState.fault}`
@@ -1885,6 +1885,7 @@
           <div><span>field p95</span><b>${Number.isFinite(Number(latency.p95)) ? `${Math.round(latency.p95)}ms` : "—"}</b></div>
           <div><span>learning</span><b>${escapeHtml(growthProgress)}</b></div>
           <div><span>sessions</span><b>${growth.strong_sessions || 0}/${growth.strong_sessions_target || 20}</b></div>
+          <div><span>used proof</span><b>${growth.processor_used_episodes || 0}/50</b></div>
         </div>
       </div>
       <div class="sec"><h3>DECISION TRACE · SEQ ${fieldState.seq}</h3>

@@ -109,3 +109,35 @@ def test_join_used_recall_episodes_is_exact_and_deduplicated() -> None:
         "orphan_decision": 1,
         "session_mismatch": 1,
     }
+
+
+def test_join_used_recall_episodes_merges_monotonic_page_amendments() -> None:
+    recalls = [
+        {
+            "decision_id": "decision-1",
+            "session_id": "session-1",
+            "prompt_hash": "a" * 64,
+        }
+    ]
+    pulls = [
+        {
+            "type": "used",
+            "event_id": "event-1",
+            "decision_id": "decision-1",
+            "session_id": "session-1",
+            "page_ids": ["page-a"],
+        },
+        {
+            "type": "used",
+            "event_id": "event-2",
+            "decision_id": "decision-1",
+            "session_id": "session-1",
+            "page_ids": ["page-b", "page-a"],
+        },
+    ]
+
+    joined = join_used_recall_episodes(recalls, pulls)
+
+    assert joined["accepted"] == 1
+    assert joined["episodes"][0]["event_ids"] == ["event-1", "event-2"]
+    assert joined["episodes"][0]["page_ids"] == ["page-a", "page-b"]

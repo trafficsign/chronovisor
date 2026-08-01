@@ -97,6 +97,59 @@ def test_growth_cycle_reads_default_locked_e2e_artifact(
     assert result["gates"]["locked_e2e"] is True
 
 
+def test_positive_learning_unlocks_before_production_authority(tmp_path: Path) -> None:
+    inputs = _label_inputs(tmp_path)
+    recalls: list[dict] = []
+    pulls: list[dict] = []
+    for index in range(200):
+        decision = f"decision-{index}"
+        session = f"session-{index % 20}"
+        page = f"page-{index}"
+        recalls.append(
+            {
+                "decision_id": decision,
+                "session_id": session,
+                "prompt_hash": f"{index:064x}",
+            }
+        )
+        pulls.append(
+            {
+                "type": "used",
+                "event_id": f"used-{index}",
+                "decision_id": decision,
+                "session_id": session,
+                "page_ids": [page],
+            }
+        )
+    _write_jsonl(inputs["recall_log_file"], recalls)
+    _write_jsonl(inputs["pull_log_file"], pulls)
+    _write_jsonl(inputs["certificate_file"], [])
+    _write_jsonl(inputs["golden_file"], [])
+    state = tmp_path / "growth-state.json"
+    last_known_good = tmp_path / "last-known-good.json"
+
+    result = recall_growth.run_growth_cycle(
+        state_file=state,
+        history_file=tmp_path / "history.jsonl",
+        candidate_trace_file=tmp_path / "candidate.jsonl",
+        promotion_file=tmp_path / "promotion.json",
+        last_known_good_file=last_known_good,
+        locked_e2e_file=_locked_gate(tmp_path),
+        label_inputs=inputs,
+    )
+
+    assert result["stage"] == "collecting_candidate_evidence"
+    assert result["positive_learning_allowed"] is True
+    assert result["field_learning_allowed"] is True
+    assert result["policy_update_allowed"] is False
+    assert result["authority_enabled"] is False
+    assert recall_growth.automatic_learning_allowed(
+        enabled=True,
+        state_file=state,
+    )
+    assert not last_known_good.exists()
+
+
 def test_processor_used_metrics_penalize_unused_shadow_cards() -> None:
     metrics = recall_growth.processor_used_metrics(
         [
@@ -190,6 +243,8 @@ def test_growth_cycle_promotes_qualified_evidence_through_canary(
     assert result["effective_mode"] == "active"
     assert result["canary_percent"] == 5
     assert result["field_learning_allowed"] is True
+    assert result["positive_learning_allowed"] is True
+    assert result["policy_update_allowed"] is True
     assert result["authority_enabled"] is True
     assert result["gates"]["processor_used_precision"] is True
     assert json.loads(promotion.read_text())["status"] == "passed"

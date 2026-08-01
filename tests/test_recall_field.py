@@ -112,6 +112,27 @@ auto_promote = true
     assert loaded.auto_promote is True
 
 
+def test_effective_config_enables_positive_edges_before_authority(monkeypatch) -> None:
+    from chronovisor.recall import recall_growth, recall_learning
+
+    monkeypatch.setattr(recall_learning, "load_last_known_good", lambda _path: {})
+    monkeypatch.setattr(
+        recall_growth,
+        "automatic_learning_allowed",
+        lambda **_kwargs: True,
+    )
+    candidate = RecallFieldConfig(
+        mode="candidate",
+        auto_growth=True,
+        positive_learning=False,
+    )
+
+    effective = recall_field._effective_config(candidate)
+
+    assert effective.mode == "candidate"
+    assert effective.positive_learning is True
+
+
 def test_fixed_replay_is_deterministic_and_uses_shadow_buffer(monkeypatch) -> None:
     from chronovisor.search import cofire
 

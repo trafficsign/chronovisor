@@ -313,6 +313,8 @@ def test_cortex_growth_summary_is_bounded_and_corruption_tolerant(
             {
                 "stage": "canary",
                 "field_learning_allowed": True,
+                "positive_learning_allowed": True,
+                "policy_update_allowed": True,
                 "authority_enabled": True,
                 "canary_percent": "5",
                 "thresholds": {
@@ -325,6 +327,7 @@ def test_cortex_growth_summary_is_bounded_and_corruption_tolerant(
                         "strong_positive_sessions": 21,
                     },
                     "candidate": {"traces": {"corrupt": True}},
+                    "processor_used": {"episodes": 52},
                 },
                 "private": "must-not-leak",
             }
@@ -335,6 +338,8 @@ def test_cortex_growth_summary_is_bounded_and_corruption_tolerant(
     assert cortex._field_growth_summary(root) == {
         "stage": "canary",
         "field_learning_allowed": True,
+        "positive_learning_allowed": True,
+        "policy_update_allowed": True,
         "authority_enabled": True,
         "canary_percent": 5,
         "strong_positive": 210,
@@ -342,6 +347,7 @@ def test_cortex_growth_summary_is_bounded_and_corruption_tolerant(
         "strong_sessions": 21,
         "strong_sessions_target": 20,
         "candidate_traces": 0,
+        "processor_used_episodes": 52,
     }
 
 

@@ -579,10 +579,25 @@ def run_growth_cycle(
             processor["used_precision_proxy"] >= MIN_PROCESSOR_USED_PRECISION
         ),
     }
-    authority_eligible = all(gates.values())
-    field_learning_allowed = bool(
-        authority_eligible and learning_decision.get("field_learning_allowed") is True
+    # Positive co-fire is the mechanism that lets a candidate Field improve its
+    # teacher coverage.  Requiring teacher coverage (and therefore full
+    # authority eligibility) before enabling that learning creates a circular
+    # gate: the Field cannot learn until it is already good enough to ship.
+    #
+    # Keep the two trust boundaries separate.  Strong/diverse labels, a clean
+    # temporal split, and the sealed non-degradation evaluation may unlock
+    # positive co-fire while the Field remains candidate-only.  Production
+    # authority and scalar policy adoption still require every live gate.
+    positive_learning_allowed = bool(
+        label_gate
+        and integrity["passed"]
+        and locked_e2e["passed"]
+        and learning_decision.get("field_learning_allowed") is True
     )
+    authority_eligible = all(gates.values())
+    policy_update_allowed = bool(authority_eligible and positive_learning_allowed)
+    # Backwards-compatible public name used by existing dashboards and clients.
+    field_learning_allowed = positive_learning_allowed
     previous = _read_json(state_file)
     effective_mode, canary_percent, stage_started = _advance_rollout(
         previous,
@@ -634,6 +649,8 @@ def run_growth_cycle(
         "canary_percent": canary_percent,
         "stage_started_trace_count": stage_started,
         "field_learning_allowed": field_learning_allowed,
+        "positive_learning_allowed": positive_learning_allowed,
+        "policy_update_allowed": policy_update_allowed,
         "label_learning_gate": label_gate,
         "authority_enabled": authority_eligible,
         "gates": gates,
@@ -673,6 +690,8 @@ def run_growth_cycle(
                 "effective_mode": effective_mode,
                 "canary_percent": canary_percent,
                 "field_learning_allowed": field_learning_allowed,
+                "positive_learning_allowed": positive_learning_allowed,
+                "policy_update_allowed": policy_update_allowed,
                 "authority_enabled": authority_eligible,
                 "gates": gates,
                 "labels": counts,
@@ -696,11 +715,7 @@ def run_growth_cycle(
             path=policy_history_file,
         )
         chain = verify_policy_history(policy_history_file)
-        if (
-            authority_eligible
-            and field_learning_allowed
-            and chain.get("status") == "ok"
-        ):
+        if policy_update_allowed and chain.get("status") == "ok":
             write_last_known_good(
                 {
                     key: float(value)
@@ -751,7 +766,10 @@ def automatic_learning_allowed(
 ) -> bool:
     if not enabled:
         return False
-    return load_growth_state(state_file).get("field_learning_allowed") is True
+    state = load_growth_state(state_file)
+    if "positive_learning_allowed" in state:
+        return state.get("positive_learning_allowed") is True
+    return state.get("field_learning_allowed") is True
 
 
 def automatic_processor_authority_allowed(

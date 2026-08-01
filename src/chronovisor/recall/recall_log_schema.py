@@ -16,7 +16,9 @@ def page_ids_from_record(row: Mapping[str, Any]) -> list[str]:
 
     current_pages = row.get("pages")
     if isinstance(current_pages, list):
-        page_ids.extend(value for value in current_pages if isinstance(value, str) and value)
+        page_ids.extend(
+            value for value in current_pages if isinstance(value, str) and value
+        )
 
     context_items = row.get("context_items")
     if isinstance(context_items, list):
@@ -36,9 +38,7 @@ def page_ids_from_record(row: Mapping[str, Any]) -> list[str]:
     return list(dict.fromkeys(page_ids))
 
 
-def canonicalize_page_ids(
-    page_ids: list[str], aliases: Mapping[str, str]
-) -> list[str]:
+def canonicalize_page_ids(page_ids: list[str], aliases: Mapping[str, str]) -> list[str]:
     """Resolve immutable historical page IDs into current derived-index IDs."""
 
     canonical: list[str] = []
@@ -59,9 +59,7 @@ def used_page_ids_from_record(row: Mapping[str, Any]) -> list[str]:
     if not isinstance(values, list):
         return []
     return list(
-        dict.fromkeys(
-            value for value in values if isinstance(value, str) and value
-        )
+        dict.fromkeys(value for value in values if isinstance(value, str) and value)
     )
 
 
@@ -96,7 +94,7 @@ def join_used_recall_episodes(
         if decision_id:
             decisions.setdefault(decision_id, []).append(row)
 
-    episodes: list[dict[str, Any]] = []
+    episodes_by_decision: dict[tuple[str, str], dict[str, Any]] = {}
     rejected: Counter[str] = Counter()
     seen_events: set[str] = set()
     for pull in pull_rows:
@@ -131,17 +129,24 @@ def join_used_recall_episodes(
         if not pages:
             rejected["missing_page_ids"] += 1
             continue
-        episodes.append(
-            {
+        episode_session = pull_session or recall_session
+        episode_key = (decision_id, episode_session)
+        existing = episodes_by_decision.get(episode_key)
+        if existing is None:
+            episodes_by_decision[episode_key] = {
                 "event_id": event_id,
+                "event_ids": [event_id],
                 "decision_id": decision_id,
-                "session_id": pull_session or recall_session,
+                "session_id": episode_session,
                 "page_ids": pages,
                 "recall": dict(recall),
                 "pull": dict(pull),
             }
-        )
+            continue
+        existing["event_ids"].append(event_id)
+        existing["page_ids"] = list(dict.fromkeys([*existing["page_ids"], *pages]))
 
+    episodes = list(episodes_by_decision.values())
     return {
         "episodes": episodes,
         "accepted": len(episodes),

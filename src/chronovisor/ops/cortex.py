@@ -419,9 +419,18 @@ def _field_growth_summary(root: Path) -> dict[str, Any]:
     labels = metrics.get("labels") if isinstance(metrics, dict) else None
     thresholds = payload.get("thresholds") if isinstance(payload, dict) else None
     candidate = metrics.get("candidate") if isinstance(metrics, dict) else None
+    processor_used = (
+        metrics.get("processor_used") if isinstance(metrics, dict) else None
+    )
     return {
         "stage": str(payload.get("stage") or "not_started"),
         "field_learning_allowed": payload.get("field_learning_allowed") is True,
+        "positive_learning_allowed": (
+            payload.get("positive_learning_allowed") is True
+            if "positive_learning_allowed" in payload
+            else payload.get("field_learning_allowed") is True
+        ),
+        "policy_update_allowed": payload.get("policy_update_allowed") is True,
         "authority_enabled": payload.get("authority_enabled") is True,
         "canary_percent": _safe_metric_int(payload.get("canary_percent")),
         "strong_positive": _safe_metric_int(
@@ -444,6 +453,11 @@ def _field_growth_summary(root: Path) -> dict[str, Any]:
         ),
         "candidate_traces": _safe_metric_int(
             candidate.get("traces") or 0 if isinstance(candidate, dict) else 0
+        ),
+        "processor_used_episodes": _safe_metric_int(
+            processor_used.get("episodes") or 0
+            if isinstance(processor_used, dict)
+            else 0
         ),
     }
 

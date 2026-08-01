@@ -1,11 +1,11 @@
 """Chronovisor MCP Server."""
 
 import contextlib
+import hashlib
 import json
 import os
 import re
 import secrets
-import uuid
 from collections.abc import Callable
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -37,7 +37,10 @@ mcp = FastMCP(
     instructions=(
         "Chronovisor is your structured knowledge base. "
         "Use chronovisor_init at session start, chronovisor_search during "
-        "conversation, and chronovisor_read for full pages with backlinks."
+        "conversation, and chronovisor_read for full pages with backlinks. "
+        "Before finishing an answer, call chronovisor_recall_used with the "
+        "forwarded decision and session IDs for every recalled page that "
+        "materially affected the answer; never mark exposure-only pages used."
     ),
 )
 
@@ -439,6 +442,95 @@ def _append_pull_log(record: dict) -> bool:
         return True
     except Exception:
         return False
+
+
+def _validate_used_recall_decision(
+    decision_id: str,
+    session_id: str,
+) -> dict[str, Any]:
+    """Resolve a used receipt to one durable Recall decision before accepting it."""
+
+    from chronovisor.core.jsonl import read_jsonl
+    from chronovisor.recall.recall_log_schema import page_ids_from_record
+    from chronovisor.recall.recall_runtime import RECALL_LOG_FILE, RECALL_PULL_LOG_FILE
+
+    matches = [
+        row
+        for row in read_jsonl(RECALL_LOG_FILE, limit=10_000)
+        if str(row.get("decision_id") or "") == decision_id
+    ]
+    if not matches:
+        return {"status": "error", "error": "unknown recall decision"}
+    if len(matches) != 1:
+        return {"status": "error", "error": "ambiguous recall decision"}
+    recall = matches[0]
+    recall_session = str(recall.get("session_id") or "")
+    if recall_session and session_id and session_id != recall_session:
+        return {"status": "error", "error": "recall session mismatch"}
+    canonical_session = session_id or recall_session
+    observable_pages = page_ids_from_record(recall)
+    for pull in read_jsonl(RECALL_PULL_LOG_FILE, limit=10_000):
+        if str(pull.get("decision_id") or "") != decision_id:
+            continue
+        pull_session = str(pull.get("session_id") or "")
+        if canonical_session and pull_session and pull_session != canonical_session:
+            continue
+        if pull.get("type") == "read":
+            page_id = pull.get("page_id")
+            if isinstance(page_id, str) and page_id:
+                observable_pages.append(page_id)
+        elif pull.get("type") == "search":
+            returned = pull.get("returned_pages")
+            if isinstance(returned, list):
+                observable_pages.extend(
+                    value for value in returned if isinstance(value, str) and value
+                )
+    features = recall.get("evidence_features")
+    shadow = features.get("processor_shadow") if isinstance(features, dict) else None
+    shadow_pages = (
+        [
+            value
+            for value in shadow.get("committed_page_ids", [])
+            if isinstance(value, str) and value
+        ]
+        if isinstance(shadow, dict)
+        else []
+    )
+    return {
+        "status": "ok",
+        "session_id": canonical_session,
+        "observable_page_ids": list(dict.fromkeys(observable_pages)),
+        "processor_shadow_page_ids": list(dict.fromkeys(shadow_pages)),
+    }
+
+
+def _existing_used_receipt(decision_id: str, session_id: str) -> dict[str, Any] | None:
+    """Return the aggregate immutable used receipts for a decision, if any."""
+
+    from chronovisor.core.jsonl import read_jsonl
+    from chronovisor.recall.recall_runtime import RECALL_PULL_LOG_FILE
+
+    matches: list[dict[str, Any]] = []
+    pages: list[str] = []
+    for row in read_jsonl(RECALL_PULL_LOG_FILE, limit=10_000):
+        if row.get("type") != "used":
+            continue
+        if str(row.get("decision_id") or "") != decision_id:
+            continue
+        row_session = str(row.get("session_id") or "")
+        if row_session and session_id and row_session != session_id:
+            continue
+        matches.append(row)
+        values = row.get("page_ids")
+        if isinstance(values, list):
+            pages.extend(value for value in values if isinstance(value, str) and value)
+    if not matches:
+        return None
+    return {
+        "event_id": str(matches[0].get("event_id") or ""),
+        "event_count": len(matches),
+        "page_ids": list(dict.fromkeys(pages)),
+    }
 
 
 def _record_search_pull(
@@ -938,7 +1030,9 @@ def chronovisor_recall_used(
     """Record which recalled pages materially affected the answer.
 
     This is the only pull-trace event that is positive learning evidence.
-    Search results and page reads remain exploration telemetry.
+    Search results and page reads remain exploration telemetry. The decision
+    and session are validated synchronously so a successful response is
+    guaranteed to be joinable by the growth controller.
     """
 
     decision_id = decision_id.strip()
@@ -951,15 +1045,69 @@ def chronovisor_recall_used(
     )[:20]
     if not pages:
         return json.dumps({"status": "error", "error": "page_ids is required"})
-    event_id = uuid.uuid4().hex
+    validation = _validate_used_recall_decision(
+        decision_id,
+        str(session_id or "").strip(),
+    )
+    if validation.get("status") != "ok":
+        return json.dumps(
+            {
+                "status": "error",
+                "error": str(validation.get("error") or "invalid recall decision"),
+                "decision_id": decision_id,
+            },
+            ensure_ascii=False,
+        )
+    canonical_session = str(validation.get("session_id") or "")
+    observable_pages = {
+        value
+        for value in validation.get("observable_page_ids", [])
+        if isinstance(value, str) and value
+    }
+    unobserved_pages = [page for page in pages if page not in observable_pages]
+    if unobserved_pages:
+        return json.dumps(
+            {
+                "status": "error",
+                "error": "used pages were not returned, injected, or read",
+                "decision_id": decision_id,
+                "page_ids": unobserved_pages,
+            },
+            ensure_ascii=False,
+        )
+    existing = _existing_used_receipt(decision_id, canonical_session)
+    existing_page_list = [
+        value
+        for value in (existing or {}).get("page_ids", [])
+        if isinstance(value, str) and value
+    ]
+    existing_pages = set(existing_page_list)
+    new_pages = [page for page in pages if page not in existing_pages]
+    if existing is not None and not new_pages:
+        return json.dumps(
+            {
+                "status": "already_recorded",
+                "event_id": str(existing.get("event_id") or ""),
+                "decision_id": decision_id,
+                "page_ids": existing.get("page_ids") or [],
+                "learning_join": "ready",
+            },
+            ensure_ascii=False,
+        )
+    event_identity = json.dumps(
+        [decision_id, canonical_session, sorted(new_pages)],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    event_id = hashlib.sha256(event_identity.encode()).hexdigest()[:32]
     recorded = _append_pull_log(
         {
             "type": "used",
             "stage": "used",
             "event_id": event_id,
-            "session_id": session_id or "",
+            "session_id": canonical_session,
             "decision_id": decision_id,
-            "page_ids": pages,
+            "page_ids": new_pages,
             "note": note[:500],
         }
     )
@@ -977,7 +1125,12 @@ def chronovisor_recall_used(
             "status": "recorded",
             "event_id": event_id,
             "decision_id": decision_id,
-            "page_ids": pages,
+            "page_ids": [*existing_page_list, *new_pages],
+            "new_page_ids": new_pages,
+            "learning_join": "ready",
+            "processor_shadow_covered_page_ids": sorted(
+                set(pages) & set(validation.get("processor_shadow_page_ids") or [])
+            ),
         },
         ensure_ascii=False,
     )

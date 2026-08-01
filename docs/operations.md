@@ -219,8 +219,15 @@ Rollback order is authority first: set `recall.field.mode = "shadow"`, set
 `search.reranker.service.mode = "shadow"` or `"off"`. Restart the affected
 GitHub-backed services, then verify the hook still returns cards through the
 full fused teacher. Never delete Field snapshots or certificate ledgers to
-roll back; they are evaluation evidence. Field learning remains disabled until
-there are at least 200 explicit strong positives across at least 20 sessions.
+roll back; they are evaluation evidence. Positive co-fire learning remains
+disabled until there are at least 200 explicit strong positives across at
+least 20 sessions. Once that label gate, the temporal split, and the sealed
+non-degradation gate pass, positive co-fire may improve the candidate Field
+while production injection remains teacher-owned. Scalar policy adoption and
+production authority remain disabled until every candidate-coverage,
+explicit-used, precision, and latency gate also passes. Keeping these gates
+separate avoids requiring the Field to reach its target coverage before it is
+allowed to learn.
 Calibration additionally requires 500 deduplicated labels and a temporal
 holdout with zero session/query leakage.
 
@@ -235,6 +242,13 @@ through 5%, 25%, and 100% session canaries. A later failed gate resolves the
 effective mode back to candidate observation without a manual config edit.
 Processor authority additionally requires at least 90% explicit-used precision
 in the recent window, so selecting many cards to preserve recall cannot pass.
+The `chronovisor_recall_used` MCP boundary validates the decision/session before
+acknowledging the receipt and accepts only pages that were injected, returned,
+or explicitly read in that decision. Exact retries are idempotent, while later
+calls may only add newly used pages to the same decision episode. A successful
+receipt therefore cannot be silently discarded later as an orphan or session
+mismatch, invent an unobserved positive, or inflate episode counts through
+retries.
 
 ## Local Decision Replay Gate
 

@@ -2706,8 +2706,8 @@ function renderRecallField(fieldValue) {
   const growth = summary.growth || {};
   const growthLabel = growth.authority_enabled
     ? `authority · canary ${growth.canary_percent || 0}%`
-    : growth.field_learning_allowed
-      ? "learning on · authority held"
+    : growth.positive_learning_allowed || growth.field_learning_allowed
+      ? "positive co-fire on · authority held"
       : `learning ${growth.strong_positive || 0}/${growth.strong_positive_target || 200}`;
   els.recallFieldQuality.textContent =
     `${growthLabel} · agreement ${agreement} · p95 ${msLabel(latency.p95)}`;

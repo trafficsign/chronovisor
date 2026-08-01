@@ -30,7 +30,7 @@ def _clamp(value: float) -> float:
 
 
 def _effective_config(config: RecallFieldConfig) -> RecallFieldConfig:
-    """Apply learned edges only after the autonomous supervision gate passes."""
+    """Apply each learned input only after its own supervision gate passes."""
 
     if not config.auto_growth:
         return config
