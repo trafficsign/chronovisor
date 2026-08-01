@@ -17,7 +17,7 @@ import os
 import subprocess
 import tempfile
 import time
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -102,7 +102,7 @@ def inspect(
         observed = datetime.fromisoformat(wall_time.replace("Z", "+00:00"))
     except ValueError:
         return {"status": "invalid", "error": "heartbeat wall time is invalid"}
-    age = (_utc(now) - observed.astimezone(UTC)).total_seconds()
+    age = (_utc(now) - observed.astimezone(timezone.utc)).total_seconds()
     if age < -300:
         status = "clock_regression"
     elif age > max_age_seconds:
@@ -159,10 +159,10 @@ def append_incident(path: Path, payload: dict[str, Any]) -> None:
 
 
 def _utc(value: datetime | None = None) -> datetime:
-    current = value or datetime.now(UTC)
+    current = value or datetime.now(timezone.utc)
     if current.tzinfo is None:
-        return current.replace(tzinfo=UTC)
-    return current.astimezone(UTC)
+        return current.replace(tzinfo=timezone.utc)
+    return current.astimezone(timezone.utc)
 
 
 def _threshold_transition(

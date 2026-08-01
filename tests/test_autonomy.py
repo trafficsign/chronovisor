@@ -2638,6 +2638,10 @@ def test_install_then_uninstall_launchd_round_trip_in_fixture(
     assert len(list(launch_agents.glob("com.trafficsign.chronovisor-*.plist"))) == 5
     assert (wrappers / "chronovisor-soak").exists()
     assert "a" * 40 in (wrappers / "chronovisor-soak").read_text(encoding="utf-8")
+    observer = wrappers / "chronovisor-deadman-observer"
+    observer_source = Path(autonomy.__file__).parents[1] / "deadman_observer.py"
+    assert observer.read_bytes() == observer_source.read_bytes()
+    assert observer.stat().st_mode & 0o111
 
     removed = autonomy.uninstall_launchd(dry_run=False, unload=False)
 
