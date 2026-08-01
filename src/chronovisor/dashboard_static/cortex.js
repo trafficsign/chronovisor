@@ -129,6 +129,10 @@
     captureEvents: 0,
     ingestEvents: 0,
     applyEvents: 0,
+    absorptionArcs: 0,
+    explorationArcs: 0,
+    consolidationEdges: 0,
+    transportElectricPeak: 0,
   };
   window.chronovisorCortexMetrics = () => ({
     spread: cortexMetrics.spread.map((row) => ({ ...row })),
@@ -157,6 +161,10 @@
       captureEvents: cortexMetrics.captureEvents,
       ingestEvents: cortexMetrics.ingestEvents,
       applyEvents: cortexMetrics.applyEvents,
+      absorptionArcs: cortexMetrics.absorptionArcs,
+      explorationArcs: cortexMetrics.explorationArcs,
+      consolidationEdges: cortexMetrics.consolidationEdges,
+      transportElectricPeak: cortexMetrics.transportElectricPeak,
     },
   });
 
@@ -164,6 +172,7 @@
   const edgeAfterglows = [];
   const nodeEffects = [];
   const transportEffects = [];
+  const demoTransportTimers = [];
   const stars = Array.from({ length: 130 }, () => ({
     x: Math.random(),
     y: Math.random(),
@@ -798,8 +807,19 @@
     return [visibleHub()].filter(Boolean);
   }
 
+  function clearDemoTransportTimers() {
+    demoTransportTimers.splice(0).forEach((timer) => window.clearTimeout(timer));
+  }
+
+  function scheduleDemoTransport(delay, event) {
+    demoTransportTimers.push(
+      window.setTimeout(() => visualizeTransportEvent({ ...event, source: "demo" }), delay),
+    );
+  }
+
   function stimulate(name, label = "") {
     if (name === "save") {
+      clearDemoTransportTimers();
       visualizeTransportEvent({
         kind: "save",
         phase: "capture",
@@ -812,21 +832,32 @@
       return;
     }
     if (name === "ingest") {
-      visualizeTransportEvent({
+      clearDemoTransportTimers();
+      scheduleDemoTransport(0, {
+        kind: "ingest",
+        phase: "triage",
+        label: "DEMO TRIAGE · scanning raw memory",
+        page_ids: ["chronovisor-system"],
+      });
+      scheduleDemoTransport(850, {
         kind: "ingest",
         phase: "generate",
-        label: "DEMO INGEST · semantic projection",
-        page_ids: ["current-state"],
-        source: "demo",
+        label: "DEMO GENERATE · semantic projection",
+        page_ids: ["chronovisor-system"],
       });
-      window.setTimeout(() => visualizeTransportEvent({
+      scheduleDemoTransport(1700, {
+        kind: "ingest",
+        phase: "consensus",
+        label: "DEMO CONSENSUS · local verification",
+        page_ids: ["chronovisor-system"],
+      });
+      scheduleDemoTransport(2550, {
         kind: "ingest",
         phase: "apply",
         operation: "updated",
-        label: "DEMO MEMORY UPDATED · current-state",
-        page_ids: ["current-state"],
-        source: "demo",
-      }), 900);
+        label: "DEMO MEMORY UPDATED · chronovisor-system",
+        page_ids: ["chronovisor-system"],
+      });
       return;
     }
     const roots = scenarioNodes(name);
@@ -944,6 +975,11 @@
     target.dataset.maxCoreScale = cortexMetrics.maxCoreScale.toFixed(3);
     target.dataset.maxGlowPadding =
       cortexMetrics.maxGlowPadding.toFixed(3);
+    target.dataset.absorptionArcs = String(cortexMetrics.absorptionArcs);
+    target.dataset.explorationArcs = String(cortexMetrics.explorationArcs);
+    target.dataset.consolidationEdges = String(cortexMetrics.consolidationEdges);
+    target.dataset.transportElectricPeak =
+      cortexMetrics.transportElectricPeak.toFixed(3);
     target.dataset.activeLabelLimit = String(ACTIVE_LABEL_LIMIT);
     target.dataset.electricPathLimit = String(MAX_ELECTRIC_PATHS);
     target.dataset.flashTiming =
@@ -1050,10 +1086,14 @@
     const pageId = transportPageId(event);
     const node = pageId ? byId.get(pageId) : null;
     const duration = phase === "capture"
-      ? 2400
+      ? 2600
       : phase === "apply" || phase === "complete"
-        ? 3400
-        : 2800;
+        ? 3600
+        : phase === "consensus"
+          ? 2600
+          : phase === "generate"
+            ? 2300
+            : 2100;
     transportEffects.push({
       kind: event.kind,
       phase,
@@ -1073,6 +1113,13 @@
     if (phase === "capture") cortexMetrics.captureEvents += 1;
     else cortexMetrics.ingestEvents += 1;
     if (phase === "apply" || phase === "complete") cortexMetrics.applyEvents += 1;
+    crackle(
+      phase === "apply" || phase === "complete"
+        ? 0.12
+        : phase === "capture"
+          ? 0.055
+          : 0.04 + Math.min(0.035, cortexMetrics.ingestEvents * 0.006),
+    );
     updateMemoryIngress(event, phase);
     const prefix = event.source === "demo" ? "DEMO/REPLAY" : "MEMORY I/O";
     flashTicker(`${prefix} · ${String(event.label || phase).toUpperCase()}`);
@@ -1817,6 +1864,274 @@
     };
   }
 
+  function transportElectricPoints(source, target, effect, lane, time) {
+    const phase = Math.floor((time - effect.startedAt) / 68);
+    return electricPathPoints(
+      { screenX: source.x, screenY: source.y },
+      { screenX: target.x, screenY: target.y },
+      `transport:${effect.phase}:${lane}:${effect.pageId || effect.captureId}`,
+      effect.seq * 41 + lane * 17,
+      phase + lane,
+    );
+  }
+
+  function strokeTransportBolt(
+    points,
+    progress,
+    color,
+    intensity,
+    outerWidth,
+    innerWidth,
+  ) {
+    const prefix = electricPathPrefix(points, progress);
+    const head = prefix.at(-1) || points[0];
+    if (traceElectricPath(points)) {
+      context.strokeStyle = rgba(color, intensity * 0.16);
+      context.lineWidth = outerWidth + 3.4;
+      context.stroke();
+    }
+    if (traceElectricPath(prefix)) {
+      context.strokeStyle = rgba(color, intensity * 0.94);
+      context.lineWidth = outerWidth;
+      context.stroke();
+      traceElectricPath(prefix);
+      context.strokeStyle = rgba(RGB_HOT, intensity * 0.88);
+      context.lineWidth = innerWidth;
+      context.stroke();
+    }
+    context.fillStyle = rgba(RGB_HOT, intensity);
+    context.beginPath();
+    context.arc(head.x, head.y, Math.max(1.2, innerWidth * 1.25), 0, Math.PI * 2);
+    context.fill();
+    cortexMetrics.transportElectricPeak = Math.max(
+      cortexMetrics.transportElectricPeak,
+      intensity,
+    );
+    return head;
+  }
+
+  function captureSource(lane) {
+    if (lane < 4) {
+      return { x: -28, y: height * (0.25 + lane * 0.15) };
+    }
+    if (lane < 7) {
+      return { x: width * (0.18 + (lane - 4) * 0.18), y: -28 };
+    }
+    return { x: width * (0.1 + (lane - 7) * 0.22), y: height + 28 };
+  }
+
+  function drawCaptureElectricity(effect, time, progress, fade, anchor) {
+    const laneCount = 9;
+    for (let lane = 0; lane < laneCount; lane += 1) {
+      const laneProgress = reducedMotion.matches || !motionEnabled
+        ? 0.76
+        : (progress * 2.05 + lane * 0.127) % 1;
+      const source = captureSource(lane);
+      const points = transportElectricPoints(source, anchor, effect, lane, time);
+      const intensity = fade * (0.28 + laneProgress * 0.62);
+      const head = strokeTransportBolt(
+        points,
+        1 - Math.pow(1 - laneProgress, 2.5),
+        RGB_CAPTURE,
+        intensity,
+        lane % 3 === 0 ? 2.5 : 1.35,
+        lane % 3 === 0 ? 0.7 : 0.42,
+      );
+      context.fillStyle = rgba(RGB_CAPTURE, intensity * 0.9);
+      const token = Math.floor(
+        deterministicUnit(effect.captureId || effect.label, lane + effect.seq * 17)
+        * 0xffff,
+      ).toString(16).padStart(4, "0");
+      context.fillText(token, head.x + 5, head.y - 4);
+      if (laneProgress > 0.76) {
+        const arrival = (laneProgress - 0.76) / 0.24;
+        context.strokeStyle = rgba(RGB_CAPTURE, fade * (1 - arrival) * 0.72);
+        context.lineWidth = 0.8;
+        context.beginPath();
+        context.arc(anchor.x, anchor.y, 5 + arrival * 17, 0, Math.PI * 2);
+        context.stroke();
+      }
+      cortexMetrics.absorptionArcs += 1;
+    }
+    const capacitorPulse = reducedMotion.matches || !motionEnabled
+      ? 0.55
+      : (time - effect.startedAt) * 0.004;
+    context.strokeStyle = rgba(RGB_CAPTURE, fade * 0.68);
+    context.lineWidth = 1.1;
+    context.beginPath();
+    context.arc(
+      anchor.x,
+      anchor.y,
+      11 + Math.sin(capacitorPulse) * 2.5,
+      capacitorPulse,
+      capacitorPulse + Math.PI * 1.45,
+    );
+    context.stroke();
+    const glowSize = 32;
+    context.globalAlpha = fade * 0.58;
+    context.drawImage(
+      glowCapture,
+      anchor.x - glowSize / 2,
+      anchor.y - glowSize / 2,
+      glowSize,
+      glowSize,
+    );
+    context.globalAlpha = 1;
+  }
+
+  function ingestProbeTargets(effect, target) {
+    const count = effect.phase === "triage" ? 6 : effect.phase === "generate" ? 4 : 3;
+    const radius = effect.phase === "triage" ? 150 : effect.phase === "generate" ? 82 : 38;
+    return Array.from({ length: count }, (_value, branch) => {
+      if (branch === 0 && effect.phase !== "triage") return target;
+      const angle =
+        deterministicUnit(effect.label, effect.seq + branch * 29) * Math.PI * 2
+        + branch * 1.7;
+      const spread = radius * (0.55 + deterministicUnit(effect.pageId, branch + 701) * 0.45);
+      return {
+        x: clamp(target.x + Math.cos(angle) * spread, 34, width - 34),
+        y: clamp(target.y + Math.sin(angle) * spread, 64, height - 64),
+      };
+    });
+  }
+
+  function drawIngestElectricity(effect, time, progress, fade, anchor, target) {
+    const probes = ingestProbeTargets(effect, target);
+    let primaryHead = target;
+    probes.forEach((probe, branch) => {
+      const branchProgress = reducedMotion.matches || !motionEnabled
+        ? 0.72
+        : clamp(progress * 1.5 - branch * 0.075);
+      const origin = effect.phase === "consensus" && branch
+        ? {
+            x: anchor.x + (branch % 2 ? -1 : 1) * (12 + branch * 7),
+            y: anchor.y - branch * 10,
+          }
+        : anchor;
+      const points = transportElectricPoints(origin, probe, effect, branch, time);
+      const head = strokeTransportBolt(
+        points,
+        branchProgress,
+        RGB_FIRE,
+        fade * (branch === 0 ? 0.9 : 0.48),
+        branch === 0 ? 2.8 : 1.45,
+        branch === 0 ? 0.72 : 0.42,
+      );
+      if (branch === 0) primaryHead = head;
+      cortexMetrics.explorationArcs += 1;
+    });
+    const ringProgress = reducedMotion.matches || !motionEnabled
+      ? 0.58
+      : (progress * 1.75) % 1;
+    const scanRadius =
+      (effect.phase === "triage" ? 24 : effect.phase === "generate" ? 17 : 12)
+      + ringProgress * (effect.phase === "triage" ? 62 : 36);
+    context.setLineDash(effect.phase === "consensus" ? [2, 3] : [3, 7]);
+    context.lineDashOffset = -(time - effect.startedAt) * 0.028;
+    context.strokeStyle = rgba(RGB_FIRE, fade * (1 - ringProgress) * 0.65);
+    context.lineWidth = effect.phase === "consensus" ? 1.4 : 0.8;
+    context.beginPath();
+    context.arc(target.x, target.y, scanRadius, 0, Math.PI * 2);
+    context.stroke();
+    context.setLineDash([]);
+    const phaseLabel = effect.phase === "triage"
+      ? "SCAN"
+      : effect.phase === "generate"
+        ? "SYNTH"
+        : "VERIFY";
+    context.fillStyle = rgba(RGB_FIRE, fade * 0.88);
+    context.textAlign = "left";
+    context.fillText(
+      `${phaseLabel} ${effect.pageId || "LOCAL"}`.slice(0, 42),
+      primaryHead.x + 7,
+      primaryHead.y - 7,
+    );
+  }
+
+  function visibleConsolidationNeighbors(node) {
+    if (!node) return [];
+    return [...neighbors[node.index]]
+      .map((index) => nodes[index])
+      .filter(
+        (neighbor) =>
+          neighbor
+          && nodeState[neighbor.index] > 0
+          && neighbor.viewDepth <= 9e8
+          && neighbor.screenX > 20
+          && neighbor.screenX < width - 20
+          && neighbor.screenY > 40
+          && neighbor.screenY < height - 40,
+      )
+      .sort((left, right) => right.fanIn - left.fanIn)
+      .slice(0, 6);
+  }
+
+  function drawApplyElectricity(effect, time, progress, fade, anchor, target) {
+    const mainPoints = transportElectricPoints(anchor, target, effect, 0, time);
+    const travel = reducedMotion.matches || !motionEnabled ? 0.86 : clamp(progress * 2.25);
+    const head = strokeTransportBolt(
+      mainPoints,
+      travel,
+      RGB_COMMIT,
+      fade * 0.98,
+      5.8,
+      1.15,
+    );
+    const arrival = clamp((progress - 0.18) / 0.82);
+    if (arrival > 0) {
+      visibleConsolidationNeighbors(target.node).forEach((neighbor, branch) => {
+        const branchProgress = reducedMotion.matches || !motionEnabled
+          ? 0.8
+          : clamp(arrival * 1.8 - branch * 0.085);
+        const points = transportElectricPoints(
+          target,
+          { x: neighbor.screenX, y: neighbor.screenY },
+          effect,
+          branch + 1,
+          time,
+        );
+        strokeTransportBolt(
+          points,
+          branchProgress,
+          RGB_COMMIT,
+          fade * (0.54 - branch * 0.035),
+          2.25,
+          0.5,
+        );
+        cortexMetrics.consolidationEdges += 1;
+      });
+    }
+    const radius = target.node
+      ? Math.max(0.75, target.node.radius * target.node.screenScale) * NODE_CORE_SCALE
+      : 2.2;
+    drawCompactGlow(
+      glowCommit,
+      target.x,
+      target.y,
+      radius,
+      3,
+      fade * (0.38 + arrival * 0.45),
+    );
+    context.strokeStyle = rgba(RGB_COMMIT, fade * (0.55 + arrival * 0.4));
+    context.lineWidth = 1.15;
+    context.beginPath();
+    context.arc(target.x, target.y, radius + 2.5, 0, Math.PI * 2);
+    context.stroke();
+    if (!target.node) {
+      context.fillStyle = rgba(RGB_COMMIT, fade * 0.88);
+      context.beginPath();
+      context.arc(target.x, target.y, radius, 0, Math.PI * 2);
+      context.fill();
+    }
+    context.fillStyle = rgba(RGB_COMMIT, fade * 0.9);
+    context.textAlign = "left";
+    context.fillText(
+      `${effect.phase === "complete" ? "LOCKED" : "WRITE"} ${effect.pageId || "MEMORY"}`.slice(0, 42),
+      head.x + 7,
+      head.y - 8,
+    );
+  }
+
   function drawTransportEffects(time) {
     context.save();
     context.globalCompositeOperation = "lighter";
@@ -1837,102 +2152,14 @@
       const fade = 1 - smoothstep(clamp(rawProgress));
       const anchor = transportAnchor();
       if (effect.phase === "capture") {
-        const laneCount = 9;
-        for (let lane = 0; lane < laneCount; lane += 1) {
-          const laneProgress = reducedMotion.matches || !motionEnabled
-            ? 0.66
-            : (progress * 1.75 + lane * 0.117) % 1;
-          const sourceX = -28;
-          const sourceY = anchor.y - 94 + lane * 19;
-          const eased = 1 - Math.pow(1 - laneProgress, 2.4);
-          const x = sourceX + (anchor.x - sourceX) * eased;
-          const y = sourceY + (anchor.y - sourceY) * eased;
-          const tailX = sourceX + (anchor.x - sourceX) * Math.max(0, eased - 0.16);
-          const tailY = sourceY + (anchor.y - sourceY) * Math.max(0, eased - 0.16);
-          context.strokeStyle = rgba(RGB_CAPTURE, fade * (0.12 + laneProgress * 0.42));
-          context.lineWidth = lane % 3 === 0 ? 1.2 : 0.65;
-          context.beginPath();
-          context.moveTo(tailX, tailY);
-          context.lineTo(x, y);
-          context.stroke();
-          context.fillStyle = rgba(RGB_CAPTURE, fade * (0.42 + laneProgress * 0.48));
-          const token = Math.floor(
-            deterministicUnit(effect.captureId || effect.label, lane + effect.seq * 17)
-            * 0xffff,
-          ).toString(16).padStart(4, "0");
-          context.fillText(token, x + 4, y - 3);
-        }
-        const glowSize = 26;
-        context.globalAlpha = fade * 0.5;
-        context.drawImage(
-          glowCapture,
-          anchor.x - glowSize / 2,
-          anchor.y - glowSize / 2,
-          glowSize,
-          glowSize,
-        );
-        context.globalAlpha = 1;
+        drawCaptureElectricity(effect, time, progress, fade, anchor);
       } else {
         const target = transportTarget(effect);
-        const dx = target.x - anchor.x;
-        const dy = target.y - anchor.y;
-        const color = effect.phase === "apply" || effect.phase === "complete"
-          ? RGB_COMMIT
-          : RGB_FIRE;
-        const energized = effect.phase === "complete" ? 1 : progress;
-        const headX = anchor.x + dx * energized;
-        const headY = anchor.y + dy * energized;
-        context.setLineDash([2, 7]);
-        context.lineDashOffset = -(time - effect.startedAt) * 0.035;
-        context.strokeStyle = rgba(color, fade * 0.28);
-        context.lineWidth = 1;
-        context.beginPath();
-        context.moveTo(anchor.x, anchor.y);
-        context.lineTo(target.x, target.y);
-        context.stroke();
-        context.setLineDash([]);
-        context.strokeStyle = rgba(color, fade * 0.82);
-        context.lineWidth = effect.phase === "apply" ? 2.1 : 1.45;
-        context.beginPath();
-        context.moveTo(anchor.x, anchor.y);
-        context.lineTo(headX, headY);
-        context.stroke();
-        context.fillStyle = rgba(RGB_HOT, fade * 0.9);
-        context.beginPath();
-        context.arc(headX, headY, 1.6, 0, Math.PI * 2);
-        context.fill();
         if (effect.phase === "apply" || effect.phase === "complete") {
-          const radius = target.node
-            ? Math.max(0.75, target.node.radius * target.node.screenScale) * NODE_CORE_SCALE
-            : 2.2;
-          drawCompactGlow(
-            glowCommit,
-            target.x,
-            target.y,
-            radius,
-            3,
-            fade * 0.72,
-          );
-          context.strokeStyle = rgba(RGB_COMMIT, fade * 0.92);
-          context.lineWidth = 1.1;
-          context.beginPath();
-          context.arc(target.x, target.y, radius + 2.5, 0, Math.PI * 2);
-          context.stroke();
-          if (!target.node) {
-            context.fillStyle = rgba(RGB_COMMIT, fade * 0.88);
-            context.beginPath();
-            context.arc(target.x, target.y, radius, 0, Math.PI * 2);
-            context.fill();
-          }
+          drawApplyElectricity(effect, time, progress, fade, anchor, target);
+        } else {
+          drawIngestElectricity(effect, time, progress, fade, anchor, target);
         }
-        const caption = effect.phase === "apply"
-          ? `WRITE ${effect.pageId || "MEMORY"}`
-          : effect.phase === "complete"
-            ? "CONSOLIDATED"
-            : `${effect.phase.toUpperCase()} ${effect.pageId || "LOCAL"}`;
-        context.fillStyle = rgba(color, fade * 0.82);
-        context.textAlign = "left";
-        context.fillText(caption.slice(0, 42), headX + 7, headY - 6);
       }
       if (!effect.paintedAt) {
         effect.paintedAt = time;
@@ -2054,6 +2281,10 @@
     cortexMetrics.flashPeak = 0;
     cortexMetrics.maxCoreScale = 0;
     cortexMetrics.maxGlowPadding = 0;
+    cortexMetrics.absorptionArcs = 0;
+    cortexMetrics.explorationArcs = 0;
+    cortexMetrics.consolidationEdges = 0;
+    cortexMetrics.transportElectricPeak = 0;
     context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
     context.clearRect(0, 0, width, height);
     context.fillStyle = STEEL;

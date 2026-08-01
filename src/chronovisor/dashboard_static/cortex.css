@@ -713,6 +713,25 @@ canvas#gl {
 #memoryIngress[data-phase="apply"],
 #memoryIngress[data-phase="complete"] { --ingress-color: #45d49b; }
 
+#memoryIngress[data-phase="capture"]::after {
+  animation-duration: 0.48s;
+  animation-direction: reverse;
+}
+
+#memoryIngress[data-phase="triage"]::after,
+#memoryIngress[data-phase="generate"]::after {
+  animation-duration: 0.78s;
+}
+
+#memoryIngress[data-phase="consensus"]::after {
+  animation: ingressScan 0.44s steps(4, end) infinite alternate;
+}
+
+#memoryIngress[data-phase="apply"]::after,
+#memoryIngress[data-phase="complete"]::after {
+  animation: ingressLock 0.72s ease-out both;
+}
+
 .ingressBeacon {
   width: 6px;
   height: 6px;
@@ -755,6 +774,12 @@ canvas#gl {
 
 @keyframes ingressBeacon {
   50% { opacity: 0.28; }
+}
+
+@keyframes ingressLock {
+  0% { opacity: 1; transform: translateX(-120%); }
+  58% { opacity: 1; transform: translateX(20%); }
+  100% { opacity: 0.2; transform: translateX(120%); }
 }
 
 #ticker {

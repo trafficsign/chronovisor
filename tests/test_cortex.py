@@ -692,6 +692,16 @@ def test_cortex_static_view_preserves_fable_layout_and_uses_live_data() -> None:
     assert "function visualizeFieldEvent(event)" in script
     assert "function visualizeTransportEvent(event)" in script
     assert "function drawTransportEffects(time)" in script
+    assert "function drawCaptureElectricity(" in script
+    assert "function drawIngestElectricity(" in script
+    assert "function drawApplyElectricity(" in script
+    assert "function visibleConsolidationNeighbors(node)" in script
+    assert 'phase: "triage"' in script
+    assert 'phase: "consensus"' in script
+    assert "scheduleDemoTransport(2550" in script
+    assert "cortexMetrics.absorptionArcs += 1;" in script
+    assert "cortexMetrics.explorationArcs += 1;" in script
+    assert "cortexMetrics.consolidationEdges += 1;" in script
     assert "transportEvents.forEach(visualizeTransportEvent)" in script
     assert 'event.kind === "save" || event.kind === "ingest"' in script
     assert "drawTransportEffects(time);" in script
