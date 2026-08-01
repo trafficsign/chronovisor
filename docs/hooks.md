@@ -153,3 +153,20 @@ chronovisor hooks inspect --json
 This lists detected Codex and Claude Code hook entries, labels current,
 legacy-wrapper, and deprecated-no-op commands, emits migration warnings for the
 last category, and computes Codex-style canonical hook hashes for inspection.
+
+## Typed graph recall boundary
+
+`UserPromptSubmit` may read verified typed relation candidates only through the
+normal search and Page Certificate path. In `shadow`, the Hook records a
+privacy-safe candidate path but preserves the existing rank and injection byte
+contract. A trace contains hashed query/session identity, decision and path
+IDs, relation IDs, page IDs, lifecycle, and evidence digests; it never contains
+the prompt, page body, or evidence text. Failure to write this diagnostic trace
+is fail-open and cannot block Recall.
+
+The Hook never builds the graph, consolidates entities, summarizes
+communities, runs relation consensus, or calibrates a rubric. Those operations
+belong to the idle sleep lane. Synchronous usefulness judgment may load one
+previously adopted sealed rubric into the existing 9B-to-35B Processor path,
+but it cannot start the 20B/26B/35B calibration ensemble. This preserves the
+four-second total deadline and the existing deterministic fallback reserve.

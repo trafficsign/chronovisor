@@ -312,3 +312,41 @@ the single dispatcher directly. The Stop dispatcher schedules deterministic
 save/correction capture only; successful save completion can enqueue an audit
 candidate, but asynchronous semantic work belongs to convergence workers rather
 than the host's session boundary.
+
+## Typed Knowledge Graph and Local Consensus
+
+The typed graph is an append-only, derived recall plane. It augments the
+existing BM25, Nemotron, BGE reranker, Page Certificate, and Recall Field; it
+does not replace them. Page changes are processed in the bounded sleep lane:
+
+```text
+changed page digest
+  -> deterministic mentions and explicit links
+  -> bounded local structured entity/relation extraction
+  -> evidence and digest validation
+  -> producer-independent local consensus
+  -> verified relation snapshot
+  -> deterministic Leiden-style community projection
+  -> source-bound local community summary
+```
+
+Relation lifecycle is `proposed -> held|verified -> repeatedly_used ->
+authoritative`, with independent `stale` and `retracted` events. `proposed` and
+`held` relations never enter retrieval or Field propagation. `verified`
+relations are candidate-only; a relation becomes `repeatedly_used` only after
+the saved path led to a page actually used in distinct sessions. Only
+`authoritative` relations may enter the active Field buffer.
+
+Search classifies each query as `direct`, `local`, `global`, or `mixed`.
+Direct search keeps the existing fast path, local/mixed search may traverse at
+most two verified relation hops, and global search may add source-bound
+community candidates. Every typed path records relation IDs, direction,
+predicate, lifecycle, evidence digests, and weight components. Shadow mode
+records the same privacy-safe paths without changing rank or injection.
+
+Relation truth, entity identity, recall usefulness, and rubric calibration are
+four separate Decision Router lanes. Consensus is local and background-only;
+the artifact producer is excluded from quorum. The synchronous Hook loads only
+an already adopted sealed rubric and never launches the three-model ensemble.
+Existing search remains the teacher and automatic rollback target for every
+canary stage.

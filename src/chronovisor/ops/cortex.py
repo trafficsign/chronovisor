@@ -13,8 +13,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from chronovisor.core.durable_state import DurableStateError, read_sealed_json
 from chronovisor.core.frontmatter import parse as parse_frontmatter
 from chronovisor.core.link_fix import extract_targets
+from chronovisor.knowledge_graph.store import KnowledgeGraphStore
 
 _GRAPH_CACHE_LOCK = threading.Lock()
 _GRAPH_CACHE: dict[str, dict[str, Any]] = {}
@@ -98,6 +100,19 @@ def _source_fingerprint(
                 stat.st_mtime_ns,
             )
         )
+    for relative in (
+        "knowledge-graph/relation-snapshot.json",
+        "knowledge-graph/community-snapshot.json",
+        "runtime/typed-graph/status.json",
+        "runtime/typed-graph/promotion.json",
+        "runtime/recall-rubric/status.json",
+    ):
+        path = root / relative
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        rows.append((relative, stat.st_size, stat.st_mtime_ns))
     encoded = json.dumps(
         {"commit": commit, "sources": rows},
         ensure_ascii=False,
@@ -217,6 +232,10 @@ def _build_graph(
         }
         for index, page in enumerate(pages)
     ]
+    typed_graph = _typed_graph_projection(root, index_by_key=index_by_key)
+    memberships = typed_graph.pop("memberships")
+    for node in nodes:
+        node["communities"] = memberships.get(node["id"], [])
     short_commit = commit[:7] if commit else "local"
     return {
         "meta": {
@@ -232,6 +251,251 @@ def _build_graph(
         "nodes": nodes,
         "links": edges,
         "categories": categories,
+        "typedGraph": typed_graph,
+    }
+
+
+def _safe_sealed(path: Path) -> dict[str, Any]:
+    try:
+        value = read_sealed_json(path, recover_backup=True)
+    except (DurableStateError, OSError, ValueError, json.JSONDecodeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _typed_graph_projection(
+    root: Path,
+    *,
+    index_by_key: dict[str, int],
+) -> dict[str, Any]:
+    """Return IDs, digests, votes and state only; never expose evidence text."""
+
+    store = KnowledgeGraphStore(root / "knowledge-graph")
+    try:
+        records = store.relations()
+    except (DurableStateError, OSError, TypeError, ValueError):
+        records = []
+    relations: list[dict[str, Any]] = []
+    for record in records:
+        source_index = index_by_key.get(record.source_page_id.casefold())
+        target_index = index_by_key.get(record.target_page_id.casefold())
+        if source_index is None or target_index is None:
+            continue
+        consensus = record.consensus
+        relations.append(
+            {
+                "relation_id": record.relation_id,
+                "source": source_index,
+                "target": target_index,
+                "source_page_id": record.source_page_id,
+                "target_page_id": record.target_page_id,
+                "predicate": record.predicate[:128],
+                "direction": record.direction,
+                "status": record.status,
+                "producer_role": record.producer_role,
+                "confidence": round(record.confidence, 4),
+                "used_count": record.used_count,
+                "used_sessions": len(record.used_sessions),
+                "reason_code": record.reason_code[:160],
+                "evidence_refs": [
+                    {
+                        "page_id": row.page_id,
+                        "content_sha256": row.content_sha256,
+                        "span_sha256": row.span_sha256,
+                        "source_line": row.source_line,
+                        "raw_sha256": row.raw_sha256,
+                    }
+                    for row in record.evidence
+                ],
+                "consensus": (
+                    {
+                        "receipt_id": consensus.receipt_id,
+                        "producer_role": consensus.producer_role,
+                        "quorum": consensus.quorum,
+                        "outcome": consensus.outcome,
+                        "hold_reason": consensus.hold_reason[:160],
+                        "votes": [
+                            {
+                                "role": vote.role,
+                                "model_sha256": vote.model_sha256,
+                                "decision": vote.decision,
+                                "confidence": round(vote.confidence, 4),
+                                "vote_sha256": vote.vote_sha256,
+                            }
+                            for vote in consensus.votes
+                        ],
+                    }
+                    if consensus is not None
+                    else None
+                ),
+            }
+        )
+    entity_payload = _safe_sealed(store.entity_snapshot_file)
+    candidate_values = entity_payload.get("candidates")
+    merge_values = entity_payload.get("merge_candidates")
+    entity_candidates = candidate_values if isinstance(candidate_values, dict) else {}
+    if isinstance(merge_values, dict):
+        for merge_id, merge in sorted(merge_values.items()):
+            if len(relations) >= 2_000 or not isinstance(merge, dict):
+                break
+            members = [
+                entity_candidates.get(str(candidate_id))
+                for candidate_id in merge.get("member_candidate_ids") or []
+            ]
+            rows = [value for value in members if isinstance(value, dict)]
+            page_ids = sorted(
+                {str(value.get("page_id") or "") for value in rows} - {""}
+            )
+            evidence_refs = [
+                {
+                    "page_id": str(value.get("page_id") or ""),
+                    "content_sha256": str(value.get("content_sha256") or ""),
+                    "span_sha256": str(value.get("alias_evidence_sha256") or ""),
+                    "source_line": 0,
+                    "raw_sha256": "",
+                }
+                for value in rows
+            ]
+            merge_consensus_value = merge.get("consensus")
+            merge_consensus: dict[str, Any] = (
+                merge_consensus_value if isinstance(merge_consensus_value, dict) else {}
+            )
+            merge_votes_value = merge_consensus.get("votes")
+            merge_votes = (
+                merge_votes_value if isinstance(merge_votes_value, list) else []
+            )
+            for source_offset, source_page_id in enumerate(page_ids):
+                for target_page_id in page_ids[source_offset + 1 :]:
+                    source_index = index_by_key.get(source_page_id.casefold())
+                    target_index = index_by_key.get(target_page_id.casefold())
+                    if source_index is None or target_index is None:
+                        continue
+                    relations.append(
+                        {
+                            "relation_id": str(merge_id),
+                            "source": source_index,
+                            "target": target_index,
+                            "source_page_id": source_page_id,
+                            "target_page_id": target_page_id,
+                            "predicate": "same_entity_alias",
+                            "direction": "bidirectional",
+                            "status": str(merge.get("status") or "proposed"),
+                            "producer_role": "entity_local_consensus",
+                            "confidence": 1.0,
+                            "used_count": int(merge.get("used_count") or 0),
+                            "used_sessions": len(merge.get("used_sessions") or []),
+                            "reason_code": str(
+                                merge.get("reason_code") or merge.get("reason") or ""
+                            )[:160],
+                            "evidence_refs": evidence_refs,
+                            "consensus": {
+                                "receipt_id": str(
+                                    merge_consensus.get("receipt_id")
+                                    or merge.get("receipt_id")
+                                    or ""
+                                ),
+                                "producer_role": str(
+                                    merge_consensus.get("producer_role")
+                                    or "entity_local_consensus"
+                                ),
+                                "quorum": int(merge_consensus.get("quorum") or 2),
+                                "outcome": str(
+                                    merge_consensus.get("outcome")
+                                    or merge.get("status")
+                                    or "proposed"
+                                ),
+                                "hold_reason": str(
+                                    merge_consensus.get("hold_reason")
+                                    or merge.get("reason_code")
+                                    or ""
+                                )[:160],
+                                "votes": [
+                                    {
+                                        "role": str(vote.get("role") or ""),
+                                        "model_sha256": str(
+                                            vote.get("model_sha256") or ""
+                                        ),
+                                        "decision": str(
+                                            vote.get("decision") or "abstain"
+                                        ),
+                                        "confidence": round(
+                                            float(vote.get("confidence") or 0.0), 4
+                                        ),
+                                        "vote_sha256": str(
+                                            vote.get("vote_sha256") or ""
+                                        ),
+                                    }
+                                    for vote in merge_votes
+                                    if isinstance(vote, dict)
+                                ],
+                            },
+                        }
+                    )
+    community_payload = _safe_sealed(store.community_snapshot_file)
+    community_values = community_payload.get("communities")
+    communities: list[dict[str, Any]] = []
+    memberships: dict[str, list[str]] = {}
+    if isinstance(community_values, dict):
+        for community_id, value in sorted(community_values.items()):
+            if not isinstance(value, dict):
+                continue
+            community_members: list[str] = [
+                str(page_id)
+                for page_id in value.get("member_page_ids") or []
+                if str(page_id).casefold() in index_by_key
+            ]
+            for member_page_id in community_members:
+                memberships.setdefault(member_page_id, []).append(str(community_id))
+            communities.append(
+                {
+                    "community_id": str(community_id),
+                    "member_page_ids": community_members,
+                    "relation_ids": [
+                        str(relation_id)
+                        for relation_id in value.get("relation_ids") or []
+                    ],
+                    "source_digests": [
+                        str(digest) for digest in value.get("source_digests") or []
+                    ],
+                    "summary_sha256": str(value.get("summary_sha256") or ""),
+                    "generated_at": str(value.get("generated_at") or ""),
+                }
+            )
+    status = _safe_sealed(root / "runtime" / "typed-graph" / "status.json")
+    promotion = _safe_sealed(root / "runtime" / "typed-graph" / "promotion.json")
+    rubric = _safe_sealed(root / "runtime" / "recall-rubric" / "status.json")
+    return {
+        "relations": relations,
+        "communities": communities,
+        "memberships": memberships,
+        "status": {
+            "mode": str(status.get("mode") or "shadow"),
+            "engineering_complete": status.get("engineering_complete") is True,
+            "authority_mature": status.get("authority_mature") is True,
+            "relation_counts": status.get("relation_counts") or {},
+            "builder": status.get("builder") or {},
+            "consensus": status.get("consensus") or {},
+            "entities": status.get("entities") or {},
+            "community_summary": status.get("community_summary") or {},
+            "evaluation": status.get("evaluation") or {},
+            "four_arm": status.get("four_arm") or {},
+            "rubric_gold": status.get("rubric_gold") or {},
+            "authority": status.get("authority") or {},
+            "external_model_calls": int(status.get("external_model_calls") or 0),
+            "rollout": {
+                "mode": str(promotion.get("mode") or "shadow"),
+                "canary_percent": int(promotion.get("canary_percent") or 0),
+                "reason": str(promotion.get("reason") or "not_evaluated")[:160],
+                "gates": promotion.get("gates") or {},
+            },
+            "rubric": {
+                "status": str(rubric.get("status") or "builtin"),
+                "rubric_id": str(rubric.get("rubric_id") or "builtin-v1"),
+                "gates": rubric.get("gates") or {},
+                "samples": int(rubric.get("samples") or 0),
+                "judge_metrics": rubric.get("judge_metrics") or {},
+            },
+        },
     }
 
 
@@ -252,7 +516,9 @@ def build_cortex_graph(
         with _GRAPH_CACHE_LOCK:
             cached = _GRAPH_CACHE.get(cache_key)
             if cached and cached.get("fingerprint") == fingerprint:
-                return cached["graph"]
+                cached_graph = cached.get("graph")
+                if isinstance(cached_graph, dict):
+                    return cached_graph
 
     graph = _build_graph(
         resolved_root,
@@ -303,14 +569,20 @@ def _project_field_event(value: Any) -> dict[str, Any] | None:
         or not isinstance(kind, str)
     ):
         return None
-    projected = {key: value.get(key) for key in _FIELD_EVENT_KEYS if key in value}
+    projected: dict[str, Any] = {
+        key: value.get(key) for key in _FIELD_EVENT_KEYS if key in value
+    }
     components = value.get("components")
     safe_components = components if isinstance(components, dict) else {}
-    projected["components"] = {
+    projected_components: dict[str, Any] = {
         key: round(float(safe_components.get(key) or 0.0), 6)
         for key in sorted(_FIELD_COMPONENT_KEYS)
         if isinstance(safe_components.get(key, 0.0), int | float)
     }
+    relation_id = safe_components.get("relation_id")
+    if isinstance(relation_id, str) and relation_id.startswith("rel_"):
+        projected_components["relation_id"] = relation_id[:128]
+    projected["components"] = projected_components
     projected["source"] = "stateful-recall-field"
     return projected
 

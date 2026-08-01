@@ -744,6 +744,99 @@ canvas#gl {
   overflow-y: auto;
 }
 
+.relationFilter {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--tx3);
+  font: 8px var(--mono);
+  text-transform: uppercase;
+}
+
+.relationFilter select {
+  max-width: 112px;
+  padding: 4px 6px;
+  color: var(--tx2);
+  font: 8px var(--mono);
+  background: rgba(8, 12, 20, 0.92);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+}
+
+.relationMetrics {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.relationCards {
+  display: grid;
+  gap: 6px;
+}
+
+.relationCard {
+  min-width: 0;
+  padding: 7px;
+  color: var(--tx2);
+  font: 8.5px/1.5 var(--mono);
+  background: rgba(10, 15, 25, 0.72);
+  border: 1px solid var(--line);
+  border-radius: 7px;
+}
+
+.relationCard summary {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 6px;
+  align-items: center;
+  cursor: pointer;
+}
+
+.relationCard summary b,
+.relationCard summary small,
+.relationId,
+.relationCard .mrow b {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.relationId {
+  margin: 7px 0 4px;
+  color: #b8a7ff;
+}
+
+.relationLife {
+  padding: 2px 4px;
+  color: #9b7cff;
+  border: 1px dashed currentColor;
+  border-radius: 4px;
+}
+
+.relationLife.held { color: #54b9ff; }
+.relationLife.repeatedly_used,
+.relationLife.authoritative { color: #45d49b; }
+.relationLife.stale { color: #7d8494; }
+.relationLife.retracted { color: #ff5d68; }
+
+.relationVotes,
+.relationEvidence {
+  display: grid;
+  gap: 3px;
+  margin-top: 5px;
+}
+
+.relationVotes span,
+.relationEvidence span {
+  overflow: hidden;
+  padding: 3px 5px;
+  color: var(--tx3);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  border-left: 2px solid #7d92b5;
+}
+
+.relationVotes .approve { border-color: #45d49b; }
+.relationVotes .reject { border-color: #ff5d68; }
+
 .sec {
   margin-top: 14px;
 }

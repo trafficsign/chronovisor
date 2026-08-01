@@ -5,6 +5,8 @@ import os
 import threading
 from pathlib import Path
 
+from chronovisor.core.durable_state import write_sealed_json
+from chronovisor.knowledge_graph.store import KnowledgeGraphStore
 from chronovisor.ops import cortex, dashboard
 from chronovisor.recall.recall_field_schema import (
     ActivationNode,
@@ -106,6 +108,70 @@ def test_build_cortex_graph_cache_invalidates_when_a_page_changes(
 
     assert first is not second
     assert second["nodes"][0]["l"] > first["nodes"][0]["l"]
+
+
+def test_cortex_projects_entity_consensus_votes_without_mentions(tmp_path: Path) -> None:
+    root = tmp_path / "chronovisor"
+    _write_page(root / "pages" / "a.md", title="A", body="Alpha")
+    _write_page(root / "pages" / "b.md", title="B", body="Beta")
+    store = KnowledgeGraphStore(root / "knowledge-graph")
+    store.write_derived_snapshot(
+        "entities",
+        {
+            "schema_version": 1,
+            "candidates": {
+                "one": {
+                    "candidate_id": "one",
+                    "mention": "secret mention one",
+                    "page_id": "a",
+                    "content_sha256": "a" * 64,
+                    "alias_evidence_sha256": "b" * 64,
+                },
+                "two": {
+                    "candidate_id": "two",
+                    "mention": "secret mention two",
+                    "page_id": "b",
+                    "content_sha256": "c" * 64,
+                    "alias_evidence_sha256": "d" * 64,
+                },
+            },
+            "merge_candidates": {
+                "merge_one": {
+                    "member_candidate_ids": ["one", "two"],
+                    "status": "verified",
+                    "receipt_id": "receipt-one",
+                    "consensus": {
+                        "receipt_id": "receipt-one",
+                        "producer_role": "tie_break",
+                        "quorum": 2,
+                        "outcome": "verified",
+                        "hold_reason": "",
+                        "votes": [
+                            {
+                                "role": "primary",
+                                "model_sha256": "e" * 64,
+                                "decision": "approve",
+                                "confidence": 0.91,
+                                "vote_sha256": "f" * 64,
+                            }
+                        ],
+                    },
+                }
+            },
+        },
+    )
+    write_sealed_json(
+        root / "runtime" / "typed-graph" / "status.json",
+        {"engineering_complete": True, "authority_mature": False},
+    )
+
+    graph = cortex.build_cortex_graph(root, use_cache=False)
+    relation = graph["typedGraph"]["relations"][0]
+
+    assert relation["relation_id"] == "merge_one"
+    assert relation["consensus"]["votes"][0]["role"] == "primary"
+    assert relation["consensus"]["votes"][0]["decision"] == "approve"
+    assert "secret mention" not in json.dumps(graph, ensure_ascii=False)
 
 
 def test_websocket_helpers_follow_rfc6455() -> None:

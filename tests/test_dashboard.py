@@ -9,9 +9,49 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
+from chronovisor.core.durable_state import write_sealed_json
 from chronovisor.core.runtime_config import SearchEmbeddingConfig
 from chronovisor.ingest import orchestrator
 from chronovisor.ops import dashboard, runtime_status
+
+
+def test_typed_graph_dashboard_snapshot_separates_engineering_and_authority(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", tmp_path)
+    write_sealed_json(
+        tmp_path / "runtime" / "typed-graph" / "status.json",
+        {
+            "mode": "candidate",
+            "engineering_complete": True,
+            "authority_mature": False,
+            "relation_counts": {"verified": 7, "authoritative": 0},
+            "builder": {"status": "ok", "remaining_pages": 12},
+            "consensus": {"status": "ok", "verified": 3, "held": 1},
+            "external_model_calls": 0,
+        },
+    )
+    write_sealed_json(
+        tmp_path / "runtime" / "typed-graph" / "promotion.json",
+        {"mode": "shadow", "canary_percent": 0, "reason": "collecting"},
+    )
+    write_sealed_json(
+        tmp_path / "runtime" / "recall-rubric" / "status.json",
+        {"status": "builtin", "samples": 4},
+    )
+
+    value = dashboard._typed_graph_dashboard_snapshot()
+
+    assert value["engineering_complete"] is True
+    assert value["authority_mature"] is False
+    assert value["builder"]["remaining_pages"] == 12
+    assert value["rollout"] == {
+        "mode": "shadow",
+        "canary_percent": 0,
+        "reason": "collecting",
+        "gates": {},
+    }
+    assert "collecting authority" in dashboard._typed_graph_lane_detail(value)
 
 
 def test_mark_batch_activity_requires_a_running_batch_job() -> None:

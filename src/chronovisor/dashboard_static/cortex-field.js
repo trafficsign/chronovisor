@@ -56,6 +56,7 @@
       reason_code: String(value.reason_code || ""),
       certificate_id: String(value.certificate_id || ""),
       components: normalizedComponents(value.components),
+      relation_id: String(value.components?.relation_id || ""),
       source: String(value.source || "stateful-recall-field"),
       received_at: performance.now(),
     };

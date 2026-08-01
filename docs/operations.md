@@ -1002,3 +1002,38 @@ Reference pages remain excluded by default.
 - If local models remain loaded after tests, run `ollama ps` and stop them.
 - If a hook still appears to use old recall behavior after a GitHub package
   update, check the running `uvx` process and cache before changing local code.
+
+## Typed graph operations
+
+Typed graph maintenance runs as the `typed_graph` sleep-cycle lane. It is
+bounded to one worker and pauses when a foreground LLM, Semantic, Reranker, or
+Ingest generation lease is active. The normal response to `paused` is to let
+the next sleep cycle retry; do not bypass the resource guard.
+
+Inspect these sealed artifacts together:
+
+```text
+~/.chronovisor/knowledge-graph/relation-events.jsonl
+~/.chronovisor/knowledge-graph/relation-snapshot.json
+~/.chronovisor/knowledge-graph/entity-snapshot.json
+~/.chronovisor/knowledge-graph/community-snapshot.json
+~/.chronovisor/runtime/typed-graph/status.json
+~/.chronovisor/runtime/typed-graph/evaluation.json
+~/.chronovisor/runtime/typed-graph/promotion.json
+~/.chronovisor/runtime/typed-graph/candidate-trace.jsonl
+~/.chronovisor/runtime/recall-rubric/status.json
+```
+
+`status.json` separates `engineering_complete` from `authority_mature` and
+lists current counts, targets, unmet gates, queue overflow, merge holds,
+community summary freshness, four-arm progress, Judge disagreement metrics,
+and the next automatic evaluation. Authority collecting is not an operational
+failure. The worker keeps accumulating reviewed labels and actual-use paths,
+then re-evaluates on an idle sleep cycle without a future manual-enable step.
+
+The four-arm evaluation compares current, graph-only, rubric-only, and the
+interaction on the same query hashes. Runtime artifacts contain no query text,
+page body, evidence span text, or raw prompt. If every challenger fails, current
+is the recorded winner. If the interaction underperforms either single change,
+it cannot promote. Corrupt or stale relation state fails back to current search;
+never delete the existing Field or search state during rollback.

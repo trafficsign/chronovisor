@@ -578,7 +578,12 @@ def _resolve_model_name(
 
 
 def _external_configured_model(name: str, roles: set[str]) -> bool:
-    return bool(roles <= {"rerank", "search-embed"} and roles and "/" in name and not name.startswith("hf.co/"))
+    return bool(
+        roles <= {"rerank", "search-embed"}
+        and roles
+        and "/" in name
+        and not name.startswith("hf.co/")
+    )
 
 
 def _model_status_snapshot(ollama: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -1578,8 +1583,7 @@ def _save_history_snapshot(
                         "name": filename,
                         "bytes": raw_bytes,
                         "status": status,
-                        "source": meta.get("source")
-                        or _raw_source_label(filename),
+                        "source": meta.get("source") or _raw_source_label(filename),
                     }
                 )
     for row in rows.values():
@@ -1711,9 +1715,9 @@ def _frontier_preflight_snapshot() -> dict[str, Any]:
     try:
         from chronovisor.decision.frontier_guard import FrontierGuard
 
-        inspection = FrontierGuard(CHRONOVISOR_ROOT / "runtime" / "frontier-repair").inspect(
-            dry_run=True
-        )
+        inspection = FrontierGuard(
+            CHRONOVISOR_ROOT / "runtime" / "frontier-repair"
+        ).inspect(dry_run=True)
         state = inspection.state
         incidents = state.get("incidents") if isinstance(state, dict) else {}
         incidents = incidents if isinstance(incidents, dict) else {}
@@ -1969,11 +1973,25 @@ _PROCESSING_LANES: tuple[tuple[str, str, tuple[tuple[str, str], ...]], ...] = (
             ("escalate", "Escalate"),
         ),
     ),
+    (
+        "typed_graph",
+        "Typed Graph",
+        (
+            ("discover", "Discover"),
+            ("extract", "Extract"),
+            ("verify", "Verify"),
+            ("consolidate", "Consolidate"),
+            ("evaluate", "Evaluate"),
+            ("promote", "Promote"),
+        ),
+    ),
 )
 
 
 def _processing_pipeline_for_role(role: object) -> str:
     normalized = str(role or "").casefold()
+    if normalized.startswith(("relation_", "entity_merge", "recall_rubric")):
+        return "typed_graph"
     if normalized.startswith("recall"):
         return "recall"
     if normalized.startswith("ingest"):
@@ -1988,6 +2006,8 @@ def _processing_pipeline_for_role(role: object) -> str:
 def _processing_consensus_step(pipeline: str, role: object, phase: object) -> str:
     normalized_role = str(role or "").casefold()
     normalized_phase = str(phase or "trigger").casefold()
+    if pipeline == "typed_graph":
+        return "verify" if normalized_phase in {"validate", "vote"} else "extract"
     if pipeline == "recall":
         if normalized_role.endswith(":tie_break"):
             return "tie_break"
@@ -2004,6 +2024,8 @@ def _processing_consensus_step(pipeline: str, role: object, phase: object) -> st
 
 
 def _processing_model_step(pipeline: str, operation: object) -> str:
+    if pipeline == "typed_graph":
+        return "verify" if operation in {"verify", "judge"} else "extract"
     if pipeline == "recall":
         if operation == "rerank":
             return "rerank"
@@ -2068,6 +2090,7 @@ def _processing_activity_snapshot() -> dict[str, Any]:
     model_activities = _model_activities()
     frontier_reviews = _frontier_activity_snapshot()
     frontier_repair = _frontier_repair_snapshot(limit=8)
+    typed_graph = _typed_graph_dashboard_snapshot()
 
     active_by_lane: dict[str, dict[str, Any]] = {}
 
@@ -2161,9 +2184,7 @@ def _processing_activity_snapshot() -> dict[str, Any]:
         visible_rows = live_rows or rows
         latest = visible_rows[-1]
         active_by_lane[pipeline] = {
-            "current_step": _processing_model_step(
-                pipeline, latest.get("operation")
-            ),
+            "current_step": _processing_model_step(pipeline, latest.get("operation")),
             "model": latest.get("model"),
             "role": _processing_component_label(latest.get("component")),
             "phase": latest.get("caller") or latest.get("operation"),
@@ -2214,6 +2235,11 @@ def _processing_activity_snapshot() -> dict[str, Any]:
                 "work_item": (active or {}).get("work_item"),
                 "active_jobs": int((active or {}).get("active_jobs") or 0),
                 "recent": bool((active or {}).get("recent")),
+                "detail": (
+                    _typed_graph_lane_detail(typed_graph)
+                    if key == "typed_graph"
+                    else "waiting for work"
+                ),
                 "steps": _processing_step_rows(steps, current_step),
             }
         )
@@ -2229,6 +2255,101 @@ def _processing_activity_snapshot() -> dict[str, Any]:
         "revision": revision,
         **stable,
     }
+
+
+def _typed_graph_dashboard_snapshot() -> dict[str, Any]:
+    """Cheap browser-safe summary for Observatory and the processing lane."""
+
+    status_value = _read_json_file(
+        CHRONOVISOR_ROOT / "runtime" / "typed-graph" / "status.json"
+    )
+    status: dict[str, Any] = status_value if isinstance(status_value, dict) else {}
+    promotion_value = _read_json_file(
+        CHRONOVISOR_ROOT / "runtime" / "typed-graph" / "promotion.json"
+    )
+    promotion: dict[str, Any] = (
+        promotion_value if isinstance(promotion_value, dict) else {}
+    )
+    rubric_value = _read_json_file(
+        CHRONOVISOR_ROOT / "runtime" / "recall-rubric" / "status.json"
+    )
+    rubric: dict[str, Any] = rubric_value if isinstance(rubric_value, dict) else {}
+    builder_value = status.get("builder")
+    builder: dict[str, Any] = builder_value if isinstance(builder_value, dict) else {}
+    consensus_value = status.get("consensus")
+    consensus: dict[str, Any] = (
+        consensus_value if isinstance(consensus_value, dict) else {}
+    )
+    return {
+        "mode": str(status.get("mode") or "shadow"),
+        "engineering_complete": status.get("engineering_complete") is True,
+        "authority_mature": status.get("authority_mature") is True,
+        "relation_counts": status.get("relation_counts") or {},
+        "communities": int(status.get("communities") or 0),
+        "builder": {
+            "status": str(builder.get("status") or "not_started"),
+            "changed_pages": int(builder.get("changed_pages") or 0),
+            "queued_pages": int(builder.get("queued_pages") or 0),
+            "remaining_pages": int(builder.get("remaining_pages") or 0),
+            "queue_overflow": int(builder.get("queue_overflow") or 0),
+            "model": str(builder.get("model") or "gemma4:26b"),
+        },
+        "consensus": {
+            "status": str(consensus.get("status") or "not_started"),
+            "verified": int(consensus.get("verified") or 0),
+            "held": int(consensus.get("held") or 0),
+            "disagreement": int(consensus.get("disagreement") or 0),
+        },
+        "rubric": {
+            "status": str(rubric.get("status") or "builtin"),
+            "gates": rubric.get("gates") or {},
+            "samples": int(rubric.get("samples") or 0),
+            "judge_metrics": rubric.get("judge_metrics") or {},
+        },
+        "rubric_gold": status.get("rubric_gold") or {},
+        "entities": status.get("entities") or {},
+        "community_summary": status.get("community_summary") or {},
+        "evaluation": status.get("evaluation") or {},
+        "four_arm": status.get("four_arm") or {},
+        "authority": status.get("authority") or {},
+        "rollout": {
+            "mode": str(promotion.get("mode") or "shadow"),
+            "canary_percent": int(promotion.get("canary_percent") or 0),
+            "reason": str(promotion.get("reason") or "not_evaluated")[:160],
+            "gates": promotion.get("gates") or {},
+        },
+        "external_model_calls": int(status.get("external_model_calls") or 0),
+    }
+
+
+def _typed_graph_lane_detail(value: dict[str, Any]) -> str:
+    counts = value.get("relation_counts")
+    counts = counts if isinstance(counts, dict) else {}
+    verified = int(counts.get("verified") or 0)
+    authoritative = int(counts.get("authoritative") or 0)
+    rollout = value.get("rollout")
+    rollout = rollout if isinstance(rollout, dict) else {}
+    state = (
+        "authority mature" if value.get("authority_mature") else "collecting authority"
+    )
+    return (
+        f"{state} · verified {verified} · authoritative {authoritative} · "
+        f"canary {int(rollout.get('canary_percent') or 0)}% · external 0"
+    )
+
+
+def _safe_typed_graph_snapshot() -> dict[str, Any]:
+    return _safe_snapshot_component(
+        "typed_graph",
+        _typed_graph_dashboard_snapshot,
+        {
+            "mode": "shadow",
+            "engineering_complete": False,
+            "authority_mature": False,
+            "relation_counts": {},
+            "external_model_calls": 0,
+        },
+    )
 
 
 def _empty_local_consensus_summary() -> dict[str, Any]:
@@ -3698,9 +3819,7 @@ def _dashboard_glob_files(patterns: list[Path], *, limit: int = 0) -> list[Path]
     return files
 
 
-def _dashboard_rglob_files(
-    root: Path, pattern: str, *, limit: int = 0
-) -> list[Path]:
+def _dashboard_rglob_files(root: Path, pattern: str, *, limit: int = 0) -> list[Path]:
     try:
         files = sorted(path for path in root.rglob(pattern) if path.is_file())
     except OSError:
@@ -3867,6 +3986,7 @@ def build_fast_snapshot() -> dict[str, Any]:
         "recall": {},
         "recall_improvement": {},
         "model_lab": {},
+        "typed_graph": _typed_graph_dashboard_snapshot(),
         "save_history": {},
         "knowledge_mix": {},
         "librarian": _safe_snapshot_component(
@@ -4141,6 +4261,7 @@ def build_snapshot() -> dict[str, Any]:
             _model_lab_snapshot,
             {"policy": {"roles": {}}, "candidates": [], "history": []},
         ),
+        "typed_graph": _safe_typed_graph_snapshot(),
         "save_history": _safe_snapshot_component(
             "save_history",
             lambda: _materialized_component(
@@ -4236,7 +4357,9 @@ def _snapshot_source_fingerprint() -> tuple[Any, ...]:
     ):
         tracked.extend(sorted(pattern.parent.glob(pattern.name))[-limit:])
     tracked.extend(
-        sorted((CHRONOVISOR_ROOT / "runtime" / "decision-artifacts").glob("*/*.json"))[-32:]
+        sorted((CHRONOVISOR_ROOT / "runtime" / "decision-artifacts").glob("*/*.json"))[
+            -32:
+        ]
     )
     identities: list[tuple[Any, ...]] = []
     for path in dict.fromkeys(tracked):
@@ -4402,9 +4525,7 @@ def _load_or_create_dashboard_token(path: Path) -> str:
     except FileExistsError as exc:
         existing = path.read_text(encoding="utf-8").strip()
         if DASHBOARD_TOKEN_RE.fullmatch(existing) is None:
-            raise RuntimeError(
-                f"dashboard access token is malformed: {path}"
-            ) from exc
+            raise RuntimeError(f"dashboard access token is malformed: {path}") from exc
         os.chmod(path, 0o600)
         return existing
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
@@ -4821,11 +4942,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     def _cortex_graph_response(self) -> None:
         identity = runtime_identity()
-        commit = str(
-            identity.get("commit_id")
-            or identity.get("expected_commit")
-            or ""
-        )
+        commit = str(identity.get("commit_id") or identity.get("expected_commit") or "")
         _json_response(
             self,
             build_cortex_graph(CHRONOVISOR_ROOT, commit=commit),
@@ -4988,9 +5105,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             elif path == "/api/self-heal":
                 _json_response(
                     self,
-                    {
-                        "self_heal": _cached_snapshot(allow_stale=True)["self_heal"]
-                    },
+                    {"self_heal": _cached_snapshot(allow_stale=True)["self_heal"]},
                 )
             elif path == "/api/recall":
                 _json_response(
@@ -5010,6 +5125,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 _json_response(
                     self,
                     {"model_lab": _cached_snapshot(allow_stale=True)["model_lab"]},
+                )
+            elif path == "/api/typed-graph":
+                _json_response(
+                    self,
+                    {"typed_graph": _typed_graph_dashboard_snapshot()},
                 )
             elif path == "/api/save-history":
                 _json_response(
@@ -5087,7 +5207,9 @@ def serve(
     credentials_file: Path | None = None,
 ) -> None:
     init_chronovisor()
-    token_path = access_token_file or CHRONOVISOR_ROOT / "runtime" / "dashboard-access-token"
+    token_path = (
+        access_token_file or CHRONOVISOR_ROOT / "runtime" / "dashboard-access-token"
+    )
     credentials_path = (
         credentials_file or CHRONOVISOR_ROOT / "runtime" / "dashboard-credentials.json"
     )
@@ -5130,10 +5252,12 @@ def main(argv: list[str] | None = None) -> int:
     """Run the ``chronovisor-dashboard`` command-line entry point."""
     args = build_parser().parse_args(argv)
     token_path = (
-        args.access_token_file or CHRONOVISOR_ROOT / "runtime" / "dashboard-access-token"
+        args.access_token_file
+        or CHRONOVISOR_ROOT / "runtime" / "dashboard-access-token"
     )
     credentials_path = (
-        args.credentials_file or CHRONOVISOR_ROOT / "runtime" / "dashboard-credentials.json"
+        args.credentials_file
+        or CHRONOVISOR_ROOT / "runtime" / "dashboard-credentials.json"
     )
     if args.set_credentials:
         password = getpass.getpass("Dashboard password: ")

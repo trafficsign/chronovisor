@@ -424,7 +424,7 @@ function processingElapsedText(lane, now = Date.now()) {
 }
 
 function processingLaneDetail(lane, now = Date.now()) {
-  if (lane.state !== "active") return "waiting for work";
+  if (lane.state !== "active") return fmt(lane.detail, "waiting for work");
   const role = fmt(lane.role || lane.phase || lane.current_step, "work");
   const details = [lane.model, role, processingElapsedText(lane, now)].filter(Boolean);
   if (lane.recent) details.push("just completed");

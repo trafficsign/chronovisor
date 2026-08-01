@@ -40,6 +40,8 @@
     motion: true,
     rotate: true,
     sound: false,
+    relations: true,
+    relationLifecycle: "all",
     synapseVisibility: 160,
   });
   const SYNAPSE_VISIBILITY_MIN = 30;
@@ -59,6 +61,11 @@
   let edgeState;
   let drawOrder = [];
   let labelHubs = new Set();
+  let typedRelations = [];
+  let typedCommunities = [];
+  let communityHulls = [];
+  let relationById = new Map();
+  const activeRelationIds = new Set();
 
   let selected = -1;
   let hovered = -1;
@@ -72,6 +79,8 @@
   let motionEnabled = VIEW_PREFERENCES_DEFAULTS.motion;
   let autoRotate = VIEW_PREFERENCES_DEFAULTS.rotate;
   let soundOn = VIEW_PREFERENCES_DEFAULTS.sound;
+  let relationsVisible = VIEW_PREFERENCES_DEFAULTS.relations;
+  let relationLifecycle = VIEW_PREFERENCES_DEFAULTS.relationLifecycle;
   let edgeVisibility = VIEW_PREFERENCES_DEFAULTS.synapseVisibility / 100;
   let alpha = 1;
   let spikes = 0;
@@ -196,6 +205,16 @@
         typeof value.sound === "boolean"
           ? value.sound
           : VIEW_PREFERENCES_DEFAULTS.sound,
+      relations:
+        typeof value.relations === "boolean"
+          ? value.relations
+          : VIEW_PREFERENCES_DEFAULTS.relations,
+      relationLifecycle: [
+        "all", "proposed", "held", "verified", "repeatedly_used",
+        "authoritative", "stale", "retracted",
+      ].includes(value.relationLifecycle)
+        ? value.relationLifecycle
+        : VIEW_PREFERENCES_DEFAULTS.relationLifecycle,
       synapseVisibility: Number.isFinite(rawVisibility)
         ? Math.round(
           clamp(
@@ -225,6 +244,8 @@
       motion: motionEnabled,
       rotate: autoRotate,
       sound: soundOn,
+      relations: relationsVisible,
+      relationLifecycle,
       synapseVisibility: Math.round(edgeVisibility * 100),
     };
   }
@@ -245,9 +266,15 @@
       motion: document.getElementById("tMotion"),
       rotate: document.getElementById("tRot"),
       sound: document.getElementById("tSnd"),
+      relations: document.getElementById("tRelations"),
     };
     for (const [name, control] of Object.entries(controls)) {
-      const enabled = { motion: motionEnabled, rotate: autoRotate, sound: soundOn }[
+      const enabled = {
+        motion: motionEnabled,
+        rotate: autoRotate,
+        sound: soundOn,
+        relations: relationsVisible,
+      }[
         name
       ];
       control.classList.toggle("on", enabled);
@@ -262,6 +289,7 @@
     document.getElementById("visSlider").value = String(
       Math.round(edgeVisibility * 100),
     );
+    document.getElementById("relationLifecycle").value = relationLifecycle;
   }
 
   function applyViewPreferences(candidate) {
@@ -270,6 +298,8 @@
     motionEnabled = preferences.motion;
     autoRotate = preferences.rotate;
     soundOn = preferences.sound;
+    relationsVisible = preferences.relations;
+    relationLifecycle = preferences.relationLifecycle;
     edgeVisibility = preferences.synapseVisibility / 100;
     syncViewPreferenceControls();
   }
@@ -412,6 +442,7 @@
       title: row.title || row.id,
       updated: row.updated || "",
       tags: Array.isArray(row.tags) ? row.tags : [],
+      communities: Array.isArray(row.communities) ? row.communities : [],
       name: row.id,
       radius: Math.max(
         2.3,
@@ -445,7 +476,32 @@
       kind: row[2] || 0,
       edgeType: row[3] || "wikilink",
       eventOnly: false,
+      typed: false,
     }));
+    typedRelations = Array.isArray(data.typedGraph?.relations)
+      ? data.typedGraph.relations
+      : [];
+    typedCommunities = Array.isArray(data.typedGraph?.communities)
+      ? data.typedGraph.communities
+      : [];
+    relationById = new Map(
+      typedRelations.map((relation) => [relation.relation_id, relation]),
+    );
+    typedRelations.forEach((relation) => {
+      if (!nodes[relation.source] || !nodes[relation.target]) return;
+      links.push({
+        source: relation.source,
+        target: relation.target,
+        kind: 1,
+        edgeType: `relation:${relation.predicate}`,
+        eventOnly: false,
+        typed: true,
+        relationId: relation.relation_id,
+        predicate: relation.predicate,
+        lifecycle: relation.status,
+        direction: relation.direction,
+      });
+    });
     nodeCount = nodes.length;
     neighbors = Array.from({ length: nodeCount }, () => new Set());
     outgoing = Array.from({ length: nodeCount }, () => []);
@@ -453,9 +509,20 @@
       if (!nodes[link.source] || !nodes[link.target]) return;
       neighbors[link.source].add(link.target);
       neighbors[link.target].add(link.source);
-      if (link.kind < 2) outgoing[link.source].push(edgeIndex);
+      if (link.kind < 2 && !link.typed) outgoing[link.source].push(edgeIndex);
     });
     byId = new Map(nodes.map((node) => [node.id, node]));
+    communityHulls = typedCommunities
+      .map((community) => ({
+        id: community.community_id,
+        members: (community.member_page_ids || [])
+          .map((pageId) => byId.get(pageId)?.index)
+          .filter((index) => Number.isInteger(index)),
+        summarySha256: community.summary_sha256 || "",
+      }))
+      .filter((community) => community.members.length >= 3)
+      .sort((left, right) => right.members.length - left.members.length)
+      .slice(0, 18);
     nodeState = new Uint8Array(nodeCount);
     edgeState = new Uint8Array(links.length);
     drawOrder = nodes.map((_node, index) => index);
@@ -630,6 +697,8 @@
     links.forEach((link, edgeIndex) => {
       if (
         TYPE_OFF.has(link.kind)
+        || (link.typed && (!relationsVisible
+          || (relationLifecycle !== "all" && link.lifecycle !== relationLifecycle)))
         || nodeState[link.source] === 0
         || nodeState[link.target] === 0
       ) {
@@ -884,6 +953,13 @@
     const now = performance.now();
     const node = effectNode(event);
     if (event.kind === "spread") {
+      if (event.relation_id && relationById.has(event.relation_id)) {
+        activeRelationIds.add(event.relation_id);
+        window.setTimeout(() => {
+          activeRelationIds.delete(event.relation_id);
+          stateDirty = true;
+        }, EDGE_AFTERGLOW_MS + ELECTRIC_TRAVEL_MAX_MS);
+      }
       const edgeIndex = ensureActualEdge(event);
       if (edgeIndex < 0) {
         flashTicker(`◇ seq ${event.seq} · unmapped ${event.source_page_id}→${event.target_page_id}`);
@@ -956,6 +1032,7 @@
     const paths = Array.from({ length: 9 }, () => new Path2D());
     const pathKinds = new Uint8Array(9);
     links.forEach((link, edgeIndex) => {
+      if (link.typed) return;
       const state = edgeState[edgeIndex];
       if (!state) return;
       const source = nodes[link.source];
@@ -1008,6 +1085,89 @@
         context.stroke(paths[batch]);
       }
     }
+    drawTypedRelations();
+  }
+
+  function drawTypedRelations() {
+    if (!relationsVisible) return;
+    const statusColors = {
+      proposed: [108, 122, 148],
+      held: RGB_INHIBIT,
+      verified: RGB_VIOLET,
+      repeatedly_used: RGB_COMMIT,
+      authoritative: [103, 224, 184],
+      stale: [107, 116, 132],
+      retracted: RGB_FAULT,
+    };
+    links.forEach((link, edgeIndex) => {
+      if (!link.typed || edgeState[edgeIndex] === 0) return;
+      const source = nodes[link.source];
+      const target = nodes[link.target];
+      if (!source || !target || source.viewDepth > 9e8 || target.viewDepth > 9e8) return;
+      const focused = edgeState[edgeIndex] === 3;
+      const active = activeRelationIds.has(link.relationId);
+      const color = statusColors[link.lifecycle] || RGB_VIOLET;
+      context.save();
+      context.setLineDash(link.lifecycle === "authoritative" ? [] : [4, 5]);
+      context.lineWidth = active ? 2 : focused ? 1.25 : 0.65;
+      context.strokeStyle = rgba(
+        color,
+        (active ? 0.82 : focused ? 0.55 : 0.18) * fog((source.viewDepth + target.viewDepth) / 2),
+      );
+      context.beginPath();
+      context.moveTo(source.screenX, source.screenY);
+      context.lineTo(target.screenX, target.screenY);
+      context.stroke();
+      context.restore();
+    });
+  }
+
+  function convexHull(points) {
+    if (points.length < 3) return points;
+    const ordered = [...points].sort((left, right) => left.x - right.x || left.y - right.y);
+    const cross = (origin, left, right) =>
+      (left.x - origin.x) * (right.y - origin.y)
+      - (left.y - origin.y) * (right.x - origin.x);
+    const lower = [];
+    ordered.forEach((point) => {
+      while (lower.length >= 2 && cross(lower.at(-2), lower.at(-1), point) <= 0) lower.pop();
+      lower.push(point);
+    });
+    const upper = [];
+    [...ordered].reverse().forEach((point) => {
+      while (upper.length >= 2 && cross(upper.at(-2), upper.at(-1), point) <= 0) upper.pop();
+      upper.push(point);
+    });
+    lower.pop();
+    upper.pop();
+    return [...lower, ...upper];
+  }
+
+  function drawCommunityHulls() {
+    if (!relationsVisible || camera.distance > 1900) return;
+    communityHulls.forEach((community, communityIndex) => {
+      const points = community.members
+        .map((index) => nodes[index])
+        .filter((node) => node && nodeState[node.index] >= 2 && node.viewDepth <= 9e8)
+        .map((node) => ({ x: node.screenX, y: node.screenY }));
+      if (points.length < 3) return;
+      const hull = convexHull(points);
+      if (hull.length < 3) return;
+      const hue = deterministicUnit(community.id, communityIndex + 401);
+      const color = hue > 0.5 ? [126, 105, 210] : [79, 124, 180];
+      context.save();
+      context.beginPath();
+      context.moveTo(hull[0].x, hull[0].y);
+      hull.slice(1).forEach((point) => context.lineTo(point.x, point.y));
+      context.closePath();
+      context.fillStyle = rgba(color, 0.018);
+      context.strokeStyle = rgba(color, 0.10);
+      context.lineWidth = 0.7;
+      context.setLineDash([2, 7]);
+      context.fill();
+      context.stroke();
+      context.restore();
+    });
   }
 
   function projectPoint(x, y, z) {
@@ -1100,6 +1260,7 @@
       duration: EDGE_AFTERGLOW_MS,
       delta: pulse.delta,
       seq: pulse.seq,
+      demo: pulse.demo,
     });
     trimVisualQueues();
     const metric = cortexMetrics.spread.find((row) => row.seq === pulse.seq);
@@ -1139,15 +1300,17 @@
         phase,
       );
       if (!traceElectricPath(points)) continue;
+      const travelColor = afterglow.demo ? RGB_FIRE : RGB_ELECTRIC;
+      const travelHot = afterglow.demo ? RGB_HOT : RGB_HOT;
       context.strokeStyle = rgba(
-        RGB_ELECTRIC,
+        travelColor,
         fade * (0.22 + afterglow.delta * 0.48),
       );
       context.lineWidth = 3.2 + afterglow.delta * 5.2;
       context.stroke();
       traceElectricPath(points);
       context.strokeStyle = rgba(
-        RGB_HOT,
+        travelHot,
         fade * (0.42 + afterglow.delta * 0.5),
       );
       context.lineWidth = 0.8 + afterglow.delta * 1.45;
@@ -1155,7 +1318,7 @@
       const glowSize = 8 + afterglow.delta * 9;
       context.globalAlpha = fade * (0.12 + afterglow.delta * 0.24);
       context.drawImage(
-        glowElectric,
+        afterglow.demo ? glowFire : glowElectric,
         target.screenX - glowSize / 2,
         target.screenY - glowSize / 2,
         glowSize,
@@ -1215,9 +1378,10 @@
         * depthFade;
       context.lineCap = "round";
       context.lineJoin = "round";
+      const travelColor = pulse.demo ? RGB_FIRE : RGB_ELECTRIC;
       if (traceElectricPath(fullPath)) {
         context.strokeStyle = rgba(
-          RGB_ELECTRIC,
+          travelColor,
           (0.14 + pulse.delta * 0.28)
           * depthFade
           * (0.55 + progress * 0.45),
@@ -1226,7 +1390,7 @@
         context.stroke();
       }
       if (traceElectricPath(energizedPath)) {
-        context.strokeStyle = rgba(RGB_ELECTRIC, intensity);
+        context.strokeStyle = rgba(travelColor, intensity);
         context.lineWidth = 4.6 + pulse.delta * 5.4;
         context.stroke();
         traceElectricPath(energizedPath);
@@ -1239,7 +1403,7 @@
       }
       const branchLength = 4 + pulse.delta * 8;
       const branchSign = deterministicUnit(edgeId, pulse.seq + 991) > 0.5 ? 1 : -1;
-      context.strokeStyle = rgba(RGB_ELECTRIC, 0.45 + pulse.delta * 0.35);
+      context.strokeStyle = rgba(travelColor, 0.45 + pulse.delta * 0.35);
       context.lineWidth = 0.7 + pulse.delta * 0.5;
       context.beginPath();
       context.moveTo(head.x, head.y);
@@ -1250,7 +1414,7 @@
       context.stroke();
       if (staticMotion) {
         const arrowLength = 7 + pulse.delta * 5;
-        context.strokeStyle = rgba(RGB_ELECTRIC, 0.75 + pulse.delta * 0.25);
+        context.strokeStyle = rgba(travelColor, 0.75 + pulse.delta * 0.25);
         context.lineWidth = 1.2 + pulse.delta;
         context.beginPath();
         context.moveTo(head.x, head.y);
@@ -1268,7 +1432,7 @@
       const glowSize = 10 + 12 * pulse.delta;
       context.globalAlpha = 0.7 + pulse.delta * 0.3;
       context.drawImage(
-        glowElectric,
+        pulse.demo ? glowFire : glowElectric,
         head.x - glowSize / 2,
         head.y - glowSize / 2,
         glowSize,
@@ -1615,6 +1779,7 @@
       context.fill();
     });
     context.globalAlpha = 1;
+    drawCommunityHulls();
     drawEdges();
     drawEdgeAfterglows(time);
     drawPulses(time);
@@ -1932,6 +2097,75 @@
       </div>`;
   }
 
+  function graphStatusHtml() {
+    const graph = data.typedGraph || {};
+    const status = graph.status || {};
+    const rollout = status.rollout || {};
+    const rubric = status.rubric || {};
+    const rubricGold = status.rubric_gold || {};
+    const counts = status.relation_counts || {};
+    const builder = status.builder || {};
+    const entities = status.entities || {};
+    const summaries = status.community_summary || {};
+    const evaluation = status.evaluation || {};
+    const authority = status.authority || {};
+    const authorityCurrent = authority.current || {};
+    const authorityTargets = authority.targets || {};
+    const countRows = [
+      "proposed", "held", "verified", "repeatedly_used",
+      "authoritative", "stale", "retracted",
+    ];
+    return `<div class="sec relationStatus"><h3>TYPED RELATION FIELD</h3>
+      <div class="fieldStatus ${status.authority_mature ? "online" : "stale"}">
+        <span class="stateGlyph" aria-hidden="true">${status.authority_mature ? "●" : "◷"}</span>
+        <b>${status.engineering_complete ? "ENGINEERING COMPLETE" : "BUILDING"}</b>
+        <span>${status.authority_mature ? "AUTHORITY MATURE" : "AUTHORITY COLLECTING"}</span>
+      </div>
+      <div class="fieldMetrics relationMetrics">
+        ${countRows.map((name) => `<div><span>${escapeHtml(name)}</span><b>${Number(counts[name] || 0)}</b></div>`).join("")}
+        <div><span>communities</span><b>${(graph.communities || []).length}</b></div>
+        <div><span>external calls</span><b>${Number(status.external_model_calls || 0)}</b></div>
+        <div><span>rollout</span><b>${escapeHtml(rollout.mode || "shadow")} ${Number(rollout.canary_percent || 0)}%</b></div>
+        <div><span>rubric</span><b>${escapeHtml(rubric.status || "builtin")}</b></div>
+        <div><span>rubric gold</span><b>${Number(rubricGold.cases || 0)}/30 · ${escapeHtml(rubricGold.step || rubricGold.status || "waiting")}</b></div>
+        <div><span>builder queue</span><b>${Number(builder.remaining_pages || 0)} · ${escapeHtml(builder.model || "local")}</b></div>
+        <div><span>merge holds</span><b>${Number(entities.held || 0)}</b></div>
+        <div><span>summaries</span><b>${Number(summaries.generated || 0)} new · ${Number(summaries.reused || 0)} cached</b></div>
+        <div><span>evaluation</span><b>${escapeHtml(evaluation.status || "waiting")} · ${escapeHtml(evaluation.winner || "current")}</b></div>
+        <div><span>relation maturity</span><b>${Number(authorityCurrent.relation_strong || 0)}/${Number(authorityTargets.relation_strong || 0)} · ${Number(authorityCurrent.relation_sessions || 0)}/${Number(authorityTargets.relation_sessions || 0)} sessions</b></div>
+      </div>
+      ${(authority.unmet_gates || []).length ? `<div class="ghost">Unmet gates: ${(authority.unmet_gates || []).map(escapeHtml).join(" · ")}. Re-evaluates on ${escapeHtml(authority.next_evaluation || "next sleep cycle")}.</div>` : ""}
+      <div class="ghost">Static dashed lines are relation state. Yellow electricity appears only for a real Field spread event.</div>
+    </div>`;
+  }
+
+  function relationDetailsHtml(node) {
+    const relations = typedRelations.filter(
+      (relation) => relation.source === node.index || relation.target === node.index,
+    );
+    if (!relations.length) {
+      return '<div class="sec"><h3>TYPED RELATIONS · 0</h3><div class="ghost">— none</div></div>';
+    }
+    return `<div class="sec"><h3>TYPED RELATIONS · ${relations.length}</h3>
+      <div class="relationCards">${relations.slice(0, 24).map((relation) => {
+        const consensus = relation.consensus || {};
+        const votes = Array.isArray(consensus.votes) ? consensus.votes : [];
+        const evidence = Array.isArray(relation.evidence_refs) ? relation.evidence_refs : [];
+        return `<details class="relationCard" ${activeRelationIds.has(relation.relation_id) ? "open" : ""}>
+          <summary><span class="relationLife ${escapeHtml(relation.status)}">${escapeHtml(relation.status)}</span><b>${escapeHtml(relation.predicate)}</b><small>${escapeHtml(relation.direction)}</small></summary>
+          <div class="relationId">${escapeHtml(relation.relation_id)}</div>
+          <div class="mrow"><span>path</span><b>${escapeHtml(relation.source_page_id)} → ${escapeHtml(relation.target_page_id)}</b></div>
+          <div class="mrow"><span>producer</span><b>${escapeHtml(relation.producer_role)}</b></div>
+          <div class="mrow"><span>used</span><b>${Number(relation.used_count || 0)} · ${Number(relation.used_sessions || 0)} sessions</b></div>
+          <div class="mrow"><span>reason</span><b>${escapeHtml(relation.reason_code || consensus.hold_reason || "—")}</b></div>
+          <div class="mrow"><span>quorum</span><b>${Number(consensus.quorum || 0)} · ${escapeHtml(consensus.outcome || "pending")}</b></div>
+          <div class="relationVotes">${votes.length ? votes.map((vote) => `<span class="${escapeHtml(vote.decision)}">${escapeHtml(vote.role)} · ${escapeHtml(vote.decision)} ${(Number(vote.confidence || 0) * 100).toFixed(0)}%</span>`).join("") : '<span>no votes</span>'}</div>
+          <div class="relationEvidence">${evidence.map((ref) => `<span title="${escapeHtml(ref.content_sha256)} / ${escapeHtml(ref.span_sha256)}">${escapeHtml(ref.page_id)}:${Number(ref.source_line || 0)} · ${escapeHtml(String(ref.span_sha256 || "").slice(0, 10))}</span>`).join("")}</div>
+        </details>`;
+      }).join("")}</div>
+    </div>`;
+  }
+
   function selectedFieldHtml(node) {
     const state = fieldState.nodes.get(node.id);
     const components = state?.components || {
@@ -1978,7 +2212,7 @@
       1,
       ...loadPackages.map((packageName) => packageStats[packageName].lines),
     );
-    return `${fieldStateHtml()}
+    return `${fieldStateHtml()}${graphStatusHtml()}
       <div class="sec"><h3>BINDING INTEGRITY</h3>
         <div id="gaugeWrap"><canvas id="gauge" width="236" height="236"></canvas>
           <div class="gLegend">
@@ -2056,6 +2290,8 @@
       </div>
       ${selectedFieldHtml(node)}
       ${fieldStateHtml()}
+      ${graphStatusHtml()}
+      ${relationDetailsHtml(node)}
       ${node.tags.length ? `<div class="sec"><h3>TAGS · ${node.tags.length}</h3><div class="tagChips">${node.tags.map((tag) => `<span>${escapeHtml(tag)}</span>`).join("")}</div></div>` : ""}
       <div class="sec"><h3>LINKS TO · ${dependsOn.length}</h3>
         <div class="depChips">${chips(dependsOn)}</div>
@@ -2231,6 +2467,21 @@
           ? "LIVE PAINT resumed · Field state stayed current"
           : "LIVE PAINT paused · Field state still updating",
       );
+    });
+    const relationToggle = document.getElementById("tRelations");
+    relationToggle.addEventListener("click", () => {
+      relationsVisible = !relationsVisible;
+      relationToggle.classList.toggle("on", relationsVisible);
+      relationToggle.setAttribute("aria-pressed", String(relationsVisible));
+      stateDirty = true;
+      saveViewPreferences();
+      flashTicker(relationsVisible ? "typed relation layer enabled" : "typed relation layer hidden");
+    });
+    document.getElementById("relationLifecycle").addEventListener("change", (event) => {
+      relationLifecycle = event.target.value;
+      stateDirty = true;
+      saveViewPreferences();
+      flashTicker(`relation lifecycle · ${relationLifecycle}`);
     });
     const motionToggle = document.getElementById("tMotion");
     motionToggle.addEventListener("click", () => {

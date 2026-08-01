@@ -562,3 +562,44 @@ with integer term/page keys and Chronovisor's Japanese CJK-bigram
 pre-tokenization. An exact anchor table covers page IDs, titles, tags,
 entities, and raw keywords. The old `bm25.json` projection is deleted after
 the SQLite projection is built successfully.
+
+## Typed knowledge graph
+
+```toml
+[knowledge_graph]
+enabled = true
+mode = "shadow" # off | shadow | candidate | active
+external_models_allowed = false
+extractor_model = "gemma4:26b"
+community_summary_model = "gemma4:26b"
+local_extraction_enabled = true
+max_changed_pages_per_cycle = 25
+max_queue_size = 500
+max_community_summaries_per_cycle = 2
+max_model_seconds_per_day = 7200
+min_relation_strong = 20
+min_relation_sessions = 5
+min_entity_strong = 20
+min_entity_sessions = 5
+min_rubric_gold = 30
+
+[knowledge_graph.retrieval]
+mode = "shadow" # off | shadow | candidate | active
+max_hops = 2
+max_relations_per_node = 12
+max_candidate_pages = 50
+per_predicate_cap = 4
+hub_penalty = 0.15
+```
+
+Only bare local Ollama model names and `ollama://` or `local://` identifiers are
+accepted. Enabling `external_models_allowed` or configuring an HTTP/provider
+model fails closed; the typed graph has no cloud-model fallback. Builder and
+community-summary budgets share the daily model-seconds ceiling. The worker
+also pauses while foreground model activity holds the shared resource lease.
+
+The configured mode is not authority by itself. Promotion is controlled by a
+sealed evaluation artifact and proceeds automatically by session hash through
+5%, 25%, and 100% canaries. Any failed evaluation, resource, model, stale-store,
+or learning gate returns retrieval to shadow and preserves the existing search
+teacher.
