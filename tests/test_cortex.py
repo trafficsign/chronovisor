@@ -697,6 +697,12 @@ def test_cortex_static_view_preserves_fable_layout_and_uses_live_data() -> None:
     assert "function applyProcessingActivity(snapshot)" in script
     assert "function processingEffectPhase(step)" in script
     assert "function pulseActiveProcessingLanes()" in script
+    assert "function processingTargetNode(laneKey)" in script
+    assert "function drawProcessingNodeBlink(" in script
+    assert 'effect.laneKey === "ingest"' in script
+    assert "processingTargetLocked" in script
+    assert "cortexMetrics.processingNodeBlinks += 1;" in script
+    assert "cortexMetrics.processingTargetNodeIndex = target.node.index;" in script
     assert "const PROCESSING_EFFECT_PULSE_MS = 1450;" in script
     assert 'kind: "processing"' in script
     assert "channel_key: `processing:${laneKey}`" in script

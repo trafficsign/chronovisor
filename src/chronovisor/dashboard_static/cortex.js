@@ -157,6 +157,8 @@
     triageCandidates: 0,
     generateParticles: 0,
     consensusOrbits: 0,
+    processingNodeBlinks: 0,
+    processingTargetNodeIndex: -1,
     formationOriginX: 0,
     formationOriginY: 0,
     formationTargetX: 0,
@@ -213,6 +215,8 @@
       triageCandidates: cortexMetrics.triageCandidates,
       generateParticles: cortexMetrics.generateParticles,
       consensusOrbits: cortexMetrics.consensusOrbits,
+      processingNodeBlinks: cortexMetrics.processingNodeBlinks,
+      processingTargetNodeIndex: cortexMetrics.processingTargetNodeIndex,
       formationOriginX: cortexMetrics.formationOriginX,
       formationOriginY: cortexMetrics.formationOriginY,
       formationTargetX: cortexMetrics.formationTargetX,
@@ -1060,6 +1064,12 @@
     target.dataset.triageCandidates = String(cortexMetrics.triageCandidates);
     target.dataset.generateParticles = String(cortexMetrics.generateParticles);
     target.dataset.consensusOrbits = String(cortexMetrics.consensusOrbits);
+    target.dataset.processingNodeBlinks = String(
+      cortexMetrics.processingNodeBlinks,
+    );
+    target.dataset.processingTargetNodeIndex = String(
+      cortexMetrics.processingTargetNodeIndex,
+    );
     target.dataset.formationOriginX = cortexMetrics.formationOriginX.toFixed(1);
     target.dataset.formationOriginY = cortexMetrics.formationOriginY.toFixed(1);
     target.dataset.formationTargetX = cortexMetrics.formationTargetX.toFixed(1);
@@ -1188,13 +1198,34 @@
     });
   }
 
+  function processingTargetNode(laneKey) {
+    const candidates = nodes
+      .filter((node) => !nodeState || nodeState[node.index] > 0)
+      .sort(
+        (left, right) =>
+          right.fanIn + right.fanOut - left.fanIn - left.fanOut
+          || left.id.localeCompare(right.id),
+      )
+      .slice(0, 12);
+    if (!candidates.length) return null;
+    const index = Math.floor(
+      deterministicUnit(String(laneKey || "process"), 17) * candidates.length,
+    );
+    return candidates[index] || candidates[0];
+  }
+
   function visualizeTransportEvent(event) {
     const phase = event.kind === "save"
       ? "capture"
       : String(event.phase || "generate");
     const now = performance.now();
     const pageId = transportPageId(event);
-    const node = pageId ? byId.get(pageId) : null;
+    const laneKey = String(event.lane_key || "");
+    const node = pageId
+      ? byId.get(pageId)
+      : event.kind === "processing"
+        ? processingTargetNode(laneKey)
+        : null;
     const channelKey = String(
       event.channel_key
       || (event.kind === "processing"
@@ -1217,7 +1248,7 @@
       kind: event.kind,
       phase,
       channelKey,
-      laneKey: String(event.lane_key || ""),
+      laneKey,
       step: String(event.step || phase),
       pageId,
       nodeIndex: node?.index ?? -1,
@@ -1969,16 +2000,23 @@
 
   function transportTarget(effect) {
     const node = nodes[effect.nodeIndex];
+    const processingTargetLocked = effect.kind === "processing" && Boolean(node);
     if (
       node
       && node.viewDepth <= 9e8
-      && node.screenX > 20
-      && node.screenX < width - 20
-      && node.screenY > 40
-      && node.screenY < height - 40
+      && (
+        processingTargetLocked
+        || (
+          node.screenX > 20
+          && node.screenX < width - 20
+          && node.screenY > 40
+          && node.screenY < height - 40
+        )
+      )
     ) {
       return { x: node.screenX, y: node.screenY, node };
     }
+    if (processingTargetLocked) return null;
     const fallbacks = nodes
       .filter(visibleMemoryNode)
       .sort((left, right) => right.fanIn + right.fanOut - left.fanIn - left.fanOut);
@@ -2466,6 +2504,36 @@
     );
   }
 
+  function drawProcessingNodeBlink(effect, time, fade, target) {
+    if (!target.node) return;
+    const radius = Math.max(
+      0.75,
+      target.node.radius * target.node.screenScale,
+    ) * NODE_CORE_SCALE;
+    const blink = reducedMotion.matches || !motionEnabled
+      ? 0.72
+      : 0.16 + (0.84 * (0.5 + 0.5 * Math.sin(time * 0.009)));
+    cortexMetrics.processingNodeBlinks += 1;
+    cortexMetrics.processingTargetNodeIndex = target.node.index;
+    cortexMetrics.formationTargetX = target.x;
+    cortexMetrics.formationTargetY = target.y;
+    drawCompactGlow(
+      glowElectric,
+      target.x,
+      target.y,
+      radius,
+      2.4,
+      fade * (0.22 + blink * 0.58),
+    );
+    context.fillStyle = rgba(
+      RGB_ELECTRIC,
+      fade * (0.34 + blink * 0.62),
+    );
+    context.beginPath();
+    context.arc(target.x, target.y, radius, 0, Math.PI * 2);
+    context.fill();
+  }
+
   function visibleConsolidationNeighbors(node) {
     if (!node) return [];
     return [...neighbors[node.index]]
@@ -2578,11 +2646,16 @@
         drawCaptureComets(effect, progress, fade);
       } else {
         const target = transportTarget(effect);
+        if (!target) continue;
         const star = memoryStarGeometry();
         if (effect.phase === "apply" || effect.phase === "complete") {
           drawApplyFormation(effect, time, progress, fade, target);
         } else if (effect.phase === "consensus") {
-          drawConsensusFormation(effect, time, progress, fade, target);
+          if (effect.kind === "processing" && effect.laneKey === "ingest") {
+            drawProcessingNodeBlink(effect, time, fade, target);
+          } else {
+            drawConsensusFormation(effect, time, progress, fade, target);
+          }
         } else if (effect.phase === "generate") {
           drawGenerateFormation(effect, progress, fade, target);
         } else {
@@ -2728,6 +2801,8 @@
     cortexMetrics.triageCandidates = 0;
     cortexMetrics.generateParticles = 0;
     cortexMetrics.consensusOrbits = 0;
+    cortexMetrics.processingNodeBlinks = 0;
+    cortexMetrics.processingTargetNodeIndex = -1;
     cortexMetrics.formationOriginX = 0;
     cortexMetrics.formationOriginY = 0;
     cortexMetrics.formationTargetX = 0;
