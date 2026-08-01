@@ -566,6 +566,7 @@ CHRONOVISOR_ROOT="$(mktemp -d -t chronovisor-test)" uv run pytest -q</code></pre
 <li><time>2026-08-01 18:55</time><span>実装完了条件をmachine-readable gateへ固定。Engineering Completeはsealed baseline/relation/rubric/model、automatic canary、current fallback、external call 0からのみ導出し、Authority Matureはrelation/entity/rubricの実利用母数と品質gateへ分離。</span></li>
 <li><time>2026-08-01 18:58</time><span>push後live監査で、foreground busy中は旧promotion artifactの欠損digestと旧sample定義まで保存される後方互換gapを検出。有効canaryは不変のまま、pre-contract artifactだけをsealed digest・distinct applied session単位へin-place移行する処理を追加。</span></li>
 <li><time>2026-08-01 19:20</time><span>pause migration追加後の全体suiteを再度隔離実行し、<code>2964 passed, 1 skipped</code>（1268.83秒）。focused 92件、Ruff、対象mypy、diff checkも成功。</span></li>
+<li><time>2026-08-01 19:25</time><span>実装commit <code>dc7b22d</code>をGitHub <code>main</code>へ反映し、Dashboard・Ingest-drain・SemanticをGitHub-backed runtimeで再起動。3 archiveのcommit一致、health OK、Semantic MPS self-test、Ingest idle/authority available、typed-graph Engineering Complete 8/8、external call 0を確認。Cortexは799×964のlive DOMで横overflow 0、console warning/error 0。</span></li>
 </ol>
 </section>
 
