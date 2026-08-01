@@ -102,8 +102,17 @@
   let width = 0;
   let height = 0;
   const pixelRatio = Math.min(2, window.devicePixelRatio || 1);
-  const camera = { theta: 0.6, phi: 0.18, distance: 1650 };
+  const camera = {
+    theta: 0.6,
+    phi: 0.18,
+    distance: 1650,
+    pivotX: 0,
+    pivotY: 0,
+    pivotZ: 0,
+    pivotNodeIndex: -1,
+  };
   let cameraTarget = null;
+  let cameraPivotTarget = null;
   let focalLength = 900;
   let dragging = false;
   let downPoint = null;
@@ -217,6 +226,11 @@
       consensusOrbits: cortexMetrics.consensusOrbits,
       processingNodeBlinks: cortexMetrics.processingNodeBlinks,
       processingTargetNodeIndex: cortexMetrics.processingTargetNodeIndex,
+      cameraPivotNodeIndex: camera.pivotNodeIndex,
+      cameraPivotX: camera.pivotX,
+      cameraPivotY: camera.pivotY,
+      cameraPivotZ: camera.pivotZ,
+      cameraDistance: camera.distance,
       formationOriginX: cortexMetrics.formationOriginX,
       formationOriginY: cortexMetrics.formationOriginY,
       formationTargetX: cortexMetrics.formationTargetX,
@@ -709,10 +723,13 @@
     const cosPhi = Math.cos(camera.phi);
     const sinPhi = Math.sin(camera.phi);
     nodes.forEach((node) => {
-      const rotatedX = node.x * cosTheta + node.z * sinTheta;
-      const rotatedZ = -node.x * sinTheta + node.z * cosTheta;
-      const rotatedY = node.y * cosPhi - rotatedZ * sinPhi;
-      const depthZ = node.y * sinPhi + rotatedZ * cosPhi;
+      const localX = node.x - camera.pivotX;
+      const localY = node.y - camera.pivotY;
+      const localZ = node.z - camera.pivotZ;
+      const rotatedX = localX * cosTheta + localZ * sinTheta;
+      const rotatedZ = -localX * sinTheta + localZ * cosTheta;
+      const rotatedY = localY * cosPhi - rotatedZ * sinPhi;
+      const depthZ = localY * sinPhi + rotatedZ * cosPhi;
       const viewDepth = camera.distance - depthZ;
       if (viewDepth < 60) {
         node.viewDepth = 1e9;
@@ -739,7 +756,55 @@
     return Math.sqrt(maximum);
   }
 
+  function graphCenter() {
+    if (!nodes.length) return { x: 0, y: 0, z: 0 };
+    const center = nodes.reduce(
+      (total, node) => ({
+        x: total.x + node.x,
+        y: total.y + node.y,
+        z: total.z + node.z,
+      }),
+      { x: 0, y: 0, z: 0 },
+    );
+    return {
+      x: center.x / nodes.length,
+      y: center.y / nodes.length,
+      z: center.z / nodes.length,
+    };
+  }
+
+  function syncCameraPivotControl() {
+    const control = document.getElementById("resetCenter");
+    if (!control) return;
+    control.classList.toggle("on", camera.pivotNodeIndex >= 0);
+    control.dataset.pivoted = String(camera.pivotNodeIndex >= 0);
+  }
+
+  function setCameraPivot(point, nodeIndex = -1) {
+    cameraPivotTarget = {
+      x: Number(point.x || 0),
+      y: Number(point.y || 0),
+      z: Number(point.z || 0),
+    };
+    camera.pivotNodeIndex = nodeIndex;
+    syncCameraPivotControl();
+    lastInteraction = performance.now();
+  }
+
+  function setNodeAsCameraPivot(index) {
+    const node = nodes[index];
+    if (!node) return;
+    setCameraPivot(node, index);
+    flashTicker(`rotation center · ${node.id}`);
+  }
+
+  function resetCameraPivot(announce = true) {
+    setCameraPivot(graphCenter());
+    if (announce) flashTicker("rotation center · graph center");
+  }
+
   function fitView() {
+    resetCameraPivot(false);
     cameraTarget = {
       theta: camera.theta,
       phi: camera.phi,
@@ -755,9 +820,13 @@
   function focusNode(index) {
     const node = nodes[index];
     if (!node) return;
-    const theta = Math.atan2(node.x, node.z);
-    const radial = Math.hypot(node.x, node.z);
-    const phi = Math.max(-1.3, Math.min(1.3, Math.atan2(node.y, radial)));
+    if (index === camera.pivotNodeIndex) return;
+    const localX = node.x - camera.pivotX;
+    const localY = node.y - camera.pivotY;
+    const localZ = node.z - camera.pivotZ;
+    const theta = Math.atan2(localX, localZ);
+    const radial = Math.hypot(localX, localZ);
+    const phi = Math.max(-1.3, Math.min(1.3, Math.atan2(localY, radial)));
     cameraTarget = {
       theta,
       phi,
@@ -1043,6 +1112,11 @@
       cortexMetrics.maxGlowPadding.toFixed(3);
     target.dataset.cameraTheta = camera.theta.toFixed(4);
     target.dataset.cameraPhi = camera.phi.toFixed(4);
+    target.dataset.cameraDistance = camera.distance.toFixed(1);
+    target.dataset.cameraPivotNodeIndex = String(camera.pivotNodeIndex);
+    target.dataset.cameraPivotX = camera.pivotX.toFixed(2);
+    target.dataset.cameraPivotY = camera.pivotY.toFixed(2);
+    target.dataset.cameraPivotZ = camera.pivotZ.toFixed(2);
     target.dataset.cometTrailSegments = String(cortexMetrics.cometTrailSegments);
     target.dataset.cometHeads = String(cortexMetrics.cometHeads);
     target.dataset.cometImpacts = String(cortexMetrics.cometImpacts);
@@ -1516,10 +1590,13 @@
     const sinTheta = Math.sin(camera.theta);
     const cosPhi = Math.cos(camera.phi);
     const sinPhi = Math.sin(camera.phi);
-    const rotatedX = x * cosTheta + z * sinTheta;
-    const rotatedZ = -x * sinTheta + z * cosTheta;
-    const rotatedY = y * cosPhi - rotatedZ * sinPhi;
-    const depthZ = y * sinPhi + rotatedZ * cosPhi;
+    const localX = x - camera.pivotX;
+    const localY = y - camera.pivotY;
+    const localZ = z - camera.pivotZ;
+    const rotatedX = localX * cosTheta + localZ * sinTheta;
+    const rotatedZ = -localX * sinTheta + localZ * cosTheta;
+    const rotatedY = localY * cosPhi - rotatedZ * sinPhi;
+    const depthZ = localY * sinPhi + rotatedZ * cosPhi;
     const viewDepth = camera.distance - depthZ;
     if (viewDepth < 60) return null;
     const scale = focalLength / viewDepth;
@@ -1941,6 +2018,30 @@
         context.stroke();
       }
     });
+  }
+
+  function drawCameraPivot(time) {
+    const node = nodes[camera.pivotNodeIndex];
+    if (
+      !node
+      || nodeState[node.index] === 0
+      || node.viewDepth > 9e8
+      || node.screenX < -60
+      || node.screenX > width + 60
+      || node.screenY < -60
+      || node.screenY > height + 60
+    ) return;
+    const radius = Math.max(0.75, node.radius * node.screenScale) + 12;
+    const pulse = 0.62 + Math.sin(time * 0.0045) * 0.16;
+    context.save();
+    context.strokeStyle = rgba(RGB_ELECTRIC, pulse);
+    context.lineWidth = 1;
+    context.setLineDash([2, 5]);
+    context.beginPath();
+    context.arc(node.screenX, node.screenY, radius, 0, Math.PI * 2);
+    context.stroke();
+    context.setLineDash([]);
+    context.restore();
   }
 
   function drawNodeEffects(time) {
@@ -2825,6 +2926,7 @@
     drawEdgeAfterglows(time);
     drawPulses(time);
     drawNodes(time);
+    drawCameraPivot(time);
     drawNodeEffects(time);
     drawTransportEffects(time);
     drawLabels(time);
@@ -2847,6 +2949,26 @@
     }
     if (autoRotate && !dragging && now - lastInteraction > 2600) {
       camera.theta += delta * 0.000045;
+    }
+    const pivotNode = nodes[camera.pivotNodeIndex];
+    const pivotGoal = pivotNode || cameraPivotTarget;
+    if (pivotGoal) {
+      camera.pivotX += (pivotGoal.x - camera.pivotX) * 0.14;
+      camera.pivotY += (pivotGoal.y - camera.pivotY) * 0.14;
+      camera.pivotZ += (pivotGoal.z - camera.pivotZ) * 0.14;
+      if (
+        !pivotNode
+        && Math.hypot(
+          pivotGoal.x - camera.pivotX,
+          pivotGoal.y - camera.pivotY,
+          pivotGoal.z - camera.pivotZ,
+        ) < 0.12
+      ) {
+        camera.pivotX = pivotGoal.x;
+        camera.pivotY = pivotGoal.y;
+        camera.pivotZ = pivotGoal.z;
+        cameraPivotTarget = null;
+      }
     }
     if (cameraTarget) {
       camera.theta = angleLerp(camera.theta, cameraTarget.theta, 0.1);
@@ -2885,13 +3007,16 @@
     return best;
   }
 
-  function select(index) {
+  function select(index, setPivot = false) {
     selected = index;
     stateDirty = true;
     renderPanel();
     document.getElementById("panelBody").scrollTop = 0;
     renderTreeSelection();
-    if (index >= 0) focusNode(index);
+    if (index >= 0) {
+      if (setPivot) setNodeAsCameraPivot(index);
+      else focusNode(index);
+    }
   }
 
   function bindCanvasInteractions() {
@@ -2940,7 +3065,7 @@
     canvas.addEventListener("pointerup", (event) => {
       if (!moved) {
         const index = pick(event.offsetX, event.offsetY);
-        select(index);
+        select(index, index >= 0);
       }
       downPoint = null;
       dragging = false;
@@ -2949,7 +3074,7 @@
     canvas.addEventListener("dblclick", (event) => {
       const index = pick(event.offsetX, event.offsetY);
       if (index >= 0) {
-        select(index);
+        select(index, true);
         flashTicker(`preview · ${nodes[index].id}`);
       } else {
         fitView();
@@ -3512,6 +3637,10 @@
     document.querySelectorAll(".stim").forEach((button) => {
       button.addEventListener("click", () => stimulate(button.dataset.s));
     });
+    document.getElementById("resetCenter").addEventListener("click", () => {
+      resetCameraPivot();
+    });
+    syncCameraPivotControl();
     const liveToggle = document.getElementById("tLive");
     liveToggle.addEventListener("click", () => {
       liveEventsEnabled = !liveEventsEnabled;

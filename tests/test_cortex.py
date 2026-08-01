@@ -679,6 +679,8 @@ def test_cortex_static_view_preserves_fable_layout_and_uses_live_data() -> None:
     assert 'id="tMotion"' in html
     assert 'id="sessionSelect"' in html
     assert 'id="memoryIngress"' in html
+    assert 'id="resetCenter"' in html
+    assert "◎ RESET CENTER" in html
     assert 'id="tAuto"' not in html
     assert 'id="tSnd"' in html
     assert 'id="tReset"' in html
@@ -704,6 +706,20 @@ def test_cortex_static_view_preserves_fable_layout_and_uses_live_data() -> None:
     assert "cortexMetrics.processingNodeBlinks += 1;" in script
     assert "cortexMetrics.processingTargetNodeIndex = target.node.index;" in script
     assert "const PROCESSING_EFFECT_PULSE_MS = 1450;" in script
+    assert "function graphCenter()" in script
+    assert "function setNodeAsCameraPivot(index)" in script
+    assert "function resetCameraPivot(announce = true)" in script
+    assert "function drawCameraPivot(time)" in script
+    assert "camera.pivotNodeIndex = nodeIndex;" in script
+    assert "node.x - camera.pivotX" in script
+    assert "node.y - camera.pivotY" in script
+    assert "node.z - camera.pivotZ" in script
+    assert "select(index, index >= 0);" in script
+    assert 'document.getElementById("resetCenter").addEventListener' in script
+    assert "resetCameraPivot();" in script
+    assert "drawCameraPivot(time);" in script
+    assert "target.dataset.cameraPivotNodeIndex" in script
+    assert ".seg button.centerReset.on" in style
     assert 'kind: "processing"' in script
     assert "channel_key: `processing:${laneKey}`" in script
     assert "connectProcessingActivity();" in script

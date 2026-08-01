@@ -5,6 +5,7 @@
   --line: rgba(110, 140, 190, 0.12);
   --amber: #ffb454;
   --amber2: #f5934b;
+  --electric: #ffd84d;
   --steel: #7d92b5;
   --tx: #c9d6ee;
   --tx2: #7f90b0;
@@ -545,6 +546,15 @@ canvas#gl {
 .seg button.stim:active {
   color: #fff;
   background: rgba(255, 180, 84, 0.3);
+}
+
+.seg button.centerReset {
+  border-left: 1px solid var(--line);
+}
+
+.seg button.centerReset.on {
+  color: var(--electric);
+  text-shadow: 0 0 10px rgba(255, 216, 77, 0.45);
 }
 
 .tgl {
