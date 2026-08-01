@@ -2910,7 +2910,7 @@
         moved = true;
       }
       if (downPoint && moved) {
-        camera.theta -= event.movementX * 0.0045;
+        camera.theta += event.movementX * 0.0045;
         camera.phi = Math.max(
           -1.35,
           Math.min(1.35, camera.phi - event.movementY * 0.0045),
