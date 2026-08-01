@@ -50,6 +50,8 @@ def test_typed_graph_dashboard_snapshot_separates_engineering_and_authority(
         "canary_percent": 0,
         "reason": "collecting",
         "gates": {},
+        "sample_count": 0,
+        "sample_unit": "",
     }
     assert "collecting authority" in dashboard._typed_graph_lane_detail(value)
 

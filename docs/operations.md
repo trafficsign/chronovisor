@@ -1030,6 +1030,17 @@ community summary freshness, four-arm progress, Judge disagreement metrics,
 and the next automatic evaluation. Authority collecting is not an operational
 failure. The worker keeps accumulating reviewed labels and actual-use paths,
 then re-evaluates on an idle sleep cycle without a future manual-enable step.
+`engineering_complete` is derived from explicit gates (valid locked baseline,
+sealed manifest/relation/rubric/model digests, automatic canary counter,
+current-teacher fallback, and zero external calls); it is never hard-coded.
+
+Rubric gold accepts only rows joined to the verified manual-94 manifest. The
+raw session ID is never persisted: the feedback ref is joined to a salted
+session digest. Cases are query-deduplicated and ordered across all nine
+strata, train/dev/locked-test, positive/negative labels, and at least five
+sessions. The nightly typed-graph lane uses up to four of its bounded local
+model steps per day. Thirty valid cases are necessary but not sufficient:
+the local ensemble must strictly beat the best single judge before adoption.
 
 The four typed-graph Decision Router lanes are `adoption_scoped = false`:
 their contracts and five-case fixtures are background-specific and do not
@@ -1042,3 +1053,9 @@ page body, evidence span text, or raw prompt. If every challenger fails, current
 is the recorded winner. If the interaction underperforms either single change,
 it cannot promote. Corrupt or stale relation state fails back to current search;
 never delete the existing Field or search state during rollback.
+
+After all data and quality gates pass, rollout enters 5%, then advances through
+25% and 100% after each 100 new distinct session hashes that actually received
+a typed relation/entity candidate. Shadow-only traces and repeated requests in
+one session do not count. A foreground resource pause preserves the existing
+canary artifact; only a failed quality/maturity gate rolls it back to current.

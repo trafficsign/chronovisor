@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
@@ -11,6 +12,7 @@ from pathlib import Path
 from time import monotonic
 from typing import Any
 
+from chronovisor.core.canonical_json import canonical_json_sha256_stringifying
 from chronovisor.core.durable_state import (
     DurableStateError,
     read_sealed_json,
@@ -30,6 +32,7 @@ from chronovisor.knowledge_graph.consensus import _router_for_producer
 from chronovisor.knowledge_graph.schema import sha256
 
 RUBRIC_ROOT = CHRONOVISOR_ROOT / "runtime" / "recall-rubric"
+MIN_RUBRIC_SESSIONS = 5
 CANDIDATE_FILE = RUBRIC_ROOT / "candidate.json"
 ACTIVE_FILE = RUBRIC_ROOT / "active.json"
 LAST_KNOWN_GOOD_FILE = RUBRIC_ROOT / "last-known-good.json"
@@ -95,35 +98,134 @@ def _gold_stratum(row: Mapping[str, Any], *, page_id: str, gold: bool) -> str:
     stale = {str(value) for value in row.get("stale_pages") or []}
     if page_id in stale:
         return "stale_info"
-    if kind == "injection_ignored" or "関係ない" in query or "topic" in query:
+    negative_pages = [
+        str(value) for value in row.get("negative_pages") or [] if isinstance(value, str)
+    ]
+    if (
+        not gold
+        and kind == "injection_ignored"
+        and negative_pages
+        and page_id == negative_pages[0]
+    ):
         return "topic_switch"
+    if not gold and source == "auditor_precision":
+        return "hub_false_positive"
+    if not gold and (
+        kind == "injection_ignored" or "関係ない" in query or "topic" in query
+    ):
+        return "topic_switch"
+    system_terms = (
+        "chronovisor",
+        "クロノバイザー",
+        "llmウィキ",
+        "システム",
+        "自律",
+        "保存",
+    )
+    system_pages = (
+        "chronovisor-",
+        "wiki-memory-",
+        "memory-system-",
+        "codex-wiki-",
+    )
+    if gold and any(term in query for term in system_terms) and page_id.startswith(
+        system_pages
+    ):
+        return "self_reference"
+    expected = row.get("expected_pages")
+    if gold and isinstance(expected, list) and len(expected) >= 2:
+        return "multi_hop"
     if any(term in query for term in ("俺", "自分", "personal", "面接", "career")):
         return "personal_context"
     if any(term in query for term in ("関係", "経由", "つなが", "multi", "between")):
         return "multi_hop"
     if page_id.casefold() in query or "このページ" in query:
         return "self_reference"
-    if not gold and source == "auditor_precision":
-        return "hub_false_positive"
     if not gold:
         return "adjacent_unneeded"
     return "read_worthy" if len(query) >= 80 else "relevant"
 
 
-def _gold_cases(root: Path, golden_file: Path) -> list[dict[str, Any]]:
+def _review_session_hashes(root: Path) -> dict[str, str]:
+    """Join reviewed refs to privacy-safe session identities."""
+
+    output: dict[str, str] = {}
     try:
-        manifest = read_sealed_json(
-            root / "runtime" / "search-eval" / "manual-94-manifest.json",
-            recover_backup=True,
+        lines = (root / "recall" / "feedback.jsonl").read_text(
+            encoding="utf-8"
+        ).splitlines()
+    except OSError:
+        return output
+    for line in lines:
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(row, dict):
+            continue
+        ref = str(row.get("ref") or "")
+        snapshot = row.get("snapshot")
+        turn_ref = row.get("turn_ref")
+        session_id = str(
+            (
+                snapshot.get("session_id")
+                if isinstance(snapshot, dict)
+                else ""
+            )
+            or (
+                turn_ref.get("session_id")
+                if isinstance(turn_ref, dict)
+                else ""
+            )
+            or ""
         )
-    except Exception:
-        manifest = {}
+        if ref and session_id:
+            output[ref] = sha256(["rubric-session-v1", session_id])
+    return output
+
+
+def _locked_manual_manifest(root: Path) -> dict[str, Any]:
+    """Read and verify the search-eval manifest's legacy custom seal."""
+
+    path = root / "runtime" / "search-eval" / "manual-94-manifest.json"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    observed = str(payload.get("manifest_sha256") or "")
+    unsigned = {key: value for key, value in payload.items() if key != "manifest_sha256"}
+    if observed != canonical_json_sha256_stringifying(unsigned):
+        return {}
+    entries = payload.get("entries")
+    if not isinstance(entries, list):
+        return {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            return {}
+        entry_seal = str(entry.get("entry_sha256") or "")
+        entry_unsigned = {
+            key: value for key, value in entry.items() if key != "entry_sha256"
+        }
+        if entry_seal != canonical_json_sha256_stringifying(entry_unsigned):
+            return {}
+    return payload
+
+
+def _gold_cases(root: Path, golden_file: Path) -> list[dict[str, Any]]:
+    manifest = _locked_manual_manifest(root)
+    if not manifest:
+        return []
     entries = manifest.get("entries")
     allowed = {
         str(row.get("query_sha256") or "")
         for row in entries or []
         if isinstance(row, dict) and row.get("reviewed") is True
     }
+    if not allowed:
+        return []
+    session_hashes = _review_session_hashes(root)
     cases: list[dict[str, Any]] = []
     try:
         lines = golden_file.read_text(encoding="utf-8").splitlines()
@@ -138,7 +240,7 @@ def _gold_cases(root: Path, golden_file: Path) -> list[dict[str, Any]]:
             continue
         query = str(row.get("query") or "")
         query_sha = sha256(query)
-        if not query or (allowed and query_sha not in allowed):
+        if not query or query_sha not in allowed:
             continue
         labeled: list[tuple[str, bool]] = [
             (str(page_id), True)
@@ -166,10 +268,15 @@ def _gold_cases(root: Path, golden_file: Path) -> list[dict[str, Any]]:
                     "page_id_sha256": sha256(page_id),
                     "gold": gold,
                     "stratum": _gold_stratum(row, page_id=page_id, gold=gold),
+                    "split": str(row.get("split") or ""),
+                    "session_hash": session_hashes.get(str(row.get("ref") or ""), ""),
                     "review_receipt_id": "manual94:" + str(row.get("ref") or query_sha),
                 }
             )
-    return sorted(cases, key=lambda row: str(row["case_id"]))
+    # Build the same diverse, query-deduplicated order that calibration will
+    # consume.  Otherwise hundreds of duplicate-page cases can spend the daily
+    # model budget before all strata/splits have a single usable example.
+    return select_diverse_cases(cases, limit=len(cases))
 
 
 def _usefulness_prediction(value: Mapping[str, Any] | None) -> bool | str:
@@ -177,14 +284,44 @@ def _usefulness_prediction(value: Mapping[str, Any] | None) -> bool | str:
         return "abstain"
     if value.get("decision") in {"abstained", "needs_retry"}:
         return "abstain"
-    passed = bool(
+    return bool(
         value.get("decision") == "approved"
         and value.get("topically_relevant") is True
         and value.get("marginally_useful") is True
         and value.get("read_worthy") is True
         and value.get("stale_or_harmful") is False
     )
-    return passed
+
+
+def _locked_gold_rows(path: Path) -> list[dict[str, Any]]:
+    """Load only rows carrying the current privacy and split contract."""
+
+    rows: list[dict[str, Any]] = []
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return rows
+    required_predictions = {
+        *RUBRIC_VARIANTS,
+        "primary",
+        "challenger",
+        "tie_break",
+        "ensemble",
+    }
+    for line in lines:
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if (
+            isinstance(value, dict)
+            and value.get("reviewed") is True
+            and str(value.get("split") or "") in {"train", "dev", "locked-test"}
+            and re.fullmatch(r"[0-9a-f]{64}", str(value.get("session_hash") or ""))
+            and required_predictions.issubset(value)
+        ):
+            rows.append(value)
+    return rows
 
 
 def _judge_variant(
@@ -242,6 +379,12 @@ def _judge_consensus(case: Mapping[str, Any], *, root: Path) -> dict[str, Any]:
         decision_lane="recall_usefulness_judgment",
     )
     output: dict[str, Any] = {
+        "primary": "abstain",
+        "primary_confidence": 0.0,
+        "challenger": "abstain",
+        "challenger_confidence": 0.0,
+        "tie_break": "abstain",
+        "tie_break_confidence": 0.0,
         "ensemble": _usefulness_prediction(
             result.value if isinstance(result.value, dict) else None
         ),
@@ -291,12 +434,19 @@ def build_locked_gold_cycle(
         else 0.0
     )
     completed = {
-        str(value) for value in state.get("completed_case_ids") or [] if str(value)
+        str(row.get("case_id") or "")
+        for row in _locked_gold_rows(output_file)
+        if str(row.get("case_id") or "")
     }
     pending_value = state.get("pending")
     pending = dict(pending_value) if isinstance(pending_value, dict) else {}
     case = next(
-        (row for row in cases if row["case_id"] == pending.get("case_id")),
+        (
+            row
+            for row in cases
+            if row["case_id"] == pending.get("case_id")
+            and row["case_id"] not in completed
+        ),
         None,
     )
     if case is None:
@@ -342,7 +492,13 @@ def build_locked_gold_cycle(
         step = "local_consensus"
     elapsed = max(0.0, monotonic() - started)
     pending["predictions"] = predictions
-    required = {*RUBRIC_VARIANTS, "primary", "challenger", "ensemble"}
+    required = {
+        *RUBRIC_VARIANTS,
+        "primary",
+        "challenger",
+        "tie_break",
+        "ensemble",
+    }
     finished = required.issubset(predictions)
     if finished and not dry_run:
         append_jsonl_durable(
@@ -355,6 +511,8 @@ def build_locked_gold_cycle(
                     "page_id_sha256": case["page_id_sha256"],
                     "gold": case["gold"],
                     "stratum": case["stratum"],
+                    "split": case["split"],
+                    "session_hash": case["session_hash"],
                     "reviewed": True,
                     "review_receipt_sha256": sha256(case["review_receipt_id"]),
                     **predictions,
@@ -435,22 +593,31 @@ def select_diverse_cases(
     while len(selected) < max(0, limit):
         changed = False
         for stratum in STRATA:
-            while buckets[stratum]:
-                row = buckets[stratum].pop(0)
-                query = str(row.get("query_sha256") or "")
-                session = str(row.get("session_hash") or "")
-                if (
-                    query
-                    and query in seen_queries
-                    or session
-                    and session in seen_sessions
-                ):
-                    continue
-                selected.append(row)
-                seen_queries.add(query)
+            eligible = [
+                (index, row)
+                for index, row in enumerate(buckets[stratum])
+                if str(row.get("query_sha256") or "") not in seen_queries
+            ]
+            if not eligible:
+                buckets[stratum].clear()
+                continue
+            index, row = next(
+                (
+                    (index, value)
+                    for index, value in eligible
+                    if str(value.get("session_hash") or "")
+                    and str(value.get("session_hash") or "") not in seen_sessions
+                ),
+                eligible[0],
+            )
+            buckets[stratum].pop(index)
+            query = str(row.get("query_sha256") or "")
+            session = str(row.get("session_hash") or "")
+            selected.append(row)
+            seen_queries.add(query)
+            if session:
                 seen_sessions.add(session)
-                changed = True
-                break
+            changed = True
             if len(selected) >= limit:
                 break
         if not changed:
@@ -459,7 +626,7 @@ def select_diverse_cases(
 
 
 def _binary_metrics(rows: Sequence[Mapping[str, Any]], model: str) -> dict[str, float]:
-    tp = fp = fn = correct = 0
+    tp = fp = fn = correct = decided = 0
     brier_values: list[float] = []
     calibration: list[tuple[float, int]] = []
     abstained = 0
@@ -473,6 +640,7 @@ def _binary_metrics(rows: Sequence[Mapping[str, Any]], model: str) -> dict[str, 
             abstained += 1
             continue
         predicted = bool(prediction)
+        decided += 1
         correct += predicted == label
         tp += predicted and label
         fp += predicted and not label
@@ -485,7 +653,6 @@ def _binary_metrics(rows: Sequence[Mapping[str, Any]], model: str) -> dict[str, 
         probability = probability if predicted else 1.0 - probability
         brier_values.append((probability - float(label)) ** 2)
         calibration.append((probability, int(label)))
-    decided = tp + fp + (correct - tp - fp)
     precision = tp / (tp + fp) if tp + fp else 0.0
     recall = tp / (tp + fn) if tp + fn else 0.0
     ece = 0.0
@@ -559,6 +726,22 @@ def evaluate_judges(
         stratum: sum(row.get("stratum") == stratum for row in rows)
         for stratum in STRATA
     }
+    sessions = {
+        str(row.get("session_hash") or "")
+        for row in rows
+        if str(row.get("session_hash") or "")
+    }
+    split_counts = {
+        split: {
+            "positive": sum(
+                row.get("split") == split and row.get("gold") is True for row in rows
+            ),
+            "negative": sum(
+                row.get("split") == split and row.get("gold") is False for row in rows
+            ),
+        }
+        for split in ("train", "dev", "locked-test")
+    }
     return {
         "schema_version": 1,
         "samples": len(rows),
@@ -569,6 +752,8 @@ def evaluate_judges(
         "ensemble_accuracy": ensemble,
         "ensemble_gain": round(ensemble - best_single, 6),
         "strata_counts": strata_counts,
+        "session_count": len(sessions),
+        "split_counts": split_counts,
     }
 
 
@@ -604,18 +789,28 @@ def promote_candidate(
     )
     strata_value = metrics.get("strata_counts")
     strata_counts = strata_value if isinstance(strata_value, Mapping) else {}
+    split_value = metrics.get("split_counts")
+    split_counts = split_value if isinstance(split_value, Mapping) else {}
     gates = {
         "gold_samples": gold_count >= 30,
+        "session_diversity": int(metrics.get("session_count") or 0)
+        >= MIN_RUBRIC_SESSIONS,
         "holdout_non_regression": precision >= 0.90,
         "calibration": ece <= 0.10,
         "coverage": abstention <= 0.50,
         "ensemble_value": isinstance(ensemble_gain, int | float)
-        and float(ensemble_gain) >= 0.0,
+        and float(ensemble_gain) > 0.0,
         "strata_coverage": all(
             isinstance(strata_counts.get(stratum), int)
             and not isinstance(strata_counts.get(stratum), bool)
             and int(strata_counts[stratum]) > 0
             for stratum in STRATA
+        ),
+        "split_balance": all(
+            isinstance(split_counts.get(split), Mapping)
+            and int(split_counts[split].get("positive") or 0) > 0
+            and int(split_counts[split].get("negative") or 0) > 0
+            for split in ("train", "dev", "locked-test")
         ),
     }
     result = {
@@ -704,15 +899,13 @@ def run_calibration_cycle(
 ) -> dict[str, Any]:
     """Auto-compare 10/30-case rubric variants and adopt only sealed winners."""
 
-    rows: list[dict[str, Any]] = []
-    try:
-        for line in rows_file.read_text(encoding="utf-8").splitlines():
-            value = json.loads(line)
-            if isinstance(value, dict) and value.get("reviewed") is True:
-                rows.append(value)
-    except (OSError, json.JSONDecodeError):
-        rows = []
+    rows = _locked_gold_rows(rows_file)
     selected = select_diverse_cases(rows, limit=30)
+    selected_sessions = {
+        str(row.get("session_hash") or "")
+        for row in selected
+        if str(row.get("session_hash") or "")
+    }
     sample_gate = 30 if len(selected) >= 30 else 10 if len(selected) >= 10 else 0
     comparison = (
         evaluate_rubric_variants(selected[:sample_gate])
@@ -736,13 +929,15 @@ def run_calibration_cycle(
     )
     if not dry_run:
         write_candidate(artifact, candidate_file)
-    if sample_gate < 30:
+    if sample_gate < 30 or len(selected_sessions) < MIN_RUBRIC_SESSIONS:
         payload = {
             "schema_version": 1,
             "generated_at": datetime.now(UTC).isoformat(timespec="seconds"),
             "status": "collecting",
             "samples": len(selected),
+            "sessions": len(selected_sessions),
             "next_gate": 10 if len(selected) < 10 else 30,
+            "next_session_gate": MIN_RUBRIC_SESSIONS,
             "winner": winner,
             "comparison": comparison,
             "external_model_calls": 0,
@@ -843,6 +1038,7 @@ def run_calibration_cycle(
                 "candidate_sha256": artifact["artifact_sha256"],
                 "calibration_epoch": calibration_epoch,
                 "samples": len(selected),
+                "sessions": len(selected_sessions),
                 "winner": winner,
                 "comparison": comparison,
                 "judge_metrics": judge_metrics,
@@ -868,6 +1064,7 @@ def run_calibration_cycle(
     payload = {
         **result,
         "samples": len(selected),
+        "sessions": len(selected_sessions),
         "winner": winner,
         "comparison": comparison,
         "judge_metrics": judge_metrics,

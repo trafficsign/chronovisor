@@ -2283,6 +2283,7 @@ def _typed_graph_dashboard_snapshot() -> dict[str, Any]:
     return {
         "mode": str(status.get("mode") or "shadow"),
         "engineering_complete": status.get("engineering_complete") is True,
+        "engineering_gates": status.get("engineering_gates") or {},
         "authority_mature": status.get("authority_mature") is True,
         "relation_counts": status.get("relation_counts") or {},
         "communities": int(status.get("communities") or 0),
@@ -2317,6 +2318,8 @@ def _typed_graph_dashboard_snapshot() -> dict[str, Any]:
             "canary_percent": int(promotion.get("canary_percent") or 0),
             "reason": str(promotion.get("reason") or "not_evaluated")[:160],
             "gates": promotion.get("gates") or {},
+            "sample_count": int(promotion.get("sample_count") or 0),
+            "sample_unit": str(promotion.get("sample_unit") or ""),
         },
         "external_model_calls": int(status.get("external_model_calls") or 0),
     }

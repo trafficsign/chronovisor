@@ -1067,6 +1067,18 @@ canvas#gl {
   font: 10px var(--mono);
 }
 
+.faultText {
+  padding: 7px 8px;
+  margin-top: 8px;
+  color: #ff7a84;
+  font: 9px var(--mono);
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  background: rgba(255, 93, 104, 0.06);
+  border: 1px solid rgba(255, 93, 104, 0.22);
+  border-radius: 7px;
+}
+
 .fieldStatus {
   display: grid;
   grid-template-columns: auto 1fr;

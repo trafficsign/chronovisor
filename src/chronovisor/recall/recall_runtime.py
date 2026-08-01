@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import re
 import sys
@@ -756,7 +757,7 @@ def run_local_judge(
     timeout_ms: int | None = None,
 ) -> tuple[float | None, list[str], str]:
     system = "You are a fast Chronovisor recall classifier. Return compact JSON only."
-    prompt = {
+    prompt: dict[str, Any] = {
         "user_prompt": request.prompt,
         "cwd": request.cwd,
         "heuristic_score": round(heuristic_score, 3),
@@ -769,7 +770,7 @@ def run_local_judge(
             "reason": "very short Japanese reason",
         },
     }
-    schema = {
+    schema: dict[str, Any] = {
         "type": "object",
         "properties": {
             "decision": {"type": "string", "enum": ["none", "search", "read"]},
@@ -1086,7 +1087,7 @@ def calibrated_score(features: dict[str, Any], policy: RecallPolicy) -> float | 
         return 0.0
     if total > 40:
         return 1.0
-    return 1.0 / (1.0 + pow(2.718281828459045, -total))
+    return 1.0 / (1.0 + math.exp(-total))
 
 
 def build_evidence_features(
@@ -2109,7 +2110,8 @@ def _finalize_recall_result(
         else None
     )
     if (
-        isinstance(observer, dict)
+        isinstance(field_metadata, dict)
+        and isinstance(observer, dict)
         and observer.get("status") in {"fallback", "observed", "active"}
         and active_request.session_id
     ):
@@ -3097,14 +3099,17 @@ def main(argv: list[str] | None = None) -> int:
 
     policy = load_policy(Path(args.config).expanduser())
     if args.warmup:
-        result = warm_recall_model(policy)
+        warmup_result = warm_recall_model(policy)
         print(
             json.dumps(
-                {"status": "ok" if result["ok"] else "error", **result},
+                {
+                    "status": "ok" if warmup_result["ok"] else "error",
+                    **warmup_result,
+                },
                 ensure_ascii=False,
             )
         )
-        return 0 if result["ok"] else 1
+        return 0 if warmup_result["ok"] else 1
 
     payload: dict[str, Any] = {}
     if args.hook:
@@ -3133,8 +3138,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.session_id:
         request.session_id = args.session_id
 
-    result = run_recall(request, policy, perform_search=not args.no_search)
-    output = render_output(result, args.format)
+    recall_result = run_recall(request, policy, perform_search=not args.no_search)
+    output = render_output(recall_result, args.format)
     if output:
         print(output)
     return 0

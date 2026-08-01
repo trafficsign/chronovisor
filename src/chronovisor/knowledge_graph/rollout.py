@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
@@ -13,6 +14,7 @@ from chronovisor.core.store import CHRONOVISOR_ROOT
 
 PROMOTION_FILE = CHRONOVISOR_ROOT / "runtime" / "typed-graph" / "promotion.json"
 CANARY_STEPS = (5, 25, 100)
+CANARY_SAMPLE_UNIT = "distinct_applied_session_hashes"
 
 
 def selected_for_canary(session_id: str, percent: int) -> bool:
@@ -20,6 +22,40 @@ def selected_for_canary(session_id: str, percent: int) -> bool:
         return False
     bucket = int(hashlib.sha256(session_id.encode()).hexdigest()[:8], 16) % 100
     return bucket < min(100, percent)
+
+
+def applied_canary_session_count(path_ledger: Path) -> int:
+    """Count privacy-safe sessions that actually received typed candidates.
+
+    Shadow projections are deliberately excluded.  The count is monotonic for
+    the append-only ledger and can therefore advance a rollout beyond the
+    finite locked-fixture evaluation set.
+    """
+
+    sessions: set[str] = set()
+    try:
+        lines = path_ledger.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return 0
+    for line in lines:
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(row, dict) or row.get("shadow") is not False:
+            continue
+        session_hash = str(row.get("session_hash") or "")
+        path_ids = [
+            str(value)
+            for value in [
+                *(row.get("relation_ids") or []),
+                *(row.get("entity_merge_ids") or []),
+            ]
+            if isinstance(value, str) and value
+        ]
+        if session_hash and path_ids:
+            sessions.add(session_hash)
+    return len(sessions)
 
 
 def advance_rollout(
@@ -67,6 +103,7 @@ def advance_rollout(
         "canary_percent": percent,
         "stage_started_sample_count": started,
         "sample_count": sample_count,
+        "sample_unit": CANARY_SAMPLE_UNIT,
         "gates": dict(sorted(gates.items())),
         "reason": reason,
         "rollback_teacher": "current",
@@ -79,10 +116,20 @@ def advance_rollout(
 
 
 def rollback(*, reason: str, promotion_file: Path = PROMOTION_FILE) -> dict[str, Any]:
+    try:
+        previous = read_sealed_json(promotion_file, recover_backup=True)
+    except Exception:
+        previous = {}
     payload = advance_rollout(
         gates={"manual_or_runtime_guard": False},
-        sample_count=0,
+        sample_count=int(previous.get("sample_count") or 0),
         promotion_file=promotion_file,
+        manifest_sha256=str(previous.get("manifest_sha256") or ""),
+        relation_snapshot_sha256=str(
+            previous.get("relation_snapshot_sha256") or ""
+        ),
+        rubric_sha256=str(previous.get("rubric_sha256") or ""),
+        model_manifest_sha256=str(previous.get("model_manifest_sha256") or ""),
     )
     payload = {**payload, "rollback_reason": reason[:160]}
     return write_sealed_json(promotion_file, payload)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, replace
@@ -28,9 +29,11 @@ from chronovisor.knowledge_graph.consolidation import (
 from chronovisor.knowledge_graph.evaluation import (
     EVALUATION_ARMS,
     FIXTURE_CATEGORIES,
+    baseline_manifest_sha256,
     capture_baseline,
     compare_four_arms,
     evaluate_locked_rows,
+    run_evaluation_cycle,
     validate_baseline,
 )
 from chronovisor.knowledge_graph.retrieval import (
@@ -39,7 +42,12 @@ from chronovisor.knowledge_graph.retrieval import (
     relation_neighbors,
     trace_paths,
 )
-from chronovisor.knowledge_graph.rollout import advance_rollout, rollback
+from chronovisor.knowledge_graph.rollout import (
+    CANARY_SAMPLE_UNIT,
+    advance_rollout,
+    applied_canary_session_count,
+    rollback,
+)
 from chronovisor.knowledge_graph.schema import (
     ConsensusReceipt,
     ConsensusVote,
@@ -759,6 +767,89 @@ def test_four_arm_locked_gate_and_rollout_rollback(tmp_path: Path) -> None:
     assert first["canary_percent"] == 5
     assert reverted["mode"] == "shadow"
     assert reverted["rollback_reason"] == "precision drift"
+    assert reverted["manifest_sha256"] == "e" * 64
+    assert reverted["relation_snapshot_sha256"] == "f" * 64
+    assert reverted["rubric_sha256"] == "a" * 64
+    assert reverted["model_manifest_sha256"] == "b" * 64
+
+
+def test_evaluation_manifest_is_bound_to_locked_fixture_manifest(tmp_path: Path) -> None:
+    baseline_file = tmp_path / "baseline.json"
+    baseline = capture_baseline(
+        output_file=baseline_file,
+        git_head="a" * 40,
+        runtime_commit="b" * 40,
+        config_sha256="c" * 64,
+        model_inventory=["gemma4:26b"],
+        artifact_counts={"manual_locked": 94},
+    )
+
+    result = run_evaluation_cycle(
+        rows_file=tmp_path / "rows.jsonl",
+        baseline_file=baseline_file,
+        output_file=tmp_path / "evaluation.json",
+        dry_run=True,
+    )
+
+    assert result["manifest_sha256"] == baseline_manifest_sha256(baseline)
+    assert result["manifest_sha256"] == sha256(baseline["fixture_manifest"])
+
+
+def test_canary_advances_from_distinct_applied_sessions(tmp_path: Path) -> None:
+    path_ledger = tmp_path / "candidate-trace.jsonl"
+    rows = [
+        {
+            "session_hash": "session-a",
+            "shadow": False,
+            "relation_ids": ["rel_a"],
+        },
+        {
+            "session_hash": "session-a",
+            "shadow": False,
+            "relation_ids": ["rel_a"],
+        },
+        {
+            "session_hash": "session-b",
+            "shadow": False,
+            "entity_merge_ids": ["merge_b"],
+        },
+        {
+            "session_hash": "shadow-only",
+            "shadow": True,
+            "relation_ids": ["rel_shadow"],
+        },
+    ]
+    path_ledger.write_text(
+        "\n".join([*(json.dumps(row) for row in rows), "{bad-json"]) + "\n",
+        encoding="utf-8",
+    )
+    promotion_file = tmp_path / "promotion.json"
+
+    assert applied_canary_session_count(path_ledger) == 2
+    first = advance_rollout(
+        gates={"quality": True},
+        sample_count=0,
+        promotion_file=promotion_file,
+        minimum_step_samples=2,
+    )
+    second = advance_rollout(
+        gates={"quality": True},
+        sample_count=2,
+        promotion_file=promotion_file,
+        minimum_step_samples=2,
+    )
+    third = advance_rollout(
+        gates={"quality": True},
+        sample_count=4,
+        promotion_file=promotion_file,
+        minimum_step_samples=2,
+    )
+
+    assert first["canary_percent"] == 5
+    assert second["canary_percent"] == 25
+    assert third["canary_percent"] == 100
+    assert third["mode"] == "active"
+    assert third["sample_unit"] == CANARY_SAMPLE_UNIT
 
 
 def test_relation_authority_requires_rollout_and_distinct_used_sessions(

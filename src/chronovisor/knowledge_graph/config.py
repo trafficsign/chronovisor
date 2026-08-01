@@ -39,6 +39,7 @@ class KnowledgeGraphConfig:
     min_entity_sessions: int = 5
     min_entity_strong: int = 20
     min_rubric_gold: int = 30
+    min_rubric_sessions: int = 5
     retrieval: GraphRetrievalConfig = field(default_factory=GraphRetrievalConfig)
 
 
@@ -110,6 +111,9 @@ def load_config(path: Path | str | None = None) -> KnowledgeGraphConfig:
         min_entity_sessions=_integer(section.get("min_entity_sessions"), 5, 1, 10_000),
         min_entity_strong=_integer(section.get("min_entity_strong"), 20, 1, 1_000_000),
         min_rubric_gold=_integer(section.get("min_rubric_gold"), 30, 1, 10_000),
+        min_rubric_sessions=_integer(
+            section.get("min_rubric_sessions"), 5, 1, 10_000
+        ),
         retrieval=GraphRetrievalConfig(
             mode=_mode(retrieval_section.get("mode"), "shadow"),
             max_hops=_integer(retrieval_section.get("max_hops"), 2, 1, 4),

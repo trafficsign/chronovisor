@@ -17,6 +17,7 @@ from chronovisor.recall.rubric_calibration import (
     select_diverse_cases,
     write_candidate,
 )
+from chronovisor.search.search_eval import SearchExample, write_sealed_manifest
 
 
 def test_diverse_selection_excludes_query_and_session_duplicates() -> None:
@@ -85,16 +86,41 @@ def test_active_rubric_is_sealed_and_promotion_fails_closed(tmp_path: Path) -> N
         active_file=active,
         last_known_good_file=lkg,
         metrics={
-            "ensemble_gain": 0.0,
+            "ensemble_gain": 0.1,
             "models": {"ensemble": {"precision": 1.0, "ece": 0.0, "abstention": 0.0}},
             "strata_counts": {stratum: 1 for stratum in STRATA},
+            "session_count": 5,
+            "split_counts": {
+                split: {"positive": 1, "negative": 1}
+                for split in ("train", "dev", "locked-test")
+            },
         },
         gold_count=10,
     )
     assert held["status"] == "held"
     assert not active.exists()
 
-    adopted = promote_candidate(
+    insufficient_sessions = promote_candidate(
+        candidate_file=candidate,
+        active_file=active,
+        last_known_good_file=lkg,
+        metrics={
+            "ensemble_gain": 0.1,
+            "models": {"ensemble": {"precision": 1.0, "ece": 0.0, "abstention": 0.0}},
+            "strata_counts": {stratum: 1 for stratum in STRATA},
+            "session_count": 4,
+            "split_counts": {
+                split: {"positive": 1, "negative": 1}
+                for split in ("train", "dev", "locked-test")
+            },
+        },
+        gold_count=30,
+    )
+    assert insufficient_sessions["status"] == "held"
+    assert insufficient_sessions["gates"]["session_diversity"] is False
+    assert not active.exists()
+
+    no_ensemble_gain = promote_candidate(
         candidate_file=candidate,
         active_file=active,
         last_known_good_file=lkg,
@@ -102,6 +128,31 @@ def test_active_rubric_is_sealed_and_promotion_fails_closed(tmp_path: Path) -> N
             "ensemble_gain": 0.0,
             "models": {"ensemble": {"precision": 1.0, "ece": 0.0, "abstention": 0.0}},
             "strata_counts": {stratum: 1 for stratum in STRATA},
+            "session_count": 5,
+            "split_counts": {
+                split: {"positive": 1, "negative": 1}
+                for split in ("train", "dev", "locked-test")
+            },
+        },
+        gold_count=30,
+    )
+    assert no_ensemble_gain["status"] == "held"
+    assert no_ensemble_gain["gates"]["ensemble_value"] is False
+    assert not active.exists()
+
+    adopted = promote_candidate(
+        candidate_file=candidate,
+        active_file=active,
+        last_known_good_file=lkg,
+        metrics={
+            "ensemble_gain": 0.1,
+            "models": {"ensemble": {"precision": 1.0, "ece": 0.0, "abstention": 0.0}},
+            "strata_counts": {stratum: 1 for stratum in STRATA},
+            "session_count": 5,
+            "split_counts": {
+                split: {"positive": 1, "negative": 1}
+                for split in ("train", "dev", "locked-test")
+            },
         },
         gold_count=30,
     )
@@ -124,16 +175,17 @@ def test_calibration_cycle_requires_background_local_consensus(
                 "case_id": f"case-{index}",
                 "reviewed": True,
                 "stratum": STRATA[index % len(STRATA)],
+                "split": ("train", "dev", "locked-test")[index % 3],
                 "query_sha256": f"query-{index}",
-                "session_hash": f"session-{index}",
+                "session_hash": f"{index:064x}",
                 "gold": gold,
                 "current": gold,
                 "generated": gold,
                 "diverse_few_shot": gold,
                 "calibrated": gold,
-                "primary": gold,
-                "challenger": gold,
-                "tie_break": gold,
+                "primary": (not gold) if index % 5 == 0 else gold,
+                "challenger": (not gold) if index % 7 == 0 else gold,
+                "tie_break": (not gold) if index % 11 == 0 else gold,
                 "ensemble": gold,
                 "primary_confidence": 0.95,
                 "challenger_confidence": 0.95,
@@ -202,6 +254,29 @@ def test_locked_gold_builder_is_incremental_local_and_privacy_safe(
         + "\n",
         encoding="utf-8",
     )
+    (tmp_path / "recall" / "feedback.jsonl").write_text(
+        json.dumps(
+            {
+                "ref": "manual-1",
+                "snapshot": {"session_id": "private-session-id"},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    manifest = tmp_path / "runtime" / "search-eval" / "manual-94-manifest.json"
+    manifest.parent.mkdir(parents=True)
+    write_sealed_manifest(
+        [
+            SearchExample(
+                query="What is the grounded answer?",
+                expected_pages=("answer",),
+                reviewed=True,
+                ref="manual-1",
+            )
+        ],
+        manifest,
+    )
     monkeypatch.setattr(
         rubric_calibration,
         "_judge_variant",
@@ -238,6 +313,13 @@ def test_locked_gold_builder_is_incremental_local_and_privacy_safe(
     assert result["cases"] == 1
     assert row["gold"] is True
     assert row["ensemble"] is True
+    assert len(row["session_hash"]) == 64
+    assert row["session_hash"] != "private-session-id"
     assert "query" not in row
     assert "page_id" not in row
     assert "Grounded answer body" not in output.read_text(encoding="utf-8")
+
+    tampered = json.loads(manifest.read_text(encoding="utf-8"))
+    tampered["entries"][0]["source"] = "tampered"
+    manifest.write_text(json.dumps(tampered), encoding="utf-8")
+    assert rubric_calibration._gold_cases(tmp_path, golden) == []

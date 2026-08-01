@@ -2111,6 +2111,10 @@
     const authority = status.authority || {};
     const authorityCurrent = authority.current || {};
     const authorityTargets = authority.targets || {};
+    const engineeringGates = status.engineering_gates || {};
+    const failedEngineering = Object.entries(engineeringGates)
+      .filter(([, passed]) => passed !== true)
+      .map(([name]) => name);
     const countRows = [
       "proposed", "held", "verified", "repeatedly_used",
       "authoritative", "stale", "retracted",
@@ -2126,6 +2130,7 @@
         <div><span>communities</span><b>${(graph.communities || []).length}</b></div>
         <div><span>external calls</span><b>${Number(status.external_model_calls || 0)}</b></div>
         <div><span>rollout</span><b>${escapeHtml(rollout.mode || "shadow")} ${Number(rollout.canary_percent || 0)}%</b></div>
+        <div><span>canary evidence</span><b>${Number(rollout.sample_count || 0)} sessions</b></div>
         <div><span>rubric</span><b>${escapeHtml(rubric.status || "builtin")}</b></div>
         <div><span>rubric gold</span><b>${Number(rubricGold.cases || 0)}/30 · ${escapeHtml(rubricGold.step || rubricGold.status || "waiting")}</b></div>
         <div><span>builder queue</span><b>${Number(builder.remaining_pages || 0)} · ${escapeHtml(builder.model || "local")}</b></div>
@@ -2133,7 +2138,11 @@
         <div><span>summaries</span><b>${Number(summaries.generated || 0)} new · ${Number(summaries.reused || 0)} cached</b></div>
         <div><span>evaluation</span><b>${escapeHtml(evaluation.status || "waiting")} · ${escapeHtml(evaluation.winner || "current")}</b></div>
         <div><span>relation maturity</span><b>${Number(authorityCurrent.relation_strong || 0)}/${Number(authorityTargets.relation_strong || 0)} · ${Number(authorityCurrent.relation_sessions || 0)}/${Number(authorityTargets.relation_sessions || 0)} sessions</b></div>
+        <div><span>entity maturity</span><b>${Number(authorityCurrent.entity_strong || 0)}/${Number(authorityTargets.entity_strong || 0)} · ${Number(authorityCurrent.entity_sessions || 0)}/${Number(authorityTargets.entity_sessions || 0)} sessions</b></div>
+        <div><span>rubric maturity</span><b>${Number(authorityCurrent.rubric_gold || 0)}/${Number(authorityTargets.rubric_gold || 0)} · ${Number(authorityCurrent.rubric_sessions || 0)}/${Number(authorityTargets.rubric_sessions || 0)} sessions</b></div>
+        <div><span>locked evaluation</span><b>${Number(authorityCurrent.evaluation_samples || 0)} arm rows</b></div>
       </div>
+      ${failedEngineering.length ? `<div class="faultText">Engineering gates: ${failedEngineering.map(escapeHtml).join(" · ")}</div>` : ""}
       ${(authority.unmet_gates || []).length ? `<div class="ghost">Unmet gates: ${(authority.unmet_gates || []).map(escapeHtml).join(" · ")}. Re-evaluates on ${escapeHtml(authority.next_evaluation || "next sleep cycle")}.</div>` : ""}
       <div class="ghost">Static dashed lines are relation state. Yellow electricity appears only for a real Field spread event.</div>
     </div>`;

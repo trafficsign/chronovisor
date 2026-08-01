@@ -560,6 +560,10 @@ CHRONOVISOR_ROOT="$(mktemp -d -t chronovisor-test)" uv run pytest -q</code></pre
 <li><time>2026-08-01 17:10</time><span>実MCP search→read→recall_usedを同一decisionで実行。graph channel、1-hop path、Field stimulus/spread、used event <code>84d02bd351574f84a4d53bd2d6a9d074</code>を同一session hashで確認。</span></li>
 <li><time>2026-08-01 17:15</time><span>Cortexがnested typed endpointを描画できないlive差分を検出し、<code>e540709</code>でbasename/ambiguity-safe解決を全projectionへ適用。本番APIでtyped relations 96、verified relation 1、community 1を確認。</span></li>
 <li><time>2026-08-01 17:39</time><span>最終品質gateを完走。全体<code>2959 passed, 1 skipped</code>、新規Cortex/Graph focused 35件、Ruff、対象mypy、diff checkがすべて成功。Engineering Completeを確定し、Authority Matureは実利用母数がgateへ到達するまで自動shadow評価を継続。</span></li>
+<li><time>2026-08-01 18:05</time><span>完了主張を要件単位で再監査し、17:39判定を撤回。relation snapshot digestのfield名誤り、最大32件のfixture rowを100件canary母数へ流用した永久停止、resource busy時の誤rollback、hard-coded Engineering Complete、manual-94 custom sealの誤読、rubric session/split/strataの到達不能、全model accuracyが常に1.0になる分母式を検出。</span></li>
+<li><time>2026-08-01 18:22</time><span>自動成長経路を修復。canaryを実適用distinct sessionで5→25→100へ進め、maturity母数をrelation/entity/rubricごとに分離。manual-94をcustom seal/entry sealまで検証し、80 query・6 sessionから先頭30件で9 strata・3 split・positive/negativeを満たす順序へ固定。rubricは日次4 step、最低30件/5 sessions、ensembleのstrict improvementを必須化。resource pauseはcanaryを保存し、品質gate失敗だけcurrentへrollbackする。Ruff、対象mypy、large-function policy、focused 405件が成功。</span></li>
+<li><time>2026-08-01 18:50</time><span>隔離した一時<code>CHRONOVISOR_ROOT</code>で全体suiteを完走し、<code>2963 passed, 1 skipped</code>（1576.72秒）。diff check、Ruff、対象mypy、Node syntax、focused 405件と合わせてコード側のEngineering Complete gateを再確定。</span></li>
+<li><time>2026-08-01 18:55</time><span>実装完了条件をmachine-readable gateへ固定。Engineering Completeはsealed baseline/relation/rubric/model、automatic canary、current fallback、external call 0からのみ導出し、Authority Matureはrelation/entity/rubricの実利用母数と品質gateへ分離。</span></li>
 </ol>
 </section>
 

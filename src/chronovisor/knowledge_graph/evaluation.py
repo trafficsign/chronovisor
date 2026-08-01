@@ -231,6 +231,13 @@ def validate_baseline(path: Path) -> dict[str, Any]:
     return {"status": "passed" if all(checks.values()) else "failed", "checks": checks}
 
 
+def baseline_manifest_sha256(baseline: Mapping[str, Any]) -> str:
+    """Bind evaluation rows to the locked query manifest, not mutable metadata."""
+
+    manifest = baseline.get("fixture_manifest")
+    return sha256(manifest if isinstance(manifest, dict) else {})
+
+
 def compare_four_arms(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     """Aggregate sealed arm results without assuming graph+rubric wins."""
 
@@ -425,9 +432,7 @@ def run_evaluation_cycle(
         rows = [row for row in rows if row.get("evaluation_epoch") == evaluation_epoch]
     payload = evaluate_locked_rows(
         rows,
-        manifest_sha256=sha256(
-            [baseline.get("snapshot_sha256", ""), preregistration()]
-        ),
+        manifest_sha256=baseline_manifest_sha256(baseline),
     )
     return payload if dry_run else write_sealed_json(output_file, payload)
 
