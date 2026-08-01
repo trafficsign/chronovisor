@@ -277,8 +277,8 @@ def _typed_graph_projection(
         records = []
     relations: list[dict[str, Any]] = []
     for record in records:
-        source_index = index_by_key.get(record.source_page_id.casefold())
-        target_index = index_by_key.get(record.target_page_id.casefold())
+        source_index = index_by_key.get(_target_key(record.source_page_id))
+        target_index = index_by_key.get(_target_key(record.target_page_id))
         if source_index is None or target_index is None:
             continue
         consensus = record.consensus
@@ -366,8 +366,8 @@ def _typed_graph_projection(
             )
             for source_offset, source_page_id in enumerate(page_ids):
                 for target_page_id in page_ids[source_offset + 1 :]:
-                    source_index = index_by_key.get(source_page_id.casefold())
-                    target_index = index_by_key.get(target_page_id.casefold())
+                    source_index = index_by_key.get(_target_key(source_page_id))
+                    target_index = index_by_key.get(_target_key(target_page_id))
                     if source_index is None or target_index is None:
                         continue
                     relations.append(
@@ -440,9 +440,9 @@ def _typed_graph_projection(
             if not isinstance(value, dict):
                 continue
             community_members: list[str] = [
-                str(page_id)
+                _target_key(str(page_id))
                 for page_id in value.get("member_page_ids") or []
-                if str(page_id).casefold() in index_by_key
+                if _target_key(str(page_id)) in index_by_key
             ]
             for member_page_id in community_members:
                 memberships.setdefault(member_page_id, []).append(str(community_id))

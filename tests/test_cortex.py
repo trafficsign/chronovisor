@@ -6,6 +6,12 @@ import threading
 from pathlib import Path
 
 from chronovisor.core.durable_state import write_sealed_json
+from chronovisor.knowledge_graph.schema import (
+    EvidenceRef,
+    RelationRecord,
+    relation_id,
+    sha256,
+)
 from chronovisor.knowledge_graph.store import KnowledgeGraphStore
 from chronovisor.ops import cortex, dashboard
 from chronovisor.recall.recall_field_schema import (
@@ -172,6 +178,48 @@ def test_cortex_projects_entity_consensus_votes_without_mentions(tmp_path: Path)
     assert relation["consensus"]["votes"][0]["role"] == "primary"
     assert relation["consensus"]["votes"][0]["decision"] == "approve"
     assert "secret mention" not in json.dumps(graph, ensure_ascii=False)
+
+
+def test_cortex_projects_typed_relations_with_nested_page_ids(tmp_path: Path) -> None:
+    root = tmp_path / "chronovisor"
+    _write_page(root / "pages" / "topic" / "a.md", title="A", body="Alpha")
+    _write_page(root / "pages" / "b.md", title="B", body="Beta")
+    evidence = EvidenceRef(
+        page_id="topic/a",
+        content_sha256="a" * 64,
+        span_sha256="b" * 64,
+        source_line=3,
+    )
+    record = RelationRecord(
+        relation_id=relation_id(
+            source_page_id="topic/a",
+            target_page_id="b",
+            predicate="references",
+            evidence_sha256=sha256([evidence.__dict__]),
+            model_sha256="c" * 64,
+            rubric_sha256="d" * 64,
+        ),
+        source_page_id="topic/a",
+        target_page_id="b",
+        predicate="references",
+        direction="forward",
+        status="verified",
+        evidence=(evidence,),
+        model_sha256="c" * 64,
+        rubric_sha256="d" * 64,
+        producer_role="local_consensus",
+        confidence=0.9,
+    )
+    KnowledgeGraphStore(root / "knowledge-graph").append(
+        record, action="propose"
+    )
+
+    graph = cortex.build_cortex_graph(root, use_cache=False)
+
+    relation = graph["typedGraph"]["relations"][0]
+    assert graph["nodes"][relation["source"]]["id"] == "a"
+    assert graph["nodes"][relation["target"]]["id"] == "b"
+    assert relation["source_page_id"] == "topic/a"
 
 
 def test_websocket_helpers_follow_rfc6455() -> None:
