@@ -1,0 +1,561 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>Chronovisor Typed GraphRAG + Local Consensus Recall Calibration 実装計画</title>
+<style>
+:root{
+  --fg:#1a1a1a; --muted:#666; --bg:#fafaf7; --accent:#2c5aa0;
+  --done:#888; --warn:#c0392b; --ok:#2e7d32; --rule:#e0e0d8;
+  --code-bg:#eee;
+}
+*{box-sizing:border-box}
+body{
+  font-family:-apple-system,'Hiragino Kaku Gothic ProN','Yu Gothic',sans-serif;
+  color:var(--fg); background:var(--bg);
+  max-width:880px; margin:2rem auto; padding:0 1.5rem;
+  line-height:1.7; font-size:15px;
+}
+header{
+  border-bottom:2px solid var(--rule); padding-bottom:1rem; margin-bottom:1.5rem;
+  position:sticky; top:0; background:var(--bg); z-index:10;
+}
+h1{font-size:1.6rem;margin:0 0 0.5rem 0}
+h2{font-size:1.15rem;margin:1.75rem 0 0.5rem 0;padding-bottom:0.25rem;border-bottom:1px solid var(--rule)}
+h3{font-size:1rem;margin:1.25rem 0 0.35rem 0}
+.meta-bar{display:flex;gap:1rem;font-size:0.85rem;color:var(--muted);flex-wrap:wrap;align-items:center}
+.meta-bar code{background:transparent;color:var(--muted)}
+.badge{
+  display:inline-block;padding:0.15rem 0.7rem;border-radius:1rem;
+  background:var(--accent);color:#fff;font-weight:600;font-size:0.8rem;
+  letter-spacing:0.02em;
+}
+.badge[data-state="ready"]{background:#16a085}
+.badge[data-state="running"]{background:#e67e22}
+.badge[data-state="done"]{background:var(--ok)}
+.badge[data-state="blocked"]{background:var(--warn)}
+section{margin:0 0 0.5rem 0}
+ul,ol{padding-left:1.5rem;margin:0.5rem 0}
+li{margin:0.25rem 0}
+ol.checklist{list-style:none;padding-left:0}
+ol.checklist li{display:flex;align-items:flex-start;gap:0.6rem;padding:0.15rem 0}
+ol.checklist input[type=checkbox]{margin-top:0.4rem;flex-shrink:0}
+ol.checklist input[type=checkbox]:checked + span{color:var(--done);text-decoration:line-through}
+section.rules{background:#f3f1eb;padding:0.5rem 1rem;border-radius:6px;font-size:0.9rem;border-left:3px solid var(--accent)}
+section.rules h2{border:none;margin-top:0.5rem}
+section.blockers ul{color:var(--warn)}
+ol.log{list-style:none;padding-left:0;font-family:'SF Mono',Menlo,monospace;font-size:0.85rem}
+ol.log li{padding:0.3rem 0;border-bottom:1px dashed var(--rule);display:flex;gap:0.75rem}
+ol.log time{color:var(--muted);flex-shrink:0;min-width:9.5rem}
+code{background:var(--code-bg);padding:0.1rem 0.35rem;border-radius:3px;font-size:0.9em;font-family:'SF Mono',Menlo,monospace}
+pre{background:#111820;color:#e6edf3;padding:1rem;border-radius:7px;overflow:auto;line-height:1.45}
+pre code{background:transparent;color:inherit;padding:0}
+table{width:100%;border-collapse:collapse;margin:0.7rem 0 1rem;font-size:0.9rem}
+th,td{border:1px solid var(--rule);padding:0.45rem 0.55rem;text-align:left;vertical-align:top}
+th{background:#efeee8}
+.gate{border-left:3px solid var(--ok);background:#edf6ee;padding:0.65rem 0.8rem;border-radius:4px}
+.warning{border-left:3px solid var(--warn);background:#fbefed;padding:0.65rem 0.8rem;border-radius:4px}
+.note{border-left:3px solid var(--accent);background:#edf2f8;padding:0.65rem 0.8rem;border-radius:4px}
+.compact{font-size:0.88rem;color:var(--muted)}
+a{color:var(--accent)}
+@media print{
+  body{font-size:11pt;max-width:none;margin:0;padding:1rem}
+  header{position:static}
+}
+</style>
+</head>
+<body>
+<script type="application/json" id="plan-meta">
+{"task_id":"plan_fed0fc45ec8a43aa98a20220874d5495","created_at":"2026-08-01T13:40:22+09:00","状態":"ready","slug":"typed-graphrag-local-consensus-recall"}
+</script>
+
+<header>
+<h1>Plan: <span id="plan-title">Chronovisor Typed GraphRAG + Local Consensus Recall Calibration</span></h1>
+<div class="meta-bar">
+<span class="badge" data-bind="状態" data-state="ready">ready</span>
+<span><code data-bind="task_id">plan_fed0fc45ec8a43aa98a20220874d5495</code></span>
+<span data-bind="created_at">2026-08-01T13:40:22+09:00</span>
+</div>
+</header>
+
+<section data-section="目的">
+<h2>目的</h2>
+<ul>
+<li>既存の <strong>BM25 + Nemotron + BGE + Recall Processor + Evidence Certificate + Stateful Recall Field</strong> を壊さず、RAGUの構造化グラフ構築思想と、少量ラベルによるJudge rubric校正思想を増分統合する。</li>
+<li>ページの表層的一致だけでなく、entity・relation・communityを辿るmulti-hop候補生成を追加し、現状取りこぼしている「複数ページを横断しないと見つからない記憶」をRecallできるようにする。</li>
+<li>外部フロンティアAPIを完全に使わず、既存の <code>Ornith 35B + gpt-oss 20B + Gemma 4 26B</code> ローカル2-of-3合議と実利用結果をteacherにする。</li>
+<li>新しい判断結果を別の学習系へ分岐させず、既存Label Ledger、positive co-fire、Recall Field成長Controller、自動昇格・自動rollbackへ一本化する。</li>
+<li>Cortexを、relation path、合議、根拠、lifecycle、実際の発火・学習を追跡できるread-onlyデバッガへ拡張する。</li>
+</ul>
+<p class="note"><strong>完成像:</strong> RAGU型Graph Builderが候補の探索範囲を広げ、ローカル合議が曖昧な関係・rubricを検証し、最終的な実使用がRecall Fieldの結合と方策を育てる。既存Recallは常にbaseline/teacher/rollback先として残す。</p>
+</section>
+
+<section data-section="参照情報">
+<h2>参照情報と採用範囲</h2>
+<table>
+<thead><tr><th>情報源</th><th>採用する考え方</th><th>そのまま採用しないもの</th></tr></thead>
+<tbody>
+<tr>
+<td><a href="https://arxiv.org/abs/2607.11683">RAGU: A Multi-Step GraphRAG Engine with a Compact Domain-Adapted LLM</a><br><a href="https://github.com/RaguTeam/RAGU">実装</a></td>
+<td>entityとrelationの二段階typed extraction、抽出とconsolidationの分離、DBSCAN系dedupe、要約、Leiden community、local/global/mixed retrieval。</td>
+<td>RAGUをChronovisorの検索へ丸ごと置換しない。Meno-Lite-0.1をproductionへ直採用しない。日本語・個人Wiki・Apple Siliconで独立評価するまでlab challengerに限定する。</td>
+</tr>
+<tr>
+<td><a href="https://zenn.dev/aishift/articles/08bbe9ec0a4b3b">少量のデータでジャッジを人手評価に近づける手法を比較する</a></td>
+<td>客観判定は詳細rubric、主観的な有用性は10〜30件からrubric calibrationをshadow比較する。層化・多様性選択、holdout、分布偏り監査を採用する。</td>
+<td>記事の10件/30件という結果をChronovisorのauthority条件へ直接転用しない。MIPROv2/GEPAを勝者と仮定しない。ローカル実データの比較で勝ったrubricだけ採用する。</td>
+</tr>
+</tbody>
+</table>
+<p class="compact">RAGU論文の主要主張（7BがKG構築でQwen2.5-32Bを相対12.5%上回る、medical evidence recall最大0.84等）は研究結果として扱い、Chronovisorの受入値にはしない。記事のκ値もGPT-5.4-miniと公開dataset上の結果であり、再現なしに一般化しない。</p>
+</section>
+
+<section data-section="確認済みの現状">
+<h2>確認済みの現状（2026-08-01 13:40 JST）</h2>
+<table>
+<thead><tr><th>領域</th><th>現状</th><th>本計画での扱い</th></tr></thead>
+<tbody>
+<tr><td>Git/runtime基準</td><td><code>origin/main = 573b5710e954</code></td><td>Phase 0で再取得してsealed baselineへ固定する。</td></tr>
+<tr><td>検索</td><td>BM25 + Nemotron-3-Embed + BGE reranker。<code>graph_expand_results()</code>は2-hop候補拡張を実装済み。</td><td>置換しない。四条件比較のbaseline/teacherにする。</td></tr>
+<tr><td>共通graph seam</td><td><code>search/graph_edges.py::typed_neighbors()</code>をSearchとRecall Fieldが共有。wikilink/backlink/tag/entity/co-fireを返す。</td><td>RAGU relation storeを新しいproviderとしてここへ追加する。</td></tr>
+<tr><td>現在のtyped edge</td><td><code>edge_type</code>はあるが、predicate、方向、relation id、根拠span、source digest、lifecycle、retractionがない。同一targetの複数signalは最大weight一件へ畳まれる。</td><td>既存edge互換を保ったままrelation evidence bundleを別契約で追加する。</td></tr>
+<tr><td>Decision Router</td><td>Ornith 35B primary、gpt-oss 20B challenger、Gemma 4 26B tie-breakのローカル2-of-3。schema、repair、adoption artifact、fail-closedを実装済み。</td><td>再実装しない。Graph/Rubric専用laneとschemaを追加する。</td></tr>
+<tr><td>同期Recall Judge</td><td>resident Ornith 9B、未解決時のみOrnith 35Bへbounded escalation。</td><td>4秒同期パスを三者合議へ置換しない。採用済みrubricだけを同期側で利用する。</td></tr>
+<tr><td>Label Ledger</td><td>certificate=silver、<code>recall_used</code>=strong、review済みeval=gold。page/query単位。</td><td>relationラベルを<code>subject_kind</code>で分離し、既存page gateを水増ししない。</td></tr>
+<tr><td>Recall Field live</td><td><code>candidate</code> 100%、55 traces / 4 sessions、strong positive 34 / 4 sessions、positive co-fire 0 node / 0 edge、authority無効。</td><td>既存200 strong / 20 sessions等のgateを維持。新しいrelationで迂回しない。</td></tr>
+<tr><td>Cortex</td><td>実Field event、yellow electric arc、violet activation、green commit、blue inhibit、red faultを表示。</td><td>relationの静的種別と実際の発火を混同せず、path/evidence/voteを追加する。</td></tr>
+</tbody>
+</table>
+<p class="warning"><strong>現在の意味:</strong> 成長機構は存在するが、実使用episode不足でpositive edge形成前。新機能の実装完了と、十分な実利用後のauthority成熟は別の状態として管理する。</p>
+</section>
+
+<section data-section="完成アーキテクチャ">
+<h2>完成アーキテクチャ</h2>
+<pre><code>Raw / Page update
+  └─ Sleep / background Graph Builder（ローカルのみ）
+       ├─ entity mention extraction
+       ├─ constrained relation extraction + evidence span
+       ├─ entity consolidation candidate
+       ├─ community detection / source-bound summary
+       └─ append-only relation events
+
+UserPromptSubmit
+  ├─ 現行 BM25 + Nemotron + BGE ───────────────┐
+  ├─ 既存 wikilink/tag/entity/co-fire graph ───┤
+  └─ Typed GraphRAG shadow/candidate branch ────┤
+                                                ▼
+                                      candidate union / trace
+                                                ▼
+                                現行 Recall Processor + Certificate
+                                                ▼
+                           pointer 0〜6 / rich evidence 0〜2 / abstain
+
+Background supervision
+  ├─ objective evidence checks（決定論的）
+  ├─ local 2-of-3 consensus（Ornith / gpt-oss / Gemma 4）
+  ├─ recall_used / explicit feedback / reviewed eval
+  └─ page labels と relation labels を分離した Label Ledger
+                                                ▼
+                            Stateful Recall Field / Growth Controller
+                         co-fire + typed relation + policy + rollback
+
+Dashboard / Cortex = read-only projection（relation path / votes / gates）</code></pre>
+
+<h3>同期・非同期の境界</h3>
+<table>
+<thead><tr><th>処理</th><th>実行場所</th><th>authority</th><th>予算</th></tr></thead>
+<tbody>
+<tr><td>通常検索・semantic verify・Certificate</td><td>同期Hook</td><td>既存teacher</td><td>現行4秒deadlineを維持</td></tr>
+<tr><td>Ornith 9B → 35B判定</td><td>同期Hook、曖昧域のみ</td><td>既存Processor境界</td><td>remaining budget内</td></tr>
+<tr><td>三者合議、rubric候補評価</td><td>sleep/background</td><td>silver提案のみ</td><td>idle時、単一worker、日次上限</td></tr>
+<tr><td>entity/relation/community構築</td><td>sleep/background</td><td>最初はshadowのみ</td><td>changed pageのみ、digest cache</td></tr>
+<tr><td>実使用・feedback</td><td>turn境界/Stop</td><td>strong/gold教師</td><td>追加LLM不要</td></tr>
+</tbody>
+</table>
+</section>
+
+<section data-section="権限モデル">
+<h2>権限モデルと不変条件</h2>
+
+<h3>Relation lifecycle</h3>
+<pre><code>proposed
+   ├─ no-quorum / stale / conflict ──→ held
+   ├─ source changed ────────────────→ stale → reverify
+   └─ independent evidence + local quorum
+                    ↓
+                 verified
+                    ↓ actual used path repeated across sessions
+             repeatedly_used
+                    ↓ locked eval + non-degradation + sealed promotion
+              authoritative
+
+どの状態からも retract event で無効化可能。過去eventは削除しない。</code></pre>
+<ul>
+<li><code>proposed</code>はDashboard/shadow traceだけ。候補順位・Field伝播・注入を変えない。</li>
+<li><code>verified</code>はcandidate branchのみ。既存teacherと並列比較し、単独注入禁止。</li>
+<li><code>repeatedly_used</code>はFieldのpositive学習候補にできるが、page-level gateとrelation-level gateを両方要求する。</li>
+<li><code>authoritative</code>だけがactive GraphRAG候補へ参加できる。それでも最終Page Certificateを省略しない。</li>
+<li>semantic similarityや「検索順位が高かったこと」はrelation真偽の証明に使わない。</li>
+</ul>
+
+<h3>ローカル三者合議</h3>
+<ul>
+<li>Primary=<code>maxwell1500/ornith-35b:Q5_K_M</code>、Challenger=<code>gpt-oss:20b</code>、Tie-break=<code>gemma4:26b</code>の既存Decision Routerを再利用する。</li>
+<li>2-of-3は真理/goldではなく、provenance付きsilver proposal。最終教師は実使用またはreview済みlocked eval。</li>
+<li>artifactを生成したモデル自身の票を、同じartifactの独立検証票として数えない。producer除外またはrole rotationを必須にする。</li>
+<li>三者不一致、schema不正、timeout、model missing、evidence不足は<code>held</code>。多数決で無理にpassしない。</li>
+<li>客観項目（source span存在、digest一致、未知page ID、矛盾、期限切れ）はモデル投票より先に決定論的vetoする。</li>
+<li>外部model/API endpointを設定するとstartup validationで拒否し、メトリクス<code>external_model_calls</code>は常に0を要求する。</li>
+</ul>
+</section>
+
+<section data-section="データ契約">
+<h2>先に固定するデータ契約</h2>
+
+<h3>1. Relation event</h3>
+<pre><code>~/.chronovisor/knowledge-graph/
+  relation-events.jsonl        append-only + hash chain
+  relation-snapshot.json       sealed materialized view
+  entity-snapshot.json         canonical候補とalias evidence
+  community-snapshot.json      derived communityとsummary refs
+  builder-state.json           page/content/model/rubric digest
+
+~/.chronovisor/runtime/typed-graph/
+  status.json                  browser-safe health
+  candidate-trace.jsonl        bounded/redacted shadow比較
+  promotion.json               sealed authority artifact</code></pre>
+<p>各relation eventは少なくとも次を持つ。</p>
+<ul>
+<li><code>relation_id</code>（source/target/predicate/evidence digestから決定的生成）、event id、previous hash、schema/policy version。</li>
+<li>source/target page UID・entity ID、predicate、direction、validity interval、status。</li>
+<li>evidence span参照、source line、source raw/content digest。Dashboardには本文を渡さない。</li>
+<li>extractor model/revision/template/rubric digest、confidence、producer role。</li>
+<li>local consensus receipt、各vote digest、quorum、abstention/hold reason。</li>
+<li>created/verified/used/retracted/stale timestampsと原因event。</li>
+</ul>
+
+<h3>2. Entity consolidation</h3>
+<ul>
+<li>mention、alias candidate、canonical entity、entity mergeを別型にする。文字列一致やembedding近傍だけでcanonical mergeしない。</li>
+<li>DBSCAN系clusteringは候補生成のみ。cluster idはauthoritative entity idにしない。</li>
+<li>人名・製品名・モデル名・略称・同名異義を分離し、誤mergeをsplit/retractできるeventを持つ。</li>
+<li>既存Alias Store/PageRegistry/frontmatterを直接上書きせず、採用後にCAS/read-back付きの明示経路で同期する。</li>
+</ul>
+
+<h3>3. Rubric artifact</h3>
+<ul>
+<li><code>rubric_id/version</code>、対象task、objective checks、subjective criteria、few-shot case refs、model/prompt digestを持つ。</li>
+<li>候補rubricはモデルがactive設定を直接編集せず、candidate artifactとして生成する。</li>
+<li>10/30件のdiverse labeled subsetで初期比較できるが、authority昇格には既存strong/gold・時系列holdout・非劣化gateを要求する。</li>
+<li>採用結果はDecision Router adoption artifact、Label Ledger、Recall Growth policy historyへhash-bindする。</li>
+</ul>
+
+<h3>4. Label Ledger分離</h3>
+<table>
+<thead><tr><th>subject_kind</th><th>silver</th><th>strong</th><th>gold</th><th>既存200件gateへの算入</th></tr></thead>
+<tbody>
+<tr><td><code>page_recall</code></td><td>certificate/合議</td><td>recall_used</td><td>reviewed eval</td><td>既存規則どおり</td></tr>
+<tr><td><code>relation</code></td><td>2-of-3 verified</td><td>used page + 保存済みrelation pathの反復</td><td>locked relation eval</td><td>算入しない。専用gate</td></tr>
+<tr><td><code>entity_merge</code></td><td>2-of-3 proposal</td><td>独立source/反復利用</td><td>locked merge eval</td><td>算入しない。専用gate</td></tr>
+<tr><td><code>rubric</code></td><td>shadow winner</td><td>時系列実利用で非劣化</td><td>locked eval採用</td><td>算入しない。専用gate</td></tr>
+</tbody>
+</table>
+</section>
+
+<section data-section="実行手順">
+<h2>実行手順</h2>
+
+<h3>Phase 0 — Baseline、authority、不変条件を凍結</h3>
+<ol class="checklist">
+<li><input type="checkbox"><span>GitHub HEAD、runtime archive、live config、model inventory、Field growth、co-fire、Recall calibration、search evalを再取得し、query本文を含まないsealed baseline manifestを作る。</span></li>
+<li><input type="checkbox"><span>現行 / Graphのみ / Rubricのみ / Graph+Rubricの四条件を同一query、同一candidate/token/deadline、同一time-ordered splitで比較するpreregistrationを固定する。</span></li>
+<li><input type="checkbox"><span>現行manual-94に加え、single-hop、multi-hop、global synthesis、entity ambiguity、alias collision、topic shift、hub false-positive、今回のような無関係カード誤注入を含むlocked fixtureを用意する。</span></li>
+<li><input type="checkbox"><span>page labelとrelation/entity/rubric labelの母数・split・gateを分離し、relationの大量生成で既存strong positive数を水増しできないcontract testを先に書く。</span></li>
+<li><input type="checkbox"><span>外部API 0、同期4秒超過0、raw prompt/本文のruntime投影禁止、現行teacherをrollback先にする不変条件をmachine-checkableにする。</span></li>
+</ol>
+<p class="gate">受入ゲート: 同じmanifestでbaselineを再実行でき、四条件の差分がfeature flagだけに帰属する。split leakage=0、外部model call=0をテストで証明する。</p>
+
+<h3>Phase 1 — Append-only Typed Knowledge Graph契約</h3>
+<ol class="checklist">
+<li><input type="checkbox"><span><code>knowledge_graph/schema.py</code>へentity mention、entity candidate、relation event、community、consensus receipt、promotionのversioned schemaを追加する。</span></li>
+<li><input type="checkbox"><span><code>knowledge_graph/store.py</code>へowner-only permission、file lock、idempotent append、hash chain、sealed snapshot、atomic replace、read-back、corrupt tail recoveryを実装する。</span></li>
+<li><input type="checkbox"><span>relation IDとentity candidate IDをcontent/model/rubric digest込みで決定的にし、再実行で重複を増やさない。</span></li>
+<li><input type="checkbox"><span>source content変更、page rename/archive/superseded、alias変更でrelationを<code>stale</code>にし、再検証まで候補権限から除外する。</span></li>
+<li><input type="checkbox"><span>同じsource-targetでも複数predicate・複数根拠を失わないevidence bundleを実装する。既存<code>TypedEdge</code>の後方互換出力は固定する。</span></li>
+</ol>
+<p class="gate">受入ゲート: append-only chain、replay、idempotency、retract/split、content drift、同一target複数根拠、concurrent writer、corrupt recoveryが決定的。既存graph fixtureの出力はflag offでbyte-equivalent。</p>
+
+<h3>Phase 2 — RAGU型Graph Builderをsleep/backgroundへ追加</h3>
+<ol class="checklist">
+<li><input type="checkbox"><span>changed page digestだけを対象に、Stage Aでentity mentionを抽出し、Stage Bで確定mention集合に拘束したrelationを抽出する。全relationにevidence span/source digestを必須化する。</span></li>
+<li><input type="checkbox"><span>既定producerをローカルモデルに限定し、JSON Schema、temperature/seed固定、context/token上限、prompt injection耐性、retry上限を既存structured callへ統合する。</span></li>
+<li><input type="checkbox"><span>producer自身を独立reviewerとして数えない。重要merge/relationは残り2モデルまたは別role epochで検証し、no-quorumはheldにする。</span></li>
+<li><input type="checkbox"><span>Graph Builderをsleep-cycleの独立laneへ追加し、foreground Recall、Semantic、Reranker、Ingest generation稼働中はpauseする。単一worker、queue上限、日次model-seconds/token上限、digest cacheを実装する。</span></li>
+<li><input type="checkbox"><span>Meno-Lite-0.1は任意lab challengerとし、未導入でも本計画が完了するようにする。導入時も日本語/英語、Apple Silicon latency、relation precisionで既存モデルと比較する。</span></li>
+</ol>
+<p class="gate">受入ゲート: 外部通信0。changed pageだけを一度処理し、同じdigestでmodel call 0。schema/evidence不備はproposedにすら入れない。foreground p95と4秒deadlineを非劣化。</p>
+
+<h3>Phase 3 — Entity consolidationとCommunity index</h3>
+<ol class="checklist">
+<li><input type="checkbox"><span>casefold/Unicode/alias exact、Nemotron embedding、DBSCAN系clusteringを組み合わせてmerge候補を生成するが、cluster結果をauthorityにしない。</span></li>
+<li><input type="checkbox"><span>entity mergeとrelation truthを別decision laneで判定し、同名異義、略称、モデルversion、人物/組織/製品衝突、誤merge splitをfixture化する。</span></li>
+<li><input type="checkbox"><span>verified以上のgraphだけからLeiden communityをderived artifactとして作り、community membershipとsummary source refsを保存する。</span></li>
+<li><input type="checkbox"><span>community summaryはローカルモデルで生成し、source page refs/digestsを必須にする。summary本文自体をgold evidenceにしない。</span></li>
+<li><input type="checkbox"><span>incremental invalidation、community再編の安定性、巨大hub抑制、最大community/page/relation予算を実装する。</span></li>
+</ol>
+<p class="gate">受入ゲート: 誤merge率、split復元率、unknown entity hold、community再計算の決定性をlocked setで測定。sourceを辿れないsummaryは検索候補に使わない。</p>
+
+<h3>Phase 4 — Typed GraphRAG candidate branchを既存検索/Fieldへ接続</h3>
+<ol class="checklist">
+<li><input type="checkbox"><span><code>typed_neighbors()</code>へrelation providerとstatus filterを追加し、既存callerを変更せずflag offの出力を維持する。</span></li>
+<li><input type="checkbox"><span>query planをdirect/local/global/mixedへ分類する。simple exact queryは現行fast path、multi-hopのみrelation traversal、global questionのみcommunity候補を使う。</span></li>
+<li><input type="checkbox"><span>relation pathにrelation IDs、predicate、direction、hop、evidence refs、lifecycle、各weight componentを残す。semantic verifyの結果をrelation真偽とは記録しない。</span></li>
+<li><input type="checkbox"><span>最初は独立shadow channelとして順位を変更せず比較する。candidate昇格後もverified以上だけを候補unionへ追加し、最終Page Certificateを必須にする。</span></li>
+<li><input type="checkbox"><span>Fieldはproposed edgeを伝播しない。verifiedはcandidate bufferのみ、repeatedly_used以上だけpositive学習、authoritativeだけactive bufferへ許可する。</span></li>
+<li><input type="checkbox"><span>per-predicate cap、degree normalization、hub penalty、cycle/self-edge防止、max hop/node/edge、deadline fallbackを適用する。</span></li>
+</ol>
+<p class="gate">受入ゲート: shadowで現行順位・注入が不変。2-hop pathの全relation/evidenceを追跡可能。topic reset・低確信・store stale/corrupt時は即座に現行teacherへfallbackする。</p>
+
+<h3>Phase 5 — Local Consensus JudgeとRubric Calibration</h3>
+<ol class="checklist">
+<li><input type="checkbox"><span>Decision Routerへ<code>relation_verification</code>、<code>entity_merge_verification</code>、<code>recall_usefulness_judgment</code>、<code>recall_rubric_calibration</code>の専用lane/schema/prompt/contract casesを追加する。</span></li>
+<li><input type="checkbox"><span>客観判定（evidence support、contradiction、provenance、digest、unknown ID）は詳細rubric + deterministic checks、主観判定（必要性、marginal utility、topic relevance）は校正rubricへ分離する。</span></li>
+<li><input type="checkbox"><span>zero-shot/current rubric、generated rubric、diverse few-shot、rubric calibrationを10/30件のcandidate setから比較する。MIPROv2/GEPAは同じgateに勝つ場合だけ任意採用する。</span></li>
+<li><input type="checkbox"><span>case選択はrelevant、adjacent-but-unneeded、hub false positive、self-reference、topic switch、stale info、personal context、read-worthy、multi-hopを層化し、重複query/sessionを除く。</span></li>
+<li><input type="checkbox"><span>三者のmodel別precision/recall、ECE/Brier、abstention、pairwise error correlation、unanimous-wrong率、best-single比ensemble利得をlocked goldで測る。</span></li>
+<li><input type="checkbox"><span>採用rubric artifactだけを同期9B→35B Processorへロードする。同期Hookから20B/26B/35B三者を連続起動しないことをcontract testで固定する。</span></li>
+</ol>
+<p class="gate">受入ゲート: 外部call=0、session/query leakage=0、各splitにpositive/negativeあり。false-passを悪化させず、best single modelをensembleが上回る。相関が高くensemble利得がない場合は現行rubricを維持する。</p>
+
+<h3>Phase 6 — Label Ledgerと既存自己成長ループへ統合</h3>
+<ol class="checklist">
+<li><input type="checkbox"><span>合議receipt、relation path、entity merge、rubric outcomeをprovenance付きLabel Ledgerへjoinし、<code>subject_kind</code>ごとにcount/gate/splitを完全分離する。</span></li>
+<li><input type="checkbox"><span>単なるgraph exposure、candidate表示、合議passをstrongにしない。保存済みpathを経由したused pageだけrelation strong候補にする。</span></li>
+<li><input type="checkbox"><span>同じrelation pathが異なる実セッションで反復利用された場合だけ<code>repeatedly_used</code>へ昇格する。retraction/negative feedbackは過去のpositiveを上書きせず対向eventとして残す。</span></li>
+<li><input type="checkbox"><span>既存Recall Growthへrelation/Judge品質gateを追加し、positive co-fire、typed relation weight、rubric採用を一つのpolicy history/LKG/rollbackで管理する。</span></li>
+<li><input type="checkbox"><span>200 strong / 20 sessions等の既存page gateは維持し、relation/entity/rubricは別々の最低母数・session分散・lower confidence boundをpreregistered evalから確定する。</span></li>
+<li><input type="checkbox"><span>実装後に手動で有効化する必要がないよう、データ成熟時はsealed gate→5/25/100%を自動進行し、悪化時は自動shadow rollbackする。</span></li>
+</ol>
+<p class="gate">受入ゲート: label provenance join率100%、orphan/ambiguous receiptは棄却、page gate水増し0、policy history chain正常。再起動後も同じ成熟状態を復元し、将来の手動TODOを残さない。</p>
+
+<h3>Phase 7 — Cortex / Observatoryを関係グラフの実デバッガへ拡張</h3>
+<ol class="checklist">
+<li><input type="checkbox"><span>既存<code>/cortex</code>へrelation layer filter、lifecycle、predicate、direction、community、active path、consensusを追加し、新しい別画面は作らない。</span></li>
+<li><input type="checkbox"><span>右HUDにrelation ID、source/target、evidence ref、status、producer、三者vote/quorum、used count、promotion/hold/retract reasonを表示する。</span></li>
+<li><input type="checkbox"><span>静的relationは細いbase line/dashで表現し、黄色のtraveling electric arcは実Field spread eventだけに予約する。表示だけのedgeを発火に見せない。</span></li>
+<li><input type="checkbox"><span>active nodeのサイズは変えず、既存halo/発光で示す。relation overlay、community hull、labelが重なって可読性を落とさないLODを実装する。</span></li>
+<li><input type="checkbox"><span>ObservatoryへGraph Builder backlog/active model、relation counts by state、merge holds、community freshness、Judge disagreement/correlation、外部call=0、各rollout gateを追加する。</span></li>
+<li><input type="checkbox"><span>projectionはbrowser-safeなID/digest/短いreasonだけにし、raw prompt、evidence本文、sensitive page metadataを渡さない。</span></li>
+</ol>
+<p class="gate">受入ゲート: 実relation pathと表示edgeが1対1。発火eventなしで黄色arcを出さない。1280/1024/920/680pxで横overflow・枠外脱出・主要HUD重なり0、通常45fps以上、event-to-paint p95 ≤250ms。</p>
+
+<h3>Phase 8 — 四条件評価、canary、自動rollback</h3>
+<ol class="checklist">
+<li><input type="checkbox"><span>現行 / Graphのみ / Rubricのみ / Graph+Rubricを同一locked setで実行し、候補生成、rerank、certificate、commit、actual useの各stageを比較する。</span></li>
+<li><input type="checkbox"><span>direct query、multi-hop、global synthesisを別集計し、単純検索の非劣化とmulti-hop改善を同時に要求する。</span></li>
+<li><input type="checkbox"><span>Recall@5/10、MRR、used-page coverage、pointer/rich precision、negative-hit、abstention、誤merge率、relation path precision、p50/p95/max、4秒超過、memory/model-secondsを保存する。</span></li>
+<li><input type="checkbox"><span>Graph+Rubricが単体施策より悪い場合は相互作用失敗として採用しない。全部不合格なら現行をwinnerとして記録する。</span></li>
+<li><input type="checkbox"><span>sealed promotion artifactにmanifest、model/rubric/relation snapshot digest、全gateを含め、candidate→5%→25%→100%をsession hashで進める。</span></li>
+<li><input type="checkbox"><span>drift、precision低下、false-pass増加、relation store stale/corrupt、model欠落、resource pressureで即shadowへ戻し、現行teacherを返す。</span></li>
+</ol>
+<p class="gate">受入ゲート: 現行pointer/rich precisionとused-page coverageを非劣化、negative-hitを改善、multi-hop Recall@5を統計的に改善、4秒超過0、外部call 0。lower confidence boundとabstentionを併記し、0件注入だけでprecisionを稼ぐ構成を棄却する。</p>
+
+<h3>Phase 9 — 文書、GitHub runtime、live受入</h3>
+<ol class="checklist">
+<li><input type="checkbox"><span><code>docs/architecture.md</code>、<code>docs/config.md</code>、<code>docs/operations.md</code>、<code>docs/hooks.md</code>へGraph Builder、relation lifecycle、local consensus、rubric、resource budget、rollbackを反映する。</span></li>
+<li><input type="checkbox"><span>各Phaseを意味のある単位でcommitし、完了直後に本計画のcheckboxと実行ログを更新する。既存の未追跡ファイルを混ぜない。</span></li>
+<li><input type="checkbox"><span>push/restartの明示許可後、origin/mainへpushし、Dashboard、Semantic、Reranker、Ingest drain、必要なbackground workerをGitHub-backed runtimeから再起動する。</span></li>
+<li><input type="checkbox"><span>runtime archiveのdirect_url commit、running process/module path、socket、status artifact、model inventory、Dashboard runtime commitをGitHub HEADと照合する。</span></li>
+<li><input type="checkbox"><span>実会話で現行検索とtyped graph candidateを発生させ、relation trace→Certificate→commit/reject→recall_used→Field event→Cortex表示を同じdecision/path IDで追跡する。</span></li>
+<li><input type="checkbox"><span>Engineering CompleteとAuthority Maturityを別表示し、未達gate、現在値、目標値、自動再評価予定をDashboard/CLIへ残す。</span></li>
+</ol>
+<p class="gate">受入ゲート: GitHub commit、全runtime archive、health、live Recall、live relation trace、Cortexが一致。ローカルworktreeだけでproduction完了と報告しない。</p>
+</section>
+
+<section data-section="やってはいけないこと">
+<h2>やってはいけないこと（必須）</h2>
+<ul>
+<li>外部フロンティアモデル、クラウドJudge、外部embedding/APIをteacher・tie-break・fallbackとして呼ばない。</li>
+<li>RAGUやMeno-Liteを現行検索の代替として一括導入しない。アーキテクチャをChronovisorの既存seamへ移植する。</li>
+<li>三者合議を同期UserPromptSubmitで毎回実行しない。4秒budgetとVRAM residencyを壊さない。</li>
+<li>2-of-3合議、semantic similarity、DBSCAN cluster、community summaryをgold truthと呼ばない。</li>
+<li>artifact producerに自己採点させ、その票を独立票として数えない。</li>
+<li>entity clusterで既存Alias Store/PageRegistry/frontmatterを直接merge・削除・上書きしない。</li>
+<li>proposed/verified edgeをproduction authority、active Field、positive co-fireへ近道で入れない。</li>
+<li>relation/entity/rubric labelでpage-level 200 strong / 20 session gateを水増ししない。</li>
+<li>単なるexposure、ignored、certificate rejectを単独の正例/負例にしない。</li>
+<li>Graph+Rubricを最初から勝者と仮定しない。四条件比較で現行が勝つ結果を許容する。</li>
+<li>Dashboard/Cortexからstateを変更しない。表示障害でrelation/Fieldデータを削除・rollbackしない。</li>
+<li>raw prompt、ページ本文、evidence span本文、sensitive metadataをGit、status JSON、browser projectionへ出さない。</li>
+</ul>
+</section>
+
+<section data-section="設定とロールバック">
+<h2>設定・Feature Flag・Resource Budget</h2>
+<pre><code>[knowledge_graph]
+enabled = true
+mode = "shadow"                 # off | shadow | candidate | active
+external_models_allowed = false
+extractor_model = "gemma4:26b"
+max_changed_pages_per_cycle = 25
+max_model_seconds_per_day = 7200
+
+[knowledge_graph.retrieval]
+mode = "shadow"
+max_hops = 2
+max_relations_per_node = 12
+max_candidate_pages = 50
+
+[recall.consensus_judge]
+enabled = true
+mode = "shadow"
+background_only = true
+quorum = 2
+primary_model = "maxwell1500/ornith-35b:Q5_K_M"
+challenger_model = "gpt-oss:20b"
+tie_break_model = "gemma4:26b"
+
+[recall.rubric_calibration]
+enabled = true
+mode = "shadow"
+initial_label_counts = [10, 30]
+external_teacher = false</code></pre>
+<ul>
+<li>値はPhase 0のresource測定後に確定し、上記は設計既定値。既存設定名と重複する場合は既存構造へ統合する。</li>
+<li>四条件比較のため<code>typed_graph_enabled</code>、<code>graph_retrieval_enabled</code>、<code>calibrated_judge_enabled</code>、<code>graph_injection_authority</code>を独立に切り替えられる。</li>
+<li>自動rollbackはrelation snapshot/rubric/policyをlast-known-goodへ戻し、既存検索・既存Certificate・既存Field stateを削除しない。</li>
+<li>background workerはforeground LLM、Semantic/Reranker MPS lease、Ingest generation、memory pressureを検知してpauseする。</li>
+</ul>
+</section>
+
+<section data-section="主な変更対象">
+<h2>主な変更対象</h2>
+<table>
+<thead><tr><th>領域</th><th>既存接続点</th><th>想定追加/変更</th></tr></thead>
+<tbody>
+<tr><td>Knowledge Graph</td><td><code>search/graph_edges.py</code><br><code>search/search.py</code><br><code>search/index_store.py</code></td><td><code>knowledge_graph/schema.py</code><br><code>store.py</code><br><code>builder.py</code><br><code>consolidation.py</code><br><code>communities.py</code><br><code>retrieval.py</code></td></tr>
+<tr><td>Claims/entities</td><td><code>recall/claims.py</code><br><code>ops/entities.py</code><br><code>core/alias_store.py</code></td><td>evidence/source digest再利用、merge candidate adapter、stale/retract連携</td></tr>
+<tr><td>Local consensus</td><td><code>decision/decision_router.py</code><br><code>decision/local_structured.py</code><br><code>decision/decision_lane_prompts.py</code></td><td>Graph/Rubric専用lane、schema、contract cases、producer除外、correlation metrics</td></tr>
+<tr><td>Recall Judge</td><td><code>recall/recall_runtime.py</code><br><code>recall/recall_calibration.py</code><br><code>recall/evidence_certificate.py</code></td><td><code>recall/rubric_calibration.py</code>、active rubric loader、合議provenance</td></tr>
+<tr><td>Learning</td><td><code>recall/recall_label_factory.py</code><br><code>recall/recall_growth.py</code><br><code>search/cofire.py</code></td><td>subject_kind分離、relation path attribution、relation/Judge gates、統合rollback</td></tr>
+<tr><td>Field</td><td><code>recall/recall_field.py</code><br><code>recall/recall_field_candidate.py</code></td><td>relation status filter、path IDs、candidate/active authority境界</td></tr>
+<tr><td>Background</td><td><code>ops/sleep_cycle.py</code><br>resource coordination</td><td>Graph Builder / consensus queue lane、budget、pause/resume、health</td></tr>
+<tr><td>Dashboard</td><td><code>ops/cortex.py</code><br><code>dashboard_static/cortex*</code><br>Observatory</td><td>relation/consensus/growth projection、filter/HUD、processing lane</td></tr>
+</tbody>
+</table>
+</section>
+
+<section class="rules" data-section="実行中更新ルール">
+<h2>実行中更新ルール</h2>
+<ul>
+<li>実行手順のチェックは、各手順の完了直後に更新する（まとめて更新しない）。</li>
+<li>チェックを更新したら、同時に <code>実行ログ</code> へ時刻付きで追記する。</li>
+<li>中断時は <code>状態</code>（<code>plan-meta</code> の JSON および <code>.badge</code> の <code>data-state</code>）を <code>blocked</code> にし、理由を <code>ブロッカー</code> に記入する。</li>
+<li>Phase開始前にGitHub HEAD、live config、artifact countsを再取得し、本計画内の2026-08-01 snapshotを現在値として使わない。</li>
+<li>各Phaseのgateを満たさない限り次のauthorityへ進めない。実装コードが存在するだけでcheckboxを完了にしない。</li>
+<li>shadow/candidateの失敗は隠さず記録し、既存teacherへ戻した状態を正常な結果として扱う。</li>
+<li>ユーザー所有の未追跡<code>_handoff/2026-06-11_0042_recall-redesign.md</code>と<code>logs/</code>を変更・stageしない。</li>
+</ul>
+</section>
+
+<section data-section="完了条件">
+<h2>完了条件</h2>
+<h3>Engineering Complete（本計画の実装完了）</h3>
+<ul>
+<li>全Phaseのコード、artifact、tests、docs、Dashboard、runtime deploymentが完了し、GitHub-backed productionと一致している。</li>
+<li>RAGU型Graph Builder、local consensus、rubric calibration、relation path attributionが既存学習ループへ接続されている。</li>
+<li>外部model/API callがコード・設定・live metricのすべてで0。</li>
+<li>現行検索は常にfallback/rollback先として機能し、shadow/offで完全な後方互換を持つ。</li>
+<li>将来データが閾値へ到達した際、自動評価・自動canary・自動rollbackが走り、手動で有効化するTODOが残らない。</li>
+</ul>
+<h3>Authority Mature（実利用データ依存、別status）</h3>
+<ul>
+<li>page、relation、entity、rubricそれぞれの最低母数/session分散/locked evalが成立している。</li>
+<li>四条件比較で勝者がpreregistered gateを満たし、5%→25%→100%を自動通過している。</li>
+<li>条件未達の間はcandidate/shadowのままでもEngineering Completeを偽らない。Dashboardに未達理由と現在値を表示する。</li>
+</ul>
+</section>
+
+<section data-section="検証手順">
+<h2>検証手順</h2>
+<h3>コード・契約</h3>
+<pre><code>uv run ruff check .
+uv run mypy src/chronovisor
+uv run pytest -q \
+  tests/test_search_fusion.py \
+  tests/test_recall_processor.py \
+  tests/test_recall_field.py \
+  tests/test_recall_field_candidate.py \
+  tests/test_recall_label_factory.py \
+  tests/test_recall_growth.py \
+  tests/test_recall_calibration.py \
+  tests/test_decision_router.py \
+  tests/test_decision_lane_contract_cases.py \
+  tests/test_cortex.py \
+  tests/test_sleep_cycle.py
+
+CHRONOVISOR_ROOT="$(mktemp -d -t chronovisor-test)" uv run pytest -q</code></pre>
+<ul>
+<li>追加するGraph schema/store/builder/consolidation/retrieval/rubric testsをfocused commandへ含める。</li>
+<li>unknown ID、direction、multiple evidence、self edge、cycle、hub、stale digest、retract、split、corrupt chain、model missing、no-quorum、prompt injectionを網羅する。</li>
+<li>同期Recall中にgpt-oss/Gemma 4/三者35Bが呼ばれないこと、external HTTP/model providerが0であることをspy/deny-network testで証明する。</li>
+</ul>
+
+<h3>品質・性能</h3>
+<ul>
+<li>四条件を同一locked manifestで複数回実行し、random seed・model revision・rubric digestを固定する。</li>
+<li>direct / multi-hop / global / negative / topic shiftを分離してRecall@5/10、MRR、precision、coverage、abstention、negative-hitを出す。</li>
+<li>relation precision、merge precision、path attribution coverage、pairwise model error correlation、unanimous-wrong率を別集計する。</li>
+<li>idle、Semantic/Reranker同時、35B resident、Ingest稼働、memory pressure、worker kill/restartでp50/p95/max、model reload、queue、4秒超過を測る。</li>
+<li>Graph/Rubric artifactのpage/query/session/time leakage、モデル自身の出力を自己教師化する循環を検査する。</li>
+</ul>
+
+<h3>Cortex / Dashboard</h3>
+<ul>
+<li>実relation event/path/vote/lifecycleとHUD表示をID単位で照合する。</li>
+<li>黄色arcは実spread eventだけ、static relationは非発火表示、commit/inhibit/faultの既存色契約を維持する。</li>
+<li>1280×720、1024×768、920×720、680×720でDOMの横overflow、枠外脱出、重なりを実測し、console error/warningを確認する。</li>
+<li>processing laneにGraph Builder/Consensusが実状態で点灯し、idle時に偽activeを表示しない。</li>
+</ul>
+
+<h3>Production</h3>
+<ul>
+<li>push許可後にorigin/main、全runtime archive <code>direct_url.json</code>、running process module、health/status artifactを照合する。</li>
+<li>実会話でtyped graph candidateを発生させても、shadow中は最終注入が現行teacherと一致することを確認する。</li>
+<li>同じdecision/pathについてRecall log、relation trace、Certificate、Label Ledger、Field event、Cortexをjoinする。</li>
+<li>サービス再起動後にsnapshot、policy history、queue、maturity statusが復元される。</li>
+</ul>
+</section>
+
+<section class="blockers" data-section="ブロッカー">
+<h2>ブロッカー（発生時のみ）</h2>
+<ul>
+<li>なし。現時点の注意は、strong positive 34件/4 sessions、positive co-fire 0 edgeであり、Authority Matureは実利用データ待ちになること。</li>
+<li>RAGU/Meno-Liteの日本語品質とApple Silicon backendは未検証。Meno-Lite不採用でも計画を進められる設計にする。</li>
+</ul>
+</section>
+
+<section data-section="受け渡しメモ">
+<h2>受け渡しメモ（次担当へ）</h2>
+<ul>
+<li>最小接続点は<code>search/graph_edges.py::typed_neighbors()</code>。SearchとFieldの両方が使うため、ここへproviderを追加し、別engineを作らない。</li>
+<li>現行<code>recall_calibration.py</code>はEvidence Gateの数値校正であり、本計画のJudge rubric校正とは別責務。旧<code>frontier</code>命名が残っていても実体はDecision Router/local consensusなので、意味を確認してからrenameする。</li>
+<li>同期Recall Judgeは9B→35Bのまま。三者合議はbackground shadow teacherで、同期パスへ入れない。</li>
+<li>relation labelとpage labelを混ぜると既存200件gateが壊れる。<code>subject_kind</code>分離を最初のcontractとして実装する。</li>
+<li>relation storeはpage frontmatter、Alias Store、PageRegistryとは別のappend-only authorityにする。derived snapshotから元eventへ常に戻れるようにする。</li>
+<li>GraphRAGの価値はmulti-hop/globalで測る。simple exact queryを遅くしてはいけない。</li>
+<li>最終的に採用されるのは四条件の勝者だけ。Graph+Rubricが勝つと決め打ちしない。</li>
+</ul>
+</section>
+
+<section data-section="実行ログ">
+<h2>実行ログ</h2>
+<ol class="log">
+<li><time>2026-08-01 13:40</time><span>指定先<code>chronovisor/_handoff</code>へPlanテンプレートから新規作成。Git/runtime基準、Field growth、co-fire、model inventoryを再確認。</span></li>
+<li><time>2026-08-01 13:45</time><span>RAGU論文/実装、Judge calibration記事、既存Search/Field/Label Ledger/Decision Routerの接続点を監査。既存骨格を維持し、typed relation providerとbackground local consensusを増分接続する方針を固定。</span></li>
+<li><time>2026-08-01 13:49</time><span>relation lifecycle、page/relation label分離、四条件評価、外部call 0、同期4秒境界、Cortex表示、Engineering CompleteとAuthority Matureの分離を含む計画をready化。</span></li>
+</ol>
+</section>
+
+</body>
+</html>
