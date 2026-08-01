@@ -763,6 +763,11 @@ def test_cortex_static_view_preserves_fable_layout_and_uses_live_data() -> None:
     assert "radius + NODE_EFFECT_MAX_PADDING_PX" in script
     assert "target.dataset.maxCoreScale" in script
     assert "target.dataset.maxGlowPadding" in script
+    assert "target.dataset.cameraTheta = camera.theta.toFixed(4);" in script
+    assert "target.dataset.cameraPhi = camera.phi.toFixed(4);" in script
+    assert "camera.theta -= event.movementX * 0.0045;" in script
+    assert "camera.phi - event.movementY * 0.0045" in script
+    assert "camera.phi + event.movementY * 0.0045" not in script
     assert "radius + progress * 26" not in script
     assert "radius + (1 - progress) * 28" not in script
     assert "radius + progress * 18" not in script

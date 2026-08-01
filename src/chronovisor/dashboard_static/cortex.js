@@ -1020,6 +1020,8 @@
     target.dataset.maxCoreScale = cortexMetrics.maxCoreScale.toFixed(3);
     target.dataset.maxGlowPadding =
       cortexMetrics.maxGlowPadding.toFixed(3);
+    target.dataset.cameraTheta = camera.theta.toFixed(4);
+    target.dataset.cameraPhi = camera.phi.toFixed(4);
     target.dataset.cometTrailSegments = String(cortexMetrics.cometTrailSegments);
     target.dataset.cometHeads = String(cortexMetrics.cometHeads);
     target.dataset.cometImpacts = String(cortexMetrics.cometImpacts);
@@ -2767,7 +2769,7 @@
         camera.theta -= event.movementX * 0.0045;
         camera.phi = Math.max(
           -1.35,
-          Math.min(1.35, camera.phi + event.movementY * 0.0045),
+          Math.min(1.35, camera.phi - event.movementY * 0.0045),
         );
         cameraTarget = null;
         lastInteraction = performance.now();
