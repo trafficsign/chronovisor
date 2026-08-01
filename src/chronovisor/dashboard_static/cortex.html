@@ -109,6 +109,12 @@
           <button id="zOut" type="button" aria-label="ズームアウト">−</button>
           <button id="zFit" type="button" aria-label="全体表示">⌂</button>
         </div>
+        <div id="memoryIngress" data-phase="idle" aria-live="polite">
+          <span class="ingressBeacon" aria-hidden="true"></span>
+          <span class="ingressChannel">RAW BUFFER</span>
+          <b id="memoryIngressState">IDLE</b>
+          <code id="memoryIngressDetail">awaiting host capture</code>
+        </div>
         <div id="ticker"><span class="cur"></span><span id="tickerTx"></span></div>
         <div id="genInfo"></div>
         <div id="tooltip"></div>

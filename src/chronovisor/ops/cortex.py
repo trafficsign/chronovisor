@@ -22,8 +22,16 @@ _GRAPH_CACHE_LOCK = threading.Lock()
 _GRAPH_CACHE: dict[str, dict[str, Any]] = {}
 _WEBSOCKET_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 _INGEST_PAGE_RE = re.compile(
-    r"(?:^|\s)ingest \| (?:created|updated) (?P<page>[^\r\n]+)$"
+    r"(?:^|\s)ingest \| (?P<operation>created|updated) (?P<page>[^\r\n]+)$"
 )
+_INGEST_GENERATE_RE = re.compile(
+    r"(?:^|\s)ingest \| generating \d+/\d+: (?P<page>[^\r\n]+)$"
+)
+_INGEST_STAGE_RE = re.compile(r"(?:^|\s)ingest \| stage 1: triage started$")
+_INGEST_AUTH_RE = re.compile(
+    r"(?:^|\s)ingest \| authorization: [^\r\n]+ -> apply_available$"
+)
+_INGEST_COMPLETE_RE = re.compile(r"(?:^|\s)ingest \| completed(?:\s|$)")
 _ENTRYPOINT_PAGES = {
     "claude-code",
     "current-state",
@@ -969,19 +977,12 @@ class CortexEventCursor:
             for path in self._field_event_paths():
                 self._offsets[path] = self._file_size(path)
         self._remainders: dict[Path, bytes] = {}
-        self._raw_dir_mtime_ns = self._directory_mtime(self.raw_dir)
+        self._raw_snapshot = self._raw_file_snapshot()
 
     @staticmethod
     def _file_size(path: Path) -> int:
         try:
             return path.stat().st_size
-        except OSError:
-            return 0
-
-    @staticmethod
-    def _directory_mtime(path: Path) -> int:
-        try:
-            return path.stat().st_mtime_ns
         except OSError:
             return 0
 
@@ -1006,15 +1007,48 @@ class CortexEventCursor:
             self._remainders[path] = remainder
         return data.decode("utf-8", errors="replace").splitlines()
 
+    def _raw_file_snapshot(self) -> dict[str, tuple[int, int]]:
+        snapshot: dict[str, tuple[int, int]] = {}
+        try:
+            paths = self.raw_dir.glob("*.md")
+        except OSError:
+            return snapshot
+        for path in paths:
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            snapshot[path.name] = (stat.st_size, stat.st_mtime_ns)
+        return snapshot
+
     @staticmethod
-    def _event(kind: str, page_ids: list[str], label: str) -> dict[str, Any]:
-        return {
+    def _event(
+        kind: str,
+        page_ids: list[str],
+        label: str,
+        **details: str | int,
+    ) -> dict[str, Any]:
+        event: dict[str, Any] = {
             "kind": kind,
             "page_ids": list(dict.fromkeys(page_ids))[:24],
-            "label": label,
+            "label": label[:160],
             "ts": datetime.now().astimezone().isoformat(timespec="seconds"),
             "source": "telemetry-fallback",
         }
+        for key in (
+            "phase",
+            "operation",
+            "file_name",
+            "capture_id",
+            "byte_count",
+            "raw_count",
+        ):
+            value = details.get(key)
+            if isinstance(value, str):
+                event[key] = value[:160]
+            elif isinstance(value, int):
+                event[key] = max(0, value)
+        return event
 
     def _field_events(self) -> list[dict[str, Any]]:
         if self.field_event_log is None:
@@ -1114,25 +1148,99 @@ class CortexEventCursor:
         return events
 
     def _save_events(self) -> list[dict[str, Any]]:
-        current = self._directory_mtime(self.raw_dir)
-        if current <= self._raw_dir_mtime_ns:
+        snapshot = self._raw_file_snapshot()
+        if snapshot == self._raw_snapshot:
             return []
-        self._raw_dir_mtime_ns = current
-        return [self._event("save", [], "SAVE raw capture")]
+        changed = [
+            name
+            for name, identity in snapshot.items()
+            if self._raw_snapshot.get(name) != identity
+        ]
+        self._raw_snapshot = snapshot
+        if not changed:
+            return []
+        changed.sort(key=lambda name: snapshot[name][1], reverse=True)
+        newest = changed[0]
+        byte_count = sum(snapshot[name][0] for name in changed)
+        identity = f"{newest}:{snapshot[newest][0]}:{snapshot[newest][1]}"
+        capture_id = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:12]
+        return [
+            self._event(
+                "save",
+                [],
+                f"CAPTURED · {byte_count} B · ID {capture_id}",
+                phase="capture",
+                file_name=newest,
+                capture_id=capture_id,
+                byte_count=byte_count,
+                raw_count=len(changed),
+            )
+        ]
 
     def _ingest_events(self) -> list[dict[str, Any]]:
         events: list[dict[str, Any]] = []
         for line in self._tail_lines(self.activity_log):
             match = _INGEST_PAGE_RE.search(line)
-            if not match:
+            if match:
+                page_id = Path(match.group("page").strip()).stem
+                operation = match.group("operation")
+                events.append(
+                    self._event(
+                        "ingest",
+                        [page_id],
+                        f"MEMORY {operation.upper()} · {page_id}",
+                        phase="apply",
+                        operation=operation,
+                    )
+                )
                 continue
-            page_id = Path(match.group("page").strip()).stem
-            events.append(self._event("ingest", [page_id], "INGEST page apply"))
+            match = _INGEST_GENERATE_RE.search(line)
+            if match:
+                page_id = Path(match.group("page").strip()).stem
+                events.append(
+                    self._event(
+                        "ingest",
+                        [page_id],
+                        f"INGEST GENERATE · {page_id}",
+                        phase="generate",
+                    )
+                )
+            elif _INGEST_STAGE_RE.search(line):
+                events.append(
+                    self._event(
+                        "ingest",
+                        [],
+                        "INGEST TRIAGE · raw inspection",
+                        phase="triage",
+                    )
+                )
+            elif _INGEST_AUTH_RE.search(line):
+                events.append(
+                    self._event(
+                        "ingest",
+                        [],
+                        "INGEST CONSENSUS · apply available",
+                        phase="consensus",
+                    )
+                )
+            elif _INGEST_COMPLETE_RE.search(line):
+                events.append(
+                    self._event(
+                        "ingest",
+                        [],
+                        "INGEST COMPLETE · memory consolidated",
+                        phase="complete",
+                    )
+                )
         return events
 
     def poll(self) -> list[dict[str, Any]]:
         if self.follow_field_sessions:
-            return self._followed_field_events()
+            return [
+                *self._followed_field_events(),
+                *self._save_events(),
+                *self._ingest_events(),
+            ]
         if self.field_session:
             return self._field_events()
         return [

@@ -656,6 +656,107 @@ canvas#gl {
   border-color: rgba(255, 180, 84, 0.4);
 }
 
+#memoryIngress {
+  --ingress-color: #61708a;
+  position: absolute;
+  bottom: 38px;
+  left: 14px;
+  z-index: 10;
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr);
+  gap: 3px 8px;
+  align-items: center;
+  width: min(310px, calc(100% - 92px));
+  min-height: 34px;
+  padding: 7px 10px 6px;
+  overflow: hidden;
+  color: var(--tx3);
+  font: 8.5px/1.25 var(--mono);
+  background: linear-gradient(90deg, rgba(5, 9, 15, 0.92), rgba(5, 9, 15, 0.68));
+  border: 1px solid rgba(96, 114, 145, 0.2);
+  border-left: 2px solid var(--ingress-color);
+  border-radius: 3px 9px 9px 3px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.24);
+  opacity: 0.72;
+  pointer-events: none;
+  transition: border-color 0.2s, box-shadow 0.2s, opacity 0.2s;
+  backdrop-filter: blur(8px);
+}
+
+#memoryIngress::after {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    105deg,
+    transparent 0 42%,
+    color-mix(in srgb, var(--ingress-color) 18%, transparent) 49%,
+    transparent 56% 100%
+  );
+  transform: translateX(-120%);
+  content: "";
+}
+
+#memoryIngress:not([data-phase="idle"]) {
+  opacity: 1;
+  border-color: color-mix(in srgb, var(--ingress-color) 50%, transparent);
+  box-shadow: 0 0 22px color-mix(in srgb, var(--ingress-color) 18%, transparent);
+}
+
+#memoryIngress:not([data-phase="idle"])::after {
+  animation: ingressScan 1.05s linear infinite;
+}
+
+#memoryIngress[data-phase="capture"] { --ingress-color: #4fe4ff; }
+#memoryIngress[data-phase="triage"],
+#memoryIngress[data-phase="generate"],
+#memoryIngress[data-phase="consensus"] { --ingress-color: #ffb454; }
+#memoryIngress[data-phase="apply"],
+#memoryIngress[data-phase="complete"] { --ingress-color: #45d49b; }
+
+.ingressBeacon {
+  width: 6px;
+  height: 6px;
+  grid-row: 1 / span 2;
+  background: var(--ingress-color);
+  border-radius: 50%;
+  box-shadow: 0 0 9px var(--ingress-color);
+}
+
+#memoryIngress:not([data-phase="idle"]) .ingressBeacon {
+  animation: ingressBeacon 0.62s steps(2, end) infinite;
+}
+
+.ingressChannel {
+  color: var(--ingress-color);
+  font-weight: 700;
+  letter-spacing: 0.12em;
+}
+
+#memoryIngressState {
+  overflow: hidden;
+  color: var(--tx);
+  letter-spacing: 0.08em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#memoryIngressDetail {
+  grid-column: 2 / -1;
+  overflow: hidden;
+  color: color-mix(in srgb, var(--ingress-color) 70%, #8b96aa);
+  font: inherit;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@keyframes ingressScan {
+  to { transform: translateX(120%); }
+}
+
+@keyframes ingressBeacon {
+  50% { opacity: 0.28; }
+}
+
 #ticker {
   position: absolute;
   bottom: 12px;

@@ -116,7 +116,9 @@ def test_build_cortex_graph_cache_invalidates_when_a_page_changes(
     assert second["nodes"][0]["l"] > first["nodes"][0]["l"]
 
 
-def test_cortex_projects_entity_consensus_votes_without_mentions(tmp_path: Path) -> None:
+def test_cortex_projects_entity_consensus_votes_without_mentions(
+    tmp_path: Path,
+) -> None:
     root = tmp_path / "chronovisor"
     _write_page(root / "pages" / "a.md", title="A", body="Alpha")
     _write_page(root / "pages" / "b.md", title="B", body="Beta")
@@ -210,9 +212,7 @@ def test_cortex_projects_typed_relations_with_nested_page_ids(tmp_path: Path) ->
         producer_role="local_consensus",
         confidence=0.9,
     )
-    KnowledgeGraphStore(root / "knowledge-graph").append(
-        record, action="propose"
-    )
+    KnowledgeGraphStore(root / "knowledge-graph").append(record, action="propose")
 
     graph = cortex.build_cortex_graph(root, use_cache=False)
 
@@ -327,8 +327,96 @@ def test_cortex_event_cursor_maps_durable_activity_to_firing_events(
     assert events[2]["page_ids"] == ["page-a"]
     assert events[3]["page_ids"] == ["page-b"]
     assert events[4]["page_ids"] == []
+    assert events[4]["phase"] == "capture"
+    assert events[4]["byte_count"] == 3
+    assert events[4]["raw_count"] == 1
+    assert len(events[4]["capture_id"]) == 12
     assert events[5]["page_ids"] == ["page-c"]
+    assert events[5]["phase"] == "apply"
+    assert events[5]["operation"] == "updated"
     assert all(event["source"] == "telemetry-fallback" for event in events)
+
+
+def test_cortex_event_cursor_projects_ingest_lifecycle_phases(tmp_path: Path) -> None:
+    root = tmp_path / "chronovisor"
+    activity_log = root / "log.md"
+    activity_log.parent.mkdir(parents=True)
+    activity_log.write_text("", encoding="utf-8")
+    cursor = cortex.CortexEventCursor(root, activity_log=activity_log)
+
+    activity_log.write_text(
+        "\n".join(
+            [
+                "- [22:10:00] ingest | stage 1: triage started",
+                "- [22:10:01] ingest | generating 1/1: semantic-projection/page-d",
+                "- [22:10:02] ingest | authorization: local -> apply_available",
+                "- [22:10:03] ingest | created semantic-projection/page-d.md",
+                "- [22:10:04] ingest | completed in 4.0s",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    events = cursor.poll()
+
+    assert [event["phase"] for event in events] == [
+        "triage",
+        "generate",
+        "consensus",
+        "apply",
+        "complete",
+    ]
+    assert events[1]["page_ids"] == ["page-d"]
+    assert events[3]["operation"] == "created"
+
+
+def test_cortex_latest_field_stream_includes_real_memory_io(tmp_path: Path) -> None:
+    root = tmp_path / "chronovisor"
+    event_root = root / "recall" / "field" / "events"
+    raw_dir = root / "raw"
+    event_root.mkdir(parents=True)
+    raw_dir.mkdir(parents=True)
+    activity_log = root / "log.md"
+    activity_log.write_text("", encoding="utf-8")
+    event_path = event_root / "0123456789abcdef.jsonl"
+    event_path.write_text("", encoding="utf-8")
+    cursor = cortex.CortexEventCursor(
+        root,
+        activity_log=activity_log,
+        follow_field_sessions=True,
+    )
+
+    event_path.write_text(
+        json.dumps(
+            {
+                "seq": 1,
+                "timestamp_epoch": 10.0,
+                "session_hash": event_path.stem,
+                "topic_epoch": 0,
+                "kind": "stimulus",
+                "page_id": "page-a",
+                "delta": 1.0,
+                "activation": 1.0,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    raw_mtime = raw_dir.stat().st_mtime_ns
+    (raw_dir / "capture.md").write_text("memory", encoding="utf-8")
+    os.utime(raw_dir, ns=(raw_mtime + 1, raw_mtime + 1))
+    activity_log.write_text(
+        "- [22:10:03] ingest | updated page-b.md\n",
+        encoding="utf-8",
+    )
+
+    events = cursor.poll()
+
+    assert [event["kind"] for event in events] == ["stimulus", "save", "ingest"]
+    assert events[0]["source"] == "stateful-recall-field"
+    assert events[1]["phase"] == "capture"
+    assert events[2]["phase"] == "apply"
 
 
 def test_cortex_field_projection_is_sealed_session_scoped_and_browser_safe(
@@ -590,6 +678,7 @@ def test_cortex_static_view_preserves_fable_layout_and_uses_live_data() -> None:
     assert 'id="tLive"' in html
     assert 'id="tMotion"' in html
     assert 'id="sessionSelect"' in html
+    assert 'id="memoryIngress"' in html
     assert 'id="tAuto"' not in html
     assert 'id="tSnd"' in html
     assert 'id="tReset"' in html
@@ -601,6 +690,13 @@ def test_cortex_static_view_preserves_fable_layout_and_uses_live_data() -> None:
     assert "function firePageIds(" not in script
     assert "function fire(" not in script
     assert "function visualizeFieldEvent(event)" in script
+    assert "function visualizeTransportEvent(event)" in script
+    assert "function drawTransportEffects(time)" in script
+    assert "transportEvents.forEach(visualizeTransportEvent)" in script
+    assert 'event.kind === "save" || event.kind === "ingest"' in script
+    assert "drawTransportEffects(time);" in script
+    assert "RAW BUFFER" in html
+    assert '#memoryIngress[data-phase="capture"]' in style
     assert "function ensureActualEdge(event)" in script
     assert "function drawEdges()" in script
     assert "const ACTIVE_LABEL_LIMIT = 5;" in script
