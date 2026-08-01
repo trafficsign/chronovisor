@@ -35,6 +35,13 @@
   const MAX_TRANSPORT_EFFECTS = 18;
   const CAPTURE_COMET_DURATION_MS = 5200;
   const PROCESSING_EFFECT_PULSE_MS = 1450;
+  const SIMULATION_STEP_MS = 15;
+  const SIMULATION_ALPHA_FLOOR = 0.012;
+  const SIMULATION_SLEEP_VELOCITY = 0.02;
+  const SIMULATION_SLEEP_TICKS = 36;
+  const SIMULATION_MAX_STEPS_PER_FRAME = 4;
+  const METRICS_PUBLISH_INTERVAL_MS = 200;
+  const FRAME_DURATION_CAPACITY = 240;
   const NODE_STIMULUS_SCALE = 0.38;
   const NODE_ARRIVAL_SCALE = 0.28;
   const NODE_CORE_SCALE = 1;
@@ -53,14 +60,28 @@
   });
   const SYNAPSE_VISIBILITY_MIN = 30;
   const SYNAPSE_VISIBILITY_MAX = 420;
+  const RELATION_STATUS_COLORS = Object.freeze({
+    proposed: [108, 122, 148],
+    held: RGB_INHIBIT,
+    verified: RGB_VIOLET,
+    repeatedly_used: RGB_COMMIT,
+    authoritative: [103, 224, 184],
+    stale: [107, 116, 132],
+    retracted: RGB_FAULT,
+  });
 
   let data;
   let nodes = [];
   let links = [];
+  let simulationLinks = [];
   let nodeCount = 0;
   let neighbors = [];
+  let neighborsByConnectivity = [];
+  let neighborsByFanIn = [];
   let outgoing = [];
+  let nodesByConnectivity = [];
   let byId = new Map();
+  let edgeIndexByPair = new Map();
   let packageList = [];
   let packageShade = {};
   let anchors = {};
@@ -68,6 +89,16 @@
   let edgeState;
   let drawOrder = [];
   let labelHubs = new Set();
+  let labelCandidateMarks = new Uint32Array(0);
+  let labelCandidateGeneration = 0;
+  const labelCandidates = [];
+  const activeLabelNodes = [];
+  const occupiedLabels = [];
+  let formationCandidateMarks = new Uint32Array(0);
+  let formationCandidateGeneration = 0;
+  const formationCandidates = [];
+  const consolidationCandidates = [];
+  const transportFallbacks = [];
   let typedRelations = [];
   let typedCommunities = [];
   let communityHulls = [];
@@ -90,9 +121,17 @@
   let relationLifecycle = VIEW_PREFERENCES_DEFAULTS.relationLifecycle;
   let edgeVisibility = VIEW_PREFERENCES_DEFAULTS.synapseVisibility / 100;
   let alpha = 1;
+  let simulationAwake = true;
+  let simulationSettledTicks = 0;
+  let simulationTicks = 0;
+  let simulationSleepCount = 0;
+  let simulationLastMaxVelocity = 0;
   let spikes = 0;
   let lastInteraction = 0;
   let lastVisualMetricsPublished = 0;
+  let lastCortexMetricsPublished = -1e9;
+  let frameDurationCursor = 0;
+  let frameDurationCount = 0;
   let ingressReset = 0;
   let ingressRevision = 0;
 
@@ -114,6 +153,13 @@
   let cameraTarget = null;
   let cameraPivotTarget = null;
   let focalLength = 900;
+  let projectionCosTheta = 1;
+  let projectionSinTheta = 0;
+  let projectionCosPhi = 1;
+  let projectionSinPhi = 0;
+  let projectionCenterX = 0;
+  let projectionCenterY = 0;
+  let labelFont = "10.5px monospace";
   let dragging = false;
   let downPoint = null;
   let moved = false;
@@ -129,7 +175,7 @@
   const fieldState = window.CortexField.createState();
   const cortexMetrics = {
     spread: [],
-    frameDurations: [],
+    frameDurations: new Float32Array(FRAME_DURATION_CAPACITY),
     maxPulseQueue: 0,
     violetNodes: 0,
     labelsPainted: 0,
@@ -175,11 +221,34 @@
     consolidationEdges: 0,
     transportElectricPeak: 0,
   };
+  function recentFrameDurations(limit = FRAME_DURATION_CAPACITY) {
+    const count = Math.min(limit, frameDurationCount);
+    const values = new Array(count);
+    const start =
+      (frameDurationCursor - count + FRAME_DURATION_CAPACITY)
+      % FRAME_DURATION_CAPACITY;
+    for (let index = 0; index < count; index += 1) {
+      values[index] =
+        cortexMetrics.frameDurations[
+          (start + index) % FRAME_DURATION_CAPACITY
+        ];
+    }
+    return values;
+  }
+
   window.chronovisorCortexMetrics = () => ({
     spread: cortexMetrics.spread.map((row) => ({ ...row })),
-    frameDurations: cortexMetrics.frameDurations.slice(-240),
+    frameDurations: recentFrameDurations(),
     maxPulseQueue: cortexMetrics.maxPulseQueue,
     pulseQueue: pulses.length,
+    simulation: {
+      awake: simulationAwake,
+      alpha,
+      ticks: simulationTicks,
+      sleepCount: simulationSleepCount,
+      settledTicks: simulationSettledTicks,
+      lastMaxVelocity: simulationLastMaxVelocity,
+    },
     visual: {
       violetNodes: cortexMetrics.violetNodes,
       labelsPainted: cortexMetrics.labelsPainted,
@@ -514,6 +583,7 @@
     height = stage.clientHeight;
     canvas.width = Math.max(1, Math.round(width * pixelRatio));
     canvas.height = Math.max(1, Math.round(height * pixelRatio));
+    labelFont = `10.5px ${getComputedStyle(document.body).getPropertyValue("--mono")}`;
   }
 
   function initializeGraph(graphData) {
@@ -569,14 +639,20 @@
       screenScale: 0,
       viewDepth: 1e9,
     }));
-    links = data.links.map((row) => ({
-      source: row[0],
-      target: row[1],
-      kind: row[2] || 0,
-      edgeType: row[3] || "wikilink",
-      eventOnly: false,
-      typed: false,
-    }));
+    links = data.links.map((row) => {
+      const source = row[0];
+      const target = row[1];
+      return {
+        source,
+        target,
+        kind: row[2] || 0,
+        edgeType: row[3] || "wikilink",
+        eventOnly: false,
+        typed: false,
+        restLength:
+          58 + (nodes[source]?.radius || 0) + (nodes[target]?.radius || 0),
+      };
+    });
     typedRelations = Array.isArray(data.typedGraph?.relations)
       ? data.typedGraph.relations
       : [];
@@ -599,8 +675,13 @@
         predicate: relation.predicate,
         lifecycle: relation.status,
         direction: relation.direction,
+        restLength:
+          58
+          + (nodes[relation.source]?.radius || 0)
+          + (nodes[relation.target]?.radius || 0),
       });
     });
+    simulationLinks = links.filter((link) => link.kind !== 2);
     nodeCount = nodes.length;
     neighbors = Array.from({ length: nodeCount }, () => new Set());
     outgoing = Array.from({ length: nodeCount }, () => []);
@@ -610,6 +691,27 @@
       neighbors[link.target].add(link.source);
       if (link.kind < 2 && !link.typed) outgoing[link.source].push(edgeIndex);
     });
+    edgeIndexByPair = new Map();
+    links.forEach((link, edgeIndex) => {
+      const key = `${link.source}:${link.target}`;
+      if (!edgeIndexByPair.has(key)) edgeIndexByPair.set(key, edgeIndex);
+    });
+    nodesByConnectivity = [...nodes].sort(
+      (left, right) =>
+        right.fanIn + right.fanOut - left.fanIn - left.fanOut,
+    );
+    neighborsByConnectivity = neighbors.map((indexes) =>
+      [...indexes].sort(
+        (left, right) =>
+          nodes[right].fanIn + nodes[right].fanOut
+          - nodes[left].fanIn - nodes[left].fanOut,
+      ),
+    );
+    neighborsByFanIn = neighbors.map((indexes) =>
+      [...indexes].sort(
+        (left, right) => nodes[right].fanIn - nodes[left].fanIn,
+      ),
+    );
     byId = new Map(nodes.map((node) => [node.id, node]));
     communityHulls = typedCommunities
       .map((community) => ({
@@ -622,8 +724,18 @@
       .filter((community) => community.members.length >= 3)
       .sort((left, right) => right.members.length - left.members.length)
       .slice(0, 18);
+    communityHulls.forEach((community, communityIndex) => {
+      const hue = deterministicUnit(community.id, communityIndex + 401);
+      community.color = hue > 0.5 ? [126, 105, 210] : [79, 124, 180];
+      community.points = [];
+      community.lowerHull = [];
+      community.upperHull = [];
+      community.hull = [];
+    });
     nodeState = new Uint8Array(nodeCount);
-    edgeState = new Uint8Array(links.length);
+    edgeState = new Uint8Array(links.length + 256);
+    labelCandidateMarks = new Uint32Array(nodeCount);
+    formationCandidateMarks = new Uint32Array(nodeCount);
     drawOrder = nodes.map((_node, index) => index);
     labelHubs = new Set(
       [...nodes]
@@ -652,6 +764,7 @@
   function seedPositions() {
     nodes.forEach((node) => {
       const anchor = anchors[node.packageName] || { x: 0, y: 0, z: 0 };
+      node.anchor = anchor;
       node.x = anchor.x * 0.42 + (deterministicUnit(node.id, 11) - 0.5) * 330;
       node.y = anchor.y * 0.42 + (deterministicUnit(node.id, 29) - 0.5) * 280;
       node.z = anchor.z * 0.42 + (deterministicUnit(node.id, 47) - 0.5) * 330;
@@ -661,28 +774,28 @@
   function tick() {
     const centerForce = alpha * 0.00055;
     const anchorForce = alpha * (mode === "cluster" ? 0.015 : 0.0007);
-    nodes.forEach((node) => {
-      const anchor = anchors[node.packageName] || { x: 0, y: 0, z: 0 };
+    for (let index = 0; index < nodes.length; index += 1) {
+      const node = nodes[index];
+      const anchor = node.anchor;
       node.vx -= node.x * centerForce * 0.8;
       node.vy -= node.y * centerForce * 1.25;
       node.vz -= node.z * centerForce;
       node.vx += (anchor.x - node.x) * anchorForce;
       node.vy += (anchor.y - node.y) * anchorForce;
       node.vz += (anchor.z - node.z) * anchorForce;
-    });
+    }
 
     const spring = mode === "cluster" ? 0.0012 : 0.0007;
-    links.forEach((link) => {
-      if (link.kind === 2) return;
+    for (let index = 0; index < simulationLinks.length; index += 1) {
+      const link = simulationLinks[index];
       const source = nodes[link.source];
       const target = nodes[link.target];
-      if (!source || !target) return;
+      if (!source || !target) continue;
       const dx = target.x - source.x;
       const dy = target.y - source.y;
       const dz = target.z - source.z;
-      const distance = Math.hypot(dx, dy, dz) || 1;
-      const rest = 58 + source.radius + target.radius;
-      const force = (distance - rest) * spring * alpha;
+      const distance = Math.sqrt(dx * dx + dy * dy + dz * dz) || 1;
+      const force = (distance - link.restLength) * spring * alpha;
       const fx = (dx / distance) * force;
       const fy = (dy / distance) * force;
       const fz = (dz / distance) * force;
@@ -692,55 +805,92 @@
       target.vx -= fx;
       target.vy -= fy;
       target.vz -= fz;
-    });
+    }
 
-    nodes.forEach((node) => {
+    let maxVelocitySquared = 0;
+    for (let index = 0; index < nodes.length; index += 1) {
+      const node = nodes[index];
       node.vx *= 0.82;
       node.vy *= 0.82;
       node.vz *= 0.82;
-      const velocity = Math.hypot(node.vx, node.vy, node.vz);
-      if (velocity > 13) {
-        const limit = 13 / velocity;
+      let velocitySquared =
+        node.vx * node.vx + node.vy * node.vy + node.vz * node.vz;
+      if (velocitySquared > 169) {
+        const limit = 13 / Math.sqrt(velocitySquared);
         node.vx *= limit;
         node.vy *= limit;
         node.vz *= limit;
+        velocitySquared = 169;
       }
       node.x += node.vx;
       node.y += node.vy;
       node.z += node.vz;
-    });
-    alpha = Math.max(0.012, alpha * 0.986);
+      maxVelocitySquared = Math.max(maxVelocitySquared, velocitySquared);
+    }
+    alpha = Math.max(SIMULATION_ALPHA_FLOOR, alpha * 0.986);
+    simulationTicks += 1;
+    simulationLastMaxVelocity = Math.sqrt(maxVelocitySquared);
+    if (
+      alpha <= SIMULATION_ALPHA_FLOOR
+      && simulationLastMaxVelocity <= SIMULATION_SLEEP_VELOCITY
+    ) {
+      simulationSettledTicks += 1;
+      if (simulationSettledTicks >= SIMULATION_SLEEP_TICKS) {
+        sleepSimulation();
+      }
+    } else {
+      simulationSettledTicks = 0;
+    }
+  }
+
+  function sleepSimulation() {
+    if (!simulationAwake) return;
+    simulationAwake = false;
+    simulationSleepCount += 1;
+    simulationAccumulator = 0;
+    alpha = 0;
+    for (let index = 0; index < nodes.length; index += 1) {
+      nodes[index].vx = 0;
+      nodes[index].vy = 0;
+      nodes[index].vz = 0;
+    }
   }
 
   function reheat(value) {
     alpha = Math.max(alpha, value);
+    simulationAwake = true;
+    simulationSettledTicks = 0;
+    simulationAccumulator = 0;
   }
 
   function projectAll() {
     focalLength = Math.min(width, height) * 1.12;
-    const cosTheta = Math.cos(camera.theta);
-    const sinTheta = Math.sin(camera.theta);
-    const cosPhi = Math.cos(camera.phi);
-    const sinPhi = Math.sin(camera.phi);
-    nodes.forEach((node) => {
+    projectionCosTheta = Math.cos(camera.theta);
+    projectionSinTheta = Math.sin(camera.theta);
+    projectionCosPhi = Math.cos(camera.phi);
+    projectionSinPhi = Math.sin(camera.phi);
+    projectionCenterX = width / 2;
+    projectionCenterY = height / 2;
+    for (let index = 0; index < nodes.length; index += 1) {
+      const node = nodes[index];
       const localX = node.x - camera.pivotX;
       const localY = node.y - camera.pivotY;
       const localZ = node.z - camera.pivotZ;
-      const rotatedX = localX * cosTheta + localZ * sinTheta;
-      const rotatedZ = -localX * sinTheta + localZ * cosTheta;
-      const rotatedY = localY * cosPhi - rotatedZ * sinPhi;
-      const depthZ = localY * sinPhi + rotatedZ * cosPhi;
+      const rotatedX = localX * projectionCosTheta + localZ * projectionSinTheta;
+      const rotatedZ = -localX * projectionSinTheta + localZ * projectionCosTheta;
+      const rotatedY = localY * projectionCosPhi - rotatedZ * projectionSinPhi;
+      const depthZ = localY * projectionSinPhi + rotatedZ * projectionCosPhi;
       const viewDepth = camera.distance - depthZ;
       if (viewDepth < 60) {
         node.viewDepth = 1e9;
-        return;
+        continue;
       }
       const scale = focalLength / viewDepth;
-      node.screenX = rotatedX * scale + width / 2;
-      node.screenY = rotatedY * scale + height / 2;
+      node.screenX = rotatedX * scale + projectionCenterX;
+      node.screenY = rotatedY * scale + projectionCenterY;
       node.screenScale = scale;
       node.viewDepth = viewDepth;
-    });
+    }
   }
 
   function fog(viewDepth) {
@@ -1054,9 +1204,17 @@
     }
   }
 
-  function publishCortexMetrics() {
+  function publishCortexMetrics(force = false) {
     const target = document.getElementById("fieldAria");
     if (!target) return;
+    const now = performance.now();
+    if (
+      !force
+      && now - lastCortexMetricsPublished < METRICS_PUBLISH_INTERVAL_MS
+    ) {
+      return;
+    }
+    lastCortexMetricsPublished = now;
     const painted = cortexMetrics.spread.filter(
       (row) => Number.isFinite(row.paintedAt),
     );
@@ -1066,9 +1224,8 @@
     const p95 = latencies.length
       ? latencies[Math.min(latencies.length - 1, Math.round((latencies.length - 1) * 0.95))]
       : 0;
-    const frames = cortexMetrics.frameDurations
+    const frames = recentFrameDurations(120)
       .filter((value) => value > 0)
-      .slice(-120)
       .sort((left, right) => left - right);
     const frameP95 = frames.length
       ? frames[Math.min(frames.length - 1, Math.round((frames.length - 1) * 0.95))]
@@ -1094,11 +1251,19 @@
     target.dataset.captureEvents = String(cortexMetrics.captureEvents);
     target.dataset.ingestEvents = String(cortexMetrics.ingestEvents);
     target.dataset.applyEvents = String(cortexMetrics.applyEvents);
+    target.dataset.simulationAwake = String(simulationAwake);
+    target.dataset.simulationAlpha = alpha.toFixed(4);
+    target.dataset.simulationTicks = String(simulationTicks);
+    target.dataset.simulationSleepCount = String(simulationSleepCount);
+    target.dataset.simulationSettledTicks = String(simulationSettledTicks);
+    target.dataset.simulationMaxVelocity =
+      simulationLastMaxVelocity.toFixed(4);
   }
 
   function publishVisualMetrics(time) {
     if (time - lastVisualMetricsPublished < 200) return;
     lastVisualMetricsPublished = time;
+    publishCortexMetrics();
     const target = document.getElementById("fieldAria");
     if (!target) return;
     target.dataset.violetNodes = String(cortexMetrics.violetNodes);
@@ -1159,30 +1324,51 @@
       `${ELECTRIC_TRAVEL_MIN_MS}/${ELECTRIC_TRAVEL_MAX_MS}`;
   }
 
+  function refreshNeighborPriorities(index) {
+    const indexes = [...(neighbors[index] || [])];
+    neighborsByConnectivity[index] = [...indexes].sort(
+      (left, right) =>
+        nodes[right].fanIn + nodes[right].fanOut
+        - nodes[left].fanIn - nodes[left].fanOut,
+    );
+    neighborsByFanIn[index] = indexes.sort(
+      (left, right) => nodes[right].fanIn - nodes[left].fanIn,
+    );
+  }
+
   function ensureActualEdge(event) {
     const source = byId.get(event.source_page_id);
     const target = byId.get(event.target_page_id);
     if (!source || !target) return -1;
-    let edgeIndex = links.findIndex(
-      (link) => link.source === source.index && link.target === target.index,
-    );
-    if (edgeIndex >= 0) return edgeIndex;
-    edgeIndex = links.length;
-    links.push({
+    const pairKey = `${source.index}:${target.index}`;
+    const existingEdgeIndex = edgeIndexByPair.get(pairKey);
+    if (Number.isInteger(existingEdgeIndex)) return existingEdgeIndex;
+    const edgeIndex = links.length;
+    const link = {
       source: source.index,
       target: target.index,
       kind: 1,
       edgeType: event.edge_type || "field",
       eventOnly: true,
-    });
+      typed: false,
+      restLength: 58 + source.radius + target.radius,
+    };
+    links.push(link);
+    simulationLinks.push(link);
+    edgeIndexByPair.set(pairKey, edgeIndex);
     neighbors[source.index].add(target.index);
     neighbors[target.index].add(source.index);
+    refreshNeighborPriorities(source.index);
+    refreshNeighborPriorities(target.index);
     outgoing[source.index].push(edgeIndex);
-    const expanded = new Uint8Array(links.length);
-    expanded.set(edgeState);
-    expanded[edgeIndex] = 2;
-    edgeState = expanded;
+    if (edgeIndex >= edgeState.length) {
+      const expanded = new Uint8Array(Math.ceil(edgeState.length * 1.5));
+      expanded.set(edgeState);
+      edgeState = expanded;
+    }
+    edgeState[edgeIndex] = 2;
     stateDirty = true;
+    reheat(0.18);
     return edgeIndex;
   }
 
@@ -1505,15 +1691,6 @@
 
   function drawTypedRelations() {
     if (!relationsVisible) return;
-    const statusColors = {
-      proposed: [108, 122, 148],
-      held: RGB_INHIBIT,
-      verified: RGB_VIOLET,
-      repeatedly_used: RGB_COMMIT,
-      authoritative: [103, 224, 184],
-      stale: [107, 116, 132],
-      retracted: RGB_FAULT,
-    };
     links.forEach((link, edgeIndex) => {
       if (!link.typed || edgeState[edgeIndex] === 0) return;
       const source = nodes[link.source];
@@ -1521,7 +1698,7 @@
       if (!source || !target || source.viewDepth > 9e8 || target.viewDepth > 9e8) return;
       const focused = edgeState[edgeIndex] === 3;
       const active = activeRelationIds.has(link.relationId);
-      const color = statusColors[link.lifecycle] || RGB_VIOLET;
+      const color = RELATION_STATUS_COLORS[link.lifecycle] || RGB_VIOLET;
       context.save();
       context.setLineDash(link.lifecycle === "authoritative" ? [] : [4, 5]);
       context.lineWidth = active ? 2 : focused ? 1.25 : 0.65;
@@ -1537,46 +1714,77 @@
     });
   }
 
-  function convexHull(points) {
+  function screenCross(origin, left, right) {
+    return (
+      (left.screenX - origin.screenX) * (right.screenY - origin.screenY)
+      - (left.screenY - origin.screenY) * (right.screenX - origin.screenX)
+    );
+  }
+
+  function convexHull(community) {
+    const { points, lowerHull: lower, upperHull: upper, hull } = community;
     if (points.length < 3) return points;
-    const ordered = [...points].sort((left, right) => left.x - right.x || left.y - right.y);
-    const cross = (origin, left, right) =>
-      (left.x - origin.x) * (right.y - origin.y)
-      - (left.y - origin.y) * (right.x - origin.x);
-    const lower = [];
-    ordered.forEach((point) => {
-      while (lower.length >= 2 && cross(lower.at(-2), lower.at(-1), point) <= 0) lower.pop();
+    points.sort(
+      (left, right) =>
+        left.screenX - right.screenX || left.screenY - right.screenY,
+    );
+    lower.length = 0;
+    for (let index = 0; index < points.length; index += 1) {
+      const point = points[index];
+      while (
+        lower.length >= 2
+        && screenCross(lower.at(-2), lower.at(-1), point) <= 0
+      ) {
+        lower.pop();
+      }
       lower.push(point);
-    });
-    const upper = [];
-    [...ordered].reverse().forEach((point) => {
-      while (upper.length >= 2 && cross(upper.at(-2), upper.at(-1), point) <= 0) upper.pop();
+    }
+    upper.length = 0;
+    for (let index = points.length - 1; index >= 0; index -= 1) {
+      const point = points[index];
+      while (
+        upper.length >= 2
+        && screenCross(upper.at(-2), upper.at(-1), point) <= 0
+      ) {
+        upper.pop();
+      }
       upper.push(point);
-    });
+    }
     lower.pop();
     upper.pop();
-    return [...lower, ...upper];
+    hull.length = 0;
+    for (let index = 0; index < lower.length; index += 1) {
+      hull.push(lower[index]);
+    }
+    for (let index = 0; index < upper.length; index += 1) {
+      hull.push(upper[index]);
+    }
+    return hull;
   }
 
   function drawCommunityHulls() {
     if (!relationsVisible || camera.distance > 1900) return;
-    communityHulls.forEach((community, communityIndex) => {
-      const points = community.members
-        .map((index) => nodes[index])
-        .filter((node) => node && nodeState[node.index] >= 2 && node.viewDepth <= 9e8)
-        .map((node) => ({ x: node.screenX, y: node.screenY }));
+    communityHulls.forEach((community) => {
+      const { points } = community;
+      points.length = 0;
+      for (let index = 0; index < community.members.length; index += 1) {
+        const node = nodes[community.members[index]];
+        if (node && nodeState[node.index] >= 2 && node.viewDepth <= 9e8) {
+          points.push(node);
+        }
+      }
       if (points.length < 3) return;
-      const hull = convexHull(points);
+      const hull = convexHull(community);
       if (hull.length < 3) return;
-      const hue = deterministicUnit(community.id, communityIndex + 401);
-      const color = hue > 0.5 ? [126, 105, 210] : [79, 124, 180];
       context.save();
       context.beginPath();
-      context.moveTo(hull[0].x, hull[0].y);
-      hull.slice(1).forEach((point) => context.lineTo(point.x, point.y));
+      context.moveTo(hull[0].screenX, hull[0].screenY);
+      for (let index = 1; index < hull.length; index += 1) {
+        context.lineTo(hull[index].screenX, hull[index].screenY);
+      }
       context.closePath();
-      context.fillStyle = rgba(color, 0.018);
-      context.strokeStyle = rgba(color, 0.10);
+      context.fillStyle = rgba(community.color, 0.018);
+      context.strokeStyle = rgba(community.color, 0.10);
       context.lineWidth = 0.7;
       context.setLineDash([2, 7]);
       context.fill();
@@ -1586,23 +1794,19 @@
   }
 
   function projectPoint(x, y, z) {
-    const cosTheta = Math.cos(camera.theta);
-    const sinTheta = Math.sin(camera.theta);
-    const cosPhi = Math.cos(camera.phi);
-    const sinPhi = Math.sin(camera.phi);
     const localX = x - camera.pivotX;
     const localY = y - camera.pivotY;
     const localZ = z - camera.pivotZ;
-    const rotatedX = localX * cosTheta + localZ * sinTheta;
-    const rotatedZ = -localX * sinTheta + localZ * cosTheta;
-    const rotatedY = localY * cosPhi - rotatedZ * sinPhi;
-    const depthZ = localY * sinPhi + rotatedZ * cosPhi;
+    const rotatedX = localX * projectionCosTheta + localZ * projectionSinTheta;
+    const rotatedZ = -localX * projectionSinTheta + localZ * projectionCosTheta;
+    const rotatedY = localY * projectionCosPhi - rotatedZ * projectionSinPhi;
+    const depthZ = localY * projectionSinPhi + rotatedZ * projectionCosPhi;
     const viewDepth = camera.distance - depthZ;
     if (viewDepth < 60) return null;
     const scale = focalLength / viewDepth;
     return {
-      x: rotatedX * scale + width / 2,
-      y: rotatedY * scale + height / 2,
+      x: rotatedX * scale + projectionCenterX,
+      y: rotatedY * scale + projectionCenterY,
       scale,
       viewDepth,
     };
@@ -2118,16 +2322,19 @@
       return { x: node.screenX, y: node.screenY, node };
     }
     if (processingTargetLocked) return null;
-    const fallbacks = nodes
-      .filter(visibleMemoryNode)
-      .sort((left, right) => right.fanIn + right.fanOut - left.fanIn - left.fanOut);
-    const fallbackIndex = effect.kind === "processing" && fallbacks.length
+    transportFallbacks.length = 0;
+    for (let index = 0; index < nodesByConnectivity.length; index += 1) {
+      const candidate = nodesByConnectivity[index];
+      if (visibleMemoryNode(candidate)) transportFallbacks.push(candidate);
+      if (transportFallbacks.length >= 12) break;
+    }
+    const fallbackIndex = effect.kind === "processing" && transportFallbacks.length
       ? Math.floor(
           deterministicUnit(effect.channelKey, effect.laneKey.length + 17)
-          * Math.min(12, fallbacks.length),
+          * transportFallbacks.length,
         )
       : 0;
-    const fallback = fallbacks.at(fallbackIndex) || visibleHub();
+    const fallback = transportFallbacks[fallbackIndex] || visibleHub();
     if (fallback) {
       return { x: fallback.screenX, y: fallback.screenY, node: fallback };
     }
@@ -2431,26 +2638,39 @@
   }
 
   function ingestFormationCandidates(target, count, includeTarget = false) {
-    const selected = [];
-    const seen = new Set();
+    formationCandidates.length = 0;
+    formationCandidateGeneration = (formationCandidateGeneration + 1) >>> 0;
+    if (!formationCandidateGeneration) {
+      formationCandidateMarks.fill(0);
+      formationCandidateGeneration = 1;
+    }
     const add = (node) => {
-      if (!node || seen.has(node.index) || !visibleMemoryNode(node)) return;
-      seen.add(node.index);
-      selected.push(node);
+      if (
+        !node
+        || formationCandidates.length >= count
+        || formationCandidateMarks[node.index] === formationCandidateGeneration
+        || !visibleMemoryNode(node)
+      ) {
+        return;
+      }
+      formationCandidateMarks[node.index] = formationCandidateGeneration;
+      formationCandidates.push(node);
     };
     if (includeTarget) add(target.node);
     if (target.node) {
-      [...(neighbors[target.node.index] || [])]
-        .map((index) => nodes[index])
-        .filter(Boolean)
-        .sort((left, right) => right.fanIn + right.fanOut - left.fanIn - left.fanOut)
-        .forEach(add);
+      const neighborIndexes = neighborsByConnectivity[target.node.index] || [];
+      for (let index = 0; index < neighborIndexes.length; index += 1) {
+        add(nodes[neighborIndexes[index]]);
+        if (formationCandidates.length >= count) break;
+      }
     }
-    nodes
-      .filter(visibleMemoryNode)
-      .sort((left, right) => right.fanIn + right.fanOut - left.fanIn - left.fanOut)
-      .forEach(add);
-    return selected.slice(0, count);
+    if (formationCandidates.length < count) {
+      for (let index = 0; index < nodesByConnectivity.length; index += 1) {
+        add(nodesByConnectivity[index]);
+        if (formationCandidates.length >= count) break;
+      }
+    }
+    return formationCandidates;
   }
 
   function drawFormationNodeGlow(node, color, glow, intensity, padding = 2.4) {
@@ -2636,21 +2856,25 @@
   }
 
   function visibleConsolidationNeighbors(node) {
-    if (!node) return [];
-    return [...neighbors[node.index]]
-      .map((index) => nodes[index])
-      .filter(
-        (neighbor) =>
-          neighbor
-          && nodeState[neighbor.index] > 0
-          && neighbor.viewDepth <= 9e8
-          && neighbor.screenX > 20
-          && neighbor.screenX < width - 20
-          && neighbor.screenY > 40
-          && neighbor.screenY < height - 40,
-      )
-      .sort((left, right) => right.fanIn - left.fanIn)
-      .slice(0, 6);
+    consolidationCandidates.length = 0;
+    if (!node) return consolidationCandidates;
+    const neighborIndexes = neighborsByFanIn[node.index] || [];
+    for (let index = 0; index < neighborIndexes.length; index += 1) {
+      const neighbor = nodes[neighborIndexes[index]];
+      if (
+        neighbor
+        && nodeState[neighbor.index] > 0
+        && neighbor.viewDepth <= 9e8
+        && neighbor.screenX > 20
+        && neighbor.screenX < width - 20
+        && neighbor.screenY > 40
+        && neighbor.screenY < height - 40
+      ) {
+        consolidationCandidates.push(neighbor);
+        if (consolidationCandidates.length >= 6) break;
+      }
+    }
+    return consolidationCandidates;
   }
 
   function drawApplyFormation(effect, time, progress, fade, target) {
@@ -2729,6 +2953,7 @@
     context.lineCap = "round";
     context.lineJoin = "round";
     context.font = "8px ui-monospace, SFMono-Regular, Menlo, monospace";
+    let memoryStar = null;
     for (let index = transportEffects.length - 1; index >= 0; index -= 1) {
       const effect = transportEffects[index];
       const rawProgress = (time - effect.startedAt) / effect.duration;
@@ -2748,7 +2973,6 @@
       } else {
         const target = transportTarget(effect);
         if (!target) continue;
-        const star = memoryStarGeometry();
         if (effect.phase === "apply" || effect.phase === "complete") {
           drawApplyFormation(effect, time, progress, fade, target);
         } else if (effect.phase === "consensus") {
@@ -2760,7 +2984,8 @@
         } else if (effect.phase === "generate") {
           drawGenerateFormation(effect, progress, fade, target);
         } else {
-          drawTriageFormation(effect, progress, fade, star, target);
+          if (!memoryStar) memoryStar = memoryStarGeometry();
+          drawTriageFormation(effect, progress, fade, memoryStar, target);
         }
       }
       if (!effect.paintedAt) {
@@ -2772,58 +2997,98 @@
     context.restore();
   }
 
-  function drawLabels(time) {
-    context.font = `10.5px ${getComputedStyle(document.body).getPropertyValue("--mono")}`;
-    context.textAlign = "center";
-    const occupied = [];
-    const activeLabels = new Set(
-      nodes
-        .filter(
-          (node) =>
-            nodeState[node.index] >= 2
-            && node.viewDepth <= 9e8
-            && node.fieldActivation > 0.05,
-        )
-        .sort(
-          (left, right) =>
-            right.fieldActivation - left.fieldActivation
-            || right.fanIn - left.fanIn
-            || left.id.localeCompare(right.id),
-        )
-        .slice(0, ACTIVE_LABEL_LIMIT)
-        .map((node) => node.index),
+  function compareActiveLabels(left, right) {
+    return (
+      right.fieldActivation - left.fieldActivation
+      || right.fanIn - left.fanIn
+      || left.id.localeCompare(right.id)
     );
-    const candidates = nodes
-      .filter((node) => {
-        const state = nodeState[node.index];
-        const focused = node.index === selected || node.index === hovered;
-        return (
-          state >= 2
+  }
+
+  function insertActiveLabel(node) {
+    let insertAt = 0;
+    while (
+      insertAt < activeLabelNodes.length
+      && compareActiveLabels(node, activeLabelNodes[insertAt]) >= 0
+    ) {
+      insertAt += 1;
+    }
+    if (insertAt >= ACTIVE_LABEL_LIMIT) return;
+    const nextLength = Math.min(ACTIVE_LABEL_LIMIT, activeLabelNodes.length + 1);
+    activeLabelNodes.length = nextLength;
+    for (let index = nextLength - 1; index > insertAt; index -= 1) {
+      activeLabelNodes[index] = activeLabelNodes[index - 1];
+    }
+    activeLabelNodes[insertAt] = node;
+  }
+
+  function beginLabelCandidates() {
+    labelCandidates.length = 0;
+    activeLabelNodes.length = 0;
+    labelCandidateGeneration = (labelCandidateGeneration + 1) >>> 0;
+    if (!labelCandidateGeneration) {
+      labelCandidateMarks.fill(0);
+      labelCandidateGeneration = 1;
+    }
+  }
+
+  function addLabelCandidate(node) {
+    if (!node || labelCandidateMarks[node.index] === labelCandidateGeneration) {
+      return;
+    }
+    labelCandidateMarks[node.index] = labelCandidateGeneration;
+    labelCandidates.push(node);
+  }
+
+  function collectLabelCandidates(time) {
+    beginLabelCandidates();
+    for (let index = 0; index < nodes.length; index += 1) {
+      const node = nodes[index];
+      const state = nodeState[index];
+      if (state < 2 || node.viewDepth > 9e8) continue;
+      if (node.fieldActivation > 0.05) insertActiveLabel(node);
+      if (state === 3 || index === selected || index === hovered) {
+        addLabelCandidate(node);
+      }
+    }
+    for (let index = 0; index < activeLabelNodes.length; index += 1) {
+      const node = activeLabelNodes[index];
+      addLabelCandidate(node);
+    }
+    if (!activeLabelNodes.length && camera.distance < 1500) {
+      labelHubs.forEach((index) => {
+        const node = nodes[index];
+        if (
+          node
+          && nodeState[index] >= 2
           && node.viewDepth <= 9e8
-          && (state === 3
-            || focused
-            || activeLabels.has(node.index)
-            || (!activeLabels.size
-              && labelHubs.has(node.index)
-              && camera.distance < 1500
-              && node.viewDepth < camera.distance))
-        );
-      })
-      .sort((left, right) => {
-        const leftPriority =
-          (left.index === selected ? 100000 : 0)
-          + (left.index === hovered ? 50000 : 0)
-          + excitationLevel(left, time) * 1000
-          + left.fieldActivation * 900
-          + left.fanIn;
-        const rightPriority =
-          (right.index === selected ? 100000 : 0)
-          + (right.index === hovered ? 50000 : 0)
-          + excitationLevel(right, time) * 1000
-          + right.fieldActivation * 900
-          + right.fanIn;
-        return rightPriority - leftPriority;
+          && node.viewDepth < camera.distance
+        ) {
+          addLabelCandidate(node);
+        }
       });
+    }
+    for (let index = 0; index < labelCandidates.length; index += 1) {
+      const node = labelCandidates[index];
+      node.labelPriority =
+        (node.index === selected ? 100000 : 0)
+        + (node.index === hovered ? 50000 : 0)
+        + excitationLevel(node, time) * 1000
+        + node.fieldActivation * 900
+        + node.fanIn;
+    }
+    labelCandidates.sort(
+      (left, right) =>
+        right.labelPriority - left.labelPriority || left.index - right.index,
+    );
+    return labelCandidates;
+  }
+
+  function drawLabels(time) {
+    context.font = labelFont;
+    context.textAlign = "center";
+    occupiedLabels.length = 0;
+    const candidates = collectLabelCandidates(time);
     candidates.forEach((node) => {
       const state = nodeState[node.index];
       const hot = excitationLevel(node, time) > 0.5;
@@ -2845,7 +3110,7 @@
         top: y - 11,
         bottom: y + 3,
       };
-      const overlaps = occupied.some(
+      const overlaps = occupiedLabels.some(
         (other) =>
           bounds.left < other.right
           && bounds.right > other.left
@@ -2853,7 +3118,7 @@
           && bounds.bottom > other.top,
       );
       if (overlaps && state !== 3) return;
-      occupied.push(bounds);
+      occupiedLabels.push(bounds);
       cortexMetrics.labelsPainted += 1;
       context.fillStyle = `rgba(3,5,10,${0.7 * depthFade})`;
       context.fillRect(node.screenX - labelWidth / 2 - 3, y - 9, labelWidth + 6, 12);
@@ -2937,15 +3202,31 @@
   let simulationAccumulator = 0;
   function frame(now) {
     const delta = Math.min(60, now - previousTime);
-    cortexMetrics.frameDurations.push(delta);
-    if (cortexMetrics.frameDurations.length > 240) {
-      cortexMetrics.frameDurations.shift();
-    }
+    cortexMetrics.frameDurations[frameDurationCursor] = delta;
+    frameDurationCursor = (frameDurationCursor + 1) % FRAME_DURATION_CAPACITY;
+    frameDurationCount = Math.min(
+      FRAME_DURATION_CAPACITY,
+      frameDurationCount + 1,
+    );
     previousTime = now;
-    simulationAccumulator += delta;
-    while (simulationAccumulator > 15) {
-      tick();
-      simulationAccumulator -= 15;
+    if (simulationAwake) {
+      simulationAccumulator = Math.min(
+        SIMULATION_STEP_MS * SIMULATION_MAX_STEPS_PER_FRAME,
+        simulationAccumulator + delta,
+      );
+      let simulationSteps = 0;
+      while (
+        simulationAwake
+        && simulationAccumulator > SIMULATION_STEP_MS
+        && simulationSteps < SIMULATION_MAX_STEPS_PER_FRAME
+      ) {
+        tick();
+        simulationSteps += 1;
+        if (!simulationAwake) break;
+        simulationAccumulator -= SIMULATION_STEP_MS;
+      }
+    } else {
+      simulationAccumulator = 0;
     }
     if (autoRotate && !dragging && now - lastInteraction > 2600) {
       camera.theta += delta * 0.000045;

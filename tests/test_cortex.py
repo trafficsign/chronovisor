@@ -812,7 +812,8 @@ def test_cortex_static_view_preserves_fable_layout_and_uses_live_data() -> None:
     assert "target.dataset.electricPeak" in script
     assert "function publishVisualMetrics(time)" in script
     assert "cortexMetrics.violetNodes += 1;" in script
-    assert ".slice(0, ACTIVE_LABEL_LIMIT)" in script
+    assert "if (insertAt >= ACTIVE_LABEL_LIMIT) return;" in script
+    assert "Math.min(ACTIVE_LABEL_LIMIT, activeLabelNodes.length + 1)" in script
     assert "liveEventsEnabled = true" in script
     assert "followLatestSession = true" in script
     assert '"?follow=latest"' in script
@@ -846,6 +847,55 @@ def test_cortex_static_view_preserves_fable_layout_and_uses_live_data() -> None:
     assert "body.has-activity-bar {" in activity_style
     assert ".activity-bar {" in activity_style
     assert ".has-activity-bar .shell {" in activity_style
+
+
+def test_cortex_sleeps_only_layout_physics_and_keeps_rendering_live() -> None:
+    script = (dashboard.STATIC_DIR / "cortex.js").read_text(encoding="utf-8")
+
+    assert "const SIMULATION_ALPHA_FLOOR = 0.012;" in script
+    assert "const SIMULATION_SLEEP_VELOCITY = 0.02;" in script
+    assert "const SIMULATION_SLEEP_TICKS = 36;" in script
+    assert "const SIMULATION_MAX_STEPS_PER_FRAME = 4;" in script
+    assert "function sleepSimulation()" in script
+    assert "simulationAwake = false;" in script
+    assert "simulationAccumulator = 0;" in script
+    assert "nodes[index].vx = 0;" in script
+    assert "simulationAwake = true;" in script
+    assert "if (simulationAwake) {" in script
+    assert "simulationSteps < SIMULATION_MAX_STEPS_PER_FRAME" in script
+    assert "simulationLinks.push(link);" in script
+    assert "reheat(0.18);" in script
+
+    frame = script[script.index("function frame(now)") : script.index("function pick(")]
+    assert "tick();" in frame
+    assert "projectAll();" in frame
+    assert "draw(now);" in frame
+    assert "requestAnimationFrame(frame);" in frame
+    assert frame.index("tick();") < frame.index("projectAll();")
+
+
+def test_cortex_reuses_hot_path_state_without_reducing_visual_limits() -> None:
+    script = (dashboard.STATIC_DIR / "cortex.js").read_text(encoding="utf-8")
+
+    assert "const METRICS_PUBLISH_INTERVAL_MS = 200;" in script
+    assert "now - lastCortexMetricsPublished < METRICS_PUBLISH_INTERVAL_MS" in script
+    assert "const FRAME_DURATION_CAPACITY = 240;" in script
+    assert "function recentFrameDurations(" in script
+    assert "frameDurationCursor = (frameDurationCursor + 1)" in script
+    assert "const labelCandidates = [];" in script
+    assert "const activeLabelNodes = [];" in script
+    assert "const occupiedLabels = [];" in script
+    assert "function collectLabelCandidates(time)" in script
+    assert "labelCandidateMarks = new Uint32Array(nodeCount);" in script
+    assert "context.font = labelFont;" in script
+    assert "community.points = [];" in script
+    assert "neighborsByConnectivity = neighbors.map(" in script
+    assert "neighborsByFanIn = neighbors.map(" in script
+    assert "if (!memoryStar) memoryStar = memoryStarGeometry();" in script
+    assert "transportFallbacks.length = 0;" in script
+    assert "const ACTIVE_LABEL_LIMIT = 5;" in script
+    assert "const MAX_ELECTRIC_PATHS = 12;" in script
+    assert "const MAX_TRANSPORT_EFFECTS = 18;" in script
 
 
 def test_dashboard_serves_cortex_graph_api(monkeypatch) -> None:
