@@ -95,10 +95,44 @@ def _p95_improvement(teacher: list[float], field: list[float]) -> float | None:
     return round(teacher_p95 - field_p95, 3)
 
 
+def _is_stable_candidate_row(row: Mapping[str, Any]) -> bool:
+    """Return whether a trace contains an actual stable-topic Field comparison.
+
+    Topic resets, empty working sets, and canary exclusions correctly fall back to
+    the full teacher.  They remain part of operational safety metrics, but they
+    are not evidence about Field ranking quality.
+
+    Schema-v1 traces did not identify the quality population explicitly, so an
+    observed/active row remains the conservative compatibility signal.  Newer
+    traces mark stable-topic attempts directly.  A failed verifier is still a
+    quality miss even though the request correctly falls back to the teacher.
+    """
+
+    if "quality_eligible" in row:
+        return row.get("quality_eligible") is True
+    return str(row.get("status") or "") in {"observed", "active"} and (
+        "full_search_required" not in row or row.get("full_search_required") is False
+    )
+
+
 def candidate_metrics(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
-    """Aggregate privacy-safe Field/teacher comparisons."""
+    """Aggregate privacy-safe Field/teacher comparisons.
+
+    End-to-end latency, deadline misses, and fallback rate cover every turn.
+    Ranking coverage and Field/teacher latency compare only stable-topic rows
+    where the Field was actually attempted; verifier failures remain quality
+    misses while the request itself falls back safely.
+    """
 
     sessions: set[str] = set()
+    stable_sessions: set[str] = set()
+    coverage_sessions: set[str] = set()
+    commit_sessions: set[str] = set()
+    paired_latency_sessions: set[str] = set()
+    stable_traces = 0
+    coverage_evidence_traces = 0
+    commit_evidence_traces = 0
+    paired_latency_traces = 0
     teacher_pages = 0
     teacher_overlap = 0
     field_pages = 0
@@ -108,56 +142,98 @@ def candidate_metrics(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     field_latencies: list[float] = []
     teacher_latencies: list[float] = []
     over_4s = 0
+    fallbacks = 0
     full_searches = 0
     active_rows = 0
     for row in rows:
         session = str(row.get("session_hash") or "")
         if session:
             sessions.add(session)
-        field_ids = {
-            str(value)
-            for value in row.get("field_page_ids", [])
-            if isinstance(value, str) and value
-        }
-        teacher_ids = {
-            str(value)
-            for value in row.get("teacher_page_ids", [])
-            if isinstance(value, str) and value
-        }
-        committed_ids = {
-            str(value)
-            for value in row.get("committed_page_ids", [])
-            if isinstance(value, str) and value
-        }
-        teacher_pages += len(teacher_ids)
-        teacher_overlap += len(teacher_ids & field_ids)
-        field_pages += len(field_ids)
-        committed_pages += len(committed_ids)
-        committed_overlap += len(committed_ids & field_ids)
         latency = row.get("latency_ms")
         if isinstance(latency, int | float) and not isinstance(latency, bool):
             latencies.append(max(0.0, float(latency)))
-        field_latency = row.get("field_latency_ms")
-        if isinstance(field_latency, int | float) and not isinstance(
-            field_latency, bool
-        ):
-            field_latencies.append(max(0.0, float(field_latency)))
-        teacher_latency = row.get("teacher_latency_ms")
-        if isinstance(teacher_latency, int | float) and not isinstance(
-            teacher_latency, bool
-        ):
-            teacher_latencies.append(max(0.0, float(teacher_latency)))
         if row.get("over_4s") is True or (
             isinstance(latency, int | float) and float(latency) > 4_000
         ):
             over_4s += 1
-        if row.get("full_search_required") is True:
+        is_fallback = str(row.get("status") or "") == "fallback"
+        if is_fallback:
+            fallbacks += 1
+        if is_fallback or (
+            "full_search_required" in row
+            and row.get("full_search_required") is not False
+        ):
             full_searches += 1
         if row.get("authority") == "field":
             active_rows += 1
+        if not _is_stable_candidate_row(row):
+            continue
+
+        stable_traces += 1
+        if session:
+            stable_sessions.add(session)
+        raw_field_ids = row.get("field_page_ids")
+        raw_teacher_ids = row.get("teacher_page_ids")
+        raw_committed_ids = row.get("committed_page_ids")
+        field_ids = {
+            str(value)
+            for value in (raw_field_ids if isinstance(raw_field_ids, list) else [])
+            if isinstance(value, str) and value
+        }
+        teacher_ids = {
+            str(value)
+            for value in (raw_teacher_ids if isinstance(raw_teacher_ids, list) else [])
+            if isinstance(value, str) and value
+        }
+        committed_ids = {
+            str(value)
+            for value in (
+                raw_committed_ids if isinstance(raw_committed_ids, list) else []
+            )
+            if isinstance(value, str) and value
+        }
+        if isinstance(raw_field_ids, list) and isinstance(raw_teacher_ids, list):
+            teacher_overlap += len(teacher_ids & field_ids)
+            field_pages += len(field_ids)
+            if teacher_ids:
+                coverage_evidence_traces += 1
+                if session:
+                    coverage_sessions.add(session)
+                teacher_pages += len(teacher_ids)
+        if (
+            isinstance(raw_field_ids, list)
+            and isinstance(raw_committed_ids, list)
+            and committed_ids
+        ):
+            commit_evidence_traces += 1
+            if session:
+                commit_sessions.add(session)
+            committed_pages += len(committed_ids)
+            committed_overlap += len(committed_ids & field_ids)
+        field_latency = row.get("field_latency_ms")
+        teacher_latency = row.get("teacher_latency_ms")
+        if (
+            isinstance(field_latency, int | float)
+            and not isinstance(field_latency, bool)
+            and isinstance(teacher_latency, int | float)
+            and not isinstance(teacher_latency, bool)
+        ):
+            paired_latency_traces += 1
+            if session:
+                paired_latency_sessions.add(session)
+            field_latencies.append(max(0.0, float(field_latency)))
+            teacher_latencies.append(max(0.0, float(teacher_latency)))
     return {
         "traces": len(rows),
         "sessions": len(sessions),
+        "stable_traces": stable_traces,
+        "stable_sessions": len(stable_sessions),
+        "coverage_evidence_traces": coverage_evidence_traces,
+        "coverage_evidence_sessions": len(coverage_sessions),
+        "commit_evidence_traces": commit_evidence_traces,
+        "commit_evidence_sessions": len(commit_sessions),
+        "paired_latency_traces": paired_latency_traces,
+        "paired_latency_sessions": len(paired_latency_sessions),
         "teacher_pages": teacher_pages,
         "field_pages": field_pages,
         "field_teacher_overlap": teacher_overlap,
@@ -189,10 +265,10 @@ def candidate_metrics(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
             "p95": _percentile(teacher_latencies, 0.95),
             "max": round(max(teacher_latencies), 3) if teacher_latencies else None,
         },
-        "p95_improvement_ms": _p95_improvement(
-            teacher_latencies, field_latencies
-        ),
+        "p95_improvement_ms": _p95_improvement(teacher_latencies, field_latencies),
         "over_4s": over_4s,
+        "fallbacks": fallbacks,
+        "fallback_rate": round(fallbacks / len(rows) if rows else 0.0, 6),
         "full_searches": full_searches,
         "full_search_rate": round(full_searches / len(rows) if rows else 0.0, 6),
         "active_traces": active_rows,
@@ -366,13 +442,22 @@ def _promotion_payload(metrics: dict[str, Any]) -> dict[str, Any]:
     used = metrics["processor_used"]
     learning = metrics["learning"]
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "status": "passed",
         "metrics": {
+            "stable_traces": int(candidate["quality_window_stable_traces"]),
+            "stable_sessions": int(candidate["quality_window_stable_sessions"]),
+            "coverage_evidence_traces": int(candidate["coverage_evidence_traces"]),
+            "coverage_evidence_sessions": int(candidate["coverage_evidence_sessions"]),
+            "commit_evidence_traces": int(candidate["commit_evidence_traces"]),
+            "commit_evidence_sessions": int(candidate["commit_evidence_sessions"]),
+            "paired_latency_traces": int(candidate["paired_latency_traces"]),
+            "paired_latency_sessions": int(candidate["paired_latency_sessions"]),
             "teacher_commit_coverage": float(candidate["teacher_commit_coverage"]),
             "precision_delta_points": float(learning["precision_delta_points"]),
             "recall_delta_points": float(learning["recall_delta_points"]),
             "over_4s": int(candidate["over_4s"]),
+            "fallback_rate": float(candidate["fallback_rate"]),
             "full_search_rate": float(candidate["full_search_rate"]),
             "processor_used_page_coverage": float(used["used_page_coverage"]),
             "processor_used_precision_proxy": float(used["used_precision_proxy"]),
@@ -392,10 +477,30 @@ def _seal(payload: dict[str, Any]) -> dict[str, Any]:
 
 def _failed_promotion(reason: str, metrics: dict[str, Any]) -> dict[str, Any]:
     payload = {
-        "schema_version": 1,
+        "schema_version": 2,
         "status": "held",
         "reason": reason,
         "metrics": {
+            "stable_traces": int(metrics["candidate"]["quality_window_stable_traces"]),
+            "stable_sessions": int(
+                metrics["candidate"]["quality_window_stable_sessions"]
+            ),
+            "coverage_evidence_traces": int(
+                metrics["candidate"]["coverage_evidence_traces"]
+            ),
+            "coverage_evidence_sessions": int(
+                metrics["candidate"]["coverage_evidence_sessions"]
+            ),
+            "commit_evidence_traces": int(
+                metrics["candidate"]["commit_evidence_traces"]
+            ),
+            "commit_evidence_sessions": int(
+                metrics["candidate"]["commit_evidence_sessions"]
+            ),
+            "paired_latency_traces": int(metrics["candidate"]["paired_latency_traces"]),
+            "paired_latency_sessions": int(
+                metrics["candidate"]["paired_latency_sessions"]
+            ),
             "teacher_commit_coverage": float(
                 metrics["candidate"]["teacher_commit_coverage"]
             ),
@@ -406,6 +511,7 @@ def _failed_promotion(reason: str, metrics: dict[str, Any]) -> dict[str, Any]:
                 metrics["processor_used"]["used_precision_proxy"]
             ),
             "over_4s": int(metrics["candidate"]["over_4s"]),
+            "fallback_rate": float(metrics["candidate"]["fallback_rate"]),
         },
     }
     return _seal(payload)
@@ -447,9 +553,16 @@ def _advance_rollout(
         return "candidate", 100, candidate_trace_count
     previous_mode = str(previous.get("effective_mode") or "candidate")
     previous_percent = int(previous.get("canary_percent") or 0)
-    started_at = int(previous.get("stage_started_trace_count") or 0)
     if previous_mode != "active" or previous_percent not in CANARY_STEPS:
         return "active", CANARY_STEPS[0], candidate_trace_count
+    if "stage_started_stable_trace_count" not in previous:
+        # The legacy counter used all turns, not stable quality attempts.  Never
+        # subtract unlike units: preserve the current canary and rebase it.
+        return "active", previous_percent, candidate_trace_count
+    try:
+        started_at = max(0, int(previous["stage_started_stable_trace_count"]))
+    except (TypeError, ValueError):
+        return "active", previous_percent, candidate_trace_count
     new_samples = max(0, candidate_trace_count - started_at)
     if new_samples < CANARY_ADVANCE_SAMPLES:
         return "active", previous_percent, started_at
@@ -539,6 +652,35 @@ def _persist_growth_artifacts(
         )
 
 
+def _candidate_growth_metrics(
+    rows: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Build stable-quality and all-turn operational windows independently."""
+
+    totals = candidate_metrics(rows)
+    operational = candidate_metrics(rows[-QUALITY_WINDOW:])
+    stable_rows = [row for row in rows if _is_stable_candidate_row(row)]
+    quality = candidate_metrics(stable_rows[-QUALITY_WINDOW:])
+    return {
+        **quality,
+        "traces": totals["traces"],
+        "sessions": totals["sessions"],
+        "stable_traces": totals["stable_traces"],
+        "stable_sessions": totals["stable_sessions"],
+        "active_traces": totals["active_traces"],
+        "quality_window_traces": operational["traces"],
+        "quality_window_sessions": operational["sessions"],
+        "quality_window_stable_traces": quality["stable_traces"],
+        "quality_window_stable_sessions": quality["stable_sessions"],
+        "latency_ms": operational["latency_ms"],
+        "over_4s": operational["over_4s"],
+        "fallbacks": operational["fallbacks"],
+        "fallback_rate": operational["fallback_rate"],
+        "full_searches": operational["full_searches"],
+        "full_search_rate": operational["full_search_rate"],
+    }
+
+
 def run_growth_cycle(
     *,
     dry_run: bool = False,
@@ -572,16 +714,7 @@ def run_growth_cycle(
     )
     recall_rows = _read_jsonl(inputs["recall_log_file"])
     pull_rows = _read_jsonl(inputs["pull_log_file"])
-    candidate_rows = _read_jsonl(candidate_trace_file)
-    candidate_totals = candidate_metrics(candidate_rows)
-    candidate_quality = candidate_metrics(candidate_rows[-QUALITY_WINDOW:])
-    candidate = {
-        **candidate_quality,
-        "traces": candidate_totals["traces"],
-        "sessions": candidate_totals["sessions"],
-        "active_traces": candidate_totals["active_traces"],
-        "quality_window_traces": candidate_quality["traces"],
-    }
+    candidate = _candidate_growth_metrics(_read_jsonl(candidate_trace_file))
     processor = processor_used_metrics(recall_rows, pull_rows)
     counts = dict(labels["counts"])
     label_gate = bool(labels["gates"]["field_learning_allowed"])
@@ -665,8 +798,24 @@ def run_growth_cycle(
         "labels": label_gate,
         "split_integrity": integrity["passed"],
         "locked_e2e": locked_e2e["passed"],
-        "candidate_samples": candidate["traces"] >= MIN_CANDIDATE_TRACES,
-        "candidate_sessions": candidate["sessions"] >= MIN_CANDIDATE_SESSIONS,
+        "candidate_samples": (
+            candidate["quality_window_stable_traces"] >= MIN_CANDIDATE_TRACES
+        ),
+        "candidate_sessions": (
+            candidate["quality_window_stable_sessions"] >= MIN_CANDIDATE_SESSIONS
+        ),
+        "candidate_coverage_evidence": (
+            candidate["coverage_evidence_traces"] >= MIN_CANDIDATE_TRACES
+            and candidate["coverage_evidence_sessions"] >= MIN_CANDIDATE_SESSIONS
+        ),
+        "candidate_commit_evidence": (
+            candidate["commit_evidence_traces"] >= MIN_CANDIDATE_TRACES
+            and candidate["commit_evidence_sessions"] >= MIN_CANDIDATE_SESSIONS
+        ),
+        "candidate_latency_evidence": (
+            candidate["paired_latency_traces"] >= MIN_CANDIDATE_TRACES
+            and candidate["paired_latency_sessions"] >= MIN_CANDIDATE_SESSIONS
+        ),
         "teacher_top30_coverage": (
             candidate["teacher_top30_coverage"] >= MIN_TEACHER_COVERAGE
         ),
@@ -711,7 +860,7 @@ def run_growth_cycle(
     effective_mode, canary_percent, stage_started = _advance_rollout(
         previous,
         authority_eligible=authority_eligible,
-        candidate_trace_count=int(candidate["traces"]),
+        candidate_trace_count=int(candidate["stable_traces"]),
     )
     if not label_gate:
         stage = "collecting_labels"
@@ -722,6 +871,9 @@ def run_growth_cycle(
             "locked_e2e",
             "candidate_samples",
             "candidate_sessions",
+            "candidate_coverage_evidence",
+            "candidate_commit_evidence",
+            "candidate_latency_evidence",
             "teacher_top30_coverage",
             "teacher_commit_coverage",
             "latency",
@@ -757,6 +909,7 @@ def run_growth_cycle(
         "effective_mode": effective_mode,
         "canary_percent": canary_percent,
         "stage_started_trace_count": stage_started,
+        "stage_started_stable_trace_count": stage_started,
         "field_learning_allowed": field_learning_allowed,
         "positive_learning_allowed": positive_learning_allowed,
         "policy_update_allowed": policy_update_allowed,
@@ -768,6 +921,9 @@ def run_growth_cycle(
             "strong_positive_sessions": MIN_STRONG_SESSIONS,
             "candidate_traces": MIN_CANDIDATE_TRACES,
             "candidate_sessions": MIN_CANDIDATE_SESSIONS,
+            "candidate_trace_scope": "stable_topic_attempt",
+            "candidate_evidence_traces": MIN_CANDIDATE_TRACES,
+            "candidate_evidence_sessions": MIN_CANDIDATE_SESSIONS,
             "processor_used_episodes": MIN_PROCESSOR_USED_EPISODES,
             "teacher_coverage": MIN_TEACHER_COVERAGE,
             "processor_used_coverage": MIN_PROCESSOR_USED_COVERAGE,

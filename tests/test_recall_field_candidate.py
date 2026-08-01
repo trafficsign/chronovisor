@@ -42,6 +42,9 @@ def test_candidate_and_teacher_run_but_teacher_keeps_authority(monkeypatch) -> N
     assert mode == "hybrid"
     assert metadata["authority"] == "teacher"
     assert metadata["missed_page_ids"] == ["c"]
+    assert metadata["quality_eligible"] is True
+    assert metadata["field_attempted"] is True
+    assert metadata["field_verified"] is True
 
 
 def test_topic_reset_skips_field_verify_but_never_full_search(monkeypatch) -> None:
@@ -68,6 +71,112 @@ def test_topic_reset_skips_field_verify_but_never_full_search(monkeypatch) -> No
 
     assert [row.page_id for row in results] == ["fresh"]
     assert metadata["reason"] == "topic_reset"
+    assert metadata["quality_eligible"] is False
+    assert metadata["field_attempted"] is False
+    assert metadata["field_verified"] is False
+
+
+def test_active_mode_fails_closed_when_field_verification_times_out(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    cfg = RecallFieldConfig(mode="active", canary_percent=100)
+    artifact = tmp_path / "promotion.json"
+    payload = {
+        "schema_version": 1,
+        "status": "passed",
+        "metrics": {
+            "teacher_commit_coverage": 0.99,
+            "precision_delta_points": -0.5,
+            "recall_delta_points": -0.5,
+            "over_4s": 0,
+            "processor_used_precision_proxy": 0.95,
+        },
+    }
+    artifact.write_text(
+        json.dumps(
+            {
+                **payload,
+                "snapshot_sha256": recall_field_candidate._canonical_sha256(payload),
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(recall_field_candidate, "PROMOTION_ARTIFACT", artifact)
+    monkeypatch.setattr(
+        recall_field_candidate.semantic_client,
+        "verify",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(TimeoutError),
+    )
+
+    results, mode, metadata = recall_field_candidate.run_candidate_teacher_pair(
+        query="query",
+        field_turn={
+            "session_hash": "0123456789abcdef",
+            "candidate_page_ids": ["field"],
+            "full_search_fallback": False,
+        },
+        teacher_search=lambda: ([page("teacher")], "hybrid"),
+        timeout_ms=500,
+        config=cfg,
+    )
+
+    assert [row.page_id for row in results] == ["teacher"]
+    assert mode == "hybrid"
+    assert metadata["status"] == "fallback"
+    assert metadata["reason"] == "TimeoutError"
+    assert metadata["authority"] == "teacher"
+    assert metadata["full_search_required"] is True
+    assert metadata["quality_eligible"] is True
+    assert metadata["field_attempted"] is True
+    assert metadata["field_verified"] is False
+
+    trace = recall_field_candidate.append_candidate_trace(
+        session_hash="0123456789abcdef",
+        prompt="private prompt",
+        observer=metadata,
+        committed_page_ids=["teacher"],
+        latency_ms=120,
+        path=tmp_path / "trace.jsonl",
+    )
+    assert trace["quality_eligible"] is True
+    assert trace["field_attempted"] is True
+    assert trace["field_verified"] is False
+
+
+def test_successful_empty_verification_falls_back_to_teacher(monkeypatch) -> None:
+    cfg = RecallFieldConfig(mode="active", canary_percent=100)
+    monkeypatch.setattr(
+        recall_field_candidate,
+        "authority_allowed",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        recall_field_candidate.semantic_client,
+        "verify",
+        lambda *_args, **_kwargs: [],
+    )
+
+    results, mode, metadata = recall_field_candidate.run_candidate_teacher_pair(
+        query="query",
+        field_turn={
+            "session_hash": "0123456789abcdef",
+            "candidate_page_ids": ["field"],
+            "full_search_fallback": False,
+        },
+        teacher_search=lambda: ([page("teacher")], "hybrid"),
+        timeout_ms=500,
+        config=cfg,
+    )
+
+    assert [row.page_id for row in results] == ["teacher"]
+    assert mode == "hybrid"
+    assert metadata["status"] == "fallback"
+    assert metadata["reason"] == "empty_verified_field"
+    assert metadata["authority"] == "teacher"
+    assert metadata["full_search_required"] is True
+    assert metadata["field_verified"] is True
+    assert metadata["quality_eligible"] is True
 
 
 def test_active_mode_rolls_back_without_passing_artifact(
@@ -191,9 +300,17 @@ def test_promotion_artifact_is_hash_bound_and_requires_nondegradation(
 ) -> None:
     path = tmp_path / "promotion.json"
     payload = {
-        "schema_version": 1,
+        "schema_version": 2,
         "status": "passed",
         "metrics": {
+            "stable_traces": 100,
+            "stable_sessions": 20,
+            "coverage_evidence_traces": 100,
+            "coverage_evidence_sessions": 20,
+            "commit_evidence_traces": 100,
+            "commit_evidence_sessions": 20,
+            "paired_latency_traces": 100,
+            "paired_latency_sessions": 20,
             "teacher_commit_coverage": 0.99,
             "precision_delta_points": -0.5,
             "recall_delta_points": -0.5,
@@ -212,6 +329,35 @@ def test_promotion_artifact_is_hash_bound_and_requires_nondegradation(
     )
 
     assert recall_field_candidate.authority_allowed(path) is True
+    legacy = {
+        **payload,
+        "schema_version": 1,
+        "metrics": {
+            key: value
+            for key, value in payload["metrics"].items()
+            if not key.startswith(("stable_", "coverage_", "commit_", "paired_"))
+        },
+    }
+    path.write_text(
+        json.dumps(
+            {
+                **legacy,
+                "snapshot_sha256": recall_field_candidate._canonical_sha256(legacy),
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert recall_field_candidate.authority_allowed(path) is False
+
+    path.write_text(
+        json.dumps(
+            {
+                **payload,
+                "snapshot_sha256": recall_field_candidate._canonical_sha256(payload),
+            }
+        ),
+        encoding="utf-8",
+    )
     tampered = json.loads(path.read_text(encoding="utf-8"))
     tampered["metrics"]["recall_delta_points"] = -2.0
     path.write_text(json.dumps(tampered), encoding="utf-8")
@@ -241,6 +387,9 @@ def test_candidate_trace_hashes_prompt_and_measures_commit_coverage(tmp_path) ->
         observer={
             "status": "observed",
             "authority": "teacher",
+            "quality_eligible": True,
+            "field_attempted": True,
+            "field_verified": True,
             "field_page_ids": ["a", "b"],
             "teacher_page_ids": ["a", "c"],
             "missed_page_ids": ["c"],
@@ -252,5 +401,8 @@ def test_candidate_trace_hashes_prompt_and_measures_commit_coverage(tmp_path) ->
     serialized = path.read_text(encoding="utf-8")
 
     assert record["teacher_commit_coverage"] == 0.5
+    assert record["quality_eligible"] is True
+    assert record["field_attempted"] is True
+    assert record["field_verified"] is True
     assert "private prompt" not in serialized
     assert json.loads(serialized)["prompt_sha256"] == record["prompt_sha256"]

@@ -24,6 +24,8 @@ CANDIDATE_TRACE_FILE = (
     CHRONOVISOR_ROOT / "runtime" / "recall-field" / "candidate-trace.jsonl"
 )
 PROMOTION_ARTIFACT = CHRONOVISOR_ROOT / "runtime" / "recall-field" / "promotion.json"
+MIN_PROMOTION_TRACES = 100
+MIN_PROMOTION_SESSIONS = 20
 
 
 def _canonical_sha256(payload: dict[str, Any]) -> str:
@@ -81,7 +83,11 @@ def authority_allowed(path: Path | None = None) -> bool:
         payload = json.loads(artifact.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return False
-    if not isinstance(payload, dict) or payload.get("status") != "passed":
+    if (
+        not isinstance(payload, dict)
+        or payload.get("schema_version") != 2
+        or payload.get("status") != "passed"
+    ):
         return False
     expected_sha = str(payload.get("snapshot_sha256") or "")
     unsigned = {
@@ -93,6 +99,18 @@ def authority_allowed(path: Path | None = None) -> bool:
     try:
         return bool(
             isinstance(metrics, dict)
+            and int(metrics.get("stable_traces") or 0) >= MIN_PROMOTION_TRACES
+            and int(metrics.get("stable_sessions") or 0) >= MIN_PROMOTION_SESSIONS
+            and int(metrics.get("coverage_evidence_traces") or 0)
+            >= MIN_PROMOTION_TRACES
+            and int(metrics.get("coverage_evidence_sessions") or 0)
+            >= MIN_PROMOTION_SESSIONS
+            and int(metrics.get("commit_evidence_traces") or 0) >= MIN_PROMOTION_TRACES
+            and int(metrics.get("commit_evidence_sessions") or 0)
+            >= MIN_PROMOTION_SESSIONS
+            and int(metrics.get("paired_latency_traces") or 0) >= MIN_PROMOTION_TRACES
+            and int(metrics.get("paired_latency_sessions") or 0)
+            >= MIN_PROMOTION_SESSIONS
             and float(metrics.get("teacher_commit_coverage") or 0.0) >= 0.99
             and float(metrics.get("precision_delta_points") or -100.0) >= -1.0
             and float(metrics.get("recall_delta_points") or -100.0) >= -1.0
@@ -188,6 +206,9 @@ def run_candidate_teacher_pair(
                     6,
                 ),
                 "full_search_required": True,
+                "quality_eligible": False,
+                "field_attempted": False,
+                "field_verified": False,
                 "field_latency_ms": None,
                 "teacher_latency_ms": teacher_latency_ms,
                 "authority": "teacher",
@@ -221,6 +242,42 @@ def run_candidate_teacher_pair(
     field_ids = [str(row.page_id) for row in verified[:30]]
     overlap = len(set(teacher_ids) & set(field_ids))
     coverage = overlap / max(1, len(set(teacher_ids)))
+    verify_completed = verify_meta.get("status") == "verified"
+    if not verify_completed or not verified:
+        fallback_reason = (
+            "empty_verified_field"
+            if verify_completed
+            else str(verify_meta.get("reason") or "field_verification_failed")
+        )
+        return (
+            teacher_results,
+            teacher_mode,
+            {
+                **verify_meta,
+                "status": "fallback",
+                "reason": fallback_reason,
+                "authority": "teacher",
+                "field_page_ids": field_ids,
+                "teacher_page_ids": teacher_ids,
+                "teacher_top30_coverage": round(coverage, 6),
+                "missed_page_ids": [
+                    page_id for page_id in teacher_ids if page_id not in set(field_ids)
+                ],
+                "rollback": cfg.mode == "active",
+                "rollback_reason": (
+                    "field_verification_empty"
+                    if verify_completed
+                    else "field_verification_failed"
+                ),
+                "full_search_required": True,
+                "quality_eligible": True,
+                "field_attempted": True,
+                "field_verified": verify_completed,
+                "field_latency_ms": int(verify_meta.get("latency_ms") or 0),
+                "teacher_latency_ms": teacher_latency_ms,
+                "effective_mode": "shadow",
+            },
+        )
     promoted = bool(
         cfg.mode == "active" and certificate_boundary_enabled and authority_allowed()
     )
@@ -246,6 +303,9 @@ def run_candidate_teacher_pair(
                 else ""
             ),
             "full_search_required": False,
+            "quality_eligible": True,
+            "field_attempted": True,
+            "field_verified": True,
             "field_latency_ms": int(verify_meta.get("latency_ms") or 0),
             "teacher_latency_ms": teacher_latency_ms,
             "effective_mode": "active" if promoted else "shadow",
@@ -284,6 +344,9 @@ def append_candidate_trace(
         "authority": str(observer.get("authority") or "teacher"),
         "fallback_reason": str(observer.get("reason") or ""),
         "full_search_required": observer.get("full_search_required") is True,
+        "quality_eligible": observer.get("quality_eligible") is True,
+        "field_attempted": observer.get("field_attempted") is True,
+        "field_verified": observer.get("field_verified") is True,
         "teacher_top30_coverage": float(observer.get("teacher_top30_coverage") or 0.0),
         "teacher_commit_coverage": round(commit_coverage, 6),
         "field_page_ids": field_ids,
