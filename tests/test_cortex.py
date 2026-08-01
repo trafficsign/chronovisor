@@ -702,7 +702,7 @@ def test_cortex_static_view_preserves_fable_layout_and_uses_live_data() -> None:
     assert 'phase: "triage"' in script
     assert 'phase: "consensus"' in script
     assert "scheduleDemoTransport(2550" in script
-    assert "cortexMetrics.cometTrailSegments += 1;" in script
+    assert "cortexMetrics.cometTrailSegments += segmentCount;" in script
     assert "cortexMetrics.cometImpacts += 1;" in script
     assert "cortexMetrics.explorationArcs += 1;" in script
     assert "cortexMetrics.consolidationEdges += 1;" in script

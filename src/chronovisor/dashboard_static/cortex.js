@@ -1995,23 +1995,38 @@
     };
   }
 
-  function strokeCaptureCometTrail(from, to, tailRatio, brightness, widthScale) {
-    context.strokeStyle = rgba(RGB_CAPTURE, brightness * 0.18);
-    context.lineWidth = (5.2 - tailRatio * 3.8) * widthScale;
+  function traceCaptureCometPoints(points, start = 0, end = points.length - 1) {
+    if (end <= start || !points[start]) return false;
     context.beginPath();
-    context.moveTo(from.x, from.y);
-    context.lineTo(to.x, to.y);
-    context.stroke();
-    context.strokeStyle = rgba(
-      mix(RGB_CAPTURE, RGB_HOT, 1 - tailRatio),
-      brightness * 0.92,
-    );
-    context.lineWidth = Math.max(0.35, (1.45 - tailRatio) * widthScale);
-    context.beginPath();
-    context.moveTo(from.x, from.y);
-    context.lineTo(to.x, to.y);
-    context.stroke();
-    cortexMetrics.cometTrailSegments += 1;
+    context.moveTo(points[start].x, points[start].y);
+    for (let index = start + 1; index <= end; index += 1) {
+      context.lineTo(points[index].x, points[index].y);
+    }
+    return true;
+  }
+
+  function drawCaptureCometTrail(points, comet, fade) {
+    const segmentCount = points.length - 1;
+    const widthScale = comet === 0 ? 1 : 0.62;
+    if (traceCaptureCometPoints(points)) {
+      context.strokeStyle = rgba(RGB_CAPTURE, fade * 0.15);
+      context.lineWidth = 5.2 * widthScale;
+      context.stroke();
+    }
+    const bandCount = 5;
+    for (let band = 0; band < bandCount; band += 1) {
+      const start = Math.floor(segmentCount * band / bandCount);
+      const end = Math.max(start + 1, Math.floor(segmentCount * (band + 1) / bandCount));
+      const tailRatio = (start + end) / (segmentCount * 2);
+      if (!traceCaptureCometPoints(points, start, end)) continue;
+      context.strokeStyle = rgba(
+        mix(RGB_CAPTURE, RGB_HOT, 1 - tailRatio),
+        fade * Math.pow(1 - tailRatio, 1.65) * 0.92,
+      );
+      context.lineWidth = Math.max(0.35, (1.45 - tailRatio) * widthScale);
+      context.stroke();
+    }
+    cortexMetrics.cometTrailSegments += segmentCount;
   }
 
   function drawCaptureCometHead(comet, head, fade) {
@@ -2069,32 +2084,36 @@
     cortexMetrics.cometImpacts += 1;
   }
 
-  function captureCometPoint(effect, comet, localProgress, star) {
+  function captureCometOrbit(effect, comet, star) {
     const seed = deterministicUnit(
       effect.captureId || effect.label,
       effect.seq * 101 + comet * 37,
     );
+    return {
+      ellipse: 0.53 + seed * 0.15,
+      outerRadius: Math.max(
+        star.radius * (2.25 + seed * 0.35),
+        Math.hypot(width, height) * (0.52 + seed * 0.08),
+      ),
+      startAngle: -0.62 + comet * 2.23 + (seed - 0.5) * 0.7,
+      tilt: (seed - 0.5) * 0.5,
+      turns: 1.08 + seed * 0.42 + (comet === 0 ? 0.2 : 0),
+    };
+  }
+
+  function captureCometPoint(orbit, localProgress, star) {
     const journey = clamp(localProgress / 0.91);
     const accelerated = Math.pow(journey, 1.72);
-    const startAngle = -0.62 + comet * 2.23 + (seed - 0.5) * 0.7;
-    const turns = 1.08 + seed * 0.42 + (comet === 0 ? 0.2 : 0);
-    const angle = startAngle + accelerated * turns * Math.PI * 2;
-    const outerRadius = Math.max(
-      star.radius * (2.25 + seed * 0.35),
-      Math.hypot(width, height) * (0.52 + seed * 0.08),
-    );
-    const radius = outerRadius * (1 - smoothstep(accelerated));
-    const ellipse = 0.53 + seed * 0.15;
-    const tilt = (seed - 0.5) * 0.5;
+    const angle = orbit.startAngle + accelerated * orbit.turns * Math.PI * 2;
+    const radius = orbit.outerRadius * (1 - smoothstep(accelerated));
     const orbitX = Math.cos(angle) * radius;
-    const orbitY = Math.sin(angle) * radius * ellipse;
-    const cosTilt = Math.cos(tilt);
-    const sinTilt = Math.sin(tilt);
+    const orbitY = Math.sin(angle) * radius * orbit.ellipse;
+    const cosTilt = Math.cos(orbit.tilt);
+    const sinTilt = Math.sin(orbit.tilt);
     return {
       x: star.x + orbitX * cosTilt - orbitY * sinTilt,
       y: star.y + orbitX * sinTilt + orbitY * cosTilt,
       journey,
-      seed,
     };
   }
 
@@ -2104,25 +2123,17 @@
     const localProgress = clamp((progress - delay) / (1 - delay));
     if (progress < delay) return;
 
-    const head = captureCometPoint(effect, comet, localProgress, star);
+    const orbit = captureCometOrbit(effect, comet, star);
+    const head = captureCometPoint(orbit, localProgress, star);
     const tailSpan = 0.075 + head.journey * (comet === 0 ? 0.19 : 0.135);
     const segmentCount = comet === 0 ? 30 : 20;
-    let previous = head;
+    const points = [head];
     for (let segment = 1; segment <= segmentCount; segment += 1) {
       const tailRatio = segment / segmentCount;
       const tailProgress = Math.max(0, localProgress - tailSpan * tailRatio);
-      const point = captureCometPoint(effect, comet, tailProgress, star);
-      const brightness = fade * Math.pow(1 - tailRatio, 1.65);
-      const widthScale = comet === 0 ? 1 : 0.62;
-      strokeCaptureCometTrail(
-        previous,
-        point,
-        tailRatio,
-        brightness,
-        widthScale,
-      );
-      previous = point;
+      points.push(captureCometPoint(orbit, tailProgress, star));
     }
+    drawCaptureCometTrail(points, comet, fade);
     drawCaptureCometHead(comet, head, fade);
     drawCaptureImpact(comet, localProgress, fade, star);
   }
