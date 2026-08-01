@@ -66,13 +66,13 @@ a{color:var(--accent)}
 </head>
 <body>
 <script type="application/json" id="plan-meta">
-{"task_id":"plan_fed0fc45ec8a43aa98a20220874d5495","created_at":"2026-08-01T13:40:22+09:00","状態":"ready","slug":"typed-graphrag-local-consensus-recall"}
+{"task_id":"plan_fed0fc45ec8a43aa98a20220874d5495","created_at":"2026-08-01T13:40:22+09:00","状態":"done","slug":"typed-graphrag-local-consensus-recall"}
 </script>
 
 <header>
 <h1>Plan: <span id="plan-title">Chronovisor Typed GraphRAG + Local Consensus Recall Calibration</span></h1>
 <div class="meta-bar">
-<span class="badge" data-bind="状態" data-state="ready">ready</span>
+<span class="badge" data-bind="状態" data-state="done">done</span>
 <span><code data-bind="task_id">plan_fed0fc45ec8a43aa98a20220874d5495</code></span>
 <span data-bind="created_at">2026-08-01T13:40:22+09:00</span>
 </div>
@@ -267,107 +267,107 @@ Dashboard / Cortex = read-only projection（relation path / votes / gates）</co
 
 <h3>Phase 0 — Baseline、authority、不変条件を凍結</h3>
 <ol class="checklist">
-<li><input type="checkbox"><span>GitHub HEAD、runtime archive、live config、model inventory、Field growth、co-fire、Recall calibration、search evalを再取得し、query本文を含まないsealed baseline manifestを作る。</span></li>
-<li><input type="checkbox"><span>現行 / Graphのみ / Rubricのみ / Graph+Rubricの四条件を同一query、同一candidate/token/deadline、同一time-ordered splitで比較するpreregistrationを固定する。</span></li>
-<li><input type="checkbox"><span>現行manual-94に加え、single-hop、multi-hop、global synthesis、entity ambiguity、alias collision、topic shift、hub false-positive、今回のような無関係カード誤注入を含むlocked fixtureを用意する。</span></li>
-<li><input type="checkbox"><span>page labelとrelation/entity/rubric labelの母数・split・gateを分離し、relationの大量生成で既存strong positive数を水増しできないcontract testを先に書く。</span></li>
-<li><input type="checkbox"><span>外部API 0、同期4秒超過0、raw prompt/本文のruntime投影禁止、現行teacherをrollback先にする不変条件をmachine-checkableにする。</span></li>
+<li><input type="checkbox" checked><span>GitHub HEAD、runtime archive、live config、model inventory、Field growth、co-fire、Recall calibration、search evalを再取得し、query本文を含まないsealed baseline manifestを作る。</span></li>
+<li><input type="checkbox" checked><span>現行 / Graphのみ / Rubricのみ / Graph+Rubricの四条件を同一query、同一candidate/token/deadline、同一time-ordered splitで比較するpreregistrationを固定する。</span></li>
+<li><input type="checkbox" checked><span>現行manual-94に加え、single-hop、multi-hop、global synthesis、entity ambiguity、alias collision、topic shift、hub false-positive、今回のような無関係カード誤注入を含むlocked fixtureを用意する。</span></li>
+<li><input type="checkbox" checked><span>page labelとrelation/entity/rubric labelの母数・split・gateを分離し、relationの大量生成で既存strong positive数を水増しできないcontract testを先に書く。</span></li>
+<li><input type="checkbox" checked><span>外部API 0、同期4秒超過0、raw prompt/本文のruntime投影禁止、現行teacherをrollback先にする不変条件をmachine-checkableにする。</span></li>
 </ol>
 <p class="gate">受入ゲート: 同じmanifestでbaselineを再実行でき、四条件の差分がfeature flagだけに帰属する。split leakage=0、外部model call=0をテストで証明する。</p>
 
 <h3>Phase 1 — Append-only Typed Knowledge Graph契約</h3>
 <ol class="checklist">
-<li><input type="checkbox"><span><code>knowledge_graph/schema.py</code>へentity mention、entity candidate、relation event、community、consensus receipt、promotionのversioned schemaを追加する。</span></li>
-<li><input type="checkbox"><span><code>knowledge_graph/store.py</code>へowner-only permission、file lock、idempotent append、hash chain、sealed snapshot、atomic replace、read-back、corrupt tail recoveryを実装する。</span></li>
-<li><input type="checkbox"><span>relation IDとentity candidate IDをcontent/model/rubric digest込みで決定的にし、再実行で重複を増やさない。</span></li>
-<li><input type="checkbox"><span>source content変更、page rename/archive/superseded、alias変更でrelationを<code>stale</code>にし、再検証まで候補権限から除外する。</span></li>
-<li><input type="checkbox"><span>同じsource-targetでも複数predicate・複数根拠を失わないevidence bundleを実装する。既存<code>TypedEdge</code>の後方互換出力は固定する。</span></li>
+<li><input type="checkbox" checked><span><code>knowledge_graph/schema.py</code>へentity mention、entity candidate、relation event、community、consensus receipt、promotionのversioned schemaを追加する。</span></li>
+<li><input type="checkbox" checked><span><code>knowledge_graph/store.py</code>へowner-only permission、file lock、idempotent append、hash chain、sealed snapshot、atomic replace、read-back、corrupt tail recoveryを実装する。</span></li>
+<li><input type="checkbox" checked><span>relation IDとentity candidate IDをcontent/model/rubric digest込みで決定的にし、再実行で重複を増やさない。</span></li>
+<li><input type="checkbox" checked><span>source content変更、page rename/archive/superseded、alias変更でrelationを<code>stale</code>にし、再検証まで候補権限から除外する。</span></li>
+<li><input type="checkbox" checked><span>同じsource-targetでも複数predicate・複数根拠を失わないevidence bundleを実装する。既存<code>TypedEdge</code>の後方互換出力は固定する。</span></li>
 </ol>
 <p class="gate">受入ゲート: append-only chain、replay、idempotency、retract/split、content drift、同一target複数根拠、concurrent writer、corrupt recoveryが決定的。既存graph fixtureの出力はflag offでbyte-equivalent。</p>
 
 <h3>Phase 2 — RAGU型Graph Builderをsleep/backgroundへ追加</h3>
 <ol class="checklist">
-<li><input type="checkbox"><span>changed page digestだけを対象に、Stage Aでentity mentionを抽出し、Stage Bで確定mention集合に拘束したrelationを抽出する。全relationにevidence span/source digestを必須化する。</span></li>
-<li><input type="checkbox"><span>既定producerをローカルモデルに限定し、JSON Schema、temperature/seed固定、context/token上限、prompt injection耐性、retry上限を既存structured callへ統合する。</span></li>
-<li><input type="checkbox"><span>producer自身を独立reviewerとして数えない。重要merge/relationは残り2モデルまたは別role epochで検証し、no-quorumはheldにする。</span></li>
-<li><input type="checkbox"><span>Graph Builderをsleep-cycleの独立laneへ追加し、foreground Recall、Semantic、Reranker、Ingest generation稼働中はpauseする。単一worker、queue上限、日次model-seconds/token上限、digest cacheを実装する。</span></li>
-<li><input type="checkbox"><span>Meno-Lite-0.1は任意lab challengerとし、未導入でも本計画が完了するようにする。導入時も日本語/英語、Apple Silicon latency、relation precisionで既存モデルと比較する。</span></li>
+<li><input type="checkbox" checked><span>changed page digestだけを対象に、Stage Aでentity mentionを抽出し、Stage Bで確定mention集合に拘束したrelationを抽出する。全relationにevidence span/source digestを必須化する。</span></li>
+<li><input type="checkbox" checked><span>既定producerをローカルモデルに限定し、JSON Schema、temperature/seed固定、context/token上限、prompt injection耐性、retry上限を既存structured callへ統合する。</span></li>
+<li><input type="checkbox" checked><span>producer自身を独立reviewerとして数えない。重要merge/relationは残り2モデルまたは別role epochで検証し、no-quorumはheldにする。</span></li>
+<li><input type="checkbox" checked><span>Graph Builderをsleep-cycleの独立laneへ追加し、foreground Recall、Semantic、Reranker、Ingest generation稼働中はpauseする。単一worker、queue上限、日次model-seconds/token上限、digest cacheを実装する。</span></li>
+<li><input type="checkbox" checked><span>Meno-Lite-0.1は任意lab challengerとし、未導入でも本計画が完了するようにする。導入時も日本語/英語、Apple Silicon latency、relation precisionで既存モデルと比較する。</span></li>
 </ol>
 <p class="gate">受入ゲート: 外部通信0。changed pageだけを一度処理し、同じdigestでmodel call 0。schema/evidence不備はproposedにすら入れない。foreground p95と4秒deadlineを非劣化。</p>
 
 <h3>Phase 3 — Entity consolidationとCommunity index</h3>
 <ol class="checklist">
-<li><input type="checkbox"><span>casefold/Unicode/alias exact、Nemotron embedding、DBSCAN系clusteringを組み合わせてmerge候補を生成するが、cluster結果をauthorityにしない。</span></li>
-<li><input type="checkbox"><span>entity mergeとrelation truthを別decision laneで判定し、同名異義、略称、モデルversion、人物/組織/製品衝突、誤merge splitをfixture化する。</span></li>
-<li><input type="checkbox"><span>verified以上のgraphだけからLeiden communityをderived artifactとして作り、community membershipとsummary source refsを保存する。</span></li>
-<li><input type="checkbox"><span>community summaryはローカルモデルで生成し、source page refs/digestsを必須にする。summary本文自体をgold evidenceにしない。</span></li>
-<li><input type="checkbox"><span>incremental invalidation、community再編の安定性、巨大hub抑制、最大community/page/relation予算を実装する。</span></li>
+<li><input type="checkbox" checked><span>casefold/Unicode/alias exact、Nemotron embedding、DBSCAN系clusteringを組み合わせてmerge候補を生成するが、cluster結果をauthorityにしない。</span></li>
+<li><input type="checkbox" checked><span>entity mergeとrelation truthを別decision laneで判定し、同名異義、略称、モデルversion、人物/組織/製品衝突、誤merge splitをfixture化する。</span></li>
+<li><input type="checkbox" checked><span>verified以上のgraphだけからLeiden communityをderived artifactとして作り、community membershipとsummary source refsを保存する。</span></li>
+<li><input type="checkbox" checked><span>community summaryはローカルモデルで生成し、source page refs/digestsを必須にする。summary本文自体をgold evidenceにしない。</span></li>
+<li><input type="checkbox" checked><span>incremental invalidation、community再編の安定性、巨大hub抑制、最大community/page/relation予算を実装する。</span></li>
 </ol>
 <p class="gate">受入ゲート: 誤merge率、split復元率、unknown entity hold、community再計算の決定性をlocked setで測定。sourceを辿れないsummaryは検索候補に使わない。</p>
 
 <h3>Phase 4 — Typed GraphRAG candidate branchを既存検索/Fieldへ接続</h3>
 <ol class="checklist">
-<li><input type="checkbox"><span><code>typed_neighbors()</code>へrelation providerとstatus filterを追加し、既存callerを変更せずflag offの出力を維持する。</span></li>
-<li><input type="checkbox"><span>query planをdirect/local/global/mixedへ分類する。simple exact queryは現行fast path、multi-hopのみrelation traversal、global questionのみcommunity候補を使う。</span></li>
-<li><input type="checkbox"><span>relation pathにrelation IDs、predicate、direction、hop、evidence refs、lifecycle、各weight componentを残す。semantic verifyの結果をrelation真偽とは記録しない。</span></li>
-<li><input type="checkbox"><span>最初は独立shadow channelとして順位を変更せず比較する。candidate昇格後もverified以上だけを候補unionへ追加し、最終Page Certificateを必須にする。</span></li>
-<li><input type="checkbox"><span>Fieldはproposed edgeを伝播しない。verifiedはcandidate bufferのみ、repeatedly_used以上だけpositive学習、authoritativeだけactive bufferへ許可する。</span></li>
-<li><input type="checkbox"><span>per-predicate cap、degree normalization、hub penalty、cycle/self-edge防止、max hop/node/edge、deadline fallbackを適用する。</span></li>
+<li><input type="checkbox" checked><span><code>typed_neighbors()</code>へrelation providerとstatus filterを追加し、既存callerを変更せずflag offの出力を維持する。</span></li>
+<li><input type="checkbox" checked><span>query planをdirect/local/global/mixedへ分類する。simple exact queryは現行fast path、multi-hopのみrelation traversal、global questionのみcommunity候補を使う。</span></li>
+<li><input type="checkbox" checked><span>relation pathにrelation IDs、predicate、direction、hop、evidence refs、lifecycle、各weight componentを残す。semantic verifyの結果をrelation真偽とは記録しない。</span></li>
+<li><input type="checkbox" checked><span>最初は独立shadow channelとして順位を変更せず比較する。candidate昇格後もverified以上だけを候補unionへ追加し、最終Page Certificateを必須にする。</span></li>
+<li><input type="checkbox" checked><span>Fieldはproposed edgeを伝播しない。verifiedはcandidate bufferのみ、repeatedly_used以上だけpositive学習、authoritativeだけactive bufferへ許可する。</span></li>
+<li><input type="checkbox" checked><span>per-predicate cap、degree normalization、hub penalty、cycle/self-edge防止、max hop/node/edge、deadline fallbackを適用する。</span></li>
 </ol>
 <p class="gate">受入ゲート: shadowで現行順位・注入が不変。2-hop pathの全relation/evidenceを追跡可能。topic reset・低確信・store stale/corrupt時は即座に現行teacherへfallbackする。</p>
 
 <h3>Phase 5 — Local Consensus JudgeとRubric Calibration</h3>
 <ol class="checklist">
-<li><input type="checkbox"><span>Decision Routerへ<code>relation_verification</code>、<code>entity_merge_verification</code>、<code>recall_usefulness_judgment</code>、<code>recall_rubric_calibration</code>の専用lane/schema/prompt/contract casesを追加する。</span></li>
-<li><input type="checkbox"><span>客観判定（evidence support、contradiction、provenance、digest、unknown ID）は詳細rubric + deterministic checks、主観判定（必要性、marginal utility、topic relevance）は校正rubricへ分離する。</span></li>
-<li><input type="checkbox"><span>zero-shot/current rubric、generated rubric、diverse few-shot、rubric calibrationを10/30件のcandidate setから比較する。MIPROv2/GEPAは同じgateに勝つ場合だけ任意採用する。</span></li>
-<li><input type="checkbox"><span>case選択はrelevant、adjacent-but-unneeded、hub false positive、self-reference、topic switch、stale info、personal context、read-worthy、multi-hopを層化し、重複query/sessionを除く。</span></li>
-<li><input type="checkbox"><span>三者のmodel別precision/recall、ECE/Brier、abstention、pairwise error correlation、unanimous-wrong率、best-single比ensemble利得をlocked goldで測る。</span></li>
-<li><input type="checkbox"><span>採用rubric artifactだけを同期9B→35B Processorへロードする。同期Hookから20B/26B/35B三者を連続起動しないことをcontract testで固定する。</span></li>
+<li><input type="checkbox" checked><span>Decision Routerへ<code>relation_verification</code>、<code>entity_merge_verification</code>、<code>recall_usefulness_judgment</code>、<code>recall_rubric_calibration</code>の専用lane/schema/prompt/contract casesを追加する。</span></li>
+<li><input type="checkbox" checked><span>客観判定（evidence support、contradiction、provenance、digest、unknown ID）は詳細rubric + deterministic checks、主観判定（必要性、marginal utility、topic relevance）は校正rubricへ分離する。</span></li>
+<li><input type="checkbox" checked><span>zero-shot/current rubric、generated rubric、diverse few-shot、rubric calibrationを10/30件のcandidate setから比較する。MIPROv2/GEPAは同じgateに勝つ場合だけ任意採用する。</span></li>
+<li><input type="checkbox" checked><span>case選択はrelevant、adjacent-but-unneeded、hub false positive、self-reference、topic switch、stale info、personal context、read-worthy、multi-hopを層化し、重複query/sessionを除く。</span></li>
+<li><input type="checkbox" checked><span>三者のmodel別precision/recall、ECE/Brier、abstention、pairwise error correlation、unanimous-wrong率、best-single比ensemble利得をlocked goldで測る。</span></li>
+<li><input type="checkbox" checked><span>採用rubric artifactだけを同期9B→35B Processorへロードする。同期Hookから20B/26B/35B三者を連続起動しないことをcontract testで固定する。</span></li>
 </ol>
 <p class="gate">受入ゲート: 外部call=0、session/query leakage=0、各splitにpositive/negativeあり。false-passを悪化させず、best single modelをensembleが上回る。相関が高くensemble利得がない場合は現行rubricを維持する。</p>
 
 <h3>Phase 6 — Label Ledgerと既存自己成長ループへ統合</h3>
 <ol class="checklist">
-<li><input type="checkbox"><span>合議receipt、relation path、entity merge、rubric outcomeをprovenance付きLabel Ledgerへjoinし、<code>subject_kind</code>ごとにcount/gate/splitを完全分離する。</span></li>
-<li><input type="checkbox"><span>単なるgraph exposure、candidate表示、合議passをstrongにしない。保存済みpathを経由したused pageだけrelation strong候補にする。</span></li>
-<li><input type="checkbox"><span>同じrelation pathが異なる実セッションで反復利用された場合だけ<code>repeatedly_used</code>へ昇格する。retraction/negative feedbackは過去のpositiveを上書きせず対向eventとして残す。</span></li>
-<li><input type="checkbox"><span>既存Recall Growthへrelation/Judge品質gateを追加し、positive co-fire、typed relation weight、rubric採用を一つのpolicy history/LKG/rollbackで管理する。</span></li>
-<li><input type="checkbox"><span>200 strong / 20 sessions等の既存page gateは維持し、relation/entity/rubricは別々の最低母数・session分散・lower confidence boundをpreregistered evalから確定する。</span></li>
-<li><input type="checkbox"><span>実装後に手動で有効化する必要がないよう、データ成熟時はsealed gate→5/25/100%を自動進行し、悪化時は自動shadow rollbackする。</span></li>
+<li><input type="checkbox" checked><span>合議receipt、relation path、entity merge、rubric outcomeをprovenance付きLabel Ledgerへjoinし、<code>subject_kind</code>ごとにcount/gate/splitを完全分離する。</span></li>
+<li><input type="checkbox" checked><span>単なるgraph exposure、candidate表示、合議passをstrongにしない。保存済みpathを経由したused pageだけrelation strong候補にする。</span></li>
+<li><input type="checkbox" checked><span>同じrelation pathが異なる実セッションで反復利用された場合だけ<code>repeatedly_used</code>へ昇格する。retraction/negative feedbackは過去のpositiveを上書きせず対向eventとして残す。</span></li>
+<li><input type="checkbox" checked><span>既存Recall Growthへrelation/Judge品質gateを追加し、positive co-fire、typed relation weight、rubric採用を一つのpolicy history/LKG/rollbackで管理する。</span></li>
+<li><input type="checkbox" checked><span>200 strong / 20 sessions等の既存page gateは維持し、relation/entity/rubricは別々の最低母数・session分散・lower confidence boundをpreregistered evalから確定する。</span></li>
+<li><input type="checkbox" checked><span>実装後に手動で有効化する必要がないよう、データ成熟時はsealed gate→5/25/100%を自動進行し、悪化時は自動shadow rollbackする。</span></li>
 </ol>
 <p class="gate">受入ゲート: label provenance join率100%、orphan/ambiguous receiptは棄却、page gate水増し0、policy history chain正常。再起動後も同じ成熟状態を復元し、将来の手動TODOを残さない。</p>
 
 <h3>Phase 7 — Cortex / Observatoryを関係グラフの実デバッガへ拡張</h3>
 <ol class="checklist">
-<li><input type="checkbox"><span>既存<code>/cortex</code>へrelation layer filter、lifecycle、predicate、direction、community、active path、consensusを追加し、新しい別画面は作らない。</span></li>
-<li><input type="checkbox"><span>右HUDにrelation ID、source/target、evidence ref、status、producer、三者vote/quorum、used count、promotion/hold/retract reasonを表示する。</span></li>
-<li><input type="checkbox"><span>静的relationは細いbase line/dashで表現し、黄色のtraveling electric arcは実Field spread eventだけに予約する。表示だけのedgeを発火に見せない。</span></li>
-<li><input type="checkbox"><span>active nodeのサイズは変えず、既存halo/発光で示す。relation overlay、community hull、labelが重なって可読性を落とさないLODを実装する。</span></li>
-<li><input type="checkbox"><span>ObservatoryへGraph Builder backlog/active model、relation counts by state、merge holds、community freshness、Judge disagreement/correlation、外部call=0、各rollout gateを追加する。</span></li>
-<li><input type="checkbox"><span>projectionはbrowser-safeなID/digest/短いreasonだけにし、raw prompt、evidence本文、sensitive page metadataを渡さない。</span></li>
+<li><input type="checkbox" checked><span>既存<code>/cortex</code>へrelation layer filter、lifecycle、predicate、direction、community、active path、consensusを追加し、新しい別画面は作らない。</span></li>
+<li><input type="checkbox" checked><span>右HUDにrelation ID、source/target、evidence ref、status、producer、三者vote/quorum、used count、promotion/hold/retract reasonを表示する。</span></li>
+<li><input type="checkbox" checked><span>静的relationは細いbase line/dashで表現し、黄色のtraveling electric arcは実Field spread eventだけに予約する。表示だけのedgeを発火に見せない。</span></li>
+<li><input type="checkbox" checked><span>active nodeのサイズは変えず、既存halo/発光で示す。relation overlay、community hull、labelが重なって可読性を落とさないLODを実装する。</span></li>
+<li><input type="checkbox" checked><span>ObservatoryへGraph Builder backlog/active model、relation counts by state、merge holds、community freshness、Judge disagreement/correlation、外部call=0、各rollout gateを追加する。</span></li>
+<li><input type="checkbox" checked><span>projectionはbrowser-safeなID/digest/短いreasonだけにし、raw prompt、evidence本文、sensitive page metadataを渡さない。</span></li>
 </ol>
 <p class="gate">受入ゲート: 実relation pathと表示edgeが1対1。発火eventなしで黄色arcを出さない。1280/1024/920/680pxで横overflow・枠外脱出・主要HUD重なり0、通常45fps以上、event-to-paint p95 ≤250ms。</p>
 
 <h3>Phase 8 — 四条件評価、canary、自動rollback</h3>
 <ol class="checklist">
-<li><input type="checkbox"><span>現行 / Graphのみ / Rubricのみ / Graph+Rubricを同一locked setで実行し、候補生成、rerank、certificate、commit、actual useの各stageを比較する。</span></li>
-<li><input type="checkbox"><span>direct query、multi-hop、global synthesisを別集計し、単純検索の非劣化とmulti-hop改善を同時に要求する。</span></li>
-<li><input type="checkbox"><span>Recall@5/10、MRR、used-page coverage、pointer/rich precision、negative-hit、abstention、誤merge率、relation path precision、p50/p95/max、4秒超過、memory/model-secondsを保存する。</span></li>
-<li><input type="checkbox"><span>Graph+Rubricが単体施策より悪い場合は相互作用失敗として採用しない。全部不合格なら現行をwinnerとして記録する。</span></li>
-<li><input type="checkbox"><span>sealed promotion artifactにmanifest、model/rubric/relation snapshot digest、全gateを含め、candidate→5%→25%→100%をsession hashで進める。</span></li>
-<li><input type="checkbox"><span>drift、precision低下、false-pass増加、relation store stale/corrupt、model欠落、resource pressureで即shadowへ戻し、現行teacherを返す。</span></li>
+<li><input type="checkbox" checked><span>現行 / Graphのみ / Rubricのみ / Graph+Rubricを同一locked setで実行し、候補生成、rerank、certificate、commit、actual useの各stageを比較する。</span></li>
+<li><input type="checkbox" checked><span>direct query、multi-hop、global synthesisを別集計し、単純検索の非劣化とmulti-hop改善を同時に要求する。</span></li>
+<li><input type="checkbox" checked><span>Recall@5/10、MRR、used-page coverage、pointer/rich precision、negative-hit、abstention、誤merge率、relation path precision、p50/p95/max、4秒超過、memory/model-secondsを保存する。</span></li>
+<li><input type="checkbox" checked><span>Graph+Rubricが単体施策より悪い場合は相互作用失敗として採用しない。全部不合格なら現行をwinnerとして記録する。</span></li>
+<li><input type="checkbox" checked><span>sealed promotion artifactにmanifest、model/rubric/relation snapshot digest、全gateを含め、candidate→5%→25%→100%をsession hashで進める。</span></li>
+<li><input type="checkbox" checked><span>drift、precision低下、false-pass増加、relation store stale/corrupt、model欠落、resource pressureで即shadowへ戻し、現行teacherを返す。</span></li>
 </ol>
 <p class="gate">受入ゲート: 現行pointer/rich precisionとused-page coverageを非劣化、negative-hitを改善、multi-hop Recall@5を統計的に改善、4秒超過0、外部call 0。lower confidence boundとabstentionを併記し、0件注入だけでprecisionを稼ぐ構成を棄却する。</p>
 
 <h3>Phase 9 — 文書、GitHub runtime、live受入</h3>
 <ol class="checklist">
-<li><input type="checkbox"><span><code>docs/architecture.md</code>、<code>docs/config.md</code>、<code>docs/operations.md</code>、<code>docs/hooks.md</code>へGraph Builder、relation lifecycle、local consensus、rubric、resource budget、rollbackを反映する。</span></li>
-<li><input type="checkbox"><span>各Phaseを意味のある単位でcommitし、完了直後に本計画のcheckboxと実行ログを更新する。既存の未追跡ファイルを混ぜない。</span></li>
-<li><input type="checkbox"><span>push/restartの明示許可後、origin/mainへpushし、Dashboard、Semantic、Reranker、Ingest drain、必要なbackground workerをGitHub-backed runtimeから再起動する。</span></li>
-<li><input type="checkbox"><span>runtime archiveのdirect_url commit、running process/module path、socket、status artifact、model inventory、Dashboard runtime commitをGitHub HEADと照合する。</span></li>
-<li><input type="checkbox"><span>実会話で現行検索とtyped graph candidateを発生させ、relation trace→Certificate→commit/reject→recall_used→Field event→Cortex表示を同じdecision/path IDで追跡する。</span></li>
-<li><input type="checkbox"><span>Engineering CompleteとAuthority Maturityを別表示し、未達gate、現在値、目標値、自動再評価予定をDashboard/CLIへ残す。</span></li>
+<li><input type="checkbox" checked><span><code>docs/architecture.md</code>、<code>docs/config.md</code>、<code>docs/operations.md</code>、<code>docs/hooks.md</code>へGraph Builder、relation lifecycle、local consensus、rubric、resource budget、rollbackを反映する。</span></li>
+<li><input type="checkbox" checked><span>各Phaseを意味のある単位でcommitし、完了直後に本計画のcheckboxと実行ログを更新する。既存の未追跡ファイルを混ぜない。</span></li>
+<li><input type="checkbox" checked><span>push/restartの明示許可後、origin/mainへpushし、Dashboard、Semantic、Reranker、Ingest drain、必要なbackground workerをGitHub-backed runtimeから再起動する。</span></li>
+<li><input type="checkbox" checked><span>runtime archiveのdirect_url commit、running process/module path、socket、status artifact、model inventory、Dashboard runtime commitをGitHub HEADと照合する。</span></li>
+<li><input type="checkbox" checked><span>実会話で現行検索とtyped graph candidateを発生させ、relation trace→Certificate→commit/reject→recall_used→Field event→Cortex表示を同じdecision/path IDで追跡する。</span></li>
+<li><input type="checkbox" checked><span>Engineering CompleteとAuthority Maturityを別表示し、未達gate、現在値、目標値、自動再評価予定をDashboard/CLIへ残す。</span></li>
 </ol>
 <p class="gate">受入ゲート: GitHub commit、全runtime archive、health、live Recall、live relation trace、Cortexが一致。ローカルworktreeだけでproduction完了と報告しない。</p>
 </section>
@@ -554,6 +554,12 @@ CHRONOVISOR_ROOT="$(mktemp -d -t chronovisor-test)" uv run pytest -q</code></pre
 <li><time>2026-08-01 13:40</time><span>指定先<code>chronovisor/_handoff</code>へPlanテンプレートから新規作成。Git/runtime基準、Field growth、co-fire、model inventoryを再確認。</span></li>
 <li><time>2026-08-01 13:45</time><span>RAGU論文/実装、Judge calibration記事、既存Search/Field/Label Ledger/Decision Routerの接続点を監査。既存骨格を維持し、typed relation providerとbackground local consensusを増分接続する方針を固定。</span></li>
 <li><time>2026-08-01 13:49</time><span>relation lifecycle、page/relation label分離、四条件評価、外部call 0、同期4秒境界、Cortex表示、Engineering CompleteとAuthority Matureの分離を含む計画をready化。</span></li>
+<li><time>2026-08-01 15:30</time><span><code>ea7a8e9</code>〜<code>a14f29e</code>でtyped relation authority、incremental builder、local consensus、entity/community consolidation、direct/local/global/mixed retrieval、四条件評価、自動rollout、Label Ledger/Field growth、Dashboard/Cortex投影を実装。</span></li>
+<li><time>2026-08-01 16:30</time><span>初回GitHub runtime反映で既存19-lane adoption manifestとの非互換をlive検出。background graph laneをadoption対象から分離する<code>4cc4697</code>を適用し、Ingest authorityを<code>available=true</code>、pending 0へ復旧。</span></li>
+<li><time>2026-08-01 17:00</time><span>実Wiki 25ページからentity候補14・relation候補65を生成。nested page endpointの誤holdをlive検出して<code>9156c9f</code>で修正し、local quorumによるverified relation <code>rel_04fcf61e62e3ef9b37260586</code>を確立。</span></li>
+<li><time>2026-08-01 17:10</time><span>実MCP search→read→recall_usedを同一decisionで実行。graph channel、1-hop path、Field stimulus/spread、used event <code>84d02bd351574f84a4d53bd2d6a9d074</code>を同一session hashで確認。</span></li>
+<li><time>2026-08-01 17:15</time><span>Cortexがnested typed endpointを描画できないlive差分を検出し、<code>e540709</code>でbasename/ambiguity-safe解決を全projectionへ適用。本番APIでtyped relations 96、verified relation 1、community 1を確認。</span></li>
+<li><time>2026-08-01 17:39</time><span>最終品質gateを完走。全体<code>2959 passed, 1 skipped</code>、新規Cortex/Graph focused 35件、Ruff、対象mypy、diff checkがすべて成功。Engineering Completeを確定し、Authority Matureは実利用母数がgateへ到達するまで自動shadow評価を継続。</span></li>
 </ol>
 </section>
 
