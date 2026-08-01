@@ -192,14 +192,25 @@ def test_enabled_lane_can_return_only_adopted_consensus(
 
 
 def test_every_registered_lane_names_a_production_schema() -> None:
+    from chronovisor.decision.decision_schema_manifest import (
+        background_decision_schemas,
+    )
+
     schemas = production_decision_schemas()
     assert DECISION_POLICIES
     structured = {
         policy.schema_name
         for policy in DECISION_POLICIES.values()
-        if policy.kind in {"consensus", "local_batch"}
+        if policy.kind in {"consensus", "local_batch"} and policy.adoption_scoped
     }
     assert structured <= set(schemas)
+    background = {
+        policy.schema_name
+        for policy in DECISION_POLICIES.values()
+        if policy.kind in {"consensus", "local_batch"}
+        and not policy.adoption_scoped
+    }
+    assert background <= set(background_decision_schemas())
 
 
 def test_every_production_structured_review_call_names_a_lane() -> None:

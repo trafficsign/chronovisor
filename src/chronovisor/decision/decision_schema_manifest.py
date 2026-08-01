@@ -222,12 +222,6 @@ def production_decision_schemas() -> dict[str, Mapping[str, Any]]:
     """
 
     from chronovisor.decision.frontier_review import FRONTIER_DECISION_SCHEMA
-    from chronovisor.decision.graph_decisions import (
-        ENTITY_MERGE_VERIFICATION_SCHEMA,
-        RECALL_RUBRIC_CALIBRATION_SCHEMA,
-        RECALL_USEFULNESS_SCHEMA,
-        RELATION_VERIFICATION_SCHEMA,
-    )
     from chronovisor.decision.local_repair import LOCAL_REPAIR_SCHEMA
     from chronovisor.ingest.ingest import INGEST_FRONTIER_DECISION_SCHEMA
     from chronovisor.ingest.read_back_repair import READ_BACK_FRONTIER_SCHEMA
@@ -259,6 +253,20 @@ def production_decision_schemas() -> dict[str, Mapping[str, Any]]:
         "read_back_repair": READ_BACK_FRONTIER_SCHEMA,
         "retention": RETENTION_FRONTIER_SCHEMA,
         "search_label": FRONTIER_LABEL_SCHEMA,
+    }
+
+
+def background_decision_schemas() -> dict[str, Mapping[str, Any]]:
+    """Schemas for shadow/background lanes outside the adopted 19-lane fleet."""
+
+    from chronovisor.decision.graph_decisions import (
+        ENTITY_MERGE_VERIFICATION_SCHEMA,
+        RECALL_RUBRIC_CALIBRATION_SCHEMA,
+        RECALL_USEFULNESS_SCHEMA,
+        RELATION_VERIFICATION_SCHEMA,
+    )
+
+    return {
         "relation_verification": RELATION_VERIFICATION_SCHEMA,
         "entity_merge_verification": ENTITY_MERGE_VERIFICATION_SCHEMA,
         "recall_usefulness_judgment": RECALL_USEFULNESS_SCHEMA,
@@ -285,6 +293,7 @@ def production_signature_manifest() -> dict[str, dict[str, Any]]:
 
 
 __all__ = [
+    "background_decision_schemas",
     "production_decision_schemas",
     "production_schema_manifest",
     "production_signature_manifest",

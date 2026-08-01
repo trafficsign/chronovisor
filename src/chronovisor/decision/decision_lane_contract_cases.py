@@ -50,7 +50,7 @@ from chronovisor.decision.graph_decisions import (
 )
 
 CASES_PER_MODEL_BACKED_LANE = 5
-LANE_CONTRACT_CASE_ID_VERSION = 28
+LANE_CONTRACT_CASE_ID_VERSION = 26
 
 
 def _coverage_label(expected: dict[str, Any]) -> str | None:
@@ -2609,6 +2609,23 @@ def _recall_rubric_calibration_cases() -> list[tuple[str, str | None, dict[str, 
     ]
 
 
+def background_decision_lane_contract_cases() -> dict[
+    str, tuple[tuple[str, str | None, dict[str, Any]], ...]
+]:
+    """Return fixed cases for background lanes without resealing fleet adoption."""
+
+    builders = {
+        "relation_verification": _relation_verification_cases,
+        "entity_merge_verification": _entity_merge_verification_cases,
+        "recall_usefulness_judgment": _recall_usefulness_cases,
+        "recall_rubric_calibration": _recall_rubric_calibration_cases,
+    }
+    cases = {lane: tuple(builder()) for lane, builder in builders.items()}
+    if any(len(rows) < CASES_PER_MODEL_BACKED_LANE for rows in cases.values()):
+        raise ValueError("background lane contract coverage is incomplete")
+    return cases
+
+
 @lru_cache(maxsize=1)
 def decision_lane_contract_case_specs() -> tuple[DecisionLaneContractCase, ...]:
     """Return at least five raw production contract cases for every lane."""
@@ -2636,10 +2653,6 @@ def decision_lane_contract_case_specs() -> tuple[DecisionLaneContractCase, ...]:
         "recall_improvement": _recall_improvement_cases,
         "search_label": _search_label_cases,
         "search_self_tune": _search_self_tune_cases,
-        "relation_verification": _relation_verification_cases,
-        "entity_merge_verification": _entity_merge_verification_cases,
-        "recall_usefulness_judgment": _recall_usefulness_cases,
-        "recall_rubric_calibration": _recall_rubric_calibration_cases,
     }
     required = set(model_backed_lane_names())
     if set(builders) != required:
@@ -2770,6 +2783,7 @@ def decision_lane_contract_case_manifest_sha256() -> str:
 __all__ = [
     "CASES_PER_MODEL_BACKED_LANE",
     "DecisionLaneContractCase",
+    "background_decision_lane_contract_cases",
     "decision_lane_contract_case_manifest",
     "decision_lane_contract_case_manifest_sha256",
     "decision_lane_contract_case_specs",

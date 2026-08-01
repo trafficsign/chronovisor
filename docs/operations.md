@@ -1031,6 +1031,11 @@ and the next automatic evaluation. Authority collecting is not an operational
 failure. The worker keeps accumulating reviewed labels and actual-use paths,
 then re-evaluates on an idle sleep cycle without a future manual-enable step.
 
+The four typed-graph Decision Router lanes are `adoption_scoped = false`:
+their contracts and five-case fixtures are background-specific and do not
+reseal or invalidate the existing 19-lane production adoption artifact. The
+typed-graph rollout gates control their authority independently.
+
 The four-arm evaluation compares current, graph-only, rubric-only, and the
 interaction on the same query hashes. Runtime artifacts contain no query text,
 page body, evidence span text, or raw prompt. If every challenger fails, current

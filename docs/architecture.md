@@ -348,5 +348,9 @@ Relation truth, entity identity, recall usefulness, and rubric calibration are
 four separate Decision Router lanes. Consensus is local and background-only;
 the artifact producer is excluded from quorum. The synchronous Hook loads only
 an already adopted sealed rubric and never launches the three-model ensemble.
+These four background lanes have independent contract fixtures but are not
+added retroactively to the adopted 19-lane production-fleet manifest. They use
+the bootstrap local triplet under typed-graph maturity gates, so deployment
+cannot invalidate the existing Ingest decision authority artifact.
 Existing search remains the teacher and automatic rollback target for every
 canary stage.

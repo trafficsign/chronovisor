@@ -26,6 +26,7 @@ class DecisionPolicy:
     kind: str
     schema_name: str | None = None
     default_mode: str = "shadow"
+    adoption_scoped: bool = True
 
     def __post_init__(self) -> None:
         if self.kind not in VALID_KINDS:
@@ -89,16 +90,28 @@ DECISION_POLICIES: dict[str, DecisionPolicy] = {
         "recall_improvement", "local_batch", "generic_decision"
     ),
     "relation_verification": DecisionPolicy(
-        "relation_verification", "consensus", "relation_verification"
+        "relation_verification",
+        "consensus",
+        "relation_verification",
+        adoption_scoped=False,
     ),
     "entity_merge_verification": DecisionPolicy(
-        "entity_merge_verification", "consensus", "entity_merge_verification"
+        "entity_merge_verification",
+        "consensus",
+        "entity_merge_verification",
+        adoption_scoped=False,
     ),
     "recall_usefulness_judgment": DecisionPolicy(
-        "recall_usefulness_judgment", "consensus", "recall_usefulness_judgment"
+        "recall_usefulness_judgment",
+        "consensus",
+        "recall_usefulness_judgment",
+        adoption_scoped=False,
     ),
     "recall_rubric_calibration": DecisionPolicy(
-        "recall_rubric_calibration", "local_batch", "recall_rubric_calibration"
+        "recall_rubric_calibration",
+        "local_batch",
+        "recall_rubric_calibration",
+        adoption_scoped=False,
     ),
     "search_label": DecisionPolicy("search_label", "local_batch", "search_label"),
     "search_self_tune": DecisionPolicy(
@@ -168,6 +181,7 @@ def decision_policy_snapshot() -> dict[str, Any]:
             "kind": policy.kind,
             "schema_name": policy.schema_name,
             "mode": mode,
+            "adoption_scoped": policy.adoption_scoped,
             "error": error,
         }
     return {

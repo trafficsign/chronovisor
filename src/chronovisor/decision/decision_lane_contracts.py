@@ -26,11 +26,11 @@ from chronovisor.core.canonical_json import (
 # Registry/artifact identity.  This is deliberately not rendered into every
 # model request: a change in one lane must not perturb sampling in 18 unrelated
 # lanes or force their already-proven prompt contracts to drift.
-LANE_CONTRACT_POLICY_VERSION = 11
+LANE_CONTRACT_POLICY_VERSION = 10
 LANE_REQUEST_ENVELOPE_VERSION = 2
 MIN_CASES_PER_MODEL_BACKED_LANE = 5
-LANE_CONTRACT_SOURCE = "deterministic_lane_contract_v27"
-LANE_CONTRACT_CASE_VERSION = 28
+LANE_CONTRACT_SOURCE = "deterministic_lane_contract_v26"
+LANE_CONTRACT_CASE_VERSION = 26
 
 
 @dataclass(frozen=True)
@@ -414,6 +414,7 @@ def model_backed_lane_names() -> tuple[str, ...]:
             lane
             for lane, policy in DECISION_POLICIES.items()
             if policy.kind in {"consensus", "local_batch"}
+            and policy.adoption_scoped
         )
     )
 
@@ -434,7 +435,7 @@ def lane_contract_manifest() -> dict[str, dict[str, Any]]:
         set(_REQUIRED_COVERAGE_LABELS),
         set(_REQUIRED_EFFECTS),
     )
-    if any(set(required) != registry for registry in registry_sets):
+    if any(not set(required).issubset(registry) for registry in registry_sets):
         missing = sorted(set(required) - set(_LANE_SEMANTICS))
         extra = sorted(set(_LANE_SEMANTICS) - set(required))
         raise ValueError(
@@ -473,10 +474,44 @@ def lane_contract_manifest_sha256() -> str:
 
 
 def lane_contract(lane: str) -> dict[str, Any]:
-    try:
-        return lane_contract_manifest()[lane]
-    except KeyError as exc:
-        raise ValueError(f"unknown model-backed decision lane: {lane}") from exc
+    manifest = lane_contract_manifest()
+    if lane in manifest:
+        return manifest[lane]
+
+    from chronovisor.decision.decision_policy import DECISION_POLICIES
+    from chronovisor.decision.decision_schema_manifest import (
+        background_decision_schemas,
+        schema_sha256,
+    )
+
+    policy = DECISION_POLICIES.get(lane)
+    schemas = background_decision_schemas()
+    schema_name = str(policy.schema_name or "") if policy is not None else ""
+    if (
+        policy is None
+        or policy.adoption_scoped
+        or lane not in _LANE_SEMANTICS
+        or schema_name not in schemas
+    ):
+        raise ValueError(f"unknown model-backed decision lane: {lane}")
+    semantics = _LANE_SEMANTICS[lane]
+    from chronovisor.decision.decision_schema_manifest import signature_policy
+
+    payload = {
+        "policy_version": LANE_PROMPT_POLICY_VERSIONS[lane],
+        "request_envelope_version": LANE_REQUEST_ENVELOPE_VERSION,
+        "lane": lane,
+        "kind": policy.kind,
+        "schema_name": schema_name,
+        "schema_sha256": schema_sha256(schemas[schema_name]),
+        "signature_policy": signature_policy(schemas[schema_name]),
+        "prompt_policy": semantics.prompt_policy,
+        "system_policy": semantics.system_policy,
+        "effect_policy": semantics.effect_policy,
+        "required_coverage_labels": list(_REQUIRED_COVERAGE_LABELS[lane]),
+        "required_effects": list(_REQUIRED_EFFECTS[lane]),
+    }
+    return {**payload, "contract_sha256": _sha256_json(payload)}
 
 
 def lane_contract_sha256(lane: str) -> str:
