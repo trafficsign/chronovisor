@@ -677,9 +677,10 @@ canvas#gl {
   border-left: 2px solid var(--ingress-color);
   border-radius: 3px 9px 9px 3px;
   box-shadow: 0 8px 28px rgba(0, 0, 0, 0.24);
-  opacity: 0.72;
+  opacity: 0;
   pointer-events: none;
-  transition: border-color 0.2s, box-shadow 0.2s, opacity 0.2s;
+  transform: translateY(6px);
+  transition: border-color 0.2s, box-shadow 0.2s, opacity 0.2s, transform 0.2s;
   backdrop-filter: blur(8px);
 }
 
@@ -696,13 +697,14 @@ canvas#gl {
   content: "";
 }
 
-#memoryIngress:not([data-phase="idle"]) {
+#memoryIngress:not([data-phase="idle"]):not([data-phase="capture"]) {
   opacity: 1;
+  transform: translateY(0);
   border-color: color-mix(in srgb, var(--ingress-color) 50%, transparent);
   box-shadow: 0 0 22px color-mix(in srgb, var(--ingress-color) 18%, transparent);
 }
 
-#memoryIngress:not([data-phase="idle"])::after {
+#memoryIngress:not([data-phase="idle"]):not([data-phase="capture"])::after {
   animation: ingressScan 1.05s linear infinite;
 }
 
@@ -712,11 +714,6 @@ canvas#gl {
 #memoryIngress[data-phase="consensus"] { --ingress-color: #ffb454; }
 #memoryIngress[data-phase="apply"],
 #memoryIngress[data-phase="complete"] { --ingress-color: #45d49b; }
-
-#memoryIngress[data-phase="capture"]::after {
-  animation-duration: 0.48s;
-  animation-direction: reverse;
-}
 
 #memoryIngress[data-phase="triage"]::after,
 #memoryIngress[data-phase="generate"]::after {
@@ -741,7 +738,7 @@ canvas#gl {
   box-shadow: 0 0 9px var(--ingress-color);
 }
 
-#memoryIngress:not([data-phase="idle"]) .ingressBeacon {
+#memoryIngress:not([data-phase="idle"]):not([data-phase="capture"]) .ingressBeacon {
   animation: ingressBeacon 0.62s steps(2, end) infinite;
 }
 
