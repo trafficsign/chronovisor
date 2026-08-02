@@ -24,15 +24,94 @@ def decide_learning_update(
     *,
     current: dict[str, float],
     proposed: dict[str, float],
-    label_counts: dict[str, int],
-    metrics: dict[str, float],
+    label_counts: dict[str, Any],
+    metrics: dict[str, Any],
+    answer_evaluation: dict[str, Any] | None = None,
+    confidence_bounds: dict[str, Any] | None = None,
     max_change: float = 0.05,
 ) -> dict[str, Any]:
-    """Cap changes and roll back on leakage risk or quality regression."""
+    """Authorize only train-scoped, outcome-grounded, bounded evidence."""
 
+    if label_counts.get("scope") != "train":
+        return {
+            "status": "held",
+            "reason": "learning_counts_not_train_scoped",
+            "policy": current,
+            "field_learning_allowed": False,
+            "calibration_allowed": False,
+        }
     strong = int(label_counts.get("strong_positive") or 0)
     sessions = int(label_counts.get("strong_positive_sessions") or 0)
     total = int(label_counts.get("total") or 0)
+    answer = answer_evaluation or (
+        metrics.get("answer_evaluation")
+        if isinstance(metrics.get("answer_evaluation"), dict)
+        else {}
+    )
+    bounds = confidence_bounds or (
+        metrics.get("confidence_bounds")
+        if isinstance(metrics.get("confidence_bounds"), dict)
+        else {}
+    )
+    answer_bound = bounds.get("answer_reward") if isinstance(bounds, dict) else None
+    if not isinstance(answer, dict) or answer.get("passed") is not True:
+        return {
+            "status": "held",
+            "reason": "missing_or_invalid_answer_evaluation",
+            "policy": current,
+            "field_learning_allowed": False,
+            "calibration_allowed": total >= 500,
+        }
+    if (
+        not isinstance(answer_bound, dict)
+        or answer_bound.get("valid") is not True
+        or not isinstance(answer_bound.get("samples"), int)
+        or int(answer_bound["samples"]) < 20
+        or not isinstance(answer_bound.get("clusters"), int)
+        or int(answer_bound["clusters"]) < 20
+        or not isinstance(answer_bound.get("method"), str)
+        or not answer_bound["method"]
+        or not isinstance(answer_bound.get("manifest_sha256"), str)
+        or len(answer_bound["manifest_sha256"]) != 64
+    ):
+        return {
+            "status": "held",
+            "reason": "missing_or_invalid_confidence_evidence",
+            "policy": current,
+            "field_learning_allowed": False,
+            "calibration_allowed": total >= 500,
+        }
+    point = answer_bound.get("point")
+    lower = answer_bound.get("lower")
+    point_floor = answer_bound.get("point_floor")
+    lower_floor = answer_bound.get("lower_floor")
+    if not all(
+        isinstance(value, int | float) and not isinstance(value, bool)
+        for value in (point, lower, point_floor, lower_floor)
+    ):
+        return {
+            "status": "held",
+            "reason": "missing_or_invalid_confidence_evidence",
+            "policy": current,
+            "field_learning_allowed": False,
+            "calibration_allowed": total >= 500,
+        }
+    if float(point) < float(point_floor):
+        return {
+            "status": "held",
+            "reason": "answer_reward_point_floor_failed",
+            "policy": current,
+            "field_learning_allowed": False,
+            "calibration_allowed": total >= 500,
+        }
+    if float(lower) < float(lower_floor):
+        return {
+            "status": "held",
+            "reason": "answer_reward_lower_bound_failed",
+            "policy": current,
+            "field_learning_allowed": False,
+            "calibration_allowed": total >= 500,
+        }
     if strong < 200 or sessions < 20:
         return {
             "status": "held",
@@ -41,10 +120,20 @@ def decide_learning_update(
             "field_learning_allowed": False,
             "calibration_allowed": total >= 500,
         }
-    if metrics.get("session_leakage", 0.0) > 0 or metrics.get("query_leakage", 0.0) > 0:
+    if any(
+        float(metrics.get(key) or 0.0) > 0
+        for key in (
+            "session_leakage",
+            "query_leakage",
+            "page_leakage",
+            "content_leakage",
+            "timestamp_leakage",
+            "embargo_leakage",
+        )
+    ):
         return {
             "status": "rollback",
-            "reason": "holdout_leakage",
+            "reason": "split_leakage",
             "policy": current,
             "field_learning_allowed": False,
             "calibration_allowed": total >= 500,
@@ -75,7 +164,7 @@ def decide_learning_update(
     }
     return {
         "status": "candidate",
-        "reason": "shadow_only_until_locked_gate",
+        "reason": "train_outcome_candidate_only_until_authority_gates",
         "policy": {**current, **bounded},
         "field_learning_allowed": True,
         "calibration_allowed": total >= 500,

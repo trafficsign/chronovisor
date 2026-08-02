@@ -11,7 +11,7 @@ from typing import Any
 from chronovisor.core.runtime_config import active_config_file, load_toml_file
 from chronovisor.search.search_types import tokenize
 
-FIELD_SCHEMA_VERSION = 1
+FIELD_SCHEMA_VERSION = 2
 FIELD_EVENT_KINDS = frozenset(
     {
         "stimulus",
@@ -87,9 +87,11 @@ class RecallFieldState:
     created_at_epoch: float = 0.0
     updated_at_epoch: float = 0.0
     topic_signature: tuple[str, ...] = ()
+    topic_prompt_hash: str = ""
     active: dict[str, ActivationNode] = field(default_factory=dict)
     shadow: dict[str, ActivationNode] = field(default_factory=dict)
     pending_teacher_commits: list[dict[str, Any]] = field(default_factory=list)
+    negative_contributions: dict[str, dict[str, Any]] = field(default_factory=dict)
     full_search_fallback: bool = True
 
     def to_dict(self) -> dict[str, Any]:
@@ -103,6 +105,7 @@ class RecallFieldState:
             "created_at_epoch": self.created_at_epoch,
             "updated_at_epoch": self.updated_at_epoch,
             "topic_signature": list(self.topic_signature),
+            "topic_prompt_hash": self.topic_prompt_hash,
             "active": {
                 page_id: asdict(node) for page_id, node in sorted(self.active.items())
             },
@@ -110,6 +113,7 @@ class RecallFieldState:
                 page_id: asdict(node) for page_id, node in sorted(self.shadow.items())
             },
             "pending_teacher_commits": list(self.pending_teacher_commits),
+            "negative_contributions": dict(self.negative_contributions),
             "full_search_fallback": self.full_search_fallback,
         }
 
@@ -133,6 +137,24 @@ class RecallFieldState:
             }
 
         pending = value.get("pending_teacher_commits")
+        negative_contributions = value.get("negative_contributions")
+        if not isinstance(negative_contributions, dict) or any(
+            not isinstance(key, str)
+            or not key
+            or not isinstance(row, dict)
+            or row.get("buffer") not in {"active", "shadow"}
+            or not isinstance(row.get("page_weights"), dict)
+            or any(
+                not isinstance(page_id, str)
+                or not page_id
+                or isinstance(weight, bool)
+                or not isinstance(weight, int | float)
+                or not 0.0 <= float(weight) <= 1.0
+                for page_id, weight in row.get("page_weights", {}).items()
+            )
+            for key, row in negative_contributions.items()
+        ):
+            raise ValueError("invalid field negative contributions")
         return cls(
             session_hash=session_hash,
             host=str(value.get("host") or "").strip().casefold(),
@@ -150,6 +172,7 @@ class RecallFieldState:
                 for item in value.get("topic_signature", [])
                 if isinstance(item, str) and re.fullmatch(r"[0-9a-f]{12}", item)
             )[:64],
+            topic_prompt_hash=str(value.get("topic_prompt_hash") or "")[:64],
             active=nodes("active"),
             shadow=nodes("shadow"),
             pending_teacher_commits=[
@@ -161,6 +184,11 @@ class RecallFieldState:
             ]
             if isinstance(pending, list)
             else [],
+            negative_contributions={
+                str(key): dict(row)
+                for key, row in negative_contributions.items()
+                if isinstance(key, str) and key and isinstance(row, dict)
+            },
             full_search_fallback=value.get("full_search_fallback") is not False,
         )
 

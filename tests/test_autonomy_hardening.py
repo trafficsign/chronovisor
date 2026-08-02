@@ -271,6 +271,45 @@ def test_successful_save_enqueues_audit_after_receipt_in_same_commit(
     assert len(state["jobs"]) == 2
 
 
+@pytest.mark.parametrize("status", ["saved", "recovered"])
+def test_save_receipt_output_is_forwarded_exactly_to_answer_capture(
+    tmp_path: Path, monkeypatch, status: str
+) -> None:
+    monkeypatch.setattr(background_jobs, "JOB_DIR", tmp_path)
+    monkeypatch.setattr(background_jobs, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(background_jobs, "LOCK_FILE", tmp_path / "state.lock")
+    save = background_jobs.enqueue_job(
+        name="codex-save",
+        module="chronovisor.hosts.codex_record",
+        args=["--hook", "--save"],
+        env={},
+        stdin_text='{"stale":"hook-payload"}',
+        on_success=[
+            {
+                "name": "recall-answer-capture",
+                "module": "chronovisor.recall.recall_answer_eval",
+                "args": ["--host", "codex", "--hook", "--capture-only"],
+                "env": {},
+                "when_output_statuses": ["saved", "recovered"],
+                "stdin_from_output": True,
+            }
+        ],
+    )
+    background_jobs._claim(save["job_id"])
+    receipt = json.dumps(
+        {"status": status, "session_id": "session", "session_file": "/exact"},
+        separators=(",", ":"),
+    )
+
+    completed = background_jobs._finish(
+        save["job_id"], exit_code=0, output=f"log\n{receipt}\n"
+    )
+    state = json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
+    followup = state["jobs"][completed["followup_job_ids"][0]]
+
+    assert followup["stdin"] == receipt
+
+
 def test_failed_save_does_not_enqueue_audit_candidate(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(background_jobs, "JOB_DIR", tmp_path)
     monkeypatch.setattr(background_jobs, "STATE_FILE", tmp_path / "state.json")

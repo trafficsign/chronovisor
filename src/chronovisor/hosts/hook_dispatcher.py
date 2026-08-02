@@ -358,6 +358,19 @@ def stop_tasks(host: str, args: argparse.Namespace) -> list[BackgroundTask]:
                             "args": ["--host", "codex", "--hook"],
                             "env": {},
                             "when_output_status": "saved",
+                        },
+                        {
+                            # Capture only immutable answer references after the
+                            # host save has reported durable publication. Replay
+                            # and scoring remain sleep/offline work.
+                            "name": "recall-answer-capture",
+                            "module": "chronovisor.recall.recall_answer_eval",
+                            "args": ["--host", "codex", "--hook", "--capture-only"],
+                            "env": {
+                                "CHRONOVISOR_RECALL_ANSWER_CAPTURE_ENABLED": "1"
+                            },
+                            "when_output_statuses": ["saved", "recovered"],
+                            "stdin_from_output": True,
                         }
                     ],
                 )
@@ -377,6 +390,21 @@ def stop_tasks(host: str, args: argparse.Namespace) -> list[BackgroundTask]:
                             "args": ["--host", "claude-code", "--hook"],
                             "env": {},
                             "when_output_status": "saved",
+                        },
+                        {
+                            "name": "recall-answer-capture",
+                            "module": "chronovisor.recall.recall_answer_eval",
+                            "args": [
+                                "--host",
+                                "claude-code",
+                                "--hook",
+                                "--capture-only",
+                            ],
+                            "env": {
+                                "CHRONOVISOR_RECALL_ANSWER_CAPTURE_ENABLED": "1"
+                            },
+                            "when_output_statuses": ["saved", "recovered"],
+                            "stdin_from_output": True,
                         }
                     ],
                 )

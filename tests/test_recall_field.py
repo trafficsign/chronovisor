@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import statistics
 import threading
 import time
 from pathlib import Path
+
+import pytest
 
 from chronovisor.recall import recall_field
 from chronovisor.recall.recall_field_schema import (
@@ -350,6 +353,294 @@ def test_teacher_commit_is_inactive_until_next_turn(
 
     assert after.shadow["teacher-page"].activation > 0
     assert any(event.kind == "commit_applied" for event in events)
+
+
+def test_reviewed_negative_is_exact_idempotent_and_exactly_retractable(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from chronovisor.recall import feedback_ledger
+
+    page = tmp_path / "page.md"
+    page.write_text("bound page bytes", encoding="utf-8")
+    page_sha = hashlib.sha256(page.read_bytes()).hexdigest()
+    monkeypatch.setattr(
+        feedback_ledger,
+        "find_page",
+        lambda page_id: page if page_id == "bound-page" else None,
+    )
+    monkeypatch.setattr(feedback_ledger, "RECALL_DIR", tmp_path)
+    hashed = session_hash("codex", "negative-session")
+    field_evidence = {"field_shadow": {"topic_epoch": 0, "session_hash": hashed}}
+    (tmp_path / "recall-log.jsonl").write_text(
+        json.dumps(
+            {
+                "decision_id": "decision-1",
+                "session_id": "negative-session",
+                "host": "codex",
+                "prompt_hash": "9c7e05e5868afcf3",
+                "decision": "read",
+                "pages": ["bound-page"],
+                "evidence_features": field_evidence,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    cfg = config()
+    store = RecallFieldStore(tmp_path / "field", config=cfg)
+
+    def seed(state):
+        state.host = "codex"
+        state.topic_prompt_hash = "9c7e05e5868afcf3"
+        state.shadow["bound-page"] = ActivationNode(activation=0.9, direct=0.9)
+        state.pending_teacher_commits = [
+            {"page_id": "bound-page", "available_turn": 1, "topic_epoch": 0}
+        ]
+        return state, []
+
+    store.transact(hashed, seed, now=100.0)
+    original = {
+        "kind": "page_ignored",
+        "host": "codex",
+        "frontier_reviewed": True,
+        "label_quality": "strong",
+        "content_correction_key": "correction-1",
+        "ref": "decision-1",
+        "prompt": "prompt",
+        "snapshot": {
+            "decision_id": "decision-1",
+            "session_id": "negative-session",
+            "host": "codex",
+            "prompt_hash": "9c7e05e5868afcf3",
+            "decision": "read",
+            "evidence_features": field_evidence,
+        },
+        "source_turn_ref": {
+            "session_id": "negative-session",
+            "prompt_hash": "9c7e05e5868afcf3",
+            "user_line": 1,
+            "assistant_line": 2,
+        },
+        "negative_pages": ["bound-page"],
+        "negative_page_hashes": {"bound-page": page_sha},
+    }
+
+    applied = recall_field.apply_reviewed_negative_feedback(
+        original,
+        config=cfg,
+        store=store,
+        application_file=tmp_path / "applications.jsonl",
+        now=101.0,
+    )
+    duplicate = recall_field.apply_reviewed_negative_feedback(
+        original,
+        config=cfg,
+        store=store,
+        application_file=tmp_path / "applications.jsonl",
+        now=102.0,
+    )
+    after_apply = store.load(hashed, now=102.0)
+
+    assert applied["status"] == "applied"
+    assert duplicate["status"] == "duplicate"
+    assert after_apply.shadow["bound-page"].activation == pytest.approx(0.9)
+    assert recall_field.effective_activation(
+        after_apply,
+        page_id="bound-page",
+        node=after_apply.shadow["bound-page"],
+        buffer_name="shadow",
+    ) == pytest.approx(0.15)
+    assert after_apply.shadow["bound-page"].negative == 0.0
+    assert after_apply.pending_teacher_commits == []
+    assert len(after_apply.negative_contributions) == 1
+    suppressed_queue = recall_field.queue_teacher_commits(
+        host="codex",
+        session_id="negative-session",
+        page_ids=["bound-page"],
+        config=cfg,
+        store=store,
+        now=102.5,
+    )
+    assert suppressed_queue["queued"] == 0
+
+    malformed = {
+        "kind": "page_ignored_retracted",
+        "target_kind": "page_ignored",
+        "content_correction_key": "correction-1",
+        "target_feedback_sha256": "0" * 64,
+    }
+    held = recall_field.retract_reviewed_negative_feedback(
+        malformed,
+        original,
+        config=cfg,
+        store=store,
+        application_file=tmp_path / "applications.jsonl",
+        now=103.0,
+    )
+    assert held == {
+        "status": "held",
+        "reason": "retraction_binding_invalid",
+        "restored": 0,
+    }
+    assert store.load(hashed, now=103.0).shadow[
+        "bound-page"
+    ].activation == pytest.approx(0.9)
+
+    exact = {
+        **malformed,
+        "target_feedback_sha256": feedback_ledger.feedback_row_sha256(original),
+    }
+    retracted = recall_field.retract_reviewed_negative_feedback(
+        exact,
+        original,
+        config=cfg,
+        store=store,
+        application_file=tmp_path / "applications.jsonl",
+        now=104.0,
+    )
+    duplicate_retraction = recall_field.retract_reviewed_negative_feedback(
+        exact,
+        original,
+        config=cfg,
+        store=store,
+        application_file=tmp_path / "applications.jsonl",
+        now=105.0,
+    )
+    restored = store.load(hashed, now=105.0)
+
+    assert retracted["status"] == "retracted"
+    assert duplicate_retraction["status"] == "duplicate_or_missing"
+    assert restored.shadow["bound-page"].activation == pytest.approx(0.9)
+    assert restored.shadow["bound-page"].negative == 0.0
+    assert restored.negative_contributions == {}
+
+
+def test_reviewed_negative_rejects_stale_page_binding(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from chronovisor.recall import feedback_ledger
+
+    page = tmp_path / "page.md"
+    page.write_text("current", encoding="utf-8")
+    monkeypatch.setattr(feedback_ledger, "find_page", lambda _page_id: page)
+    monkeypatch.setattr(feedback_ledger, "RECALL_DIR", tmp_path)
+    (tmp_path / "recall-log.jsonl").write_text(
+        json.dumps(
+            {
+                "decision_id": "decision-stale",
+                "session_id": "session-stale",
+                "host": "codex",
+                "prompt_hash": "9c7e05e5868afcf3",
+                "decision": "read",
+                "pages": ["page"],
+                "evidence_features": {
+                    "field_shadow": {"topic_epoch": 0, "session_hash": "field-session"}
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    result = recall_field.apply_reviewed_negative_feedback(
+        {
+            "kind": "page_ignored",
+            "host": "codex",
+            "frontier_reviewed": True,
+            "label_quality": "strong",
+            "content_correction_key": "correction-stale",
+            "ref": "decision-stale",
+            "prompt": "prompt",
+            "snapshot": {
+                "decision_id": "decision-stale",
+                "session_id": "session-stale",
+                "host": "codex",
+                "prompt_hash": "9c7e05e5868afcf3",
+                "decision": "read",
+                "evidence_features": {
+                    "field_shadow": {
+                        "topic_epoch": 0,
+                        "session_hash": "field-session",
+                    }
+                },
+            },
+            "source_turn_ref": {
+                "session_id": "session-stale",
+                "prompt_hash": "9c7e05e5868afcf3",
+                "user_line": 1,
+                "assistant_line": 2,
+            },
+            "negative_pages": ["page"],
+            "negative_page_hashes": {"page": "0" * 64},
+        },
+        config=config(),
+        store=RecallFieldStore(tmp_path / "field", config=config()),
+        application_file=tmp_path / "applications.jsonl",
+    )
+
+    assert result == {"status": "held", "reason": "page_hash_mismatch", "applied": 0}
+
+
+def test_v1_snapshot_migrates_destructive_negative_to_composition(
+    tmp_path: Path,
+) -> None:
+    store = RecallFieldStore(tmp_path / "field", config=config())
+    hashed = "0123456789abcdef"
+    payload = {
+        "schema_version": 1,
+        "session_hash": hashed,
+        "host": "codex",
+        "topic_epoch": 0,
+        "turn": 1,
+        "seq": 1,
+        "created_at_epoch": 1.0,
+        "updated_at_epoch": 2.0,
+        "topic_signature": [],
+        "active": {},
+        "shadow": {
+            "page": {
+                "activation": 0.15,
+                "direct": 0.9,
+                "spread": 0.0,
+                "negative": 0.75,
+                "inhibition": 0.0,
+                "anti_index": 0.0,
+                "hub_penalty": 0.0,
+                "last_turn": 1,
+                "last_seq": 1,
+            }
+        },
+        "pending_teacher_commits": [],
+        "negative_contributions": {
+            "producer": {
+                "producer_key": "producer",
+                "feedback_sha256": "a" * 64,
+                "page_hashes": {"page": "b" * 64},
+                "deltas": {"page": 0.75},
+                "buffer": "shadow",
+                "status": "active",
+            }
+        },
+        "full_search_fallback": False,
+    }
+    encoded = json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode()
+    snapshot = {**payload, "snapshot_sha256": hashlib.sha256(encoded).hexdigest()}
+    path = store.legacy_session_root / f"{hashed}.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps(snapshot), encoding="utf-8")
+
+    state = store.load(hashed, now=3.0)
+
+    assert state.shadow["page"].activation == pytest.approx(0.9)
+    assert recall_field.effective_activation(
+        state,
+        page_id="page",
+        node=state.shadow["page"],
+        buffer_name="shadow",
+    ) == pytest.approx(0.15)
+    assert json.loads(path.read_text())["schema_version"] == 1
+    assert json.loads(store._state_path(hashed).read_text())["schema_version"] == 2
 
 
 def test_store_seal_corrupt_recovery_retention_and_concurrency(

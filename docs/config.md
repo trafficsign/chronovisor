@@ -25,6 +25,12 @@ manual UTF-8/Markdown API in every mode; only the Codex and Claude transcript
 savers use source-native segments. Compression is never performed by Stop or
 the save worker. The sleep cycle seals at most four eligible segments per run.
 
+This Raw archive `layout = "v2"` setting is unrelated to the Recall Field store
+schema. Field snapshots migrate on first read from the read-only
+`recall/field/sessions/` v1 namespace into sealed schema-2 files under
+`recall/field/sessions-v2/`; current code writes only `sessions-v2/` (and
+`events-v2/`) and never rewrites the v1 migration source.
+
 ## Unified Shape
 
 ```toml
@@ -34,7 +40,10 @@ recall = true
 [hooks.stop]
 save = true
 # Stop only enqueues deterministic capture jobs. After a successful durable
-# save receipt, the worker queues an asynchronous Recall audit candidate.
+# `saved` receipt, the worker queues both an asynchronous Recall audit candidate
+# and privacy-safe answer-episode capture. A `recovered` receipt queues answer
+# capture only; it does not queue another audit candidate. Neither follow-up
+# runs replay/scoring.
 # Semantic work is drained by local convergence after the hook process exits.
 audit = false
 content_correction = true
@@ -167,11 +176,12 @@ max_sample_rate = 0.10
 max_operations_without_audit = 4
 
 [search.negative_feedback]
-# Optional. Only a reviewed false-positive, or a reviewed/hash-bound strong
-# contradiction, can demote a page for a similar query. read,
-# injection_ignored, page_ignored, and certificate reject are exposure/label
-# factory inputs, not standalone true negatives. Retractions and newer reviewed
-# positive labels are applied before any penalty.
+# Optional search-ranking suppressions. The separate Recall Field/co-fire path
+# accepts only a strong Frontier-reviewed page_ignored/contradiction with exact
+# decision/session identity and current page-content hash. Passive read,
+# injection_ignored, unreviewed page_ignored, and certificate reject remain
+# exposure only. An exact producer-key/feedback-digest retraction restores only
+# the contribution it names.
 enabled = true
 similarity_threshold = 0.35
 penalty = 0.85
@@ -349,6 +359,17 @@ event_retention = 2000
 
 [recall.field.growth]
 # Sleep-cycle supervision advances 5% -> 25% -> 100% only after every gate.
+# `recall_used` is diagnostic only. Positive learning requires sealed train
+# answer outcomes; production authority additionally requires the independent
+# sealed manual-94 retrieval artifact, a separate sealed locked-test answer
+# artifact, an exact cross-split manifest match, and connected-cluster
+# confidence bounds for candidate and Processor point/LCB floors. Manual-94 is
+# frozen first at `runtime/search-eval/manual-94-manifest.json`: schema 2 must
+# contain exactly 94 unique reviewed entries, exact entry/manifest seals, and
+# the review-ledger byte length, line count, file hash, and chain head. The
+# manifest is frozen before evaluation. Evaluation then rebinds every ranked
+# page to its live UID/content digest; a simultaneously generated or changed
+# cohort fails closed.
 enabled = true
 auto_promote = true
 
@@ -419,6 +440,9 @@ actions = ["alias", "query_hint", "page_tag"]
 ## Environment Overrides
 
 - `CHRONOVISOR_RECALL_ENABLED=0`: disable synchronous recall.
+- `CHRONOVISOR_RECALL_ANSWER_CAPTURE_ENABLED=1`: permit the capture-only answer
+  episode hook. The Stop dispatcher sets this only on the post-save follow-up;
+  the flag does not enable replay or scoring.
 - `CODEX_CHRONOVISOR_RECORD_ENABLED=1`: enable the Codex record hook.
 - `CLAUDE_CODE_CHRONOVISOR_RECORD_ENABLED=1`: enable the Claude Code record hook.
 - `CHRONOVISOR_RECALL_AUDIT_ENABLED` and
@@ -456,6 +480,35 @@ unless they belong to the guarded code-repair settings listed above. Routine
 
 Direct `chronovisor-hook --event Stop` deployments may enable save and
 deterministic correction capture, but never semantic work.
+
+`chronovisor-recall-answer-eval --status` reports captured episode bindings and
+the locked-test artifact. Hook mode accepts only an exact `saved`/`recovered`
+worker receipt and supports capture only. Build the fixed split with
+`--build-split-manifest`; offline evaluation requires `--evaluate`, a sealed
+`--gold-manifest`, a separately sealed and pre-frozen `--scorer-calibration`,
+and registered `module:callable` runner/scorer adapters plus their exact JSON
+identities. A `field-e2e-replay` locked evaluation additionally requires the
+built-in `builtin_field_environment_replay` adapter and the exact live identity
+returned by `builtin_field_environment_identity()`; a look-alike adapter or
+stale model, policy, config, corpus, index, last-known-good, or candidate-policy
+identity fails closed.
+
+The durable answer inputs are `recall/answer-episodes.jsonl`,
+`recall/answer-review-receipts.jsonl`, and
+`recall/answer-execution-receipts.jsonl`. Episode rows use schema 1. Capture
+cursors and the preregistered schema-2 split live at
+`runtime/recall-answer-eval/capture-cursors.json` and
+`runtime/recall-answer-eval/split-manifest.json`. Sealed answer-evaluation
+artifacts use schema 3: train output is
+`runtime/recall-answer-eval/train-answer-eval.json`, while locked Field evidence
+is `runtime/recall-field/locked-answer-eval.json`.
+
+Training may consume only a sealed passing `train` artifact and may therefore
+advance candidate-only learning before production authority exists. It never
+makes train data locked authority. Until the independent manual-94, locked
+field-e2e, cross-split, confidence, freshness, and promotion checks all pass,
+production results remain teacher-owned/full-search fallback and Field remains
+candidate/shadow. Only a valid promotion permits active Field authority.
 
 ## Optional Reranker
 

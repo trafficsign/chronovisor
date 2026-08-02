@@ -1453,8 +1453,8 @@ def test_locked_e2e_artifact_seals_all_promotion_gates(tmp_path) -> None:
         path=path,
     )
 
-    assert artifact["status"] == "passed"
-    assert all(artifact["gates"].values())
+    assert artifact["status"] == "failed"
+    assert artifact["gates"]["sealed_manual_94"] is False
     assert artifact["precision_lower_95"] is not None
     assert (
         json.loads(path.read_text())["snapshot_sha256"] == artifact["snapshot_sha256"]

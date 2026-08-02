@@ -20,8 +20,9 @@ from chronovisor.recall.recall_field_schema import (
 )
 
 FIELD_ROOT = CHRONOVISOR_ROOT / "recall" / "field"
-SESSION_ROOT = FIELD_ROOT / "sessions"
-EVENT_ROOT = FIELD_ROOT / "events"
+SESSION_ROOT = FIELD_ROOT / "sessions-v2"
+EVENT_ROOT = FIELD_ROOT / "events-v2"
+LEGACY_SESSION_ROOT = FIELD_ROOT / "sessions"
 
 
 class RecallFieldStore:
@@ -32,8 +33,9 @@ class RecallFieldStore:
         config: RecallFieldConfig | None = None,
     ) -> None:
         self.root = root
-        self.session_root = root / "sessions"
-        self.event_root = root / "events"
+        self.session_root = root / "sessions-v2"
+        self.event_root = root / "events-v2"
+        self.legacy_session_root = root / "sessions"
         self.config = config or RecallFieldConfig()
 
     def _state_path(self, session_hash: str) -> Path:
@@ -87,9 +89,32 @@ class RecallFieldStore:
         try:
             value = json.loads(path.read_text(encoding="utf-8"))
             payload = self._verify_snapshot(value)
+            if payload.get("schema_version") != 2:
+                raise ValueError("v2 namespace contains a non-v2 snapshot")
             return RecallFieldState.from_dict(payload, session_hash=session_hash)
         except FileNotFoundError:
-            return self._new_state(session_hash, now)
+            legacy_path = self.legacy_session_root / f"{session_hash}.json"
+            try:
+                legacy_value = json.loads(legacy_path.read_text(encoding="utf-8"))
+                legacy_payload = self._verify_snapshot(legacy_value)
+                if legacy_payload.get("schema_version") != 1:
+                    raise ValueError("legacy namespace contains a non-v1 snapshot")
+                migrated = RecallFieldState.from_dict(
+                    self._migrate_v1_payload(
+                        legacy_payload,
+                        session_hash=session_hash,
+                    ),
+                    session_hash=session_hash,
+                )
+                # The v1 file is a read-only migration source.  Only the v2
+                # namespace is written, so an old binary can never quarantine
+                # or overwrite a v2 snapshot at the same path.
+                self._save_unlocked(migrated)
+                return migrated
+            except FileNotFoundError:
+                return self._new_state(session_hash, now)
+            except (OSError, json.JSONDecodeError, ValueError):
+                return self._new_state(session_hash, now)
         except (OSError, json.JSONDecodeError, ValueError):
             if path.exists():
                 corrupt = path.with_name(
@@ -101,6 +126,66 @@ class RecallFieldStore:
                     pass
             return self._new_state(session_hash, now)
 
+    @staticmethod
+    def _migrate_v1_payload(
+        payload: dict[str, Any], *, session_hash: str
+    ) -> dict[str, Any]:
+        """Restore v1 destructive inhibition, then encode it compositionally."""
+
+        if payload.get("session_hash") != session_hash:
+            raise ValueError("field snapshot session mismatch")
+        migrated = dict(payload)
+        migrated["schema_version"] = 2
+        active = {
+            str(key): dict(value)
+            for key, value in payload.get("active", {}).items()
+            if isinstance(key, str) and isinstance(value, dict)
+        }
+        shadow = {
+            str(key): dict(value)
+            for key, value in payload.get("shadow", {}).items()
+            if isinstance(key, str) and isinstance(value, dict)
+        }
+        contributions: dict[str, dict[str, Any]] = {}
+        for key, raw in payload.get("negative_contributions", {}).items():
+            if not isinstance(key, str) or not isinstance(raw, dict):
+                continue
+            if raw.get("status") != "active":
+                continue
+            deltas = raw.get("deltas")
+            if not isinstance(deltas, dict):
+                raise ValueError("v1 negative contribution has no reversible deltas")
+            buffer_name = "shadow" if raw.get("buffer") == "shadow" else "active"
+            nodes = shadow if buffer_name == "shadow" else active
+            weights: dict[str, float] = {}
+            for page_id, value in deltas.items():
+                if (
+                    not isinstance(page_id, str)
+                    or isinstance(value, bool)
+                    or not isinstance(value, int | float)
+                    or not 0.0 <= float(value) <= 1.0
+                ):
+                    raise ValueError("v1 negative contribution delta is invalid")
+                delta = float(value)
+                node = nodes.setdefault(page_id, {})
+                activation = float(node.get("activation") or 0.0)
+                negative = float(node.get("negative") or 0.0)
+                node["activation"] = min(1.0, max(0.0, activation + delta))
+                node["negative"] = min(1.0, max(0.0, negative - 0.75))
+                weights[page_id] = delta
+            contributions[key] = {
+                "producer_key": str(raw.get("producer_key") or ""),
+                "feedback_sha256": str(raw.get("feedback_sha256") or ""),
+                "page_hashes": dict(raw.get("page_hashes") or {}),
+                "page_weights": weights,
+                "buffer": buffer_name,
+                "topic_epoch": int(payload.get("topic_epoch") or 0),
+                "prompt_hash": str(payload.get("topic_prompt_hash") or ""),
+            }
+        migrated["active"] = active
+        migrated["shadow"] = shadow
+        migrated["negative_contributions"] = contributions
+        return migrated
     @staticmethod
     def _atomic_write(path: Path, text: str) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)

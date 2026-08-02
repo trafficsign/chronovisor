@@ -2,13 +2,24 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 import time
 from collections import deque
 from dataclasses import asdict, replace
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
+from chronovisor.core.durable_state import sidecar_exclusive_lock
+from chronovisor.core.jsonl_write import append_jsonl_durable
 from chronovisor.core.store import CHRONOVISOR_ROOT
+from chronovisor.recall.feedback_ledger import (
+    feedback_row_sha256,
+    read_jsonl_rows,
+    trusted_negative_feedback_row_error,
+)
 from chronovisor.recall.recall_field_schema import (
     ActivationNode,
     FieldEvent,
@@ -24,9 +35,70 @@ from chronovisor.recall.recall_field_store import RecallFieldStore
 from chronovisor.search.graph_edges import typed_neighbors
 from chronovisor.search.index_store import get_store
 
+NEGATIVE_APPLICATION_LEDGER = (
+    CHRONOVISOR_ROOT / "recall" / "field" / "negative-applications.jsonl"
+)
+
 
 def _clamp(value: float) -> float:
     return max(0.0, min(1.0, value))
+
+
+def _negative_contribution_weight(
+    state: RecallFieldState,
+    *,
+    page_id: str,
+    buffer_name: str,
+) -> float:
+    total = 0.0
+    for contribution in state.negative_contributions.values():
+        if (
+            not isinstance(contribution, dict)
+            or contribution.get("buffer") != buffer_name
+            or contribution.get("topic_epoch") != state.topic_epoch
+            or contribution.get("prompt_hash") != state.topic_prompt_hash
+        ):
+            continue
+        weights = contribution.get("page_weights")
+        if isinstance(weights, dict):
+            value = weights.get(page_id)
+            if isinstance(value, int | float) and not isinstance(value, bool):
+                total += max(0.0, float(value))
+    return total
+
+
+def effective_activation(
+    state: RecallFieldState,
+    *,
+    page_id: str,
+    node: ActivationNode,
+    buffer_name: str,
+) -> float:
+    """Compose immutable base activation with all active negative producers."""
+
+    return _clamp(
+        node.activation
+        - _negative_contribution_weight(
+            state, page_id=page_id, buffer_name=buffer_name
+        )
+    )
+
+
+def _suppressed_pages(state: RecallFieldState, *, buffer_name: str) -> set[str]:
+    return {
+        str(page_id)
+        for contribution in state.negative_contributions.values()
+        if isinstance(contribution, dict)
+        and contribution.get("buffer") == buffer_name
+        and contribution.get("topic_epoch") == state.topic_epoch
+        and contribution.get("prompt_hash") == state.topic_prompt_hash
+        for page_id, weight in (
+            contribution.get("page_weights", {}).items()
+            if isinstance(contribution.get("page_weights"), dict)
+            else []
+        )
+        if isinstance(weight, int | float) and float(weight) > 0.0
+    }
 
 
 def _effective_config(config: RecallFieldConfig) -> RecallFieldConfig:
@@ -184,7 +256,8 @@ def update_field_state(
     events: list[FieldEvent] = []
     previous_turn = state.turn
     state.turn += 1
-    buffer = state.shadow if config.mode == "shadow" else state.active
+    buffer_name = "shadow" if config.mode == "shadow" else "active"
+    buffer = state.shadow if buffer_name == "shadow" else state.active
     elapsed = max(0.0, now - state.updated_at_epoch)
     _decay_buffer(
         state.active,
@@ -211,6 +284,7 @@ def update_field_state(
     if topic_reset:
         state.topic_epoch += 1
         buffer.clear()
+        state.negative_contributions.clear()
         state.full_search_fallback = True
         state.pending_teacher_commits = [
             row
@@ -237,14 +311,23 @@ def update_field_state(
     else:
         state.full_search_fallback = not bool(buffer)
     state.topic_signature = prompt_signature
+    if prompt_text:
+        from chronovisor.recall.recall_runtime import stable_prompt_hash
+
+        state.topic_prompt_hash = stable_prompt_hash(prompt_text)
 
     applicable_commits: list[dict[str, Any]] = []
     pending: list[dict[str, Any]] = []
+    suppressed = _suppressed_pages(state, buffer_name=buffer_name)
     for row in state.pending_teacher_commits:
         same_epoch = int(row.get("topic_epoch", -1)) == state.topic_epoch
-        if same_epoch and int(row.get("available_turn") or 0) <= state.turn:
+        if (
+            same_epoch
+            and int(row.get("available_turn") or 0) <= state.turn
+            and str(row.get("page_id") or "") not in suppressed
+        ):
             applicable_commits.append(row)
-        elif same_epoch:
+        elif same_epoch and str(row.get("page_id") or "") not in suppressed:
             pending.append(row)
     state.pending_teacher_commits = pending
     effective_stimuli = list(stimuli)
@@ -321,12 +404,29 @@ def update_field_state(
     graph = graph_store or get_store()
     graph.refresh_if_stale()
     frontier: deque[tuple[str, int, float]] = deque(
-        (page_id, 0, node.activation)
+        (
+            page_id,
+            0,
+            effective_activation(
+                state, page_id=page_id, node=node, buffer_name=buffer_name
+            ),
+        )
         for page_id, node in sorted(
             buffer.items(),
-            key=lambda item: (-item[1].activation, item[0]),
+            key=lambda item: (
+                -effective_activation(
+                    state,
+                    page_id=item[0],
+                    node=item[1],
+                    buffer_name=buffer_name,
+                ),
+                item[0],
+            ),
         )[: config.working_set_size]
-        if node.activation > 0.01
+        if effective_activation(
+            state, page_id=page_id, node=node, buffer_name=buffer_name
+        )
+        > 0.01
     )
     traversed = 0
     best_spread: dict[str, float] = {}
@@ -410,7 +510,15 @@ def update_field_state(
 
     retained = sorted(
         buffer.items(),
-        key=lambda item: (-item[1].activation, item[0]),
+        key=lambda item: (
+            -effective_activation(
+                state,
+                page_id=item[0],
+                node=item[1],
+                buffer_name=buffer_name,
+            ),
+            item[0],
+        ),
     )[: config.max_active_nodes]
     buffer.clear()
     buffer.update(retained)
@@ -428,12 +536,18 @@ def run_field_turn(
     config: RecallFieldConfig | None = None,
     store: RecallFieldStore | None = None,
     now: float | None = None,
+    session_hash_override: str = "",
 ) -> dict[str, Any]:
     """Run one private Field turn without changing Recall candidates."""
 
     started = time.perf_counter()
     cfg = _effective_config(config or load_recall_field_config())
-    hashed_session = session_hash(host, session_id)
+    hashed_session = (
+        session_hash_override
+        if len(session_hash_override) == 16
+        and all(char in "0123456789abcdef" for char in session_hash_override.casefold())
+        else session_hash(host, session_id)
+    )
     if cfg.mode == "off" or not hashed_session:
         return {
             "status": "disabled",
@@ -460,10 +574,29 @@ def run_field_turn(
         )
 
     state, events = field_store.transact(hashed_session, mutate, now=observed)
-    buffer = state.shadow if cfg.mode == "shadow" else state.active
+    buffer_name = "shadow" if cfg.mode == "shadow" else "active"
+    buffer = state.shadow if buffer_name == "shadow" else state.active
     top = sorted(
-        buffer.items(),
-        key=lambda item: (-item[1].activation, item[0]),
+        [
+            item
+            for item in buffer.items()
+            if effective_activation(
+                state,
+                page_id=item[0],
+                node=item[1],
+                buffer_name=buffer_name,
+            )
+            > 0.01
+        ],
+        key=lambda item: (
+            -effective_activation(
+                state,
+                page_id=item[0],
+                node=item[1],
+                buffer_name=buffer_name,
+            ),
+            item[0],
+        ),
     )[: cfg.working_set_size]
     return {
         "status": "ok",
@@ -478,7 +611,15 @@ def run_field_turn(
         "activations": [
             {
                 "page_id": page_id,
-                "activation": round(node.activation, 6),
+                "activation": round(
+                    effective_activation(
+                        state,
+                        page_id=page_id,
+                        node=node,
+                        buffer_name=buffer_name,
+                    ),
+                    6,
+                ),
                 "components": {
                     key: round(float(value), 6)
                     for key, value in asdict(node).items()
@@ -597,6 +738,349 @@ def record_mcp_activity(
     }
 
 
+def _reviewed_negative_error(row: dict[str, Any]) -> str:
+    """Validate the one direct negative-learning producer contract."""
+
+    return trusted_negative_feedback_row_error(row)
+
+
+def apply_reviewed_negative_feedback(
+    row: dict[str, Any],
+    *,
+    config: RecallFieldConfig | None = None,
+    store: RecallFieldStore | None = None,
+    application_file: Path = NEGATIVE_APPLICATION_LEDGER,
+    now: float | None = None,
+) -> dict[str, Any]:
+    """Apply one exact, reviewed negative directly to its owning Field session.
+
+    Unlike ``record_mcp_activity``, this path has no unknown-positive fallback.
+    The producer/digest key is stored inside the sealed session snapshot, making
+    retries idempotent even if the append-only audit write was interrupted.
+    """
+
+    error = _reviewed_negative_error(row)
+    if error:
+        return {"status": "held", "reason": error, "applied": 0}
+    cfg = _effective_config(config or load_recall_field_config())
+    snapshot = row["snapshot"]
+    host = str(row.get("host") or snapshot.get("host") or "")
+    session_id = str(snapshot["session_id"])
+    hashed_session = session_hash(host, session_id)
+    if cfg.mode == "off" or not hashed_session:
+        return {"status": "held", "reason": "field_unavailable", "applied": 0}
+    producer_key = str(row.get("content_correction_key") or row.get("producer_key"))
+    feedback_digest = feedback_row_sha256(row)
+    evidence = snapshot.get("evidence_features")
+    field_evidence = (
+        evidence.get("field_shadow") if isinstance(evidence, dict) else None
+    )
+    expected_topic_epoch = (
+        field_evidence.get("topic_epoch") if isinstance(field_evidence, dict) else None
+    )
+    expected_prompt_hash = str(snapshot.get("prompt_hash") or "")
+    if (
+        not isinstance(expected_topic_epoch, int)
+        or isinstance(expected_topic_epoch, bool)
+        or expected_topic_epoch < 0
+        or str(field_evidence.get("session_hash") or "") != hashed_session
+        or not expected_prompt_hash
+    ):
+        return {"status": "held", "reason": "field_topic_binding_missing", "applied": 0}
+    contribution_key = hashlib.sha256(
+        f"{producer_key}:{feedback_digest}:{expected_topic_epoch}:{expected_prompt_hash}".encode()
+    ).hexdigest()
+    pages = list(dict.fromkeys(str(page) for page in row["negative_pages"]))
+    observed = time.time() if now is None else now
+    field_store = store or RecallFieldStore(config=cfg)
+    held_reason: list[str] = []
+
+    def mutate(
+        state: RecallFieldState,
+    ) -> tuple[RecallFieldState, list[FieldEvent]]:
+        if (
+            state.topic_epoch != expected_topic_epoch
+            or state.topic_prompt_hash != expected_prompt_hash
+        ):
+            held_reason.append("field_topic_epoch_or_query_mismatch")
+            return state, []
+        if contribution_key in state.negative_contributions:
+            return state, []
+        buffer_name = "shadow" if cfg.mode == "shadow" else "active"
+        buffer = state.shadow if buffer_name == "shadow" else state.active
+        state.pending_teacher_commits = [
+            pending
+            for pending in state.pending_teacher_commits
+            if not (
+                str(pending.get("page_id") or "") in pages
+                and int(pending.get("topic_epoch", -1)) == expected_topic_epoch
+            )
+        ]
+        page_weights: dict[str, float] = {}
+        events: list[FieldEvent] = []
+        for page_id in pages:
+            node = buffer.setdefault(page_id, ActivationNode())
+            composed_before = effective_activation(
+                state,
+                page_id=page_id,
+                node=node,
+                buffer_name=buffer_name,
+            )
+            node.last_seq = state.seq + 1
+            page_weights[page_id] = 0.75
+            events.append(
+                _event(
+                    state,
+                    observed,
+                    "inhibit",
+                    page_id=page_id,
+                    delta=-0.75,
+                    activation=round(_clamp(composed_before - 0.75), 6),
+                    reason_code="frontier_reviewed_negative",
+                    components={
+                        "producer_key": producer_key,
+                        "feedback_sha256": feedback_digest,
+                    },
+                )
+            )
+        state.negative_contributions[contribution_key] = {
+            "producer_key": producer_key,
+            "feedback_sha256": feedback_digest,
+            "page_hashes": dict(row["negative_page_hashes"]),
+            "page_weights": page_weights,
+            "buffer": buffer_name,
+            "topic_epoch": expected_topic_epoch,
+            "prompt_hash": expected_prompt_hash,
+        }
+        state.updated_at_epoch = observed
+        return state, events
+
+    state, events = field_store.transact(hashed_session, mutate, now=observed)
+    if held_reason:
+        return {"status": "held", "reason": held_reason[0], "applied": 0}
+    ledger_row = {
+        "schema_version": 1,
+        "kind": "reviewed_negative_applied",
+        "ts": datetime.fromtimestamp(observed, UTC).isoformat(),
+        "session_hash": hashed_session,
+        "producer_key": producer_key,
+        "feedback_sha256": feedback_digest,
+        "contribution_key": contribution_key,
+        "page_ids": pages,
+        "page_hashes": dict(row["negative_page_hashes"]),
+        "applied": bool(events),
+    }
+    with sidecar_exclusive_lock(application_file):
+        existing = {
+            str(value.get("contribution_key") or "")
+            for value in _read_application_rows(application_file)
+            if value.get("kind") == "reviewed_negative_applied"
+        }
+        if contribution_key not in existing:
+            append_jsonl_durable(application_file, [ledger_row], sort_keys=True)
+    return {
+        "status": "applied" if events else "duplicate",
+        "applied": len(events),
+        "session_hash": state.session_hash,
+        "producer_key": producer_key,
+        "feedback_sha256": feedback_digest,
+        "contribution_key": contribution_key,
+        "page_ids": pages,
+    }
+
+
+def _read_application_rows(path: Path) -> list[dict[str, Any]]:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    rows: list[dict[str, Any]] = []
+    for line in lines:
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            rows.append(value)
+    return rows
+
+
+def retract_reviewed_negative_feedback(
+    retraction: dict[str, Any],
+    original: dict[str, Any],
+    *,
+    config: RecallFieldConfig | None = None,
+    store: RecallFieldStore | None = None,
+    application_file: Path = NEGATIVE_APPLICATION_LEDGER,
+    now: float | None = None,
+) -> dict[str, Any]:
+    """Retract only the exact producer/digest contribution named by a tombstone."""
+
+    producer_key = str(
+        original.get("content_correction_key") or original.get("producer_key") or ""
+    )
+    feedback_digest = feedback_row_sha256(original)
+    if (
+        retraction.get("kind") != "page_ignored_retracted"
+        or retraction.get("target_kind") != original.get("kind")
+        or retraction.get("content_correction_key") != producer_key
+        or retraction.get("target_feedback_sha256") != feedback_digest
+    ):
+        return {"status": "held", "reason": "retraction_binding_invalid", "restored": 0}
+    snapshot = original.get("snapshot")
+    if not isinstance(snapshot, dict):
+        return {"status": "held", "reason": "missing_original_session", "restored": 0}
+    cfg = _effective_config(config or load_recall_field_config())
+    host = str(original.get("host") or snapshot.get("host") or "")
+    hashed_session = session_hash(host, str(snapshot.get("session_id") or ""))
+    if not hashed_session:
+        return {"status": "held", "reason": "missing_original_session", "restored": 0}
+    evidence = snapshot.get("evidence_features")
+    field_evidence = (
+        evidence.get("field_shadow") if isinstance(evidence, dict) else None
+    )
+    expected_topic_epoch = (
+        field_evidence.get("topic_epoch") if isinstance(field_evidence, dict) else -1
+    )
+    expected_prompt_hash = str(snapshot.get("prompt_hash") or "")
+    contribution_key = hashlib.sha256(
+        f"{producer_key}:{feedback_digest}:{expected_topic_epoch}:{expected_prompt_hash}".encode()
+    ).hexdigest()
+    observed = time.time() if now is None else now
+    field_store = store or RecallFieldStore(config=cfg)
+
+    def mutate(
+        state: RecallFieldState,
+    ) -> tuple[RecallFieldState, list[FieldEvent]]:
+        contribution = state.negative_contributions.get(contribution_key)
+        if not isinstance(contribution, dict):
+            return state, []
+        if (
+            contribution.get("topic_epoch") != state.topic_epoch
+            or contribution.get("prompt_hash") != state.topic_prompt_hash
+        ):
+            del state.negative_contributions[contribution_key]
+            return state, []
+        buffer = (
+            state.shadow if contribution.get("buffer") == "shadow" else state.active
+        )
+        buffer_name = "shadow" if contribution.get("buffer") == "shadow" else "active"
+        del state.negative_contributions[contribution_key]
+        events: list[FieldEvent] = []
+        page_weights = contribution.get("page_weights", {})
+        for page_id, raw_delta in page_weights.items() if isinstance(page_weights, dict) else []:
+            if not isinstance(page_id, str) or not isinstance(raw_delta, int | float):
+                continue
+            delta = max(0.0, min(1.0, float(raw_delta)))
+            node = buffer.get(page_id)
+            if node is None:
+                continue
+            events.append(
+                _event(
+                    state,
+                    observed,
+                    "stimulus",
+                    page_id=page_id,
+                    delta=round(delta, 6),
+                    activation=round(
+                        effective_activation(
+                            state,
+                            page_id=page_id,
+                            node=node,
+                            buffer_name=buffer_name,
+                        ),
+                        6,
+                    ),
+                    reason_code="exact_negative_retraction",
+                    components={
+                        "producer_key": producer_key,
+                        "feedback_sha256": feedback_digest,
+                    },
+                )
+            )
+        state.updated_at_epoch = observed
+        return state, events
+
+    state, events = field_store.transact(hashed_session, mutate, now=observed)
+    if events:
+        append_jsonl_durable(
+            application_file,
+            [
+                {
+                    "schema_version": 1,
+                    "kind": "reviewed_negative_retracted",
+                    "ts": datetime.fromtimestamp(observed, UTC).isoformat(),
+                    "session_hash": state.session_hash,
+                    "producer_key": producer_key,
+                    "feedback_sha256": feedback_digest,
+                    "contribution_key": contribution_key,
+                    "retraction_sha256": feedback_row_sha256(retraction),
+                }
+            ],
+            sort_keys=True,
+        )
+    return {
+        "status": "retracted" if events else "duplicate_or_missing",
+        "restored": len(events),
+        "contribution_key": contribution_key,
+    }
+
+
+def sync_reviewed_negative_feedback(
+    feedback_file: Path,
+    *,
+    config: RecallFieldConfig | None = None,
+    store: RecallFieldStore | None = None,
+) -> dict[str, Any]:
+    """Replay active producers and exact tombstones into sealed Field state."""
+
+    rows = read_jsonl_rows(feedback_file)
+    originals: dict[tuple[str, str], dict[str, Any]] = {}
+    tombstones: dict[tuple[str, str], dict[str, Any]] = {}
+    applied = retracted = held = 0
+    for row in rows:
+        if row.get("kind") in {"page_ignored", "contradiction"}:
+            producer = str(
+                row.get("content_correction_key") or row.get("producer_key") or ""
+            )
+            digest = feedback_row_sha256(row)
+            originals[(producer, digest)] = row
+        elif row.get("kind") == "page_ignored_retracted":
+            key = (
+                str(row.get("content_correction_key") or ""),
+                str(row.get("target_feedback_sha256") or ""),
+            )
+            if key in tombstones:
+                held += 1
+            else:
+                tombstones[key] = row
+    for key, original in originals.items():
+        tombstone = tombstones.pop(key, None)
+        if tombstone is not None:
+            result = retract_reviewed_negative_feedback(
+                tombstone, original, config=config, store=store
+            )
+            if result.get("status") in {"retracted", "duplicate_or_missing"}:
+                retracted += 1
+            else:
+                held += 1
+            continue
+        result = apply_reviewed_negative_feedback(
+            original, config=config, store=store
+        )
+        if result.get("status") in {"applied", "duplicate"}:
+            applied += 1
+        else:
+            held += 1
+    held += len(tombstones)
+    return {
+        "status": "ok" if held == 0 else "held",
+        "applied_or_present": applied,
+        "retracted_or_absent": retracted,
+        "held": held,
+    }
+
+
 def record_mcp_content_activity(
     *,
     host: str,
@@ -637,12 +1121,31 @@ def record_mcp_content_activity(
     ]
     if not exact_pages:
         state = field_store.load(hashed_session, now=observed)
-        buffer = state.shadow if cfg.mode == "shadow" else state.active
+        buffer_name = "shadow" if cfg.mode == "shadow" else "active"
+        buffer = state.shadow if buffer_name == "shadow" else state.active
         exact_pages = [
             page_id
             for page_id, _node in sorted(
-                buffer.items(),
-                key=lambda item: (-item[1].activation, item[0]),
+                [
+                    item
+                    for item in buffer.items()
+                    if effective_activation(
+                        state,
+                        page_id=item[0],
+                        node=item[1],
+                        buffer_name=buffer_name,
+                    )
+                    > 0.01
+                ],
+                key=lambda item: (
+                    -effective_activation(
+                        state,
+                        page_id=item[0],
+                        node=item[1],
+                        buffer_name=buffer_name,
+                    ),
+                    item[0],
+                ),
             )[:3]
         ]
     return record_mcp_activity(
@@ -666,11 +1169,17 @@ def queue_teacher_commits(
     config: RecallFieldConfig | None = None,
     store: RecallFieldStore | None = None,
     now: float | None = None,
+    session_hash_override: str = "",
 ) -> dict[str, Any]:
     """Queue teacher commits for the next turn without current-turn activation."""
 
     cfg = _effective_config(config or load_recall_field_config())
-    hashed_session = session_hash(host, session_id)
+    hashed_session = (
+        session_hash_override
+        if len(session_hash_override) == 16
+        and all(char in "0123456789abcdef" for char in session_hash_override.casefold())
+        else session_hash(host, session_id)
+    )
     if cfg.mode == "off" or not hashed_session or not page_ids:
         return {"status": "skipped", "queued": 0}
     observed = time.time() if now is None else now
@@ -681,6 +1190,8 @@ def queue_teacher_commits(
     def mutate(
         state: RecallFieldState,
     ) -> tuple[RecallFieldState, list[FieldEvent]]:
+        buffer_name = "shadow" if cfg.mode == "shadow" else "active"
+        suppressed = _suppressed_pages(state, buffer_name=buffer_name)
         existing = {
             (str(row.get("page_id") or ""), int(row.get("topic_epoch", -1)))
             for row in state.pending_teacher_commits
@@ -688,7 +1199,7 @@ def queue_teacher_commits(
         events: list[FieldEvent] = []
         for page_id in dict.fromkeys(page_ids):
             key = (page_id, state.topic_epoch)
-            if not page_id or key in existing:
+            if not page_id or key in existing or page_id in suppressed:
                 continue
             state.pending_teacher_commits.append(
                 {

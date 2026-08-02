@@ -735,12 +735,16 @@ def _source_pull_pages(
     return list(dict.fromkeys(pages))[:MAX_CANDIDATE_PAGES]
 
 
-def source_recall_record(source_turn: TurnContext) -> dict[str, Any] | None:
+def source_recall_record(
+    source_turn: TurnContext,
+    *,
+    log_file: Path = RECALL_LOG_FILE,
+) -> dict[str, Any] | None:
     # The general recall auditor permits fuzzy fallbacks. Content mutation does
     # not: provenance must match the exact prompt, host, session, and turn time.
     candidates = [
         record
-        for record in read_jsonl_tail(RECALL_LOG_FILE, 5000)
+        for record in read_jsonl_tail(log_file, 5000)
         if record.get("prompt_hash") == source_turn.prompt_hash
         and (not source_turn.host or record.get("host") == source_turn.host)
         and (
@@ -2815,11 +2819,12 @@ def _review_artifact_payload(
     proposal: dict[str, Any],
     review: dict[str, Any],
     mutations: list[PreparedPageMutation],
+    reviewed_versions: dict[str, dict[str, Any]],
     authority: dict[str, Any],
 ) -> dict[str, Any]:
     return seal_semantic_artifact(
         {
-            "schema_version": 2,
+            "schema_version": 3,
             "key": key,
             "proposal_sha256": _canonical_json_sha256(proposal),
             "review": review,
@@ -2833,6 +2838,7 @@ def _review_artifact_payload(
                 }
                 for mutation in mutations
             ],
+            "reviewed_versions": reviewed_versions,
         },
         authority=authority,
         lane=REVIEW_LANE,
@@ -2846,13 +2852,16 @@ def _review_artifact_error(
     proposal: dict[str, Any],
     mutations: list[PreparedPageMutation],
 ) -> str | None:
-    if artifact.get("schema_version") != 2 or artifact.get("key") != key:
+    if artifact.get("schema_version") != 3 or artifact.get("key") != key:
         return "frontier review artifact identity mismatch"
     if artifact.get("proposal_sha256") != _canonical_json_sha256(proposal):
         return "frontier review artifact proposal mismatch"
     rows = artifact.get("mutations")
+    reviewed_versions = artifact.get("reviewed_versions")
     if not isinstance(rows, list) or len(rows) != len(mutations):
         return "frontier review artifact mutation count mismatch"
+    if not isinstance(reviewed_versions, dict):
+        return "frontier review artifact file versions are missing"
     expected_review_hashes: set[tuple[str, str, str]] = set()
     for mutation, row in zip(mutations, rows, strict=False):
         if not isinstance(row, dict):
@@ -2886,6 +2895,18 @@ def _review_artifact_error(
         ):
             return "frontier review artifact page hashes are stale"
         expected_review_hashes.add((mutation.page_id, original_sha256, updated_sha256))
+        version = reviewed_versions.get(mutation.page_id)
+        if (
+            not isinstance(version, dict)
+            or version.get("sha256") != original_sha256
+            or any(
+                not isinstance(version.get(key), int)
+                or isinstance(version.get(key), bool)
+                or int(version[key]) < 0
+                for key in ("device", "inode", "size", "mtime_ns", "ctime_ns")
+            )
+        ):
+            return "frontier review artifact file version is invalid"
     review = artifact.get("review")
     if not isinstance(review, dict):
         return "frontier review artifact review is missing"
@@ -2939,6 +2960,37 @@ def _review_artifact_error(
     }
     if actual_review_hashes != expected_review_hashes:
         return "frontier review artifact hash echo is invalid"
+    return None
+
+
+def _mutation_file_versions(
+    mutations: list[PreparedPageMutation],
+) -> dict[str, dict[str, Any]]:
+    versions: dict[str, dict[str, Any]] = {}
+    for mutation in mutations:
+        stat = mutation.path.stat()
+        current = mutation.path.read_bytes()
+        versions[mutation.page_id] = {
+            "sha256": hashlib.sha256(current).hexdigest(),
+            "device": stat.st_dev,
+            "inode": stat.st_ino,
+            "size": stat.st_size,
+            "mtime_ns": stat.st_mtime_ns,
+            "ctime_ns": stat.st_ctime_ns,
+        }
+    return versions
+
+
+def _reviewed_preimage_version_error(
+    reviewed_versions: dict[str, dict[str, Any]],
+    mutations: list[PreparedPageMutation],
+) -> str | None:
+    try:
+        current = _mutation_file_versions(mutations)
+    except OSError as exc:
+        return f"frontier reviewed page version unavailable: {exc}"
+    if current != reviewed_versions:
+        return "frontier reviewed page version changed before commit"
     return None
 
 
@@ -3280,37 +3332,63 @@ def _record_wrong_retrieval(
     key: str,
     ignored_pages: list[str],
 ) -> dict[str, Any]:
+    captured_hashes = event.get("candidate_page_hashes")
+    if not isinstance(captured_hashes, dict):
+        return {"kind": "page_ignored", "status": "held", "reason": "missing_reviewed_page_hashes"}
+    reviewed_hashes = {
+        page_id: str(captured_hashes.get(page_id) or "") for page_id in ignored_pages
+    }
+    if (
+        any(len(value) != 64 for value in reviewed_hashes.values())
+        or _current_candidate_page_hashes(ignored_pages) != reviewed_hashes
+    ):
+        return {"kind": "page_ignored", "status": "held", "reason": "reviewed_page_bytes_changed"}
     RECALL_FEEDBACK_FILE.parent.mkdir(parents=True, exist_ok=True)
     lock_path = RECALL_FEEDBACK_FILE.with_suffix(RECALL_FEEDBACK_FILE.suffix + ".lock")
     with lock_path.open("a+b") as lock_handle:
         fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
         try:
-            if _jsonl_has_key(RECALL_FEEDBACK_FILE, key):
-                return {"kind": "page_ignored", "already_recorded": True}
-            return append_feedback(
-                "page_ignored",
-                str(
-                    proposal.get("reason")
-                    or "user correction classified as wrong retrieval"
-                ),
-                prompt=str(event.get("source_prompt") or ""),
-                host=str(event.get("host") or ""),
-                expected_pages=[],
-                ref=str(event.get("source_decision_id") or ""),
-                extra={
-                    "source": LANE,
-                    "content_correction_key": key,
-                    "frontier_reviewed": True,
-                    "negative_pages": ignored_pages,
-                    "negative_page_hashes": _current_candidate_page_hashes(
-                        ignored_pages
+            existing = _jsonl_row_for_key(RECALL_FEEDBACK_FILE, key)
+            if existing is not None:
+                feedback = existing
+                already_recorded = True
+            else:
+                feedback = append_feedback(
+                    "page_ignored",
+                    str(
+                        proposal.get("reason")
+                        or "user correction classified as wrong retrieval"
                     ),
-                    "injected_pages": ignored_pages,
-                    "correction_turn_ref": event.get("correction_turn_ref", {}),
-                },
-            )
+                    prompt=str(event.get("source_prompt") or ""),
+                    host=str(event.get("host") or ""),
+                    expected_pages=[],
+                    negative_pages=ignored_pages,
+                    ref=str(event.get("source_decision_id") or ""),
+                    extra={
+                        "source": LANE,
+                        "content_correction_key": key,
+                        "frontier_reviewed": True,
+                        "label_quality": "strong",
+                        "negative_page_hashes": reviewed_hashes,
+                        "injected_pages": ignored_pages,
+                        "source_turn_ref": event.get("source_turn_ref", {}),
+                        "correction_turn_ref": event.get("correction_turn_ref", {}),
+                    },
+                )
+                already_recorded = False
         finally:
             fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+    # This exact negative producer is intentionally separate from generic MCP
+    # activity, which remains unknown-positive usage telemetry.
+    from chronovisor.recall.recall_field import apply_reviewed_negative_feedback
+
+    projection = apply_reviewed_negative_feedback(feedback)
+    return {
+        "kind": "page_ignored",
+        "already_recorded": already_recorded,
+        "feedback_sha256": feedback_row_sha256(feedback),
+        "field_negative": projection,
+    }
 
 
 def _requeue_changed_event(
@@ -4478,6 +4556,174 @@ def _commit_content_correction(
     }
 
 
+def _apply_reviewed_frontier_mutations(
+    *,
+    key: str,
+    event: dict[str, Any],
+    proposal: dict[str, Any],
+    review: dict[str, Any],
+    review_authority: dict[str, Any],
+    triage_review: dict[str, Any],
+    triage_authority: dict[str, Any],
+    mutations: list[PreparedPageMutation],
+    sealed_review_versions: dict[str, Any],
+    page_ids: list[str],
+    store: ConvergenceStore,
+    owner: str | None,
+    reviewer: Callable[[dict[str, Any]], dict[str, Any]] | None,
+    eligible_keys: set[str] | None,
+    dry_run: bool,
+) -> dict[str, Any]:
+    """Apply reviewed bytes under stable authority and exact page-version CAS."""
+
+    locked_version_error: str | None = None
+    with decision_authority_lock(), chronovisor_mutation_lock():
+        current_authority, current_authority_error = _current_content_review_authority(
+            reviewer=reviewer
+        )
+        review_epoch_error = (
+            current_authority_error
+            or compare_semantic_authority(
+                review_authority,
+                current_authority,
+                lane=REVIEW_LANE,
+            )
+            or _review_authority_error(review, review_authority)
+        )
+        current_triage_authority, current_triage_authority_error = (
+            _current_content_classification_authority(reviewer=reviewer)
+        )
+        triage_epoch_error = (
+            current_triage_authority_error
+            or compare_semantic_authority(
+                triage_authority,
+                current_triage_authority,
+                lane=CLASSIFICATION_LANE,
+            )
+            or _classification_authority_error(triage_review, triage_authority)
+        )
+        if review_epoch_error is not None or triage_epoch_error is not None:
+            return _fail_claimed_frontier(
+                store=store,
+                key=key,
+                owner=owner,
+                error=review_epoch_error or triage_epoch_error or "authority changed",
+                failure_class="review_artifact_invalid",
+                dry_run=dry_run,
+            )
+        locked_version_error = _reviewed_preimage_version_error(
+            sealed_review_versions,
+            mutations,
+        )
+        apply_result = (
+            {
+                "status": "retry",
+                "reason": locked_version_error,
+                "pages": [mutation.page_id for mutation in mutations],
+            }
+            if locked_version_error
+            else apply_prepared_mutations(mutations, dry_run=dry_run)
+        )
+        if (
+            not locked_version_error
+            and apply_result.get("status")
+            in {"applied", "already_applied", "dry_run"}
+        ):
+            committed_page_ids = [mutation.page_id for mutation in mutations]
+            verification = (
+                {"status": "dry_run", "refresh": {}, "semantic_readback": {}}
+                if dry_run
+                else _refresh_and_verify(mutations)
+            )
+            if not dry_run and verification.get("status") != "ok":
+                rollback = rollback_prepared_mutations(mutations)
+                rollback_refresh = _refresh_after_apply(committed_page_ids)
+                if rollback and all(rollback.values()):
+                    try:
+                        rollback_versions = _mutation_file_versions(mutations)
+                        _write_json_atomic(
+                            _review_path(key),
+                            _review_artifact_payload(
+                                key,
+                                proposal,
+                                review,
+                                mutations,
+                                rollback_versions,
+                                review_authority,
+                            ),
+                        )
+                    except (OSError, ValueError):
+                        pass
+                result = _fail_claimed_frontier(
+                    store=store,
+                    key=key,
+                    owner=owner,
+                    error="derived index refresh or semantic readback failed: "
+                    + json.dumps(verification, ensure_ascii=False, default=str),
+                    failure_class="index_refresh_error",
+                    dry_run=dry_run,
+                )
+                result["apply"] = apply_result
+                result["verification"] = verification
+                result["rollback"] = rollback
+                result["rollback_refresh"] = rollback_refresh
+                return result
+            # Mutation lock remains held through exact readback, durable audit,
+            # and the terminal transition. No concurrent writer can change
+            # reviewed bytes between verification and an "applied" result.
+            return _commit_content_correction(
+                key=key,
+                event=event,
+                proposal=proposal,
+                review=review,
+                apply_result=apply_result,
+                verification=verification,
+                mutations=mutations,
+                page_ids=committed_page_ids,
+                store=store,
+                owner=owner,
+                dry_run=dry_run,
+            )
+    if locked_version_error:
+        result = _requeue_changed_event(
+            key=key,
+            event=event,
+            store=store,
+            owner=owner,
+            error=locked_version_error,
+            eligible_keys=eligible_keys,
+            dry_run=dry_run,
+        )
+        result["apply"] = apply_result
+        return result
+    if apply_result.get("status") not in {"applied", "already_applied", "dry_run"}:
+        current_hashes = _current_candidate_page_hashes(page_ids)
+        previous_hashes = event.get("candidate_page_hashes")
+        if isinstance(previous_hashes, dict) and current_hashes != previous_hashes:
+            result = _requeue_changed_event(
+                key=key,
+                event=event,
+                store=store,
+                owner=owner,
+                error=str(apply_result.get("reason") or apply_result.get("status")),
+                eligible_keys=eligible_keys,
+                dry_run=dry_run,
+            )
+            result["apply"] = apply_result
+            return result
+        result = _fail_claimed_frontier(
+            store=store,
+            key=key,
+            owner=owner,
+            error=str(apply_result.get("reason") or apply_result.get("status")),
+            failure_class="mutation_retry",
+            dry_run=dry_run,
+        )
+        result["apply"] = apply_result
+        return result
+    raise AssertionError("unreachable content-correction apply status")
+
+
 def _process_frontier_item(
     item: dict[str, Any],
     *,
@@ -4936,6 +5182,18 @@ def _process_frontier_item(
             failure_class="schema_invalid",
             dry_run=dry_run,
         )
+    try:
+        reviewed_versions = _mutation_file_versions(mutations)
+    except OSError as exc:
+        return _requeue_changed_event(
+            key=key,
+            event=event,
+            store=store,
+            owner=owner,
+            error=f"reviewed page version capture failed: {exc}",
+            eligible_keys=eligible_keys,
+            dry_run=dry_run,
+        )
     artifact = _load_json(_review_path(key))
     artifact_error = (
         _review_artifact_error(
@@ -5118,14 +5376,35 @@ def _process_frontier_item(
     else:
         review = artifact_review
         validation_error = None
+    sealed_review_versions = (
+        artifact.get("reviewed_versions")
+        if isinstance(artifact, dict)
+        and isinstance(artifact.get("reviewed_versions"), dict)
+        else reviewed_versions
+    )
+    version_error = _reviewed_preimage_version_error(
+        sealed_review_versions,
+        mutations,
+    )
     if dry_run:
         return {
             "key": key,
             "status": "dry_run",
             "frontier": review,
             "approval_error": validation_error
+            or version_error
             or _validate_frontier_approval(review, mutations),
         }
+    if version_error:
+        return _requeue_changed_event(
+            key=key,
+            event=event,
+            store=store,
+            owner=owner,
+            error=version_error,
+            eligible_keys=eligible_keys,
+            dry_run=dry_run,
+        )
     if validation_error:
         result = _fail_claimed_frontier(
             store=store,
@@ -5153,7 +5432,12 @@ def _process_frontier_item(
                 _write_json_atomic(
                     _review_path(key),
                     _review_artifact_payload(
-                        key, proposal, review, mutations, review_authority
+                        key,
+                        proposal,
+                        review,
+                        mutations,
+                        reviewed_versions,
+                        review_authority,
                     ),
                 )
             except Exception as exc:
@@ -5199,7 +5483,12 @@ def _process_frontier_item(
             _write_json_atomic(
                 _review_path(key),
                 _review_artifact_payload(
-                    key, proposal, review, mutations, review_authority
+                    key,
+                    proposal,
+                    review,
+                    mutations,
+                    reviewed_versions,
+                    review_authority,
                 ),
             )
         except Exception as exc:
@@ -5228,100 +5517,21 @@ def _process_frontier_item(
             )
     # Keep the adoption/policy epoch stable from final authority validation
     # through the durable page CAS. Adoption artifact writers take this lease.
-    with decision_authority_lock():
-        current_authority, current_authority_error = _current_content_review_authority(
-            reviewer=reviewer
-        )
-        review_epoch_error = (
-            current_authority_error
-            or compare_semantic_authority(
-                review_authority,
-                current_authority,
-                lane=REVIEW_LANE,
-            )
-            or _review_authority_error(review, review_authority)
-        )
-        current_triage_authority, current_triage_authority_error = (
-            _current_content_classification_authority(reviewer=reviewer)
-        )
-        triage_epoch_error = (
-            current_triage_authority_error
-            or compare_semantic_authority(
-                triage_authority,
-                current_triage_authority,
-                lane=CLASSIFICATION_LANE,
-            )
-            or _classification_authority_error(triage_review, triage_authority)
-        )
-        if review_epoch_error is not None or triage_epoch_error is not None:
-            return _fail_claimed_frontier(
-                store=store,
-                key=key,
-                owner=owner,
-                error=review_epoch_error or triage_epoch_error or "authority changed",
-                failure_class="review_artifact_invalid",
-                dry_run=dry_run,
-            )
-        apply_result = apply_prepared_mutations(mutations, dry_run=dry_run)
-    if apply_result.get("status") not in {"applied", "already_applied", "dry_run"}:
-        current_hashes = _current_candidate_page_hashes(page_ids)
-        previous_hashes = event.get("candidate_page_hashes")
-        if isinstance(previous_hashes, dict) and current_hashes != previous_hashes:
-            result = _requeue_changed_event(
-                key=key,
-                event=event,
-                store=store,
-                owner=owner,
-                error=str(apply_result.get("reason") or apply_result.get("status")),
-                eligible_keys=eligible_keys,
-                dry_run=dry_run,
-            )
-            result["apply"] = apply_result
-            return result
-        result = _fail_claimed_frontier(
-            store=store,
-            key=key,
-            owner=owner,
-            error=str(apply_result.get("reason") or apply_result.get("status")),
-            failure_class="mutation_retry",
-            dry_run=dry_run,
-        )
-        result["apply"] = apply_result
-        return result
-    page_ids = [mutation.page_id for mutation in mutations]
-    verification = (
-        {"status": "dry_run", "refresh": {}, "semantic_readback": {}}
-        if dry_run
-        else _refresh_and_verify(mutations)
-    )
-    if not dry_run and verification.get("status") != "ok":
-        rollback = rollback_prepared_mutations(mutations)
-        rollback_refresh = _refresh_after_apply(page_ids)
-        result = _fail_claimed_frontier(
-            store=store,
-            key=key,
-            owner=owner,
-            error="derived index refresh or semantic readback failed: "
-            + json.dumps(verification, ensure_ascii=False, default=str),
-            failure_class="index_refresh_error",
-            dry_run=dry_run,
-        )
-        result["apply"] = apply_result
-        result["verification"] = verification
-        result["rollback"] = rollback
-        result["rollback_refresh"] = rollback_refresh
-        return result
-    return _commit_content_correction(
+    return _apply_reviewed_frontier_mutations(
         key=key,
         event=event,
         proposal=proposal,
         review=review,
-        apply_result=apply_result,
-        verification=verification,
+        review_authority=review_authority,
+        triage_review=triage_review,
+        triage_authority=triage_authority,
         mutations=mutations,
+        sealed_review_versions=sealed_review_versions,
         page_ids=page_ids,
         store=store,
         owner=owner,
+        reviewer=reviewer,
+        eligible_keys=eligible_keys,
         dry_run=dry_run,
     )
 

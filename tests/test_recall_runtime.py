@@ -176,7 +176,9 @@ def test_weak_rrf_and_hit_count_do_not_cross_injection_threshold() -> None:
         )
         for index in range(8)
     ]
-    policy = RecallPolicy()
+    # This asserts the static evidence formula, independent of any live learned
+    # calibration artifact under the developer's Chronovisor root.
+    policy = RecallPolicy(calibration_enabled=False)
     features = build_evidence_features(
         request=request,
         matched={},
@@ -1880,3 +1882,20 @@ def test_missed_candidate_feedback_does_not_suppress_runtime(
 
     assert result.decision == "read"
     assert "feedback false-positive prompt" not in result.reasons
+
+
+def test_feedback_extra_cannot_overwrite_reserved_provenance(
+    tmp_path, monkeypatch
+) -> None:
+    from chronovisor.recall import recall_runtime
+
+    monkeypatch.setattr(
+        recall_runtime, "RECALL_FEEDBACK_FILE", tmp_path / "feedback.jsonl"
+    )
+    with pytest.raises(ValueError, match="reserved fields"):
+        append_feedback(
+            "page_ignored",
+            prompt="prompt",
+            host="codex",
+            extra={"host": "spoofed", "snapshot": {"decision_id": "fake"}},
+        )

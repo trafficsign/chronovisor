@@ -599,14 +599,14 @@ def _project_field_event(value: Any) -> dict[str, Any] | None:
 
 
 def _read_field_events(
-    field_root: Path,
+    event_root: Path,
     session_hash: str,
     *,
     limit: int = 256,
 ) -> list[dict[str, Any]]:
     if not _FIELD_SESSION_RE.fullmatch(session_hash):
         return []
-    path = field_root / "events" / f"{session_hash}.jsonl"
+    path = event_root / f"{session_hash}.jsonl"
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
     except OSError:
@@ -755,11 +755,13 @@ def build_cortex_field_projection(
     """Build a browser-safe projection of recent Stateful Recall Field state."""
 
     from chronovisor.recall.recall_field_schema import load_recall_field_config
+    from chronovisor.recall.recall_field_store import RecallFieldStore
 
     observed = time.time() if now is None else now
     field_root = root.expanduser().resolve() / "recall" / "field"
-    session_root = field_root / "sessions"
     config = load_recall_field_config()
+    field_store = RecallFieldStore(root=field_root, config=config)
+    session_root = field_store.session_root
     growth = _field_growth_summary(root)
     effective_mode = config.mode
     if config.auto_promote and config.mode not in {"off", "shadow"}:
@@ -859,7 +861,7 @@ def build_cortex_field_projection(
     nodes.sort(key=lambda row: (-row["activation"], row["page_id"]))
     nodes = nodes[: config.max_active_nodes]
     events = _read_field_events(
-        field_root,
+        field_store.event_root,
         session["session_hash"],
         limit=event_limit,
     )
@@ -960,7 +962,11 @@ class CortexEventCursor:
             field_session if _FIELD_SESSION_RE.fullmatch(field_session) else ""
         )
         self.follow_field_sessions = bool(follow_field_sessions)
-        self.field_event_root = self.root / "recall" / "field" / "events"
+        from chronovisor.recall.recall_field_store import RecallFieldStore
+
+        self.field_event_root = RecallFieldStore(
+            root=self.root / "recall" / "field"
+        ).event_root
         self.field_event_log = (
             self.field_event_root / f"{self.field_session}.jsonl"
             if self.field_session

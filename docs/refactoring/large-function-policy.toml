@@ -1,6 +1,6 @@
 schema_version = 1
 threshold_lines = 300
-baseline_function_count = 38
+baseline_function_count = 43
 
 [[functions]]
 path = "src/chronovisor/decision/decision_router.py"
@@ -262,6 +262,51 @@ disposition = "retained"
 max_lines = 846
 rationale = "Campaign K extracted evidence and commit projections; remaining per-item transaction preserves classification, review, CAS mutation, rollback, readback, and audit order."
 tests = ["tests/test_content_correction.py", "tests/test_campaign_k_seams.py"]
+
+[[functions]]
+path = "src/chronovisor/recall/recall_answer_eval.py"
+qualname = "evaluate_answer_episodes"
+baseline_lines = 515
+disposition = "retained"
+max_lines = 515
+rationale = "One preregistered paired evaluation transaction binds the immutable cohort, runner order, field replay, scorer calls, receipts, confidence bounds, and sealed artifact in auditable execution order."
+tests = ["tests/test_recall_answer_eval.py"]
+
+[[functions]]
+path = "src/chronovisor/recall/recall_answer_eval.py"
+qualname = "validate_answer_outcome_artifact"
+baseline_lines = 606
+disposition = "retained"
+max_lines = 606
+rationale = "Fail-closed wire-order validator recomputes one answer artifact from live episodes, review and execution receipts, environment bindings, pair protocol, numerical bounds, and exact gates."
+tests = ["tests/test_recall_answer_eval.py"]
+
+[[functions]]
+path = "src/chronovisor/recall/recall_field_candidate.py"
+qualname = "authority_allowed"
+baseline_lines = 411
+disposition = "retained"
+max_lines = 411
+rationale = "Central authority verifier intentionally rejoins every sealed promotion source, append-only trace prefix, environment epoch, confidence case, growth snapshot, and rollout threshold before returning one boolean."
+tests = ["tests/test_recall_field_candidate.py", "tests/test_recall_growth.py"]
+
+[[functions]]
+path = "src/chronovisor/recall/recall_growth.py"
+qualname = "retrieval_locked_e2e_status"
+baseline_lines = 398
+disposition = "retained"
+max_lines = 398
+rationale = "Manual-94 verifier recomputes exact reviewed labels, live ranked page bindings, selection certificates, commit identities, aggregate metrics, canonical frozen manifest, and preregistration as one trust boundary."
+tests = ["tests/test_recall_growth.py", "tests/test_search_eval.py"]
+
+[[functions]]
+path = "src/chronovisor/recall/recall_growth.py"
+qualname = "run_growth_cycle"
+baseline_lines = 556
+disposition = "retained"
+max_lines = 556
+rationale = "Single growth transaction joins supervision, complete candidate confidence, processor evidence, train and locked answer artifacts, canary state, LKG identity, source prefixes, and atomic publication."
+tests = ["tests/test_recall_growth.py", "tests/test_recall_field_candidate.py"]
 
 [[functions]]
 path = "src/chronovisor/recall/recall_auto_apply.py"

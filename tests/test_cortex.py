@@ -373,7 +373,7 @@ def test_cortex_event_cursor_projects_ingest_lifecycle_phases(tmp_path: Path) ->
 
 def test_cortex_latest_field_stream_includes_real_memory_io(tmp_path: Path) -> None:
     root = tmp_path / "chronovisor"
-    event_root = root / "recall" / "field" / "events"
+    event_root = root / "recall" / "field" / "events-v2"
     raw_dir = root / "raw"
     event_root.mkdir(parents=True)
     raw_dir.mkdir(parents=True)
@@ -558,7 +558,7 @@ def test_cortex_event_cursor_tails_only_selected_field_session(
 ) -> None:
     root = tmp_path / "chronovisor"
     session = "0123456789abcdef"
-    event_path = root / "recall" / "field" / "events" / f"{session}.jsonl"
+    event_path = root / "recall" / "field" / "events-v2" / f"{session}.jsonl"
     event_path.parent.mkdir(parents=True)
     event_path.write_text("", encoding="utf-8")
     cursor = cortex.CortexEventCursor(root, field_session=session)
@@ -612,7 +612,7 @@ def test_cortex_event_cursor_follows_activity_across_field_sessions(
     tmp_path: Path,
 ) -> None:
     root = tmp_path / "chronovisor"
-    event_root = root / "recall" / "field" / "events"
+    event_root = root / "recall" / "field" / "events-v2"
     event_root.mkdir(parents=True)
     first = event_root / "0123456789abcdef.jsonl"
     first.write_text("", encoding="utf-8")

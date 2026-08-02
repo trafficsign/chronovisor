@@ -9,8 +9,11 @@ from chronovisor.core.runtime_config import (
     NegativeFeedbackConfig,
     load_negative_feedback_config,
 )
-from chronovisor.recall import negative_feedback
-from chronovisor.recall.feedback_ledger import feedback_row_sha256
+from chronovisor.recall import feedback_ledger, negative_feedback
+from chronovisor.recall.feedback_ledger import (
+    active_feedback_rows,
+    feedback_row_sha256,
+)
 from chronovisor.search.search import ScoredPage
 
 
@@ -38,6 +41,13 @@ def feedback_file(tmp_path, monkeypatch):
     monkeypatch.setattr(negative_feedback, "GOLDEN_FILE_OVERRIDE", tmp_path / "golden.jsonl")
     monkeypatch.setattr(negative_feedback, "_CACHE", negative_feedback._Cache())
     monkeypatch.setattr(negative_feedback, "_PROTECT_CACHE", negative_feedback._Cache())
+    # Most tests below isolate query-conditioning behavior. Authority binding
+    # itself is exercised separately with the real central validator.
+    monkeypatch.setattr(
+        negative_feedback,
+        "trusted_negative_feedback_rows",
+        lambda candidate, **_kwargs: active_feedback_rows(candidate),
+    )
     return path
 
 
@@ -363,6 +373,11 @@ def test_default_feedback_uses_process_shared_derived_cache(
     monkeypatch.setattr(negative_feedback, "PERSISTENT_CACHE_FILE", cache)
     monkeypatch.setattr(negative_feedback, "_feedback_file", lambda: feedback)
     monkeypatch.setattr(negative_feedback, "_CACHE", negative_feedback._Cache())
+    monkeypatch.setattr(
+        negative_feedback,
+        "trusted_negative_feedback_rows",
+        lambda candidate, **_kwargs: active_feedback_rows(candidate),
+    )
 
     expected = negative_feedback._load_entries(CONFIG)
     assert len(expected) == 1
@@ -371,11 +386,96 @@ def test_default_feedback_uses_process_shared_derived_cache(
     monkeypatch.setattr(negative_feedback, "_CACHE", negative_feedback._Cache())
     monkeypatch.setattr(
         negative_feedback,
-        "active_feedback_rows",
-        lambda _path: pytest.fail("persistent cache should avoid ledger scan"),
+        "trusted_negative_feedback_rows",
+        lambda *_args, **_kwargs: pytest.fail(
+            "persistent cache should avoid ledger scan"
+        ),
     )
 
     assert negative_feedback._load_entries(CONFIG) == expected
+
+
+def test_production_penalty_requires_exact_recall_bound_negative(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    feedback = tmp_path / "feedback.jsonl"
+    recall_log = tmp_path / "recall.jsonl"
+    page_path = tmp_path / "noise.md"
+    page_path.write_text("noise", encoding="utf-8")
+    prompt = "same exact query"
+    prompt_hash = feedback_ledger._prompt_hash(prompt)
+    decision_id = "decision-exact"
+    field_evidence = {
+        "field_shadow": {"topic_epoch": 0, "session_hash": "field-session"}
+    }
+    exact = {
+        "ts": "2026-08-01T00:00:00Z",
+        "kind": "page_ignored",
+        "host": "codex",
+        "frontier_reviewed": True,
+        "label_quality": "strong",
+        "content_correction_key": "correction-exact",
+        "ref": decision_id,
+        "prompt": prompt,
+        "snapshot": {
+            "decision_id": decision_id,
+            "decision": "search",
+            "host": "codex",
+            "session_id": "session-exact",
+            "prompt_hash": prompt_hash,
+            "evidence_features": field_evidence,
+        },
+        "source_turn_ref": {
+            "session_id": "session-exact",
+            "prompt_hash": prompt_hash,
+            "user_line": 1,
+            "assistant_line": 2,
+        },
+        "negative_pages": ["noise"],
+        "negative_page_hashes": {
+            "noise": hashlib.sha256(page_path.read_bytes()).hexdigest()
+        },
+    }
+    write_feedback(
+        recall_log,
+        [
+            {
+                "decision_id": decision_id,
+                "decision": "search",
+                "host": "codex",
+                "session_id": "session-exact",
+                "prompt_hash": prompt_hash,
+                "pages": ["noise"],
+                "evidence_features": field_evidence,
+            }
+        ],
+    )
+    monkeypatch.setattr(negative_feedback, "FEEDBACK_FILE_OVERRIDE", feedback)
+    monkeypatch.setattr(negative_feedback, "RECALL_LOG_FILE_OVERRIDE", recall_log)
+    monkeypatch.setattr(
+        negative_feedback,
+        "trusted_negative_feedback_rows",
+        feedback_ledger.trusted_negative_feedback_rows,
+    )
+    monkeypatch.setattr(feedback_ledger, "find_page", lambda _page_id: page_path)
+    monkeypatch.setattr(negative_feedback, "find_mutation_page", lambda _page_id: page_path)
+    monkeypatch.setattr(
+        feedback_ledger, "find_mutation_page", lambda _page_id: page_path
+    )
+    monkeypatch.setattr(negative_feedback, "_CACHE", negative_feedback._Cache())
+
+    write_feedback(feedback, [{key: value for key, value in exact.items() if key != "ref"}])
+    assert negative_feedback.penalties_for_query(prompt, CONFIG) == {}
+
+    write_feedback(feedback, [exact])
+    negative_feedback._CACHE = negative_feedback._Cache()
+    assert feedback_ledger.trusted_negative_feedback_row_error(
+        exact, recall_log_file=recall_log
+    ) == ""
+    assert negative_feedback.penalties_for_query(prompt, CONFIG) == {
+        "noise": pytest.approx(0.85)
+    }
 
 
 def test_reviewed_positive_protects_page_from_penalty(feedback_file, tmp_path) -> None:

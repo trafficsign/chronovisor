@@ -20,7 +20,7 @@ import uuid
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field, replace
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -1950,6 +1950,25 @@ def format_recall_context(result: RecallResult, policy: RecallPolicy) -> str:
     )
 
 
+def _retained_context_page_ids(context: str) -> list[str]:
+    """Return only page IDs that survived the exact rendered context budget."""
+
+    marker = "payload_json=\n"
+    if marker not in context:
+        return []
+    encoded = context.split(marker, 1)[1].rsplit("\n[/RECALL_CONTEXT]", 1)[0]
+    try:
+        payload = json.loads(encoded)
+    except (json.JSONDecodeError, TypeError):
+        return []
+    items = payload.get("items") if isinstance(payload, dict) else None
+    return [
+        str(item.get("page_id") or "")
+        for item in items
+        if isinstance(item, dict) and str(item.get("page_id") or "")
+    ] if isinstance(items, list) else []
+
+
 def merge_context_blocks(*blocks: str, max_chars: int) -> str:
     selected: list[str] = []
     for block in blocks:
@@ -2061,6 +2080,15 @@ def _finalize_recall_result(
         recall_context,
         max_chars=policy.max_total_context_chars,
     )
+    retained_page_ids = (
+        _retained_context_page_ids(recall_context)
+        if recall_context and recall_context in result.context
+        else []
+    )
+    retained = set(retained_page_ids)
+    result.context_items = [
+        item for item in result.context_items if item.page_id in retained
+    ]
     if result.state_context:
         result.reasons.extend(["core memory injected", "state register injected"])
     if session_state is not None:
@@ -2805,8 +2833,41 @@ def _elapsed_ms(started: float) -> int:
 
 
 def append_recall_log(request: RecallRequest, result: RecallResult) -> None:
+    page_bindings: list[dict[str, str]] = []
+    for item in result.context_items:
+        path = find_page(item.page_id)
+        try:
+            content_sha = hashlib.sha256(path.read_bytes()).hexdigest() if path else ""
+        except OSError:
+            content_sha = ""
+        page_bindings.append(
+            {
+                "page_id": item.page_id,
+                "page_uid": item.uid,
+                "content_sha256": content_sha,
+            }
+        )
+    context_receipt = {
+        "schema_version": 1,
+        "renderer_protocol": "recall-result-context-v1",
+        "context_style": result.context_style,
+        "rendered_context": result.context,
+        "rendered_context_sha256": hashlib.sha256(
+            result.context.encode("utf-8")
+        ).hexdigest(),
+        "page_bindings": page_bindings,
+    }
+    context_receipt["receipt_sha256"] = hashlib.sha256(
+        json.dumps(
+            context_receipt,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
     record = {
-        "ts": datetime.now().isoformat(timespec="seconds"),
+        "schema_version": 2,
+        "ts": datetime.now(UTC).isoformat(timespec="seconds"),
         "decision_id": result.decision_id,
         "stage": "injected" if result.context_items else "decision",
         "host": request.host,
@@ -2821,6 +2882,8 @@ def append_recall_log(request: RecallRequest, result: RecallResult) -> None:
         "queries": result.queries,
         "pages": [item.page_id for item in result.context_items],
         "page_uids": [item.uid for item in result.context_items if item.uid],
+        "context_items": page_bindings,
+        "context_receipt": context_receipt,
         "reasons": result.reasons,
         "used_judge": result.used_judge,
         "judge_confidence": result.judge_confidence,
@@ -2943,7 +3006,7 @@ def append_feedback(
         recall_log_snapshot(found) if ref and (found := find_recall_log(ref)) else None
     )
     record = {
-        "ts": datetime.now().isoformat(timespec="seconds"),
+        "ts": datetime.now(UTC).isoformat(timespec="seconds"),
         "kind": kind,
         "host": host,
         "prompt": prompt,
@@ -2955,9 +3018,14 @@ def append_feedback(
         "snapshot": snapshot,
     }
     if extra:
+        reserved = set(record) & set(extra)
+        if reserved:
+            raise ValueError(
+                "feedback extra cannot overwrite reserved fields: "
+                + ", ".join(sorted(reserved))
+            )
         for key, value in extra.items():
-            if key not in {"ts", "kind"}:
-                record[key] = value
+            record[key] = value
     append_jsonl(RECALL_FEEDBACK_FILE, record)
     return record
 

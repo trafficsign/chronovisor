@@ -315,7 +315,15 @@ def test_stop_dispatch_enqueues_save_and_receipt_audit(
             "args": ["--host", "codex", "--hook"],
             "env": {},
             "when_output_status": "saved",
-        }
+        },
+        {
+            "name": "recall-answer-capture",
+            "module": "chronovisor.recall.recall_answer_eval",
+            "args": ["--host", "codex", "--hook", "--capture-only"],
+            "env": {"CHRONOVISOR_RECALL_ANSWER_CAPTURE_ENABLED": "1"},
+            "when_output_statuses": ["saved", "recovered"],
+            "stdin_from_output": True,
+        },
     ]
 
 

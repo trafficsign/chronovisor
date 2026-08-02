@@ -1,9 +1,17 @@
 from __future__ import annotations
 
+import hashlib
 import json
 
+import pytest
+
+from chronovisor.core.durable_state import write_sealed_json
+from chronovisor.recall import recall_label_factory
 from chronovisor.recall.feedback_ledger import feedback_row_sha256
-from chronovisor.recall.recall_label_factory import build_label_ledger
+from chronovisor.recall.recall_label_factory import (
+    assign_temporal_splits,
+    build_label_ledger,
+)
 
 
 def write_rows(path, rows) -> None:
@@ -11,6 +19,42 @@ def write_rows(path, rows) -> None:
         "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows),
         encoding="utf-8",
     )
+
+
+def test_duplicate_order_cannot_change_temporal_split() -> None:
+    common = {
+        "page_id": "page",
+        "query_sha256": "a" * 64,
+        "session_hash": "session",
+        "polarity": "positive",
+        "quality": "strong",
+        "provenance": {"source": "test", "outcome_grounded": True},
+        "content_sha256": "b" * 64,
+    }
+    early = recall_label_factory._label(
+        **common, observed_at="2026-07-01T00:00:00Z"
+    )
+    late = recall_label_factory._label(
+        **common, observed_at="2026-07-10T00:00:00Z"
+    )
+    joined = {"accepted": 0, "rejected": 0}
+    first = recall_label_factory._summarize_label_ledger(
+        [early, late],
+        joined,
+        embargo_seconds=recall_label_factory.DEFAULT_EMBARGO_SECONDS,
+        answer_diagnostics={},
+    )
+    second = recall_label_factory._summarize_label_ledger(
+        [late, early],
+        joined,
+        embargo_seconds=recall_label_factory.DEFAULT_EMBARGO_SECONDS,
+        answer_diagnostics={},
+    )
+
+    assert first["labels"] == second["labels"]
+    assert first["labels"][0]["observed_at"] == "2026-07-01T00:00:00Z"
+    with pytest.raises(ValueError, match="fixed at 24 hours"):
+        assign_temporal_splits([early], embargo_seconds=-1)
 
 
 def test_label_factory_keeps_exposure_non_negative_and_deduplicates(tmp_path) -> None:
@@ -221,12 +265,13 @@ def test_relation_labels_cannot_inflate_page_learning_gate(tmp_path) -> None:
     )
 
     assert payload["counts"]["strong_positive"] == 0
-    assert payload["counts"]["by_subject_kind"]["relation"]["total"] == 500
+    assert payload["counts_by_split"]["unassigned"]["total"] == 500
+    assert sum(row["subject_kind"] == "relation" for row in payload["labels"]) == 500
     assert payload["gates"]["field_learning_allowed"] is False
     assert all(row["subject_kind"] == "relation" for row in payload["labels"])
 
 
-def test_used_entity_path_becomes_strong_without_inflating_page_gate(tmp_path) -> None:
+def test_used_relation_and_entity_paths_remain_silver_without_unlocking(tmp_path) -> None:
     certificates = tmp_path / "certificates.jsonl"
     recalls = tmp_path / "recall.jsonl"
     pulls = tmp_path / "pull.jsonl"
@@ -255,7 +300,7 @@ def test_used_entity_path_becomes_strong_without_inflating_page_gate(tmp_path) -
                 "decision_id": "decision-entity",
                 "page_id": "target",
                 "query_sha256": "q" * 64,
-                "relation_ids": [],
+                "relation_ids": ["relation-used"],
                 "entity_merge_ids": ["merge_entity"],
             }
         ],
@@ -275,9 +320,17 @@ def test_used_entity_path_becomes_strong_without_inflating_page_gate(tmp_path) -
     entity_labels = [
         row for row in payload["labels"] if row["subject_kind"] == "entity_merge"
     ]
-    assert entity_labels[0]["quality"] == "strong"
+    relation_labels = [
+        row for row in payload["labels"] if row["subject_kind"] == "relation"
+    ]
+    assert entity_labels[0]["quality"] == "silver"
+    assert entity_labels[0]["polarity"] == "exposure"
+    assert relation_labels[0]["quality"] == "silver"
+    assert relation_labels[0]["polarity"] == "exposure"
     assert payload["counts"]["strong_positive"] == 0
     assert payload["gates"]["field_learning_allowed"] is False
+    assert payload["gates"]["relation_learning_allowed"] is False
+    assert payload["gates"]["entity_learning_allowed"] is False
 
 
 def test_explicit_feedback_and_relation_retraction_remain_opposing_events(
@@ -358,12 +411,7 @@ def test_explicit_feedback_and_relation_retraction_remain_opposing_events(
     payload = build_label_ledger(**inputs)
     labels = payload["labels"]
 
-    assert any(
-        row["page_id"] == "bad-page"
-        and row["polarity"] == "negative"
-        and row["quality"] == "strong"
-        for row in labels
-    )
+    assert not any(row["page_id"] == "bad-page" for row in labels)
     assert not any(
         row["page_id"] in {"withdrawn-page", "not-explicit"} for row in labels
     )
@@ -373,3 +421,124 @@ def test_explicit_feedback_and_relation_retraction_remain_opposing_events(
         row["provenance"]["source"] == "relation_opposing_event"
         for row in relation_labels
     )
+
+
+def test_split_assignment_groups_content_and_quarantines_bad_timestamps() -> None:
+    labels = [
+        {
+            "label_id": f"label-{index}",
+            "session_hash": f"session-{index}",
+            "query_sha256": f"query-{index}",
+            "page_id": f"page-{index}",
+            "page_uid": f"uid-{index}",
+            "content_sha256": f"{index + 1:064x}",
+            "observed_at": f"2026-07-{index + 1:02d}T00:00:00Z",
+        }
+        for index in range(10)
+    ]
+    labels.extend(
+        [
+            {
+                "label_id": "same-content-alias",
+                "session_hash": "different-session",
+                "query_sha256": "different-query",
+                "page_id": "renamed-page",
+                "page_uid": "renamed-uid",
+                "content_sha256": f"{1:064x}",
+                "observed_at": "2026-07-10T12:00:00Z",
+            },
+            {
+                "label_id": "undated",
+                "session_hash": "undated-session",
+                "query_sha256": "undated-query",
+                "page_id": "undated-page",
+                "observed_at": "",
+            },
+            {
+                "label_id": "naive-time",
+                "session_hash": "naive-session",
+                "query_sha256": "naive-query",
+                "page_id": "naive-page",
+                "observed_at": "2026-08-01T00:00:00",
+            },
+        ]
+    )
+
+    assigned = assign_temporal_splits(labels)
+
+    same_content = {
+        row["split"]
+        for row in assigned
+        if row.get("content_sha256") == f"{1:064x}"
+    }
+    assert len(same_content) == 1
+    assert next(row for row in assigned if row["label_id"] == "undated")[
+        "split_diagnostic"
+    ] == "legacy_undated"
+    assert next(row for row in assigned if row["label_id"] == "naive-time")[
+        "split_diagnostic"
+    ] == "invalid_timestamp"
+    assert any(row["split"] == "embargo" for row in assigned)
+
+
+def test_only_sealed_train_answer_outcomes_unlock_page_labels(tmp_path) -> None:
+    inputs = {
+        name: tmp_path / f"{name}.jsonl"
+        for name in (
+            "certificate_file",
+            "recall_log_file",
+            "pull_log_file",
+            "golden_file",
+        )
+    }
+    for path in inputs.values():
+        write_rows(path, [])
+
+    def artifact(path, split: str, page_id: str, session: str) -> None:
+        manifest = {"split": split}
+        manifest["manifest_sha256"] = hashlib.sha256(
+            json.dumps(
+                manifest, sort_keys=True, separators=(",", ":")
+            ).encode()
+        ).hexdigest()
+        write_sealed_json(
+            path,
+            {
+                "schema_version": 1,
+                "status": "passed",
+                "manifest": manifest,
+                "confidence_bound": {
+                    "valid": True,
+                    "method": "connected-cluster-bootstrap-percentile",
+                    "lower": 0.1,
+                },
+                "gates": {"verified": True},
+                "page_rewards": [
+                    {
+                        "page_id": page_id,
+                        "content_sha256": "a" * 64,
+                        "reward": 0.2,
+                        "producer": "verified_answer_pair_v1",
+                        "decision_id": f"decision-{split}",
+                        "episode_id": f"episode-{split}",
+                        "query_sha256": "b" * 64,
+                        "session_hash": session,
+                        "observed_at": "2026-07-01T00:00:00Z",
+                    }
+                ],
+            },
+        )
+
+    locked = tmp_path / "locked.json"
+    artifact(locked, "locked-test", "locked-page", "locked-session")
+    locked_payload = build_label_ledger(**inputs, answer_outcome_file=locked)
+    assert locked_payload["counts"]["strong_positive"] == 0
+    assert locked_payload["counts_by_split"]["locked-test"][
+        "outcome_grounded_positive"
+    ] == 0
+
+    train = tmp_path / "train.json"
+    artifact(train, "train", "train-page", "train-session")
+    train_payload = build_label_ledger(**inputs, answer_outcome_file=train)
+    assert train_payload["counts"]["scope"] == "train"
+    assert train_payload["counts"]["strong_positive"] == 0

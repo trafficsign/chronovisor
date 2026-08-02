@@ -461,21 +461,43 @@ def _enqueue_followups_locked(
     parent_job_id: str,
     parent: dict[str, Any],
     output_statuses: set[str],
+    output_by_status: dict[str, str],
 ) -> list[str]:
     specs = parent.get("on_success")
     if not isinstance(specs, list):
         return []
-    stdin_text = str(parent.get("stdin") or "")
+    parent_stdin = str(parent.get("stdin") or "")
     enqueued: list[str] = []
     for spec in specs:
         if not isinstance(spec, dict):
             continue
         required_status = spec.get("when_output_status")
+        required_statuses = spec.get("when_output_statuses")
         if (
             isinstance(required_status, str)
             and required_status not in output_statuses
         ):
             continue
+        if isinstance(required_statuses, list) and not any(
+            isinstance(value, str) and value in output_statuses
+            for value in required_statuses
+        ):
+            continue
+        stdin_text = parent_stdin
+        if spec.get("stdin_from_output") is True:
+            candidates = (
+                [value for value in required_statuses if isinstance(value, str)]
+                if isinstance(required_statuses, list)
+                else [required_status]
+                if isinstance(required_status, str)
+                else sorted(output_statuses)
+            )
+            stdin_text = next(
+                (output_by_status[value] for value in candidates if value in output_by_status),
+                "",
+            )
+            if not stdin_text:
+                continue
         name = str(spec.get("name") or "").strip()
         module = str(spec.get("module") or "").strip()
         module = canonical_module_path(module)
@@ -551,6 +573,20 @@ def _last_json_status(output: str) -> str | None:
     return None
 
 
+def _last_json_status_line(output: str) -> tuple[str, str] | None:
+    """Return the exact final JSON receipt line and its declared status."""
+
+    for line in reversed(output.splitlines()):
+        try:
+            payload = json.loads(line)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        status = payload.get("status") if isinstance(payload, dict) else None
+        if isinstance(status, str):
+            return status, line
+    return None
+
+
 def _finish(job_id: str, *, exit_code: int, output: str) -> dict[str, Any]:
     with _lock():
         state = _load()
@@ -563,11 +599,15 @@ def _finish(job_id: str, *, exit_code: int, output: str) -> dict[str, Any]:
             job["next_retry_at"] = None
             job["stdin"] = ""
         elif rerun_requested:
-            rerun_status = _last_json_status(output) if exit_code == 0 else None
-            if rerun_status:
+            rerun_receipt = _last_json_status_line(output) if exit_code == 0 else None
+            if rerun_receipt:
+                rerun_status, receipt_line = rerun_receipt
                 deferred = job.setdefault("deferred_success_statuses", [])
                 if isinstance(deferred, list) and rerun_status not in deferred:
                     deferred.append(rerun_status)
+                deferred_outputs = job.setdefault("deferred_success_outputs", {})
+                if isinstance(deferred_outputs, dict):
+                    deferred_outputs[rerun_status] = receipt_line
             job["status"] = "queued"
             job["attempts"] = 0
             job["next_retry_at"] = None
@@ -589,17 +629,30 @@ def _finish(job_id: str, *, exit_code: int, output: str) -> dict[str, Any]:
                 ]
                 if isinstance(status, str) and status
             }
+            output_by_status = {
+                str(key): str(value)
+                for key, value in (
+                    job.get("deferred_success_outputs", {}).items()
+                    if isinstance(job.get("deferred_success_outputs"), dict)
+                    else []
+                )
+            }
+            current_receipt = _last_json_status_line(output)
+            if current_receipt is not None:
+                output_by_status[current_receipt[0]] = current_receipt[1]
             if not job.get("followups_enqueued_at"):
                 followup_ids = _enqueue_followups_locked(
                     state,
                     parent_job_id=job_id,
                     parent=job,
                     output_statuses=output_statuses,
+                    output_by_status=output_by_status,
                 )
                 if followup_ids:
                     job["followup_job_ids"] = followup_ids
                     job["followups_enqueued_at"] = _iso()
             job.pop("deferred_success_statuses", None)
+            job.pop("deferred_success_outputs", None)
             job["stdin"] = ""
         elif attempts >= MAX_ATTEMPTS:
             job["status"] = "quarantined"

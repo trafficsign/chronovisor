@@ -18,7 +18,7 @@ import tempfile
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, replace
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -85,7 +85,7 @@ MANUAL_MANIFEST_FILE = BASELINE_DIR / "manual-94-manifest.json"
 LOCKED_E2E_ARTIFACT = BASELINE_DIR / "recall-field-locked-e2e.json"
 SELF_TUNE_HISTORY_FILE = BASELINE_DIR / "self-tune-history.jsonl"
 SELF_TUNE_ATTEMPT_FILE = BASELINE_DIR / "self-tune-attempt.json"
-SEALED_MANIFEST_SCHEMA_VERSION = 1
+SEALED_MANIFEST_SCHEMA_VERSION = 2
 
 DEFAULT_VARIANTS = (
     "bm25",
@@ -185,17 +185,42 @@ def _sealed_manifest_entry(example: SearchExample) -> dict[str, Any]:
 
 
 def write_sealed_manifest(
-    examples: list[SearchExample], output_file: Path
+    examples: list[SearchExample],
+    output_file: Path,
+    *,
+    review_ledger_file: Path | None = None,
 ) -> dict[str, Any]:
-    """Write a deterministic evaluation manifest without raw query text."""
+    """Freeze a reviewed cohort before evaluation without storing query text."""
 
     entries = sorted(
         (_sealed_manifest_entry(example) for example in examples),
         key=lambda row: (str(row["query_sha256"]), str(row["ref"])),
     )
+    ledger_path = review_ledger_file.expanduser().resolve(strict=False) if review_ledger_file else None
+    try:
+        ledger_bytes = ledger_path.read_bytes() if ledger_path else b""
+        ledger_sha256 = hashlib.sha256(ledger_bytes).hexdigest() if ledger_path else ""
+        frozen_at = datetime.fromtimestamp(ledger_path.stat().st_mtime, UTC).isoformat(
+            timespec="microseconds"
+        ).replace("+00:00", "Z") if ledger_path else "1970-01-01T00:00:00Z"
+    except OSError:
+        ledger_sha256 = ""
+        frozen_at = ""
+    review_ledger = {
+        "path": str(ledger_path) if ledger_path else "",
+        "file_sha256": ledger_sha256,
+        "head_sha256": _canonical_json_sha256(
+            {
+                "file_sha256": ledger_sha256,
+                "entry_sha256": [str(entry["entry_sha256"]) for entry in entries],
+            }
+        ),
+    }
     unsigned = {
         "schema_version": SEALED_MANIFEST_SCHEMA_VERSION,
         "examples": len(entries),
+        "frozen_at": frozen_at,
+        "review_ledger": review_ledger,
         "entries": entries,
     }
     payload = {**unsigned, "manifest_sha256": _canonical_json_sha256(unsigned)}
@@ -228,6 +253,7 @@ def write_locked_e2e_artifact(
     *,
     path: Path = LOCKED_E2E_ARTIFACT,
     variant: str = "hybrid-rerank",
+    frozen_manifest: Path = MANUAL_MANIFEST_FILE,
 ) -> dict[str, Any]:
     """Seal the full retrieval→certificate→commit locked evaluation gate."""
 
@@ -235,16 +261,61 @@ def write_locked_e2e_artifact(
     metrics = variant_payload.get("metrics", {})
     processor = metrics.get("processor", {}) if isinstance(metrics, dict) else {}
     evidence = processor.get("evidence_kind", {}) if isinstance(processor, dict) else {}
-    manifest_entries = sorted(
+    evaluated_entries = sorted(
         (_sealed_manifest_entry(example) for example in examples),
         key=lambda row: (str(row["query_sha256"]), str(row["ref"])),
     )
+    try:
+        frozen_manifest_bytes = frozen_manifest.read_bytes()
+        manifest = json.loads(frozen_manifest_bytes.decode("utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        frozen_manifest_bytes = b""
+        manifest = {}
     manifest_unsigned = {
-        "schema_version": SEALED_MANIFEST_SCHEMA_VERSION,
-        "examples": len(manifest_entries),
-        "entries": manifest_entries,
-    }
-    manifest_sha = _canonical_json_sha256(manifest_unsigned)
+        key: value for key, value in manifest.items() if key != "manifest_sha256"
+    } if isinstance(manifest, dict) else {}
+    manifest_sha = str(manifest.get("manifest_sha256") or "") if isinstance(manifest, dict) else ""
+    review_ledger = manifest.get("review_ledger") if isinstance(manifest, dict) else None
+    try:
+        ledger_path = Path(str(review_ledger.get("path") or "")).expanduser().resolve(strict=False)
+        ledger_sha256 = hashlib.sha256(ledger_path.read_bytes()).hexdigest()
+    except (AttributeError, OSError):
+        ledger_sha256 = ""
+    expected_review_head = _canonical_json_sha256(
+        {
+            "file_sha256": ledger_sha256,
+            "entry_sha256": [str(entry["entry_sha256"]) for entry in evaluated_entries],
+        }
+    )
+    generated_raw = str(payload.get("generated_at") or "")
+    try:
+        frozen_dt = datetime.fromisoformat(
+            str(manifest.get("frozen_at") or "").replace("Z", "+00:00")
+        )
+        generated_dt = datetime.fromisoformat(generated_raw.replace("Z", "+00:00"))
+        preregistered = bool(
+            frozen_dt.tzinfo is not None
+            and generated_dt.tzinfo is not None
+            and frozen_dt.utcoffset() == timedelta(0)
+            and generated_dt.utcoffset() == timedelta(0)
+            and frozen_dt < generated_dt
+        )
+    except (TypeError, ValueError):
+        preregistered = False
+    frozen_manifest_valid = bool(
+        isinstance(manifest, dict)
+        and manifest.get("schema_version") == SEALED_MANIFEST_SCHEMA_VERSION
+        and manifest.get("examples") == 94
+        and manifest.get("entries") == evaluated_entries
+        and len({str(entry.get("entry_sha256") or "") for entry in evaluated_entries}) == 94
+        and all(entry.get("reviewed") is True for entry in evaluated_entries)
+        and manifest_sha == _canonical_json_sha256(manifest_unsigned)
+        and isinstance(review_ledger, dict)
+        and review_ledger.get("file_sha256") == ledger_sha256
+        and len(ledger_sha256) == 64
+        and review_ledger.get("head_sha256") == expected_review_head
+        and preregistered
+    )
     precision = processor.get("precision") if isinstance(processor, dict) else None
     related_recall = (
         float(processor.get("related_recall") or 0.0)
@@ -255,8 +326,14 @@ def write_locked_e2e_artifact(
     true_positive = int(processor.get("true_positive_pages") or 0)
     rich_precision = evidence.get("rich", {}).get("precision")
     pointer_precision = evidence.get("pointer", {}).get("precision")
+    authority_cases = variant_payload.get("authority_cases")
+    cases = authority_cases if isinstance(authority_cases, list) else []
     gates = {
-        "sealed_manual_94": len(examples) == 94,
+        "sealed_manual_94": (
+            len(examples) == 94
+            and len(cases) == 94
+            and frozen_manifest_valid
+        ),
         "rerank_recall_at_5": float(metrics.get("recall_at_5") or 0.0) >= 0.535,
         "negative_hit_rate": (
             float(metrics.get("negative_hit_rate_at_20") or 0.0) <= 0.20
@@ -270,15 +347,47 @@ def write_locked_e2e_artifact(
         and float(pointer_precision) >= 0.90,
         "latency": float(metrics.get("latency_ms", {}).get("max") or 0.0) <= 4_000,
     }
+    from chronovisor.recall.recall_answer_eval import (
+        builtin_field_environment_identity,
+    )
+
+    environment_epoch = builtin_field_environment_identity()
+    authority_metrics = {
+        "recall_at_5": metrics.get("recall_at_5"),
+        "negative_hit_rate_at_20": metrics.get("negative_hit_rate_at_20"),
+        "latency_ms": {
+            "max": metrics.get("latency_ms", {}).get("max")
+            if isinstance(metrics.get("latency_ms"), dict)
+            else None
+        },
+        "processor": {
+            "precision": precision,
+            "related_recall": related_recall,
+            "evidence_kind": {
+                "rich": {"precision": rich_precision},
+                "pointer": {"precision": pointer_precision},
+            },
+        },
+    }
     unsigned = {
-        "schema_version": 1,
-        "generated_at": str(payload.get("generated_at") or ""),
+        "schema_version": 2,
+        "generated_at": generated_raw,
         "variant": variant,
         "manifest_sha256": manifest_sha,
+        "manifest": manifest,
+        "frozen_manifest_sha256": (
+            hashlib.sha256(frozen_manifest_bytes).hexdigest()
+            if frozen_manifest_bytes
+            else ""
+        ),
         "examples": len(examples),
+        "frozen_at": str(manifest.get("frozen_at") or "") if isinstance(manifest, dict) else "",
+        "environment_epoch": environment_epoch,
+        "environment_epoch_sha256": _canonical_json_sha256(environment_epoch),
+        "cases": cases,
         "status": "passed" if all(gates.values()) else "failed",
         "gates": gates,
-        "metrics": metrics,
+        "metrics": authority_metrics,
         "precision_lower_95": _wilson_lower_bound(true_positive, labeled),
         "precision_delta_points": (
             round((float(precision) - 1.0) * 100.0, 6)
@@ -1232,6 +1341,78 @@ def _bucket_metrics(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     return {key: _metrics(value) for key, value in sorted(buckets.items())}
 
 
+def _manual94_authority_cases(
+    examples: list[SearchExample], rows: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Seal reviewed case-level evidence used by the manual-94 authority gate."""
+
+    from chronovisor.recall.recall_runtime import page_uid_for_id
+
+    cases: list[dict[str, Any]] = []
+    for example, row in zip(examples, rows, strict=True):
+        manifest_entry = _sealed_manifest_entry(example)
+        bindings: list[dict[str, Any]] = []
+        for rank, page_id in enumerate(row.get("result_pages", []), start=1):
+            path = find_page(str(page_id))
+            try:
+                content_sha = hashlib.sha256(path.read_bytes()).hexdigest() if path else ""
+            except OSError:
+                content_sha = ""
+            bindings.append(
+                {
+                    "page_id": str(page_id),
+                    "page_uid": page_uid_for_id(str(page_id)),
+                    "content_sha256": content_sha,
+                    "rank": rank,
+                }
+            )
+        processor = row.get("processor") if isinstance(row.get("processor"), dict) else {}
+        selected_value = processor.get("selected") if isinstance(processor, dict) else []
+        selected = selected_value if isinstance(selected_value, list) else []
+        selected_rows = [dict(item) for item in selected if isinstance(item, dict)]
+        committed = row.get("stages", {}).get("committed", [])
+        committed_ids = [str(value) for value in committed if isinstance(value, str)]
+        certificate_ids = [
+            str(item.get("certificate_id") or "")
+            for item in selected_rows
+            if str(item.get("certificate_id") or "")
+        ]
+        commit_ids = [
+            _canonical_json_sha256(
+                {
+                    "query_sha256": manifest_entry["query_sha256"],
+                    "committed_page_ids": committed_ids,
+                    "certificate_ids": certificate_ids,
+                }
+            )
+        ] if committed_ids and certificate_ids else []
+        case = {
+            "manifest_entry_sha256": manifest_entry["entry_sha256"],
+            "review_receipt_sha256": _canonical_json_sha256(
+                {
+                    "kind": "manual94-human-review-v1",
+                    "entry_sha256": manifest_entry["entry_sha256"],
+                    "ref": example.ref,
+                    "source": example.source,
+                    "reviewed": example.reviewed,
+                }
+            ),
+            "query_sha256": manifest_entry["query_sha256"],
+            "expected_pages": list(example.expected_pages),
+            "bad_pages": list(example.bad_pages),
+            "reviewed": example.reviewed,
+            "ranked_page_bindings": bindings,
+            "committed_page_ids": committed_ids,
+            "certificate_ids": certificate_ids,
+            "commit_ids": commit_ids,
+            "selected_evidence": selected_rows,
+            "latency_ms": row.get("latency_ms"),
+        }
+        case["case_sha256"] = _canonical_json_sha256(case)
+        cases.append(case)
+    return cases
+
+
 def evaluate_examples(
     examples: list[SearchExample],
     *,
@@ -1300,6 +1481,11 @@ def evaluate_examples(
         by_variant[variant] = {
             "metrics": _metrics(rows),
             "by_bucket": _bucket_metrics(rows),
+            "authority_cases": (
+                _manual94_authority_cases(examples, rows)
+                if len(examples) == 94 and all(example.reviewed for example in examples)
+                else []
+            ),
         }
     return {"variants": by_variant, "debug_rows": debug_rows}
 
@@ -3036,6 +3222,12 @@ def _recover_applied_self_tune_receipt(
         return recovered
 
 
+def _self_tune_recovery_paths_aligned(history_file: Path, policy_file: Path) -> bool:
+    return (history_file == SELF_TUNE_HISTORY_FILE) == (
+        policy_file == ACTIVE_SEARCH_POLICY_FILE
+    )
+
+
 def self_tune(
     *,
     golden_file: Path = GOLDEN_FILE,
@@ -3049,7 +3241,7 @@ def self_tune(
     max_examples: int = 200,
     max_elapsed_seconds: float = 10 * 60,
 ) -> dict[str, Any]:
-    if not dry_run:
+    if not dry_run and _self_tune_recovery_paths_aligned(history_file, policy_file):
         recovered = _recover_applied_self_tune_receipt(
             policy_file=policy_file,
             history_file=history_file,
@@ -3708,9 +3900,12 @@ def run_report(
             "kinds": _count_by(examples, "kind"),
             "sources": _count_by(examples, "source"),
             "source_filter": source_filter,
+            "limit": max(0, limit),
         },
         "top_n": top_n,
-        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "generated_at": datetime.now(UTC).isoformat(timespec="seconds").replace(
+            "+00:00", "Z"
+        ),
         "variants": result["variants"],
     }
     if debug_dump is not None:
@@ -3720,13 +3915,18 @@ def run_report(
         payload["failure_index"] = write_failure_index(
             result["debug_rows"], failure_index
         )
-    if sealed_manifest is not None:
-        payload["sealed_manifest"] = write_sealed_manifest(examples, sealed_manifest)
+    if sealed_manifest is not None and locked_e2e_artifact is None:
+        payload["sealed_manifest"] = write_sealed_manifest(
+            examples,
+            sealed_manifest,
+            review_ledger_file=golden_file,
+        )
     if locked_e2e_artifact is not None:
         payload["locked_e2e"] = write_locked_e2e_artifact(
             payload,
             examples,
             path=locked_e2e_artifact,
+            frozen_manifest=sealed_manifest or MANUAL_MANIFEST_FILE,
         )
     if save:
         payload["baseline_file"] = str(save_baseline(payload))

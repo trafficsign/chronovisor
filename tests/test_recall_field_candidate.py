@@ -300,7 +300,7 @@ def test_promotion_artifact_is_hash_bound_and_requires_nondegradation(
 ) -> None:
     path = tmp_path / "promotion.json"
     payload = {
-        "schema_version": 2,
+        "schema_version": 3,
         "status": "passed",
         "metrics": {
             "stable_traces": 100,
@@ -315,8 +315,41 @@ def test_promotion_artifact_is_hash_bound_and_requires_nondegradation(
             "precision_delta_points": -0.5,
             "recall_delta_points": -0.5,
             "over_4s": 0,
-            "processor_used_precision_proxy": 0.95,
-        },
+                "processor_used_precision_proxy": 0.95,
+            },
+        "confidence_evidence": {
+            "candidate": {
+                "samples": 100,
+                "clusters": 20,
+                "manifest_sha256": "a" * 64,
+                    "teacher_coverage": {"valid": True, "method": "connected-cluster-wilson-score", "point": 1.0, "lower": 0.99, "upper": 1.0},
+                    "commit_coverage": {"valid": True, "method": "connected-cluster-wilson-score", "point": 1.0, "lower": 0.99, "upper": 1.0},
+                    "field_precision": {"valid": True, "method": "connected-cluster-wilson-score", "point": 1.0, "lower": 0.95, "upper": 1.0},
+            },
+            "processor_used": {
+                "samples": 50,
+                "clusters": 20,
+                "manifest_sha256": "b" * 64,
+                    "coverage": {"valid": True, "method": "connected-cluster-wilson-score", "point": 1.0, "lower": 0.99, "upper": 1.0},
+                    "precision": {"valid": True, "method": "connected-cluster-wilson-score", "point": 1.0, "lower": 0.95, "upper": 1.0},
+            },
+            "answer_reward": {
+                    "valid": True,
+                    "method": "connected-cluster-bootstrap-percentile",
+                "samples": 20,
+                "clusters": 20,
+                "manifest_sha256": "c" * 64,
+                "point": 0.05,
+                    "lower": 0.01,
+                    "upper": 0.1,
+                "point_floor": 0.02,
+                "lower_floor": 0.0,
+            },
+            },
+            "answer_evaluation": {"passed": True, "split_manifest_sha256": "d" * 64},
+            "locked_answer_evaluation": {"passed": True, "split_manifest_sha256": "d" * 64},
+            "retrieval_locked_e2e": {"passed": True, "examples": 94, "manifest_sha256": "e" * 64},
+            "answer_artifact_set": {"passed": True, "split_manifest_sha256": "d" * 64},
     }
     path.write_text(
         json.dumps(
@@ -328,7 +361,9 @@ def test_promotion_artifact_is_hash_bound_and_requires_nondegradation(
         encoding="utf-8",
     )
 
-    assert recall_field_candidate.authority_allowed(path) is True
+    # Summary-only confidence is not authority evidence. The central gate now
+    # requires case receipts, live source artifacts, and a current trace chain.
+    assert recall_field_candidate.authority_allowed(path) is False
     legacy = {
         **payload,
         "schema_version": 1,
@@ -343,6 +378,29 @@ def test_promotion_artifact_is_hash_bound_and_requires_nondegradation(
             {
                 **legacy,
                 "snapshot_sha256": recall_field_candidate._canonical_sha256(legacy),
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert recall_field_candidate.authority_allowed(path) is False
+
+    degraded = {
+        **payload,
+        "confidence_evidence": {
+            **payload["confidence_evidence"],
+            "answer_reward": {
+                **payload["confidence_evidence"]["answer_reward"],
+                "lower": -0.01,
+            },
+        },
+    }
+    path.write_text(
+        json.dumps(
+            {
+                **degraded,
+                "snapshot_sha256": recall_field_candidate._canonical_sha256(
+                    degraded
+                ),
             }
         ),
         encoding="utf-8",

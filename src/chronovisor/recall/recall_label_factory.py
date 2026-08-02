@@ -5,13 +5,17 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+from collections import Counter
+from collections.abc import Mapping
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from chronovisor.core.link_fix import atomic_write
 from chronovisor.core.store import CHRONOVISOR_ROOT
 from chronovisor.recall.evidence_certificate import CERTIFICATE_LEDGER
-from chronovisor.recall.feedback_ledger import active_feedback_rows
+from chronovisor.recall.feedback_ledger import trusted_negative_feedback_rows
+from chronovisor.recall.recall_answer_eval import validate_answer_outcome_artifact
 from chronovisor.recall.recall_log_schema import join_used_recall_episodes
 
 LABEL_LEDGER = CHRONOVISOR_ROOT / "runtime" / "recall-labels" / "ledger.jsonl"
@@ -29,6 +33,8 @@ RUBRIC_OUTCOME_LEDGER = (
 )
 RELATION_EVENT_LEDGER = CHRONOVISOR_ROOT / "knowledge-graph" / "relation-events.jsonl"
 QUALITY_WEIGHTS = {"silver": 0.25, "strong": 1.0, "gold": 2.0}
+DEFAULT_EMBARGO_SECONDS = 86_400
+VALID_SPLITS = frozenset({"train", "holdout", "locked-test"})
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -67,6 +73,9 @@ def _label(
     observed_at: str = "",
     subject_kind: str = "page_recall",
     subject_id: str = "",
+    page_uid: str = "",
+    content_sha256: str = "",
+    preregistered_split: str = "",
 ) -> dict[str, Any]:
     resolved_subject_id = subject_id or page_id
     identity = session_hash or query_sha256 or str(provenance.get("event_id") or "")
@@ -80,11 +89,13 @@ def _label(
         ]
     )
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "label_id": _digest(stable)[:24],
         "subject_kind": subject_kind,
         "subject_id": resolved_subject_id,
         "page_id": page_id,
+        "page_uid": page_uid,
+        "content_sha256": content_sha256,
         "query_sha256": query_sha256,
         "session_hash": session_hash,
         "polarity": polarity,
@@ -92,12 +103,36 @@ def _label(
         "weight": QUALITY_WEIGHTS.get(quality, 0.0),
         "split": "unassigned",
         "observed_at": observed_at,
+        "preregistered_split": (
+            preregistered_split if preregistered_split in VALID_SPLITS else ""
+        ),
         "provenance": provenance,
     }
 
 
-def assign_temporal_splits(labels: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Assign chronological 70/20/10 splits without session/query leakage."""
+def _strict_utc(value: object) -> datetime | None:
+    """Parse timezone-aware ISO-8601 and normalize it to UTC."""
+
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return None
+    return parsed.astimezone(UTC)
+
+
+def assign_temporal_splits(
+    labels: list[dict[str, Any]],
+    *,
+    embargo_seconds: int = DEFAULT_EMBARGO_SECONDS,
+) -> list[dict[str, Any]]:
+    """Assign grouped chronological splits with a fixed boundary embargo."""
+
+    if embargo_seconds != DEFAULT_EMBARGO_SECONDS:
+        raise ValueError("authority split embargo is fixed at 24 hours")
 
     parent: dict[str, str] = {}
 
@@ -123,6 +158,15 @@ def assign_temporal_splits(labels: list[dict[str, Any]]) -> list[dict[str, Any]]
             keys.append(f"session:{session}")
         if query:
             keys.append(f"query:{query}")
+        page_uid = str(row.get("page_uid") or "")
+        page_id = str(row.get("page_id") or "")
+        content_sha = str(row.get("content_sha256") or "")
+        if page_id:
+            keys.append(f"page_id:{page_id}")
+        if page_uid:
+            keys.append(f"page_uid:{page_uid}")
+        if content_sha:
+            keys.append(f"content:{content_sha}")
         if not keys:
             keys.append(f"label:{row.get('label_id')}")
         for key in keys:
@@ -131,30 +175,80 @@ def assign_temporal_splits(labels: list[dict[str, Any]]) -> list[dict[str, Any]]
             union(keys[0], key)
         row_keys.append(keys)
 
+    assigned: list[dict[str, Any]] = [dict(row) for row in labels]
+    valid_indexes: set[int] = set()
+    for index, row in enumerate(assigned):
+        parsed = _strict_utc(row.get("observed_at"))
+        if parsed is None:
+            row["split"] = "unassigned"
+            row["split_diagnostic"] = (
+                "legacy_undated" if not str(row.get("observed_at") or "") else "invalid_timestamp"
+            )
+            continue
+        row["observed_at"] = parsed.isoformat().replace("+00:00", "Z")
+        row["observed_at_epoch"] = parsed.timestamp()
+        valid_indexes.add(index)
+
     groups: dict[str, list[int]] = {}
     for index, keys in enumerate(row_keys):
+        if index not in valid_indexes:
+            continue
         groups.setdefault(find(keys[0]), []).append(index)
     ordered = sorted(
         groups.values(),
         key=lambda indexes: (
-            max(str(labels[index].get("observed_at") or "") for index in indexes),
-            min(str(labels[index].get("label_id") or "") for index in indexes),
+            max(float(assigned[index]["observed_at_epoch"]) for index in indexes),
+            min(str(assigned[index].get("label_id") or "") for index in indexes),
         ),
     )
     count = len(ordered)
     train_end = max(1, math.ceil(count * 0.70)) if count else 0
     holdout_end = max(train_end, math.ceil(count * 0.90))
-    assigned: list[dict[str, Any]] = [dict(row) for row in labels]
+    base_splits: list[str] = []
     for group_index, indexes in enumerate(ordered):
-        split = (
+        temporal_split = (
             "train"
             if group_index < train_end
             else "holdout"
             if group_index < holdout_end
             else "locked-test"
         )
+        declared = {
+            str(assigned[index].get("preregistered_split") or "")
+            for index in indexes
+            if str(assigned[index].get("preregistered_split") or "")
+        }
+        split = next(iter(declared)) if len(declared) == 1 else temporal_split
+        if len(declared) > 1:
+            split = "unassigned"
         for index in indexes:
             assigned[index]["split"] = split
+            assigned[index]["split_diagnostic"] = (
+                "conflicting_preregistered_split" if len(declared) > 1 else "assigned"
+            )
+        base_splits.append(split)
+
+    embargo = max(0, int(embargo_seconds))
+    boundaries: list[float] = []
+    for left, right in zip(ordered, ordered[1:], strict=False):
+        left_split = assigned[left[0]]["split"]
+        right_split = assigned[right[0]]["split"]
+        if left_split != right_split and {left_split, right_split} <= VALID_SPLITS:
+            boundaries.append(
+                min(float(assigned[index]["observed_at_epoch"]) for index in right)
+            )
+    if embargo:
+        for indexes in ordered:
+            if any(
+                abs(float(assigned[index]["observed_at_epoch"]) - boundary) < embargo
+                for index in indexes
+                for boundary in boundaries
+            ):
+                for index in indexes:
+                    assigned[index]["split"] = "embargo"
+                    assigned[index]["split_diagnostic"] = "boundary_embargo"
+    for row in assigned:
+        row.pop("observed_at_epoch", None)
     return assigned
 
 
@@ -182,14 +276,22 @@ def _certificate_labels(path: Path) -> list[dict[str, Any]]:
                     "policy_sha256": str(row.get("policy_sha256") or ""),
                 },
                 observed_at=str(row.get("created_at") or ""),
+                page_uid=str(row.get("page_uid") or ""),
+                content_sha256=str(row.get("content_sha256") or ""),
             )
         )
     return labels
 
 
-def _explicit_feedback_labels(path: Path | None) -> list[dict[str, Any]]:
+def _explicit_feedback_labels(
+    path: Path | None, *, recall_log_file: Path
+) -> list[dict[str, Any]]:
     labels: list[dict[str, Any]] = []
-    for row in active_feedback_rows(path) if path else []:
+    for row in (
+        trusted_negative_feedback_rows(path, recall_log_file=recall_log_file)
+        if path
+        else []
+    ):
         if row.get("kind") != "page_ignored":
             continue
         values = row.get("negative_pages")
@@ -199,16 +301,28 @@ def _explicit_feedback_labels(path: Path | None) -> list[dict[str, Any]]:
         snapshot = snapshot_value if isinstance(snapshot_value, dict) else {}
         prompt = str(row.get("prompt") or "")
         query_sha = _digest(prompt) if prompt else str(snapshot.get("prompt_hash") or "")
+        page_hashes_value = row.get("negative_page_hashes")
+        page_hashes = page_hashes_value if isinstance(page_hashes_value, dict) else {}
         for page_id in values:
             if not isinstance(page_id, str) or not page_id:
                 continue
+            expected_hash = str(page_hashes.get(page_id) or "")
+            exact = bool(
+                row.get("frontier_reviewed") is True
+                and row.get("label_quality") == "strong"
+                and str(row.get("content_correction_key") or "")
+                and str(row.get("ref") or "")
+                and str(snapshot.get("decision_id") or row.get("decision_id") or "")
+                and str(snapshot.get("session_id") or row.get("session_id") or "")
+                and len(expected_hash) == 64
+            )
             labels.append(
                 _label(
                     page_id=page_id,
                     query_sha256=query_sha,
                     session_hash=_session_hash(snapshot.get("session_id")),
                     polarity="negative",
-                    quality="strong" if row.get("frontier_reviewed") is True else "silver",
+                    quality="strong" if exact else "silver",
                     provenance={
                         "source": "explicit_page_feedback",
                         "ref": str(row.get("ref") or ""),
@@ -216,11 +330,59 @@ def _explicit_feedback_labels(path: Path | None) -> list[dict[str, Any]]:
                             json.dumps(row, ensure_ascii=False, sort_keys=True, default=str)
                         ),
                         "reviewed": row.get("frontier_reviewed") is True,
+                        "exact_negative": exact,
+                        "content_sha256": expected_hash,
                     },
                     observed_at=str(row.get("ts") or ""),
+                    content_sha256=expected_hash,
                 )
             )
     return labels
+
+
+def _answer_outcome_labels(path: Path | None) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    labels: list[dict[str, Any]] = []
+    diagnostics: Counter[str] = Counter()
+    if path is None:
+        return labels, {}
+    outcome = validate_answer_outcome_artifact(path, required_split="train")
+    if outcome.get("passed") is not True:
+        return labels, {"invalid_or_held_artifact": 1}
+    effects = [
+        ("positive", "reward", row)
+        for row in outcome.get("page_rewards", [])
+    ] + [
+        ("negative", "penalty", row)
+        for row in outcome.get("page_penalties", [])
+    ]
+    for polarity, score_key, effect in effects:
+        if not isinstance(effect, Mapping):
+            diagnostics["invalid_effect"] += 1
+            continue
+        score = effect.get(score_key)
+        labels.append(
+            _label(
+                page_id=str(effect["page_id"]),
+                query_sha256=str(effect["query_sha256"]),
+                session_hash=str(effect["session_hash"]),
+                polarity=polarity,
+                quality="strong",
+                provenance={
+                    "source": "verified_answer_outcome",
+                    "outcome_grounded": True,
+                    "episode_id": str(effect["episode_id"]),
+                    "decision_id": str(effect["decision_id"]),
+                    "artifact_manifest_sha256": str(outcome["manifest_sha256"]),
+                    score_key: round(float(score), 9),
+                    "content_sha256": str(effect["content_sha256"]),
+                },
+                observed_at=str(effect["observed_at"]),
+                page_uid=str(effect.get("page_uid") or ""),
+                content_sha256=str(effect["content_sha256"]),
+                preregistered_split="train",
+            )
+        )
+    return labels, dict(sorted(diagnostics.items()))
 
 
 def _opposing_relation_labels(path: Path | None) -> list[dict[str, Any]]:
@@ -254,22 +416,48 @@ def _opposing_relation_labels(path: Path | None) -> list[dict[str, Any]]:
     return labels
 
 
+def _recall_page_identity(
+    recall: Mapping[str, Any], page_id: str
+) -> tuple[str, str]:
+    for item in recall.get("context_items", []):
+        if not isinstance(item, Mapping) or item.get("page_id") != page_id:
+            continue
+        return (
+            str(item.get("page_uid") or ""),
+            str(item.get("content_sha256") or item.get("page_sha256") or ""),
+        )
+    return "", ""
+
+
 def _summarize_label_ledger(
-    labels: list[dict[str, Any]], joined: dict[str, Any]
+    labels: list[dict[str, Any]],
+    joined: dict[str, Any],
+    *,
+    embargo_seconds: int,
+    answer_diagnostics: Mapping[str, int],
 ) -> dict[str, Any]:
-    deduped: dict[tuple[str, str, str, str], dict[str, Any]] = {}
-    for label in labels:
+    deduped: dict[tuple[str, str, str, str, str], dict[str, Any]] = {}
+    for label in sorted(
+        labels,
+        key=lambda row: (
+            -float(row["weight"]),
+            str(row.get("observed_at") or "9999"),
+            json.dumps(row, ensure_ascii=False, sort_keys=True, default=str),
+        ),
+    ):
         identity = str(label["session_hash"] or label["query_sha256"])
         key = (
             identity,
             str(label["subject_kind"]),
             str(label["subject_id"]),
             str(label["polarity"]),
+            str(label.get("content_sha256") or ""),
         )
-        current = deduped.get(key)
-        if current is None or float(label["weight"]) > float(current["weight"]):
+        if key not in deduped:
             deduped[key] = label
-    rows = assign_temporal_splits(list(deduped.values()))
+    rows = assign_temporal_splits(
+        list(deduped.values()), embargo_seconds=embargo_seconds
+    )
     rows = sorted(
         rows,
         key=lambda row: (
@@ -280,12 +468,14 @@ def _summarize_label_ledger(
             str(row["polarity"]),
         ),
     )
+    train_rows = [row for row in rows if row["split"] == "train"]
     trusted_positive = [
         row
-        for row in rows
+        for row in train_rows
         if row["subject_kind"] == "page_recall"
         and row["polarity"] == "positive"
         and row["quality"] in {"strong", "gold"}
+        and row.get("provenance", {}).get("outcome_grounded") is True
     ]
     strong_positive = [row for row in trusted_positive if row["quality"] == "strong"]
     sessions = {
@@ -293,40 +483,102 @@ def _summarize_label_ledger(
     }
     subject_counts: dict[str, dict[str, int]] = {}
     subject_sessions: dict[str, set[str]] = {}
-    for row in rows:
+    for row in train_rows:
         kind = str(row["subject_kind"])
         bucket = subject_counts.setdefault(
-            kind, {"total": 0, "silver": 0, "strong": 0, "gold": 0}
+            kind,
+            {
+                "total": 0,
+                "silver": 0,
+                "strong": 0,
+                "gold": 0,
+                "outcome_grounded_trusted": 0,
+            },
         )
         bucket["total"] += 1
         bucket[str(row["quality"])] += 1
         if row["quality"] in {"strong", "gold"} and row["session_hash"]:
             subject_sessions.setdefault(kind, set()).add(str(row["session_hash"]))
+        if (
+            row["quality"] in {"strong", "gold"}
+            and row["polarity"] == "positive"
+            and row.get("provenance", {}).get("outcome_grounded") is True
+        ):
+            bucket["outcome_grounded_trusted"] += 1
     for kind, bucket in subject_counts.items():
         bucket["sessions"] = len(subject_sessions.get(kind, set()))
+    counts_by_split: dict[str, dict[str, int]] = {}
+    for split in ("train", "holdout", "locked-test", "embargo", "unassigned"):
+        scoped = [row for row in rows if row["split"] == split]
+        counts_by_split[split] = {
+            "total": len(scoped),
+            "strong": sum(row["quality"] == "strong" for row in scoped),
+            "gold": sum(row["quality"] == "gold" for row in scoped),
+            "outcome_grounded_positive": sum(
+                row["polarity"] == "positive"
+                and row.get("provenance", {}).get("outcome_grounded") is True
+                for row in scoped
+            ),
+        }
+    split_policy = {
+        "schema_version": 1,
+        "strategy": "connected-components-chronological-70-20-10",
+        "component_keys": [
+            "session_hash",
+            "query_sha256",
+            "page_id",
+            "page_uid",
+            "content_sha256",
+        ],
+        "embargo_seconds": max(0, int(embargo_seconds)),
+        "invalid_timestamp_split": "unassigned",
+        "learning_split": "train",
+    }
+    split_policy["manifest_sha256"] = _digest(
+        json.dumps(split_policy, sort_keys=True, separators=(",", ":"))
+    )
+    diagnostics = {
+        "invalid_timestamp": sum(
+            row.get("split_diagnostic") == "invalid_timestamp" for row in rows
+        ),
+        "legacy_undated": sum(
+            row.get("split_diagnostic") == "legacy_undated" for row in rows
+        ),
+        "page_id_fallback": sum(
+            bool(row.get("page_id")) and not bool(row.get("page_uid")) for row in rows
+        ),
+        "embargo_excluded": counts_by_split["embargo"]["total"],
+        "answer_artifacts": dict(answer_diagnostics),
+    }
+    learning_counts = {
+        "scope": "train",
+        "total": len(train_rows),
+        "strong_positive": len(strong_positive),
+        "gold_positive": len(trusted_positive) - len(strong_positive),
+        "strong_positive_sessions": len(sessions),
+        "joined_used": int(joined["accepted"]),
+        "rejected_used": int(joined["rejected"]),
+        "by_subject_kind": subject_counts,
+    }
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "labels": rows,
-        "counts": {
-            "total": len(rows),
-            "strong_positive": len(strong_positive),
-            "gold_positive": len(trusted_positive) - len(strong_positive),
-            "strong_positive_sessions": len(sessions),
-            "joined_used": int(joined["accepted"]),
-            "rejected_used": int(joined["rejected"]),
-            "by_subject_kind": subject_counts,
-        },
+        "counts": learning_counts,
+        "learning_counts": learning_counts,
+        "counts_by_split": counts_by_split,
+        "split_policy": split_policy,
+        "diagnostics": diagnostics,
         "gates": {
             "field_learning_allowed": len(strong_positive) >= 200
             and len(sessions) >= 20,
-            "calibration_allowed": len(rows) >= 500,
+            "calibration_allowed": len(train_rows) >= 500,
             "relation_learning_allowed": subject_counts.get("relation", {}).get(
-                "strong", 0
+                "outcome_grounded_trusted", 0
             )
             >= 20
             and subject_counts.get("relation", {}).get("sessions", 0) >= 5,
             "entity_learning_allowed": subject_counts.get("entity_merge", {}).get(
-                "strong", 0
+                "outcome_grounded_trusted", 0
             )
             >= 20
             and subject_counts.get("entity_merge", {}).get("sessions", 0) >= 5,
@@ -350,10 +602,17 @@ def build_label_ledger(
     rubric_outcome_file: Path | None = None,
     feedback_file: Path | None = None,
     relation_event_file: Path | None = None,
+    answer_outcome_file: Path | None = None,
+    embargo_seconds: int = DEFAULT_EMBARGO_SECONDS,
 ) -> dict[str, Any]:
     """Join evidence without treating exposure or rejects as negatives."""
 
+    if embargo_seconds != DEFAULT_EMBARGO_SECONDS:
+        raise ValueError("authority split embargo is fixed at 24 hours")
+
     labels = _certificate_labels(certificate_file)
+    answer_labels, answer_diagnostics = _answer_outcome_labels(answer_outcome_file)
+    labels.extend(answer_labels)
 
     recall_rows = _read_jsonl(recall_log_file)
     pull_rows = _read_jsonl(pull_log_file)
@@ -368,19 +627,25 @@ def build_label_ledger(
         )
         session = _session_hash(episode.get("session_id"))
         for page_id in episode["page_ids"]:
+            page_uid, content_sha = _recall_page_identity(recall, page_id)
             labels.append(
                 _label(
                     page_id=page_id,
                     query_sha256=query_sha,
                     session_hash=session,
-                    polarity="positive",
+                    # Explicit use is valuable telemetry, but is not evidence
+                    # that Recall improved the resulting answer.
+                    polarity="exposure",
                     quality="strong",
                     provenance={
                         "source": "recall_used",
                         "event_id": episode["event_id"],
                         "decision_id": episode["decision_id"],
+                        "usage_telemetry_only": True,
                     },
                     observed_at=str(episode.get("pull", {}).get("ts") or ""),
+                    page_uid=page_uid,
+                    content_sha256=content_sha,
                 )
             )
     for row in pull_rows:
@@ -432,12 +697,19 @@ def build_label_ledger(
                             "reviewed": True,
                         },
                         observed_at=str(row.get("ts") or ""),
+                        page_uid=str(row.get("page_uid") or ""),
+                        content_sha256=str(row.get("content_sha256") or ""),
+                        preregistered_split=str(row.get("split") or ""),
                     )
                 )
 
     # Only explicit, still-active page corrections are negative supervision.
     # Passive exposure and generic ``injection_ignored`` events remain non-negative.
-    labels.extend(_explicit_feedback_labels(feedback_file))
+    labels.extend(
+        _explicit_feedback_labels(
+            feedback_file, recall_log_file=recall_log_file
+        )
+    )
 
     # Stale and retract are opposing relation events. They do not erase the
     # earlier positive receipt, preserving replayable supervision history.
@@ -501,8 +773,8 @@ def build_label_ledger(
                         if used is not None
                         else str(row.get("session_hash") or "")
                     ),
-                    polarity="positive" if actually_used else "exposure",
-                    quality="strong" if actually_used else "silver",
+                    polarity="exposure",
+                    quality="silver",
                     subject_kind="relation",
                     subject_id=relation_id,
                     provenance={
@@ -511,6 +783,7 @@ def build_label_ledger(
                         else "relation_path_exposure",
                         "decision_id": decision_id,
                         "path_id": str(row.get("path_id") or ""),
+                        "usage_telemetry_only": actually_used,
                     },
                     observed_at=str((used or row).get("ts") or ""),
                 )
@@ -530,8 +803,8 @@ def build_label_ledger(
                         if used is not None
                         else str(row.get("session_hash") or "")
                     ),
-                    polarity="positive" if actually_used else "exposure",
-                    quality="strong" if actually_used else "silver",
+                    polarity="exposure",
+                    quality="silver",
                     subject_kind="entity_merge",
                     subject_id=merge_id,
                     provenance={
@@ -540,6 +813,7 @@ def build_label_ledger(
                         else "entity_merge_path_exposure",
                         "decision_id": decision_id,
                         "path_id": str(row.get("path_id") or ""),
+                        "usage_telemetry_only": actually_used,
                     },
                     observed_at=str((used or row).get("ts") or ""),
                 )
@@ -568,12 +842,18 @@ def build_label_ledger(
                     provenance={
                         "source": f"{kind}_outcome",
                         "receipt_id": str(row.get("receipt_id") or ""),
+                        "outcome_grounded": row.get("outcome_grounded") is True,
                     },
                     observed_at=str(row.get("observed_at") or ""),
                 )
             )
 
-    return _summarize_label_ledger(labels, joined)
+    return _summarize_label_ledger(
+        labels,
+        joined,
+        embargo_seconds=embargo_seconds,
+        answer_diagnostics=answer_diagnostics,
+    )
 
 
 def materialize_label_ledger(
@@ -589,6 +869,8 @@ def materialize_label_ledger(
     rubric_outcome_file: Path | None = None,
     feedback_file: Path | None = None,
     relation_event_file: Path | None = None,
+    answer_outcome_file: Path | None = None,
+    embargo_seconds: int = DEFAULT_EMBARGO_SECONDS,
 ) -> dict[str, Any]:
     payload = build_label_ledger(
         certificate_file=certificate_file,
@@ -601,6 +883,8 @@ def materialize_label_ledger(
         rubric_outcome_file=rubric_outcome_file,
         feedback_file=feedback_file,
         relation_event_file=relation_event_file,
+        answer_outcome_file=answer_outcome_file,
+        embargo_seconds=embargo_seconds,
     )
     output_file.parent.mkdir(parents=True, exist_ok=True)
     atomic_write(
@@ -620,6 +904,7 @@ def materialize_label_ledger(
 
 
 def default_label_ledger_inputs() -> dict[str, Path]:
+    from chronovisor.recall.recall_answer_eval import TRAIN_ANSWER_EVAL_ARTIFACT
     from chronovisor.recall.recall_runtime import (
         RECALL_FEEDBACK_FILE,
         RECALL_LOG_FILE,
@@ -634,4 +919,5 @@ def default_label_ledger_inputs() -> dict[str, Path]:
         "golden_file": GOLDEN_FILE,
         "feedback_file": RECALL_FEEDBACK_FILE,
         "relation_event_file": RELATION_EVENT_LEDGER,
+        "answer_outcome_file": TRAIN_ANSWER_EVAL_ARTIFACT,
     }

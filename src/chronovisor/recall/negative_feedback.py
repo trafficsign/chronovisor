@@ -32,12 +32,13 @@ from chronovisor.core.runtime_config import (
 )
 from chronovisor.core.store import CHRONOVISOR_ROOT
 from chronovisor.ingest.page_mutation import find_mutation_page
-from chronovisor.recall.feedback_ledger import active_feedback_rows
+from chronovisor.recall.feedback_ledger import trusted_negative_feedback_rows
 from chronovisor.search.search_types import ScoredPage, tokenize
 
 # Test seams: when set, bypass the recall_runtime/golden default paths.
 FEEDBACK_FILE_OVERRIDE: Path | None = None
 GOLDEN_FILE_OVERRIDE: Path | None = None
+RECALL_LOG_FILE_OVERRIDE: Path | None = None
 PERSISTENT_CACHE_FILE = (
     CHRONOVISOR_ROOT / "runtime" / "search" / "negative-feedback-cache.json"
 )
@@ -83,6 +84,14 @@ def _golden_file() -> Path:
     return RECALL_DIR / "search-golden.jsonl"
 
 
+def _recall_log_file() -> Path:
+    if RECALL_LOG_FILE_OVERRIDE is not None:
+        return RECALL_LOG_FILE_OVERRIDE
+    from chronovisor.recall.recall_runtime import RECALL_LOG_FILE
+
+    return RECALL_LOG_FILE
+
+
 def _tokenize(text: str) -> frozenset[str]:
     return frozenset(tokenize(text))
 
@@ -111,11 +120,21 @@ def _persistent_key(
     mtime_ns: int,
     size: int,
     config: NegativeFeedbackConfig,
+    recall_log_file: Path,
 ) -> dict[str, object]:
+    try:
+        recall_stat = recall_log_file.stat()
+    except OSError:
+        recall_mtime_ns, recall_size = 0, 0
+    else:
+        recall_mtime_ns, recall_size = recall_stat.st_mtime_ns, recall_stat.st_size
     return {
         "path": str(path),
         "mtime_ns": mtime_ns,
         "size": size,
+        "recall_log_path": str(recall_log_file),
+        "recall_log_mtime_ns": recall_mtime_ns,
+        "recall_log_size": recall_size,
         "kinds": list(config.kinds),
         "max_age_days": config.max_age_days,
         "max_entries": config.max_entries,
@@ -229,6 +248,13 @@ def _load_entries(config: NegativeFeedbackConfig) -> list[_FeedbackEntry]:
         config.max_entries,
         (datetime.now(UTC).date().isoformat() if config.max_age_days > 0 else ""),
     )
+    recall_log_file = _recall_log_file()
+    try:
+        recall_stat = recall_log_file.stat()
+        recall_identity = (recall_stat.st_mtime_ns, recall_stat.st_size)
+    except OSError:
+        recall_identity = (0, 0)
+    cache_key = (*cache_key, str(recall_log_file), *recall_identity)
     with _CACHE_LOCK:
         if _CACHE.key == cache_key:
             return _CACHE.entries
@@ -237,6 +263,7 @@ def _load_entries(config: NegativeFeedbackConfig) -> list[_FeedbackEntry]:
         mtime_ns=stat.st_mtime_ns,
         size=stat.st_size,
         config=config,
+        recall_log_file=recall_log_file,
     )
     persisted = _read_persistent_entries(persistent_key)
     if persisted is not None:
@@ -251,7 +278,9 @@ def _load_entries(config: NegativeFeedbackConfig) -> list[_FeedbackEntry]:
         else None
     )
     entries: list[_FeedbackEntry] = []
-    for row in active_feedback_rows(path):
+    for row in trusted_negative_feedback_rows(
+        path, recall_log_file=recall_log_file
+    ):
         if not isinstance(row, dict) or row.get("kind") not in config.kinds:
             continue
         kind = str(row.get("kind") or "")
