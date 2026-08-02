@@ -6,3 +6,4 @@ dist/
 build/
 dashboard-access-token
 dashboard-credentials.json
+.env
