@@ -946,6 +946,98 @@ def test_run_improvement_frontier_rejection_blocks_active_policy(
     }
 
 
+def test_run_improvement_frontier_human_required_failure_maps_to_review_retry(
+    tmp_path, monkeypatch
+) -> None:
+    log_file = tmp_path / "recall-log.jsonl"
+    feedback_file = tmp_path / "feedback.jsonl"
+    _write_feedback(log_file, feedback_file)
+
+    monkeypatch.setattr(
+        recall_improvement,
+        "load_policy",
+        lambda _config=None: RecallPolicy(log_decisions=False, max_pages=3),
+    )
+    monkeypatch.setattr(
+        recall_improvement, "safe_append_event", lambda *_args, **_kwargs: None
+    )
+
+    def fake_propose(**_kwargs):
+        return [
+            PolicyProposal(
+                source="test",
+                model="qwen",
+                proposal_id="p1",
+                summary="Auth failure path",
+                rationale="Expected page needs a wider top-k.",
+                overrides={"max_pages": 4},
+                risk="low",
+                audit_recommended=True,
+            )
+        ]
+
+    def fake_evaluate(examples, *, policy, replay, deadline=None):
+        del deadline
+        improved = policy.max_pages == 4
+        return {
+            "metrics": {
+                "examples": len(examples),
+                "positives": len(examples),
+                "false_positives": 0,
+                "recall_at_1": 1.0 if improved else 0.0,
+                "recall_at_3": 1.0 if improved else 0.0,
+                "mrr": 1.0 if improved else 0.0,
+                "waste_injection_rate": 0.0,
+                "avg_pages": float(policy.max_pages),
+                "decision_counts": {"read": len(examples)},
+                "latency_ms": {"p50": 10.0, "p95": 10.0, "max": 10.0},
+            },
+            "rows": [
+                {
+                    "prompt": "Chronovisor recall policy",
+                    "kind": "missed_candidate",
+                    "expected_pages": ["target-page"],
+                    "pages": ["target-page"] if improved else ["old-page"],
+                    "decision": "read",
+                    "latency_ms": 10,
+                }
+            ],
+        }
+
+    monkeypatch.setattr(recall_improvement, "propose_with_models", fake_propose)
+    monkeypatch.setattr(recall_improvement, "evaluate_examples", fake_evaluate)
+    monkeypatch.setattr(
+        recall_improvement,
+        "run_frontier_policy_audit",
+        lambda *_args, **_kwargs: {
+            "decision": "needs_retry",
+            "failure_class": "auth_required",
+            "summary": "frontier authority boundary not available now",
+            "human_required": True,
+        },
+    )
+
+    payload = recall_improvement.run_improvement(
+        log_file=log_file,
+        feedback_file=feedback_file,
+        models=("qwen",),
+        include_heuristic=False,
+        frontier_mode="always",
+        active_file=tmp_path / "human-required-active-policy.json",
+        registry_file=tmp_path / "human-required-registry.jsonl",
+        runs_dir=tmp_path / "human-required-runs",
+        episodes_file=tmp_path / "human-required-episodes.jsonl",
+        live_episodes_file=tmp_path / "human-required-live-episodes.jsonl",
+    )
+
+    assert payload["status"] == "pending_frontier_review"
+    assert payload["frontier_audit"]["decision"] == "needs_retry"
+    assert payload["frontier_audit"]["failure_class"] == "auth_required"
+    assert payload["frontier_audit"]["human_required"] is True
+    assert payload["applied"] is False
+    assert payload["active_policy"] is None
+
+
 def test_run_due_dry_run_is_read_only(tmp_path, monkeypatch) -> None:
     feedback_file = tmp_path / "feedback.jsonl"
     feedback_file.write_text(

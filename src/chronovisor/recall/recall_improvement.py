@@ -31,7 +31,6 @@ from chronovisor.decision.local_structured import (
     ValidationIssue,
 )
 from chronovisor.ingest.page_mutation import decision_authority_lock
-from chronovisor.ops.convergence import is_human_required_result
 from chronovisor.ops.runtime_status import safe_append_event, safe_append_metric
 from chronovisor.recall.feedback_ledger import active_feedback_rows
 from chronovisor.recall.recall_eval import (
@@ -1820,8 +1819,6 @@ def run_improvement(
                     status = "pending_frontier_review"
                 elif not allowed:
                     status = "budget_deferred"
-                elif is_human_required_result(frontier_audit):
-                    status = "human_required"
                 elif frontier_audit.get("decision") == "quarantined":
                     status = "frontier_quarantined"
                 elif frontier_audit.get("decision") == "rejected":
