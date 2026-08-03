@@ -217,8 +217,8 @@ const WORK_STAGE_ALIASES = {
 const STAGE_METRIC_LABELS = {
   "local-consensus-review": "Local review",
   "local-regenerate": "Local retry",
-  "frontier-review": "Frontier review",
-  "frontier-regenerate": "Frontier retry",
+  "frontier-review": "Consensus review",
+  "frontier-regenerate": "Consensus retry",
   authorization: "Authorize",
 };
 
@@ -2848,7 +2848,7 @@ function renderRecallImprovement(lab) {
     : ["Run chronovisor recall-improve run to start the local proposal tournament."];
   if (latest && latest.frontier_audit_recommended) {
     const audit = latest.frontier_audit || {};
-    detailParts.push(`frontier ${fmt(audit.decision || "recommended")}`);
+    detailParts.push(`consensus ${fmt(audit.decision || "recommended")}`);
   }
   if (latest && latest.live_telemetry && numeric(latest.live_telemetry.episodes)) {
     detailParts.push(`${latest.live_telemetry.episodes} live episodes`);
@@ -2909,7 +2909,7 @@ function renderRecallImprovement(lab) {
     const proposal = rowBest.proposal || {};
     const score = rowBest.dev && numeric(rowBest.dev.score) ? ` · dev ${rowBest.dev.score.toFixed(3)}` : "";
     const audit = item.frontier_audit || {};
-    const auditText = audit.decision ? ` · frontier ${audit.decision}` : "";
+    const auditText = audit.decision ? ` · consensus ${audit.decision}` : "";
     const blockers = blockerSummaryText(item.candidate_blockers);
     const blockerLabel = itemStatus === "applied" || itemStatus === "shadow_pass"
       ? "other candidates blocked by"

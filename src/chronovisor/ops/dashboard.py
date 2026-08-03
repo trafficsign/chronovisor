@@ -3303,7 +3303,7 @@ def _frontier_summary(
     if decision == "approved":
         state = "resolved"
         level = "success"
-        title = "Frontier approved"
+        title = "Consensus approved"
     elif human_required:
         state = "failed"
         level = "error"
@@ -3311,15 +3311,15 @@ def _frontier_summary(
     elif rescue_status == "pending_frontier_review":
         state = "pending"
         level = "warn"
-        title = "Frontier review pending"
+        title = "Consensus review pending"
     elif rescue_status == "frontier_preflight_failed":
         state = "pending"
         level = "warn"
-        title = "Frontier preflight failed"
+        title = "Consensus preflight failed"
     else:
         level = "warn" if decision in {"needs_retry", "quarantined"} else "error"
         state = "pending" if decision == "needs_retry" else "failed"
-        title = f"Frontier {decision}"
+        title = f"Consensus {decision}"
     raw_file = record.get("raw_file") or (packet or {}).get("raw_file")
     commit = frontier.get("commit")
     detail = frontier.get("summary") or decision
@@ -3390,16 +3390,16 @@ def _packet_summary(packet: dict[str, Any]) -> dict[str, Any]:
     title = {
         "pending_local_repair": "Repair queued",
         "local_repairing": "Local repair running",
-        "pending_frontier": "Frontier queued",
-        "frontier_running": "Frontier running",
-        "frontier_retry": "Frontier retry needed",
-        "frontier_preflight_failed": "Frontier preflight failed",
-        "pending_frontier_review": "Frontier review pending",
+        "pending_frontier": "Consensus queued",
+        "frontier_running": "Consensus running",
+        "frontier_retry": "Consensus retry needed",
+        "frontier_preflight_failed": "Consensus preflight failed",
+        "pending_frontier_review": "Consensus review pending",
         "repair_deferred": "Frontier repair deferred",
         "human_required": "Human required",
         "local_repair_failed": "Local repair failed",
-        "frontier_rejected": "Frontier rejected",
-        "frontier_quarantined": "Frontier quarantined",
+        "frontier_rejected": "Consensus rejected",
+        "frontier_quarantined": "Consensus quarantined",
     }.get(status, status.replace("_", " "))
     return {
         "timestamp": packet.get("updated_at") or packet.get("created_at"),
@@ -3460,7 +3460,7 @@ def _self_heal_snapshot(limit: int = 12) -> dict[str, Any]:
             1 for item in history if item.get("title") == "Human required"
         ),
         "pending_frontier_review": sum(
-            1 for item in history if item.get("title") == "Frontier review pending"
+            1 for item in history if item.get("title") == "Consensus review pending"
         ),
     }
     latest = history[-1] if history else None
