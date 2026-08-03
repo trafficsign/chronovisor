@@ -247,13 +247,10 @@ def test_policy_snapshot_separates_structured_shadow_from_deterministic_enabled(
             raising=False,
         )
     snapshot = decision_policy_snapshot()
-    structured = sum(
-        policy.kind in {"consensus", "local_batch"}
-        for policy in DECISION_POLICIES.values()
-    )
-    deterministic = len(DECISION_POLICIES) - structured
-    assert snapshot["counts"]["shadow"] == structured
-    assert snapshot["counts"]["enabled"] == deterministic
+    shadow = sum(policy.default_mode == "shadow" for policy in DECISION_POLICIES.values())
+    enabled = sum(policy.default_mode == "enabled" for policy in DECISION_POLICIES.values())
+    assert snapshot["counts"]["shadow"] == shadow
+    assert snapshot["counts"]["enabled"] == enabled
     assert resolve_decision_policy(None)[2] == "decision_lane_required"
 
 

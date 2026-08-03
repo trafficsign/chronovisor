@@ -140,6 +140,15 @@ SEARCH_LABEL_LANE = "search_label"
 SEARCH_LABEL_PROMPT_POLICY_VERSION = 2
 SEARCH_SELF_TUNE_LANE = "search_self_tune"
 SEARCH_REVIEW_ARTIFACT_SCHEMA_VERSION = 2
+RQ_PROJECTION_POLICY_SHA256 = canonical_sha256(
+    {
+        "version": 1,
+        "maximum_page_bytes": 12_000,
+        "maximum_total_bytes": 32_000,
+        "format": "[PAGE <page_id>]\\n<utf8-prefix>",
+        "source": "independent_page_snapshot",
+    }
+)
 ALREADY_APPLIED_RECOVERY = "already_applied_exact_postimage"
 
 FrontierLabelReviewer = Callable[[dict[str, Any]], dict[str, Any]]
@@ -482,7 +491,7 @@ def _str_list(value: Any) -> list[str]:
 def _label_candidate_payload(row: Mapping[str, Any]) -> dict[str, Any]:
     """Return the stable label claim authorized by one semantic verdict."""
 
-    return {
+    payload = {
         "query": str(row.get("query") or ""),
         "expected_pages": _str_list(row.get("expected_pages")),
         "negative_pages": _str_list(row.get("negative_pages")),
@@ -494,6 +503,72 @@ def _label_candidate_payload(row: Mapping[str, Any]) -> dict[str, Any]:
         "ref": str(row.get("ref") or ""),
         "ts": str(row.get("ts") or ""),
     }
+    if payload["source"] in {"recall_questions", "auto", "generated"}:
+        payload["candidate_preregistration"] = {
+            "candidate_sha256": str(row.get("candidate_sha256") or ""),
+            "preregistered_at": str(row.get("preregistered_at") or ""),
+            "source_page": str(row.get("source_page") or ""),
+            "page_uid": str(row.get("page_uid") or ""),
+            "content_sha256": str(row.get("content_sha256") or ""),
+            "content_byte_length": row.get("content_byte_length"),
+            "projection_policy_sha256": str(
+                row.get("projection_policy_sha256") or ""
+            ),
+            "split_role": str(row.get("split_role") or ""),
+        }
+    return payload
+
+
+def _auto_candidate_preregistration_error(row: Mapping[str, Any]) -> str:
+    from chronovisor.recall.recall_runtime import page_uid_for_id
+
+    query = str(row.get("query") or "")
+    pages = _str_list(row.get("expected_pages"))
+    page_id = str(row.get("source_page") or "")
+    path = find_page(page_id) if page_id else None
+    try:
+        content = path.read_bytes() if path else b""
+    except OSError:
+        content = b""
+    identity = {
+        "query": query,
+        "expected_pages": pages,
+        "source": str(row.get("source") or ""),
+        "page_uid": str(row.get("page_uid") or ""),
+        "content_sha256": str(row.get("content_sha256") or ""),
+        "content_byte_length": row.get("content_byte_length"),
+        "projection_policy_sha256": str(
+            row.get("projection_policy_sha256") or ""
+        ),
+        "search_eval_split": str(row.get("split") or ""),
+    }
+    candidate_sha = _canonical_json_sha256(identity)
+    try:
+        preregistered = datetime.fromisoformat(
+            str(row.get("preregistered_at") or "").replace("Z", "+00:00")
+        )
+        preregistered_valid = (
+            preregistered.tzinfo is not None
+            and preregistered.utcoffset() is not None
+        )
+    except ValueError:
+        preregistered_valid = False
+    if (
+        len(pages) != 1
+        or pages != [page_id]
+        or not query
+        or not page_id
+        or row.get("candidate_sha256") != candidate_sha
+        or row.get("projection_policy_sha256") != RQ_PROJECTION_POLICY_SHA256
+        or row.get("split_role") != "search_eval_only_not_answer_benchmark"
+        or not preregistered_valid
+        or not content
+        or row.get("content_sha256") != hashlib.sha256(content).hexdigest()
+        or row.get("content_byte_length") != len(content)
+        or row.get("page_uid") != page_uid_for_id(page_id)
+    ):
+        return "search label candidate preregistration is stale or invalid"
+    return ""
 
 
 def _has_semantic_no_quorum_marker(value: object) -> bool:
@@ -667,6 +742,38 @@ def _label_review_artifact_error(
         artifact.get("review"),
         artifact.get("evidence"),
     )
+
+
+def authoritative_search_label_error(row: Mapping[str, Any]) -> str | None:
+    """Rejoin a golden row to its exact approved current-authority artifact."""
+
+    preregistration_error = _auto_candidate_preregistration_error(row)
+    if preregistration_error:
+        return preregistration_error
+    artifact = row.get("decision_artifact")
+    evidence = _label_candidate_payload(row)
+    authority, authority_error = decision_authority.current_semantic_authority(
+        SEARCH_LABEL_LANE
+    )
+    if authority_error is not None or authority is None:
+        return authority_error or "search label authority unavailable"
+    error = _label_review_artifact_error(
+        artifact,
+        evidence=evidence,
+        current_authority=authority,
+    )
+    if error is not None:
+        return error
+    review = artifact.get("review") if isinstance(artifact, Mapping) else None
+    if not isinstance(review, Mapping) or review.get("decision") != "approved":
+        return "search label artifact is not approved"
+    if _label_tuple_from_review(dict(review)) != (
+        tuple(evidence["expected_pages"]),
+        tuple(evidence["negative_pages"]),
+        tuple(evidence["stale_pages"]),
+    ):
+        return "search label artifact postimage changed"
+    return None
 
 
 def _top_page_ids(value: Any) -> tuple[str, ...]:
@@ -854,6 +961,12 @@ def load_examples(
             continue
         source = str(row.get("source") or "manual")
         if not _source_allowed(source, source_filter):
+            continue
+        if source in {
+            "recall_questions",
+            "auto",
+            "generated",
+        } and authoritative_search_label_error(row) is not None:
             continue
         expected = _str_tuple(row.get("expected_pages"))
         negative = _str_tuple(row.get("negative_pages"))
@@ -2086,6 +2199,18 @@ def _golden_row_from_review(
         "review_note": str(review.get("summary") or ""),
         "decision_artifact": dict(decision_artifact),
     }
+    if str(row.get("source") or "") in {"recall_questions", "auto", "generated"}:
+        for field in (
+            "candidate_sha256",
+            "preregistered_at",
+            "source_page",
+            "page_uid",
+            "content_sha256",
+            "content_byte_length",
+            "projection_policy_sha256",
+            "split_role",
+        ):
+            out[field] = row.get(field)
     return out
 
 

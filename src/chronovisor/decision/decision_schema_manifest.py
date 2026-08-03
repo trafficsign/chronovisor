@@ -261,6 +261,7 @@ def background_decision_schemas() -> dict[str, Mapping[str, Any]]:
 
     from chronovisor.decision.graph_decisions import (
         ENTITY_MERGE_VERIFICATION_SCHEMA,
+        RECALL_ANSWER_ADJUDICATION_SCHEMA,
         RECALL_RUBRIC_CALIBRATION_SCHEMA,
         RECALL_USEFULNESS_SCHEMA,
         RELATION_VERIFICATION_SCHEMA,
@@ -271,6 +272,7 @@ def background_decision_schemas() -> dict[str, Mapping[str, Any]]:
         "entity_merge_verification": ENTITY_MERGE_VERIFICATION_SCHEMA,
         "recall_usefulness_judgment": RECALL_USEFULNESS_SCHEMA,
         "recall_rubric_calibration": RECALL_RUBRIC_CALIBRATION_SCHEMA,
+        "recall_answer_adjudication": RECALL_ANSWER_ADJUDICATION_SCHEMA,
     }
 
 

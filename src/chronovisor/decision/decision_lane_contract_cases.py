@@ -44,6 +44,7 @@ from chronovisor.decision.decision_lane_prompts import (
 )
 from chronovisor.decision.graph_decisions import (
     build_entity_merge_verification_prompt,
+    build_recall_answer_adjudication_prompt,
     build_recall_rubric_calibration_prompt,
     build_recall_usefulness_prompt,
     build_relation_verification_prompt,
@@ -51,6 +52,7 @@ from chronovisor.decision.graph_decisions import (
 
 CASES_PER_MODEL_BACKED_LANE = 5
 LANE_CONTRACT_CASE_ID_VERSION = 26
+BACKGROUND_LANE_CONTRACT_CASE_VERSION = 2
 
 
 def _coverage_label(expected: dict[str, Any]) -> str | None:
@@ -124,13 +126,15 @@ def _make_case(
     expected: dict[str, Any],
 ) -> DecisionLaneContractCase:
     from chronovisor.decision.decision_schema_manifest import (
+        background_decision_schemas,
         decision_signature_value,
         production_decision_schemas,
     )
     from chronovisor.decision.local_structured import validate_json
     from chronovisor.lab.local_model_eval import replay_semantic_effect
 
-    schema = production_decision_schemas()[schema_name]
+    schemas = {**production_decision_schemas(), **background_decision_schemas()}
+    schema = schemas[schema_name]
     issues = validate_json(expected, schema)
     if issues:
         rendered = "; ".join(issue.message for issue in issues)
@@ -2609,6 +2613,39 @@ def _recall_rubric_calibration_cases() -> list[tuple[str, str | None, dict[str, 
     ]
 
 
+def _recall_answer_adjudication_cases() -> list[
+    tuple[str, str | None, dict[str, Any]]
+]:
+    definitions = [
+        ("approved", "search_label_candidate", True, True, True, True),
+        ("rejected", "gold_entry", False, True, True, True),
+        ("abstained", "gold_entry", True, True, True, True),
+        ("needs_retry", "scorer_calibration_case", False, False, False, False),
+        ("approved", "scorer_calibration_case", True, True, True, True),
+    ]
+    rows = []
+    for index, (decision, kind, complete, independent, preregistered, safe) in enumerate(
+        definitions, 1
+    ):
+        subject_sha = f"{index:064x}"
+        evidence = {
+            "subject_kind": kind,
+            "subject_sha256": subject_sha,
+            "evidence_complete": complete,
+            "reference_independent": independent,
+            "preregistered_before_evaluation": preregistered,
+            "split_safe": safe,
+        }
+        rows.append(
+            (
+                build_recall_answer_adjudication_prompt(evidence),
+                None,
+                _graph_expected(decision, **evidence),
+            )
+        )
+    return rows
+
+
 def background_decision_lane_contract_cases() -> dict[
     str, tuple[tuple[str, str | None, dict[str, Any]], ...]
 ]:
@@ -2619,11 +2656,91 @@ def background_decision_lane_contract_cases() -> dict[
         "entity_merge_verification": _entity_merge_verification_cases,
         "recall_usefulness_judgment": _recall_usefulness_cases,
         "recall_rubric_calibration": _recall_rubric_calibration_cases,
+        "recall_answer_adjudication": _recall_answer_adjudication_cases,
     }
     cases = {lane: tuple(builder()) for lane, builder in builders.items()}
     if any(len(rows) < CASES_PER_MODEL_BACKED_LANE for rows in cases.values()):
         raise ValueError("background lane contract coverage is incomplete")
     return cases
+
+
+@lru_cache(maxsize=1)
+def background_decision_lane_contract_case_specs() -> tuple[
+    DecisionLaneContractCase, ...
+]:
+    """Return fixed background cases without changing adoption coverage."""
+
+    from chronovisor.decision.decision_policy import DECISION_POLICIES
+
+    cases: list[DecisionLaneContractCase] = []
+    for lane, requests in sorted(background_decision_lane_contract_cases().items()):
+        schema_name = str(DECISION_POLICIES[lane].schema_name or "")
+        for ordinal, (prompt, system, expected) in enumerate(requests, 1):
+            case = _make_case(
+                lane=lane,
+                ordinal=ordinal,
+                prompt=prompt,
+                system=system,
+                schema_name=schema_name,
+                expected=expected,
+            )
+            cases.append(case)
+    if len(cases) != len(background_decision_lane_contract_cases()) * 5:
+        raise ValueError("background lane contract case set is incomplete")
+    return tuple(cases)
+
+
+def background_decision_lane_contract_case_manifest() -> dict[str, Any]:
+    """Seal background requests independently from fleet adoption evidence."""
+
+    from chronovisor.decision.decision_lane_contracts import lane_contract_sha256
+    from chronovisor.decision.decision_router import (
+        decision_request_fingerprint_sha256,
+    )
+    from chronovisor.decision.decision_schema_manifest import (
+        background_decision_schemas,
+        production_decision_schemas,
+    )
+
+    schemas = {**production_decision_schemas(), **background_decision_schemas()}
+    lanes: dict[str, list[dict[str, Any]]] = {}
+    for case in background_decision_lane_contract_case_specs():
+        schema = schemas[case.schema_name]
+        lanes.setdefault(case.lane, []).append(
+            {
+                "contract_id": (
+                    f"background-contract-v{BACKGROUND_LANE_CONTRACT_CASE_VERSION}:"
+                    f"{case.lane}:{case.ordinal}"
+                ),
+                "effective_request_sha256": decision_request_fingerprint_sha256(
+                    prompt=case.prompt,
+                    schema=schema,
+                    system=case.system,
+                    decision_lane=case.lane,
+                ),
+                "expected_sha256": _sha256_json(case.expected),
+                "expected_signature_sha256": _sha256_json(
+                    case.expected_decision_signature
+                ),
+                "expected_effect": case.expected_effect,
+            }
+        )
+    return {
+        "version": BACKGROUND_LANE_CONTRACT_CASE_VERSION,
+        "case_count_per_lane": 5,
+        "lanes": {
+            lane: {
+                "lane_contract_sha256": lane_contract_sha256(lane),
+                "cases": sorted(rows, key=lambda row: str(row["contract_id"])),
+            }
+            for lane, rows in sorted(lanes.items())
+        },
+    }
+
+
+@lru_cache(maxsize=1)
+def background_decision_lane_contract_case_manifest_sha256() -> str:
+    return _sha256_json(background_decision_lane_contract_case_manifest())
 
 
 @lru_cache(maxsize=1)
@@ -2781,9 +2898,13 @@ def decision_lane_contract_case_manifest_sha256() -> str:
 
 
 __all__ = [
+    "BACKGROUND_LANE_CONTRACT_CASE_VERSION",
     "CASES_PER_MODEL_BACKED_LANE",
     "DecisionLaneContractCase",
     "background_decision_lane_contract_cases",
+    "background_decision_lane_contract_case_manifest",
+    "background_decision_lane_contract_case_manifest_sha256",
+    "background_decision_lane_contract_case_specs",
     "decision_lane_contract_case_manifest",
     "decision_lane_contract_case_manifest_sha256",
     "decision_lane_contract_case_specs",

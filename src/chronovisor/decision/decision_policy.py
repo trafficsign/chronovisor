@@ -27,6 +27,7 @@ class DecisionPolicy:
     schema_name: str | None = None
     default_mode: str = "shadow"
     adoption_scoped: bool = True
+    qualification_required: bool = False
 
     def __post_init__(self) -> None:
         if self.kind not in VALID_KINDS:
@@ -113,6 +114,14 @@ DECISION_POLICIES: dict[str, DecisionPolicy] = {
         "recall_rubric_calibration",
         adoption_scoped=False,
     ),
+    "recall_answer_adjudication": DecisionPolicy(
+        "recall_answer_adjudication",
+        "consensus",
+        "recall_answer_adjudication",
+        default_mode="enabled",
+        adoption_scoped=False,
+        qualification_required=True,
+    ),
     "search_label": DecisionPolicy("search_label", "local_batch", "search_label"),
     "search_self_tune": DecisionPolicy(
         "search_self_tune", "local_batch", "generic_decision"
@@ -182,6 +191,7 @@ def decision_policy_snapshot() -> dict[str, Any]:
             "schema_name": policy.schema_name,
             "mode": mode,
             "adoption_scoped": policy.adoption_scoped,
+            "qualification_required": policy.qualification_required,
             "error": error,
         }
     return {

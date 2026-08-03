@@ -70,6 +70,32 @@ RECALL_RUBRIC_CALIBRATION_SCHEMA = _schema(
     ],
 )
 
+RECALL_ANSWER_ADJUDICATION_SCHEMA = _schema(
+    {
+        "subject_kind": {
+            "type": "string",
+            "enum": [
+                "gold_entry",
+                "scorer_calibration_case",
+                "search_label_candidate",
+            ],
+        },
+        "subject_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "evidence_complete": {"type": "boolean"},
+        "reference_independent": {"type": "boolean"},
+        "preregistered_before_evaluation": {"type": "boolean"},
+        "split_safe": {"type": "boolean"},
+    },
+    [
+        "subject_kind",
+        "subject_sha256",
+        "evidence_complete",
+        "reference_independent",
+        "preregistered_before_evaluation",
+        "split_safe",
+    ],
+)
+
 
 def _render(kind: str, evidence: Mapping[str, Any], rubric: str) -> str:
     return f"""\
@@ -113,4 +139,16 @@ def build_recall_rubric_calibration_prompt(evidence: Mapping[str, Any]) -> str:
         "recall rubric calibration",
         evidence,
         "Adopt only when locked time-ordered holdout improves calibration, preserves coverage and precision, and has a sealed rollback target. Training wins alone are insufficient.",
+    )
+
+
+def build_recall_answer_adjudication_prompt(evidence: Mapping[str, Any]) -> str:
+    return _render(
+        "Recall answer benchmark adjudication",
+        evidence,
+        "Approve only an exact pre-frozen deterministic evidence projection. "
+        "The reference must not reuse a production answer or depend on field-on/"
+        "field-off results. Evidence must fully support the reference or fixed "
+        "control scores, every digest and split binding must be complete, and "
+        "ambiguous or insufficient evidence must be held.",
     )

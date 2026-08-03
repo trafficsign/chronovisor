@@ -1397,9 +1397,16 @@ def _semantic_effect(
 
 @lru_cache(maxsize=1)
 def _production_schema_by_digest() -> dict[str, Mapping[str, Any]]:
+    from chronovisor.decision.decision_schema_manifest import (
+        background_decision_schemas,
+    )
+
     return {
         schema_sha256(schema): schema
-        for schema in production_decision_schemas().values()
+        for schema in (
+            list(production_decision_schemas().values())
+            + list(background_decision_schemas().values())
+        )
     }
 
 

@@ -24,7 +24,7 @@ import tempfile
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -36,6 +36,9 @@ from chronovisor.core.durable_state import (
     verify_sealed_object,
     write_sealed_json,
 )
+from chronovisor.core.durable_state import (
+    canonical_sha256 as _sealed_canonical_sha,
+)
 from chronovisor.core.jsonl_write import append_jsonl_durable
 from chronovisor.core.store import (
     CHRONOVISOR_ROOT,
@@ -43,6 +46,20 @@ from chronovisor.core.store import (
     PAGES_DIR,
     find_page,
     init_chronovisor,
+)
+from chronovisor.decision.graph_decisions import (
+    RECALL_ANSWER_ADJUDICATION_SCHEMA,
+    build_recall_answer_adjudication_prompt,
+)
+from chronovisor.decision.machine_consensus_receipt import (
+    GOLD_ENTRY_PRODUCER_POLICY_SHA256,
+    SCORER_CALIBRATION_PRODUCER_POLICY_SHA256,
+    SEARCH_LABEL_CANDIDATE_PRODUCER_POLICY_SHA256,
+    append_machine_consensus_receipt,
+    list_machine_consensus_receipts,
+    load_machine_consensus_receipt,
+    search_label_candidate_packet_error,
+    validate_machine_consensus_receipt,
 )
 from chronovisor.raw.raw_segment import copy_source_interval
 from chronovisor.raw.raw_store import RawStore
@@ -81,19 +98,44 @@ TRAIN_ANSWER_EVAL_ARTIFACT = (
     CHRONOVISOR_ROOT / "runtime" / "recall-answer-eval" / "train-answer-eval.json"
 )
 ANSWER_REVIEW_LEDGER = RECALL_DIR / "answer-review-receipts.jsonl"
+ANSWER_CONSENSUS_LEDGER = RECALL_DIR / "answer-consensus-receipts.jsonl"
 ANSWER_EXECUTION_LEDGER = RECALL_DIR / "answer-execution-receipts.jsonl"
 ANSWER_ADAPTER_REGISTRY = (
     CHRONOVISOR_ROOT / "runtime" / "recall-answer-eval" / "adapter-registry.json"
 )
+INDEPENDENT_ANSWER_BENCHMARK = (
+    CHRONOVISOR_ROOT
+    / "runtime"
+    / "recall-answer-eval"
+    / "independent-benchmark.json"
+)
+ANSWER_BENCHMARK_SOURCE_LEDGER_DIR = (
+    CHRONOVISOR_ROOT
+    / "runtime"
+    / "recall-answer-eval"
+    / "benchmark-source-ledgers"
+)
+SEARCH_GOLDEN_FILE = CHRONOVISOR_ROOT / "recall" / "search-golden.jsonl"
+SEARCH_MANUAL94_MANIFEST = (
+    CHRONOVISOR_ROOT / "runtime" / "search-eval" / "manual-94-manifest.json"
+)
 HOOK_ENABLE_ENV = "CHRONOVISOR_RECALL_ANSWER_CAPTURE_ENABLED"
-ANSWER_EPISODE_SCHEMA_VERSION = 1
+ANSWER_EPISODE_SCHEMA_VERSION = 2
+LEGACY_ANSWER_EPISODE_SCHEMA_VERSION = 1
 ANSWER_SPLIT_SCHEMA_VERSION = 2
 ANSWER_EVAL_SCHEMA_VERSION = 3
+ANSWER_BENCHMARK_EVAL_SCHEMA_VERSION = 1
 ANSWER_DIMENSIONS = ("correctness", "grounding", "citation")
 ANSWER_AUTHORITY_CONFIDENCE = 0.95
 ANSWER_AUTHORITY_SEED = 1729
 AUTHORITY_EMBARGO_SECONDS = 86_400
+ANSWER_BENCHMARK_MIN_TRAIN_CLUSTERS = 20
+ANSWER_BENCHMARK_MIN_LOCKED_CLUSTERS = 20
 SCORER_CALIBRATION_SCHEMA_VERSION = 1
+MACHINE_SCORER_CALIBRATION_SCHEMA_VERSION = 2
+MACHINE_SCORER_CALIBRATION_MIN_CASES = 40
+MACHINE_SCORER_CALIBRATION_MIN_PAIRS = 20
+MACHINE_SCORER_CALIBRATION_MIN_CLUSTERS = 20
 SCORER_CALIBRATION_CONFIDENCE = 0.95
 SCORER_CALIBRATION_MIN_CASES = 20
 SCORER_CALIBRATION_MIN_SESSIONS = 10
@@ -138,6 +180,7 @@ _REQUIRED_CALIBRATION_SCORER_IDENTITY = (
 _ALLOWED_GOLD_SOURCE_KINDS = frozenset(
     {"human_review", "adjudicated_benchmark"}
 )
+ANSWER_ADJUDICATION_LANE = "recall_answer_adjudication"
 
 
 class AnswerRunner(Protocol):
@@ -184,6 +227,29 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
+def _read_jsonl_strict(path: Path) -> list[dict[str, Any]]:
+    """Read a durable JSONL projection without hiding physical corruption."""
+
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        return []
+    except (OSError, UnicodeError) as exc:
+        raise DurableStateError("jsonl read failed") from exc
+    rows: list[dict[str, Any]] = []
+    for line in lines:
+        if not line.strip():
+            raise DurableStateError("jsonl blank row")
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise DurableStateError("jsonl row invalid") from exc
+        if not isinstance(row, dict):
+            raise DurableStateError("jsonl row must be an object")
+        rows.append(row)
+    return rows
+
+
 def _sha_text(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
@@ -197,6 +263,18 @@ def _canonical_sha(value: object) -> str:
         default=str,
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+DETERMINISTIC_GOLD_PROJECTION_POLICY_SHA256 = GOLD_ENTRY_PRODUCER_POLICY_SHA256
+BOUNDED_EVIDENCE_PROJECTION_POLICY_SHA256 = _canonical_sha(
+    {
+        "version": 1,
+        "maximum_page_bytes": 12_000,
+        "maximum_total_bytes": 32_000,
+        "format": "[PAGE <page_id>]\\n<utf8-prefix>",
+        "source": "independent_page_snapshot",
+    }
+)
 
 
 def _valid_sha(value: object) -> bool:
@@ -215,6 +293,16 @@ def _strict_utc(value: object) -> str:
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         return ""
     return parsed.astimezone(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _utc_order_key(value: object) -> str:
+    normalized = _strict_utc(value)
+    if not normalized:
+        return ""
+    parsed = datetime.fromisoformat(normalized.replace("Z", "+00:00"))
+    return parsed.astimezone(UTC).isoformat(timespec="microseconds").replace(
+        "+00:00", "Z"
+    )
 
 
 def _now_utc() -> str:
@@ -1249,6 +1337,7 @@ def capture_session_answer_episodes(
                     "session_file": str(session_file),
                 },
                 "prompt_sha256": turn.prompt_hash,
+                "prompt_content_sha256": _sha_text(turn.prompt),
                 "answer_sha256": _sha_text(turn.assistant_response),
                 "answer_chars": len(turn.assistant_response),
                 "raw_ref": {
@@ -1287,7 +1376,16 @@ def capture_session_answer_episodes(
                 and prior.get("binding_status") == "verified"
             )
             current_verified = row["binding_status"] == "verified"
-            if prior is None or (not prior_verified and current_verified):
+            if (
+                prior is None
+                or (not prior_verified and current_verified)
+                or (
+                    current_verified
+                    and isinstance(prior, Mapping)
+                    and prior.get("schema_version")
+                    == LEGACY_ANSWER_EPISODE_SCHEMA_VERSION
+                )
+            ):
                 captured.append(row)
                 latest_by_id[episode_id] = row
             if not blocked:
@@ -1369,6 +1467,10 @@ def _load_bound_turn(episode: Mapping[str, Any]) -> tuple[Any | None, str]:
         if turn.user_line == start
         and turn.assistant_line == end
         and turn.prompt_hash == episode.get("prompt_sha256")
+        and (
+            not episode.get("prompt_content_sha256")
+            or _sha_text(turn.prompt) == episode.get("prompt_content_sha256")
+        )
         and _sha_text(turn.assistant_response) == episode.get("answer_sha256")
     ]
     return (matching[0], "") if len(matching) == 1 else (None, "turn_binding_mismatch")
@@ -1443,12 +1545,20 @@ def _episode_page_bindings(episode: Mapping[str, Any]) -> list[dict[str, str]]:
 
 
 def _episode_manifest_entry(episode: Mapping[str, Any]) -> dict[str, Any]:
+    query_sha256 = str(episode.get("prompt_content_sha256") or "")
+    if not _valid_sha(query_sha256):
+        # V1 persisted the parser's short prompt join hash.  Recover the full
+        # content digest from the immutable Raw turn; never reinterpret the
+        # short join key as a SHA-256 authority value.
+        turn, error = _load_bound_turn(episode)
+        query_sha256 = _sha_text(turn.prompt) if turn is not None and not error else ""
     return {
         "episode_id": str(episode.get("episode_id") or ""),
         "episode_sha256": str(episode.get("episode_sha256") or ""),
         "observed_at": str(episode.get("observed_at") or ""),
         "session_hash": str(episode.get("session_hash") or ""),
-        "query_sha256": str(episode.get("prompt_sha256") or ""),
+        "prompt_hash": str(episode.get("prompt_sha256") or ""),
+        "query_sha256": query_sha256,
         "page_bindings": _episode_page_bindings(episode),
     }
 
@@ -1469,18 +1579,25 @@ def _authority_eligible_episode_entry(
     entry = _episode_manifest_entry(episode)
     bindings = entry.get("page_bindings")
     if (
-        episode.get("schema_version") != ANSWER_EPISODE_SCHEMA_VERSION
+        episode.get("schema_version")
+        not in {LEGACY_ANSWER_EPISODE_SCHEMA_VERSION, ANSWER_EPISODE_SCHEMA_VERSION}
         or not _valid_sha(episode.get("episode_sha256"))
         or episode.get("episode_sha256") != _canonical_sha(unsigned)
         or not entry.get("episode_id")
         or not _strict_utc(entry.get("observed_at"))
         or not entry.get("session_hash")
+        or not entry.get("prompt_hash")
         or not _valid_sha(entry.get("query_sha256"))
+        or (
+            episode.get("schema_version") == ANSWER_EPISODE_SCHEMA_VERSION
+            and episode.get("prompt_content_sha256") != entry.get("query_sha256")
+        )
         or not isinstance(bindings, list)
         or not bindings
         or any(
             not isinstance(binding, Mapping)
             or not str(binding.get("page_id") or "")
+            or not str(binding.get("page_uid") or "")
             or not _valid_sha(binding.get("content_sha256"))
             for binding in bindings
         )
@@ -2081,7 +2198,11 @@ def _field_replay_commit_id(
 def builtin_field_environment_replay(
     prompt: str, episode: Mapping[str, Any], seed: int
 ) -> Mapping[str, Any]:
-    """Run current Field and full-search teacher from one in-memory state clone."""
+    """Run current Field and full-search teacher from one in-memory state clone.
+
+    Independent benchmark replay always starts from a new empty state.  Historical
+    production-episode replay may still clone the corresponding live session.
+    """
 
     from chronovisor.recall.recall_field import (
         _effective_config,
@@ -2089,7 +2210,10 @@ def builtin_field_environment_replay(
         run_field_turn,
     )
     from chronovisor.recall.recall_field_candidate import _verify
-    from chronovisor.recall.recall_field_schema import load_recall_field_config
+    from chronovisor.recall.recall_field_schema import (
+        RecallFieldState,
+        load_recall_field_config,
+    )
     from chronovisor.recall.recall_field_store import RecallFieldStore
     from chronovisor.recall.recall_runtime import (
         RecallRequest,
@@ -2101,7 +2225,6 @@ def builtin_field_environment_replay(
         search_candidates,
     )
 
-    del seed  # State and search identity, not sampling order, determine retrieval.
     identity = builtin_field_environment_identity()
     config = _effective_config(load_recall_field_config())
     policy = replace(
@@ -2110,7 +2233,19 @@ def builtin_field_environment_replay(
         processor_judge_enabled=False,
     )
     session_hash = str(episode.get("session_hash") or "")
-    base_state = RecallFieldStore(config=config).load(session_hash)
+    independent_replay = (
+        episode.get("evaluation_kind")
+        == "independent-benchmark-field-replay"
+    )
+    if independent_replay:
+        base_state = RecallFieldState(
+            session_hash=session_hash,
+            host="answer-eval",
+        )
+        observed = float(1_700_000_000 + (seed % 1_000_000))
+    else:
+        base_state = RecallFieldStore(config=config).load(session_hash)
+        observed = max(time.time(), base_state.updated_at_epoch)
     base_sha = _canonical_sha(base_state.to_dict())
 
     class _ClonedFieldStore:
@@ -2129,7 +2264,6 @@ def builtin_field_environment_replay(
             self.state, events = mutate(self.state)
             return self.state, events
 
-    observed = max(time.time(), base_state.updated_at_epoch)
     candidate_store = _ClonedFieldStore(base_state)
     teacher_store = _ClonedFieldStore(base_state)
     candidate_turn = run_field_turn(
@@ -2716,11 +2850,2203 @@ def _score_answer(
     return scores, "", str(receipt["receipt_sha256"])
 
 
+def _contains_forbidden_gold_input(value: object) -> bool:
+    forbidden = {
+        "production_answer",
+        "production_answer_sha256",
+        "field_arm",
+        "field_outcome",
+        "scorer_output",
+        "scorer_scores",
+    }
+    if isinstance(value, Mapping):
+        return any(
+            str(key) in forbidden or _contains_forbidden_gold_input(item)
+            for key, item in value.items()
+        )
+    if isinstance(value, list | tuple):
+        return any(_contains_forbidden_gold_input(item) for item in value)
+    return False
+
+
+def _project_gold_for_scorer(gold: Mapping[str, Any]) -> dict[str, Any]:
+    """Project scorer input to remove forbidden keys recursively.
+
+    We keep all top-level scorer keys while scrubbing forbidden fields from all
+    nested objects. This prevents accidentally passing raw treatment payloads
+    (such as production answers) into the scorer while still preserving the
+    evidence fields used by existing scorers.
+    """
+
+    forbidden = {
+        "production_answer",
+        "production_answer_sha256",
+        "field_arm",
+        "field_outcome",
+        "scorer_output",
+        "scorer_scores",
+    }
+
+    def _project(value: Any) -> Any:
+        if isinstance(value, Mapping):
+            return {
+                str(key): _project(item)
+                for key, item in value.items()
+                if str(key) not in forbidden
+            }
+        if isinstance(value, list | tuple):
+            return [_project(item) for item in value]
+        return value
+
+    return _project(dict(gold))
+
+
+def _gold_machine_subject(
+    entry: Mapping[str, Any],
+    *,
+    rubric_sha256: str,
+    gold_family_id: str,
+    expected_split: str,
+    split_epoch_id: str,
+) -> dict[str, Any]:
+    evidence = entry.get("evidence")
+    evidence_map = dict(evidence) if isinstance(evidence, Mapping) else {}
+    source_packet = evidence_map.get("source_packet")
+    return {
+        "schema_version": 1,
+        "subject_kind": "gold_entry",
+        "episode_id": str(entry.get("episode_id") or ""),
+        "gold_answer_sha256": _sha_text(str(entry.get("gold_answer") or "")),
+        "evidence_sha256": str(entry.get("evidence_sha256") or ""),
+        "source_packet_sha256": str(
+            evidence_map.get("source_packet_sha256") or ""
+        ),
+        "source_packet": dict(source_packet)
+        if isinstance(source_packet, Mapping)
+        else {},
+        "reference_answer_sha256": _sha_text(str(entry.get("gold_answer") or "")),
+        "source_frozen_at": str(evidence_map.get("source_frozen_at") or ""),
+        "rubric_sha256": rubric_sha256,
+        "gold_family_id": gold_family_id,
+        "split": expected_split,
+        "split_epoch_id": split_epoch_id,
+        "producer_kind": "deterministic_evidence_projection",
+        "producer_model": None,
+        "producer_policy_sha256": DETERMINISTIC_GOLD_PROJECTION_POLICY_SHA256,
+        "production_answer_used": False,
+    }
+
+
+def _independent_gold_source_packet_error(packet: object) -> str:
+    """Validate a gold packet without consulting Recall treatment output."""
+
+    if not isinstance(packet, Mapping):
+        return "independent_gold_source_packet_invalid"
+    expected_keys = {
+        "schema_version",
+        "source_kind",
+        "case_id",
+        "prompt",
+        "prompt_content_sha256",
+        "evidence_chunks",
+        "reference_evidence_sha256",
+        "page_bindings",
+        "source_authority_sha256",
+        "source_entry_sha256",
+        "split",
+        "split_epoch_id",
+        "component_sha256",
+        "source_frozen_at",
+        "projection_policy_sha256",
+    }
+    prompt = packet.get("prompt")
+    chunks = packet.get("evidence_chunks")
+    bindings = packet.get("page_bindings")
+    if (
+        set(packet) != expected_keys
+        or
+        packet.get("schema_version") != 1
+        or not isinstance(packet.get("source_kind"), str)
+        or packet.get("source_kind")
+        not in {"manual94_candidate_seed", "machine_search_label_consensus", "synthetic_fixture"}
+        or not isinstance(packet.get("case_id"), str)
+        or not str(packet.get("case_id") or "")
+        or not isinstance(prompt, str)
+        or not prompt
+        or packet.get("prompt_content_sha256") != _sha_text(prompt)
+        or packet.get("projection_policy_sha256")
+        != BOUNDED_EVIDENCE_PROJECTION_POLICY_SHA256
+        or not _valid_sha(packet.get("source_authority_sha256"))
+        or not _valid_sha(packet.get("source_entry_sha256"))
+        or not _valid_sha(packet.get("split_epoch_id"))
+        or not isinstance(packet.get("split"), str)
+        or packet.get("split") not in {"train", "holdout", "locked-test"}
+        or not _strict_utc(packet.get("source_frozen_at"))
+        or not isinstance(bindings, list)
+        or not bindings
+        or not isinstance(chunks, list)
+        or len(chunks) != len(bindings)
+        or any(
+            not isinstance(binding, Mapping)
+            or set(binding)
+            != {"page_id", "page_uid", "content_sha256", "content_byte_length"}
+            or not str(binding.get("page_id") or "")
+            or not str(binding.get("page_uid") or "")
+            or not _valid_sha(binding.get("content_sha256"))
+            or not isinstance(binding.get("content_byte_length"), int)
+            or isinstance(binding.get("content_byte_length"), bool)
+            or int(binding.get("content_byte_length") or 0) <= 0
+            for binding in bindings
+        )
+        or not _valid_sha(packet.get("component_sha256"))
+        or _contains_forbidden_gold_input(packet)
+    ):
+        return "independent_gold_source_packet_invalid"
+    assert isinstance(chunks, list) and isinstance(bindings, list)
+    binding_page_ids = [str(binding.get("page_id") or "") for binding in bindings]
+    chunk_page_ids = [
+        str(chunk.get("page_id") or "") if isinstance(chunk, Mapping) else ""
+        for chunk in chunks
+    ]
+    if (
+        len(set(binding_page_ids)) != len(binding_page_ids)
+        or len(set(chunk_page_ids)) != len(chunk_page_ids)
+        or binding_page_ids != chunk_page_ids
+    ):
+        return "independent_gold_source_packet_invalid"
+    rendered: list[str] = []
+    for binding, chunk in zip(bindings, chunks, strict=True):
+        if (
+            not isinstance(binding, Mapping)
+            or not isinstance(chunk, Mapping)
+            or set(chunk)
+            != {
+                "page_id",
+                "content_sha256",
+                "byte_start",
+                "byte_end",
+                "excerpt",
+                "excerpt_sha256",
+                "truncated",
+            }
+            or chunk.get("page_id") != binding.get("page_id")
+            or chunk.get("content_sha256") != binding.get("content_sha256")
+            or chunk.get("byte_start") != 0
+            or not isinstance(chunk.get("byte_end"), int)
+            or isinstance(chunk.get("byte_end"), bool)
+            or not 0
+            < int(chunk["byte_end"])
+            <= min(12_000, int(binding.get("content_byte_length") or 0))
+            or not isinstance(chunk.get("excerpt"), str)
+            or len(str(chunk["excerpt"]).encode("utf-8")) != chunk.get("byte_end")
+            or chunk.get("excerpt_sha256") != _sha_text(str(chunk["excerpt"]))
+            or not isinstance(chunk.get("truncated"), bool)
+            or chunk.get("truncated")
+            is not (
+                int(chunk["byte_end"])
+                < int(binding.get("content_byte_length") or 0)
+            )
+        ):
+            return "independent_gold_source_packet_invalid"
+        rendered.append(f"[PAGE {chunk['page_id']}]\n{chunk['excerpt']}")
+    evidence = "\n\n".join(rendered)
+    if (
+        len(evidence.encode("utf-8")) > 32_000
+        or packet.get("reference_evidence_sha256") != _sha_text(evidence)
+    ):
+        return "independent_gold_source_packet_invalid"
+    return ""
+
+
+def _packet_reference_evidence(packet: Mapping[str, Any]) -> str:
+    chunks = packet.get("evidence_chunks")
+    if _independent_gold_source_packet_error(packet) or not isinstance(chunks, list):
+        raise ValueError("independent gold source packet is invalid")
+    return "\n\n".join(
+        f"[PAGE {chunk['page_id']}]\n{chunk['excerpt']}"
+        for chunk in chunks
+        if isinstance(chunk, Mapping)
+    )
+
+
+def _legacy_machine_source_ledger_entry_error(entry: object) -> str:
+    if (
+        not isinstance(entry, Mapping)
+        or set(entry) != {"case_id", "source_entry_sha256", "search_row"}
+        or not isinstance(entry.get("case_id"), str)
+        or not str(entry.get("case_id") or "")
+        or not _valid_sha(entry.get("source_entry_sha256"))
+        or not isinstance(entry.get("search_row"), Mapping)
+        or entry.get("source_entry_sha256")
+        != _canonical_sha(dict(entry["search_row"]))
+    ):
+        return "machine_answer_source_entry_invalid"
+    row = dict(entry["search_row"])
+    try:
+        from chronovisor.search.search_eval import (
+            FRONTIER_LABEL_SCHEMA,
+            _label_candidate_payload,
+            _label_review_artifact_error,
+            _label_tuple_from_review,
+        )
+
+        artifact = row.get("decision_artifact")
+        artifact_map = artifact if isinstance(artifact, Mapping) else {}
+        authority = artifact_map.get("authority")
+        evidence = _label_candidate_payload(row)
+        review = artifact_map.get("review")
+        error = _label_review_artifact_error(
+            artifact,
+            evidence=evidence,
+            current_authority=authority,
+        )
+        expected = (
+            tuple(evidence["expected_pages"]),
+            tuple(evidence["negative_pages"]),
+            tuple(evidence["stale_pages"]),
+        )
+        execution = review.get("decision_execution") if isinstance(review, Mapping) else None
+        fingerprint = (
+            execution.get("execution_fingerprint")
+            if isinstance(execution, Mapping)
+            else None
+        )
+        artifact_seal = (
+            execution.get("decision_artifact_seal_sha256")
+            if isinstance(execution, Mapping)
+            else None
+        )
+        from chronovisor.decision.decision_artifact import (
+            DecisionArtifactStore,
+            default_store_root,
+        )
+
+        execution_artifact = (
+            DecisionArtifactStore(default_store_root(CHRONOVISOR_ROOT)).load(
+                fingerprint
+            )
+            if isinstance(fingerprint, str)
+            else None
+        )
+        execution_identity = (
+            execution_artifact.get("execution_identity")
+            if isinstance(execution_artifact, Mapping)
+            else None
+        )
+        execution_provenance = (
+            execution_artifact.get("provenance")
+            if isinstance(execution_artifact, Mapping)
+            else None
+        )
+        decision = (
+            execution_artifact.get("decision")
+            if isinstance(execution_artifact, Mapping)
+            else None
+        )
+        schema_fields = set(FRONTIER_LABEL_SCHEMA.get("properties", {}))
+        review_decision = (
+            {key: review.get(key) for key in schema_fields}
+            if isinstance(review, Mapping)
+            else None
+        )
+    except (KeyError, TypeError, ValueError):
+        return "machine_answer_source_entry_invalid"
+    if (
+        error is not None
+        or not isinstance(authority, Mapping)
+        or authority.get("source") != "adopted_local_consensus"
+        or not isinstance(execution_artifact, Mapping)
+        or execution_artifact.get("seal_sha256") != artifact_seal
+        or not isinstance(execution_identity, Mapping)
+        or execution_identity.get("lane") != "search_label"
+        or execution_identity.get("authority_sha256")
+        != _sealed_canonical_sha(authority)
+        or not isinstance(execution_provenance, Mapping)
+        or execution_provenance.get("router_policy") != authority.get("router")
+        or decision != review_decision
+        or not isinstance(review, Mapping)
+        or review.get("decision") != "approved"
+        or _label_tuple_from_review(dict(review)) != expected
+        or row.get("reviewed") is not True
+        or row.get("source") not in {"recall_questions", "recall_question"}
+        or not isinstance(row.get("query"), str)
+        or not str(row.get("query") or "").strip()
+        or not isinstance(row.get("expected_pages"), list)
+        or not row.get("expected_pages")
+        or entry.get("case_id")
+        != "search-machine-" + str(entry["source_entry_sha256"])[:32]
+    ):
+        return "machine_answer_source_entry_invalid"
+    return ""
+
+
+def _legacy_validate_machine_answer_source_ledger(
+    value: Path | Mapping[str, Any],
+) -> dict[str, Any]:
+    try:
+        payload = (
+            read_sealed_json(value)
+            if isinstance(value, Path)
+            else verify_sealed_object(dict(value))
+        )
+    except (DurableStateError, TypeError, ValueError):
+        return {"passed": False, "reason": "machine_answer_source_ledger_seal_invalid"}
+    entries = payload.get("entries")
+    if (
+        set(payload)
+        != {
+            "schema_version",
+            "artifact_kind",
+            "frozen_at",
+            "entries",
+            "entries_sha256",
+            "seal_sha256",
+        }
+        or payload.get("schema_version") != 1
+        or payload.get("artifact_kind")
+        != "machine-search-label-answer-source-ledger"
+        or not _strict_utc(payload.get("frozen_at"))
+        or not isinstance(entries, list)
+        or not entries
+        or payload.get("entries_sha256") != _canonical_sha(entries)
+    ):
+        return {"passed": False, "reason": "machine_answer_source_ledger_invalid"}
+    by_sha: dict[str, dict[str, Any]] = {}
+    case_ids: set[str] = set()
+    for entry in entries:
+        error = _legacy_machine_source_ledger_entry_error(entry)
+        entry_map = dict(entry) if isinstance(entry, Mapping) else {}
+        source_sha = str(entry_map.get("source_entry_sha256") or "")
+        case_id = str(entry_map.get("case_id") or "")
+        if error or source_sha in by_sha or case_id in case_ids:
+            return {
+                "passed": False,
+                "reason": error or "machine_answer_source_entry_duplicate",
+            }
+        by_sha[source_sha] = entry_map
+        case_ids.add(case_id)
+    return {
+        "passed": True,
+        "reason": "verified_machine_answer_source_ledger",
+        "payload": payload,
+        "entries": by_sha,
+        "manifest_sha256": str(payload["seal_sha256"]),
+    }
+
+
+def _legacy_packet_from_machine_source_entry(
+    entry: Mapping[str, Any],
+    *,
+    source_authority_sha256: str,
+    frozen_at: str,
+) -> dict[str, Any]:
+    from chronovisor.recall.recall_runtime import page_uid_for_id
+
+    row = entry.get("search_row")
+    if not isinstance(row, Mapping):
+        raise ValueError("machine source row is missing")
+    expected_pages = [
+        str(page_id)
+        for page_id in row.get("expected_pages", [])
+        if isinstance(page_id, str) and page_id
+    ]
+    if not expected_pages:
+        raise ValueError("machine source row has no positive page")
+    chunks: list[dict[str, Any]] = []
+    bindings: list[dict[str, Any]] = []
+    for page_id in expected_pages:
+        path = find_page(page_id)
+        try:
+            content = path.read_text(encoding="utf-8") if path else ""
+        except (OSError, UnicodeError):
+            content = ""
+        page_uid = page_uid_for_id(page_id)
+        if not content or not page_uid:
+            raise ValueError("machine source page binding is unavailable")
+        content_bytes = content.encode("utf-8")
+        excerpt = content_bytes[:12_000].decode("utf-8", errors="ignore")
+        excerpt_bytes = excerpt.encode("utf-8")
+        content_sha = _sha_text(content)
+        bindings.append(
+            {
+                "page_id": page_id,
+                "page_uid": page_uid,
+                "content_sha256": content_sha,
+                "content_byte_length": len(content_bytes),
+            }
+        )
+        chunks.append(
+            {
+                "page_id": page_id,
+                "content_sha256": content_sha,
+                "byte_start": 0,
+                "byte_end": len(excerpt_bytes),
+                "excerpt": excerpt,
+                "excerpt_sha256": _sha_text(excerpt),
+                "truncated": len(excerpt_bytes) < len(content_bytes),
+            }
+        )
+    while len(
+        "\n\n".join(
+            f"[PAGE {chunk['page_id']}]\n{chunk['excerpt']}" for chunk in chunks
+        ).encode("utf-8")
+    ) > 32_000:
+        chunks.pop()
+        bindings.pop()
+    if not chunks:
+        raise ValueError("machine source evidence projection is empty")
+    reference = "\n\n".join(
+        f"[PAGE {chunk['page_id']}]\n{chunk['excerpt']}" for chunk in chunks
+    )
+    prompt = str(row.get("query") or "")
+    return {
+        "schema_version": 1,
+        "source_kind": "machine_search_label_consensus",
+        "case_id": str(entry["case_id"]),
+        "prompt": prompt,
+        "prompt_content_sha256": _sha_text(prompt),
+        "evidence_chunks": chunks,
+        "reference_evidence_sha256": _sha_text(reference),
+        "page_bindings": bindings,
+        "source_authority_sha256": source_authority_sha256,
+        "source_entry_sha256": str(entry["source_entry_sha256"]),
+        "split": "",
+        "split_epoch_id": "",
+        "component_sha256": "",
+        "source_frozen_at": frozen_at,
+        "projection_policy_sha256": BOUNDED_EVIDENCE_PROJECTION_POLICY_SHA256,
+    }
+
+
+def _search_label_candidate_subject(packet: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "subject_kind": "search_label_candidate",
+        "candidate_preregistration_sha256": str(
+            packet.get("candidate_preregistration_sha256") or ""
+        ),
+        "source_packet_sha256": _sealed_canonical_sha(packet),
+        "source_packet": copy.deepcopy(dict(packet)),
+        "evidence_sha256": str(packet.get("reference_evidence_sha256") or ""),
+        "producer_kind": "deterministic_evidence_projection",
+        "producer_model": None,
+        "producer_policy_sha256": (
+            SEARCH_LABEL_CANDIDATE_PRODUCER_POLICY_SHA256
+        ),
+        "production_answer_used": False,
+    }
+
+
+def _freeze_search_label_candidate_packet(row: Mapping[str, Any]) -> dict[str, Any]:
+    """Freeze one preregistered RQ only while its exact page bytes still match."""
+
+    from chronovisor.search.search_eval import _auto_candidate_preregistration_error
+
+    preregistration_error = _auto_candidate_preregistration_error(row)
+    if preregistration_error:
+        raise ValueError(preregistration_error)
+    preregistered_at = _strict_utc(row.get("preregistered_at"))
+    if (
+        not preregistered_at
+        or datetime.fromisoformat(preregistered_at.replace("Z", "+00:00"))
+        > datetime.now(UTC) + timedelta(minutes=5)
+    ):
+        raise ValueError("candidate preregistration time is invalid")
+    page_id = str(row.get("source_page") or "")
+    path = find_page(page_id)
+    try:
+        content_bytes = path.read_bytes() if path else b""
+    except OSError as exc:
+        raise ValueError("candidate page bytes unavailable") from exc
+    if (
+        not content_bytes
+        or hashlib.sha256(content_bytes).hexdigest()
+        != row.get("content_sha256")
+        or len(content_bytes) != row.get("content_byte_length")
+    ):
+        raise ValueError("candidate preregistration page drift")
+    excerpt = content_bytes[:12_000].decode("utf-8", errors="ignore")
+    excerpt_bytes = excerpt.encode("utf-8")
+    reference = f"[PAGE {page_id}]\n{excerpt}"
+    candidate = {
+        "query": str(row.get("query") or ""),
+        "expected_pages": [str(value) for value in row.get("expected_pages", [])],
+        "negative_pages": [],
+        "stale_pages": [],
+        "source": str(row.get("source") or ""),
+        "source_page": page_id,
+        "search_eval_split": str(row.get("split") or ""),
+        "split_role": str(row.get("split_role") or ""),
+        "language": str(row.get("language") or ""),
+        "kind": str(row.get("kind") or ""),
+        "preregistered_at": preregistered_at,
+        "candidate_preregistration_sha256": str(
+            row.get("candidate_sha256") or ""
+        ),
+        "page_uid": str(row.get("page_uid") or ""),
+        "content_sha256": str(row.get("content_sha256") or ""),
+        "content_byte_length": row.get("content_byte_length"),
+        "projection_policy_sha256": str(
+            row.get("projection_policy_sha256") or ""
+        ),
+    }
+    packet = {
+        "schema_version": 1,
+        "packet_kind": "preregistered_rq_page_evidence",
+        "candidate_preregistration_sha256": str(
+            row.get("candidate_sha256") or ""
+        ),
+        "candidate": candidate,
+        "page_binding": {
+            "page_id": page_id,
+            "page_uid": str(row.get("page_uid") or ""),
+            "content_sha256": hashlib.sha256(content_bytes).hexdigest(),
+            "content_byte_length": len(content_bytes),
+        },
+        "evidence_chunk": {
+            "page_id": page_id,
+            "content_sha256": hashlib.sha256(content_bytes).hexdigest(),
+            "byte_start": 0,
+            "byte_end": len(excerpt_bytes),
+            "excerpt": excerpt,
+            "excerpt_sha256": hashlib.sha256(excerpt_bytes).hexdigest(),
+            "truncated": len(excerpt_bytes) < len(content_bytes),
+        },
+        "reference_evidence_sha256": _sha_text(reference),
+        "projection_policy_sha256": BOUNDED_EVIDENCE_PROJECTION_POLICY_SHA256,
+    }
+    packet_error = search_label_candidate_packet_error(packet)
+    if packet_error:
+        raise ValueError(packet_error)
+    return packet
+
+
+def _validated_search_label_candidate_receipt(
+    receipt_sha256: object,
+    *,
+    packet: Mapping[str, Any],
+    consensus_ledger_file: Path,
+    chronovisor_root: Path,
+) -> dict[str, Any]:
+    loaded = load_machine_consensus_receipt(
+        receipt_sha256, ledger_file=consensus_ledger_file
+    )
+    if loaded.get("passed") is not True:
+        return loaded
+    receipt = loaded.get("receipt")
+    authority = receipt.get("authority") if isinstance(receipt, Mapping) else None
+    if (
+        not isinstance(authority, Mapping)
+        or authority.get("source") != "adopted_local_consensus"
+        or not _valid_sha(authority.get("capability_sha256"))
+    ):
+        return {"passed": False, "reason": "machine_source_authority_invalid"}
+    subject = _search_label_candidate_subject(packet)
+    prompt = build_recall_answer_adjudication_prompt(
+        {"subject": subject, "subject_sha256": _sealed_canonical_sha(subject)}
+    )
+    return validate_machine_consensus_receipt(
+        receipt_sha256,
+        expected_kind="search_label_candidate_review",
+        expected_subject=subject,
+        expected_producer_policy_sha256=(
+            SEARCH_LABEL_CANDIDATE_PRODUCER_POLICY_SHA256
+        ),
+        prompt=prompt,
+        schema=RECALL_ANSWER_ADJUDICATION_SCHEMA,
+        system=None,
+        lane=ANSWER_ADJUDICATION_LANE,
+        ledger_file=consensus_ledger_file,
+        chronovisor_root=chronovisor_root,
+        current_authority=authority,
+    )
+
+
+def adjudicate_machine_search_label_candidates(
+    *,
+    candidate_file: Path,
+    consensus_ledger_file: Path = ANSWER_CONSENSUS_LEDGER,
+    chronovisor_root: Path = CHRONOVISOR_ROOT,
+    max_items: int = 1,
+    dry_run: bool = False,
+    router_factory: Callable[[str], Any] | None = None,
+) -> dict[str, Any]:
+    """Freeze and locally adjudicate preregistered RQ candidates incrementally."""
+
+    chain = list_machine_consensus_receipts(ledger_file=consensus_ledger_file)
+    if chain.get("passed") is not True:
+        return {"status": "held", "reason": str(chain.get("reason") or "ledger_invalid")}
+    existing = {
+        str(receipt.get("subject", {}).get("candidate_preregistration_sha256") or ""):
+        receipt
+        for receipt in chain.get("receipts", [])
+        if isinstance(receipt, Mapping)
+        and receipt.get("kind") == "search_label_candidate_review"
+        and isinstance(receipt.get("subject"), Mapping)
+    }
+    raw_candidates = [
+        row
+        for row in _read_jsonl(candidate_file)
+        if row.get("source") == "recall_questions"
+        and isinstance(row.get("candidate_sha256"), str)
+    ]
+    latest_by_logical_key: dict[tuple[str, str], dict[str, Any]] = {}
+    future_candidates = 0
+    now_limit = datetime.now(UTC) + timedelta(minutes=5)
+    for row in raw_candidates:
+        preregistered = _utc_order_key(row.get("preregistered_at"))
+        if (
+            not preregistered
+            or datetime.fromisoformat(preregistered.replace("Z", "+00:00"))
+            > now_limit
+        ):
+            future_candidates += 1
+            continue
+        logical_key = (
+            str(row.get("query") or ""),
+            str(row.get("page_uid") or ""),
+        )
+        incumbent = latest_by_logical_key.get(logical_key)
+        rank = (
+            _utc_order_key(row.get("preregistered_at")),
+            str(row.get("candidate_sha256") or ""),
+        )
+        incumbent_rank = (
+            _utc_order_key(incumbent.get("preregistered_at")),
+            str(incumbent.get("candidate_sha256") or ""),
+        ) if incumbent is not None else ("", "")
+        if rank > incumbent_rank:
+            latest_by_logical_key[logical_key] = row
+    candidates = sorted(
+        latest_by_logical_key.values(),
+        key=lambda row: str(row.get("candidate_sha256") or ""),
+    )
+    superseded = len(raw_candidates) - len(candidates) - future_candidates
+    accepted = 0
+    already = 0
+    stale = future_candidates
+    for row in candidates:
+        candidate_sha = str(row.get("candidate_sha256") or "")
+        prior = existing.get(candidate_sha)
+        if isinstance(prior, Mapping):
+            subject = prior.get("subject")
+            packet = subject.get("source_packet") if isinstance(subject, Mapping) else None
+            checked = (
+                _validated_search_label_candidate_receipt(
+                    prior.get("receipt_sha256"),
+                    packet=packet,
+                    consensus_ledger_file=consensus_ledger_file,
+                    chronovisor_root=chronovisor_root,
+                )
+                if isinstance(packet, Mapping)
+                else {"passed": False, "reason": "machine_source_packet_missing"}
+            )
+            if checked.get("passed") is not True:
+                return {"status": "held", "reason": str(checked.get("reason"))}
+            already += 1
+            continue
+        try:
+            packet = _freeze_search_label_candidate_packet(row)
+        except (OSError, TypeError, ValueError):
+            stale += 1
+            continue
+        if dry_run or accepted >= max(0, max_items):
+            continue
+        subject = _search_label_candidate_subject(packet)
+        prompt = build_recall_answer_adjudication_prompt(
+            {"subject": subject, "subject_sha256": _sealed_canonical_sha(subject)}
+        )
+        result = append_machine_consensus_receipt(
+            kind="search_label_candidate_review",
+            subject=subject,
+            producer_policy_sha256=SEARCH_LABEL_CANDIDATE_PRODUCER_POLICY_SHA256,
+            prompt=prompt,
+            schema=RECALL_ANSWER_ADJUDICATION_SCHEMA,
+            system=None,
+            lane=ANSWER_ADJUDICATION_LANE,
+            ledger_file=consensus_ledger_file,
+            chronovisor_root=chronovisor_root,
+            router_factory=router_factory,
+        )
+        if result.get("status") != "accepted":
+            return {
+                "status": str(result.get("status") or "held"),
+                "reason": str(result.get("reason") or "candidate_consensus_held"),
+                "accepted": accepted,
+                "already": already,
+                "stale": stale,
+            }
+        accepted += 1
+    pending = max(0, len(candidates) - already - accepted - stale)
+    return {
+        "status": "complete" if pending == 0 and stale == 0 else "waiting",
+        "reason": (
+            "verified_machine_search_label_consensus"
+            if pending == 0 and stale == 0
+            else "candidate_re_preregistration_required"
+            if stale
+            else "candidate_consensus_pending"
+        ),
+        "accepted": accepted,
+        "already": already,
+        "pending": pending,
+        "stale": stale,
+        "superseded": superseded,
+        "dry_run": dry_run,
+    }
+
+
+def _machine_source_entries_from_receipts(
+    receipts: Sequence[Mapping[str, Any]],
+    *,
+    consensus_ledger_file: Path,
+    chronovisor_root: Path,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    grouped: dict[tuple[str, str], list[tuple[str, Mapping[str, Any], Mapping[str, Any]]]] = {}
+    for receipt in receipts:
+        if receipt.get("kind") != "search_label_candidate_review":
+            continue
+        subject = receipt.get("subject")
+        packet = subject.get("source_packet") if isinstance(subject, Mapping) else None
+        if not isinstance(packet, Mapping) or search_label_candidate_packet_error(packet):
+            raise ValueError("machine source packet is invalid")
+        checked = _validated_search_label_candidate_receipt(
+            receipt.get("receipt_sha256"),
+            packet=packet,
+            consensus_ledger_file=consensus_ledger_file,
+            chronovisor_root=chronovisor_root,
+        )
+        if checked.get("passed") is not True:
+            raise ValueError(str(checked.get("reason") or "machine source receipt invalid"))
+        candidate = packet["candidate"]
+        logical_key = (str(candidate["query"]), str(candidate["page_uid"]))
+        rank = _utc_order_key(candidate["preregistered_at"])
+        if not rank:
+            raise ValueError("machine source preregistration timestamp invalid")
+        grouped.setdefault(logical_key, []).append((rank, packet, receipt))
+    entries: list[dict[str, Any]] = []
+    retirements: list[dict[str, Any]] = []
+    for logical_key, versions in sorted(grouped.items()):
+        versions.sort(
+            key=lambda row: (
+                row[0],
+                str(row[1].get("candidate_preregistration_sha256") or ""),
+            )
+        )
+        _active_rank, active_packet, active_receipt = versions[-1]
+        identity = {
+            "candidate_preregistration_sha256": active_packet.get(
+                "candidate_preregistration_sha256"
+            ),
+            "source_packet_sha256": _sealed_canonical_sha(active_packet),
+            "consensus_receipt_sha256": active_receipt.get("receipt_sha256"),
+        }
+        source_sha = _canonical_sha(identity)
+        entries.append(
+            {
+                "case_id": "search-machine-" + source_sha[:32],
+                "source_entry_sha256": source_sha,
+                **identity,
+                "source_packet": copy.deepcopy(dict(active_packet)),
+            }
+        )
+        logical_key_sha = _canonical_sha(
+            {"query": logical_key[0], "page_uid": logical_key[1]}
+        )
+        for old_rank, old_packet, old_receipt in versions[:-1]:
+            retirements.append(
+                {
+                    "logical_key_sha256": logical_key_sha,
+                    "superseded_candidate_preregistration_sha256": old_packet.get(
+                        "candidate_preregistration_sha256"
+                    ),
+                    "superseded_source_packet_sha256": _sealed_canonical_sha(
+                        old_packet
+                    ),
+                    "superseded_consensus_receipt_sha256": old_receipt.get(
+                        "receipt_sha256"
+                    ),
+                    "superseded_preregistered_at": old_rank,
+                    "superseded_by_candidate_preregistration_sha256": (
+                        active_packet.get("candidate_preregistration_sha256")
+                    ),
+                    "superseded_by_source_packet_sha256": _sealed_canonical_sha(
+                        active_packet
+                    ),
+                    "superseded_by_consensus_receipt_sha256": active_receipt.get(
+                        "receipt_sha256"
+                    ),
+                    "superseded_by_preregistered_at": _utc_order_key(
+                        active_packet["candidate"]["preregistered_at"]
+                    ),
+                }
+            )
+    entries.sort(key=lambda entry: str(entry["source_entry_sha256"]))
+    retirements.sort(
+        key=lambda row: (
+            str(row["logical_key_sha256"]),
+            str(row["superseded_preregistered_at"]),
+        )
+    )
+    return entries, retirements
+
+
+def _machine_source_ledger_entry_error(
+    entry: object,
+    *,
+    consensus_ledger_file: Path,
+    chronovisor_root: Path,
+    ledger_frozen_at: str,
+    receipt_positions: Mapping[str, int],
+    frozen_head_position: int,
+) -> str:
+    if not isinstance(entry, Mapping) or set(entry) != {
+        "case_id",
+        "source_entry_sha256",
+        "candidate_preregistration_sha256",
+        "source_packet_sha256",
+        "source_packet",
+        "consensus_receipt_sha256",
+    }:
+        return "machine_answer_source_entry_invalid"
+    packet = entry.get("source_packet")
+    identity = {
+        "candidate_preregistration_sha256": entry.get(
+            "candidate_preregistration_sha256"
+        ),
+        "source_packet_sha256": entry.get("source_packet_sha256"),
+        "consensus_receipt_sha256": entry.get("consensus_receipt_sha256"),
+    }
+    source_sha = _canonical_sha(identity)
+    if (
+        not isinstance(packet, Mapping)
+        or search_label_candidate_packet_error(packet)
+        or entry.get("candidate_preregistration_sha256")
+        != packet.get("candidate_preregistration_sha256")
+        or entry.get("source_packet_sha256") != _sealed_canonical_sha(packet)
+        or entry.get("source_entry_sha256") != source_sha
+        or entry.get("case_id") != f"search-machine-{source_sha[:32]}"
+        or not _valid_sha(entry.get("consensus_receipt_sha256"))
+    ):
+        return "machine_answer_source_entry_invalid"
+    checked = _validated_search_label_candidate_receipt(
+        entry.get("consensus_receipt_sha256"),
+        packet=packet,
+        consensus_ledger_file=consensus_ledger_file,
+        chronovisor_root=chronovisor_root,
+    )
+    if checked.get("passed") is not True:
+        return str(checked.get("reason") or "machine_answer_source_receipt_invalid")
+    receipt = checked.get("receipt")
+    candidate = packet.get("candidate") if isinstance(packet, Mapping) else None
+    preregistered_at = (
+        _utc_order_key(candidate.get("preregistered_at"))
+        if isinstance(candidate, Mapping)
+        else ""
+    )
+    created_at = (
+        _utc_order_key(receipt.get("created_at"))
+        if isinstance(receipt, Mapping)
+        else ""
+    )
+    receipt_position = receipt_positions.get(
+        str(entry.get("consensus_receipt_sha256") or ""), -1
+    )
+    if (
+        not preregistered_at
+        or not created_at
+        or not ledger_frozen_at
+        or not preregistered_at < created_at <= ledger_frozen_at
+        or receipt_position < 0
+        or receipt_position > frozen_head_position
+    ):
+        return "machine_answer_source_receipt_epoch_invalid"
+    return ""
+
+
+def validate_machine_answer_source_ledger(
+    value: Path | Mapping[str, Any],
+    *,
+    consensus_ledger_file: Path | None = None,
+    chronovisor_root: Path = CHRONOVISOR_ROOT,
+) -> dict[str, Any]:
+    """Validate a source epoch entirely from sealed packet and CAS receipts."""
+
+    try:
+        payload = (
+            read_sealed_json(value)
+            if isinstance(value, Path)
+            else verify_sealed_object(dict(value))
+        )
+    except (DurableStateError, OSError, TypeError, ValueError):
+        return {"passed": False, "reason": "machine_answer_source_ledger_seal_invalid"}
+    entries = payload.get("entries")
+    if (
+        set(payload)
+        != {
+            "schema_version",
+            "artifact_kind",
+            "frozen_at",
+            "entries",
+            "entries_sha256",
+            "retirements",
+            "retirements_sha256",
+            "consensus_ledger_path",
+            "consensus_ledger_head_sha256",
+            "seal_sha256",
+        }
+        or payload.get("schema_version") != 2
+        or payload.get("artifact_kind")
+        != "machine-search-label-answer-source-ledger"
+        or not _strict_utc(payload.get("frozen_at"))
+        or not isinstance(entries, list)
+        or not entries
+        or payload.get("entries_sha256") != _canonical_sha(entries)
+        or not isinstance(payload.get("retirements"), list)
+        or payload.get("retirements_sha256")
+        != _canonical_sha(payload.get("retirements"))
+    ):
+        return {"passed": False, "reason": "machine_answer_source_ledger_invalid"}
+    bound_consensus_ledger = Path(str(payload.get("consensus_ledger_path") or ""))
+    expected_consensus_ledger = (
+        chronovisor_root / "recall" / "answer-consensus-receipts.jsonl"
+    ).expanduser().resolve(strict=False)
+    if (
+        not str(payload.get("consensus_ledger_path") or "")
+        or bound_consensus_ledger.expanduser().resolve(strict=False)
+        != expected_consensus_ledger
+        or (
+            consensus_ledger_file is not None
+            and bound_consensus_ledger.expanduser().resolve(strict=False)
+            != consensus_ledger_file.expanduser().resolve(strict=False)
+        )
+    ):
+        return {"passed": False, "reason": "machine_answer_source_ledger_invalid"}
+    chain = list_machine_consensus_receipts(ledger_file=bound_consensus_ledger)
+    receipts = chain.get("receipts")
+    receipt_shas = (
+        [str(receipt.get("receipt_sha256") or "") for receipt in receipts]
+        if isinstance(receipts, list)
+        else []
+    )
+    frozen_head = str(payload.get("consensus_ledger_head_sha256") or "")
+    receipt_positions = {receipt_sha: index for index, receipt_sha in enumerate(receipt_shas)}
+    frozen_head_position = receipt_positions.get(frozen_head, -1)
+    if (
+        chain.get("passed") is not True
+        or not _valid_sha(frozen_head)
+        or frozen_head == "0" * 64
+        or frozen_head_position < 0
+    ):
+        return {"passed": False, "reason": "machine_answer_consensus_ledger_invalid"}
+    try:
+        expected_entries, expected_retirements = _machine_source_entries_from_receipts(
+            [
+                receipt
+                for receipt in receipts[: frozen_head_position + 1]
+                if isinstance(receipt, Mapping)
+            ],
+            consensus_ledger_file=bound_consensus_ledger,
+            chronovisor_root=chronovisor_root,
+        )
+    except (OSError, TypeError, ValueError):
+        return {"passed": False, "reason": "machine_answer_source_receipt_invalid"}
+    if entries != expected_entries or payload.get("retirements") != expected_retirements:
+        return {"passed": False, "reason": "machine_answer_source_epoch_invalid"}
+    by_sha: dict[str, dict[str, Any]] = {}
+    case_ids: set[str] = set()
+    for entry in entries:
+        error = _machine_source_ledger_entry_error(
+            entry,
+            consensus_ledger_file=bound_consensus_ledger,
+            chronovisor_root=chronovisor_root,
+            ledger_frozen_at=_utc_order_key(payload.get("frozen_at")),
+            receipt_positions=receipt_positions,
+            frozen_head_position=frozen_head_position,
+        )
+        entry_map = dict(entry) if isinstance(entry, Mapping) else {}
+        source_sha = str(entry_map.get("source_entry_sha256") or "")
+        case_id = str(entry_map.get("case_id") or "")
+        if error or source_sha in by_sha or case_id in case_ids:
+            return {
+                "passed": False,
+                "reason": error or "machine_answer_source_entry_duplicate",
+            }
+        by_sha[source_sha] = entry_map
+        case_ids.add(case_id)
+    return {
+        "passed": True,
+        "reason": "verified_machine_answer_source_ledger",
+        "payload": payload,
+        "entries": by_sha,
+        "manifest_sha256": str(payload["seal_sha256"]),
+    }
+
+
+def _packet_from_machine_source_entry(
+    entry: Mapping[str, Any],
+    *,
+    source_authority_sha256: str,
+    frozen_at: str,
+) -> dict[str, Any]:
+    """Project benchmark input from the frozen receipt packet; never read live pages."""
+
+    source_packet = entry.get("source_packet")
+    if not isinstance(source_packet, Mapping) or search_label_candidate_packet_error(
+        source_packet
+    ):
+        raise ValueError("machine source packet is invalid")
+    candidate = source_packet["candidate"]
+    binding = source_packet["page_binding"]
+    chunk = source_packet["evidence_chunk"]
+    return {
+        "schema_version": 1,
+        "source_kind": "machine_search_label_consensus",
+        "case_id": str(entry["case_id"]),
+        "prompt": str(candidate["query"]),
+        "prompt_content_sha256": _sha_text(str(candidate["query"])),
+        "evidence_chunks": [copy.deepcopy(dict(chunk))],
+        "reference_evidence_sha256": str(
+            source_packet["reference_evidence_sha256"]
+        ),
+        "page_bindings": [copy.deepcopy(dict(binding))],
+        "source_authority_sha256": source_authority_sha256,
+        "source_entry_sha256": str(entry["source_entry_sha256"]),
+        "split": "",
+        "split_epoch_id": "",
+        "component_sha256": "",
+        "source_frozen_at": frozen_at,
+        "projection_policy_sha256": BOUNDED_EVIDENCE_PROJECTION_POLICY_SHA256,
+    }
+
+
+def _benchmark_component_assignments(
+    packets: Sequence[Mapping[str, Any]],
+    *,
+    source_authority_sha256: str,
+    predecessor_entries: Sequence[Mapping[str, Any]] | None = None,
+    predecessor_epoch_id: str = "",
+) -> tuple[dict[str, tuple[str, str]], str, dict[str, int]]:
+    case_ids = [str(packet.get("case_id") or "") for packet in packets]
+    if not case_ids or any(not case_id for case_id in case_ids) or len(case_ids) != len(
+        set(case_ids)
+    ):
+        raise ValueError("benchmark case identity is invalid")
+    parent = {case_id: case_id for case_id in case_ids}
+
+    def find(case_id: str) -> str:
+        while parent[case_id] != case_id:
+            parent[case_id] = parent[parent[case_id]]
+            case_id = parent[case_id]
+        return case_id
+
+    def union(left: str, right: str) -> None:
+        left_root, right_root = find(left), find(right)
+        if left_root != right_root:
+            parent[max(left_root, right_root)] = min(left_root, right_root)
+
+    identity_nodes: dict[str, list[str]] = {}
+    for packet in packets:
+        case_id = str(packet["case_id"])
+        bindings = packet.get("page_bindings")
+        if not isinstance(bindings, list):
+            raise ValueError("benchmark page bindings are invalid")
+        for binding in bindings:
+            if not isinstance(binding, Mapping):
+                raise ValueError("benchmark page binding is invalid")
+            for field in ("page_id", "page_uid", "content_sha256"):
+                identity_nodes.setdefault(
+                    f"{field}:{str(binding.get(field) or '')}", []
+                ).append(case_id)
+    for members in identity_nodes.values():
+        for case_id in members[1:]:
+            union(members[0], case_id)
+    components: dict[str, list[Mapping[str, Any]]] = {}
+    for packet in packets:
+        components.setdefault(find(str(packet["case_id"])), []).append(packet)
+    normalized: list[tuple[str, list[str], list[str]]] = []
+    for members in components.values():
+        member_ids = sorted(str(packet["case_id"]) for packet in members)
+        identity_values = sorted(
+            {
+                f"{field}:{str(binding.get(field) or '')}"
+                for packet in members
+                for binding in packet.get("page_bindings", [])
+                if isinstance(binding, Mapping)
+                for field in ("page_id", "page_uid", "content_sha256")
+            }
+        )
+        component_sha = _canonical_sha(
+            {"case_ids": member_ids, "page_identity_nodes": identity_values}
+        )
+        normalized.append((component_sha, member_ids, identity_values))
+    normalized.sort(key=lambda row: row[0])
+    predecessor_node_splits: dict[str, str] = {}
+    for packet in predecessor_entries or ():
+        split = packet.get("split")
+        bindings = packet.get("page_bindings")
+        if split not in {"train", "holdout", "locked-test"} or not isinstance(
+            bindings, list
+        ):
+            raise ValueError("benchmark predecessor split evidence is invalid")
+        for binding in bindings:
+            if not isinstance(binding, Mapping):
+                raise ValueError("benchmark predecessor binding is invalid")
+            for field in ("page_id", "page_uid", "content_sha256"):
+                node = f"{field}:{str(binding.get(field) or '')}"
+                previous = predecessor_node_splits.setdefault(node, str(split))
+                if previous != split:
+                    raise ValueError("benchmark predecessor already leaks splits")
+    inherited: dict[str, str] = {}
+    new_components: list[str] = []
+    normalized_by_sha = {row[0]: row for row in normalized}
+    for component_sha, _members, identity_values in normalized:
+        previous_splits = {
+            predecessor_node_splits[node]
+            for node in identity_values
+            if node in predecessor_node_splits
+        }
+        if len(previous_splits) > 1:
+            raise ValueError("benchmark successor would merge predecessor splits")
+        if previous_splits:
+            inherited[component_sha] = next(iter(previous_splits))
+        else:
+            new_components.append(component_sha)
+    new_components.sort()
+    count = len(new_components)
+    train_count = max(1, int(count * 0.70)) if count else 0
+    holdout_count = max(1, int(count * 0.20)) if count > 1 else 0
+    if train_count + holdout_count >= count:
+        holdout_count = max(0, count - train_count - 1)
+    new_split: dict[str, str] = {}
+    for index, component_sha in enumerate(new_components):
+        new_split[component_sha] = (
+            "train"
+            if index < train_count
+            else "holdout"
+            if index < train_count + holdout_count
+            else "locked-test"
+        )
+    assignments: dict[str, tuple[str, str]] = {}
+    component_manifest: list[dict[str, Any]] = []
+    for component_sha in sorted(normalized_by_sha):
+        _sha, members, identity_values = normalized_by_sha[component_sha]
+        split = inherited.get(component_sha) or new_split[component_sha]
+        component_manifest.append(
+            {
+                "component_sha256": component_sha,
+                "case_ids": members,
+                "page_identity_nodes": identity_values,
+                "split": split,
+            }
+        )
+        assignments.update({case_id: (component_sha, split) for case_id in members})
+    split_epoch_id = _canonical_sha(
+        {
+            "source_authority_sha256": source_authority_sha256,
+            "policy": (
+                "sticky-page-identity-connected-components-70-20-10-v3"
+                if predecessor_entries is not None or predecessor_epoch_id
+                else "page-identity-connected-components-70-20-10-v2"
+            ),
+            **(
+                {"predecessor_epoch_id": predecessor_epoch_id or None}
+                if predecessor_entries is not None or predecessor_epoch_id
+                else {}
+            ),
+            "components": component_manifest,
+        }
+    )
+    cluster_counts = {
+        split: sum(1 for row in component_manifest if row["split"] == split)
+        for split in ("train", "holdout", "locked-test")
+    }
+    return assignments, split_epoch_id, cluster_counts
+
+
+def validate_independent_answer_benchmark(
+    value: Path | Mapping[str, Any],
+    *,
+    chronovisor_root: Path = CHRONOVISOR_ROOT,
+) -> dict[str, Any]:
+    try:
+        payload = (
+            read_sealed_json(value)
+            if isinstance(value, Path)
+            else verify_sealed_object(dict(value))
+        )
+    except (DurableStateError, TypeError, ValueError):
+        return {"passed": False, "reason": "independent_benchmark_seal_invalid"}
+    if payload.get("artifact_kind") == "independent-answer-benchmark-active-pointer":
+        if not isinstance(value, Path):
+            return {"passed": False, "reason": "independent_benchmark_pointer_invalid"}
+        epoch_sha = str(payload.get("epoch_sha256") or "")
+        manifest_sha = str(payload.get("manifest_sha256") or "")
+        expected_path = value.parent / "benchmarks" / f"{epoch_sha}.json"
+        if (
+            payload.get("schema_version") != 1
+            or not _valid_sha(epoch_sha)
+            or not _valid_sha(manifest_sha)
+            or payload.get("manifest_path") != str(expected_path)
+            or not _strict_utc(payload.get("updated_at"))
+        ):
+            return {"passed": False, "reason": "independent_benchmark_pointer_invalid"}
+        nested = validate_independent_answer_benchmark(
+            expected_path, chronovisor_root=chronovisor_root
+        )
+        if (
+            nested.get("passed") is not True
+            or nested.get("manifest_sha256") != manifest_sha
+            or nested.get("split_epoch_id") != epoch_sha
+        ):
+            return {"passed": False, "reason": "independent_benchmark_pointer_drift"}
+        return nested
+    entries = payload.get("entries")
+    split_epoch_id = payload.get("split_epoch_id")
+    schema_version = payload.get("schema_version")
+    source_kind = payload.get("source_kind")
+    if (
+        schema_version not in {1, 2}
+        or payload.get("artifact_kind") != "independent-answer-benchmark-manifest"
+        or not isinstance(source_kind, str)
+        or source_kind
+        not in {"manual94_candidate_seed", "machine_search_label_consensus", "synthetic_fixture"}
+        or not _strict_utc(payload.get("frozen_at"))
+        or not _valid_sha(payload.get("source_authority_sha256"))
+        or not _valid_sha(split_epoch_id)
+        or not isinstance(entries, list)
+        or not entries
+    ):
+        return {"passed": False, "reason": "independent_benchmark_shape_invalid"}
+    if (
+        schema_version == 1
+        and source_kind == "machine_search_label_consensus"
+    ) or (schema_version == 2 and source_kind != "machine_search_label_consensus"):
+        return {"passed": False, "reason": "independent_benchmark_source_version_invalid"}
+    if (
+        source_kind == "synthetic_fixture"
+        and isinstance(value, Path)
+        and value.expanduser().resolve(strict=False).is_relative_to(
+            CHRONOVISOR_ROOT.expanduser().resolve(strict=False)
+        )
+    ):
+        return {"passed": False, "reason": "synthetic_benchmark_forbidden_in_production"}
+    source_ledger_check: dict[str, Any] = {}
+    predecessor_check: dict[str, Any] = {}
+    predecessor_entries: list[Mapping[str, Any]] | None = (
+        [] if schema_version == 2 else None
+    )
+    predecessor_epoch_id = ""
+    if schema_version == 2:
+        ledger_sha = str(payload.get("source_ledger_sha256") or "")
+        ledger_path = Path(str(payload.get("source_ledger_path") or ""))
+        expected_ledger_path = ledger_path.parent / f"{ledger_sha}.json"
+        if (
+            not _valid_sha(ledger_sha)
+            or payload.get("source_authority_sha256") != ledger_sha
+            or ledger_path != expected_ledger_path
+        ):
+            return {"passed": False, "reason": "machine_benchmark_source_ledger_invalid"}
+        source_ledger_check = validate_machine_answer_source_ledger(
+            ledger_path, chronovisor_root=chronovisor_root
+        )
+        if (
+            source_ledger_check.get("passed") is not True
+            or source_ledger_check.get("manifest_sha256") != ledger_sha
+        ):
+            return {"passed": False, "reason": "machine_benchmark_source_ledger_invalid"}
+        predecessor = payload.get("predecessor")
+        if predecessor is not None:
+            if not isinstance(predecessor, Mapping):
+                return {"passed": False, "reason": "benchmark_predecessor_invalid"}
+            predecessor_path = Path(str(predecessor.get("manifest_path") or ""))
+            predecessor_check = validate_independent_answer_benchmark(
+                predecessor_path, chronovisor_root=chronovisor_root
+            )
+            if (
+                predecessor_check.get("passed") is not True
+                or predecessor.get("split_epoch_id")
+                != predecessor_check.get("split_epoch_id")
+                or predecessor.get("manifest_sha256")
+                != predecessor_check.get("manifest_sha256")
+                or predecessor_path.name
+                != f"{predecessor_check.get('split_epoch_id')}.json"
+            ):
+                return {"passed": False, "reason": "benchmark_predecessor_invalid"}
+            predecessor_entries = list(
+                predecessor_check.get("entries", {}).values()
+            )
+            predecessor_epoch_id = str(predecessor_check["split_epoch_id"])
+    by_id: dict[str, dict[str, Any]] = {}
+    for raw in entries:
+        packet = dict(raw) if isinstance(raw, Mapping) else {}
+        if (
+            _independent_gold_source_packet_error(packet)
+            or packet.get("source_kind") != payload.get("source_kind")
+            or packet.get("source_authority_sha256")
+            != payload.get("source_authority_sha256")
+            or packet.get("split_epoch_id") != split_epoch_id
+            or packet.get("source_frozen_at") != payload.get("frozen_at")
+            or packet.get("case_id") in by_id
+        ):
+            return {"passed": False, "reason": "independent_benchmark_entry_invalid"}
+        by_id[str(packet["case_id"])] = packet
+    if schema_version == 2:
+        ledger_entries = source_ledger_check.get("entries", {})
+        for packet in by_id.values():
+            ledger_entry = ledger_entries.get(packet.get("source_entry_sha256"))
+            source_packet = (
+                ledger_entry.get("source_packet")
+                if isinstance(ledger_entry, Mapping)
+                else None
+            )
+            candidate = (
+                source_packet.get("candidate")
+                if isinstance(source_packet, Mapping)
+                else None
+            )
+            source_binding = (
+                source_packet.get("page_binding")
+                if isinstance(source_packet, Mapping)
+                else None
+            )
+            source_chunk = (
+                source_packet.get("evidence_chunk")
+                if isinstance(source_packet, Mapping)
+                else None
+            )
+            if (
+                not isinstance(ledger_entry, Mapping)
+                or ledger_entry.get("case_id") != packet.get("case_id")
+                or not isinstance(candidate, Mapping)
+                or candidate.get("query") != packet.get("prompt")
+                or not isinstance(source_binding, Mapping)
+                or packet.get("page_bindings") != [source_binding]
+                or not isinstance(source_chunk, Mapping)
+                or packet.get("evidence_chunks") != [source_chunk]
+                or packet.get("reference_evidence_sha256")
+                != source_packet.get("reference_evidence_sha256")
+            ):
+                return {"passed": False, "reason": "machine_benchmark_source_join_invalid"}
+        if predecessor_check.get("payload", {}).get("source_kind") == (
+            "machine_search_label_consensus"
+        ):
+            previous_sources = {
+                str(packet.get("source_entry_sha256") or "")
+                for packet in predecessor_entries or []
+            }
+            current_sources = {
+                str(packet.get("source_entry_sha256") or "")
+                for packet in by_id.values()
+            }
+            retired_sources = {
+                _canonical_sha(
+                    {
+                        "candidate_preregistration_sha256": retirement.get(
+                            "superseded_candidate_preregistration_sha256"
+                        ),
+                        "source_packet_sha256": retirement.get(
+                            "superseded_source_packet_sha256"
+                        ),
+                        "consensus_receipt_sha256": retirement.get(
+                            "superseded_consensus_receipt_sha256"
+                        ),
+                    }
+                )
+                for retirement in source_ledger_check.get("payload", {}).get(
+                    "retirements", []
+                )
+                if isinstance(retirement, Mapping)
+            }
+            if not (previous_sources - current_sources).issubset(retired_sources):
+                return {"passed": False, "reason": "machine_benchmark_source_shrank"}
+    try:
+        expected_assignments, expected_epoch, expected_cluster_counts = (
+            _benchmark_component_assignments(
+                list(by_id.values()),
+                source_authority_sha256=str(payload["source_authority_sha256"]),
+                predecessor_entries=predecessor_entries,
+                predecessor_epoch_id=predecessor_epoch_id,
+            )
+        )
+    except (TypeError, ValueError):
+        return {"passed": False, "reason": "independent_benchmark_components_invalid"}
+    if (
+        split_epoch_id != expected_epoch
+        or any(
+            (packet.get("component_sha256"), packet.get("split"))
+            != expected_assignments[case_id]
+            for case_id, packet in by_id.items()
+        )
+    ):
+        return {"passed": False, "reason": "independent_benchmark_component_drift"}
+    cluster_sets = {
+        split: {
+            str(packet["component_sha256"])
+            for packet in by_id.values()
+            if packet.get("split") == split
+        }
+        for split in ("train", "holdout", "locked-test")
+    }
+    if any(
+        cluster_sets[left] & cluster_sets[right]
+        for left, right in (
+            ("train", "holdout"),
+            ("train", "locked-test"),
+            ("holdout", "locked-test"),
+        )
+    ):
+        return {"passed": False, "reason": "independent_benchmark_split_leakage"}
+    cluster_counts = {key: len(value) for key, value in cluster_sets.items()}
+    if cluster_counts != expected_cluster_counts:
+        return {"passed": False, "reason": "independent_benchmark_component_drift"}
+    gates = {
+        "train_cluster_floor": (
+            cluster_counts["train"] >= ANSWER_BENCHMARK_MIN_TRAIN_CLUSTERS
+        ),
+        "locked_cluster_floor": (
+            cluster_counts["locked-test"]
+            >= ANSWER_BENCHMARK_MIN_LOCKED_CLUSTERS
+        ),
+    }
+    if (
+        payload.get("cluster_counts") != cluster_counts
+        or payload.get("promotion_gates") != gates
+        or payload.get("promotion_status")
+        != ("promotion_ready" if all(gates.values()) else "waiting_for_machine_expansion")
+    ):
+        return {"passed": False, "reason": "independent_benchmark_gate_invalid"}
+    return {
+        "passed": True,
+        "reason": "verified_independent_benchmark",
+        "payload": payload,
+        "entries": by_id,
+        "manifest_sha256": str(payload["seal_sha256"]),
+        "split_epoch_id": str(split_epoch_id),
+        "cluster_counts": cluster_counts,
+        "promotion_ready": all(gates.values()),
+        "manifest_path": str(value) if isinstance(value, Path) else "",
+    }
+
+
+def _create_once_sealed(path: Path, payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Create one immutable sealed artifact, or return the identical object."""
+
+    proposed = seal_object(payload)
+    with sidecar_exclusive_lock(path):
+        if path.exists():
+            existing = read_sealed_json(path)
+            if existing != proposed:
+                raise DurableStateError("immutable artifact conflict")
+            return existing
+        return write_sealed_json(path, payload, backup=False)
+
+
+def _publish_versioned_benchmark(
+    pointer_path: Path,
+    payload: Mapping[str, Any],
+    *,
+    chronovisor_root: Path = CHRONOVISOR_ROOT,
+) -> dict[str, Any]:
+    """Publish an immutable epoch, then atomically advance its active pointer."""
+
+    epoch_sha = str(payload.get("split_epoch_id") or "")
+    if not _valid_sha(epoch_sha):
+        raise DurableStateError("benchmark epoch identity is invalid")
+    epoch_path = pointer_path.parent / "benchmarks" / f"{epoch_sha}.json"
+    sealed = _create_once_sealed(epoch_path, payload)
+    pointer = {
+        "schema_version": 1,
+        "artifact_kind": "independent-answer-benchmark-active-pointer",
+        "epoch_sha256": epoch_sha,
+        "manifest_sha256": str(sealed["seal_sha256"]),
+        "manifest_path": str(epoch_path),
+        "updated_at": _now_utc(),
+    }
+    with sidecar_exclusive_lock(pointer_path):
+        if pointer_path.exists():
+            current = read_sealed_json(pointer_path)
+            if (
+                current.get("epoch_sha256") == epoch_sha
+                and current.get("manifest_sha256") == sealed["seal_sha256"]
+            ):
+                return sealed
+        write_sealed_json(pointer_path, pointer, backup=True)
+    check = validate_independent_answer_benchmark(
+        pointer_path, chronovisor_root=chronovisor_root
+    )
+    if check.get("passed") is not True:
+        raise DurableStateError("benchmark active pointer read-back failed")
+    return sealed
+
+
+def build_independent_answer_benchmark(
+    *,
+    golden_file: Path = SEARCH_GOLDEN_FILE,
+    manual94_manifest: Path = SEARCH_MANUAL94_MANIFEST,
+    output_file: Path = INDEPENDENT_ANSWER_BENCHMARK,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Freeze reviewed search truth before any Recall answer evaluation.
+
+    Legacy manual94 human review remains readable, while new machine-reviewed
+    rows must first enter the independently sealed search authority surface.
+    No captured Recall context, generated answer, or field outcome is read.
+    """
+
+    if output_file.exists():
+        check = validate_independent_answer_benchmark(output_file)
+        return {
+            "status": "complete" if check.get("passed") else "held",
+            "reason": (
+                "promotion_ready"
+                if check.get("promotion_ready")
+                else "waiting_for_machine_expansion"
+                if check.get("passed")
+                else str(check.get("reason") or "independent_benchmark_invalid")
+            ),
+            "artifact": str(output_file),
+            "entries": len(check.get("entries", {})),
+            "manifest_sha256": str(check.get("manifest_sha256") or ""),
+        }
+    try:
+        manual = json.loads(manual94_manifest.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return {"status": "waiting", "reason": "manual94_manifest_missing"}
+    frozen_at = _now_utc()
+    manual_unsigned = {
+        key: value for key, value in manual.items() if key != "manifest_sha256"
+    } if isinstance(manual, Mapping) else {}
+    manual_entries = manual.get("entries") if isinstance(manual, Mapping) else None
+    if (
+        not isinstance(manual_entries, list)
+        or len(manual_entries) != 94
+        or manual.get("examples") != 94
+        or manual.get("manifest_sha256") != _canonical_sha(manual_unsigned)
+        or len({str(row.get("entry_sha256") or "") for row in manual_entries if isinstance(row, Mapping)}) != 94
+    ):
+        return {"status": "held", "reason": "manual94_authority_invalid"}
+    from chronovisor.search.search_eval import _sealed_manifest_entry, load_examples
+
+    golden_by_entry: dict[str, list[Any]] = {}
+    for example in load_examples(golden_file, reviewed_only=True):
+        sealed_entry = _sealed_manifest_entry(example)
+        golden_by_entry.setdefault(str(sealed_entry["entry_sha256"]), []).append(
+            example
+        )
+    source_authority_sha = _canonical_sha(manual)
+    from chronovisor.recall.recall_runtime import page_uid_for_id
+
+    packets: list[dict[str, Any]] = []
+    for raw_entry in sorted(
+        (dict(row) for row in manual_entries if isinstance(row, Mapping)),
+        key=lambda row: str(row.get("entry_sha256") or ""),
+    ):
+        entry_sha = str(raw_entry.get("entry_sha256") or "")
+        entry_unsigned = {key: value for key, value in raw_entry.items() if key != "entry_sha256"}
+        joined = golden_by_entry.get(entry_sha, [])
+        example = joined[0] if len(joined) == 1 else None
+        if (
+            not _valid_sha(entry_sha)
+            or entry_sha != _canonical_sha(entry_unsigned)
+            or raw_entry.get("reviewed") is not True
+            or example is None
+            or _sealed_manifest_entry(example) != raw_entry
+        ):
+            return {"status": "held", "reason": "manual94_search_join_invalid"}
+        expected_pages = [
+            str(page_id)
+            for page_id in raw_entry.get("expected_pages", [])
+            if isinstance(page_id, str) and page_id
+        ]
+        if not expected_pages:
+            continue
+        evidence_chunks: list[dict[str, Any]] = []
+        bindings: list[dict[str, str]] = []
+        for page_id in expected_pages:
+            path = find_page(page_id)
+            try:
+                content = path.read_text(encoding="utf-8") if path else ""
+            except (OSError, UnicodeError):
+                content = ""
+            if not content:
+                return {"status": "waiting", "reason": "benchmark_page_unavailable"}
+            content_sha = _sha_text(content)
+            page_uid = page_uid_for_id(page_id)
+            if not page_uid:
+                return {"status": "waiting", "reason": "benchmark_page_uid_missing"}
+            bindings.append(
+                {
+                    "page_id": page_id,
+                    "page_uid": page_uid,
+                    "content_sha256": content_sha,
+                    "content_byte_length": len(content.encode("utf-8")),
+                }
+            )
+            content_bytes = content.encode("utf-8")
+            excerpt = content_bytes[:12_000].decode("utf-8", errors="ignore")
+            excerpt_bytes = excerpt.encode("utf-8")
+            evidence_chunks.append(
+                {
+                    "page_id": page_id,
+                    "content_sha256": content_sha,
+                    "byte_start": 0,
+                    "byte_end": len(excerpt_bytes),
+                    "excerpt": excerpt,
+                    "excerpt_sha256": _sha_text(excerpt),
+                    "truncated": len(excerpt_bytes) < len(content_bytes),
+                }
+            )
+        prompt = str(example.query)
+        while len(
+            "\n\n".join(
+                f"[PAGE {chunk['page_id']}]\n{chunk['excerpt']}"
+                for chunk in evidence_chunks
+            ).encode("utf-8")
+        ) > 32_000:
+            evidence_chunks.pop()
+        if not evidence_chunks:
+            return {"status": "held", "reason": "benchmark_projection_empty"}
+        reference_evidence = "\n\n".join(
+            f"[PAGE {chunk['page_id']}]\n{chunk['excerpt']}"
+            for chunk in evidence_chunks
+        )
+        retained_page_ids = {str(chunk["page_id"]) for chunk in evidence_chunks}
+        bindings = [
+            binding for binding in bindings if binding["page_id"] in retained_page_ids
+        ]
+        packet = {
+            "schema_version": 1,
+            "source_kind": "manual94_candidate_seed",
+            "case_id": "search-" + entry_sha[:32],
+            "prompt": prompt,
+            "prompt_content_sha256": _sha_text(prompt),
+            "evidence_chunks": evidence_chunks,
+            "reference_evidence_sha256": _sha_text(reference_evidence),
+            "page_bindings": bindings,
+            "source_authority_sha256": source_authority_sha,
+            "source_entry_sha256": entry_sha,
+            "split": "",
+            "split_epoch_id": "",
+            "component_sha256": "",
+            "source_frozen_at": frozen_at,
+            "projection_policy_sha256": (
+                BOUNDED_EVIDENCE_PROJECTION_POLICY_SHA256
+            ),
+        }
+        packets.append(packet)
+    if not packets:
+        return {"status": "held", "reason": "independent_benchmark_empty"}
+
+    assignments, split_epoch_id, cluster_counts = _benchmark_component_assignments(
+        packets, source_authority_sha256=source_authority_sha
+    )
+    for packet in packets:
+        packet["component_sha256"], packet["split"] = assignments[
+            str(packet["case_id"])
+        ]
+        packet["split_epoch_id"] = split_epoch_id
+        if _independent_gold_source_packet_error(packet):
+            return {"status": "held", "reason": "independent_benchmark_entry_invalid"}
+    payload = {
+        "schema_version": 1,
+        "artifact_kind": "independent-answer-benchmark-manifest",
+        "source_kind": "manual94_candidate_seed",
+        "frozen_at": frozen_at,
+        "source_authority_sha256": source_authority_sha,
+        "split_epoch_id": split_epoch_id,
+        "cluster_counts": cluster_counts,
+        "entries": packets,
+    }
+    payload["promotion_gates"] = {
+        "train_cluster_floor": (
+            payload["cluster_counts"]["train"]
+            >= ANSWER_BENCHMARK_MIN_TRAIN_CLUSTERS
+        ),
+        "locked_cluster_floor": (
+            payload["cluster_counts"]["locked-test"]
+            >= ANSWER_BENCHMARK_MIN_LOCKED_CLUSTERS
+        ),
+    }
+    payload["promotion_status"] = (
+        "promotion_ready"
+        if all(payload["promotion_gates"].values())
+        else "waiting_for_machine_expansion"
+    )
+    if dry_run:
+        return {"status": "waiting", "reason": "dry_run", "entries": len(packets)}
+    try:
+        sealed = _publish_versioned_benchmark(output_file, payload)
+    except (DurableStateError, OSError, ValueError):
+        return {"status": "held", "reason": "independent_benchmark_conflict"}
+    return {
+        "status": "complete",
+        "reason": payload["promotion_status"],
+        "artifact": str(output_file),
+        "entries": len(packets),
+        "manifest_sha256": str(sealed["seal_sha256"]),
+    }
+
+
+def build_machine_answer_benchmark_epoch(
+    *,
+    output_file: Path = INDEPENDENT_ANSWER_BENCHMARK,
+    source_ledger_dir: Path = ANSWER_BENCHMARK_SOURCE_LEDGER_DIR,
+    consensus_ledger_file: Path = ANSWER_CONSENSUS_LEDGER,
+    chronovisor_root: Path = CHRONOVISOR_ROOT,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Freeze exact locally-adjudicated RQ packets into one successor epoch."""
+
+    chain = list_machine_consensus_receipts(ledger_file=consensus_ledger_file)
+    if chain.get("passed") is not True:
+        return {"status": "held", "reason": str(chain.get("reason") or "ledger_invalid")}
+    receipts = chain.get("receipts")
+    if not isinstance(receipts, list):
+        return {"status": "held", "reason": "machine_consensus_ledger_invalid"}
+    try:
+        entries, retirements = _machine_source_entries_from_receipts(
+            [receipt for receipt in receipts if isinstance(receipt, Mapping)],
+            consensus_ledger_file=consensus_ledger_file,
+            chronovisor_root=chronovisor_root,
+        )
+    except (OSError, TypeError, ValueError) as exc:
+        return {
+            "status": "held",
+            "reason": f"machine_source_receipt_invalid:{type(exc).__name__}",
+        }
+    if len(entries) != len(
+        {str(entry["source_entry_sha256"]) for entry in entries}
+    ):
+        return {"status": "held", "reason": "machine_source_entry_duplicate"}
+    if not entries:
+        return {"status": "waiting", "reason": "machine_search_labels_pending"}
+    frozen_at = _now_utc()
+    consensus_head = (
+        str(receipts[-1].get("receipt_sha256") or "") if receipts else "0" * 64
+    )
+    ledger_payload = {
+        "schema_version": 2,
+        "artifact_kind": "machine-search-label-answer-source-ledger",
+        "frozen_at": frozen_at,
+        "entries": entries,
+        "entries_sha256": _canonical_sha(entries),
+        "retirements": retirements,
+        "retirements_sha256": _canonical_sha(retirements),
+        "consensus_ledger_path": str(consensus_ledger_file),
+        "consensus_ledger_head_sha256": consensus_head,
+    }
+    sealed_ledger = seal_object(ledger_payload)
+    ledger_sha = str(sealed_ledger["seal_sha256"])
+    ledger_path = source_ledger_dir / f"{ledger_sha}.json"
+    ledger_check = validate_machine_answer_source_ledger(
+        sealed_ledger,
+        consensus_ledger_file=consensus_ledger_file,
+        chronovisor_root=chronovisor_root,
+    )
+    if ledger_check.get("passed") is not True:
+        return {"status": "held", "reason": str(ledger_check.get("reason"))}
+    predecessor_check: dict[str, Any] = {}
+    predecessor_entries: list[Mapping[str, Any]] = []
+    predecessor: dict[str, Any] | None = None
+    if output_file.exists():
+        predecessor_check = validate_independent_answer_benchmark(
+            output_file, chronovisor_root=chronovisor_root
+        )
+        if predecessor_check.get("passed") is not True:
+            return {
+                "status": "held",
+                "reason": str(
+                    predecessor_check.get("reason") or "benchmark_predecessor_invalid"
+                ),
+            }
+        predecessor_entries = list(predecessor_check.get("entries", {}).values())
+        predecessor_path = str(predecessor_check.get("manifest_path") or "")
+        if not predecessor_path:
+            return {"status": "held", "reason": "benchmark_predecessor_path_missing"}
+        predecessor = {
+            "split_epoch_id": str(predecessor_check["split_epoch_id"]),
+            "manifest_sha256": str(predecessor_check["manifest_sha256"]),
+            "manifest_path": predecessor_path,
+        }
+        current_payload = predecessor_check.get("payload", {})
+        if (
+            isinstance(current_payload, Mapping)
+            and current_payload.get("source_kind")
+            == "machine_search_label_consensus"
+            and current_payload.get("source_authority_sha256") == ledger_sha
+        ):
+            return {
+                "status": "complete",
+                "reason": str(current_payload.get("promotion_status") or "verified"),
+                "artifact": str(output_file),
+                "entries": len(predecessor_entries),
+                "manifest_sha256": str(predecessor_check["manifest_sha256"]),
+            }
+    packets: list[dict[str, Any]] = []
+    try:
+        for entry in entries:
+            packets.append(
+                _packet_from_machine_source_entry(
+                    entry,
+                    source_authority_sha256=ledger_sha,
+                    frozen_at=frozen_at,
+                )
+            )
+        assignments, split_epoch_id, cluster_counts = (
+            _benchmark_component_assignments(
+                packets,
+                source_authority_sha256=ledger_sha,
+                predecessor_entries=predecessor_entries,
+                predecessor_epoch_id=(
+                    str(predecessor["split_epoch_id"]) if predecessor else ""
+                ),
+            )
+        )
+    except (OSError, TypeError, ValueError):
+        return {"status": "held", "reason": "machine_benchmark_projection_invalid"}
+    for packet in packets:
+        packet["component_sha256"], packet["split"] = assignments[
+            str(packet["case_id"])
+        ]
+        packet["split_epoch_id"] = split_epoch_id
+        if _independent_gold_source_packet_error(packet):
+            return {"status": "held", "reason": "machine_benchmark_packet_invalid"}
+    payload: dict[str, Any] = {
+        "schema_version": 2,
+        "artifact_kind": "independent-answer-benchmark-manifest",
+        "source_kind": "machine_search_label_consensus",
+        "frozen_at": frozen_at,
+        "source_authority_sha256": ledger_sha,
+        "source_ledger_sha256": ledger_sha,
+        "source_ledger_path": str(ledger_path),
+        "predecessor": predecessor,
+        "split_epoch_id": split_epoch_id,
+        "cluster_counts": cluster_counts,
+        "entries": packets,
+    }
+    payload["promotion_gates"] = {
+        "train_cluster_floor": (
+            cluster_counts["train"] >= ANSWER_BENCHMARK_MIN_TRAIN_CLUSTERS
+        ),
+        "locked_cluster_floor": (
+            cluster_counts["locked-test"]
+            >= ANSWER_BENCHMARK_MIN_LOCKED_CLUSTERS
+        ),
+    }
+    payload["promotion_status"] = (
+        "promotion_ready"
+        if all(payload["promotion_gates"].values())
+        else "waiting_for_machine_expansion"
+    )
+    if dry_run:
+        return {
+            "status": "waiting",
+            "reason": "dry_run",
+            "entries": len(entries),
+            "cluster_counts": cluster_counts,
+        }
+    try:
+        _create_once_sealed(ledger_path, ledger_payload)
+        sealed = _publish_versioned_benchmark(
+            output_file, payload, chronovisor_root=chronovisor_root
+        )
+    except (DurableStateError, OSError, ValueError):
+        return {"status": "held", "reason": "machine_benchmark_publish_conflict"}
+    return {
+        "status": "complete",
+        "reason": str(payload["promotion_status"]),
+        "artifact": str(output_file),
+        "entries": len(packets),
+        "manifest_sha256": str(sealed["seal_sha256"]),
+    }
+
+
+def build_machine_gold_cycle(
+    *,
+    split: str,
+    benchmark_manifest: Path | Mapping[str, Any] = INDEPENDENT_ANSWER_BENCHMARK,
+    candidate_file: Path | None = None,
+    output_file: Path | None = None,
+    consensus_ledger_file: Path = ANSWER_CONSENSUS_LEDGER,
+    chronovisor_root: Path = CHRONOVISOR_ROOT,
+    router_factory: Callable[[str], Any] | None = None,
+    max_items: int = 1,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Incrementally create source-backed gold without any answer/outcome input."""
+
+    if split not in {"train", "holdout", "locked-test"}:
+        return {"status": "held", "reason": "machine_gold_split_invalid"}
+    if not isinstance(benchmark_manifest, Path):
+        return {"status": "held", "reason": "machine_gold_pinned_benchmark_required"}
+    benchmark_check = validate_independent_answer_benchmark(
+        benchmark_manifest, chronovisor_root=chronovisor_root
+    )
+    if benchmark_check.get("passed") is not True:
+        return {
+            "status": "waiting",
+            "reason": str(
+                benchmark_check.get("reason") or "independent_benchmark_missing"
+            ),
+        }
+    benchmark = benchmark_check["payload"]
+    if benchmark.get("source_kind") != "machine_search_label_consensus":
+        return {"status": "waiting", "reason": "machine_benchmark_authority_required"}
+    if benchmark_check.get("promotion_ready") is not True:
+        return {"status": "waiting", "reason": "waiting_for_machine_expansion"}
+    split_epoch_id = str(benchmark_check["split_epoch_id"])
+    source_frozen_at = _strict_utc(benchmark.get("frozen_at"))
+    selected = [
+        dict(entry)
+        for entry in benchmark_check.get("entries", {}).values()
+        if entry.get("split") == split
+    ]
+    selected.sort(key=lambda entry: str(entry.get("case_id") or ""))
+    if not selected:
+        return {"status": "waiting", "reason": "machine_gold_split_empty"}
+    runtime_root = chronovisor_root / "runtime" / "recall-answer-eval"
+    pointer_path = output_file or runtime_root / f"{split}-gold-manifest.json"
+    candidates_path = candidate_file or (
+        runtime_root / "gold-candidates" / split / f"{split_epoch_id}.jsonl"
+    )
+    artifact_path = runtime_root / "gold" / split / f"{split_epoch_id}.json"
+    rubric_sha = _canonical_sha(
+        {
+            "version": 1,
+            "dimensions": list(ANSWER_DIMENSIONS),
+            "reference": "deterministic_source_evidence_projection",
+        }
+    )
+    gold_family_id = "machine-gold-" + split_epoch_id[:24]
+    if pointer_path.exists():
+        existing_artifact = validate_gold_manifest(
+            pointer_path,
+            required_episode_ids=[str(entry["case_id"]) for entry in selected],
+            consensus_ledger_file=consensus_ledger_file,
+            chronovisor_root=chronovisor_root,
+            expected_split=split,
+            split_epoch_id=split_epoch_id,
+            benchmark_manifest=benchmark_manifest,
+        )
+        if existing_artifact.get("passed") is True:
+            return {
+                "status": "complete",
+                "reason": "verified_machine_consensus",
+                "artifact": str(existing_artifact.get("manifest_path") or artifact_path),
+                "pointer": str(pointer_path),
+                "entries": len(selected),
+                "manifest_sha256": str(existing_artifact.get("manifest_sha256") or ""),
+            }
+    existing: dict[str, dict[str, Any]] = {}
+    selected_ids = {str(entry["case_id"]) for entry in selected}
+    for row in _read_jsonl(candidates_path):
+        entry = row.get("entry")
+        if not isinstance(entry, Mapping) or row.get("entry_sha256") != _canonical_sha(
+            dict(entry)
+        ):
+            continue
+        candidate = dict(entry)
+        episode_id = str(candidate.get("episode_id") or "")
+        if episode_id not in selected_ids:
+            continue
+        subject = _gold_machine_subject(
+            candidate,
+            rubric_sha256=rubric_sha,
+            gold_family_id=gold_family_id,
+            expected_split=split,
+            split_epoch_id=split_epoch_id,
+        )
+        prompt = build_recall_answer_adjudication_prompt(
+            {"subject": subject, "subject_sha256": _sealed_canonical_sha(subject)}
+        )
+        provenance = candidate.get("review_provenance")
+        receipt_sha = (
+            provenance.get("consensus_receipt_sha256")
+            if isinstance(provenance, Mapping)
+            else None
+        )
+        candidate_check = validate_machine_consensus_receipt(
+            receipt_sha,
+            expected_kind="gold_entry_review",
+            expected_subject=subject,
+            expected_producer_policy_sha256=(
+                DETERMINISTIC_GOLD_PROJECTION_POLICY_SHA256
+            ),
+            prompt=prompt,
+            schema=RECALL_ANSWER_ADJUDICATION_SCHEMA,
+            system=None,
+            lane=ANSWER_ADJUDICATION_LANE,
+            ledger_file=consensus_ledger_file,
+            chronovisor_root=chronovisor_root,
+        )
+        if candidate_check.get("passed") is True:
+            existing[episode_id] = candidate
+    accepted = 0
+    waiting_reason = ""
+    for split_entry in selected:
+        episode_id = str(split_entry.get("case_id") or "")
+        if episode_id in existing or accepted >= max(0, max_items):
+            continue
+        source_packet = dict(split_entry)
+        source_error = _independent_gold_source_packet_error(source_packet)
+        if source_error:
+            return {"status": "held", "reason": source_error}
+        reference_answer = _packet_reference_evidence(source_packet)
+        evidence: dict[str, Any] = {
+            "source_packet": source_packet,
+            "source_packet_sha256": _sealed_canonical_sha(source_packet),
+            "source_frozen_at": source_frozen_at,
+            "reference_policy_sha256": DETERMINISTIC_GOLD_PROJECTION_POLICY_SHA256,
+        }
+        evidence_sha = _canonical_sha(
+            {
+                "episode_id": episode_id,
+                "gold_answer": reference_answer,
+                "evidence": evidence,
+                "rubric_sha256": rubric_sha,
+            }
+        )
+        entry = {
+            "episode_id": episode_id,
+            "gold_answer": reference_answer,
+            "evidence": evidence,
+            "evidence_sha256": evidence_sha,
+        }
+        subject = _gold_machine_subject(
+            entry,
+            rubric_sha256=rubric_sha,
+            gold_family_id=gold_family_id,
+            expected_split=split,
+            split_epoch_id=split_epoch_id,
+        )
+        prompt = build_recall_answer_adjudication_prompt(
+            {"subject": subject, "subject_sha256": _sealed_canonical_sha(subject)}
+        )
+        if dry_run:
+            return {
+                "status": "waiting",
+                "reason": "dry_run",
+                "pending": len(selected) - len(existing),
+            }
+        adjudication = append_machine_consensus_receipt(
+            kind="gold_entry_review",
+            subject=subject,
+            producer_policy_sha256=DETERMINISTIC_GOLD_PROJECTION_POLICY_SHA256,
+            prompt=prompt,
+            schema=RECALL_ANSWER_ADJUDICATION_SCHEMA,
+            system=None,
+            lane=ANSWER_ADJUDICATION_LANE,
+            ledger_file=consensus_ledger_file,
+            chronovisor_root=chronovisor_root,
+            router_factory=router_factory,
+        )
+        if adjudication.get("status") != "accepted":
+            waiting_reason = str(adjudication.get("reason") or "machine_gold_held")
+            return {
+                "status": str(adjudication.get("status") or "held"),
+                "reason": waiting_reason,
+                "accepted": accepted,
+            }
+        receipt = adjudication["receipt"]
+        entry["review_provenance"] = {
+            "source_kind": "adjudicated_benchmark",
+            "authority_kind": "adopted_local_consensus",
+            "consensus_receipt_sha256": receipt["receipt_sha256"],
+            "subject_sha256": _sealed_canonical_sha(subject),
+            "reviewed_at": receipt["created_at"],
+        }
+        append_jsonl_durable(
+            candidates_path,
+            [{"entry": entry, "entry_sha256": _canonical_sha(entry)}],
+            sort_keys=True,
+        )
+        existing[episode_id] = entry
+        accepted += 1
+    if len(existing) < len(selected):
+        return {
+            "status": "waiting",
+            "reason": waiting_reason or "machine_gold_adjudication_pending",
+            "accepted": accepted,
+            "completed": len(existing),
+            "required": len(selected),
+        }
+    payload = {
+        "schema_version": 1,
+        "artifact_kind": "immutable-answer-gold-manifest",
+        "frozen_at": _now_utc(),
+        "gold_id": f"{gold_family_id}-{split}",
+        "gold_family_id": gold_family_id,
+        "version": "machine-consensus-v1",
+        "review_protocol_sha256": DETERMINISTIC_GOLD_PROJECTION_POLICY_SHA256,
+        "rubric_sha256": rubric_sha,
+        "split": split,
+        "split_epoch_id": split_epoch_id,
+        "benchmark_manifest_path": str(benchmark_check.get("manifest_path") or ""),
+        "benchmark_manifest_sha256": str(benchmark_check["manifest_sha256"]),
+        "entries": [existing[str(entry["case_id"])] for entry in selected],
+    }
+    sealed = seal_object(payload)
+    check = validate_gold_manifest(
+        sealed,
+        required_episode_ids=[str(entry["case_id"]) for entry in selected],
+        consensus_ledger_file=consensus_ledger_file,
+        chronovisor_root=chronovisor_root,
+        expected_split=split,
+        split_epoch_id=split_epoch_id,
+        benchmark_manifest=benchmark_manifest,
+    )
+    if check.get("passed") is not True:
+        return {
+            "status": "held",
+            "reason": str(check.get("reason") or "machine_gold_validation_failed"),
+        }
+    try:
+        sealed = _create_once_sealed(artifact_path, payload)
+        pointer = {
+            "schema_version": 1,
+            "artifact_kind": "immutable-answer-gold-active-pointer",
+            "split": split,
+            "split_epoch_id": split_epoch_id,
+            "manifest_path": str(artifact_path),
+            "manifest_sha256": str(sealed["seal_sha256"]),
+            "updated_at": _now_utc(),
+        }
+        with sidecar_exclusive_lock(pointer_path):
+            write_sealed_json(pointer_path, pointer, backup=True)
+        pointer_check = validate_gold_manifest(
+            pointer_path,
+            required_episode_ids=[str(entry["case_id"]) for entry in selected],
+            consensus_ledger_file=consensus_ledger_file,
+            chronovisor_root=chronovisor_root,
+            expected_split=split,
+            split_epoch_id=split_epoch_id,
+            benchmark_manifest=benchmark_manifest,
+        )
+        if pointer_check.get("passed") is not True:
+            raise DurableStateError("machine gold pointer read-back failed")
+    except (DurableStateError, OSError, ValueError):
+        return {"status": "held", "reason": "machine_gold_immutable_conflict"}
+    return {
+        "status": "complete",
+        "reason": "verified_machine_consensus",
+        "artifact": str(artifact_path),
+        "pointer": str(pointer_path),
+        "entries": len(selected),
+        "manifest_sha256": sealed["seal_sha256"],
+    }
+
+
 def validate_gold_manifest(
     value: Path | Mapping[str, Any],
     *,
     required_episode_ids: Sequence[str],
     review_ledger_file: Path = ANSWER_REVIEW_LEDGER,
+    consensus_ledger_file: Path = ANSWER_CONSENSUS_LEDGER,
+    chronovisor_root: Path = CHRONOVISOR_ROOT,
+    expected_split: str = "",
+    split_epoch_id: str = "",
+    benchmark_manifest: Path | Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     try:
         payload = (
@@ -2730,6 +5056,59 @@ def validate_gold_manifest(
         )
     except (DurableStateError, TypeError, ValueError):
         return {"passed": False, "reason": "gold_manifest_seal_invalid"}
+    if payload.get("artifact_kind") == "immutable-answer-gold-active-pointer":
+        if not isinstance(value, Path):
+            return {"passed": False, "reason": "machine_gold_pointer_invalid"}
+        pointer_split = str(payload.get("split") or "")
+        pointer_epoch = str(payload.get("split_epoch_id") or "")
+        manifest_path = Path(str(payload.get("manifest_path") or ""))
+        expected_path = (
+            chronovisor_root
+            / "runtime"
+            / "recall-answer-eval"
+            / "gold"
+            / pointer_split
+            / f"{pointer_epoch}.json"
+        )
+        if (
+            set(payload)
+            != {
+                "schema_version",
+                "artifact_kind",
+                "split",
+                "split_epoch_id",
+                "manifest_path",
+                "manifest_sha256",
+                "updated_at",
+                "seal_sha256",
+            }
+            or payload.get("schema_version") != 1
+            or pointer_split not in {"train", "holdout", "locked-test"}
+            or not _valid_sha(pointer_epoch)
+            or not _valid_sha(payload.get("manifest_sha256"))
+            or manifest_path.expanduser().resolve(strict=False)
+            != expected_path.expanduser().resolve(strict=False)
+            or not _strict_utc(payload.get("updated_at"))
+            or (expected_split and pointer_split != expected_split)
+            or (split_epoch_id and pointer_epoch != split_epoch_id)
+        ):
+            return {"passed": False, "reason": "machine_gold_pointer_invalid"}
+        nested = validate_gold_manifest(
+            manifest_path,
+            required_episode_ids=required_episode_ids,
+            review_ledger_file=review_ledger_file,
+            consensus_ledger_file=consensus_ledger_file,
+            chronovisor_root=chronovisor_root,
+            expected_split=expected_split or pointer_split,
+            split_epoch_id=split_epoch_id or pointer_epoch,
+            benchmark_manifest=benchmark_manifest,
+        )
+        if (
+            nested.get("passed") is not True
+            or nested.get("manifest_sha256") != payload.get("manifest_sha256")
+        ):
+            return {"passed": False, "reason": "machine_gold_pointer_drift"}
+        return nested
     entries = payload.get("entries")
     rubric_sha = payload.get("rubric_sha256")
     if (
@@ -2747,6 +5126,59 @@ def validate_gold_manifest(
         or not isinstance(entries, list)
     ):
         return {"passed": False, "reason": "gold_manifest_shape_invalid"}
+    if payload.get("version") == "machine-consensus-v1" and set(payload) != {
+        "schema_version",
+        "artifact_kind",
+        "frozen_at",
+        "gold_id",
+        "gold_family_id",
+        "version",
+        "review_protocol_sha256",
+        "rubric_sha256",
+        "split",
+        "split_epoch_id",
+        "benchmark_manifest_path",
+        "benchmark_manifest_sha256",
+        "entries",
+        "seal_sha256",
+    }:
+        return {"passed": False, "reason": "machine_gold_shape_invalid"}
+    if (
+        payload.get("version") == "machine-consensus-v1"
+        and payload.get("review_protocol_sha256")
+        != DETERMINISTIC_GOLD_PROJECTION_POLICY_SHA256
+    ):
+        return {"passed": False, "reason": "machine_gold_protocol_invalid"}
+    benchmark_entries: Mapping[str, Mapping[str, Any]] = {}
+    if payload.get("version") == "machine-consensus-v1":
+        pinned_benchmark_path = Path(
+            str(payload.get("benchmark_manifest_path") or "")
+        )
+        expected_benchmark_path = (
+            chronovisor_root
+            / "runtime"
+            / "recall-answer-eval"
+            / "benchmarks"
+            / f"{split_epoch_id}.json"
+        )
+        if (
+            pinned_benchmark_path.expanduser().resolve(strict=False)
+            != expected_benchmark_path.expanduser().resolve(strict=False)
+        ):
+            return {"passed": False, "reason": "machine_gold_benchmark_invalid"}
+        benchmark_check = validate_independent_answer_benchmark(
+            pinned_benchmark_path, chronovisor_root=chronovisor_root
+        )
+        if (
+            benchmark_check.get("passed") is not True
+            or benchmark_check.get("split_epoch_id") != split_epoch_id
+            or benchmark_check.get("manifest_sha256")
+            != payload.get("benchmark_manifest_sha256")
+            or payload.get("split") != expected_split
+            or payload.get("split_epoch_id") != split_epoch_id
+        ):
+            return {"passed": False, "reason": "machine_gold_benchmark_invalid"}
+        benchmark_entries = benchmark_check.get("entries", {})
     by_id: dict[str, dict[str, Any]] = {}
     seen_review_receipts: set[str] = set()
     frozen_at = _strict_utc(payload.get("frozen_at"))
@@ -2761,6 +5193,35 @@ def validate_gold_manifest(
         evidence_sha = entry.get("evidence_sha256")
         review_value = entry.get("review_provenance")
         review = review_value if isinstance(review_value, Mapping) else {}
+        if payload.get("version") == "machine-consensus-v1" and (
+            set(entry)
+            != {
+                "episode_id",
+                "gold_answer",
+                "evidence",
+                "evidence_sha256",
+                "review_provenance",
+            }
+            or not isinstance(evidence, Mapping)
+            or set(evidence)
+            != {
+                "source_packet",
+                "source_packet_sha256",
+                "source_frozen_at",
+                "reference_policy_sha256",
+            }
+            or set(review)
+            != {
+                "source_kind",
+                "authority_kind",
+                "consensus_receipt_sha256",
+                "subject_sha256",
+                "reviewed_at",
+            }
+            or review.get("source_kind") != "adjudicated_benchmark"
+            or review.get("authority_kind") != "adopted_local_consensus"
+        ):
+            return {"passed": False, "reason": "machine_gold_entry_shape_invalid"}
         expected_evidence_sha = _canonical_sha(
             {
                 "episode_id": episode_id,
@@ -2770,22 +5231,139 @@ def validate_gold_manifest(
             }
         )
         receipt_sha = str(review.get("reviewer_receipt_sha256") or "")
-        review_error = _review_receipt_error(
-            receipt_sha256=receipt_sha,
-            expected_kind="gold_entry_review",
-            expected_payload={
-                "episode_id": episode_id,
-                "gold_answer_sha256": _sha_text(gold_answer)
-                if isinstance(gold_answer, str)
-                else "",
-                "evidence_sha256": evidence_sha,
-                "rubric_sha256": rubric_sha,
-            },
-            expected_protocol_sha256=review_protocol_sha,
-            ledger_file=review_ledger_file,
-            frozen_at=frozen_at,
-            expected_reviewed_at=str(review.get("reviewed_at") or ""),
-        )
+        source_kind = str(review.get("source_kind") or "")
+        machine_subject: dict[str, Any] = {}
+        if source_kind == "adjudicated_benchmark":
+            source_packet = (
+                evidence.get("source_packet") if isinstance(evidence, Mapping) else None
+            )
+            source_packet_sha = (
+                evidence.get("source_packet_sha256")
+                if isinstance(evidence, Mapping)
+                else None
+            )
+            machine_source_error = _independent_gold_source_packet_error(
+                source_packet
+            )
+            expected_packet = benchmark_entries.get(episode_id)
+            if (
+                not machine_source_error
+                and (
+                    not isinstance(expected_packet, Mapping)
+                    or not isinstance(source_packet, Mapping)
+                    or dict(source_packet) != dict(expected_packet)
+                )
+            ):
+                machine_source_error = "machine_gold_benchmark_packet_mismatch"
+            if (
+                not machine_source_error
+                and isinstance(source_packet, Mapping)
+                and source_packet_sha != _sealed_canonical_sha(source_packet)
+            ):
+                machine_source_error = "machine_gold_source_packet_digest_invalid"
+            if (
+                not machine_source_error
+                and isinstance(source_packet, Mapping)
+                and (
+                    gold_answer != _packet_reference_evidence(source_packet)
+                    or evidence.get("source_frozen_at")
+                    != source_packet.get("source_frozen_at")
+                    or source_packet.get("split") != expected_split
+                    or source_packet.get("split_epoch_id") != split_epoch_id
+                )
+            ):
+                machine_source_error = "machine_gold_reference_evidence_mismatch"
+            machine_subject = _gold_machine_subject(
+                entry,
+                rubric_sha256=str(rubric_sha or ""),
+                gold_family_id=str(payload.get("gold_family_id") or ""),
+                expected_split=expected_split,
+                split_epoch_id=split_epoch_id,
+            )
+            machine_prompt = build_recall_answer_adjudication_prompt(
+                {
+                    "subject": machine_subject,
+                    "subject_sha256": _sealed_canonical_sha(machine_subject),
+                }
+            )
+            loaded_machine_receipt = load_machine_consensus_receipt(
+                review.get("consensus_receipt_sha256"),
+                ledger_file=consensus_ledger_file,
+            )
+            historical_authority = (
+                loaded_machine_receipt.get("receipt", {}).get("authority")
+                if loaded_machine_receipt.get("passed") is True
+                and isinstance(loaded_machine_receipt.get("receipt"), Mapping)
+                else None
+            )
+            machine_check = validate_machine_consensus_receipt(
+                review.get("consensus_receipt_sha256"),
+                expected_kind="gold_entry_review",
+                expected_subject=machine_subject,
+                expected_producer_policy_sha256=(
+                    DETERMINISTIC_GOLD_PROJECTION_POLICY_SHA256
+                ),
+                prompt=machine_prompt,
+                schema=RECALL_ANSWER_ADJUDICATION_SCHEMA,
+                system=None,
+                lane=ANSWER_ADJUDICATION_LANE,
+                ledger_file=consensus_ledger_file,
+                chronovisor_root=chronovisor_root,
+                current_authority=(
+                    historical_authority
+                    if isinstance(historical_authority, Mapping)
+                    else None
+                ),
+            )
+            machine_receipt = machine_check.get("receipt", {})
+            source_frozen_at = _strict_utc(machine_subject.get("source_frozen_at"))
+            receipt_created_at = _strict_utc(
+                machine_receipt.get("created_at")
+                if isinstance(machine_receipt, Mapping)
+                else ""
+            )
+            causal_order = bool(
+                source_frozen_at
+                and receipt_created_at
+                and frozen_at
+                and datetime.fromisoformat(source_frozen_at.replace("Z", "+00:00"))
+                < datetime.fromisoformat(receipt_created_at.replace("Z", "+00:00"))
+                <= datetime.fromisoformat(frozen_at.replace("Z", "+00:00"))
+            )
+            if machine_source_error:
+                review_error = machine_source_error
+            elif machine_check.get("passed") is not True:
+                review_error = str(
+                    machine_check.get("reason") or "machine_consensus_invalid"
+                )
+            elif not causal_order:
+                review_error = "machine_gold_causal_order_invalid"
+            elif (
+                review.get("subject_sha256")
+                != _sealed_canonical_sha(machine_subject)
+                or review.get("reviewed_at") != receipt_created_at
+            ):
+                review_error = "machine_gold_subject_binding_invalid"
+            else:
+                review_error = ""
+            receipt_sha = str(review.get("consensus_receipt_sha256") or "")
+        else:
+            review_error = _review_receipt_error(
+                receipt_sha256=receipt_sha,
+                expected_kind="gold_entry_review",
+                expected_payload={
+                    "episode_id": episode_id,
+                    "gold_answer_sha256": _sha_text(gold_answer)
+                    if isinstance(gold_answer, str)
+                    else "",
+                    "evidence_sha256": evidence_sha,
+                    "rubric_sha256": rubric_sha,
+                },
+                expected_protocol_sha256=review_protocol_sha,
+                ledger_file=review_ledger_file,
+                frozen_at=frozen_at,
+                expected_reviewed_at=str(review.get("reviewed_at") or ""),
+            )
         if (
             not episode_id
             or episode_id in by_id
@@ -2793,11 +5371,20 @@ def validate_gold_manifest(
             or not gold_answer
             or not isinstance(evidence, Mapping)
             or evidence_sha != expected_evidence_sha
-            or review.get("source_kind") not in _ALLOWED_GOLD_SOURCE_KINDS
-            or not _valid_sha(review.get("reviewer_receipt_sha256"))
+            or source_kind not in _ALLOWED_GOLD_SOURCE_KINDS
+            or not _valid_sha(receipt_sha)
             or not _strict_utc(review.get("reviewed_at"))
             or receipt_sha in seen_review_receipts
             or review_error
+            or (
+                source_kind == "adjudicated_benchmark"
+                and (
+                    not expected_split
+                    or not _valid_sha(split_epoch_id)
+                    or not _valid_sha(machine_subject.get("source_packet_sha256"))
+                    or _contains_forbidden_gold_input(evidence)
+                )
+            )
         ):
             return {"passed": False, "reason": "gold_entry_invalid"}
         seen_review_receipts.add(receipt_sha)
@@ -3178,7 +5765,9 @@ def build_scorer_calibration_artifact(
     frozen_at: str,
     review_protocol_sha256: str,
     review_ledger_file: Path = ANSWER_REVIEW_LEDGER,
+    consensus_ledger_file: Path = ANSWER_CONSENSUS_LEDGER,
     execution_ledger_file: Path = ANSWER_EXECUTION_LEDGER,
+    chronovisor_root: Path = CHRONOVISOR_ROOT,
 ) -> dict[str, Any]:
     """Seal case-level reviewed labels and scorer decisions for preregistration."""
 
@@ -3270,9 +5859,12 @@ def validate_scorer_calibration_artifact(
     *,
     scorer_identity: Mapping[str, Any],
     answer_split_manifest: Path | Mapping[str, Any] | None = None,
+    independent_benchmark_manifest: Path | Mapping[str, Any] | None = None,
     evaluated_at: str = "",
     review_ledger_file: Path = ANSWER_REVIEW_LEDGER,
+    consensus_ledger_file: Path = ANSWER_CONSENSUS_LEDGER,
     execution_ledger_file: Path = ANSWER_EXECUTION_LEDGER,
+    chronovisor_root: Path = CHRONOVISOR_ROOT,
 ) -> dict[str, Any]:
     """Recompute case-level agreement; a metrics-only envelope fails closed."""
 
@@ -3284,6 +5876,18 @@ def validate_scorer_calibration_artifact(
         )
     except (DurableStateError, TypeError, ValueError):
         return {"passed": False, "reason": "calibration_seal_invalid"}
+    if payload.get("schema_version") == MACHINE_SCORER_CALIBRATION_SCHEMA_VERSION:
+        if independent_benchmark_manifest is None:
+            return {"passed": False, "reason": "machine_calibration_benchmark_missing"}
+        return validate_machine_scorer_calibration_artifact(
+            payload,
+            scorer_identity=scorer_identity,
+            benchmark_manifest=independent_benchmark_manifest,
+            consensus_ledger_file=consensus_ledger_file,
+            execution_ledger_file=execution_ledger_file,
+            chronovisor_root=chronovisor_root,
+            evaluated_at=evaluated_at,
+        )
     identity = _calibration_scorer_identity(scorer_identity)
     identity_sha = _canonical_sha(identity)
     cases = payload.get("cases")
@@ -3390,6 +5994,882 @@ def validate_scorer_calibration_artifact(
     }
 
 
+def _machine_calibration_policy() -> dict[str, Any]:
+    return {
+        "version": MACHINE_SCORER_CALIBRATION_SCHEMA_VERSION,
+        "minimum_cases": MACHINE_SCORER_CALIBRATION_MIN_CASES,
+        "minimum_pairs": MACHINE_SCORER_CALIBRATION_MIN_PAIRS,
+        "minimum_clusters": MACHINE_SCORER_CALIBRATION_MIN_CLUSTERS,
+        "control_variants": [
+            "positive",
+            "wrong_fact",
+            "missing_citation",
+            "wrong_page",
+        ],
+        "source_split": "holdout",
+        "scorer_role": "tie_break",
+        "consensus_roles": ["primary", "challenger"],
+        "quality_policy": _scorer_calibration_policy(),
+    }
+
+
+def _machine_calibration_policy_sha256() -> str:
+    policy_sha = _canonical_sha(_machine_calibration_policy())
+    if policy_sha != SCORER_CALIBRATION_PRODUCER_POLICY_SHA256:
+        raise ValueError("machine calibration producer policy allowlist drift")
+    return policy_sha
+
+
+def _machine_calibration_answer(
+    packet: Mapping[str, Any], variant: str
+) -> tuple[str, dict[str, float]]:
+    reference = _packet_reference_evidence(packet)
+    chunks = packet.get("evidence_chunks")
+    first_page = (
+        str(chunks[0].get("page_id") or "")
+        if isinstance(chunks, list) and chunks and isinstance(chunks[0], Mapping)
+        else "source"
+    )
+    if variant == "positive":
+        return reference, {dimension: 1.0 for dimension in ANSWER_DIMENSIONS}
+    if variant == "wrong_fact":
+        return (
+            f"The frozen evidence states the opposite of its actual fact. [PAGE {first_page}]",
+            {dimension: 0.0 for dimension in ANSWER_DIMENSIONS},
+        )
+    if variant == "missing_citation":
+        text = "\n\n".join(
+            str(chunk.get("excerpt") or "")
+            for chunk in chunks or []
+            if isinstance(chunk, Mapping)
+        )
+        return text, {"correctness": 1.0, "grounding": 1.0, "citation": 0.0}
+    if variant == "wrong_page":
+        text = reference.replace(f"[PAGE {first_page}]", "[PAGE wrong-page]")
+        return text, {"correctness": 1.0, "grounding": 0.0, "citation": 0.0}
+    raise ValueError("unknown machine calibration variant")
+
+
+def _machine_calibration_controls(
+    benchmark_check: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    packets = [
+        dict(packet)
+        for packet in benchmark_check.get("entries", {}).values()
+        if packet.get("split") == "holdout"
+    ]
+    packets.sort(
+        key=lambda packet: (
+            str(packet.get("component_sha256") or ""),
+            str(packet.get("case_id") or ""),
+        )
+    )
+    by_component: dict[str, dict[str, Any]] = {}
+    for packet in packets:
+        by_component.setdefault(str(packet.get("component_sha256") or ""), packet)
+    selected = [by_component[key] for key in sorted(by_component)[:20] if key]
+    if len(selected) < MACHINE_SCORER_CALIBRATION_MIN_CLUSTERS:
+        return []
+    policy_sha = _machine_calibration_policy_sha256()
+    negatives = ("wrong_fact", "missing_citation", "wrong_page")
+    controls: list[dict[str, Any]] = []
+    for index, packet in enumerate(selected):
+        packet_sha = _sealed_canonical_sha(packet)
+        pair_id = _canonical_sha(
+            {
+                "policy_sha256": policy_sha,
+                "component_sha256": packet["component_sha256"],
+                "source_entry_sha256": packet["source_entry_sha256"],
+            }
+        )
+        for arm, variant in (("a", "positive"), ("b", negatives[index % 3])):
+            answer, expected_scores = _machine_calibration_answer(packet, variant)
+            control_id = _canonical_sha(
+                {
+                    "policy_sha256": policy_sha,
+                    "pair_id": pair_id,
+                    "pair_arm": arm,
+                    "variant": variant,
+                    "source_packet_sha256": packet_sha,
+                }
+            )
+            controls.append(
+                {
+                    "control_id": control_id,
+                    "pair_id": pair_id,
+                    "pair_arm": arm,
+                    "variant": variant,
+                    "answer": answer,
+                    "answer_sha256": _sha_text(answer),
+                    "expected_scores": expected_scores,
+                    "expected_scores_sha256": _canonical_sha(expected_scores),
+                    "query_sha256": packet["prompt_content_sha256"],
+                    "evidence_sha256": packet["reference_evidence_sha256"],
+                    "component_sha256": packet["component_sha256"],
+                    "source_packet": packet,
+                    "source_packet_sha256": packet_sha,
+                }
+            )
+    return controls
+
+
+def _machine_calibration_subject(
+    control: Mapping[str, Any], *, benchmark_manifest_sha256: str
+) -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "subject_kind": "scorer_calibration_case",
+        "control": copy.deepcopy(dict(control)),
+        "control_sha256": _canonical_sha(dict(control)),
+        "control_id": control.get("control_id"),
+        "pair_id": control.get("pair_id"),
+        "pair_arm": control.get("pair_arm"),
+        "answer_variant": control.get("variant"),
+        "answer_sha256": control.get("answer_sha256"),
+        "expected_scores_sha256": control.get("expected_scores_sha256"),
+        "source_packet_sha256": control.get("source_packet_sha256"),
+        "benchmark_manifest_sha256": benchmark_manifest_sha256,
+        "component_sha256": control.get("component_sha256"),
+        "evidence_complete": True,
+        "reference_independent": True,
+        "preregistered_before_evaluation": True,
+        "split_safe": True,
+        "producer_kind": "deterministic_evidence_projection",
+        "producer_model": None,
+        "producer_policy_sha256": _machine_calibration_policy_sha256(),
+        "production_answer_used": False,
+    }
+
+
+def _machine_calibration_case_metrics(
+    cases: Sequence[Mapping[str, Any]],
+) -> tuple[dict[str, Any], dict[str, bool]]:
+    metric_cases = [
+        {
+            "session_hash": str(case["control"]["component_sha256"])[:16],
+            "query_sha256": case["control"]["query_sha256"],
+            "evidence_sha256": case["control"]["evidence_sha256"],
+            "cluster_nodes": [
+                f"component:{case['control']['component_sha256']}"
+            ],
+            "pair_id": case["control"]["pair_id"],
+            "pair_arm": case["control"]["pair_arm"],
+            "human_reviewed": case["control"]["expected_scores"],
+            "scorer_scores": case["scorer_scores"],
+        }
+        for case in cases
+    ]
+    metrics = _calibration_metrics(metric_cases)
+    quality_gates = _calibration_gates(metrics)
+    gates = {
+        **quality_gates,
+        "machine_case_count": metrics.get("cases")
+        == MACHINE_SCORER_CALIBRATION_MIN_CASES,
+        "machine_pair_count": metrics.get("pairs")
+        == MACHINE_SCORER_CALIBRATION_MIN_PAIRS,
+        "machine_cluster_count": metrics.get("clusters")
+        == MACHINE_SCORER_CALIBRATION_MIN_CLUSTERS,
+    }
+    return metrics, gates
+
+
+_MACHINE_CALIBRATION_CASE_KEYS = {
+    "control_id",
+    "control",
+    "consensus_receipt_sha256",
+    "scoring",
+    "scorer_scores",
+    "execution_receipt_sha256",
+}
+_MACHINE_CALIBRATION_CONTROL_KEYS = {
+    "control_id",
+    "pair_id",
+    "pair_arm",
+    "variant",
+    "answer",
+    "answer_sha256",
+    "expected_scores",
+    "expected_scores_sha256",
+    "query_sha256",
+    "evidence_sha256",
+    "component_sha256",
+    "source_packet",
+    "source_packet_sha256",
+}
+
+
+def _machine_calibration_case_error(
+    case: Mapping[str, Any],
+    *,
+    control: Mapping[str, Any],
+    benchmark: Mapping[str, Any],
+    scorer_identity: Mapping[str, Any],
+    consensus_ledger_file: Path,
+    execution_ledger_file: Path,
+    chronovisor_root: Path,
+    completed_before: str = "",
+) -> str:
+    if set(case) != _MACHINE_CALIBRATION_CASE_KEYS:
+        return "machine_calibration_case_shape_invalid"
+    if set(control) != _MACHINE_CALIBRATION_CONTROL_KEYS:
+        return "machine_calibration_control_shape_invalid"
+    if case.get("control_id") != control.get("control_id") or case.get(
+        "control"
+    ) != dict(control):
+        return "machine_calibration_control_drift"
+    scorer_identity_sha = _canonical_sha(dict(scorer_identity))
+    benchmark_sha = str(benchmark.get("manifest_sha256") or "")
+    policy_sha = _machine_calibration_policy_sha256()
+    calibration_run_id = _canonical_sha(
+        {
+            "kind": "machine-scorer-calibration-v2",
+            "benchmark_manifest_sha256": benchmark_sha,
+            "scorer_identity_sha256": scorer_identity_sha,
+            "policy_sha256": policy_sha,
+        }
+    )
+    pair_protocol = _preregistered_pair_protocol(
+        seed=ANSWER_AUTHORITY_SEED,
+        episode_id=str(control["control_id"]),
+        episode_sha256=str(control["source_packet_sha256"]),
+        split_manifest_sha256=benchmark_sha,
+        gold_manifest_sha256=benchmark_sha,
+        adapter_registry_sha256=scorer_identity_sha,
+        evaluation_kind="machine-scorer-calibration-v2",
+    )
+    expected_scoring = {
+        **dict(pair_protocol["scoring"]),
+        "evidence_manifest_sha256": benchmark_sha,
+        "rubric_sha256": str(scorer_identity.get("rubric_sha256") or ""),
+    }
+    scoring = case.get("scoring")
+    scores = case.get("scorer_scores")
+    if scoring != expected_scoring:
+        return "machine_calibration_scoring_drift"
+    if (
+        not isinstance(scores, Mapping)
+        or set(scores) != set(ANSWER_DIMENSIONS)
+        or any(not _finite_unit_score(scores.get(name)) for name in ANSWER_DIMENSIONS)
+    ):
+        return "machine_calibration_scores_invalid"
+    subject = _machine_calibration_subject(
+        control, benchmark_manifest_sha256=benchmark_sha
+    )
+    prompt = build_recall_answer_adjudication_prompt(
+        {"subject": subject, "subject_sha256": _sealed_canonical_sha(subject)}
+    )
+    loaded = load_machine_consensus_receipt(
+        case.get("consensus_receipt_sha256"), ledger_file=consensus_ledger_file
+    )
+    receipt = loaded.get("receipt") if loaded.get("passed") is True else None
+    historical_authority = (
+        receipt.get("authority") if isinstance(receipt, Mapping) else None
+    )
+    receipt_check = validate_machine_consensus_receipt(
+        case.get("consensus_receipt_sha256"),
+        expected_kind="scorer_calibration_case_review",
+        expected_subject=subject,
+        expected_producer_policy_sha256=policy_sha,
+        prompt=prompt,
+        schema=RECALL_ANSWER_ADJUDICATION_SCHEMA,
+        system=None,
+        lane=ANSWER_ADJUDICATION_LANE,
+        ledger_file=consensus_ledger_file,
+        chronovisor_root=chronovisor_root,
+        current_authority=(
+            historical_authority
+            if isinstance(historical_authority, Mapping)
+            else None
+        ),
+    )
+    artifact = receipt_check.get("artifact", {})
+    votes = (
+        artifact.get("provenance", {}).get("vote_manifest", [])
+        if isinstance(artifact, Mapping)
+        else []
+    )
+    models = (
+        receipt.get("authority", {}).get("router", {}).get("models", [])
+        if isinstance(receipt, Mapping)
+        else []
+    )
+    receipt_created_at = _strict_utc(
+        receipt.get("created_at") if isinstance(receipt, Mapping) else ""
+    )
+    benchmark_frozen_at = _strict_utc(
+        benchmark.get("payload", {}).get("frozen_at")
+        if isinstance(benchmark.get("payload"), Mapping)
+        else ""
+    )
+    normalized_before = _strict_utc(completed_before) if completed_before else ""
+    causal_error = bool(
+        not receipt_created_at
+        or not benchmark_frozen_at
+        or datetime.fromisoformat(receipt_created_at.replace("Z", "+00:00"))
+        <= datetime.fromisoformat(benchmark_frozen_at.replace("Z", "+00:00"))
+        or (
+            normalized_before
+            and datetime.fromisoformat(receipt_created_at.replace("Z", "+00:00"))
+            > datetime.fromisoformat(normalized_before.replace("Z", "+00:00"))
+        )
+    )
+    if (
+        receipt_check.get("passed") is not True
+        or not isinstance(votes, list)
+        or len(votes) != 2
+        or [vote.get("role") for vote in votes if isinstance(vote, Mapping)]
+        != ["primary", "challenger"]
+        or not isinstance(models, list)
+        or len(models) != 3
+        or scorer_identity.get("model") != models[2]
+        or causal_error
+    ):
+        return "machine_calibration_consensus_invalid"
+    expected_reset = {
+        "seed": expected_scoring["seed"],
+        "base_state_sha256": expected_scoring["base_state_sha256"],
+        "reset_protocol_sha256": scorer_identity.get("policy_sha256"),
+    }
+    return _execution_receipt_error(
+        receipt_sha256=case.get("execution_receipt_sha256"),
+        expected_kind="answer_scorer_call",
+        expected_adapter_identity_sha256=scorer_identity_sha,
+        expected_parent_run_id=calibration_run_id,
+        expected_input_payload={
+            "prompt_sha256": control["query_sha256"],
+            "answer_sha256": control["answer_sha256"],
+            "gold_evidence_sha256": control["evidence_sha256"],
+            "scoring": expected_scoring,
+        },
+        expected_output_payload={
+            "dimensions": dict(scores),
+            "reset_receipt": expected_reset,
+        },
+        ledger_file=execution_ledger_file,
+        completed_before=completed_before,
+    )
+
+
+def _machine_calibration_paths(
+    *,
+    chronovisor_root: Path,
+    benchmark_epoch_sha256: str,
+    scorer_identity_sha256: str,
+) -> tuple[Path, Path]:
+    runtime_root = chronovisor_root / "runtime" / "recall-answer-eval"
+    return (
+        runtime_root
+        / "scorer-calibration-candidates"
+        / benchmark_epoch_sha256
+        / f"{scorer_identity_sha256}.jsonl",
+        runtime_root
+        / "scorer-calibration"
+        / benchmark_epoch_sha256
+        / f"{scorer_identity_sha256}.json",
+    )
+
+
+def _publish_machine_calibration_pointer(
+    *,
+    pointer_path: Path,
+    artifact_path: Path,
+    artifact: Mapping[str, Any],
+    benchmark_epoch_sha256: str,
+    scorer_identity_sha256: str,
+    scorer_identity: Mapping[str, Any],
+    consensus_ledger_file: Path,
+    execution_ledger_file: Path,
+    chronovisor_root: Path,
+) -> dict[str, Any]:
+    pointer = {
+        "schema_version": 1,
+        "artifact_kind": "machine-answer-scorer-calibration-active-pointer",
+        "benchmark_epoch_sha256": benchmark_epoch_sha256,
+        "scorer_identity_sha256": scorer_identity_sha256,
+        "manifest_path": str(artifact_path),
+        "manifest_sha256": str(artifact["seal_sha256"]),
+        "updated_at": _now_utc(),
+    }
+    with sidecar_exclusive_lock(pointer_path):
+        write_sealed_json(pointer_path, pointer, backup=True)
+    return validate_machine_scorer_calibration_artifact(
+        pointer_path,
+        scorer_identity=scorer_identity,
+        benchmark_manifest=None,
+        consensus_ledger_file=consensus_ledger_file,
+        execution_ledger_file=execution_ledger_file,
+        chronovisor_root=chronovisor_root,
+    )
+
+
+def build_machine_scorer_calibration_cycle(
+    *,
+    scorer: AnswerScorer,
+    scorer_identity: Mapping[str, Any],
+    benchmark_manifest: Path | Mapping[str, Any] = INDEPENDENT_ANSWER_BENCHMARK,
+    output_file: Path | None = None,
+    candidate_file: Path | None = None,
+    consensus_ledger_file: Path = ANSWER_CONSENSUS_LEDGER,
+    execution_ledger_file: Path = ANSWER_EXECUTION_LEDGER,
+    chronovisor_root: Path = CHRONOVISOR_ROOT,
+    router_factory: Callable[[str], Any] | None = None,
+    max_items: int = 1,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Incrementally score one immutable 40-control calibration epoch."""
+
+    from chronovisor.recall.recall_answer_adapters import (
+        builtin_ollama_answer_scorer,
+    )
+
+    if not isinstance(benchmark_manifest, Path):
+        return {"status": "held", "reason": "machine_calibration_pinned_benchmark_required"}
+    benchmark = validate_independent_answer_benchmark(
+        benchmark_manifest, chronovisor_root=chronovisor_root
+    )
+    if (
+        benchmark.get("passed") is not True
+        or benchmark.get("payload", {}).get("source_kind")
+        != "machine_search_label_consensus"
+    ):
+        return {"status": "waiting", "reason": "machine_benchmark_authority_required"}
+    controls = _machine_calibration_controls(benchmark)
+    if len(controls) != MACHINE_SCORER_CALIBRATION_MIN_CASES:
+        return {"status": "waiting", "reason": "calibration_holdout_clusters_pending"}
+    if scorer is not builtin_ollama_answer_scorer:
+        return {"status": "held", "reason": "builtin_scorer_required"}
+    identity_error = _identity_error(scorer_identity, _REQUIRED_SCORER_IDENTITY)
+    if identity_error:
+        return {"status": "held", "reason": identity_error}
+    scorer_identity_sha = _canonical_sha(dict(scorer_identity))
+    benchmark_epoch_sha = str(benchmark["split_epoch_id"])
+    canonical_candidate, artifact_path = _machine_calibration_paths(
+        chronovisor_root=chronovisor_root,
+        benchmark_epoch_sha256=benchmark_epoch_sha,
+        scorer_identity_sha256=scorer_identity_sha,
+    )
+    if candidate_file is not None and candidate_file.resolve(strict=False) != (
+        canonical_candidate.resolve(strict=False)
+    ):
+        return {"status": "held", "reason": "machine_calibration_candidate_path_invalid"}
+    candidates_path = canonical_candidate
+    pointer_path = output_file or (
+        chronovisor_root
+        / "runtime"
+        / "recall-answer-eval"
+        / "scorer-calibration-active.json"
+    )
+    if pointer_path.exists():
+        pointer_check = validate_machine_scorer_calibration_artifact(
+            pointer_path,
+            scorer_identity=scorer_identity,
+            benchmark_manifest=None,
+            consensus_ledger_file=consensus_ledger_file,
+            execution_ledger_file=execution_ledger_file,
+            chronovisor_root=chronovisor_root,
+        )
+        if pointer_check.get("passed") is not True:
+            return {"status": "held", "reason": "machine_calibration_pointer_invalid"}
+        if pointer_check.get("benchmark_epoch_sha256") == benchmark_epoch_sha:
+            return {
+                "status": "complete",
+                "reason": "verified",
+                "artifact": str(pointer_check.get("manifest_path") or artifact_path),
+                "pointer": str(pointer_path),
+                "manifest_sha256": str(pointer_check.get("manifest_sha256") or ""),
+            }
+    if artifact_path.exists():
+        artifact_check = validate_machine_scorer_calibration_artifact(
+            artifact_path,
+            scorer_identity=scorer_identity,
+            benchmark_manifest=None,
+            consensus_ledger_file=consensus_ledger_file,
+            execution_ledger_file=execution_ledger_file,
+            chronovisor_root=chronovisor_root,
+        )
+        if artifact_check.get("passed") is not True:
+            return {"status": "held", "reason": "machine_calibration_immutable_conflict"}
+        pointer_check = _publish_machine_calibration_pointer(
+            pointer_path=pointer_path,
+            artifact_path=artifact_path,
+            artifact=artifact_check["payload"],
+            benchmark_epoch_sha256=benchmark_epoch_sha,
+            scorer_identity_sha256=scorer_identity_sha,
+            scorer_identity=scorer_identity,
+            consensus_ledger_file=consensus_ledger_file,
+            execution_ledger_file=execution_ledger_file,
+            chronovisor_root=chronovisor_root,
+        )
+        if pointer_check.get("passed") is not True:
+            return {"status": "held", "reason": "machine_calibration_pointer_write_failed"}
+        return {
+            "status": "complete",
+            "reason": "verified",
+            "artifact": str(artifact_path),
+            "pointer": str(pointer_path),
+            "manifest_sha256": str(artifact_check["manifest_sha256"]),
+        }
+    control_by_id = {str(control["control_id"]): control for control in controls}
+    cases: dict[str, dict[str, Any]] = {}
+    try:
+        candidate_rows = _read_jsonl_strict(candidates_path)
+    except DurableStateError:
+        return {"status": "held", "reason": "machine_calibration_candidates_invalid"}
+    for row in candidate_rows:
+        case = row.get("case")
+        if (
+            set(row) != {"case", "case_sha256"}
+            or not isinstance(case, Mapping)
+            or row.get("case_sha256") != _canonical_sha(dict(case))
+        ):
+            return {"status": "held", "reason": "machine_calibration_candidates_invalid"}
+        control_id = str(case.get("control_id") or "")
+        control = control_by_id.get(control_id)
+        if control is None or control_id in cases:
+            return {"status": "held", "reason": "machine_calibration_candidates_invalid"}
+        case_error = _machine_calibration_case_error(
+            case,
+            control=control,
+            benchmark=benchmark,
+            scorer_identity=scorer_identity,
+            consensus_ledger_file=consensus_ledger_file,
+            execution_ledger_file=execution_ledger_file,
+            chronovisor_root=chronovisor_root,
+        )
+        if case_error:
+            return {"status": "held", "reason": case_error}
+        cases[control_id] = dict(case)
+    policy_sha = _machine_calibration_policy_sha256()
+    benchmark_sha = str(benchmark["manifest_sha256"])
+    calibration_run_id = _canonical_sha(
+        {
+            "kind": "machine-scorer-calibration-v2",
+            "benchmark_manifest_sha256": benchmark_sha,
+            "scorer_identity_sha256": scorer_identity_sha,
+            "policy_sha256": policy_sha,
+        }
+    )
+    accepted = 0
+    for control in controls:
+        control_id = str(control["control_id"])
+        if control_id in cases or accepted >= max(0, max_items):
+            continue
+        subject = _machine_calibration_subject(
+            control, benchmark_manifest_sha256=benchmark_sha
+        )
+        prompt = build_recall_answer_adjudication_prompt(
+            {"subject": subject, "subject_sha256": _sealed_canonical_sha(subject)}
+        )
+        if dry_run:
+            return {
+                "status": "waiting",
+                "reason": "dry_run",
+                "pending": len(controls) - len(cases),
+            }
+        adjudication = append_machine_consensus_receipt(
+            kind="scorer_calibration_case_review",
+            subject=subject,
+            producer_policy_sha256=policy_sha,
+            prompt=prompt,
+            schema=RECALL_ANSWER_ADJUDICATION_SCHEMA,
+            system=None,
+            lane=ANSWER_ADJUDICATION_LANE,
+            ledger_file=consensus_ledger_file,
+            chronovisor_root=chronovisor_root,
+            router_factory=router_factory,
+        )
+        if adjudication.get("status") != "accepted":
+            return {
+                "status": str(adjudication.get("status") or "held"),
+                "reason": str(adjudication.get("reason") or "control_consensus_held"),
+                "completed": len(cases),
+            }
+        receipt = adjudication["receipt"]
+        pair_protocol = _preregistered_pair_protocol(
+            seed=ANSWER_AUTHORITY_SEED,
+            episode_id=control_id,
+            episode_sha256=str(control["source_packet_sha256"]),
+            split_manifest_sha256=benchmark_sha,
+            gold_manifest_sha256=benchmark_sha,
+            adapter_registry_sha256=scorer_identity_sha,
+            evaluation_kind="machine-scorer-calibration-v2",
+        )
+        scoring = {
+            **dict(pair_protocol["scoring"]),
+            "evidence_manifest_sha256": benchmark_sha,
+            "rubric_sha256": str(scorer_identity.get("rubric_sha256") or ""),
+        }
+        gold = {
+            "evidence": {"source_packet": control["source_packet"]},
+            "evidence_sha256": control["evidence_sha256"],
+            "rubric_sha256": str(scorer_identity.get("rubric_sha256") or ""),
+        }
+        scores, score_error, execution_receipt = _score_answer(
+            scorer,
+            str(control["source_packet"]["prompt"]),
+            str(control["answer"]),
+            gold,
+            scorer_identity,
+            scoring,
+            parent_run_id=calibration_run_id,
+            execution_ledger_file=execution_ledger_file,
+        )
+        if score_error or scores is None:
+            return {"status": "waiting", "reason": score_error or "scorer_failed"}
+        case = {
+            "control_id": control_id,
+            "control": control,
+            "consensus_receipt_sha256": receipt["receipt_sha256"],
+            "scoring": scoring,
+            "scorer_scores": scores,
+            "execution_receipt_sha256": execution_receipt,
+        }
+        case_error = _machine_calibration_case_error(
+            case,
+            control=control,
+            benchmark=benchmark,
+            scorer_identity=scorer_identity,
+            consensus_ledger_file=consensus_ledger_file,
+            execution_ledger_file=execution_ledger_file,
+            chronovisor_root=chronovisor_root,
+        )
+        if case_error:
+            return {"status": "held", "reason": case_error}
+        append_jsonl_durable(
+            candidates_path,
+            [{"case": case, "case_sha256": _canonical_sha(case)}],
+            sort_keys=True,
+        )
+        cases[control_id] = case
+        accepted += 1
+    if len(cases) < len(controls):
+        return {
+            "status": "waiting",
+            "reason": "machine_calibration_pending",
+            "accepted": accepted,
+            "completed": len(cases),
+            "required": len(controls),
+        }
+    ordered = [cases[str(control["control_id"])] for control in controls]
+    metrics, gates = _machine_calibration_case_metrics(ordered)
+    if not all(gates.values()):
+        return {"status": "held", "reason": "machine_calibration_gate_failed"}
+    benchmark_payload = benchmark["payload"]
+    benchmark_path = Path(str(benchmark.get("manifest_path") or ""))
+    source_ledger_path = str(benchmark_payload.get("source_ledger_path") or "")
+    source_ledger_sha = str(benchmark_payload.get("source_ledger_sha256") or "")
+    payload = {
+        "schema_version": MACHINE_SCORER_CALIBRATION_SCHEMA_VERSION,
+        "artifact_kind": "machine-answer-scorer-calibration",
+        "status": "passed",
+        "reason": "verified",
+        "frozen_at": _now_utc(),
+        "benchmark_manifest_path": str(benchmark_path),
+        "benchmark_manifest_sha256": benchmark_sha,
+        "benchmark_epoch_sha256": benchmark_epoch_sha,
+        "benchmark_source_ledger_path": source_ledger_path,
+        "benchmark_source_ledger_sha256": source_ledger_sha,
+        "policy": _machine_calibration_policy(),
+        "policy_sha256": policy_sha,
+        "scorer_identity": dict(scorer_identity),
+        "scorer_identity_sha256": scorer_identity_sha,
+        "calibration_run_id": calibration_run_id,
+        "cases": ordered,
+        "metrics": metrics,
+        "gates": gates,
+    }
+    check = validate_machine_scorer_calibration_artifact(
+        seal_object(payload),
+        scorer_identity=scorer_identity,
+        benchmark_manifest=None,
+        consensus_ledger_file=consensus_ledger_file,
+        execution_ledger_file=execution_ledger_file,
+        chronovisor_root=chronovisor_root,
+    )
+    if check.get("passed") is not True:
+        return {"status": "held", "reason": str(check.get("reason"))}
+    try:
+        artifact = _create_once_sealed(artifact_path, payload)
+        pointer_check = _publish_machine_calibration_pointer(
+            pointer_path=pointer_path,
+            artifact_path=artifact_path,
+            artifact=artifact,
+            benchmark_epoch_sha256=benchmark_epoch_sha,
+            scorer_identity_sha256=scorer_identity_sha,
+            scorer_identity=scorer_identity,
+            consensus_ledger_file=consensus_ledger_file,
+            execution_ledger_file=execution_ledger_file,
+            chronovisor_root=chronovisor_root,
+        )
+    except (DurableStateError, OSError, ValueError):
+        return {"status": "held", "reason": "machine_calibration_immutable_conflict"}
+    if pointer_check.get("passed") is not True:
+        return {"status": "held", "reason": "machine_calibration_pointer_write_failed"}
+    return {
+        "status": "complete",
+        "reason": "verified",
+        "artifact": str(artifact_path),
+        "pointer": str(pointer_path),
+        "manifest_sha256": str(artifact["seal_sha256"]),
+    }
+
+
+def validate_machine_scorer_calibration_artifact(
+    value: Path | Mapping[str, Any],
+    *,
+    scorer_identity: Mapping[str, Any],
+    benchmark_manifest: Path | Mapping[str, Any],
+    consensus_ledger_file: Path = ANSWER_CONSENSUS_LEDGER,
+    execution_ledger_file: Path = ANSWER_EXECUTION_LEDGER,
+    chronovisor_root: Path = CHRONOVISOR_ROOT,
+    evaluated_at: str = "",
+) -> dict[str, Any]:
+    try:
+        payload = (
+            read_sealed_json(value)
+            if isinstance(value, Path)
+            else verify_sealed_object(dict(value))
+        )
+    except (DurableStateError, TypeError, ValueError):
+        return {"passed": False, "reason": "machine_calibration_seal_invalid"}
+    benchmark = validate_independent_answer_benchmark(benchmark_manifest)
+    controls = _machine_calibration_controls(benchmark)
+    cases = payload.get("cases")
+    scorer_identity_sha = _canonical_sha(dict(scorer_identity))
+    policy_sha = _machine_calibration_policy_sha256()
+    calibration_run_id = _canonical_sha(
+        {
+            "kind": "machine-scorer-calibration-v2",
+            "benchmark_manifest_sha256": str(benchmark.get("manifest_sha256") or ""),
+            "scorer_identity_sha256": scorer_identity_sha,
+            "policy_sha256": policy_sha,
+        }
+    )
+    if (
+        benchmark.get("passed") is not True
+        or benchmark.get("payload", {}).get("source_kind")
+        != "machine_search_label_consensus"
+        or len(controls) != MACHINE_SCORER_CALIBRATION_MIN_CASES
+        or payload.get("schema_version") != MACHINE_SCORER_CALIBRATION_SCHEMA_VERSION
+        or payload.get("artifact_kind") != "machine-answer-scorer-calibration"
+        or payload.get("benchmark_manifest_sha256")
+        != benchmark.get("manifest_sha256")
+        or payload.get("benchmark_epoch_sha256") != benchmark.get("split_epoch_id")
+        or payload.get("policy") != _machine_calibration_policy()
+        or payload.get("policy_sha256") != policy_sha
+        or payload.get("scorer_identity") != dict(scorer_identity)
+        or payload.get("scorer_identity_sha256") != scorer_identity_sha
+        or payload.get("calibration_run_id") != calibration_run_id
+        or not _strict_utc(payload.get("frozen_at"))
+        or not isinstance(cases, list)
+        or len(cases) != MACHINE_SCORER_CALIBRATION_MIN_CASES
+    ):
+        return {"passed": False, "reason": "machine_calibration_identity_invalid"}
+    expected_by_id = {str(control["control_id"]): control for control in controls}
+    observed: list[Mapping[str, Any]] = []
+    seen: set[str] = set()
+    for case in cases:
+        if not isinstance(case, Mapping):
+            return {"passed": False, "reason": "machine_calibration_case_invalid"}
+        control_id = str(case.get("control_id") or "")
+        control = expected_by_id.get(control_id)
+        if control is None or control_id in seen or case.get("control") != control:
+            return {"passed": False, "reason": "machine_calibration_control_drift"}
+        subject = _machine_calibration_subject(
+            control,
+            benchmark_manifest_sha256=str(benchmark["manifest_sha256"]),
+        )
+        prompt = build_recall_answer_adjudication_prompt(
+            {"subject": subject, "subject_sha256": _sealed_canonical_sha(subject)}
+        )
+        receipt_check = validate_machine_consensus_receipt(
+            case.get("consensus_receipt_sha256"),
+            expected_kind="scorer_calibration_case_review",
+            expected_subject=subject,
+            expected_producer_policy_sha256=policy_sha,
+            prompt=prompt,
+            schema=RECALL_ANSWER_ADJUDICATION_SCHEMA,
+            system=None,
+            lane=ANSWER_ADJUDICATION_LANE,
+            ledger_file=consensus_ledger_file,
+            chronovisor_root=chronovisor_root,
+        )
+        receipt = receipt_check.get("receipt", {})
+        artifact = receipt_check.get("artifact", {})
+        votes = artifact.get("provenance", {}).get("vote_manifest", []) if isinstance(artifact, Mapping) else []
+        models = receipt.get("authority", {}).get("router", {}).get("models", []) if isinstance(receipt, Mapping) else []
+        scoring = case.get("scoring")
+        scores = case.get("scorer_scores")
+        expected_reset = {
+            "seed": scoring.get("seed") if isinstance(scoring, Mapping) else None,
+            "base_state_sha256": scoring.get("base_state_sha256") if isinstance(scoring, Mapping) else None,
+            "reset_protocol_sha256": scorer_identity.get("policy_sha256"),
+        }
+        execution_error = _execution_receipt_error(
+            receipt_sha256=case.get("execution_receipt_sha256"),
+            expected_kind="answer_scorer_call",
+            expected_adapter_identity_sha256=scorer_identity_sha,
+            expected_parent_run_id=calibration_run_id,
+            expected_input_payload={
+                "prompt_sha256": control["query_sha256"],
+                "answer_sha256": control["answer_sha256"],
+                "gold_evidence_sha256": control["evidence_sha256"],
+                "scoring": scoring,
+            },
+            expected_output_payload={
+                "dimensions": scores,
+                "reset_receipt": expected_reset,
+            },
+            ledger_file=execution_ledger_file,
+            completed_before=str(payload.get("frozen_at") or ""),
+        )
+        if (
+            receipt_check.get("passed") is not True
+            or not isinstance(votes, list)
+            or len(votes) != 2
+            or [vote.get("role") for vote in votes if isinstance(vote, Mapping)]
+            != ["primary", "challenger"]
+            or not isinstance(models, list)
+            or len(models) != 3
+            or scorer_identity.get("model") != models[2]
+            or not isinstance(scores, Mapping)
+            or set(scores) != set(ANSWER_DIMENSIONS)
+            or any(not _finite_unit_score(scores.get(name)) for name in ANSWER_DIMENSIONS)
+            or execution_error
+        ):
+            return {"passed": False, "reason": "machine_calibration_case_invalid"}
+        seen.add(control_id)
+        observed.append(case)
+    if set(seen) != set(expected_by_id):
+        return {"passed": False, "reason": "machine_calibration_control_set_invalid"}
+    metrics, gates = _machine_calibration_case_metrics(observed)
+    frozen_at = _strict_utc(payload.get("frozen_at"))
+    time_error = bool(
+        evaluated_at
+        and (
+            not _strict_utc(evaluated_at)
+            or datetime.fromisoformat(frozen_at.replace("Z", "+00:00"))
+            >= datetime.fromisoformat(_strict_utc(evaluated_at).replace("Z", "+00:00"))
+        )
+    )
+    passed = bool(
+        payload.get("metrics") == metrics
+        and payload.get("gates") == gates
+        and all(gates.values())
+        and payload.get("status") == "passed"
+        and payload.get("reason") == "verified"
+        and not time_error
+    )
+    return {
+        "passed": passed,
+        "reason": "verified" if passed else "machine_calibration_evidence_incomplete",
+        "manifest_sha256": str(payload.get("seal_sha256") or ""),
+        "scorer_identity_sha256": scorer_identity_sha,
+        "metrics": metrics,
+        "payload": payload,
+    }
+
+
 def evaluate_answer_episodes(
     *,
     runner: AnswerRunner | None,
@@ -3404,6 +6884,7 @@ def evaluate_answer_episodes(
     gold_manifest: Path | Mapping[str, Any] | None = None,
     scorer_calibration: Path | Mapping[str, Any] | None = None,
     review_ledger_file: Path = ANSWER_REVIEW_LEDGER,
+    consensus_ledger_file: Path = ANSWER_CONSENSUS_LEDGER,
     execution_ledger_file: Path = ANSWER_EXECUTION_LEDGER,
     adapter_registry: Path | Mapping[str, Any] = ANSWER_ADAPTER_REGISTRY,
     confidence: float = ANSWER_AUTHORITY_CONFIDENCE,
@@ -3473,6 +6954,9 @@ def evaluate_answer_episodes(
             gold_manifest,
             required_episode_ids=selected_ids,
             review_ledger_file=review_ledger_file,
+            consensus_ledger_file=consensus_ledger_file,
+            expected_split=split,
+            split_epoch_id=_split_epoch_id(split_value),
         )
         if gold_manifest is not None
         else {"passed": False, "reason": "missing_gold_manifest"}
@@ -3484,6 +6968,7 @@ def evaluate_answer_episodes(
             answer_split_manifest=split_value,
             evaluated_at=evaluated_at,
             review_ledger_file=review_ledger_file,
+            consensus_ledger_file=consensus_ledger_file,
             execution_ledger_file=execution_ledger_file,
         )
         if scorer_calibration is not None
@@ -3699,6 +7184,7 @@ def evaluate_answer_episodes(
             on_answer, on_error, on_runner_receipt = generated["field_on"]
             off_answer, off_error, off_runner_receipt = generated["field_off"]
             gold = gold_check["entries"][str(episode["episode_id"])]
+            safe_gold = _project_gold_for_scorer(gold)
             if _sha_text(str(gold["gold_answer"])) == episode.get("answer_sha256"):
                 results.append(
                     {
@@ -3717,7 +7203,7 @@ def evaluate_answer_episodes(
                         scorer,
                         turn.prompt,
                         answer,
-                        gold,
+                        safe_gold,
                         scorer_identity or {},
                         scoring,
                         parent_run_id=run_receipt["receipt_sha256"],
@@ -3754,7 +7240,7 @@ def evaluate_answer_episodes(
                     "episode_id": episode["episode_id"],
                     "status": "verified",
                     "session_hash": episode["session_hash"],
-                    "query_sha256": episode["prompt_sha256"],
+                    "query_sha256": _sha_text(turn.prompt),
                     "decision_id": episode["decision_id"],
                     "used_page_ids": episode["used_page_ids"],
                     "used_page_hashes": used_hashes,
@@ -3907,12 +7393,668 @@ def evaluate_answer_episodes(
     return sealed
 
 
+def evaluate_independent_answer_benchmark(
+    *,
+    runner: AnswerRunner | None,
+    scorer: AnswerScorer | None,
+    runner_identity: Mapping[str, Any] | None,
+    scorer_identity: Mapping[str, Any] | None,
+    benchmark_manifest: Path | Mapping[str, Any] = INDEPENDENT_ANSWER_BENCHMARK,
+    gold_manifest: Path | Mapping[str, Any] | None = None,
+    scorer_calibration: Path | Mapping[str, Any] | None = None,
+    field_environment_replay: FieldEnvironmentReplay | None = None,
+    field_environment_identity: Mapping[str, Any] | None = None,
+    consensus_ledger_file: Path = ANSWER_CONSENSUS_LEDGER,
+    review_ledger_file: Path = ANSWER_REVIEW_LEDGER,
+    execution_ledger_file: Path = ANSWER_EXECUTION_LEDGER,
+    adapter_registry: Path | Mapping[str, Any] = ANSWER_ADAPTER_REGISTRY,
+    chronovisor_root: Path = CHRONOVISOR_ROOT,
+    output_file: Path | None = None,
+    split: str = "train",
+    min_independent_samples: int = 20,
+) -> dict[str, Any]:
+    """Evaluate fresh Recall replay on independent benchmark episodes only."""
+
+    evaluated_at = _now_utc()
+    if min_independent_samples != 20:
+        raise ValueError("benchmark minimum independent samples is fixed at 20")
+    if split not in {"train", "locked-test"}:
+        raise ValueError("benchmark evaluation split is invalid")
+    benchmark_check = validate_independent_answer_benchmark(benchmark_manifest)
+    benchmark_payload = benchmark_check.get("payload", {})
+    selected = sorted(
+        [
+            dict(packet)
+            for packet in benchmark_check.get("entries", {}).values()
+            if packet.get("split") == split
+        ],
+        key=lambda packet: str(packet.get("case_id") or ""),
+    )
+    selected_ids = [str(packet["case_id"]) for packet in selected]
+    machine_benchmark_authority = bool(
+        benchmark_payload.get("schema_version") == 2
+        and benchmark_payload.get("source_kind")
+        == "machine_search_label_consensus"
+    )
+    gold_check = (
+        validate_gold_manifest(
+            gold_manifest,
+            required_episode_ids=selected_ids,
+            consensus_ledger_file=consensus_ledger_file,
+            expected_split=split,
+            split_epoch_id=str(benchmark_check.get("split_epoch_id") or ""),
+            benchmark_manifest=benchmark_manifest,
+        )
+        if gold_manifest is not None
+        else {"passed": False, "reason": "missing_gold_manifest"}
+    )
+    calibration_check = (
+        validate_scorer_calibration_artifact(
+            scorer_calibration,
+            scorer_identity=scorer_identity or {},
+            answer_split_manifest=None,
+            independent_benchmark_manifest=benchmark_manifest,
+            evaluated_at=evaluated_at,
+            review_ledger_file=review_ledger_file,
+            consensus_ledger_file=consensus_ledger_file,
+            execution_ledger_file=execution_ledger_file,
+            chronovisor_root=chronovisor_root,
+        )
+        if scorer_calibration is not None
+        else {"passed": False, "reason": "missing_scorer_calibration"}
+    )
+    required_adapters: list[tuple[str, Any, Mapping[str, Any]]] = []
+    if runner is not None:
+        required_adapters.append(("runner", runner, runner_identity or {}))
+    if scorer is not None:
+        required_adapters.append(("scorer", scorer, scorer_identity or {}))
+    if field_environment_replay is not None:
+        required_adapters.append(
+            (
+                "field_environment",
+                field_environment_replay,
+                field_environment_identity or {},
+            )
+        )
+    adapter_check = validate_adapter_registry(
+        adapter_registry, required=required_adapters, evaluated_at=evaluated_at
+    )
+    preregistered = all(
+        timestamp
+        and datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+        < datetime.fromisoformat(evaluated_at.replace("Z", "+00:00"))
+        for timestamp in (
+            _strict_utc(benchmark_payload.get("frozen_at")),
+            _strict_utc(gold_check.get("payload", {}).get("frozen_at")),
+        )
+    )
+    identity_error = (
+        str(benchmark_check.get("reason") or "benchmark_invalid")
+        if benchmark_check.get("passed") is not True
+        else "machine_benchmark_authority_required"
+        if not machine_benchmark_authority
+        else "waiting_for_machine_expansion"
+        if benchmark_check.get("promotion_ready") is not True
+        else "benchmark_split_empty"
+        if not selected
+        else str(gold_check.get("reason") or "gold_manifest_invalid")
+        if gold_check.get("passed") is not True
+        else str(calibration_check.get("reason") or "scorer_calibration_invalid")
+        if calibration_check.get("passed") is not True
+        else "benchmark_not_preregistered"
+        if not preregistered
+        else str(adapter_check.get("reason") or "adapter_registry_invalid")
+        if adapter_check.get("passed") is not True
+        else "missing_runner"
+        if runner is None
+        else "missing_scorer"
+        if scorer is None
+        else "missing_field_environment_replay"
+        if field_environment_replay is None
+        else "field_environment_adapter_not_builtin"
+        if field_environment_replay is not builtin_field_environment_replay
+        else "field_environment_identity_mismatch"
+        if dict(field_environment_identity or {})
+        != builtin_field_environment_identity()
+        else _identity_error(runner_identity or {}, _REQUIRED_RUNNER_IDENTITY)
+        or _identity_error(scorer_identity or {}, _REQUIRED_SCORER_IDENTITY)
+        or (
+            "scorer_gold_identity_mismatch"
+            if (scorer_identity or {}).get("rubric_sha256")
+            != gold_check.get("rubric_sha256")
+            or (scorer_identity or {}).get("evidence_manifest_sha256")
+            != gold_check.get("manifest_sha256")
+            else ""
+        )
+    )
+    run_receipt = {
+        "evaluated_at": evaluated_at,
+        "split": split,
+        "benchmark_manifest_sha256": str(
+            benchmark_check.get("manifest_sha256") or ""
+        ),
+        "benchmark_epoch_sha256": str(
+            benchmark_check.get("split_epoch_id") or ""
+        ),
+        "gold_manifest_sha256": str(gold_check.get("manifest_sha256") or ""),
+        "scorer_calibration_sha256": str(
+            calibration_check.get("manifest_sha256") or ""
+        ),
+        "runner_identity_sha256": _canonical_sha(dict(runner_identity or {})),
+        "scorer_identity_sha256": _canonical_sha(dict(scorer_identity or {})),
+        "field_environment_identity_sha256": _canonical_sha(
+            dict(field_environment_identity or {})
+        ),
+        "adapter_registry_sha256": str(adapter_check.get("manifest_sha256") or ""),
+    }
+    run_receipt["receipt_sha256"] = _canonical_sha(run_receipt)
+    results: list[dict[str, Any]] = []
+    if not identity_error:
+        assert runner is not None and scorer is not None
+        assert field_environment_replay is not None
+        for packet in selected:
+            case_id = str(packet["case_id"])
+            pair_protocol = _preregistered_pair_protocol(
+                seed=ANSWER_AUTHORITY_SEED,
+                episode_id=case_id,
+                episode_sha256=packet["source_entry_sha256"],
+                split_manifest_sha256=benchmark_check["manifest_sha256"],
+                gold_manifest_sha256=gold_check["manifest_sha256"],
+                adapter_registry_sha256=adapter_check["manifest_sha256"],
+                evaluation_kind="independent-benchmark-field-replay",
+            )
+            pair_seed = int(pair_protocol["pair_seed"])
+            contexts, environment, environment_error = _field_environment_contexts(
+                field_environment_replay,
+                prompt=str(packet["prompt"]),
+                episode={
+                    "episode_id": case_id,
+                    "session_hash": _sha_text(f"benchmark:{case_id}")[:16],
+                    "evaluation_kind": "independent-benchmark-field-replay",
+                },
+                pair_seed=pair_seed,
+                identity=field_environment_identity or {},
+                parent_run_id=run_receipt["receipt_sha256"],
+                execution_ledger_file=execution_ledger_file,
+            )
+            if environment_error:
+                results.append(
+                    {"case_id": case_id, "status": "unknown", "reason": environment_error}
+                )
+                continue
+            arm_contexts = {
+                "field_on": contexts["candidate_field"],
+                "field_off": contexts["production_teacher"],
+            }
+            generation = dict(pair_protocol["generation"])
+            generated = {
+                arm: _runner_answer(
+                    runner,
+                    str(packet["prompt"]),
+                    arm_contexts[arm],
+                    generation,
+                    runner_identity or {},
+                    parent_run_id=run_receipt["receipt_sha256"],
+                    execution_ledger_file=execution_ledger_file,
+                )
+                for arm in pair_protocol["arm_order"]
+            }
+            scoring = {
+                **dict(pair_protocol["scoring"]),
+                "evidence_manifest_sha256": gold_check["manifest_sha256"],
+                "rubric_sha256": gold_check["rubric_sha256"],
+            }
+            gold = gold_check["entries"][case_id]
+            safe_gold = _project_gold_for_scorer(gold)
+            scored: dict[str, tuple[dict[str, float] | None, str, str]] = {}
+            for arm in pair_protocol["arm_order"]:
+                answer, runner_error, _runner_receipt = generated[arm]
+                scored[arm] = (
+                    _score_answer(
+                        scorer,
+                        str(packet["prompt"]),
+                        answer,
+                        safe_gold,
+                        scorer_identity or {},
+                        scoring,
+                        parent_run_id=run_receipt["receipt_sha256"],
+                        execution_ledger_file=execution_ledger_file,
+                    )
+                    if not runner_error
+                    else (None, runner_error, "")
+                )
+            on_answer, on_error, on_runner_receipt = generated["field_on"]
+            off_answer, off_error, off_runner_receipt = generated["field_off"]
+            on_score, on_score_error, on_scorer_receipt = scored["field_on"]
+            off_score, off_score_error, off_scorer_receipt = scored["field_off"]
+            error = on_error or off_error or on_score_error or off_score_error
+            if error or on_score is None or off_score is None:
+                results.append({"case_id": case_id, "status": "unknown", "reason": error})
+                continue
+            deltas = {
+                dimension: round(on_score[dimension] - off_score[dimension], 9)
+                for dimension in ANSWER_DIMENSIONS
+            }
+            result = {
+                "case_id": case_id,
+                "status": "verified",
+                "component_sha256": packet["component_sha256"],
+                "query_sha256": packet["prompt_content_sha256"],
+                "source_entry_sha256": packet["source_entry_sha256"],
+                "source_page_bindings": packet["page_bindings"],
+                "pair_seed": pair_seed,
+                "pair_protocol_sha256": pair_protocol["protocol_sha256"],
+                "arm_order": pair_protocol["arm_order"],
+                "environment_evidence": environment,
+                "field_on": {
+                    "answer_sha256": _sha_text(on_answer),
+                    "answer_chars": len(on_answer),
+                    "dimensions": on_score,
+                    "runner_execution_receipt_sha256": on_runner_receipt,
+                    "scorer_execution_receipt_sha256": on_scorer_receipt,
+                },
+                "field_off": {
+                    "answer_sha256": _sha_text(off_answer),
+                    "answer_chars": len(off_answer),
+                    "dimensions": off_score,
+                    "runner_execution_receipt_sha256": off_runner_receipt,
+                    "scorer_execution_receipt_sha256": off_scorer_receipt,
+                },
+                "dimension_deltas": deltas,
+                "score_delta": round(sum(deltas.values()) / len(deltas), 9),
+                "cluster_nodes": [f"component:{packet['component_sha256']}"],
+            }
+            results.append(result)
+    verified = [row for row in results if row.get("status") == "verified"]
+    bound = cluster_bootstrap_interval(
+        verified,
+        value_key="score_delta",
+        confidence=ANSWER_AUTHORITY_CONFIDENCE,
+        seed=ANSWER_AUTHORITY_SEED,
+    )
+    gates = {
+        "identity": not identity_error,
+        "all_cases_verified": bool(selected) and len(verified) == len(selected),
+        "minimum_samples": len(verified) >= min_independent_samples,
+        "minimum_clusters": int(bound.get("clusters") or 0)
+        >= min_independent_samples,
+        "improvement_point": float(bound.get("point") or 0.0) >= 0.02,
+        "improvement_lcb": float(bound.get("lower") or -1.0) > 0.0,
+    }
+    passed = bool(gates and all(gates.values()))
+    payload = {
+        "schema_version": ANSWER_BENCHMARK_EVAL_SCHEMA_VERSION,
+        "artifact_kind": "independent-answer-benchmark-evaluation",
+        "status": "passed" if passed else "held",
+        "reason": identity_error or ("verified" if passed else "gate_failed"),
+        "split": split,
+        "benchmark_manifest": benchmark_payload,
+        "gold_manifest": gold_check.get("payload", {}),
+        "scorer_calibration": calibration_check.get("payload", {}),
+        "adapter_registry": adapter_check.get("payload", {}),
+        "runner_identity": dict(runner_identity or {}),
+        "scorer_identity": dict(scorer_identity or {}),
+        "field_environment_identity": dict(field_environment_identity or {}),
+        "run_receipt": run_receipt,
+        "minimum_independent_samples": min_independent_samples,
+        "case_ids": selected_ids,
+        "results": results,
+        "confidence_bound": bound,
+        "gates": gates,
+        "page_rewards": [],
+        "page_penalties": [],
+        "learning_effects": [],
+        "production_episode_ledger_used": False,
+    }
+    sealed = seal_object(payload)
+    if output_file is not None:
+        _create_once_sealed(output_file, payload)
+    return sealed
+
+
+def validate_independent_answer_outcome_artifact(
+    value: Path | Mapping[str, Any],
+    *,
+    required_split: str,
+    benchmark_manifest: Path | Mapping[str, Any] = INDEPENDENT_ANSWER_BENCHMARK,
+    consensus_ledger_file: Path = ANSWER_CONSENSUS_LEDGER,
+    review_ledger_file: Path = ANSWER_REVIEW_LEDGER,
+    execution_ledger_file: Path = ANSWER_EXECUTION_LEDGER,
+    adapter_registry: Path | Mapping[str, Any] = ANSWER_ADAPTER_REGISTRY,
+) -> dict[str, Any]:
+    """Fail closed without consulting any production answer episode ledger."""
+
+    try:
+        payload = (
+            read_sealed_json(value)
+            if isinstance(value, Path)
+            else verify_sealed_object(dict(value))
+        )
+    except (DurableStateError, TypeError, ValueError):
+        return {"passed": False, "reason": "benchmark_outcome_seal_invalid"}
+    benchmark = validate_independent_answer_benchmark(benchmark_manifest)
+    if required_split not in {"train", "locked-test"}:
+        return {"passed": False, "reason": "benchmark_outcome_split_invalid"}
+    results = payload.get("results")
+    selected = sorted(
+        str(packet["case_id"])
+        for packet in benchmark.get("entries", {}).values()
+        if packet.get("split") == required_split
+    )
+    forbidden = {
+        "production_answer",
+        "production_answer_sha256",
+        "decision_id",
+        "used_page_ids",
+        "episode_id",
+    }
+
+    def has_forbidden(item: object) -> bool:
+        if isinstance(item, Mapping):
+            return any(
+                str(key) in forbidden or has_forbidden(child)
+                for key, child in item.items()
+            )
+        if isinstance(item, list):
+            return any(has_forbidden(child) for child in item)
+        return False
+
+    selected_packets = {
+        str(packet["case_id"]): packet
+        for packet in benchmark.get("entries", {}).values()
+        if packet.get("split") == required_split
+    }
+    gold_check = validate_gold_manifest(
+        payload.get("gold_manifest", {}),
+        required_episode_ids=selected,
+        consensus_ledger_file=consensus_ledger_file,
+        expected_split=required_split,
+        split_epoch_id=str(benchmark.get("split_epoch_id") or ""),
+        benchmark_manifest=benchmark_manifest,
+    )
+    runner_value = payload.get("runner_identity")
+    scorer_value = payload.get("scorer_identity")
+    field_value = payload.get("field_environment_identity")
+    runner_identity = runner_value if isinstance(runner_value, Mapping) else {}
+    scorer_identity = scorer_value if isinstance(scorer_value, Mapping) else {}
+    field_identity = field_value if isinstance(field_value, Mapping) else {}
+    run_receipt_value = payload.get("run_receipt")
+    run_receipt = (
+        run_receipt_value if isinstance(run_receipt_value, Mapping) else {}
+    )
+    evaluated_at = _strict_utc(run_receipt.get("evaluated_at"))
+    calibration_check = validate_scorer_calibration_artifact(
+        payload.get("scorer_calibration", {}),
+        scorer_identity=scorer_identity,
+        answer_split_manifest=None,
+        independent_benchmark_manifest=benchmark_manifest,
+        evaluated_at=evaluated_at,
+        review_ledger_file=review_ledger_file,
+        consensus_ledger_file=consensus_ledger_file,
+        execution_ledger_file=execution_ledger_file,
+    )
+    registry_error = _adapter_registry_binding_error(
+        payload.get("adapter_registry"),
+        live_registry=adapter_registry,
+        identities=[
+            ("runner", runner_identity),
+            ("scorer", scorer_identity),
+            ("field_environment", field_identity),
+        ],
+        evaluated_at=evaluated_at,
+    )
+    expected_run_receipt = {
+        "evaluated_at": evaluated_at,
+        "split": required_split,
+        "benchmark_manifest_sha256": str(benchmark.get("manifest_sha256") or ""),
+        "benchmark_epoch_sha256": str(benchmark.get("split_epoch_id") or ""),
+        "gold_manifest_sha256": str(gold_check.get("manifest_sha256") or ""),
+        "scorer_calibration_sha256": str(
+            calibration_check.get("manifest_sha256") or ""
+        ),
+        "runner_identity_sha256": _canonical_sha(dict(runner_identity)),
+        "scorer_identity_sha256": _canonical_sha(dict(scorer_identity)),
+        "field_environment_identity_sha256": _canonical_sha(dict(field_identity)),
+        "adapter_registry_sha256": str(
+            payload.get("adapter_registry", {}).get("seal_sha256")
+            if isinstance(payload.get("adapter_registry"), Mapping)
+            else ""
+        ),
+    }
+    expected_run_receipt["receipt_sha256"] = _canonical_sha(expected_run_receipt)
+    verified = [
+        dict(row)
+        for row in results
+        if isinstance(row, Mapping) and row.get("status") == "verified"
+    ] if isinstance(results, list) else []
+    numeric = True
+    structural = bool(
+        benchmark.get("passed") is True
+        and benchmark.get("promotion_ready") is True
+        and benchmark.get("payload", {}).get("schema_version") == 2
+        and benchmark.get("payload", {}).get("source_kind")
+        == "machine_search_label_consensus"
+        and payload.get("benchmark_manifest") == benchmark.get("payload")
+        and gold_check.get("passed") is True
+        and calibration_check.get("passed") is True
+        and not registry_error
+        and run_receipt == expected_run_receipt
+        and dict(field_identity) == builtin_field_environment_identity()
+        and not _identity_error(runner_identity, _REQUIRED_RUNNER_IDENTITY)
+        and not _identity_error(scorer_identity, _REQUIRED_SCORER_IDENTITY)
+        and scorer_identity.get("rubric_sha256") == gold_check.get("rubric_sha256")
+        and scorer_identity.get("evidence_manifest_sha256")
+        == gold_check.get("manifest_sha256")
+    )
+    for row in verified:
+        case_id = str(row.get("case_id") or "")
+        packet = selected_packets.get(case_id)
+        on_value = row.get("field_on")
+        off_value = row.get("field_off")
+        on_map = on_value if isinstance(on_value, Mapping) else {}
+        off_map = off_value if isinstance(off_value, Mapping) else {}
+        on = on_map.get("dimensions")
+        off = off_map.get("dimensions")
+        if (
+            packet is None
+            or not isinstance(on, Mapping)
+            or not isinstance(off, Mapping)
+            or set(on) != set(ANSWER_DIMENSIONS)
+            or set(off) != set(ANSWER_DIMENSIONS)
+            or any(
+                isinstance(dimensions.get(dimension), bool)
+                or not isinstance(dimensions.get(dimension), int | float)
+                or not 0.0 <= float(dimensions[dimension]) <= 1.0
+                for dimensions in (on, off)
+                for dimension in ANSWER_DIMENSIONS
+            )
+        ):
+            numeric = False
+            break
+        deltas = {
+            dimension: round(float(on[dimension]) - float(off[dimension]), 9)
+            for dimension in ANSWER_DIMENSIONS
+        }
+        pair_protocol = _preregistered_pair_protocol(
+            seed=ANSWER_AUTHORITY_SEED,
+            episode_id=case_id,
+            episode_sha256=packet["source_entry_sha256"],
+            split_manifest_sha256=benchmark["manifest_sha256"],
+            gold_manifest_sha256=gold_check["manifest_sha256"],
+            adapter_registry_sha256=expected_run_receipt[
+                "adapter_registry_sha256"
+            ],
+            evaluation_kind="independent-benchmark-field-replay",
+        )
+        pair_seed = int(pair_protocol["pair_seed"])
+        environment_error = _field_environment_evidence_error(
+            row.get("environment_evidence"),
+            identity=field_identity,
+            parent_run_id=expected_run_receipt["receipt_sha256"],
+            episode_id=case_id,
+            prompt_sha256=packet["prompt_content_sha256"],
+            pair_seed=pair_seed,
+            execution_ledger_file=execution_ledger_file,
+        )
+        environment = row.get("environment_evidence")
+        arms = environment.get("arms") if isinstance(environment, Mapping) else {}
+        candidate = arms.get("candidate_field") if isinstance(arms, Mapping) else {}
+        teacher = arms.get("production_teacher") if isinstance(arms, Mapping) else {}
+        context_shas = {
+            "field_on": candidate.get("context_sha256")
+            if isinstance(candidate, Mapping)
+            else "",
+            "field_off": teacher.get("context_sha256")
+            if isinstance(teacher, Mapping)
+            else "",
+        }
+        generation = dict(pair_protocol["generation"])
+        scoring = {
+            **dict(pair_protocol["scoring"]),
+            "evidence_manifest_sha256": gold_check["manifest_sha256"],
+            "rubric_sha256": gold_check["rubric_sha256"],
+        }
+        gold = gold_check.get("entries", {}).get(case_id, {})
+        execution_errors: list[str] = []
+        for arm_name, arm in (("field_on", on_map), ("field_off", off_map)):
+            execution_errors.extend(
+                (
+                    _execution_receipt_error(
+                        receipt_sha256=arm.get(
+                            "runner_execution_receipt_sha256"
+                        ),
+                        expected_kind="answer_runner_call",
+                        expected_adapter_identity_sha256=_canonical_sha(
+                            dict(runner_identity)
+                        ),
+                        expected_parent_run_id=expected_run_receipt[
+                            "receipt_sha256"
+                        ],
+                        expected_input_payload={
+                            "prompt_sha256": packet["prompt_content_sha256"],
+                            "context_sha256": context_shas[arm_name],
+                            "generation": generation,
+                        },
+                        expected_output_payload={
+                            "answer_sha256": arm.get("answer_sha256"),
+                            "answer_chars": arm.get("answer_chars"),
+                            "reset_receipt": {
+                                "seed": pair_seed,
+                                "base_state_sha256": generation[
+                                    "base_state_sha256"
+                                ],
+                                "reset_protocol_sha256": runner_identity.get(
+                                    "policy_sha256"
+                                ),
+                            },
+                        },
+                        ledger_file=execution_ledger_file,
+                    ),
+                    _execution_receipt_error(
+                        receipt_sha256=arm.get(
+                            "scorer_execution_receipt_sha256"
+                        ),
+                        expected_kind="answer_scorer_call",
+                        expected_adapter_identity_sha256=_canonical_sha(
+                            dict(scorer_identity)
+                        ),
+                        expected_parent_run_id=expected_run_receipt[
+                            "receipt_sha256"
+                        ],
+                        expected_input_payload={
+                            "prompt_sha256": packet["prompt_content_sha256"],
+                            "answer_sha256": arm.get("answer_sha256"),
+                            "gold_evidence_sha256": gold.get("evidence_sha256"),
+                            "scoring": scoring,
+                        },
+                        expected_output_payload={
+                            "dimensions": arm.get("dimensions"),
+                            "reset_receipt": {
+                                "seed": pair_seed,
+                                "base_state_sha256": scoring[
+                                    "base_state_sha256"
+                                ],
+                                "reset_protocol_sha256": scorer_identity.get(
+                                    "policy_sha256"
+                                ),
+                            },
+                        },
+                        ledger_file=execution_ledger_file,
+                    ),
+                )
+            )
+        if (
+            row.get("dimension_deltas") != deltas
+            or row.get("score_delta")
+            != round(sum(deltas.values()) / len(deltas), 9)
+            or row.get("component_sha256") != packet["component_sha256"]
+            or row.get("query_sha256") != packet["prompt_content_sha256"]
+            or row.get("source_entry_sha256") != packet["source_entry_sha256"]
+            or row.get("source_page_bindings") != packet["page_bindings"]
+            or row.get("pair_seed") != pair_seed
+            or row.get("pair_protocol_sha256")
+            != pair_protocol["protocol_sha256"]
+            or row.get("arm_order") != pair_protocol["arm_order"]
+            or row.get("cluster_nodes")
+            != [f"component:{packet['component_sha256']}"]
+            or environment_error
+            or any(execution_errors)
+        ):
+            numeric = False
+            break
+    recomputed = cluster_bootstrap_interval(
+        verified,
+        value_key="score_delta",
+        confidence=ANSWER_AUTHORITY_CONFIDENCE,
+        seed=ANSWER_AUTHORITY_SEED,
+    )
+    minimum_samples = payload.get("minimum_independent_samples")
+    recomputed_gates = {
+        "identity": structural,
+        "all_cases_verified": bool(selected) and len(verified) == len(selected),
+        "minimum_samples": len(verified) >= 20,
+        "minimum_clusters": int(recomputed.get("clusters") or 0) >= 20,
+        "improvement_point": float(recomputed.get("point") or 0.0) >= 0.02,
+        "improvement_lcb": float(recomputed.get("lower") or -1.0) > 0.0,
+    }
+    passed = bool(
+        structural
+        and payload.get("schema_version") == ANSWER_BENCHMARK_EVAL_SCHEMA_VERSION
+        and payload.get("artifact_kind")
+        == "independent-answer-benchmark-evaluation"
+        and payload.get("status") == "passed"
+        and payload.get("split") == required_split
+        and payload.get("production_episode_ledger_used") is False
+        and payload.get("page_rewards") == []
+        and payload.get("page_penalties") == []
+        and payload.get("learning_effects") == []
+        and minimum_samples == 20
+        and payload.get("case_ids") == selected
+        and isinstance(results, list)
+        and [str(row.get("case_id") or "") for row in results if isinstance(row, Mapping)]
+        == selected
+        and len(verified) == len(selected)
+        and not has_forbidden(results)
+        and numeric
+        and payload.get("confidence_bound") == recomputed
+        and payload.get("gates") == recomputed_gates
+        and all(recomputed_gates.values())
+    )
+    return {
+        "passed": passed,
+        "reason": "verified" if passed else "benchmark_outcome_invalid",
+        "manifest_sha256": str(payload.get("seal_sha256") or ""),
+        "payload": payload,
+    }
+
+
 def validate_locked_answer_artifact(
     value: Path | Mapping[str, Any],
     *,
     minimum_independent_samples: int = 20,
     episode_file: Path = ANSWER_EPISODE_LEDGER,
     review_ledger_file: Path = ANSWER_REVIEW_LEDGER,
+    consensus_ledger_file: Path = ANSWER_CONSENSUS_LEDGER,
     execution_ledger_file: Path = ANSWER_EXECUTION_LEDGER,
     adapter_registry: Path | Mapping[str, Any] = ANSWER_ADAPTER_REGISTRY,
 ) -> dict[str, Any]:
@@ -3924,6 +8066,7 @@ def validate_locked_answer_artifact(
         minimum_independent_samples=minimum_independent_samples,
         episode_file=episode_file,
         review_ledger_file=review_ledger_file,
+        consensus_ledger_file=consensus_ledger_file,
         execution_ledger_file=execution_ledger_file,
         adapter_registry=adapter_registry,
     )
@@ -4020,6 +8163,7 @@ def validate_answer_outcome_artifact(
     minimum_independent_samples: int = 20,
     episode_file: Path = ANSWER_EPISODE_LEDGER,
     review_ledger_file: Path = ANSWER_REVIEW_LEDGER,
+    consensus_ledger_file: Path = ANSWER_CONSENSUS_LEDGER,
     execution_ledger_file: Path = ANSWER_EXECUTION_LEDGER,
     adapter_registry: Path | Mapping[str, Any] = ANSWER_ADAPTER_REGISTRY,
 ) -> dict[str, Any]:
@@ -4068,6 +8212,9 @@ def validate_answer_outcome_artifact(
         payload.get("gold_manifest", {}),
         required_episode_ids=expected_ids,
         review_ledger_file=review_ledger_file,
+        consensus_ledger_file=consensus_ledger_file,
+        expected_split=required_split,
+        split_epoch_id=_split_epoch_id(split_check.get("manifest", {})),
     )
     results = payload.get("results")
     result_ids = [
@@ -4473,7 +8620,7 @@ def validate_answer_outcome_artifact(
                 != live_episode.get("answer_sha256")
                 or row.get("session_hash") != live_episode.get("session_hash")
                 or row.get("query_sha256")
-                != live_episode.get("prompt_sha256")
+                != split_entry.get("query_sha256")
                 or used_ids != live_used_ids
                 or dict(used_hashes) != expected_used_hashes
                 or bindings != expected_bindings

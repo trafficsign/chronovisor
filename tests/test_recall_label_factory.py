@@ -117,7 +117,14 @@ def test_label_factory_keeps_exposure_non_negative_and_deduplicates(tmp_path) ->
                 "expected_pages": ["page-a"],
                 "negative_pages": ["page-c"],
                 "reviewed": True,
-            }
+            },
+            {
+                "query": "forged auto gold",
+                "expected_pages": ["forged-page"],
+                "reviewed": True,
+                "source": "recall_questions",
+                "reviewer": "chronovisor:recall-questions",
+            },
         ],
     )
 
@@ -128,6 +135,7 @@ def test_label_factory_keeps_exposure_non_negative_and_deduplicates(tmp_path) ->
         golden_file=golden,
     )
     labels = payload["labels"]
+    assert not any(row["page_id"] == "forged-page" for row in labels)
 
     assert any(
         row["page_id"] == "page-b" and row["polarity"] == "exposure" for row in labels

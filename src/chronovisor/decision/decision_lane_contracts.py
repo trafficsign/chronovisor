@@ -162,6 +162,11 @@ _LANE_SEMANTICS: dict[str, LaneSemantics] = {
         "Approve only calibrated non-regression with coverage preserved and a sealed rollback target.",
         "approved nominates a rubric artifact; adoption still requires the unified growth and canary gates.",
     ),
+    "recall_answer_adjudication": LaneSemantics(
+        "One pre-frozen deterministic answer-gold or scorer-control subject bound to exact episode, evidence, rubric, split, and producer-policy digests.",
+        "Approve only a source-backed reference or deterministic corruption whose fixed labels were registered before evaluation; production answers and post-result labels are forbidden.",
+        "approved authorizes only the exact subject digest as benchmark authority; rejected, abstained, and needs_retry are holds.",
+    ),
 }
 
 # Model-visible prompt-contract versions are lane scoped. Version 7 preserves
@@ -307,6 +312,12 @@ _REQUIRED_COVERAGE_LABELS: dict[str, tuple[str, ...]] = {
         'decision="abstained"',
         'decision="needs_retry"',
     ),
+    "recall_answer_adjudication": (
+        'decision="approved"',
+        'decision="rejected"',
+        'decision="abstained"',
+        'decision="needs_retry"',
+    ),
 }
 
 
@@ -396,6 +407,12 @@ _REQUIRED_EFFECTS: dict[str, tuple[str, ...]] = {
         "decision:needs_retry",
     ),
     "recall_rubric_calibration": (
+        "decision:approved",
+        "decision:rejected",
+        "decision:abstained",
+        "decision:needs_retry",
+    ),
+    "recall_answer_adjudication": (
         "decision:approved",
         "decision:rejected",
         "decision:abstained",

@@ -15,7 +15,7 @@ import tempfile
 import time
 import uuid
 from collections import Counter
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import ExitStack, contextmanager, suppress
 from dataclasses import dataclass, replace
 from datetime import datetime
@@ -801,6 +801,14 @@ def _structured_route_result(
 ) -> dict[str, Any]:
     """Convert one trusted local-router result into the compatibility envelope."""
 
+    residency = routed.residency if isinstance(routed.residency, Mapping) else {}
+    decision_execution = {
+        "execution_fingerprint": residency.get("execution_fingerprint"),
+        "decision_artifact_seal_sha256": residency.get(
+            "decision_artifact_seal_sha256"
+        ),
+    }
+
     if lane_mode == "shadow":
         reason = f"decision_lane_shadow:{decision_lane}"
         failure = _frontier_failure(
@@ -817,6 +825,7 @@ def _structured_route_result(
         )
         result["local_consensus"] = routed.audit_record()
         result["decision_policy"] = policy_audit
+        result["decision_execution"] = decision_execution
         return result
     if router_policy_source != "adopted_artifact":
         reason = f"decision_lane_unadopted:{decision_lane}"
@@ -834,6 +843,7 @@ def _structured_route_result(
         )
         result["local_consensus"] = routed.audit_record()
         result["decision_policy"] = policy_audit
+        result["decision_execution"] = decision_execution
         return result
     if routed.ok and isinstance(routed.decision, dict):
         result = _validated_structured_result(
@@ -843,6 +853,7 @@ def _structured_route_result(
         )
         result["local_consensus"] = routed.audit_record()
         result["decision_policy"] = policy_audit
+        result["decision_execution"] = decision_execution
         return result
 
     reason = (
@@ -897,6 +908,7 @@ def _structured_route_result(
     )
     result["local_consensus"] = routed.audit_record()
     result["decision_policy"] = policy_audit
+    result["decision_execution"] = decision_execution
     return result
 
 

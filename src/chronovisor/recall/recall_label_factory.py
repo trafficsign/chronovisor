@@ -57,6 +57,18 @@ def _digest(value: str) -> str:
     return hashlib.sha256(value.encode()).hexdigest()
 
 
+def _machine_search_gold_authority_error(row: Mapping[str, Any]) -> str:
+    """Require the exact canonical search-label artifact for auto candidates."""
+
+    try:
+        from chronovisor.search.search_eval import authoritative_search_label_error
+
+        error = authoritative_search_label_error(row)
+    except Exception as exc:
+        return f"machine_search_gold_authority_unavailable:{type(exc).__name__}"
+    return str(error or "")
+
+
 def _session_hash(value: object) -> str:
     session = str(value or "").strip()
     return _digest(session)[:16] if session else ""
@@ -671,6 +683,12 @@ def build_label_ledger(
 
     for row in _read_jsonl(golden_file):
         if row.get("reviewed") is not True:
+            continue
+        if str(row.get("source") or "") in {
+            "recall_questions",
+            "auto",
+            "generated",
+        } and _machine_search_gold_authority_error(row):
             continue
         query = str(row.get("query") or "")
         query_sha = _digest(query) if query else str(row.get("query_sha256") or "")

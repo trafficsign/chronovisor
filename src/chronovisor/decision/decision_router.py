@@ -19,6 +19,7 @@ from chronovisor.core import ollama
 from chronovisor.core.canonical_json import (
     canonical_json_sha256_strict as _sha256_json,
 )
+from chronovisor.core.durable_state import canonical_sha256
 from chronovisor.core.canonical_json import (
     canonical_json_strict as _canonical_json,
 )
@@ -2300,6 +2301,7 @@ class DecisionRouter:
             residency={
                 "source": "canonical_artifact_replay",
                 "execution_fingerprint": artifact.get("execution_fingerprint"),
+                "decision_artifact_seal_sha256": artifact.get("seal_sha256"),
                 "model_invocations": 0,
                 "num_ctx": context_tier,
             },
@@ -2313,7 +2315,24 @@ class DecisionRouter:
         identity: Mapping[str, Any],
         context_tier: int,
         decision_lane: str,
-    ) -> None:
+    ) -> dict[str, Any]:
+        vote_manifest = [
+            {
+                "role": vote.role,
+                "model": vote.model,
+                "model_identity_sha256": canonical_sha256(
+                    {
+                        "role": vote.role,
+                        "model": vote.model,
+                        "adoption_artifact_sha256": self.policy.artifact_sha256,
+                    }
+                ),
+                "valid": vote.valid,
+                "signature_sha256": vote.signature_sha256,
+                "invalid_reason": vote.invalid_reason,
+            }
+            for vote in result.votes
+        ]
         proof = [
             {
                 "role": vote.role,
@@ -2327,7 +2346,7 @@ class DecisionRouter:
             raise DecisionArtifactError(
                 "agreed result cannot be sealed without a two-vote proof"
             )
-        self.decision_artifact_store.publish(
+        return self.decision_artifact_store.publish(
             fingerprint=fingerprint,
             identity=identity,
             decision=result.value,
@@ -2338,6 +2357,8 @@ class DecisionRouter:
                 "context_tier": context_tier,
                 "router_policy": self.policy.audit_record(),
                 "structured_generation_policy": structured_generation_policy(),
+                "vote_manifest": vote_manifest,
+                "vote_manifest_sha256": canonical_sha256(vote_manifest),
             },
         )
 
@@ -3666,12 +3687,20 @@ class DecisionRouter:
         if result.ok and artifact_identity is not None and effective_lane is not None:
             fingerprint, identity, context_tier = artifact_identity
             try:
-                self._publish_artifact(
+                published = self._publish_artifact(
                     result,
                     fingerprint=fingerprint,
                     identity=identity,
                     context_tier=context_tier,
                     decision_lane=effective_lane,
+                )
+                result = replace(
+                    result,
+                    residency={
+                        **dict(result.residency or {}),
+                        "execution_fingerprint": fingerprint,
+                        "decision_artifact_seal_sha256": published.get("seal_sha256"),
+                    },
                 )
             except DecisionArtifactError as exc:
                 return self._quarantined(

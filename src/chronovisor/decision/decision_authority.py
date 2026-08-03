@@ -20,7 +20,7 @@ ADOPTED_LOCAL_SOURCE = "adopted_local_consensus"
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
 
 
-def current_semantic_authority(
+def base_semantic_authority(
     lane: str,
     *,
     injected_reviewer: bool = False,
@@ -93,6 +93,44 @@ def current_semantic_authority(
     return authority, None
 
 
+def current_semantic_authority(
+    lane: str,
+    *,
+    injected_reviewer: bool = False,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Return effect authority, including required lane capability evidence."""
+
+    authority, error = base_semantic_authority(
+        lane, injected_reviewer=injected_reviewer
+    )
+    if error is not None or authority is None or injected_reviewer:
+        return authority, error
+    from chronovisor.decision.decision_policy import DECISION_POLICIES
+
+    policy = DECISION_POLICIES.get(lane)
+    if policy is None or not policy.qualification_required:
+        return authority, None
+    try:
+        from chronovisor.decision.background_lane_qualification import (
+            validate_current_background_lane_qualification,
+        )
+
+        qualification = validate_current_background_lane_qualification(
+            lane, base_authority=authority
+        )
+    except Exception as exc:
+        return None, f"decision_lane_qualification_unavailable:{type(exc).__name__}"
+    if qualification.get("passed") is not True:
+        return None, str(
+            qualification.get("reason") or "decision_lane_qualification_missing"
+        )
+    qualified = copy.deepcopy(authority)
+    qualified["capability_sha256"] = str(
+        qualification.get("capability_sha256") or ""
+    )
+    return qualified, None
+
+
 def semantic_authority_shape_error(
     authority: object,
     *,
@@ -114,6 +152,19 @@ def semantic_authority_shape_error(
         return None
     if source != ADOPTED_LOCAL_SOURCE:
         return "decision authority source is invalid"
+    from chronovisor.decision.decision_policy import DECISION_POLICIES
+
+    policy_definition = DECISION_POLICIES.get(lane)
+    if (
+        policy_definition is not None
+        and policy_definition.qualification_required
+        and (
+            not isinstance(authority.get("capability_sha256"), str)
+            or _SHA256_RE.fullmatch(str(authority.get("capability_sha256") or ""))
+            is None
+        )
+    ):
+        return "decision authority capability is invalid"
     for field in (
         "lane_contract_sha256",
         "lane_contract_manifest_sha256",
@@ -370,6 +421,7 @@ __all__ = [
     "ADOPTED_LOCAL_SOURCE",
     "AUTHORITY_VERSION",
     "INJECTED_REVIEWER_SOURCE",
+    "base_semantic_authority",
     "compare_semantic_authority",
     "current_semantic_authority",
     "seal_semantic_artifact",

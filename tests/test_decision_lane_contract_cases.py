@@ -179,6 +179,7 @@ def test_background_graph_contracts_are_separate_from_adopted_fleet() -> None:
         "entity_merge_verification",
         "recall_usefulness_judgment",
         "recall_rubric_calibration",
+        "recall_answer_adjudication",
     }
     assert all(len(rows) == 5 for rows in cases.values())
     assert set(cases).isdisjoint(model_backed_lane_names())

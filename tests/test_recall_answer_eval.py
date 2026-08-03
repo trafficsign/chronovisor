@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 from datetime import UTC, datetime, timedelta
@@ -8,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from chronovisor.core.durable_state import seal_object
+from chronovisor.core.durable_state import DurableStateError, seal_object
 from chronovisor.raw.raw_segment import append_capture
 from chronovisor.recall import recall_answer_eval
 from chronovisor.recall.recall_runtime import stable_prompt_hash
@@ -140,6 +141,577 @@ def test_field_environment_receipt_rejects_unrendered_bindings(
     assert contexts == {}
     assert evidence == {}
     assert error == "field_environment_arm_receipt_invalid"
+
+
+def test_evaluate_answer_episodes_projects_forbidden_gold_fields_for_scorer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, Any] = {}
+    prompt = "How do frogs jump?"
+    rubric_sha = "f" * 64
+    episodes = []
+    for episode_index in range(2):
+        episode_id = f"episode-{episode_index}"
+        prompt_hash = recall_answer_eval._sha_text(prompt)
+        query_hash = recall_answer_eval._sha_text(f"{prompt}-{episode_index}")
+        episode = {
+            "schema_version": recall_answer_eval.ANSWER_EPISODE_SCHEMA_VERSION,
+            "episode_id": episode_id,
+            "binding_status": "verified",
+            "exact_used_subset": True,
+            "session_hash": f"session-{episode_index}",
+            "prompt_sha256": prompt_hash,
+            "prompt_content_sha256": query_hash,
+            "decision_id": f"decision-{episode_index}",
+            "used_page_ids": [f"page-{episode_index}"],
+            "injected_page_ids": [f"page-{episode_index}"],
+            "page_content_sha256": {
+                f"page-{episode_index}": recall_answer_eval._sha_text(
+                    f"content-{episode_index}"
+                )
+            },
+            "page_uids": {f"page-{episode_index}": f"uid-{episode_index}"},
+            "observed_at": "2026-08-01T00:00:00Z",
+            "answer_sha256": f"d{episode_index}" * 32,
+            "raw_ref": {},
+        }
+        episode["episode_sha256"] = recall_answer_eval._canonical_sha(
+            {key: value for key, value in episode.items() if key != "episode_sha256"}
+        )
+        episodes.append(episode)
+    manifest_entries = [
+        {**recall_answer_eval._episode_manifest_entry(episode), "split": "train"}
+        for episode in episodes
+    ]
+    split_manifest = seal_object(
+        {
+            "schema_version": recall_answer_eval.ANSWER_SPLIT_SCHEMA_VERSION,
+            "artifact_kind": "answer-preregistered-split-manifest",
+            "frozen_at": "2026-08-01T00:00:00Z",
+            "embargo_seconds": recall_answer_eval.AUTHORITY_EMBARGO_SECONDS,
+            "strategy": "connected-components-chronological-70-20-10",
+            "component_keys": [
+                "session_hash",
+                "query_sha256",
+                "page_id",
+                "page_uid",
+                "content_sha256",
+            ],
+            "episode_ledger_manifest_sha256": recall_answer_eval.manifest_sha256(
+                [episode["episode_sha256"] for episode in episodes]
+            ),
+            "entries": manifest_entries,
+        }
+    )
+    split_manifest["epoch_id"] = recall_answer_eval._split_epoch_id(split_manifest)
+
+    evidence = {
+        "production_answer": "forbidden-leak",
+        "source_packet": {
+            "field_outcome": "should-not-pass",
+            "page_bindings": [
+                {
+                    "page_id": "page-1",
+                    "content_byte_length": 12,
+                    "content_sha256": "e" * 64,
+                }
+            ],
+        },
+    }
+    gold_entries = {
+        episode["episode_id"]: {
+            "episode_id": episode["episode_id"],
+            "gold_answer": f"gold answer {episode['episode_id']}",
+            "evidence": {
+                **evidence,
+                "production_answer": "forbidden-leak",
+                "source_packet": {
+                    "field_outcome": "should-not-pass",
+                    "page_bindings": evidence["source_packet"]["page_bindings"],
+                },
+            },
+            "evidence_sha256": recall_answer_eval._canonical_sha(
+                {
+                    "episode_id": episode["episode_id"],
+                    "gold_answer": f"gold answer {episode['episode_id']}",
+                    "evidence": {
+                        **evidence,
+                        "production_answer": "forbidden-leak",
+                        "source_packet": {
+                            "field_outcome": "should-not-pass",
+                            "page_bindings": evidence["source_packet"][
+                                "page_bindings"
+                            ],
+                        },
+                    },
+                    "rubric_sha256": rubric_sha,
+                }
+            ),
+            "review_provenance": {
+                "source_kind": "human_review",
+                "reviewer_receipt_sha256": "a" * 64,
+                "reviewed_at": "2026-08-01T00:00:00Z",
+            },
+        }
+        for episode in episodes
+    }
+    runner_identity = {
+        "runner_id": "runner-1",
+        "model": "fixture-runner",
+        "system_sha256": "a" * 64,
+        "sampler_sha256": "b" * 64,
+        "policy_sha256": "c" * 64,
+    }
+    scorer_identity = {
+        "scorer_id": "scorer-1",
+        "version": "1",
+        "model": "fixture-scorer",
+        "system_sha256": "d" * 64,
+        "sampler_sha256": "e" * 64,
+        "policy_sha256": "f" * 64,
+        "rubric_sha256": rubric_sha,
+        "calibration_protocol_sha256": "1" * 64,
+        "evidence_manifest_sha256": "a" * 64,
+    }
+
+    def runner(
+        _prompt: str, _context: str, generation: Mapping[str, Any]
+    ) -> Mapping[str, Any]:
+        answer = "candidate answer on" if _context == "context" else "candidate answer off"
+        return {
+            "answer": answer,
+            "identity": runner_identity,
+            "reset_receipt": {
+                "seed": generation["seed"],
+                "base_state_sha256": generation["base_state_sha256"],
+                "reset_protocol_sha256": runner_identity["policy_sha256"],
+            },
+        }
+
+    def scorer(
+        _prompt: str,
+        _answer: str,
+        gold: Mapping[str, Any],
+        _scoring: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        captured["gold"] = json.loads(json.dumps(gold))
+        return {
+            "identity": scorer_identity,
+            "evidence_sha256": gold["evidence_sha256"],
+            "reset_receipt": {
+                "seed": 123,
+                "base_state_sha256": "state",
+                "reset_protocol_sha256": scorer_identity["policy_sha256"],
+            },
+            "dimensions": {
+                dimension: 1.0 for dimension in recall_answer_eval.ANSWER_DIMENSIONS
+            },
+        }
+
+    def fake_score_answer(
+        _scorer: object,
+        _prompt: str,
+        answer: str,
+        gold: Mapping[str, Any],
+        _identity: Mapping[str, Any],
+        _scoring: Mapping[str, Any],
+        *,
+        parent_run_id: str,
+        execution_ledger_file: Path,
+    ) -> tuple[dict[str, float] | None, str, str]:
+        captured["prompt"] = _prompt
+        captured["answer"] = answer
+        captured["gold"] = json.loads(json.dumps(gold))
+        score = 1.0 if "on" in answer else 0.0
+        return (
+            {dimension: score for dimension in recall_answer_eval.ANSWER_DIMENSIONS},
+            "",
+            parent_run_id[:64],
+        )
+
+    def no_leak(value: object) -> bool:
+        return recall_answer_eval._contains_forbidden_gold_input(value)
+
+    monkeypatch.setattr(recall_answer_eval, "_latest_episode_rows", lambda _path: episodes)
+    monkeypatch.setattr(
+        recall_answer_eval,
+        "validate_split_manifest",
+        lambda _path: {
+            "passed": True,
+            "manifest": split_manifest,
+            "entries": split_manifest["entries"],
+            "manifest_sha256": split_manifest["seal_sha256"],
+        },
+    )
+    monkeypatch.setattr(
+        recall_answer_eval,
+        "validate_gold_manifest",
+        lambda *_args, **_kwargs: {
+            "passed": True,
+            "reason": "verified",
+            "manifest_sha256": "a" * 64,
+            "rubric_sha256": rubric_sha,
+            "entries": gold_entries,
+            "payload": {"frozen_at": "2026-08-01T00:00:00Z"},
+        },
+    )
+    monkeypatch.setattr(
+        recall_answer_eval,
+        "validate_scorer_calibration_artifact",
+        lambda *_args, **_kwargs: {"passed": True, "manifest_sha256": "b" * 64},
+    )
+    monkeypatch.setattr(
+        recall_answer_eval,
+        "validate_adapter_registry",
+        lambda *_args, **_kwargs: {
+            "passed": True,
+            "manifest_sha256": "c" * 64,
+            "payload": {},
+        },
+    )
+    monkeypatch.setattr(
+        recall_answer_eval,
+        "_load_bound_turn",
+        lambda episode: (
+            SimpleNamespace(prompt=f"{prompt}:{episode.get('episode_id', '')}"),
+            "",
+        ),
+    )
+    monkeypatch.setattr(
+        recall_answer_eval,
+        "_context_for_episode",
+        lambda _episode: ("context", ""),
+    )
+    monkeypatch.setattr(
+        recall_answer_eval,
+        "_now_utc",
+        lambda: "2026-08-02T00:00:00Z",
+    )
+    monkeypatch.setattr(
+        recall_answer_eval,
+        "_score_answer",
+        fake_score_answer,
+    )
+
+    result = recall_answer_eval.evaluate_answer_episodes(
+        runner=runner,
+        scorer=scorer,
+        runner_identity=runner_identity,
+        scorer_identity={**scorer_identity, "evidence_manifest_sha256": "a" * 64},
+        split_manifest=split_manifest,
+        gold_manifest=seal_object(
+            {
+                "schema_version": 1,
+                "artifact_kind": "immutable-answer-gold-manifest",
+                "frozen_at": "2026-08-01T00:00:00Z",
+                "gold_id": "gold-id",
+                "gold_family_id": "family",
+                "version": "1",
+                "review_protocol_sha256": "e" * 64,
+                "rubric_sha256": rubric_sha,
+                "entries": list(gold_entries.values()),
+            }
+        ),
+        scorer_calibration=seal_object(
+            {
+                "schema_version": 3,
+                "artifact_kind": "preregistered-answer-scorer-calibration",
+                "frozen_at": "2026-08-01T00:00:00Z",
+                "scorer_identity": {k: v for k, v in scorer_identity.items()},
+                "scorer_identity_sha256": "0" * 64,
+                "review_protocol_sha256": "1" * 64,
+                "policy": {},
+                "calibration_run_id": "0" * 64,
+                "cases": [],
+                "metrics": {},
+                "gates": {},
+                "status": "passed",
+                "reason": "verified",
+            }
+        ),
+        review_ledger_file=tmp_path / "review.jsonl",
+        execution_ledger_file=tmp_path / "execution.jsonl",
+        adapter_registry=tmp_path / "adapter-registry.json",
+        min_independent_samples=1,
+        improvement_point_floor=0.0,
+        split="train",
+    )
+
+    print(json.dumps(result, indent=2, sort_keys=True))
+    assert result["status"] == "passed", result
+    assert captured.get("gold") is not None
+    assert not no_leak(captured["gold"])
+    assert captured["prompt"].startswith(prompt)
+    assert captured["answer"] in {"candidate answer on", "candidate answer off"}
+
+
+def test_evaluate_independent_answer_benchmark_projects_forbidden_gold_fields(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, Any] = {}
+    packets = []
+    for index in range(20):
+        packets.append(
+            {
+                "case_id": f"case-{index:02d}",
+                "prompt": f"How do frogs jump? {index}",
+                "prompt_content_sha256": recall_answer_eval._sha_text(
+                    f"How do frogs jump? {index}"
+                ),
+                "source_entry_sha256": f"b{index:063x}",
+                "split": "train",
+                "component_sha256": f"c{index:063x}",
+                "page_bindings": [
+                    {
+                        "page_id": f"page-{index}",
+                        "page_uid": f"uid-{index}",
+                        "content_sha256": f"d{index:063x}",
+                        "content_byte_length": 12,
+                    }
+                ],
+            }
+        )
+    evidence = {
+        "production_answer": "forbidden-leak",
+        "source_packet": {
+            "field_outcome": "should-not-pass",
+            "page_id": "page-1",
+            "evidence_chunks": [],
+        },
+    }
+    benchmark_manifest = {
+        "schema_version": 2,
+        "artifact_kind": "independent-answer-benchmark-manifest",
+        "source_kind": "machine_search_label_consensus",
+        "frozen_at": "2026-08-01T00:00:00Z",
+        "source_authority_sha256": "a" * 64,
+        "source_ledger_sha256": "b" * 64,
+        "source_ledger_path": str(tmp_path / "machine-source-ledger.json"),
+        "split_epoch_id": recall_answer_eval._canonical_sha(
+            {
+                "source_authority_sha256": "a" * 64,
+            }
+        ),
+        "cluster_counts": {"train": 20, "holdout": 0, "locked-test": 0},
+        "promotion_gates": {
+            "train_cluster_floor": True,
+            "locked_cluster_floor": True,
+        },
+        "promotion_status": "promotion_ready",
+        "entries": packets,
+    }
+    benchmark_manifest = recall_answer_eval.seal_object(benchmark_manifest)
+    bench_id = benchmark_manifest["seal_sha256"]
+    benchmark_split = benchmark_manifest["split_epoch_id"]
+    gold_entries = {}
+    for packet in packets:
+        episode_id = packet["case_id"]
+        answer = f"gold answer {episode_id}"
+        proof = recall_answer_eval._canonical_sha(
+            {
+                "episode_id": episode_id,
+                "gold_answer": answer,
+                "evidence": evidence,
+                "rubric_sha256": "f" * 64,
+            }
+        )
+        gold_entries[episode_id] = {
+            "episode_id": episode_id,
+            "gold_answer": answer,
+            "evidence": evidence,
+            "evidence_sha256": proof,
+            "review_provenance": {
+                "source_kind": "human_review",
+                "reviewer_receipt_sha256": "a" * 64,
+                "reviewed_at": "2026-08-01T00:00:00Z",
+            },
+        }
+    sample_evidence_sha = next(iter(gold_entries.values()))["evidence_sha256"]
+    runner_identity = {
+        "runner_id": "runner-1",
+        "model": "fixture-runner",
+        "system_sha256": "a" * 64,
+        "sampler_sha256": "b" * 64,
+        "policy_sha256": "c" * 64,
+    }
+    scorer_identity = {
+        "scorer_id": "scorer-1",
+        "version": "1",
+        "model": "fixture-scorer",
+        "system_sha256": "d" * 64,
+        "sampler_sha256": "e" * 64,
+        "policy_sha256": "f" * 64,
+        "rubric_sha256": "f" * 64,
+        "calibration_protocol_sha256": "1" * 64,
+        "evidence_manifest_sha256": "a" * 64,
+    }
+
+    def runner(
+        _prompt: str, _context: str, generation: Mapping[str, Any]
+    ) -> Mapping[str, Any]:
+        answer = (
+            "candidate answer on" if _context == "candidate-field" else "candidate answer off"
+        )
+        return {
+            "answer": answer,
+            "identity": runner_identity,
+            "reset_receipt": {
+                "seed": generation["seed"],
+                "base_state_sha256": generation["base_state_sha256"],
+                "reset_protocol_sha256": runner_identity["policy_sha256"],
+            },
+        }
+
+    def fake_score_answer(
+        _scorer: object,
+        _prompt: str,
+        _answer: str,
+        gold: Mapping[str, Any],
+        _identity: Mapping[str, Any],
+        _scoring: Mapping[str, Any],
+        *,
+        parent_run_id: str,
+        execution_ledger_file: Path,
+    ) -> tuple[dict[str, float] | None, str, str]:
+        captured["gold"] = json.loads(json.dumps(gold))
+        score = 1.0 if "on" in _answer else 0.0
+        return (
+            {dimension: score for dimension in recall_answer_eval.ANSWER_DIMENSIONS},
+            "",
+            parent_run_id[:64],
+        )
+
+    monkeypatch.setattr(
+        recall_answer_eval,
+        "validate_independent_answer_benchmark",
+        lambda *_args, **_kwargs: {
+            "passed": True,
+            "reason": "verified",
+            "payload": {
+                **benchmark_manifest,
+                "frozen_at": "2026-08-01T00:00:00Z",
+                "cluster_counts": {"train": 20, "holdout": 0, "locked-test": 0},
+                "promotion_gates": {
+                    "train_cluster_floor": True,
+                    "locked_cluster_floor": True,
+                },
+                "promotion_status": "promotion_ready",
+            },
+            "entries": {packet["case_id"]: packet for packet in packets},
+            "manifest_sha256": bench_id,
+            "split_epoch_id": benchmark_split,
+            "promotion_ready": True,
+            "manifest_path": "",
+        },
+    )
+    monkeypatch.setattr(
+        recall_answer_eval,
+        "validate_gold_manifest",
+        lambda *_args, **_kwargs: {
+            "passed": True,
+            "manifest_sha256": "a" * 64,
+            "rubric_sha256": "f" * 64,
+            "entries": gold_entries,
+            "payload": {"frozen_at": "2026-08-01T00:00:00Z"},
+        },
+    )
+    monkeypatch.setattr(
+        recall_answer_eval,
+        "validate_scorer_calibration_artifact",
+        lambda *_args, **_kwargs: {"passed": True, "manifest_sha256": "b" * 64},
+    )
+    monkeypatch.setattr(
+        recall_answer_eval,
+        "validate_adapter_registry",
+        lambda *_args, **_kwargs: {
+            "passed": True,
+            "manifest_sha256": "c" * 64,
+            "payload": {},
+        },
+    )
+    monkeypatch.setattr(
+        recall_answer_eval,
+        "_field_environment_contexts",
+        lambda *_, **__: (
+            {
+                "candidate_field": "candidate-field",
+                "production_teacher": "production-teacher",
+            },
+            {},
+            "",
+        ),
+    )
+    monkeypatch.setattr(
+        recall_answer_eval,
+        "_now_utc",
+        lambda: "2026-08-02T00:00:00Z",
+    )
+    monkeypatch.setattr(
+        recall_answer_eval,
+        "_score_answer",
+        fake_score_answer,
+    )
+
+    result = recall_answer_eval.evaluate_independent_answer_benchmark(
+        runner=runner,
+        scorer=lambda *_args, **_kwargs: {
+            "identity": scorer_identity,
+            "evidence_sha256": sample_evidence_sha,
+            "reset_receipt": {
+                "seed": 1,
+                "base_state_sha256": "state",
+                "reset_protocol_sha256": scorer_identity["policy_sha256"],
+            },
+            "dimensions": {
+                dimension: 1.0 for dimension in recall_answer_eval.ANSWER_DIMENSIONS
+            },
+        },
+        runner_identity=runner_identity,
+        scorer_identity={**scorer_identity, "evidence_manifest_sha256": "a" * 64},
+        benchmark_manifest=benchmark_manifest,
+        gold_manifest=seal_object(
+            {
+                "schema_version": 1,
+                "artifact_kind": "immutable-answer-gold-manifest",
+                "frozen_at": "2026-08-01T00:00:00Z",
+                "gold_id": "gold-id",
+                "gold_family_id": "family",
+                "version": "1",
+                "review_protocol_sha256": "e" * 64,
+                "rubric_sha256": "f" * 64,
+                "entries": list(gold_entries.values()),
+            }
+        ),
+        scorer_calibration=seal_object(
+            {
+                "schema_version": 3,
+                "artifact_kind": "preregistered-answer-scorer-calibration",
+                "frozen_at": "2026-08-01T00:00:00Z",
+                "scorer_identity": {k: v for k, v in scorer_identity.items()},
+                "scorer_identity_sha256": "0" * 64,
+                "review_protocol_sha256": "1" * 64,
+                "policy": {},
+                "calibration_run_id": "0" * 64,
+                "cases": [],
+                "metrics": {},
+                "gates": {},
+                "status": "passed",
+                "reason": "verified",
+            }
+        ),
+        field_environment_replay=recall_answer_eval.builtin_field_environment_replay,
+        field_environment_identity=recall_answer_eval.builtin_field_environment_identity(),
+        consensus_ledger_file=tmp_path / "consensus.jsonl",
+        review_ledger_file=tmp_path / "review.jsonl",
+        execution_ledger_file=tmp_path / "execution.jsonl",
+        adapter_registry=tmp_path / "adapter-registry.json",
+        output_file=tmp_path / "benchmark-answer.json",
+    )
+
+    print(json.dumps(result, indent=2, sort_keys=True))
+    assert result["status"] == "passed", result
+    assert not recall_answer_eval._contains_forbidden_gold_input(captured["gold"])
+    assert captured["gold"]["evidence"]["source_packet"]["page_id"] == "page-1"
 
 
 def test_receipt_chunk_requires_segment_v2_commit_identity(
@@ -318,7 +890,11 @@ def _install_deterministic_builtin_field_replay(
         calls["queue"].append(
             {"page_ids": page_ids, "certificate_ids": certificate_ids}
         )
-        kwargs["store"].state.commits.append(page_ids)
+        state = kwargs["store"].state
+        if hasattr(state, "commits"):
+            state.commits.append(page_ids)
+        else:
+            state.pending_teacher_commits.append({"page_ids": page_ids})
         return {"queued": len(page_ids)}
 
     def candidate_verify(prompt: str, page_ids: list[str], **_kwargs):
@@ -426,6 +1002,55 @@ def test_builtin_field_environment_replay_uses_shared_production_seams(
         },
         ledger_file=execution_ledger,
     ) == ""
+
+
+def test_independent_field_replay_never_loads_live_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from chronovisor.recall.recall_field_store import RecallFieldStore
+
+    identity, calls = _install_deterministic_builtin_field_replay(tmp_path, monkeypatch)
+
+    def reject_live_load(*_args, **_kwargs):
+        raise AssertionError("independent replay read live Field state")
+
+    monkeypatch.setattr(RecallFieldStore, "load", reject_live_load)
+    contexts, evidence, error = recall_answer_eval._field_environment_contexts(
+        recall_answer_eval.builtin_field_environment_replay,
+        prompt="independent clean replay",
+        episode={
+            "episode_id": "independent-case",
+            "session_hash": "preseeded-session",
+            "evaluation_kind": "independent-benchmark-field-replay",
+        },
+        pair_seed=1729,
+        identity=identity,
+        parent_run_id="b" * 64,
+        execution_ledger_file=tmp_path / "execution.jsonl",
+    )
+
+    assert error == ""
+    assert set(contexts) == {"candidate_field", "production_teacher"}
+    assert evidence["base_state_sha256"] == recall_answer_eval._canonical_sha(
+        {
+            "schema_version": 2,
+            "session_hash": "preseeded-session",
+            "host": "answer-eval",
+            "topic_epoch": 0,
+            "turn": 0,
+            "seq": 0,
+            "created_at_epoch": 0.0,
+            "updated_at_epoch": 0.0,
+            "topic_signature": [],
+            "topic_prompt_hash": "",
+            "active": {},
+            "shadow": {},
+            "pending_teacher_commits": [],
+            "negative_contributions": {},
+            "full_search_fallback": True,
+        }
+    )
+    assert len(calls["turn"]) == 2
 
 
 def test_real_train_and_locked_artifact_set_reaches_growth_gate(
@@ -1891,3 +2516,424 @@ def test_authority_confidence_and_seed_are_not_caller_selectable() -> None:
         recall_answer_eval.evaluate_answer_episodes(**base, confidence=0.01)
     with pytest.raises(ValueError, match="bootstrap seed is fixed"):
         recall_answer_eval.evaluate_answer_episodes(**base, seed=7)
+
+
+def _independent_packet() -> dict:
+    prompt = "What is the frozen fact?"
+    excerpt = "The frozen fact is 42."
+    evidence = f"[PAGE fact-page]\n{excerpt}"
+    packet = {
+        "schema_version": 1,
+        "source_kind": "synthetic_fixture",
+        "case_id": "case-1",
+        "prompt": prompt,
+        "prompt_content_sha256": recall_answer_eval._sha_text(prompt),
+        "evidence_chunks": [
+            {
+                "page_id": "fact-page",
+                "content_sha256": "1" * 64,
+                "byte_start": 0,
+                "byte_end": len(excerpt.encode("utf-8")),
+                "excerpt": excerpt,
+                "excerpt_sha256": recall_answer_eval._sha_text(excerpt),
+                "truncated": False,
+            }
+        ],
+        "reference_evidence_sha256": recall_answer_eval._sha_text(evidence),
+        "page_bindings": [
+            {
+                "page_id": "fact-page",
+                "page_uid": "uid-fact-page",
+                "content_sha256": "1" * 64,
+                "content_byte_length": len(excerpt.encode("utf-8")),
+            }
+        ],
+        "source_authority_sha256": "2" * 64,
+        "source_entry_sha256": "3" * 64,
+        "split": "train",
+        "split_epoch_id": "",
+        "component_sha256": "",
+        "source_frozen_at": "2026-07-01T00:00:00Z",
+        "projection_policy_sha256": (
+            recall_answer_eval.BOUNDED_EVIDENCE_PROJECTION_POLICY_SHA256
+        ),
+    }
+    assignments, epoch, _counts = recall_answer_eval._benchmark_component_assignments(
+        [packet], source_authority_sha256=packet["source_authority_sha256"]
+    )
+    packet["component_sha256"], packet["split"] = assignments[packet["case_id"]]
+    packet["split_epoch_id"] = epoch
+    return packet
+
+
+def _independent_benchmark(packet: dict) -> dict:
+    return seal_object(
+        {
+            "schema_version": 1,
+            "artifact_kind": "independent-answer-benchmark-manifest",
+            "source_kind": packet["source_kind"],
+            "frozen_at": packet["source_frozen_at"],
+            "source_authority_sha256": packet["source_authority_sha256"],
+            "split_epoch_id": packet["split_epoch_id"],
+            "cluster_counts": {"train": 1, "holdout": 0, "locked-test": 0},
+            "promotion_gates": {
+                "train_cluster_floor": False,
+                "locked_cluster_floor": False,
+            },
+            "promotion_status": "waiting_for_machine_expansion",
+            "entries": [packet],
+        }
+    )
+
+
+def test_independent_benchmark_rejects_treatment_context_and_is_create_once(
+    tmp_path: Path,
+) -> None:
+    packet = _independent_packet()
+    payload = {
+        "schema_version": 1,
+        "artifact_kind": "independent-answer-benchmark-manifest",
+        "source_kind": "synthetic_fixture",
+        "frozen_at": packet["source_frozen_at"],
+        "source_authority_sha256": packet["source_authority_sha256"],
+        "split_epoch_id": packet["split_epoch_id"],
+        "cluster_counts": {"train": 1, "holdout": 0, "locked-test": 0},
+        "promotion_gates": {
+            "train_cluster_floor": False,
+            "locked_cluster_floor": False,
+        },
+        "promotion_status": "waiting_for_machine_expansion",
+        "entries": [packet],
+    }
+    path = tmp_path / "benchmark.json"
+    first = recall_answer_eval._create_once_sealed(path, payload)
+    second = recall_answer_eval._create_once_sealed(path, payload)
+
+    assert first == second
+    assert recall_answer_eval.validate_independent_answer_benchmark(path)[
+        "passed"
+    ] is True
+
+    treatment_derived = {**packet, "rendered_context": "candidate Recall output"}
+    treatment_payload = {**payload, "entries": [treatment_derived]}
+    assert recall_answer_eval.validate_independent_answer_benchmark(
+        seal_object(treatment_payload)
+    ) == {"passed": False, "reason": "independent_benchmark_entry_invalid"}
+    with pytest.raises(DurableStateError, match="immutable artifact conflict"):
+        recall_answer_eval._create_once_sealed(
+            path, {**payload, "frozen_at": "2026-07-02T00:00:00Z"}
+        )
+
+
+def test_machine_gold_recomputes_packet_digest_and_shape(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    valid_packet = _independent_packet()
+    reference_evidence = recall_answer_eval._packet_reference_evidence(valid_packet)
+    packet = {**valid_packet, "prompt_content_sha256": "9" * 64}
+    evidence = {
+        "source_packet": packet,
+        "source_packet_sha256": recall_answer_eval._sealed_canonical_sha(packet),
+        "source_frozen_at": packet["source_frozen_at"],
+        "reference_policy_sha256": (
+            recall_answer_eval.DETERMINISTIC_GOLD_PROJECTION_POLICY_SHA256
+        ),
+    }
+    rubric_sha = "6" * 64
+    entry = {
+        "episode_id": packet["case_id"],
+        "gold_answer": reference_evidence,
+        "evidence": evidence,
+    }
+    entry["evidence_sha256"] = recall_answer_eval._canonical_sha(
+        {
+            "episode_id": entry["episode_id"],
+            "gold_answer": entry["gold_answer"],
+            "evidence": evidence,
+            "rubric_sha256": rubric_sha,
+        }
+    )
+    subject = recall_answer_eval._gold_machine_subject(
+        entry,
+        rubric_sha256=rubric_sha,
+        gold_family_id="family",
+        expected_split="train",
+        split_epoch_id=packet["split_epoch_id"],
+    )
+    entry["review_provenance"] = {
+        "source_kind": "adjudicated_benchmark",
+        "consensus_receipt_sha256": "7" * 64,
+        "subject_sha256": recall_answer_eval._sealed_canonical_sha(subject),
+        "reviewed_at": "2026-07-02T00:00:00Z",
+    }
+    monkeypatch.setattr(
+        recall_answer_eval,
+        "validate_machine_consensus_receipt",
+        lambda *_args, **_kwargs: {
+            "passed": True,
+            "receipt": {"created_at": "2026-07-02T00:00:00Z"},
+        },
+    )
+    manifest = seal_object(
+        {
+            "schema_version": 1,
+            "artifact_kind": "immutable-answer-gold-manifest",
+            "frozen_at": "2026-07-03T00:00:00Z",
+            "gold_id": "gold",
+            "gold_family_id": "family",
+            "version": "machine-consensus-v1",
+            "review_protocol_sha256": (
+                recall_answer_eval.DETERMINISTIC_GOLD_PROJECTION_POLICY_SHA256
+            ),
+            "rubric_sha256": rubric_sha,
+            "entries": [entry],
+        }
+    )
+
+    assert recall_answer_eval.validate_gold_manifest(
+        manifest,
+        required_episode_ids=[packet["case_id"]],
+        expected_split="train",
+        split_epoch_id=packet["split_epoch_id"],
+        benchmark_manifest=_independent_benchmark(valid_packet),
+    ) == {"passed": False, "reason": "machine_gold_shape_invalid"}
+
+
+def test_independent_packet_rejects_impossible_length_and_duplicates() -> None:
+    packet = _independent_packet()
+    impossible = copy.deepcopy(packet)
+    impossible["evidence_chunks"][0]["byte_end"] += 1
+    impossible["evidence_chunks"][0]["excerpt"] += "x"
+    impossible["evidence_chunks"][0]["excerpt_sha256"] = (
+        recall_answer_eval._sha_text(impossible["evidence_chunks"][0]["excerpt"])
+    )
+    duplicate = copy.deepcopy(packet)
+    duplicate["evidence_chunks"].append(copy.deepcopy(duplicate["evidence_chunks"][0]))
+    duplicate["page_bindings"].append(copy.deepcopy(duplicate["page_bindings"][0]))
+
+    assert (
+        recall_answer_eval._independent_gold_source_packet_error(impossible)
+        == "independent_gold_source_packet_invalid"
+    )
+    assert (
+        recall_answer_eval._independent_gold_source_packet_error(duplicate)
+        == "independent_gold_source_packet_invalid"
+    )
+
+
+def test_machine_gold_rejects_alternate_benchmark_packet_graft(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    benchmark_packet = _independent_packet()
+    graft = copy.deepcopy(benchmark_packet)
+    graft["evidence_chunks"][0]["excerpt"] = "A different frozen fact."
+    graft["evidence_chunks"][0]["byte_end"] = len(
+        graft["evidence_chunks"][0]["excerpt"].encode("utf-8")
+    )
+    graft["evidence_chunks"][0]["excerpt_sha256"] = recall_answer_eval._sha_text(
+        graft["evidence_chunks"][0]["excerpt"]
+    )
+    graft["page_bindings"][0]["content_byte_length"] = graft["evidence_chunks"][0][
+        "byte_end"
+    ]
+    graft_reference = (
+        f"[PAGE {graft['evidence_chunks'][0]['page_id']}]\n"
+        f"{graft['evidence_chunks'][0]['excerpt']}"
+    )
+    graft["reference_evidence_sha256"] = recall_answer_eval._sha_text(
+        graft_reference
+    )
+    rubric_sha = "6" * 64
+    evidence = {
+        "source_packet": graft,
+        "source_packet_sha256": recall_answer_eval._sealed_canonical_sha(graft),
+        "source_frozen_at": graft["source_frozen_at"],
+        "reference_policy_sha256": (
+            recall_answer_eval.DETERMINISTIC_GOLD_PROJECTION_POLICY_SHA256
+        ),
+    }
+    entry = {
+        "episode_id": graft["case_id"],
+        "gold_answer": recall_answer_eval._packet_reference_evidence(graft),
+        "evidence": evidence,
+    }
+    entry["evidence_sha256"] = recall_answer_eval._canonical_sha(
+        {
+            "episode_id": entry["episode_id"],
+            "gold_answer": entry["gold_answer"],
+            "evidence": evidence,
+            "rubric_sha256": rubric_sha,
+        }
+    )
+    subject = recall_answer_eval._gold_machine_subject(
+        entry,
+        rubric_sha256=rubric_sha,
+        gold_family_id="family",
+        expected_split="train",
+        split_epoch_id=graft["split_epoch_id"],
+    )
+    entry["review_provenance"] = {
+        "source_kind": "adjudicated_benchmark",
+        "consensus_receipt_sha256": "7" * 64,
+        "subject_sha256": recall_answer_eval._sealed_canonical_sha(subject),
+        "reviewed_at": "2026-07-02T00:00:00Z",
+    }
+    monkeypatch.setattr(
+        recall_answer_eval,
+        "validate_machine_consensus_receipt",
+        lambda *_args, **_kwargs: {
+            "passed": True,
+            "receipt": {"created_at": "2026-07-02T00:00:00Z"},
+        },
+    )
+    manifest = seal_object(
+        {
+            "schema_version": 1,
+            "artifact_kind": "immutable-answer-gold-manifest",
+            "frozen_at": "2026-07-03T00:00:00Z",
+            "gold_id": "gold",
+            "gold_family_id": "family",
+            "version": "machine-consensus-v1",
+            "review_protocol_sha256": (
+                recall_answer_eval.DETERMINISTIC_GOLD_PROJECTION_POLICY_SHA256
+            ),
+            "rubric_sha256": rubric_sha,
+            "entries": [entry],
+        }
+    )
+
+    assert recall_answer_eval.validate_gold_manifest(
+        manifest,
+        required_episode_ids=[graft["case_id"]],
+        expected_split="train",
+        split_epoch_id=graft["split_epoch_id"],
+        benchmark_manifest=_independent_benchmark(benchmark_packet),
+    ) == {"passed": False, "reason": "machine_gold_shape_invalid"}
+
+
+def test_benchmark_successor_keeps_predecessor_splits_and_rejects_cross_split_merge() -> None:
+    packets = []
+    for index in range(12):
+        packet = copy.deepcopy(_independent_packet())
+        packet["case_id"] = f"case-{index:02d}"
+        packet["page_bindings"][0]["page_id"] = f"page-{index:02d}"
+        packet["page_bindings"][0]["page_uid"] = f"uid-{index:02d}"
+        packet["page_bindings"][0]["content_sha256"] = f"{index + 1:064x}"
+        packet["evidence_chunks"][0]["page_id"] = f"page-{index:02d}"
+        packet["evidence_chunks"][0]["content_sha256"] = f"{index + 1:064x}"
+        packets.append(packet)
+    first, first_epoch, _counts = recall_answer_eval._benchmark_component_assignments(
+        packets, source_authority_sha256="a" * 64
+    )
+    predecessor = []
+    for packet in packets:
+        old = copy.deepcopy(packet)
+        old["component_sha256"], old["split"] = first[old["case_id"]]
+        old["split_epoch_id"] = first_epoch
+        predecessor.append(old)
+    successor_packets = copy.deepcopy(packets)
+    extra = copy.deepcopy(packets[0])
+    extra["case_id"] = "case-new"
+    extra["page_bindings"][0]["page_id"] = "page-new"
+    extra["page_bindings"][0]["page_uid"] = "uid-new"
+    extra["page_bindings"][0]["content_sha256"] = "f" * 64
+    successor_packets.append(extra)
+    successor, _epoch, _counts = recall_answer_eval._benchmark_component_assignments(
+        successor_packets,
+        source_authority_sha256="b" * 64,
+        predecessor_entries=predecessor,
+        predecessor_epoch_id=first_epoch,
+    )
+
+    assert all(
+        successor[packet["case_id"]][1] == packet["split"]
+        for packet in predecessor
+    )
+    distinct = next(
+        (left, right)
+        for left in predecessor
+        for right in predecessor
+        if left["split"] != right["split"]
+    )
+    merged = copy.deepcopy(packets[0])
+    merged["case_id"] = "merged"
+    merged["page_bindings"] = [
+        copy.deepcopy(distinct[0]["page_bindings"][0]),
+        copy.deepcopy(distinct[1]["page_bindings"][0]),
+    ]
+    with pytest.raises(ValueError, match="merge predecessor splits"):
+        recall_answer_eval._benchmark_component_assignments(
+            [merged],
+            source_authority_sha256="c" * 64,
+            predecessor_entries=predecessor,
+            predecessor_epoch_id=first_epoch,
+        )
+
+
+def test_machine_calibration_controls_are_exact_40_20_20_and_regenerated() -> None:
+    entries = {}
+    for index in range(20):
+        packet = copy.deepcopy(_independent_packet())
+        packet["case_id"] = f"holdout-{index:02d}"
+        packet["split"] = "holdout"
+        packet["component_sha256"] = f"{index + 1:064x}"
+        packet["source_entry_sha256"] = f"{index + 101:064x}"
+        entries[packet["case_id"]] = packet
+    controls = recall_answer_eval._machine_calibration_controls(
+        {"entries": entries}
+    )
+
+    assert len(controls) == 40
+    assert len({control["pair_id"] for control in controls}) == 20
+    assert len({control["component_sha256"] for control in controls}) == 20
+    assert {control["variant"] for control in controls} == {
+        "positive",
+        "wrong_fact",
+        "missing_citation",
+        "wrong_page",
+    }
+    assert all(
+        control["expected_scores_sha256"]
+        == recall_answer_eval._canonical_sha(control["expected_scores"])
+        and control["answer_sha256"]
+        == recall_answer_eval._sha_text(control["answer"])
+        for control in controls
+    )
+    forged = copy.deepcopy(controls[0])
+    forged["expected_scores"]["correctness"] = 0.0
+    regenerated = {
+        control["control_id"]: control
+        for control in recall_answer_eval._machine_calibration_controls(
+            {"entries": entries}
+        )
+    }
+    assert forged != regenerated[forged["control_id"]]
+    subject = recall_answer_eval._machine_calibration_subject(
+        controls[0], benchmark_manifest_sha256="a" * 64
+    )
+    assert subject["control"] == controls[0]
+    assert subject["control_sha256"] == recall_answer_eval._canonical_sha(
+        controls[0]
+    )
+
+
+def test_legacy_prompt_join_hash_migrates_to_full_content_sha(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    episode = {
+        "schema_version": recall_answer_eval.LEGACY_ANSWER_EPISODE_SCHEMA_VERSION,
+        "episode_id": "legacy",
+        "prompt_sha256": "0123456789abcdef",
+    }
+    monkeypatch.setattr(
+        recall_answer_eval,
+        "_load_bound_turn",
+        lambda _episode: (SimpleNamespace(prompt="full legacy prompt"), ""),
+    )
+
+    entry = recall_answer_eval._episode_manifest_entry(episode)
+
+    assert entry["prompt_hash"] == "0123456789abcdef"
+    assert entry["query_sha256"] == recall_answer_eval._sha_text(
+        "full legacy prompt"
+    )
