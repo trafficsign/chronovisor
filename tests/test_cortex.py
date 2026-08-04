@@ -660,6 +660,36 @@ def test_cortex_event_cursor_follows_activity_across_field_sessions(
     ]
 
 
+def test_cortex_projection_center_tracks_mode_bar_safe_area() -> None:
+    script = (
+        dashboard.STATIC_DIR / "cortex.js"
+    ).read_text(encoding="utf-8")
+    center_contract = script.split(
+        "  function updateProjectionCenter()", 1
+    )[1].split("\n  function resize()", 1)[0]
+    project_all = script.split(
+        "  function projectAll()", 1
+    )[1].split("\n  function fog(", 1)[0]
+
+    assert 'const modeBar = document.getElementById("modeBar");' in script
+    assert "const stageBounds = stage.getBoundingClientRect();" in center_contract
+    assert "const modeBarBounds = modeBar.getBoundingClientRect();" in center_contract
+    assert "(modeBarBounds.bottom - stageBounds.top)" in center_contract
+    assert "(height / stageBounds.height)" in center_contract
+    assert "projectionCenterX = width / 2;" in center_contract
+    assert "projectionCenterY = height / 2;" in center_contract
+    assert "projectionCenterY = (projectionTopInset + height) / 2;" in center_contract
+    assert "updateProjectionCenter();" in script
+    assert "projectionCenterX = width / 2;" not in project_all
+    assert "projectionCenterY = height / 2;" not in project_all
+    assert "getBoundingClientRect" not in project_all
+    assert "resizeObserver.observe(stage);" in script
+    assert "resizeObserver.observe(modeBar);" in script
+    assert "target.dataset.projectionCenterX" in script
+    assert "target.dataset.projectionCenterY" in script
+    assert "target.dataset.projectionTopInset" in script
+
+
 def test_cortex_static_view_preserves_fable_layout_and_uses_live_data() -> None:
     static = dashboard.STATIC_DIR
     html = (static / "cortex.html").read_text(encoding="utf-8")

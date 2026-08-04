@@ -137,6 +137,7 @@
 
   const stage = document.getElementById("stage");
   const canvas = document.getElementById("gl");
+  const modeBar = document.getElementById("modeBar");
   const context = canvas.getContext("2d");
   let width = 0;
   let height = 0;
@@ -159,6 +160,7 @@
   let projectionSinPhi = 0;
   let projectionCenterX = 0;
   let projectionCenterY = 0;
+  let projectionTopInset = 0;
   let labelFont = "10.5px monospace";
   let dragging = false;
   let downPoint = null;
@@ -578,9 +580,36 @@
     );
   }
 
+  function updateProjectionCenter() {
+    projectionCenterX = width / 2;
+    projectionCenterY = height / 2;
+    projectionTopInset = 0;
+    if (!modeBar || width <= 0 || height <= 0) return;
+
+    const stageBounds = stage.getBoundingClientRect();
+    const modeBarBounds = modeBar.getBoundingClientRect();
+    if (
+      !Number.isFinite(stageBounds.top)
+      || !Number.isFinite(stageBounds.height)
+      || stageBounds.height <= 0
+      || !Number.isFinite(modeBarBounds.bottom)
+      || !Number.isFinite(modeBarBounds.height)
+      || modeBarBounds.height <= 0
+    ) {
+      return;
+    }
+
+    const topInset =
+      (modeBarBounds.bottom - stageBounds.top) * (height / stageBounds.height);
+    if (!Number.isFinite(topInset) || topInset <= 0 || topInset >= height) return;
+    projectionTopInset = topInset;
+    projectionCenterY = (projectionTopInset + height) / 2;
+  }
+
   function resize() {
     width = stage.clientWidth;
     height = stage.clientHeight;
+    updateProjectionCenter();
     canvas.width = Math.max(1, Math.round(width * pixelRatio));
     canvas.height = Math.max(1, Math.round(height * pixelRatio));
     labelFont = `10.5px ${getComputedStyle(document.body).getPropertyValue("--mono")}`;
@@ -869,8 +898,6 @@
     projectionSinTheta = Math.sin(camera.theta);
     projectionCosPhi = Math.cos(camera.phi);
     projectionSinPhi = Math.sin(camera.phi);
-    projectionCenterX = width / 2;
-    projectionCenterY = height / 2;
     for (let index = 0; index < nodes.length; index += 1) {
       const node = nodes[index];
       const localX = node.x - camera.pivotX;
@@ -1304,6 +1331,9 @@
     target.dataset.simulationSettledTicks = String(simulationSettledTicks);
     target.dataset.simulationMaxVelocity =
       simulationLastMaxVelocity.toFixed(4);
+    target.dataset.projectionCenterX = projectionCenterX.toFixed(1);
+    target.dataset.projectionCenterY = projectionCenterY.toFixed(1);
+    target.dataset.projectionTopInset = projectionTopInset.toFixed(1);
   }
 
   function publishVisualMetrics(time) {
@@ -4481,7 +4511,9 @@
       }
       initializeGraph(graphData);
       resize();
-      new ResizeObserver(resize).observe(stage);
+      const resizeObserver = new ResizeObserver(resize);
+      resizeObserver.observe(stage);
+      if (modeBar) resizeObserver.observe(modeBar);
       buildTree();
       renderPanel();
       bindCanvasInteractions();
