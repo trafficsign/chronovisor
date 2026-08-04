@@ -324,10 +324,82 @@ def test_audit_store_keeps_a_bounded_tail_and_refreshes_summary(tmp_path: Path) 
     assert summary["retained_records"] == 2
     assert summary["decisions"] == {
         "agreed": 1,
+        "conservative_veto_bypassed_by_lane_policy": 0,
+        "conservative_veto_fired": 0,
+        "dissent_effect_classes": {},
+        "model_conservative_vote_rates": {},
         "pair_agreement": 1,
         "tie_break_used": 0,
         "total": 2,
         "unresolved_quarantine": 1,
+    }
+
+
+def test_decision_summary_aggregates_veto_dissent_and_model_rates(
+    tmp_path: Path,
+) -> None:
+    store = LocalConsensusAuditStore(tmp_path / "audit")
+    store.append(
+        {
+            "kind": "decision",
+            "status": "agreed",
+            "conservative_veto_fired": True,
+            "conservative_veto_bypassed_by_lane_policy": True,
+            "dissent_effect_class": "conservative",
+            "votes": [
+                {"model": "model-a", "valid": True, "effect_class": "mutating"},
+                {
+                    "model": "model-b",
+                    "valid": True,
+                    "effect_class": "conservative",
+                },
+                {"model": "model-a", "valid": True, "effect_class": "mutating"},
+            ],
+        }
+    )
+    store.append(
+        {
+            "kind": "decision",
+            "status": "quarantined",
+            "conservative_veto_fired": True,
+            "conservative_veto_bypassed_by_lane_policy": False,
+            "dissent_effect_class": "unclassifiable",
+            "votes": [
+                {
+                    "model": "model-b",
+                    "valid": True,
+                    "effect_class": "conservative",
+                },
+                {
+                    "model": "model-c",
+                    "valid": False,
+                    "effect_class": "conservative",
+                },
+            ],
+        }
+    )
+
+    summary = json.loads(store.summary_file.read_text(encoding="utf-8"))
+    decisions = summary["decisions"]
+
+    assert summary["schema_version"] == 3
+    assert decisions["conservative_veto_fired"] == 2
+    assert decisions["conservative_veto_bypassed_by_lane_policy"] == 1
+    assert decisions["dissent_effect_classes"] == {
+        "conservative": 1,
+        "unclassifiable": 1,
+    }
+    assert decisions["model_conservative_vote_rates"] == {
+        "model-a": {
+            "valid_votes": 2,
+            "conservative_votes": 0,
+            "conservative_rate": 0.0,
+        },
+        "model-b": {
+            "valid_votes": 2,
+            "conservative_votes": 2,
+            "conservative_rate": 1.0,
+        },
     }
 
 

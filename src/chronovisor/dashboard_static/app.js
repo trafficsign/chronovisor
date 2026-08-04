@@ -2964,12 +2964,32 @@ function render(snapshot) {
   const decisionSummary = consensusSummary.decisions || {};
   const evaluationSummary = (consensusSummary.evaluation || {}).decisions || {};
   const policyCounts = ((status.decision_policies || {}).counts) || {};
+  const dissentEffects = decisionSummary.dissent_effect_classes || {};
+  const dissentSummary = Object.entries(dissentEffects)
+    .filter(([, count]) => intValue(count) > 0)
+    .map(([effect, count]) => `${effect} ${intValue(count)}`)
+    .join(" / ") || "none";
+  const modelConservativeRates = decisionSummary.model_conservative_vote_rates || {};
+  const conservativeVoteSummary = Object.entries(modelConservativeRates)
+    .map(([modelName, counts]) => {
+      const rate = numeric(counts?.conservative_rate)
+        ? pctLabel(counts.conservative_rate)
+        : "0.0%";
+      return `${shortName(modelName)} ${rate}`;
+    })
+    .join(" / ") || "none";
+  const vetoSummary = [
+    `veto ${intValue(decisionSummary.conservative_veto_fired)}`,
+    `bypassed ${intValue(decisionSummary.conservative_veto_bypassed_by_lane_policy)}`,
+    `dissent ${dissentSummary}`,
+    `conservative votes ${conservativeVoteSummary}`,
+  ].join(" · ");
   const activeModels = (consensus.activities || [])
     .map((item) => [item.role, item.model].filter(Boolean).join(" · "))
     .filter(Boolean);
   els.localConsensus.textContent = consensus.active
-    ? `${intValue(consensus.count)} active · ${activeModels.join(" · ")}`
-    : `${intValue(decisionSummary.total)} routine · ${intValue(decisionSummary.pair_agreement)} pair · ${intValue(decisionSummary.tie_break_used)} tie · ${intValue(decisionSummary.unresolved_quarantine)} quarantined · ${intValue(evaluationSummary.total)} eval · ${intValue(policyCounts.shadow)} shadow / ${intValue(policyCounts.enabled)} enabled`;
+    ? `${intValue(consensus.count)} active · ${activeModels.join(" · ")} · ${vetoSummary}`
+    : `${intValue(decisionSummary.total)} routine · ${intValue(decisionSummary.pair_agreement)} pair · ${intValue(decisionSummary.tie_break_used)} tie · ${intValue(decisionSummary.unresolved_quarantine)} quarantined · ${vetoSummary} · ${intValue(evaluationSummary.total)} eval · ${intValue(policyCounts.shadow)} shadow / ${intValue(policyCounts.enabled)} enabled`;
   const repair = status.frontier_repair || {};
   const repairSummary = repair.summary || {};
   const activeRepair = repair.active_incident || ((repair.process_activity || {}).latest) || {};

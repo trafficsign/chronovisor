@@ -2370,9 +2370,13 @@ def _empty_local_consensus_summary() -> dict[str, Any]:
         "pair_agreement": 0,
         "tie_break_used": 0,
         "unresolved_quarantine": 0,
+        "conservative_veto_fired": 0,
+        "conservative_veto_bypassed_by_lane_policy": 0,
+        "dissent_effect_classes": {},
+        "model_conservative_vote_rates": {},
     }
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "retained_records": 0,
         "routine_records": 0,
         "sessions": sessions,
@@ -2553,6 +2557,17 @@ def _decision_trace_outcome(
         "Raw retained" if task_role.startswith("ingest") else "Input retained"
     )
     if trace_state == "agreed":
+        if (decision or {}).get("conservative_veto_bypassed_by_lane_policy") is True:
+            dissent_effect = str(
+                (decision or {}).get("dissent_effect_class") or "unclassifiable"
+            )
+            return {
+                "kind": "approved",
+                "reason": "Lane policy bypassed conservative veto",
+                "data": f"Dissent effect: {dissent_effect}",
+                "next": "Mutation may proceed",
+                "code": "conservative_veto_bypassed_by_lane_policy",
+            }
         return {
             "kind": "approved",
             "reason": "Safe local quorum reached",
@@ -2813,7 +2828,11 @@ def _decision_trace_snapshot(
         elif decision and decision.get("pair_agreement"):
             summary = "2/2 pair agreement"
         elif decision and decision.get("tie_break_used"):
-            summary = "2/3 quorum after tie-break"
+            summary = (
+                "2/3 quorum · conservative veto bypassed by lane policy"
+                if decision.get("conservative_veto_bypassed_by_lane_policy")
+                else "2/3 quorum after tie-break"
+            )
         else:
             summary = "Local quorum agreed"
     elif decision_status == "quarantined":
@@ -2987,6 +3006,9 @@ def _local_consensus_snapshot(limit: int = 40) -> dict[str, Any]:
                         "pair_safe_resolution_without_tie",
                         "signature_majority_resolution",
                         "safe_policy_resolution",
+                        "conservative_veto_fired",
+                        "conservative_veto_bypassed_by_lane_policy",
+                        "dissent_effect_class",
                     )
                 }
             )

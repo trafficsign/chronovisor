@@ -1484,6 +1484,9 @@ class TestIngestFrontierGate:
             lane_contract_manifest_sha256,
             lane_contract_sha256,
         )
+        from chronovisor.decision.decision_router import (
+            QUORUM_SAFETY_POLICY_VERSION,
+        )
         from chronovisor.ingest import ingest
 
         def production_review_stub(*_args, **_kwargs):
@@ -1553,7 +1556,10 @@ class TestIngestFrontierGate:
         }
         assert authority["router"] == router_audit
         assert authority["source"] == "adopted_local_consensus"
-        assert authority["quorum_safety_policy_version"] == 1
+        assert (
+            authority["quorum_safety_policy_version"]
+            == QUORUM_SAFETY_POLICY_VERSION
+        )
         assert "tie_break_adjudication_policy_version" not in authority
         assert ingest._ingest_review_authority_shape_error(authority) is None
 

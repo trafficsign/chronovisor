@@ -19,10 +19,10 @@ from chronovisor.core import ollama
 from chronovisor.core.canonical_json import (
     canonical_json_sha256_strict as _sha256_json,
 )
-from chronovisor.core.durable_state import canonical_sha256
 from chronovisor.core.canonical_json import (
     canonical_json_strict as _canonical_json,
 )
+from chronovisor.core.durable_state import canonical_sha256
 from chronovisor.core.runtime_config import (
     DecisionRouterConfig,
     load_decision_router_config,
@@ -86,8 +86,31 @@ ModelUnloader = Callable[[str], bool]
 AUDIT_ROLE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,79}$")
 ADOPTION_ARTIFACT_SCHEMA_VERSION = 12
 DECISION_SEMANTICS_POLICY_VERSION = 12
-QUORUM_SAFETY_POLICY_VERSION = 1
+QUORUM_SAFETY_POLICY_VERSION = 2
 DECISION_REQUEST_FINGERPRINT_VERSION = 4
+# These lane contracts authorize only additive or reversible effects. Any
+# membership change is a quorum-safety policy change and MUST be accompanied by
+# a QUORUM_SAFETY_POLICY_VERSION bump so adoption evidence and semantic holds
+# cannot silently retain the old policy.
+TIE_BREAK_MUTATING_MAJORITY_LANES = frozenset(
+    {
+        "lint_tag_repair",
+        "recall_auto_apply",
+        "orphan_link",
+        "metadata_backfill",
+        "search_label",
+    }
+)
+_EFFECT_CLASS_MUTATING = "mutating"
+_EFFECT_CLASS_CONSERVATIVE = "conservative"
+_EFFECT_CLASS_UNCLASSIFIABLE = "unclassifiable"
+_DECISION_EFFECT_CLASSES = frozenset(
+    (
+        _EFFECT_CLASS_MUTATING,
+        _EFFECT_CLASS_CONSERVATIVE,
+        _EFFECT_CLASS_UNCLASSIFIABLE,
+    )
+)
 MIN_ADOPTION_USABLE_CASES = 100
 MIN_CASES_PER_PRODUCTION_SCHEMA = 5
 REQUIRED_ADOPTION_CHECKS = frozenset(
@@ -465,6 +488,28 @@ def _decision_mutates_durable_state(
         return True
 
     return None
+
+
+def _decision_effect_class(
+    value: Any,
+    schema: Mapping[str, Any],
+    *,
+    prompt: str,
+    decision_lane: str | None,
+) -> str:
+    """Map durable-effect classification to a stable audit token."""
+
+    effect = _decision_mutates_durable_state(
+        value,
+        schema,
+        prompt=prompt,
+        decision_lane=decision_lane,
+    )
+    if effect is True:
+        return _EFFECT_CLASS_MUTATING
+    if effect is False:
+        return _EFFECT_CLASS_CONSERVATIVE
+    return _EFFECT_CLASS_UNCLASSIFIABLE
 
 
 def decision_system_with_policy(
@@ -1232,6 +1277,8 @@ class DecisionVote:
     invalid_reason: str | None = None
     observed_model_bytes: int | None = None
     observed_num_ctx: int | None = None
+    decision_label: str | None = None
+    effect_class: str | None = None
     runtime_observation_status: str = "unavailable"
 
     @property
@@ -1252,6 +1299,8 @@ class DecisionVote:
             "valid": self.valid,
             "signature_sha256": self.signature_sha256,
             "invalid_reason": self.invalid_reason,
+            "decision_label": self.decision_label,
+            "effect_class": self.effect_class,
             "runtime_observation": {
                 "status": self.runtime_observation_status,
                 "model_size_bytes": self.observed_model_bytes,
@@ -1269,6 +1318,9 @@ class DecisionRouterResult:
     votes: tuple[DecisionVote, ...] = ()
     failure_class: str | None = None
     quarantine_reason: str | None = None
+    conservative_veto_fired: bool = False
+    conservative_veto_bypassed_by_lane_policy: bool = False
+    dissent_effect_class: str | None = None
     num_ctx: int | None = None
     residency: Mapping[str, Any] | None = None
 
@@ -1284,6 +1336,11 @@ class DecisionRouterResult:
         return {
             "status": self.status,
             "ok": self.ok,
+            "conservative_veto_fired": self.conservative_veto_fired,
+            "conservative_veto_bypassed_by_lane_policy": (
+                self.conservative_veto_bypassed_by_lane_policy
+            ),
+            "dissent_effect_class": self.dissent_effect_class,
             "quorum_safety_policy_version": QUORUM_SAFETY_POLICY_VERSION,
             "agreement_sha256": self.agreement_sha256,
             "failure_class": self.failure_class,
@@ -1299,6 +1356,11 @@ class DecisionRouterResult:
         return {
             "status": self.status,
             "ok": self.ok,
+            "conservative_veto_fired": self.conservative_veto_fired,
+            "conservative_veto_bypassed_by_lane_policy": (
+                self.conservative_veto_bypassed_by_lane_policy
+            ),
+            "dissent_effect_class": self.dissent_effect_class,
             "decision": self.value if self.ok else None,
             "failure_class": self.failure_class,
             "quarantine_reason": self.quarantine_reason,
@@ -2465,6 +2527,11 @@ class DecisionRouter:
                 invalid_reason=f"agreement_key_error:{type(exc).__name__}",
             )
         digest = hashlib.sha256(signature.encode("utf-8")).hexdigest()
+        decision_label = None
+        if isinstance(result.value, Mapping):
+            decision = result.value.get("decision")
+            if isinstance(decision, str) and decision in _schema_decision_enum(schema):
+                decision_label = decision
         return DecisionVote(
             role=role,
             model=model,
@@ -2472,6 +2539,13 @@ class DecisionRouter:
             requested_num_ctx=num_ctx,
             signature=signature,
             signature_sha256=digest,
+            decision_label=decision_label,
+            effect_class=_decision_effect_class(
+                result.value,
+                schema,
+                prompt=prompt,
+                decision_lane=decision_lane,
+            ),
         )
 
     def _request_context(
@@ -2717,8 +2791,8 @@ class DecisionRouter:
         *,
         prompt: str,
         decision_lane: str | None,
-    ) -> bool:
-        """Return true when a valid hold/no-op vote vetoes a mutation majority."""
+    ) -> tuple[bool, str]:
+        """Return whether a non-mutating vote vetoes mutation majority."""
 
         winner = next(
             (vote for vote in votes if vote.valid and vote.signature == signature),
@@ -2726,31 +2800,75 @@ class DecisionRouter:
         )
         if (
             winner is None
-            or _decision_mutates_durable_state(
+            or _decision_effect_class(
                 winner.result.value,
                 schema,
                 prompt=prompt,
                 decision_lane=decision_lane,
             )
-            is not True
+            != _EFFECT_CLASS_MUTATING
         ):
-            return False
+            return (False, _EFFECT_CLASS_UNCLASSIFIABLE)
         for vote in votes:
             if not vote.valid or vote.signature == signature:
                 continue
             # A production effect that cannot be classified must never provide
             # affirmative evidence for a durable mutating majority.
-            if (
-                _decision_mutates_durable_state(
-                    vote.result.value,
+            dissent_effect = _decision_effect_class(
+                vote.result.value,
+                schema,
+                prompt=prompt,
+                decision_lane=decision_lane,
+            )
+            if dissent_effect != _EFFECT_CLASS_MUTATING:
+                return True, dissent_effect
+        return (False, _EFFECT_CLASS_UNCLASSIFIABLE)
+
+    def _resolve_tie_break_votes(
+        self,
+        votes: Sequence[DecisionVote],
+        schema: Mapping[str, Any],
+        *,
+        prompt: str,
+        decision_lane: str | None,
+    ) -> DecisionRouterResult:
+        """Resolve a completed tie-break without changing pair-quorum semantics."""
+
+        winner = self._winner(votes)
+        if winner is not None:
+            conservative_veto_fired, dissent_effect_class = (
+                self._mutating_majority_has_conservative_veto(
+                    votes,
+                    winner,
                     schema,
                     prompt=prompt,
                     decision_lane=decision_lane,
                 )
-                is not True
-            ):
-                return True
-        return False
+            )
+            if conservative_veto_fired:
+                if decision_lane in TIE_BREAK_MUTATING_MAJORITY_LANES:
+                    return replace(
+                        self._agreed(votes, winner, schema),
+                        conservative_veto_fired=True,
+                        conservative_veto_bypassed_by_lane_policy=True,
+                        dissent_effect_class=dissent_effect_class,
+                    )
+                return replace(
+                    self._quarantined(
+                        votes,
+                        "mutating_local_majority_vetoed_by_conservative_vote",
+                    ),
+                    conservative_veto_fired=True,
+                    dissent_effect_class=dissent_effect_class,
+                )
+            return self._agreed(votes, winner, schema)
+
+        valid_count = sum(vote.valid for vote in votes)
+        if valid_count < self.config.quorum:
+            return self._quarantined(votes, "fewer_than_two_valid_local_votes")
+        return self._quarantined(
+            votes, "local_models_did_not_reach_two_vote_quorum"
+        )
 
     @staticmethod
     def _classification_noop_consensus(
@@ -3850,6 +3968,13 @@ class DecisionRouter:
                         "status": result.status,
                         "failure_class": result.failure_class,
                         "quarantine_reason": result.quarantine_reason,
+                        "conservative_veto_fired": (
+                            result.conservative_veto_fired
+                        ),
+                        "conservative_veto_bypassed_by_lane_policy": (
+                            result.conservative_veto_bypassed_by_lane_policy
+                        ),
+                        "dissent_effect_class": result.dissent_effect_class,
                         "num_ctx": selected_num_ctx,
                         "residency": residency,
                         "pair_agreement": pair_signature_agreement,
@@ -3877,6 +4002,7 @@ class DecisionRouter:
                             vote.result.repair_turns for vote in result.votes
                         ),
                         "models": [vote.model for vote in result.votes],
+                        "votes": [vote.audit_record() for vote in result.votes],
                         "decision_semantics_policy_version": (
                             DECISION_SEMANTICS_POLICY_VERSION
                             if _is_content_classification_schema(schema)
@@ -4191,30 +4317,13 @@ class DecisionRouter:
                     failure_class="local_resource_quarantined",
                 )
             )
-        winner = self._winner(votes)
-        if winner is not None:
-            if self._mutating_majority_has_conservative_veto(
+        return finalize(
+            self._resolve_tie_break_votes(
                 votes,
-                winner,
                 schema,
                 prompt=prompt,
                 decision_lane=decision_lane,
-            ):
-                return finalize(
-                    self._quarantined(
-                        votes,
-                        "mutating_local_majority_vetoed_by_conservative_vote",
-                    )
-                )
-            return finalize(self._agreed(votes, winner, schema))
-
-        valid_count = sum(vote.valid for vote in votes)
-        if valid_count < self.config.quorum:
-            return finalize(
-                self._quarantined(votes, "fewer_than_two_valid_local_votes")
             )
-        return finalize(
-            self._quarantined(votes, "local_models_did_not_reach_two_vote_quorum")
         )
 
 
@@ -4225,6 +4334,7 @@ __all__ = [
     "DecisionVote",
     "DECISION_REQUEST_FINGERPRINT_VERSION",
     "QUORUM_SAFETY_POLICY_VERSION",
+    "TIE_BREAK_MUTATING_MAJORITY_LANES",
     "NON_DECISION_FIELDS",
     "ModelMetadataProvider",
     "RouterPolicyResolution",

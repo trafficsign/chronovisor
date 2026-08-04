@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
 from chronovisor.core import runtime_config, store
+from chronovisor.core.durable_state import write_sealed_json
 from chronovisor.hosts import cli
 from chronovisor.ops import runtime_status
 from chronovisor.recall import recall_runtime
@@ -120,6 +123,136 @@ def test_status_plain_uses_chronovisor_response_key(
 
     assert "chronovisor:" in output
     assert "raw=1 pages=1 system=1" in output
+
+
+def test_hold_report_cli_aggregates_both_read_only_stores_as_json_and_text(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from chronovisor.search import semantic_hold
+    from tests.semantic_hold_support import (
+        semantic_authority,
+        semantic_review,
+        structured_review_epoch,
+    )
+
+    patch_wiki(tmp_path, monkeypatch)
+    root = store.CHRONOVISOR_ROOT
+    authority = semantic_authority("recall_auto_apply", artifact_sha256="d" * 64)
+    epoch = structured_review_epoch(authority, lane="recall_auto_apply")
+    cache = semantic_hold.StructuredReviewSemanticHoldCache(
+        root / "runtime" / "semantic-holds" / "structured-review"
+    )
+    with cache.locked(
+        lane="recall_auto_apply",
+        epoch=epoch,
+        authority=authority,
+    ) as lease:
+        lease.store(semantic_review(authority))
+    [semantic_entry] = list(cache.entries_dir.glob("*.json"))
+    semantic_time = datetime(2026, 8, 1, 12, tzinfo=UTC).timestamp()
+    os.utime(semantic_entry, (semantic_time, semantic_time))
+
+    managed_state = root / "runtime" / "managed-holds" / "state.json"
+    managed_artifact = "b" * 64
+    write_sealed_json(
+        managed_state,
+        {
+            "schema_version": 1,
+            "entries": {
+                "active-id": {
+                    "identity": "active-id",
+                    "hold_sha256": "1" * 64,
+                    "authority_epoch": managed_artifact,
+                    "raw_sha256": "2" * 64,
+                    "lane": "ingest_reconciliation",
+                    "state": "active",
+                    "created_at": "2026-07-01T00:00:00Z",
+                },
+                "resolved-id": {
+                    "identity": "resolved-id",
+                    "hold_sha256": "3" * 64,
+                    "authority_epoch": managed_artifact,
+                    "raw_sha256": "4" * 64,
+                    "lane": "ingest_reconciliation",
+                    "state": "resolved",
+                    "created_at": "2026-07-03T00:00:00Z",
+                },
+            },
+            "authority_epochs": {
+                "ingest_reconciliation": managed_artifact,
+            },
+            "lane_last_lease_at": {},
+        },
+        backup=False,
+    )
+    semantic_before = semantic_entry.read_bytes()
+    managed_before = managed_state.read_bytes()
+    managed_lock = managed_state.with_name(f"{managed_state.name}.lock")
+    assert not managed_lock.exists()
+
+    def filesystem_snapshot() -> dict[str, tuple[str, int, bytes | None]]:
+        snapshot: dict[str, tuple[str, int, bytes | None]] = {}
+        for path in (root, *sorted(root.rglob("*"))):
+            metadata = path.stat()
+            snapshot[path.relative_to(root).as_posix()] = (
+                "file" if path.is_file() else "directory",
+                metadata.st_mtime_ns,
+                path.read_bytes() if path.is_file() else None,
+            )
+        return snapshot
+
+    filesystem_before = filesystem_snapshot()
+
+    assert cli.main(["hold-report", "--json"]) == 0
+    report = json.loads(capsys.readouterr().out)
+
+    assert report["totals"] == {"active": 2, "resolved": 1, "total": 3}
+    assert report["source_totals"] == {
+        "structured_review_cache": 1,
+        "managed_holds": 2,
+    }
+    assert report["errors"] == []
+    groups = {
+        (
+            group["lane"],
+            group["quarantine_reason"],
+            group["artifact_sha256_prefix"],
+        ): group
+        for group in report["groups"]
+    }
+    semantic_group = groups[
+        (
+            "recall_auto_apply",
+            "local_models_did_not_reach_two_vote_quorum",
+            "dddddddd",
+        )
+    ]
+    assert semantic_group["active"] == 1
+    assert semantic_group["resolved"] == 0
+    assert semantic_group["created_at_min"] == "2026-08-01T12:00:00Z"
+    managed_group = groups[
+        (
+            "ingest_reconciliation",
+            "managed_semantic_no_quorum",
+            "bbbbbbbb",
+        )
+    ]
+    assert managed_group["active"] == 1
+    assert managed_group["resolved"] == 1
+    assert managed_group["created_at_min"] == "2026-07-01T00:00:00Z"
+    assert managed_group["created_at_max"] == "2026-07-03T00:00:00Z"
+
+    assert cli.main(["hold-report"]) == 0
+    plain = capsys.readouterr().out
+    assert "hold-report\tactive=2\tresolved=1\ttotal=3" in plain
+    assert "recall_auto_apply\tlocal_models_did_not_reach_two_vote_quorum" in plain
+    assert "ingest_reconciliation\tmanaged_semantic_no_quorum" in plain
+    assert semantic_entry.read_bytes() == semantic_before
+    assert managed_state.read_bytes() == managed_before
+    assert not managed_lock.exists()
+    assert filesystem_snapshot() == filesystem_before
 
 
 def test_hooks_inspect_json_handles_missing_host_files(tmp_path, monkeypatch, capsys) -> None:

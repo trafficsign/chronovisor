@@ -29,8 +29,8 @@ from chronovisor.core.canonical_json import (
 LANE_CONTRACT_POLICY_VERSION = 10
 LANE_REQUEST_ENVELOPE_VERSION = 2
 MIN_CASES_PER_MODEL_BACKED_LANE = 5
-LANE_CONTRACT_SOURCE = "deterministic_lane_contract_v26"
-LANE_CONTRACT_CASE_VERSION = 26
+LANE_CONTRACT_SOURCE = "deterministic_lane_contract_v27"
+LANE_CONTRACT_CASE_VERSION = 27
 
 
 @dataclass(frozen=True)

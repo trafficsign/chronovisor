@@ -538,9 +538,16 @@ def print_plain_status(data: dict[str, Any]) -> None:
     print(f"runtime: {runtime.get('state', 'unknown')} stage={runtime.get('stage')}")
 
 
+def _configure_hold_report_parser(subparsers: Any) -> None:
+    parser = subparsers.add_parser(
+        "hold-report",
+        help="Report semantic holds by lane, reason, artifact, date, and state.",
+    )
+    parser.add_argument("--json", action="store_true")
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the complete stable CLI command tree without executing a handler."""
-
     parser = argparse.ArgumentParser(description="Operate and inspect Chronovisor.")
     sub = parser.add_subparsers(dest="command", required=True)
     status_parser = sub.add_parser(
@@ -571,6 +578,7 @@ def build_parser() -> argparse.ArgumentParser:
     hooks_install.add_argument("--json", action="store_true")
     health_parser = sub.add_parser("health", help="Show knowledge health KPIs.")
     health_parser.add_argument("--json", action="store_true")
+    _configure_hold_report_parser(sub)
     snapshot_parser = sub.add_parser(
         "snapshot",
         help="Commit ~/.chronovisor into its own git history.",
@@ -848,9 +856,19 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _dispatch_hold_report(as_json: bool) -> int:
+    from chronovisor.ops.hold_report import build_hold_report, render_hold_report
+
+    data = build_hold_report(chronovisor_store.CHRONOVISOR_ROOT)
+    if as_json:
+        print(json.dumps(data, ensure_ascii=False, indent=2, default=str))
+    else:
+        print(render_hold_report(data))
+    return 0
+
+
 def dispatch(args: argparse.Namespace) -> int:
     """Dispatch one already-parsed command while preserving its exit contract."""
-
     if args.command == "status":
         data = build_status()
         if args.json:
@@ -913,7 +931,6 @@ def dispatch(args: argparse.Namespace) -> int:
         return 0
     if args.command == "health":
         from chronovisor.ops.health import health_snapshot
-
         data = health_snapshot()
         if args.json:
             print(json.dumps(data, ensure_ascii=False, indent=2, default=str))
@@ -939,6 +956,8 @@ def dispatch(args: argparse.Namespace) -> int:
             print(f"lint_repair\t{queues['lint_repair']}")
             print(f"search_golden\t{queues['search_golden']}")
         return 0
+    if args.command == "hold-report":
+        return _dispatch_hold_report(args.json)
     if args.command == "snapshot":
         from chronovisor.ops.snapshot import snapshot_chronovisor
 

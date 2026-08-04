@@ -717,6 +717,44 @@ def _session_summary(sessions: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
 
 
 def _decision_summary(decisions: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    dissent_effect_classes: dict[str, int] = {}
+    model_votes: dict[str, dict[str, int | float]] = {}
+    for row in decisions:
+        dissent_effect = row.get("dissent_effect_class")
+        if isinstance(dissent_effect, str) and dissent_effect:
+            dissent_effect_classes[dissent_effect] = (
+                dissent_effect_classes.get(dissent_effect, 0) + 1
+            )
+        votes = row.get("votes")
+        if not isinstance(votes, list):
+            continue
+        for vote in votes:
+            if not isinstance(vote, Mapping) or vote.get("valid") is not True:
+                continue
+            model = vote.get("model")
+            effect_class = vote.get("effect_class")
+            if not isinstance(model, str) or not model:
+                continue
+            counts = model_votes.setdefault(
+                model,
+                {"valid_votes": 0, "conservative_votes": 0},
+            )
+            counts["valid_votes"] = int(counts["valid_votes"]) + 1
+            if effect_class == "conservative":
+                counts["conservative_votes"] = (
+                    int(counts["conservative_votes"]) + 1
+                )
+    model_conservative_vote_rates: dict[str, dict[str, int | float]] = {}
+    for model, counts in sorted(model_votes.items()):
+        valid_votes = int(counts["valid_votes"])
+        conservative_votes = int(counts["conservative_votes"])
+        model_conservative_vote_rates[model] = {
+            "valid_votes": valid_votes,
+            "conservative_votes": conservative_votes,
+            "conservative_rate": (
+                round(conservative_votes / valid_votes, 6) if valid_votes else 0.0
+            ),
+        }
     return {
         "total": len(decisions),
         "agreed": sum(row.get("status") == "agreed" for row in decisions),
@@ -725,6 +763,15 @@ def _decision_summary(decisions: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         "unresolved_quarantine": sum(
             bool(row.get("unresolved_quarantine")) for row in decisions
         ),
+        "conservative_veto_fired": sum(
+            bool(row.get("conservative_veto_fired")) for row in decisions
+        ),
+        "conservative_veto_bypassed_by_lane_policy": sum(
+            bool(row.get("conservative_veto_bypassed_by_lane_policy"))
+            for row in decisions
+        ),
+        "dissent_effect_classes": dict(sorted(dissent_effect_classes.items())),
+        "model_conservative_vote_rates": model_conservative_vote_rates,
     }
 
 
@@ -747,7 +794,7 @@ def _audit_summary(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     routine = grouped(routine_rows)
     evaluation = grouped(evaluation_rows)
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "updated_at": _utc_timestamp(),
         "retained_records": len(rows),
         "routine_records": routine["records"],

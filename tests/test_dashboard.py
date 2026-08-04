@@ -270,7 +270,24 @@ def test_local_consensus_snapshot_removes_dead_markers_and_exposes_redacted_metr
         {"first_pass_valid": 7, "repaired": 2, "repair_turns": 3}
     )
     summary["decisions"].update(
-        {"pair_agreement": 4, "tie_break_used": 2, "unresolved_quarantine": 1}
+        {
+            "pair_agreement": 4,
+            "tie_break_used": 2,
+            "unresolved_quarantine": 1,
+            "conservative_veto_fired": 3,
+            "conservative_veto_bypassed_by_lane_policy": 2,
+            "dissent_effect_classes": {
+                "conservative": 2,
+                "unclassifiable": 1,
+            },
+            "model_conservative_vote_rates": {
+                "ornith:test": {
+                    "valid_votes": 4,
+                    "conservative_votes": 1,
+                    "conservative_rate": 0.25,
+                }
+            },
+        }
     )
     root.mkdir(parents=True, exist_ok=True)
     (root / "summary.json").write_text(json.dumps(summary), encoding="utf-8")
@@ -284,6 +301,9 @@ def test_local_consensus_snapshot_removes_dead_markers_and_exposes_redacted_metr
                 "pair_agreement": True,
                 "tie_break_used": False,
                 "unresolved_quarantine": False,
+                "conservative_veto_fired": True,
+                "conservative_veto_bypassed_by_lane_policy": True,
+                "dissent_effect_class": "conservative",
                 "prompt": "secret prompt",
                 "raw_output": "secret output",
             }
@@ -309,6 +329,29 @@ def test_local_consensus_snapshot_removes_dead_markers_and_exposes_redacted_metr
     assert snapshot["summary"]["decisions"]["pair_agreement"] == 4
     assert snapshot["summary"]["decisions"]["tie_break_used"] == 2
     assert snapshot["summary"]["decisions"]["unresolved_quarantine"] == 1
+    assert snapshot["summary"]["decisions"]["conservative_veto_fired"] == 3
+    assert (
+        snapshot["summary"]["decisions"][
+            "conservative_veto_bypassed_by_lane_policy"
+        ]
+        == 2
+    )
+    assert snapshot["summary"]["decisions"]["dissent_effect_classes"] == {
+        "conservative": 2,
+        "unclassifiable": 1,
+    }
+    assert snapshot["summary"]["decisions"]["model_conservative_vote_rates"] == {
+        "ornith:test": {
+            "valid_votes": 4,
+            "conservative_votes": 1,
+            "conservative_rate": 0.25,
+        }
+    }
+    assert snapshot["history"][0]["conservative_veto_fired"] is True
+    assert (
+        snapshot["history"][0]["conservative_veto_bypassed_by_lane_policy"] is True
+    )
+    assert snapshot["history"][0]["dissent_effect_class"] == "conservative"
     assert "prompt" not in snapshot["history"][0]
     assert "raw_output" not in snapshot["history"][0]
     assert not (active_dir / "dead.json").exists()
@@ -697,6 +740,37 @@ def test_decision_trace_explains_semantic_quality_and_resource_holds() -> None:
     assert resource["next"] == "Retry when capacity recovers"
 
 
+def test_decision_trace_explains_lane_policy_veto_bypass() -> None:
+    decision = {
+        "kind": "decision",
+        "request_sha256": "e" * 64,
+        "role": "recall_auto_apply",
+        "status": "agreed",
+        "tie_break_used": True,
+        "conservative_veto_fired": True,
+        "conservative_veto_bypassed_by_lane_policy": True,
+        "dissent_effect_class": "unclassifiable",
+    }
+
+    outcome = dashboard._decision_trace_outcome(
+        decision,
+        trace_state="agreed",
+        task_role="recall_auto_apply",
+    )
+    trace = dashboard._decision_trace_snapshot([], [decision], decision)
+
+    assert outcome == {
+        "kind": "approved",
+        "reason": "Lane policy bypassed conservative veto",
+        "data": "Dissent effect: unclassifiable",
+        "next": "Mutation may proceed",
+        "code": "conservative_veto_bypassed_by_lane_policy",
+    }
+    assert trace["summary"] == (
+        "2/3 quorum · conservative veto bypassed by lane policy"
+    )
+
+
 def test_local_consensus_snapshot_removes_reused_pid_marker(
     tmp_path: Path,
     monkeypatch,
@@ -956,6 +1030,11 @@ def test_dashboard_static_labels_routine_review_as_local_consensus() -> None:
     assert "correction uncertainty" in app
     assert "batch.active === true ? 1 : 0" in app
     assert "batch.total ? 1 : 0" not in app
+    assert "conservative_veto_fired" in app
+    assert "conservative_veto_bypassed_by_lane_policy" in app
+    assert "dissent_effect_classes" in app
+    assert "model_conservative_vote_rates" in app
+    assert "conservative votes" in app
     assert 'id="local-consensus"' in page
     assert 'id="frontier-repair"' in page
     assert "Frontier Repair" in page

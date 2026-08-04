@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from chronovisor.decision.decision_router import QUORUM_SAFETY_POLICY_VERSION
 from chronovisor.search import semantic_hold
 from tests.semantic_hold_support import (
     semantic_authority as _authority,
@@ -151,6 +152,7 @@ def test_semantic_hold_rejects_operational_failure_and_success() -> None:
     [
         "lane",
         "authority",
+        "quorum_safety_policy_version",
         "schema",
         "prompt",
         "system",
@@ -171,11 +173,15 @@ def test_structured_review_cache_misses_every_epoch_change(
         lease.store(_semantic_review(authority))
 
     changed_lane = "recall_calibration" if change == "lane" else "recall_auto_apply"
-    changed_authority = (
-        _authority(changed_lane, artifact_sha256="9" * 64)
-        if change == "authority"
-        else _authority(changed_lane)
-    )
+    if change == "authority":
+        changed_authority = _authority(changed_lane, artifact_sha256="9" * 64)
+    elif change == "quorum_safety_policy_version":
+        changed_authority = _authority(
+            changed_lane,
+            quorum_safety_policy_version=QUORUM_SAFETY_POLICY_VERSION - 1,
+        )
+    else:
+        changed_authority = _authority(changed_lane)
     changed_epoch = _epoch(
         changed_authority,
         lane=changed_lane,

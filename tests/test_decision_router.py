@@ -71,7 +71,9 @@ from chronovisor.lab.local_model_eval import (
     replay_semantic_effect,
 )
 from chronovisor.ops.autonomy import DUPLICATE_FRONTIER_SCHEMA
+from chronovisor.ops.lint import SAFE_FIX_REVIEW_SCHEMA
 from chronovisor.ops.lint_repair import TAG_REPAIR_SCHEMA
+from chronovisor.ops.orphan_link import ORPHAN_FRONTIER_SCHEMA
 from chronovisor.recall.content_correction import (
     FRONTIER_CLASSIFICATION_SCHEMA,
     FRONTIER_REVIEW_SCHEMA,
@@ -1265,30 +1267,35 @@ def test_generic_nonapproval_vetoes_durable_mutating_majority() -> None:
 
 
 def test_ingest_nonmutation_vote_vetoes_mutating_majority() -> None:
-    def ingest_payload(decision: str, disposition: str) -> str:
-        return json.dumps(
-            {
-                "decision": decision,
-                "summary": decision,
-                "failed_operations_disposition": disposition,
-                "tests_run": [],
-                "risk": None,
-                "notes": None,
-                "invalid_tags": [],
-                "replacement_operations": [],
-            }
-        )
+    row = next(
+        candidate.row
+        for candidate in contract_candidates()
+        if candidate.row["decision_lane"] == "ingest_reconciliation"
+        and candidate.row["expected"]["decision"] == "apply_available"
+        and candidate.row["expected"]["failed_operations_disposition"] == "none"
+    )
+    mutating = dict(row["expected"])
+    conservative = {
+        **mutating,
+        "decision": "confirmed_noop",
+        "summary": "No mutation is required.",
+    }
 
     transport = ModelTransport(
         {
-            "ornith:test": [ingest_payload("apply_available", "none")],
-            "gpt-oss:test": [ingest_payload("confirmed_noop", "none")],
-            "gemma:test": [ingest_payload("apply_available", "none")],
+            "ornith:test": [json.dumps(mutating)],
+            "gpt-oss:test": [json.dumps(conservative)],
+            "gemma:test": [json.dumps(mutating)],
         }
     )
 
-    result = DecisionRouter(config=_config(), transport=transport).decide(
-        "prompt", INGEST_FRONTIER_DECISION_SCHEMA
+    result = DecisionRouter(
+        config=_config(max_input_chars=50_000, num_ctx=32_768),
+        transport=transport,
+    ).decide(
+        str(row["prompt"]),
+        dict(row["schema"]),
+        decision_lane="ingest_reconciliation",
     )
 
     assert result.ok is False
@@ -1555,7 +1562,9 @@ def test_duplicate_model_roles_fail_closed_before_any_call() -> None:
 
     assert result.ok is False
     assert result.failure_class == "local_consensus_failed"
-    assert result.quarantine_reason.startswith("router_config_invalid:")
+    assert result.quarantine_reason == (
+        "router_config_invalid:primary, challenger, and tie-break models must be distinct"
+    )
     assert transport.requests == []
 
 
@@ -2991,40 +3000,356 @@ def test_local_repair_accepts_exact_target_named_by_two_votes() -> None:
     assert len(result.votes) == 3
 
 
-def test_search_label_rejection_vetoes_mutating_promotion_majority() -> None:
-    def label_payload(decision: str, expected_pages: list[str]) -> str:
-        return json.dumps(
+@pytest.mark.parametrize(
+    (
+        "decision_lane",
+        "schema",
+        "prompt",
+        "approved_payload",
+        "rejected_payload",
+    ),
+    [
+        (
+            "lint_tag_repair",
+            TAG_REPAIR_SCHEMA,
+            "tag repair candidate",
             {
-                "decision": decision,
+                "decision": "approved",
+                "tags": ["d/tools-config", "t/howto", "s/evergreen"],
+                "reason": "candidate",
+            },
+            {
+                "decision": "rejected",
+                "tags": ["d/hardware", "t/reference", "s/2026"],
+                "reason": "rejected",
+            },
+        ),
+        (
+            "recall_auto_apply",
+            FRONTIER_DECISION_SCHEMA,
+            "recall auto apply candidate",
+            {
+                "decision": "approved",
+                "summary": "approved",
+                "tests_run": ["test-1"],
+                "commit": None,
+                "committed": False,
+                "pushed": False,
+                "risk": None,
+                "notes": None,
+            },
+            {
+                "decision": "rejected",
+                "summary": "rejected",
+                "tests_run": ["test-2"],
+                "commit": None,
+                "committed": False,
+                "pushed": False,
+                "risk": None,
+                "notes": None,
+            },
+        ),
+        (
+            "orphan_link",
+            ORPHAN_FRONTIER_SCHEMA,
+            'orphan link candidate with "proposal_kind": "link"',
+            {
+                "decision": "approved",
                 "confidence": 0.9,
-                "expected_pages": expected_pages,
+                "summary": "approved link",
+            },
+            {
+                "decision": "rejected",
+                "confidence": 0.9,
+                "summary": "rejected",
+            },
+        ),
+        (
+            "metadata_backfill",
+            SAFE_FIX_REVIEW_SCHEMA,
+            "metadata backfill candidate",
+            {
+                "decision": "approved",
+                "summary": "approved",
+                "tests_run": ["check"],
+                "commit": None,
+                "committed": False,
+                "pushed": False,
+                "risk": None,
+                "notes": None,
+            },
+            {
+                "decision": "rejected",
+                "summary": "rejected",
+                "tests_run": ["check"],
+                "commit": None,
+                "committed": False,
+                "pushed": False,
+                "risk": None,
+                "notes": None,
+            },
+        ),
+        (
+            "search_label",
+            FRONTIER_LABEL_SCHEMA,
+            "search label candidate",
+            {
+                "decision": "approved",
+                "confidence": 0.9,
+                "expected_pages": ["wrong-page"],
                 "negative_pages": [],
                 "stale_pages": [],
-                "summary": decision,
+                "summary": "approved",
                 "notes": None,
-            }
-        )
-
+            },
+            {
+                "decision": "rejected",
+                "confidence": 0.9,
+                "expected_pages": [],
+                "negative_pages": ["wrong-page"],
+                "stale_pages": [],
+                "summary": "rejected",
+                "notes": None,
+            },
+        ),
+    ],
+)
+def test_conservative_veto_is_bypassed_for_lane_policy(
+    decision_lane: str,
+    schema: dict[str, object],
+    prompt: str,
+    approved_payload: dict[str, object],
+    rejected_payload: dict[str, object],
+) -> None:
     transport = ModelTransport(
         {
-            "ornith:test": [label_payload("approved", ["wrong-page"])],
-            "gpt-oss:test": [label_payload("rejected", [])],
-            "gemma:test": [label_payload("approved", ["wrong-page"])],
+            "ornith:test": [json.dumps(approved_payload)],
+            "gpt-oss:test": [json.dumps(rejected_payload)],
+            "gemma:test": [json.dumps(approved_payload)],
         }
     )
 
     result = DecisionRouter(config=_config(), transport=transport).decide(
-        "search label candidate",
-        FRONTIER_LABEL_SCHEMA,
+        prompt,
+        schema,
+        decision_lane=decision_lane,
     )
 
-    assert result.ok is False
-    assert result.status == "quarantined"
-    assert (
-        result.quarantine_reason
-        == "mutating_local_majority_vetoed_by_conservative_vote"
-    )
+    assert result.ok is True
+    assert result.conservative_veto_fired is True
+    assert result.conservative_veto_bypassed_by_lane_policy is True
+    assert result.dissent_effect_class == "conservative"
+    assert result.value["decision"] == "approved"
     assert len(result.votes) == 3
+
+
+def test_unclassifiable_dissent_is_audited_and_bypassed_for_allowlisted_lane(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from chronovisor.decision import decision_router
+
+    approved = {
+        "decision": "approved",
+        "summary": "approved",
+        "tests_run": [],
+        "commit": None,
+        "committed": False,
+        "pushed": False,
+        "risk": None,
+        "notes": None,
+    }
+    rejected = {**approved, "decision": "rejected", "summary": "rejected"}
+    transport = ModelTransport(
+        {
+            "ornith:test": [json.dumps(approved)],
+            "gpt-oss:test": [json.dumps(rejected)],
+            "gemma:test": [json.dumps(approved)],
+        }
+    )
+
+    def effect_class(value, _schema, **_kwargs):
+        return (
+            decision_router._EFFECT_CLASS_MUTATING
+            if value.get("decision") == "approved"
+            else decision_router._EFFECT_CLASS_UNCLASSIFIABLE
+        )
+
+    monkeypatch.setattr(decision_router, "_decision_effect_class", effect_class)
+    result = DecisionRouter(config=_config(), transport=transport).decide(
+        "recall auto-apply candidate",
+        FRONTIER_DECISION_SCHEMA,
+        decision_lane="recall_auto_apply",
+    )
+
+    assert result.ok is True
+    assert result.conservative_veto_fired is True
+    assert result.conservative_veto_bypassed_by_lane_policy is True
+    assert result.dissent_effect_class == "unclassifiable"
+    assert [vote.effect_class for vote in result.votes] == [
+        "mutating",
+        "unclassifiable",
+        "mutating",
+    ]
+
+
+@pytest.mark.parametrize("decision_lane", [None, "unknown_lane"])
+def test_non_allowlisted_lane_mutating_majority_remains_fail_closed(
+    decision_lane: str | None,
+) -> None:
+    approved = {
+        "decision": "approved",
+        "summary": "approved",
+        "tests_run": [],
+        "commit": None,
+        "committed": False,
+        "pushed": False,
+        "risk": None,
+        "notes": None,
+    }
+    rejected = {**approved, "decision": "rejected", "summary": "rejected"}
+    transport = ModelTransport(
+        {
+            "ornith:test": [json.dumps(approved)],
+            "gpt-oss:test": [json.dumps(rejected)],
+            "gemma:test": [json.dumps(approved)],
+        }
+    )
+    router = DecisionRouter(config=_config(), transport=transport)
+
+    # Exercise the quorum boundary directly: an unknown public lane is rejected
+    # even earlier by its missing lane contract, while this proves it can never
+    # enter the bypass set if it reaches tie-break resolution.
+    result = router._decide_locked(
+        "prompt",
+        FRONTIER_DECISION_SCHEMA,
+        decision_lane=decision_lane,
+    )
+
+    assert result.status == "quarantined"
+    assert result.quarantine_reason == (
+        "mutating_local_majority_vetoed_by_conservative_vote"
+    )
+    assert result.conservative_veto_fired is True
+    assert result.conservative_veto_bypassed_by_lane_policy is False
+
+
+def test_unknown_public_lane_fails_before_model_calls() -> None:
+    transport = ModelTransport({})
+
+    result = DecisionRouter(config=_config(), transport=transport).decide(
+        "prompt",
+        FRONTIER_DECISION_SCHEMA,
+        decision_lane="unknown_lane",
+    )
+
+    assert result.status == "quarantined"
+    assert result.failure_class == "lane_contract_invalid"
+    assert result.quarantine_reason == (
+        "lane_contract_invalid:unknown model-backed decision lane: unknown_lane"
+    )
+    assert transport.requests == []
+
+
+def test_pair_agreement_never_calls_conservative_veto_evaluator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    approved = {
+        "decision": "approved",
+        "summary": "approved",
+        "tests_run": [],
+        "commit": None,
+        "committed": False,
+        "pushed": False,
+        "risk": None,
+        "notes": None,
+    }
+    transport = ModelTransport(
+        {
+            "ornith:test": [json.dumps(approved)],
+            "gpt-oss:test": [json.dumps(approved)],
+        }
+    )
+
+    def unexpected(*_args, **_kwargs):
+        raise AssertionError("pair agreement must not evaluate conservative veto")
+
+    monkeypatch.setattr(
+        DecisionRouter,
+        "_mutating_majority_has_conservative_veto",
+        staticmethod(unexpected),
+    )
+    result = DecisionRouter(config=_config(), transport=transport).decide(
+        "recall auto-apply candidate",
+        FRONTIER_DECISION_SCHEMA,
+        decision_lane="recall_auto_apply",
+    )
+
+    assert result.ok is True
+    assert len(result.votes) == 2
+    assert result.conservative_veto_fired is False
+
+
+def test_allowlisted_nonmutating_majority_has_no_veto() -> None:
+    rejected = {
+        "decision": "rejected",
+        "summary": "rejected",
+        "tests_run": [],
+        "commit": None,
+        "committed": False,
+        "pushed": False,
+        "risk": None,
+        "notes": None,
+    }
+    approved = {**rejected, "decision": "approved", "summary": "approved"}
+    transport = ModelTransport(
+        {
+            "ornith:test": [json.dumps(rejected)],
+            "gpt-oss:test": [json.dumps(approved)],
+            "gemma:test": [json.dumps(rejected)],
+        }
+    )
+
+    result = DecisionRouter(config=_config(), transport=transport).decide(
+        "recall auto-apply candidate",
+        FRONTIER_DECISION_SCHEMA,
+        decision_lane="recall_auto_apply",
+    )
+
+    assert result.ok is True
+    assert result.value["decision"] == "rejected"
+    assert result.conservative_veto_fired is False
+    assert result.conservative_veto_bypassed_by_lane_policy is False
+    assert result.dissent_effect_class is None
+
+
+def test_allowlisted_lane_true_three_way_no_quorum_still_quarantines() -> None:
+    base = {
+        "summary": "decision",
+        "tests_run": [],
+        "commit": None,
+        "committed": False,
+        "pushed": False,
+        "risk": None,
+        "notes": None,
+    }
+    transport = ModelTransport(
+        {
+            "ornith:test": [json.dumps({**base, "decision": "approved"})],
+            "gpt-oss:test": [json.dumps({**base, "decision": "rejected"})],
+            "gemma:test": [json.dumps({**base, "decision": "needs_retry"})],
+        }
+    )
+
+    result = DecisionRouter(config=_config(), transport=transport).decide(
+        "recall auto-apply candidate",
+        FRONTIER_DECISION_SCHEMA,
+        decision_lane="recall_auto_apply",
+    )
+
+    assert result.status == "quarantined"
+    assert result.quarantine_reason == "local_models_did_not_reach_two_vote_quorum"
+    assert result.conservative_veto_fired is False
+    assert result.conservative_veto_bypassed_by_lane_policy is False
 
 
 def test_tag_review_requires_two_approvals_of_exact_local_proposal() -> None:
@@ -3153,6 +3478,11 @@ def test_vote_audit_is_hash_only_and_does_not_leak_payloads() -> None:
         result.audit_record()["quorum_safety_policy_version"]
         == QUORUM_SAFETY_POLICY_VERSION
     )
+    assert result.audit_record()["conservative_veto_fired"] is False
+    assert (
+        result.audit_record()["conservative_veto_bypassed_by_lane_policy"] is False
+    )
+    assert result.audit_record()["dissent_effect_class"] is None
     assert secret not in serialized
     assert "secret prompt" not in serialized
     assert result.agreement_sha256 in serialized

@@ -31,6 +31,7 @@ from chronovisor.core.canonical_json import (
 from chronovisor.core.canonical_json import (
     canonical_json_strict as _canonical_json,
 )
+from chronovisor.core.runtime_config import DecisionRouterConfig
 from chronovisor.decision.decision_authority import (
     semantic_authority_shape_error,
     semantic_verdict_authority_provenance_error,
@@ -142,6 +143,8 @@ def _file_observation(path: Path) -> dict[str, Any]:
 
 def structured_review_authority_observation_sha256(
     authority: Mapping[str, Any],
+    *,
+    router_config: DecisionRouterConfig | None = None,
 ) -> str:
     """Observe mutable authority sources for one in-flight boundary guard.
 
@@ -176,7 +179,7 @@ def structured_review_authority_observation_sha256(
     )
 
     live_metadata = _safe_model_metadata(fetch_local_model_metadata(models), models)
-    config = load_decision_router_config()
+    config = router_config or load_decision_router_config()
     adoption_path = (
         Path(config.adoption_artifact).expanduser()
         if config.adoption_artifact.strip()
@@ -337,9 +340,7 @@ def _vote_error(
     role: str,
     model: str,
 ) -> str | None:
-    if not isinstance(vote, Mapping):
-        return "local consensus vote audit is invalid"
-    if set(vote) != {
+    required_fields = {
         "role",
         "model",
         "requested_num_ctx",
@@ -348,7 +349,14 @@ def _vote_error(
         "invalid_reason",
         "runtime_observation",
         "session",
-    }:
+    }
+    optional_fields = {"decision_label", "effect_class"}
+    if not isinstance(vote, Mapping):
+        return "local consensus vote audit is invalid"
+    vote_fields = set(vote)
+    if not required_fields.issubset(vote_fields) or not vote_fields.issubset(
+        required_fields | optional_fields
+    ):
         return "local consensus vote audit fields are invalid"
     if (
         vote.get("role") != role
@@ -368,6 +376,20 @@ def _vote_error(
         or not isinstance(runtime.get("status"), str)
     ):
         return "local consensus runtime audit is invalid"
+    effect_class = vote.get("effect_class")
+    if (
+        "effect_class" in vote
+        and (
+            not isinstance(effect_class, str)
+            or effect_class not in {"mutating", "conservative", "unclassifiable"}
+        )
+    ):
+        return "local consensus vote effect class is invalid"
+    decision_label = vote.get("decision_label")
+    if "decision_label" in vote and decision_label is not None and not isinstance(
+        decision_label, str
+    ):
+        return "local consensus vote decision label is invalid"
     for field in ("model_size_bytes", "num_ctx"):
         value = runtime.get(field)
         if value is not None and (
@@ -413,9 +435,7 @@ def _vote_error(
 def _local_consensus_error(
     consensus: object, *, policy: Mapping[str, Any]
 ) -> str | None:
-    if not isinstance(consensus, Mapping):
-        return "local consensus audit is missing"
-    if set(consensus) != {
+    required_fields = {
         "status",
         "ok",
         "quorum_safety_policy_version",
@@ -425,9 +445,42 @@ def _local_consensus_error(
         "num_ctx",
         "residency",
         "votes",
-    }:
+    }
+    optional_fields = {
+        "conservative_veto_fired",
+        "conservative_veto_bypassed_by_lane_policy",
+        "dissent_effect_class",
+    }
+    if not isinstance(consensus, Mapping):
+        return "local consensus audit is missing"
+    consensus_fields = set(consensus)
+    if not required_fields.issubset(consensus_fields) or not consensus_fields.issubset(
+        required_fields | optional_fields
+    ):
         return "local consensus audit fields are invalid"
     reason = consensus.get("quarantine_reason")
+    if "conservative_veto_fired" in consensus and not isinstance(
+        consensus.get("conservative_veto_fired"), bool
+    ):
+        return "local consensus veto flag is invalid"
+    if "conservative_veto_bypassed_by_lane_policy" in consensus and not isinstance(
+        consensus.get("conservative_veto_bypassed_by_lane_policy"), bool
+    ):
+        return "local consensus lane-policy flag is invalid"
+    dissent_effect = consensus.get("dissent_effect_class")
+    if (
+        "dissent_effect_class" in consensus
+        and (
+            dissent_effect is not None
+            and not isinstance(dissent_effect, str)
+            or (
+                isinstance(dissent_effect, str)
+                and dissent_effect
+                not in {"mutating", "conservative", "unclassifiable"}
+            )
+        )
+    ):
+        return "local consensus dissent effect class is invalid"
     if (
         consensus.get("status") != "quarantined"
         or consensus.get("ok") is not False
@@ -542,6 +595,16 @@ def build_semantic_no_quorum_hold(
     review_error = _semantic_review_error(review, lane=lane)
     if review_error is not None:
         raise ValueError(review_error)
+    authority_quorum_version = authority.get("quorum_safety_policy_version")
+    consensus = review.get("local_consensus")
+    if (
+        isinstance(authority_quorum_version, int)
+        and not isinstance(authority_quorum_version, bool)
+        and isinstance(consensus, Mapping)
+        and consensus.get("quorum_safety_policy_version")
+        != authority_quorum_version
+    ):
+        raise ValueError("semantic review quorum safety policy changed")
     provenance_error = semantic_verdict_authority_provenance_error(
         review,
         authority,
@@ -651,6 +714,18 @@ def semantic_no_quorum_hold_error(
     review_error = _semantic_review_error(review_stub, lane=lane)
     if review_error is not None:
         return review_error
+    authority_quorum_version = stored_authority.get(
+        "quorum_safety_policy_version"
+    )
+    consensus = hold.get("local_consensus")
+    if (
+        isinstance(authority_quorum_version, int)
+        and not isinstance(authority_quorum_version, bool)
+        and isinstance(consensus, Mapping)
+        and consensus.get("quorum_safety_policy_version")
+        != authority_quorum_version
+    ):
+        return "semantic hold quorum safety policy changed"
     provenance_error = semantic_verdict_authority_provenance_error(
         review_stub,
         stored_authority,

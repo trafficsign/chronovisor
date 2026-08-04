@@ -51,8 +51,9 @@ from chronovisor.decision.graph_decisions import (
 )
 
 CASES_PER_MODEL_BACKED_LANE = 5
-LANE_CONTRACT_CASE_ID_VERSION = 26
+LANE_CONTRACT_CASE_ID_VERSION = 27
 BACKGROUND_LANE_CONTRACT_CASE_VERSION = 2
+QUORUM_VETO_CASES_PER_POLICY_LANE = 1
 
 
 def _coverage_label(expected: dict[str, Any]) -> str | None:
@@ -93,6 +94,70 @@ class DecisionLaneContractCase:
             "expected_decision_signature": self.expected_decision_signature,
             "expected_effect": self.expected_effect,
         }
+
+
+@dataclass(frozen=True)
+class QuorumVetoLaneContractCase:
+    """One deterministic tie-break safety-policy contract fixture."""
+
+    lane: str
+    expected_status: str
+    expected_bypass: bool
+    expected_quarantine_reason: str | None
+    majority_effect_class: str = "mutating"
+    dissent_effect_class: str = "conservative"
+    conservative_veto_fired: bool = True
+
+    @property
+    def case_id(self) -> str:
+        return f"quorum-veto-v{LANE_CONTRACT_CASE_ID_VERSION}:{self.lane}:1"
+
+    def as_dict(self) -> dict[str, Any]:
+        payload = {
+            "case_id": self.case_id,
+            "lane": self.lane,
+            "vote_shape": "tie_break_2_to_1",
+            "majority_effect_class": self.majority_effect_class,
+            "dissent_effect_class": self.dissent_effect_class,
+            "conservative_veto_fired": self.conservative_veto_fired,
+            "expected_status": self.expected_status,
+            "expected_bypass": self.expected_bypass,
+            "expected_quarantine_reason": self.expected_quarantine_reason,
+        }
+        return {**payload, "case_sha256": _sha256_json(payload)}
+
+
+def quorum_veto_lane_contract_cases() -> tuple[QuorumVetoLaneContractCase, ...]:
+    """Bind all and only the approved lane-scoped veto policy decisions."""
+
+    bypass_lanes = (
+        "lint_tag_repair",
+        "metadata_backfill",
+        "orphan_link",
+        "recall_auto_apply",
+        "search_label",
+    )
+    cases = tuple(
+        QuorumVetoLaneContractCase(
+            lane=lane,
+            expected_status="agreed",
+            expected_bypass=True,
+            expected_quarantine_reason=None,
+        )
+        for lane in bypass_lanes
+    ) + (
+        QuorumVetoLaneContractCase(
+            lane="ingest_reconciliation",
+            expected_status="quarantined",
+            expected_bypass=False,
+            expected_quarantine_reason=(
+                "mutating_local_majority_vetoed_by_conservative_vote"
+            ),
+        ),
+    )
+    if len(cases) != 6 or len({case.lane for case in cases}) != len(cases):
+        raise ValueError("quorum veto lane contract coverage is incomplete")
+    return cases
 
 
 def _generic_expected(decision: str, summary: str) -> dict[str, Any]:
@@ -2826,6 +2891,7 @@ def decision_lane_contract_case_manifest() -> dict[str, Any]:
     )
     from chronovisor.decision.decision_router import (
         DECISION_REQUEST_FINGERPRINT_VERSION,
+        QUORUM_SAFETY_POLICY_VERSION,
         decision_request_fingerprint_sha256,
     )
     from chronovisor.decision.decision_schema_manifest import (
@@ -2885,10 +2951,23 @@ def decision_lane_contract_case_manifest() -> dict[str, Any]:
         "request_fingerprint_version": DECISION_REQUEST_FINGERPRINT_VERSION,
         "cases_per_lane": CASES_PER_MODEL_BACKED_LANE,
         "total_cases": sum(int(row["case_count"]) for row in lanes.values()),
+        "quorum_safety_policy_version": QUORUM_SAFETY_POLICY_VERSION,
+        "quorum_veto_cases_per_policy_lane": (
+            QUORUM_VETO_CASES_PER_POLICY_LANE
+        ),
+        "quorum_veto_case_count": len(quorum_veto_lane_contract_cases()),
+        "quorum_veto_cases": [
+            case.as_dict() for case in quorum_veto_lane_contract_cases()
+        ],
         "lanes": lanes,
     }
     if manifest["total_cases"] < 19 * CASES_PER_MODEL_BACKED_LANE:
         raise ValueError("canonical lane contract case manifest is under-covered")
+    manifest["total_contract_cases"] = (
+        int(manifest["total_cases"]) + int(manifest["quorum_veto_case_count"])
+    )
+    if manifest["quorum_veto_case_count"] < 6:
+        raise ValueError("quorum veto policy case manifest is under-covered")
     return manifest
 
 
@@ -2901,6 +2980,8 @@ __all__ = [
     "BACKGROUND_LANE_CONTRACT_CASE_VERSION",
     "CASES_PER_MODEL_BACKED_LANE",
     "DecisionLaneContractCase",
+    "QUORUM_VETO_CASES_PER_POLICY_LANE",
+    "QuorumVetoLaneContractCase",
     "background_decision_lane_contract_cases",
     "background_decision_lane_contract_case_manifest",
     "background_decision_lane_contract_case_manifest_sha256",
@@ -2908,4 +2989,5 @@ __all__ = [
     "decision_lane_contract_case_manifest",
     "decision_lane_contract_case_manifest_sha256",
     "decision_lane_contract_case_specs",
+    "quorum_veto_lane_contract_cases",
 ]

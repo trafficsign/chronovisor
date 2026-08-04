@@ -11,10 +11,12 @@ import pytest
 from chronovisor.core.runtime_config import DecisionRouterConfig
 from chronovisor.decision.decision_lane_contract_cases import (
     CASES_PER_MODEL_BACKED_LANE,
+    QUORUM_VETO_CASES_PER_POLICY_LANE,
     background_decision_lane_contract_cases,
     decision_lane_contract_case_manifest,
     decision_lane_contract_case_manifest_sha256,
     decision_lane_contract_case_specs,
+    quorum_veto_lane_contract_cases,
 )
 from chronovisor.decision.decision_lane_contracts import (
     LANE_CONTRACT_CASE_VERSION,
@@ -44,6 +46,8 @@ from chronovisor.decision.decision_lane_prompts import (
 )
 from chronovisor.decision.decision_policy import DECISION_POLICIES
 from chronovisor.decision.decision_router import (
+    QUORUM_SAFETY_POLICY_VERSION,
+    TIE_BREAK_MUTATING_MAJORITY_LANES,
     _strip_ingest_repair_host_block,
     decision_context_buckets,
     decision_request_context,
@@ -167,7 +171,7 @@ def test_contract_cases_cover_every_model_backed_lane_independently() -> None:
     assert min(counts.values()) == CASES_PER_MODEL_BACKED_LANE
     assert counts["content_correction_classification"] == 6
     assert len({case.case_id for case in cases}) == len(cases)
-    assert all(case.case_id.startswith("lane-contract-v26:") for case in cases)
+    assert all(case.case_id.startswith("lane-contract-v27:") for case in cases)
 
 
 def test_background_graph_contracts_are_separate_from_adopted_fleet() -> None:
@@ -392,8 +396,8 @@ def test_content_review_contracts_distinguish_three_nonapproval_evidence_states(
 def test_lane_contract_case_source_version_tracks_the_resealed_cases() -> None:
     assert LANE_CONTRACT_POLICY_VERSION == 10
     assert INGEST_REPAIR_OPTION_POLICY_VERSION == 2
-    assert LANE_CONTRACT_CASE_VERSION == 26
-    assert LANE_CONTRACT_SOURCE == "deterministic_lane_contract_v26"
+    assert LANE_CONTRACT_CASE_VERSION == 27
+    assert LANE_CONTRACT_SOURCE == "deterministic_lane_contract_v27"
     assert set(model_backed_lane_names()).issubset(LANE_PROMPT_POLICY_VERSIONS)
     assert set(LANE_PROMPT_POLICY_VERSIONS) - set(model_backed_lane_names()) == set(
         background_decision_lane_contract_cases()
@@ -1918,7 +1922,13 @@ def test_ingest_preflight_scopes_a_shared_tag_option_to_one_filename() -> None:
 def test_canonical_manifest_seals_all_effective_requests_and_outcomes() -> None:
     manifest = decision_lane_contract_case_manifest()
     assert manifest["total_cases"] == 100
+    assert manifest["total_contract_cases"] == 106
     assert len(manifest["lanes"]) == 19
+    assert manifest["quorum_safety_policy_version"] == QUORUM_SAFETY_POLICY_VERSION
+    assert manifest["quorum_veto_cases_per_policy_lane"] == (
+        QUORUM_VETO_CASES_PER_POLICY_LANE
+    )
+    assert manifest["quorum_veto_case_count"] == 6
     assert len(decision_lane_contract_case_manifest_sha256()) == 64
     assert all(
         lane["case_count"] >= CASES_PER_MODEL_BACKED_LANE
@@ -1926,6 +1936,36 @@ def test_canonical_manifest_seals_all_effective_requests_and_outcomes() -> None:
         and len(lane["effective_request_sha256s"]) == lane["case_count"]
         for lane in manifest["lanes"].values()
     )
+
+
+def test_quorum_veto_policy_cases_cover_five_bypasses_and_ingest_veto() -> None:
+    cases = quorum_veto_lane_contract_cases()
+    by_lane = {case.lane: case for case in cases}
+
+    assert set(by_lane) == {
+        *TIE_BREAK_MUTATING_MAJORITY_LANES,
+        "ingest_reconciliation",
+    }
+    assert len(cases) == 6
+    assert all(case.case_id.startswith("quorum-veto-v27:") for case in cases)
+    assert all(len(case.as_dict()["case_sha256"]) == 64 for case in cases)
+    for lane in TIE_BREAK_MUTATING_MAJORITY_LANES:
+        case = by_lane[lane]
+        assert case.expected_status == "agreed"
+        assert case.expected_bypass is True
+        assert case.expected_quarantine_reason is None
+        assert case.conservative_veto_fired is True
+        assert case.majority_effect_class == "mutating"
+        assert case.dissent_effect_class == "conservative"
+    ingest = by_lane["ingest_reconciliation"]
+    assert ingest.expected_status == "quarantined"
+    assert ingest.expected_bypass is False
+    assert ingest.expected_quarantine_reason == (
+        "mutating_local_majority_vetoed_by_conservative_vote"
+    )
+    assert decision_lane_contract_case_manifest()["quorum_veto_cases"] == [
+        case.as_dict() for case in cases
+    ]
 
 
 def test_lane_overlay_excludes_the_infeasible_16k_bucket() -> None:

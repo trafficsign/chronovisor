@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from chronovisor.decision.decision_router import QUORUM_SAFETY_POLICY_VERSION
 from chronovisor.search import semantic_hold
 
 
@@ -11,6 +12,7 @@ def semantic_authority(
     artifact_sha256: str = "a" * 64,
     kind: str = "consensus",
     schema_name: str = "generic_decision",
+    quorum_safety_policy_version: int = QUORUM_SAFETY_POLICY_VERSION,
 ) -> dict[str, object]:
     return {
         "source": "adopted_local_consensus",
@@ -19,6 +21,7 @@ def semantic_authority(
         "lane_contract_sha256": "b" * 64,
         "lane_contract_manifest_sha256": "c" * 64,
         "lane_contract_case_manifest_sha256": "d" * 64,
+        "quorum_safety_policy_version": quorum_safety_policy_version,
         "policy": {
             "kind": kind,
             "schema_name": schema_name,
@@ -103,7 +106,7 @@ def semantic_review(
         "local_consensus": {
             "status": "quarantined",
             "ok": False,
-            "quorum_safety_policy_version": 1,
+            "quorum_safety_policy_version": QUORUM_SAFETY_POLICY_VERSION,
             "agreement_sha256": None,
             "failure_class": "local_consensus_failed",
             "quarantine_reason": reason,
