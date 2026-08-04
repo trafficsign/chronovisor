@@ -1179,6 +1179,52 @@
     flashTicker(label || `DEMO/REPLAY · ${name.toUpperCase()} · backend unchanged`);
   }
 
+  const STIMULATE_KINDS = new Set(["auto_recall", "recall", "read", "search", "used"]);
+
+  function stimulateFromTransport(event) {
+    if (event.source === "demo") return;
+    if (!STIMULATE_KINDS.has(event.kind)) return;
+    const pageIds = Array.isArray(event.page_ids) ? event.page_ids : [];
+    const targets = pageIds.map((id) => byId.get(id)).filter(Boolean);
+    if (!targets.length) {
+      const fallback = visibleHub();
+      if (fallback) targets.push(fallback);
+    }
+    if (!targets.length) return;
+    const now = performance.now();
+    const scale = event.kind === "auto_recall" ? 0.9 : 0.6;
+    targets.slice(0, 5).forEach((node, index) => {
+      const startedAt = now + index * 35;
+      exciteNode(node, scale * NODE_STIMULUS_SCALE, startedAt);
+      nodeEffects.push({
+        nodeIndex: node.index,
+        kind: "stimulus",
+        startedAt,
+        duration: 650,
+        delta: scale * NODE_STIMULUS_SCALE,
+        seq: -(index + 1),
+        demo: false,
+      });
+      const candidates = outgoing[node.index]
+        .filter((edgeIndex) => edgeState[edgeIndex] > 0)
+        .sort((left, right) => left - right)
+        .slice(0, 3);
+      candidates.forEach((edgeIndex, branch) => {
+        queueElectricPulse({
+          edgeIndex,
+          startedAt: now + 120 + branch * 80,
+          duration: electricTravelDuration((scale - 0.12) - branch * 0.12),
+          delta: (scale - 0.12) - branch * 0.12,
+          seq: -(index * 10 + branch + 1),
+          edgeType: links[edgeIndex].edgeType,
+          demo: false,
+          paintedAt: 0,
+        });
+      });
+    });
+    trimVisualQueues();
+  }
+
   function queueElectricPulse(pulse) {
     pulses.push(pulse);
     pulses.sort(
@@ -1547,6 +1593,7 @@
     if (aria) {
       aria.textContent = `${phase}, ${event.label || "memory transport"}${pageId ? `, ${pageId}` : ""}`;
     }
+    stimulateFromTransport(event);
     publishCortexMetrics();
   }
 
