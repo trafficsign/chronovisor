@@ -708,7 +708,7 @@ def test_cortex_static_view_preserves_fable_layout_and_uses_live_data() -> None:
     assert 'id="tLive"' in html
     assert 'id="tMotion"' in html
     assert 'id="sessionSelect"' in html
-    assert 'id="memoryIngress"' in html
+    assert 'id="processingLanesMonitor"' in html
     assert 'id="resetCenter"' in html
     assert "◎ RESET CENTER" in html
     assert 'id="tAuto"' not in html
@@ -781,18 +781,16 @@ def test_cortex_static_view_preserves_fable_layout_and_uses_live_data() -> None:
     assert "transportEvents.forEach(visualizeTransportEvent)" in script
     assert "TRANSPORT_KINDS.has(event.kind)" in script
     assert "drawTransportEffects(time);" in script
-    assert "RAW BUFFER" in html
+    assert "PROCESSING LANES" in html
     assert (
-        '#memoryIngress[data-phase="generate"] { --ingress-color: #9b7cff; }' in style
+        '.processingLane[data-phase="generate"] { --lane-color: #9b7cff; }' in style
     )
     assert (
-        '#memoryIngress[data-phase="consensus"] { --ingress-color: #ffe6ae; }' in style
+        '.processingLane[data-phase="consensus"] { --lane-color: #ffe6ae; }' in style
     )
     assert "violet · memory synthesis" in script
     assert "platinum · local agreement" in script
-    assert (
-        '#memoryIngress:not([data-phase="idle"]):not([data-phase="capture"])' in style
-    )
+    assert '.processingLane[data-state="active"]' in style
     assert "function ensureActualEdge(event)" in script
     assert "function drawEdges()" in script
     assert "const ACTIVE_LABEL_LIMIT = 5;" in script
@@ -877,6 +875,105 @@ def test_cortex_static_view_preserves_fable_layout_and_uses_live_data() -> None:
     assert "body.has-activity-bar {" in activity_style
     assert ".activity-bar {" in activity_style
     assert ".has-activity-bar .shell {" in activity_style
+
+
+def test_cortex_processing_lanes_monitor_has_fixed_independent_routing() -> None:
+    static = dashboard.STATIC_DIR
+    html = (static / "cortex.html").read_text(encoding="utf-8")
+    style = (static / "cortex.css").read_text(encoding="utf-8")
+    script = (static / "cortex.js").read_text(encoding="utf-8")
+
+    lane_keys = (
+        "raw_buffer",
+        "ingest",
+        "recall",
+        "audit",
+        "improve",
+        "repair",
+        "typed_graph",
+    )
+    assert html.count('class="processingLane"') == len(lane_keys)
+    for lane_key in lane_keys:
+        assert f'id="processingLane-{lane_key}"' in html
+        assert f'data-lane="{lane_key}"' in html
+    for label in (
+        "RAW BUFFER",
+        "INGEST",
+        "RECALL",
+        "AUDIT",
+        "IMPROVE",
+        "REPAIR",
+        "TYPED GRAPH",
+    ):
+        assert f'<span class="processingLaneName">{label}</span>' in html
+
+    monitor_start = html.index('<section id="processingLanesMonitor"')
+    monitor_end = html.index("</section>", monitor_start)
+    panel_body = html.index('<div id="panelBody"></div>')
+    assert monitor_start < monitor_end < panel_body
+    assert 'aria-label="Processing lanes monitor"' in html
+    assert 'id="processingLanesAnnounce"' in html
+    assert 'aria-live="polite"' in html
+    assert 'aria-atomic="true"' in html
+    assert 'id="memoryIngress"' not in html
+    assert "#memoryIngress" not in style
+    assert "updateMemoryIngress" not in script
+
+    assert "#processingLanesMonitor {" in style
+    assert "flex: none;" in style[style.index("#processingLanesMonitor {") :]
+    assert "#panelBody {" in style
+    assert "min-height: 0;" in style[style.index("#panelBody {") :]
+    assert "--lane-color: #61708a;" in style
+    assert "border-left: 2px solid #344057;" in style
+    assert '.processingLane[data-state="active"]' in style
+    assert '.processingLane[data-state="complete"]' in style
+    assert '.processingLane[data-state="active"] .processingLaneDetail {' in style
+    assert '.processingLane[data-phase="capture"] { --lane-color: #4fe4ff; }' in style
+    assert '.processingLane[data-phase="triage"] { --lane-color: #ffb454; }' in style
+    assert '.processingLane[data-phase="generate"] { --lane-color: #9b7cff; }' in style
+    assert (
+        '.processingLane[data-phase="consensus"] { --lane-color: #ffe6ae; }'
+        in style
+    )
+    assert '.processingLane[data-phase="complete"] { --lane-color: #45d49b; }' in style
+
+    assert "const processingLaneMonitorStates = new Map(" in script
+    assert "PROCESSING_LANE_KEYS.map((laneKey) =>" in script
+    assert "revision: 0," in script
+    assert "resetTimer: 0," in script
+    assert "monitorState.revision += 1;" in script
+    assert "window.clearTimeout(monitorState.resetTimer);" in script
+    assert "revision !== monitorState.revision" in script
+    assert "resetProcessingLaneMonitor(laneKey, revision)" in script
+    assert "PROCESSING_LANE_COMPLETE_HOLD_MS = 1800" in script
+    assert "PROCESSING_LANE_ACTIVE_HOLD_MS = 4800" in script
+
+    assert 'kind === "save" || kind === "capture"' in script
+    assert 'return "raw_buffer";' in script
+    assert 'if (kind === "ingest") return "ingest";' in script
+    assert 'if (RECALL_TELEMETRY_KINDS.has(kind)) return "recall";' in script
+    assert 'PROCESSING_ACTIVITY_LANE_KEY_SET.has(laneKey) ? laneKey : "audit"' in script
+    assert 'if (kind === "search") return "triage";' in script
+    assert 'if (kind === "used") return "apply";' in script
+    assert '["recall", "auto_recall", "read"].includes(kind)' in script
+    assert 'if (kind === "processing") value = event.step || phase;' in script
+    assert '.replaceAll("_", " ")' in script
+    assert "[event.model, event.role]" in script
+    assert "formatBytes(bytes)" in script
+    assert 'event.operation || (kind === "ingest" ? event.phase || "" : "")' in script
+    assert ".textContent = status;" in script
+    assert ".textContent = detail;" in script
+    assert "const shouldAnnounce =" in script
+    assert "if (announce && shouldAnnounce)" in script
+    assert 'processingLaneEvent(state.lane, "complete")' in script
+    assert "updateProcessingLaneMonitor(event, phase);" in script
+    assert 'visualizeTransportEvent({ ...event, source: "demo" })' in script
+    visualize_transport = script[
+        script.index("function visualizeTransportEvent(event)") : script.index(
+            "function visualizeFieldEvent(event)"
+        )
+    ]
+    assert 'event.kind === "save" || event.kind === "capture"' in visualize_transport
 
 
 def test_cortex_sleeps_only_layout_physics_and_keeps_rendering_live() -> None:

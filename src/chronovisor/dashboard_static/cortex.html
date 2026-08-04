@@ -110,12 +110,6 @@
           <button id="zOut" type="button" aria-label="ズームアウト">−</button>
           <button id="zFit" type="button" aria-label="全体表示">⌂</button>
         </div>
-        <div id="memoryIngress" data-phase="idle" aria-live="polite">
-          <span class="ingressBeacon" aria-hidden="true"></span>
-          <span class="ingressChannel">RAW BUFFER</span>
-          <b id="memoryIngressState">IDLE</b>
-          <code id="memoryIngressDetail">awaiting host capture</code>
-        </div>
         <div id="ticker"><span class="cur"></span><span id="tickerTx"></span></div>
         <div id="genInfo"></div>
         <div id="tooltip"></div>
@@ -126,6 +120,40 @@
           <span>SYSTEM MONITOR</span>
           <span id="eventLive" class="liveStatus">● LIVE</span>
         </div>
+        <section id="processingLanesMonitor" aria-label="Processing lanes monitor">
+          <div class="processingLanesTitle">PROCESSING LANES</div>
+          <div id="processingLanes" role="list">
+            <div class="processingLane" id="processingLane-raw_buffer" data-lane="raw_buffer" data-phase="idle" data-state="idle" role="listitem" aria-label="RAW BUFFER lane, idle">
+              <div class="processingLanePrimary"><span class="processingLaneBeacon" aria-hidden="true"></span><span class="processingLaneName">RAW BUFFER</span><b class="processingLaneStatus">IDLE</b></div>
+              <code class="processingLaneDetail"></code>
+            </div>
+            <div class="processingLane" id="processingLane-ingest" data-lane="ingest" data-phase="idle" data-state="idle" role="listitem" aria-label="INGEST lane, idle">
+              <div class="processingLanePrimary"><span class="processingLaneBeacon" aria-hidden="true"></span><span class="processingLaneName">INGEST</span><b class="processingLaneStatus">IDLE</b></div>
+              <code class="processingLaneDetail"></code>
+            </div>
+            <div class="processingLane" id="processingLane-recall" data-lane="recall" data-phase="idle" data-state="idle" role="listitem" aria-label="RECALL lane, idle">
+              <div class="processingLanePrimary"><span class="processingLaneBeacon" aria-hidden="true"></span><span class="processingLaneName">RECALL</span><b class="processingLaneStatus">IDLE</b></div>
+              <code class="processingLaneDetail"></code>
+            </div>
+            <div class="processingLane" id="processingLane-audit" data-lane="audit" data-phase="idle" data-state="idle" role="listitem" aria-label="AUDIT lane, idle">
+              <div class="processingLanePrimary"><span class="processingLaneBeacon" aria-hidden="true"></span><span class="processingLaneName">AUDIT</span><b class="processingLaneStatus">IDLE</b></div>
+              <code class="processingLaneDetail"></code>
+            </div>
+            <div class="processingLane" id="processingLane-improve" data-lane="improve" data-phase="idle" data-state="idle" role="listitem" aria-label="IMPROVE lane, idle">
+              <div class="processingLanePrimary"><span class="processingLaneBeacon" aria-hidden="true"></span><span class="processingLaneName">IMPROVE</span><b class="processingLaneStatus">IDLE</b></div>
+              <code class="processingLaneDetail"></code>
+            </div>
+            <div class="processingLane" id="processingLane-repair" data-lane="repair" data-phase="idle" data-state="idle" role="listitem" aria-label="REPAIR lane, idle">
+              <div class="processingLanePrimary"><span class="processingLaneBeacon" aria-hidden="true"></span><span class="processingLaneName">REPAIR</span><b class="processingLaneStatus">IDLE</b></div>
+              <code class="processingLaneDetail"></code>
+            </div>
+            <div class="processingLane" id="processingLane-typed_graph" data-lane="typed_graph" data-phase="idle" data-state="idle" role="listitem" aria-label="TYPED GRAPH lane, idle">
+              <div class="processingLanePrimary"><span class="processingLaneBeacon" aria-hidden="true"></span><span class="processingLaneName">TYPED GRAPH</span><b class="processingLaneStatus">IDLE</b></div>
+              <code class="processingLaneDetail"></code>
+            </div>
+          </div>
+          <div id="processingLanesAnnounce" class="srOnly" aria-live="polite" aria-atomic="true"></div>
+        </section>
         <div id="panelBody"></div>
       </aside>
     </div>
