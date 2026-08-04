@@ -1040,6 +1040,7 @@ def test_cortex_processing_lanes_monitor_has_fixed_independent_routing() -> None
         "typed_graph",
     )
     assert html.count('class="processingLane"') == len(lane_keys)
+    assert html.count('class="processingLaneDetail"') == len(lane_keys)
     for lane_key in lane_keys:
         assert f'id="processingLane-{lane_key}"' in html
         assert f'data-lane="{lane_key}"' in html
@@ -1074,7 +1075,6 @@ def test_cortex_processing_lanes_monitor_has_fixed_independent_routing() -> None
     assert "border-left: 2px solid #344057;" in style
     assert '.processingLane[data-state="active"]' in style
     assert '.processingLane[data-state="complete"]' in style
-    assert '.processingLane[data-state="active"] .processingLaneDetail {' in style
     assert '.processingLane[data-phase="capture"] { --lane-color: #4fe4ff; }' in style
     assert '.processingLane[data-phase="triage"] { --lane-color: #ffb454; }' in style
     assert '.processingLane[data-phase="generate"] { --lane-color: #9b7cff; }' in style
@@ -1083,6 +1083,42 @@ def test_cortex_processing_lanes_monitor_has_fixed_independent_routing() -> None
         in style
     )
     assert '.processingLane[data-phase="complete"] { --lane-color: #45d49b; }' in style
+
+    lane_style = style[
+        style.index(".processingLane {") : style.index(".processingLane::after {")
+    ]
+    assert "display: grid;" in lane_style
+    assert "grid-template-rows: 11px 9px;" in lane_style
+    assert "row-gap: 1px;" in lane_style
+    assert "box-sizing: border-box;" in lane_style
+    assert "height: 30px;" in lane_style
+    assert "padding: 4px 7px 3px;" in lane_style
+    assert "min-height:" not in lane_style
+
+    detail_style = style[
+        style.index(".processingLaneDetail {") : style.index(
+            '.processingLane[data-phase="capture"]'
+        )
+    ]
+    assert "visibility: hidden;" in detail_style
+    assert "min-width: 0;" in detail_style
+    assert "overflow: hidden;" in detail_style
+    assert "text-overflow: ellipsis;" in detail_style
+    assert "white-space: nowrap;" in detail_style
+    assert "font: 7.5px/9px var(--mono);" in detail_style
+    assert "display: none;" not in detail_style
+    assert (
+        '.processingLane[data-state="active"] .processingLaneDetail,\n'
+        '.processingLane[data-state="complete"] .processingLaneDetail {' in style
+    )
+    assert (
+        "visibility: visible;"
+        in style[
+            style.index(
+                '.processingLane[data-state="active"] .processingLaneDetail,'
+            ) : style.index('.processingLane[data-state="complete"]::after')
+        ]
+    )
 
     assert "const processingLaneMonitorStates = new Map(" in script
     assert "PROCESSING_LANE_KEYS.map((laneKey) =>" in script
