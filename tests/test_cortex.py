@@ -14,6 +14,7 @@ from chronovisor.knowledge_graph.schema import (
 )
 from chronovisor.knowledge_graph.store import KnowledgeGraphStore
 from chronovisor.ops import cortex, dashboard
+from chronovisor.raw.raw_segment import RawSegmentReceipt, append_capture
 from chronovisor.recall.recall_field_schema import (
     ActivationNode,
     FieldEvent,
@@ -34,6 +35,27 @@ def _write_page(
     path.write_text(
         f"---\ntitle: {title}\nupdated: 2026-07-29\n{tag_line}---\n{body}\n",
         encoding="utf-8",
+    )
+
+
+def _append_v2_capture(root: Path, *, after_line: int) -> RawSegmentReceipt:
+    session_key = "0123456789abcdef01234567"
+    until_line = after_line + 1
+    idempotency_key = (
+        f"codex-{session_key}-from{after_line}-to{until_line}"
+    )
+    return append_capture(
+        raw_dir=root / "raw",
+        raw_id=f"save-{idempotency_key}.md",
+        idempotency_key=idempotency_key,
+        host="codex",
+        session_key=session_key,
+        session_id="cortex-test-session",
+        source_file=root / "session.jsonl",
+        after_line=after_line,
+        until_line=until_line,
+        source_bytes=f'{{"line":{until_line}}}\n'.encode(),
+        record_count=1,
     )
 
 
@@ -374,13 +396,16 @@ def test_cortex_event_cursor_projects_ingest_lifecycle_phases(tmp_path: Path) ->
 def test_cortex_latest_field_stream_includes_real_memory_io(tmp_path: Path) -> None:
     root = tmp_path / "chronovisor"
     event_root = root / "recall" / "field" / "events-v2"
-    raw_dir = root / "raw"
     event_root.mkdir(parents=True)
-    raw_dir.mkdir(parents=True)
+    recall_log = root / "recall" / "recall-log.jsonl"
+    pull_log = root / "recall" / "pull-log.jsonl"
     activity_log = root / "log.md"
+    recall_log.write_text("", encoding="utf-8")
+    pull_log.write_text("", encoding="utf-8")
     activity_log.write_text("", encoding="utf-8")
     event_path = event_root / "0123456789abcdef.jsonl"
     event_path.write_text("", encoding="utf-8")
+    _append_v2_capture(root, after_line=0)
     cursor = cortex.CortexEventCursor(
         root,
         activity_log=activity_log,
@@ -403,9 +428,32 @@ def test_cortex_latest_field_stream_includes_real_memory_io(tmp_path: Path) -> N
         + "\n",
         encoding="utf-8",
     )
-    raw_mtime = raw_dir.stat().st_mtime_ns
-    (raw_dir / "capture.md").write_text("memory", encoding="utf-8")
-    os.utime(raw_dir, ns=(raw_mtime + 1, raw_mtime + 1))
+    recall_log.write_text(
+        json.dumps(
+            {
+                "stage": "injected",
+                "status": "ok",
+                "decision": "read",
+                "pages": ["page-recalled"],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    pull_log.write_text(
+        "\n".join(
+            [
+                json.dumps({"type": "read", "page_id": "page-read"}),
+                json.dumps(
+                    {"type": "search", "direct_pages": ["page-searched"]}
+                ),
+                json.dumps({"type": "used", "page_ids": ["page-used"]}),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    receipt = _append_v2_capture(root, after_line=1)
     activity_log.write_text(
         "- [22:10:03] ingest | updated page-b.md\n",
         encoding="utf-8",
@@ -413,10 +461,48 @@ def test_cortex_latest_field_stream_includes_real_memory_io(tmp_path: Path) -> N
 
     events = cursor.poll()
 
-    assert [event["kind"] for event in events] == ["stimulus", "save", "ingest"]
+    assert [event["kind"] for event in events] == [
+        "stimulus",
+        "auto_recall",
+        "read",
+        "search",
+        "used",
+        "save",
+        "ingest",
+    ]
     assert events[0]["source"] == "stateful-recall-field"
-    assert events[1]["phase"] == "capture"
-    assert events[2]["phase"] == "apply"
+    assert events[1]["page_ids"] == ["page-recalled"]
+    assert events[2]["page_ids"] == ["page-read"]
+    assert events[3]["page_ids"] == ["page-searched"]
+    assert events[4]["page_ids"] == ["page-used"]
+    assert events[5]["phase"] == "capture"
+    assert events[5]["byte_count"] == receipt.commit.length
+    assert events[5]["raw_count"] == 1
+    assert events[5]["raw_id"] == receipt.commit.raw_id
+    assert len(events[5]["capture_id"]) == 12
+    assert events[6]["phase"] == "apply"
+    assert all(
+        event["source"] == "telemetry-fallback" for event in events[1:]
+    )
+
+
+def test_cortex_raw_v2_journal_truncation_does_not_replay_capture(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "chronovisor"
+    receipt = _append_v2_capture(root, after_line=0)
+    journal = receipt.commit_path.read_text(encoding="utf-8")
+    cursor = cortex.CortexEventCursor(root)
+
+    assert cursor.poll() == []
+    receipt.commit_path.write_text("", encoding="utf-8")
+    assert cursor.poll() == []
+    receipt.commit_path.write_text(journal, encoding="utf-8")
+    assert cursor.poll() == []
+    new_receipt = _append_v2_capture(root, after_line=1)
+    events = cursor.poll()
+    assert [event["kind"] for event in events] == ["save"]
+    assert events[0]["raw_id"] == new_receipt.commit.raw_id
 
 
 def test_cortex_field_projection_is_sealed_session_scoped_and_browser_safe(
@@ -561,6 +647,12 @@ def test_cortex_event_cursor_tails_only_selected_field_session(
     event_path = root / "recall" / "field" / "events-v2" / f"{session}.jsonl"
     event_path.parent.mkdir(parents=True)
     event_path.write_text("", encoding="utf-8")
+    recall_log = root / "recall" / "recall-log.jsonl"
+    pull_log = root / "recall" / "pull-log.jsonl"
+    activity_log = root / "log.md"
+    recall_log.write_text("", encoding="utf-8")
+    pull_log.write_text("", encoding="utf-8")
+    activity_log.write_text("", encoding="utf-8")
     cursor = cortex.CortexEventCursor(root, field_session=session)
 
     event_path.write_text(
@@ -582,30 +674,85 @@ def test_cortex_event_cursor_tails_only_selected_field_session(
         + "\n",
         encoding="utf-8",
     )
+    recall_log.write_text(
+        json.dumps(
+            {
+                "stage": "injected",
+                "status": "ok",
+                "decision": "read",
+                "pages": ["page-recalled"],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    pull_log.write_text(
+        "\n".join(
+            [
+                json.dumps({"type": "read", "page_id": "page-read"}),
+                json.dumps(
+                    {"type": "search", "direct_pages": ["page-searched"]}
+                ),
+                json.dumps({"type": "used", "page_ids": ["page-used"]}),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    receipt = _append_v2_capture(root, after_line=0)
+    invalid_commit = receipt.commit.to_dict()
+    invalid_commit["after_line"] = "not-an-integer"
+    receipt.commit_path.write_text(
+        "{malformed\n"
+        + json.dumps(invalid_commit)
+        + "\n"
+        + receipt.commit_path.read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    activity_log.write_text(
+        "- [22:10:03] ingest | updated page-ingested.md\n",
+        encoding="utf-8",
+    )
 
-    assert cursor.poll() == [
-        {
-            "seq": 1,
-            "timestamp_epoch": 10.0,
-            "session_hash": session,
-            "topic_epoch": 0,
-            "kind": "spread",
-            "source_page_id": "page-a",
-            "target_page_id": "page-b",
-            "edge_type": "wikilink",
-            "delta": 0.4,
-            "activation": 0.5,
-            "components": {
-                "direct": 0.0,
-                "spread": 0.5,
-                "negative": 0.0,
-                "inhibition": 0.0,
-                "anti_index": 0.0,
-                "hub_penalty": 0.0,
-            },
-            "source": "stateful-recall-field",
-        }
+    events = cursor.poll()
+
+    assert [event["kind"] for event in events] == [
+        "spread",
+        "auto_recall",
+        "read",
+        "search",
+        "used",
+        "save",
+        "ingest",
     ]
+    assert events[0] == {
+        "seq": 1,
+        "timestamp_epoch": 10.0,
+        "session_hash": session,
+        "topic_epoch": 0,
+        "kind": "spread",
+        "source_page_id": "page-a",
+        "target_page_id": "page-b",
+        "edge_type": "wikilink",
+        "delta": 0.4,
+        "activation": 0.5,
+        "components": {
+            "direct": 0.0,
+            "spread": 0.5,
+            "negative": 0.0,
+            "inhibition": 0.0,
+            "anti_index": 0.0,
+            "hub_penalty": 0.0,
+        },
+        "source": "stateful-recall-field",
+    }
+    assert events[1]["page_ids"] == ["page-recalled"]
+    assert events[2]["page_ids"] == ["page-read"]
+    assert events[3]["page_ids"] == ["page-searched"]
+    assert events[4]["page_ids"] == ["page-used"]
+    assert events[5]["raw_id"] == receipt.commit.raw_id
+    assert events[5]["byte_count"] == receipt.commit.length
+    assert events[6]["page_ids"] == ["page-ingested"]
 
 
 def test_cortex_event_cursor_follows_activity_across_field_sessions(

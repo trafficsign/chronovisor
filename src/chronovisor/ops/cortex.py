@@ -17,6 +17,7 @@ from chronovisor.core.durable_state import DurableStateError, read_sealed_json
 from chronovisor.core.frontmatter import parse as parse_frontmatter
 from chronovisor.core.link_fix import extract_targets
 from chronovisor.knowledge_graph.store import KnowledgeGraphStore
+from chronovisor.raw.raw_segment import RawSegmentCommit, RawSegmentCorrupt
 
 _GRAPH_CACHE_LOCK = threading.Lock()
 _GRAPH_CACHE: dict[str, dict[str, Any]] = {}
@@ -983,6 +984,17 @@ class CortexEventCursor:
             for path in self._field_event_paths():
                 self._offsets[path] = self._file_size(path)
         self._remainders: dict[Path, bytes] = {}
+        self._raw_commit_files: dict[Path, tuple[int, int]] = {}
+        self._known_raw_commit_files: set[tuple[int, int]] = set()
+        self._raw_commit_rebaselines: set[Path] = set()
+        self._seen_raw_commit_ids: set[str] = set()
+        for path in self._raw_commit_paths():
+            identity = self._file_identity(path)
+            if identity is None:
+                continue
+            self._offsets[path] = self._file_size(path)
+            self._raw_commit_files[path] = identity
+            self._known_raw_commit_files.add(identity)
         self._raw_snapshot = self._raw_file_snapshot()
 
     @staticmethod
@@ -991,6 +1003,14 @@ class CortexEventCursor:
             return path.stat().st_size
         except OSError:
             return 0
+
+    @staticmethod
+    def _file_identity(path: Path) -> tuple[int, int] | None:
+        try:
+            stat = path.stat()
+        except OSError:
+            return None
+        return stat.st_dev, stat.st_ino
 
     def _tail_lines(self, path: Path) -> list[str]:
         size = self._file_size(path)
@@ -1027,6 +1047,63 @@ class CortexEventCursor:
             snapshot[path.name] = (stat.st_size, stat.st_mtime_ns)
         return snapshot
 
+    def _raw_commit_paths(self) -> list[Path]:
+        pattern = "[0-9][0-9][0-9][0-9]/[0-9][0-9]/[0-9][0-9]/*.commits.jsonl"
+        try:
+            return sorted(self.raw_dir.glob(pattern))
+        except OSError:
+            return []
+
+    def _raw_segment_commits(self) -> list[RawSegmentCommit]:
+        commits: list[RawSegmentCommit] = []
+        for path in self._raw_commit_paths():
+            identity = self._file_identity(path)
+            if identity is None:
+                continue
+            size = self._file_size(path)
+            previous_identity = self._raw_commit_files.get(path)
+            if previous_identity is None:
+                self._offsets[path] = (
+                    size if identity in self._known_raw_commit_files else 0
+                )
+                self._raw_commit_files[path] = identity
+                self._known_raw_commit_files.add(identity)
+            elif previous_identity != identity:
+                self._offsets[path] = size
+                self._remainders.pop(path, None)
+                self._raw_commit_files[path] = identity
+                self._known_raw_commit_files.add(identity)
+                self._raw_commit_rebaselines.discard(path)
+                continue
+            elif size < self._offsets.get(path, 0):
+                # A same-inode truncation may be followed by historical journal
+                # restoration. Baseline both the shrink and its first regrowth.
+                self._offsets[path] = size
+                self._remainders.pop(path, None)
+                self._raw_commit_rebaselines.add(path)
+                continue
+            elif path in self._raw_commit_rebaselines:
+                if size > self._offsets.get(path, 0):
+                    self._offsets[path] = size
+                    self._remainders.pop(path, None)
+                    self._raw_commit_rebaselines.discard(path)
+                continue
+            for line in self._tail_lines(path):
+                try:
+                    commit = RawSegmentCommit.from_dict(json.loads(line))
+                except (
+                    json.JSONDecodeError,
+                    RawSegmentCorrupt,
+                    TypeError,
+                    ValueError,
+                ):
+                    continue
+                if commit.raw_id in self._seen_raw_commit_ids:
+                    continue
+                self._seen_raw_commit_ids.add(commit.raw_id)
+                commits.append(commit)
+        return commits
+
     @staticmethod
     def _event(
         kind: str,
@@ -1045,6 +1122,7 @@ class CortexEventCursor:
             "phase",
             "operation",
             "file_name",
+            "raw_id",
             "capture_id",
             "byte_count",
             "raw_count",
@@ -1154,32 +1232,49 @@ class CortexEventCursor:
         return events
 
     def _save_events(self) -> list[dict[str, Any]]:
+        commits = self._raw_segment_commits()
         snapshot = self._raw_file_snapshot()
-        if snapshot == self._raw_snapshot:
-            return []
         changed = [
             name
             for name, identity in snapshot.items()
             if self._raw_snapshot.get(name) != identity
         ]
         self._raw_snapshot = snapshot
-        if not changed:
+        if not commits and not changed:
             return []
-        changed.sort(key=lambda name: snapshot[name][1], reverse=True)
-        newest = changed[0]
-        byte_count = sum(snapshot[name][0] for name in changed)
-        identity = f"{newest}:{snapshot[newest][0]}:{snapshot[newest][1]}"
-        capture_id = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:12]
+        changed.sort(key=lambda name: (snapshot[name][1], name), reverse=True)
+        byte_count = sum(commit.length for commit in commits) + sum(
+            snapshot[name][0] for name in changed
+        )
+        identities = [
+            f"raw:{commit.raw_id}:{commit.sha256}" for commit in commits
+        ] + [
+            f"legacy:{name}:{snapshot[name][0]}:{snapshot[name][1]}"
+            for name in changed
+        ]
+        capture_id = hashlib.sha256(
+            "\n".join(sorted(identities)).encode("utf-8")
+        ).hexdigest()[:12]
+        details: dict[str, str | int] = {
+            "phase": "capture",
+            "capture_id": capture_id,
+            "byte_count": byte_count,
+            "raw_count": len(commits) + len(changed),
+        }
+        if commits:
+            newest_commit = max(
+                commits,
+                key=lambda commit: (commit.captured_at, commit.raw_id),
+            )
+            details["raw_id"] = newest_commit.raw_id
+        if changed:
+            details["file_name"] = changed[0]
         return [
             self._event(
                 "save",
                 [],
                 f"CAPTURED · {byte_count} B · ID {capture_id}",
-                phase="capture",
-                file_name=newest,
-                capture_id=capture_id,
-                byte_count=byte_count,
-                raw_count=len(changed),
+                **details,
             )
         ]
 
@@ -1241,15 +1336,13 @@ class CortexEventCursor:
         return events
 
     def poll(self) -> list[dict[str, Any]]:
+        field_events: list[dict[str, Any]] = []
         if self.follow_field_sessions:
-            return [
-                *self._followed_field_events(),
-                *self._save_events(),
-                *self._ingest_events(),
-            ]
-        if self.field_session:
-            return self._field_events()
+            field_events = self._followed_field_events()
+        elif self.field_session:
+            field_events = self._field_events()
         return [
+            *field_events,
             *self._automatic_recall_events(),
             *self._pull_events(),
             *self._save_events(),
