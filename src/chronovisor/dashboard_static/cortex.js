@@ -4342,15 +4342,16 @@
       const telemetryEvents = payload.events.filter(
         (event) => event.source === "telemetry-fallback",
       );
+      const TRANSPORT_KINDS = new Set(["save", "ingest", "recall", "auto_recall", "read", "search", "used"]);
       const transportEvents = telemetryEvents.filter(
-        (event) => event.kind === "save" || event.kind === "ingest",
+        (event) => TRANSPORT_KINDS.has(event.kind),
       );
       const fieldEvents = payload.events.filter(
         (event) => event.source !== "telemetry-fallback",
       );
       if (liveEventsEnabled) transportEvents.forEach(visualizeTransportEvent);
       const latestFallback = telemetryEvents
-        .filter((event) => event.kind !== "save" && event.kind !== "ingest")
+        .filter((event) => !TRANSPORT_KINDS.has(event.kind))
         .at(-1);
       if (latestFallback) {
         flashTicker(

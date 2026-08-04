@@ -749,7 +749,7 @@ def test_cortex_static_view_preserves_fable_layout_and_uses_live_data() -> None:
     assert "cortexMetrics.consensusOrbits += 1;" in script
     assert "cortexMetrics.consolidationEdges += 1;" in script
     assert "transportEvents.forEach(visualizeTransportEvent)" in script
-    assert 'event.kind === "save" || event.kind === "ingest"' in script
+    assert "TRANSPORT_KINDS.has(event.kind)" in script
     assert "drawTransportEffects(time);" in script
     assert "RAW BUFFER" in html
     assert (
