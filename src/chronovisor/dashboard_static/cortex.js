@@ -34,6 +34,10 @@
   const MAX_ELECTRIC_PATHS = 12;
   const MAX_TRANSPORT_EFFECTS = 18;
   const CAPTURE_COMET_DURATION_MS = 5200;
+  const LIVE_CAPTURE_COMET_DURATION_MS = 6400;
+  const RECALL_SIGNAL_DURATION_MS = 3000;
+  const RECALL_ELECTRIC_TRAVEL_MS = 2800;
+  const RECALL_TRANSPORT_MIN_VISIBLE_MS = 3200;
   const PROCESSING_EFFECT_PULSE_MS = 1450;
   const PROCESSING_LANE_COMPLETE_HOLD_MS = 1800;
   const PROCESSING_LANE_ACTIVE_HOLD_MS = 4800;
@@ -1259,7 +1263,7 @@
         nodeIndex: node.index,
         kind: "stimulus",
         startedAt,
-        duration: 650,
+        duration: RECALL_SIGNAL_DURATION_MS,
         delta: scale * NODE_STIMULUS_SCALE,
         seq: -(index + 1),
         demo: false,
@@ -1272,7 +1276,8 @@
         queueElectricPulse({
           edgeIndex,
           startedAt: now + 120 + branch * 80,
-          duration: electricTravelDuration((scale - 0.12) - branch * 0.12),
+          duration: RECALL_ELECTRIC_TRAVEL_MS,
+          retainedUntil: startedAt + RECALL_ELECTRIC_TRAVEL_MS,
           delta: (scale - 0.12) - branch * 0.12,
           seq: -(index * 10 + branch + 1),
           edgeType: links[edgeIndex].edgeType,
@@ -1284,17 +1289,44 @@
     trimVisualQueues();
   }
 
-  function queueElectricPulse(pulse) {
-    pulses.push(pulse);
-    pulses.sort(
+  function isElectricPulseProtected(pulse, now) {
+    return Number(pulse.retainedUntil || 0) > now;
+  }
+
+  function pruneAndBoundElectricPulses(
+    pulseQueue,
+    now,
+    maxPulses = MAX_ELECTRIC_PATHS,
+  ) {
+    for (let index = pulseQueue.length - 1; index >= 0; index -= 1) {
+      const pulse = pulseQueue[index];
+      if (Number(pulse.startedAt || 0) + Number(pulse.duration || 0) <= now) {
+        pulseQueue.splice(index, 1);
+      }
+    }
+    pulseQueue.sort(
       (left, right) =>
         right.delta - left.delta
         || right.startedAt - left.startedAt
         || right.seq - left.seq,
     );
-    if (pulses.length > MAX_ELECTRIC_PATHS) {
-      pulses.splice(MAX_ELECTRIC_PATHS);
+    const boundedLimit = Math.max(0, Math.floor(Number(maxPulses) || 0));
+    while (pulseQueue.length > boundedLimit) {
+      let evictionIndex = -1;
+      for (let index = pulseQueue.length - 1; index >= 0; index -= 1) {
+        if (!isElectricPulseProtected(pulseQueue[index], now)) {
+          evictionIndex = index;
+          break;
+        }
+      }
+      pulseQueue.splice(evictionIndex >= 0 ? evictionIndex : -1, 1);
     }
+    return pulseQueue;
+  }
+
+  function queueElectricPulse(pulse) {
+    pulses.push(pulse);
+    pruneAndBoundElectricPulses(pulses, performance.now());
   }
 
   function trimVisualQueues() {
@@ -1627,7 +1659,7 @@
     const holdMs = phase === "complete"
       ? PROCESSING_LANE_COMPLETE_HOLD_MS
       : phase === "capture"
-        ? CAPTURE_COMET_DURATION_MS + 400
+        ? captureCometDuration(event) + 400
         : PROCESSING_LANE_ACTIVE_HOLD_MS;
     monitorState.resetTimer = window.setTimeout(
       () => resetProcessingLaneMonitor(laneKey, revision),
@@ -1641,10 +1673,86 @@
         effect.phase === "capture"
         || effect.channelKey !== channelKey
         || (pageId && effect.pageId && effect.pageId !== pageId)
+        || isTransportEffectProtected(effect, now)
       ) return;
       const elapsed = Math.max(0, now - effect.startedAt);
       effect.duration = Math.min(effect.duration, elapsed + 280);
     });
+  }
+
+  function captureCometDuration(event) {
+    return event.source === "demo"
+      ? CAPTURE_COMET_DURATION_MS
+      : LIVE_CAPTURE_COMET_DURATION_MS;
+  }
+
+  function transportEffectTiming(event, phase, now) {
+    const baseDuration = phase === "capture"
+      ? captureCometDuration(event)
+      : phase === "apply" || phase === "complete"
+        ? 3600
+        : phase === "consensus"
+          ? 2600
+          : phase === "generate"
+            ? 2300
+            : 2100;
+    const duration = RECALL_TELEMETRY_KINDS.has(event.kind)
+      ? Math.max(baseDuration, RECALL_TRANSPORT_MIN_VISIBLE_MS)
+      : baseDuration;
+    const retainedUntil = phase === "capture"
+      ? now + baseDuration
+      : RECALL_TELEMETRY_KINDS.has(event.kind)
+        ? now + RECALL_TRANSPORT_MIN_VISIBLE_MS
+        : now;
+    return { duration, retainedUntil };
+  }
+
+  function isTransportEffectProtected(effect, now) {
+    return Number(effect.retainedUntil || 0) > now;
+  }
+
+  function transportEvictionIndex(effects, now) {
+    const processingIndex = effects.findIndex(
+      (effect) =>
+        effect.kind === "processing"
+        && !isTransportEffectProtected(effect, now),
+    );
+    if (processingIndex >= 0) return processingIndex;
+    const unprotectedIndex = effects.findIndex(
+      (effect) => !isTransportEffectProtected(effect, now),
+    );
+    if (unprotectedIndex >= 0) return unprotectedIndex;
+    return effects.reduce((candidateIndex, effect, index) => {
+      if (candidateIndex < 0) return index;
+      const candidate = effects[candidateIndex];
+      return Number(effect.retainedUntil || 0) < Number(candidate.retainedUntil || 0)
+        || (
+          Number(effect.retainedUntil || 0) === Number(candidate.retainedUntil || 0)
+          && Number(effect.startedAt || 0) < Number(candidate.startedAt || 0)
+        )
+        ? index
+        : candidateIndex;
+    }, -1);
+  }
+
+  function pruneAndBoundTransportEffects(
+    effects,
+    now,
+    maxEffects = MAX_TRANSPORT_EFFECTS,
+  ) {
+    for (let index = effects.length - 1; index >= 0; index -= 1) {
+      const effect = effects[index];
+      if (Number(effect.startedAt || 0) + Number(effect.duration || 0) <= now) {
+        effects.splice(index, 1);
+      }
+    }
+    const boundedLimit = Math.max(0, Math.floor(Number(maxEffects) || 0));
+    while (effects.length > boundedLimit) {
+      const evictionIndex = transportEvictionIndex(effects, now);
+      if (evictionIndex < 0) break;
+      effects.splice(evictionIndex, 1);
+    }
+    return effects;
   }
 
   function processingTargetNode(laneKey) {
@@ -1684,15 +1792,7 @@
     if (phase !== "capture") {
       retireSupersededIngestEffects(pageId, now, channelKey);
     }
-    const duration = phase === "capture"
-      ? CAPTURE_COMET_DURATION_MS
-      : phase === "apply" || phase === "complete"
-        ? 3600
-        : phase === "consensus"
-          ? 2600
-          : phase === "generate"
-            ? 2300
-            : 2100;
+    const { duration, retainedUntil } = transportEffectTiming(event, phase, now);
     transportEffects.push({
       kind: event.kind,
       phase,
@@ -1707,13 +1807,12 @@
       rawCount: Math.max(1, Number(event.raw_count || 1)),
       startedAt: now,
       duration,
+      retainedUntil,
       seq: ++cortexMetrics.transportReceived,
       demo: event.source === "demo",
       paintedAt: 0,
     });
-    if (transportEffects.length > MAX_TRANSPORT_EFFECTS) {
-      transportEffects.splice(0, transportEffects.length - MAX_TRANSPORT_EFFECTS);
-    }
+    pruneAndBoundTransportEffects(transportEffects, now);
     if (phase === "capture") cortexMetrics.captureEvents += 1;
     else if (event.kind === "processing") cortexMetrics.processingEvents += 1;
     else cortexMetrics.ingestEvents += 1;
@@ -3138,6 +3237,7 @@
   }
 
   function drawTransportEffects(time) {
+    pruneAndBoundTransportEffects(transportEffects, time);
     context.save();
     context.globalCompositeOperation = "lighter";
     context.lineCap = "round";

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import threading
 from pathlib import Path
 
@@ -1206,6 +1207,214 @@ def test_cortex_reuses_hot_path_state_without_reducing_visual_limits() -> None:
     assert "const ACTIVE_LABEL_LIMIT = 5;" in script
     assert "const MAX_ELECTRIC_PATHS = 12;" in script
     assert "const MAX_TRANSPORT_EFFECTS = 18;" in script
+
+
+def test_cortex_transport_retention_resists_processing_storm_and_stays_bounded(
+) -> None:
+    script = (dashboard.STATIC_DIR / "cortex.js").read_text(encoding="utf-8")
+    visualize_transport = script[
+        script.index("function visualizeTransportEvent(") : script.index(
+            "function visualizeFieldEvent("
+        )
+    ]
+    assert "transportEffectTiming(event, phase, now)" in visualize_transport
+    assert "pruneAndBoundTransportEffects(transportEffects, now)" in (
+        visualize_transport
+    )
+    helpers = script[
+        script.index("function captureCometDuration(") : script.index(
+            "function processingTargetNode("
+        )
+    ]
+    scenario = f"""
+const MAX_TRANSPORT_EFFECTS = 18;
+const CAPTURE_COMET_DURATION_MS = 5200;
+const LIVE_CAPTURE_COMET_DURATION_MS = 6400;
+const RECALL_TRANSPORT_MIN_VISIBLE_MS = 3200;
+const RECALL_TELEMETRY_KINDS = new Set([
+  "recall", "auto_recall", "read", "search", "used",
+]);
+{helpers}
+const save = {{
+  id: "save",
+  kind: "save",
+  startedAt: 0,
+  duration: 6400,
+  retainedUntil: 6400,
+}};
+const recall = {{
+  id: "recall",
+  kind: "recall",
+  startedAt: 0,
+  duration: 3200,
+  retainedUntil: 3200,
+}};
+const processingStorm = Array.from({{ length: 18 }}, (_, index) => ({{
+  id: `processing-${{index}}`,
+  kind: "processing",
+  startedAt: 900 + index,
+  duration: 2300,
+  retainedUntil: 900 + index,
+}}));
+const retained = pruneAndBoundTransportEffects(
+  [save, recall, ...processingStorm],
+  1000,
+);
+const expired = pruneAndBoundTransportEffects([
+  {{ id: "expired", kind: "processing", startedAt: 0, duration: 100 }},
+  {{ id: "live", kind: "processing", startedAt: 950, duration: 1000 }},
+], 1000);
+const protectedBurst = Array.from({{ length: 19 }}, (_, index) => ({{
+  id: `memory-${{index}}`,
+  kind: "recall",
+  startedAt: index,
+  duration: 5000,
+  retainedUntil: 4000 + index,
+}}));
+pruneAndBoundTransportEffects(protectedBurst, 1000);
+process.stdout.write(JSON.stringify({{
+  demoCaptureTiming: transportEffectTiming(
+    {{ kind: "save", source: "demo" }}, "capture", 1000,
+  ),
+  liveCaptureTiming: transportEffectTiming(
+    {{ kind: "save", source: "transport" }}, "capture", 1000,
+  ),
+  recallTiming: transportEffectTiming(
+    {{ kind: "read", source: "transport" }}, "generate", 1000,
+  ),
+  usedTiming: transportEffectTiming(
+    {{ kind: "used", source: "transport" }}, "apply", 1000,
+  ),
+  retainedIds: retained.map((effect) => effect.id),
+  retainedLength: retained.length,
+  expiredIds: expired.map((effect) => effect.id),
+  protectedLength: protectedBurst.length,
+  oldestProtectedEvicted: !protectedBurst.some((effect) => effect.id === "memory-0"),
+}}));
+"""
+    completed = subprocess.run(
+        ["node", "-e", scenario],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    result = json.loads(completed.stdout)
+
+    assert result["demoCaptureTiming"] == {
+        "duration": 5200,
+        "retainedUntil": 6200,
+    }
+    assert result["liveCaptureTiming"] == {
+        "duration": 6400,
+        "retainedUntil": 7400,
+    }
+    assert result["recallTiming"] == {
+        "duration": 3200,
+        "retainedUntil": 4200,
+    }
+    assert result["usedTiming"] == {
+        "duration": 3600,
+        "retainedUntil": 4200,
+    }
+    assert result["retainedLength"] == 18
+    assert "save" in result["retainedIds"]
+    assert "recall" in result["retainedIds"]
+    assert result["expiredIds"] == ["live"]
+    assert result["protectedLength"] == 18
+    assert result["oldestProtectedEvicted"] is True
+
+
+def test_cortex_recall_electricity_survives_field_storm_and_stays_bounded(
+) -> None:
+    script = (dashboard.STATIC_DIR / "cortex.js").read_text(encoding="utf-8")
+    stimulate_transport = script[
+        script.index("function stimulateFromTransport(") : script.index(
+            "function isElectricPulseProtected("
+        )
+    ]
+    assert "duration: RECALL_ELECTRIC_TRAVEL_MS" in stimulate_transport
+    assert (
+        "retainedUntil: startedAt + RECALL_ELECTRIC_TRAVEL_MS"
+        in stimulate_transport
+    )
+    helpers = script[
+        script.index("function isElectricPulseProtected(") : script.index(
+            "function trimVisualQueues("
+        )
+    ]
+    scenario = f"""
+const MAX_ELECTRIC_PATHS = 12;
+const pulses = [];
+const performance = {{ now: () => 1000 }};
+{helpers}
+for (let index = 0; index < 12; index += 1) {{
+  queueElectricPulse({{
+    id: `field-${{index}}`,
+    kind: "field",
+    startedAt: 900,
+    duration: 760,
+    delta: 1 - index * 0.01,
+    seq: index,
+  }});
+}}
+for (let index = 0; index < 3; index += 1) {{
+  queueElectricPulse({{
+    id: `recall-${{index}}`,
+    kind: "recall",
+    startedAt: 1000 + index,
+    duration: 2800,
+    retainedUntil: 3800 + index,
+    delta: 0.1,
+    seq: 100 + index,
+  }});
+}}
+for (let index = 0; index < 40; index += 1) {{
+  queueElectricPulse({{
+    id: `late-field-${{index}}`,
+    kind: "field",
+    startedAt: 1000,
+    duration: 760,
+    delta: 1,
+    seq: 200 + index,
+  }});
+}}
+const protectedBurst = Array.from({{ length: 13 }}, (_, index) => ({{
+  id: `protected-${{index}}`,
+  startedAt: 1000,
+  duration: 2800,
+  retainedUntil: 3800 + index,
+  delta: 0.5,
+  seq: index,
+}}));
+pruneAndBoundElectricPulses(protectedBurst, 1000);
+const expired = [
+  {{ id: "expired", startedAt: 0, duration: 100, delta: 1, seq: 1 }},
+  {{ id: "live", startedAt: 950, duration: 1000, delta: 0.5, seq: 2 }},
+];
+pruneAndBoundElectricPulses(expired, 1000);
+process.stdout.write(JSON.stringify({{
+  pulseIds: pulses.map((pulse) => pulse.id),
+  pulseLength: pulses.length,
+  protectedLength: protectedBurst.length,
+  earliestProtectedEvicted: !protectedBurst.some(
+    (pulse) => pulse.id === "protected-0",
+  ),
+  expiredIds: expired.map((pulse) => pulse.id),
+}}));
+"""
+    completed = subprocess.run(
+        ["node", "-e", scenario],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    result = json.loads(completed.stdout)
+
+    assert result["pulseLength"] == 12
+    assert {"recall-0", "recall-1", "recall-2"}.issubset(result["pulseIds"])
+    assert result["protectedLength"] == 12
+    assert result["earliestProtectedEvicted"] is True
+    assert result["expiredIds"] == ["live"]
 
 
 def test_dashboard_serves_cortex_graph_api(monkeypatch) -> None:
