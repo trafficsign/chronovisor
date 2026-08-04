@@ -93,6 +93,8 @@ RUNTIME_DIR = CHRONOVISOR_ROOT / "runtime" / "content-correction"
 PROPOSALS_DIR = RUNTIME_DIR / "proposals"
 CONTENT_FEEDBACK_FILE = CHRONOVISOR_ROOT / "recall" / "content-feedback.jsonl"
 MAX_CANDIDATE_PAGES = 6
+CLASSIFICATION_MUTATION_DETAIL_TOTAL_BYTES = 20_000
+CLASSIFICATION_MUTATION_PROJECTIONS_MAX_BYTES = 40_000
 CORRECTION_SIGNAL_SCAN_CHARS = 512
 MAX_STALE_REVISIONS = 3
 QUARANTINE_RETRY_ENV = "CHRONOVISOR_CONTENT_CORRECTION_QUARANTINE_RETRY_SECONDS"
@@ -2489,6 +2491,7 @@ def _frontier_classification_prompt(
     mutations: list[PreparedPageMutation],
     page_evidence: list[dict[str, Any]] | None = None,
 ) -> str:
+    mutation_projections = _classification_mutation_projections(mutations)
     return f"""\
 You are an authoritative local-consensus triage judge for an autonomous Chronovisor
 correction. Classify across the complete set: page_fact_wrong, outdated,
@@ -2564,9 +2567,197 @@ checking that boundary.
 </CANDIDATE_PAGE_EVIDENCE_UNTRUSTED_JSON>
 
 <PREPARED_MUTATIONS_UNTRUSTED_JSON>
-{json.dumps([mutation.review_payload() for mutation in mutations], ensure_ascii=False, indent=2)}
+{json.dumps(mutation_projections, ensure_ascii=False, indent=2)}
 </PREPARED_MUTATIONS_UNTRUSTED_JSON>
 """
+
+
+def _classification_context_projection(value: object) -> dict[str, Any] | None:
+    """Keep positional provenance while bounding mutation context text."""
+
+    if not isinstance(value, Mapping):
+        return None
+    context = str(value.get("context") or "")
+    projected = {
+        key: value.get(key)
+        for key in (
+            "body_start",
+            "body_end",
+            "context_start",
+            "context_end",
+            "prefix_truncated",
+            "suffix_truncated",
+        )
+        if key in value
+    }
+    projected.update(
+        {
+            "context_excerpt": _trim_utf8(context, 512),
+            "context_utf8_bytes": len(context.encode("utf-8")),
+            "context_sha256": hashlib.sha256(context.encode("utf-8")).hexdigest(),
+        }
+    )
+    return projected
+
+
+def _classification_mutation_projection(
+    mutation: PreparedPageMutation,
+    *,
+    replacement_detail_budget_bytes: int,
+) -> dict[str, Any]:
+    """Return deterministic, classification-only evidence for one mutation.
+
+    Full before/after previews and a large diff are required by the separate
+    byte-mutation review, but classification only needs page identity,
+    provenance, hashes, replacement counts, and enough bounded text to decide
+    which branch applies.  The full payload and full diff remain hash-bound so
+    truncation cannot silently change their identity.
+    """
+
+    review = mutation.review_payload(preview_chars=64)
+    review_replacements = review.get("replacements")
+    review_replacements = (
+        review_replacements if isinstance(review_replacements, list) else []
+    )
+    replacement_manifest: list[dict[str, Any]] = []
+    replacement_details: dict[int, dict[str, Any]] = {}
+    for index, replacement in enumerate(mutation.replacements):
+        row = (
+            review_replacements[index]
+            if index < len(review_replacements)
+            and isinstance(review_replacements[index], Mapping)
+            else {}
+        )
+        old_raw = replacement.old_text.encode("utf-8")
+        new_raw = replacement.new_text.encode("utf-8")
+        diff_hunk = str(row.get("unified_diff_hunk") or "")
+        before_context = _classification_context_projection(row.get("before_context"))
+        after_context = _classification_context_projection(row.get("after_context"))
+        identity = {
+            "index": index,
+            "action": replacement.action,
+            "old_text_utf8_bytes": len(old_raw),
+            "new_text_utf8_bytes": len(new_raw),
+            "old_text_sha256": hashlib.sha256(old_raw).hexdigest(),
+            "new_text_sha256": hashlib.sha256(new_raw).hexdigest(),
+            "preimage_available": row.get("preimage_available"),
+            "before_context": (
+                {
+                    key: value
+                    for key, value in before_context.items()
+                    if key != "context_excerpt"
+                }
+                if before_context is not None
+                else None
+            ),
+            "after_context": (
+                {
+                    key: value
+                    for key, value in after_context.items()
+                    if key != "context_excerpt"
+                }
+                if after_context is not None
+                else None
+            ),
+            "unified_diff_hunk_utf8_bytes": len(diff_hunk.encode("utf-8")),
+            "unified_diff_hunk_sha256": hashlib.sha256(
+                diff_hunk.encode("utf-8")
+            ).hexdigest(),
+        }
+        replacement_manifest.append(identity)
+        replacement_details[index] = {
+            **identity,
+            "old_text_excerpt": _trim_utf8(replacement.old_text, 512),
+            "new_text_excerpt": _trim_utf8(replacement.new_text, 512),
+            "before_context": before_context,
+            "after_context": after_context,
+            "unified_diff_hunk_excerpt": _trim_utf8(diff_hunk, 384),
+        }
+
+    detail_order: list[int] = []
+    left = 0
+    right = len(replacement_manifest) - 1
+    while left <= right:
+        detail_order.append(left)
+        if right != left:
+            detail_order.append(right)
+        left += 1
+        right -= 1
+    projected_replacements: list[dict[str, Any]] = []
+    for index in detail_order:
+        candidate = sorted(
+            [*projected_replacements, replacement_details[index]],
+            key=lambda item: int(item["index"]),
+        )
+        encoded = json.dumps(
+            candidate,
+            ensure_ascii=False,
+            sort_keys=True,
+            indent=2,
+        ).encode("utf-8")
+        if len(encoded) > max(0, replacement_detail_budget_bytes):
+            continue
+        projected_replacements = candidate
+
+    replacement_count = len(mutation.replacements)
+    return {
+        "projection_schema_version": 2,
+        "projection_kind": "content_correction_classification_mutation",
+        "page_id": mutation.page_id,
+        "correction_id": mutation.correction_id,
+        "original_sha256": mutation.original_sha256,
+        "updated_sha256": mutation.updated_sha256,
+        "original_utf8_bytes": len(mutation.original),
+        "updated_utf8_bytes": len(mutation.updated),
+        "already_applied": mutation.already_applied,
+        "replacement_count": replacement_count,
+        "replacement_manifest_sha256": _canonical_json_sha256(
+            replacement_manifest
+        ),
+        "replacement_detail_budget_bytes": replacement_detail_budget_bytes,
+        "replacement_detail_count": len(projected_replacements),
+        "replacement_details_truncated": (
+            len(projected_replacements) != replacement_count
+        ),
+        "omitted_replacement_count": replacement_count
+        - len(projected_replacements),
+        "included_replacement_indexes": [
+            int(item["index"]) for item in projected_replacements
+        ],
+        "replacements": projected_replacements,
+        "bounded_review_payload_sha256": _canonical_json_sha256(review),
+        "bounded_unified_diff_sha256": review.get("unified_diff_sha256"),
+        "full_unified_diff_sha256": review.get("full_unified_diff_sha256"),
+        "unified_diff_truncated": review.get("unified_diff_truncated"),
+    }
+
+
+def _classification_mutation_projections(
+    mutations: list[PreparedPageMutation],
+) -> list[dict[str, Any]]:
+    """Bound the complete classification-only mutation block deterministically."""
+
+    if len(mutations) > MAX_CANDIDATE_PAGES:
+        raise PageMutationError("classification mutation projection exceeds page limit")
+    detail_budget = CLASSIFICATION_MUTATION_DETAIL_TOTAL_BYTES // max(
+        1, len(mutations)
+    )
+    projections = [
+        _classification_mutation_projection(
+            mutation,
+            replacement_detail_budget_bytes=detail_budget,
+        )
+        for mutation in mutations
+    ]
+    encoded = json.dumps(
+        projections,
+        ensure_ascii=False,
+        sort_keys=True,
+        indent=2,
+    ).encode("utf-8")
+    if len(encoded) > CLASSIFICATION_MUTATION_PROJECTIONS_MAX_BYTES:
+        raise PageMutationError("classification mutation projection exceeds byte limit")
+    return projections
 
 
 def _bounded_page_evidence(

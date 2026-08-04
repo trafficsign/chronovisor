@@ -17,6 +17,7 @@ import uuid
 from collections import Counter
 from collections.abc import Iterator, Mapping
 from contextlib import ExitStack, contextmanager, suppress
+from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from datetime import datetime
 from html import unescape
@@ -37,6 +38,10 @@ from chronovisor.search import semantic_hold
 
 FRONTIER_ACTIVITY_DIR = CHRONOVISOR_ROOT / "runtime" / "frontier-reviews" / "active"
 STRUCTURED_REVIEW_HOLD_CACHE_ROOT: Path | None = None
+_STRUCTURED_REVIEW_ROUTER_CONFIG: ContextVar[Any | None] = ContextVar(
+    "structured_review_router_config",
+    default=None,
+)
 
 FRONTIER_DECISION_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -801,7 +806,8 @@ def _structured_route_result(
 ) -> dict[str, Any]:
     """Convert one trusted local-router result into the compatibility envelope."""
 
-    residency = routed.residency if isinstance(routed.residency, Mapping) else {}
+    routed_residency = getattr(routed, "residency", None)
+    residency = routed_residency if isinstance(routed_residency, Mapping) else {}
     decision_execution = {
         "execution_fingerprint": residency.get("execution_fingerprint"),
         "decision_artifact_seal_sha256": residency.get(
@@ -934,6 +940,21 @@ def _structured_semantic_cache_result_error(
     assert isinstance(consensus, dict)
     reason = consensus.get("quarantine_reason")
     assert isinstance(reason, str)
+    decision_execution = result.get("decision_execution")
+    if not isinstance(decision_execution, dict) or set(decision_execution) != {
+        "execution_fingerprint",
+        "decision_artifact_seal_sha256",
+    }:
+        return "structured semantic cache execution provenance is invalid"
+    if any(
+        value is not None
+        and (
+            not isinstance(value, str)
+            or re.fullmatch(r"[0-9a-f]{64}", value) is None
+        )
+        for value in decision_execution.values()
+    ):
+        return "structured semantic cache execution provenance is invalid"
     expected = _structured_failure_payload(
         schema,
         summary=reason,
@@ -947,6 +968,7 @@ def _structured_semantic_cache_result_error(
     )
     expected["local_consensus"] = consensus
     expected["decision_policy"] = policy_audit
+    expected["decision_execution"] = decision_execution
     if result != expected:
         return "structured semantic cache failure payload is not canonical"
     try:
@@ -967,7 +989,10 @@ def _structured_authority_observation(
     """Return an opaque mutable-source generation for the in-flight guard."""
 
     try:
-        return semantic_hold.structured_review_authority_observation_sha256(authority)
+        return semantic_hold.structured_review_authority_observation_sha256(
+            authority,
+            router_config=_STRUCTURED_REVIEW_ROUTER_CONFIG.get(),
+        )
     except Exception:
         # Enabled adopted lanes fail closed before inference when the mutable
         # authority generation cannot be observed.
@@ -981,7 +1006,10 @@ def _current_structured_authority(
 
     from chronovisor.decision.decision_authority import current_semantic_authority
 
-    return current_semantic_authority(lane)
+    return current_semantic_authority(
+        lane,
+        router_config=_STRUCTURED_REVIEW_ROUTER_CONFIG.get(),
+    )
 
 
 def _structured_subprocess_failure(
@@ -1652,6 +1680,7 @@ def run_structured_review(
     from chronovisor.decision.decision_router import (
         DecisionRouter,
         decision_request_fingerprint_sha256,
+        load_decision_router_config,
     )
     from chronovisor.decision.decision_schema_manifest import (
         production_schema_manifest,
@@ -1721,48 +1750,60 @@ def run_structured_review(
         result["decision_policy"] = policy_audit
         return result
 
+    # Resolve one immutable configuration snapshot for the authority seal and
+    # router constructed for this review.  The later guard calls intentionally
+    # run outside this context so a live authority change still fails closed.
+    review_router_config = load_decision_router_config()
+
     authority: dict[str, Any] | None = None
     authority_observation_sha256: str | None = None
     cache_epoch: dict[str, Any] | None = None
     if isinstance(decision_lane, str) and decision_lane and lane_mode == "enabled":
-        candidate_authority, authority_error = _current_structured_authority(
-            decision_lane
-        )
-        if authority_error is None and isinstance(candidate_authority, dict):
-            expected_policy_authority = {
-                "kind": lane_policy.kind,
-                "schema_name": lane_policy.schema_name,
-                "mode": lane_mode,
-                "error": lane_error,
-            }
-            if candidate_authority.get("policy") == expected_policy_authority:
-                candidate_observation_sha256 = _structured_authority_observation(
-                    candidate_authority
-                )
-                try:
-                    if candidate_observation_sha256 is None:
-                        raise ValueError("authority observation unavailable")
-                    effective_request_sha256 = decision_request_fingerprint_sha256(
-                        prompt=prompt,
-                        schema=schema,
-                        system=system,
-                        decision_lane=decision_lane,
+        config_token = _STRUCTURED_REVIEW_ROUTER_CONFIG.set(review_router_config)
+        try:
+            candidate_authority, authority_error = _current_structured_authority(
+                decision_lane
+            )
+            if authority_error is None and isinstance(candidate_authority, dict):
+                expected_policy_authority = {
+                    "kind": lane_policy.kind,
+                    "schema_name": lane_policy.schema_name,
+                    "mode": lane_mode,
+                    "error": lane_error,
+                }
+                if candidate_authority.get("policy") == expected_policy_authority:
+                    candidate_observation_sha256 = _structured_authority_observation(
+                        candidate_authority
                     )
-                    cache_epoch = semantic_hold.build_structured_review_hold_epoch(
-                        lane=decision_lane,
-                        authority=candidate_authority,
-                        schema_sha256=actual_digest,
-                        prompt=prompt,
-                        system=system,
-                        effective_request_sha256=effective_request_sha256,
-                    )
-                except (TypeError, ValueError):
-                    cache_epoch = None
-                else:
-                    authority = candidate_authority
-                    authority_observation_sha256 = candidate_observation_sha256
+                    try:
+                        if candidate_observation_sha256 is None:
+                            raise ValueError("authority observation unavailable")
+                        effective_request_sha256 = decision_request_fingerprint_sha256(
+                            prompt=prompt,
+                            schema=schema,
+                            system=system,
+                            decision_lane=decision_lane,
+                        )
+                        cache_epoch = semantic_hold.build_structured_review_hold_epoch(
+                            lane=decision_lane,
+                            authority=candidate_authority,
+                            schema_sha256=actual_digest,
+                            prompt=prompt,
+                            system=system,
+                            effective_request_sha256=effective_request_sha256,
+                        )
+                    except (TypeError, ValueError):
+                        cache_epoch = None
+                    else:
+                        authority = candidate_authority
+                        authority_observation_sha256 = (
+                            candidate_observation_sha256
+                        )
+        finally:
+            _STRUCTURED_REVIEW_ROUTER_CONFIG.reset(config_token)
 
     router = DecisionRouter(
+        config=review_router_config,
         audit_root=audit_root,
         audit_role=decision_lane or model_role,
         record_replay=record_replay,

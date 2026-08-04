@@ -87,6 +87,14 @@ Batch Yield render artifact-bound ingest semantic defers separately from
 pending and failed work. Guarded Codex repair has a separate incident/budget
 view. A missing or dead worker PID is idle, not live work.
 
+The local-consensus summary also exposes quorum-v2 safety evidence from the
+retained routine audit window: conservative-veto conditions, lane-policy
+bypasses, the `conservative`/`unclassifiable` dissent breakdown, and each
+model's conservative votes divided by its valid votes. A bypassed trace is
+rendered explicitly as `Lane policy bypassed conservative veto`; it is not
+folded into an ordinary pair agreement. These metrics use redacted enum/effect
+labels and never expose prompts, raw model output, or decision payloads.
+
 Dashboard Decision Trace is event-backed, not a simulated progress animation.
 Each local structured session writes redacted phase transitions to the bounded
 `runtime/local-consensus/trace-events.jsonl` journal. The dashboard reads only
@@ -105,6 +113,37 @@ certificate/reason plus direct, spread, negative, inhibition, Anti-Index, and
 Hub components. `Pause motion`, keyboard navigation, the active-node table,
 ARIA summary, and reduced-motion static arrows are part of the operational
 contract, not demo-only behavior.
+
+## Hold report
+
+```sh
+chronovisor hold-report
+chronovisor hold-report --json
+```
+
+This command is a read-only cross-source inventory. It reads
+`runtime/semantic-holds/structured-review/entries/` under the semantic cache's
+per-entry shared-lock convention and reads the sealed
+`runtime/managed-holds/state.json` under its shared state lock. It does not
+create, delete, resolve, reschedule, or drain a hold.
+
+The text and JSON forms group by lane, quarantine reason, and the first eight
+hex characters of the authority/artifact SHA. Each group includes the earliest
+and latest observed timestamps plus active, resolved, and total counts; JSON
+also includes source totals and non-fatal read errors. Structured-cache dates
+come from immutable entry mtimes. Managed-hold dates use the first available
+created/scheduled/updated/finished timestamp.
+
+Quorum safety policy v2 changes the authority/cache epoch. Old structured
+entries remain immutable but are non-reusable and appear as resolved when their
+stored policy version differs from the running version. When a bounded
+convergence or sleep pass next selects the item, the normal cache lookup misses
+and the item is re-evaluated. Managed ingest holds are scheduled by their existing
+`authority_epochs` reconciliation when the lane epoch changes. Do not delete
+cache entries or edit `state.json` to force this process. After rollout, compare
+successive `hold-report` snapshots while the ordinary bounded drain runs; the
+five bypass lanes should shed old veto holds, while ingest vetoes and genuine
+three-way no-quorum items may be held again under the new epoch.
 
 ## Evidence Research
 
@@ -256,8 +295,8 @@ retries.
 # Make one immutable candidate config first. Its [decision_router] section
 # must contain the intended production values and adoption_artifact = "".
 CANDIDATE_CONFIG="$HOME/.chronovisor/runtime/model-lab/decision-router-candidate.toml"
-CORPUS="$HOME/.chronovisor/runtime/model-lab/adoption-corpus-v64-lane26-20260723.jsonl"
-ARTIFACT="$HOME/.chronovisor/runtime/model-lab/local-eval/adoption-v64-evaluator21-20260723.json"
+CORPUS="$HOME/.chronovisor/runtime/model-lab/adoption-corpus-quorum2-lane27-YYYYMMDD.jsonl"
+ARTIFACT="$HOME/.chronovisor/runtime/model-lab/local-eval/adoption-quorum2-lane27-evaluator21-YYYYMMDD.json"
 chmod 600 "$CANDIDATE_CONFIG"
 
 # Preflight the deterministic selection without replacing the durable corpus.
@@ -308,12 +347,14 @@ request-fingerprint policy, or candidate config changes; do not overwrite a
 corpus after an evaluation has started. The same immutable candidate config
 must be supplied to both the compiler and every fresh or resumed evaluator
 invocation. A config change is a new evaluation identity, never a resumable
-continuation. The current v64 identity uses artifact schema 12, evaluator
-policy 21, decision-semantics policy 12, quorum-safety policy 1, action-
-signature policy 5, effective-request-fingerprint policy 4, structured-
-generation policy 3, lane-contract registry policy 10, lane-contract case policy
-26 with source `deterministic_lane_contract_v26`, residency policy 2, and
-`num_predict = 3072`. Evaluator policy 21 seals explicit deterministic seed 0,
+continuation. An artifact that authorizes the current runtime must use artifact
+schema 12, evaluator policy 21, decision-semantics policy 12, quorum-safety
+policy 2, action-signature policy 5, effective-request-fingerprint policy 4,
+structured-generation policy 3, lane-contract registry policy 10,
+lane-contract case policy 27 with source `deterministic_lane_contract_v27`,
+residency policy 2, and `num_predict = 3072`. Older artifacts sealed under
+quorum-v1 or lane-contract-v26 remain historical evidence but cannot authorize
+current execution. Evaluator policy 21 seals explicit deterministic seed 0,
 hash-bound ingest repair option selection, host-only byte-exact materialization
 before action signatures/quorum, and repair-attempt accounting into the
 artifact identity.
@@ -331,14 +372,16 @@ versioned corpus, and run a fresh evaluator artifact. The changed per-lane hash
 updates the aggregate manifest and artifact identity automatically; do not put
 the registry version into every model request, because that would invalidate
 all 19 lanes. Increment the registry policy itself only when the registry or
-artifact identity contract changes. The fixed v64 baseline contains 100
-canonical cases spanning all 19 model-backed lanes and all four executable
-context buckets. Previous replay rows are included only when their independent
+artifact identity contract changes. The current deterministic manifest contains
+100 model-backed canonical cases spanning all 19 model-backed lanes and all
+four executable context buckets, plus six quorum-veto policy fixtures: one for
+each of the five bypass lanes and one that preserves the ingest veto. Previous
+replay rows are included only when their independent
 provenance, contract identity, expected effect, and action signature all match
 the current policy. During compilation only, non-deterministic historical rows
 with stale lane or request identity are counted and excluded; deterministic
 contract fixtures, the frozen corpus, evaluation, and runtime loading remain
-strict. The v64 corpus admits no stale historical rows.
+strict. A frozen current-policy corpus admits no stale historical rows.
 
 Canonical fixtures must be reachable through the same deterministic preflight
 as production. Entity-backfill missing, malformed, truncated, or alias-
@@ -476,7 +519,8 @@ Increasing the resident count also requires spare capacity of at least 2 GiB or
 10% of the proposed resident set, whichever is larger, so small memory changes
 do not flap repeatedly between two and three runners.
 
-After the v64/evaluator-policy-21 artifact reports `adopted=true`, nominate it in
+After a freshly generated quorum-v2/lane-contract-v27/evaluator-policy-21
+artifact reports `adopted=true`, nominate it in
 `decision_router.adoption_artifact`, revalidate it through a fresh runtime, and
 promote all 19 model-backed semantic lanes from `shadow` to `enabled`. Together
 with the five deterministic/guarded lanes, the post-adoption production state

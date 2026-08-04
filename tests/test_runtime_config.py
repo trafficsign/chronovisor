@@ -1,10 +1,42 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
 
 from chronovisor.core import runtime_config
+
+
+def test_toml_loader_uses_one_old_or_new_snapshot_during_atomic_replace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = tmp_path / "config.toml"
+    replacement = tmp_path / "config.next.toml"
+    old = '[decision_router]\nprimary_model = "old-primary"\n'
+    new = '[decision_router]\nprimary_model = "new-primary"\n'
+    config.write_text(old, encoding="utf-8")
+    replacement.write_text(new, encoding="utf-8")
+    real_read_bytes = Path.read_bytes
+    replaced = False
+
+    def read_once(path: Path) -> bytes:
+        nonlocal replaced
+        snapshot = real_read_bytes(path)
+        if path == config and not replaced:
+            os.replace(replacement, config)
+            replaced = True
+        return snapshot
+
+    monkeypatch.setattr(Path, "read_bytes", read_once)
+
+    first = runtime_config.load_decision_router_config(config)
+    second = runtime_config.load_decision_router_config(config)
+
+    assert first.primary_model == "old-primary"
+    assert second.primary_model == "new-primary"
+    assert config.read_text(encoding="utf-8") == new
 
 
 def test_uvx_runtime_command_uses_pushed_github_source(monkeypatch) -> None:

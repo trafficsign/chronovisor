@@ -14,6 +14,8 @@ import re
 from collections.abc import Mapping
 from typing import Any
 
+from chronovisor.core.runtime_config import DecisionRouterConfig
+
 AUTHORITY_VERSION = 1
 INJECTED_REVIEWER_SOURCE = "injected_reviewer_boundary"
 ADOPTED_LOCAL_SOURCE = "adopted_local_consensus"
@@ -24,6 +26,7 @@ def base_semantic_authority(
     lane: str,
     *,
     injected_reviewer: bool = False,
+    router_config: DecisionRouterConfig | None = None,
 ) -> tuple[dict[str, Any] | None, str | None]:
     """Return the exact authority currently allowed to produce lane effects.
 
@@ -60,7 +63,8 @@ def base_semantic_authority(
         policy, mode, policy_error = resolve_decision_policy(lane)
         if policy is None or policy_error is not None or mode != "enabled":
             return None, policy_error or f"decision_lane_not_enabled:{lane}:{mode}"
-        resolution = resolve_router_policy(load_decision_router_config())
+        resolved_config = router_config or load_decision_router_config()
+        resolution = resolve_router_policy(resolved_config)
         authority = {
             "source": ADOPTED_LOCAL_SOURCE,
             "authority_version": AUTHORITY_VERSION,
@@ -97,11 +101,14 @@ def current_semantic_authority(
     lane: str,
     *,
     injected_reviewer: bool = False,
+    router_config: DecisionRouterConfig | None = None,
 ) -> tuple[dict[str, Any] | None, str | None]:
     """Return effect authority, including required lane capability evidence."""
 
     authority, error = base_semantic_authority(
-        lane, injected_reviewer=injected_reviewer
+        lane,
+        injected_reviewer=injected_reviewer,
+        router_config=router_config,
     )
     if error is not None or authority is None or injected_reviewer:
         return authority, error
@@ -152,6 +159,13 @@ def semantic_authority_shape_error(
         return None
     if source != ADOPTED_LOCAL_SOURCE:
         return "decision authority source is invalid"
+    quorum_safety_policy_version = authority.get("quorum_safety_policy_version")
+    if quorum_safety_policy_version is not None and (
+        isinstance(quorum_safety_policy_version, bool)
+        or not isinstance(quorum_safety_policy_version, int)
+        or quorum_safety_policy_version < 1
+    ):
+        return "decision authority quorum safety policy is invalid"
     from chronovisor.decision.decision_policy import DECISION_POLICIES
 
     policy_definition = DECISION_POLICIES.get(lane)

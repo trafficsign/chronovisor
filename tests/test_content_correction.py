@@ -4535,6 +4535,195 @@ def test_untrusted_prompt_boundaries_and_embedded_instruction_check_are_mandator
     )
 
 
+def test_huge_classification_mutation_is_bounded_and_preserves_provenance(
+    tmp_path: Path,
+) -> None:
+    from chronovisor.core.runtime_config import DecisionRouterConfig
+    from chronovisor.decision.decision_router import decision_effective_request
+    from chronovisor.decision.local_structured import preflight_structured_request
+
+    old_text = "legacy-value-" + ("x" * 1_900)
+    new_text = "current-value-" + ("y" * 1_900)
+    before = (
+        "---\ntitle: Huge review page\n---\n"
+        + ("prefix evidence\n" * 3_000)
+        + old_text
+        + "\n"
+        + ("suffix evidence\n" * 3_000)
+    ).encode("utf-8")
+    after = before.replace(old_text.encode("utf-8"), new_text.encode("utf-8"), 1)
+    mutation = page_mutation.PreparedPageMutation(
+        page_id="huge-review-page",
+        path=tmp_path / "huge-review-page.md",
+        correction_id="correction-huge-1",
+        original=before,
+        updated=after,
+        original_sha256=hashlib.sha256(before).hexdigest(),
+        updated_sha256=hashlib.sha256(after).hexdigest(),
+        replacements=(
+            page_mutation.ExactReplacement(
+                old_text=old_text,
+                new_text=new_text,
+            ),
+        ),
+    )
+    full_review = mutation.review_payload()
+    assert len(json.dumps(full_review).encode("utf-8")) > 50_000
+
+    event = _event("huge-review-page")
+    event.update(
+        {
+            "source_assistant_response": "source evidence " * 1_000,
+            "candidate_page_hashes": {
+                "huge-review-page": mutation.original_sha256,
+            },
+            "injected_pages": ["huge-review-page"],
+            "pulled_pages": ["huge-review-page"],
+            "revision": 3,
+        }
+    )
+    proposal = {
+        "decision": "page_fact_wrong",
+        "confidence": 0.99,
+        "reason": "classification evidence " * 140,
+        "proposals": [],
+    }
+    prompt = content_correction._frontier_classification_prompt(
+        event,
+        proposal,
+        [mutation],
+        [
+            {
+                "page_id": mutation.page_id,
+                "sha256": mutation.original_sha256,
+                "title": "Huge review page",
+                "updated": "2026-08-04",
+                "content": "bounded page evidence " * 220,
+            }
+        ],
+    )
+    bound_prompt, bound_system = decision_effective_request(
+        prompt=prompt,
+        schema=content_correction.FRONTIER_CLASSIFICATION_SCHEMA,
+        system=None,
+        decision_lane=content_correction.CLASSIFICATION_LANE,
+    )
+    config = DecisionRouterConfig()
+    preflight = preflight_structured_request(
+        bound_prompt,
+        content_correction.FRONTIER_CLASSIFICATION_SCHEMA,
+        system=bound_system,
+        max_input_chars=config.max_input_chars,
+    )
+
+    assert preflight.ok is True
+    assert preflight.input_bytes < config.max_input_chars
+    block = json.loads(
+        prompt.split("<PREPARED_MUTATIONS_UNTRUSTED_JSON>\n", 1)[1].split(
+            "\n</PREPARED_MUTATIONS_UNTRUSTED_JSON>", 1
+        )[0]
+    )
+    [projection] = block
+    assert projection["projection_schema_version"] == 2
+    assert projection["page_id"] == mutation.page_id
+    assert projection["correction_id"] == mutation.correction_id
+    assert projection["original_sha256"] == mutation.original_sha256
+    assert projection["updated_sha256"] == mutation.updated_sha256
+    assert projection["original_utf8_bytes"] == len(before)
+    assert projection["updated_utf8_bytes"] == len(after)
+    assert projection["replacement_count"] == 1
+    assert projection["replacement_detail_count"] == 1
+    assert projection["replacement_details_truncated"] is False
+    assert projection["omitted_replacement_count"] == 0
+    assert projection["included_replacement_indexes"] == [0]
+    assert len(projection["replacement_manifest_sha256"]) == 64
+    [replacement] = projection["replacements"]
+    assert replacement["index"] == 0
+    assert replacement["old_text_sha256"] == hashlib.sha256(
+        old_text.encode("utf-8")
+    ).hexdigest()
+    assert replacement["new_text_sha256"] == hashlib.sha256(
+        new_text.encode("utf-8")
+    ).hexdigest()
+    assert replacement["before_context"]["body_start"] >= 0
+    assert replacement["after_context"]["body_start"] >= 0
+    assert len(projection["full_unified_diff_sha256"]) == 64
+    assert "before_preview" not in projection
+    assert "after_preview" not in projection
+    assert "unified_diff" not in projection
+
+
+def test_classification_mutation_projection_has_one_total_replacement_budget(
+    tmp_path: Path,
+) -> None:
+    replacements = tuple(
+        page_mutation.ExactReplacement(
+            old_text=f"OLD-VALUE-[{index:04d}]",
+            new_text=f"NEW-VALUE-[{index:04d}]",
+        )
+        for index in range(240)
+    )
+    before_text = "---\ntitle: Many replacements\n---\n" + "\n".join(
+        replacement.old_text for replacement in replacements
+    )
+    after_text = before_text
+    for replacement in replacements:
+        after_text = after_text.replace(
+            replacement.old_text,
+            replacement.new_text,
+            1,
+        )
+    before = before_text.encode("utf-8")
+    after = after_text.encode("utf-8")
+    mutation = page_mutation.PreparedPageMutation(
+        page_id="many-replacements",
+        path=tmp_path / "many-replacements.md",
+        correction_id="correction-many-replacements",
+        original=before,
+        updated=after,
+        original_sha256=hashlib.sha256(before).hexdigest(),
+        updated_sha256=hashlib.sha256(after).hexdigest(),
+        replacements=replacements,
+    )
+
+    prompt = content_correction._frontier_classification_prompt(
+        _event("many-replacements"),
+        {
+            "decision": "page_fact_wrong",
+            "confidence": 0.99,
+            "reason": "The prepared replacements correct the supported facts.",
+            "proposals": [],
+        },
+        [mutation],
+        [],
+    )
+    block_text = prompt.split(
+        "<PREPARED_MUTATIONS_UNTRUSTED_JSON>\n", 1
+    )[1].split("\n</PREPARED_MUTATIONS_UNTRUSTED_JSON>", 1)[0]
+    [projection] = json.loads(block_text)
+
+    assert len(block_text.encode("utf-8")) <= (
+        content_correction.CLASSIFICATION_MUTATION_PROJECTIONS_MAX_BYTES
+    )
+    assert projection["replacement_count"] == len(replacements)
+    assert 0 < projection["replacement_detail_count"] < len(replacements)
+    assert projection["replacement_details_truncated"] is True
+    assert projection["omitted_replacement_count"] == (
+        len(replacements) - projection["replacement_detail_count"]
+    )
+    assert projection["included_replacement_indexes"] == sorted(
+        projection["included_replacement_indexes"]
+    )
+    assert 0 in projection["included_replacement_indexes"]
+    assert len(replacements) - 1 in projection["included_replacement_indexes"]
+    assert len(projection["replacement_manifest_sha256"]) == 64
+    assert projection["original_sha256"] == mutation.original_sha256
+    assert projection["updated_sha256"] == mutation.updated_sha256
+    assert projection["replacement_detail_budget_bytes"] == (
+        content_correction.CLASSIFICATION_MUTATION_DETAIL_TOTAL_BYTES
+    )
+
+
 def test_mutation_review_prompt_distinguishes_missing_from_contrary_evidence() -> None:
     prompt = content_correction._frontier_prompt(
         _event("hardware-profile"),

@@ -1387,6 +1387,63 @@ def test_structured_review_types_three_valid_distinct_semantic_no_quorum(
     assert result["human_required"] is False
 
 
+def test_structured_review_shares_one_router_config_with_initial_authority(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    shared_config = _local_router_config()
+    authority_box = {"value": semantic_authority()}
+    authority_configs: list[DecisionRouterConfig | None] = []
+    router_configs: list[DecisionRouterConfig] = []
+    calls: list[str] = []
+    base_router = _cache_test_router_class(
+        authority_box,
+        calls,
+        outcome="success",
+    )
+
+    class CapturingRouter(base_router):
+        def __init__(self, **kwargs) -> None:
+            router_configs.append(kwargs["config"])
+            super().__init__(**kwargs)
+
+        def decide(self, *args, **kwargs):
+            result = super().decide(*args, **kwargs)
+            result.residency = {}
+            return result
+
+    def current_authority(_lane: str):
+        authority_configs.append(
+            frontier_review._STRUCTURED_REVIEW_ROUTER_CONFIG.get()
+        )
+        return authority_box["value"], None
+
+    monkeypatch.setattr(
+        decision_router,
+        "load_decision_router_config",
+        lambda: shared_config,
+    )
+    monkeypatch.setattr(decision_router, "DecisionRouter", CapturingRouter)
+    monkeypatch.setattr(
+        frontier_review,
+        "_current_structured_authority",
+        current_authority,
+    )
+    monkeypatch.setenv("CHRONOVISOR_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
+
+    result = frontier_review.run_structured_review(
+        "review this",
+        frontier_review.FRONTIER_DECISION_SCHEMA,
+        repo_root=tmp_path,
+        decision_lane="recall_auto_apply",
+    )
+
+    assert result["decision"] == "approved"
+    assert authority_configs[0] is shared_config
+    assert router_configs == [shared_config]
+    assert all(config is None for config in authority_configs[1:])
+
+
 def test_structured_review_reuses_exact_epoch_semantic_hold_without_model_call(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

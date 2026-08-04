@@ -263,11 +263,13 @@ def active_config_file(path: Path | str | None = None) -> Path:
 def load_toml_file(path: Path | str | None = None) -> dict[str, Any]:
     resolved = active_config_file(path)
     try:
-        if not resolved.exists():
-            return {}
-        data = tomllib.loads(resolved.read_text(encoding="utf-8"))
+        # Read one immutable byte snapshot.  Checking existence separately or
+        # reopening the path while parsing can mix generations when an
+        # external operator atomically replaces the runtime configuration.
+        snapshot = resolved.read_bytes()
+        data = tomllib.loads(snapshot.decode("utf-8"))
         return data if isinstance(data, dict) else {}
-    except (OSError, tomllib.TOMLDecodeError):
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
         return {}
 
 

@@ -2,6 +2,16 @@
 
 The runtime config is `~/.chronovisor/config.toml`.
 
+The reader opens that path once and parses one immutable byte snapshot. When an
+operator atomically replaces the file, a load therefore observes either the old
+generation or the new generation, never an existence check from one generation
+and bytes from another. One structured review resolves a single
+`DecisionRouterConfig` for both its initial authority seal and the router it
+constructs. Later in-flight authority guards intentionally read current state
+again, so a real mid-review authority change still fails closed. Chronovisor has
+no repository-owned config writer; operators should continue to publish config
+changes by atomic replacement rather than in-place partial writes.
+
 ## Raw Archive rollout
 
 Transcript storage uses one durable Wiki-wide setting so Stop hooks, MCP,
@@ -102,14 +112,14 @@ adaptive_residency = true
 residency_policy_version = 2
 memory_reserve_gib = 16
 max_resident_models = 3
-# This is the post-adoption production shape. The v64 artifact is sealed by
-# artifact schema 12, evaluator policy 21, decision-semantics policy 12,
-# quorum-safety policy 1, action-signature policy 5, effective-request-
-# fingerprint policy 4, structured-generation policy 3, lane-contract registry
-# policy 10 (artifact identity
-# only), lane prompt policy 8 for 16 lanes, 9 for raw replay and recall
-# auto-apply, 16 for ingest, and lane-contract case policy 24 (source
-# deterministic_lane_contract_v26).
+# The current runtime contract is sealed by artifact schema 12, evaluator
+# policy 21, decision-semantics policy 12, quorum-safety policy 2,
+# action-signature policy 5, effective-request-fingerprint policy 4,
+# structured-generation policy 3, lane-contract registry policy 10 (artifact
+# identity only), lane prompt policy 8 for 16 lanes, 9 for raw replay and recall
+# auto-apply, 16 for ingest, and lane-contract case policy 27 (source
+# deterministic_lane_contract_v27). An artifact carrying the former quorum-v1
+# or lane-contract-v26 identity cannot authorize this runtime and fails closed.
 # Evaluator policy 21 seals deterministic seed 0 as well as hash-bound ingest
 # repair option selection and host-only byte materialization into the artifact
 # identity. Repair option
@@ -119,7 +129,7 @@ max_resident_models = 3
 # engine/model-drifted artifacts make enabled semantic lanes quarantine before
 # inference. Set this to "" and keep the 19 model-backed lanes in shadow only
 # while compiling and evaluating a replacement candidate.
-adoption_artifact = "~/.chronovisor/runtime/model-lab/local-eval/adoption-v64-evaluator21-20260723.json"
+adoption_artifact = "~/.chronovisor/runtime/model-lab/local-eval/adoption-quorum2-lane27-evaluator21-YYYYMMDD.json"
 
 [decision_policies]
 # Deterministic/non-model lanes and the guarded repair-only lane are live
@@ -436,6 +446,20 @@ enabled = true
 min_count = 1
 actions = ["alias", "query_hint", "page_tag"]
 ```
+
+## Decision quorum safety
+
+The quorum-v2 lane exception is code-owned, not configurable through TOML. It
+contains exactly `lint_tag_repair`, `recall_auto_apply`, `orphan_link`,
+`metadata_backfill`, and `search_label`, whose reviewed effect contracts are
+additive or reversible. It applies only after a tie-break produces a 2-to-1
+mutating majority. `ingest_reconciliation`, every non-listed lane, and a
+missing, empty, or unknown lane retain the conservative veto. An unclassifiable
+(`None`) dissent also remains fail-closed outside the five named lanes.
+
+Changing the set requires a source change, a quorum-safety policy-version bump,
+updated v27-or-later lane-contract evidence, and a newly validated adoption
+identity. A local config override cannot silently broaden it.
 
 ## Environment Overrides
 

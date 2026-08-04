@@ -179,6 +179,26 @@ Exceptional system repair
   `seed=0`, no thinking, JSON Schema output). Its policy hash is part of both
   the effective-request fingerprint and adoption identity, so an unseeded or
   differently seeded artifact cannot authorize production.
+  Quorum safety policy v2 keeps the fast two-vote pair-agreement path unchanged.
+  After a tie-break, a 2-to-1 mutating majority is classified against the
+  dissenting valid vote. A conservative or unclassifiable dissent normally
+  vetoes the mutation. The only bypass lanes are `lint_tag_repair`,
+  `recall_auto_apply`, `orphan_link`, `metadata_backfill`, and `search_label`:
+  their reviewed lane contracts limit effects to additive or reversible
+  operations, so the two matching mutation votes may proceed while the veto
+  condition remains audit evidence. `ingest_reconciliation`, every other lane,
+  and a missing, empty, or unknown lane remain fail-closed. An effect classifier
+  result of `None` is recorded as `unclassifiable` and is never treated as
+  affirmative mutation evidence. A true three-way disagreement still
+  quarantines for lack of a two-vote quorum.
+  Decision audit rows record `conservative_veto_fired`,
+  `conservative_veto_bypassed_by_lane_policy`, and `dissent_effect_class`.
+  Per-vote audit records add only the schema decision label and the stable
+  `mutating`/`conservative`/`unclassifiable` effect class to the existing model,
+  role, validity, signature, and runtime observations. Prompts, raw model
+  output, and decision payloads remain excluded. The Dashboard aggregates the
+  veto and bypass counts, dissent classes, and valid-vote conservative rate by
+  model from this redacted audit stream.
   No local failure or disagreement has a frontier fallback. Frontier execution
   exists only in the separately guarded system-code-repair plane.
   Ingest treats one narrowly defined outcome differently from an operational
@@ -189,6 +209,12 @@ Exceptional system repair
   validates a different adopted-artifact SHA; a changed but invalid nomination
   fails closed. Runtime, transport, capacity, and other operational failures
   remain in the separate repair queue.
+  Structured semantic holds bind the quorum-safety policy version into their
+  authority and cache epoch. A policy change therefore makes an older immutable
+  cache entry non-reusable; when the bounded convergence/sleep driver next
+  selects the item, it evaluates under the new authority instead of requiring
+  cache deletion or a state migration. Managed ingest holds use the same
+  authority-epoch change to schedule re-evaluation.
 - **Content correction**: binds explicit user corrections, plus narrowly
   qualified bare denial/contrast signals, to the preceding complete turn by
   exact prompt hash, host, session, and timestamped Recall provenance. Bare
@@ -199,6 +225,17 @@ Exceptional system repair
   ambiguity, no attributable page, and no correction are resolved by the local
   decision router. Wrong retrieval writes `page_ignored` feedback only for the
   locally agreed `negative_pages`; it never penalizes every recalled page.
+
+  Classification receives a deterministic bounded projection rather than the
+  full byte-mutation review packet. The projection retains page/correction
+  identity, pre/post byte lengths and SHA-256 values, the SHA-256 of the complete
+  replacement identity manifest, bounded first/last replacement detail,
+  positional context provenance, and hashes of full replacement text and diffs.
+  Detail has one total budget across the mutation set; an over-limit projection
+  fails closed.
+  The separate byte-mutation review continues to receive the evidence needed to
+  authorize exact page writes, so classification compression does not weaken
+  CAS or review boundaries.
 
   Exact-provenance corrections may target ordinary pages or the allowlisted
   user-memory system pages `user-profile`, `current-state`, and
