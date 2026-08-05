@@ -46,6 +46,7 @@ from chronovisor.ops.cortex import (
     CortexEventCursor,
     build_cortex_field_projection,
     build_cortex_graph,
+    build_cortex_relation_details,
     websocket_accept,
     websocket_text_frame,
 )
@@ -4983,6 +4984,41 @@ class DashboardHandler(BaseHTTPRequestHandler):
             ),
         )
 
+    def _cortex_relations_response(self, query: str) -> None:
+        params = dict(parse_qsl(query, keep_blank_values=False))
+        raw_keys = str(params.get("keys") or "")
+        relation_keys: list[tuple[str, str, str]] = []
+        if len(raw_keys) <= 12_000:
+            try:
+                values = json.loads(raw_keys)
+            except (json.JSONDecodeError, TypeError, ValueError):
+                values = []
+            if isinstance(values, list):
+                for value in values[:24]:
+                    if (
+                        not isinstance(value, list)
+                        or len(value) != 3
+                        or not isinstance(value[0], str)
+                        or not isinstance(value[1], str)
+                        or not isinstance(value[2], str)
+                        or not value[0]
+                        or not value[1]
+                        or not value[2]
+                        or len(value[0]) > 256
+                        or len(value[1]) > 240
+                        or len(value[2]) > 240
+                    ):
+                        continue
+                    relation_keys.append((value[0], value[1], value[2]))
+        _json_response(
+            self,
+            {
+                "relations": build_cortex_relation_details(
+                    CHRONOVISOR_ROOT, relation_keys
+                )
+            },
+        )
+
     def _cortex_events_response(self, query: str) -> None:
         upgrade = self.headers.get("Upgrade", "").casefold()
         connection = {
@@ -5014,14 +5050,20 @@ class DashboardHandler(BaseHTTPRequestHandler):
             activity_log=LOG_FILE,
             field_session=str(params.get("session") or ""),
             follow_field_sessions=params.get("follow") == "latest",
+            after_seq=max(0, int(params.get("after_seq") or 0))
+            if str(params.get("after_seq") or "").isdigit()
+            else 0,
         )
         last_heartbeat = 0.0
         try:
             while True:
-                events = cursor.poll()
+                payload = cursor.poll_payload()
+                events = (
+                    payload.get("events") if payload.get("type") == "events" else []
+                )
                 now = time.monotonic()
-                if events:
-                    payload = {"type": "events", "events": events}
+                if events or payload.get("type") in {"resync", "session_changed"}:
+                    pass
                 elif now - last_heartbeat >= 15:
                     payload = {"type": "heartbeat"}
                 else:
@@ -5183,6 +5225,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._cortex_graph_response()
             elif path == "/api/cortex/field":
                 self._cortex_field_response(parsed.query)
+            elif path == "/api/cortex/relations":
+                self._cortex_relations_response(parsed.query)
             elif path == "/api/cortex/events":
                 self._cortex_events_response(parsed.query)
             elif path == "/api/model-status":

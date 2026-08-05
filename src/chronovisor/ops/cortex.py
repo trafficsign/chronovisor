@@ -8,6 +8,7 @@ import json
 import re
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -24,6 +25,11 @@ _GRAPH_CACHE: dict[str, dict[str, Any]] = {}
 _WEBSOCKET_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 _CORTEX_EVENT_SCHEMA = "chronovisor.cortex.event.v2"
 _CORTEX_PAGE_ID_MAX_LENGTH = 240  # Keep aligned with CortexTransportPolicy.
+_CORTEX_EVENT_BATCH_LIMIT = 32
+_RELATION_DETAIL_LIMIT = 24
+_RELATION_EVIDENCE_LIMIT = 12
+_RELATION_VOTE_LIMIT = 8
+_ENTITY_DETAIL_MEMBER_SCAN_LIMIT = 256
 _RECALL_TRANSPORT_KINDS = {"recall", "auto_recall", "read", "search", "used"}
 _INGEST_PAGE_RE = re.compile(
     r"(?:^|\s)ingest \| (?P<operation>created|updated) (?P<page>[^\r\n]+)$"
@@ -67,6 +73,24 @@ _FIELD_COMPONENT_KEYS = {
     "anti_index",
     "hub_penalty",
 }
+
+
+def _browser_text(value: Any, limit: int) -> str:
+    return str(value or "")[:limit]
+
+
+def _browser_nonnegative_int(value: Any) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _browser_confidence(value: Any) -> float:
+    try:
+        return round(max(0.0, min(1.0, float(value or 0.0))), 4)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _project_cortex_page_ids(values: Any) -> list[str]:
@@ -298,7 +322,7 @@ def _typed_graph_projection(
     *,
     index_by_key: dict[str, int],
 ) -> dict[str, Any]:
-    """Return IDs, digests, votes and state only; never expose evidence text."""
+    """Return browser-safe relation topology without lazy detail payloads."""
 
     store = KnowledgeGraphStore(root / "knowledge-graph")
     try:
@@ -311,55 +335,23 @@ def _typed_graph_projection(
         target_index = index_by_key.get(_target_key(record.target_page_id))
         if source_index is None or target_index is None:
             continue
-        consensus = record.consensus
-        relations.append(
-            {
-                "relation_id": record.relation_id,
-                "source": source_index,
-                "target": target_index,
-                "source_page_id": record.source_page_id,
-                "target_page_id": record.target_page_id,
-                "predicate": record.predicate[:128],
-                "direction": record.direction,
-                "status": record.status,
-                "producer_role": record.producer_role,
-                "confidence": round(record.confidence, 4),
-                "used_count": record.used_count,
-                "used_sessions": len(record.used_sessions),
-                "reason_code": record.reason_code[:160],
-                "evidence_refs": [
-                    {
-                        "page_id": row.page_id,
-                        "content_sha256": row.content_sha256,
-                        "span_sha256": row.span_sha256,
-                        "source_line": row.source_line,
-                        "raw_sha256": row.raw_sha256,
-                    }
-                    for row in record.evidence
-                ],
-                "consensus": (
-                    {
-                        "receipt_id": consensus.receipt_id,
-                        "producer_role": consensus.producer_role,
-                        "quorum": consensus.quorum,
-                        "outcome": consensus.outcome,
-                        "hold_reason": consensus.hold_reason[:160],
-                        "votes": [
-                            {
-                                "role": vote.role,
-                                "model_sha256": vote.model_sha256,
-                                "decision": vote.decision,
-                                "confidence": round(vote.confidence, 4),
-                                "vote_sha256": vote.vote_sha256,
-                            }
-                            for vote in consensus.votes
-                        ],
-                    }
-                    if consensus is not None
-                    else None
-                ),
-            }
-        )
+        relation = {
+            "relation_id": record.relation_id,
+            "source": source_index,
+            "target": target_index,
+            "source_page_id": record.source_page_id,
+            "target_page_id": record.target_page_id,
+            "predicate": record.predicate[:128],
+            "direction": record.direction,
+            "status": record.status,
+            "producer_role": record.producer_role,
+            "confidence": round(record.confidence, 4),
+            "used_count": record.used_count,
+            "used_sessions": len(record.used_sessions),
+            "reason_code": record.reason_code[:160],
+            "detail_available": bool(record.evidence or record.consensus),
+        }
+        relations.append(relation)
     entity_payload = _safe_sealed(store.entity_snapshot_file)
     candidate_values = entity_payload.get("candidates")
     merge_values = entity_payload.get("merge_candidates")
@@ -368,99 +360,52 @@ def _typed_graph_projection(
         for merge_id, merge in sorted(merge_values.items()):
             if len(relations) >= 2_000 or not isinstance(merge, dict):
                 break
+            member_values = merge.get("member_candidate_ids")
+            member_ids = member_values if isinstance(member_values, list) else []
             members = [
-                entity_candidates.get(str(candidate_id))
-                for candidate_id in merge.get("member_candidate_ids") or []
+                entity_candidates.get(_browser_text(candidate_id, 256))
+                for candidate_id in member_ids[:_ENTITY_DETAIL_MEMBER_SCAN_LIMIT]
             ]
             rows = [value for value in members if isinstance(value, dict)]
             page_ids = sorted(
-                {str(value.get("page_id") or "") for value in rows} - {""}
+                {_browser_text(value.get("page_id"), 240) for value in rows}
+                - {""}
             )
-            evidence_refs = [
-                {
-                    "page_id": str(value.get("page_id") or ""),
-                    "content_sha256": str(value.get("content_sha256") or ""),
-                    "span_sha256": str(value.get("alias_evidence_sha256") or ""),
-                    "source_line": 0,
-                    "raw_sha256": "",
-                }
-                for value in rows
-            ]
             merge_consensus_value = merge.get("consensus")
             merge_consensus: dict[str, Any] = (
                 merge_consensus_value if isinstance(merge_consensus_value, dict) else {}
             )
-            merge_votes_value = merge_consensus.get("votes")
-            merge_votes = (
-                merge_votes_value if isinstance(merge_votes_value, list) else []
-            )
+            relation_limit_reached = False
             for source_offset, source_page_id in enumerate(page_ids):
                 for target_page_id in page_ids[source_offset + 1 :]:
+                    if len(relations) >= 2_000:
+                        relation_limit_reached = True
+                        break
                     source_index = index_by_key.get(_target_key(source_page_id))
                     target_index = index_by_key.get(_target_key(target_page_id))
                     if source_index is None or target_index is None:
                         continue
-                    relations.append(
-                        {
-                            "relation_id": str(merge_id),
-                            "source": source_index,
-                            "target": target_index,
-                            "source_page_id": source_page_id,
-                            "target_page_id": target_page_id,
-                            "predicate": "same_entity_alias",
-                            "direction": "bidirectional",
-                            "status": str(merge.get("status") or "proposed"),
-                            "producer_role": "entity_local_consensus",
-                            "confidence": 1.0,
-                            "used_count": int(merge.get("used_count") or 0),
-                            "used_sessions": len(merge.get("used_sessions") or []),
-                            "reason_code": str(
-                                merge.get("reason_code") or merge.get("reason") or ""
-                            )[:160],
-                            "evidence_refs": evidence_refs,
-                            "consensus": {
-                                "receipt_id": str(
-                                    merge_consensus.get("receipt_id")
-                                    or merge.get("receipt_id")
-                                    or ""
-                                ),
-                                "producer_role": str(
-                                    merge_consensus.get("producer_role")
-                                    or "entity_local_consensus"
-                                ),
-                                "quorum": int(merge_consensus.get("quorum") or 2),
-                                "outcome": str(
-                                    merge_consensus.get("outcome")
-                                    or merge.get("status")
-                                    or "proposed"
-                                ),
-                                "hold_reason": str(
-                                    merge_consensus.get("hold_reason")
-                                    or merge.get("reason_code")
-                                    or ""
-                                )[:160],
-                                "votes": [
-                                    {
-                                        "role": str(vote.get("role") or ""),
-                                        "model_sha256": str(
-                                            vote.get("model_sha256") or ""
-                                        ),
-                                        "decision": str(
-                                            vote.get("decision") or "abstain"
-                                        ),
-                                        "confidence": round(
-                                            float(vote.get("confidence") or 0.0), 4
-                                        ),
-                                        "vote_sha256": str(
-                                            vote.get("vote_sha256") or ""
-                                        ),
-                                    }
-                                    for vote in merge_votes
-                                    if isinstance(vote, dict)
-                                ],
-                            },
-                        }
-                    )
+                    relation = {
+                        "relation_id": str(merge_id),
+                        "source": source_index,
+                        "target": target_index,
+                        "source_page_id": source_page_id,
+                        "target_page_id": target_page_id,
+                        "predicate": "same_entity_alias",
+                        "direction": "bidirectional",
+                        "status": str(merge.get("status") or "proposed"),
+                        "producer_role": "entity_local_consensus",
+                        "confidence": 1.0,
+                        "used_count": int(merge.get("used_count") or 0),
+                        "used_sessions": len(merge.get("used_sessions") or []),
+                        "reason_code": str(
+                            merge.get("reason_code") or merge.get("reason") or ""
+                        )[:160],
+                        "detail_available": bool(rows or merge_consensus),
+                    }
+                    relations.append(relation)
+                if relation_limit_reached:
+                    break
     community_payload = _safe_sealed(store.community_snapshot_file)
     community_values = community_payload.get("communities")
     communities: list[dict[str, Any]] = []
@@ -530,6 +475,216 @@ def _typed_graph_projection(
             },
         },
     }
+
+
+def build_cortex_relation_details(
+    root: Path,
+    relation_keys: list[tuple[str, str, str]],
+) -> list[dict[str, Any]]:
+    """Return bounded details for stable, explicitly requested relation keys."""
+
+    requested = {
+        (
+            str(relation_id)[:256],
+            str(source_page_id)[:_CORTEX_PAGE_ID_MAX_LENGTH],
+            str(target_page_id)[:_CORTEX_PAGE_ID_MAX_LENGTH],
+        )
+        for relation_id, source_page_id, target_page_id in relation_keys[
+            :_RELATION_DETAIL_LIMIT
+        ]
+        if str(relation_id) and str(source_page_id) and str(target_page_id)
+    }
+    if not requested:
+        return []
+    resolved_root = root.expanduser().resolve()
+    store = KnowledgeGraphStore(resolved_root / "knowledge-graph")
+    relation_ids = {key[0] for key in requested}
+    records: dict[str, dict[str, Any]] = {}
+    try:
+        snapshot = store.load_snapshot()
+        values = snapshot.get("relations")
+        if isinstance(values, dict):
+            for relation_id_value in relation_ids:
+                value = values.get(relation_id_value)
+                if isinstance(value, dict):
+                    records[relation_id_value] = value
+    except (DurableStateError, OSError, TypeError, ValueError):
+        records = {}
+
+    details: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for key in requested:
+        record = records.get(key[0])
+        if record is None or key != (
+            str(record.get("relation_id") or ""),
+            str(record.get("source_page_id") or ""),
+            str(record.get("target_page_id") or ""),
+        ):
+            continue
+        evidence_value = record.get("evidence")
+        evidence = evidence_value if isinstance(evidence_value, list) else []
+        consensus_value = record.get("consensus")
+        consensus = consensus_value if isinstance(consensus_value, dict) else None
+        votes_value = consensus.get("votes") if consensus is not None else None
+        votes = votes_value if isinstance(votes_value, list) else []
+        details[key] = {
+            "relation_id": key[0],
+            "source_page_id": key[1],
+            "target_page_id": key[2],
+            "evidence_refs": [
+                {
+                    "page_id": _browser_text(row.get("page_id"), 240),
+                    "content_sha256": _browser_text(
+                        row.get("content_sha256"), 64
+                    ),
+                    "span_sha256": _browser_text(row.get("span_sha256"), 64),
+                    "source_line": _browser_nonnegative_int(
+                        row.get("source_line")
+                    ),
+                    "raw_sha256": _browser_text(row.get("raw_sha256"), 64),
+                }
+                for row in evidence[:_RELATION_EVIDENCE_LIMIT]
+                if isinstance(row, dict)
+            ],
+            "consensus": (
+                {
+                    "receipt_id": _browser_text(consensus.get("receipt_id"), 256),
+                    "producer_role": _browser_text(
+                        consensus.get("producer_role"), 64
+                    ),
+                    "quorum": _browser_nonnegative_int(consensus.get("quorum")),
+                    "outcome": _browser_text(consensus.get("outcome"), 32),
+                    "hold_reason": _browser_text(
+                        consensus.get("hold_reason"), 160
+                    ),
+                    "votes": [
+                        {
+                            "role": _browser_text(vote.get("role"), 64),
+                            "model_sha256": _browser_text(
+                                vote.get("model_sha256"), 64
+                            ),
+                            "decision": _browser_text(
+                                vote.get("decision") or "abstain", 32
+                            ),
+                            "confidence": _browser_confidence(
+                                vote.get("confidence")
+                            ),
+                            "vote_sha256": _browser_text(
+                                vote.get("vote_sha256"), 64
+                            ),
+                        }
+                        for vote in votes[:_RELATION_VOTE_LIMIT]
+                        if isinstance(vote, dict)
+                    ],
+                }
+                if consensus is not None
+                else None
+            ),
+        }
+
+    missing = requested - details.keys()
+    if missing:
+        entity_payload = _safe_sealed(store.entity_snapshot_file)
+        candidate_values = entity_payload.get("candidates")
+        merge_values = entity_payload.get("merge_candidates")
+        candidates = candidate_values if isinstance(candidate_values, dict) else {}
+        merges = merge_values if isinstance(merge_values, dict) else {}
+        for key in missing:
+            merge = merges.get(key[0])
+            if not isinstance(merge, dict):
+                continue
+            member_values = merge.get("member_candidate_ids")
+            member_ids = member_values if isinstance(member_values, list) else []
+            requested_pages = {key[1], key[2]}
+            if len(requested_pages) != 2:
+                continue
+            rows: list[dict[str, Any]] = []
+            found_pages: set[str] = set()
+            for candidate_id in member_ids[:_ENTITY_DETAIL_MEMBER_SCAN_LIMIT]:
+                value = candidates.get(_browser_text(candidate_id, 256))
+                if not isinstance(value, dict):
+                    continue
+                page_id = _browser_text(value.get("page_id"), 240)
+                if page_id not in requested_pages:
+                    continue
+                found_pages.add(page_id)
+                if len(rows) < _RELATION_EVIDENCE_LIMIT:
+                    rows.append(value)
+                if found_pages == requested_pages:
+                    break
+            if found_pages != requested_pages:
+                continue
+            consensus_value = merge.get("consensus")
+            consensus = consensus_value if isinstance(consensus_value, dict) else {}
+            votes_value = consensus.get("votes")
+            votes = votes_value if isinstance(votes_value, list) else []
+            details[key] = {
+                "relation_id": key[0],
+                "source_page_id": key[1],
+                "target_page_id": key[2],
+                "evidence_refs": [
+                    {
+                        "page_id": _browser_text(value.get("page_id"), 240),
+                        "content_sha256": _browser_text(
+                            value.get("content_sha256"), 64
+                        ),
+                        "span_sha256": _browser_text(
+                            value.get("alias_evidence_sha256"), 64
+                        ),
+                        "source_line": 0,
+                        "raw_sha256": "",
+                    }
+                    for value in rows
+                ],
+                "consensus": {
+                    "receipt_id": _browser_text(
+                        consensus.get("receipt_id")
+                        or merge.get("receipt_id")
+                        or "",
+                        256,
+                    ),
+                    "producer_role": _browser_text(
+                        consensus.get("producer_role")
+                        or "entity_local_consensus",
+                        64,
+                    ),
+                    "quorum": _browser_nonnegative_int(
+                        consensus.get("quorum") or 2
+                    ),
+                    "outcome": _browser_text(
+                        consensus.get("outcome")
+                        or merge.get("status")
+                        or "proposed",
+                        32,
+                    ),
+                    "hold_reason": _browser_text(
+                        consensus.get("hold_reason")
+                        or merge.get("reason_code")
+                        or "",
+                        160,
+                    ),
+                    "votes": [
+                        {
+                            "role": _browser_text(vote.get("role"), 64),
+                            "model_sha256": _browser_text(
+                                vote.get("model_sha256"), 64
+                            ),
+                            "decision": _browser_text(
+                                vote.get("decision") or "abstain", 32
+                            ),
+                            "confidence": _browser_confidence(
+                                vote.get("confidence")
+                            ),
+                            "vote_sha256": _browser_text(
+                                vote.get("vote_sha256"), 64
+                            ),
+                        }
+                        for vote in votes[:_RELATION_VOTE_LIMIT]
+                        if isinstance(vote, dict)
+                    ],
+                },
+            }
+
+    return [details[key] for key in sorted(details)[:_RELATION_DETAIL_LIMIT]]
 
 
 def build_cortex_graph(
@@ -974,6 +1129,9 @@ class CortexEventCursor:
         activity_log: Path | None = None,
         field_session: str = "",
         follow_field_sessions: bool = False,
+        after_seq: int = 0,
+        field_batch_limit: int = 32,
+        event_batch_limit: int = _CORTEX_EVENT_BATCH_LIMIT,
     ) -> None:
         self.root = root.expanduser().resolve()
         self.recall_log = recall_log or self.root / "recall" / "recall-log.jsonl"
@@ -986,24 +1144,24 @@ class CortexEventCursor:
         self.follow_field_sessions = bool(follow_field_sessions)
         from chronovisor.recall.recall_field_store import RecallFieldStore
 
-        self.field_event_root = RecallFieldStore(
-            root=self.root / "recall" / "field"
-        ).event_root
-        self.field_event_log = (
-            self.field_event_root / f"{self.field_session}.jsonl"
-            if self.field_session
-            else None
+        self.field_store = RecallFieldStore(root=self.root / "recall" / "field")
+        self.field_event_root = self.field_store.event_root
+        self.field_event_log = None
+        self._field_after_seq = max(0, int(after_seq))
+        self._field_batch_limit = max(1, min(32, int(field_batch_limit)))
+        self._event_batch_limit = max(
+            1,
+            min(_CORTEX_EVENT_BATCH_LIMIT, int(event_batch_limit)),
         )
+        self._pending_events: deque[dict[str, Any]] = deque()
+        self._field_control: dict[str, Any] | None = None
+        if self.follow_field_sessions and not self.field_session:
+            self.field_session = self._latest_followed_field_session()
         self._offsets = {
             self.recall_log: self._file_size(self.recall_log),
             self.pull_log: self._file_size(self.pull_log),
             self.activity_log: self._file_size(self.activity_log),
         }
-        if self.field_event_log is not None:
-            self._offsets[self.field_event_log] = self._file_size(self.field_event_log)
-        if self.follow_field_sessions:
-            for path in self._field_event_paths():
-                self._offsets[path] = self._file_size(path)
         self._remainders: dict[Path, bytes] = {}
         self._raw_commit_files: dict[Path, tuple[int, int]] = {}
         self._known_raw_commit_files: set[tuple[int, int]] = set()
@@ -1192,18 +1350,84 @@ class CortexEventCursor:
         return event
 
     def _field_events(self) -> list[dict[str, Any]]:
-        if self.field_event_log is None:
+        if not self.field_session:
+            return []
+        rows = self.field_store.read_events(
+            self.field_session,
+            after_seq=self._field_after_seq,
+        )
+        snapshot_status, committed_seq = self._field_commit_watermark(
+            self.field_session
+        )
+        if snapshot_status == "corrupt":
+            self._field_control = {
+                "type": "resync",
+                "session_hash": self.field_session,
+                "after_seq": self._field_after_seq,
+                "committed_seq": 0,
+                "reason": "field_snapshot_corrupt",
+            }
+            return []
+        if snapshot_status == "missing":
+            # Browser-safe test fixtures and pre-v2 sessions may have only an
+            # event journal. Production sessions are gated by their snapshot.
+            committed_seq = max(
+                (int(row.get("seq") or 0) for row in rows if isinstance(row, dict)),
+                default=self._field_after_seq,
+            )
+        elif self._field_after_seq > committed_seq:
+            self._field_control = {
+                "type": "resync",
+                "session_hash": self.field_session,
+                "after_seq": self._field_after_seq,
+                "committed_seq": committed_seq,
+                "reason": "field_watermark_ahead",
+            }
             return []
         events: list[dict[str, Any]] = []
-        for line in self._tail_lines(self.field_event_log):
-            try:
-                event = _project_field_event(json.loads(line))
-            except json.JSONDecodeError:
-                continue
+        expected = self._field_after_seq + 1
+        for row in rows:
+            event = _project_field_event(row)
             if event is None or event["session_hash"] != self.field_session:
                 continue
+            sequence = int(event["seq"])
+            if sequence > committed_seq:
+                continue
+            if sequence != expected:
+                self._field_control = {
+                    "type": "resync",
+                    "session_hash": self.field_session,
+                    "after_seq": self._field_after_seq,
+                    "committed_seq": committed_seq,
+                    "reason": "field_sequence_gap",
+                }
+                return []
             events.append(event)
+            expected += 1
+            if len(events) >= self._field_batch_limit:
+                break
+        if not events and committed_seq > self._field_after_seq:
+            self._field_control = {
+                "type": "resync",
+                "session_hash": self.field_session,
+                "after_seq": self._field_after_seq,
+                "committed_seq": committed_seq,
+                "reason": "field_retention_gap",
+            }
+            return []
+        if events:
+            self._field_after_seq = int(events[-1]["seq"])
         return events
+
+    def _field_commit_watermark(self, session_hash: str) -> tuple[str, int]:
+        snapshot_path = self.field_store.session_root / f"{session_hash}.json"
+        try:
+            snapshot = _read_sealed_field_snapshot(snapshot_path)
+            return "valid", max(0, int(snapshot.get("seq") or 0))
+        except FileNotFoundError:
+            return "missing", 0
+        except (OSError, ValueError, json.JSONDecodeError):
+            return "corrupt", 0
 
     def _field_event_paths(self) -> list[Path]:
         try:
@@ -1211,29 +1435,50 @@ class CortexEventCursor:
         except OSError:
             return []
 
+    def _latest_followed_field_session(self) -> str:
+        latest = self.field_store.latest_session_hash(max_age_seconds=float("inf"))
+        if latest:
+            return latest
+        paths = self._field_event_paths()
+        try:
+            return max(paths, key=lambda path: path.stat().st_mtime_ns).stem
+        except (OSError, ValueError):
+            return ""
+
     def _followed_field_events(self) -> list[dict[str, Any]]:
-        events: list[dict[str, Any]] = []
-        for path in self._field_event_paths():
-            if not _FIELD_SESSION_RE.fullmatch(path.stem):
-                continue
-            if path not in self._offsets:
-                self._offsets[path] = 0
-            for line in self._tail_lines(path):
-                try:
-                    event = _project_field_event(json.loads(line))
-                except json.JSONDecodeError:
-                    continue
-                if event is None or event["session_hash"] != path.stem:
-                    continue
-                events.append(event)
-        return sorted(
-            events,
-            key=lambda event: (
-                float(event.get("timestamp_epoch") or 0.0),
-                str(event.get("session_hash") or ""),
-                int(event.get("seq") or 0),
-            ),
-        )
+        latest = self._latest_followed_field_session()
+        if latest and latest != self.field_session:
+            previous = self.field_session
+            self.field_session = latest
+            snapshot_status, committed_seq = self._field_commit_watermark(latest)
+            if snapshot_status == "corrupt":
+                self._field_control = {
+                    "type": "resync",
+                    "session_hash": latest,
+                    "previous_session_hash": previous,
+                    "after_seq": self._field_after_seq,
+                    "committed_seq": 0,
+                    "reason": "field_snapshot_corrupt",
+                }
+                return []
+            if snapshot_status == "missing":
+                committed_seq = max(
+                    (
+                        int(row.get("seq") or 0)
+                        for row in self.field_store.read_events(latest)
+                        if isinstance(row, dict)
+                    ),
+                    default=0,
+                )
+            self._field_after_seq = committed_seq
+            self._field_control = {
+                "type": "session_changed",
+                "session_hash": latest,
+                "previous_session_hash": previous,
+                "committed_seq": self._field_after_seq,
+            }
+            return []
+        return self._field_events()
 
     def _automatic_recall_events(self) -> list[dict[str, Any]]:
         events: list[dict[str, Any]] = []
@@ -1421,15 +1666,45 @@ class CortexEventCursor:
         return events
 
     def poll(self) -> list[dict[str, Any]]:
+        payload = self.poll_payload()
+        return payload.get("events", []) if payload.get("type") == "events" else []
+
+    def poll_payload(self) -> dict[str, Any]:
+        """Return one bounded event envelope or an explicit resync control."""
+
+        self._field_control = None
+        if self._pending_events:
+            return {
+                "type": "events",
+                "events": [
+                    self._pending_events.popleft()
+                    for _ in range(
+                        min(self._event_batch_limit, len(self._pending_events))
+                    )
+                ],
+            }
         field_events: list[dict[str, Any]] = []
         if self.follow_field_sessions:
             field_events = self._followed_field_events()
         elif self.field_session:
             field_events = self._field_events()
-        return [
+        if self._field_control is not None:
+            return self._field_control
+        self._pending_events.extend(
+            [
             *field_events,
             *self._automatic_recall_events(),
             *self._pull_events(),
             *self._save_events(),
             *self._ingest_events(),
-        ]
+            ]
+        )
+        return {
+            "type": "events",
+            "events": [
+                self._pending_events.popleft()
+                for _ in range(
+                    min(self._event_batch_limit, len(self._pending_events))
+                )
+            ],
+        }

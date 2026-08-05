@@ -2,6 +2,7 @@
 
 (() => {
   const TransportPolicy = window.CortexTransportPolicy;
+  const Runtime = window.CortexRuntime;
   const STEEL = "#7d92b5";
   const FIRE = "#ffb454";
   const FIRE_HOT = "#fff3dd";
@@ -42,6 +43,13 @@
   const SIMULATION_MAX_STEPS_PER_FRAME = 4;
   const METRICS_PUBLISH_INTERVAL_MS = 200;
   const FRAME_DURATION_CAPACITY = 240;
+  const FRAME_CADENCE_IDLE_GAP_MS = 250;
+  const EVENT_DRAIN_PER_FRAME = 32;
+  const VISUAL_DRAIN_PER_FRAME = 4;
+  const EVENT_EDGE_LIMIT = 256;
+  const EVENT_EDGE_TTL_MS = 60_000;
+  const EXPLORER_CHUNK_SIZE = 120;
+  const AUTO_ROTATE_COOLDOWN_MS = 2600;
   const NODE_STIMULUS_SCALE = 0.38;
   const NODE_ARRIVAL_SCALE = 0.28;
   const NODE_CORE_SCALE = 1;
@@ -82,11 +90,14 @@
   let nodesByConnectivity = [];
   let byId = new Map();
   let edgeIndexByPair = new Map();
+  const eventEdgeByPair = new Map();
+  const eventEdgeSlots = [];
   let packageList = [];
   let packageShade = {};
   let anchors = {};
   let nodeState;
   let edgeState;
+  let nodeExcitation = new Float32Array(0);
   let drawOrder = [];
   let labelHubs = new Set();
   let labelCandidateMarks = new Uint32Array(0);
@@ -104,6 +115,12 @@
   let communityHulls = [];
   let relationById = new Map();
   const activeRelationIds = new Set();
+  const relationDetailsByKey = new Map();
+  let relationDetailRequest = 0;
+  let relationDetailAbort = null;
+  let relationDetailError = "";
+  let relationDetailErrorNode = -1;
+  let relationDetailLoadingNode = -1;
 
   let selected = -1;
   let hovered = -1;
@@ -132,10 +149,48 @@
   let lastCortexMetricsPublished = -1e9;
   let frameDurationCursor = 0;
   let frameDurationCount = 0;
+  let frameCadenceCursor = 0;
+  let frameCadenceCount = 0;
   const stage = document.getElementById("stage");
-  const canvas = document.getElementById("gl");
+  const baseCanvas = document.getElementById("gl");
+  const canvas = document.getElementById("overlay");
   const modeBar = document.getElementById("modeBar");
   const context = canvas.getContext("2d");
+  const spatialIndex = Runtime.createSpatialIndex(48);
+  const stageMetrics = Runtime.createStageMetrics();
+  let renderScheduler = null;
+  let pendingPointer = null;
+  let panelRenderPending = false;
+  let fieldResyncPending = false;
+  let fieldTerminalReason = "";
+  let reconnectSuppressedGeneration = -1;
+  const terminalFieldControlGate = Runtime.createGenerationGate();
+  const longFrameMetrics = {
+    longAnimationFrames: 0,
+    longAnimationFrameMax: 0,
+    longTasks: 0,
+    longTaskMax: 0,
+  };
+  function invalidate(reason) {
+    if (renderScheduler) renderScheduler.invalidate(reason);
+  }
+  const baseRenderer = window.CortexWebGL.createRenderer(baseCanvas, {
+    onStateChange: () => invalidate("renderer-state"),
+  });
+  const autoRotateWake = Runtime.createCooldownWake({
+    now: () => performance.now(),
+    setTimer: (callback, delay) => window.setTimeout(callback, delay),
+    clearTimer: (handle) => window.clearTimeout(handle),
+    readyAt: () => lastInteraction + AUTO_ROTATE_COOLDOWN_MS,
+    isEnabled: () => (
+      autoRotate
+      && motionEnabled
+      && !reducedMotion.matches
+      && !dragging
+    ),
+    isHidden: () => document.hidden,
+    onReady: () => invalidate("auto-rotate-wake"),
+  });
   let width = 0;
   let height = 0;
   const pixelRatio = Math.min(2, window.devicePixelRatio || 1);
@@ -172,9 +227,94 @@
   let sessionRequest = 0;
   const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
   const fieldState = window.CortexField.createState();
+  const protectedTransportKinds = new Set([
+    "save",
+    "capture",
+    "recall",
+    "auto_recall",
+    "read",
+    "search",
+    "used",
+  ]);
+  function transportOverflowKey(event) {
+    if (!event || event.family === "field") return "";
+    if (
+      event.family !== "transport"
+      && event.priority_class !== "protected"
+      && !protectedTransportKinds.has(event.kind)
+    ) return "";
+    return [
+      String(event.kind || "transport"),
+      String(event.phase || ""),
+      String(event.channel_key || ""),
+    ].join(":");
+  }
+
+  function mergeTransportOverflow(previous, event) {
+    const previousCount = Math.max(1, Number(previous.coalesced_count) || 1);
+    const eventCount = Math.max(1, Number(event.coalesced_count) || 1);
+    const pageIds = [];
+    const seen = new Set();
+    [...(previous.page_ids || []), ...(event.page_ids || [])].forEach((pageId) => {
+      if (!pageId || seen.has(pageId) || pageIds.length >= 24) return;
+      seen.add(pageId);
+      pageIds.push(pageId);
+    });
+    const coalescedCount = previousCount + eventCount;
+    const coalescedKinds = [
+      ...(previous.coalesced_kinds || [previous.kind]),
+      ...(event.coalesced_kinds || [event.kind]),
+    ].filter(Boolean);
+    return {
+      ...event,
+      page_ids: pageIds,
+      coalesced_count: coalescedCount,
+      coalesced_kinds: [...new Set(coalescedKinds)].slice(0, 16),
+      label: `${String(event.label || event.kind || "transport").slice(0, 130)} · ${coalescedCount} coalesced`,
+    };
+  }
+  const incomingFieldEvents = Runtime.createEventQueue({
+    maximum: window.CortexField.MAX_EVENTS,
+    protectedEvent: () => true,
+    onOverflow: () => {
+      fieldResyncPending = true;
+    },
+  });
+  const incomingTransportEvents = Runtime.createEventQueue({
+    maximum: window.CortexField.MAX_EVENTS,
+    protectedEvent: (event) =>
+      event.priority_class === "protected"
+      || protectedTransportKinds.has(event.kind),
+    coalesceKey: (event) =>
+      event.family === "telemetry"
+        ? `telemetry:${event.kind}`
+        : event.kind === "processing"
+          ? `processing:${event.lane_key}:${event.phase}`
+          : "",
+    overflowCoalesceKey: transportOverflowKey,
+    mergeOverflow: mergeTransportOverflow,
+  });
+  const pendingFieldVisuals = Runtime.createEventQueue({
+    maximum: window.CortexField.MAX_EVENTS,
+    protectedEvent: () => true,
+    onOverflow: () => {
+      fieldResyncPending = true;
+    },
+  });
+  const pendingTransportVisuals = Runtime.createEventQueue({
+    maximum: window.CortexField.MAX_EVENTS,
+    protectedEvent: (event) => protectedTransportKinds.has(event.kind),
+    coalesceKey: (event) =>
+      event.kind === "processing"
+        ? `${event.lane_key}:${event.phase}`
+        : "",
+    overflowCoalesceKey: transportOverflowKey,
+    mergeOverflow: mergeTransportOverflow,
+  });
   const cortexMetrics = {
     spread: [],
     frameDurations: new Float32Array(FRAME_DURATION_CAPACITY),
+    frameCadences: new Float32Array(FRAME_DURATION_CAPACITY),
     maxPulseQueue: 0,
     violetNodes: 0,
     labelsPainted: 0,
@@ -186,6 +326,7 @@
     maxGlowPadding: 0,
     transportReceived: 0,
     transportPainted: 0,
+    transportByKind: {},
     processingEvents: 0,
     activeProcessingLanes: 0,
     processingActivityConnected: false,
@@ -235,9 +376,35 @@
     return values;
   }
 
+  function recentFrameCadences(limit = FRAME_DURATION_CAPACITY) {
+    const count = Math.min(limit, frameCadenceCount);
+    const values = new Array(count);
+    const start =
+      (frameCadenceCursor - count + FRAME_DURATION_CAPACITY)
+      % FRAME_DURATION_CAPACITY;
+    for (let index = 0; index < count; index += 1) {
+      values[index] =
+        cortexMetrics.frameCadences[
+          (start + index) % FRAME_DURATION_CAPACITY
+        ];
+    }
+    return values;
+  }
+
   window.chronovisorCortexMetrics = () => ({
     spread: cortexMetrics.spread.map((row) => ({ ...row })),
     frameDurations: recentFrameDurations(),
+    frameCadences: recentFrameCadences(),
+    stages: stageMetrics.snapshot(),
+    scheduler: renderScheduler ? renderScheduler.state() : { pending: 0 },
+    renderer: baseRenderer.snapshot(),
+    eventQueues: {
+      incomingField: incomingFieldEvents.state(),
+      incomingTransport: incomingTransportEvents.state(),
+      fieldVisuals: pendingFieldVisuals.state(),
+      transportVisuals: pendingTransportVisuals.state(),
+    },
+    performanceObservers: { ...longFrameMetrics },
     maxPulseQueue: cortexMetrics.maxPulseQueue,
     pulseQueue: pulses.length,
     simulation: {
@@ -267,6 +434,7 @@
       electricTravelMaxMs: ELECTRIC_TRAVEL_MAX_MS,
       transportReceived: cortexMetrics.transportReceived,
       transportPainted: cortexMetrics.transportPainted,
+      transportByKind: { ...cortexMetrics.transportByKind },
       processingEvents: cortexMetrics.processingEvents,
       activeProcessingLanes: cortexMetrics.activeProcessingLanes,
       processingActivityConnected: cortexMetrics.processingActivityConnected,
@@ -307,6 +475,33 @@
       transportElectricPeak: cortexMetrics.transportElectricPeak,
     },
   });
+
+  const performanceObservers = [];
+  function observeLongFrames() {
+    if (!("PerformanceObserver" in window)) return;
+    const supported = window.PerformanceObserver.supportedEntryTypes || [];
+    const observe = (type, counterKey, maxKey) => {
+      if (!supported.includes(type)) return;
+      try {
+        const observer = new PerformanceObserver((list) => {
+          list.getEntries().forEach((entry) => {
+            const duration = Number(entry.duration) || 0;
+            longFrameMetrics[counterKey] += 1;
+            longFrameMetrics[maxKey] = Math.max(
+              longFrameMetrics[maxKey],
+              duration,
+            );
+          });
+        });
+        observer.observe({ type, buffered: true });
+        performanceObservers.push(observer);
+      } catch (_error) {
+        // Performance observers are optional diagnostics.
+      }
+    };
+    observe("long-animation-frame", "longAnimationFrames", "longAnimationFrameMax");
+    observe("longtask", "longTasks", "longTaskMax");
+  }
 
   const pulses = [];
   const edgeAfterglows = [];
@@ -485,6 +680,8 @@
     relationLifecycle = preferences.relationLifecycle;
     edgeVisibility = preferences.synapseVisibility / 100;
     syncViewPreferenceControls();
+    stateDirty = true;
+    invalidate("preferences");
   }
 
   function resetViewPreferences() {
@@ -625,7 +822,9 @@
     updateProjectionCenter();
     canvas.width = Math.max(1, Math.round(width * pixelRatio));
     canvas.height = Math.max(1, Math.round(height * pixelRatio));
+    baseRenderer.resize(width, height, pixelRatio);
     labelFont = `10.5px ${getComputedStyle(document.body).getPropertyValue("--mono")}`;
+    invalidate("resize");
   }
 
   function initializeGraph(graphData) {
@@ -723,7 +922,7 @@
           + (nodes[relation.target]?.radius || 0),
       });
     });
-    simulationLinks = links.filter((link) => link.kind !== 2);
+    simulationLinks = links.filter((link) => link.kind !== 2 && !link.typed);
     nodeCount = nodes.length;
     neighbors = Array.from({ length: nodeCount }, () => new Set());
     outgoing = Array.from({ length: nodeCount }, () => []);
@@ -775,7 +974,10 @@
       community.hull = [];
     });
     nodeState = new Uint8Array(nodeCount);
-    edgeState = new Uint8Array(links.length + 256);
+    edgeState = new Uint8Array(links.length + EVENT_EDGE_LIMIT);
+    nodeExcitation = new Float32Array(nodeCount);
+    eventEdgeByPair.clear();
+    eventEdgeSlots.length = 0;
     labelCandidateMarks = new Uint32Array(nodeCount);
     formationCandidateMarks = new Uint32Array(nodeCount);
     drawOrder = nodes.map((_node, index) => index);
@@ -903,6 +1105,7 @@
     simulationAwake = true;
     simulationSettledTicks = 0;
     simulationAccumulator = 0;
+    invalidate("simulation");
   }
 
   function projectAll() {
@@ -931,6 +1134,11 @@
       node.screenScale = scale;
       node.viewDepth = viewDepth;
     }
+    spatialIndex.rebuild(
+      nodes,
+      (node, index) => nodeState[index] > 0 && node.viewDepth <= 9e8,
+      (node) => Math.max(5, node.radius * node.screenScale),
+    );
   }
 
   function fog(viewDepth) {
@@ -979,6 +1187,7 @@
     camera.pivotNodeIndex = nodeIndex;
     syncCameraPivotControl();
     lastInteraction = performance.now();
+    invalidate("camera-pivot");
   }
 
   function setNodeAsCameraPivot(index) {
@@ -1302,10 +1511,10 @@
   function queueElectricPulse(pulse) {
     pulses.push(pulse);
     pruneAndBoundElectricPulses(pulses, performance.now());
+    invalidate("electric-pulse");
   }
 
   function trimVisualQueues() {
-    pruneAndBoundElectricPulses(pulses, performance.now());
     if (nodeEffects.length > window.CortexField.MAX_EVENTS) {
       nodeEffects.splice(0, nodeEffects.length - window.CortexField.MAX_EVENTS);
     }
@@ -1340,15 +1549,22 @@
     const frameP95 = frames.length
       ? frames[Math.min(frames.length - 1, Math.round((frames.length - 1) * 0.95))]
       : 0;
-    const frameMean = frames.length
-      ? frames.reduce((total, value) => total + value, 0) / frames.length
+    const frameP99 = frames.length
+      ? frames[Math.min(frames.length - 1, Math.ceil(frames.length * 0.99) - 1)]
+      : 0;
+    const frameMax = frames.length ? frames[frames.length - 1] : 0;
+    const cadences = recentFrameCadences(120).filter((value) => value > 0);
+    const cadenceMean = cadences.length
+      ? cadences.reduce((total, value) => total + value, 0) / cadences.length
       : 0;
     target.dataset.spreadReceived = String(cortexMetrics.spread.length);
     target.dataset.spreadPainted = String(painted.length);
     target.dataset.paintP95Ms = p95.toFixed(1);
     target.dataset.maxPulseQueue = String(cortexMetrics.maxPulseQueue);
     target.dataset.frameP95Ms = frameP95.toFixed(1);
-    target.dataset.fps = frameMean ? (1000 / frameMean).toFixed(1) : "0.0";
+    target.dataset.frameP99Ms = frameP99.toFixed(1);
+    target.dataset.frameMaxMs = frameMax.toFixed(1);
+    target.dataset.fps = cadenceMean ? (1000 / cadenceMean).toFixed(1) : "0.0";
     target.dataset.transportReceived = String(cortexMetrics.transportReceived);
     target.dataset.transportPainted = String(cortexMetrics.transportPainted);
     target.dataset.processingEvents = String(cortexMetrics.processingEvents);
@@ -1371,6 +1587,28 @@
     target.dataset.projectionCenterX = projectionCenterX.toFixed(1);
     target.dataset.projectionCenterY = projectionCenterY.toFixed(1);
     target.dataset.projectionTopInset = projectionTopInset.toFixed(1);
+    const stages = stageMetrics.snapshot();
+    Object.entries(stages).forEach(([name, metrics]) => {
+      target.dataset[`${name}P50Ms`] = metrics.p50.toFixed(2);
+      target.dataset[`${name}P95Ms`] = metrics.p95.toFixed(2);
+      target.dataset[`${name}P99Ms`] = metrics.p99.toFixed(2);
+      target.dataset[`${name}MaxMs`] = metrics.max.toFixed(2);
+    });
+    target.dataset.longAnimationFrames = String(
+      longFrameMetrics.longAnimationFrames,
+    );
+    target.dataset.longAnimationFrameMaxMs =
+      longFrameMetrics.longAnimationFrameMax.toFixed(1);
+    target.dataset.longTasks = String(longFrameMetrics.longTasks);
+    target.dataset.longTaskMaxMs = longFrameMetrics.longTaskMax.toFixed(1);
+    target.dataset.renderer = baseRenderer.snapshot().mode;
+    target.dataset.pendingRaf = String(
+      renderScheduler ? renderScheduler.state().pending : 0,
+    );
+    target.dataset.eventQueue = String(
+      incomingFieldEvents.state().length
+      + incomingTransportEvents.state().length,
+    );
   }
 
   function publishVisualMetrics(time) {
@@ -1456,7 +1694,39 @@
     const pairKey = `${source.index}:${target.index}`;
     const existingEdgeIndex = edgeIndexByPair.get(pairKey);
     if (Number.isInteger(existingEdgeIndex)) return existingEdgeIndex;
-    const edgeIndex = links.length;
+    const now = performance.now();
+    const existingEventEdge = eventEdgeByPair.get(pairKey);
+    if (Number.isInteger(existingEventEdge)) {
+      const existing = links[existingEventEdge];
+      if (existing) {
+        existing.expiresAt = now + EVENT_EDGE_TTL_MS;
+        existing.lastUsedAt = now;
+        return existingEventEdge;
+      }
+    }
+    let edgeIndex = -1;
+    if (eventEdgeSlots.length < EVENT_EDGE_LIMIT) {
+      edgeIndex = links.length;
+      eventEdgeSlots.push(edgeIndex);
+    } else {
+      let oldest = Infinity;
+      for (let index = 0; index < eventEdgeSlots.length; index += 1) {
+        const candidateIndex = eventEdgeSlots[index];
+        const candidate = links[candidateIndex];
+        if (
+          !candidate
+          || pulses.some((pulse) => pulse.edgeIndex === candidateIndex)
+          || edgeAfterglows.some((effect) => effect.edgeIndex === candidateIndex)
+        ) continue;
+        if ((candidate.lastUsedAt || 0) < oldest) {
+          oldest = candidate.lastUsedAt || 0;
+          edgeIndex = candidateIndex;
+        }
+      }
+    }
+    if (edgeIndex < 0) return -1;
+    const replaced = links[edgeIndex];
+    if (replaced?.pairKey) eventEdgeByPair.delete(replaced.pairKey);
     const link = {
       source: source.index,
       target: target.index,
@@ -1464,24 +1734,17 @@
       edgeType: event.edge_type || "field",
       eventOnly: true,
       typed: false,
+      pairKey,
+      expiresAt: now + EVENT_EDGE_TTL_MS,
+      lastUsedAt: now,
       restLength: 58 + source.radius + target.radius,
     };
-    links.push(link);
-    simulationLinks.push(link);
-    edgeIndexByPair.set(pairKey, edgeIndex);
-    neighbors[source.index].add(target.index);
-    neighbors[target.index].add(source.index);
-    refreshNeighborPriorities(source.index);
-    refreshNeighborPriorities(target.index);
-    outgoing[source.index].push(edgeIndex);
-    if (edgeIndex >= edgeState.length) {
-      const expanded = new Uint8Array(Math.ceil(edgeState.length * 1.5));
-      expanded.set(edgeState);
-      edgeState = expanded;
-    }
+    if (edgeIndex === links.length) links.push(link);
+    else links[edgeIndex] = link;
+    eventEdgeByPair.set(pairKey, edgeIndex);
     edgeState[edgeIndex] = 2;
     stateDirty = true;
-    reheat(0.18);
+    invalidate("event-topology");
     return edgeIndex;
   }
 
@@ -1619,7 +1882,9 @@
   }
 
   function visualizeTransportEvent(event) {
-    event = TransportPolicy.normalizeEvent(event);
+    event = event?.schema === TransportPolicy.EVENT_SCHEMA
+      ? event
+      : TransportPolicy.normalizeEvent(event);
     if (!event || event.family !== "transport") return;
     const phase = event.phase;
     const now = performance.now();
@@ -1644,6 +1909,15 @@
       phase,
       now,
     );
+    const eventMultiplicity = Math.max(
+      1,
+      Number(event.coalesced_count) || 1,
+    );
+    cortexMetrics.transportReceived += eventMultiplicity;
+    const transportKind = String(event.kind || "transport");
+    cortexMetrics.transportByKind[transportKind] =
+      Number(cortexMetrics.transportByKind[transportKind] || 0)
+      + eventMultiplicity;
     transportEffects.push({
       kind: event.kind,
       phase,
@@ -1660,15 +1934,18 @@
       duration,
       retainedUntil,
       priorityClass: event.priority_class,
-      seq: ++cortexMetrics.transportReceived,
+      seq: cortexMetrics.transportReceived,
       demo: event.mode === "demo",
       paintedAt: 0,
     });
     TransportPolicy.pruneAndBoundTransportEffects(transportEffects, now);
-    if (phase === "capture") cortexMetrics.captureEvents += 1;
-    else if (event.kind === "processing") cortexMetrics.processingEvents += 1;
-    else cortexMetrics.ingestEvents += 1;
-    if (phase === "apply" || phase === "complete") cortexMetrics.applyEvents += 1;
+    if (phase === "capture") cortexMetrics.captureEvents += eventMultiplicity;
+    else if (event.kind === "processing") {
+      cortexMetrics.processingEvents += eventMultiplicity;
+    } else cortexMetrics.ingestEvents += eventMultiplicity;
+    if (phase === "apply" || phase === "complete") {
+      cortexMetrics.applyEvents += eventMultiplicity;
+    }
     crackle(
       phase === "apply" || phase === "complete"
         ? 0.12
@@ -1689,6 +1966,7 @@
     }
     stimulateFromTransport(event);
     publishCortexMetrics();
+    invalidate("transport-effect");
   }
 
   function visualizeFieldEvent(event) {
@@ -1700,6 +1978,7 @@
         window.setTimeout(() => {
           activeRelationIds.delete(event.relation_id);
           stateDirty = true;
+          invalidate("relation-afterglow");
         }, EDGE_AFTERGLOW_MS + ELECTRIC_TRAVEL_MAX_MS);
       }
       const edgeIndex = ensureActualEdge(event);
@@ -1768,13 +2047,16 @@
     flashTicker(`${event.kind.toUpperCase()} · seq ${event.seq} · ${route}`);
     document.getElementById("fieldAria").textContent =
       `${event.kind}, sequence ${event.seq}, ${route}, delta ${event.delta.toFixed(3)}`;
+    invalidate("field-effect");
   }
 
   function drawEdges() {
     const paths = Array.from({ length: 9 }, () => new Path2D());
     const pathKinds = new Uint8Array(9);
+    const now = performance.now();
     links.forEach((link, edgeIndex) => {
       if (link.typed) return;
+      if (link.eventOnly && link.expiresAt <= now) return;
       const state = edgeState[edgeIndex];
       if (!state) return;
       const source = nodes[link.source];
@@ -1832,6 +2114,7 @@
 
   function drawTypedRelations() {
     if (!relationsVisible) return;
+    const batches = new Map();
     links.forEach((link, edgeIndex) => {
       if (!link.typed || edgeState[edgeIndex] === 0) return;
       const source = nodes[link.source];
@@ -1840,19 +2123,46 @@
       const focused = edgeState[edgeIndex] === 3;
       const active = activeRelationIds.has(link.relationId);
       const color = RELATION_STATUS_COLORS[link.lifecycle] || RGB_VIOLET;
-      context.save();
-      context.setLineDash(link.lifecycle === "authoritative" ? [] : [4, 5]);
-      context.lineWidth = active ? 2 : focused ? 1.25 : 0.65;
-      context.strokeStyle = rgba(
-        color,
-        (active ? 0.82 : focused ? 0.55 : 0.18) * fog((source.viewDepth + target.viewDepth) / 2),
+      const depth = (source.viewDepth + target.viewDepth) / 2;
+      const depthBand = depth < camera.distance * 0.85
+        ? 0
+        : depth < camera.distance * 1.15
+          ? 1
+          : 2;
+      const key = Runtime.relationBatchKey(
+        link,
+        edgeState[edgeIndex],
+        active,
+        depthBand,
       );
-      context.beginPath();
-      context.moveTo(source.screenX, source.screenY);
-      context.lineTo(target.screenX, target.screenY);
-      context.stroke();
-      context.restore();
+      let batch = batches.get(key);
+      if (!batch) {
+        const depthOpacity = [1, 0.72, 0.48][depthBand];
+        batch = {
+          path: new Path2D(),
+          color,
+          dashed: link.lifecycle !== "authoritative",
+          width: active ? 2 : focused ? 1.25 : 0.65,
+          opacity: Math.min(
+            0.9,
+            (active ? 0.82 : focused ? 0.55 : 0.18)
+              * depthOpacity
+              * edgeVisibility,
+          ),
+        };
+        batches.set(key, batch);
+      }
+      batch.path.moveTo(source.screenX, source.screenY);
+      batch.path.lineTo(target.screenX, target.screenY);
     });
+    context.save();
+    batches.forEach((batch) => {
+      context.setLineDash(batch.dashed ? [4, 5] : []);
+      context.lineWidth = batch.width;
+      context.strokeStyle = rgba(batch.color, batch.opacity);
+      context.stroke(batch.path);
+    });
+    context.restore();
   }
 
   function screenCross(origin, left, right) {
@@ -2006,6 +2316,7 @@
   }
 
   function completePulse(pulse, target, time) {
+    if (!target) return;
     target.arrivedAt = time;
     exciteNode(target, pulse.delta * NODE_ARRIVAL_SCALE, time);
     nodeEffects.push({
@@ -2025,7 +2336,12 @@
       seq: pulse.seq,
       demo: pulse.demo,
     });
-    trimVisualQueues();
+    if (nodeEffects.length > window.CortexField.MAX_EVENTS) {
+      nodeEffects.splice(0, nodeEffects.length - window.CortexField.MAX_EVENTS);
+    }
+    if (edgeAfterglows.length > MAX_ELECTRIC_PATHS) {
+      edgeAfterglows.splice(0, edgeAfterglows.length - MAX_ELECTRIC_PATHS);
+    }
     const metric = cortexMetrics.spread.find((row) => row.seq === pulse.seq);
     if (metric) metric.arrivalAt = time;
   }
@@ -2099,25 +2415,30 @@
   }
 
   function drawPulses(time) {
+    const staticMotion = reducedMotion.matches || !motionEnabled;
+    Runtime.drainExpiredPulses(
+      pulses,
+      (pulse) => {
+        const link = links[pulse.edgeIndex];
+        if (!link) return true;
+        const rawProgress = (time - pulse.startedAt) / pulse.duration;
+        return rawProgress >= 1 || (staticMotion && time - pulse.startedAt >= 900);
+      },
+      (pulse) => {
+        const link = links[pulse.edgeIndex];
+        if (link) completePulse(pulse, nodes[link.target], time);
+      },
+    );
     context.globalCompositeOperation = "lighter";
     for (let index = pulses.length - 1; index >= 0; index -= 1) {
       const pulse = pulses[index];
       const link = links[pulse.edgeIndex];
-      if (!link) {
-        pulses.splice(index, 1);
-        continue;
-      }
+      if (!link) continue;
       const source = nodes[link.source];
       const target = nodes[link.target];
-      const staticMotion = reducedMotion.matches || !motionEnabled;
       const rawProgress = (time - pulse.startedAt) / pulse.duration;
       const progress = staticMotion ? 0.72 : rawProgress;
       if (rawProgress < 0) continue;
-      if (progress >= 1) {
-        pulses.splice(index, 1);
-        completePulse(pulse, target, time);
-        continue;
-      }
       if (source.viewDepth > 9e8 || target.viewDepth > 9e8) continue;
       const edgeId = `${source.id}>${target.id}:${pulse.edgeType}`;
       const dx = target.screenX - source.screenX;
@@ -2211,18 +2532,16 @@
       const metric = cortexMetrics.spread.find((row) => row.seq === pulse.seq);
       if (metric && metric.paintedAt === null) metric.paintedAt = time;
       publishCortexMetrics();
-      if (staticMotion && time - pulse.startedAt >= 900) {
-        pulses.splice(index, 1);
-        completePulse(pulse, target, time);
-      }
     }
   }
 
-  function drawNodes(time) {
-    drawOrder.sort(
-      (leftIndex, rightIndex) =>
-        nodes[rightIndex].viewDepth - nodes[leftIndex].viewDepth,
-    );
+  function drawNodes(time, overlayOnly = false) {
+    if (!overlayOnly) {
+      drawOrder.sort(
+        (leftIndex, rightIndex) =>
+          nodes[rightIndex].viewDepth - nodes[leftIndex].viewDepth,
+      );
+    }
     drawOrder.forEach((index) => {
       const node = nodes[index];
       const state = nodeState[index];
@@ -2240,7 +2559,15 @@
       const dim = state === 1 ? 0.28 : 1;
       const fieldActivation = Math.max(0, Math.min(1, node.fieldActivation));
       const isFieldActive = fieldActivation >= 0.05;
-      const excitation = excitationLevel(node, time);
+      const excitation = nodeExcitation[index];
+      if (
+        overlayOnly
+        && !isFieldActive
+        && excitation <= 0.01
+        && state !== 3
+        && index !== selected
+        && index !== hovered
+      ) return;
       const baseRadius = Math.max(0.75, node.radius * node.screenScale);
       const radius = baseRadius * NODE_CORE_SCALE;
       cortexMetrics.maxCoreScale = Math.max(
@@ -2271,7 +2598,7 @@
           cortexMetrics.flashPeak,
           excitation,
         );
-      } else if (state === 3 || node.fanIn >= 38) {
+      } else if (state === 3 || (!overlayOnly && node.fanIn >= 38)) {
         drawCompactGlow(
           glowSteel,
           node.screenX,
@@ -2308,10 +2635,14 @@
         excitation > 0.03 || isFieldActive
           ? "lighter"
           : "source-over";
-      context.fillStyle = rgba(color, coreOpacity);
-      context.beginPath();
-      context.arc(node.screenX, node.screenY, radius, 0, Math.PI * 2);
-      context.fill();
+      // WebGL owns the full core. The overlay contributes only dynamic glow,
+      // rings and the hot inner point; Canvas fallback owns the full core.
+      if (!overlayOnly) {
+        context.fillStyle = rgba(color, coreOpacity);
+        context.beginPath();
+        context.arc(node.screenX, node.screenY, radius, 0, Math.PI * 2);
+        context.fill();
+      }
       if (excitation > 0.35) {
         context.fillStyle = rgba(RGB_HOT, excitation * depthFade);
         context.beginPath();
@@ -3281,7 +3612,7 @@
     });
   }
 
-  function draw(time) {
+  function draw(time, webglBaseRendered) {
     cortexMetrics.violetNodes = 0;
     cortexMetrics.labelsPainted = 0;
     cortexMetrics.afterglowEdges = 0;
@@ -3329,10 +3660,10 @@
     });
     context.globalAlpha = 1;
     drawCommunityHulls();
-    drawEdges();
+    if (!webglBaseRendered) drawEdges();
     drawEdgeAfterglows(time);
     drawPulses(time);
-    drawNodes(time);
+    drawNodes(time, webglBaseRendered);
     drawCameraPivot(time);
     drawNodeEffects(time);
     drawTransportEffects(time);
@@ -3342,15 +3673,88 @@
 
   let previousTime = performance.now();
   let simulationAccumulator = 0;
-  function frame(now) {
-    const delta = Math.min(60, now - previousTime);
-    cortexMetrics.frameDurations[frameDurationCursor] = delta;
-    frameDurationCursor = (frameDurationCursor + 1) % FRAME_DURATION_CAPACITY;
-    frameDurationCount = Math.min(
-      FRAME_DURATION_CAPACITY,
-      frameDurationCount + 1,
+  function cameraIsMoving() {
+    if (cameraTarget || cameraPivotTarget) return true;
+    const pivotNode = nodes[camera.pivotNodeIndex];
+    return Boolean(
+      pivotNode
+      && Math.hypot(
+        pivotNode.x - camera.pivotX,
+        pivotNode.y - camera.pivotY,
+        pivotNode.z - camera.pivotZ,
+      ) >= 0.12
     );
+  }
+
+  function hasRenderWork() {
+    const autoRotationReady = autoRotateWake.sync();
+    return Boolean(
+      stateDirty
+      || simulationAwake
+      || cameraIsMoving()
+      || pendingPointer
+      || panelRenderPending
+      || fieldResyncPending
+      || incomingFieldEvents.state().length
+      || incomingTransportEvents.state().length
+      || pendingFieldVisuals.state().length
+      || pendingTransportVisuals.state().length
+      || pulses.length
+      || edgeAfterglows.length
+      || nodeEffects.length
+      || transportEffects.length
+      || autoRotationReady
+    );
+  }
+
+  function flushFrameWork() {
+    if (pendingPointer) {
+      const pointer = pendingPointer;
+      pendingPointer = null;
+      processPointerMove(pointer);
+    }
+    processQueuedEvents();
+    if (fieldResyncPending) {
+      fieldResyncPending = false;
+      incomingFieldEvents.clear();
+      pendingFieldVisuals.clear();
+      loadField(fieldState.sessionHash);
+    }
+    if (panelRenderPending) {
+      panelRenderPending = false;
+      renderPanel();
+    }
+  }
+
+  function frame(
+    now,
+    _reasons,
+    frameState = { continuation: false, sinceLastRender: null },
+  ) {
+    const frameWorkStartedAt = performance.now();
+    const rawDelta = Math.max(0, now - previousTime);
+    const delta = Math.min(60, rawDelta);
+    const cadence = Number(frameState.sinceLastRender);
+    if (
+      frameState.sinceLastRender !== null
+      && Number.isFinite(cadence)
+      && (
+        frameState.continuation
+        || cadence <= FRAME_CADENCE_IDLE_GAP_MS
+      )
+    ) {
+      cortexMetrics.frameCadences[frameCadenceCursor] = cadence;
+      frameCadenceCursor = (frameCadenceCursor + 1) % FRAME_DURATION_CAPACITY;
+      frameCadenceCount = Math.min(
+        FRAME_DURATION_CAPACITY,
+        frameCadenceCount + 1,
+      );
+    }
     previousTime = now;
+    let startedAt = performance.now();
+    flushFrameWork();
+    stageMetrics.record("domEventFlush", performance.now() - startedAt);
+    startedAt = performance.now();
     if (simulationAwake) {
       simulationAccumulator = Math.min(
         SIMULATION_STEP_MS * SIMULATION_MAX_STEPS_PER_FRAME,
@@ -3370,7 +3774,10 @@
     } else {
       simulationAccumulator = 0;
     }
-    if (autoRotate && !dragging && now - lastInteraction > 2600) {
+    stageMetrics.record("simulation", performance.now() - startedAt);
+    if (
+      autoRotateWake.ready()
+    ) {
       camera.theta += delta * 0.000045;
     }
     const pivotNode = nodes[camera.pivotNodeIndex];
@@ -3408,29 +3815,64 @@
         cameraTarget = null;
       }
     }
+    startedAt = performance.now();
     if (stateDirty) recomputeState();
     projectAll();
-    draw(now);
-    requestAnimationFrame(frame);
+    for (let index = 0; index < nodeCount; index += 1) {
+      nodeExcitation[index] = excitationLevel(nodes[index], now);
+    }
+    const webglBaseRendered = baseRenderer.render({
+      now,
+      width,
+      height,
+      pixelRatio,
+      nodes,
+      excitations: nodeExcitation,
+      links,
+      nodeState,
+      edgeState,
+      selected,
+      hovered,
+      relationsVisible,
+      activeRelations: activeRelationIds,
+      relationColors: RELATION_STATUS_COLORS,
+      edgeVisibility,
+      baseEdgeColor: RGB_STEEL,
+      selectedEdgeColor: RGB_FIRE,
+      fog,
+    });
+    stageMetrics.record("projectionBase", performance.now() - startedAt);
+    startedAt = performance.now();
+    draw(now, webglBaseRendered);
+    stageMetrics.record("overlayEffects", performance.now() - startedAt);
+    publishCortexMetrics();
+    cortexMetrics.frameDurations[frameDurationCursor] =
+      performance.now() - frameWorkStartedAt;
+    frameDurationCursor = (frameDurationCursor + 1) % FRAME_DURATION_CAPACITY;
+    frameDurationCount = Math.min(
+      FRAME_DURATION_CAPACITY,
+      frameDurationCount + 1,
+    );
   }
 
   function pick(x, y) {
-    let best = -1;
-    let bestDistance = 1e9;
-    nodes.forEach((node) => {
-      if (nodeState[node.index] === 0 || node.viewDepth > 9e8) return;
-      const distance =
-        Math.hypot(node.screenX - x, node.screenY - y)
-        - Math.max(5, node.radius * node.screenScale);
-      if (distance < 4 && distance < bestDistance) {
-        bestDistance = distance;
-        best = node.index;
-      }
-    });
-    return best;
+    return spatialIndex.pick(
+      x,
+      y,
+      nodes,
+      (node, pointerX, pointerY) =>
+        Math.hypot(node.screenX - pointerX, node.screenY - pointerY)
+        - Math.max(5, node.radius * node.screenScale),
+    );
   }
 
   function select(index, setPivot = false) {
+    relationDetailRequest += 1;
+    if (relationDetailAbort) relationDetailAbort.abort();
+    relationDetailAbort = null;
+    relationDetailError = "";
+    relationDetailErrorNode = -1;
+    relationDetailLoadingNode = -1;
     selected = index;
     stateDirty = true;
     renderPanel();
@@ -3440,52 +3882,74 @@
       if (setPivot) setNodeAsCameraPivot(index);
       else focusNode(index);
     }
+    invalidate("selection");
+  }
+
+  function processPointerMove(pointer) {
+    const tooltip = document.getElementById("tooltip");
+    const { x, y } = pointer;
+    if (downPoint && Math.hypot(x - downPoint.x, y - downPoint.y) > 4) {
+      moved = true;
+    }
+    if (downPoint && moved) {
+      camera.theta += pointer.movementX * 0.0045;
+      camera.phi = Math.max(
+        -1.35,
+        Math.min(1.35, camera.phi - pointer.movementY * 0.0045),
+      );
+      cameraTarget = null;
+      lastInteraction = performance.now();
+      return;
+    }
+    const index = pick(x, y);
+    if (index !== hovered) {
+      hovered = index;
+      stateDirty = true;
+    }
+    if (index >= 0) {
+      const node = nodes[index];
+      tooltip.style.display = "block";
+      tooltip.style.left = `${Math.min(width - 240, x + 16)}px`;
+      tooltip.style.top = `${Math.max(8, y - 14)}px`;
+      tooltip.innerHTML = `<div class="t">${escapeHtml(node.id)}</div>
+        <div class="s">${node.lineCount.toLocaleString()} lines · in ${node.fanIn} / out ${node.fanOut}${node.entrypoint ? " · entrypoint" : ""}</div>`;
+      canvas.style.cursor = "pointer";
+    } else {
+      tooltip.style.display = "none";
+      canvas.style.cursor = "grab";
+    }
   }
 
   function bindCanvasInteractions() {
-    const tooltip = document.getElementById("tooltip");
     canvas.addEventListener("pointerdown", (event) => {
       canvas.setPointerCapture(event.pointerId);
       downPoint = { x: event.offsetX, y: event.offsetY };
       moved = false;
       dragging = true;
       lastInteraction = performance.now();
+      invalidate("pointer-down");
     });
     canvas.addEventListener("pointermove", (event) => {
-      const x = event.offsetX;
-      const y = event.offsetY;
-      if (downPoint && Math.hypot(x - downPoint.x, y - downPoint.y) > 4) {
-        moved = true;
-      }
-      if (downPoint && moved) {
-        camera.theta += event.movementX * 0.0045;
-        camera.phi = Math.max(
-          -1.35,
-          Math.min(1.35, camera.phi - event.movementY * 0.0045),
-        );
-        cameraTarget = null;
-        lastInteraction = performance.now();
-        return;
-      }
-      const index = pick(x, y);
-      if (index !== hovered) {
-        hovered = index;
-        stateDirty = true;
-      }
-      if (index >= 0) {
-        const node = nodes[index];
-        tooltip.style.display = "block";
-        tooltip.style.left = `${Math.min(width - 240, x + 16)}px`;
-        tooltip.style.top = `${Math.max(8, y - 14)}px`;
-        tooltip.innerHTML = `<div class="t">${escapeHtml(node.id)}</div>
-          <div class="s">${node.lineCount.toLocaleString()} lines · in ${node.fanIn} / out ${node.fanOut}${node.entrypoint ? " · entrypoint" : ""}</div>`;
-        canvas.style.cursor = "pointer";
+      if (pendingPointer && downPoint) {
+        pendingPointer.x = event.offsetX;
+        pendingPointer.y = event.offsetY;
+        pendingPointer.movementX += event.movementX;
+        pendingPointer.movementY += event.movementY;
       } else {
-        tooltip.style.display = "none";
-        canvas.style.cursor = "grab";
+        pendingPointer = {
+          x: event.offsetX,
+          y: event.offsetY,
+          movementX: event.movementX,
+          movementY: event.movementY,
+        };
       }
+      invalidate("pointer-move");
     });
     canvas.addEventListener("pointerup", (event) => {
+      if (pendingPointer) {
+        processPointerMove(pendingPointer);
+        pendingPointer = null;
+      }
       if (!moved) {
         const index = pick(event.offsetX, event.offsetY);
         select(index, index >= 0);
@@ -3493,6 +3957,7 @@
       downPoint = null;
       dragging = false;
       lastInteraction = performance.now();
+      invalidate("pointer-up");
     });
     canvas.addEventListener("dblclick", (event) => {
       const index = pick(event.offsetX, event.offsetY);
@@ -3513,18 +3978,65 @@
           Math.min(4200, camera.distance * Math.exp(event.deltaY * 0.0011)),
         );
         cameraTarget = null;
+        invalidate("wheel");
       },
       { passive: false },
     );
   }
 
   const packageStats = {};
+  const packageNodeCache = new Map();
+  const packageTreeElements = new Map();
+
+  function materializePackage(packageName, throughIndex = -1) {
+    const list = packageTreeElements.get(packageName)?.list;
+    const packageNodes = packageNodeCache.get(packageName) || [];
+    if (!list) return;
+    let rendered = Number(list.dataset.rendered || 0);
+    const targetPosition = throughIndex >= 0
+      ? packageNodes.findIndex((node) => node.index === throughIndex) + 1
+      : 0;
+    const target = Math.min(
+      packageNodes.length,
+      Math.max(rendered + EXPLORER_CHUNK_SIZE, targetPosition),
+    );
+    list.querySelector(".modMore")?.remove();
+    const fragment = document.createDocumentFragment();
+    for (; rendered < target; rendered += 1) {
+      const node = packageNodes[rendered];
+      const moduleRow = document.createElement("div");
+      moduleRow.className = "modRow";
+      moduleRow.dataset.index = String(node.index);
+      moduleRow.innerHTML = `<span title="${escapeHtml(node.title)}">${escapeHtml(node.name)}</span>
+        ${node.entrypoint ? '<span class="ep">▸ep</span>' : ""}
+        <span class="l">${node.lineCount}</span>`;
+      fragment.appendChild(moduleRow);
+    }
+    list.dataset.rendered = String(rendered);
+    if (rendered < packageNodes.length) {
+      const more = document.createElement("button");
+      more.className = "modMore";
+      more.type = "button";
+      more.dataset.package = packageName;
+      more.textContent = `load ${Math.min(EXPLORER_CHUNK_SIZE, packageNodes.length - rendered)} more…`;
+      fragment.appendChild(more);
+    }
+    list.appendChild(fragment);
+  }
+
   function buildTree() {
     const tree = document.getElementById("tree");
+    packageNodeCache.clear();
+    packageTreeElements.clear();
+    nodes.forEach((node) => {
+      if (!packageNodeCache.has(node.packageName)) {
+        packageNodeCache.set(node.packageName, []);
+      }
+      packageNodeCache.get(node.packageName).push(node);
+    });
     packageList.forEach((packageName) => {
-      const packageNodes = nodes.filter(
-        (node) => node.packageName === packageName,
-      );
+      const packageNodes = packageNodeCache.get(packageName) || [];
+      packageNodes.sort((left, right) => right.fanIn - left.fanIn);
       packageStats[packageName] = {
         count: packageNodes.length,
         lines: packageNodes.reduce((total, node) => total + node.lineCount, 0),
@@ -3534,6 +4046,7 @@
     packageList.forEach((packageName) => {
       const row = document.createElement("div");
       row.className = "pkgRow";
+      row.dataset.package = packageName;
       const dotColor = rgba(
         shade(RGB_STEEL, packageShade[packageName] || 1),
         1,
@@ -3544,40 +4057,49 @@
         <span class="ar">▶</span>`;
       const list = document.createElement("div");
       list.className = "modList";
-      packageNodesByFanIn(packageName).forEach((node) => {
-        const moduleRow = document.createElement("div");
-        moduleRow.className = "modRow";
-        moduleRow.dataset.index = String(node.index);
-        moduleRow.innerHTML = `<span title="${escapeHtml(node.title)}">${escapeHtml(node.name)}</span>
-          ${node.entrypoint ? '<span class="ep">▸ep</span>' : ""}
-          <span class="l">${node.lineCount}</span>`;
-        moduleRow.addEventListener("click", () => select(node.index));
-        moduleRow.addEventListener("dblclick", () => {
-          select(node.index);
-          flashTicker(`preview · ${node.id}`);
-        });
-        list.appendChild(moduleRow);
-      });
-      row.addEventListener("click", (event) => {
-        if (event.target.classList.contains("dot")) {
-          if (packageOff.has(packageName)) packageOff.delete(packageName);
-          else packageOff.add(packageName);
-          row.classList.toggle("off", packageOff.has(packageName));
-          stateDirty = true;
-          return;
-        }
-        row.classList.toggle("open");
-        list.classList.toggle("open");
-      });
+      list.dataset.package = packageName;
+      list.dataset.rendered = "0";
+      packageTreeElements.set(packageName, { row, list });
       tree.appendChild(row);
       tree.appendChild(list);
     });
-  }
-
-  function packageNodesByFanIn(packageName) {
-    return nodes
-      .filter((node) => node.packageName === packageName)
-      .sort((left, right) => right.fanIn - left.fanIn);
+    tree.addEventListener("click", (event) => {
+      const moduleRow = event.target.closest(".modRow[data-index]");
+      if (moduleRow) {
+        select(Number(moduleRow.dataset.index));
+        return;
+      }
+      const more = event.target.closest(".modMore[data-package]");
+      if (more) {
+        materializePackage(more.dataset.package);
+        return;
+      }
+      const packageRow = event.target.closest(".pkgRow[data-package]");
+      if (!packageRow) return;
+      const packageName = packageRow.dataset.package;
+      const list = packageTreeElements.get(packageName)?.list;
+      if (!list) return;
+      if (event.target.classList.contains("dot")) {
+        if (packageOff.has(packageName)) packageOff.delete(packageName);
+        else packageOff.add(packageName);
+        packageRow.classList.toggle("off", packageOff.has(packageName));
+        stateDirty = true;
+        invalidate("package-visibility");
+        return;
+      }
+      packageRow.classList.toggle("open");
+      list.classList.toggle("open");
+      if (list.classList.contains("open") && !Number(list.dataset.rendered)) {
+        materializePackage(packageName);
+      }
+    });
+    tree.addEventListener("dblclick", (event) => {
+      const moduleRow = event.target.closest(".modRow[data-index]");
+      if (!moduleRow) return;
+      const index = Number(moduleRow.dataset.index);
+      select(index);
+      flashTicker(`preview · ${nodes[index].id}`);
+    });
   }
 
   function renderTreeSelection() {
@@ -3586,9 +4108,16 @@
       .querySelectorAll(".modRow.sel")
       .forEach((element) => element.classList.remove("sel"));
     if (selected < 0) return;
-    const element = tree.querySelector(
+    let element = tree.querySelector(
       `.modRow[data-index="${selected}"]`,
     );
+    if (!element) {
+      const node = nodes[selected];
+      if (node) {
+        materializePackage(node.packageName, selected);
+        element = tree.querySelector(`.modRow[data-index="${selected}"]`);
+      }
+    }
     if (!element) return;
     const list = element.parentElement;
     if (list && !list.classList.contains("open")) {
@@ -3631,6 +4160,7 @@
           <span>${escapeHtml(fieldState.mode)} · ${escapeHtml(fieldState.source)}</span>
         </div>
         <div class="fieldSession">${escapeHtml(fieldState.sessionHash || "no session")}</div>
+        ${fieldTerminalReason ? '<button class="fieldRetry" type="button" data-retry-field>retry field connection</button>' : ""}
         <div class="fieldMetrics">
           <div><span>active</span><b>${summary.active || 0}</b></div>
           <div><span>candidate</span><b>${summary.candidate || 0}</b></div>
@@ -3747,9 +4277,10 @@
     }
     return `<div class="sec"><h3>TYPED RELATIONS · ${relations.length}</h3>
       <div class="relationCards">${relations.slice(0, 24).map((relation) => {
-        const consensus = relation.consensus || {};
+        const detail = relationDetailsByKey.get(relationDetailKey(relation));
+        const consensus = detail?.consensus || {};
         const votes = Array.isArray(consensus.votes) ? consensus.votes : [];
-        const evidence = Array.isArray(relation.evidence_refs) ? relation.evidence_refs : [];
+        const evidence = Array.isArray(detail?.evidence_refs) ? detail.evidence_refs : [];
         return `<details class="relationCard" ${activeRelationIds.has(relation.relation_id) ? "open" : ""}>
           <summary><span class="relationLife ${escapeHtml(relation.status)}">${escapeHtml(relation.status)}</span><b>${escapeHtml(relation.predicate)}</b><small>${escapeHtml(relation.direction)}</small></summary>
           <div class="relationId">${escapeHtml(relation.relation_id)}</div>
@@ -3757,12 +4288,73 @@
           <div class="mrow"><span>producer</span><b>${escapeHtml(relation.producer_role)}</b></div>
           <div class="mrow"><span>used</span><b>${Number(relation.used_count || 0)} · ${Number(relation.used_sessions || 0)} sessions</b></div>
           <div class="mrow"><span>reason</span><b>${escapeHtml(relation.reason_code || consensus.hold_reason || "—")}</b></div>
-          <div class="mrow"><span>quorum</span><b>${Number(consensus.quorum || 0)} · ${escapeHtml(consensus.outcome || "pending")}</b></div>
-          <div class="relationVotes">${votes.length ? votes.map((vote) => `<span class="${escapeHtml(vote.decision)}">${escapeHtml(vote.role)} · ${escapeHtml(vote.decision)} ${(Number(vote.confidence || 0) * 100).toFixed(0)}%</span>`).join("") : '<span>no votes</span>'}</div>
-          <div class="relationEvidence">${evidence.map((ref) => `<span title="${escapeHtml(ref.content_sha256)} / ${escapeHtml(ref.span_sha256)}">${escapeHtml(ref.page_id)}:${Number(ref.source_line || 0)} · ${escapeHtml(String(ref.span_sha256 || "").slice(0, 10))}</span>`).join("")}</div>
+          ${detail
+            ? `<div class="mrow"><span>quorum</span><b>${Number(consensus.quorum || 0)} · ${escapeHtml(consensus.outcome || "pending")}</b></div>
+              <div class="relationVotes">${votes.length ? votes.map((vote) => `<span class="${escapeHtml(vote.decision)}">${escapeHtml(vote.role)} · ${escapeHtml(vote.decision)} ${(Number(vote.confidence || 0) * 100).toFixed(0)}%</span>`).join("") : '<span>no votes</span>'}</div>
+              <div class="relationEvidence">${evidence.map((ref) => `<span title="${escapeHtml(ref.content_sha256)} / ${escapeHtml(ref.span_sha256)}">${escapeHtml(ref.page_id)}:${Number(ref.source_line || 0)} · ${escapeHtml(String(ref.span_sha256 || "").slice(0, 10))}</span>`).join("")}</div>`
+            : `<div class="ghost">${relationDetailError && relationDetailErrorNode === node.index ? `detail unavailable · ${escapeHtml(relationDetailError)} <button type="button" data-retry-relations>retry</button>` : "loading detail…"}</div>`}
         </details>`;
       }).join("")}</div>
     </div>`;
+  }
+
+  function relationDetailKey(relation) {
+    return JSON.stringify([
+      String(relation.relation_id || ""),
+      String(relation.source_page_id || ""),
+      String(relation.target_page_id || ""),
+    ]);
+  }
+
+  async function loadSelectedRelationDetails(node) {
+    if (relationDetailError && relationDetailErrorNode === node.index) return;
+    if (relationDetailLoadingNode === node.index) return;
+    const relations = typedRelations
+      .filter(
+        (relation) => relation.source === node.index || relation.target === node.index,
+      )
+      .slice(0, 24);
+    const missing = relations.filter(
+      (relation) =>
+        relation.detail_available
+        && !relationDetailsByKey.has(relationDetailKey(relation)),
+    );
+    if (!missing.length) return;
+    const request = ++relationDetailRequest;
+    if (relationDetailAbort) relationDetailAbort.abort();
+    relationDetailAbort = new AbortController();
+    relationDetailLoadingNode = node.index;
+    relationDetailError = "";
+    const keys = missing.map((relation) => [
+      relation.relation_id,
+      relation.source_page_id,
+      relation.target_page_id,
+    ]);
+    try {
+      const response = await fetch(
+        `/api/cortex/relations?keys=${encodeURIComponent(JSON.stringify(keys))}`,
+        {
+          headers: { Accept: "application/json" },
+          cache: "no-store",
+          signal: relationDetailAbort.signal,
+        },
+      );
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const payload = await response.json();
+      if (request !== relationDetailRequest || selected !== node.index) return;
+      (Array.isArray(payload.relations) ? payload.relations : []).forEach(
+        (relation) => relationDetailsByKey.set(relationDetailKey(relation), relation),
+      );
+      renderPanel();
+    } catch (error) {
+      if (error.name === "AbortError") return;
+      if (request !== relationDetailRequest || selected !== node.index) return;
+      relationDetailError = error.message || String(error);
+      relationDetailErrorNode = node.index;
+      renderPanel();
+    } finally {
+      if (request === relationDetailRequest) relationDetailLoadingNode = -1;
+    }
   }
 
   function selectedFieldHtml(node) {
@@ -3909,7 +4501,9 @@
       panel.innerHTML = overviewHtml();
       drawGauge();
     } else {
-      panel.innerHTML = selectedHtml(nodes[selected]);
+      const node = nodes[selected];
+      panel.innerHTML = selectedHtml(node);
+      loadSelectedRelationDetails(node);
     }
   }
 
@@ -3920,7 +4514,7 @@
     const staticLinks = data.meta.static || 0;
     const deferredLinks = data.meta.deferred || 0;
     const target = staticLinks / Math.max(1, staticLinks + deferredLinks);
-    let animation = 0;
+    let animation = 1;
     function step() {
       if (!document.getElementById("gauge")) return;
       animation = Math.min(1, animation + 0.03);
@@ -3975,7 +4569,6 @@
       gaugeContext.fillStyle = "rgba(127,144,176,.9)";
       gaugeContext.font = `7.5px ${mono}`;
       gaugeContext.fillText("STATIC BIND", centerX, centerY + 16);
-      if (animation < 1) requestAnimationFrame(step);
     }
     step();
   }
@@ -3990,6 +4583,17 @@
   function bindInterface() {
     const panel = document.getElementById("panelBody");
     panel.addEventListener("click", (event) => {
+      if (event.target.closest("[data-retry-field]")) {
+        loadField(fieldState.sessionHash);
+        return;
+      }
+      if (event.target.closest("[data-retry-relations]")) {
+        relationDetailError = "";
+        relationDetailErrorNode = -1;
+        relationDetailLoadingNode = -1;
+        if (selected >= 0) loadSelectedRelationDetails(nodes[selected]);
+        return;
+      }
       if (event.target.id === "closeSel") {
         select(-1);
         return;
@@ -4024,6 +4628,7 @@
       }
       searchHits.textContent = query ? `${matches.size} hits` : "";
       stateDirty = true;
+      invalidate("search");
     });
     search.addEventListener("keydown", (event) => {
       if (event.key === "Enter" && matches.size) {
@@ -4039,6 +4644,7 @@
         searchHits.textContent = "";
         stateDirty = true;
         search.blur();
+        invalidate("search-clear");
       }
     });
     window.addEventListener("keydown", (event) => {
@@ -4073,6 +4679,7 @@
           ? "LIVE PAINT resumed · Field state stayed current"
           : "LIVE PAINT paused · Field state still updating",
       );
+      invalidate("live-toggle");
     });
     const relationToggle = document.getElementById("tRelations");
     relationToggle.addEventListener("click", () => {
@@ -4082,12 +4689,14 @@
       stateDirty = true;
       saveViewPreferences();
       flashTicker(relationsVisible ? "typed relation layer enabled" : "typed relation layer hidden");
+      invalidate("relations-toggle");
     });
     document.getElementById("relationLifecycle").addEventListener("change", (event) => {
       relationLifecycle = event.target.value;
       stateDirty = true;
       saveViewPreferences();
       flashTicker(`relation lifecycle · ${relationLifecycle}`);
+      invalidate("relation-filter");
     });
     const motionToggle = document.getElementById("tMotion");
     motionToggle.addEventListener("click", () => {
@@ -4100,6 +4709,7 @@
           ? "motion enabled"
           : "motion paused · static edge arrows remain",
       );
+      invalidate("motion-toggle");
     });
     const rotateToggle = document.getElementById("tRot");
     rotateToggle.addEventListener("click", () => {
@@ -4107,6 +4717,7 @@
       rotateToggle.classList.toggle("on", autoRotate);
       rotateToggle.setAttribute("aria-pressed", String(autoRotate));
       saveViewPreferences();
+      invalidate("rotate-toggle");
     });
     const soundToggle = document.getElementById("tSnd");
     soundToggle.addEventListener("click", () => {
@@ -4114,6 +4725,7 @@
       soundToggle.classList.toggle("on", soundOn);
       soundToggle.setAttribute("aria-pressed", String(soundOn));
       saveViewPreferences();
+      invalidate("sound-toggle");
       unlockSound();
     });
     document.getElementById("visSlider").addEventListener("input", (event) => {
@@ -4124,6 +4736,7 @@
           SYNAPSE_VISIBILITY_MAX,
         ) / 100;
       saveViewPreferences();
+      invalidate("edge-visibility");
     });
     document
       .getElementById("tReset")
@@ -4139,10 +4752,12 @@
     document.getElementById("zIn").addEventListener("click", () => {
       camera.distance = Math.max(240, camera.distance / 1.4);
       cameraTarget = null;
+      invalidate("zoom-in");
     });
     document.getElementById("zOut").addEventListener("click", () => {
       camera.distance = Math.min(4200, camera.distance * 1.4);
       cameraTarget = null;
+      invalidate("zoom-out");
     });
     document.getElementById("zFit").addEventListener("click", () => {
       select(-1);
@@ -4175,6 +4790,7 @@
           ? "reduced motion · static electric arrows"
           : "electric arc motion restored",
       );
+      invalidate("reduced-motion");
     });
   }
 
@@ -4383,6 +4999,10 @@
   }
 
   async function loadField(sessionHash = "", replayEvents = []) {
+    fieldTerminalReason = "";
+    terminalFieldControlGate.clear();
+    reconnectSuppressedGeneration = -1;
+    window.clearTimeout(eventReconnect);
     const request = ++sessionRequest;
     const queryString = sessionHash
       ? `?session=${encodeURIComponent(sessionHash)}`
@@ -4399,14 +5019,17 @@
       syncFieldNodes();
       updateSessionControl();
       setEventStatus(fieldState.status === "online");
-      renderPanel();
+      panelRenderPending = true;
       stateDirty = true;
       if (liveEventsEnabled && replayEvents.length) {
-        replayEvents
-          .filter((event) => event.session_hash === fieldState.sessionHash)
-          .forEach(visualizeFieldEvent);
+        pendingFieldVisuals.push(
+          replayEvents.filter(
+            (event) => event.session_hash === fieldState.sessionHash,
+          ),
+        );
       }
       connectEvents(fieldState.sessionHash);
+      invalidate("field-projection");
     } catch (error) {
       fieldState.status = "fault";
       fieldState.fault = error.message || String(error);
@@ -4416,15 +5039,82 @@
     }
   }
 
+  function handleTerminalFieldControl(payload, generation) {
+    if (payload.reason !== "field_snapshot_corrupt") return false;
+    if (!terminalFieldControlGate.accept(generation, payload.reason)) return true;
+    reconnectSuppressedGeneration = generation;
+    fieldTerminalReason = "field snapshot corrupt";
+    fieldState.status = "fault";
+    fieldState.fault = fieldTerminalReason;
+    fieldState.stale = true;
+    fieldResyncPending = false;
+    incomingFieldEvents.clear();
+    pendingFieldVisuals.clear();
+    window.clearTimeout(eventReconnect);
+    window.CortexField.setConnection(fieldState, "offline");
+    setEventStatus(false);
+    panelRenderPending = true;
+    stateDirty = true;
+    if (eventSocket) eventSocket.close();
+    invalidate("field-terminal-fault");
+    return true;
+  }
+
+  function processQueuedEvents() {
+    const fieldEvents = incomingFieldEvents.drain(EVENT_DRAIN_PER_FRAME);
+    const transportEvents = incomingTransportEvents.drain(
+      EVENT_DRAIN_PER_FRAME - fieldEvents.length,
+    );
+    if (transportEvents.length) {
+      let latestTelemetry = null;
+      transportEvents.forEach((event) => {
+        if (TransportPolicy.isTransportKind(event.kind)) {
+          if (liveEventsEnabled) pendingTransportVisuals.push([event]);
+        } else {
+          latestTelemetry = event;
+        }
+      });
+      if (latestTelemetry) {
+        flashTicker(
+          `TELEMETRY · ${latestTelemetry.label || latestTelemetry.kind || "activity"} · no synthetic firing`,
+        );
+      }
+    }
+    if (fieldEvents.length && fieldState.sessionHash) {
+      const accepted = window.CortexField.applyEvents(fieldState, fieldEvents);
+      if (fieldState.seqGap) {
+        setEventStatus(false);
+        fieldResyncPending = true;
+      } else if (accepted.length) {
+        syncFieldNodes();
+        if (liveEventsEnabled) pendingFieldVisuals.push(accepted);
+        fieldState.status = "online";
+        fieldState.stale = false;
+        setEventStatus(true);
+        panelRenderPending = true;
+        stateDirty = true;
+      }
+    }
+    let visualBudget = VISUAL_DRAIN_PER_FRAME;
+    const fieldVisuals = pendingFieldVisuals.drain(visualBudget);
+    fieldVisuals.forEach(visualizeFieldEvent);
+    visualBudget -= fieldVisuals.length;
+    if (visualBudget > 0) {
+      pendingTransportVisuals
+        .drain(visualBudget)
+        .forEach(visualizeTransportEvent);
+    }
+  }
+
   function connectEvents(sessionHash = fieldState.sessionHash) {
     const generation = ++eventSocketGeneration;
     if (eventSocket) eventSocket.close();
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-    const queryString = followLatestSession
-      ? "?follow=latest"
-      : sessionHash
-        ? `?session=${encodeURIComponent(sessionHash)}`
-        : "";
+    const params = new URLSearchParams();
+    if (followLatestSession) params.set("follow", "latest");
+    if (sessionHash) params.set("session", sessionHash);
+    params.set("after_seq", String(Math.max(0, Number(fieldState.seq || 0))));
+    const queryString = `?${params.toString()}`;
     eventSocket = new WebSocket(
       `${protocol}//${window.location.host}/api/cortex/events${queryString}`,
     );
@@ -4441,70 +5131,33 @@
       } catch (_error) {
         return;
       }
+      if (payload.type === "resync") {
+        if (handleTerminalFieldControl(payload, generation)) return;
+        fieldResyncPending = true;
+        invalidate("field-resync");
+        return;
+      }
+      if (payload.type === "session_changed" && payload.session_hash) {
+        loadField(String(payload.session_hash));
+        return;
+      }
       if (payload.type !== "events" || !Array.isArray(payload.events)) return;
       const normalizedEvents = payload.events
         .map(TransportPolicy.normalizeEvent)
         .filter(Boolean);
-      const telemetryEvents = normalizedEvents.filter(
-        (event) => event.family !== "field",
+      incomingFieldEvents.push(
+        normalizedEvents.filter((event) => event.family === "field"),
       );
-      const transportEvents = telemetryEvents.filter(
-        (event) => TransportPolicy.isTransportKind(event.kind),
+      incomingTransportEvents.push(
+        normalizedEvents.filter((event) => event.family !== "field"),
       );
-      const fieldEvents = normalizedEvents.filter(
-        (event) => event.family === "field",
-      );
-      if (liveEventsEnabled) transportEvents.forEach(visualizeTransportEvent);
-      const latestFallback = telemetryEvents
-        .filter((event) => !TransportPolicy.isTransportKind(event.kind))
-        .at(-1);
-      if (latestFallback) {
-        flashTicker(
-          `TELEMETRY · ${latestFallback.label || latestFallback.kind || "activity"} · no synthetic firing`,
-        );
-      }
-      const latestEvent = fieldEvents.at(-1);
-      if (
-        followLatestSession
-        && latestEvent?.session_hash
-        && latestEvent.session_hash !== fieldState.sessionHash
-      ) {
-        const targetSession = latestEvent.session_hash;
-        const replayEvents = fieldEvents.filter(
-          (event) => event.session_hash === targetSession,
-        );
-        loadField(targetSession, replayEvents);
-        return;
-      }
-      if (!fieldEvents.length) return;
-      if (!fieldState.sessionHash) {
-        const event = latestEvent;
-        flashTicker(
-          `TELEMETRY FALLBACK · ${event?.label || event?.kind || "activity"} · no synthetic firing`,
-        );
-        return;
-      }
-      const accepted = window.CortexField.applyEvents(fieldState, fieldEvents);
-      if (fieldState.seqGap) {
-        setEventStatus(false);
-        renderPanel();
-        window.setTimeout(() => loadField(fieldState.sessionHash), 250);
-        return;
-      }
-      syncFieldNodes();
-      if (liveEventsEnabled) accepted.forEach(visualizeFieldEvent);
-      if (accepted.length) {
-        fieldState.status = "online";
-        fieldState.stale = false;
-        setEventStatus(true);
-        renderPanel();
-        stateDirty = true;
-      }
+      invalidate("socket-events");
     });
     eventSocket.addEventListener("close", () => {
       if (generation !== eventSocketGeneration) return;
       window.CortexField.setConnection(fieldState, "offline");
       setEventStatus(false);
+      if (reconnectSuppressedGeneration === generation) return;
       window.clearTimeout(eventReconnect);
       eventReconnect = window.setTimeout(
         () => connectEvents(fieldState.sessionHash),
@@ -4538,6 +5191,24 @@
         throw new Error("graph API returned an invalid payload");
       }
       initializeGraph(graphData);
+      renderScheduler = Runtime.createRenderScheduler({
+        requestFrame: (callback) => window.requestAnimationFrame(callback),
+        cancelFrame: (handle) => window.cancelAnimationFrame(handle),
+        isHidden: () => document.hidden,
+        onFrame: frame,
+        hasWork: hasRenderWork,
+      });
+      document.addEventListener("visibilitychange", () => {
+        autoRotateWake.sync();
+        renderScheduler.visibilityChanged();
+      });
+      window.addEventListener("beforeunload", () => {
+        autoRotateWake.dispose();
+        renderScheduler.dispose();
+        baseRenderer.dispose();
+        performanceObservers.forEach((observer) => observer.disconnect());
+      }, { once: true });
+      observeLongFrames();
       resize();
       const resizeObserver = new ResizeObserver(resize);
       resizeObserver.observe(stage);
@@ -4549,13 +5220,13 @@
       bindInterface();
       initializeHeader();
       recomputeState();
-      const settleTicks = nodeCount > 1500 ? 70 : 180;
+      const settleTicks = nodeCount > 1500 ? 8 : 32;
       for (let index = 0; index < settleTicks; index += 1) tick();
       fitView();
       camera.distance = cameraTarget.distance;
       cameraTarget = null;
       previousTime = performance.now();
-      requestAnimationFrame(frame);
+      invalidate("boot");
       connectProcessingActivity();
       await loadField();
     } catch (error) {

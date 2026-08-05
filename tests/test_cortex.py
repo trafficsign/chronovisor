@@ -6,6 +6,8 @@ import subprocess
 import threading
 from pathlib import Path
 
+import pytest
+
 from chronovisor.core.durable_state import write_sealed_json
 from chronovisor.knowledge_graph.schema import (
     EvidenceRef,
@@ -145,6 +147,7 @@ def test_cortex_projects_entity_consensus_votes_without_mentions(
     root = tmp_path / "chronovisor"
     _write_page(root / "pages" / "a.md", title="A", body="Alpha")
     _write_page(root / "pages" / "b.md", title="B", body="Beta")
+    _write_page(root / "pages" / "c.md", title="C", body="Gamma")
     store = KnowledgeGraphStore(root / "knowledge-graph")
     store.write_derived_snapshot(
         "entities",
@@ -165,10 +168,32 @@ def test_cortex_projects_entity_consensus_votes_without_mentions(
                     "content_sha256": "c" * 64,
                     "alias_evidence_sha256": "d" * 64,
                 },
+                "three": {
+                    "candidate_id": "three",
+                    "mention": "secret mention three",
+                    "page_id": "c",
+                    "content_sha256": "1" * 64,
+                    "alias_evidence_sha256": "2" * 64,
+                },
+                **{
+                    f"extra-{index}": {
+                        "candidate_id": f"extra-{index}",
+                        "mention": f"secret mention extra {index}",
+                        "page_id": "a" if index % 2 == 0 else "b",
+                        "content_sha256": f"{index + 10:064x}",
+                        "alias_evidence_sha256": f"{index + 100:064x}",
+                    }
+                    for index in range(20)
+                },
             },
             "merge_candidates": {
                 "merge_one": {
-                    "member_candidate_ids": ["one", "two"],
+                    "member_candidate_ids": [
+                        "one",
+                        "two",
+                        "three",
+                        *(f"extra-{index}" for index in range(20)),
+                    ],
                     "status": "verified",
                     "receipt_id": "receipt-one",
                     "consensus": {
@@ -184,10 +209,20 @@ def test_cortex_projects_entity_consensus_votes_without_mentions(
                                 "decision": "approve",
                                 "confidence": 0.91,
                                 "vote_sha256": "f" * 64,
-                            }
+                            },
+                            *(
+                                {
+                                    "role": f"extra-{index}",
+                                    "model_sha256": f"{index + 200:064x}",
+                                    "decision": "approve",
+                                    "confidence": 0.8,
+                                    "vote_sha256": f"{index + 300:064x}",
+                                }
+                                for index in range(20)
+                            ),
                         ],
                     },
-                }
+                },
             },
         },
     )
@@ -200,9 +235,158 @@ def test_cortex_projects_entity_consensus_votes_without_mentions(
     relation = graph["typedGraph"]["relations"][0]
 
     assert relation["relation_id"] == "merge_one"
-    assert relation["consensus"]["votes"][0]["role"] == "primary"
-    assert relation["consensus"]["votes"][0]["decision"] == "approve"
+    assert "consensus" not in relation
+    assert "evidence_refs" not in relation
+    details = cortex.build_cortex_relation_details(
+        root,
+        [
+            (
+                relation["relation_id"],
+                relation["source_page_id"],
+                relation["target_page_id"],
+            )
+        ],
+    )
+    assert details[0]["consensus"]["votes"][0]["role"] == "primary"
+    assert details[0]["consensus"]["votes"][0]["decision"] == "approve"
+    assert len(details[0]["evidence_refs"]) == 2
+    assert len(details[0]["consensus"]["votes"]) == 8
+    shared_relation = next(
+        row
+        for row in graph["typedGraph"]["relations"]
+        if row["source_page_id"] == "b" and row["target_page_id"] == "c"
+    )
+    shared_details = cortex.build_cortex_relation_details(
+        root,
+        [(shared_relation["relation_id"], "b", "c")],
+    )
+    assert shared_details[0]["source_page_id"] == "b"
+    assert shared_details[0]["target_page_id"] == "c"
     assert "secret mention" not in json.dumps(graph, ensure_ascii=False)
+    assert "secret mention" not in json.dumps(details, ensure_ascii=False)
+
+
+def test_cortex_entity_projection_only_emits_detail_resolvable_member_pairs(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "chronovisor"
+    for page_id in ("a", "b", "c"):
+        _write_page(
+            root / "pages" / f"{page_id}.md",
+            title=page_id.upper(),
+            body=page_id,
+        )
+    member_ids = ["candidate-a", "candidate-b"] + [
+        f"candidate-extra-{index}" for index in range(254)
+    ] + ["candidate-c"]
+    candidates = {
+        "candidate-a": {
+            "page_id": "a",
+            "content_sha256": "a" * 64,
+            "alias_evidence_sha256": "1" * 64,
+        },
+        "candidate-b": {
+            "page_id": "b",
+            "content_sha256": "b" * 64,
+            "alias_evidence_sha256": "2" * 64,
+        },
+        "candidate-c": {
+            "page_id": "c",
+            "content_sha256": "c" * 64,
+            "alias_evidence_sha256": "3" * 64,
+        },
+        **{
+            f"candidate-extra-{index}": {
+                "page_id": "a",
+                "content_sha256": f"{index + 10:064x}",
+                "alias_evidence_sha256": f"{index + 300:064x}",
+            }
+            for index in range(254)
+        },
+    }
+    store = KnowledgeGraphStore(root / "knowledge-graph")
+    store.write_derived_snapshot(
+        "entities",
+        {
+            "schema_version": 1,
+            "candidates": candidates,
+            "merge_candidates": {
+                "merge-bounded": {
+                    "member_candidate_ids": member_ids,
+                    "status": "verified",
+                    "consensus": {"outcome": "verified", "votes": []},
+                }
+            },
+        },
+    )
+
+    graph = cortex.build_cortex_graph(root, use_cache=False)
+    relations = [
+        row
+        for row in graph["typedGraph"]["relations"]
+        if row["relation_id"] == "merge-bounded"
+    ]
+
+    assert [
+        (row["source_page_id"], row["target_page_id"])
+        for row in relations
+    ] == [("a", "b")]
+    details = cortex.build_cortex_relation_details(
+        root,
+        [
+            (
+                row["relation_id"],
+                row["source_page_id"],
+                row["target_page_id"],
+            )
+            for row in relations
+        ],
+    )
+    assert [(row["source_page_id"], row["target_page_id"]) for row in details] == [
+        ("a", "b")
+    ]
+
+
+def test_cortex_entity_projection_caps_pairs_within_one_large_merge(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "chronovisor"
+    page_ids = [f"page-{index:03}" for index in range(256)]
+    for page_id in page_ids:
+        _write_page(
+            root / "pages" / f"{page_id}.md",
+            title=page_id,
+            body=page_id,
+        )
+    candidate_ids = [f"candidate-{index:03}" for index in range(256)]
+    KnowledgeGraphStore(root / "knowledge-graph").write_derived_snapshot(
+        "entities",
+        {
+            "schema_version": 1,
+            "candidates": {
+                candidate_id: {
+                    "page_id": page_id,
+                    "content_sha256": f"{index:064x}",
+                    "alias_evidence_sha256": f"{index + 256:064x}",
+                }
+                for index, (candidate_id, page_id) in enumerate(
+                    zip(candidate_ids, page_ids, strict=True)
+                )
+            },
+            "merge_candidates": {
+                "merge-256": {
+                    "member_candidate_ids": candidate_ids,
+                    "status": "verified",
+                }
+            },
+        },
+    )
+
+    graph = cortex.build_cortex_graph(root, use_cache=False)
+    relations = graph["typedGraph"]["relations"]
+
+    assert len(relations) == 2_000
+    assert {row["relation_id"] for row in relations} == {"merge-256"}
 
 
 def test_cortex_projects_typed_relations_with_nested_page_ids(tmp_path: Path) -> None:
@@ -243,6 +427,170 @@ def test_cortex_projects_typed_relations_with_nested_page_ids(tmp_path: Path) ->
     assert graph["nodes"][relation["source"]]["id"] == "a"
     assert graph["nodes"][relation["target"]]["id"] == "b"
     assert relation["source_page_id"] == "topic/a"
+
+
+def test_cortex_relation_detail_lookup_is_bounded_and_sorted(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    evidence = tuple(
+        EvidenceRef(
+            page_id="a",
+            content_sha256=f"{index:064x}",
+            span_sha256=f"{index + 100:064x}",
+            source_line=index + 1,
+        )
+        for index in range(20)
+    )
+    relations = []
+    for index in range(30):
+        predicate = f"bounded_{index:02}"
+        relations.append(
+            RelationRecord(
+                relation_id=relation_id(
+                    source_page_id="a",
+                    target_page_id="b",
+                    predicate=predicate,
+                    evidence_sha256=sha256([row.__dict__ for row in evidence]),
+                    model_sha256="c" * 64,
+                    rubric_sha256="d" * 64,
+                ),
+                source_page_id="a",
+                target_page_id="b",
+                predicate=predicate,
+                direction="forward",
+                status="verified",
+                evidence=evidence,
+                model_sha256="c" * 64,
+                rubric_sha256="d" * 64,
+                producer_role="local_consensus",
+                confidence=0.9,
+            )
+        )
+    snapshot_relations = {
+        relation.relation_id: json.loads(json.dumps(relation.to_dict()))
+        for relation in relations
+    }
+    snapshot_relations[relations[-1].relation_id]["evidence"][12] = {
+        "invalid_beyond_browser_limit": True
+    }
+    # Invalid unrequested rows prove the detail path does not instantiate the
+    # full relation snapshot before filtering stable requested IDs.
+    snapshot_relations.update(
+        {f"unrequested-{index}": {"invalid": True} for index in range(2_111)}
+    )
+    monkeypatch.setattr(
+        KnowledgeGraphStore,
+        "load_snapshot",
+        lambda _store: {"relations": snapshot_relations},
+    )
+    keys = [
+        (relation.relation_id, relation.source_page_id, relation.target_page_id)
+        for relation in reversed(relations)
+    ]
+
+    details = cortex.build_cortex_relation_details(tmp_path, keys)
+
+    assert len(details) == 24
+    assert [row["relation_id"] for row in details] == sorted(
+        relation.relation_id for relation in relations[6:]
+    )
+    assert all(len(row["evidence_refs"]) == 12 for row in details)
+    assert len(json.dumps(details, separators=(",", ":"))) < 120_000
+
+
+def test_cortex_entity_relation_detail_bounds_member_work_and_strings(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    class CountingCandidates(dict[str, dict[str, object]]):
+        def __init__(self) -> None:
+            super().__init__(
+                {
+                    "candidate-source": {
+                        "page_id": "source",
+                        "content_sha256": "c" * 10_000,
+                        "alias_evidence_sha256": "a" * 10_000,
+                    },
+                    "candidate-target": {
+                        "page_id": "target",
+                        "content_sha256": "d" * 10_000,
+                        "alias_evidence_sha256": "b" * 10_000,
+                    },
+                }
+            )
+            self.lookups = 0
+
+        def get(self, key: str, default=None):  # type: ignore[no-untyped-def]
+            self.lookups += 1
+            return super().get(key, default)
+
+    candidates = CountingCandidates()
+    long_value = "x" * 10_000
+    votes = [
+        {
+            "role": long_value,
+            "model_sha256": long_value,
+            "decision": long_value,
+            "confidence": 4.2,
+            "vote_sha256": long_value,
+        }
+        for _index in range(20)
+    ]
+    entity_payload = {
+        "candidates": candidates,
+        "merge_candidates": {
+            "merge-long": {
+                "member_candidate_ids": [
+                    "candidate-source",
+                    "candidate-target",
+                    *(f"unrequested-{index}" for index in range(10_000)),
+                ],
+                "status": long_value,
+                "receipt_id": long_value,
+                "reason_code": long_value,
+                "consensus": {
+                    "receipt_id": long_value,
+                    "producer_role": long_value,
+                    "quorum": -3,
+                    "outcome": long_value,
+                    "hold_reason": long_value,
+                    "votes": votes,
+                },
+            }
+        },
+    }
+    monkeypatch.setattr(
+        KnowledgeGraphStore,
+        "load_snapshot",
+        lambda _store: {"relations": {}},
+    )
+    monkeypatch.setattr(cortex, "_safe_sealed", lambda _path: entity_payload)
+
+    details = cortex.build_cortex_relation_details(
+        tmp_path,
+        [("merge-long", "source", "target")],
+    )
+
+    assert candidates.lookups == 2
+    assert len(details) == 1
+    detail = details[0]
+    assert len(detail["evidence_refs"]) == 2
+    assert all(len(row["page_id"]) <= 240 for row in detail["evidence_refs"])
+    assert all(len(row["content_sha256"]) == 64 for row in detail["evidence_refs"])
+    assert all(len(row["span_sha256"]) == 64 for row in detail["evidence_refs"])
+    consensus = detail["consensus"]
+    assert len(consensus["receipt_id"]) == 256
+    assert len(consensus["producer_role"]) == 64
+    assert consensus["quorum"] == 0
+    assert len(consensus["outcome"]) == 32
+    assert len(consensus["hold_reason"]) == 160
+    assert len(consensus["votes"]) == 8
+    assert all(len(vote["role"]) == 64 for vote in consensus["votes"])
+    assert all(len(vote["model_sha256"]) == 64 for vote in consensus["votes"])
+    assert all(len(vote["decision"]) == 32 for vote in consensus["votes"])
+    assert all(vote["confidence"] == 1.0 for vote in consensus["votes"])
+    assert all(len(vote["vote_sha256"]) == 64 for vote in consensus["votes"])
 
 
 def test_websocket_helpers_follow_rfc6455() -> None:
@@ -896,12 +1244,267 @@ def test_cortex_event_cursor_follows_activity_across_field_sessions(
         encoding="utf-8",
     )
 
-    events = cursor.poll()
+    payload = cursor.poll_payload()
 
-    assert [(event["session_hash"], event["page_id"]) for event in events] == [
-        (first.stem, "page-a"),
-        (second.stem, "page-b"),
-    ]
+    assert payload == {
+        "type": "session_changed",
+        "session_hash": second.stem,
+        "previous_session_hash": first.stem,
+        "committed_seq": 1,
+    }
+    assert cursor.poll_payload() == {"type": "events", "events": []}
+
+
+def test_cortex_field_cursor_uses_committed_seq_batches_and_survives_replacement(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "chronovisor"
+    session = "0123456789abcdef"
+    store = RecallFieldStore(root=root / "recall" / "field")
+
+    def seed(state):
+        state.seq = 100
+        state.updated_at_epoch = 100.0
+        return state, [
+            FieldEvent(
+                seq=seq,
+                timestamp_epoch=float(seq),
+                session_hash=session,
+                topic_epoch=0,
+                kind="stimulus",
+                page_id=f"page-{seq}",
+                delta=0.1,
+                activation=0.1,
+            )
+            for seq in range(1, 101)
+        ]
+
+    store.transact(session, seed, now=100.0)
+    cursor = cortex.CortexEventCursor(
+        root,
+        field_session=session,
+        after_seq=0,
+    )
+    batches = [cursor.poll_payload() for _index in range(4)]
+
+    assert [len(batch["events"]) for batch in batches] == [32, 32, 32, 4]
+    assert [
+        event["seq"] for batch in batches for event in batch["events"]
+    ] == list(range(1, 101))
+
+    def append_one(state):
+        state.seq = 101
+        state.updated_at_epoch = 101.0
+        return state, [
+            FieldEvent(
+                seq=101,
+                timestamp_epoch=101.0,
+                session_hash=session,
+                topic_epoch=0,
+                kind="stimulus",
+                page_id="page-101",
+            )
+        ]
+
+    # RecallFieldStore replaces the journal inode atomically. Logical sequence
+    # reads still deliver the new event exactly once regardless of byte size.
+    store.transact(session, append_one, now=101.0)
+    assert [event["seq"] for event in cursor.poll_payload()["events"]] == [101]
+    assert cursor.poll_payload() == {"type": "events", "events": []}
+
+    advanced = cortex.CortexEventCursor(
+        root,
+        field_session=session,
+        after_seq=999,
+    )
+    assert advanced.poll_payload() == {
+        "type": "resync",
+        "session_hash": session,
+        "after_seq": 999,
+        "committed_seq": 101,
+        "reason": "field_watermark_ahead",
+    }
+
+
+def test_cortex_field_cursor_closes_projection_to_websocket_race_and_switches(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "chronovisor"
+    first = "0123456789abcdef"
+    second = "fedcba9876543210"
+    store = RecallFieldStore(root=root / "recall" / "field")
+
+    def write_event(session_hash: str, seq: int, page_id: str):
+        def mutate(state):
+            state.seq = seq
+            state.updated_at_epoch = float(seq)
+            return state, [
+                FieldEvent(
+                    seq=seq,
+                    timestamp_epoch=float(seq),
+                    session_hash=session_hash,
+                    topic_epoch=0,
+                    kind="stimulus",
+                    page_id=page_id,
+                )
+            ]
+
+        store.transact(session_hash, mutate, now=float(seq))
+
+    write_event(first, 1, "page-a")
+    projection = cortex.build_cortex_field_projection(
+        root,
+        session_hash=first,
+        now=1.0,
+    )
+    write_event(first, 2, "page-race")
+    cursor = cortex.CortexEventCursor(
+        root,
+        field_session=first,
+        after_seq=projection["snapshot"]["seq"],
+    )
+    assert [event["seq"] for event in cursor.poll_payload()["events"]] == [2]
+
+    follower = cortex.CortexEventCursor(
+        root,
+        field_session=first,
+        follow_field_sessions=True,
+        after_seq=2,
+    )
+    write_event(second, 1, "page-b")
+    changed = follower.poll_payload()
+    assert changed == {
+        "type": "session_changed",
+        "session_hash": second,
+        "previous_session_hash": first,
+        "committed_seq": 1,
+    }
+    assert follower.poll_payload() == {"type": "events", "events": []}
+
+
+def test_cortex_field_cursor_is_independent_of_atomic_file_size_changes(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "chronovisor"
+    session = "0123456789abcdef"
+    store = RecallFieldStore(
+        root=root / "recall" / "field",
+        config=RecallFieldConfig(event_retention=3),
+    )
+
+    def append_next() -> None:
+        def mutate(state):
+            sequence = state.seq + 1
+            state.seq = sequence
+            state.updated_at_epoch = float(sequence)
+            return state, [
+                FieldEvent(
+                    seq=sequence,
+                    timestamp_epoch=float(sequence),
+                    session_hash=session,
+                    topic_epoch=0,
+                    kind="stimulus",
+                    page_id=f"page-{sequence}",
+                )
+            ]
+
+        store.transact(session, mutate)
+
+    append_next()
+    cursor = cortex.CortexEventCursor(root, field_session=session, after_seq=1)
+    event_path = store.event_root / f"{session}.jsonl"
+    delivered = []
+    for _index in range(3):
+        append_next()
+        delivered.extend(
+            event["seq"] for event in cursor.poll_payload()["events"]
+        )
+    before_shrink = event_path.stat().st_size
+    store.config = RecallFieldConfig(event_retention=1)
+    append_next()
+    after_shrink = event_path.stat().st_size
+    delivered.extend(event["seq"] for event in cursor.poll_payload()["events"])
+
+    assert delivered == [2, 3, 4, 5]
+    assert after_shrink < before_shrink
+
+
+def test_cortex_event_cursor_bounds_whole_envelope_and_preserves_tail_order(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "chronovisor"
+    recall_log = root / "recall" / "recall-log.jsonl"
+    recall_log.parent.mkdir(parents=True)
+    recall_log.write_text("", encoding="utf-8")
+    cursor = cortex.CortexEventCursor(root, recall_log=recall_log)
+    recall_log.write_text(
+        "".join(
+            json.dumps(
+                {
+                    "stage": "injected",
+                    "status": "ok",
+                    "decision": "read",
+                    "pages": [f"page-{index:03}"],
+                }
+            )
+            + "\n"
+            for index in range(100)
+        ),
+        encoding="utf-8",
+    )
+
+    batches = [cursor.poll_payload() for _index in range(4)]
+
+    assert [len(batch["events"]) for batch in batches] == [32, 32, 32, 4]
+    assert [
+        event["page_ids"][0]
+        for batch in batches
+        for event in batch["events"]
+    ] == [f"page-{index:03}" for index in range(100)]
+    assert cursor.poll_payload() == {"type": "events", "events": []}
+
+
+def test_cortex_field_cursor_fails_closed_for_corrupt_existing_snapshot(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "chronovisor"
+    session = "0123456789abcdef"
+    field_root = root / "recall" / "field"
+    event_root = field_root / "events-v2"
+    session_root = field_root / "sessions-v2"
+    event_root.mkdir(parents=True)
+    session_root.mkdir(parents=True)
+    event = {
+        "seq": 1,
+        "timestamp_epoch": 1.0,
+        "session_hash": session,
+        "topic_epoch": 0,
+        "kind": "stimulus",
+        "page_id": "page-a",
+        "delta": 1.0,
+        "activation": 1.0,
+    }
+    (event_root / f"{session}.jsonl").write_text(
+        json.dumps(event) + "\n",
+        encoding="utf-8",
+    )
+    missing_snapshot = cortex.CortexEventCursor(root, field_session=session)
+    assert [
+        row["seq"] for row in missing_snapshot.poll_payload()["events"]
+    ] == [1]
+
+    (session_root / f"{session}.json").write_text(
+        '{"seq":1,"snapshot_sha256":"invalid"}\n',
+        encoding="utf-8",
+    )
+    corrupt_snapshot = cortex.CortexEventCursor(root, field_session=session)
+    assert corrupt_snapshot.poll_payload() == {
+        "type": "resync",
+        "session_hash": session,
+        "after_seq": 0,
+        "committed_seq": 0,
+        "reason": "field_snapshot_corrupt",
+    }
 
 
 def test_cortex_projection_center_tracks_mode_bar_safe_area() -> None:
@@ -932,6 +1535,103 @@ def test_cortex_projection_center_tracks_mode_bar_safe_area() -> None:
     assert "target.dataset.projectionCenterX" in script
     assert "target.dataset.projectionCenterY" in script
     assert "target.dataset.projectionTopInset" in script
+
+
+def test_cortex_staged_renderer_lazy_explorer_and_relation_detail_contract() -> None:
+    static = dashboard.STATIC_DIR
+    html = (static / "cortex.html").read_text(encoding="utf-8")
+    style = (static / "cortex.css").read_text(encoding="utf-8")
+    script = (static / "cortex.js").read_text(encoding="utf-8")
+    webgl_script = (static / "cortex-webgl.js").read_text(encoding="utf-8")
+    build_tree = script[
+        script.index("function buildTree()") : script.index(
+            "function renderTreeSelection()"
+        )
+    ]
+    draw_relations = script[
+        script.index("function drawTypedRelations()") : script.index(
+            "function screenCross("
+        )
+    ]
+    draw_nodes = script[
+        script.index("function drawNodes(") : script.index(
+            "function drawCameraPivot("
+        )
+    ]
+    core_block = draw_nodes[
+        draw_nodes.index("// WebGL owns the full core.") : draw_nodes.index(
+            "if (excitation > 0.35)"
+        )
+    ]
+    overflow_key = script[
+        script.index("function transportOverflowKey(") : script.index(
+            "function mergeTransportOverflow("
+        )
+    ]
+    terminal_control = script[
+        script.index("function handleTerminalFieldControl(") : script.index(
+            "function processQueuedEvents("
+        )
+    ]
+
+    assert 'id="gl" class="cortexBase"' in html
+    assert 'id="overlay" class="cortexOverlay"' in html
+    assert "/static/cortex-runtime.js" in html
+    assert "/static/cortex-webgl.js" in html
+    assert html.index("/static/cortex-runtime.js") < html.index("/static/cortex.js")
+    assert html.index("/static/cortex-webgl.js") < html.index("/static/cortex.js")
+    assert "#stage canvas.cortexBase" in style
+    assert "#stage canvas.cortexOverlay" in style
+    assert "const EXPLORER_CHUNK_SIZE = 120;" in script
+    assert "function materializePackage(" in script
+    assert 'tree.addEventListener("click"' in build_tree
+    assert 'tree.addEventListener("dblclick"' in build_tree
+    assert "moduleRow.addEventListener" not in build_tree
+    assert "materializePackage(packageName);" in build_tree
+    assert "Runtime.relationBatchKey(" in draw_relations
+    assert "context.save();" in draw_relations
+    assert draw_relations.count("context.stroke(") == 1
+    assert "relationDetailsByKey" in script
+    assert "String(relation.source_page_id" in script
+    assert "String(relation.target_page_id" in script
+    assert 'fetch(\n        `/api/cortex/relations?keys=' in script
+    assert "relationDetailRequest" in script
+    assert "AbortController" in script
+    assert "EVENT_DRAIN_PER_FRAME = 32" in script
+    assert "VISUAL_DRAIN_PER_FRAME = 4" in script
+    assert "overflowCoalesceKey: transportOverflowKey" in script
+    assert "const incomingFieldEvents = Runtime.createEventQueue" in script
+    assert "const incomingTransportEvents = Runtime.createEventQueue" in script
+    assert "incomingFieldEvents.clear();" in script
+    resync_block = script[
+        script.index("if (fieldResyncPending) {") : script.index(
+            "if (panelRenderPending) {"
+        )
+    ]
+    assert "incomingTransportEvents.clear" not in resync_block
+    assert "coalesced_count: coalescedCount" in script
+    assert "String(event.kind" in overflow_key
+    assert "String(event.phase" in overflow_key
+    assert "String(event.channel_key" in overflow_key
+    assert "transportByKind: {}" in script
+    assert "cortexMetrics.transportByKind[transportKind]" in script
+    assert 'payload.reason !== "field_snapshot_corrupt"' in terminal_control
+    assert "terminalFieldControlGate.accept(generation" in terminal_control
+    assert "reconnectSuppressedGeneration = generation" in terminal_control
+    assert "fieldResyncPending = false" in terminal_control
+    assert "incomingTransportEvents.clear" not in terminal_control
+    assert "if (reconnectSuppressedGeneration === generation) return;" in script
+    assert 'data-retry-field' in script
+    assert "target.dataset.longAnimationFrames" in script
+    assert "target.dataset.projectionBaseP95Ms" not in script  # emitted generically
+    assert 'stageMetrics.record("projectionBase"' in script
+    assert 'stageMetrics.record("overlayEffects"' in script
+    assert 'stageMetrics.record("domEventFlush"' in script
+    assert "1.0 - smoothstep(0.28, 0.5, radius)" in webgl_script
+    assert "fallbackLatched = true;" in webgl_script
+    assert "if (!overlayOnly)" in core_block
+    assert "context.fill();" in core_block
+    assert 'canvas.style.opacity = visible ? "1" : "0"' in webgl_script
 
 
 def test_cortex_static_view_preserves_fable_layout_and_uses_live_data() -> None:
@@ -1028,7 +1728,9 @@ def test_cortex_static_view_preserves_fable_layout_and_uses_live_data() -> None:
     assert "cortexMetrics.generateParticles += 1;" in script
     assert "cortexMetrics.consensusOrbits += 1;" in script
     assert "cortexMetrics.consolidationEdges += 1;" in script
-    assert "transportEvents.forEach(visualizeTransportEvent)" in script
+    assert "incomingFieldEvents.push(" in script
+    assert "incomingTransportEvents.push(" in script
+    assert "pendingTransportVisuals" in script
     assert "TransportPolicy.isTransportKind(event.kind)" in script
     assert "drawTransportEffects(time);" in script
     assert "PROCESSING LANES" in html
@@ -1074,9 +1776,9 @@ def test_cortex_static_view_preserves_fable_layout_and_uses_live_data() -> None:
     assert "target.dataset.maxGlowPadding" in script
     assert "target.dataset.cameraTheta = camera.theta.toFixed(4);" in script
     assert "target.dataset.cameraPhi = camera.phi.toFixed(4);" in script
-    assert "camera.theta += event.movementX * 0.0045;" in script
+    assert "camera.theta += pointer.movementX * 0.0045;" in script
     assert "camera.theta -= event.movementX * 0.0045;" not in script
-    assert "camera.phi - event.movementY * 0.0045" in script
+    assert "camera.phi - pointer.movementY * 0.0045" in script
     assert "camera.phi + event.movementY * 0.0045" not in script
     assert "radius + progress * 26" not in script
     assert "radius + (1 - progress) * 28" not in script
@@ -1094,7 +1796,8 @@ def test_cortex_static_view_preserves_fable_layout_and_uses_live_data() -> None:
     assert "Math.min(ACTIVE_LABEL_LIMIT, activeLabelNodes.length + 1)" in script
     assert "liveEventsEnabled = true" in script
     assert "followLatestSession = true" in script
-    assert '"?follow=latest"' in script
+    assert 'params.set("follow", "latest")' in script
+    assert 'params.set("after_seq"' in script
     assert "LIVE · follow activity" in script
     assert "window.CortexField.applyEvents(fieldState" in script
     assert "const MAX_EVENTS = 256;" in field_script
@@ -1267,7 +1970,7 @@ def test_cortex_processing_lanes_monitor_has_fixed_independent_routing() -> None
     assert "TransportPolicy.processingLaneUpdateDecision(" in script
     assert "monitorState.lastLiveAt = updateDecision.lastLiveAt;" in script
     assert 'if (event.mode === "live") clearDemoTransportTimers();' not in script
-    assert "event = TransportPolicy.normalizeEvent(event);" in script
+    assert "TransportPolicy.normalizeEvent(event);" in script
 
 
 def test_cortex_sleeps_only_layout_physics_and_keeps_rendering_live() -> None:
@@ -1284,15 +1987,27 @@ def test_cortex_sleeps_only_layout_physics_and_keeps_rendering_live() -> None:
     assert "simulationAwake = true;" in script
     assert "if (simulationAwake) {" in script
     assert "simulationSteps < SIMULATION_MAX_STEPS_PER_FRAME" in script
-    assert "simulationLinks.push(link);" in script
-    assert "reheat(0.18);" in script
+    assert (
+        "simulationLinks = links.filter((link) => link.kind !== 2 && !link.typed);"
+        in script
+    )
+    ensure_edge = script[
+        script.index("function ensureActualEdge(") : script.index(
+            "function syncFieldNodes("
+        )
+    ]
+    assert "simulationLinks.push" not in ensure_edge
+    assert "EVENT_EDGE_TTL_MS" in ensure_edge
 
-    frame = script[script.index("function frame(now)") : script.index("function pick(")]
+    frame = script[
+        script.index("function frame(\n") : script.index("function pick(")
+    ]
     assert "tick();" in frame
     assert "projectAll();" in frame
-    assert "draw(now);" in frame
-    assert "requestAnimationFrame(frame);" in frame
+    assert "draw(now, webglBaseRendered);" in frame
+    assert "baseRenderer.render({" in frame
     assert frame.index("tick();") < frame.index("projectAll();")
+    assert "Runtime.createRenderScheduler" in script
 
 
 def test_cortex_reuses_hot_path_state_without_reducing_visual_limits() -> None:
@@ -1302,7 +2017,14 @@ def test_cortex_reuses_hot_path_state_without_reducing_visual_limits() -> None:
     assert "now - lastCortexMetricsPublished < METRICS_PUBLISH_INTERVAL_MS" in script
     assert "const FRAME_DURATION_CAPACITY = 240;" in script
     assert "function recentFrameDurations(" in script
+    assert "function recentFrameCadences(" in script
     assert "frameDurationCursor = (frameDurationCursor + 1)" in script
+    assert "performance.now() - frameWorkStartedAt" in script
+    assert "frameState.sinceLastRender !== null" in script
+    assert "frameState.continuation" in script
+    assert "|| cadence <= FRAME_CADENCE_IDLE_GAP_MS" in script
+    assert "1000 / cadenceMean" in script
+    assert "Runtime.createCooldownWake" in script
     assert "const labelCandidates = [];" in script
     assert "const activeLabelNodes = [];" in script
     assert "const occupiedLabels = [];" in script
@@ -1320,6 +2042,593 @@ def test_cortex_reuses_hot_path_state_without_reducing_visual_limits() -> None:
         encoding="utf-8"
     )
     assert "const MAX_TRANSPORT_EFFECTS = 18;" in policy_script
+
+
+def test_cortex_runtime_pulse_scheduler_metrics_burst_and_webgl_fallback() -> None:
+    runtime_path = dashboard.STATIC_DIR / "cortex-runtime.js"
+    webgl_path = dashboard.STATIC_DIR / "cortex-webgl.js"
+    scenario = (
+        f"const runtime = require({json.dumps(str(runtime_path))});\n"
+        f"const webgl = require({json.dumps(str(webgl_path))});\n"
+        + r"""
+const pulses = [
+  { id: "A", expired: true },
+  { id: "B", expired: true },
+  { id: "C", expired: true },
+  { id: "D", expired: false },
+];
+const completed = [];
+const completionCount = runtime.drainExpiredPulses(
+  pulses,
+  (pulse) => pulse.expired,
+  (pulse) => {
+    completed.push(pulse.id);
+    // A callback may touch the already-compacted queue without invalidating
+    // the original walk; complete callbacks are not nested in that walk.
+    pulses.reverse();
+  },
+);
+
+// Browser frame identifiers may legally wrap to zero. The scheduler must
+// still treat id 0 as an outstanding request and coalesce invalidations.
+let nextFrame = 0;
+const frames = new Map();
+let hidden = false;
+    let active = false;
+    let rendered = 0;
+    const frameContinuations = [];
+    const frameIntervals = [];
+const scheduler = runtime.createRenderScheduler({
+  requestFrame(callback) {
+    const id = nextFrame++;
+    frames.set(id, callback);
+    return id;
+  },
+  cancelFrame(id) { frames.delete(id); },
+  isHidden: () => hidden,
+  onFrame: (_now, _reasons, frameState) => {
+    rendered += 1;
+    frameContinuations.push(frameState.continuation);
+    frameIntervals.push(frameState.sinceLastRender);
+  },
+  hasWork: () => active,
+});
+function runNext(now) {
+  const [id, callback] = frames.entries().next().value;
+  frames.delete(id);
+  callback(now);
+}
+scheduler.invalidate("one");
+scheduler.invalidate("two");
+scheduler.invalidate("three");
+const coalescedFrames = frames.size;
+runNext(10);
+const idleFrames = frames.size;
+active = true;
+scheduler.invalidate("effect");
+runNext(20);
+const activeFrames = frames.size;
+active = false;
+runNext(30);
+hidden = true;
+scheduler.invalidate("hidden");
+const hiddenFrames = frames.size;
+hidden = false;
+scheduler.visibilityChanged();
+const wakeFrames = frames.size;
+runNext(40);
+scheduler.invalidate("pointer-after-idle");
+runNext(1000);
+scheduler.invalidate("adjacent-wheel");
+runNext(1016);
+active = true;
+scheduler.invalidate("long-work-start");
+runNext(1026);
+active = false;
+runNext(1400);
+
+const ring = runtime.createDurationRing(3);
+[100, 1, 2, 3].forEach((value) => ring.record(value));
+const ringSnapshot = ring.snapshot();
+
+let overflowed = 0;
+const eventQueue = runtime.createEventQueue({
+  maximum: 256,
+  protectedEvent: (event) => event.family === "field",
+  onOverflow: () => { overflowed += 1; },
+});
+eventQueue.push(Array.from({ length: 100 }, (_, index) => ({
+  family: "field",
+  seq: index + 1,
+})));
+const drainSizes = [];
+const drainedSeqs = [];
+while (eventQueue.state().length) {
+  const batch = eventQueue.drain(32);
+  drainSizes.push(batch.length);
+  drainedSeqs.push(...batch.map((event) => event.seq));
+}
+const overflowQueue = runtime.createEventQueue({
+  maximum: 2,
+  protectedEvent: () => true,
+  onOverflow: () => { overflowed += 1; },
+});
+overflowQueue.push([
+  { family: "field", seq: 1 },
+  { family: "field", seq: 2 },
+  { family: "field", seq: 3 },
+]);
+
+const listeners = new Map();
+const removed = [];
+const rendererStates = [];
+const canvas = {
+  style: {},
+  dataset: {},
+  getContext: () => null,
+  addEventListener: (name, callback) => listeners.set(name, callback),
+  removeEventListener: (name, callback) => {
+    if (listeners.get(name) === callback) listeners.delete(name);
+    removed.push(name);
+  },
+};
+const renderer = webgl.createRenderer(canvas, {
+  onStateChange: (state) => rendererStates.push(state),
+});
+const fallbackRendered = renderer.render({ width: 10, height: 10 });
+let prevented = 0;
+listeners.get("webglcontextlost")({ preventDefault: () => { prevented += 1; } });
+listeners.get("webglcontextlost")({ preventDefault: () => { prevented += 1; } });
+renderer.dispose();
+
+process.stdout.write(JSON.stringify({
+  completionCount,
+  completed,
+  remainingPulses: pulses.map((pulse) => pulse.id),
+  coalescedFrames,
+  idleFrames,
+  activeFrames,
+  hiddenFrames,
+  wakeFrames,
+  rendered,
+  frameContinuations,
+  frameIntervals,
+  scheduler: scheduler.state(),
+  ring: ringSnapshot,
+  drainSizes,
+  drainedSeqs,
+  overflowed,
+  fallbackRendered,
+  rendererStates,
+  rendererMode: renderer.snapshot().mode,
+  rendererOpacity: canvas.style.opacity,
+  rendererState: canvas.dataset.rendererState,
+  prevented,
+  remainingListeners: listeners.size,
+  removed,
+}));
+"""
+    )
+    completed = subprocess.run(
+        ["node", "-e", scenario],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    result = json.loads(completed.stdout)
+
+    assert result["completionCount"] == 3
+    assert result["completed"] == ["A", "B", "C"]
+    assert result["remainingPulses"] == ["D"]
+    assert result["coalescedFrames"] == 1
+    assert result["idleFrames"] == 0
+    assert result["activeFrames"] == 1
+    assert result["hiddenFrames"] == 0
+    assert result["wakeFrames"] == 1
+    assert result["rendered"] == 8
+    assert result["frameContinuations"] == [
+        False,
+        False,
+        True,
+        False,
+        False,
+        False,
+        False,
+        True,
+    ]
+    assert result["frameIntervals"] == [None, 10, 10, 10, 960, 16, 10, 374]
+    assert result["scheduler"]["pending"] == 0
+    assert result["ring"]["samples"] == [1, 2, 3]
+    assert result["ring"]["mean"] == 2
+    assert result["ring"]["max"] == 3
+    assert result["ring"]["lifetimeMax"] == 100
+    assert result["drainSizes"] == [32, 32, 32, 4]
+    assert result["drainedSeqs"] == list(range(1, 101))
+    assert result["overflowed"] == 1
+    assert result["fallbackRendered"] is False
+    assert result["rendererStates"] == ["fallback", "lost"]
+    assert result["rendererMode"] == "canvas2d"
+    assert result["rendererOpacity"] == "0"
+    assert result["rendererState"] == "lost"
+    assert result["prevented"] == 2
+    assert result["remainingListeners"] == 0
+    assert sorted(result["removed"]) == [
+        "webglcontextlost",
+        "webglcontextrestored",
+    ]
+
+
+def test_cortex_runtime_cooldown_spatial_pick_and_transport_backpressure() -> None:
+    runtime_path = dashboard.STATIC_DIR / "cortex-runtime.js"
+    scenario = f"const runtime = require({json.dumps(str(runtime_path))});\n" + r"""
+let observedNow = 0;
+let lastInteraction = 0;
+let enabled = true;
+let nextTimer = 0;
+let wakes = 0;
+const timers = new Map();
+const cooldown = runtime.createCooldownWake({
+  now: () => observedNow,
+  setTimer(callback, delay) {
+    const id = nextTimer++;
+    timers.set(id, { callback, delay });
+    return id;
+  },
+  clearTimer(id) { timers.delete(id); },
+  readyAt: () => lastInteraction + 2600,
+  isEnabled: () => enabled,
+  isHidden: () => false,
+  onReady: () => { wakes += 1; },
+});
+const initiallyReady = cooldown.sync();
+const zeroTimerPending = cooldown.state().pending;
+const staleCallback = timers.get(0).callback;
+lastInteraction = 1000;
+observedNow = 100;
+cooldown.sync();
+const rescheduledDelay = timers.get(1).delay;
+staleCallback();
+const wakesAfterStale = wakes;
+observedNow = 3600;
+timers.get(1).callback();
+const readyAfterCooldown = cooldown.ready();
+lastInteraction = 4000;
+observedNow = 4000;
+cooldown.sync();
+const disposedCallback = timers.get(2).callback;
+cooldown.dispose();
+disposedCallback();
+
+const spatial = runtime.createSpatialIndex(48);
+const nodes = [
+  { screenX: 0, screenY: 0, hitRadius: 120 },
+  { screenX: 500, screenY: 0, hitRadius: 8 },
+];
+spatial.rebuild(nodes, () => true, (node) => node.hitRadius);
+const picked = spatial.pick(
+  110,
+  0,
+  nodes,
+  (node, x, y) => Math.hypot(node.screenX - x, node.screenY - y) - node.hitRadius,
+);
+
+let fieldResyncs = 0;
+const fieldQueue = runtime.createEventQueue({
+  maximum: 256,
+  protectedEvent: () => true,
+  onOverflow: () => { fieldResyncs += 1; },
+});
+const transportQueue = runtime.createEventQueue({
+  maximum: 256,
+  protectedEvent: () => true,
+});
+fieldQueue.push(Array.from({ length: 257 }, (_, index) => ({
+  family: "field",
+  seq: index + 1,
+})));
+transportQueue.push([{ family: "transport", kind: "save", capture_id: "cap-1" }]);
+if (fieldResyncs) fieldQueue.clear();
+const transportVisible = transportQueue.drain(32);
+const transportAfterVisible = transportQueue.drain(32);
+
+const typedQueue = runtime.createEventQueue({
+  maximum: 3,
+  protectedEvent: () => true,
+  overflowCoalesceKey: (event) => [event.kind, event.phase, event.channel_key].join(":"),
+  mergeOverflow: (previous, event) => ({
+    ...event,
+    coalesced_count: (previous.coalesced_count || 1) + 1,
+    page_ids: [...new Set([...(previous.page_ids || []), ...(event.page_ids || [])])],
+  }),
+});
+typedQueue.push([
+  { family: "transport", kind: "save", phase: "capture", channel_key: "save", page_ids: ["save-a"] },
+  { family: "transport", kind: "read", phase: "generate", channel_key: "read", page_ids: ["read-a"] },
+  { family: "transport", kind: "used", phase: "apply", channel_key: "used", page_ids: ["used-a"] },
+]);
+typedQueue.push([
+  { family: "transport", kind: "save", phase: "capture", channel_key: "save", page_ids: ["save-b"], capture_id: "latest-save" },
+  { family: "transport", kind: "read", phase: "generate", channel_key: "read", page_ids: ["read-b"] },
+  { family: "transport", kind: "used", phase: "apply", channel_key: "used", page_ids: ["used-b"] },
+]);
+const typedState = typedQueue.state();
+const typedEvents = typedQueue.drain(3);
+
+const gate = runtime.createGenerationGate();
+const gateDecisions = [
+  gate.accept(7, "field_snapshot_corrupt"),
+  gate.accept(7, "field_snapshot_corrupt"),
+  gate.accept(8, "field_snapshot_corrupt"),
+];
+
+process.stdout.write(JSON.stringify({
+  initiallyReady,
+  zeroTimerPending,
+  rescheduledDelay,
+  wakesAfterStale,
+  wakes,
+  readyAfterCooldown,
+  cooldownState: cooldown.state(),
+  picked,
+  maximumHitRadius: spatial.maximumHitRadius(),
+  fieldResyncs,
+  remainingField: fieldQueue.state().length,
+  transportVisible,
+  transportAfterVisible,
+  typedState,
+  typedEvents,
+  gateDecisions,
+}));
+"""
+    completed = subprocess.run(
+        ["node", "-e", scenario],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    result = json.loads(completed.stdout)
+
+    assert result["initiallyReady"] is False
+    assert result["zeroTimerPending"] == 1
+    assert result["rescheduledDelay"] == 3500
+    assert result["wakesAfterStale"] == 0
+    assert result["wakes"] == 1
+    assert result["readyAfterCooldown"] is True
+    assert result["cooldownState"]["pending"] == 0
+    assert result["cooldownState"]["disposed"] is True
+    assert result["picked"] == 0
+    assert result["maximumHitRadius"] == 120
+    assert result["fieldResyncs"] == 1
+    assert result["remainingField"] == 0
+    assert result["transportVisible"] == [
+        {"family": "transport", "kind": "save", "capture_id": "cap-1"}
+    ]
+    assert result["transportAfterVisible"] == []
+    assert result["typedState"] == {
+        "length": 3,
+        "maximum": 3,
+        "overflowCount": 3,
+        "droppedCount": 0,
+        "coalescedCount": 3,
+    }
+    assert [event["kind"] for event in result["typedEvents"]] == [
+        "save",
+        "read",
+        "used",
+    ]
+    assert all(event["coalesced_count"] == 2 for event in result["typedEvents"])
+    assert result["typedEvents"][0]["capture_id"] == "latest-save"
+    assert result["typedEvents"][0]["page_ids"] == ["save-a", "save-b"]
+    assert result["gateDecisions"] == [True, False, True]
+
+
+def test_cortex_webgl_batches_base_nodes_edges_and_typed_relations() -> None:
+    webgl_path = dashboard.STATIC_DIR / "cortex-webgl.js"
+    scenario = f"const webgl = require({json.dumps(str(webgl_path))});\n" + r"""
+const draws = [];
+const uploads = [];
+let throwDraw = false;
+let drawInvocations = 0;
+const gl = {
+  VERTEX_SHADER: 1,
+  FRAGMENT_SHADER: 2,
+  COMPILE_STATUS: 3,
+  LINK_STATUS: 4,
+  ARRAY_BUFFER: 5,
+  FLOAT: 6,
+  DYNAMIC_DRAW: 7,
+  BLEND: 8,
+  SRC_ALPHA: 9,
+  ONE_MINUS_SRC_ALPHA: 10,
+  COLOR_BUFFER_BIT: 11,
+  LINES: 12,
+  POINTS: 13,
+  createShader: () => ({}),
+  shaderSource() {},
+  compileShader() {},
+  getShaderParameter: () => true,
+  getShaderInfoLog: () => "",
+  deleteShader() {},
+  createProgram: () => ({}),
+  attachShader() {},
+  linkProgram() {},
+  getProgramParameter: () => true,
+  getProgramInfoLog: () => "",
+  deleteProgram() {},
+  createBuffer: () => ({}),
+  getAttribLocation: (_program, name) => ({
+    a_position: 0,
+    a_color: 1,
+    a_size: 2,
+  })[name],
+  getUniformLocation: () => ({}),
+  useProgram() {},
+  bindBuffer() {},
+  enableVertexAttribArray() {},
+  vertexAttribPointer() {},
+  enable() {},
+  blendFunc() {},
+  bufferData() {},
+  bufferSubData(_target, _offset, data) { uploads.push(Array.from(data)); },
+  viewport() {},
+  clearColor() {},
+  clear() {},
+  uniform1i() {},
+  drawArrays(mode, first, count) {
+    draws.push([mode, first, count]);
+    drawInvocations += 1;
+    if (throwDraw) throw new Error("runtime draw failure");
+  },
+  deleteBuffer() {},
+};
+const listeners = new Map();
+const states = [];
+const stateVisuals = [];
+const canvas = {
+  style: {},
+  dataset: {},
+  getContext: (name) => name === "webgl2" ? gl : null,
+  addEventListener: (name, callback) => listeners.set(name, callback),
+  removeEventListener: (name) => listeners.delete(name),
+};
+const renderer = webgl.createRenderer(canvas, {
+  onStateChange: (state) => {
+    states.push(state);
+    stateVisuals.push([state, canvas.style.opacity]);
+  },
+});
+renderer.resize(800, 600, 2);
+const nodes = [
+  { screenX: 100, screenY: 100, viewDepth: 1000, radius: 3, screenScale: 1, base: [100, 120, 140], fieldActivation: 0 },
+  { screenX: 200, screenY: 200, viewDepth: 1100, radius: 4, screenScale: 1, base: [100, 120, 140], fieldActivation: 0 },
+];
+const scene = {
+  now: 10,
+  width: 800,
+  height: 600,
+  pixelRatio: 2,
+  nodes,
+  excitations: new Float32Array([0.2, 0.6]),
+  links: [
+    { source: 0, target: 1, typed: false },
+    { source: 1, target: 0, typed: true, lifecycle: "verified", relationId: "r1" },
+  ],
+  nodeState: new Uint8Array([2, 2]),
+  edgeState: new Uint8Array([2, 2]),
+  activeRelations: new Set(),
+  relationsVisible: true,
+  edgeVisibility: 1,
+  selected: 0,
+  hovered: 1,
+  fog: () => 1,
+};
+const rendered = renderer.render(scene);
+const nodeUpload = uploads[1];
+throwDraw = true;
+const failedRender = renderer.render(scene);
+const failureSnapshot = renderer.snapshot();
+const drawsAfterFailure = drawInvocations;
+const repeatedFailureRender = renderer.render(scene);
+const drawsAfterRepeatedFailure = drawInvocations;
+throwDraw = false;
+const retryReady = renderer.retry();
+const recoveredRender = renderer.render(scene);
+const beforeLoss = renderer.snapshot();
+listeners.get("webglcontextlost")({ preventDefault() {} });
+const duringLoss = renderer.render({ width: 800, height: 600 });
+listeners.get("webglcontextrestored")();
+const afterRestore = renderer.snapshot();
+renderer.dispose();
+process.stdout.write(JSON.stringify({
+  rendered,
+  nodeUpload,
+  failedRender,
+  failureSnapshot,
+  drawsAfterFailure,
+  repeatedFailureRender,
+  drawsAfterRepeatedFailure,
+  retryReady,
+  recoveredRender,
+  draws,
+  beforeLoss,
+  duringLoss,
+  afterRestore,
+  states,
+  stateVisuals,
+  width: canvas.width,
+  height: canvas.height,
+  listenerCount: listeners.size,
+  disposedOpacity: canvas.style.opacity,
+}));
+"""
+    completed = subprocess.run(
+        ["node", "-e", scenario],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    result = json.loads(completed.stdout)
+
+    assert result["rendered"] is True
+    assert result["draws"] == [
+        [12, 0, 14],
+        [13, 0, 2],
+        [12, 0, 14],
+        [12, 0, 14],
+        [13, 0, 2],
+    ]
+    assert result["failedRender"] is False
+    assert result["failureSnapshot"]["mode"] == "canvas2d"
+    assert result["failureSnapshot"]["fallbackLatched"] is True
+    assert result["drawsAfterFailure"] == 3
+    assert result["repeatedFailureRender"] is False
+    assert result["drawsAfterRepeatedFailure"] == 3
+    assert result["retryReady"] is True
+    assert result["recoveredRender"] is True
+    assert result["beforeLoss"]["mode"] == "webgl2"
+    assert result["beforeLoss"]["edgeCount"] == 7
+    assert result["beforeLoss"]["nodeCount"] == 2
+    assert result["duringLoss"] is False
+    assert result["afterRestore"]["mode"] == "webgl2"
+    assert result["states"] == [
+        "ready",
+        "fallback",
+        "ready",
+        "lost",
+        "ready",
+        "restored",
+    ]
+    assert result["stateVisuals"] == [
+        ["ready", "1"],
+        ["fallback", "0"],
+        ["ready", "1"],
+        ["lost", "0"],
+        ["ready", "1"],
+        ["restored", "1"],
+    ]
+    assert result["disposedOpacity"] == "0"
+    node_upload = result["nodeUpload"]
+    violet_mix = 0.2 * 0.72
+    expected_violet = [
+        base + (violet - base) * violet_mix
+        for base, violet in zip([100, 120, 140], [155, 124, 255], strict=True)
+    ]
+    hot_mix = (0.6 - 0.55) / 0.7
+    expected_hot = [
+        base + (hot - base) * hot_mix
+        for base, hot in zip([100, 120, 140], [255, 243, 221], strict=True)
+    ]
+    assert node_upload[2:5] == pytest.approx(
+        [channel / 255 for channel in expected_violet]
+    )
+    assert node_upload[5] == pytest.approx(0.72)
+    assert node_upload[9:12] == pytest.approx(
+        [channel / 255 for channel in expected_hot]
+    )
+    assert node_upload[12] == pytest.approx(0.82)
+    assert result["width"] == 1600
+    assert result["height"] == 1200
+    assert result["listenerCount"] == 0
 
 
 def test_cortex_transport_policy_normalizes_v1_v2_and_processing_activity() -> None:
@@ -1830,6 +3139,47 @@ def test_dashboard_serves_cortex_graph_api(monkeypatch) -> None:
 
     assert response.status_code == 200
     assert response.json() == expected
+
+
+def test_dashboard_serves_bounded_cortex_relation_details(monkeypatch) -> None:
+    expected = [
+        {
+            "relation_id": "relation-a",
+            "source_page_id": "page-a",
+            "target_page_id": "page-b",
+        }
+    ]
+    observed: dict[str, object] = {}
+
+    def details(root, relation_keys):
+        observed.update(root=root, relation_keys=relation_keys)
+        return expected
+
+    monkeypatch.setattr(dashboard, "build_cortex_relation_details", details)
+    server = dashboard.ThreadingHTTPServer(
+        ("127.0.0.1", 0),
+        dashboard.DashboardHandler,
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    host, port = server.server_address
+    try:
+        response = dashboard.httpx.get(
+            f"http://{host}:{port}/api/cortex/relations",
+            params={"keys": json.dumps([["relation-a", "page-a", "page-b"]])},
+            timeout=2,
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+    assert response.status_code == 200
+    assert response.json() == {"relations": expected}
+    assert observed == {
+        "root": dashboard.CHRONOVISOR_ROOT,
+        "relation_keys": [("relation-a", "page-a", "page-b")],
+    }
 
 
 def test_dashboard_serves_session_scoped_cortex_field_api(monkeypatch) -> None:

@@ -8,6 +8,8 @@
   <link rel="stylesheet" href="/static/activity-bar.css">
   <script src="/static/cortex-field.js" defer></script>
   <script src="/static/cortex-transport-policy.js" defer></script>
+  <script src="/static/cortex-runtime.js" defer></script>
+  <script src="/static/cortex-webgl.js" defer></script>
   <script src="/static/cortex.js" defer></script>
 </head>
 <body class="has-activity-bar">
@@ -79,7 +81,8 @@
       </nav>
 
       <main id="stage" tabindex="0" aria-label="Stateful Recall Field graph">
-        <canvas id="gl" aria-hidden="true"></canvas>
+        <canvas id="gl" class="cortexBase" aria-hidden="true"></canvas>
+        <canvas id="overlay" class="cortexOverlay" aria-hidden="true"></canvas>
         <div id="fieldAria" class="srOnly" aria-live="polite"></div>
         <div id="scan"></div>
         <div class="hudCorner" id="c1"></div>
