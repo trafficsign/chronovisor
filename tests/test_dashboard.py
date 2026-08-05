@@ -5,14 +5,54 @@ from __future__ import annotations
 import json
 import os
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 from chronovisor.core.durable_state import write_sealed_json
 from chronovisor.core.runtime_config import SearchEmbeddingConfig
 from chronovisor.ingest import orchestrator
 from chronovisor.ops import dashboard, runtime_status
+
+
+def _reset_processing_activity_cache() -> None:
+    with dashboard._PROCESSING_ACTIVITY_CACHE_CONDITION:
+        dashboard._PROCESSING_ACTIVITY_CACHE.update(
+            {
+                "source": None,
+                "snapshot": None,
+                "audited_at": 0.0,
+                "refreshing": False,
+                "build_count": 0,
+                "cache_hits": 0,
+                "coalesced": 0,
+                "error_count": 0,
+                "last_build_duration_ms": 0.0,
+                "last_error": None,
+            }
+        )
+        dashboard._PROCESSING_ACTIVITY_CACHE_CONDITION.notify_all()
+
+
+def _reset_snapshot_fingerprint_cache() -> None:
+    with dashboard._SNAPSHOT_FINGERPRINT_CONDITION:
+        dashboard._SNAPSHOT_FINGERPRINT_CACHE.update(
+            {
+                "source": None,
+                "fingerprint": None,
+                "audited_at": 0.0,
+                "probing": False,
+                "generation": 0,
+                "probe_count": 0,
+                "cache_hits": 0,
+                "coalesced": 0,
+                "error_count": 0,
+            }
+        )
+        dashboard._SNAPSHOT_FINGERPRINT_CONDITION.notify_all()
 
 
 def test_typed_graph_dashboard_snapshot_separates_engineering_and_authority(
@@ -359,6 +399,7 @@ def test_local_consensus_snapshot_removes_dead_markers_and_exposes_redacted_metr
 
 
 def test_processing_activity_projects_simultaneous_llm_workflows(monkeypatch) -> None:
+    _reset_processing_activity_cache()
     status = {
         "state": "running",
         "stage": "apply",
@@ -462,6 +503,7 @@ def test_processing_activity_projects_simultaneous_llm_workflows(monkeypatch) ->
 
 
 def test_processing_activity_projects_direct_ollama_calls(monkeypatch) -> None:
+    _reset_processing_activity_cache()
     monkeypatch.setattr(runtime_status, "read_status", lambda: {})
     monkeypatch.setattr(orchestrator, "_load_state", lambda: {})
     monkeypatch.setattr(
@@ -506,6 +548,364 @@ def test_processing_activity_projects_direct_ollama_calls(monkeypatch) -> None:
     assert by_key["recall"]["role"] == "Recall Processor"
     assert by_key["recall"]["phase"] == "judge_candidates"
     assert by_key["recall"]["model"] == "recall:test"
+
+
+def test_processing_activity_cache_single_flights_concurrent_callers(
+    monkeypatch,
+) -> None:
+    _reset_processing_activity_cache()
+    entered = threading.Event()
+    release = threading.Event()
+    calls = 0
+
+    def build() -> dict:
+        nonlocal calls
+        calls += 1
+        entered.set()
+        assert release.wait(timeout=2)
+        return {"revision": "one", "active_count": 0, "lanes": []}
+
+    monkeypatch.setattr(
+        dashboard, "_processing_activity_source_fingerprint", lambda: ("same",)
+    )
+    monkeypatch.setattr(dashboard, "_build_processing_activity_snapshot", build)
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        futures = [pool.submit(dashboard._processing_activity_snapshot) for _ in range(8)]
+        assert entered.wait(timeout=2)
+        release.set()
+        snapshots = [future.result(timeout=2) for future in futures]
+
+    assert calls == 1
+    assert {snapshot["revision"] for snapshot in snapshots} == {"one"}
+    metrics = snapshots[-1]["_dashboard"]["activity_cache"]
+    assert metrics["build_count"] == 1
+    assert metrics["coalesced"] >= 1
+
+
+def test_processing_activity_cache_reuses_recent_source_and_refreshes_on_change(
+    monkeypatch,
+) -> None:
+    _reset_processing_activity_cache()
+    clock = [100.0]
+    source = [("source", 1)]
+    calls = 0
+
+    def build() -> dict:
+        nonlocal calls
+        calls += 1
+        return {
+            "revision": str(calls),
+            "active_count": 1,
+            "lanes": [{"state": "active", "recent": True}],
+        }
+
+    class ImmediateThread:
+        def __init__(self, *, target, args, **_kwargs) -> None:
+            self.target = target
+            self.args = args
+
+        def start(self) -> None:
+            self.target(*self.args)
+
+    monkeypatch.setattr(dashboard.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        dashboard, "_processing_activity_source_fingerprint", lambda: source[0]
+    )
+    monkeypatch.setattr(dashboard, "_build_processing_activity_snapshot", build)
+    monkeypatch.setattr(dashboard.threading, "Thread", ImmediateThread)
+
+    assert dashboard._processing_activity_snapshot()["revision"] == "1"
+    assert dashboard._processing_activity_snapshot()["revision"] == "1"
+    assert calls == 1
+
+    source[0] = ("source", 2)
+    # A real source change refreshes synchronously on the next poll even
+    # though no recent-lane audit time has elapsed.
+    # The changed-source leader publishes fresh data; concurrent callers can
+    # still receive the last-good snapshot while this one build is in flight.
+    assert dashboard._processing_activity_snapshot()["revision"] == "2"
+    assert dashboard._processing_activity_snapshot()["revision"] == "2"
+    assert calls == 2
+
+
+def test_processing_activity_source_fingerprint_observes_atomic_marker_rename(
+    tmp_path: Path, monkeypatch
+) -> None:
+    chronovisor_root = tmp_path / "wiki"
+    active_dir = chronovisor_root / "runtime" / "model-activity" / "active"
+    active_dir.mkdir(parents=True)
+    monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", chronovisor_root)
+    monkeypatch.setattr(
+        runtime_status, "STATUS_FILE", chronovisor_root / "runtime" / "status.json"
+    )
+    monkeypatch.setattr(
+        orchestrator, "STATE_FILE", chronovisor_root / ".orchestrator_state.json"
+    )
+
+    before = dashboard._processing_activity_source_fingerprint()
+    temporary = active_dir / ".activity.tmp"
+    temporary.write_text('{"schema_version": 1}\n', encoding="utf-8")
+    os.replace(temporary, active_dir / "activity.json")
+    after = dashboard._processing_activity_source_fingerprint()
+
+    assert before != after
+
+
+def test_processing_activity_source_tracks_local_consensus_marker_lifecycle(
+    tmp_path: Path, monkeypatch
+) -> None:
+    chronovisor_root = tmp_path / "wiki"
+    active_dir = chronovisor_root / "runtime" / "local-consensus" / "active"
+    active_dir.mkdir(parents=True)
+    monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", chronovisor_root)
+    monkeypatch.setattr(
+        runtime_status, "STATUS_FILE", chronovisor_root / "runtime" / "status.json"
+    )
+    monkeypatch.setattr(
+        orchestrator, "STATE_FILE", chronovisor_root / ".orchestrator_state.json"
+    )
+
+    before = dashboard._processing_activity_source_fingerprint()
+    temporary = active_dir / ".review.tmp"
+    marker = active_dir / "review.json"
+    temporary.write_text('{"schema_version": 1}\n', encoding="utf-8")
+    os.replace(temporary, marker)
+    after_create = dashboard._processing_activity_source_fingerprint()
+    marker.unlink()
+    after_remove = dashboard._processing_activity_source_fingerprint()
+
+    assert after_create != before
+    assert after_remove != after_create
+
+
+def test_processing_activity_cache_rejects_a_build_crossing_source_epochs(
+    monkeypatch,
+) -> None:
+    _reset_processing_activity_cache()
+    source = [("source", 1)]
+    calls = 0
+
+    def build() -> dict:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            source[0] = ("source", 3)
+        return {"revision": str(calls), "active_count": 0, "lanes": []}
+
+    monkeypatch.setattr(
+        dashboard, "_processing_activity_source_fingerprint", lambda: source[0]
+    )
+    monkeypatch.setattr(dashboard, "_build_processing_activity_snapshot", build)
+
+    assert dashboard._processing_activity_snapshot()["revision"] == "1"
+    source[0] = ("source", 2)
+    # Revision 2 spans source epochs 2 and 3, so it is never published over
+    # the last known-good revision.
+    assert dashboard._processing_activity_snapshot()["revision"] == "1"
+    assert dashboard._PROCESSING_ACTIVITY_CACHE["source"] is None
+    assert dashboard._processing_activity_snapshot()["revision"] == "3"
+    assert calls == 3
+
+
+def test_processing_activity_cold_cache_retries_cross_epoch_build(
+    monkeypatch,
+) -> None:
+    _reset_processing_activity_cache()
+    source = [("source", 1)]
+    calls = 0
+
+    def build() -> dict:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            source[0] = ("source", 2)
+        return {"revision": str(calls), "active_count": 0, "lanes": []}
+
+    monkeypatch.setattr(
+        dashboard, "_processing_activity_source_fingerprint", lambda: source[0]
+    )
+    monkeypatch.setattr(dashboard, "_build_processing_activity_snapshot", build)
+
+    snapshot = dashboard._processing_activity_snapshot()
+
+    assert snapshot["revision"] == "2"
+    assert calls == 2
+    assert dashboard._PROCESSING_ACTIVITY_CACHE["source"] == ("source", 2)
+    assert snapshot["_dashboard"]["activity_cache"]["build_count"] == 1
+
+
+def test_processing_activity_cold_cache_fails_closed_after_two_epoch_changes(
+    monkeypatch,
+) -> None:
+    _reset_processing_activity_cache()
+    source = [0]
+
+    def build() -> dict:
+        source[0] += 1
+        return {"revision": str(source[0]), "active_count": 0, "lanes": []}
+
+    monkeypatch.setattr(
+        dashboard,
+        "_processing_activity_source_fingerprint",
+        lambda: ("source", source[0]),
+    )
+    monkeypatch.setattr(dashboard, "_build_processing_activity_snapshot", build)
+
+    with pytest.raises(RuntimeError, match="source changed during two builds"):
+        dashboard._processing_activity_snapshot()
+
+    assert dashboard._PROCESSING_ACTIVITY_CACHE["snapshot"] is None
+    assert dashboard._PROCESSING_ACTIVITY_CACHE["refreshing"] is False
+    assert dashboard._PROCESSING_ACTIVITY_CACHE["error_count"] == 1
+
+
+@pytest.mark.parametrize(
+    ("active_count", "lanes"),
+    [
+        (0, []),
+        (1, [{"state": "active", "recent": False}]),
+    ],
+    ids=["idle", "ongoing"],
+)
+def test_processing_activity_cache_audits_idle_and_ongoing_at_one_second(
+    monkeypatch, active_count: int, lanes: list[dict]
+) -> None:
+    _reset_processing_activity_cache()
+    clock = [200.0]
+    calls = 0
+
+    def build() -> dict:
+        nonlocal calls
+        calls += 1
+        return {
+            "revision": str(calls),
+            "active_count": active_count,
+            "lanes": lanes,
+        }
+
+    class ImmediateThread:
+        def __init__(self, *, target, args, **_kwargs) -> None:
+            self.target = target
+            self.args = args
+
+        def start(self) -> None:
+            self.target(*self.args)
+
+    monkeypatch.setattr(dashboard.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        dashboard, "_processing_activity_source_fingerprint", lambda: ("same",)
+    )
+    monkeypatch.setattr(dashboard, "_build_processing_activity_snapshot", build)
+    monkeypatch.setattr(dashboard.threading, "Thread", ImmediateThread)
+
+    assert dashboard._processing_activity_snapshot()["revision"] == "1"
+    clock[0] += dashboard.PROCESSING_ACTIVITY_AUDIT_SECONDS - 0.001
+    assert dashboard._processing_activity_snapshot()["revision"] == "1"
+    clock[0] += 0.001
+    assert dashboard._processing_activity_snapshot()["revision"] == "1"
+    refreshed = dashboard._processing_activity_snapshot()
+
+    assert refreshed["revision"] == "2"
+    assert calls == 2
+    metrics = refreshed["_dashboard"]["activity_cache"]
+    assert metrics["audit_seconds"] == 1.0
+    assert metrics["recent_audit_seconds"] == 0.25
+    assert "active_audit_seconds" not in metrics
+
+
+def test_processing_activity_cache_audits_recent_lane_at_poll_cadence(
+    monkeypatch,
+) -> None:
+    _reset_processing_activity_cache()
+    clock = [400.0]
+    calls = 0
+
+    def build() -> dict:
+        nonlocal calls
+        calls += 1
+        return {
+            "revision": str(calls),
+            "active_count": 1,
+            "lanes": [{"state": "active", "recent": True}],
+        }
+
+    class ImmediateThread:
+        def __init__(self, *, target, args, **_kwargs) -> None:
+            self.target = target
+            self.args = args
+
+        def start(self) -> None:
+            self.target(*self.args)
+
+    monkeypatch.setattr(dashboard.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        dashboard, "_processing_activity_source_fingerprint", lambda: ("same",)
+    )
+    monkeypatch.setattr(dashboard, "_build_processing_activity_snapshot", build)
+    monkeypatch.setattr(dashboard.threading, "Thread", ImmediateThread)
+
+    assert dashboard._processing_activity_snapshot()["revision"] == "1"
+    clock[0] += dashboard.PROCESSING_ACTIVITY_RECENT_AUDIT_SECONDS - 0.001
+    assert dashboard._processing_activity_snapshot()["revision"] == "1"
+    clock[0] += 0.001
+    assert dashboard._processing_activity_snapshot()["revision"] == "1"
+    refreshed = dashboard._processing_activity_snapshot()
+
+    assert refreshed["revision"] == "2"
+    assert calls == 2
+    assert (
+        dashboard.PROCESSING_ACTIVITY_RECENT_AUDIT_SECONDS
+        == dashboard.PROCESSING_ACTIVITY_POLL_SECONDS
+    )
+    assert (
+        dashboard.PROCESSING_ACTIVITY_RECENT_AUDIT_SECONDS
+        < dashboard.MODEL_ACTIVITY_VISIBLE_SECONDS
+    )
+
+
+def test_processing_activity_cache_keeps_stale_success_and_retries_on_audit(
+    monkeypatch,
+) -> None:
+    _reset_processing_activity_cache()
+    clock = [300.0]
+    source = [("source", 1)]
+    attempts = 0
+
+    def build() -> dict:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 2:
+            raise RuntimeError("transient")
+        return {"revision": str(attempts), "active_count": 0, "lanes": []}
+
+    class ImmediateThread:
+        def __init__(self, *, target, args, **_kwargs) -> None:
+            self.target = target
+            self.args = args
+
+        def start(self) -> None:
+            self.target(*self.args)
+
+    monkeypatch.setattr(dashboard.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        dashboard, "_processing_activity_source_fingerprint", lambda: source[0]
+    )
+    monkeypatch.setattr(dashboard, "_build_processing_activity_snapshot", build)
+    monkeypatch.setattr(dashboard.threading, "Thread", ImmediateThread)
+
+    assert dashboard._processing_activity_snapshot()["revision"] == "1"
+    source[0] = ("source", 2)
+    failed_refresh = dashboard._processing_activity_snapshot()
+    assert failed_refresh["revision"] == "1"
+    assert failed_refresh["_dashboard"]["activity_cache"]["error_count"] == 1
+    assert dashboard._processing_activity_snapshot()["revision"] == "1"
+    assert attempts == 2
+
+    clock[0] += dashboard.PROCESSING_ACTIVITY_AUDIT_SECONDS
+    assert dashboard._processing_activity_snapshot()["revision"] == "1"
+    assert dashboard._processing_activity_snapshot()["revision"] == "3"
+    assert attempts == 3
 
 
 def test_processing_role_projection_covers_dashboard_lanes() -> None:
@@ -1096,6 +1496,46 @@ def test_dashboard_static_labels_routine_review_as_local_consensus() -> None:
     assert 'details.push("just completed")' in app
 
 
+def test_dashboard_reuses_decision_trace_poll_for_live_consensus_status() -> None:
+    app = (dashboard.STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    summary_helper = app.split(
+        "function renderLocalConsensusSummary(status)", 1
+    )[1].split("function render(snapshot)", 1)[0]
+    render_block = app.split("function render(snapshot)", 1)[1].split(
+        "let refreshInFlight", 1
+    )[0]
+    live_helper = app.split("function renderLiveConsensus(consensus)", 1)[1].split(
+        "async function refreshDecisionTrace", 1
+    )[0]
+    refresh_block = app.split("async function refreshDecisionTrace()", 1)[1].split(
+        "async function decisionTraceRefreshLoop", 1
+    )[0]
+
+    assert "let latestRenderedStatus = null;" in app
+    assert "latestRenderedStatus = status;" in render_block
+    assert "renderLocalConsensusSummary(status);" in render_block
+    assert "status.decision_policies" in summary_helper
+    assert "...latestRenderedStatus" in live_helper
+    assert "...currentConsensus" in live_helper
+    assert "...liveConsensus" in live_helper
+    assert "...(currentConsensus.summary || {})" in live_helper
+    assert "...(liveConsensus.summary || {})" in live_helper
+    assert "local_consensus: mergedConsensus" in live_helper
+    assert "renderDecisionTrace(mergedConsensus);" in live_helper
+    assert (
+        'const underlyingState = String(latestRenderedStatus.state || "").toLowerCase();'
+        in live_helper
+    )
+    assert '["error", "blocked"].includes(underlyingState)' in live_helper
+    assert 'mergedConsensus.active ? "running" : latestRenderedStatus.state' in live_helper
+    assert "setState(displayState);" in live_helper
+    assert "renderLocalConsensusSummary(latestRenderedStatus);" in live_helper
+    assert "renderWorkStatus(latestRenderedStatus);" in live_helper
+    assert 'fetch("/api/local-consensus"' in refresh_block
+    assert "renderLiveConsensus(consensus);" in refresh_block
+    assert refresh_block.count("fetch(") == 1
+
+
 def test_dashboard_static_layout_aligns_peer_panels_and_contains_event_badges() -> None:
     style = (dashboard.STATIC_DIR / "style.css").read_text(encoding="utf-8")
 
@@ -1497,9 +1937,193 @@ def test_dashboard_basic_auth_rate_limits_repeated_failures(
     assert blocked.status_code == 429
 
 
-def test_cached_snapshot_reuses_idle_result_until_a_source_changes(
+def test_snapshot_fingerprint_probe_single_flights_concurrent_callers(
+    monkeypatch,
+) -> None:
+    _reset_snapshot_fingerprint_cache()
+    entered = threading.Event()
+    release = threading.Event()
+    calls = 0
+
+    def build_fingerprint() -> tuple[str, int]:
+        nonlocal calls
+        calls += 1
+        entered.set()
+        assert release.wait(timeout=2)
+        return ("fingerprint", calls)
+
+    monkeypatch.setattr(
+        dashboard, "_snapshot_source_probe_identity", lambda: ("source",)
+    )
+    monkeypatch.setattr(
+        dashboard, "_build_snapshot_source_fingerprint", build_fingerprint
+    )
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        futures = [
+            pool.submit(dashboard._snapshot_source_fingerprint) for _ in range(8)
+        ]
+        assert entered.wait(timeout=2)
+        release.set()
+        fingerprints = [future.result(timeout=2) for future in futures]
+
+    assert calls == 1
+    assert fingerprints == [("fingerprint", 1)] * 8
+    assert dashboard._SNAPSHOT_FINGERPRINT_CACHE["probe_count"] == 1
+    assert dashboard._SNAPSHOT_FINGERPRINT_CACHE["coalesced"] >= 1
+
+
+def test_snapshot_fingerprint_probe_reuses_audit_and_invalidates_source(
+    monkeypatch,
+) -> None:
+    _reset_snapshot_fingerprint_cache()
+    clock = [400.0]
+    source = [("source", 1)]
+    calls = 0
+
+    def build_fingerprint() -> tuple[str, int]:
+        nonlocal calls
+        calls += 1
+        return ("fingerprint", calls)
+
+    monkeypatch.setattr(dashboard.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        dashboard, "_snapshot_source_probe_identity", lambda: source[0]
+    )
+    monkeypatch.setattr(
+        dashboard, "_build_snapshot_source_fingerprint", build_fingerprint
+    )
+
+    assert dashboard._snapshot_source_fingerprint() == ("fingerprint", 1)
+    assert dashboard._snapshot_source_fingerprint() == ("fingerprint", 1)
+    clock[0] += dashboard.SNAPSHOT_FINGERPRINT_AUDIT_SECONDS - 0.001
+    assert dashboard._snapshot_source_fingerprint() == ("fingerprint", 1)
+
+    source[0] = ("source", 2)
+    assert dashboard._snapshot_source_fingerprint() == ("fingerprint", 2)
+    clock[0] += dashboard.SNAPSHOT_FINGERPRINT_AUDIT_SECONDS
+    assert dashboard._snapshot_source_fingerprint() == ("fingerprint", 3)
+    assert calls == 3
+
+
+def test_snapshot_fingerprint_probe_releases_waiters_after_error(
+    monkeypatch,
+) -> None:
+    _reset_snapshot_fingerprint_cache()
+    calls = 0
+
+    def build_fingerprint() -> tuple[str, int]:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("probe failed")
+        return ("fingerprint", calls)
+
+    monkeypatch.setattr(
+        dashboard, "_snapshot_source_probe_identity", lambda: ("source",)
+    )
+    monkeypatch.setattr(
+        dashboard, "_build_snapshot_source_fingerprint", build_fingerprint
+    )
+
+    with pytest.raises(RuntimeError, match="probe failed"):
+        dashboard._snapshot_source_fingerprint()
+    assert dashboard._SNAPSHOT_FINGERPRINT_CACHE["probing"] is False
+    assert dashboard._SNAPSHOT_FINGERPRINT_CACHE["error_count"] == 1
+    assert dashboard._snapshot_source_fingerprint() == ("fingerprint", 2)
+
+
+def test_snapshot_probe_identity_isolates_root_and_builder(
     tmp_path: Path, monkeypatch
 ) -> None:
+    first_root = tmp_path / "first"
+    second_root = tmp_path / "second"
+    monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", first_root)
+    first = dashboard._snapshot_source_probe_identity()
+
+    monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", second_root)
+    second = dashboard._snapshot_source_probe_identity()
+    assert first != second
+
+    original_builder = dashboard.build_snapshot
+    monkeypatch.setattr(dashboard, "build_snapshot", lambda: {})
+    replaced_builder = dashboard._snapshot_source_probe_identity()
+    assert replaced_builder != second
+    monkeypatch.setattr(dashboard, "build_snapshot", original_builder)
+
+
+def test_snapshot_fingerprint_tracks_explicit_runtime_cold_sources(
+    tmp_path: Path, monkeypatch
+) -> None:
+    chronovisor_root = tmp_path / "wiki"
+    runtime_dir = chronovisor_root / "runtime"
+    artifact_dir = runtime_dir / "raw-projections" / "artifacts"
+    artifact_dir.mkdir(parents=True)
+    monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", chronovisor_root)
+    monkeypatch.setattr(dashboard, "LOG_FILE", chronovisor_root / "log.md")
+    monkeypatch.setattr(
+        orchestrator, "STATE_FILE", chronovisor_root / ".orchestrator_state.json"
+    )
+    monkeypatch.setattr(runtime_status, "STATUS_FILE", runtime_dir / "status.json")
+    monkeypatch.setattr(runtime_status, "EVENTS_FILE", runtime_dir / "events.jsonl")
+    monkeypatch.setattr(runtime_status, "METRICS_FILE", runtime_dir / "metrics.jsonl")
+
+    before = dashboard._build_snapshot_source_fingerprint()
+    temporary = artifact_dir / ".raw.tmp"
+    temporary.write_text("projection\n", encoding="utf-8")
+    os.replace(temporary, artifact_dir / "raw.md")
+    after_projection = dashboard._build_snapshot_source_fingerprint()
+    assert after_projection != before
+
+    (runtime_dir / "ingest-liveness.json").write_text("{}\n", encoding="utf-8")
+    after_liveness = dashboard._build_snapshot_source_fingerprint()
+    assert after_liveness != after_projection
+
+
+def test_cached_snapshot_and_fingerprint_probe_have_no_lock_cycle(
+    monkeypatch,
+) -> None:
+    _reset_snapshot_fingerprint_cache()
+    dashboard._SNAPSHOT_CACHE.update(
+        {
+            "built_at": 0.0,
+            "fingerprint": None,
+            "snapshot": None,
+            "refreshing": False,
+        }
+    )
+    builds = 0
+
+    def build_snapshot() -> dict:
+        nonlocal builds
+        builds += 1
+        return {
+            "serial": builds,
+            "status": {"state": "idle", "batch": {"active": False}},
+        }
+
+    monkeypatch.setattr(
+        dashboard, "_snapshot_source_probe_identity", lambda: ("source",)
+    )
+    monkeypatch.setattr(
+        dashboard,
+        "_build_snapshot_source_fingerprint",
+        lambda: ("fingerprint",),
+    )
+    monkeypatch.setattr(dashboard, "build_snapshot", build_snapshot)
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        futures = [pool.submit(dashboard._cached_snapshot) for _ in range(8)]
+        snapshots = [future.result(timeout=3) for future in futures]
+
+    assert {snapshot["serial"] for snapshot in snapshots} == {1}
+    assert builds == 1
+
+
+def test_cached_snapshot_ignores_live_status_churn_but_refreshes_cold_sources(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _reset_snapshot_fingerprint_cache()
     chronovisor_root = tmp_path / "wiki"
     runtime_dir = chronovisor_root / "runtime"
     runtime_dir.mkdir(parents=True)
@@ -1530,17 +2154,116 @@ def test_cached_snapshot_reuses_idle_result_until_a_source_changes(
         }
 
     monkeypatch.setattr(dashboard, "build_snapshot", fake_build)
+    runtime_status.STATUS_FILE.write_text(
+        json.dumps(
+            {
+                "state": "running",
+                "stage": "raw",
+                "current_job_id": "job-1",
+                "current_raw": "raw.md",
+                "updated_at": "2026-08-05T10:00:00+09:00",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
     assert dashboard._cached_snapshot()["serial"] == 1
     assert dashboard._cached_snapshot()["serial"] == 1
-    runtime_status.STATUS_FILE.write_text("{}\n", encoding="utf-8")
+    temporary = runtime_dir / ".status.tmp"
+    temporary.write_text(
+        json.dumps(
+            {
+                "state": "running",
+                "stage": "generate",
+                "current_job_id": "job-1",
+                "current_raw": "raw.md",
+                "updated_at": "2026-08-05T10:00:01+09:00",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    os.replace(temporary, runtime_status.STATUS_FILE)
+    # Force a full probe to prove neither status.json nor the runtime root
+    # directory identity participates in the cold fingerprint.
+    dashboard._invalidate_snapshot_fingerprint_probe()
+    assert dashboard._cached_snapshot()["serial"] == 1
+
+    runtime_status.EVENTS_FILE.write_text("{}\n", encoding="utf-8")
     assert dashboard._cached_snapshot()["serial"] == 2
     assert calls == 2
 
 
-def test_cached_snapshot_uses_short_ttl_while_active(
+def test_cached_snapshot_refreshes_on_semantic_runtime_epoch_change(
     tmp_path: Path, monkeypatch
 ) -> None:
+    _reset_snapshot_fingerprint_cache()
+    chronovisor_root = tmp_path / "wiki"
+    runtime_dir = chronovisor_root / "runtime"
+    runtime_dir.mkdir(parents=True)
+    monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", chronovisor_root)
+    monkeypatch.setattr(dashboard, "LOG_FILE", chronovisor_root / "log.md")
+    monkeypatch.setattr(
+        orchestrator, "STATE_FILE", chronovisor_root / ".orchestrator_state.json"
+    )
+    monkeypatch.setattr(runtime_status, "STATUS_FILE", runtime_dir / "status.json")
+    monkeypatch.setattr(runtime_status, "EVENTS_FILE", runtime_dir / "events.jsonl")
+    monkeypatch.setattr(runtime_status, "METRICS_FILE", runtime_dir / "metrics.jsonl")
+    dashboard._SNAPSHOT_CACHE.update(
+        {
+            "built_at": 0.0,
+            "fingerprint": None,
+            "snapshot": None,
+            "refreshing": False,
+        }
+    )
+    runtime_status.STATUS_FILE.write_text(
+        '{"state": "idle", "stage": "idle"}\n', encoding="utf-8"
+    )
+    calls = 0
+
+    def fake_build() -> dict:
+        nonlocal calls
+        calls += 1
+        live = runtime_status.read_status()
+        active = live.get("state") == "running"
+        return {
+            "serial": calls,
+            "status": {
+                "state": "running" if active else "idle",
+                "batch": {"active": active},
+            },
+        }
+
+    monkeypatch.setattr(dashboard, "build_snapshot", fake_build)
+
+    assert dashboard._cached_snapshot()["serial"] == 1
+    temporary = runtime_dir / ".status.tmp"
+    temporary.write_text(
+        json.dumps(
+            {
+                "state": "running",
+                "stage": "raw",
+                "current_job_id": "job-2",
+                "current_raw": "next.md",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    os.replace(temporary, runtime_status.STATUS_FILE)
+
+    refreshed = dashboard._cached_snapshot()
+    assert refreshed["serial"] == 2
+    assert refreshed["status"]["state"] == "running"
+    assert calls == 2
+
+
+def test_cached_snapshot_uses_30_second_cold_ttl_while_active(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _reset_snapshot_fingerprint_cache()
     chronovisor_root = tmp_path / "wiki"
     chronovisor_root.mkdir()
     monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", chronovisor_root)
@@ -1571,16 +2294,196 @@ def test_cached_snapshot_uses_short_ttl_while_active(
     monkeypatch.setattr(dashboard.time, "monotonic", lambda: clock[0])
 
     assert dashboard._cached_snapshot()["serial"] == 1
-    clock[0] += dashboard.SNAPSHOT_ACTIVE_CACHE_SECONDS / 2
+    assert dashboard.SNAPSHOT_ACTIVE_CACHE_SECONDS == 30.0
+    clock[0] += dashboard.SNAPSHOT_ACTIVE_CACHE_SECONDS - 0.001
     assert dashboard._cached_snapshot()["serial"] == 1
-    clock[0] += dashboard.SNAPSHOT_ACTIVE_CACHE_SECONDS
+    clock[0] += 0.001
     assert dashboard._cached_snapshot()["serial"] == 2
     assert calls == 2
+
+
+def test_snapshot_live_status_overlay_is_non_mutating_and_preserves_cold_fields(
+    monkeypatch,
+) -> None:
+    cached = {
+        "status": {
+            "state": "idle",
+            "stage": "idle",
+            "pending": 7,
+            "batch": {"index": 4, "total": 4, "active": False},
+            "local_consensus": {"active": False, "count": 11},
+            "frontier_repair": {"active": False, "summary": {"total": 3}},
+            "frontier_review": {"active": False, "count": 2},
+            "decision_policies": {"lanes": {"ingest": "enabled"}},
+            "semantic_deferred": {"count": 2, "samples": ["semantic.md"]},
+            "operational_deferred": {"count": 1, "samples": ["blocked.md"]},
+            "raw_outstanding": 10,
+        },
+        "events": [{"kind": "cold"}],
+        "local_consensus": {"active": False, "count": 11},
+        "_dashboard": {"detail_state": "ready"},
+    }
+    original = json.loads(json.dumps(cached))
+    monkeypatch.setattr(
+        runtime_status,
+        "read_status",
+        lambda: {
+            "state": "running",
+            "stage": "generate",
+            "current_job_id": "job-live",
+            "current_job_pid": 42,
+            "current_raw": "new.md",
+            "current_op": "create",
+            "batch": {"index": 1, "total": 3},
+            "llm": {"active": True, "model": "live:model"},
+            "semantic_deferred": {"count": 999},
+        },
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_load_state",
+        lambda: {
+            "current_job_id": "job-live",
+            "current_job_pid": 42,
+            "current_job_started_at": "2026-08-05T10:00:00+09:00",
+        },
+    )
+    monkeypatch.setattr(
+        orchestrator, "ingest_process_lease_is_held", lambda _pid: True
+    )
+    monkeypatch.setattr(
+        dashboard, "_job_process_identity_matches", lambda _pid, _started: True
+    )
+
+    overlaid = dashboard._snapshot_with_live_status(cached)
+
+    assert overlaid["status"]["state"] == "running"
+    assert overlaid["status"]["stage"] == "generate"
+    assert overlaid["status"]["current_job_id"] == "job-live"
+    assert overlaid["status"]["current_raw"] == "new.md"
+    assert overlaid["status"]["pending"] == 7
+    assert overlaid["status"]["batch"]["active"] is True
+    for key in dashboard._COLD_STATUS_DERIVED_KEYS:
+        assert overlaid["status"][key] == cached["status"][key]
+    assert overlaid["events"] == [{"kind": "cold"}]
+    assert overlaid["_dashboard"] == {
+        "detail_state": "ready",
+        "live_overlay": True,
+    }
+    assert cached == original
+
+
+def test_snapshot_live_status_overlay_reflects_idle_to_active_next_response(
+    monkeypatch,
+) -> None:
+    cached = {
+        "status": {
+            "state": "idle",
+            "stage": "idle",
+            "pending": 1,
+            "batch": {"active": False},
+        }
+    }
+    live = [{"state": "idle", "stage": "idle", "batch": {"active": False}}]
+    orch = [{}]
+    monkeypatch.setattr(runtime_status, "read_status", lambda: dict(live[0]))
+    monkeypatch.setattr(orchestrator, "_load_state", lambda: dict(orch[0]))
+    monkeypatch.setattr(
+        orchestrator, "ingest_process_lease_is_held", lambda _pid: True
+    )
+    monkeypatch.setattr(
+        dashboard, "_job_process_identity_matches", lambda _pid, _started: True
+    )
+
+    first = dashboard._snapshot_with_live_status(cached)
+    assert first["status"]["state"] == "idle"
+
+    live[0] = {
+        "state": "running",
+        "stage": "raw",
+        "current_job_id": "job-2",
+        "current_job_pid": 84,
+        "current_raw": "raw.md",
+        "batch": {"index": 1, "total": 2},
+    }
+    orch[0] = {
+        "current_job_id": "job-2",
+        "current_job_pid": 84,
+        "current_job_started_at": "2026-08-05T11:00:00+09:00",
+    }
+    second = dashboard._snapshot_with_live_status(cached)
+
+    assert second["status"]["state"] == "running"
+    assert second["status"]["stage"] == "raw"
+    assert second["status"]["current_job_id"] == "job-2"
+    assert second["status"]["batch"]["active"] is True
+    assert cached["status"]["state"] == "idle"
+
+
+def test_snapshot_live_status_overlay_failure_keeps_cached_snapshot(
+    monkeypatch,
+) -> None:
+    cached = {
+        "status": {"state": "idle", "stage": "idle", "pending": 2},
+        "events": [{"kind": "cold"}],
+        "_dashboard": {"detail_state": "refreshing", "stale": True},
+    }
+    original = json.loads(json.dumps(cached))
+    monkeypatch.setattr(
+        runtime_status,
+        "read_status",
+        lambda: (_ for _ in ()).throw(RuntimeError("status unavailable")),
+    )
+
+    overlaid = dashboard._snapshot_with_live_status(cached)
+
+    assert overlaid["status"] == cached["status"]
+    assert overlaid["events"] == cached["events"]
+    assert overlaid["_dashboard"] == {
+        "detail_state": "refreshing",
+        "stale": True,
+        "live_overlay": False,
+        "live_overlay_error": "RuntimeError",
+    }
+    assert cached == original
+
+
+def test_snapshot_routes_apply_live_overlay() -> None:
+    source = Path(dashboard.__file__).read_text(encoding="utf-8")
+    snapshot_route = source.split('elif path == "/api/snapshot":', 1)[1].split(
+        'elif path == "/api/status":', 1
+    )[0]
+    status_route = source.split('elif path == "/api/status":', 1)[1].split(
+        'elif path == "/api/local-consensus":', 1
+    )[0]
+
+    assert "_snapshot_with_live_status(" in snapshot_route
+    assert "_cached_snapshot(allow_stale=True)" in snapshot_route
+    assert "_snapshot_with_live_status(" in status_route
+    assert '"_dashboard": snapshot.get("_dashboard") or {}' in status_route
+
+
+def test_local_consensus_route_stays_on_direct_live_path() -> None:
+    source = Path(dashboard.__file__).read_text(encoding="utf-8")
+    local_consensus_route = source.split(
+        'elif path == "/api/local-consensus":', 1
+    )[1].split('elif path == "/api/activity":', 1)[0]
+    processing_source = source.split(
+        "def _processing_activity_source_fingerprint", 1
+    )[1].split("def _processing_activity_cache_metrics_locked", 1)[0]
+
+    assert "_local_consensus_snapshot()" in local_consensus_route
+    assert "_cached_snapshot" not in local_consensus_route
+    assert (
+        'CHRONOVISOR_ROOT / "runtime" / "local-consensus" / "active"'
+        in processing_source
+    )
 
 
 def test_cached_snapshot_serves_stale_while_refreshing_in_background(
     monkeypatch,
 ) -> None:
+    _reset_snapshot_fingerprint_cache()
     dashboard._SNAPSHOT_CACHE.update(
         {
             "built_at": 0.0,
@@ -1806,6 +2709,7 @@ def test_materialized_component_returns_stale_while_audit_refreshes(
 def test_cached_snapshot_rebuilds_after_a_source_changes_during_build(
     tmp_path: Path, monkeypatch
 ) -> None:
+    _reset_snapshot_fingerprint_cache()
     chronovisor_root = tmp_path / "wiki"
     runtime_dir = chronovisor_root / "runtime"
     runtime_dir.mkdir(parents=True)
@@ -1831,7 +2735,7 @@ def test_cached_snapshot_rebuilds_after_a_source_changes_during_build(
         nonlocal calls
         calls += 1
         if calls == 1:
-            runtime_status.STATUS_FILE.write_text("{}\n", encoding="utf-8")
+            runtime_status.EVENTS_FILE.write_text("{}\n", encoding="utf-8")
         return {
             "serial": calls,
             "status": {"state": "idle", "batch": {"active": False}},
@@ -1840,21 +2744,35 @@ def test_cached_snapshot_rebuilds_after_a_source_changes_during_build(
     monkeypatch.setattr(dashboard, "build_snapshot", fake_build)
 
     assert dashboard._cached_snapshot()["serial"] == 1
+    assert dashboard._SNAPSHOT_CACHE["fingerprint"] is None
     assert dashboard._cached_snapshot()["serial"] == 2
     assert dashboard._cached_snapshot()["serial"] == 2
     assert calls == 2
 
 
-def test_cached_idle_snapshot_invalidates_on_standalone_consensus_activity(
+def test_cached_snapshot_ignores_local_consensus_live_file_churn(
     tmp_path: Path, monkeypatch
 ) -> None:
+    _reset_snapshot_fingerprint_cache()
     chronovisor_root = tmp_path / "wiki"
-    chronovisor_root.mkdir()
+    runtime_dir = chronovisor_root / "runtime"
+    consensus_dir = runtime_dir / "local-consensus"
+    active_dir = consensus_dir / "active"
+    active_dir.mkdir(parents=True)
+    summary = consensus_dir / "summary.json"
+    audit = consensus_dir / "audit.jsonl"
+    trace = consensus_dir / "trace-events.jsonl"
+    summary.write_text('{"revision": 1}\n', encoding="utf-8")
+    audit.write_text('{"revision": 1}\n', encoding="utf-8")
+    trace.write_text('{"revision": 1}\n', encoding="utf-8")
     monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", chronovisor_root)
     monkeypatch.setattr(dashboard, "LOG_FILE", chronovisor_root / "log.md")
     monkeypatch.setattr(
         orchestrator, "STATE_FILE", chronovisor_root / ".orchestrator_state.json"
     )
+    monkeypatch.setattr(runtime_status, "STATUS_FILE", runtime_dir / "status.json")
+    monkeypatch.setattr(runtime_status, "EVENTS_FILE", runtime_dir / "events.jsonl")
+    monkeypatch.setattr(runtime_status, "METRICS_FILE", runtime_dir / "metrics.jsonl")
     dashboard._SNAPSHOT_CACHE.update(
         {
             "built_at": 0.0,
@@ -1876,11 +2794,38 @@ def test_cached_idle_snapshot_invalidates_on_standalone_consensus_activity(
     monkeypatch.setattr(dashboard, "build_snapshot", fake_build)
 
     assert dashboard._cached_snapshot()["serial"] == 1
-    active_dir = chronovisor_root / "runtime" / "local-consensus" / "active"
-    active_dir.mkdir(parents=True)
-    (active_dir / "request.json").write_text("{}\n", encoding="utf-8")
-    assert dashboard._cached_snapshot()["serial"] == 2
-    assert calls == 2
+    before = dashboard._build_snapshot_source_fingerprint()
+
+    marker_temporary = active_dir / ".request.tmp"
+    marker = active_dir / "request.json"
+    marker_temporary.write_text('{"revision": 2}\n', encoding="utf-8")
+    os.replace(marker_temporary, marker)
+    summary_temporary = consensus_dir / ".summary.tmp"
+    summary_temporary.write_text('{"revision": 2}\n', encoding="utf-8")
+    os.replace(summary_temporary, summary)
+    with audit.open("a", encoding="utf-8") as handle:
+        handle.write('{"revision": 2}\n')
+    with trace.open("a", encoding="utf-8") as handle:
+        handle.write('{"revision": 2}\n')
+
+    dashboard._invalidate_snapshot_fingerprint_probe()
+    after_create = dashboard._build_snapshot_source_fingerprint()
+    assert after_create == before
+    assert dashboard._cached_snapshot()["serial"] == 1
+
+    marker.unlink()
+    summary_temporary.write_text('{"revision": 3}\n', encoding="utf-8")
+    os.replace(summary_temporary, summary)
+    with audit.open("a", encoding="utf-8") as handle:
+        handle.write('{"revision": 3}\n')
+    with trace.open("a", encoding="utf-8") as handle:
+        handle.write('{"revision": 3}\n')
+
+    dashboard._invalidate_snapshot_fingerprint_probe()
+    after_remove = dashboard._build_snapshot_source_fingerprint()
+    assert after_remove == before
+    assert dashboard._cached_snapshot()["serial"] == 1
+    assert calls == 1
 
 
 def test_build_snapshot_surfaces_frontier_human_required(

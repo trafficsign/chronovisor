@@ -228,6 +228,7 @@ let selectedSaveDate = null;
 let knowledgeMixMode = "size";
 let latestKnowledgeMix = null;
 let saveLoadHitRegions = [];
+let latestRenderedStatus = null;
 
 const KNOWLEDGE_COLORS = [
   "#828fff",
@@ -2921,10 +2922,48 @@ function renderRecallImprovement(lab) {
   });
 }
 
+function renderLocalConsensusSummary(status) {
+  const consensus = status.local_consensus || {};
+  const consensusSummary = consensus.summary || {};
+  const decisionSummary = consensusSummary.decisions || {};
+  const evaluationSummary = (consensusSummary.evaluation || {}).decisions || {};
+  const policyCounts = ((status.decision_policies || {}).counts) || {};
+  const dissentEffects = decisionSummary.dissent_effect_classes || {};
+  const dissentSummary = Object.entries(dissentEffects)
+    .filter(([, count]) => intValue(count) > 0)
+    .map(([effect, count]) => `${effect} ${intValue(count)}`)
+    .join(" / ") || "none";
+  const modelConservativeRates = decisionSummary.model_conservative_vote_rates || {};
+  const conservativeVoteSummary = Object.entries(modelConservativeRates)
+    .map(([modelName, counts]) => {
+      const rate = numeric(counts?.conservative_rate)
+        ? pctLabel(counts.conservative_rate)
+        : "0.0%";
+      return `${shortName(modelName)} ${rate}`;
+    })
+    .join(" / ") || "none";
+  const vetoSummary = [
+    `veto ${intValue(decisionSummary.conservative_veto_fired)}`,
+    `bypassed ${intValue(decisionSummary.conservative_veto_bypassed_by_lane_policy)}`,
+    `dissent ${dissentSummary}`,
+    `conservative votes ${conservativeVoteSummary}`,
+  ].join(" · ");
+  const activeModels = (consensus.activities || [])
+    .map((item) => [item.role, item.model].filter(Boolean).join(" · "))
+    .filter(Boolean);
+  els.localConsensus.textContent = consensus.active
+    ? `${intValue(consensus.count)} active · ${activeModels.join(" · ")} · ${vetoSummary}`
+    : `${intValue(decisionSummary.total)} routine · ${intValue(decisionSummary.pair_agreement)} pair · ${intValue(decisionSummary.tie_break_used)} tie · ${intValue(decisionSummary.unresolved_quarantine)} quarantined · ${vetoSummary} · ${intValue(evaluationSummary.total)} eval · ${intValue(policyCounts.shadow)} shadow / ${intValue(policyCounts.enabled)} enabled`;
+}
+
 function render(snapshot) {
-  const status = snapshot.status || {};
-  status.local_consensus = snapshot.local_consensus || status.local_consensus || {};
-  status.frontier_repair = snapshot.frontier_repair || status.frontier_repair || {};
+  const snapshotStatus = snapshot.status || {};
+  const status = {
+    ...snapshotStatus,
+    local_consensus: snapshot.local_consensus || snapshotStatus.local_consensus || {},
+    frontier_repair: snapshot.frontier_repair || snapshotStatus.frontier_repair || {},
+  };
+  latestRenderedStatus = status;
   const metrics = snapshot.metrics || [];
   const batch = status.batch || {};
   const ollama = snapshot.ollama || {};
@@ -2959,37 +2998,7 @@ function render(snapshot) {
   renderWorkStatus(status);
   renderDecisionTrace(status.local_consensus || {});
   renderLlm(status.llm, status);
-  const consensus = status.local_consensus || {};
-  const consensusSummary = consensus.summary || {};
-  const decisionSummary = consensusSummary.decisions || {};
-  const evaluationSummary = (consensusSummary.evaluation || {}).decisions || {};
-  const policyCounts = ((status.decision_policies || {}).counts) || {};
-  const dissentEffects = decisionSummary.dissent_effect_classes || {};
-  const dissentSummary = Object.entries(dissentEffects)
-    .filter(([, count]) => intValue(count) > 0)
-    .map(([effect, count]) => `${effect} ${intValue(count)}`)
-    .join(" / ") || "none";
-  const modelConservativeRates = decisionSummary.model_conservative_vote_rates || {};
-  const conservativeVoteSummary = Object.entries(modelConservativeRates)
-    .map(([modelName, counts]) => {
-      const rate = numeric(counts?.conservative_rate)
-        ? pctLabel(counts.conservative_rate)
-        : "0.0%";
-      return `${shortName(modelName)} ${rate}`;
-    })
-    .join(" / ") || "none";
-  const vetoSummary = [
-    `veto ${intValue(decisionSummary.conservative_veto_fired)}`,
-    `bypassed ${intValue(decisionSummary.conservative_veto_bypassed_by_lane_policy)}`,
-    `dissent ${dissentSummary}`,
-    `conservative votes ${conservativeVoteSummary}`,
-  ].join(" · ");
-  const activeModels = (consensus.activities || [])
-    .map((item) => [item.role, item.model].filter(Boolean).join(" · "))
-    .filter(Boolean);
-  els.localConsensus.textContent = consensus.active
-    ? `${intValue(consensus.count)} active · ${activeModels.join(" · ")} · ${vetoSummary}`
-    : `${intValue(decisionSummary.total)} routine · ${intValue(decisionSummary.pair_agreement)} pair · ${intValue(decisionSummary.tie_break_used)} tie · ${intValue(decisionSummary.unresolved_quarantine)} quarantined · ${vetoSummary} · ${intValue(evaluationSummary.total)} eval · ${intValue(policyCounts.shadow)} shadow / ${intValue(policyCounts.enabled)} enabled`;
+  renderLocalConsensusSummary(status);
   const repair = status.frontier_repair || {};
   const repairSummary = repair.summary || {};
   const activeRepair = repair.active_incident || ((repair.process_activity || {}).latest) || {};
@@ -3105,6 +3114,32 @@ async function refreshLoop() {
   }
 }
 
+function renderLiveConsensus(consensus) {
+  const currentConsensus = latestRenderedStatus?.local_consensus || {};
+  const liveConsensus = consensus && typeof consensus === "object" ? consensus : {};
+  const mergedConsensus = {
+    ...currentConsensus,
+    ...liveConsensus,
+    summary: {
+      ...(currentConsensus.summary || {}),
+      ...(liveConsensus.summary || {}),
+    },
+  };
+  renderDecisionTrace(mergedConsensus);
+  if (!latestRenderedStatus) return;
+  latestRenderedStatus = {
+    ...latestRenderedStatus,
+    local_consensus: mergedConsensus,
+  };
+  const underlyingState = String(latestRenderedStatus.state || "").toLowerCase();
+  const displayState = ["error", "blocked"].includes(underlyingState)
+    ? underlyingState
+    : mergedConsensus.active ? "running" : latestRenderedStatus.state;
+  setState(displayState);
+  renderLocalConsensusSummary(latestRenderedStatus);
+  renderWorkStatus(latestRenderedStatus);
+}
+
 async function refreshDecisionTrace() {
   if (decisionRefreshInFlight) return;
   decisionRefreshInFlight = true;
@@ -3120,7 +3155,7 @@ async function refreshDecisionTrace() {
     });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const consensus = (await response.json()).local_consensus || {};
-    renderDecisionTrace(consensus);
+    renderLiveConsensus(consensus);
     nextDecisionRefreshDelayMs = consensus.active
       ? ACTIVE_DECISION_REFRESH_DELAY_MS
       : IDLE_DECISION_REFRESH_DELAY_MS;

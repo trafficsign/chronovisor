@@ -112,8 +112,11 @@ ACTIVE_BATCH_STAGES = {
     "apply",
 }
 DECISION_ROUTER_DASHBOARD_CACHE_SECONDS = 15.0
-SNAPSHOT_ACTIVE_CACHE_SECONDS = 5.0
+# Live runtime status is overlaid at response time; expensive cold aggregates
+# only need this bounded active refresh cadence.
+SNAPSHOT_ACTIVE_CACHE_SECONDS = 30.0
 SNAPSHOT_IDLE_CACHE_SECONDS = 60.0
+SNAPSHOT_FINGERPRINT_AUDIT_SECONDS = 1.0
 SAVE_HISTORY_SEGMENT_DETAIL_DAYS = 30
 SAVE_HISTORY_MAX_SEGMENTS_PER_DAY = 64
 DASHBOARD_MATERIALIZED_SCHEMA = "chronovisor.ops.dashboard-component.v1"
@@ -122,6 +125,8 @@ DASHBOARD_HEALTH_AUDIT_SECONDS = 60.0
 DASHBOARD_LOCAL_CONSENSUS_AUDIT_SECONDS = 300.0
 PROCESSING_ACTIVITY_POLL_SECONDS = 0.25
 PROCESSING_ACTIVITY_HEARTBEAT_SECONDS = 10.0
+PROCESSING_ACTIVITY_AUDIT_SECONDS = 1.0
+PROCESSING_ACTIVITY_RECENT_AUDIT_SECONDS = PROCESSING_ACTIVITY_POLL_SECONDS
 _PROCESS_IDENTITY_MATCH = "match"
 _PROCESS_IDENTITY_MISMATCH = "mismatch"
 _PROCESS_IDENTITY_UNAVAILABLE = "unavailable"
@@ -138,6 +143,35 @@ _SNAPSHOT_CACHE: dict[str, Any] = {
     "fingerprint": None,
     "snapshot": None,
     "refreshing": False,
+}
+_SNAPSHOT_FINGERPRINT_LOCK = threading.Lock()
+_SNAPSHOT_FINGERPRINT_CONDITION = threading.Condition(_SNAPSHOT_FINGERPRINT_LOCK)
+_SNAPSHOT_FINGERPRINT_CACHE: dict[str, Any] = {
+    "source": None,
+    "fingerprint": None,
+    "audited_at": 0.0,
+    "probing": False,
+    "generation": 0,
+    "probe_count": 0,
+    "cache_hits": 0,
+    "coalesced": 0,
+    "error_count": 0,
+}
+_PROCESSING_ACTIVITY_CACHE_LOCK = threading.Lock()
+_PROCESSING_ACTIVITY_CACHE_CONDITION = threading.Condition(
+    _PROCESSING_ACTIVITY_CACHE_LOCK
+)
+_PROCESSING_ACTIVITY_CACHE: dict[str, Any] = {
+    "source": None,
+    "snapshot": None,
+    "audited_at": 0.0,
+    "refreshing": False,
+    "build_count": 0,
+    "cache_hits": 0,
+    "coalesced": 0,
+    "error_count": 0,
+    "last_build_duration_ms": 0.0,
+    "last_error": None,
 }
 _MATERIALIZED_COMPONENT_LOCK = threading.RLock()
 _MATERIALIZED_COMPONENTS: dict[tuple[str, str], dict[str, Any]] = {}
@@ -2071,7 +2105,7 @@ def _processing_step_rows(
     ]
 
 
-def _processing_activity_snapshot() -> dict[str, Any]:
+def _build_processing_activity_snapshot() -> dict[str, Any]:
     """Return a cheap live projection for the dashboard processing lanes."""
 
     cached_status = runtime_status.read_status()
@@ -2256,6 +2290,248 @@ def _processing_activity_snapshot() -> dict[str, Any]:
         "revision": revision,
         **stable,
     }
+
+
+def _processing_activity_source_fingerprint() -> tuple[Any, ...]:
+    """Probe only fixed live identities used by the processing-lane builder."""
+
+    paths = (
+        runtime_status.STATUS_FILE,
+        orchestrator.STATE_FILE,
+        CHRONOVISOR_ROOT / "runtime" / "local-consensus" / "active",
+        CHRONOVISOR_ROOT / "runtime" / "model-activity" / "active",
+        CHRONOVISOR_ROOT / "runtime" / "model-activity" / "recent",
+        CHRONOVISOR_ROOT / "runtime" / "frontier-reviews" / "active",
+        CHRONOVISOR_ROOT / "runtime" / "frontier-repair" / "state.json",
+        CHRONOVISOR_ROOT / "runtime" / "frontier-repair" / "events.jsonl",
+        CHRONOVISOR_ROOT / "runtime" / "typed-graph" / "status.json",
+        CHRONOVISOR_ROOT / "runtime" / "typed-graph" / "promotion.json",
+        CHRONOVISOR_ROOT / "runtime" / "recall-rubric" / "status.json",
+    )
+    callables = (
+        id(_build_processing_activity_snapshot),
+        id(runtime_status.read_status),
+        id(orchestrator._load_state),
+        id(_canonicalize_runtime_status),
+        id(_local_consensus_activities),
+        id(_model_activities),
+        id(_frontier_activity_snapshot),
+        id(_frontier_repair_snapshot),
+        id(_typed_graph_dashboard_snapshot),
+    )
+    return (
+        str(CHRONOVISOR_ROOT),
+        callables,
+        *(_path_identity(path) for path in paths),
+    )
+
+
+def _processing_activity_cache_metrics_locked() -> dict[str, Any]:
+    return {
+        "build_count": int(_PROCESSING_ACTIVITY_CACHE.get("build_count") or 0),
+        "cache_hits": int(_PROCESSING_ACTIVITY_CACHE.get("cache_hits") or 0),
+        "coalesced": int(_PROCESSING_ACTIVITY_CACHE.get("coalesced") or 0),
+        "error_count": int(_PROCESSING_ACTIVITY_CACHE.get("error_count") or 0),
+        "last_build_duration_ms": round(
+            float(
+                _PROCESSING_ACTIVITY_CACHE.get("last_build_duration_ms") or 0.0
+            ),
+            3,
+        ),
+        "last_error": _PROCESSING_ACTIVITY_CACHE.get("last_error"),
+        "refreshing": bool(_PROCESSING_ACTIVITY_CACHE.get("refreshing")),
+        "audit_seconds": PROCESSING_ACTIVITY_AUDIT_SECONDS,
+        "recent_audit_seconds": PROCESSING_ACTIVITY_RECENT_AUDIT_SECONDS,
+    }
+
+
+def _processing_activity_cache_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
+    with _PROCESSING_ACTIVITY_CACHE_LOCK:
+        metrics = _processing_activity_cache_metrics_locked()
+    dashboard_value = snapshot.get("_dashboard")
+    dashboard_state = dashboard_value if isinstance(dashboard_value, dict) else {}
+    return {
+        **snapshot,
+        "_dashboard": {**dashboard_state, "activity_cache": metrics},
+    }
+
+
+def _refresh_processing_activity_cache(
+    source: tuple[Any, ...],
+) -> dict[str, Any]:
+    """Build one lane snapshot outside the cache lock and publish atomically."""
+
+    started_at = time.monotonic()
+    build_source = source
+    for _attempt in range(2):
+        try:
+            snapshot = _build_processing_activity_snapshot()
+            completed_source = _processing_activity_source_fingerprint()
+        except Exception as exc:
+            duration_ms = max(0.0, (time.monotonic() - started_at) * 1000)
+            try:
+                current_source = _processing_activity_source_fingerprint()
+            except Exception:
+                current_source = None
+            with _PROCESSING_ACTIVITY_CACHE_CONDITION:
+                fallback = _PROCESSING_ACTIVITY_CACHE.get("snapshot")
+                _PROCESSING_ACTIVITY_CACHE.update(
+                    {
+                        # Suppress a failure storm for this exact source epoch;
+                        # the next source change or bounded audit retries.
+                        "source": (
+                            build_source if current_source == build_source else None
+                        ),
+                        "audited_at": time.monotonic(),
+                        "refreshing": False,
+                        "error_count": int(
+                            _PROCESSING_ACTIVITY_CACHE.get("error_count") or 0
+                        )
+                        + 1,
+                        "last_build_duration_ms": duration_ms,
+                        "last_error": exc.__class__.__name__,
+                    }
+                )
+                _PROCESSING_ACTIVITY_CACHE_CONDITION.notify_all()
+            if isinstance(fallback, dict):
+                return fallback
+            raise
+
+        duration_ms = max(0.0, (time.monotonic() - started_at) * 1000)
+        with _PROCESSING_ACTIVITY_CACHE_CONDITION:
+            fallback = _PROCESSING_ACTIVITY_CACHE.get("snapshot")
+            if completed_source == build_source:
+                _PROCESSING_ACTIVITY_CACHE.update(
+                    {
+                        "source": build_source,
+                        "snapshot": snapshot,
+                        "audited_at": time.monotonic(),
+                        "refreshing": False,
+                        "build_count": int(
+                            _PROCESSING_ACTIVITY_CACHE.get("build_count") or 0
+                        )
+                        + 1,
+                        "last_build_duration_ms": duration_ms,
+                        "last_error": None,
+                    }
+                )
+                _PROCESSING_ACTIVITY_CACHE_CONDITION.notify_all()
+                return snapshot
+            if isinstance(fallback, dict):
+                # Do not publish a snapshot assembled across source epochs.
+                # The next 250ms poll observes source=None and starts clean.
+                _PROCESSING_ACTIVITY_CACHE.update(
+                    {
+                        "source": None,
+                        "audited_at": 0.0,
+                        "refreshing": False,
+                        "last_build_duration_ms": duration_ms,
+                    }
+                )
+                _PROCESSING_ACTIVITY_CACHE_CONDITION.notify_all()
+                return fallback
+        # A cold cache has no safe fallback. Retry once against the completed
+        # epoch before exposing any snapshot to a client.
+        build_source = completed_source
+
+    error = RuntimeError("processing activity source changed during two builds")
+    with _PROCESSING_ACTIVITY_CACHE_CONDITION:
+        fallback = _PROCESSING_ACTIVITY_CACHE.get("snapshot")
+        _PROCESSING_ACTIVITY_CACHE.update(
+            {
+                "source": None,
+                "audited_at": 0.0,
+                "refreshing": False,
+                "error_count": int(
+                    _PROCESSING_ACTIVITY_CACHE.get("error_count") or 0
+                )
+                + 1,
+                "last_build_duration_ms": max(
+                    0.0, (time.monotonic() - started_at) * 1000
+                ),
+                "last_error": error.__class__.__name__,
+            }
+        )
+        _PROCESSING_ACTIVITY_CACHE_CONDITION.notify_all()
+    if isinstance(fallback, dict):
+        return fallback
+    raise error
+
+
+def _processing_activity_snapshot() -> dict[str, Any]:
+    """Share live lane derivation across clients while preserving 250ms polls."""
+
+    source = _processing_activity_source_fingerprint()
+    start_async = False
+    build_synchronously = False
+    snapshot: dict[str, Any] | None = None
+    while snapshot is None and not build_synchronously:
+        with _PROCESSING_ACTIVITY_CACHE_CONDITION:
+            now = time.monotonic()
+            cached = _PROCESSING_ACTIVITY_CACHE.get("snapshot")
+            source_matches = _PROCESSING_ACTIVITY_CACHE.get("source") == source
+            audited_at = float(
+                _PROCESSING_ACTIVITY_CACHE.get("audited_at") or 0.0
+            )
+            lanes = cached.get("lanes") if isinstance(cached, dict) else []
+            has_recent_lane = isinstance(lanes, list) and any(
+                isinstance(lane, dict) and lane.get("recent") is True
+                for lane in lanes
+            )
+            audit_seconds = (
+                PROCESSING_ACTIVITY_RECENT_AUDIT_SECONDS
+                if has_recent_lane
+                else PROCESSING_ACTIVITY_AUDIT_SECONDS
+            )
+            if (
+                isinstance(cached, dict)
+                and source_matches
+                and now - audited_at < audit_seconds
+            ):
+                _PROCESSING_ACTIVITY_CACHE["cache_hits"] = int(
+                    _PROCESSING_ACTIVITY_CACHE.get("cache_hits") or 0
+                ) + 1
+                snapshot = cached
+                continue
+            if _PROCESSING_ACTIVITY_CACHE.get("refreshing"):
+                _PROCESSING_ACTIVITY_CACHE["coalesced"] = int(
+                    _PROCESSING_ACTIVITY_CACHE.get("coalesced") or 0
+                ) + 1
+                if isinstance(cached, dict):
+                    _PROCESSING_ACTIVITY_CACHE["cache_hits"] = int(
+                        _PROCESSING_ACTIVITY_CACHE.get("cache_hits") or 0
+                    ) + 1
+                    snapshot = cached
+                    continue
+                _PROCESSING_ACTIVITY_CACHE_CONDITION.wait()
+                source = _processing_activity_source_fingerprint()
+                continue
+            _PROCESSING_ACTIVITY_CACHE["refreshing"] = True
+            if isinstance(cached, dict) and source_matches:
+                _PROCESSING_ACTIVITY_CACHE["cache_hits"] = int(
+                    _PROCESSING_ACTIVITY_CACHE.get("cache_hits") or 0
+                ) + 1
+                snapshot = cached
+                start_async = True
+            else:
+                # A real source identity change is the live-data path: one
+                # caller builds synchronously while concurrent clients keep
+                # receiving the last successful snapshot. Only time-based
+                # audits use stale-while-refresh.
+                build_synchronously = True
+
+    if start_async:
+        threading.Thread(
+            target=_refresh_processing_activity_cache,
+            args=(source,),
+            name="chronovisor-dashboard-activity-refresh",
+            daemon=True,
+        ).start()
+    elif build_synchronously:
+        snapshot = _refresh_processing_activity_cache(source)
+    if not isinstance(snapshot, dict):
+        raise RuntimeError("processing activity cache did not produce a snapshot")
+    return _processing_activity_cache_payload(snapshot)
 
 
 def _typed_graph_dashboard_snapshot() -> dict[str, Any]:
@@ -4325,19 +4601,30 @@ def build_snapshot() -> dict[str, Any]:
     }
 
 
-def _snapshot_source_fingerprint() -> tuple[Any, ...]:
-    """Return a cheap identity for files that make an idle snapshot stale."""
-
-    tracked: list[Path] = [
+def _snapshot_fixed_source_paths() -> tuple[Path, ...]:
+    # Directory identities are the immediate coarse signal. Append/in-place
+    # cold inputs that do not move a directory entry are intentionally bounded
+    # by the 30s active / 60s idle snapshot TTL instead of triggering rebuilds.
+    # Local Consensus live files are also excluded here: processing activity
+    # and /api/local-consensus remain live, while the aggregate snapshot is
+    # deliberately bounded by the same active/idle TTLs.
+    return (
         CHRONOVISOR_ROOT / "raw",
         CHRONOVISOR_ROOT / "pages",
-        CHRONOVISOR_ROOT / "runtime",
+        CHRONOVISOR_ROOT / "runtime" / "raw-projections" / "parents",
+        CHRONOVISOR_ROOT / "runtime" / "raw-projections" / "artifacts",
+        CHRONOVISOR_ROOT / "runtime" / "ingest-liveness.json",
+        CHRONOVISOR_ROOT / "runtime" / "ingest-read-back-runs.jsonl",
+        CHRONOVISOR_ROOT / "runtime" / "ingest-read-back-failures.jsonl",
+        CHRONOVISOR_ROOT / "runtime" / "ingest-read-back-repair.json",
+        CHRONOVISOR_ROOT / "runtime" / "librarian",
+        CHRONOVISOR_ROOT / "runtime" / "librarian" / "events.jsonl",
+        CHRONOVISOR_ROOT / "runtime" / "typed-graph" / "status.json",
+        CHRONOVISOR_ROOT / "runtime" / "typed-graph" / "promotion.json",
+        CHRONOVISOR_ROOT / "runtime" / "recall-rubric" / "status.json",
         CHRONOVISOR_ROOT / "runtime" / "failures" / "state.json",
         CHRONOVISOR_ROOT / "runtime" / "failures" / "failure-registry.jsonl",
         CHRONOVISOR_ROOT / "runtime" / "convergence" / "state.json",
-        CHRONOVISOR_ROOT / "runtime" / "local-consensus" / "active",
-        CHRONOVISOR_ROOT / "runtime" / "local-consensus" / "summary.json",
-        CHRONOVISOR_ROOT / "runtime" / "local-consensus" / "audit.jsonl",
         CHRONOVISOR_ROOT / "runtime" / "frontier-reviews" / "active",
         CHRONOVISOR_ROOT / "runtime" / "frontier-repair" / "state.json",
         CHRONOVISOR_ROOT / "runtime" / "frontier-repair" / "events.jsonl",
@@ -4365,22 +4652,70 @@ def _snapshot_source_fingerprint() -> tuple[Any, ...]:
         CHRONOVISOR_ROOT / "config.toml",
         LOG_FILE,
         orchestrator.STATE_FILE,
-        runtime_status.STATUS_FILE,
         runtime_status.EVENTS_FILE,
         runtime_status.METRICS_FILE,
-    ]
-    # Existing append-only files do not change their parent directory mtime.
-    # Bound each dynamic tail so the cache check stays cheap while still
-    # observing standalone review activity that does not write status.json.
-    for pattern, limit in (
-        (CHRONOVISOR_ROOT / "runtime" / "local-consensus" / "active" / "*.json", 16),
+    )
+
+
+def _snapshot_runtime_epoch() -> tuple[Any, ...]:
+    """Return stable live semantics, excluding high-frequency stage churn."""
+
+    try:
+        value = runtime_status.read_status()
+    except Exception as exc:
+        return ("unavailable", exc.__class__.__name__)
+    status = value if isinstance(value, dict) else {}
+    active = bool(
+        status.get("state") == "running"
+        or status.get("current_job_id")
+        or status.get("current_raw")
+    )
+    return (
+        "active" if active else "idle",
+        str(status.get("current_job_id") or ""),
+        str(status.get("current_raw") or ""),
+    )
+
+
+def _snapshot_dynamic_source_patterns() -> tuple[tuple[Path, int], ...]:
+    return (
         (CHRONOVISOR_ROOT / "runtime" / "frontier-reviews" / "active" / "*.json", 8),
         (CHRONOVISOR_ROOT / "runtime" / "failures" / "packets" / "*.json", 24),
         (CHRONOVISOR_ROOT / "runtime" / "eval" / "*.json", 16),
         (CHRONOVISOR_ROOT / "runtime" / "recall-improvement" / "runs" / "*.json", 16),
         (CHRONOVISOR_ROOT / "runtime" / "quality" / "lanes" / "*.json", 32),
         (CHRONOVISOR_ROOT / "logs" / "ingest-drain-*.jsonl", 14),
-    ):
+    )
+
+
+def _snapshot_source_probe_identity() -> tuple[Any, ...]:
+    """Bounded O(1) identity used to reuse the expensive fingerprint scan."""
+
+    dynamic_directories = tuple(
+        dict.fromkeys(
+            pattern.parent for pattern, _limit in _snapshot_dynamic_source_patterns()
+        )
+    )
+    decision_artifacts = CHRONOVISOR_ROOT / "runtime" / "decision-artifacts"
+    paths = (*_snapshot_fixed_source_paths(), *dynamic_directories, decision_artifacts)
+    return (
+        str(CHRONOVISOR_ROOT),
+        id(build_snapshot),
+        id(_build_snapshot_source_fingerprint),
+        id(_snapshot_runtime_epoch),
+        _snapshot_runtime_epoch(),
+        *(_path_identity(path) for path in paths),
+    )
+
+
+def _build_snapshot_source_fingerprint() -> tuple[Any, ...]:
+    """Scan bounded dynamic tails for a full dashboard source identity."""
+
+    tracked = list(_snapshot_fixed_source_paths())
+    # Existing append-only files do not change their parent directory mtime.
+    # Bound each dynamic tail so the cache check stays cheap while still
+    # observing standalone review activity that does not write status.json.
+    for pattern, limit in _snapshot_dynamic_source_patterns():
         tracked.extend(sorted(pattern.parent.glob(pattern.name))[-limit:])
     tracked.extend(
         sorted((CHRONOVISOR_ROOT / "runtime" / "decision-artifacts").glob("*/*.json"))[
@@ -4398,7 +4733,78 @@ def _snapshot_source_fingerprint() -> tuple[Any, ...]:
     # Tests and embedded callers may replace the builder without changing the
     # wiki paths. Binding the callable prevents a cached success from masking
     # the replacement (or its exception).
-    return (id(build_snapshot), *identities)
+    return (id(build_snapshot), _snapshot_runtime_epoch(), *identities)
+
+
+def _invalidate_snapshot_fingerprint_probe() -> None:
+    with _SNAPSHOT_FINGERPRINT_CONDITION:
+        while _SNAPSHOT_FINGERPRINT_CACHE.get("probing"):
+            _SNAPSHOT_FINGERPRINT_CONDITION.wait()
+        _SNAPSHOT_FINGERPRINT_CACHE.update(
+            {"source": None, "fingerprint": None, "audited_at": 0.0}
+        )
+
+
+def _snapshot_source_fingerprint() -> tuple[Any, ...]:
+    """Share one expensive source scan across concurrent snapshot requests."""
+
+    source = _snapshot_source_probe_identity()
+    while True:
+        with _SNAPSHOT_FINGERPRINT_CONDITION:
+            now = time.monotonic()
+            cached = _SNAPSHOT_FINGERPRINT_CACHE.get("fingerprint")
+            if (
+                isinstance(cached, tuple)
+                and _SNAPSHOT_FINGERPRINT_CACHE.get("source") == source
+                and now - float(
+                    _SNAPSHOT_FINGERPRINT_CACHE.get("audited_at") or 0.0
+                )
+                < SNAPSHOT_FINGERPRINT_AUDIT_SECONDS
+            ):
+                _SNAPSHOT_FINGERPRINT_CACHE["cache_hits"] = int(
+                    _SNAPSHOT_FINGERPRINT_CACHE.get("cache_hits") or 0
+                ) + 1
+                return cached
+            if _SNAPSHOT_FINGERPRINT_CACHE.get("probing"):
+                _SNAPSHOT_FINGERPRINT_CACHE["coalesced"] = int(
+                    _SNAPSHOT_FINGERPRINT_CACHE.get("coalesced") or 0
+                ) + 1
+                _SNAPSHOT_FINGERPRINT_CONDITION.wait()
+                source = _snapshot_source_probe_identity()
+                continue
+            _SNAPSHOT_FINGERPRINT_CACHE["probing"] = True
+            break
+
+    try:
+        fingerprint = _build_snapshot_source_fingerprint()
+        completed_source = _snapshot_source_probe_identity()
+    except Exception:
+        with _SNAPSHOT_FINGERPRINT_CONDITION:
+            _SNAPSHOT_FINGERPRINT_CACHE["probing"] = False
+            _SNAPSHOT_FINGERPRINT_CACHE["error_count"] = int(
+                _SNAPSHOT_FINGERPRINT_CACHE.get("error_count") or 0
+            ) + 1
+            _SNAPSHOT_FINGERPRINT_CONDITION.notify_all()
+        raise
+    with _SNAPSHOT_FINGERPRINT_CONDITION:
+        _SNAPSHOT_FINGERPRINT_CACHE.update(
+            {
+                "source": completed_source,
+                "fingerprint": fingerprint,
+                "audited_at": time.monotonic(),
+                "probing": False,
+                "generation": int(
+                    _SNAPSHOT_FINGERPRINT_CACHE.get("generation") or 0
+                )
+                + 1,
+                "probe_count": int(
+                    _SNAPSHOT_FINGERPRINT_CACHE.get("probe_count") or 0
+                )
+                + 1,
+            }
+        )
+        _SNAPSHOT_FINGERPRINT_CONDITION.notify_all()
+    return fingerprint
 
 
 def _snapshot_is_active(snapshot: dict[str, Any]) -> bool:
@@ -4444,6 +4850,10 @@ def _build_snapshot_cache(
                     _SNAPSHOT_CACHE["refreshing"] = False
                     return cached
             snapshot = build_snapshot()
+            # The build may have changed materialized files itself. Bypass the
+            # short probe reuse so this stability check observes the true
+            # post-build source epoch.
+            _invalidate_snapshot_fingerprint_probe()
             post_build_fingerprint = _snapshot_source_fingerprint()
     except Exception:
         with _SNAPSHOT_CACHE_LOCK:
@@ -4484,11 +4894,10 @@ def _refresh_snapshot_cache(
 def _cached_snapshot(*, allow_stale: bool = False) -> dict[str, Any]:
     """Single-flight expensive snapshots and reuse unchanged idle results."""
 
+    # Probe before the snapshot cache lock. The fingerprint cache has its own
+    # condition and no code path holds both locks, avoiding lock-order cycles.
+    fingerprint = _snapshot_source_fingerprint()
     with _SNAPSHOT_CACHE_LOCK:
-        # Compute after acquiring the single-flight lock. A request that
-        # waited for another build must compare against the post-build source
-        # state, not the fingerprint it observed before waiting.
-        fingerprint = _snapshot_source_fingerprint()
         now = time.monotonic()
         observed_built_at = float(_SNAPSHOT_CACHE.get("built_at") or 0.0)
         cached = _SNAPSHOT_CACHE.get("snapshot")
@@ -4531,6 +4940,66 @@ def _cached_snapshot(*, allow_stale: bool = False) -> dict[str, Any]:
             ).start()
         return stale
     return _build_snapshot_cache(fingerprint, observed_built_at)
+
+
+_COLD_STATUS_DERIVED_KEYS = (
+    "local_consensus",
+    "frontier_repair",
+    "frontier_review",
+    "decision_policies",
+    "semantic_deferred",
+    "operational_deferred",
+    "raw_outstanding",
+)
+
+
+def _snapshot_with_live_status(snapshot: dict[str, Any]) -> dict[str, Any]:
+    """Overlay cheap runtime truth without mutating cached cold aggregates."""
+
+    cached_value = snapshot.get("status")
+    cached_status = cached_value if isinstance(cached_value, dict) else {}
+    pending_value = cached_status.get("pending")
+    pending = (
+        int(pending_value)
+        if isinstance(pending_value, int) and not isinstance(pending_value, bool)
+        else 0
+    )
+    dashboard_value = snapshot.get("_dashboard")
+    dashboard_state = dashboard_value if isinstance(dashboard_value, dict) else {}
+    try:
+        live_value = runtime_status.read_status()
+        live_status = live_value if isinstance(live_value, dict) else {}
+        canonical_live = _canonicalize_runtime_status(
+            live_status,
+            orchestrator._load_state(),
+            pending=max(0, pending),
+        )
+    except Exception as exc:
+        return {
+            **snapshot,
+            "_dashboard": {
+                **dashboard_state,
+                "live_overlay": False,
+                "live_overlay_error": exc.__class__.__name__,
+            },
+        }
+
+    status = {**cached_status, **canonical_live}
+    for key in _COLD_STATUS_DERIVED_KEYS:
+        if key in cached_status:
+            status[key] = cached_status[key]
+    batch = status.get("batch")
+    if isinstance(batch, dict):
+        status["batch"] = dict(batch)
+    llm = status.get("llm")
+    if isinstance(llm, dict):
+        status["llm"] = dict(llm)
+    _mark_batch_activity(status)
+    return {
+        **snapshot,
+        "status": status,
+        "_dashboard": {**dashboard_state, "live_overlay": True},
+    }
 
 
 def _load_or_create_dashboard_token(path: Path) -> str:
@@ -5131,11 +5600,22 @@ class DashboardHandler(BaseHTTPRequestHandler):
             elif path == "/api/fast-snapshot":
                 _json_response(self, build_fast_snapshot())
             elif path == "/api/snapshot":
-                _json_response(self, _cached_snapshot(allow_stale=True))
-            elif path == "/api/status":
                 _json_response(
                     self,
-                    {"status": _cached_snapshot(allow_stale=True)["status"]},
+                    _snapshot_with_live_status(
+                        _cached_snapshot(allow_stale=True)
+                    ),
+                )
+            elif path == "/api/status":
+                snapshot = _snapshot_with_live_status(
+                    _cached_snapshot(allow_stale=True)
+                )
+                _json_response(
+                    self,
+                    {
+                        "status": snapshot["status"],
+                        "_dashboard": snapshot.get("_dashboard") or {},
+                    },
                 )
             elif path == "/api/local-consensus":
                 _json_response(
