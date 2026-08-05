@@ -1959,6 +1959,22 @@ def test_cortex_save_capture_uses_bounded_radial_wave_and_heartbeat() -> None:
 
     assert "const CAPTURE_WAVE_NODE_LIMIT = 112;" in script
     assert "const CAPTURE_WAVE_TAIL_RATIO = 0.42;" in script
+    front_opacity = 1.0
+    front_padding = 5.5
+    tail_opacity = 0.66
+    tail_padding = 3.6
+    assert (
+        f"const CAPTURE_WAVE_FRONT_GLOW_OPACITY = {front_opacity:g};" in script
+    )
+    assert (
+        f"const CAPTURE_WAVE_FRONT_GLOW_PADDING_PX = {front_padding:g};" in script
+    )
+    assert f"const CAPTURE_WAVE_TAIL_GLOW_OPACITY = {tail_opacity:g};" in script
+    assert (
+        f"const CAPTURE_WAVE_TAIL_GLOW_PADDING_PX = {tail_padding:g};" in script
+    )
+    assert front_opacity > tail_opacity
+    assert front_padding > tail_padding
     assert "const CAPTURE_WAVE_TRAVEL_END = 0.72;" in script
     assert "const CAPTURE_HEARTBEAT_END = 0.94;" in script
     assert "captureWaveDistances = new Float32Array(nodes.length);" in capture_block
@@ -2012,10 +2028,21 @@ def test_cortex_save_capture_uses_bounded_radial_wave_and_heartbeat() -> None:
     node_wave_block = capture_block.split(
         "function drawCaptureWaveNodes(", 1
     )[1].split("function drawCaptureHeartbeat(", 1)[0]
-    assert "drawCompactGlow(" in node_wave_block
+    assert "drawCaptureWaveNodeGlow(node, intensity, fade, inTail);" in node_wave_block
     assert "context.drawImage(" not in node_wave_block
     assert "const inTail = distance > wave.waveRadius;" in node_wave_block
     assert "falloffWidth * CAPTURE_WAVE_TAIL_RATIO" in capture_block
+    node_glow_block = capture_block.split(
+        "function drawCaptureWaveNodeGlow(", 1
+    )[1].split("function drawCaptureWaveNodes(", 1)[0]
+    assert node_glow_block.count("context.drawImage(") == 1
+    assert "CAPTURE_WAVE_FRONT_GLOW_OPACITY" in node_glow_block
+    assert "CAPTURE_WAVE_FRONT_GLOW_PADDING_PX" in node_glow_block
+    assert "CAPTURE_WAVE_TAIL_GLOW_OPACITY" in node_glow_block
+    assert "CAPTURE_WAVE_TAIL_GLOW_PADDING_PX" in node_glow_block
+    assert "context.stroke(" not in node_glow_block
+    assert "context.arc(" not in node_glow_block
+    assert "context.fill(" not in node_glow_block
     heartbeat_draw_block = capture_block.split(
         "function drawCaptureHeartbeat(", 1
     )[1].split("function recordCaptureWaveMetrics(", 1)[0]

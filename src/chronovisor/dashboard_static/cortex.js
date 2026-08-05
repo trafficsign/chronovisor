@@ -50,6 +50,10 @@
   const EVENT_EDGE_TTL_MS = 60_000;
   const CAPTURE_WAVE_NODE_LIMIT = 112;
   const CAPTURE_WAVE_TAIL_RATIO = 0.42;
+  const CAPTURE_WAVE_FRONT_GLOW_OPACITY = 1;
+  const CAPTURE_WAVE_FRONT_GLOW_PADDING_PX = 5.5;
+  const CAPTURE_WAVE_TAIL_GLOW_OPACITY = 0.66;
+  const CAPTURE_WAVE_TAIL_GLOW_PADDING_PX = 3.6;
   const CAPTURE_WAVE_TRAVEL_END = 0.72;
   const CAPTURE_HEARTBEAT_END = 0.94;
   const EXPLORER_CHUNK_SIZE = 120;
@@ -3177,6 +3181,31 @@
     return smoothstep(proximity) * wavePeak;
   }
 
+  function drawCaptureWaveNodeGlow(node, intensity, fade, inTail) {
+    const padding = inTail
+      ? CAPTURE_WAVE_TAIL_GLOW_PADDING_PX
+      : CAPTURE_WAVE_FRONT_GLOW_PADDING_PX;
+    const opacity = inTail
+      ? CAPTURE_WAVE_TAIL_GLOW_OPACITY
+      : CAPTURE_WAVE_FRONT_GLOW_OPACITY;
+    const radius = Math.max(0.8, node.radius * node.screenScale);
+    const glowRadius = radius + padding;
+    const glowSize = glowRadius * 2;
+    context.globalAlpha = clamp(fade * intensity * opacity);
+    context.drawImage(
+      glowCapture,
+      node.screenX - glowRadius,
+      node.screenY - glowRadius,
+      glowSize,
+      glowSize,
+    );
+    context.globalAlpha = 1;
+    cortexMetrics.maxGlowPadding = Math.max(
+      cortexMetrics.maxGlowPadding,
+      padding,
+    );
+  }
+
   function drawCaptureWaveNodes(effect, wave, falloffWidth, fade) {
     let waveNodes = 0;
     let afterglowNodes = 0;
@@ -3201,15 +3230,7 @@
       );
       if (intensity <= 0) continue;
       const inTail = distance > wave.waveRadius;
-      const radius = Math.max(0.8, node.radius * node.screenScale);
-      drawCompactGlow(
-        glowCapture,
-        node.screenX,
-        node.screenY,
-        radius,
-        inTail ? 2.8 : 4,
-        fade * intensity * (inTail ? 0.48 : 0.78),
-      );
+      drawCaptureWaveNodeGlow(node, intensity, fade, inTail);
       drawnNodes += 1;
       if (inTail) afterglowNodes += 1;
       else waveNodes += 1;
