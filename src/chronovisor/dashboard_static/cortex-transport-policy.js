@@ -55,14 +55,14 @@
   const VISUAL_PROFILES = Object.freeze({
     demo: Object.freeze({
       mode: "demo",
-      captureCometDurationMs: 5200,
+      captureWaveDurationMs: 3600,
       recallNodeDurationMs: 650,
       recallElectricDurationMs: null,
       recallTransportMinVisibleMs: 3200,
     }),
     live: Object.freeze({
       mode: "live",
-      captureCometDurationMs: 6400,
+      captureWaveDurationMs: 5000,
       recallNodeDurationMs: 3000,
       recallElectricDurationMs: 2800,
       recallTransportMinVisibleMs: 3200,
@@ -331,7 +331,7 @@
     const holdMs = phase === "complete"
       ? PROCESSING_LANE_COMPLETE_HOLD_MS
       : phase === "capture"
-        ? profileFor(event).captureCometDurationMs + 400
+        ? profileFor(event).captureWaveDurationMs + 400
         : PROCESSING_LANE_ACTIVE_HOLD_MS;
     return {
       event,
@@ -370,7 +370,7 @@
     const startedAt = finite(now);
     const profile = profileFor(event || value);
     const baseDuration = phase === "capture"
-      ? profile.captureCometDurationMs
+      ? profile.captureWaveDurationMs
       : phase === "apply" || phase === "complete"
         ? 3600
         : phase === "consensus"
@@ -423,7 +423,23 @@
     return finite(effect?.retainedUntil) > finite(now);
   }
 
+  function supersedeCaptureVisuals(effects) {
+    if (!Array.isArray(effects)) return effects;
+    effects.forEach((effect) => {
+      if (lower(effect?.phase) === "capture") {
+        effect.captureVisualSuperseded = true;
+      }
+    });
+    return effects;
+  }
+
   function transportEvictionIndex(effects, now) {
+    const supersededCaptureIndex = effects.findIndex(
+      (effect) =>
+        effect.captureVisualSuperseded === true
+        && lower(effect.phase) === "capture",
+    );
+    if (supersededCaptureIndex >= 0) return supersededCaptureIndex;
     const processingIndex = effects.findIndex(
       (effect) =>
         (effect.kind === "processing" || effect.priorityClass === "processing")
@@ -434,7 +450,22 @@
       (effect) => !isTransportEffectProtected(effect, now),
     );
     if (unprotectedIndex >= 0) return unprotectedIndex;
+    let latestCaptureIndex = -1;
+    effects.forEach((effect, index) => {
+      if (
+        lower(effect.phase) !== "capture"
+        || effect.captureVisualSuperseded === true
+      ) return;
+      if (
+        latestCaptureIndex < 0
+        || finite(effect.seq) > finite(effects[latestCaptureIndex].seq)
+      ) latestCaptureIndex = index;
+    });
+    const protectLatestCapture = latestCaptureIndex >= 0 && effects.length > 1;
     return effects.reduce((candidateIndex, effect, index) => {
+      if (protectLatestCapture && index === latestCaptureIndex) {
+        return candidateIndex;
+      }
       if (candidateIndex < 0) return index;
       const candidate = effects[candidateIndex];
       return finite(effect.retainedUntil) < finite(candidate.retainedUntil)
@@ -524,6 +555,7 @@
     recallVisualProfile,
     liveRecallElectricTiming,
     transportTiming,
+    supersedeCaptureVisuals,
     isTransportEffectProtected,
     pruneAndBoundTransportEffects,
     isElectricPulseProtected,

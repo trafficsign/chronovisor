@@ -48,6 +48,10 @@
   const VISUAL_DRAIN_PER_FRAME = 4;
   const EVENT_EDGE_LIMIT = 256;
   const EVENT_EDGE_TTL_MS = 60_000;
+  const CAPTURE_WAVE_NODE_LIMIT = 112;
+  const CAPTURE_WAVE_TAIL_RATIO = 0.42;
+  const CAPTURE_WAVE_TRAVEL_END = 0.72;
+  const CAPTURE_HEARTBEAT_END = 0.94;
   const EXPLORER_CHUNK_SIZE = 120;
   const AUTO_ROTATE_COOLDOWN_MS = 2600;
   const SPHERE_TARGET_FORCE = 0.018;
@@ -118,6 +122,7 @@
   const formationCandidates = [];
   const consolidationCandidates = [];
   const transportFallbacks = [];
+  let captureWaveDistances = new Float32Array(0);
   let typedRelations = [];
   let typedCommunities = [];
   let communityHulls = [];
@@ -343,21 +348,21 @@
     captureEvents: 0,
     ingestEvents: 0,
     applyEvents: 0,
-    cometTrailSegments: 0,
-    cometHeads: 0,
-    cometImpacts: 0,
-    maxCometHeadRadius: 0,
-    cometCenterX: 0,
-    cometCenterY: 0,
-    cometMinX: 0,
-    cometMaxX: 0,
-    cometMinY: 0,
-    cometMaxY: 0,
-    cometSafeLeft: 0,
-    cometSafeRight: 0,
-    cometSafeTop: 0,
-    cometSafeBottom: 0,
-    cometTurns: 0,
+    captureEffectCount: 0,
+    captureEffectSeq: -1,
+    captureWaveEffects: 0,
+    captureWaveNodes: 0,
+    captureAfterglowNodes: 0,
+    captureWavePeak: 0,
+    captureHeartbeatPeak: 0,
+    captureCenterX: 0,
+    captureCenterY: 0,
+    captureRadius: 0,
+    captureBandWidth: 0,
+    captureProgress: 0,
+    capturePhase: "idle",
+    captureHeartbeatCount: 0,
+    captureHeartbeatSeq: -1,
     explorationArcs: 0,
     triageCandidates: 0,
     generateParticles: 0,
@@ -456,21 +461,21 @@
       captureEvents: cortexMetrics.captureEvents,
       ingestEvents: cortexMetrics.ingestEvents,
       applyEvents: cortexMetrics.applyEvents,
-      cometTrailSegments: cortexMetrics.cometTrailSegments,
-      cometHeads: cortexMetrics.cometHeads,
-      cometImpacts: cortexMetrics.cometImpacts,
-      maxCometHeadRadius: cortexMetrics.maxCometHeadRadius,
-      cometCenterX: cortexMetrics.cometCenterX,
-      cometCenterY: cortexMetrics.cometCenterY,
-      cometMinX: cortexMetrics.cometMinX,
-      cometMaxX: cortexMetrics.cometMaxX,
-      cometMinY: cortexMetrics.cometMinY,
-      cometMaxY: cortexMetrics.cometMaxY,
-      cometSafeLeft: cortexMetrics.cometSafeLeft,
-      cometSafeRight: cortexMetrics.cometSafeRight,
-      cometSafeTop: cortexMetrics.cometSafeTop,
-      cometSafeBottom: cortexMetrics.cometSafeBottom,
-      cometTurns: cortexMetrics.cometTurns,
+      captureEffectCount: cortexMetrics.captureEffectCount,
+      captureEffectSeq: cortexMetrics.captureEffectSeq,
+      captureWaveEffects: cortexMetrics.captureWaveEffects,
+      captureWaveNodes: cortexMetrics.captureWaveNodes,
+      captureAfterglowNodes: cortexMetrics.captureAfterglowNodes,
+      captureWavePeak: cortexMetrics.captureWavePeak,
+      captureHeartbeatPeak: cortexMetrics.captureHeartbeatPeak,
+      captureCenterX: cortexMetrics.captureCenterX,
+      captureCenterY: cortexMetrics.captureCenterY,
+      captureRadius: cortexMetrics.captureRadius,
+      captureBandWidth: cortexMetrics.captureBandWidth,
+      captureProgress: cortexMetrics.captureProgress,
+      capturePhase: cortexMetrics.capturePhase,
+      captureHeartbeatCount: cortexMetrics.captureHeartbeatCount,
+      captureHeartbeatSeq: cortexMetrics.captureHeartbeatSeq,
       explorationArcs: cortexMetrics.explorationArcs,
       triageCandidates: cortexMetrics.triageCandidates,
       generateParticles: cortexMetrics.generateParticles,
@@ -1745,22 +1750,28 @@
       sphereQuality.targetError.max.toFixed(2);
     target.dataset.sphereRadialErrorMean =
       sphereQuality.radialError.mean.toFixed(2);
-    target.dataset.cometTrailSegments = String(cortexMetrics.cometTrailSegments);
-    target.dataset.cometHeads = String(cortexMetrics.cometHeads);
-    target.dataset.cometImpacts = String(cortexMetrics.cometImpacts);
-    target.dataset.maxCometHeadRadius =
-      cortexMetrics.maxCometHeadRadius.toFixed(3);
-    target.dataset.cometCenterX = cortexMetrics.cometCenterX.toFixed(1);
-    target.dataset.cometCenterY = cortexMetrics.cometCenterY.toFixed(1);
-    target.dataset.cometMinX = cortexMetrics.cometMinX.toFixed(1);
-    target.dataset.cometMaxX = cortexMetrics.cometMaxX.toFixed(1);
-    target.dataset.cometMinY = cortexMetrics.cometMinY.toFixed(1);
-    target.dataset.cometMaxY = cortexMetrics.cometMaxY.toFixed(1);
-    target.dataset.cometSafeLeft = cortexMetrics.cometSafeLeft.toFixed(1);
-    target.dataset.cometSafeRight = cortexMetrics.cometSafeRight.toFixed(1);
-    target.dataset.cometSafeTop = cortexMetrics.cometSafeTop.toFixed(1);
-    target.dataset.cometSafeBottom = cortexMetrics.cometSafeBottom.toFixed(1);
-    target.dataset.cometTurns = cortexMetrics.cometTurns.toFixed(2);
+    target.dataset.captureEffectCount = String(cortexMetrics.captureEffectCount);
+    target.dataset.captureEffectSeq = String(cortexMetrics.captureEffectSeq);
+    target.dataset.captureWaveEffects = String(cortexMetrics.captureWaveEffects);
+    target.dataset.captureWaveNodes = String(cortexMetrics.captureWaveNodes);
+    target.dataset.captureAfterglowNodes = String(
+      cortexMetrics.captureAfterglowNodes,
+    );
+    target.dataset.captureWavePeak = cortexMetrics.captureWavePeak.toFixed(3);
+    target.dataset.captureHeartbeatPeak =
+      cortexMetrics.captureHeartbeatPeak.toFixed(3);
+    target.dataset.captureCenterX = cortexMetrics.captureCenterX.toFixed(1);
+    target.dataset.captureCenterY = cortexMetrics.captureCenterY.toFixed(1);
+    target.dataset.captureRadius = cortexMetrics.captureRadius.toFixed(1);
+    target.dataset.captureBandWidth = cortexMetrics.captureBandWidth.toFixed(1);
+    target.dataset.captureProgress = cortexMetrics.captureProgress.toFixed(3);
+    target.dataset.capturePhase = cortexMetrics.capturePhase;
+    target.dataset.captureHeartbeatCount = String(
+      cortexMetrics.captureHeartbeatCount,
+    );
+    target.dataset.captureHeartbeatSeq = String(
+      cortexMetrics.captureHeartbeatSeq,
+    );
     target.dataset.explorationArcs = String(cortexMetrics.explorationArcs);
     target.dataset.consolidationEdges = String(cortexMetrics.consolidationEdges);
     target.dataset.triageCandidates = String(cortexMetrics.triageCandidates);
@@ -2030,6 +2041,9 @@
     cortexMetrics.transportByKind[transportKind] =
       Number(cortexMetrics.transportByKind[transportKind] || 0)
       + eventMultiplicity;
+    if (phase === "capture") {
+      TransportPolicy.supersedeCaptureVisuals(transportEffects);
+    }
     transportEffects.push({
       kind: event.kind,
       phase,
@@ -2994,20 +3008,6 @@
     return head;
   }
 
-  function captureCometCount(effect) {
-    const byteTier = effect.byteCount >= 1024 * 1024
-      ? 4
-      : effect.byteCount >= 128 * 1024
-        ? 3
-        : effect.byteCount >= 32 * 1024
-          ? 2
-          : effect.byteCount >= 8 * 1024
-            ? 1
-            : 0;
-    const rawTier = Math.max(0, Math.ceil(Math.log2(effect.rawCount + 1)) - 1);
-    return Math.round(clamp(3 + Math.max(byteTier, rawTier), 3, 7));
-  }
-
   function visibleMemoryNode(node) {
     return (
       nodeState[node.index] > 0
@@ -3060,184 +3060,231 @@
     };
   }
 
-  function captureSafeRect() {
-    const top = clamp(height * 0.28, 156, 220);
+  function captureWaveGeometry() {
+    if (captureWaveDistances.length !== nodes.length) {
+      captureWaveDistances = new Float32Array(nodes.length);
+    }
+    let weightedX = 0;
+    let weightedY = 0;
+    let totalWeight = 0;
+    nodes.forEach((node) => {
+      if (!visibleMemoryNode(node)) return;
+      const weight = memoryNodeWeight(node);
+      weightedX += node.screenX * weight;
+      weightedY += node.screenY * weight;
+      totalWeight += weight;
+    });
+    const centerX = totalWeight ? weightedX / totalWeight : width * 0.5;
+    const centerY = totalWeight ? weightedY / totalWeight : height * 0.52;
+    let maxDistance = 0;
+    nodes.forEach((node) => {
+      if (!visibleMemoryNode(node)) {
+        captureWaveDistances[node.index] = -1;
+        return;
+      }
+      const distance = Math.hypot(
+        node.screenX - centerX,
+        node.screenY - centerY,
+      );
+      captureWaveDistances[node.index] = distance;
+      maxDistance = Math.max(maxDistance, distance);
+    });
+    const shortest = Math.max(240, Math.min(width, height));
     return {
-      left: 34,
-      right: Math.max(35, width - 34),
-      top,
-      bottom: Math.max(top + 24, height - 46),
+      x: centerX,
+      y: centerY,
+      radius: Math.max(maxDistance + 8, shortest * 0.22),
     };
   }
 
-  function recordCaptureCometBounds(points) {
-    points.forEach((point) => {
-      cortexMetrics.cometMinX = Math.min(cortexMetrics.cometMinX, point.x);
-      cortexMetrics.cometMaxX = Math.max(cortexMetrics.cometMaxX, point.x);
-      cortexMetrics.cometMinY = Math.min(cortexMetrics.cometMinY, point.y);
-      cortexMetrics.cometMaxY = Math.max(cortexMetrics.cometMaxY, point.y);
-    });
-  }
-
-  function traceCaptureCometPoints(points, start = 0, end = points.length - 1) {
-    if (end <= start || !points[start]) return false;
-    context.beginPath();
-    context.moveTo(points[start].x, points[start].y);
-    for (let index = start + 1; index <= end; index += 1) {
-      context.lineTo(points[index].x, points[index].y);
+  function captureWaveState(progress, radius, staticMotion) {
+    if (staticMotion) {
+      return {
+        phase: "static",
+        waveRadius: radius * 0.56,
+        wavePeak: 0.72,
+        heartbeatPeak: 0.3,
+      };
     }
-    return true;
-  }
-
-  function drawCaptureCometTrail(points, comet, fade) {
-    const segmentCount = points.length - 1;
-    const widthScale = comet === 0 ? 1 : 0.62;
-    if (traceCaptureCometPoints(points)) {
-      context.strokeStyle = rgba(RGB_CAPTURE, fade * 0.15);
-      context.lineWidth = 5.2 * widthScale;
-      context.stroke();
+    if (progress < CAPTURE_WAVE_TRAVEL_END) {
+      const travel = smoothstep(progress / CAPTURE_WAVE_TRAVEL_END);
+      return {
+        phase: "wave",
+        waveRadius: radius * (1 - travel),
+        wavePeak: 0.62 + Math.sin(travel * Math.PI) * 0.34,
+        heartbeatPeak: 0,
+      };
     }
-    const bandCount = 5;
-    for (let band = 0; band < bandCount; band += 1) {
-      const start = Math.floor(segmentCount * band / bandCount);
-      const end = Math.max(start + 1, Math.floor(segmentCount * (band + 1) / bandCount));
-      const tailRatio = (start + end) / (segmentCount * 2);
-      if (!traceCaptureCometPoints(points, start, end)) continue;
-      context.strokeStyle = rgba(
-        mix(RGB_CAPTURE, RGB_HOT, 1 - tailRatio),
-        fade * Math.pow(1 - tailRatio, 1.65) * 0.92,
+    if (progress < CAPTURE_HEARTBEAT_END) {
+      const heartbeatProgress = clamp(
+        (progress - CAPTURE_WAVE_TRAVEL_END)
+        / (CAPTURE_HEARTBEAT_END - CAPTURE_WAVE_TRAVEL_END),
       );
-      context.lineWidth = Math.max(0.35, (1.45 - tailRatio) * widthScale);
-      context.stroke();
+      return {
+        phase: "heartbeat",
+        waveRadius: 0,
+        wavePeak: 0.34 * (1 - heartbeatProgress),
+        heartbeatPeak: Math.pow(Math.sin(heartbeatProgress * Math.PI), 0.78),
+      };
     }
-    cortexMetrics.cometTrailSegments += segmentCount;
+    return {
+      phase: "settle",
+      waveRadius: 0,
+      wavePeak: 0,
+      heartbeatPeak: 0,
+    };
   }
 
-  function drawCaptureCometHead(comet, head, fade) {
-    const headRadius =
-      (comet === 0 ? 2.2 : 1.35)
-      + head.journey * (comet === 0 ? 2.4 : 1.2);
-    const glowSize = headRadius * (comet === 0 ? 8.5 : 6.5);
-    context.globalAlpha = fade * (comet === 0 ? 0.78 : 0.54);
+  function captureHeartbeatAlpha(peak, fade) {
+    return clamp(fade) * peak * 0.46;
+  }
+
+  function greatestCommonDivisor(left, right) {
+    let a = Math.abs(Math.trunc(left));
+    let b = Math.abs(Math.trunc(right));
+    while (b) {
+      const remainder = a % b;
+      a = b;
+      b = remainder;
+    }
+    return a;
+  }
+
+  function captureWaveSampleStride(length, effect) {
+    if (length <= 1) return 1;
+    let stride = Math.max(
+      1,
+      Math.floor(
+        deterministicUnit(effect.captureId || effect.label, effect.seq * 59)
+        * length,
+      ) | 1,
+    );
+    while (greatestCommonDivisor(stride, length) !== 1) stride += 2;
+    return stride;
+  }
+
+  function captureWaveNodeIntensity(
+    distance,
+    waveRadius,
+    falloffWidth,
+    wavePeak,
+  ) {
+    const radialOffset = distance - waveRadius;
+    const reach = radialOffset > 0
+      ? falloffWidth * CAPTURE_WAVE_TAIL_RATIO
+      : falloffWidth;
+    const proximity = 1 - clamp(Math.abs(radialOffset) / Math.max(1, reach));
+    return smoothstep(proximity) * wavePeak;
+  }
+
+  function drawCaptureWaveNodes(effect, wave, falloffWidth, fade) {
+    let waveNodes = 0;
+    let afterglowNodes = 0;
+    let drawnNodes = 0;
+    const start = nodes.length
+      ? Math.floor(
+          deterministicUnit(effect.captureId || effect.label, effect.seq * 43)
+          * nodes.length,
+        )
+      : 0;
+    const stride = captureWaveSampleStride(nodes.length, effect);
+    for (let offset = 0; offset < nodes.length; offset += 1) {
+      if (drawnNodes >= CAPTURE_WAVE_NODE_LIMIT) break;
+      const node = nodes[(start + offset * stride) % nodes.length];
+      const distance = captureWaveDistances[node.index];
+      if (distance < 0) continue;
+      const intensity = captureWaveNodeIntensity(
+        distance,
+        wave.waveRadius,
+        falloffWidth,
+        wave.wavePeak,
+      );
+      if (intensity <= 0) continue;
+      const inTail = distance > wave.waveRadius;
+      const radius = Math.max(0.8, node.radius * node.screenScale);
+      drawCompactGlow(
+        glowCapture,
+        node.screenX,
+        node.screenY,
+        radius,
+        inTail ? 2.8 : 4,
+        fade * intensity * (inTail ? 0.48 : 0.78),
+      );
+      drawnNodes += 1;
+      if (inTail) afterglowNodes += 1;
+      else waveNodes += 1;
+    }
+    return { waveNodes, afterglowNodes, painted: drawnNodes > 0 };
+  }
+
+  function drawCaptureHeartbeat(star, wave, fade) {
+    const peak = wave.heartbeatPeak;
+    const alpha = captureHeartbeatAlpha(peak, fade);
+    if (alpha <= 0) return false;
+    const glowSize = star.radius * (2.05 + peak * 0.38);
+    context.globalAlpha = alpha;
     context.drawImage(
       glowCapture,
-      head.x - glowSize / 2,
-      head.y - glowSize / 2,
+      star.x - glowSize / 2,
+      star.y - glowSize / 2,
       glowSize,
       glowSize,
     );
     context.globalAlpha = 1;
-    context.fillStyle = rgba(RGB_HOT, fade * 0.96);
-    context.beginPath();
-    context.arc(head.x, head.y, headRadius, 0, Math.PI * 2);
-    context.fill();
-    cortexMetrics.cometHeads += 1;
-    cortexMetrics.maxCometHeadRadius = Math.max(
-      cortexMetrics.maxCometHeadRadius,
-      headRadius,
+    return true;
+  }
+
+  function recordCaptureWaveMetrics(effect, progress, star, wave, bandWidth, counts) {
+    cortexMetrics.captureWaveEffects = 1;
+    cortexMetrics.captureWavePeak = Math.max(
+      cortexMetrics.captureWavePeak,
+      wave.wavePeak,
+    );
+    cortexMetrics.captureHeartbeatPeak = Math.max(
+      cortexMetrics.captureHeartbeatPeak,
+      wave.heartbeatPeak,
     );
     cortexMetrics.transportElectricPeak = Math.max(
       cortexMetrics.transportElectricPeak,
-      fade * 0.96,
+      wave.wavePeak,
+      wave.heartbeatPeak,
     );
-  }
-
-  function drawCaptureImpact(comet, localProgress, fade, star) {
-    if (localProgress <= 0.91) return;
-    const impact = clamp((localProgress - 0.91) / 0.09);
-    const impactFade = fade * (1 - smoothstep(impact));
-    const impactRadius = Math.min(
-      comet === 0 ? 30 : 18,
-      star.radius * (comet === 0 ? 0.14 : 0.085),
-    );
-    context.strokeStyle = rgba(RGB_CAPTURE, impactFade * 0.82);
-    context.lineWidth = 1.15 - impact * 0.5;
-    context.beginPath();
-    context.arc(
-      star.x,
-      star.y,
-      4 + Math.sqrt(impact) * impactRadius,
-      0,
-      Math.PI * 2,
-    );
-    context.stroke();
-    context.fillStyle = rgba(RGB_HOT, impactFade * 0.9);
-    context.beginPath();
-    context.arc(star.x, star.y, Math.max(0.7, 2.8 - impact * 1.9), 0, Math.PI * 2);
-    context.fill();
-    cortexMetrics.cometImpacts += 1;
-  }
-
-  function captureCometOrbit(effect, comet, star, safe) {
-    const seed = deterministicUnit(
-      effect.captureId || effect.label,
-      effect.seq * 101 + comet * 37,
-    );
-    const headMargin = comet === 0 ? 22 : 14;
-    const availableX = Math.max(
-      8,
-      Math.min(star.x - safe.left, safe.right - star.x) - headMargin,
-    );
-    const availableY = Math.max(
-      8,
-      Math.min(star.y - safe.top, safe.bottom - star.y) - headMargin,
-    );
-    return {
-      radiusX: availableX * (0.9 + seed * 0.09),
-      radiusY: availableY * (0.84 + seed * 0.14),
-      startAngle: -0.62 + comet * 2.23 + (seed - 0.5) * 0.7,
-      turns: 2.85 + seed * 0.25 + (comet === 0 ? 0.1 : 0),
-    };
-  }
-
-  function captureCometPoint(orbit, localProgress, star) {
-    const journey = clamp(localProgress / 0.91);
-    const accelerated = Math.pow(journey, 1.72);
-    const angle = orbit.startAngle + accelerated * orbit.turns * Math.PI * 2;
-    const contraction = 1 - smoothstep(accelerated);
-    return {
-      x: star.x + Math.cos(angle) * orbit.radiusX * contraction,
-      y: star.y + Math.sin(angle) * orbit.radiusY * contraction,
-      journey,
-    };
-  }
-
-  function drawCaptureComet(effect, comet, progress, fade, star, safe) {
-    const count = captureCometCount(effect);
-    const delay = comet * Math.min(0.055, 0.22 / Math.max(1, count - 1));
-    const localProgress = clamp((progress - delay) / (1 - delay));
-    if (progress < delay) return;
-
-    const orbit = captureCometOrbit(effect, comet, star, safe);
-    if (comet === 0) cortexMetrics.cometTurns = orbit.turns;
-    const head = captureCometPoint(orbit, localProgress, star);
-    const tailSpan = 0.075 + head.journey * (comet === 0 ? 0.19 : 0.135);
-    const segmentCount = comet === 0 ? 30 : 20;
-    const points = [head];
-    for (let segment = 1; segment <= segmentCount; segment += 1) {
-      const tailRatio = segment / segmentCount;
-      const tailProgress = Math.max(0, localProgress - tailSpan * tailRatio);
-      points.push(captureCometPoint(orbit, tailProgress, star));
+    if (wave.phase === "heartbeat" && effect.heartbeatRecorded !== true) {
+      effect.heartbeatRecorded = true;
+      cortexMetrics.captureHeartbeatCount += 1;
+      cortexMetrics.captureHeartbeatSeq = effect.seq;
     }
-    recordCaptureCometBounds(points);
-    drawCaptureCometTrail(points, comet, fade);
-    drawCaptureCometHead(comet, head, fade);
-    drawCaptureImpact(comet, localProgress, fade, star);
+    cortexMetrics.captureWaveNodes = counts.waveNodes;
+    cortexMetrics.captureAfterglowNodes = counts.afterglowNodes;
+    cortexMetrics.captureCenterX = star.x;
+    cortexMetrics.captureCenterY = star.y;
+    cortexMetrics.captureRadius = star.radius;
+    cortexMetrics.captureBandWidth = bandWidth;
+    cortexMetrics.captureProgress = progress;
+    cortexMetrics.capturePhase = wave.phase;
   }
 
-  function drawCaptureComets(effect, progress, fade) {
-    const star = memoryStarGeometry();
-    const safe = captureSafeRect();
-    cortexMetrics.cometCenterX = star.x;
-    cortexMetrics.cometCenterY = star.y;
-    cortexMetrics.cometSafeLeft = safe.left;
-    cortexMetrics.cometSafeRight = safe.right;
-    cortexMetrics.cometSafeTop = safe.top;
-    cortexMetrics.cometSafeBottom = safe.bottom;
-    const count = captureCometCount(effect);
-    for (let comet = count - 1; comet >= 0; comet -= 1) {
-      drawCaptureComet(effect, comet, progress, fade, star, safe);
+  function recordCaptureWaveSettleMetrics(progress) {
+    cortexMetrics.captureWaveEffects = 1;
+    cortexMetrics.captureWaveNodes = 0;
+    cortexMetrics.captureAfterglowNodes = 0;
+    cortexMetrics.captureWavePeak = 0;
+    cortexMetrics.captureHeartbeatPeak = 0;
+    cortexMetrics.captureProgress = progress;
+    cortexMetrics.capturePhase = "settle";
+  }
+
+  function drawCaptureWave(effect, progress, fade, star) {
+    const staticMotion = reducedMotion.matches || !motionEnabled;
+    const wave = captureWaveState(progress, star.radius, staticMotion);
+    const bandWidth = clamp(star.radius * 0.18, 42, 112);
+    let counts = { waveNodes: 0, afterglowNodes: 0, painted: false };
+    if (wave.wavePeak > 0) {
+      counts = drawCaptureWaveNodes(effect, wave, bandWidth, fade);
     }
+    const heartbeatPainted = drawCaptureHeartbeat(star, wave, fade);
+    recordCaptureWaveMetrics(effect, progress, star, wave, bandWidth, counts);
+    return counts.painted || heartbeatPainted;
   }
 
   function ingestFormationCandidates(target, count, includeTarget = false) {
@@ -3558,6 +3605,18 @@
     context.lineJoin = "round";
     context.font = "8px ui-monospace, SFMono-Regular, Menlo, monospace";
     let memoryStar = null;
+    let captureWaveStar = null;
+    let latestCaptureSeq = -1;
+    let captureEffectCount = 0;
+    for (let index = 0; index < transportEffects.length; index += 1) {
+      const effect = transportEffects[index];
+      if (effect.phase !== "capture") continue;
+      captureEffectCount += 1;
+      if (effect.captureVisualSuperseded === true) continue;
+      latestCaptureSeq = Math.max(latestCaptureSeq, Number(effect.seq) || 0);
+    }
+    cortexMetrics.captureEffectCount = captureEffectCount;
+    cortexMetrics.captureEffectSeq = latestCaptureSeq;
     for (let index = transportEffects.length - 1; index >= 0; index -= 1) {
       const effect = transportEffects[index];
       const rawProgress = (time - effect.startedAt) / effect.duration;
@@ -3566,14 +3625,29 @@
         continue;
       }
       if (rawProgress < 0) continue;
+      let paintedThisFrame = false;
       const progress = reducedMotion.matches || !motionEnabled
         ? 0.68
         : clamp(rawProgress);
       const fade = effect.phase === "capture"
-        ? 1 - smoothstep(clamp((rawProgress - 0.91) / 0.09))
+        ? 1 - smoothstep(clamp((rawProgress - CAPTURE_HEARTBEAT_END) / 0.06))
         : 1 - smoothstep(clamp(rawProgress));
       if (effect.phase === "capture") {
-        drawCaptureComets(effect, progress, fade);
+        if (effect.seq === latestCaptureSeq) {
+          const captureProgress = clamp(rawProgress);
+          const staticCapture = reducedMotion.matches || !motionEnabled;
+          if (!staticCapture && captureProgress >= CAPTURE_HEARTBEAT_END) {
+            recordCaptureWaveSettleMetrics(captureProgress);
+          } else {
+            if (!captureWaveStar) captureWaveStar = captureWaveGeometry();
+            paintedThisFrame = drawCaptureWave(
+              effect,
+              captureProgress,
+              fade,
+              captureWaveStar,
+            );
+          }
+        }
       } else {
         const target = transportTarget(effect);
         if (!target) continue;
@@ -3591,8 +3665,9 @@
           if (!memoryStar) memoryStar = memoryStarGeometry();
           drawTriageFormation(effect, progress, fade, memoryStar, target);
         }
+        paintedThisFrame = true;
       }
-      if (!effect.paintedAt) {
+      if (paintedThisFrame && !effect.paintedAt) {
         effect.paintedAt = time;
         cortexMetrics.transportPainted += 1;
         publishCortexMetrics();
@@ -3762,21 +3837,19 @@
     cortexMetrics.flashPeak = 0;
     cortexMetrics.maxCoreScale = 0;
     cortexMetrics.maxGlowPadding = 0;
-    cortexMetrics.cometTrailSegments = 0;
-    cortexMetrics.cometHeads = 0;
-    cortexMetrics.cometImpacts = 0;
-    cortexMetrics.maxCometHeadRadius = 0;
-    cortexMetrics.cometCenterX = 0;
-    cortexMetrics.cometCenterY = 0;
-    cortexMetrics.cometMinX = width;
-    cortexMetrics.cometMaxX = 0;
-    cortexMetrics.cometMinY = height;
-    cortexMetrics.cometMaxY = 0;
-    cortexMetrics.cometSafeLeft = 0;
-    cortexMetrics.cometSafeRight = width;
-    cortexMetrics.cometSafeTop = 0;
-    cortexMetrics.cometSafeBottom = height;
-    cortexMetrics.cometTurns = 0;
+    cortexMetrics.captureEffectCount = 0;
+    cortexMetrics.captureEffectSeq = -1;
+    cortexMetrics.captureWaveEffects = 0;
+    cortexMetrics.captureWaveNodes = 0;
+    cortexMetrics.captureAfterglowNodes = 0;
+    cortexMetrics.captureWavePeak = 0;
+    cortexMetrics.captureHeartbeatPeak = 0;
+    cortexMetrics.captureCenterX = 0;
+    cortexMetrics.captureCenterY = 0;
+    cortexMetrics.captureRadius = 0;
+    cortexMetrics.captureBandWidth = 0;
+    cortexMetrics.captureProgress = 0;
+    cortexMetrics.capturePhase = "idle";
     cortexMetrics.explorationArcs = 0;
     cortexMetrics.triageCandidates = 0;
     cortexMetrics.generateParticles = 0;
@@ -4582,7 +4655,7 @@
       </div>
       <div class="sec"><h3>STIMULUS PATHWAYS</h3>
         <div class="mrow"><span style="color:#ffd84d">⚡ RECALL</span><b>yellow · synaptic firing</b></div>
-        <div class="mrow"><span style="color:#4fe4ff">☄ SAVE</span><b>cyan · comet capture → memory core</b></div>
+        <div class="mrow"><span style="color:#4fe4ff">◉ SAVE</span><b>cyan · inward memory wave → heartbeat</b></div>
         <div class="mrow"><span style="color:#ffb454">⌁ TRIAGE</span><b>orange · candidate evaluation</b></div>
         <div class="mrow"><span style="color:#9b7cff">✦ GENERATE</span><b>violet · memory synthesis</b></div>
         <div class="mrow"><span style="color:#ffe6ae">◎ CONSENSUS</span><b>platinum · local agreement</b></div>
