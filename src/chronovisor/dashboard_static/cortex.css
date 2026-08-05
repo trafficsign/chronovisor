@@ -557,6 +557,7 @@ header::after {
 }
 
 .seg button {
+  min-height: 28px;
   padding: 6px 13px;
   color: var(--tx2);
   font: 11px var(--mono);
@@ -565,10 +566,20 @@ header::after {
   border: 0;
   cursor: pointer;
   transition: 0.2s;
+  touch-action: manipulation;
+}
+
+.modeSeg button {
+  min-width: 78px;
 }
 
 .seg button:hover {
   color: var(--tx);
+}
+
+.seg button:focus-visible {
+  outline: 2px solid var(--electric);
+  outline-offset: -2px;
 }
 
 .seg button.on {
@@ -1633,18 +1644,52 @@ header::after {
   #modeBar {
     top: 8px;
     width: calc(100% - 20px);
+    max-width: calc(100% - 20px);
     gap: 5px;
+  }
+
+  #modeBar .modeSeg {
+    width: min(100%, 276px);
+  }
+
+  #modeBar .modeSeg button {
+    flex: 1 1 0;
+    min-width: 0;
+  }
+
+  #modeBar .demoSeg {
+    display: grid;
+    width: 100%;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+
+  #modeBar .demoSeg button {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   #modeBar .seg button,
   #modeBar .tgl,
+  #modeBar .relationFilter,
+  #modeBar .relationFilter select,
   #visCtl {
+    min-height: 28px;
     padding: 5px 7px;
     font-size: 9px;
   }
 
   #visCtl {
     display: none;
+  }
+}
+
+@media (max-width: 420px) {
+  #zoomCtl {
+    right: 14px;
+    bottom: 44px;
+    flex-flow: row nowrap;
   }
 }
 

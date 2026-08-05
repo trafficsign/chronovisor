@@ -50,6 +50,12 @@
   const EVENT_EDGE_TTL_MS = 60_000;
   const EXPLORER_CHUNK_SIZE = 120;
   const AUTO_ROTATE_COOLDOWN_MS = 2600;
+  const SPHERE_TARGET_FORCE = 0.018;
+  const SPHERE_RADIAL_FORCE = 0.006;
+  const SPHERE_LINK_SPRING = 0.00006;
+  const SPHERE_NORMAL_EDGE_SCALE = 0.28;
+  const SPHERE_BACK_HEMISPHERE_FADE = 0.72;
+  const SPHERE_FIT_PADDING_PX = 28;
   const NODE_STIMULUS_SCALE = 0.38;
   const NODE_ARRIVAL_SCALE = 0.28;
   const NODE_CORE_SCALE = 1;
@@ -95,6 +101,8 @@
   let packageList = [];
   let packageShade = {};
   let anchors = {};
+  let sphereTargets = [];
+  let sphereQuality = Runtime.measureSphereQuality([], []);
   let nodeState;
   let edgeState;
   let nodeExcitation = new Float32Array(0);
@@ -143,9 +151,11 @@
   let simulationTicks = 0;
   let simulationSleepCount = 0;
   let simulationLastMaxVelocity = 0;
+  let modeFitTimer = 0;
   let spikes = 0;
   let lastInteraction = 0;
   let lastVisualMetricsPublished = 0;
+  let lastSphereMetricsPublished = -1e9;
   let lastCortexMetricsPublished = -1e9;
   let frameDurationCursor = 0;
   let frameDurationCount = 0;
@@ -392,6 +402,11 @@
   }
 
   window.chronovisorCortexMetrics = () => ({
+    mode,
+    sphere: {
+      active: mode === "sphere",
+      ...sphereQuality,
+    },
     spread: cortexMetrics.spread.map((row) => ({ ...row })),
     frameDurations: recentFrameDurations(),
     frameCadences: recentFrameCadences(),
@@ -570,7 +585,7 @@
     const value = candidate && typeof candidate === "object" ? candidate : {};
     const rawVisibility = Number(value.synapseVisibility);
     return {
-      mode: value.mode === "cluster" ? "cluster" : "organic",
+      mode: Runtime.normalizeLayoutMode(value.mode),
       motion:
         typeof value.motion === "boolean"
           ? value.motion
@@ -658,12 +673,16 @@
       control.classList.toggle("on", enabled);
       control.setAttribute("aria-pressed", String(enabled));
     }
-    document
-      .getElementById("mOrganic")
-      .classList.toggle("on", mode === "organic");
-    document
-      .getElementById("mCluster")
-      .classList.toggle("on", mode === "cluster");
+    [
+      ["mOrganic", "organic"],
+      ["mSphere", "sphere"],
+      ["mCluster", "cluster"],
+    ].forEach(([id, controlMode]) => {
+      const control = document.getElementById(id);
+      const active = mode === controlMode;
+      control.classList.toggle("on", active);
+      control.setAttribute("aria-pressed", String(active));
+    });
     document.getElementById("visSlider").value = String(
       Math.round(edgeVisibility * 100),
     );
@@ -692,7 +711,7 @@
     }
     applyViewPreferences(VIEW_PREFERENCES_DEFAULTS);
     reheat(0.7);
-    window.setTimeout(fitView, 900);
+    scheduleModeFit();
     flashTicker("view preferences reset");
   }
 
@@ -988,6 +1007,7 @@
         .map((node) => node.index),
     );
     buildAnchors();
+    buildSphereTargets();
     seedPositions();
   }
 
@@ -1005,6 +1025,14 @@
     });
   }
 
+  function buildSphereTargets() {
+    sphereTargets = Runtime.createSphereTargets(nodes);
+    sphereTargets.forEach((target, index) => {
+      nodes[index].sphereTarget = target;
+    });
+    sphereQuality = Runtime.measureSphereQuality(nodes, sphereTargets);
+  }
+
   function seedPositions() {
     nodes.forEach((node) => {
       const anchor = anchors[node.packageName] || { x: 0, y: 0, z: 0 };
@@ -1016,11 +1044,31 @@
   }
 
   function tick() {
-    const centerForce = alpha * 0.00055;
-    const anchorForce = alpha * (mode === "cluster" ? 0.015 : 0.0007);
+    const sphereMode = mode === "sphere";
+    const centerForce = sphereMode ? 0 : alpha * 0.00055;
+    const anchorForce = sphereMode
+      ? 0
+      : alpha * (mode === "cluster" ? 0.015 : 0.0007);
     for (let index = 0; index < nodes.length; index += 1) {
       const node = nodes[index];
       const anchor = node.anchor;
+      if (sphereMode) {
+        const target = node.sphereTarget;
+        if (!target) continue;
+        const targetForce = alpha * SPHERE_TARGET_FORCE;
+        node.vx += (target.x - node.x) * targetForce;
+        node.vy += (target.y - node.y) * targetForce;
+        node.vz += (target.z - node.z) * targetForce;
+        const radius = Math.hypot(node.x, node.y, node.z);
+        if (radius > 0.001) {
+          const radialForce =
+            (target.radius - radius) * alpha * SPHERE_RADIAL_FORCE;
+          node.vx += (node.x / radius) * radialForce;
+          node.vy += (node.y / radius) * radialForce;
+          node.vz += (node.z / radius) * radialForce;
+        }
+        continue;
+      }
       node.vx -= node.x * centerForce * 0.8;
       node.vy -= node.y * centerForce * 1.25;
       node.vz -= node.z * centerForce;
@@ -1029,7 +1077,11 @@
       node.vz += (anchor.z - node.z) * anchorForce;
     }
 
-    const spring = mode === "cluster" ? 0.0012 : 0.0007;
+    const spring = sphereMode
+      ? SPHERE_LINK_SPRING
+      : mode === "cluster"
+        ? 0.0012
+        : 0.0007;
     for (let index = 0; index < simulationLinks.length; index += 1) {
       const link = simulationLinks[index];
       const source = nodes[link.source];
@@ -1054,9 +1106,10 @@
     let maxVelocitySquared = 0;
     for (let index = 0; index < nodes.length; index += 1) {
       const node = nodes[index];
-      node.vx *= 0.82;
-      node.vy *= 0.82;
-      node.vz *= 0.82;
+      const damping = sphereMode ? 0.78 : 0.82;
+      node.vx *= damping;
+      node.vy *= damping;
+      node.vz *= damping;
       let velocitySquared =
         node.vx * node.vx + node.vy * node.vy + node.vz * node.vz;
       if (velocitySquared > 169) {
@@ -1108,8 +1161,12 @@
     invalidate("simulation");
   }
 
+  function projectionFocalLength() {
+    return Math.min(width, height) * 1.12;
+  }
+
   function projectAll() {
-    focalLength = Math.min(width, height) * 1.12;
+    focalLength = projectionFocalLength();
     projectionCosTheta = Math.cos(camera.theta);
     projectionSinTheta = Math.sin(camera.theta);
     projectionCosPhi = Math.cos(camera.phi);
@@ -1143,13 +1200,28 @@
 
   function fog(viewDepth) {
     const amount = (viewDepth - camera.distance * 0.55) / (camera.distance * 1.1);
-    return 1 - Math.max(0, Math.min(0.72, amount));
+    const baseFade = 1 - Math.max(0, Math.min(0.72, amount));
+    if (mode !== "sphere") return baseFade;
+    const shellRadius = Math.max(1, sphereQuality.targetRadius.max || 540);
+    const backDepth = clamp(
+      (viewDepth - camera.distance) / shellRadius,
+    );
+    return baseFade * (1 - backDepth * SPHERE_BACK_HEMISPHERE_FADE);
   }
 
   function graphRadius() {
+    return graphRadiusFrom({ x: 0, y: 0, z: 0 });
+  }
+
+  function graphRadiusFrom(center) {
     let maximum = 0;
     nodes.forEach((node) => {
-      maximum = Math.max(maximum, node.x ** 2 + node.y ** 2 + node.z ** 2);
+      maximum = Math.max(
+        maximum,
+        (node.x - center.x) ** 2
+          + (node.y - center.y) ** 2
+          + (node.z - center.z) ** 2,
+      );
     });
     return Math.sqrt(maximum);
   }
@@ -1203,12 +1275,35 @@
   }
 
   function fitView() {
+    const center = graphCenter();
     resetCameraPivot(false);
+    const distance = mode === "sphere"
+      ? Runtime.fitSphereCamera({
+          sphereRadius: graphRadiusFrom(center),
+          focalLength: projectionFocalLength(),
+          viewportWidth: width,
+          viewportHeight: height,
+          topInset: projectionTopInset,
+          padding: SPHERE_FIT_PADDING_PX,
+          minimumDistance: 600,
+        }).distance
+      : Math.max(600, graphRadius() * 2.55);
     cameraTarget = {
       theta: camera.theta,
       phi: camera.phi,
-      distance: Math.max(600, graphRadius() * 2.55),
+      distance,
     };
+  }
+
+  function scheduleModeFit(expectedMode = mode) {
+    window.clearTimeout(modeFitTimer);
+    modeFitTimer = window.setTimeout(() => {
+      modeFitTimer = 0;
+      if (mode === expectedMode) {
+        fitView();
+        invalidate("mode-fit");
+      }
+    }, 900);
   }
 
   function angleLerp(from, to, factor) {
@@ -1614,6 +1709,13 @@
   function publishVisualMetrics(time) {
     if (time - lastVisualMetricsPublished < 200) return;
     lastVisualMetricsPublished = time;
+    if (
+      mode === "sphere"
+      && time - lastSphereMetricsPublished >= 1000
+    ) {
+      sphereQuality = Runtime.measureSphereQuality(nodes, sphereTargets);
+      lastSphereMetricsPublished = time;
+    }
     publishCortexMetrics();
     const target = document.getElementById("fieldAria");
     if (!target) return;
@@ -1633,6 +1735,16 @@
     target.dataset.cameraPivotX = camera.pivotX.toFixed(2);
     target.dataset.cameraPivotY = camera.pivotY.toFixed(2);
     target.dataset.cameraPivotZ = camera.pivotZ.toFixed(2);
+    target.dataset.layoutMode = mode;
+    target.dataset.sphereCoreNodes = String(sphereQuality.tiers.core);
+    target.dataset.sphereMiddleNodes = String(sphereQuality.tiers.middle);
+    target.dataset.sphereOuterNodes = String(sphereQuality.tiers.outer);
+    target.dataset.sphereTargetErrorMean =
+      sphereQuality.targetError.mean.toFixed(2);
+    target.dataset.sphereTargetErrorMax =
+      sphereQuality.targetError.max.toFixed(2);
+    target.dataset.sphereRadialErrorMean =
+      sphereQuality.radialError.mean.toFixed(2);
     target.dataset.cometTrailSegments = String(cortexMetrics.cometTrailSegments);
     target.dataset.cometHeads = String(cortexMetrics.cometHeads);
     target.dataset.cometImpacts = String(cortexMetrics.cometImpacts);
@@ -2051,8 +2163,13 @@
   }
 
   function drawEdges() {
-    const paths = Array.from({ length: 9 }, () => new Path2D());
-    const pathKinds = new Uint8Array(9);
+    const sphereMode = mode === "sphere";
+    const depthBandCount = sphereMode ? 4 : 3;
+    const paths = Array.from(
+      { length: depthBandCount * 3 },
+      () => new Path2D(),
+    );
+    const pathKinds = new Uint8Array(depthBandCount * 3);
     const now = performance.now();
     links.forEach((link, edgeIndex) => {
       if (link.typed) return;
@@ -2078,13 +2195,15 @@
         return;
       }
       const depth = (source.viewDepth + target.viewDepth) / 2;
-      const band =
-        depth < camera.distance * 0.85
+      const depthFade = fog(depth);
+      const band = sphereMode
+        ? Runtime.sphereFogBand(depthFade)
+        : depth < camera.distance * 0.85
           ? 0
           : depth < camera.distance * 1.15
             ? 1
             : 2;
-      const batch = (state - 1) * 3 + band;
+      const batch = (state - 1) * depthBandCount + band;
       paths[batch].moveTo(source.screenX, source.screenY);
       paths[batch].lineTo(target.screenX, target.screenY);
       pathKinds[batch] = 1;
@@ -2092,17 +2211,23 @@
 
     const bandOpacity = [0.085, 0.05, 0.024];
     for (let state = 1; state <= 3; state += 1) {
-      for (let band = 2; band >= 0; band -= 1) {
-        const batch = (state - 1) * 3 + band;
+      for (let band = depthBandCount - 1; band >= 0; band -= 1) {
+        const batch = (state - 1) * depthBandCount + band;
         if (!pathKinds[batch]) continue;
         context.lineWidth =
           state === 3 ? 1.3 : 0.7 + Math.max(0, edgeVisibility - 1) * 0.28;
-        let opacity =
-          state === 3
+        let opacity = sphereMode
+          ? (state === 3 ? 0.42 : state === 2 ? 0.075 : 0.025)
+            * Runtime.sphereFogOpacity(band)
+            * edgeVisibility
+          : state === 3
             ? 0.42
             : state === 2
               ? bandOpacity[band] * edgeVisibility
               : bandOpacity[band] * 0.35 * edgeVisibility;
+        if (sphereMode && state !== 3) {
+          opacity *= SPHERE_NORMAL_EDGE_SCALE;
+        }
         opacity = Math.min(0.85, opacity);
         context.strokeStyle =
           state === 3 ? rgba(RGB_FIRE, opacity) : rgba(RGB_STEEL, opacity);
@@ -2114,6 +2239,7 @@
 
   function drawTypedRelations() {
     if (!relationsVisible) return;
+    const sphereMode = mode === "sphere";
     const batches = new Map();
     links.forEach((link, edgeIndex) => {
       if (!link.typed || edgeState[edgeIndex] === 0) return;
@@ -2124,11 +2250,14 @@
       const active = activeRelationIds.has(link.relationId);
       const color = RELATION_STATUS_COLORS[link.lifecycle] || RGB_VIOLET;
       const depth = (source.viewDepth + target.viewDepth) / 2;
-      const depthBand = depth < camera.distance * 0.85
-        ? 0
-        : depth < camera.distance * 1.15
-          ? 1
-          : 2;
+      const depthFade = fog(depth);
+      const depthBand = sphereMode
+        ? Runtime.sphereFogBand(depthFade)
+        : depth < camera.distance * 0.85
+          ? 0
+          : depth < camera.distance * 1.15
+            ? 1
+            : 2;
       const key = Runtime.relationBatchKey(
         link,
         edgeState[edgeIndex],
@@ -2137,7 +2266,9 @@
       );
       let batch = batches.get(key);
       if (!batch) {
-        const depthOpacity = [1, 0.72, 0.48][depthBand];
+        const depthOpacity = sphereMode
+          ? Runtime.sphereFogOpacity(depthBand)
+          : [1, 0.72, 0.48][depthBand];
         batch = {
           path: new Path2D(),
           color,
@@ -3472,6 +3603,8 @@
 
   function compareActiveLabels(left, right) {
     return (
+      (mode === "sphere" ? left.viewDepth - right.viewDepth : 0)
+      ||
       right.fieldActivation - left.fieldActivation
       || right.fanIn - left.fanIn
       || left.id.localeCompare(right.id)
@@ -3548,6 +3681,14 @@
         + (node.index === hovered ? 50000 : 0)
         + excitationLevel(node, time) * 1000
         + node.fieldActivation * 900
+        + (mode === "sphere"
+          ? clamp(
+              (camera.distance - node.viewDepth)
+                / Math.max(1, sphereQuality.targetRadius.max || 540),
+              -1,
+              1,
+            ) * 700
+          : 0)
         + node.fanIn;
     }
     labelCandidates.sort(
@@ -3833,10 +3974,12 @@
       edgeState,
       selected,
       hovered,
+      mode,
       relationsVisible,
       activeRelations: activeRelationIds,
       relationColors: RELATION_STATUS_COLORS,
       edgeVisibility,
+      normalEdgeScale: mode === "sphere" ? SPHERE_NORMAL_EDGE_SCALE : 1,
       baseEdgeColor: RGB_STEEL,
       selectedEdgeColor: RGB_FIRE,
       fog,
@@ -4660,6 +4803,9 @@
     document.getElementById("mOrganic").addEventListener("click", () => {
       setMode("organic");
     });
+    document.getElementById("mSphere").addEventListener("click", () => {
+      setMode("sphere");
+    });
     document.getElementById("mCluster").addEventListener("click", () => {
       setMode("cluster");
     });
@@ -4795,16 +4941,11 @@
   }
 
   function setMode(nextMode) {
-    mode = nextMode === "cluster" ? "cluster" : "organic";
-    reheat(0.7);
-    document
-      .getElementById("mOrganic")
-      .classList.toggle("on", mode === "organic");
-    document
-      .getElementById("mCluster")
-      .classList.toggle("on", mode === "cluster");
+    mode = Runtime.normalizeLayoutMode(nextMode);
+    reheat(mode === "sphere" ? 0.9 : 0.7);
+    syncViewPreferenceControls();
     saveViewPreferences();
-    window.setTimeout(fitView, 900);
+    scheduleModeFit(mode);
   }
 
   let factIndex = 0;
@@ -5203,6 +5344,7 @@
         renderScheduler.visibilityChanged();
       });
       window.addEventListener("beforeunload", () => {
+        window.clearTimeout(modeFitTimer);
         autoRotateWake.dispose();
         renderScheduler.dispose();
         baseRenderer.dispose();
@@ -5225,6 +5367,7 @@
       fitView();
       camera.distance = cameraTarget.distance;
       cameraTarget = null;
+      if (mode === "sphere") scheduleModeFit(mode);
       previousTime = performance.now();
       invalidate("boot");
       connectProcessingActivity();

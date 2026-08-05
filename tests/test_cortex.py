@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import subprocess
 import threading
@@ -1537,6 +1538,110 @@ def test_cortex_projection_center_tracks_mode_bar_safe_area() -> None:
     assert "target.dataset.projectionTopInset" in script
 
 
+def test_cortex_sphere_mode_dom_persistence_simulation_and_renderer_contract() -> None:
+    static = dashboard.STATIC_DIR
+    html = (static / "cortex.html").read_text(encoding="utf-8")
+    style = (static / "cortex.css").read_text(encoding="utf-8")
+    script = (static / "cortex.js").read_text(encoding="utf-8")
+    runtime_script = (static / "cortex-runtime.js").read_text(encoding="utf-8")
+    webgl_script = (static / "cortex-webgl.js").read_text(encoding="utf-8")
+    tick = script[
+        script.index("function tick()") : script.index("function sleepSimulation()")
+    ]
+    set_mode = script[
+        script.index("function setMode(") : script.index("let factIndex")
+    ]
+    fog = script[
+        script.index("function fog(") : script.index("function graphRadius()")
+    ]
+    draw_edges = script[
+        script.index("function drawEdges()") : script.index(
+            "function drawTypedRelations()"
+        )
+    ]
+    draw_typed_relations = script[
+        script.index("function drawTypedRelations()") : script.index(
+            "function screenCross("
+        )
+    ]
+    fit_view = script[
+        script.index("function fitView()") : script.index(
+            "function scheduleModeFit("
+        )
+    ]
+
+    assert html.index(">ORGANIC</button>") < html.index(">SPHERE</button>")
+    assert html.index(">SPHERE</button>") < html.index(">CLUSTERS</button>")
+    assert 'class="seg modeSeg" role="group" aria-label="Graph layout"' in html
+    assert 'id="mOrganic" class="on" type="button" aria-pressed="true"' in html
+    assert 'id="mSphere" type="button" aria-pressed="false"' in html
+    assert 'id="mCluster" type="button" aria-pressed="false"' in html
+    assert ".modeSeg button" in style
+    assert "min-height: 28px" in style
+    assert ".seg button:focus-visible" in style
+    assert "grid-template-columns: repeat(4, minmax(0, 1fr))" in style
+    assert "@media (max-width: 420px)" in style
+    assert "flex-flow: row nowrap;" in style
+    assert "#zoomCtl button" in style
+    assert "width: 32px;" in style
+    assert "height: 32px;" in style
+    assert "Runtime.normalizeLayoutMode(value.mode)" in script
+    assert '["mSphere", "sphere"]' in script
+    assert 'control.setAttribute("aria-pressed", String(active));' in script
+    assert 'document.getElementById("mSphere").addEventListener' in script
+    assert 'setMode("sphere");' in script
+    assert "Runtime.normalizeLayoutMode(nextMode)" in set_mode
+    assert 'reheat(mode === "sphere" ? 0.9 : 0.7);' in set_mode
+    assert "syncViewPreferenceControls();" in set_mode
+    assert "saveViewPreferences();" in set_mode
+    assert "scheduleModeFit(mode);" in set_mode
+    assert "window.clearTimeout(modeFitTimer);" in script
+    assert "if (mode === expectedMode) {" in script
+    assert 'invalidate("mode-fit");' in script
+    assert 'if (mode === "sphere") scheduleModeFit(mode);' in script
+    assert 'mode: "organic"' in script
+    assert "Runtime.createSphereTargets(nodes)" in script
+    assert "nodes[index].sphereTarget = target" in script
+    assert 'const sphereMode = mode === "sphere"' in tick
+    assert "SPHERE_TARGET_FORCE" in tick
+    assert "SPHERE_RADIAL_FORCE" in tick
+    assert "SPHERE_LINK_SPRING" in tick
+    assert "const centerForce = sphereMode ? 0" in tick
+    assert "for (let index = 0; index < simulationLinks.length" in tick
+    assert "SPHERE_BACK_HEMISPHERE_FADE" in fog
+    assert "sphereQuality.targetRadius.max" in fog
+    assert "Runtime.fitSphereCamera({" in fit_view
+    assert "sphereRadius: graphRadiusFrom(center)" in fit_view
+    assert "focalLength: projectionFocalLength()" in fit_view
+    assert "topInset: projectionTopInset" in fit_view
+    assert "padding: SPHERE_FIT_PADDING_PX" in fit_view
+    assert "Math.max(600, graphRadius() * 2.55)" in fit_view
+    assert "normalEdgeScale: mode === \"sphere\"" in script
+    assert "opacity *= SPHERE_NORMAL_EDGE_SCALE" in script
+    assert "const depthFade = fog(depth);" in draw_edges
+    assert "const depthBandCount = sphereMode ? 4 : 3;" in draw_edges
+    assert "Runtime.sphereFogBand(depthFade)" in draw_edges
+    assert "Runtime.sphereFogOpacity(band)" in draw_edges
+    assert draw_edges.count("context.stroke(paths[batch])") == 1
+    assert 'const sphereMode = mode === "sphere";' in draw_typed_relations
+    assert "Runtime.sphereFogBand(depthFade)" in draw_typed_relations
+    assert "Runtime.sphereFogOpacity(depthBand)" in draw_typed_relations
+    assert draw_typed_relations.count("context.stroke(batch.path)") == 1
+    assert "Number(scene.normalEdgeScale)" in webgl_script
+    assert 'mode === "sphere" ? left.viewDepth - right.viewDepth' in script
+    assert "sphereQuality = Runtime.measureSphereQuality" in script
+    assert "target.dataset.layoutMode = mode" in script
+    assert "target.dataset.sphereCoreNodes" in script
+    assert "target.dataset.sphereTargetErrorMean" in script
+    assert "function createSphereTargets(" in runtime_script
+    assert "function measureSphereQuality(" in runtime_script
+    assert "function fitSphereCamera(" in runtime_script
+    assert "function sphereFogBand(" in runtime_script
+    assert "function sphereFogOpacity(" in runtime_script
+    # The established ORGANIC/CLUSTERS package-anchor handedness stays intact.
+    assert "Math.PI * (1 + Math.sqrt(5)) * offset" in script
+
+
 def test_cortex_staged_renderer_lazy_explorer_and_relation_detail_contract() -> None:
     static = dashboard.STATIC_DIR
     html = (static / "cortex.html").read_text(encoding="utf-8")
@@ -2044,6 +2149,201 @@ def test_cortex_reuses_hot_path_state_without_reducing_visual_limits() -> None:
     assert "const MAX_TRANSPORT_EFFECTS = 18;" in policy_script
 
 
+def test_cortex_runtime_sphere_layout_is_deterministic_tiered_and_finite() -> None:
+    runtime_path = dashboard.STATIC_DIR / "cortex-runtime.js"
+    scenario = f"const runtime = require({json.dumps(str(runtime_path))});\n" + r"""
+const nodes = [
+  { id: "current-state", packageName: "system", entrypoint: 1, fanIn: 30, fanOut: 5 },
+  { id: "hub", packageName: "alpha", fanIn: 80, fanOut: 40 },
+  { id: "alpha-a", packageName: "alpha", fanIn: 2, fanOut: 1 },
+  { id: "alpha-b", packageName: "alpha", fanIn: 1, fanOut: 1 },
+  { id: "beta-a", packageName: "beta", fanIn: 3, fanOut: 2 },
+  { id: "beta-b", packageName: "beta", fanIn: 0, fanOut: 1 },
+];
+const first = runtime.createSphereTargets(nodes);
+const second = runtime.createSphereTargets(nodes.map((node) => ({ ...node })));
+const reversedNodes = [...nodes].reverse();
+const reversed = runtime.createSphereTargets(reversedNodes);
+const byId = Object.fromEntries(nodes.map((node, index) => [node.id, first[index]]));
+const reversedById = Object.fromEntries(
+  reversedNodes.map((node, index) => [node.id, reversed[index]]),
+);
+const positioned = first.map((target) => ({
+  x: target.x,
+  y: target.y,
+  z: target.z,
+}));
+const exactQuality = runtime.measureSphereQuality(positioned, first);
+const opposite = first.map((target) => ({
+  x: -target.x,
+  y: -target.y,
+  z: -target.z,
+}));
+const oppositeQuality = runtime.measureSphereQuality(opposite, first);
+const largeNodes = Array.from({ length: 3863 }, (_, index) => ({
+  id: `node-${String(index).padStart(4, "0")}`,
+  packageName: `package-${index % 17}`,
+  entrypoint: index < 4 ? 1 : 0,
+  fanIn: (index * 37) % 113,
+  fanOut: (index * 19) % 71,
+}));
+const largeTargets = runtime.createSphereTargets(largeNodes);
+const largeQuality = runtime.measureSphereQuality(largeTargets, largeTargets);
+const singleton = runtime.createSphereTargets([
+  { id: "only", packageName: "single", fanIn: 0, fanOut: 0 },
+])[0];
+const largeFinite = largeTargets.every((target) =>
+  [target.x, target.y, target.z, target.radius].every(Number.isFinite)
+);
+const radii = Object.fromEntries(
+  ["core", "middle", "outer"].map((tier) => {
+    const values = first.filter((target) => target.tier === tier).map((target) => target.radius);
+    return [tier, { min: Math.min(...values), max: Math.max(...values), count: values.length }];
+  }),
+);
+const storage = new Map();
+storage.set("view", JSON.stringify({ mode: runtime.normalizeLayoutMode("sphere") }));
+const reloadedMode = runtime.normalizeLayoutMode(JSON.parse(storage.get("view")).mode);
+storage.delete("view");
+const resetMode = runtime.normalizeLayoutMode(
+  storage.has("view") ? JSON.parse(storage.get("view")).mode : undefined,
+);
+process.stdout.write(JSON.stringify({
+  deterministic: JSON.stringify(first) === JSON.stringify(second),
+  orderIndependent: nodes.every((node) => {
+    const left = byId[node.id];
+    const right = reversedById[node.id];
+    return left.tier === right.tier
+      && left.radius === right.radius
+      && Math.hypot(left.x - right.x, left.y - right.y, left.z - right.z) < 1e-9;
+  }),
+  finite: first.every((target) =>
+    [target.x, target.y, target.z, target.radius].every(Number.isFinite)
+  ),
+  tiers: exactQuality.tiers,
+  radii,
+  exactQuality,
+  oppositeQuality,
+  largeCount: largeTargets.length,
+  largeFinite,
+  largeQuality,
+  singleton,
+  modes: [
+    runtime.normalizeLayoutMode("organic"),
+    runtime.normalizeLayoutMode("sphere"),
+    runtime.normalizeLayoutMode("cluster"),
+    runtime.normalizeLayoutMode("invalid"),
+    reloadedMode,
+    resetMode,
+  ],
+}));
+"""
+    completed = subprocess.run(
+        ["node", "-e", scenario],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    result = json.loads(completed.stdout)
+
+    assert result["deterministic"] is True
+    assert result["orderIndependent"] is True
+    assert result["finite"] is True
+    assert all(result["tiers"][tier] > 0 for tier in ("core", "middle", "outer"))
+    assert result["radii"]["core"]["max"] < result["radii"]["middle"]["min"]
+    assert result["radii"]["middle"]["max"] < result["radii"]["outer"]["min"]
+    assert result["exactQuality"]["targetError"]["max"] == pytest.approx(0)
+    assert result["exactQuality"]["radialError"]["max"] == pytest.approx(0)
+    assert result["oppositeQuality"]["targetError"]["mean"] > 300
+    assert result["oppositeQuality"]["radialError"]["max"] == pytest.approx(0)
+    assert result["largeCount"] == 3863
+    assert result["largeFinite"] is True
+    assert result["largeQuality"]["targetCentroid"]["normalizedOffset"] <= 0.05
+    assert result["largeQuality"]["occupiedOctants"] == 8
+    singleton_radius = (
+        result["singleton"]["x"] ** 2
+        + result["singleton"]["y"] ** 2
+        + result["singleton"]["z"] ** 2
+    ) ** 0.5
+    assert singleton_radius == pytest.approx(result["singleton"]["radius"])
+    assert singleton_radius > 100
+    assert result["modes"] == [
+        "organic",
+        "sphere",
+        "cluster",
+        "organic",
+        "sphere",
+        "organic",
+    ]
+
+
+def test_cortex_runtime_sphere_camera_fit_and_fog_are_bounded() -> None:
+    runtime_path = dashboard.STATIC_DIR / "cortex-runtime.js"
+    scenario = f"""
+const runtime = require({json.dumps(str(runtime_path))});
+const cases = [
+  {{ viewportWidth: 1024, viewportHeight: 716, topInset: 126, padding: 28,
+     sphereRadius: 562, focalLength: 716 * 1.12, minimumDistance: 600 }},
+  {{ viewportWidth: 680, viewportHeight: 448, topInset: 130, padding: 28,
+     sphereRadius: 562, focalLength: 448 * 1.12, minimumDistance: 600 }},
+  {{ viewportWidth: 375, viewportHeight: 320, topInset: 164, padding: 28,
+     sphereRadius: 562, focalLength: 320 * 1.12, minimumDistance: 600 }},
+  {{ viewportWidth: 320, viewportHeight: 320, topInset: 178, padding: 28,
+     sphereRadius: 562, focalLength: 320 * 1.12, minimumDistance: 600 }},
+];
+const fits = cases.map((options) => runtime.fitSphereCamera(options));
+const fog = [1, 0.74, 0.49, 0.24, 0].map((depthFade) => {{
+  const band = runtime.sphereFogBand(depthFade);
+  return {{ depthFade, band, opacity: runtime.sphereFogOpacity(band) }};
+}});
+process.stdout.write(JSON.stringify({{ fits, fog }}));
+"""
+    completed = subprocess.run(
+        ["node", "-e", scenario],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    result = json.loads(completed.stdout)
+
+    for fit in result["fits"]:
+        projected_radius = (
+            fit["focalLength"]
+            * fit["sphereRadius"]
+            / math.sqrt(fit["distance"] ** 2 - fit["sphereRadius"] ** 2)
+        )
+        assert math.isfinite(fit["distance"])
+        assert fit["distance"] > fit["sphereRadius"]
+        assert fit["projectedRadius"] == pytest.approx(projected_radius)
+        assert fit["projectedRadius"] <= fit["safeRadius"] + 1e-8
+        assert (
+            fit["projectedBounds"]["left"]
+            >= fit["safeBounds"]["left"] - 1e-8
+        )
+        assert (
+            fit["projectedBounds"]["right"]
+            <= fit["safeBounds"]["right"] + 1e-8
+        )
+        assert (
+            fit["projectedBounds"]["top"]
+            >= fit["safeBounds"]["top"] - 1e-8
+        )
+        assert (
+            fit["projectedBounds"]["bottom"]
+            <= fit["safeBounds"]["bottom"] + 1e-8
+        )
+
+    assert [bucket["band"] for bucket in result["fog"]] == [0, 1, 2, 3, 3]
+    assert [bucket["opacity"] for bucket in result["fog"]] == [
+        0.875,
+        0.625,
+        0.375,
+        0.2,
+        0.2,
+    ]
+    assert result["fog"][-1]["opacity"] < result["fog"][0]["opacity"] * 0.25
+
+
 def test_cortex_runtime_pulse_scheduler_metrics_burst_and_webgl_fallback() -> None:
     runtime_path = dashboard.STATIC_DIR / "cortex-runtime.js"
     webgl_path = dashboard.STATIC_DIR / "cortex-webgl.js"
@@ -2518,11 +2818,14 @@ const scene = {
   activeRelations: new Set(),
   relationsVisible: true,
   edgeVisibility: 1,
+  mode: "sphere",
+  normalEdgeScale: 0.28,
   selected: 0,
   hovered: 1,
   fog: () => 1,
 };
 const rendered = renderer.render(scene);
+const edgeUpload = uploads[0];
 const nodeUpload = uploads[1];
 throwDraw = true;
 const failedRender = renderer.render(scene);
@@ -2541,6 +2844,7 @@ const afterRestore = renderer.snapshot();
 renderer.dispose();
 process.stdout.write(JSON.stringify({
   rendered,
+  edgeUpload,
   nodeUpload,
   failedRender,
   failureSnapshot,
@@ -2607,6 +2911,10 @@ process.stdout.write(JSON.stringify({
         ["restored", "1"],
     ]
     assert result["disposedOpacity"] == "0"
+    edge_upload = result["edgeUpload"]
+    assert edge_upload[5] == pytest.approx(0.075 * 0.28)
+    assert edge_upload[12] == pytest.approx(0.075 * 0.28)
+    assert edge_upload[19] == pytest.approx(0.18)
     node_upload = result["nodeUpload"]
     violet_mix = 0.2 * 0.72
     expected_violet = [

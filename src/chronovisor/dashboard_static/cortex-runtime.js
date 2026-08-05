@@ -6,6 +6,407 @@
   if (root) root.CortexRuntime = api;
 })(typeof window === "undefined" ? globalThis : window, () => {
   const DEFAULT_SAMPLE_CAPACITY = 240;
+  const GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5));
+  const SPHERE_FOG_OPACITIES = Object.freeze([0.875, 0.625, 0.375, 0.2]);
+
+  function clamp(value, minimum, maximum) {
+    return Math.max(minimum, Math.min(maximum, value));
+  }
+
+  function deterministicUnit(value, salt = 0) {
+    let hash = 2166136261 ^ Number(salt || 0);
+    const text = String(value);
+    for (let index = 0; index < text.length; index += 1) {
+      hash ^= text.charCodeAt(index);
+      hash = Math.imul(hash, 16777619);
+    }
+    return (hash >>> 0) / 4294967295;
+  }
+
+  function normalizeLayoutMode(value) {
+    return value === "sphere" || value === "cluster" ? value : "organic";
+  }
+
+  function sphereFogBand(depthFade) {
+    const fade = Number(depthFade);
+    const boundedFade = Number.isFinite(fade) ? clamp(fade, 0, 1) : 0;
+    return Math.min(3, Math.floor((1 - boundedFade) * 4));
+  }
+
+  function sphereFogOpacity(depthBand) {
+    const band = clamp(Math.trunc(Number(depthBand) || 0), 0, 3);
+    return SPHERE_FOG_OPACITIES[band];
+  }
+
+  function fitSphereCamera(options = {}) {
+    const viewportWidth = Math.max(1, Number(options.viewportWidth) || 1);
+    const viewportHeight = Math.max(1, Number(options.viewportHeight) || 1);
+    const topInset = clamp(
+      Number(options.topInset) || 0,
+      0,
+      Math.max(0, viewportHeight - 1),
+    );
+    const usableWidth = viewportWidth;
+    const usableHeight = Math.max(1, viewportHeight - topInset);
+    const maximumPadding = Math.max(
+      0,
+      Math.min(usableWidth, usableHeight) / 2 - 1,
+    );
+    const padding = clamp(
+      Number(options.padding) || 0,
+      0,
+      maximumPadding,
+    );
+    const safeRadius = Math.max(
+      1,
+      Math.min(usableWidth, usableHeight) / 2 - padding,
+    );
+    const sphereRadius = Math.max(0, Number(options.sphereRadius) || 0);
+    const focalLength = Math.max(1, Number(options.focalLength) || 1);
+    const minimumDistance = Math.max(
+      0,
+      Number(options.minimumDistance) || 0,
+    );
+    const tangentDistance = sphereRadius > 0
+      ? sphereRadius * Math.sqrt(1 + (focalLength / safeRadius) ** 2)
+      : 0;
+    const distance = Math.max(
+      minimumDistance,
+      tangentDistance,
+      sphereRadius > 0 ? sphereRadius + 1e-6 : 0,
+    );
+    const projectedRadius = sphereRadius > 0
+      ? focalLength * sphereRadius
+        / Math.sqrt(Math.max(1e-12, distance ** 2 - sphereRadius ** 2))
+      : 0;
+    const centerX = viewportWidth / 2;
+    const centerY = topInset + usableHeight / 2;
+    return {
+      distance,
+      focalLength,
+      padding,
+      projectedRadius,
+      safeRadius,
+      sphereRadius,
+      topInset,
+      usableHeight,
+      usableWidth,
+      center: { x: centerX, y: centerY },
+      projectedBounds: {
+        left: centerX - projectedRadius,
+        right: centerX + projectedRadius,
+        top: centerY - projectedRadius,
+        bottom: centerY + projectedRadius,
+      },
+      safeBounds: {
+        left: padding,
+        right: viewportWidth - padding,
+        top: topInset + padding,
+        bottom: viewportHeight - padding,
+      },
+    };
+  }
+
+  function compareText(left, right) {
+    const leftText = String(left);
+    const rightText = String(right);
+    return leftText < rightText ? -1 : leftText > rightText ? 1 : 0;
+  }
+
+  function fibonacciSpherePoint(index, count, radii = 1) {
+    const total = Math.max(1, Number(count) || 1);
+    const offset = Math.max(0, Number(index) || 0) + 0.5;
+    const y = 1 - (2 * offset) / total;
+    const planar = Math.sqrt(Math.max(0, 1 - y * y));
+    const angle = GOLDEN_ANGLE * offset;
+    const scale = typeof radii === "number"
+      ? { x: radii, y: radii, z: radii }
+      : {
+          x: Number(radii?.x) || 1,
+          y: Number(radii?.y) || 1,
+          z: Number(radii?.z) || 1,
+        };
+    return {
+      x: Math.cos(angle) * planar * scale.x,
+      y: y * scale.y,
+      z: Math.sin(angle) * planar * scale.z,
+    };
+  }
+
+  function normalizeVector(vector) {
+    const length = Math.hypot(vector.x, vector.y, vector.z) || 1;
+    return {
+      x: vector.x / length,
+      y: vector.y / length,
+      z: vector.z / length,
+    };
+  }
+
+  function createSphereTargets(nodes, options = {}) {
+    const source = Array.isArray(nodes) ? nodes : [];
+    const radii = {
+      core: Math.max(40, Number(options.coreRadius) || 180),
+      middle: Math.max(80, Number(options.middleRadius) || 350),
+      outer: Math.max(120, Number(options.outerRadius) || 540),
+    };
+    const coreIds = new Set([
+      "claude-code",
+      "current-state",
+      "lessons-learned",
+      "user-profile",
+    ]);
+    const coreIndexes = new Set();
+    source.forEach((node, index) => {
+      if (
+        node?.entrypoint
+        || node?.packageName === "system"
+        || coreIds.has(String(node?.id || ""))
+      ) coreIndexes.add(index);
+    });
+    const hubCandidates = source
+      .map((node, index) => ({
+        index,
+        id: String(node?.id || index),
+        connectivity: Math.max(
+          0,
+          Number(node?.fanIn || 0) + Number(node?.fanOut || 0),
+        ),
+      }))
+      .filter((row) => !coreIndexes.has(row.index))
+      .sort(
+        (left, right) =>
+          right.connectivity - left.connectivity
+          || compareText(left.id, right.id),
+      );
+    const hubCount = hubCandidates.length
+      ? Math.max(1, Math.ceil(source.length * 0.06))
+      : 0;
+    const hubIndexes = new Set(
+      hubCandidates.slice(0, hubCount).map((row) => row.index),
+    );
+    const packageNames = [...new Set(
+      source.map((node) => String(node?.packageName || "unclassified")),
+    )].sort(compareText);
+    const membersByPackage = new Map(
+      packageNames.map((packageName) => [packageName, []]),
+    );
+    source.forEach((node, index) => {
+      const packageName = String(node?.packageName || "unclassified");
+      membersByPackage.get(packageName).push({
+        index,
+        id: String(node?.id || index),
+      });
+    });
+    membersByPackage.forEach((members) => {
+      members.sort((left, right) => compareText(left.id, right.id));
+    });
+    const packageAnchors = new Map(
+      packageNames.map((packageName, index) => [
+        packageName,
+        normalizeVector(fibonacciSpherePoint(index, packageNames.length)),
+      ]),
+    );
+
+    const targets = new Array(source.length);
+    packageNames.forEach((packageName) => {
+      const anchor = packageAnchors.get(packageName);
+      const reference = Math.abs(anchor.y) < 0.9
+        ? { x: 0, y: 1, z: 0 }
+        : { x: 1, y: 0, z: 0 };
+      const tangent = normalizeVector({
+        x: reference.y * anchor.z - reference.z * anchor.y,
+        y: reference.z * anchor.x - reference.x * anchor.z,
+        z: reference.x * anchor.y - reference.y * anchor.x,
+      });
+      const bitangent = normalizeVector({
+        x: anchor.y * tangent.z - anchor.z * tangent.y,
+        y: anchor.z * tangent.x - anchor.x * tangent.z,
+        z: anchor.x * tangent.y - anchor.y * tangent.x,
+      });
+      const members = membersByPackage.get(packageName);
+      const packageFraction = members.length / Math.max(1, source.length);
+      const capRadius = clamp(
+        Math.acos(clamp(1 - 2 * packageFraction * 0.92, -1, 1)),
+        0.12,
+        1.45,
+      );
+      const phase = deterministicUnit(packageName, 73) * Math.PI * 2;
+      members.forEach((member, memberOffset) => {
+        const tier = coreIndexes.has(member.index)
+          ? "core"
+          : hubIndexes.has(member.index)
+            ? "middle"
+            : "outer";
+        const baseRadius = radii[tier];
+        const jitterRange = tier === "outer" ? 22 : tier === "middle" ? 12 : 7;
+        const radius = baseRadius
+          + (deterministicUnit(member.id, 211) - 0.5) * jitterRange * 2;
+        const radialFraction = Math.sqrt(
+          (memberOffset + 0.5) / Math.max(1, members.length),
+        );
+        const angularRadius = capRadius * radialFraction;
+        const angle = phase + GOLDEN_ANGLE * memberOffset;
+        const tangentX =
+          tangent.x * Math.cos(angle) + bitangent.x * Math.sin(angle);
+        const tangentY =
+          tangent.y * Math.cos(angle) + bitangent.y * Math.sin(angle);
+        const tangentZ =
+          tangent.z * Math.cos(angle) + bitangent.z * Math.sin(angle);
+        const direction = normalizeVector({
+          x: anchor.x * Math.cos(angularRadius)
+            + tangentX * Math.sin(angularRadius),
+          y: anchor.y * Math.cos(angularRadius)
+            + tangentY * Math.sin(angularRadius),
+          z: anchor.z * Math.cos(angularRadius)
+            + tangentZ * Math.sin(angularRadius),
+        });
+        targets[member.index] = {
+          x: direction.x * radius,
+          y: direction.y * radius,
+          z: direction.z * radius,
+          radius,
+          tier,
+          packageName,
+        };
+      });
+    });
+    // A few deterministic recentering passes remove residual mass bias from
+    // uneven package sizes while retaining each node's tier radius.
+    for (let iteration = 0; iteration < 4 && targets.length > 1; iteration += 1) {
+      const centroid = targets.reduce(
+        (total, target) => ({
+          x: total.x + target.x / targets.length,
+          y: total.y + target.y / targets.length,
+          z: total.z + target.z / targets.length,
+        }),
+        { x: 0, y: 0, z: 0 },
+      );
+      if (Math.hypot(centroid.x, centroid.y, centroid.z) < 0.01) break;
+      targets.forEach((target) => {
+        const shifted = {
+          x: target.x - centroid.x,
+          y: target.y - centroid.y,
+          z: target.z - centroid.z,
+        };
+        const shiftedLength = Math.hypot(shifted.x, shifted.y, shifted.z);
+        if (shiftedLength < 1e-9) return;
+        const direction = normalizeVector(shifted);
+        target.x = direction.x * target.radius;
+        target.y = direction.y * target.radius;
+        target.z = direction.z * target.radius;
+      });
+    }
+    return targets;
+  }
+
+  function measureSphereQuality(nodes, targets) {
+    const source = Array.isArray(nodes) ? nodes : [];
+    const goals = Array.isArray(targets) ? targets : [];
+    const tiers = { core: 0, middle: 0, outer: 0 };
+    let finiteNodes = 0;
+    let targetMinimum = Infinity;
+    let targetMaximum = 0;
+    let targetTotal = 0;
+    let actualMinimum = Infinity;
+    let actualMaximum = 0;
+    let actualTotal = 0;
+    let errorTotal = 0;
+    let errorSquaredTotal = 0;
+    let errorMaximum = 0;
+    let radialErrorTotal = 0;
+    let radialErrorSquaredTotal = 0;
+    let radialErrorMaximum = 0;
+    let targetCount = 0;
+    const targetCentroid = { x: 0, y: 0, z: 0 };
+    const targetOctants = new Array(8).fill(0);
+    for (let index = 0; index < goals.length; index += 1) {
+      const target = goals[index];
+      const node = source[index];
+      if (!target) continue;
+      targetCount += 1;
+      targetCentroid.x += Number(target.x) || 0;
+      targetCentroid.y += Number(target.y) || 0;
+      targetCentroid.z += Number(target.z) || 0;
+      const octant = (target.x >= 0 ? 1 : 0)
+        | (target.y >= 0 ? 2 : 0)
+        | (target.z >= 0 ? 4 : 0);
+      targetOctants[octant] += 1;
+      if (Object.hasOwn(tiers, target.tier)) tiers[target.tier] += 1;
+      const targetRadius = Number(target.radius) || 0;
+      targetMinimum = Math.min(targetMinimum, targetRadius);
+      targetMaximum = Math.max(targetMaximum, targetRadius);
+      targetTotal += targetRadius;
+      if (
+        !node
+        || !Number.isFinite(node.x)
+        || !Number.isFinite(node.y)
+        || !Number.isFinite(node.z)
+      ) continue;
+      const actualRadius = Math.hypot(node.x, node.y, node.z);
+      const radialError = Math.abs(actualRadius - targetRadius);
+      const error = Math.hypot(
+        node.x - target.x,
+        node.y - target.y,
+        node.z - target.z,
+      );
+      finiteNodes += 1;
+      actualMinimum = Math.min(actualMinimum, actualRadius);
+      actualMaximum = Math.max(actualMaximum, actualRadius);
+      actualTotal += actualRadius;
+      errorTotal += error;
+      errorSquaredTotal += error * error;
+      errorMaximum = Math.max(errorMaximum, error);
+      radialErrorTotal += radialError;
+      radialErrorSquaredTotal += radialError * radialError;
+      radialErrorMaximum = Math.max(radialErrorMaximum, radialError);
+    }
+    if (targetCount) {
+      targetCentroid.x /= targetCount;
+      targetCentroid.y /= targetCount;
+      targetCentroid.z /= targetCount;
+    }
+    const targetCentroidOffset = Math.hypot(
+      targetCentroid.x,
+      targetCentroid.y,
+      targetCentroid.z,
+    );
+    return {
+      nodeCount: targetCount,
+      finiteNodes,
+      tiers,
+      targetRadius: {
+        min: targetCount ? targetMinimum : 0,
+        max: targetCount ? targetMaximum : 0,
+        mean: targetCount ? targetTotal / targetCount : 0,
+      },
+      targetCentroid: {
+        ...targetCentroid,
+        offset: targetCentroidOffset,
+        normalizedOffset: targetMaximum
+          ? targetCentroidOffset / targetMaximum
+          : 0,
+      },
+      targetOctants,
+      occupiedOctants: targetOctants.filter((count) => count > 0).length,
+      actualRadius: {
+        min: finiteNodes ? actualMinimum : 0,
+        max: finiteNodes ? actualMaximum : 0,
+        mean: finiteNodes ? actualTotal / finiteNodes : 0,
+      },
+      targetError: {
+        mean: finiteNodes ? errorTotal / finiteNodes : 0,
+        rms: finiteNodes ? Math.sqrt(errorSquaredTotal / finiteNodes) : 0,
+        max: errorMaximum,
+      },
+      radialError: {
+        mean: finiteNodes ? radialErrorTotal / finiteNodes : 0,
+        rms: finiteNodes
+          ? Math.sqrt(radialErrorSquaredTotal / finiteNodes)
+          : 0,
+        max: radialErrorMaximum,
+      },
+    };
+  }
 
   function percentile(sorted, fraction) {
     if (!sorted.length) return 0;
@@ -443,6 +844,7 @@
   }
 
   return {
+    createSphereTargets,
     createDurationRing,
     createCooldownWake,
     createEventQueue,
@@ -450,7 +852,14 @@
     createRenderScheduler,
     createSpatialIndex,
     createStageMetrics,
+    deterministicUnit,
     drainExpiredPulses,
+    fibonacciSpherePoint,
+    fitSphereCamera,
+    measureSphereQuality,
+    normalizeLayoutMode,
     relationBatchKey,
+    sphereFogBand,
+    sphereFogOpacity,
   };
 });

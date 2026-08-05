@@ -247,6 +247,11 @@
             color = relationColors[link.lifecycle] || relationColors.verified;
             const active = activeRelations.has(link.relationId);
             opacity = (active ? 0.82 : state === 3 ? 0.55 : 0.18);
+          } else if (state !== 3) {
+            const normalEdgeScale = Number(scene.normalEdgeScale);
+            opacity *= Number.isFinite(normalEdgeScale)
+              ? Math.max(0, normalEdgeScale)
+              : 1;
           }
           opacity = Math.min(0.9, opacity * depthFade * (scene.edgeVisibility || 1));
           if (link.typed && link.lifecycle !== "authoritative") {
