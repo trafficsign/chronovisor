@@ -22,6 +22,9 @@ from chronovisor.raw.raw_segment import RawSegmentCommit, RawSegmentCorrupt
 _GRAPH_CACHE_LOCK = threading.Lock()
 _GRAPH_CACHE: dict[str, dict[str, Any]] = {}
 _WEBSOCKET_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+_CORTEX_EVENT_SCHEMA = "chronovisor.cortex.event.v2"
+_CORTEX_PAGE_ID_MAX_LENGTH = 240  # Keep aligned with CortexTransportPolicy.
+_RECALL_TRANSPORT_KINDS = {"recall", "auto_recall", "read", "search", "used"}
 _INGEST_PAGE_RE = re.compile(
     r"(?:^|\s)ingest \| (?P<operation>created|updated) (?P<page>[^\r\n]+)$"
 )
@@ -64,6 +67,24 @@ _FIELD_COMPONENT_KEYS = {
     "anti_index",
     "hub_penalty",
 }
+
+
+def _project_cortex_page_ids(values: Any) -> list[str]:
+    if not isinstance(values, list):
+        return []
+    projected: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if not isinstance(value, str) or not value:
+            continue
+        page_id = value[:_CORTEX_PAGE_ID_MAX_LENGTH]
+        if not page_id or page_id in seen:
+            continue
+        seen.add(page_id)
+        projected.append(page_id)
+        if len(projected) >= 24:
+            break
+    return projected
 
 
 @dataclass(frozen=True)
@@ -1107,16 +1128,52 @@ class CortexEventCursor:
     @staticmethod
     def _event(
         kind: str,
-        page_ids: list[str],
+        page_ids: list[Any],
         label: str,
+        *,
+        origin: str,
         **details: str | int,
     ) -> dict[str, Any]:
+        phase_value = details.get("phase")
+        if isinstance(phase_value, str) and phase_value:
+            phase = phase_value
+        elif kind in {"save", "capture"}:
+            phase = "capture"
+        elif kind == "search":
+            phase = "triage"
+        elif kind == "used":
+            phase = "apply"
+        else:
+            phase = "generate"
+        if kind in {"save", "capture"}:
+            lane_key = "raw_buffer"
+        elif kind == "ingest":
+            lane_key = "ingest"
+        elif kind in _RECALL_TRANSPORT_KINDS:
+            lane_key = "recall"
+        else:
+            lane_key = "audit"
+        priority_class = (
+            "protected"
+            if kind in {"save", "capture"} | _RECALL_TRANSPORT_KINDS
+            else "standard"
+        )
         event: dict[str, Any] = {
+            "schema": _CORTEX_EVENT_SCHEMA,
+            "family": "transport",
+            "origin": origin,
+            "mode": "live",
             "kind": kind,
-            "page_ids": list(dict.fromkeys(page_ids))[:24],
+            "page_ids": _project_cortex_page_ids(page_ids),
             "label": label[:160],
             "ts": datetime.now().astimezone().isoformat(timespec="seconds"),
             "source": "telemetry-fallback",
+            "presentation": {
+                "lane_key": lane_key,
+                "phase": phase,
+                "channel_key": kind,
+                "priority_class": priority_class,
+            },
         }
         for key in (
             "phase",
@@ -1203,6 +1260,7 @@ class CortexEventCursor:
                     page_ids,
                     f"AUTO RECALL · {len(page_ids)} page"
                     f"{'' if len(page_ids) == 1 else 's'}",
+                    origin="recall-log",
                 )
             )
         return events
@@ -1216,19 +1274,34 @@ class CortexEventCursor:
                 continue
             event_type = row.get("type")
             if event_type == "read" and row.get("page_id"):
-                events.append(self._event("read", [str(row["page_id"])], "MCP READ"))
+                events.append(
+                    self._event(
+                        "read",
+                        [row["page_id"]],
+                        "MCP READ",
+                        origin="pull-log",
+                    )
+                )
             elif event_type == "search":
                 page_ids = [
-                    str(page_id) for page_id in row.get("direct_pages") or [] if page_id
+                    page_id for page_id in row.get("direct_pages") or [] if page_id
                 ]
                 if page_ids:
-                    events.append(self._event("search", page_ids, "MCP SEARCH"))
+                    events.append(
+                        self._event(
+                            "search", page_ids, "MCP SEARCH", origin="pull-log"
+                        )
+                    )
             elif event_type == "used":
                 page_ids = [
-                    str(page_id) for page_id in row.get("page_ids") or [] if page_id
+                    page_id for page_id in row.get("page_ids") or [] if page_id
                 ]
                 if page_ids:
-                    events.append(self._event("used", page_ids, "RECALL USED"))
+                    events.append(
+                        self._event(
+                            "used", page_ids, "RECALL USED", origin="pull-log"
+                        )
+                    )
         return events
 
     def _save_events(self) -> list[dict[str, Any]]:
@@ -1269,11 +1342,18 @@ class CortexEventCursor:
             details["raw_id"] = newest_commit.raw_id
         if changed:
             details["file_name"] = changed[0]
+        if commits and changed:
+            origin = "raw-journal+raw-snapshot"
+        elif commits:
+            origin = "raw-journal"
+        else:
+            origin = "raw-snapshot"
         return [
             self._event(
                 "save",
                 [],
                 f"CAPTURED · {byte_count} B · ID {capture_id}",
+                origin=origin,
                 **details,
             )
         ]
@@ -1290,6 +1370,7 @@ class CortexEventCursor:
                         "ingest",
                         [page_id],
                         f"MEMORY {operation.upper()} · {page_id}",
+                        origin="activity-log",
                         phase="apply",
                         operation=operation,
                     )
@@ -1303,6 +1384,7 @@ class CortexEventCursor:
                         "ingest",
                         [page_id],
                         f"INGEST GENERATE · {page_id}",
+                        origin="activity-log",
                         phase="generate",
                     )
                 )
@@ -1312,6 +1394,7 @@ class CortexEventCursor:
                         "ingest",
                         [],
                         "INGEST TRIAGE · raw inspection",
+                        origin="activity-log",
                         phase="triage",
                     )
                 )
@@ -1321,6 +1404,7 @@ class CortexEventCursor:
                         "ingest",
                         [],
                         "INGEST CONSENSUS · apply available",
+                        origin="activity-log",
                         phase="consensus",
                     )
                 )
@@ -1330,6 +1414,7 @@ class CortexEventCursor:
                         "ingest",
                         [],
                         "INGEST COMPLETE · memory consolidated",
+                        origin="activity-log",
                         phase="complete",
                     )
                 )

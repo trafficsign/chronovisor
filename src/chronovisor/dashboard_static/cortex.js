@@ -1,6 +1,7 @@
 "use strict";
 
 (() => {
+  const TransportPolicy = window.CortexTransportPolicy;
   const STEEL = "#7d92b5";
   const FIRE = "#ffb454";
   const FIRE_HOT = "#fff3dd";
@@ -31,36 +32,9 @@
   const EDGE_AFTERGLOW_MS = 1550;
   const ELECTRIC_TRAVEL_MIN_MS = 420;
   const ELECTRIC_TRAVEL_MAX_MS = 760;
-  const MAX_ELECTRIC_PATHS = 12;
-  const MAX_TRANSPORT_EFFECTS = 18;
-  const CAPTURE_COMET_DURATION_MS = 5200;
-  const LIVE_CAPTURE_COMET_DURATION_MS = 6400;
-  const RECALL_SIGNAL_DURATION_MS = 3000;
-  const RECALL_ELECTRIC_TRAVEL_MS = 2800;
-  const RECALL_TRANSPORT_MIN_VISIBLE_MS = 3200;
-  const PROCESSING_EFFECT_PULSE_MS = 1450;
-  const PROCESSING_LANE_COMPLETE_HOLD_MS = 1800;
-  const PROCESSING_LANE_ACTIVE_HOLD_MS = 4800;
-  const PROCESSING_LANE_KEYS = Object.freeze([
-    "raw_buffer",
-    "ingest",
-    "recall",
-    "audit",
-    "improve",
-    "repair",
-    "typed_graph",
-  ]);
-  const PROCESSING_LANE_KEY_SET = new Set(PROCESSING_LANE_KEYS);
-  const PROCESSING_ACTIVITY_LANE_KEY_SET = new Set(
-    PROCESSING_LANE_KEYS.filter((laneKey) => laneKey !== "raw_buffer"),
-  );
-  const RECALL_TELEMETRY_KINDS = new Set([
-    "recall",
-    "auto_recall",
-    "read",
-    "search",
-    "used",
-  ]);
+  const MAX_ELECTRIC_PATHS = TransportPolicy.MAX_ELECTRIC_PATHS;
+  const PROCESSING_EFFECT_PULSE_MS = TransportPolicy.PROCESSING_EFFECT_PULSE_MS;
+  const PROCESSING_LANE_KEYS = TransportPolicy.PROCESSING_LANE_KEYS;
   const SIMULATION_STEP_MS = 15;
   const SIMULATION_ALPHA_FLOOR = 0.012;
   const SIMULATION_SLEEP_VELOCITY = 0.02;
@@ -349,10 +323,13 @@
         phase: "idle",
         status: "IDLE",
         detail: "",
+        mode: "idle",
+        lastLiveAt: -1,
       },
     ]),
   );
   const demoTransportTimers = [];
+  let demoTransportGeneration = 0;
   const stars = Array.from({ length: 130 }, () => ({
     x: Math.random(),
     y: Math.random(),
@@ -1149,18 +1126,35 @@
   }
 
   function clearDemoTransportTimers() {
+    demoTransportGeneration += 1;
     demoTransportTimers.splice(0).forEach((timer) => window.clearTimeout(timer));
   }
 
-  function scheduleDemoTransport(delay, event) {
+  function startDemoTransportSequence() {
+    clearDemoTransportTimers();
+    return {
+      generation: demoTransportGeneration,
+      startedAt: performance.now(),
+    };
+  }
+
+  function scheduleDemoTransport(delay, event, sequence) {
     demoTransportTimers.push(
-      window.setTimeout(() => visualizeTransportEvent({ ...event, source: "demo" }), delay),
+      window.setTimeout(() => {
+        if (sequence.generation !== demoTransportGeneration) return;
+        visualizeTransportEvent({
+          ...event,
+          mode: "demo",
+          source: "demo",
+          demo_sequence_started_at: sequence.startedAt,
+        });
+      }, delay),
     );
   }
 
   function stimulate(name, label = "") {
+    const demoSequence = startDemoTransportSequence();
     if (name === "save") {
-      clearDemoTransportTimers();
       visualizeTransportEvent({
         kind: "save",
         phase: "capture",
@@ -1168,41 +1162,42 @@
         byte_count: 18841,
         raw_count: 3,
         capture_id: "9f3a7c21",
+        demo_sequence_started_at: demoSequence.startedAt,
         source: "demo",
       });
       return;
     }
     if (name === "ingest") {
-      clearDemoTransportTimers();
       scheduleDemoTransport(0, {
         kind: "ingest",
         phase: "triage",
         label: "DEMO TRIAGE · scanning raw memory",
         page_ids: ["chronovisor-system"],
-      });
+      }, demoSequence);
       scheduleDemoTransport(1100, {
         kind: "ingest",
         phase: "generate",
         label: "DEMO GENERATE · semantic projection",
         page_ids: ["chronovisor-system"],
-      });
+      }, demoSequence);
       scheduleDemoTransport(2200, {
         kind: "ingest",
         phase: "consensus",
         label: "DEMO CONSENSUS · local verification",
         page_ids: ["chronovisor-system"],
-      });
+      }, demoSequence);
       scheduleDemoTransport(3300, {
         kind: "ingest",
         phase: "apply",
         operation: "updated",
         label: "DEMO MEMORY UPDATED · chronovisor-system",
         page_ids: ["chronovisor-system"],
-      });
+      }, demoSequence);
       return;
     }
     const roots = scenarioNodes(name);
     const now = performance.now();
+    const demoProfile = TransportPolicy.profileFor("demo");
     roots.forEach((node, rootIndex) => {
       const startedAt = now + rootIndex * 35;
       exciteNode(node, 0.9 * NODE_STIMULUS_SCALE, startedAt);
@@ -1210,7 +1205,7 @@
         nodeIndex: node.index,
         kind: "stimulus",
         startedAt,
-        duration: 650,
+        duration: demoProfile.recallNodeDurationMs,
         delta: 0.9 * NODE_STIMULUS_SCALE,
         seq: -(rootIndex + 1),
         demo: true,
@@ -1242,11 +1237,9 @@
     flashTicker(label || `DEMO/REPLAY · ${name.toUpperCase()} · backend unchanged`);
   }
 
-  const STIMULATE_KINDS = new Set(["auto_recall", "recall", "read", "search", "used"]);
-
   function stimulateFromTransport(event) {
-    if (event.source === "demo") return;
-    if (!STIMULATE_KINDS.has(event.kind)) return;
+    const recallProfile = TransportPolicy.recallVisualProfile(event);
+    if (!recallProfile || recallProfile.mode === "demo") return;
     const pageIds = Array.isArray(event.page_ids) ? event.page_ids : [];
     const targets = pageIds.map((id) => byId.get(id)).filter(Boolean);
     if (!targets.length) {
@@ -1255,7 +1248,7 @@
     }
     if (!targets.length) return;
     const now = performance.now();
-    const scale = event.kind === "auto_recall" ? 0.9 : 0.6;
+    const scale = recallProfile.scale;
     targets.slice(0, 5).forEach((node, index) => {
       const startedAt = now + index * 35;
       exciteNode(node, scale * NODE_STIMULUS_SCALE, startedAt);
@@ -1263,7 +1256,7 @@
         nodeIndex: node.index,
         kind: "stimulus",
         startedAt,
-        duration: RECALL_SIGNAL_DURATION_MS,
+        duration: recallProfile.nodeDurationMs,
         delta: scale * NODE_STIMULUS_SCALE,
         seq: -(index + 1),
         demo: false,
@@ -1273,11 +1266,16 @@
         .sort((left, right) => left - right)
         .slice(0, 3);
       candidates.forEach((edgeIndex, branch) => {
+        const electricTiming = TransportPolicy.liveRecallElectricTiming(
+          event,
+          startedAt,
+        );
+        if (!electricTiming) return;
         queueElectricPulse({
           edgeIndex,
           startedAt: now + 120 + branch * 80,
-          duration: RECALL_ELECTRIC_TRAVEL_MS,
-          retainedUntil: startedAt + RECALL_ELECTRIC_TRAVEL_MS,
+          duration: electricTiming.duration,
+          retainedUntil: electricTiming.retainedUntil,
           delta: (scale - 0.12) - branch * 0.12,
           seq: -(index * 10 + branch + 1),
           edgeType: links[edgeIndex].edgeType,
@@ -1289,39 +1287,16 @@
     trimVisualQueues();
   }
 
-  function isElectricPulseProtected(pulse, now) {
-    return Number(pulse.retainedUntil || 0) > now;
-  }
-
   function pruneAndBoundElectricPulses(
     pulseQueue,
     now,
     maxPulses = MAX_ELECTRIC_PATHS,
   ) {
-    for (let index = pulseQueue.length - 1; index >= 0; index -= 1) {
-      const pulse = pulseQueue[index];
-      if (Number(pulse.startedAt || 0) + Number(pulse.duration || 0) <= now) {
-        pulseQueue.splice(index, 1);
-      }
-    }
-    pulseQueue.sort(
-      (left, right) =>
-        right.delta - left.delta
-        || right.startedAt - left.startedAt
-        || right.seq - left.seq,
+    return TransportPolicy.pruneAndBoundElectricPulses(
+      pulseQueue,
+      now,
+      maxPulses,
     );
-    const boundedLimit = Math.max(0, Math.floor(Number(maxPulses) || 0));
-    while (pulseQueue.length > boundedLimit) {
-      let evictionIndex = -1;
-      for (let index = pulseQueue.length - 1; index >= 0; index -= 1) {
-        if (!isElectricPulseProtected(pulseQueue[index], now)) {
-          evictionIndex = index;
-          break;
-        }
-      }
-      pulseQueue.splice(evictionIndex >= 0 ? evictionIndex : -1, 1);
-    }
-    return pulseQueue;
   }
 
   function queueElectricPulse(pulse) {
@@ -1330,9 +1305,7 @@
   }
 
   function trimVisualQueues() {
-    if (pulses.length > MAX_ELECTRIC_PATHS) {
-      pulses.splice(MAX_ELECTRIC_PATHS);
-    }
+    pruneAndBoundElectricPulses(pulses, performance.now());
     if (nodeEffects.length > window.CortexField.MAX_EVENTS) {
       nodeEffects.splice(0, nodeEffects.length - window.CortexField.MAX_EVENTS);
     }
@@ -1539,63 +1512,6 @@
       : "";
   }
 
-  function processingLaneMonitorKey(event) {
-    const kind = String(event.kind || "").toLowerCase();
-    if (kind === "save" || kind === "capture") return "raw_buffer";
-    if (kind === "ingest") return "ingest";
-    if (RECALL_TELEMETRY_KINDS.has(kind)) return "recall";
-    if (kind !== "processing") return null;
-    const laneKey = String(event.lane_key || "").toLowerCase();
-    return PROCESSING_ACTIVITY_LANE_KEY_SET.has(laneKey) ? laneKey : "audit";
-  }
-
-  function processingLaneMonitorPhase(event, sourcePhase) {
-    const kind = String(event.kind || "").toLowerCase();
-    if (kind === "save" || kind === "capture") return "capture";
-    if (kind === "search") return "triage";
-    if (kind === "used") return "apply";
-    if (["recall", "auto_recall", "read"].includes(kind)) return "generate";
-    return String(sourcePhase || event.phase || "generate").toLowerCase();
-  }
-
-  function processingLaneMonitorStatus(event, phase) {
-    if (phase === "complete") return "COMPLETE";
-    const kind = String(event.kind || "").toLowerCase();
-    let value;
-    if (kind === "processing") value = event.step || phase;
-    else if (kind === "save" || kind === "capture") value = "capture";
-    else if (kind === "ingest") value = event.phase || phase || "ingest";
-    else value = kind || phase;
-    return String(value || "active")
-      .replaceAll("_", " ")
-      .toUpperCase()
-      .slice(0, 32);
-  }
-
-  function processingLaneMonitorDetail(event, laneKey) {
-    const kind = String(event.kind || "").toLowerCase();
-    if (kind === "processing") {
-      return ([event.model, event.role]
-        .filter(Boolean)
-        .map(String)
-        .join(" · ") || String(event.label || "live processing")).slice(0, 160);
-    }
-    if (laneKey === "raw_buffer") {
-      const bytes = Number(event.byte_count || 0);
-      const count = Math.max(1, Number(event.raw_count || 1));
-      const captureId = String(event.capture_id || "pending").slice(0, 12);
-      return `${formatBytes(bytes)} · ${count} raw · ID ${captureId}`;
-    }
-    const pageId = transportPageId(event);
-    if (pageId) {
-      const operation = String(
-        event.operation || (kind === "ingest" ? event.phase || "" : ""),
-      ).toUpperCase();
-      return `${operation ? `${operation} · ` : ""}${pageId}`.slice(0, 160);
-    }
-    return String(event.label || "local pipeline active").slice(0, 160);
-  }
-
   function resetProcessingLaneMonitor(laneKey, revision) {
     const monitorState = processingLaneMonitorStates.get(laneKey);
     if (!monitorState || revision !== monitorState.revision) return;
@@ -1617,28 +1533,14 @@
       phase: "idle",
       status: "IDLE",
       detail: "",
+      mode: "idle",
     });
   }
 
-  function updateProcessingLaneMonitor(event, sourcePhase) {
-    const laneKey = processingLaneMonitorKey(event);
-    if (!laneKey || !PROCESSING_LANE_KEY_SET.has(laneKey)) return;
-    const monitorState = processingLaneMonitorStates.get(laneKey);
-    const row = document.getElementById(`processingLane-${laneKey}`);
-    if (!monitorState || !row) return;
-    const phase = processingLaneMonitorPhase(event, sourcePhase);
-    const status = processingLaneMonitorStatus(event, phase);
-    const detail = processingLaneMonitorDetail(event, laneKey);
-    const rowState = phase === "complete" ? "complete" : "active";
-    const shouldAnnounce =
-      monitorState.state !== rowState
-      || monitorState.status !== status
-      || monitorState.detail !== detail;
-    monitorState.revision += 1;
-    const revision = monitorState.revision;
-    window.clearTimeout(monitorState.resetTimer);
+  function renderProcessingLaneMonitor(projection, monitorState, row) {
+    const { detail, phase, state, status } = projection;
     row.dataset.phase = phase;
-    row.dataset.state = rowState;
+    row.dataset.state = state;
     row.querySelector(".processingLaneStatus").textContent = status;
     row.querySelector(".processingLaneDetail").textContent = detail;
     const laneName = row.querySelector(".processingLaneName").textContent;
@@ -1647,23 +1549,43 @@
       `${laneName} lane, ${status.toLowerCase()}${detail ? `, ${detail}` : ""}`,
     );
     const announce = document.getElementById("processingLanesAnnounce");
+    const shouldAnnounce =
+      monitorState.state !== state
+      || monitorState.status !== status
+      || monitorState.detail !== detail;
     if (announce && shouldAnnounce) {
       announce.textContent = `${laneName}: ${status}${detail ? `, ${detail}` : ""}`;
     }
+  }
+
+  function updateProcessingLaneMonitor(event, sourcePhase) {
+    const projection = TransportPolicy.projectProcessingLane(event, sourcePhase);
+    if (!projection) return;
+    const laneKey = projection.laneKey;
+    const monitorState = processingLaneMonitorStates.get(laneKey);
+    const row = document.getElementById(`processingLane-${laneKey}`);
+    if (!monitorState || !row) return;
+    const updateDecision = TransportPolicy.processingLaneUpdateDecision(
+      projection,
+      monitorState.lastLiveAt,
+      performance.now(),
+    );
+    if (!updateDecision.accept) return;
+    monitorState.lastLiveAt = updateDecision.lastLiveAt;
+    monitorState.revision += 1;
+    const revision = monitorState.revision;
+    window.clearTimeout(monitorState.resetTimer);
+    renderProcessingLaneMonitor(projection, monitorState, row);
     Object.assign(monitorState, {
-      state: rowState,
-      phase,
-      status,
-      detail,
+      state: projection.state,
+      phase: projection.phase,
+      status: projection.status,
+      detail: projection.detail,
+      mode: projection.mode,
     });
-    const holdMs = phase === "complete"
-      ? PROCESSING_LANE_COMPLETE_HOLD_MS
-      : phase === "capture"
-        ? captureCometDuration(event) + 400
-        : PROCESSING_LANE_ACTIVE_HOLD_MS;
     monitorState.resetTimer = window.setTimeout(
       () => resetProcessingLaneMonitor(laneKey, revision),
-      holdMs,
+      projection.holdMs,
     );
   }
 
@@ -1673,86 +1595,11 @@
         effect.phase === "capture"
         || effect.channelKey !== channelKey
         || (pageId && effect.pageId && effect.pageId !== pageId)
-        || isTransportEffectProtected(effect, now)
+        || TransportPolicy.isTransportEffectProtected(effect, now)
       ) return;
       const elapsed = Math.max(0, now - effect.startedAt);
       effect.duration = Math.min(effect.duration, elapsed + 280);
     });
-  }
-
-  function captureCometDuration(event) {
-    return event.source === "demo"
-      ? CAPTURE_COMET_DURATION_MS
-      : LIVE_CAPTURE_COMET_DURATION_MS;
-  }
-
-  function transportEffectTiming(event, phase, now) {
-    const baseDuration = phase === "capture"
-      ? captureCometDuration(event)
-      : phase === "apply" || phase === "complete"
-        ? 3600
-        : phase === "consensus"
-          ? 2600
-          : phase === "generate"
-            ? 2300
-            : 2100;
-    const duration = RECALL_TELEMETRY_KINDS.has(event.kind)
-      ? Math.max(baseDuration, RECALL_TRANSPORT_MIN_VISIBLE_MS)
-      : baseDuration;
-    const retainedUntil = phase === "capture"
-      ? now + baseDuration
-      : RECALL_TELEMETRY_KINDS.has(event.kind)
-        ? now + RECALL_TRANSPORT_MIN_VISIBLE_MS
-        : now;
-    return { duration, retainedUntil };
-  }
-
-  function isTransportEffectProtected(effect, now) {
-    return Number(effect.retainedUntil || 0) > now;
-  }
-
-  function transportEvictionIndex(effects, now) {
-    const processingIndex = effects.findIndex(
-      (effect) =>
-        effect.kind === "processing"
-        && !isTransportEffectProtected(effect, now),
-    );
-    if (processingIndex >= 0) return processingIndex;
-    const unprotectedIndex = effects.findIndex(
-      (effect) => !isTransportEffectProtected(effect, now),
-    );
-    if (unprotectedIndex >= 0) return unprotectedIndex;
-    return effects.reduce((candidateIndex, effect, index) => {
-      if (candidateIndex < 0) return index;
-      const candidate = effects[candidateIndex];
-      return Number(effect.retainedUntil || 0) < Number(candidate.retainedUntil || 0)
-        || (
-          Number(effect.retainedUntil || 0) === Number(candidate.retainedUntil || 0)
-          && Number(effect.startedAt || 0) < Number(candidate.startedAt || 0)
-        )
-        ? index
-        : candidateIndex;
-    }, -1);
-  }
-
-  function pruneAndBoundTransportEffects(
-    effects,
-    now,
-    maxEffects = MAX_TRANSPORT_EFFECTS,
-  ) {
-    for (let index = effects.length - 1; index >= 0; index -= 1) {
-      const effect = effects[index];
-      if (Number(effect.startedAt || 0) + Number(effect.duration || 0) <= now) {
-        effects.splice(index, 1);
-      }
-    }
-    const boundedLimit = Math.max(0, Math.floor(Number(maxEffects) || 0));
-    while (effects.length > boundedLimit) {
-      const evictionIndex = transportEvictionIndex(effects, now);
-      if (evictionIndex < 0) break;
-      effects.splice(evictionIndex, 1);
-    }
-    return effects;
   }
 
   function processingTargetNode(laneKey) {
@@ -1772,9 +1619,9 @@
   }
 
   function visualizeTransportEvent(event) {
-    const phase = event.kind === "save" || event.kind === "capture"
-      ? "capture"
-      : String(event.phase || "generate");
+    event = TransportPolicy.normalizeEvent(event);
+    if (!event || event.family !== "transport") return;
+    const phase = event.phase;
     const now = performance.now();
     const pageId = transportPageId(event);
     const laneKey = String(event.lane_key || "");
@@ -1792,7 +1639,11 @@
     if (phase !== "capture") {
       retireSupersededIngestEffects(pageId, now, channelKey);
     }
-    const { duration, retainedUntil } = transportEffectTiming(event, phase, now);
+    const { duration, retainedUntil } = TransportPolicy.transportTiming(
+      event,
+      phase,
+      now,
+    );
     transportEffects.push({
       kind: event.kind,
       phase,
@@ -1808,11 +1659,12 @@
       startedAt: now,
       duration,
       retainedUntil,
+      priorityClass: event.priority_class,
       seq: ++cortexMetrics.transportReceived,
-      demo: event.source === "demo",
+      demo: event.mode === "demo",
       paintedAt: 0,
     });
-    pruneAndBoundTransportEffects(transportEffects, now);
+    TransportPolicy.pruneAndBoundTransportEffects(transportEffects, now);
     if (phase === "capture") cortexMetrics.captureEvents += 1;
     else if (event.kind === "processing") cortexMetrics.processingEvents += 1;
     else cortexMetrics.ingestEvents += 1;
@@ -1825,7 +1677,7 @@
           : 0.04 + Math.min(0.035, cortexMetrics.ingestEvents * 0.006),
     );
     updateProcessingLaneMonitor(event, phase);
-    const prefix = event.source === "demo"
+    const prefix = event.mode === "demo"
       ? "DEMO/REPLAY"
       : event.kind === "processing"
         ? "LIVE PROCESS"
@@ -3237,7 +3089,7 @@
   }
 
   function drawTransportEffects(time) {
-    pruneAndBoundTransportEffects(transportEffects, time);
+    TransportPolicy.pruneAndBoundTransportEffects(transportEffects, time);
     context.save();
     context.globalCompositeOperation = "lighter";
     context.lineCap = "round";
@@ -4438,57 +4290,11 @@
     });
   }
 
-  function processingEffectPhase(step) {
-    const normalized = String(step || "").toLowerCase();
-    if (
-      ["raw", "triage", "search", "select", "discover", "detect"].includes(
-        normalized,
-      )
-    ) {
-      return "triage";
-    }
-    if (
-      [
-        "generate",
-        "rerank",
-        "primary",
-        "challenger",
-        "inspect",
-        "extract",
-        "local_fix",
-      ].includes(normalized)
-    ) {
-      return "generate";
-    }
-    if (
-      ["consensus", "tie_break", "verify", "evaluate", "escalate"].includes(
-        normalized,
-      )
-    ) {
-      return "consensus";
-    }
-    if (["apply", "commit", "report", "consolidate", "promote"].includes(normalized)) {
-      return "apply";
-    }
-    return "generate";
-  }
-
-  function processingLaneEvent(lane, phase = processingEffectPhase(lane.current_step)) {
-    const laneKey = String(lane.key || "process");
-    const step = String(lane.current_step || lane.phase || "work");
-    const label = `${lane.label || laneKey} · ${step}`;
-    return {
-      kind: "processing",
-      phase,
-      source: "processing-activity",
-      lane_key: laneKey,
-      step,
-      channel_key: `processing:${laneKey}`,
-      label,
-      model: String(lane.model || ""),
-      role: String(lane.role || ""),
-      page_ids: [],
-    };
+  function processingLaneEvent(
+    lane,
+    phase = TransportPolicy.processingEffectPhase(lane.current_step),
+  ) {
+    return TransportPolicy.normalizeProcessingActivity(lane, phase);
   }
 
   function pulseProcessingLane(state, now = performance.now()) {
@@ -4509,7 +4315,7 @@
       const laneKey = String(lane.key || "process");
       if (lane.state !== "active") return;
       activeKeys.add(laneKey);
-      const phase = processingEffectPhase(lane.current_step);
+      const phase = TransportPolicy.processingEffectPhase(lane.current_step);
       const signature = [
         lane.work_item,
         lane.current_step,
@@ -4636,19 +4442,21 @@
         return;
       }
       if (payload.type !== "events" || !Array.isArray(payload.events)) return;
-      const telemetryEvents = payload.events.filter(
-        (event) => event.source === "telemetry-fallback",
+      const normalizedEvents = payload.events
+        .map(TransportPolicy.normalizeEvent)
+        .filter(Boolean);
+      const telemetryEvents = normalizedEvents.filter(
+        (event) => event.family !== "field",
       );
-      const TRANSPORT_KINDS = new Set(["save", "capture", "ingest", "recall", "auto_recall", "read", "search", "used"]);
       const transportEvents = telemetryEvents.filter(
-        (event) => TRANSPORT_KINDS.has(event.kind),
+        (event) => TransportPolicy.isTransportKind(event.kind),
       );
-      const fieldEvents = payload.events.filter(
-        (event) => event.source !== "telemetry-fallback",
+      const fieldEvents = normalizedEvents.filter(
+        (event) => event.family === "field",
       );
       if (liveEventsEnabled) transportEvents.forEach(visualizeTransportEvent);
       const latestFallback = telemetryEvents
-        .filter((event) => !TRANSPORT_KINDS.has(event.kind))
+        .filter((event) => !TransportPolicy.isTransportKind(event.kind))
         .at(-1);
       if (latestFallback) {
         flashTicker(

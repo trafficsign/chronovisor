@@ -358,6 +358,38 @@ def test_cortex_event_cursor_maps_durable_activity_to_firing_events(
     assert events[5]["phase"] == "apply"
     assert events[5]["operation"] == "updated"
     assert all(event["source"] == "telemetry-fallback" for event in events)
+    assert all(
+        event["schema"] == "chronovisor.cortex.event.v2" for event in events
+    )
+    assert all(event["family"] == "transport" for event in events)
+    assert all(event["mode"] == "live" for event in events)
+    assert all("duration" not in event for event in events)
+    assert [event["origin"] for event in events] == [
+        "recall-log",
+        "pull-log",
+        "pull-log",
+        "pull-log",
+        "raw-snapshot",
+        "activity-log",
+    ]
+    assert events[0]["presentation"] == {
+        "lane_key": "recall",
+        "phase": "generate",
+        "channel_key": "auto_recall",
+        "priority_class": "protected",
+    }
+    assert events[4]["presentation"] == {
+        "lane_key": "raw_buffer",
+        "phase": "capture",
+        "channel_key": "save",
+        "priority_class": "protected",
+    }
+    assert events[5]["presentation"] == {
+        "lane_key": "ingest",
+        "phase": "apply",
+        "channel_key": "ingest",
+        "priority_class": "standard",
+    }
 
 
 def test_cortex_event_cursor_projects_ingest_lifecycle_phases(tmp_path: Path) -> None:
@@ -392,6 +424,50 @@ def test_cortex_event_cursor_projects_ingest_lifecycle_phases(tmp_path: Path) ->
     ]
     assert events[1]["page_ids"] == ["page-d"]
     assert events[3]["operation"] == "created"
+    assert all(event["origin"] == "activity-log" for event in events)
+    assert [event["presentation"]["phase"] for event in events] == [
+        "triage",
+        "generate",
+        "consensus",
+        "apply",
+        "complete",
+    ]
+
+
+def test_cortex_event_cursor_bounds_and_sanitizes_page_ids(tmp_path: Path) -> None:
+    root = tmp_path / "chronovisor"
+    pull_log = root / "recall" / "pull-log.jsonl"
+    pull_log.parent.mkdir(parents=True)
+    pull_log.write_text("", encoding="utf-8")
+    cursor = cortex.CortexEventCursor(root, pull_log=pull_log)
+    huge_page_id = "x" * 300
+    pull_log.write_text(
+        json.dumps(
+            {
+                "type": "search",
+                "direct_pages": [
+                    "page-a",
+                    42,
+                    None,
+                    "",
+                    "page-a",
+                    huge_page_id,
+                    huge_page_id,
+                    *[f"page-{index}" for index in range(30)],
+                ],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    events = cursor.poll()
+
+    assert len(events) == 1
+    assert len(events[0]["page_ids"]) == 24
+    assert events[0]["page_ids"][:2] == ["page-a", "x" * 240]
+    assert all(isinstance(page_id, str) for page_id in events[0]["page_ids"])
+    assert all(len(page_id) <= 240 for page_id in events[0]["page_ids"])
 
 
 def test_cortex_latest_field_stream_includes_real_memory_io(tmp_path: Path) -> None:
@@ -480,6 +556,7 @@ def test_cortex_latest_field_stream_includes_real_memory_io(tmp_path: Path) -> N
     assert events[5]["byte_count"] == receipt.commit.length
     assert events[5]["raw_count"] == 1
     assert events[5]["raw_id"] == receipt.commit.raw_id
+    assert events[5]["origin"] == "raw-journal"
     assert len(events[5]["capture_id"]) == 12
     assert events[6]["phase"] == "apply"
     assert all(
@@ -504,6 +581,25 @@ def test_cortex_raw_v2_journal_truncation_does_not_replay_capture(
     events = cursor.poll()
     assert [event["kind"] for event in events] == ["save"]
     assert events[0]["raw_id"] == new_receipt.commit.raw_id
+    assert events[0]["origin"] == "raw-journal"
+
+
+def test_cortex_save_event_reports_mixed_journal_and_snapshot_origin(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "chronovisor"
+    cursor = cortex.CortexEventCursor(root)
+
+    _append_v2_capture(root, after_line=0)
+    legacy_capture = root / "raw" / "legacy-capture.md"
+    legacy_capture.parent.mkdir(parents=True, exist_ok=True)
+    legacy_capture.write_text("legacy raw", encoding="utf-8")
+
+    events = cursor.poll()
+
+    assert [event["kind"] for event in events] == ["save"]
+    assert events[0]["origin"] == "raw-journal+raw-snapshot"
+    assert events[0]["raw_count"] == 2
 
 
 def test_cortex_field_projection_is_sealed_session_scoped_and_browser_safe(
@@ -843,6 +939,9 @@ def test_cortex_static_view_preserves_fable_layout_and_uses_live_data() -> None:
     html = (static / "cortex.html").read_text(encoding="utf-8")
     style = (static / "cortex.css").read_text(encoding="utf-8")
     script = (static / "cortex.js").read_text(encoding="utf-8")
+    policy_script = (static / "cortex-transport-policy.js").read_text(
+        encoding="utf-8"
+    )
     field_script = (static / "cortex-field.js").read_text(encoding="utf-8")
     observatory = (static / "index.html").read_text(encoding="utf-8")
     activity_style = (static / "activity-bar.css").read_text(encoding="utf-8")
@@ -875,7 +974,7 @@ def test_cortex_static_view_preserves_fable_layout_and_uses_live_data() -> None:
     assert 'new EventSource("/api/activity-stream")' in script
     assert "function connectProcessingActivity()" in script
     assert "function applyProcessingActivity(snapshot)" in script
-    assert "function processingEffectPhase(step)" in script
+    assert "TransportPolicy.processingEffectPhase" in script
     assert "function pulseActiveProcessingLanes()" in script
     assert "function processingTargetNode(laneKey)" in script
     assert "function drawProcessingNodeBlink(" in script
@@ -883,7 +982,10 @@ def test_cortex_static_view_preserves_fable_layout_and_uses_live_data() -> None:
     assert "processingTargetLocked" in script
     assert "cortexMetrics.processingNodeBlinks += 1;" in script
     assert "cortexMetrics.processingTargetNodeIndex = target.node.index;" in script
-    assert "const PROCESSING_EFFECT_PULSE_MS = 1450;" in script
+    assert (
+        "const PROCESSING_EFFECT_PULSE_MS = TransportPolicy.PROCESSING_EFFECT_PULSE_MS;"
+        in script
+    )
     assert "function graphCenter()" in script
     assert "function setNodeAsCameraPivot(index)" in script
     assert "function resetCameraPivot(announce = true)" in script
@@ -898,14 +1000,14 @@ def test_cortex_static_view_preserves_fable_layout_and_uses_live_data() -> None:
     assert "drawCameraPivot(time);" in script
     assert "target.dataset.cameraPivotNodeIndex" in script
     assert ".seg button.centerReset.on" in style
-    assert 'kind: "processing"' in script
-    assert "channel_key: `processing:${laneKey}`" in script
+    assert 'kind: "processing"' in policy_script
+    assert '`processing:${laneKey || "audit"}`' in policy_script
     assert "connectProcessingActivity();" in script
     assert "function drawCaptureComets(" in script
     assert "function captureCometPoint(" in script
     assert "function memoryStarGeometry(" in script
     assert "function captureSafeRect(" in script
-    assert "const CAPTURE_COMET_DURATION_MS = 5200;" in script
+    assert "captureCometDurationMs: 5200" in policy_script
     assert "turns: 2.85" in script
     assert "function drawCaptureElectricity(" not in script
     assert "function drawTriageFormation(" in script
@@ -927,7 +1029,7 @@ def test_cortex_static_view_preserves_fable_layout_and_uses_live_data() -> None:
     assert "cortexMetrics.consensusOrbits += 1;" in script
     assert "cortexMetrics.consolidationEdges += 1;" in script
     assert "transportEvents.forEach(visualizeTransportEvent)" in script
-    assert "TRANSPORT_KINDS.has(event.kind)" in script
+    assert "TransportPolicy.isTransportKind(event.kind)" in script
     assert "drawTransportEffects(time);" in script
     assert "PROCESSING LANES" in html
     assert (
@@ -948,7 +1050,7 @@ def test_cortex_static_view_preserves_fable_layout_and_uses_live_data() -> None:
     assert "const EDGE_AFTERGLOW_MS = 1550;" in script
     assert "const ELECTRIC_TRAVEL_MIN_MS = 420;" in script
     assert "const ELECTRIC_TRAVEL_MAX_MS = 760;" in script
-    assert "const MAX_ELECTRIC_PATHS = 12;" in script
+    assert "const MAX_ELECTRIC_PATHS = TransportPolicy.MAX_ELECTRIC_PATHS;" in script
     assert "const NODE_STIMULUS_SCALE = 0.38;" in script
     assert "const NODE_ARRIVAL_SCALE = 0.28;" in script
     assert "const NODE_CORE_SCALE = 1;" in script
@@ -998,7 +1100,11 @@ def test_cortex_static_view_preserves_fable_layout_and_uses_live_data() -> None:
     assert "const MAX_EVENTS = 256;" in field_script
     assert "event.seq !== state.seq + 1" in field_script
     assert "/static/cortex-field.js" in html
+    assert "/static/cortex-transport-policy.js" in html
     assert html.index("/static/cortex-field.js") < html.index("/static/cortex.js")
+    assert html.index("/static/cortex-transport-policy.js") < html.index(
+        "/static/cortex.js"
+    )
     assert "DEMO · RECALL" in html
     assert "@media (prefers-reduced-motion: reduce)" in style
     assert 'id="recall-field-summary"' in observatory
@@ -1030,6 +1136,9 @@ def test_cortex_processing_lanes_monitor_has_fixed_independent_routing() -> None
     html = (static / "cortex.html").read_text(encoding="utf-8")
     style = (static / "cortex.css").read_text(encoding="utf-8")
     script = (static / "cortex.js").read_text(encoding="utf-8")
+    policy_script = (static / "cortex-transport-policy.js").read_text(
+        encoding="utf-8"
+    )
 
     lane_keys = (
         "raw_buffer",
@@ -1125,39 +1234,40 @@ def test_cortex_processing_lanes_monitor_has_fixed_independent_routing() -> None
     assert "PROCESSING_LANE_KEYS.map((laneKey) =>" in script
     assert "revision: 0," in script
     assert "resetTimer: 0," in script
+    assert 'mode: "idle",' in script
     assert "monitorState.revision += 1;" in script
     assert "window.clearTimeout(monitorState.resetTimer);" in script
     assert "revision !== monitorState.revision" in script
     assert "resetProcessingLaneMonitor(laneKey, revision)" in script
-    assert "PROCESSING_LANE_COMPLETE_HOLD_MS = 1800" in script
-    assert "PROCESSING_LANE_ACTIVE_HOLD_MS = 4800" in script
+    assert "projection.holdMs" in script
+    assert "const PROCESSING_LANE_COMPLETE_HOLD_MS = 1800" in policy_script
+    assert "const PROCESSING_LANE_ACTIVE_HOLD_MS = 4800" in policy_script
 
-    assert 'kind === "save" || kind === "capture"' in script
-    assert 'return "raw_buffer";' in script
-    assert 'if (kind === "ingest") return "ingest";' in script
-    assert 'if (RECALL_TELEMETRY_KINDS.has(kind)) return "recall";' in script
-    assert 'PROCESSING_ACTIVITY_LANE_KEY_SET.has(laneKey) ? laneKey : "audit"' in script
-    assert 'if (kind === "search") return "triage";' in script
-    assert 'if (kind === "used") return "apply";' in script
-    assert '["recall", "auto_recall", "read"].includes(kind)' in script
-    assert 'if (kind === "processing") value = event.step || phase;' in script
-    assert '.replaceAll("_", " ")' in script
-    assert "[event.model, event.role]" in script
-    assert "formatBytes(bytes)" in script
-    assert 'event.operation || (kind === "ingest" ? event.phase || "" : "")' in script
-    assert ".textContent = status;" in script
-    assert ".textContent = detail;" in script
+    assert 'kind === "save" || kind === "capture"' in policy_script
+    assert 'return "raw_buffer";' in policy_script
+    assert 'if (kind === "ingest") return "ingest";' in policy_script
+    assert "if (isRecallKind(kind)) return \"recall\";" in policy_script
+    assert 'PROCESSING_ACTIVITY_LANE_KEY_SET.has(laneKey) ? laneKey : "audit"' in policy_script
+    assert 'if (kind === "search") return "triage";' in policy_script
+    assert 'if (kind === "used") return "apply";' in policy_script
+    assert '["recall", "auto_recall", "read"].includes(kind)' in policy_script
+    assert 'event.kind === "processing"' in policy_script
+    assert '.replaceAll("_", " ")' in policy_script
+    assert "[event.model, event.role]" in policy_script
+    assert "formatBytes(event.byte_count)" in policy_script
+    assert "function renderProcessingLaneMonitor(" in script
+    assert 'row.querySelector(".processingLaneStatus").textContent = status;' in script
+    assert 'row.querySelector(".processingLaneDetail").textContent = detail;' in script
     assert "const shouldAnnounce =" in script
     assert "if (announce && shouldAnnounce)" in script
     assert 'processingLaneEvent(state.lane, "complete")' in script
     assert "updateProcessingLaneMonitor(event, phase);" in script
-    assert 'visualizeTransportEvent({ ...event, source: "demo" })' in script
-    visualize_transport = script[
-        script.index("function visualizeTransportEvent(event)") : script.index(
-            "function visualizeFieldEvent(event)"
-        )
-    ]
-    assert 'event.kind === "save" || event.kind === "capture"' in visualize_transport
+    assert "generation !== demoTransportGeneration" in script
+    assert "demo_sequence_started_at: sequence.startedAt" in script
+    assert "TransportPolicy.processingLaneUpdateDecision(" in script
+    assert "monitorState.lastLiveAt = updateDecision.lastLiveAt;" in script
+    assert 'if (event.mode === "live") clearDemoTransportTimers();' not in script
+    assert "event = TransportPolicy.normalizeEvent(event);" in script
 
 
 def test_cortex_sleeps_only_layout_physics_and_keeps_rendering_live() -> None:
@@ -1205,92 +1315,344 @@ def test_cortex_reuses_hot_path_state_without_reducing_visual_limits() -> None:
     assert "if (!memoryStar) memoryStar = memoryStarGeometry();" in script
     assert "transportFallbacks.length = 0;" in script
     assert "const ACTIVE_LABEL_LIMIT = 5;" in script
-    assert "const MAX_ELECTRIC_PATHS = 12;" in script
-    assert "const MAX_TRANSPORT_EFFECTS = 18;" in script
+    assert "const MAX_ELECTRIC_PATHS = TransportPolicy.MAX_ELECTRIC_PATHS;" in script
+    policy_script = (dashboard.STATIC_DIR / "cortex-transport-policy.js").read_text(
+        encoding="utf-8"
+    )
+    assert "const MAX_TRANSPORT_EFFECTS = 18;" in policy_script
+
+
+def test_cortex_transport_policy_normalizes_v1_v2_and_processing_activity() -> None:
+    policy_path = dashboard.STATIC_DIR / "cortex-transport-policy.js"
+    scenario = f"const policy = require({json.dumps(str(policy_path))});\n" + """
+const legacyRecall = policy.normalizeEvent({
+  kind: "read",
+  source: "telemetry-fallback",
+  page_ids: ["page-a", "page-a"],
+});
+const envelope = policy.normalizeEvent({
+  schema: "chronovisor.cortex.event.v2",
+  family: "transport",
+  origin: "pull-log",
+  mode: "live",
+  source: "telemetry-fallback",
+  kind: "used",
+  presentation: {
+    lane_key: "recall",
+    phase: "apply",
+    channel_key: "recall-used",
+    priority_class: "protected",
+  },
+});
+const legacyField = policy.normalizeEvent({
+  kind: "spread",
+  source: "stateful-recall-field",
+  session_hash: "0123456789abcdef",
+});
+const legacyUnknownTelemetry = policy.normalizeEvent({
+  kind: "unknown_activity",
+  source: "telemetry-fallback",
+});
+const v2Field = policy.normalizeEvent({
+  schema: policy.EVENT_SCHEMA,
+  family: "field",
+  origin: "recall-field",
+  mode: "live",
+  source: "stateful-recall-field",
+  kind: "spread",
+});
+const processing = policy.normalizeProcessingActivity({
+  key: "unknown-lane",
+  label: "UNKNOWN",
+  current_step: "verify",
+  model: "model-a",
+  role: "role-a",
+});
+const pageIds = policy.normalizePageIds([
+  "page-a",
+  42,
+  null,
+  "",
+  "page-a",
+  "x".repeat(300),
+  "x".repeat(300),
+  ...Array.from({ length: 30 }, (_, index) => `page-${index}`),
+]);
+const rejected = {
+  unknownSchema: policy.normalizeEvent({
+    schema: "chronovisor.cortex.event.v99",
+    family: "transport",
+    kind: "read",
+    source: "telemetry-fallback",
+  }),
+  invalidFamily: policy.normalizeEvent({
+    schema: policy.EVENT_SCHEMA,
+    family: "other",
+    kind: "read",
+    source: "telemetry-fallback",
+  }),
+  transportAsField: policy.normalizeEvent({
+    schema: policy.EVENT_SCHEMA,
+    family: "field",
+    kind: "read",
+    source: "stateful-recall-field",
+  }),
+  fieldAsTransport: policy.normalizeEvent({
+    schema: policy.EVENT_SCHEMA,
+    family: "transport",
+    kind: "spread",
+    source: "telemetry-fallback",
+  }),
+  badSource: policy.normalizeEvent({
+    schema: policy.EVENT_SCHEMA,
+    family: "transport",
+    kind: "read",
+    source: "stateful-recall-field",
+  }),
+};
+process.stdout.write(JSON.stringify({
+  legacyRecall,
+  envelope,
+  legacyField,
+  legacyUnknownTelemetry,
+  v2Field,
+  processing,
+  pageIds,
+  pageIdMaxLength: policy.PAGE_ID_MAX_LENGTH,
+  rejected,
+}));
+"""
+    completed = subprocess.run(
+        ["node", "-e", scenario],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    result = json.loads(completed.stdout)
+
+    assert result["legacyRecall"] | {
+        "schema": "chronovisor.cortex.event.v2",
+        "family": "transport",
+        "origin": "telemetry-fallback",
+        "mode": "live",
+        "lane_key": "recall",
+        "phase": "generate",
+        "channel_key": "read",
+        "priority_class": "protected",
+        "page_ids": ["page-a"],
+    } == result["legacyRecall"]
+    assert result["envelope"]["presentation"] == {
+        "lane_key": "recall",
+        "phase": "apply",
+        "channel_key": "recall-used",
+        "priority_class": "protected",
+    }
+    assert result["legacyField"]["family"] == "field"
+    assert result["legacyField"]["source"] == "stateful-recall-field"
+    assert result["legacyUnknownTelemetry"]["family"] == "telemetry"
+    assert result["legacyUnknownTelemetry"]["kind"] == "unknown_activity"
+    assert result["v2Field"]["family"] == "field"
+    assert result["v2Field"]["kind"] == "spread"
+    assert result["processing"]["schema"] == "chronovisor.cortex.event.v2"
+    assert result["processing"]["family"] == "transport"
+    assert result["processing"]["origin"] == "activity-stream"
+    assert result["processing"]["lane_key"] == "audit"
+    assert result["processing"]["phase"] == "consensus"
+    assert result["processing"]["channel_key"] == "processing:audit"
+    assert result["pageIdMaxLength"] == 240
+    assert len(result["pageIds"]) == 24
+    assert result["pageIds"][:2] == ["page-a", "x" * 240]
+    assert all(isinstance(page_id, str) for page_id in result["pageIds"])
+    assert all(len(page_id) <= 240 for page_id in result["pageIds"])
+    assert result["rejected"] == {
+        "unknownSchema": None,
+        "invalidFamily": None,
+        "transportAsField": None,
+        "fieldAsTransport": None,
+        "badSource": None,
+    }
+
+
+def test_cortex_processing_lane_projection_is_pure_and_uses_mode_holds() -> None:
+    policy_path = dashboard.STATIC_DIR / "cortex-transport-policy.js"
+    scenario = f"const policy = require({json.dumps(str(policy_path))});\n" + """
+const demoCapture = policy.projectProcessingLane({
+  kind: "save",
+  source: "demo",
+  byte_count: 18841,
+  raw_count: 3,
+  capture_id: "9f3a7c21",
+});
+const liveCapture = policy.projectProcessingLane({
+  kind: "save",
+  source: "telemetry-fallback",
+  byte_count: 2048,
+  capture_id: "live-capture",
+});
+const active = policy.projectProcessingLane(
+  policy.normalizeProcessingActivity({
+    key: "recall",
+    current_step: "rerank",
+    model: "model-a",
+    role: "recall_judge",
+  }),
+);
+const complete = policy.projectProcessingLane(active.event, "complete");
+const unknown = policy.projectProcessingLane({
+  kind: "processing",
+  lane_key: "not-real",
+  step: "work",
+  source: "processing-activity",
+});
+const demoBeforeLive = policy.projectProcessingLane({
+  kind: "ingest",
+  phase: "generate",
+  source: "demo",
+  demo_sequence_started_at: 100,
+});
+const demoAfterLive = policy.projectProcessingLane({
+  kind: "ingest",
+  phase: "apply",
+  source: "demo",
+  demo_sequence_started_at: 300,
+});
+const liveDecision = policy.processingLaneUpdateDecision(active, 0, 200);
+const staleDemoDecision = policy.processingLaneUpdateDecision(
+  demoBeforeLive,
+  liveDecision.lastLiveAt,
+  250,
+);
+const newerDemoDecision = policy.processingLaneUpdateDecision(
+  demoAfterLive,
+  liveDecision.lastLiveAt,
+  350,
+);
+process.stdout.write(JSON.stringify({
+  laneKeys: policy.PROCESSING_LANE_KEYS,
+  demoCapture,
+  liveCapture,
+  active,
+  complete,
+  unknown,
+  liveDecision,
+  staleDemoDecision,
+  newerDemoDecision,
+}));
+"""
+    completed = subprocess.run(
+        ["node", "-e", scenario],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    result = json.loads(completed.stdout)
+
+    assert result["laneKeys"] == [
+        "raw_buffer",
+        "ingest",
+        "recall",
+        "audit",
+        "improve",
+        "repair",
+        "typed_graph",
+    ]
+    assert result["demoCapture"] | {
+        "laneKey": "raw_buffer",
+        "phase": "capture",
+        "status": "CAPTURE",
+        "detail": "18.4 KB · 3 raw · ID 9f3a7c21",
+        "state": "active",
+        "holdMs": 5600,
+        "mode": "demo",
+    } == result["demoCapture"]
+    assert result["liveCapture"]["holdMs"] == 6800
+    assert result["active"] | {
+        "laneKey": "recall",
+        "phase": "generate",
+        "status": "RERANK",
+        "detail": "model-a · recall_judge",
+        "state": "active",
+        "holdMs": 4800,
+        "mode": "live",
+    } == result["active"]
+    assert result["complete"]["state"] == "complete"
+    assert result["complete"]["status"] == "COMPLETE"
+    assert result["complete"]["holdMs"] == 1800
+    assert result["unknown"]["laneKey"] == "audit"
+    assert result["liveDecision"] == {"accept": True, "lastLiveAt": 200}
+    assert result["staleDemoDecision"] == {
+        "accept": False,
+        "lastLiveAt": 200,
+    }
+    assert result["newerDemoDecision"] == {
+        "accept": True,
+        "lastLiveAt": 200,
+    }
 
 
 def test_cortex_transport_retention_resists_processing_storm_and_stays_bounded(
 ) -> None:
     script = (dashboard.STATIC_DIR / "cortex.js").read_text(encoding="utf-8")
-    visualize_transport = script[
-        script.index("function visualizeTransportEvent(") : script.index(
-            "function visualizeFieldEvent("
-        )
-    ]
-    assert "transportEffectTiming(event, phase, now)" in visualize_transport
-    assert "pruneAndBoundTransportEffects(transportEffects, now)" in (
-        visualize_transport
-    )
-    helpers = script[
-        script.index("function captureCometDuration(") : script.index(
-            "function processingTargetNode("
-        )
-    ]
-    scenario = f"""
-const MAX_TRANSPORT_EFFECTS = 18;
-const CAPTURE_COMET_DURATION_MS = 5200;
-const LIVE_CAPTURE_COMET_DURATION_MS = 6400;
-const RECALL_TRANSPORT_MIN_VISIBLE_MS = 3200;
-const RECALL_TELEMETRY_KINDS = new Set([
-  "recall", "auto_recall", "read", "search", "used",
-]);
-{helpers}
-const save = {{
+    assert "TransportPolicy.transportTiming(" in script
+    assert "TransportPolicy.pruneAndBoundTransportEffects(" in script
+    policy_path = dashboard.STATIC_DIR / "cortex-transport-policy.js"
+    scenario = f"const policy = require({json.dumps(str(policy_path))});\n" + """
+const save = {
   id: "save",
   kind: "save",
   startedAt: 0,
   duration: 6400,
   retainedUntil: 6400,
-}};
-const recall = {{
+};
+const recall = {
   id: "recall",
   kind: "recall",
   startedAt: 0,
   duration: 3200,
   retainedUntil: 3200,
-}};
-const processingStorm = Array.from({{ length: 18 }}, (_, index) => ({{
-  id: `processing-${{index}}`,
+};
+const processingStorm = Array.from({ length: 18 }, (_, index) => ({
+  id: `processing-${index}`,
   kind: "processing",
   startedAt: 900 + index,
   duration: 2300,
   retainedUntil: 900 + index,
-}}));
-const retained = pruneAndBoundTransportEffects(
+}));
+const retained = policy.pruneAndBoundTransportEffects(
   [save, recall, ...processingStorm],
   1000,
 );
-const expired = pruneAndBoundTransportEffects([
-  {{ id: "expired", kind: "processing", startedAt: 0, duration: 100 }},
-  {{ id: "live", kind: "processing", startedAt: 950, duration: 1000 }},
+const expired = policy.pruneAndBoundTransportEffects([
+  { id: "expired", kind: "processing", startedAt: 0, duration: 100 },
+  { id: "live", kind: "processing", startedAt: 950, duration: 1000 },
 ], 1000);
-const protectedBurst = Array.from({{ length: 19 }}, (_, index) => ({{
-  id: `memory-${{index}}`,
+const protectedBurst = Array.from({ length: 19 }, (_, index) => ({
+  id: `memory-${index}`,
   kind: "recall",
   startedAt: index,
   duration: 5000,
   retainedUntil: 4000 + index,
-}}));
-pruneAndBoundTransportEffects(protectedBurst, 1000);
-process.stdout.write(JSON.stringify({{
-  demoCaptureTiming: transportEffectTiming(
-    {{ kind: "save", source: "demo" }}, "capture", 1000,
+}));
+policy.pruneAndBoundTransportEffects(protectedBurst, 1000);
+process.stdout.write(JSON.stringify({
+  demoCaptureTiming: policy.transportTiming(
+    { kind: "save", source: "demo" }, "capture", 1000,
   ),
-  liveCaptureTiming: transportEffectTiming(
-    {{ kind: "save", source: "transport" }}, "capture", 1000,
+  liveCaptureTiming: policy.transportTiming(
+    { kind: "save", source: "transport" }, "capture", 1000,
   ),
-  recallTiming: transportEffectTiming(
-    {{ kind: "read", source: "transport" }}, "generate", 1000,
+  recallTiming: policy.transportTiming(
+    { kind: "read", source: "transport" }, "generate", 1000,
   ),
-  usedTiming: transportEffectTiming(
-    {{ kind: "used", source: "transport" }}, "apply", 1000,
+  usedTiming: policy.transportTiming(
+    { kind: "used", source: "transport" }, "apply", 1000,
   ),
   retainedIds: retained.map((effect) => effect.id),
   retainedLength: retained.length,
   expiredIds: expired.map((effect) => effect.id),
   protectedLength: protectedBurst.length,
   oldestProtectedEvicted: !protectedBurst.some((effect) => effect.id === "memory-0"),
-}}));
+}));
 """
     completed = subprocess.run(
         ["node", "-e", scenario],
@@ -1327,72 +1689,69 @@ process.stdout.write(JSON.stringify({{
 def test_cortex_recall_electricity_survives_field_storm_and_stays_bounded(
 ) -> None:
     script = (dashboard.STATIC_DIR / "cortex.js").read_text(encoding="utf-8")
-    stimulate_transport = script[
-        script.index("function stimulateFromTransport(") : script.index(
-            "function isElectricPulseProtected("
-        )
-    ]
-    assert "duration: RECALL_ELECTRIC_TRAVEL_MS" in stimulate_transport
-    assert (
-        "retainedUntil: startedAt + RECALL_ELECTRIC_TRAVEL_MS"
-        in stimulate_transport
-    )
-    helpers = script[
-        script.index("function isElectricPulseProtected(") : script.index(
-            "function trimVisualQueues("
-        )
-    ]
-    scenario = f"""
-const MAX_ELECTRIC_PATHS = 12;
+    assert "TransportPolicy.recallVisualProfile(event)" in script
+    assert "TransportPolicy.liveRecallElectricTiming(" in script
+    assert "duration: electricTiming.duration" in script
+    assert "retainedUntil: electricTiming.retainedUntil" in script
+    policy_path = dashboard.STATIC_DIR / "cortex-transport-policy.js"
+    scenario = f"const policy = require({json.dumps(str(policy_path))});\n" + """
 const pulses = [];
-const performance = {{ now: () => 1000 }};
-{helpers}
-for (let index = 0; index < 12; index += 1) {{
-  queueElectricPulse({{
-    id: `field-${{index}}`,
+function queue(pulse) {
+  pulses.push(pulse);
+  policy.pruneAndBoundElectricPulses(pulses, 1000);
+}
+for (let index = 0; index < 12; index += 1) {
+  queue({
+    id: `field-${index}`,
     kind: "field",
     startedAt: 900,
     duration: 760,
     delta: 1 - index * 0.01,
     seq: index,
-  }});
-}}
-for (let index = 0; index < 3; index += 1) {{
-  queueElectricPulse({{
-    id: `recall-${{index}}`,
+  });
+}
+for (let index = 0; index < 3; index += 1) {
+  queue({
+    id: `recall-${index}`,
     kind: "recall",
     startedAt: 1000 + index,
     duration: 2800,
     retainedUntil: 3800 + index,
     delta: 0.1,
     seq: 100 + index,
-  }});
-}}
-for (let index = 0; index < 40; index += 1) {{
-  queueElectricPulse({{
-    id: `late-field-${{index}}`,
+  });
+}
+for (let index = 0; index < 40; index += 1) {
+  queue({
+    id: `late-field-${index}`,
     kind: "field",
     startedAt: 1000,
     duration: 760,
     delta: 1,
     seq: 200 + index,
-  }});
-}}
-const protectedBurst = Array.from({{ length: 13 }}, (_, index) => ({{
-  id: `protected-${{index}}`,
+  });
+}
+const protectedBurst = Array.from({ length: 13 }, (_, index) => ({
+  id: `protected-${index}`,
   startedAt: 1000,
   duration: 2800,
   retainedUntil: 3800 + index,
   delta: 0.5,
   seq: index,
-}}));
-pruneAndBoundElectricPulses(protectedBurst, 1000);
+}));
+policy.pruneAndBoundElectricPulses(protectedBurst, 1000);
 const expired = [
-  {{ id: "expired", startedAt: 0, duration: 100, delta: 1, seq: 1 }},
-  {{ id: "live", startedAt: 950, duration: 1000, delta: 0.5, seq: 2 }},
+  { id: "expired", startedAt: 0, duration: 100, delta: 1, seq: 1 },
+  { id: "live", startedAt: 950, duration: 1000, delta: 0.5, seq: 2 },
 ];
-pruneAndBoundElectricPulses(expired, 1000);
-process.stdout.write(JSON.stringify({{
+policy.pruneAndBoundElectricPulses(expired, 1000);
+process.stdout.write(JSON.stringify({
+  demoProfile: policy.profileFor("demo"),
+  recallProfile: policy.recallVisualProfile({ kind: "recall", mode: "live" }),
+  electricTiming: policy.liveRecallElectricTiming(
+    { kind: "recall", mode: "live" },
+    1000,
+  ),
   pulseIds: pulses.map((pulse) => pulse.id),
   pulseLength: pulses.length,
   protectedLength: protectedBurst.length,
@@ -1400,7 +1759,7 @@ process.stdout.write(JSON.stringify({{
     (pulse) => pulse.id === "protected-0",
   ),
   expiredIds: expired.map((pulse) => pulse.id),
-}}));
+}));
 """
     completed = subprocess.run(
         ["node", "-e", scenario],
@@ -1410,6 +1769,24 @@ process.stdout.write(JSON.stringify({{
     )
     result = json.loads(completed.stdout)
 
+    assert result["demoProfile"] == {
+        "mode": "demo",
+        "captureCometDurationMs": 5200,
+        "recallNodeDurationMs": 650,
+        "recallElectricDurationMs": None,
+        "recallTransportMinVisibleMs": 3200,
+    }
+    assert result["recallProfile"] == {
+        "mode": "live",
+        "scale": 0.6,
+        "nodeDurationMs": 3000,
+        "electricDurationMs": 2800,
+        "electricRetainMs": 2800,
+    }
+    assert result["electricTiming"] == {
+        "duration": 2800,
+        "retainedUntil": 3800,
+    }
     assert result["pulseLength"] == 12
     assert {"recall-0", "recall-1", "recall-2"}.issubset(result["pulseIds"])
     assert result["protectedLength"] == 12
