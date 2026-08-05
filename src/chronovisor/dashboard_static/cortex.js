@@ -49,13 +49,16 @@
   const EVENT_EDGE_LIMIT = 256;
   const EVENT_EDGE_TTL_MS = 60_000;
   const CAPTURE_WAVE_NODE_LIMIT = 112;
+  const CAPTURE_WAVE_MAX_VISIBLE = 4;
+  const CAPTURE_WAVE_MIN_INTERVAL_MS = 420;
   const CAPTURE_WAVE_TAIL_RATIO = 0.42;
   const CAPTURE_WAVE_FRONT_GLOW_OPACITY = 1;
   const CAPTURE_WAVE_FRONT_GLOW_PADDING_PX = 5.5;
   const CAPTURE_WAVE_TAIL_GLOW_OPACITY = 0.66;
   const CAPTURE_WAVE_TAIL_GLOW_PADDING_PX = 3.6;
   const CAPTURE_WAVE_TRAVEL_END = 0.72;
-  const CAPTURE_HEARTBEAT_END = 0.94;
+  const CAPTURE_HEARTBEAT_SETTLE_MS = 220;
+  const CAPTURE_HEARTBEAT_DURATION_MS = 720;
   const EXPLORER_CHUNK_SIZE = 120;
   const AUTO_ROTATE_COOLDOWN_MS = 2600;
   const SPHERE_TARGET_FORCE = 0.018;
@@ -354,6 +357,7 @@
     applyEvents: 0,
     captureEffectCount: 0,
     captureEffectSeq: -1,
+    captureEffectCaptureId: "",
     captureWaveEffects: 0,
     captureWaveNodes: 0,
     captureAfterglowNodes: 0,
@@ -467,6 +471,7 @@
       applyEvents: cortexMetrics.applyEvents,
       captureEffectCount: cortexMetrics.captureEffectCount,
       captureEffectSeq: cortexMetrics.captureEffectSeq,
+      captureEffectCaptureId: cortexMetrics.captureEffectCaptureId,
       captureWaveEffects: cortexMetrics.captureWaveEffects,
       captureWaveNodes: cortexMetrics.captureWaveNodes,
       captureAfterglowNodes: cortexMetrics.captureAfterglowNodes,
@@ -531,6 +536,20 @@
   const edgeAfterglows = [];
   const nodeEffects = [];
   const transportEffects = [];
+  const captureWaveTrain = [];
+  const captureWaveSampleEffect = Object.freeze({
+    captureId: "capture-wave-train",
+    seq: 1,
+  });
+  const captureHeartbeatBurst = {
+    finalSeq: -1,
+    finalCaptureId: "",
+    dueAt: 0,
+    generation: 0,
+    recorded: true,
+    painted: false,
+    wakeTimer: 0,
+  };
   const activeProcessingLanes = new Map();
   const processingLaneMonitorStates = new Map(
     PROCESSING_LANE_KEYS.map((laneKey) => [
@@ -1756,6 +1775,7 @@
       sphereQuality.radialError.mean.toFixed(2);
     target.dataset.captureEffectCount = String(cortexMetrics.captureEffectCount);
     target.dataset.captureEffectSeq = String(cortexMetrics.captureEffectSeq);
+    target.dataset.captureEffectCaptureId = cortexMetrics.captureEffectCaptureId;
     target.dataset.captureWaveEffects = String(cortexMetrics.captureWaveEffects);
     target.dataset.captureWaveNodes = String(cortexMetrics.captureWaveNodes);
     target.dataset.captureAfterglowNodes = String(
@@ -1992,6 +2012,74 @@
     });
   }
 
+  function scheduleCaptureHeartbeatWake(generation, wakeAt) {
+    captureHeartbeatBurst.wakeTimer = window.setTimeout(() => {
+      if (generation !== captureHeartbeatBurst.generation) return;
+      captureHeartbeatBurst.wakeTimer = 0;
+      invalidate("capture-heartbeat");
+    }, Math.max(0, wakeAt - performance.now()));
+  }
+
+  function armCaptureHeartbeat(finalSeq, dueAt, finalCaptureId) {
+    captureHeartbeatBurst.generation += 1;
+    const generation = captureHeartbeatBurst.generation;
+    if (captureHeartbeatBurst.wakeTimer) {
+      window.clearTimeout(captureHeartbeatBurst.wakeTimer);
+    }
+    captureHeartbeatBurst.finalSeq = finalSeq;
+    captureHeartbeatBurst.finalCaptureId = finalCaptureId;
+    captureHeartbeatBurst.dueAt = dueAt;
+    captureHeartbeatBurst.recorded = false;
+    captureHeartbeatBurst.painted = false;
+    scheduleCaptureHeartbeatWake(generation, dueAt);
+  }
+
+  function pruneCaptureWaveTrain(now) {
+    for (let index = captureWaveTrain.length - 1; index >= 0; index -= 1) {
+      if (now >= captureWaveTrain[index].arrivalAt) {
+        captureWaveTrain.splice(index, 1);
+      }
+    }
+  }
+
+  function admitCaptureWave(effect, eventMultiplicity, now) {
+    pruneCaptureWaveTrain(now);
+    const newest = captureWaveTrain.at(-1) || null;
+    if (
+      newest
+      && (
+        now - newest.startedAt < CAPTURE_WAVE_MIN_INTERVAL_MS
+        || captureWaveTrain.length >= CAPTURE_WAVE_MAX_VISIBLE
+      )
+    ) {
+      newest.coalescedCount += eventMultiplicity;
+      newest.latestCaptureId = effect.captureId;
+      armCaptureHeartbeat(
+        effect.seq,
+        Math.max(
+          captureHeartbeatBurst.dueAt,
+          now + CAPTURE_HEARTBEAT_SETTLE_MS,
+        ),
+        effect.captureId,
+      );
+      return false;
+    }
+    captureWaveTrain.push(effect);
+    let latestArrivalAt = effect.arrivalAt;
+    for (let index = 0; index < captureWaveTrain.length; index += 1) {
+      latestArrivalAt = Math.max(
+        latestArrivalAt,
+        captureWaveTrain[index].arrivalAt,
+      );
+    }
+    armCaptureHeartbeat(
+      effect.seq,
+      latestArrivalAt + CAPTURE_HEARTBEAT_SETTLE_MS,
+      effect.captureId,
+    );
+    return true;
+  }
+
   function processingTargetNode(laneKey) {
     const candidates = nodes
       .filter((node) => !nodeState || nodeState[node.index] > 0)
@@ -2045,10 +2133,7 @@
     cortexMetrics.transportByKind[transportKind] =
       Number(cortexMetrics.transportByKind[transportKind] || 0)
       + eventMultiplicity;
-    if (phase === "capture") {
-      TransportPolicy.supersedeCaptureVisuals(transportEffects);
-    }
-    transportEffects.push({
+    const effect = {
       kind: event.kind,
       phase,
       channelKey,
@@ -2067,7 +2152,15 @@
       seq: cortexMetrics.transportReceived,
       demo: event.mode === "demo",
       paintedAt: 0,
-    });
+      coalescedCount: eventMultiplicity,
+      latestCaptureId: String(event.capture_id || "").slice(0, 12),
+      arrivalAt: now + duration * CAPTURE_WAVE_TRAVEL_END,
+    };
+    if (phase === "capture") {
+      admitCaptureWave(effect, eventMultiplicity, now);
+    } else {
+      transportEffects.push(effect);
+    }
     TransportPolicy.pruneAndBoundTransportEffects(transportEffects, now);
     if (phase === "capture") cortexMetrics.captureEvents += eventMultiplicity;
     else if (event.kind === "processing") {
@@ -3107,7 +3200,6 @@
         phase: "static",
         waveRadius: radius * 0.56,
         wavePeak: 0.72,
-        heartbeatPeak: 0.3,
       };
     }
     if (progress < CAPTURE_WAVE_TRAVEL_END) {
@@ -3116,27 +3208,18 @@
         phase: "wave",
         waveRadius: radius * (1 - travel),
         wavePeak: 0.62 + Math.sin(travel * Math.PI) * 0.34,
-        heartbeatPeak: 0,
-      };
-    }
-    if (progress < CAPTURE_HEARTBEAT_END) {
-      const heartbeatProgress = clamp(
-        (progress - CAPTURE_WAVE_TRAVEL_END)
-        / (CAPTURE_HEARTBEAT_END - CAPTURE_WAVE_TRAVEL_END),
-      );
-      return {
-        phase: "heartbeat",
-        waveRadius: 0,
-        wavePeak: 0.34 * (1 - heartbeatProgress),
-        heartbeatPeak: Math.pow(Math.sin(heartbeatProgress * Math.PI), 0.78),
       };
     }
     return {
       phase: "settle",
       waveRadius: 0,
       wavePeak: 0,
-      heartbeatPeak: 0,
     };
+  }
+
+  function captureHeartbeatPeak(progress) {
+    if (progress <= 0 || progress >= 1) return 0;
+    return Math.pow(Math.sin(progress * Math.PI), 0.78);
   }
 
   function captureHeartbeatAlpha(peak, fade) {
@@ -3206,40 +3289,100 @@
     );
   }
 
-  function drawCaptureWaveNodes(effect, wave, falloffWidth, fade) {
+  function drawCaptureWaveTrain(time, star) {
+    const staticMotion = reducedMotion.matches || !motionEnabled;
+    const falloffWidth = clamp(star.radius * 0.18, 42, 112);
+    let latestWave = null;
+    for (let index = 0; index < captureWaveTrain.length; index += 1) {
+      const wave = captureWaveTrain[index];
+      const progress = clamp((time - wave.startedAt) / wave.duration);
+      wave.frameState = captureWaveState(progress, star.radius, staticMotion);
+      wave.framePainted = false;
+      wave.frameProgress = progress;
+      if (!latestWave || wave.seq > latestWave.seq) latestWave = wave;
+    }
+    cortexMetrics.captureEffectCount = captureWaveTrain.length;
+    cortexMetrics.captureEffectSeq = captureHeartbeatBurst.finalSeq;
+    cortexMetrics.captureEffectCaptureId = captureHeartbeatBurst.finalCaptureId;
+    cortexMetrics.captureCenterX = star.x;
+    cortexMetrics.captureCenterY = star.y;
+    cortexMetrics.captureRadius = star.radius;
+    cortexMetrics.captureBandWidth = falloffWidth;
+    cortexMetrics.captureProgress = latestWave?.frameProgress || 0;
+    cortexMetrics.capturePhase = captureWaveTrain.length > 1
+      ? "wave-train"
+      : latestWave?.frameState.phase || "idle";
     let waveNodes = 0;
     let afterglowNodes = 0;
     let drawnNodes = 0;
     const start = nodes.length
       ? Math.floor(
-          deterministicUnit(effect.captureId || effect.label, effect.seq * 43)
+          deterministicUnit("capture-wave-train", 43)
           * nodes.length,
         )
       : 0;
-    const stride = captureWaveSampleStride(nodes.length, effect);
+    const stride = captureWaveSampleStride(nodes.length, captureWaveSampleEffect);
     for (let offset = 0; offset < nodes.length; offset += 1) {
       if (drawnNodes >= CAPTURE_WAVE_NODE_LIMIT) break;
       const node = nodes[(start + offset * stride) % nodes.length];
       const distance = captureWaveDistances[node.index];
       if (distance < 0) continue;
-      const intensity = captureWaveNodeIntensity(
-        distance,
-        wave.waveRadius,
-        falloffWidth,
-        wave.wavePeak,
-      );
-      if (intensity <= 0) continue;
-      const inTail = distance > wave.waveRadius;
-      drawCaptureWaveNodeGlow(node, intensity, fade, inTail);
+      let combinedIntensity = 0;
+      let contributorMask = 0;
+      let strongestIntensity = 0;
+      let strongestWave = null;
+      for (let index = 0; index < captureWaveTrain.length; index += 1) {
+        const wave = captureWaveTrain[index];
+        const intensity = captureWaveNodeIntensity(
+          distance,
+          wave.frameState.waveRadius,
+          falloffWidth,
+          wave.frameState.wavePeak,
+        );
+        combinedIntensity = 1 - (1 - combinedIntensity) * (1 - intensity);
+        if (intensity > 0) contributorMask |= 1 << index;
+        if (intensity > strongestIntensity) {
+          strongestIntensity = intensity;
+          strongestWave = wave;
+        }
+      }
+      if (!strongestWave || combinedIntensity <= 0) continue;
+      const inTail = distance > strongestWave.frameState.waveRadius;
+      drawCaptureWaveNodeGlow(node, combinedIntensity, 1, inTail);
+      for (let index = 0; index < captureWaveTrain.length; index += 1) {
+        if (contributorMask & (1 << index)) {
+          captureWaveTrain[index].framePainted = true;
+        }
+      }
       drawnNodes += 1;
       if (inTail) afterglowNodes += 1;
       else waveNodes += 1;
+      cortexMetrics.captureWavePeak = Math.max(
+        cortexMetrics.captureWavePeak,
+        combinedIntensity,
+      );
     }
-    return { waveNodes, afterglowNodes, painted: drawnNodes > 0 };
+    let paintedWaveCount = 0;
+    for (let index = 0; index < captureWaveTrain.length; index += 1) {
+      const wave = captureWaveTrain[index];
+      if (!wave.framePainted) continue;
+      paintedWaveCount += 1;
+      if (!wave.paintedAt) {
+        wave.paintedAt = time;
+        cortexMetrics.transportPainted += 1;
+      }
+    }
+    cortexMetrics.captureWaveEffects = paintedWaveCount;
+    cortexMetrics.captureWaveNodes = waveNodes;
+    cortexMetrics.captureAfterglowNodes = afterglowNodes;
+    cortexMetrics.transportElectricPeak = Math.max(
+      cortexMetrics.transportElectricPeak,
+      cortexMetrics.captureWavePeak,
+    );
+    return drawnNodes > 0;
   }
 
-  function drawCaptureHeartbeat(star, wave, fade) {
-    const peak = wave.heartbeatPeak;
+  function drawCaptureHeartbeat(star, peak, fade) {
     const alpha = captureHeartbeatAlpha(peak, fade);
     if (alpha <= 0) return false;
     const glowSize = star.radius * (2.05 + peak * 0.38);
@@ -3255,57 +3398,71 @@
     return true;
   }
 
-  function recordCaptureWaveMetrics(effect, progress, star, wave, bandWidth, counts) {
-    cortexMetrics.captureWaveEffects = 1;
-    cortexMetrics.captureWavePeak = Math.max(
-      cortexMetrics.captureWavePeak,
-      wave.wavePeak,
-    );
-    cortexMetrics.captureHeartbeatPeak = Math.max(
-      cortexMetrics.captureHeartbeatPeak,
-      wave.heartbeatPeak,
-    );
-    cortexMetrics.transportElectricPeak = Math.max(
-      cortexMetrics.transportElectricPeak,
-      wave.wavePeak,
-      wave.heartbeatPeak,
-    );
-    if (wave.phase === "heartbeat" && effect.heartbeatRecorded !== true) {
-      effect.heartbeatRecorded = true;
-      cortexMetrics.captureHeartbeatCount += 1;
-      cortexMetrics.captureHeartbeatSeq = effect.seq;
+  function drawCaptureHeartbeatBurst(time, star) {
+    if (captureHeartbeatBurst.recorded || time < captureHeartbeatBurst.dueAt) {
+      return false;
     }
-    cortexMetrics.captureWaveNodes = counts.waveNodes;
-    cortexMetrics.captureAfterglowNodes = counts.afterglowNodes;
+    const progress = (
+      time - captureHeartbeatBurst.dueAt
+    ) / CAPTURE_HEARTBEAT_DURATION_MS;
+    if (progress >= 1) {
+      if (captureHeartbeatBurst.painted) {
+        cortexMetrics.captureHeartbeatCount += 1;
+        cortexMetrics.captureHeartbeatSeq = captureHeartbeatBurst.finalSeq;
+      }
+      captureHeartbeatBurst.recorded = true;
+      cortexMetrics.capturePhase = "settle";
+      return false;
+    }
+    const staticMotion = reducedMotion.matches || !motionEnabled;
+    const peak = staticMotion ? 0.3 : captureHeartbeatPeak(progress);
+    const painted = drawCaptureHeartbeat(star, peak, 1);
+    captureHeartbeatBurst.painted ||= painted;
+    if (staticMotion && !captureHeartbeatBurst.wakeTimer) {
+      scheduleCaptureHeartbeatWake(
+        captureHeartbeatBurst.generation,
+        captureHeartbeatBurst.dueAt + CAPTURE_HEARTBEAT_DURATION_MS,
+      );
+    }
+    cortexMetrics.captureHeartbeatPeak = peak;
+    cortexMetrics.captureEffectSeq = captureHeartbeatBurst.finalSeq;
+    cortexMetrics.captureEffectCaptureId = captureHeartbeatBurst.finalCaptureId;
     cortexMetrics.captureCenterX = star.x;
     cortexMetrics.captureCenterY = star.y;
     cortexMetrics.captureRadius = star.radius;
-    cortexMetrics.captureBandWidth = bandWidth;
-    cortexMetrics.captureProgress = progress;
-    cortexMetrics.capturePhase = wave.phase;
+    cortexMetrics.capturePhase = "heartbeat";
+    cortexMetrics.transportElectricPeak = Math.max(
+      cortexMetrics.transportElectricPeak,
+      peak,
+    );
+    return painted;
   }
 
-  function recordCaptureWaveSettleMetrics(progress) {
-    cortexMetrics.captureWaveEffects = 1;
-    cortexMetrics.captureWaveNodes = 0;
-    cortexMetrics.captureAfterglowNodes = 0;
-    cortexMetrics.captureWavePeak = 0;
-    cortexMetrics.captureHeartbeatPeak = 0;
-    cortexMetrics.captureProgress = progress;
-    cortexMetrics.capturePhase = "settle";
+  function captureHeartbeatHasRenderWork(time) {
+    return (
+      motionEnabled
+      && !reducedMotion.matches
+      && !captureHeartbeatBurst.recorded
+      && time >= captureHeartbeatBurst.dueAt
+    );
   }
 
-  function drawCaptureWave(effect, progress, fade, star) {
-    const staticMotion = reducedMotion.matches || !motionEnabled;
-    const wave = captureWaveState(progress, star.radius, staticMotion);
-    const bandWidth = clamp(star.radius * 0.18, 42, 112);
-    let counts = { waveNodes: 0, afterglowNodes: 0, painted: false };
-    if (wave.wavePeak > 0) {
-      counts = drawCaptureWaveNodes(effect, wave, bandWidth, fade);
+  function drawCaptureEffects(time) {
+    pruneCaptureWaveTrain(time);
+    let star = null;
+    let painted = false;
+    if (captureWaveTrain.length) {
+      star = captureWaveGeometry();
+      painted = drawCaptureWaveTrain(time, star);
     }
-    const heartbeatPainted = drawCaptureHeartbeat(star, wave, fade);
-    recordCaptureWaveMetrics(effect, progress, star, wave, bandWidth, counts);
-    return counts.painted || heartbeatPainted;
+    if (
+      !captureHeartbeatBurst.recorded
+      && time >= captureHeartbeatBurst.dueAt
+    ) {
+      if (!star) star = captureWaveGeometry();
+      painted = drawCaptureHeartbeatBurst(time, star) || painted;
+    }
+    return painted;
   }
 
   function ingestFormationCandidates(target, count, includeTarget = false) {
@@ -3626,18 +3783,7 @@
     context.lineJoin = "round";
     context.font = "8px ui-monospace, SFMono-Regular, Menlo, monospace";
     let memoryStar = null;
-    let captureWaveStar = null;
-    let latestCaptureSeq = -1;
-    let captureEffectCount = 0;
-    for (let index = 0; index < transportEffects.length; index += 1) {
-      const effect = transportEffects[index];
-      if (effect.phase !== "capture") continue;
-      captureEffectCount += 1;
-      if (effect.captureVisualSuperseded === true) continue;
-      latestCaptureSeq = Math.max(latestCaptureSeq, Number(effect.seq) || 0);
-    }
-    cortexMetrics.captureEffectCount = captureEffectCount;
-    cortexMetrics.captureEffectSeq = latestCaptureSeq;
+    drawCaptureEffects(time);
     for (let index = transportEffects.length - 1; index >= 0; index -= 1) {
       const effect = transportEffects[index];
       const rawProgress = (time - effect.startedAt) / effect.duration;
@@ -3650,44 +3796,24 @@
       const progress = reducedMotion.matches || !motionEnabled
         ? 0.68
         : clamp(rawProgress);
-      const fade = effect.phase === "capture"
-        ? 1 - smoothstep(clamp((rawProgress - CAPTURE_HEARTBEAT_END) / 0.06))
-        : 1 - smoothstep(clamp(rawProgress));
-      if (effect.phase === "capture") {
-        if (effect.seq === latestCaptureSeq) {
-          const captureProgress = clamp(rawProgress);
-          const staticCapture = reducedMotion.matches || !motionEnabled;
-          if (!staticCapture && captureProgress >= CAPTURE_HEARTBEAT_END) {
-            recordCaptureWaveSettleMetrics(captureProgress);
-          } else {
-            if (!captureWaveStar) captureWaveStar = captureWaveGeometry();
-            paintedThisFrame = drawCaptureWave(
-              effect,
-              captureProgress,
-              fade,
-              captureWaveStar,
-            );
-          }
-        }
-      } else {
-        const target = transportTarget(effect);
-        if (!target) continue;
-        if (effect.phase === "apply" || effect.phase === "complete") {
-          drawApplyFormation(effect, time, progress, fade, target);
-        } else if (effect.phase === "consensus") {
-          if (effect.kind === "processing" && effect.laneKey === "ingest") {
-            drawProcessingNodeBlink(effect, time, fade, target);
-          } else {
-            drawConsensusFormation(effect, time, progress, fade, target);
-          }
-        } else if (effect.phase === "generate") {
-          drawGenerateFormation(effect, progress, fade, target);
+      const fade = 1 - smoothstep(clamp(rawProgress));
+      const target = transportTarget(effect);
+      if (!target) continue;
+      if (effect.phase === "apply" || effect.phase === "complete") {
+        drawApplyFormation(effect, time, progress, fade, target);
+      } else if (effect.phase === "consensus") {
+        if (effect.kind === "processing" && effect.laneKey === "ingest") {
+          drawProcessingNodeBlink(effect, time, fade, target);
         } else {
-          if (!memoryStar) memoryStar = memoryStarGeometry();
-          drawTriageFormation(effect, progress, fade, memoryStar, target);
+          drawConsensusFormation(effect, time, progress, fade, target);
         }
-        paintedThisFrame = true;
+      } else if (effect.phase === "generate") {
+        drawGenerateFormation(effect, progress, fade, target);
+      } else {
+        if (!memoryStar) memoryStar = memoryStarGeometry();
+        drawTriageFormation(effect, progress, fade, memoryStar, target);
       }
+      paintedThisFrame = true;
       if (paintedThisFrame && !effect.paintedAt) {
         effect.paintedAt = time;
         cortexMetrics.transportPainted += 1;
@@ -3860,6 +3986,7 @@
     cortexMetrics.maxGlowPadding = 0;
     cortexMetrics.captureEffectCount = 0;
     cortexMetrics.captureEffectSeq = -1;
+    cortexMetrics.captureEffectCaptureId = "";
     cortexMetrics.captureWaveEffects = 0;
     cortexMetrics.captureWaveNodes = 0;
     cortexMetrics.captureAfterglowNodes = 0;
@@ -3938,6 +4065,8 @@
       || edgeAfterglows.length
       || nodeEffects.length
       || transportEffects.length
+      || captureWaveTrain.length
+      || captureHeartbeatHasRenderWork(performance.now())
       || autoRotationReady
     );
   }
@@ -5439,6 +5568,8 @@
       });
       window.addEventListener("beforeunload", () => {
         window.clearTimeout(modeFitTimer);
+        captureHeartbeatBurst.generation += 1;
+        window.clearTimeout(captureHeartbeatBurst.wakeTimer);
         autoRotateWake.dispose();
         renderScheduler.dispose();
         baseRenderer.dispose();

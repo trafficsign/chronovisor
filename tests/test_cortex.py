@@ -1808,7 +1808,7 @@ def test_cortex_static_view_preserves_fable_layout_and_uses_live_data() -> None:
     assert 'kind: "processing"' in policy_script
     assert '`processing:${laneKey || "audit"}`' in policy_script
     assert "connectProcessingActivity();" in script
-    assert "function drawCaptureWave(" in script
+    assert "function drawCaptureWaveTrain(" in script
     assert "function captureWaveGeometry(" in script
     assert "function captureWaveState(" in script
     assert "function drawCaptureHeartbeat(" in script
@@ -1833,9 +1833,9 @@ def test_cortex_static_view_preserves_fable_layout_and_uses_live_data() -> None:
     assert 'phase: "triage"' in script
     assert 'phase: "consensus"' in script
     assert "scheduleDemoTransport(3300" in script
-    assert "cortexMetrics.captureWaveEffects = 1;" in script
+    assert "cortexMetrics.captureWaveEffects = paintedWaveCount;" in script
     assert "cortexMetrics.captureWavePeak = Math.max(" in script
-    assert "cortexMetrics.captureHeartbeatPeak = Math.max(" in script
+    assert "cortexMetrics.captureHeartbeatPeak = peak;" in script
     assert "cortexMetrics.triageCandidates += 1;" in script
     assert "cortexMetrics.generateParticles += 1;" in script
     assert "cortexMetrics.consensusOrbits += 1;" in script
@@ -1976,14 +1976,17 @@ def test_cortex_save_capture_uses_bounded_radial_wave_and_heartbeat() -> None:
     assert front_opacity > tail_opacity
     assert front_padding > tail_padding
     assert "const CAPTURE_WAVE_TRAVEL_END = 0.72;" in script
-    assert "const CAPTURE_HEARTBEAT_END = 0.94;" in script
+    assert "const CAPTURE_WAVE_MAX_VISIBLE = 4;" in script
+    assert "const CAPTURE_WAVE_MIN_INTERVAL_MS = 420;" in script
+    assert "const CAPTURE_HEARTBEAT_SETTLE_MS = 220;" in script
+    assert "const CAPTURE_HEARTBEAT_DURATION_MS = 720;" in script
     assert "captureWaveDistances = new Float32Array(nodes.length);" in capture_block
     assert "node.screenX - centerX" in capture_block
     assert "node.screenY - centerY" in capture_block
     assert "radius: Math.max(maxDistance + 8, shortest * 0.22)" in capture_block
     assert "Math.hypot(width, height) * 0.62" not in capture_block
     assert "function drawCaptureWaveBand(" not in script
-    assert "function drawCaptureWaveNodes(" in capture_block
+    assert "function drawCaptureWaveTrain(" in capture_block
     assert "function captureWaveNodeIntensity(" in capture_block
     assert "function captureWaveSampleStride(" in capture_block
     assert "greatestCommonDivisor(stride, length)" in capture_block
@@ -1992,13 +1995,13 @@ def test_cortex_save_capture_uses_bounded_radial_wave_and_heartbeat() -> None:
     assert ".sort(" not in capture_block
     assert "function drawCaptureHeartbeat(" in capture_block
     assert 'phase: "wave"' in capture_block
-    assert 'phase: "heartbeat"' in capture_block
+    assert 'cortexMetrics.capturePhase = "heartbeat";' in capture_block
     assert 'phase: "settle"' in capture_block
     settle_block = capture_block.split('phase: "settle"', 1)[1].split(
         "function captureHeartbeatAlpha(", 1
     )[0]
     assert "wavePeak: 0" in settle_block
-    assert "heartbeatPeak: 0" in settle_block
+    assert "heartbeatPeak" not in settle_block
     assert 'phase: "static"' in capture_block
     assert "reducedMotion.matches || !motionEnabled" in capture_block
     assert "context.createRadialGradient" not in capture_block
@@ -2015,26 +2018,44 @@ def test_cortex_save_capture_uses_bounded_radial_wave_and_heartbeat() -> None:
     assert "captureCometDurationMs" not in policy_script
     assert "captureWaveDurationMs: 3600" in policy_script
     assert "captureWaveDurationMs: 5000" in policy_script
-    assert "let latestCaptureSeq = -1;" in script
-    assert "captureEffectCount += 1;" in script
-    assert "effect.seq === latestCaptureSeq" in script
-    assert "effect.captureVisualSuperseded === true" in script
-    assert "TransportPolicy.supersedeCaptureVisuals(transportEffects);" in script
+    assert "const captureWaveTrain = [];" in script
+    assert "const captureHeartbeatBurst = {" in script
+    assert "function admitCaptureWave(" in script
+    assert "function armCaptureHeartbeat(" in script
+    assert "function scheduleCaptureHeartbeatWake(" in script
+    assert "TransportPolicy.supersedeCaptureVisuals(transportEffects);" not in script
     assert "let paintedThisFrame = false;" in script
     assert "paintedThisFrame && !effect.paintedAt" in script
-    assert "effect.heartbeatRecorded !== true" in capture_block
-    assert "effect.heartbeatRecorded = true;" in capture_block
+    assert "effect.heartbeatRecorded" not in capture_block
     assert "cortexMetrics.captureHeartbeatCount += 1;" in capture_block
+    assert "const staticMotion = reducedMotion.matches || !motionEnabled;" in (
+        capture_block
+    )
+    assert "const peak = staticMotion ? 0.3 : captureHeartbeatPeak(progress);" in (
+        capture_block
+    )
+    assert "if (staticMotion && !captureHeartbeatBurst.wakeTimer)" in capture_block
+    assert "motionEnabled\n      && !reducedMotion.matches" in capture_block
     node_wave_block = capture_block.split(
-        "function drawCaptureWaveNodes(", 1
+        "function drawCaptureWaveTrain(", 1
     )[1].split("function drawCaptureHeartbeat(", 1)[0]
-    assert "drawCaptureWaveNodeGlow(node, intensity, fade, inTail);" in node_wave_block
+    assert "drawCaptureWaveNodeGlow(node, combinedIntensity, 1, inTail);" in (
+        node_wave_block
+    )
+    assert node_wave_block.count(
+        "for (let offset = 0; offset < nodes.length; offset += 1)"
+    ) == 1
+    assert "for (let index = 0; index < captureWaveTrain.length; index += 1)" in (
+        node_wave_block
+    )
     assert "context.drawImage(" not in node_wave_block
-    assert "const inTail = distance > wave.waveRadius;" in node_wave_block
+    assert "const inTail = distance > strongestWave.frameState.waveRadius;" in (
+        node_wave_block
+    )
     assert "falloffWidth * CAPTURE_WAVE_TAIL_RATIO" in capture_block
     node_glow_block = capture_block.split(
         "function drawCaptureWaveNodeGlow(", 1
-    )[1].split("function drawCaptureWaveNodes(", 1)[0]
+    )[1].split("function drawCaptureWaveTrain(", 1)[0]
     assert node_glow_block.count("context.drawImage(") == 1
     assert "CAPTURE_WAVE_FRONT_GLOW_OPACITY" in node_glow_block
     assert "CAPTURE_WAVE_FRONT_GLOW_PADDING_PX" in node_glow_block
@@ -2045,68 +2066,46 @@ def test_cortex_save_capture_uses_bounded_radial_wave_and_heartbeat() -> None:
     assert "context.fill(" not in node_glow_block
     heartbeat_draw_block = capture_block.split(
         "function drawCaptureHeartbeat(", 1
-    )[1].split("function recordCaptureWaveMetrics(", 1)[0]
+    )[1].split("function drawCaptureHeartbeatBurst(", 1)[0]
     assert heartbeat_draw_block.count("context.drawImage(") == 1
     assert "glowCapture" in heartbeat_draw_block
     assert "context.stroke(" not in heartbeat_draw_block
     assert "context.arc(" not in heartbeat_draw_block
     assert "context.fill(" not in heartbeat_draw_block
     assert "context.beginPath(" not in heartbeat_draw_block
-    draw_capture_block = capture_block.split(
-        "function drawCaptureWave(effect, progress, fade, star)", 1
-    )[1]
+    assert "captureWaveTrain.length >= CAPTURE_WAVE_MAX_VISIBLE" in script
+    assert "newest.coalescedCount += eventMultiplicity;" in script
+    assert "newest.startedAt =" not in script
     assert (
-        "let counts = { waveNodes: 0, afterglowNodes: 0, painted: false };"
-        in draw_capture_block
+        "Math.max(\n          captureHeartbeatBurst.dueAt,\n"
+        "          now + CAPTURE_HEARTBEAT_SETTLE_MS,\n        )"
+    ) in script
+    assert "combinedIntensity = 1 - (1 - combinedIntensity) * (1 - intensity);" in (
+        node_wave_block
     )
-    assert "if (wave.wavePeak > 0)" in draw_capture_block
-    assert draw_capture_block.index("if (wave.wavePeak > 0)") < (
-        draw_capture_block.index("drawCaptureWaveNodes(")
-    )
-    assert draw_capture_block.index("drawCaptureHeartbeat(") > (
-        draw_capture_block.index("if (wave.wavePeak > 0)")
-    )
-    assert "const heartbeatPainted = drawCaptureHeartbeat(" in draw_capture_block
-    assert "return counts.painted || heartbeatPainted;" in draw_capture_block
-    assert "paintedThisFrame = drawCaptureWave(" in script
     draw_transport_start = script.index("function drawTransportEffects(time)")
-    transport_capture_start = script.index(
-        'if (effect.phase === "capture") {',
-        draw_transport_start,
+    draw_transport_block = script[draw_transport_start : script.index(
+        "function compareActiveLabels(", draw_transport_start
+    )]
+    assert "drawCaptureEffects(time);" in draw_transport_block
+    assert 'effect.phase === "capture"' not in draw_transport_block
+    draw_effects_block = capture_block.split("function drawCaptureEffects(", 1)[1]
+    assert draw_effects_block.index("pruneCaptureWaveTrain(time);") < (
+        draw_effects_block.index("captureWaveGeometry()")
     )
-    transport_capture_block = script[
-        transport_capture_start : script.index(
-            "const target = transportTarget(effect);",
-            transport_capture_start,
-        )
-    ]
-    settle_guard = (
-        "if (!staticCapture && captureProgress >= CAPTURE_HEARTBEAT_END)"
-    )
-    assert settle_guard in transport_capture_block
-    assert transport_capture_block.index(settle_guard) < (
-        transport_capture_block.index("captureWaveGeometry()")
-    )
-    assert "recordCaptureWaveSettleMetrics(captureProgress);" in (
-        transport_capture_block
-    )
-    assert "const staticCapture = reducedMotion.matches || !motionEnabled;" in (
-        transport_capture_block
-    )
-    assert "captureProgress," in transport_capture_block
     assert "cyan · inward memory wave → heartbeat" in script
     visualize_block = script[
         script.index("function visualizeTransportEvent(event)") : script.index(
             "function visualizeFieldEvent(event)",
         )
     ]
-    assert visualize_block.index(
-        "TransportPolicy.supersedeCaptureVisuals(transportEffects);"
-    ) < visualize_block.index("transportEffects.push({")
+    assert "admitCaptureWave(effect, eventMultiplicity, now);" in visualize_block
+    assert "transportEffects.push(effect);" in visualize_block
 
     for metric in (
         "captureEffectCount",
         "captureEffectSeq",
+        "captureEffectCaptureId",
         "captureWaveEffects",
         "captureWaveNodes",
         "captureAfterglowNodes",
@@ -2183,7 +2182,7 @@ process.stdout.write(JSON.stringify({{
 
     intensity_source = script[
         script.index("function captureWaveNodeIntensity(") : script.index(
-            "function drawCaptureWaveNodes(",
+            "function drawCaptureWaveNodeGlow(",
         )
     ]
     intensity_scenario = f"""
@@ -2281,7 +2280,6 @@ def test_cortex_capture_heartbeat_envelope_is_single_and_continuous() -> None:
     ]
     scenario = f"""
 const CAPTURE_WAVE_TRAVEL_END = 0.72;
-const CAPTURE_HEARTBEAT_END = 0.94;
 function clamp(value, minimum = 0, maximum = 1) {{
   return Math.min(maximum, Math.max(minimum, value));
 }}
@@ -2292,23 +2290,19 @@ function smoothstep(value) {{
 {state_source}
 process.stdout.write(JSON.stringify({{
   wave: captureWaveState(0.5, 100, false),
-  heartbeatPeak: captureWaveState(0.83, 100, false),
-  beforeEnd: captureWaveState(0.939999, 100, false),
-  atEnd: captureWaveState(0.94, 100, false),
+  atCenter: captureWaveState(0.72, 100, false),
   settle: captureWaveState(0.97, 100, false),
   staticState: captureWaveState(0.5, 100, true),
+  peakStart: captureHeartbeatPeak(0),
+  peakMiddle: captureHeartbeatPeak(0.5),
+  peakBeforeEnd: captureHeartbeatPeak(0.999999),
+  peakEnd: captureHeartbeatPeak(1),
   alphaZeroPeak: captureHeartbeatAlpha(0, 1),
   alphaZeroFade: captureHeartbeatAlpha(1, 0),
   alphaTiny: captureHeartbeatAlpha(0.000001, 1),
   alphaFull: captureHeartbeatAlpha(1, 1),
-  beforeEndAlpha: captureHeartbeatAlpha(
-    captureWaveState(0.939999, 100, false).heartbeatPeak,
-    1,
-  ),
-  atEndAlpha: captureHeartbeatAlpha(
-    captureWaveState(0.94, 100, false).heartbeatPeak,
-    1,
-  ),
+  beforeEndAlpha: captureHeartbeatAlpha(captureHeartbeatPeak(0.999999), 1),
+  atEndAlpha: captureHeartbeatAlpha(captureHeartbeatPeak(1), 1),
 }}));
 """
     completed = subprocess.run(
@@ -2319,128 +2313,223 @@ process.stdout.write(JSON.stringify({{
     )
     result = json.loads(completed.stdout)
 
-    assert result["wave"]["heartbeatPeak"] == 0
-    assert result["heartbeatPeak"]["phase"] == "heartbeat"
-    assert result["heartbeatPeak"]["heartbeatPeak"] == pytest.approx(1.0)
-    assert 0 <= result["beforeEnd"]["heartbeatPeak"] < 0.001
-    assert result["atEnd"]["heartbeatPeak"] == 0
-    assert result["atEnd"]["wavePeak"] == 0
-    assert result["settle"]["heartbeatPeak"] == 0
+    assert "heartbeatPeak" not in result["wave"]
+    assert result["atCenter"]["phase"] == "settle"
+    assert result["atCenter"]["wavePeak"] == 0
     assert result["settle"]["wavePeak"] == 0
+    assert result["peakStart"] == 0
+    assert result["peakMiddle"] == pytest.approx(1.0)
+    assert 0 < result["peakBeforeEnd"] < 0.001
+    assert result["peakEnd"] == 0
     assert result["alphaZeroPeak"] == 0
     assert result["alphaZeroFade"] == 0
     assert 0 < result["alphaTiny"] < 0.000001
     assert result["alphaFull"] == pytest.approx(0.46)
     assert 0 <= result["beforeEndAlpha"] < 0.001
     assert result["atEndAlpha"] == 0
-    assert result["staticState"] | {
-        "phase": "static",
-        "heartbeatPeak": 0.3,
-    } == result["staticState"]
+    assert result["staticState"]["phase"] == "static"
+    assert "heartbeatPeak" not in result["staticState"]
 
 
-def test_cortex_capture_visual_supersession_is_irreversible() -> None:
+def test_cortex_capture_wave_train_finishes_rapid_burst_without_revival() -> None:
+    script = (dashboard.STATIC_DIR / "cortex.js").read_text(encoding="utf-8")
     policy_path = dashboard.STATIC_DIR / "cortex-transport-policy.js"
-    scenario = f"const policy = require({json.dumps(str(policy_path))});\n" + """
-const oldLive = {
-  id: "old-live",
-  phase: "capture",
-  seq: 1,
-  retainedUntil: 5000,
-};
-const ingest = { id: "ingest", phase: "generate", seq: 2 };
-const effects = [oldLive, ingest];
-policy.supersedeCaptureVisuals(effects);
-const newDemo = {
-  id: "new-demo",
-  phase: "capture",
-  seq: 3,
-  retainedUntil: 3600,
-};
-effects.push(newDemo);
-const visibleBeforeExpiry = effects
-  .filter((effect) => (
-    effect.phase === "capture" && effect.captureVisualSuperseded !== true
-  ))
-  .map((effect) => effect.id);
-const afterDemoExpiry = effects.filter((effect) => effect.id !== "new-demo");
-const visibleAfterExpiry = afterDemoExpiry
-  .filter((effect) => (
-    effect.phase === "capture" && effect.captureVisualSuperseded !== true
-  ))
-  .map((effect) => effect.id);
-const fullQueue = [
-  {
-    id: "full-old-live",
-    phase: "capture",
-    seq: 10,
-    startedAt: 0,
-    duration: 5000,
-    retainedUntil: 5000,
-  },
-  ...Array.from({ length: 17 }, (_, index) => ({
-    id: `protected-${index}`,
-    phase: "generate",
-    seq: 11 + index,
-    startedAt: 0,
-    duration: 7000,
-    retainedUntil: 7000 + index,
-  })),
-];
-policy.supersedeCaptureVisuals(fullQueue);
-fullQueue.push({
-  id: "full-new-demo",
+    admission_source = script[
+        script.index("function scheduleCaptureHeartbeatWake(") : script.index(
+            "function processingTargetNode(",
+        )
+    ]
+    heartbeat_source = script[
+        script.index("function drawCaptureHeartbeatBurst(") : script.index(
+            "function captureHeartbeatHasRenderWork(",
+        )
+    ]
+    heartbeat_work_source = script[
+        script.index("function captureHeartbeatHasRenderWork(") : script.index(
+            "function drawCaptureEffects(",
+        )
+    ]
+    scenario = f"const policy = require({json.dumps(str(policy_path))});\n" + f"""
+const CAPTURE_WAVE_MAX_VISIBLE = 4;
+const CAPTURE_WAVE_MIN_INTERVAL_MS = 420;
+const CAPTURE_WAVE_TRAVEL_END = 0.72;
+const CAPTURE_HEARTBEAT_SETTLE_MS = 220;
+const CAPTURE_HEARTBEAT_DURATION_MS = 720;
+const captureWaveTrain = [];
+const captureHeartbeatBurst = {{
+  finalSeq: -1,
+  finalCaptureId: "",
+  dueAt: 0,
+  generation: 0,
+  recorded: true,
+  painted: false,
+  wakeTimer: 0,
+}};
+let observedNow = 0;
+let nextTimer = 1;
+const timers = new Map();
+const invalidations = [];
+const window = {{
+  setTimeout(callback, delay) {{
+    const id = nextTimer++;
+    timers.set(id, {{ callback, delay }});
+    return id;
+  }},
+  clearTimeout(id) {{ timers.delete(id); }},
+}};
+const performance = {{ now: () => observedNow }};
+function invalidate(reason) {{ invalidations.push(reason); }}
+{admission_source}
+const accepted = [];
+const firstWaveProgress = [];
+let maximumVisible = 0;
+let staleWake = null;
+for (let index = 0; index < 20; index += 1) {{
+  observedNow = index * 120;
+  const effect = {{
+    captureId: `cap-${{index}}`,
+    latestCaptureId: `cap-${{index}}`,
+    seq: index + 1,
+    startedAt: observedNow,
+    duration: 3600,
+    arrivalAt: observedNow + 3600 * CAPTURE_WAVE_TRAVEL_END,
+    coalescedCount: 1,
+    paintedAt: 0,
+  }};
+  if (admitCaptureWave(effect, 1, observedNow)) accepted.push(effect);
+  if (index === 0) staleWake = timers.get(captureHeartbeatBurst.wakeTimer).callback;
+  maximumVisible = Math.max(maximumVisible, captureWaveTrain.length);
+  firstWaveProgress.push((observedNow - accepted[0].startedAt) / 3600);
+}}
+const waveSnapshot = captureWaveTrain.map((wave) => ({{
+  seq: wave.seq,
+  startedAt: wave.startedAt,
+  duration: wave.duration,
+  arrivalAt: wave.arrivalAt,
+  coalescedCount: wave.coalescedCount,
+  latestCaptureId: wave.latestCaptureId,
+}}));
+const scheduledFinalSeq = captureHeartbeatBurst.finalSeq;
+const scheduledDueAt = captureHeartbeatBurst.dueAt;
+const pendingWakeCount = timers.size;
+staleWake();
+const invalidationsAfterStaleWake = invalidations.length;
+const liveWake = timers.get(captureHeartbeatBurst.wakeTimer);
+observedNow = scheduledDueAt;
+liveWake.callback();
+const invalidationsAfterLiveWake = invalidations.length;
+const remainingAfterArrivals = [];
+for (const wave of waveSnapshot) {{
+  pruneCaptureWaveTrain(wave.arrivalAt + 0.001);
+  remainingAfterArrivals.push(captureWaveTrain.length);
+}}
+const cortexMetrics = {{
+  captureHeartbeatCount: 0,
+  captureHeartbeatSeq: -1,
+  captureHeartbeatPeak: 0,
+  captureEffectSeq: -1,
+  captureCenterX: 0,
+  captureCenterY: 0,
+  captureRadius: 0,
+  capturePhase: "idle",
+  transportElectricPeak: 0,
+}};
+const reducedMotion = {{ matches: false }};
+let motionEnabled = true;
+function captureHeartbeatPeak(progress) {{
+  if (progress <= 0 || progress >= 1) return 0;
+  return Math.pow(Math.sin(progress * Math.PI), 0.78);
+}}
+function drawCaptureHeartbeat(_star, peak) {{ return peak > 0; }}
+{heartbeat_source}
+{heartbeat_work_source}
+const star = {{ x: 500, y: 300, radius: 240 }};
+drawCaptureHeartbeatBurst(scheduledDueAt, star);
+drawCaptureHeartbeatBurst(
+  scheduledDueAt + CAPTURE_HEARTBEAT_DURATION_MS / 2,
+  star,
+);
+drawCaptureHeartbeatBurst(
+  scheduledDueAt + CAPTURE_HEARTBEAT_DURATION_MS,
+  star,
+);
+drawCaptureHeartbeatBurst(
+  scheduledDueAt + CAPTURE_HEARTBEAT_DURATION_MS + 1,
+  star,
+);
+const firstHeartbeatCount = cortexMetrics.captureHeartbeatCount;
+captureHeartbeatBurst.dueAt = scheduledDueAt + 2000;
+captureHeartbeatBurst.recorded = false;
+captureHeartbeatBurst.painted = false;
+const boundaryFrameAt = (
+  captureHeartbeatBurst.dueAt + CAPTURE_HEARTBEAT_DURATION_MS - 0.001
+);
+drawCaptureHeartbeatBurst(boundaryFrameAt, star);
+const schedulerAfterBoundary = (
+  captureHeartbeatBurst.dueAt + CAPTURE_HEARTBEAT_DURATION_MS + 0.001
+);
+const boundaryNeedsFinalFrame = captureHeartbeatHasRenderWork(
+  schedulerAfterBoundary,
+);
+const boundaryRecordedBeforeFinalFrame = captureHeartbeatBurst.recorded;
+drawCaptureHeartbeatBurst(schedulerAfterBoundary, star);
+const boundaryHasWorkAfterFinalFrame = captureHeartbeatHasRenderWork(
+  schedulerAfterBoundary,
+);
+const fullQueue = Array.from({{ length: 18 }}, (_, index) => ({{
+  id: `protected-${{index}}`,
+  phase: "generate",
+  seq: index + 1,
+  startedAt: 0,
+  duration: 8000,
+  retainedUntil: 8000 + index,
+}}));
+fullQueue.push({{
+  id: "first-capture",
   phase: "capture",
   seq: 30,
   startedAt: 1000,
   duration: 3600,
   retainedUntil: 4600,
-});
+}});
 policy.pruneAndBoundTransportEffects(fullQueue, 1000);
-const firstDemoQueue = Array.from({ length: 18 }, (_, index) => ({
-  id: `first-protected-${index}`,
-  phase: "generate",
-  seq: 40 + index,
-  startedAt: 0,
-  duration: 8000,
-  retainedUntil: 8000 + index,
-}));
-firstDemoQueue.push({
-  id: "first-demo",
-  phase: "capture",
-  seq: 60,
-  startedAt: 1000,
-  duration: 3600,
-  retainedUntil: 4600,
-});
-policy.pruneAndBoundTransportEffects(firstDemoQueue, 1000);
-const zeroLimitQueue = [{
+const zeroLimitQueue = [{{
   id: "only-capture",
   phase: "capture",
   seq: 70,
   startedAt: 1000,
   duration: 3600,
   retainedUntil: 4600,
-}];
+}}];
 policy.pruneAndBoundTransportEffects(zeroLimitQueue, 1000, 0);
-process.stdout.write(JSON.stringify({
-  lengthAfterSupersede: effects.length,
-  oldSuperseded: oldLive.captureVisualSuperseded,
-  ingestSuperseded: ingest.captureVisualSuperseded === true,
-  newSuperseded: newDemo.captureVisualSuperseded === true,
-  visibleBeforeExpiry,
-  retainedOldAfterExpiry: afterDemoExpiry.some((effect) => effect.id === "old-live"),
-  visibleAfterExpiry,
-  fullQueueLength: fullQueue.length,
-  fullQueueRetainedOld: fullQueue.some((effect) => effect.id === "full-old-live"),
-  fullQueueRetainedNew: fullQueue.some((effect) => effect.id === "full-new-demo"),
-  firstDemoQueueLength: firstDemoQueue.length,
-  firstDemoRetained: firstDemoQueue.some((effect) => effect.id === "first-demo"),
-  firstProtectedEvicted: !firstDemoQueue.some(
-    (effect) => effect.id === "first-protected-0",
+process.stdout.write(JSON.stringify({{
+  accepted: accepted.map((wave) => wave.seq),
+  waveSnapshot,
+  allWaveProgressAtFinalInput: waveSnapshot.map(
+    (wave) => (19 * 120 - wave.startedAt) / wave.duration,
   ),
+  maximumVisible,
+  firstWaveProgress,
+  scheduledFinalSeq,
+  scheduledFinalCaptureId: captureHeartbeatBurst.finalCaptureId,
+  scheduledDueAt,
+  finalInputQuietUntil: 19 * 120 + CAPTURE_HEARTBEAT_SETTLE_MS,
+  pendingWakeCount,
+  invalidationsAfterStaleWake,
+  invalidationsAfterLiveWake,
+  remainingAfterArrivals,
+  firstHeartbeatCount,
+  heartbeatCount: cortexMetrics.captureHeartbeatCount,
+  heartbeatSeq: cortexMetrics.captureHeartbeatSeq,
+  finalRecorded: captureHeartbeatBurst.recorded,
+  boundaryNeedsFinalFrame,
+  boundaryRecordedBeforeFinalFrame,
+  boundaryHasWorkAfterFinalFrame,
+  fullQueueLength: fullQueue.length,
+  firstCaptureRetained: fullQueue.some((effect) => effect.id === "first-capture"),
+  firstProtectedEvicted: !fullQueue.some((effect) => effect.id === "protected-0"),
   zeroLimitLength: zeroLimitQueue.length,
-}));
+}}));
 """
     completed = subprocess.run(
         ["node", "-e", scenario],
@@ -2450,22 +2539,47 @@ process.stdout.write(JSON.stringify({
     )
     result = json.loads(completed.stdout)
 
-    assert result == {
-        "lengthAfterSupersede": 3,
-        "oldSuperseded": True,
-        "ingestSuperseded": False,
-        "newSuperseded": False,
-        "visibleBeforeExpiry": ["new-demo"],
-        "retainedOldAfterExpiry": True,
-        "visibleAfterExpiry": [],
-        "fullQueueLength": 18,
-        "fullQueueRetainedOld": False,
-        "fullQueueRetainedNew": True,
-        "firstDemoQueueLength": 18,
-        "firstDemoRetained": True,
-        "firstProtectedEvicted": True,
-        "zeroLimitLength": 0,
-    }
+    assert result["accepted"] == [1, 5, 9, 13]
+    assert result["maximumVisible"] == 4
+    assert len(result["waveSnapshot"]) == 4
+    assert result["waveSnapshot"][0]["startedAt"] == 0
+    assert [wave["startedAt"] for wave in result["waveSnapshot"]] == [
+        0,
+        480,
+        960,
+        1440,
+    ]
+    assert result["allWaveProgressAtFinalInput"] == pytest.approx(
+        [2280 / 3600, 1800 / 3600, 1320 / 3600, 840 / 3600]
+    )
+    assert result["waveSnapshot"][-1]["latestCaptureId"] == "cap-19"
+    assert all(
+        later >= earlier
+        for earlier, later in zip(
+            result["firstWaveProgress"],
+            result["firstWaveProgress"][1:],
+            strict=False,
+        )
+    )
+    assert result["scheduledFinalSeq"] == 20
+    assert result["scheduledFinalCaptureId"] == "cap-19"
+    assert result["scheduledDueAt"] == pytest.approx(4252)
+    assert result["scheduledDueAt"] >= result["finalInputQuietUntil"]
+    assert result["pendingWakeCount"] == 1
+    assert result["invalidationsAfterStaleWake"] == 0
+    assert result["invalidationsAfterLiveWake"] == 1
+    assert result["remainingAfterArrivals"] == [3, 2, 1, 0]
+    assert result["firstHeartbeatCount"] == 1
+    assert result["heartbeatCount"] == 2
+    assert result["heartbeatSeq"] == 20
+    assert result["finalRecorded"] is True
+    assert result["boundaryNeedsFinalFrame"] is True
+    assert result["boundaryRecordedBeforeFinalFrame"] is False
+    assert result["boundaryHasWorkAfterFinalFrame"] is False
+    assert result["fullQueueLength"] == 18
+    assert result["firstCaptureRetained"] is True
+    assert result["firstProtectedEvicted"] is True
+    assert result["zeroLimitLength"] == 0
 
 
 def test_cortex_processing_lanes_monitor_has_fixed_independent_routing() -> None:
@@ -3183,6 +3297,34 @@ typedQueue.push([
 const typedState = typedQueue.state();
 const typedEvents = typedQueue.drain(3);
 
+const captureOverflowQueue = runtime.createEventQueue({
+  maximum: 256,
+  protectedEvent: () => true,
+  overflowCoalesceKey: (event) => [
+    event.kind,
+    event.phase,
+    event.channel_key,
+  ].join(":"),
+  mergeOverflow: (previous, event) => ({
+    ...event,
+    coalesced_count:
+      (previous.coalesced_count || 1) + (event.coalesced_count || 1),
+  }),
+});
+captureOverflowQueue.push(Array.from({ length: 300 }, (_, index) => ({
+  family: "transport",
+  kind: "save",
+  phase: "capture",
+  channel_key: "save",
+  capture_id: `cap-${index}`,
+  coalesced_count: 1,
+})));
+const captureOverflowState = captureOverflowQueue.state();
+const captureOverflowEvents = [];
+while (captureOverflowQueue.state().length) {
+  captureOverflowEvents.push(...captureOverflowQueue.drain(32));
+}
+
 const gate = runtime.createGenerationGate();
 const gateDecisions = [
   gate.accept(7, "field_snapshot_corrupt"),
@@ -3206,6 +3348,12 @@ process.stdout.write(JSON.stringify({
   transportAfterVisible,
   typedState,
   typedEvents,
+  captureOverflowState,
+  captureOverflowIds: captureOverflowEvents.map((event) => event.capture_id),
+  captureOverflowMultiplicity: captureOverflowEvents.reduce(
+    (total, event) => total + event.coalesced_count,
+    0,
+  ),
   gateDecisions,
 }));
 """
@@ -3248,6 +3396,18 @@ process.stdout.write(JSON.stringify({
     assert all(event["coalesced_count"] == 2 for event in result["typedEvents"])
     assert result["typedEvents"][0]["capture_id"] == "latest-save"
     assert result["typedEvents"][0]["page_ids"] == ["save-a", "save-b"]
+    assert result["captureOverflowState"] == {
+        "length": 256,
+        "maximum": 256,
+        "overflowCount": 44,
+        "droppedCount": 0,
+        "coalescedCount": 44,
+    }
+    assert result["captureOverflowIds"] == [
+        f"cap-{index}" for index in range(44, 300)
+    ]
+    assert result["captureOverflowIds"][-1] == "cap-299"
+    assert result["captureOverflowMultiplicity"] == 300
     assert result["gateDecisions"] == [True, False, True]
 
 

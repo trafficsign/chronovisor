@@ -793,7 +793,9 @@
                 )
               : -1;
             if (existing >= 0) {
-              queue[existing] = mergeOverflow(queue[existing], event);
+              const merged = mergeOverflow(queue[existing], event);
+              queue.splice(existing, 1);
+              queue.push(merged);
               overflowCount += 1;
               coalescedCount += 1;
               continue;
