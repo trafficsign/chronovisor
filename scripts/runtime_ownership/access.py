@@ -132,6 +132,7 @@ class _AccessAnalysis:
         self.returns: dict[str, FlowValue] = {
             ref: FlowValue() for ref in self.functions
         }
+        self.called_targets: set[str] = set()
         self.class_attrs: dict[str, dict[str, FlowValue]] = {}
         self.class_comprehension_parents: dict[
             str,
@@ -145,7 +146,9 @@ class _AccessAnalysis:
             self._persistent_changed = False
             for module, tree in sorted(self.trees.items()):
                 self._analyze_module(module, tree)
-            for _ref, info in sorted(self.functions.items()):
+            for ref, info in sorted(self.functions.items()):
+                if info.parent_ref is not None and ref not in self.called_targets:
+                    continue
                 self._analyze_function(info)
             if not self._persistent_changed:
                 break
@@ -391,6 +394,12 @@ class _AccessAnalysis:
         self.params[ref][parameter] = previous.merged(value)
         if self.params[ref][parameter] != previous:
             self._persistent_changed = True
+
+    def _mark_called_target(self, target: str) -> None:
+        if target in self.called_targets:
+            return
+        self.called_targets.add(target)
+        self._persistent_changed = True
 
     def record_dynamic_star_import(
         self,

@@ -193,6 +193,8 @@ def test_closure_free_and_nonlocal_names_receive_outer_origin() -> None:
                 "    def nonlocal_writer():\n"
                 "        nonlocal nonlocal_path\n"
                 "        nonlocal_path.write_text('value')\n"
+                "    free_reader()\n"
+                "    nonlocal_writer()\n"
             ),
         }
     )
@@ -256,6 +258,7 @@ def test_global_name_uses_module_binding_not_outer_local() -> None:
                 "    def global_writer():\n"
                 "        global path\n"
                 "        path.write_text('value')\n"
+                "    global_writer()\n"
             ),
         }
     )

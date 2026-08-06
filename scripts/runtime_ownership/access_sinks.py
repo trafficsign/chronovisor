@@ -34,6 +34,8 @@ class AccessEngine(Protocol):
     returns: dict[str, FlowValue]
     facts: AccessFactCollector
 
+    def _mark_called_target(self, target: str) -> None: ...
+
     def _eval(
         self,
         node: ast.expr,
@@ -312,6 +314,8 @@ def evaluate_call(
         if class_target is not None:
             known_class_targets = (class_target,)
             has_unknown = False
+    for target in known_targets:
+        engine._mark_called_target(target)
     if known_targets or known_class_targets:
         returned = FlowValue()
         for target in known_targets:
