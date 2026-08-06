@@ -15,7 +15,12 @@ from .access_model import (
     FunctionInfo,
     _open_mode,
 )
-from .access_resolver import call_name, resolve_call_target, resolve_class_target
+from .access_resolver import (
+    CallResolution,
+    call_name,
+    resolve_call_target,
+    resolve_class_target,
+)
 
 
 class AccessEngine(Protocol):
@@ -129,10 +134,11 @@ def evaluate_call(
             return FlowValue()
         if receiver.has_origins and method in PATH_TRANSFORMS:
             return receiver.bound(f"transform:{method}")
-    target = resolve_call_target(
+    resolution = resolve_call_target(
         node.func,
         module=module,
         class_ref=class_ref,
+        env=env,
         object_env=object_env,
         actor=actor,
         functions=engine.functions,
@@ -145,12 +151,13 @@ def evaluate_call(
     if (
         isinstance(node.func, ast.Name)
         and node.func.id == "open"
+        and not resolution.known_targets
         and (
             "open" in env
             or (actor_info is not None and "open" in actor_info.parameters)
         )
     ):
-        target = ""
+        resolution = CallResolution(has_unknown=True)
     argument_values = [
         engine._eval(
             argument,
@@ -163,9 +170,110 @@ def evaluate_call(
         )
         for argument in node.args
     ]
-    keyword_values = {
-        str(keyword.arg): engine._eval(
-            keyword.value,
+    keyword_values: dict[str, FlowValue] = {}
+    unknown_keyword_unpack = FlowValue()
+    for keyword in node.keywords:
+        if keyword.arg is not None:
+            keyword_values[keyword.arg] = engine._eval(
+                keyword.value,
+                module=module,
+                actor=actor,
+                class_ref=class_ref,
+                env=env,
+                object_env=object_env,
+                call_ordinals=call_ordinals,
+            )
+            continue
+        if isinstance(keyword.value, ast.Dict):
+            literal_keys = all(
+                isinstance(key, ast.Constant) and isinstance(key.value, str)
+                for key in keyword.value.keys
+            )
+            unpacked = FlowValue()
+            for key, value_node in zip(
+                keyword.value.keys,
+                keyword.value.values,
+                strict=True,
+            ):
+                key_value = FlowValue()
+                if key is not None:
+                    key_value = engine._eval(
+                        key,
+                        module=module,
+                        actor=actor,
+                        class_ref=class_ref,
+                        env=env,
+                        object_env=object_env,
+                        call_ordinals=call_ordinals,
+                    )
+                value = engine._eval(
+                    value_node,
+                    module=module,
+                    actor=actor,
+                    class_ref=class_ref,
+                    env=env,
+                    object_env=object_env,
+                    call_ordinals=call_ordinals,
+                )
+                if literal_keys:
+                    assert isinstance(key, ast.Constant)
+                    assert isinstance(key.value, str)
+                    keyword_values[key.value] = value
+                else:
+                    unpacked = unpacked.merged(key_value).merged(value)
+            if not literal_keys:
+                unknown_keyword_unpack = unknown_keyword_unpack.merged(unpacked)
+            continue
+        unknown_keyword_unpack = unknown_keyword_unpack.merged(
+            engine._eval(
+                keyword.value,
+                module=module,
+                actor=actor,
+                class_ref=class_ref,
+                env=env,
+                object_env=object_env,
+                call_ordinals=call_ordinals,
+            )
+        )
+    source_call_name = call_name(node.func)
+    escaped = receiver.copy()
+    for value in [
+        *argument_values,
+        *keyword_values.values(),
+        unknown_keyword_unpack,
+    ]:
+        escaped = escaped.merged(value)
+    known_targets = resolution.known_targets
+    authoritative_value: FlowValue | None = None
+    authoritative_base_value: FlowValue | None = None
+    if isinstance(node.func, ast.Name) and node.func.id in env:
+        authoritative_value = env[node.func.id]
+    elif (
+        isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id in env
+    ):
+        authoritative_base_value = env[node.func.value.id]
+    known_class_targets = (
+        tuple(sorted(authoritative_value.class_targets))
+        if authoritative_value is not None
+        else ()
+    )
+    has_unknown = resolution.has_unknown
+    if authoritative_value is not None:
+        unresolved_call_targets = authoritative_value.call_targets.difference(
+            known_targets
+        )
+        has_unknown = (
+            authoritative_value.unknown_callable
+            or bool(unresolved_call_targets)
+            or not (
+                authoritative_value.call_targets or authoritative_value.class_targets
+            )
+        )
+    elif authoritative_base_value is not None:
+        callee_value = engine._eval(
+            node.func,
             module=module,
             actor=actor,
             class_ref=class_ref,
@@ -173,65 +281,60 @@ def evaluate_call(
             object_env=object_env,
             call_ordinals=call_ordinals,
         )
-        for keyword in node.keywords
-        if keyword.arg is not None
-    }
-    source_call_name = call_name(node.func)
-    if target in engine.functions:
-        info = engine.functions[target]
-        values = list(argument_values)
-        if info.class_ref is not None and not target.endswith(".__init__"):
-            values = [FlowValue(), *values]
-        for index, value in enumerate(values):
-            if index >= len(info.parameters) or not value.has_origins:
-                continue
-            engine._bind_call_parameter(
-                target,
-                info.parameters[index],
-                value,
-                actor=actor,
-                module=module,
-                node=node,
-                ordinal=ordinal,
+        known_targets = tuple(
+            sorted(
+                set(known_targets)
+                | {
+                    target
+                    for target in callee_value.call_targets
+                    if target in engine.functions
+                }
             )
-        for parameter, value in keyword_values.items():
-            if parameter in info.parameters and value.has_origins:
+        )
+        known_class_targets = tuple(sorted(callee_value.class_targets))
+        has_unknown = (
+            authoritative_base_value.unknown_callable
+            or callee_value.unknown_callable
+            or bool(callee_value.call_targets.difference(known_targets))
+            or not (known_targets or known_class_targets)
+        )
+    has_authoritative_binding = (
+        authoritative_value is not None or authoritative_base_value is not None
+    )
+    if not known_targets and not known_class_targets and not has_authoritative_binding:
+        class_target = resolve_class_target(
+            node.func,
+            module=module,
+            classes=engine.classes,
+            imported_symbols=engine.imported_symbols,
+            imported_modules=engine.imported_modules,
+        )
+        if class_target is not None:
+            known_class_targets = (class_target,)
+            has_unknown = False
+    if known_targets or known_class_targets:
+        returned = FlowValue()
+        for target in known_targets:
+            info = engine.functions[target]
+            values = list(argument_values)
+            if info.class_ref is not None and not target.endswith(".__init__"):
+                values = [FlowValue(), *values]
+            for index, value in enumerate(values):
+                if index >= len(info.parameters) or not value.has_origins:
+                    continue
                 engine._bind_call_parameter(
                     target,
-                    parameter,
+                    info.parameters[index],
                     value,
                     actor=actor,
                     module=module,
                     node=node,
                     ordinal=ordinal,
                 )
-        return engine.returns[target].bound(f"result:{target}")
-    class_target = resolve_class_target(
-        node.func,
-        module=module,
-        classes=engine.classes,
-        imported_symbols=engine.imported_symbols,
-        imported_modules=engine.imported_modules,
-    )
-    if class_target is not None:
-        init_ref = f"{class_target}.__init__"
-        if init_ref in engine.functions:
-            info = engine.functions[init_ref]
-            for index, value in enumerate(argument_values, start=1):
-                if index < len(info.parameters) and value.has_origins:
-                    engine._bind_call_parameter(
-                        init_ref,
-                        info.parameters[index],
-                        value,
-                        actor=actor,
-                        module=module,
-                        node=node,
-                        ordinal=ordinal,
-                    )
             for parameter, value in keyword_values.items():
                 if parameter in info.parameters and value.has_origins:
                     engine._bind_call_parameter(
-                        init_ref,
+                        target,
                         parameter,
                         value,
                         actor=actor,
@@ -239,7 +342,50 @@ def evaluate_call(
                         node=node,
                         ordinal=ordinal,
                     )
-        return FlowValue(object_types={class_target})
+            returned = returned.merged(engine.returns[target].bound(f"result:{target}"))
+        for class_target in known_class_targets:
+            init_ref = f"{class_target}.__init__"
+            if init_ref in engine.functions:
+                info = engine.functions[init_ref]
+                for index, value in enumerate(argument_values, start=1):
+                    if index < len(info.parameters) and value.has_origins:
+                        engine._bind_call_parameter(
+                            init_ref,
+                            info.parameters[index],
+                            value,
+                            actor=actor,
+                            module=module,
+                            node=node,
+                            ordinal=ordinal,
+                        )
+                for parameter, value in keyword_values.items():
+                    if parameter in info.parameters and value.has_origins:
+                        engine._bind_call_parameter(
+                            init_ref,
+                            parameter,
+                            value,
+                            actor=actor,
+                            module=module,
+                            node=node,
+                            ordinal=ordinal,
+                        )
+            returned = returned.merged(FlowValue(object_types={class_target}))
+        if has_unknown or unknown_keyword_unpack.has_origins:
+            if escaped.has_origins:
+                engine.facts.record_escape(
+                    escaped,
+                    actor=actor,
+                    operation=f"call:{source_call_name or '<dynamic>'}",
+                    sink=source_call_name or "<dynamic>",
+                    reason="registered_locator_to_unknown_callee",
+                    path=engine.paths[module],
+                    line=int(node.lineno),
+                    ordinal=ordinal,
+                )
+            if has_unknown:
+                returned = returned.merged(FlowValue(unknown_callable=True))
+        return returned
+    target = resolution.fallback_target
     if _is_builtin_open(
         engine,
         node,
@@ -248,6 +394,17 @@ def evaluate_call(
         module=module,
         env=env,
     ):
+        if unknown_keyword_unpack.has_origins:
+            engine.facts.record_escape(
+                unknown_keyword_unpack,
+                actor=actor,
+                operation=f"call:{source_call_name or '<dynamic>'}",
+                sink=target or source_call_name or "<dynamic>",
+                reason="registered_locator_to_unknown_callee",
+                path=engine.paths[module],
+                line=int(node.lineno),
+                ordinal=ordinal,
+            )
         origin = (
             argument_values[0]
             if argument_values
@@ -277,9 +434,6 @@ def evaluate_call(
                 ordinal=ordinal,
             )
         return FlowValue()
-    escaped = receiver.copy()
-    for value in [*argument_values, *keyword_values.values()]:
-        escaped = escaped.merged(value)
     if escaped.has_origins:
         engine.facts.record_escape(
             escaped,
@@ -291,7 +445,7 @@ def evaluate_call(
             line=int(node.lineno),
             ordinal=ordinal,
         )
-    return FlowValue()
+    return FlowValue(unknown_callable=True)
 
 
 def _is_builtin_open(

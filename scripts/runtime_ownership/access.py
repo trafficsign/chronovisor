@@ -174,23 +174,10 @@ class _AccessAnalysis:
 
     def _analyze_function(self, info: FunctionInfo) -> bool:
         module_env = self.module_runtime_envs[info.module]
-        module_functions = {
-            candidate.node.name
-            for candidate in self.functions.values()
-            if candidate.module == info.module
-            and candidate.parent_ref is None
-            and candidate.class_ref is None
-        }
         env = {
             name: value.copy()
             for name, value in module_env.items()
             if name not in info.local_names or name in info.global_names
-            if not (
-                name in module_functions
-                and not value.has_origins
-                and not value.object_types
-                and not value.module_refs
-            )
         }
         for name in info.local_names:
             env[name] = FlowValue()

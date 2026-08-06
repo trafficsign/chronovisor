@@ -170,6 +170,8 @@ def bind_import_statement(
             and child_module in engine.known_modules
         ):
             value = FlowValue(module_refs={child_module})
+        elif target_module not in engine.known_modules:
+            value = FlowValue(unknown_callable=True)
         _strong_bind(
             env,
             object_env,
@@ -497,11 +499,31 @@ def _evaluate_module_exports(
                         deleted_names.add(name)
                         if name == "__all__":
                             star_policy = StarExportPolicy.public()
-            elif isinstance(
-                statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
-            ):
-                env.pop(statement.name, None)
-                object_env.pop(statement.name, None)
+            elif isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                _strong_bind(
+                    env,
+                    object_env,
+                    statement.name,
+                    FlowValue(
+                        call_targets={f"{module}:{statement.name}"},
+                        unknown_callable=bool(statement.decorator_list),
+                    ),
+                    step=f"definition:{module}:<module>:{statement.name}",
+                )
+                definite_names.add(statement.name)
+            elif isinstance(statement, ast.ClassDef):
+                class_ref = f"{module}:{statement.name}"
+                _strong_bind(
+                    env,
+                    object_env,
+                    statement.name,
+                    FlowValue(
+                        object_types={class_ref},
+                        class_targets={class_ref},
+                        unknown_callable=bool(statement.decorator_list),
+                    ),
+                    step=f"definition:{module}:<module>:{statement.name}",
+                )
                 definite_names.add(statement.name)
         return env, object_env, star_policy, definite_names, deleted_names
 
