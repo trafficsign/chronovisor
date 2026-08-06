@@ -104,3 +104,33 @@ def test_certificate_ledger_is_private_and_omits_raw_query(
     assert payload["query_sha256"] == "query-hash"
     assert "query" not in payload
     assert stat.S_IMODE(ledger.stat().st_mode) == 0o600
+
+
+def test_default_certificate_ledger_uses_its_exact_sidecar(
+    tmp_path: Path, monkeypatch
+) -> None:
+    ledger = tmp_path / "evidence-certificate-ledger.jsonl"
+    lock = tmp_path / "evidence-certificate-ledger.jsonl.lock"
+    monkeypatch.setattr(evidence_certificate, "CERTIFICATE_LEDGER", ledger)
+    monkeypatch.setattr(evidence_certificate, "CERTIFICATE_LEDGER_LOCK", lock)
+    certificate = EvidenceCertificate(
+        certificate_id="cert-lock",
+        page_id="page-a",
+        outcome="pass",
+        confidence=0.9,
+        label_quality="strong",
+        supporting_span="bounded evidence",
+        source_line=4,
+        query_sha256="query-hash",
+        content_sha256="content-hash",
+        policy_sha256="policy-hash",
+        model_revision="bge-revision",
+        features={"reranker_raw": 2.0},
+        reasons=("independent_signals_agree",),
+        created_at="2026-07-30T22:00:00",
+    )
+
+    evidence_certificate.append_certificates([certificate], path=ledger)
+
+    assert lock.exists()
+    assert not (tmp_path / "evidence-certificate-ledger.lock").exists()

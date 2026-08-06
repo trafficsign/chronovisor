@@ -78,20 +78,20 @@ def append_page_claims(page_ids: list[str], *, source_raw: str = "", op: str = "
             "written": 0,
             "skipped": list(page_ids),
         }
-    written = 0
-    skipped: list[str] = []
+    skipped, pending = list[str](), list[dict[str, Any]]()
     for page_id in page_ids:
         rows = page_claims(page_id, source_raw=source_raw, op=op)
-        if not rows:
+        if rows:
+            pending.extend(rows)
+        else:
             skipped.append(page_id)
-            continue
-        for claim in rows:
-            _append_jsonl(CLAIMS_FILE, claim)
-            written += 1
+    if pending:
+        with _claims_ledger_lock(CLAIMS_FILE):
+            _append_claim_rows(CLAIMS_FILE, pending)
     return {
         "status": "ok",
         "claims_file": str(CLAIMS_FILE),
-        "written": written,
+        "written": len(pending),
         "skipped": skipped,
     }
 
@@ -477,7 +477,9 @@ def _is_placeholder_claim(row: dict[str, Any]) -> bool:
     return find_page(source_page) is None
 
 
-def sanitize_claim_ledger(*, path: Path = CLAIMS_FILE, write: bool = True) -> dict[str, Any]:
+def _sanitize_claim_ledger_unlocked(
+    *, path: Path = CLAIMS_FILE, write: bool = True
+) -> dict[str, Any]:
     try:
         lines = [line for line in path.read_text(encoding="utf-8").split("\n") if line.strip()]
     except OSError:
@@ -499,6 +501,40 @@ def sanitize_claim_ledger(*, path: Path = CLAIMS_FILE, write: bool = True) -> di
         payload = "".join(json.dumps(row, ensure_ascii=False, sort_keys=True, default=str) + "\n" for row in kept)
         path.write_text(payload, encoding="utf-8")
     return {"status": "ok", "path": str(path), "kept": len(kept), "dropped": dropped, "write": write}
+
+
+def sanitize_claim_ledger(
+    *, path: Path = CLAIMS_FILE, write: bool = True
+) -> dict[str, Any]:
+    if not write:
+        return _sanitize_claim_ledger_unlocked(path=path, write=False)
+    with _claims_ledger_lock(path):
+        return _sanitize_claim_ledger_unlocked(path=path, write=True)
+
+
+def _claims_ledger_lock(path: Path):
+    import contextlib
+    import fcntl
+    import os
+
+    @contextlib.contextmanager
+    def locked():
+        lock_path = path.with_suffix(path.suffix + ".lock")
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with lock_path.open("a+", encoding="utf-8") as handle:
+            os.chmod(lock_path, 0o600)
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+    return locked()
+
+
+def _append_claim_rows(path: Path, rows: list[dict[str, Any]]) -> None:
+    for row in rows:
+        _append_jsonl(path, row)
 
 
 def main(argv: list[str] | None = None) -> int:

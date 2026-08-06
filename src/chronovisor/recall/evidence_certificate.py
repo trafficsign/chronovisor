@@ -17,7 +17,7 @@ from chronovisor.core.store import CHRONOVISOR_ROOT, find_page
 from chronovisor.search.search_types import tokenize
 
 CERTIFICATE_LEDGER = CHRONOVISOR_ROOT / "recall" / "evidence-certificate-ledger.jsonl"
-CERTIFICATE_LEDGER_LOCK = CERTIFICATE_LEDGER.with_suffix(".lock")
+CERTIFICATE_LEDGER_LOCK = CERTIFICATE_LEDGER.parent / "evidence-certificate-ledger.jsonl.lock"
 
 
 @dataclass(frozen=True)
@@ -328,7 +328,11 @@ def append_certificates(
     if not certificates:
         return 0
     path.parent.mkdir(parents=True, exist_ok=True)
-    lock_path = path.with_suffix(path.suffix + ".lock")
+    lock_path = (
+        CERTIFICATE_LEDGER_LOCK
+        if path == CERTIFICATE_LEDGER
+        else path.with_suffix(path.suffix + ".lock")
+    )
     with exclusive_text_file_lock(lock_path):
         with path.open("a", encoding="utf-8") as handle:
             for certificate in certificates:

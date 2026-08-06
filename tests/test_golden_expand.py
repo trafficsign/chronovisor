@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
 from pathlib import Path
 
 from chronovisor.ops import golden_expand
@@ -87,3 +88,37 @@ def test_legacy_reviewed_rq_is_re_preregistered_and_dry_run_never_refreshes(
     row = json.loads(candidate.read_text(encoding="utf-8"))
     assert row["reviewed"] is False
     assert row["candidate_sha256"]
+
+
+def test_expand_rereads_candidate_queue_after_acquiring_lock(
+    tmp_path: Path, monkeypatch
+) -> None:
+    candidate_file = tmp_path / "search-label-queue.jsonl"
+    candidate = {
+        "query": "Where is the target?",
+        "expected_pages": ["target"],
+        "negative": False,
+    }
+    monkeypatch.setattr(
+        golden_expand,
+        "rows_from_recall_questions",
+        lambda **_kwargs: [candidate],
+    )
+    real_lock = golden_expand._search_label_queue_lock
+
+    @contextmanager
+    def competing_writer(path: Path):
+        path.write_text(json.dumps(candidate) + "\n", encoding="utf-8")
+        with real_lock(path):
+            yield
+
+    monkeypatch.setattr(golden_expand, "_search_label_queue_lock", competing_writer)
+
+    payload = golden_expand.expand_golden_from_recall_questions(
+        golden_file=tmp_path / "search-golden.jsonl",
+        candidate_file=candidate_file,
+        write=True,
+    )
+
+    assert payload["added"] == 0
+    assert candidate_file.read_text(encoding="utf-8").count("\n") == 1

@@ -170,6 +170,20 @@ def test_active_pointer_uses_compare_and_swap_and_rolls_back(tmp_path: Path) -> 
     assert read_active(root=tmp_path)["generation_id"] == first.generation_id
 
 
+def test_default_semantic_root_uses_declared_activation_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest = _build(tmp_path)
+    declared_lock = tmp_path / "declared-activation.lock"
+    monkeypatch.setattr(semantic_index, "SEMANTIC_ROOT", tmp_path)
+    monkeypatch.setattr(semantic_index, "ACTIVATION_LOCK", declared_lock)
+
+    activate_generation(manifest.generation_id, root=tmp_path)
+
+    assert declared_lock.exists()
+    assert not (tmp_path / "activation.lock").exists()
+
+
 def test_delta_shadows_all_base_documents_for_updated_page(tmp_path: Path) -> None:
     manifest = _build(tmp_path)
     activate_generation(manifest.generation_id, root=tmp_path)

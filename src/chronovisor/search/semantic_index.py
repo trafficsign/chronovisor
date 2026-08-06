@@ -614,7 +614,7 @@ def activate_generation(
 ) -> dict[str, Any]:
     manifest = validate_generation(generation_id, root=root)
     _secure_directory(root)
-    lock_path = root / "activation.lock"
+    lock_path = ACTIVATION_LOCK if root == SEMANTIC_ROOT else root / "activation.lock"
     with lock_path.open("a+") as handle:
         os.chmod(lock_path, 0o600)
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX)

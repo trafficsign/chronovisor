@@ -1748,7 +1748,7 @@ def build_label_queue(
                     "preserved": len(existing_rows),
                     "dry_run": False,
                 }
-        with decision_authority_lock():
+        with decision_authority_lock(), _search_label_queue_lock(output_file):
             try:
                 current_output_preimage = output_file.read_bytes()
             except FileNotFoundError:
@@ -2880,7 +2880,7 @@ def review_label_queue_with_frontier(
         # Keep the final authority stable through the semantic postimage and
         # its queue acknowledgement. A review whose epoch changed after the
         # model returned is reopened and cannot mutate either durable file.
-        with decision_authority_lock():
+        with decision_authority_lock(), _search_label_queue_lock(queue_file):
             if (
                 optional_bytes(queue_file) != queue_preimage
                 or optional_bytes(golden_file) != golden_preimage
@@ -4210,6 +4210,21 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-negative-hit-rate-at-20", type=float, default=1.0)
     parser.add_argument("--json", action="store_true")
     return parser
+
+
+@contextlib.contextmanager
+def _search_label_queue_lock(path: Path):
+    import fcntl
+
+    lock_path = path.with_suffix(path.suffix + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+", encoding="utf-8") as handle:
+        os.chmod(lock_path, 0o600)
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 def main(argv: list[str] | None = None) -> int:

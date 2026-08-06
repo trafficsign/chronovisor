@@ -146,29 +146,39 @@ def expand_golden_from_recall_questions(
     write: bool = True,
 ) -> dict[str, Any]:
     existing = _read_jsonl(golden_file)
-    candidates_existing = _read_jsonl(candidate_file)
-    # Legacy reviewed RQ rows were never preregistered and must not suppress
-    # the new machine-authority candidate.  Only the candidate queue is a
-    # deduplication surface for newly generated RQ projections.
-    existing_keys = {_key(row) for row in candidates_existing}
     candidates = rows_from_recall_questions(
         limit=limit,
         include_reference=include_reference,
         refresh_index=write,
     )
-    additions: list[dict[str, Any]] = []
-    seen = set(existing_keys)
-    for row in candidates:
-        key = _key(row)
-        if key in seen:
-            continue
-        seen.add(key)
-        additions.append(row)
-    if write and additions:
-        candidate_file.parent.mkdir(parents=True, exist_ok=True)
-        with candidate_file.open("a", encoding="utf-8") as f:
-            for row in additions:
-                f.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
+
+    def additions_for(current: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        # Only the queue suppresses duplicate machine-authority candidates.
+        seen = {_key(row) for row in current}
+        additions: list[dict[str, Any]] = []
+        for row in candidates:
+            key = _key(row)
+            if key in seen:
+                continue
+            seen.add(key)
+            additions.append(row)
+        return additions
+
+    candidates_existing = _read_jsonl(candidate_file)
+    additions = additions_for(candidates_existing)
+    if write:
+        # Candidate generation stays outside the lock. Re-read under the shared
+        # sidecar so dedupe and append are one cross-process transaction.
+        with _search_label_queue_lock(candidate_file):
+            candidates_existing = _read_jsonl(candidate_file)
+            additions = additions_for(candidates_existing)
+            if additions:
+                candidate_file.parent.mkdir(parents=True, exist_ok=True)
+                with candidate_file.open("a", encoding="utf-8") as f:
+                    for row in additions:
+                        f.write(
+                            json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n"
+                        )
     return {
         "status": "ok",
         "path": str(candidate_file),
@@ -177,6 +187,26 @@ def expand_golden_from_recall_questions(
         "added": len(additions),
         "write": write,
     }
+
+
+def _search_label_queue_lock(path: Path):
+    import contextlib
+    import fcntl
+    import os
+
+    @contextlib.contextmanager
+    def locked():
+        lock_path = path.with_suffix(path.suffix + ".lock")
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with lock_path.open("a+", encoding="utf-8") as handle:
+            os.chmod(lock_path, 0o600)
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+    return locked()
 
 
 def main(argv: list[str] | None = None) -> int:

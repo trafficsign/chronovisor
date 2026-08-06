@@ -1,13 +1,20 @@
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
+import multiprocessing
+import os
+import stat
+from contextlib import contextmanager
+from pathlib import Path
 
 import pytest
 
 from chronovisor.core.runtime_config import RerankerConfig
 from chronovisor.decision.decision_router import canonical_agreement_signature
 from chronovisor.decision.decision_schema_manifest import production_decision_schemas
+from chronovisor.ops import golden_expand
 from chronovisor.ops.convergence import CycleBudget
 from chronovisor.recall.feedback_ledger import feedback_row_sha256
 from chronovisor.search import search_eval
@@ -31,6 +38,24 @@ def write_jsonl(path, rows) -> None:
         "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows),
         encoding="utf-8",
     )
+
+
+def _wait_for_search_label_lock(path_value, ready, start, attempted, acquired) -> None:
+    ready.set()
+    if not start.wait(5):
+        return
+    attempted.set()
+    with search_eval._search_label_queue_lock(Path(path_value)):
+        acquired.set()
+
+
+def _assert_lock_is_available(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+    finally:
+        os.close(descriptor)
 
 
 def authority(lane: str, marker: str = "a") -> dict:
@@ -620,6 +645,145 @@ def test_build_label_queue_does_not_touch_golden(tmp_path) -> None:
     assert golden_file.read_text(encoding="utf-8") == ""
 
 
+def test_build_label_queue_uses_shared_jsonl_sidecar(tmp_path, monkeypatch) -> None:
+    feedback_file = tmp_path / "feedback.jsonl"
+    log_file = tmp_path / "recall-log.jsonl"
+    output_file = tmp_path / "label-queue.jsonl"
+    write_jsonl(
+        feedback_file,
+        [
+            {
+                "kind": "missed_candidate",
+                "prompt": "query",
+                "expected_pages": ["target"],
+                "ref": "r1",
+            }
+        ],
+    )
+    write_jsonl(log_file, [])
+    calls = []
+    real_lock = search_eval._search_label_queue_lock
+
+    @contextmanager
+    def recording_lock(path):
+        calls.append(path)
+        with real_lock(path):
+            yield
+
+    monkeypatch.setattr(search_eval, "_search_label_queue_lock", recording_lock)
+
+    search_eval.build_label_queue(
+        feedback_file=feedback_file,
+        log_file=log_file,
+        output_file=output_file,
+    )
+
+    lock = output_file.with_suffix(".jsonl.lock")
+    assert calls == [output_file]
+    assert lock.exists()
+    assert stat.S_IMODE(os.stat(lock).st_mode) == 0o600
+
+
+def test_build_label_queue_defers_concurrent_append_and_nests_locks(
+    tmp_path, monkeypatch
+) -> None:
+    feedback_file = tmp_path / "feedback.jsonl"
+    log_file = tmp_path / "recall-log.jsonl"
+    output_file = tmp_path / "label-queue.jsonl"
+    write_jsonl(
+        feedback_file,
+        [
+            {
+                "kind": "missed_candidate",
+                "prompt": "query",
+                "expected_pages": ["target"],
+                "ref": "r1",
+            }
+        ],
+    )
+    write_jsonl(log_file, [])
+    competitor = {
+        "query": "competitor",
+        "expected_pages": ["competitor-page"],
+        "queue_status": "pending_frontier_review",
+    }
+    original_build = search_eval.build_candidates
+    real_queue_lock = search_eval._search_label_queue_lock
+    order: list[str] = []
+
+    def competing_build(**kwargs):
+        lock = output_file.with_suffix(".jsonl.lock")
+        _assert_lock_is_available(lock)
+        with golden_expand._search_label_queue_lock(output_file):
+            write_jsonl(output_file, [competitor])
+        return original_build(**kwargs)
+
+    @contextmanager
+    def authority_lock():
+        order.append("authority enter")
+        try:
+            yield
+        finally:
+            order.append("authority exit")
+
+    @contextmanager
+    def queue_lock(path):
+        order.append("queue enter")
+        try:
+            with real_queue_lock(path):
+                yield
+        finally:
+            order.append("queue exit")
+
+    monkeypatch.setattr(search_eval, "build_candidates", competing_build)
+    monkeypatch.setattr(search_eval, "decision_authority_lock", authority_lock)
+    monkeypatch.setattr(search_eval, "_search_label_queue_lock", queue_lock)
+
+    payload = search_eval.build_label_queue(
+        feedback_file=feedback_file,
+        log_file=log_file,
+        output_file=output_file,
+    )
+
+    assert payload["status"] == "concurrent_update_deferred"
+    assert [row["query"] for row in search_eval.read_jsonl(output_file)] == [
+        "competitor"
+    ]
+    assert order == [
+        "authority enter",
+        "queue enter",
+        "queue exit",
+        "authority exit",
+    ]
+
+
+def test_search_label_sidecar_blocks_across_processes(tmp_path) -> None:
+    queue_file = tmp_path / "label-queue.jsonl"
+    context = multiprocessing.get_context("spawn")
+    ready = context.Event()
+    start = context.Event()
+    attempted = context.Event()
+    acquired = context.Event()
+    process = context.Process(
+        target=_wait_for_search_label_lock,
+        args=(str(queue_file), ready, start, attempted, acquired),
+    )
+    process.start()
+    try:
+        assert ready.wait(5)
+        with golden_expand._search_label_queue_lock(queue_file):
+            start.set()
+            assert attempted.wait(5)
+            assert not acquired.wait(0.2)
+        assert acquired.wait(5)
+        process.join(5)
+        assert process.exitcode == 0
+    finally:
+        if process.is_alive():
+            process.terminate()
+            process.join(5)
+
+
 def test_frontier_review_promotes_trusted_label_queue_rows(tmp_path) -> None:
     queue_file = tmp_path / "label-queue.jsonl"
     golden_file = tmp_path / "search-golden.jsonl"
@@ -680,6 +844,86 @@ def test_frontier_review_promotes_trusted_label_queue_rows(tmp_path) -> None:
     assert golden_rows[0]["expected_pages"] == ["target"]
     assert queue_rows[0]["decision_artifact"]["schema_version"] == 2
     assert golden_rows[0]["decision_artifact"] == queue_rows[0]["decision_artifact"]
+
+
+def test_frontier_review_reopens_when_callback_appends_to_queue(
+    tmp_path, monkeypatch
+) -> None:
+    queue_file = tmp_path / "label-queue.jsonl"
+    golden_file = tmp_path / "search-golden.jsonl"
+    initial = {
+        "query": "query",
+        "expected_pages": ["target"],
+        "negative_pages": [],
+        "stale_pages": [],
+        "queue_status": "pending_frontier_review",
+        "promoted_to_golden": False,
+    }
+    competitor = {
+        "query": "competitor",
+        "expected_pages": ["competitor-page"],
+        "negative_pages": [],
+        "stale_pages": [],
+        "queue_status": "pending_frontier_review",
+        "promoted_to_golden": False,
+    }
+    write_jsonl(queue_file, [initial])
+    golden_file.write_bytes(b"")
+    real_queue_lock = search_eval._search_label_queue_lock
+    order: list[str] = []
+
+    def reviewer(_row):
+        _assert_lock_is_available(queue_file.with_suffix(".jsonl.lock"))
+        with golden_expand._search_label_queue_lock(queue_file):
+            write_jsonl(queue_file, [initial, competitor])
+        return {
+            "decision": "approved",
+            "confidence": 0.95,
+            "expected_pages": ["target"],
+            "negative_pages": [],
+            "stale_pages": [],
+            "summary": "trusted",
+            "notes": None,
+        }
+
+    @contextmanager
+    def authority_lock():
+        order.append("authority enter")
+        try:
+            yield
+        finally:
+            order.append("authority exit")
+
+    @contextmanager
+    def queue_lock(path):
+        order.append("queue enter")
+        try:
+            with real_queue_lock(path):
+                yield
+        finally:
+            order.append("queue exit")
+
+    monkeypatch.setattr(search_eval, "decision_authority_lock", authority_lock)
+    monkeypatch.setattr(search_eval, "_search_label_queue_lock", queue_lock)
+
+    payload = search_eval.review_label_queue_with_frontier(
+        queue_file=queue_file,
+        golden_file=golden_file,
+        reviewer=reviewer,
+    )
+
+    assert payload["status"] == "concurrent_update_deferred"
+    assert [row["query"] for row in search_eval.read_jsonl(queue_file)] == [
+        "query",
+        "competitor",
+    ]
+    assert golden_file.read_bytes() == b""
+    assert order[-4:] == [
+        "authority enter",
+        "queue enter",
+        "queue exit",
+        "authority exit",
+    ]
 
 
 def test_frontier_review_commits_golden_before_queue_ack(tmp_path, monkeypatch) -> None:
