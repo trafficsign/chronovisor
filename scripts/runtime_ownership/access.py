@@ -96,12 +96,16 @@ class _AccessAnalysis:
             self.origin_symbols[origin_key] = FlowValue(
                 {resource_id: frozenset({(f"origin:{module}:{symbol}",)})}
             )
-        self.module_exports = build_module_exports(
+        export_table = build_module_exports(
             self.trees,
             package_modules=self.package_modules,
             known_modules=self.known_modules,
             origin_symbols=self.origin_symbols,
         )
+        self.module_exports = export_table.bindings
+        self.module_star_exports = export_table.star_bindings
+        self.module_star_definite = export_table.star_definite
+        self.module_star_policies = export_table.star_policies
         self.module_runtime_envs: dict[str, dict[str, FlowValue]] = {
             module: {} for module in sorted(self.trees)
         }
@@ -400,6 +404,28 @@ class _AccessAnalysis:
         self.params[ref][parameter] = previous.merged(value)
         if self.params[ref][parameter] != previous:
             self._persistent_changed = True
+
+    def record_dynamic_star_import(
+        self,
+        statement: ast.ImportFrom,
+        *,
+        module: str,
+        actor: str,
+        target_module: str,
+        value: FlowValue,
+    ) -> None:
+        if not value.has_origins:
+            return
+        self.facts.record_escape(
+            value,
+            actor=actor,
+            operation=f"import:*:{target_module}",
+            sink=f"module:{target_module}",
+            reason="dynamic_star_import",
+            path=self.paths[module],
+            line=int(statement.lineno),
+            ordinal=(int(statement.lineno) << 20) + int(statement.col_offset) + 1,
+        )
 
     def _bind_call_parameter(
         self,
