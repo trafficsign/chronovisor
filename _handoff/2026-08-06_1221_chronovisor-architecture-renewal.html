@@ -1,0 +1,331 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>Plan</title>
+<style>
+:root{
+  --fg:#1a1a1a; --muted:#666; --bg:#fafaf7; --accent:#2c5aa0;
+  --done:#888; --warn:#c0392b; --ok:#2e7d32; --rule:#e0e0d8;
+  --code-bg:#eee;
+}
+*{box-sizing:border-box}
+body{
+  font-family:-apple-system,'Hiragino Kaku Gothic ProN','Yu Gothic',sans-serif;
+  color:var(--fg); background:var(--bg);
+  max-width:880px; margin:2rem auto; padding:0 1.5rem;
+  line-height:1.7; font-size:15px;
+}
+header{
+  border-bottom:2px solid var(--rule); padding-bottom:1rem; margin-bottom:1.5rem;
+  position:sticky; top:0; background:var(--bg); z-index:10;
+}
+h1{font-size:1.6rem;margin:0 0 0.5rem 0}
+h2{font-size:1.15rem;margin:1.75rem 0 0.5rem 0;padding-bottom:0.25rem;border-bottom:1px solid var(--rule)}
+.meta-bar{display:flex;gap:1rem;font-size:0.85rem;color:var(--muted);flex-wrap:wrap;align-items:center}
+.meta-bar code{background:transparent;color:var(--muted)}
+.badge{
+  display:inline-block;padding:0.15rem 0.7rem;border-radius:1rem;
+  background:var(--accent);color:#fff;font-weight:600;font-size:0.8rem;
+  letter-spacing:0.02em;
+}
+.badge[data-state="ready"]{background:#16a085}
+.badge[data-state="running"]{background:#e67e22}
+.badge[data-state="done"]{background:var(--ok)}
+.badge[data-state="blocked"]{background:var(--warn)}
+section{margin:0 0 0.5rem 0}
+ul,ol{padding-left:1.5rem;margin:0.5rem 0}
+li{margin:0.25rem 0}
+ol.checklist{list-style:none;padding-left:0}
+ol.checklist > li{display:flex;align-items:flex-start;gap:0.6rem;padding:0.35rem 0}
+ol.checklist > li > input[type=checkbox]{margin-top:0.4rem;flex-shrink:0}
+ol.checklist > li > input[type=checkbox]:checked + span{color:var(--done);text-decoration:line-through}
+section.rules{background:#f3f1eb;padding:0.5rem 1rem;border-radius:6px;font-size:0.9rem;border-left:3px solid var(--accent)}
+section.rules h2{border:none;margin-top:0.5rem}
+section.blockers ul{color:var(--warn)}
+ol.log{list-style:none;padding-left:0;font-family:'SF Mono',Menlo,monospace;font-size:0.85rem}
+ol.log li{padding:0.3rem 0;border-bottom:1px dashed var(--rule);display:flex;gap:0.75rem}
+ol.log time{color:var(--muted);flex-shrink:0;min-width:9.5rem}
+code{background:var(--code-bg);padding:0.1rem 0.35rem;border-radius:3px;font-size:0.9em;font-family:'SF Mono',Menlo,monospace}
+table{width:100%;border-collapse:collapse;margin:0.75rem 0 1rem;font-size:0.92rem}
+th,td{padding:0.45rem 0.55rem;border:1px solid var(--rule);vertical-align:top;text-align:left}
+th{background:#f3f1eb}
+pre{background:#eee;padding:0.8rem 1rem;border-radius:6px;overflow:auto;line-height:1.45;font-size:0.84rem}
+.callout{background:#f3f1eb;border-left:3px solid var(--accent);padding:0.65rem 0.9rem;border-radius:4px;margin:0.75rem 0}
+.warn{border-left-color:var(--warn)}
+.checklist span{width:100%}
+.checklist span > ul{margin-top:0.35rem}
+.exit{color:var(--muted);font-size:0.92rem}
+@media print{
+  body{font-size:11pt;max-width:none;margin:0;padding:1rem}
+  header{position:static}
+}
+</style>
+</head>
+<body>
+<script type="application/json" id="plan-meta">
+{"task_id":"plan_c071e61508af439e9aff770445c2dfdd","created_at":"2026-08-06T12:21:04+09:00","状態":"draft","slug":"chronovisor-architecture-renewal"}
+</script>
+
+<header>
+<h1>Plan: <span id="plan-title">Chronovisor 全体アーキテクチャ刷新（Campaign O–V）</span></h1>
+<div class="meta-bar">
+<span class="badge" data-bind="状態" data-state="draft">draft</span>
+<span><code data-bind="task_id">plan_xxx</code></span>
+<span data-bind="created_at">1970-01-01T00:00:00+09:00</span>
+</div>
+</header>
+
+<section data-section="目的">
+<h2>目的</h2>
+<ul>
+<li>Chronovisor 全体を、既存の機能別フォルダ分けから、依存方向・runtime所有権・永続化契約まで強制できるアーキテクチャへ段階的に移行する。</li>
+<li>UserPromptSubmit の Recall、Stop の lossless save、background convergence、exceptional repair の4経路を、外部挙動と安全境界を維持したまま明確な use case／port／adapter に分離する。</li>
+<li>Dashboard/Cortex を含む観測面も同じ原則で分割し、リアルタイム性・視覚品質・イベントの意味を落とさず、変更箇所を局所化する。</li>
+<li>過去 Campaign A–N の成果を土台にし、再配置済みモジュールや廃止済みshimを作り直さない。今回の中心は、その後に増えた循環依存と責務集中を閉じることに置く。</li>
+</ul>
+
+<div class="callout">
+<strong>完了時の要約:</strong> production package 間の多重SCCをゼロにし、productionから<code>lab</code>への依存をゼロにし、runtime artifactごとのwriter／lock／schema ownerを一意にする。全品質ゲート、隔離全pytest、GitHub-backed本番のlive確認まで通す。
+</div>
+</section>
+
+<section data-section="やってはいけないこと">
+<h2>やってはいけないこと（必須）</h2>
+<ul>
+<li>一括rename・一括移動・全層同時切替のbig-bang refactorをしない。各Campaignは単独でgreen・rollback可能にする。</li>
+<li>外部API、51 console script名、durable worker module名、CLI引数、MCP schema、HTTP/SSE/WebSocket payloadを、明示的なversioned migrationなしに変えない。</li>
+<li><code>~/.chronovisor</code>のpath、保存byte列、cursor、receipt、queue順序、artifact identity、authority hash、lock/CAS/fsync/rollback順序を「内部整理」として暗黙変更しない。</li>
+<li><code>runtime/</code>を再生成可能なcacheとして一括削除・移動しない。projectionと、durable queue・authority artifact・receipt・identity registryをowner registryで区別する。</li>
+<li>ingest、background jobs、semantic SQLite lease、page mutation、decision authority、Ollama、accelerator、sleep/convergenceのlockを一つの汎用lockへ統合しない。</li>
+<li>Recallのdeadline・fail-open、mutation/authorityのfail-closed、model budget、single-flight、idempotencyを弱めない。</li>
+<li>大型関数capの引き上げ、lint除外、mypy ignore、テスト削除、goldenの無条件更新で見かけ上greenにしない。</li>
+<li>同名・類似helperを、timezone、invalid-row handling、locking、fsync、byte format、例外方針の一致を証明せず統合しない。</li>
+<li>静的zero-inboundだけでmoduleやscriptを削除しない。entry point、<code>python -m</code>、LaunchAgent、durable job string、docs、runtime archiveを照合する。</li>
+<li>本番<code>~/.chronovisor</code>をpytestのrootに使わない。隔離rootと持続的JUnitを必須にする。</li>
+<li>Cortexのノード数・光量・動き・イベント頻度を落として性能を作らない。UI redesignや新機能をrefactor commitへ混ぜない。</li>
+<li>既存の未追跡<code>_handoff/2026-06-11_0042_recall-redesign.md</code>と<code>logs/</code>を編集・stage・削除しない。</li>
+<li>local checkoutだけを本番扱いしない。push済みcommit、runtime archive、running process、health、live behaviorが一致するまで完了にしない。</li>
+</ul>
+</section>
+
+<section data-section="前提・仮定">
+<h2>前提・仮定</h2>
+<ul>
+<li>計画作成時点の基準は<code>a17b870</code>。Campaign A–Nはcommit ancestryと完了handoff上で完了済み。</li>
+<li>前回debt closure後の88 commitsで、対象140 filesに約62,344 additions / 1,100 deletionsが入り、現在はPython 281 modules・200,634行、frontend 16,979行、pytest collection 3,107 items。</li>
+<li>現行13 packagesのうち<code>core</code>以外の12 production/lab packagesが一つの循環依存成分。Import Linterは<code>core</code>の外向き依存禁止1契約だけを検証し、後発の<code>knowledge_graph</code>はdomain inventoryにも未登録。</li>
+<li>現在の基準線はgreenではない。RuffはF821が28件、strict mypyは1件、大型関数policyは既存cap超過2件と未登録300行超4件を含む。大規模移動より先に直す。</li>
+<li>最大hotspotは<code>recall/recall_answer_eval.py</code> 9,093行、<code>recall/content_correction.py</code> 5,988行、<code>ops/dashboard.py</code> 5,833行、<code>ingest/ingest.py</code> 5,397行、<code>dashboard_static/cortex.js</code> 5,606行。</li>
+<li><code>core.store</code>、<code>core.runtime_config</code>、<code>core.durable_state</code>、<code>core.ollama</code>は高fan-inで、global root、file I/O、locks、model transport、resource scheduling、telemetryが広範囲へ波及する。</li>
+<li><code>runtime/</code>にはobservability projectionだけでなく、durable queue、completion receipt、authority artifact、page identity registryが混在する。物理pathの整理より所有protocolの明文化を優先する。</li>
+<li>計画時点の本番archiveはDashboard=<code>a17b870</code>、Ingest/Semantic=<code>4aaeeb5</code>、Reranker=<code>940e050</code>でmixed-version。異常とは限らないため、IPC/API/stateは最低1世代の新旧相互運用を必須とする。</li>
+</ul>
+
+<h2>目標アーキテクチャ</h2>
+<pre>interfaces / composition roots
+  hosts · CLI · MCP · dashboard · launchd scheduler
+                    │
+                    ▼
+application use cases
+  capture · recall · ingest/convergence · maintenance · repair
+                    │
+                    ▼
+domain services
+  raw · ingest · recall · search · knowledge_graph · decision
+  classification · librarian · research
+                    │
+                    ▼
+contracts + pure core
+  IDs · schemas · ports · policies · deterministic value objects
+
+infrastructure adapters ── injected at composition roots
+  filesystem · durable state · locks · clocks · processes · Ollama · sockets
+
+lab ──&gt; published contracts/use cases only
+production ──X──&gt; lab implementation</pre>
+
+<table>
+<thead><tr><th>境界</th><th>最終ルール</th></tr></thead>
+<tbody>
+<tr><td><code>contracts/core</code></td><td>outer layerやfeature実装へ依存しない。durable schemaとpure policyを保持。</td></tr>
+<tr><td>domain</td><td>他domainのprivate実装を直接importせず、公開contract/portで連携。</td></tr>
+<tr><td>application</td><td>transaction、deadline、retry、authority順序を所有し、domainを調停。</td></tr>
+<tr><td>infrastructure</td><td>file/model/process/socket実装。portを実装するがuse caseを所有しない。</td></tr>
+<tr><td><code>hosts/ops</code></td><td>transport・composition・schedulingへ縮小し、domain mutationを持たない。</td></tr>
+<tr><td><code>lab</code></td><td>本番から参照されないoutbound consumer。実験artifactの本番採用はversioned contract経由。</td></tr>
+</tbody>
+</table>
+</section>
+
+<section data-section="実行手順">
+<h2>実行手順</h2>
+<ol class="checklist">
+<li><input type="checkbox"><span><strong>Campaign O — Green baselineと不変条件の固定</strong>
+  <ul>
+    <li>専用branchを作り、HEAD、worktree、package/import graph、hotspot、51 entry points、7 tracked plist、authority/schema hash、production healthをmachine-readable baseline artifactへ記録する。</li>
+    <li>現在のRuff・mypy・large-function policy failureを、先にcharacterization testを足してから修正する。cap引上げや対象除外は禁止。</li>
+    <li><code>knowledge_graph</code>をdomain inventoryとcore forbidden listへ追加し、現存edge/SCCを出力するarchitecture fitness scriptを追加する。</li>
+    <li>隔離rootで全pytestをJUnit付き実行し、失敗・flaky・外部service依存を分類する。CIにはまず現行コマンドとartifact保存をそのまま載せる。</li>
+    <li>Recall/Save/Ingest/repair、Dashboard/Cortexについてgolden payload、durable bytes、latency/frame/memoryの変更前基準を採取する。</li>
+  </ul>
+  <div class="exit"><strong>Exit:</strong> 既存挙動のまま全baseline gateがgreen。以降の各Campaignが同一基準で比較可能。</div>
+</span></li>
+
+<li><input type="checkbox"><span><strong>Campaign P — Contracts、ownership、依存fitness</strong>
+  <ul>
+    <li>ADRで上記layer、許可依存、public API、compatibility期間を確定する。package名の変更自体を目的にしない。</li>
+    <li>durable artifact／queue／lock／socket／schema／workerごとに、単一writer、reader、lock scope、version、retention、recovery ownerをregistry化する。</li>
+    <li>本番<code>classification</code>/<code>decision</code>が参照するlab utility・adoption schema/validatorをproduction contractへ移し、production→<code>lab</code>をImport Linterで禁止する。</li>
+    <li>新規cross-domain edge禁止を先に有効化し、既存edgeは期限・owner・除去Campaign付きledgerでのみ許可する。例外の増加をCIで拒否する。</li>
+    <li>private symbolのcross-domain importと、schema manifestが実装定数をimport収集する構造を、明示registry/contractへ反転する。</li>
+  </ul>
+  <div class="exit"><strong>Exit:</strong> production→labがゼロ。新しい循環edgeは追加不能。すべてのruntime stateにownerがある。</div>
+</span></li>
+
+<li><input type="checkbox"><span><strong>Campaign Q — RuntimeContextとdurable infrastructure</strong>
+  <ul>
+    <li><code>RuntimeContext</code>/<code>RuntimeLayout</code>と、clock・filesystem・lock・process・model・socketのportを定義し、composition rootで実装を注入する。</li>
+    <li>import時に固定される<code>CHRONOVISOR_ROOT</code>や派生pathをcompatibility adapterの背後へ置き、小さいvertical sliceから明示contextへ移す。</li>
+    <li>atomic write、sealed JSON、append-only JSONL、directory fsync、file lock、CASを共通durable primitivesへ集約する。ただしbyte formatと順序が一致するvariantだけを統合する。</li>
+    <li>共通化するのはprimitiveであり、各ownerのlock lifetime、lease、retry、tombstone、ACK protocolは統合しない。MCP process-local jobとdurable background queue、JSON queueとSQLite semantic queueを別contractとして保持する。</li>
+    <li><code>core.ollama</code>をtransport、resource lease/residency、calibration、activity telemetryへ責務分離し、callerには狭いclient/lease portだけを公開する。</li>
+    <li>schema migrationはdual-read/single-write、crash recovery、旧artifact replay、rollback testを備え、live readerがゼロになるまで旧readerを消さない。</li>
+    <li>最初のproduction pilotはread-onlyなDashboard snapshot queryにし、次にHook/MCP adapterへ広げる。authority mutation pathをpilotにしない。</li>
+  </ul>
+  <div class="exit"><strong>Exit:</strong> 移行済みuse caseをtemporary root/fake clock/fake clientで起動でき、production bytes/hash/lock順序がbaselineと一致。</div>
+</span></li>
+
+<li><input type="checkbox"><span><strong>Campaign R — 4つのruntime loopをvertical sliceで再構成</strong>
+  <ul>
+    <li><strong>R1 Capture/Stop:</strong> host parser、lossless delta、receipt、audit enqueueをtyped use caseへ分離。Stopの即時returnとbyte-exact性を守る。</li>
+    <li><strong>R2 Recall/UserPromptSubmit:</strong> evidence gate、search/graph、processor、Field、publicationを一つのdeadline-aware application serviceへ整理し、各段をport化。最終BM25 fallbackとfail-openを保持する。</li>
+    <li><strong>R3 Ingest/convergence:</strong> prepare/review/apply/read-backを明示state machineへし、transaction owner、authority check、lease、CAS、rollback、terminal stateを型で表す。巨大compatibility facadeは薄い委譲だけにする。</li>
+    <li><strong>R4 Exceptional repair:</strong> routine uncertaintyとfrontier code repairをpackage境界でも分離し、incident evidence/budget/24h guardだけがrepair adapterへ到達できるようにする。</li>
+    <li>各sliceはcharacterization → 新実装shadow/adapter → byte/payload比較 → canary →旧経路retireの順で独立commit・独立rollbackする。</li>
+    <li>service protocol変更はserverのadditive reader/fieldを先にdeployし、health確認後にclientを切替える。queueはexpand → drain → contract、authority/schema変更は最後に行う。</li>
+  </ul>
+  <div class="exit"><strong>Exit:</strong> 4 loopのorchestrator、domain policy、I/O adapterが分離し、各use caseに直接テスト可能な入口が一つある。</div>
+</span></li>
+
+<li><input type="checkbox"><span><strong>Campaign S — Package cycle closureとouter layerの縮小</strong>
+  <ul>
+    <li><code>decision↔ops</code>、<code>recall↔search</code>、<code>decision↔ingest</code>、<code>ingest↔ops</code>等を、Campaign Rで得たports/eventsへ置換し、SCCを一辺ずつ縮める。</li>
+    <li><code>hosts.server</code>からraw atomic publish、search/read、status assembly、ingest triggerの実装をuse caseへ移し、MCP serialization adapterへ縮小する。</li>
+    <li><code>ops</code>内のdomain mutationを各domain application serviceへ戻し、<code>ops</code>はscheduling/composition/observabilityだけにする。</li>
+    <li>script・<code>python -m</code>・durable module string・LaunchAgent参照を全数追跡し、compatibility wrapper経由でcanonical targetへ移す。</li>
+  </ul>
+  <div class="exit"><strong>Exit:</strong> production top-level package graphに複数node SCCがなく、Import Linterのlayer contractが全てgreen。</div>
+</span></li>
+
+<li><input type="checkbox"><span><strong>Campaign T — Dashboard/Cortexとentrypoint surface</strong>
+  <ul>
+    <li>Dashboard backendをsnapshot query/materializer、Cortex event stream、auth、HTTP/SSE/WebSocket transport、static servingへ分割する。observerからdomain mutationを起こさない。</li>
+    <li><code>app.js</code>をAPI client・normalized store・panel rendererへ、<code>cortex.js</code>をscene state・layout/simulation・event effects・renderer・controlsへ分割し、明示module APIにする。</li>
+    <li>Cortexは単一<code>requestAnimationFrame</code> scheduler、bounded queue/object pool、visibility pause、cold/live refresh分離を維持し、Nodeで実行できるbehavior testへ文字列assertionを置換する。</li>
+    <li>51 console script名はcompatibility wrapperとして維持しつつ、共通launcher/command registryへ集約する。obsolete候補はruntime参照監査後だけ削除する。</li>
+    <li>既存viewportでDOM寸法・重なり・stream freshnessを実測し、60秒steady stateとRecall/Save連打でframe pacing、event-to-visual latency、memory slopeがbaseline以下であることを確認する。</li>
+  </ul>
+  <div class="exit"><strong>Exit:</strong> 表示・操作・リアルタイム性を維持し、backend/frontend各責務が独立テスト可能。51 entry pointsは全てcallable。</div>
+</span></li>
+
+<li><input type="checkbox"><span><strong>Campaign U — 品質面の全面引き上げ</strong>
+  <ul>
+    <li>strict mypyを<code>core/contracts</code>からapplication/domainへpackage単位で拡張し、broad ignoreなしで完了させる。</li>
+    <li>pytestをunit/contract/integration/liveのmarkerへ分類し、authority・durability・recovery・deadline pathのbranch coverage baselineと低下禁止を導入する。</li>
+    <li>architecture graph、large-function policy、public API、entrypoint、launchd、schema/hash、forward/reverse importsを単一verification commandとCI artifactへ統合する。</li>
+    <li>重複helperとdead-code候補をownership registryに照らして処理し、統合しないvariantには差異をtest/docで残す。</li>
+    <li>巨大関数はlock/transaction境界を壊さず、pure projection・validation・effect adapterから分ける。すべてpolicyに個別rationaleとcapを持たせる。</li>
+  </ul>
+  <div class="exit"><strong>Exit:</strong> local/CIの同一gateがgreenで、architecture・型・durability契約が新規変更を自動拒否できる。</div>
+</span></li>
+
+<li><input type="checkbox"><span><strong>Campaign V — Compatibility retirement、最終監査、本番切替</strong>
+  <ul>
+    <li>旧adapter/schema/module pathごとにlive利用ゼロ、queue drain済み、migration/replay成功、rollback可能を証明してから削除する。</li>
+    <li>architecture docs、runtime ownership registry、operator runbook、failure/rollback手順、Campaign O–V完了記録を更新する。</li>
+    <li>隔離全pytestのJUnit、全static/architecture gate、51 entry points、全tracked plist、authority/schema hash、golden bytes/payload、Cortex perfを最終確認する。</li>
+    <li>意図したfileだけcommitし、push後に影響LaunchAgentだけ再起動する。runtime archiveの<code>direct_url.json</code> commit、PID、health、Recall/Save/Ingest/Cortex live smokeを照合する。</li>
+    <li>異常時は直前のpush済みcommitへ戻し、同じserviceを再起動してruntime reader互換とhealthを確認する。</li>
+  </ul>
+  <div class="exit"><strong>Exit:</strong> GitHub、本番archive、running process、health、live behaviorが同じ完成commitを指し、旧互換層が証拠に基づいて閉鎖済み。</div>
+</span></li>
+</ol>
+</section>
+
+<section class="rules" data-section="実行中更新ルール">
+<h2>実行中更新ルール</h2>
+<ul>
+<li>実行手順のチェックは、各手順の完了直後に更新する（まとめて更新しない）。</li>
+<li>チェックを更新したら、同時に <code>実行ログ</code> へ時刻付きで追記する。</li>
+<li>中断時は <code>状態</code>（<code>plan-meta</code> の JSON および <code>.badge</code> の <code>data-state</code>）を <code>blocked</code> にし、理由を <code>ブロッカー</code> に記入する。</li>
+</ul>
+</section>
+
+<section data-section="完了条件">
+<h2>完了条件</h2>
+<ul>
+<li>Campaign O–Vの全checkboxと実行ログが、その場で更新されている。</li>
+<li>production package graphに複数packageのSCCがなく、<code>core/contracts</code>の外向き依存、production→<code>lab</code>、domain→<code>hosts/ops</code>の逆依存がゼロ。</li>
+<li>runtime artifact/queue/lock/socket/schema/workerのownerが一意で、version/recovery/retentionがregistryと実装で一致。</li>
+<li>Ruff、strict mypy、Import Linter、large-function、architecture、compileall、entrypoint、plist、全pytestが全てgreen。</li>
+<li>51 console entry points、MCP/HTTP/SSE/WebSocket contract、durable module path、既存artifact replayに後方互換があるか、明示migrationが完了。</li>
+<li>少なくとも1世代のmixed-version service/client/state相互運用がtestと段階deployで証明されている。</li>
+<li>authority hashes、保存bytes、I/O順序、deadline/fail-open/fail-closed、rollback/idempotencyが変更前と同一。意図的変更はversioned migrationと比較証跡がある。</li>
+<li>Dashboard/Cortexの視覚品質、live freshness、frame pacing、event-to-visual latency、steady-state memoryがbaselineから退行しない。</li>
+<li>push済みcommitと全affected production runtimeが一致し、healthとtask-specific live smokeが成功。</li>
+<li>ユーザー所有の未追跡ファイルに変更がない。</li>
+</ul>
+</section>
+
+<section data-section="検証手順">
+<h2>検証手順</h2>
+<ol>
+<li>各Campaign開始前に対象use caseのcharacterization/goldenを追加し、変更前実装でpassすることを確認する。</li>
+<li>各commit前に次を実行する。
+<pre>uv run --frozen ruff check --no-cache src scripts tests
+uv run --frozen mypy
+uv run --frozen lint-imports --no-cache
+uv run --frozen pytest -q tests/test_large_function_policy.py
+uv run --frozen python -m compileall -q src scripts
+git diff --check</pre></li>
+<li>architecture verificationでpackage graph、SCC、forbidden edge、production→lab、cross-domain private import、ownership registryの完全性を検証する。</li>
+<li>隔離全スイートを持続的JUnit付きで実行し、process outputではなくXMLの<code>errors=0</code>、<code>failures=0</code>を確認する。
+<pre>test_root="$(mktemp -d -t chronovisor-refactor-test)"
+CHRONOVISOR_ROOT="$test_root" PYTHONDONTWRITEBYTECODE=1 \
+  uv run --frozen pytest -q \
+  --junitxml=/tmp/chronovisor-refactor-junit.xml</pre></li>
+<li>全console targetのimport/callable、forward/reverse module import、<code>launchd/*.plist</code>の<code>plutil -lint</code>を実行する。</li>
+<li>固定fixtureでdurable byte/hash、authority identity、schema manifest、queue/receipt順序、recovery/rollbackをbefore/after比較する。</li>
+<li>Dashboard/Cortexは指定viewportのDOM実測、60秒steady-state、Recall/Save burst、tab visibility切替をbrowser performance evidenceとscreenshotで確認する。</li>
+<li>production cutoverでは<code>push → affected LaunchAgent restart → runtime archive commit → PID/health → task-specific live smoke</code>の順で確認する。</li>
+</ol>
+</section>
+
+<section class="blockers" data-section="ブロッカー">
+<h2>ブロッカー（発生時のみ）</h2>
+<ul>
+<li>なし。状態は<code>draft</code>であり、実装開始にはユーザーの計画承認が必要。</li>
+</ul>
+</section>
+
+<section data-section="受け渡しメモ">
+<h2>受け渡しメモ（次担当へ）</h2>
+<ul>
+<li>実装開始時に<code>plan-meta</code>とbadgeを<code>running</code>へ変更し、Campaign Oだけをin progressにする。複数Campaignを同時に開始しない。</li>
+<li>最初のsource commitは現行3品質failureの修復とbaseline artifactだけに限定し、architecture移動を混ぜない。</li>
+<li>過去A–Nのhandoffと<code>docs/refactoring/</code>は履歴上の正本。新計画はそれらを否定せず、2026-07-29以降のgrowthを対象にする。</li>
+<li>変更writerは原則1体。read-only inventory/verificationは並列化してよいが、同一fileの複数writerを使わない。</li>
+<li>各Campaignで「compatibility追加」と「旧compatibility削除」を同じcommitにしない。live利用の観測期間を挟む。</li>
+<li>production push/restartは、そのCampaignが本番経路へ影響する場合だけ実施し、無関係なserviceは再起動しない。</li>
+<li>途中で前提が崩れた場合は範囲を黙って変えず、状態を<code>blocked</code>にして根拠と再計画案を記録する。</li>
+</ul>
+</section>
+
+<section data-section="実行ログ">
+<h2>実行ログ</h2>
+<ol class="log"></ol>
+</section>
+
+</body>
+</html>
