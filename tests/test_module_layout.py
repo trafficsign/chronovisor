@@ -14,6 +14,7 @@ DOMAIN_NAMES = {
     "decision",
     "hosts",
     "ingest",
+    "knowledge_graph",
     "lab",
     "librarian",
     "ops",
@@ -37,6 +38,16 @@ def test_top_level_python_files_have_no_legacy_shims() -> None:
     }
 
     assert top_level == TOP_LEVEL_IMPLEMENTATION_EXCEPTIONS
+
+
+def test_domain_inventory_covers_every_package() -> None:
+    packages = {
+        path.name
+        for path in PACKAGE_ROOT.iterdir()
+        if path.is_dir() and (path / "__init__.py").is_file()
+    }
+
+    assert packages == DOMAIN_NAMES
 
 
 def test_domain_implementations_do_not_import_legacy_module_paths() -> None:

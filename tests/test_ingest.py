@@ -943,6 +943,35 @@ def isolated_wiki(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     )
     monkeypatch.setattr(index_store, "_store", None)
     monkeypatch.setattr(ollama, "is_available", lambda: False)
+    monkeypatch.setattr(ingest, "is_available", lambda: False)
+    monkeypatch.setattr(orchestrator, "is_available", lambda: False)
+
+    real_ensure_page_metadata = ingest._ensure_page_metadata_frontmatter
+
+    def isolated_page_metadata(
+        text,
+        page_id,
+        parse,
+        patch,
+        *,
+        allow_local_model=True,
+        force_deterministic_rebuild=False,
+    ):
+        del allow_local_model
+        return real_ensure_page_metadata(
+            text,
+            page_id,
+            parse,
+            patch,
+            allow_local_model=False,
+            force_deterministic_rebuild=force_deterministic_rebuild,
+        )
+
+    monkeypatch.setattr(
+        ingest,
+        "_ensure_page_metadata_frontmatter",
+        isolated_page_metadata,
+    )
     monkeypatch.setattr(
         search,
         "update_embeddings",
@@ -6152,6 +6181,16 @@ class TestRawKeywordsMetadataPropagation:
     every operation generated from this raw — without leaking into the
     triage prompt or being fabricated when absent.
     """
+
+    @pytest.fixture(autouse=True)
+    def isolate_context_admission(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from chronovisor.ingest import ingest
+
+        monkeypatch.setattr(
+            ingest,
+            "_admit_ingest_context",
+            lambda _config, selected: selected,
+        )
 
     def test_metadata_raw_keywords_lands_on_every_operation(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch

@@ -52,7 +52,7 @@ def test_large_function_policy_covers_every_current_large_function() -> None:
     policy = _policy()
     threshold = int(policy["threshold_lines"])
     entries = policy["functions"]
-    assert len(entries) == int(policy["baseline_function_count"]) == 43
+    assert len(entries) == int(policy["baseline_function_count"]) == 47
 
     retained: set[tuple[str, str]] = set()
     declared: set[tuple[str, str]] = set()

@@ -6870,6 +6870,119 @@ def validate_machine_scorer_calibration_artifact(
     }
 
 
+def _answer_evaluation_gates(
+    *,
+    sealed_split_manifest: bool,
+    immutable_gold_manifest: bool,
+    scorer_calibration: bool,
+    preregistered_before_run: bool,
+    episode_ledger_exact: bool,
+    registered_adapters: bool,
+    evaluation_kind_authorized: bool,
+    runner_identity: bool,
+    all_pairs_verified: bool,
+    minimum_independent_samples: bool,
+    valid_confidence_bound: bool,
+    authority_protocol_fixed: bool,
+    improvement_point: bool,
+    improvement_lower_bound: bool,
+    non_degradation: bool,
+    no_leakage: bool,
+    dimension_bounds_valid: bool,
+) -> dict[str, bool]:
+    """Project the stable, byte-significant answer authority gate envelope."""
+
+    return {
+        "sealed_split_manifest": sealed_split_manifest,
+        "immutable_gold_manifest": immutable_gold_manifest,
+        "scorer_calibration": scorer_calibration,
+        "preregistered_before_run": preregistered_before_run,
+        "episode_ledger_exact": episode_ledger_exact,
+        "registered_adapters": registered_adapters,
+        "evaluation_kind_authorized": evaluation_kind_authorized,
+        "runner_identity": runner_identity,
+        "all_pairs_verified": all_pairs_verified,
+        "minimum_independent_samples": minimum_independent_samples,
+        "valid_confidence_bound": valid_confidence_bound,
+        "authority_protocol_fixed": authority_protocol_fixed,
+        "improvement_point": improvement_point,
+        "improvement_lower_bound": improvement_lower_bound,
+        "non_degradation": non_degradation,
+        "no_leakage": no_leakage,
+        "dimension_bounds_valid": dimension_bounds_valid,
+    }
+
+
+def _validated_answer_outcome_gates(
+    *,
+    split_valid: bool,
+    gold_valid: bool,
+    calibration_valid: bool,
+    preregistration_valid: bool,
+    adapter_registry_valid: bool,
+    evaluation_kind: str,
+    required_split: str,
+    identities_valid: bool,
+    verified_count: int,
+    expected_count: int,
+    cluster_value: Any,
+    manifest: Mapping[str, Any] | None,
+    recomputed: Mapping[str, Any],
+    confidence_value: float,
+    seed_value: int,
+    result_ids: Sequence[str],
+    dimension_bounds: Mapping[str, Mapping[str, Any]],
+) -> dict[str, bool]:
+    """Recompute the authority gate envelope from validated artifact evidence."""
+
+    minimum_samples = (
+        isinstance(cluster_value, int)
+        and isinstance(manifest, Mapping)
+        and isinstance(manifest.get("minimum_independent_samples"), int)
+        and not isinstance(manifest.get("minimum_independent_samples"), bool)
+        and cluster_value >= manifest["minimum_independent_samples"]
+    )
+    return _answer_evaluation_gates(
+        sealed_split_manifest=split_valid,
+        immutable_gold_manifest=gold_valid,
+        scorer_calibration=calibration_valid,
+        preregistered_before_run=preregistration_valid,
+        episode_ledger_exact=True,
+        registered_adapters=adapter_registry_valid,
+        evaluation_kind_authorized=(
+            evaluation_kind == "historical-context-utility"
+            and required_split == "train"
+        )
+        or (
+            evaluation_kind == "field-e2e-replay"
+            and required_split == "locked-test"
+        ),
+        runner_identity=identities_valid,
+        all_pairs_verified=verified_count == expected_count and bool(expected_count),
+        minimum_independent_samples=minimum_samples,
+        valid_confidence_bound=recomputed.get("valid") is True,
+        authority_protocol_fixed=confidence_value
+        == ANSWER_AUTHORITY_CONFIDENCE
+        and seed_value == ANSWER_AUTHORITY_SEED,
+        improvement_point=isinstance(recomputed.get("point"), int | float)
+        and isinstance(manifest, Mapping)
+        and isinstance(manifest.get("improvement_point_floor"), int | float)
+        and not isinstance(manifest.get("improvement_point_floor"), bool)
+        and float(recomputed["point"]) >= float(manifest["improvement_point_floor"]),
+        improvement_lower_bound=isinstance(recomputed.get("lower"), int | float)
+        and isinstance(manifest, Mapping)
+        and isinstance(manifest.get("improvement_lcb_floor"), int | float)
+        and not isinstance(manifest.get("improvement_lcb_floor"), bool)
+        and float(recomputed["lower"]) >= float(manifest["improvement_lcb_floor"]),
+        non_degradation=isinstance(recomputed.get("lower"), int | float)
+        and float(recomputed["lower"]) >= 0.0,
+        no_leakage=len(result_ids) == len(set(result_ids)) == expected_count,
+        dimension_bounds_valid=all(
+            item.get("valid") is True for item in dimension_bounds.values()
+        ),
+    )
+
+
 def evaluate_answer_episodes(
     *,
     runner: AnswerRunner | None,
@@ -7292,40 +7405,38 @@ def evaluate_answer_episodes(
         )
         for dimension in ANSWER_DIMENSIONS
     }
-    gates = {
-        "sealed_split_manifest": split_check.get("passed") is True,
-        "immutable_gold_manifest": gold_check.get("passed") is True,
-        "scorer_calibration": calibration_check.get("passed") is True,
-        "preregistered_before_run": preregistration_valid,
-        "episode_ledger_exact": ledger_exact,
-        "registered_adapters": adapter_check.get("passed") is True,
-        "evaluation_kind_authorized": (
+    gates = _answer_evaluation_gates(
+        sealed_split_manifest=split_check.get("passed") is True,
+        immutable_gold_manifest=gold_check.get("passed") is True,
+        scorer_calibration=calibration_check.get("passed") is True,
+        preregistered_before_run=preregistration_valid,
+        episode_ledger_exact=ledger_exact,
+        registered_adapters=adapter_check.get("passed") is True,
+        evaluation_kind_authorized=(
             evaluation_kind == "historical-context-utility" and split == "train"
         )
         or (evaluation_kind == "field-e2e-replay" and split == "locked-test"),
-        "runner_identity": not bool(identity_error),
-        "all_pairs_verified": bool(selected) and len(verified) == len(selected),
-        "minimum_independent_samples": cluster_count >= min_independent_samples,
-        "valid_confidence_bound": bound.get("valid") is True,
-        "authority_protocol_fixed": confidence == ANSWER_AUTHORITY_CONFIDENCE
+        runner_identity=not bool(identity_error),
+        all_pairs_verified=bool(selected) and len(verified) == len(selected),
+        minimum_independent_samples=cluster_count >= min_independent_samples,
+        valid_confidence_bound=bound.get("valid") is True,
+        authority_protocol_fixed=confidence == ANSWER_AUTHORITY_CONFIDENCE
         and seed == ANSWER_AUTHORITY_SEED,
-        "improvement_point": isinstance(bound.get("point"), int | float)
+        improvement_point=isinstance(bound.get("point"), int | float)
         and float(bound["point"]) >= improvement_point_floor,
-        "improvement_lower_bound": isinstance(bound.get("lower"), int | float)
+        improvement_lower_bound=isinstance(bound.get("lower"), int | float)
         and float(bound["lower"]) >= improvement_lcb_floor,
-        "non_degradation": isinstance(bound.get("lower"), int | float)
+        non_degradation=isinstance(bound.get("lower"), int | float)
         and float(bound["lower"]) >= 0.0,
-        "no_leakage": len({str(row.get("episode_id") or "") for row in selected})
+        no_leakage=len({str(row.get("episode_id") or "") for row in selected})
         == len(selected_ids)
         == len(selected),
-        "dimension_bounds_valid": all(
+        dimension_bounds_valid=all(
             item.get("valid") is True for item in dimension_bounds.values()
         ),
-    }
+    )
     passed = bool(gates and all(value is True for value in gates.values()))
-    page_rewards: list[dict[str, Any]] = []
-    page_penalties: list[dict[str, Any]] = []
-    if all(
+    effects_authorized = all(
         gates[key]
         for key in (
             "sealed_split_manifest",
@@ -7339,27 +7450,10 @@ def evaluate_answer_episodes(
             "all_pairs_verified",
             "no_leakage",
         )
-    ):
-        for row in verified:
-            delta = float(row["score_delta"])
-            if delta == 0.0:
-                continue
-            for binding in row["used_page_bindings"]:
-                common = {
-                    "episode_id": row["episode_id"],
-                    "decision_id": row["decision_id"],
-                    "page_id": binding["page_id"],
-                    "page_uid": binding["page_uid"],
-                    "content_sha256": binding["content_sha256"],
-                    "producer": "verified_answer_pair_v2",
-                    "session_hash": row["session_hash"],
-                    "query_sha256": row["query_sha256"],
-                    "observed_at": row["observed_at"],
-                }
-                if delta > 0.0:
-                    page_rewards.append({**common, "reward": round(delta, 9)})
-                else:
-                    page_penalties.append({**common, "penalty": round(-delta, 9)})
+    )
+    page_rewards, page_penalties = (
+        _strict_outcome_page_effects(verified) if effects_authorized else ([], [])
+    )
     payload = {
         "schema_version": ANSWER_EVAL_SCHEMA_VERSION,
         "artifact_kind": "answer-on-off-evaluation",
@@ -8072,6 +8166,36 @@ def validate_locked_answer_artifact(
     )
 
 
+def _strict_outcome_page_effects(
+    rows: Sequence[Mapping[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Project trusted evaluator rows without tolerating malformed evidence."""
+
+    rewards: list[dict[str, Any]] = []
+    penalties: list[dict[str, Any]] = []
+    for row in rows:
+        delta = float(row["score_delta"])
+        if delta == 0.0:
+            continue
+        for binding in row["used_page_bindings"]:
+            common = {
+                "episode_id": row["episode_id"],
+                "decision_id": row["decision_id"],
+                "page_id": binding["page_id"],
+                "page_uid": binding["page_uid"],
+                "content_sha256": binding["content_sha256"],
+                "producer": "verified_answer_pair_v2",
+                "session_hash": row["session_hash"],
+                "query_sha256": row["query_sha256"],
+                "observed_at": row["observed_at"],
+            }
+            if delta > 0.0:
+                rewards.append({**common, "reward": round(delta, 9)})
+            else:
+                penalties.append({**common, "penalty": round(-delta, 9)})
+    return rewards, penalties
+
+
 def _outcome_page_effects(
     rows: Sequence[Mapping[str, Any]],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -8687,49 +8811,25 @@ def validate_answer_outcome_artifact(
         and isinstance(manifest.get("improvement_lcb_floor"), int | float)
         and not isinstance(manifest.get("improvement_lcb_floor"), bool)
     )
-    expected_gates = {
-        "sealed_split_manifest": split_check.get("passed") is True,
-        "immutable_gold_manifest": gold_check.get("passed") is True,
-        "scorer_calibration": calibration_check.get("passed") is True,
-        "preregistered_before_run": preregistration_valid,
-        "episode_ledger_exact": True,
-        "registered_adapters": not bool(adapter_registry_error),
-        "evaluation_kind_authorized": (
-            evaluation_kind == "historical-context-utility"
-            and required_split == "train"
-        )
-        or (
-            evaluation_kind == "field-e2e-replay"
-            and required_split == "locked-test"
-        ),
-        "runner_identity": identities_valid,
-        "all_pairs_verified": len(verified_rows) == len(expected_ids) and bool(expected_ids),
-        "minimum_independent_samples": isinstance(cluster_value, int)
-        and isinstance(manifest, Mapping)
-        and isinstance(manifest.get("minimum_independent_samples"), int)
-        and not isinstance(manifest.get("minimum_independent_samples"), bool)
-        and cluster_value >= manifest["minimum_independent_samples"],
-        "valid_confidence_bound": recomputed.get("valid") is True,
-        "authority_protocol_fixed": confidence_value
-        == ANSWER_AUTHORITY_CONFIDENCE
-        and seed_value == ANSWER_AUTHORITY_SEED,
-        "improvement_point": isinstance(recomputed.get("point"), int | float)
-        and isinstance(manifest, Mapping)
-        and isinstance(manifest.get("improvement_point_floor"), int | float)
-        and not isinstance(manifest.get("improvement_point_floor"), bool)
-        and float(recomputed["point"]) >= float(manifest["improvement_point_floor"]),
-        "improvement_lower_bound": isinstance(recomputed.get("lower"), int | float)
-        and isinstance(manifest, Mapping)
-        and isinstance(manifest.get("improvement_lcb_floor"), int | float)
-        and not isinstance(manifest.get("improvement_lcb_floor"), bool)
-        and float(recomputed["lower"]) >= float(manifest["improvement_lcb_floor"]),
-        "non_degradation": isinstance(recomputed.get("lower"), int | float)
-        and float(recomputed["lower"]) >= 0.0,
-        "no_leakage": len(result_ids) == len(set(result_ids)) == len(expected_ids),
-        "dimension_bounds_valid": all(
-            item.get("valid") is True for item in expected_dimension_bounds.values()
-        ),
-    }
+    expected_gates = _validated_answer_outcome_gates(
+        split_valid=split_check.get("passed") is True,
+        gold_valid=gold_check.get("passed") is True,
+        calibration_valid=calibration_check.get("passed") is True,
+        preregistration_valid=preregistration_valid,
+        adapter_registry_valid=not bool(adapter_registry_error),
+        evaluation_kind=evaluation_kind,
+        required_split=required_split,
+        identities_valid=identities_valid,
+        verified_count=len(verified_rows),
+        expected_count=len(expected_ids),
+        cluster_value=cluster_value,
+        manifest=manifest if isinstance(manifest, Mapping) else None,
+        recomputed=recomputed,
+        confidence_value=confidence_value,
+        seed_value=seed_value,
+        result_ids=result_ids,
+        dimension_bounds=expected_dimension_bounds,
+    )
     gates_valid = gates == expected_gates
     valid = bool(
         structure_valid

@@ -352,6 +352,15 @@ def _patch_page_lookup(monkeypatch, pages: Path) -> None:
             "semantic_readback": {"status": "ok"},
         },
     )
+    monkeypatch.setattr(
+        content_correction,
+        "_refresh_after_apply",
+        lambda page_ids: {
+            "status": "ok",
+            "pages": list(page_ids),
+            "errors": [],
+        },
+    )
 
 
 def test_unique_quoted_exact_replacement_applies_without_any_model(

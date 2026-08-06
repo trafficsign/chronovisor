@@ -1,6 +1,6 @@
 schema_version = 1
 threshold_lines = 300
-baseline_function_count = 43
+baseline_function_count = 47
 
 [[functions]]
 path = "src/chronovisor/decision/decision_router.py"
@@ -279,6 +279,42 @@ baseline_lines = 606
 disposition = "retained"
 max_lines = 606
 rationale = "Fail-closed wire-order validator recomputes one answer artifact from live episodes, review and execution receipts, environment bindings, pair protocol, numerical bounds, and exact gates."
+tests = ["tests/test_recall_answer_eval.py"]
+
+[[functions]]
+path = "src/chronovisor/recall/recall_answer_eval.py"
+qualname = "validate_gold_manifest"
+baseline_lines = 367
+disposition = "retained"
+max_lines = 367
+rationale = "Fail-closed validation keeps immutable human and machine-consensus gold variants in one wire-order trust boundary, including receipt causality, source packets, split identity, and exact episode coverage."
+tests = ["tests/test_recall_answer_eval.py", "tests/test_machine_consensus_receipt.py"]
+
+[[functions]]
+path = "src/chronovisor/recall/recall_answer_eval.py"
+qualname = "build_machine_scorer_calibration_cycle"
+baseline_lines = 310
+disposition = "retained"
+max_lines = 310
+rationale = "One preregistered calibration publication transaction binds benchmark controls, scorer executions, local-consensus receipts, causal timestamps, metrics, gates, and immutable output identity."
+tests = ["tests/test_recall_answer_eval.py", "tests/test_machine_consensus_receipt.py"]
+
+[[functions]]
+path = "src/chronovisor/recall/recall_answer_eval.py"
+qualname = "evaluate_independent_answer_benchmark"
+baseline_lines = 317
+disposition = "retained"
+max_lines = 317
+rationale = "Independent benchmark evaluation intentionally keeps fixed cohort admission, field replay, paired execution and scoring receipts, cluster bounds, leakage gates, and sealed artifact publication together."
+tests = ["tests/test_recall_answer_eval.py"]
+
+[[functions]]
+path = "src/chronovisor/recall/recall_answer_eval.py"
+qualname = "validate_independent_answer_outcome_artifact"
+baseline_lines = 334
+disposition = "retained"
+max_lines = 334
+rationale = "The validator recomputes the complete independent benchmark envelope in persisted wire order, including benchmark and gold bindings, execution receipts, score deltas, cluster bounds, counts, and gates."
 tests = ["tests/test_recall_answer_eval.py"]
 
 [[functions]]

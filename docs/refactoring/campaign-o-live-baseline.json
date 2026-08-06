@@ -1,0 +1,555 @@
+{
+  "schema_version": 1,
+  "campaign": "O",
+  "captured_at": "2026-08-06T04:42:22Z",
+  "captured_at_semantics": "Latest observation in a timestamped passive capture window. Every dynamic section retains its own timestamp and must not be treated as a single atomic snapshot.",
+  "assessment": {
+    "kind": "passive_observation",
+    "quality_gate": false,
+    "pass_semantics": "none",
+    "mutation_performed": false,
+    "notes": [
+      "Values record the running production baseline and must not be interpreted as a green deployment or deterministic test result.",
+      "The runtime was mixed-version at capture time.",
+      "Background ingest changed backend values during capture, so observations from different timestamps must not be merged as one instant.",
+      "The /api/ingest-liveness response observed at 2026-08-06T04:42:13Z carried a producer timestamp of 2026-08-06T13:17:27+09:00, 1486 seconds (approximately 25 minutes) older than the API observation; its status fields are retained as stale passive evidence, not a contemporaneous pass.",
+      "Warnings and incomplete authority states are preserved rather than normalized away."
+    ]
+  },
+  "provenance": {
+    "api_and_process_capture": {
+      "captured_at": "2026-08-06T04:42:13Z",
+      "field_and_graph_captured_at": "2026-08-06T04:42:22Z",
+      "method": "passive reads of running-process metadata, runtime archives, and local HTTP API responses"
+    },
+    "cortex_fresh_tab": {
+      "url": "http://127.0.0.1:8765/cortex",
+      "first_captured_at": "2026-08-06T04:39:09.118Z",
+      "second_captured_at": "2026-08-06T04:40:25.687Z",
+      "raf_final_captured_at": "2026-08-06T04:40:38.527Z",
+      "steady_interval_seconds": 76.57,
+      "method": "passive browser DOM, renderer, performance, memory, and console sampling"
+    },
+    "cortex_user_tab": {
+      "captured_on": "2026-08-06",
+      "timezone": "Asia/Tokyo",
+      "time_precision": "date",
+      "method": "passive observation of the existing user tab; lifetime counters are separately scoped"
+    }
+  },
+  "runtime_processes": {
+    "mixed_version": true,
+    "captured_at": "2026-08-06T04:42:13Z",
+    "services": [
+      {
+        "service": "dashboard",
+        "parent_pid": 49992,
+        "child_pid": 50061,
+        "runtime_archive": "8LUgvpgiJ6Hi0D7UeuOSa",
+        "commit": "a17b8704e2a69e1df1dc3466e956edee77fec870"
+      },
+      {
+        "service": "ingest",
+        "parent_pid": 57785,
+        "child_pid": 57858,
+        "runtime_archive": "8r7TrgkRkTjzjYkp1F6gi",
+        "commit": "4aaeeb56559717f96f0d06c309bd51928d7bf1a4"
+      },
+      {
+        "service": "semantic",
+        "parent_pid": 57827,
+        "child_pid": 57888,
+        "runtime_archive": "FHwrjkY8go3hHm6ivlvgp",
+        "commit": "4aaeeb56559717f96f0d06c309bd51928d7bf1a4"
+      },
+      {
+        "service": "reranker",
+        "parent_pid": 94031,
+        "child_pid": 94245,
+        "runtime_archive": "rCbyooUhu2WeB_Fp2HKGT",
+        "commit": "940e050bd14417f09615c4299f48b94762dbf10b"
+      },
+      {
+        "service": "burn",
+        "parent_pid": 765,
+        "child_pid": 1218,
+        "runtime_archive": "1UKmigBjG4iCxeZXLvRYa",
+        "commit": "1b7d2df523defc0bb4d120976068149b53b536f3"
+      }
+    ]
+  },
+  "api_observations": {
+    "health": {
+      "endpoint": "/api/health",
+      "captured_at": "2026-08-06T04:42:13Z",
+      "status": "alert",
+      "alert_source": "semantic",
+      "context": "active background work",
+      "drift": false,
+      "dashboard_runtime": {
+        "commit": "a17b8704e2a69e1df1dc3466e956edee77fec870",
+        "archive": "8LUgvpgiJ6Hi0D7UeuOSa"
+      }
+    },
+    "ingest_liveness": {
+      "captured_at": "2026-08-06T04:42:13Z",
+      "api_observed_at": "2026-08-06T04:42:13Z",
+      "producer_reported_at": "2026-08-06T13:17:27+09:00",
+      "producer_age_at_api_observation_seconds": 1486,
+      "staleness_caveat": "The producer timestamp was approximately 25 minutes older than the API observation. These values are passive, non-atomic evidence and do not establish a current pass.",
+      "status": "ok",
+      "runtime": "ready",
+      "authority": true,
+      "pending_raws": 50,
+      "ollama": true,
+      "alert": false,
+      "retryable": false
+    },
+    "semantic": {
+      "captured_at": "2026-08-06T04:42:13Z",
+      "index_status": "alert",
+      "service_status": "ok",
+      "pid": 57888,
+      "ready": true,
+      "coverage": {
+        "ratio": 0.9989738327347357,
+        "current": 3898,
+        "covered": 3894
+      },
+      "missing": 0,
+      "stale": 4,
+      "deleted": 0,
+      "query": {
+        "samples": 2000,
+        "errors": 18,
+        "latency_ms": {
+          "p50": 121.805,
+          "p95": 316.346,
+          "max": 639.627
+        }
+      }
+    },
+    "recall": {
+      "endpoint": "/api/recall",
+      "captured_at": "2026-08-06T04:41:58Z",
+      "samples": 400,
+      "decisions": {
+        "none": 209,
+        "read": 191,
+        "search": 0
+      },
+      "errors": 202,
+      "latency_ms": {
+        "p50": 3674,
+        "p95": 3750,
+        "max": 3752
+      },
+      "pulls": {
+        "total": 200,
+        "search": 62,
+        "read": 121,
+        "used": 17
+      },
+      "last_five": {
+        "decision": "none",
+        "latency_ms": 3750
+      }
+    },
+    "cortex_field": {
+      "endpoint": "/api/cortex/field",
+      "captured_at": "2026-08-06T04:42:22Z",
+      "status": "stale",
+      "stage": "candidate",
+      "source": "stateful-recall-field",
+      "session_id": "5bd3dec454aab5cd",
+      "host": "claude-code",
+      "topic_epoch": 598,
+      "turn": 648,
+      "seq": 12473,
+      "nodes": 117,
+      "events": 256,
+      "sessions": 11,
+      "outcomes": {
+        "active": 12,
+        "candidate": 30,
+        "commit": 0,
+        "reject": 118
+      },
+      "agreement": 0.0063,
+      "latency_ms": {
+        "p50": 88,
+        "p95": 119,
+        "max": 149
+      },
+      "age_seconds": 3591.4,
+      "authority": false,
+      "field": false,
+      "positive": false,
+      "policy": false,
+      "maturity": {
+        "strong": 0,
+        "strong_required": 200,
+        "sessions": 0,
+        "sessions_required": 20
+      },
+      "candidate_traces": 570,
+      "processor_used": 7,
+      "full_search_fallback": true
+    },
+    "save_history": {
+      "endpoint": "/api/save-history",
+      "captured_at": "2026-08-06T04:41:58Z",
+      "raw_saved": 11333,
+      "bytes": {
+        "raw": 8484091,
+        "processed": 8372662,
+        "pending": 73680,
+        "deferred": 37749,
+        "failed": 0
+      },
+      "attempted": 8340,
+      "succeeded_or_processed": 7822,
+      "deferred": 292,
+      "failed": 226,
+      "pages": {
+        "created": 1272,
+        "updated": 2779
+      },
+      "latest_day": {
+        "raw": 174,
+        "attempted": 236,
+        "succeeded": 225,
+        "deferred": 3,
+        "failed": 8,
+        "pages_created": 26,
+        "pages_updated": 54
+      }
+    },
+    "self_heal": {
+      "captured_at": "2026-08-06T04:42:13Z",
+      "resolved": 12,
+      "pending": 0,
+      "failed": 0,
+      "frontier": 0,
+      "human": 0,
+      "packets": 14,
+      "packet_disposition": "local_quarantined",
+      "preflight": {
+        "status": "standby",
+        "ok": true
+      }
+    },
+    "frontier": {
+      "captured_at": "2026-08-06T04:42:13Z",
+      "active": false,
+      "available": false,
+      "total": 0
+    },
+    "activity": {
+      "captured_at": "2026-08-06T04:42:13Z",
+      "active_count": 2,
+      "active_kinds": [
+        "ingest_consensus",
+        "recall_search"
+      ],
+      "revision_sample": "79e86a...",
+      "revision_complete": false,
+      "dashboard_activity_cache": {
+        "builds": 13940,
+        "hits": 121366,
+        "coalesced": 8538,
+        "errors": 0,
+        "last_build_ms": 49.039
+      }
+    },
+    "graph": {
+      "captured_at": "2026-08-06T04:42:22Z",
+      "generated_at": "2026-08-06T13:42:22+09:00",
+      "commit": "a17b870",
+      "nodes": 3898,
+      "links": 15907,
+      "categories": 123,
+      "total_lines": 489361,
+      "static": 15907,
+      "deferred": 0,
+      "spawn": 0,
+      "entrypoints": 4
+    },
+    "librarian": {
+      "generated_at": "2026-08-06T04:42:00Z",
+      "status": "blocked",
+      "unresolved_link": 1,
+      "queue": {
+        "actionable": 2,
+        "completed": 3684,
+        "held": 201,
+        "queued": 2,
+        "running": 0
+      },
+      "debts": {
+        "review_required": 201,
+        "unclassified": 2,
+        "unresolved_link": 1,
+        "explicit_hold": 201,
+        "scope_unregistered": 1
+      }
+    },
+    "typed_graph": {
+      "captured_at": "2026-08-06T04:42:22Z",
+      "status": "shadow",
+      "engineering_complete": true,
+      "authority_mature": false,
+      "rollout": {
+        "reason": "gate_failed",
+        "percent": 0
+      },
+      "relations": {
+        "proposed": 688,
+        "held": 23,
+        "verified": 2,
+        "stale": 194
+      },
+      "communities": 2,
+      "external_model_calls": 0,
+      "builder": {
+        "remaining": 3686,
+        "model": "gemma4:26b"
+      },
+      "rubric": {
+        "passed": 3,
+        "required": 30
+      },
+      "sessions": {
+        "passed": 3,
+        "required": 5
+      }
+    }
+  },
+  "cortex_browser_observations": {
+    "fresh_tab": {
+      "viewport": {
+        "width_css_px": 1280,
+        "height_css_px": 720,
+        "device_pixel_ratio": 2,
+        "document_width_css_px": 1280,
+        "document_height_css_px": 720,
+        "overflow": false
+      },
+      "rects_css_px": {
+        "header": {
+          "x": 48,
+          "y": 0,
+          "width": 1232,
+          "height": 52
+        },
+        "stage_gl_overlay": {
+          "x": 290,
+          "y": 52,
+          "width": 694,
+          "height": 668
+        },
+        "hud": {
+          "x": 984,
+          "y": 52,
+          "width": 296,
+          "height": 668
+        }
+      },
+      "canvas": {
+        "css_width": 694,
+        "css_height": 668,
+        "backing_width": 1388,
+        "backing_height": 1336
+      },
+      "projection": {
+        "center_x": 347.0,
+        "center_y": 434.5,
+        "top_inset": 201.0,
+        "center_formula": "201 + (668 - 201) / 2"
+      },
+      "renderer": {
+        "api": "webgl2",
+        "layout": "sphere",
+        "nodes": {
+          "core": 5,
+          "middle": 234,
+          "outer": 3658
+        },
+        "simulation": {
+          "status": "asleep",
+          "alpha": 0,
+          "ticks": 349
+        }
+      },
+      "steady_interval": {
+        "field_aria_fps": 60.0,
+        "frame_ms": {
+          "p95": 1.4,
+          "p99": 1.5,
+          "max": 2.3
+        },
+        "projection_base_ms": {
+          "p95": 0.9,
+          "p99": 0.9,
+          "max": 1.0
+        },
+        "overlay_effects_ms": {
+          "p95": 0.7,
+          "p99": 0.8,
+          "max": 1.7
+        },
+        "dom_flush_ms": {
+          "p95": 0.0,
+          "p99": 0.1,
+          "max": 0.1
+        },
+        "pending_raf": 0,
+        "event_queue": 0,
+        "processing_activity_connected": true,
+        "active_processing_lanes": 1,
+        "transport": {
+          "received": 106,
+          "painted": 106
+        },
+        "processing_events": 103,
+        "capture": 0,
+        "ingest": 3,
+        "apply": 6,
+        "long_animation_frames": {
+          "count": 47,
+          "max_ms": 91.4
+        },
+        "page_long_tasks": {
+          "count": 0,
+          "max_ms": 0
+        },
+        "resources": {
+          "count": 9,
+          "transfer_bytes": 2647558,
+          "decoded_bytes": 2644858
+        },
+        "memory_bytes": {
+          "first": {
+            "used": 44751340,
+            "total": 79528944,
+            "limit": 4395630592
+          },
+          "second": {
+            "used": 23785816,
+            "total": 80809144,
+            "limit": 4395630592
+          }
+        }
+      },
+      "raf_samples": {
+        "initial_240": {
+          "mean_ms": 17.08375,
+          "p95_ms": 17.4,
+          "p99_ms": 33.3,
+          "max_ms": 34.1,
+          "over_20_ms": 6,
+          "over_33_ms": 5,
+          "over_50_ms": 0,
+          "fps": 58.535
+        },
+        "stable_final_240": {
+          "mean_ms": 16.6667,
+          "p95_ms": 17.2,
+          "p99_ms": 17.6,
+          "max_ms": 17.6,
+          "over_20_ms": 0,
+          "fps": 60.0
+        }
+      },
+      "console": {
+        "warnings": 0,
+        "errors": 0,
+        "checked_at_both_samples": true
+      }
+    },
+    "existing_user_tab": {
+      "viewport": {
+        "width_css_px": 842,
+        "height_css_px": 964,
+        "device_pixel_ratio": 2,
+        "document_width_css_px": 842,
+        "document_height_css_px": 964,
+        "overflow": false
+      },
+      "rects_css_px": {
+        "header": {
+          "x": 48,
+          "y": 0,
+          "width": 794,
+          "height": 52
+        },
+        "stage_gl_overlay": {
+          "x": 48,
+          "y": 52,
+          "width": 518,
+          "height": 912
+        },
+        "hud": {
+          "x": 566,
+          "y": 52,
+          "width": 276,
+          "height": 912
+        }
+      },
+      "canvas": {
+        "backing_width": 1036,
+        "backing_height": 1824
+      },
+      "projection": {
+        "center_x": 259.0,
+        "center_y": 580.8,
+        "top_inset": 249.5,
+        "center_formula": "249.5 + (912 - 249.5) / 2"
+      },
+      "renderer": {
+        "api": "webgl2",
+        "layout": "sphere",
+        "simulation": "asleep"
+      },
+      "field_aria_fps": 60.0,
+      "frame_ms": {
+        "p95": 1.6,
+        "p99": 2.5,
+        "max": 2.5
+      },
+      "projection_base_ms": {
+        "p95": 1.1,
+        "p99": 1.1,
+        "max": 1.2
+      },
+      "overlay_effects_ms": {
+        "p95": 0.6,
+        "p99": 1.6,
+        "max": 1.6
+      },
+      "pending_raf": 0,
+      "event_queue": 0,
+      "lifetime_long_animation_frames": {
+        "count": 4,
+        "max_ms": 119.8,
+        "scope": "existing user tab lifetime; not comparable to the fresh-tab interval"
+      },
+      "page_long_tasks": {
+        "count": 0,
+        "max_ms": 0
+      },
+      "console": {
+        "warnings": 0,
+        "errors": 0
+      }
+    }
+  },
+  "caveats": [
+    "Dashboard, graph, ingest, semantic, reranker, and burn observations came from different deployed commits.",
+    "Backend HTTP captures span 2026-08-06T04:41:58Z through 04:42:22Z while background ingest was active; they are not an atomic snapshot.",
+    "The ingest liveness payload read at 04:42:13Z carried a producer timestamp of 04:17:27Z and was approximately 25 minutes old.",
+    "Health status alert was attributed to semantic activity; drift false does not override Recall errors and timeouts, the Librarian block, or immature authority states.",
+    "The Cortex measurements did not exercise demo controls, buttons, or mutations.",
+    "The duplicate fresh-measurement tab was closed after capture; the original Cortex tab remained open."
+  ]
+}

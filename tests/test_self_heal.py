@@ -11,7 +11,30 @@ import pytest
 
 
 @pytest.fixture()
-def isolated_wiki(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+def ingest_ollama_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[str]:
+    """Stub the import-by-value availability consumer used by ingest."""
+
+    from chronovisor.ingest import orchestrator
+
+    calls: list[str] = []
+
+    def unavailable() -> bool:
+        calls.append("is_available")
+        return False
+
+    monkeypatch.setattr(orchestrator, "is_available", unavailable)
+    return calls
+
+
+@pytest.fixture()
+def isolated_wiki(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    ingest_ollama_unavailable: list[str],
+) -> Path:
+    del ingest_ollama_unavailable
     chronovisor_root = tmp_path / "wiki"
     pages = chronovisor_root / "pages"
     raw = chronovisor_root / "raw"
@@ -120,6 +143,19 @@ def isolated_wiki(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(ollama, "is_available", lambda: False)
     monkeypatch.setattr(search, "update_embeddings", lambda page_ids=None: 0)
     return chronovisor_root
+
+
+def test_ingest_ollama_fixture_patches_import_by_value_consumer(
+    monkeypatch: pytest.MonkeyPatch,
+    ingest_ollama_unavailable: list[str],
+) -> None:
+    from chronovisor.core import ollama
+    from chronovisor.ingest import orchestrator
+
+    monkeypatch.setattr(ollama, "is_available", lambda: True)
+
+    assert orchestrator.is_available() is False
+    assert ingest_ollama_unavailable == ["is_available"]
 
 
 def _seed_page(chronovisor_root: Path, rel: str) -> None:
@@ -1667,6 +1703,7 @@ def test_local_consensus_nonconvergence_restores_raw_without_frontier(
 
 def test_sandbox_drill_keeps_semantic_repair_out_of_frontier(
     monkeypatch: pytest.MonkeyPatch,
+    ingest_ollama_unavailable: list[str],
 ) -> None:
     from chronovisor.ops.self_heal import run_sandbox_drill
 
@@ -1682,6 +1719,7 @@ def test_sandbox_drill_keeps_semantic_repair_out_of_frontier(
     assert result["aliases"]["opus-4-7-evaluation-and-industry-geopolitics"] == (
         "ai/opus-4.7-evaluation-and-industry-geopolitics"
     )
+    assert ingest_ollama_unavailable
 
 
 def test_frontier_human_required_sends_notification(

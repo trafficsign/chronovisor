@@ -64,13 +64,13 @@ pre{background:#eee;padding:0.8rem 1rem;border-radius:6px;overflow:auto;line-hei
 </head>
 <body>
 <script type="application/json" id="plan-meta">
-{"task_id":"plan_c071e61508af439e9aff770445c2dfdd","created_at":"2026-08-06T12:21:04+09:00","状態":"draft","slug":"chronovisor-architecture-renewal"}
+{"task_id":"plan_c071e61508af439e9aff770445c2dfdd","created_at":"2026-08-06T12:21:04+09:00","状態":"running","slug":"chronovisor-architecture-renewal"}
 </script>
 
 <header>
 <h1>Plan: <span id="plan-title">Chronovisor 全体アーキテクチャ刷新（Campaign O–V）</span></h1>
 <div class="meta-bar">
-<span class="badge" data-bind="状態" data-state="draft">draft</span>
+<span class="badge" data-bind="状態" data-state="running">running</span>
 <span><code data-bind="task_id">plan_xxx</code></span>
 <span data-bind="created_at">1970-01-01T00:00:00+09:00</span>
 </div>
@@ -161,7 +161,7 @@ production ──X──&gt; lab implementation</pre>
 <section data-section="実行手順">
 <h2>実行手順</h2>
 <ol class="checklist">
-<li><input type="checkbox"><span><strong>Campaign O — Green baselineと不変条件の固定</strong>
+<li><input type="checkbox" checked><span><strong>Campaign O — Green baselineと不変条件の固定</strong>
   <ul>
     <li>専用branchを作り、HEAD、worktree、package/import graph、hotspot、51 entry points、7 tracked plist、authority/schema hash、production healthをmachine-readable baseline artifactへ記録する。</li>
     <li>現在のRuff・mypy・large-function policy failureを、先にcharacterization testを足してから修正する。cap引上げや対象除外は禁止。</li>
@@ -305,7 +305,7 @@ CHRONOVISOR_ROOT="$test_root" PYTHONDONTWRITEBYTECODE=1 \
 <section class="blockers" data-section="ブロッカー">
 <h2>ブロッカー（発生時のみ）</h2>
 <ul>
-<li>なし。状態は<code>draft</code>であり、実装開始にはユーザーの計画承認が必要。</li>
+<li>なし。</li>
 </ul>
 </section>
 
@@ -324,7 +324,13 @@ CHRONOVISOR_ROOT="$test_root" PYTHONDONTWRITEBYTECODE=1 \
 
 <section data-section="実行ログ">
 <h2>実行ログ</h2>
-<ol class="log"></ol>
+<ol class="log">
+<li><time>2026-08-06 12:44</time><span>Campaign O を開始。計画を <code>running</code> へ更新し、Green baseline と不変条件の固定に着手。</span></li>
+<li><time>2026-08-06 14:39</time><span>Campaign O の pre-full checkpoint。品質failure修正、architecture/live baseline、CI gate、live Ollama zero-attempt guardの実装とfocused reviewまで完了。最終static validationとauthoritative隔離full suiteは未完了のため、Campaign Oはin progress・未チェックのまま維持。</span></li>
+<li><time>2026-08-06 15:00</time><span>最初のauthoritative隔離full suiteは無効・red。<code>3132 collected</code>に対してJUnitは<code>3118 passed</code>、<code>1 skipped</code>、<code>15 failed reports</code>（うち<code>2</code>件はguard ledgerのsynthetic duplicate）を記録した。self-healとDashboardの未隔離Ollama依存、およびnative Ollama CLI依存はPython guard／Seatbeltによりkernel到達前またはkernel境界で阻止され、production repositoryとoperator stateは変更されなかった。この実行はCampaign Oのgreen証跡には採用しない。</span></li>
+<li><time>2026-08-06 15:47</time><span>無効full suiteで露呈したtest dependencyをproduction変更なしで隔離し、Python socket/native subprocess guardを親・子processで強化。実<code>shell=True</code>、shell command-string、launcher wrapperをcategoricalに拒否し、修正Seatbelt profile下を含むfocused suiteとfinal reviewer approvalまで完了した。新しいauthoritative隔離full suiteは未実行のため、Campaign Oは<code>running</code>・未チェックのまま維持。</span></li>
+<li><time>2026-08-06 15:57</time><span>Campaign O 完了。authoritative rerun <code>/var/folders/9x/qdg4yvh503d3bfnbcv1cnbgw0000gn/T/campaign-o-authoritative-rerun.R7EkCPqSuJ</code> はpytest <code>rc=0</code>、JUnit <code>3221 tests / 0 failures / 0 errors / 1 skipped</code>（<code>3220 passed</code>）。suite-tag Seatbelt denial <code>0</code>、Python/native guard hit <code>0</code>、model activity exact allowlist検証green、Ollama API <code>95</code> samples・最大gap <code>3s</code>、repository hash／mtime／status不変条件をすべて満たした。Campaign Oのみを完了チェックし、全体計画は<code>running</code>、Campaign Pは未開始・未チェックのまま維持。</span></li>
+</ol>
 </section>
 
 </body>

@@ -16,6 +16,13 @@ from chronovisor.librarian.librarian_status import (
 from chronovisor.ops import dashboard
 
 
+@pytest.fixture(autouse=True)
+def _isolate_model_inventory(monkeypatch: pytest.MonkeyPatch) -> None:
+    from chronovisor.core import ollama
+
+    monkeypatch.setattr(ollama, "model_digests", lambda _models: {})
+
+
 def test_dashboard_static_contract_exposes_librarian_progress() -> None:
     html = (dashboard.STATIC_DIR / "index.html").read_text(encoding="utf-8")
     js = (dashboard.STATIC_DIR / "app.js").read_text(encoding="utf-8")
@@ -193,7 +200,21 @@ def test_collection_review_queue_is_visible_but_not_catch_up_work(
 
 def test_collection_review_required_is_terminal_with_visible_hold(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from chronovisor.librarian import collection_authority
+
+    review_roles: list[str] = []
+
+    def isolated_review(*_args, role: str = "primary", **_kwargs):
+        review_roles.append(role)
+        return {"reviewer_calls": 0}
+
+    monkeypatch.setattr(
+        collection_authority,
+        "review_collection_queue",
+        isolated_review,
+    )
     page = tmp_path / "pages" / "misc" / "note.md"
     page.parent.mkdir(parents=True)
     page.write_text(
@@ -206,6 +227,7 @@ def test_collection_review_required_is_terminal_with_visible_hold(
         encoding="utf-8",
     )
     run_shadow(root=tmp_path, full_sweep=True)
+    assert review_roles == ["primary", "challenger"]
 
     from chronovisor.librarian.librarian_status import build_librarian_status
 

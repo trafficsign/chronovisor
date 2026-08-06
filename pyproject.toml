@@ -123,6 +123,7 @@ source_modules = ["chronovisor.core"]
 forbidden_modules = [
     "chronovisor.raw",
     "chronovisor.ingest",
+    "chronovisor.knowledge_graph",
     "chronovisor.recall",
     "chronovisor.search",
     "chronovisor.classification",

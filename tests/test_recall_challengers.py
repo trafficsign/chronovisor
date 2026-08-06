@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import pytest
+
+from chronovisor.lab import recall_challengers
 from chronovisor.lab.recall_challengers import (
     adoption_gate,
     run_report,
@@ -78,7 +81,23 @@ def test_challenger_requires_complete_nondegrading_speed_metrics() -> None:
     assert top_k_reproduction([["a", "b"]], [["a", "b"]], k=2) == 1.0
 
 
-def test_report_never_adopts_unmeasured_challengers(tmp_path) -> None:
+@pytest.fixture()
+def no_live_ollama_cli(monkeypatch: pytest.MonkeyPatch) -> None:
+    original_which = recall_challengers.shutil.which
+
+    def isolated_which(command: str) -> str | None:
+        if command == "ollama":
+            return None
+        return original_which(command)
+
+    monkeypatch.setattr(recall_challengers.shutil, "which", isolated_which)
+
+
+def test_report_never_adopts_unmeasured_challengers(
+    tmp_path,
+    no_live_ollama_cli: None,
+) -> None:
+    del no_live_ollama_cli
     report = run_report(
         baseline={
             "recall_at_5": 0.563,
@@ -93,6 +112,8 @@ def test_report_never_adopts_unmeasured_challengers(tmp_path) -> None:
 
     assert report["winner"] is None
     assert report["production_changed"] is False
+    assert report["environment"]["ollama_executable"] == ""
+    assert report["environment"]["ollama_version"] == ""
     assert set(report["excluded_production"]) == {
         "dsi",
         "memory_lora",
@@ -100,7 +121,11 @@ def test_report_never_adopts_unmeasured_challengers(tmp_path) -> None:
     }
 
 
-def test_report_selects_only_a_measured_gate_winner(tmp_path) -> None:
+def test_report_selects_only_a_measured_gate_winner(
+    tmp_path,
+    no_live_ollama_cli: None,
+) -> None:
+    del no_live_ollama_cli
     baseline = {
         "recall_at_5": 0.563,
         "negative_hit_at_20": 0.229,
@@ -128,3 +153,5 @@ def test_report_selects_only_a_measured_gate_winner(tmp_path) -> None:
     assert report["winner"] == "colbert"
     assert report["challengers"]["colbert"]["adopted"] is True
     assert report["production_changed"] is False
+    assert report["environment"]["ollama_executable"] == ""
+    assert report["environment"]["ollama_version"] == ""

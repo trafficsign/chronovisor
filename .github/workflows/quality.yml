@@ -1,0 +1,61 @@
+name: quality
+
+on:
+  pull_request:
+  push:
+
+permissions:
+  contents: read
+
+jobs:
+  frozen-quality-gates:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CHRONOVISOR_ROOT: ${{ runner.temp }}/chronovisor-test-root
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          python-version: "3.13"
+      - run: uv sync --frozen
+      - run: uv run --frozen ruff check --no-cache src scripts tests
+      - run: uv run --frozen mypy
+      - run: uv run --frozen lint-imports --no-cache
+      - name: Architecture and refactor contracts
+        run: |
+          uv run --frozen python scripts/architecture_baseline.py \
+            --check docs/refactoring/architecture-baseline.json
+          uv run --frozen pytest -q \
+            tests/test_architecture_baseline.py \
+            tests/test_large_function_policy.py \
+            tests/test_module_layout.py \
+            tests/test_refactor_inventory.py
+      - run: uv run --frozen python -m compileall -q src scripts
+      - name: Check changed-file whitespace
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          if git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
+            git diff --check "${BASE_SHA}...HEAD"
+          elif git rev-parse --verify HEAD^ >/dev/null 2>&1; then
+            git diff --check HEAD^...HEAD
+          else
+            empty_tree="$(git hash-object -t tree /dev/null)"
+            git diff --check "${empty_tree}" HEAD
+          fi
+      - name: Isolated full test suite
+        run: >-
+          uv run --frozen pytest -q
+          --junitxml=${{ runner.temp }}/chronovisor-junit.xml
+      - name: Upload pytest JUnit
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: chronovisor-pytest-junit
+          path: ${{ runner.temp }}/chronovisor-junit.xml
+          if-no-files-found: warn

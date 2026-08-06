@@ -17,6 +17,7 @@ from contextlib import contextmanager, suppress
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
+from types import FrameType
 from typing import Any, cast
 
 import httpx
@@ -1248,7 +1249,7 @@ def _emit_progress(
 def _model_activity_caller() -> tuple[str, str]:
     """Identify the first caller outside this adapter without recording prompts."""
 
-    frame = sys._getframe(1)
+    frame: FrameType | None = sys._getframe(1)
     while frame is not None:
         component = str(frame.f_globals.get("__name__") or "")
         if component and component not in {__name__, "contextlib"}:

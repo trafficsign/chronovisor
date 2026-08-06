@@ -3,9 +3,11 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -13,6 +15,80 @@ from chronovisor.core.durable_state import DurableStateError, seal_object
 from chronovisor.raw.raw_segment import append_capture
 from chronovisor.recall import recall_answer_eval
 from chronovisor.recall.recall_runtime import stable_prompt_hash
+
+
+def test_answer_evaluation_gate_projection_preserves_sealed_bytes() -> None:
+    names = [
+        "sealed_split_manifest",
+        "immutable_gold_manifest",
+        "scorer_calibration",
+        "preregistered_before_run",
+        "episode_ledger_exact",
+        "registered_adapters",
+        "evaluation_kind_authorized",
+        "runner_identity",
+        "all_pairs_verified",
+        "minimum_independent_samples",
+        "valid_confidence_bound",
+        "authority_protocol_fixed",
+        "improvement_point",
+        "improvement_lower_bound",
+        "non_degradation",
+        "no_leakage",
+        "dimension_bounds_valid",
+    ]
+    values = {name: index % 2 == 0 for index, name in enumerate(names)}
+
+    gates = recall_answer_eval._answer_evaluation_gates(**values)
+
+    assert list(gates) == names
+    assert gates == values
+    assert (
+        seal_object({"gates": gates})["seal_sha256"]
+        == "a164e4b2323a920c55623402f2cc967718fc50a56a65418b44b0c734dc0d70d2"
+    )
+
+
+def test_strict_outcome_effect_projection_preserves_failure_semantics() -> None:
+    row = {
+        "episode_id": "episode-1",
+        "decision_id": "decision-1",
+        "score_delta": 0.25,
+        "used_page_bindings": [
+            {
+                "page_id": "page-1",
+                "page_uid": "uid-1",
+                "content_sha256": "a" * 64,
+            }
+        ],
+        "session_hash": "b" * 64,
+        "query_sha256": "c" * 64,
+        "observed_at": "2026-08-06T00:00:00Z",
+    }
+
+    rewards, penalties = recall_answer_eval._strict_outcome_page_effects([row])
+
+    assert rewards == [
+        {
+            "episode_id": "episode-1",
+            "decision_id": "decision-1",
+            "page_id": "page-1",
+            "page_uid": "uid-1",
+            "content_sha256": "a" * 64,
+            "producer": "verified_answer_pair_v2",
+            "session_hash": "b" * 64,
+            "query_sha256": "c" * 64,
+            "observed_at": "2026-08-06T00:00:00Z",
+            "reward": 0.25,
+        }
+    ]
+    assert penalties == []
+    with pytest.raises(KeyError):
+        recall_answer_eval._strict_outcome_page_effects([{}])
+    with pytest.raises(TypeError):
+        recall_answer_eval._strict_outcome_page_effects(
+            [{**row, "used_page_bindings": [None]}]
+        )
 
 
 def _write_rows(path: Path, rows: list[dict]) -> None:

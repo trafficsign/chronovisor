@@ -18,6 +18,30 @@ from chronovisor.ingest import orchestrator
 from chronovisor.ops import dashboard, runtime_status
 
 
+@pytest.fixture(autouse=True)
+def isolate_live_decision_router_resolution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep dashboard unit tests from validating policy against live Ollama."""
+
+    from chronovisor.decision import decision_router
+
+    def use_configured_policy(config: object) -> SimpleNamespace:
+        return SimpleNamespace(
+            config=config,
+            artifact_sha256=None,
+            source="bootstrap",
+            error=None,
+        )
+
+    monkeypatch.setattr(dashboard, "resolve_router_policy", use_configured_policy)
+    monkeypatch.setattr(
+        decision_router,
+        "resolve_router_policy",
+        use_configured_policy,
+    )
+
+
 def _reset_processing_activity_cache() -> None:
     with dashboard._PROCESSING_ACTIVITY_CACHE_CONDITION:
         dashboard._PROCESSING_ACTIVITY_CACHE.update(
@@ -352,6 +376,16 @@ def test_local_consensus_snapshot_removes_dead_markers_and_exposes_redacted_metr
         encoding="utf-8",
     )
     monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", chronovisor_root)
+    monkeypatch.setattr(
+        dashboard,
+        "_resolved_decision_router_config",
+        lambda: SimpleNamespace(
+            primary_model="ornith:test",
+            challenger_model="challenger:test",
+            tie_break_model="tie-break:test",
+            num_ctx=32768,
+        ),
+    )
     monkeypatch.setattr(
         runtime_status,
         "_pid_is_alive",
@@ -1561,6 +1595,16 @@ def test_build_snapshot_combines_runtime_and_queue(tmp_path: Path, monkeypatch) 
     (raw_dir / "r1.md").write_text("raw")
 
     monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", chronovisor_root)
+    monkeypatch.setattr(
+        dashboard,
+        "_resolved_decision_router_config",
+        lambda: SimpleNamespace(
+            primary_model="ornith:test",
+            challenger_model="challenger:test",
+            tie_break_model="tie-break:test",
+            num_ctx=32768,
+        ),
+    )
     monkeypatch.setattr(dashboard, "LOG_FILE", chronovisor_root / "log.md")
     monkeypatch.setattr(runtime_status, "RUNTIME_DIR", runtime_dir)
     monkeypatch.setattr(runtime_status, "STATUS_FILE", runtime_dir / "status.json")
