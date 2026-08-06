@@ -54,42 +54,64 @@ not collect implementation constants from their consumers.
 The following are compatibility contracts, not architecture exceptions:
 
 - literal legacy module paths declared by `LEGACY_MODULE_PATHS`;
-- console entry-point names and targets declared in `pyproject.toml`.
+- console entry-point names and targets declared in `pyproject.toml`;
+- the 15 command/module dispatch pairs declared by `lab.cli.COMMANDS`.
 
 They are recorded separately under `compatibility_contracts` in the exception
-ledger. Changing a name or target requires an explicit compatibility migration,
-an observation period for live consumers, and a rollback path. A module move
-must preserve these strings until that migration is complete.
+ledger. A replacement is additive first: the old and new targets remain
+callable for at least one mixed-version release generation. Retirement requires
+all deployed readers and writers to use the canonical target, durable references
+and queues to be drained or replayed, and a minimum seven-day observation period
+with zero legacy module, command, or entry-point invocations. Before removal, an
+operator verifies that the previous GitHub-backed runtime archive still starts
+and passes health checks. Rollback restores the compatibility mapping or wrapper,
+redeploys that recorded commit, and restarts only the affected service. A module
+move must preserve the old strings until all retirement conditions are met.
 
 ### Existing exceptions and the fitness gate
 
 `docs/refactoring/architecture-exceptions.json` is the machine-readable ledger
 of every current cross-domain package edge, cross-domain private import,
 literal dynamic import, and schema-manifest implementation-constant import.
-Each package-edge row contains a `sites` diagnostic array enumerating all of its
+Each package-edge row contains an enforced `sites` array enumerating all of its
 current import statements. Package edges use one semantic identity per
-source/target package pair; sensitive statement exceptions use scope and a
-line-independent occurrence identity. Every exception also has a non-empty
-owner, deadline, removal campaign, and rationale.
+source/target package pair; sites and sensitive statement exceptions use scope
+and a line-independent occurrence identity plus normalized statement-content
+hash. Every exception also has a source-domain/component owner, deadline,
+removal campaign, and rationale.
+
+`docs/refactoring/architecture-exception-baseline.json` is the separate frozen
+ceiling. Each ID class has disjoint `active` and `retired` sets whose union must
+equal the inventory produced by applying the current scanner to the fixed
+Campaign O source commit. The bootstrap mode reads only that historical commit.
+The normal `--retire-missing-exceptions` mode may move IDs only from `active` to
+`retired`; it cannot add an ID, reactivate a retired ID, or change the historical
+source commit. `--generate-exceptions` requires the current tree to match the
+active seed exactly. The detailed ledger cannot authorize itself by rewriting
+this seed.
 
 The architecture fitness gate is fail-closed. It rejects:
 
 - a package-edge or sensitive-statement identity not present in the frozen
   baseline;
+- a new site inside an existing package edge, including production-to-`lab`
+  static or literal dynamic sites;
 - a current package edge or sensitive statement missing from the detailed
   ledger;
-- a stale ledger row whose code site no longer exists;
+- an unrecorded, stale, duplicate, identity-mismatched, content-mismatched, or
+  count-mismatched site;
+- an ID reintroduced after retirement or any active-to-retired history reversal;
 - a baseline identity missing from the detailed ledger;
 - missing exception metadata or a malformed semantic identity;
-- growth of production-to-`lab` package edges;
+- growth of production-to-`lab` package edges or static/dynamic import sites;
 - drift in protected compatibility contracts.
 
 Existing edge and strongly connected component baselines remain no-growth
 ceilings. Removals are allowed. Removing an exception requires deleting its code
-dependency, detailed ledger row, and frozen baseline identity in the same
-change; package-edge removal also requires deleting all diagnostic sites for
-that edge. Ledger-only removal and code-only removal both fail. New exceptions
-are not accepted as a way to make a build green.
+dependency and detailed ledger row while moving the corresponding seed ID from
+`active` to `retired` in the same change; package-edge removal also requires
+retiring all sites for that edge. Ledger-only, code-only, and seed-only removal
+all fail. New exceptions are not accepted as a way to make a build green.
 
 The edge-and-statement ledger is the Campaign P0 enforcement mechanism. A new
 hard Import Linter layering contract is deliberately deferred until Campaign
