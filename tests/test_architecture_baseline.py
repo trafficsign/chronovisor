@@ -11,6 +11,20 @@ import pytest
 
 ROOT = Path(__file__).parents[1]
 BASELINE = ROOT / "docs" / "refactoring" / "architecture-baseline.json"
+EMPTY_EXCEPTION_VIOLATIONS = {
+    "ledger_load_error": "",
+    "ledger_schema_version": [],
+    "new_exception_ids": [],
+    "unrecorded_exception_ids": [],
+    "stale_exception_ids": [],
+    "baseline_semantic_id_non_subset": [],
+    "exception_identity_mismatches": [],
+    "exception_metadata_missing": [],
+    "duplicate_exception_ids": [],
+    "production_to_lab_edge_growth": [],
+    "compatibility_contract_drift": {},
+    "compatibility_metadata_missing": [],
+}
 
 
 def _load_script() -> ModuleType:
@@ -37,6 +51,29 @@ def current(architecture: ModuleType) -> dict[str, Any]:
     return architecture.scan_repository(ROOT, captured_at="verification")
 
 
+def _exception_inputs(
+    current: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
+    return (
+        copy.deepcopy(current["worktree_source"]),
+        copy.deepcopy(current["architecture_exception_ledger"]),
+        copy.deepcopy(current["compatibility_contracts"]),
+    )
+
+
+def _exception_violations(
+    architecture: ModuleType,
+    source: dict[str, Any],
+    ledger: dict[str, Any],
+    compatibility: list[dict[str, Any]],
+) -> dict[str, Any]:
+    return architecture._architecture_exception_violations(
+        source,
+        ledger,
+        compatibility,
+    )
+
+
 def test_baseline_records_complete_pre_campaign_inventory(
     baseline: dict[str, Any],
 ) -> None:
@@ -44,9 +81,10 @@ def test_baseline_records_complete_pre_campaign_inventory(
     assert baseline["campaign"] == "O"
     assert baseline["campaign_started_at"] == "2026-08-06T12:44:00+09:00"
     assert baseline["captured_at"] != baseline["campaign_started_at"]
-    assert "before the authoritative isolated full suite" in baseline[
-        "captured_at_semantics"
-    ]
+    assert (
+        "before the authoritative isolated full suite"
+        in baseline["captured_at_semantics"]
+    )
     assert baseline["repository"]["head_at_capture"] == (
         "d341d575f56c1f3217840e20a0dd144799244a89"
     )
@@ -114,9 +152,7 @@ def test_baseline_labels_repository_contract_hash_semantics(
 def test_baseline_keeps_live_evidence_out_of_repository_gates(
     baseline: dict[str, Any],
 ) -> None:
-    exclusions = {
-        row["evidence"] for row in baseline["live_only_exclusions"]
-    }
+    exclusions = {row["evidence"] for row in baseline["live_only_exclusions"]}
     assert exclusions == {
         "production_runtime_archives_and_running_processes",
         "production_authority_artifact_identity",
@@ -141,6 +177,7 @@ def test_current_architecture_does_not_weaken_baseline(
         "launchd_drift": {},
         "contract_hash_drift": {},
         "architecture_contract_drift": {},
+        **EMPTY_EXCEPTION_VIOLATIONS,
     }
 
 
@@ -210,10 +247,7 @@ def test_python_source_digest_distinguishes_crlf_from_lf(
     lf, _edges = architecture._source_inventory(package_root)
 
     assert crlf["totals"] == lf["totals"]
-    assert (
-        crlf["python_source_bytes_sha256"]
-        != lf["python_source_bytes_sha256"]
-    )
+    assert crlf["python_source_bytes_sha256"] != lf["python_source_bytes_sha256"]
 
 
 def test_entrypoint_and_launchd_surfaces_still_match_baseline(
@@ -275,3 +309,404 @@ def test_import_scanner_covers_function_scope_root_and_relative_imports(
     _source, edges = architecture._source_inventory(package_root)
 
     assert edges == [["core", "ops"], ["ops", "core"]]
+
+
+def test_statement_inventory_groups_edges_and_keeps_sensitive_sites(
+    architecture: ModuleType, tmp_path: Path
+) -> None:
+    package_root = tmp_path / "src" / "chronovisor"
+    for package in ("decision", "lab", "ops"):
+        path = package_root / package
+        path.mkdir(parents=True)
+        (path / "__init__.py").write_text("", encoding="utf-8")
+    (package_root / "ops" / "sample.py").write_text(
+        "import importlib\n"
+        "from chronovisor.lab._private import _value\n"
+        "from chronovisor.decision.decision_schema_manifest import "
+        "NON_DECISION_FIELDS\n"
+        "\n"
+        "def load():\n"
+        "    importlib.import_module('chronovisor.lab.worker')\n"
+        "    return __import__('chronovisor.lab.plugin')\n",
+        encoding="utf-8",
+    )
+
+    source, edges = architecture._source_inventory(package_root)
+    rows = source["import_sites"]
+    exceptions = architecture._architecture_exception_rows(source)
+
+    assert edges == [["ops", "decision"], ["ops", "lab"]]
+    assert source["import_site_counts"] == {
+        "cross_domain_import": 2,
+        "dynamic_import": 2,
+        "private_symbol_import": 1,
+        "schema_manifest_implementation_import": 1,
+    }
+    assert len({row["semantic_id"] for row in rows}) == len(rows)
+    assert {
+        row["statement_kind"] for row in rows if row["category"] == "dynamic_import"
+    } == {"__import__", "importlib.import_module"}
+    assert (
+        next(row for row in rows if row["category"] == "dynamic_import")["scope_kind"]
+        == "function"
+    )
+    edge_rows = [row for row in exceptions if row["category"] == "cross_domain_edge"]
+    assert {(row["source_package"], row["target_package"]) for row in edge_rows} == {
+        ("ops", "decision"),
+        ("ops", "lab"),
+    }
+    assert sum(len(row["sites"]) for row in edge_rows) == 2
+    assert {row["category"] for row in exceptions} == {
+        "cross_domain_edge",
+        "dynamic_import",
+        "private_symbol_import",
+        "schema_manifest_implementation_import",
+    }
+
+
+def test_statement_semantic_identity_ignores_source_line_moves(
+    architecture: ModuleType, tmp_path: Path
+) -> None:
+    package_root = tmp_path / "src" / "chronovisor"
+    for package in ("core", "ops"):
+        path = package_root / package
+        path.mkdir(parents=True)
+        (path / "__init__.py").write_text("", encoding="utf-8")
+    module = package_root / "core" / "sample.py"
+    module.write_text(
+        "from chronovisor.ops import public_api\n",
+        encoding="utf-8",
+    )
+    before, _edges = architecture._source_inventory(package_root)
+    module.write_text(
+        "\n\n\nfrom chronovisor.ops import public_api\n",
+        encoding="utf-8",
+    )
+    after, _edges = architecture._source_inventory(package_root)
+
+    before_site = before["import_sites"][0]
+    after_site = after["import_sites"][0]
+    assert before_site["line"] == 1
+    assert after_site["line"] == 4
+    assert before_site["semantic_id"] == after_site["semantic_id"]
+    assert (
+        architecture._architecture_exception_rows(before)[0]["semantic_id"]
+        == architecture._architecture_exception_rows(after)[0]["semantic_id"]
+    )
+
+
+def test_current_exception_ledger_is_complete_and_grouped_by_edge(
+    architecture: ModuleType,
+    current: dict[str, Any],
+) -> None:
+    source, ledger, compatibility = _exception_inputs(current)
+    detected = architecture._architecture_exception_rows(source)
+    detected_ids = {row["semantic_id"] for row in detected}
+    ledger_ids = {row["semantic_id"] for row in ledger["exceptions"]}
+    edge_rows = [
+        row for row in ledger["exceptions"] if row["category"] == "cross_domain_edge"
+    ]
+    raw_cross_sites = [
+        row
+        for row in source["import_sites"]
+        if row["category"] == "cross_domain_import"
+    ]
+
+    assert detected_ids == ledger_ids == set(ledger["baseline_semantic_ids"])
+    assert len(detected_ids) == len(detected)
+    assert len(edge_rows) == current["worktree_architecture"]["edge_count"]
+    assert sum(len(row["sites"]) for row in edge_rows) == len(raw_cross_sites)
+    assert ledger["counts"]["cross_domain_sites"] == len(raw_cross_sites)
+    assert {row["kind"] for row in compatibility} == {
+        "console_entrypoint",
+        "module_string",
+    }
+    assert {row["semantic_id"] for row in ledger["compatibility_contracts"]} == {
+        row["semantic_id"] for row in compatibility
+    }
+    assert (
+        _exception_violations(
+            architecture,
+            source,
+            ledger,
+            compatibility,
+        )
+        == EMPTY_EXCEPTION_VIOLATIONS
+    )
+
+
+def test_exception_gate_rejects_new_edge_even_when_detailed_row_is_added(
+    architecture: ModuleType,
+    current: dict[str, Any],
+) -> None:
+    source, ledger, compatibility = _exception_inputs(current)
+    existing_edges = {
+        (row["source_package"], row["target_package"])
+        for row in source["import_sites"]
+        if row["category"] == "cross_domain_import"
+    }
+    source_package, target_package = next(
+        (source_name, target_name)
+        for source_name in source["packages"]
+        for target_name in source["packages"]
+        if source_name != target_name
+        and target_name != "lab"
+        and (source_name, target_name) not in existing_edges
+    )
+    template = next(
+        row
+        for row in source["import_sites"]
+        if row["category"] == "cross_domain_import"
+    )
+    import_site = {
+        **template,
+        "source_package": source_package,
+        "source_module": f"chronovisor.{source_package}.new_dependency",
+        "scope_kind": "module",
+        "scope": "<module>",
+        "statement_kind": "from",
+        "target_package": target_package,
+        "target_module": f"chronovisor.{target_package}.public_api",
+        "symbols": ["public_api"],
+        "occurrence": 1,
+        "line": 1,
+    }
+    import_site["semantic_id"] = architecture._semantic_id(import_site)
+    source["import_sites"].append(import_site)
+    new_edge = next(
+        row
+        for row in architecture._architecture_exception_rows(source)
+        if row["category"] == "cross_domain_edge"
+        and row["source_package"] == source_package
+        and row["target_package"] == target_package
+    )
+    ledger["exceptions"].append(
+        {
+            **new_edge,
+            "owner": "test-owner",
+            "deadline": "2099-12-31",
+            "removal_campaign": "P9",
+            "rationale": "Synthetic new edge.",
+        }
+    )
+
+    violations = _exception_violations(
+        architecture,
+        source,
+        ledger,
+        compatibility,
+    )
+
+    assert violations["new_exception_ids"] == [new_edge["semantic_id"]]
+    assert violations["unrecorded_exception_ids"] == []
+
+
+def test_exception_gate_rejects_new_sensitive_statement_on_existing_edge(
+    architecture: ModuleType,
+    current: dict[str, Any],
+) -> None:
+    source, ledger, compatibility = _exception_inputs(current)
+    template = next(
+        row for row in source["import_sites"] if row["category"] == "dynamic_import"
+    )
+    import_site = {
+        **template,
+        "source_module": f"{template['source_module']}.new_dynamic_site",
+        "scope_kind": "module",
+        "scope": "<module>",
+        "occurrence": 1,
+        "line": 1,
+    }
+    import_site["semantic_id"] = architecture._semantic_id(import_site)
+    source["import_sites"].append(import_site)
+    ledger["exceptions"].append(
+        {
+            **import_site,
+            "owner": "test-owner",
+            "deadline": "2099-12-31",
+            "removal_campaign": "P9",
+            "rationale": "Synthetic sensitive statement.",
+        }
+    )
+
+    violations = _exception_violations(
+        architecture,
+        source,
+        ledger,
+        compatibility,
+    )
+
+    assert violations["new_exception_ids"] == [import_site["semantic_id"]]
+    assert violations["unrecorded_exception_ids"] == []
+
+
+def test_exception_gate_rejects_stale_rows_and_missing_metadata(
+    architecture: ModuleType,
+    current: dict[str, Any],
+) -> None:
+    source, ledger, compatibility = _exception_inputs(current)
+    edge = next(
+        row for row in ledger["exceptions"] if row["category"] == "cross_domain_edge"
+    )
+    source["import_sites"] = [
+        row
+        for row in source["import_sites"]
+        if row["category"] != "cross_domain_import"
+        or row["source_package"] != edge["source_package"]
+        or row["target_package"] != edge["target_package"]
+    ]
+    ledger["exceptions"][0].pop("owner", None)
+
+    violations = _exception_violations(
+        architecture,
+        source,
+        ledger,
+        compatibility,
+    )
+
+    assert violations["stale_exception_ids"] == [edge["semantic_id"]]
+    assert violations["exception_metadata_missing"] == [
+        {
+            "semantic_id": ledger["exceptions"][0]["semantic_id"],
+            "missing": ["owner"],
+        }
+    ]
+
+
+def test_exception_gate_rejects_baseline_ids_missing_from_detailed_ledger(
+    architecture: ModuleType,
+    current: dict[str, Any],
+) -> None:
+    source, ledger, compatibility = _exception_inputs(current)
+    missing_id = "arch:baseline-without-ledger-row"
+    ledger["baseline_semantic_ids"].append(missing_id)
+
+    violations = _exception_violations(
+        architecture,
+        source,
+        ledger,
+        compatibility,
+    )
+
+    assert violations["baseline_semantic_id_non_subset"] == [missing_id]
+
+
+def test_exception_gate_allows_code_and_ledger_deletion_together(
+    architecture: ModuleType,
+    current: dict[str, Any],
+) -> None:
+    source, ledger, compatibility = _exception_inputs(current)
+    edge = next(
+        row
+        for row in ledger["exceptions"]
+        if row["category"] == "cross_domain_edge" and row["target_package"] != "lab"
+    )
+    source["import_sites"] = [
+        row
+        for row in source["import_sites"]
+        if row["source_package"] != edge["source_package"]
+        or row["target_package"] != edge["target_package"]
+    ]
+    remaining_ids = {
+        row["semantic_id"] for row in architecture._architecture_exception_rows(source)
+    }
+    ledger["exceptions"] = [
+        row for row in ledger["exceptions"] if row["semantic_id"] in remaining_ids
+    ]
+    ledger["baseline_semantic_ids"] = [
+        semantic_id
+        for semantic_id in ledger["baseline_semantic_ids"]
+        if semantic_id in remaining_ids
+    ]
+    ledger["production_to_lab_baseline_semantic_ids"] = [
+        semantic_id
+        for semantic_id in ledger["production_to_lab_baseline_semantic_ids"]
+        if semantic_id in remaining_ids
+    ]
+
+    violations = _exception_violations(
+        architecture,
+        source,
+        ledger,
+        compatibility,
+    )
+
+    assert violations == EMPTY_EXCEPTION_VIOLATIONS
+
+
+def test_exception_gate_rejects_production_to_lab_growth(
+    architecture: ModuleType,
+    current: dict[str, Any],
+) -> None:
+    source, ledger, compatibility = _exception_inputs(current)
+    existing_sources = {
+        row["source_package"]
+        for row in source["import_sites"]
+        if row["category"] == "cross_domain_import" and row["target_package"] == "lab"
+    }
+    source_package = next(
+        package
+        for package in sorted(architecture.PRODUCTION_PACKAGES)
+        if package not in existing_sources
+    )
+    template = next(
+        row
+        for row in source["import_sites"]
+        if row["category"] == "cross_domain_import"
+    )
+    import_site = {
+        **template,
+        "source_package": source_package,
+        "source_module": f"chronovisor.{source_package}.new_lab_dependency",
+        "scope_kind": "module",
+        "scope": "<module>",
+        "statement_kind": "from",
+        "target_package": "lab",
+        "target_module": "chronovisor.lab.contract",
+        "symbols": ["contract"],
+        "occurrence": 1,
+        "line": 1,
+    }
+    import_site["semantic_id"] = architecture._semantic_id(import_site)
+    source["import_sites"].append(import_site)
+    new_edge = next(
+        row
+        for row in architecture._architecture_exception_rows(source)
+        if row["category"] == "cross_domain_edge"
+        and row["source_package"] == source_package
+        and row["target_package"] == "lab"
+    )
+
+    violations = _exception_violations(
+        architecture,
+        source,
+        ledger,
+        compatibility,
+    )
+
+    assert violations["production_to_lab_edge_growth"] == [new_edge["semantic_id"]]
+
+
+def test_exception_gate_rejects_compatibility_contract_drift(
+    architecture: ModuleType,
+    current: dict[str, Any],
+) -> None:
+    source, ledger, compatibility = _exception_inputs(current)
+    previous_id = compatibility[0]["semantic_id"]
+    compatibility[0]["target"] += ":moved"
+    compatibility[0]["semantic_id"] = architecture._compatibility_semantic_id(
+        compatibility[0]
+    )
+
+    violations = _exception_violations(
+        architecture,
+        source,
+        ledger,
+        compatibility,
+    )
+
+    assert violations["compatibility_contract_drift"] == {
+        "unrecorded": [compatibility[0]["semantic_id"]],
+        "stale": [previous_id],
+        "identity_mismatches": [],
+    }

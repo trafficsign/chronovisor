@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate and verify the Campaign O repository architecture baseline."""
+"""Generate and verify repository architecture baselines and exception ledgers."""
 
 from __future__ import annotations
 
@@ -36,6 +36,36 @@ LIVE_ONLY_EXCLUSIONS = [
         "reason": "viewport, event latency, frame pacing, and memory need a live browser",
     },
 ]
+ARCHITECTURE_EXCEPTION_LEDGER = Path("docs/refactoring/architecture-exceptions.json")
+EXCEPTION_METADATA_FIELDS = ("owner", "deadline", "removal_campaign", "rationale")
+PRODUCTION_PACKAGES = frozenset(
+    {
+        "classification",
+        "core",
+        "decision",
+        "hosts",
+        "ingest",
+        "knowledge_graph",
+        "librarian",
+        "ops",
+        "raw",
+        "recall",
+        "research",
+        "search",
+    }
+)
+STATEMENT_IDENTITY_FIELDS = (
+    "category",
+    "source_package",
+    "source_module",
+    "scope_kind",
+    "scope",
+    "statement_kind",
+    "target_package",
+    "target_module",
+    "symbols",
+    "occurrence",
+)
 
 
 class _FunctionCounter(ast.NodeVisitor):
@@ -55,9 +85,7 @@ class _FunctionCounter(ast.NodeVisitor):
     def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
         self._visit_function(node)
 
-    def _visit_function(
-        self, node: ast.FunctionDef | ast.AsyncFunctionDef
-    ) -> None:
+    def _visit_function(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
         self.count += 1
         end_line = node.end_lineno or node.lineno
         self.rows.append(
@@ -142,6 +170,191 @@ def _import_targets(node: ast.ImportFrom, *, relative_path: Path) -> list[str]:
     return [target]
 
 
+def _module_name(relative_path: Path) -> str:
+    parts = list(relative_path.with_suffix("").parts)
+    if parts and parts[-1] == "__init__":
+        parts.pop()
+    return ".".join(("chronovisor", *parts))
+
+
+def _semantic_identity(row: dict[str, Any]) -> dict[str, Any]:
+    if row.get("category") == "cross_domain_edge":
+        return {
+            key: row[key]
+            for key in (
+                "category",
+                "source_package",
+                "target_package",
+            )
+        }
+    return {key: row[key] for key in STATEMENT_IDENTITY_FIELDS}
+
+
+def _semantic_id(row: dict[str, Any]) -> str:
+    return f"arch:{_canonical_sha256(_semantic_identity(row))}"
+
+
+class _ImportSiteCollector(ast.NodeVisitor):
+    def __init__(
+        self,
+        *,
+        relative_path: Path,
+        source_package: str,
+        package_set: set[str],
+    ) -> None:
+        self.relative_path = relative_path
+        self.source_package = source_package
+        self.source_module = _module_name(relative_path)
+        self.package_set = package_set
+        self.scope: list[tuple[str, str]] = []
+        self.rows: list[dict[str, Any]] = []
+        self.occurrences: dict[str, int] = {}
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        self.scope.append(("class", node.name))
+        self.generic_visit(node)
+        self.scope.pop()
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self.scope.append(("function", node.name))
+        self.generic_visit(node)
+        self.scope.pop()
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        self.scope.append(("function", node.name))
+        self.generic_visit(node)
+        self.scope.pop()
+
+    def visit_Import(self, node: ast.Import) -> None:
+        for alias in node.names:
+            self._record_static(
+                node=node,
+                statement_kind="import",
+                target_module=alias.name,
+                symbols=[],
+            )
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+        target = _import_target(node, relative_path=self.relative_path)
+        if target is None:
+            return
+        if target == "chronovisor":
+            for alias in node.names:
+                self._record_static(
+                    node=node,
+                    statement_kind="from",
+                    target_module=f"chronovisor.{alias.name}",
+                    symbols=[alias.name],
+                )
+            return
+        self._record_static(
+            node=node,
+            statement_kind="from",
+            target_module=target,
+            symbols=[alias.name for alias in node.names],
+        )
+
+    def visit_Call(self, node: ast.Call) -> None:
+        target = ""
+        statement_kind = ""
+        if isinstance(node.func, ast.Name) and node.func.id == "__import__":
+            statement_kind = "__import__"
+        elif (
+            isinstance(node.func, ast.Attribute)
+            and node.func.attr == "import_module"
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "importlib"
+        ):
+            statement_kind = "importlib.import_module"
+        if statement_kind and node.args:
+            literal = node.args[0]
+            if isinstance(literal, ast.Constant) and isinstance(literal.value, str):
+                target = literal.value
+        if target.startswith("chronovisor."):
+            self._add_row(
+                node=node,
+                category="dynamic_import",
+                statement_kind=statement_kind,
+                target_module=target,
+                symbols=[],
+            )
+        self.generic_visit(node)
+
+    def _record_static(
+        self,
+        *,
+        node: ast.Import | ast.ImportFrom,
+        statement_kind: str,
+        target_module: str,
+        symbols: list[str],
+    ) -> None:
+        parts = target_module.split(".")
+        if len(parts) < 2 or parts[0] != "chronovisor":
+            return
+        target_package = parts[1]
+        if target_package not in self.package_set:
+            return
+        if target_package != self.source_package:
+            self._add_row(
+                node=node,
+                category="cross_domain_import",
+                statement_kind=statement_kind,
+                target_module=target_module,
+                symbols=symbols,
+            )
+            if any(symbol.startswith("_") for symbol in symbols) or any(
+                part.startswith("_") for part in parts[2:]
+            ):
+                self._add_row(
+                    node=node,
+                    category="private_symbol_import",
+                    statement_kind=statement_kind,
+                    target_module=target_module,
+                    symbols=symbols,
+                )
+        if target_module == "chronovisor.decision.decision_schema_manifest" and any(
+            symbol.startswith("_") or symbol.isupper() for symbol in symbols
+        ):
+            self._add_row(
+                node=node,
+                category="schema_manifest_implementation_import",
+                statement_kind=statement_kind,
+                target_module=target_module,
+                symbols=symbols,
+            )
+
+    def _add_row(
+        self,
+        *,
+        node: ast.AST,
+        category: str,
+        statement_kind: str,
+        target_module: str,
+        symbols: list[str],
+    ) -> None:
+        target_parts = target_module.split(".")
+        scope_kind = self.scope[-1][0] if self.scope else "module"
+        row: dict[str, Any] = {
+            "category": category,
+            "source_package": self.source_package,
+            "source_module": self.source_module,
+            "scope_kind": scope_kind,
+            "scope": ".".join(name for _kind, name in self.scope) or "<module>",
+            "statement_kind": statement_kind,
+            "target_package": target_parts[1] if len(target_parts) > 1 else "",
+            "target_module": target_module,
+            "symbols": sorted(set(symbols)),
+            "line": int(getattr(node, "lineno", 0)),
+        }
+        occurrence_key = _canonical_sha256(
+            {key: row[key] for key in STATEMENT_IDENTITY_FIELDS if key != "occurrence"}
+        )
+        row["occurrence"] = self.occurrences.get(occurrence_key, 0) + 1
+        self.occurrences[occurrence_key] = row["occurrence"]
+        row["semantic_id"] = _semantic_id(row)
+        self.rows.append(row)
+
+
 def _source_inventory(package_root: Path) -> tuple[dict[str, Any], list[list[str]]]:
     packages = _package_names(package_root)
     package_set = set(packages)
@@ -151,6 +364,7 @@ def _source_inventory(package_root: Path) -> tuple[dict[str, Any], list[list[str
     source_digests: list[tuple[str, str]] = []
     module_rows: list[dict[str, Any]] = []
     function_rows: list[dict[str, Any]] = []
+    import_rows: list[dict[str, Any]] = []
     for package in packages:
         metrics = {"modules": 0, "lines": 0, "functions": 0}
         for path in sorted((package_root / package).rglob("*.py")):
@@ -175,10 +389,15 @@ def _source_inventory(package_root: Path) -> tuple[dict[str, Any], list[list[str
                     "sha256": digest,
                 }
             )
-            function_rows.extend(
-                {"path": module_path, **row} for row in counter.rows
-            )
+            function_rows.extend({"path": module_path, **row} for row in counter.rows)
             relative_path = path.relative_to(package_root)
+            collector = _ImportSiteCollector(
+                relative_path=relative_path,
+                source_package=package,
+                package_set=package_set,
+            )
+            collector.visit(tree)
+            import_rows.extend(collector.rows)
             for node in ast.walk(tree):
                 targets: list[str] = []
                 if isinstance(node, ast.Import):
@@ -221,6 +440,13 @@ def _source_inventory(package_root: Path) -> tuple[dict[str, Any], list[list[str
             }
         )
         function_rows.extend({"path": module_path, **row} for row in counter.rows)
+        collector = _ImportSiteCollector(
+            relative_path=path.relative_to(package_root),
+            source_package="<top-level>",
+            package_set=package_set,
+        )
+        collector.visit(tree)
+        import_rows.extend(collector.rows)
     for key, value in top_level.items():
         totals[key] += value
     inventory = {
@@ -242,9 +468,75 @@ def _source_inventory(package_root: Path) -> tuple[dict[str, Any], list[list[str
             function_rows,
             key=lambda row: (-row["lines"], row["path"], row["qualname"]),
         )[:50],
+        "import_sites": sorted(
+            import_rows,
+            key=lambda row: (
+                row["semantic_id"],
+                row["line"],
+            ),
+        ),
+        "import_site_counts": dict(
+            sorted(
+                {
+                    category: sum(row["category"] == category for row in import_rows)
+                    for category in {row["category"] for row in import_rows}
+                }.items()
+            )
+        ),
         "python_source_bytes_sha256": _canonical_sha256(source_digests),
     }
     return inventory, [list(edge) for edge in sorted(edges)]
+
+
+def _architecture_exception_rows(
+    source: dict[str, Any],
+) -> list[dict[str, Any]]:
+    import_sites = [
+        dict(row) for row in source.get("import_sites", []) if isinstance(row, dict)
+    ]
+    cross_domain_sites: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    exceptions: list[dict[str, Any]] = []
+    statement_categories = {
+        "dynamic_import",
+        "private_symbol_import",
+        "schema_manifest_implementation_import",
+    }
+    for row in import_sites:
+        category = row.get("category")
+        if category == "cross_domain_import":
+            edge = (str(row["source_package"]), str(row["target_package"]))
+            cross_domain_sites.setdefault(edge, []).append(
+                {
+                    key: row[key]
+                    for key in (
+                        "semantic_id",
+                        "source_module",
+                        "scope_kind",
+                        "scope",
+                        "statement_kind",
+                        "target_module",
+                        "symbols",
+                        "occurrence",
+                        "line",
+                    )
+                }
+            )
+        elif category in statement_categories:
+            exceptions.append(row)
+
+    for (source_package, target_package), sites in cross_domain_sites.items():
+        edge_row: dict[str, Any] = {
+            "category": "cross_domain_edge",
+            "source_package": source_package,
+            "target_package": target_package,
+            "sites": sorted(
+                sites,
+                key=lambda row: (row["semantic_id"], row["line"]),
+            ),
+        }
+        edge_row["semantic_id"] = _semantic_id(edge_row)
+        exceptions.append(edge_row)
+    return sorted(exceptions, key=lambda row: row["semantic_id"])
 
 
 def _source_inventory_at_revision(
@@ -262,9 +554,7 @@ def _source_inventory_at_revision(
         return _source_inventory(Path(directory) / "src" / "chronovisor")
 
 
-def _tracked_non_python_assets(
-    root: Path, *, revision: str | None
-) -> dict[str, Any]:
+def _tracked_non_python_assets(root: Path, *, revision: str | None) -> dict[str, Any]:
     if revision is None:
         paths = _run_git(root, "ls-files", "src/chronovisor").splitlines()
     else:
@@ -359,6 +649,156 @@ def _entrypoints(pyproject: dict[str, Any]) -> list[dict[str, str]]:
     ]
 
 
+def _compatibility_semantic_id(row: dict[str, Any]) -> str:
+    identity = {key: row[key] for key in ("kind", "name", "target")}
+    return f"compat:{_canonical_sha256(identity)}"
+
+
+def _legacy_module_paths(package_root: Path) -> dict[str, str]:
+    path = package_root / "core" / "module_paths.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    for node in tree.body:
+        if not isinstance(node, ast.AnnAssign):
+            continue
+        if not isinstance(node.target, ast.Name):
+            continue
+        if node.target.id != "LEGACY_MODULE_PATHS" or node.value is None:
+            continue
+        payload = ast.literal_eval(node.value)
+        if not isinstance(payload, dict):
+            break
+        return {str(key): str(value) for key, value in payload.items()}
+    raise ValueError(f"LEGACY_MODULE_PATHS literal not found in {path}")
+
+
+def _compatibility_contracts(
+    pyproject: dict[str, Any], package_root: Path
+) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    for legacy, target in sorted(_legacy_module_paths(package_root).items()):
+        row = {"kind": "module_string", "name": legacy, "target": target}
+        row["semantic_id"] = _compatibility_semantic_id(row)
+        rows.append(row)
+    for entrypoint in _entrypoints(pyproject):
+        row = {
+            "kind": "console_entrypoint",
+            "name": entrypoint["name"],
+            "target": entrypoint["target"],
+        }
+        row["semantic_id"] = _compatibility_semantic_id(row)
+        rows.append(row)
+    return sorted(rows, key=lambda row: row["semantic_id"])
+
+
+def _load_architecture_exception_ledger(root: Path) -> dict[str, Any]:
+    path = root / ARCHITECTURE_EXCEPTION_LEDGER
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return {
+            "schema_version": 0,
+            "baseline_semantic_ids": [],
+            "exceptions": [],
+            "compatibility_contracts": [],
+            "load_error": f"{type(exc).__name__}: {exc}",
+        }
+    if not isinstance(payload, dict):
+        return {
+            "schema_version": 0,
+            "baseline_semantic_ids": [],
+            "exceptions": [],
+            "compatibility_contracts": [],
+            "load_error": "ledger root must be an object",
+        }
+    return payload
+
+
+def build_architecture_exception_ledger(root: Path) -> dict[str, Any]:
+    root = root.resolve()
+    package_root = root / "src" / "chronovisor"
+    pyproject = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+    source, _edges = _source_inventory(package_root)
+    detected_rows = _architecture_exception_rows(source)
+    detected_by_id = {str(row["semantic_id"]): dict(row) for row in detected_rows}
+    rationale = {
+        "cross_domain_edge": (
+            "Existing package dependency pending a published contract or use-case port."
+        ),
+        "private_symbol_import": (
+            "Existing cross-domain private API dependency pending public API extraction."
+        ),
+        "dynamic_import": (
+            "Existing literal dynamic import retained until composition ownership moves."
+        ),
+        "schema_manifest_implementation_import": (
+            "Existing schema implementation constant dependency pending contract publication."
+        ),
+    }
+    exceptions: list[dict[str, Any]] = []
+    for semantic_id, detected in sorted(detected_by_id.items()):
+        row = dict(detected)
+        row.update(
+            {
+                "semantic_id": semantic_id,
+                "owner": "chronovisor-architecture",
+                "deadline": "2026-09-30",
+                "removal_campaign": "P9",
+                "rationale": rationale[str(row["category"])],
+            }
+        )
+        exceptions.append(row)
+
+    compatibility_contracts: list[dict[str, Any]] = []
+    for detected in _compatibility_contracts(pyproject, package_root):
+        compatibility_contracts.append(
+            {
+                **detected,
+                "owner": "chronovisor-compatibility",
+                "deadline": "2026-12-31",
+                "removal_campaign": "V",
+                "rationale": (
+                    "Protected compatibility surface; retire only with an explicit migration."
+                ),
+            }
+        )
+    semantic_ids = sorted(detected_by_id)
+    return {
+        "schema_version": 1,
+        "captured_from_head": _run_git(root, "rev-parse", "HEAD").strip(),
+        "semantic_identity": (
+            "cross-domain edges use category+source_package+target_package; "
+            "statement exceptions use category+source_package+source_module+"
+            "scope_kind+scope+statement_kind+target_package+target_module+symbols+"
+            "occurrence; source line and edge sites are diagnostic only"
+        ),
+        "baseline_semantic_ids": semantic_ids,
+        "production_to_lab_baseline_semantic_ids": sorted(
+            semantic_id
+            for semantic_id, row in detected_by_id.items()
+            if row.get("category") == "cross_domain_edge"
+            and row.get("source_package") in PRODUCTION_PACKAGES
+            and row.get("target_package") == "lab"
+        ),
+        "counts": {
+            "exceptions": len(exceptions),
+            "by_category": dict(
+                sorted(
+                    {
+                        category: sum(row["category"] == category for row in exceptions)
+                        for category in {row["category"] for row in exceptions}
+                    }.items()
+                )
+            ),
+            "cross_domain_sites": source["import_site_counts"].get(
+                "cross_domain_import", 0
+            ),
+            "compatibility_contracts": len(compatibility_contracts),
+        },
+        "exceptions": exceptions,
+        "compatibility_contracts": compatibility_contracts,
+    }
+
+
 def _launchd_inventory(root: Path) -> list[dict[str, Any]]:
     paths = [
         line
@@ -449,20 +889,19 @@ def _contract_hashes(root: Path) -> dict[str, Any]:
 def scan_repository(root: Path, *, captured_at: str) -> dict[str, Any]:
     root = root.resolve()
     pyproject = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
-    worktree_source, worktree_edges = _source_inventory(
-        root / "src" / "chronovisor"
+    worktree_source, worktree_edges = _source_inventory(root / "src" / "chronovisor")
+    compatibility_contracts = _compatibility_contracts(
+        pyproject,
+        root / "src" / "chronovisor",
     )
+    architecture_exception_ledger = _load_architecture_exception_ledger(root)
     worktree_status = _run_git(root, "status", "--short").splitlines()
     protected_paths = {
         "_handoff/2026-06-11_0042_recall-redesign.md",
         "logs/",
     }
-    protected_status = [
-        row for row in worktree_status if row[3:] in protected_paths
-    ]
-    campaign_status = [
-        row for row in worktree_status if row not in protected_status
-    ]
+    protected_status = [row for row in worktree_status if row[3:] in protected_paths]
+    campaign_status = [row for row in worktree_status if row not in protected_status]
     source_base = _run_git(
         root,
         "log",
@@ -529,6 +968,8 @@ def scan_repository(root: Path, *, captured_at: str) -> dict[str, Any]:
             ),
         },
         "console_entrypoints": _entrypoints(pyproject),
+        "compatibility_contracts": compatibility_contracts,
+        "architecture_exception_ledger": architecture_exception_ledger,
         "tracked_launchd_plists": _launchd_inventory(root),
         "contract_hashes": _contract_hashes(root),
         "live_only_exclusions": LIVE_ONLY_EXCLUSIONS,
@@ -559,13 +1000,124 @@ def _keyed_rows_drift(
     return {name: values for name, values in drift.items() if values}
 
 
+def _missing_metadata(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    missing: list[dict[str, Any]] = []
+    for row in rows:
+        absent = [
+            field
+            for field in EXCEPTION_METADATA_FIELDS
+            if not isinstance(row.get(field), str) or not str(row[field]).strip()
+        ]
+        if absent:
+            missing.append(
+                {
+                    "semantic_id": str(row.get("semantic_id") or ""),
+                    "missing": absent,
+                }
+            )
+    return missing
+
+
+def _architecture_exception_violations(
+    current_source: dict[str, Any],
+    ledger: dict[str, Any],
+    current_compatibility: list[dict[str, Any]],
+) -> dict[str, Any]:
+    detected_rows = _architecture_exception_rows(current_source)
+    detected = {str(row["semantic_id"]): row for row in detected_rows}
+    exception_rows = [
+        dict(row) for row in ledger.get("exceptions", []) if isinstance(row, dict)
+    ]
+    recorded = {str(row.get("semantic_id") or ""): row for row in exception_rows}
+    baseline_ids = {str(value) for value in ledger.get("baseline_semantic_ids", [])}
+    detected_ids = set(detected)
+    recorded_ids = {value for value in recorded if value}
+
+    identity_mismatches: list[str] = []
+    for semantic_id, row in recorded.items():
+        try:
+            expected = _semantic_id(row)
+        except KeyError:
+            expected = ""
+        if not semantic_id or semantic_id != expected:
+            identity_mismatches.append(semantic_id)
+
+    compatibility_rows = [
+        dict(row)
+        for row in ledger.get("compatibility_contracts", [])
+        if isinstance(row, dict)
+    ]
+    recorded_compatibility = {
+        str(row.get("semantic_id") or ""): row for row in compatibility_rows
+    }
+    current_compatibility_ids = {
+        str(row["semantic_id"]) for row in current_compatibility
+    }
+    recorded_compatibility_ids = {value for value in recorded_compatibility if value}
+    compatibility_identity_mismatches: list[str] = []
+    for semantic_id, row in recorded_compatibility.items():
+        try:
+            expected = _compatibility_semantic_id(row)
+        except KeyError:
+            expected = ""
+        if not semantic_id or semantic_id != expected:
+            compatibility_identity_mismatches.append(semantic_id)
+
+    production_lab_baseline = {
+        str(value)
+        for value in ledger.get("production_to_lab_baseline_semantic_ids", [])
+    }
+    production_lab_current = {
+        semantic_id
+        for semantic_id, row in detected.items()
+        if row.get("category") == "cross_domain_edge"
+        and row.get("source_package") in PRODUCTION_PACKAGES
+        and row.get("target_package") == "lab"
+    }
+    return {
+        "ledger_load_error": str(ledger.get("load_error") or ""),
+        "ledger_schema_version": (
+            [] if ledger.get("schema_version") == 1 else [ledger.get("schema_version")]
+        ),
+        "new_exception_ids": sorted(detected_ids - baseline_ids),
+        "unrecorded_exception_ids": sorted(detected_ids - recorded_ids),
+        "stale_exception_ids": sorted(recorded_ids - detected_ids),
+        "baseline_semantic_id_non_subset": sorted(baseline_ids - recorded_ids),
+        "exception_identity_mismatches": sorted(identity_mismatches),
+        "exception_metadata_missing": _missing_metadata(exception_rows),
+        "duplicate_exception_ids": sorted(
+            semantic_id
+            for semantic_id in recorded_ids
+            if sum(
+                str(row.get("semantic_id") or "") == semantic_id
+                for row in exception_rows
+            )
+            > 1
+        ),
+        "production_to_lab_edge_growth": sorted(
+            production_lab_current - production_lab_baseline
+        ),
+        "compatibility_contract_drift": {
+            "unrecorded": sorted(
+                current_compatibility_ids - recorded_compatibility_ids
+            ),
+            "stale": sorted(recorded_compatibility_ids - current_compatibility_ids),
+            "identity_mismatches": sorted(compatibility_identity_mismatches),
+        }
+        if (
+            current_compatibility_ids != recorded_compatibility_ids
+            or compatibility_identity_mismatches
+        )
+        else {},
+        "compatibility_metadata_missing": _missing_metadata(compatibility_rows),
+    }
+
+
 def architecture_fitness(
     baseline: dict[str, Any], current: dict[str, Any]
 ) -> dict[str, Any]:
     baseline_architecture = baseline["architecture"]
-    current_architecture = current.get(
-        "worktree_architecture", current["architecture"]
-    )
+    current_architecture = current.get("worktree_architecture", current["architecture"])
     baseline_packages = set(baseline["source"]["packages"])
     current_source = current.get("worktree_source", current["source"])
     current_packages = set(current_source["packages"])
@@ -582,7 +1134,9 @@ def architecture_fitness(
         component
         for component in current_architecture["strongly_connected_components"]
         if len(component) > 1
-        and not any(set(component).issubset(baseline) for baseline in baseline_components)
+        and not any(
+            set(component).issubset(baseline) for baseline in baseline_components
+        )
     ]
     observations = {
         "new_packages": new_packages,
@@ -593,15 +1147,15 @@ def architecture_fitness(
             "baseline_manifest_sha256": baseline["source"]
             .get("tracked_non_python_assets", {})
             .get("manifest_sha256", ""),
-            "current_manifest_sha256": current_source
-            .get("tracked_non_python_assets", {})
-            .get("manifest_sha256", ""),
+            "current_manifest_sha256": current_source.get(
+                "tracked_non_python_assets", {}
+            ).get("manifest_sha256", ""),
             "baseline_file_count": baseline["source"]
             .get("tracked_non_python_assets", {})
             .get("file_count", 0),
-            "current_file_count": current_source
-            .get("tracked_non_python_assets", {})
-            .get("file_count", 0),
+            "current_file_count": current_source.get(
+                "tracked_non_python_assets", {}
+            ).get("file_count", 0),
         },
     }
     entrypoint_drift = _keyed_rows_drift(
@@ -627,9 +1181,17 @@ def architecture_fitness(
                 "contracts", current["architecture"]["contracts"]
             ),
         }
-        if baseline_architecture["contracts"]
-        != current["architecture"]["contracts"]
+        if baseline_architecture["contracts"] != current["architecture"]["contracts"]
         else {}
+    )
+    exception_violations = _architecture_exception_violations(
+        current_source,
+        current.get("architecture_exception_ledger", {}),
+        [
+            dict(row)
+            for row in current.get("compatibility_contracts", [])
+            if isinstance(row, dict)
+        ],
     )
     violations = {
         "new_edges": new_edges,
@@ -639,6 +1201,7 @@ def architecture_fitness(
         "launchd_drift": launchd_drift,
         "contract_hash_drift": contract_hash_drift,
         "architecture_contract_drift": architecture_contract_drift,
+        **exception_violations,
     }
     return {
         "schema_version": SCHEMA_VERSION,
@@ -658,18 +1221,21 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--captured-at", default="")
     parser.add_argument("--output", type=Path)
     parser.add_argument("--check", type=Path)
+    parser.add_argument("--generate-exceptions", action="store_true")
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    captured_at = args.captured_at or "verification"
-    current = scan_repository(args.root, captured_at=captured_at)
-    payload = current
+    if args.generate_exceptions:
+        payload = build_architecture_exception_ledger(args.root)
+    else:
+        captured_at = args.captured_at or "verification"
+        payload = scan_repository(args.root, captured_at=captured_at)
     exit_code = 0
-    if args.check is not None:
+    if args.check is not None and not args.generate_exceptions:
         baseline = json.loads(args.check.read_text(encoding="utf-8"))
-        payload = architecture_fitness(baseline, current)
+        payload = architecture_fitness(baseline, payload)
         exit_code = 0 if payload["passed"] else 1
     encoded = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
     if args.output is None:

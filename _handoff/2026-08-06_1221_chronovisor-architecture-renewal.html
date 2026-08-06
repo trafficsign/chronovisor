@@ -172,7 +172,7 @@ production ──X──&gt; lab implementation</pre>
   <div class="exit"><strong>Exit:</strong> 既存挙動のまま全baseline gateがgreen。以降の各Campaignが同一基準で比較可能。</div>
 </span></li>
 
-<li><input type="checkbox"><span><strong>Campaign P — Contracts、ownership、依存fitness</strong>
+<li><input type="checkbox"><span><strong>Campaign P — Contracts、ownership、依存fitness</strong> <em>— in progress (P0)</em>
   <ul>
     <li>ADRで上記layer、許可依存、public API、compatibility期間を確定する。package名の変更自体を目的にしない。</li>
     <li>durable artifact／queue／lock／socket／schema／workerごとに、単一writer、reader、lock scope、version、retention、recovery ownerをregistry化する。</li>
@@ -330,6 +330,7 @@ CHRONOVISOR_ROOT="$test_root" PYTHONDONTWRITEBYTECODE=1 \
 <li><time>2026-08-06 15:00</time><span>最初のauthoritative隔離full suiteは無効・red。<code>3132 collected</code>に対してJUnitは<code>3118 passed</code>、<code>1 skipped</code>、<code>15 failed reports</code>（うち<code>2</code>件はguard ledgerのsynthetic duplicate）を記録した。self-healとDashboardの未隔離Ollama依存、およびnative Ollama CLI依存はPython guard／Seatbeltによりkernel到達前またはkernel境界で阻止され、production repositoryとoperator stateは変更されなかった。この実行はCampaign Oのgreen証跡には採用しない。</span></li>
 <li><time>2026-08-06 15:47</time><span>無効full suiteで露呈したtest dependencyをproduction変更なしで隔離し、Python socket/native subprocess guardを親・子processで強化。実<code>shell=True</code>、shell command-string、launcher wrapperをcategoricalに拒否し、修正Seatbelt profile下を含むfocused suiteとfinal reviewer approvalまで完了した。新しいauthoritative隔離full suiteは未実行のため、Campaign Oは<code>running</code>・未チェックのまま維持。</span></li>
 <li><time>2026-08-06 15:57</time><span>Campaign O 完了。authoritative rerun <code>/var/folders/9x/qdg4yvh503d3bfnbcv1cnbgw0000gn/T/campaign-o-authoritative-rerun.R7EkCPqSuJ</code> はpytest <code>rc=0</code>、JUnit <code>3221 tests / 0 failures / 0 errors / 1 skipped</code>（<code>3220 passed</code>）。suite-tag Seatbelt denial <code>0</code>、Python/native guard hit <code>0</code>、model activity exact allowlist検証green、Ollama API <code>95</code> samples・最大gap <code>3s</code>、repository hash／mtime／status不変条件をすべて満たした。Campaign Oのみを完了チェックし、全体計画は<code>running</code>、Campaign Pは未開始・未チェックのまま維持。</span></li>
+<li><time>2026-08-06 16:23</time><span>Campaign P の P0 を開始。layer／public API／compatibility方針をADRへ固定し、現行<code>95</code> package edgeと全<code>1267</code> cross-domain import site、private／dynamic／schema-manifest例外、legacy module string／console entry pointを機械生成ledgerへ記録。新規・stale・metadata欠落・production→lab増加・compatibility driftを拒否するfitness gateとfocused testを追加中。Campaign Pはin progress・未チェックのまま維持。</span></li>
 </ol>
 </section>
 
