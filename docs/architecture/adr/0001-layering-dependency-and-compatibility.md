@@ -48,6 +48,10 @@ documenting and testing its compatibility contract does not make it public.
 Domain implementation packages do not import another domain's private symbols.
 Schema registries publish stable schema identities through a contract; they do
 not collect implementation constants from their consumers.
+Inside the two registry scopes, every imported all-uppercase name is treated as
+an implementation constant without a target-module allowlist or a `_SCHEMA`
+suffix requirement. This includes names such as `SCHEMA`, `FOO_SCHEMA_VERSION`,
+and `FOO_SCHEMA_V2`, including same-package imports.
 
 ### Protected compatibility surfaces
 
@@ -83,7 +87,11 @@ removal campaign, and rationale.
 `docs/refactoring/architecture-exception-baseline.json` is the separate frozen
 ceiling. Each ID class has disjoint `active` and `retired` sets whose union must
 equal the inventory produced by applying the current scanner to the fixed
-Campaign O source commit. The bootstrap mode reads only that historical commit.
+Campaign O source commit
+`d404a6b20d00e3bcd1d4cdb89edfa5a718c51833`. The bootstrap mode reads only that
+historical commit. A valid previous seed must name that exact commit, and the
+current seed must retain the previous seed's source commit; changing the module
+constant, current seed, and ledger together therefore cannot move the ceiling.
 The normal `--retire-missing-exceptions` mode may move IDs only from `active` to
 `retired`; it cannot add an ID, reactivate a retired ID, or change the historical
 source commit. `--generate-exceptions` requires the current tree to match the
@@ -112,6 +120,11 @@ dependency and detailed ledger row while moving the corresponding seed ID from
 `active` to `retired` in the same change; package-edge removal also requires
 retiring all sites for that edge. Ledger-only, code-only, and seed-only removal
 all fail. New exceptions are not accepted as a way to make a build green.
+
+Production-to-`lab` milestones distinguish import-site work from package-edge
+retirement. P2 tracks the classification site work, while the
+classification-to-`lab` package-edge row carries P3 and is retired only when the
+edge count reaches zero.
 
 The edge-and-statement ledger is the Campaign P0 enforcement mechanism. A new
 hard Import Linter layering contract is deliberately deferred until Campaign

@@ -1979,7 +1979,7 @@
       "semantic_id": "arch:0f37f016df9c2c328a0edc59fd3b3c4b8039921bde3fdaaede27d59f34be9f60",
       "owner": "chronovisor.classification",
       "deadline": "2026-08-31",
-      "removal_campaign": "P2",
+      "removal_campaign": "P3",
       "rationale": "Remove the classification->lab package edge through a published contract."
     },
     {

@@ -342,11 +342,7 @@ class _ImportSiteCollector(ast.NodeVisitor):
                     target_module=target_module,
                     symbols=symbols,
                 )
-        schema_symbols = [
-            symbol
-            for symbol in symbols
-            if symbol.isupper() and symbol.endswith("_SCHEMA")
-        ]
+        schema_symbols = [symbol for symbol in symbols if symbol.isupper()]
         if (
             self.source_module == SCHEMA_MANIFEST_MODULE
             and self.scope
@@ -1032,7 +1028,21 @@ def _seed_state_violations(
     active_growth: dict[str, list[str]] = {}
     duplicate_seed_ids: dict[str, list[str]] = {}
     previous_available = (
-        previous_seed.get("schema_version") == EXCEPTION_BASELINE_SCHEMA_VERSION
+        not previous_seed.get("load_error")
+        and previous_seed.get("schema_version") == EXCEPTION_BASELINE_SCHEMA_VERSION
+    )
+    current_source_head = seed.get("source_baseline_head")
+    previous_source_head = previous_seed.get("source_baseline_head")
+    previous_source_head_drift = (
+        []
+        if not previous_available
+        or previous_source_head == FROZEN_EXCEPTION_SOURCE_HEAD
+        else [previous_source_head]
+    )
+    source_head_history_drift = (
+        {}
+        if not previous_available or current_source_head == previous_source_head
+        else {"previous": previous_source_head, "current": current_source_head}
     )
     for field in EXCEPTION_BASELINE_ID_FIELDS:
         active = _seed_ids(seed, field, "active")
@@ -1103,9 +1113,11 @@ def _seed_state_violations(
         ),
         "seed_source_baseline_head_drift": (
             []
-            if seed.get("source_baseline_head") == FROZEN_EXCEPTION_SOURCE_HEAD
-            else [seed.get("source_baseline_head")]
+            if current_source_head == FROZEN_EXCEPTION_SOURCE_HEAD
+            else [current_source_head]
         ),
+        "previous_seed_source_baseline_head_drift": previous_source_head_drift,
+        "seed_source_baseline_head_history_drift": source_head_history_drift,
         "seed_structure_errors": _seed_structure_errors(seed),
         "seed_universe_drift": universe_drift,
         "seed_active_retired_overlap": overlap,
@@ -1168,7 +1180,7 @@ def _exception_removal_campaign(row: dict[str, Any]) -> str:
     target = str(row.get("target_package") or "")
     if target == "lab" and source in PRODUCTION_PACKAGES:
         if source == "classification":
-            return "P2" if category == "cross_domain_edge" else "P3"
+            return "P3"
         if source in {"decision", "ops", "search"}:
             return "P4"
         if source == "librarian":
@@ -1237,8 +1249,16 @@ def _preserved_metadata(
     fallback: dict[str, str],
     *,
     legacy_owner: str,
+    legacy_campaign: str | None = None,
 ) -> dict[str, str]:
-    if existing is None or existing.get("owner") == legacy_owner:
+    if (
+        existing is None
+        or existing.get("owner") == legacy_owner
+        or (
+            legacy_campaign is not None
+            and existing.get("removal_campaign") == legacy_campaign
+        )
+    ):
         return fallback
     if _missing_metadata([existing]):
         return fallback
@@ -1280,6 +1300,13 @@ def build_architecture_exception_ledger(root: Path) -> dict[str, Any]:
                     existing_exceptions.get(semantic_id),
                     _exception_metadata(detected),
                     legacy_owner="chronovisor-architecture",
+                    legacy_campaign=(
+                        "P2"
+                        if detected.get("category") == "cross_domain_edge"
+                        and detected.get("source_package") == "classification"
+                        and detected.get("target_package") == "lab"
+                        else None
+                    ),
                 ),
             }
         )

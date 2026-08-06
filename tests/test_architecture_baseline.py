@@ -42,6 +42,8 @@ EMPTY_EXCEPTION_VIOLATIONS = {
     "seed_load_error": "",
     "seed_schema_version": [],
     "seed_source_baseline_head_drift": [],
+    "previous_seed_source_baseline_head_drift": [],
+    "seed_source_baseline_head_history_drift": {},
     "seed_structure_errors": [],
     "seed_universe_drift": {},
     "seed_active_retired_overlap": {},
@@ -441,6 +443,48 @@ def test_statement_inventory_tracks_registry_to_implementation_direction(
         for row in schema_rows
     )
     assert len({row["semantic_id"] for row in rows}) == len(rows)
+
+
+def test_schema_registry_detects_all_uppercase_same_package_constants(
+    architecture: ModuleType, tmp_path: Path
+) -> None:
+    package_root = tmp_path / "src" / "chronovisor"
+    decision = package_root / "decision"
+    decision.mkdir(parents=True)
+    (decision / "__init__.py").write_text("", encoding="utf-8")
+    (decision / "decision_schema_manifest.py").write_text(
+        "def production_decision_schemas():\n"
+        "    from chronovisor.decision.schemas import (\n"
+        "        SCHEMA, FOO_SCHEMA_VERSION, FOO_SCHEMA_V2, lower_name\n"
+        "    )\n"
+        "\n"
+        "def background_decision_schemas():\n"
+        "    from chronovisor.decision.schemas import (\n"
+        "        BACKGROUND_SCHEMA_VERSION, mixed_Name\n"
+        "    )\n",
+        encoding="utf-8",
+    )
+
+    source, edges = architecture._source_inventory(package_root)
+    schema_rows = [
+        row
+        for row in source["import_sites"]
+        if row["category"] == "schema_manifest_implementation_import"
+    ]
+
+    assert edges == []
+    assert len(schema_rows) == 2
+    assert {row["target_module"] for row in schema_rows} == {
+        "chronovisor.decision.schemas"
+    }
+    assert {row["scope"]: row["symbols"] for row in schema_rows} == {
+        "production_decision_schemas": [
+            "FOO_SCHEMA_V2",
+            "FOO_SCHEMA_VERSION",
+            "SCHEMA",
+        ],
+        "background_decision_schemas": ["BACKGROUND_SCHEMA_VERSION"],
+    }
 
 
 def test_statement_semantic_identity_and_content_ignore_line_moves(
@@ -915,10 +959,9 @@ def test_exception_metadata_routes_to_real_owner_and_removal_campaign(
         for row in rows
     }
 
-    assert (
-        by_key[("cross_domain_edge", "classification", "lab")]["removal_campaign"]
-        == "P2"
-    )
+    classification_edge = by_key[("cross_domain_edge", "classification", "lab")]
+    assert classification_edge["removal_campaign"] == "P3"
+    assert classification_edge["deadline"] == architecture.CAMPAIGN_DEADLINES["P3"]
     assert (
         by_key[("private_symbol_import", "classification", "lab")]["removal_campaign"]
         == "P3"
@@ -935,8 +978,7 @@ def test_exception_metadata_routes_to_real_owner_and_removal_campaign(
         for row in rows
         if row["category"] == "private_symbol_import" and row["target_package"] != "lab"
     } == {"P8"}
-    assert {row["removal_campaign"] for row in rows} >= {
-        "P2",
+    assert {row["removal_campaign"] for row in rows} == {
         "P3",
         "P4",
         "P5",
@@ -1044,12 +1086,55 @@ def test_exception_artifacts_are_fresh_and_head_independent(
     assert architecture.build_architecture_exception_ledger(ROOT) == recorded_ledger
     assert "captured_from_head" not in recorded_seed
     assert "captured_from_head" not in recorded_ledger
-    assert recorded_seed["source_baseline_head"] == (
+    assert (
         architecture.FROZEN_EXCEPTION_SOURCE_HEAD
+        == "d404a6b20d00e3bcd1d4cdb89edfa5a718c51833"
+    )
+    assert (
+        recorded_seed["source_baseline_head"]
+        == architecture.FROZEN_EXCEPTION_SOURCE_HEAD
     )
     assert recorded_ledger["source_baseline_head"] == (
         architecture.FROZEN_EXCEPTION_SOURCE_HEAD
     )
+
+
+def test_frozen_source_head_rejects_coordinated_current_artifact_drift(
+    architecture: ModuleType,
+    current: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source, ledger, compatibility, seed, frozen, _previous = _exception_inputs(current)
+    previous = copy.deepcopy(seed)
+    original_head = seed["source_baseline_head"]
+    replacement_head = "0" * 40
+    monkeypatch.setattr(
+        architecture,
+        "FROZEN_EXCEPTION_SOURCE_HEAD",
+        replacement_head,
+    )
+    seed["source_baseline_head"] = replacement_head
+    frozen["source_baseline_head"] = replacement_head
+    ledger["source_baseline_head"] = replacement_head
+    ledger["baseline_sha256"] = architecture._canonical_sha256(seed)
+
+    violations = _exception_violations(
+        architecture,
+        source,
+        ledger,
+        compatibility,
+        seed,
+        frozen,
+        previous,
+    )
+
+    assert violations["ledger_source_baseline_head_drift"] == []
+    assert violations["seed_source_baseline_head_drift"] == []
+    assert violations["previous_seed_source_baseline_head_drift"] == [original_head]
+    assert violations["seed_source_baseline_head_history_drift"] == {
+        "previous": original_head,
+        "current": replacement_head,
+    }
 
 
 def test_compatibility_policy_requires_mixed_version_observation_and_rollback() -> None:
