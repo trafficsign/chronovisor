@@ -76,6 +76,7 @@ def evaluate_generic_expression(
         if value.has_origins:
             engine.facts.record_escape(
                 value,
+                node=node,
                 actor=actor,
                 operation="control:await",
                 sink="python.await",
@@ -129,6 +130,7 @@ def evaluate_generic_expression(
         if escaped.has_origins:
             engine.facts.record_escape(
                 escaped.bound(f"lambda:{actor}"),
+                node=node,
                 actor=actor,
                 operation="lambda",
                 sink="python.lambda",
@@ -231,6 +233,7 @@ def evaluate_generic_expression(
     if isinstance(node, (ast.BinOp, ast.Subscript)) and bound.has_origins:
         engine.facts.record_escape(
             bound,
+            node=node,
             actor=actor,
             operation=f"expression:{type(node).__name__.lower()}",
             sink=f"python.{type(node).__name__}",
@@ -453,6 +456,7 @@ def _record_comprehension_control(
     if value.has_origins:
         engine.facts.record_escape(
             value,
+            node=node,
             actor=actor,
             operation=f"control:{kind}",
             sink=f"python.{kind}",

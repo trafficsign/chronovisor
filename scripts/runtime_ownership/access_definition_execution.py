@@ -74,6 +74,7 @@ class DefinitionExecutionEngine(Protocol):
         module: str,
         node: ast.Call,
         ordinal: int,
+        site_node: ast.AST | None = None,
     ) -> None: ...
 
 
@@ -247,6 +248,7 @@ def apply_definition_decorators(
                     module=module,
                     node=call,
                     ordinal=ordinal,
+                    site_node=expression,
                 )
             applied = applied.merged(engine.returns[target].bound(f"result:{target}"))
         for target in sorted(decorator.class_targets):
@@ -257,6 +259,7 @@ def apply_definition_decorators(
             if current.has_origins:
                 engine.facts.record_escape(
                     current,
+                    node=expression,
                     actor=actor,
                     operation="definition:decorator_application",
                     sink="python.decorator",
@@ -341,6 +344,7 @@ def _evaluate_header_use(
     if value.has_origins:
         engine.facts.record_escape(
             value,
+            node=node,
             actor=actor,
             operation=f"definition:{kind}",
             sink=f"python.{kind}",

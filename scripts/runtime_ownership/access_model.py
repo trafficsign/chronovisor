@@ -63,6 +63,27 @@ def _module_name(path: str) -> str:
     return ".".join(parts)
 
 
+def _normalized_repo_relative_path(path: str) -> str:
+    raw = path.replace("\\", "/")
+    if PurePosixPath(raw).is_absolute():
+        raise ValueError(f"runtime syntax site path must be repo-relative: {path}")
+    parts: list[str] = []
+    for part in raw.split("/"):
+        if part in {"", "."}:
+            continue
+        if part == "..":
+            if not parts:
+                raise ValueError(
+                    f"runtime syntax site path escapes repository root: {path}"
+                )
+            parts.pop()
+            continue
+        parts.append(part)
+    if not parts:
+        raise ValueError("runtime syntax site path must name a repository file")
+    return "/".join(parts)
+
+
 @dataclass
 class FlowValue:
     origins: dict[str, frozenset[tuple[str, ...]]] = field(default_factory=dict)
@@ -291,6 +312,149 @@ def _class_definition_ref(
 
 
 @dataclass(frozen=True)
+class SyntaxSite:
+    """A line-independent executable syntax site with display-only evidence."""
+
+    site_id: str
+    scope: str
+    kind: str
+    syntax: str
+    occurrence: int
+    path: str
+    line: int
+
+
+def _collect_syntax_sites(
+    trees: Mapping[str, ast.Module],
+    paths: Mapping[str, str],
+    function_refs_by_node: Mapping[int, str],
+) -> dict[int, SyntaxSite]:
+    candidates: list[tuple[ast.AST, str, str, int]] = []
+
+    class ExecutableScopeVisitor(ast.NodeVisitor):
+        def __init__(self, module: str) -> None:
+            self.module = module
+            self.path = _normalized_repo_relative_path(paths[module])
+            self.scope = f"{module}:<module>"
+            self.class_ref: str | None = None
+            self.sequence = 0
+
+        def visit(self, node: ast.AST) -> Any:
+            if isinstance(node, (ast.stmt, ast.expr)):
+                candidates.append((node, self.scope, self.path, self.sequence))
+                self.sequence += 1
+            return super().visit(node)
+
+        def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+            self._visit_function(node)
+
+        def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+            self._visit_function(node)
+
+        def _visit_function(
+            self, node: ast.FunctionDef | ast.AsyncFunctionDef
+        ) -> None:
+            for expression in [
+                *node.decorator_list,
+                *node.args.defaults,
+                *(value for value in node.args.kw_defaults if value is not None),
+            ]:
+                self.visit(expression)
+            arguments = [
+                *node.args.posonlyargs,
+                *node.args.args,
+                *node.args.kwonlyargs,
+            ]
+            if node.args.vararg is not None:
+                arguments.append(node.args.vararg)
+            if node.args.kwarg is not None:
+                arguments.append(node.args.kwarg)
+            for argument in arguments:
+                if argument.annotation is not None:
+                    self.visit(argument.annotation)
+            if node.returns is not None:
+                self.visit(node.returns)
+            function_ref = function_refs_by_node.get(id(node))
+            if function_ref is None:
+                return
+            previous_scope = self.scope
+            previous_class_ref = self.class_ref
+            self.scope = function_ref
+            for statement in node.body:
+                self.visit(statement)
+            self.scope = previous_scope
+            self.class_ref = previous_class_ref
+
+        def visit_ClassDef(self, node: ast.ClassDef) -> None:
+            for expression in [*node.decorator_list, *node.bases]:
+                self.visit(expression)
+            for keyword in node.keywords:
+                self.visit(keyword.value)
+            current_ref = _class_definition_ref(
+                module=self.module,
+                actor=self.scope,
+                enclosing_class_ref=self.class_ref,
+                name=node.name,
+            )
+            previous_scope = self.scope
+            previous_class_ref = self.class_ref
+            self.scope = f"{current_ref}.<classbody>"
+            self.class_ref = current_ref
+            for statement in node.body:
+                self.visit(statement)
+            self.scope = previous_scope
+            self.class_ref = previous_class_ref
+
+        def visit_Lambda(self, node: ast.Lambda) -> None:
+            for expression in [
+                *node.args.defaults,
+                *(value for value in node.args.kw_defaults if value is not None),
+            ]:
+                self.visit(expression)
+
+    for module, tree in sorted(trees.items()):
+        ExecutableScopeVisitor(module).visit(tree)
+
+    grouped: dict[tuple[str, str, str, str], list[tuple[ast.AST, int]]] = {}
+    for node, scope, path, sequence in candidates:
+        kind = type(node).__name__.lower()
+        syntax = ast.dump(
+            node,
+            annotate_fields=True,
+            include_attributes=False,
+        )
+        grouped.setdefault((path, scope, kind, syntax), []).append((node, sequence))
+
+    sites: dict[int, SyntaxSite] = {}
+    for (path, scope, kind, syntax), nodes in sorted(grouped.items()):
+        nodes.sort(
+            key=lambda item: (
+                int(getattr(item[0], "lineno", 0)),
+                int(getattr(item[0], "col_offset", 0)),
+                item[1],
+            )
+        )
+        for occurrence, (node, _sequence) in enumerate(nodes, start=1):
+            identity = {
+                "path": path,
+                "scope": scope,
+                "kind": kind,
+                "syntax": syntax,
+                "occurrence": occurrence,
+            }
+            sites[id(node)] = SyntaxSite(
+                site_id=_stable_id("runtime-site", identity),
+                scope=scope,
+                kind=kind,
+                syntax=syntax,
+                occurrence=occurrence,
+                path=path,
+                line=int(getattr(node, "lineno", 0)),
+            )
+    return sites
+
+
+@dataclass(frozen=True)
 class RawAccess:
     resource_id: str
     actor: str
@@ -302,6 +466,7 @@ class RawAccess:
     path: str
     line: int
     structural_ordinal: int
+    site_id: str
 
 
 @dataclass(frozen=True)
@@ -315,6 +480,7 @@ class RawEscape:
     path: str
     line: int
     structural_ordinal: int
+    site_id: str
 
 
 def _call_ordinals(
@@ -738,8 +904,10 @@ __all__ = [
     "FunctionInfo",
     "RawAccess",
     "RawEscape",
+    "SyntaxSite",
     "_call_ordinals",
     "_collect_functions",
+    "_collect_syntax_sites",
     "_import_tables",
     "_module_name",
     "_open_mode",

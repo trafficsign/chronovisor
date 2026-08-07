@@ -169,6 +169,7 @@ def analyze_augassign(
     if merged.has_origins:
         engine.facts.record_escape(
             merged,
+            node=statement,
             actor=actor,
             operation=f"augassign:{type(statement.op).__name__.lower()}",
             sink="python.AugAssign",
@@ -603,6 +604,7 @@ def _record_unknown_unpack(
     if value.has_origins:
         engine.facts.record_escape(
             value,
+            node=target,
             actor=actor,
             operation="destructure",
             sink="python.iterable-unpack",
@@ -637,6 +639,7 @@ def _evaluate_definition_use(
     if value.has_origins:
         engine.facts.record_escape(
             value,
+            node=node,
             actor=actor,
             operation=f"definition:{kind}",
             sink=f"python.{kind}",

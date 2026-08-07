@@ -14,6 +14,7 @@ from .access_model import (
     FunctionInfo,
     _call_ordinals,
     _collect_functions,
+    _collect_syntax_sites,
     _import_tables,
     _module_name,
 )
@@ -249,7 +250,14 @@ class _AccessAnalysis:
             str,
             tuple[dict[str, FlowValue], dict[str, set[str]]],
         ] = {}
-        self.facts = AccessFactCollector(self.resource_locators)
+        self.facts = AccessFactCollector(
+            self.resource_locators,
+            _collect_syntax_sites(
+                self.trees,
+                self.paths,
+                self.function_refs_by_node,
+            ),
+        )
         self._persistent_changed = False
 
     def run(self) -> dict[str, Any]:
@@ -661,6 +669,8 @@ class _AccessAnalysis:
             values = [FlowValue(object_types={info.class_ref}), *values]
         provided: set[str] = set()
         source_name = call_name(node.func) or "<dynamic>"
+        site_id = self.facts.site_id(node)
+        call_site = f"{source_name}:{ordinal}|site_id={site_id}"
         for index, value in enumerate(values):
             if index >= len(info.parameters):
                 break
@@ -671,7 +681,7 @@ class _AccessAnalysis:
                 frame_objects,
                 parameter,
                 value,
-                step=f"call:{actor}->{target}:{parameter}|site={source_name}:{ordinal}",
+                step=f"call:{actor}->{target}:{parameter}|site={call_site}",
             )
         for parameter, value in keyword_values.items():
             if parameter not in info.parameters:
@@ -682,7 +692,7 @@ class _AccessAnalysis:
                 frame_objects,
                 parameter,
                 value,
-                step=f"call:{actor}->{target}:{parameter}|site={source_name}:{ordinal}",
+                step=f"call:{actor}->{target}:{parameter}|site={call_site}",
             )
         for parameter, value in self.definition_defaults[target].items():
             if parameter not in provided:
@@ -702,6 +712,7 @@ class _AccessAnalysis:
             module=module,
             source_name=source_name,
             ordinal=ordinal,
+            site_id=site_id,
             closure_instance=closure_instance,
         )
         self._active_local_calls.add(target)
@@ -806,6 +817,7 @@ class _AccessAnalysis:
         module: str,
         source_name: str,
         ordinal: int,
+        site_id: str,
         closure_instance: str | None,
     ) -> str:
         parent_activation = self._active_local_activations.get(
@@ -814,7 +826,7 @@ class _AccessAnalysis:
         callable_identity = closure_instance or target
         return (
             f"{parent_activation}|call:{actor}->{callable_identity}"
-            f"|site={source_name}:{ordinal}"
+            f"|site={source_name}:{ordinal}|site_id={site_id}"
         )
 
     def _closure_instance_state(
@@ -1058,6 +1070,7 @@ class _AccessAnalysis:
             return
         self.facts.record_escape(
             value,
+            node=statement,
             actor=actor,
             operation=f"import:*:{target_module}",
             sink=f"module:{target_module}",
@@ -1077,12 +1090,15 @@ class _AccessAnalysis:
         module: str,
         node: ast.Call,
         ordinal: int,
+        site_node: ast.AST | None = None,
     ) -> None:
+        physical_node = site_node or node
         self._require_function_summary(target)
         safe, cyclic = value.partition_call_cycles(target=target)
         if cyclic.has_origins and target not in self.recursive_base_targets:
             self.facts.record_escape(
                 cyclic,
+                node=physical_node,
                 actor=actor,
                 operation=f"call:{target}",
                 sink=target,
@@ -1093,7 +1109,11 @@ class _AccessAnalysis:
             )
         if safe.has_origins:
             source_name = call_name(node.func) or "<dynamic>"
-            step = f"call:{actor}->{target}:{parameter}|site={source_name}:{ordinal}"
+            site_id = self.facts.site_id(physical_node)
+            step = (
+                f"call:{actor}->{target}:{parameter}|site={source_name}:{ordinal}"
+                f"|site_id={site_id}"
+            )
             self._merge_param(target, parameter, safe.bound(step))
 
 

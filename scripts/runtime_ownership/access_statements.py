@@ -376,6 +376,7 @@ def evaluate_control_expression(
     if value.has_origins:
         engine.facts.record_escape(
             value,
+            node=node,
             actor=actor,
             operation=f"control:{kind}",
             sink=f"python.{kind}",

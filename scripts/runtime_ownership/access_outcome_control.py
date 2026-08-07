@@ -359,6 +359,7 @@ def analyze_with(
         if affected.has_origins:
             engine.facts.record_escape(
                 affected,
+                node=statement,
                 actor=actor,
                 operation=f"control:{kind}_suppression",
                 sink=f"python.{kind}",
@@ -576,6 +577,7 @@ def _record_control_value(
     if value.has_origins:
         engine.facts.record_escape(
             value,
+            node=node,
             actor=actor,
             operation=f"control:{kind}",
             sink=f"python.{kind}",

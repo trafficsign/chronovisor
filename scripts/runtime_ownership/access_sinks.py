@@ -82,6 +82,7 @@ class AccessEngine(Protocol):
         module: str,
         node: ast.Call,
         ordinal: int,
+        site_node: ast.AST | None = None,
     ) -> None: ...
 
 
@@ -112,6 +113,7 @@ def evaluate_call(
         if receiver.has_origins and method in READ_PATH_METHODS:
             engine.facts.record_access(
                 receiver,
+                node=node,
                 actor=actor,
                 mode="read",
                 operation=f"path.{method}",
@@ -124,6 +126,7 @@ def evaluate_call(
         if receiver.has_origins and method in WRITE_PATH_METHODS:
             engine.facts.record_access(
                 receiver,
+                node=node,
                 actor=actor,
                 mode="write",
                 operation=f"path.{method}",
@@ -138,6 +141,7 @@ def evaluate_call(
             if isinstance(mode, str):
                 engine.facts.record_escape(
                     receiver,
+                    node=node,
                     actor=actor,
                     operation="path.open",
                     sink="pathlib.Path.open",
@@ -149,6 +153,7 @@ def evaluate_call(
             else:
                 engine.facts.record_access(
                     receiver,
+                    node=node,
                     actor=actor,
                     mode=mode[0],
                     operation=f"path.open:{mode[1]}",
@@ -444,6 +449,7 @@ def evaluate_call(
             if escaped_closure_capture.has_origins:
                 engine.facts.record_escape(
                     escaped_closure_capture,
+                    node=node,
                     actor=actor,
                     operation=f"call:{source_call_name or '<dynamic>'}",
                     sink=source_call_name or "<dynamic>",
@@ -455,6 +461,7 @@ def evaluate_call(
             if escaped.has_origins:
                 engine.facts.record_escape(
                     escaped,
+                    node=node,
                     actor=actor,
                     operation=f"call:{source_call_name or '<dynamic>'}",
                     sink=source_call_name or "<dynamic>",
@@ -478,6 +485,7 @@ def evaluate_call(
         if unknown_keyword_unpack.has_origins:
             engine.facts.record_escape(
                 unknown_keyword_unpack,
+                node=node,
                 actor=actor,
                 operation=f"call:{source_call_name or '<dynamic>'}",
                 sink=target or source_call_name or "<dynamic>",
@@ -495,6 +503,7 @@ def evaluate_call(
         if origin.has_origins and isinstance(mode, str):
             engine.facts.record_escape(
                 origin,
+                node=node,
                 actor=actor,
                 operation="builtin.open",
                 sink="builtins.open",
@@ -506,6 +515,7 @@ def evaluate_call(
         elif origin.has_origins:
             engine.facts.record_access(
                 origin,
+                node=node,
                 actor=actor,
                 mode=mode[0],
                 operation=f"builtin.open:{mode[1]}",
@@ -518,6 +528,7 @@ def evaluate_call(
     if escaped.has_origins:
         engine.facts.record_escape(
             escaped,
+            node=node,
             actor=actor,
             operation=f"call:{source_call_name or '<dynamic>'}",
             sink=target or source_call_name or "<dynamic>",
@@ -529,6 +540,7 @@ def evaluate_call(
     if escaped_closure_capture.has_origins:
         engine.facts.record_escape(
             escaped_closure_capture,
+            node=node,
             actor=actor,
             operation=f"call:{source_call_name or '<dynamic>'}",
             sink=target or source_call_name or "<dynamic>",
