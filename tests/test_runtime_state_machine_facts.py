@@ -7,6 +7,7 @@ import subprocess
 import sys
 from collections import Counter
 from collections.abc import Mapping
+from functools import cache
 from pathlib import Path
 from typing import Any, cast
 
@@ -38,18 +39,23 @@ from scripts.runtime_ownership.machine_facts import (
     validate_effective_adapter,
     validate_machine_fact_document,
     validate_runtime_access_v2,
+    verify_current_toolchain_code,
     verify_loaded_analyzer_code,
 )
 from scripts.runtime_ownership.manifests import (
     ANALYZER_MANIFEST_KIND,
+    MACHINE_FACT_TOOLCHAIN_MANIFEST_KIND,
+    MACHINE_FACT_TOOLCHAIN_PATHS,
     SOURCE_MANIFEST_KIND,
     CommittedSnapshot,
     build_manifest,
     committed_snapshot,
+    verify_manifest,
 )
 from tests.runtime_access_v2_helpers import validate_runtime_access_v2_result
 
 ROOT = Path(__file__).resolve().parents[1]
+TOOLCHAIN_PRECOMMIT_HEAD = "11e2acf77a53edf520e3cce5d2e5decd16cd06c5"
 FORBIDDEN_FIELDS = {
     "owner",
     "owner_package",
@@ -59,6 +65,33 @@ FORBIDDEN_FIELDS = {
     "lifecycle",
     "coordination",
 }
+
+
+def _git(repository: Path, *arguments: str) -> bytes:
+    completed = subprocess.run(
+        ["git", *arguments],
+        cwd=repository,
+        capture_output=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr.decode("utf-8", errors="replace")
+    return completed.stdout
+
+
+def _toolchain_repository(tmp_path: Path) -> tuple[Path, str]:
+    repository = tmp_path / "toolchain-repository"
+    repository.mkdir()
+    _git(repository, "init", "--quiet", "--object-format=sha1")
+    _git(repository, "config", "user.name", "Machine Fact Test")
+    _git(repository, "config", "user.email", "machine-fact@example.test")
+    for index, path in enumerate(MACHINE_FACT_TOOLCHAIN_PATHS):
+        target = repository / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(f"ROW = {index}\n")
+    _git(repository, "add", "-A")
+    _git(repository, "commit", "--quiet", "-m", "toolchain")
+    revision = _git(repository, "rev-parse", "HEAD").decode("ascii").strip()
+    return repository, revision
 
 
 @pytest.fixture(scope="module")
@@ -94,6 +127,32 @@ def seals() -> tuple[dict[str, str], dict[str, str]]:
             "manifest_sha256": ANALYZER_MANIFEST_SHA256,
         },
     )
+
+
+@cache
+def _precommit_toolchain() -> tuple[dict[str, Any], CommittedSnapshot]:
+    manifest = build_manifest(
+        ROOT,
+        TOOLCHAIN_PRECOMMIT_HEAD,
+        manifest_kind=MACHINE_FACT_TOOLCHAIN_MANIFEST_KIND,
+        expected_revision=TOOLCHAIN_PRECOMMIT_HEAD,
+    )
+    snapshot = verify_manifest(
+        ROOT,
+        manifest,
+        expected_kind=MACHINE_FACT_TOOLCHAIN_MANIFEST_KIND,
+        expected_revision=TOOLCHAIN_PRECOMMIT_HEAD,
+    )
+    return manifest, snapshot
+
+
+def _toolchain_seal() -> dict[str, str]:
+    manifest, _snapshot = _precommit_toolchain()
+    return {
+        "revision": str(manifest["revision"]),
+        "files_sha256": str(manifest["files_sha256"]),
+        "manifest_sha256": str(manifest["manifest_sha256"]),
+    }
 
 
 def _empty_v2() -> dict[str, Any]:
@@ -336,11 +395,15 @@ def _document(
         adapter,
         analyzer=fake_analyzer,
     )
+    toolchain_manifest, toolchain_snapshot = _precommit_toolchain()
     document = _assemble_sealed_document(
         result_value,
         adapter,
+        repository=ROOT,
         source_seal=source_seal,
         analyzer_seal=analyzer_seal,
+        toolchain_manifest=toolchain_manifest,
+        toolchain_snapshot=toolchain_snapshot,
     )
     return document, cast(dict[str, Any], document["cache_key"])
 
@@ -379,6 +442,46 @@ def test_exact_source_and_analyzer_manifests_are_separately_sealed() -> None:
     )
     assert source["counts"] == {"files": 296, "bytes": 7_456_781}
     assert analyzer["counts"] == {"files": 15, "bytes": 556_664}
+
+
+def test_precommit_toolchain_manifest_is_third_independent_seal(
+    adapter: Mapping[str, Any], seals: tuple[dict[str, str], dict[str, str]]
+) -> None:
+    manifest, snapshot = _precommit_toolchain()
+    assert snapshot.revision == TOOLCHAIN_PRECOMMIT_HEAD
+    assert manifest["counts"] == {"files": 3, "bytes": 170_655}
+    assert manifest["files_sha256"] == (
+        "343d8385b93004be7f80aff326393b6965200313c124dc4e7bc0cca05854b93b"
+    )
+    document, key = _document(adapter, seals)
+    assert document["cache_schema_version"] == 2
+    assert document["toolchain_seal"] == _toolchain_seal()
+    assert key["toolchain_revision"] == TOOLCHAIN_PRECOMMIT_HEAD
+    assert key["toolchain_files_sha256"] == manifest["files_sha256"]
+    assert key["toolchain_manifest_sha256"] == manifest["manifest_sha256"]
+    assert document["source_seal"] != document["toolchain_seal"]
+    assert document["analyzer_seal"] != document["toolchain_seal"]
+
+
+def test_current_toolchain_verifier_rejects_byte_and_loaded_path_drift(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _manifest, snapshot = _precommit_toolchain()
+    with pytest.raises(MachineFactError, match="toolchain bytes drifted"):
+        verify_current_toolchain_code(ROOT, snapshot)
+
+    mirror = tmp_path / "mirror"
+    for row in snapshot.files:
+        target = mirror / row.path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(row.raw_bytes)
+    with pytest.raises(MachineFactError, match="unexpected path"):
+        verify_current_toolchain_code(mirror, snapshot)
+
+    for path in MACHINE_FACT_TOOLCHAIN_PATHS:
+        module_name = f"scripts.runtime_ownership.{Path(path).stem}"
+        monkeypatch.setattr(sys.modules[module_name], "__file__", str(mirror / path))
+    verify_current_toolchain_code(mirror, snapshot)
 
 
 def test_real_adapter_partition_hash_aliases_and_reasons(
@@ -483,7 +586,7 @@ def test_fake_analyzer_is_called_once_with_all_alias_rows(
     assert len(calls[0][1]) == 243
     assert result == _empty_v2()
     with pytest.raises(MachineFactError, match="keys mismatch"):
-        machine_fact_cache_bytes(result, adapter=adapter)
+        machine_fact_cache_bytes(ROOT, result, adapter=adapter)
 
 
 def test_sealed_entrypoint_rejects_dependency_injection_and_preloaded_state() -> None:
@@ -500,6 +603,41 @@ def test_sealed_entrypoint_rejects_dependency_injection_and_preloaded_state() ->
         )
     with pytest.raises(MachineFactError, match="fresh analyzer import state"):
         run_sealed_effective_analysis(ROOT)
+
+
+def test_sealed_entrypoint_rejects_toolchain_drift_before_analyzer_import(
+    tmp_path: Path,
+) -> None:
+    repository, _revision = _toolchain_repository(tmp_path)
+    (repository / MACHINE_FACT_TOOLCHAIN_PATHS[0]).write_text("dirty\n")
+    code = f"""
+import sys
+from pathlib import Path
+sys.path.insert(0, {str(ROOT)!r})
+from scripts.runtime_ownership.machine_facts import (
+    MachineFactError,
+    run_sealed_effective_analysis,
+)
+try:
+    run_sealed_effective_analysis(Path(sys.argv[1]))
+except MachineFactError as exc:
+    assert "toolchain bytes drifted" in str(exc), str(exc)
+else:
+    raise AssertionError("dirty toolchain was accepted")
+assert not any(
+    name == "scripts.runtime_ownership.access"
+    or name.startswith("scripts.runtime_ownership.access_")
+    for name in sys.modules
+)
+"""
+    probe = subprocess.run(
+        [sys.executable, "-c", code, str(repository)],
+        cwd=repository,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert probe.returncode == 0, probe.stderr
 
 
 def test_importing_machine_facts_does_not_preload_analyzer_modules() -> None:
@@ -888,9 +1026,11 @@ def test_cache_key_has_exact_metadata_and_invalidates_both_inputs(
     seals: tuple[dict[str, str], dict[str, str]],
 ) -> None:
     source_seal, analyzer_seal = seals
+    toolchain_seal = _toolchain_seal()
     key = cache_key_metadata(
         source_seal=source_seal,
         analyzer_seal=analyzer_seal,
+        toolchain_seal=toolchain_seal,
         candidate_subset_sha256=CANDIDATE_SUBSET_SHA256,
     )
     assert set(key) == {
@@ -901,6 +1041,9 @@ def test_cache_key_has_exact_metadata_and_invalidates_both_inputs(
         "analyzer_revision",
         "analyzer_files_sha256",
         "analyzer_manifest_sha256",
+        "toolchain_revision",
+        "toolchain_files_sha256",
+        "toolchain_manifest_sha256",
         "candidate_subset_sha256",
         "shard_plan_id",
     }
@@ -912,6 +1055,7 @@ def test_cache_key_has_exact_metadata_and_invalidates_both_inputs(
         cache_key_metadata(
             source_seal=changed_source,
             analyzer_seal=analyzer_seal,
+            toolchain_seal=toolchain_seal,
             candidate_subset_sha256=CANDIDATE_SUBSET_SHA256,
         )
         != key
@@ -920,6 +1064,16 @@ def test_cache_key_has_exact_metadata_and_invalidates_both_inputs(
         cache_key_metadata(
             source_seal=source_seal,
             analyzer_seal=changed_analyzer,
+            toolchain_seal=toolchain_seal,
+            candidate_subset_sha256=CANDIDATE_SUBSET_SHA256,
+        )
+        != key
+    )
+    assert (
+        cache_key_metadata(
+            source_seal=source_seal,
+            analyzer_seal=analyzer_seal,
+            toolchain_seal={**toolchain_seal, "files_sha256": "2" * 64},
             candidate_subset_sha256=CANDIDATE_SUBSET_SHA256,
         )
         != key
@@ -938,20 +1092,120 @@ def test_adapter_candidate_drift_and_cache_input_invalidation_fail_closed(
         invalidated[seal_name]["files_sha256"] = replacement
         invalidated["cache_key"][key_name] = replacement
         with pytest.raises(MachineFactError, match="official sealed cache key"):
-            validate_machine_fact_document(invalidated, adapter=adapter)
+            validate_machine_fact_document(ROOT, invalidated, adapter=adapter)
 
     drifted_adapter = copy.deepcopy(adapter)
     drifted_adapter["analyzer_candidates"][0]["module"] = "tampered"
     with pytest.raises(MachineFactError, match="candidate subset hash"):
-        validate_machine_fact_document(document, adapter=drifted_adapter)
+        validate_machine_fact_document(ROOT, document, adapter=drifted_adapter)
+
+
+def test_toolchain_cache_tamper_missing_commit_and_seal_confusion_fail_closed(
+    adapter: Mapping[str, Any],
+    seals: tuple[dict[str, str], dict[str, str]],
+    tmp_path: Path,
+) -> None:
+    document, _key = _document(adapter, seals)
+    for seal_field, key_field, replacement in [
+        ("files_sha256", "toolchain_files_sha256", "2" * 64),
+        ("manifest_sha256", "toolchain_manifest_sha256", "3" * 64),
+    ]:
+        tampered = copy.deepcopy(document)
+        tampered["toolchain_seal"][seal_field] = replacement
+        tampered["cache_key"][key_field] = replacement
+        with pytest.raises(MachineFactError, match="committed manifest"):
+            validate_machine_fact_document(ROOT, tampered, adapter=adapter)
+
+    missing_commit = copy.deepcopy(document)
+    missing_commit["toolchain_seal"]["revision"] = "f" * 40
+    missing_commit["cache_key"]["toolchain_revision"] = "f" * 40
+    with pytest.raises(MachineFactError, match="verified Git commit"):
+        validate_machine_fact_document(ROOT, missing_commit, adapter=adapter)
+
+    wrong_existing_commit = copy.deepcopy(document)
+    wrong_existing_commit["toolchain_seal"]["revision"] = ANALYZER_REVISION
+    wrong_existing_commit["cache_key"]["toolchain_revision"] = ANALYZER_REVISION
+    with pytest.raises(MachineFactError, match="verified Git commit"):
+        validate_machine_fact_document(ROOT, wrong_existing_commit, adapter=adapter)
+
+    foreign_repository, _revision = _toolchain_repository(tmp_path)
+    with pytest.raises(MachineFactError, match="verified Git commit"):
+        validate_machine_fact_document(foreign_repository, document, adapter=adapter)
+
+    for left, right in [
+        ("source_seal", "toolchain_seal"),
+        ("analyzer_seal", "toolchain_seal"),
+    ]:
+        confused = copy.deepcopy(document)
+        confused[left], confused[right] = confused[right], confused[left]
+        with pytest.raises(MachineFactError):
+            validate_machine_fact_document(ROOT, confused, adapter=adapter)
+
+
+@pytest.mark.parametrize(
+    ("container", "field", "replacement"),
+    [
+        ("toolchain_seal", "revision", True),
+        ("toolchain_seal", "files_sha256", 1.0),
+        ("toolchain_seal", "manifest_sha256", False),
+        ("cache_key", "toolchain_revision", True),
+        ("cache_key", "toolchain_files_sha256", 1.0),
+        ("cache_key", "toolchain_manifest_sha256", False),
+    ],
+)
+def test_toolchain_seal_and_cache_key_reject_bool_and_float(
+    adapter: Mapping[str, Any],
+    seals: tuple[dict[str, str], dict[str, str]],
+    container: str,
+    field: str,
+    replacement: object,
+) -> None:
+    document, _key = _document(adapter, seals)
+    document[container][field] = replacement
+
+    with pytest.raises(MachineFactError):
+        validate_machine_fact_document(ROOT, document, adapter=adapter)
+
+
+def test_private_assembler_requires_verified_toolchain_manifest_and_snapshot(
+    adapter: Mapping[str, Any],
+    seals: tuple[dict[str, str], dict[str, str]],
+    analyzer_snapshot: CommittedSnapshot,
+) -> None:
+    source_seal, analyzer_seal = seals
+    toolchain_manifest, _toolchain_snapshot = _precommit_toolchain()
+    with pytest.raises(MachineFactError, match="wrong kind"):
+        _assemble_sealed_document(
+            _empty_v2(),
+            adapter,
+            repository=ROOT,
+            source_seal=source_seal,
+            analyzer_seal=analyzer_seal,
+            toolchain_manifest=toolchain_manifest,
+            toolchain_snapshot=analyzer_snapshot,
+        )
+
+    reseeded = copy.deepcopy(toolchain_manifest)
+    reseeded["manifest_sha256"] = "0" * 64
+    _manifest, toolchain_snapshot = _precommit_toolchain()
+    with pytest.raises(MachineFactError, match="not verified"):
+        _assemble_sealed_document(
+            _empty_v2(),
+            adapter,
+            repository=ROOT,
+            source_seal=source_seal,
+            analyzer_seal=analyzer_seal,
+            toolchain_manifest=reseeded,
+            toolchain_snapshot=toolchain_snapshot,
+        )
 
 
 def test_cache_round_trip_and_tamper_rejection(
     adapter: Mapping[str, Any], seals: tuple[dict[str, str], dict[str, str]]
 ) -> None:
     document, _key = _document(adapter, seals, result=_nonempty_v2(adapter))
-    raw = machine_fact_cache_bytes(document, adapter=adapter)
-    assert load_machine_fact_cache(raw, adapter=adapter) == document
+    raw = machine_fact_cache_bytes(ROOT, document, adapter=adapter)
+    assert load_machine_fact_cache(ROOT, raw, adapter=adapter) == document
 
     tampered_cases: list[dict[str, Any]] = []
     for path, replacement in [
@@ -970,7 +1224,7 @@ def test_cache_round_trip_and_tamper_rejection(
         tampered_cases.append(value)
     for tampered in tampered_cases:
         with pytest.raises(MachineFactError):
-            validate_machine_fact_document(tampered, adapter=adapter)
+            validate_machine_fact_document(ROOT, tampered, adapter=adapter)
 
 
 def test_cache_rejects_duplicate_nan_malformed_and_noncanonical_json(
@@ -987,7 +1241,7 @@ def test_cache_rejects_duplicate_nan_malformed_and_noncanonical_json(
         (noncanonical, "canonical byte form"),
     ]:
         with pytest.raises(MachineFactError, match=message):
-            load_machine_fact_cache(invalid, adapter=adapter)
+            load_machine_fact_cache(ROOT, invalid, adapter=adapter)
 
 
 def test_strict_integer_fields_reject_booleans(
@@ -1011,7 +1265,7 @@ def test_strict_integer_fields_reject_booleans(
             target = target[component]
         target[path[-1]] = True
         with pytest.raises(MachineFactError):
-            validate_machine_fact_document(invalid, adapter=adapter)
+            validate_machine_fact_document(ROOT, invalid, adapter=adapter)
 
     runtime = _empty_v2()
     runtime["counts"]["accesses"] = True
@@ -1032,7 +1286,7 @@ def test_deep_json_recursion_is_normalized_to_machine_fact_error(
 
     deeply_nested_json = b"[" * 2_000 + b"0" + b"]" * 2_000
     with pytest.raises(MachineFactError, match="JSON"):
-        load_machine_fact_cache(deeply_nested_json, adapter=adapter)
+        load_machine_fact_cache(ROOT, deeply_nested_json, adapter=adapter)
 
 
 def test_sharding_api_is_rejected_and_dynamic_open_proves_non_equivalence(

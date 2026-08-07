@@ -34,13 +34,26 @@ ANALYZER_PATHS = (
 ManifestKind: TypeAlias = Literal[
     "chronovisor-source-manifest",
     "chronovisor-runtime-access-analyzer-manifest",
+    "chronovisor-machine-fact-toolchain-manifest",
 ]
 
 SOURCE_MANIFEST_KIND: ManifestKind = "chronovisor-source-manifest"
-ANALYZER_MANIFEST_KIND: ManifestKind = (
-    "chronovisor-runtime-access-analyzer-manifest"
+ANALYZER_MANIFEST_KIND: ManifestKind = "chronovisor-runtime-access-analyzer-manifest"
+MACHINE_FACT_TOOLCHAIN_MANIFEST_KIND: ManifestKind = (
+    "chronovisor-machine-fact-toolchain-manifest"
 )
-_MANIFEST_KINDS = frozenset({SOURCE_MANIFEST_KIND, ANALYZER_MANIFEST_KIND})
+MACHINE_FACT_TOOLCHAIN_PATHS = (
+    "scripts/runtime_ownership/manifests.py",
+    "scripts/runtime_ownership/declarations.py",
+    "scripts/runtime_ownership/machine_facts.py",
+)
+_MANIFEST_KINDS = frozenset(
+    {
+        SOURCE_MANIFEST_KIND,
+        ANALYZER_MANIFEST_KIND,
+        MACHINE_FACT_TOOLCHAIN_MANIFEST_KIND,
+    }
+)
 _FULL_SHA1 = re.compile(r"[0-9a-f]{40}")
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _CANONICAL_DECIMAL_BYTES = re.compile(rb"(?:0|[1-9][0-9]*)\Z")
@@ -57,9 +70,7 @@ _TOP_LEVEL_KEYS = frozenset(
         "manifest_sha256",
     }
 )
-_FILE_KEYS = frozenset(
-    {"path", "git_mode", "byte_count", "blob_oid", "sha256"}
-)
+_FILE_KEYS = frozenset({"path", "git_mode", "byte_count", "blob_oid", "sha256"})
 _COUNT_KEYS = frozenset({"files", "bytes"})
 
 
@@ -147,9 +158,7 @@ def _decode_git_text(
         return raw.decode(encoding)
     except UnicodeDecodeError as exc:
         display_encoding = "ASCII" if encoding == "ascii" else "UTF-8"
-        raise ManifestError(
-            f"{label} is not valid {display_encoding}"
-        ) from exc
+        raise ManifestError(f"{label} is not valid {display_encoding}") from exc
 
 
 def _git_object_format(repository: Path) -> str:
@@ -160,8 +169,7 @@ def _git_object_format(repository: Path) -> str:
     value = value.strip()
     if value != "sha1":
         raise ManifestError(
-            "manifest revision schema requires a sha1 repository, got "
-            f"{value!r}"
+            f"manifest revision schema requires a sha1 repository, got {value!r}"
         )
     return value
 
@@ -180,9 +188,7 @@ def resolve_full_revision(repository: Path, revision: str) -> str:
         "--verify",
         f"{revision}^{{commit}}",
     )
-    resolved = _decode_git_text(
-        completed.stdout, label="resolved revision"
-    ).strip()
+    resolved = _decode_git_text(completed.stdout, label="resolved revision").strip()
     if resolved != revision:
         raise ManifestError(
             f"revision did not resolve to itself as a commit: {revision}"
@@ -199,6 +205,12 @@ def _head_revision(repository: Path) -> str:
     return resolve_full_revision(repository, resolved)
 
 
+def current_head_revision(repository: Path) -> str:
+    """Return HEAD only when it is an exact commit in a supported repository."""
+
+    return _head_revision(repository)
+
+
 def _parse_tree(raw: bytes) -> tuple[_TreeEntry, ...]:
     if not raw:
         return ()
@@ -212,9 +224,7 @@ def _parse_tree(raw: bytes) -> tuple[_TreeEntry, ...]:
         try:
             header, raw_path = record.split(b"\t", 1)
             mode, object_type, oid, raw_size = header.split(b" ", 3)
-            path = _decode_git_text(
-                raw_path, label="git tree path", encoding="utf-8"
-            )
+            path = _decode_git_text(raw_path, label="git tree path", encoding="utf-8")
             git_mode = _decode_git_text(mode, label="git tree mode")
             git_type = _decode_git_text(object_type, label="git tree type")
             object_oid = _decode_git_text(oid, label="git tree object id")
@@ -282,8 +292,10 @@ def _is_direct_analyzer_path(path: str) -> bool:
     if not path.startswith(prefix):
         return False
     remainder = path.removeprefix(prefix)
-    return "/" not in remainder and remainder.startswith("access") and remainder.endswith(
-        ".py"
+    return (
+        "/" not in remainder
+        and remainder.startswith("access")
+        and remainder.endswith(".py")
     )
 
 
@@ -300,6 +312,11 @@ def _selection(manifest_kind: ManifestKind) -> dict[str, object]:
         return {
             "python": "scripts/runtime_ownership/access*.py",
             "exact_file_count": 15,
+        }
+    if manifest_kind == MACHINE_FACT_TOOLCHAIN_MANIFEST_KIND:
+        return {
+            "python": list(MACHINE_FACT_TOOLCHAIN_PATHS),
+            "exact_file_count": 3,
         }
     raise ManifestError(f"unsupported manifest_kind: {manifest_kind!r}")
 
@@ -326,6 +343,18 @@ def _select_entries(
         if selected_paths != expected_paths or len(selected) != len(ANALYZER_PATHS):
             raise ManifestError(
                 "analyzer selection must be the exact 15 paths; "
+                f"missing={sorted(expected_paths - selected_paths)}, "
+                f"extra={sorted(selected_paths - expected_paths)}"
+            )
+    elif manifest_kind == MACHINE_FACT_TOOLCHAIN_MANIFEST_KIND:
+        selected = [row for row in entries if row.path in MACHINE_FACT_TOOLCHAIN_PATHS]
+        selected_paths = {row.path for row in selected}
+        expected_paths = set(MACHINE_FACT_TOOLCHAIN_PATHS)
+        if selected_paths != expected_paths or len(selected) != len(
+            MACHINE_FACT_TOOLCHAIN_PATHS
+        ):
+            raise ManifestError(
+                "machine-fact toolchain selection must be the exact 3 paths; "
                 f"missing={sorted(expected_paths - selected_paths)}, "
                 f"extra={sorted(selected_paths - expected_paths)}"
             )
@@ -357,9 +386,7 @@ def _validate_selected_entries(
         if row.byte_count is None or row.byte_count < 0:
             raise ManifestError(f"selected blob has invalid byte count: {row.path}")
         if _FULL_SHA1.fullmatch(row.object_oid) is None:
-            raise ManifestError(
-                f"selected blob has invalid sha1 object id: {row.path}"
-            )
+            raise ManifestError(f"selected blob has invalid sha1 object id: {row.path}")
 
 
 def _cat_file_batch(repository: Path, object_oids: Sequence[str]) -> dict[str, bytes]:
@@ -377,16 +404,10 @@ def _cat_file_batch(repository: Path, object_oids: Sequence[str]) -> dict[str, b
         parts = header.split(b" ")
         if len(parts) != 3:
             raise ManifestError("invalid git cat-file --batch header")
-        actual_oid = _decode_git_text(
-            parts[0], label="git cat-file object id"
-        )
-        object_type = _decode_git_text(
-            parts[1], label="git cat-file object type"
-        )
+        actual_oid = _decode_git_text(parts[0], label="git cat-file object id")
+        object_type = _decode_git_text(parts[1], label="git cat-file object type")
         if _CANONICAL_DECIMAL_BYTES.fullmatch(parts[2]) is None:
-            raise ManifestError(
-                "git cat-file byte count is not a canonical decimal"
-            )
+            raise ManifestError("git cat-file byte count is not a canonical decimal")
         byte_count = int(parts[2])
         if actual_oid != expected_oid or object_type != "blob" or byte_count < 0:
             raise ManifestError(
@@ -464,12 +485,8 @@ def selected_paths_unchanged(
     descendant = resolve_full_revision(repository, descendant_revision)
     if not _is_ancestor(repository, ancestor, descendant):
         return False
-    before = committed_snapshot(
-        repository, ancestor, manifest_kind=manifest_kind
-    )
-    after = committed_snapshot(
-        repository, descendant, manifest_kind=manifest_kind
-    )
+    before = committed_snapshot(repository, ancestor, manifest_kind=manifest_kind)
+    after = committed_snapshot(repository, descendant, manifest_kind=manifest_kind)
     before_rows = tuple(
         (row.path, row.git_mode, row.git_type, row.blob_oid, row.raw_bytes)
         for row in before.files
@@ -567,9 +584,7 @@ def _build_manifest_and_snapshot(
     expected_revision: str | None,
     require_current_unchanged: bool,
 ) -> tuple[dict[str, Any], CommittedSnapshot]:
-    snapshot = committed_snapshot(
-        repository, revision, manifest_kind=manifest_kind
-    )
+    snapshot = committed_snapshot(repository, revision, manifest_kind=manifest_kind)
     _enforce_revision_policy(
         repository,
         snapshot.revision,
@@ -644,9 +659,7 @@ def _validate_manifest_structure(
         raise ManifestError("files must be a JSON array")
     files: list[dict[str, Any]] = []
     for index, item in enumerate(files_value):
-        file_row = _require_exact_keys(
-            item, _FILE_KEYS, label=f"files[{index}]"
-        )
+        file_row = _require_exact_keys(item, _FILE_KEYS, label=f"files[{index}]")
         path = file_row["path"]
         if not isinstance(path, str) or not path:
             raise ManifestError(f"files[{index}].path must be non-empty")
@@ -677,9 +690,7 @@ def _validate_manifest_structure(
     files_sha256 = _require_sha256(row["files_sha256"], label="files_sha256")
     if files_sha256 != _sha256(files):
         raise ManifestError("files_sha256 does not match file rows")
-    manifest_sha256 = _require_sha256(
-        row["manifest_sha256"], label="manifest_sha256"
-    )
+    manifest_sha256 = _require_sha256(row["manifest_sha256"], label="manifest_sha256")
     unsigned = {key: value for key, value in row.items() if key != "manifest_sha256"}
     if manifest_sha256 != _sha256(unsigned):
         raise ManifestError("manifest_sha256 does not match manifest content")
@@ -721,6 +732,8 @@ __all__ = [
     "ANALYZER_PATHS",
     "ANALYZER_MANIFEST_KIND",
     "FROZEN_SOURCE_REVISION",
+    "MACHINE_FACT_TOOLCHAIN_MANIFEST_KIND",
+    "MACHINE_FACT_TOOLCHAIN_PATHS",
     "SOURCE_MANIFEST_KIND",
     "CommittedFile",
     "CommittedSnapshot",
@@ -728,6 +741,7 @@ __all__ = [
     "ManifestKind",
     "build_manifest",
     "committed_snapshot",
+    "current_head_revision",
     "resolve_full_revision",
     "selected_paths_unchanged",
     "verify_manifest",

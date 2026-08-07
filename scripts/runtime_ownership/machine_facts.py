@@ -25,14 +25,18 @@ from scripts.runtime_ownership.declarations import (
 from scripts.runtime_ownership.manifests import (
     ANALYZER_MANIFEST_KIND,
     ANALYZER_PATHS,
+    MACHINE_FACT_TOOLCHAIN_MANIFEST_KIND,
+    MACHINE_FACT_TOOLCHAIN_PATHS,
     SOURCE_MANIFEST_KIND,
     CommittedSnapshot,
+    ManifestError,
     build_manifest,
+    current_head_revision,
     verify_manifest,
 )
 
 ADAPTER_SCHEMA_VERSION = 1
-CACHE_SCHEMA_VERSION = 1
+CACHE_SCHEMA_VERSION = 2
 EFFECTIVE_SOURCE_REVISION = EFFECTIVE_FEEDBACK_REVISION
 SOURCE_FILES_SHA256 = "be2ad06f687bc619a89d12ad6274d6843b26278e2094d420146105c398e73cee"
 SOURCE_MANIFEST_SHA256 = (
@@ -103,6 +107,9 @@ _CACHE_KEY_KEYS = frozenset(
         "analyzer_revision",
         "analyzer_files_sha256",
         "analyzer_manifest_sha256",
+        "toolchain_revision",
+        "toolchain_files_sha256",
+        "toolchain_manifest_sha256",
         "candidate_subset_sha256",
         "shard_plan_id",
     }
@@ -116,6 +123,7 @@ _WRAPPER_KEYS = frozenset(
         "cache_key",
         "source_seal",
         "analyzer_seal",
+        "toolchain_seal",
         "candidate_subset_sha256",
         "shard_plan",
         "runtime_access",
@@ -145,6 +153,10 @@ Analyzer: TypeAlias = Callable[
 _ANALYZER_MODULE_NAMES = frozenset(
     f"scripts.runtime_ownership.{Path(path).stem}" for path in ANALYZER_PATHS
 )
+_TOOLCHAIN_MODULE_BY_PATH = {
+    path: f"scripts.runtime_ownership.{Path(path).stem}"
+    for path in MACHINE_FACT_TOOLCHAIN_PATHS
+}
 
 
 class MachineFactError(ValueError):
@@ -1121,14 +1133,23 @@ def cache_key_metadata(
     *,
     source_seal: Mapping[str, Any],
     analyzer_seal: Mapping[str, Any],
+    toolchain_seal: Mapping[str, Any],
     candidate_subset_sha256: str,
     shard_plan_id: str = SHARD_PLAN_ID,
 ) -> dict[str, Any]:
     """Build the exact metadata object that identifies one reusable result."""
 
-    if set(source_seal) != _SEAL_KEYS or set(analyzer_seal) != _SEAL_KEYS:
-        raise MachineFactError("source and analyzer seals must have exact keys")
-    for label, seal in (("source", source_seal), ("analyzer", analyzer_seal)):
+    if any(
+        set(seal) != _SEAL_KEYS for seal in (source_seal, analyzer_seal, toolchain_seal)
+    ):
+        raise MachineFactError(
+            "source, analyzer, and toolchain seals must have exact keys"
+        )
+    for label, seal in (
+        ("source", source_seal),
+        ("analyzer", analyzer_seal),
+        ("toolchain", toolchain_seal),
+    ):
         revision = seal["revision"]
         files_hash = seal["files_sha256"]
         manifest_hash = seal["manifest_sha256"]
@@ -1150,6 +1171,9 @@ def cache_key_metadata(
         "analyzer_revision": analyzer_seal["revision"],
         "analyzer_files_sha256": analyzer_seal["files_sha256"],
         "analyzer_manifest_sha256": analyzer_seal["manifest_sha256"],
+        "toolchain_revision": toolchain_seal["revision"],
+        "toolchain_files_sha256": toolchain_seal["files_sha256"],
+        "toolchain_manifest_sha256": toolchain_seal["manifest_sha256"],
         "candidate_subset_sha256": candidate_subset_sha256,
         "shard_plan_id": shard_plan_id,
     }
@@ -1216,13 +1240,73 @@ def analyze_runtime_access_unsealed(
     return result
 
 
+def _verified_supplied_toolchain_seal(
+    repository: Path,
+    manifest: Mapping[str, Any],
+    snapshot: CommittedSnapshot,
+) -> dict[str, str]:
+    if snapshot.manifest_kind != MACHINE_FACT_TOOLCHAIN_MANIFEST_KIND:
+        raise MachineFactError("supplied toolchain snapshot has the wrong kind")
+    try:
+        rebuilt = verify_manifest(
+            repository,
+            manifest,
+            expected_kind=MACHINE_FACT_TOOLCHAIN_MANIFEST_KIND,
+            expected_revision=snapshot.revision,
+        )
+    except ManifestError as exc:
+        raise MachineFactError("supplied toolchain manifest is not verified") from exc
+    if rebuilt != snapshot:
+        raise MachineFactError(
+            "supplied toolchain snapshot does not match its manifest"
+        )
+    return _seal(manifest)
+
+
+def _rebuild_toolchain_seal(
+    repository: Path, claimed_seal: Mapping[str, Any]
+) -> dict[str, str]:
+    if set(claimed_seal) != _SEAL_KEYS:
+        raise MachineFactError("toolchain seal must have exact keys")
+    revision = _string(claimed_seal.get("revision"), label="toolchain_seal.revision")
+    if _SHA1.fullmatch(revision) is None:
+        raise MachineFactError("toolchain seal revision is invalid")
+    try:
+        manifest = build_manifest(
+            repository,
+            revision,
+            manifest_kind=MACHINE_FACT_TOOLCHAIN_MANIFEST_KIND,
+            expected_revision=revision,
+        )
+        verify_manifest(
+            repository,
+            manifest,
+            expected_kind=MACHINE_FACT_TOOLCHAIN_MANIFEST_KIND,
+            expected_revision=revision,
+        )
+    except ManifestError as exc:
+        raise MachineFactError(
+            "toolchain seal does not resolve to a verified Git commit"
+        ) from exc
+    rebuilt_seal = _seal(manifest)
+    if dict(claimed_seal) != rebuilt_seal:
+        raise MachineFactError("toolchain seal does not match its committed manifest")
+    return rebuilt_seal
+
+
 def _assemble_sealed_document(
     result: Mapping[str, Any],
     adapter: Mapping[str, Any],
     *,
+    repository: Path,
     source_seal: Mapping[str, Any],
     analyzer_seal: Mapping[str, Any],
+    toolchain_manifest: Mapping[str, Any],
+    toolchain_snapshot: CommittedSnapshot,
 ) -> dict[str, Any]:
+    toolchain_seal = _verified_supplied_toolchain_seal(
+        repository, toolchain_manifest, toolchain_snapshot
+    )
     validate_effective_adapter(adapter)
     validate_runtime_access_v2(
         result, resource_locators=_adapter_resource_locators(adapter)
@@ -1230,6 +1314,7 @@ def _assemble_sealed_document(
     cache_key = cache_key_metadata(
         source_seal=source_seal,
         analyzer_seal=analyzer_seal,
+        toolchain_seal=toolchain_seal,
         candidate_subset_sha256=CANDIDATE_SUBSET_SHA256,
     )
     document = {
@@ -1239,6 +1324,7 @@ def _assemble_sealed_document(
         "cache_key": cache_key,
         "source_seal": dict(source_seal),
         "analyzer_seal": dict(analyzer_seal),
+        "toolchain_seal": toolchain_seal,
         "candidate_subset_sha256": CANDIDATE_SUBSET_SHA256,
         "shard_plan": {
             "id": SHARD_PLAN_ID,
@@ -1250,11 +1336,12 @@ def _assemble_sealed_document(
         "excluded_declarations": _plain_json(adapter["excluded_declarations"]),
         "counts": _wrapper_counts(adapter, result),
     }
-    validate_machine_fact_document(document, adapter=adapter)
+    validate_machine_fact_document(repository, document, adapter=adapter)
     return document
 
 
 def validate_machine_fact_document(
+    repository: Path,
     value: object,
     *,
     adapter: Mapping[str, Any],
@@ -1285,9 +1372,14 @@ def validate_machine_fact_document(
     analyzer_seal = _object(
         document["analyzer_seal"], _SEAL_KEYS, label="analyzer_seal"
     )
+    toolchain_seal = _object(
+        document["toolchain_seal"], _SEAL_KEYS, label="toolchain_seal"
+    )
+    verified_toolchain_seal = _rebuild_toolchain_seal(repository, toolchain_seal)
     rebuilt_key = cache_key_metadata(
         source_seal=source_seal,
         analyzer_seal=analyzer_seal,
+        toolchain_seal=verified_toolchain_seal,
         candidate_subset_sha256=_string(
             document["candidate_subset_sha256"], label="candidate_subset_sha256"
         ),
@@ -1306,11 +1398,13 @@ def validate_machine_fact_document(
     official_key = cache_key_metadata(
         source_seal=official_source_seal,
         analyzer_seal=official_analyzer_seal,
+        toolchain_seal=verified_toolchain_seal,
         candidate_subset_sha256=CANDIDATE_SUBSET_SHA256,
     )
     if (
         source_seal != official_source_seal
         or analyzer_seal != official_analyzer_seal
+        or toolchain_seal != verified_toolchain_seal
         or key != official_key
         or rebuilt_key != official_key
     ):
@@ -1351,15 +1445,17 @@ def validate_machine_fact_document(
 
 
 def machine_fact_cache_bytes(
+    repository: Path,
     document: object,
     *,
     adapter: Mapping[str, Any],
 ) -> bytes:
-    validate_machine_fact_document(document, adapter=adapter)
+    validate_machine_fact_document(repository, document, adapter=adapter)
     return canonical_bytes(document)
 
 
 def load_machine_fact_cache(
+    repository: Path,
     raw: bytes,
     *,
     adapter: Mapping[str, Any],
@@ -1393,7 +1489,7 @@ def load_machine_fact_cache(
         raise MachineFactError("cache JSON is malformed") from exc
     if canonical_bytes(value) != raw:
         raise MachineFactError("cache JSON is not in canonical byte form")
-    validate_machine_fact_document(value, adapter=adapter)
+    validate_machine_fact_document(repository, value, adapter=adapter)
     return cast(dict[str, Any], value)
 
 
@@ -1448,6 +1544,39 @@ def current_loaded_analyzer_files(repository: Path) -> dict[str, bytes]:
     return {path: (repository / path).read_bytes() for path in ANALYZER_PATHS}
 
 
+def verify_current_toolchain_code(
+    repository: Path, committed: CommittedSnapshot
+) -> None:
+    """Verify exact current bytes and loaded module paths for the toolchain."""
+
+    if committed.manifest_kind != MACHINE_FACT_TOOLCHAIN_MANIFEST_KIND:
+        raise MachineFactError("committed toolchain snapshot has the wrong kind")
+    expected = _snapshot_mapping(committed)
+    if set(expected) != set(MACHINE_FACT_TOOLCHAIN_PATHS):
+        raise MachineFactError("committed toolchain snapshot is not the exact 3 paths")
+    try:
+        current = {
+            path: (repository / path).read_bytes()
+            for path in MACHINE_FACT_TOOLCHAIN_PATHS
+        }
+    except OSError as exc:
+        raise MachineFactError("current toolchain files cannot be read") from exc
+    if current != expected:
+        raise MachineFactError("current toolchain bytes drifted from committed HEAD")
+    for path, module_name in _TOOLCHAIN_MODULE_BY_PATH.items():
+        module = sys.modules.get(module_name)
+        if module is None:
+            raise MachineFactError(f"toolchain module is not loaded: {module_name}")
+        loaded_path = getattr(module, "__file__", None)
+        if (
+            type(loaded_path) is not str
+            or Path(loaded_path).resolve() != (repository / path).resolve()
+        ):
+            raise MachineFactError(
+                f"toolchain module loaded from an unexpected path: {module_name}"
+            )
+
+
 def _require_fresh_analyzer_import_state() -> None:
     loaded = sorted(_ANALYZER_MODULE_NAMES.intersection(sys.modules))
     if loaded:
@@ -1495,13 +1624,23 @@ def _import_verified_fresh_analyzer(
 
 
 def run_sealed_effective_analysis(repository: Path) -> dict[str, Any]:
-    """Bind exact source and access-analyzer inputs into an effective artifact.
-
-    The adapter/toolchain module seal is deliberately outside this tranche's
-    boundary and must be added before generating a durable production artifact.
-    """
+    """Bind exact source, analyzer, and current-HEAD toolchain Git inputs."""
 
     _require_fresh_analyzer_import_state()
+    toolchain_revision = current_head_revision(repository)
+    toolchain_manifest = build_manifest(
+        repository,
+        toolchain_revision,
+        manifest_kind=MACHINE_FACT_TOOLCHAIN_MANIFEST_KIND,
+        expected_revision=toolchain_revision,
+    )
+    toolchain_snapshot = verify_manifest(
+        repository,
+        toolchain_manifest,
+        expected_kind=MACHINE_FACT_TOOLCHAIN_MANIFEST_KIND,
+        expected_revision=toolchain_revision,
+    )
+    verify_current_toolchain_code(repository, toolchain_snapshot)
     source_manifest = build_manifest(
         repository,
         EFFECTIVE_SOURCE_REVISION,
@@ -1551,8 +1690,11 @@ def run_sealed_effective_analysis(repository: Path) -> dict[str, Any]:
     return _assemble_sealed_document(
         result,
         adapter,
+        repository=repository,
         source_seal=_seal(source_manifest),
         analyzer_seal=_seal(analyzer_manifest),
+        toolchain_manifest=toolchain_manifest,
+        toolchain_snapshot=toolchain_snapshot,
     )
 
 
@@ -1583,5 +1725,6 @@ __all__ = [
     "validate_effective_adapter",
     "validate_machine_fact_document",
     "validate_runtime_access_v2",
+    "verify_current_toolchain_code",
     "verify_loaded_analyzer_code",
 ]

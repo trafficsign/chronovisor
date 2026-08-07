@@ -14,10 +14,13 @@ from scripts.runtime_ownership.manifests import (
     ANALYZER_MANIFEST_KIND,
     ANALYZER_PATHS,
     FROZEN_SOURCE_REVISION,
+    MACHINE_FACT_TOOLCHAIN_MANIFEST_KIND,
+    MACHINE_FACT_TOOLCHAIN_PATHS,
     SOURCE_MANIFEST_KIND,
     ManifestError,
     build_manifest,
     committed_snapshot,
+    current_head_revision,
     resolve_full_revision,
     selected_paths_unchanged,
     verify_manifest,
@@ -25,11 +28,10 @@ from scripts.runtime_ownership.manifests import (
 
 ROOT = Path(__file__).resolve().parents[1]
 CURRENT_HEAD = "f90202f1d1b9b2ed44075f38b0668c91fc0f196f"
+TOOLCHAIN_PRECOMMIT_HEAD = "11e2acf77a53edf520e3cce5d2e5decd16cd06c5"
 
 
-def _git(
-    repository: Path, *arguments: str, input_bytes: bytes | None = None
-) -> bytes:
+def _git(repository: Path, *arguments: str, input_bytes: bytes | None = None) -> bytes:
     completed = subprocess.run(
         ["git", *arguments],
         cwd=repository,
@@ -37,13 +39,13 @@ def _git(
         capture_output=True,
         check=False,
     )
-    assert completed.returncode == 0, completed.stderr.decode(
-        "utf-8", errors="replace"
-    )
+    assert completed.returncode == 0, completed.stderr.decode("utf-8", errors="replace")
     return completed.stdout
 
 
-def _write(repository: Path, path: str, content: bytes, *, executable: bool = False) -> None:
+def _write(
+    repository: Path, path: str, content: bytes, *, executable: bool = False
+) -> None:
     target = repository / path
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_bytes(content)
@@ -98,6 +100,14 @@ def analyzer_repository(tmp_path: Path) -> tuple[Path, str]:
     return repository, _commit(repository, "analyzer")
 
 
+@pytest.fixture
+def toolchain_repository(tmp_path: Path) -> tuple[Path, str]:
+    repository = _initialize_repository(tmp_path / "repository")
+    for index, path in enumerate(MACHINE_FACT_TOOLCHAIN_PATHS):
+        _write(repository, path, f"ROW = {index}\n".encode())
+    return repository, _commit(repository, "toolchain")
+
+
 def _canonical_bytes(value: Any) -> bytes:
     return json.dumps(
         value,
@@ -115,9 +125,7 @@ def _reseal(manifest: dict[str, Any]) -> None:
     unsigned = {
         key: value for key, value in manifest.items() if key != "manifest_sha256"
     }
-    manifest["manifest_sha256"] = hashlib.sha256(
-        _canonical_bytes(unsigned)
-    ).hexdigest()
+    manifest["manifest_sha256"] = hashlib.sha256(_canonical_bytes(unsigned)).hexdigest()
 
 
 def _source_manifest(repository: Path, revision: str) -> dict[str, Any]:
@@ -163,20 +171,18 @@ def test_resolve_full_revision_rejects_noncommit_object(
     source_repository: tuple[Path, str],
 ) -> None:
     repository, _revision = source_repository
-    blob_oid = _git(
-        repository, "hash-object", "-w", "--stdin", input_bytes=b"not a commit"
-    ).decode("ascii").strip()
+    blob_oid = (
+        _git(repository, "hash-object", "-w", "--stdin", input_bytes=b"not a commit")
+        .decode("ascii")
+        .strip()
+    )
 
     with pytest.raises(ManifestError):
         resolve_full_revision(repository, blob_oid)
 
 
 def test_parse_tree_rejects_unterminated_nul_framing() -> None:
-    unterminated = (
-        b"100644 blob "
-        + b"a" * 40
-        + b"       1\tpyproject.toml"
-    )
+    unterminated = b"100644 blob " + b"a" * 40 + b"       1\tpyproject.toml"
 
     assert manifests._parse_tree(b"") == ()
     with pytest.raises(ManifestError, match="missing its trailing NUL"):
@@ -191,12 +197,7 @@ def test_parse_tree_rejects_unterminated_nul_framing() -> None:
             "empty path",
         ),
         (
-            (
-                b"100644 blob "
-                + b"a" * 40
-                + b"       1\tpyproject.toml\0"
-            )
-            * 2,
+            (b"100644 blob " + b"a" * 40 + b"       1\tpyproject.toml\0") * 2,
             "duplicate path",
         ),
         (
@@ -205,22 +206,14 @@ def test_parse_tree_rejects_unterminated_nul_framing() -> None:
         ),
     ],
 )
-def test_parse_tree_rejects_empty_and_duplicate_paths(
-    raw: bytes, message: str
-) -> None:
+def test_parse_tree_rejects_empty_and_duplicate_paths(raw: bytes, message: str) -> None:
     with pytest.raises(ManifestError, match=message):
         manifests._parse_tree(raw)
 
 
 @pytest.mark.parametrize("raw_size", [b"+1", b"01", b"-0"])
 def test_parse_tree_rejects_noncanonical_decimal_sizes(raw_size: bytes) -> None:
-    raw = (
-        b"100644 blob "
-        + b"a" * 40
-        + b"    "
-        + raw_size
-        + b"\tpyproject.toml\0"
-    )
+    raw = b"100644 blob " + b"a" * 40 + b"    " + raw_size + b"\tpyproject.toml\0"
 
     with pytest.raises(ManifestError, match="canonical decimal"):
         manifests._parse_tree(raw)
@@ -304,9 +297,9 @@ def test_committed_snapshot_exposes_exact_blob_metadata_and_raw_bytes(
     )
     assert snapshot.read_bytes("src/chronovisor/__init__.py") == b"VALUE = 1\n"
     assert {row.git_type for row in snapshot.files} == {"blob"}
-    assert {
-        row.path: row.git_mode for row in snapshot.files
-    }["scripts/chronovisor-fixture"] == "100755"
+    assert {row.path: row.git_mode for row in snapshot.files}[
+        "scripts/chronovisor-fixture"
+    ] == "100755"
 
 
 def test_snapshot_uses_required_git_plumbing_and_never_worktree_reads(
@@ -320,9 +313,7 @@ def test_snapshot_uses_required_git_plumbing_and_never_worktree_reads(
         command: list[str], **kwargs: Any
     ) -> subprocess.CompletedProcess[bytes]:
         commands.append(command)
-        return cast(
-            subprocess.CompletedProcess[bytes], real_run(command, **kwargs)
-        )
+        return cast(subprocess.CompletedProcess[bytes], real_run(command, **kwargs))
 
     def forbidden(*_args: Any, **_kwargs: Any) -> Any:
         raise AssertionError("worktree filesystem selection is forbidden")
@@ -521,12 +512,14 @@ def test_manifest_schema_counts_and_hashes_are_canonical(
         "files": 4,
         "bytes": sum(row["byte_count"] for row in manifest["files"]),
     }
-    assert manifest["files_sha256"] == hashlib.sha256(
-        _canonical_bytes(manifest["files"])
-    ).hexdigest()
-    assert manifest["manifest_sha256"] == hashlib.sha256(
-        _canonical_bytes(unsigned)
-    ).hexdigest()
+    assert (
+        manifest["files_sha256"]
+        == hashlib.sha256(_canonical_bytes(manifest["files"])).hexdigest()
+    )
+    assert (
+        manifest["manifest_sha256"]
+        == hashlib.sha256(_canonical_bytes(unsigned)).hexdigest()
+    )
     assert _verify_source(repository, manifest, revision).revision == revision
 
 
@@ -640,9 +633,7 @@ def test_verify_rebuilds_tree_instead_of_trusting_resealed_rows(
             "sha256": second["sha256"],
         }
     )
-    manifest["counts"]["bytes"] = sum(
-        row["byte_count"] for row in manifest["files"]
-    )
+    manifest["counts"]["bytes"] = sum(row["byte_count"] for row in manifest["files"])
     _reseal(manifest)
 
     with pytest.raises(ManifestError, match="independently rebuilt"):
@@ -681,9 +672,7 @@ def test_revision_policy_is_required_and_options_are_exclusive(
 ) -> None:
     repository, revision = source_repository
     with pytest.raises(ManifestError, match="revision policy is required"):
-        build_manifest(
-            repository, revision, manifest_kind=SOURCE_MANIFEST_KIND
-        )
+        build_manifest(repository, revision, manifest_kind=SOURCE_MANIFEST_KIND)
     with pytest.raises(ManifestError, match="mutually exclusive"):
         build_manifest(
             repository,
@@ -846,4 +835,140 @@ def test_real_head_canonical_source_and_analyzer_manifests() -> None:
     )
     assert analyzer["manifest_sha256"] == (
         "74d6671eaf0ed4a6def71b28829bdbb7b4aa6392831d01beb2384dfe7b34948b"
+    )
+
+
+def test_toolchain_manifest_selects_exact_three_and_ignores_worktree(
+    toolchain_repository: tuple[Path, str],
+) -> None:
+    repository, revision = toolchain_repository
+    manifest = build_manifest(
+        repository,
+        revision,
+        manifest_kind=MACHINE_FACT_TOOLCHAIN_MANIFEST_KIND,
+        expected_revision=revision,
+    )
+    assert current_head_revision(repository) == revision
+    assert manifest["selection"] == {
+        "python": list(MACHINE_FACT_TOOLCHAIN_PATHS),
+        "exact_file_count": 3,
+    }
+    assert [row["path"] for row in manifest["files"]] == sorted(
+        MACHINE_FACT_TOOLCHAIN_PATHS
+    )
+    assert manifest["counts"]["files"] == 3
+    snapshot = verify_manifest(
+        repository,
+        manifest,
+        expected_kind=MACHINE_FACT_TOOLCHAIN_MANIFEST_KIND,
+        expected_revision=revision,
+    )
+    assert tuple(row.path for row in snapshot.files) == tuple(
+        sorted(MACHINE_FACT_TOOLCHAIN_PATHS)
+    )
+
+    _write(repository, MACHINE_FACT_TOOLCHAIN_PATHS[0], b"dirty\n")
+    _write(repository, "untracked.py", b"ignored\n")
+    assert (
+        build_manifest(
+            repository,
+            revision,
+            manifest_kind=MACHINE_FACT_TOOLCHAIN_MANIFEST_KIND,
+            expected_revision=revision,
+        )
+        == manifest
+    )
+
+
+def test_toolchain_manifest_rejects_missing_and_reseeded_extra_path(
+    toolchain_repository: tuple[Path, str],
+) -> None:
+    repository, revision = toolchain_repository
+    manifest = build_manifest(
+        repository,
+        revision,
+        manifest_kind=MACHINE_FACT_TOOLCHAIN_MANIFEST_KIND,
+        expected_revision=revision,
+    )
+    extra = copy.deepcopy(manifest)
+    extra_row = {**extra["files"][0], "path": "scripts/runtime_ownership/extra.py"}
+    extra["files"].append(extra_row)
+    extra["files"].sort(key=lambda row: row["path"])
+    extra["counts"]["files"] += 1
+    extra["counts"]["bytes"] += extra_row["byte_count"]
+    _reseal(extra)
+    with pytest.raises(ManifestError, match="independently rebuilt"):
+        verify_manifest(
+            repository,
+            extra,
+            expected_kind=MACHINE_FACT_TOOLCHAIN_MANIFEST_KIND,
+            expected_revision=revision,
+        )
+
+    _git(repository, "rm", "--quiet", MACHINE_FACT_TOOLCHAIN_PATHS[0])
+    missing_revision = _commit_index(repository, "missing toolchain path")
+    with pytest.raises(ManifestError, match="exact 3 paths"):
+        committed_snapshot(
+            repository,
+            missing_revision,
+            manifest_kind=MACHINE_FACT_TOOLCHAIN_MANIFEST_KIND,
+        )
+
+
+@pytest.mark.parametrize("invalid_kind", ["executable", "symlink", "gitlink"])
+def test_toolchain_manifest_rejects_non_regular_or_executable_inputs(
+    toolchain_repository: tuple[Path, str], invalid_kind: str
+) -> None:
+    repository, revision = toolchain_repository
+    path = MACHINE_FACT_TOOLCHAIN_PATHS[0]
+    if invalid_kind == "executable":
+        _git(repository, "update-index", "--chmod=+x", path)
+    elif invalid_kind == "symlink":
+        target = repository / path
+        target.unlink()
+        target.symlink_to("declarations.py")
+        _git(repository, "add", path)
+    else:
+        _git(
+            repository,
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            f"160000,{revision},{path}",
+        )
+    invalid_revision = _commit_index(repository, invalid_kind)
+    with pytest.raises(ManifestError, match="not a blob|invalid git mode"):
+        committed_snapshot(
+            repository,
+            invalid_revision,
+            manifest_kind=MACHINE_FACT_TOOLCHAIN_MANIFEST_KIND,
+        )
+
+
+def test_real_precommit_toolchain_manifest_is_git_only_and_canonical() -> None:
+    assert resolve_full_revision(ROOT, TOOLCHAIN_PRECOMMIT_HEAD) == (
+        TOOLCHAIN_PRECOMMIT_HEAD
+    )
+    manifest = build_manifest(
+        ROOT,
+        TOOLCHAIN_PRECOMMIT_HEAD,
+        manifest_kind=MACHINE_FACT_TOOLCHAIN_MANIFEST_KIND,
+        expected_revision=TOOLCHAIN_PRECOMMIT_HEAD,
+    )
+    assert manifest["revision"] == TOOLCHAIN_PRECOMMIT_HEAD
+    assert manifest["counts"] == {"files": 3, "bytes": 170_655}
+    assert manifest["files_sha256"] == (
+        "343d8385b93004be7f80aff326393b6965200313c124dc4e7bc0cca05854b93b"
+    )
+    assert manifest["manifest_sha256"] == (
+        "12cd1e8b14b58e87dffce2a7541a8e152b585742e52aa884b963509be442556d"
+    )
+    assert [row["path"] for row in manifest["files"]] == sorted(
+        MACHINE_FACT_TOOLCHAIN_PATHS
+    )
+    verify_manifest(
+        ROOT,
+        manifest,
+        expected_kind=MACHINE_FACT_TOOLCHAIN_MANIFEST_KIND,
+        expected_revision=TOOLCHAIN_PRECOMMIT_HEAD,
     )
