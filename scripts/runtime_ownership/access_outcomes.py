@@ -14,6 +14,7 @@ from .access_model import (
     has_fcntl_lock_mask,
     has_file_descriptor_object,
     is_exact_path_receiver,
+    mark_attribute_alternative_ambiguity,
 )
 
 if TYPE_CHECKING:
@@ -53,6 +54,12 @@ class BlockResult:
             if outcome.kind == "return":
                 return_values.append(outcome.value)
                 value = value.merged(outcome.value)
+        mark_attribute_alternative_ambiguity(value, return_values)
+        if any(outcome.kind == "normal" for outcome in self.outcomes):
+            mark_attribute_alternative_ambiguity(
+                value,
+                [*return_values, FlowValue()],
+            )
         if has_fcntl_lock_mask(value) and (
             any(candidate == FlowValue() for candidate in return_values)
             or any(outcome.kind == "normal" for outcome in self.outcomes)
@@ -105,6 +112,7 @@ def join_states(states: Iterable[StateSnapshot]) -> StateSnapshot:
             candidate = state_env.get(name, FlowValue())
             candidates.append(candidate)
             value = value.merged(candidate)
+        mark_attribute_alternative_ambiguity(value, candidates)
         if has_fcntl_lock_mask(value) and any(
             candidate == FlowValue() for candidate in candidates
         ):
@@ -457,7 +465,7 @@ def _analyze_outcome_statement(
         prefix_states=None,
     )
     outcomes = [Outcome("normal", env, object_env, FlowValue())]
-    if returned.has_origins:
+    if returned.has_analysis_state:
         returned_env, returned_objects = copy_state(env, object_env)
         outcomes.append(Outcome("return", returned_env, returned_objects, returned))
     return BlockResult(changed, outcomes)

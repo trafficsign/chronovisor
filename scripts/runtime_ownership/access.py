@@ -8,16 +8,23 @@ from typing import Any
 
 from .access_expressions import evaluate_generic_expression
 from .access_facts import AccessFactCollector
-from .access_imports import build_module_exports, resolve_module_attribute
+from .access_imports import (
+    build_module_exports,
+    resolve_import_from,
+    resolve_module_attribute,
+)
 from .access_model import (
     FILE_BOUND_CLOSE_OBJECT_TYPE,
     FILE_BOUND_FILENO_OBJECT_TYPE,
     FILE_HANDLE_OBJECT_TYPE,
     FILE_UNKNOWN_ATTRIBUTE_OBJECT_TYPE,
+    PATH_BOUND_TRANSFORM_PREFIX,
+    PATH_TRANSFORMS,
     SQLITE_HANDLE_OBJECT_TYPES,
     SQLITE_UNKNOWN_ATTRIBUTE_OBJECT_TYPE,
     SUPPORTED_STDLIB_MODULES,
     UNRESOLVED_RUNTIME_OBJECT_ALTERNATIVE_TYPE,
+    DataclassInfo,
     FlowValue,
     FunctionInfo,
     _call_ordinals,
@@ -42,6 +49,26 @@ from .access_statements import analyze_block, evaluate_control_expression
 
 _CALL_MODULE_STATE_PREFIX = "\0runtime-module-state:"
 _CALL_CLOSURE_STATE_PREFIX = "\0runtime-closure-state:"
+
+_SOCKET_ORIGIN_ALIASES = {
+    "unix://$HOME/.chronovisor/runtime/semantic.sock": (
+        "chronovisor.core.runtime_config",
+        "SearchEmbeddingConfig.socket",
+    ),
+    "unix://$HOME/.chronovisor/runtime/reranker.sock": (
+        "chronovisor.core.runtime_config",
+        "RerankerServiceConfig.socket",
+    ),
+}
+
+
+def _normalized_socket_locator(value: str) -> str:
+    normalized = value.removeprefix("unix://")
+    if normalized == "$HOME":
+        return "~"
+    if normalized.startswith("$HOME/"):
+        return f"~/{normalized.removeprefix('$HOME/')}"
+    return normalized
 
 
 def _call_module_state_prefix(module: str) -> str:
@@ -136,6 +163,48 @@ def _has_nonrecursive_self_path(info: FunctionInfo) -> bool:
     return has_direct_self_call and (can_continue or can_exit)
 
 
+def _is_main_guard(expression: ast.expr) -> bool:
+    if not isinstance(expression, ast.Compare) or len(expression.ops) != 1:
+        return False
+    if not isinstance(expression.ops[0], ast.Eq) or len(expression.comparators) != 1:
+        return False
+    left, right = expression.left, expression.comparators[0]
+    pairs = ((left, right), (right, left))
+    return any(
+        isinstance(name, ast.Name)
+        and name.id == "__name__"
+        and isinstance(value, ast.Constant)
+        and value.value == "__main__"
+        for name, value in pairs
+    )
+
+
+def _main_guard_call_ids(tree: ast.Module) -> frozenset[int]:
+    call_ids: set[int] = set()
+    for statement in tree.body:
+        if not isinstance(statement, ast.If) or not _is_main_guard(statement.test):
+            continue
+        for guarded_statement in statement.body:
+            call_ids.update(
+                id(node)
+                for node in ast.walk(guarded_statement)
+                if isinstance(node, ast.Call)
+            )
+    return frozenset(call_ids)
+
+
+def _value_has_nested_origins(value: FlowValue) -> bool:
+    if value.has_origins:
+        return True
+    if any(
+        _value_has_nested_origins(item) for item in value.attribute_values.values()
+    ):
+        return True
+    return value.structured_items is not None and any(
+        _value_has_nested_origins(item) for item in value.structured_items
+    )
+
+
 class _AccessAnalysis:
     def __init__(
         self,
@@ -167,10 +236,27 @@ class _AccessAnalysis:
             self.functions.update(functions)
             self.classes[module] = classes
         self.package_modules = frozenset(package_modules)
+        self.main_guard_call_ids = frozenset().union(
+            *(_main_guard_call_ids(tree) for tree in self.trees.values())
+        )
         self.future_annotations = frozenset(
             module
             for module, tree in self.trees.items()
             if _uses_future_annotations(tree)
+        )
+        self.dataclass_targets = frozenset(
+            f"{module}:{statement.name}"
+            for module, tree in self.trees.items()
+            for statement in tree.body
+            if isinstance(statement, ast.ClassDef)
+            and any(
+                _is_declared_dataclass_decorator(
+                    decorator,
+                    imported_symbols=self.imported_symbols[module],
+                    imported_modules=self.imported_modules[module],
+                )
+                for decorator in statement.decorator_list
+            )
         )
         known_modules = set(self.trees)
         for module in self.trees:
@@ -182,6 +268,9 @@ class _AccessAnalysis:
         self.known_modules = frozenset(known_modules)
         self.origin_symbols: dict[tuple[str, str], FlowValue] = {}
         self.resource_locators: dict[str, str] = {}
+        self.socket_field_origins: dict[
+            tuple[str, str], tuple[str, FlowValue]
+        ] = {}
         for row in resource_candidates:
             resource_id = str(row.get("id") or row.get("resource_id") or "")
             locator = row.get("locator")
@@ -211,6 +300,14 @@ class _AccessAnalysis:
             self.origin_symbols[origin_key] = FlowValue(
                 {resource_id: frozenset({(f"origin:{module}:{symbol}",)})}
             )
+            alias = _SOCKET_ORIGIN_ALIASES.get(locator_value)
+            if alias is not None:
+                self.socket_field_origins[alias] = (
+                    _normalized_socket_locator(locator_value),
+                    self.origin_symbols[origin_key].bound(
+                        f"origin-alias:{alias[0]}:{alias[1]}"
+                    ),
+                )
         export_table = build_module_exports(
             self.trees,
             package_modules=self.package_modules,
@@ -226,6 +323,14 @@ class _AccessAnalysis:
         }
         self.function_refs_by_node = {
             id(info.node): ref for ref, info in self.functions.items()
+        }
+        self.function_loaded_names = {
+            ref: frozenset(
+                node.id
+                for node in ast.walk(info.node)
+                if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)
+            )
+            for ref, info in self.functions.items()
         }
         self.function_parents = {
             ref: info.parent_ref for ref, info in self.functions.items()
@@ -257,6 +362,7 @@ class _AccessAnalysis:
         self.called_targets: set[str] = set()
         self.locally_executed_targets: set[str] = set()
         self.summary_required_targets: set[str] = set()
+        self.analyzed_summary_targets: set[str] = set()
         self._active_local_calls: set[str] = set()
         self._active_local_activations: dict[str, str] = {}
         self._local_module_states: list[
@@ -264,6 +370,7 @@ class _AccessAnalysis:
         ] = []
         self._local_closure_states: list[dict[str, dict[str, FlowValue]]] = []
         self.class_attrs: dict[str, dict[str, FlowValue]] = {}
+        self.dataclass_infos: dict[str, DataclassInfo] = {}
         self.class_comprehension_parents: dict[
             str,
             tuple[dict[str, FlowValue], dict[str, set[str]]],
@@ -283,18 +390,170 @@ class _AccessAnalysis:
             self._persistent_changed = False
             for module, tree in sorted(self.trees.items()):
                 self._analyze_module(module, tree)
-            for ref, info in sorted(self.functions.items()):
-                if (
-                    ref in self.locally_executed_targets
-                    and ref not in self.summary_required_targets
-                ):
-                    continue
-                if info.parent_ref is not None and ref not in self.called_targets:
-                    continue
-                self._analyze_function(info)
+            module_changed = self._persistent_changed
+            function_changed = False
+            while True:
+                self._persistent_changed = False
+                for ref, info in sorted(self.functions.items()):
+                    if (
+                        ref in self.locally_executed_targets
+                        and ref not in self.summary_required_targets
+                    ):
+                        continue
+                    if info.parent_ref is not None and ref not in self.called_targets:
+                        continue
+                    if not self._function_has_origin_inputs(info):
+                        continue
+                    self._analyze_function(info)
+                if not self._persistent_changed:
+                    break
+                function_changed = True
+            self._persistent_changed = module_changed or function_changed
             if not self._persistent_changed:
                 break
         return self.facts.result()
+
+    def _function_has_origin_inputs(self, info: FunctionInfo) -> bool:
+        if info.ref in self.summary_required_targets:
+            return True
+        if self._function_has_origin_local_import(info):
+            return True
+        values = [
+            *self.params[info.ref].values(),
+            *self.definition_defaults[info.ref].values(),
+            *self.closure_envs[info.ref].values(),
+        ]
+        module_env = self.module_runtime_envs[info.module]
+        for name in (
+            info.referenced_names
+            | info.global_names
+            | self.function_loaded_names[info.ref]
+        ):
+            value = module_env.get(name)
+            if value is not None:
+                values.append(value)
+        explicit_constructors = {
+            constructor.ref: constructor
+            for value in values
+            for class_target in value.class_targets
+            if (
+                (constructor := self.functions.get(f"{class_target}.__init__"))
+                is not None
+                and constructor.ref != info.ref
+            )
+        }
+        for constructor in explicit_constructors.values():
+            if (
+                constructor.ref in self.summary_required_targets
+                or self._function_has_origin_local_import(constructor)
+            ):
+                return True
+            values.extend(self.params[constructor.ref].values())
+            values.extend(self.definition_defaults[constructor.ref].values())
+            values.extend(self.closure_envs[constructor.ref].values())
+            constructor_module_env = self.module_runtime_envs[constructor.module]
+            for name in (
+                constructor.referenced_names
+                | constructor.global_names
+                | self.function_loaded_names[constructor.ref]
+            ):
+                value = constructor_module_env.get(name)
+                if value is not None:
+                    values.append(value)
+        if info.class_ref is not None:
+            values.extend(self.class_attrs.get(info.class_ref, {}).values())
+            dataclass_info = self.dataclass_infos.get(info.class_ref)
+            if dataclass_info is not None:
+                values.extend(
+                    field.default
+                    for field in dataclass_info.fields
+                    if field.default is not None
+                )
+                values.extend(
+                    field.default_factory
+                    for field in dataclass_info.fields
+                    if field.default_factory is not None
+                )
+                values.extend(
+                    FlowValue(class_targets=set(field.declared_class_targets))
+                    for field in dataclass_info.fields
+                    if field.declared_class_targets
+                )
+        expanded_values = list(values)
+        seen_classes: set[str] = set()
+        pending_classes = set().union(*(value.class_targets for value in values))
+        while pending_classes:
+            class_target = pending_classes.pop()
+            if class_target in seen_classes:
+                continue
+            seen_classes.add(class_target)
+            dataclass_info = self.dataclass_infos.get(class_target)
+            if dataclass_info is None:
+                continue
+            for field in dataclass_info.fields:
+                if field.default is not None:
+                    expanded_values.append(field.default)
+                    pending_classes.update(field.default.class_targets)
+                if field.default_factory is not None:
+                    expanded_values.append(field.default_factory)
+                    pending_classes.update(field.default_factory.class_targets)
+                pending_classes.update(field.declared_class_targets)
+        values = expanded_values
+        if any(_value_has_nested_origins(value) for value in values):
+            return True
+        call_targets = set().union(*(value.call_targets for value in values))
+        if any(
+            _value_has_nested_origins(self.returns.get(target, FlowValue()))
+            for target in call_targets
+        ):
+            return True
+        module_refs = set().union(*(value.module_refs for value in values))
+        return any(
+            _value_has_nested_origins(exported)
+            for module_ref in module_refs
+            for exported in self.module_exports.get(module_ref, {}).values()
+        )
+
+    def _function_has_origin_local_import(self, info: FunctionInfo) -> bool:
+        for node in ast.walk(info.node):
+            candidate_modules: set[str] = set()
+            candidate_values: list[FlowValue] = []
+            if isinstance(node, ast.Import):
+                candidate_modules.update(alias.name for alias in node.names)
+            elif isinstance(node, ast.ImportFrom):
+                target_module = resolve_import_from(
+                    info.module,
+                    level=node.level,
+                    imported_module=node.module,
+                    is_package=info.module in self.package_modules,
+                )
+                for alias in node.names:
+                    if alias.name == "*":
+                        candidate_values.extend(
+                            self.module_star_exports.get(target_module, {}).values()
+                        )
+                        continue
+                    candidate_values.append(
+                        self.module_exports.get(target_module, {}).get(
+                            alias.name, FlowValue()
+                        )
+                    )
+                    candidate_modules.add(
+                        f"{target_module}.{alias.name}"
+                        if target_module
+                        else alias.name
+                    )
+            if any(_value_has_nested_origins(value) for value in candidate_values):
+                return True
+            if any(
+                _value_has_nested_origins(exported)
+                for candidate_module in candidate_modules
+                for exported in self.module_exports.get(
+                    candidate_module, {}
+                ).values()
+            ):
+                return True
+        return False
 
     def _analyze_module(self, module: str, tree: ast.Module) -> bool:
         env: dict[str, FlowValue] = {}
@@ -321,10 +580,16 @@ class _AccessAnalysis:
 
     def _analyze_function(self, info: FunctionInfo) -> bool:
         module_env = self.module_runtime_envs[info.module]
+        required_module_names = (
+            info.referenced_names
+            | info.global_names
+            | self.function_loaded_names[info.ref]
+        )
         env = {
             name: value.copy()
             for name, value in module_env.items()
-            if name not in info.local_names or name in info.global_names
+            if name in required_module_names
+            and (name not in info.local_names or name in info.global_names)
         }
         for name in info.local_names:
             env[name] = FlowValue()
@@ -340,7 +605,7 @@ class _AccessAnalysis:
         for parameter, value in self.params[info.ref].items():
             env[parameter] = value.bound(f"param:{info.ref}:{parameter}")
         for parameter, default_value in self.definition_defaults[info.ref].items():
-            if default_value.has_origins:
+            if default_value.has_analysis_state:
                 env[parameter] = env.get(parameter, FlowValue()).merged(
                     default_value.bound(f"default:{info.ref}:{parameter}")
                 )
@@ -359,6 +624,7 @@ class _AccessAnalysis:
             self.returns[info.ref] = merged_return
             self._persistent_changed = True
             changed = True
+        self.analyzed_summary_targets.add(info.ref)
         return changed
 
     def _merge_definition_default(
@@ -410,9 +676,7 @@ class _AccessAnalysis:
             if name in module_env and value == module_env[name]:
                 continue
             if (
-                not value.has_origins
-                and not value.object_types
-                and not value.module_refs
+                not value.has_analysis_state
             ):
                 continue
             previous = closure.get(name, FlowValue())
@@ -478,6 +742,30 @@ class _AccessAnalysis:
             return value
         origin = self.origin_symbols.get((module, name))
         return origin.copy() if origin is not None else value
+
+    def _socket_field_origin(
+        self,
+        *,
+        module: str,
+        class_ref: str,
+        field_name: str,
+        expression: ast.expr,
+    ) -> FlowValue | None:
+        if not (
+            isinstance(expression, ast.Constant)
+            and isinstance(expression.value, str)
+        ):
+            return None
+        class_name = class_ref.removeprefix(f"{module}:")
+        candidate = self.socket_field_origins.get(
+            (module, f"{class_name}.{field_name}")
+        )
+        if candidate is None:
+            return None
+        expected, origin = candidate
+        if _normalized_socket_locator(expression.value) != expected:
+            return None
+        return origin.copy()
 
     def _bind_target(
         self,
@@ -560,12 +848,91 @@ class _AccessAnalysis:
                         ordinal=ordinal,
                     )
                 return False
+            if (
+                base.instance_ids
+                or base.class_targets
+                or base.attribute_values
+                or base.attribute_values_complete
+                or base.attribute_values_ambiguous
+                or base.unknown_callable
+            ):
+                bound_attribute = value.bound(
+                    f"attribute-assignment:{actor}:{target.attr}"
+                )
+                precise_instance = (
+                    len(base.instance_ids) == 1
+                    and not base.class_targets
+                    and not base.unknown_callable
+                    and not base.attribute_values_ambiguous
+                )
+                precise_class = (
+                    len(base.class_targets) == 1
+                    and not base.instance_ids
+                    and base.object_types == base.class_targets
+                    and not base.origins
+                    and not base.module_refs
+                    and not base.call_targets
+                    and not base.unknown_callable
+                    and not base.attribute_values_ambiguous
+                )
+                precise_receiver = precise_instance or precise_class
+
+                def updated_receiver(candidate: FlowValue) -> FlowValue:
+                    updated = candidate.copy()
+                    if precise_receiver:
+                        updated.attribute_values[target.attr] = (
+                            bound_attribute.copy()
+                        )
+                    else:
+                        previous = updated.attribute_values.get(target.attr)
+                        updated.attribute_values[target.attr] = (
+                            bound_attribute.copy()
+                            if previous is None
+                            else previous.merged(bound_attribute)
+                        )
+                        updated.attribute_values_complete = False
+                        updated.attribute_values_ambiguous = True
+                    return updated
+
+                receiver_name = target.value.id
+                receiver_ids = set(base.instance_ids)
+                receiver_classes = set(base.class_targets)
+                for name, candidate in list(env.items()):
+                    is_receiver_alias = name == receiver_name
+                    if precise_instance:
+                        is_receiver_alias = (
+                            candidate.instance_ids == receiver_ids
+                            and not candidate.class_targets
+                        )
+                    elif precise_class:
+                        is_receiver_alias = (
+                            candidate.class_targets == receiver_classes
+                            and not candidate.instance_ids
+                        )
+                    if not is_receiver_alias:
+                        continue
+                    updated = updated_receiver(candidate)
+                    env[name] = updated
+                    if updated.object_types:
+                        object_env[name] = set(updated.object_types)
+                    else:
+                        object_env.pop(name, None)
+                return False
         if (
             class_ref is not None
             and isinstance(target, ast.Attribute)
             and isinstance(target.value, ast.Name)
             and target.value.id == "self"
         ):
+            receiver = env.get("self", FlowValue())
+            if receiver.instance_ids or receiver.attribute_values:
+                updated = receiver.copy()
+                updated.attribute_values[target.attr] = value.bound(
+                    f"attr:{class_ref}:{target.attr}"
+                )
+                env["self"] = updated
+                object_env["self"] = set(updated.object_types)
+                return False
             attrs = self.class_attrs.setdefault(class_ref, {})
             previous = attrs.get(target.attr, FlowValue())
             attrs[target.attr] = previous.merged(
@@ -641,6 +1008,81 @@ class _AccessAnalysis:
             return f"{kind}:{site_id}"
         return f"{kind}:{site_id}|activation={activation}"
 
+    def _instance_class_attribute(
+        self,
+        instance: FlowValue,
+        *,
+        attribute: str,
+        env: Mapping[str, FlowValue],
+    ) -> FlowValue | None:
+        if not instance.instance_ids or instance.class_targets:
+            return None
+        known_class_targets = frozenset().union(
+            *(module_classes.values() for module_classes in self.classes.values())
+        )
+        instance_classes = sorted(
+            instance.object_types.intersection(known_class_targets)
+        )
+        if not instance_classes:
+            return None
+
+        fallback: FlowValue | None = None
+        fallback_ambiguous = instance.attribute_values_ambiguous
+        resolved_classes = 0
+        for class_target in instance_classes:
+            class_bindings = [
+                value
+                for value in env.values()
+                if value.class_targets == {class_target}
+                and not value.instance_ids
+                and attribute in value.attribute_values
+            ]
+            class_attribute: FlowValue | None = None
+            for binding in class_bindings:
+                candidate = binding.attribute_values[attribute]
+                if class_attribute is None:
+                    class_attribute = candidate.copy()
+                    continue
+                if candidate != class_attribute:
+                    fallback_ambiguous = True
+                class_attribute = class_attribute.merged(candidate)
+            if class_attribute is None:
+                info = self.dataclass_infos.get(class_target)
+                field = None
+                if info is not None:
+                    field = next(
+                        (
+                            candidate
+                            for candidate in info.fields
+                            if candidate.name == attribute
+                            and candidate.default is not None
+                        ),
+                        None,
+                    )
+                if field is not None:
+                    assert field.default is not None
+                    class_attribute = field.default.copy()
+            if class_attribute is None:
+                fallback_ambiguous = True
+                continue
+            resolved_classes += 1
+            class_attribute = class_attribute.bound(
+                f"class-attribute:{class_target}:{attribute}"
+            )
+            if fallback is None:
+                fallback = class_attribute
+            else:
+                if class_attribute != fallback:
+                    fallback_ambiguous = True
+                fallback = fallback.merged(class_attribute)
+        if fallback is None:
+            return None
+        if resolved_classes != len(instance_classes):
+            fallback_ambiguous = True
+        if fallback_ambiguous:
+            fallback.attribute_values_ambiguous = True
+        return fallback
+
     def _eval(
         self,
         node: ast.expr,
@@ -655,14 +1097,6 @@ class _AccessAnalysis:
         if isinstance(node, ast.Name):
             return env.get(node.id, FlowValue()).copy()
         if isinstance(node, ast.Attribute):
-            if (
-                isinstance(node.value, ast.Name)
-                and node.value.id == "self"
-                and class_ref is not None
-            ):
-                value = self.class_attrs.get(class_ref, {}).get(node.attr)
-                if value is not None:
-                    return value.copy()
             base = self._eval(
                 node.value,
                 module=module,
@@ -672,6 +1106,47 @@ class _AccessAnalysis:
                 object_env=object_env,
                 call_ordinals=call_ordinals,
             )
+            if node.attr in base.attribute_values:
+                projected_attribute = base.attribute_values[node.attr].bound(
+                    f"attribute:{node.attr}"
+                )
+                if base.attribute_values_ambiguous:
+                    projected_attribute.attribute_values_ambiguous = True
+                return projected_attribute
+            class_attribute = self._instance_class_attribute(
+                base,
+                attribute=node.attr,
+                env=env,
+            )
+            if class_attribute is not None:
+                return class_attribute
+            if base.attribute_values or base.attribute_values_complete:
+                return FlowValue(attribute_values_ambiguous=True)
+            if (
+                isinstance(node.value, ast.Name)
+                and node.value.id == "self"
+                and class_ref is not None
+            ):
+                value = self.class_attrs.get(class_ref, {}).get(node.attr)
+                if value is not None:
+                    return value.copy()
+            method_targets = {
+                f"{object_type}.{node.attr}"
+                for object_type in base.object_types
+                if f"{object_type}.{node.attr}" in self.functions
+            }
+            if method_targets:
+                return FlowValue(
+                    call_targets=method_targets,
+                    attribute_values={"\0bound_receiver": base.copy()},
+                    attribute_values_complete=True,
+                )
+            if is_path_receiver(base) and node.attr in PATH_TRANSFORMS:
+                return FlowValue(
+                    object_types={f"{PATH_BOUND_TRANSFORM_PREFIX}{node.attr}"},
+                    attribute_values={"\0bound_receiver": base.copy()},
+                    attribute_values_complete=True,
+                )
             projected, projection = project_sqlite_attribute(
                 base, attribute=node.attr
             )
@@ -774,12 +1249,36 @@ class _AccessAnalysis:
         env: dict[str, FlowValue],
         object_env: dict[str, set[str]],
         closure_instance: str | None,
+        bound_receiver: FlowValue | None = None,
+        receiver_out: list[FlowValue] | None = None,
+        force: bool = False,
     ) -> FlowValue | None:
         info = self.functions[target]
         caller_is_local = actor in self._active_local_calls
         caller_is_module = actor == f"{module}:<module>"
+        summary_only_guarded_call = (
+            caller_is_module
+            and id(node) in self.main_guard_call_ids
+            and info.parent_ref is None
+            and info.class_ref is None
+            and closure_instance is None
+            and bound_receiver is None
+            and isinstance(node.func, ast.Name)
+            and not _value_has_nested_origins(
+                env.get(node.func.id, FlowValue())
+            )
+            and not any(
+                _value_has_nested_origins(value)
+                for value in [*argument_values, *keyword_values.values()]
+            )
+            and not self._function_has_origin_inputs(info)
+        )
         if (
-            not (caller_is_local or caller_is_module)
+            not (
+                caller_is_local
+                or (caller_is_module and not summary_only_guarded_call)
+                or force
+            )
             or (
                 info.parent_ref is not None
                 and info.parent_ref != actor
@@ -836,8 +1335,12 @@ class _AccessAnalysis:
             frame_env[name] = FlowValue()
             frame_objects.pop(name, None)
         values = list(argument_values)
-        if info.class_ref is not None and not target.endswith(".__init__"):
-            values = [FlowValue(object_types={info.class_ref}), *values]
+        if info.class_ref is not None:
+            receiver_value = bound_receiver or FlowValue(
+                object_types={info.class_ref},
+                attribute_values_ambiguous=True,
+            )
+            values = [receiver_value, *values]
         provided: set[str] = set()
         source_name = call_name(node.func) or "<dynamic>"
         site_id = self.facts.site_id(node)
@@ -915,6 +1418,14 @@ class _AccessAnalysis:
         ]
         if exit_states:
             exit_env, exit_objects = join_states(exit_states)
+            if (
+                receiver_out is not None
+                and info.class_ref is not None
+                and info.parameters
+            ):
+                receiver_out.append(
+                    exit_env.get(info.parameters[0], FlowValue()).copy()
+                )
             for name in exit_env:
                 if _is_call_path_state_name(name):
                     self._sync_call_name(
@@ -1371,7 +1882,7 @@ class _AccessAnalysis:
                 line=int(node.lineno),
                 ordinal=ordinal,
             )
-        if safe.has_origins:
+        if safe.has_analysis_state:
             source_name = call_name(node.func) or "<dynamic>"
             site_id = self.facts.site_id(physical_node)
             step = (
@@ -1387,6 +1898,26 @@ def _uses_future_annotations(tree: ast.Module) -> bool:
         and statement.module == "__future__"
         and any(alias.name == "annotations" for alias in statement.names)
         for statement in tree.body
+    )
+
+
+def _is_declared_dataclass_decorator(
+    expression: ast.expr,
+    *,
+    imported_symbols: Mapping[str, tuple[str, str]],
+    imported_modules: Mapping[str, str],
+) -> bool:
+    callable_expression = expression.func if isinstance(expression, ast.Call) else expression
+    if isinstance(callable_expression, ast.Name):
+        return imported_symbols.get(callable_expression.id) == (
+            "dataclasses",
+            "dataclass",
+        )
+    return (
+        isinstance(callable_expression, ast.Attribute)
+        and isinstance(callable_expression.value, ast.Name)
+        and callable_expression.attr == "dataclass"
+        and imported_modules.get(callable_expression.value.id) == "dataclasses"
     )
 
 

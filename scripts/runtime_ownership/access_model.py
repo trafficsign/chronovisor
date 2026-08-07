@@ -13,8 +13,10 @@ from typing import Any, Literal
 MAX_BINDING_PATHS_PER_RESOURCE = 64
 
 STDLIB_BUILTINS_CALLS = frozenset({"open"})
+STDLIB_DATACLASSES_CALLS = frozenset({"dataclass", "field"})
 STDLIB_FCNTL_CALLS = frozenset({"flock"})
 STDLIB_OS_CALLS = frozenset({"fdopen", "open", "rename", "replace"})
+STDLIB_PATHLIB_CALLS = frozenset({"Path"})
 STDLIB_SQLITE3_CALLS = frozenset({"connect"})
 STDLIB_SQLITE3_TYPES = frozenset({"Connection", "Cursor"})
 FCNTL_LOCK_FLAGS = frozenset({"LOCK_EX", "LOCK_NB", "LOCK_SH", "LOCK_UN"})
@@ -64,7 +66,14 @@ STDLIB_CALL_TARGET_PREFIX = "stdlib-call-target:"
 STDLIB_MODULE_MUTATION_PREFIX = "stdlib-module-attribute-mutated:"
 STDLIB_MODULE_WILDCARD_ATTRIBUTE = "*"
 STDLIB_MODULE_STATE_PREFIX = "\0stdlib-module-state:"
-SUPPORTED_STDLIB_MODULES = frozenset({"builtins", "fcntl", "os", "sqlite3"})
+SUPPORTED_STDLIB_MODULES = frozenset(
+    {"builtins", "dataclasses", "fcntl", "os", "pathlib", "sqlite3"}
+)
+PATH_OBJECT_TYPE = "stdlib-pathlib-path"
+PATH_STRING_OBJECT_TYPE = "stdlib-pathlib-path-representation"
+PATH_BOUND_TRANSFORM_PREFIX = "stdlib-pathlib-bound-transform:"
+DATACLASS_INIT_VAR_MARKER = "stdlib-dataclasses-init-var"
+DATACLASS_KW_ONLY_MARKER = "stdlib-dataclasses-kw-only"
 SQLITE_CURSOR_SCALAR_ATTRIBUTES = frozenset(
     {"arraysize", "description", "lastrowid", "rowcount"}
 )
@@ -172,28 +181,44 @@ class FlowValue:
     runtime_object_ids: set[str] = field(default_factory=set)
     runtime_close_ids: set[str] = field(default_factory=set)
     runtime_descriptor_ids: set[str] = field(default_factory=set)
+    instance_ids: set[str] = field(default_factory=set)
+    attribute_values: dict[str, FlowValue] = field(default_factory=dict)
+    attribute_values_complete: bool = False
+    attribute_values_ambiguous: bool = False
 
     def copy(self) -> FlowValue:
         return FlowValue(
-            dict(self.origins),
-            set(self.object_types),
-            frozenset(self.overflowed),
-            set(self.module_refs),
-            set(self.call_targets),
-            set(self.class_targets),
-            self.unknown_callable,
-            set(self.closure_instances),
-            (
+            origins=dict(self.origins),
+            object_types=set(self.object_types),
+            overflowed=frozenset(self.overflowed),
+            module_refs=set(self.module_refs),
+            call_targets=set(self.call_targets),
+            class_targets=set(self.class_targets),
+            unknown_callable=self.unknown_callable,
+            closure_instances=set(self.closure_instances),
+            structured_items=(
                 tuple(item.copy() for item in self.structured_items)
                 if self.structured_items is not None
                 else None
             ),
-            set(self.runtime_object_ids),
-            set(self.runtime_close_ids),
-            set(self.runtime_descriptor_ids),
+            runtime_object_ids=set(self.runtime_object_ids),
+            runtime_close_ids=set(self.runtime_close_ids),
+            runtime_descriptor_ids=set(self.runtime_descriptor_ids),
+            instance_ids=set(self.instance_ids),
+            attribute_values={
+                name: value.copy() for name, value in self.attribute_values.items()
+            },
+            attribute_values_complete=self.attribute_values_complete,
+            attribute_values_ambiguous=self.attribute_values_ambiguous,
         )
 
     def merged(self, other: FlowValue) -> FlowValue:
+        self_bottom = _is_flow_bottom(self)
+        other_bottom = _is_flow_bottom(other)
+        if self_bottom:
+            return other.copy()
+        if other_bottom:
+            return self.copy()
         result = self.copy()
         if self.structured_items is not None and other.structured_items is not None:
             if len(self.structured_items) == len(other.structured_items):
@@ -210,11 +235,55 @@ class FlowValue:
         elif self.structured_items is None and other.structured_items is not None:
             result.structured_items = (
                 tuple(item.copy() for item in other.structured_items)
-                if _is_flow_bottom(self)
+                if self_bottom
                 else None
             )
-        elif self.structured_items is not None and not _is_flow_bottom(other):
+        elif self.structured_items is not None and not other_bottom:
             result.structured_items = None
+        self_has_attributes = bool(self.attribute_values) or (
+            self.attribute_values_complete or self.attribute_values_ambiguous
+        )
+        other_has_attributes = bool(other.attribute_values) or (
+            other.attribute_values_complete or other.attribute_values_ambiguous
+        )
+        if self_has_attributes and other_has_attributes:
+            names = self.attribute_values.keys() | other.attribute_values.keys()
+            merged_attributes: dict[str, FlowValue] = {}
+            for name in names:
+                left = self.attribute_values.get(name)
+                right = other.attribute_values.get(name)
+                if left is None:
+                    assert right is not None
+                    merged = right.copy()
+                    merged.attribute_values_ambiguous = True
+                elif right is None:
+                    merged = left.copy()
+                    merged.attribute_values_ambiguous = True
+                else:
+                    merged = left.merged(right)
+                    if left.has_analysis_state != right.has_analysis_state:
+                        merged.attribute_values_ambiguous = True
+                merged_attributes[name] = merged
+            result.attribute_values = merged_attributes
+            same_shape = self.attribute_values.keys() == other.attribute_values.keys()
+            result.attribute_values_complete = (
+                self.attribute_values_complete
+                and other.attribute_values_complete
+                and same_shape
+            )
+            result.attribute_values_ambiguous = (
+                self.attribute_values_ambiguous
+                or other.attribute_values_ambiguous
+                or not same_shape
+                or self.attribute_values_complete != other.attribute_values_complete
+            )
+        elif self_has_attributes or other_has_attributes:
+            source = self if self_has_attributes else other
+            result.attribute_values = {
+                name: value.copy() for name, value in source.attribute_values.items()
+            }
+            result.attribute_values_complete = False
+            result.attribute_values_ambiguous = True
         overflowed = set(result.overflowed | other.overflowed)
         for resource_id, paths in other.origins.items():
             bounded, truncated = _bounded_binding_paths(
@@ -231,6 +300,7 @@ class FlowValue:
         result.runtime_object_ids.update(other.runtime_object_ids)
         result.runtime_close_ids.update(other.runtime_close_ids)
         result.runtime_descriptor_ids.update(other.runtime_descriptor_ids)
+        result.instance_ids.update(other.instance_ids)
         result.unknown_callable |= other.unknown_callable
         result.overflowed = frozenset(overflowed)
         return result
@@ -246,27 +316,40 @@ class FlowValue:
             if truncated:
                 overflowed.add(resource_id)
         return FlowValue(
-            origins,
-            set(self.object_types),
-            frozenset(overflowed),
-            set(self.module_refs),
-            set(self.call_targets),
-            set(self.class_targets),
-            self.unknown_callable,
-            set(self.closure_instances),
-            (
+            origins=origins,
+            object_types=set(self.object_types),
+            overflowed=frozenset(overflowed),
+            module_refs=set(self.module_refs),
+            call_targets=set(self.call_targets),
+            class_targets=set(self.class_targets),
+            unknown_callable=self.unknown_callable,
+            closure_instances=set(self.closure_instances),
+            structured_items=(
                 tuple(item.bound(step) for item in self.structured_items)
                 if self.structured_items is not None
                 else None
             ),
-            set(self.runtime_object_ids),
-            set(self.runtime_close_ids),
-            set(self.runtime_descriptor_ids),
+            runtime_object_ids=set(self.runtime_object_ids),
+            runtime_close_ids=set(self.runtime_close_ids),
+            runtime_descriptor_ids=set(self.runtime_descriptor_ids),
+            instance_ids=set(self.instance_ids),
+            attribute_values={
+                name: value.bound(step)
+                for name, value in self.attribute_values.items()
+            },
+            attribute_values_complete=self.attribute_values_complete,
+            attribute_values_ambiguous=self.attribute_values_ambiguous,
         )
 
     @property
     def has_origins(self) -> bool:
         return bool(self.origins)
+
+    @property
+    def has_analysis_state(self) -> bool:
+        """Return whether this value carries direct or recursively nested state."""
+
+        return not _is_flow_bottom(self)
 
     def partition_call_cycles(self, *, target: str) -> tuple[FlowValue, FlowValue]:
         safe: dict[str, frozenset[tuple[str, ...]]] = {}
@@ -298,36 +381,98 @@ class FlowValue:
             )
             safe_items = tuple(item[0] for item in partitioned_items)
             cyclic_items = tuple(item[1] for item in partitioned_items)
+        safe_attributes: dict[str, FlowValue] = {}
+        cyclic_attributes: dict[str, FlowValue] = {}
+        for name, value in self.attribute_values.items():
+            safe_value, cyclic_value = value.partition_call_cycles(target=target)
+            safe_attributes[name] = safe_value
+            cyclic_attributes[name] = cyclic_value
         return (
             FlowValue(
-                safe,
-                set(object_types),
-                frozenset(self.overflowed & safe.keys()),
-                set(module_refs),
-                set(call_targets),
-                set(class_targets),
-                self.unknown_callable,
-                set(self.closure_instances),
-                safe_items,
-                set(self.runtime_object_ids),
-                set(self.runtime_close_ids),
-                set(self.runtime_descriptor_ids),
+                origins=safe,
+                object_types=set(object_types),
+                overflowed=frozenset(self.overflowed & safe.keys()),
+                module_refs=set(module_refs),
+                call_targets=set(call_targets),
+                class_targets=set(class_targets),
+                unknown_callable=self.unknown_callable,
+                closure_instances=set(self.closure_instances),
+                structured_items=safe_items,
+                runtime_object_ids=set(self.runtime_object_ids),
+                runtime_close_ids=set(self.runtime_close_ids),
+                runtime_descriptor_ids=set(self.runtime_descriptor_ids),
+                instance_ids=set(self.instance_ids),
+                attribute_values=safe_attributes,
+                attribute_values_complete=self.attribute_values_complete,
+                attribute_values_ambiguous=self.attribute_values_ambiguous,
             ),
             FlowValue(
-                cyclic,
-                set(object_types),
-                frozenset(self.overflowed & cyclic.keys()),
-                set(module_refs),
-                set(call_targets),
-                set(class_targets),
-                self.unknown_callable,
-                set(self.closure_instances),
-                cyclic_items,
-                set(self.runtime_object_ids),
-                set(self.runtime_close_ids),
-                set(self.runtime_descriptor_ids),
+                origins=cyclic,
+                object_types=set(object_types),
+                overflowed=frozenset(self.overflowed & cyclic.keys()),
+                module_refs=set(module_refs),
+                call_targets=set(call_targets),
+                class_targets=set(class_targets),
+                unknown_callable=self.unknown_callable,
+                closure_instances=set(self.closure_instances),
+                structured_items=cyclic_items,
+                runtime_object_ids=set(self.runtime_object_ids),
+                runtime_close_ids=set(self.runtime_close_ids),
+                runtime_descriptor_ids=set(self.runtime_descriptor_ids),
+                instance_ids=set(self.instance_ids),
+                attribute_values=cyclic_attributes,
+                attribute_values_complete=self.attribute_values_complete,
+                attribute_values_ambiguous=self.attribute_values_ambiguous,
             ),
         )
+
+
+@dataclass(frozen=True)
+class DataclassFieldInfo:
+    """Exact generated-constructor metadata for one declared dataclass field."""
+
+    name: str
+    default: FlowValue | None = None
+    default_factory: FlowValue | None = None
+    default_factory_expression: ast.expr | None = None
+    declared_class_targets: frozenset[str] = frozenset()
+    init: bool = True
+    keyword_only: bool = False
+    init_var: bool = False
+
+
+@dataclass(frozen=True)
+class DataclassInfo:
+    """Analyzer-only dataclass shape; it never changes registry ownership."""
+
+    fields: tuple[DataclassFieldInfo, ...]
+    generated_init: bool
+    explicit_init: bool
+    shape_ambiguous: bool = False
+    post_init_target: str | None = None
+    post_init_unknown: bool = False
+
+
+def mark_attribute_alternative_ambiguity(
+    value: FlowValue,
+    alternatives: Sequence[FlowValue],
+) -> FlowValue:
+    """Fail closed when a join can select a value without the tracked shape."""
+
+    has_attributes = bool(value.attribute_values) or value.attribute_values_complete
+    if not has_attributes:
+        return value
+    if any(
+        not (
+            alternative.attribute_values
+            or alternative.attribute_values_complete
+            or alternative.attribute_values_ambiguous
+        )
+        for alternative in alternatives
+    ):
+        value.attribute_values_complete = False
+        value.attribute_values_ambiguous = True
+    return value
 
 
 def _is_flow_bottom(value: FlowValue) -> bool:
@@ -344,6 +489,10 @@ def _is_flow_bottom(value: FlowValue) -> bool:
         or value.runtime_object_ids
         or value.runtime_close_ids
         or value.runtime_descriptor_ids
+        or value.instance_ids
+        or value.attribute_values
+        or value.attribute_values_complete
+        or value.attribute_values_ambiguous
     )
 
 
@@ -357,8 +506,15 @@ def is_path_receiver(value: FlowValue) -> bool:
         FILE_UNKNOWN_ATTRIBUTE_OBJECT_TYPE,
         OS_FD_OBJECT_TYPE,
         SQLITE_UNKNOWN_ATTRIBUTE_OBJECT_TYPE,
+        PATH_STRING_OBJECT_TYPE,
     }
-    return value.has_origins and value.object_types.isdisjoint(non_path_types)
+    return (
+        value.has_origins
+        and value.object_types.isdisjoint(non_path_types)
+        and not value.attribute_values
+        and not value.attribute_values_complete
+        and not value.attribute_values_ambiguous
+    )
 
 
 def is_exact_path_receiver(value: FlowValue) -> bool:
@@ -366,7 +522,7 @@ def is_exact_path_receiver(value: FlowValue) -> bool:
 
     return (
         value.has_origins
-        and not value.object_types
+        and value.object_types <= {PATH_OBJECT_TYPE}
         and not value.module_refs
         and not value.call_targets
         and not value.class_targets
@@ -376,6 +532,30 @@ def is_exact_path_receiver(value: FlowValue) -> bool:
         and not value.runtime_object_ids
         and not value.runtime_close_ids
         and not value.runtime_descriptor_ids
+        and not value.attribute_values
+        and not value.attribute_values_complete
+        and not value.attribute_values_ambiguous
+    )
+
+
+def is_exact_path_constructor_argument(value: FlowValue) -> bool:
+    """Require an uncontaminated locator, Path, or exact Path representation."""
+
+    return (
+        value.has_origins
+        and value.object_types <= {PATH_OBJECT_TYPE, PATH_STRING_OBJECT_TYPE}
+        and not value.module_refs
+        and not value.call_targets
+        and not value.class_targets
+        and not value.unknown_callable
+        and not value.closure_instances
+        and value.structured_items is None
+        and not value.runtime_object_ids
+        and not value.runtime_close_ids
+        and not value.runtime_descriptor_ids
+        and not value.attribute_values
+        and not value.attribute_values_complete
+        and not value.attribute_values_ambiguous
     )
 
 
@@ -568,17 +748,34 @@ def contaminate_runtime_objects(
     )
     if not object_ids:
         return set()
-    for name, candidate in list(env.items()):
-        if not object_ids.intersection(
+
+    def contaminate(candidate: FlowValue) -> FlowValue:
+        contaminated = candidate.copy()
+        if object_ids.intersection(
             candidate.runtime_object_ids | candidate.runtime_descriptor_ids
         ):
+            contaminated.object_types.add(
+                UNRESOLVED_RUNTIME_OBJECT_ALTERNATIVE_TYPE
+            )
+        contaminated.attribute_values = {
+            attribute: contaminate(value)
+            for attribute, value in candidate.attribute_values.items()
+        }
+        if candidate.structured_items is not None:
+            contaminated.structured_items = tuple(
+                contaminate(item) for item in candidate.structured_items
+            )
+        return contaminated
+
+    for name, candidate in list(env.items()):
+        contaminated = contaminate(candidate)
+        if contaminated == candidate:
             continue
-        contaminated = candidate.copy()
-        contaminated.object_types.add(
-            UNRESOLVED_RUNTIME_OBJECT_ALTERNATIVE_TYPE
-        )
         env[name] = contaminated
-        object_env[name] = set(contaminated.object_types)
+        if contaminated.object_types:
+            object_env[name] = set(contaminated.object_types)
+        else:
+            object_env.pop(name, None)
     return object_ids
 
 
@@ -728,6 +925,9 @@ def precise_stdlib_module_name(value: FlowValue) -> str | None:
         or value.class_targets
         or value.unknown_callable
         or value.closure_instances
+        or value.attribute_values
+        or value.attribute_values_complete
+        or value.attribute_values_ambiguous
         or any(
             not object_type.startswith(marker_prefix)
             for object_type in value.object_types
@@ -906,6 +1106,18 @@ def _collect_syntax_sites(
                 self.visit(statement)
             self.scope = previous_scope
             self.class_ref = previous_class_ref
+
+        def visit_Call(self, node: ast.Call) -> None:
+            self.visit(node.func)
+            for argument in node.args:
+                self.visit(argument)
+            for keyword in node.keywords:
+                if keyword.arg == "default_factory" and isinstance(
+                    keyword.value, ast.Lambda
+                ):
+                    self.visit(keyword.value.body)
+                else:
+                    self.visit(keyword.value)
 
         def visit_Lambda(self, node: ast.Lambda) -> None:
             for expression in [

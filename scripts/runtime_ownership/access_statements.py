@@ -9,7 +9,11 @@ from typing import Protocol
 from .access_control import match_values
 from .access_facts import AccessFactCollector
 from .access_imports import ImportEngine, bind_import_statement
-from .access_model import FlowValue, FunctionInfo
+from .access_model import (
+    FlowValue,
+    FunctionInfo,
+    mark_attribute_alternative_ambiguity,
+)
 from .access_outcomes import (
     analyze_block_result,
     sync_normal_state,
@@ -784,8 +788,12 @@ def _join_paths(
     names = set().union(*(branch_env for _, _, branch_env, _ in results))
     for name in names:
         value = FlowValue()
+        candidates: list[FlowValue] = []
         for _changed, _returned, branch_env, _objects in results:
-            value = value.merged(branch_env.get(name, FlowValue()))
+            candidate = branch_env.get(name, FlowValue())
+            candidates.append(candidate)
+            value = value.merged(candidate)
+        mark_attribute_alternative_ambiguity(value, candidates)
         joined_env[name] = value
     object_names = set().union(*(branch_objects for _, _, _, branch_objects in results))
     for name in object_names:

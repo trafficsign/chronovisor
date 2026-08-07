@@ -12,15 +12,19 @@ from .access_export_flow import (
     StarExportPolicy,
 )
 from .access_model import (
+    DATACLASS_INIT_VAR_MARKER,
+    DATACLASS_KW_ONLY_MARKER,
     FCNTL_LOCK_FLAGS,
     OS_FLAG_OBJECT_PREFIX,
     OS_OPEN_ACCESS_FLAGS,
     OS_OPEN_MODIFIER_FLAGS,
     SQLITE_TYPE_OBJECT_PREFIX,
     STDLIB_BUILTINS_CALLS,
+    STDLIB_DATACLASSES_CALLS,
     STDLIB_FCNTL_CALLS,
     STDLIB_MODULE_WILDCARD_ATTRIBUTE,
     STDLIB_OS_CALLS,
+    STDLIB_PATHLIB_CALLS,
     STDLIB_SQLITE3_CALLS,
     STDLIB_SQLITE3_TYPES,
     SUPPORTED_STDLIB_MODULES,
@@ -202,6 +206,14 @@ def bind_import_statement(
             target_module == "builtins"
             and "builtins" not in engine.known_modules
         )
+        stdlib_dataclasses = (
+            target_module == "dataclasses"
+            and "dataclasses" not in engine.known_modules
+        )
+        stdlib_pathlib = (
+            target_module == "pathlib"
+            and "pathlib" not in engine.known_modules
+        )
         stdlib_os_attribute = stdlib_os and _stdlib_attribute_is_unmutated(
             env, module="os", attribute=alias.name
         )
@@ -220,12 +232,35 @@ def bind_import_statement(
                 env, module="builtins", attribute=alias.name
             )
         )
+        stdlib_dataclasses_attribute = (
+            stdlib_dataclasses
+            and _stdlib_attribute_is_unmutated(
+                env, module="dataclasses", attribute=alias.name
+            )
+        )
+        stdlib_pathlib_attribute = (
+            stdlib_pathlib
+            and _stdlib_attribute_is_unmutated(
+                env, module="pathlib", attribute=alias.name
+            )
+        )
         if stdlib_builtins_attribute and alias.name in STDLIB_BUILTINS_CALLS:
             value = FlowValue(call_targets={f"builtins:{alias.name}"})
+        elif (
+            stdlib_dataclasses_attribute
+            and alias.name in STDLIB_DATACLASSES_CALLS
+        ):
+            value = FlowValue(call_targets={f"dataclasses:{alias.name}"})
+        elif stdlib_dataclasses_attribute and alias.name == "KW_ONLY":
+            value = FlowValue(object_types={DATACLASS_KW_ONLY_MARKER})
+        elif stdlib_dataclasses_attribute and alias.name == "InitVar":
+            value = FlowValue(object_types={DATACLASS_INIT_VAR_MARKER})
         elif stdlib_fcntl_attribute and alias.name in STDLIB_FCNTL_CALLS:
             value = FlowValue(call_targets={f"fcntl:{alias.name}"})
         elif stdlib_os_attribute and alias.name in STDLIB_OS_CALLS:
             value = FlowValue(call_targets={f"os:{alias.name}"})
+        elif stdlib_pathlib_attribute and alias.name in STDLIB_PATHLIB_CALLS:
+            value = FlowValue(call_targets={f"pathlib:{alias.name}"})
         elif stdlib_sqlite3_attribute and alias.name in STDLIB_SQLITE3_CALLS:
             value = FlowValue(call_targets={f"sqlite3:{alias.name}"})
         elif stdlib_sqlite3_attribute and alias.name in STDLIB_SQLITE3_TYPES:
@@ -418,6 +453,14 @@ def resolve_module_attribute(
                         object_types={f"{SQLITE_TYPE_OBJECT_PREFIX}{attribute}"}
                     )
                 )
+            elif module_ref == "dataclasses" and attribute == "KW_ONLY":
+                resolved = resolved.merged(
+                    FlowValue(object_types={DATACLASS_KW_ONLY_MARKER})
+                )
+            elif module_ref == "dataclasses" and attribute == "InitVar":
+                resolved = resolved.merged(
+                    FlowValue(object_types={DATACLASS_INIT_VAR_MARKER})
+                )
             elif _is_supported_stdlib_call(module_ref, attribute):
                 resolved = resolved.merged(
                     FlowValue(call_targets={f"{module_ref}:{attribute}"})
@@ -437,8 +480,10 @@ def resolve_module_attribute(
 def _is_supported_stdlib_call(module: str, attribute: str) -> bool:
     calls = {
         "builtins": STDLIB_BUILTINS_CALLS,
+        "dataclasses": STDLIB_DATACLASSES_CALLS,
         "fcntl": STDLIB_FCNTL_CALLS,
         "os": STDLIB_OS_CALLS,
+        "pathlib": STDLIB_PATHLIB_CALLS,
         "sqlite3": STDLIB_SQLITE3_CALLS,
     }
     return attribute in calls.get(module, frozenset())

@@ -238,7 +238,7 @@ def apply_definition_decorators(
                 continue
             known = True
             ordinal = int(call_ordinals.get(id(expression), 0))
-            if info.parameters and current.has_origins:
+            if info.parameters and current.has_analysis_state:
                 call = ast.copy_location(
                     ast.Call(func=expression, args=[], keywords=[]),
                     expression,

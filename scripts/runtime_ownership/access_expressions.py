@@ -18,6 +18,7 @@ from .access_model import (
     has_file_descriptor_object,
     is_exact_path_receiver,
     is_path_receiver,
+    mark_attribute_alternative_ambiguity,
     sqlite_handle_kind,
 )
 
@@ -187,7 +188,7 @@ def evaluate_generic_expression(
             return FlowValue()
         return merged
     if isinstance(node, ast.IfExp):
-        test = engine._eval(
+        engine._eval(
             node.test,
             module=module,
             actor=actor,
@@ -214,7 +215,10 @@ def evaluate_generic_expression(
             object_env=object_env,
             call_ordinals=call_ordinals,
         )
-        result = test.merged(body).merged(orelse).bound("expression:IfExp")
+        result = mark_attribute_alternative_ambiguity(
+            body.merged(orelse),
+            [body, orelse],
+        ).bound("expression:IfExp")
         if has_fcntl_lock_mask(body) != has_fcntl_lock_mask(orelse):
             result.object_types.add(
                 FCNTL_UNRESOLVED_LOCK_OPERATION_OBJECT_TYPE
@@ -227,6 +231,10 @@ def evaluate_generic_expression(
             result.object_types.add(
                 UNRESOLVED_RUNTIME_OBJECT_ALTERNATIVE_TYPE
             )
+        body_is_callable = bool(body.call_targets or body.class_targets)
+        orelse_is_callable = bool(orelse.call_targets or orelse.class_targets)
+        if body_is_callable != orelse_is_callable:
+            result.unknown_callable = True
         return result
     if isinstance(node, ast.Lambda):
         escaped = _lambda_origins(

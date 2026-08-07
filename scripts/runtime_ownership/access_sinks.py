@@ -14,6 +14,9 @@ from .access_model import (
     OS_FLAG_OBJECT_PREFIX,
     OS_OPEN_ACCESS_FLAGS,
     OS_OPEN_MODIFIER_FLAGS,
+    PATH_BOUND_TRANSFORM_PREFIX,
+    PATH_OBJECT_TYPE,
+    PATH_STRING_OBJECT_TYPE,
     PATH_TRANSFORMS,
     READ_PATH_METHODS,
     SQLITE_TYPE_OBJECT_PREFIX,
@@ -24,12 +27,15 @@ from .access_model import (
     STDLIB_SQLITE3_CALLS,
     SUPPORTED_STDLIB_MODULES,
     WRITE_PATH_METHODS,
+    DataclassFieldInfo,
+    DataclassInfo,
     FlowValue,
     FunctionInfo,
     fcntl_lock_masks,
     file_handle_kind,
     is_exact_flock_descriptor,
     is_exact_os_fd,
+    is_exact_path_constructor_argument,
     is_exact_path_receiver,
     is_path_receiver,
     is_precise_stdlib_module,
@@ -61,12 +67,17 @@ class AccessEngine(Protocol):
     imported_symbols: dict[str, dict[str, tuple[str, str]]]
     imported_modules: dict[str, dict[str, str]]
     classes: dict[str, dict[str, str]]
+    dataclass_infos: dict[str, DataclassInfo]
+    dataclass_targets: frozenset[str]
     returns: dict[str, FlowValue]
+    analyzed_summary_targets: set[str]
     facts: AccessFactCollector
 
     def _mark_called_target(self, target: str) -> None: ...
 
     def _require_function_summary(self, target: str) -> None: ...
+
+    def _function_has_origin_inputs(self, info: FunctionInfo) -> bool: ...
 
     def _closure_capture_value(
         self,
@@ -88,6 +99,9 @@ class AccessEngine(Protocol):
         env: dict[str, FlowValue],
         object_env: dict[str, set[str]],
         closure_instance: str | None,
+        bound_receiver: FlowValue | None = None,
+        receiver_out: list[FlowValue] | None = None,
+        force: bool = False,
     ) -> FlowValue | None: ...
 
     def _eval(
@@ -390,6 +404,19 @@ def _evaluate_path_transform(
             operation=f"path.{method}",
             sink=f"pathlib.Path.{method}",
             reason="ambiguous_registered_origin_path_transform_argument",
+            path=engine.paths[module],
+            line=int(node.lineno),
+            ordinal=ordinal,
+        )
+        return FlowValue()
+    if method == "expanduser" and (node.args or node.keywords):
+        engine.facts.record_escape(
+            receiver,
+            node=node,
+            actor=actor,
+            operation="path.expanduser",
+            sink="pathlib.Path.expanduser",
+            reason="invalid_or_ambiguous_path_transform_signature",
             path=engine.paths[module],
             line=int(node.lineno),
             ordinal=ordinal,
@@ -2524,6 +2551,416 @@ def _evaluate_sqlite_handle_call(
     return None
 
 
+def _has_only_stdlib_call_target(value: FlowValue, target: str) -> bool:
+    return (
+        value.call_targets == {target}
+        and not value.origins
+        and not value.object_types
+        and not value.module_refs
+        and not value.class_targets
+        and not value.unknown_callable
+        and not value.attribute_values
+        and not value.attribute_values_complete
+        and not value.attribute_values_ambiguous
+    )
+
+
+def _is_exact_stdlib_call(
+    node: ast.Call,
+    receiver: FlowValue,
+    env: Mapping[str, FlowValue],
+    *,
+    module: str,
+    attribute: str,
+) -> bool:
+    target = f"{module}:{attribute}"
+    if isinstance(node.func, ast.Name):
+        value = env.get(node.func.id)
+        return value is not None and _has_only_stdlib_call_target(value, target)
+    return (
+        isinstance(node.func, ast.Attribute)
+        and node.func.attr == attribute
+        and is_precise_stdlib_module(
+            receiver,
+            module=module,
+            attribute=attribute,
+        )
+    )
+
+
+def _record_exact_call_escape(
+    engine: AccessEngine,
+    value: FlowValue,
+    node: ast.Call,
+    *,
+    module: str,
+    actor: str,
+    ordinal: int,
+    operation: str,
+    sink: str,
+    reason: str,
+) -> None:
+    if not value.has_origins:
+        return
+    engine.facts.record_escape(
+        value,
+        node=node,
+        actor=actor,
+        operation=operation,
+        sink=sink,
+        reason=reason,
+        path=engine.paths[module],
+        line=int(node.lineno),
+        ordinal=ordinal,
+    )
+
+
+def _evaluate_path_constructor(
+    engine: AccessEngine,
+    node: ast.Call,
+    argument_values: Sequence[FlowValue],
+    keyword_values: Mapping[str, FlowValue],
+    unknown_keyword_unpack: FlowValue,
+    *,
+    module: str,
+    actor: str,
+    ordinal: int,
+) -> FlowValue:
+    implicated = _merge_values(
+        [*argument_values, *keyword_values.values(), unknown_keyword_unpack]
+    )
+    valid = (
+        len(node.args) == 1
+        and not isinstance(node.args[0], ast.Starred)
+        and not node.keywords
+        and len(argument_values) == 1
+        and is_exact_path_constructor_argument(argument_values[0])
+    )
+    if not valid:
+        _record_exact_call_escape(
+            engine,
+            implicated,
+            node,
+            module=module,
+            actor=actor,
+            ordinal=ordinal,
+            operation="path.constructor",
+            sink="pathlib.Path",
+            reason="invalid_or_ambiguous_path_constructor_signature",
+        )
+        return FlowValue()
+    result = argument_values[0].bound("constructor:pathlib.Path")
+    result.object_types = {PATH_OBJECT_TYPE}
+    return result
+
+
+def _value_contains_origins(value: FlowValue) -> bool:
+    if value.has_origins:
+        return True
+    if any(_value_contains_origins(item) for item in value.attribute_values.values()):
+        return True
+    return value.structured_items is not None and any(
+        _value_contains_origins(item) for item in value.structured_items
+    )
+
+
+def _evaluate_builtin_str_representation(
+    engine: AccessEngine,
+    node: ast.Call,
+    argument_values: Sequence[FlowValue],
+    keyword_values: Mapping[str, FlowValue],
+    unknown_keyword_unpack: FlowValue,
+    *,
+    module: str,
+    actor: str,
+    ordinal: int,
+) -> FlowValue:
+    implicated = _merge_values(
+        [*argument_values, *keyword_values.values(), unknown_keyword_unpack]
+    )
+    valid = (
+        len(node.args) == 1
+        and not isinstance(node.args[0], ast.Starred)
+        and not node.keywords
+        and len(argument_values) == 1
+        and PATH_OBJECT_TYPE in argument_values[0].object_types
+        and is_exact_path_constructor_argument(argument_values[0])
+    )
+    if not valid:
+        _record_exact_call_escape(
+            engine,
+            implicated,
+            node,
+            module=module,
+            actor=actor,
+            ordinal=ordinal,
+            operation="builtin.str",
+            sink="builtins.str",
+            reason="invalid_or_ambiguous_path_representation_signature",
+        )
+        return FlowValue()
+    represented = argument_values[0].bound("representation:builtins.str")
+    represented.object_types = {PATH_STRING_OBJECT_TYPE}
+    return represented
+
+
+def _dataclass_default_factory_value(
+    engine: AccessEngine,
+    field: DataclassFieldInfo,
+    *,
+    active: frozenset[str],
+    node: ast.Call,
+    module: str,
+    actor: str,
+    ordinal: int,
+    env: dict[str, FlowValue],
+    object_env: dict[str, set[str]],
+) -> FlowValue:
+    factory = field.default_factory or FlowValue()
+    exact_class_targets = (
+        factory.class_targets
+        if not (
+            factory.origins
+            or factory.call_targets
+            or factory.module_refs
+            or factory.unknown_callable
+        )
+        else set()
+    )
+    if len(exact_class_targets) == 1:
+        class_target = next(iter(exact_class_targets))
+        if class_target in active:
+            return _ambiguous_factory_value(engine, field)
+        constructed = _evaluate_dataclass_constructor(
+            engine,
+            node,
+            class_target,
+            (),
+            {},
+            FlowValue(),
+            module=module,
+            actor=actor,
+            ordinal=ordinal,
+            env=env,
+            object_env=object_env,
+            active=active | {class_target},
+        )
+        if constructed is not None:
+            return constructed
+        return FlowValue(
+            object_types={class_target},
+            attribute_values_ambiguous=True,
+        )
+    exact_call_targets = (
+        factory.call_targets
+        if not (
+            factory.origins
+            or factory.class_targets
+            or factory.module_refs
+            or factory.unknown_callable
+        )
+        else set()
+    )
+    if len(exact_call_targets) == 1:
+        target = next(iter(exact_call_targets))
+        if target in engine.functions:
+            engine._mark_called_target(target)
+            result = engine._execute_known_call(
+                target,
+                (),
+                {},
+                actor=actor,
+                module=module,
+                node=node,
+                ordinal=ordinal,
+                env=env,
+                object_env=object_env,
+                closure_instance=None,
+                force=True,
+            )
+            if result is not None:
+                return result
+    expression = field.default_factory_expression
+    if isinstance(expression, ast.Lambda):
+        factory_module = next(
+            iter(field.declared_class_targets), ""
+        ).partition(":")[0] or module
+        factory_env = {
+            name: value.copy()
+            for name, value in getattr(engine, "module_runtime_envs", {}).get(
+                factory_module, env
+            ).items()
+        }
+        factory_objects = {
+            name: set(value.object_types)
+            for name, value in factory_env.items()
+            if value.object_types
+        }
+        return engine._eval(
+            expression.body,
+            module=factory_module,
+            actor=f"{factory_module}:<module>",
+            class_ref=None,
+            env=factory_env,
+            object_env=factory_objects,
+            call_ordinals={},
+        )
+    return _ambiguous_factory_value(engine, field)
+
+
+def _ambiguous_factory_value(
+    engine: AccessEngine,
+    field: DataclassFieldInfo,
+) -> FlowValue:
+    result = (field.default_factory or FlowValue()).copy()
+    for declared_target in field.declared_class_targets:
+        info = engine.dataclass_infos.get(declared_target)
+        if info is None:
+            continue
+        for declared_field in info.fields:
+            if declared_field.default is not None:
+                result.attribute_values[declared_field.name] = (
+                    declared_field.default.copy()
+                )
+        result.object_types.add(declared_target)
+    result.attribute_values_complete = False
+    result.attribute_values_ambiguous = True
+    return result
+
+
+def _mark_instance_shape_ambiguous(value: FlowValue) -> FlowValue:
+    result = value.copy()
+    result.attribute_values_complete = False
+    result.attribute_values_ambiguous = True
+    for attribute in result.attribute_values.values():
+        attribute.attribute_values_ambiguous = True
+    return result
+
+
+def _evaluate_dataclass_constructor(
+    engine: AccessEngine,
+    node: ast.Call,
+    class_target: str,
+    argument_values: Sequence[FlowValue],
+    keyword_values: Mapping[str, FlowValue],
+    unknown_keyword_unpack: FlowValue,
+    *,
+    module: str,
+    actor: str,
+    ordinal: int,
+    env: dict[str, FlowValue],
+    object_env: dict[str, set[str]],
+    active: frozenset[str] = frozenset(),
+) -> FlowValue | None:
+    info = engine.dataclass_infos.get(class_target)
+    if info is None or not info.generated_init:
+        return None
+    positional_fields = [
+        field for field in info.fields if field.init and not field.keyword_only
+    ]
+    init_fields = {field.name: field for field in info.fields if field.init}
+    provided: dict[str, FlowValue] = {}
+    invalid = (
+        any(isinstance(argument, ast.Starred) for argument in node.args)
+        or any(keyword.arg is None for keyword in node.keywords)
+        or len(argument_values) > len(positional_fields)
+    )
+    if not invalid:
+        for field, value in zip(positional_fields, argument_values, strict=False):
+            provided[field.name] = value
+        for name, value in keyword_values.items():
+            if name not in init_fields or name in provided:
+                invalid = True
+                break
+            provided[name] = value
+    attributes: dict[str, FlowValue] = {}
+    init_var_arguments: list[FlowValue] = []
+    if not invalid:
+        for field in info.fields:
+            if field.name in provided:
+                field_value = provided[field.name].bound(
+                    f"dataclass-field:{class_target}:{field.name}"
+                )
+            elif field.default is not None:
+                field_value = field.default.bound(
+                    f"default:{class_target}:{field.name}"
+                )
+            elif field.default_factory is not None:
+                field_value = _dataclass_default_factory_value(
+                    engine,
+                    field,
+                    active=active | {class_target},
+                    node=node,
+                    module=module,
+                    actor=actor,
+                    ordinal=ordinal,
+                    env=env,
+                    object_env=object_env,
+                ).bound(f"default-factory:{class_target}:{field.name}")
+            elif field.init:
+                invalid = True
+                break
+            else:
+                field_value = FlowValue()
+            if field.init_var:
+                if field.init:
+                    init_var_arguments.append(field_value)
+                continue
+            attributes[field.name] = field_value
+    if invalid:
+        implicated = _merge_values(
+            [*argument_values, *keyword_values.values(), unknown_keyword_unpack]
+        )
+        _record_exact_call_escape(
+            engine,
+            implicated,
+            node,
+            module=module,
+            actor=actor,
+            ordinal=ordinal,
+            operation=f"dataclass.constructor:{class_target}",
+            sink=class_target,
+            reason="invalid_or_ambiguous_dataclass_signature",
+        )
+        return FlowValue(unknown_callable=True)
+    instance = FlowValue(
+        object_types={class_target},
+        instance_ids={
+            engine._runtime_object_identity(
+                node,
+                kind=f"instance:{class_target}",
+                actor=actor,
+            )
+        },
+        attribute_values=attributes,
+        attribute_values_complete=not info.shape_ambiguous,
+        attribute_values_ambiguous=info.shape_ambiguous,
+    )
+    if info.post_init_unknown:
+        return _mark_instance_shape_ambiguous(instance)
+    if info.post_init_target is not None:
+        receiver_values: list[FlowValue] = []
+        post_result = engine._execute_known_call(
+            info.post_init_target,
+            init_var_arguments,
+            {},
+            actor=actor,
+            module=module,
+            node=node,
+            ordinal=ordinal,
+            env=env,
+            object_env=object_env,
+            closure_instance=None,
+            bound_receiver=instance,
+            receiver_out=receiver_values,
+            force=True,
+        )
+        if post_result is None or len(receiver_values) != 1:
+            return _mark_instance_shape_ambiguous(instance)
+        instance = receiver_values[0]
+    return instance
+
+
 def evaluate_call(
     engine: AccessEngine,
     node: ast.Call,
@@ -2620,6 +3057,24 @@ def evaluate_call(
         imported_symbols=engine.imported_symbols,
         imported_modules=engine.imported_modules,
     )
+    if isinstance(node.func, ast.Attribute) and receiver.object_types:
+        method_candidates = {
+            f"{object_type}.{node.func.attr}"
+            for object_type in receiver.object_types
+        }
+        known_method_targets = tuple(
+            sorted(
+                target for target in method_candidates if target in engine.functions
+            )
+        )
+        if known_method_targets:
+            resolution = CallResolution(
+                known_targets=known_method_targets,
+                has_unknown=(
+                    receiver.unknown_callable
+                    or len(known_method_targets) != len(method_candidates)
+                ),
+            )
     actor_info = engine.functions.get(actor)
     if (
         isinstance(node.func, ast.Name)
@@ -2714,6 +3169,131 @@ def evaluate_call(
                 object_env=object_env,
                 call_ordinals=call_ordinals,
             )
+        )
+    callee_value = FlowValue()
+    if isinstance(node.func, ast.Name):
+        callee_value = env.get(node.func.id, FlowValue()).copy()
+    elif isinstance(node.func, ast.Call):
+        callee_value = engine._eval(
+            node.func,
+            module=module,
+            actor=actor,
+            class_ref=class_ref,
+            env=env,
+            object_env=object_env,
+            call_ordinals=call_ordinals,
+        )
+    bound_path_methods = {
+        object_type.removeprefix(PATH_BOUND_TRANSFORM_PREFIX)
+        for object_type in callee_value.object_types
+        if object_type.startswith(PATH_BOUND_TRANSFORM_PREFIX)
+    }
+    bound_path_receiver = callee_value.attribute_values.get("\0bound_receiver")
+    if bound_path_methods and bound_path_receiver is not None:
+        if len(bound_path_methods) != 1:
+            _record_exact_call_escape(
+                engine,
+                bound_path_receiver,
+                node,
+                module=module,
+                actor=actor,
+                ordinal=ordinal,
+                operation="path.transform",
+                sink="pathlib.Path",
+                reason="invalid_or_ambiguous_path_transform_signature",
+            )
+            return FlowValue()
+        return _evaluate_path_transform(
+            engine,
+            node,
+            bound_path_receiver,
+            method=next(iter(bound_path_methods)),
+            module=module,
+            actor=actor,
+            class_ref=class_ref,
+            env=env,
+            object_env=object_env,
+            call_ordinals=call_ordinals,
+            ordinal=ordinal,
+        )
+    if _is_unshadowed_builtin(
+        engine,
+        node,
+        name="getattr",
+        actor=actor,
+        module=module,
+        env=env,
+    ):
+        valid_getattr = (
+            len(node.args) == 2
+            and not node.keywords
+            and len(argument_values) == 2
+            and is_exact_path_receiver(argument_values[0])
+            and isinstance(node.args[1], ast.Constant)
+            and isinstance(node.args[1].value, str)
+            and node.args[1].value in PATH_TRANSFORMS
+        )
+        if valid_getattr:
+            assert isinstance(node.args[1], ast.Constant)
+            method = str(node.args[1].value)
+            return FlowValue(
+                object_types={f"{PATH_BOUND_TRANSFORM_PREFIX}{method}"},
+                attribute_values={
+                    "\0bound_receiver": argument_values[0].copy()
+                },
+                attribute_values_complete=True,
+            )
+    if (
+        "dataclasses" not in engine.known_modules
+        and _is_exact_stdlib_call(
+            node,
+            receiver,
+            env,
+            module="dataclasses",
+            attribute="field",
+        )
+    ):
+        if node.args or any(keyword.arg is None for keyword in node.keywords):
+            return FlowValue()
+        default = keyword_values.get("default")
+        return default.copy() if default is not None else FlowValue()
+    if (
+        "pathlib" not in engine.known_modules
+        and _is_exact_stdlib_call(
+            node,
+            receiver,
+            env,
+            module="pathlib",
+            attribute="Path",
+        )
+    ):
+        return _evaluate_path_constructor(
+            engine,
+            node,
+            argument_values,
+            keyword_values,
+            unknown_keyword_unpack,
+            module=module,
+            actor=actor,
+            ordinal=ordinal,
+        )
+    if _is_unshadowed_builtin(
+        engine,
+        node,
+        name="str",
+        actor=actor,
+        module=module,
+        env=env,
+    ):
+        return _evaluate_builtin_str_representation(
+            engine,
+            node,
+            argument_values,
+            keyword_values,
+            unknown_keyword_unpack,
+            module=module,
+            actor=actor,
+            ordinal=ordinal,
         )
     dict_mutation = _evaluate_stdlib_module_dict_mutation_call(
         engine,
@@ -2948,6 +3528,16 @@ def evaluate_call(
                 authoritative_value.call_targets or authoritative_value.class_targets
             )
         )
+        if (
+            known_class_targets
+            and all(target in engine.dataclass_infos for target in known_class_targets)
+            and authoritative_value.class_targets == set(known_class_targets)
+            and authoritative_value.object_types == set(known_class_targets)
+            and not authoritative_value.origins
+            and not authoritative_value.module_refs
+            and not authoritative_value.call_targets
+        ):
+            has_unknown = False
     elif authoritative_base_value is not None:
         callee_value = engine._eval(
             node.func,
@@ -2989,9 +3579,28 @@ def evaluate_call(
         if class_target is not None:
             known_class_targets = (class_target,)
             has_unknown = False
+    if known_class_targets and all(
+        target in engine.dataclass_targets and target not in engine.dataclass_infos
+        for target in known_class_targets
+    ):
+        return FlowValue()
     for target in known_targets:
         engine._mark_called_target(target)
     local_returns: dict[str, FlowValue] = {}
+    bound_receiver: FlowValue | None = None
+    receiver_binding_name: str | None = None
+    if isinstance(node.func, ast.Attribute) and (
+        _value_contains_origins(receiver)
+        or bool(receiver.instance_ids)
+        or bool(receiver.attribute_values)
+    ):
+        bound_receiver = receiver
+        if isinstance(node.func.value, ast.Name):
+            receiver_binding_name = node.func.value.id
+    elif authoritative_value is not None:
+        bound_receiver = authoritative_value.attribute_values.get(
+            "\0bound_receiver"
+        )
     if len(known_targets) == 1 and not has_unknown:
         target = known_targets[0]
         closure_instances = tuple(
@@ -3006,8 +3615,10 @@ def evaluate_call(
             )
         ) or (None,)
         merged_local_return = FlowValue()
+        merged_receiver = FlowValue()
         all_local = True
         for closure_instance in closure_instances:
+            receiver_values: list[FlowValue] = []
             local_return = engine._execute_known_call(
                 target,
                 argument_values,
@@ -3019,13 +3630,26 @@ def evaluate_call(
                 env=env,
                 object_env=object_env,
                 closure_instance=closure_instance,
+                bound_receiver=bound_receiver,
+                receiver_out=receiver_values,
+                force=bound_receiver is not None,
             )
             if local_return is None:
                 all_local = False
                 break
             merged_local_return = merged_local_return.merged(local_return)
+            for receiver_value in receiver_values:
+                merged_receiver = merged_receiver.merged(receiver_value)
         if all_local:
             local_returns[target] = merged_local_return
+            if receiver_binding_name is not None and merged_receiver.has_analysis_state:
+                env[receiver_binding_name] = merged_receiver
+                if merged_receiver.object_types:
+                    object_env[receiver_binding_name] = set(
+                        merged_receiver.object_types
+                    )
+                else:
+                    object_env.pop(receiver_binding_name, None)
     for target in known_targets:
         if target not in local_returns:
             info = engine.functions[target]
@@ -3046,7 +3670,8 @@ def evaluate_call(
                 env=env,
                 object_env=object_env,
             )
-            engine._require_function_summary(target)
+            if any(_value_contains_origins(value) for value in conservative_values):
+                engine._require_function_summary(target)
     if known_targets or known_class_targets:
         if known_class_targets or has_unknown:
             _taint_callable_stdlib_modules(
@@ -3068,7 +3693,7 @@ def evaluate_call(
                 if info.class_ref is not None and not target.endswith(".__init__"):
                     values = [FlowValue(), *values]
                 for index, value in enumerate(values):
-                    if index >= len(info.parameters) or not value.has_origins:
+                    if index >= len(info.parameters) or not value.has_analysis_state:
                         continue
                     engine._bind_call_parameter(
                         target,
@@ -3080,7 +3705,7 @@ def evaluate_call(
                         ordinal=ordinal,
                     )
                 for parameter, value in keyword_values.items():
-                    if parameter in info.parameters and value.has_origins:
+                    if parameter in info.parameters and value.has_analysis_state:
                         engine._bind_call_parameter(
                             target,
                             parameter,
@@ -3091,13 +3716,77 @@ def evaluate_call(
                             ordinal=ordinal,
                         )
                 local_return = engine.returns[target]
+                if target not in engine.analyzed_summary_targets:
+                    local_return = FlowValue(unknown_callable=True)
             returned = returned.merged(local_return.bound(f"result:{target}"))
         for class_target in known_class_targets:
+            dataclass_instance = _evaluate_dataclass_constructor(
+                engine,
+                node,
+                class_target,
+                argument_values,
+                keyword_values,
+                unknown_keyword_unpack,
+                module=module,
+                actor=actor,
+                ordinal=ordinal,
+                env=env,
+                object_env=object_env,
+            )
+            if dataclass_instance is not None:
+                returned = returned.merged(dataclass_instance)
+                continue
             init_ref = f"{class_target}.__init__"
-            if init_ref in engine.functions:
+            constructor_value = _merge_values(
+                [
+                    *argument_values,
+                    *keyword_values.values(),
+                    unknown_keyword_unpack,
+                ]
+            )
+            instance = FlowValue(
+                object_types={class_target},
+                instance_ids={
+                    engine._runtime_object_identity(
+                        node,
+                        kind=f"instance:{class_target}",
+                        actor=actor,
+                    )
+                },
+            )
+            execute_constructor = (
+                init_ref in engine.functions
+                and (
+                    _value_contains_origins(constructor_value)
+                    or engine._function_has_origin_inputs(engine.functions[init_ref])
+                )
+            )
+            if execute_constructor:
+                instance.attribute_values_complete = True
+                init_receiver_values: list[FlowValue] = []
+                init_result = engine._execute_known_call(
+                    init_ref,
+                    argument_values,
+                    keyword_values,
+                    actor=actor,
+                    module=module,
+                    node=node,
+                    ordinal=ordinal,
+                    env=env,
+                    object_env=object_env,
+                    closure_instance=None,
+                    bound_receiver=instance,
+                    receiver_out=init_receiver_values,
+                    force=True,
+                )
+                if init_result is None or len(init_receiver_values) != 1:
+                    instance = _mark_instance_shape_ambiguous(instance)
+                else:
+                    instance = init_receiver_values[0]
+            elif init_ref in engine.functions:
                 info = engine.functions[init_ref]
                 for index, value in enumerate(argument_values, start=1):
-                    if index < len(info.parameters) and value.has_origins:
+                    if index < len(info.parameters) and value.has_analysis_state:
                         engine._bind_call_parameter(
                             init_ref,
                             info.parameters[index],
@@ -3108,7 +3797,7 @@ def evaluate_call(
                             ordinal=ordinal,
                         )
                 for parameter, value in keyword_values.items():
-                    if parameter in info.parameters and value.has_origins:
+                    if parameter in info.parameters and value.has_analysis_state:
                         engine._bind_call_parameter(
                             init_ref,
                             parameter,
@@ -3118,7 +3807,7 @@ def evaluate_call(
                             node=node,
                             ordinal=ordinal,
                         )
-            returned = returned.merged(FlowValue(object_types={class_target}))
+            returned = returned.merged(instance)
         if has_unknown or unknown_keyword_unpack.has_origins:
             if escaped_closure_capture.has_origins:
                 engine.facts.record_escape(
