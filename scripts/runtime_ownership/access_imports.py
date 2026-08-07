@@ -12,16 +12,22 @@ from .access_export_flow import (
     StarExportPolicy,
 )
 from .access_model import (
+    FCNTL_LOCK_FLAGS,
     OS_FLAG_OBJECT_PREFIX,
     OS_OPEN_ACCESS_FLAGS,
     OS_OPEN_MODIFIER_FLAGS,
     SQLITE_TYPE_OBJECT_PREFIX,
+    STDLIB_BUILTINS_CALLS,
+    STDLIB_FCNTL_CALLS,
     STDLIB_MODULE_WILDCARD_ATTRIBUTE,
     STDLIB_OS_CALLS,
     STDLIB_SQLITE3_CALLS,
     STDLIB_SQLITE3_TYPES,
     SUPPORTED_STDLIB_MODULES,
     FlowValue,
+    fcntl_lock_mask_value,
+    is_precise_stdlib_module,
+    precise_stdlib_module_name,
     stdlib_call_target_marker,
     stdlib_module_mutation_attributes,
     stdlib_module_mutation_marker,
@@ -189,6 +195,13 @@ def bind_import_statement(
             target_module == "sqlite3"
             and "sqlite3" not in engine.known_modules
         )
+        stdlib_fcntl = (
+            target_module == "fcntl" and "fcntl" not in engine.known_modules
+        )
+        stdlib_builtins = (
+            target_module == "builtins"
+            and "builtins" not in engine.known_modules
+        )
         stdlib_os_attribute = stdlib_os and _stdlib_attribute_is_unmutated(
             env, module="os", attribute=alias.name
         )
@@ -198,7 +211,20 @@ def bind_import_statement(
                 env, module="sqlite3", attribute=alias.name
             )
         )
-        if stdlib_os_attribute and alias.name in STDLIB_OS_CALLS:
+        stdlib_fcntl_attribute = stdlib_fcntl and _stdlib_attribute_is_unmutated(
+            env, module="fcntl", attribute=alias.name
+        )
+        stdlib_builtins_attribute = (
+            stdlib_builtins
+            and _stdlib_attribute_is_unmutated(
+                env, module="builtins", attribute=alias.name
+            )
+        )
+        if stdlib_builtins_attribute and alias.name in STDLIB_BUILTINS_CALLS:
+            value = FlowValue(call_targets={f"builtins:{alias.name}"})
+        elif stdlib_fcntl_attribute and alias.name in STDLIB_FCNTL_CALLS:
+            value = FlowValue(call_targets={f"fcntl:{alias.name}"})
+        elif stdlib_os_attribute and alias.name in STDLIB_OS_CALLS:
             value = FlowValue(call_targets={f"os:{alias.name}"})
         elif stdlib_sqlite3_attribute and alias.name in STDLIB_SQLITE3_CALLS:
             value = FlowValue(call_targets={f"sqlite3:{alias.name}"})
@@ -211,6 +237,20 @@ def bind_import_statement(
         ):
             value = FlowValue(
                 object_types={f"{OS_FLAG_OBJECT_PREFIX}{alias.name}"}
+            )
+        elif stdlib_fcntl_attribute and alias.name in FCNTL_LOCK_FLAGS:
+            value = fcntl_lock_mask_value(alias.name)
+        elif stdlib_builtins and alias.name in STDLIB_BUILTINS_CALLS:
+            value = FlowValue(
+                object_types={
+                    stdlib_call_target_marker("builtins", alias.name)
+                },
+                unknown_callable=True,
+            )
+        elif stdlib_fcntl and alias.name in STDLIB_FCNTL_CALLS:
+            value = FlowValue(
+                object_types={stdlib_call_target_marker("fcntl", alias.name)},
+                unknown_callable=True,
             )
         elif stdlib_os and alias.name in STDLIB_OS_CALLS:
             value = FlowValue(
@@ -352,7 +392,56 @@ def resolve_module_attribute(
         child_module = f"{module_ref}.{attribute}"
         if child_module in known_modules:
             resolved = resolved.merged(FlowValue(module_refs={child_module}))
+        if module_ref in known_modules:
+            continue
+        precise_module = precise_stdlib_module_name(value)
+        if precise_module != module_ref:
+            continue
+        if is_precise_stdlib_module(
+            value,
+            module=module_ref,
+            attribute=attribute,
+        ):
+            if module_ref == "fcntl" and attribute in FCNTL_LOCK_FLAGS:
+                resolved = resolved.merged(fcntl_lock_mask_value(attribute))
+            elif module_ref == "os" and attribute in (
+                OS_OPEN_ACCESS_FLAGS | OS_OPEN_MODIFIER_FLAGS
+            ):
+                resolved = resolved.merged(
+                    FlowValue(
+                        object_types={f"{OS_FLAG_OBJECT_PREFIX}{attribute}"}
+                    )
+                )
+            elif module_ref == "sqlite3" and attribute in STDLIB_SQLITE3_TYPES:
+                resolved = resolved.merged(
+                    FlowValue(
+                        object_types={f"{SQLITE_TYPE_OBJECT_PREFIX}{attribute}"}
+                    )
+                )
+            elif _is_supported_stdlib_call(module_ref, attribute):
+                resolved = resolved.merged(
+                    FlowValue(call_targets={f"{module_ref}:{attribute}"})
+                )
+        elif _is_supported_stdlib_call(module_ref, attribute):
+            resolved = resolved.merged(
+                FlowValue(
+                    object_types={
+                        stdlib_call_target_marker(module_ref, attribute)
+                    },
+                    unknown_callable=True,
+                )
+            )
     return resolved
+
+
+def _is_supported_stdlib_call(module: str, attribute: str) -> bool:
+    calls = {
+        "builtins": STDLIB_BUILTINS_CALLS,
+        "fcntl": STDLIB_FCNTL_CALLS,
+        "os": STDLIB_OS_CALLS,
+        "sqlite3": STDLIB_SQLITE3_CALLS,
+    }
+    return attribute in calls.get(module, frozenset())
 
 
 def _merge_module_export_summary(

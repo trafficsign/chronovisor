@@ -5,16 +5,29 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 from typing import Any, Literal
 
 MAX_BINDING_PATHS_PER_RESOURCE = 64
 
-STDLIB_OS_CALLS = frozenset({"open", "rename", "replace"})
+STDLIB_BUILTINS_CALLS = frozenset({"open"})
+STDLIB_FCNTL_CALLS = frozenset({"flock"})
+STDLIB_OS_CALLS = frozenset({"fdopen", "open", "rename", "replace"})
 STDLIB_SQLITE3_CALLS = frozenset({"connect"})
 STDLIB_SQLITE3_TYPES = frozenset({"Connection", "Cursor"})
+FCNTL_LOCK_FLAGS = frozenset({"LOCK_EX", "LOCK_NB", "LOCK_SH", "LOCK_UN"})
+FCNTL_LOCK_FLAG_BITS = {
+    "LOCK_SH": 1,
+    "LOCK_EX": 2,
+    "LOCK_NB": 4,
+    "LOCK_UN": 8,
+}
+FCNTL_LOCK_MASK_OBJECT_PREFIX = "stdlib-fcntl-lock-mask:"
+FCNTL_UNRESOLVED_LOCK_OPERATION_OBJECT_TYPE = (
+    "stdlib-fcntl-unresolved-lock-operation"
+)
 OS_OPEN_ACCESS_FLAGS = frozenset({"O_RDONLY", "O_WRONLY", "O_RDWR"})
 OS_OPEN_MODIFIER_FLAGS = frozenset(
     {
@@ -33,6 +46,13 @@ OS_OPEN_MODIFIER_FLAGS = frozenset(
 )
 OS_FLAG_OBJECT_PREFIX = "stdlib-os-flag:"
 OS_FD_OBJECT_TYPE = "stdlib-os-file-descriptor"
+FILE_HANDLE_OBJECT_TYPE = "stdlib-file-handle"
+FILE_BOUND_CLOSE_OBJECT_TYPE = "stdlib-file-bound-close"
+FILE_BOUND_FILENO_OBJECT_TYPE = "stdlib-file-bound-fileno"
+FILE_UNKNOWN_ATTRIBUTE_OBJECT_TYPE = "stdlib-file-unknown-attribute"
+UNRESOLVED_RUNTIME_OBJECT_ALTERNATIVE_TYPE = (
+    "stdlib-unresolved-runtime-object-alternative"
+)
 SQLITE_CONNECTION_OBJECT_TYPE = "stdlib-sqlite3-connection"
 SQLITE_CURSOR_OBJECT_TYPE = "stdlib-sqlite3-cursor"
 SQLITE_HANDLE_OBJECT_TYPES = frozenset(
@@ -44,7 +64,7 @@ STDLIB_CALL_TARGET_PREFIX = "stdlib-call-target:"
 STDLIB_MODULE_MUTATION_PREFIX = "stdlib-module-attribute-mutated:"
 STDLIB_MODULE_WILDCARD_ATTRIBUTE = "*"
 STDLIB_MODULE_STATE_PREFIX = "\0stdlib-module-state:"
-SUPPORTED_STDLIB_MODULES = frozenset({"os", "sqlite3"})
+SUPPORTED_STDLIB_MODULES = frozenset({"builtins", "fcntl", "os", "sqlite3"})
 SQLITE_CURSOR_SCALAR_ATTRIBUTES = frozenset(
     {"arraysize", "description", "lastrowid", "rowcount"}
 )
@@ -149,6 +169,9 @@ class FlowValue:
     unknown_callable: bool = False
     closure_instances: set[tuple[str, str]] = field(default_factory=set)
     structured_items: tuple[FlowValue, ...] | None = None
+    runtime_object_ids: set[str] = field(default_factory=set)
+    runtime_close_ids: set[str] = field(default_factory=set)
+    runtime_descriptor_ids: set[str] = field(default_factory=set)
 
     def copy(self) -> FlowValue:
         return FlowValue(
@@ -165,6 +188,9 @@ class FlowValue:
                 if self.structured_items is not None
                 else None
             ),
+            set(self.runtime_object_ids),
+            set(self.runtime_close_ids),
+            set(self.runtime_descriptor_ids),
         )
 
     def merged(self, other: FlowValue) -> FlowValue:
@@ -202,6 +228,9 @@ class FlowValue:
         result.call_targets.update(other.call_targets)
         result.class_targets.update(other.class_targets)
         result.closure_instances.update(other.closure_instances)
+        result.runtime_object_ids.update(other.runtime_object_ids)
+        result.runtime_close_ids.update(other.runtime_close_ids)
+        result.runtime_descriptor_ids.update(other.runtime_descriptor_ids)
         result.unknown_callable |= other.unknown_callable
         result.overflowed = frozenset(overflowed)
         return result
@@ -230,6 +259,9 @@ class FlowValue:
                 if self.structured_items is not None
                 else None
             ),
+            set(self.runtime_object_ids),
+            set(self.runtime_close_ids),
+            set(self.runtime_descriptor_ids),
         )
 
     @property
@@ -277,6 +309,9 @@ class FlowValue:
                 self.unknown_callable,
                 set(self.closure_instances),
                 safe_items,
+                set(self.runtime_object_ids),
+                set(self.runtime_close_ids),
+                set(self.runtime_descriptor_ids),
             ),
             FlowValue(
                 cyclic,
@@ -288,6 +323,9 @@ class FlowValue:
                 self.unknown_callable,
                 set(self.closure_instances),
                 cyclic_items,
+                set(self.runtime_object_ids),
+                set(self.runtime_close_ids),
+                set(self.runtime_descriptor_ids),
             ),
         )
 
@@ -303,6 +341,9 @@ def _is_flow_bottom(value: FlowValue) -> bool:
         or value.unknown_callable
         or value.closure_instances
         or value.structured_items is not None
+        or value.runtime_object_ids
+        or value.runtime_close_ids
+        or value.runtime_descriptor_ids
     )
 
 
@@ -310,10 +351,59 @@ def is_path_receiver(value: FlowValue) -> bool:
     """Return whether an origin-bearing value is still a Path proxy."""
 
     non_path_types = SQLITE_HANDLE_OBJECT_TYPES | {
+        FILE_BOUND_CLOSE_OBJECT_TYPE,
+        FILE_BOUND_FILENO_OBJECT_TYPE,
+        FILE_HANDLE_OBJECT_TYPE,
+        FILE_UNKNOWN_ATTRIBUTE_OBJECT_TYPE,
         OS_FD_OBJECT_TYPE,
         SQLITE_UNKNOWN_ATTRIBUTE_OBJECT_TYPE,
     }
     return value.has_origins and value.object_types.isdisjoint(non_path_types)
+
+
+def is_exact_path_receiver(value: FlowValue) -> bool:
+    """Require a Path receiver with no non-Path runtime alternative."""
+
+    return (
+        value.has_origins
+        and not value.object_types
+        and not value.module_refs
+        and not value.call_targets
+        and not value.class_targets
+        and not value.unknown_callable
+        and not value.closure_instances
+        and value.structured_items is None
+        and not value.runtime_object_ids
+        and not value.runtime_close_ids
+        and not value.runtime_descriptor_ids
+    )
+
+
+def stdlib_module_dict_reference(
+    expression: ast.expr,
+    env: Mapping[str, FlowValue],
+) -> FlowValue | None:
+    """Resolve a precise ``module.__dict__`` or unshadowed ``vars(module)``."""
+
+    module_expression: ast.expr | None = None
+    if isinstance(expression, ast.Attribute) and expression.attr == "__dict__":
+        module_expression = expression.value
+    elif (
+        isinstance(expression, ast.Call)
+        and isinstance(expression.func, ast.Name)
+        and expression.func.id == "vars"
+        and "vars" not in env
+        and len(expression.args) == 1
+        and not expression.keywords
+    ):
+        module_expression = expression.args[0]
+    if not isinstance(module_expression, ast.Name):
+        return None
+    base = env.get(module_expression.id, FlowValue())
+    module_ref = precise_stdlib_module_name(base)
+    if module_ref not in SUPPORTED_STDLIB_MODULES:
+        return None
+    return base
 
 
 def is_exact_runtime_object(
@@ -357,6 +447,203 @@ def sqlite_handle_kind(value: FlowValue) -> str | None:
     ):
         return "cursor"
     return None
+
+
+def file_handle_kind(value: FlowValue) -> str | None:
+    """Return the precise synchronous file-handle kind carried by a value."""
+
+    if is_exact_runtime_object(
+        value,
+        object_type=FILE_HANDLE_OBJECT_TYPE,
+        binding_step="handle:file",
+    ):
+        return "file"
+    return None
+
+
+def is_exact_os_fd(value: FlowValue) -> bool:
+    """Return whether *value* is an uncontaminated tracked OS descriptor."""
+
+    return is_exact_runtime_object(
+        value,
+        object_type=OS_FD_OBJECT_TYPE,
+        binding_step="handle:os.fd",
+    )
+
+
+def is_exact_flock_descriptor(value: FlowValue) -> bool:
+    """Accept exact file handles, exact FDs, and joins of those alternatives."""
+
+    if (
+        not value.has_origins
+        or not value.object_types
+        or not value.object_types
+        <= {FILE_HANDLE_OBJECT_TYPE, OS_FD_OBJECT_TYPE}
+        or value.module_refs
+        or value.call_targets
+        or value.class_targets
+        or value.unknown_callable
+        or value.closure_instances
+        or value.structured_items is not None
+    ):
+        return False
+    return all(
+        "handle:file" in chain or "handle:os.fd" in chain
+        for chains in value.origins.values()
+        for chain in chains
+    )
+
+
+def tag_file_handle(
+    value: FlowValue,
+    *,
+    identity: str | None = None,
+    wraps_fd: bool = False,
+    closefd: bool = True,
+) -> FlowValue:
+    """Replace locator/descriptor tags with the exact file-handle tag."""
+
+    tagged = value.bound("handle:file")
+    tagged.object_types = {FILE_HANDLE_OBJECT_TYPE}
+    if identity is not None:
+        tagged.runtime_object_ids = {identity}
+        descriptor_ids = (
+            value.runtime_descriptor_ids or value.runtime_object_ids
+            if wraps_fd
+            else {identity}
+        )
+        tagged.runtime_descriptor_ids = set(descriptor_ids)
+        tagged.runtime_close_ids = {identity}
+        if closefd:
+            tagged.runtime_close_ids.update(descriptor_ids)
+    return tagged
+
+
+def tag_os_fd(value: FlowValue, *, identity: str | None = None) -> FlowValue:
+    """Replace file-handle/locator tags with the exact OS descriptor tag."""
+
+    tagged = value.bound("handle:os.fd")
+    tagged.object_types = {OS_FD_OBJECT_TYPE}
+    if identity is not None:
+        tagged.runtime_object_ids = {identity}
+        tagged.runtime_close_ids = {identity}
+        tagged.runtime_descriptor_ids = {identity}
+    else:
+        descriptor_ids = value.runtime_descriptor_ids or value.runtime_object_ids
+        tagged.runtime_object_ids = set(descriptor_ids)
+        tagged.runtime_close_ids = set(descriptor_ids)
+        tagged.runtime_descriptor_ids = set(descriptor_ids)
+    return tagged
+
+
+def has_file_descriptor_object(value: FlowValue) -> bool:
+    """Return whether a value carries a file-handle or OS-FD alternative."""
+
+    return bool(
+        value.object_types.intersection(
+            {FILE_HANDLE_OBJECT_TYPE, OS_FD_OBJECT_TYPE}
+        )
+    )
+
+
+def contaminate_runtime_objects(
+    env: dict[str, FlowValue],
+    object_env: dict[str, set[str]],
+    values: Sequence[FlowValue],
+) -> set[str]:
+    """Invalidate exact file/FD aliases that may have been closed or mutated."""
+
+    object_ids = set().union(
+        *(
+            value.runtime_close_ids or value.runtime_object_ids
+            for value in values
+            if has_file_descriptor_object(value)
+            or value.object_types.intersection(
+                {
+                    FILE_BOUND_CLOSE_OBJECT_TYPE,
+                    FILE_UNKNOWN_ATTRIBUTE_OBJECT_TYPE,
+                }
+            )
+        )
+    )
+    if not object_ids:
+        return set()
+    for name, candidate in list(env.items()):
+        if not object_ids.intersection(
+            candidate.runtime_object_ids | candidate.runtime_descriptor_ids
+        ):
+            continue
+        contaminated = candidate.copy()
+        contaminated.object_types.add(
+            UNRESOLVED_RUNTIME_OBJECT_ALTERNATIVE_TYPE
+        )
+        env[name] = contaminated
+        object_env[name] = set(contaminated.object_types)
+    return object_ids
+
+
+def fcntl_lock_mask_value(flag: str) -> FlowValue:
+    """Build the exact symbolic value for a supported ``fcntl`` lock flag."""
+
+    return FlowValue(
+        object_types={
+            f"{FCNTL_LOCK_MASK_OBJECT_PREFIX}{FCNTL_LOCK_FLAG_BITS[flag]}"
+        }
+    )
+
+
+def fcntl_lock_masks(value: FlowValue) -> frozenset[int] | None:
+    """Decode exact symbolic alternatives without accepting raw integers."""
+
+    if (
+        not value.object_types
+        or value.origins
+        or value.module_refs
+        or value.call_targets
+        or value.class_targets
+        or value.unknown_callable
+        or value.closure_instances
+        or value.structured_items is not None
+    ):
+        return None
+    masks: set[int] = set()
+    for object_type in value.object_types:
+        if not object_type.startswith(FCNTL_LOCK_MASK_OBJECT_PREFIX):
+            return None
+        raw_mask = object_type.removeprefix(FCNTL_LOCK_MASK_OBJECT_PREFIX)
+        try:
+            masks.add(int(raw_mask))
+        except ValueError:
+            return None
+    return frozenset(masks)
+
+
+def has_fcntl_lock_mask(value: FlowValue) -> bool:
+    """Return whether a value contains at least one symbolic lock alternative."""
+
+    return any(
+        object_type.startswith(FCNTL_LOCK_MASK_OBJECT_PREFIX)
+        for object_type in value.object_types
+    )
+
+
+def combine_fcntl_lock_masks(
+    left: FlowValue,
+    right: FlowValue,
+) -> FlowValue | None:
+    """Apply bitwise OR to each exact alternative while preserving joins."""
+
+    left_masks = fcntl_lock_masks(left)
+    right_masks = fcntl_lock_masks(right)
+    if left_masks is None or right_masks is None:
+        return None
+    return FlowValue(
+        object_types={
+            f"{FCNTL_LOCK_MASK_OBJECT_PREFIX}{left_mask | right_mask}"
+            for left_mask in left_masks
+            for right_mask in right_masks
+        }
+    ).bound("expression:fcntl.lock_bitor")
 
 
 def tag_sqlite_handle(value: FlowValue, *, kind: str) -> FlowValue:
@@ -1081,17 +1368,15 @@ OpenModeResult = (
 )
 
 
-def _open_mode(node: ast.Call, *, mode_index: int) -> OpenModeResult:
-    mode_node: ast.expr | None = None
-    if len(node.args) > mode_index:
-        mode_node = node.args[mode_index]
-    for keyword in node.keywords:
-        if keyword.arg == "mode":
-            mode_node = keyword.value
+def open_mode_from_expression(mode_node: ast.expr | None) -> OpenModeResult:
+    """Classify a statically supplied CPython text-open mode."""
+
     if mode_node is None:
         return "read", "r"
-    if not isinstance(mode_node, ast.Constant) or not isinstance(mode_node.value, str):
+    if not isinstance(mode_node, ast.Constant):
         return "dynamic_open_mode"
+    if not isinstance(mode_node.value, str):
+        return "invalid_open_mode"
     mode = mode_node.value
     if (
         not mode
@@ -1110,7 +1395,25 @@ def _open_mode(node: ast.Call, *, mode_index: int) -> OpenModeResult:
     return "read", mode
 
 
+def _open_mode(node: ast.Call, *, mode_index: int) -> OpenModeResult:
+    mode_node: ast.expr | None = None
+    if len(node.args) > mode_index:
+        mode_node = node.args[mode_index]
+    for keyword in node.keywords:
+        if keyword.arg == "mode":
+            mode_node = keyword.value
+    return open_mode_from_expression(mode_node)
+
+
 __all__ = [
+    "FCNTL_LOCK_FLAGS",
+    "FCNTL_LOCK_FLAG_BITS",
+    "FCNTL_LOCK_MASK_OBJECT_PREFIX",
+    "FCNTL_UNRESOLVED_LOCK_OPERATION_OBJECT_TYPE",
+    "FILE_BOUND_CLOSE_OBJECT_TYPE",
+    "FILE_BOUND_FILENO_OBJECT_TYPE",
+    "FILE_HANDLE_OBJECT_TYPE",
+    "FILE_UNKNOWN_ATTRIBUTE_OBJECT_TYPE",
     "MAX_BINDING_PATHS_PER_RESOURCE",
     "OS_FD_OBJECT_TYPE",
     "OS_FLAG_OBJECT_PREFIX",
@@ -1132,6 +1435,8 @@ __all__ = [
     "SQLITE_UNKNOWN_ATTRIBUTE_OBJECT_TYPE",
     "SyntaxSite",
     "STDLIB_OS_CALLS",
+    "STDLIB_BUILTINS_CALLS",
+    "STDLIB_FCNTL_CALLS",
     "STDLIB_MODULE_MUTATION_PREFIX",
     "STDLIB_MODULE_STATE_PREFIX",
     "STDLIB_MODULE_WILDCARD_ATTRIBUTE",
@@ -1139,6 +1444,7 @@ __all__ = [
     "STDLIB_SQLITE3_CALLS",
     "STDLIB_SQLITE3_TYPES",
     "SUPPORTED_STDLIB_MODULES",
+    "UNRESOLVED_RUNTIME_OBJECT_ALTERNATIVE_TYPE",
     "_call_ordinals",
     "_collect_functions",
     "_collect_syntax_sites",
@@ -1146,16 +1452,30 @@ __all__ = [
     "_module_name",
     "_open_mode",
     "_stable_id",
+    "combine_fcntl_lock_masks",
+    "contaminate_runtime_objects",
+    "fcntl_lock_mask_value",
+    "fcntl_lock_masks",
+    "has_fcntl_lock_mask",
+    "has_file_descriptor_object",
+    "file_handle_kind",
+    "is_exact_flock_descriptor",
+    "is_exact_os_fd",
+    "is_exact_path_receiver",
     "is_path_receiver",
     "is_exact_runtime_object",
     "is_precise_stdlib_module",
     "project_sqlite_attribute",
     "precise_stdlib_module_name",
+    "open_mode_from_expression",
     "sqlite_handle_kind",
     "stdlib_call_target_marker",
     "stdlib_call_targets",
+    "stdlib_module_dict_reference",
     "stdlib_module_mutation_attributes",
     "stdlib_module_mutation_marker",
     "stdlib_module_state_name",
+    "tag_file_handle",
+    "tag_os_fd",
     "tag_sqlite_handle",
 ]

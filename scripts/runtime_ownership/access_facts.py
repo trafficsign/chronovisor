@@ -343,6 +343,40 @@ class AccessFactCollector:
         }
 
     def _reconcile_ambiguous_accesses(self) -> None:
+        concrete = {
+            (row.site_id, row.resource_id, _sink_family(row.sink))
+            for row in self.raw_accesses
+        }
+        superseded_dynamic = {
+            row
+            for row in self.raw_escapes
+            if row.reason in {"dynamic_flock_operation", "dynamic_open_mode"}
+            and (row.site_id, row.resource_id, _sink_family(row.sink))
+            in concrete
+        }
+        if superseded_dynamic:
+            superseded_ids = {
+                _stable_id(
+                    "runtime-escape-fact",
+                    _escape_fact_identity(
+                        site_id=row.site_id,
+                        resource_id=row.resource_id,
+                        operation=row.operation,
+                        sink=row.sink,
+                        reason=row.reason,
+                    ),
+                )
+                for row in superseded_dynamic
+            }
+            self.raw_escapes.difference_update(superseded_dynamic)
+            self.raw_overflows = {
+                row
+                for row in self.raw_overflows
+                if not (
+                    row.source_kind == "escape"
+                    and row.source_fact_id in superseded_ids
+                )
+            }
         blocked = {
             (row.site_id, row.resource_id, _sink_family(row.sink))
             for row in self.raw_escapes

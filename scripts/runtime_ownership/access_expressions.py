@@ -8,7 +8,18 @@ from typing import Protocol
 
 from .access_bindings import bind_structured_target, evaluate_iterable
 from .access_facts import AccessFactCollector
-from .access_model import FlowValue, is_path_receiver, sqlite_handle_kind
+from .access_model import (
+    FCNTL_UNRESOLVED_LOCK_OPERATION_OBJECT_TYPE,
+    UNRESOLVED_RUNTIME_OBJECT_ALTERNATIVE_TYPE,
+    FlowValue,
+    combine_fcntl_lock_masks,
+    fcntl_lock_masks,
+    has_fcntl_lock_mask,
+    has_file_descriptor_object,
+    is_exact_path_receiver,
+    is_path_receiver,
+    sqlite_handle_kind,
+)
 
 
 class ExpressionEngine(Protocol):
@@ -133,6 +144,90 @@ def evaluate_generic_expression(
             object_env=object_env,
             call_ordinals=call_ordinals,
         )
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr):
+        left = engine._eval(
+            node.left,
+            module=module,
+            actor=actor,
+            class_ref=class_ref,
+            env=env,
+            object_env=object_env,
+            call_ordinals=call_ordinals,
+        )
+        right = engine._eval(
+            node.right,
+            module=module,
+            actor=actor,
+            class_ref=class_ref,
+            env=env,
+            object_env=object_env,
+            call_ordinals=call_ordinals,
+        )
+        combined = combine_fcntl_lock_masks(left, right)
+        if combined is not None:
+            return combined
+        merged = left.merged(right).bound("expression:BinOp")
+        if fcntl_lock_masks(left) is not None or fcntl_lock_masks(right) is not None:
+            merged.object_types.add(
+                FCNTL_UNRESOLVED_LOCK_OPERATION_OBJECT_TYPE
+            )
+            return merged
+        if merged.has_origins:
+            engine.facts.record_escape(
+                merged,
+                node=node,
+                actor=actor,
+                operation="expression:binop",
+                sink="python.BinOp",
+                reason="unsupported_registered_origin_expression",
+                path=engine.paths[module],
+                line=int(node.lineno),
+                ordinal=int(call_ordinals.get(id(node), 0)),
+            )
+            return FlowValue()
+        return merged
+    if isinstance(node, ast.IfExp):
+        test = engine._eval(
+            node.test,
+            module=module,
+            actor=actor,
+            class_ref=class_ref,
+            env=env,
+            object_env=object_env,
+            call_ordinals=call_ordinals,
+        )
+        body = engine._eval(
+            node.body,
+            module=module,
+            actor=actor,
+            class_ref=class_ref,
+            env=env,
+            object_env=object_env,
+            call_ordinals=call_ordinals,
+        )
+        orelse = engine._eval(
+            node.orelse,
+            module=module,
+            actor=actor,
+            class_ref=class_ref,
+            env=env,
+            object_env=object_env,
+            call_ordinals=call_ordinals,
+        )
+        result = test.merged(body).merged(orelse).bound("expression:IfExp")
+        if has_fcntl_lock_mask(body) != has_fcntl_lock_mask(orelse):
+            result.object_types.add(
+                FCNTL_UNRESOLVED_LOCK_OPERATION_OBJECT_TYPE
+            )
+        if has_file_descriptor_object(body) != has_file_descriptor_object(orelse):
+            result.object_types.add(
+                UNRESOLVED_RUNTIME_OBJECT_ALTERNATIVE_TYPE
+            )
+        if is_exact_path_receiver(body) != is_exact_path_receiver(orelse):
+            result.object_types.add(
+                UNRESOLVED_RUNTIME_OBJECT_ALTERNATIVE_TYPE
+            )
+        return result
     if isinstance(node, ast.Lambda):
         escaped = _lambda_origins(
             engine,

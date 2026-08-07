@@ -7,7 +7,14 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, cast
 
-from .access_model import FlowValue
+from .access_model import (
+    FCNTL_UNRESOLVED_LOCK_OPERATION_OBJECT_TYPE,
+    UNRESOLVED_RUNTIME_OBJECT_ALTERNATIVE_TYPE,
+    FlowValue,
+    has_fcntl_lock_mask,
+    has_file_descriptor_object,
+    is_exact_path_receiver,
+)
 
 if TYPE_CHECKING:
     from .access_statements import StatementEngine
@@ -41,9 +48,32 @@ class BlockResult:
     @property
     def returned(self) -> FlowValue:
         value = FlowValue()
+        return_values: list[FlowValue] = []
         for outcome in self.outcomes:
             if outcome.kind == "return":
+                return_values.append(outcome.value)
                 value = value.merged(outcome.value)
+        if has_fcntl_lock_mask(value) and (
+            any(candidate == FlowValue() for candidate in return_values)
+            or any(outcome.kind == "normal" for outcome in self.outcomes)
+        ):
+            value.object_types.add(
+                FCNTL_UNRESOLVED_LOCK_OPERATION_OBJECT_TYPE
+            )
+        if has_file_descriptor_object(value) and (
+            any(candidate == FlowValue() for candidate in return_values)
+            or any(outcome.kind == "normal" for outcome in self.outcomes)
+        ):
+            value.object_types.add(
+                UNRESOLVED_RUNTIME_OBJECT_ALTERNATIVE_TYPE
+            )
+        if is_exact_path_receiver(value) and (
+            any(candidate == FlowValue() for candidate in return_values)
+            or any(outcome.kind == "normal" for outcome in self.outcomes)
+        ):
+            value.object_types.add(
+                UNRESOLVED_RUNTIME_OBJECT_ALTERNATIVE_TYPE
+            )
         return value
 
 
@@ -70,8 +100,29 @@ def join_states(states: Iterable[StateSnapshot]) -> StateSnapshot:
     names = set().union(*(state_env for state_env, _objects in materialized))
     for name in names:
         value = FlowValue()
+        candidates: list[FlowValue] = []
         for state_env, _objects in materialized:
-            value = value.merged(state_env.get(name, FlowValue()))
+            candidate = state_env.get(name, FlowValue())
+            candidates.append(candidate)
+            value = value.merged(candidate)
+        if has_fcntl_lock_mask(value) and any(
+            candidate == FlowValue() for candidate in candidates
+        ):
+            value.object_types.add(
+                FCNTL_UNRESOLVED_LOCK_OPERATION_OBJECT_TYPE
+            )
+        if has_file_descriptor_object(value) and any(
+            candidate == FlowValue() for candidate in candidates
+        ):
+            value.object_types.add(
+                UNRESOLVED_RUNTIME_OBJECT_ALTERNATIVE_TYPE
+            )
+        if is_exact_path_receiver(value) and any(
+            candidate == FlowValue() for candidate in candidates
+        ):
+            value.object_types.add(
+                UNRESOLVED_RUNTIME_OBJECT_ALTERNATIVE_TYPE
+            )
         joined_env[name] = value
     object_names = set().union(
         *(state_objects for _state_env, state_objects in materialized)
@@ -489,7 +540,7 @@ def _bind_deleted_attribute_targets(
     env: dict[str, FlowValue],
     object_env: dict[str, set[str]],
 ) -> None:
-    if isinstance(target, ast.Attribute):
+    if isinstance(target, (ast.Attribute, ast.Subscript)):
         engine._bind_target(
             target,
             FlowValue(),

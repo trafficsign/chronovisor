@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import ast
-from collections.abc import Mapping
-from typing import TYPE_CHECKING
+from collections.abc import Mapping, Sequence
+from typing import TYPE_CHECKING, Protocol, cast
 
 from .access_bindings import (
     IterableValue,
@@ -13,7 +13,11 @@ from .access_bindings import (
     structured_target_mismatch,
 )
 from .access_control import match_values
-from .access_model import FlowValue, sqlite_handle_kind
+from .access_model import (
+    FlowValue,
+    file_handle_kind,
+    sqlite_handle_kind,
+)
 from .access_outcomes import (
     BlockResult,
     Outcome,
@@ -27,6 +31,15 @@ from .access_outcomes import (
 
 if TYPE_CHECKING:
     from .access_statements import StatementEngine
+
+
+class _RuntimeContaminationEngine(Protocol):
+    def _contaminate_runtime_objects(
+        self,
+        env: dict[str, FlowValue],
+        object_env: dict[str, set[str]],
+        values: Sequence[FlowValue],
+    ) -> None: ...
 
 
 def analyze_loop(
@@ -320,7 +333,7 @@ def analyze_with(
 
     changed = False
     kind = "async_with" if isinstance(statement, ast.AsyncWith) else "with"
-    managers: list[tuple[bool, FlowValue]] = []
+    managers: list[tuple[str | None, FlowValue]] = []
     for item in statement.items:
         _record_snapshot(prefix_states, env, object_env)
         context_value = engine._eval(
@@ -332,10 +345,12 @@ def analyze_with(
             object_env=object_env,
             call_ordinals=call_ordinals,
         )
-        if (
-            isinstance(statement, ast.AsyncWith)
-            and sqlite_handle_kind(context_value) == "connection"
-        ):
+        context_manager_kind: str | None = None
+        if sqlite_handle_kind(context_value) == "connection":
+            context_manager_kind = "sqlite"
+        elif file_handle_kind(context_value) == "file":
+            context_manager_kind = "file"
+        if isinstance(statement, ast.AsyncWith) and context_manager_kind is not None:
             _record_control_value(
                 engine,
                 context_value,
@@ -364,12 +379,10 @@ def analyze_with(
                 prefix_states=prefix_states,
             )
             return BlockResult(changed, outcomes)
-        sqlite_manager = (
-            isinstance(statement, ast.With)
-            and sqlite_handle_kind(context_value) == "connection"
-        )
-        if sqlite_manager:
+        if context_manager_kind == "sqlite":
             entered_value = context_value.bound("context:sqlite.connection.enter")
+        elif context_manager_kind == "file":
+            entered_value = context_value.bound("context:file.handle.enter")
         else:
             entered_value = FlowValue()
             _record_control_value(
@@ -382,7 +395,12 @@ def analyze_with(
                 call_ordinals=call_ordinals,
             )
         managers.append(
-            (sqlite_manager, entered_value if sqlite_manager else context_value)
+            (
+                context_manager_kind,
+                entered_value
+                if context_manager_kind is not None
+                else context_value,
+            )
         )
         if item.optional_vars is not None:
             changed |= engine._bind_target(
@@ -422,7 +440,7 @@ def analyze_with(
 
 def _exit_context_managers(
     engine: StatementEngine,
-    managers: list[tuple[bool, FlowValue]],
+    managers: list[tuple[str | None, FlowValue]],
     outcomes: list[Outcome],
     *,
     statement: ast.With | ast.AsyncWith,
@@ -431,11 +449,11 @@ def _exit_context_managers(
     actor: str,
     prefix_states: list[StateSnapshot] | None,
 ) -> list[Outcome]:
-    for sqlite_manager, context_value in reversed(managers):
+    for manager_kind, context_value in reversed(managers):
         exited: list[Outcome] = []
         for outcome in outcomes:
             _record_snapshot(prefix_states, outcome.env, outcome.object_env)
-            if sqlite_manager:
+            if manager_kind == "sqlite":
                 operation = (
                     "sqlite.transaction.implicit_rollback"
                     if outcome.kind == "raise"
@@ -450,6 +468,18 @@ def _exit_context_managers(
                     actor=actor,
                 )
                 exited.append(copy_outcome(outcome))
+                continue
+            if manager_kind == "file":
+                closed = copy_outcome(outcome)
+                cast(
+                    _RuntimeContaminationEngine,
+                    engine,
+                )._contaminate_runtime_objects(
+                    closed.env,
+                    closed.object_env,
+                    [context_value],
+                )
+                exited.append(closed)
                 continue
             exited.append(copy_outcome(outcome))
             if outcome.kind != "raise":

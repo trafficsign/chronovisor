@@ -10,9 +10,14 @@ from .access_expressions import evaluate_generic_expression
 from .access_facts import AccessFactCollector
 from .access_imports import build_module_exports, resolve_module_attribute
 from .access_model import (
+    FILE_BOUND_CLOSE_OBJECT_TYPE,
+    FILE_BOUND_FILENO_OBJECT_TYPE,
+    FILE_HANDLE_OBJECT_TYPE,
+    FILE_UNKNOWN_ATTRIBUTE_OBJECT_TYPE,
     SQLITE_HANDLE_OBJECT_TYPES,
     SQLITE_UNKNOWN_ATTRIBUTE_OBJECT_TYPE,
     SUPPORTED_STDLIB_MODULES,
+    UNRESOLVED_RUNTIME_OBJECT_ALTERNATIVE_TYPE,
     FlowValue,
     FunctionInfo,
     _call_ordinals,
@@ -20,8 +25,12 @@ from .access_model import (
     _collect_syntax_sites,
     _import_tables,
     _module_name,
+    contaminate_runtime_objects,
+    is_path_receiver,
     precise_stdlib_module_name,
     project_sqlite_attribute,
+    stdlib_call_target_marker,
+    stdlib_module_dict_reference,
     stdlib_module_mutation_attributes,
     stdlib_module_mutation_marker,
     stdlib_module_state_name,
@@ -169,6 +178,7 @@ class _AccessAnalysis:
             known_modules.update(
                 ".".join(parts[:index]) for index in range(1, len(parts))
             )
+        known_modules.discard("builtins")
         self.known_modules = frozenset(known_modules)
         self.origin_symbols: dict[tuple[str, str], FlowValue] = {}
         self.resource_locators: dict[str, str] = {}
@@ -490,6 +500,41 @@ class _AccessAnalysis:
             else:
                 object_env.pop(target.id, None)
             return False
+        if isinstance(target, ast.Subscript):
+            base = stdlib_module_dict_reference(target.value, env)
+            if base is not None:
+                attribute = (
+                    target.slice.value
+                    if isinstance(target.slice, ast.Constant)
+                    and isinstance(target.slice.value, str)
+                    else "*"
+                )
+                module_ref = precise_stdlib_module_name(base)
+                if self._taint_stdlib_module_attribute(
+                    base,
+                    attribute=attribute,
+                    env=env,
+                    object_env=object_env,
+                ):
+                    if (
+                        attribute != "*"
+                        and value.has_origins
+                        and module is not None
+                        and source_node is not None
+                    ):
+                        assert module_ref is not None
+                        self.facts.record_escape(
+                            value,
+                            node=source_node,
+                            actor=actor,
+                            operation=f"assignment:{module_ref}.{attribute}",
+                            sink=f"{module_ref}.{attribute}",
+                            reason="registered_locator_to_stdlib_module_mutation",
+                            path=self.paths[module],
+                            line=int(getattr(source_node, "lineno", 0)),
+                            ordinal=ordinal,
+                        )
+                    return False
         if isinstance(target, ast.Attribute) and isinstance(
             target.value, ast.Name
         ):
@@ -558,6 +603,44 @@ class _AccessAnalysis:
             object_env[name] = set(tainted.object_types)
         return True
 
+    def _contaminate_runtime_objects(
+        self,
+        env: dict[str, FlowValue],
+        object_env: dict[str, set[str]],
+        values: Sequence[FlowValue],
+    ) -> None:
+        affected = contaminate_runtime_objects(env, object_env, values)
+        if not affected:
+            return
+        for attrs in self.class_attrs.values():
+            for name, candidate in list(attrs.items()):
+                if not affected.intersection(
+                    candidate.runtime_object_ids
+                    | candidate.runtime_descriptor_ids
+                ):
+                    continue
+                contaminated = candidate.copy()
+                contaminated.object_types.add(
+                    UNRESOLVED_RUNTIME_OBJECT_ALTERNATIVE_TYPE
+                )
+                if contaminated == candidate:
+                    continue
+                attrs[name] = contaminated
+                self._persistent_changed = True
+
+    def _runtime_object_identity(
+        self,
+        node: ast.Call,
+        *,
+        kind: str,
+        actor: str,
+    ) -> str:
+        site_id = self.facts.site_id(node)
+        activation = self._active_local_activations.get(actor)
+        if activation is None:
+            return f"{kind}:{site_id}"
+        return f"{kind}:{site_id}|activation={activation}"
+
     def _eval(
         self,
         node: ast.expr,
@@ -600,6 +683,20 @@ class _AccessAnalysis:
                 unknown = base.bound(f"attribute:sqlite.unknown:{node.attr}")
                 unknown.object_types.difference_update(SQLITE_HANDLE_OBJECT_TYPES)
                 unknown.object_types.add(SQLITE_UNKNOWN_ATTRIBUTE_OBJECT_TYPE)
+                return unknown
+            if base.has_origins and FILE_HANDLE_OBJECT_TYPE in base.object_types:
+                unknown = base.bound(f"attribute:file.unknown:{node.attr}")
+                unknown.object_types.discard(FILE_HANDLE_OBJECT_TYPE)
+                if node.attr == "close":
+                    unknown.object_types.add(FILE_BOUND_CLOSE_OBJECT_TYPE)
+                elif node.attr == "fileno":
+                    unknown.object_types.add(FILE_BOUND_FILENO_OBJECT_TYPE)
+                else:
+                    unknown.object_types.add(FILE_UNKNOWN_ATTRIBUTE_OBJECT_TYPE)
+                return unknown
+            if is_path_receiver(base) and node.attr == "open":
+                unknown = base.bound(f"attribute:path.unknown:{node.attr}")
+                unknown.unknown_callable = True
                 return unknown
             return resolve_module_attribute(
                 base,
@@ -1128,7 +1225,51 @@ class _AccessAnalysis:
             env=module_env,
             object_env=module_objects,
         )
+        self._reconcile_stdlib_import_captures(
+            target_module,
+            env=module_env,
+            object_env=module_objects,
+        )
         return module_env, module_objects, state_prefix
+
+    def _reconcile_stdlib_import_captures(
+        self,
+        module: str,
+        *,
+        env: dict[str, FlowValue],
+        object_env: dict[str, set[str]],
+    ) -> None:
+        mutations = {
+            module_ref: frozenset().union(
+                *(
+                    stdlib_module_mutation_attributes(
+                        value,
+                        module=module_ref,
+                    )
+                    for value in env.values()
+                )
+            )
+            for module_ref in SUPPORTED_STDLIB_MODULES
+        }
+        for local, (module_ref, attribute) in self.imported_symbols.get(
+            module,
+            {},
+        ).items():
+            mutated = mutations.get(module_ref, frozenset())
+            if not ({attribute, "*"} & set(mutated)):
+                continue
+            candidate = env.get(local)
+            target = f"{module_ref}:{attribute}"
+            if candidate is None or candidate.call_targets != {target}:
+                continue
+            unknown = candidate.copy()
+            unknown.call_targets.clear()
+            unknown.object_types.add(
+                stdlib_call_target_marker(module_ref, attribute)
+            )
+            unknown.unknown_callable = True
+            env[local] = unknown
+            object_env[local] = set(unknown.object_types)
 
     @staticmethod
     def _store_call_module_state(

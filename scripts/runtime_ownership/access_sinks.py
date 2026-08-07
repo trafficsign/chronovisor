@@ -10,13 +10,15 @@ from urllib.parse import parse_qsl, urlsplit
 
 from .access_facts import AccessFactCollector
 from .access_model import (
-    OS_FD_OBJECT_TYPE,
+    FCNTL_UNRESOLVED_LOCK_OPERATION_OBJECT_TYPE,
     OS_FLAG_OBJECT_PREFIX,
     OS_OPEN_ACCESS_FLAGS,
     OS_OPEN_MODIFIER_FLAGS,
     PATH_TRANSFORMS,
     READ_PATH_METHODS,
     SQLITE_TYPE_OBJECT_PREFIX,
+    STDLIB_BUILTINS_CALLS,
+    STDLIB_FCNTL_CALLS,
     STDLIB_MODULE_WILDCARD_ATTRIBUTE,
     STDLIB_OS_CALLS,
     STDLIB_SQLITE3_CALLS,
@@ -24,12 +26,21 @@ from .access_model import (
     WRITE_PATH_METHODS,
     FlowValue,
     FunctionInfo,
-    _open_mode,
+    fcntl_lock_masks,
+    file_handle_kind,
+    is_exact_flock_descriptor,
+    is_exact_os_fd,
+    is_exact_path_receiver,
     is_path_receiver,
     is_precise_stdlib_module,
+    open_mode_from_expression,
     precise_stdlib_module_name,
     sqlite_handle_kind,
     stdlib_call_targets,
+    stdlib_module_dict_reference,
+    stdlib_module_mutation_marker,
+    tag_file_handle,
+    tag_os_fd,
     tag_sqlite_handle,
 )
 from .access_resolver import (
@@ -112,6 +123,21 @@ class AccessEngine(Protocol):
         env: dict[str, FlowValue],
         object_env: dict[str, set[str]],
     ) -> bool: ...
+
+    def _contaminate_runtime_objects(
+        self,
+        env: dict[str, FlowValue],
+        object_env: dict[str, set[str]],
+        values: Sequence[FlowValue],
+    ) -> None: ...
+
+    def _runtime_object_identity(
+        self,
+        node: ast.Call,
+        *,
+        kind: str,
+        actor: str,
+    ) -> str: ...
 
 
 def _eval_expression(
@@ -256,6 +282,27 @@ def _taint_callable_stdlib_modules(
         )
 
 
+def _stdlib_reference_is_read_only(info: FunctionInfo, name: str) -> bool:
+    parents = {
+        id(child): parent
+        for parent in ast.walk(info.node)
+        for child in ast.iter_child_nodes(parent)
+    }
+    found = False
+    for child in ast.walk(info.node):
+        if not isinstance(child, ast.Name) or child.id != name:
+            continue
+        found = True
+        parent = parents.get(id(child))
+        if not (
+            isinstance(parent, ast.Attribute)
+            and parent.value is child
+            and isinstance(parent.ctx, ast.Load)
+        ):
+            return False
+    return found
+
+
 def _canonical_stdlib_call_sink(
     node: ast.Call,
     receiver: FlowValue,
@@ -292,6 +339,10 @@ def _canonical_stdlib_call_sink(
 
 
 def _is_supported_stdlib_call(module_ref: str, attribute: str) -> bool:
+    if module_ref == "builtins":
+        return attribute in STDLIB_BUILTINS_CALLS
+    if module_ref == "fcntl":
+        return attribute in STDLIB_FCNTL_CALLS
     if module_ref == "os":
         return attribute in STDLIB_OS_CALLS
     if module_ref == "sqlite3":
@@ -455,6 +506,39 @@ def _is_precise_os_module(value: FlowValue, *, attribute: str) -> bool:
     )
 
 
+def _stdlib_builtins_call_name(
+    node: ast.Call,
+    receiver: FlowValue,
+    env: Mapping[str, FlowValue],
+    *,
+    known_modules: frozenset[str],
+) -> str | None:
+    if "builtins" in known_modules:
+        return None
+    if isinstance(node.func, ast.Attribute):
+        if node.func.attr in STDLIB_BUILTINS_CALLS and is_precise_stdlib_module(
+            receiver,
+            module="builtins",
+            attribute=node.func.attr,
+        ):
+            return node.func.attr
+        return None
+    if not isinstance(node.func, ast.Name) or node.func.id not in env:
+        return None
+    value = env[node.func.id]
+    for name in STDLIB_BUILTINS_CALLS:
+        if (
+            value.call_targets == {f"builtins:{name}"}
+            and not value.origins
+            and not value.module_refs
+            and not value.class_targets
+            and not value.unknown_callable
+            and not value.closure_instances
+        ):
+            return name
+    return None
+
+
 def _stdlib_os_call_name(
     node: ast.Call,
     receiver: FlowValue,
@@ -603,6 +687,820 @@ def _valid_named_signature(
             return False
         assigned.add(name)
     return required_names <= assigned
+
+
+_BUILTIN_OPEN_POSITIONAL_NAMES = (
+    "file",
+    "mode",
+    "buffering",
+    "encoding",
+    "errors",
+    "newline",
+    "closefd",
+    "opener",
+)
+_FDOPEN_POSITIONAL_NAMES = (
+    "fd",
+    "mode",
+    "buffering",
+    "encoding",
+    "errors",
+    "newline",
+    "closefd",
+    "opener",
+)
+_PATH_OPEN_POSITIONAL_NAMES = (
+    "mode",
+    "buffering",
+    "encoding",
+    "errors",
+    "newline",
+)
+
+
+def _valid_file_open_signature(node: ast.Call, *, kind: str) -> bool:
+    positional_names = {
+        "builtin": _BUILTIN_OPEN_POSITIONAL_NAMES,
+        "fdopen": _FDOPEN_POSITIONAL_NAMES,
+        "path": _PATH_OPEN_POSITIONAL_NAMES,
+    }[kind]
+    required = frozenset() if kind == "path" else frozenset({positional_names[0]})
+    return _valid_named_signature(
+        node,
+        positional_names=positional_names,
+        keyword_only_names=frozenset(),
+        required_names=required,
+    )
+
+
+def _open_primary_candidates(
+    node: ast.Call,
+    argument_values: Sequence[FlowValue],
+    keyword_values: Mapping[str, FlowValue],
+    unknown_keyword_unpack: FlowValue,
+    *,
+    primary_name: str,
+) -> FlowValue:
+    values: list[FlowValue] = []
+    if argument_values:
+        values.append(argument_values[0])
+    if primary_name in keyword_values:
+        values.append(keyword_values[primary_name])
+    if _has_unknown_keyword_unpack(node):
+        values.append(unknown_keyword_unpack)
+    return _merge_values(values)
+
+
+def _open_auxiliary_origins(
+    argument_values: Sequence[FlowValue],
+    keyword_values: Mapping[str, FlowValue],
+    unknown_keyword_unpack: FlowValue,
+    *,
+    primary_name: str | None,
+) -> FlowValue:
+    values = list(argument_values if primary_name is None else argument_values[1:])
+    values.extend(
+        value
+        for name, value in keyword_values.items()
+        if name != primary_name
+    )
+    if primary_name is None or not unknown_keyword_unpack.has_origins:
+        values.append(unknown_keyword_unpack)
+    return _merge_values(values)
+
+
+def _record_open_escape(
+    engine: AccessEngine,
+    value: FlowValue,
+    node: ast.Call,
+    *,
+    operation: str,
+    sink: str,
+    reason: str,
+    module: str,
+    actor: str,
+    ordinal: int,
+) -> None:
+    if not value.has_origins:
+        return
+    engine.facts.record_escape(
+        value,
+        node=node,
+        actor=actor,
+        operation=operation,
+        sink=sink,
+        reason=reason,
+        path=engine.paths[module],
+        line=int(node.lineno),
+        ordinal=ordinal,
+    )
+
+
+def _evaluate_stdlib_module_dict_mutation_call(
+    engine: AccessEngine,
+    node: ast.Call,
+    *,
+    env: dict[str, FlowValue],
+    object_env: dict[str, set[str]],
+) -> FlowValue | None:
+    if (
+        not isinstance(node.func, ast.Attribute)
+        or node.func.attr != "pop"
+        or not 1 <= len(node.args) <= 2
+        or node.keywords
+        or any(isinstance(argument, ast.Starred) for argument in node.args)
+    ):
+        return None
+    base = stdlib_module_dict_reference(node.func.value, env)
+    if base is None:
+        return None
+    key = node.args[0]
+    attribute = (
+        key.value
+        if isinstance(key, ast.Constant) and isinstance(key.value, str)
+        else STDLIB_MODULE_WILDCARD_ATTRIBUTE
+    )
+    if not engine._taint_stdlib_module_attribute(
+        base,
+        attribute=attribute,
+        env=env,
+        object_env=object_env,
+    ):
+        return None
+    return FlowValue(unknown_callable=True)
+
+
+def _evaluate_stdlib_vars_call(
+    engine: AccessEngine,
+    node: ast.Call,
+    argument_values: Sequence[FlowValue],
+    *,
+    env: Mapping[str, FlowValue],
+) -> FlowValue | None:
+    if (
+        not isinstance(node.func, ast.Name)
+        or node.func.id != "vars"
+        or "vars" in env
+        or len(node.args) != 1
+        or node.keywords
+        or isinstance(node.args[0], ast.Starred)
+    ):
+        return None
+    value = argument_values[0]
+    module_ref = precise_stdlib_module_name(value)
+    if module_ref is None or module_ref in engine.known_modules:
+        return None
+    return value.bound("result:builtins.vars:module_dict")
+
+
+def _is_static_none(expression: ast.expr | None) -> bool:
+    return isinstance(expression, ast.Constant) and expression.value is None
+
+
+def _static_open_option(
+    node: ast.Call,
+    *,
+    index: int,
+    keyword: str,
+) -> tuple[bool, bool, object | None]:
+    provided = _argument_is_provided(node, index=index, keyword=keyword)
+    if not provided:
+        return False, True, None
+    expression = _precise_argument_expression(
+        node,
+        index=index,
+        keyword=keyword,
+    )
+    if not isinstance(expression, ast.Constant):
+        if (
+            isinstance(expression, ast.UnaryOp)
+            and isinstance(expression.op, (ast.UAdd, ast.USub))
+            and isinstance(expression.operand, ast.Constant)
+            and type(expression.operand.value) is int
+        ):
+            value = expression.operand.value
+            return (
+                True,
+                True,
+                value if isinstance(expression.op, ast.UAdd) else -value,
+            )
+        return True, False, None
+    return True, True, expression.value
+
+
+def _open_options_error(
+    node: ast.Call,
+    *,
+    kind: str,
+    mode: tuple[Literal["read", "write", "read_write"], str],
+    primary_is_path: bool,
+) -> str | None:
+    offset = 0 if kind == "path" else 1
+    binary = "b" in mode[1]
+    provided, static, buffering = _static_open_option(
+        node,
+        index=offset + 1,
+        keyword="buffering",
+    )
+    if provided and (
+        not static
+        or not isinstance(buffering, int)
+        or buffering == 0
+        and not binary
+    ):
+        return "invalid_or_ambiguous_open_options"
+
+    for relative_index, keyword in enumerate(
+        ("encoding", "errors", "newline"),
+        start=2,
+    ):
+        provided, static, value = _static_open_option(
+            node,
+            index=offset + relative_index,
+            keyword=keyword,
+        )
+        if not provided:
+            continue
+        if not static or value is not None and not isinstance(value, str):
+            return "invalid_or_ambiguous_open_options"
+        if binary and value is not None:
+            return "invalid_or_ambiguous_open_options"
+        if keyword == "newline" and value not in {None, "", "\n", "\r", "\r\n"}:
+            return "invalid_or_ambiguous_open_options"
+
+    if kind != "path":
+        provided, static, closefd = _static_open_option(
+            node,
+            index=6,
+            keyword="closefd",
+        )
+        if provided and (
+            not static or primary_is_path and not bool(closefd)
+        ):
+            return "invalid_or_ambiguous_open_options"
+    return None
+
+
+def _open_closefd_enabled(node: ast.Call, *, kind: str) -> bool:
+    if kind == "path":
+        return True
+    provided, static, value = _static_open_option(
+        node,
+        index=6,
+        keyword="closefd",
+    )
+    return not provided or static and bool(value)
+
+
+def _evaluate_file_open(
+    engine: AccessEngine,
+    node: ast.Call,
+    argument_values: Sequence[FlowValue],
+    keyword_values: Mapping[str, FlowValue],
+    unknown_keyword_unpack: FlowValue,
+    *,
+    kind: str,
+    receiver: FlowValue,
+    module: str,
+    actor: str,
+    ordinal: int,
+) -> FlowValue:
+    operation = {
+        "builtin": "builtin.open",
+        "fdopen": "os.fdopen",
+        "path": "path.open",
+    }[kind]
+    sink = {
+        "builtin": "builtins.open",
+        "fdopen": "os.fdopen",
+        "path": "pathlib.Path.open",
+    }[kind]
+    primary_name = {
+        "builtin": "file",
+        "fdopen": "fd",
+        "path": None,
+    }[kind]
+    auxiliary = _open_auxiliary_origins(
+        argument_values,
+        keyword_values,
+        unknown_keyword_unpack,
+        primary_name=primary_name,
+    )
+    if not _valid_file_open_signature(node, kind=kind):
+        primary = receiver
+        if primary_name is not None:
+            primary = _open_primary_candidates(
+                node,
+                argument_values,
+                keyword_values,
+                unknown_keyword_unpack,
+                primary_name=primary_name,
+            )
+        _record_open_escape(
+            engine,
+            primary,
+            node,
+            operation=operation,
+            sink=sink,
+            reason="invalid_or_ambiguous_open_signature",
+            module=module,
+            actor=actor,
+            ordinal=ordinal,
+        )
+        _record_open_escape(
+            engine,
+            auxiliary,
+            node,
+            operation=f"{operation}.arguments",
+            sink=sink,
+            reason="ambiguous_registered_origin_open_arguments",
+            module=module,
+            actor=actor,
+            ordinal=ordinal,
+        )
+        return FlowValue()
+
+    primary = receiver
+    if primary_name is not None:
+        primary, ambiguous = _precise_argument_value(
+            node,
+            argument_values,
+            keyword_values,
+            index=0,
+            keyword=primary_name,
+        )
+        if ambiguous.has_origins:
+            _record_open_escape(
+                engine,
+                ambiguous,
+                node,
+                operation=operation,
+                sink=sink,
+                reason="invalid_or_ambiguous_open_signature",
+                module=module,
+                actor=actor,
+                ordinal=ordinal,
+            )
+            return FlowValue()
+
+    primary_is_fd = is_exact_os_fd(primary)
+    primary_is_path = is_exact_path_receiver(primary)
+    if kind == "fdopen" and not primary_is_fd:
+        _record_open_escape(
+            engine,
+            primary,
+            node,
+            operation=operation,
+            sink=sink,
+            reason="ambiguous_registered_origin_open_arguments",
+            module=module,
+            actor=actor,
+            ordinal=ordinal,
+        )
+        _record_open_escape(
+            engine,
+            auxiliary,
+            node,
+            operation=f"{operation}.arguments",
+            sink=sink,
+            reason="ambiguous_registered_origin_open_arguments",
+            module=module,
+            actor=actor,
+            ordinal=ordinal,
+        )
+        return FlowValue()
+    if kind != "fdopen" and primary.has_origins and not (
+        primary_is_fd or primary_is_path
+    ):
+        _record_open_escape(
+            engine,
+            primary,
+            node,
+            operation=operation,
+            sink=sink,
+            reason="ambiguous_registered_origin_open_arguments",
+            module=module,
+            actor=actor,
+            ordinal=ordinal,
+        )
+        _record_open_escape(
+            engine,
+            auxiliary,
+            node,
+            operation=f"{operation}.arguments",
+            sink=sink,
+            reason="ambiguous_registered_origin_open_arguments",
+            module=module,
+            actor=actor,
+            ordinal=ordinal,
+        )
+        return FlowValue()
+
+    mode_expression = _precise_argument_expression(
+        node,
+        index=0 if kind == "path" else 1,
+        keyword="mode",
+    )
+    mode = open_mode_from_expression(mode_expression)
+    opener_expression = (
+        _precise_argument_expression(node, index=7, keyword="opener")
+        if kind != "path"
+        else None
+    )
+    opener_provided = kind != "path" and _argument_is_provided(
+        node,
+        index=7,
+        keyword="opener",
+    )
+    _record_open_escape(
+        engine,
+        auxiliary,
+        node,
+        operation=f"{operation}.arguments",
+        sink=sink,
+        reason="ambiguous_registered_origin_open_arguments",
+        module=module,
+        actor=actor,
+        ordinal=ordinal,
+    )
+    if isinstance(mode, str):
+        _record_open_escape(
+            engine,
+            primary,
+            node,
+            operation=operation,
+            sink=sink,
+            reason=mode,
+            module=module,
+            actor=actor,
+            ordinal=ordinal,
+        )
+        return FlowValue()
+    if opener_provided and not _is_static_none(opener_expression):
+        _record_open_escape(
+            engine,
+            primary,
+            node,
+            operation=operation,
+            sink=sink,
+            reason="unsupported_open_opener",
+            module=module,
+            actor=actor,
+            ordinal=ordinal,
+        )
+        return FlowValue()
+    options_error = _open_options_error(
+        node,
+        kind=kind,
+        mode=mode,
+        primary_is_path=primary_is_path,
+    )
+    if options_error is not None:
+        _record_open_escape(
+            engine,
+            primary,
+            node,
+            operation=operation,
+            sink=sink,
+            reason=options_error,
+            module=module,
+            actor=actor,
+            ordinal=ordinal,
+        )
+        return FlowValue()
+    if auxiliary.has_origins:
+        _record_open_escape(
+            engine,
+            primary,
+            node,
+            operation=operation,
+            sink=sink,
+            reason="ambiguous_registered_origin_open_arguments",
+            module=module,
+            actor=actor,
+            ordinal=ordinal,
+        )
+        return FlowValue()
+    if not primary.has_origins:
+        return FlowValue()
+    if primary_is_path:
+        engine.facts.record_access(
+            primary,
+            node=node,
+            actor=actor,
+            mode=mode[0],
+            operation=f"{operation}:{mode[1]}",
+            sink=sink,
+            path=engine.paths[module],
+            line=int(node.lineno),
+            ordinal=ordinal,
+        )
+    return tag_file_handle(
+        primary.bound(f"result:{operation}:handle"),
+        identity=engine._runtime_object_identity(
+            node,
+            kind="file",
+            actor=actor,
+        ),
+        wraps_fd=primary_is_fd,
+        closefd=_open_closefd_enabled(node, kind=kind),
+    )
+
+
+def _valid_zero_argument_method_signature(node: ast.Call) -> bool:
+    return (
+        not node.args
+        and _expanded_keyword_arguments(node) == []
+        and not _has_unknown_keyword_unpack(node)
+    )
+
+
+def _evaluate_file_handle_call(
+    engine: AccessEngine,
+    node: ast.Call,
+    receiver: FlowValue,
+    argument_values: Sequence[FlowValue],
+    keyword_values: Mapping[str, FlowValue],
+    unknown_keyword_unpack: FlowValue,
+    *,
+    method: str,
+    module: str,
+    actor: str,
+    env: dict[str, FlowValue],
+    object_env: dict[str, set[str]],
+    ordinal: int,
+) -> FlowValue | None:
+    if method not in {"close", "fileno"}:
+        return None
+    if not _valid_zero_argument_method_signature(node):
+        implicated = receiver.merged(
+            _merge_values(
+                [
+                    *argument_values,
+                    *keyword_values.values(),
+                    unknown_keyword_unpack,
+                ]
+            )
+        )
+        reason = (
+            "invalid_or_ambiguous_fileno_signature"
+            if method == "fileno"
+            else "registered_locator_to_unknown_callee"
+        )
+        _record_open_escape(
+            engine,
+            implicated,
+            node,
+            operation=f"file.{method}",
+            sink=f"io.IOBase.{method}",
+            reason=reason,
+            module=module,
+            actor=actor,
+            ordinal=ordinal,
+        )
+        return FlowValue()
+    if method == "close":
+        engine._contaminate_runtime_objects(env, object_env, [receiver])
+        return FlowValue()
+    return tag_os_fd(receiver.bound("result:file.fileno:fd"))
+
+
+def _is_precise_fcntl_module(value: FlowValue, *, attribute: str) -> bool:
+    return is_precise_stdlib_module(
+        value,
+        module="fcntl",
+        attribute=attribute,
+    )
+
+
+def _stdlib_fcntl_call_name(
+    node: ast.Call,
+    receiver: FlowValue,
+    env: Mapping[str, FlowValue],
+    *,
+    known_modules: frozenset[str],
+) -> str | None:
+    if "fcntl" in known_modules:
+        return None
+    if isinstance(node.func, ast.Attribute):
+        if node.func.attr in STDLIB_FCNTL_CALLS and _is_precise_fcntl_module(
+            receiver,
+            attribute=node.func.attr,
+        ):
+            return node.func.attr
+        return None
+    if not isinstance(node.func, ast.Name) or node.func.id not in env:
+        return None
+    value = env[node.func.id]
+    for name in STDLIB_FCNTL_CALLS:
+        if (
+            value.call_targets == {f"fcntl:{name}"}
+            and not value.origins
+            and not value.module_refs
+            and not value.class_targets
+            and not value.unknown_callable
+            and not value.closure_instances
+        ):
+            return name
+    return None
+
+
+def _flock_classification(
+    masks: frozenset[int],
+) -> tuple[Literal["read", "write", "read_write"], str] | None:
+    if masks == {8}:
+        return "read_write", "unlock"
+    if not masks or any(mask not in {1, 2, 5, 6} for mask in masks):
+        return None
+    lock_kinds = {mask & 3 for mask in masks}
+    if not lock_kinds <= {1, 2}:
+        return None
+    if lock_kinds == {1}:
+        mode: Literal["read", "write", "read_write"] = "read"
+        operation = "shared"
+    elif lock_kinds == {2}:
+        mode = "write"
+        operation = "exclusive"
+    else:
+        mode = "read_write"
+        operation = "shared_or_exclusive"
+    blocking_kinds = {bool(mask & 4) for mask in masks}
+    if blocking_kinds == {True}:
+        operation = f"{operation}_nonblocking"
+    elif len(blocking_kinds) == 2:
+        operation = f"{operation}_maybe_nonblocking"
+    return mode, operation
+
+
+def _flock_operation_reason(
+    expression: ast.expr | None,
+    value: FlowValue,
+) -> tuple[
+    tuple[Literal["read", "write", "read_write"], str] | None,
+    str | None,
+]:
+    masks = fcntl_lock_masks(value)
+    if masks is not None:
+        classification = _flock_classification(masks)
+        if classification is not None:
+            return classification, None
+        return None, "invalid_flock_operation"
+    if isinstance(expression, ast.Constant):
+        return None, "invalid_flock_operation"
+    non_fcntl_types = value.object_types.difference(
+        {FCNTL_UNRESOLVED_LOCK_OPERATION_OBJECT_TYPE}
+    )
+    if non_fcntl_types and not all(
+        object_type.startswith("stdlib-fcntl-lock-mask:")
+        for object_type in non_fcntl_types
+    ):
+        return None, "invalid_flock_operation"
+    if (
+        isinstance(expression, ast.BinOp)
+        and isinstance(expression.op, ast.BitOr)
+        and any(isinstance(child, ast.Constant) for child in ast.walk(expression))
+    ):
+        return None, "invalid_flock_operation"
+    return None, "dynamic_flock_operation"
+
+
+def _record_flock_escape(
+    engine: AccessEngine,
+    value: FlowValue,
+    node: ast.Call,
+    *,
+    operation: str,
+    reason: str,
+    module: str,
+    actor: str,
+    ordinal: int,
+) -> None:
+    if not value.has_origins:
+        return
+    engine.facts.record_escape(
+        value,
+        node=node,
+        actor=actor,
+        operation=operation,
+        sink="fcntl.flock",
+        reason=reason,
+        path=engine.paths[module],
+        line=int(node.lineno),
+        ordinal=ordinal,
+    )
+
+
+def _evaluate_flock(
+    engine: AccessEngine,
+    node: ast.Call,
+    argument_values: Sequence[FlowValue],
+    keyword_values: Mapping[str, FlowValue],
+    unknown_keyword_unpack: FlowValue,
+    *,
+    module: str,
+    actor: str,
+    ordinal: int,
+) -> FlowValue:
+    valid_signature = (
+        len(node.args) == 2
+        and not any(isinstance(argument, ast.Starred) for argument in node.args)
+        and not node.keywords
+    )
+    if not valid_signature:
+        descriptor_values: list[FlowValue] = []
+        if argument_values:
+            descriptor_values.append(argument_values[0])
+        if "fd" in keyword_values:
+            descriptor_values.append(keyword_values["fd"])
+        if _has_unknown_keyword_unpack(node):
+            descriptor_values.append(unknown_keyword_unpack)
+        descriptor = _merge_values(descriptor_values)
+        auxiliary = _merge_values(
+            [
+                *argument_values[1:],
+                *(
+                    value
+                    for name, value in keyword_values.items()
+                    if name != "fd"
+                ),
+            ]
+        )
+        _record_flock_escape(
+            engine,
+            descriptor,
+            node,
+            operation="fcntl.flock",
+            reason="invalid_or_ambiguous_flock_signature",
+            module=module,
+            actor=actor,
+            ordinal=ordinal,
+        )
+        _record_flock_escape(
+            engine,
+            auxiliary,
+            node,
+            operation="fcntl.flock.arguments",
+            reason="ambiguous_registered_origin_flock_arguments",
+            module=module,
+            actor=actor,
+            ordinal=ordinal,
+        )
+        return FlowValue()
+
+    descriptor = argument_values[0]
+    operation_value = argument_values[1]
+    _record_flock_escape(
+        engine,
+        operation_value,
+        node,
+        operation="fcntl.flock.arguments",
+        reason="ambiguous_registered_origin_flock_arguments",
+        module=module,
+        actor=actor,
+        ordinal=ordinal,
+    )
+    if not is_exact_flock_descriptor(descriptor):
+        _record_flock_escape(
+            engine,
+            descriptor,
+            node,
+            operation="fcntl.flock",
+            reason="ambiguous_registered_origin_flock_descriptor",
+            module=module,
+            actor=actor,
+            ordinal=ordinal,
+        )
+        return FlowValue()
+    operation_expression = node.args[1]
+    classification, reason = _flock_operation_reason(
+        operation_expression,
+        operation_value,
+    )
+    if classification is None:
+        assert reason is not None
+        _record_flock_escape(
+            engine,
+            descriptor,
+            node,
+            operation="fcntl.flock",
+            reason=reason,
+            module=module,
+            actor=actor,
+            ordinal=ordinal,
+        )
+        return FlowValue()
+    engine.facts.record_access(
+        descriptor,
+        node=node,
+        actor=actor,
+        mode=classification[0],
+        operation=f"fcntl.flock:{classification[1]}",
+        sink="fcntl.flock",
+        path=engine.paths[module],
+        line=int(node.lineno),
+        ordinal=ordinal,
+    )
+    return FlowValue()
 
 
 def _valid_sqlite_connect_signature(node: ast.Call) -> bool:
@@ -853,9 +1751,14 @@ def _evaluate_os_open(
             line=int(node.lineno),
             ordinal=ordinal,
         )
-    descriptor = path_value.bound("result:os.open:fd")
-    descriptor.object_types.add(OS_FD_OBJECT_TYPE)
-    return descriptor
+    return tag_os_fd(
+        path_value.bound("result:os.open:fd"),
+        identity=engine._runtime_object_identity(
+            node,
+            kind="fd",
+            actor=actor,
+        ),
+    )
 
 
 def _evaluate_os_move(
@@ -1634,6 +2537,7 @@ def evaluate_call(
 ) -> FlowValue:
     ordinal = int(call_ordinals.get(id(node), 0))
     receiver = FlowValue()
+    path_open = False
     if isinstance(node.func, ast.Attribute):
         receiver = engine._eval(
             node.func.value,
@@ -1646,6 +2550,7 @@ def evaluate_call(
         )
         method = node.func.attr
         path_receiver = is_path_receiver(receiver)
+        exact_path_receiver = is_exact_path_receiver(receiver)
         if path_receiver and method in {"rename", "replace"}:
             return _evaluate_path_move(
                 engine,
@@ -1686,33 +2591,8 @@ def evaluate_call(
                 ordinal=ordinal,
             )
             return FlowValue()
-        if path_receiver and method == "open":
-            mode = _open_mode(node, mode_index=0)
-            if isinstance(mode, str):
-                engine.facts.record_escape(
-                    receiver,
-                    node=node,
-                    actor=actor,
-                    operation="path.open",
-                    sink="pathlib.Path.open",
-                    reason=mode,
-                    path=engine.paths[module],
-                    line=int(node.lineno),
-                    ordinal=ordinal,
-                )
-            else:
-                engine.facts.record_access(
-                    receiver,
-                    node=node,
-                    actor=actor,
-                    mode=mode[0],
-                    operation=f"path.open:{mode[1]}",
-                    sink="pathlib.Path.open",
-                    path=engine.paths[module],
-                    line=int(node.lineno),
-                    ordinal=ordinal,
-                )
-            return FlowValue()
+        if exact_path_receiver and method == "open":
+            path_open = True
         if path_receiver and method in PATH_TRANSFORMS:
             return _evaluate_path_transform(
                 engine,
@@ -1767,7 +2647,7 @@ def evaluate_call(
     unknown_keyword_unpack = FlowValue()
     for keyword in node.keywords:
         if keyword.arg is not None:
-            keyword_values[keyword.arg] = engine._eval(
+            value = engine._eval(
                 keyword.value,
                 module=module,
                 actor=actor,
@@ -1776,6 +2656,10 @@ def evaluate_call(
                 object_env=object_env,
                 call_ordinals=call_ordinals,
             )
+            keyword_values[keyword.arg] = keyword_values.get(
+                keyword.arg,
+                FlowValue(),
+            ).merged(value)
             continue
         if isinstance(keyword.value, ast.Dict):
             literal_keys = all(
@@ -1811,7 +2695,10 @@ def evaluate_call(
                 if literal_keys:
                     assert isinstance(key, ast.Constant)
                     assert isinstance(key.value, str)
-                    keyword_values[key.value] = value
+                    keyword_values[key.value] = keyword_values.get(
+                        key.value,
+                        FlowValue(),
+                    ).merged(value)
                 else:
                     unpacked = unpacked.merged(key_value).merged(value)
             if not literal_keys:
@@ -1828,6 +2715,22 @@ def evaluate_call(
                 call_ordinals=call_ordinals,
             )
         )
+    dict_mutation = _evaluate_stdlib_module_dict_mutation_call(
+        engine,
+        node,
+        env=env,
+        object_env=object_env,
+    )
+    if dict_mutation is not None:
+        return dict_mutation
+    vars_call = _evaluate_stdlib_vars_call(
+        engine,
+        node,
+        argument_values,
+        env=env,
+    )
+    if vars_call is not None:
+        return vars_call
     builtin_mutation = _evaluate_builtin_stdlib_module_mutation(
         engine,
         node,
@@ -1840,6 +2743,39 @@ def evaluate_call(
     )
     if builtin_mutation is not None:
         return builtin_mutation
+    if path_open:
+        return _evaluate_file_open(
+            engine,
+            node,
+            argument_values,
+            keyword_values,
+            unknown_keyword_unpack,
+            kind="path",
+            receiver=receiver,
+            module=module,
+            actor=actor,
+            ordinal=ordinal,
+        )
+    if file_handle_kind(receiver) == "file" and isinstance(
+        node.func,
+        ast.Attribute,
+    ):
+        file_result = _evaluate_file_handle_call(
+            engine,
+            node,
+            receiver,
+            argument_values,
+            keyword_values,
+            unknown_keyword_unpack,
+            method=node.func.attr,
+            module=module,
+            actor=actor,
+            env=env,
+            object_env=object_env,
+            ordinal=ordinal,
+        )
+        if file_result is not None:
+            return file_result
     source_call_name = call_name(node.func)
     canonical_call_sink = _canonical_stdlib_call_sink(
         node,
@@ -1847,6 +2783,54 @@ def evaluate_call(
         env,
         known_modules=engine.known_modules,
     )
+    builtins_call = _stdlib_builtins_call_name(
+        node,
+        receiver,
+        env,
+        known_modules=engine.known_modules,
+    )
+    bare_builtin_open = _is_bare_builtin_open_reference(
+        engine,
+        node,
+        target=resolution.fallback_target,
+        actor=actor,
+        module=module,
+        env=env,
+    )
+    if canonical_call_sink is None and bare_builtin_open:
+        canonical_call_sink = "builtins.open"
+    if builtins_call == "open" or (
+        bare_builtin_open and _builtin_open_is_unmutated(env)
+    ):
+        return _evaluate_file_open(
+            engine,
+            node,
+            argument_values,
+            keyword_values,
+            unknown_keyword_unpack,
+            kind="builtin",
+            receiver=receiver,
+            module=module,
+            actor=actor,
+            ordinal=ordinal,
+        )
+    fcntl_call = _stdlib_fcntl_call_name(
+        node,
+        receiver,
+        env,
+        known_modules=engine.known_modules,
+    )
+    if fcntl_call == "flock":
+        return _evaluate_flock(
+            engine,
+            node,
+            argument_values,
+            keyword_values,
+            unknown_keyword_unpack,
+            module=module,
+            actor=actor,
+            ordinal=ordinal,
+        )
     sqlite3_call = _stdlib_sqlite3_call_name(
         node,
         receiver,
@@ -1901,6 +2885,19 @@ def evaluate_call(
             env=env,
             ordinal=ordinal,
         )
+    if os_call == "fdopen":
+        return _evaluate_file_open(
+            engine,
+            node,
+            argument_values,
+            keyword_values,
+            unknown_keyword_unpack,
+            kind="fdopen",
+            receiver=receiver,
+            module=module,
+            actor=actor,
+            ordinal=ordinal,
+        )
     if os_call in {"rename", "replace"}:
         return _evaluate_os_move(
             engine,
@@ -1932,6 +2929,8 @@ def evaluate_call(
         and node.func.value.id in env
     ):
         authoritative_base_value = env[node.func.value.id]
+    if authoritative_value is not None and authoritative_value.has_origins:
+        escaped = escaped.merged(authoritative_value)
     known_class_targets = (
         tuple(sorted(authoritative_value.class_targets))
         if authoritative_value is not None
@@ -2038,6 +3037,7 @@ def evaluate_call(
                     env[name]
                     for name in info.referenced_names | info.nonlocal_names
                     if name in env
+                    and not _stdlib_reference_is_read_only(info, name)
                 ),
             ]
             _taint_callable_stdlib_modules(
@@ -2146,62 +3146,23 @@ def evaluate_call(
                 )
             if has_unknown:
                 returned = returned.merged(FlowValue(unknown_callable=True))
+            engine._contaminate_runtime_objects(
+                env,
+                object_env,
+                [
+                    receiver,
+                    *argument_values,
+                    *keyword_values.values(),
+                    unknown_keyword_unpack,
+                    *(
+                        [authoritative_value]
+                        if authoritative_value is not None
+                        else []
+                    ),
+                ],
+            )
         return returned
     target = resolution.fallback_target
-    if _is_builtin_open(
-        engine,
-        node,
-        target=target,
-        actor=actor,
-        module=module,
-        env=env,
-    ):
-        if unknown_keyword_unpack.has_origins:
-            engine.facts.record_escape(
-                unknown_keyword_unpack,
-                node=node,
-                actor=actor,
-                operation=f"call:{source_call_name or '<dynamic>'}",
-                sink=canonical_call_sink
-                or target
-                or source_call_name
-                or "<dynamic>",
-                reason="registered_locator_to_unknown_callee",
-                path=engine.paths[module],
-                line=int(node.lineno),
-                ordinal=ordinal,
-            )
-        origin = (
-            argument_values[0]
-            if argument_values
-            else keyword_values.get("file", FlowValue())
-        )
-        mode = _open_mode(node, mode_index=1)
-        if origin.has_origins and isinstance(mode, str):
-            engine.facts.record_escape(
-                origin,
-                node=node,
-                actor=actor,
-                operation="builtin.open",
-                sink="builtins.open",
-                reason=mode,
-                path=engine.paths[module],
-                line=int(node.lineno),
-                ordinal=ordinal,
-            )
-        elif origin.has_origins:
-            engine.facts.record_access(
-                origin,
-                node=node,
-                actor=actor,
-                mode=mode[0],
-                operation=f"builtin.open:{mode[1]}",
-                sink="builtins.open",
-                path=engine.paths[module],
-                line=int(node.lineno),
-                ordinal=ordinal,
-            )
-        return FlowValue()
     _taint_callable_stdlib_modules(
         engine,
         [
@@ -2236,10 +3197,25 @@ def evaluate_call(
             line=int(node.lineno),
             ordinal=ordinal,
         )
+    engine._contaminate_runtime_objects(
+        env,
+        object_env,
+        [
+            receiver,
+            *argument_values,
+            *keyword_values.values(),
+            unknown_keyword_unpack,
+            *(
+                [authoritative_value]
+                if authoritative_value is not None
+                else []
+            ),
+        ],
+    )
     return FlowValue(unknown_callable=True)
 
 
-def _is_builtin_open(
+def _is_bare_builtin_open_reference(
     engine: AccessEngine,
     node: ast.Call,
     *,
@@ -2248,14 +3224,29 @@ def _is_builtin_open(
     module: str,
     env: dict[str, FlowValue],
 ) -> bool:
-    if target == "builtins:open":
-        return True
-    if not isinstance(node.func, ast.Name) or node.func.id != "open" or target:
+    if not isinstance(node.func, ast.Name) or node.func.id != "open":
+        return False
+    if target not in {"", "builtins:open"}:
         return False
     if "open" in env or "open" in engine.imported_symbols.get(module, {}):
         return False
     info = engine.functions.get(actor)
-    return info is None or "open" not in info.parameters
+    return info is None or not (
+        "open" in info.parameters or "open" in info.local_names
+    )
+
+
+def _builtin_open_is_unmutated(env: Mapping[str, FlowValue]) -> bool:
+    marker = stdlib_module_mutation_marker("builtins", "open")
+    wildcard = stdlib_module_mutation_marker(
+        "builtins",
+        STDLIB_MODULE_WILDCARD_ATTRIBUTE,
+    )
+    return not any(
+        value.module_refs == {"builtins"}
+        and bool({marker, wildcard}.intersection(value.object_types))
+        for value in env.values()
+    )
 
 
 __all__ = ["AccessEngine", "evaluate_call"]
