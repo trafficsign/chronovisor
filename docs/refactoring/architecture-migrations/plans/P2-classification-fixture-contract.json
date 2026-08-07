@@ -1,6 +1,26 @@
 {
   "campaign": "P2",
   "h0_parent_commit": "602ab1efd46b3c74447887cf430cc77962fec7bd",
+  "history": {
+    "evidence_hardening_changed_paths": [
+      "docs/refactoring/architecture-migrations/plans/P2-classification-fixture-contract.json",
+      "scripts/architecture_migrations.py",
+      "tests/test_architecture_migrations.py"
+    ],
+    "frozen_source_parent": "602ab1efd46b3c74447887cf430cc77962fec7bd",
+    "gate_hygiene_changed_paths": [
+      "tests/test_architecture_baseline.py"
+    ],
+    "gate_hygiene_commit": "f1208ee3914e7ec402b84ebda16423f57065e041",
+    "h0_seed_added_paths": [
+      "docs/refactoring/architecture-migrations/plans/P2-classification-fixture-contract.json",
+      "scripts/architecture_migrations.py",
+      "src/chronovisor/classification/classification_fixture_contract.py",
+      "tests/test_architecture_migrations.py",
+      "tests/test_classification_fixture_contract.py"
+    ],
+    "h0_seed_commit": "6cbcd1e617c631bee23de0cf8c6597f324485205"
+  },
   "inputs": {
     "baseline": {
       "blob_oid": "83a022cd8e4a8b9c9cbb1a64da68d8b164a7aa54",
@@ -72,7 +92,7 @@
       }
     }
   },
-  "plan_sha256": "7c09389672f176b825744b6c390174ee774fd7066f29edb2902df2f854f0a54b",
+  "plan_sha256": "bedd3ad58736a1489115a76ef5638cc9adf522c687226f7c0a6156e20868ae69",
   "production_contract": {
     "forbidden_import_prefixes": [
       "chronovisor.lab"
@@ -132,7 +152,13 @@
       },
       "path": "src/chronovisor/classification/classification_resolver.py",
       "semantic_id": "arch:0d799ce1e29887c64caf095e2640a148aa9e90326aaef4c45a476ae13c33e85b",
-      "source_module": "chronovisor.classification.classification_resolver"
+      "source_module": "chronovisor.classification.classification_resolver",
+      "source_transform": {
+        "h0_sha256": "7b65c798842ce4c3269028664fd42437835f0f38a5cdbf92b2c84588d0c090ed",
+        "h1_sha256": "cfa318c7a235168914209d2d4bbf860ac52e1c65bcb1c965d34fa18b91db57ea",
+        "new_snippet": "from chronovisor.classification.classification_fixture_contract import inference_dto\n",
+        "old_snippet": "from chronovisor.lab.classification_fixture_set import inference_dto\n"
+      }
     },
     {
       "new_import": {
@@ -163,7 +189,13 @@
       },
       "path": "src/chronovisor/classification/classification_bundle.py",
       "semantic_id": "arch:7d200838738a191b653ce5829735d820b786746b2a6329bf9cc98610ff57dd32",
-      "source_module": "chronovisor.classification.classification_bundle"
+      "source_module": "chronovisor.classification.classification_bundle",
+      "source_transform": {
+        "h0_sha256": "52748c3d51a8f282ee4841371d83d2ebfde1452615a74dc8ca3994e6fcb33f27",
+        "h1_sha256": "0f93ca7c9bbadee526779968682a1f094cedd4a3b86dbb80971b21f48e6a72c4",
+        "new_snippet": "from chronovisor.classification.classification_fixture_contract import (\n    DISABLED_BASELINE_SCHEMA,\n    sha256_bytes,\n    sha256_file,\n)\n",
+        "old_snippet": "from chronovisor.lab.classification_fixture_set import (\n    DISABLED_BASELINE_SCHEMA,\n    sha256_bytes,\n    sha256_file,\n)\n"
+      }
     },
     {
       "new_import": {
@@ -190,7 +222,13 @@
       },
       "path": "src/chronovisor/classification/classification_retention.py",
       "semantic_id": "arch:a36a5c65819a0aab93f8c971dee29537ef65da12069950b9fdab4b270bb9c9d7",
-      "source_module": "chronovisor.classification.classification_retention"
+      "source_module": "chronovisor.classification.classification_retention",
+      "source_transform": {
+        "h0_sha256": "b160333fbde80d5e75beb1964cfc54c5d203c15eb0522b99ae5c2c980ebbb37c",
+        "h1_sha256": "89b5c5b13a371ecb6e7091d1a9a0555880ae85b896323ff61f3978f77692c183",
+        "new_snippet": "from chronovisor.classification.classification_fixture_contract import (\n    sha256_bytes,\n    sha256_file,\n)\n",
+        "old_snippet": "from chronovisor.lab.classification_fixture_set import sha256_bytes, sha256_file\n"
+      }
     },
     {
       "new_import": {
@@ -217,7 +255,13 @@
       },
       "path": "src/chronovisor/classification/classification_library_sources.py",
       "semantic_id": "arch:c7056bd3c53d85c0dfb27edae2aead5bac51065e169b7b87ef3f21b4363d3ca2",
-      "source_module": "chronovisor.classification.classification_library_sources"
+      "source_module": "chronovisor.classification.classification_library_sources",
+      "source_transform": {
+        "h0_sha256": "a8a59f9da35f1d06b60caf0f39583426dc7940568f6505d465cb21e3d29d0d9b",
+        "h1_sha256": "a6dc204fa813f97f21e5c810d8da1a34d6392eecb46d2227a61284b4a2e4e62b",
+        "new_snippet": "from chronovisor.classification.classification_fixture_contract import (\n    sha256_bytes,\n    sha256_file,\n)\n",
+        "old_snippet": "from chronovisor.lab.classification_fixture_set import sha256_bytes, sha256_file\n"
+      }
     },
     {
       "new_import": {
@@ -244,7 +288,13 @@
       },
       "path": "src/chronovisor/classification/classification_evidence_judgment.py",
       "semantic_id": "arch:e821d535f1969c514f6f49a2338ec36e382d3a6b82040c593bf28f580d86c97d",
-      "source_module": "chronovisor.classification.classification_evidence_judgment"
+      "source_module": "chronovisor.classification.classification_evidence_judgment",
+      "source_transform": {
+        "h0_sha256": "2e86604c7285f76e75b5b5be5ca8177fda12527f68488c275cafa4fc93da4e7c",
+        "h1_sha256": "b34864549a5be45620c14171aa61cf9f5c23060d6f02c965a1806ce407a81f41",
+        "new_snippet": "from chronovisor.classification.classification_fixture_contract import (\n    sha256_bytes,\n    write_jsonl as _write_jsonl,\n)\n",
+        "old_snippet": "from chronovisor.lab.classification_fixture_set import _write_jsonl, sha256_bytes\n"
+      }
     }
   ]
 }

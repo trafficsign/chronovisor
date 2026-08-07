@@ -5,8 +5,10 @@ from __future__ import annotations
 
 import argparse
 import ast
+import copy
 import hashlib
 import json
+import os
 import re
 import subprocess
 from collections.abc import Mapping, Sequence
@@ -18,6 +20,8 @@ RECEIPT_SCHEMA = "chronovisor.architecture-migration-receipt.v1"
 MIGRATION_ID = "P2-classification-fixture-contract"
 FROZEN_SOURCE_HEAD = "d404a6b20d00e3bcd1d4cdb89edfa5a718c51833"
 H0_PARENT_COMMIT = "602ab1efd46b3c74447887cf430cc77962fec7bd"
+H0_SEED_COMMIT = "6cbcd1e617c631bee23de0cf8c6597f324485205"
+GATE_HYGIENE_COMMIT = "f1208ee3914e7ec402b84ebda16423f57065e041"
 PLAN_PATH = Path(
     "docs/refactoring/architecture-migrations/plans/"
     "P2-classification-fixture-contract.json"
@@ -31,9 +35,7 @@ BASELINE_PATH = Path("docs/refactoring/architecture-exception-baseline.json")
 CONTRACT_PATH = Path(
     "src/chronovisor/classification/classification_fixture_contract.py"
 )
-CONTRACT_MODULE = (
-    "chronovisor.classification.classification_fixture_contract"
-)
+CONTRACT_MODULE = "chronovisor.classification.classification_fixture_contract"
 PRIVATE_EXCEPTION_ID = (
     "arch:97b784f974ebdf78ae0226731f9b421e381ac04bad98dd104435367c618f52e9"
 )
@@ -74,6 +76,16 @@ H2_PATHS = tuple(
             BASELINE_PATH.as_posix(),
             LEDGER_PATH.as_posix(),
             RECEIPT_PATH.as_posix(),
+        }
+    )
+)
+GATE_HYGIENE_PATHS = ("tests/test_architecture_baseline.py",)
+EVIDENCE_HARDENING_PATHS = tuple(
+    sorted(
+        {
+            PLAN_PATH.as_posix(),
+            "scripts/architecture_migrations.py",
+            "tests/test_architecture_migrations.py",
         }
     )
 )
@@ -156,6 +168,21 @@ def _canonical_json_bytes(payload: Any) -> bytes:
     return (encoded + "\n").encode("utf-8")
 
 
+def _document_json_bytes(payload: Any) -> bytes:
+    """Encode ledger documents while preserving their established key order."""
+
+    try:
+        encoded = json.dumps(
+            payload,
+            ensure_ascii=False,
+            indent=2,
+            allow_nan=False,
+        )
+    except (TypeError, ValueError) as exc:
+        raise MigrationValidationError(f"payload is not strict JSON: {exc}") from exc
+    return (encoded + "\n").encode("utf-8")
+
+
 def _seal(payload: Mapping[str, Any], field: str) -> str:
     unsigned = {key: value for key, value in payload.items() if key != field}
     compact = json.dumps(
@@ -204,16 +231,23 @@ def _relative_path(value: Any, *, context: str) -> str:
     if not isinstance(value, str) or not value:
         raise MigrationValidationError(f"{context} must be a non-empty path")
     path = PurePosixPath(value)
-    if path.is_absolute() or ".." in path.parts or path.as_posix() != value:
-        raise MigrationValidationError(f"{context} must be canonical repo-relative path")
+    if (
+        path.is_absolute()
+        or value == "."
+        or ".." in path.parts
+        or path.as_posix() != value
+    ):
+        raise MigrationValidationError(
+            f"{context} must be canonical repo-relative path"
+        )
     return value
 
 
 def _load_canonical(path: Path, *, seal_field: str) -> dict[str, Any]:
     try:
         raw = path.read_bytes()
-        payload = json.loads(raw)
-    except (OSError, json.JSONDecodeError) as exc:
+        payload = _decode_json(raw, context=str(path))
+    except OSError as exc:
         raise MigrationValidationError(f"cannot load {path}: {exc}") from exc
     artifact = _object(payload, context=str(path))
     if raw != _canonical_json_bytes(artifact):
@@ -228,12 +262,16 @@ def _load_canonical(path: Path, *, seal_field: str) -> dict[str, Any]:
 
 
 def _git(root: Path, *args: str) -> bytes:
+    env = {
+        key: value for key, value in os.environ.items() if not key.startswith("GIT_")
+    }
     try:
         return subprocess.run(
-            ["git", *args],
+            ["git", "--no-replace-objects", "--literal-pathspecs", *args],
             cwd=root,
             check=True,
             capture_output=True,
+            env=env,
         ).stdout
     except subprocess.CalledProcessError as exc:
         detail = exc.stderr.decode("utf-8", errors="replace").strip()
@@ -243,32 +281,98 @@ def _git(root: Path, *args: str) -> bytes:
 
 
 def _commit(root: Path, revision: str) -> str:
-    resolved = _git(root, "rev-parse", "--verify", f"{revision}^{{commit}}").decode().strip()
+    if not isinstance(revision, str) or not _COMMIT_RE.fullmatch(revision):
+        raise MigrationValidationError(
+            "revision must be a lowercase full 40-character commit SHA"
+        )
+    resolved = (
+        _git(
+            root,
+            "rev-parse",
+            "--verify",
+            "--end-of-options",
+            f"{revision}^{{commit}}",
+        )
+        .decode()
+        .strip()
+    )
     if not _COMMIT_RE.fullmatch(resolved):
         raise MigrationValidationError(f"noncanonical commit identity: {resolved!r}")
+    if resolved != revision:
+        raise MigrationValidationError("resolved commit identity differs from revision")
     return resolved
 
 
+def _tree_entry(root: Path, commit: str, path: str) -> tuple[str, str]:
+    canonical = _relative_path(path, context="Git tree path")
+    output = _git(root, "ls-tree", "-z", "--full-tree", commit, "--", canonical)
+    records = [record for record in output.split(b"\0") if record]
+    if len(records) != 1 or b"\t" not in records[0]:
+        raise MigrationValidationError(
+            f"{canonical} is not one Git tree entry at {commit}"
+        )
+    metadata, raw_path = records[0].split(b"\t", 1)
+    try:
+        mode, object_type, oid = metadata.decode("ascii").split()
+        recorded_path = raw_path.decode("utf-8")
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise MigrationValidationError(
+            f"malformed Git tree entry for {canonical} at {commit}"
+        ) from exc
+    if recorded_path != canonical:
+        raise MigrationValidationError(f"Git tree path mismatch for {canonical}")
+    if mode != "100644" or object_type != "blob":
+        raise MigrationValidationError(
+            f"{canonical} must be an exact 100644 blob at {commit}"
+        )
+    if not _BLOB_RE.fullmatch(oid):
+        raise MigrationValidationError(
+            f"invalid blob identity for {canonical}: {oid!r}"
+        )
+    return mode, oid
+
+
 def _git_file(root: Path, commit: str, path: str) -> bytes:
-    return _git(root, "show", f"{commit}:{path}")
+    _mode, oid = _tree_entry(root, commit, path)
+    return _git(root, "cat-file", "blob", oid)
 
 
 def _blob_oid(root: Path, commit: str, path: str) -> str:
-    output = _git(root, "ls-tree", commit, "--", path).decode().strip()
-    fields = output.split(maxsplit=3)
-    if len(fields) != 4 or fields[1] != "blob" or fields[3] != path:
-        raise MigrationValidationError(f"{path} is not one Git blob at {commit}")
-    oid = fields[2]
-    if not _BLOB_RE.fullmatch(oid):
-        raise MigrationValidationError(f"invalid blob identity for {path}: {oid!r}")
+    _mode, oid = _tree_entry(root, commit, path)
     return oid
 
 
-def _json_bytes(raw: bytes, *, context: str) -> dict[str, Any]:
+def _reject_constant(value: str) -> Any:
+    raise MigrationValidationError(f"non-finite JSON number is forbidden: {value}")
+
+
+def _reject_duplicate_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    payload: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in payload:
+            raise MigrationValidationError(f"duplicate JSON key is forbidden: {key}")
+        payload[key] = value
+    return payload
+
+
+def _decode_json(raw: bytes, *, context: str) -> Any:
     try:
-        return _object(json.loads(raw), context=context)
-    except json.JSONDecodeError as exc:
+        return json.loads(
+            raw,
+            object_pairs_hook=_reject_duplicate_pairs,
+            parse_constant=_reject_constant,
+        )
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
         raise MigrationValidationError(f"invalid JSON at {context}: {exc}") from exc
+
+
+def _json_bytes(
+    raw: bytes, *, context: str, canonical_document: bool = False
+) -> dict[str, Any]:
+    payload = _object(_decode_json(raw, context=context), context=context)
+    if canonical_document and raw != _document_json_bytes(payload):
+        raise MigrationValidationError(f"{context} is not canonical document JSON")
+    return payload
 
 
 def _single_parent(root: Path, commit: str) -> str:
@@ -279,17 +383,53 @@ def _single_parent(root: Path, commit: str) -> str:
     return parts[1]
 
 
-def _changed_paths(root: Path, parent: str, child: str) -> tuple[str, ...]:
-    output = _git(
+def _changed_entries(root: Path, parent: str, child: str) -> dict[str, str]:
+    raw = _git(
         root,
         "diff-tree",
         "--no-commit-id",
-        "--name-only",
+        "--name-status",
+        "-z",
+        "--no-renames",
         "-r",
         parent,
         child,
-    ).decode()
-    return tuple(sorted(line for line in output.splitlines() if line))
+    )
+    fields = [field for field in raw.split(b"\0") if field]
+    if len(fields) % 2:
+        raise MigrationValidationError("malformed Git diff-tree output")
+    entries: dict[str, str] = {}
+    for index in range(0, len(fields), 2):
+        try:
+            status = fields[index].decode("ascii")
+            path = fields[index + 1].decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise MigrationValidationError("noncanonical Git diff path") from exc
+        _relative_path(path, context="Git diff path")
+        if status not in {"A", "M", "D"} or path in entries:
+            raise MigrationValidationError("unsupported or duplicate Git diff entry")
+        entries[path] = status
+    return entries
+
+
+def _require_transition(
+    root: Path,
+    parent: str,
+    child: str,
+    expected: Mapping[str, str],
+    *,
+    context: str,
+) -> None:
+    actual = _changed_entries(root, parent, child)
+    if actual != dict(expected):
+        raise MigrationValidationError(
+            f"{context} changed path/status scope mismatch: {actual}"
+        )
+    for path, status in actual.items():
+        if status != "A":
+            _tree_entry(root, parent, path)
+        if status != "D":
+            _tree_entry(root, child, path)
 
 
 def _import_rows(raw: bytes, *, path: str) -> list[dict[str, Any]]:
@@ -344,21 +484,29 @@ def _find_rows(ledger: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, Any
     site_by_id: dict[str, dict[str, Any]] = {}
     for row in exceptions:
         semantic_id = row.get("semantic_id")
-        if isinstance(semantic_id, str):
-            if semantic_id in exception_by_id:
-                raise MigrationValidationError(f"duplicate ledger exception {semantic_id}")
-            exception_by_id[semantic_id] = row
+        if not isinstance(semantic_id, str) or not _ARCH_ID_RE.fullmatch(semantic_id):
+            raise MigrationValidationError(
+                "invalid or missing ledger exception semantic_id"
+            )
+        if semantic_id in exception_by_id:
+            raise MigrationValidationError(f"duplicate ledger exception {semantic_id}")
+        exception_by_id[semantic_id] = row
         sites = row.get("sites", [])
-        if isinstance(sites, list):
-            for site in sites:
-                if not isinstance(site, dict) or not isinstance(
-                    site.get("semantic_id"), str
-                ):
-                    raise MigrationValidationError("invalid ledger site")
-                site_id = str(site["semantic_id"])
-                if site_id in site_by_id:
-                    raise MigrationValidationError(f"duplicate ledger site {site_id}")
-                site_by_id[site_id] = site
+        if not isinstance(sites, list):
+            raise MigrationValidationError(
+                f"ledger sites must be a list: {semantic_id}"
+            )
+        for site in sites:
+            if (
+                not isinstance(site, dict)
+                or not isinstance(site.get("semantic_id"), str)
+                or not _ARCH_ID_RE.fullmatch(str(site["semantic_id"]))
+            ):
+                raise MigrationValidationError("invalid ledger site")
+            site_id = str(site["semantic_id"])
+            if site_id in site_by_id:
+                raise MigrationValidationError(f"duplicate ledger site {site_id}")
+            site_by_id[site_id] = site
     return exception_by_id, site_by_id
 
 
@@ -396,6 +544,7 @@ def load_plan(path: Path) -> dict[str, Any]:
             "migration_id",
             "campaign",
             "h0_parent_commit",
+            "history",
             "inputs",
             "production_contract",
             "sites",
@@ -415,6 +564,30 @@ def load_plan(path: Path) -> dict[str, Any]:
         raise MigrationValidationError("plan.h0_parent_commit is invalid")
     if plan["h0_parent_commit"] != H0_PARENT_COMMIT:
         raise MigrationValidationError("plan H0 parent commit drift")
+
+    history = _object(plan["history"], context="plan.history")
+    _require_keys(
+        history,
+        {
+            "frozen_source_parent",
+            "h0_seed_commit",
+            "h0_seed_added_paths",
+            "gate_hygiene_commit",
+            "gate_hygiene_changed_paths",
+            "evidence_hardening_changed_paths",
+        },
+        context="plan.history",
+    )
+    expected_history = {
+        "frozen_source_parent": H0_PARENT_COMMIT,
+        "h0_seed_commit": H0_SEED_COMMIT,
+        "h0_seed_added_paths": list(H0_PATHS),
+        "gate_hygiene_commit": GATE_HYGIENE_COMMIT,
+        "gate_hygiene_changed_paths": list(GATE_HYGIENE_PATHS),
+        "evidence_hardening_changed_paths": list(EVIDENCE_HARDENING_PATHS),
+    }
+    if history != expected_history:
+        raise MigrationValidationError("plan history chain drift")
 
     inputs = _object(plan["inputs"], context="plan.inputs")
     _require_keys(inputs, {"baseline", "ledger"}, context="plan.inputs")
@@ -451,11 +624,15 @@ def load_plan(path: Path) -> dict[str, Any]:
         context="production_contract.forbidden_import_prefixes",
     )
     if forbidden != ["chronovisor.lab"]:
-        raise MigrationValidationError("production contract must forbid chronovisor.lab")
+        raise MigrationValidationError(
+            "production contract must forbid chronovisor.lab"
+        )
 
     sites = _objects(plan["sites"], context="plan.sites")
     if [row.get("semantic_id") for row in sites] != list(MIGRATED_SITE_IDS):
-        raise MigrationValidationError("plan sites are missing, duplicated, or reordered")
+        raise MigrationValidationError(
+            "plan sites are missing, duplicated, or reordered"
+        )
     if [row.get("path") for row in sorted(sites, key=lambda row: row["path"])] != list(
         H1_PATHS
     ):
@@ -463,7 +640,14 @@ def load_plan(path: Path) -> dict[str, Any]:
     for site in sites:
         _require_keys(
             site,
-            {"semantic_id", "path", "source_module", "old_import", "new_import"},
+            {
+                "semantic_id",
+                "path",
+                "source_module",
+                "old_import",
+                "new_import",
+                "source_transform",
+            },
             context=f"site {site.get('semantic_id')}",
         )
         site_id = site["semantic_id"]
@@ -508,6 +692,37 @@ def load_plan(path: Path) -> dict[str, Any]:
             raise MigrationValidationError(f"site {site_id} new symbols drift")
         if site["new_import"]["local_names"] != EXPECTED_LOCAL_NAMES[site_id]:
             raise MigrationValidationError(f"site {site_id} local binding drift")
+        transform = _object(
+            site["source_transform"], context=f"site {site_id}.source_transform"
+        )
+        _require_keys(
+            transform,
+            {"h0_sha256", "h1_sha256", "old_snippet", "new_snippet"},
+            context=f"site {site_id}.source_transform",
+        )
+        for field in ("h0_sha256", "h1_sha256"):
+            if not isinstance(transform[field], str) or not _HEX_SHA_RE.fullmatch(
+                transform[field]
+            ):
+                raise MigrationValidationError(
+                    f"site {site_id} has invalid source {field}"
+                )
+        for field in ("old_snippet", "new_snippet"):
+            snippet = transform[field]
+            if not isinstance(snippet, str) or not snippet.endswith("\n"):
+                raise MigrationValidationError(
+                    f"site {site_id} has invalid source {field}"
+                )
+        if transform["old_snippet"] == transform["new_snippet"]:
+            raise MigrationValidationError(f"site {site_id} source transform is empty")
+        if _import_rows(
+            transform["old_snippet"].encode("utf-8"), path=f"{site_id}:old"
+        ) != [site["old_import"]]:
+            raise MigrationValidationError(f"site {site_id} old source snippet drift")
+        if _import_rows(
+            transform["new_snippet"].encode("utf-8"), path=f"{site_id}:new"
+        ) != [site["new_import"]]:
+            raise MigrationValidationError(f"site {site_id} new source snippet drift")
 
     retirement = _object(plan["retirement_policy"], context="retirement_policy")
     _require_keys(
@@ -544,9 +759,10 @@ def load_plan(path: Path) -> dict[str, Any]:
         context="retirement_policy.p3_retain_site_ids",
     ) != [PROVIDER_SITE_ID]:
         raise MigrationValidationError("P3 provider retention drift")
-    if not isinstance(retirement["early_retirement_reason"], str) or not retirement[
-        "early_retirement_reason"
-    ].strip():
+    if (
+        not isinstance(retirement["early_retirement_reason"], str)
+        or not retirement["early_retirement_reason"].strip()
+    ):
         raise MigrationValidationError("early retirement reason is required")
 
     phases = _object(plan["phases"], context="plan.phases")
@@ -606,12 +822,35 @@ def _selected_counts(active: Mapping[str, Any]) -> dict[str, Any]:
     return {key: active.get(key) for key in EXPECTED_H0_ACTIVE_COUNTS}
 
 
+def _validate_fixed_history(root: Path, plan: Mapping[str, Any]) -> None:
+    source_parent = _commit(root, str(plan["h0_parent_commit"]))
+    h0_seed = _commit(root, str(plan["history"]["h0_seed_commit"]))
+    gate_hygiene = _commit(root, str(plan["history"]["gate_hygiene_commit"]))
+    if _single_parent(root, h0_seed) != source_parent:
+        raise MigrationValidationError("H0 seed parent identity drift")
+    _require_transition(
+        root,
+        source_parent,
+        h0_seed,
+        {path: "A" for path in H0_PATHS},
+        context="source-parent->H0-seed",
+    )
+    if _single_parent(root, gate_hygiene) != h0_seed:
+        raise MigrationValidationError("gate hygiene parent identity drift")
+    _require_transition(
+        root,
+        h0_seed,
+        gate_hygiene,
+        {path: "M" for path in GATE_HYGIENE_PATHS},
+        context="H0-seed->gate-hygiene",
+    )
+
+
 def validate_plan(root: Path, plan: Mapping[str, Any]) -> dict[str, Any]:
     """Validate H0 inputs and legacy callsites from the sealed parent commit."""
 
     commit = _commit(root, str(plan["h0_parent_commit"]))
-    if commit != plan["h0_parent_commit"]:
-        raise MigrationValidationError("H0 parent must be a full commit identity")
+    _validate_fixed_history(root, plan)
     inputs = _object(plan["inputs"], context="plan.inputs")
     baseline_raw = _validate_artifact_binding(
         root,
@@ -697,16 +936,21 @@ def validate_plan(root: Path, plan: Mapping[str, Any]) -> dict[str, Any]:
         if recorded is None:
             raise MigrationValidationError(f"sealed site is absent: {site_id}")
         if recorded.get("source_module") != planned["source_module"]:
-            raise MigrationValidationError(f"sealed site source module drift: {site_id}")
+            raise MigrationValidationError(
+                f"sealed site source module drift: {site_id}"
+            )
         old_import = planned["old_import"]
         if sorted(recorded.get("symbols", [])) != old_import["symbols"]:
             raise MigrationValidationError(f"sealed site symbols drift: {site_id}")
         if recorded.get("target_module") != old_import["target_module"]:
             raise MigrationValidationError(f"sealed site target drift: {site_id}")
     _validate_import_state(root, commit, sites, state="old_import")
+    _expected_h1_sources(root, plan)
     return {
         "migration_id": MIGRATION_ID,
         "h0_parent_commit": commit,
+        "h0_seed_commit": H0_SEED_COMMIT,
+        "gate_hygiene_commit": GATE_HYGIENE_COMMIT,
         "site_count": len(sites),
         "state": "valid-h0-plan",
     }
@@ -717,7 +961,9 @@ def _validate_contract_source(root: Path, commit: str, plan: Mapping[str, Any]) 
     try:
         tree = ast.parse(raw.decode("utf-8"), filename=CONTRACT_PATH.as_posix())
     except (UnicodeDecodeError, SyntaxError) as exc:
-        raise MigrationValidationError(f"production contract cannot be parsed: {exc}") from exc
+        raise MigrationValidationError(
+            f"production contract cannot be parsed: {exc}"
+        ) from exc
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             targets = [alias.name for alias in node.names]
@@ -725,8 +971,13 @@ def _validate_contract_source(root: Path, commit: str, plan: Mapping[str, Any]) 
             targets = [node.module]
         else:
             continue
-        if any(target == "chronovisor.lab" or target.startswith("chronovisor.lab.") for target in targets):
-            raise MigrationValidationError("production contract imports chronovisor.lab")
+        if any(
+            target == "chronovisor.lab" or target.startswith("chronovisor.lab.")
+            for target in targets
+        ):
+            raise MigrationValidationError(
+                "production contract imports chronovisor.lab"
+            )
     namespace: dict[str, Any] = {}
     for node in tree.body:
         if isinstance(node, (ast.FunctionDef, ast.ClassDef)):
@@ -744,37 +995,86 @@ def _validate_contract_source(root: Path, commit: str, plan: Mapping[str, Any]) 
         raise MigrationValidationError(f"production contract lacks symbols: {missing}")
 
 
+def validate_history(
+    root: Path, plan: Mapping[str, Any], evidence_parent_revision: str
+) -> dict[str, Any]:
+    """Validate the fixed source/H0/B chain and exact evidence-hardening commit."""
+
+    validate_plan(root, plan)
+    evidence_parent = _commit(root, evidence_parent_revision)
+    if _single_parent(root, evidence_parent) != GATE_HYGIENE_COMMIT:
+        raise MigrationValidationError("evidence hardening parent identity drift")
+    _require_transition(
+        root,
+        GATE_HYGIENE_COMMIT,
+        evidence_parent,
+        {path: "M" for path in EVIDENCE_HARDENING_PATHS},
+        context="gate-hygiene->evidence-hardening",
+    )
+    if _git_file(root, evidence_parent, PLAN_PATH.as_posix()) != _canonical_json_bytes(
+        plan
+    ):
+        raise MigrationValidationError(
+            "evidence hardening committed plan differs from supplied plan"
+        )
+    _validate_contract_source(root, H0_SEED_COMMIT, plan)
+    return {
+        "migration_id": MIGRATION_ID,
+        "evidence_parent_commit": evidence_parent,
+        "state": "valid-evidence-history",
+    }
+
+
+def _expected_h1_sources(root: Path, plan: Mapping[str, Any]) -> dict[str, bytes]:
+    expected: dict[str, bytes] = {}
+    for site in _objects(plan["sites"], context="plan.sites"):
+        path = str(site["path"])
+        transform = _object(
+            site["source_transform"],
+            context=f"site {site['semantic_id']}.source_transform",
+        )
+        h0_raw = _git_file(root, H0_SEED_COMMIT, path)
+        if hashlib.sha256(h0_raw).hexdigest() != transform["h0_sha256"]:
+            raise MigrationValidationError(f"sealed H0 source digest drift: {path}")
+        old = str(transform["old_snippet"]).encode("utf-8")
+        new = str(transform["new_snippet"]).encode("utf-8")
+        if h0_raw.count(old) != 1:
+            raise MigrationValidationError(
+                f"sealed H0 source must contain one exact old snippet: {path}"
+            )
+        h1_raw = h0_raw.replace(old, new, 1)
+        if hashlib.sha256(h1_raw).hexdigest() != transform["h1_sha256"]:
+            raise MigrationValidationError(f"sealed H1 source digest drift: {path}")
+        if path in expected:
+            raise MigrationValidationError(f"duplicate H1 source path: {path}")
+        expected[path] = h1_raw
+    if tuple(sorted(expected)) != H1_PATHS:
+        raise MigrationValidationError("sealed H1 source path set drift")
+    return expected
+
+
 def validate_h1(
     root: Path, plan: Mapping[str, Any], h1_revision: str
 ) -> dict[str, Any]:
-    """Validate the exact additive H0 then exact five-file H1 transition."""
+    """Validate H1 as the exact five-source transform after the fixed C parent."""
 
-    validate_plan(root, plan)
     h1 = _commit(root, h1_revision)
-    h0 = _single_parent(root, h1)
-    parent = _single_parent(root, h0)
-    if parent != plan["h0_parent_commit"]:
-        raise MigrationValidationError("H1 is not the direct child of sealed H0")
-    if _changed_paths(root, parent, h0) != H0_PATHS:
-        raise MigrationValidationError("H0 commit path scope mismatch")
-    if _changed_paths(root, h0, h1) != H1_PATHS:
-        raise MigrationValidationError("H1 commit path scope mismatch")
-    if _git_file(root, h0, PLAN_PATH.as_posix()) != _canonical_json_bytes(plan):
-        raise MigrationValidationError("H0 committed plan differs from supplied plan")
-    _validate_contract_source(root, h0, plan)
-    if _git_file(root, h0, CONTRACT_PATH.as_posix()) != _git_file(
-        root, h1, CONTRACT_PATH.as_posix()
-    ):
-        raise MigrationValidationError("H1 changed the production contract")
-    sites = _objects(plan["sites"], context="plan.sites")
-    _validate_import_state(root, h0, sites, state="old_import")
-    _validate_import_state(root, h1, sites, state="new_import")
-    for path in (BASELINE_PATH.as_posix(), LEDGER_PATH.as_posix()):
-        if _git_file(root, h0, path) != _git_file(root, h1, path):
-            raise MigrationValidationError(f"H1 changed sealed ledger artifact: {path}")
+    evidence_parent = _single_parent(root, h1)
+    validate_history(root, plan, evidence_parent)
+    _require_transition(
+        root,
+        evidence_parent,
+        h1,
+        {path: "M" for path in H1_PATHS},
+        context="evidence-hardening->H1",
+    )
+    for path, expected_raw in _expected_h1_sources(root, plan).items():
+        if _git_file(root, h1, path) != expected_raw:
+            raise MigrationValidationError(f"H1 source bytes differ: {path}")
     return {
         "migration_id": MIGRATION_ID,
-        "h0_commit": h0,
+        "h0_commit": H0_SEED_COMMIT,
+        "evidence_parent_commit": evidence_parent,
         "h1_commit": h1,
         "state": "valid-h1-transition",
     }
@@ -785,23 +1085,167 @@ def _seed_ids(seed: Mapping[str, Any], field: str, state: str) -> set[str]:
     return set(_strings(bucket.get(state), context=f"baseline.{field}.{state}"))
 
 
-def _validate_h2_payloads(
-    baseline_raw: bytes, ledger_raw: bytes, plan: Mapping[str, Any]
+def _ordered_seed_ids(baseline: Mapping[str, Any], field: str, state: str) -> list[str]:
+    bucket = _object(baseline.get(field), context=f"baseline.{field}")
+    values = _strings(bucket.get(state), context=f"baseline.{field}.{state}")
+    if values != sorted(values):
+        raise MigrationValidationError(f"baseline.{field}.{state} must be sorted")
+    return values
+
+
+def _assert_seed_integrity(baseline: Mapping[str, Any], *, context: str) -> None:
+    fields = (
+        "exception_semantic_ids",
+        "cross_domain_site_semantic_ids",
+        "production_to_lab_edge_semantic_ids",
+        "production_to_lab_static_site_semantic_ids",
+        "production_to_lab_dynamic_site_semantic_ids",
+        "compatibility_semantic_ids",
+    )
+    counts = _object(baseline.get("counts"), context=f"{context}.counts")
+    active_counts = _object(counts.get("active"), context=f"{context}.counts.active")
+    retired_counts = _object(counts.get("retired"), context=f"{context}.counts.retired")
+    count_names = {
+        "exception_semantic_ids": "exceptions",
+        "cross_domain_site_semantic_ids": "cross_domain_sites",
+        "production_to_lab_edge_semantic_ids": "production_to_lab_edges",
+        "production_to_lab_static_site_semantic_ids": (
+            "production_to_lab_static_sites"
+        ),
+        "production_to_lab_dynamic_site_semantic_ids": (
+            "production_to_lab_dynamic_sites"
+        ),
+        "compatibility_semantic_ids": "compatibility_contracts",
+    }
+    for field in fields:
+        active = _ordered_seed_ids(baseline, field, "active")
+        retired = _ordered_seed_ids(baseline, field, "retired")
+        if set(active) & set(retired):
+            raise MigrationValidationError(f"{context}.{field} active/retired overlap")
+        if active_counts.get(count_names[field]) != len(active):
+            raise MigrationValidationError(f"{context}.{field} active count drift")
+        if retired_counts.get(field) != len(retired):
+            raise MigrationValidationError(f"{context}.{field} retired count drift")
+    by_category = _object(
+        active_counts.get("by_category"), context=f"{context}.counts.active.by_category"
+    )
+    if not all(isinstance(value, int) and value >= 0 for value in by_category.values()):
+        raise MigrationValidationError(f"{context} category counts are invalid")
+    if sum(by_category.values()) != active_counts.get("exceptions"):
+        raise MigrationValidationError(f"{context} category counts do not sum")
+
+
+def _move_seed_ids(
+    baseline: dict[str, Any], field: str, expected_ids: Sequence[str]
 ) -> None:
-    baseline = _json_bytes(baseline_raw, context="H2 baseline")
-    ledger = _json_bytes(ledger_raw, context="H2 ledger")
-    counts = _object(baseline.get("counts"), context="H2 baseline.counts")
-    active = _object(counts.get("active"), context="H2 baseline.counts.active")
-    retired = _object(counts.get("retired"), context="H2 baseline.counts.retired")
-    if _selected_counts(active) != EXPECTED_H2_ACTIVE_COUNTS:
-        raise MigrationValidationError("H2 active count invariant failed")
-    if retired != EXPECTED_H2_RETIRED_COUNTS:
-        raise MigrationValidationError("H2 retired count invariant failed")
-    if _selected_counts(_object(ledger.get("counts"), context="H2 ledger.counts")) != (
-        EXPECTED_H2_ACTIVE_COUNTS
-    ):
-        raise MigrationValidationError("H2 ledger count invariant failed")
-    compact_seed_sha = hashlib.sha256(
+    bucket = _object(baseline.get(field), context=f"baseline.{field}")
+    active = _strings(bucket.get("active"), context=f"baseline.{field}.active")
+    retired = _strings(bucket.get("retired"), context=f"baseline.{field}.retired")
+    expected = set(expected_ids)
+    if expected & set(retired) or not expected <= set(active):
+        raise MigrationValidationError(f"sealed H1 {field} retirement membership drift")
+    bucket["active"] = sorted(set(active) - expected)
+    bucket["retired"] = sorted(set(retired) | expected)
+
+
+def _expected_h2_payloads(
+    h1_baseline_raw: bytes, h1_ledger_raw: bytes
+) -> tuple[bytes, bytes]:
+    baseline = copy.deepcopy(
+        _json_bytes(
+            h1_baseline_raw,
+            context="H1 baseline",
+            canonical_document=True,
+        )
+    )
+    ledger = copy.deepcopy(
+        _json_bytes(h1_ledger_raw, context="H1 ledger", canonical_document=True)
+    )
+    _assert_seed_integrity(baseline, context="H1 baseline")
+
+    _move_seed_ids(baseline, "exception_semantic_ids", [PRIVATE_EXCEPTION_ID])
+    _move_seed_ids(baseline, "cross_domain_site_semantic_ids", MIGRATED_SITE_IDS)
+    _move_seed_ids(
+        baseline,
+        "production_to_lab_static_site_semantic_ids",
+        MIGRATED_SITE_IDS,
+    )
+    baseline_counts = _object(baseline["counts"], context="baseline.counts")
+    baseline_active = _object(
+        baseline_counts["active"], context="baseline.counts.active"
+    )
+    baseline_retired = _object(
+        baseline_counts["retired"], context="baseline.counts.retired"
+    )
+    baseline_active["exceptions"] = len(
+        _ordered_seed_ids(baseline, "exception_semantic_ids", "active")
+    )
+    baseline_active["cross_domain_sites"] = len(
+        _ordered_seed_ids(baseline, "cross_domain_site_semantic_ids", "active")
+    )
+    baseline_active["production_to_lab_static_sites"] = len(
+        _ordered_seed_ids(
+            baseline, "production_to_lab_static_site_semantic_ids", "active"
+        )
+    )
+    baseline_by_category = _object(
+        baseline_active["by_category"], context="baseline.counts.active.by_category"
+    )
+    private_count = baseline_by_category.get("private_symbol_import")
+    if not isinstance(private_count, int) or private_count < 1:
+        raise MigrationValidationError("sealed H1 private exception count drift")
+    baseline_by_category["private_symbol_import"] = private_count - 1
+    for field in EXPECTED_H2_RETIRED_COUNTS:
+        baseline_retired[field] = len(_ordered_seed_ids(baseline, field, "retired"))
+    if _selected_counts(baseline_active) != EXPECTED_H2_ACTIVE_COUNTS:
+        raise MigrationValidationError("derived H2 active count invariant failed")
+    if baseline_retired != EXPECTED_H2_RETIRED_COUNTS:
+        raise MigrationValidationError("derived H2 retired count invariant failed")
+    _assert_seed_integrity(baseline, context="derived H2 baseline")
+
+    exceptions = _objects(ledger.get("exceptions"), context="H1 ledger.exceptions")
+    private_rows = [
+        row for row in exceptions if row.get("semantic_id") == PRIVATE_EXCEPTION_ID
+    ]
+    if len(private_rows) != 1:
+        raise MigrationValidationError("sealed H1 private ledger row drift")
+    private_category = private_rows[0].get("category")
+    if private_category != "private_symbol_import":
+        raise MigrationValidationError("sealed H1 private ledger category drift")
+    ledger["exceptions"] = [
+        row for row in exceptions if row.get("semantic_id") != PRIVATE_EXCEPTION_ID
+    ]
+    exception_by_id, _site_by_id = _find_rows(ledger)
+    edge = exception_by_id.get(CLASSIFICATION_LAB_EDGE_ID)
+    if edge is None:
+        raise MigrationValidationError("sealed H1 classification edge is absent")
+    sites = _objects(edge.get("sites"), context="H1 classification edge.sites")
+    site_ids = [site.get("semantic_id") for site in sites]
+    if any(site_ids.count(site_id) != 1 for site_id in MIGRATED_SITE_IDS):
+        raise MigrationValidationError("sealed H1 migrated edge site membership drift")
+    if site_ids.count(PROVIDER_SITE_ID) != 1:
+        raise MigrationValidationError("sealed H1 provider site membership drift")
+    edge["sites"] = [
+        site for site in sites if site.get("semantic_id") not in set(MIGRATED_SITE_IDS)
+    ]
+    if [site.get("semantic_id") for site in edge["sites"]] != [PROVIDER_SITE_ID]:
+        raise MigrationValidationError("derived H2 classification edge site drift")
+
+    ledger_counts = _object(ledger.get("counts"), context="H1 ledger.counts")
+    ledger_counts["exceptions"] = baseline_active["exceptions"]
+    ledger_counts["cross_domain_sites"] = baseline_active["cross_domain_sites"]
+    ledger_counts["production_to_lab_static_sites"] = baseline_active[
+        "production_to_lab_static_sites"
+    ]
+    ledger_by_category = _object(
+        ledger_counts.get("by_category"), context="H1 ledger.counts.by_category"
+    )
+    ledger_by_category["private_symbol_import"] = baseline_by_category[
+        "private_symbol_import"
+    ]
+    if ledger_counts != baseline_active:
+        raise MigrationValidationError("derived H2 ledger count structure drift")
+    ledger["baseline_sha256"] = hashlib.sha256(
         json.dumps(
             baseline,
             ensure_ascii=False,
@@ -810,57 +1254,132 @@ def _validate_h2_payloads(
             allow_nan=False,
         ).encode("utf-8")
     ).hexdigest()
-    if ledger.get("baseline_sha256") != compact_seed_sha:
-        raise MigrationValidationError("H2 ledger is not bound to H2 baseline")
+    _find_rows(ledger)
+    return _document_json_bytes(baseline), _document_json_bytes(ledger)
 
-    if PRIVATE_EXCEPTION_ID not in _seed_ids(
-        baseline, "exception_semantic_ids", "retired"
-    ):
-        raise MigrationValidationError("H2 private exception was not retired")
-    for site_id in MIGRATED_SITE_IDS:
-        if site_id not in _seed_ids(
-            baseline, "cross_domain_site_semantic_ids", "retired"
-        ) or site_id not in _seed_ids(
-            baseline, "production_to_lab_static_site_semantic_ids", "retired"
-        ):
-            raise MigrationValidationError(f"H2 site was not retired: {site_id}")
-    if CLASSIFICATION_LAB_EDGE_ID not in _seed_ids(
-        baseline, "production_to_lab_edge_semantic_ids", "active"
-    ):
-        raise MigrationValidationError("P3 classification-to-lab edge was retired early")
-    if PROVIDER_SITE_ID not in _seed_ids(
-        baseline, "cross_domain_site_semantic_ids", "active"
-    ) or PROVIDER_SITE_ID not in _seed_ids(
-        baseline, "production_to_lab_static_site_semantic_ids", "active"
-    ):
-        raise MigrationValidationError("P3 provider site was retired early")
 
-    exception_by_id, site_by_id = _find_rows(ledger)
-    if PRIVATE_EXCEPTION_ID in exception_by_id:
-        raise MigrationValidationError("H2 ledger retains the private exception")
-    if any(site_id in site_by_id for site_id in MIGRATED_SITE_IDS):
-        raise MigrationValidationError("H2 ledger retains a migrated site")
-    edge = exception_by_id.get(CLASSIFICATION_LAB_EDGE_ID)
-    if edge is None or edge.get("removal_campaign") != "P3":
-        raise MigrationValidationError("H2 ledger removed the P3 edge")
-    if PROVIDER_SITE_ID not in site_by_id:
-        raise MigrationValidationError("H2 ledger removed the P3 provider site")
+def _validate_h2_payloads(
+    h1_baseline_raw: bytes,
+    h1_ledger_raw: bytes,
+    h2_baseline_raw: bytes,
+    h2_ledger_raw: bytes,
+) -> None:
+    _json_bytes(h2_baseline_raw, context="H2 baseline", canonical_document=True)
+    _json_bytes(h2_ledger_raw, context="H2 ledger", canonical_document=True)
+    expected_baseline, expected_ledger = _expected_h2_payloads(
+        h1_baseline_raw, h1_ledger_raw
+    )
+    if h2_baseline_raw != expected_baseline:
+        raise MigrationValidationError("H2 baseline is not the exact sealed transform")
+    if h2_ledger_raw != expected_ledger:
+        raise MigrationValidationError("H2 ledger is not the exact sealed transform")
+
+
+def _parse_name_status(raw: bytes, *, context: str) -> dict[str, str]:
+    fields = [field for field in raw.split(b"\0") if field]
+    if len(fields) % 2:
+        raise MigrationValidationError(f"malformed {context} name-status output")
+    entries: dict[str, str] = {}
+    for index in range(0, len(fields), 2):
+        try:
+            status = fields[index].decode("ascii")
+            path = fields[index + 1].decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise MigrationValidationError(f"noncanonical {context} path") from exc
+        _relative_path(path, context=f"{context} path")
+        if status not in {"A", "M", "D"} or path in entries:
+            raise MigrationValidationError(f"unsupported or duplicate {context} entry")
+        entries[path] = status
+    return entries
+
+
+def _index_file(root: Path, path: str) -> bytes:
+    canonical = _relative_path(path, context="Git index path")
+    output = _git(root, "ls-files", "--stage", "-z", "--", canonical)
+    records = [record for record in output.split(b"\0") if record]
+    if len(records) != 1 or b"\t" not in records[0]:
+        raise MigrationValidationError(f"{canonical} is not one Git index entry")
+    metadata, raw_path = records[0].split(b"\t", 1)
+    try:
+        mode, oid, stage = metadata.decode("ascii").split()
+        recorded_path = raw_path.decode("utf-8")
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise MigrationValidationError(
+            f"malformed Git index entry for {canonical}"
+        ) from exc
+    if recorded_path != canonical or mode != "100644" or stage != "0":
+        raise MigrationValidationError(
+            f"{canonical} must be one stage-0 exact 100644 index blob"
+        )
+    if not _BLOB_RE.fullmatch(oid):
+        raise MigrationValidationError(f"invalid index blob identity for {canonical}")
+    return _git(root, "cat-file", "blob", oid)
+
+
+def _current_head(root: Path) -> str:
+    resolved = _git(root, "rev-parse", "--verify", "HEAD^{commit}").decode().strip()
+    if not _COMMIT_RE.fullmatch(resolved):
+        raise MigrationValidationError("current HEAD is not a canonical commit")
+    return resolved
 
 
 def build_receipt(
     root: Path, plan: Mapping[str, Any], h1_revision: str
 ) -> dict[str, Any]:
-    """Build an H2 receipt from validated worktree ledger artifacts."""
+    """Build an H2 receipt only from the exact staged H2 artifact blobs."""
 
     h1_report = validate_h1(root, plan, h1_revision)
-    baseline_raw = (root / BASELINE_PATH).read_bytes()
-    ledger_raw = (root / LEDGER_PATH).read_bytes()
-    _validate_h2_payloads(baseline_raw, ledger_raw, plan)
+    h1 = str(h1_report["h1_commit"])
+    if _current_head(root) != h1:
+        raise MigrationValidationError(
+            "current HEAD must be the supplied full H1 commit"
+        )
+    staged = _parse_name_status(
+        _git(
+            root,
+            "diff",
+            "--cached",
+            "--name-status",
+            "-z",
+            "--no-renames",
+            h1,
+        ),
+        context="staged H2",
+    )
+    expected_staged = {
+        BASELINE_PATH.as_posix(): "M",
+        LEDGER_PATH.as_posix(): "M",
+    }
+    if staged != expected_staged:
+        raise MigrationValidationError(
+            f"staged H2 path/status scope mismatch: {staged}"
+        )
+    unstaged = _git(
+        root,
+        "diff",
+        "--name-only",
+        "-z",
+        "--",
+        BASELINE_PATH.as_posix(),
+        LEDGER_PATH.as_posix(),
+    )
+    if unstaged:
+        raise MigrationValidationError("H2 staged artifacts have unstaged differences")
+    baseline_raw = _index_file(root, BASELINE_PATH.as_posix())
+    ledger_raw = _index_file(root, LEDGER_PATH.as_posix())
+    h1_baseline_raw = _git_file(root, h1, BASELINE_PATH.as_posix())
+    h1_ledger_raw = _git_file(root, h1, LEDGER_PATH.as_posix())
+    _validate_h2_payloads(
+        h1_baseline_raw,
+        h1_ledger_raw,
+        baseline_raw,
+        ledger_raw,
+    )
     payload: dict[str, Any] = {
         "schema": RECEIPT_SCHEMA,
         "migration_id": MIGRATION_ID,
         "plan_sha256": plan["plan_sha256"],
-        "h1_commit": h1_report["h1_commit"],
+        "h1_commit": h1,
         "h2_artifacts": {
             "baseline": {
                 "path": BASELINE_PATH.as_posix(),
@@ -932,37 +1451,45 @@ def load_receipt(path: Path) -> dict[str, Any]:
     for name, path in (("baseline", BASELINE_PATH), ("ledger", LEDGER_PATH)):
         binding = _object(artifacts[name], context=f"receipt.h2_artifacts.{name}")
         _require_keys(binding, {"path", "sha256"}, context=f"receipt.{name}")
-        if binding["path"] != path.as_posix() or not isinstance(
-            binding["sha256"], str
-        ) or not _HEX_SHA_RE.fullmatch(binding["sha256"]):
+        if (
+            binding["path"] != path.as_posix()
+            or not isinstance(binding["sha256"], str)
+            or not _HEX_SHA_RE.fullmatch(binding["sha256"])
+        ):
             raise MigrationValidationError(f"receipt {name} binding is invalid")
     return receipt
 
 
-def _receipt_additions(
-    root: Path, h1: str, tip: str, receipt_path: str
-) -> list[str]:
-    commits = _git(
-        root,
-        "rev-list",
-        "--first-parent",
-        "--ancestry-path",
-        f"{h1}..{tip}",
-    ).decode().splitlines()
+def _receipt_additions(root: Path, h1: str, tip: str, receipt_path: str) -> list[str]:
+    commits = (
+        _git(
+            root,
+            "rev-list",
+            "--first-parent",
+            "--ancestry-path",
+            f"{h1}..{tip}",
+        )
+        .decode()
+        .splitlines()
+    )
     additions = []
     for commit in commits:
         parent = _single_parent(root, commit)
-        status = _git(
-            root,
-            "diff-tree",
-            "--no-commit-id",
-            "--name-status",
-            "-r",
-            parent,
-            commit,
-            "--",
-            receipt_path,
-        ).decode().strip()
+        status = (
+            _git(
+                root,
+                "diff-tree",
+                "--no-commit-id",
+                "--name-status",
+                "-r",
+                parent,
+                commit,
+                "--",
+                receipt_path,
+            )
+            .decode()
+            .strip()
+        )
         if status == f"A\t{receipt_path}":
             additions.append(commit)
         elif status:
@@ -991,18 +1518,34 @@ def verify_receipt(
     h2 = additions[0]
     if _single_parent(root, h2) != h1:
         raise MigrationValidationError("H2 is not the direct child of H1")
-    if _changed_paths(root, h1, h2) != H2_PATHS:
-        raise MigrationValidationError("H1->H2 changed path scope mismatch")
+    _require_transition(
+        root,
+        h1,
+        h2,
+        {
+            BASELINE_PATH.as_posix(): "M",
+            LEDGER_PATH.as_posix(): "M",
+            RECEIPT_PATH.as_posix(): "A",
+        },
+        context="H1->H2",
+    )
     committed_receipt = _git_file(root, h2, RECEIPT_PATH.as_posix())
     if committed_receipt != _canonical_json_bytes(receipt):
         raise MigrationValidationError("committed H2 receipt bytes differ")
     artifacts = receipt["h2_artifacts"]
+    h1_baseline_raw = _git_file(root, h1, BASELINE_PATH.as_posix())
+    h1_ledger_raw = _git_file(root, h1, LEDGER_PATH.as_posix())
     baseline_raw = _git_file(root, h2, BASELINE_PATH.as_posix())
     ledger_raw = _git_file(root, h2, LEDGER_PATH.as_posix())
     for name, raw in (("baseline", baseline_raw), ("ledger", ledger_raw)):
         if hashlib.sha256(raw).hexdigest() != artifacts[name]["sha256"]:
             raise MigrationValidationError(f"committed H2 {name} digest differs")
-    _validate_h2_payloads(baseline_raw, ledger_raw, plan)
+    _validate_h2_payloads(
+        h1_baseline_raw,
+        h1_ledger_raw,
+        baseline_raw,
+        ledger_raw,
+    )
     return {
         "migration_id": MIGRATION_ID,
         "h1_commit": h1,
@@ -1019,12 +1562,33 @@ def write_canonical_json(path: Path, payload: Mapping[str, Any]) -> None:
     path.write_bytes(_canonical_json_bytes(payload))
 
 
+def _untracked_output_path(root: Path, value: Path) -> tuple[Path, str]:
+    candidate = value if value.is_absolute() else root / value
+    if candidate.is_symlink():
+        raise MigrationValidationError("receipt output must not be a symlink")
+    resolved = candidate.resolve()
+    try:
+        relative = resolved.relative_to(root).as_posix()
+    except ValueError as exc:
+        raise MigrationValidationError(
+            "receipt output must stay inside the repository"
+        ) from exc
+    _relative_path(relative, context="receipt output")
+    if _git(root, "ls-files", "-z", "--", relative):
+        raise MigrationValidationError(
+            "receipt output must be untracked before generation"
+        )
+    return resolved, relative
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=Path(__file__).parents[1])
     parser.add_argument("--plan", type=Path, default=PLAN_PATH)
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("validate-plan")
+    history = commands.add_parser("validate-history")
+    history.add_argument("--evidence-parent", required=True)
     h1 = commands.add_parser("validate-h1")
     h1.add_argument("--h1", required=True)
     build = commands.add_parser("build-receipt")
@@ -1032,7 +1596,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     build.add_argument("--output", type=Path, default=RECEIPT_PATH)
     verify = commands.add_parser("verify-receipt")
     verify.add_argument("--receipt", type=Path, default=RECEIPT_PATH)
-    verify.add_argument("--tip", default="HEAD")
+    verify.add_argument("--tip", required=True)
     return parser.parse_args(argv)
 
 
@@ -1044,15 +1608,17 @@ def main(argv: list[str] | None = None) -> int:
         plan = load_plan(plan_path)
         if args.command == "validate-plan":
             report = validate_plan(root, plan)
+        elif args.command == "validate-history":
+            report = validate_history(root, plan, args.evidence_parent)
         elif args.command == "validate-h1":
             report = validate_h1(root, plan, args.h1)
         elif args.command == "build-receipt":
             receipt = build_receipt(root, plan, args.h1)
-            output = args.output if args.output.is_absolute() else root / args.output
+            output, output_relative = _untracked_output_path(root, args.output)
             write_canonical_json(output, receipt)
             report = {
                 "migration_id": MIGRATION_ID,
-                "output": output.relative_to(root).as_posix(),
+                "output": output_relative,
                 "state": "h2-receipt-built",
             }
         else:
