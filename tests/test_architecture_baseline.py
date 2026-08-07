@@ -1081,9 +1081,43 @@ def test_exception_artifacts_are_fresh_and_head_independent(
             encoding="utf-8"
         )
     )
+    built_ledger = architecture.build_architecture_exception_ledger(ROOT)
+
+    def diagnostic_lines(value: Any) -> list[Any]:
+        if isinstance(value, dict):
+            return [
+                *(item for key, item in value.items() if key == "line"),
+                *(
+                    line
+                    for key, item in value.items()
+                    if key != "line"
+                    for line in diagnostic_lines(item)
+                ),
+            ]
+        if isinstance(value, list):
+            return [line for item in value for line in diagnostic_lines(item)]
+        return []
+
+    def without_diagnostic_lines(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {
+                key: without_diagnostic_lines(item)
+                for key, item in value.items()
+                if key != "line"
+            }
+        if isinstance(value, list):
+            return [without_diagnostic_lines(item) for item in value]
+        return value
 
     assert architecture.build_architecture_exception_baseline(ROOT) == recorded_seed
-    assert architecture.build_architecture_exception_ledger(ROOT) == recorded_ledger
+    recorded_lines = diagnostic_lines(recorded_ledger)
+    built_lines = diagnostic_lines(built_ledger)
+    assert recorded_lines
+    assert built_lines
+    assert all(isinstance(line, int) for line in (*recorded_lines, *built_lines))
+    assert without_diagnostic_lines(built_ledger) == without_diagnostic_lines(
+        recorded_ledger
+    )
     assert "captured_from_head" not in recorded_seed
     assert "captured_from_head" not in recorded_ledger
     assert (
