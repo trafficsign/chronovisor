@@ -8,6 +8,7 @@ answers. Claude Code and Codex only need thin adapters around this CLI.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import json
 import math
@@ -18,7 +19,9 @@ import time
 import tomllib
 import uuid
 from collections import deque
+from collections.abc import Iterable, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -3002,6 +3005,34 @@ def append_feedback(
     ref: str = "",
     extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    record = _build_feedback_record(
+        kind,
+        note,
+        prompt,
+        host,
+        expected_pages=expected_pages,
+        negative_pages=negative_pages,
+        expected_queries=expected_queries,
+        ref=ref,
+        extra=extra,
+    )
+    with _feedback_exclusive_lock(RECALL_FEEDBACK_FILE):
+        _append_feedback_rows_lock_held(RECALL_FEEDBACK_FILE, [record])
+    return record
+
+
+def _build_feedback_record(
+    kind: str,
+    note: str = "",
+    prompt: str = "",
+    host: str = "",
+    *,
+    expected_pages: list[str] | None = None,
+    negative_pages: list[str] | None = None,
+    expected_queries: list[str] | None = None,
+    ref: str = "",
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     snapshot = (
         recall_log_snapshot(found) if ref and (found := find_recall_log(ref)) else None
     )
@@ -3026,8 +3057,42 @@ def append_feedback(
             )
         for key, value in extra.items():
             record[key] = value
-    append_jsonl(RECALL_FEEDBACK_FILE, record)
     return record
+
+
+@contextmanager
+def _feedback_exclusive_lock(path: Path) -> Iterator[None]:
+    """Hold the non-reentrant 0600 sidecar lock for a feedback ledger.
+
+    The shared durable-state helper does not normalize modes on sidecars that
+    already exist.  Keep this stricter protocol recall-local until every lane
+    can adopt that mode change together.
+    """
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = path.with_suffix(path.suffix + ".lock")
+    descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        # Existing runtime sidecars may predate the fixed private mode.
+        os.chmod(lock_path, 0o600)
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+    finally:
+        os.close(descriptor)
+
+
+def _append_feedback_rows_lock_held(
+    path: Path,
+    rows: Iterable[Mapping[str, Any]],
+    *,
+    sort_keys: bool = False,
+) -> None:
+    """Append feedback while the caller holds ``_feedback_exclusive_lock``."""
+
+    append_jsonl_durable(path, rows, sort_keys=sort_keys)
 
 
 def append_jsonl(path: Path, record: dict[str, Any]) -> None:

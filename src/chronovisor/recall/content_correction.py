@@ -77,7 +77,9 @@ from chronovisor.recall.recall_runtime import (
     RECALL_FEEDBACK_FILE,
     RECALL_LOG_FILE,
     RECALL_PULL_LOG_FILE,
-    append_feedback,
+    _append_feedback_rows_lock_held,
+    _build_feedback_record,
+    _feedback_exclusive_lock,
     recall_log_snapshot,
 )
 from chronovisor.research.evidence_grounding import (
@@ -2140,17 +2142,13 @@ def _retract_legacy_unfiltered_page_ignored_feedback(
             "retracted": 0,
         }
 
-    RECALL_FEEDBACK_FILE.parent.mkdir(parents=True, exist_ok=True)
-    lock_path = RECALL_FEEDBACK_FILE.with_suffix(RECALL_FEEDBACK_FILE.suffix + ".lock")
-    with lock_path.open("a+b") as lock_handle:
-        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
-        try:
-            # Re-read under the producer's lock so concurrent feedback writes
-            # cannot create duplicate or partially bound migration records.
-            planned, matched, already = plan()
-            append_jsonl_durable(RECALL_FEEDBACK_FILE, planned, sort_keys=True)
-        finally:
-            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+    with _feedback_exclusive_lock(RECALL_FEEDBACK_FILE):
+        # Re-read under the producer's lock so concurrent feedback writes
+        # cannot create duplicate or partially bound migration records.
+        planned, matched, already = plan()
+        _append_feedback_rows_lock_held(
+            RECALL_FEEDBACK_FILE, planned, sort_keys=True
+        )
     return {
         "status": "ok",
         "dry_run": False,
@@ -3534,41 +3532,36 @@ def _record_wrong_retrieval(
         or _current_candidate_page_hashes(ignored_pages) != reviewed_hashes
     ):
         return {"kind": "page_ignored", "status": "held", "reason": "reviewed_page_bytes_changed"}
-    RECALL_FEEDBACK_FILE.parent.mkdir(parents=True, exist_ok=True)
-    lock_path = RECALL_FEEDBACK_FILE.with_suffix(RECALL_FEEDBACK_FILE.suffix + ".lock")
-    with lock_path.open("a+b") as lock_handle:
-        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
-        try:
-            existing = _jsonl_row_for_key(RECALL_FEEDBACK_FILE, key)
-            if existing is not None:
-                feedback = existing
-                already_recorded = True
-            else:
-                feedback = append_feedback(
-                    "page_ignored",
-                    str(
-                        proposal.get("reason")
-                        or "user correction classified as wrong retrieval"
-                    ),
-                    prompt=str(event.get("source_prompt") or ""),
-                    host=str(event.get("host") or ""),
-                    expected_pages=[],
-                    negative_pages=ignored_pages,
-                    ref=str(event.get("source_decision_id") or ""),
-                    extra={
-                        "source": LANE,
-                        "content_correction_key": key,
-                        "frontier_reviewed": True,
-                        "label_quality": "strong",
-                        "negative_page_hashes": reviewed_hashes,
-                        "injected_pages": ignored_pages,
-                        "source_turn_ref": event.get("source_turn_ref", {}),
-                        "correction_turn_ref": event.get("correction_turn_ref", {}),
-                    },
-                )
-                already_recorded = False
-        finally:
-            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+    with _feedback_exclusive_lock(RECALL_FEEDBACK_FILE):
+        existing = _jsonl_row_for_key(RECALL_FEEDBACK_FILE, key)
+        if existing is not None:
+            feedback = existing
+            already_recorded = True
+        else:
+            feedback = _build_feedback_record(
+                "page_ignored",
+                str(
+                    proposal.get("reason")
+                    or "user correction classified as wrong retrieval"
+                ),
+                prompt=str(event.get("source_prompt") or ""),
+                host=str(event.get("host") or ""),
+                expected_pages=[],
+                negative_pages=ignored_pages,
+                ref=str(event.get("source_decision_id") or ""),
+                extra={
+                    "source": LANE,
+                    "content_correction_key": key,
+                    "frontier_reviewed": True,
+                    "label_quality": "strong",
+                    "negative_page_hashes": reviewed_hashes,
+                    "injected_pages": ignored_pages,
+                    "source_turn_ref": event.get("source_turn_ref", {}),
+                    "correction_turn_ref": event.get("correction_turn_ref", {}),
+                },
+            )
+            _append_feedback_rows_lock_held(RECALL_FEEDBACK_FILE, [feedback])
+            already_recorded = False
     # This exact negative producer is intentionally separate from generic MCP
     # activity, which remains unknown-positive usage telemetry.
     from chronovisor.recall.recall_field import apply_reviewed_negative_feedback

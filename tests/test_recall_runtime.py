@@ -1,8 +1,14 @@
 from __future__ import annotations
 
 import json
+import select
+import stat
+import subprocess
+import sys
 import threading
+from contextlib import contextmanager
 from dataclasses import asdict
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -1706,6 +1712,268 @@ def test_feedback_writer_uses_configurable_path(tmp_path, monkeypatch) -> None:
     assert record["kind"] == "missed"
     assert feedback_file.exists()
     assert "前回の話" in feedback_file.read_text()
+
+
+def test_feedback_writer_uses_exact_private_sidecar_and_preserves_json_bytes(
+    tmp_path, monkeypatch
+) -> None:
+    from chronovisor.recall import recall_runtime
+
+    class FrozenDatetime:
+        @classmethod
+        def now(cls, _timezone):
+            return SimpleNamespace(
+                isoformat=lambda *, timespec: "2026-08-07T12:34:56+00:00"
+            )
+
+    feedback_file = tmp_path / "feedback.jsonl"
+    lock_file = tmp_path / "feedback.jsonl.lock"
+    lock_file.touch(mode=0o666)
+    lock_file.chmod(0o666)
+    monkeypatch.setattr(recall_runtime, "RECALL_FEEDBACK_FILE", feedback_file)
+    monkeypatch.setattr(recall_runtime, "datetime", FrozenDatetime)
+
+    record = append_feedback(
+        "missed",
+        "note",
+        prompt="昨日のあれ",
+        host="codex",
+        extra={"z_extra": 1, "a_extra": 2},
+    )
+
+    expected = {
+        "ts": "2026-08-07T12:34:56+00:00",
+        "kind": "missed",
+        "host": "codex",
+        "prompt": "昨日のあれ",
+        "note": "note",
+        "expected_pages": [],
+        "negative_pages": [],
+        "expected_queries": [],
+        "ref": "",
+        "snapshot": None,
+        "z_extra": 1,
+        "a_extra": 2,
+    }
+    assert record == expected
+    assert feedback_file.read_bytes() == (
+        json.dumps(expected, ensure_ascii=False, default=str) + "\n"
+    ).encode("utf-8")
+    assert lock_file.is_file()
+    assert stat.S_IMODE(lock_file.stat().st_mode) == 0o600
+    assert not (tmp_path / "feedback.lock").exists()
+
+
+def test_feedback_writer_blocks_behind_process_lock_then_durably_appends(
+    tmp_path, monkeypatch
+) -> None:
+    from chronovisor.recall import recall_runtime
+
+    feedback_file = tmp_path / "feedback.jsonl"
+    lock_file = tmp_path / "feedback.jsonl.lock"
+    monkeypatch.setattr(recall_runtime, "RECALL_FEEDBACK_FILE", feedback_file)
+    holder = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import fcntl, os, sys\n"
+                "fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT, 0o600)\n"
+                "fcntl.flock(fd, fcntl.LOCK_EX)\n"
+                "print('locked', flush=True)\n"
+                "sys.stdin.readline()\n"
+                "fcntl.flock(fd, fcntl.LOCK_UN)\n"
+                "os.close(fd)\n"
+            ),
+            str(lock_file),
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    assert holder.stdin is not None
+    assert holder.stdout is not None
+    ready, _, _ = select.select([holder.stdout], [], [], 5.0)
+    assert ready and holder.stdout.readline() == "locked\n"
+
+    finished = threading.Event()
+    failures: list[BaseException] = []
+
+    def write_feedback() -> None:
+        try:
+            append_feedback("missed", prompt="blocked writer")
+        except BaseException as exc:  # pragma: no cover - asserted below
+            failures.append(exc)
+        finally:
+            finished.set()
+
+    writer = threading.Thread(target=write_feedback, daemon=True)
+    writer.start()
+    try:
+        assert not finished.wait(0.25)
+        assert not feedback_file.exists()
+    finally:
+        holder.stdin.write("release\n")
+        holder.stdin.flush()
+
+    assert finished.wait(5.0)
+    writer.join(timeout=0.1)
+    assert holder.wait(timeout=5.0) == 0
+    assert failures == []
+    raw = feedback_file.read_bytes()
+    assert raw.endswith(b"\n")
+    assert json.loads(raw)["prompt"] == "blocked writer"
+
+
+def test_feedback_writer_releases_lock_after_durable_append_failure(
+    tmp_path, monkeypatch
+) -> None:
+    from chronovisor.recall import recall_runtime
+
+    feedback_file = tmp_path / "feedback.jsonl"
+    lock_file = tmp_path / "feedback.jsonl.lock"
+    monkeypatch.setattr(recall_runtime, "RECALL_FEEDBACK_FILE", feedback_file)
+    monkeypatch.setattr(
+        recall_runtime,
+        "append_jsonl_durable",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("fsync failed")),
+    )
+
+    with pytest.raises(OSError, match="fsync failed"):
+        append_feedback("missed", prompt="must unlock")
+
+    reacquire = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import fcntl, os, sys\n"
+                "fd = os.open(sys.argv[1], os.O_RDWR)\n"
+                "fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
+                "fcntl.flock(fd, fcntl.LOCK_UN)\n"
+                "os.close(fd)\n"
+            ),
+            str(lock_file),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=5.0,
+    )
+    assert reacquire.returncode == 0, reacquire.stderr
+    assert not feedback_file.exists()
+
+
+def test_feedback_lock_covers_tail_probe_append_and_both_fsyncs(
+    tmp_path, monkeypatch
+) -> None:
+    from chronovisor.core import jsonl_write
+    from chronovisor.recall import recall_runtime
+
+    feedback_file = tmp_path / "feedback.jsonl"
+    monkeypatch.setattr(recall_runtime, "RECALL_FEEDBACK_FILE", feedback_file)
+    original_lock = recall_runtime._feedback_exclusive_lock
+    original_path_open = Path.open
+    original_fsync = jsonl_write.os.fsync
+    locked = False
+    events: list[str] = []
+
+    @contextmanager
+    def tracked_lock(path: Path):
+        nonlocal locked
+        with original_lock(path):
+            locked = True
+            events.append("lock-enter")
+            try:
+                yield
+            finally:
+                events.append("lock-exit")
+                locked = False
+
+    def tracked_path_open(path: Path, mode: str = "r", *args, **kwargs):
+        if path == feedback_file and mode in {"rb", "ab"}:
+            assert locked
+            events.append(f"open-{mode}")
+        return original_path_open(path, mode, *args, **kwargs)
+
+    def tracked_fsync(descriptor: int) -> None:
+        assert locked
+        kind = "dir" if stat.S_ISDIR(jsonl_write.os.fstat(descriptor).st_mode) else "file"
+        events.append(f"fsync-{kind}")
+        original_fsync(descriptor)
+
+    monkeypatch.setattr(recall_runtime, "_feedback_exclusive_lock", tracked_lock)
+    monkeypatch.setattr(Path, "open", tracked_path_open)
+    monkeypatch.setattr(jsonl_write.os, "fsync", tracked_fsync)
+
+    append_feedback("missed", prompt="ordered durability")
+
+    assert events == [
+        "lock-enter",
+        "open-rb",
+        "open-ab",
+        "fsync-file",
+        "fsync-dir",
+        "lock-exit",
+    ]
+
+
+def test_concurrent_feedback_writers_preserve_prefix_and_per_writer_order(
+    tmp_path,
+) -> None:
+    feedback_file = tmp_path / "feedback.jsonl"
+    prefix = b'{"historical":true}\n'
+    feedback_file.write_bytes(prefix)
+    script = (
+        "import sys\n"
+        "from pathlib import Path\n"
+        "from chronovisor.recall import recall_runtime\n"
+        "recall_runtime.RECALL_FEEDBACK_FILE = Path(sys.argv[1])\n"
+        "print('ready', flush=True)\n"
+        "sys.stdin.readline()\n"
+        "for index in range(2):\n"
+        "    recall_runtime.append_feedback(\n"
+        "        'concurrent', prompt=f'{sys.argv[2]}-{index}',\n"
+        "        extra={'writer': sys.argv[2], 'index': index},\n"
+        "    )\n"
+    )
+    writers = [
+        subprocess.Popen(
+            [sys.executable, "-c", script, str(feedback_file), writer_id],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            text=True,
+        )
+        for writer_id in ("left", "right")
+    ]
+    try:
+        for writer in writers:
+            assert writer.stdin is not None
+            assert writer.stdout is not None
+            ready, _, _ = select.select([writer.stdout], [], [], 5.0)
+            assert ready and writer.stdout.readline() == "ready\n"
+        for writer in writers:
+            assert writer.stdin is not None
+            writer.stdin.write("start\n")
+            writer.stdin.flush()
+        for writer in writers:
+            assert writer.wait(timeout=5.0) == 0
+    finally:
+        for writer in writers:
+            if writer.poll() is None:
+                writer.kill()
+                writer.wait(timeout=5.0)
+
+    raw = feedback_file.read_bytes()
+    assert raw.startswith(prefix)
+    assert raw.endswith(b"\n")
+    rows = [json.loads(line) for line in raw.splitlines()]
+    assert rows[0] == {"historical": True}
+    assert len(rows) == 5
+    for writer_id in ("left", "right"):
+        assert [
+            row["index"] for row in rows[1:] if row.get("writer") == writer_id
+        ] == [0, 1]
 
 
 def test_missed_feedback_prompt_only_records_without_expected(

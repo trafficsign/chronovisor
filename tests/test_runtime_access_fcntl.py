@@ -1049,7 +1049,7 @@ def test_fcntl_ids_are_line_stable_and_production_inventory_is_complete() -> Non
             elif target == ("os", "fdopen"):
                 fdopen_calls.append(node)
 
-    assert len(flock_calls) == 101
+    assert len(flock_calls) == 99
     assert all(
         len(call.args) == 2
         and not call.keywords

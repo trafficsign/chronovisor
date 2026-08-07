@@ -3,6 +3,9 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import select
+import subprocess
+import sys
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -1563,6 +1566,11 @@ def test_legacy_applied_feedback_retraction_is_exact_dry_run_safe_and_idempotent
         store=store,
     )
     after_first = feedback_file.read_bytes()
+    assert after_first.startswith(feedback_before)
+    tombstone = json.loads(after_first.splitlines()[-1])
+    assert after_first.splitlines(keepends=True)[-1] == (
+        json.dumps(tombstone, ensure_ascii=False, sort_keys=True, default=str) + "\n"
+    ).encode("utf-8")
     repeated = content_correction.run_pending_corrections(
         max_items=0,
         store=store,
@@ -2082,6 +2090,131 @@ def test_wrong_retrieval_requires_frontier_and_records_only_page_scoped_feedback
     assert feedback["kind"] != "false-positive"
     assert store.get(merged["item"]["key"])["status"] == "applied"
     assert page.read_bytes() == before
+
+
+def test_wrong_retrieval_feedback_transaction_uses_one_non_reentrant_lock(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from chronovisor.recall import recall_field, recall_runtime
+
+    feedback_file = tmp_path / "feedback.jsonl"
+    runtime_feedback_file = tmp_path / "unexpected-runtime-feedback.jsonl"
+    monkeypatch.setattr(content_correction, "RECALL_FEEDBACK_FILE", feedback_file)
+    monkeypatch.setattr(
+        recall_runtime, "RECALL_FEEDBACK_FILE", runtime_feedback_file
+    )
+    original_lock = recall_runtime._feedback_exclusive_lock
+    depth = 0
+    entries = 0
+
+    @contextmanager
+    def fail_on_nested_lock(path: Path):
+        nonlocal depth, entries
+        if depth:
+            raise AssertionError("feedback lock must not be acquired recursively")
+        depth += 1
+        entries += 1
+        try:
+            with original_lock(path):
+                yield
+        finally:
+            depth -= 1
+
+    monkeypatch.setattr(recall_runtime, "_feedback_exclusive_lock", fail_on_nested_lock)
+    monkeypatch.setattr(content_correction, "_feedback_exclusive_lock", fail_on_nested_lock)
+    monkeypatch.setattr(
+        content_correction,
+        "_current_candidate_page_hashes",
+        lambda _page_ids: {"memory": "a" * 64},
+    )
+    monkeypatch.setattr(
+        recall_field,
+        "apply_reviewed_negative_feedback",
+        lambda feedback: {"status": "recorded", "kind": feedback["kind"]},
+    )
+    event = _event()
+    event["candidate_page_hashes"] = {"memory": "a" * 64}
+
+    result = content_correction._record_wrong_retrieval(
+        event,
+        {"reason": "irrelevant page"},
+        key="feedback-key",
+        ignored_pages=["memory"],
+    )
+
+    assert entries == 1
+    assert depth == 0
+    assert result["already_recorded"] is False
+    assert json.loads(feedback_file.read_text(encoding="utf-8"))[
+        "content_correction_key"
+    ] == "feedback-key"
+    assert not runtime_feedback_file.exists()
+
+
+def test_concurrent_wrong_retrieval_transactions_append_one_row_for_same_key(
+    tmp_path: Path,
+) -> None:
+    feedback_file = tmp_path / "feedback.jsonl"
+    script = (
+        "import sys\n"
+        "from pathlib import Path\n"
+        "from chronovisor.recall import content_correction, recall_field, recall_runtime\n"
+        "path = Path(sys.argv[1])\n"
+        "content_correction.RECALL_FEEDBACK_FILE = path\n"
+        "recall_runtime.RECALL_FEEDBACK_FILE = path\n"
+        "content_correction._current_candidate_page_hashes = (\n"
+        "    lambda _page_ids: {'memory': 'a' * 64}\n"
+        ")\n"
+        "recall_field.apply_reviewed_negative_feedback = lambda _feedback: {}\n"
+        "event = {\n"
+        "    'host': 'codex',\n"
+        "    'source_prompt': 'source',\n"
+        "    'source_decision_id': '',\n"
+        "    'source_turn_ref': {},\n"
+        "    'correction_turn_ref': {},\n"
+        "    'candidate_page_hashes': {'memory': 'a' * 64},\n"
+        "}\n"
+        "print('ready', flush=True)\n"
+        "sys.stdin.readline()\n"
+        "content_correction._record_wrong_retrieval(\n"
+        "    event, {'reason': 'irrelevant'},\n"
+        "    key='same-key', ignored_pages=['memory'],\n"
+        ")\n"
+    )
+    writers = [
+        subprocess.Popen(
+            [sys.executable, "-c", script, str(feedback_file)],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            text=True,
+        )
+        for _ in range(2)
+    ]
+    try:
+        for writer in writers:
+            assert writer.stdin is not None
+            assert writer.stdout is not None
+            ready, _, _ = select.select([writer.stdout], [], [], 5.0)
+            assert ready and writer.stdout.readline() == "ready\n"
+        for writer in writers:
+            assert writer.stdin is not None
+            writer.stdin.write("start\n")
+            writer.stdin.flush()
+        for writer in writers:
+            assert writer.wait(timeout=5.0) == 0
+    finally:
+        for writer in writers:
+            if writer.poll() is None:
+                writer.kill()
+                writer.wait(timeout=5.0)
+
+    rows = [
+        json.loads(line)
+        for line in feedback_file.read_text(encoding="utf-8").splitlines()
+    ]
+    assert len(rows) == 1
+    assert rows[0]["content_correction_key"] == "same-key"
 
 
 def test_classification_side_effects_recover_without_frontier_redecision(
