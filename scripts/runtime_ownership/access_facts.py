@@ -38,14 +38,19 @@ def _escape_blocks_concrete_access(reason: str) -> bool:
 
 
 def _logical_actor(actor: str, chain: tuple[str, ...]) -> str:
+    call_relations: list[tuple[str, str]] = []
     for step in chain:
-        if step.startswith("call:") and "->" in step:
-            return step.removeprefix("call:").split("->", 1)[0]
+        if not step.startswith("call:") or "->" not in step:
+            continue
+        relation = step.removeprefix("call:").split("|", 1)[0]
+        source, target_parameter = relation.split("->", 1)
+        if ":" not in target_parameter:
+            continue
+        target, _parameter = target_parameter.rsplit(":", 1)
+        call_relations.append((source, target))
+    if call_relations and any(target == actor for _, target in call_relations):
+        return call_relations[0][0]
     return actor
-
-
-def _legacy_binding_chain(chain: tuple[str, ...]) -> tuple[str, ...]:
-    return tuple(_SITE_ID_PATTERN.sub("", step) for step in chain)
 
 
 def _v2_binding_chain(chain: tuple[str, ...]) -> tuple[str, ...]:
@@ -301,8 +306,6 @@ class AccessFactCollector:
 
     def result(self) -> dict[str, Any]:
         self._reconcile_ambiguous_accesses()
-        accesses = self._finalize_accesses()
-        escapes = self._finalize_escapes()
         access_facts, access_provenances = self._finalize_v2_accesses()
         escape_facts, escape_provenances = self._finalize_v2_escapes()
         provenances = {**access_provenances, **escape_provenances}
@@ -313,7 +316,6 @@ class AccessFactCollector:
             referenced_site_ids.update(str(item) for item in row["call_site_ids"])
         return {
             "schema_version": 2,
-            "legacy_identity_version": 1,
             "sites": self._finalize_sites(referenced_site_ids),
             "provenances": sorted(
                 provenances.values(), key=lambda row: str(row["provenance_id"])
@@ -327,17 +329,13 @@ class AccessFactCollector:
             "escape_fact_ids": sorted(
                 str(row["escape_fact_id"]) for row in escape_facts
             ),
-            "accesses": accesses,
-            "escapes": escapes,
-            "access_ids": sorted(str(row["access_id"]) for row in accesses),
-            "escape_ids": sorted(str(row["escape_id"]) for row in escapes),
             "counts": {
-                "accesses": len(accesses),
-                "escapes": len(escapes),
-                "read": sum(row["mode"] == "read" for row in accesses),
-                "write": sum(row["mode"] == "write" for row in accesses),
+                "accesses": len(access_facts),
+                "escapes": len(escape_facts),
+                "read": sum(row["mode"] == "read" for row in access_facts),
+                "write": sum(row["mode"] == "write" for row in access_facts),
                 "read_write": sum(
-                    row["mode"] == "read_write" for row in accesses
+                    row["mode"] == "read_write" for row in access_facts
                 ),
             },
         }
@@ -645,82 +643,5 @@ class AccessFactCollector:
                 }
             )
         return facts
-
-    def _finalize_accesses(self) -> list[dict[str, Any]]:
-        rows: list[dict[str, Any]] = []
-        grouped: dict[tuple[Any, ...], list[RawAccess]] = {}
-        for row in self.raw_accesses:
-            key = (
-                row.resource_id,
-                row.actor,
-                row.sink_actor,
-                row.mode,
-                row.operation,
-                row.sink,
-                _legacy_binding_chain(row.binding_chain),
-            )
-            grouped.setdefault(key, []).append(row)
-        for key, sites in sorted(grouped.items(), key=lambda item: item[0]):
-            sites.sort(key=lambda row: (row.path, row.structural_ordinal, row.line))
-            binding_chain = key[-1]
-            for occurrence, row in enumerate(sites, start=1):
-                identity = {
-                    "resource_id": row.resource_id,
-                    "actor": row.actor,
-                    "sink_actor": row.sink_actor,
-                    "mode": row.mode,
-                    "operation": row.operation,
-                    "sink": row.sink,
-                    "binding_chain": list(binding_chain),
-                    "occurrence": occurrence,
-                }
-                rows.append(
-                    {
-                        "access_id": _stable_id("runtime-access", identity),
-                        **identity,
-                        "locator": self.resource_locators[row.resource_id],
-                        "evidence": {"path": row.path, "line": row.line},
-                        "structural_ordinal": row.structural_ordinal,
-                    }
-                )
-        return sorted(rows, key=lambda row: str(row["access_id"]))
-
-    def _finalize_escapes(self) -> list[dict[str, Any]]:
-        rows: list[dict[str, Any]] = []
-        grouped: dict[tuple[Any, ...], list[RawEscape]] = {}
-        for row in self.raw_escapes:
-            key = (
-                row.resource_id,
-                row.actor,
-                row.operation,
-                row.sink,
-                row.reason,
-                _legacy_binding_chain(row.binding_chain),
-            )
-            grouped.setdefault(key, []).append(row)
-        for key, sites in sorted(grouped.items(), key=lambda item: item[0]):
-            sites.sort(key=lambda row: (row.path, row.structural_ordinal, row.line))
-            binding_chain = key[-1]
-            for occurrence, row in enumerate(sites, start=1):
-                identity = {
-                    "resource_id": row.resource_id,
-                    "actor": row.actor,
-                    "operation": row.operation,
-                    "sink": row.sink,
-                    "reason": row.reason,
-                    "binding_chain": list(binding_chain),
-                    "occurrence": occurrence,
-                }
-                rows.append(
-                    {
-                        "escape_id": _stable_id("runtime-escape", identity),
-                        **identity,
-                        "locator": self.resource_locators[row.resource_id],
-                        "evidence": {"path": row.path, "line": row.line},
-                        "structural_ordinal": row.structural_ordinal,
-                    }
-                )
-        return sorted(rows, key=lambda row: str(row["escape_id"]))
-
 
 __all__ = ["AccessFactCollector"]

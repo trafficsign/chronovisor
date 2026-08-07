@@ -1,11 +1,17 @@
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from scripts.runtime_ownership.access import discover_access_facts
+from tests.runtime_access_v2_helpers import (
+    joined_access_rows,
+    joined_escape_rows,
+)
 
 
-def _access_fixture(*, consumer: str, extra: dict[str, str] | None = None) -> dict:
+def _access_fixture(*, consumer: str, extra: dict[str, str] | None = None) -> dict[str, Any]:
     sources = {
         "src/chronovisor/state.py": "STATE_FILE = object()\n",
         "src/chronovisor/consumer.py": consumer,
@@ -39,7 +45,7 @@ def test_access_fixed_point_converges_for_default_and_local_alias() -> None:
         "write": 1,
         "read_write": 0,
     }
-    access = result["accesses"][0]
+    access = joined_access_rows(result)[0]
     assert access["actor"] == "chronovisor.consumer:save"
     assert access["sink_actor"] == "chronovisor.consumer:save"
     assert access["operation"] == "path.write_text"
@@ -72,8 +78,8 @@ def test_access_tracks_imports_helpers_returns_and_simple_self_attrs() -> None:
         )
     )
 
-    assert result["escapes"] == []
-    by_actor = {row["actor"]: row for row in result["accesses"]}
+    assert joined_escape_rows(result) == []
+    by_actor = {row["actor"]: row for row in joined_access_rows(result)}
     assert set(by_actor) == {
         "chronovisor.consumer:read_imported",
         "chronovisor.consumer:write_module_alias",
@@ -118,15 +124,15 @@ def test_open_modes_are_exact_and_dynamic_mode_fails_closed() -> None:
         "write": 2,
         "read_write": 1,
     }
-    assert {row["operation"] for row in result["accesses"]} == {
+    assert {row["operation"] for row in joined_access_rows(result)} == {
         "builtin.open:r",
         "path.open:r",
         "path.open:w",
         "path.open:a",
         "path.open:r+",
     }
-    assert result["escapes"][0]["reason"] == "dynamic_open_mode"
-    assert result["escapes"][0]["sink"] == "pathlib.Path.open"
+    assert joined_escape_rows(result)[0]["reason"] == "dynamic_open_mode"
+    assert joined_escape_rows(result)[0]["sink"] == "pathlib.Path.open"
 
 
 def test_registered_locator_to_unknown_callee_is_an_escape() -> None:
@@ -138,13 +144,13 @@ def test_registered_locator_to_unknown_callee_is_an_escape() -> None:
         )
     )
 
-    assert result["accesses"] == []
-    assert len(result["escapes"]) == 1
-    assert result["escapes"][0]["actor"] == "chronovisor.consumer:leak"
-    assert result["escapes"][0]["reason"] == ("registered_locator_to_unknown_callee")
+    assert joined_access_rows(result) == []
+    assert len(joined_escape_rows(result)) == 1
+    assert joined_escape_rows(result)[0]["actor"] == "chronovisor.consumer:leak"
+    assert joined_escape_rows(result)[0]["reason"] == ("registered_locator_to_unknown_callee")
 
 
-def test_access_ids_are_line_independent_and_detect_new_readers_and_writers() -> None:
+def test_access_fact_ids_are_line_independent_and_detect_new_actors() -> None:
     base_source = (
         "from chronovisor.state import STATE_FILE\n"
         "def writer_one():\n"
@@ -163,15 +169,15 @@ def test_access_ids_are_line_independent_and_detect_new_readers_and_writers() ->
         )
     )
 
-    base_ids = set(base["access_ids"])
-    assert set(line_shifted["access_ids"]) == base_ids
-    assert len(set(second_writer["access_ids"]) - base_ids) == 1
-    assert len(set(new_reader["access_ids"]) - base_ids) == 1
-    assert {row["actor"] for row in second_writer["accesses"]} == {
+    base_ids = set(base["access_fact_ids"])
+    assert set(line_shifted["access_fact_ids"]) == base_ids
+    assert len(set(second_writer["access_fact_ids"]) - base_ids) == 1
+    assert len(set(new_reader["access_fact_ids"]) - base_ids) == 1
+    assert {row["actor"] for row in joined_access_rows(second_writer)} == {
         "chronovisor.consumer:writer_one",
         "chronovisor.consumer:writer_two",
     }
-    assert {row["mode"] for row in new_reader["accesses"]} == {"read", "write"}
+    assert {row["mode"] for row in joined_access_rows(new_reader)} == {"read", "write"}
 
 
 def test_shared_helper_preserves_each_logical_writer_binding() -> None:
@@ -187,15 +193,16 @@ def test_shared_helper_preserves_each_logical_writer_binding() -> None:
         )
     )
 
-    assert result["counts"]["accesses"] == 2
-    assert {row["actor"] for row in result["accesses"]} == {
+    assert result["counts"]["accesses"] == 1
+    assert {row["actor"] for row in joined_access_rows(result)} == {
         "chronovisor.consumer:writer_a",
         "chronovisor.consumer:writer_b",
     }
-    assert {row["sink_actor"] for row in result["accesses"]} == {
+    assert {row["sink_actor"] for row in joined_access_rows(result)} == {
         "chronovisor.consumer:persist"
     }
-    assert len(set(result["access_ids"])) == 2
+    assert len(result["access_fact_ids"]) == 1
+    assert len(result["provenance_ids"]) == 2
 
 
 def test_recursive_binding_cycle_fails_closed_without_duplicate_access() -> None:
@@ -212,13 +219,13 @@ def test_recursive_binding_cycle_fails_closed_without_duplicate_access() -> None
 
     assert result["counts"]["accesses"] == 1
     assert result["counts"]["escapes"] == 1
-    assert result["accesses"][0]["actor"] == "chronovisor.consumer:writer"
-    assert result["accesses"][0]["sink_actor"] == "chronovisor.consumer:helper"
-    assert result["escapes"][0]["reason"] == "binding_cycle"
-    assert result["escapes"][0]["sink"] == "chronovisor.consumer:helper"
+    assert joined_access_rows(result)[0]["actor"] == "chronovisor.consumer:writer"
+    assert joined_access_rows(result)[0]["sink_actor"] == "chronovisor.consumer:helper"
+    assert joined_escape_rows(result)[0]["reason"] == "binding_cycle"
+    assert joined_escape_rows(result)[0]["sink"] == "chronovisor.consumer:helper"
 
 
-def test_helper_access_ids_ignore_unrelated_calls_and_add_identical_calls() -> None:
+def test_helper_fact_id_ignores_calls_while_provenance_tracks_them() -> None:
     helper = (
         "from chronovisor.state import STATE_FILE\n"
         "def persist(path):\n"
@@ -246,10 +253,14 @@ def test_helper_access_ids_ignore_unrelated_calls_and_add_identical_calls() -> N
         )
     )
 
-    base_ids = set(base["access_ids"])
-    assert set(with_unrelated_call["access_ids"]) == base_ids
-    assert len(set(with_identical_call["access_ids"]) - base_ids) == 1
-    assert len(with_identical_call["access_ids"]) == 2
+    base_ids = set(base["access_fact_ids"])
+    assert set(with_unrelated_call["access_fact_ids"]) == base_ids
+    assert set(with_identical_call["access_fact_ids"]) == base_ids
+    assert len(
+        set(with_identical_call["provenance_ids"])
+        - set(base["provenance_ids"])
+    ) == 1
+    assert len(with_identical_call["provenance_ids"]) == 2
 
 
 def test_provenance_overflow_is_a_deterministic_escape() -> None:
@@ -267,16 +278,16 @@ def test_provenance_overflow_is_a_deterministic_escape() -> None:
     second = _access_fixture(consumer=source)
 
     assert first["counts"] == {
-        "accesses": 64,
+        "accesses": 1,
         "escapes": 1,
         "read": 0,
-        "write": 64,
+        "write": 1,
         "read_write": 0,
     }
-    assert first["access_ids"] == second["access_ids"]
-    assert first["escape_ids"] == second["escape_ids"]
-    assert first["escapes"][0]["reason"] == "provenance_overflow"
-    assert first["escapes"][0]["sink"] == "pathlib.Path.write_text"
+    assert first["access_fact_ids"] == second["access_fact_ids"]
+    assert first["escape_fact_ids"] == second["escape_fact_ids"]
+    assert joined_escape_rows(first)[0]["reason"] == "provenance_overflow"
+    assert joined_escape_rows(first)[0]["sink"] == "pathlib.Path.write_text"
 
 
 def test_ambiguous_resource_candidates_for_one_symbol_are_rejected() -> None:
@@ -318,7 +329,7 @@ def test_nested_writer_propagates_closure_origin_through_nested_helper() -> None
         )
     )
 
-    by_actor = {row["actor"]: row for row in result["accesses"]}
+    by_actor = {row["actor"]: row for row in joined_access_rows(result)}
     nested_actor = "chronovisor.consumer:outer.<locals>.nested_writer"
     assert set(by_actor) == {
         nested_actor,
@@ -331,7 +342,7 @@ def test_nested_writer_propagates_closure_origin_through_nested_helper() -> None
         step.startswith("closure:chronovisor.consumer:outer->")
         for step in by_actor[nested_actor]["binding_chain"]
     )
-    assert result["escapes"] == []
+    assert joined_escape_rows(result) == []
 
 
 def test_generic_expressions_visit_known_sinks_with_stable_ids() -> None:
@@ -370,7 +381,7 @@ def test_generic_expressions_visit_known_sinks_with_stable_ids() -> None:
         "write": 0,
         "read_write": 0,
     }
-    assert set(with_unrelated_expression["access_ids"]) == set(result["access_ids"])
+    assert set(with_unrelated_expression["access_fact_ids"]) == set(result["access_fact_ids"])
 
 
 def test_generic_origins_bind_propagate_or_fail_closed_by_semantics() -> None:
@@ -389,27 +400,27 @@ def test_generic_origins_bind_propagate_or_fail_closed_by_semantics() -> None:
         )
     )
 
-    assert {row["operation"] for row in result["accesses"]} == {
+    assert {row["operation"] for row in joined_access_rows(result)} == {
         "path.read_text",
         "path.write_text",
     }
     named_read = next(
-        row for row in result["accesses"] if row["operation"] == "path.read_text"
+        row for row in joined_access_rows(result) if row["operation"] == "path.read_text"
     )
     path_division_write = next(
-        row for row in result["accesses"] if row["operation"] == "path.write_text"
+        row for row in joined_access_rows(result) if row["operation"] == "path.write_text"
     )
     assert any(
         step.startswith("alias:chronovisor.consumer:named:path")
         for step in named_read["binding_chain"]
     )
     assert "transform:truediv" in path_division_write["binding_chain"]
-    assert {row["reason"] for row in result["escapes"]} == {
+    assert {row["reason"] for row in joined_escape_rows(result)} == {
         "unsupported_registered_origin_control_flow",
         "registered_locator_to_unknown_callee",
         "unsupported_registered_origin_expression",
     }
-    assert {row["operation"] for row in result["escapes"]} == {
+    assert {row["operation"] for row in joined_escape_rows(result)} == {
         "control:if",
         "call:opaque_container",
         "call:opaque_bool",
@@ -444,15 +455,15 @@ def test_comprehensions_visit_sinks_and_fail_closed_on_raw_controls() -> None:
         "write": 0,
         "read_write": 0,
     }
-    assert {row["operation"] for row in result["escapes"]} == {
+    assert {row["operation"] for row in joined_escape_rows(result)} == {
         "control:comprehension_iter",
         "control:comprehension_if",
     }
-    assert {row["reason"] for row in result["escapes"]} == {
+    assert {row["reason"] for row in joined_escape_rows(result)} == {
         "unsupported_registered_origin_control_flow"
     }
-    assert set(with_unrelated_expression["access_ids"]) == set(result["access_ids"])
-    assert set(with_unrelated_expression["escape_ids"]) == set(result["escape_ids"])
+    assert set(with_unrelated_expression["access_fact_ids"]) == set(result["access_fact_ids"])
+    assert set(with_unrelated_expression["escape_fact_ids"]) == set(result["escape_fact_ids"])
 
 
 def test_lambda_origin_accesses_are_explicit_stable_escapes() -> None:
@@ -473,13 +484,13 @@ def test_lambda_origin_accesses_are_explicit_stable_escapes() -> None:
     result = _access_fixture(consumer=source)
     with_unrelated_expression = _access_fixture(consumer=shifted)
 
-    assert result["accesses"] == []
-    assert len(result["escapes"]) == 3
-    assert {row["reason"] for row in result["escapes"]} == {
+    assert joined_access_rows(result) == []
+    assert len(joined_escape_rows(result)) == 3
+    assert {row["reason"] for row in joined_escape_rows(result)} == {
         "unsupported_registered_origin_lambda"
     }
-    assert {row["sink"] for row in result["escapes"]} == {"python.lambda"}
-    assert set(with_unrelated_expression["escape_ids"]) == set(result["escape_ids"])
+    assert {row["sink"] for row in joined_escape_rows(result)} == {"python.lambda"}
+    assert set(with_unrelated_expression["escape_fact_ids"]) == set(result["escape_fact_ids"])
 
 
 def test_unknown_method_receiver_is_a_stable_escape() -> None:
@@ -497,11 +508,11 @@ def test_unknown_method_receiver_is_a_stable_escape() -> None:
     result = _access_fixture(consumer=source)
     with_unrelated_call = _access_fixture(consumer=shifted)
 
-    assert result["accesses"] == []
-    assert len(result["escapes"]) == 1
-    assert result["escapes"][0]["reason"] == ("registered_locator_to_unknown_callee")
-    assert result["escapes"][0]["operation"] == "call:STATE_FILE.opaque"
-    assert set(with_unrelated_call["escape_ids"]) == set(result["escape_ids"])
+    assert joined_access_rows(result) == []
+    assert len(joined_escape_rows(result)) == 1
+    assert joined_escape_rows(result)[0]["reason"] == ("registered_locator_to_unknown_callee")
+    assert joined_escape_rows(result)[0]["operation"] == "call:STATE_FILE.opaque"
+    assert set(with_unrelated_call["escape_fact_ids"]) == set(result["escape_fact_ids"])
 
 
 def test_await_raw_origin_escapes_while_inner_sink_is_discovered() -> None:
@@ -520,15 +531,15 @@ def test_await_raw_origin_escapes_while_inner_sink_is_discovered() -> None:
     result = _access_fixture(consumer=source)
     with_unrelated_call = _access_fixture(consumer=shifted)
 
-    assert len(result["accesses"]) == 1
-    assert result["accesses"][0]["operation"] == "path.read_text"
-    assert len(result["escapes"]) == 1
-    assert result["escapes"][0]["operation"] == "control:await"
-    assert result["escapes"][0]["reason"] == (
+    assert len(joined_access_rows(result)) == 1
+    assert joined_access_rows(result)[0]["operation"] == "path.read_text"
+    assert len(joined_escape_rows(result)) == 1
+    assert joined_escape_rows(result)[0]["operation"] == "control:await"
+    assert joined_escape_rows(result)[0]["reason"] == (
         "unsupported_registered_origin_control_flow"
     )
-    assert set(with_unrelated_call["access_ids"]) == set(result["access_ids"])
-    assert set(with_unrelated_call["escape_ids"]) == set(result["escape_ids"])
+    assert set(with_unrelated_call["access_fact_ids"]) == set(result["access_fact_ids"])
+    assert set(with_unrelated_call["escape_fact_ids"]) == set(result["escape_fact_ids"])
 
 
 def test_parameter_binding_kills_same_named_module_origin() -> None:
@@ -540,8 +551,8 @@ def test_parameter_binding_kills_same_named_module_origin() -> None:
         )
     )
 
-    assert result["accesses"] == []
-    assert result["escapes"] == []
+    assert joined_access_rows(result) == []
+    assert joined_escape_rows(result) == []
 
 
 def test_local_assignment_strongly_kills_same_named_module_origin() -> None:
@@ -554,8 +565,8 @@ def test_local_assignment_strongly_kills_same_named_module_origin() -> None:
         )
     )
 
-    assert result["accesses"] == []
-    assert result["escapes"] == []
+    assert joined_access_rows(result) == []
+    assert joined_escape_rows(result) == []
 
 
 def test_open_shadow_keyword_file_and_invalid_modes_are_classified_exactly() -> None:
@@ -601,12 +612,12 @@ def test_open_shadow_keyword_file_and_invalid_modes_are_classified_exactly() -> 
         )
     )
 
-    assert {row["operation"] for row in shadowed["accesses"]} == {
+    assert {row["operation"] for row in joined_access_rows(shadowed)} == {
         "path.write_text",
         "path.write_bytes",
     }
-    assert len(shadowed["escapes"]) == 3
-    assert {row["reason"] for row in shadowed["escapes"]} == {
+    assert len(joined_escape_rows(shadowed)) == 3
+    assert {row["reason"] for row in joined_escape_rows(shadowed)} == {
         "registered_locator_to_unknown_callee"
     }
     assert modes["counts"] == {
@@ -616,11 +627,11 @@ def test_open_shadow_keyword_file_and_invalid_modes_are_classified_exactly() -> 
         "write": 1,
         "read_write": 0,
     }
-    assert modes["accesses"][0]["operation"] == "builtin.open:w"
-    assert [row["reason"] for row in modes["escapes"]].count("invalid_open_mode") == 2
-    assert [row["reason"] for row in modes["escapes"]].count("dynamic_open_mode") == 1
-    assert set(shifted_modes["access_ids"]) == set(modes["access_ids"])
-    assert set(shifted_modes["escape_ids"]) == set(modes["escape_ids"])
+    assert joined_access_rows(modes)[0]["operation"] == "builtin.open:w"
+    assert [row["reason"] for row in joined_escape_rows(modes)].count("invalid_open_mode") == 2
+    assert [row["reason"] for row in joined_escape_rows(modes)].count("dynamic_open_mode") == 1
+    assert set(shifted_modes["access_fact_ids"]) == set(modes["access_fact_ids"])
+    assert set(shifted_modes["escape_fact_ids"]) == set(modes["escape_fact_ids"])
 
 
 def test_async_control_flow_does_not_drop_origins() -> None:
@@ -635,15 +646,15 @@ def test_async_control_flow_does_not_drop_origins() -> None:
         )
     )
 
-    assert {row["operation"] for row in result["accesses"]} == {
+    assert {row["operation"] for row in joined_access_rows(result)} == {
         "path.read_text",
         "path.write_text",
     }
-    assert {row["operation"] for row in result["escapes"]} == {
+    assert {row["operation"] for row in joined_escape_rows(result)} == {
         "control:async_with",
         "control:async_for",
     }
-    assert {row["reason"] for row in result["escapes"]} == {
+    assert {row["reason"] for row in joined_escape_rows(result)} == {
         "unsupported_registered_origin_control_flow"
     }
 
@@ -666,13 +677,13 @@ def test_match_control_flow_does_not_drop_origins() -> None:
         )
     )
 
-    assert {row["operation"] for row in result["accesses"]} == {"path.read_bytes"}
-    assert {row["operation"] for row in result["escapes"]} == {
+    assert {row["operation"] for row in joined_access_rows(result)} == {"path.read_bytes"}
+    assert {row["operation"] for row in joined_escape_rows(result)} == {
         "control:match_subject",
         "control:match_guard",
         "control:match_pattern",
     }
-    assert {row["reason"] for row in result["escapes"]} == {
+    assert {row["reason"] for row in joined_escape_rows(result)} == {
         "unsupported_registered_origin_control_flow"
     }
 
@@ -687,12 +698,12 @@ def test_yield_control_flow_does_not_drop_origins() -> None:
         )
     )
 
-    assert result["accesses"] == []
-    assert {row["operation"] for row in result["escapes"]} == {
+    assert joined_access_rows(result) == []
+    assert {row["operation"] for row in joined_escape_rows(result)} == {
         "control:yield",
         "control:yield_from",
     }
-    assert {row["reason"] for row in result["escapes"]} == {
+    assert {row["reason"] for row in joined_escape_rows(result)} == {
         "unsupported_registered_origin_control_flow"
     }
 
@@ -708,8 +719,8 @@ def test_sequential_assignment_strongly_kills_previous_origin() -> None:
         )
     )
 
-    assert result["accesses"] == []
-    assert result["escapes"] == []
+    assert joined_access_rows(result) == []
+    assert joined_escape_rows(result) == []
 
 
 def test_possible_branch_preserves_only_feasible_origin() -> None:
@@ -724,10 +735,10 @@ def test_possible_branch_preserves_only_feasible_origin() -> None:
         )
     )
 
-    assert len(result["accesses"]) == 1
-    assert result["accesses"][0]["actor"] == "chronovisor.consumer:possible"
-    assert result["accesses"][0]["operation"] == "path.write_text"
-    assert result["escapes"] == []
+    assert len(joined_access_rows(result)) == 1
+    assert joined_access_rows(result)[0]["actor"] == "chronovisor.consumer:possible"
+    assert joined_access_rows(result)[0]["operation"] == "path.write_text"
+    assert joined_escape_rows(result) == []
 
 
 def test_branch_assignment_does_not_leak_into_mutually_exclusive_else() -> None:
@@ -743,8 +754,8 @@ def test_branch_assignment_does_not_leak_into_mutually_exclusive_else() -> None:
         )
     )
 
-    assert result["accesses"] == []
-    assert result["escapes"] == []
+    assert joined_access_rows(result) == []
+    assert joined_escape_rows(result) == []
 
 
 def test_mutually_exclusive_branches_join_each_resource_once() -> None:
@@ -774,19 +785,19 @@ def test_mutually_exclusive_branches_join_each_resource_once() -> None:
         {path: text.encode() for path, text in sources.items()}, candidates
     )
 
-    assert len(result["accesses"]) == 2
-    assert {row["resource_id"] for row in result["accesses"]} == {
+    assert len(joined_access_rows(result)) == 2
+    assert {row["resource_id"] for row in joined_access_rows(result)} == {
         "runtime-resource:state-a",
         "runtime-resource:state-b",
     }
-    assert {row["actor"] for row in result["accesses"]} == {
+    assert {row["actor"] for row in joined_access_rows(result)} == {
         "chronovisor.consumer:choose"
     }
-    assert result["escapes"] == []
+    assert joined_escape_rows(result) == []
 
 
 def test_constant_origin_without_an_io_sink_is_not_a_writer() -> None:
     result = _access_fixture(consumer="from chronovisor.state import STATE_FILE\n")
 
-    assert result["accesses"] == []
-    assert result["escapes"] == []
+    assert joined_access_rows(result) == []
+    assert joined_escape_rows(result) == []

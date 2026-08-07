@@ -1,9 +1,15 @@
 from __future__ import annotations
 
+from typing import Any
+
 from scripts.runtime_ownership.access import discover_access_facts
+from tests.runtime_access_v2_helpers import (
+    joined_access_rows,
+    joined_escape_rows,
+)
 
 
-def _access_fixture(*, consumer: str) -> dict:
+def _access_fixture(*, consumer: str) -> dict[str, Any]:
     sources = {
         "src/chronovisor/state.py": "STATE_FILE = object()\n",
         "src/chronovisor/consumer.py": consumer,
@@ -19,8 +25,8 @@ def _access_fixture(*, consumer: str) -> dict:
     )
 
 
-def _operations(result: dict) -> list[str]:
-    return [row["operation"] for row in result["accesses"]]
+def _operations(result: dict[str, Any]) -> list[str]:
+    return [row["operation"] for row in joined_access_rows(result)]
 
 
 def test_registered_origin_is_injected_when_its_assignment_executes() -> None:
@@ -45,8 +51,8 @@ def test_registered_origin_is_injected_when_its_assignment_executes() -> None:
     )
 
     assert _operations(result) == ["path.write_text"]
-    assert result["accesses"][0]["actor"] == "chronovisor.state:after"
-    assert result["escapes"] == []
+    assert joined_access_rows(result)[0]["actor"] == "chronovisor.state:after"
+    assert joined_escape_rows(result) == []
 
 
 def test_module_function_definition_strongly_kills_prior_origin() -> None:
@@ -60,8 +66,8 @@ def test_module_function_definition_strongly_kills_prior_origin() -> None:
         )
     )
 
-    assert result["accesses"] == []
-    assert result["escapes"] == []
+    assert joined_access_rows(result) == []
+    assert joined_escape_rows(result) == []
 
 
 def test_later_function_definition_does_not_retroactively_kill_earlier_sink() -> None:
@@ -76,7 +82,7 @@ def test_later_function_definition_does_not_retroactively_kill_earlier_sink() ->
     )
 
     assert _operations(result) == ["path.write_text"]
-    assert result["escapes"] == []
+    assert joined_escape_rows(result) == []
 
 
 def test_top_level_default_is_evaluated_once_and_cached_before_later_kill() -> None:
@@ -90,8 +96,8 @@ def test_top_level_default_is_evaluated_once_and_cached_before_later_kill() -> N
     )
 
     assert set(_operations(result)) == {"path.read_text", "path.write_text"}
-    assert len(result["accesses"]) == 2
-    by_operation = {row["operation"]: row for row in result["accesses"]}
+    assert len(joined_access_rows(result)) == 2
+    by_operation = {row["operation"]: row for row in joined_access_rows(result)}
     assert by_operation["path.read_text"]["actor"] == ("chronovisor.consumer:<module>")
     assert by_operation["path.read_text"]["sink_actor"] == (
         "chronovisor.consumer:<module>"
@@ -101,7 +107,7 @@ def test_top_level_default_is_evaluated_once_and_cached_before_later_kill() -> N
         step.startswith("default:chronovisor.consumer:cached:path")
         for step in by_operation["path.write_text"]["binding_chain"]
     )
-    assert result["escapes"] == []
+    assert joined_escape_rows(result) == []
 
 
 def test_top_level_decorator_is_evaluated_once_with_module_actor() -> None:
@@ -116,10 +122,10 @@ def test_top_level_decorator_is_evaluated_once_with_module_actor() -> None:
     )
 
     assert _operations(result) == ["path.exists"]
-    assert len(result["accesses"]) == 1
-    assert result["accesses"][0]["actor"] == "chronovisor.consumer:<module>"
-    assert result["accesses"][0]["sink_actor"] == ("chronovisor.consumer:<module>")
-    assert result["escapes"] == []
+    assert len(joined_access_rows(result)) == 1
+    assert joined_access_rows(result)[0]["actor"] == "chronovisor.consumer:<module>"
+    assert joined_access_rows(result)[0]["sink_actor"] == ("chronovisor.consumer:<module>")
+    assert joined_escape_rows(result) == []
 
 
 def test_top_level_default_cannot_see_later_assignment() -> None:
@@ -132,8 +138,8 @@ def test_top_level_default_cannot_see_later_assignment() -> None:
         )
     )
 
-    assert result["accesses"] == []
-    assert result["escapes"] == []
+    assert joined_access_rows(result) == []
+    assert joined_escape_rows(result) == []
 
 
 def test_top_level_body_uses_final_module_state_not_definition_closure() -> None:
@@ -146,8 +152,8 @@ def test_top_level_body_uses_final_module_state_not_definition_closure() -> None
         )
     )
 
-    assert result["accesses"] == []
-    assert result["escapes"] == []
+    assert joined_access_rows(result) == []
+    assert joined_escape_rows(result) == []
 
 
 def test_definition_defaults_follow_import_and_assignment_source_order() -> None:
@@ -165,8 +171,8 @@ def test_definition_defaults_follow_import_and_assignment_source_order() -> None
     )
 
     assert _operations(result) == ["path.read_text"]
-    assert result["accesses"][0]["actor"] == "chronovisor.consumer:sees_before"
-    assert result["escapes"] == []
+    assert joined_access_rows(result)[0]["actor"] == "chronovisor.consumer:sees_before"
+    assert joined_escape_rows(result) == []
 
 
 def test_definition_default_cannot_see_later_import() -> None:
@@ -178,11 +184,11 @@ def test_definition_default_cannot_see_later_import() -> None:
         )
     )
 
-    assert result["accesses"] == []
-    assert result["escapes"] == []
+    assert joined_access_rows(result) == []
+    assert joined_escape_rows(result) == []
 
 
-def test_definition_execution_access_ids_are_line_shift_stable() -> None:
+def test_definition_execution_access_fact_ids_are_line_shift_stable() -> None:
     source = (
         "from chronovisor.state import STATE_FILE\n"
         "def cached(path=STATE_FILE, marker=STATE_FILE.read_text()):\n"
@@ -191,9 +197,9 @@ def test_definition_execution_access_ids_are_line_shift_stable() -> None:
     base = _access_fixture(consumer=source)
     shifted = _access_fixture(consumer="\n\n\n" + source)
 
-    assert set(shifted["access_ids"]) == set(base["access_ids"])
+    assert set(shifted["access_fact_ids"]) == set(base["access_fact_ids"])
     assert set(_operations(base)) == {"path.read_text", "path.write_text"}
-    assert shifted["escape_ids"] == base["escape_ids"] == []
+    assert shifted["escape_fact_ids"] == base["escape_fact_ids"] == []
 
 
 def test_annotations_evaluate_at_definition_time_without_future_import() -> None:
@@ -220,11 +226,11 @@ def test_annotations_evaluate_at_definition_time_without_future_import() -> None
         "path.is_file",
         "path.is_dir",
     }
-    assert len(result["accesses"]) == 6
-    assert {row["actor"] for row in result["accesses"]} == {
+    assert len(joined_access_rows(result)) == 6
+    assert {row["actor"] for row in joined_access_rows(result)} == {
         "chronovisor.consumer:<module>"
     }
-    assert result["escapes"] == []
+    assert joined_escape_rows(result) == []
 
 
 def test_future_annotations_are_not_evaluated_at_definition_time() -> None:
@@ -239,5 +245,5 @@ def test_future_annotations_are_not_evaluated_at_definition_time() -> None:
         )
     )
 
-    assert result["accesses"] == []
-    assert result["escapes"] == []
+    assert joined_access_rows(result) == []
+    assert joined_escape_rows(result) == []

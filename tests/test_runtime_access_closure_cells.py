@@ -4,6 +4,10 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from scripts.runtime_ownership.access import discover_access_facts
+from tests.runtime_access_v2_helpers import (
+    joined_access_rows,
+    joined_escape_rows,
+)
 
 
 def _candidate(
@@ -42,8 +46,8 @@ def _discover(
 
 
 def _assert_no_facts(result: Mapping[str, Any]) -> None:
-    assert result["accesses"] == []
-    assert result["escapes"] == []
+    assert joined_access_rows(result) == []
+    assert joined_escape_rows(result) == []
 
 
 def test_closure_late_binding_observes_kill_before_reader_call() -> None:
@@ -76,9 +80,9 @@ def test_nonlocal_setter_before_reader_exposes_origin() -> None:
         "outer()\n"
     )
 
-    assert len(result["accesses"]) == 1
-    assert result["accesses"][0]["operation"] == "path.read_text"
-    assert result["escapes"] == []
+    assert len(joined_access_rows(result)) == 1
+    assert joined_access_rows(result)[0]["operation"] == "path.read_text"
+    assert joined_escape_rows(result) == []
 
 
 def test_reader_before_nonlocal_setter_does_not_observe_future_origin() -> None:
@@ -135,9 +139,9 @@ def test_optional_setter_can_reach_unconditional_reader() -> None:
         "outer(object())\n"
     )
 
-    assert len(result["accesses"]) == 1
-    assert result["accesses"][0]["operation"] == "path.read_text"
-    assert result["escapes"] == []
+    assert len(joined_access_rows(result)) == 1
+    assert joined_access_rows(result)[0]["operation"] == "path.read_text"
+    assert joined_escape_rows(result) == []
 
 
 def test_never_called_nested_reader_and_setter_produce_no_facts() -> None:
@@ -186,9 +190,9 @@ def test_global_setter_before_reader_exposes_origin() -> None:
         "reader()\n"
     )
 
-    assert len(result["accesses"]) == 1
-    assert result["accesses"][0]["operation"] == "path.read_text"
-    assert result["escapes"] == []
+    assert len(joined_access_rows(result)) == 1
+    assert joined_access_rows(result)[0]["operation"] == "path.read_text"
+    assert joined_escape_rows(result) == []
 
 
 def test_cross_module_reader_before_setter_does_not_observe_future_origin() -> None:
@@ -230,9 +234,9 @@ def test_cross_module_setter_before_reader_exposes_origin() -> None:
         },
     )
 
-    assert len(result["accesses"]) == 1
-    assert result["accesses"][0]["operation"] == "path.read_text"
-    assert result["escapes"] == []
+    assert len(joined_access_rows(result)) == 1
+    assert joined_access_rows(result)[0]["operation"] == "path.read_text"
+    assert joined_escape_rows(result) == []
 
 
 def test_imprecise_later_call_requires_summary_after_precise_local_call() -> None:
@@ -265,12 +269,12 @@ def test_imprecise_later_call_requires_summary_after_precise_local_call() -> Non
         ],
     )
 
-    assert {row["resource_id"] for row in result["accesses"]} == {
+    assert {row["resource_id"] for row in joined_access_rows(result)} == {
         "runtime-resource:first",
         "runtime-resource:second",
     }
-    assert {row["operation"] for row in result["accesses"]} == {"path.read_text"}
-    assert result["escapes"] == []
+    assert {row["operation"] for row in joined_access_rows(result)} == {"path.read_text"}
+    assert joined_escape_rows(result) == []
 
 
 def test_recursive_depth_40_reaches_base_sink_without_cap() -> None:
@@ -283,9 +287,9 @@ def test_recursive_depth_40_reaches_base_sink_without_cap() -> None:
         "descend(STATE_FILE, 40)\n"
     )
 
-    assert len(result["accesses"]) == 1
-    assert result["accesses"][0]["operation"] == "path.write_text"
-    assert result["escapes"] == []
+    assert len(joined_access_rows(result)) == 1
+    assert joined_access_rows(result)[0]["operation"] == "path.write_text"
+    assert joined_escape_rows(result) == []
 
 
 def test_recursive_if_expression_base_sink_has_no_binding_cycle_escape() -> None:
@@ -300,9 +304,9 @@ def test_recursive_if_expression_base_sink_has_no_binding_cycle_escape() -> None
         "descend(STATE_FILE, 40)\n"
     )
 
-    assert len(result["accesses"]) == 1
-    assert result["accesses"][0]["operation"] == "path.write_text"
-    assert result["escapes"] == []
+    assert len(joined_access_rows(result)) == 1
+    assert joined_access_rows(result)[0]["operation"] == "path.write_text"
+    assert joined_escape_rows(result) == []
 
 
 def test_alias_only_unconditional_recursion_remains_binding_cycle_escape() -> None:
@@ -315,10 +319,10 @@ def test_alias_only_unconditional_recursion_remains_binding_cycle_escape() -> No
         "helper(STATE_FILE)\n"
     )
 
-    assert len(result["accesses"]) == 1
-    assert result["accesses"][0]["operation"] == "path.write_text"
-    assert len(result["escapes"]) == 1
-    assert result["escapes"][0]["reason"] == "binding_cycle"
+    assert len(joined_access_rows(result)) == 1
+    assert joined_access_rows(result)[0]["operation"] == "path.write_text"
+    assert len(joined_escape_rows(result)) == 1
+    assert joined_escape_rows(result)[0]["reason"] == "binding_cycle"
 
 
 def test_returned_closures_remain_activation_scoped() -> None:
@@ -350,10 +354,10 @@ def test_returned_closures_remain_activation_scoped() -> None:
         ],
     )
 
-    assert len(result["accesses"]) == 1
-    assert result["accesses"][0]["resource_id"] == "runtime-resource:first"
-    assert result["accesses"][0]["operation"] == "path.read_text"
-    assert result["escapes"] == []
+    assert len(joined_access_rows(result)) == 1
+    assert joined_access_rows(result)[0]["resource_id"] == "runtime-resource:first"
+    assert joined_access_rows(result)[0]["operation"] == "path.read_text"
+    assert joined_escape_rows(result) == []
 
 
 def test_returned_closure_observes_kill_after_definition() -> None:
@@ -388,9 +392,9 @@ def test_returned_nonlocal_setter_updates_sibling_reader_cell() -> None:
         "reader()\n"
     )
 
-    assert len(result["accesses"]) == 1
-    assert result["accesses"][0]["operation"] == "path.read_text"
-    assert result["escapes"] == []
+    assert len(joined_access_rows(result)) == 1
+    assert joined_access_rows(result)[0]["operation"] == "path.read_text"
+    assert joined_escape_rows(result) == []
 
 
 def test_returned_reader_before_nonlocal_setter_has_no_future_cell_state() -> None:
@@ -442,8 +446,8 @@ def test_registered_origin_closure_to_unknown_callee_is_explicit_escape() -> Non
         "outer()\n"
     )
 
-    assert result["accesses"] == []
-    assert len(result["escapes"]) == 1
-    assert result["escapes"][0]["resource_id"] == "runtime-resource:state"
-    assert result["escapes"][0]["operation"] == "call:consume"
-    assert result["escapes"][0]["reason"] == "closure_to_unknown_callee"
+    assert joined_access_rows(result) == []
+    assert len(joined_escape_rows(result)) == 1
+    assert joined_escape_rows(result)[0]["resource_id"] == "runtime-resource:state"
+    assert joined_escape_rows(result)[0]["operation"] == "call:consume"
+    assert joined_escape_rows(result)[0]["reason"] == "closure_to_unknown_callee"

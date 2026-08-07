@@ -1,11 +1,17 @@
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from scripts.runtime_ownership.access import discover_access_facts
+from tests.runtime_access_v2_helpers import (
+    joined_access_rows,
+    joined_escape_rows,
+)
 
 
-def _access_fixture(*, consumer: str) -> dict:
+def _access_fixture(*, consumer: str) -> dict[str, Any]:
     sources = {
         "src/chronovisor/state.py": "STATE_FILE = object()\n",
         "src/chronovisor/consumer.py": consumer,
@@ -21,8 +27,8 @@ def _access_fixture(*, consumer: str) -> dict:
     )
 
 
-def _operations(result: dict) -> list[str]:
-    return [row["operation"] for row in result["accesses"]]
+def _operations(result: dict[str, Any]) -> list[str]:
+    return [row["operation"] for row in joined_access_rows(result)]
 
 
 def test_literal_for_binds_the_exact_item_value() -> None:
@@ -36,7 +42,7 @@ def test_literal_for_binds_the_exact_item_value() -> None:
     )
 
     assert _operations(result) == ["path.write_text"]
-    assert result["escapes"] == []
+    assert joined_escape_rows(result) == []
 
 
 def test_literal_for_tuple_and_list_targets_bind_exact_positions() -> None:
@@ -54,8 +60,8 @@ def test_literal_for_tuple_and_list_targets_bind_exact_positions() -> None:
     )
 
     assert set(_operations(result)) == {"path.read_text", "path.write_text"}
-    assert len(result["accesses"]) == 2
-    assert result["escapes"] == []
+    assert len(joined_access_rows(result)) == 2
+    assert joined_escape_rows(result) == []
 
 
 def test_literal_for_starred_target_binds_exact_positions() -> None:
@@ -73,7 +79,7 @@ def test_literal_for_starred_target_binds_exact_positions() -> None:
     )
 
     assert _operations(result) == ["path.write_text"]
-    assert result["escapes"] == []
+    assert joined_escape_rows(result) == []
 
 
 def test_async_for_unknown_registered_iterable_binds_and_escapes() -> None:
@@ -87,10 +93,10 @@ def test_async_for_unknown_registered_iterable_binds_and_escapes() -> None:
     )
 
     assert _operations(result) == ["path.write_text"]
-    assert {row["reason"] for row in result["escapes"]} == {
+    assert {row["reason"] for row in joined_escape_rows(result)} == {
         "unsupported_registered_origin_control_flow"
     }
-    assert {row["sink"] for row in result["escapes"]} == {"python.async_for"}
+    assert {row["sink"] for row in joined_escape_rows(result)} == {"python.async_for"}
 
 
 def test_empty_literal_for_skips_body_and_runs_else() -> None:
@@ -106,7 +112,7 @@ def test_empty_literal_for_skips_body_and_runs_else() -> None:
     )
 
     assert _operations(result) == ["path.read_text"]
-    assert result["escapes"] == []
+    assert joined_escape_rows(result) == []
 
 
 def test_nonempty_literal_for_break_skips_else_and_carries_item() -> None:
@@ -123,7 +129,7 @@ def test_nonempty_literal_for_break_skips_else_and_carries_item() -> None:
     )
 
     assert _operations(result) == ["path.write_text"]
-    assert result["escapes"] == []
+    assert joined_escape_rows(result) == []
 
 
 def test_nonempty_literal_for_exhaustion_runs_else() -> None:
@@ -139,7 +145,7 @@ def test_nonempty_literal_for_exhaustion_runs_else() -> None:
     )
 
     assert _operations(result) == ["path.exists"]
-    assert result["escapes"] == []
+    assert joined_escape_rows(result) == []
 
 
 @pytest.mark.parametrize(
@@ -170,7 +176,7 @@ def test_exact_literal_unpack_mismatch_raises_without_continuation(
     )
 
     assert _operations(result) == ["path.exists"]
-    assert result["escapes"] == []
+    assert joined_escape_rows(result) == []
 
 
 def test_literal_for_target_mismatch_raises_before_body_else_and_fallthrough() -> None:
@@ -186,8 +192,8 @@ def test_literal_for_target_mismatch_raises_before_body_else_and_fallthrough() -
         )
     )
 
-    assert result["accesses"] == []
-    assert result["escapes"] == []
+    assert joined_access_rows(result) == []
+    assert joined_escape_rows(result) == []
 
 
 def test_comprehension_walrus_binds_containing_function_scope() -> None:
@@ -201,7 +207,7 @@ def test_comprehension_walrus_binds_containing_function_scope() -> None:
     )
 
     assert _operations(result) == ["path.write_text"]
-    assert result["escapes"] == []
+    assert joined_escape_rows(result) == []
 
 
 def test_comprehension_walrus_binds_containing_module_scope() -> None:
@@ -214,7 +220,7 @@ def test_comprehension_walrus_binds_containing_module_scope() -> None:
     )
 
     assert _operations(result) == ["path.write_text"]
-    assert result["escapes"] == []
+    assert joined_escape_rows(result) == []
 
 
 def test_async_comprehension_walrus_binds_containing_scope() -> None:
@@ -228,7 +234,7 @@ def test_async_comprehension_walrus_binds_containing_scope() -> None:
     )
 
     assert _operations(result) == ["path.write_text"]
-    assert result["escapes"] == []
+    assert joined_escape_rows(result) == []
 
 
 def test_comprehension_walrus_filter_binds_containing_scope() -> None:
@@ -242,10 +248,10 @@ def test_comprehension_walrus_filter_binds_containing_scope() -> None:
     )
 
     assert _operations(result) == ["path.write_text"]
-    assert {row["reason"] for row in result["escapes"]} == {
+    assert {row["reason"] for row in joined_escape_rows(result)} == {
         "unsupported_registered_origin_control_flow"
     }
-    assert {row["sink"] for row in result["escapes"]} == {"python.comprehension_if"}
+    assert {row["sink"] for row in joined_escape_rows(result)} == {"python.comprehension_if"}
 
 
 def test_optional_comprehension_walrus_joins_prior_origin() -> None:
@@ -260,7 +266,7 @@ def test_optional_comprehension_walrus_joins_prior_origin() -> None:
     )
 
     assert _operations(result) == ["path.write_text"]
-    assert result["escapes"] == []
+    assert joined_escape_rows(result) == []
 
 
 def test_nested_comprehension_iteration_targets_remain_isolated() -> None:
@@ -276,4 +282,4 @@ def test_nested_comprehension_iteration_targets_remain_isolated() -> None:
     )
 
     assert _operations(result) == ["path.read_text"]
-    assert result["escapes"] == []
+    assert joined_escape_rows(result) == []

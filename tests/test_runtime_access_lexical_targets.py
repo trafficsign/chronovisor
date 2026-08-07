@@ -1,9 +1,15 @@
 from __future__ import annotations
 
+from typing import Any
+
 from scripts.runtime_ownership.access import discover_access_facts
+from tests.runtime_access_v2_helpers import (
+    joined_access_rows,
+    joined_escape_rows,
+)
 
 
-def _access_fixture(*, consumer: str) -> dict:
+def _access_fixture(*, consumer: str) -> dict[str, Any]:
     sources = {
         "src/chronovisor/state.py": "STATE_FILE = object()\n",
         "src/chronovisor/consumer.py": consumer,
@@ -19,8 +25,8 @@ def _access_fixture(*, consumer: str) -> dict:
     )
 
 
-def _operations(result: dict) -> list[str]:
-    return [row["operation"] for row in result["accesses"]]
+def _operations(result: dict[str, Any]) -> list[str]:
+    return [row["operation"] for row in joined_access_rows(result)]
 
 
 def test_delete_name_strongly_kills_origin() -> None:
@@ -34,8 +40,8 @@ def test_delete_name_strongly_kills_origin() -> None:
         )
     )
 
-    assert result["accesses"] == []
-    assert result["escapes"] == []
+    assert joined_access_rows(result) == []
+    assert joined_escape_rows(result) == []
 
 
 def test_literal_tuple_and_list_destructuring_bind_exact_positions() -> None:
@@ -53,7 +59,7 @@ def test_literal_tuple_and_list_destructuring_bind_exact_positions() -> None:
     )
 
     assert set(_operations(result)) == {"path.read_text", "path.write_text"}
-    assert result["escapes"] == []
+    assert joined_escape_rows(result) == []
 
 
 def test_starred_destructuring_binds_prefix_remainder_and_suffix() -> None:
@@ -71,7 +77,7 @@ def test_starred_destructuring_binds_prefix_remainder_and_suffix() -> None:
     )
 
     assert set(_operations(result)) == {"path.read_text", "path.write_text"}
-    assert result["escapes"] == []
+    assert joined_escape_rows(result) == []
 
 
 def test_unknown_registered_iterable_is_bound_and_explicitly_escaped() -> None:
@@ -83,12 +89,12 @@ def test_unknown_registered_iterable_is_bound_and_explicitly_escaped() -> None:
         )
     )
 
-    assert result["accesses"] == []
-    assert len(result["escapes"]) == 1
-    assert result["escapes"][0]["reason"] == (
+    assert joined_access_rows(result) == []
+    assert len(joined_escape_rows(result)) == 1
+    assert joined_escape_rows(result)[0]["reason"] == (
         "unsupported_registered_origin_destructuring"
     )
-    assert result["escapes"][0]["sink"] == "python.iterable-unpack"
+    assert joined_escape_rows(result)[0]["sink"] == "python.iterable-unpack"
 
 
 def test_nested_function_definition_evaluates_defaults_and_kills_prior_name() -> None:
@@ -104,7 +110,7 @@ def test_nested_function_definition_evaluates_defaults_and_kills_prior_name() ->
     )
 
     assert _operations(result) == ["path.read_text"]
-    assert result["escapes"] == []
+    assert joined_escape_rows(result) == []
 
 
 def test_nested_definition_evaluates_decorator_and_kills_prior_name() -> None:
@@ -121,7 +127,7 @@ def test_nested_definition_evaluates_decorator_and_kills_prior_name() -> None:
     )
 
     assert _operations(result) == ["path.exists"]
-    assert result["escapes"] == []
+    assert joined_escape_rows(result) == []
 
 
 def test_nested_class_definition_evaluates_bases_and_kills_prior_name() -> None:
@@ -137,7 +143,7 @@ def test_nested_class_definition_evaluates_bases_and_kills_prior_name() -> None:
     )
 
     assert _operations(result) == ["path.exists"]
-    assert result["escapes"] == []
+    assert joined_escape_rows(result) == []
 
 
 def test_comprehension_target_shadows_without_leaking() -> None:
@@ -152,7 +158,7 @@ def test_comprehension_target_shadows_without_leaking() -> None:
     )
 
     assert _operations(result) == ["path.read_text"]
-    assert result["escapes"] == []
+    assert joined_escape_rows(result) == []
 
 
 def test_comprehension_binds_origin_before_element() -> None:
@@ -165,7 +171,7 @@ def test_comprehension_binds_origin_before_element() -> None:
     )
 
     assert _operations(result) == ["path.write_text"]
-    assert result["escapes"] == []
+    assert joined_escape_rows(result) == []
 
 
 def test_nested_comprehension_generators_see_prior_bindings() -> None:
@@ -180,7 +186,7 @@ def test_nested_comprehension_generators_see_prior_bindings() -> None:
     )
 
     assert set(_operations(result)) == {"path.read_text", "path.write_text"}
-    assert result["escapes"] == []
+    assert joined_escape_rows(result) == []
 
 
 def test_comprehension_destructuring_target_uses_exact_positions() -> None:
@@ -194,4 +200,4 @@ def test_comprehension_destructuring_target_uses_exact_positions() -> None:
     )
 
     assert _operations(result) == ["path.write_text"]
-    assert result["escapes"] == []
+    assert joined_escape_rows(result) == []

@@ -1,8 +1,14 @@
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from scripts.runtime_ownership.access import discover_access_facts
+from tests.runtime_access_v2_helpers import (
+    joined_access_rows,
+    joined_escape_rows,
+)
 
 
 def _discover(
@@ -10,7 +16,7 @@ def _discover(
     *,
     module: str = "chronovisor.state",
     symbol: str = "STATE_FILE",
-) -> dict:
+) -> dict[str, Any]:
     candidate = {
         "id": "runtime-resource:state",
         "module": module,
@@ -57,10 +63,10 @@ def test_function_local_import_forms_resolve_registered_origin(
         }
     )
 
-    assert len(result["accesses"]) == 1
-    assert result["accesses"][0]["actor"] == "chronovisor.consumer:save"
-    assert result["accesses"][0]["operation"] == "path.write_text"
-    assert result["escapes"] == []
+    assert len(joined_access_rows(result)) == 1
+    assert joined_access_rows(result)[0]["actor"] == "chronovisor.consumer:save"
+    assert joined_access_rows(result)[0]["operation"] == "path.write_text"
+    assert joined_escape_rows(result) == []
 
 
 def test_package_init_relative_reexport_resolves_origin() -> None:
@@ -79,9 +85,9 @@ def test_package_init_relative_reexport_resolves_origin() -> None:
         module="chronovisor.pkg.state",
     )
 
-    assert len(result["accesses"]) == 1
-    assert result["accesses"][0]["operation"] == "path.write_text"
-    assert result["escapes"] == []
+    assert len(joined_access_rows(result)) == 1
+    assert joined_access_rows(result)[0]["operation"] == "path.write_text"
+    assert joined_escape_rows(result) == []
 
 
 def test_two_hop_reexport_and_simple_module_alias_resolve_origin() -> None:
@@ -103,9 +109,9 @@ def test_two_hop_reexport_and_simple_module_alias_resolve_origin() -> None:
         }
     )
 
-    assert len(result["accesses"]) == 1
-    assert result["accesses"][0]["operation"] == "path.write_text"
-    assert result["escapes"] == []
+    assert len(joined_access_rows(result)) == 1
+    assert joined_access_rows(result)[0]["operation"] == "path.write_text"
+    assert joined_escape_rows(result) == []
 
 
 def test_reexport_fixed_point_has_no_silent_depth_cap() -> None:
@@ -125,9 +131,9 @@ def test_reexport_fixed_point_has_no_silent_depth_cap() -> None:
 
     result = _discover(sources)
 
-    assert len(result["accesses"]) == 1
-    assert result["accesses"][0]["operation"] == "path.write_text"
-    assert result["escapes"] == []
+    assert len(joined_access_rows(result)) == 1
+    assert joined_access_rows(result)[0]["operation"] == "path.write_text"
+    assert joined_escape_rows(result) == []
 
 
 def test_reexport_cycle_connected_to_registered_origin_is_explicit() -> None:
@@ -175,8 +181,8 @@ def test_function_local_import_strongly_shadows_module_binding(
         }
     )
 
-    assert result["accesses"] == []
-    assert result["escapes"] == []
+    assert joined_access_rows(result) == []
+    assert joined_escape_rows(result) == []
 
 
 def test_closure_free_and_nonlocal_names_receive_outer_origin() -> None:
@@ -199,11 +205,11 @@ def test_closure_free_and_nonlocal_names_receive_outer_origin() -> None:
         }
     )
 
-    assert {row["operation"] for row in result["accesses"]} == {
+    assert {row["operation"] for row in joined_access_rows(result)} == {
         "path.read_text",
         "path.write_text",
     }
-    assert result["escapes"] == []
+    assert joined_escape_rows(result) == []
 
 
 def test_nonlocal_assignment_kills_captured_origin() -> None:
@@ -222,8 +228,8 @@ def test_nonlocal_assignment_kills_captured_origin() -> None:
         }
     )
 
-    assert result["accesses"] == []
-    assert result["escapes"] == []
+    assert joined_access_rows(result) == []
+    assert joined_escape_rows(result) == []
 
 
 def test_nested_scope_assignment_does_not_shadow_outer_global() -> None:
@@ -240,10 +246,10 @@ def test_nested_scope_assignment_does_not_shadow_outer_global() -> None:
         }
     )
 
-    assert len(result["accesses"]) == 1
-    assert result["accesses"][0]["actor"] == "chronovisor.consumer:outer"
-    assert result["accesses"][0]["operation"] == "path.write_text"
-    assert result["escapes"] == []
+    assert len(joined_access_rows(result)) == 1
+    assert joined_access_rows(result)[0]["actor"] == "chronovisor.consumer:outer"
+    assert joined_access_rows(result)[0]["operation"] == "path.write_text"
+    assert joined_escape_rows(result) == []
 
 
 def test_global_name_uses_module_binding_not_outer_local() -> None:
@@ -263,10 +269,10 @@ def test_global_name_uses_module_binding_not_outer_local() -> None:
         }
     )
 
-    assert len(result["accesses"]) == 1
-    assert result["accesses"][0]["actor"].endswith("global_writer")
-    assert result["accesses"][0]["operation"] == "path.write_text"
-    assert result["escapes"] == []
+    assert len(joined_access_rows(result)) == 1
+    assert joined_access_rows(result)[0]["actor"].endswith("global_writer")
+    assert joined_access_rows(result)[0]["operation"] == "path.write_text"
+    assert joined_escape_rows(result) == []
 
 
 @pytest.mark.parametrize(
@@ -291,5 +297,5 @@ def test_lambda_capture_scan_respects_nested_lexical_bindings(
         }
     )
 
-    assert result["accesses"] == []
-    assert result["escapes"] == []
+    assert joined_access_rows(result) == []
+    assert joined_escape_rows(result) == []

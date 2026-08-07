@@ -1,11 +1,17 @@
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from scripts.runtime_ownership.access import discover_access_facts
+from tests.runtime_access_v2_helpers import (
+    joined_access_rows,
+    joined_escape_rows,
+)
 
 
-def _access_fixture(*, consumer: str) -> dict:
+def _access_fixture(*, consumer: str) -> dict[str, Any]:
     sources = {
         "src/chronovisor/state.py": "STATE_FILE = object()\n",
         "src/chronovisor/consumer.py": consumer,
@@ -37,9 +43,9 @@ def test_try_handler_receives_partial_try_state() -> None:
         )
     )
 
-    assert len(result["accesses"]) == 1
-    assert result["accesses"][0]["operation"] == "path.write_text"
-    assert result["escapes"] == []
+    assert len(joined_access_rows(result)) == 1
+    assert joined_access_rows(result)[0]["operation"] == "path.write_text"
+    assert joined_escape_rows(result) == []
 
 
 def test_try_handler_keeps_origin_from_prefix_before_later_kill() -> None:
@@ -59,9 +65,9 @@ def test_try_handler_keeps_origin_from_prefix_before_later_kill() -> None:
         )
     )
 
-    assert len(result["accesses"]) == 1
-    assert result["accesses"][0]["operation"] == "path.write_text"
-    assert result["escapes"] == []
+    assert len(joined_access_rows(result)) == 1
+    assert joined_access_rows(result)[0]["operation"] == "path.write_text"
+    assert joined_escape_rows(result) == []
 
 
 @pytest.mark.parametrize("loop_kind", ["for", "while"])
@@ -89,9 +95,9 @@ def test_loop_body_reaches_carried_origin_on_later_iteration(loop_kind: str) -> 
         )
     )
 
-    assert len(result["accesses"]) == 1
-    assert result["accesses"][0]["operation"] == "path.write_text"
-    assert result["escapes"] == []
+    assert len(joined_access_rows(result)) == 1
+    assert joined_access_rows(result)[0]["operation"] == "path.write_text"
+    assert joined_escape_rows(result) == []
 
 
 def test_try_else_and_finally_keep_normal_and_exceptional_state() -> None:
@@ -114,9 +120,9 @@ def test_try_else_and_finally_keep_normal_and_exceptional_state() -> None:
         )
     )
 
-    assert {row["operation"] for row in result["accesses"]} == {
+    assert {row["operation"] for row in joined_access_rows(result)} == {
         "path.read_text",
         "path.write_text",
         "path.exists",
     }
-    assert result["escapes"] == []
+    assert joined_escape_rows(result) == []

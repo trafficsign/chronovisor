@@ -1,13 +1,19 @@
 from __future__ import annotations
 
+from typing import Any
+
 from scripts.runtime_ownership.access import discover_access_facts
+from tests.runtime_access_v2_helpers import (
+    joined_access_rows,
+    joined_escape_rows,
+)
 
 
 def _discover(
     consumer: str,
     *,
     extra_sources: dict[str, str] | None = None,
-) -> dict:
+) -> dict[str, Any]:
     sources = {
         "src/chronovisor/state.py": "STATE_FILE = object()\n",
         "src/chronovisor/consumer.py": consumer,
@@ -25,22 +31,22 @@ def _discover(
     )
 
 
-def _operations(result: dict) -> list[str]:
-    return [row["operation"] for row in result["accesses"]]
+def _operations(result: dict[str, Any]) -> list[str]:
+    return [row["operation"] for row in joined_access_rows(result)]
 
 
-def _assert_known_helper_write(result: dict) -> None:
+def _assert_known_helper_write(result: dict[str, Any]) -> None:
     assert _operations(result) == ["path.write_text"]
-    assert result["accesses"][0]["actor"] == "chronovisor.consumer:run"
-    assert result["accesses"][0]["sink_actor"] == "chronovisor.consumer:helper"
+    assert joined_access_rows(result)[0]["actor"] == "chronovisor.consumer:run"
+    assert joined_access_rows(result)[0]["sink_actor"] == "chronovisor.consumer:helper"
 
 
-def _assert_unknown_helper_escape(result: dict) -> None:
-    assert result["accesses"] == []
-    assert len(result["escapes"]) == 1
-    assert result["escapes"][0]["actor"] == "chronovisor.consumer:run"
-    assert result["escapes"][0]["operation"] == "call:helper"
-    assert result["escapes"][0]["reason"] == ("registered_locator_to_unknown_callee")
+def _assert_unknown_helper_escape(result: dict[str, Any]) -> None:
+    assert joined_access_rows(result) == []
+    assert len(joined_escape_rows(result)) == 1
+    assert joined_escape_rows(result)[0]["actor"] == "chronovisor.consumer:run"
+    assert joined_escape_rows(result)[0]["operation"] == "call:helper"
+    assert joined_escape_rows(result)[0]["reason"] == ("registered_locator_to_unknown_callee")
 
 
 def test_known_repo_helper_definition_and_call_resolve() -> None:
@@ -53,7 +59,7 @@ def test_known_repo_helper_definition_and_call_resolve() -> None:
     )
 
     _assert_known_helper_write(result)
-    assert result["escapes"] == []
+    assert joined_escape_rows(result) == []
 
 
 def test_external_import_shadows_repo_helper() -> None:
@@ -96,10 +102,10 @@ def test_known_and_external_branch_preserves_both_call_outcomes() -> None:
     )
 
     _assert_known_helper_write(result)
-    assert len(result["escapes"]) == 1
-    assert result["escapes"][0]["actor"] == "chronovisor.consumer:run"
-    assert result["escapes"][0]["operation"] == "call:selected"
-    assert result["escapes"][0]["reason"] == ("registered_locator_to_unknown_callee")
+    assert len(joined_escape_rows(result)) == 1
+    assert joined_escape_rows(result)[0]["actor"] == "chronovisor.consumer:run"
+    assert joined_escape_rows(result)[0]["operation"] == "call:selected"
+    assert joined_escape_rows(result)[0]["reason"] == ("registered_locator_to_unknown_callee")
 
 
 def test_repo_helper_definition_rebinds_prior_external_import() -> None:
@@ -113,7 +119,7 @@ def test_repo_helper_definition_rebinds_prior_external_import() -> None:
     )
 
     _assert_known_helper_write(result)
-    assert result["escapes"] == []
+    assert joined_escape_rows(result) == []
 
 
 def test_imported_repo_helper_resolves_to_helper_sink_actor() -> None:
@@ -130,9 +136,9 @@ def test_imported_repo_helper_resolves_to_helper_sink_actor() -> None:
     )
 
     assert _operations(result) == ["path.write_text"]
-    assert result["accesses"][0]["actor"] == "chronovisor.consumer:run"
-    assert result["accesses"][0]["sink_actor"] == "chronovisor.helpers:helper"
-    assert result["escapes"] == []
+    assert joined_access_rows(result)[0]["actor"] == "chronovisor.consumer:run"
+    assert joined_access_rows(result)[0]["sink_actor"] == "chronovisor.helpers:helper"
+    assert joined_escape_rows(result) == []
 
 
 def test_known_local_repo_helper_alias_resolves() -> None:
@@ -146,7 +152,7 @@ def test_known_local_repo_helper_alias_resolves() -> None:
     )
 
     _assert_known_helper_write(result)
-    assert result["escapes"] == []
+    assert joined_escape_rows(result) == []
 
 
 def test_function_parameter_shadows_module_repo_helper() -> None:
@@ -169,11 +175,11 @@ def test_external_module_attribute_call_is_unknown_callee_escape() -> None:
         "    external_api.helper(STATE_FILE)\n"
     )
 
-    assert result["accesses"] == []
-    assert len(result["escapes"]) == 1
-    assert result["escapes"][0]["actor"] == "chronovisor.consumer:run"
-    assert result["escapes"][0]["operation"] == "call:external_api.helper"
-    assert result["escapes"][0]["reason"] == ("registered_locator_to_unknown_callee")
+    assert joined_access_rows(result) == []
+    assert len(joined_escape_rows(result)) == 1
+    assert joined_escape_rows(result)[0]["actor"] == "chronovisor.consumer:run"
+    assert joined_escape_rows(result)[0]["operation"] == "call:external_api.helper"
+    assert joined_escape_rows(result)[0]["reason"] == ("registered_locator_to_unknown_callee")
 
 
 def test_branch_between_two_known_helpers_records_both_sink_actors() -> None:
@@ -192,12 +198,12 @@ def test_branch_between_two_known_helpers_records_both_sink_actors() -> None:
     )
 
     assert _operations(result) == ["path.write_text", "path.write_text"]
-    assert {row["actor"] for row in result["accesses"]} == {"chronovisor.consumer:run"}
-    assert {row["sink_actor"] for row in result["accesses"]} == {
+    assert {row["actor"] for row in joined_access_rows(result)} == {"chronovisor.consumer:run"}
+    assert {row["sink_actor"] for row in joined_access_rows(result)} == {
         "chronovisor.consumer:helper_a",
         "chronovisor.consumer:helper_b",
     }
-    assert result["escapes"] == []
+    assert joined_escape_rows(result) == []
 
 
 def test_known_helper_and_noncallable_branch_preserves_access_and_escape() -> None:
@@ -214,10 +220,10 @@ def test_known_helper_and_noncallable_branch_preserves_access_and_escape() -> No
     )
 
     _assert_known_helper_write(result)
-    assert len(result["escapes"]) == 1
-    assert result["escapes"][0]["actor"] == "chronovisor.consumer:run"
-    assert result["escapes"][0]["operation"] == "call:selected"
-    assert result["escapes"][0]["reason"] == ("registered_locator_to_unknown_callee")
+    assert len(joined_escape_rows(result)) == 1
+    assert joined_escape_rows(result)[0]["actor"] == "chronovisor.consumer:run"
+    assert joined_escape_rows(result)[0]["operation"] == "call:selected"
+    assert joined_escape_rows(result)[0]["reason"] == ("registered_locator_to_unknown_callee")
 
 
 def test_none_assignment_shadows_local_repo_helper() -> None:
@@ -230,10 +236,10 @@ def test_none_assignment_shadows_local_repo_helper() -> None:
         "    helper(STATE_FILE)\n"
     )
 
-    assert result["accesses"] == []
-    assert len(result["escapes"]) == 1
-    assert result["escapes"][0]["operation"] == "call:helper"
-    assert result["escapes"][0]["reason"] == ("registered_locator_to_unknown_callee")
+    assert joined_access_rows(result) == []
+    assert len(joined_escape_rows(result)) == 1
+    assert joined_escape_rows(result)[0]["operation"] == "call:helper"
+    assert joined_escape_rows(result)[0]["reason"] == ("registered_locator_to_unknown_callee")
 
 
 def test_none_assignment_shadows_imported_repo_helper() -> None:
@@ -250,10 +256,10 @@ def test_none_assignment_shadows_imported_repo_helper() -> None:
         },
     )
 
-    assert result["accesses"] == []
-    assert len(result["escapes"]) == 1
-    assert result["escapes"][0]["operation"] == "call:helper"
-    assert result["escapes"][0]["reason"] == ("registered_locator_to_unknown_callee")
+    assert joined_access_rows(result) == []
+    assert len(joined_escape_rows(result)) == 1
+    assert joined_escape_rows(result)[0]["operation"] == "call:helper"
+    assert joined_escape_rows(result)[0]["reason"] == ("registered_locator_to_unknown_callee")
 
 
 def test_none_assignment_shadows_imported_repo_module_alias() -> None:
@@ -270,10 +276,10 @@ def test_none_assignment_shadows_imported_repo_module_alias() -> None:
         },
     )
 
-    assert result["accesses"] == []
-    assert len(result["escapes"]) == 1
-    assert result["escapes"][0]["operation"] == "call:helpers.helper"
-    assert result["escapes"][0]["reason"] == ("registered_locator_to_unknown_callee")
+    assert joined_access_rows(result) == []
+    assert len(joined_escape_rows(result)) == 1
+    assert joined_escape_rows(result)[0]["operation"] == "call:helpers.helper"
+    assert joined_escape_rows(result)[0]["reason"] == ("registered_locator_to_unknown_callee")
 
 
 def test_unshadowed_local_class_constructor_binds_init_parameter() -> None:
@@ -287,11 +293,11 @@ def test_unshadowed_local_class_constructor_binds_init_parameter() -> None:
     )
 
     assert _operations(result) == ["path.write_text"]
-    assert result["accesses"][0]["actor"] == "chronovisor.consumer:run"
-    assert result["accesses"][0]["sink_actor"] == (
+    assert joined_access_rows(result)[0]["actor"] == "chronovisor.consumer:run"
+    assert joined_access_rows(result)[0]["sink_actor"] == (
         "chronovisor.consumer:Factory.__init__"
     )
-    assert result["escapes"] == []
+    assert joined_escape_rows(result) == []
 
 
 def test_named_imported_class_constructor_binds_init_parameter() -> None:
@@ -310,11 +316,11 @@ def test_named_imported_class_constructor_binds_init_parameter() -> None:
     )
 
     assert _operations(result) == ["path.write_text"]
-    assert result["accesses"][0]["actor"] == "chronovisor.consumer:run"
-    assert result["accesses"][0]["sink_actor"] == (
+    assert joined_access_rows(result)[0]["actor"] == "chronovisor.consumer:run"
+    assert joined_access_rows(result)[0]["sink_actor"] == (
         "chronovisor.factories:Factory.__init__"
     )
-    assert result["escapes"] == []
+    assert joined_escape_rows(result) == []
 
 
 def test_imported_module_class_constructor_binds_init_parameter() -> None:
@@ -333,11 +339,11 @@ def test_imported_module_class_constructor_binds_init_parameter() -> None:
     )
 
     assert _operations(result) == ["path.write_text"]
-    assert result["accesses"][0]["actor"] == "chronovisor.consumer:run"
-    assert result["accesses"][0]["sink_actor"] == (
+    assert joined_access_rows(result)[0]["actor"] == "chronovisor.consumer:run"
+    assert joined_access_rows(result)[0]["sink_actor"] == (
         "chronovisor.factories:Factory.__init__"
     )
-    assert result["escapes"] == []
+    assert joined_escape_rows(result) == []
 
 
 def test_none_assignment_shadows_imported_module_class_constructor() -> None:
@@ -356,10 +362,10 @@ def test_none_assignment_shadows_imported_module_class_constructor() -> None:
         },
     )
 
-    assert result["accesses"] == []
-    assert len(result["escapes"]) == 1
-    assert result["escapes"][0]["operation"] == "call:factories.Factory"
-    assert result["escapes"][0]["reason"] == ("registered_locator_to_unknown_callee")
+    assert joined_access_rows(result) == []
+    assert len(joined_escape_rows(result)) == 1
+    assert joined_escape_rows(result)[0]["operation"] == "call:factories.Factory"
+    assert joined_escape_rows(result)[0]["reason"] == ("registered_locator_to_unknown_callee")
 
 
 def test_direct_star_imported_class_constructor_binds_init_parameter() -> None:
@@ -378,11 +384,11 @@ def test_direct_star_imported_class_constructor_binds_init_parameter() -> None:
     )
 
     assert _operations(result) == ["path.write_text"]
-    assert result["accesses"][0]["actor"] == "chronovisor.consumer:run"
-    assert result["accesses"][0]["sink_actor"] == (
+    assert joined_access_rows(result)[0]["actor"] == "chronovisor.consumer:run"
+    assert joined_access_rows(result)[0]["sink_actor"] == (
         "chronovisor.factories:Factory.__init__"
     )
-    assert result["escapes"] == []
+    assert joined_escape_rows(result) == []
 
 
 def test_two_hop_star_imported_class_constructor_binds_init_parameter() -> None:
@@ -402,11 +408,11 @@ def test_two_hop_star_imported_class_constructor_binds_init_parameter() -> None:
     )
 
     assert _operations(result) == ["path.write_text"]
-    assert result["accesses"][0]["actor"] == "chronovisor.consumer:run"
-    assert result["accesses"][0]["sink_actor"] == (
+    assert joined_access_rows(result)[0]["actor"] == "chronovisor.consumer:run"
+    assert joined_access_rows(result)[0]["sink_actor"] == (
         "chronovisor.factories:Factory.__init__"
     )
-    assert result["escapes"] == []
+    assert joined_escape_rows(result) == []
 
 
 def test_none_assignment_shadows_local_class_constructor() -> None:
@@ -420,10 +426,10 @@ def test_none_assignment_shadows_local_class_constructor() -> None:
         "    Factory(STATE_FILE)\n"
     )
 
-    assert result["accesses"] == []
-    assert len(result["escapes"]) == 1
-    assert result["escapes"][0]["operation"] == "call:Factory"
-    assert result["escapes"][0]["reason"] == ("registered_locator_to_unknown_callee")
+    assert joined_access_rows(result) == []
+    assert len(joined_escape_rows(result)) == 1
+    assert joined_escape_rows(result)[0]["operation"] == "call:Factory"
+    assert joined_escape_rows(result)[0]["reason"] == ("registered_locator_to_unknown_callee")
 
 
 def test_direct_star_imported_repo_helper_reaches_helper_sink() -> None:
@@ -440,8 +446,8 @@ def test_direct_star_imported_repo_helper_reaches_helper_sink() -> None:
     )
 
     assert _operations(result) == ["path.write_text"]
-    assert result["accesses"][0]["sink_actor"] == "chronovisor.helpers:helper"
-    assert result["escapes"] == []
+    assert joined_access_rows(result)[0]["sink_actor"] == "chronovisor.helpers:helper"
+    assert joined_escape_rows(result) == []
 
 
 def test_two_hop_star_imported_repo_helper_reaches_helper_sink() -> None:
@@ -459,8 +465,8 @@ def test_two_hop_star_imported_repo_helper_reaches_helper_sink() -> None:
     )
 
     assert _operations(result) == ["path.write_text"]
-    assert result["accesses"][0]["sink_actor"] == "chronovisor.helpers:helper"
-    assert result["escapes"] == []
+    assert joined_access_rows(result)[0]["sink_actor"] == "chronovisor.helpers:helper"
+    assert joined_escape_rows(result) == []
 
 
 def test_literal_mapping_keyword_unpack_binds_helper_parameter() -> None:
@@ -473,4 +479,4 @@ def test_literal_mapping_keyword_unpack_binds_helper_parameter() -> None:
     )
 
     _assert_known_helper_write(result)
-    assert result["escapes"] == []
+    assert joined_escape_rows(result) == []

@@ -1,9 +1,15 @@
 from __future__ import annotations
 
+from typing import Any
+
 from scripts.runtime_ownership.access import discover_access_facts
+from tests.runtime_access_v2_helpers import (
+    joined_access_rows,
+    joined_escape_rows,
+)
 
 
-def _discover(consumer: str) -> dict:
+def _discover(consumer: str) -> dict[str, Any]:
     sources = {
         "src/chronovisor/state.py": "STATE_FILE = object()\n",
         "src/chronovisor/consumer.py": consumer,
@@ -19,8 +25,8 @@ def _discover(consumer: str) -> dict:
     )
 
 
-def _operations(result: dict) -> list[str]:
-    return [row["operation"] for row in result["accesses"]]
+def _operations(result: dict[str, Any]) -> list[str]:
+    return [row["operation"] for row in joined_access_rows(result)]
 
 
 def test_known_function_decorator_return_rebinds_function_name() -> None:
@@ -35,8 +41,8 @@ def test_known_function_decorator_return_rebinds_function_name() -> None:
     )
 
     assert _operations(result) == ["path.read_text"]
-    assert result["accesses"][0]["actor"] == "chronovisor.consumer:<module>"
-    assert result["escapes"] == []
+    assert joined_access_rows(result)[0]["actor"] == "chronovisor.consumer:<module>"
+    assert joined_escape_rows(result) == []
 
 
 def test_known_function_decorator_return_rebinds_class_name() -> None:
@@ -51,8 +57,8 @@ def test_known_function_decorator_return_rebinds_class_name() -> None:
     )
 
     assert _operations(result) == ["path.read_text"]
-    assert result["accesses"][0]["actor"] == "chronovisor.consumer:<module>"
-    assert result["escapes"] == []
+    assert joined_access_rows(result)[0]["actor"] == "chronovisor.consumer:<module>"
+    assert joined_escape_rows(result) == []
 
 
 def test_decorators_apply_bottom_up_without_false_origin() -> None:
@@ -69,8 +75,8 @@ def test_decorators_apply_bottom_up_without_false_origin() -> None:
         "decorated.read_text()\n"
     )
 
-    assert result["accesses"] == []
-    assert result["escapes"] == []
+    assert joined_access_rows(result) == []
+    assert joined_escape_rows(result) == []
 
 
 def test_nested_class_global_read_uses_module_binding() -> None:
@@ -85,10 +91,10 @@ def test_nested_class_global_read_uses_module_binding() -> None:
     )
 
     assert _operations(result) == ["path.read_text"]
-    assert result["accesses"][0]["actor"] == (
+    assert joined_access_rows(result)[0]["actor"] == (
         "chronovisor.consumer:outer.<locals>.Holder.<classbody>"
     )
-    assert result["escapes"] == []
+    assert joined_escape_rows(result) == []
 
 
 def test_function_annotation_may_raise_to_enclosing_handler() -> None:
@@ -103,8 +109,8 @@ def test_function_annotation_may_raise_to_enclosing_handler() -> None:
     )
 
     assert _operations(result) == ["path.read_text"]
-    assert result["accesses"][0]["actor"] == "chronovisor.consumer:<module>"
-    assert result["escapes"] == []
+    assert joined_access_rows(result)[0]["actor"] == "chronovisor.consumer:<module>"
+    assert joined_escape_rows(result) == []
 
 
 def test_future_function_annotation_does_not_reach_enclosing_handler() -> None:
@@ -119,8 +125,8 @@ def test_future_function_annotation_does_not_reach_enclosing_handler() -> None:
         "    path.read_text()\n"
     )
 
-    assert result["accesses"] == []
-    assert result["escapes"] == []
+    assert joined_access_rows(result) == []
+    assert joined_escape_rows(result) == []
 
 
 def test_class_body_may_raise_to_enclosing_handler() -> None:
@@ -135,8 +141,8 @@ def test_class_body_may_raise_to_enclosing_handler() -> None:
     )
 
     assert _operations(result) == ["path.read_text"]
-    assert result["accesses"][0]["actor"] == "chronovisor.consumer:<module>"
-    assert result["escapes"] == []
+    assert joined_access_rows(result)[0]["actor"] == "chronovisor.consumer:<module>"
+    assert joined_escape_rows(result) == []
 
 
 def test_same_line_default_calls_remain_distinct_physical_sites() -> None:
@@ -146,9 +152,9 @@ def test_same_line_default_calls_remain_distinct_physical_sites() -> None:
     )
 
     assert _operations(result) == ["path.read_text", "path.read_text"]
-    assert len(set(result["access_ids"])) == 2
-    assert {row["actor"] for row in result["accesses"]} == {
+    assert len(set(result["access_fact_ids"])) == 2
+    assert {row["actor"] for row in joined_access_rows(result)} == {
         "chronovisor.consumer:<module>"
     }
-    assert len({row["evidence"]["line"] for row in result["accesses"]}) == 1
-    assert result["escapes"] == []
+    assert len({row["evidence"]["line"] for row in joined_access_rows(result)}) == 1
+    assert joined_escape_rows(result) == []

@@ -1,9 +1,15 @@
 from __future__ import annotations
 
+from typing import Any
+
 from scripts.runtime_ownership.access import discover_access_facts
+from tests.runtime_access_v2_helpers import (
+    joined_access_rows,
+    joined_escape_rows,
+)
 
 
-def _access_fixture(*, consumer: str) -> dict:
+def _access_fixture(*, consumer: str) -> dict[str, Any]:
     sources = {
         "src/chronovisor/state.py": "STATE_FILE = object()\n",
         "src/chronovisor/consumer.py": consumer,
@@ -19,8 +25,8 @@ def _access_fixture(*, consumer: str) -> dict:
     )
 
 
-def _operations(result: dict) -> set[str]:
-    return {row["operation"] for row in result["accesses"]}
+def _operations(result: dict[str, Any]) -> set[str]:
+    return {row["operation"] for row in joined_access_rows(result)}
 
 
 def test_try_handler_sees_state_before_overwriting_call_assignment() -> None:
@@ -39,7 +45,7 @@ def test_try_handler_sees_state_before_overwriting_call_assignment() -> None:
     )
 
     assert _operations(result) == {"path.write_text"}
-    assert result["escapes"] == []
+    assert joined_escape_rows(result) == []
 
 
 def test_try_handler_sees_state_before_return_expression() -> None:
@@ -58,7 +64,7 @@ def test_try_handler_sees_state_before_return_expression() -> None:
     )
 
     assert _operations(result) == {"path.write_text"}
-    assert result["escapes"] == []
+    assert joined_escape_rows(result) == []
 
 
 def test_with_preserves_break_and_stops_the_body() -> None:
@@ -79,7 +85,7 @@ def test_with_preserves_break_and_stops_the_body() -> None:
     )
 
     assert _operations(result) == {"path.write_text"}
-    assert result["escapes"] == []
+    assert joined_escape_rows(result) == []
 
 
 def test_with_preserves_continue_and_stops_the_body() -> None:
@@ -96,8 +102,8 @@ def test_with_preserves_continue_and_stops_the_body() -> None:
         )
     )
 
-    assert result["accesses"] == []
-    assert result["escapes"] == []
+    assert joined_access_rows(result) == []
+    assert joined_escape_rows(result) == []
 
 
 def test_with_preserves_return_through_finally() -> None:
@@ -117,7 +123,7 @@ def test_with_preserves_return_through_finally() -> None:
     )
 
     assert _operations(result) == {"path.write_text"}
-    assert result["escapes"] == []
+    assert joined_escape_rows(result) == []
 
 
 def test_async_with_preserves_return_through_finally() -> None:
@@ -137,7 +143,7 @@ def test_async_with_preserves_return_through_finally() -> None:
     )
 
     assert _operations(result) == {"path.write_text"}
-    assert result["escapes"] == []
+    assert joined_escape_rows(result) == []
 
 
 def test_with_retains_raise_for_handler_and_stops_the_body() -> None:
@@ -156,7 +162,7 @@ def test_with_retains_raise_for_handler_and_stops_the_body() -> None:
     )
 
     assert _operations(result) == {"path.write_text"}
-    assert result["escapes"] == []
+    assert joined_escape_rows(result) == []
 
 
 def test_with_reports_unknown_suppression_for_tracked_raise() -> None:
@@ -173,7 +179,7 @@ def test_with_reports_unknown_suppression_for_tracked_raise() -> None:
     )
 
     assert "unknown_context_manager_suppression" in {
-        row["reason"] for row in result["escapes"]
+        row["reason"] for row in joined_escape_rows(result)
     }
 
 
@@ -191,8 +197,8 @@ def test_irrefutable_match_return_makes_outer_sink_unreachable() -> None:
         )
     )
 
-    assert result["accesses"] == []
-    assert result["escapes"] == []
+    assert joined_access_rows(result) == []
+    assert joined_escape_rows(result) == []
 
 
 def test_irrefutable_match_preserves_break_and_skips_loop_else() -> None:
@@ -213,7 +219,7 @@ def test_irrefutable_match_preserves_break_and_skips_loop_else() -> None:
     )
 
     assert _operations(result) == {"path.write_text"}
-    assert result["escapes"] == []
+    assert joined_escape_rows(result) == []
 
 
 def test_irrefutable_match_preserves_continue_and_stops_following_code() -> None:
@@ -231,8 +237,8 @@ def test_irrefutable_match_preserves_continue_and_stops_following_code() -> None
         )
     )
 
-    assert result["accesses"] == []
-    assert result["escapes"] == []
+    assert joined_access_rows(result) == []
+    assert joined_escape_rows(result) == []
 
 
 def test_irrefutable_match_retains_raise_for_handler() -> None:
@@ -252,7 +258,7 @@ def test_irrefutable_match_retains_raise_for_handler() -> None:
     )
 
     assert _operations(result) == {"path.write_text"}
-    assert result["escapes"] == []
+    assert joined_escape_rows(result) == []
 
 
 def test_augassign_evaluates_rhs_sink_once() -> None:
@@ -266,8 +272,8 @@ def test_augassign_evaluates_rhs_sink_once() -> None:
     )
 
     assert _operations(result) == {"path.read_text"}
-    assert len(result["accesses"]) == 1
-    assert result["escapes"] == []
+    assert len(joined_access_rows(result)) == 1
+    assert joined_escape_rows(result) == []
 
 
 def test_augassign_preserves_origin_and_reports_unsupported_transform() -> None:
@@ -282,7 +288,7 @@ def test_augassign_preserves_origin_and_reports_unsupported_transform() -> None:
     )
 
     assert _operations(result) == {"path.write_text"}
-    assert {row["reason"] for row in result["escapes"]} == {
+    assert {row["reason"] for row in joined_escape_rows(result)} == {
         "unsupported_registered_origin_augassign"
     }
 
@@ -299,8 +305,8 @@ def test_augassign_attribute_origin_is_an_explicit_escape() -> None:
         )
     )
 
-    assert result["accesses"] == []
-    assert {row["reason"] for row in result["escapes"]} == {
+    assert joined_access_rows(result) == []
+    assert {row["reason"] for row in joined_escape_rows(result)} == {
         "unsupported_registered_origin_augassign"
     }
 
@@ -315,7 +321,7 @@ def test_augassign_subscript_origin_is_an_explicit_escape() -> None:
         )
     )
 
-    assert result["accesses"] == []
+    assert joined_access_rows(result) == []
     assert "unsupported_registered_origin_expression" in {
-        row["reason"] for row in result["escapes"]
+        row["reason"] for row in joined_escape_rows(result)
     }

@@ -5,6 +5,10 @@ from typing import Any
 
 from scripts.runtime_ownership.access import discover_access_facts
 from scripts.runtime_ownership.access_model import FlowValue
+from tests.runtime_access_v2_helpers import (
+    joined_access_rows,
+    joined_escape_rows,
+)
 
 SEMANTIC_ID = "runtime-resource:semantic-socket"
 RERANKER_ID = "runtime-resource:reranker-socket"
@@ -61,10 +65,10 @@ def _discover(
 
 
 def _assert_no_concrete_socket_facts(result: dict[str, Any]) -> None:
-    assert result["accesses"] == []
+    assert joined_access_rows(result) == []
     assert all(
         not str(row["sink"]).startswith(("socket.", "socketserver."))
-        for row in result["accesses"]
+        for row in joined_access_rows(result)
     )
 
 
@@ -115,7 +119,7 @@ def test_dataclass_defaults_factory_class_projection_and_override_are_exact() ->
     )
 
     _assert_no_concrete_socket_facts(result)
-    escapes = result["escapes"]
+    escapes = joined_escape_rows(result)
     assert {(row["actor"], row["resource_id"]) for row in escapes} == {
         ("chronovisor.consumer:semantic_default", SEMANTIC_ID),
         ("chronovisor.consumer:reranker_factory", RERANKER_ID),
@@ -142,14 +146,14 @@ def test_dataclass_branch_unknown_and_missing_attributes_fail_closed() -> None:
     )
 
     _assert_no_concrete_socket_facts(result)
-    assert {(row["actor"], row["resource_id"]) for row in result["escapes"]} == {
+    assert {(row["actor"], row["resource_id"]) for row in joined_escape_rows(result)} == {
         ("chronovisor.consumer:branch", SEMANTIC_ID),
         ("chronovisor.consumer:unknown", SEMANTIC_ID),
     }
     # Access facts are may-path evidence: the registered default alternatives
     # remain concrete, while the origin-bearing invalid projection still
     # escapes and the surviving path reaches the deliberately unknown boundary.
-    assert {row["reason"] for row in result["escapes"]} == {
+    assert {row["reason"] for row in joined_escape_rows(result)} == {
         "invalid_or_ambiguous_path_constructor_signature",
         "registered_locator_to_unknown_callee"
     }
@@ -167,11 +171,11 @@ def test_generated_dataclass_constructor_rejects_invalid_binding() -> None:
     )
 
     _assert_no_concrete_socket_facts(result)
-    assert {row["actor"] for row in result["escapes"]} == {
+    assert {row["actor"] for row in joined_escape_rows(result)} == {
         "chronovisor.consumer:duplicate",
         "chronovisor.consumer:unexpected",
     }
-    assert {row["reason"] for row in result["escapes"]} == {
+    assert {row["reason"] for row in joined_escape_rows(result)} == {
         "invalid_or_ambiguous_dataclass_signature"
     }
 
@@ -190,13 +194,13 @@ def test_path_expanduser_and_str_preserve_locator_for_both_import_forms() -> Non
     )
 
     _assert_no_concrete_socket_facts(result)
-    assert {(row["actor"], row["resource_id"]) for row in result["escapes"]} == {
+    assert {(row["actor"], row["resource_id"]) for row in joined_escape_rows(result)} == {
         ("chronovisor.consumer:direct", SEMANTIC_ID),
         ("chronovisor.consumer:qualified", SEMANTIC_ID),
     }
     assert all(
         "representation:builtins.str" in row["binding_chain"]
-        for row in result["escapes"]
+        for row in joined_escape_rows(result)
     )
 
 
@@ -221,10 +225,10 @@ def test_qualified_path_mutations_and_reimport_escape_with_the_locator() -> None
         )
 
         _assert_no_concrete_socket_facts(result)
-        assert len(result["escapes"]) == 1
-        assert result["escapes"][0]["actor"] == "chronovisor.consumer:inspect"
-        assert result["escapes"][0]["resource_id"] == SEMANTIC_ID
-        assert result["escapes"][0]["reason"] == (
+        assert len(joined_escape_rows(result)) == 1
+        assert joined_escape_rows(result)[0]["actor"] == "chronovisor.consumer:inspect"
+        assert joined_escape_rows(result)[0]["resource_id"] == SEMANTIC_ID
+        assert joined_escape_rows(result)[0]["reason"] == (
             "registered_locator_to_unknown_callee"
         )
 
@@ -242,8 +246,8 @@ def test_path_reference_captured_before_mutation_retains_exact_binding() -> None
     )
 
     _assert_no_concrete_socket_facts(result)
-    assert len(result["escapes"]) == 1
-    escape = result["escapes"][0]
+    assert len(joined_escape_rows(result)) == 1
+    escape = joined_escape_rows(result)[0]
     assert escape["actor"] == "chronovisor.consumer:inspect"
     assert escape["resource_id"] == SEMANTIC_ID
     assert "constructor:pathlib.Path" in escape["binding_chain"]
@@ -262,8 +266,8 @@ def test_unrelated_pathlib_mutation_does_not_taint_path() -> None:
     )
 
     _assert_no_concrete_socket_facts(result)
-    assert len(result["escapes"]) == 1
-    escape = result["escapes"][0]
+    assert len(joined_escape_rows(result)) == 1
+    escape = joined_escape_rows(result)[0]
     assert escape["actor"] == "chronovisor.consumer:inspect"
     assert escape["resource_id"] == SEMANTIC_ID
     assert "constructor:pathlib.Path" in escape["binding_chain"]
@@ -290,7 +294,7 @@ def test_shadowed_and_invalid_path_operations_escape_without_concrete_facts() ->
     )
 
     _assert_no_concrete_socket_facts(result)
-    assert {row["actor"] for row in result["escapes"]} == {
+    assert {row["actor"] for row in joined_escape_rows(result)} == {
         "chronovisor.consumer:shadow_path",
         "chronovisor.consumer:shadow_str",
         "chronovisor.consumer:dynamic_path",
@@ -298,7 +302,7 @@ def test_shadowed_and_invalid_path_operations_escape_without_concrete_facts() ->
         "chronovisor.consumer:invalid_expanduser",
         "chronovisor.consumer:invalid_str",
     }
-    assert {row["reason"] for row in result["escapes"]} >= {
+    assert {row["reason"] for row in joined_escape_rows(result)} >= {
         "invalid_or_ambiguous_path_constructor_signature",
         "invalid_or_ambiguous_path_transform_signature",
         "invalid_or_ambiguous_path_representation_signature",
@@ -324,7 +328,7 @@ def test_nested_only_state_crosses_helper_summary_and_closure() -> None:
     )
 
     _assert_no_concrete_socket_facts(result)
-    assert {(row["actor"], row["resource_id"]) for row in result["escapes"]} == {
+    assert {(row["actor"], row["resource_id"]) for row in joined_escape_rows(result)} == {
         ("chronovisor.consumer:through_summary", SEMANTIC_ID),
         ("chronovisor.consumer:through_closure", SEMANTIC_ID),
     }
@@ -355,7 +359,7 @@ def test_production_runtime_config_fields_seed_exact_socket_origins() -> None:
     )
 
     _assert_no_concrete_socket_facts(result)
-    assert {(row["actor"], row["resource_id"]) for row in result["escapes"]} == {
+    assert {(row["actor"], row["resource_id"]) for row in joined_escape_rows(result)} == {
         ("chronovisor.consumer:semantic", SEMANTIC_ID),
         ("chronovisor.consumer:reranker", RERANKER_ID),
         ("chronovisor.consumer:semantic_fallback", SEMANTIC_ID),
@@ -378,7 +382,7 @@ def test_socket_alias_requires_the_config_default_to_match_the_candidate() -> No
     )
 
     _assert_no_concrete_socket_facts(result)
-    assert result["escapes"] == []
+    assert joined_escape_rows(result) == []
 
 
 def test_post_init_and_bound_method_use_the_exact_instance_state() -> None:
@@ -408,7 +412,7 @@ def test_post_init_and_bound_method_use_the_exact_instance_state() -> None:
     )
 
     _assert_no_concrete_socket_facts(result)
-    assert {(row["actor"], row["resource_id"]) for row in result["escapes"]} == {
+    assert {(row["actor"], row["resource_id"]) for row in joined_escape_rows(result)} == {
         ("chronovisor.consumer:kept", SEMANTIC_ID),
     }
 
@@ -428,8 +432,8 @@ def test_explicit_init_state_is_not_shared_between_instances() -> None:
     )
 
     _assert_no_concrete_socket_facts(result)
-    assert len(result["escapes"]) == 1
-    assert result["escapes"][0]["resource_id"] == SEMANTIC_ID
+    assert len(joined_escape_rows(result)) == 1
+    assert joined_escape_rows(result)[0]["resource_id"] == SEMANTIC_ID
 
 
 def test_post_construction_attribute_assignments_use_strong_exact_updates() -> None:
@@ -473,7 +477,7 @@ def test_post_construction_attribute_assignments_use_strong_exact_updates() -> N
     )
 
     _assert_no_concrete_socket_facts(result)
-    assert {row["actor"] for row in result["escapes"]} == {
+    assert {row["actor"] for row in joined_escape_rows(result)} == {
         "chronovisor.consumer:generated_custom_to_origin",
         "chronovisor.consumer:class_roundtrip",
         "chronovisor.consumer:instance_class_separation",
@@ -501,7 +505,7 @@ def test_explicit_instance_attribute_assignments_update_both_directions() -> Non
     )
 
     _assert_no_concrete_socket_facts(result)
-    assert {row["actor"] for row in result["escapes"]} == {
+    assert {row["actor"] for row in joined_escape_rows(result)} == {
         "chronovisor.consumer:custom_to_origin",
     }
 
@@ -525,7 +529,7 @@ def test_explicit_init_executes_for_default_and_body_origin_inputs() -> None:
     )
 
     _assert_no_concrete_socket_facts(result)
-    assert {row["actor"] for row in result["escapes"]} == {
+    assert {row["actor"] for row in joined_escape_rows(result)} == {
         "chronovisor.consumer:default_origin",
         "chronovisor.consumer:body_origin",
     }
@@ -596,7 +600,7 @@ def test_init_var_binds_post_init_without_becoming_an_instance_field() -> None:
     )
 
     _assert_no_concrete_socket_facts(result)
-    assert {row["actor"] for row in result["escapes"]} == {
+    assert {row["actor"] for row in joined_escape_rows(result)} == {
         "chronovisor.consumer:default_origin",
         "chronovisor.consumer:keyword_default_origin",
         "chronovisor.consumer:class_default_fallback",
@@ -646,7 +650,7 @@ def test_inherited_kw_only_and_function_lambda_factories_preserve_defaults() -> 
     )
 
     _assert_no_concrete_socket_facts(result)
-    assert {(row["actor"], row["resource_id"]) for row in result["escapes"]} == {
+    assert {(row["actor"], row["resource_id"]) for row in joined_escape_rows(result)} == {
         ("chronovisor.consumer:inherited", SEMANTIC_ID),
         ("chronovisor.consumer:function_factory", RERANKER_ID),
         ("chronovisor.consumer:lambda_factory", RERANKER_ID),
@@ -666,7 +670,7 @@ def test_extracted_path_transforms_preserve_the_receiver_origin() -> None:
     )
 
     _assert_no_concrete_socket_facts(result)
-    assert {(row["actor"], row["resource_id"]) for row in result["escapes"]} == {
+    assert {(row["actor"], row["resource_id"]) for row in joined_escape_rows(result)} == {
         ("chronovisor.consumer:attribute", SEMANTIC_ID),
         ("chronovisor.consumer:reflected", SEMANTIC_ID),
     }
@@ -683,7 +687,7 @@ def test_main_guard_with_candidate_state_keeps_the_function_facts() -> None:
     )
 
     _assert_no_concrete_socket_facts(result)
-    assert {(row["actor"], row["resource_id"]) for row in result["escapes"]} == {
+    assert {(row["actor"], row["resource_id"]) for row in joined_escape_rows(result)} == {
         ("chronovisor.consumer:boot", SEMANTIC_ID),
     }
 
@@ -703,7 +707,7 @@ def test_main_guard_local_origin_import_keeps_module_side_effects() -> None:
     )
 
     _assert_no_concrete_socket_facts(result)
-    assert {(row["actor"], row["resource_id"]) for row in result["escapes"]} == {
+    assert {(row["actor"], row["resource_id"]) for row in joined_escape_rows(result)} == {
         ("chronovisor.consumer:inspect", SEMANTIC_ID),
     }
 
@@ -718,8 +722,8 @@ def test_general_module_level_candidate_call_keeps_local_execution() -> None:
     )
 
     _assert_no_concrete_socket_facts(result)
-    assert {(row["actor"], row["resource_id"]) for row in result["escapes"]} == {
-        ("chronovisor.consumer:consume", SEMANTIC_ID),
+    assert {(row["actor"], row["resource_id"]) for row in joined_escape_rows(result)} == {
+        ("chronovisor.consumer:<module>", SEMANTIC_ID),
     }
 
 
@@ -752,7 +756,7 @@ def test_unknown_dataclass_base_and_factory_fail_closed_with_the_locator() -> No
     )
 
     _assert_no_concrete_socket_facts(result)
-    assert {(row["actor"], row["resource_id"]) for row in result["escapes"]} == {
+    assert {(row["actor"], row["resource_id"]) for row in joined_escape_rows(result)} == {
         ("chronovisor.consumer:unknown_base", SEMANTIC_ID),
         ("chronovisor.consumer:unknown_factory", RERANKER_ID),
     }
@@ -776,4 +780,4 @@ def test_python_313_field_signature_rejects_doc_keyword() -> None:
     )
 
     _assert_no_concrete_socket_facts(result)
-    assert result["escapes"] == []
+    assert joined_escape_rows(result) == []

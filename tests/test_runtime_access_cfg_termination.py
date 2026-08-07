@@ -1,11 +1,17 @@
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from scripts.runtime_ownership.access import discover_access_facts
+from tests.runtime_access_v2_helpers import (
+    joined_access_rows,
+    joined_escape_rows,
+)
 
 
-def _access_fixture(*, consumer: str) -> dict:
+def _access_fixture(*, consumer: str) -> dict[str, Any]:
     sources = {
         "src/chronovisor/state.py": "STATE_FILE = object()\n",
         "src/chronovisor/consumer.py": consumer,
@@ -21,8 +27,8 @@ def _access_fixture(*, consumer: str) -> dict:
     )
 
 
-def _operations(result: dict) -> list[str]:
-    return [row["operation"] for row in result["accesses"]]
+def _operations(result: dict[str, Any]) -> list[str]:
+    return [row["operation"] for row in joined_access_rows(result)]
 
 
 def test_return_terminates_block_before_sink() -> None:
@@ -36,8 +42,8 @@ def test_return_terminates_block_before_sink() -> None:
         )
     )
 
-    assert result["accesses"] == []
-    assert result["escapes"] == []
+    assert joined_access_rows(result) == []
+    assert joined_escape_rows(result) == []
 
 
 def test_returning_origin_branch_does_not_pollute_fallthrough() -> None:
@@ -53,8 +59,8 @@ def test_returning_origin_branch_does_not_pollute_fallthrough() -> None:
         )
     )
 
-    assert result["accesses"] == []
-    assert result["escapes"] == []
+    assert joined_access_rows(result) == []
+    assert joined_escape_rows(result) == []
 
 
 def test_break_carries_origin_to_loop_exit_but_stops_body() -> None:
@@ -72,7 +78,7 @@ def test_break_carries_origin_to_loop_exit_but_stops_body() -> None:
     )
 
     assert _operations(result) == ["path.write_text"]
-    assert result["escapes"] == []
+    assert joined_escape_rows(result) == []
 
 
 def test_continue_carries_origin_to_later_iteration_but_stops_body() -> None:
@@ -91,7 +97,7 @@ def test_continue_carries_origin_to_later_iteration_but_stops_body() -> None:
     )
 
     assert _operations(result) == ["path.write_text"]
-    assert result["escapes"] == []
+    assert joined_escape_rows(result) == []
 
 
 def test_nested_return_in_loop_does_not_reach_fallthrough_sink() -> None:
@@ -108,8 +114,8 @@ def test_nested_return_in_loop_does_not_reach_fallthrough_sink() -> None:
         )
     )
 
-    assert result["accesses"] == []
-    assert result["escapes"] == []
+    assert joined_access_rows(result) == []
+    assert joined_escape_rows(result) == []
 
 
 def test_raise_terminates_block_before_sink() -> None:
@@ -123,8 +129,8 @@ def test_raise_terminates_block_before_sink() -> None:
         )
     )
 
-    assert result["accesses"] == []
-    assert result["escapes"] == []
+    assert joined_access_rows(result) == []
+    assert joined_escape_rows(result) == []
 
 
 def test_finally_runs_for_return_and_post_try_is_unreachable() -> None:
@@ -142,7 +148,7 @@ def test_finally_runs_for_return_and_post_try_is_unreachable() -> None:
     )
 
     assert _operations(result) == ["path.write_text"]
-    assert result["escapes"] == []
+    assert joined_escape_rows(result) == []
 
 
 def test_terminating_finally_overrides_earlier_return_state() -> None:
@@ -160,8 +166,8 @@ def test_terminating_finally_overrides_earlier_return_state() -> None:
         )
     )
 
-    assert result["accesses"] == []
-    assert result["escapes"] == []
+    assert joined_access_rows(result) == []
+    assert joined_escape_rows(result) == []
 
 
 @pytest.mark.parametrize("control", ["break", "continue"])
@@ -181,7 +187,7 @@ def test_finally_runs_for_loop_control_and_control_stops_body(control: str) -> N
     )
 
     assert _operations(result) == ["path.write_text"]
-    assert result["escapes"] == []
+    assert joined_escape_rows(result) == []
 
 
 def test_finally_runs_for_raise_and_raise_stops_outer_block() -> None:
@@ -198,4 +204,4 @@ def test_finally_runs_for_raise_and_raise_stops_outer_block() -> None:
     )
 
     assert _operations(result) == ["path.exists"]
-    assert result["escapes"] == []
+    assert joined_escape_rows(result) == []

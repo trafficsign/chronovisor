@@ -6,6 +6,10 @@ from typing import Any
 import pytest
 
 from scripts.runtime_ownership.access import discover_access_facts
+from tests.runtime_access_v2_helpers import (
+    joined_access_rows,
+    joined_escape_rows,
+)
 
 
 def _candidate(symbol: str) -> dict[str, Any]:
@@ -48,14 +52,14 @@ def test_path_division_preserves_origin_without_generic_escape() -> None:
         "    child.write_text('value')\n"
     )
 
-    assert [row["operation"] for row in result["accesses"]] == [
+    assert [row["operation"] for row in joined_access_rows(result)] == [
         "path.write_text"
     ]
     assert any(
         step == "transform:truediv"
-        for step in result["accesses"][0]["binding_chain"]
+        for step in joined_access_rows(result)[0]["binding_chain"]
     )
-    assert result["escapes"] == []
+    assert joined_escape_rows(result) == []
 
 
 def test_path_division_with_registered_right_operand_fails_closed() -> None:
@@ -65,9 +69,9 @@ def test_path_division_with_registered_right_operand_fails_closed() -> None:
         "    return 'prefix' / STATE_FILE\n"
     )
 
-    assert result["accesses"] == []
-    assert len(result["escapes"]) == 1
-    assert result["escapes"][0]["reason"] == (
+    assert joined_access_rows(result) == []
+    assert len(joined_escape_rows(result)) == 1
+    assert joined_escape_rows(result)[0]["reason"] == (
         "ambiguous_registered_origin_path_division"
     )
 
@@ -79,11 +83,11 @@ def test_with_name_preserves_path_origin() -> None:
         "    STATE_FILE.with_name('other.json').write_text('value')\n"
     )
 
-    assert [row["operation"] for row in result["accesses"]] == [
+    assert [row["operation"] for row in joined_access_rows(result)] == [
         "path.write_text"
     ]
-    assert "transform:with_name" in result["accesses"][0]["binding_chain"]
-    assert result["escapes"] == []
+    assert "transform:with_name" in joined_access_rows(result)[0]["binding_chain"]
+    assert joined_escape_rows(result) == []
 
 
 @pytest.mark.parametrize("method", ["rename", "replace"])
@@ -122,10 +126,10 @@ def test_path_move_opaque_destination_fails_closed() -> None:
         candidates=[_candidate("SOURCE"), _candidate("DESTINATION")],
     )
 
-    assert any(row["operation"] == "path.rename" for row in result["accesses"])
+    assert any(row["operation"] == "path.rename" for row in joined_access_rows(result))
     assert any(
         row["reason"] == "ambiguous_registered_origin_path_destination"
-        for row in result["escapes"]
+        for row in joined_escape_rows(result)
     )
 
 
@@ -142,7 +146,7 @@ def test_os_open_modes_and_returned_fd_keep_path_provenance() -> None:
 
     assert {
         (row["mode"], row["operation"])
-        for row in result["accesses"]
+        for row in joined_access_rows(result)
     } == {
         ("read", "os.open:O_RDONLY"),
         ("write", "os.open:O_WRONLY|O_CREAT|O_TRUNC"),
@@ -150,7 +154,7 @@ def test_os_open_modes_and_returned_fd_keep_path_provenance() -> None:
     }
     fd_escape = next(
         row
-        for row in result["escapes"]
+        for row in joined_escape_rows(result)
         if row["reason"] == "registered_locator_to_unknown_callee"
     )
     assert "result:os.open:fd" in fd_escape["binding_chain"]
@@ -164,10 +168,10 @@ def test_os_open_unknown_flags_fail_closed() -> None:
         "    return os.open(STATE_FILE, flags)\n"
     )
 
-    assert result["accesses"] == []
-    assert len(result["escapes"]) == 1
-    assert result["escapes"][0]["reason"] == "dynamic_os_open_flags"
-    assert result["escapes"][0]["operation"] == "os.open"
+    assert joined_access_rows(result) == []
+    assert len(joined_escape_rows(result)) == 1
+    assert joined_escape_rows(result)[0]["reason"] == "dynamic_os_open_flags"
+    assert joined_escape_rows(result)[0]["operation"] == "os.open"
 
 
 @pytest.mark.parametrize("keyword", ["mode", "dir_fd"])
@@ -227,7 +231,7 @@ def test_os_open_fd_proxy_is_not_dispatched_as_a_path_receiver() -> None:
     assert len(result["escape_facts"]) == 1
     escape = result["escape_facts"][0]
     assert escape["reason"] == "registered_locator_to_unknown_callee"
-    assert "result:os.open:fd" in result["escapes"][0]["binding_chain"]
+    assert "result:os.open:fd" in joined_escape_rows(result)[0]["binding_chain"]
 
 
 @pytest.mark.parametrize(
@@ -278,14 +282,14 @@ def test_os_replace_and_rename_record_both_paths_through_module_alias() -> None:
 
     assert {
         (row["operation"], row["resource_id"], row["mode"])
-        for row in result["accesses"]
+        for row in joined_access_rows(result)
     } == {
         ("os.replace.source", "runtime-resource:source", "read_write"),
         ("os.replace.destination", "runtime-resource:destination", "write"),
         ("os.rename.source", "runtime-resource:source", "read_write"),
         ("os.rename.destination", "runtime-resource:destination", "write"),
     }
-    assert result["escapes"] == []
+    assert joined_escape_rows(result) == []
 
 
 def test_from_os_import_alias_resolves_open_and_flags() -> None:
@@ -296,9 +300,9 @@ def test_from_os_import_alias_resolves_open_and_flags() -> None:
         "    low_open(STATE_FILE, WRITE_ONLY)\n"
     )
 
-    assert len(result["accesses"]) == 1
-    assert result["accesses"][0]["operation"] == "os.open:O_WRONLY"
-    assert result["escapes"] == []
+    assert len(joined_access_rows(result)) == 1
+    assert joined_access_rows(result)[0]["operation"] == "os.open:O_WRONLY"
+    assert joined_escape_rows(result) == []
 
 
 def test_os_local_and_external_shadows_are_not_concrete_sinks() -> None:
@@ -315,8 +319,8 @@ def test_os_local_and_external_shadows_are_not_concrete_sinks() -> None:
         candidates=[_candidate("SOURCE"), _candidate("DESTINATION")],
     )
 
-    assert result["accesses"] == []
-    assert result["escapes"]
+    assert joined_access_rows(result) == []
+    assert joined_escape_rows(result)
     assert not any(
         row["operation"].startswith("os.") for row in result["escape_facts"]
     )

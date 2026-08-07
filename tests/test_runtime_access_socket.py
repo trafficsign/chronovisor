@@ -17,6 +17,9 @@ from scripts.runtime_ownership.access_model import (
     simultaneous_flow_merge,
     structured_flow_value,
 )
+from tests.runtime_access_v2_helpers import (
+    joined_escape_rows,
+)
 
 RESOURCE_ID = "runtime-resource:unix-socket"
 
@@ -779,7 +782,7 @@ def test_production_socket_inventory_is_exact_and_excludes_tcp_helpers() -> None
         ),
         [
             (row["actor"], row["operation"], row["binding_chain"])
-            for row in result["escapes"]
+            for row in joined_escape_rows(result)
             if row["operation"] == "path.constructor"
             and row["actor"].endswith(":serve")
         ][:10],

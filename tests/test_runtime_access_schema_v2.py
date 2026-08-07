@@ -4,9 +4,16 @@ import ast
 from collections.abc import Mapping
 from typing import Any
 
+import pytest
+
 from scripts.runtime_ownership.access import discover_access_facts
-from scripts.runtime_ownership.access_facts import AccessFactCollector
+from scripts.runtime_ownership.access_facts import AccessFactCollector, _logical_actor
 from scripts.runtime_ownership.access_model import FlowValue, _collect_syntax_sites
+from tests.runtime_access_v2_helpers import (
+    joined_access_rows,
+    joined_escape_rows,
+    validate_runtime_access_v2_result,
+)
 
 
 def _discover(
@@ -40,6 +47,53 @@ def _v2_identity(result: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def test_logical_actor_keeps_actor_for_unrelated_internal_call() -> None:
+    actor = "chronovisor.consumer:semantic_fallback"
+    chain = (
+        "call:chronovisor.core.runtime_config:load_search_embedding_config->"
+        "chronovisor.core.runtime_config:"
+        "load_search_embedding_config.<locals>.text:default|"
+        "site_id=runtime-site:" + "a" * 64,
+    )
+
+    assert _logical_actor(actor, chain) == actor
+
+
+def test_logical_actor_uses_direct_reaching_caller() -> None:
+    chain = (
+        "call:chronovisor.consumer:writer->"
+        "chronovisor.consumer:persist:path",
+    )
+
+    assert _logical_actor("chronovisor.consumer:persist", chain) == (
+        "chronovisor.consumer:writer"
+    )
+
+
+def test_logical_actor_uses_outermost_caller_for_nested_reaching_chain() -> None:
+    chain = (
+        "call:chronovisor.consumer:writer->"
+        "chronovisor.consumer:middle:path",
+        "call:chronovisor.consumer:middle->"
+        "chronovisor.consumer:persist:path",
+    )
+
+    assert _logical_actor("chronovisor.consumer:persist", chain) == (
+        "chronovisor.consumer:writer"
+    )
+
+
+def test_logical_actor_parses_site_id_suffix_on_reaching_edge() -> None:
+    chain = (
+        "call:chronovisor.consumer:<module>->"
+        "chronovisor.consumer:consume:path|site_id=runtime-site:" + "b" * 64,
+    )
+
+    assert _logical_actor("chronovisor.consumer:consume", chain) == (
+        "chronovisor.consumer:<module>"
+    )
+
+
 def test_schema_v2_ids_ignore_line_shift_but_sites_keep_line_evidence() -> None:
     source = (
         "from chronovisor.state import STATE_FILE\n"
@@ -51,7 +105,6 @@ def test_schema_v2_ids_ignore_line_shift_but_sites_keep_line_evidence() -> None:
     shifted = _discover("\n\n" + source)
 
     assert base["schema_version"] == 2
-    assert base["legacy_identity_version"] == 1
     assert base["provenance_ids"] == sorted(
         row["provenance_id"] for row in base["provenances"]
     )
@@ -112,7 +165,7 @@ def test_shared_helper_is_one_physical_fact_with_two_provenances() -> None:
     ]
     assert len(fact["provenance_ids"]) == 2
     assert fact["sink_actor"] == "chronovisor.consumer:persist"
-    assert len(result["accesses"]) == 2
+    assert len(joined_access_rows(result)) == 2
 
 
 def test_adding_writer_keeps_fact_id_and_adds_top_level_provenance_id() -> None:
@@ -410,10 +463,10 @@ def test_escape_fact_collapses_shared_site_and_keeps_actor_provenance() -> None:
     ]
     assert len(fact["provenance_ids"]) == 2
     assert fact["provenance_complete"] is True
-    assert len(result["escapes"]) == 2
+    assert len(joined_escape_rows(result)) == 2
 
 
-def test_legacy_projection_keeps_v1_call_binding_and_identity_fields() -> None:
+def test_schema_v2_root_contract_excludes_legacy_projection() -> None:
     result = _discover(
         "from chronovisor.state import STATE_FILE\n"
         "def persist(path):\n"
@@ -422,22 +475,218 @@ def test_legacy_projection_keeps_v1_call_binding_and_identity_fields() -> None:
         "    persist(STATE_FILE)\n"
     )
 
-    legacy = result["accesses"][0]
-    assert result["legacy_identity_version"] == 1
-    assert result["access_ids"] == [legacy["access_id"]]
-    assert any("|site=persist:1" in step for step in legacy["binding_chain"])
-    assert all("|site_id=" not in step for step in legacy["binding_chain"])
-    assert set(legacy) == {
-        "access_id",
-        "resource_id",
-        "actor",
-        "sink_actor",
-        "mode",
-        "operation",
-        "sink",
-        "binding_chain",
-        "occurrence",
-        "locator",
-        "evidence",
-        "structural_ordinal",
+    assert set(result) == {
+        "schema_version",
+        "sites",
+        "provenances",
+        "provenance_ids",
+        "access_facts",
+        "access_fact_ids",
+        "escape_facts",
+        "escape_fact_ids",
+        "counts",
     }
+    assert {
+        "legacy_identity_version",
+        "accesses",
+        "escapes",
+        "access_ids",
+        "escape_ids",
+    }.isdisjoint(result)
+    binding_chain = joined_access_rows(result)[0]["binding_chain"]
+    assert all("|site=persist:1" not in step for step in binding_chain)
+    assert any("|site_id=" in step for step in binding_chain)
+
+
+def test_v2_join_rejects_duplicate_site_id() -> None:
+    result = _discover(
+        "from chronovisor.state import STATE_FILE\n"
+        "STATE_FILE.read_text()\n"
+    )
+    result["sites"].append(result["sites"][0])
+
+    with pytest.raises(AssertionError, match=r"^duplicate site_id: runtime-site:"):
+        joined_access_rows(result)
+
+
+def test_v2_join_rejects_duplicate_provenance_id() -> None:
+    result = _discover(
+        "from chronovisor.state import STATE_FILE\n"
+        "STATE_FILE.read_text()\n"
+    )
+    result["provenances"].append(result["provenances"][0])
+
+    with pytest.raises(
+        AssertionError,
+        match=r"^duplicate provenance_id: runtime-provenance:",
+    ):
+        joined_access_rows(result)
+
+
+def test_v2_join_rejects_missing_referenced_site() -> None:
+    result = _discover(
+        "from chronovisor.state import STATE_FILE\n"
+        "STATE_FILE.read_text()\n"
+    )
+    result["sites"] = []
+
+    with pytest.raises(
+        AssertionError,
+        match=r"^runtime access fact references unknown site_id:",
+    ):
+        joined_access_rows(result)
+
+
+def test_v2_join_rejects_missing_referenced_provenance() -> None:
+    result = _discover(
+        "from chronovisor.state import STATE_FILE\n"
+        "STATE_FILE.read_text()\n"
+    )
+    result["provenances"] = []
+    result["provenance_ids"] = []
+
+    with pytest.raises(
+        AssertionError,
+        match=r"^runtime access fact references unknown provenance_id:",
+    ):
+        joined_access_rows(result)
+
+
+def test_v2_validator_rejects_duplicate_top_level_provenance_id() -> None:
+    result = _discover(
+        "from chronovisor.state import STATE_FILE\n"
+        "STATE_FILE.read_text()\n"
+    )
+    result["provenance_ids"].append(result["provenance_ids"][0])
+
+    with pytest.raises(AssertionError, match=r"^provenance_ids must be unique$"):
+        validate_runtime_access_v2_result(result)
+
+
+def test_v2_validator_rejects_unsorted_top_level_provenance_ids() -> None:
+    result = _discover(
+        "from chronovisor.state import STATE_FILE\n"
+        "def persist(path):\n"
+        "    path.write_text('value')\n"
+        "def writer_a():\n"
+        "    persist(STATE_FILE)\n"
+        "def writer_b():\n"
+        "    persist(STATE_FILE)\n"
+    )
+    result["provenance_ids"] = list(reversed(result["provenance_ids"]))
+
+    with pytest.raises(AssertionError, match=r"^provenance_ids must be sorted$"):
+        validate_runtime_access_v2_result(result)
+
+
+def test_v2_validator_rejects_provenance_id_list_drift() -> None:
+    result = _discover(
+        "from chronovisor.state import STATE_FILE\n"
+        "STATE_FILE.read_text()\n"
+    )
+    result["provenance_ids"] = []
+
+    with pytest.raises(
+        AssertionError,
+        match=r"^provenance_ids must exactly match provenance row identities$",
+    ):
+        validate_runtime_access_v2_result(result)
+
+
+@pytest.mark.parametrize(
+    "id_list_key",
+    ["access_fact_ids", "escape_fact_ids"],
+)
+def test_v2_validator_rejects_fact_id_list_drift(id_list_key: str) -> None:
+    result = _discover(
+        "from chronovisor.state import STATE_FILE\n"
+        "STATE_FILE.read_text()\n"
+        "opaque(STATE_FILE)\n"
+    )
+    result[id_list_key] = []
+
+    with pytest.raises(
+        AssertionError,
+        match=rf"^{id_list_key} must exactly match sorted .* identities$",
+    ):
+        validate_runtime_access_v2_result(result)
+
+
+def test_v2_validator_rejects_duplicate_fact_id() -> None:
+    result = _discover(
+        "from chronovisor.state import STATE_FILE\n"
+        "STATE_FILE.read_text()\n"
+    )
+    result["access_facts"].append(dict(result["access_facts"][0]))
+
+    with pytest.raises(
+        AssertionError,
+        match=r"^duplicate access_fact_id: runtime-access-fact:",
+    ):
+        validate_runtime_access_v2_result(result)
+
+
+def test_v2_validator_rejects_duplicate_fact_provenance_reference() -> None:
+    result = _discover(
+        "from chronovisor.state import STATE_FILE\n"
+        "STATE_FILE.read_text()\n"
+    )
+    fact = result["access_facts"][0]
+    fact["provenance_ids"].append(fact["provenance_ids"][0])
+
+    with pytest.raises(
+        AssertionError,
+        match=r"^runtime access fact provenance_ids must be unique:",
+    ):
+        validate_runtime_access_v2_result(result)
+
+
+def test_v2_validator_rejects_orphan_top_level_provenance() -> None:
+    result = _discover(
+        "from chronovisor.state import STATE_FILE\n"
+        "STATE_FILE.read_text()\n"
+    )
+    orphan_id = "runtime-provenance:" + "f" * 64
+    result["provenances"].append(
+        {**result["provenances"][0], "provenance_id": orphan_id}
+    )
+    result["provenance_ids"] = sorted([*result["provenance_ids"], orphan_id])
+
+    with pytest.raises(
+        AssertionError,
+        match=r"^orphan top-level provenance identities:",
+    ):
+        validate_runtime_access_v2_result(result)
+
+
+def test_v2_validator_rejects_unknown_provenance_call_site() -> None:
+    result = _discover(
+        "from chronovisor.state import STATE_FILE\n"
+        "def persist(path):\n"
+        "    path.write_text('value')\n"
+        "persist(STATE_FILE)\n"
+    )
+    missing_site_id = "runtime-site:" + "f" * 64
+    provenance = result["provenances"][0]
+    provenance["call_site_ids"].append(missing_site_id)
+
+    with pytest.raises(
+        AssertionError,
+        match=r"^runtime provenance references unknown call_site_id:",
+    ):
+        validate_runtime_access_v2_result(result)
+
+
+def test_v2_validator_rejects_orphan_top_level_site() -> None:
+    result = _discover(
+        "from chronovisor.state import STATE_FILE\n"
+        "STATE_FILE.read_text()\n"
+    )
+    orphan_id = "runtime-site:" + "f" * 64
+    result["sites"].append({**result["sites"][0], "site_id": orphan_id})
+
+    with pytest.raises(
+        AssertionError,
+        match=r"^orphan top-level site identities:",
+    ):
+        validate_runtime_access_v2_result(result)

@@ -1,9 +1,15 @@
 from __future__ import annotations
 
+from typing import Any
+
 from scripts.runtime_ownership.access import discover_access_facts
+from tests.runtime_access_v2_helpers import (
+    joined_access_rows,
+    joined_escape_rows,
+)
 
 
-def _discover(sources: dict[str, str]) -> dict:
+def _discover(sources: dict[str, str]) -> dict[str, Any]:
     candidate = {
         "id": "runtime-resource:state",
         "module": "chronovisor.state",
@@ -15,8 +21,8 @@ def _discover(sources: dict[str, str]) -> dict:
     )
 
 
-def _operations(result: dict) -> list[str]:
-    return [row["operation"] for row in result["accesses"]]
+def _operations(result: dict[str, Any]) -> list[str]:
+    return [row["operation"] for row in joined_access_rows(result)]
 
 
 def test_direct_repo_star_import_exposes_known_origin() -> None:
@@ -35,8 +41,8 @@ def test_direct_repo_star_import_exposes_known_origin() -> None:
     )
 
     assert _operations(result) == ["path.write_text"]
-    assert result["accesses"][0]["actor"] == "chronovisor.consumer:save"
-    assert result["escapes"] == []
+    assert joined_access_rows(result)[0]["actor"] == "chronovisor.consumer:save"
+    assert joined_escape_rows(result) == []
 
 
 def test_two_hop_star_reexport_exposes_known_origin() -> None:
@@ -54,8 +60,8 @@ def test_two_hop_star_reexport_exposes_known_origin() -> None:
     )
 
     assert _operations(result) == ["path.write_text"]
-    assert result["accesses"][0]["actor"] == "chronovisor.consumer:save"
-    assert result["escapes"] == []
+    assert joined_access_rows(result)[0]["actor"] == "chronovisor.consumer:save"
+    assert joined_escape_rows(result) == []
 
 
 def test_static_literal_all_limits_star_exports() -> None:
@@ -78,8 +84,8 @@ def test_static_literal_all_limits_star_exports() -> None:
     )
 
     assert _operations(result) == ["path.write_text"]
-    assert result["accesses"][0]["actor"] == "chronovisor.consumer:use_exports"
-    assert result["escapes"] == []
+    assert joined_access_rows(result)[0]["actor"] == "chronovisor.consumer:use_exports"
+    assert joined_escape_rows(result) == []
 
 
 def test_dynamic_all_exposes_known_may_values_and_escapes() -> None:
@@ -100,8 +106,8 @@ def test_dynamic_all_exposes_known_may_values_and_escapes() -> None:
     )
 
     assert _operations(result) == ["path.write_text"]
-    assert len(result["escapes"]) == 1
-    assert result["escapes"][0]["reason"] == "dynamic_star_import"
+    assert len(joined_escape_rows(result)) == 1
+    assert joined_escape_rows(result)[0]["reason"] == "dynamic_star_import"
 
 
 def test_module_if_branch_import_contributes_may_export() -> None:
@@ -124,7 +130,7 @@ def test_module_if_branch_import_contributes_may_export() -> None:
     )
 
     assert _operations(result) == ["path.write_text"]
-    assert result["escapes"] == []
+    assert joined_escape_rows(result) == []
 
 
 def test_module_try_branch_import_contributes_may_export() -> None:
@@ -146,7 +152,7 @@ def test_module_try_branch_import_contributes_may_export() -> None:
     )
 
     assert _operations(result) == ["path.write_text"]
-    assert result["escapes"] == []
+    assert joined_escape_rows(result) == []
 
 
 def test_module_match_branch_import_contributes_may_export() -> None:
@@ -170,4 +176,4 @@ def test_module_match_branch_import_contributes_may_export() -> None:
     )
 
     assert _operations(result) == ["path.write_text"]
-    assert result["escapes"] == []
+    assert joined_escape_rows(result) == []
