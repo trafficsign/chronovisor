@@ -11,12 +11,27 @@ from pathlib import PurePosixPath
 from typing import Any, Literal
 
 MAX_BINDING_PATHS_PER_RESOURCE = 64
+MAX_FLOW_VARIANTS = 64
 
 STDLIB_BUILTINS_CALLS = frozenset({"open"})
 STDLIB_DATACLASSES_CALLS = frozenset({"dataclass", "field"})
 STDLIB_FCNTL_CALLS = frozenset({"flock"})
-STDLIB_OS_CALLS = frozenset({"fdopen", "open", "rename", "replace"})
+STDLIB_OS_CALLS = frozenset({"chmod", "fdopen", "open", "rename", "replace"})
 STDLIB_PATHLIB_CALLS = frozenset({"Path"})
+STDLIB_SIGNAL_CALLS = frozenset({"signal"})
+STDLIB_SOCKET_CALLS = frozenset({"socket"})
+STDLIB_SOCKET_CONSTANTS = frozenset(
+    {
+        "AF_UNIX",
+        "SOCK_STREAM",
+        "SOCK_DGRAM",
+        "SOCK_RAW",
+        "SOCK_SEQPACKET",
+    }
+)
+STDLIB_SOCKETSERVER_CLASSES = frozenset(
+    {"ThreadingUnixStreamServer", "UnixStreamServer"}
+)
 STDLIB_SQLITE3_CALLS = frozenset({"connect"})
 STDLIB_SQLITE3_TYPES = frozenset({"Connection", "Cursor"})
 FCNTL_LOCK_FLAGS = frozenset({"LOCK_EX", "LOCK_NB", "LOCK_SH", "LOCK_UN"})
@@ -62,16 +77,39 @@ SQLITE_HANDLE_OBJECT_TYPES = frozenset(
 )
 SQLITE_UNKNOWN_ATTRIBUTE_OBJECT_TYPE = "stdlib-sqlite3-unknown-attribute"
 SQLITE_TYPE_OBJECT_PREFIX = "stdlib-sqlite3-type:"
+SOCKET_CONSTANT_OBJECT_PREFIX = "stdlib-socket-constant:"
+SOCKET_HANDLE_OBJECT_TYPE = "stdlib-socket-unix-stream"
+SOCKET_STATE_PREFIX = "stdlib-socket-state:"
+SOCKET_STATES = frozenset({"bound", "connected", "created", "listening"})
+SOCKET_BOUND_METHOD_PREFIX = "stdlib-socket-bound-method:"
+SOCKETSERVER_CLASS_OBJECT_PREFIX = "stdlib-socketserver-class:"
+SOCKETSERVER_CLASS_DICT_OBJECT_TYPE = "stdlib-socketserver-local-class-dict"
+SOCKETSERVER_LOCAL_CLASS_OBJECT_PREFIX = "stdlib-socketserver-local-class:"
+SOCKETSERVER_HANDLE_OBJECT_TYPE = "stdlib-socketserver-unix-stream"
+SOCKETSERVER_BOUND_METHOD_PREFIX = "stdlib-socketserver-bound-method:"
+SOCKETSERVER_STATE_PREFIX = "stdlib-socketserver-state:"
+SOCKETSERVER_STATES = frozenset({"created", "bound", "active", "returned"})
 STDLIB_CALL_TARGET_PREFIX = "stdlib-call-target:"
 STDLIB_MODULE_MUTATION_PREFIX = "stdlib-module-attribute-mutated:"
 STDLIB_MODULE_WILDCARD_ATTRIBUTE = "*"
 STDLIB_MODULE_STATE_PREFIX = "\0stdlib-module-state:"
 SUPPORTED_STDLIB_MODULES = frozenset(
-    {"builtins", "dataclasses", "fcntl", "os", "pathlib", "sqlite3"}
+    {
+        "builtins",
+        "dataclasses",
+        "fcntl",
+        "os",
+        "pathlib",
+        "signal",
+        "socket",
+        "socketserver",
+        "sqlite3",
+    }
 )
 PATH_OBJECT_TYPE = "stdlib-pathlib-path"
 PATH_STRING_OBJECT_TYPE = "stdlib-pathlib-path-representation"
 PATH_BOUND_TRANSFORM_PREFIX = "stdlib-pathlib-bound-transform:"
+STRUCTURED_CONTAINER_OBJECT_TYPE = "python-structured-container"
 DATACLASS_INIT_VAR_MARKER = "stdlib-dataclasses-init-var"
 DATACLASS_KW_ONLY_MARKER = "stdlib-dataclasses-kw-only"
 SQLITE_CURSOR_SCALAR_ATTRIBUTES = frozenset(
@@ -185,6 +223,9 @@ class FlowValue:
     attribute_values: dict[str, FlowValue] = field(default_factory=dict)
     attribute_values_complete: bool = False
     attribute_values_ambiguous: bool = False
+    variants: tuple[FlowValue, ...] = field(default_factory=tuple)
+    has_originless_alternative: bool = False
+    variant_tainted_resource_ids: frozenset[str] = field(default_factory=frozenset)
 
     def copy(self) -> FlowValue:
         return FlowValue(
@@ -210,6 +251,11 @@ class FlowValue:
             },
             attribute_values_complete=self.attribute_values_complete,
             attribute_values_ambiguous=self.attribute_values_ambiguous,
+            variants=tuple(variant.copy() for variant in self.variants),
+            has_originless_alternative=self.has_originless_alternative,
+            variant_tainted_resource_ids=frozenset(
+                self.variant_tainted_resource_ids
+            ),
         )
 
     def merged(self, other: FlowValue) -> FlowValue:
@@ -303,6 +349,34 @@ class FlowValue:
         result.instance_ids.update(other.instance_ids)
         result.unknown_callable |= other.unknown_callable
         result.overflowed = frozenset(overflowed)
+        result.has_originless_alternative = (
+            self.has_originless_alternative
+            or other.has_originless_alternative
+        )
+        result.variant_tainted_resource_ids = frozenset(
+            self.variant_tainted_resource_ids
+            | other.variant_tainted_resource_ids
+        )
+        if self.variants or other.variants:
+            left_variants = self.variants or (_without_variants(self),)
+            right_variants = other.variants or (_without_variants(other),)
+            simultaneous = [
+                left.merged(right)
+                for left in left_variants
+                for right in right_variants
+            ]
+            result.variants, variant_overflow = _normalize_flow_variants(
+                simultaneous
+            )
+            if variant_overflow:
+                result.overflowed = frozenset(
+                    set(result.overflowed)
+                    | {
+                        resource_id
+                        for variant in simultaneous
+                        for resource_id in variant.origins
+                    }
+                )
         return result
 
     def bound(self, step: str) -> FlowValue:
@@ -339,6 +413,11 @@ class FlowValue:
             },
             attribute_values_complete=self.attribute_values_complete,
             attribute_values_ambiguous=self.attribute_values_ambiguous,
+            variants=tuple(variant.bound(step) for variant in self.variants),
+            has_originless_alternative=self.has_originless_alternative,
+            variant_tainted_resource_ids=frozenset(
+                self.variant_tainted_resource_ids
+            ),
         )
 
     @property
@@ -387,11 +466,39 @@ class FlowValue:
             safe_value, cyclic_value = value.partition_call_cycles(target=target)
             safe_attributes[name] = safe_value
             cyclic_attributes[name] = cyclic_value
+        safe_variants: list[FlowValue] = []
+        cyclic_variants: list[FlowValue] = []
+        for variant in self.variants:
+            safe_variant, cyclic_variant = variant.partition_call_cycles(target=target)
+            if safe_variant.has_analysis_state:
+                safe_variants.append(safe_variant)
+            if cyclic_variant.has_analysis_state:
+                cyclic_variants.append(cyclic_variant)
+        normalized_safe_variants, safe_variant_overflow = _normalize_flow_variants(
+            safe_variants
+        )
+        normalized_cyclic_variants, cyclic_variant_overflow = (
+            _normalize_flow_variants(cyclic_variants)
+        )
+        safe_overflowed = set(self.overflowed & safe.keys())
+        cyclic_overflowed = set(self.overflowed & cyclic.keys())
+        if safe_variant_overflow:
+            safe_overflowed.update(
+                resource_id
+                for variant in safe_variants
+                for resource_id in variant.origins
+            )
+        if cyclic_variant_overflow:
+            cyclic_overflowed.update(
+                resource_id
+                for variant in cyclic_variants
+                for resource_id in variant.origins
+            )
         return (
             FlowValue(
                 origins=safe,
                 object_types=set(object_types),
-                overflowed=frozenset(self.overflowed & safe.keys()),
+                overflowed=frozenset(safe_overflowed),
                 module_refs=set(module_refs),
                 call_targets=set(call_targets),
                 class_targets=set(class_targets),
@@ -405,11 +512,16 @@ class FlowValue:
                 attribute_values=safe_attributes,
                 attribute_values_complete=self.attribute_values_complete,
                 attribute_values_ambiguous=self.attribute_values_ambiguous,
+                variants=normalized_safe_variants,
+                has_originless_alternative=self.has_originless_alternative,
+                variant_tainted_resource_ids=frozenset(
+                    self.variant_tainted_resource_ids & safe.keys()
+                ),
             ),
             FlowValue(
                 origins=cyclic,
                 object_types=set(object_types),
-                overflowed=frozenset(self.overflowed & cyclic.keys()),
+                overflowed=frozenset(cyclic_overflowed),
                 module_refs=set(module_refs),
                 call_targets=set(call_targets),
                 class_targets=set(class_targets),
@@ -423,6 +535,11 @@ class FlowValue:
                 attribute_values=cyclic_attributes,
                 attribute_values_complete=self.attribute_values_complete,
                 attribute_values_ambiguous=self.attribute_values_ambiguous,
+                variants=normalized_cyclic_variants,
+                has_originless_alternative=self.has_originless_alternative,
+                variant_tainted_resource_ids=frozenset(
+                    self.variant_tainted_resource_ids & cyclic.keys()
+                ),
             ),
         )
 
@@ -451,6 +568,220 @@ class DataclassInfo:
     shape_ambiguous: bool = False
     post_init_target: str | None = None
     post_init_unknown: bool = False
+
+
+def _without_variants(value: FlowValue) -> FlowValue:
+    stripped = value.copy()
+    stripped.variants = ()
+    stripped.attribute_values = {
+        name: _without_variants(attribute)
+        for name, attribute in stripped.attribute_values.items()
+    }
+    if stripped.structured_items is not None:
+        stripped.structured_items = tuple(
+            _without_variants(item) for item in stripped.structured_items
+        )
+    return stripped
+
+
+def _without_top_variants(value: FlowValue) -> FlowValue:
+    stripped = value.copy()
+    stripped.variants = ()
+    return stripped
+
+
+def _flow_value_key(value: FlowValue) -> tuple[Any, ...]:
+    return (
+        tuple(
+            (resource_id, tuple(sorted(paths)))
+            for resource_id, paths in sorted(value.origins.items())
+        ),
+        tuple(sorted(value.object_types)),
+        tuple(sorted(value.overflowed)),
+        tuple(sorted(value.module_refs)),
+        tuple(sorted(value.call_targets)),
+        tuple(sorted(value.class_targets)),
+        value.unknown_callable,
+        tuple(sorted(value.closure_instances)),
+        (
+            tuple(_flow_value_key(item) for item in value.structured_items)
+            if value.structured_items is not None
+            else None
+        ),
+        tuple(sorted(value.runtime_object_ids)),
+        tuple(sorted(value.runtime_close_ids)),
+        tuple(sorted(value.runtime_descriptor_ids)),
+        tuple(sorted(value.instance_ids)),
+        tuple(
+            (name, _flow_value_key(attribute))
+            for name, attribute in sorted(value.attribute_values.items())
+        ),
+        value.attribute_values_complete,
+        value.attribute_values_ambiguous,
+        value.has_originless_alternative,
+        tuple(sorted(value.variant_tainted_resource_ids)),
+    )
+
+
+def _normalize_flow_variants(
+    variants: Sequence[FlowValue],
+) -> tuple[tuple[FlowValue, ...], bool]:
+    resource_variants: dict[tuple[Any, ...], FlowValue] = {}
+    for variant in variants:
+        normalized = _without_variants(variant)
+        if not normalized.has_origins:
+            continue
+        resource_variants.setdefault(_flow_value_key(normalized), normalized)
+    ordered_resources = [
+        resource_variants[key]
+        for key in sorted(resource_variants, key=repr)
+    ]
+    return (
+        tuple(ordered_resources[:MAX_FLOW_VARIANTS]),
+        len(ordered_resources) > MAX_FLOW_VARIANTS,
+    )
+
+
+def _all_flow_variants(value: FlowValue) -> tuple[FlowValue, ...]:
+    """Return exact resource-bearing alternatives for internal propagation."""
+
+    if value.variants:
+        return tuple(
+            variant.copy() for variant in value.variants if variant.has_origins
+        )
+    if value.has_origins:
+        return (_without_variants(value),)
+    return ()
+
+
+def candidate_flow_variants(value: FlowValue) -> tuple[FlowValue, ...]:
+    """Return bounded direct-origin alternatives for variant-wise evaluation."""
+
+    if value.structured_items is not None and value.has_origins:
+        return (_without_variants(value),)
+    if value.variants:
+        variants = [
+            variant.copy() for variant in value.variants if variant.has_origins
+        ]
+        for candidate in variants:
+            if candidate.origins.keys() & value.variant_tainted_resource_ids:
+                candidate.unknown_callable = True
+        if variants and value.overflowed:
+            candidate = variants[0]
+            candidate.overflowed = frozenset(
+                set(candidate.overflowed) | set(value.overflowed)
+            )
+        return tuple(variants)
+    if value.has_origins:
+        candidate = _without_variants(value)
+        if candidate.origins.keys() & value.variant_tainted_resource_ids:
+            candidate.unknown_callable = True
+        return (candidate,)
+    return ()
+
+
+def simultaneous_flow_merge(values: Sequence[FlowValue]) -> FlowValue:
+    """Merge operands of one runtime operation and retain cross-branch taint."""
+
+    materialized = list(values)
+    result = FlowValue()
+    for value in materialized:
+        result = result.merged(value)
+    tainted_resources = set(result.variant_tainted_resource_ids)
+    for index, value in enumerate(materialized):
+        if not value.has_originless_alternative:
+            continue
+        for other_index, other in enumerate(materialized):
+            if other_index != index:
+                tainted_resources.update(other.origins)
+    result.variant_tainted_resource_ids = frozenset(tainted_resources)
+    result.has_originless_alternative = bool(materialized) and all(
+        value.has_originless_alternative
+        or (not value.has_origins and value.has_analysis_state)
+        for value in materialized
+    )
+    return result
+
+
+def structured_flow_value(items: Sequence[FlowValue]) -> FlowValue:
+    """Build a container value while retaining its shape in every candidate."""
+
+    copied_items = tuple(item.copy() for item in items)
+    result = simultaneous_flow_merge(copied_items)
+    result.structured_items = copied_items
+    return result
+
+
+def opaque_structured_flow_value(values: Sequence[FlowValue]) -> FlowValue:
+    """Build a non-scalar container without retaining recursive item state."""
+
+    result = simultaneous_flow_merge(
+        tuple(_without_top_variants(value) for value in values)
+    )
+    result.object_types.add(STRUCTURED_CONTAINER_OBJECT_TYPE)
+    result.structured_items = None
+    result.variants = ()
+    return result
+
+
+def exclusive_flow_join(alternatives: Sequence[FlowValue]) -> FlowValue:
+    """Join mutually exclusive values without tainting one candidate path by another."""
+
+    materialized = list(alternatives)
+    result = FlowValue()
+    variants: list[FlowValue] = []
+    has_originless_alternative = False
+    tainted_resources: set[str] = set()
+    for alternative in materialized:
+        result = result.merged(_without_top_variants(alternative))
+        variants.extend(_all_flow_variants(alternative))
+        has_originless_alternative |= alternative.has_originless_alternative or (
+            not alternative.has_origins and alternative.has_analysis_state
+        )
+        tainted_resources.update(alternative.variant_tainted_resource_ids)
+    result.has_originless_alternative = has_originless_alternative
+    result.variant_tainted_resource_ids = frozenset(tainted_resources)
+    result.variants, variant_overflow = _normalize_flow_variants(variants)
+    if variant_overflow:
+        result.overflowed = frozenset(
+            set(result.overflowed)
+            | {
+                resource_id
+                for variant in variants
+                for resource_id in variant.origins
+            }
+        )
+    return result
+
+
+def with_candidate_flow_variants(
+    value: FlowValue, alternatives: Sequence[FlowValue]
+) -> FlowValue:
+    """Attach exact candidate alternatives without changing the joined value."""
+
+    result = value.copy()
+    variants = [*_all_flow_variants(value)]
+    has_originless_alternative = value.has_originless_alternative
+    tainted_resources = set(value.variant_tainted_resource_ids)
+    for alternative in alternatives:
+        variants.extend(_all_flow_variants(alternative))
+        has_originless_alternative |= alternative.has_originless_alternative or (
+            not alternative.has_origins and alternative.has_analysis_state
+        )
+        tainted_resources.update(alternative.variant_tainted_resource_ids)
+    result.has_originless_alternative = has_originless_alternative
+    result.variant_tainted_resource_ids = frozenset(tainted_resources)
+    result.variants, variant_overflow = _normalize_flow_variants(variants)
+    if variant_overflow:
+        result.overflowed = frozenset(
+            set(result.overflowed)
+            | {
+                resource_id
+                for variant in variants
+                for resource_id in variant.origins
+            }
+        )
+    return result
 
 
 def mark_attribute_alternative_ambiguity(
@@ -493,13 +824,16 @@ def _is_flow_bottom(value: FlowValue) -> bool:
         or value.attribute_values
         or value.attribute_values_complete
         or value.attribute_values_ambiguous
+        or value.variants
+        or value.has_originless_alternative
+        or value.variant_tainted_resource_ids
     )
 
 
 def is_path_receiver(value: FlowValue) -> bool:
     """Return whether an origin-bearing value is still a Path proxy."""
 
-    non_path_types = SQLITE_HANDLE_OBJECT_TYPES | {
+    non_path_types = set(SQLITE_HANDLE_OBJECT_TYPES) | {
         FILE_BOUND_CLOSE_OBJECT_TYPE,
         FILE_BOUND_FILENO_OBJECT_TYPE,
         FILE_HANDLE_OBJECT_TYPE,
@@ -507,7 +841,16 @@ def is_path_receiver(value: FlowValue) -> bool:
         OS_FD_OBJECT_TYPE,
         SQLITE_UNKNOWN_ATTRIBUTE_OBJECT_TYPE,
         PATH_STRING_OBJECT_TYPE,
+        SOCKET_HANDLE_OBJECT_TYPE,
+        SOCKETSERVER_HANDLE_OBJECT_TYPE,
     }
+    non_path_types.update(
+        object_type
+        for object_type in value.object_types
+        if object_type.startswith(
+            (SOCKET_BOUND_METHOD_PREFIX, SOCKETSERVER_BOUND_METHOD_PREFIX)
+        )
+    )
     return (
         value.has_origins
         and value.object_types.isdisjoint(non_path_types)
@@ -629,6 +972,153 @@ def sqlite_handle_kind(value: FlowValue) -> str | None:
     return None
 
 
+def _is_exact_managed_runtime_object(
+    value: FlowValue,
+    *,
+    object_types: set[str],
+    binding_step: str,
+) -> bool:
+    """Require one live managed object, including origin-less constructors."""
+
+    return (
+        value.object_types == object_types
+        and not value.module_refs
+        and not value.call_targets
+        and not value.class_targets
+        and not value.unknown_callable
+        and not value.closure_instances
+        and value.structured_items is None
+        and not value.attribute_values_ambiguous
+        and bool(value.runtime_object_ids)
+        and all(
+            binding_step in chain
+            for chains in value.origins.values()
+            for chain in chains
+        )
+    )
+
+
+def socket_handle_kind(value: FlowValue) -> str | None:
+    """Return the precise live raw AF_UNIX/SOCK_STREAM socket kind."""
+
+    return "unix_stream" if socket_handle_state(value) is not None else None
+
+
+def socket_handle_state(value: FlowValue) -> str | None:
+    """Return the precise raw Unix stream socket lifecycle state."""
+
+    states = {
+        object_type.removeprefix(SOCKET_STATE_PREFIX)
+        for object_type in value.object_types
+        if object_type.startswith(SOCKET_STATE_PREFIX)
+    }
+    if len(states) != 1:
+        return None
+    state = next(iter(states))
+    expected = {SOCKET_HANDLE_OBJECT_TYPE, f"{SOCKET_STATE_PREFIX}{state}"}
+    if state not in SOCKET_STATES or not _is_exact_managed_runtime_object(
+        value,
+        object_types=expected,
+        binding_step="handle:socket.unix_stream",
+    ):
+        return None
+    return state
+
+
+def socketserver_handle_state(value: FlowValue) -> str | None:
+    """Return the precise live UnixStreamServer lifecycle state."""
+
+    states = {
+        object_type.removeprefix(SOCKETSERVER_STATE_PREFIX)
+        for object_type in value.object_types
+        if object_type.startswith(SOCKETSERVER_STATE_PREFIX)
+    }
+    if len(states) != 1:
+        return None
+    state = next(iter(states))
+    expected = {
+        SOCKETSERVER_HANDLE_OBJECT_TYPE,
+        f"{SOCKETSERVER_STATE_PREFIX}{state}",
+    }
+    if state not in SOCKETSERVER_STATES or not _is_exact_managed_runtime_object(
+        value,
+        object_types=expected,
+        binding_step="handle:socketserver.unix_stream",
+    ):
+        return None
+    return state
+
+
+def socket_constant_value(name: str) -> FlowValue:
+    """Build an exact symbolic socket constant without trusting raw integers."""
+
+    return FlowValue(object_types={f"{SOCKET_CONSTANT_OBJECT_PREFIX}{name}"})
+
+
+def socket_constant_name(value: FlowValue) -> str | None:
+    """Decode one uncontaminated symbolic socket constant."""
+
+    if (
+        len(value.object_types) != 1
+        or value.origins
+        or value.module_refs
+        or value.call_targets
+        or value.class_targets
+        or value.unknown_callable
+        or value.closure_instances
+        or value.structured_items is not None
+        or value.runtime_object_ids
+        or value.attribute_values
+        or value.attribute_values_complete
+        or value.attribute_values_ambiguous
+    ):
+        return None
+    object_type = next(iter(value.object_types))
+    if not object_type.startswith(SOCKET_CONSTANT_OBJECT_PREFIX):
+        return None
+    name = object_type.removeprefix(SOCKET_CONSTANT_OBJECT_PREFIX)
+    return name if name in STDLIB_SOCKET_CONSTANTS else None
+
+
+def tag_socket_handle(
+    value: FlowValue, *, identity: str, state: str = "created"
+) -> FlowValue:
+    """Attach exact raw Unix stream socket identity to an endpoint value."""
+
+    if state not in SOCKET_STATES:
+        raise ValueError(f"unsupported socket lifecycle state: {state}")
+    tagged = value.bound("handle:socket.unix_stream")
+    tagged.object_types = {
+        SOCKET_HANDLE_OBJECT_TYPE,
+        f"{SOCKET_STATE_PREFIX}{state}",
+    }
+    tagged.runtime_object_ids = {identity}
+    tagged.runtime_close_ids = {identity}
+    tagged.runtime_descriptor_ids = set()
+    return tagged
+
+
+def tag_socketserver_handle(
+    value: FlowValue,
+    *,
+    identity: str,
+    state: str,
+) -> FlowValue:
+    """Attach exact UnixStreamServer identity and lifecycle state."""
+
+    if state not in SOCKETSERVER_STATES:
+        raise ValueError(f"unsupported socketserver lifecycle state: {state}")
+    tagged = value.bound("handle:socketserver.unix_stream")
+    tagged.object_types = {
+        SOCKETSERVER_HANDLE_OBJECT_TYPE,
+        f"{SOCKETSERVER_STATE_PREFIX}{state}",
+    }
+    tagged.runtime_object_ids = {identity}
+    tagged.runtime_close_ids = {identity}
+    tagged.runtime_descriptor_ids = set()
+    return tagged
+
+
 def file_handle_kind(value: FlowValue) -> str | None:
     """Return the precise synchronous file-handle kind carried by a value."""
 
@@ -726,6 +1216,27 @@ def has_file_descriptor_object(value: FlowValue) -> bool:
     )
 
 
+def has_managed_runtime_object(value: FlowValue) -> bool:
+    """Return whether a value carries a tracked closeable runtime object."""
+
+    return bool(
+        value.object_types.intersection(
+            {
+                FILE_HANDLE_OBJECT_TYPE,
+                OS_FD_OBJECT_TYPE,
+                SOCKET_HANDLE_OBJECT_TYPE,
+                SOCKETSERVER_HANDLE_OBJECT_TYPE,
+            }
+        )
+        or any(
+            object_type.startswith(
+                (SOCKET_BOUND_METHOD_PREFIX, SOCKETSERVER_BOUND_METHOD_PREFIX)
+            )
+            for object_type in value.object_types
+        )
+    )
+
+
 def contaminate_runtime_objects(
     env: dict[str, FlowValue],
     object_env: dict[str, set[str]],
@@ -737,7 +1248,7 @@ def contaminate_runtime_objects(
         *(
             value.runtime_close_ids or value.runtime_object_ids
             for value in values
-            if has_file_descriptor_object(value)
+            if has_managed_runtime_object(value)
             or value.object_types.intersection(
                 {
                     FILE_BOUND_CLOSE_OBJECT_TYPE,
@@ -774,6 +1285,58 @@ def contaminate_runtime_objects(
         env[name] = contaminated
         if contaminated.object_types:
             object_env[name] = set(contaminated.object_types)
+        else:
+            object_env.pop(name, None)
+    return object_ids
+
+
+def replace_runtime_object_aliases(
+    env: dict[str, FlowValue],
+    object_env: dict[str, set[str]],
+    receiver: FlowValue,
+    replacement: FlowValue,
+) -> set[str]:
+    """Replace one live handle across aliases while preserving nested shape."""
+
+    object_ids = set(receiver.runtime_object_ids)
+    if not object_ids:
+        return set()
+
+    def replace(candidate: FlowValue) -> FlowValue:
+        if (
+            object_ids.intersection(candidate.runtime_object_ids)
+            and has_managed_runtime_object(candidate)
+            and not any(
+                object_type.startswith(
+                    (SOCKET_BOUND_METHOD_PREFIX, SOCKETSERVER_BOUND_METHOD_PREFIX)
+                )
+                for object_type in candidate.object_types
+            )
+        ):
+            return replacement.copy()
+        updated = candidate.copy()
+        if object_ids.intersection(candidate.runtime_object_ids):
+            for resource_id, paths in replacement.origins.items():
+                updated.origins[resource_id] = updated.origins.get(
+                    resource_id, frozenset()
+                ) | paths
+        updated.attribute_values = {
+            attribute: replace(value)
+            for attribute, value in candidate.attribute_values.items()
+        }
+        if candidate.structured_items is not None:
+            updated.structured_items = tuple(
+                replace(item) for item in candidate.structured_items
+            )
+        return updated
+
+    for name, candidate in list(env.items()):
+        updated = replace(candidate)
+        if updated == candidate:
+            continue
+        env[name] = updated
+        if updated.object_types:
+            object_env[name] = set(updated.object_types)
         else:
             object_env.pop(name, None)
     return object_ids
@@ -1627,6 +2190,7 @@ __all__ = [
     "FILE_HANDLE_OBJECT_TYPE",
     "FILE_UNKNOWN_ATTRIBUTE_OBJECT_TYPE",
     "MAX_BINDING_PATHS_PER_RESOURCE",
+    "MAX_FLOW_VARIANTS",
     "OS_FD_OBJECT_TYPE",
     "OS_FLAG_OBJECT_PREFIX",
     "OS_OPEN_ACCESS_FLAGS",
@@ -1645,6 +2209,19 @@ __all__ = [
     "SQLITE_HANDLE_OBJECT_TYPES",
     "SQLITE_TYPE_OBJECT_PREFIX",
     "SQLITE_UNKNOWN_ATTRIBUTE_OBJECT_TYPE",
+    "SOCKET_BOUND_METHOD_PREFIX",
+    "SOCKET_CONSTANT_OBJECT_PREFIX",
+    "SOCKET_HANDLE_OBJECT_TYPE",
+    "SOCKET_STATE_PREFIX",
+    "SOCKET_STATES",
+    "SOCKETSERVER_BOUND_METHOD_PREFIX",
+    "SOCKETSERVER_CLASS_DICT_OBJECT_TYPE",
+    "SOCKETSERVER_CLASS_OBJECT_PREFIX",
+    "SOCKETSERVER_HANDLE_OBJECT_TYPE",
+    "SOCKETSERVER_LOCAL_CLASS_OBJECT_PREFIX",
+    "SOCKETSERVER_STATE_PREFIX",
+    "SOCKETSERVER_STATES",
+    "STRUCTURED_CONTAINER_OBJECT_TYPE",
     "SyntaxSite",
     "STDLIB_OS_CALLS",
     "STDLIB_BUILTINS_CALLS",
@@ -1655,6 +2232,10 @@ __all__ = [
     "STDLIB_CALL_TARGET_PREFIX",
     "STDLIB_SQLITE3_CALLS",
     "STDLIB_SQLITE3_TYPES",
+    "STDLIB_SOCKET_CALLS",
+    "STDLIB_SIGNAL_CALLS",
+    "STDLIB_SOCKET_CONSTANTS",
+    "STDLIB_SOCKETSERVER_CLASSES",
     "SUPPORTED_STDLIB_MODULES",
     "UNRESOLVED_RUNTIME_OBJECT_ALTERNATIVE_TYPE",
     "_call_ordinals",
@@ -1665,11 +2246,14 @@ __all__ = [
     "_open_mode",
     "_stable_id",
     "combine_fcntl_lock_masks",
+    "candidate_flow_variants",
     "contaminate_runtime_objects",
+    "exclusive_flow_join",
     "fcntl_lock_mask_value",
     "fcntl_lock_masks",
     "has_fcntl_lock_mask",
     "has_file_descriptor_object",
+    "has_managed_runtime_object",
     "file_handle_kind",
     "is_exact_flock_descriptor",
     "is_exact_os_fd",
@@ -1679,8 +2263,17 @@ __all__ = [
     "is_precise_stdlib_module",
     "project_sqlite_attribute",
     "precise_stdlib_module_name",
+    "replace_runtime_object_aliases",
     "open_mode_from_expression",
+    "opaque_structured_flow_value",
     "sqlite_handle_kind",
+    "socket_constant_name",
+    "socket_constant_value",
+    "socket_handle_kind",
+    "socket_handle_state",
+    "socketserver_handle_state",
+    "simultaneous_flow_merge",
+    "structured_flow_value",
     "stdlib_call_target_marker",
     "stdlib_call_targets",
     "stdlib_module_dict_reference",
@@ -1690,4 +2283,7 @@ __all__ = [
     "tag_file_handle",
     "tag_os_fd",
     "tag_sqlite_handle",
+    "tag_socket_handle",
+    "tag_socketserver_handle",
+    "with_candidate_flow_variants",
 ]

@@ -25,13 +25,19 @@ from .access_model import (
     STDLIB_MODULE_WILDCARD_ATTRIBUTE,
     STDLIB_OS_CALLS,
     STDLIB_PATHLIB_CALLS,
+    STDLIB_SIGNAL_CALLS,
+    STDLIB_SOCKET_CALLS,
+    STDLIB_SOCKET_CONSTANTS,
+    STDLIB_SOCKETSERVER_CLASSES,
     STDLIB_SQLITE3_CALLS,
     STDLIB_SQLITE3_TYPES,
     SUPPORTED_STDLIB_MODULES,
     FlowValue,
+    exclusive_flow_join,
     fcntl_lock_mask_value,
     is_precise_stdlib_module,
     precise_stdlib_module_name,
+    socket_constant_value,
     stdlib_call_target_marker,
     stdlib_module_mutation_attributes,
     stdlib_module_mutation_marker,
@@ -160,6 +166,30 @@ def bind_import_statement(
     )
     for alias in statement.names:
         if alias.name == "*":
+            if (
+                target_module in {"socket", "socketserver"}
+                and target_module not in engine.known_modules
+            ):
+                names = (
+                    STDLIB_SOCKET_CALLS | STDLIB_SOCKET_CONSTANTS
+                    if target_module == "socket"
+                    else STDLIB_SOCKETSERVER_CLASSES
+                )
+                for local in sorted(names):
+                    _strong_bind(
+                        env,
+                        object_env,
+                        local,
+                        _external_stdlib_attribute_value(
+                            env,
+                            module=target_module,
+                            attribute=local,
+                        ),
+                        step=f"import:{actor}:{local}->{target_module}:*",
+                    )
+                    if definite_names is not None:
+                        definite_names.add(local)
+                continue
             star_values = engine.module_star_exports.get(target_module, {})
             star_definite = engine.module_star_definite.get(target_module, frozenset())
             policy = engine.module_star_policies.get(
@@ -214,6 +244,16 @@ def bind_import_statement(
             target_module == "pathlib"
             and "pathlib" not in engine.known_modules
         )
+        stdlib_socket = (
+            target_module == "socket" and "socket" not in engine.known_modules
+        )
+        stdlib_signal = (
+            target_module == "signal" and "signal" not in engine.known_modules
+        )
+        stdlib_socketserver = (
+            target_module == "socketserver"
+            and "socketserver" not in engine.known_modules
+        )
         stdlib_os_attribute = stdlib_os and _stdlib_attribute_is_unmutated(
             env, module="os", attribute=alias.name
         )
@@ -244,6 +284,24 @@ def bind_import_statement(
                 env, module="pathlib", attribute=alias.name
             )
         )
+        stdlib_socket_attribute = (
+            stdlib_socket
+            and _stdlib_attribute_is_unmutated(
+                env, module="socket", attribute=alias.name
+            )
+        )
+        stdlib_signal_attribute = (
+            stdlib_signal
+            and _stdlib_attribute_is_unmutated(
+                env, module="signal", attribute=alias.name
+            )
+        )
+        stdlib_socketserver_attribute = (
+            stdlib_socketserver
+            and _stdlib_attribute_is_unmutated(
+                env, module="socketserver", attribute=alias.name
+            )
+        )
         if stdlib_builtins_attribute and alias.name in STDLIB_BUILTINS_CALLS:
             value = FlowValue(call_targets={f"builtins:{alias.name}"})
         elif (
@@ -261,11 +319,26 @@ def bind_import_statement(
             value = FlowValue(call_targets={f"os:{alias.name}"})
         elif stdlib_pathlib_attribute and alias.name in STDLIB_PATHLIB_CALLS:
             value = FlowValue(call_targets={f"pathlib:{alias.name}"})
+        elif stdlib_signal_attribute and alias.name in STDLIB_SIGNAL_CALLS:
+            value = FlowValue(call_targets={f"signal:{alias.name}"})
         elif stdlib_sqlite3_attribute and alias.name in STDLIB_SQLITE3_CALLS:
             value = FlowValue(call_targets={f"sqlite3:{alias.name}"})
         elif stdlib_sqlite3_attribute and alias.name in STDLIB_SQLITE3_TYPES:
             value = FlowValue(
                 object_types={f"{SQLITE_TYPE_OBJECT_PREFIX}{alias.name}"}
+            )
+        elif stdlib_socket_attribute and alias.name in STDLIB_SOCKET_CALLS:
+            value = FlowValue(call_targets={f"socket:{alias.name}"})
+        elif stdlib_socket_attribute and alias.name in STDLIB_SOCKET_CONSTANTS:
+            value = socket_constant_value(alias.name)
+        elif (
+            stdlib_socketserver_attribute
+            and alias.name in STDLIB_SOCKETSERVER_CLASSES
+        ):
+            value = FlowValue(
+                object_types={
+                    f"stdlib-socketserver-class:{alias.name}"
+                }
             )
         elif stdlib_os_attribute and alias.name in (
             OS_OPEN_ACCESS_FLAGS | OS_OPEN_MODIFIER_FLAGS
@@ -299,6 +372,20 @@ def bind_import_statement(
                 },
                 unknown_callable=True,
             )
+        elif stdlib_socket and alias.name in STDLIB_SOCKET_CALLS:
+            value = FlowValue(
+                object_types={stdlib_call_target_marker("socket", alias.name)},
+                unknown_callable=True,
+            )
+        elif stdlib_signal and alias.name in STDLIB_SIGNAL_CALLS:
+            value = FlowValue(
+                object_types={stdlib_call_target_marker("signal", alias.name)},
+                unknown_callable=True,
+            )
+        elif (
+            stdlib_socketserver and alias.name in STDLIB_SOCKETSERVER_CLASSES
+        ):
+            value = FlowValue(unknown_callable=True)
         elif (
             not value.has_origins
             and not value.module_refs
@@ -358,6 +445,34 @@ def _stdlib_attribute_is_unmutated(
         and bool({marker, wildcard_marker}.intersection(value.object_types))
         for value in env.values()
     )
+
+
+def _external_stdlib_attribute_value(
+    env: Mapping[str, FlowValue],
+    *,
+    module: str,
+    attribute: str,
+) -> FlowValue:
+    if not _stdlib_attribute_is_unmutated(
+        env, module=module, attribute=attribute
+    ):
+        if module == "socket" and attribute in STDLIB_SOCKET_CALLS:
+            return FlowValue(
+                object_types={stdlib_call_target_marker(module, attribute)},
+                unknown_callable=True,
+            )
+        return FlowValue(unknown_callable=True)
+    if module == "socket" and attribute in STDLIB_SOCKET_CALLS:
+        return FlowValue(call_targets={f"socket:{attribute}"})
+    if module == "signal" and attribute in STDLIB_SIGNAL_CALLS:
+        return FlowValue(call_targets={f"signal:{attribute}"})
+    if module == "socket" and attribute in STDLIB_SOCKET_CONSTANTS:
+        return socket_constant_value(attribute)
+    if module == "socketserver" and attribute in STDLIB_SOCKETSERVER_CLASSES:
+        return FlowValue(
+            object_types={f"stdlib-socketserver-class:{attribute}"}
+        )
+    return FlowValue()
 
 
 def build_module_exports(
@@ -461,6 +576,19 @@ def resolve_module_attribute(
                 resolved = resolved.merged(
                     FlowValue(object_types={DATACLASS_INIT_VAR_MARKER})
                 )
+            elif module_ref == "socket" and attribute in STDLIB_SOCKET_CONSTANTS:
+                resolved = resolved.merged(socket_constant_value(attribute))
+            elif (
+                module_ref == "socketserver"
+                and attribute in STDLIB_SOCKETSERVER_CLASSES
+            ):
+                resolved = resolved.merged(
+                    FlowValue(
+                        object_types={
+                            f"stdlib-socketserver-class:{attribute}"
+                        }
+                    )
+                )
             elif _is_supported_stdlib_call(module_ref, attribute):
                 resolved = resolved.merged(
                     FlowValue(call_targets={f"{module_ref}:{attribute}"})
@@ -484,6 +612,8 @@ def _is_supported_stdlib_call(module: str, attribute: str) -> bool:
         "fcntl": STDLIB_FCNTL_CALLS,
         "os": STDLIB_OS_CALLS,
         "pathlib": STDLIB_PATHLIB_CALLS,
+        "signal": STDLIB_SIGNAL_CALLS,
+        "socket": STDLIB_SOCKET_CALLS,
         "sqlite3": STDLIB_SQLITE3_CALLS,
     }
     return attribute in calls.get(module, frozenset())
@@ -516,7 +646,7 @@ def _merge_module_export_summary(
 
 
 def _merge_fixed_point_value(previous: FlowValue, evaluated: FlowValue) -> FlowValue:
-    merged = previous.merged(evaluated)
+    merged = exclusive_flow_join([previous, evaluated])
     for resource_id, paths in merged.origins.items():
         shortest = min(len(path) for path in paths)
         merged.origins[resource_id] = frozenset(

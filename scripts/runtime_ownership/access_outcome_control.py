@@ -16,6 +16,8 @@ from .access_control import match_values
 from .access_model import (
     FlowValue,
     file_handle_kind,
+    socket_handle_kind,
+    socketserver_handle_state,
     sqlite_handle_kind,
 )
 from .access_outcomes import (
@@ -350,6 +352,10 @@ def analyze_with(
             context_manager_kind = "sqlite"
         elif file_handle_kind(context_value) == "file":
             context_manager_kind = "file"
+        elif socket_handle_kind(context_value) is not None:
+            context_manager_kind = "socket"
+        elif socketserver_handle_state(context_value) is not None:
+            context_manager_kind = "socketserver"
         if isinstance(statement, ast.AsyncWith) and context_manager_kind is not None:
             _record_control_value(
                 engine,
@@ -383,6 +389,10 @@ def analyze_with(
             entered_value = context_value.bound("context:sqlite.connection.enter")
         elif context_manager_kind == "file":
             entered_value = context_value.bound("context:file.handle.enter")
+        elif context_manager_kind == "socket":
+            entered_value = context_value.bound("context:socket.handle.enter")
+        elif context_manager_kind == "socketserver":
+            entered_value = context_value.bound("context:socketserver.enter")
         else:
             entered_value = FlowValue()
             _record_control_value(
@@ -469,7 +479,7 @@ def _exit_context_managers(
                 )
                 exited.append(copy_outcome(outcome))
                 continue
-            if manager_kind == "file":
+            if manager_kind in {"file", "socket", "socketserver"}:
                 closed = copy_outcome(outcome)
                 cast(
                     _RuntimeContaminationEngine,

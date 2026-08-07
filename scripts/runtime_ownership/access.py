@@ -20,6 +20,10 @@ from .access_model import (
     FILE_UNKNOWN_ATTRIBUTE_OBJECT_TYPE,
     PATH_BOUND_TRANSFORM_PREFIX,
     PATH_TRANSFORMS,
+    SOCKET_BOUND_METHOD_PREFIX,
+    SOCKETSERVER_BOUND_METHOD_PREFIX,
+    SOCKETSERVER_CLASS_DICT_OBJECT_TYPE,
+    SOCKETSERVER_LOCAL_CLASS_OBJECT_PREFIX,
     SQLITE_HANDLE_OBJECT_TYPES,
     SQLITE_UNKNOWN_ATTRIBUTE_OBJECT_TYPE,
     SUPPORTED_STDLIB_MODULES,
@@ -32,15 +36,21 @@ from .access_model import (
     _collect_syntax_sites,
     _import_tables,
     _module_name,
+    candidate_flow_variants,
     contaminate_runtime_objects,
+    exclusive_flow_join,
     is_path_receiver,
     precise_stdlib_module_name,
     project_sqlite_attribute,
+    replace_runtime_object_aliases,
+    socket_handle_kind,
+    socketserver_handle_state,
     stdlib_call_target_marker,
     stdlib_module_dict_reference,
     stdlib_module_mutation_attributes,
     stdlib_module_mutation_marker,
     stdlib_module_state_name,
+    with_candidate_flow_variants,
 )
 from .access_outcomes import analyze_block_result, join_states
 from .access_resolver import call_name
@@ -297,17 +307,19 @@ class _AccessAnalysis:
                     f"conflicting locators for runtime resource {resource_id}"
                 )
             self.resource_locators[resource_id] = locator_value
-            self.origin_symbols[origin_key] = FlowValue(
+            origin_value = FlowValue(
                 {resource_id: frozenset({(f"origin:{module}:{symbol}",)})}
             )
             alias = _SOCKET_ORIGIN_ALIASES.get(locator_value)
             if alias is not None:
                 self.socket_field_origins[alias] = (
                     _normalized_socket_locator(locator_value),
-                    self.origin_symbols[origin_key].bound(
+                    origin_value.bound(
                         f"origin-alias:{alias[0]}:{alias[1]}"
                     ),
                 )
+                continue
+            self.origin_symbols[origin_key] = origin_value
         export_table = build_module_exports(
             self.trees,
             package_modules=self.package_modules,
@@ -606,8 +618,11 @@ class _AccessAnalysis:
             env[parameter] = value.bound(f"param:{info.ref}:{parameter}")
         for parameter, default_value in self.definition_defaults[info.ref].items():
             if default_value.has_analysis_state:
-                env[parameter] = env.get(parameter, FlowValue()).merged(
-                    default_value.bound(f"default:{info.ref}:{parameter}")
+                env[parameter] = exclusive_flow_join(
+                    [
+                        env.get(parameter, FlowValue()),
+                        default_value.bound(f"default:{info.ref}:{parameter}"),
+                    ]
                 )
         changed, returned = analyze_block(
             self,
@@ -619,7 +634,7 @@ class _AccessAnalysis:
             object_env=object_env,
             call_ordinals=info.call_ordinals,
         )
-        merged_return = self.returns[info.ref].merged(returned)
+        merged_return = exclusive_flow_join([self.returns[info.ref], returned])
         if merged_return != self.returns[info.ref]:
             self.returns[info.ref] = merged_return
             self._persistent_changed = True
@@ -634,7 +649,7 @@ class _AccessAnalysis:
         value: FlowValue,
     ) -> bool:
         previous = self.definition_defaults[ref].get(parameter, FlowValue())
-        merged = previous.merged(value)
+        merged = exclusive_flow_join([previous, value])
         if merged == previous:
             return False
         self.definition_defaults[ref][parameter] = merged
@@ -680,8 +695,8 @@ class _AccessAnalysis:
             ):
                 continue
             previous = closure.get(name, FlowValue())
-            closure[name] = previous.merged(
-                value.bound(f"closure:{actor}->{ref}:{name}")
+            closure[name] = exclusive_flow_join(
+                [previous, value.bound(f"closure:{actor}->{ref}:{name}")]
             )
             if closure[name] != previous:
                 self._persistent_changed = True
@@ -789,6 +804,18 @@ class _AccessAnalysis:
                 object_env.pop(target.id, None)
             return False
         if isinstance(target, ast.Subscript):
+            if (
+                isinstance(target.value, ast.Attribute)
+                and target.value.attr == "__dict__"
+                and isinstance(target.value.value, ast.Name)
+            ):
+                class_value = env.get(target.value.value.id, FlowValue())
+                if self._invalidate_socketserver_subclass(
+                    class_value,
+                    env=env,
+                    object_env=object_env,
+                ):
+                    return False
             base = stdlib_module_dict_reference(target.value, env)
             if base is not None:
                 attribute = (
@@ -827,6 +854,27 @@ class _AccessAnalysis:
             target.value, ast.Name
         ):
             base = env.get(target.value.id, FlowValue())
+            if self._invalidate_socketserver_subclass(
+                base,
+                env=env,
+                object_env=object_env,
+            ):
+                return False
+            if socket_handle_kind(base) is not None:
+                if base.has_origins and module is not None and source_node is not None:
+                    self.facts.record_escape(
+                        base,
+                        node=source_node,
+                        actor=actor,
+                        operation=f"socket.attribute_mutation:{target.attr}",
+                        sink=f"socket.socket.{target.attr}",
+                        reason="unsupported_socket_handle_mutation",
+                        path=self.paths[module],
+                        line=int(getattr(source_node, "lineno", 0)),
+                        ordinal=ordinal,
+                    )
+                self._contaminate_runtime_objects(env, object_env, [base])
+                return False
             module_ref = precise_stdlib_module_name(base)
             if self._taint_stdlib_module_attribute(
                 base,
@@ -995,6 +1043,58 @@ class _AccessAnalysis:
                 attrs[name] = contaminated
                 self._persistent_changed = True
 
+    def _invalidate_socketserver_subclass(
+        self,
+        value: FlowValue,
+        *,
+        env: dict[str, FlowValue],
+        object_env: dict[str, set[str]],
+    ) -> bool:
+        class_targets = set(value.class_targets)
+        if not class_targets or not any(
+            object_type.startswith(SOCKETSERVER_LOCAL_CLASS_OBJECT_PREFIX)
+            for object_type in value.object_types
+        ):
+            return False
+        changed = False
+        for name, candidate in list(env.items()):
+            if not class_targets.intersection(candidate.class_targets) or not any(
+                object_type.startswith(SOCKETSERVER_LOCAL_CLASS_OBJECT_PREFIX)
+                for object_type in candidate.object_types
+            ):
+                continue
+            invalidated = candidate.copy()
+            invalidated.attribute_values_complete = False
+            invalidated.attribute_values_ambiguous = True
+            if invalidated == candidate:
+                continue
+            env[name] = invalidated
+            object_env[name] = set(invalidated.object_types)
+            changed = True
+        return changed
+
+    def _replace_runtime_object_aliases(
+        self,
+        env: dict[str, FlowValue],
+        object_env: dict[str, set[str]],
+        receiver: FlowValue,
+        replacement: FlowValue,
+    ) -> None:
+        affected = replace_runtime_object_aliases(
+            env,
+            object_env,
+            receiver,
+            replacement,
+        )
+        if not affected:
+            return
+        for attrs in self.class_attrs.values():
+            for name, candidate in list(attrs.items()):
+                if not affected.intersection(candidate.runtime_object_ids):
+                    continue
+                attrs[name] = replacement.copy()
+                self._persistent_changed = True
+
     def _runtime_object_identity(
         self,
         node: ast.Call,
@@ -1110,6 +1210,16 @@ class _AccessAnalysis:
                 projected_attribute = base.attribute_values[node.attr].bound(
                     f"attribute:{node.attr}"
                 )
+                variant_attributes = [
+                    variant.attribute_values[node.attr].bound(
+                        f"attribute:{node.attr}"
+                    )
+                    for variant in candidate_flow_variants(base)
+                    if node.attr in variant.attribute_values
+                ]
+                projected_attribute = with_candidate_flow_variants(
+                    projected_attribute, variant_attributes
+                )
                 if base.attribute_values_ambiguous:
                     projected_attribute.attribute_values_ambiguous = True
                 return projected_attribute
@@ -1130,6 +1240,15 @@ class _AccessAnalysis:
                 value = self.class_attrs.get(class_ref, {}).get(node.attr)
                 if value is not None:
                     return value.copy()
+            if node.attr == "__dict__" and any(
+                object_type.startswith(SOCKETSERVER_LOCAL_CLASS_OBJECT_PREFIX)
+                for object_type in base.object_types
+            ):
+                return FlowValue(
+                    object_types={SOCKETSERVER_CLASS_DICT_OBJECT_TYPE},
+                    attribute_values={"\0bound_receiver": base.copy()},
+                    attribute_values_complete=True,
+                )
             method_targets = {
                 f"{object_type}.{node.attr}"
                 for object_type in base.object_types
@@ -1169,6 +1288,20 @@ class _AccessAnalysis:
                 else:
                     unknown.object_types.add(FILE_UNKNOWN_ATTRIBUTE_OBJECT_TYPE)
                 return unknown
+            if socket_handle_kind(base) is not None:
+                bound = base.bound(f"attribute:socket:{node.attr}")
+                bound.object_types = {f"{SOCKET_BOUND_METHOD_PREFIX}{node.attr}"}
+                bound.attribute_values = {"\0bound_receiver": base.copy()}
+                bound.attribute_values_complete = True
+                return bound
+            if socketserver_handle_state(base) is not None:
+                bound = base.bound(f"attribute:socketserver:{node.attr}")
+                bound.object_types = {
+                    f"{SOCKETSERVER_BOUND_METHOD_PREFIX}{node.attr}"
+                }
+                bound.attribute_values = {"\0bound_receiver": base.copy()}
+                bound.attribute_values_complete = True
+                return bound
             if is_path_receiver(base) and node.attr == "open":
                 unknown = base.bound(f"attribute:path.unknown:{node.attr}")
                 unknown.unknown_callable = True
@@ -1220,7 +1353,7 @@ class _AccessAnalysis:
 
     def _merge_param(self, ref: str, parameter: str, value: FlowValue) -> None:
         previous = self.params[ref].get(parameter, FlowValue())
-        self.params[ref][parameter] = previous.merged(value)
+        self.params[ref][parameter] = exclusive_flow_join([previous, value])
         if self.params[ref][parameter] != previous:
             self._persistent_changed = True
 

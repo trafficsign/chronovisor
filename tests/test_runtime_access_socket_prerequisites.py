@@ -146,8 +146,12 @@ def test_dataclass_branch_unknown_and_missing_attributes_fail_closed() -> None:
         ("chronovisor.consumer:branch", SEMANTIC_ID),
         ("chronovisor.consumer:unknown", SEMANTIC_ID),
     }
+    # Access facts are may-path evidence: the registered default alternatives
+    # remain concrete, while the origin-bearing invalid projection still
+    # escapes and the surviving path reaches the deliberately unknown boundary.
     assert {row["reason"] for row in result["escapes"]} == {
-        "invalid_or_ambiguous_path_constructor_signature"
+        "invalid_or_ambiguous_path_constructor_signature",
+        "registered_locator_to_unknown_callee"
     }
 
 

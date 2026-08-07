@@ -19,11 +19,19 @@ from .access_model import (
     PATH_STRING_OBJECT_TYPE,
     PATH_TRANSFORMS,
     READ_PATH_METHODS,
+    SOCKET_BOUND_METHOD_PREFIX,
+    SOCKETSERVER_BOUND_METHOD_PREFIX,
+    SOCKETSERVER_CLASS_DICT_OBJECT_TYPE,
+    SOCKETSERVER_CLASS_OBJECT_PREFIX,
+    SOCKETSERVER_LOCAL_CLASS_OBJECT_PREFIX,
     SQLITE_TYPE_OBJECT_PREFIX,
     STDLIB_BUILTINS_CALLS,
     STDLIB_FCNTL_CALLS,
     STDLIB_MODULE_WILDCARD_ATTRIBUTE,
     STDLIB_OS_CALLS,
+    STDLIB_SIGNAL_CALLS,
+    STDLIB_SOCKET_CALLS,
+    STDLIB_SOCKETSERVER_CLASSES,
     STDLIB_SQLITE3_CALLS,
     SUPPORTED_STDLIB_MODULES,
     WRITE_PATH_METHODS,
@@ -31,6 +39,8 @@ from .access_model import (
     DataclassInfo,
     FlowValue,
     FunctionInfo,
+    candidate_flow_variants,
+    exclusive_flow_join,
     fcntl_lock_masks,
     file_handle_kind,
     is_exact_flock_descriptor,
@@ -39,14 +49,21 @@ from .access_model import (
     is_exact_path_receiver,
     is_path_receiver,
     is_precise_stdlib_module,
+    opaque_structured_flow_value,
     open_mode_from_expression,
     precise_stdlib_module_name,
+    socket_constant_name,
+    socket_handle_kind,
+    socket_handle_state,
+    socketserver_handle_state,
     sqlite_handle_kind,
     stdlib_call_targets,
     stdlib_module_dict_reference,
     stdlib_module_mutation_marker,
     tag_file_handle,
     tag_os_fd,
+    tag_socket_handle,
+    tag_socketserver_handle,
     tag_sqlite_handle,
 )
 from .access_resolver import (
@@ -76,6 +93,14 @@ class AccessEngine(Protocol):
     def _mark_called_target(self, target: str) -> None: ...
 
     def _require_function_summary(self, target: str) -> None: ...
+
+    def _invalidate_socketserver_subclass(
+        self,
+        value: FlowValue,
+        *,
+        env: dict[str, FlowValue],
+        object_env: dict[str, set[str]],
+    ) -> bool: ...
 
     def _function_has_origin_inputs(self, info: FunctionInfo) -> bool: ...
 
@@ -143,6 +168,14 @@ class AccessEngine(Protocol):
         env: dict[str, FlowValue],
         object_env: dict[str, set[str]],
         values: Sequence[FlowValue],
+    ) -> None: ...
+
+    def _replace_runtime_object_aliases(
+        self,
+        env: dict[str, FlowValue],
+        object_env: dict[str, set[str]],
+        receiver: FlowValue,
+        replacement: FlowValue,
     ) -> None: ...
 
     def _runtime_object_identity(
@@ -260,6 +293,50 @@ def _evaluate_builtin_stdlib_module_mutation(
     return FlowValue()
 
 
+def _evaluate_socketserver_subclass_mutation(
+    engine: AccessEngine,
+    node: ast.Call,
+    receiver: FlowValue,
+    argument_values: Sequence[FlowValue],
+    *,
+    module: str,
+    actor: str,
+    env: dict[str, FlowValue],
+    object_env: dict[str, set[str]],
+) -> FlowValue | None:
+    name = node.func.id if isinstance(node.func, ast.Name) else ""
+    arity = {"setattr": 3, "delattr": 2}.get(name)
+    if (
+        arity is not None
+        and _is_unshadowed_builtin(
+        engine,
+        node,
+        name=name,
+        actor=actor,
+        module=module,
+        env=env,
+        )
+        and len(node.args) == arity
+        and not any(isinstance(argument, ast.Starred) for argument in node.args)
+        and not node.keywords
+        and argument_values
+        and engine._invalidate_socketserver_subclass(
+            argument_values[0], env=env, object_env=object_env
+        )
+    ):
+        return FlowValue()
+    if not (
+        isinstance(node.func, ast.Attribute)
+        and SOCKETSERVER_CLASS_DICT_OBJECT_TYPE in receiver.object_types
+    ):
+        return None
+    class_value = receiver.attribute_values.get("\0bound_receiver", FlowValue())
+    engine._invalidate_socketserver_subclass(
+        class_value, env=env, object_env=object_env
+    )
+    return FlowValue()
+
+
 def _taint_callable_stdlib_modules(
     engine: AccessEngine,
     values: Sequence[FlowValue],
@@ -359,6 +436,8 @@ def _is_supported_stdlib_call(module_ref: str, attribute: str) -> bool:
         return attribute in STDLIB_FCNTL_CALLS
     if module_ref == "os":
         return attribute in STDLIB_OS_CALLS
+    if module_ref == "signal":
+        return attribute in STDLIB_SIGNAL_CALLS
     if module_ref == "sqlite3":
         return attribute in STDLIB_SQLITE3_CALLS
     return False
@@ -410,19 +489,36 @@ def _evaluate_path_transform(
         )
         return FlowValue()
     if method == "expanduser" and (node.args or node.keywords):
-        engine.facts.record_escape(
-            receiver,
-            node=node,
-            actor=actor,
-            operation="path.expanduser",
-            sink="pathlib.Path.expanduser",
-            reason="invalid_or_ambiguous_path_transform_signature",
-            path=engine.paths[module],
-            line=int(node.lineno),
-            ordinal=ordinal,
-        )
+        for variant in candidate_flow_variants(receiver):
+            engine.facts.record_escape(
+                variant,
+                node=node,
+                actor=actor,
+                operation="path.expanduser",
+                sink="pathlib.Path.expanduser",
+                reason="invalid_or_ambiguous_path_transform_signature",
+                path=engine.paths[module],
+                line=int(node.lineno),
+                ordinal=ordinal,
+            )
         return FlowValue()
-    return receiver.bound(f"transform:{method}")
+    transformed: list[FlowValue] = []
+    for variant in candidate_flow_variants(receiver):
+        if not is_exact_path_receiver(variant):
+            engine.facts.record_escape(
+                variant,
+                node=node,
+                actor=actor,
+                operation=f"path.{method}",
+                sink=f"pathlib.Path.{method}",
+                reason="invalid_or_ambiguous_path_transform_signature",
+                path=engine.paths[module],
+                line=int(node.lineno),
+                ordinal=ordinal,
+            )
+            continue
+        transformed.append(variant.bound(f"transform:{method}"))
+    return exclusive_flow_join(transformed)
 
 
 def _evaluate_path_move(
@@ -830,30 +926,58 @@ def _evaluate_stdlib_module_dict_mutation_call(
     env: dict[str, FlowValue],
     object_env: dict[str, set[str]],
 ) -> FlowValue | None:
-    if (
-        not isinstance(node.func, ast.Attribute)
-        or node.func.attr != "pop"
-        or not 1 <= len(node.args) <= 2
-        or node.keywords
-        or any(isinstance(argument, ast.Starred) for argument in node.args)
-    ):
+    if not isinstance(node.func, ast.Attribute):
+        return None
+    method = node.func.attr
+    valid_pop = (
+        method == "pop"
+        and 1 <= len(node.args) <= 2
+        and not node.keywords
+        and not any(isinstance(argument, ast.Starred) for argument in node.args)
+    )
+    valid_update = (
+        method == "update"
+        and len(node.args) <= 1
+        and not any(isinstance(argument, ast.Starred) for argument in node.args)
+        and all(keyword.arg is not None for keyword in node.keywords)
+    )
+    if not (valid_pop or valid_update):
         return None
     base = stdlib_module_dict_reference(node.func.value, env)
     if base is None:
         return None
-    key = node.args[0]
-    attribute = (
-        key.value
-        if isinstance(key, ast.Constant) and isinstance(key.value, str)
-        else STDLIB_MODULE_WILDCARD_ATTRIBUTE
-    )
-    if not engine._taint_stdlib_module_attribute(
-        base,
-        attribute=attribute,
-        env=env,
-        object_env=object_env,
-    ):
-        return None
+    attributes: set[str] = set()
+    if valid_pop:
+        key = node.args[0]
+        attributes.add(
+            key.value
+            if isinstance(key, ast.Constant) and isinstance(key.value, str)
+            else STDLIB_MODULE_WILDCARD_ATTRIBUTE
+        )
+    else:
+        attributes.update(
+            keyword.arg for keyword in node.keywords if keyword.arg is not None
+        )
+        if node.args:
+            mapping = node.args[0]
+            if isinstance(mapping, ast.Dict) and all(
+                isinstance(key, ast.Constant) and isinstance(key.value, str)
+                for key in mapping.keys
+            ):
+                attributes.update(
+                    str(key.value)
+                    for key in mapping.keys
+                    if isinstance(key, ast.Constant)
+                )
+            else:
+                attributes.add(STDLIB_MODULE_WILDCARD_ATTRIBUTE)
+    for attribute in attributes:
+        engine._taint_stdlib_module_attribute(
+            base,
+            attribute=attribute,
+            env=env,
+            object_env=object_env,
+        )
     return FlowValue(unknown_callable=True)
 
 
@@ -874,6 +998,15 @@ def _evaluate_stdlib_vars_call(
     ):
         return None
     value = argument_values[0]
+    if any(
+        object_type.startswith(SOCKETSERVER_LOCAL_CLASS_OBJECT_PREFIX)
+        for object_type in value.object_types
+    ):
+        return FlowValue(
+            object_types={SOCKETSERVER_CLASS_DICT_OBJECT_TYPE},
+            attribute_values={"\0bound_receiver": value.copy()},
+            attribute_values_complete=True,
+        )
     module_ref = precise_stdlib_module_name(value)
     if module_ref is None or module_ref in engine.known_modules:
         return None
@@ -1698,6 +1831,105 @@ def _record_os_argument_escape(
         line=int(node.lineno),
         ordinal=ordinal,
     )
+
+
+def _evaluate_os_chmod(
+    engine: AccessEngine,
+    node: ast.Call,
+    argument_values: Sequence[FlowValue],
+    keyword_values: Mapping[str, FlowValue],
+    unknown_keyword_unpack: FlowValue,
+    *,
+    module: str,
+    actor: str,
+    ordinal: int,
+) -> FlowValue:
+    path_value, ambiguous_path = _precise_argument_value(
+        node,
+        argument_values,
+        keyword_values,
+        index=0,
+        keyword="path",
+    )
+    mode_expression = _precise_argument_expression(
+        node,
+        index=1,
+        keyword="mode",
+    )
+    dir_fd_expression = _precise_argument_expression(
+        node,
+        index=2,
+        keyword="dir_fd",
+    )
+    follow_expression = _precise_argument_expression(
+        node,
+        index=3,
+        keyword="follow_symlinks",
+    )
+    auxiliary = _merge_values(
+        [
+            *argument_values[1:],
+            *(value for name, value in keyword_values.items() if name != "path"),
+            unknown_keyword_unpack,
+            ambiguous_path,
+        ]
+    )
+    valid = (
+        _valid_named_signature(
+            node,
+            positional_names=("path", "mode"),
+            keyword_only_names=frozenset({"dir_fd", "follow_symlinks"}),
+            required_names=frozenset({"path", "mode"}),
+        )
+        and len(path_value.origins) == 1
+        and not path_value.overflowed
+        and is_exact_path_constructor_argument(path_value)
+        and isinstance(mode_expression, ast.Constant)
+        and type(mode_expression.value) is int
+        and (
+            not _argument_is_provided(node, index=2, keyword="dir_fd")
+            or _is_static_none(dir_fd_expression)
+        )
+        and (
+            not _argument_is_provided(
+                node, index=3, keyword="follow_symlinks"
+            )
+            or _static_exact_constant(follow_expression, True)
+        )
+    )
+    if not valid:
+        _record_os_argument_escape(
+            engine,
+            path_value.merged(auxiliary),
+            node,
+            name="chmod",
+            module=module,
+            actor=actor,
+            ordinal=ordinal,
+        )
+        return FlowValue()
+    if auxiliary.has_origins:
+        _record_os_argument_escape(
+            engine,
+            auxiliary,
+            node,
+            name="chmod",
+            module=module,
+            actor=actor,
+            ordinal=ordinal,
+        )
+    engine.facts.record_access(
+        path_value,
+        node=node,
+        actor=actor,
+        mode="write",
+        operation="os.chmod",
+        sink="os.chmod",
+        path=engine.paths[module],
+        line=int(node.lineno),
+        ordinal=ordinal,
+    )
+    return FlowValue()
 
 
 def _evaluate_os_open(
@@ -2551,6 +2783,968 @@ def _evaluate_sqlite_handle_call(
     return None
 
 
+def _stdlib_socket_call_name(
+    node: ast.Call,
+    receiver: FlowValue,
+    env: Mapping[str, FlowValue],
+    *,
+    known_modules: frozenset[str],
+) -> str | None:
+    if "socket" in known_modules:
+        return None
+    if isinstance(node.func, ast.Attribute):
+        if (
+            node.func.attr in STDLIB_SOCKET_CALLS
+            and is_precise_stdlib_module(
+                receiver,
+                module="socket",
+                attribute=node.func.attr,
+            )
+        ):
+            return node.func.attr
+        return None
+    if not isinstance(node.func, ast.Name) or node.func.id not in env:
+        return None
+    value = env[node.func.id]
+    for name in STDLIB_SOCKET_CALLS:
+        if _has_only_stdlib_call_target(value, f"socket:{name}"):
+            return name
+    return None
+
+
+def _exact_filesystem_unix_endpoint(
+    engine: AccessEngine,
+    value: FlowValue,
+) -> bool:
+    if (
+        len(value.origins) != 1
+        or value.overflowed
+        or not is_exact_path_constructor_argument(value)
+    ):
+        return False
+    resource_id = next(iter(value.origins))
+    locator = engine.resource_locators.get(resource_id, "")
+    if not locator.startswith("unix://"):
+        return False
+    address = locator.removeprefix("unix://")
+    return bool(address) and not address.startswith("\0")
+
+
+def _record_socket_escape(
+    engine: AccessEngine,
+    value: FlowValue,
+    node: ast.Call,
+    *,
+    method: str,
+    reason: str,
+    module: str,
+    actor: str,
+    ordinal: int,
+) -> None:
+    if not value.has_origins:
+        return
+    engine.facts.record_escape(
+        value,
+        node=node,
+        actor=actor,
+        operation=f"socket.{method}",
+        sink=f"socket.socket.{method}",
+        reason=reason,
+        path=engine.paths[module],
+        line=int(node.lineno),
+        ordinal=ordinal,
+    )
+
+
+def _static_exact_constant(expression: ast.expr | None, expected: object) -> bool:
+    if (
+        isinstance(expression, ast.Constant)
+        and type(expression.value) is type(expected)
+        and expression.value == expected
+    ):
+        return True
+    return (
+        isinstance(expected, int)
+        and not isinstance(expected, bool)
+        and isinstance(expression, ast.UnaryOp)
+        and isinstance(expression.op, ast.USub)
+        and isinstance(expression.operand, ast.Constant)
+        and type(expression.operand.value) is int
+        and -expression.operand.value == expected
+    )
+
+
+def _valid_socket_constructor_signature(node: ast.Call) -> bool:
+    return _valid_named_signature(
+        node,
+        positional_names=("family", "type", "proto", "fileno"),
+        keyword_only_names=frozenset(),
+        required_names=frozenset({"family"}),
+    )
+
+
+def _evaluate_socket_constructor(
+    engine: AccessEngine,
+    node: ast.Call,
+    argument_values: Sequence[FlowValue],
+    keyword_values: Mapping[str, FlowValue],
+    unknown_keyword_unpack: FlowValue,
+    *,
+    module: str,
+    actor: str,
+    ordinal: int,
+) -> FlowValue:
+    implicated = _merge_values(
+        [*argument_values, *keyword_values.values(), unknown_keyword_unpack]
+    )
+    family, family_ambiguous = _precise_argument_value(
+        node,
+        argument_values,
+        keyword_values,
+        index=0,
+        keyword="family",
+    )
+    socket_type, type_ambiguous = _precise_argument_value(
+        node,
+        argument_values,
+        keyword_values,
+        index=1,
+        keyword="type",
+    )
+    type_expression = _precise_argument_expression(
+        node,
+        index=1,
+        keyword="type",
+    )
+    proto_expression = _precise_argument_expression(
+        node,
+        index=2,
+        keyword="proto",
+    )
+    fileno_expression = _precise_argument_expression(
+        node,
+        index=3,
+        keyword="fileno",
+    )
+    valid = (
+        _valid_socket_constructor_signature(node)
+        and not family_ambiguous.has_analysis_state
+        and not type_ambiguous.has_analysis_state
+        and socket_constant_name(family) == "AF_UNIX"
+        and (
+            not _argument_is_provided(node, index=1, keyword="type")
+            or socket_constant_name(socket_type) == "SOCK_STREAM"
+            or _static_exact_constant(type_expression, -1)
+        )
+        and (
+            not _argument_is_provided(node, index=2, keyword="proto")
+            or _static_exact_constant(proto_expression, 0)
+            or _static_exact_constant(proto_expression, -1)
+        )
+        and (
+            not _argument_is_provided(node, index=3, keyword="fileno")
+            or _is_static_none(fileno_expression)
+        )
+    )
+    if not valid:
+        _record_socket_escape(
+            engine,
+            implicated,
+            node,
+            method="constructor",
+            reason="invalid_or_unsupported_unix_socket_constructor",
+            module=module,
+            actor=actor,
+            ordinal=ordinal,
+        )
+        return FlowValue(unknown_callable=True)
+    return tag_socket_handle(
+        FlowValue(),
+        identity=engine._runtime_object_identity(
+            node,
+            kind="socket.unix_stream",
+            actor=actor,
+        ),
+    )
+
+
+def _socket_method_signature(node: ast.Call, method: str) -> bool:
+    if any(isinstance(argument, ast.Starred) for argument in node.args):
+        return False
+    keywords = _expanded_keyword_arguments(node)
+    if keywords is None or keywords:
+        return False
+    lengths: dict[str, tuple[int, int]] = {
+        "accept": (0, 0),
+        "bind": (1, 1),
+        "close": (0, 0),
+        "connect": (1, 1),
+        "connect_ex": (1, 1),
+        "listen": (0, 1),
+        "recv": (1, 2),
+        "recv_into": (1, 3),
+        "recvfrom": (1, 2),
+        "recvfrom_into": (1, 3),
+        "send": (1, 2),
+        "sendall": (1, 2),
+        "setblocking": (1, 1),
+        "settimeout": (1, 1),
+    }
+    bounds = lengths.get(method)
+    return bounds is not None and bounds[0] <= len(node.args) <= bounds[1]
+
+
+def _socket_receiver_with_endpoint(
+    receiver: FlowValue,
+    endpoint: FlowValue,
+    *,
+    step: str,
+    state: str,
+) -> FlowValue:
+    identity = next(iter(receiver.runtime_object_ids))
+    return tag_socket_handle(
+        endpoint.bound(step), identity=identity, state=state
+    )
+
+
+def _evaluate_socket_handle_call(
+    engine: AccessEngine,
+    node: ast.Call,
+    receiver: FlowValue,
+    argument_values: Sequence[FlowValue],
+    keyword_values: Mapping[str, FlowValue],
+    unknown_keyword_unpack: FlowValue,
+    *,
+    method: str,
+    module: str,
+    actor: str,
+    env: dict[str, FlowValue],
+    object_env: dict[str, set[str]],
+    ordinal: int,
+) -> FlowValue | None:
+    recognized = {
+        "accept",
+        "bind",
+        "close",
+        "connect",
+        "connect_ex",
+        "listen",
+        "recv",
+        "recv_into",
+        "recvfrom",
+        "recvfrom_into",
+        "send",
+        "sendall",
+        "setblocking",
+        "settimeout",
+    }
+    if method not in recognized:
+        return None
+    state = socket_handle_state(receiver)
+    assert state is not None
+    arguments = _merge_values(
+        [*argument_values, *keyword_values.values(), unknown_keyword_unpack]
+    )
+    if not _socket_method_signature(node, method):
+        _record_socket_escape(
+            engine,
+            receiver.merged(arguments),
+            node,
+            method=method,
+            reason="invalid_or_ambiguous_unix_socket_method_signature",
+            module=module,
+            actor=actor,
+            ordinal=ordinal,
+        )
+        engine._contaminate_runtime_objects(env, object_env, [receiver])
+        return FlowValue()
+    if method in {"setblocking", "settimeout"}:
+        if arguments.has_origins:
+            _record_socket_escape(
+                engine,
+                arguments,
+                node,
+                method=method,
+                reason="ambiguous_registered_origin_socket_configuration",
+                module=module,
+                actor=actor,
+                ordinal=ordinal,
+            )
+            engine._contaminate_runtime_objects(env, object_env, [receiver])
+        return FlowValue()
+    if method == "close":
+        engine._contaminate_runtime_objects(env, object_env, [receiver])
+        return FlowValue()
+    if method == "connect_ex":
+        _record_socket_escape(
+            engine,
+            receiver.merged(arguments),
+            node,
+            method=method,
+            reason="unsupported_unix_socket_connect_ex",
+            module=module,
+            actor=actor,
+            ordinal=ordinal,
+        )
+        engine._contaminate_runtime_objects(env, object_env, [receiver])
+        return FlowValue()
+    required_states = {
+        "accept": {"listening"},
+        "bind": {"created"},
+        "connect": {"created"},
+        "listen": {"bound"},
+        "recv": {"connected"},
+        "recv_into": {"connected"},
+        "recvfrom": {"connected"},
+        "recvfrom_into": {"connected"},
+        "send": {"connected"},
+        "sendall": {"connected"},
+    }
+    if method in required_states and state not in required_states[method]:
+        _record_socket_escape(
+            engine,
+            receiver.merged(arguments),
+            node,
+            method=method,
+            reason="invalid_unix_socket_lifecycle_transition",
+            module=module,
+            actor=actor,
+            ordinal=ordinal,
+        )
+        engine._contaminate_runtime_objects(env, object_env, [receiver])
+        return FlowValue()
+    if method in {"bind", "connect"}:
+        endpoint = argument_values[0]
+        if receiver.has_origins or not _exact_filesystem_unix_endpoint(
+            engine, endpoint
+        ):
+            _record_socket_escape(
+                engine,
+                receiver.merged(endpoint),
+                node,
+                method=method,
+                reason="dynamic_or_unsupported_unix_socket_endpoint",
+                module=module,
+                actor=actor,
+                ordinal=ordinal,
+            )
+            engine._contaminate_runtime_objects(env, object_env, [receiver])
+            return FlowValue()
+        mode = "write" if method == "bind" else "read_write"
+        engine.facts.record_access(
+            endpoint,
+            node=node,
+            actor=actor,
+            mode=mode,
+            operation=f"socket.{method}",
+            sink=f"socket.socket.{method}",
+            path=engine.paths[module],
+            line=int(node.lineno),
+            ordinal=ordinal,
+        )
+        promoted = _socket_receiver_with_endpoint(
+            receiver,
+            endpoint,
+            step=f"result:socket.{method}:endpoint",
+            state="bound" if method == "bind" else "connected",
+        )
+        engine._replace_runtime_object_aliases(
+            env, object_env, receiver, promoted
+        )
+        return FlowValue()
+    if arguments.has_origins:
+        _record_socket_escape(
+            engine,
+            arguments,
+            node,
+            method=method,
+            reason="ambiguous_registered_origin_socket_auxiliary_arguments",
+            module=module,
+            actor=actor,
+            ordinal=ordinal,
+        )
+    if not receiver.has_origins:
+        engine._contaminate_runtime_objects(env, object_env, [receiver])
+        return FlowValue()
+    modes = {
+        "accept": "read_write",
+        "listen": "write",
+        "recv": "read",
+        "recv_into": "read",
+        "recvfrom": "read",
+        "recvfrom_into": "read",
+        "send": "write",
+        "sendall": "write",
+    }
+    engine.facts.record_access(
+        receiver,
+        node=node,
+        actor=actor,
+        mode=modes[method],
+        operation=f"socket.{method}",
+        sink=f"socket.socket.{method}",
+        path=engine.paths[module],
+        line=int(node.lineno),
+        ordinal=ordinal,
+    )
+    if method == "accept":
+        accepted = tag_socket_handle(
+            receiver.bound("result:socket.accept:socket"),
+            identity=engine._runtime_object_identity(
+                node,
+                kind="socket.accepted.unix_stream",
+                actor=actor,
+            ),
+            state="connected",
+        )
+        return FlowValue(
+            structured_items=(accepted, FlowValue()),
+        )
+    if method in {"recvfrom", "recvfrom_into"}:
+        return FlowValue(structured_items=(FlowValue(), FlowValue()))
+    if method == "listen":
+        updated = tag_socket_handle(
+            receiver.bound("lifecycle:socket.listen"),
+            identity=next(iter(receiver.runtime_object_ids)),
+            state="listening",
+        )
+        engine._replace_runtime_object_aliases(env, object_env, receiver, updated)
+    return FlowValue()
+
+
+def _socketserver_factory_kind(value: FlowValue) -> str | None:
+    if (
+        value.origins
+        or value.module_refs
+        or value.call_targets
+        or value.unknown_callable
+        or value.closure_instances
+        or value.structured_items is not None
+        or value.instance_ids
+        or value.attribute_values_ambiguous
+    ):
+        return None
+    external = {
+        object_type.removeprefix(SOCKETSERVER_CLASS_OBJECT_PREFIX)
+        for object_type in value.object_types
+        if object_type.startswith(SOCKETSERVER_CLASS_OBJECT_PREFIX)
+    }
+    local = {
+        object_type.removeprefix(SOCKETSERVER_LOCAL_CLASS_OBJECT_PREFIX)
+        for object_type in value.object_types
+        if object_type.startswith(SOCKETSERVER_LOCAL_CLASS_OBJECT_PREFIX)
+    }
+    kinds = external | local
+    if len(kinds) != 1:
+        return None
+    kind = next(iter(kinds))
+    if external and len(value.object_types) != 1:
+        return None
+    if local and (
+        len(value.class_targets) != 1
+        or value.object_types
+        != {
+            next(iter(value.class_targets)),
+            f"{SOCKETSERVER_LOCAL_CLASS_OBJECT_PREFIX}{kind}",
+        }
+    ):
+        return None
+    return kind
+
+
+def _socketserver_factory_marked_kinds(value: FlowValue) -> set[str]:
+    return {
+        object_type.removeprefix(prefix)
+        for prefix in (
+            SOCKETSERVER_CLASS_OBJECT_PREFIX,
+            SOCKETSERVER_LOCAL_CLASS_OBJECT_PREFIX,
+        )
+        for object_type in value.object_types
+        if object_type.startswith(prefix)
+    }.intersection(STDLIB_SOCKETSERVER_CLASSES)
+
+
+def _static_bool_argument(
+    node: ast.Call,
+    *,
+    index: int,
+    keyword: str,
+    default: bool,
+) -> bool | None:
+    if not _argument_is_provided(node, index=index, keyword=keyword):
+        return default
+    expression = _precise_argument_expression(
+        node,
+        index=index,
+        keyword=keyword,
+    )
+    if not (
+        isinstance(expression, ast.Constant)
+        and isinstance(expression.value, bool)
+    ):
+        return None
+    return bool(expression.value)
+
+
+def _exact_local_handler_class(value: FlowValue) -> bool:
+    return (
+        len(value.class_targets) == 1
+        and value.object_types == value.class_targets
+        and not value.origins
+        and not value.module_refs
+        and not value.call_targets
+        and not value.unknown_callable
+        and not value.instance_ids
+        and not value.attribute_values_ambiguous
+    )
+
+
+def _record_socketserver_access(
+    engine: AccessEngine,
+    value: FlowValue,
+    node: ast.Call,
+    *,
+    mode: str,
+    operation: str,
+    sink: str,
+    module: str,
+    actor: str,
+    ordinal: int,
+) -> None:
+    if not value.has_origins:
+        return
+    engine.facts.record_access(
+        value,
+        node=node,
+        actor=actor,
+        mode=mode,
+        operation=operation,
+        sink=sink,
+        path=engine.paths[module],
+        line=int(node.lineno),
+        ordinal=ordinal,
+    )
+
+
+def _record_socketserver_escape(
+    engine: AccessEngine,
+    value: FlowValue,
+    node: ast.Call,
+    *,
+    operation: str,
+    sink: str,
+    reason: str,
+    module: str,
+    actor: str,
+    ordinal: int,
+) -> None:
+    if not value.has_origins:
+        return
+    engine.facts.record_escape(
+        value,
+        node=node,
+        actor=actor,
+        operation=operation,
+        sink=sink,
+        reason=reason,
+        path=engine.paths[module],
+        line=int(node.lineno),
+        ordinal=ordinal,
+    )
+
+
+def _evaluate_socketserver_constructor(
+    engine: AccessEngine,
+    node: ast.Call,
+    factory: FlowValue,
+    argument_values: Sequence[FlowValue],
+    keyword_values: Mapping[str, FlowValue],
+    unknown_keyword_unpack: FlowValue,
+    *,
+    module: str,
+    actor: str,
+    ordinal: int,
+) -> FlowValue | None:
+    kind = _socketserver_factory_kind(factory)
+    if kind is None:
+        marked_kinds = _socketserver_factory_marked_kinds(factory)
+        if not marked_kinds:
+            return None
+        endpoint = (
+            argument_values[0]
+            if argument_values
+            else keyword_values.get("server_address", FlowValue())
+        )
+        implicated = _merge_values(
+            [*argument_values, *keyword_values.values(), unknown_keyword_unpack]
+        )
+        _record_socketserver_escape(
+            engine,
+            implicated.merged(endpoint),
+            node,
+            operation="socketserver.constructor",
+            sink="socketserver.unsafe_local_unix_stream_subclass",
+            reason="unsafe_or_mutated_unix_stream_server_subclass",
+            module=module,
+            actor=actor,
+            ordinal=ordinal,
+        )
+        return FlowValue(unknown_callable=True)
+    endpoint, endpoint_ambiguous = _precise_argument_value(
+        node,
+        argument_values,
+        keyword_values,
+        index=0,
+        keyword="server_address",
+    )
+    handler, handler_ambiguous = _precise_argument_value(
+        node,
+        argument_values,
+        keyword_values,
+        index=1,
+        keyword="RequestHandlerClass",
+    )
+    bind_and_activate = _static_bool_argument(
+        node,
+        index=2,
+        keyword="bind_and_activate",
+        default=True,
+    )
+    implicated = _merge_values(
+        [
+            *argument_values,
+            *keyword_values.values(),
+            unknown_keyword_unpack,
+            endpoint_ambiguous,
+            handler_ambiguous,
+        ]
+    )
+    valid = (
+        _valid_named_signature(
+            node,
+            positional_names=(
+                "server_address",
+                "RequestHandlerClass",
+                "bind_and_activate",
+            ),
+            keyword_only_names=frozenset(),
+            required_names=frozenset(
+                {"server_address", "RequestHandlerClass"}
+            ),
+        )
+        and _exact_filesystem_unix_endpoint(engine, endpoint)
+        and _exact_local_handler_class(handler)
+        and bind_and_activate is not None
+        and not implicated.merged(endpoint).attribute_values_ambiguous
+    )
+    if not valid:
+        _record_socketserver_escape(
+            engine,
+            implicated.merged(endpoint),
+            node,
+            operation="socketserver.constructor",
+            sink=f"socketserver.{kind}",
+            reason="invalid_or_unsupported_unix_stream_server_constructor",
+            module=module,
+            actor=actor,
+            ordinal=ordinal,
+        )
+        return FlowValue(unknown_callable=True)
+    identity = engine._runtime_object_identity(
+        node,
+        kind="socketserver.unix_stream",
+        actor=actor,
+    )
+    state = "created"
+    if bind_and_activate:
+        _record_socketserver_access(
+            engine,
+            endpoint,
+            node,
+            mode="write",
+            operation="socketserver.constructor.server_bind",
+            sink="socketserver.TCPServer.server_bind",
+            module=module,
+            actor=actor,
+            ordinal=ordinal,
+        )
+        _record_socketserver_access(
+            engine,
+            endpoint,
+            node,
+            mode="write",
+            operation="socketserver.constructor.server_activate",
+            sink="socketserver.TCPServer.server_activate",
+            module=module,
+            actor=actor,
+            ordinal=ordinal,
+        )
+        state = "active"
+    _record_socketserver_escape(
+        engine,
+        endpoint,
+        node,
+        operation="socketserver.request_handler_boundary",
+        sink="socketserver.RequestHandlerClass",
+        reason="unix_socket_request_handler_callback_boundary",
+        module=module,
+        actor=actor,
+        ordinal=ordinal,
+    )
+    return tag_socketserver_handle(
+        endpoint.bound(f"result:socketserver.{kind}"),
+        identity=identity,
+        state=state,
+    )
+
+
+def _socketserver_method_signature(node: ast.Call, method: str) -> bool:
+    if any(isinstance(argument, ast.Starred) for argument in node.args):
+        return False
+    keywords = _expanded_keyword_arguments(node)
+    if keywords is None:
+        return False
+    if method == "serve_forever":
+        return (
+            len(node.args) <= 1
+            and not keywords
+            or not node.args
+            and [name for name, _expression in keywords] == ["poll_interval"]
+        )
+    return not node.args and not keywords
+
+
+def _evaluate_socketserver_handle_call(
+    engine: AccessEngine,
+    node: ast.Call,
+    receiver: FlowValue,
+    argument_values: Sequence[FlowValue],
+    keyword_values: Mapping[str, FlowValue],
+    unknown_keyword_unpack: FlowValue,
+    *,
+    method: str,
+    module: str,
+    actor: str,
+    env: dict[str, FlowValue],
+    object_env: dict[str, set[str]],
+    ordinal: int,
+) -> FlowValue | None:
+    recognized = {
+        "serve_forever",
+        "server_activate",
+        "server_bind",
+        "server_close",
+        "shutdown",
+    }
+    if method not in recognized:
+        return None
+    arguments = _merge_values(
+        [*argument_values, *keyword_values.values(), unknown_keyword_unpack]
+    )
+    state = socketserver_handle_state(receiver)
+    if state is None or not _socketserver_method_signature(node, method):
+        _record_socketserver_escape(
+            engine,
+            receiver.merged(arguments),
+            node,
+            operation=f"socketserver.{method}",
+            sink=f"socketserver.BaseServer.{method}",
+            reason="invalid_or_ambiguous_socketserver_lifecycle",
+            module=module,
+            actor=actor,
+            ordinal=ordinal,
+        )
+        engine._contaminate_runtime_objects(env, object_env, [receiver])
+        return FlowValue()
+    if arguments.has_origins:
+        _record_socketserver_escape(
+            engine,
+            arguments,
+            node,
+            operation=f"socketserver.{method}.arguments",
+            sink=f"socketserver.BaseServer.{method}",
+            reason="ambiguous_registered_origin_socketserver_arguments",
+            module=module,
+            actor=actor,
+            ordinal=ordinal,
+        )
+    next_state = state
+    mode = "write"
+    sink = f"socketserver.BaseServer.{method}"
+    if method == "server_bind" and state == "created":
+        next_state = "bound"
+        sink = "socketserver.TCPServer.server_bind"
+    elif method == "server_activate" and state == "bound":
+        next_state = "active"
+        sink = "socketserver.TCPServer.server_activate"
+    elif method == "serve_forever" and state in {"active", "returned"}:
+        next_state = "returned"
+        mode = "read_write"
+    elif method == "shutdown":
+        _record_socketserver_escape(
+            engine,
+            receiver,
+            node,
+            operation="socketserver.shutdown",
+            sink="socketserver.BaseServer.shutdown",
+            reason="synchronous_socketserver_shutdown_would_deadlock",
+            module=module,
+            actor=actor,
+            ordinal=ordinal,
+        )
+        engine._contaminate_runtime_objects(env, object_env, [receiver])
+        return FlowValue()
+    elif method == "server_close":
+        engine._contaminate_runtime_objects(env, object_env, [receiver])
+        return FlowValue()
+    else:
+        _record_socketserver_escape(
+            engine,
+            receiver,
+            node,
+            operation=f"socketserver.{method}",
+            sink=sink,
+            reason="invalid_socketserver_lifecycle_transition",
+            module=module,
+            actor=actor,
+            ordinal=ordinal,
+        )
+        engine._contaminate_runtime_objects(env, object_env, [receiver])
+        return FlowValue()
+    _record_socketserver_access(
+        engine,
+        receiver,
+        node,
+        mode=mode,
+        operation=f"socketserver.{method}",
+        sink=sink,
+        module=module,
+        actor=actor,
+        ordinal=ordinal,
+    )
+    updated = tag_socketserver_handle(
+        receiver.bound(f"lifecycle:socketserver.{method}"),
+        identity=next(iter(receiver.runtime_object_ids)),
+        state=next_state,
+    )
+    engine._replace_runtime_object_aliases(env, object_env, receiver, updated)
+    return FlowValue()
+
+
+def _socketserver_bound_method(
+    value: FlowValue,
+) -> tuple[str, FlowValue] | None:
+    methods = {
+        object_type.removeprefix(SOCKETSERVER_BOUND_METHOD_PREFIX)
+        for object_type in value.object_types
+        if object_type.startswith(SOCKETSERVER_BOUND_METHOD_PREFIX)
+    }
+    receiver = value.attribute_values.get("\0bound_receiver")
+    if len(methods) != 1 or receiver is None:
+        return None
+    return next(iter(methods)), receiver
+
+
+def _socket_bound_method(value: FlowValue) -> tuple[str, FlowValue] | None:
+    methods = {
+        object_type.removeprefix(SOCKET_BOUND_METHOD_PREFIX)
+        for object_type in value.object_types
+        if object_type.startswith(SOCKET_BOUND_METHOD_PREFIX)
+    }
+    receiver = value.attribute_values.get("\0bound_receiver")
+    if len(methods) != 1 or receiver is None:
+        return None
+    return next(iter(methods)), receiver
+
+
+def _evaluate_socketserver_thread_callback(
+    engine: AccessEngine,
+    node: ast.Call,
+    receiver: FlowValue,
+    argument_values: Sequence[FlowValue],
+    keyword_values: Mapping[str, FlowValue],
+    unknown_keyword_unpack: FlowValue,
+    *,
+    module: str,
+    actor: str,
+    ordinal: int,
+) -> FlowValue | None:
+    if not (
+        isinstance(node.func, ast.Attribute)
+        and node.func.attr == "Thread"
+        and receiver.module_refs == {"threading"}
+        and "threading" not in engine.known_modules
+        and not receiver.origins
+        and not receiver.object_types
+        and not receiver.call_targets
+        and not receiver.class_targets
+        and not receiver.unknown_callable
+    ):
+        return None
+    target, target_ambiguous = _precise_argument_value(
+        node,
+        argument_values,
+        keyword_values,
+        index=1,
+        keyword="target",
+    )
+    bound = _socketserver_bound_method(target)
+    if bound is None or bound[0] != "shutdown":
+        return None
+    server = bound[1]
+    daemon_expression = _precise_argument_expression(
+        node,
+        index=5,
+        keyword="daemon",
+    )
+    keywords = _expanded_keyword_arguments(node)
+    valid = (
+        not node.args
+        and keywords is not None
+        and {name for name, _expression in keywords} == {"target", "daemon"}
+        and not target_ambiguous.has_analysis_state
+        and not unknown_keyword_unpack.has_analysis_state
+        and _static_exact_constant(daemon_expression, True)
+        and socketserver_handle_state(server) in {"active", "returned"}
+    )
+    if not valid:
+        _record_socketserver_escape(
+            engine,
+            server,
+            node,
+            operation="socketserver.shutdown.thread_callback",
+            sink="threading.Thread",
+            reason="invalid_or_ambiguous_socketserver_thread_callback",
+            module=module,
+            actor=actor,
+            ordinal=ordinal,
+        )
+        return FlowValue()
+    _record_socketserver_access(
+        engine,
+        server,
+        node,
+        mode="write",
+        operation="socketserver.shutdown",
+        sink="socketserver.BaseServer.shutdown",
+        module=module,
+        actor=actor,
+        ordinal=ordinal,
+    )
+    _record_socketserver_escape(
+        engine,
+        server,
+        node,
+        operation="socketserver.shutdown.thread_callback",
+        sink="threading.Thread",
+        reason="unix_socket_shutdown_thread_callback_boundary",
+        module=module,
+        actor=actor,
+        ordinal=ordinal,
+    )
+    return FlowValue()
+
+
 def _has_only_stdlib_call_target(value: FlowValue, target: str) -> bool:
     return (
         value.call_targets == {target}
@@ -2586,6 +3780,149 @@ def _is_exact_stdlib_call(
             attribute=attribute,
         )
     )
+
+
+def _is_safe_threaded_shutdown_handler(info: FunctionInfo) -> bool:
+    node = info.node
+    if not isinstance(node, ast.FunctionDef) or node.decorator_list:
+        return False
+    parameters = [*node.args.posonlyargs, *node.args.args]
+    if (
+        len(parameters) != 2
+        or node.args.vararg is not None
+        or node.args.kwarg is not None
+        or node.args.kwonlyargs
+        or node.args.defaults
+    ):
+        return False
+    if len(node.body) != 1 or not isinstance(node.body[0], ast.Expr):
+        return False
+    start_call = node.body[0].value
+    if not (
+        isinstance(start_call, ast.Call)
+        and isinstance(start_call.func, ast.Attribute)
+        and start_call.func.attr == "start"
+        and not start_call.args
+        and not start_call.keywords
+        and isinstance(start_call.func.value, ast.Call)
+    ):
+        return False
+    thread_call = start_call.func.value
+    return (
+        isinstance(thread_call.func, ast.Attribute)
+        and thread_call.func.attr == "Thread"
+    )
+
+
+def _evaluate_signal_handler_registration(
+    engine: AccessEngine,
+    node: ast.Call,
+    receiver: FlowValue,
+    argument_values: Sequence[FlowValue],
+    keyword_values: Mapping[str, FlowValue],
+    unknown_keyword_unpack: FlowValue,
+    *,
+    module: str,
+    actor: str,
+    env: dict[str, FlowValue],
+    object_env: dict[str, set[str]],
+    ordinal: int,
+) -> FlowValue | None:
+    if not _is_exact_stdlib_call(
+        node,
+        receiver,
+        env,
+        module="signal",
+        attribute="signal",
+    ):
+        return None
+    handler = argument_values[1] if len(argument_values) > 1 else FlowValue()
+    capture = engine._closure_capture_value(handler, env=env)
+    valid_signature = (
+        len(node.args) == 2
+        and not any(isinstance(argument, ast.Starred) for argument in node.args)
+        and not node.keywords
+        and len(argument_values) == 2
+        and not keyword_values
+        and not unknown_keyword_unpack.has_analysis_state
+    )
+    targets = tuple(sorted(handler.call_targets))
+    for target in targets:
+        info = engine.functions.get(target)
+        if info is None or info.parent_ref != actor:
+            continue
+        for name in info.referenced_names | info.nonlocal_names:
+            capture = capture.merged(env.get(name, FlowValue()))
+    closure_instances = tuple(
+        sorted(
+            (target, instance_id)
+            for target, instance_id in handler.closure_instances
+            if target in engine.functions
+        )
+    )
+    exact_handler = (
+        valid_signature
+        and len(targets) == 1
+        and targets[0] in engine.functions
+        and not handler.origins
+        and not handler.object_types
+        and not handler.module_refs
+        and not handler.class_targets
+        and not handler.unknown_callable
+        and _is_safe_threaded_shutdown_handler(engine.functions[targets[0]])
+        and (
+            engine.functions[targets[0]].parent_ref is None
+            or (
+                engine.functions[targets[0]].parent_ref == actor
+                and (
+                    not closure_instances
+                    or closure_instances
+                    == tuple(
+                        item
+                        for item in closure_instances
+                        if item[0] == targets[0]
+                    )
+                    and len(closure_instances) == 1
+                )
+            )
+        )
+    )
+    if not exact_handler:
+        if capture.has_origins:
+            _record_socketserver_escape(
+                engine,
+                capture,
+                node,
+                operation="socketserver.shutdown.signal_callback",
+                sink="signal.signal",
+                reason="unknown_or_ambiguous_signal_handler_callback",
+                module=module,
+                actor=actor,
+                ordinal=ordinal,
+            )
+        return FlowValue()
+    target = targets[0]
+    closure_instance = (
+        closure_instances[0][1] if closure_instances else None
+    )
+    isolated_env = {name: value.copy() for name, value in env.items()}
+    isolated_objects = {
+        name: set(values) for name, values in object_env.items()
+    }
+    engine._execute_known_call(
+        target,
+        [FlowValue(), FlowValue()],
+        {},
+        actor=actor,
+        module=module,
+        node=node,
+        ordinal=ordinal,
+        env=isolated_env,
+        object_env=isolated_objects,
+        closure_instance=closure_instance,
+        force=True,
+    )
+    return FlowValue()
 
 
 def _record_exact_call_escape(
@@ -2629,14 +3966,13 @@ def _evaluate_path_constructor(
     implicated = _merge_values(
         [*argument_values, *keyword_values.values(), unknown_keyword_unpack]
     )
-    valid = (
+    valid_signature = (
         len(node.args) == 1
         and not isinstance(node.args[0], ast.Starred)
         and not node.keywords
         and len(argument_values) == 1
-        and is_exact_path_constructor_argument(argument_values[0])
     )
-    if not valid:
+    if not valid_signature:
         _record_exact_call_escape(
             engine,
             implicated,
@@ -2649,9 +3985,26 @@ def _evaluate_path_constructor(
             reason="invalid_or_ambiguous_path_constructor_signature",
         )
         return FlowValue()
-    result = argument_values[0].bound("constructor:pathlib.Path")
-    result.object_types = {PATH_OBJECT_TYPE}
-    return result
+    variants = candidate_flow_variants(argument_values[0])
+    valid_variants: list[FlowValue] = []
+    for variant in variants:
+        if not is_exact_path_constructor_argument(variant):
+            _record_exact_call_escape(
+                engine,
+                variant,
+                node,
+                module=module,
+                actor=actor,
+                ordinal=ordinal,
+                operation="path.constructor",
+                sink="pathlib.Path",
+                reason="invalid_or_ambiguous_path_constructor_signature",
+            )
+            continue
+        transformed = variant.bound("constructor:pathlib.Path")
+        transformed.object_types = {PATH_OBJECT_TYPE}
+        valid_variants.append(transformed)
+    return exclusive_flow_join(valid_variants)
 
 
 def _value_contains_origins(value: FlowValue) -> bool:
@@ -2678,15 +4031,13 @@ def _evaluate_builtin_str_representation(
     implicated = _merge_values(
         [*argument_values, *keyword_values.values(), unknown_keyword_unpack]
     )
-    valid = (
+    valid_signature = (
         len(node.args) == 1
         and not isinstance(node.args[0], ast.Starred)
         and not node.keywords
         and len(argument_values) == 1
-        and PATH_OBJECT_TYPE in argument_values[0].object_types
-        and is_exact_path_constructor_argument(argument_values[0])
     )
-    if not valid:
+    if not valid_signature:
         _record_exact_call_escape(
             engine,
             implicated,
@@ -2699,9 +4050,28 @@ def _evaluate_builtin_str_representation(
             reason="invalid_or_ambiguous_path_representation_signature",
         )
         return FlowValue()
-    represented = argument_values[0].bound("representation:builtins.str")
-    represented.object_types = {PATH_STRING_OBJECT_TYPE}
-    return represented
+    valid_variants: list[FlowValue] = []
+    for variant in candidate_flow_variants(argument_values[0]):
+        if not (
+            PATH_OBJECT_TYPE in variant.object_types
+            and is_exact_path_constructor_argument(variant)
+        ):
+            _record_exact_call_escape(
+                engine,
+                variant,
+                node,
+                module=module,
+                actor=actor,
+                ordinal=ordinal,
+                operation="builtin.str",
+                sink="builtins.str",
+                reason="invalid_or_ambiguous_path_representation_signature",
+            )
+            continue
+        represented = variant.bound("representation:builtins.str")
+        represented.object_types = {PATH_STRING_OBJECT_TYPE}
+        valid_variants.append(represented)
+    return exclusive_flow_join(valid_variants)
 
 
 def _dataclass_default_factory_value(
@@ -3183,6 +4553,33 @@ def evaluate_call(
             object_env=object_env,
             call_ordinals=call_ordinals,
         )
+    subclass_mutation = _evaluate_socketserver_subclass_mutation(
+        engine,
+        node,
+        receiver,
+        argument_values,
+        module=module,
+        actor=actor,
+        env=env,
+        object_env=object_env,
+    )
+    if subclass_mutation is not None:
+        return subclass_mutation
+    signal_registration = _evaluate_signal_handler_registration(
+        engine,
+        node,
+        receiver,
+        argument_values,
+        keyword_values,
+        unknown_keyword_unpack,
+        module=module,
+        actor=actor,
+        env=env,
+        object_env=object_env,
+        ordinal=ordinal,
+    )
+    if signal_registration is not None:
+        return signal_registration
     bound_path_methods = {
         object_type.removeprefix(PATH_BOUND_TRANSFORM_PREFIX)
         for object_type in callee_value.object_types
@@ -3295,6 +4692,48 @@ def evaluate_call(
             actor=actor,
             ordinal=ordinal,
         )
+    for wrapper_name in ("list", "tuple", "set", "dict"):
+        if not _is_unshadowed_builtin(
+            engine,
+            node,
+            name=wrapper_name,
+            actor=actor,
+            module=module,
+            env=env,
+        ):
+            continue
+        valid_wrapper = (
+            not any(isinstance(argument, ast.Starred) for argument in node.args)
+            and not node.keywords
+            and len(argument_values) <= 1
+        )
+        implicated = _merge_values(
+            [*argument_values, *keyword_values.values(), unknown_keyword_unpack]
+        )
+        if not valid_wrapper:
+            _record_exact_call_escape(
+                engine,
+                implicated,
+                node,
+                module=module,
+                actor=actor,
+                ordinal=ordinal,
+                operation=f"builtin.{wrapper_name}",
+                sink=f"builtins.{wrapper_name}",
+                reason="invalid_or_ambiguous_structured_wrapper_signature",
+            )
+            return FlowValue()
+        if not argument_values:
+            return opaque_structured_flow_value(())
+        wrapped = argument_values[0]
+        items = (
+            wrapped.structured_items
+            if wrapped.structured_items is not None
+            else (wrapped,)
+        )
+        return opaque_structured_flow_value(items).bound(
+            f"constructor:builtins.{wrapper_name}"
+        )
     dict_mutation = _evaluate_stdlib_module_dict_mutation_call(
         engine,
         node,
@@ -3323,6 +4762,114 @@ def evaluate_call(
     )
     if builtin_mutation is not None:
         return builtin_mutation
+    socket_call = _stdlib_socket_call_name(
+        node,
+        receiver,
+        env,
+        known_modules=engine.known_modules,
+    )
+    if socket_call == "socket":
+        return _evaluate_socket_constructor(
+            engine,
+            node,
+            argument_values,
+            keyword_values,
+            unknown_keyword_unpack,
+            module=module,
+            actor=actor,
+            ordinal=ordinal,
+        )
+    socket_method_receiver = receiver
+    socket_method = node.func.attr if isinstance(node.func, ast.Attribute) else ""
+    if socket_handle_kind(socket_method_receiver) is None:
+        bound_socket_method = _socket_bound_method(callee_value)
+        if bound_socket_method is not None:
+            socket_method, socket_method_receiver = bound_socket_method
+    if socket_handle_kind(socket_method_receiver) is not None:
+        socket_result = _evaluate_socket_handle_call(
+            engine,
+            node,
+            socket_method_receiver,
+            argument_values,
+            keyword_values,
+            unknown_keyword_unpack,
+            method=socket_method,
+            module=module,
+            actor=actor,
+            env=env,
+            object_env=object_env,
+            ordinal=ordinal,
+        )
+        if socket_result is not None:
+            return socket_result
+    thread_callback = _evaluate_socketserver_thread_callback(
+        engine,
+        node,
+        receiver,
+        argument_values,
+        keyword_values,
+        unknown_keyword_unpack,
+        module=module,
+        actor=actor,
+        ordinal=ordinal,
+    )
+    if thread_callback is not None:
+        return thread_callback
+    socketserver_factory = callee_value
+    if (
+        "socketserver" not in engine.known_modules
+        and
+        isinstance(node.func, ast.Attribute)
+        and node.func.attr in STDLIB_SOCKETSERVER_CLASSES
+        and is_precise_stdlib_module(
+            receiver,
+            module="socketserver",
+            attribute=node.func.attr,
+        )
+    ):
+        socketserver_factory = FlowValue(
+            object_types={
+                f"{SOCKETSERVER_CLASS_OBJECT_PREFIX}{node.func.attr}"
+            }
+        )
+    socketserver_constructor = _evaluate_socketserver_constructor(
+        engine,
+        node,
+        socketserver_factory,
+        argument_values,
+        keyword_values,
+        unknown_keyword_unpack,
+        module=module,
+        actor=actor,
+        ordinal=ordinal,
+    )
+    if socketserver_constructor is not None:
+        return socketserver_constructor
+    socketserver_method_receiver = receiver
+    socketserver_method = (
+        node.func.attr if isinstance(node.func, ast.Attribute) else ""
+    )
+    if socketserver_handle_state(socketserver_method_receiver) is None:
+        bound_server_method = _socketserver_bound_method(callee_value)
+        if bound_server_method is not None:
+            socketserver_method, socketserver_method_receiver = bound_server_method
+    if socketserver_handle_state(socketserver_method_receiver) is not None:
+        socketserver_result = _evaluate_socketserver_handle_call(
+            engine,
+            node,
+            socketserver_method_receiver,
+            argument_values,
+            keyword_values,
+            unknown_keyword_unpack,
+            method=socketserver_method,
+            module=module,
+            actor=actor,
+            env=env,
+            object_env=object_env,
+            ordinal=ordinal,
+        )
+        if socketserver_result is not None:
+            return socketserver_result
     if path_open:
         return _evaluate_file_open(
             engine,
@@ -3463,6 +5010,17 @@ def evaluate_call(
             module=module,
             actor=actor,
             env=env,
+            ordinal=ordinal,
+        )
+    if os_call == "chmod":
+        return _evaluate_os_chmod(
+            engine,
+            node,
+            argument_values,
+            keyword_values,
+            unknown_keyword_unpack,
+            module=module,
+            actor=actor,
             ordinal=ordinal,
         )
     if os_call == "fdopen":

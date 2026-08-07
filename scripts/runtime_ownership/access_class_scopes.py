@@ -14,11 +14,15 @@ from .access_definition_execution import (
 from .access_model import (
     DATACLASS_INIT_VAR_MARKER,
     DATACLASS_KW_ONLY_MARKER,
+    SOCKETSERVER_CLASS_OBJECT_PREFIX,
+    SOCKETSERVER_LOCAL_CLASS_OBJECT_PREFIX,
+    STDLIB_SOCKETSERVER_CLASSES,
     DataclassFieldInfo,
     DataclassInfo,
     FlowValue,
     _call_ordinals,
     _class_definition_ref,
+    is_precise_stdlib_module,
     precise_stdlib_module_name,
 )
 from .access_outcomes import (
@@ -38,6 +42,7 @@ class ModuleScopeEngine(Protocol):
     module_exports: dict[str, dict[str, FlowValue]]
     dataclass_infos: dict[str, DataclassInfo]
     _persistent_changed: bool
+    known_modules: frozenset[str]
 
     def _socket_field_origin(
         self,
@@ -160,6 +165,15 @@ def analyze_class_definition(
                 object_types={current_ref},
                 class_targets={current_ref},
             )
+            socketserver_kind = _safe_socketserver_subclass_kind(
+                statement,
+                outer_env=env,
+                known_modules=cast(ModuleScopeEngine, engine).known_modules,
+            )
+            if socketserver_kind is not None:
+                definition_value.object_types.add(
+                    f"{SOCKETSERVER_LOCAL_CLASS_OBJECT_PREFIX}{socketserver_kind}"
+                )
             if dataclass_info is not None:
                 prior_info = cast(ModuleScopeEngine, engine).dataclass_infos.get(
                     current_ref
@@ -223,6 +237,72 @@ def analyze_class_definition(
             )
         )
     return BlockResult(changed, normalize_outcomes(outcomes))
+
+
+def _safe_socketserver_subclass_kind(
+    statement: ast.ClassDef,
+    *,
+    outer_env: Mapping[str, FlowValue],
+    known_modules: frozenset[str],
+) -> str | None:
+    """Recognize only the inert local subclasses used by production services."""
+
+    if statement.decorator_list or statement.keywords or len(statement.bases) != 1:
+        return None
+    base_expression = statement.bases[0]
+    base_value: FlowValue | None = None
+    if isinstance(base_expression, ast.Name):
+        base_value = outer_env.get(base_expression.id)
+    elif (
+        isinstance(base_expression, ast.Attribute)
+        and isinstance(base_expression.value, ast.Name)
+    ):
+        module_value = outer_env.get(base_expression.value.id)
+        if (
+            module_value is not None
+            and "socketserver" not in known_modules
+            and base_expression.attr in STDLIB_SOCKETSERVER_CLASSES
+            and is_precise_stdlib_module(
+                module_value,
+                module="socketserver",
+                attribute=base_expression.attr,
+            )
+        ):
+            base_value = FlowValue(
+                object_types={
+                    f"{SOCKETSERVER_CLASS_OBJECT_PREFIX}{base_expression.attr}"
+                }
+            )
+    if base_value is None or len(base_value.object_types) != 1:
+        return None
+    marker = next(iter(base_value.object_types))
+    if not marker.startswith(SOCKETSERVER_CLASS_OBJECT_PREFIX):
+        return None
+    kind = marker.removeprefix(SOCKETSERVER_CLASS_OBJECT_PREFIX)
+    if kind not in STDLIB_SOCKETSERVER_CLASSES:
+        return None
+    for child in statement.body:
+        if isinstance(child, ast.Pass):
+            continue
+        if (
+            isinstance(child, ast.Expr)
+            and isinstance(child.value, ast.Constant)
+            and isinstance(child.value.value, str)
+        ):
+            continue
+        if not isinstance(child, (ast.Assign, ast.AnnAssign)):
+            return None
+        targets = child.targets if isinstance(child, ast.Assign) else [child.target]
+        if len(targets) != 1 or not isinstance(targets[0], ast.Name):
+            return None
+        if targets[0].id not in {"allow_reuse_address", "daemon_threads"}:
+            return None
+        if child.value is None or not (
+            isinstance(child.value, ast.Constant)
+            and isinstance(child.value.value, bool)
+        ):
+            return None
+    return kind
 
 
 def _is_exact_dataclass_decorator(

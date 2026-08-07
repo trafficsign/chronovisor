@@ -13,13 +13,17 @@ from .access_model import (
     UNRESOLVED_RUNTIME_OBJECT_ALTERNATIVE_TYPE,
     FlowValue,
     combine_fcntl_lock_masks,
+    exclusive_flow_join,
     fcntl_lock_masks,
     has_fcntl_lock_mask,
     has_file_descriptor_object,
     is_exact_path_receiver,
     is_path_receiver,
     mark_attribute_alternative_ambiguity,
+    opaque_structured_flow_value,
+    simultaneous_flow_merge,
     sqlite_handle_kind,
+    structured_flow_value,
 )
 
 
@@ -216,7 +220,7 @@ def evaluate_generic_expression(
             call_ordinals=call_ordinals,
         )
         result = mark_attribute_alternative_ambiguity(
-            body.merged(orelse),
+            exclusive_flow_join([body, orelse]),
             [body, orelse],
         ).bound("expression:IfExp")
         if has_fcntl_lock_mask(body) != has_fcntl_lock_mask(orelse):
@@ -236,6 +240,22 @@ def evaluate_generic_expression(
         if body_is_callable != orelse_is_callable:
             result.unknown_callable = True
         return result
+    if isinstance(node, ast.BoolOp):
+        alternatives = [
+            engine._eval(
+                value,
+                module=module,
+                actor=actor,
+                class_ref=class_ref,
+                env=env,
+                object_env=object_env,
+                call_ordinals=call_ordinals,
+            )
+            for value in node.values
+        ]
+        return mark_attribute_alternative_ambiguity(
+            exclusive_flow_join(alternatives), alternatives
+        ).bound("expression:BoolOp")
     if isinstance(node, ast.Lambda):
         escaped = _lambda_origins(
             engine,
@@ -275,11 +295,54 @@ def evaluate_generic_expression(
             )
             for item in node.elts
         )
-        result = FlowValue(structured_items=items)
-        for item in items:
-            result = result.merged(item)
-        result.structured_items = items
-        return result.bound(f"expression:{type(node).__name__}")
+        return structured_flow_value(items).bound(
+            f"expression:{type(node).__name__}"
+        )
+    if isinstance(node, ast.Set) and not any(
+        isinstance(item, ast.Starred) for item in node.elts
+    ):
+        items = tuple(
+            engine._eval(
+                item,
+                module=module,
+                actor=actor,
+                class_ref=class_ref,
+                env=env,
+                object_env=object_env,
+                call_ordinals=call_ordinals,
+            )
+            for item in node.elts
+        )
+        return opaque_structured_flow_value(items).bound("expression:Set")
+    if isinstance(node, ast.Dict):
+        dict_items: list[FlowValue] = []
+        for key, value_node in zip(node.keys, node.values, strict=True):
+            if key is not None:
+                dict_items.append(
+                    engine._eval(
+                        key,
+                        module=module,
+                        actor=actor,
+                        class_ref=class_ref,
+                        env=env,
+                        object_env=object_env,
+                        call_ordinals=call_ordinals,
+                    )
+                )
+            dict_items.append(
+                engine._eval(
+                    value_node,
+                    module=module,
+                    actor=actor,
+                    class_ref=class_ref,
+                    env=env,
+                    object_env=object_env,
+                    call_ordinals=call_ordinals,
+                )
+            )
+        return opaque_structured_flow_value(dict_items).bound(
+            "expression:Dict"
+        )
     if isinstance(node, (ast.ListComp, ast.SetComp, ast.GeneratorExp)):
         (
             result,
@@ -296,23 +359,24 @@ def evaluate_generic_expression(
             object_env=object_env,
             call_ordinals=call_ordinals,
         )
-        if not generators_reachable:
-            return result.bound(f"expression:{type(node).__name__}")
-        result = result.merged(
-            _evaluate_comprehension_expression(
-                engine,
-                node.elt,
-                module=module,
-                actor=actor,
-                class_ref=class_ref,
-                env=local_env,
-                object_env=local_objects,
-                containing_env=env,
-                containing_objects=object_env,
-                call_ordinals=call_ordinals,
+        if generators_reachable:
+            result = result.merged(
+                _evaluate_comprehension_expression(
+                    engine,
+                    node.elt,
+                    module=module,
+                    actor=actor,
+                    class_ref=class_ref,
+                    env=local_env,
+                    object_env=local_objects,
+                    containing_env=env,
+                    containing_objects=object_env,
+                    call_ordinals=call_ordinals,
+                )
             )
+        return opaque_structured_flow_value((result,)).bound(
+            f"expression:{type(node).__name__}"
         )
-        return result.bound(f"expression:{type(node).__name__}")
     if isinstance(node, ast.DictComp):
         (
             result,
@@ -329,30 +393,30 @@ def evaluate_generic_expression(
             object_env=object_env,
             call_ordinals=call_ordinals,
         )
-        if not generators_reachable:
-            return result.bound(f"expression:{type(node).__name__}")
-        for child in (node.key, node.value):
-            result = result.merged(
-                _evaluate_comprehension_expression(
-                    engine,
-                    child,
-                    module=module,
-                    actor=actor,
-                    class_ref=class_ref,
-                    env=local_env,
-                    object_env=local_objects,
-                    containing_env=env,
-                    containing_objects=object_env,
-                    call_ordinals=call_ordinals,
+        if generators_reachable:
+            for child in (node.key, node.value):
+                result = result.merged(
+                    _evaluate_comprehension_expression(
+                        engine,
+                        child,
+                        module=module,
+                        actor=actor,
+                        class_ref=class_ref,
+                        env=local_env,
+                        object_env=local_objects,
+                        containing_env=env,
+                        containing_objects=object_env,
+                        call_ordinals=call_ordinals,
+                    )
                 )
-            )
-        return result.bound("expression:DictComp")
+        return opaque_structured_flow_value((result,)).bound(
+            "expression:DictComp"
+        )
     children = _generic_children(node)
     if children is None:
         return None
-    result = FlowValue()
-    for child in children:
-        result = result.merged(
+    result = simultaneous_flow_merge(
+        [
             engine._eval(
                 child,
                 module=module,
@@ -362,7 +426,9 @@ def evaluate_generic_expression(
                 object_env=object_env,
                 call_ordinals=call_ordinals,
             )
-        )
+            for child in children
+        ]
+    )
     bound = result.bound(f"expression:{type(node).__name__}")
     if isinstance(node, (ast.BinOp, ast.Subscript)) and bound.has_origins:
         engine.facts.record_escape(

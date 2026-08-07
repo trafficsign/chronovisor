@@ -11,6 +11,7 @@ from .access_model import (
     FCNTL_UNRESOLVED_LOCK_OPERATION_OBJECT_TYPE,
     UNRESOLVED_RUNTIME_OBJECT_ALTERNATIVE_TYPE,
     FlowValue,
+    exclusive_flow_join,
     has_fcntl_lock_mask,
     has_file_descriptor_object,
     is_exact_path_receiver,
@@ -48,12 +49,11 @@ class BlockResult:
 
     @property
     def returned(self) -> FlowValue:
-        value = FlowValue()
         return_values: list[FlowValue] = []
         for outcome in self.outcomes:
             if outcome.kind == "return":
                 return_values.append(outcome.value)
-                value = value.merged(outcome.value)
+        value = exclusive_flow_join(return_values)
         mark_attribute_alternative_ambiguity(value, return_values)
         if any(outcome.kind == "normal" for outcome in self.outcomes):
             mark_attribute_alternative_ambiguity(
@@ -106,12 +106,11 @@ def join_states(states: Iterable[StateSnapshot]) -> StateSnapshot:
     joined_objects: dict[str, set[str]] = {}
     names = set().union(*(state_env for state_env, _objects in materialized))
     for name in names:
-        value = FlowValue()
         candidates: list[FlowValue] = []
         for state_env, _objects in materialized:
             candidate = state_env.get(name, FlowValue())
             candidates.append(candidate)
-            value = value.merged(candidate)
+        value = exclusive_flow_join(candidates)
         mark_attribute_alternative_ambiguity(value, candidates)
         if has_fcntl_lock_mask(value) and any(
             candidate == FlowValue() for candidate in candidates
@@ -156,9 +155,7 @@ def normalize_outcomes(outcomes: Iterable[Outcome]) -> list[Outcome]:
         env, object_env = join_states(
             (member.env, member.object_env) for member in members
         )
-        value = FlowValue()
-        for member in members:
-            value = value.merged(member.value)
+        value = exclusive_flow_join([member.value for member in members])
         normalized.append(Outcome(kind, env, object_env, value))
     return normalized
 
