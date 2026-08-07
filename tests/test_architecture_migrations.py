@@ -95,8 +95,8 @@ def _valid_receipt(migrations: ModuleType, plan: dict[str, Any]) -> dict[str, An
                 "sha256": "3" * 64,
             },
         },
-        "active_counts": migrations.EXPECTED_H2_ACTIVE_COUNTS,
-        "retired_counts": migrations.EXPECTED_H2_RETIRED_COUNTS,
+        "active_counts": dict(migrations.EXPECTED_H2_ACTIVE_COUNTS),
+        "retired_counts": dict(migrations.EXPECTED_H2_RETIRED_COUNTS),
         "retired_exception_ids": [migrations.PRIVATE_EXCEPTION_ID],
         "retired_site_ids": list(migrations.MIGRATED_SITE_IDS),
         "p3_retained_edge_ids": [migrations.CLASSIFICATION_LAB_EDGE_ID],
@@ -106,7 +106,7 @@ def _valid_receipt(migrations: ModuleType, plan: dict[str, Any]) -> dict[str, An
     return receipt
 
 
-def _clone_with_evidence_parent(
+def _clone_with_review_fix_parent(
     tmp_path: Path, migrations: ModuleType
 ) -> tuple[Path, dict[str, Any], str]:
     repo = tmp_path / "repo"
@@ -116,11 +116,17 @@ def _clone_with_evidence_parent(
         check=True,
         capture_output=True,
     )
-    _git(repo, "checkout", "--quiet", "--detach", migrations.GATE_HYGIENE_COMMIT)
-    for relative in migrations.EVIDENCE_HARDENING_PATHS:
+    _git(
+        repo,
+        "checkout",
+        "--quiet",
+        "--detach",
+        migrations.EVIDENCE_HARDENING_COMMIT,
+    )
+    for relative in migrations.REVIEW_FIX_PATHS:
         shutil.copyfile(ROOT / relative, repo / relative)
-    _git(repo, "add", "--", *migrations.EVIDENCE_HARDENING_PATHS)
-    evidence_parent = _commit(repo, "refactor: harden P2 migration evidence")
+    _git(repo, "add", "--", *migrations.REVIEW_FIX_PATHS)
+    evidence_parent = _commit(repo, "refactor: close P2 evidence review gaps")
     plan = migrations.load_plan(repo / migrations.PLAN_PATH)
     return repo, plan, evidence_parent
 
@@ -195,9 +201,9 @@ def test_p2_plan_separates_h2_retirement_from_p3_retention(
         ("unknown", "unexpected"),
         ("missing", "campaign"),
         ("duplicate", "missing, duplicated, or reordered"),
-        ("git-object", "byte digest mismatch"),
+        ("git-object", "fixed evidence hardening plan"),
         ("history", "history chain drift"),
-        ("snippet", "source digest drift"),
+        ("snippet", "source transform drift"),
     ],
 )
 def test_plan_rejects_semantic_and_git_object_drift(
@@ -255,6 +261,32 @@ def test_plan_rejects_noncanonical_duplicate_and_nonfinite_json(
         migrations.load_plan(path)
 
 
+def test_plan_rejects_self_resigned_extra_import_transform(
+    migrations: ModuleType, tmp_path: Path
+) -> None:
+    payload = json.loads(PLAN.read_text(encoding="utf-8"))
+    site = payload["sites"][0]
+    transform = site["source_transform"]
+    transform["new_snippet"] += "import chronovisor.lab.evil\n"
+    h0_raw = migrations._git_file(
+        ROOT,
+        migrations.H0_SEED_COMMIT,
+        site["path"],
+    )
+    h1_raw = h0_raw.replace(
+        transform["old_snippet"].encode(),
+        transform["new_snippet"].encode(),
+        1,
+    )
+    transform["h1_sha256"] = migrations.hashlib.sha256(h1_raw).hexdigest()
+    _resign(migrations, payload, "plan_sha256")
+    path = tmp_path / "self-resigned-extra-import.json"
+    _write_plan(migrations, path, payload)
+
+    with pytest.raises(migrations.MigrationValidationError, match="source transform"):
+        migrations.load_plan(path)
+
+
 def test_receipt_schema_is_strict_canonical_and_self_hashed(
     migrations: ModuleType, tmp_path: Path
 ) -> None:
@@ -269,6 +301,73 @@ def test_receipt_schema_is_strict_canonical_and_self_hashed(
     migrations.write_canonical_json(path, receipt)
     with pytest.raises(migrations.MigrationValidationError, match="unknown"):
         migrations.load_receipt(path)
+
+
+@pytest.mark.parametrize(
+    "mutation, expected",
+    [
+        ("minimal", "keys mismatch"),
+        ("unknown", "unknown"),
+        ("bad-seal", "self-seal mismatch"),
+        ("plan-sha", "canonical plan"),
+    ],
+)
+def test_verify_receipt_direct_api_rejects_unvalidated_objects(
+    migrations: ModuleType,
+    mutation: str,
+    expected: str,
+) -> None:
+    plan = migrations.load_plan(PLAN)
+    receipt = _valid_receipt(migrations, plan)
+    if mutation == "minimal":
+        receipt = {}
+    elif mutation == "unknown":
+        receipt["unexpected"] = True
+        _resign(migrations, receipt, "receipt_sha256")
+    elif mutation == "bad-seal":
+        receipt["receipt_sha256"] = "0" * 64
+    else:
+        receipt["plan_sha256"] = "4" * 64
+        _resign(migrations, receipt, "receipt_sha256")
+
+    with pytest.raises(migrations.MigrationValidationError, match=expected):
+        migrations.verify_receipt(
+            ROOT,
+            plan,
+            receipt,
+            migrations.EVIDENCE_HARDENING_COMMIT,
+        )
+
+
+@pytest.mark.parametrize(
+    ("bucket", "field"),
+    [
+        ("active_counts", "production_to_lab_dynamic_sites"),
+        ("retired_counts", "exception_semantic_ids"),
+    ],
+)
+def test_receipt_rejects_boolean_counts_from_file_and_direct_api(
+    migrations: ModuleType,
+    tmp_path: Path,
+    bucket: str,
+    field: str,
+) -> None:
+    plan = migrations.load_plan(PLAN)
+    receipt = _valid_receipt(migrations, plan)
+    receipt[bucket][field] = True
+    _resign(migrations, receipt, "receipt_sha256")
+    path = tmp_path / f"bool-{bucket}.json"
+    migrations.write_canonical_json(path, receipt)
+
+    with pytest.raises(migrations.MigrationValidationError, match="count drift"):
+        migrations.load_receipt(path)
+    with pytest.raises(migrations.MigrationValidationError, match="count drift"):
+        migrations.verify_receipt(
+            ROOT,
+            plan,
+            receipt,
+            migrations.EVIDENCE_HARDENING_COMMIT,
+        )
 
 
 def test_external_revisions_require_exact_lowercase_full_sha(
@@ -289,7 +388,9 @@ def test_external_revisions_require_exact_lowercase_full_sha(
 def test_git_reads_ignore_replace_objects_and_git_environment(
     migrations: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    repo, plan, _evidence_parent = _clone_with_evidence_parent(tmp_path, migrations)
+    repo, plan, _evidence_parent = _clone_with_review_fix_parent(
+        tmp_path, migrations
+    )
     _git(
         repo,
         "replace",
@@ -348,7 +449,7 @@ def test_tree_entries_reject_symlink_executable_gitlink_and_missing(
 def test_history_h1_h2_and_receipt_verify_end_to_end(
     migrations: ModuleType, tmp_path: Path
 ) -> None:
-    repo, plan, evidence_parent = _clone_with_evidence_parent(tmp_path, migrations)
+    repo, plan, evidence_parent = _clone_with_review_fix_parent(tmp_path, migrations)
     assert migrations.validate_history(repo, plan, evidence_parent) == {
         "migration_id": migrations.MIGRATION_ID,
         "evidence_parent_commit": evidence_parent,
@@ -379,36 +480,100 @@ def test_history_h1_h2_and_receipt_verify_end_to_end(
     assert verified["state"] == "valid-h2-receipt"
 
 
-def test_evidence_history_rejects_extra_c_path_and_plan_byte_drift(
+def test_evidence_history_rejects_extra_d_path_and_plan_byte_drift(
     migrations: ModuleType, tmp_path: Path
 ) -> None:
-    repo, plan, evidence_parent = _clone_with_evidence_parent(tmp_path, migrations)
-    _git(repo, "checkout", "--quiet", "--detach", migrations.GATE_HYGIENE_COMMIT)
-    for relative in migrations.EVIDENCE_HARDENING_PATHS:
+    repo, plan, _evidence_parent = _clone_with_review_fix_parent(
+        tmp_path, migrations
+    )
+    _git(
+        repo,
+        "checkout",
+        "--quiet",
+        "--detach",
+        migrations.EVIDENCE_HARDENING_COMMIT,
+    )
+    for relative in migrations.REVIEW_FIX_PATHS:
         shutil.copyfile(ROOT / relative, repo / relative)
     (repo / "pyproject.toml").write_bytes(
         (repo / "pyproject.toml").read_bytes() + b"\n# unrelated\n"
     )
-    _git(repo, "add", "--", *migrations.EVIDENCE_HARDENING_PATHS, "pyproject.toml")
-    extra = _commit(repo, "invalid extra C path")
+    _git(repo, "add", "--", *migrations.REVIEW_FIX_PATHS, "pyproject.toml")
+    extra = _commit(repo, "invalid extra D path")
     with pytest.raises(migrations.MigrationValidationError, match="scope mismatch"):
         migrations.validate_history(repo, plan, extra)
 
-    _git(repo, "checkout", "--quiet", "--detach", evidence_parent)
+    _git(
+        repo,
+        "checkout",
+        "--quiet",
+        "--detach",
+        migrations.EVIDENCE_HARDENING_COMMIT,
+    )
+    for relative in migrations.REVIEW_FIX_PATHS:
+        shutil.copyfile(ROOT / relative, repo / relative)
     payload = json.loads((repo / migrations.PLAN_PATH).read_bytes())
     payload["campaign"] = "tampered-but-self-consistent"
     _resign(migrations, payload, "plan_sha256")
     migrations.write_canonical_json(repo / migrations.PLAN_PATH, payload)
-    _git(repo, "add", "--", migrations.PLAN_PATH.as_posix())
+    _git(
+        repo,
+        "add",
+        "--",
+        *migrations.REVIEW_FIX_PATHS,
+        migrations.PLAN_PATH.as_posix(),
+    )
     drift = _commit(repo, "plan byte drift")
-    with pytest.raises(migrations.MigrationValidationError):
+    with pytest.raises(migrations.MigrationValidationError, match="scope mismatch"):
         migrations.validate_history(repo, plan, drift)
+
+
+def test_history_rejects_alternate_c_with_identical_plan_and_path_scope(
+    migrations: ModuleType, tmp_path: Path
+) -> None:
+    repo = tmp_path / "alternate-c"
+    subprocess.run(
+        ["git", "clone", "--quiet", "--shared", str(ROOT), str(repo)],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    _git(repo, "checkout", "--quiet", "--detach", migrations.GATE_HYGIENE_COMMIT)
+    for relative in migrations.EVIDENCE_HARDENING_PATHS:
+        destination = repo / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(
+            migrations._git_file(
+                ROOT,
+                migrations.EVIDENCE_HARDENING_COMMIT,
+                relative,
+            )
+        )
+    _git(repo, "add", "--", *migrations.EVIDENCE_HARDENING_PATHS)
+    alternate_c = _commit(repo, "alternate C with identical tree changes")
+    assert alternate_c != migrations.EVIDENCE_HARDENING_COMMIT
+    assert migrations._git_file(
+        repo, alternate_c, migrations.PLAN_PATH.as_posix()
+    ) == migrations._git_file(
+        ROOT,
+        migrations.EVIDENCE_HARDENING_COMMIT,
+        migrations.PLAN_PATH.as_posix(),
+    )
+
+    for relative in migrations.REVIEW_FIX_PATHS:
+        shutil.copyfile(ROOT / relative, repo / relative)
+    _git(repo, "add", "--", *migrations.REVIEW_FIX_PATHS)
+    alternate_d = _commit(repo, "review fixes atop alternate C")
+    plan = migrations.load_plan(repo / migrations.PLAN_PATH)
+
+    with pytest.raises(migrations.MigrationValidationError, match="parent identity"):
+        migrations.validate_history(repo, plan, alternate_d)
 
 
 def test_h1_rejects_logic_import_symbol_and_alias_drift(
     migrations: ModuleType, tmp_path: Path
 ) -> None:
-    repo, plan, evidence_parent = _clone_with_evidence_parent(tmp_path, migrations)
+    repo, plan, evidence_parent = _clone_with_review_fix_parent(tmp_path, migrations)
     expected = migrations._expected_h1_sources(repo, plan)
     assert (
         b"chronovisor.lab.classification_library_evidence"
@@ -433,7 +598,9 @@ def test_h1_rejects_logic_import_symbol_and_alias_drift(
 def test_h1_rejects_non_100644_source_mode(
     migrations: ModuleType, tmp_path: Path
 ) -> None:
-    repo, plan, _evidence_parent = _clone_with_evidence_parent(tmp_path, migrations)
+    repo, plan, _evidence_parent = _clone_with_review_fix_parent(
+        tmp_path, migrations
+    )
     expected = migrations._expected_h1_sources(repo, plan)
     for path, raw in expected.items():
         (repo / path).write_bytes(raw)
@@ -448,7 +615,9 @@ def test_h1_rejects_non_100644_source_mode(
 def test_h2_exact_transform_rejects_semantic_and_encoding_attacks(
     migrations: ModuleType, tmp_path: Path
 ) -> None:
-    repo, plan, _evidence_parent = _clone_with_evidence_parent(tmp_path, migrations)
+    repo, plan, _evidence_parent = _clone_with_review_fix_parent(
+        tmp_path, migrations
+    )
     h1 = _write_h1(repo, migrations, plan)
     h1_baseline = migrations._git_file(repo, h1, migrations.BASELINE_PATH.as_posix())
     h1_ledger = migrations._git_file(repo, h1, migrations.LEDGER_PATH.as_posix())
@@ -531,7 +700,9 @@ def test_h2_exact_transform_rejects_semantic_and_encoding_attacks(
 def test_build_receipt_requires_clean_exact_two_path_index(
     migrations: ModuleType, tmp_path: Path
 ) -> None:
-    repo, plan, _evidence_parent = _clone_with_evidence_parent(tmp_path, migrations)
+    repo, plan, _evidence_parent = _clone_with_review_fix_parent(
+        tmp_path, migrations
+    )
     h1 = _write_h1(repo, migrations, plan)
     baseline, _ledger = _stage_h2(repo, migrations, h1)
     assert migrations.build_receipt(repo, plan, h1)["h1_commit"] == h1
@@ -554,7 +725,9 @@ def test_build_receipt_requires_clean_exact_two_path_index(
 def test_receipt_verification_rejects_non_additive_receipt_history(
     migrations: ModuleType, tmp_path: Path
 ) -> None:
-    repo, plan, _evidence_parent = _clone_with_evidence_parent(tmp_path, migrations)
+    repo, plan, _evidence_parent = _clone_with_review_fix_parent(
+        tmp_path, migrations
+    )
     h1 = _write_h1(repo, migrations, plan)
     _stage_h2(repo, migrations, h1)
     receipt = migrations.build_receipt(repo, plan, h1)
@@ -569,6 +742,20 @@ def test_receipt_verification_rejects_non_additive_receipt_history(
 
     with pytest.raises(migrations.MigrationValidationError, match="non-additive"):
         migrations.verify_receipt(repo, plan, receipt, tip)
+
+
+def test_receipt_output_rejects_existing_untracked_regular_file(
+    migrations: ModuleType, tmp_path: Path
+) -> None:
+    repo = tmp_path / "output"
+    repo.mkdir()
+    _git(repo, "init", "--quiet")
+    output = repo / "receipt.json"
+    output.write_text("user-owned\n", encoding="utf-8")
+
+    with pytest.raises(migrations.MigrationValidationError, match="already exist"):
+        migrations._untracked_output_path(repo, Path("receipt.json"))
+    assert output.read_text(encoding="utf-8") == "user-owned\n"
 
 
 def test_production_contract_has_no_lab_import() -> None:

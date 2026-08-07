@@ -11,6 +11,59 @@ import pytest
 
 ROOT = Path(__file__).parents[1]
 BASELINE = ROOT / "docs" / "refactoring" / "architecture-baseline.json"
+
+DiagnosticPath = tuple[str | int, ...]
+
+
+def _diagnostic_line_entries(
+    value: Any, path: DiagnosticPath = ()
+) -> list[tuple[DiagnosticPath, Any]]:
+    if isinstance(value, dict):
+        entries: list[tuple[DiagnosticPath, Any]] = []
+        for key, item in value.items():
+            item_path = (*path, key)
+            if key == "line":
+                entries.append((item_path, item))
+            else:
+                entries.extend(_diagnostic_line_entries(item, item_path))
+        return entries
+    if isinstance(value, list):
+        return [
+            entry
+            for index, item in enumerate(value)
+            for entry in _diagnostic_line_entries(item, (*path, index))
+        ]
+    return []
+
+
+def _without_diagnostic_lines(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: _without_diagnostic_lines(item)
+            for key, item in value.items()
+            if key != "line"
+        }
+    if isinstance(value, list):
+        return [_without_diagnostic_lines(item) for item in value]
+    return value
+
+
+def _assert_diagnostic_line_contract(recorded: Any, built: Any) -> None:
+    recorded_entries = _diagnostic_line_entries(recorded)
+    built_entries = _diagnostic_line_entries(built)
+    assert recorded_entries
+    assert built_entries
+    assert all(
+        type(line) is int
+        for _path, line in (*recorded_entries, *built_entries)
+    )
+    recorded_paths = [path for path, _line in recorded_entries]
+    built_paths = [path for path, _line in built_entries]
+    assert len(recorded_paths) == len(built_paths)
+    assert set(recorded_paths) == set(built_paths)
+    assert _without_diagnostic_lines(built) == _without_diagnostic_lines(recorded)
+
+
 EMPTY_EXCEPTION_VIOLATIONS = {
     "ledger_load_error": "",
     "ledger_schema_version": [],
@@ -1083,41 +1136,8 @@ def test_exception_artifacts_are_fresh_and_head_independent(
     )
     built_ledger = architecture.build_architecture_exception_ledger(ROOT)
 
-    def diagnostic_lines(value: Any) -> list[Any]:
-        if isinstance(value, dict):
-            return [
-                *(item for key, item in value.items() if key == "line"),
-                *(
-                    line
-                    for key, item in value.items()
-                    if key != "line"
-                    for line in diagnostic_lines(item)
-                ),
-            ]
-        if isinstance(value, list):
-            return [line for item in value for line in diagnostic_lines(item)]
-        return []
-
-    def without_diagnostic_lines(value: Any) -> Any:
-        if isinstance(value, dict):
-            return {
-                key: without_diagnostic_lines(item)
-                for key, item in value.items()
-                if key != "line"
-            }
-        if isinstance(value, list):
-            return [without_diagnostic_lines(item) for item in value]
-        return value
-
     assert architecture.build_architecture_exception_baseline(ROOT) == recorded_seed
-    recorded_lines = diagnostic_lines(recorded_ledger)
-    built_lines = diagnostic_lines(built_ledger)
-    assert recorded_lines
-    assert built_lines
-    assert all(isinstance(line, int) for line in (*recorded_lines, *built_lines))
-    assert without_diagnostic_lines(built_ledger) == without_diagnostic_lines(
-        recorded_ledger
-    )
+    _assert_diagnostic_line_contract(recorded_ledger, built_ledger)
     assert "captured_from_head" not in recorded_seed
     assert "captured_from_head" not in recorded_ledger
     assert (
@@ -1131,6 +1151,19 @@ def test_exception_artifacts_are_fresh_and_head_independent(
     assert recorded_ledger["source_baseline_head"] == (
         architecture.FROZEN_EXCEPTION_SOURCE_HEAD
     )
+
+
+def test_diagnostic_line_contract_rejects_bool_and_path_drift() -> None:
+    with pytest.raises(AssertionError):
+        _assert_diagnostic_line_contract(
+            {"items": [{"line": 1}]},
+            {"items": [{"line": True}]},
+        )
+    with pytest.raises(AssertionError):
+        _assert_diagnostic_line_contract(
+            {"items": [{"line": 1}, {}]},
+            {"items": [{}, {"line": 99}]},
+        )
 
 
 def test_frozen_source_head_rejects_coordinated_current_artifact_drift(

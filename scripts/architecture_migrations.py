@@ -22,6 +22,10 @@ FROZEN_SOURCE_HEAD = "d404a6b20d00e3bcd1d4cdb89edfa5a718c51833"
 H0_PARENT_COMMIT = "602ab1efd46b3c74447887cf430cc77962fec7bd"
 H0_SEED_COMMIT = "6cbcd1e617c631bee23de0cf8c6597f324485205"
 GATE_HYGIENE_COMMIT = "f1208ee3914e7ec402b84ebda16423f57065e041"
+EVIDENCE_HARDENING_COMMIT = "63371cf32937948da784292fc8fc6db15e6a4679"
+CANONICAL_PLAN_SHA256 = (
+    "bedd3ad58736a1489115a76ef5638cc9adf522c687226f7c0a6156e20868ae69"
+)
 PLAN_PATH = Path(
     "docs/refactoring/architecture-migrations/plans/"
     "P2-classification-fixture-contract.json"
@@ -89,6 +93,15 @@ EVIDENCE_HARDENING_PATHS = tuple(
         }
     )
 )
+REVIEW_FIX_PATHS = tuple(
+    sorted(
+        {
+            "scripts/architecture_migrations.py",
+            "tests/test_architecture_baseline.py",
+            "tests/test_architecture_migrations.py",
+        }
+    )
+)
 EXPECTED_H0_ACTIVE_COUNTS = {
     "exceptions": 162,
     "cross_domain_sites": 1267,
@@ -142,6 +155,104 @@ EXPECTED_LOCAL_NAMES = {
     MIGRATED_SITE_IDS[4]: {
         "sha256_bytes": "sha256_bytes",
         "write_jsonl": "_write_jsonl",
+    },
+}
+EXPECTED_SOURCE_TRANSFORMS = {
+    MIGRATED_SITE_IDS[0]: {
+        "h0_sha256": (
+            "7b65c798842ce4c3269028664fd42437835f0f38a5cdbf92b2c84588d0c090ed"
+        ),
+        "h1_sha256": (
+            "cfa318c7a235168914209d2d4bbf860ac52e1c65bcb1c965d34fa18b91db57ea"
+        ),
+        "new_snippet": (
+            "from chronovisor.classification.classification_fixture_contract "
+            "import inference_dto\n"
+        ),
+        "old_snippet": (
+            "from chronovisor.lab.classification_fixture_set import "
+            "inference_dto\n"
+        ),
+    },
+    MIGRATED_SITE_IDS[1]: {
+        "h0_sha256": (
+            "52748c3d51a8f282ee4841371d83d2ebfde1452615a74dc8ca3994e6fcb33f27"
+        ),
+        "h1_sha256": (
+            "0f93ca7c9bbadee526779968682a1f094cedd4a3b86dbb80971b21f48e6a72c4"
+        ),
+        "new_snippet": (
+            "from chronovisor.classification.classification_fixture_contract "
+            "import (\n"
+            "    DISABLED_BASELINE_SCHEMA,\n"
+            "    sha256_bytes,\n"
+            "    sha256_file,\n"
+            ")\n"
+        ),
+        "old_snippet": (
+            "from chronovisor.lab.classification_fixture_set import (\n"
+            "    DISABLED_BASELINE_SCHEMA,\n"
+            "    sha256_bytes,\n"
+            "    sha256_file,\n"
+            ")\n"
+        ),
+    },
+    MIGRATED_SITE_IDS[2]: {
+        "h0_sha256": (
+            "b160333fbde80d5e75beb1964cfc54c5d203c15eb0522b99ae5c2c980ebbb37c"
+        ),
+        "h1_sha256": (
+            "89b5c5b13a371ecb6e7091d1a9a0555880ae85b896323ff61f3978f77692c183"
+        ),
+        "new_snippet": (
+            "from chronovisor.classification.classification_fixture_contract "
+            "import (\n"
+            "    sha256_bytes,\n"
+            "    sha256_file,\n"
+            ")\n"
+        ),
+        "old_snippet": (
+            "from chronovisor.lab.classification_fixture_set import "
+            "sha256_bytes, sha256_file\n"
+        ),
+    },
+    MIGRATED_SITE_IDS[3]: {
+        "h0_sha256": (
+            "a8a59f9da35f1d06b60caf0f39583426dc7940568f6505d465cb21e3d29d0d9b"
+        ),
+        "h1_sha256": (
+            "a6dc204fa813f97f21e5c810d8da1a34d6392eecb46d2227a61284b4a2e4e62b"
+        ),
+        "new_snippet": (
+            "from chronovisor.classification.classification_fixture_contract "
+            "import (\n"
+            "    sha256_bytes,\n"
+            "    sha256_file,\n"
+            ")\n"
+        ),
+        "old_snippet": (
+            "from chronovisor.lab.classification_fixture_set import "
+            "sha256_bytes, sha256_file\n"
+        ),
+    },
+    MIGRATED_SITE_IDS[4]: {
+        "h0_sha256": (
+            "2e86604c7285f76e75b5b5be5ca8177fda12527f68488c275cafa4fc93da4e7c"
+        ),
+        "h1_sha256": (
+            "b34864549a5be45620c14171aa61cf9f5c23060d6f02c965a1806ce407a81f41"
+        ),
+        "new_snippet": (
+            "from chronovisor.classification.classification_fixture_contract "
+            "import (\n"
+            "    sha256_bytes,\n"
+            "    write_jsonl as _write_jsonl,\n"
+            ")\n"
+        ),
+        "old_snippet": (
+            "from chronovisor.lab.classification_fixture_set import "
+            "_write_jsonl, sha256_bytes\n"
+        ),
     },
 }
 _ARCH_ID_RE = re.compile(r"arch:[0-9a-f]{64}\Z")
@@ -453,6 +564,27 @@ def _import_rows(raw: bytes, *, path: str) -> list[dict[str, Any]]:
     return rows
 
 
+def _exact_import_snippet(raw: bytes, *, path: str) -> dict[str, Any]:
+    try:
+        tree = ast.parse(raw.decode("utf-8"), filename=path)
+    except (UnicodeDecodeError, SyntaxError) as exc:
+        raise MigrationValidationError(f"cannot parse {path}: {exc}") from exc
+    if len(tree.body) != 1 or not isinstance(tree.body[0], ast.ImportFrom):
+        raise MigrationValidationError(
+            f"{path} must contain exactly one from-import statement"
+        )
+    node = tree.body[0]
+    if node.level or node.module is None:
+        raise MigrationValidationError(f"{path} must use an absolute from-import")
+    return {
+        "target_module": node.module,
+        "symbols": sorted(alias.name for alias in node.names),
+        "local_names": {
+            alias.name: alias.asname or alias.name for alias in node.names
+        },
+    }
+
+
 def _validate_import_state(
     root: Path,
     commit: str,
@@ -715,13 +847,15 @@ def load_plan(path: Path) -> dict[str, Any]:
                 )
         if transform["old_snippet"] == transform["new_snippet"]:
             raise MigrationValidationError(f"site {site_id} source transform is empty")
-        if _import_rows(
+        if transform != EXPECTED_SOURCE_TRANSFORMS[site_id]:
+            raise MigrationValidationError(f"site {site_id} source transform drift")
+        if _exact_import_snippet(
             transform["old_snippet"].encode("utf-8"), path=f"{site_id}:old"
-        ) != [site["old_import"]]:
+        ) != site["old_import"]:
             raise MigrationValidationError(f"site {site_id} old source snippet drift")
-        if _import_rows(
+        if _exact_import_snippet(
             transform["new_snippet"].encode("utf-8"), path=f"{site_id}:new"
-        ) != [site["new_import"]]:
+        ) != site["new_import"]:
             raise MigrationValidationError(f"site {site_id} new source snippet drift")
 
     retirement = _object(plan["retirement_policy"], context="retirement_policy")
@@ -826,6 +960,7 @@ def _validate_fixed_history(root: Path, plan: Mapping[str, Any]) -> None:
     source_parent = _commit(root, str(plan["h0_parent_commit"]))
     h0_seed = _commit(root, str(plan["history"]["h0_seed_commit"]))
     gate_hygiene = _commit(root, str(plan["history"]["gate_hygiene_commit"]))
+    evidence_hardening = _commit(root, EVIDENCE_HARDENING_COMMIT)
     if _single_parent(root, h0_seed) != source_parent:
         raise MigrationValidationError("H0 seed parent identity drift")
     _require_transition(
@@ -844,6 +979,21 @@ def _validate_fixed_history(root: Path, plan: Mapping[str, Any]) -> None:
         {path: "M" for path in GATE_HYGIENE_PATHS},
         context="H0-seed->gate-hygiene",
     )
+    if _single_parent(root, evidence_hardening) != gate_hygiene:
+        raise MigrationValidationError("evidence hardening parent identity drift")
+    _require_transition(
+        root,
+        gate_hygiene,
+        evidence_hardening,
+        {path: "M" for path in EVIDENCE_HARDENING_PATHS},
+        context="gate-hygiene->evidence-hardening",
+    )
+    if _git_file(root, evidence_hardening, PLAN_PATH.as_posix()) != (
+        _canonical_json_bytes(plan)
+    ):
+        raise MigrationValidationError(
+            "fixed evidence hardening plan differs from supplied canonical plan"
+        )
 
 
 def validate_plan(root: Path, plan: Mapping[str, Any]) -> dict[str, Any]:
@@ -998,24 +1148,39 @@ def _validate_contract_source(root: Path, commit: str, plan: Mapping[str, Any]) 
 def validate_history(
     root: Path, plan: Mapping[str, Any], evidence_parent_revision: str
 ) -> dict[str, Any]:
-    """Validate the fixed source/H0/B chain and exact evidence-hardening commit."""
+    """Validate the fixed source/H0/B/C chain and exact review-fix parent D."""
 
     validate_plan(root, plan)
     evidence_parent = _commit(root, evidence_parent_revision)
-    if _single_parent(root, evidence_parent) != GATE_HYGIENE_COMMIT:
-        raise MigrationValidationError("evidence hardening parent identity drift")
+    if _single_parent(root, evidence_parent) != EVIDENCE_HARDENING_COMMIT:
+        raise MigrationValidationError("review-fix parent identity drift")
     _require_transition(
         root,
-        GATE_HYGIENE_COMMIT,
+        EVIDENCE_HARDENING_COMMIT,
         evidence_parent,
-        {path: "M" for path in EVIDENCE_HARDENING_PATHS},
-        context="gate-hygiene->evidence-hardening",
+        {path: "M" for path in REVIEW_FIX_PATHS},
+        context="evidence-hardening->review-fix",
     )
     if _git_file(root, evidence_parent, PLAN_PATH.as_posix()) != _canonical_json_bytes(
         plan
     ):
         raise MigrationValidationError(
-            "evidence hardening committed plan differs from supplied plan"
+            "review-fix committed plan differs from supplied canonical plan"
+        )
+    verifier_path = Path(__file__).resolve()
+    try:
+        verifier_raw = verifier_path.read_bytes()
+    except OSError as exc:
+        raise MigrationValidationError(
+            f"cannot read current trusted verifier: {exc}"
+        ) from exc
+    if _git_file(
+        root,
+        evidence_parent,
+        "scripts/architecture_migrations.py",
+    ) != verifier_raw:
+        raise MigrationValidationError(
+            "review-fix verifier differs from the current trusted verifier"
         )
     _validate_contract_source(root, H0_SEED_COMMIT, plan)
     return {
@@ -1323,6 +1488,101 @@ def _current_head(root: Path) -> str:
     return resolved
 
 
+def _validate_exact_counts(
+    value: Any, expected: Mapping[str, Any], *, context: str
+) -> dict[str, Any]:
+    counts = _object(value, context=context)
+    _require_keys(counts, set(expected), context=context)
+    for key, expected_value in expected.items():
+        actual_value = counts[key]
+        if isinstance(expected_value, Mapping):
+            _validate_exact_counts(
+                actual_value,
+                expected_value,
+                context=f"{context}.{key}",
+            )
+        elif type(actual_value) is not int or actual_value != expected_value:
+            raise MigrationValidationError(f"{context}.{key} count drift")
+    return counts
+
+
+def _validate_receipt_object(
+    value: Any, *, expected_plan_sha256: str
+) -> dict[str, Any]:
+    receipt = _object(value, context="receipt")
+    _require_keys(
+        receipt,
+        {
+            "schema",
+            "migration_id",
+            "plan_sha256",
+            "h1_commit",
+            "h2_artifacts",
+            "active_counts",
+            "retired_counts",
+            "retired_exception_ids",
+            "retired_site_ids",
+            "p3_retained_edge_ids",
+            "p3_retained_site_ids",
+            "receipt_sha256",
+        },
+        context="receipt",
+    )
+    if receipt["schema"] != RECEIPT_SCHEMA or receipt["migration_id"] != MIGRATION_ID:
+        raise MigrationValidationError("unsupported receipt identity")
+    if (
+        not isinstance(expected_plan_sha256, str)
+        or not _HEX_SHA_RE.fullmatch(expected_plan_sha256)
+        or expected_plan_sha256 != CANONICAL_PLAN_SHA256
+    ):
+        raise MigrationValidationError("expected plan SHA is invalid")
+    if receipt["plan_sha256"] != expected_plan_sha256:
+        raise MigrationValidationError("receipt does not bind the canonical plan")
+    if not isinstance(receipt["h1_commit"], str) or not _COMMIT_RE.fullmatch(
+        receipt["h1_commit"]
+    ):
+        raise MigrationValidationError("receipt H1 commit is invalid")
+    _validate_exact_counts(
+        receipt["active_counts"],
+        EXPECTED_H2_ACTIVE_COUNTS,
+        context="receipt.active_counts",
+    )
+    _validate_exact_counts(
+        receipt["retired_counts"],
+        EXPECTED_H2_RETIRED_COUNTS,
+        context="receipt.retired_counts",
+    )
+    expected_lists = {
+        "retired_exception_ids": [PRIVATE_EXCEPTION_ID],
+        "retired_site_ids": list(MIGRATED_SITE_IDS),
+        "p3_retained_edge_ids": [CLASSIFICATION_LAB_EDGE_ID],
+        "p3_retained_site_ids": [PROVIDER_SITE_ID],
+    }
+    for field, expected in expected_lists.items():
+        if _strings(receipt[field], context=f"receipt.{field}") != expected:
+            raise MigrationValidationError(f"receipt {field} drift")
+    artifacts = _object(receipt["h2_artifacts"], context="receipt.h2_artifacts")
+    _require_keys(artifacts, {"baseline", "ledger"}, context="receipt.h2_artifacts")
+    for name, path in (("baseline", BASELINE_PATH), ("ledger", LEDGER_PATH)):
+        binding = _object(artifacts[name], context=f"receipt.h2_artifacts.{name}")
+        _require_keys(
+            binding,
+            {"path", "sha256"},
+            context=f"receipt.h2_artifacts.{name}",
+        )
+        if binding["path"] != path.as_posix():
+            raise MigrationValidationError(f"receipt {name} path is invalid")
+        digest = binding["sha256"]
+        if not isinstance(digest, str) or not _HEX_SHA_RE.fullmatch(digest):
+            raise MigrationValidationError(f"receipt {name} SHA is invalid")
+    recorded_seal = receipt["receipt_sha256"]
+    if not isinstance(recorded_seal, str) or not _HEX_SHA_RE.fullmatch(recorded_seal):
+        raise MigrationValidationError("receipt self-seal is invalid")
+    if recorded_seal != _seal(receipt, "receipt_sha256"):
+        raise MigrationValidationError("receipt self-seal mismatch")
+    return receipt
+
+
 def build_receipt(
     root: Path, plan: Mapping[str, Any], h1_revision: str
 ) -> dict[str, Any]:
@@ -1390,74 +1650,28 @@ def build_receipt(
                 "sha256": hashlib.sha256(ledger_raw).hexdigest(),
             },
         },
-        "active_counts": EXPECTED_H2_ACTIVE_COUNTS,
-        "retired_counts": EXPECTED_H2_RETIRED_COUNTS,
+        "active_counts": dict(EXPECTED_H2_ACTIVE_COUNTS),
+        "retired_counts": dict(EXPECTED_H2_RETIRED_COUNTS),
         "retired_exception_ids": [PRIVATE_EXCEPTION_ID],
         "retired_site_ids": list(MIGRATED_SITE_IDS),
         "p3_retained_edge_ids": [CLASSIFICATION_LAB_EDGE_ID],
         "p3_retained_site_ids": [PROVIDER_SITE_ID],
     }
     payload["receipt_sha256"] = _seal(payload, "receipt_sha256")
-    return payload
+    return _validate_receipt_object(
+        payload,
+        expected_plan_sha256=str(plan["plan_sha256"]),
+    )
 
 
 def load_receipt(path: Path) -> dict[str, Any]:
     """Load and strictly validate a canonical H2 receipt."""
 
     receipt = _load_canonical(path, seal_field="receipt_sha256")
-    _require_keys(
+    return _validate_receipt_object(
         receipt,
-        {
-            "schema",
-            "migration_id",
-            "plan_sha256",
-            "h1_commit",
-            "h2_artifacts",
-            "active_counts",
-            "retired_counts",
-            "retired_exception_ids",
-            "retired_site_ids",
-            "p3_retained_edge_ids",
-            "p3_retained_site_ids",
-            "receipt_sha256",
-        },
-        context="receipt",
+        expected_plan_sha256=CANONICAL_PLAN_SHA256,
     )
-    if receipt["schema"] != RECEIPT_SCHEMA or receipt["migration_id"] != MIGRATION_ID:
-        raise MigrationValidationError("unsupported receipt identity")
-    if not isinstance(receipt["plan_sha256"], str) or not _HEX_SHA_RE.fullmatch(
-        receipt["plan_sha256"]
-    ):
-        raise MigrationValidationError("receipt plan SHA is invalid")
-    if not isinstance(receipt["h1_commit"], str) or not _COMMIT_RE.fullmatch(
-        receipt["h1_commit"]
-    ):
-        raise MigrationValidationError("receipt H1 commit is invalid")
-    if receipt["active_counts"] != EXPECTED_H2_ACTIVE_COUNTS:
-        raise MigrationValidationError("receipt active counts drift")
-    if receipt["retired_counts"] != EXPECTED_H2_RETIRED_COUNTS:
-        raise MigrationValidationError("receipt retired counts drift")
-    expected_lists = {
-        "retired_exception_ids": [PRIVATE_EXCEPTION_ID],
-        "retired_site_ids": list(MIGRATED_SITE_IDS),
-        "p3_retained_edge_ids": [CLASSIFICATION_LAB_EDGE_ID],
-        "p3_retained_site_ids": [PROVIDER_SITE_ID],
-    }
-    for field, expected in expected_lists.items():
-        if _strings(receipt[field], context=f"receipt.{field}") != expected:
-            raise MigrationValidationError(f"receipt {field} drift")
-    artifacts = _object(receipt["h2_artifacts"], context="receipt.h2_artifacts")
-    _require_keys(artifacts, {"baseline", "ledger"}, context="receipt.h2_artifacts")
-    for name, path in (("baseline", BASELINE_PATH), ("ledger", LEDGER_PATH)):
-        binding = _object(artifacts[name], context=f"receipt.h2_artifacts.{name}")
-        _require_keys(binding, {"path", "sha256"}, context=f"receipt.{name}")
-        if (
-            binding["path"] != path.as_posix()
-            or not isinstance(binding["sha256"], str)
-            or not _HEX_SHA_RE.fullmatch(binding["sha256"])
-        ):
-            raise MigrationValidationError(f"receipt {name} binding is invalid")
-    return receipt
 
 
 def _receipt_additions(root: Path, h1: str, tip: str, receipt_path: str) -> list[str]:
@@ -1505,8 +1719,11 @@ def verify_receipt(
 ) -> dict[str, Any]:
     """Find and verify the unique first-parent H2 commit and exact H1->H2 diff."""
 
-    if receipt["plan_sha256"] != plan["plan_sha256"]:
-        raise MigrationValidationError("receipt does not bind the supplied plan")
+    plan_sha256 = plan.get("plan_sha256")
+    receipt = _validate_receipt_object(
+        receipt,
+        expected_plan_sha256=plan_sha256,
+    )
     h1 = _commit(root, str(receipt["h1_commit"]))
     validate_h1(root, plan, h1)
     tip = _commit(root, tip_revision)
@@ -1566,6 +1783,8 @@ def _untracked_output_path(root: Path, value: Path) -> tuple[Path, str]:
     candidate = value if value.is_absolute() else root / value
     if candidate.is_symlink():
         raise MigrationValidationError("receipt output must not be a symlink")
+    if candidate.exists():
+        raise MigrationValidationError("receipt output must not already exist")
     resolved = candidate.resolve()
     try:
         relative = resolved.relative_to(root).as_posix()
