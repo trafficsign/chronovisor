@@ -138,6 +138,26 @@ def evaluate_generic_expression(
                 ordinal=0,
             )
         return FlowValue()
+    if isinstance(node, (ast.Tuple, ast.List)) and not any(
+        isinstance(item, ast.Starred) for item in node.elts
+    ):
+        items = tuple(
+            engine._eval(
+                item,
+                module=module,
+                actor=actor,
+                class_ref=class_ref,
+                env=env,
+                object_env=object_env,
+                call_ordinals=call_ordinals,
+            )
+            for item in node.elts
+        )
+        result = FlowValue(structured_items=items)
+        for item in items:
+            result = result.merged(item)
+        result.structured_items = items
+        return result.bound(f"expression:{type(node).__name__}")
     if isinstance(node, (ast.ListComp, ast.SetComp, ast.GeneratorExp)):
         result, local_env, local_objects = _evaluate_comprehension_generators(
             engine,

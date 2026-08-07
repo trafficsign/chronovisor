@@ -41,6 +41,13 @@ class DefinitionExecutionEngine(Protocol):
         object_env: dict[str, set[str]],
     ) -> bool: ...
 
+    def _function_definition_value(
+        self,
+        ref: str,
+        *,
+        actor: str,
+    ) -> FlowValue: ...
+
     def _merge_closure(
         self,
         ref: str,
@@ -131,7 +138,7 @@ def analyze_function_definition(
             )
 
     definition_value = (
-        FlowValue(call_targets={function_ref})
+        engine._function_definition_value(function_ref, actor=actor)
         if function_ref is not None
         else FlowValue(unknown_callable=True)
     )

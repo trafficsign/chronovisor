@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import ast
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Protocol
 
 from .access_facts import AccessFactCollector
@@ -35,6 +35,30 @@ class AccessEngine(Protocol):
     facts: AccessFactCollector
 
     def _mark_called_target(self, target: str) -> None: ...
+
+    def _require_function_summary(self, target: str) -> None: ...
+
+    def _closure_capture_value(
+        self,
+        value: FlowValue,
+        *,
+        env: Mapping[str, FlowValue],
+    ) -> FlowValue: ...
+
+    def _execute_known_call(
+        self,
+        target: str,
+        argument_values: Sequence[FlowValue],
+        keyword_values: Mapping[str, FlowValue],
+        *,
+        actor: str,
+        module: str,
+        node: ast.Call,
+        ordinal: int,
+        env: dict[str, FlowValue],
+        object_env: dict[str, set[str]],
+        closure_instance: str | None,
+    ) -> FlowValue | None: ...
 
     def _eval(
         self,
@@ -245,6 +269,7 @@ def evaluate_call(
         unknown_keyword_unpack,
     ]:
         escaped = escaped.merged(value)
+    escaped_closure_capture = engine._closure_capture_value(escaped, env=env)
     known_targets = resolution.known_targets
     authoritative_value: FlowValue | None = None
     authoritative_base_value: FlowValue | None = None
@@ -316,37 +341,78 @@ def evaluate_call(
             has_unknown = False
     for target in known_targets:
         engine._mark_called_target(target)
+    local_returns: dict[str, FlowValue] = {}
+    if len(known_targets) == 1 and not has_unknown:
+        target = known_targets[0]
+        closure_instances = tuple(
+            sorted(
+                instance_id
+                for instance_target, instance_id in (
+                    authoritative_value.closure_instances
+                    if authoritative_value is not None
+                    else set()
+                )
+                if instance_target == target
+            )
+        ) or (None,)
+        merged_local_return = FlowValue()
+        all_local = True
+        for closure_instance in closure_instances:
+            local_return = engine._execute_known_call(
+                target,
+                argument_values,
+                keyword_values,
+                actor=actor,
+                module=module,
+                node=node,
+                ordinal=ordinal,
+                env=env,
+                object_env=object_env,
+                closure_instance=closure_instance,
+            )
+            if local_return is None:
+                all_local = False
+                break
+            merged_local_return = merged_local_return.merged(local_return)
+        if all_local:
+            local_returns[target] = merged_local_return
+    for target in known_targets:
+        if target not in local_returns:
+            engine._require_function_summary(target)
     if known_targets or known_class_targets:
         returned = FlowValue()
         for target in known_targets:
             info = engine.functions[target]
-            values = list(argument_values)
-            if info.class_ref is not None and not target.endswith(".__init__"):
-                values = [FlowValue(), *values]
-            for index, value in enumerate(values):
-                if index >= len(info.parameters) or not value.has_origins:
-                    continue
-                engine._bind_call_parameter(
-                    target,
-                    info.parameters[index],
-                    value,
-                    actor=actor,
-                    module=module,
-                    node=node,
-                    ordinal=ordinal,
-                )
-            for parameter, value in keyword_values.items():
-                if parameter in info.parameters and value.has_origins:
+            local_return = local_returns.get(target)
+            if local_return is None:
+                values = list(argument_values)
+                if info.class_ref is not None and not target.endswith(".__init__"):
+                    values = [FlowValue(), *values]
+                for index, value in enumerate(values):
+                    if index >= len(info.parameters) or not value.has_origins:
+                        continue
                     engine._bind_call_parameter(
                         target,
-                        parameter,
+                        info.parameters[index],
                         value,
                         actor=actor,
                         module=module,
                         node=node,
                         ordinal=ordinal,
                     )
-            returned = returned.merged(engine.returns[target].bound(f"result:{target}"))
+                for parameter, value in keyword_values.items():
+                    if parameter in info.parameters and value.has_origins:
+                        engine._bind_call_parameter(
+                            target,
+                            parameter,
+                            value,
+                            actor=actor,
+                            module=module,
+                            node=node,
+                            ordinal=ordinal,
+                        )
+                local_return = engine.returns[target]
+            returned = returned.merged(local_return.bound(f"result:{target}"))
         for class_target in known_class_targets:
             init_ref = f"{class_target}.__init__"
             if init_ref in engine.functions:
@@ -375,6 +441,17 @@ def evaluate_call(
                         )
             returned = returned.merged(FlowValue(object_types={class_target}))
         if has_unknown or unknown_keyword_unpack.has_origins:
+            if escaped_closure_capture.has_origins:
+                engine.facts.record_escape(
+                    escaped_closure_capture,
+                    actor=actor,
+                    operation=f"call:{source_call_name or '<dynamic>'}",
+                    sink=source_call_name or "<dynamic>",
+                    reason="closure_to_unknown_callee",
+                    path=engine.paths[module],
+                    line=int(node.lineno),
+                    ordinal=ordinal,
+                )
             if escaped.has_origins:
                 engine.facts.record_escape(
                     escaped,
@@ -445,6 +522,17 @@ def evaluate_call(
             operation=f"call:{source_call_name or '<dynamic>'}",
             sink=target or source_call_name or "<dynamic>",
             reason="registered_locator_to_unknown_callee",
+            path=engine.paths[module],
+            line=int(node.lineno),
+            ordinal=ordinal,
+        )
+    if escaped_closure_capture.has_origins:
+        engine.facts.record_escape(
+            escaped_closure_capture,
+            actor=actor,
+            operation=f"call:{source_call_name or '<dynamic>'}",
+            sink=target or source_call_name or "<dynamic>",
+            reason="closure_to_unknown_callee",
             path=engine.paths[module],
             line=int(node.lineno),
             ordinal=ordinal,

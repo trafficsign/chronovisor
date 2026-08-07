@@ -166,12 +166,15 @@ def analyze_block_result(
             next_outcomes.extend(result.outcomes)
         outcomes = normalize_outcomes(next_outcomes)
     for nested_ref in nested_refs:
-        for outcome in outcomes:
+        if outcomes:
+            capture_env, _capture_objects = join_states(
+                (outcome.env, outcome.object_env) for outcome in outcomes
+            )
             changed |= engine._merge_closure(
                 nested_ref,
                 actor=actor,
                 module=module,
-                env=outcome.env,
+                env=capture_env,
             )
     return BlockResult(changed, outcomes)
 

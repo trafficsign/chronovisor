@@ -299,17 +299,25 @@ def evaluate_structured(
             for item in node.elts
         )
         return StructuredValue(_merge_values(items), items)
-    return StructuredValue(
-        engine._eval(
-            node,
-            module=module,
-            actor=actor,
-            class_ref=class_ref,
-            env=env,
-            object_env=object_env,
-            call_ordinals=call_ordinals,
-        )
+    value = engine._eval(
+        node,
+        module=module,
+        actor=actor,
+        class_ref=class_ref,
+        env=env,
+        object_env=object_env,
+        call_ordinals=call_ordinals,
     )
+    return _structured_flow_value(value)
+
+
+def _structured_flow_value(value: FlowValue) -> StructuredValue:
+    items = (
+        tuple(_structured_flow_value(item) for item in value.structured_items)
+        if value.structured_items is not None
+        else None
+    )
+    return StructuredValue(value, items)
 
 
 def evaluate_iterable(

@@ -72,6 +72,8 @@ class FlowValue:
     call_targets: set[str] = field(default_factory=set)
     class_targets: set[str] = field(default_factory=set)
     unknown_callable: bool = False
+    closure_instances: set[tuple[str, str]] = field(default_factory=set)
+    structured_items: tuple[FlowValue, ...] | None = None
 
     def copy(self) -> FlowValue:
         return FlowValue(
@@ -82,10 +84,36 @@ class FlowValue:
             set(self.call_targets),
             set(self.class_targets),
             self.unknown_callable,
+            set(self.closure_instances),
+            (
+                tuple(item.copy() for item in self.structured_items)
+                if self.structured_items is not None
+                else None
+            ),
         )
 
     def merged(self, other: FlowValue) -> FlowValue:
         result = self.copy()
+        if self.structured_items is not None and other.structured_items is not None:
+            if len(self.structured_items) == len(other.structured_items):
+                result.structured_items = tuple(
+                    left.merged(right)
+                    for left, right in zip(
+                        self.structured_items,
+                        other.structured_items,
+                        strict=True,
+                    )
+                )
+            else:
+                result.structured_items = None
+        elif self.structured_items is None and other.structured_items is not None:
+            result.structured_items = (
+                tuple(item.copy() for item in other.structured_items)
+                if _is_flow_bottom(self)
+                else None
+            )
+        elif self.structured_items is not None and not _is_flow_bottom(other):
+            result.structured_items = None
         overflowed = set(result.overflowed | other.overflowed)
         for resource_id, paths in other.origins.items():
             bounded, truncated = _bounded_binding_paths(
@@ -98,6 +126,7 @@ class FlowValue:
         result.module_refs.update(other.module_refs)
         result.call_targets.update(other.call_targets)
         result.class_targets.update(other.class_targets)
+        result.closure_instances.update(other.closure_instances)
         result.unknown_callable |= other.unknown_callable
         result.overflowed = frozenset(overflowed)
         return result
@@ -120,6 +149,12 @@ class FlowValue:
             set(self.call_targets),
             set(self.class_targets),
             self.unknown_callable,
+            set(self.closure_instances),
+            (
+                tuple(item.bound(step) for item in self.structured_items)
+                if self.structured_items is not None
+                else None
+            ),
         )
 
     @property
@@ -147,6 +182,15 @@ class FlowValue:
         module_refs = set(self.module_refs)
         call_targets = set(self.call_targets)
         class_targets = set(self.class_targets)
+        safe_items: tuple[FlowValue, ...] | None = None
+        cyclic_items: tuple[FlowValue, ...] | None = None
+        if self.structured_items is not None:
+            partitioned_items = tuple(
+                item.partition_call_cycles(target=target)
+                for item in self.structured_items
+            )
+            safe_items = tuple(item[0] for item in partitioned_items)
+            cyclic_items = tuple(item[1] for item in partitioned_items)
         return (
             FlowValue(
                 safe,
@@ -156,6 +200,8 @@ class FlowValue:
                 set(call_targets),
                 set(class_targets),
                 self.unknown_callable,
+                set(self.closure_instances),
+                safe_items,
             ),
             FlowValue(
                 cyclic,
@@ -165,8 +211,24 @@ class FlowValue:
                 set(call_targets),
                 set(class_targets),
                 self.unknown_callable,
+                set(self.closure_instances),
+                cyclic_items,
             ),
         )
+
+
+def _is_flow_bottom(value: FlowValue) -> bool:
+    return not (
+        value.origins
+        or value.object_types
+        or value.overflowed
+        or value.module_refs
+        or value.call_targets
+        or value.class_targets
+        or value.unknown_callable
+        or value.closure_instances
+        or value.structured_items is not None
+    )
 
 
 def _bounded_binding_paths(
@@ -207,6 +269,7 @@ class FunctionInfo:
     local_names: frozenset[str]
     global_names: frozenset[str]
     nonlocal_names: frozenset[str]
+    referenced_names: frozenset[str]
     node: ast.FunctionDef | ast.AsyncFunctionDef
     parameters: tuple[str, ...]
     defaults: Mapping[str, ast.expr]
@@ -526,6 +589,7 @@ def _collect_functions(
         local_names, global_names, nonlocal_names = _function_scope_bindings(
             node, parameters
         )
+        referenced_names = _function_referenced_names(node)
         ref = f"{module}:{qualname}"
         functions[ref] = FunctionInfo(
             ref=ref,
@@ -537,6 +601,7 @@ def _collect_functions(
             local_names=local_names,
             global_names=global_names,
             nonlocal_names=nonlocal_names,
+            referenced_names=referenced_names,
             node=node,
             parameters=parameters,
             defaults=defaults,
@@ -575,6 +640,34 @@ def _collect_functions(
                     class_ref=class_ref,
                 )
     return functions, classes
+
+
+def _function_referenced_names(
+    node: ast.FunctionDef | ast.AsyncFunctionDef,
+) -> frozenset[str]:
+    names: set[str] = set()
+
+    class ReferenceVisitor(ast.NodeVisitor):
+        def visit_Name(self, item: ast.Name) -> None:
+            if isinstance(item.ctx, ast.Load):
+                names.add(item.id)
+
+        def visit_FunctionDef(self, item: ast.FunctionDef) -> None:
+            return
+
+        def visit_AsyncFunctionDef(self, item: ast.AsyncFunctionDef) -> None:
+            return
+
+        def visit_ClassDef(self, item: ast.ClassDef) -> None:
+            return
+
+        def visit_Lambda(self, item: ast.Lambda) -> None:
+            return
+
+    visitor = ReferenceVisitor()
+    for statement in node.body:
+        visitor.visit(statement)
+    return frozenset(names)
 
 
 def _import_tables(

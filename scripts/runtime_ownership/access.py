@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import ast
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
 from .access_expressions import evaluate_generic_expression
@@ -17,9 +17,105 @@ from .access_model import (
     _import_tables,
     _module_name,
 )
+from .access_outcomes import analyze_block_result, join_states
 from .access_resolver import call_name
 from .access_sinks import evaluate_call
 from .access_statements import analyze_block, evaluate_control_expression
+
+_CALL_MODULE_STATE_PREFIX = "\0runtime-module-state:"
+_CALL_CLOSURE_STATE_PREFIX = "\0runtime-closure-state:"
+
+
+def _call_module_state_prefix(module: str) -> str:
+    return f"{_CALL_MODULE_STATE_PREFIX}{module}:"
+
+
+def _is_call_module_state_name(name: str) -> bool:
+    return name.startswith(_CALL_MODULE_STATE_PREFIX)
+
+
+def _call_closure_state_prefix(group_id: str) -> str:
+    return f"{_CALL_CLOSURE_STATE_PREFIX}{group_id}:"
+
+
+def _is_call_closure_state_name(name: str) -> bool:
+    return name.startswith(_CALL_CLOSURE_STATE_PREFIX)
+
+
+def _is_call_path_state_name(name: str) -> bool:
+    return _is_call_module_state_name(name) or _is_call_closure_state_name(name)
+
+
+def _has_nonrecursive_self_path(info: FunctionInfo) -> bool:
+    """Return whether one normal/return path avoids a direct self-call."""
+
+    def calls_self(node: ast.AST | None) -> bool:
+        if node is None:
+            return False
+
+        class SelfCallVisitor(ast.NodeVisitor):
+            found = False
+
+            def visit_Call(self, item: ast.Call) -> None:
+                if isinstance(item.func, ast.Name) and item.func.id == info.node.name:
+                    self.found = True
+                    return
+                self.generic_visit(item)
+
+            def visit_FunctionDef(self, item: ast.FunctionDef) -> None:
+                return
+
+            def visit_AsyncFunctionDef(self, item: ast.AsyncFunctionDef) -> None:
+                return
+
+            def visit_ClassDef(self, item: ast.ClassDef) -> None:
+                return
+
+            def visit_Lambda(self, item: ast.Lambda) -> None:
+                return
+
+        visitor = SelfCallVisitor()
+        visitor.visit(node)
+        return visitor.found
+
+    def expression_has_nonrecursive_path(node: ast.expr | None) -> bool:
+        if isinstance(node, ast.IfExp):
+            return not calls_self(node.test) and (
+                expression_has_nonrecursive_path(node.body)
+                or expression_has_nonrecursive_path(node.orelse)
+            )
+        return not calls_self(node)
+
+    def block_paths(statements: Sequence[ast.stmt]) -> tuple[bool, bool]:
+        can_continue = True
+        can_exit = False
+        for statement in statements:
+            if not can_continue:
+                break
+            if isinstance(statement, ast.If):
+                if calls_self(statement.test):
+                    can_continue = False
+                    continue
+                body_continue, body_exit = block_paths(statement.body)
+                else_continue, else_exit = block_paths(statement.orelse)
+                can_continue = body_continue or else_continue
+                can_exit |= body_exit or else_exit
+                continue
+            if isinstance(statement, ast.Return):
+                if expression_has_nonrecursive_path(statement.value):
+                    can_exit = True
+                can_continue = False
+                continue
+            if isinstance(statement, ast.Raise):
+                can_continue = False
+                continue
+            if calls_self(statement):
+                can_continue = False
+        return can_continue, can_exit
+
+    has_direct_self_call = any(calls_self(statement) for statement in info.node.body)
+    can_continue, can_exit = block_paths(info.node.body)
+    return has_direct_self_call and (can_continue or can_exit)
 
 
 class _AccessAnalysis:
@@ -115,6 +211,11 @@ class _AccessAnalysis:
         self.function_parents = {
             ref: info.parent_ref for ref, info in self.functions.items()
         }
+        self.recursive_base_targets = frozenset(
+            ref
+            for ref, info in self.functions.items()
+            if _has_nonrecursive_self_path(info)
+        )
         self.nested_functions = {
             (info.parent_ref, info.node.name): ref
             for ref, info in self.functions.items()
@@ -123,6 +224,8 @@ class _AccessAnalysis:
         self.closure_envs: dict[str, dict[str, FlowValue]] = {
             ref: {} for ref in self.functions
         }
+        self.closure_instance_envs: dict[str, dict[str, FlowValue]] = {}
+        self.closure_instance_groups: dict[str, str] = {}
         self.params: dict[str, dict[str, FlowValue]] = {
             ref: {} for ref in self.functions
         }
@@ -133,6 +236,14 @@ class _AccessAnalysis:
             ref: FlowValue() for ref in self.functions
         }
         self.called_targets: set[str] = set()
+        self.locally_executed_targets: set[str] = set()
+        self.summary_required_targets: set[str] = set()
+        self._active_local_calls: set[str] = set()
+        self._active_local_activations: dict[str, str] = {}
+        self._local_module_states: list[
+            tuple[str, dict[str, FlowValue], dict[str, set[str]]]
+        ] = []
+        self._local_closure_states: list[dict[str, dict[str, FlowValue]]] = []
         self.class_attrs: dict[str, dict[str, FlowValue]] = {}
         self.class_comprehension_parents: dict[
             str,
@@ -142,18 +253,21 @@ class _AccessAnalysis:
         self._persistent_changed = False
 
     def run(self) -> dict[str, Any]:
-        for _iteration in range(32):
+        while True:
             self._persistent_changed = False
             for module, tree in sorted(self.trees.items()):
                 self._analyze_module(module, tree)
             for ref, info in sorted(self.functions.items()):
+                if (
+                    ref in self.locally_executed_targets
+                    and ref not in self.summary_required_targets
+                ):
+                    continue
                 if info.parent_ref is not None and ref not in self.called_targets:
                     continue
                 self._analyze_function(info)
             if not self._persistent_changed:
                 break
-        else:
-            raise ValueError("runtime access fixed point did not converge")
         return self.facts.result()
 
     def _analyze_module(self, module: str, tree: ast.Module) -> bool:
@@ -168,7 +282,11 @@ class _AccessAnalysis:
             object_env={},
             call_ordinals=_call_ordinals(tree),
         )[0]
-        runtime_env = {name: value.copy() for name, value in env.items()}
+        runtime_env = {
+            name: value.copy()
+            for name, value in env.items()
+            if not _is_call_path_state_name(name)
+        }
         if runtime_env != self.module_runtime_envs[module]:
             self.module_runtime_envs[module] = runtime_env
             self._persistent_changed = True
@@ -239,6 +357,17 @@ class _AccessAnalysis:
         module: str,
         env: Mapping[str, FlowValue],
     ) -> bool:
+        instance_id = self._local_closure_instance_id(ref, actor=actor)
+        if instance_id is not None:
+            local_instances = self._local_closure_states[-1]
+            local_instances[instance_id] = self._capture_closure_env(
+                ref,
+                actor=actor,
+                module=module,
+                env=env,
+                instance_id=instance_id,
+            )
+            return False
         changed = False
         closure = self.closure_envs[ref]
         module_env = self.module_runtime_envs[module]
@@ -246,6 +375,10 @@ class _AccessAnalysis:
         if info.parent_ref is None:
             return False
         for name, value in env.items():
+            if _is_call_path_state_name(name):
+                continue
+            if name not in info.referenced_names and name not in info.nonlocal_names:
+                continue
             if name in info.local_names or name in info.global_names:
                 continue
             if name in module_env and value == module_env[name]:
@@ -264,6 +397,48 @@ class _AccessAnalysis:
                 self._persistent_changed = True
                 changed = True
         return changed
+
+    def _function_definition_value(self, ref: str, *, actor: str) -> FlowValue:
+        value = FlowValue(call_targets={ref})
+        instance_id = self._local_closure_instance_id(ref, actor=actor)
+        if instance_id is not None:
+            value.closure_instances.add((ref, instance_id))
+            activation_id = self._active_local_activations[actor]
+            self.closure_instance_groups[instance_id] = activation_id
+        return value
+
+    def _local_closure_instance_id(self, ref: str, *, actor: str) -> str | None:
+        activation_id = self._active_local_activations.get(actor)
+        if activation_id is None or self.functions[ref].parent_ref != actor:
+            return None
+        return f"{activation_id}|closure:{ref}"
+
+    def _capture_closure_env(
+        self,
+        ref: str,
+        *,
+        actor: str,
+        module: str,
+        env: Mapping[str, FlowValue],
+        instance_id: str,
+    ) -> dict[str, FlowValue]:
+        captured: dict[str, FlowValue] = {}
+        module_env = self.module_runtime_envs[module]
+        info = self.functions[ref]
+        for name, value in env.items():
+            if _is_call_path_state_name(name):
+                continue
+            if name not in info.referenced_names and name not in info.nonlocal_names:
+                continue
+            if name in info.local_names or name in info.global_names:
+                continue
+            if name in module_env and value == module_env[name]:
+                continue
+            group_id = self.closure_instance_groups.get(instance_id, instance_id)
+            captured[name] = value.bound(
+                f"closure:{actor}:cell:{name}|group={group_id}"
+            )
+        return captured
 
     def _assignment_binding_value(
         self,
@@ -401,6 +576,475 @@ class _AccessAnalysis:
         self.called_targets.add(target)
         self._persistent_changed = True
 
+    def _require_function_summary(self, target: str) -> None:
+        if target in self.summary_required_targets:
+            return
+        self.summary_required_targets.add(target)
+        self._persistent_changed = True
+
+    def _execute_known_call(
+        self,
+        target: str,
+        argument_values: Sequence[FlowValue],
+        keyword_values: Mapping[str, FlowValue],
+        *,
+        actor: str,
+        module: str,
+        node: ast.Call,
+        ordinal: int,
+        env: dict[str, FlowValue],
+        object_env: dict[str, set[str]],
+        closure_instance: str | None,
+    ) -> FlowValue | None:
+        info = self.functions[target]
+        caller_is_local = actor in self._active_local_calls
+        caller_is_module = actor == f"{module}:<module>"
+        if (
+            not (caller_is_local or caller_is_module)
+            or (
+                info.parent_ref is not None
+                and info.parent_ref != actor
+                and closure_instance is None
+            )
+            or target in self._active_local_calls
+        ):
+            return None
+        module_env, module_objects, external_state_prefix = self._call_module_state(
+            info.module,
+            actor=actor,
+            module=module,
+            env=env,
+            object_env=object_env,
+        )
+        lexical_call = info.parent_ref == actor
+        captured_env = (
+            self._closure_instance_state(
+                closure_instance,
+                ref=target,
+                path_env=env,
+            )
+            if closure_instance is not None and not lexical_call
+            else None
+        )
+        if lexical_call:
+            base_env = env
+            base_objects = object_env
+        elif captured_env is not None:
+            base_env = captured_env
+            base_objects = {
+                name: set(value.object_types)
+                for name, value in captured_env.items()
+                if value.object_types
+            }
+        else:
+            base_env = module_env
+            base_objects = module_objects
+        frame_env = {name: value.copy() for name, value in base_env.items()}
+        frame_objects = {name: set(values) for name, values in base_objects.items()}
+        for name, value in env.items():
+            if not _is_call_closure_state_name(name):
+                continue
+            frame_env[name] = value.copy()
+            if name in object_env:
+                frame_objects[name] = set(object_env[name])
+        for name in info.global_names:
+            frame_env[name] = module_env.get(name, FlowValue()).copy()
+            if name in module_objects:
+                frame_objects[name] = set(module_objects[name])
+            else:
+                frame_objects.pop(name, None)
+        for name in info.local_names:
+            frame_env[name] = FlowValue()
+            frame_objects.pop(name, None)
+        values = list(argument_values)
+        if info.class_ref is not None and not target.endswith(".__init__"):
+            values = [FlowValue(object_types={info.class_ref}), *values]
+        provided: set[str] = set()
+        source_name = call_name(node.func) or "<dynamic>"
+        for index, value in enumerate(values):
+            if index >= len(info.parameters):
+                break
+            parameter = info.parameters[index]
+            provided.add(parameter)
+            self._bind_local_call_value(
+                frame_env,
+                frame_objects,
+                parameter,
+                value,
+                step=f"call:{actor}->{target}:{parameter}|site={source_name}:{ordinal}",
+            )
+        for parameter, value in keyword_values.items():
+            if parameter not in info.parameters:
+                continue
+            provided.add(parameter)
+            self._bind_local_call_value(
+                frame_env,
+                frame_objects,
+                parameter,
+                value,
+                step=f"call:{actor}->{target}:{parameter}|site={source_name}:{ordinal}",
+            )
+        for parameter, value in self.definition_defaults[target].items():
+            if parameter not in provided:
+                self._bind_local_call_value(
+                    frame_env,
+                    frame_objects,
+                    parameter,
+                    value,
+                    step=f"default:{target}:{parameter}",
+                )
+        if target not in self.locally_executed_targets:
+            self.locally_executed_targets.add(target)
+            self._persistent_changed = True
+        activation_id = self._call_activation_id(
+            target,
+            actor=actor,
+            module=module,
+            source_name=source_name,
+            ordinal=ordinal,
+            closure_instance=closure_instance,
+        )
+        self._active_local_calls.add(target)
+        self._active_local_activations[target] = activation_id
+        self._local_module_states.append((info.module, module_env, module_objects))
+        local_closures: dict[str, dict[str, FlowValue]] = {}
+        self._local_closure_states.append(local_closures)
+        try:
+            result = analyze_block_result(
+                self,
+                info.node.body,
+                module=info.module,
+                actor=target,
+                class_ref=info.class_ref,
+                env=frame_env,
+                object_env=frame_objects,
+                call_ordinals=info.call_ordinals,
+            )
+        finally:
+            self._local_closure_states.pop()
+            self._local_module_states.pop()
+            self._active_local_activations.pop(target)
+            self._active_local_calls.remove(target)
+        self._persist_closure_instances(local_closures)
+        exit_states = [
+            (outcome.env, outcome.object_env)
+            for outcome in result.outcomes
+            if outcome.kind in {"normal", "return"}
+        ]
+        if exit_states:
+            exit_env, exit_objects = join_states(exit_states)
+            for name in exit_env:
+                if _is_call_path_state_name(name):
+                    self._sync_call_name(
+                        name,
+                        source_env=exit_env,
+                        source_objects=exit_objects,
+                        target_env=env,
+                        target_objects=object_env,
+                    )
+            if lexical_call:
+                for name in info.nonlocal_names:
+                    self._sync_call_name(
+                        name,
+                        source_env=exit_env,
+                        source_objects=exit_objects,
+                        target_env=env,
+                        target_objects=object_env,
+                    )
+            elif closure_instance is not None and info.nonlocal_names:
+                updated_capture = {
+                    name: value.copy() for name, value in (captured_env or {}).items()
+                }
+                updated_objects = {
+                    name: set(value.object_types)
+                    for name, value in updated_capture.items()
+                    if value.object_types
+                }
+                for name in info.nonlocal_names:
+                    self._sync_call_name(
+                        name,
+                        source_env=exit_env,
+                        source_objects=exit_objects,
+                        target_env=updated_capture,
+                        target_objects=updated_objects,
+                    )
+                self._store_closure_group_state(
+                    closure_instance,
+                    updated_capture,
+                    updated_objects,
+                    env=env,
+                    object_env=object_env,
+                )
+            for name in info.global_names:
+                self._sync_call_name(
+                    name,
+                    source_env=exit_env,
+                    source_objects=exit_objects,
+                    target_env=module_env,
+                    target_objects=module_objects,
+                )
+        self._store_local_closure_groups(
+            local_closures,
+            env=env,
+            object_env=object_env,
+        )
+        if external_state_prefix is not None:
+            self._store_call_module_state(
+                external_state_prefix,
+                module_env,
+                module_objects,
+                env=env,
+                object_env=object_env,
+            )
+        return result.returned
+
+    def _call_activation_id(
+        self,
+        target: str,
+        *,
+        actor: str,
+        module: str,
+        source_name: str,
+        ordinal: int,
+        closure_instance: str | None,
+    ) -> str:
+        parent_activation = self._active_local_activations.get(
+            actor, f"module:{module}"
+        )
+        callable_identity = closure_instance or target
+        return (
+            f"{parent_activation}|call:{actor}->{callable_identity}"
+            f"|site={source_name}:{ordinal}"
+        )
+
+    def _closure_instance_state(
+        self,
+        instance_id: str,
+        *,
+        ref: str,
+        path_env: Mapping[str, FlowValue] | None = None,
+    ) -> dict[str, FlowValue]:
+        info = self.functions[ref]
+        visible_cells = info.referenced_names | info.nonlocal_names
+        group_id = self.closure_instance_groups.get(instance_id)
+        if group_id is not None and path_env is not None:
+            prefix = _call_closure_state_prefix(group_id)
+            path_state = {
+                name.removeprefix(prefix): value.copy()
+                for name, value in path_env.items()
+                if name.startswith(prefix)
+                and name.removeprefix(prefix) in visible_cells
+            }
+            if path_state:
+                return path_state
+        for local_instances in reversed(self._local_closure_states):
+            state = local_instances.get(instance_id)
+            if state is not None:
+                live_state = {
+                    name: value.copy()
+                    for name, value in state.items()
+                    if name in visible_cells
+                }
+                if (
+                    group_id is not None
+                    and path_env is not None
+                    and group_id in self._active_local_activations.values()
+                ):
+                    for name in live_state:
+                        live_state[name] = path_env.get(name, FlowValue()).copy()
+                return live_state
+        state = self.closure_instance_envs.get(instance_id, {})
+        return {
+            name: value.copy() for name, value in state.items() if name in visible_cells
+        }
+
+    def _closure_capture_value(
+        self,
+        value: FlowValue,
+        *,
+        env: Mapping[str, FlowValue],
+    ) -> FlowValue:
+        captured = FlowValue()
+        for ref, instance_id in sorted(value.closure_instances):
+            for name, capture in sorted(
+                self._closure_instance_state(
+                    instance_id,
+                    ref=ref,
+                    path_env=env,
+                ).items()
+            ):
+                if capture.has_origins:
+                    captured = captured.merged(
+                        capture.bound(
+                            f"closure-escape:{ref}:{name}|instance={instance_id}"
+                        )
+                    )
+        return captured
+
+    def _store_local_closure_groups(
+        self,
+        instances: Mapping[str, Mapping[str, FlowValue]],
+        *,
+        env: dict[str, FlowValue],
+        object_env: dict[str, set[str]],
+    ) -> None:
+        groups: dict[str, dict[str, FlowValue]] = {}
+        for instance_id, state in instances.items():
+            group_id = self.closure_instance_groups.get(instance_id)
+            if group_id is None:
+                continue
+            group = groups.setdefault(group_id, {})
+            for name, value in state.items():
+                group[name] = group.get(name, FlowValue()).merged(value)
+        for group_id, state in groups.items():
+            self._store_closure_group(
+                group_id,
+                state,
+                env=env,
+                object_env=object_env,
+            )
+
+    def _store_closure_group_state(
+        self,
+        instance_id: str,
+        state: Mapping[str, FlowValue],
+        state_objects: Mapping[str, set[str]],
+        *,
+        env: dict[str, FlowValue],
+        object_env: dict[str, set[str]],
+    ) -> None:
+        group_id = self.closure_instance_groups.get(instance_id)
+        if group_id is None:
+            return
+        self._store_closure_group(
+            group_id,
+            state,
+            state_objects=state_objects,
+            env=env,
+            object_env=object_env,
+        )
+
+    @staticmethod
+    def _store_closure_group(
+        group_id: str,
+        state: Mapping[str, FlowValue],
+        *,
+        env: dict[str, FlowValue],
+        object_env: dict[str, set[str]],
+        state_objects: Mapping[str, set[str]] | None = None,
+    ) -> None:
+        prefix = _call_closure_state_prefix(group_id)
+        for name in list(env):
+            if name.startswith(prefix):
+                env.pop(name, None)
+                object_env.pop(name, None)
+        for name, value in state.items():
+            state_name = f"{prefix}{name}"
+            env[state_name] = value.copy()
+            if state_objects is not None and name in state_objects:
+                object_env[state_name] = set(state_objects[name])
+
+    def _persist_closure_instances(
+        self,
+        instances: Mapping[str, Mapping[str, FlowValue]],
+    ) -> None:
+        for instance_id, state in instances.items():
+            previous = self.closure_instance_envs.get(instance_id, {})
+            persisted: dict[str, FlowValue] = {}
+            for name in previous.keys() | state.keys():
+                persisted[name] = previous.get(name, FlowValue()).merged(
+                    state.get(name, FlowValue())
+                )
+            if previous == persisted:
+                continue
+            self.closure_instance_envs[instance_id] = persisted
+            self._persistent_changed = True
+
+    def _call_module_state(
+        self,
+        target_module: str,
+        *,
+        actor: str,
+        module: str,
+        env: dict[str, FlowValue],
+        object_env: dict[str, set[str]],
+    ) -> tuple[dict[str, FlowValue], dict[str, set[str]], str | None]:
+        for state_module, state_env, state_objects in reversed(
+            self._local_module_states
+        ):
+            if state_module == target_module:
+                return state_env, state_objects, None
+        if actor == f"{module}:<module>" and target_module == module:
+            return env, object_env, None
+        baseline = self.module_runtime_envs[target_module]
+        module_env = {name: value.copy() for name, value in baseline.items()}
+        module_objects = {
+            name: set(value.object_types)
+            for name, value in module_env.items()
+            if value.object_types
+        }
+        state_prefix = _call_module_state_prefix(target_module)
+        for name, value in env.items():
+            if not name.startswith(state_prefix):
+                continue
+            module_name = name.removeprefix(state_prefix)
+            module_env[module_name] = value.copy()
+            if name in object_env:
+                module_objects[module_name] = set(object_env[name])
+            else:
+                module_objects.pop(module_name, None)
+        return module_env, module_objects, state_prefix
+
+    @staticmethod
+    def _store_call_module_state(
+        state_prefix: str,
+        module_env: Mapping[str, FlowValue],
+        module_objects: Mapping[str, set[str]],
+        *,
+        env: dict[str, FlowValue],
+        object_env: dict[str, set[str]],
+    ) -> None:
+        for name in list(env):
+            if name.startswith(state_prefix):
+                env.pop(name, None)
+                object_env.pop(name, None)
+        for name, value in module_env.items():
+            state_name = f"{state_prefix}{name}"
+            env[state_name] = value.copy()
+            if name in module_objects:
+                object_env[state_name] = set(module_objects[name])
+
+    @staticmethod
+    def _bind_local_call_value(
+        env: dict[str, FlowValue],
+        object_env: dict[str, set[str]],
+        name: str,
+        value: FlowValue,
+        *,
+        step: str,
+    ) -> None:
+        bound = value.bound(step)
+        env[name] = bound
+        if bound.object_types:
+            object_env[name] = set(bound.object_types)
+        else:
+            object_env.pop(name, None)
+
+    @staticmethod
+    def _sync_call_name(
+        name: str,
+        *,
+        source_env: Mapping[str, FlowValue],
+        source_objects: Mapping[str, set[str]],
+        target_env: dict[str, FlowValue],
+        target_objects: dict[str, set[str]],
+    ) -> None:
+        target_env[name] = source_env.get(name, FlowValue()).copy()
+        if name in source_objects:
+            target_objects[name] = set(source_objects[name])
+        else:
+            target_objects.pop(name, None)
+
     def record_dynamic_star_import(
         self,
         statement: ast.ImportFrom,
@@ -434,8 +1078,9 @@ class _AccessAnalysis:
         node: ast.Call,
         ordinal: int,
     ) -> None:
+        self._require_function_summary(target)
         safe, cyclic = value.partition_call_cycles(target=target)
-        if cyclic.has_origins:
+        if cyclic.has_origins and target not in self.recursive_base_targets:
             self.facts.record_escape(
                 cyclic,
                 actor=actor,
