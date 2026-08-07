@@ -23,6 +23,20 @@ _SITE_ID_PATTERN = re.compile(r"\|site_id=(runtime-site:[0-9a-f]{64})")
 _V1_SITE_PATTERN = re.compile(r"\|site=(?!id=)[^|]*")
 
 
+def _sink_family(sink: str) -> str:
+    normalized = sink.lower()
+    if normalized.startswith("stdlib-"):
+        normalized = normalized.removeprefix("stdlib-")
+    return normalized.replace("-", ".")
+
+
+def _escape_blocks_concrete_access(reason: str) -> bool:
+    return any(
+        marker in reason
+        for marker in ("ambiguous", "invalid", "unknown", "unsupported")
+    )
+
+
 def _logical_actor(actor: str, chain: tuple[str, ...]) -> str:
     for step in chain:
         if step.startswith("call:") and "->" in step:
@@ -286,6 +300,7 @@ class AccessFactCollector:
             )
 
     def result(self) -> dict[str, Any]:
+        self._reconcile_ambiguous_accesses()
         accesses = self._finalize_accesses()
         escapes = self._finalize_escapes()
         access_facts, access_provenances = self._finalize_v2_accesses()
@@ -325,6 +340,44 @@ class AccessFactCollector:
                     row["mode"] == "read_write" for row in accesses
                 ),
             },
+        }
+
+    def _reconcile_ambiguous_accesses(self) -> None:
+        blocked = {
+            (row.site_id, row.resource_id, _sink_family(row.sink))
+            for row in self.raw_escapes
+            if _escape_blocks_concrete_access(row.reason)
+        }
+        removed = {
+            row
+            for row in self.raw_accesses
+            if (row.site_id, row.resource_id, _sink_family(row.sink))
+            in blocked
+        }
+        if not removed:
+            return
+        removed_fact_ids = {
+            _stable_id(
+                "runtime-access-fact",
+                _access_fact_identity(
+                    site_id=row.site_id,
+                    resource_id=row.resource_id,
+                    mode=row.mode,
+                    operation=row.operation,
+                    sink=row.sink,
+                    sink_actor=row.sink_actor,
+                ),
+            )
+            for row in removed
+        }
+        self.raw_accesses.difference_update(removed)
+        self.raw_overflows = {
+            row
+            for row in self.raw_overflows
+            if not (
+                row.source_kind == "access"
+                and row.source_fact_id in removed_fact_ids
+            )
         }
 
     def _finalize_sites(self, site_ids: set[str]) -> list[dict[str, Any]]:

@@ -15,8 +15,17 @@ from .access_model import (
     OS_FLAG_OBJECT_PREFIX,
     OS_OPEN_ACCESS_FLAGS,
     OS_OPEN_MODIFIER_FLAGS,
+    SQLITE_TYPE_OBJECT_PREFIX,
+    STDLIB_MODULE_WILDCARD_ATTRIBUTE,
     STDLIB_OS_CALLS,
+    STDLIB_SQLITE3_CALLS,
+    STDLIB_SQLITE3_TYPES,
+    SUPPORTED_STDLIB_MODULES,
     FlowValue,
+    stdlib_call_target_marker,
+    stdlib_module_mutation_attributes,
+    stdlib_module_mutation_marker,
+    stdlib_module_state_name,
 )
 
 SymbolKey = tuple[str, str]
@@ -117,11 +126,16 @@ def bind_import_statement(
         for alias in statement.names:
             local = alias.asname or alias.name.split(".")[0]
             imported = alias.name if alias.asname else alias.name.split(".")[0]
+            value = _module_import_value(
+                env,
+                imported=imported,
+                known_modules=engine.known_modules,
+            )
             _strong_bind(
                 env,
                 object_env,
                 local,
-                FlowValue(module_refs={imported}),
+                value,
                 step=f"import:{actor}:{local}->{alias.name}",
             )
             if definite_names is not None:
@@ -171,13 +185,44 @@ def bind_import_statement(
         )
         child_module = f"{target_module}.{alias.name}" if target_module else alias.name
         stdlib_os = target_module == "os" and "os" not in engine.known_modules
-        if stdlib_os and alias.name in STDLIB_OS_CALLS:
+        stdlib_sqlite3 = (
+            target_module == "sqlite3"
+            and "sqlite3" not in engine.known_modules
+        )
+        stdlib_os_attribute = stdlib_os and _stdlib_attribute_is_unmutated(
+            env, module="os", attribute=alias.name
+        )
+        stdlib_sqlite3_attribute = (
+            stdlib_sqlite3
+            and _stdlib_attribute_is_unmutated(
+                env, module="sqlite3", attribute=alias.name
+            )
+        )
+        if stdlib_os_attribute and alias.name in STDLIB_OS_CALLS:
             value = FlowValue(call_targets={f"os:{alias.name}"})
-        elif stdlib_os and alias.name in (
+        elif stdlib_sqlite3_attribute and alias.name in STDLIB_SQLITE3_CALLS:
+            value = FlowValue(call_targets={f"sqlite3:{alias.name}"})
+        elif stdlib_sqlite3_attribute and alias.name in STDLIB_SQLITE3_TYPES:
+            value = FlowValue(
+                object_types={f"{SQLITE_TYPE_OBJECT_PREFIX}{alias.name}"}
+            )
+        elif stdlib_os_attribute and alias.name in (
             OS_OPEN_ACCESS_FLAGS | OS_OPEN_MODIFIER_FLAGS
         ):
             value = FlowValue(
                 object_types={f"{OS_FLAG_OBJECT_PREFIX}{alias.name}"}
+            )
+        elif stdlib_os and alias.name in STDLIB_OS_CALLS:
+            value = FlowValue(
+                object_types={stdlib_call_target_marker("os", alias.name)},
+                unknown_callable=True,
+            )
+        elif stdlib_sqlite3 and alias.name in STDLIB_SQLITE3_CALLS:
+            value = FlowValue(
+                object_types={
+                    stdlib_call_target_marker("sqlite3", alias.name)
+                },
+                unknown_callable=True,
             )
         elif (
             not value.has_origins
@@ -196,6 +241,48 @@ def bind_import_statement(
         )
         if definite_names is not None:
             definite_names.add(local)
+
+
+def _module_import_value(
+    env: Mapping[str, FlowValue],
+    *,
+    imported: str,
+    known_modules: frozenset[str],
+) -> FlowValue:
+    value = FlowValue(module_refs={imported})
+    if imported not in SUPPORTED_STDLIB_MODULES or imported in known_modules:
+        return value
+    state_name = stdlib_module_state_name(imported)
+    candidates = [
+        candidate
+        for name, candidate in env.items()
+        if name == state_name or candidate.module_refs == {imported}
+    ]
+    for candidate in candidates:
+        for attribute in stdlib_module_mutation_attributes(
+            candidate, module=imported
+        ):
+            value.object_types.add(
+                stdlib_module_mutation_marker(imported, attribute)
+            )
+    return value
+
+
+def _stdlib_attribute_is_unmutated(
+    env: Mapping[str, FlowValue],
+    *,
+    module: str,
+    attribute: str,
+) -> bool:
+    marker = stdlib_module_mutation_marker(module, attribute)
+    wildcard_marker = stdlib_module_mutation_marker(
+        module, STDLIB_MODULE_WILDCARD_ATTRIBUTE
+    )
+    return not any(
+        value.module_refs == {module}
+        and bool({marker, wildcard_marker}.intersection(value.object_types))
+        for value in env.values()
+    )
 
 
 def build_module_exports(

@@ -8,7 +8,7 @@ from typing import Protocol
 
 from .access_bindings import bind_structured_target, evaluate_iterable
 from .access_facts import AccessFactCollector
-from .access_model import FlowValue, is_path_receiver
+from .access_model import FlowValue, is_path_receiver, sqlite_handle_kind
 
 
 class ExpressionEngine(Protocol):
@@ -40,6 +40,9 @@ class ExpressionEngine(Protocol):
         class_ref: str | None,
         env: dict[str, FlowValue],
         object_env: dict[str, set[str]],
+        module: str | None = None,
+        source_node: ast.AST | None = None,
+        ordinal: int = 0,
     ) -> bool: ...
 
     def _assignment_binding_value(
@@ -114,6 +117,9 @@ def evaluate_generic_expression(
             class_ref=class_ref,
             env=env,
             object_env=object_env,
+            module=module,
+            source_node=node,
+            ordinal=int(call_ordinals.get(id(node), 0)),
         )
         return value
     if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
@@ -172,7 +178,12 @@ def evaluate_generic_expression(
         result.structured_items = items
         return result.bound(f"expression:{type(node).__name__}")
     if isinstance(node, (ast.ListComp, ast.SetComp, ast.GeneratorExp)):
-        result, local_env, local_objects = _evaluate_comprehension_generators(
+        (
+            result,
+            local_env,
+            local_objects,
+            generators_reachable,
+        ) = _evaluate_comprehension_generators(
             engine,
             node.generators,
             module=module,
@@ -182,6 +193,8 @@ def evaluate_generic_expression(
             object_env=object_env,
             call_ordinals=call_ordinals,
         )
+        if not generators_reachable:
+            return result.bound(f"expression:{type(node).__name__}")
         result = result.merged(
             _evaluate_comprehension_expression(
                 engine,
@@ -198,7 +211,12 @@ def evaluate_generic_expression(
         )
         return result.bound(f"expression:{type(node).__name__}")
     if isinstance(node, ast.DictComp):
-        result, local_env, local_objects = _evaluate_comprehension_generators(
+        (
+            result,
+            local_env,
+            local_objects,
+            generators_reachable,
+        ) = _evaluate_comprehension_generators(
             engine,
             node.generators,
             module=module,
@@ -208,6 +226,8 @@ def evaluate_generic_expression(
             object_env=object_env,
             call_ordinals=call_ordinals,
         )
+        if not generators_reachable:
+            return result.bound(f"expression:{type(node).__name__}")
         for child in (node.key, node.value):
             result = result.merged(
                 _evaluate_comprehension_expression(
@@ -355,7 +375,7 @@ def _evaluate_comprehension_generators(
     env: dict[str, FlowValue],
     object_env: dict[str, set[str]],
     call_ordinals: Mapping[int, int],
-) -> tuple[FlowValue, dict[str, FlowValue], dict[str, set[str]]]:
+) -> tuple[FlowValue, dict[str, FlowValue], dict[str, set[str]], bool]:
     parent = engine.class_comprehension_parents.get(actor)
     if parent is None:
         parent = (env, object_env)
@@ -374,8 +394,8 @@ def _evaluate_comprehension_generators(
             env=iterable_env,
             object_env=iterable_objects,
             call_ordinals=call_ordinals,
+            allow_sqlite_cursor_iteration=not bool(generator.is_async),
         )
-        result = result.merged(iterable.aggregate)
         if not iterable.literal:
             _record_comprehension_control(
                 engine,
@@ -386,6 +406,9 @@ def _evaluate_comprehension_generators(
                 actor=actor,
                 call_ordinals=call_ordinals,
             )
+        if generator.is_async and sqlite_handle_kind(iterable.aggregate) == "cursor":
+            return FlowValue(), local_env, local_objects, False
+        result = result.merged(iterable.aggregate)
         bind_structured_target(
             engine,
             generator.target,
@@ -413,7 +436,7 @@ def _evaluate_comprehension_generators(
                     call_ordinals=call_ordinals,
                 )
             )
-    return result, local_env, local_objects
+    return result, local_env, local_objects, True
 
 
 def _evaluate_comprehension_control(

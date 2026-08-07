@@ -13,6 +13,8 @@ from typing import Any, Literal
 MAX_BINDING_PATHS_PER_RESOURCE = 64
 
 STDLIB_OS_CALLS = frozenset({"open", "rename", "replace"})
+STDLIB_SQLITE3_CALLS = frozenset({"connect"})
+STDLIB_SQLITE3_TYPES = frozenset({"Connection", "Cursor"})
 OS_OPEN_ACCESS_FLAGS = frozenset({"O_RDONLY", "O_WRONLY", "O_RDWR"})
 OS_OPEN_MODIFIER_FLAGS = frozenset(
     {
@@ -31,6 +33,31 @@ OS_OPEN_MODIFIER_FLAGS = frozenset(
 )
 OS_FLAG_OBJECT_PREFIX = "stdlib-os-flag:"
 OS_FD_OBJECT_TYPE = "stdlib-os-file-descriptor"
+SQLITE_CONNECTION_OBJECT_TYPE = "stdlib-sqlite3-connection"
+SQLITE_CURSOR_OBJECT_TYPE = "stdlib-sqlite3-cursor"
+SQLITE_HANDLE_OBJECT_TYPES = frozenset(
+    {SQLITE_CONNECTION_OBJECT_TYPE, SQLITE_CURSOR_OBJECT_TYPE}
+)
+SQLITE_UNKNOWN_ATTRIBUTE_OBJECT_TYPE = "stdlib-sqlite3-unknown-attribute"
+SQLITE_TYPE_OBJECT_PREFIX = "stdlib-sqlite3-type:"
+STDLIB_CALL_TARGET_PREFIX = "stdlib-call-target:"
+STDLIB_MODULE_MUTATION_PREFIX = "stdlib-module-attribute-mutated:"
+STDLIB_MODULE_WILDCARD_ATTRIBUTE = "*"
+STDLIB_MODULE_STATE_PREFIX = "\0stdlib-module-state:"
+SUPPORTED_STDLIB_MODULES = frozenset({"os", "sqlite3"})
+SQLITE_CURSOR_SCALAR_ATTRIBUTES = frozenset(
+    {"arraysize", "description", "lastrowid", "rowcount"}
+)
+SQLITE_CONNECTION_SCALAR_ATTRIBUTES = frozenset(
+    {
+        "autocommit",
+        "in_transaction",
+        "isolation_level",
+        "row_factory",
+        "text_factory",
+        "total_changes",
+    }
+)
 
 READ_PATH_METHODS = frozenset(
     {
@@ -282,7 +309,162 @@ def _is_flow_bottom(value: FlowValue) -> bool:
 def is_path_receiver(value: FlowValue) -> bool:
     """Return whether an origin-bearing value is still a Path proxy."""
 
-    return value.has_origins and OS_FD_OBJECT_TYPE not in value.object_types
+    non_path_types = SQLITE_HANDLE_OBJECT_TYPES | {
+        OS_FD_OBJECT_TYPE,
+        SQLITE_UNKNOWN_ATTRIBUTE_OBJECT_TYPE,
+    }
+    return value.has_origins and value.object_types.isdisjoint(non_path_types)
+
+
+def is_exact_runtime_object(
+    value: FlowValue,
+    *,
+    object_type: str,
+    binding_step: str,
+) -> bool:
+    """Require one uncontaminated runtime object kind and its provenance tag."""
+
+    return (
+        value.has_origins
+        and value.object_types == {object_type}
+        and not value.module_refs
+        and not value.call_targets
+        and not value.class_targets
+        and not value.unknown_callable
+        and not value.closure_instances
+        and value.structured_items is None
+        and all(
+            binding_step in chain
+            for chains in value.origins.values()
+            for chain in chains
+        )
+    )
+
+
+def sqlite_handle_kind(value: FlowValue) -> str | None:
+    """Return the precise SQLite handle kind carried by a flow value."""
+
+    if is_exact_runtime_object(
+        value,
+        object_type=SQLITE_CONNECTION_OBJECT_TYPE,
+        binding_step="handle:sqlite.connection",
+    ):
+        return "connection"
+    if is_exact_runtime_object(
+        value,
+        object_type=SQLITE_CURSOR_OBJECT_TYPE,
+        binding_step="handle:sqlite.cursor",
+    ):
+        return "cursor"
+    return None
+
+
+def tag_sqlite_handle(value: FlowValue, *, kind: str) -> FlowValue:
+    tagged = value.bound(f"handle:sqlite.{kind}")
+    tagged.object_types = {
+        SQLITE_CONNECTION_OBJECT_TYPE
+        if kind == "connection"
+        else SQLITE_CURSOR_OBJECT_TYPE
+    }
+    return tagged
+
+
+def project_sqlite_attribute(
+    value: FlowValue,
+    *,
+    attribute: str,
+) -> tuple[bool, FlowValue]:
+    kind = sqlite_handle_kind(value)
+    if kind == "cursor" and attribute == "connection":
+        return (
+            True,
+            tag_sqlite_handle(
+                value.bound("attribute:sqlite.cursor.connection"),
+                kind="connection",
+            ),
+        )
+    if kind == "cursor" and attribute in SQLITE_CURSOR_SCALAR_ATTRIBUTES:
+        return True, FlowValue()
+    if (
+        kind == "connection"
+        and attribute in SQLITE_CONNECTION_SCALAR_ATTRIBUTES
+    ):
+        return True, FlowValue()
+    return False, FlowValue()
+
+
+def stdlib_module_mutation_marker(module: str, attribute: str) -> str:
+    return f"{STDLIB_MODULE_MUTATION_PREFIX}{module}:{attribute}"
+
+
+def stdlib_call_target_marker(module: str, attribute: str) -> str:
+    return f"{STDLIB_CALL_TARGET_PREFIX}{module}.{attribute}"
+
+
+def stdlib_call_targets(value: FlowValue) -> frozenset[str]:
+    return frozenset(
+        object_type.removeprefix(STDLIB_CALL_TARGET_PREFIX)
+        for object_type in value.object_types
+        if object_type.startswith(STDLIB_CALL_TARGET_PREFIX)
+    )
+
+
+def stdlib_module_state_name(module: str) -> str:
+    return f"{STDLIB_MODULE_STATE_PREFIX}{module}"
+
+
+def stdlib_module_mutation_attributes(
+    value: FlowValue,
+    *,
+    module: str,
+) -> frozenset[str]:
+    marker_prefix = f"{STDLIB_MODULE_MUTATION_PREFIX}{module}:"
+    return frozenset(
+        object_type.removeprefix(marker_prefix)
+        for object_type in value.object_types
+        if object_type.startswith(marker_prefix)
+    )
+
+
+def precise_stdlib_module_name(value: FlowValue) -> str | None:
+    """Return the exact supported stdlib module identity, ignoring mutation tags."""
+
+    if len(value.module_refs) != 1:
+        return None
+    module = next(iter(value.module_refs))
+    if module not in SUPPORTED_STDLIB_MODULES:
+        return None
+    marker_prefix = f"{STDLIB_MODULE_MUTATION_PREFIX}{module}:"
+    if (
+        value.origins
+        or value.call_targets
+        or value.class_targets
+        or value.unknown_callable
+        or value.closure_instances
+        or any(
+            not object_type.startswith(marker_prefix)
+            for object_type in value.object_types
+        )
+    ):
+        return None
+    return module
+
+
+def is_precise_stdlib_module(
+    value: FlowValue,
+    *,
+    module: str,
+    attribute: str,
+) -> bool:
+    return (
+        precise_stdlib_module_name(value) == module
+        and stdlib_module_mutation_marker(
+            module, STDLIB_MODULE_WILDCARD_ATTRIBUTE
+        )
+        not in value.object_types
+        and stdlib_module_mutation_marker(module, attribute)
+        not in value.object_types
+    )
 
 
 def _bounded_binding_paths(
@@ -941,8 +1123,22 @@ __all__ = [
     "FunctionInfo",
     "RawAccess",
     "RawEscape",
+    "SQLITE_CONNECTION_OBJECT_TYPE",
+    "SQLITE_CONNECTION_SCALAR_ATTRIBUTES",
+    "SQLITE_CURSOR_OBJECT_TYPE",
+    "SQLITE_CURSOR_SCALAR_ATTRIBUTES",
+    "SQLITE_HANDLE_OBJECT_TYPES",
+    "SQLITE_TYPE_OBJECT_PREFIX",
+    "SQLITE_UNKNOWN_ATTRIBUTE_OBJECT_TYPE",
     "SyntaxSite",
     "STDLIB_OS_CALLS",
+    "STDLIB_MODULE_MUTATION_PREFIX",
+    "STDLIB_MODULE_STATE_PREFIX",
+    "STDLIB_MODULE_WILDCARD_ATTRIBUTE",
+    "STDLIB_CALL_TARGET_PREFIX",
+    "STDLIB_SQLITE3_CALLS",
+    "STDLIB_SQLITE3_TYPES",
+    "SUPPORTED_STDLIB_MODULES",
     "_call_ordinals",
     "_collect_functions",
     "_collect_syntax_sites",
@@ -951,4 +1147,15 @@ __all__ = [
     "_open_mode",
     "_stable_id",
     "is_path_receiver",
+    "is_exact_runtime_object",
+    "is_precise_stdlib_module",
+    "project_sqlite_attribute",
+    "precise_stdlib_module_name",
+    "sqlite_handle_kind",
+    "stdlib_call_target_marker",
+    "stdlib_call_targets",
+    "stdlib_module_mutation_attributes",
+    "stdlib_module_mutation_marker",
+    "stdlib_module_state_name",
+    "tag_sqlite_handle",
 ]

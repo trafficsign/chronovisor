@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from .access_facts import AccessFactCollector
-from .access_model import FlowValue
+from .access_model import FlowValue, sqlite_handle_kind
 
 
 class ValueEngine(Protocol):
@@ -36,6 +36,9 @@ class ValueEngine(Protocol):
         class_ref: str | None,
         env: dict[str, FlowValue],
         object_env: dict[str, set[str]],
+        module: str | None = None,
+        source_node: ast.AST | None = None,
+        ordinal: int = 0,
     ) -> bool: ...
 
     def _assignment_binding_value(
@@ -185,6 +188,9 @@ def analyze_augassign(
         class_ref=class_ref,
         env=env,
         object_env=object_env,
+        module=module,
+        source_node=statement,
+        ordinal=int(call_ordinals.get(id(statement.target), 0)),
     )
 
 
@@ -331,6 +337,7 @@ def evaluate_iterable(
     env: dict[str, FlowValue],
     object_env: dict[str, set[str]],
     call_ordinals: Mapping[int, int],
+    allow_sqlite_cursor_iteration: bool = True,
 ) -> IterableValue:
     if isinstance(node, (ast.Tuple, ast.List)):
         structured = evaluate_structured(
@@ -405,6 +412,11 @@ def evaluate_iterable(
         object_env=object_env,
         call_ordinals=call_ordinals,
     )
+    if (
+        allow_sqlite_cursor_iteration
+        and sqlite_handle_kind(structured.value) == "cursor"
+    ):
+        return IterableValue(StructuredValue(FlowValue()), FlowValue(), False, None)
     return IterableValue(
         StructuredValue(structured.value.copy()), structured.value, False, None
     )
@@ -468,6 +480,9 @@ def bind_structured_target(
             class_ref=class_ref,
             env=env,
             object_env=object_env,
+            module=module,
+            source_node=target,
+            ordinal=int(call_ordinals.get(id(target), 0)),
         )
     assignments = _unpack_assignments(target.elts, value)
     if assignments is None:

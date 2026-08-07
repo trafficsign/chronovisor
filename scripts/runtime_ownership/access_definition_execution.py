@@ -39,6 +39,9 @@ class DefinitionExecutionEngine(Protocol):
         class_ref: str | None,
         env: dict[str, FlowValue],
         object_env: dict[str, set[str]],
+        module: str | None = None,
+        source_node: ast.AST | None = None,
+        ordinal: int = 0,
     ) -> bool: ...
 
     def _function_definition_value(

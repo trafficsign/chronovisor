@@ -13,7 +13,7 @@ from .access_bindings import (
     structured_target_mismatch,
 )
 from .access_control import match_values
-from .access_model import FlowValue
+from .access_model import FlowValue, sqlite_handle_kind
 from .access_outcomes import (
     BlockResult,
     Outcome,
@@ -57,6 +57,7 @@ def analyze_loop(
             env=entry_env,
             object_env=entry_objects,
             call_ordinals=call_ordinals,
+            allow_sqlite_cursor_iteration=not isinstance(statement, ast.AsyncFor),
         )
         if not iterable.literal:
             _record_control_value(
@@ -67,6 +68,14 @@ def analyze_loop(
                 module=module,
                 actor=actor,
                 call_ordinals=call_ordinals,
+            )
+        if (
+            isinstance(statement, ast.AsyncFor)
+            and sqlite_handle_kind(iterable.aggregate) == "cursor"
+        ):
+            return BlockResult(
+                changed,
+                [Outcome("raise", entry_env, entry_objects, FlowValue())],
             )
         if iterable.literal_length == 0:
             exhausted = Outcome.normal(entry_env, entry_objects)
@@ -311,26 +320,74 @@ def analyze_with(
 
     changed = False
     kind = "async_with" if isinstance(statement, ast.AsyncWith) else "with"
-    context_value = FlowValue()
+    managers: list[tuple[bool, FlowValue]] = []
     for item in statement.items:
         _record_snapshot(prefix_states, env, object_env)
-        context_value = context_value.merged(
-            _evaluate_control(
+        context_value = engine._eval(
+            item.context_expr,
+            module=module,
+            actor=actor,
+            class_ref=class_ref,
+            env=env,
+            object_env=object_env,
+            call_ordinals=call_ordinals,
+        )
+        if (
+            isinstance(statement, ast.AsyncWith)
+            and sqlite_handle_kind(context_value) == "connection"
+        ):
+            _record_control_value(
                 engine,
+                context_value,
                 item.context_expr,
                 kind=kind,
                 module=module,
                 actor=actor,
-                class_ref=class_ref,
-                env=env,
-                object_env=object_env,
                 call_ordinals=call_ordinals,
             )
+            failure_env, failure_objects = copy_state(env, object_env)
+            outcomes = _exit_context_managers(
+                engine,
+                managers,
+                [
+                    Outcome(
+                        "raise",
+                        failure_env,
+                        failure_objects,
+                        context_value.copy(),
+                    )
+                ],
+                statement=statement,
+                kind=kind,
+                module=module,
+                actor=actor,
+                prefix_states=prefix_states,
+            )
+            return BlockResult(changed, outcomes)
+        sqlite_manager = (
+            isinstance(statement, ast.With)
+            and sqlite_handle_kind(context_value) == "connection"
+        )
+        if sqlite_manager:
+            entered_value = context_value.bound("context:sqlite.connection.enter")
+        else:
+            entered_value = FlowValue()
+            _record_control_value(
+                engine,
+                context_value,
+                item.context_expr,
+                kind=kind,
+                module=module,
+                actor=actor,
+                call_ordinals=call_ordinals,
+            )
+        managers.append(
+            (sqlite_manager, entered_value if sqlite_manager else context_value)
         )
         if item.optional_vars is not None:
             changed |= engine._bind_target(
                 item.optional_vars,
-                FlowValue(),
+                entered_value,
                 actor=actor,
                 class_ref=class_ref,
                 env=env,
@@ -349,30 +406,99 @@ def analyze_with(
         prefix_states=prefix_states,
     )
     changed |= body_result.changed
-    outcomes: list[Outcome] = []
-    for outcome in body_result.outcomes:
-        _record_snapshot(prefix_states, outcome.env, outcome.object_env)
-        outcomes.append(copy_outcome(outcome))
-        if outcome.kind != "raise":
-            continue
-        affected = context_value.merged(outcome.value)
-        if affected.has_origins:
-            engine.facts.record_escape(
-                affected,
-                node=statement,
-                actor=actor,
-                operation=f"control:{kind}_suppression",
-                sink=f"python.{kind}",
-                reason="unknown_context_manager_suppression",
-                path=engine.paths[module],
-                line=int(statement.lineno),
-                ordinal=0,
+    outcomes = [copy_outcome(outcome) for outcome in body_result.outcomes]
+    outcomes = _exit_context_managers(
+        engine,
+        managers,
+        outcomes,
+        statement=statement,
+        kind=kind,
+        module=module,
+        actor=actor,
+        prefix_states=prefix_states,
+    )
+    return BlockResult(changed, outcomes)
+
+
+def _exit_context_managers(
+    engine: StatementEngine,
+    managers: list[tuple[bool, FlowValue]],
+    outcomes: list[Outcome],
+    *,
+    statement: ast.With | ast.AsyncWith,
+    kind: str,
+    module: str,
+    actor: str,
+    prefix_states: list[StateSnapshot] | None,
+) -> list[Outcome]:
+    for sqlite_manager, context_value in reversed(managers):
+        exited: list[Outcome] = []
+        for outcome in outcomes:
+            _record_snapshot(prefix_states, outcome.env, outcome.object_env)
+            if sqlite_manager:
+                operation = (
+                    "sqlite.transaction.implicit_rollback"
+                    if outcome.kind == "raise"
+                    else "sqlite.transaction.implicit_commit"
+                )
+                _record_sqlite_context_exit(
+                    engine,
+                    context_value,
+                    statement,
+                    operation=operation,
+                    module=module,
+                    actor=actor,
+                )
+                exited.append(copy_outcome(outcome))
+                continue
+            exited.append(copy_outcome(outcome))
+            if outcome.kind != "raise":
+                continue
+            affected = context_value.merged(outcome.value)
+            if affected.has_origins:
+                engine.facts.record_escape(
+                    affected,
+                    node=statement,
+                    actor=actor,
+                    operation=f"control:{kind}_suppression",
+                    sink=f"python.{kind}",
+                    reason="unknown_context_manager_suppression",
+                    path=engine.paths[module],
+                    line=int(statement.lineno),
+                    ordinal=0,
+                )
+            suppressed_env, suppressed_objects = copy_state(
+                outcome.env, outcome.object_env
             )
-        suppressed_env, suppressed_objects = copy_state(outcome.env, outcome.object_env)
-        outcomes.append(
-            Outcome("normal", suppressed_env, suppressed_objects, FlowValue())
-        )
-    return BlockResult(changed, normalize_outcomes(outcomes))
+            exited.append(
+                Outcome("normal", suppressed_env, suppressed_objects, FlowValue())
+            )
+        outcomes = normalize_outcomes(exited)
+    return outcomes
+
+
+def _record_sqlite_context_exit(
+    engine: StatementEngine,
+    value: FlowValue,
+    statement: ast.With | ast.AsyncWith,
+    *,
+    operation: str,
+    module: str,
+    actor: str,
+) -> None:
+    if not value.has_origins:
+        return
+    engine.facts.record_access(
+        value,
+        node=statement,
+        actor=actor,
+        mode="write",
+        operation=operation,
+        sink="sqlite3.Connection.__exit__",
+        path=engine.paths[module],
+        line=int(statement.lineno),
+        ordinal=0,
+    )
 
 
 def analyze_match(

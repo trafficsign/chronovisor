@@ -298,6 +298,14 @@ def _analyze_outcome_statement(
         return BlockResult(False, [Outcome("continue", env, object_env, FlowValue())])
     if isinstance(statement, ast.Delete):
         for target in statement.targets:
+            _bind_deleted_attribute_targets(
+                engine,
+                target,
+                actor=actor,
+                class_ref=class_ref,
+                env=env,
+                object_env=object_env,
+            )
             _delete_name_target(target, env=env, object_env=object_env)
         return BlockResult(False, [Outcome("normal", env, object_env, FlowValue())])
     if isinstance(statement, ast.If):
@@ -470,6 +478,36 @@ def _delete_name_target(
     elif isinstance(target, (ast.Tuple, ast.List)):
         for child in target.elts:
             _delete_name_target(child, env=env, object_env=object_env)
+
+
+def _bind_deleted_attribute_targets(
+    engine: StatementEngine,
+    target: ast.expr,
+    *,
+    actor: str,
+    class_ref: str | None,
+    env: dict[str, FlowValue],
+    object_env: dict[str, set[str]],
+) -> None:
+    if isinstance(target, ast.Attribute):
+        engine._bind_target(
+            target,
+            FlowValue(),
+            actor=actor,
+            class_ref=class_ref,
+            env=env,
+            object_env=object_env,
+        )
+    elif isinstance(target, (ast.Tuple, ast.List)):
+        for child in target.elts:
+            _bind_deleted_attribute_targets(
+                engine,
+                child,
+                actor=actor,
+                class_ref=class_ref,
+                env=env,
+                object_env=object_env,
+            )
 
 
 __all__ = [

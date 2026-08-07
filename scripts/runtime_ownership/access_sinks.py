@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import ast
+import re
 from collections.abc import Mapping, Sequence
-from typing import Protocol
+from typing import Literal, Protocol
+from urllib.parse import parse_qsl, urlsplit
 
 from .access_facts import AccessFactCollector
 from .access_model import (
@@ -14,12 +16,21 @@ from .access_model import (
     OS_OPEN_MODIFIER_FLAGS,
     PATH_TRANSFORMS,
     READ_PATH_METHODS,
+    SQLITE_TYPE_OBJECT_PREFIX,
+    STDLIB_MODULE_WILDCARD_ATTRIBUTE,
     STDLIB_OS_CALLS,
+    STDLIB_SQLITE3_CALLS,
+    SUPPORTED_STDLIB_MODULES,
     WRITE_PATH_METHODS,
     FlowValue,
     FunctionInfo,
     _open_mode,
     is_path_receiver,
+    is_precise_stdlib_module,
+    precise_stdlib_module_name,
+    sqlite_handle_kind,
+    stdlib_call_targets,
+    tag_sqlite_handle,
 )
 from .access_resolver import (
     CallResolution,
@@ -32,6 +43,7 @@ from .access_resolver import (
 class AccessEngine(Protocol):
     paths: dict[str, str]
     known_modules: frozenset[str]
+    resource_locators: dict[str, str]
     functions: dict[str, FunctionInfo]
     nested_functions: dict[tuple[str, str], str]
     function_parents: dict[str, str | None]
@@ -92,6 +104,15 @@ class AccessEngine(Protocol):
         site_node: ast.AST | None = None,
     ) -> None: ...
 
+    def _taint_stdlib_module_attribute(
+        self,
+        base: FlowValue,
+        *,
+        attribute: str,
+        env: dict[str, FlowValue],
+        object_env: dict[str, set[str]],
+    ) -> bool: ...
+
 
 def _eval_expression(
     engine: AccessEngine,
@@ -120,6 +141,162 @@ def _merge_values(values: Sequence[FlowValue]) -> FlowValue:
     for value in values:
         merged = merged.merged(value)
     return merged
+
+
+def _is_unshadowed_builtin(
+    engine: AccessEngine,
+    node: ast.Call,
+    *,
+    name: str,
+    actor: str,
+    module: str,
+    env: Mapping[str, FlowValue],
+) -> bool:
+    if not isinstance(node.func, ast.Name) or node.func.id != name:
+        return False
+    if name in env or name in engine.imported_symbols.get(module, {}):
+        return False
+    info = engine.functions.get(actor)
+    return info is None or (
+        name not in info.parameters and name not in info.local_names
+    )
+
+
+def _evaluate_builtin_stdlib_module_mutation(
+    engine: AccessEngine,
+    node: ast.Call,
+    argument_values: Sequence[FlowValue],
+    *,
+    module: str,
+    actor: str,
+    env: dict[str, FlowValue],
+    object_env: dict[str, set[str]],
+    ordinal: int,
+) -> FlowValue | None:
+    name = node.func.id if isinstance(node.func, ast.Name) else ""
+    arity = {"setattr": 3, "delattr": 2}.get(name)
+    if arity is None or not _is_unshadowed_builtin(
+        engine,
+        node,
+        name=name,
+        actor=actor,
+        module=module,
+        env=env,
+    ):
+        return None
+    if (
+        len(node.args) != arity
+        or any(isinstance(argument, ast.Starred) for argument in node.args)
+        or node.keywords
+    ):
+        return FlowValue()
+    attribute_node = node.args[1]
+    if isinstance(attribute_node, ast.Constant):
+        if not isinstance(attribute_node.value, str):
+            return FlowValue()
+        attribute = attribute_node.value
+    else:
+        attribute = STDLIB_MODULE_WILDCARD_ATTRIBUTE
+    if not engine._taint_stdlib_module_attribute(
+        argument_values[0],
+        attribute=attribute,
+        env=env,
+        object_env=object_env,
+    ):
+        return None
+    affected = _merge_values(argument_values[1:])
+    if affected.has_origins:
+        engine.facts.record_escape(
+            affected,
+            node=node,
+            actor=actor,
+            operation=f"builtin.{name}",
+            sink=f"builtins.{name}",
+            reason="registered_locator_to_stdlib_module_mutation",
+            path=engine.paths[module],
+            line=int(node.lineno),
+            ordinal=ordinal,
+        )
+    return FlowValue()
+
+
+def _taint_callable_stdlib_modules(
+    engine: AccessEngine,
+    values: Sequence[FlowValue],
+    *,
+    env: dict[str, FlowValue],
+    object_env: dict[str, set[str]],
+) -> None:
+    pending = list(values)
+    modules: set[str] = set()
+    while pending:
+        value = pending.pop()
+        modules.update(
+            module_ref
+            for module_ref in value.module_refs
+            if module_ref in SUPPORTED_STDLIB_MODULES
+            and module_ref not in engine.known_modules
+        )
+        if value.structured_items is not None:
+            pending.extend(value.structured_items)
+    for module_ref in sorted(modules):
+        base = next(
+            (
+                value
+                for value in values
+                if precise_stdlib_module_name(value) == module_ref
+            ),
+            FlowValue(module_refs={module_ref}),
+        )
+        engine._taint_stdlib_module_attribute(
+            base,
+            attribute=STDLIB_MODULE_WILDCARD_ATTRIBUTE,
+            env=env,
+            object_env=object_env,
+        )
+
+
+def _canonical_stdlib_call_sink(
+    node: ast.Call,
+    receiver: FlowValue,
+    env: Mapping[str, FlowValue],
+    *,
+    known_modules: frozenset[str],
+) -> str | None:
+    candidates: set[str] = set()
+    if isinstance(node.func, ast.Attribute):
+        module_ref = precise_stdlib_module_name(receiver)
+        if (
+            module_ref is not None
+            and module_ref not in known_modules
+            and _is_supported_stdlib_call(module_ref, node.func.attr)
+        ):
+            candidates.add(f"{module_ref}.{node.func.attr}")
+    elif isinstance(node.func, ast.Name) and node.func.id in env:
+        value = env[node.func.id]
+        candidates.update(stdlib_call_targets(value))
+        for target in value.call_targets:
+            module_ref, separator, attribute = target.partition(":")
+            if (
+                separator
+                and module_ref not in known_modules
+                and _is_supported_stdlib_call(module_ref, attribute)
+            ):
+                candidates.add(f"{module_ref}.{attribute}")
+    supported = {
+        candidate
+        for candidate in candidates
+        if candidate.split(".", 1)[0] not in known_modules
+    }
+    return next(iter(supported)) if len(supported) == 1 else None
+
+
+def _is_supported_stdlib_call(module_ref: str, attribute: str) -> bool:
+    if module_ref == "os":
+        return attribute in STDLIB_OS_CALLS
+    if module_ref == "sqlite3":
+        return attribute in STDLIB_SQLITE3_CALLS
+    return False
 
 
 def _evaluate_path_transform(
@@ -270,14 +447,11 @@ def _evaluate_path_move(
     return destination.bound(f"result:path.{method}.destination")
 
 
-def _is_precise_os_module(value: FlowValue) -> bool:
-    return (
-        value.module_refs == {"os"}
-        and not value.origins
-        and not value.call_targets
-        and not value.class_targets
-        and not value.unknown_callable
-        and not value.closure_instances
+def _is_precise_os_module(value: FlowValue, *, attribute: str) -> bool:
+    return is_precise_stdlib_module(
+        value,
+        module="os",
+        attribute=attribute,
     )
 
 
@@ -291,7 +465,9 @@ def _stdlib_os_call_name(
     if "os" in known_modules:
         return None
     if isinstance(node.func, ast.Attribute):
-        if node.func.attr in STDLIB_OS_CALLS and _is_precise_os_module(receiver):
+        if node.func.attr in STDLIB_OS_CALLS and _is_precise_os_module(
+            receiver, attribute=node.func.attr
+        ):
             return node.func.attr
         return None
     if not isinstance(node.func, ast.Name) or node.func.id not in env:
@@ -343,10 +519,150 @@ def _precise_argument_expression(
     candidates: list[ast.expr] = []
     if len(node.args) > index and not isinstance(node.args[index], ast.Starred):
         candidates.append(node.args[index])
-    candidates.extend(
-        item.value for item in node.keywords if item.arg == keyword
-    )
+    candidates.extend(_keyword_argument_expressions(node, keyword=keyword))
     return candidates[0] if len(candidates) == 1 else None
+
+
+def _keyword_argument_expressions(
+    node: ast.Call,
+    *,
+    keyword: str,
+) -> list[ast.expr]:
+    expressions = [item.value for item in node.keywords if item.arg == keyword]
+    for item in node.keywords:
+        if item.arg is not None or not isinstance(item.value, ast.Dict):
+            continue
+        for key, value in zip(
+            item.value.keys,
+            item.value.values,
+            strict=True,
+        ):
+            if (
+                isinstance(key, ast.Constant)
+                and isinstance(key.value, str)
+                and key.value == keyword
+            ):
+                expressions.append(value)
+    return expressions
+
+
+def _expanded_keyword_arguments(
+    node: ast.Call,
+) -> list[tuple[str, ast.expr]] | None:
+    expanded: list[tuple[str, ast.expr]] = []
+    for item in node.keywords:
+        if item.arg is not None:
+            expanded.append((item.arg, item.value))
+            continue
+        if not isinstance(item.value, ast.Dict):
+            return None
+        for key, value in zip(
+            item.value.keys,
+            item.value.values,
+            strict=True,
+        ):
+            if not (
+                isinstance(key, ast.Constant)
+                and isinstance(key.value, str)
+            ):
+                return None
+            expanded.append((key.value, value))
+    return expanded
+
+
+def _has_unknown_keyword_unpack(node: ast.Call) -> bool:
+    for item in node.keywords:
+        if item.arg is not None:
+            continue
+        if not isinstance(item.value, ast.Dict) or not all(
+            isinstance(key, ast.Constant) and isinstance(key.value, str)
+            for key in item.value.keys
+        ):
+            return True
+    return False
+
+
+def _valid_named_signature(
+    node: ast.Call,
+    *,
+    positional_names: Sequence[str],
+    keyword_only_names: frozenset[str],
+    required_names: frozenset[str],
+) -> bool:
+    if any(isinstance(argument, ast.Starred) for argument in node.args):
+        return False
+    if len(node.args) > len(positional_names):
+        return False
+    keywords = _expanded_keyword_arguments(node)
+    if keywords is None:
+        return False
+    assigned = set(positional_names[: len(node.args)])
+    allowed = set(positional_names) | set(keyword_only_names)
+    for name, _expression in keywords:
+        if name not in allowed or name in assigned:
+            return False
+        assigned.add(name)
+    return required_names <= assigned
+
+
+def _valid_sqlite_connect_signature(node: ast.Call) -> bool:
+    return _valid_named_signature(
+        node,
+        positional_names=(
+            "database",
+            "timeout",
+            "detect_types",
+            "isolation_level",
+            "check_same_thread",
+            "factory",
+            "cached_statements",
+            "uri",
+        ),
+        keyword_only_names=frozenset({"autocommit"}),
+        required_names=frozenset({"database"}),
+    )
+
+
+def _valid_sqlite_method_signature(node: ast.Call, *, method: str) -> bool:
+    if any(isinstance(argument, ast.Starred) for argument in node.args):
+        return False
+    keywords = _expanded_keyword_arguments(node)
+    if keywords is None:
+        return False
+    if method == "execute":
+        return 1 <= len(node.args) <= 2 and not keywords
+    if method == "executemany":
+        return len(node.args) == 2 and not keywords
+    if method == "executescript":
+        return len(node.args) == 1 and not keywords
+    if method in {"commit", "rollback", "close", "fetchone", "fetchall"}:
+        return not node.args and not keywords
+    if method == "fetchmany":
+        return (
+            len(node.args) <= 1
+            and not keywords
+            or not node.args
+            and [name for name, _expression in keywords] == ["size"]
+        )
+    if method == "cursor":
+        return (
+            len(node.args) <= 1
+            and not keywords
+            or not node.args
+            and [name for name, _expression in keywords] == ["factory"]
+        )
+    return False
+
+
+def _argument_is_provided(
+    node: ast.Call,
+    *,
+    index: int,
+    keyword: str,
+) -> bool:
+    return len(node.args) > index or bool(
+        _keyword_argument_expressions(node, keyword=keyword)
+    )
 
 
 def _is_precise_os_flag(value: FlowValue, flag: str) -> bool:
@@ -373,7 +689,7 @@ def _os_flag_names(
         expression.value, ast.Name
     ):
         base = env.get(expression.value.id, FlowValue())
-        if _is_precise_os_module(base):
+        if _is_precise_os_module(base, attribute=expression.attr):
             flag = expression.attr
             if flag in OS_OPEN_ACCESS_FLAGS | OS_OPEN_MODIFIER_FLAGS:
                 return frozenset({flag})
@@ -614,6 +930,697 @@ def _evaluate_os_move(
     return FlowValue()
 
 
+SQLiteAccessMode = Literal["read", "write", "read_write"]
+_SQL_DYNAMIC = "\0sqlite-dynamic\0"
+_SQLITE_READ_VERBS = frozenset({"SELECT"})
+_SQLITE_WRITE_VERBS = frozenset(
+    {
+        "ALTER",
+        "CREATE",
+        "DELETE",
+        "DROP",
+        "INSERT",
+        "REPLACE",
+        "UPDATE",
+        "VACUUM",
+    }
+)
+_SQLITE_READ_PRAGMAS = frozenset(
+    {
+        "application_id",
+        "collation_list",
+        "compile_options",
+        "data_version",
+        "database_list",
+        "foreign_key_check",
+        "foreign_key_list",
+        "freelist_count",
+        "function_list",
+        "index_info",
+        "index_list",
+        "index_xinfo",
+        "integrity_check",
+        "journal_mode",
+        "module_list",
+        "page_count",
+        "page_size",
+        "pragma_list",
+        "quick_check",
+        "schema_version",
+        "table_info",
+        "table_list",
+        "table_xinfo",
+        "user_version",
+    }
+)
+_SQLITE_WRITE_PRAGMAS = frozenset(
+    {"incremental_vacuum", "optimize", "shrink_memory", "wal_checkpoint"}
+)
+_SQLITE_READ_PRAGMA_ARGUMENTS = frozenset(
+    {
+        "foreign_key_check",
+        "foreign_key_list",
+        "index_info",
+        "index_xinfo",
+        "integrity_check",
+        "quick_check",
+        "table_info",
+        "table_xinfo",
+    }
+)
+_SQLITE_WRITE_PRAGMA_ARGUMENTS = frozenset(
+    {"application_id", "journal_mode", "page_size", "user_version"}
+)
+
+
+def _tag_sqlite_handle(value: FlowValue, *, kind: str) -> FlowValue:
+    return tag_sqlite_handle(value, kind=kind)
+
+
+def _is_precise_sqlite3_module(
+    value: FlowValue, *, attribute: str
+) -> bool:
+    return is_precise_stdlib_module(
+        value,
+        module="sqlite3",
+        attribute=attribute,
+    )
+
+
+def _is_precise_sqlite3_type(
+    expression: ast.expr | None,
+    env: Mapping[str, FlowValue],
+    *,
+    type_name: str,
+) -> bool:
+    if isinstance(expression, ast.Attribute) and isinstance(
+        expression.value, ast.Name
+    ):
+        return (
+            expression.attr == type_name
+            and _is_precise_sqlite3_module(
+                env.get(expression.value.id, FlowValue()),
+                attribute=type_name,
+            )
+        )
+    if not isinstance(expression, ast.Name):
+        return False
+    value = env.get(expression.id, FlowValue())
+    return (
+        value.object_types == {f"{SQLITE_TYPE_OBJECT_PREFIX}{type_name}"}
+        and not value.origins
+        and not value.module_refs
+        and not value.call_targets
+        and not value.class_targets
+        and not value.unknown_callable
+        and not value.closure_instances
+    )
+
+
+def _stdlib_sqlite3_call_name(
+    node: ast.Call,
+    receiver: FlowValue,
+    env: Mapping[str, FlowValue],
+    *,
+    known_modules: frozenset[str],
+) -> str | None:
+    if "sqlite3" in known_modules:
+        return None
+    if isinstance(node.func, ast.Attribute):
+        if (
+            node.func.attr in STDLIB_SQLITE3_CALLS
+            and _is_precise_sqlite3_module(
+                receiver, attribute=node.func.attr
+            )
+        ):
+            return node.func.attr
+        return None
+    if not isinstance(node.func, ast.Name) or node.func.id not in env:
+        return None
+    value = env[node.func.id]
+    for name in STDLIB_SQLITE3_CALLS:
+        if (
+            value.call_targets == {f"sqlite3:{name}"}
+            and not value.origins
+            and not value.module_refs
+            and not value.class_targets
+            and not value.unknown_callable
+            and not value.closure_instances
+        ):
+            return name
+    return None
+
+
+def _static_text_shape(expression: ast.expr | None) -> str | None:
+    if isinstance(expression, ast.Constant) and isinstance(expression.value, str):
+        return expression.value
+    if not isinstance(expression, ast.JoinedStr):
+        return None
+    parts: list[str] = []
+    for item in expression.values:
+        if isinstance(item, ast.Constant) and isinstance(item.value, str):
+            parts.append(item.value)
+        elif isinstance(item, ast.FormattedValue):
+            parts.append(_SQL_DYNAMIC)
+        else:
+            return None
+    return "".join(parts)
+
+
+def _database_shape_has_read_only_mode(
+    expression: ast.expr | None,
+    value: FlowValue,
+    resource_locators: Mapping[str, str],
+) -> bool:
+    shape = _static_text_shape(expression)
+    locators = [
+        resource_locators[resource_id]
+        for resource_id in value.origins
+        if resource_id in resource_locators
+    ]
+    if shape is not None:
+        if _SQL_DYNAMIC not in shape:
+            return _sqlite_uri_is_read_only(shape)
+        if shape.count(_SQL_DYNAMIC) != 1 or not locators:
+            return False
+        return all(
+            _sqlite_uri_is_read_only(shape.replace(_SQL_DYNAMIC, locator))
+            for locator in locators
+        )
+    if not _value_preserves_locator_shape(value):
+        return False
+    return bool(locators) and all(_sqlite_uri_is_read_only(uri) for uri in locators)
+
+
+def _sqlite_uri_is_read_only(uri: str) -> bool:
+    if not uri.startswith("file:"):
+        return False
+    parsed = urlsplit(uri)
+    if parsed.scheme != "file" or _SQL_DYNAMIC in parsed.query:
+        return False
+    modes = [
+        value
+        for name, value in parse_qsl(parsed.query, keep_blank_values=True)
+        if name == "mode"
+    ]
+    return bool(modes) and all(mode == "ro" for mode in modes)
+
+
+def _value_preserves_locator_shape(value: FlowValue) -> bool:
+    return all(
+        not any(
+            step.startswith(("expression:", "transform:"))
+            for step in chain
+        )
+        for chains in value.origins.values()
+        for chain in chains
+    )
+
+
+def _is_static_true(expression: ast.expr | None) -> bool:
+    return isinstance(expression, ast.Constant) and expression.value is True
+
+
+def _record_sqlite_escape(
+    engine: AccessEngine,
+    value: FlowValue,
+    node: ast.Call,
+    *,
+    operation: str,
+    reason: str,
+    module: str,
+    actor: str,
+    ordinal: int,
+) -> None:
+    if not value.has_origins:
+        return
+    engine.facts.record_escape(
+        value,
+        node=node,
+        actor=actor,
+        operation=operation,
+        sink="sqlite3",
+        reason=reason,
+        path=engine.paths[module],
+        line=int(node.lineno),
+        ordinal=ordinal,
+    )
+
+
+def _evaluate_sqlite_connect(
+    engine: AccessEngine,
+    node: ast.Call,
+    argument_values: Sequence[FlowValue],
+    keyword_values: Mapping[str, FlowValue],
+    unknown_keyword_unpack: FlowValue,
+    *,
+    module: str,
+    actor: str,
+    env: Mapping[str, FlowValue],
+    ordinal: int,
+) -> FlowValue:
+    database_arguments = []
+    if argument_values:
+        database_arguments.append(argument_values[0])
+    if "database" in keyword_values:
+        database_arguments.append(keyword_values["database"])
+    database_origins = _merge_values(database_arguments)
+    auxiliary_origins = unknown_keyword_unpack.merged(
+        _merge_values(
+            [
+                *argument_values[1:],
+                *(
+                    value
+                    for name, value in keyword_values.items()
+                    if name != "database"
+                ),
+            ]
+        )
+    )
+    if not _valid_sqlite_connect_signature(node):
+        _record_sqlite_escape(
+            engine,
+            database_origins,
+            node,
+            operation="sqlite.connect",
+            reason="invalid_or_ambiguous_sqlite_signature",
+            module=module,
+            actor=actor,
+            ordinal=ordinal,
+        )
+        _record_sqlite_escape(
+            engine,
+            auxiliary_origins,
+            node,
+            operation="sqlite.connect.arguments",
+            reason="ambiguous_registered_origin_sqlite_connect_arguments",
+            module=module,
+            actor=actor,
+            ordinal=ordinal,
+        )
+        return FlowValue()
+    database, ambiguous_database = _precise_argument_value(
+        node,
+        argument_values,
+        keyword_values,
+        index=0,
+        keyword="database",
+    )
+    implicated = ambiguous_database.merged(auxiliary_origins)
+    if database.has_origins and not is_path_receiver(database):
+        implicated = implicated.merged(database)
+    if implicated.has_origins:
+        _record_sqlite_escape(
+            engine,
+            implicated.merged(database),
+            node,
+            operation="sqlite.connect",
+            reason="ambiguous_registered_origin_sqlite_connect_arguments",
+            module=module,
+            actor=actor,
+            ordinal=ordinal,
+        )
+        return FlowValue()
+    if _has_unknown_keyword_unpack(node):
+        _record_sqlite_escape(
+            engine,
+            database,
+            node,
+            operation="sqlite.connect",
+            reason="ambiguous_registered_origin_sqlite_connect_arguments",
+            module=module,
+            actor=actor,
+            ordinal=ordinal,
+        )
+        return FlowValue()
+    database_expression = _precise_argument_expression(
+        node, index=0, keyword="database"
+    )
+    if database_expression is None:
+        _record_sqlite_escape(
+            engine,
+            database,
+            node,
+            operation="sqlite.connect",
+            reason="ambiguous_registered_origin_sqlite_connect_arguments",
+            module=module,
+            actor=actor,
+            ordinal=ordinal,
+        )
+        return FlowValue()
+    factory_expression = _precise_argument_expression(
+        node, index=5, keyword="factory"
+    )
+    if _argument_is_provided(node, index=5, keyword="factory") and not (
+        _is_precise_sqlite3_type(
+            factory_expression,
+            env,
+            type_name="Connection",
+        )
+    ):
+        _record_sqlite_escape(
+            engine,
+            database,
+            node,
+            operation="sqlite.connect",
+            reason="unsupported_sqlite_connect_factory",
+            module=module,
+            actor=actor,
+            ordinal=ordinal,
+        )
+        return FlowValue()
+    uri_expression = _precise_argument_expression(node, index=7, keyword="uri")
+    read_only = _is_static_true(uri_expression) and (
+        _database_shape_has_read_only_mode(
+            database_expression,
+            database,
+            engine.resource_locators,
+        )
+    )
+    if database.has_origins:
+        engine.facts.record_access(
+            database,
+            node=node,
+            actor=actor,
+            mode="read" if read_only else "read_write",
+            operation="sqlite.connect:ro" if read_only else "sqlite.connect:rwc",
+            sink="sqlite3.connect",
+            path=engine.paths[module],
+            line=int(node.lineno),
+            ordinal=ordinal,
+        )
+    return _tag_sqlite_handle(
+        database.bound("result:sqlite.connect:connection"),
+        kind="connection",
+    )
+
+
+def _strip_sql_prefix(text: str) -> str | None:
+    remaining = text
+    while True:
+        remaining = remaining.lstrip()
+        if remaining.startswith("--"):
+            newline = remaining.find("\n")
+            if newline < 0:
+                return ""
+            if _SQL_DYNAMIC in remaining[:newline]:
+                return None
+            remaining = remaining[newline + 1 :]
+            continue
+        if remaining.startswith("/*"):
+            end = remaining.find("*/", 2)
+            if end < 0:
+                return None
+            if _SQL_DYNAMIC in remaining[: end + 2]:
+                return None
+            remaining = remaining[end + 2 :]
+            continue
+        return remaining
+
+
+def _classify_pragma(text: str) -> SQLiteAccessMode | None:
+    if _SQL_DYNAMIC in text:
+        return None
+    match = re.match(
+        r"PRAGMA\s+(?:(?:[A-Za-z_]\w*)\.)?([A-Za-z_]\w*)(.*)$",
+        text,
+        re.IGNORECASE | re.DOTALL,
+    )
+    if match is None:
+        return None
+    name = match.group(1).lower()
+    remainder = match.group(2).strip()
+    if "=" in remainder:
+        return "write"
+    if remainder.startswith("("):
+        if name in _SQLITE_READ_PRAGMA_ARGUMENTS:
+            return "read"
+        if name in (_SQLITE_WRITE_PRAGMA_ARGUMENTS | _SQLITE_WRITE_PRAGMAS):
+            return "write"
+        return None
+    if remainder:
+        return None
+    if name in _SQLITE_WRITE_PRAGMAS:
+        return "write"
+    if name in _SQLITE_READ_PRAGMAS:
+        return "read"
+    return None
+
+
+def _classify_sql_statement(
+    text: str,
+) -> tuple[SQLiteAccessMode, str | None] | None:
+    stripped = _strip_sql_prefix(text)
+    if stripped is None:
+        return None
+    match = re.match(r"([A-Za-z]+)", stripped)
+    if match is None:
+        return None
+    verb = match.group(1).upper()
+    if verb in _SQLITE_READ_VERBS:
+        return "read", None
+    if verb in _SQLITE_WRITE_VERBS:
+        return "write", None
+    if verb == "PRAGMA":
+        mode = _classify_pragma(stripped)
+        return None if mode is None else (mode, None)
+    if verb == "BEGIN" and re.match(
+        r"BEGIN\s+IMMEDIATE(?:\s|;|$)", stripped, re.IGNORECASE
+    ):
+        return "write", "sqlite.transaction.begin_immediate"
+    return None
+
+
+def _join_sqlite_modes(modes: Sequence[SQLiteAccessMode]) -> SQLiteAccessMode:
+    if not modes:
+        return "read"
+    if all(mode == "read" for mode in modes):
+        return "read"
+    if all(mode == "write" for mode in modes):
+        return "write"
+    return "read_write"
+
+
+def _split_sql_statements(text: str) -> list[str] | None:
+    statements: list[str] = []
+    start = 0
+    index = 0
+    quote_end: str | None = None
+    while index < len(text):
+        character = text[index]
+        if quote_end is not None:
+            if character == quote_end:
+                if quote_end != "]" and index + 1 < len(text) and (
+                    text[index + 1] == quote_end
+                ):
+                    index += 2
+                    continue
+                quote_end = None
+            index += 1
+            continue
+        if text.startswith("--", index):
+            newline = text.find("\n", index + 2)
+            index = len(text) if newline < 0 else newline + 1
+            continue
+        if text.startswith("/*", index):
+            end = text.find("*/", index + 2)
+            if end < 0:
+                return None
+            index = end + 2
+            continue
+        if character in {"'", '"', "`"}:
+            quote_end = character
+        elif character == "[":
+            quote_end = "]"
+        elif character == ";":
+            statement = text[start:index].strip()
+            if statement:
+                statements.append(statement)
+            start = index + 1
+        index += 1
+    if quote_end is not None:
+        return None
+    tail = text[start:].strip()
+    if tail:
+        statements.append(tail)
+    return statements
+
+
+def _classify_sql(
+    expression: ast.expr | None,
+    *,
+    method: str,
+) -> tuple[SQLiteAccessMode, str] | None:
+    shape = _static_text_shape(expression)
+    if shape is None:
+        return None
+    if method != "executescript":
+        statements = _split_sql_statements(shape)
+        if statements is None or len(statements) != 1:
+            return None
+        classified = _classify_sql_statement(statements[0])
+        if classified is None:
+            return None
+        mode, special_operation = classified
+        return mode, special_operation or f"sqlite.{method}:{mode}"
+    if _SQL_DYNAMIC in shape:
+        return None
+    statements = _split_sql_statements(shape)
+    if statements is None:
+        return None
+    classifications = [_classify_sql_statement(part) for part in statements]
+    if not statements or any(item is None for item in classifications):
+        return None
+    modes = [item[0] for item in classifications if item is not None]
+    mode = _join_sqlite_modes(modes)
+    return mode, f"sqlite.executescript:{mode}"
+
+
+def _evaluate_sqlite_handle_call(
+    engine: AccessEngine,
+    node: ast.Call,
+    receiver: FlowValue,
+    argument_values: Sequence[FlowValue],
+    keyword_values: Mapping[str, FlowValue],
+    unknown_keyword_unpack: FlowValue,
+    *,
+    handle_kind: str,
+    method: str,
+    module: str,
+    actor: str,
+    env: Mapping[str, FlowValue],
+    ordinal: int,
+) -> FlowValue | None:
+    execute_methods = {"execute", "executemany", "executescript"}
+    fetch_methods = {"fetchone", "fetchall", "fetchmany"}
+    recognized = execute_methods | fetch_methods | {
+        "close",
+        "commit",
+        "cursor",
+        "rollback",
+    }
+    if method not in recognized:
+        return None
+    arguments = _merge_values(
+        [*argument_values, *keyword_values.values(), unknown_keyword_unpack]
+    )
+    _record_sqlite_escape(
+        engine,
+        arguments,
+        node,
+        operation=f"sqlite.{method}.arguments",
+        reason="ambiguous_registered_origin_sqlite_arguments",
+        module=module,
+        actor=actor,
+        ordinal=ordinal,
+    )
+    if not _valid_sqlite_method_signature(node, method=method):
+        _record_sqlite_escape(
+            engine,
+            receiver,
+            node,
+            operation=f"sqlite.{method}",
+            reason="invalid_or_ambiguous_sqlite_signature",
+            module=module,
+            actor=actor,
+            ordinal=ordinal,
+        )
+        return FlowValue()
+    has_unknown_unpack = _has_unknown_keyword_unpack(node)
+    if method == "cursor" and handle_kind == "connection":
+        factory_expression = _precise_argument_expression(
+            node, index=0, keyword="factory"
+        )
+        unsupported_factory = has_unknown_unpack or (
+            _argument_is_provided(node, index=0, keyword="factory")
+            and not _is_precise_sqlite3_type(
+                factory_expression, env, type_name="Cursor"
+            )
+        )
+        if unsupported_factory:
+            _record_sqlite_escape(
+                engine,
+                receiver,
+                node,
+                operation="sqlite.cursor",
+                reason="unsupported_sqlite_cursor_factory",
+                module=module,
+                actor=actor,
+                ordinal=ordinal,
+            )
+            return FlowValue()
+        return _tag_sqlite_handle(
+            receiver.bound("result:sqlite.connection.cursor"), kind="cursor"
+        )
+    if method in execute_methods:
+        keyword = "sql_script" if method == "executescript" else "sql"
+        sql_expression = _precise_argument_expression(
+            node,
+            index=0,
+            keyword=keyword,
+        )
+        classification = (
+            None
+            if has_unknown_unpack
+            else _classify_sql(sql_expression, method=method)
+        )
+        if classification is None:
+            _record_sqlite_escape(
+                engine,
+                receiver,
+                node,
+                operation=f"sqlite.{method}",
+                reason="dynamic_or_unsupported_sqlite_sql",
+                module=module,
+                actor=actor,
+                ordinal=ordinal,
+            )
+        elif receiver.has_origins:
+            engine.facts.record_access(
+                receiver,
+                node=node,
+                actor=actor,
+                mode=classification[0],
+                operation=classification[1],
+                sink=f"sqlite3.{handle_kind}.{method}",
+                path=engine.paths[module],
+                line=int(node.lineno),
+                ordinal=ordinal,
+            )
+        return _tag_sqlite_handle(
+            receiver.bound(f"result:sqlite.{method}:cursor"), kind="cursor"
+        )
+    if has_unknown_unpack:
+        _record_sqlite_escape(
+            engine,
+            receiver,
+            node,
+            operation=f"sqlite.{method}",
+            reason="ambiguous_sqlite_lifecycle_arguments",
+            module=module,
+            actor=actor,
+            ordinal=ordinal,
+        )
+        return FlowValue()
+    if method in {"commit", "rollback"} and handle_kind == "connection":
+        if receiver.has_origins:
+            engine.facts.record_access(
+                receiver,
+                node=node,
+                actor=actor,
+                mode="write",
+                operation=f"sqlite.transaction.{method}",
+                sink=f"sqlite3.Connection.{method}",
+                path=engine.paths[module],
+                line=int(node.lineno),
+                ordinal=ordinal,
+            )
+        return FlowValue()
+    if method == "close" or (method in fetch_methods and handle_kind == "cursor"):
+        return FlowValue()
+    return None
+
+
 def evaluate_call(
     engine: AccessEngine,
     node: ast.Call,
@@ -821,7 +1828,61 @@ def evaluate_call(
                 call_ordinals=call_ordinals,
             )
         )
+    builtin_mutation = _evaluate_builtin_stdlib_module_mutation(
+        engine,
+        node,
+        argument_values,
+        module=module,
+        actor=actor,
+        env=env,
+        object_env=object_env,
+        ordinal=ordinal,
+    )
+    if builtin_mutation is not None:
+        return builtin_mutation
     source_call_name = call_name(node.func)
+    canonical_call_sink = _canonical_stdlib_call_sink(
+        node,
+        receiver,
+        env,
+        known_modules=engine.known_modules,
+    )
+    sqlite3_call = _stdlib_sqlite3_call_name(
+        node,
+        receiver,
+        env,
+        known_modules=engine.known_modules,
+    )
+    if sqlite3_call == "connect":
+        return _evaluate_sqlite_connect(
+            engine,
+            node,
+            argument_values,
+            keyword_values,
+            unknown_keyword_unpack,
+            module=module,
+            actor=actor,
+            env=env,
+            ordinal=ordinal,
+        )
+    handle_kind = sqlite_handle_kind(receiver)
+    if handle_kind is not None and isinstance(node.func, ast.Attribute):
+        sqlite_result = _evaluate_sqlite_handle_call(
+            engine,
+            node,
+            receiver,
+            argument_values,
+            keyword_values,
+            unknown_keyword_unpack,
+            handle_kind=handle_kind,
+            method=node.func.attr,
+            module=module,
+            actor=actor,
+            env=env,
+            ordinal=ordinal,
+        )
+        if sqlite_result is not None:
+            return sqlite_result
     os_call = _stdlib_os_call_name(
         node,
         receiver,
@@ -968,8 +2029,36 @@ def evaluate_call(
             local_returns[target] = merged_local_return
     for target in known_targets:
         if target not in local_returns:
+            info = engine.functions[target]
+            conservative_values = [
+                *argument_values,
+                *keyword_values.values(),
+                unknown_keyword_unpack,
+                *(
+                    env[name]
+                    for name in info.referenced_names | info.nonlocal_names
+                    if name in env
+                ),
+            ]
+            _taint_callable_stdlib_modules(
+                engine,
+                conservative_values,
+                env=env,
+                object_env=object_env,
+            )
             engine._require_function_summary(target)
     if known_targets or known_class_targets:
+        if known_class_targets or has_unknown:
+            _taint_callable_stdlib_modules(
+                engine,
+                [
+                    *argument_values,
+                    *keyword_values.values(),
+                    unknown_keyword_unpack,
+                ],
+                env=env,
+                object_env=object_env,
+            )
         returned = FlowValue()
         for target in known_targets:
             info = engine.functions[target]
@@ -1037,7 +2126,7 @@ def evaluate_call(
                     node=node,
                     actor=actor,
                     operation=f"call:{source_call_name or '<dynamic>'}",
-                    sink=source_call_name or "<dynamic>",
+                    sink=canonical_call_sink or source_call_name or "<dynamic>",
                     reason="closure_to_unknown_callee",
                     path=engine.paths[module],
                     line=int(node.lineno),
@@ -1049,7 +2138,7 @@ def evaluate_call(
                     node=node,
                     actor=actor,
                     operation=f"call:{source_call_name or '<dynamic>'}",
-                    sink=source_call_name or "<dynamic>",
+                    sink=canonical_call_sink or source_call_name or "<dynamic>",
                     reason="registered_locator_to_unknown_callee",
                     path=engine.paths[module],
                     line=int(node.lineno),
@@ -1073,7 +2162,10 @@ def evaluate_call(
                 node=node,
                 actor=actor,
                 operation=f"call:{source_call_name or '<dynamic>'}",
-                sink=target or source_call_name or "<dynamic>",
+                sink=canonical_call_sink
+                or target
+                or source_call_name
+                or "<dynamic>",
                 reason="registered_locator_to_unknown_callee",
                 path=engine.paths[module],
                 line=int(node.lineno),
@@ -1110,13 +2202,23 @@ def evaluate_call(
                 ordinal=ordinal,
             )
         return FlowValue()
+    _taint_callable_stdlib_modules(
+        engine,
+        [
+            *argument_values,
+            *keyword_values.values(),
+            unknown_keyword_unpack,
+        ],
+        env=env,
+        object_env=object_env,
+    )
     if escaped.has_origins:
         engine.facts.record_escape(
             escaped,
             node=node,
             actor=actor,
             operation=f"call:{source_call_name or '<dynamic>'}",
-            sink=target or source_call_name or "<dynamic>",
+            sink=canonical_call_sink or target or source_call_name or "<dynamic>",
             reason="registered_locator_to_unknown_callee",
             path=engine.paths[module],
             line=int(node.lineno),
@@ -1128,7 +2230,7 @@ def evaluate_call(
             node=node,
             actor=actor,
             operation=f"call:{source_call_name or '<dynamic>'}",
-            sink=target or source_call_name or "<dynamic>",
+            sink=canonical_call_sink or target or source_call_name or "<dynamic>",
             reason="closure_to_unknown_callee",
             path=engine.paths[module],
             line=int(node.lineno),

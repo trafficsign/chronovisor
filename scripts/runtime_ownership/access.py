@@ -10,6 +10,9 @@ from .access_expressions import evaluate_generic_expression
 from .access_facts import AccessFactCollector
 from .access_imports import build_module_exports, resolve_module_attribute
 from .access_model import (
+    SQLITE_HANDLE_OBJECT_TYPES,
+    SQLITE_UNKNOWN_ATTRIBUTE_OBJECT_TYPE,
+    SUPPORTED_STDLIB_MODULES,
     FlowValue,
     FunctionInfo,
     _call_ordinals,
@@ -17,6 +20,11 @@ from .access_model import (
     _collect_syntax_sites,
     _import_tables,
     _module_name,
+    precise_stdlib_module_name,
+    project_sqlite_attribute,
+    stdlib_module_mutation_attributes,
+    stdlib_module_mutation_marker,
+    stdlib_module_state_name,
 )
 from .access_outcomes import analyze_block_result, join_states
 from .access_resolver import call_name
@@ -470,6 +478,9 @@ class _AccessAnalysis:
         class_ref: str | None,
         env: dict[str, FlowValue],
         object_env: dict[str, set[str]],
+        module: str | None = None,
+        source_node: ast.AST | None = None,
+        ordinal: int = 0,
     ) -> bool:
         if isinstance(target, ast.Name):
             bound = value.bound(f"alias:{actor}:{target.id}")
@@ -479,6 +490,31 @@ class _AccessAnalysis:
             else:
                 object_env.pop(target.id, None)
             return False
+        if isinstance(target, ast.Attribute) and isinstance(
+            target.value, ast.Name
+        ):
+            base = env.get(target.value.id, FlowValue())
+            module_ref = precise_stdlib_module_name(base)
+            if self._taint_stdlib_module_attribute(
+                base,
+                attribute=target.attr,
+                env=env,
+                object_env=object_env,
+            ):
+                if value.has_origins and module is not None and source_node is not None:
+                    assert module_ref is not None
+                    self.facts.record_escape(
+                        value,
+                        node=source_node,
+                        actor=actor,
+                        operation=f"assignment:{module_ref}.{target.attr}",
+                        sink=f"{module_ref}.{target.attr}",
+                        reason="registered_locator_to_stdlib_module_mutation",
+                        path=self.paths[module],
+                        line=int(getattr(source_node, "lineno", 0)),
+                        ordinal=ordinal,
+                    )
+                return False
         if (
             class_ref is not None
             and isinstance(target, ast.Attribute)
@@ -495,6 +531,32 @@ class _AccessAnalysis:
                 return True
             return False
         return False
+
+    def _taint_stdlib_module_attribute(
+        self,
+        base: FlowValue,
+        *,
+        attribute: str,
+        env: dict[str, FlowValue],
+        object_env: dict[str, set[str]],
+    ) -> bool:
+        module_ref = precise_stdlib_module_name(base)
+        if module_ref is None or module_ref in self.known_modules:
+            return False
+        marker = stdlib_module_mutation_marker(module_ref, attribute)
+        state_name = stdlib_module_state_name(module_ref)
+        state = env.get(state_name, FlowValue(module_refs={module_ref})).copy()
+        state.object_types.add(marker)
+        env[state_name] = state
+        object_env[state_name] = set(state.object_types)
+        for name, candidate in list(env.items()):
+            if candidate.module_refs != {module_ref}:
+                continue
+            tainted = candidate.copy()
+            tainted.object_types.add(marker)
+            env[name] = tainted
+            object_env[name] = set(tainted.object_types)
+        return True
 
     def _eval(
         self,
@@ -527,6 +589,18 @@ class _AccessAnalysis:
                 object_env=object_env,
                 call_ordinals=call_ordinals,
             )
+            projected, projection = project_sqlite_attribute(
+                base, attribute=node.attr
+            )
+            if projected:
+                return projection
+            if base.has_origins and base.object_types.intersection(
+                SQLITE_HANDLE_OBJECT_TYPES
+            ):
+                unknown = base.bound(f"attribute:sqlite.unknown:{node.attr}")
+                unknown.object_types.difference_update(SQLITE_HANDLE_OBJECT_TYPES)
+                unknown.object_types.add(SQLITE_UNKNOWN_ATTRIBUTE_OBJECT_TYPE)
+                return unknown
             return resolve_module_attribute(
                 base,
                 node.attr,
@@ -794,6 +868,11 @@ class _AccessAnalysis:
                     target_env=module_env,
                     target_objects=module_objects,
                 )
+            self._propagate_stdlib_module_mutations(
+                exit_env,
+                env=env,
+                object_env=object_env,
+            )
         self._store_local_closure_groups(
             local_closures,
             env=env,
@@ -808,6 +887,40 @@ class _AccessAnalysis:
                 object_env=object_env,
             )
         return result.returned
+
+    def _propagate_stdlib_module_mutations(
+        self,
+        source_env: Mapping[str, FlowValue],
+        *,
+        env: dict[str, FlowValue],
+        object_env: dict[str, set[str]],
+    ) -> None:
+        for module_ref in sorted(SUPPORTED_STDLIB_MODULES):
+            attributes = frozenset().union(
+                *(
+                    stdlib_module_mutation_attributes(
+                        value, module=module_ref
+                    )
+                    for value in source_env.values()
+                )
+            )
+            if not attributes:
+                continue
+            base = next(
+                (
+                    value
+                    for value in env.values()
+                    if precise_stdlib_module_name(value) == module_ref
+                ),
+                FlowValue(module_refs={module_ref}),
+            )
+            for attribute in sorted(attributes):
+                self._taint_stdlib_module_attribute(
+                    base,
+                    attribute=attribute,
+                    env=env,
+                    object_env=object_env,
+                )
 
     def _call_activation_id(
         self,
@@ -985,6 +1098,11 @@ class _AccessAnalysis:
             self._local_module_states
         ):
             if state_module == target_module:
+                self._propagate_stdlib_module_mutations(
+                    env,
+                    env=state_env,
+                    object_env=state_objects,
+                )
                 return state_env, state_objects, None
         if actor == f"{module}:<module>" and target_module == module:
             return env, object_env, None
@@ -1005,6 +1123,11 @@ class _AccessAnalysis:
                 module_objects[module_name] = set(object_env[name])
             else:
                 module_objects.pop(module_name, None)
+        self._propagate_stdlib_module_mutations(
+            env,
+            env=module_env,
+            object_env=module_objects,
+        )
         return module_env, module_objects, state_prefix
 
     @staticmethod
