@@ -8,7 +8,7 @@ from typing import Protocol
 
 from .access_bindings import bind_structured_target, evaluate_iterable
 from .access_facts import AccessFactCollector
-from .access_model import FlowValue
+from .access_model import FlowValue, is_path_receiver
 
 
 class ExpressionEngine(Protocol):
@@ -116,6 +116,17 @@ def evaluate_generic_expression(
             object_env=object_env,
         )
         return value
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+        return _evaluate_path_division(
+            engine,
+            node,
+            module=module,
+            actor=actor,
+            class_ref=class_ref,
+            env=env,
+            object_env=object_env,
+            call_ordinals=call_ordinals,
+        )
     if isinstance(node, ast.Lambda):
         escaped = _lambda_origins(
             engine,
@@ -244,6 +255,67 @@ def evaluate_generic_expression(
         )
         return FlowValue()
     return bound
+
+
+def _evaluate_path_division(
+    engine: ExpressionEngine,
+    node: ast.BinOp,
+    *,
+    module: str,
+    actor: str,
+    class_ref: str | None,
+    env: dict[str, FlowValue],
+    object_env: dict[str, set[str]],
+    call_ordinals: Mapping[int, int],
+) -> FlowValue:
+    left = engine._eval(
+        node.left,
+        module=module,
+        actor=actor,
+        class_ref=class_ref,
+        env=env,
+        object_env=object_env,
+        call_ordinals=call_ordinals,
+    )
+    right = engine._eval(
+        node.right,
+        module=module,
+        actor=actor,
+        class_ref=class_ref,
+        env=env,
+        object_env=object_env,
+        call_ordinals=call_ordinals,
+    )
+    if is_path_receiver(left) and not right.has_origins:
+        return left.bound("transform:truediv")
+    merged = left.merged(right).bound("expression:BinOp")
+    if right.has_origins:
+        engine.facts.record_escape(
+            merged,
+            node=node,
+            actor=actor,
+            operation="path.truediv",
+            sink="pathlib.Path.__truediv__",
+            reason="ambiguous_registered_origin_path_division",
+            path=engine.paths[module],
+            line=int(node.lineno),
+            ordinal=int(call_ordinals.get(id(node), 0)),
+        )
+        return FlowValue()
+    if left.has_origins:
+        engine.facts.record_escape(
+            merged,
+            node=node,
+            actor=actor,
+            operation="expression:binop",
+            sink="python.BinOp",
+            reason="unsupported_registered_origin_expression",
+            path=engine.paths[module],
+            line=int(node.lineno),
+            ordinal=int(call_ordinals.get(id(node), 0)),
+        )
+        return FlowValue()
+    return merged
 
 
 def _generic_children(node: ast.expr) -> list[ast.expr] | None:

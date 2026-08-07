@@ -12,6 +12,26 @@ from typing import Any, Literal
 
 MAX_BINDING_PATHS_PER_RESOURCE = 64
 
+STDLIB_OS_CALLS = frozenset({"open", "rename", "replace"})
+OS_OPEN_ACCESS_FLAGS = frozenset({"O_RDONLY", "O_WRONLY", "O_RDWR"})
+OS_OPEN_MODIFIER_FLAGS = frozenset(
+    {
+        "O_APPEND",
+        "O_CLOEXEC",
+        "O_CREAT",
+        "O_DIRECTORY",
+        "O_DSYNC",
+        "O_EXCL",
+        "O_NOFOLLOW",
+        "O_NONBLOCK",
+        "O_SYNC",
+        "O_TMPFILE",
+        "O_TRUNC",
+    }
+)
+OS_FLAG_OBJECT_PREFIX = "stdlib-os-flag:"
+OS_FD_OBJECT_TYPE = "stdlib-os-file-descriptor"
+
 READ_PATH_METHODS = frozenset(
     {
         "read_text",
@@ -40,7 +60,14 @@ WRITE_PATH_METHODS = frozenset(
     }
 )
 PATH_TRANSFORMS = frozenset(
-    {"expanduser", "resolve", "absolute", "with_suffix", "joinpath"}
+    {
+        "expanduser",
+        "resolve",
+        "absolute",
+        "with_suffix",
+        "with_name",
+        "joinpath",
+    }
 )
 
 
@@ -250,6 +277,12 @@ def _is_flow_bottom(value: FlowValue) -> bool:
         or value.closure_instances
         or value.structured_items is not None
     )
+
+
+def is_path_receiver(value: FlowValue) -> bool:
+    """Return whether an origin-bearing value is still a Path proxy."""
+
+    return value.has_origins and OS_FD_OBJECT_TYPE not in value.object_types
 
 
 def _bounded_binding_paths(
@@ -897,6 +930,10 @@ def _open_mode(node: ast.Call, *, mode_index: int) -> OpenModeResult:
 
 __all__ = [
     "MAX_BINDING_PATHS_PER_RESOURCE",
+    "OS_FD_OBJECT_TYPE",
+    "OS_FLAG_OBJECT_PREFIX",
+    "OS_OPEN_ACCESS_FLAGS",
+    "OS_OPEN_MODIFIER_FLAGS",
     "PATH_TRANSFORMS",
     "READ_PATH_METHODS",
     "WRITE_PATH_METHODS",
@@ -905,6 +942,7 @@ __all__ = [
     "RawAccess",
     "RawEscape",
     "SyntaxSite",
+    "STDLIB_OS_CALLS",
     "_call_ordinals",
     "_collect_functions",
     "_collect_syntax_sites",
@@ -912,4 +950,5 @@ __all__ = [
     "_module_name",
     "_open_mode",
     "_stable_id",
+    "is_path_receiver",
 ]

@@ -8,12 +8,18 @@ from typing import Protocol
 
 from .access_facts import AccessFactCollector
 from .access_model import (
+    OS_FD_OBJECT_TYPE,
+    OS_FLAG_OBJECT_PREFIX,
+    OS_OPEN_ACCESS_FLAGS,
+    OS_OPEN_MODIFIER_FLAGS,
     PATH_TRANSFORMS,
     READ_PATH_METHODS,
+    STDLIB_OS_CALLS,
     WRITE_PATH_METHODS,
     FlowValue,
     FunctionInfo,
     _open_mode,
+    is_path_receiver,
 )
 from .access_resolver import (
     CallResolution,
@@ -25,6 +31,7 @@ from .access_resolver import (
 
 class AccessEngine(Protocol):
     paths: dict[str, str]
+    known_modules: frozenset[str]
     functions: dict[str, FunctionInfo]
     nested_functions: dict[tuple[str, str], str]
     function_parents: dict[str, str | None]
@@ -86,6 +93,527 @@ class AccessEngine(Protocol):
     ) -> None: ...
 
 
+def _eval_expression(
+    engine: AccessEngine,
+    expression: ast.expr,
+    *,
+    module: str,
+    actor: str,
+    class_ref: str | None,
+    env: dict[str, FlowValue],
+    object_env: dict[str, set[str]],
+    call_ordinals: Mapping[int, int],
+) -> FlowValue:
+    return engine._eval(
+        expression,
+        module=module,
+        actor=actor,
+        class_ref=class_ref,
+        env=env,
+        object_env=object_env,
+        call_ordinals=call_ordinals,
+    )
+
+
+def _merge_values(values: Sequence[FlowValue]) -> FlowValue:
+    merged = FlowValue()
+    for value in values:
+        merged = merged.merged(value)
+    return merged
+
+
+def _evaluate_path_transform(
+    engine: AccessEngine,
+    node: ast.Call,
+    receiver: FlowValue,
+    *,
+    method: str,
+    module: str,
+    actor: str,
+    class_ref: str | None,
+    env: dict[str, FlowValue],
+    object_env: dict[str, set[str]],
+    call_ordinals: Mapping[int, int],
+    ordinal: int,
+) -> FlowValue:
+    argument_origins = _merge_values(
+        [
+            _eval_expression(
+                engine,
+                expression,
+                module=module,
+                actor=actor,
+                class_ref=class_ref,
+                env=env,
+                object_env=object_env,
+                call_ordinals=call_ordinals,
+            )
+            for expression in [
+                *node.args,
+                *(keyword.value for keyword in node.keywords),
+            ]
+        ]
+    )
+    if argument_origins.has_origins:
+        engine.facts.record_escape(
+            argument_origins,
+            node=node,
+            actor=actor,
+            operation=f"path.{method}",
+            sink=f"pathlib.Path.{method}",
+            reason="ambiguous_registered_origin_path_transform_argument",
+            path=engine.paths[module],
+            line=int(node.lineno),
+            ordinal=ordinal,
+        )
+        return FlowValue()
+    return receiver.bound(f"transform:{method}")
+
+
+def _evaluate_path_move(
+    engine: AccessEngine,
+    node: ast.Call,
+    receiver: FlowValue,
+    *,
+    method: str,
+    module: str,
+    actor: str,
+    class_ref: str | None,
+    env: dict[str, FlowValue],
+    object_env: dict[str, set[str]],
+    call_ordinals: Mapping[int, int],
+    ordinal: int,
+) -> FlowValue:
+    positional = [
+        _eval_expression(
+            engine,
+            expression,
+            module=module,
+            actor=actor,
+            class_ref=class_ref,
+            env=env,
+            object_env=object_env,
+            call_ordinals=call_ordinals,
+        )
+        for expression in node.args
+    ]
+    keywords = [
+        (
+            keyword.arg,
+            _eval_expression(
+                engine,
+                keyword.value,
+                module=module,
+                actor=actor,
+                class_ref=class_ref,
+                env=env,
+                object_env=object_env,
+                call_ordinals=call_ordinals,
+            ),
+        )
+        for keyword in node.keywords
+    ]
+    precise: list[FlowValue] = []
+    ambiguous: list[FlowValue] = []
+    for index, (expression, value) in enumerate(zip(node.args, positional, strict=True)):
+        if index == 0 and not isinstance(expression, ast.Starred):
+            precise.append(value)
+        else:
+            ambiguous.append(value)
+    for name, value in keywords:
+        if name == "target":
+            precise.append(value)
+        else:
+            ambiguous.append(value)
+    if len(precise) == 1:
+        destination = precise[0]
+    else:
+        ambiguous.extend(precise)
+        destination = FlowValue()
+    implicated = _merge_values(ambiguous)
+    engine.facts.record_access(
+        receiver,
+        node=node,
+        actor=actor,
+        mode="write",
+        operation=f"path.{method}",
+        sink=f"pathlib.Path.{method}",
+        path=engine.paths[module],
+        line=int(node.lineno),
+        ordinal=ordinal,
+    )
+    if destination.has_origins:
+        engine.facts.record_access(
+            destination,
+            node=node,
+            actor=actor,
+            mode="write",
+            operation=f"path.{method}.destination",
+            sink=f"pathlib.Path.{method}",
+            path=engine.paths[module],
+            line=int(node.lineno),
+            ordinal=ordinal,
+        )
+    if implicated.has_origins:
+        engine.facts.record_escape(
+            implicated,
+            node=node,
+            actor=actor,
+            operation=f"path.{method}.destination",
+            sink=f"pathlib.Path.{method}",
+            reason="ambiguous_registered_origin_path_destination",
+            path=engine.paths[module],
+            line=int(node.lineno),
+            ordinal=ordinal,
+        )
+        return FlowValue()
+    return destination.bound(f"result:path.{method}.destination")
+
+
+def _is_precise_os_module(value: FlowValue) -> bool:
+    return (
+        value.module_refs == {"os"}
+        and not value.origins
+        and not value.call_targets
+        and not value.class_targets
+        and not value.unknown_callable
+        and not value.closure_instances
+    )
+
+
+def _stdlib_os_call_name(
+    node: ast.Call,
+    receiver: FlowValue,
+    env: Mapping[str, FlowValue],
+    *,
+    known_modules: frozenset[str],
+) -> str | None:
+    if "os" in known_modules:
+        return None
+    if isinstance(node.func, ast.Attribute):
+        if node.func.attr in STDLIB_OS_CALLS and _is_precise_os_module(receiver):
+            return node.func.attr
+        return None
+    if not isinstance(node.func, ast.Name) or node.func.id not in env:
+        return None
+    value = env[node.func.id]
+    for name in STDLIB_OS_CALLS:
+        if (
+            value.call_targets == {f"os:{name}"}
+            and not value.origins
+            and not value.module_refs
+            and not value.class_targets
+            and not value.unknown_callable
+            and not value.closure_instances
+        ):
+            return name
+    return None
+
+
+def _precise_argument_value(
+    node: ast.Call,
+    argument_values: Sequence[FlowValue],
+    keyword_values: Mapping[str, FlowValue],
+    *,
+    index: int,
+    keyword: str,
+) -> tuple[FlowValue, FlowValue]:
+    candidates: list[FlowValue] = []
+    ambiguous: list[FlowValue] = []
+    if len(node.args) > index:
+        value = argument_values[index]
+        if isinstance(node.args[index], ast.Starred):
+            ambiguous.append(value)
+        else:
+            candidates.append(value)
+    if keyword in keyword_values:
+        candidates.append(keyword_values[keyword])
+    if len(candidates) == 1:
+        return candidates[0], _merge_values(ambiguous)
+    ambiguous.extend(candidates)
+    return FlowValue(), _merge_values(ambiguous)
+
+
+def _precise_argument_expression(
+    node: ast.Call,
+    *,
+    index: int,
+    keyword: str,
+) -> ast.expr | None:
+    candidates: list[ast.expr] = []
+    if len(node.args) > index and not isinstance(node.args[index], ast.Starred):
+        candidates.append(node.args[index])
+    candidates.extend(
+        item.value for item in node.keywords if item.arg == keyword
+    )
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def _is_precise_os_flag(value: FlowValue, flag: str) -> bool:
+    return (
+        value.object_types == {f"{OS_FLAG_OBJECT_PREFIX}{flag}"}
+        and not value.origins
+        and not value.module_refs
+        and not value.call_targets
+        and not value.class_targets
+        and not value.unknown_callable
+        and not value.closure_instances
+    )
+
+
+def _os_flag_names(
+    expression: ast.expr,
+    env: Mapping[str, FlowValue],
+) -> frozenset[str] | None:
+    if isinstance(expression, ast.BinOp) and isinstance(expression.op, ast.BitOr):
+        left = _os_flag_names(expression.left, env)
+        right = _os_flag_names(expression.right, env)
+        return None if left is None or right is None else left | right
+    if isinstance(expression, ast.Attribute) and isinstance(
+        expression.value, ast.Name
+    ):
+        base = env.get(expression.value.id, FlowValue())
+        if _is_precise_os_module(base):
+            flag = expression.attr
+            if flag in OS_OPEN_ACCESS_FLAGS | OS_OPEN_MODIFIER_FLAGS:
+                return frozenset({flag})
+        return None
+    if isinstance(expression, ast.Name):
+        value = env.get(expression.id, FlowValue())
+        for flag in OS_OPEN_ACCESS_FLAGS | OS_OPEN_MODIFIER_FLAGS:
+            if _is_precise_os_flag(value, flag):
+                return frozenset({flag})
+    return None
+
+
+def _os_open_mode(
+    expression: ast.expr | None,
+    env: Mapping[str, FlowValue],
+) -> tuple[str, str] | None:
+    if isinstance(expression, ast.Constant) and isinstance(expression.value, int):
+        access_bits = expression.value & 3
+        mode_by_bits = {0: "read", 1: "write", 2: "read_write"}
+        mode = mode_by_bits.get(access_bits)
+        return None if mode is None else (mode, f"flags={expression.value}")
+    if expression is None:
+        return None
+    names = _os_flag_names(expression, env)
+    if names is None:
+        return None
+    access_flags = names & OS_OPEN_ACCESS_FLAGS
+    if len(access_flags) != 1:
+        return None
+    access_flag = next(iter(access_flags))
+    modes = {
+        "O_RDONLY": "read",
+        "O_WRONLY": "write",
+        "O_RDWR": "read_write",
+    }
+    label = "|".join([access_flag, *sorted(names - {access_flag})])
+    return modes[access_flag], label
+
+
+def _unexpected_argument_origins(
+    node: ast.Call,
+    argument_values: Sequence[FlowValue],
+    keyword_values: Mapping[str, FlowValue],
+    *,
+    positional_count: int,
+    keyword_names: frozenset[str],
+) -> FlowValue:
+    values = [
+        value
+        for index, value in enumerate(argument_values)
+        if index >= positional_count or isinstance(node.args[index], ast.Starred)
+    ]
+    values.extend(
+        value
+        for name, value in keyword_values.items()
+        if name not in keyword_names
+    )
+    return _merge_values(values)
+
+
+def _record_os_argument_escape(
+    engine: AccessEngine,
+    value: FlowValue,
+    node: ast.Call,
+    *,
+    name: str,
+    module: str,
+    actor: str,
+    ordinal: int,
+) -> None:
+    if not value.has_origins:
+        return
+    engine.facts.record_escape(
+        value,
+        node=node,
+        actor=actor,
+        operation=f"os.{name}",
+        sink=f"os.{name}",
+        reason=f"ambiguous_registered_origin_os_{name}_arguments",
+        path=engine.paths[module],
+        line=int(node.lineno),
+        ordinal=ordinal,
+    )
+
+
+def _evaluate_os_open(
+    engine: AccessEngine,
+    node: ast.Call,
+    argument_values: Sequence[FlowValue],
+    keyword_values: Mapping[str, FlowValue],
+    unknown_keyword_unpack: FlowValue,
+    *,
+    module: str,
+    actor: str,
+    env: Mapping[str, FlowValue],
+    ordinal: int,
+) -> FlowValue:
+    path_value, path_ambiguous = _precise_argument_value(
+        node,
+        argument_values,
+        keyword_values,
+        index=0,
+        keyword="path",
+    )
+    flags_value, flags_ambiguous = _precise_argument_value(
+        node,
+        argument_values,
+        keyword_values,
+        index=1,
+        keyword="flags",
+    )
+    implicated = path_ambiguous.merged(flags_ambiguous)
+    if flags_value.has_origins:
+        implicated = implicated.merged(flags_value)
+    implicated = implicated.merged(unknown_keyword_unpack).merged(
+        _unexpected_argument_origins(
+            node,
+            argument_values,
+            keyword_values,
+            positional_count=2,
+            keyword_names=frozenset({"path", "flags"}),
+        )
+    )
+    if implicated.has_origins:
+        _record_os_argument_escape(
+            engine,
+            implicated.merged(path_value),
+            node,
+            name="open",
+            module=module,
+            actor=actor,
+            ordinal=ordinal,
+        )
+        return FlowValue()
+    if not path_value.has_origins:
+        return FlowValue()
+    mode = _os_open_mode(
+        _precise_argument_expression(node, index=1, keyword="flags"), env
+    )
+    if mode is None:
+        engine.facts.record_escape(
+            path_value,
+            node=node,
+            actor=actor,
+            operation="os.open",
+            sink="os.open",
+            reason="dynamic_os_open_flags",
+            path=engine.paths[module],
+            line=int(node.lineno),
+            ordinal=ordinal,
+        )
+    else:
+        engine.facts.record_access(
+            path_value,
+            node=node,
+            actor=actor,
+            mode=mode[0],
+            operation=f"os.open:{mode[1]}",
+            sink="os.open",
+            path=engine.paths[module],
+            line=int(node.lineno),
+            ordinal=ordinal,
+        )
+    descriptor = path_value.bound("result:os.open:fd")
+    descriptor.object_types.add(OS_FD_OBJECT_TYPE)
+    return descriptor
+
+
+def _evaluate_os_move(
+    engine: AccessEngine,
+    node: ast.Call,
+    argument_values: Sequence[FlowValue],
+    keyword_values: Mapping[str, FlowValue],
+    unknown_keyword_unpack: FlowValue,
+    *,
+    name: str,
+    module: str,
+    actor: str,
+    ordinal: int,
+) -> FlowValue:
+    source, source_ambiguous = _precise_argument_value(
+        node,
+        argument_values,
+        keyword_values,
+        index=0,
+        keyword="src",
+    )
+    destination, destination_ambiguous = _precise_argument_value(
+        node,
+        argument_values,
+        keyword_values,
+        index=1,
+        keyword="dst",
+    )
+    implicated = source_ambiguous.merged(destination_ambiguous)
+    implicated = implicated.merged(unknown_keyword_unpack).merged(
+        _unexpected_argument_origins(
+            node,
+            argument_values,
+            keyword_values,
+            positional_count=2,
+            keyword_names=frozenset({"src", "dst"}),
+        )
+    )
+    if source.has_origins:
+        engine.facts.record_access(
+            source,
+            node=node,
+            actor=actor,
+            mode="read_write",
+            operation=f"os.{name}.source",
+            sink=f"os.{name}",
+            path=engine.paths[module],
+            line=int(node.lineno),
+            ordinal=ordinal,
+        )
+    if destination.has_origins:
+        engine.facts.record_access(
+            destination,
+            node=node,
+            actor=actor,
+            mode="write",
+            operation=f"os.{name}.destination",
+            sink=f"os.{name}",
+            path=engine.paths[module],
+            line=int(node.lineno),
+            ordinal=ordinal,
+        )
+    _record_os_argument_escape(
+        engine,
+        implicated,
+        node,
+        name=name,
+        module=module,
+        actor=actor,
+        ordinal=ordinal,
+    )
+    return FlowValue()
+
+
 def evaluate_call(
     engine: AccessEngine,
     node: ast.Call,
@@ -110,7 +638,22 @@ def evaluate_call(
             call_ordinals=call_ordinals,
         )
         method = node.func.attr
-        if receiver.has_origins and method in READ_PATH_METHODS:
+        path_receiver = is_path_receiver(receiver)
+        if path_receiver and method in {"rename", "replace"}:
+            return _evaluate_path_move(
+                engine,
+                node,
+                receiver,
+                method=method,
+                module=module,
+                actor=actor,
+                class_ref=class_ref,
+                env=env,
+                object_env=object_env,
+                call_ordinals=call_ordinals,
+                ordinal=ordinal,
+            )
+        if path_receiver and method in READ_PATH_METHODS:
             engine.facts.record_access(
                 receiver,
                 node=node,
@@ -123,7 +666,7 @@ def evaluate_call(
                 ordinal=ordinal,
             )
             return FlowValue()
-        if receiver.has_origins and method in WRITE_PATH_METHODS:
+        if path_receiver and method in WRITE_PATH_METHODS:
             engine.facts.record_access(
                 receiver,
                 node=node,
@@ -136,7 +679,7 @@ def evaluate_call(
                 ordinal=ordinal,
             )
             return FlowValue()
-        if receiver.has_origins and method == "open":
+        if path_receiver and method == "open":
             mode = _open_mode(node, mode_index=0)
             if isinstance(mode, str):
                 engine.facts.record_escape(
@@ -163,8 +706,20 @@ def evaluate_call(
                     ordinal=ordinal,
                 )
             return FlowValue()
-        if receiver.has_origins and method in PATH_TRANSFORMS:
-            return receiver.bound(f"transform:{method}")
+        if path_receiver and method in PATH_TRANSFORMS:
+            return _evaluate_path_transform(
+                engine,
+                node,
+                receiver,
+                method=method,
+                module=module,
+                actor=actor,
+                class_ref=class_ref,
+                env=env,
+                object_env=object_env,
+                call_ordinals=call_ordinals,
+                ordinal=ordinal,
+            )
     resolution = resolve_call_target(
         node.func,
         module=module,
@@ -267,6 +822,36 @@ def evaluate_call(
             )
         )
     source_call_name = call_name(node.func)
+    os_call = _stdlib_os_call_name(
+        node,
+        receiver,
+        env,
+        known_modules=engine.known_modules,
+    )
+    if os_call == "open":
+        return _evaluate_os_open(
+            engine,
+            node,
+            argument_values,
+            keyword_values,
+            unknown_keyword_unpack,
+            module=module,
+            actor=actor,
+            env=env,
+            ordinal=ordinal,
+        )
+    if os_call in {"rename", "replace"}:
+        return _evaluate_os_move(
+            engine,
+            node,
+            argument_values,
+            keyword_values,
+            unknown_keyword_unpack,
+            name=os_call,
+            module=module,
+            actor=actor,
+            ordinal=ordinal,
+        )
     escaped = receiver.copy()
     for value in [
         *argument_values,

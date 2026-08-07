@@ -389,12 +389,21 @@ def test_generic_origins_bind_propagate_or_fail_closed_by_semantics() -> None:
         )
     )
 
-    assert len(result["accesses"]) == 1
-    assert result["accesses"][0]["operation"] == "path.read_text"
+    assert {row["operation"] for row in result["accesses"]} == {
+        "path.read_text",
+        "path.write_text",
+    }
+    named_read = next(
+        row for row in result["accesses"] if row["operation"] == "path.read_text"
+    )
+    path_division_write = next(
+        row for row in result["accesses"] if row["operation"] == "path.write_text"
+    )
     assert any(
         step.startswith("alias:chronovisor.consumer:named:path")
-        for step in result["accesses"][0]["binding_chain"]
+        for step in named_read["binding_chain"]
     )
+    assert "transform:truediv" in path_division_write["binding_chain"]
     assert {row["reason"] for row in result["escapes"]} == {
         "unsupported_registered_origin_control_flow",
         "registered_locator_to_unknown_callee",
@@ -404,7 +413,6 @@ def test_generic_origins_bind_propagate_or_fail_closed_by_semantics() -> None:
         "control:if",
         "call:opaque_container",
         "call:opaque_bool",
-        "expression:binop",
         "expression:subscript",
     }
 

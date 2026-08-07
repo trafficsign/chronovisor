@@ -11,7 +11,13 @@ from .access_export_flow import (
     ModuleExportTable,
     StarExportPolicy,
 )
-from .access_model import FlowValue
+from .access_model import (
+    OS_FLAG_OBJECT_PREFIX,
+    OS_OPEN_ACCESS_FLAGS,
+    OS_OPEN_MODIFIER_FLAGS,
+    STDLIB_OS_CALLS,
+    FlowValue,
+)
 
 SymbolKey = tuple[str, str]
 ExportState = tuple[
@@ -164,7 +170,16 @@ def bind_import_statement(
             alias.name, FlowValue()
         )
         child_module = f"{target_module}.{alias.name}" if target_module else alias.name
-        if (
+        stdlib_os = target_module == "os" and "os" not in engine.known_modules
+        if stdlib_os and alias.name in STDLIB_OS_CALLS:
+            value = FlowValue(call_targets={f"os:{alias.name}"})
+        elif stdlib_os and alias.name in (
+            OS_OPEN_ACCESS_FLAGS | OS_OPEN_MODIFIER_FLAGS
+        ):
+            value = FlowValue(
+                object_types={f"{OS_FLAG_OBJECT_PREFIX}{alias.name}"}
+            )
+        elif (
             not value.has_origins
             and not value.module_refs
             and child_module in engine.known_modules
