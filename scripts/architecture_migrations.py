@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 import subprocess
 from collections.abc import Mapping, Sequence
 from pathlib import Path, PurePosixPath
@@ -23,6 +24,7 @@ H0_PARENT_COMMIT = "602ab1efd46b3c74447887cf430cc77962fec7bd"
 H0_SEED_COMMIT = "6cbcd1e617c631bee23de0cf8c6597f324485205"
 GATE_HYGIENE_COMMIT = "f1208ee3914e7ec402b84ebda16423f57065e041"
 EVIDENCE_HARDENING_COMMIT = "63371cf32937948da784292fc8fc6db15e6a4679"
+REVIEW_FIX_COMMIT = "6094b59f508bc30b8a3a73240d297f03d1704f59"
 CANONICAL_PLAN_SHA256 = (
     "bedd3ad58736a1489115a76ef5638cc9adf522c687226f7c0a6156e20868ae69"
 )
@@ -101,6 +103,13 @@ REVIEW_FIX_PATHS = tuple(
             "tests/test_architecture_migrations.py",
         }
     )
+)
+RECEIPT_HARDENING_PATHS = (
+    "scripts/architecture_migrations.py",
+    "tests/test_architecture_migrations.py",
+)
+RECEIPT_HARDENING_TEST_SHA256 = (
+    "834edd1475eacf251a92abf613cbc41f69b8026774fd176284a564341b90d465"
 )
 EXPECTED_H0_ACTIVE_COUNTS = {
     "exceptions": 162,
@@ -668,7 +677,19 @@ def _validate_artifact_binding(
 def load_plan(path: Path) -> dict[str, Any]:
     """Load a canonical, self-hashed migration plan with no schema extensions."""
 
-    plan = _load_canonical(path, seal_field="plan_sha256")
+    return _validate_plan_object(_load_canonical(path, seal_field="plan_sha256"))
+
+
+def _validate_plan_object(value: Any) -> dict[str, Any]:
+    """Canonicalize and strictly validate a supplied plan object."""
+
+    raw = _canonical_json_bytes(value)
+    plan = _object(_decode_json(raw, context="plan object"), context="plan")
+    recorded = plan.get("plan_sha256")
+    if not isinstance(recorded, str) or not _HEX_SHA_RE.fullmatch(recorded):
+        raise MigrationValidationError("plan has invalid plan_sha256")
+    if recorded != _seal(plan, "plan_sha256"):
+        raise MigrationValidationError("plan plan_sha256 mismatch")
     _require_keys(
         plan,
         {
@@ -961,6 +982,7 @@ def _validate_fixed_history(root: Path, plan: Mapping[str, Any]) -> None:
     h0_seed = _commit(root, str(plan["history"]["h0_seed_commit"]))
     gate_hygiene = _commit(root, str(plan["history"]["gate_hygiene_commit"]))
     evidence_hardening = _commit(root, EVIDENCE_HARDENING_COMMIT)
+    review_fix = _commit(root, REVIEW_FIX_COMMIT)
     if _single_parent(root, h0_seed) != source_parent:
         raise MigrationValidationError("H0 seed parent identity drift")
     _require_transition(
@@ -993,6 +1015,19 @@ def _validate_fixed_history(root: Path, plan: Mapping[str, Any]) -> None:
     ):
         raise MigrationValidationError(
             "fixed evidence hardening plan differs from supplied canonical plan"
+        )
+    if _single_parent(root, review_fix) != evidence_hardening:
+        raise MigrationValidationError("review-fix parent identity drift")
+    _require_transition(
+        root,
+        evidence_hardening,
+        review_fix,
+        {path: "M" for path in REVIEW_FIX_PATHS},
+        context="evidence-hardening->review-fix",
+    )
+    if _git_file(root, review_fix, PLAN_PATH.as_posix()) != _canonical_json_bytes(plan):
+        raise MigrationValidationError(
+            "fixed review-fix plan differs from supplied canonical plan"
         )
 
 
@@ -1148,24 +1183,24 @@ def _validate_contract_source(root: Path, commit: str, plan: Mapping[str, Any]) 
 def validate_history(
     root: Path, plan: Mapping[str, Any], evidence_parent_revision: str
 ) -> dict[str, Any]:
-    """Validate the fixed source/H0/B/C chain and exact review-fix parent D."""
+    """Validate the fixed chain and exact receipt-hardening evidence parent."""
 
     validate_plan(root, plan)
     evidence_parent = _commit(root, evidence_parent_revision)
-    if _single_parent(root, evidence_parent) != EVIDENCE_HARDENING_COMMIT:
-        raise MigrationValidationError("review-fix parent identity drift")
+    if _single_parent(root, evidence_parent) != REVIEW_FIX_COMMIT:
+        raise MigrationValidationError("receipt-hardening parent identity drift")
     _require_transition(
         root,
-        EVIDENCE_HARDENING_COMMIT,
+        REVIEW_FIX_COMMIT,
         evidence_parent,
-        {path: "M" for path in REVIEW_FIX_PATHS},
-        context="evidence-hardening->review-fix",
+        {path: "M" for path in RECEIPT_HARDENING_PATHS},
+        context="review-fix->receipt-hardening",
     )
     if _git_file(root, evidence_parent, PLAN_PATH.as_posix()) != _canonical_json_bytes(
         plan
     ):
         raise MigrationValidationError(
-            "review-fix committed plan differs from supplied canonical plan"
+            "receipt-hardening committed plan differs from supplied canonical plan"
         )
     verifier_path = Path(__file__).resolve()
     try:
@@ -1180,8 +1215,17 @@ def validate_history(
         "scripts/architecture_migrations.py",
     ) != verifier_raw:
         raise MigrationValidationError(
-            "review-fix verifier differs from the current trusted verifier"
+            "receipt-hardening verifier differs from the current trusted verifier"
         )
+    committed_tests = _git_file(
+        root,
+        evidence_parent,
+        "tests/test_architecture_migrations.py",
+    )
+    if hashlib.sha256(committed_tests).hexdigest() != (
+        RECEIPT_HARDENING_TEST_SHA256
+    ):
+        raise MigrationValidationError("receipt-hardening test bytes differ")
     _validate_contract_source(root, H0_SEED_COMMIT, plan)
     return {
         "migration_id": MIGRATION_ID,
@@ -1719,7 +1763,8 @@ def verify_receipt(
 ) -> dict[str, Any]:
     """Find and verify the unique first-parent H2 commit and exact H1->H2 diff."""
 
-    plan_sha256 = plan.get("plan_sha256")
+    plan = _validate_plan_object(plan)
+    plan_sha256 = plan["plan_sha256"]
     receipt = _validate_receipt_object(
         receipt,
         expected_plan_sha256=plan_sha256,
@@ -1779,6 +1824,92 @@ def write_canonical_json(path: Path, payload: Mapping[str, Any]) -> None:
     path.write_bytes(_canonical_json_bytes(payload))
 
 
+def _remove_created_output(
+    parent_fd: int,
+    name: str,
+    created: os.stat_result,
+) -> None:
+    """Remove the output only while the directory entry is the created inode."""
+
+    try:
+        current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    except (FileNotFoundError, OSError):
+        return
+    if (
+        current.st_dev,
+        current.st_ino,
+        stat.S_IFMT(current.st_mode),
+    ) != (
+        created.st_dev,
+        created.st_ino,
+        stat.S_IFMT(created.st_mode),
+    ):
+        return
+    try:
+        os.unlink(name, dir_fd=parent_fd)
+    except FileNotFoundError:
+        return
+
+
+def _write_new_canonical_json(path: Path, payload: Mapping[str, Any]) -> None:
+    """Create a canonical artifact without following or replacing a final entry."""
+
+    raw = _canonical_json_bytes(payload)
+    directory_flags = os.O_RDONLY
+    for flag_name in ("O_CLOEXEC", "O_DIRECTORY", "O_NOFOLLOW"):
+        directory_flags |= getattr(os, flag_name, 0)
+    try:
+        parent_fd = os.open(path.parent, directory_flags)
+    except OSError as exc:
+        raise MigrationValidationError(
+            f"cannot open receipt output directory: {exc}"
+        ) from exc
+    try:
+        output_flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
+        for flag_name in ("O_CLOEXEC", "O_NOFOLLOW"):
+            output_flags |= getattr(os, flag_name, 0)
+        try:
+            output_fd = os.open(
+                path.name,
+                output_flags,
+                0o600,
+                dir_fd=parent_fd,
+            )
+        except OSError as exc:
+            raise MigrationValidationError(
+                f"cannot exclusively create receipt output: {exc}"
+            ) from exc
+        created: os.stat_result | None = None
+        try:
+            created = os.fstat(output_fd)
+            offset = 0
+            while offset < len(raw):
+                written = os.write(output_fd, raw[offset:])
+                if written <= 0:
+                    raise MigrationValidationError(
+                        "receipt output write made no progress"
+                    )
+                offset += written
+            os.fsync(output_fd)
+        except (MigrationValidationError, OSError) as exc:
+            if created is not None:
+                _remove_created_output(parent_fd, path.name, created)
+            if isinstance(exc, MigrationValidationError):
+                raise
+            raise MigrationValidationError(
+                f"cannot write receipt output: {exc}"
+            ) from exc
+        finally:
+            try:
+                os.close(output_fd)
+            except OSError as exc:
+                raise MigrationValidationError(
+                    f"cannot close receipt output: {exc}"
+                ) from exc
+    finally:
+        os.close(parent_fd)
+
+
 def _untracked_output_path(root: Path, value: Path) -> tuple[Path, str]:
     candidate = value if value.is_absolute() else root / value
     if candidate.is_symlink():
@@ -1834,7 +1965,7 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "build-receipt":
             receipt = build_receipt(root, plan, args.h1)
             output, output_relative = _untracked_output_path(root, args.output)
-            write_canonical_json(output, receipt)
+            _write_new_canonical_json(output, receipt)
             report = {
                 "migration_id": MIGRATION_ID,
                 "output": output_relative,

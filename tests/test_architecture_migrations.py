@@ -106,7 +106,7 @@ def _valid_receipt(migrations: ModuleType, plan: dict[str, Any]) -> dict[str, An
     return receipt
 
 
-def _clone_with_review_fix_parent(
+def _clone_with_evidence_parent(
     tmp_path: Path, migrations: ModuleType
 ) -> tuple[Path, dict[str, Any], str]:
     repo = tmp_path / "repo"
@@ -121,12 +121,12 @@ def _clone_with_review_fix_parent(
         "checkout",
         "--quiet",
         "--detach",
-        migrations.EVIDENCE_HARDENING_COMMIT,
+        migrations.REVIEW_FIX_COMMIT,
     )
-    for relative in migrations.REVIEW_FIX_PATHS:
+    for relative in migrations.RECEIPT_HARDENING_PATHS:
         shutil.copyfile(ROOT / relative, repo / relative)
-    _git(repo, "add", "--", *migrations.REVIEW_FIX_PATHS)
-    evidence_parent = _commit(repo, "refactor: close P2 evidence review gaps")
+    _git(repo, "add", "--", *migrations.RECEIPT_HARDENING_PATHS)
+    evidence_parent = _commit(repo, "refactor: make P2 receipt creation race-safe")
     plan = migrations.load_plan(repo / migrations.PLAN_PATH)
     return repo, plan, evidence_parent
 
@@ -340,6 +340,40 @@ def test_verify_receipt_direct_api_rejects_unvalidated_objects(
 
 
 @pytest.mark.parametrize(
+    "mutation",
+    ["malformed", "missing", "unknown", "self-seal", "type"],
+)
+def test_verify_receipt_direct_api_rejects_invalid_plan_as_validation_error(
+    migrations: ModuleType,
+    mutation: str,
+) -> None:
+    plan = migrations.load_plan(PLAN)
+    receipt = _valid_receipt(migrations, plan)
+    attacked = copy.deepcopy(plan)
+    if mutation == "malformed":
+        attacked["inputs"] = object()
+    elif mutation == "missing":
+        del attacked["campaign"]
+        _resign(migrations, attacked, "plan_sha256")
+    elif mutation == "unknown":
+        attacked["unexpected"] = True
+        _resign(migrations, attacked, "plan_sha256")
+    elif mutation == "self-seal":
+        attacked["campaign"] = "P3"
+    else:
+        attacked["sites"] = "not-an-array"
+        _resign(migrations, attacked, "plan_sha256")
+
+    with pytest.raises(migrations.MigrationValidationError):
+        migrations.verify_receipt(
+            ROOT,
+            attacked,
+            receipt,
+            migrations.REVIEW_FIX_COMMIT,
+        )
+
+
+@pytest.mark.parametrize(
     ("bucket", "field"),
     [
         ("active_counts", "production_to_lab_dynamic_sites"),
@@ -388,7 +422,7 @@ def test_external_revisions_require_exact_lowercase_full_sha(
 def test_git_reads_ignore_replace_objects_and_git_environment(
     migrations: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    repo, plan, _evidence_parent = _clone_with_review_fix_parent(
+    repo, plan, _evidence_parent = _clone_with_evidence_parent(
         tmp_path, migrations
     )
     _git(
@@ -449,7 +483,7 @@ def test_tree_entries_reject_symlink_executable_gitlink_and_missing(
 def test_history_h1_h2_and_receipt_verify_end_to_end(
     migrations: ModuleType, tmp_path: Path
 ) -> None:
-    repo, plan, evidence_parent = _clone_with_review_fix_parent(tmp_path, migrations)
+    repo, plan, evidence_parent = _clone_with_evidence_parent(tmp_path, migrations)
     assert migrations.validate_history(repo, plan, evidence_parent) == {
         "migration_id": migrations.MIGRATION_ID,
         "evidence_parent_commit": evidence_parent,
@@ -480,10 +514,10 @@ def test_history_h1_h2_and_receipt_verify_end_to_end(
     assert verified["state"] == "valid-h2-receipt"
 
 
-def test_evidence_history_rejects_extra_d_path_and_plan_byte_drift(
+def test_evidence_history_rejects_extra_path_and_plan_byte_drift(
     migrations: ModuleType, tmp_path: Path
 ) -> None:
-    repo, plan, _evidence_parent = _clone_with_review_fix_parent(
+    repo, plan, _evidence_parent = _clone_with_evidence_parent(
         tmp_path, migrations
     )
     _git(
@@ -491,15 +525,21 @@ def test_evidence_history_rejects_extra_d_path_and_plan_byte_drift(
         "checkout",
         "--quiet",
         "--detach",
-        migrations.EVIDENCE_HARDENING_COMMIT,
+        migrations.REVIEW_FIX_COMMIT,
     )
-    for relative in migrations.REVIEW_FIX_PATHS:
+    for relative in migrations.RECEIPT_HARDENING_PATHS:
         shutil.copyfile(ROOT / relative, repo / relative)
     (repo / "pyproject.toml").write_bytes(
         (repo / "pyproject.toml").read_bytes() + b"\n# unrelated\n"
     )
-    _git(repo, "add", "--", *migrations.REVIEW_FIX_PATHS, "pyproject.toml")
-    extra = _commit(repo, "invalid extra D path")
+    _git(
+        repo,
+        "add",
+        "--",
+        *migrations.RECEIPT_HARDENING_PATHS,
+        "pyproject.toml",
+    )
+    extra = _commit(repo, "invalid extra evidence path")
     with pytest.raises(migrations.MigrationValidationError, match="scope mismatch"):
         migrations.validate_history(repo, plan, extra)
 
@@ -508,9 +548,9 @@ def test_evidence_history_rejects_extra_d_path_and_plan_byte_drift(
         "checkout",
         "--quiet",
         "--detach",
-        migrations.EVIDENCE_HARDENING_COMMIT,
+        migrations.REVIEW_FIX_COMMIT,
     )
-    for relative in migrations.REVIEW_FIX_PATHS:
+    for relative in migrations.RECEIPT_HARDENING_PATHS:
         shutil.copyfile(ROOT / relative, repo / relative)
     payload = json.loads((repo / migrations.PLAN_PATH).read_bytes())
     payload["campaign"] = "tampered-but-self-consistent"
@@ -520,12 +560,64 @@ def test_evidence_history_rejects_extra_d_path_and_plan_byte_drift(
         repo,
         "add",
         "--",
-        *migrations.REVIEW_FIX_PATHS,
+        *migrations.RECEIPT_HARDENING_PATHS,
         migrations.PLAN_PATH.as_posix(),
     )
     drift = _commit(repo, "plan byte drift")
     with pytest.raises(migrations.MigrationValidationError, match="scope mismatch"):
         migrations.validate_history(repo, plan, drift)
+
+
+def test_history_rejects_h1_directly_atop_fixed_review_fix(
+    migrations: ModuleType, tmp_path: Path
+) -> None:
+    repo = tmp_path / "h1-without-evidence-parent"
+    subprocess.run(
+        ["git", "clone", "--quiet", "--shared", str(ROOT), str(repo)],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    _git(repo, "checkout", "--quiet", "--detach", migrations.REVIEW_FIX_COMMIT)
+    plan = migrations.load_plan(repo / migrations.PLAN_PATH)
+    h1 = _write_h1(repo, migrations, plan)
+
+    with pytest.raises(
+        migrations.MigrationValidationError,
+        match="receipt-hardening parent identity",
+    ):
+        migrations.validate_h1(repo, plan, h1)
+
+
+def test_history_rejects_alternate_evidence_parent_with_test_drift(
+    migrations: ModuleType, tmp_path: Path
+) -> None:
+    repo = tmp_path / "alternate-evidence-parent"
+    subprocess.run(
+        ["git", "clone", "--quiet", "--shared", str(ROOT), str(repo)],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    _git(repo, "checkout", "--quiet", "--detach", migrations.REVIEW_FIX_COMMIT)
+    shutil.copyfile(
+        ROOT / "scripts/architecture_migrations.py",
+        repo / "scripts/architecture_migrations.py",
+    )
+    test_path = repo / "tests/test_architecture_migrations.py"
+    test_path.write_bytes(
+        (ROOT / "tests/test_architecture_migrations.py").read_bytes()
+        + b"\n# unsealed test drift\n"
+    )
+    _git(repo, "add", "--", *migrations.RECEIPT_HARDENING_PATHS)
+    alternate = _commit(repo, "alternate evidence with weaker tests")
+    plan = migrations.load_plan(repo / migrations.PLAN_PATH)
+
+    with pytest.raises(
+        migrations.MigrationValidationError,
+        match="test bytes differ",
+    ):
+        migrations.validate_history(repo, plan, alternate)
 
 
 def test_history_rejects_alternate_c_with_identical_plan_and_path_scope(
@@ -573,7 +665,7 @@ def test_history_rejects_alternate_c_with_identical_plan_and_path_scope(
 def test_h1_rejects_logic_import_symbol_and_alias_drift(
     migrations: ModuleType, tmp_path: Path
 ) -> None:
-    repo, plan, evidence_parent = _clone_with_review_fix_parent(tmp_path, migrations)
+    repo, plan, evidence_parent = _clone_with_evidence_parent(tmp_path, migrations)
     expected = migrations._expected_h1_sources(repo, plan)
     assert (
         b"chronovisor.lab.classification_library_evidence"
@@ -598,7 +690,7 @@ def test_h1_rejects_logic_import_symbol_and_alias_drift(
 def test_h1_rejects_non_100644_source_mode(
     migrations: ModuleType, tmp_path: Path
 ) -> None:
-    repo, plan, _evidence_parent = _clone_with_review_fix_parent(
+    repo, plan, _evidence_parent = _clone_with_evidence_parent(
         tmp_path, migrations
     )
     expected = migrations._expected_h1_sources(repo, plan)
@@ -615,7 +707,7 @@ def test_h1_rejects_non_100644_source_mode(
 def test_h2_exact_transform_rejects_semantic_and_encoding_attacks(
     migrations: ModuleType, tmp_path: Path
 ) -> None:
-    repo, plan, _evidence_parent = _clone_with_review_fix_parent(
+    repo, plan, _evidence_parent = _clone_with_evidence_parent(
         tmp_path, migrations
     )
     h1 = _write_h1(repo, migrations, plan)
@@ -700,7 +792,7 @@ def test_h2_exact_transform_rejects_semantic_and_encoding_attacks(
 def test_build_receipt_requires_clean_exact_two_path_index(
     migrations: ModuleType, tmp_path: Path
 ) -> None:
-    repo, plan, _evidence_parent = _clone_with_review_fix_parent(
+    repo, plan, _evidence_parent = _clone_with_evidence_parent(
         tmp_path, migrations
     )
     h1 = _write_h1(repo, migrations, plan)
@@ -725,7 +817,7 @@ def test_build_receipt_requires_clean_exact_two_path_index(
 def test_receipt_verification_rejects_non_additive_receipt_history(
     migrations: ModuleType, tmp_path: Path
 ) -> None:
-    repo, plan, _evidence_parent = _clone_with_review_fix_parent(
+    repo, plan, _evidence_parent = _clone_with_evidence_parent(
         tmp_path, migrations
     )
     h1 = _write_h1(repo, migrations, plan)
@@ -755,7 +847,126 @@ def test_receipt_output_rejects_existing_untracked_regular_file(
 
     with pytest.raises(migrations.MigrationValidationError, match="already exist"):
         migrations._untracked_output_path(repo, Path("receipt.json"))
+    with pytest.raises(migrations.MigrationValidationError, match="exclusively"):
+        migrations._write_new_canonical_json(output, {"state": "new"})
     assert output.read_text(encoding="utf-8") == "user-owned\n"
+
+
+def test_receipt_output_exclusive_create_writes_all_bytes_with_mode_0600(
+    migrations: ModuleType,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = tmp_path / "short-writes"
+    repo.mkdir()
+    _git(repo, "init", "--quiet")
+    output, _relative = migrations._untracked_output_path(
+        repo, Path("receipt.json")
+    )
+    payload = {"state": "created", "value": "x" * 64}
+    real_write = migrations.os.write
+
+    def short_write(fd: int, raw: bytes) -> int:
+        return real_write(fd, raw[:7])
+
+    monkeypatch.setattr(migrations.os, "write", short_write)
+    migrations._write_new_canonical_json(output, payload)
+
+    assert output.read_bytes() == migrations._canonical_json_bytes(payload)
+    assert output.stat().st_mode & 0o777 == 0o600
+
+
+def test_receipt_output_rejects_symlink_and_dangling_symlink_without_victim_write(
+    migrations: ModuleType, tmp_path: Path
+) -> None:
+    repo = tmp_path / "symlink-output"
+    repo.mkdir()
+    _git(repo, "init", "--quiet")
+    output = repo / "receipt.json"
+    victim = tmp_path / "external-victim.json"
+    victim.write_bytes(b"victim-bytes\n")
+
+    output.symlink_to(victim)
+    with pytest.raises(migrations.MigrationValidationError, match="symlink"):
+        migrations._untracked_output_path(repo, Path("receipt.json"))
+    with pytest.raises(migrations.MigrationValidationError, match="exclusively"):
+        migrations._write_new_canonical_json(output, {"state": "attack"})
+    assert victim.read_bytes() == b"victim-bytes\n"
+
+    output.unlink()
+    output.symlink_to(tmp_path / "missing-victim.json")
+    with pytest.raises(migrations.MigrationValidationError, match="symlink"):
+        migrations._untracked_output_path(repo, Path("receipt.json"))
+    with pytest.raises(migrations.MigrationValidationError, match="exclusively"):
+        migrations._write_new_canonical_json(output, {"state": "attack"})
+    assert output.is_symlink()
+    assert not (tmp_path / "missing-victim.json").exists()
+
+
+def test_receipt_output_rejects_post_validation_symlink_swap(
+    migrations: ModuleType, tmp_path: Path
+) -> None:
+    repo = tmp_path / "swapped-output"
+    repo.mkdir()
+    _git(repo, "init", "--quiet")
+    output, _relative = migrations._untracked_output_path(
+        repo, Path("receipt.json")
+    )
+    victim = tmp_path / "post-validation-victim.json"
+    victim.write_bytes(b"unchanged\n")
+    output.symlink_to(victim)
+
+    with pytest.raises(migrations.MigrationValidationError, match="exclusively"):
+        migrations._write_new_canonical_json(output, {"state": "attack"})
+    assert output.is_symlink()
+    assert victim.read_bytes() == b"unchanged\n"
+
+
+def test_receipt_output_write_failure_removes_only_created_entry(
+    migrations: ModuleType,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = tmp_path / "failed-output"
+    repo.mkdir()
+    _git(repo, "init", "--quiet")
+    output, _relative = migrations._untracked_output_path(
+        repo, Path("receipt.json")
+    )
+
+    def fail_write(_fd: int, _raw: bytes) -> int:
+        raise OSError("injected write failure")
+
+    monkeypatch.setattr(migrations.os, "write", fail_write)
+    with pytest.raises(migrations.MigrationValidationError, match="cannot write"):
+        migrations._write_new_canonical_json(output, {"state": "failure"})
+    assert not output.exists()
+
+
+def test_receipt_output_failure_does_not_unlink_swapped_entry(
+    migrations: ModuleType,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = tmp_path / "failed-swapped-output"
+    repo.mkdir()
+    _git(repo, "init", "--quiet")
+    output, _relative = migrations._untracked_output_path(
+        repo, Path("receipt.json")
+    )
+    victim = tmp_path / "write-failure-victim.json"
+    victim.write_bytes(b"safe\n")
+
+    def swap_then_fail(_fd: int, _raw: bytes) -> int:
+        output.unlink()
+        output.symlink_to(victim)
+        raise OSError("injected swap failure")
+
+    monkeypatch.setattr(migrations.os, "write", swap_then_fail)
+    with pytest.raises(migrations.MigrationValidationError, match="cannot write"):
+        migrations._write_new_canonical_json(output, {"state": "failure"})
+    assert output.is_symlink()
+    assert victim.read_bytes() == b"safe\n"
 
 
 def test_production_contract_has_no_lab_import() -> None:
