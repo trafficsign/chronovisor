@@ -1450,7 +1450,10 @@ def test_frontier_repair_snapshot_preserves_unavailable_identity_until_lease(
 
 
 def test_dashboard_static_labels_routine_review_as_local_consensus() -> None:
-    app = (dashboard.STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    app = "".join(
+        (dashboard.STATIC_DIR / name).read_text(encoding="utf-8")
+        for name in ("app.js", "app-client.js")
+    )
     page = (dashboard.STATIC_DIR / "index.html").read_text(encoding="utf-8")
     style = (dashboard.STATIC_DIR / "style.css").read_text(encoding="utf-8")
 
@@ -1528,10 +1531,14 @@ def test_dashboard_static_labels_routine_review_as_local_consensus() -> None:
     assert "place-items: start;" in style
     assert 'lane.recent ? "PULSE" : "ACTIVE"' in app
     assert 'details.push("just completed")' in app
+    assert page.index('/static/app.js') < page.index('/static/app-client.js')
 
 
 def test_dashboard_reuses_decision_trace_poll_for_live_consensus_status() -> None:
-    app = (dashboard.STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    app = "".join(
+        (dashboard.STATIC_DIR / name).read_text(encoding="utf-8")
+        for name in ("app.js", "app-client.js")
+    )
     summary_helper = app.split(
         "function renderLocalConsensusSummary(status)", 1
     )[1].split("function render(snapshot)", 1)[0]

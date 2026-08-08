@@ -1923,7 +1923,7 @@ def test_cortex_static_view_preserves_fable_layout_and_uses_live_data() -> None:
     assert "DEMO · RECALL" in html
     assert "@media (prefers-reduced-motion: reduce)" in style
     assert 'id="recall-field-summary"' in observatory
-    assert 'fetch("/api/cortex/field"' in (static / "app.js").read_text(
+    assert 'fetch("/api/cortex/field"' in (static / "app-client.js").read_text(
         encoding="utf-8"
     )
     assert "function ambient(" not in script
