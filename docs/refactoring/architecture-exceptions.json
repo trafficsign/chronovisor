@@ -1,19 +1,19 @@
 {
   "schema_version": 2,
   "source_baseline_head": "d404a6b20d00e3bcd1d4cdb89edfa5a718c51833",
-  "baseline_sha256": "3868596e22c3940442209d5b4f916e8342bb3ac0f06a66db5683e1f3b3487197",
+  "baseline_sha256": "094ee22395e3d09fac54b0b29e980cfea08facaa03ee6eb21af0da873ac5aee4",
   "semantic_identity": "cross-domain edges use category+source_package+target_package; statement exceptions use category+source_package+source_module+scope_kind+scope+statement_kind+target_package+target_module+symbols+occurrence; source line is diagnostic and normalized statement content is verified independently",
   "counts": {
-    "exceptions": 162,
+    "exceptions": 161,
     "by_category": {
       "cross_domain_edge": 95,
       "dynamic_import": 24,
-      "private_symbol_import": 31,
+      "private_symbol_import": 30,
       "schema_manifest_implementation_import": 12
     },
-    "cross_domain_sites": 1267,
+    "cross_domain_sites": 1262,
     "production_to_lab_edges": 5,
-    "production_to_lab_static_sites": 20,
+    "production_to_lab_static_sites": 15,
     "production_to_lab_dynamic_sites": 1,
     "compatibility_contracts": 289,
     "compatibility_by_kind": {
@@ -1886,20 +1886,6 @@
       "target_package": "lab",
       "sites": [
         {
-          "semantic_id": "arch:0d799ce1e29887c64caf095e2640a148aa9e90326aaef4c45a476ae13c33e85b",
-          "source_module": "chronovisor.classification.classification_resolver",
-          "scope_kind": "module",
-          "scope": "<module>",
-          "statement_kind": "from",
-          "target_module": "chronovisor.lab.classification_fixture_set",
-          "symbols": [
-            "inference_dto"
-          ],
-          "content_sha256": "63e749950005fd3d8601d19dcd56a1dd0aa11992f2bad555f21d285780c98e5f",
-          "occurrence": 1,
-          "line": 16
-        },
-        {
           "semantic_id": "arch:7923c8117584e014f1a6d93283fb7ce9eb012f2cdb7e6228171c5fffb58aecc1",
           "source_module": "chronovisor.classification.classification_resolver",
           "scope_kind": "module",
@@ -1911,67 +1897,6 @@
             "LibraryEvidenceProvider"
           ],
           "content_sha256": "dcc6a7b96909629fa859cffb3707a01f0d35c0949c42edf4b2608d4cd8a86c44",
-          "occurrence": 1,
-          "line": 17
-        },
-        {
-          "semantic_id": "arch:7d200838738a191b653ce5829735d820b786746b2a6329bf9cc98610ff57dd32",
-          "source_module": "chronovisor.classification.classification_bundle",
-          "scope_kind": "module",
-          "scope": "<module>",
-          "statement_kind": "from",
-          "target_module": "chronovisor.lab.classification_fixture_set",
-          "symbols": [
-            "DISABLED_BASELINE_SCHEMA",
-            "sha256_bytes",
-            "sha256_file"
-          ],
-          "content_sha256": "a213630a3e7d705090ed8151c17146aaccdcbf5528f98670af68f39be41e1f9f",
-          "occurrence": 1,
-          "line": 17
-        },
-        {
-          "semantic_id": "arch:a36a5c65819a0aab93f8c971dee29537ef65da12069950b9fdab4b270bb9c9d7",
-          "source_module": "chronovisor.classification.classification_retention",
-          "scope_kind": "module",
-          "scope": "<module>",
-          "statement_kind": "from",
-          "target_module": "chronovisor.lab.classification_fixture_set",
-          "symbols": [
-            "sha256_bytes",
-            "sha256_file"
-          ],
-          "content_sha256": "c82a681df7c5684749cdc66ee5938824442f5794816be4c756f3f4321d970a14",
-          "occurrence": 1,
-          "line": 13
-        },
-        {
-          "semantic_id": "arch:c7056bd3c53d85c0dfb27edae2aead5bac51065e169b7b87ef3f21b4363d3ca2",
-          "source_module": "chronovisor.classification.classification_library_sources",
-          "scope_kind": "module",
-          "scope": "<module>",
-          "statement_kind": "from",
-          "target_module": "chronovisor.lab.classification_fixture_set",
-          "symbols": [
-            "sha256_bytes",
-            "sha256_file"
-          ],
-          "content_sha256": "c82a681df7c5684749cdc66ee5938824442f5794816be4c756f3f4321d970a14",
-          "occurrence": 1,
-          "line": 27
-        },
-        {
-          "semantic_id": "arch:e821d535f1969c514f6f49a2338ec36e382d3a6b82040c593bf28f580d86c97d",
-          "source_module": "chronovisor.classification.classification_evidence_judgment",
-          "scope_kind": "module",
-          "scope": "<module>",
-          "statement_kind": "from",
-          "target_module": "chronovisor.lab.classification_fixture_set",
-          "symbols": [
-            "_write_jsonl",
-            "sha256_bytes"
-          ],
-          "content_sha256": "9a3d9a153dd142c148f5a6aa566e53b2a5a6908c23e0eec3b403386e17e9d7f2",
           "occurrence": 1,
           "line": 17
         }
@@ -15941,28 +15866,6 @@
       "deadline": "2026-12-31",
       "removal_campaign": "S",
       "rationale": "Remove the research->decision package edge through a published contract."
-    },
-    {
-      "category": "private_symbol_import",
-      "source_package": "classification",
-      "source_module": "chronovisor.classification.classification_evidence_judgment",
-      "scope_kind": "module",
-      "scope": "<module>",
-      "statement_kind": "from",
-      "target_package": "lab",
-      "target_module": "chronovisor.lab.classification_fixture_set",
-      "symbols": [
-        "_write_jsonl",
-        "sha256_bytes"
-      ],
-      "content_sha256": "9a3d9a153dd142c148f5a6aa566e53b2a5a6908c23e0eec3b403386e17e9d7f2",
-      "line": 17,
-      "occurrence": 1,
-      "semantic_id": "arch:97b784f974ebdf78ae0226731f9b421e381ac04bad98dd104435367c618f52e9",
-      "owner": "chronovisor.classification.classification_evidence_judgment",
-      "deadline": "2026-08-31",
-      "removal_campaign": "P3",
-      "rationale": "Replace the classification->lab private API dependency with a public API."
     },
     {
       "category": "private_symbol_import",

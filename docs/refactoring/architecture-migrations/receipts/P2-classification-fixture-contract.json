@@ -1,0 +1,49 @@
+{
+  "active_counts": {
+    "compatibility_contracts": 289,
+    "cross_domain_sites": 1262,
+    "exceptions": 161,
+    "production_to_lab_dynamic_sites": 1,
+    "production_to_lab_edges": 5,
+    "production_to_lab_static_sites": 15
+  },
+  "h1_commit": "fea114e63f610ec2a51dab89a946655c6e27854d",
+  "h2_artifacts": {
+    "baseline": {
+      "path": "docs/refactoring/architecture-exception-baseline.json",
+      "sha256": "cef4cb06f275c23e886d6e276e375e70e8cbe8fb2536851eae89c88db5c374c0"
+    },
+    "ledger": {
+      "path": "docs/refactoring/architecture-exceptions.json",
+      "sha256": "8957c38b8c68e8e809353cdcfcb66725d50aeaa886462695d9bab1844a942fdb"
+    }
+  },
+  "migration_id": "P2-classification-fixture-contract",
+  "p3_retained_edge_ids": [
+    "arch:0f37f016df9c2c328a0edc59fd3b3c4b8039921bde3fdaaede27d59f34be9f60"
+  ],
+  "p3_retained_site_ids": [
+    "arch:7923c8117584e014f1a6d93283fb7ce9eb012f2cdb7e6228171c5fffb58aecc1"
+  ],
+  "plan_sha256": "bedd3ad58736a1489115a76ef5638cc9adf522c687226f7c0a6156e20868ae69",
+  "receipt_sha256": "a178ce8e77fe1e9bba7c7f0089e7bf36bade0c56232681bf02d92ad619d3573f",
+  "retired_counts": {
+    "compatibility_semantic_ids": 0,
+    "cross_domain_site_semantic_ids": 5,
+    "exception_semantic_ids": 1,
+    "production_to_lab_dynamic_site_semantic_ids": 0,
+    "production_to_lab_edge_semantic_ids": 0,
+    "production_to_lab_static_site_semantic_ids": 5
+  },
+  "retired_exception_ids": [
+    "arch:97b784f974ebdf78ae0226731f9b421e381ac04bad98dd104435367c618f52e9"
+  ],
+  "retired_site_ids": [
+    "arch:0d799ce1e29887c64caf095e2640a148aa9e90326aaef4c45a476ae13c33e85b",
+    "arch:7d200838738a191b653ce5829735d820b786746b2a6329bf9cc98610ff57dd32",
+    "arch:a36a5c65819a0aab93f8c971dee29537ef65da12069950b9fdab4b270bb9c9d7",
+    "arch:c7056bd3c53d85c0dfb27edae2aead5bac51065e169b7b87ef3f21b4363d3ca2",
+    "arch:e821d535f1969c514f6f49a2338ec36e382d3a6b82040c593bf28f580d86c97d"
+  ],
+  "schema": "chronovisor.architecture-migration-receipt.v1"
+}
