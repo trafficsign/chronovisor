@@ -298,6 +298,18 @@ S_RETIRED_PREFETCH_SITE_IDS = (
     "arch:aa400f09e2db4b388521b3792e5e6fc883d12f28310984567254487e0166f088",
     "arch:c5854d44b491487581356c43000abf8b3ff484c76a7461b8d224e3cb1fe38969",
 )
+S_RETIRED_COFIRE_SITE_IDS = (
+    "arch:069442e9133ae4db1b9ab2e9b093fb8afa6d125bc50fa6d00a9ea3caed79a912",
+    "arch:594f5f9c4ee306a34656ddf4318a713fa0669695c448df9432a204c072d49d57",
+    "arch:67da1a29cf73f85a331f78c4827799ce3a1fc3e7b3a7d017877dbd3e1578a963",
+    "arch:8aa9e302867b705d74affb8a0d56ee49e38c215b9b85bcf162c47f3fb748e1ab",
+    "arch:a4eb3344ebef26476ff69c42472e1897af92044013d9a86b7b99c22be2ab4d9d",
+    "arch:b7be03ec3de69bd39800428a6534f76ed265a6e2caac07bf89c3d22b94232d43",
+    "arch:b843b6f3252b8a22ffe801115f795bde1b498061162daf76e8ac791498ebf474",
+    "arch:c082000ed20562833d72ad9f1e41092f54a3adc13022109a11c611f2921bbb75",
+    "arch:cf52eb3049cfb070fc264c5969319c27722614ffef0dd578dd62df7c26588c2c",
+    "arch:d33cbdf98f18c36dd59ac0134a2245fdd9018939e204f36728d637eca9225ca1",
+)
 RETIREMENT_HISTORY = {
     "exception_semantic_ids": tuple(
         sorted(
@@ -336,6 +348,7 @@ RETIREMENT_HISTORY = {
                 *R3_RETIRED_READ_BACK_SITE_IDS,
                 *R4_RETIRED_ROUTINE_REVIEW_SITE_IDS,
                 *S_RETIRED_PREFETCH_SITE_IDS,
+                *S_RETIRED_COFIRE_SITE_IDS,
             )
         )
     ),
@@ -1040,7 +1053,7 @@ def test_current_exception_ledger_seed_and_schema_inventory_are_exact(
     assert detected_ids == ledger_ids == set(seed["exception_semantic_ids"]["active"])
     _assert_exact_retirement_history(architecture, seed)
     assert len(edge_rows) == current["worktree_architecture"]["edge_count"] == 90
-    assert sum(len(row["sites"]) for row in edge_rows) == len(raw_cross_sites) == 1256
+    assert sum(len(row["sites"]) for row in edge_rows) == len(raw_cross_sites) == 1254
     assert {
         field: counts[field]
         for field in (
@@ -1053,7 +1066,7 @@ def test_current_exception_ledger_seed_and_schema_inventory_are_exact(
         )
     } == {
         "exceptions": 90,
-        "cross_domain_sites": 1256,
+        "cross_domain_sites": 1254,
         "production_to_lab_edges": 0,
         "production_to_lab_static_sites": 0,
         "production_to_lab_dynamic_sites": 0,
