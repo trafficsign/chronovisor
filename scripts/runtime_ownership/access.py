@@ -43,6 +43,7 @@ from .access_model import (
     _collect_syntax_sites,
     _import_tables,
     _module_name,
+    _scoped_flow_repr_cache,
     candidate_flow_variants,
     contaminate_runtime_objects,
     exclusive_flow_join,
@@ -2168,19 +2169,20 @@ def discover_access_facts(
     if optimize_gc is not None and type(optimize_gc) is not bool:
         raise ValueError("optimize_gc must be an exact bool or None")
     resolved_progress.reset()
-    analysis = _AccessAnalysis(
-        snapshot,
-        resource_candidates,
-        limits=resolved_limits,
-        progress=resolved_progress,
-    )
-    should_optimize_gc = (
-        _default_optimize_gc() if optimize_gc is None else optimize_gc
-    )
-    if not should_optimize_gc:
-        return analysis.run()
-    with _scoped_gc_disabled():
-        return analysis.run()
+    with _scoped_flow_repr_cache():
+        analysis = _AccessAnalysis(
+            snapshot,
+            resource_candidates,
+            limits=resolved_limits,
+            progress=resolved_progress,
+        )
+        should_optimize_gc = (
+            _default_optimize_gc() if optimize_gc is None else optimize_gc
+        )
+        if not should_optimize_gc:
+            return analysis.run()
+        with _scoped_gc_disabled():
+            return analysis.run()
 
 
 def _default_optimize_gc() -> bool:
