@@ -322,15 +322,20 @@ def test_generate_forwards_per_request_runtime_overrides(monkeypatch) -> None:
 def test_generate_publishes_redacted_model_activity(tmp_path, monkeypatch) -> None:
     chronovisor_root = tmp_path / "wiki"
     observed: dict = {}
+    marker_bytes = b""
+    marker_mode = 0
 
     def fake_generate(*_args: object, **_kwargs: object) -> str:
+        nonlocal marker_bytes, marker_mode
         markers = list(
             (chronovisor_root / "runtime" / "model-activity" / "active").glob(
                 "*.json"
             )
         )
         assert len(markers) == 1
-        observed.update(json.loads(markers[0].read_text(encoding="utf-8")))
+        marker_bytes = markers[0].read_bytes()
+        marker_mode = markers[0].stat().st_mode & 0o777
+        observed.update(json.loads(marker_bytes))
         return "ok"
 
     monkeypatch.setattr(ollama, "CHRONOVISOR_ROOT", chronovisor_root)
@@ -341,7 +346,12 @@ def test_generate_publishes_redacted_model_activity(tmp_path, monkeypatch) -> No
     assert observed["model"] == "ornith:test"
     assert observed["operation"] == "generate"
     assert observed["component"] == __name__
+    assert observed["caller"] == "test_generate_publishes_redacted_model_activity"
     assert observed["pipeline"] == "audit"
+    assert marker_bytes == (
+        json.dumps(observed, ensure_ascii=False, sort_keys=True) + "\n"
+    ).encode()
+    assert marker_mode == 0o600
     assert "prompt" not in observed
     assert not list(
         (chronovisor_root / "runtime" / "model-activity" / "active").glob(
@@ -359,6 +369,24 @@ def test_generate_publishes_redacted_model_activity(tmp_path, monkeypatch) -> No
     )
     assert recent["activity_id"] == observed["activity_id"]
     assert recent["finished_at"]
+
+
+def test_model_activity_uses_live_root_when_entered(tmp_path, monkeypatch) -> None:
+    initial_root = tmp_path / "initial"
+    live_root = tmp_path / "live"
+    monkeypatch.setattr(ollama, "CHRONOVISOR_ROOT", initial_root)
+    activity = ollama.model_activity(model="ornith:test", operation="generate")
+
+    monkeypatch.setattr(ollama, "CHRONOVISOR_ROOT", live_root)
+    with activity:
+        assert len(
+            list(
+                (live_root / "runtime" / "model-activity" / "active").glob("*.json")
+            )
+        ) == 1
+
+    assert not (initial_root / "runtime" / "model-activity").exists()
+    assert (live_root / "runtime" / "model-activity" / "recent" / "audit.json").is_file()
 
 
 def test_generate_can_return_explicit_completion_metadata(monkeypatch) -> None:
