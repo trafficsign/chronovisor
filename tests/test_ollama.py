@@ -13,7 +13,7 @@ from contextlib import contextmanager
 import httpx
 import pytest
 
-from chronovisor.core import ollama
+from chronovisor.core import ollama, ollama_calibration
 from chronovisor.core.runtime_config import IngestConfig
 
 
@@ -867,8 +867,8 @@ def test_macos_memory_snapshot_uses_kernel_pressure_availability(monkeypatch) ->
             pytest.fail(f"unexpected command: {args}")
         return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
 
-    monkeypatch.setattr(ollama.os, "uname", lambda: _Darwin())
-    monkeypatch.setattr(ollama.subprocess, "run", fake_run)
+    monkeypatch.setattr(ollama_calibration.os, "uname", lambda: _Darwin())
+    monkeypatch.setattr(ollama_calibration.subprocess, "run", fake_run)
 
     snapshot = ollama.memory_snapshot()
 
@@ -910,8 +910,8 @@ Pages purgeable: 50.
             pytest.fail(f"unexpected command: {args}")
         return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
 
-    monkeypatch.setattr(ollama.os, "uname", lambda: _Darwin())
-    monkeypatch.setattr(ollama.subprocess, "run", fake_run)
+    monkeypatch.setattr(ollama_calibration.os, "uname", lambda: _Darwin())
+    monkeypatch.setattr(ollama_calibration.subprocess, "run", fake_run)
 
     snapshot = ollama.memory_snapshot()
 
@@ -948,8 +948,8 @@ Pages inactive: 200.
             pytest.fail(f"unexpected command: {args}")
         return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
 
-    monkeypatch.setattr(ollama.os, "uname", lambda: _Darwin())
-    monkeypatch.setattr(ollama.subprocess, "run", fake_run)
+    monkeypatch.setattr(ollama_calibration.os, "uname", lambda: _Darwin())
+    monkeypatch.setattr(ollama_calibration.subprocess, "run", fake_run)
 
     snapshot = ollama.memory_snapshot()
 
@@ -1002,8 +1002,8 @@ Pages occupied by compressor: 2523793.
             pytest.fail(f"unexpected command: {args}")
         return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
 
-    monkeypatch.setattr(ollama.os, "uname", lambda: _Darwin())
-    monkeypatch.setattr(ollama.subprocess, "run", fake_run)
+    monkeypatch.setattr(ollama_calibration.os, "uname", lambda: _Darwin())
+    monkeypatch.setattr(ollama_calibration.subprocess, "run", fake_run)
 
     snapshot = ollama.macos_pressure_snapshot()
 
@@ -1065,14 +1065,14 @@ def test_daemon_identity_ignores_runner_and_changes_on_restart(monkeypatch) -> N
             args=[], returncode=0, stdout=process_table["stdout"], stderr=""
         )
 
-    monkeypatch.setattr(ollama.subprocess, "run", fake_run)
+    monkeypatch.setattr(ollama_calibration.subprocess, "run", fake_run)
 
-    first = ollama._ollama_daemon_process_identity()
+    first = ollama_calibration._ollama_daemon_process_identity()
     process_table["stdout"] = """
 121 Sun Jul 13 06:00:01 2026 /opt/homebrew/bin/llama-server -c 32768
 220 Sun Jul 13 07:00:00 2026 /opt/homebrew/bin/ollama serve
 """
-    second = ollama._ollama_daemon_process_identity()
+    second = ollama_calibration._ollama_daemon_process_identity()
 
     assert first != second
 
@@ -1106,7 +1106,7 @@ def test_previous_calibration_schema_is_ignored(tmp_path) -> None:
         encoding="utf-8",
     )
 
-    assert ollama._read_calibration_payload(path) == {}
+    assert ollama_calibration._read_calibration_payload(path) == {}
 
 
 def test_footprint_calibration_persists_and_invalidates_by_identity(
@@ -1114,8 +1114,8 @@ def test_footprint_calibration_persists_and_invalidates_by_identity(
 ) -> None:
     calibration_file = tmp_path / "ollama-footprints.json"
     monkeypatch.setenv("CHRONOVISOR_OLLAMA_CALIBRATION_FILE", str(calibration_file))
-    previous = dict(ollama._MODEL_FOOTPRINT_CALIBRATION)
-    ollama._MODEL_FOOTPRINT_CALIBRATION.clear()
+    previous = dict(ollama_calibration._MODEL_FOOTPRINT_CALIBRATION)
+    ollama_calibration._MODEL_FOOTPRINT_CALIBRATION.clear()
     resident: dict[str, tuple[int, int]] = {"ornith:test": (20 * ollama.GIB, 32_768)}
     monkeypatch.setattr(
         ollama,
@@ -1143,7 +1143,7 @@ def test_footprint_calibration_persists_and_invalidates_by_identity(
         assert calibration_file.exists()
         assert calibration_file.stat().st_mode & 0o777 == 0o600
 
-        ollama._MODEL_FOOTPRINT_CALIBRATION.clear()
+        ollama_calibration._MODEL_FOOTPRINT_CALIBRATION.clear()
         resident.clear()
         plan = ollama.plan_model_residency(
             ["ornith:test"],
@@ -1156,7 +1156,8 @@ def test_footprint_calibration_persists_and_invalidates_by_identity(
         assert plan.calibrated_models == ("ornith:test",)
 
         assert (
-            ollama._matching_persisted_calibrations(
+            ollama_calibration._matching_persisted_calibrations(
+                root=ollama.CHRONOVISOR_ROOT,
                 installed={"ornith:test": 10 * ollama.GIB},
                 digests={"ornith:test": "digest-b"},
                 engine="engine-a",
@@ -1164,7 +1165,8 @@ def test_footprint_calibration_persists_and_invalidates_by_identity(
             == {}
         )
         assert (
-            ollama._matching_persisted_calibrations(
+            ollama_calibration._matching_persisted_calibrations(
+                root=ollama.CHRONOVISOR_ROOT,
                 installed={"ornith:test": 10 * ollama.GIB},
                 digests={"ornith:test": "digest-a"},
                 engine="engine-b",
@@ -1172,7 +1174,8 @@ def test_footprint_calibration_persists_and_invalidates_by_identity(
             == {}
         )
         assert (
-            ollama._matching_persisted_calibrations(
+            ollama_calibration._matching_persisted_calibrations(
+                root=ollama.CHRONOVISOR_ROOT,
                 installed={"other:test": 10 * ollama.GIB},
                 digests={"other:test": "digest-a"},
                 engine="engine-a",
@@ -1189,8 +1192,8 @@ def test_footprint_calibration_persists_and_invalidates_by_identity(
         )
         assert different_context.calibrated_models == ()
     finally:
-        ollama._MODEL_FOOTPRINT_CALIBRATION.clear()
-        ollama._MODEL_FOOTPRINT_CALIBRATION.update(previous)
+        ollama_calibration._MODEL_FOOTPRINT_CALIBRATION.clear()
+        ollama_calibration._MODEL_FOOTPRINT_CALIBRATION.update(previous)
 
 
 def test_persisted_footprint_is_readable_from_a_fresh_process(
@@ -1198,7 +1201,8 @@ def test_persisted_footprint_is_readable_from_a_fresh_process(
 ) -> None:
     calibration_file = tmp_path / "ollama-footprints.json"
     monkeypatch.setenv("CHRONOVISOR_OLLAMA_CALIBRATION_FILE", str(calibration_file))
-    ollama._persist_model_calibration(
+    ollama_calibration._persist_model_calibration(
+        root=ollama.CHRONOVISOR_ROOT,
         model="ornith:test",
         context=32_768,
         installed_size=10,
@@ -1208,9 +1212,12 @@ def test_persisted_footprint_is_readable_from_a_fresh_process(
     )
     script = """
 import json
-from chronovisor.core import ollama
+from pathlib import Path
 
-rows = ollama._matching_persisted_calibrations(
+from chronovisor.core import ollama_calibration
+
+rows = ollama_calibration._matching_persisted_calibrations(
+    root=Path("."),
     installed={"ornith:test": 10},
     digests={"ornith:test": "digest-a"},
     engine="engine-a",
