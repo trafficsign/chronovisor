@@ -343,6 +343,23 @@ V_RETIRED_LEGACY_LAB_MAPPING_COMPATIBILITY_IDS = (
     "compat:b954e9d0edb6c01e40f0800b48aee5dd6d0671c7e4f0d59cbb69e2eb16e4dd85",
     "compat:e6a5c64a3be799e9dd6399c67bd01937025053f0918c571d0590f7773d810924",
 )
+V_RETIRED_LAB_DISPATCH_COMPATIBILITY_IDS = (
+    "compat:332979899bbb6ff3a7c3786889e631989763b0c5bff2c9b8702005729dce599b",
+    "compat:37072100979c1c2e44120b1617ed5171696d0f7cd9e8183224e1a7619cf1f78f",
+    "compat:387dc16b5ce9f132ca2cea645adfd62646355dc83f85848b349dae08d018b31e",
+    "compat:6af0462a2585b1610a7cf361a5f3c28e6971890c6e178a5698ebcafcc4543917",
+    "compat:6b2b8912279f0486ff2158b1c6674b2781f847019325c8d6b2a706008e2b8c12",
+    "compat:9382111f32c151e3d068f600a17db51d82a4b91666268583d13093076d58e0ca",
+    "compat:9bbde1168d7439d81ae5c5e8032ada836a75a3698b24f7d41160a9cb428025cd",
+    "compat:abc1df8fd11b244994ff80db29979050aa986b55e8e2206390d59b9fe244efb9",
+    "compat:b0860ff53aa49f184a1bdcaefb222fdce5a0bff693103760f6e98bdf1fae55a1",
+    "compat:ba7d52fe1e6db07a1a5a296d18510612322fbc208459a68b9914b855fdc3288e",
+    "compat:c463e6a1d5a20022f868dbef7997df8a6051ba9d9ebb394c582287280d341ecc",
+    "compat:c87d02c8ccf37d8bab31ae3b3eb751406c1385b404a034941c35318ce3e3a8f5",
+    "compat:d9dd2e6dd15a6832a9dbfef819a9ac569f59a2ff1e26178f3425986a1596185f",
+    "compat:f24720c5eb7c46af0dc7a7d347228e5761d0fa05db17722f60b946f17558667d",
+    "compat:f47b2f959d10b77bc24ec3d363a0b7fbd9523799beb2c8f806c12fdb2110d84f",
+)
 RETIREMENT_HISTORY = {
     "exception_semantic_ids": tuple(
         sorted(
@@ -419,6 +436,7 @@ RETIREMENT_HISTORY = {
             (
                 *V_RETIRED_RECALL_SHIM_COMPATIBILITY_IDS,
                 *V_RETIRED_LEGACY_LAB_MAPPING_COMPATIBILITY_IDS,
+                *V_RETIRED_LAB_DISPATCH_COMPATIBILITY_IDS,
             )
         )
     ),
@@ -707,7 +725,10 @@ def _without_persisted_retirement_history(
         RETIREMENT_HISTORY["compatibility_semantic_ids"]
     )
     active_counts["compatibility_by_kind"]["module_string"] += len(
-        RETIREMENT_HISTORY["compatibility_semantic_ids"]
+        V_RETIRED_RECALL_SHIM_COMPATIBILITY_IDS
+    ) + len(V_RETIRED_LEGACY_LAB_MAPPING_COMPATIBILITY_IDS)
+    active_counts["compatibility_by_kind"]["lab_dispatch"] = len(
+        V_RETIRED_LAB_DISPATCH_COMPATIBILITY_IDS
     )
     return normalized
 
@@ -1119,14 +1140,13 @@ def test_current_exception_ledger_seed_and_schema_inventory_are_exact(
         "production_to_lab_edges": 0,
         "production_to_lab_static_sites": 0,
         "production_to_lab_dynamic_sites": 0,
-        "compatibility_contracts": 280,
+        "compatibility_contracts": 265,
     }
     assert counts["by_category"] == {
         "cross_domain_edge": 90,
     }
     assert counts["compatibility_by_kind"] == {
         "console_entrypoint": 51,
-        "lab_dispatch": 15,
         "module_string": 214,
     }
     assert counts["schema_manifest_implementation"] == {
@@ -1620,48 +1640,26 @@ def test_exception_metadata_routes_to_real_owner_and_removal_campaign(
     )
 
 
-def test_lab_dispatch_compatibility_and_drift_are_protected(
+def test_lab_dispatch_compatibility_retirement_is_protected(
     architecture: ModuleType,
     current: dict[str, Any],
 ) -> None:
-    source, ledger, compatibility, seed, frozen, previous = _exception_inputs(current)
-    dispatch = [row for row in compatibility if row["kind"] == "lab_dispatch"]
-    assert len(dispatch) == 15
-    assert {row["name"] for row in dispatch} == {
-        "adoption-corpus",
-        "classification-annif",
-        "classification-calibrate",
-        "classification-library-pilot",
-        "classification-migrate",
-        "classification-pilot",
-        "classification-pilot-v2",
-        "classification-profile-pilot",
-        "classification-query2doc-pilot",
-        "classification-query2doc-unseen",
-        "librarian-burn",
-        "local-model-eval",
-        "model",
-        "recall-challengers",
-        "research-eval",
-    }
-    previous_id = dispatch[0]["semantic_id"]
-    dispatch[0]["target"] += ".moved"
-    dispatch[0]["semantic_id"] = architecture._compatibility_semantic_id(dispatch[0])
-
-    violations = _exception_violations(
-        architecture,
-        source,
-        ledger,
-        compatibility,
-        seed,
-        frozen,
-        previous,
+    _source, _ledger, compatibility, seed, _frozen, _previous = _exception_inputs(
+        current
     )
-    assert violations["compatibility_contract_drift"] == {
-        "unrecorded": [dispatch[0]["semantic_id"]],
-        "stale": [previous_id],
-        "identity_mismatches": [],
-    }
+    dispatch = [row for row in compatibility if row["kind"] == "lab_dispatch"]
+    console = [
+        row
+        for row in compatibility
+        if row["kind"] == "console_entrypoint" and row["name"] == "chronovisor-lab"
+    ]
+
+    assert dispatch == []
+    assert len(console) == 1
+    assert console[0]["target"] == "chronovisor.lab.cli:main"
+    assert set(V_RETIRED_LAB_DISPATCH_COMPATIBILITY_IDS).issubset(
+        seed["compatibility_semantic_ids"]["retired"]
+    )
 
     source, ledger, compatibility, seed, frozen, previous = _exception_inputs(current)
     duplicate = copy.deepcopy(ledger["compatibility_contracts"][0])

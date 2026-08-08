@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "source_baseline_head": "d404a6b20d00e3bcd1d4cdb89edfa5a718c51833",
-  "baseline_sha256": "1143d6316de11d3898770dfd67f465b2b0bd6af5f2f281b099c8e7961f3ffa87",
+  "baseline_sha256": "ff2d35ba69e50bed34e564410a6a4ed9ee0eefe2d6ac8f4883538cee2d88f2f4",
   "semantic_identity": "cross-domain edges use category+source_package+target_package; statement exceptions use category+source_package+source_module+scope_kind+scope+statement_kind+target_package+target_module+symbols+occurrence; source line is diagnostic and normalized statement content is verified independently",
   "counts": {
     "exceptions": 90,
@@ -12,10 +12,9 @@
     "production_to_lab_edges": 0,
     "production_to_lab_static_sites": 0,
     "production_to_lab_dynamic_sites": 0,
-    "compatibility_contracts": 280,
+    "compatibility_contracts": 265,
     "compatibility_by_kind": {
       "console_entrypoint": 51,
-      "lab_dispatch": 15,
       "module_string": 214
     },
     "schema_manifest_implementation": {
@@ -1803,7 +1802,7 @@
           ],
           "content_sha256": "d1ef573cec062b8929cb8acea2d7ea770ed9d93a73d747ccc705eff1aaa80d8c",
           "occurrence": 1,
-          "line": 2784
+          "line": 2785
         },
         {
           "semantic_id": "arch:25683ee8685a288b74d992b3d7b7c0cff8365249ec6231340651ab8f520d97c1",
@@ -2058,7 +2057,7 @@
           ],
           "content_sha256": "28ee42a755f65f4ca4912a04812c675bef04f1511e70c28910067f05f9aa1aaf",
           "occurrence": 1,
-          "line": 2852
+          "line": 2853
         },
         {
           "semantic_id": "arch:d4418bcf0370c84fbad6c0e883c2ad993b8a573b3f363fa3e695149595c7d03c",
@@ -2114,7 +2113,7 @@
           ],
           "content_sha256": "85618d6ecd416d18c43344b96b5dd002cda2c74cdbc4c69b272ac6629e135f72",
           "occurrence": 1,
-          "line": 3528
+          "line": 3529
         },
         {
           "semantic_id": "arch:e81c916eb0389ee33b39892195896a0f91d48551a71b64ee7e0582cfac9da989",
@@ -5353,7 +5352,7 @@
           ],
           "content_sha256": "7a523e7c733bf4c48cc28e570bc6cf37a1380bfdec252e93f3786bacb3176995",
           "occurrence": 1,
-          "line": 1091
+          "line": 1092
         },
         {
           "semantic_id": "arch:1b3784b8749940c9c99751d38d244b777f230156c07d0a6e9c3d34cc773f3efc",
@@ -5395,7 +5394,7 @@
           ],
           "content_sha256": "ef353fcf4394bf5e31b2d0d02dbf9ef3860ac5226bc2fd809fba99b7fac7c983",
           "occurrence": 1,
-          "line": 1159
+          "line": 1160
         },
         {
           "semantic_id": "arch:3f85f00ece8b53f98903eb2826d7f48fad4ec69255a460e671f1917b87c92dff",
@@ -5409,7 +5408,7 @@
           ],
           "content_sha256": "7a523e7c733bf4c48cc28e570bc6cf37a1380bfdec252e93f3786bacb3176995",
           "occurrence": 1,
-          "line": 1158
+          "line": 1159
         },
         {
           "semantic_id": "arch:4d6fd35657da6202916b98374bcc4864f8b48eb7aaf86059309649d3b29250ab",
@@ -5423,7 +5422,7 @@
           ],
           "content_sha256": "debf171221e66c2dec4b2aeb2638e53d14c3409e0d8c36e761745443844e8b0f",
           "occurrence": 1,
-          "line": 1816
+          "line": 1817
         },
         {
           "semantic_id": "arch:5c0a9b635dc568c7d6ae0fcda2a8b1847b955e559820fb204c5763164890df12",
@@ -5451,7 +5450,7 @@
           ],
           "content_sha256": "a3ebc16c14e249fc7de6c38ffaf543b8cb87888e1b742504dea6ccf68e63616c",
           "occurrence": 1,
-          "line": 235
+          "line": 236
         },
         {
           "semantic_id": "arch:7f998f961c2688c446627fc37e2aca2a6f65b7de5fb7e36ca3cd43da76dbe70f",
@@ -5465,7 +5464,7 @@
           ],
           "content_sha256": "7a523e7c733bf4c48cc28e570bc6cf37a1380bfdec252e93f3786bacb3176995",
           "occurrence": 1,
-          "line": 155
+          "line": 143
         },
         {
           "semantic_id": "arch:a967196132902ca389600daa85308ec484730c56595f0eb111ee2aa537886843",
@@ -5499,7 +5498,7 @@
           ],
           "content_sha256": "ecf1cf1a39edb65023eaf75eaf9f6334086823b5d683ca567e0159ede370d05c",
           "occurrence": 1,
-          "line": 163
+          "line": 151
         },
         {
           "semantic_id": "arch:e7bd77abf3526524bed269a8c1a9e6d59ae32895a6227fefb574fd2f54695862",
@@ -5513,7 +5512,7 @@
           ],
           "content_sha256": "7a523e7c733bf4c48cc28e570bc6cf37a1380bfdec252e93f3786bacb3176995",
           "occurrence": 1,
-          "line": 57
+          "line": 45
         },
         {
           "semantic_id": "arch:f3706759b5a016470f2363a25275b35bd72aa5e188d34c125acdfa12fe9e4df3",
@@ -5527,7 +5526,7 @@
           ],
           "content_sha256": "ef353fcf4394bf5e31b2d0d02dbf9ef3860ac5226bc2fd809fba99b7fac7c983",
           "occurrence": 1,
-          "line": 58
+          "line": 46
         }
       ],
       "semantic_id": "arch:2971201e16841ab06cf4a7fbe1acc249a11c6636ecb0e4043c6da4f6a8cb9b21",
@@ -9695,7 +9694,7 @@
           ],
           "content_sha256": "1b15c4aab53e20b0cf55385681000bd57ab3010e25756a20fdeff6f1bc71335f",
           "occurrence": 1,
-          "line": 173
+          "line": 161
         }
       ],
       "semantic_id": "arch:64d2a4f3628d1836db74f3bcf004c8bedda7f4ac18d5869cf6290158f69df550",
@@ -9755,7 +9754,7 @@
           ],
           "content_sha256": "82bf186abdbd7c2657b47ec704d8a4f21374a09354c1388118434e9411a1f538",
           "occurrence": 1,
-          "line": 2507
+          "line": 2508
         },
         {
           "semantic_id": "arch:cc02068bebd36de0b2e7d9f8584000c9c937b920dd1f4621d6750d458aff9830",
@@ -10623,7 +10622,7 @@
           ],
           "content_sha256": "944af25f5176fe2312863295709a1d52a4559066799927a7a2e1c735c8e9ce0f",
           "occurrence": 1,
-          "line": 3756
+          "line": 3757
         },
         {
           "semantic_id": "arch:06447d95bfe03ccc00fec5694a0c9792f0ada9434e985c862266175c74fca1c3",
@@ -10795,7 +10794,7 @@
           ],
           "content_sha256": "2e8d49e6dc4a422a6dfdcdba3c98b89c91ceba6f921ffc8996630ffcdab973dc",
           "occurrence": 1,
-          "line": 2220
+          "line": 2221
         },
         {
           "semantic_id": "arch:359f1154164b30954fdbf64d06d7367dc14eb8a825ab17cf3485086d23a90c39",
@@ -10823,7 +10822,7 @@
           ],
           "content_sha256": "d86773d3d24ae59615021e7a067f1780d1dad215cf726c81e297d14da7ebf89c",
           "occurrence": 1,
-          "line": 4373
+          "line": 4334
         },
         {
           "semantic_id": "arch:447091ec1049018e185958e1a819c33d79c36e466752b987f99afd7fe5fabf64",
@@ -10866,7 +10865,7 @@
           ],
           "content_sha256": "90e1e3584ff2f49c406426dbf4a43870d1cf967ea1f8cff08a8864f542aec2d5",
           "occurrence": 1,
-          "line": 2719
+          "line": 2720
         },
         {
           "semantic_id": "arch:52ecaefcd302d36f216ab1504c7aba3075c3327110c31ace93440a5b0453a601",
@@ -10952,7 +10951,7 @@
           ],
           "content_sha256": "2732b02339baac93338cb46c88e1940bca7e393b066603ce2a4118f72490f0b2",
           "occurrence": 1,
-          "line": 2783
+          "line": 2784
         },
         {
           "semantic_id": "arch:67d5f50dc47e441ee60362be29b0474c520fc92e68ae5ebe4a09447b98207b69",
@@ -11067,7 +11066,7 @@
           ],
           "content_sha256": "a8ec94a460e12ff58d770c66b268ab0b982096babe2b1d1066bf9af3323ddf46",
           "occurrence": 1,
-          "line": 2380
+          "line": 2381
         },
         {
           "semantic_id": "arch:7d4384d88506a38bbed0ebb09cdeab04a60bd5748cdef0480bad80e960e383b0",
@@ -11278,7 +11277,7 @@
           ],
           "content_sha256": "f5c5569b0e1730d7e91232a28e43a375f2188de5149ce3397d94beb1f8bae6be",
           "occurrence": 1,
-          "line": 3151
+          "line": 3152
         },
         {
           "semantic_id": "arch:b5b8309e1d78d176f9be0e4bc8eddaec02c095bd8a09233779c4c17057040f94",
@@ -11320,7 +11319,7 @@
           ],
           "content_sha256": "bc2687ec11165ed17d330d316c7cb265d15b9423e3c309583bb281fc866eaf3f",
           "occurrence": 1,
-          "line": 2195
+          "line": 2196
         },
         {
           "semantic_id": "arch:bdc97bacd5e0f3a24e2c3914f1098fadefd4a6a37d9f3253587e1961364b7f7b",
@@ -11334,7 +11333,7 @@
           ],
           "content_sha256": "6cd41604c60fe06edb38afc1f994c3c6ce4187b5a1f374444bcbe7a15db979ab",
           "occurrence": 1,
-          "line": 2450
+          "line": 2451
         },
         {
           "semantic_id": "arch:ce7837577113b86fa6238840982f944cebe2f89b6e681efa2b2f1975c6ad4a57",
@@ -13725,7 +13724,7 @@
           ],
           "content_sha256": "95c593a6c2520b86380d8ccb0be036a31bb0713f9aad188c717f593d79fb9b03",
           "occurrence": 1,
-          "line": 233
+          "line": 234
         },
         {
           "semantic_id": "arch:bac75a587b78a246be6d032b40c0944ba7ed4c2c9ff1f5cb1835ed9f6003cb15",
@@ -13753,7 +13752,7 @@
           ],
           "content_sha256": "cb28c8bfbca20894561fd656e1bc7222bd5b10a744a558c2838ce884a6de6062",
           "occurrence": 1,
-          "line": 234
+          "line": 235
         },
         {
           "semantic_id": "arch:c6664a07b7d3d67a9a64bf420d75857f0718365126d19e4bb19f09d59e1fe7b6",
@@ -13795,7 +13794,7 @@
           ],
           "content_sha256": "4ae5a490d9b87f53bbb08c1474bf094a61a88b953af4584921aaba68555a9a67",
           "occurrence": 1,
-          "line": 183
+          "line": 171
         }
       ],
       "semantic_id": "arch:8a395b97293ce1fdb8ced7411b9a23bf9d7628ce4551866f453a91bd8c03ed55",
@@ -19964,16 +19963,6 @@
       "rationale": "Retire after one mixed-version generation, zero observed legacy use, and a verified rollback target."
     },
     {
-      "kind": "lab_dispatch",
-      "name": "classification-pilot",
-      "target": "chronovisor.lab.classification_pilot",
-      "semantic_id": "compat:332979899bbb6ff3a7c3786889e631989763b0c5bff2c9b8702005729dce599b",
-      "owner": "chronovisor.lab.cli",
-      "deadline": "2027-01-31",
-      "removal_campaign": "V",
-      "rationale": "Retire after one mixed-version generation, zero observed legacy use, and a verified rollback target."
-    },
-    {
       "kind": "module_string",
       "name": "chronovisor.evidence_bundle",
       "target": "chronovisor.research.evidence_bundle",
@@ -19999,16 +19988,6 @@
       "target": "chronovisor.lab.classification_profile_pilot",
       "semantic_id": "compat:35e3118b9b67bd1ab531af9e1c056c69f50f0401004fdb739b7db76eeddc2721",
       "owner": "chronovisor.core.module_paths",
-      "deadline": "2027-01-31",
-      "removal_campaign": "V",
-      "rationale": "Retire after one mixed-version generation, zero observed legacy use, and a verified rollback target."
-    },
-    {
-      "kind": "lab_dispatch",
-      "name": "librarian-burn",
-      "target": "chronovisor.lab.librarian_burn",
-      "semantic_id": "compat:37072100979c1c2e44120b1617ed5171696d0f7cd9e8183224e1a7619cf1f78f",
-      "owner": "chronovisor.lab.cli",
       "deadline": "2027-01-31",
       "removal_campaign": "V",
       "rationale": "Retire after one mixed-version generation, zero observed legacy use, and a verified rollback target."
@@ -20059,16 +20038,6 @@
       "target": "chronovisor.hosts.server:main",
       "semantic_id": "compat:380108e778cfd49f9a5a14802224b27ac1c02e24eedada517cb88687a9a4f626",
       "owner": "chronovisor.hosts.server",
-      "deadline": "2027-01-31",
-      "removal_campaign": "V",
-      "rationale": "Retire after one mixed-version generation, zero observed legacy use, and a verified rollback target."
-    },
-    {
-      "kind": "lab_dispatch",
-      "name": "classification-migrate",
-      "target": "chronovisor.lab.classification_migration",
-      "semantic_id": "compat:387dc16b5ce9f132ca2cea645adfd62646355dc83f85848b349dae08d018b31e",
-      "owner": "chronovisor.lab.cli",
       "deadline": "2027-01-31",
       "removal_campaign": "V",
       "rationale": "Retire after one mixed-version generation, zero observed legacy use, and a verified rollback target."
@@ -20614,26 +20583,6 @@
       "rationale": "Retire after one mixed-version generation, zero observed legacy use, and a verified rollback target."
     },
     {
-      "kind": "lab_dispatch",
-      "name": "recall-challengers",
-      "target": "chronovisor.lab.recall_challengers",
-      "semantic_id": "compat:6af0462a2585b1610a7cf361a5f3c28e6971890c6e178a5698ebcafcc4543917",
-      "owner": "chronovisor.lab.cli",
-      "deadline": "2027-01-31",
-      "removal_campaign": "V",
-      "rationale": "Retire after one mixed-version generation, zero observed legacy use, and a verified rollback target."
-    },
-    {
-      "kind": "lab_dispatch",
-      "name": "adoption-corpus",
-      "target": "chronovisor.lab.adoption_corpus",
-      "semantic_id": "compat:6b2b8912279f0486ff2158b1c6674b2781f847019325c8d6b2a706008e2b8c12",
-      "owner": "chronovisor.lab.cli",
-      "deadline": "2027-01-31",
-      "removal_campaign": "V",
-      "rationale": "Retire after one mixed-version generation, zero observed legacy use, and a verified rollback target."
-    },
-    {
       "kind": "module_string",
       "name": "chronovisor.recall_calibration",
       "target": "chronovisor.recall.recall_calibration",
@@ -20984,16 +20933,6 @@
       "rationale": "Retire after one mixed-version generation, zero observed legacy use, and a verified rollback target."
     },
     {
-      "kind": "lab_dispatch",
-      "name": "model",
-      "target": "chronovisor.lab.model_lab",
-      "semantic_id": "compat:9382111f32c151e3d068f600a17db51d82a4b91666268583d13093076d58e0ca",
-      "owner": "chronovisor.lab.cli",
-      "deadline": "2027-01-31",
-      "removal_campaign": "V",
-      "rationale": "Retire after one mixed-version generation, zero observed legacy use, and a verified rollback target."
-    },
-    {
       "kind": "module_string",
       "name": "chronovisor.classification_query2doc_v2",
       "target": "chronovisor.lab.classification_query2doc_v2",
@@ -21099,16 +21038,6 @@
       "target": "chronovisor.lab.research_eval",
       "semantic_id": "compat:9b755ec5bc8345b47617d7fc0f33041a22eb0debad3256ffe70ffad68a054754",
       "owner": "chronovisor.core.module_paths",
-      "deadline": "2027-01-31",
-      "removal_campaign": "V",
-      "rationale": "Retire after one mixed-version generation, zero observed legacy use, and a verified rollback target."
-    },
-    {
-      "kind": "lab_dispatch",
-      "name": "classification-annif",
-      "target": "chronovisor.lab.classification_annif",
-      "semantic_id": "compat:9bbde1168d7439d81ae5c5e8032ada836a75a3698b24f7d41160a9cb428025cd",
-      "owner": "chronovisor.lab.cli",
       "deadline": "2027-01-31",
       "removal_campaign": "V",
       "rationale": "Retire after one mixed-version generation, zero observed legacy use, and a verified rollback target."
@@ -21304,16 +21233,6 @@
       "rationale": "Retire after one mixed-version generation, zero observed legacy use, and a verified rollback target."
     },
     {
-      "kind": "lab_dispatch",
-      "name": "classification-query2doc-unseen",
-      "target": "chronovisor.lab.classification_query2doc_unseen",
-      "semantic_id": "compat:abc1df8fd11b244994ff80db29979050aa986b55e8e2206390d59b9fe244efb9",
-      "owner": "chronovisor.lab.cli",
-      "deadline": "2027-01-31",
-      "removal_campaign": "V",
-      "rationale": "Retire after one mixed-version generation, zero observed legacy use, and a verified rollback target."
-    },
-    {
       "kind": "module_string",
       "name": "chronovisor.semantic_service",
       "target": "chronovisor.search.semantic_service",
@@ -21359,16 +21278,6 @@
       "target": "chronovisor.classification.classification_embedding_worker",
       "semantic_id": "compat:ae64e9f10f8b108aec6000308a26f276b259b1c1e434de36c89db9d62784db8d",
       "owner": "chronovisor.core.module_paths",
-      "deadline": "2027-01-31",
-      "removal_campaign": "V",
-      "rationale": "Retire after one mixed-version generation, zero observed legacy use, and a verified rollback target."
-    },
-    {
-      "kind": "lab_dispatch",
-      "name": "classification-query2doc-pilot",
-      "target": "chronovisor.lab.classification_query2doc_pilot",
-      "semantic_id": "compat:b0860ff53aa49f184a1bdcaefb222fdce5a0bff693103760f6e98bdf1fae55a1",
-      "owner": "chronovisor.lab.cli",
       "deadline": "2027-01-31",
       "removal_campaign": "V",
       "rationale": "Retire after one mixed-version generation, zero observed legacy use, and a verified rollback target."
@@ -21484,16 +21393,6 @@
       "rationale": "Retire after one mixed-version generation, zero observed legacy use, and a verified rollback target."
     },
     {
-      "kind": "lab_dispatch",
-      "name": "classification-pilot-v2",
-      "target": "chronovisor.lab.classification_pilot_v2",
-      "semantic_id": "compat:ba7d52fe1e6db07a1a5a296d18510612322fbc208459a68b9914b855fdc3288e",
-      "owner": "chronovisor.lab.cli",
-      "deadline": "2027-01-31",
-      "removal_campaign": "V",
-      "rationale": "Retire after one mixed-version generation, zero observed legacy use, and a verified rollback target."
-    },
-    {
       "kind": "module_string",
       "name": "chronovisor.classification_library_calibration",
       "target": "chronovisor.lab.classification_library_calibration",
@@ -21544,16 +21443,6 @@
       "rationale": "Retire after one mixed-version generation, zero observed legacy use, and a verified rollback target."
     },
     {
-      "kind": "lab_dispatch",
-      "name": "research-eval",
-      "target": "chronovisor.lab.research_eval",
-      "semantic_id": "compat:c463e6a1d5a20022f868dbef7997df8a6051ba9d9ebb394c582287280d341ecc",
-      "owner": "chronovisor.lab.cli",
-      "deadline": "2027-01-31",
-      "removal_campaign": "V",
-      "rationale": "Retire after one mixed-version generation, zero observed legacy use, and a verified rollback target."
-    },
-    {
       "kind": "module_string",
       "name": "chronovisor.classification_engine",
       "target": "chronovisor.classification.classification_engine",
@@ -21569,16 +21458,6 @@
       "target": "chronovisor.ops.autonomy:main",
       "semantic_id": "compat:c7b800549d9b8be70d01a1bbcab2bb037603a9756f4674b7e80a0d33b294bcd6",
       "owner": "chronovisor.ops.autonomy",
-      "deadline": "2027-01-31",
-      "removal_campaign": "V",
-      "rationale": "Retire after one mixed-version generation, zero observed legacy use, and a verified rollback target."
-    },
-    {
-      "kind": "lab_dispatch",
-      "name": "classification-calibrate",
-      "target": "chronovisor.lab.classification_calibration",
-      "semantic_id": "compat:c87d02c8ccf37d8bab31ae3b3eb751406c1385b404a034941c35318ce3e3a8f5",
-      "owner": "chronovisor.lab.cli",
       "deadline": "2027-01-31",
       "removal_campaign": "V",
       "rationale": "Retire after one mixed-version generation, zero observed legacy use, and a verified rollback target."
@@ -21759,16 +21638,6 @@
       "target": "chronovisor.ops.orphan_link",
       "semantic_id": "compat:d8ca585e613b9098dec438b7337e9b084dda67f59e742ff652de695d0fc8d512",
       "owner": "chronovisor.core.module_paths",
-      "deadline": "2027-01-31",
-      "removal_campaign": "V",
-      "rationale": "Retire after one mixed-version generation, zero observed legacy use, and a verified rollback target."
-    },
-    {
-      "kind": "lab_dispatch",
-      "name": "classification-profile-pilot",
-      "target": "chronovisor.lab.classification_profile_pilot",
-      "semantic_id": "compat:d9dd2e6dd15a6832a9dbfef819a9ac569f59a2ff1e26178f3425986a1596185f",
-      "owner": "chronovisor.lab.cli",
       "deadline": "2027-01-31",
       "removal_campaign": "V",
       "rationale": "Retire after one mixed-version generation, zero observed legacy use, and a verified rollback target."
@@ -21994,16 +21863,6 @@
       "rationale": "Retire after one mixed-version generation, zero observed legacy use, and a verified rollback target."
     },
     {
-      "kind": "lab_dispatch",
-      "name": "local-model-eval",
-      "target": "chronovisor.lab.local_model_eval",
-      "semantic_id": "compat:f24720c5eb7c46af0dc7a7d347228e5761d0fa05db17722f60b946f17558667d",
-      "owner": "chronovisor.lab.cli",
-      "deadline": "2027-01-31",
-      "removal_campaign": "V",
-      "rationale": "Retire after one mixed-version generation, zero observed legacy use, and a verified rollback target."
-    },
-    {
       "kind": "module_string",
       "name": "chronovisor.codex_record",
       "target": "chronovisor.hosts.codex_record",
@@ -22019,16 +21878,6 @@
       "target": "chronovisor.search.pipeline",
       "semantic_id": "compat:f376742c600202746d9b932b5b317a8ae22145ed7ee97ab980f8cdf3fe1d6223",
       "owner": "chronovisor.core.module_paths",
-      "deadline": "2027-01-31",
-      "removal_campaign": "V",
-      "rationale": "Retire after one mixed-version generation, zero observed legacy use, and a verified rollback target."
-    },
-    {
-      "kind": "lab_dispatch",
-      "name": "classification-library-pilot",
-      "target": "chronovisor.lab.classification_library_pilot",
-      "semantic_id": "compat:f47b2f959d10b77bc24ec3d363a0b7fbd9523799beb2c8f806c12fdb2110d84f",
-      "owner": "chronovisor.lab.cli",
       "deadline": "2027-01-31",
       "removal_campaign": "V",
       "rationale": "Retire after one mixed-version generation, zero observed legacy use, and a verified rollback target."

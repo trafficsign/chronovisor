@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from types import SimpleNamespace
 
 from chronovisor.lab import cli
 from chronovisor.lab.harness import (
@@ -48,17 +47,13 @@ def test_harness_validates_contract_hashes_and_metrics(tmp_path: Path) -> None:
     }
 
 
-def test_lab_cli_forwards_arguments(monkeypatch) -> None:
-    calls: list[list[str]] = []
-    monkeypatch.setitem(cli.COMMANDS, "fake", ("fake.module", True))
-    monkeypatch.setattr(
-        cli.importlib,
-        "import_module",
-        lambda _name: SimpleNamespace(main=lambda args: calls.append(args) or 0),
-    )
+def test_lab_cli_keeps_empty_help_surface(capsys) -> None:
+    assert cli.COMMANDS == {}
 
-    assert cli.main(["fake", "--root", "/tmp/example"]) == 0
-    assert calls == [["--root", "/tmp/example"]]
+    assert cli.main(["--help"]) == 0
+    output = capsys.readouterr().out
+    assert "usage: chronovisor-lab <command> [args ...]" in output
+    assert "commands:" in output
 
 
 def test_lab_cli_rejects_unknown_command(capsys) -> None:
