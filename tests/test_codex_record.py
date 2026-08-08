@@ -13,9 +13,14 @@ from types import SimpleNamespace
 import pytest
 
 from chronovisor.core.store import RuntimeContext
-from chronovisor.hosts import codex_record
+from chronovisor.hosts import codex_record, codex_transcript
 from chronovisor.raw.raw_semantic_projection import project_parent_raw
 from chronovisor.raw.save_transaction import make_save_transaction
+
+
+def test_transcript_types_are_reexported_from_parser_module() -> None:
+    assert codex_record.TranscriptRecord is codex_transcript.TranscriptRecord
+    assert codex_record.TranscriptSlice is codex_transcript.TranscriptSlice
 
 
 def write_jsonl(path: Path, rows: list[dict]) -> None:
