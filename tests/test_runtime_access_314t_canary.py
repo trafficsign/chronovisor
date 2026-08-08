@@ -56,13 +56,13 @@ def test_independent_fixture_and_seals_are_locked() -> None:
     from scripts.runtime_ownership import machine_facts, manifests
 
     assert canary.EXPECTED_ANALYZER_REVISION == (
-        "35ac8a66fd1f2b4989fb5e652e7ff0dcbbcd1da4"
+        "b934ecb3425f2121c0375f5bcd174736c21a8546"
     )
     assert canary.EXPECTED_ANALYZER_FILES_SHA256 == (
-        "e14cbf81913232f133927980ffe70922a8b44095a8ff00bd7d05a205f23a6892"
+        "4c54b26db7e28d16de69b9c00183fab7f2c8fb411edd5d28c1d1728e1f3062f3"
     )
     assert canary.EXPECTED_ANALYZER_MANIFEST_SHA256 == (
-        "f3eae50ea10edbd39ab5fb3392007a04f736f48963318d469663b08f61f5149b"
+        "3789c8b41f22e99217419e7bc1abfa49e6de8c3d9b6f18091847f294e1a709ec"
     )
     assert canary.EXPECTED_SOURCE_REVISION == (
         "f90202f1d1b9b2ed44075f38b0668c91fc0f196f"
@@ -125,10 +125,10 @@ def test_independent_fixture_and_seals_are_locked() -> None:
         expected_revision=canary.EXPECTED_SOURCE_REVISION,
     )
     assert analyzer_manifest["files_sha256"] == (
-        "e14cbf81913232f133927980ffe70922a8b44095a8ff00bd7d05a205f23a6892"
+        "4c54b26db7e28d16de69b9c00183fab7f2c8fb411edd5d28c1d1728e1f3062f3"
     )
     assert analyzer_manifest["manifest_sha256"] == (
-        "f3eae50ea10edbd39ab5fb3392007a04f736f48963318d469663b08f61f5149b"
+        "3789c8b41f22e99217419e7bc1abfa49e6de8c3d9b6f18091847f294e1a709ec"
     )
     assert source_manifest["files_sha256"] == (
         "be2ad06f687bc619a89d12ad6274d6843b26278e2094d420146105c398e73cee"

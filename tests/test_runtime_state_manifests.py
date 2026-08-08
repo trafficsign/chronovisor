@@ -28,7 +28,7 @@ from scripts.runtime_ownership.manifests import (
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE_REVISION = "f90202f1d1b9b2ed44075f38b0668c91fc0f196f"
-ANALYZER_REVISION = "35ac8a66fd1f2b4989fb5e652e7ff0dcbbcd1da4"
+ANALYZER_REVISION = "b934ecb3425f2121c0375f5bcd174736c21a8546"
 TOOLCHAIN_PRECOMMIT_HEAD = "11e2acf77a53edf520e3cce5d2e5decd16cd06c5"
 
 
@@ -831,12 +831,12 @@ def test_real_repository_canonical_source_and_current_analyzer_manifests() -> No
     assert source["manifest_sha256"] == (
         "268a6d8ca2fbd7d4877f78a3f5c6b14fd0e7e36d760173be9ce1a05e6703f43a"
     )
-    assert analyzer["counts"] == {"files": 15, "bytes": 571292}
+    assert analyzer["counts"] == {"files": 15, "bytes": 571254}
     assert analyzer["files_sha256"] == (
-        "e14cbf81913232f133927980ffe70922a8b44095a8ff00bd7d05a205f23a6892"
+        "4c54b26db7e28d16de69b9c00183fab7f2c8fb411edd5d28c1d1728e1f3062f3"
     )
     assert analyzer["manifest_sha256"] == (
-        "f3eae50ea10edbd39ab5fb3392007a04f736f48963318d469663b08f61f5149b"
+        "3789c8b41f22e99217419e7bc1abfa49e6de8c3d9b6f18091847f294e1a709ec"
     )
 
 
