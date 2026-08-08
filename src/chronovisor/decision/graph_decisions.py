@@ -6,94 +6,20 @@ import json
 from collections.abc import Mapping
 from typing import Any
 
-_BASE_DECISIONS = ["approved", "rejected", "abstained", "needs_retry"]
-
-
-def _schema(extra: Mapping[str, Any], required: list[str]) -> dict[str, Any]:
-    return {
-        "type": "object",
-        "additionalProperties": False,
-        "required": ["decision", *required, "confidence", "summary"],
-        "properties": {
-            "decision": {"type": "string", "enum": _BASE_DECISIONS},
-            **dict(extra),
-            "confidence": {"type": "number", "minimum": 0, "maximum": 1},
-            "summary": {"type": "string", "maxLength": 500},
-        },
-    }
-
-
-RELATION_VERIFICATION_SCHEMA = _schema(
-    {
-        "evidence_supported": {"type": "boolean"},
-        "contradiction_found": {"type": "boolean"},
-        "unknown_endpoint": {"type": "boolean"},
-        "digest_valid": {"type": "boolean"},
-    },
-    ["evidence_supported", "contradiction_found", "unknown_endpoint", "digest_valid"],
+from chronovisor.decision.decision_schema_manifest import (
+    ENTITY_MERGE_VERIFICATION_SCHEMA as ENTITY_MERGE_VERIFICATION_SCHEMA,
 )
-
-ENTITY_MERGE_VERIFICATION_SCHEMA = _schema(
-    {
-        "same_identity": {"type": "boolean"},
-        "alias_supported": {"type": "boolean"},
-        "collision_risk": {"type": "boolean"},
-        "split_required": {"type": "boolean"},
-    },
-    ["same_identity", "alias_supported", "collision_risk", "split_required"],
+from chronovisor.decision.decision_schema_manifest import (
+    RECALL_ANSWER_ADJUDICATION_SCHEMA as RECALL_ANSWER_ADJUDICATION_SCHEMA,
 )
-
-RECALL_USEFULNESS_SCHEMA = _schema(
-    {
-        "topically_relevant": {"type": "boolean"},
-        "marginally_useful": {"type": "boolean"},
-        "read_worthy": {"type": "boolean"},
-        "stale_or_harmful": {"type": "boolean"},
-    },
-    ["topically_relevant", "marginally_useful", "read_worthy", "stale_or_harmful"],
+from chronovisor.decision.decision_schema_manifest import (
+    RECALL_RUBRIC_CALIBRATION_SCHEMA as RECALL_RUBRIC_CALIBRATION_SCHEMA,
 )
-
-RECALL_RUBRIC_CALIBRATION_SCHEMA = _schema(
-    {
-        "rubric_id": {"type": "string", "minLength": 1, "maxLength": 128},
-        "holdout_non_regression": {"type": "boolean"},
-        "calibration_improved": {"type": "boolean"},
-        "coverage_preserved": {"type": "boolean"},
-        "rollback_safe": {"type": "boolean"},
-    },
-    [
-        "rubric_id",
-        "holdout_non_regression",
-        "calibration_improved",
-        "coverage_preserved",
-        "rollback_safe",
-    ],
+from chronovisor.decision.decision_schema_manifest import (
+    RECALL_USEFULNESS_SCHEMA as RECALL_USEFULNESS_SCHEMA,
 )
-
-RECALL_ANSWER_ADJUDICATION_SCHEMA = _schema(
-    {
-        "subject_kind": {
-            "type": "string",
-            "enum": [
-                "gold_entry",
-                "scorer_calibration_case",
-                "search_label_candidate",
-            ],
-        },
-        "subject_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-        "evidence_complete": {"type": "boolean"},
-        "reference_independent": {"type": "boolean"},
-        "preregistered_before_evaluation": {"type": "boolean"},
-        "split_safe": {"type": "boolean"},
-    },
-    [
-        "subject_kind",
-        "subject_sha256",
-        "evidence_complete",
-        "reference_independent",
-        "preregistered_before_evaluation",
-        "split_safe",
-    ],
+from chronovisor.decision.decision_schema_manifest import (
+    RELATION_VERIFICATION_SCHEMA as RELATION_VERIFICATION_SCHEMA,
 )
 
 

@@ -5,6 +5,9 @@ from __future__ import annotations
 from typing import Any
 
 from chronovisor.decision.decision_lane_prompts import INGEST_PROPOSAL_SCHEMA_VERSION
+from chronovisor.decision.decision_schema_manifest import (
+    INGEST_FRONTIER_DECISION_SCHEMA as INGEST_FRONTIER_DECISION_SCHEMA,
+)
 
 TRIAGE_CATALOG_TOP_N = 100
 TRIAGE_MAX_OPERATIONS = 8
@@ -94,46 +97,3 @@ INGEST_REVIEW_SHARD_ROW_FIELDS = frozenset(
         "selected_num_ctx",
     }
 )
-INGEST_FRONTIER_DECISION_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": [
-        "decision",
-        "summary",
-        "failed_operations_disposition",
-        "tests_run",
-        "risk",
-        "notes",
-    ],
-    "properties": {
-        "decision": {
-            "type": "string",
-            "enum": ["apply_available", "confirmed_noop", "retry", "quarantined"],
-        },
-        "summary": {"type": "string"},
-        "failed_operations_disposition": {
-            "type": "string",
-            "enum": ["none", "confirmed_unnecessary", "retry_required"],
-        },
-        "tests_run": {"type": "array", "items": {"type": "string"}},
-        "risk": {"type": ["string", "null"]},
-        "notes": {"type": ["string", "null"]},
-        "repair_option_id": {"type": "string", "pattern": "^rp_[0-9a-f]{32}$"},
-        "invalid_tags": {
-            "type": "array",
-            "items": {"type": "string", "pattern": "^[dts]/[a-z0-9][a-z0-9-]*$"},
-        },
-        "replacement_operations": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "additionalProperties": False,
-                "required": ["filename", "content"],
-                "properties": {
-                    "filename": {"type": "string"},
-                    "content": {"type": "string"},
-                },
-            },
-        },
-    },
-}

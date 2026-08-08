@@ -15,7 +15,10 @@ from chronovisor.decision.decision_authority import (
     seal_semantic_artifact,
     semantic_verdict_authority_error,
 )
-from chronovisor.decision.decision_schema_manifest import schema_sha256
+from chronovisor.decision.decision_schema_manifest import (
+    LOCAL_REPAIR_SCHEMA,
+    schema_sha256,
+)
 from chronovisor.ingest.page_mutation import decision_authority_lock
 from chronovisor.search.semantic_hold import (
     build_semantic_no_quorum_hold,
@@ -30,22 +33,6 @@ ALLOWED_ACTIONS = {
     "escalate_to_frontier",
     "propose_prompt_fix",
     "propose_test_case",
-}
-
-
-LOCAL_REPAIR_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": ["status", "action", "confidence", "reason"],
-    "properties": {
-        "status": {"type": "string", "enum": ["resolved", "escalate", "rejected"]},
-        "action": {"type": "string", "enum": sorted(ALLOWED_ACTIONS)},
-        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
-        "requested_page_id": {"type": ["string", "null"]},
-        "target_page_id": {"type": ["string", "null"]},
-        "reason": {"type": "string"},
-        "notes": {"type": ["string", "null"]},
-    },
 }
 
 

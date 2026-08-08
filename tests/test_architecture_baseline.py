@@ -145,6 +145,31 @@ P5_RETIRED_STATIC_SITE_IDS = (
     "arch:720a675ffaa72d9b18758180feff7385941e447ceb8e426b6ec26666a01593c1",
     "arch:d3197fe29c5799aec77cc2ed8c30953a48096e5c68556beb2ed600899a313c2a",
 )
+P6_RETIRED_EXCEPTION_IDS = (
+    "arch:11c80628d958dcc6b21e259ee77d412a97af4cb5511f0429c84a484202a6a596",
+    "arch:4e0eb5b52c98d28fdfb160175a39fc24dccd4c1cb9321fbe30aff72e46b8ae90",
+    "arch:5844476903cb2fb2dcd084f7a9678a1ddeeaedf6df8dafe8cccc48b487815291",
+    "arch:6a8632c30ae66afc94f18ba39d3f1e25d9dd4d6d3b28bd1fff31f5884449c1db",
+    "arch:7b141ccbbb17a809019002f5575e6961b49329a7bcaa010927639a3e44030152",
+    "arch:7bab544e804fbf0af4eee6323a582bd92c3c743644f85c477bc59bcd85c562b1",
+    "arch:7c8d8917ab8f77feb230950beac56d55a66aa6dc44ee32539c9fb9171431eeb7",
+    "arch:a04da670e05e0224a5d91fd4a02cc0d0c8d5409dfce78fa6eda301cc91fedafc",
+    "arch:bf8303c4fc79c57bafc96d8458d6b39afe5092356234bd623353f23ca09859b4",
+    "arch:da499bda6ddd28b2de38c278f9b9a3f21566f7f17ce939dd6947f0dbff701f9a",
+    "arch:ee6cf8478aea309360b089c9efd2e03e1c89e3c54771126142c62bde33f45127",
+    "arch:f4fd4696f256bd842e26bda1797cec07348534befffe25bcf5c15756d3a7e043",
+)
+P6_RETIRED_SITE_IDS = (
+    "arch:14892c65db81586d6c498c3caba33ac9d0d88bd3ba494d117c31115ff7d6bdf0",
+    "arch:2d0a85a686938785c8908d22a51011a3dda18aee717eaca621b72cbb3cb58761",
+    "arch:345a1449cf34a4061b4babe16a9f9e456e35720159c9466eb87c1752e2405b7e",
+    "arch:9d2b3b531fa72fc18238f09e1b3213bae15a505d1987d595be04a3d11a5782b6",
+    "arch:a31c43ef090a778e85c3e5fb5c12d4c52b84f2aa99e88dc02f6476d456eb1e48",
+    "arch:a8abccad0ea8e853f423d4d53ac899770efbd37520da28ce6a93bd3cd3d16a88",
+    "arch:cd48b5ce268793ec5fd33a0eb4e2cd2ca4686b89e33aa6ef48a9b24ebe8e14aa",
+    "arch:d75501787f96455c30118b5a40578f63ea5d26dd79f75676267e19551669dba9",
+    "arch:e0041488f7773b3fd6f8a1e5768041c91b4afd7c222787920728c6e6ef8fd0e6",
+)
 RETIREMENT_HISTORY = {
     "exception_semantic_ids": tuple(
         sorted(
@@ -157,6 +182,7 @@ RETIREMENT_HISTORY = {
                 P4A_RETIRED_OPS_LAB_EDGE_ID,
                 P4A_RETIRED_OPS_LAB_DYNAMIC_SITE_ID,
                 *P5_RETIRED_EXCEPTION_IDS,
+                *P6_RETIRED_EXCEPTION_IDS,
             )
         )
     ),
@@ -171,6 +197,7 @@ RETIREMENT_HISTORY = {
                 *P4A_RETIRED_MOVED_SITE_IDS,
                 P4_RETIRED_SEARCH_LAB_SITE_ID,
                 *P5_RETIRED_SITE_IDS,
+                *P6_RETIRED_SITE_IDS,
             )
         )
     ),
@@ -435,6 +462,13 @@ def _without_persisted_retirement_history(
     active_counts["by_category"]["cross_domain_edge"] += 5
     active_counts["by_category"]["dynamic_import"] += 1
     active_counts["by_category"]["private_symbol_import"] += 7
+    active_counts["by_category"]["schema_manifest_implementation_import"] = len(
+        P6_RETIRED_EXCEPTION_IDS
+    )
+    active_counts["schema_manifest_implementation"] = {
+        "background_decision_schemas": {"statements": 1, "symbols": 5},
+        "production_decision_schemas": {"statements": 11, "symbols": 13},
+    }
     active_counts["cross_domain_sites"] += len(
         RETIREMENT_HISTORY["cross_domain_site_semantic_ids"]
     )
@@ -852,7 +886,7 @@ def test_current_exception_ledger_seed_and_schema_inventory_are_exact(
             "compatibility_contracts",
         )
     } == {
-        "exceptions": 149,
+        "exceptions": 137,
         "cross_domain_sites": 1245,
         "production_to_lab_edges": 0,
         "production_to_lab_static_sites": 0,
@@ -863,7 +897,6 @@ def test_current_exception_ledger_seed_and_schema_inventory_are_exact(
         "cross_domain_edge": 90,
         "dynamic_import": 23,
         "private_symbol_import": 24,
-        "schema_manifest_implementation_import": 12,
     }
     assert counts["compatibility_by_kind"] == {
         "console_entrypoint": 51,
@@ -871,8 +904,8 @@ def test_current_exception_ledger_seed_and_schema_inventory_are_exact(
         "module_string": 223,
     }
     assert counts["schema_manifest_implementation"] == {
-        "background_decision_schemas": {"statements": 1, "symbols": 5},
-        "production_decision_schemas": {"statements": 11, "symbols": 13},
+        "background_decision_schemas": {"statements": 0, "symbols": 0},
+        "production_decision_schemas": {"statements": 0, "symbols": 0},
     }
     assert (
         _exception_violations(
@@ -904,7 +937,7 @@ def test_retirement_history_rejects_extra_or_wrong_id(
         _assert_exact_retirement_history(architecture, seed)
 
 
-def test_actual_schema_exceptions_are_registry_imports_not_consumers(
+def test_actual_schema_registry_has_no_implementation_imports(
     current: dict[str, Any],
 ) -> None:
     rows = [
@@ -912,19 +945,7 @@ def test_actual_schema_exceptions_are_registry_imports_not_consumers(
         for row in current["architecture_exception_ledger"]["exceptions"]
         if row["category"] == "schema_manifest_implementation_import"
     ]
-    production = [row for row in rows if row["scope"] == "production_decision_schemas"]
-    background = [row for row in rows if row["scope"] == "background_decision_schemas"]
-
-    assert len(production) == 11
-    assert sum(len(row["symbols"]) for row in production) == 13
-    assert len(background) == 1
-    assert sum(len(row["symbols"]) for row in background) == 5
-    assert {row["source_module"] for row in rows} == {
-        "chronovisor.decision.decision_schema_manifest"
-    }
-    assert all(symbol.endswith("_SCHEMA") for row in rows for symbol in row["symbols"])
-    assert all(row["target_module"] != row["source_module"] for row in production)
-    assert background[0]["target_module"] == "chronovisor.decision.graph_decisions"
+    assert rows == []
 
 
 def test_new_sensitive_exception_cannot_self_authorize_in_ledger_and_seed(
@@ -1323,14 +1344,13 @@ def test_exception_metadata_routes_to_real_owner_and_removal_campaign(
         row["removal_campaign"]
         for row in rows
         if row["category"] == "schema_manifest_implementation_import"
-    } == {"P6"}
+    } == set()
     assert {
         row["removal_campaign"]
         for row in rows
         if row["category"] == "private_symbol_import" and row["target_package"] != "lab"
     } == {"P8"}
     assert {row["removal_campaign"] for row in rows} == {
-        "P6",
         "P8",
         "Q",
         "R",

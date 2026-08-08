@@ -1,15 +1,14 @@
 {
   "schema_version": 2,
   "source_baseline_head": "d404a6b20d00e3bcd1d4cdb89edfa5a718c51833",
-  "baseline_sha256": "9f63d925d23b59531bc295114b5c05b53fdfe0be86386de91555f2b3776934cf",
+  "baseline_sha256": "b47f463be6f815f92b711e935ee917e939658e21b5617e1e2ff268821038f730",
   "semantic_identity": "cross-domain edges use category+source_package+target_package; statement exceptions use category+source_package+source_module+scope_kind+scope+statement_kind+target_package+target_module+symbols+occurrence; source line is diagnostic and normalized statement content is verified independently",
   "counts": {
-    "exceptions": 149,
+    "exceptions": 137,
     "by_category": {
       "cross_domain_edge": 90,
       "dynamic_import": 23,
-      "private_symbol_import": 24,
-      "schema_manifest_implementation_import": 12
+      "private_symbol_import": 24
     },
     "cross_domain_sites": 1245,
     "production_to_lab_edges": 0,
@@ -23,12 +22,12 @@
     },
     "schema_manifest_implementation": {
       "background_decision_schemas": {
-        "statements": 1,
-        "symbols": 5
+        "statements": 0,
+        "symbols": 0
       },
       "production_decision_schemas": {
-        "statements": 11,
-        "symbols": 13
+        "statements": 0,
+        "symbols": 0
       }
     }
   },
@@ -436,7 +435,7 @@
           ],
           "content_sha256": "eec11a7fc673beb3a444406cb1b15890f434659cd752f43606280c35592c70db",
           "occurrence": 1,
-          "line": 39
+          "line": 40
         },
         {
           "semantic_id": "arch:48c04f613a0eeeeb5a632045c138575e12fbe2b0983f823525515085a7c6cc71",
@@ -450,7 +449,7 @@
           ],
           "content_sha256": "1b8a7654ff55dab4954509be9639225dbd92d8983696618e07acd6556a05c077",
           "occurrence": 1,
-          "line": 1214
+          "line": 1189
         },
         {
           "semantic_id": "arch:67da1a29cf73f85a331f78c4827799ce3a1fc3e7b3a7d017877dbd3e1578a963",
@@ -509,7 +508,7 @@
           ],
           "content_sha256": "ef9a791b31d0dae2dce5e1f2eb111650685946f16cda5d2d06e2f824620d0a36",
           "occurrence": 1,
-          "line": 359
+          "line": 334
         },
         {
           "semantic_id": "arch:8aa9e302867b705d74affb8a0d56ee49e38c215b9b85bcf162c47f3fb748e1ab",
@@ -537,7 +536,7 @@
           ],
           "content_sha256": "000f42a51e8eac250fd587f63828be0919152f273b0a517b34de64dfcf6c56bb",
           "occurrence": 1,
-          "line": 1462
+          "line": 1437
         },
         {
           "semantic_id": "arch:aa400f09e2db4b388521b3792e5e6fc883d12f28310984567254487e0166f088",
@@ -565,7 +564,7 @@
           ],
           "content_sha256": "19bd1ee52523ae2d7caad0df9ab3aa635c77743e2934a45dbcab44b97ca75b37",
           "occurrence": 1,
-          "line": 38
+          "line": 39
         },
         {
           "semantic_id": "arch:b843b6f3252b8a22ffe801115f795bde1b498061162daf76e8ac791498ebf474",
@@ -594,7 +593,7 @@
           ],
           "content_sha256": "29942a528c9bc03ebe9461eeba69167dcbe2c6f427e5d0330b4585ca62cffff6",
           "occurrence": 1,
-          "line": 1215
+          "line": 1190
         },
         {
           "semantic_id": "arch:d33cbdf98f18c36dd59ac0134a2245fdd9018939e204f36728d637eca9225ca1",
@@ -624,7 +623,7 @@
           ],
           "content_sha256": "892e36b61d821ed2b19233f70702209cd894450f989ff3d133e7fd822d95a691",
           "occurrence": 1,
-          "line": 1537
+          "line": 1512
         },
         {
           "semantic_id": "arch:f4f47c798f96d24ae940b2fcc6d62c8fd7b1fcce0ff05c3a10eea770775c0b35",
@@ -638,7 +637,7 @@
           ],
           "content_sha256": "000f42a51e8eac250fd587f63828be0919152f273b0a517b34de64dfcf6c56bb",
           "occurrence": 1,
-          "line": 523
+          "line": 498
         }
       ],
       "semantic_id": "arch:037aee102d5183b337c8c78950ffffc1912894e5c3364d77851b8b7031136f22",
@@ -664,21 +663,7 @@
           ],
           "content_sha256": "df5060a4904f3cc0d766acab3c8d585c2f6687225e08d73b3ad99b9bca67591f",
           "occurrence": 1,
-          "line": 31
-        },
-        {
-          "semantic_id": "arch:14892c65db81586d6c498c3caba33ac9d0d88bd3ba494d117c31115ff7d6bdf0",
-          "source_module": "chronovisor.decision.decision_schema_manifest",
-          "scope_kind": "function",
-          "scope": "production_decision_schemas",
-          "statement_kind": "from",
-          "target_module": "chronovisor.ops.lint_repair",
-          "symbols": [
-            "TAG_REPAIR_SCHEMA"
-          ],
-          "content_sha256": "41e6326153475cc42500f2179fc5502ddaba116b5222023144cb8f927760625b",
-          "occurrence": 1,
-          "line": 233
+          "line": 32
         },
         {
           "semantic_id": "arch:1cb67741efbfa2341d94de2621c7dcbc24d7c2a101320f56bb748297bd545e0b",
@@ -695,20 +680,6 @@
           "line": 25
         },
         {
-          "semantic_id": "arch:2d0a85a686938785c8908d22a51011a3dda18aee717eaca621b72cbb3cb58761",
-          "source_module": "chronovisor.decision.decision_schema_manifest",
-          "scope_kind": "function",
-          "scope": "production_decision_schemas",
-          "statement_kind": "from",
-          "target_module": "chronovisor.ops.orphan_link",
-          "symbols": [
-            "ORPHAN_FRONTIER_SCHEMA"
-          ],
-          "content_sha256": "d0729bd3d86405729e72ff937663cbe807370dd6fe7cb30d555d2a69ee3ca1d0",
-          "occurrence": 1,
-          "line": 234
-        },
-        {
           "semantic_id": "arch:33693d046af1e9452717148d0afeb58f0b8dedb703d56019394ebf928bb1835d",
           "source_module": "chronovisor.decision.frontier_review",
           "scope_kind": "module",
@@ -720,21 +691,7 @@
           ],
           "content_sha256": "95c593a6c2520b86380d8ccb0be036a31bb0713f9aad188c717f593d79fb9b03",
           "occurrence": 1,
-          "line": 30
-        },
-        {
-          "semantic_id": "arch:345a1449cf34a4061b4babe16a9f9e456e35720159c9466eb87c1752e2405b7e",
-          "source_module": "chronovisor.decision.decision_schema_manifest",
-          "scope_kind": "function",
-          "scope": "production_decision_schemas",
-          "statement_kind": "from",
-          "target_module": "chronovisor.ops.lint",
-          "symbols": [
-            "SAFE_FIX_REVIEW_SCHEMA"
-          ],
-          "content_sha256": "0cf16066a74582cc7dbf7904a244353a969162a7d1254601808ca9463aed9851",
-          "occurrence": 1,
-          "line": 232
+          "line": 31
         },
         {
           "semantic_id": "arch:5b3fea450cf873a771c190e308c2543ce6d95e393b80f289061e1ca997a595f9",
@@ -796,21 +753,6 @@
           "line": 774
         },
         {
-          "semantic_id": "arch:a31c43ef090a778e85c3e5fb5c12d4c52b84f2aa99e88dc02f6476d456eb1e48",
-          "source_module": "chronovisor.decision.decision_schema_manifest",
-          "scope_kind": "function",
-          "scope": "production_decision_schemas",
-          "statement_kind": "from",
-          "target_module": "chronovisor.ops.autonomy",
-          "symbols": [
-            "DUPLICATE_FRONTIER_SCHEMA",
-            "RETENTION_FRONTIER_SCHEMA"
-          ],
-          "content_sha256": "bdd403d324e96f2277c0e3fe7423ca55135b2fc8a6953da69d4b69037774d633",
-          "occurrence": 1,
-          "line": 228
-        },
-        {
           "semantic_id": "arch:a95706f14c430049687c0c78ad294625b60d2d12e171d5823912b0fbd63eceed",
           "source_module": "chronovisor.decision.decision_lane_contract_cases",
           "scope_kind": "function",
@@ -851,7 +793,7 @@
           ],
           "content_sha256": "39723adb5403c3c7ba5161a26d782458824f712fa0d5babafef2959af00e940f",
           "occurrence": 1,
-          "line": 34
+          "line": 35
         }
       ],
       "semantic_id": "arch:04f3596a6c0dc3acbc3d1ef4dcbb8eebedb2335764f44cd678a8188b1f10f90a",
@@ -1534,7 +1476,7 @@
         "_rebuild_index"
       ],
       "content_sha256": "70e2f5192f80b2a4aeaaa53482ddeab78b1a06a879636a2073c691bd1c5669eb",
-      "line": 3453,
+      "line": 3339,
       "occurrence": 1,
       "semantic_id": "arch:0dd175ac5f39948a2ea0105bd57085bc0ad73146211af3bb2fd4145ce3e85500",
       "owner": "chronovisor.recall.content_correction",
@@ -1605,6 +1547,21 @@
           "content_sha256": "75f83b4cea5be7d6379fca2977de2f31f61277e76a5ddc38def746163861a9a9",
           "occurrence": 1,
           "line": 22
+        },
+        {
+          "semantic_id": "arch:2c3ff729513e3c1d85728c4a7be0acb74c9375167fbb242e96a5414e75a87acb",
+          "source_module": "chronovisor.recall.content_correction",
+          "scope_kind": "module",
+          "scope": "<module>",
+          "statement_kind": "from",
+          "target_module": "chronovisor.decision.decision_schema_manifest",
+          "symbols": [
+            "FRONTIER_CLASSIFICATION_SCHEMA",
+            "FRONTIER_REVIEW_SCHEMA"
+          ],
+          "content_sha256": "1b368649eb271d36424a69e166996bb195317a9feaec6da7544b3e814573cdaa",
+          "occurrence": 1,
+          "line": 44
         },
         {
           "semantic_id": "arch:3593de0f0d9cc70b4f44a0231fc4d05bc10d45262bfb7407c5d60f23d1f14724",
@@ -1730,7 +1687,7 @@
           ],
           "content_sha256": "56490f13ba218abef58bcc497aa99d8a125aa50a14b569adb291e1922484a6fe",
           "occurrence": 1,
-          "line": 2794
+          "line": 2680
         },
         {
           "semantic_id": "arch:919b6a8be06d3c778c5258a9e4f0b2fd82de7c44b21fc0c8bfd8497c62bcd068",
@@ -1787,7 +1744,7 @@
           ],
           "content_sha256": "ebc360146a94ad056280bbf6d98d9f6e641566b09c2abd83a7011ad036aa2239",
           "occurrence": 1,
-          "line": 3835
+          "line": 3721
         },
         {
           "semantic_id": "arch:caa7f053b7c3f068df180c83ebb7aa517d9eecc67e9d86fc510461a404e518f4",
@@ -1861,7 +1818,7 @@
           ],
           "content_sha256": "31306549bbadec1bcfb6a772c1001b4a59d1e7746b437a169a37bfc0f4cd551d",
           "occurrence": 1,
-          "line": 44
+          "line": 48
         },
         {
           "semantic_id": "arch:e9ce3eef6a13253c1cc8c6e508425c1848bd392abefd60f7eb144b43d94d4de9",
@@ -1889,7 +1846,7 @@
           ],
           "content_sha256": "56490f13ba218abef58bcc497aa99d8a125aa50a14b569adb291e1922484a6fe",
           "occurrence": 1,
-          "line": 2457
+          "line": 2343
         },
         {
           "semantic_id": "arch:fdaa19db6f137d9fa9cbab078cd51192a9d16b3ae88ff9e99ff24a60b1323528",
@@ -1911,27 +1868,6 @@
       "deadline": "2026-12-31",
       "removal_campaign": "S",
       "rationale": "Remove the recall->decision package edge through a published contract."
-    },
-    {
-      "category": "schema_manifest_implementation_import",
-      "source_package": "decision",
-      "source_module": "chronovisor.decision.decision_schema_manifest",
-      "scope_kind": "function",
-      "scope": "production_decision_schemas",
-      "statement_kind": "from",
-      "target_package": "ops",
-      "target_module": "chronovisor.ops.lint",
-      "symbols": [
-        "SAFE_FIX_REVIEW_SCHEMA"
-      ],
-      "content_sha256": "0cf16066a74582cc7dbf7904a244353a969162a7d1254601808ca9463aed9851",
-      "line": 232,
-      "occurrence": 1,
-      "semantic_id": "arch:11c80628d958dcc6b21e259ee77d412a97af4cb5511f0429c84a484202a6a596",
-      "owner": "chronovisor.decision.decision_schema_manifest",
-      "deadline": "2026-09-21",
-      "removal_campaign": "P6",
-      "rationale": "Invert the schema registry so implementations publish schemas through a contract."
     },
     {
       "category": "cross_domain_edge",
@@ -1979,7 +1915,7 @@
           ],
           "content_sha256": "45f70c65cd81df266819f643084c56c2f8f13d40b8bb745d17b4a9ca41d48f60",
           "occurrence": 1,
-          "line": 85
+          "line": 89
         },
         {
           "semantic_id": "arch:aa0f378cd1c1e836a55c298bb8ee7a1e98adf4f774d9cddcf527c691d45b384f",
@@ -2109,6 +2045,20 @@
           "line": 13
         },
         {
+          "semantic_id": "arch:3486bfbfe5f169cbe4023d641201ff786061ae2d2948fe82cf32dad22b31bd0b",
+          "source_module": "chronovisor.ingest.ingest_schemas",
+          "scope_kind": "module",
+          "scope": "<module>",
+          "statement_kind": "from",
+          "target_module": "chronovisor.decision.decision_schema_manifest",
+          "symbols": [
+            "INGEST_FRONTIER_DECISION_SCHEMA"
+          ],
+          "content_sha256": "b950fb0fe7987a5df6688265566d3e6b8c2715eb1128ae903c9b3a40a37ac3e3",
+          "occurrence": 1,
+          "line": 8
+        },
+        {
           "semantic_id": "arch:49cd278f46edb4549bb304ec7ce6f35f3b0f6156bbf9b27ea7af1667111e387c",
           "source_module": "chronovisor.ingest.orchestrator",
           "scope_kind": "function",
@@ -2177,7 +2127,7 @@
           ],
           "content_sha256": "56490f13ba218abef58bcc497aa99d8a125aa50a14b569adb291e1922484a6fe",
           "occurrence": 1,
-          "line": 703
+          "line": 691
         },
         {
           "semantic_id": "arch:67ae6911ed6ce8e2b1ea4e26c252b5339042763fe6d8a1d4d815747d08a0291f",
@@ -2233,7 +2183,7 @@
           ],
           "content_sha256": "29b02626e84600b3cde00e88af76d62bd28eb8b1cee928fed024d31b65ef41bd",
           "occurrence": 1,
-          "line": 700
+          "line": 688
         },
         {
           "semantic_id": "arch:95f65bcb02f7e56ddaff426c1dd0a39a022f3289b7f71388f87f562f676e1b62",
@@ -2289,7 +2239,21 @@
           ],
           "content_sha256": "0ca53e202dfbad7af679108256b74d35e9074c256f5276b7605ca812fc1a5646",
           "occurrence": 1,
-          "line": 1393
+          "line": 1381
+        },
+        {
+          "semantic_id": "arch:c3f2e82146e42b59aa871561b46bac77678804fdc614c7db1108c436dfcf262b",
+          "source_module": "chronovisor.ingest.read_back_repair",
+          "scope_kind": "module",
+          "scope": "<module>",
+          "statement_kind": "from",
+          "target_module": "chronovisor.decision.decision_schema_manifest",
+          "symbols": [
+            "READ_BACK_FRONTIER_SCHEMA"
+          ],
+          "content_sha256": "c2fc7d85808fc47d7d1f536503a9e66ebe2c6801bfdfd5c98ae7aa3b63214cb6",
+          "occurrence": 1,
+          "line": 25
         },
         {
           "semantic_id": "arch:c83a66e64f35aae5ed5e623472e25533570b65971d59878bf2288d0aa72231ce",
@@ -2938,7 +2902,7 @@
           ],
           "content_sha256": "5e68dc69f87ea54c49ce5efbe3b05802a570d58641741604e7978e331bd97ca7",
           "occurrence": 1,
-          "line": 37
+          "line": 38
         },
         {
           "semantic_id": "arch:ceb52f13407460dc2dddd530614123901aa93e26debcbb5ab1ed5bc48fa2862b",
@@ -3236,7 +3200,7 @@
           ],
           "content_sha256": "e1a12aa315a633917aba4b0ca806469fc1ae0a5cd7941c4bf74f720245ba3ad9",
           "occurrence": 1,
-          "line": 3428
+          "line": 3314
         },
         {
           "semantic_id": "arch:377e96c2109cd5ab17456d1144ce1ba3cb4a2f2b0a4b2973344a87efe79fbe75",
@@ -3669,7 +3633,7 @@
           ],
           "content_sha256": "b9eea2a83824b957d112fcb7373cea6d5b05e7fdca07850be315239a8e9b236c",
           "occurrence": 1,
-          "line": 3423
+          "line": 3309
         },
         {
           "semantic_id": "arch:91131d979d276b446faaaf733e458e2f32354b2c5f1ba4294a77cfe3746c7c1c",
@@ -4328,7 +4292,7 @@
           ],
           "content_sha256": "8f92be859d538c4c436a8cc6030cf195d377ec56f56d0a72b32c81b7d1d19998",
           "occurrence": 1,
-          "line": 43
+          "line": 47
         },
         {
           "semantic_id": "arch:177fda9ce2e9e19ff57c80b0e37eb6c108fae84a52bfd6537a4a728dfccb4740",
@@ -4357,7 +4321,7 @@
           ],
           "content_sha256": "8f92be859d538c4c436a8cc6030cf195d377ec56f56d0a72b32c81b7d1d19998",
           "occurrence": 1,
-          "line": 34
+          "line": 35
         },
         {
           "semantic_id": "arch:2362260ae43f9bb32a0a753d3a15cdbdac35c62051022957456fe2bd699b4f5c",
@@ -4459,7 +4423,7 @@
           ],
           "content_sha256": "8f92be859d538c4c436a8cc6030cf195d377ec56f56d0a72b32c81b7d1d19998",
           "occurrence": 1,
-          "line": 59
+          "line": 60
         },
         {
           "semantic_id": "arch:90ba3f3246fcc638e24153cd1d16be5ef2af711425994618e0543fb36f3b8994",
@@ -4616,7 +4580,7 @@
           ],
           "content_sha256": "8f92be859d538c4c436a8cc6030cf195d377ec56f56d0a72b32c81b7d1d19998",
           "occurrence": 1,
-          "line": 40
+          "line": 41
         }
       ],
       "semantic_id": "arch:22cc7d7f4cd21e0b5f0acc36c7f425dda64ad15a8f250cb42461792f8c7da716",
@@ -4931,7 +4895,7 @@
           ],
           "content_sha256": "ecf1cf1a39edb65023eaf75eaf9f6334086823b5d683ca567e0159ede370d05c",
           "occurrence": 1,
-          "line": 3424
+          "line": 3310
         },
         {
           "semantic_id": "arch:1a19a5319fb73c28bf811298e1a4345ac1a146e135c2faf40795439c4e0a40a1",
@@ -5129,7 +5093,7 @@
           ],
           "content_sha256": "7a523e7c733bf4c48cc28e570bc6cf37a1380bfdec252e93f3786bacb3176995",
           "occurrence": 1,
-          "line": 3407
+          "line": 3293
         },
         {
           "semantic_id": "arch:a92a1f56fa0813fa96ec6c2e48d5dc3f340fdeaf2d4c3e3ff6127c4694f1dd95",
@@ -5177,7 +5141,7 @@
           ],
           "content_sha256": "a2a644e3240681394cfbeec819aae4ef2040f4a650b220d670f062f1f272433a",
           "occurrence": 1,
-          "line": 3465
+          "line": 3351
         },
         {
           "semantic_id": "arch:c2cacd6fd17fc9b96b73d9a6986046a9f70dedbc7dd64319fa1546a1f34de8f8",
@@ -5366,7 +5330,7 @@
           ],
           "content_sha256": "debf171221e66c2dec4b2aeb2638e53d14c3409e0d8c36e761745443844e8b0f",
           "occurrence": 1,
-          "line": 3415
+          "line": 3301
         }
       ],
       "semantic_id": "arch:28ad2176c0dc624ee00078f6d905aee98345d897e5208a6b65aaf2b5073a3581",
@@ -5532,7 +5496,7 @@
           ],
           "content_sha256": "7a523e7c733bf4c48cc28e570bc6cf37a1380bfdec252e93f3786bacb3176995",
           "occurrence": 1,
-          "line": 762
+          "line": 750
         },
         {
           "semantic_id": "arch:3da3a455be15a5691ae0e5c6ee440ccc87748962a6709344209139af5a040fc7",
@@ -5650,7 +5614,7 @@
           ],
           "content_sha256": "c2762bb5e1926c6a1807309c2c64d422aaeb767ddcd4ff37cf955456dbc8bff6",
           "occurrence": 1,
-          "line": 35
+          "line": 36
         },
         {
           "semantic_id": "arch:e7bd77abf3526524bed269a8c1a9e6d59ae32895a6227fefb574fd2f54695862",
@@ -7430,7 +7394,7 @@
           ],
           "content_sha256": "0d1e5b6e890039e48b17c71cea42aac624fa16f9b5a51b2492036d1ff9b5ebaa",
           "occurrence": 1,
-          "line": 38
+          "line": 39
         },
         {
           "semantic_id": "arch:fbba60322398e64235a777c5f90349a23735a924666dad98d7fc26a004b36b4c",
@@ -7447,7 +7411,7 @@
           ],
           "content_sha256": "92b59fbbfb9a9f6de35e4a529296dc4f35076d4f11b21389a3ce5b2fcae0bb6c",
           "occurrence": 1,
-          "line": 44
+          "line": 45
         }
       ],
       "semantic_id": "arch:453799fcfb903eef799f6ff04da5f945488cc070f51ffe06ac5d22236691e0de",
@@ -7544,7 +7508,7 @@
           ],
           "content_sha256": "f433cc3d27ceeca5d6b5e00795e9462a4ad1cac209e76fe4a428adf7d61806a1",
           "occurrence": 1,
-          "line": 542
+          "line": 545
         },
         {
           "semantic_id": "arch:5724ea0df3605acdde2a0c6f5ec054ba95b668a812bb86440a0f7c24b3856639",
@@ -7861,27 +7825,6 @@
       "deadline": "2026-12-31",
       "removal_campaign": "S",
       "rationale": "Remove the raw->core package edge through a published contract."
-    },
-    {
-      "category": "schema_manifest_implementation_import",
-      "source_package": "decision",
-      "source_module": "chronovisor.decision.decision_schema_manifest",
-      "scope_kind": "function",
-      "scope": "production_decision_schemas",
-      "statement_kind": "from",
-      "target_package": "ingest",
-      "target_module": "chronovisor.ingest.read_back_repair",
-      "symbols": [
-        "READ_BACK_FRONTIER_SCHEMA"
-      ],
-      "content_sha256": "58b032a824f4f77528e5f8fae2373c04f2a98a0036e1de220be15669a37f68dc",
-      "line": 227,
-      "occurrence": 1,
-      "semantic_id": "arch:4e0eb5b52c98d28fdfb160175a39fc24dccd4c1cb9321fbe30aff72e46b8ae90",
-      "owner": "chronovisor.decision.decision_schema_manifest",
-      "deadline": "2026-09-21",
-      "removal_campaign": "P6",
-      "rationale": "Invert the schema registry so implementations publish schemas through a contract."
     },
     {
       "category": "cross_domain_edge",
@@ -9051,7 +8994,7 @@
           ],
           "content_sha256": "8c9a8cb9db0cba6736a9c2f28cd4f6554da34d55d00b17252122a1209f954f86",
           "occurrence": 1,
-          "line": 5874
+          "line": 5760
         },
         {
           "semantic_id": "arch:6ed80a59f571f313a0c7dac69d5e683e1f8dfe82152c1f9cf9d191ddb1c03f91",
@@ -9093,7 +9036,7 @@
           ],
           "content_sha256": "658f0b5634e722c290643af8f6ab6203b09c00315f1ff28bdf434b2959447abb",
           "occurrence": 1,
-          "line": 1080
+          "line": 966
         },
         {
           "semantic_id": "arch:b28f41b3f3e2540dfa315af2385452797b5a76ddef5e6d634e048c359a38e687",
@@ -9137,7 +9080,7 @@
           ],
           "content_sha256": "a69eeda45a0028c9bba1b4f5037ea877ddb3596d0aad7d7147d8db21d72ae45d",
           "occurrence": 1,
-          "line": 1078
+          "line": 964
         },
         {
           "semantic_id": "arch:dede5c232afa41b7bcda2883c76e7654f08c26b5da0de2fd8aff4843321a602f",
@@ -9179,7 +9122,7 @@
           ],
           "content_sha256": "6443a33dac23ba496853a9d3e2f392bc5783124637328dea3b04639ec8b243e5",
           "occurrence": 1,
-          "line": 5881
+          "line": 5767
         }
       ],
       "semantic_id": "arch:5749580ec66cd38f371f79ed6a191b91be9215b1c4609fb0c7099c1307675b71",
@@ -9235,7 +9178,7 @@
           ],
           "content_sha256": "cd2bd0a6c3d3466259ddf0b82a8f7fc3612680f895c5bbd0298cdd1f879050ce",
           "occurrence": 1,
-          "line": 1188
+          "line": 1163
         }
       ],
       "semantic_id": "arch:5751a8779d4f0b32b48c76e10051596fdd8d814ccd1c832bb6c802cc2f7c0ba0",
@@ -9243,27 +9186,6 @@
       "deadline": "2026-12-31",
       "removal_campaign": "S",
       "rationale": "Remove the search->knowledge_graph package edge through a published contract."
-    },
-    {
-      "category": "schema_manifest_implementation_import",
-      "source_package": "decision",
-      "source_module": "chronovisor.decision.decision_schema_manifest",
-      "scope_kind": "function",
-      "scope": "production_decision_schemas",
-      "statement_kind": "from",
-      "target_package": "ingest",
-      "target_module": "chronovisor.ingest.ingest",
-      "symbols": [
-        "INGEST_FRONTIER_DECISION_SCHEMA"
-      ],
-      "content_sha256": "3d694dc2b2373d981ada13f95ec1bc56e342f9eb0f760c741a15a99d536d10d6",
-      "line": 226,
-      "occurrence": 1,
-      "semantic_id": "arch:5844476903cb2fb2dcd084f7a9678a1ddeeaedf6df8dafe8cccc48b487815291",
-      "owner": "chronovisor.decision.decision_schema_manifest",
-      "deadline": "2026-09-21",
-      "removal_campaign": "P6",
-      "rationale": "Invert the schema registry so implementations publish schemas through a contract."
     },
     {
       "category": "private_symbol_import",
@@ -9378,7 +9300,7 @@
           ],
           "content_sha256": "86ba94c0fd9c7efba976ed50826439f40e95e671dfdac536262130f73eb6e670",
           "occurrence": 1,
-          "line": 56
+          "line": 60
         }
       ],
       "semantic_id": "arch:5db7ce9fb861fda3f0a6e1c0b363ea89e8b7200db30996dc5c82b9e6704920a7",
@@ -9865,21 +9787,6 @@
           "line": 2214
         },
         {
-          "semantic_id": "arch:a8abccad0ea8e853f423d4d53ac899770efbd37520da28ce6a93bd3cd3d16a88",
-          "source_module": "chronovisor.decision.decision_schema_manifest",
-          "scope_kind": "function",
-          "scope": "production_decision_schemas",
-          "statement_kind": "from",
-          "target_module": "chronovisor.recall.content_correction",
-          "symbols": [
-            "FRONTIER_CLASSIFICATION_SCHEMA",
-            "FRONTIER_REVIEW_SCHEMA"
-          ],
-          "content_sha256": "7685e998db14ec421838adf5c2b727705419786a0eda177b2d39a0349e953ead",
-          "occurrence": 1,
-          "line": 236
-        },
-        {
           "semantic_id": "arch:d853bea9b7e5cce2fc45d721cef212975e02d7d52b3a680609743bc91838c1d3",
           "source_module": "chronovisor.decision.decision_lane_contract_cases",
           "scope_kind": "function",
@@ -9952,7 +9859,7 @@
           ],
           "content_sha256": "bc5fe2c246b5f285560c08b31c67a367fa992da69704236c76827485a2c2deed",
           "occurrence": 1,
-          "line": 34
+          "line": 35
         },
         {
           "semantic_id": "arch:ef6d5937a322dacc0a39e683c897ca715a27aacc3fb3aa05414df8011d3fce9b",
@@ -10031,7 +9938,7 @@
           ],
           "content_sha256": "c2762bb5e1926c6a1807309c2c64d422aaeb767ddcd4ff37cf955456dbc8bff6",
           "occurrence": 1,
-          "line": 41
+          "line": 44
         }
       ],
       "semantic_id": "arch:65a87028049e6d02a632977b1d5552403db6c7a543014aac4a820ba5a8a4285f",
@@ -11828,27 +11735,6 @@
       "rationale": "Remove the ingest->core package edge through a published contract."
     },
     {
-      "category": "schema_manifest_implementation_import",
-      "source_package": "decision",
-      "source_module": "chronovisor.decision.decision_schema_manifest",
-      "scope_kind": "function",
-      "scope": "production_decision_schemas",
-      "statement_kind": "from",
-      "target_package": "raw",
-      "target_module": "chronovisor.raw.raw_replay",
-      "symbols": [
-        "RAW_REPLAY_RECONCILIATION_SCHEMA"
-      ],
-      "content_sha256": "ddc7b1df0b70528c7168286946115d843c6bd0a63bd5aca5ac335cafe8b9ee04",
-      "line": 235,
-      "occurrence": 1,
-      "semantic_id": "arch:6a8632c30ae66afc94f18ba39d3f1e25d9dd4d6d3b28bd1fff31f5884449c1db",
-      "owner": "chronovisor.decision.decision_schema_manifest",
-      "deadline": "2026-09-21",
-      "removal_campaign": "P6",
-      "rationale": "Invert the schema registry so implementations publish schemas through a contract."
-    },
-    {
       "category": "private_symbol_import",
       "source_package": "hosts",
       "source_module": "chronovisor.hosts.server",
@@ -11908,7 +11794,7 @@
           ],
           "content_sha256": "f98fad9e453b684ff7361fbcf6b794432d022a61f24e0fc049036b7b3a256e20",
           "occurrence": 1,
-          "line": 36
+          "line": 37
         },
         {
           "semantic_id": "arch:594f5f9c4ee306a34656ddf4318a713fa0669695c448df9432a204c072d49d57",
@@ -12200,7 +12086,7 @@
         "record_semantic_no_quorum_defer_unless_operational_hold"
       ],
       "content_sha256": "f33f41dd413b93121adb703761d742c8b306548b8dc8dbd963dbac79b743d377",
-      "line": 2383,
+      "line": 2371,
       "occurrence": 1,
       "semantic_id": "arch:7154180a53adc001e2ce4811641f166678933f36f4d85168227508aecf661719",
       "owner": "chronovisor.raw.raw_replay",
@@ -12299,7 +12185,7 @@
           ],
           "content_sha256": "f26ec2a97fd358bf6a5fa37993cd711ca35fad8061f08ee97245f3b95f0fd693",
           "occurrence": 1,
-          "line": 45
+          "line": 49
         },
         {
           "semantic_id": "arch:600df5cc0e5dc44248b2914937a6fd0d33228304ccb434fbc25e0c7e886d46e7",
@@ -12342,7 +12228,7 @@
           ],
           "content_sha256": "70e2f5192f80b2a4aeaaa53482ddeab78b1a06a879636a2073c691bd1c5669eb",
           "occurrence": 1,
-          "line": 3453
+          "line": 3339
         },
         {
           "semantic_id": "arch:b0eeaf11c8025f47c7a600e9fd20cddb08737a114af616137d3b54318d1c0bc9",
@@ -12459,71 +12345,6 @@
       "deadline": "2026-11-30",
       "removal_campaign": "R",
       "rationale": "Move the ops->recall runtime import into explicit composition."
-    },
-    {
-      "category": "schema_manifest_implementation_import",
-      "source_package": "decision",
-      "source_module": "chronovisor.decision.decision_schema_manifest",
-      "scope_kind": "function",
-      "scope": "production_decision_schemas",
-      "statement_kind": "from",
-      "target_package": "ops",
-      "target_module": "chronovisor.ops.orphan_link",
-      "symbols": [
-        "ORPHAN_FRONTIER_SCHEMA"
-      ],
-      "content_sha256": "d0729bd3d86405729e72ff937663cbe807370dd6fe7cb30d555d2a69ee3ca1d0",
-      "line": 234,
-      "occurrence": 1,
-      "semantic_id": "arch:7b141ccbbb17a809019002f5575e6961b49329a7bcaa010927639a3e44030152",
-      "owner": "chronovisor.decision.decision_schema_manifest",
-      "deadline": "2026-09-21",
-      "removal_campaign": "P6",
-      "rationale": "Invert the schema registry so implementations publish schemas through a contract."
-    },
-    {
-      "category": "schema_manifest_implementation_import",
-      "source_package": "decision",
-      "source_module": "chronovisor.decision.decision_schema_manifest",
-      "scope_kind": "function",
-      "scope": "production_decision_schemas",
-      "statement_kind": "from",
-      "target_package": "ops",
-      "target_module": "chronovisor.ops.autonomy",
-      "symbols": [
-        "DUPLICATE_FRONTIER_SCHEMA",
-        "RETENTION_FRONTIER_SCHEMA"
-      ],
-      "content_sha256": "bdd403d324e96f2277c0e3fe7423ca55135b2fc8a6953da69d4b69037774d633",
-      "line": 228,
-      "occurrence": 1,
-      "semantic_id": "arch:7bab544e804fbf0af4eee6323a582bd92c3c743644f85c477bc59bcd85c562b1",
-      "owner": "chronovisor.decision.decision_schema_manifest",
-      "deadline": "2026-09-21",
-      "removal_campaign": "P6",
-      "rationale": "Invert the schema registry so implementations publish schemas through a contract."
-    },
-    {
-      "category": "schema_manifest_implementation_import",
-      "source_package": "decision",
-      "source_module": "chronovisor.decision.decision_schema_manifest",
-      "scope_kind": "function",
-      "scope": "production_decision_schemas",
-      "statement_kind": "from",
-      "target_package": "recall",
-      "target_module": "chronovisor.recall.content_correction",
-      "symbols": [
-        "FRONTIER_CLASSIFICATION_SCHEMA",
-        "FRONTIER_REVIEW_SCHEMA"
-      ],
-      "content_sha256": "7685e998db14ec421838adf5c2b727705419786a0eda177b2d39a0349e953ead",
-      "line": 236,
-      "occurrence": 1,
-      "semantic_id": "arch:7c8d8917ab8f77feb230950beac56d55a66aa6dc44ee32539c9fb9171431eeb7",
-      "owner": "chronovisor.decision.decision_schema_manifest",
-      "deadline": "2026-09-21",
-      "removal_campaign": "P6",
-      "rationale": "Invert the schema registry so implementations publish schemas through a contract."
     },
     {
       "category": "cross_domain_edge",
@@ -12744,7 +12565,7 @@
           ],
           "content_sha256": "5e68dc69f87ea54c49ce5efbe3b05802a570d58641741604e7978e331bd97ca7",
           "occurrence": 1,
-          "line": 39
+          "line": 42
         }
       ],
       "semantic_id": "arch:894878c98aa176b1f0efb49d854f472e33335e754f82b84453c9fb9128b52724",
@@ -13367,7 +13188,7 @@
           ],
           "content_sha256": "2732b02339baac93338cb46c88e1940bca7e393b066603ce2a4118f72490f0b2",
           "occurrence": 1,
-          "line": 3494
+          "line": 3470
         },
         {
           "semantic_id": "arch:71c975147957cc84c203aeff2a0aa24049cfcd8db89b2f064d234fbe20f9808e",
@@ -13742,7 +13563,7 @@
           ],
           "content_sha256": "653e4044ce35f3e5c464fe840ce4f7ff0f390ecda34b6abae44f9e82902d528f",
           "occurrence": 1,
-          "line": 2226
+          "line": 2199
         },
         {
           "semantic_id": "arch:ab52db066e5d69b0fa35560b4fca5fe1298c99acdb5da8ca8f481af2ed03570c",
@@ -13914,7 +13735,7 @@
           ],
           "content_sha256": "0d3fc67b77b0e38bf1c52df9400c2391eccab55e28d4c7ebabb081946a709192",
           "occurrence": 1,
-          "line": 2229
+          "line": 2202
         },
         {
           "semantic_id": "arch:ccfecb23c9ddc79779a92846190af48b4851d9e722d50145b391d84cbc158444",
@@ -14254,7 +14075,7 @@
           ],
           "content_sha256": "dd0648f06fc562c8302f77af6884b6af48025ea9db23f062b4828cde2ac5234e",
           "occurrence": 1,
-          "line": 33
+          "line": 34
         },
         {
           "semantic_id": "arch:450532c6fe5094d19e88b89e02a307748d27e45390eed9daca42ab76ef0612a4",
@@ -14472,7 +14293,7 @@
           ],
           "content_sha256": "60959ae837c78bf53c8f45fc19fbf545906d9226b817533ec3843722d2a3d169",
           "occurrence": 1,
-          "line": 2061
+          "line": 2036
         },
         {
           "semantic_id": "arch:2c32bcdb41cfce6cf3b409e934fb403c28d035f9744012c622bccc91bbe5853e",
@@ -14486,7 +14307,21 @@
           ],
           "content_sha256": "1a1a64dd23d16d0750f101123c360261ff0bbd1e73f088557801570ced4d7851",
           "occurrence": 1,
-          "line": 3897
+          "line": 3872
+        },
+        {
+          "semantic_id": "arch:6a142eb481031d6c009d11f88ca612bd6fc85a55b84496e59e2414b90f7e099a",
+          "source_module": "chronovisor.search.search_eval",
+          "scope_kind": "module",
+          "scope": "<module>",
+          "statement_kind": "from",
+          "target_module": "chronovisor.decision.decision_schema_manifest",
+          "symbols": [
+            "FRONTIER_LABEL_SCHEMA"
+          ],
+          "content_sha256": "3639f0edd7c7eeec6087da34296ad891cba9ca5cd6783913cc3727dfcb4115e2",
+          "occurrence": 1,
+          "line": 36
         },
         {
           "semantic_id": "arch:6d711f720b0254401f1699505d9f1fcae1e80f82a42046d4db964e8ab20a728b",
@@ -14543,7 +14378,7 @@
           ],
           "content_sha256": "60959ae837c78bf53c8f45fc19fbf545906d9226b817533ec3843722d2a3d169",
           "occurrence": 1,
-          "line": 3896
+          "line": 3871
         }
       ],
       "semantic_id": "arch:92292a52fbd379c3e411cb0a0682ce3cc660ecad73d95b7ce88c565db1c5b1ea",
@@ -15200,7 +15035,7 @@
         "_semantic_defer_packet_records"
       ],
       "content_sha256": "8a22293f0c54dc5a046484862ca3859a94ba1503282dbd20cb198909dec00623",
-      "line": 2616,
+      "line": 2604,
       "occurrence": 1,
       "semantic_id": "arch:9be0fa9078776c58c283d3dc92b97af31c7828b7cd0bb496b167981eac0f35ed",
       "owner": "chronovisor.raw.raw_replay",
@@ -15318,20 +15153,6 @@
           "content_sha256": "3887a9bfc6dc9c068d6c36ab97510a50ed4d8376d6ad778027aecc6fffcac72d",
           "occurrence": 1,
           "line": 1723
-        },
-        {
-          "semantic_id": "arch:d75501787f96455c30118b5a40578f63ea5d26dd79f75676267e19551669dba9",
-          "source_module": "chronovisor.decision.decision_schema_manifest",
-          "scope_kind": "function",
-          "scope": "production_decision_schemas",
-          "statement_kind": "from",
-          "target_module": "chronovisor.raw.raw_replay",
-          "symbols": [
-            "RAW_REPLAY_RECONCILIATION_SCHEMA"
-          ],
-          "content_sha256": "ddc7b1df0b70528c7168286946115d843c6bd0a63bd5aca5ac335cafe8b9ee04",
-          "occurrence": 1,
-          "line": 235
         }
       ],
       "semantic_id": "arch:9f39a64cb9539bc9ef5eb7326fc5f1f726bfe0ea5907a0f74db1236afebfe8c3",
@@ -15339,31 +15160,6 @@
       "deadline": "2026-12-31",
       "removal_campaign": "S",
       "rationale": "Remove the decision->raw package edge through a published contract."
-    },
-    {
-      "category": "schema_manifest_implementation_import",
-      "source_package": "decision",
-      "source_module": "chronovisor.decision.decision_schema_manifest",
-      "scope_kind": "function",
-      "scope": "background_decision_schemas",
-      "statement_kind": "from",
-      "target_package": "decision",
-      "target_module": "chronovisor.decision.graph_decisions",
-      "symbols": [
-        "ENTITY_MERGE_VERIFICATION_SCHEMA",
-        "RECALL_ANSWER_ADJUDICATION_SCHEMA",
-        "RECALL_RUBRIC_CALIBRATION_SCHEMA",
-        "RECALL_USEFULNESS_SCHEMA",
-        "RELATION_VERIFICATION_SCHEMA"
-      ],
-      "content_sha256": "17773e26b006cddc66af4c734ce197053754b40823a4bdfa47d21324c3ca286c",
-      "line": 262,
-      "occurrence": 1,
-      "semantic_id": "arch:a04da670e05e0224a5d91fd4a02cc0d0c8d5409dfce78fa6eda301cc91fedafc",
-      "owner": "chronovisor.decision.decision_schema_manifest",
-      "deadline": "2026-09-21",
-      "removal_campaign": "P6",
-      "rationale": "Invert the schema registry so implementations publish schemas through a contract."
     },
     {
       "category": "private_symbol_import",
@@ -15672,7 +15468,7 @@
           ],
           "content_sha256": "f98fad9e453b684ff7361fbcf6b794432d022a61f24e0fc049036b7b3a256e20",
           "occurrence": 1,
-          "line": 38
+          "line": 41
         },
         {
           "semantic_id": "arch:ea1fabe8ca914011a2b9d457f04ac4220fb810b6747722c68b7d8e5ebf22e131",
@@ -15686,7 +15482,7 @@
           ],
           "content_sha256": "657fe10918bb24b3b8f9281f5342e4ebd28d63d578097d3165ec5ff77fab2c05",
           "occurrence": 1,
-          "line": 3025
+          "line": 3013
         }
       ],
       "semantic_id": "arch:a2f4d331ffd35c9013a79416022f014905c391fdcf2d3aa12b3922767d382e77",
@@ -15883,7 +15679,7 @@
         "classify_failure"
       ],
       "content_sha256": "4b1d6906b6071cdb2f9ca2a19bdb3fd0dcb1a6d682cd1bc58115755915d59c88",
-      "line": 2502,
+      "line": 2490,
       "occurrence": 1,
       "semantic_id": "arch:b85bca5b566b069e65c44d23689a6fc707768712de8b789913734814b8ecf640",
       "owner": "chronovisor.raw.raw_replay",
@@ -15987,27 +15783,6 @@
       "rationale": "Remove the lab->search package edge through a published contract."
     },
     {
-      "category": "schema_manifest_implementation_import",
-      "source_package": "decision",
-      "source_module": "chronovisor.decision.decision_schema_manifest",
-      "scope_kind": "function",
-      "scope": "production_decision_schemas",
-      "statement_kind": "from",
-      "target_package": "search",
-      "target_module": "chronovisor.search.search_eval",
-      "symbols": [
-        "FRONTIER_LABEL_SCHEMA"
-      ],
-      "content_sha256": "1b81d5b3cf9d5572ed7e59d8ef73c483ba9610df3acafd9932f8a8bc3f64439a",
-      "line": 240,
-      "occurrence": 1,
-      "semantic_id": "arch:bf8303c4fc79c57bafc96d8458d6b39afe5092356234bd623353f23ca09859b4",
-      "owner": "chronovisor.decision.decision_schema_manifest",
-      "deadline": "2026-09-21",
-      "removal_campaign": "P6",
-      "rationale": "Invert the schema registry so implementations publish schemas through a contract."
-    },
-    {
       "category": "dynamic_import",
       "source_package": "ops",
       "source_module": "chronovisor.ops.sleep_cycle",
@@ -16045,7 +15820,7 @@
           ],
           "content_sha256": "72e98004c4c2dde2955f048994ee314843c938db26268511fff01efd6308b0f5",
           "occurrence": 1,
-          "line": 20
+          "line": 23
         },
         {
           "semantic_id": "arch:5a69f64a310ff5e4bb7e63e77ff39816d3b960d8057ed68d9a13851a73ffb383",
@@ -16062,20 +15837,6 @@
           "line": 2360
         },
         {
-          "semantic_id": "arch:9d2b3b531fa72fc18238f09e1b3213bae15a505d1987d595be04a3d11a5782b6",
-          "source_module": "chronovisor.decision.decision_schema_manifest",
-          "scope_kind": "function",
-          "scope": "production_decision_schemas",
-          "statement_kind": "from",
-          "target_module": "chronovisor.search.search_eval",
-          "symbols": [
-            "FRONTIER_LABEL_SCHEMA"
-          ],
-          "content_sha256": "1b81d5b3cf9d5572ed7e59d8ef73c483ba9610df3acafd9932f8a8bc3f64439a",
-          "occurrence": 1,
-          "line": 240
-        },
-        {
           "semantic_id": "arch:bc7ca22c6d4590c243dee1ac25dd39cc2c87d789686cb7751fd0bc19eeebaab0",
           "source_module": "chronovisor.decision.frontier_review",
           "scope_kind": "module",
@@ -16087,7 +15848,7 @@
           ],
           "content_sha256": "226d37a83c7c6ed236dc48badbdfb448d5f667b04678731aee218df637adbe24",
           "occurrence": 1,
-          "line": 37
+          "line": 38
         }
       ],
       "semantic_id": "arch:c2b49630a9475891160ffd846ff5b933e3fd8010170126e2f8d2687cc16f529d",
@@ -17732,6 +17493,20 @@
           "line": 51
         },
         {
+          "semantic_id": "arch:069e5555d7f5cae87add5e47088fc776abff96c33758b2c14204c664af41a27e",
+          "source_module": "chronovisor.ops.orphan_link",
+          "scope_kind": "module",
+          "scope": "<module>",
+          "statement_kind": "from",
+          "target_module": "chronovisor.decision.decision_schema_manifest",
+          "symbols": [
+            "ORPHAN_FRONTIER_SCHEMA"
+          ],
+          "content_sha256": "2ed51815067b72ca99952e36127fa18d392211efae70eca7c48a056a04422020",
+          "occurrence": 1,
+          "line": 58
+        },
+        {
           "semantic_id": "arch:09f7f2b727a79821f0e182b2126af03cca1e2885d7187abbf53c71eecb4c4cdf",
           "source_module": "chronovisor.ops.system_incident_supervisor",
           "scope_kind": "module",
@@ -17845,7 +17620,7 @@
           ],
           "content_sha256": "56490f13ba218abef58bcc497aa99d8a125aa50a14b569adb291e1922484a6fe",
           "occurrence": 1,
-          "line": 2480
+          "line": 2456
         },
         {
           "semantic_id": "arch:304bfa46bbb8b976d8a515d5b72458373b194662c58b98e0a0301d3947ca4851",
@@ -17876,6 +17651,20 @@
           "line": 31
         },
         {
+          "semantic_id": "arch:42b9eb661a3338aa24cf9da442dae4a0791e367ac3aa8b862c30c1d14505ea1f",
+          "source_module": "chronovisor.ops.lint",
+          "scope_kind": "module",
+          "scope": "<module>",
+          "statement_kind": "from",
+          "target_module": "chronovisor.decision.decision_schema_manifest",
+          "symbols": [
+            "SAFE_FIX_REVIEW_SCHEMA"
+          ],
+          "content_sha256": "a7d5b2361c1e993fb1968ab527ce2bcb6b76ea231a5360ee92038b1bad51103a",
+          "occurrence": 1,
+          "line": 34
+        },
+        {
           "semantic_id": "arch:47c6655b42cc9812f6df2dba9731267026cabf035e4aeee7920947c2bdbf7c09",
           "source_module": "chronovisor.ops.self_heal",
           "scope_kind": "function",
@@ -17890,6 +17679,21 @@
           "line": 2203
         },
         {
+          "semantic_id": "arch:4f5a4126fab0ed770257202c8f4f05e5554980c3ac7562eeae5ef452483cc1a2",
+          "source_module": "chronovisor.ops.autonomy",
+          "scope_kind": "module",
+          "scope": "<module>",
+          "statement_kind": "from",
+          "target_module": "chronovisor.decision.decision_schema_manifest",
+          "symbols": [
+            "DUPLICATE_FRONTIER_SCHEMA",
+            "RETENTION_FRONTIER_SCHEMA"
+          ],
+          "content_sha256": "f4bf2975d19a96cdf6862f6fa4156803712af45b6a635e4e0c25e1f145f64a00",
+          "occurrence": 1,
+          "line": 43
+        },
+        {
           "semantic_id": "arch:524b05e34ce64716e7a5526c5ec5b317cb4fa62a27a38d2174764bee6aad6d86",
           "source_module": "chronovisor.ops.lint",
           "scope_kind": "function",
@@ -17902,7 +17706,7 @@
           ],
           "content_sha256": "570ef96ae8a9cb69e075fde6654985c47d0abc3acd8e56c353cd9211615d9a3d",
           "occurrence": 1,
-          "line": 1338
+          "line": 1311
         },
         {
           "semantic_id": "arch:5315e1bb6dd55751965b694d547af4a727b114ac1e69e8384fb4e80381a50f06",
@@ -17947,7 +17751,7 @@
           ],
           "content_sha256": "303dd9588261e58bb6cb2a5f0db0c68e4fe69ceffea6a5e3bac0d2d784292f2f",
           "occurrence": 1,
-          "line": 1041
+          "line": 1031
         },
         {
           "semantic_id": "arch:7c20c085cd901a1188b536f9a6b98be96854cffcade3fa0aa8341e55ca9e487e",
@@ -17962,7 +17766,7 @@
           ],
           "content_sha256": "d2f813795c582db6d197eb6872e1bc3b99dd7b3f779af088e611a78d847bf91c",
           "occurrence": 1,
-          "line": 39
+          "line": 40
         },
         {
           "semantic_id": "arch:82df7c4ca9f7e5d08af89adbf8e07f32acc653c84a47853dde95001370c5fb66",
@@ -17990,7 +17794,7 @@
           ],
           "content_sha256": "f73429eb231ce235a54827c6a504ef72d9a5dd7468563461d7f143306ebe2092",
           "occurrence": 1,
-          "line": 622
+          "line": 595
         },
         {
           "semantic_id": "arch:848ba8e26d052a1a02586472f39059e49d7c2107988c596389e241580be989d1",
@@ -18018,7 +17822,7 @@
           ],
           "content_sha256": "ad69a9fb21ae1cd26cdfaee8624615b11c208697f4eef397d6808415cc7c2cf0",
           "occurrence": 1,
-          "line": 2875
+          "line": 2851
         },
         {
           "semantic_id": "arch:89369d77a05be043c0ce1b9d5e5114d2171f437b3b01e76755568ad7802667f1",
@@ -18032,7 +17836,7 @@
           ],
           "content_sha256": "2b989ddb9c4329696ecf348b213cee5df6c6ddce86bf50d2df1a37c5fde46107",
           "occurrence": 1,
-          "line": 3495
+          "line": 3471
         },
         {
           "semantic_id": "arch:8d4485b205661edab28bbd65c8541c56b17a06013d61f63a0259f05e8de6cb4d",
@@ -18074,7 +17878,7 @@
           ],
           "content_sha256": "ad69a9fb21ae1cd26cdfaee8624615b11c208697f4eef397d6808415cc7c2cf0",
           "occurrence": 1,
-          "line": 2135
+          "line": 2111
         },
         {
           "semantic_id": "arch:a02fe27ee53b83fb3a8aae6d01ea0383eb33851ed3f9b51c48b3713b8716e45a",
@@ -18088,7 +17892,7 @@
           ],
           "content_sha256": "60959ae837c78bf53c8f45fc19fbf545906d9226b817533ec3843722d2a3d169",
           "occurrence": 1,
-          "line": 1399
+          "line": 1372
         },
         {
           "semantic_id": "arch:a7cdaf68f0d73795ad90cf81336938f6cf543cb77a20a3578d46c598cd82ee82",
@@ -18117,7 +17921,7 @@
           ],
           "content_sha256": "56490f13ba218abef58bcc497aa99d8a125aa50a14b569adb291e1922484a6fe",
           "occurrence": 1,
-          "line": 1696
+          "line": 1672
         },
         {
           "semantic_id": "arch:ae5b43c13702780091009d4f7ae02d621718ff201b352e621d9c82c3fb062d77",
@@ -18151,6 +17955,20 @@
           "line": 28
         },
         {
+          "semantic_id": "arch:b15d5ff6fb29790cac5e13928a49ac959c67c4f44ceddb4bb6c62ccd9cc5638a",
+          "source_module": "chronovisor.ops.lint_repair",
+          "scope_kind": "module",
+          "scope": "<module>",
+          "statement_kind": "from",
+          "target_module": "chronovisor.decision.decision_schema_manifest",
+          "symbols": [
+            "TAG_REPAIR_SCHEMA"
+          ],
+          "content_sha256": "e7420ba3d6faee3320b44d86d3a0407fcabb25657d8639ead5fd4bded25d6237",
+          "occurrence": 1,
+          "line": 39
+        },
+        {
           "semantic_id": "arch:b9798433921eb1d072b8fb6ac3df790844dfebd9cf06c4f49ea2ec9748450265",
           "source_module": "chronovisor.ops.autonomy",
           "scope_kind": "function",
@@ -18162,7 +17980,7 @@
           ],
           "content_sha256": "706fa6a2d49ab5df73d488435d97e353fc2f920bf032167e942783e8ee8fff47",
           "occurrence": 1,
-          "line": 2477
+          "line": 2453
         },
         {
           "semantic_id": "arch:bd3b6f5bf954ae91948f35fe2ac228c01282b405e20e6b4c141471a0903e4a44",
@@ -18190,7 +18008,7 @@
           ],
           "content_sha256": "55d9eeef8738bf2504ddde12aa0a6e2c60b3327385d67553a15c85021956d34b",
           "occurrence": 1,
-          "line": 1693
+          "line": 1669
         },
         {
           "semantic_id": "arch:c416df2138ad9cd866870f75fd8ff01d0b772758a11be6a2fe3a262b55443c02",
@@ -18232,7 +18050,7 @@
           ],
           "content_sha256": "56490f13ba218abef58bcc497aa99d8a125aa50a14b569adb291e1922484a6fe",
           "occurrence": 1,
-          "line": 1044
+          "line": 1034
         },
         {
           "semantic_id": "arch:cfdbfcff38abdc49e8631e2c6af6acae0b1d89958c98b3c8194fe97853f3be1b",
@@ -18307,7 +18125,7 @@
           ],
           "content_sha256": "31306549bbadec1bcfb6a772c1001b4a59d1e7746b437a169a37bfc0f4cd551d",
           "occurrence": 1,
-          "line": 58
+          "line": 59
         },
         {
           "semantic_id": "arch:e3a962cb9e399069631f53e88329491c97697321504dae107806844ce34a93d1",
@@ -18490,7 +18308,7 @@
           ],
           "content_sha256": "f39e50e5b891c9a9d56edcdd7c8a02ee794d1116f436d13c1f3a87148a77d6b9",
           "occurrence": 1,
-          "line": 200
+          "line": 203
         },
         {
           "semantic_id": "arch:54594cf5b153251205c0f1a64f2802f2c8434e3470238ffc4077e54c913d215c",
@@ -18507,7 +18325,7 @@
           ],
           "content_sha256": "4b1d6906b6071cdb2f9ca2a19bdb3fd0dcb1a6d682cd1bc58115755915d59c88",
           "occurrence": 1,
-          "line": 2502
+          "line": 2490
         },
         {
           "semantic_id": "arch:557232e59a49610ccdacf06186dcf5d7342aa0176b7fa80d4f7d4b75279d74e6",
@@ -18521,7 +18339,7 @@
           ],
           "content_sha256": "d2751b3afaa6ed8a637f3f714fc2ce7d7e11d0185781d47c3520f8736199327a",
           "occurrence": 1,
-          "line": 2929
+          "line": 2917
         },
         {
           "semantic_id": "arch:5c50cd737a1946fbee84ca62d05f871f8b0501fdaaf195887d0015e1369bd47a",
@@ -18538,7 +18356,7 @@
           ],
           "content_sha256": "4b1d6906b6071cdb2f9ca2a19bdb3fd0dcb1a6d682cd1bc58115755915d59c88",
           "occurrence": 1,
-          "line": 2451
+          "line": 2439
         },
         {
           "semantic_id": "arch:75cabe27458967013ae648e701c8d9434a51f066134417ab6f4f8da467c1e5ff",
@@ -18574,7 +18392,7 @@
           ],
           "content_sha256": "f33f41dd413b93121adb703761d742c8b306548b8dc8dbd963dbac79b743d377",
           "occurrence": 1,
-          "line": 2383
+          "line": 2371
         },
         {
           "semantic_id": "arch:979713860da5e22cfefff7f311b40019586e3a9639f6630cd5a4bb77372b26fa",
@@ -18588,7 +18406,7 @@
           ],
           "content_sha256": "fe3851582c8ef30c4b82bcbdf73611083973df4067c5a81555104b45052246b9",
           "occurrence": 1,
-          "line": 1700
+          "line": 1688
         },
         {
           "semantic_id": "arch:9f34d2ec8a8fe626c432f404dcfbe0e8e6ba9f9a3b193e41db373128a77fc96a",
@@ -18602,7 +18420,7 @@
           ],
           "content_sha256": "f39e50e5b891c9a9d56edcdd7c8a02ee794d1116f436d13c1f3a87148a77d6b9",
           "occurrence": 1,
-          "line": 183
+          "line": 186
         },
         {
           "semantic_id": "arch:a0657ac2ea78d3f4b9f89d408926ea25114c6db8618a0493c4e0c05bb1da5f56",
@@ -18618,7 +18436,21 @@
           ],
           "content_sha256": "8a22293f0c54dc5a046484862ca3859a94ba1503282dbd20cb198909dec00623",
           "occurrence": 1,
-          "line": 2616
+          "line": 2604
+        },
+        {
+          "semantic_id": "arch:e8ad73c463c7f521b03c76c09f1319298bd3c07803ba740b5012ddbff2bc95dc",
+          "source_module": "chronovisor.raw.raw_replay",
+          "scope_kind": "module",
+          "scope": "<module>",
+          "statement_kind": "from",
+          "target_module": "chronovisor.decision.decision_schema_manifest",
+          "symbols": [
+            "RAW_REPLAY_RECONCILIATION_SCHEMA"
+          ],
+          "content_sha256": "abb9daecd27b7c1b6d8500264d9f256e2f37f1dcbd11e606e4012c0e66bfb005",
+          "occurrence": 1,
+          "line": 38
         },
         {
           "semantic_id": "arch:ebafc791df2bef7f53a381291731e3514236eec82b122061605647975bcc1956",
@@ -18632,7 +18464,7 @@
           ],
           "content_sha256": "d2751b3afaa6ed8a637f3f714fc2ce7d7e11d0185781d47c3520f8736199327a",
           "occurrence": 1,
-          "line": 3106
+          "line": 3094
         },
         {
           "semantic_id": "arch:ef6f56ffd387d3538cc9e04112ef37bf646ff2f5fb35e4f76a19f6a58d8d5940",
@@ -18646,7 +18478,7 @@
           ],
           "content_sha256": "56490f13ba218abef58bcc497aa99d8a125aa50a14b569adb291e1922484a6fe",
           "occurrence": 1,
-          "line": 1714
+          "line": 1702
         }
       ],
       "semantic_id": "arch:d4ec15db8b9b02ccd08fb8a8590bd1951fce307614b4cda36cab1b2a86a92286",
@@ -18715,27 +18547,6 @@
       "deadline": "2026-12-31",
       "removal_campaign": "S",
       "rationale": "Remove the research->ops package edge through a published contract."
-    },
-    {
-      "category": "schema_manifest_implementation_import",
-      "source_package": "decision",
-      "source_module": "chronovisor.decision.decision_schema_manifest",
-      "scope_kind": "function",
-      "scope": "production_decision_schemas",
-      "statement_kind": "from",
-      "target_package": "decision",
-      "target_module": "chronovisor.decision.local_repair",
-      "symbols": [
-        "LOCAL_REPAIR_SCHEMA"
-      ],
-      "content_sha256": "f66b23a2ba94407b291f15feab6780ad8926e8fed4b455d290b845aa6696ee15",
-      "line": 225,
-      "occurrence": 1,
-      "semantic_id": "arch:da499bda6ddd28b2de38c278f9b9a3f21566f7f17ce939dd6947f0dbff701f9a",
-      "owner": "chronovisor.decision.decision_schema_manifest",
-      "deadline": "2026-09-21",
-      "removal_campaign": "P6",
-      "rationale": "Invert the schema registry so implementations publish schemas through a contract."
     },
     {
       "category": "cross_domain_edge",
@@ -19510,7 +19321,7 @@
           ],
           "content_sha256": "0399d32d128293829f205ec9fae4124358d9924d79120177e5255226864fb9d3",
           "occurrence": 1,
-          "line": 63
+          "line": 64
         },
         {
           "semantic_id": "arch:0ec30874a3dd34dc2f9036c4ef70911289df66d0cc1717bab6c69cef55a86129",
@@ -19554,7 +19365,7 @@
           ],
           "content_sha256": "6c31e2d639c130ea28616f22350033b666ea402eb16be7fe65fcd772a4f0d71d",
           "occurrence": 1,
-          "line": 44
+          "line": 45
         },
         {
           "semantic_id": "arch:1f6e200cfd873ab75bfe2e58434dad20a2237d1afea15f886c582982f9e43797",
@@ -19586,7 +19397,7 @@
           ],
           "content_sha256": "dd1afab5f24ce035476d9ad047aa8ee8f7cb19951716f308331342017af96c18",
           "occurrence": 1,
-          "line": 58
+          "line": 59
         },
         {
           "semantic_id": "arch:303e96ebbb9f6c9fb191c6fda3331029dd7f4706c756de423291474c8355bbfb",
@@ -19659,7 +19470,7 @@
           ],
           "content_sha256": "7a523e7c733bf4c48cc28e570bc6cf37a1380bfdec252e93f3786bacb3176995",
           "occurrence": 1,
-          "line": 185
+          "line": 161
         },
         {
           "semantic_id": "arch:59c2a24fd481c217661b34318b597048c855b72863a3f6ef08d5bba1aa3f34f5",
@@ -19733,7 +19544,7 @@
           ],
           "content_sha256": "7a523e7c733bf4c48cc28e570bc6cf37a1380bfdec252e93f3786bacb3176995",
           "occurrence": 1,
-          "line": 1086
+          "line": 1076
         },
         {
           "semantic_id": "arch:72149f4d917ab0bcbc90202c487bdb6b41579c195b18e86f8136f35bd8d18ac5",
@@ -19775,7 +19586,7 @@
           ],
           "content_sha256": "7a523e7c733bf4c48cc28e570bc6cf37a1380bfdec252e93f3786bacb3176995",
           "occurrence": 1,
-          "line": 193
+          "line": 169
         },
         {
           "semantic_id": "arch:7a1979838b5d70c477342e09933f2877d3970c5d467a74c3d801c6898e919588",
@@ -19789,7 +19600,7 @@
           ],
           "content_sha256": "481549b401ab961b460f2105519698808cacebc41b40145323848a226b19d458",
           "occurrence": 1,
-          "line": 900
+          "line": 873
         },
         {
           "semantic_id": "arch:82ed2190e159034659bf0e939e6b33e06eb8f8ed270fc8cdf933a16c48a4c7e5",
@@ -19819,7 +19630,7 @@
           ],
           "content_sha256": "a16f080cf6f0bf1b4c6d7e4972eba867b635de8f5abce56ab185411272bfbaf2",
           "occurrence": 1,
-          "line": 49
+          "line": 50
         },
         {
           "semantic_id": "arch:91660ff982f17324c34eedca61dba927ed90b47d7a0e97f2bd28142e11410732",
@@ -19876,7 +19687,7 @@
           ],
           "content_sha256": "7a523e7c733bf4c48cc28e570bc6cf37a1380bfdec252e93f3786bacb3176995",
           "occurrence": 1,
-          "line": 421
+          "line": 411
         },
         {
           "semantic_id": "arch:b7be03ec3de69bd39800428a6534f76ed265a6e2caac07bf89c3d22b94232d43",
@@ -19904,7 +19715,7 @@
           ],
           "content_sha256": "7a523e7c733bf4c48cc28e570bc6cf37a1380bfdec252e93f3786bacb3176995",
           "occurrence": 1,
-          "line": 43
+          "line": 44
         },
         {
           "semantic_id": "arch:bfb8b0e9571d478fb7e6b64de158143fbb1be094b8a43d54474cba6daf4961af",
@@ -19936,7 +19747,7 @@
           ],
           "content_sha256": "dd1afab5f24ce035476d9ad047aa8ee8f7cb19951716f308331342017af96c18",
           "occurrence": 1,
-          "line": 55
+          "line": 59
         },
         {
           "semantic_id": "arch:c5854d44b491487581356c43000abf8b3ff484c76a7461b8d224e3cb1fe38969",
@@ -19964,7 +19775,7 @@
           ],
           "content_sha256": "a2a644e3240681394cfbeec819aae4ef2040f4a650b220d670f062f1f272433a",
           "occurrence": 1,
-          "line": 247
+          "line": 237
         }
       ],
       "semantic_id": "arch:dbc9576956ee9d59b4d54870f2a0452ce574c3d360eca067c005bbaf9757993d",
@@ -20086,7 +19897,7 @@
         "classify_failure"
       ],
       "content_sha256": "4b1d6906b6071cdb2f9ca2a19bdb3fd0dcb1a6d682cd1bc58115755915d59c88",
-      "line": 2451,
+      "line": 2439,
       "occurrence": 1,
       "semantic_id": "arch:e1e7224a039e1e222df0c954dc473c9829c6102f7279927927c48c9e63b6f2a2",
       "owner": "chronovisor.raw.raw_replay",
@@ -20135,27 +19946,6 @@
       "deadline": "2026-10-05",
       "removal_campaign": "P8",
       "rationale": "Replace the decision->ops private API dependency with a public API."
-    },
-    {
-      "category": "schema_manifest_implementation_import",
-      "source_package": "decision",
-      "source_module": "chronovisor.decision.decision_schema_manifest",
-      "scope_kind": "function",
-      "scope": "production_decision_schemas",
-      "statement_kind": "from",
-      "target_package": "decision",
-      "target_module": "chronovisor.decision.frontier_review",
-      "symbols": [
-        "FRONTIER_DECISION_SCHEMA"
-      ],
-      "content_sha256": "58d66f0e581413be70a81792b61101e43ce8c92b83ef3e7d0526da54b7470270",
-      "line": 224,
-      "occurrence": 1,
-      "semantic_id": "arch:ee6cf8478aea309360b089c9efd2e03e1c89e3c54771126142c62bde33f45127",
-      "owner": "chronovisor.decision.decision_schema_manifest",
-      "deadline": "2026-09-21",
-      "removal_campaign": "P6",
-      "rationale": "Invert the schema registry so implementations publish schemas through a contract."
     },
     {
       "category": "cross_domain_edge",
@@ -20231,35 +20021,7 @@
           ],
           "content_sha256": "f98fad9e453b684ff7361fbcf6b794432d022a61f24e0fc049036b7b3a256e20",
           "occurrence": 1,
-          "line": 19
-        },
-        {
-          "semantic_id": "arch:cd48b5ce268793ec5fd33a0eb4e2cd2ca4686b89e33aa6ef48a9b24ebe8e14aa",
-          "source_module": "chronovisor.decision.decision_schema_manifest",
-          "scope_kind": "function",
-          "scope": "production_decision_schemas",
-          "statement_kind": "from",
-          "target_module": "chronovisor.ingest.ingest",
-          "symbols": [
-            "INGEST_FRONTIER_DECISION_SCHEMA"
-          ],
-          "content_sha256": "3d694dc2b2373d981ada13f95ec1bc56e342f9eb0f760c741a15a99d536d10d6",
-          "occurrence": 1,
-          "line": 226
-        },
-        {
-          "semantic_id": "arch:e0041488f7773b3fd6f8a1e5768041c91b4afd7c222787920728c6e6ef8fd0e6",
-          "source_module": "chronovisor.decision.decision_schema_manifest",
-          "scope_kind": "function",
-          "scope": "production_decision_schemas",
-          "statement_kind": "from",
-          "target_module": "chronovisor.ingest.read_back_repair",
-          "symbols": [
-            "READ_BACK_FRONTIER_SCHEMA"
-          ],
-          "content_sha256": "58b032a824f4f77528e5f8fae2373c04f2a98a0036e1de220be15669a37f68dc",
-          "occurrence": 1,
-          "line": 227
+          "line": 22
         }
       ],
       "semantic_id": "arch:f49fc80edfc8ad028387dfecf713aaa4b1d6a3834a2146215d2d6e88550f1932",
@@ -20267,27 +20029,6 @@
       "deadline": "2026-12-31",
       "removal_campaign": "S",
       "rationale": "Remove the decision->ingest package edge through a published contract."
-    },
-    {
-      "category": "schema_manifest_implementation_import",
-      "source_package": "decision",
-      "source_module": "chronovisor.decision.decision_schema_manifest",
-      "scope_kind": "function",
-      "scope": "production_decision_schemas",
-      "statement_kind": "from",
-      "target_package": "ops",
-      "target_module": "chronovisor.ops.lint_repair",
-      "symbols": [
-        "TAG_REPAIR_SCHEMA"
-      ],
-      "content_sha256": "41e6326153475cc42500f2179fc5502ddaba116b5222023144cb8f927760625b",
-      "line": 233,
-      "occurrence": 1,
-      "semantic_id": "arch:f4fd4696f256bd842e26bda1797cec07348534befffe25bcf5c15756d3a7e043",
-      "owner": "chronovisor.decision.decision_schema_manifest",
-      "deadline": "2026-09-21",
-      "removal_campaign": "P6",
-      "rationale": "Invert the schema registry so implementations publish schemas through a contract."
     },
     {
       "category": "dynamic_import",

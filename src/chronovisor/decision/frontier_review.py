@@ -27,6 +27,7 @@ from urllib.parse import urlparse
 
 from chronovisor.core.runtime_config import uvx_runtime_command
 from chronovisor.core.store import CHRONOVISOR_ROOT
+from chronovisor.decision.decision_schema_manifest import FRONTIER_DECISION_SCHEMA
 from chronovisor.ops import runtime_status
 from chronovisor.ops.convergence import (
     HUMAN_REQUIRED_FAILURE_CLASSES as CONVERGENCE_HUMAN_REQUIRED_FAILURE_CLASSES,
@@ -42,35 +43,6 @@ _STRUCTURED_REVIEW_ROUTER_CONFIG: ContextVar[Any | None] = ContextVar(
     "structured_review_router_config",
     default=None,
 )
-
-FRONTIER_DECISION_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": [
-        "decision",
-        "summary",
-        "tests_run",
-        "commit",
-        "committed",
-        "pushed",
-        "risk",
-        "notes",
-    ],
-    "properties": {
-        "decision": {
-            "type": "string",
-            "enum": ["approved", "rejected", "quarantined", "needs_retry"],
-        },
-        "summary": {"type": "string"},
-        "tests_run": {"type": "array", "items": {"type": "string"}},
-        "commit": {"type": ["string", "null"]},
-        "committed": {"type": "boolean"},
-        "pushed": {"type": "boolean"},
-        "risk": {"type": ["string", "null"]},
-        "notes": {"type": ["string", "null"]},
-    },
-}
-
 
 def _bounded_timeout(timeout: int | None) -> int:
     requested = timeout or int(

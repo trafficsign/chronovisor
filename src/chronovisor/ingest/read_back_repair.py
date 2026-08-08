@@ -22,6 +22,7 @@ from chronovisor.core.durable_state import atomic_write_bytes, canonical_bytes
 from chronovisor.core.frontmatter import parse as parse_frontmatter
 from chronovisor.core.runtime_config import runtime_repo_root
 from chronovisor.decision import decision_authority
+from chronovisor.decision.decision_schema_manifest import READ_BACK_FRONTIER_SCHEMA
 from chronovisor.ingest.page_mutation import (
     chronovisor_mutation_lock,
     decision_authority_lock,
@@ -54,19 +55,6 @@ TARGET_PAGE_TITLE_MAX_CHARS = 500
 TARGET_PAGE_EXCERPT_MAX_CHARS = 8_000
 TARGET_PAGE_RECALL_QUESTIONS_MAX_ITEMS = 20
 TARGET_PAGE_RECALL_QUESTION_MAX_CHARS = 500
-READ_BACK_FRONTIER_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": ["decision", "confidence", "summary"],
-    "properties": {
-        "decision": {
-            "type": "string",
-            "enum": ["approved", "rejected", "needs_retry"],
-        },
-        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
-        "summary": {"type": "string"},
-    },
-}
 AUTH_REQUIRED_PATTERN = re.compile(
     r"\b401\b.{0,20}\bunauthori[sz]ed\b"
     r"|\b(?:api[-_ ]?key|authentication|authorization|oauth|credentials?)\b"

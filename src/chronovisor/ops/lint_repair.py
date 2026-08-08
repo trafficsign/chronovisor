@@ -36,6 +36,7 @@ from chronovisor.decision.decision_authority import (
     semantic_authority_shape_error,
     semantic_verdict_authority_error,
 )
+from chronovisor.decision.decision_schema_manifest import TAG_REPAIR_SCHEMA
 from chronovisor.decision.local_structured import ChatTransport, LocalStructuredSession
 from chronovisor.ingest.page_mutation import (
     chronovisor_mutation_lock,
@@ -67,26 +68,6 @@ REPAIR_RESOLVER_VERSION = "lint-repair-v1"
 TAG_REVIEW_CONTRACT_VERSION = 2
 TAG_REPAIR_DECISION_LANE = "lint_tag_repair"
 REPO_ROOT = runtime_repo_root()
-
-TAG_REPAIR_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": ["decision", "tags", "reason"],
-    "properties": {
-        "decision": {
-            "type": "string",
-            "enum": ["approved", "rejected", "uncertain", "needs_retry"],
-        },
-        "tags": {
-            "type": "array",
-            "items": {"type": "string"},
-            "minItems": 0,
-            "maxItems": 5,
-            "uniqueItems": True,
-        },
-        "reason": {"type": "string"},
-    },
-}
 
 LOCAL_TAG_SYSTEM = """\
 You repair Chronovisor page tags. Return JSON only, matching the supplied schema.

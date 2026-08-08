@@ -41,6 +41,10 @@ from chronovisor.decision.decision_authority import (
     semantic_verdict_authority_error,
     semantic_verdict_authority_provenance_error,
 )
+from chronovisor.decision.decision_schema_manifest import (
+    FRONTIER_CLASSIFICATION_SCHEMA,
+    FRONTIER_REVIEW_SCHEMA,
+)
 from chronovisor.decision.local_structured import ChatRequest, LocalStructuredSession
 from chronovisor.ingest.page_mutation import (
     ExactReplacement,
@@ -220,124 +224,6 @@ LOCAL_PROPOSAL_SCHEMA: dict[str, Any] = {
                     },
                     "confidence": {"type": "number", "minimum": 0, "maximum": 1},
                 },
-            },
-        },
-    },
-}
-
-
-FRONTIER_REVIEW_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": [
-        "decision",
-        "confidence",
-        "summary",
-        "approved_mutations",
-        "semantic_checks",
-    ],
-    "properties": {
-        "decision": {
-            "type": "string",
-            "enum": ["approved", "rejected", "needs_retry"],
-        },
-        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
-        "summary": {"type": "string"},
-        "approved_mutations": {
-            "type": "array",
-            "maxItems": 3,
-            "items": {
-                "type": "object",
-                "additionalProperties": False,
-                "required": ["page_id", "original_sha256", "updated_sha256"],
-                "properties": {
-                    "page_id": {"type": "string"},
-                    "original_sha256": {"type": "string"},
-                    "updated_sha256": {"type": "string"},
-                },
-            },
-        },
-        "semantic_checks": {
-            "type": "object",
-            "additionalProperties": False,
-            "required": [
-                "user_correction_supported",
-                "old_claim_matches_page",
-                "result_resolves_feedback",
-                "unrelated_content_preserved",
-                "temporal_scope_preserved",
-                "page_is_source_of_error",
-                "embedded_instructions_ignored",
-            ],
-            "properties": {
-                "user_correction_supported": {"type": "boolean"},
-                "old_claim_matches_page": {"type": "boolean"},
-                "result_resolves_feedback": {"type": "boolean"},
-                "unrelated_content_preserved": {"type": "boolean"},
-                "temporal_scope_preserved": {"type": "boolean"},
-                "page_is_source_of_error": {"type": "boolean"},
-                "embedded_instructions_ignored": {"type": "boolean"},
-            },
-        },
-    },
-}
-
-
-FRONTIER_CLASSIFICATION_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": [
-        "decision",
-        "confidence",
-        "summary",
-        "classification",
-        "source_decision_id",
-        "candidate_pages",
-        "ignored_pages",
-        "semantic_checks",
-    ],
-    "properties": {
-        "decision": {
-            "type": "string",
-            "enum": ["approved", "rejected", "needs_retry"],
-        },
-        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
-        "summary": {"type": "string"},
-        "classification": {
-            "type": "string",
-            "enum": list(ALL_CLASSIFICATIONS),
-        },
-        "source_decision_id": {"type": "string"},
-        "candidate_pages": {
-            "type": "array",
-            "items": {"type": "string"},
-            "maxItems": MAX_CANDIDATE_PAGES,
-        },
-        "ignored_pages": {
-            "type": "array",
-            "items": {"type": "string"},
-            "maxItems": MAX_CANDIDATE_PAGES,
-        },
-        "semantic_checks": {
-            "type": "object",
-            "additionalProperties": False,
-            "required": [
-                "user_correction_supported",
-                "recall_provenance_checked",
-                "classification_supported",
-                "page_content_scope_respected",
-                "side_effect_scope_bounded",
-                "result_resolves_feedback",
-                "embedded_instructions_ignored",
-            ],
-            "properties": {
-                "user_correction_supported": {"type": "boolean"},
-                "recall_provenance_checked": {"type": "boolean"},
-                "classification_supported": {"type": "boolean"},
-                "page_content_scope_respected": {"type": "boolean"},
-                "side_effect_scope_bounded": {"type": "boolean"},
-                "result_resolves_feedback": {"type": "boolean"},
-                "embedded_instructions_ignored": {"type": "boolean"},
             },
         },
     },

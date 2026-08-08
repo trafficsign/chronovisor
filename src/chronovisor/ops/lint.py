@@ -31,6 +31,7 @@ from chronovisor.decision.decision_authority import (
     seal_semantic_artifact,
     semantic_verdict_authority_error,
 )
+from chronovisor.decision.decision_schema_manifest import SAFE_FIX_REVIEW_SCHEMA
 from chronovisor.ingest.page_mutation import (
     chronovisor_mutation_lock,
     decision_authority_lock,
@@ -62,34 +63,6 @@ SAFE_FIX_REPACKET_CONTEXT_LINES = 4
 SAFE_FIX_SEMANTIC_HOLD_RESOLVER_VERSION = "lint-safe-fix-semantic-hold-v1"
 
 StructuredReviewer = Callable[[str, dict[str, Any]], Mapping[str, Any] | str]
-
-SAFE_FIX_REVIEW_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": [
-        "decision",
-        "summary",
-        "tests_run",
-        "commit",
-        "committed",
-        "pushed",
-        "risk",
-        "notes",
-    ],
-    "properties": {
-        "decision": {
-            "type": "string",
-            "enum": ["approved", "rejected", "quarantined", "needs_retry"],
-        },
-        "summary": {"type": "string"},
-        "tests_run": {"type": "array", "items": {"type": "string"}},
-        "commit": {"type": ["string", "null"]},
-        "committed": {"type": "boolean"},
-        "pushed": {"type": "boolean"},
-        "risk": {"type": ["string", "null"]},
-        "notes": {"type": ["string", "null"]},
-    },
-}
 
 # `chronovisor_apply` runs `check()` and then re-runs it inside `apply_safe_fixes`,
 # so the same issue list is computed twice for an unchanged corpus. Cache

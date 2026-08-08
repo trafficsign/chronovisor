@@ -35,6 +35,9 @@ from chronovisor.decision.decision_authority import (
     semantic_authority_shape_error,
     semantic_verdict_authority_error,
 )
+from chronovisor.decision.decision_schema_manifest import (
+    RAW_REPLAY_RECONCILIATION_SCHEMA,
+)
 from chronovisor.ingest.page_mutation import decision_authority_lock
 from chronovisor.ops.convergence import is_human_required_result
 from chronovisor.raw.raw_store import RawStore
@@ -1327,21 +1330,6 @@ def _reconcile_running_rows(
         _append_history(event, history_file)
         events.append(event)
     return events
-
-
-RAW_REPLAY_RECONCILIATION_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": ["decision", "confidence", "reason"],
-    "properties": {
-        "decision": {
-            "type": "string",
-            "enum": ["accept_processed", "safe_replay", "quarantine", "needs_retry"],
-        },
-        "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
-        "reason": {"type": "string"},
-    },
-}
 
 
 def _frontier_due(row: dict[str, Any], *, now: datetime) -> bool:

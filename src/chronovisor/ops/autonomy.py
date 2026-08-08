@@ -40,6 +40,10 @@ from chronovisor.decision.decision_authority import (
     semantic_authority_shape_error,
     semantic_verdict_authority_error,
 )
+from chronovisor.decision.decision_schema_manifest import (
+    DUPLICATE_FRONTIER_SCHEMA,
+    RETENTION_FRONTIER_SCHEMA,
+)
 from chronovisor.ingest.page_mutation import (
     chronovisor_mutation_lock,
     decision_authority_lock,
@@ -85,34 +89,6 @@ CONTENT_CORRECTION_LANE = "content_correction"
 DUPLICATE_FRONTIER_RESOLVER_VERSION = "duplicate-frontier-v3-exact-postimage"
 RETENTION_FRONTIER_RESOLVER_VERSION = "retention-frontier-v3-exact-postimage"
 LEGACY_SEMANTIC_HOLD_KIND = "legacy_local_semantic_no_quorum_fail_closed"
-DUPLICATE_FRONTIER_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": ["decision", "confidence", "summary"],
-    "properties": {
-        "decision": {
-            "type": "string",
-            "enum": ["supersede_left", "supersede_right", "keep_both", "needs_retry"],
-        },
-        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
-        "summary": {"type": "string"},
-    },
-}
-RETENTION_FRONTIER_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": ["decision", "confidence", "summary"],
-    "properties": {
-        "decision": {
-            "type": "string",
-            "enum": ["archive", "keep_active", "needs_retry"],
-        },
-        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
-        "summary": {"type": "string"},
-    },
-}
-
-
 def _now() -> str:
     return datetime.now().isoformat(timespec="seconds")
 

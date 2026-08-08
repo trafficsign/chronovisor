@@ -29,6 +29,460 @@ NON_DECISION_FIELDS = frozenset(
     }
 )
 
+FRONTIER_DECISION_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": [
+        "decision",
+        "summary",
+        "tests_run",
+        "commit",
+        "committed",
+        "pushed",
+        "risk",
+        "notes",
+    ],
+    "properties": {
+        "decision": {
+            "type": "string",
+            "enum": ["approved", "rejected", "quarantined", "needs_retry"],
+        },
+        "summary": {"type": "string"},
+        "tests_run": {"type": "array", "items": {"type": "string"}},
+        "commit": {"type": ["string", "null"]},
+        "committed": {"type": "boolean"},
+        "pushed": {"type": "boolean"},
+        "risk": {"type": ["string", "null"]},
+        "notes": {"type": ["string", "null"]},
+    },
+}
+
+LOCAL_REPAIR_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["status", "action", "confidence", "reason"],
+    "properties": {
+        "status": {"type": "string", "enum": ["resolved", "escalate", "rejected"]},
+        "action": {
+            "type": "string",
+            "enum": [
+                "escalate_to_frontier",
+                "propose_prompt_fix",
+                "propose_test_case",
+                "quarantine_raw",
+                "resolve_update_target",
+                "retry_raw",
+            ],
+        },
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+        "requested_page_id": {"type": ["string", "null"]},
+        "target_page_id": {"type": ["string", "null"]},
+        "reason": {"type": "string"},
+        "notes": {"type": ["string", "null"]},
+    },
+}
+
+INGEST_FRONTIER_DECISION_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": [
+        "decision",
+        "summary",
+        "failed_operations_disposition",
+        "tests_run",
+        "risk",
+        "notes",
+    ],
+    "properties": {
+        "decision": {
+            "type": "string",
+            "enum": ["apply_available", "confirmed_noop", "retry", "quarantined"],
+        },
+        "summary": {"type": "string"},
+        "failed_operations_disposition": {
+            "type": "string",
+            "enum": ["none", "confirmed_unnecessary", "retry_required"],
+        },
+        "tests_run": {"type": "array", "items": {"type": "string"}},
+        "risk": {"type": ["string", "null"]},
+        "notes": {"type": ["string", "null"]},
+        "repair_option_id": {"type": "string", "pattern": "^rp_[0-9a-f]{32}$"},
+        "invalid_tags": {
+            "type": "array",
+            "items": {"type": "string", "pattern": "^[dts]/[a-z0-9][a-z0-9-]*$"},
+        },
+        "replacement_operations": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["filename", "content"],
+                "properties": {
+                    "filename": {"type": "string"},
+                    "content": {"type": "string"},
+                },
+            },
+        },
+    },
+}
+
+READ_BACK_FRONTIER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["decision", "confidence", "summary"],
+    "properties": {
+        "decision": {
+            "type": "string",
+            "enum": ["approved", "rejected", "needs_retry"],
+        },
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+        "summary": {"type": "string"},
+    },
+}
+
+DUPLICATE_FRONTIER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["decision", "confidence", "summary"],
+    "properties": {
+        "decision": {
+            "type": "string",
+            "enum": ["supersede_left", "supersede_right", "keep_both", "needs_retry"],
+        },
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+        "summary": {"type": "string"},
+    },
+}
+
+RETENTION_FRONTIER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["decision", "confidence", "summary"],
+    "properties": {
+        "decision": {
+            "type": "string",
+            "enum": ["archive", "keep_active", "needs_retry"],
+        },
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+        "summary": {"type": "string"},
+    },
+}
+
+SAFE_FIX_REVIEW_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": [
+        "decision",
+        "summary",
+        "tests_run",
+        "commit",
+        "committed",
+        "pushed",
+        "risk",
+        "notes",
+    ],
+    "properties": {
+        "decision": {
+            "type": "string",
+            "enum": ["approved", "rejected", "quarantined", "needs_retry"],
+        },
+        "summary": {"type": "string"},
+        "tests_run": {"type": "array", "items": {"type": "string"}},
+        "commit": {"type": ["string", "null"]},
+        "committed": {"type": "boolean"},
+        "pushed": {"type": "boolean"},
+        "risk": {"type": ["string", "null"]},
+        "notes": {"type": ["string", "null"]},
+    },
+}
+
+TAG_REPAIR_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["decision", "tags", "reason"],
+    "properties": {
+        "decision": {
+            "type": "string",
+            "enum": ["approved", "rejected", "uncertain", "needs_retry"],
+        },
+        "tags": {
+            "type": "array",
+            "items": {"type": "string"},
+            "minItems": 0,
+            "maxItems": 5,
+            "uniqueItems": True,
+        },
+        "reason": {"type": "string"},
+    },
+}
+
+ORPHAN_FRONTIER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["decision", "confidence", "summary"],
+    "properties": {
+        "decision": {"type": "string", "enum": ["approved", "rejected", "needs_retry"]},
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+        "summary": {"type": "string"},
+    },
+}
+
+RAW_REPLAY_RECONCILIATION_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["decision", "confidence", "reason"],
+    "properties": {
+        "decision": {
+            "type": "string",
+            "enum": ["accept_processed", "safe_replay", "quarantine", "needs_retry"],
+        },
+        "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+        "reason": {"type": "string"},
+    },
+}
+
+FRONTIER_REVIEW_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": [
+        "decision",
+        "confidence",
+        "summary",
+        "approved_mutations",
+        "semantic_checks",
+    ],
+    "properties": {
+        "decision": {
+            "type": "string",
+            "enum": ["approved", "rejected", "needs_retry"],
+        },
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+        "summary": {"type": "string"},
+        "approved_mutations": {
+            "type": "array",
+            "maxItems": 3,
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["page_id", "original_sha256", "updated_sha256"],
+                "properties": {
+                    "page_id": {"type": "string"},
+                    "original_sha256": {"type": "string"},
+                    "updated_sha256": {"type": "string"},
+                },
+            },
+        },
+        "semantic_checks": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": [
+                "user_correction_supported",
+                "old_claim_matches_page",
+                "result_resolves_feedback",
+                "unrelated_content_preserved",
+                "temporal_scope_preserved",
+                "page_is_source_of_error",
+                "embedded_instructions_ignored",
+            ],
+            "properties": {
+                "user_correction_supported": {"type": "boolean"},
+                "old_claim_matches_page": {"type": "boolean"},
+                "result_resolves_feedback": {"type": "boolean"},
+                "unrelated_content_preserved": {"type": "boolean"},
+                "temporal_scope_preserved": {"type": "boolean"},
+                "page_is_source_of_error": {"type": "boolean"},
+                "embedded_instructions_ignored": {"type": "boolean"},
+            },
+        },
+    },
+}
+
+FRONTIER_CLASSIFICATION_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": [
+        "decision",
+        "confidence",
+        "summary",
+        "classification",
+        "source_decision_id",
+        "candidate_pages",
+        "ignored_pages",
+        "semantic_checks",
+    ],
+    "properties": {
+        "decision": {
+            "type": "string",
+            "enum": ["approved", "rejected", "needs_retry"],
+        },
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+        "summary": {"type": "string"},
+        "classification": {
+            "type": "string",
+            "enum": [
+                "page_fact_wrong",
+                "outdated",
+                "wrong_retrieval",
+                "response_misquote",
+                "ambiguous",
+                "unattributed",
+                "none",
+            ],
+        },
+        "source_decision_id": {"type": "string"},
+        "candidate_pages": {
+            "type": "array",
+            "items": {"type": "string"},
+            "maxItems": 6,
+        },
+        "ignored_pages": {
+            "type": "array",
+            "items": {"type": "string"},
+            "maxItems": 6,
+        },
+        "semantic_checks": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": [
+                "user_correction_supported",
+                "recall_provenance_checked",
+                "classification_supported",
+                "page_content_scope_respected",
+                "side_effect_scope_bounded",
+                "result_resolves_feedback",
+                "embedded_instructions_ignored",
+            ],
+            "properties": {
+                "user_correction_supported": {"type": "boolean"},
+                "recall_provenance_checked": {"type": "boolean"},
+                "classification_supported": {"type": "boolean"},
+                "page_content_scope_respected": {"type": "boolean"},
+                "side_effect_scope_bounded": {"type": "boolean"},
+                "result_resolves_feedback": {"type": "boolean"},
+                "embedded_instructions_ignored": {"type": "boolean"},
+            },
+        },
+    },
+}
+
+FRONTIER_LABEL_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": [
+        "decision",
+        "confidence",
+        "expected_pages",
+        "negative_pages",
+        "stale_pages",
+        "summary",
+        "notes",
+    ],
+    "properties": {
+        "decision": {
+            "type": "string",
+            "enum": ["approved", "rejected", "uncertain", "needs_retry"],
+        },
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+        "expected_pages": {"type": "array", "items": {"type": "string"}},
+        "negative_pages": {"type": "array", "items": {"type": "string"}},
+        "stale_pages": {"type": "array", "items": {"type": "string"}},
+        "summary": {"type": "string"},
+        "notes": {"type": ["string", "null"]},
+    },
+}
+
+_BACKGROUND_DECISIONS = ["approved", "rejected", "abstained", "needs_retry"]
+
+
+def _background_schema(
+    extra: Mapping[str, Any], required: list[str]
+) -> dict[str, Any]:
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["decision", *required, "confidence", "summary"],
+        "properties": {
+            "decision": {"type": "string", "enum": _BACKGROUND_DECISIONS},
+            **dict(extra),
+            "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+            "summary": {"type": "string", "maxLength": 500},
+        },
+    }
+
+
+RELATION_VERIFICATION_SCHEMA = _background_schema(
+    {
+        "evidence_supported": {"type": "boolean"},
+        "contradiction_found": {"type": "boolean"},
+        "unknown_endpoint": {"type": "boolean"},
+        "digest_valid": {"type": "boolean"},
+    },
+    ["evidence_supported", "contradiction_found", "unknown_endpoint", "digest_valid"],
+)
+
+ENTITY_MERGE_VERIFICATION_SCHEMA = _background_schema(
+    {
+        "same_identity": {"type": "boolean"},
+        "alias_supported": {"type": "boolean"},
+        "collision_risk": {"type": "boolean"},
+        "split_required": {"type": "boolean"},
+    },
+    ["same_identity", "alias_supported", "collision_risk", "split_required"],
+)
+
+RECALL_USEFULNESS_SCHEMA = _background_schema(
+    {
+        "topically_relevant": {"type": "boolean"},
+        "marginally_useful": {"type": "boolean"},
+        "read_worthy": {"type": "boolean"},
+        "stale_or_harmful": {"type": "boolean"},
+    },
+    ["topically_relevant", "marginally_useful", "read_worthy", "stale_or_harmful"],
+)
+
+RECALL_RUBRIC_CALIBRATION_SCHEMA = _background_schema(
+    {
+        "rubric_id": {"type": "string", "minLength": 1, "maxLength": 128},
+        "holdout_non_regression": {"type": "boolean"},
+        "calibration_improved": {"type": "boolean"},
+        "coverage_preserved": {"type": "boolean"},
+        "rollback_safe": {"type": "boolean"},
+    },
+    [
+        "rubric_id",
+        "holdout_non_regression",
+        "calibration_improved",
+        "coverage_preserved",
+        "rollback_safe",
+    ],
+)
+
+RECALL_ANSWER_ADJUDICATION_SCHEMA = _background_schema(
+    {
+        "subject_kind": {
+            "type": "string",
+            "enum": [
+                "gold_entry",
+                "scorer_calibration_case",
+                "search_label_candidate",
+            ],
+        },
+        "subject_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "evidence_complete": {"type": "boolean"},
+        "reference_independent": {"type": "boolean"},
+        "preregistered_before_evaluation": {"type": "boolean"},
+        "split_safe": {"type": "boolean"},
+    },
+    [
+        "subject_kind",
+        "subject_sha256",
+        "evidence_complete",
+        "reference_independent",
+        "preregistered_before_evaluation",
+        "split_safe",
+    ],
+)
+
 
 def schema_sha256(schema: Mapping[str, Any]) -> str:
     """Hash a schema with the same canonical JSON used by replay artifacts."""
@@ -216,28 +670,9 @@ def decision_signature_value(
 def production_decision_schemas() -> dict[str, Mapping[str, Any]]:
     """Return every named schema that can reach the local decision router.
 
-    Imports stay inside the function so normal DecisionRouter calls do not
-    load unrelated lanes.  Adding a new production caller requires adding its
-    schema here before a replacement model fleet can pass the adoption gate.
+    Adding a new production caller requires adding its schema here before a
+    replacement model fleet can pass the adoption gate.
     """
-
-    from chronovisor.decision.frontier_review import FRONTIER_DECISION_SCHEMA
-    from chronovisor.decision.local_repair import LOCAL_REPAIR_SCHEMA
-    from chronovisor.ingest.ingest import INGEST_FRONTIER_DECISION_SCHEMA
-    from chronovisor.ingest.read_back_repair import READ_BACK_FRONTIER_SCHEMA
-    from chronovisor.ops.autonomy import (
-        DUPLICATE_FRONTIER_SCHEMA,
-        RETENTION_FRONTIER_SCHEMA,
-    )
-    from chronovisor.ops.lint import SAFE_FIX_REVIEW_SCHEMA
-    from chronovisor.ops.lint_repair import TAG_REPAIR_SCHEMA
-    from chronovisor.ops.orphan_link import ORPHAN_FRONTIER_SCHEMA
-    from chronovisor.raw.raw_replay import RAW_REPLAY_RECONCILIATION_SCHEMA
-    from chronovisor.recall.content_correction import (
-        FRONTIER_CLASSIFICATION_SCHEMA,
-        FRONTIER_REVIEW_SCHEMA,
-    )
-    from chronovisor.search.search_eval import FRONTIER_LABEL_SCHEMA
 
     return {
         "content_correction_classification": FRONTIER_CLASSIFICATION_SCHEMA,
@@ -258,14 +693,6 @@ def production_decision_schemas() -> dict[str, Mapping[str, Any]]:
 
 def background_decision_schemas() -> dict[str, Mapping[str, Any]]:
     """Schemas for shadow/background lanes outside the adopted 19-lane fleet."""
-
-    from chronovisor.decision.graph_decisions import (
-        ENTITY_MERGE_VERIFICATION_SCHEMA,
-        RECALL_ANSWER_ADJUDICATION_SCHEMA,
-        RECALL_RUBRIC_CALIBRATION_SCHEMA,
-        RECALL_USEFULNESS_SCHEMA,
-        RELATION_VERIFICATION_SCHEMA,
-    )
 
     return {
         "relation_verification": RELATION_VERIFICATION_SCHEMA,
@@ -295,6 +722,24 @@ def production_signature_manifest() -> dict[str, dict[str, Any]]:
 
 
 __all__ = [
+    "DUPLICATE_FRONTIER_SCHEMA",
+    "ENTITY_MERGE_VERIFICATION_SCHEMA",
+    "FRONTIER_CLASSIFICATION_SCHEMA",
+    "FRONTIER_DECISION_SCHEMA",
+    "FRONTIER_LABEL_SCHEMA",
+    "FRONTIER_REVIEW_SCHEMA",
+    "INGEST_FRONTIER_DECISION_SCHEMA",
+    "LOCAL_REPAIR_SCHEMA",
+    "ORPHAN_FRONTIER_SCHEMA",
+    "RAW_REPLAY_RECONCILIATION_SCHEMA",
+    "READ_BACK_FRONTIER_SCHEMA",
+    "RECALL_ANSWER_ADJUDICATION_SCHEMA",
+    "RECALL_RUBRIC_CALIBRATION_SCHEMA",
+    "RECALL_USEFULNESS_SCHEMA",
+    "RELATION_VERIFICATION_SCHEMA",
+    "RETENTION_FRONTIER_SCHEMA",
+    "SAFE_FIX_REVIEW_SCHEMA",
+    "TAG_REPAIR_SCHEMA",
     "background_decision_schemas",
     "production_decision_schemas",
     "production_schema_manifest",

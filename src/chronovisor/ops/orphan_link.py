@@ -55,6 +55,7 @@ from chronovisor.decision.decision_authority import (
     semantic_verdict_authority_error,
     semantic_verdict_authority_provenance_error,
 )
+from chronovisor.decision.decision_schema_manifest import ORPHAN_FRONTIER_SCHEMA
 from chronovisor.decision.local_structured import ChatRequest, LocalStructuredSession
 from chronovisor.ingest.page_mutation import (
     chronovisor_mutation_lock,
@@ -66,17 +67,6 @@ DECISIONS_FILE = CHRONOVISOR_ROOT / "autonomy" / "orphan-link-decisions.jsonl"
 PROJECT_ROOT = runtime_repo_root()
 RESOLVER_VERSION = "orphan-link-v1"
 DECISION_LANE = "orphan_link"
-
-ORPHAN_FRONTIER_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": ["decision", "confidence", "summary"],
-    "properties": {
-        "decision": {"type": "string", "enum": ["approved", "rejected", "needs_retry"]},
-        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
-        "summary": {"type": "string"},
-    },
-}
 
 ORPHAN_SUGGESTION_SCHEMA: dict[str, Any] = {
     "type": "object",

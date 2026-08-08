@@ -33,6 +33,7 @@ from chronovisor.core.runtime_config import (
 )
 from chronovisor.core.store import CHRONOVISOR_ROOT, SYSTEM_DIR, find_page
 from chronovisor.decision import decision_authority
+from chronovisor.decision.decision_schema_manifest import FRONTIER_LABEL_SCHEMA
 from chronovisor.ingest.page_mutation import decision_authority_lock
 from chronovisor.ops.convergence import is_human_required_result
 from chronovisor.recall.feedback_ledger import active_feedback_rows
@@ -94,32 +95,6 @@ DEFAULT_VARIANTS = (
     "hybrid-plain-rrf",
     "hybrid-graph",
 )
-
-FRONTIER_LABEL_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": [
-        "decision",
-        "confidence",
-        "expected_pages",
-        "negative_pages",
-        "stale_pages",
-        "summary",
-        "notes",
-    ],
-    "properties": {
-        "decision": {
-            "type": "string",
-            "enum": ["approved", "rejected", "uncertain", "needs_retry"],
-        },
-        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
-        "expected_pages": {"type": "array", "items": {"type": "string"}},
-        "negative_pages": {"type": "array", "items": {"type": "string"}},
-        "stale_pages": {"type": "array", "items": {"type": "string"}},
-        "summary": {"type": "string"},
-        "notes": {"type": ["string", "null"]},
-    },
-}
 
 FRONTIER_PENDING_STATUSES = {
     "",
