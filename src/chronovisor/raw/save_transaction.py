@@ -12,10 +12,11 @@ import fcntl
 import hashlib
 import json
 import re
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from chronovisor.raw.raw_store import RawStore
 
@@ -128,6 +129,207 @@ def attach_save_transaction_marker(transaction: SaveTransaction, content: str) -
     digest = hashlib.sha256(protected_payload.encode("utf-8")).hexdigest()
     marker = save_transaction_marker(transaction, payload_sha256=digest)
     return f"{marker}\n{protected_payload}"
+
+
+def publish_transcript_capture(
+    *,
+    raw_dir: Path,
+    host: str,
+    session_key: str,
+    session_id: str | None,
+    session_file: Path,
+    after_line: int,
+    until_line: int,
+    idempotency_key: str,
+    source_bytes: bytes,
+    record_count: int,
+    legacy_content: str,
+    legacy_session_id: str,
+    keywords: list[str],
+    trigger_ingest: bool,
+    legacy_publisher: Callable[..., dict[str, Any]],
+) -> dict[str, Any]:
+    """Publish according to the reversible legacy/shadow/v2 feature flag."""
+
+    from chronovisor.raw.raw_segment import append_capture
+    from chronovisor.raw.raw_store import raw_layout_mode
+
+    mode = raw_layout_mode(chronovisor_root=raw_dir.parent)
+    if mode == "legacy":
+        return legacy_publisher(
+            legacy_content,
+            session_id=legacy_session_id,
+            keywords=keywords,
+            trigger_ingest=trigger_ingest,
+            idempotency_key=idempotency_key,
+        )
+
+    if mode == "shadow":
+        authority = legacy_publisher(
+            legacy_content,
+            session_id=legacy_session_id,
+            keywords=keywords,
+            trigger_ingest=trigger_ingest,
+            idempotency_key=idempotency_key,
+        )
+        try:
+            shadow = append_capture(
+                raw_dir=raw_dir,
+                raw_id=f"save-{idempotency_key}.md",
+                idempotency_key=idempotency_key,
+                host=host,
+                session_key=session_key,
+                session_id=session_id,
+                source_file=session_file,
+                after_line=after_line,
+                until_line=until_line,
+                source_bytes=source_bytes,
+                record_count=record_count,
+            )
+        except Exception as exc:
+            # Legacy is the explicit authority in shadow mode.  Its durable
+            # receipt may advance the cursor, while the mismatch stays visible
+            # for the adoption gate instead of taking down Stop capture.
+            return {
+                **authority,
+                "layout": "shadow",
+                "shadow_error": f"{type(exc).__name__}: {exc}",
+            }
+        return {
+            **authority,
+            "layout": "shadow",
+            "shadow_result": shadow.to_result(),
+            "shadow_comparison": _compare_shadow_capture(
+                legacy_content=legacy_content,
+                source_bytes=source_bytes,
+                after_line=after_line,
+                until_line=until_line,
+            ),
+        }
+
+    receipt = append_capture(
+        raw_dir=raw_dir,
+        raw_id=f"save-{idempotency_key}.md",
+        idempotency_key=idempotency_key,
+        host=host,
+        session_key=session_key,
+        session_id=session_id,
+        source_file=session_file,
+        after_line=after_line,
+        until_line=until_line,
+        source_bytes=source_bytes,
+        record_count=record_count,
+    )
+    return {**receipt.to_result(), "layout": "v2"}
+
+
+def _compare_shadow_capture(
+    *,
+    legacy_content: str,
+    source_bytes: bytes,
+    after_line: int,
+    until_line: int,
+) -> dict[str, Any]:
+    """Compare logical source records without requiring byte-identical envelopes."""
+
+    try:
+        source_rows = [json.loads(line) for line in source_bytes.splitlines()]
+        payload_text = legacy_content.split("```json\n", 1)[1].split("\n```", 1)[0]
+        legacy_rows = json.loads(payload_text)
+        if not isinstance(legacy_rows, list) or any(
+            not isinstance(row, dict) for row in legacy_rows
+        ):
+            raise ValueError("legacy transcript payload is not an object array")
+        legacy_events = [row.get("event") for row in legacy_rows]
+        legacy_lines = [row.get("line") for row in legacy_rows]
+        expected_lines = list(range(after_line + 1, until_line + 1))
+        matched = sum(
+            source == legacy
+            for source, legacy in zip(source_rows, legacy_events, strict=False)
+        )
+        duplicate_lines = len(legacy_lines) - len(set(legacy_lines))
+        missing = max(0, len(source_rows) - matched)
+        extra = max(0, len(legacy_events) - matched)
+        status = (
+            "match"
+            if source_rows == legacy_events
+            and legacy_lines == expected_lines
+            and duplicate_lines == 0
+            else "mismatch"
+        )
+        return {
+            "status": status,
+            "source_records": len(source_rows),
+            "legacy_records": len(legacy_events),
+            "matched_records": matched,
+            "missing": missing,
+            "extra": extra,
+            "duplicate_lines": duplicate_lines,
+            "line_identity_match": legacy_lines == expected_lines,
+            "source_sha256": hashlib.sha256(source_bytes).hexdigest(),
+        }
+    except Exception as exc:
+        return {
+            "status": "error",
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
+
+def publish_oversized_shadow(
+    *,
+    raw_dir: Path,
+    host: str,
+    session_file: Path,
+    session_id: str | None,
+    source_line: int,
+) -> dict[str, Any]:
+    """Mirror a legacy fragment set as one native source record in shadow mode."""
+
+    from chronovisor.raw.raw_segment import append_capture, copy_source_interval
+    from chronovisor.raw.raw_store import raw_layout_mode
+
+    if raw_layout_mode(chronovisor_root=raw_dir.parent) != "shadow":
+        return {}
+    transaction = make_save_transaction(
+        host=host,
+        session_file=session_file,
+        session_id=session_id,
+        after_line=source_line - 1,
+        until_line=source_line,
+    )
+    source_bytes = copy_source_interval(
+        session_file,
+        after_line=source_line - 1,
+        until_line=source_line,
+    )
+    try:
+        receipt = append_capture(
+            raw_dir=raw_dir,
+            raw_id=f"save-{transaction.idempotency_key}.md",
+            idempotency_key=transaction.idempotency_key,
+            host=host,
+            session_key=transaction.session_key,
+            session_id=session_id,
+            source_file=session_file,
+            after_line=transaction.after_line,
+            until_line=transaction.until_line,
+            source_bytes=source_bytes,
+            record_count=1,
+        )
+    except Exception as exc:
+        return {"shadow_error": f"{type(exc).__name__}: {exc}"}
+    return {
+        "shadow_result": receipt.to_result(),
+        "shadow_comparison": {
+            "status": "match",
+            "source_records": 1,
+            "legacy_fragment_count": None,
+            "missing": 0,
+            "extra": 0,
+            "duplicate_lines": 0,
+            "source_sha256": hashlib.sha256(source_bytes).hexdigest(),
+        },
+    }
 
 
 def parse_save_transaction_receipt(content: str) -> SaveTransactionReceipt | None:

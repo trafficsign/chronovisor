@@ -1,14 +1,14 @@
 {
   "schema_version": 2,
   "source_baseline_head": "d404a6b20d00e3bcd1d4cdb89edfa5a718c51833",
-  "baseline_sha256": "bfaecd6b85db48ff37223201c55fac3a68a69de08acdf8aadae110d3d0a08b76",
+  "baseline_sha256": "dd27600da2a17f8221b8274ee16fc7ce0e66ff03a54bb21f175d2cdb437af611",
   "semantic_identity": "cross-domain edges use category+source_package+target_package; statement exceptions use category+source_package+source_module+scope_kind+scope+statement_kind+target_package+target_module+symbols+occurrence; source line is diagnostic and normalized statement content is verified independently",
   "counts": {
     "exceptions": 90,
     "by_category": {
       "cross_domain_edge": 90
     },
-    "cross_domain_sites": 1260,
+    "cross_domain_sites": 1255,
     "production_to_lab_edges": 0,
     "production_to_lab_static_sites": 0,
     "production_to_lab_dynamic_sites": 0,
@@ -1300,7 +1300,7 @@
           ],
           "content_sha256": "ebc360146a94ad056280bbf6d98d9f6e641566b09c2abd83a7011ad036aa2239",
           "occurrence": 1,
-          "line": 27
+          "line": 26
         },
         {
           "semantic_id": "arch:83bd80f31e208f8d1f6ab7909953d2ef6d8020ab5147f2edf3f85bdb5fc7e43c",
@@ -2713,7 +2713,7 @@
           ],
           "content_sha256": "2cfe6ffa774c02c720fed19ccc7f6b1519de13da6d50cdf800b90d70e48ae95a",
           "occurrence": 1,
-          "line": 21
+          "line": 20
         },
         {
           "semantic_id": "arch:a1aa1878698b017c7a4e3a9df78e63c8b6a56861bd442c653057fc85534c21c1",
@@ -2770,7 +2770,7 @@
           ],
           "content_sha256": "f5c5569b0e1730d7e91232a28e43a375f2188de5149ce3397d94beb1f8bae6be",
           "occurrence": 1,
-          "line": 12
+          "line": 10
         },
         {
           "semantic_id": "arch:ca0434f3e87f7d4f890601fb82ffb6b7e963ee35ec7907708bd086685f705da2",
@@ -4132,7 +4132,7 @@
           ],
           "content_sha256": "45f70c65cd81df266819f643084c56c2f8f13d40b8bb745d17b4a9ca41d48f60",
           "occurrence": 1,
-          "line": 58
+          "line": 93
         },
         {
           "semantic_id": "arch:6897abd7eb99462964bc91e1c2ad852b8155bea0b36d07bb6828b640b1f3ffd0",
@@ -4147,7 +4147,7 @@
           ],
           "content_sha256": "45f70c65cd81df266819f643084c56c2f8f13d40b8bb745d17b4a9ca41d48f60",
           "occurrence": 1,
-          "line": 56
+          "line": 90
         },
         {
           "semantic_id": "arch:d25071981c959d07ba8c01428861da30386f85a9e3efed273f7ffd90656e2c13",
@@ -4572,18 +4572,25 @@
       "target_package": "raw",
       "sites": [
         {
-          "semantic_id": "arch:014cf5f6c0d82c4f638f4780ad77fe541e1a0092c3eb306e661449f82c8f2dbd",
-          "source_module": "chronovisor.hosts.agent_save_base",
-          "scope_kind": "function",
-          "scope": "publish_oversized_shadow",
+          "semantic_id": "arch:1bdfea409b35af64bf24ab847094796b4edb2f5d0f93b6ca8c55b6185f9267a9",
+          "source_module": "chronovisor.hosts.claude_code_record",
+          "scope_kind": "module",
+          "scope": "<module>",
           "statement_kind": "from",
           "target_module": "chronovisor.raw.save_transaction",
           "symbols": [
-            "make_save_transaction"
+            "SaveTransaction",
+            "attach_save_transaction_marker",
+            "find_published_save_transaction",
+            "make_save_transaction",
+            "publish_oversized_shadow",
+            "publish_transcript_capture",
+            "save_transaction_lock",
+            "validate_published_save_receipt"
           ],
-          "content_sha256": "d1ef56557f257cfe2aa215c604344bef0b31b7acde8afbbde46294709f41bf64",
+          "content_sha256": "a130ae580c56233288725a8d2d2971885270c95a609ba081d32b8c69b4e731a1",
           "occurrence": 1,
-          "line": 373
+          "line": 83
         },
         {
           "semantic_id": "arch:362ff42e3fdc6d5ee9cbc10345267a7af6afb0b7ce56562cf20a3ed35b0795b2",
@@ -4611,35 +4618,7 @@
           ],
           "content_sha256": "252da6db3da756255c65cc490066a41277f1b12af6fc7e32bf68cb93841a8cec",
           "occurrence": 1,
-          "line": 46
-        },
-        {
-          "semantic_id": "arch:5b59c553e5646f532d691a4109ab356d242a1cb16931883a1db7d73c3ad6d75e",
-          "source_module": "chronovisor.hosts.agent_save_base",
-          "scope_kind": "function",
-          "scope": "publish_transcript_capture",
-          "statement_kind": "from",
-          "target_module": "chronovisor.raw.raw_store",
-          "symbols": [
-            "raw_layout_mode"
-          ],
-          "content_sha256": "9bc3c3f6df9ca367ec66d19bdcd8343fe7b4b39a66bed89c286b3a8532ebc2b0",
-          "occurrence": 1,
-          "line": 238
-        },
-        {
-          "semantic_id": "arch:71a72909b9612fe9617c499e0c9f4c393f22e434f69855245b80599bc44d975b",
-          "source_module": "chronovisor.hosts.agent_save_base",
-          "scope_kind": "function",
-          "scope": "publish_transcript_capture",
-          "statement_kind": "from",
-          "target_module": "chronovisor.raw.raw_segment",
-          "symbols": [
-            "append_capture"
-          ],
-          "content_sha256": "db9aa3e99c0165b5fa2778955552bad7d96b4dbf484eaad4941f16f47e16759c",
-          "occurrence": 1,
-          "line": 237
+          "line": 78
         },
         {
           "semantic_id": "arch:78143409533139e639490b182b8ebcdc5c3b1a06cf3544deb7c5290209e303b8",
@@ -4653,7 +4632,7 @@
           ],
           "content_sha256": "9bc3c3f6df9ca367ec66d19bdcd8343fe7b4b39a66bed89c286b3a8532ebc2b0",
           "occurrence": 1,
-          "line": 49
+          "line": 82
         },
         {
           "semantic_id": "arch:80639e20c64a0e3d5fbedbf95c8a8b2d4c78efcaadca459a8dc7b1fbb419aefb",
@@ -4667,7 +4646,7 @@
           ],
           "content_sha256": "9bc3c3f6df9ca367ec66d19bdcd8343fe7b4b39a66bed89c286b3a8532ebc2b0",
           "occurrence": 1,
-          "line": 47
+          "line": 79
         },
         {
           "semantic_id": "arch:817dd49c4ecc27868437a8b714bc1257ebac6f031cbb67de7a714e678f9a74d5",
@@ -4682,21 +4661,6 @@
           "content_sha256": "261d3b9792040307e282fa924da726f9a2bc16d24c2780dee1e18afe3bcfa5ac",
           "occurrence": 1,
           "line": 993
-        },
-        {
-          "semantic_id": "arch:842b5bc82d3ca9fc358a2998a88eb870a77835519e3c9d65f47c320b9c9de591",
-          "source_module": "chronovisor.hosts.agent_save_base",
-          "scope_kind": "function",
-          "scope": "publish_oversized_shadow",
-          "statement_kind": "from",
-          "target_module": "chronovisor.raw.raw_segment",
-          "symbols": [
-            "append_capture",
-            "copy_source_interval"
-          ],
-          "content_sha256": "2e724eb1ec0b833a40abb6b4745894bec3dc8e3d529ddc41b4f1c09eca11ccb6",
-          "occurrence": 1,
-          "line": 371
         },
         {
           "semantic_id": "arch:8f2f1b2cf8e12591aa3a4e139786086309e6536e54a0a301420677daa6586fe8",
@@ -4724,7 +4688,7 @@
           ],
           "content_sha256": "252da6db3da756255c65cc490066a41277f1b12af6fc7e32bf68cb93841a8cec",
           "occurrence": 1,
-          "line": 48
+          "line": 81
         },
         {
           "semantic_id": "arch:9e2c0e92197963776eed3b2028003ada788c9b74231aa060b019b3bc5453d92b",
@@ -4739,25 +4703,6 @@
           "content_sha256": "13e4a6a24f47f0a70768815146eee2bb9711d07f117cf9b61a005f0aa49164bf",
           "occurrence": 1,
           "line": 1322
-        },
-        {
-          "semantic_id": "arch:aab4417a8f69291dc742ca422e9ed3b0cff932c11ecff5a9a689b0e0386e7956",
-          "source_module": "chronovisor.hosts.codex_record",
-          "scope_kind": "module",
-          "scope": "<module>",
-          "statement_kind": "from",
-          "target_module": "chronovisor.raw.save_transaction",
-          "symbols": [
-            "SaveTransaction",
-            "attach_save_transaction_marker",
-            "find_published_save_transaction",
-            "make_save_transaction",
-            "save_transaction_lock",
-            "validate_published_save_receipt"
-          ],
-          "content_sha256": "bb2a262d532040b9e3c1154519d942a5d8b4efc4e96498e6e4f710660c03ccc7",
-          "occurrence": 1,
-          "line": 48
         },
         {
           "semantic_id": "arch:ab9b7b4be78b11481edbfbcc17693ae523056a917355773cc7fe75e82ece9fe9",
@@ -4788,22 +4733,8 @@
           "line": 1790
         },
         {
-          "semantic_id": "arch:cc1fb68ebe2ed455c391ed4334afea731abf630c2645500a04b9f2f80ed0bf5b",
-          "source_module": "chronovisor.hosts.agent_save_base",
-          "scope_kind": "function",
-          "scope": "publish_oversized_shadow",
-          "statement_kind": "from",
-          "target_module": "chronovisor.raw.raw_store",
-          "symbols": [
-            "raw_layout_mode"
-          ],
-          "content_sha256": "9bc3c3f6df9ca367ec66d19bdcd8343fe7b4b39a66bed89c286b3a8532ebc2b0",
-          "occurrence": 1,
-          "line": 372
-        },
-        {
-          "semantic_id": "arch:e5f77c7061275206472263c4622936b746460ad02da0ace3355a6d12d902b935",
-          "source_module": "chronovisor.hosts.claude_code_record",
+          "semantic_id": "arch:cd56f24dc703c481c6101dc13c19903ebf8d55ae1807b783cd97d30edda5c972",
+          "source_module": "chronovisor.hosts.codex_record",
           "scope_kind": "module",
           "scope": "<module>",
           "statement_kind": "from",
@@ -4813,12 +4744,14 @@
             "attach_save_transaction_marker",
             "find_published_save_transaction",
             "make_save_transaction",
+            "publish_oversized_shadow",
+            "publish_transcript_capture",
             "save_transaction_lock",
             "validate_published_save_receipt"
           ],
-          "content_sha256": "bb2a262d532040b9e3c1154519d942a5d8b4efc4e96498e6e4f710660c03ccc7",
+          "content_sha256": "a130ae580c56233288725a8d2d2971885270c95a609ba081d32b8c69b4e731a1",
           "occurrence": 1,
-          "line": 50
+          "line": 80
         },
         {
           "semantic_id": "arch:f1d84c6274010f66853008ff177fccdc0501eb89af8e170c043cd726767035fd",

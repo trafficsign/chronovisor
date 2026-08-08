@@ -255,6 +255,15 @@ R_RETIRED_EXCEPTION_IDS = (
     "arch:dfa983ef75c1cb9dc5780530a6f4d36ea41242e4a9de1903a1f9818ea057c3c8",
     "arch:e1077a94466a205536c6e25a117027d5f77c06c0cc55482f925787412c9513ea",
 )
+R_RETIRED_PUBLICATION_SITE_IDS = (
+    "arch:014cf5f6c0d82c4f638f4780ad77fe541e1a0092c3eb306e661449f82c8f2dbd",
+    "arch:5b59c553e5646f532d691a4109ab356d242a1cb16931883a1db7d73c3ad6d75e",
+    "arch:71a72909b9612fe9617c499e0c9f4c393f22e434f69855245b80599bc44d975b",
+    "arch:842b5bc82d3ca9fc358a2998a88eb870a77835519e3c9d65f47c320b9c9de591",
+    "arch:aab4417a8f69291dc742ca422e9ed3b0cff932c11ecff5a9a689b0e0386e7956",
+    "arch:cc1fb68ebe2ed455c391ed4334afea731abf630c2645500a04b9f2f80ed0bf5b",
+    "arch:e5f77c7061275206472263c4622936b746460ad02da0ace3355a6d12d902b935",
+)
 RETIREMENT_HISTORY = {
     "exception_semantic_ids": tuple(
         sorted(
@@ -289,6 +298,7 @@ RETIREMENT_HISTORY = {
                 *P8_RETIRED_SITE_IDS,
                 Q_RETIRED_CODEX_STORE_SITE_ID,
                 Q_RETIRED_CLAUDE_CODE_STORE_SITE_ID,
+                *R_RETIRED_PUBLICATION_SITE_IDS,
             )
         )
     ),
@@ -993,7 +1003,7 @@ def test_current_exception_ledger_seed_and_schema_inventory_are_exact(
     assert detected_ids == ledger_ids == set(seed["exception_semantic_ids"]["active"])
     _assert_exact_retirement_history(architecture, seed)
     assert len(edge_rows) == current["worktree_architecture"]["edge_count"] == 90
-    assert sum(len(row["sites"]) for row in edge_rows) == len(raw_cross_sites) == 1260
+    assert sum(len(row["sites"]) for row in edge_rows) == len(raw_cross_sites) == 1255
     assert {
         field: counts[field]
         for field in (
@@ -1006,7 +1016,7 @@ def test_current_exception_ledger_seed_and_schema_inventory_are_exact(
         )
     } == {
         "exceptions": 90,
-        "cross_domain_sites": 1260,
+        "cross_domain_sites": 1255,
         "production_to_lab_edges": 0,
         "production_to_lab_static_sites": 0,
         "production_to_lab_dynamic_sites": 0,
