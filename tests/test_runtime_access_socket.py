@@ -26,6 +26,7 @@ from scripts.runtime_ownership.access_model import (
 )
 from tests.runtime_access_v2_helpers import (
     joined_escape_rows,
+    validate_runtime_access_v2_result,
 )
 
 RESOURCE_ID = "runtime-resource:unix-socket"
@@ -157,6 +158,86 @@ def test_candidate_variants_are_bounded_deduplicated_and_order_stable() -> None:
     assert len(with_originless_state.variants) == MAX_FLOW_VARIANTS
     assert all(variant.has_origins for variant in with_originless_state.variants)
     assert with_originless_state.overflowed == frozenset({RESOURCE_ID})
+
+
+def test_candidate_overflow_is_intersected_per_variant_in_both_orders() -> None:
+    second_resource = "runtime-resource:second-socket"
+    third_resource = "runtime-resource:third-socket"
+    orphan_resource = "runtime-resource:orphan-parent-overflow"
+    variants = (
+        FlowValue(
+            origins={
+                RESOURCE_ID: frozenset({("first",)}),
+                third_resource: frozenset({("shared",)}),
+            },
+            overflowed=frozenset({third_resource}),
+        ),
+        FlowValue(origins={second_resource: frozenset({("second",)})}),
+        FlowValue(origins={third_resource: frozenset({("third",)})}),
+    )
+    parent_overflow = frozenset(
+        {RESOURCE_ID, second_resource, orphan_resource}
+    )
+    expected = {
+        frozenset({RESOURCE_ID, third_resource}): frozenset(
+            {RESOURCE_ID, third_resource}
+        ),
+        frozenset({second_resource}): frozenset({second_resource}),
+        frozenset({third_resource}): frozenset(),
+    }
+
+    for ordered in (variants, tuple(reversed(variants))):
+        candidates = candidate_flow_variants(
+            FlowValue(overflowed=parent_overflow, variants=ordered)
+        )
+        assert [frozenset(candidate.origins) for candidate in candidates] == [
+            frozenset(candidate.origins) for candidate in ordered
+        ]
+        for candidate in candidates:
+            origin_ids = frozenset(candidate.origins)
+            assert candidate.overflowed == expected[origin_ids]
+            assert candidate.overflowed <= origin_ids
+
+    expression = ast.parse("sink()\n").body[0]
+    assert isinstance(expression, ast.Expr)
+    assert isinstance(expression.value, ast.Call)
+    site = SyntaxSite(
+        site_id=f"runtime-site:{'1' * 64}",
+        scope="chronovisor.consumer:exercise",
+        kind="Call",
+        syntax="sink()",
+        occurrence=1,
+        path="src/chronovisor/consumer.py",
+        line=1,
+    )
+    locators = {
+        RESOURCE_ID: "unix://$HOME/.chronovisor/runtime/first.sock",
+        second_resource: "unix://$HOME/.chronovisor/runtime/second.sock",
+        third_resource: "unix://$HOME/.chronovisor/runtime/third.sock",
+    }
+    candidates = candidate_flow_variants(
+        FlowValue(overflowed=parent_overflow, variants=variants)
+    )
+    for candidate in candidates:
+        collector = AccessFactCollector(locators, {id(expression.value): site})
+        collector.record_access(
+            candidate,
+            node=expression.value,
+            actor="chronovisor.consumer:exercise",
+            mode="read",
+            operation="path.exists",
+            sink="pathlib.Path.exists",
+            path="src/chronovisor/consumer.py",
+            line=1,
+            ordinal=1,
+        )
+        result = collector.result()
+        validate_runtime_access_v2_result(result)
+        access_ids = set(result["access_fact_ids"])
+        for overflow in result["escape_facts"]:
+            if overflow["reason"] == "provenance_overflow":
+                assert overflow["resource_id"] in candidate.origins
+                assert overflow["source_fact_id"] in access_ids
 
 
 def test_nested_variants_do_not_split_canonical_duplicate(

@@ -856,10 +856,11 @@ def candidate_flow_variants(value: FlowValue) -> tuple[FlowValue, ...]:
         for candidate in variants:
             if candidate.origins.keys() & value.variant_tainted_resource_ids:
                 candidate.unknown_callable = True
-        if variants and value.overflowed:
-            candidate = variants[0]
+            relevant = value.overflowed & candidate.origins.keys()
+            if not relevant:
+                continue
             candidate.overflowed = frozenset(
-                set(candidate.overflowed) | set(value.overflowed)
+                set(candidate.overflowed) | relevant
             )
         return tuple(variants)
     if value.has_origins:
