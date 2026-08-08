@@ -1,6 +1,6 @@
 schema_version = 1
 threshold_lines = 300
-baseline_function_count = 47
+baseline_function_count = 46
 
 [[functions]]
 path = "src/chronovisor/decision/local_model_eval.py"
@@ -306,15 +306,6 @@ baseline_lines = 317
 disposition = "retained"
 max_lines = 317
 rationale = "Independent benchmark evaluation intentionally keeps fixed cohort admission, field replay, paired execution and scoring receipts, cluster bounds, leakage gates, and sealed artifact publication together."
-tests = ["tests/test_recall_answer_eval.py"]
-
-[[functions]]
-path = "src/chronovisor/recall/recall_answer_eval.py"
-qualname = "validate_independent_answer_outcome_artifact"
-baseline_lines = 334
-disposition = "retained"
-max_lines = 334
-rationale = "The validator recomputes the complete independent benchmark envelope in persisted wire order, including benchmark and gold bindings, execution receipts, score deltas, cluster bounds, counts, and gates."
 tests = ["tests/test_recall_answer_eval.py"]
 
 [[functions]]
