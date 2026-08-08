@@ -264,6 +264,12 @@ R_RETIRED_PUBLICATION_SITE_IDS = (
     "arch:cc1fb68ebe2ed455c391ed4334afea731abf630c2645500a04b9f2f80ed0bf5b",
     "arch:e5f77c7061275206472263c4622936b746460ad02da0ace3355a6d12d902b935",
 )
+R3_RETIRED_READ_BACK_SITE_IDS = (
+    "arch:3da3a455be15a5691ae0e5c6ee440ccc87748962a6709344209139af5a040fc7",
+    "arch:7a2d5165f7eea9c3e3e8ed6eb54f6b5e54edcf3918c772855809ca81d336d13a",
+    "arch:9ca182f482eb669a841a1d7963941f0db3fd0ce8ce40a6bb504ae808a94c7359",
+    "arch:fb1c4ba11f65e136b046580b21bfa48ecbaf284c3127c14bafdbbeafe73c04f2",
+)
 RETIREMENT_HISTORY = {
     "exception_semantic_ids": tuple(
         sorted(
@@ -299,6 +305,7 @@ RETIREMENT_HISTORY = {
                 Q_RETIRED_CODEX_STORE_SITE_ID,
                 Q_RETIRED_CLAUDE_CODE_STORE_SITE_ID,
                 *R_RETIRED_PUBLICATION_SITE_IDS,
+                *R3_RETIRED_READ_BACK_SITE_IDS,
             )
         )
     ),
