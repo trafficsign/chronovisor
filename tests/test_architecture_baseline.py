@@ -505,6 +505,32 @@ def _move_seed_id(
     seed[field][target].sort()
 
 
+def _synthetic_dynamic_import_site(
+    architecture: ModuleType,
+    template: dict[str, Any],
+    *,
+    source_module: str,
+    target_package: str = "ops",
+    target_module: str = "chronovisor.ops.synthetic_target",
+) -> dict[str, Any]:
+    row = {
+        **template,
+        "category": "dynamic_import",
+        "source_package": "ops",
+        "source_module": source_module,
+        "scope": "<module>",
+        "scope_kind": "module",
+        "statement_kind": "__import__",
+        "target_package": target_package,
+        "target_module": target_module,
+        "symbols": [],
+        "occurrence": 1,
+        "line": 1,
+    }
+    row["semantic_id"] = architecture._semantic_id(row)
+    return row
+
+
 def _assert_exact_retirement_history(
     architecture: ModuleType,
     seed: dict[str, Any],
@@ -1038,19 +1064,13 @@ def test_new_sensitive_exception_cannot_self_authorize_in_ledger_and_seed(
     source, ledger, compatibility, seed, frozen, previous = _exception_inputs(current)
     previous = copy.deepcopy(seed)
     template = next(
-        row
-        for row in current["source"]["import_sites"]
-        if row["category"] == "dynamic_import" and row["target_package"] == "ops"
+        row for row in source["import_sites"] if row["category"] == "cross_domain_import"
     )
-    import_site = {
-        **template,
-        "source_module": f"{template['source_module']}.new_dynamic_site",
-        "scope": "<module>",
-        "scope_kind": "module",
-        "occurrence": 1,
-        "line": 1,
-    }
-    import_site["semantic_id"] = architecture._semantic_id(import_site)
+    import_site = _synthetic_dynamic_import_site(
+        architecture,
+        template,
+        source_module="chronovisor.ops.new_dynamic_site",
+    )
     source["import_sites"].append(import_site)
     ledger["exceptions"].append(
         {
@@ -1207,20 +1227,17 @@ def test_exception_rows_reject_unrecorded_stale_duplicate_content_and_metadata(
     current: dict[str, Any],
 ) -> None:
     source, ledger, compatibility, seed, frozen, previous = _exception_inputs(current)
-    dynamic = copy.deepcopy(
-        next(
-            row
-            for row in current["source"]["import_sites"]
-            if row["category"] == "dynamic_import" and row["target_package"] == "ops"
-        )
+    template = next(
+        row for row in source["import_sites"] if row["category"] == "cross_domain_import"
+    )
+    dynamic = _synthetic_dynamic_import_site(
+        architecture,
+        template,
+        source_module="chronovisor.ops.synthetic_dynamic",
     )
     source["import_sites"].append(dynamic)
-    _move_seed_id(
-        seed,
-        "exception_semantic_ids",
-        dynamic["semantic_id"],
-        target="active",
-    )
+    seed["exception_semantic_ids"]["active"].append(dynamic["semantic_id"])
+    seed["exception_semantic_ids"]["active"].sort()
     _sync_seed_and_ledger_counts(architecture, source, ledger, compatibility, seed)
     violations = _exception_violations(
         architecture, source, ledger, compatibility, seed, frozen, previous
@@ -1230,22 +1247,27 @@ def test_exception_rows_reject_unrecorded_stale_duplicate_content_and_metadata(
 
     source, ledger, compatibility, seed, frozen, previous = _exception_inputs(current)
     dynamic_rows = [
-        copy.deepcopy(row)
-        for row in current["source"]["import_sites"]
-        if row["category"] == "dynamic_import" and row["target_package"] == "ops"
+        _synthetic_dynamic_import_site(
+            architecture,
+            row,
+            source_module=f"chronovisor.ops.synthetic_dynamic_{index}",
+            target_module=f"chronovisor.ops.synthetic_target_{index}",
+        )
+        for index, row in enumerate(
+            row
+            for row in source["import_sites"]
+            if row["category"] == "cross_domain_import"
+        )
     ][:2]
     dynamic, identity_row = dynamic_rows
     source["import_sites"].extend(dynamic_rows)
     ledger["exceptions"].extend(
         {**row, **architecture._exception_metadata(row)} for row in dynamic_rows
     )
-    for row in dynamic_rows:
-        _move_seed_id(
-            seed,
-            "exception_semantic_ids",
-            row["semantic_id"],
-            target="active",
-        )
+    seed["exception_semantic_ids"]["active"].extend(
+        row["semantic_id"] for row in dynamic_rows
+    )
+    seed["exception_semantic_ids"]["active"].sort()
     _sync_seed_and_ledger_counts(architecture, source, ledger, compatibility, seed)
     stale = {
         **dynamic,
@@ -1374,21 +1396,13 @@ def test_production_to_lab_static_and_dynamic_site_growth_are_explicit(
         "line": 1,
     }
     static_site["semantic_id"] = architecture._semantic_id(static_site)
-    dynamic_template = next(
-        row
-        for row in current["source"]["import_sites"]
-        if row["category"] == "dynamic_import"
+    dynamic_site = _synthetic_dynamic_import_site(
+        architecture,
+        static_template,
+        source_module="chronovisor.ops.new_lab_dynamic",
+        target_package="lab",
+        target_module="chronovisor.lab.new_dynamic",
     )
-    dynamic_site = {
-        **dynamic_template,
-        "source_package": "ops",
-        "source_module": "chronovisor.ops.new_lab_dynamic",
-        "target_package": "lab",
-        "target_module": "chronovisor.lab.new_dynamic",
-        "occurrence": 1,
-        "line": 1,
-    }
-    dynamic_site["semantic_id"] = architecture._semantic_id(dynamic_site)
     source["import_sites"].extend((static_site, dynamic_site))
 
     violations = _exception_violations(
