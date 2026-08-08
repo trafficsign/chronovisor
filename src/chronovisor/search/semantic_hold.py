@@ -20,10 +20,12 @@ import os
 import re
 import tempfile
 from collections import Counter
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import Any
+
+import httpx
 
 from chronovisor.core.canonical_json import (
     canonical_json_sha256_strict as canonical_sha256,
@@ -55,6 +57,7 @@ SCHEMA_VERSION = 1
 STRUCTURED_REVIEW_HOLD_CACHE_SCHEMA_VERSION = 1
 STRUCTURED_REVIEW_HOLD_CACHE_KIND = "structured_review_semantic_no_quorum_cache"
 STRUCTURED_REVIEW_HOLD_RESOLVER_VERSION = 1
+_OLLAMA_URL = "http://localhost:11434"
 
 _SEMANTIC_REASONS = frozenset(
     {
@@ -141,6 +144,83 @@ def _file_observation(path: Path) -> dict[str, Any]:
     return observation
 
 
+def _fetch_local_model_metadata(models: Sequence[str]) -> Mapping[str, Any]:
+    """Read Ollama engine/tag metadata without loading or running a model."""
+
+    timeout = httpx.Timeout(connect=3.0, read=10.0, write=3.0, pool=3.0)
+    with httpx.Client(base_url=_OLLAMA_URL, timeout=timeout) as client:
+        version_response = client.get("/api/version")
+        version_response.raise_for_status()
+        tags_response = client.get("/api/tags")
+        tags_response.raise_for_status()
+    version_body = version_response.json()
+    tags_body = tags_response.json()
+    available = tags_body.get("models") if isinstance(tags_body, dict) else []
+    available = available if isinstance(available, list) else []
+    records: dict[str, Any] = {}
+    for requested in models:
+        match = next(
+            (
+                row
+                for row in available
+                if isinstance(row, dict)
+                and requested
+                in {str(row.get("name") or ""), str(row.get("model") or "")}
+            ),
+            None,
+        )
+        records[requested] = match or {"name": requested, "status": "missing"}
+    return {
+        "engine": {
+            "name": "ollama",
+            "version": version_body.get("version")
+            if isinstance(version_body, dict)
+            else None,
+        },
+        "models": records,
+    }
+
+
+def _safe_model_metadata(
+    payload: Mapping[str, Any], models: Sequence[str]
+) -> dict[str, Any]:
+    engine = payload.get("engine")
+    safe_engine = {
+        "name": str(engine.get("name") or "") if isinstance(engine, Mapping) else "",
+        "version": str(engine.get("version") or "")
+        if isinstance(engine, Mapping)
+        else "",
+    }
+    source_models = payload.get("models")
+    source_models = source_models if isinstance(source_models, Mapping) else {}
+    safe_models: dict[str, Any] = {}
+    detail_keys = (
+        "families",
+        "family",
+        "format",
+        "parameter_size",
+        "parent_model",
+        "quantization_level",
+    )
+    for model in models:
+        source = source_models.get(model)
+        source = source if isinstance(source, Mapping) else {}
+        details = source.get("details")
+        details = details if isinstance(details, Mapping) else {}
+        safe_models[model] = {
+            "name": str(source.get("name") or source.get("model") or model),
+            "digest": str(source.get("digest") or ""),
+            "size": source.get("size") if isinstance(source.get("size"), int) else None,
+            "modified_at": str(source.get("modified_at") or ""),
+            "status": str(
+                source.get("status") or ("available" if source else "missing")
+            ),
+            "details": {key: details.get(key) for key in detail_keys if key in details},
+            "metadata_sha256": canonical_sha256(source),
+        }
+    return {"engine": safe_engine, "models": safe_models}
+
+
 def structured_review_authority_observation_sha256(
     authority: Mapping[str, Any],
     *,
@@ -169,16 +249,9 @@ def structured_review_authority_observation_sha256(
     models = router.get("models")
     assert isinstance(models, list)
 
-    from chronovisor.core.runtime_config import (
-        CONFIG_FILE,
-        load_decision_router_config,
-    )
-    from chronovisor.lab.local_model_eval import (
-        _safe_model_metadata,
-        fetch_local_model_metadata,
-    )
+    from chronovisor.core.runtime_config import CONFIG_FILE, load_decision_router_config
 
-    live_metadata = _safe_model_metadata(fetch_local_model_metadata(models), models)
+    live_metadata = _safe_model_metadata(_fetch_local_model_metadata(models), models)
     config = router_config or load_decision_router_config()
     adoption_path = (
         Path(config.adoption_artifact).expanduser()

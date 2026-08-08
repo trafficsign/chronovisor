@@ -1,19 +1,19 @@
 {
   "schema_version": 2,
   "source_baseline_head": "d404a6b20d00e3bcd1d4cdb89edfa5a718c51833",
-  "baseline_sha256": "586aaf09e7f741bd36b1bfd8e0eb223475d23f4795a3e3d6599c984763297b33",
+  "baseline_sha256": "9c0c4fccccd6015f1a333023b7ec9cec422f4b9b536cacdf843b2a1809378caf",
   "semantic_identity": "cross-domain edges use category+source_package+target_package; statement exceptions use category+source_package+source_module+scope_kind+scope+statement_kind+target_package+target_module+symbols+occurrence; source line is diagnostic and normalized statement content is verified independently",
   "counts": {
-    "exceptions": 160,
+    "exceptions": 158,
     "by_category": {
-      "cross_domain_edge": 94,
+      "cross_domain_edge": 93,
       "dynamic_import": 24,
-      "private_symbol_import": 30,
+      "private_symbol_import": 29,
       "schema_manifest_implementation_import": 12
     },
-    "cross_domain_sites": 1261,
-    "production_to_lab_edges": 4,
-    "production_to_lab_static_sites": 14,
+    "cross_domain_sites": 1260,
+    "production_to_lab_edges": 3,
+    "production_to_lab_static_sites": 13,
     "production_to_lab_dynamic_sites": 1,
     "compatibility_contracts": 289,
     "compatibility_by_kind": {
@@ -15421,28 +15421,6 @@
       "rationale": "Remove the hosts->search package edge through a published contract."
     },
     {
-      "category": "private_symbol_import",
-      "source_package": "search",
-      "source_module": "chronovisor.search.semantic_hold",
-      "scope_kind": "function",
-      "scope": "structured_review_authority_observation_sha256",
-      "statement_kind": "from",
-      "target_package": "lab",
-      "target_module": "chronovisor.lab.local_model_eval",
-      "symbols": [
-        "_safe_model_metadata",
-        "fetch_local_model_metadata"
-      ],
-      "content_sha256": "edcd22d6a38be3eb990f313d893d9457d7fd0444b3b654cff12578565b6940a6",
-      "line": 176,
-      "occurrence": 1,
-      "semantic_id": "arch:93b9e7819071ee5c3aecca9db43262f5ef56ac9a8b6085178911353e0c0d25b7",
-      "owner": "chronovisor.search.semantic_hold",
-      "deadline": "2026-09-07",
-      "removal_campaign": "P4",
-      "rationale": "Replace the search->lab private API dependency with a public API."
-    },
-    {
       "category": "cross_domain_edge",
       "source_package": "research",
       "target_package": "core",
@@ -15749,33 +15727,6 @@
       "deadline": "2026-12-31",
       "removal_campaign": "S",
       "rationale": "Remove the research->core package edge through a published contract."
-    },
-    {
-      "category": "cross_domain_edge",
-      "source_package": "search",
-      "target_package": "lab",
-      "sites": [
-        {
-          "semantic_id": "arch:d4b968e37807dc285676f8f73e74c3740782f10133aa0fc2e09acf42dfab3636",
-          "source_module": "chronovisor.search.semantic_hold",
-          "scope_kind": "function",
-          "scope": "structured_review_authority_observation_sha256",
-          "statement_kind": "from",
-          "target_module": "chronovisor.lab.local_model_eval",
-          "symbols": [
-            "_safe_model_metadata",
-            "fetch_local_model_metadata"
-          ],
-          "content_sha256": "edcd22d6a38be3eb990f313d893d9457d7fd0444b3b654cff12578565b6940a6",
-          "occurrence": 1,
-          "line": 176
-        }
-      ],
-      "semantic_id": "arch:95ae240af520b7872ef42f68074e124a12bc04c5f937d508f8135a6a8a23d03a",
-      "owner": "chronovisor.search",
-      "deadline": "2026-09-07",
-      "removal_campaign": "P4",
-      "rationale": "Remove the search->lab package edge through a published contract."
     },
     {
       "category": "private_symbol_import",

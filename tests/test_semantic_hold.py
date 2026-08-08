@@ -78,7 +78,6 @@ def test_authority_observation_detects_a_b_a_file_generation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from chronovisor.core import runtime_config
-    from chronovisor.lab import local_model_eval
 
     config_path = tmp_path / "config.toml"
     artifact_path = tmp_path / "adoption.json"
@@ -91,8 +90,8 @@ def test_authority_observation_detects_a_b_a_file_generation(
         lambda: SimpleNamespace(adoption_artifact=str(artifact_path)),
     )
     monkeypatch.setattr(
-        local_model_eval,
-        "fetch_local_model_metadata",
+        semantic_hold,
+        "_fetch_local_model_metadata",
         lambda models: {
             "engine": {"name": "ollama", "version": "test"},
             "models": {
