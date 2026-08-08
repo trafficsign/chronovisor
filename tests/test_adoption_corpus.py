@@ -11,6 +11,12 @@ from chronovisor.decision.decision_schema_manifest import (
     production_decision_schemas,
     production_schema_manifest,
 )
+from chronovisor.decision.local_model_eval import (
+    STALE_HISTORICAL_REQUEST_IDENTITY_EXCLUSION,
+    ReplayInputError,
+    inspect_replays,
+    load_replay_corpus,
+)
 from chronovisor.ingest import read_back_repair
 from chronovisor.lab import adoption_corpus
 from chronovisor.lab.adoption_corpus import (
@@ -32,12 +38,6 @@ from chronovisor.lab.adoption_corpus import (
     STALE_UNBOUND_AUTHORITY_EXCLUSION,
     compile_adoption_corpus,
     contract_candidates,
-)
-from chronovisor.lab.local_model_eval import (
-    STALE_HISTORICAL_REQUEST_IDENTITY_EXCLUSION,
-    ReplayInputError,
-    inspect_replays,
-    load_replay_corpus,
 )
 
 

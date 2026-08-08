@@ -26,6 +26,14 @@ from chronovisor.classification.classification import (
     UDCPackage,
     load_udc_package,
 )
+from chronovisor.classification.classification_fixture_set import (
+    read_jsonl,
+    sha256_file,
+)
+from chronovisor.classification.classification_library_evidence import (
+    COMPOSITE_UDC_RE,
+    split_for_group,
+)
 from chronovisor.classification.classification_library_sources import (
     MARC_NS,
     czech_bibliography_contract,
@@ -39,11 +47,6 @@ from chronovisor.core.jsonl_write import atomic_replace_text as _atomic_write_te
 from chronovisor.core.jsonl_write import write_jsonl_atomic as _write_jsonl
 from chronovisor.core.store import CHRONOVISOR_ROOT
 from chronovisor.core.timeutil import utc_iso_milliseconds as _now
-from chronovisor.lab.classification_fixture_set import read_jsonl, sha256_file
-from chronovisor.lab.classification_library_evidence import (
-    COMPOSITE_UDC_RE,
-    split_for_group,
-)
 
 ANNIF_VERSION = "1.4.1"
 ANNIF_DISTRIBUTION = f"annif[fasttext]=={ANNIF_VERSION}"

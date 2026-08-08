@@ -1,9 +1,8 @@
 """Published production contract shared with classification fixture tooling.
 
-The fixture implementation is classification-owned; the former
-:mod:`chronovisor.lab.classification_fixture_set` path remains only as a
-compatibility alias.  This module owns the small, stable boundary needed by
-callers while keeping the legacy byte formats unchanged.
+The fixture implementation and this contract are classification-owned. This
+module owns the small, stable boundary needed by callers while keeping the
+legacy byte formats unchanged.
 """
 
 from __future__ import annotations

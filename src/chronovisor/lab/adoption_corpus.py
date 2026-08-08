@@ -70,17 +70,17 @@ from chronovisor.decision.decision_schema_manifest import (
     production_schema_manifest,
     schema_sha256,
 )
-from chronovisor.ingest.read_back_repair import (
-    READ_BACK_EVIDENCE_POLICY_MARKER,
-    READ_BACK_FRONTIER_SCHEMA,
-)
-from chronovisor.lab.local_model_eval import (
+from chronovisor.decision.local_model_eval import (
     MIN_ADOPTION_USABLE_CASES,
     MIN_CASES_PER_PRODUCTION_SCHEMA,
     UNSAFE_HOLD_DECISIONS,
     ReplayInputError,
     load_replay_corpus,
     replay_semantic_effect,
+)
+from chronovisor.ingest.read_back_repair import (
+    READ_BACK_EVIDENCE_POLICY_MARKER,
+    READ_BACK_FRONTIER_SCHEMA,
 )
 from chronovisor.recall.content_correction import (
     LEGACY_UNFILTERED_SIGNAL,

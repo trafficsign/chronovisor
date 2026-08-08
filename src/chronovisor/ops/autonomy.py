@@ -4160,10 +4160,8 @@ def install_launchd(*, dry_run: bool = False, load: bool = False) -> dict[str, A
         _write_wrapper(converge_wrapper, converge_command)
         _write_wrapper(watchdog_wrapper, watchdog_command)
         _write_wrapper(soak_wrapper, soak_command)
-        # The package-independent observer lives at the package root.  The
-        # operations namespace only contains a compatibility shim that imports
-        # Chronovisor, which would defeat this external failure boundary if it
-        # were copied as the standalone executable.
+        # The package-independent observer lives at the package root so the
+        # standalone executable preserves this external failure boundary.
         observer_source = Path(__file__).parents[1] / "deadman_observer.py"
         deadman_script.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(observer_source, deadman_script)

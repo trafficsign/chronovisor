@@ -27,19 +27,19 @@ from chronovisor.classification.classification_bundle import (
     rollback_authority,
 )
 from chronovisor.classification.classification_engine import page_payload
-from chronovisor.core.durable_state import read_sealed_json, write_sealed_json
-from chronovisor.core.timeutil import utc_iso_milliseconds as _now
-from chronovisor.ingest.page_registry import PageRegistry
-from chronovisor.lab.classification_fixture_set import (
-    _write_jsonl,
+from chronovisor.classification.classification_fixture_set import (
     inference_dto,
     sha256_bytes,
     sha256_file,
 )
-from chronovisor.lab.classification_library_evidence import (
+from chronovisor.classification.classification_library_evidence import (
     LibraryEvidenceIndex,
     LibraryEvidenceProvider,
 )
+from chronovisor.core.durable_state import read_sealed_json, write_sealed_json
+from chronovisor.core.jsonl_write import write_jsonl_atomic as _write_jsonl
+from chronovisor.core.timeutil import utc_iso_milliseconds as _now
+from chronovisor.ingest.page_registry import PageRegistry
 
 ARTIFACT_SWEEP_SCHEMA = "chronovisor.classification-artifact-sweep.v1"
 

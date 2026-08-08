@@ -21,6 +21,10 @@ from chronovisor.classification.classification_anchor import (
 from chronovisor.classification.classification_anchor_worker import (
     PROMPT_SHA256 as CORE_PROMPT_SHA256,
 )
+from chronovisor.classification.classification_fixture_set import (
+    read_jsonl,
+    sha256_file,
+)
 from chronovisor.core import ollama
 from chronovisor.core.durable_state import read_sealed_json, write_sealed_json
 from chronovisor.core.runtime_config import load_decision_router_config
@@ -42,7 +46,6 @@ from chronovisor.lab.classification_anchor_set_dev import (
     score_anchor_set,
     summarize_metrics,
 )
-from chronovisor.lab.classification_fixture_set import read_jsonl, sha256_file
 from chronovisor.lab.harness import (
     LabHarness,
     require_contract,

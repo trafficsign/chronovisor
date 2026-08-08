@@ -35,6 +35,25 @@ from chronovisor.classification.classification_evidence_judgment import (
     ARMS,
     paired_rows,
 )
+from chronovisor.classification.classification_fixture_set import (
+    build_fixture_pool,
+    create_disabled_baseline_manifest,
+    fixture_set_paths,
+    fixture_slice_flags,
+    inference_rows,
+    lock_fixture_set,
+    read_jsonl,
+    sha256_bytes,
+    sha256_file,
+)
+from chronovisor.classification.classification_library_evidence import (
+    LibraryEvidenceIndex,
+    LibraryEvidenceProvider,
+    build_dense_index,
+    build_source_index,
+    embed_texts_cancellable,
+    external_test_cases,
+)
 from chronovisor.classification.classification_library_sources import (
     atomic_write,
     czech_authority_contract,
@@ -60,6 +79,7 @@ from chronovisor.core.durable_state import (
     read_sealed_json,
     write_sealed_json,
 )
+from chronovisor.core.jsonl_write import write_jsonl_atomic as _write_jsonl
 from chronovisor.core.runtime_config import (
     load_decision_router_config,
     load_embedding_config,
@@ -68,18 +88,6 @@ from chronovisor.core.store import CHRONOVISOR_ROOT
 from chronovisor.lab.classification_artifact_runner import (
     run_artifact_only_sweep,
     storage_manifest,
-)
-from chronovisor.lab.classification_fixture_set import (
-    _write_jsonl,
-    build_fixture_pool,
-    create_disabled_baseline_manifest,
-    fixture_set_paths,
-    fixture_slice_flags,
-    inference_rows,
-    lock_fixture_set,
-    read_jsonl,
-    sha256_bytes,
-    sha256_file,
 )
 from chronovisor.lab.classification_library_calibration import (
     evaluate_holdout_gates,
@@ -93,14 +101,6 @@ from chronovisor.lab.classification_library_eval import (
     evaluate_external_test_results,
     evaluate_paired_decisions,
     unsupported_candidate_notations,
-)
-from chronovisor.lab.classification_library_evidence import (
-    LibraryEvidenceIndex,
-    LibraryEvidenceProvider,
-    build_dense_index,
-    build_source_index,
-    embed_texts_cancellable,
-    external_test_cases,
 )
 from chronovisor.lab.classification_pilot import AuthoritativeCandidateIndex
 
@@ -1733,7 +1733,9 @@ def _phase_e7a_sweep(root: Path, state: dict[str, Any]) -> dict[str, Any]:
             "\n".join(
                 (
                     sha256_file(
-                        Path(__file__).with_name("classification_library_evidence.py")
+                        Path(__file__).resolve().parents[1]
+                        / "classification"
+                        / "classification_library_evidence.py"
                     ),
                     sha256_file(
                         Path(__file__).resolve().parents[1]

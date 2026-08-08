@@ -6,19 +6,20 @@ import stat
 from pathlib import Path
 
 from chronovisor.classification import classification_fixture_contract as contract
-from chronovisor.lab import classification_fixture_set as legacy
+from chronovisor.classification import classification_fixture_set as fixture_set
+from chronovisor.core.jsonl_write import write_jsonl_atomic as fixture_writer
 
 
 def test_contract_preserves_legacy_schema_hash_and_dto_behavior(tmp_path: Path) -> None:
-    assert contract.DISABLED_BASELINE_SCHEMA == legacy.DISABLED_BASELINE_SCHEMA
-    assert contract.INFERENCE_DTO_SCHEMA == legacy.INFERENCE_DTO_SCHEMA
-    assert contract.GOLD_FIELD_PREFIXES == legacy.GOLD_FIELD_PREFIXES
+    assert contract.DISABLED_BASELINE_SCHEMA == fixture_set.DISABLED_BASELINE_SCHEMA
+    assert contract.INFERENCE_DTO_SCHEMA == fixture_set.INFERENCE_DTO_SCHEMA
+    assert contract.GOLD_FIELD_PREFIXES == fixture_set.GOLD_FIELD_PREFIXES
 
     payload = b"classification fixture bytes\n\x00"
     source = tmp_path / "source.bin"
     source.write_bytes(payload)
-    assert contract.sha256_bytes(payload) == legacy.sha256_bytes(payload)
-    assert contract.sha256_file(source) == legacy.sha256_file(source)
+    assert contract.sha256_bytes(payload) == fixture_set.sha256_bytes(payload)
+    assert contract.sha256_file(source) == fixture_set.sha256_file(source)
 
     row = {
         "uid": "uid-1",
@@ -29,7 +30,7 @@ def test_contract_preserves_legacy_schema_hash_and_dto_behavior(tmp_path: Path) 
         "fixture_rank": 1,
         "nested": {"preserved": True},
     }
-    assert contract.inference_dto(row) == legacy.inference_dto(row)
+    assert contract.inference_dto(row) == fixture_set.inference_dto(row)
 
 
 def test_contract_preserves_legacy_jsonl_bytes(tmp_path: Path) -> None:
@@ -38,20 +39,18 @@ def test_contract_preserves_legacy_jsonl_bytes(tmp_path: Path) -> None:
         {"nested": {"b": 2, "a": 1}, "flag": True},
     ]
     contract_path = tmp_path / "contract" / "rows.jsonl"
-    legacy_path = tmp_path / "legacy" / "rows.jsonl"
+    implementation_path = tmp_path / "implementation" / "rows.jsonl"
 
     contract.write_jsonl(contract_path, rows)
-    legacy._write_jsonl(legacy_path, rows)
+    fixture_writer(implementation_path, rows)
 
-    assert inspect.signature(contract.write_jsonl) == inspect.signature(
-        legacy._write_jsonl
-    )
-    assert contract_path.read_bytes() == legacy_path.read_bytes()
+    assert inspect.signature(contract.write_jsonl) == inspect.signature(fixture_writer)
+    assert contract_path.read_bytes() == implementation_path.read_bytes()
     assert [json.loads(line) for line in contract_path.read_text().splitlines()] == rows
     assert contract_path.read_text().splitlines()[0] == '{"z": 1, "日本語": "分類"}'
     assert contract_path.read_bytes().endswith(b"\n")
     assert stat.S_IMODE(contract_path.stat().st_mode) == 0o600
-    assert stat.S_IMODE(legacy_path.stat().st_mode) == 0o600
+    assert stat.S_IMODE(implementation_path.stat().st_mode) == 0o600
 
     old_inode = contract_path.stat().st_ino
     contract.write_jsonl(contract_path, [{"replacement": True}])

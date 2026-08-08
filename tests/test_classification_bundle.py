@@ -9,10 +9,10 @@ from chronovisor.classification.classification_bundle import (
     resolve_authority,
     rollback_authority,
 )
-from chronovisor.core.durable_state import write_sealed_json
-from chronovisor.lab.classification_fixture_set import (
+from chronovisor.classification.classification_fixture_set import (
     create_disabled_baseline_manifest,
 )
+from chronovisor.core.durable_state import write_sealed_json
 
 
 def test_disabled_baseline_is_distinct_from_missing_and_corrupt(

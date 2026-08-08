@@ -478,7 +478,7 @@ def test_quality_drift_freezes_locally_without_frontier(tmp_path: Path) -> None:
 
 
 def _quality_artifact(*, wrong: bool = False) -> dict:
-    from chronovisor.lab.local_model_eval import adoption_evidence_sha256
+    from chronovisor.decision.local_model_eval import adoption_evidence_sha256
 
     cases = []
     for index in range(5):

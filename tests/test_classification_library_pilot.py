@@ -9,9 +9,10 @@ from chronovisor.classification.classification import (
     default_udc_package,
 )
 from chronovisor.classification.classification_engine import record_from_consensus
+from chronovisor.classification.classification_fixture_set import fixture_set_paths
 from chronovisor.core.durable_state import write_sealed_json
+from chronovisor.core.jsonl_write import write_jsonl_atomic as _write_jsonl
 from chronovisor.lab import classification_library_pilot
-from chronovisor.lab.classification_fixture_set import _write_jsonl, fixture_set_paths
 from chronovisor.lab.classification_library_pilot import (
     FIXTURE_EPOCH,
     _advance,

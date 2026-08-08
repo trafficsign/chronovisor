@@ -15,6 +15,10 @@ from chronovisor.classification.classification import (
     default_udc_package,
 )
 from chronovisor.classification.classification_engine import CandidateIndex
+from chronovisor.classification.classification_fixture_set import (
+    read_jsonl,
+    sha256_file,
+)
 from chronovisor.classification.classification_query_worker import (
     QUERY_POLICY,
     QUERY_PROMPT_SHA256,
@@ -24,7 +28,6 @@ from chronovisor.core.durable_state import read_sealed_json, write_sealed_json
 from chronovisor.core.runtime_config import load_decision_router_config
 from chronovisor.core.store import CHRONOVISOR_ROOT
 from chronovisor.core.timeutil import utc_iso_milliseconds as _now
-from chronovisor.lab.classification_fixture_set import read_jsonl, sha256_file
 from chronovisor.lab.classification_profile_pilot import (
     notation_matches,
     query_profile_index,
