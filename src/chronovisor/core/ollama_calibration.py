@@ -11,10 +11,12 @@ import subprocess
 import threading
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from contextlib import contextmanager, suppress
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
+
+from chronovisor.core.jsonl_write import atomic_write_json_payload
 
 _MODEL_FOOTPRINT_CALIBRATION: dict[tuple[str, int, int, str, str], int] = {}
 _CALIBRATION_IO_LOCK = threading.Lock()
@@ -214,23 +216,6 @@ def _read_calibration_payload(path: Path) -> dict[str, Any]:
     return body
 
 
-def _atomic_write_calibration_payload(path: Path, payload: Mapping[str, Any]) -> None:
-    temporary = path.with_name(
-        f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
-    )
-    try:
-        with temporary.open("w", encoding="utf-8") as handle:
-            json.dump(payload, handle, ensure_ascii=False, sort_keys=True)
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        temporary.chmod(0o600)
-        os.replace(temporary, path)
-    finally:
-        with suppress(FileNotFoundError):
-            temporary.unlink()
-
-
 def _matching_persisted_calibrations(
     *,
     root: Path,
@@ -346,7 +331,7 @@ def _persist_model_calibration(
                 int(entry.get("context") or 0),
             )
         )
-        _atomic_write_calibration_payload(
+        atomic_write_json_payload(
             path,
             {
                 "schema_version": _CALIBRATION_SCHEMA_VERSION,

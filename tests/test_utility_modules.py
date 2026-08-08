@@ -13,7 +13,11 @@ from chronovisor.core.hashutil import (
     sha256_text,
 )
 from chronovisor.core.jsonl import encode_jsonl, read_jsonl, write_jsonl
-from chronovisor.core.jsonl_write import atomic_replace_bytes, write_jsonl_atomic
+from chronovisor.core.jsonl_write import (
+    atomic_replace_bytes,
+    atomic_write_json_payload,
+    write_jsonl_atomic,
+)
 from chronovisor.core.timeutil import (
     ensure_utc,
     iso_milliseconds,
@@ -72,3 +76,13 @@ def test_atomic_replace_bytes_sets_private_mode(tmp_path: Path) -> None:
 
     assert path.read_bytes() == b"fixed"
     assert path.stat().st_mode & 0o777 == 0o600
+
+
+def test_atomic_write_json_payload_preserves_exact_contract(tmp_path: Path) -> None:
+    path = tmp_path / "payload.json"
+
+    atomic_write_json_payload(path, {"z": 1, "a": "日本語"})
+
+    assert path.read_bytes() == '{"a": "日本語", "z": 1}\n'.encode()
+    assert path.stat().st_mode & 0o777 == 0o600
+    assert not list(tmp_path.glob(f".{path.name}.*.tmp"))

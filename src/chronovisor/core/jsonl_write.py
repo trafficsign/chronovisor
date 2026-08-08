@@ -5,11 +5,32 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import threading
 from collections.abc import Iterable, Mapping
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
 from chronovisor.core.jsonl import encode_jsonl
+
+
+def atomic_write_json_payload(path: Path, payload: Mapping[str, Any]) -> None:
+    """Replace one sorted JSON payload without creating its parent directory."""
+
+    temporary = path.with_name(
+        f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+    )
+    try:
+        with temporary.open("w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        temporary.chmod(0o600)
+        os.replace(temporary, path)
+    finally:
+        with suppress(FileNotFoundError):
+            temporary.unlink()
 
 
 def atomic_replace_bytes(path: Path, data: bytes, *, mode: int = 0o600) -> None:

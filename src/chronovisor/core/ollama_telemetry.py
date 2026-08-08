@@ -1,36 +1,19 @@
 """Redacted local model activity telemetry."""
 
-import json
 import logging
 import os
 import sys
 import threading
 import time
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator
 from contextlib import contextmanager, suppress
 from datetime import datetime
 from pathlib import Path
 from types import FrameType
-from typing import Any
+
+from chronovisor.core.jsonl_write import atomic_write_json_payload
 
 _MODEL_ACTIVITY_SCHEMA_VERSION = 1
-
-
-def _atomic_write_payload(path: Path, payload: Mapping[str, Any]) -> None:
-    temporary = path.with_name(
-        f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
-    )
-    try:
-        with temporary.open("w", encoding="utf-8") as handle:
-            json.dump(payload, handle, ensure_ascii=False, sort_keys=True)
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        temporary.chmod(0o600)
-        os.replace(temporary, path)
-    finally:
-        with suppress(FileNotFoundError):
-            temporary.unlink()
 
 
 def _model_activity_caller(facade_module: str) -> tuple[str, str]:
@@ -84,7 +67,7 @@ def model_activity(
         active_dir.mkdir(parents=True, exist_ok=True)
         with suppress(OSError):
             active_dir.chmod(0o700)
-        _atomic_write_payload(
+        atomic_write_json_payload(
             marker_path,
             {
                 "schema_version": _MODEL_ACTIVITY_SCHEMA_VERSION,
@@ -115,7 +98,7 @@ def model_activity(
             recent_path = active_dir.parent / "recent" / f"{selected_pipeline}.json"
             try:
                 recent_path.parent.mkdir(parents=True, exist_ok=True)
-                _atomic_write_payload(
+                atomic_write_json_payload(
                     recent_path,
                     {
                         "schema_version": _MODEL_ACTIVITY_SCHEMA_VERSION,
