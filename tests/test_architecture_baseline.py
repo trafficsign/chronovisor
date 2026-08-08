@@ -232,6 +232,9 @@ Q_RETIRED_EXCEPTION_IDS = (
     "arch:e6c724f0b06379d55660232c4ceb93edbead8217dfcc5b93377edff9077c7948",
     "arch:f8662161b0b513d566a2c1371d78ffc02e39c4ee310c04f34598a275f0c16169",
 )
+Q_RETIRED_CODEX_STORE_SITE_ID = (
+    "arch:078f19253b4b2590505ced5257392c0718443b64a691cccefb6e19c20f7b9b94"
+)
 R_RETIRED_EXCEPTION_IDS = (
     "arch:0a0ecf52ab0c563bda61e75cce2798f692b54d14d6f3b49e7e0751fb44730beb",
     "arch:399d92dc378092ffa44dab2d26f9f424864e0ac5bfabebac84547350033450cf",
@@ -281,6 +284,7 @@ RETIREMENT_HISTORY = {
                 *P5_RETIRED_SITE_IDS,
                 *P6_RETIRED_SITE_IDS,
                 *P8_RETIRED_SITE_IDS,
+                Q_RETIRED_CODEX_STORE_SITE_ID,
             )
         )
     ),

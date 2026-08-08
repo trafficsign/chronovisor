@@ -1,6 +1,7 @@
 """Chronovisor directory management."""
 
 import os
+from dataclasses import dataclass
 from pathlib import Path
 
 DEFAULT_ROOT = Path.home() / ".chronovisor"
@@ -16,14 +17,58 @@ def resolve_root() -> Path:
     return DEFAULT_ROOT
 
 
-CHRONOVISOR_ROOT = resolve_root()
-RAW_DIR = CHRONOVISOR_ROOT / "raw"
-PAGES_DIR = CHRONOVISOR_ROOT / "pages"
-SYSTEM_DIR = CHRONOVISOR_ROOT / "system"
-MODEL_LAB_REPLAY_FILE = CHRONOVISOR_ROOT / "runtime" / "model-lab" / "replay.jsonl"
-INDEX_FILE = CHRONOVISOR_ROOT / "index.md"
-LOG_FILE = CHRONOVISOR_ROOT / "log.md"
-SCHEMA_FILE = CHRONOVISOR_ROOT / "schema.md"
+@dataclass(frozen=True)
+class RuntimeContext:
+    """Immutable paths for one Chronovisor data root."""
+
+    root: Path
+
+    @property
+    def raw_dir(self) -> Path:
+        return self.root / "raw"
+
+    @property
+    def pages_dir(self) -> Path:
+        return self.root / "pages"
+
+    @property
+    def system_dir(self) -> Path:
+        return self.root / "system"
+
+    @property
+    def config_file(self) -> Path:
+        return self.root / "config.toml"
+
+    @property
+    def model_lab_replay_file(self) -> Path:
+        return self.root / "runtime" / "model-lab" / "replay.jsonl"
+
+    @property
+    def index_file(self) -> Path:
+        return self.root / "index.md"
+
+    @property
+    def log_file(self) -> Path:
+        return self.root / "log.md"
+
+    @property
+    def schema_file(self) -> Path:
+        return self.root / "schema.md"
+
+    @property
+    def codex_state_file(self) -> Path:
+        return self.root / "codex-save-state.json"
+
+
+DEFAULT_CONTEXT = RuntimeContext(resolve_root())
+CHRONOVISOR_ROOT = DEFAULT_CONTEXT.root
+RAW_DIR = DEFAULT_CONTEXT.raw_dir
+PAGES_DIR = DEFAULT_CONTEXT.pages_dir
+SYSTEM_DIR = DEFAULT_CONTEXT.system_dir
+MODEL_LAB_REPLAY_FILE = DEFAULT_CONTEXT.model_lab_replay_file
+INDEX_FILE = DEFAULT_CONTEXT.index_file
+LOG_FILE = DEFAULT_CONTEXT.log_file
+SCHEMA_FILE = DEFAULT_CONTEXT.schema_file
 
 
 def all_pages() -> list[Path]:
@@ -47,26 +92,41 @@ def page_id_from_path(path: Path) -> str:
     return path.stem
 
 
-def init_chronovisor() -> None:
+def init_chronovisor(context: RuntimeContext | None = None) -> None:
     """Initialize the Chronovisor directory structure."""
-    RAW_DIR.mkdir(parents=True, exist_ok=True)
-    PAGES_DIR.mkdir(parents=True, exist_ok=True)
-    SYSTEM_DIR.mkdir(parents=True, exist_ok=True)
+    if context is None:
+        raw_dir, pages_dir, system_dir = RAW_DIR, PAGES_DIR, SYSTEM_DIR
+        index_file, log_file, schema_file = INDEX_FILE, LOG_FILE, SCHEMA_FILE
+    else:
+        raw_dir, pages_dir, system_dir = (
+            context.raw_dir,
+            context.pages_dir,
+            context.system_dir,
+        )
+        index_file, log_file, schema_file = (
+            context.index_file,
+            context.log_file,
+            context.schema_file,
+        )
 
-    if not INDEX_FILE.exists():
-        INDEX_FILE.write_text(
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    pages_dir.mkdir(parents=True, exist_ok=True)
+    system_dir.mkdir(parents=True, exist_ok=True)
+
+    if not index_file.exists():
+        index_file.write_text(
             "---\ntitle: Index\nupdated: 1970-01-01\n---\n\n"
             "# Wiki Index\n\nNo pages yet.\n"
         )
 
-    if not LOG_FILE.exists():
-        LOG_FILE.write_text(
+    if not log_file.exists():
+        log_file.write_text(
             "---\ntitle: Log\nupdated: 1970-01-01\n---\n\n"
             "# Change Log\n"
         )
 
-    if not SCHEMA_FILE.exists():
-        SCHEMA_FILE.write_text(SCHEMA_CONTENT)
+    if not schema_file.exists():
+        schema_file.write_text(SCHEMA_CONTENT)
 
 
 SCHEMA_CONTENT = """\

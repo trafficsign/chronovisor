@@ -12,6 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from chronovisor.core.store import RuntimeContext
 from chronovisor.hosts import codex_record
 from chronovisor.raw.raw_semantic_projection import project_parent_raw
 from chronovisor.raw.save_transaction import make_save_transaction
@@ -540,6 +541,63 @@ def test_v2_save_accepts_oversized_native_record_after_metadata(
     assert Path(result["save_result"]["path"]).read_bytes() == session.read_bytes()
     assert result["scanned_until_line"] == 2
     assert json.loads(state.read_text())["files"][str(session)]["last_saved_line"] == 2
+
+
+@pytest.mark.parametrize(
+    "max_chars",
+    [codex_record.DEFAULT_MAX_CHARS, 128],
+    ids=["normal", "multi-chunk"],
+)
+def test_runtime_context_keeps_v2_stop_capture_under_supplied_root(
+    tmp_path: Path, monkeypatch, max_chars: int
+) -> None:
+    session = tmp_path / "session.jsonl"
+    runtime = RuntimeContext(tmp_path / "runtime-context")
+    forbidden_default = tmp_path / "global-default"
+    sample_session(session)
+    monkeypatch.setenv("CHRONOVISOR_RAW_LAYOUT", "v2")
+    monkeypatch.setattr(codex_record, "RAW_DIR", forbidden_default / "raw")
+    monkeypatch.setattr(
+        codex_record,
+        "DEFAULT_STATE_FILE",
+        forbidden_default / "codex-save-state.json",
+    )
+    args = args_for(session, codex_record.DEFAULT_STATE_FILE, ignore_state=True)
+    args.state_file = None
+    args.max_chars = max_chars
+
+    result = codex_record.run(args, context=runtime)
+    save_results = result.get("save_results", [result["save_result"]])
+
+    assert result["status"] == "saved"
+    if max_chars == codex_record.DEFAULT_MAX_CHARS:
+        assert result["chunk_count"] == 1
+    else:
+        assert result["chunk_count"] > 1
+    assert result["scanned_until_line"] == 5
+    assert all(
+        Path(save_result["path"]).is_relative_to(runtime.raw_dir)
+        for save_result in save_results
+    )
+    assert json.loads(runtime.codex_state_file.read_text())["files"][str(session)][
+        "last_saved_line"
+    ] == 5
+    assert runtime.pages_dir.is_dir()
+    assert runtime.system_dir.is_dir()
+    assert not forbidden_default.exists()
+
+
+def test_explicit_default_state_file_remains_an_override(tmp_path: Path) -> None:
+    parser = codex_record.build_parser()
+    runtime = RuntimeContext(tmp_path / "runtime-context")
+
+    assert parser.parse_args([]).state_file is None
+    explicit = parser.parse_args(
+        ["--state-file", str(codex_record.DEFAULT_STATE_FILE)]
+    )
+    assert codex_record._resolve_state_file(explicit, context=runtime) == (
+        codex_record.DEFAULT_STATE_FILE
+    )
 
 
 def test_shadow_save_compares_legacy_records_with_native_source(

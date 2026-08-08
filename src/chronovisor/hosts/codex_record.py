@@ -18,7 +18,12 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
-from chronovisor.core.store import CHRONOVISOR_ROOT, RAW_DIR, init_chronovisor
+from chronovisor.core.store import (
+    DEFAULT_CONTEXT,
+    RAW_DIR,
+    RuntimeContext,
+    init_chronovisor,
+)
 from chronovisor.decision.decision_policy import resolve_decision_policy
 from chronovisor.hosts.agent_save_base import (
     content_has_capture_payload as _content_has_capture_payload,
@@ -57,7 +62,7 @@ from chronovisor.research.evidence_grounding import (
 # The normal save path is deterministic and never resolves or starts a model.
 DEFAULT_MEMORY_MODEL = "deterministic-capture"
 DEFAULT_REASONING_EFFORT = "none"
-DEFAULT_STATE_FILE = CHRONOVISOR_ROOT / "codex-save-state.json"
+DEFAULT_STATE_FILE = DEFAULT_CONTEXT.codex_state_file
 DEFAULT_MAX_CHARS = 120_000
 DEFAULT_TIMEOUT_SECONDS = 300
 HOOK_ENABLE_ENV = "CODEX_CHRONOVISOR_RECORD_ENABLED"
@@ -749,6 +754,7 @@ def _capture_oversized_record(
     transcript_slice: TranscriptSlice,
     state: dict[str, Any],
     state_file: Path,
+    raw_dir: Path,
     base_result: dict[str, Any],
 ) -> dict[str, Any]:
     """Publish one oversized record as idempotent reassemblable fragments."""
@@ -803,7 +809,7 @@ def _capture_oversized_record(
         )
         try:
             validate_published_save_receipt(
-                raw_dir=RAW_DIR,
+                raw_dir=raw_dir,
                 save_result=save_result,
                 expected=transaction,
             )
@@ -814,7 +820,7 @@ def _capture_oversized_record(
         save_results.append(save_result)
 
     shadow = publish_oversized_shadow(
-        raw_dir=RAW_DIR,
+        raw_dir=raw_dir,
         host="codex",
         session_file=transcript_slice.session_file,
         session_id=transcript_slice.session_id,
@@ -898,6 +904,7 @@ def _run_save_transaction(
     args: argparse.Namespace,
     *,
     stdin_text: str | None = None,
+    context: RuntimeContext | None = None,
 ) -> dict[str, Any]:
     if args.hook and os.environ.get(HOOK_ENABLE_ENV) != "1":
         return {
@@ -905,7 +912,12 @@ def _run_save_transaction(
             "reason": f"{HOOK_ENABLE_ENV}=1 is required for hook execution",
         }
 
-    policy, policy_mode, policy_error = resolve_decision_policy("raw_capture")
+    if context is None:
+        policy, policy_mode, policy_error = resolve_decision_policy("raw_capture")
+    else:
+        policy, policy_mode, policy_error = resolve_decision_policy(
+            "raw_capture", config_path=context.config_file
+        )
     policy_kind = policy.kind if policy is not None else None
     policy_result = {
         "lane": "raw_capture",
@@ -930,14 +942,19 @@ def _run_save_transaction(
             "model_calls": 0,
         }
 
-    init_chronovisor()
+    if context is None:
+        init_chronovisor()
+    else:
+        init_chronovisor(context=context)
+
+    raw_dir = RAW_DIR if context is None else context.raw_dir
 
     hints = hook_hints(read_hook_payload(stdin_text)) if args.hook else {}
     session_file = resolve_session_file(args, hints)
     if not session_file.exists():
         raise CodexSaveError(f"session file does not exist: {session_file}")
 
-    state_file = Path(args.state_file).expanduser()
+    state_file = _resolve_state_file(args, context=context)
     state = load_state(state_file)
     committed_line = saved_line_for(state, session_file)
     after_line = 0 if args.ignore_state else committed_line
@@ -952,7 +969,7 @@ def _run_save_transaction(
         else extract_transcript_slice(session_file, after_line=committed_line)
     )
     recovered = find_published_save_transaction(
-        raw_dir=RAW_DIR,
+        raw_dir=raw_dir,
         host="codex",
         session_file=session_file,
         session_id=recovery_probe.session_id,
@@ -1030,7 +1047,7 @@ def _run_save_transaction(
 
     if args.max_chars < 1:
         raise CodexSaveError("max_chars must be a positive byte limit")
-    layout = raw_layout_mode(chronovisor_root=RAW_DIR.parent)
+    layout = raw_layout_mode(chronovisor_root=raw_dir.parent)
     if (
         layout != "v2"
         and len(_serialized_records_bytes([transcript_slice.records[0]]))
@@ -1041,6 +1058,7 @@ def _run_save_transaction(
             transcript_slice=transcript_slice,
             state=state,
             state_file=state_file,
+            raw_dir=raw_dir,
             base_result={**base_result, "decision_policy": policy_result},
         )
 
@@ -1099,7 +1117,7 @@ def _run_save_transaction(
         }
 
     save_result = publish_transcript_capture(
-        raw_dir=RAW_DIR,
+        raw_dir=raw_dir,
         host="codex",
         session_key=transaction.session_key,
         session_id=transcript_slice.session_id,
@@ -1117,7 +1135,7 @@ def _run_save_transaction(
     )
     try:
         validate_published_save_receipt(
-            raw_dir=RAW_DIR,
+            raw_dir=raw_dir,
             save_result=save_result,
             expected=transaction,
         )
@@ -1134,21 +1152,36 @@ def _run_save_transaction(
     }
 
 
-def run(args: argparse.Namespace, *, stdin_text: str | None = None) -> dict[str, Any]:
+def _resolve_state_file(
+    args: argparse.Namespace, *, context: RuntimeContext | None
+) -> Path:
+    if args.state_file is not None:
+        return Path(args.state_file).expanduser()
+    return DEFAULT_STATE_FILE if context is None else context.codex_state_file
+
+
+def run(
+    args: argparse.Namespace,
+    *,
+    stdin_text: str | None = None,
+    context: RuntimeContext | None = None,
+) -> dict[str, Any]:
     """Run one state-serialized Codex save transaction.
 
     The lock deliberately covers raw publication, not just the final JSON
     replace. A second Stop worker therefore reloads the committed cursor and
     cannot publish the same delta.
     """
-    state_file = Path(args.state_file).expanduser()
+    state_file = _resolve_state_file(args, context=context)
     session_hint = Path(args.session_file).expanduser() if args.session_file else Path(".")
     with save_transaction_lock(
         host="codex",
         session_file=session_hint,
         state_file=state_file,
     ):
-        first = _run_save_transaction(args, stdin_text=stdin_text)
+        first = _run_save_transaction(
+            args, stdin_text=stdin_text, context=context
+        )
         if (
             first.get("status") != "saved"
             or not args.save
@@ -1169,6 +1202,7 @@ def run(args: argparse.Namespace, *, stdin_text: str | None = None) -> dict[str,
             current = _run_save_transaction(
                 continuation_args,
                 stdin_text=stdin_text,
+                context=context,
             )
             if current.get("status") != "saved":
                 break
@@ -1190,7 +1224,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--cwd")
     parser.add_argument("--session-file")
     parser.add_argument("--sessions-root")
-    parser.add_argument("--state-file", default=str(DEFAULT_STATE_FILE))
+    parser.add_argument("--state-file")
     parser.add_argument("--model", default=DEFAULT_MEMORY_MODEL, help=argparse.SUPPRESS)
     parser.add_argument(
         "--reasoning-effort",

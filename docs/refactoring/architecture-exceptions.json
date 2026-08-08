@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "source_baseline_head": "d404a6b20d00e3bcd1d4cdb89edfa5a718c51833",
-  "baseline_sha256": "dd6e1a4577c4a83e7272bfa751e8833f509898830019ede7adf41515d5609ec6",
+  "baseline_sha256": "f520d67ed887bf5c2d583dbe1dc8ec93ca8ed1c4ebf6e8bd42cc31113cb8803b",
   "semantic_identity": "cross-domain edges use category+source_package+target_package; statement exceptions use category+source_package+source_module+scope_kind+scope+statement_kind+target_package+target_module+symbols+occurrence; source line is diagnostic and normalized statement content is verified independently",
   "counts": {
     "exceptions": 90,
@@ -1300,7 +1300,7 @@
           ],
           "content_sha256": "ebc360146a94ad056280bbf6d98d9f6e641566b09c2abd83a7011ad036aa2239",
           "occurrence": 1,
-          "line": 22
+          "line": 27
         },
         {
           "semantic_id": "arch:83bd80f31e208f8d1f6ab7909953d2ef6d8020ab5147f2edf3f85bdb5fc7e43c",
@@ -2537,22 +2537,6 @@
           "line": 510
         },
         {
-          "semantic_id": "arch:078f19253b4b2590505ced5257392c0718443b64a691cccefb6e19c20f7b9b94",
-          "source_module": "chronovisor.hosts.codex_record",
-          "scope_kind": "module",
-          "scope": "<module>",
-          "statement_kind": "from",
-          "target_module": "chronovisor.core.store",
-          "symbols": [
-            "CHRONOVISOR_ROOT",
-            "RAW_DIR",
-            "init_chronovisor"
-          ],
-          "content_sha256": "83ecf7d2c38f41ef1e1a350b603651ddb5fdd535cb7851aecf096bbc083fe7d3",
-          "occurrence": 1,
-          "line": 21
-        },
-        {
           "semantic_id": "arch:0a912fda5fc6d83b4ab107158e587a2b042d23d19c3dac87dd0f0d4372012b2c",
           "source_module": "chronovisor.hosts.cli",
           "scope_kind": "module",
@@ -2712,6 +2696,23 @@
           "content_sha256": "83ecf7d2c38f41ef1e1a350b603651ddb5fdd535cb7851aecf096bbc083fe7d3",
           "occurrence": 1,
           "line": 23
+        },
+        {
+          "semantic_id": "arch:a187b32955e3262437df1e8dd235b10c5ee5dbc090cb3a80ec5502f773c5bfe3",
+          "source_module": "chronovisor.hosts.codex_record",
+          "scope_kind": "module",
+          "scope": "<module>",
+          "statement_kind": "from",
+          "target_module": "chronovisor.core.store",
+          "symbols": [
+            "DEFAULT_CONTEXT",
+            "RAW_DIR",
+            "RuntimeContext",
+            "init_chronovisor"
+          ],
+          "content_sha256": "2cfe6ffa774c02c720fed19ccc7f6b1519de13da6d50cdf800b90d70e48ae95a",
+          "occurrence": 1,
+          "line": 21
         },
         {
           "semantic_id": "arch:a1aa1878698b017c7a4e3a9df78e63c8b6a56861bd442c653057fc85534c21c1",
@@ -4145,7 +4146,7 @@
           ],
           "content_sha256": "45f70c65cd81df266819f643084c56c2f8f13d40b8bb745d17b4a9ca41d48f60",
           "occurrence": 1,
-          "line": 51
+          "line": 56
         },
         {
           "semantic_id": "arch:d25071981c959d07ba8c01428861da30386f85a9e3efed273f7ffd90656e2c13",
@@ -4609,7 +4610,7 @@
           ],
           "content_sha256": "252da6db3da756255c65cc490066a41277f1b12af6fc7e32bf68cb93841a8cec",
           "occurrence": 1,
-          "line": 41
+          "line": 46
         },
         {
           "semantic_id": "arch:5b59c553e5646f532d691a4109ab356d242a1cb16931883a1db7d73c3ad6d75e",
@@ -4665,7 +4666,7 @@
           ],
           "content_sha256": "9bc3c3f6df9ca367ec66d19bdcd8343fe7b4b39a66bed89c286b3a8532ebc2b0",
           "occurrence": 1,
-          "line": 42
+          "line": 47
         },
         {
           "semantic_id": "arch:817dd49c4ecc27868437a8b714bc1257ebac6f031cbb67de7a714e678f9a74d5",
@@ -4755,7 +4756,7 @@
           ],
           "content_sha256": "bb2a262d532040b9e3c1154519d942a5d8b4efc4e96498e6e4f710660c03ccc7",
           "occurrence": 1,
-          "line": 43
+          "line": 48
         },
         {
           "semantic_id": "arch:ab9b7b4be78b11481edbfbcc17693ae523056a917355773cc7fe75e82ece9fe9",
