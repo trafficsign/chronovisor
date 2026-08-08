@@ -520,8 +520,8 @@ def _run_sleep_cycle(
         build_duplicate_review_queue,
         write_review_queue,
     )
+    from chronovisor.recall.recall_prefetch import build_prefetch_cache
     from chronovisor.search.cofire import build_cofire_graph
-    from chronovisor.search.prefetch import build_prefetch_cache
 
     try:
         per_lane_frontier = max(

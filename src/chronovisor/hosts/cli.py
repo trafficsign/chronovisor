@@ -1111,7 +1111,7 @@ def dispatch(args: argparse.Namespace) -> int:
             print(f"edges\t{public['edges']}")
         return 0
     if args.command == "prefetch":
-        from chronovisor.search.prefetch import build_prefetch_cache
+        from chronovisor.recall.recall_prefetch import build_prefetch_cache
 
         data = build_prefetch_cache(limit=max(1, args.limit), write=not args.no_write)
         public = {
