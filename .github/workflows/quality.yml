@@ -30,8 +30,10 @@ jobs:
         run: |
           uv run --frozen python scripts/architecture_baseline.py \
             --check docs/refactoring/architecture-baseline.json
+          uv run --frozen python scripts/runtime_state_ownership.py --check
           uv run --frozen pytest -q \
             tests/test_architecture_baseline.py \
+            tests/test_runtime_state_ownership.py \
             tests/test_large_function_policy.py \
             tests/test_module_layout.py \
             tests/test_refactor_inventory.py
