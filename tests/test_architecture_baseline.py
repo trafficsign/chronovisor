@@ -334,6 +334,15 @@ V_RETIRED_RECALL_SHIM_COMPATIBILITY_IDS = (
     "compat:3efe700f80c082597d4af026983c1fadd79d4c0cbbbd1109f23a96251691daa7",
     "compat:4bac6807f206d6657db39ba60a869a4ecbacf65c6cd2af1df9deb3c4b2163c51",
 )
+V_RETIRED_LEGACY_LAB_MAPPING_COMPATIBILITY_IDS = (
+    "compat:27f56632c3bfb92c49cfb4b327d182819391f77b9d9c44f93ddcbf67decc7590",
+    "compat:76601f39cc96c78c178adbf2c61bebe9ee2f9582cb842985ee46c300fadd3051",
+    "compat:7936848605442a0116711f31354cc81735149a7c90cf9e121c06e150547c780f",
+    "compat:7e43a7af9fa9ff98a8680c98ef04408c1d291741e8dd11852fe97d24bfe7edf4",
+    "compat:8ebf05539f0be5e179279af732b16ef31874fc8456938e69759bc61b7a8378e2",
+    "compat:b954e9d0edb6c01e40f0800b48aee5dd6d0671c7e4f0d59cbb69e2eb16e4dd85",
+    "compat:e6a5c64a3be799e9dd6399c67bd01937025053f0918c571d0590f7773d810924",
+)
 RETIREMENT_HISTORY = {
     "exception_semantic_ids": tuple(
         sorted(
@@ -406,7 +415,12 @@ RETIREMENT_HISTORY = {
         P4A_RETIRED_OPS_LAB_DYNAMIC_SITE_ID,
     ),
     "compatibility_semantic_ids": tuple(
-        sorted(V_RETIRED_RECALL_SHIM_COMPATIBILITY_IDS)
+        sorted(
+            (
+                *V_RETIRED_RECALL_SHIM_COMPATIBILITY_IDS,
+                *V_RETIRED_LEGACY_LAB_MAPPING_COMPATIBILITY_IDS,
+            )
+        )
     ),
 }
 
@@ -1105,7 +1119,7 @@ def test_current_exception_ledger_seed_and_schema_inventory_are_exact(
         "production_to_lab_edges": 0,
         "production_to_lab_static_sites": 0,
         "production_to_lab_dynamic_sites": 0,
-        "compatibility_contracts": 287,
+        "compatibility_contracts": 280,
     }
     assert counts["by_category"] == {
         "cross_domain_edge": 90,
@@ -1113,7 +1127,7 @@ def test_current_exception_ledger_seed_and_schema_inventory_are_exact(
     assert counts["compatibility_by_kind"] == {
         "console_entrypoint": 51,
         "lab_dispatch": 15,
-        "module_string": 221,
+        "module_string": 214,
     }
     assert counts["schema_manifest_implementation"] == {
         "background_decision_schemas": {"statements": 0, "symbols": 0},

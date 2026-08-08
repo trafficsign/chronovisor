@@ -1706,7 +1706,6 @@
       "compat:26308a9e85366f5fe08e94fe4c562b817137ce01043c793e69a1127b1b6d07a4",
       "compat:2743bb06e2366047a62bdf13574431f7966f175e89e5332270480f9d4a60a480",
       "compat:27ea3236a942fb828ba029389d9eee8adec95178d10b6362a055a6e82f8637cf",
-      "compat:27f56632c3bfb92c49cfb4b327d182819391f77b9d9c44f93ddcbf67decc7590",
       "compat:284655d94b212254ffc58dfa3294d043f9c8b42ca7ce40764b27c0e69bdb924b",
       "compat:288b854d930fea85e5d526800a1e8740fa041203e62b9967f6c3c448e4e19537",
       "compat:2973ea67f89b199a0e19de47d91ba0c8eb71203d9f3467cbf07917ae13881a1c",
@@ -1801,15 +1800,12 @@
       "compat:749ba7b1006fed305e277252ae84e5c928bbd4cc3680b31868b3100e2aa89165",
       "compat:750d7418712420802be82e8e7427ac1c5166af72ae4f2de052582894908a0bc3",
       "compat:750ea0c241e21c3a6b68977fe41f0ed37490cbd66e240918d0d90f24a623c8ca",
-      "compat:76601f39cc96c78c178adbf2c61bebe9ee2f9582cb842985ee46c300fadd3051",
       "compat:7714523ec16c932ec7b9a8994ad7806bb3ec2c3e62e0f71f65acfd9cc6b4441d",
       "compat:784d76c7da8f8cb86952456d809704a934aa269cd1f4d9368741ee8ba47a8f20",
       "compat:789c5d04cef008277ab6c8539261471044d80bf07b8e62e91e4df15d8d0f54d6",
       "compat:78c68ee2038f74da1e2a5b7b118dedae6cfe156b0187a4a37e0596af9467d681",
-      "compat:7936848605442a0116711f31354cc81735149a7c90cf9e121c06e150547c780f",
       "compat:793df23166eae81b17af60f350d6f871613fc22c4c41c8fa8c0b86aeb3fe466f",
       "compat:7befe29285a80db669b789959a4b873a6102d803bae23b97d806b6b07d733d46",
-      "compat:7e43a7af9fa9ff98a8680c98ef04408c1d291741e8dd11852fe97d24bfe7edf4",
       "compat:7e875d663c356a41d7ec671f8b2e5c8ba289d92210399e750bdd9c338955a2ef",
       "compat:809756dc2e6453c95830250d0993654f1965f62cfe7003cd0de19ce298495863",
       "compat:81cb1904bf3a7aec4baf2642ea5c5c1e01aee5204eabaaecfabf9eb1d66f346e",
@@ -1821,7 +1817,6 @@
       "compat:888ab4b589dce485c1836e5a8eb02dc7c06111f98733e209139aa052f0083a41",
       "compat:88fb2c847767aa763b3ca3819c9d1902b65c3e1ab796ed7c9a05893b4820ff34",
       "compat:8b3ad09fc391ffb2a71a441b8187292569961db74879ea80cf601c48d2a5e856",
-      "compat:8ebf05539f0be5e179279af732b16ef31874fc8456938e69759bc61b7a8378e2",
       "compat:90390a74544d04b144e537b13b791c3d5a029ac5e5222e9321bfd2c3ae15399c",
       "compat:909813e391f59aef65201f4cf85382fadee0b4880e889208a75134e3afc7553d",
       "compat:92efbda29ec81c886ec6190f08542a7b501e6354b58a544f29a9ac7d223ca823",
@@ -1873,7 +1868,6 @@
       "compat:b58eb4df41a2843b9f06954a550c0a5bcc075bce07bba0983da7d6cd45545063",
       "compat:b7f588c276f0920500ba5a2d01fd3f4a8bd3988b8dddd292dfea4ba303c25f29",
       "compat:b9404956bbba2abbf98bfb5be383164a8b25a8e64cae6d008231a57034427309",
-      "compat:b954e9d0edb6c01e40f0800b48aee5dd6d0671c7e4f0d59cbb69e2eb16e4dd85",
       "compat:b991e05f0150c4934c1d5b9b9d5fa26cdf32cfa1c2e79361a215c7f71a76587a",
       "compat:b9d5b91ddd20915bd7bd29c4b160cffefbfb128c720a400eb39cbb6779d4016f",
       "compat:ba484813fb927e843b9040141789bdb5679b976b40111b81107f1475b50efec8",
@@ -1919,7 +1913,6 @@
       "compat:e254f44ab14d270e8f1e83a7bfeb8a1f77e741921ccf329718fc7da453191623",
       "compat:e2c2cd0efc8aea94618f2246563f449ad64d0a0be8582009544f557dba444bb5",
       "compat:e64b7192d70a500732c57b16eb2a83b7920500f373d74dee136a4842bb909d6f",
-      "compat:e6a5c64a3be799e9dd6399c67bd01937025053f0918c571d0590f7773d810924",
       "compat:e8e3525247bf52854cd0a54acb65e65eebc26dc331965725a601e010b983a84f",
       "compat:e9c9297f6a15822e602fec7fc43dce3bbec0e9559d90739cffc75fddaac92563",
       "compat:ea141c3da11f416f6813126ed03632a34608e5cff35b27695c90d7a5556a7ca0",
@@ -1944,8 +1937,15 @@
       "compat:fe9ed08c5ee12265a69da1a40d52aba425e780392152d2ccf8cc9277d7eeba50"
     ],
     "retired": [
+      "compat:27f56632c3bfb92c49cfb4b327d182819391f77b9d9c44f93ddcbf67decc7590",
       "compat:3efe700f80c082597d4af026983c1fadd79d4c0cbbbd1109f23a96251691daa7",
-      "compat:4bac6807f206d6657db39ba60a869a4ecbacf65c6cd2af1df9deb3c4b2163c51"
+      "compat:4bac6807f206d6657db39ba60a869a4ecbacf65c6cd2af1df9deb3c4b2163c51",
+      "compat:76601f39cc96c78c178adbf2c61bebe9ee2f9582cb842985ee46c300fadd3051",
+      "compat:7936848605442a0116711f31354cc81735149a7c90cf9e121c06e150547c780f",
+      "compat:7e43a7af9fa9ff98a8680c98ef04408c1d291741e8dd11852fe97d24bfe7edf4",
+      "compat:8ebf05539f0be5e179279af732b16ef31874fc8456938e69759bc61b7a8378e2",
+      "compat:b954e9d0edb6c01e40f0800b48aee5dd6d0671c7e4f0d59cbb69e2eb16e4dd85",
+      "compat:e6a5c64a3be799e9dd6399c67bd01937025053f0918c571d0590f7773d810924"
     ]
   },
   "counts": {
@@ -1958,11 +1958,11 @@
       "production_to_lab_edges": 0,
       "production_to_lab_static_sites": 0,
       "production_to_lab_dynamic_sites": 0,
-      "compatibility_contracts": 287,
+      "compatibility_contracts": 280,
       "compatibility_by_kind": {
         "console_entrypoint": 51,
         "lab_dispatch": 15,
-        "module_string": 221
+        "module_string": 214
       },
       "schema_manifest_implementation": {
         "background_decision_schemas": {
@@ -1981,7 +1981,7 @@
       "production_to_lab_edge_semantic_ids": 5,
       "production_to_lab_static_site_semantic_ids": 20,
       "production_to_lab_dynamic_site_semantic_ids": 1,
-      "compatibility_semantic_ids": 2
+      "compatibility_semantic_ids": 9
     }
   }
 }

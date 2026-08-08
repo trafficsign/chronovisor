@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "source_baseline_head": "d404a6b20d00e3bcd1d4cdb89edfa5a718c51833",
-  "baseline_sha256": "64bd0e39a6a33769f458721e00048c431fb63767684b8d6ab35a5044395a7c43",
+  "baseline_sha256": "1143d6316de11d3898770dfd67f465b2b0bd6af5f2f281b099c8e7961f3ffa87",
   "semantic_identity": "cross-domain edges use category+source_package+target_package; statement exceptions use category+source_package+source_module+scope_kind+scope+statement_kind+target_package+target_module+symbols+occurrence; source line is diagnostic and normalized statement content is verified independently",
   "counts": {
     "exceptions": 90,
@@ -12,11 +12,11 @@
     "production_to_lab_edges": 0,
     "production_to_lab_static_sites": 0,
     "production_to_lab_dynamic_sites": 0,
-    "compatibility_contracts": 287,
+    "compatibility_contracts": 280,
     "compatibility_by_kind": {
       "console_entrypoint": 51,
       "lab_dispatch": 15,
-      "module_string": 221
+      "module_string": 214
     },
     "schema_manifest_implementation": {
       "background_decision_schemas": {
@@ -541,7 +541,7 @@
           ],
           "content_sha256": "df5060a4904f3cc0d766acab3c8d585c2f6687225e08d73b3ad99b9bca67591f",
           "occurrence": 1,
-          "line": 29
+          "line": 28
         },
         {
           "semantic_id": "arch:1cb67741efbfa2341d94de2621c7dcbc24d7c2a101320f56bb748297bd545e0b",
@@ -569,7 +569,7 @@
           ],
           "content_sha256": "95c593a6c2520b86380d8ccb0be036a31bb0713f9aad188c717f593d79fb9b03",
           "occurrence": 1,
-          "line": 28
+          "line": 27
         },
         {
           "semantic_id": "arch:423d4995a5000bcfec22082b0907a2eb91659589de6c62bde3183f18b59f0cda",
@@ -657,7 +657,7 @@
           ],
           "content_sha256": "39723adb5403c3c7ba5161a26d782458824f712fa0d5babafef2959af00e940f",
           "occurrence": 1,
-          "line": 32
+          "line": 31
         }
       ],
       "semantic_id": "arch:04f3596a6c0dc3acbc3d1ef4dcbb8eebedb2335764f44cd678a8188b1f10f90a",
@@ -19834,16 +19834,6 @@
       "rationale": "Retire after one mixed-version generation, zero observed legacy use, and a verified rollback target."
     },
     {
-      "kind": "module_string",
-      "name": "chronovisor.librarian_burn",
-      "target": "chronovisor.lab.librarian_burn",
-      "semantic_id": "compat:27f56632c3bfb92c49cfb4b327d182819391f77b9d9c44f93ddcbf67decc7590",
-      "owner": "chronovisor.core.module_paths",
-      "deadline": "2027-01-31",
-      "removal_campaign": "V",
-      "rationale": "Retire after one mixed-version generation, zero observed legacy use, and a verified rollback target."
-    },
-    {
       "kind": "console_entrypoint",
       "name": "chronovisor-librarian-release",
       "target": "chronovisor.librarian.librarian_release:main",
@@ -20784,16 +20774,6 @@
       "rationale": "Retire after one mixed-version generation, zero observed legacy use, and a verified rollback target."
     },
     {
-      "kind": "module_string",
-      "name": "chronovisor.classification_fixture_set",
-      "target": "chronovisor.lab.classification_fixture_set",
-      "semantic_id": "compat:76601f39cc96c78c178adbf2c61bebe9ee2f9582cb842985ee46c300fadd3051",
-      "owner": "chronovisor.core.module_paths",
-      "deadline": "2027-01-31",
-      "removal_campaign": "V",
-      "rationale": "Retire after one mixed-version generation, zero observed legacy use, and a verified rollback target."
-    },
-    {
       "kind": "console_entrypoint",
       "name": "chronovisor-burn-monitor",
       "target": "chronovisor.ops.burn_monitor:main",
@@ -20835,16 +20815,6 @@
     },
     {
       "kind": "module_string",
-      "name": "chronovisor.classification_migration",
-      "target": "chronovisor.lab.classification_migration",
-      "semantic_id": "compat:7936848605442a0116711f31354cc81735149a7c90cf9e121c06e150547c780f",
-      "owner": "chronovisor.core.module_paths",
-      "deadline": "2027-01-31",
-      "removal_campaign": "V",
-      "rationale": "Retire after one mixed-version generation, zero observed legacy use, and a verified rollback target."
-    },
-    {
-      "kind": "module_string",
       "name": "chronovisor.hubs",
       "target": "chronovisor.ops.hubs",
       "semantic_id": "compat:793df23166eae81b17af60f350d6f871613fc22c4c41c8fa8c0b86aeb3fe466f",
@@ -20858,16 +20828,6 @@
       "name": "chronovisor.librarian_rollout",
       "target": "chronovisor.librarian.librarian_rollout",
       "semantic_id": "compat:7befe29285a80db669b789959a4b873a6102d803bae23b97d806b6b07d733d46",
-      "owner": "chronovisor.core.module_paths",
-      "deadline": "2027-01-31",
-      "removal_campaign": "V",
-      "rationale": "Retire after one mixed-version generation, zero observed legacy use, and a verified rollback target."
-    },
-    {
-      "kind": "module_string",
-      "name": "chronovisor.local_model_eval",
-      "target": "chronovisor.lab.local_model_eval",
-      "semantic_id": "compat:7e43a7af9fa9ff98a8680c98ef04408c1d291741e8dd11852fe97d24bfe7edf4",
       "owner": "chronovisor.core.module_paths",
       "deadline": "2027-01-31",
       "removal_campaign": "V",
@@ -20978,16 +20938,6 @@
       "name": "chronovisor.classification_query2doc_unseen",
       "target": "chronovisor.lab.classification_query2doc_unseen",
       "semantic_id": "compat:8b3ad09fc391ffb2a71a441b8187292569961db74879ea80cf601c48d2a5e856",
-      "owner": "chronovisor.core.module_paths",
-      "deadline": "2027-01-31",
-      "removal_campaign": "V",
-      "rationale": "Retire after one mixed-version generation, zero observed legacy use, and a verified rollback target."
-    },
-    {
-      "kind": "module_string",
-      "name": "chronovisor.classification_library_evidence",
-      "target": "chronovisor.lab.classification_library_evidence",
-      "semantic_id": "compat:8ebf05539f0be5e179279af732b16ef31874fc8456938e69759bc61b7a8378e2",
       "owner": "chronovisor.core.module_paths",
       "deadline": "2027-01-31",
       "removal_campaign": "V",
@@ -21505,16 +21455,6 @@
     },
     {
       "kind": "module_string",
-      "name": "chronovisor.model_lab",
-      "target": "chronovisor.lab.model_lab",
-      "semantic_id": "compat:b954e9d0edb6c01e40f0800b48aee5dd6d0671c7e4f0d59cbb69e2eb16e4dd85",
-      "owner": "chronovisor.core.module_paths",
-      "deadline": "2027-01-31",
-      "removal_campaign": "V",
-      "rationale": "Retire after one mixed-version generation, zero observed legacy use, and a verified rollback target."
-    },
-    {
-      "kind": "module_string",
       "name": "chronovisor.deep_retrieval",
       "target": "chronovisor.research.deep_retrieval",
       "semantic_id": "compat:b991e05f0150c4934c1d5b9b9d5fa26cdf32cfa1c2e79361a215c7f71a76587a",
@@ -21959,16 +21899,6 @@
       "target": "chronovisor.recall.content_correction:main",
       "semantic_id": "compat:e64b7192d70a500732c57b16eb2a83b7920500f373d74dee136a4842bb909d6f",
       "owner": "chronovisor.recall.content_correction",
-      "deadline": "2027-01-31",
-      "removal_campaign": "V",
-      "rationale": "Retire after one mixed-version generation, zero observed legacy use, and a verified rollback target."
-    },
-    {
-      "kind": "module_string",
-      "name": "chronovisor.classification_calibration",
-      "target": "chronovisor.lab.classification_calibration",
-      "semantic_id": "compat:e6a5c64a3be799e9dd6399c67bd01937025053f0918c571d0590f7773d810924",
-      "owner": "chronovisor.core.module_paths",
       "deadline": "2027-01-31",
       "removal_campaign": "V",
       "rationale": "Retire after one mixed-version generation, zero observed legacy use, and a verified rollback target."
