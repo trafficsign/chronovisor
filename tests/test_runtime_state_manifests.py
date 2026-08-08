@@ -27,7 +27,8 @@ from scripts.runtime_ownership.manifests import (
 )
 
 ROOT = Path(__file__).resolve().parents[1]
-CURRENT_HEAD = "f90202f1d1b9b2ed44075f38b0668c91fc0f196f"
+SOURCE_REVISION = "f90202f1d1b9b2ed44075f38b0668c91fc0f196f"
+ANALYZER_REVISION = "35ac8a66fd1f2b4989fb5e652e7ff0dcbbcd1da4"
 TOOLCHAIN_PRECOMMIT_HEAD = "11e2acf77a53edf520e3cce5d2e5decd16cd06c5"
 
 
@@ -801,23 +802,24 @@ def test_real_repository_frozen_source_is_exactly_pinned() -> None:
     with pytest.raises(ManifestError, match="expected_revision"):
         build_manifest(
             ROOT,
-            CURRENT_HEAD,
+            SOURCE_REVISION,
             manifest_kind=SOURCE_MANIFEST_KIND,
             expected_revision=FROZEN_SOURCE_REVISION,
         )
 
 
-def test_real_head_canonical_source_and_analyzer_manifests() -> None:
-    assert resolve_full_revision(ROOT, CURRENT_HEAD) == CURRENT_HEAD
+def test_real_repository_canonical_source_and_current_analyzer_manifests() -> None:
+    assert resolve_full_revision(ROOT, SOURCE_REVISION) == SOURCE_REVISION
+    assert resolve_full_revision(ROOT, ANALYZER_REVISION) == ANALYZER_REVISION
     source = build_manifest(
         ROOT,
-        CURRENT_HEAD,
+        SOURCE_REVISION,
         manifest_kind=SOURCE_MANIFEST_KIND,
-        require_current_unchanged=True,
+        expected_revision=SOURCE_REVISION,
     )
     analyzer = build_manifest(
         ROOT,
-        CURRENT_HEAD,
+        ANALYZER_REVISION,
         manifest_kind=ANALYZER_MANIFEST_KIND,
         require_current_unchanged=True,
     )
@@ -829,12 +831,12 @@ def test_real_head_canonical_source_and_analyzer_manifests() -> None:
     assert source["manifest_sha256"] == (
         "268a6d8ca2fbd7d4877f78a3f5c6b14fd0e7e36d760173be9ce1a05e6703f43a"
     )
-    assert analyzer["counts"] == {"files": 15, "bytes": 556664}
+    assert analyzer["counts"] == {"files": 15, "bytes": 571292}
     assert analyzer["files_sha256"] == (
-        "4503080209a3a9632fe922afb2191974a6619a2f971b660c741d8b3978032b31"
+        "e14cbf81913232f133927980ffe70922a8b44095a8ff00bd7d05a205f23a6892"
     )
     assert analyzer["manifest_sha256"] == (
-        "74d6671eaf0ed4a6def71b28829bdbb7b4aa6392831d01beb2384dfe7b34948b"
+        "f3eae50ea10edbd39ab5fb3392007a04f736f48963318d469663b08f61f5149b"
     )
 
 

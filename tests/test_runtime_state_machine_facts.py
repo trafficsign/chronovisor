@@ -441,7 +441,7 @@ def test_exact_source_and_analyzer_manifests_are_separately_sealed() -> None:
         ANALYZER_MANIFEST_SHA256,
     )
     assert source["counts"] == {"files": 296, "bytes": 7_456_781}
-    assert analyzer["counts"] == {"files": 15, "bytes": 556_664}
+    assert analyzer["counts"] == {"files": 15, "bytes": 571_292}
 
 
 def test_precommit_toolchain_manifest_is_third_independent_seal(
@@ -1123,8 +1123,10 @@ def test_toolchain_cache_tamper_missing_commit_and_seal_confusion_fail_closed(
         validate_machine_fact_document(ROOT, missing_commit, adapter=adapter)
 
     wrong_existing_commit = copy.deepcopy(document)
-    wrong_existing_commit["toolchain_seal"]["revision"] = ANALYZER_REVISION
-    wrong_existing_commit["cache_key"]["toolchain_revision"] = ANALYZER_REVISION
+    wrong_existing_commit["toolchain_seal"]["revision"] = EFFECTIVE_SOURCE_REVISION
+    wrong_existing_commit["cache_key"]["toolchain_revision"] = (
+        EFFECTIVE_SOURCE_REVISION
+    )
     with pytest.raises(MachineFactError, match="verified Git commit"):
         validate_machine_fact_document(ROOT, wrong_existing_commit, adapter=adapter)
 
