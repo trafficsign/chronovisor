@@ -6,6 +6,7 @@
   if (root) root.CortexRuntime = api;
 })(typeof window === "undefined" ? globalThis : window, () => {
   const DEFAULT_SAMPLE_CAPACITY = 240;
+  const CAPTURE_WAVE_TRAVEL_END = 0.72;
   const GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5));
   const SPHERE_FOG_OPACITIES = Object.freeze([0.875, 0.625, 0.375, 0.2]);
 
@@ -21,6 +22,157 @@
       hash = Math.imul(hash, 16777619);
     }
     return (hash >>> 0) / 4294967295;
+  }
+
+  function smoothstep(value) {
+    const unit = clamp(value, 0, 1);
+    return unit * unit * (3 - 2 * unit);
+  }
+
+  function screenCross(origin, left, right) {
+    return (
+      (left.screenX - origin.screenX) * (right.screenY - origin.screenY)
+      - (left.screenY - origin.screenY) * (right.screenX - origin.screenX)
+    );
+  }
+
+  function convexHull(community) {
+    const { points, lowerHull: lower, upperHull: upper, hull } = community;
+    if (points.length < 3) return points;
+    points.sort(
+      (left, right) =>
+        left.screenX - right.screenX || left.screenY - right.screenY,
+    );
+    lower.length = 0;
+    for (let index = 0; index < points.length; index += 1) {
+      const point = points[index];
+      while (
+        lower.length >= 2
+        && screenCross(lower.at(-2), lower.at(-1), point) <= 0
+      ) {
+        lower.pop();
+      }
+      lower.push(point);
+    }
+    upper.length = 0;
+    for (let index = points.length - 1; index >= 0; index -= 1) {
+      const point = points[index];
+      while (
+        upper.length >= 2
+        && screenCross(upper.at(-2), upper.at(-1), point) <= 0
+      ) {
+        upper.pop();
+      }
+      upper.push(point);
+    }
+    lower.pop();
+    upper.pop();
+    hull.length = 0;
+    for (let index = 0; index < lower.length; index += 1) {
+      hull.push(lower[index]);
+    }
+    for (let index = 0; index < upper.length; index += 1) {
+      hull.push(upper[index]);
+    }
+    return hull;
+  }
+
+  function electricPathPoints(source, target, edgeId, seq, phase = 0) {
+    const dx = target.screenX - source.screenX;
+    const dy = target.screenY - source.screenY;
+    const length = Math.hypot(dx, dy) || 1;
+    const normalX = -dy / length;
+    const normalY = dx / length;
+    const pointCount = 10;
+    const jitterScale = Math.min(11, 3.5 + length * 0.018);
+    return Array.from({ length: pointCount }, (_value, pointIndex) => {
+      const unit = pointIndex / (pointCount - 1);
+      const envelope = Math.sin(Math.PI * unit);
+      const jitter =
+        (deterministicUnit(
+          edgeId,
+          seq * 131 + pointIndex * 31 + phase * 997,
+        ) - 0.5)
+        * jitterScale
+        * envelope;
+      return {
+        x: source.screenX + dx * unit + normalX * jitter,
+        y: source.screenY + dy * unit + normalY * jitter,
+      };
+    });
+  }
+
+  function electricPathPrefix(points, progress) {
+    const capped = clamp(progress, 0, 1);
+    if (!points.length || capped <= 0) return [];
+    if (capped >= 1) return points;
+    const scaled = capped * (points.length - 1);
+    const segment = Math.floor(scaled);
+    const partial = points.slice(0, segment + 1);
+    const unit = scaled - segment;
+    const start = points[segment];
+    const end = points[Math.min(points.length - 1, segment + 1)];
+    partial.push({
+      x: start.x + (end.x - start.x) * unit,
+      y: start.y + (end.y - start.y) * unit,
+    });
+    return partial;
+  }
+
+  function captureWaveState(progress, radius, staticMotion) {
+    if (staticMotion) {
+      return {
+        phase: "static",
+        waveRadius: radius * 0.56,
+        wavePeak: 0.72,
+      };
+    }
+    if (progress < CAPTURE_WAVE_TRAVEL_END) {
+      const travel = smoothstep(progress / CAPTURE_WAVE_TRAVEL_END);
+      return {
+        phase: "wave",
+        waveRadius: radius * (1 - travel),
+        wavePeak: 0.62 + Math.sin(travel * Math.PI) * 0.34,
+      };
+    }
+    return {
+      phase: "settle",
+      waveRadius: 0,
+      wavePeak: 0,
+    };
+  }
+
+  function captureHeartbeatPeak(progress) {
+    if (progress <= 0 || progress >= 1) return 0;
+    return Math.pow(Math.sin(progress * Math.PI), 0.78);
+  }
+
+  function captureHeartbeatAlpha(peak, fade) {
+    return clamp(fade, 0, 1) * peak * 0.46;
+  }
+
+  function greatestCommonDivisor(left, right) {
+    let a = Math.abs(Math.trunc(left));
+    let b = Math.abs(Math.trunc(right));
+    while (b) {
+      const remainder = a % b;
+      a = b;
+      b = remainder;
+    }
+    return a;
+  }
+
+  function captureWaveSampleStride(length, effect) {
+    if (length <= 1) return 1;
+    let stride = Math.max(
+      1,
+      Math.floor(
+        deterministicUnit(effect.captureId || effect.label, effect.seq * 59)
+        * length,
+      ) | 1,
+    );
+    while (greatestCommonDivisor(stride, length) !== 1) stride += 2;
+    return stride;
   }
 
   function normalizeLayoutMode(value) {
@@ -846,6 +998,12 @@
   }
 
   return {
+    CAPTURE_WAVE_TRAVEL_END,
+    captureHeartbeatAlpha,
+    captureHeartbeatPeak,
+    captureWaveSampleStride,
+    captureWaveState,
+    convexHull,
     createSphereTargets,
     createDurationRing,
     createCooldownWake,
@@ -856,6 +1014,8 @@
     createStageMetrics,
     deterministicUnit,
     drainExpiredPulses,
+    electricPathPoints,
+    electricPathPrefix,
     fibonacciSpherePoint,
     fitSphereCamera,
     measureSphereQuality,

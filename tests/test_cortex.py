@@ -1561,7 +1561,7 @@ def test_cortex_sphere_mode_dom_persistence_simulation_and_renderer_contract() -
     ]
     draw_typed_relations = script[
         script.index("function drawTypedRelations()") : script.index(
-            "function screenCross("
+            "function drawCommunityHulls()"
         )
     ]
     fit_view = script[
@@ -1638,6 +1638,8 @@ def test_cortex_sphere_mode_dom_persistence_simulation_and_renderer_contract() -
     assert "function fitSphereCamera(" in runtime_script
     assert "function sphereFogBand(" in runtime_script
     assert "function sphereFogOpacity(" in runtime_script
+    assert "function convexHull(" in runtime_script
+    assert "Runtime.convexHull(community)" in script
     # The established ORGANIC/CLUSTERS package-anchor handedness stays intact.
     assert "Math.PI * (1 + Math.sqrt(5)) * offset" in script
 
@@ -1655,7 +1657,7 @@ def test_cortex_staged_renderer_lazy_explorer_and_relation_detail_contract() -> 
     ]
     draw_relations = script[
         script.index("function drawTypedRelations()") : script.index(
-            "function screenCross("
+            "function drawCommunityHulls()"
         )
     ]
     draw_nodes = script[
@@ -1744,6 +1746,7 @@ def test_cortex_static_view_preserves_fable_layout_and_uses_live_data() -> None:
     html = (static / "cortex.html").read_text(encoding="utf-8")
     style = (static / "cortex.css").read_text(encoding="utf-8")
     script = (static / "cortex.js").read_text(encoding="utf-8")
+    runtime_script = (static / "cortex-runtime.js").read_text(encoding="utf-8")
     policy_script = (static / "cortex-transport-policy.js").read_text(
         encoding="utf-8"
     )
@@ -1810,7 +1813,8 @@ def test_cortex_static_view_preserves_fable_layout_and_uses_live_data() -> None:
     assert "connectProcessingActivity();" in script
     assert "function drawCaptureWaveTrain(" in script
     assert "function captureWaveGeometry(" in script
-    assert "function captureWaveState(" in script
+    assert "function captureWaveState(" in runtime_script
+    assert "Runtime.captureWaveState(" in script
     assert "function drawCaptureHeartbeat(" in script
     assert "function memoryStarGeometry(" in script
     assert "captureWaveDurationMs: 3600" in policy_script
@@ -1896,8 +1900,10 @@ def test_cortex_static_view_preserves_fable_layout_and_uses_live_data() -> None:
     assert "radius + (1 - progress) * 28" not in script
     assert "radius + progress * 18" not in script
     assert "radius + progress * 13" not in script
-    assert "function electricPathPoints(" in script
-    assert "function electricPathPrefix(" in script
+    assert "function electricPathPoints(" in runtime_script
+    assert "function electricPathPrefix(" in runtime_script
+    assert "Runtime.electricPathPoints(" in script
+    assert "Runtime.electricPathPrefix(" in script
     assert "function queueElectricPulse(" in script
     assert "function drawEdgeAfterglows(time)" in script
     assert "target.dataset.electricEdges" in script
@@ -1948,12 +1954,19 @@ def test_cortex_static_view_preserves_fable_layout_and_uses_live_data() -> None:
 
 def test_cortex_save_capture_uses_bounded_radial_wave_and_heartbeat() -> None:
     script = (dashboard.STATIC_DIR / "cortex.js").read_text(encoding="utf-8")
+    runtime_path = dashboard.STATIC_DIR / "cortex-runtime.js"
+    runtime_script = runtime_path.read_text(encoding="utf-8")
     policy_script = (
         dashboard.STATIC_DIR / "cortex-transport-policy.js"
     ).read_text(encoding="utf-8")
     capture_block = script[
         script.index("function captureWaveGeometry()") : script.index(
             "function ingestFormationCandidates(",
+        )
+    ]
+    capture_runtime_block = runtime_script[
+        runtime_script.index("function captureWaveState(") : runtime_script.index(
+            "function normalizeLayoutMode("
         )
     ]
 
@@ -1975,7 +1988,8 @@ def test_cortex_save_capture_uses_bounded_radial_wave_and_heartbeat() -> None:
     )
     assert front_opacity > tail_opacity
     assert front_padding > tail_padding
-    assert "const CAPTURE_WAVE_TRAVEL_END = 0.72;" in script
+    assert "const CAPTURE_WAVE_TRAVEL_END = 0.72;" in runtime_script
+    assert "Runtime.CAPTURE_WAVE_TRAVEL_END" in script
     assert "const CAPTURE_WAVE_MAX_VISIBLE = 4;" in script
     assert "const CAPTURE_WAVE_MIN_INTERVAL_MS = 420;" in script
     assert "const CAPTURE_HEARTBEAT_SETTLE_MS = 220;" in script
@@ -1988,21 +2002,22 @@ def test_cortex_save_capture_uses_bounded_radial_wave_and_heartbeat() -> None:
     assert "function drawCaptureWaveBand(" not in script
     assert "function drawCaptureWaveTrain(" in capture_block
     assert "function captureWaveNodeIntensity(" in capture_block
-    assert "function captureWaveSampleStride(" in capture_block
-    assert "greatestCommonDivisor(stride, length)" in capture_block
+    assert "function captureWaveSampleStride(" in capture_runtime_block
+    assert "greatestCommonDivisor(stride, length)" in capture_runtime_block
+    assert "Runtime.captureWaveSampleStride(" in capture_block
     assert "(start + offset * stride) % nodes.length" in capture_block
     assert "if (drawnNodes >= CAPTURE_WAVE_NODE_LIMIT) break;" in capture_block
     assert ".sort(" not in capture_block
     assert "function drawCaptureHeartbeat(" in capture_block
-    assert 'phase: "wave"' in capture_block
+    assert 'phase: "wave"' in capture_runtime_block
     assert 'cortexMetrics.capturePhase = "heartbeat";' in capture_block
-    assert 'phase: "settle"' in capture_block
-    settle_block = capture_block.split('phase: "settle"', 1)[1].split(
+    assert 'phase: "settle"' in capture_runtime_block
+    settle_block = capture_runtime_block.split('phase: "settle"', 1)[1].split(
         "function captureHeartbeatAlpha(", 1
     )[0]
     assert "wavePeak: 0" in settle_block
     assert "heartbeatPeak" not in settle_block
-    assert 'phase: "static"' in capture_block
+    assert 'phase: "static"' in capture_runtime_block
     assert "reducedMotion.matches || !motionEnabled" in capture_block
     assert "context.createRadialGradient" not in capture_block
     assert "context.stroke(" not in capture_block
@@ -2031,8 +2046,9 @@ def test_cortex_save_capture_uses_bounded_radial_wave_and_heartbeat() -> None:
     assert "const staticMotion = reducedMotion.matches || !motionEnabled;" in (
         capture_block
     )
-    assert "const peak = staticMotion ? 0.3 : captureHeartbeatPeak(progress);" in (
-        capture_block
+    assert (
+        "const peak = staticMotion ? 0.3 : Runtime.captureHeartbeatPeak(progress);"
+        in capture_block
     )
     assert "if (staticMotion && !captureHeartbeatBurst.wakeTimer)" in capture_block
     assert "motionEnabled\n      && !reducedMotion.matches" in capture_block
@@ -2124,7 +2140,7 @@ def test_cortex_save_capture_uses_bounded_radial_wave_and_heartbeat() -> None:
 
     geometry_source = script[
         script.index("function visibleMemoryNode(") : script.index(
-            "function captureWaveState(",
+            "function captureWaveNodeIntensity(",
         )
     ]
     geometry_scenario = f"""
@@ -2227,26 +2243,22 @@ process.stdout.write(JSON.stringify({{
     assert intensity_result["innerAtInwardFront"] == 1
     assert 0 < intensity_result["continuousInnerEdge"] < 0.000001
 
-    sampling_source = script[
-        script.index("function greatestCommonDivisor(") : script.index(
-            "function captureWaveNodeIntensity(",
-        )
-    ]
     sampling_scenario = f"""
-function deterministicUnit(value, salt) {{
-  let hash = 2166136261 ^ salt;
-  const text = String(value);
-  for (let index = 0; index < text.length; index += 1) {{
-    hash ^= text.charCodeAt(index);
-    hash = Math.imul(hash, 16777619);
+const Runtime = require({json.dumps(str(runtime_path))});
+function greatestCommonDivisor(left, right) {{
+  let a = Math.abs(Math.trunc(left));
+  let b = Math.abs(Math.trunc(right));
+  while (b) {{
+    const remainder = a % b;
+    a = b;
+    b = remainder;
   }}
-  return (hash >>> 0) / 4294967295;
+  return a;
 }}
-{sampling_source}
 const effect = {{ captureId: "capture-sampling", label: "SAVE", seq: 41 }};
 const results = Array.from({{ length: 63 }}, (_, offset) => {{
   const length = offset + 2;
-  const stride = captureWaveSampleStride(length, effect);
+  const stride = Runtime.captureWaveSampleStride(length, effect);
   const visited = new Set();
   for (let index = 0; index < length; index += 1) {{
     visited.add((index * stride) % length);
@@ -2272,37 +2284,27 @@ process.stdout.write(JSON.stringify(results));
 
 
 def test_cortex_capture_heartbeat_envelope_is_single_and_continuous() -> None:
-    script = (dashboard.STATIC_DIR / "cortex.js").read_text(encoding="utf-8")
-    state_source = script[
-        script.index("function captureWaveState(") : script.index(
-            "function greatestCommonDivisor(",
-        )
-    ]
+    runtime_path = dashboard.STATIC_DIR / "cortex-runtime.js"
     scenario = f"""
-const CAPTURE_WAVE_TRAVEL_END = 0.72;
-function clamp(value, minimum = 0, maximum = 1) {{
-  return Math.min(maximum, Math.max(minimum, value));
-}}
-function smoothstep(value) {{
-  const unit = clamp(value);
-  return unit * unit * (3 - 2 * unit);
-}}
-{state_source}
+const Runtime = require({json.dumps(str(runtime_path))});
 process.stdout.write(JSON.stringify({{
-  wave: captureWaveState(0.5, 100, false),
-  atCenter: captureWaveState(0.72, 100, false),
-  settle: captureWaveState(0.97, 100, false),
-  staticState: captureWaveState(0.5, 100, true),
-  peakStart: captureHeartbeatPeak(0),
-  peakMiddle: captureHeartbeatPeak(0.5),
-  peakBeforeEnd: captureHeartbeatPeak(0.999999),
-  peakEnd: captureHeartbeatPeak(1),
-  alphaZeroPeak: captureHeartbeatAlpha(0, 1),
-  alphaZeroFade: captureHeartbeatAlpha(1, 0),
-  alphaTiny: captureHeartbeatAlpha(0.000001, 1),
-  alphaFull: captureHeartbeatAlpha(1, 1),
-  beforeEndAlpha: captureHeartbeatAlpha(captureHeartbeatPeak(0.999999), 1),
-  atEndAlpha: captureHeartbeatAlpha(captureHeartbeatPeak(1), 1),
+  wave: Runtime.captureWaveState(0.5, 100, false),
+  atCenter: Runtime.captureWaveState(0.72, 100, false),
+  settle: Runtime.captureWaveState(0.97, 100, false),
+  staticState: Runtime.captureWaveState(0.5, 100, true),
+  peakStart: Runtime.captureHeartbeatPeak(0),
+  peakMiddle: Runtime.captureHeartbeatPeak(0.5),
+  peakBeforeEnd: Runtime.captureHeartbeatPeak(0.999999),
+  peakEnd: Runtime.captureHeartbeatPeak(1),
+  alphaZeroPeak: Runtime.captureHeartbeatAlpha(0, 1),
+  alphaZeroFade: Runtime.captureHeartbeatAlpha(1, 0),
+  alphaTiny: Runtime.captureHeartbeatAlpha(0.000001, 1),
+  alphaFull: Runtime.captureHeartbeatAlpha(1, 1),
+  beforeEndAlpha: Runtime.captureHeartbeatAlpha(
+    Runtime.captureHeartbeatPeak(0.999999),
+    1,
+  ),
+  atEndAlpha: Runtime.captureHeartbeatAlpha(Runtime.captureHeartbeatPeak(1), 1),
 }}));
 """
     completed = subprocess.run(
@@ -2334,6 +2336,7 @@ process.stdout.write(JSON.stringify({{
 def test_cortex_capture_wave_train_finishes_rapid_burst_without_revival() -> None:
     script = (dashboard.STATIC_DIR / "cortex.js").read_text(encoding="utf-8")
     policy_path = dashboard.STATIC_DIR / "cortex-transport-policy.js"
+    runtime_path = dashboard.STATIC_DIR / "cortex-runtime.js"
     admission_source = script[
         script.index("function scheduleCaptureHeartbeatWake(") : script.index(
             "function processingTargetNode(",
@@ -2349,10 +2352,10 @@ def test_cortex_capture_wave_train_finishes_rapid_burst_without_revival() -> Non
             "function drawCaptureEffects(",
         )
     ]
-    scenario = f"const policy = require({json.dumps(str(policy_path))});\n" + f"""
+    scenario = f"""
+const policy = require({json.dumps(str(policy_path))});
 const CAPTURE_WAVE_MAX_VISIBLE = 4;
 const CAPTURE_WAVE_MIN_INTERVAL_MS = 420;
-const CAPTURE_WAVE_TRAVEL_END = 0.72;
 const CAPTURE_HEARTBEAT_SETTLE_MS = 220;
 const CAPTURE_HEARTBEAT_DURATION_MS = 720;
 const captureWaveTrain = [];
@@ -2377,6 +2380,7 @@ const window = {{
   }},
   clearTimeout(id) {{ timers.delete(id); }},
 }};
+const Runtime = require({json.dumps(str(runtime_path))});
 const performance = {{ now: () => observedNow }};
 function invalidate(reason) {{ invalidations.push(reason); }}
 {admission_source}
@@ -2392,7 +2396,7 @@ for (let index = 0; index < 20; index += 1) {{
     seq: index + 1,
     startedAt: observedNow,
     duration: 3600,
-    arrivalAt: observedNow + 3600 * CAPTURE_WAVE_TRAVEL_END,
+    arrivalAt: observedNow + 3600 * Runtime.CAPTURE_WAVE_TRAVEL_END,
     coalescedCount: 1,
     paintedAt: 0,
   }};
@@ -2436,10 +2440,6 @@ const cortexMetrics = {{
 }};
 const reducedMotion = {{ matches: false }};
 let motionEnabled = true;
-function captureHeartbeatPeak(progress) {{
-  if (progress <= 0 || progress >= 1) return 0;
-  return Math.pow(Math.sin(progress * Math.PI), 0.78);
-}}
 function drawCaptureHeartbeat(_star, peak) {{ return peak > 0; }}
 {heartbeat_source}
 {heartbeat_work_source}

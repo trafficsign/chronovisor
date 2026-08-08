@@ -56,7 +56,6 @@
   const CAPTURE_WAVE_FRONT_GLOW_PADDING_PX = 5.5;
   const CAPTURE_WAVE_TAIL_GLOW_OPACITY = 0.66;
   const CAPTURE_WAVE_TAIL_GLOW_PADDING_PX = 3.6;
-  const CAPTURE_WAVE_TRAVEL_END = 0.72;
   const CAPTURE_HEARTBEAT_SETTLE_MS = 220;
   const CAPTURE_HEARTBEAT_DURATION_MS = 720;
   const EXPLORER_CHUNK_SIZE = 120;
@@ -2154,7 +2153,7 @@
       paintedAt: 0,
       coalescedCount: eventMultiplicity,
       latestCaptureId: String(event.capture_id || "").slice(0, 12),
-      arrivalAt: now + duration * CAPTURE_WAVE_TRAVEL_END,
+      arrivalAt: now + duration * Runtime.CAPTURE_WAVE_TRAVEL_END,
     };
     if (phase === "capture") {
       admitCaptureWave(effect, eventMultiplicity, now);
@@ -2407,54 +2406,6 @@
     context.restore();
   }
 
-  function screenCross(origin, left, right) {
-    return (
-      (left.screenX - origin.screenX) * (right.screenY - origin.screenY)
-      - (left.screenY - origin.screenY) * (right.screenX - origin.screenX)
-    );
-  }
-
-  function convexHull(community) {
-    const { points, lowerHull: lower, upperHull: upper, hull } = community;
-    if (points.length < 3) return points;
-    points.sort(
-      (left, right) =>
-        left.screenX - right.screenX || left.screenY - right.screenY,
-    );
-    lower.length = 0;
-    for (let index = 0; index < points.length; index += 1) {
-      const point = points[index];
-      while (
-        lower.length >= 2
-        && screenCross(lower.at(-2), lower.at(-1), point) <= 0
-      ) {
-        lower.pop();
-      }
-      lower.push(point);
-    }
-    upper.length = 0;
-    for (let index = points.length - 1; index >= 0; index -= 1) {
-      const point = points[index];
-      while (
-        upper.length >= 2
-        && screenCross(upper.at(-2), upper.at(-1), point) <= 0
-      ) {
-        upper.pop();
-      }
-      upper.push(point);
-    }
-    lower.pop();
-    upper.pop();
-    hull.length = 0;
-    for (let index = 0; index < lower.length; index += 1) {
-      hull.push(lower[index]);
-    }
-    for (let index = 0; index < upper.length; index += 1) {
-      hull.push(upper[index]);
-    }
-    return hull;
-  }
-
   function drawCommunityHulls() {
     if (!relationsVisible || camera.distance > 1900) return;
     communityHulls.forEach((community) => {
@@ -2467,7 +2418,7 @@
         }
       }
       if (points.length < 3) return;
-      const hull = convexHull(community);
+      const hull = Runtime.convexHull(community);
       if (hull.length < 3) return;
       context.save();
       context.beginPath();
@@ -2503,48 +2454,6 @@
       scale,
       viewDepth,
     };
-  }
-
-  function electricPathPoints(source, target, edgeId, seq, phase = 0) {
-    const dx = target.screenX - source.screenX;
-    const dy = target.screenY - source.screenY;
-    const length = Math.hypot(dx, dy) || 1;
-    const normalX = -dy / length;
-    const normalY = dx / length;
-    const pointCount = 10;
-    const jitterScale = Math.min(11, 3.5 + length * 0.018);
-    return Array.from({ length: pointCount }, (_value, pointIndex) => {
-      const unit = pointIndex / (pointCount - 1);
-      const envelope = Math.sin(Math.PI * unit);
-      const jitter =
-        (deterministicUnit(
-          edgeId,
-          seq * 131 + pointIndex * 31 + phase * 997,
-        ) - 0.5)
-        * jitterScale
-        * envelope;
-      return {
-        x: source.screenX + dx * unit + normalX * jitter,
-        y: source.screenY + dy * unit + normalY * jitter,
-      };
-    });
-  }
-
-  function electricPathPrefix(points, progress) {
-    const capped = clamp(progress);
-    if (!points.length || capped <= 0) return [];
-    if (capped >= 1) return points;
-    const scaled = capped * (points.length - 1);
-    const segment = Math.floor(scaled);
-    const partial = points.slice(0, segment + 1);
-    const unit = scaled - segment;
-    const start = points[segment];
-    const end = points[Math.min(points.length - 1, segment + 1)];
-    partial.push({
-      x: start.x + (end.x - start.x) * unit,
-      y: start.y + (end.y - start.y) * unit,
-    });
-    return partial;
   }
 
   function traceElectricPath(points) {
@@ -2613,7 +2522,7 @@
       const fade = (1 - smoothstep(progress)) * depthFade;
       const edgeId = `${source.id}>${target.id}:${link.edgeType || "field"}`;
       const phase = Math.floor((time - afterglow.startedAt) / 135);
-      const points = electricPathPoints(
+      const points = Runtime.electricPathPoints(
         source,
         target,
         edgeId,
@@ -2690,14 +2599,14 @@
       const normalY = dx / length;
       const depthFade = fog((source.viewDepth + target.viewDepth) / 2);
       const phase = Math.floor((time - pulse.startedAt) / 55);
-      const fullPath = electricPathPoints(
+      const fullPath = Runtime.electricPathPoints(
         source,
         target,
         edgeId,
         pulse.seq,
         phase,
       );
-      const energizedPath = electricPathPrefix(fullPath, progress);
+      const energizedPath = Runtime.electricPathPrefix(fullPath, progress);
       const head = energizedPath.at(-1) || fullPath[0];
       const intensity =
         (0.48 + pulse.delta * 0.52)
@@ -3061,7 +2970,7 @@
 
   function transportElectricPoints(source, target, effect, lane, time) {
     const phase = Math.floor((time - effect.startedAt) / 68);
-    return electricPathPoints(
+    return Runtime.electricPathPoints(
       { screenX: source.x, screenY: source.y },
       { screenX: target.x, screenY: target.y },
       `transport:${effect.phase}:${lane}:${effect.pageId || effect.captureId}`,
@@ -3078,7 +2987,7 @@
     outerWidth,
     innerWidth,
   ) {
-    const prefix = electricPathPrefix(points, progress);
+    const prefix = Runtime.electricPathPrefix(points, progress);
     const head = prefix.at(-1) || points[0];
     if (traceElectricPath(points)) {
       context.strokeStyle = rgba(color, intensity * 0.16);
@@ -3194,62 +3103,6 @@
     };
   }
 
-  function captureWaveState(progress, radius, staticMotion) {
-    if (staticMotion) {
-      return {
-        phase: "static",
-        waveRadius: radius * 0.56,
-        wavePeak: 0.72,
-      };
-    }
-    if (progress < CAPTURE_WAVE_TRAVEL_END) {
-      const travel = smoothstep(progress / CAPTURE_WAVE_TRAVEL_END);
-      return {
-        phase: "wave",
-        waveRadius: radius * (1 - travel),
-        wavePeak: 0.62 + Math.sin(travel * Math.PI) * 0.34,
-      };
-    }
-    return {
-      phase: "settle",
-      waveRadius: 0,
-      wavePeak: 0,
-    };
-  }
-
-  function captureHeartbeatPeak(progress) {
-    if (progress <= 0 || progress >= 1) return 0;
-    return Math.pow(Math.sin(progress * Math.PI), 0.78);
-  }
-
-  function captureHeartbeatAlpha(peak, fade) {
-    return clamp(fade) * peak * 0.46;
-  }
-
-  function greatestCommonDivisor(left, right) {
-    let a = Math.abs(Math.trunc(left));
-    let b = Math.abs(Math.trunc(right));
-    while (b) {
-      const remainder = a % b;
-      a = b;
-      b = remainder;
-    }
-    return a;
-  }
-
-  function captureWaveSampleStride(length, effect) {
-    if (length <= 1) return 1;
-    let stride = Math.max(
-      1,
-      Math.floor(
-        deterministicUnit(effect.captureId || effect.label, effect.seq * 59)
-        * length,
-      ) | 1,
-    );
-    while (greatestCommonDivisor(stride, length) !== 1) stride += 2;
-    return stride;
-  }
-
   function captureWaveNodeIntensity(
     distance,
     waveRadius,
@@ -3296,7 +3149,11 @@
     for (let index = 0; index < captureWaveTrain.length; index += 1) {
       const wave = captureWaveTrain[index];
       const progress = clamp((time - wave.startedAt) / wave.duration);
-      wave.frameState = captureWaveState(progress, star.radius, staticMotion);
+      wave.frameState = Runtime.captureWaveState(
+        progress,
+        star.radius,
+        staticMotion,
+      );
       wave.framePainted = false;
       wave.frameProgress = progress;
       if (!latestWave || wave.seq > latestWave.seq) latestWave = wave;
@@ -3321,7 +3178,10 @@
           * nodes.length,
         )
       : 0;
-    const stride = captureWaveSampleStride(nodes.length, captureWaveSampleEffect);
+    const stride = Runtime.captureWaveSampleStride(
+      nodes.length,
+      captureWaveSampleEffect,
+    );
     for (let offset = 0; offset < nodes.length; offset += 1) {
       if (drawnNodes >= CAPTURE_WAVE_NODE_LIMIT) break;
       const node = nodes[(start + offset * stride) % nodes.length];
@@ -3383,7 +3243,7 @@
   }
 
   function drawCaptureHeartbeat(star, peak, fade) {
-    const alpha = captureHeartbeatAlpha(peak, fade);
+    const alpha = Runtime.captureHeartbeatAlpha(peak, fade);
     if (alpha <= 0) return false;
     const glowSize = star.radius * (2.05 + peak * 0.38);
     context.globalAlpha = alpha;
@@ -3415,7 +3275,7 @@
       return false;
     }
     const staticMotion = reducedMotion.matches || !motionEnabled;
-    const peak = staticMotion ? 0.3 : captureHeartbeatPeak(progress);
+    const peak = staticMotion ? 0.3 : Runtime.captureHeartbeatPeak(progress);
     const painted = drawCaptureHeartbeat(star, peak, 1);
     captureHeartbeatBurst.painted ||= painted;
     if (staticMotion && !captureHeartbeatBurst.wakeTimer) {
