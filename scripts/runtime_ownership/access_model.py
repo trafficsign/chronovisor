@@ -62,7 +62,10 @@ class AnalysisNonConvergenceError(ValueError):
 
 @dataclass
 class AnalysisProgress:
-    """Mutable deterministic counters and work-throttled progress events."""
+    """Mutable deterministic counters and work-throttled progress events.
+
+    The callback is an observer only and must not re-enter analysis entrypoints.
+    """
 
     callback: Callable[[Mapping[str, object]], None] | None = None
     event_interval_work_units: int = 1024
@@ -80,6 +83,8 @@ class AnalysisProgress:
     events: list[dict[str, object]] = field(default_factory=list, init=False)
 
     def __post_init__(self) -> None:
+        if self.callback is not None and not callable(self.callback):
+            raise TypeError("callback must be callable or None")
         if (
             type(self.event_interval_work_units) is not int
             or self.event_interval_work_units < 1

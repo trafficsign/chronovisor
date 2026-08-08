@@ -488,8 +488,12 @@ def build_module_exports(
     limits: AnalysisLimits | None = None,
     progress: AnalysisProgress | None = None,
 ) -> ModuleExportTable:
-    resolved_limits = limits or AnalysisLimits()
-    resolved_progress = progress or AnalysisProgress()
+    resolved_limits = AnalysisLimits() if limits is None else limits
+    resolved_progress = AnalysisProgress() if progress is None else progress
+    if not isinstance(resolved_limits, AnalysisLimits):
+        raise TypeError("limits must be AnalysisLimits or None")
+    if not isinstance(resolved_progress, AnalysisProgress):
+        raise TypeError("progress must be AnalysisProgress or None")
     dependencies = _export_dependencies(
         trees,
         package_modules=package_modules,

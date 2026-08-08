@@ -33,6 +33,7 @@ from .access_model import (
     SUPPORTED_STDLIB_MODULES,
     UNRESOLVED_RUNTIME_OBJECT_ALTERNATIVE_TYPE,
     AnalysisLimits,
+    AnalysisNonConvergenceError,
     AnalysisProgress,
     DataclassInfo,
     FlowValue,
@@ -2158,8 +2159,8 @@ def discover_access_facts(
 ) -> dict[str, Any]:
     """Discover concrete access and fail-closed escape facts."""
 
-    resolved_limits = limits or AnalysisLimits()
-    resolved_progress = progress or AnalysisProgress()
+    resolved_limits = AnalysisLimits() if limits is None else limits
+    resolved_progress = AnalysisProgress() if progress is None else progress
     if not isinstance(resolved_limits, AnalysisLimits):
         raise TypeError("limits must be AnalysisLimits or None")
     if not isinstance(resolved_progress, AnalysisProgress):
@@ -2191,21 +2192,20 @@ def _default_optimize_gc() -> bool:
 
 @contextmanager
 def _scoped_gc_disabled() -> Iterator[None]:
-    """Disable cyclic GC during one run and restore process GC configuration."""
+    """Disable cyclic GC during one run and restore only its prior enabled state.
+
+    Threshold, debug, and callback changes made during the body, including by
+    other threads, are intentionally preserved so this helper does not clobber
+    unrelated process configuration.
+    """
 
     with _GC_OPTIMIZATION_LOCK:
         was_enabled = gc.isenabled()
-        thresholds = gc.get_threshold()
-        debug = gc.get_debug()
-        callbacks = tuple(gc.callbacks)
         if was_enabled:
             gc.disable()
         try:
             yield
         finally:
-            gc.set_threshold(*thresholds)
-            gc.set_debug(debug)
-            gc.callbacks[:] = callbacks
             if was_enabled:
                 gc.enable()
             else:
@@ -2214,6 +2214,7 @@ def _scoped_gc_disabled() -> Iterator[None]:
 
 __all__ = [
     "AnalysisLimits",
+    "AnalysisNonConvergenceError",
     "AnalysisProgress",
     "FlowValue",
     "FunctionInfo",

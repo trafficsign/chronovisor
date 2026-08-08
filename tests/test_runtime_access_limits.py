@@ -10,9 +10,13 @@ from typing import Any
 import pytest
 
 from scripts.runtime_ownership.access import (
+    AnalysisNonConvergenceError as PublicAnalysisNonConvergenceError,
+)
+from scripts.runtime_ownership.access import (
     _AccessAnalysis,
     discover_access_facts,
 )
+from scripts.runtime_ownership.access_imports import build_module_exports
 from scripts.runtime_ownership.access_model import (
     AnalysisLimits,
     AnalysisNonConvergenceError,
@@ -95,6 +99,46 @@ def test_progress_interval_requires_a_positive_exact_integer(invalid: object) ->
         match="event_interval_work_units must be a positive exact integer",
     ):
         AnalysisProgress(event_interval_work_units=invalid)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("invalid", [0, False, [], {}])
+@pytest.mark.parametrize("argument", ["limits", "progress"])
+def test_discover_rejects_falsey_invalid_analysis_controls(
+    argument: str,
+    invalid: object,
+) -> None:
+    with pytest.raises(TypeError, match=f"{argument} must be"):
+        discover_access_facts(  # type: ignore[arg-type]
+            {},
+            [],
+            **{argument: invalid},
+        )
+
+
+@pytest.mark.parametrize("invalid", [0, False, [], {}, object()])
+@pytest.mark.parametrize("argument", ["limits", "progress"])
+def test_build_module_exports_rejects_invalid_analysis_controls(
+    argument: str,
+    invalid: object,
+) -> None:
+    with pytest.raises(TypeError, match=f"{argument} must be"):
+        build_module_exports(  # type: ignore[arg-type]
+            {},
+            package_modules=frozenset(),
+            known_modules=frozenset(),
+            origin_symbols={},
+            **{argument: invalid},
+        )
+
+
+@pytest.mark.parametrize("invalid", [0, False, [], {}, object()])
+def test_progress_callback_must_be_callable_or_none(invalid: object) -> None:
+    with pytest.raises(TypeError, match="callback must be callable or None"):
+        AnalysisProgress(callback=invalid)  # type: ignore[arg-type]
+
+
+def test_nonconvergence_error_is_publicly_importable() -> None:
+    assert PublicAnalysisNonConvergenceError is AnalysisNonConvergenceError
 
 
 def test_module_export_limit_is_stable_before_limit_and_40_hops_take_43() -> None:
@@ -470,6 +514,55 @@ def test_gc_configuration_is_restored_after_success_and_error(
         assert gc.get_threshold() == expected_thresholds
         assert gc.get_debug() == expected_debug
         assert tuple(gc.callbacks) == expected_callbacks
+    finally:
+        gc.set_threshold(*original_thresholds)
+        gc.set_debug(original_debug)
+        gc.callbacks[:] = original_callbacks
+        if original_enabled:
+            gc.enable()
+        else:
+            gc.disable()
+
+
+def test_gc_scope_preserves_configuration_changes_from_progress_callback() -> None:
+    original_enabled = gc.isenabled()
+    original_thresholds = gc.get_threshold()
+    original_debug = gc.get_debug()
+    original_callbacks = tuple(gc.callbacks)
+    target_thresholds = tuple(value + 1 for value in original_thresholds)
+    target_debug = original_debug ^ gc.DEBUG_UNCOLLECTABLE
+    mutated = False
+
+    def gc_callback(_phase: str, _info: dict[str, int]) -> None:
+        return
+
+    target_callbacks = (*original_callbacks, gc_callback)
+
+    def observe(event: Mapping[str, object]) -> None:
+        nonlocal mutated
+        if mutated or event["phase"] != "outer":
+            return
+        gc.set_threshold(*target_thresholds)
+        gc.set_debug(target_debug)
+        gc.callbacks[:] = target_callbacks
+        mutated = True
+
+    try:
+        gc.enable()
+        _discover(
+            "from chronovisor.state import STATE_FILE\nSTATE_FILE.exists()\n",
+            progress=AnalysisProgress(
+                callback=observe,
+                event_interval_work_units=1,
+            ),
+            optimize_gc=True,
+        )
+
+        assert mutated
+        assert gc.isenabled()
+        assert gc.get_threshold() == target_thresholds
+        assert gc.get_debug() == target_debug
+        assert tuple(gc.callbacks) == target_callbacks
     finally:
         gc.set_threshold(*original_thresholds)
         gc.set_debug(original_debug)
