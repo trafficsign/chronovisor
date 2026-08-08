@@ -668,6 +668,19 @@ def test_resource_lease_reentry_and_upgrade_policy(tmp_path, monkeypatch) -> Non
     assert ollama.model_resource_lease_mode() is None
 
 
+def test_resource_lease_facade_uses_current_chronovisor_root(
+    tmp_path, monkeypatch
+) -> None:
+    root = tmp_path / "wiki"
+    monkeypatch.delenv("CHRONOVISOR_OLLAMA_RESOURCE_LOCK", raising=False)
+    monkeypatch.setattr(ollama, "CHRONOVISOR_ROOT", root)
+
+    with ollama.model_resource_lease(exclusive=False):
+        pass
+
+    assert (root / "runtime" / "ollama-resource.lock").is_file()
+
+
 def test_resource_lease_blocks_another_process(tmp_path, monkeypatch) -> None:
     lock_path = tmp_path / "resource.lock"
     ready_path = tmp_path / "ready"
