@@ -358,7 +358,7 @@ def test_teacher_commit_is_inactive_until_next_turn(
 def test_reviewed_negative_is_exact_idempotent_and_exactly_retractable(
     tmp_path: Path, monkeypatch
 ) -> None:
-    from chronovisor.recall import feedback_ledger
+    from chronovisor.search import feedback_ledger
 
     page = tmp_path / "page.md"
     page.write_text("bound page bytes", encoding="utf-8")
@@ -518,7 +518,7 @@ def test_reviewed_negative_is_exact_idempotent_and_exactly_retractable(
 def test_reviewed_negative_rejects_stale_page_binding(
     tmp_path: Path, monkeypatch
 ) -> None:
-    from chronovisor.recall import feedback_ledger
+    from chronovisor.search import feedback_ledger
 
     page = tmp_path / "page.md"
     page.write_text("current", encoding="utf-8")

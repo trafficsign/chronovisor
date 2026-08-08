@@ -7,11 +7,11 @@ import pytest
 
 from chronovisor.core.durable_state import write_sealed_json
 from chronovisor.recall import recall_label_factory
-from chronovisor.recall.feedback_ledger import feedback_row_sha256
 from chronovisor.recall.recall_label_factory import (
     assign_temporal_splits,
     build_label_ledger,
 )
+from chronovisor.search.feedback_ledger import feedback_row_sha256
 
 
 def write_rows(path, rows) -> None:

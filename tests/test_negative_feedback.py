@@ -9,8 +9,8 @@ from chronovisor.core.runtime_config import (
     NegativeFeedbackConfig,
     load_negative_feedback_config,
 )
-from chronovisor.recall import feedback_ledger, negative_feedback
-from chronovisor.recall.feedback_ledger import (
+from chronovisor.search import feedback_ledger, negative_feedback
+from chronovisor.search.feedback_ledger import (
     active_feedback_rows,
     feedback_row_sha256,
 )

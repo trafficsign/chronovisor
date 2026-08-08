@@ -16,8 +16,8 @@ from chronovisor.decision.decision_router import canonical_agreement_signature
 from chronovisor.decision.decision_schema_manifest import production_decision_schemas
 from chronovisor.ops import golden_expand
 from chronovisor.ops.convergence import CycleBudget
-from chronovisor.recall.feedback_ledger import feedback_row_sha256
 from chronovisor.search import search_eval
+from chronovisor.search.feedback_ledger import feedback_row_sha256
 from chronovisor.search.reranker import RerankOutcome
 from chronovisor.search.search import ScoredPage
 

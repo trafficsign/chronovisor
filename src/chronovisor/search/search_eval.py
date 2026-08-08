@@ -36,8 +36,8 @@ from chronovisor.decision import decision_authority
 from chronovisor.decision.decision_schema_manifest import FRONTIER_LABEL_SCHEMA
 from chronovisor.ingest.page_mutation import decision_authority_lock
 from chronovisor.ops.convergence import is_human_required_result
-from chronovisor.recall.feedback_ledger import active_feedback_rows
-from chronovisor.recall.negative_feedback import apply_penalties, penalties_for_query
+from chronovisor.search.feedback_ledger import active_feedback_rows
+from chronovisor.search.negative_feedback import apply_penalties, penalties_for_query
 from chronovisor.search.pipeline import (
     PipelineConfig,
     PipelineDependencies,

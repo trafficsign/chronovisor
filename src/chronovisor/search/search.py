@@ -29,8 +29,8 @@ from chronovisor.core.store import (
     all_pages,
     page_id_from_path,
 )
-from chronovisor.recall.negative_feedback import apply_penalties, penalties_for_query
 from chronovisor.search.lexical_index import LexicalIndex
+from chronovisor.search.negative_feedback import apply_penalties, penalties_for_query
 from chronovisor.search.pipeline import (
     PipelineDependencies,
     production_pipeline_config,

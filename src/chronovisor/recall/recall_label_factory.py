@@ -14,9 +14,9 @@ from typing import Any
 from chronovisor.core.link_fix import atomic_write
 from chronovisor.core.store import CHRONOVISOR_ROOT
 from chronovisor.recall.evidence_certificate import CERTIFICATE_LEDGER
-from chronovisor.recall.feedback_ledger import trusted_negative_feedback_rows
 from chronovisor.recall.recall_answer_eval import validate_answer_outcome_artifact
 from chronovisor.recall.recall_log_schema import join_used_recall_episodes
+from chronovisor.search.feedback_ledger import trusted_negative_feedback_rows
 
 LABEL_LEDGER = CHRONOVISOR_ROOT / "runtime" / "recall-labels" / "ledger.jsonl"
 RELATION_RECEIPT_LEDGER = (

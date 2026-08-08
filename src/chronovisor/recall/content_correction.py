@@ -64,12 +64,6 @@ from chronovisor.ops.convergence import (
     stable_item_key,
 )
 from chronovisor.recall.claims import rebuild_claim_index
-from chronovisor.recall.feedback_ledger import (
-    PAGE_IGNORED_RETRACTION_KIND,
-    feedback_row_sha256,
-    read_jsonl_rows,
-    retracted_page_ignored_targets,
-)
 from chronovisor.recall.recall_auditor import (
     TurnContext,
     hook_hints_for_host,
@@ -89,6 +83,12 @@ from chronovisor.recall.recall_runtime import (
 from chronovisor.research.evidence_grounding import (
     ProtectedLiteralGroundingError,
     validate_protected_literals,
+)
+from chronovisor.search.feedback_ledger import (
+    PAGE_IGNORED_RETRACTION_KIND,
+    feedback_row_sha256,
+    read_jsonl_rows,
+    retracted_page_ignored_targets,
 )
 
 PROJECT_ROOT = runtime_repo_root()

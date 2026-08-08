@@ -11,10 +11,6 @@ from pathlib import Path
 from typing import Any
 
 from chronovisor.core.store import CHRONOVISOR_ROOT, find_page
-from chronovisor.recall.feedback_ledger import (
-    feedback_row_sha256,
-    trusted_negative_feedback_rows,
-)
 from chronovisor.recall.recall_answer_eval import (
     TRAIN_ANSWER_EVAL_ARTIFACT,
     validate_answer_outcome_artifact,
@@ -27,6 +23,10 @@ from chronovisor.recall.recall_log_schema import (
 )
 from chronovisor.recall.recall_runtime_paths import RECALL_DIR
 from chronovisor.search.cofire import COFIRE_FILE
+from chronovisor.search.feedback_ledger import (
+    feedback_row_sha256,
+    trusted_negative_feedback_rows,
+)
 
 RECALL_LOG_FILE = RECALL_DIR / "recall-log.jsonl"
 RECALL_PULL_LOG_FILE = RECALL_DIR / "pull-log.jsonl"

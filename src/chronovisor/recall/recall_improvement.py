@@ -32,7 +32,6 @@ from chronovisor.decision.local_structured import (
 )
 from chronovisor.ingest.page_mutation import decision_authority_lock
 from chronovisor.ops.runtime_status import safe_append_event, safe_append_metric
-from chronovisor.recall.feedback_ledger import active_feedback_rows
 from chronovisor.recall.recall_eval import (
     RecallExample,
     build_dataset,
@@ -63,6 +62,7 @@ from chronovisor.recall.recall_runtime import (
     RecallPolicy,
     load_policy,
 )
+from chronovisor.search.feedback_ledger import active_feedback_rows
 
 DEFAULT_IMPROVEMENT_MODELS = (
     "maxwell1500/ornith-35b:Q5_K_M",

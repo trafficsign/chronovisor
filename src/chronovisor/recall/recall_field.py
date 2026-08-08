@@ -15,11 +15,6 @@ from typing import Any
 from chronovisor.core.durable_state import sidecar_exclusive_lock
 from chronovisor.core.jsonl_write import append_jsonl_durable
 from chronovisor.core.store import CHRONOVISOR_ROOT
-from chronovisor.recall.feedback_ledger import (
-    feedback_row_sha256,
-    read_jsonl_rows,
-    trusted_negative_feedback_row_error,
-)
 from chronovisor.recall.recall_field_schema import (
     ActivationNode,
     FieldEvent,
@@ -32,6 +27,11 @@ from chronovisor.recall.recall_field_schema import (
     topic_transition,
 )
 from chronovisor.recall.recall_field_store import RecallFieldStore
+from chronovisor.search.feedback_ledger import (
+    feedback_row_sha256,
+    read_jsonl_rows,
+    trusted_negative_feedback_row_error,
+)
 from chronovisor.search.graph_edges import typed_neighbors
 from chronovisor.search.index_store import get_store
 
