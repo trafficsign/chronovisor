@@ -56,6 +56,25 @@ from chronovisor.ingest.ingest import (  # noqa: E402
 )
 
 
+def _truncation_retry_system_prompt(
+    system_prompt: str,
+    op_type: str,
+    filename: str,
+    target_tokens: int,
+) -> str:
+    expected_wrapper = "NEW" if op_type == "create" else "UPDATE"
+    return (
+        system_prompt
+        + "\n\nHIGH-PRIORITY OUTPUT-TRUNCATION REPLACEMENT RULES:\n"
+        + "- Return a shorter complete replacement within "
+        + f"{target_tokens} output tokens.\n"
+        + "- Start with exactly "
+        + f"`=== {expected_wrapper} PAGE: {filename} ===`.\n"
+        + "- Finish with the exact final line "
+        + "`=== END PAGE ===`; never omit the end marker.\n"
+    )
+
+
 def generate_one(
     op: dict,
     raw_content: str,
@@ -79,7 +98,6 @@ def generate_one(
     if _supports_keyword(_runtime()._build_focused_context, "max_bytes"):
         context_kwargs["max_bytes"] = config.max_related_context_bytes
     context = _build_focused_context(op, raw_content, **context_kwargs)
-
     op_type = op.get("type", "create").lower()
     if op_type not in ("create", "update"):
         op_type = "create"
@@ -87,7 +105,6 @@ def generate_one(
     summary = op.get("summary", "")
     title = op.get("title", "")
     current_date = date.today().isoformat()
-
     feedback_block = ""
     if frontier_feedback:
         feedback_block = f"""
@@ -112,7 +129,6 @@ not explicit in the raw evidence.
         feedback_block=feedback_block,
         current_date=current_date,
     )
-
     full_system_prompt = (
         UPDATE_SYSTEM_PROMPT if op_type == "update" else GENERATE_SYSTEM_PROMPT
     )
@@ -332,19 +348,8 @@ not explicit in the raw evidence.
                                 filename=filename,
                                 max_output_tokens=target_tokens,
                             )
-                            expected_wrapper = (
-                                "NEW" if op_type == "create" else "UPDATE"
-                            )
-                            generate_kwargs["system"] = (
-                                system_prompt
-                                + "\n\nHIGH-PRIORITY OUTPUT-TRUNCATION "
-                                + "REPLACEMENT RULES:\n"
-                                + "- Return a shorter complete replacement within "
-                                + f"{target_tokens} output tokens.\n"
-                                + "- Start with exactly "
-                                + f"`=== {expected_wrapper} PAGE: {filename} ===`.\n"
-                                + "- Finish with the exact final line "
-                                + "`=== END PAGE ===`; never omit the end marker.\n"
+                            generate_kwargs["system"] = _truncation_retry_system_prompt(
+                                system_prompt, op_type, filename, target_tokens
                             )
                             messages = [
                                 {"role": "user", "content": prompt},
