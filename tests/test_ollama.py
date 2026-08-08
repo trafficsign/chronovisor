@@ -13,8 +13,8 @@ from contextlib import contextmanager
 import httpx
 import pytest
 
-from chronovisor.core import ollama, ollama_calibration
-from chronovisor.core.runtime_config import IngestConfig
+from chronovisor.core import ollama, ollama_calibration, ollama_transport
+from chronovisor.core.runtime_config import EmbeddingConfig, IngestConfig
 
 
 class _StreamResponse:
@@ -226,6 +226,12 @@ def test_triage_prompt_requires_filename_for_updates() -> None:
     assert "when no existing folder fits" in ollama.TRIAGE_SYSTEM_PROMPT
 
 
+def test_transport_public_types_are_facade_aliases() -> None:
+    assert ollama.OutputTooLargeError is ollama_transport.OutputTooLargeError
+    assert ollama.ChatResponse is ollama_transport.ChatResponse
+    assert ollama.GenerateResponse is ollama_transport.GenerateResponse
+
+
 def test_http_error_preserves_ollama_response_detail() -> None:
     request = httpx.Request("POST", "http://localhost:11434/api/generate")
     response = httpx.Response(
@@ -247,6 +253,27 @@ def test_http_error_preserves_ollama_response_detail() -> None:
         ),
     ):
         ollama._raise_for_status_with_detail(response)
+
+
+def test_is_available_uses_facade_health_cache_ttl(monkeypatch) -> None:
+    class AvailableResponse:
+        status_code = 200
+
+    class AvailableClient:
+        def get(self, path: str, *, timeout: object) -> AvailableResponse:
+            assert path == "/api/tags"
+            assert timeout == 3
+            return AvailableResponse()
+
+    monkeypatch.setattr(
+        ollama_transport,
+        "_health_cache",
+        {"status": False, "checked_at": time.time()},
+    )
+    monkeypatch.setattr(ollama, "HEALTH_CACHE_TTL", 0)
+    monkeypatch.setattr(ollama, "_client", lambda: AvailableClient())
+
+    assert ollama.is_available() is True
 
 
 def test_generation_prompts_forbid_invented_dates() -> None:
@@ -621,6 +648,19 @@ def test_embed_uses_explicit_model(monkeypatch) -> None:
 
     assert ollama.embed(["hello"], model="bge-m3") == [[1.0, 2.0]]
     assert client.payload["model"] == "bge-m3"
+
+
+def test_embed_uses_facade_embedding_config(monkeypatch) -> None:
+    client = _PostClient()
+    monkeypatch.setattr(ollama, "_client", lambda: client)
+    monkeypatch.setattr(
+        ollama,
+        "load_embedding_config",
+        lambda: EmbeddingConfig(model="configured-embed"),
+    )
+
+    assert ollama.embed(["hello"]) == [[1.0, 2.0]]
+    assert client.payload["model"] == "configured-embed"
 
 
 def test_embed_uses_remaining_recall_timeout(monkeypatch) -> None:
