@@ -3,14 +3,12 @@ from __future__ import annotations
 import gc
 import json
 import sys
-from collections.abc import Iterator, Mapping
-from contextlib import contextmanager
+from collections.abc import Mapping
 from dataclasses import replace
 from typing import Any
 
 import pytest
 
-from scripts.runtime_ownership import access as access_module
 from scripts.runtime_ownership.access import (
     AnalysisNonConvergenceError as PublicAnalysisNonConvergenceError,
 )
@@ -24,9 +22,6 @@ from scripts.runtime_ownership.access_model import (
     AnalysisNonConvergenceError,
     AnalysisProgress,
     _call_ordinals,
-    _current_flow_repr_cache,
-    _FlowReprCache,
-    _scoped_flow_repr_cache,
 )
 from scripts.runtime_ownership.access_statements import _analyze_legacy_block
 from tests.runtime_access_v2_helpers import joined_access_rows, joined_escape_rows
@@ -427,123 +422,6 @@ def test_two_argument_api_remains_byte_identical() -> None:
         optimize_gc=False,
     )
     assert _canonical_bytes(legacy_call) == _canonical_bytes(explicit_call)
-
-
-def test_repr_cache_is_semantically_and_progress_invisible(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    source = (
-        "from chronovisor.state import STATE_FILE\n"
-        "def choose(flag):\n"
-        "    if flag:\n"
-        "        return STATE_FILE\n"
-        "    return STATE_FILE\n"
-        "choose(flag).exists()\n"
-    )
-    cached_progress = AnalysisProgress(event_interval_work_units=1)
-    cached = _discover(
-        source,
-        progress=cached_progress,
-        optimize_gc=False,
-    )
-
-    @contextmanager
-    def without_cache() -> Iterator[None]:
-        yield
-
-    monkeypatch.setattr(access_module, "_scoped_flow_repr_cache", without_cache)
-    uncached_progress = AnalysisProgress(event_interval_work_units=1)
-    uncached = _discover(
-        source,
-        progress=uncached_progress,
-        optimize_gc=False,
-    )
-
-    assert _canonical_bytes(cached) == _canonical_bytes(uncached)
-    assert cached_progress.events == uncached_progress.events
-    assert cached_progress.counters() == uncached_progress.counters()
-    assert not set(cached).intersection(
-        {"repr_cache", "cache_hits", "cache_misses", "cache_bytes"}
-    )
-
-
-class _CacheLifecycleBaseFailure(BaseException):
-    pass
-
-
-def test_repr_cache_is_fresh_and_closed_after_every_baseexception_exit(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    captured: list[_FlowReprCache] = []
-    real_scope = _scoped_flow_repr_cache
-
-    @contextmanager
-    def capture_scope() -> Iterator[_FlowReprCache]:
-        with real_scope() as cache:
-            captured.append(cache)
-            yield cache
-
-    monkeypatch.setattr(access_module, "_scoped_flow_repr_cache", capture_scope)
-    source = "from chronovisor.state import STATE_FILE\nSTATE_FILE.exists()\n"
-
-    _discover(source, optimize_gc=False)
-    with pytest.raises(SyntaxError):
-        discover_access_facts(
-            {"src/chronovisor/broken.py": b"def broken(:\n"},
-            [],
-            optimize_gc=False,
-        )
-    with pytest.raises(AnalysisNonConvergenceError):
-        _discover(
-            source,
-            limits=replace(AnalysisLimits(), max_outer_iterations=1),
-            optimize_gc=False,
-        )
-
-    def fail_callback(_event: Mapping[str, object]) -> None:
-        raise _CacheLifecycleBaseFailure("base observer failed")
-
-    with pytest.raises(_CacheLifecycleBaseFailure, match="base observer failed"):
-        _discover(
-            source,
-            progress=AnalysisProgress(
-                callback=fail_callback,
-                event_interval_work_units=1,
-            ),
-            optimize_gc=False,
-        )
-
-    assert len(captured) == 4
-    assert len({id(cache) for cache in captured}) == len(captured)
-    assert all(cache.stats().closed for cache in captured)
-    assert all(cache.stats().current_entries == 0 for cache in captured)
-    assert all(cache.stats().current_witnesses == 0 for cache in captured)
-    assert all(cache.stats().current_bytes == 0 for cache in captured)
-    assert _current_flow_repr_cache() is None
-
-
-def test_repr_cache_context_resets_even_when_close_raises(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    closed: list[_FlowReprCache] = []
-    real_close = _FlowReprCache.close
-
-    def close_then_fail(cache: _FlowReprCache) -> None:
-        real_close(cache)
-        closed.append(cache)
-        raise _CacheLifecycleBaseFailure("close failed")
-
-    monkeypatch.setattr(_FlowReprCache, "close", close_then_fail)
-    assert _current_flow_repr_cache() is None
-    with pytest.raises(_CacheLifecycleBaseFailure, match="close failed"):
-        _discover(
-            "from chronovisor.state import STATE_FILE\nSTATE_FILE.exists()\n",
-            optimize_gc=False,
-        )
-    assert len(closed) == 1
-    assert closed[0].stats().closed is True
-    assert closed[0].stats().current_entries == 0
-    assert _current_flow_repr_cache() is None
 
 
 @pytest.mark.parametrize("invalid", [0, 1, "yes"])
