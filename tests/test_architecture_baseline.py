@@ -270,6 +270,27 @@ R3_RETIRED_READ_BACK_SITE_IDS = (
     "arch:9ca182f482eb669a841a1d7963941f0db3fd0ce8ce40a6bb504ae808a94c7359",
     "arch:fb1c4ba11f65e136b046580b21bfa48ecbaf284c3127c14bafdbbeafe73c04f2",
 )
+R4_RETIRED_ROUTINE_REVIEW_SITE_IDS = (
+    "arch:21249548ec49a61a193676dcd02608d2f3ed5484e2afe94139d14d8007d4464c",
+    "arch:2b0ea53e6a2688814cf77568739df0a8fd5b2e45c4cc8febe56219beade13da6",
+    "arch:396a2038ad4bc5fc265d4396c9e3faf0be363b297ba6115c133eb6d4628a35f3",
+    "arch:66f538a6432ca0eeae8f75f61356f3fde522871a47352401b229e15a3a768c89",
+    "arch:76a317ad927e3d5f5b571d22c7d88ab5e31e6f5ac164e03bab83c6e19069ca97",
+    "arch:78cccbf0b14f6d2a62dd8d0dd6ea0395630cb3ee07f189abd7d93d25474582b6",
+    "arch:848ba8e26d052a1a02586472f39059e49d7c2107988c596389e241580be989d1",
+    "arch:8582ce2f763f23faf24cf6caccfdab7c250da0710fa0cb0541ea05ffbae36f0f",
+    "arch:919b6a8be06d3c778c5258a9e4f0b2fd82de7c44b21fc0c8bfd8497c62bcd068",
+    "arch:a02fe27ee53b83fb3a8aae6d01ea0383eb33851ed3f9b51c48b3713b8716e45a",
+    "arch:a7d6c2e592b64acb06b900bbac5ca5712577639eafa7bc95ac9429130032fff1",
+    "arch:b588ec35b758ad0dcba3f625d67293812e2e5bef7eeb558f9d362241e09871b8",
+    "arch:bc7ca22c6d4590c243dee1ac25dd39cc2c87d789686cb7751fd0bc19eeebaab0",
+    "arch:cf411151eae4a30c69ea344e63655577d1cce073c0f24a8c246a2b19acadcd53",
+    "arch:cfdbfcff38abdc49e8631e2c6af6acae0b1d89958c98b3c8194fe97853f3be1b",
+    "arch:db3e20561f2a5aac64bc0f1f1c37e07aa1509639a76d36489ad1e3f9da09980e",
+    "arch:ddeaa9d96c4795a9a58c1973fb89ed5483865a641e9733ed76a806a3a9eca999",
+    "arch:ef6f56ffd387d3538cc9e04112ef37bf646ff2f5fb35e4f76a19f6a58d8d5940",
+    "arch:fb2f2abe1096e870dad5228173f4a70708e242d0f6f19853d4525c1e7c42080e",
+)
 RETIREMENT_HISTORY = {
     "exception_semantic_ids": tuple(
         sorted(
@@ -306,6 +327,7 @@ RETIREMENT_HISTORY = {
                 Q_RETIRED_CLAUDE_CODE_STORE_SITE_ID,
                 *R_RETIRED_PUBLICATION_SITE_IDS,
                 *R3_RETIRED_READ_BACK_SITE_IDS,
+                *R4_RETIRED_ROUTINE_REVIEW_SITE_IDS,
             )
         )
     ),
