@@ -19,7 +19,7 @@ import tempfile
 import time
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -61,6 +61,7 @@ from chronovisor.decision.decision_router import (
     DecisionRouter,
     DecisionRouterResult,
     ModelObserver,
+    _config_error,
     decision_context_buckets,
     decision_effective_request,
     decision_request_context,
@@ -97,6 +98,37 @@ STALE_HISTORICAL_REQUEST_IDENTITY_EXCLUSION = "stale_historical_request_identity
 # artifact merely because every answer in that slice happened to agree.
 MIN_ADOPTION_USABLE_CASES = 100
 MIN_CASES_PER_PRODUCTION_SCHEMA = 5
+REQUIRED_ADOPTION_CHECKS = frozenset(
+    {
+        "full_usable_corpus",
+        "minimum_usable_cases",
+        "role_coverage",
+        "decision_label_coverage",
+        "production_schema_coverage",
+        "minimum_cases_per_production_schema",
+        "model_backed_lane_coverage",
+        "minimum_cases_per_model_backed_lane",
+        "canonical_lane_case_set",
+        "first_pass_schema_success",
+        "final_schema_success",
+        "pair_valid_vote",
+        "pair_agreement",
+        "three_model_majority_resolution",
+        "expected_effect_match",
+        "canonical_lane_exact_signature_match",
+        "context_bucket_coverage",
+        "invalid_output_accepted",
+        "unsafe_decision_flips",
+    }
+)
+MINIMUM_QUALITY_THRESHOLDS = {
+    "first_pass_schema_rate": 0.98,
+    "final_schema_rate": 1.0,
+    "pair_valid_rate": 0.99,
+    "pair_agreement_rate": 0.75,
+    "majority_resolution_rate": 0.99,
+    "expected_effect_match_rate": 0.90,
+}
 UNSAFE_HOLD_DECISIONS = frozenset(
     {
         "blocked",
@@ -3175,6 +3207,618 @@ def adoption_result_sha256(artifact: Mapping[str, Any]) -> str:
             "adoption_gate": artifact.get("adoption_gate"),
             "adopted": artifact.get("adopted"),
         }
+    )
+
+
+def _candidate_config(value: Any) -> DecisionRouterConfig:
+    if not isinstance(value, Mapping):
+        raise ValueError("artifact config must be an object")
+    field_names = {item.name for item in fields(DecisionRouterConfig)}
+    required = field_names - {"adoption_artifact"}
+    missing = sorted(required - set(value))
+    unknown = sorted(set(value) - field_names)
+    if missing:
+        raise ValueError(f"artifact config is missing fields: {','.join(missing)}")
+    if unknown:
+        raise ValueError(f"artifact config has unknown fields: {','.join(unknown)}")
+    string_fields = {
+        "primary_model",
+        "challenger_model",
+        "tie_break_model",
+        "primary_keep_alive",
+        "challenger_keep_alive",
+        "tie_break_keep_alive",
+    }
+    integer_fields = required - string_fields
+    boolean_fields = {"adaptive_residency"}
+    integer_fields -= boolean_fields
+    kwargs: dict[str, Any] = {}
+    for name in string_fields:
+        item = value.get(name)
+        if not isinstance(item, str) or not item.strip():
+            raise ValueError(f"artifact config field {name} must be non-empty")
+        kwargs[name] = item.strip()
+    for name in integer_fields:
+        item = value.get(name)
+        if isinstance(item, bool) or not isinstance(item, int):
+            raise ValueError(f"artifact config field {name} must be an integer")
+        kwargs[name] = item
+    for name in boolean_fields:
+        item = value.get(name)
+        if not isinstance(item, bool):
+            raise ValueError(f"artifact config field {name} must be a boolean")
+        kwargs[name] = item
+    kwargs["adoption_artifact"] = ""
+    candidate = DecisionRouterConfig(**kwargs)
+    if error := _config_error(candidate):
+        raise ValueError(error)
+    return candidate
+
+
+def _paths_resolve_to_same_file(left: str, right: str) -> bool:
+    try:
+        return Path(left).resolve(strict=True) == Path(right).resolve(strict=True)
+    except OSError:
+        return False
+
+
+def _validated_adoption_artifact(
+    path: Path,
+) -> tuple[DecisionRouterConfig, str, dict[str, Any]]:
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        raise ValueError(f"cannot read adoption artifact: {exc}") from exc
+    try:
+        artifact = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"adoption artifact is not valid UTF-8 JSON: {exc}") from exc
+    if not isinstance(artifact, Mapping):
+        raise ValueError("adoption artifact must be an object")
+    if artifact.get("schema_version") != ARTIFACT_SCHEMA_VERSION:
+        raise ValueError("adoption artifact schema version is unsupported")
+    if artifact.get("status") != "complete" or artifact.get("adopted") is not True:
+        raise ValueError("adoption artifact is not complete and adopted")
+
+    if (
+        artifact.get("evaluator_policy_version") != EVALUATOR_POLICY_VERSION
+        or artifact.get("decision_semantics_policy_version")
+        != DECISION_SEMANTICS_POLICY_VERSION
+        or artifact.get("quorum_safety_policy_version") != QUORUM_SAFETY_POLICY_VERSION
+        or artifact.get("lane_contract_policy_version") != LANE_CONTRACT_POLICY_VERSION
+        or artifact.get("lane_contract_manifest_sha256")
+        != lane_contract_manifest_sha256()
+        or artifact.get("lane_contract_case_manifest_sha256")
+        != decision_lane_contract_case_manifest_sha256()
+        or artifact.get("structured_generation_policy")
+        != structured_generation_policy()
+        or artifact.get("structured_generation_policy_sha256")
+        != structured_generation_policy_sha256()
+        or artifact.get("evidence_sha256") != adoption_evidence_sha256(artifact)
+        or artifact.get("evaluation_result_sha256") != adoption_result_sha256(artifact)
+    ):
+        raise ValueError("adoption artifact evaluation evidence is inconsistent")
+
+    identity = artifact.get("identity")
+    if (
+        not isinstance(identity, Mapping)
+        or identity.get("evaluator_policy_version") != EVALUATOR_POLICY_VERSION
+        or identity.get("decision_semantics_policy_version")
+        != DECISION_SEMANTICS_POLICY_VERSION
+        or identity.get("quorum_safety_policy_version") != QUORUM_SAFETY_POLICY_VERSION
+        or identity.get("lane_contract_policy_version") != LANE_CONTRACT_POLICY_VERSION
+        or identity.get("lane_contract_manifest_sha256")
+        != lane_contract_manifest_sha256()
+        or identity.get("lane_contract_case_manifest_sha256")
+        != decision_lane_contract_case_manifest_sha256()
+        or identity.get("structured_generation_policy_version")
+        != STRUCTURED_GENERATION_POLICY_VERSION
+        or identity.get("structured_generation_policy_sha256")
+        != structured_generation_policy_sha256()
+        or artifact.get("run_key") != _sha256_json(identity)
+    ):
+        raise ValueError("adoption artifact run identity is inconsistent")
+    config_payload = artifact.get("config")
+    config_sha256 = _sha256_json(config_payload)
+    if (
+        artifact.get("config_sha256") != config_sha256
+        or identity.get("config_sha256") != config_sha256
+    ):
+        raise ValueError("adoption artifact config hash is inconsistent")
+    candidate = _candidate_config(config_payload)
+    context_buckets = artifact.get("context_buckets")
+    expected_context_buckets = decision_context_buckets(candidate)
+    if context_buckets != list(expected_context_buckets) or identity.get(
+        "context_buckets_sha256"
+    ) != _sha256_json(expected_context_buckets):
+        raise ValueError("adoption artifact context bucket policy is inconsistent")
+    thresholds = artifact.get("thresholds")
+    if identity.get("thresholds_sha256") != _sha256_json(thresholds):
+        raise ValueError("adoption artifact threshold hash is inconsistent")
+    if not isinstance(thresholds, Mapping):
+        raise ValueError("adoption artifact thresholds are missing")
+    for name, minimum in MINIMUM_QUALITY_THRESHOLDS.items():
+        observed = thresholds.get(name)
+        if (
+            isinstance(observed, bool)
+            or not isinstance(observed, (int, float))
+            or observed < minimum
+        ):
+            raise ValueError(f"adoption threshold {name} is weaker than runtime policy")
+    for name in ("max_invalid_output_accepted", "max_unsafe_decision_flips"):
+        observed = thresholds.get(name)
+        if isinstance(observed, bool) or not isinstance(observed, int) or observed > 0:
+            raise ValueError(f"adoption threshold {name} is weaker than runtime policy")
+    metadata = artifact.get("model_metadata")
+    if (
+        not isinstance(metadata, Mapping)
+        or identity.get("model_metadata_sha256")
+        != artifact.get("model_metadata_sha256")
+        or artifact.get("model_metadata_sha256") != _sha256_json(metadata)
+    ):
+        raise ValueError("adoption artifact model identity is inconsistent")
+    evaluated_models = (
+        candidate.primary_model,
+        candidate.challenger_model,
+        candidate.tie_break_model,
+    )
+    validate_model_metadata_identity(metadata, evaluated_models)
+
+    source = artifact.get("source")
+    if not isinstance(source, Mapping):
+        raise ValueError("adoption artifact source is missing")
+    from chronovisor.decision.decision_schema_manifest import (
+        production_schema_manifest,
+        production_signature_manifest,
+    )
+
+    current_schema_manifest_mapping = production_schema_manifest()
+    current_schema_manifest = [
+        {"name": name, "sha256": digest}
+        for name, digest in sorted(current_schema_manifest_mapping.items())
+    ]
+    current_schema_manifest_sha256 = _sha256_json(current_schema_manifest)
+    current_signature_manifest_sha256 = _sha256_json(production_signature_manifest())
+    source_path_value = source.get("source_path")
+    if (
+        not isinstance(source_path_value, str)
+        or not source_path_value
+        or not Path(source_path_value).is_absolute()
+        or identity.get("source_path") != source_path_value
+    ):
+        raise ValueError("adoption artifact is not bound to an absolute source path")
+    authoritative_corpus = load_replay_corpus(source_path_value)
+    if any(case.self_labeled for case in authoritative_corpus.cases):
+        raise ValueError(
+            "adoption source contains self-labeled local consensus evidence"
+        )
+    authoritative_source = authoritative_corpus.inspection(include_cases=False)
+    authoritative_source_path = authoritative_source.get("source_path")
+    if (
+        not isinstance(authoritative_source_path, str)
+        or not _paths_resolve_to_same_file(
+            source_path_value,
+            authoritative_source_path,
+        )
+    ):
+        raise ValueError("adoption artifact source path no longer resolves")
+    # Preserve the sealed path spelling for identity comparison. The corpus
+    # loader resolves symlinks, while adopted evidence binds the exact absolute
+    # path string in addition to the bytes it identifies.
+    authoritative_source = dict(authoritative_source)
+    authoritative_source["source_path"] = source_path_value
+    source_identity_fields = {
+        "source_path",
+        "source_sha256",
+        "total_cases",
+        "usable_cases",
+        "excluded_cases",
+        "excluded_reasons",
+        "offset",
+        "limit",
+        "selected_cases",
+        "full_usable_selection",
+        "coverage",
+        "selected_case_ids_sha256",
+        "selected_effective_requests_sha256",
+        "effective_request_fingerprints",
+    }
+    if any(
+        source.get(name) != authoritative_source.get(name)
+        for name in source_identity_fields
+    ):
+        raise ValueError("adoption artifact source no longer matches its corpus")
+    if (
+        identity.get("source_sha256") != source.get("source_sha256")
+        or identity.get("selected_case_ids_sha256")
+        != source.get("selected_case_ids_sha256")
+        or identity.get("selected_effective_requests_sha256")
+        != source.get("selected_effective_requests_sha256")
+        or identity.get("schema_manifest_sha256")
+        != (
+            source.get("coverage", {}).get("schema_manifest_sha256")
+            if isinstance(source.get("coverage"), Mapping)
+            else None
+        )
+        or identity.get("schema_manifest_sha256") != current_schema_manifest_sha256
+        or identity.get("signature_manifest_sha256")
+        != (
+            source.get("coverage", {}).get("signature_manifest_sha256")
+            if isinstance(source.get("coverage"), Mapping)
+            else None
+        )
+        or identity.get("signature_manifest_sha256")
+        != current_signature_manifest_sha256
+    ):
+        raise ValueError("adoption artifact source identity is inconsistent")
+    usable = source.get("usable_cases")
+    selected = source.get("selected_cases")
+    processed = artifact.get("processed_cases")
+    if (
+        isinstance(usable, bool)
+        or not isinstance(usable, int)
+        or usable < MIN_ADOPTION_USABLE_CASES
+        or source.get("full_usable_selection") is not True
+        or selected != usable
+        or artifact.get("selected_cases") != usable
+        or processed != usable
+    ):
+        raise ValueError("adoption artifact does not cover the full usable corpus")
+    cases = artifact.get("cases")
+    if not isinstance(cases, list) or len(cases) != usable:
+        raise ValueError("adoption artifact case evidence is missing or incomplete")
+    if len(authoritative_corpus.cases) != usable:
+        raise ValueError("adoption source case count changed after evaluation")
+    case_ids: list[str] = []
+    effective_request_ids: list[str] = []
+    case_indexes: list[int] = []
+    case_schema_counts: Counter[str] = Counter()
+    case_lane_contract_counts: Counter[str] = Counter()
+    case_lane_contract_labels: dict[str, set[str]] = {}
+    case_lane_contract_effects: dict[str, set[str]] = {}
+    case_roles: set[str] = set()
+    case_decisions: set[str] = set()
+    production_schema_digests = set(current_schema_manifest_mapping.values())
+    for position, case in enumerate(cases):
+        if not isinstance(case, Mapping):
+            raise ValueError("adoption artifact contains a non-object case")
+        authoritative_case = authoritative_corpus.cases[position]
+        case_id = case.get("case_id")
+        index = case.get("index")
+        schema_digest = case.get("schema_sha256")
+        role = case.get("role")
+        coverage_label = case.get("expected_coverage_label")
+        effective_request_id = case.get("effective_request_sha256")
+        decision_lane = case.get("decision_lane")
+        declared_lane_sha256 = case.get("lane_contract_sha256")
+        declared_lane_effect = case.get("lane_contract_effect")
+        declared_case_manifest_sha256 = case.get("lane_contract_case_manifest_sha256")
+        if (
+            not isinstance(case_id, str)
+            or re.fullmatch(r"[0-9a-f]{64}", case_id) is None
+            or isinstance(index, bool)
+            or not isinstance(index, int)
+            or index < 0
+            or not isinstance(schema_digest, str)
+            or schema_digest not in production_schema_digests
+            or not isinstance(role, str)
+            or not role
+            or not isinstance(coverage_label, str)
+            or not coverage_label
+            or not isinstance(effective_request_id, str)
+            or re.fullmatch(r"[0-9a-f]{64}", effective_request_id) is None
+            or not isinstance(case.get("votes"), list)
+        ):
+            raise ValueError("adoption artifact contains malformed case evidence")
+        case_ids.append(case_id)
+        effective_request_ids.append(effective_request_id)
+        case_indexes.append(index)
+        case_schema_counts[schema_digest] += 1
+        case_roles.add(role)
+        case_decisions.add(coverage_label)
+        if authoritative_case.source == LANE_CONTRACT_SOURCE:
+            if (
+                not isinstance(decision_lane, str)
+                or not isinstance(declared_lane_sha256, str)
+                or not isinstance(declared_lane_effect, str)
+                or declared_case_manifest_sha256
+                != decision_lane_contract_case_manifest_sha256()
+            ):
+                raise ValueError("adoption artifact lane contract case is malformed")
+            case_lane_contract_counts[decision_lane] += 1
+            case_lane_contract_labels.setdefault(decision_lane, set()).add(
+                coverage_label
+            )
+            case_lane_contract_effects.setdefault(decision_lane, set()).add(
+                declared_lane_effect
+            )
+        expected_signature = decision_signature_value(
+            authoritative_case.schema,
+            authoritative_case.expected,
+        )
+        expected_signature = (
+            dict(expected_signature) if isinstance(expected_signature, Mapping) else {}
+        )
+        required_context, planned_context = decision_request_context(
+            candidate,
+            authoritative_case.prompt,
+            authoritative_case.schema,
+            authoritative_case.system,
+            decision_lane=authoritative_case.decision_lane,
+        )
+        if required_context > candidate.num_ctx:
+            raise ValueError("adoption source case now exceeds configured context")
+        authoritative_fields = {
+            "index": authoritative_case.index,
+            "case_id": authoritative_case.case_id,
+            "effective_request_sha256": (authoritative_case.effective_request_sha256),
+            "role": authoritative_case.role,
+            "source": authoritative_case.source,
+            "contract_id": authoritative_case.contract_id,
+            "decision_lane": authoritative_case.decision_lane,
+            "lane_contract_sha256": authoritative_case.lane_contract_sha256,
+            "lane_contract_effect": authoritative_case.lane_contract_effect,
+            "lane_contract_case_manifest_sha256": (
+                authoritative_case.lane_contract_case_manifest_sha256
+            ),
+            "evidence_provenance_sha256": _sha256_json(
+                authoritative_case.evidence_provenance
+            ),
+            "schema_sha256": authoritative_case.schema_sha256,
+            "expected_signature": expected_signature,
+            "expected_signature_sha256": (authoritative_case.expected_signature_sha256),
+            "expected_coverage_label": (authoritative_case.expected_coverage_label),
+            "expected_decision": authoritative_case.expected_decision,
+            "expected_effect": replay_semantic_effect(
+                authoritative_case.expected,
+                authoritative_case.schema,
+                prompt=authoritative_case.prompt,
+                decision_lane=authoritative_case.decision_lane,
+            ),
+            "effect_context": replay_effect_context(authoritative_case.prompt),
+            "num_ctx": planned_context,
+        }
+        if any(case.get(name) != value for name, value in authoritative_fields.items()):
+            raise ValueError(
+                "adoption artifact case metadata no longer matches source corpus"
+            )
+        vote_identity = [
+            (vote.get("role"), vote.get("model"))
+            for vote in case["votes"]
+            if isinstance(vote, Mapping)
+        ]
+        expected_vote_identity = [
+            ("primary", candidate.primary_model),
+            ("challenger", candidate.challenger_model),
+            ("tie_break", candidate.tie_break_model),
+        ][: len(case["votes"])]
+        case_num_ctx = case.get("num_ctx")
+        if (
+            vote_identity != expected_vote_identity
+            or case_num_ctx not in expected_context_buckets
+            or any(
+                vote.get("requested_num_ctx") != case_num_ctx
+                for vote in case["votes"]
+                if isinstance(vote, Mapping)
+            )
+        ):
+            raise ValueError(
+                "adoption artifact vote identity or context is inconsistent"
+            )
+        if not validate_adoption_case_derived_evidence(case):
+            raise ValueError("adoption artifact case flags disagree with vote evidence")
+    if (
+        len(set(case_ids)) != len(case_ids)
+        or len(set(case_indexes)) != len(case_indexes)
+        or case_indexes != list(range(usable))
+        or _sha256_json(case_ids) != source.get("selected_case_ids_sha256")
+        or _sha256_json(case_ids) != identity.get("selected_case_ids_sha256")
+        or len(set(effective_request_ids)) != len(effective_request_ids)
+        or _sha256_json(effective_request_ids)
+        != source.get("selected_effective_requests_sha256")
+        or _sha256_json(effective_request_ids)
+        != identity.get("selected_effective_requests_sha256")
+    ):
+        raise ValueError("adoption artifact case identity is inconsistent")
+    request_fingerprints = source.get("effective_request_fingerprints")
+    if (
+        not isinstance(request_fingerprints, Mapping)
+        or request_fingerprints.get("version") != DECISION_REQUEST_FINGERPRINT_VERSION
+        or request_fingerprints.get("unique_requests") != usable
+        or request_fingerprints.get("exact_duplicate_groups") != 0
+        or request_fingerprints.get("exact_duplicate_rows") != 0
+        or request_fingerprints.get("exact_duplicate_redundant_rows") != 0
+        or request_fingerprints.get("conflicting_groups") != 0
+        or request_fingerprints.get("conflicting_rows") != 0
+    ):
+        raise ValueError("adoption artifact request fingerprints are not unique")
+    context_plan = source.get("context_plan")
+    case_context_counts = Counter(int(case["num_ctx"]) for case in cases)
+    execution_order_sha256 = _sha256_json(
+        [
+            case["case_id"]
+            for case in sorted(
+                cases,
+                key=lambda row: (int(row["num_ctx"]), int(row["index"])),
+            )
+        ]
+    )
+    if (
+        not isinstance(context_plan, Mapping)
+        or context_plan.get("mode") != "exact_context_ascending_v1"
+        or context_plan.get("oversized_cases") != 0
+        or context_plan.get("execution_order_sha256") != execution_order_sha256
+        or context_plan.get("execution_order_sha256")
+        != identity.get("evaluation_order_sha256")
+        or identity.get("evaluation_mode") != "exact_context_ascending_v1"
+        or context_plan.get("bucket_counts")
+        != {
+            str(bucket): case_context_counts[bucket]
+            for bucket in expected_context_buckets
+        }
+        or any(case_context_counts[bucket] < 1 for bucket in expected_context_buckets)
+    ):
+        raise ValueError("adoption artifact context execution plan is inconsistent")
+    coverage = source.get("coverage")
+    if (
+        not isinstance(coverage, Mapping)
+        or coverage.get("role_coverage_rate") != 1.0
+        or coverage.get("decision_coverage_rate") != 1.0
+        or coverage.get("production_schema_coverage_rate") != 1.0
+        or not isinstance(coverage.get("minimum_production_schema_cases"), int)
+        or coverage.get("minimum_production_schema_cases")
+        < MIN_CASES_PER_PRODUCTION_SCHEMA
+    ):
+        raise ValueError("adoption artifact is not representative of usable evidence")
+    if (
+        coverage.get("selected_roles") != sorted(case_roles)
+        or coverage.get("usable_roles") != sorted(case_roles)
+        or coverage.get("selected_decisions") != sorted(case_decisions)
+        or coverage.get("usable_decisions") != sorted(case_decisions)
+    ):
+        raise ValueError("adoption artifact role or decision coverage is inconsistent")
+    current_lane_manifest = lane_contract_manifest()
+    required_lane_names = model_backed_lane_names()
+    if (
+        coverage.get("lane_contract_policy_version") != LANE_CONTRACT_POLICY_VERSION
+        or coverage.get("lane_contract_manifest_sha256")
+        != lane_contract_manifest_sha256()
+        or coverage.get("lane_contract_case_manifest_sha256")
+        != decision_lane_contract_case_manifest_sha256()
+        or coverage.get("model_backed_lane_coverage_rate") != 1.0
+        or not isinstance(coverage.get("minimum_model_backed_lane_cases"), int)
+        or coverage["minimum_model_backed_lane_cases"] < MIN_CASES_PER_MODEL_BACKED_LANE
+        or set(case_lane_contract_counts) != set(required_lane_names)
+    ):
+        raise ValueError("adoption artifact model-backed lane coverage is incomplete")
+    for lane in required_lane_names:
+        contract = current_lane_manifest[lane]
+        if (
+            case_lane_contract_counts[lane] < MIN_CASES_PER_MODEL_BACKED_LANE
+            or not set(contract["required_coverage_labels"]).issubset(
+                case_lane_contract_labels.get(lane, set())
+            )
+            or not set(contract["required_effects"]).issubset(
+                case_lane_contract_effects.get(lane, set())
+            )
+        ):
+            raise ValueError(f"adoption artifact lane contract is incomplete: {lane}")
+    required_lane_rows = coverage.get("required_model_backed_lanes")
+    if (
+        not isinstance(required_lane_rows, list)
+        or [row.get("lane") for row in required_lane_rows if isinstance(row, Mapping)]
+        != list(required_lane_names)
+        or any(
+            not isinstance(row, Mapping)
+            or str(row.get("lane")) not in current_lane_manifest
+            or row.get("contract_sha256")
+            != current_lane_manifest.get(str(row.get("lane")), {}).get(
+                "contract_sha256"
+            )
+            or row.get("valid") is not True
+            for row in required_lane_rows
+        )
+    ):
+        raise ValueError("adoption artifact lane contract manifest is inconsistent")
+    required_schemas = coverage.get("required_schemas")
+    if not isinstance(required_schemas, list) or not required_schemas:
+        raise ValueError("adoption artifact schema evidence is missing")
+    observed_schema_manifest: dict[str, str] = {}
+    for row in required_schemas:
+        if (
+            not isinstance(row, Mapping)
+            or not isinstance(row.get("names"), list)
+            or not row.get("names")
+            or not all(isinstance(name, str) and name for name in row["names"])
+            or not isinstance(row.get("sha256"), str)
+            or not re.fullmatch(r"[0-9a-f]{64}", row["sha256"])
+            or isinstance(row.get("selected_cases"), bool)
+            or not isinstance(row.get("selected_cases"), int)
+            or row["selected_cases"] < MIN_CASES_PER_PRODUCTION_SCHEMA
+        ):
+            raise ValueError(
+                "adoption artifact has incomplete production schema evidence"
+            )
+        for name in row["names"]:
+            if name in observed_schema_manifest:
+                raise ValueError("adoption artifact repeats a production schema name")
+            observed_schema_manifest[name] = str(row["sha256"])
+        if (
+            row.get("selected_cases") != case_schema_counts[str(row["sha256"])]
+            or row.get("usable_cases") != case_schema_counts[str(row["sha256"])]
+        ):
+            raise ValueError("adoption artifact schema case counts are inconsistent")
+    if observed_schema_manifest != current_schema_manifest_mapping:
+        raise ValueError("adoption artifact schema evidence does not match runtime")
+
+    try:
+        threshold_values = {
+            item.name: thresholds[item.name] for item in fields(AdoptionThresholds)
+        }
+    except (KeyError, TypeError) as exc:
+        raise ValueError("adoption artifact thresholds are incomplete") from exc
+    if set(thresholds) != set(threshold_values):
+        raise ValueError("adoption artifact thresholds contain unknown fields")
+    evaluated_thresholds = AdoptionThresholds(**threshold_values)
+    metrics = artifact.get("metrics")
+    if not isinstance(metrics, Mapping):
+        raise ValueError("adoption artifact metrics are missing")
+    recomputed_metrics = adoption_metrics(
+        cases,
+        required_context_buckets=expected_context_buckets,
+    )
+    if dict(metrics) != recomputed_metrics:
+        raise ValueError("adoption artifact metrics do not match case evidence")
+    recomputed_gate = adoption_gate(
+        recomputed_metrics,
+        evaluated_thresholds,
+        source,
+    )
+    gate = artifact.get("adoption_gate")
+    if not isinstance(gate, Mapping) or dict(gate) != recomputed_gate:
+        raise ValueError("adoption artifact gate does not match case evidence")
+    checks = gate.get("checks") if isinstance(gate, Mapping) else None
+    if (
+        not isinstance(checks, Mapping)
+        or not checks
+        or not REQUIRED_ADOPTION_CHECKS.issubset(checks)
+        or gate.get("passed") is not True
+        or any(
+            not isinstance(check, Mapping) or check.get("passed") is not True
+            for check in checks.values()
+        )
+    ):
+        raise ValueError("adoption artifact gate did not fully pass")
+    for name, minimum in MINIMUM_QUALITY_THRESHOLDS.items():
+        observed = metrics.get(name)
+        if (
+            isinstance(observed, bool)
+            or not isinstance(observed, (int, float))
+            or observed < minimum
+        ):
+            raise ValueError(f"adoption metric {name} is below runtime policy")
+    for name in ("invalid_output_accepted", "unsafe_decision_flips"):
+        observed = metrics.get(name)
+        if isinstance(observed, bool) or not isinstance(observed, int) or observed > 0:
+            raise ValueError(f"adoption metric {name} exceeds runtime policy")
+    bucket_counts = metrics.get("context_bucket_counts")
+    if (
+        metrics.get("context_buckets_required") != list(expected_context_buckets)
+        or metrics.get("context_bucket_coverage_rate") != 1.0
+        or not isinstance(bucket_counts, Mapping)
+        or any(
+            isinstance(bucket_counts.get(str(bucket)), bool)
+            or not isinstance(bucket_counts.get(str(bucket)), int)
+            or bucket_counts[str(bucket)] < 1
+            for bucket in expected_context_buckets
+        )
+    ):
+        raise ValueError("adoption artifact did not evaluate every context bucket")
+
+    return (
+        candidate,
+        hashlib.sha256(raw).hexdigest(),
+        json.loads(_canonical_json(metadata)),
     )
 
 

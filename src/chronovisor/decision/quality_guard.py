@@ -819,7 +819,7 @@ def run_quality_probe(
     if artifact_validator is None:
         # Reuse the production validator so a self-consistent but stale or
         # weakened artifact cannot become either quality evidence or LKG.
-        from chronovisor.decision.decision_router import _validated_adoption_artifact
+        from chronovisor.decision.local_model_eval import _validated_adoption_artifact
 
         artifact_validator = _validated_adoption_artifact
     try:

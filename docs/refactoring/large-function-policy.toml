@@ -3,7 +3,7 @@ threshold_lines = 300
 baseline_function_count = 47
 
 [[functions]]
-path = "src/chronovisor/decision/decision_router.py"
+path = "src/chronovisor/decision/local_model_eval.py"
 qualname = "_validated_adoption_artifact"
 baseline_lines = 572
 disposition = "retained"
