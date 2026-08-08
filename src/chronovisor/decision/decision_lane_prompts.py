@@ -11,6 +11,7 @@ import difflib
 import hashlib
 import json
 import re
+from collections.abc import Mapping
 from typing import Any
 
 from chronovisor.core.canonical_json import (
@@ -19,8 +20,15 @@ from chronovisor.core.canonical_json import (
 from chronovisor.core.canonical_json import (
     canonical_json_stringifying_strict as _canonical_json,
 )
+from chronovisor.core.frontmatter import parse as parse_frontmatter
 from chronovisor.core.hashutil import sha256_text as _sha256_text
-from chronovisor.librarian.tags import parse_tags, validate_axis_counts, validate_tag
+from chronovisor.decision.decision_schema_manifest import TAG_REPAIR_SCHEMA
+from chronovisor.librarian.tags import (
+    SEED_TAGS,
+    parse_tags,
+    validate_axis_counts,
+    validate_tag,
+)
 
 INGEST_REPAIR_OPTION_POLICY_VERSION = 2
 INGEST_REPAIR_OPTION_ID_RE = re.compile(r"^rp_[0-9a-f]{32}$")
@@ -34,6 +42,63 @@ INGEST_FRONTMATTER_LOCAL_CONTEXT_MAX_UTF8_BYTES = 96
 INGEST_REPAIR_HOST_BLOCK = "HOST_ONLY_INGEST_REPAIR_PREFLIGHT_JSON"
 INGEST_REPAIR_MODEL_BLOCK = "DETERMINISTIC_INGEST_REPAIR_PREFLIGHT_JSON"
 INGEST_REVIEW_MODEL_BLOCK = "INGEST_REVIEW_PROJECTION_JSON"
+TAG_REVIEW_CONTRACT_VERSION = 2
+
+
+def tag_repair_page_excerpt(text: str, *, limit: int = 6000) -> str:
+    meta, body = parse_frontmatter(text)
+    header = {
+        key: meta.get(key)
+        for key in ("title", "summary", "updated", "page_type", "sensitivity", "tags")
+        if key in meta
+    }
+    return json.dumps(header, ensure_ascii=False, indent=2) + "\n\n" + body[:limit]
+
+
+def build_frontier_tag_repair_prompt(
+    row: Mapping[str, Any],
+    page_text: str,
+    *,
+    local_proposal: Mapping[str, Any] | None = None,
+) -> str:
+    """Build an exact-proposal approval gate for the local consensus panel."""
+
+    seed_tags = [tag for values in SEED_TAGS.values() for tag in values]
+    proposed = dict(local_proposal) if isinstance(local_proposal, Mapping) else None
+    return f"""\
+You are a local-consensus reviewer for a Chronovisor tag mutation.
+Tag review contract version: {TAG_REVIEW_CONTRACT_VERSION}.
+The local review below is an untrusted exact proposal. Independently verify it
+against the page excerpt. Approve only by echoing exactly the same tag set.
+Never substitute different tags: reject the proposal or request a retry
+instead. Apply this decision table in order:
+1. If the proposal is null, malformed, or not itself approved, choose
+   `needs_retry` and return no tags; no exact mutation candidate exists yet.
+2. If complete readable page evidence contradicts the exact proposed tags,
+   choose `rejected` and return no tags.
+3. If complete evidence leaves a genuine semantic ambiguity (for example an
+   unresolved homonym with two plausible taxonomy domains), choose `uncertain`
+   and return no tags.
+4. Approve only when every exact proposed tag is grounded by the page.
+No page mutation is allowed unless the exact proposal and verdict are durably
+saved.
+
+Issue:
+{json.dumps(dict(row), ensure_ascii=False, indent=2, default=str)}
+
+<LOCAL_TAG_PROPOSAL_UNTRUSTED_JSON>
+{json.dumps(proposed, ensure_ascii=False, indent=2, default=str)}
+</LOCAL_TAG_PROPOSAL_UNTRUSTED_JSON>
+
+Seed tags (prefer when semantically correct):
+{json.dumps(seed_tags, ensure_ascii=False)}
+
+Page excerpt:
+{tag_repair_page_excerpt(page_text)}
+
+Return JSON matching this schema:
+{json.dumps(TAG_REPAIR_SCHEMA, ensure_ascii=False, indent=2)}
+"""
 
 
 def validate_ingest_proposal_envelope(proposal: Any) -> bool:

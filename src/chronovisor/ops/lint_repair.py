@@ -36,6 +36,11 @@ from chronovisor.decision.decision_authority import (
     semantic_authority_shape_error,
     semantic_verdict_authority_error,
 )
+from chronovisor.decision.decision_lane_prompts import (
+    TAG_REVIEW_CONTRACT_VERSION,
+    build_frontier_tag_repair_prompt,
+    tag_repair_page_excerpt,
+)
 from chronovisor.decision.decision_schema_manifest import TAG_REPAIR_SCHEMA
 from chronovisor.decision.local_structured import ChatTransport, LocalStructuredSession
 from chronovisor.ingest.page_mutation import (
@@ -65,7 +70,6 @@ from chronovisor.search.semantic_hold import (
 )
 
 REPAIR_RESOLVER_VERSION = "lint-repair-v1"
-TAG_REVIEW_CONTRACT_VERSION = 2
 TAG_REPAIR_DECISION_LANE = "lint_tag_repair"
 REPO_ROOT = runtime_repo_root()
 
@@ -228,16 +232,6 @@ def _tag_semantic_epoch(
     }
 
 
-def _page_excerpt(text: str, *, limit: int = 6000) -> str:
-    meta, body = parse_frontmatter(text)
-    header = {
-        key: meta.get(key)
-        for key in ("title", "summary", "updated", "page_type", "sensitivity", "tags")
-        if key in meta
-    }
-    return json.dumps(header, ensure_ascii=False, indent=2) + "\n\n" + body[:limit]
-
-
 def build_tag_repair_prompt(row: Mapping[str, Any], page_text: str) -> str:
     seed_tags = [tag for values in SEED_TAGS.values() for tag in values]
     return f"""\
@@ -250,53 +244,7 @@ Seed tags (prefer when semantically correct):
 {json.dumps(seed_tags, ensure_ascii=False)}
 
 Page excerpt:
-{_page_excerpt(page_text)}
-
-Return JSON matching this schema:
-{json.dumps(TAG_REPAIR_SCHEMA, ensure_ascii=False, indent=2)}
-"""
-
-
-def build_frontier_tag_repair_prompt(
-    row: Mapping[str, Any],
-    page_text: str,
-    *,
-    local_proposal: Mapping[str, Any] | None = None,
-) -> str:
-    """Build an exact-proposal approval gate for the local consensus panel."""
-
-    seed_tags = [tag for values in SEED_TAGS.values() for tag in values]
-    proposed = dict(local_proposal) if isinstance(local_proposal, Mapping) else None
-    return f"""\
-You are a local-consensus reviewer for a Chronovisor tag mutation.
-Tag review contract version: {TAG_REVIEW_CONTRACT_VERSION}.
-The local review below is an untrusted exact proposal. Independently verify it
-against the page excerpt. Approve only by echoing exactly the same tag set.
-Never substitute different tags: reject the proposal or request a retry
-instead. Apply this decision table in order:
-1. If the proposal is null, malformed, or not itself approved, choose
-   `needs_retry` and return no tags; no exact mutation candidate exists yet.
-2. If complete readable page evidence contradicts the exact proposed tags,
-   choose `rejected` and return no tags.
-3. If complete evidence leaves a genuine semantic ambiguity (for example an
-   unresolved homonym with two plausible taxonomy domains), choose `uncertain`
-   and return no tags.
-4. Approve only when every exact proposed tag is grounded by the page.
-No page mutation is allowed unless the exact proposal and verdict are durably
-saved.
-
-Issue:
-{json.dumps(dict(row), ensure_ascii=False, indent=2, default=str)}
-
-<LOCAL_TAG_PROPOSAL_UNTRUSTED_JSON>
-{json.dumps(proposed, ensure_ascii=False, indent=2, default=str)}
-</LOCAL_TAG_PROPOSAL_UNTRUSTED_JSON>
-
-Seed tags (prefer when semantically correct):
-{json.dumps(seed_tags, ensure_ascii=False)}
-
-Page excerpt:
-{_page_excerpt(page_text)}
+{tag_repair_page_excerpt(page_text)}
 
 Return JSON matching this schema:
 {json.dumps(TAG_REPAIR_SCHEMA, ensure_ascii=False, indent=2)}

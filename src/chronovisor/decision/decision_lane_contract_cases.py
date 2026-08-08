@@ -32,6 +32,7 @@ from chronovisor.decision.decision_lane_prompts import (
     INGEST_PROPOSAL_SCHEMA_VERSION,
     build_autonomy_duplicate_review_prompt,
     build_autonomy_retention_review_prompt,
+    build_frontier_tag_repair_prompt,
     build_identity_preflight_receipt,
     build_ingest_reconciliation_prompt,
     build_orphan_link_review_prompt,
@@ -1373,8 +1374,6 @@ def _lint_safe_mutation_cases() -> list[tuple[str, str | None, dict[str, Any]]]:
 
 
 def _tag_repair_cases() -> list[tuple[str, str | None, dict[str, Any]]]:
-    from chronovisor.ops.lint_repair import build_frontier_tag_repair_prompt
-
     definitions = [
         (
             "approved",
