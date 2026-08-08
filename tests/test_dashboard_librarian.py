@@ -25,7 +25,9 @@ def _isolate_model_inventory(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_dashboard_static_contract_exposes_librarian_progress() -> None:
     html = (dashboard.STATIC_DIR / "index.html").read_text(encoding="utf-8")
-    js = (dashboard.STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    renderer_js = (dashboard.STATIC_DIR / "app-renderer.js").read_text(
+        encoding="utf-8"
+    )
     for identifier in (
         "librarian-state",
         "librarian-swept-generation",
@@ -55,8 +57,8 @@ def test_dashboard_static_contract_exposes_librarian_progress() -> None:
         "librarian-evidence-update",
     ):
         assert f'id="{identifier}"' in html
-    assert "function renderLibrarian" in js
-    assert "renderLibrarian(snapshot.librarian || {})" in js
+    assert "function renderLibrarian" in renderer_js
+    assert "renderLibrarian(snapshot.librarian || {})" in renderer_js
 
 
 def test_collection_first_status_exposes_registry_quality(

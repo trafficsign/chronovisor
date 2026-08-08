@@ -771,36 +771,40 @@ def test_orchestrator_reports_terminal_semantic_defer_without_failure(
 def test_dashboard_static_contract_exposes_deferred_without_pending_dashes() -> None:
     root = Path(__file__).parents[1] / "src" / "chronovisor" / "dashboard_static"
     html = (root / "index.html").read_text(encoding="utf-8")
-    js = (root / "app.js").read_text(encoding="utf-8")
+    store_js = (root / "app.js").read_text(encoding="utf-8")
+    renderer_js = (root / "app-renderer.js").read_text(encoding="utf-8")
+    client_js = (root / "app-client.js").read_text(encoding="utf-8")
 
     assert 'id="pending-deferred"' in html
     assert 'id="batch-deferred"' in html
     assert 'id="batch-continued"' in html
     assert "semantic deferred" in html
-    assert 'document.getElementById("pending-deferred")' in js
-    assert 'document.getElementById("batch-deferred")' in js
-    assert 'document.getElementById("batch-continued")' in js
-    assert 'dashed: segment.status === "pending"' in js
-    assert 'dashed: segment.status === "deferred"' not in js
-    assert "row.files_deferred" in js
-    assert "row.files_continued" in js
-    assert "function batchCountLabel(row)" in js
-    assert "parts.push(`${row.deferred} defer`)" in js
-    assert "parts.push(`${row.continued} continue`)" in js
-    assert "function fitCanvasText(ctx, text, maxWidth)" in js
-    assert "function drawBatchLegend(ctx, width, left, y)" in js
-    assert "ctx.measureText(batchCountLabel(row)).width" in js
-    assert "Math.ceil(ctx.measureText(label).width) + textGap" in js
-    assert "Math.max(40, pad.right - 16)" in js
-    assert "let refreshInFlight = null" in js
-    assert "if (refreshInFlight !== null) return refreshInFlight" in js
-    assert "window.setTimeout(refreshLoop, nextRefreshDelayMs)" in js
-    assert "const ACTIVE_REFRESH_DELAY_MS = 5000" in js
-    assert "const IDLE_REFRESH_DELAY_MS = 10000" in js
-    assert "setInterval(refresh" not in js
-    assert "const SNAPSHOT_TIMEOUT_MS = 180000" in js
-    assert "const controller = new AbortController()" in js
-    assert "signal: controller.signal" in js
-    assert "controller.abort()" in js
-    assert "window.clearTimeout(timeoutId)" in js
-    assert "finally {\n    window.setTimeout(refreshLoop, nextRefreshDelayMs)" in js
+    assert 'document.getElementById("pending-deferred")' in store_js
+    assert 'document.getElementById("batch-deferred")' in store_js
+    assert 'document.getElementById("batch-continued")' in store_js
+    assert 'dashed: segment.status === "pending"' in renderer_js
+    assert 'dashed: segment.status === "deferred"' not in renderer_js
+    assert "row.files_deferred" in renderer_js
+    assert "row.files_continued" in renderer_js
+    assert "function batchCountLabel(row)" in renderer_js
+    assert "parts.push(`${row.deferred} defer`)" in renderer_js
+    assert "parts.push(`${row.continued} continue`)" in renderer_js
+    assert "function fitCanvasText(ctx, text, maxWidth)" in renderer_js
+    assert "function drawBatchLegend(ctx, width, left, y)" in renderer_js
+    assert "ctx.measureText(batchCountLabel(row)).width" in renderer_js
+    assert "Math.ceil(ctx.measureText(label).width) + textGap" in renderer_js
+    assert "Math.max(40, pad.right - 16)" in renderer_js
+    assert "let refreshInFlight = null" in client_js
+    assert "if (refreshInFlight !== null) return refreshInFlight" in client_js
+    assert "window.setTimeout(refreshLoop, nextRefreshDelayMs)" in client_js
+    assert "const ACTIVE_REFRESH_DELAY_MS = 5000" in client_js
+    assert "const IDLE_REFRESH_DELAY_MS = 10000" in client_js
+    assert "setInterval(refresh" not in client_js
+    assert "const SNAPSHOT_TIMEOUT_MS = 180000" in client_js
+    assert "const controller = new AbortController()" in client_js
+    assert "signal: controller.signal" in client_js
+    assert "controller.abort()" in client_js
+    assert "window.clearTimeout(timeoutId)" in client_js
+    assert (
+        "finally {\n    window.setTimeout(refreshLoop, nextRefreshDelayMs)" in client_js
+    )
