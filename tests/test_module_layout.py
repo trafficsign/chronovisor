@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import ast
-import importlib
 import tomllib
 from pathlib import Path
 
@@ -80,10 +79,8 @@ def test_domain_implementations_do_not_import_legacy_module_paths() -> None:
     assert violations == []
 
 
-def test_legacy_module_map_targets_are_importable_without_top_level_shims() -> None:
-    for legacy, target in LEGACY_MODULE_PATHS.items():
-        assert legacy != target
-        assert importlib.import_module(target) is not None
+def test_legacy_module_map_is_retired() -> None:
+    assert LEGACY_MODULE_PATHS == {}
 
 
 def test_console_scripts_target_domain_modules() -> None:

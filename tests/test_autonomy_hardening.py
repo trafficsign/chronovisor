@@ -176,11 +176,13 @@ def test_background_job_failure_is_durable_and_retryable(tmp_path: Path, monkeyp
     monkeypatch.setattr(background_jobs, "JOB_DIR", tmp_path)
     monkeypatch.setattr(background_jobs, "STATE_FILE", tmp_path / "state.json")
     monkeypatch.setattr(background_jobs, "LOCK_FILE", tmp_path / "state.lock")
-    monkeypatch.setattr(
-        background_jobs.subprocess,
-        "run",
-        lambda *args, **kwargs: SimpleNamespace(returncode=1, stdout="", stderr="temporary failure"),
-    )
+    commands: list[list[str]] = []
+
+    def fail(command: list[str], **_kwargs) -> SimpleNamespace:
+        commands.append(command)
+        return SimpleNamespace(returncode=1, stdout="", stderr="temporary failure")
+
+    monkeypatch.setattr(background_jobs.subprocess, "run", fail)
     job = background_jobs.enqueue_job(
         name="save", module="example", args=[], env={}, stdin_text="{}"
     )
@@ -189,11 +191,12 @@ def test_background_job_failure_is_durable_and_retryable(tmp_path: Path, monkeyp
     stored = json.loads((tmp_path / "state.json").read_text())["jobs"][job["job_id"]]
 
     assert result["status"] == "retry_wait"
+    assert commands == [[background_jobs.sys.executable, "-m", "example"]]
     assert stored["exit_code"] == 1
     assert "temporary failure" in stored["output_tail"]
 
 
-def test_background_job_load_canonicalizes_durable_legacy_module(
+def test_background_job_load_preserves_durable_module_fields(
     tmp_path: Path, monkeypatch
 ) -> None:
     state_file = tmp_path / "state.json"
@@ -221,8 +224,8 @@ def test_background_job_load_canonicalizes_durable_legacy_module(
     loaded = background_jobs._load()
 
     job = loaded["jobs"]["job-1"]
-    assert job["module"] == "chronovisor.ops.self_heal"
-    assert job["dedupe_key"] != "legacy"
+    assert job["module"] == "chronovisor.self_heal"
+    assert job["dedupe_key"] == "legacy"
 
 
 def test_successful_save_enqueues_audit_after_receipt_in_same_commit(
