@@ -1,17 +1,24 @@
 from __future__ import annotations
 
 import ast
+import random
 from collections import Counter
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+import pytest
+
+from scripts.runtime_ownership import access_model
 from scripts.runtime_ownership.access import discover_access_facts
 from scripts.runtime_ownership.access_facts import AccessFactCollector
 from scripts.runtime_ownership.access_model import (
     MAX_FLOW_VARIANTS,
     FlowValue,
     SyntaxSite,
+    _flow_value_key,
+    _normalize_flow_variants,
+    _without_variants,
     candidate_flow_variants,
     exclusive_flow_join,
     simultaneous_flow_merge,
@@ -22,6 +29,73 @@ from tests.runtime_access_v2_helpers import (
 )
 
 RESOURCE_ID = "runtime-resource:unix-socket"
+
+
+def _reference_normalize_flow_variants(
+    variants: Sequence[FlowValue],
+) -> tuple[tuple[FlowValue, ...], bool]:
+    """Preserve the pre-optimization normalization for exact comparisons."""
+
+    resource_variants: dict[tuple[Any, ...], FlowValue] = {}
+    for variant in variants:
+        normalized = _without_variants(variant)
+        if not normalized.has_origins:
+            continue
+        resource_variants.setdefault(_flow_value_key(normalized), normalized)
+    ordered_resources = [
+        resource_variants[key]
+        for key in sorted(resource_variants, key=repr)
+    ]
+    return (
+        tuple(ordered_resources[:MAX_FLOW_VARIANTS]),
+        len(ordered_resources) > MAX_FLOW_VARIANTS,
+    )
+
+
+def _random_flow_value(
+    generator: random.Random,
+    *,
+    depth: int = 0,
+) -> FlowValue:
+    token = generator.randrange(8)
+    origins: dict[str, frozenset[tuple[str, ...]]] = (
+        {
+            RESOURCE_ID: frozenset(
+                {(f"random:{token}", f"depth:{depth}")}
+            )
+        }
+        if generator.randrange(3)
+        else {}
+    )
+    structured_items = None
+    attribute_values: dict[str, FlowValue] = {}
+    variants: tuple[FlowValue, ...] = ()
+    if depth < 2:
+        if generator.randrange(3) == 0:
+            structured_items = (
+                _random_flow_value(generator, depth=depth + 1),
+            )
+        if generator.randrange(3) == 0:
+            attribute_values = {
+                f"attribute:{token % 3}": _random_flow_value(
+                    generator, depth=depth + 1
+                )
+            }
+        if generator.randrange(2) == 0:
+            variants = (
+                _random_flow_value(generator, depth=depth + 1),
+            )
+    return FlowValue(
+        origins=origins,
+        object_types={f"object:{token % 4}"} if token % 2 else set(),
+        module_refs={f"module:{token % 3}"} if token % 3 else set(),
+        unknown_callable=bool(token % 2),
+        structured_items=structured_items,
+        attribute_values=attribute_values,
+        attribute_values_complete=bool(attribute_values) and token % 2 == 0,
+        attribute_values_ambiguous=bool(attribute_values) and token % 3 == 0,
+        variants=variants,
+    )
 
 
 def _candidate(
@@ -83,6 +157,118 @@ def test_candidate_variants_are_bounded_deduplicated_and_order_stable() -> None:
     assert len(with_originless_state.variants) == MAX_FLOW_VARIANTS
     assert all(variant.has_origins for variant in with_originless_state.variants)
     assert with_originless_state.overflowed == frozenset({RESOURCE_ID})
+
+
+def test_nested_variants_do_not_split_canonical_duplicate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = FlowValue(
+        origins={RESOURCE_ID: frozenset({("shared",)})},
+        object_types={"shared-object"},
+        variants=(
+            FlowValue(origins={RESOURCE_ID: frozenset({("nested:first",)})}),
+        ),
+    )
+    second = FlowValue(
+        origins={RESOURCE_ID: frozenset({("shared",)})},
+        object_types={"shared-object"},
+        variants=(
+            FlowValue(origins={RESOURCE_ID: frozenset({("nested:second",)})}),
+        ),
+    )
+    expected = _without_variants(first)
+    stripped_ids: list[int] = []
+    original_without_variants = access_model._without_variants
+
+    def tracked_without_variants(value: FlowValue) -> FlowValue:
+        stripped_ids.append(id(value))
+        return original_without_variants(value)
+
+    monkeypatch.setattr(access_model, "_without_variants", tracked_without_variants)
+
+    normalized, overflowed = _normalize_flow_variants((first, second))
+
+    assert normalized == (expected,)
+    assert stripped_ids == [id(first)]
+    assert overflowed is False
+
+
+def test_nested_only_originless_variant_is_skipped() -> None:
+    nested_only = FlowValue(
+        structured_items=(
+            FlowValue(origins={RESOURCE_ID: frozenset({("structured",)})}),
+        ),
+        attribute_values={
+            "resource": FlowValue(
+                origins={RESOURCE_ID: frozenset({("attribute",)})}
+            )
+        },
+        variants=(
+            FlowValue(origins={RESOURCE_ID: frozenset({("variant",)})}),
+        ),
+    )
+    direct = FlowValue(origins={RESOURCE_ID: frozenset({("direct",)})})
+
+    normalized, overflowed = _normalize_flow_variants((nested_only, direct))
+
+    assert normalized == (_without_variants(direct),)
+    assert overflowed is False
+
+
+def test_normalized_winner_is_copy_isolated_from_input() -> None:
+    winner = FlowValue(
+        origins={RESOURCE_ID: frozenset({("winner",)})},
+        object_types={"outer"},
+        structured_items=(FlowValue(object_types={"structured"}),),
+        attribute_values={"field": FlowValue(object_types={"attribute"})},
+        variants=(FlowValue(object_types={"discarded-variant"}),),
+    )
+    original = winner.copy()
+
+    normalized, overflowed = _normalize_flow_variants((winner,))
+    normalized[0].origins[RESOURCE_ID] = frozenset({("mutated",)})
+    normalized[0].object_types.add("mutated")
+    assert normalized[0].structured_items is not None
+    normalized[0].structured_items[0].object_types.add("mutated")
+    normalized[0].attribute_values["field"].object_types.add("mutated")
+
+    assert winner == original
+    assert normalized[0].variants == ()
+    assert overflowed is False
+
+
+def test_optimized_normalization_matches_reference_on_bounded_cases() -> None:
+    generator = random.Random(0xC0FFEE)
+    cases: list[list[FlowValue]] = [
+        [],
+        [FlowValue()],
+        [
+            FlowValue(
+                origins={RESOURCE_ID: frozenset({(f"unique:{index}",)})},
+                variants=(FlowValue(object_types={f"nested:{index}"}),),
+            )
+            for index in range(MAX_FLOW_VARIANTS + 1)
+        ],
+    ]
+    for _ in range(32):
+        values = [
+            _random_flow_value(generator)
+            for _ in range(generator.randrange(1, 20))
+        ]
+        if values:
+            duplicate = values[0].copy()
+            duplicate.variants = (FlowValue(object_types={"duplicate-only"}),)
+            values.append(duplicate)
+        cases.append(values)
+
+    for values in cases:
+        expected, expected_overflow = _reference_normalize_flow_variants(values)
+        actual, actual_overflow = _normalize_flow_variants(values)
+        assert actual == expected
+        assert tuple(map(_flow_value_key, actual)) == tuple(
+            map(_flow_value_key, expected)
+        )
+        assert actual_overflow is expected_overflow
 
 
 def test_originless_exclusive_state_is_retained_for_simultaneous_merges() -> None:

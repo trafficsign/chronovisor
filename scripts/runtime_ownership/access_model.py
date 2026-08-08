@@ -819,17 +819,16 @@ def _normalize_flow_variants(
 ) -> tuple[tuple[FlowValue, ...], bool]:
     resource_variants: dict[tuple[Any, ...], FlowValue] = {}
     for variant in variants:
-        normalized = _without_variants(variant)
-        if not normalized.has_origins:
+        if not variant.has_origins:
             continue
-        resource_variants.setdefault(_flow_value_key(normalized), normalized)
-    ordered_resources = [
-        resource_variants[key]
-        for key in sorted(resource_variants, key=repr)
-    ]
+        resource_variants.setdefault(_flow_value_key(variant), variant)
+    ordered_keys = sorted(resource_variants, key=repr)
     return (
-        tuple(ordered_resources[:MAX_FLOW_VARIANTS]),
-        len(ordered_resources) > MAX_FLOW_VARIANTS,
+        tuple(
+            _without_variants(resource_variants[key])
+            for key in ordered_keys[:MAX_FLOW_VARIANTS]
+        ),
+        len(resource_variants) > MAX_FLOW_VARIANTS,
     )
 
 
