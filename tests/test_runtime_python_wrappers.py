@@ -63,6 +63,13 @@ def test_each_uvx_call_pins_python_immediately_and_before_from() -> None:
             assert segment.index(PYTHON_ARGUMENT) < segment.index("--from")
 
 
+def test_library_evidence_invokes_canonical_module_directly() -> None:
+    wrapper = _text("chronovisor-library-evidence")
+
+    assert "python -m chronovisor.lab.classification_library_pilot" in wrapper
+    assert "chronovisor-lab classification-library-pilot" not in wrapper
+
+
 def test_selected_python_is_standard_gil_build_when_available() -> None:
     if not STANDARD_PYTHON.is_file():
         pytest.skip("production Homebrew Python is not installed on this host")
