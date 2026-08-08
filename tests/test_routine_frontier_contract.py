@@ -90,25 +90,16 @@ def test_routine_review_cannot_reach_frontier_execution() -> None:
 def test_codex_subprocess_is_reachable_only_inside_guarded_entrypoint() -> None:
     tree = _tree("decision/frontier_review.py")
     calling_functions: set[str] = set()
-    compatibility_review: ast.FunctionDef | None = None
     for node in tree.body:
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
         called = _called_names(node)
         if "_run_codex" in called:
             calling_functions.add(node.name)
-        if node.name == "run_structured_review":
-            compatibility_review = node
 
     assert calling_functions == {"run_frontier_review"}
-    assert compatibility_review is not None
-    compatibility_calls = _called_names(compatibility_review)
-    assert "_run_codex" not in compatibility_calls
-    assert "run" not in {
-        node.func.attr
-        for node in ast.walk(compatibility_review)
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Attribute)
-        and isinstance(node.func.value, ast.Name)
-        and node.func.value.id == "subprocess"
-    }
+    assert all(
+        not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        or node.name != "run_structured_review"
+        for node in tree.body
+    )

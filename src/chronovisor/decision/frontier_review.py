@@ -23,7 +23,6 @@ from urllib.parse import urlparse
 
 from chronovisor.core.runtime_config import uvx_runtime_command
 from chronovisor.core.store import CHRONOVISOR_ROOT
-from chronovisor.decision import routine_review as _routine_review
 from chronovisor.decision.decision_schema_manifest import FRONTIER_DECISION_SCHEMA
 from chronovisor.ops import runtime_status
 from chronovisor.ops.convergence import (
@@ -34,11 +33,7 @@ from chronovisor.ops.convergence import (
 )
 
 FRONTIER_ACTIVITY_DIR = CHRONOVISOR_ROOT / "runtime" / "frontier-reviews" / "active"
-semantic_hold = _routine_review.semantic_hold
-STRUCTURED_REVIEW_HOLD_CACHE_ROOT = (
-    _routine_review.STRUCTURED_REVIEW_HOLD_CACHE_ROOT
-)
-_STRUCTURED_REVIEW_ROUTER_CONFIG = _routine_review._STRUCTURED_REVIEW_ROUTER_CONFIG
+
 
 def _bounded_timeout(timeout: int | None) -> int:
     requested = timeout or int(
@@ -1173,73 +1168,6 @@ def _extract_json_object(text: str) -> dict[str, Any] | None:
         if isinstance(value, dict):
             return value
     return None
-
-
-
-_structured_route_result = _routine_review._structured_route_result
-_structured_semantic_cache_result_error = (
-    _routine_review._structured_semantic_cache_result_error
-)
-_structured_authority_observation = (
-    _routine_review._structured_authority_observation
-)
-_current_structured_authority = _routine_review._current_structured_authority
-_schema_type_matches = _routine_review._schema_type_matches
-_structured_validation_error = _routine_review._structured_validation_error
-_failure_default = _routine_review._failure_default
-_structured_failure_payload = _routine_review._structured_failure_payload
-_validated_structured_result = _routine_review._validated_structured_result
-
-
-def run_structured_review(
-    prompt: str,
-    schema: dict[str, Any],
-    *,
-    repo_root: Path,
-    audit_root: Path | None = None,
-    timeout: int | None = None,
-    execute_patch: bool = False,
-    command_env: str = "CHRONOVISOR_STRUCTURED_REVIEW_CMD",
-    model_role: str = "semantic_judge",
-    decision_lane: str | None = None,
-    model_override: str | None = None,
-    reasoning_effort_override: str | None = None,
-    record_replay: bool = True,
-    system: str | None = None,
-) -> dict[str, Any]:
-    """Compatibility export for the routine local-consensus entry point."""
-
-    _routine_review.STRUCTURED_REVIEW_HOLD_CACHE_ROOT = (
-        STRUCTURED_REVIEW_HOLD_CACHE_ROOT
-    )
-    _routine_review._structured_route_result = _structured_route_result
-    _routine_review._structured_semantic_cache_result_error = (
-        _structured_semantic_cache_result_error
-    )
-    _routine_review._structured_authority_observation = (
-        _structured_authority_observation
-    )
-    _routine_review._current_structured_authority = _current_structured_authority
-    _routine_review._schema_type_matches = _schema_type_matches
-    _routine_review._structured_validation_error = _structured_validation_error
-    _routine_review._failure_default = _failure_default
-    _routine_review._structured_failure_payload = _structured_failure_payload
-    _routine_review._validated_structured_result = _validated_structured_result
-    return _routine_review.run_structured_review(
-        prompt,
-        schema,
-        repo_root=repo_root,
-        audit_root=audit_root,
-        timeout=timeout,
-        execute_patch=execute_patch,
-        command_env=command_env,
-        model_role=model_role,
-        decision_lane=decision_lane,
-        model_override=model_override,
-        reasoning_effort_override=reasoning_effort_override,
-        record_replay=record_replay,
-        system=system,
-    )
 
 
 def _git_probe(
