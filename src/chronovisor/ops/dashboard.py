@@ -55,13 +55,13 @@ from chronovisor.ops.dashboard_http import (
     _json_response,
     _send_security_headers,
 )
+from chronovisor.ops.dashboard_static import STATIC_DIR, _resolve_static_path
 from chronovisor.ops.health import health_snapshot
 from chronovisor.ops.model_lab import snapshot as model_lab_snapshot
 from chronovisor.recall import recall_runtime
 from chronovisor.recall.recall_auditor import load_audit_policy
 from chronovisor.recall.recall_improvement import configured_models
 
-STATIC_DIR = Path(__file__).resolve().parents[1] / "dashboard_static"
 DASHBOARD_ACCESS_COOKIE = "chronovisor_dashboard_access"
 DASHBOARD_ACCESS_QUERY = "access_token"
 DASHBOARD_TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{32,128}$")
@@ -5676,11 +5676,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     },
                 )
             elif path.startswith("/static/"):
-                rel = path.removeprefix("/static/").lstrip("/")
-                target = (STATIC_DIR / rel).resolve()
-                try:
-                    target.relative_to(STATIC_DIR.resolve())
-                except ValueError:
+                target = _resolve_static_path(STATIC_DIR, path)
+                if target is None:
                     self.send_error(HTTPStatus.FORBIDDEN)
                     return
                 _file_response(self, target)

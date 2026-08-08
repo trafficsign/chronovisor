@@ -1833,6 +1833,22 @@ def test_dashboard_private_client_scope_rejects_public_addresses() -> None:
     assert dashboard._private_client_scope("not-an-ip") == "invalid"
 
 
+def test_dashboard_static_path_resolver_rejects_directory_and_symlink_escapes(
+    tmp_path: Path,
+) -> None:
+    static_dir = tmp_path / "static"
+    static_dir.mkdir()
+    inside = static_dir / "app.js"
+    inside.write_text("inside", encoding="utf-8")
+    outside = tmp_path / "outside.js"
+    outside.write_text("outside", encoding="utf-8")
+    (static_dir / "linked.js").symlink_to(outside)
+
+    assert dashboard._resolve_static_path(static_dir, "/static/app.js") == inside
+    assert dashboard._resolve_static_path(static_dir, "/static/../outside.js") is None
+    assert dashboard._resolve_static_path(static_dir, "/static/linked.js") is None
+
+
 def test_dashboard_lan_hosts_prefers_routable_ip_over_mdns_and_link_local(
     monkeypatch,
 ) -> None:
