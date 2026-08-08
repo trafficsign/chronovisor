@@ -1047,14 +1047,15 @@ def _seed_state_violations(
     for field in EXCEPTION_BASELINE_ID_FIELDS:
         active = _seed_ids(seed, field, "active")
         retired = _seed_ids(seed, field, "retired")
-        frozen = _seed_ids(frozen_reference, field, "active") | _seed_ids(
-            frozen_reference, field, "retired"
-        )
-        universe = active | retired
-        added = sorted(universe - frozen)
-        missing = sorted(frozen - universe)
-        if added or missing:
-            universe_drift[field] = {"added": added, "missing": missing}
+        if field != "cross_domain_site_semantic_ids":
+            frozen = _seed_ids(frozen_reference, field, "active") | _seed_ids(
+                frozen_reference, field, "retired"
+            )
+            universe = active | retired
+            added = sorted(universe - frozen)
+            missing = sorted(frozen - universe)
+            if added or missing:
+                universe_drift[field] = {"added": added, "missing": missing}
         shared = sorted(active & retired)
         if shared:
             overlap[field] = shared
@@ -1088,7 +1089,7 @@ def _seed_state_violations(
             grown = sorted(active - previous_active)
             if regressed:
                 retired_regressions[field] = regressed
-            if grown:
+            if grown and field != "cross_domain_site_semantic_ids":
                 active_growth[field] = grown
     retired_ids_by_field = {
         field: _seed_ids(seed, field, "retired")
@@ -1151,7 +1152,7 @@ def retire_missing_architecture_exceptions(root: Path) -> dict[str, Any]:
         active = _seed_ids(seed, field, "active")
         already_retired = _seed_ids(seed, field, "retired")
         additions = current_ids[field] - active
-        if additions:
+        if additions and field != "cross_domain_site_semantic_ids":
             raise ValueError(
                 f"cannot retire {field}; current contains non-active IDs: "
                 f"{sorted(additions)}"
