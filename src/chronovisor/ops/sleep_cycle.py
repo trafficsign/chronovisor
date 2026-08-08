@@ -23,6 +23,7 @@ from typing import Any
 
 from chronovisor.core.store import CHRONOVISOR_ROOT
 from chronovisor.knowledge_graph.runtime import run_graph_maintenance
+from chronovisor.ops.model_lab import run_due as run_model_lab_due
 from chronovisor.recall.recall_growth import run_growth_cycle
 
 HISTORY_FILE = CHRONOVISOR_ROOT / "runtime" / "sleep-cycle-history.jsonl"
@@ -943,7 +944,7 @@ def _run_sleep_cycle(
     )
     model_lab = _run_lane(
         "model_lab",
-        lambda: __import__("chronovisor.lab.model_lab", fromlist=["run_due"]).run_due(
+        lambda: run_model_lab_due(
             dry_run=dry_run,
             max_evaluations=2,
         ),

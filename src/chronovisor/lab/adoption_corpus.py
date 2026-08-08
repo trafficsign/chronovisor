@@ -42,6 +42,7 @@ from chronovisor.core.runtime_config import (
     load_candidate_decision_router_config,
     load_decision_router_config,
 )
+from chronovisor.core.store import MODEL_LAB_REPLAY_FILE as REPLAY_FILE
 from chronovisor.decision.decision_lane_contract_cases import (
     decision_lane_contract_case_manifest,
     decision_lane_contract_case_manifest_sha256,
@@ -81,7 +82,6 @@ from chronovisor.lab.local_model_eval import (
     load_replay_corpus,
     replay_semantic_effect,
 )
-from chronovisor.lab.model_lab import REPLAY_FILE
 from chronovisor.recall.content_correction import (
     LEGACY_UNFILTERED_SIGNAL,
     correction_signal,

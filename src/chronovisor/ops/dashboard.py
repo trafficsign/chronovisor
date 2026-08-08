@@ -51,6 +51,7 @@ from chronovisor.ops.cortex import (
     websocket_text_frame,
 )
 from chronovisor.ops.health import health_snapshot
+from chronovisor.ops.model_lab import snapshot as model_lab_snapshot
 from chronovisor.recall import recall_runtime
 from chronovisor.recall.recall_auditor import load_audit_policy
 from chronovisor.recall.recall_improvement import configured_models
@@ -3917,9 +3918,7 @@ def _recall_improvement_snapshot() -> dict[str, Any]:
 
 def _model_lab_snapshot() -> dict[str, Any]:
     try:
-        from chronovisor.lab.model_lab import snapshot
-
-        return snapshot()
+        return model_lab_snapshot()
     except Exception as exc:
         return {
             "status": "error",
