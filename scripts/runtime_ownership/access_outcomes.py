@@ -53,30 +53,33 @@ class BlockResult:
         for outcome in self.outcomes:
             if outcome.kind == "return":
                 return_values.append(outcome.value)
+        has_bottom_return = any(
+            not candidate.has_analysis_state for candidate in return_values
+        )
+        has_normal_outcome = any(
+            outcome.kind == "normal" for outcome in self.outcomes
+        )
         value = exclusive_flow_join(return_values)
         mark_attribute_alternative_ambiguity(value, return_values)
-        if any(outcome.kind == "normal" for outcome in self.outcomes):
+        if has_normal_outcome:
             mark_attribute_alternative_ambiguity(
                 value,
                 [*return_values, FlowValue()],
             )
         if has_fcntl_lock_mask(value) and (
-            any(candidate == FlowValue() for candidate in return_values)
-            or any(outcome.kind == "normal" for outcome in self.outcomes)
+            has_bottom_return or has_normal_outcome
         ):
             value.object_types.add(
                 FCNTL_UNRESOLVED_LOCK_OPERATION_OBJECT_TYPE
             )
         if has_file_descriptor_object(value) and (
-            any(candidate == FlowValue() for candidate in return_values)
-            or any(outcome.kind == "normal" for outcome in self.outcomes)
+            has_bottom_return or has_normal_outcome
         ):
             value.object_types.add(
                 UNRESOLVED_RUNTIME_OBJECT_ALTERNATIVE_TYPE
             )
         if is_exact_path_receiver(value) and (
-            any(candidate == FlowValue() for candidate in return_values)
-            or any(outcome.kind == "normal" for outcome in self.outcomes)
+            has_bottom_return or has_normal_outcome
         ):
             value.object_types.add(
                 UNRESOLVED_RUNTIME_OBJECT_ALTERNATIVE_TYPE
@@ -108,25 +111,24 @@ def join_states(states: Iterable[StateSnapshot]) -> StateSnapshot:
     for name in names:
         candidates: list[FlowValue] = []
         for state_env, _objects in materialized:
-            candidate = state_env.get(name, FlowValue())
+            candidate = state_env.get(name)
+            if candidate is None:
+                candidate = FlowValue()
             candidates.append(candidate)
+        has_bottom = any(
+            not candidate.has_analysis_state for candidate in candidates
+        )
         value = exclusive_flow_join(candidates)
         mark_attribute_alternative_ambiguity(value, candidates)
-        if has_fcntl_lock_mask(value) and any(
-            candidate == FlowValue() for candidate in candidates
-        ):
+        if has_fcntl_lock_mask(value) and has_bottom:
             value.object_types.add(
                 FCNTL_UNRESOLVED_LOCK_OPERATION_OBJECT_TYPE
             )
-        if has_file_descriptor_object(value) and any(
-            candidate == FlowValue() for candidate in candidates
-        ):
+        if has_file_descriptor_object(value) and has_bottom:
             value.object_types.add(
                 UNRESOLVED_RUNTIME_OBJECT_ALTERNATIVE_TYPE
             )
-        if is_exact_path_receiver(value) and any(
-            candidate == FlowValue() for candidate in candidates
-        ):
+        if is_exact_path_receiver(value) and has_bottom:
             value.object_types.add(
                 UNRESOLVED_RUNTIME_OBJECT_ALTERNATIVE_TYPE
             )

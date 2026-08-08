@@ -512,6 +512,20 @@ def test_exclusive_join_matches_reference_for_adversarial_values() -> None:
         [],
         [FlowValue()],
         [FlowValue(origins={RESOURCE_ID: frozenset({("single",)})})],
+        [
+            FlowValue(
+                variants=(
+                    FlowValue(
+                        origins={
+                            RESOURCE_ID: frozenset({("variant-only",)})
+                        }
+                    ),
+                )
+            ),
+            FlowValue(
+                origins={RESOURCE_ID: frozenset({("later-direct",)})}
+            ),
+        ],
     ]
     for _ in range(64):
         values = [
@@ -549,6 +563,7 @@ def test_exclusive_join_only_strips_truthy_top_variants(
         ),
     )
     expected = _reference_exclusive_flow_join((direct, branched))
+    expected_reverse = _reference_exclusive_flow_join((branched, direct))
     stripped_ids: list[int] = []
     original = access_model._without_top_variants
 
@@ -559,6 +574,9 @@ def test_exclusive_join_only_strips_truthy_top_variants(
     monkeypatch.setattr(access_model, "_without_top_variants", tracked)
 
     assert exclusive_flow_join((direct, branched)) == expected
+    assert stripped_ids == [id(branched)]
+    stripped_ids.clear()
+    assert exclusive_flow_join((branched, direct)) == expected_reverse
     assert stripped_ids == [id(branched)]
 
 

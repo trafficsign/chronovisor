@@ -932,17 +932,24 @@ def exclusive_flow_join(alternatives: Sequence[FlowValue]) -> FlowValue:
     """Join mutually exclusive values without tainting one candidate path by another."""
 
     materialized = list(alternatives)
-    result = FlowValue()
+    if materialized:
+        first = materialized[0]
+        result = (
+            _without_top_variants(first) if first.variants else first.copy()
+        )
+    else:
+        result = FlowValue()
     variants: list[FlowValue] = []
     has_originless_alternative = False
     tainted_resources: set[str] = set()
-    for alternative in materialized:
-        merge_value = (
-            _without_top_variants(alternative)
-            if alternative.variants
-            else alternative
-        )
-        result = result.merged(merge_value)
+    for index, alternative in enumerate(materialized):
+        if index:
+            merge_value = (
+                _without_top_variants(alternative)
+                if alternative.variants
+                else alternative
+            )
+            result = result.merged(merge_value)
         variants.extend(_all_flow_variants(alternative))
         has_originless_alternative |= alternative.has_originless_alternative or (
             not alternative.has_origins and alternative.has_analysis_state
