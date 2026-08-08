@@ -3085,17 +3085,17 @@ def _legacy_machine_source_ledger_entry_error(entry: object) -> str:
     try:
         from chronovisor.search.search_eval import (
             FRONTIER_LABEL_SCHEMA,
-            _label_candidate_payload,
-            _label_review_artifact_error,
-            _label_tuple_from_review,
+            label_candidate_payload,
+            label_review_artifact_error,
+            label_tuple_from_review,
         )
 
         artifact = row.get("decision_artifact")
         artifact_map = artifact if isinstance(artifact, Mapping) else {}
         authority = artifact_map.get("authority")
-        evidence = _label_candidate_payload(row)
+        evidence = label_candidate_payload(row)
         review = artifact_map.get("review")
-        error = _label_review_artifact_error(
+        error = label_review_artifact_error(
             artifact,
             evidence=evidence,
             current_authority=authority,
@@ -3166,7 +3166,7 @@ def _legacy_machine_source_ledger_entry_error(entry: object) -> str:
         or decision != review_decision
         or not isinstance(review, Mapping)
         or review.get("decision") != "approved"
-        or _label_tuple_from_review(dict(review)) != expected
+        or label_tuple_from_review(dict(review)) != expected
         or row.get("reviewed") is not True
         or row.get("source") not in {"recall_questions", "recall_question"}
         or not isinstance(row.get("query"), str)
@@ -3340,9 +3340,9 @@ def _search_label_candidate_subject(packet: Mapping[str, Any]) -> dict[str, Any]
 def _freeze_search_label_candidate_packet(row: Mapping[str, Any]) -> dict[str, Any]:
     """Freeze one preregistered RQ only while its exact page bytes still match."""
 
-    from chronovisor.search.search_eval import _auto_candidate_preregistration_error
+    from chronovisor.search.search_eval import auto_candidate_preregistration_error
 
-    preregistration_error = _auto_candidate_preregistration_error(row)
+    preregistration_error = auto_candidate_preregistration_error(row)
     if preregistration_error:
         raise ValueError(preregistration_error)
     preregistered_at = _strict_utc(row.get("preregistered_at"))
@@ -4426,11 +4426,11 @@ def build_independent_answer_benchmark(
         or len({str(row.get("entry_sha256") or "") for row in manual_entries if isinstance(row, Mapping)}) != 94
     ):
         return {"status": "held", "reason": "manual94_authority_invalid"}
-    from chronovisor.search.search_eval import _sealed_manifest_entry, load_examples
+    from chronovisor.search.search_eval import load_examples, sealed_manifest_entry
 
     golden_by_entry: dict[str, list[Any]] = {}
     for example in load_examples(golden_file, reviewed_only=True):
-        sealed_entry = _sealed_manifest_entry(example)
+        sealed_entry = sealed_manifest_entry(example)
         golden_by_entry.setdefault(str(sealed_entry["entry_sha256"]), []).append(
             example
         )
@@ -4451,7 +4451,7 @@ def build_independent_answer_benchmark(
             or entry_sha != _canonical_sha(entry_unsigned)
             or raw_entry.get("reviewed") is not True
             or example is None
-            or _sealed_manifest_entry(example) != raw_entry
+            or sealed_manifest_entry(example) != raw_entry
         ):
             return {"status": "held", "reason": "manual94_search_join_invalid"}
         expected_pages = [

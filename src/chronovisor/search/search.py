@@ -590,6 +590,9 @@ def _iter_all_embeddings() -> "list[tuple[str, list[float], float, float]]":
     return out
 
 
+iter_all_embeddings = _iter_all_embeddings
+
+
 def _iter_all_chunk_embeddings() -> (
     "list[tuple[str, str, int, str, list[float], float, float]]"
 ):

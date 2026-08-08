@@ -2704,6 +2704,9 @@ def _ensure_recall_metadata_frontmatter(
     return patch(text, updates)
 
 
+ensure_recall_metadata_frontmatter = _ensure_recall_metadata_frontmatter
+
+
 def _ensure_page_metadata_frontmatter(
     text: str,
     page_id: str,
@@ -3970,6 +3973,10 @@ def _rebuild_index() -> None:
         lines.append(f"- [[{p.stem}]] — {title}")
 
     INDEX_FILE.write_text("\n".join(lines) + "\n")
+
+
+def rebuild_index() -> None:
+    _rebuild_index()
 
 
 def _append_log(message: str) -> None:

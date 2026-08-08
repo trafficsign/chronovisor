@@ -2317,6 +2317,9 @@ to true only after explicitly checking this boundary.
 """
 
 
+frontier_prompt = _frontier_prompt
+
+
 def run_frontier_judge(
     event: dict[str, Any],
     proposal: dict[str, Any],
@@ -2454,6 +2457,9 @@ checking that boundary.
 {json.dumps(mutation_projections, ensure_ascii=False, indent=2)}
 </PREPARED_MUTATIONS_UNTRUSTED_JSON>
 """
+
+
+frontier_classification_prompt = _frontier_classification_prompt
 
 
 def _classification_context_projection(value: object) -> dict[str, Any] | None:
@@ -3336,9 +3342,9 @@ def _refresh_after_apply(page_ids: list[str]) -> dict[str, Any]:
         result["claims"] = f"error:{exc.__class__.__name__}"
         result["errors"].append(f"claims:{exc}")
     try:
-        from chronovisor.ingest.ingest import _rebuild_index
+        from chronovisor.ingest.ingest import rebuild_index
 
-        _rebuild_index()
+        rebuild_index()
         result["index_markdown"] = "ok"
     except Exception as exc:
         result["index_markdown"] = f"error:{exc.__class__.__name__}"

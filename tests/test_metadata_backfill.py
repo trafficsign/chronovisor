@@ -30,7 +30,7 @@ def test_cached_rejection_does_not_pin_later_metadata_candidates(tmp_path: Path,
         meta, _body = parse(text)
         return patch(text, {"summary": f"{meta['title']} summary", "recall_questions": [f"What is {meta['title']}?"]})
 
-    monkeypatch.setattr(metadata_backfill, "_ensure_recall_metadata_frontmatter", propose)
+    monkeypatch.setattr(metadata_backfill, "ensure_recall_metadata_frontmatter", propose)
     calls: list[str] = []
 
     def reviewer(prompt, _schema):
@@ -52,7 +52,7 @@ def test_local_metadata_proposal_is_stable_for_exact_preimage(tmp_path: Path, mo
     generated = iter(["proposal one", "proposal two"])
     monkeypatch.setattr(
         metadata_backfill,
-        "_ensure_recall_metadata_frontmatter",
+        "ensure_recall_metadata_frontmatter",
         lambda *_args: next(generated),
     )
 

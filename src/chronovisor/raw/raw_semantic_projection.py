@@ -983,11 +983,11 @@ def project_native_transcript(
         phase: str | None = None
         event_type: str | None = None
         if commit.host == "codex":
-            from chronovisor.hosts.codex_record import _codex_semantic_view
+            from chronovisor.hosts.codex_record import codex_semantic_view
 
             item_type = event.get("type")
             payload = event.get("payload")
-            role, text = _codex_semantic_view(item_type, payload)
+            role, text = codex_semantic_view(item_type, payload)
             payload_type = payload.get("type") if isinstance(payload, dict) else None
             event_type = (
                 payload_type
@@ -1006,12 +1006,12 @@ def project_native_transcript(
                 "phase": phase,
             }
         elif commit.host == "claude-code":
-            from chronovisor.hosts.claude_code_record import _claude_semantic_view
+            from chronovisor.hosts.claude_code_record import claude_semantic_view
 
             item_type = event.get("type")
             message = event.get("message")
             content = message.get("content") if isinstance(message, dict) else None
-            role, text = _claude_semantic_view(item_type, content)
+            role, text = claude_semantic_view(item_type, content)
             event_type = item_type if isinstance(item_type, str) else None
             semantic_row = {
                 "line": source_line,

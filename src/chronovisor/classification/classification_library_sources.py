@@ -26,7 +26,7 @@ from chronovisor.classification.classification_fixture_contract import (
     sha256_file,
 )
 from chronovisor.core.durable_state import read_sealed_json, write_sealed_json
-from chronovisor.core.jsonl_write import atomic_replace_bytes as _atomic_write
+from chronovisor.core.jsonl_write import atomic_replace_bytes as atomic_write
 from chronovisor.core.timeutil import utc_iso_milliseconds as _now
 
 EXTERNAL_PACKAGE_SCHEMA = "chronovisor.external-library-package.v1"
@@ -36,6 +36,8 @@ MARC_NS = "http://www.loc.gov/MARC21/slim"
 RDF_NS = "http://www.w3.org/1999/02/22-rdf-syntax-ns#"
 SKOS_NS = "http://www.w3.org/2004/02/skos/core#"
 MAX_DOWNLOAD_BYTES = 2 * 1024**3
+
+_atomic_write = atomic_write
 
 
 

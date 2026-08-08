@@ -198,7 +198,7 @@ def test_calibration_cycle_requires_background_local_consensus(
     )
     monkeypatch.setattr(
         rubric_calibration,
-        "_router_for_producer",
+        "router_for_producer",
         lambda *_args: SimpleNamespace(
             decide=lambda *_call_args, **_kwargs: SimpleNamespace(
                 ok=True,

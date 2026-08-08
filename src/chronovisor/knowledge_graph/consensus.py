@@ -56,6 +56,9 @@ def _router_for_producer(
     )
 
 
+router_for_producer = _router_for_producer
+
+
 def _page_paths(root: Path, page_id: str) -> tuple[Path, ...]:
     direct = (
         root / "pages" / f"{page_id}.md",

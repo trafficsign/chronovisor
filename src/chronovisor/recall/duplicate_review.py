@@ -16,7 +16,7 @@ import numpy as np
 
 from chronovisor.core.store import CHRONOVISOR_ROOT
 from chronovisor.search.index_store import get_store
-from chronovisor.search.search import _iter_all_embeddings
+from chronovisor.search.search import iter_all_embeddings
 
 REVIEW_QUEUE = CHRONOVISOR_ROOT / "review" / "duplicate-candidates.jsonl"
 
@@ -191,7 +191,7 @@ def embedding_duplicate_candidates(
     meta_by_id = {str(meta.get("page_id", "")): meta for meta in metas}
     rows = [
         (pid, vec, norm)
-        for pid, vec, _mtime, norm in _iter_all_embeddings()
+        for pid, vec, _mtime, norm in iter_all_embeddings()
         if pid in meta_by_id and norm > 0
     ]
     if not rows or limit <= 0:

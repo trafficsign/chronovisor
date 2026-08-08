@@ -2371,8 +2371,8 @@ def _publish_semantic_no_quorum_defer(
     from chronovisor.decision.failure_supervisor import (
         SEMANTIC_NO_QUORUM_DEFER_REASON,
         SEMANTIC_NO_QUORUM_FAILURE_CLASS,
-        _current_adopted_authority_sha256,
         classify_failure,
+        current_adopted_authority_sha256,
         record_semantic_no_quorum_defer_unless_operational_hold,
     )
 
@@ -2409,7 +2409,7 @@ def _publish_semantic_no_quorum_defer(
     # authority transaction.  A concurrent artifact change must release the
     # old split instead of publishing a stale hold.
     with decision_authority_lock():
-        if _current_adopted_authority_sha256() != authority_sha256:
+        if current_adopted_authority_sha256() != authority_sha256:
             return None
         supervision = record_semantic_no_quorum_defer_unless_operational_hold(
             raw_path=path,
@@ -2439,8 +2439,8 @@ def _preview_semantic_no_quorum_defer(
     from chronovisor.decision.failure_supervisor import (
         SEMANTIC_NO_QUORUM_DEFER_REASON,
         SEMANTIC_NO_QUORUM_FAILURE_CLASS,
-        _current_adopted_authority_sha256,
         classify_failure,
+        current_adopted_authority_sha256,
     )
 
     failure = classify_failure(error)
@@ -2463,7 +2463,7 @@ def _preview_semantic_no_quorum_defer(
             return None
     except OSError:
         return None
-    if _current_adopted_authority_sha256() != authority_sha256:
+    if current_adopted_authority_sha256() != authority_sha256:
         return None
     return {
         "reason": SEMANTIC_NO_QUORUM_DEFER_REASON,
@@ -2490,8 +2490,8 @@ def _cheap_semantic_no_quorum_candidate(
     from chronovisor.decision.failure_supervisor import (
         SEMANTIC_NO_QUORUM_DEFER_REASON,
         SEMANTIC_NO_QUORUM_FAILURE_CLASS,
-        _current_adopted_authority_sha256,
         classify_failure,
+        current_adopted_authority_sha256,
     )
 
     if active_reason == SEMANTIC_NO_QUORUM_DEFER_REASON:
@@ -2513,7 +2513,7 @@ def _cheap_semantic_no_quorum_candidate(
         failure.failure_class != SEMANTIC_NO_QUORUM_FAILURE_CLASS
         or not isinstance(authority_sha256, str)
         or re.fullmatch(r"[0-9a-f]{64}", authority_sha256) is None
-        or _current_adopted_authority_sha256() != authority_sha256
+        or current_adopted_authority_sha256() != authority_sha256
         or not isinstance(expected_raw_sha256, str)
         or re.fullmatch(r"[0-9a-f]{64}", expected_raw_sha256) is None
         or path is None
@@ -2603,8 +2603,8 @@ def _active_semantic_defer_packet_evidence(
         return None
     from chronovisor.decision.failure_supervisor import (
         SEMANTIC_NO_QUORUM_DEFER_REASON,
-        _current_adopted_authority_epoch,
-        _semantic_defer_packet_records,
+        current_adopted_authority_epoch,
+        semantic_defer_packet_records,
     )
 
     expected_sha256 = row.get("raw_sha256")
@@ -2613,9 +2613,9 @@ def _active_semantic_defer_packet_evidence(
         or re.fullmatch(r"[0-9a-f]{64}", expected_sha256) is None
     ):
         return None
-    current_authority_epoch = _current_adopted_authority_epoch()
+    current_authority_epoch = current_adopted_authority_epoch()
     for packet_path, packet, packet_raws in reversed(
-        _semantic_defer_packet_records(verify_sources=True)
+        semantic_defer_packet_records(verify_sources=True)
     ):
         if raw_name not in packet_raws:
             continue

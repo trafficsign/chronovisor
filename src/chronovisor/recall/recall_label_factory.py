@@ -53,6 +53,9 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
+read_jsonl = _read_jsonl
+
+
 def _digest(value: str) -> str:
     return hashlib.sha256(value.encode()).hexdigest()
 

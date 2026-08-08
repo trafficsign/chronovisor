@@ -1365,6 +1365,9 @@ Return JSON matching this schema:
 """
 
 
+build_safe_fix_prompt = _build_safe_fix_prompt
+
+
 def _default_safe_fix_reviewer(
     prompt: str,
     schema: dict[str, Any],

@@ -224,6 +224,10 @@ def _client() -> httpx.Client:
     return _CLIENT
 
 
+def client() -> httpx.Client:
+    return _client()
+
+
 def _raise_for_status_with_detail(response: httpx.Response) -> None:
     """Preserve Ollama's bounded error body in runtime diagnostics."""
 

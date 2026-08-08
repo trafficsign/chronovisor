@@ -13,7 +13,7 @@ from chronovisor.core.frontmatter import parse, patch
 from chronovisor.core.link_fix import atomic_write
 from chronovisor.core.runtime_config import runtime_repo_root
 from chronovisor.core.store import CHRONOVISOR_ROOT, all_pages, page_id_from_path
-from chronovisor.ingest.ingest import _ensure_recall_metadata_frontmatter
+from chronovisor.ingest.ingest import ensure_recall_metadata_frontmatter
 from chronovisor.ingest.page_mutation import chronovisor_mutation_lock
 from chronovisor.ops.lint import (
     build_semantic_mutation_proposal,
@@ -72,7 +72,7 @@ def _stable_local_proposal(original: str, page_id: str) -> str:
             == hashlib.sha256(proposed.encode("utf-8")).hexdigest()
         ):
             return proposed
-    proposed = _ensure_recall_metadata_frontmatter(original, page_id, parse, patch)
+    proposed = ensure_recall_metadata_frontmatter(original, page_id, parse, patch)
     envelope = {
         "version": PROPOSAL_VERSION,
         "page_id": page_id,

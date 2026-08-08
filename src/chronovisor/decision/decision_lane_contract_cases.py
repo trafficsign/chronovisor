@@ -234,7 +234,7 @@ def _safe_mutation_requests(
     | None = None,
 ) -> list[tuple[str, str | None, dict[str, Any]]]:
     from chronovisor.ops.lint import (
-        _build_safe_fix_prompt,
+        build_safe_fix_prompt,
         build_semantic_mutation_proposal,
     )
 
@@ -278,7 +278,7 @@ def _safe_mutation_requests(
             )
         requests.append(
             (
-                _build_safe_fix_prompt(proposal, expected_text=before),
+                build_safe_fix_prompt(proposal, expected_text=before),
                 None,
                 _generic_expected(
                     decision, f"{operation} contract {index}: {decision}"
@@ -442,7 +442,7 @@ def _retention_cases() -> list[tuple[str, str | None, dict[str, Any]]]:
 
 
 def _classification_cases() -> list[tuple[str, str | None, dict[str, Any]]]:
-    from chronovisor.recall.content_correction import _frontier_classification_prompt
+    from chronovisor.recall.content_correction import frontier_classification_prompt
 
     check_names = (
         "user_correction_supported",
@@ -558,7 +558,7 @@ def _classification_cases() -> list[tuple[str, str | None, dict[str, Any]]]:
         }
         requests.append(
             (
-                _frontier_classification_prompt(event, proposal, [], page_evidence),
+                frontier_classification_prompt(event, proposal, [], page_evidence),
                 None,
                 expected,
             )
@@ -568,7 +568,7 @@ def _classification_cases() -> list[tuple[str, str | None, dict[str, Any]]]:
 
 def _content_review_cases() -> list[tuple[str, str | None, dict[str, Any]]]:
     from chronovisor.ingest.page_mutation import ExactReplacement, PreparedPageMutation
-    from chronovisor.recall.content_correction import _frontier_prompt
+    from chronovisor.recall.content_correction import frontier_prompt
 
     check_names = (
         "user_correction_supported",
@@ -751,7 +751,7 @@ def _content_review_cases() -> list[tuple[str, str | None, dict[str, Any]]]:
         }
         requests.append(
             (
-                _frontier_prompt(
+                frontier_prompt(
                     event,
                     proposal,
                     mutations,
@@ -772,8 +772,8 @@ def _content_review_cases() -> list[tuple[str, str | None, dict[str, Any]]]:
 
 def _entity_backfill_cases() -> list[tuple[str, str | None, dict[str, Any]]]:
     from chronovisor.ops.entities import (
-        _review_evidence,
         patch_entities_frontmatter,
+        review_evidence,
         validate_entity_backfill_proposal,
     )
 
@@ -811,7 +811,7 @@ def _entity_backfill_cases() -> list[tuple[str, str | None, dict[str, Any]]]:
             (
                 before,
                 after,
-                _review_evidence(before, after, registry=registry),
+                review_evidence(before, after, registry=registry),
                 decision,
             )
         )
@@ -1327,7 +1327,7 @@ def _lint_safe_mutation_cases() -> list[tuple[str, str | None, dict[str, Any]]]:
         "broken_link_retarget",
     ]
     from chronovisor.ops.lint import (
-        _build_safe_fix_prompt,
+        build_safe_fix_prompt,
         build_semantic_mutation_proposal,
     )
 
@@ -1362,7 +1362,7 @@ def _lint_safe_mutation_cases() -> list[tuple[str, str | None, dict[str, Any]]]:
             )
         requests.append(
             (
-                _build_safe_fix_prompt(proposal, expected_text=before),
+                build_safe_fix_prompt(proposal, expected_text=before),
                 None,
                 _generic_expected(
                     decision, f"{operation} contract resolves as {decision}"

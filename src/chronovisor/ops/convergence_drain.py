@@ -323,7 +323,7 @@ def _adoption_artifact_fingerprint() -> dict[str, Any]:
 
     from chronovisor.core.runtime_config import load_decision_router_config
     from chronovisor.decision.decision_router import (
-        _config_error,
+        config_error,
         resolve_router_policy,
     )
 
@@ -346,7 +346,7 @@ def _adoption_artifact_fingerprint() -> dict[str, Any]:
         }
 
     configured_projection = asdict(configured)
-    configured_error = _config_error(configured)
+    configured_error = config_error(configured)
     nominated = configured.adoption_artifact.strip()
     if nominated:
         path = Path(nominated).expanduser()
@@ -362,7 +362,7 @@ def _adoption_artifact_fingerprint() -> dict[str, Any]:
     try:
         resolution = resolve_router_policy(configured)
         resolved_projection = asdict(resolution.config)
-        resolved_config_error = _config_error(resolution.config)
+        resolved_config_error = config_error(resolution.config)
         resolved = {
             "status": (
                 "ok"

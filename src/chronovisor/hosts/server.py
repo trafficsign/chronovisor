@@ -360,9 +360,9 @@ def chronovisor_status() -> str:
     # behaviour change.
     ollama_status = "unknown"
     try:
-        from chronovisor.core.ollama import _client
+        from chronovisor.core.ollama import client
 
-        resp = _client().get("/api/tags", timeout=3)
+        resp = client().get("/api/tags", timeout=3)
         ollama_status = "running" if resp.status_code == 200 else "error"
     except Exception:
         ollama_status = "stopped"

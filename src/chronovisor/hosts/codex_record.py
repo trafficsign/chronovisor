@@ -338,6 +338,9 @@ def _codex_semantic_view(item_type: Any, payload: Any) -> tuple[str, str]:
     return role, message_content_text(semantic_content)
 
 
+codex_semantic_view = _codex_semantic_view
+
+
 def sanitize_message_content(content: Any) -> Any:
     """Build a semantic-only view; the raw ``event`` remains untouched."""
     if isinstance(content, str):

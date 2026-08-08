@@ -170,6 +170,58 @@ P6_RETIRED_SITE_IDS = (
     "arch:d75501787f96455c30118b5a40578f63ea5d26dd79f75676267e19551669dba9",
     "arch:e0041488f7773b3fd6f8a1e5768041c91b4afd7c222787920728c6e6ef8fd0e6",
 )
+P8_RETIRED_EXCEPTION_IDS = (
+    "arch:0dd175ac5f39948a2ea0105bd57085bc0ad73146211af3bb2fd4145ce3e85500",
+    "arch:28c3a88a93f1de01512b7f754d6750ed14917c793cf8dd1469180be7e10d1b19",
+    "arch:338b445c2207aafffd487bcb16cd0a25071ef34a3860d4a7be4f472326527990",
+    "arch:41f00727fc440966e09b85f6fbf82b0ddb3cebfd242ce258c8b322705d627986",
+    "arch:4378d25de1fb1ddbe365e869d32cb5356c149f66771ab10c2e498266c0bfc0f3",
+    "arch:590fa4fd0924687c1a913b2af7f182f92143de6fbbf0e541f64953d16a179408",
+    "arch:648a9b9e052d10909f44d4b79186d0793a5de7ce64b918b3f98482561d55818c",
+    "arch:6abce68a5a1e666ebff3595b7b7cb404ef0a97215372636843e1ec041630493a",
+    "arch:6cc04644754e482ed6ae7e9859ad0fac7ed50e8b4835de515d0b1ad38b824d79",
+    "arch:7154180a53adc001e2ce4811641f166678933f36f4d85168227508aecf661719",
+    "arch:72a718cc63232593dfbd7ffc828f783ab5af79e501158637e58604e8219e82ca",
+    "arch:7d4e47bd194181a9b13b16420474fbc3403a2059f771569ef26617fa14c08ef2",
+    "arch:9187b1564e97702b2c73709ba1ebae7a4b04280dd12f78d0d4bed66c46c5b794",
+    "arch:95bdc07367c91b215296553d55fd82c5953fbfef4629d534980c6da0c9cd222f",
+    "arch:9891f454d950d68fd2895bfe17e55ca371eb284e7abf0041b91299ce393b1a1a",
+    "arch:9b54312069c9a4d226d034ccd821763d8227c003cc5b31d29243e76d465123e1",
+    "arch:9be0fa9078776c58c283d3dc92b97af31c7828b7cd0bb496b167981eac0f35ed",
+    "arch:9c938719975bdadaa3c4946e8622bf2a4a66d26c5a34eff815b2eb958c2bf95f",
+    "arch:a2ca34a4cc432e3fb966ab693529f5f1a4ef36f4de07655c0cfc29ab1e319039",
+    "arch:b85bca5b566b069e65c44d23689a6fc707768712de8b789913734814b8ecf640",
+    "arch:d75e577e883bebe790d233a96cf5dde988790e705c776ab677dd4f96ec3e691c",
+    "arch:e1e7224a039e1e222df0c954dc473c9829c6102f7279927927c48c9e63b6f2a2",
+    "arch:e9fa9bce4c0a06aa0146a84a4ba56ec0137c485109ed9064c9109699917c0988",
+    "arch:fbdec81173e15632af15abe3ca6495603c199d519fcafaf1891b52e3902c4e17",
+)
+P8_RETIRED_SITE_IDS = (
+    "arch:05a5644c1c8f4dd7536dfa0ff41043eeb47e345093018b6794bed6f5808711df",
+    "arch:17f858bf2bfddb6e63415b822ff82724119dc57418147be329a08c242f155a4e",
+    "arch:3eb89b4f98050387999ec5390c5bed0764626ed8a258efb28e2887dc8c9d9576",
+    "arch:41a537e2dd25f011407cd49f335a1409af848d1a7dfa0c67f994a944c59a9310",
+    "arch:4588bb1ce077357947e20e066c6093ae4fd37a0da12115ea4d4eb50dfcb506ca",
+    "arch:4d60610f1891ba0fce296751c45342fba1e11422a1154372dd68ef9fb209cee1",
+    "arch:54594cf5b153251205c0f1a64f2802f2c8434e3470238ffc4077e54c913d215c",
+    "arch:5c50cd737a1946fbee84ca62d05f871f8b0501fdaaf195887d0015e1369bd47a",
+    "arch:5c6f34e998db473f557450427911060f10d2104a08edcc5ce9d571df6a9e30b4",
+    "arch:704b12abe8163940b25486bdad5a611795f5fefcb41181979a145d6535e23a09",
+    "arch:7732b045d37b3b0908200e20b8363574942fea9697833942639ef630b1f85fc8",
+    "arch:866bbdab4f7d3bc8bff91b6be7a381959a2869e0ea745089d075418637bef7b2",
+    "arch:93d16b885ad11b7bb1c80e7828a3f11c4360cc4f1a7ee6d23582513ed9c020ad",
+    "arch:9c72014099f660aa1a4c423d8f320d8ca3e184208e518e8251c6533d818a67bb",
+    "arch:a0657ac2ea78d3f4b9f89d408926ea25114c6db8618a0493c4e0c05bb1da5f56",
+    "arch:a86be5811e6fe125b2c97401a36498267f440fa9beec2590bfc1ed59e62b9cde",
+    "arch:a95706f14c430049687c0c78ad294625b60d2d12e171d5823912b0fbd63eceed",
+    "arch:aeedfb954b8e0397f834e7a90459f6df0f2e9b8beb128c7739f8646c84fdd0f4",
+    "arch:b2e6e19cdf61d0a42cb4f53676b94eb3abcebfadd941922cbc49418b8fa352df",
+    "arch:d7babd64ddbfa4c8fa1284a37e088fb938e78a1cfae8f887c57cc5a129c4ee90",
+    "arch:de6ae4bbda036951b03e1ed2118299d645683c0ef9a8ca5ae58178631cae2afa",
+    "arch:e025071ee401c58f20d9ec33d033bae0f9e5e63048d9a4c40988927c3c13cc2a",
+    "arch:e0f682cdefa0a5826d0fd863f8567461073a1ff7d7b2a81ddf69368cf4fc9f37",
+    "arch:ffe37b3f777b7be66e4a055426d26f1a7750aa4654290db9a8e7e824e94f643b",
+)
 RETIREMENT_HISTORY = {
     "exception_semantic_ids": tuple(
         sorted(
@@ -183,6 +235,7 @@ RETIREMENT_HISTORY = {
                 P4A_RETIRED_OPS_LAB_DYNAMIC_SITE_ID,
                 *P5_RETIRED_EXCEPTION_IDS,
                 *P6_RETIRED_EXCEPTION_IDS,
+                *P8_RETIRED_EXCEPTION_IDS,
             )
         )
     ),
@@ -198,6 +251,7 @@ RETIREMENT_HISTORY = {
                 P4_RETIRED_SEARCH_LAB_SITE_ID,
                 *P5_RETIRED_SITE_IDS,
                 *P6_RETIRED_SITE_IDS,
+                *P8_RETIRED_SITE_IDS,
             )
         )
     ),
@@ -461,7 +515,7 @@ def _without_persisted_retirement_history(
     active_counts["exceptions"] += len(RETIREMENT_HISTORY["exception_semantic_ids"])
     active_counts["by_category"]["cross_domain_edge"] += 5
     active_counts["by_category"]["dynamic_import"] += 1
-    active_counts["by_category"]["private_symbol_import"] += 7
+    active_counts["by_category"]["private_symbol_import"] = 31
     active_counts["by_category"]["schema_manifest_implementation_import"] = len(
         P6_RETIRED_EXCEPTION_IDS
     )
@@ -886,7 +940,7 @@ def test_current_exception_ledger_seed_and_schema_inventory_are_exact(
             "compatibility_contracts",
         )
     } == {
-        "exceptions": 137,
+        "exceptions": 113,
         "cross_domain_sites": 1245,
         "production_to_lab_edges": 0,
         "production_to_lab_static_sites": 0,
@@ -896,7 +950,6 @@ def test_current_exception_ledger_seed_and_schema_inventory_are_exact(
     assert counts["by_category"] == {
         "cross_domain_edge": 90,
         "dynamic_import": 23,
-        "private_symbol_import": 24,
     }
     assert counts["compatibility_by_kind"] == {
         "console_entrypoint": 51,
@@ -1148,13 +1201,14 @@ def test_exception_rows_reject_unrecorded_stale_duplicate_content_and_metadata(
     for row in ledger["exceptions"]:
         if row["semantic_id"] == dynamic["semantic_id"]:
             row["content_sha256"] = "0" * 64
-    private = next(
+    identity_row = next(
         row
         for row in ledger["exceptions"]
-        if row["category"] == "private_symbol_import"
+        if row["category"] == "dynamic_import"
+        and row["semantic_id"] != dynamic["semantic_id"]
     )
-    private["target_module"] += ".tampered"
-    private.pop("owner")
+    identity_row["target_module"] += ".tampered"
+    identity_row.pop("owner")
     ledger["counts"]["exceptions"] += 1
     violations = _exception_violations(
         architecture, source, ledger, compatibility, seed, frozen, previous
@@ -1162,9 +1216,9 @@ def test_exception_rows_reject_unrecorded_stale_duplicate_content_and_metadata(
     assert stale["semantic_id"] in violations["stale_exception_ids"]
     assert dynamic["semantic_id"] in violations["duplicate_exception_ids"]
     assert dynamic["semantic_id"] in violations["exception_content_mismatches"]
-    assert private["semantic_id"] in violations["exception_identity_mismatches"]
+    assert identity_row["semantic_id"] in violations["exception_identity_mismatches"]
     assert {
-        "semantic_id": private["semantic_id"],
+        "semantic_id": identity_row["semantic_id"],
         "missing": ["owner"],
     } in violations["exception_metadata_missing"]
     assert violations["ledger_count_drift"]
@@ -1349,9 +1403,8 @@ def test_exception_metadata_routes_to_real_owner_and_removal_campaign(
         row["removal_campaign"]
         for row in rows
         if row["category"] == "private_symbol_import" and row["target_package"] != "lab"
-    } == {"P8"}
+    } == set()
     assert {row["removal_campaign"] for row in rows} == {
-        "P8",
         "Q",
         "R",
         "S",

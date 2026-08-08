@@ -28,7 +28,7 @@ from chronovisor.decision.graph_decisions import (
     build_recall_usefulness_prompt,
 )
 from chronovisor.decision.local_structured import LocalStructuredSession
-from chronovisor.knowledge_graph.consensus import _router_for_producer
+from chronovisor.knowledge_graph.consensus import router_for_producer
 from chronovisor.knowledge_graph.schema import sha256
 
 RUBRIC_ROOT = CHRONOVISOR_ROOT / "runtime" / "recall-rubric"
@@ -373,7 +373,7 @@ def _judge_consensus(case: Mapping[str, Any], *, root: Path) -> dict[str, Any]:
         "page_id": str(case.get("page_id") or ""),
         "page_excerpt": excerpt,
     }
-    result = _router_for_producer("deterministic", "recall_usefulness_judgment").decide(
+    result = router_for_producer("deterministic", "recall_usefulness_judgment").decide(
         build_recall_usefulness_prompt(evidence, RUBRIC_VARIANTS["calibrated"]),
         RECALL_USEFULNESS_SCHEMA,
         decision_lane="recall_usefulness_judgment",
@@ -968,7 +968,7 @@ def run_calibration_cycle(
     consensus_result = (
         None
         if dry_run or cache_hit
-        else _router_for_producer("deterministic", "recall_rubric_calibration").decide(
+        else router_for_producer("deterministic", "recall_rubric_calibration").decide(
             build_recall_rubric_calibration_prompt(calibration_evidence),
             RECALL_RUBRIC_CALIBRATION_SCHEMA,
             decision_lane="recall_rubric_calibration",

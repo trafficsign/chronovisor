@@ -36,7 +36,7 @@ from chronovisor.classification.classification_evidence_judgment import (
     paired_rows,
 )
 from chronovisor.classification.classification_library_sources import (
-    _atomic_write,
+    atomic_write,
     czech_authority_contract,
     czech_bibliography_contract,
     download_file,
@@ -500,7 +500,7 @@ def _phase_e1_czech_bibliography(root: Path, state: dict[str, Any]) -> dict[str,
         size_cap_bytes=1024**3,
         checkpoint_dir=target / "oai-checkpoint",
     )
-    _atomic_write(target / "source.xml", raw)
+    atomic_write(target / "source.xml", raw)
     rows = stable_sample(parse_marcxml_records(raw, authority=False), limit=100_000)
     manifest = write_external_package(
         target,
@@ -583,7 +583,7 @@ def _phase_e1_ndl_bibliography(root: Path, state: dict[str, Any]) -> dict[str, A
         extract_oai_records=True,
         checkpoint_dir=target / "oai-checkpoint",
     )
-    _atomic_write(target / "source.xml", raw)
+    atomic_write(target / "source.xml", raw)
     contract = ndl_bibliography_contract(
         "https://ndlsearch.ndl.go.jp/api/oaipmh",
         provider_allowlist=("iss-ndl-opac",),

@@ -8,7 +8,7 @@ from typing import Any
 
 from chronovisor.core.durable_state import read_sealed_json
 from chronovisor.knowledge_graph.store import KnowledgeGraphStore
-from chronovisor.recall.recall_label_factory import _read_jsonl
+from chronovisor.recall.recall_label_factory import read_jsonl
 
 
 def advance_used_relations(
@@ -22,11 +22,11 @@ def advance_used_relations(
 
     used = {
         str(row.get("decision_id") or ""): row
-        for row in _read_jsonl(pull_log_file)
+        for row in read_jsonl(pull_log_file)
         if row.get("type") == "used" and str(row.get("decision_id") or "")
     }
     sessions_by_relation: dict[str, set[str]] = {}
-    for row in _read_jsonl(relation_path_file):
+    for row in read_jsonl(relation_path_file):
         decision_id = str(row.get("decision_id") or "")
         use = used.get(decision_id)
         if use is None:
@@ -104,11 +104,11 @@ def advance_used_entities(
     )
     used = {
         str(row.get("decision_id") or ""): row
-        for row in _read_jsonl(pull_log_file)
+        for row in read_jsonl(pull_log_file)
         if row.get("type") == "used" and str(row.get("decision_id") or "")
     }
     sessions_by_merge: dict[str, set[str]] = {}
-    for row in _read_jsonl(relation_path_file):
+    for row in read_jsonl(relation_path_file):
         use = used.get(str(row.get("decision_id") or ""))
         if use is None:
             continue

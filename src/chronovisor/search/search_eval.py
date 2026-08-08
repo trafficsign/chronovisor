@@ -168,6 +168,9 @@ def _sealed_manifest_entry(example: SearchExample) -> dict[str, Any]:
     return {**entry, "entry_sha256": _canonical_json_sha256(entry)}
 
 
+sealed_manifest_entry = _sealed_manifest_entry
+
+
 def write_sealed_manifest(
     examples: list[SearchExample],
     output_file: Path,
@@ -494,6 +497,9 @@ def _label_candidate_payload(row: Mapping[str, Any]) -> dict[str, Any]:
     return payload
 
 
+label_candidate_payload = _label_candidate_payload
+
+
 def _auto_candidate_preregistration_error(row: Mapping[str, Any]) -> str:
     from chronovisor.recall.recall_runtime import page_uid_for_id
 
@@ -544,6 +550,9 @@ def _auto_candidate_preregistration_error(row: Mapping[str, Any]) -> str:
     ):
         return "search label candidate preregistration is stale or invalid"
     return ""
+
+
+auto_candidate_preregistration_error = _auto_candidate_preregistration_error
 
 
 def _has_semantic_no_quorum_marker(value: object) -> bool:
@@ -717,6 +726,9 @@ def _label_review_artifact_error(
         artifact.get("review"),
         artifact.get("evidence"),
     )
+
+
+label_review_artifact_error = _label_review_artifact_error
 
 
 def authoritative_search_label_error(row: Mapping[str, Any]) -> str | None:
@@ -2059,6 +2071,9 @@ def _label_tuple_from_review(
         tuple(_str_list(review.get("negative_pages"))),
         tuple(_str_list(review.get("stale_pages"))),
     )
+
+
+label_tuple_from_review = _label_tuple_from_review
 
 
 def _combine_frontier_label_reviews(

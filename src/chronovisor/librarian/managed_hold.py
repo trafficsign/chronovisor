@@ -662,10 +662,10 @@ def sync_ingest_semantic_holds(
     inventory = ingest_semantic_hold_inventory(chronovisor_root)
     try:
         from chronovisor.decision.failure_supervisor import (
-            _current_adopted_authority_epoch,
+            current_adopted_authority_epoch,
         )
 
-        current_authority = _current_adopted_authority_epoch()
+        current_authority = current_adopted_authority_epoch()
     except Exception:
         current_authority = None
     raw_files = {

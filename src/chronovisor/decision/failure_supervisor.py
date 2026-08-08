@@ -1021,6 +1021,21 @@ def _semantic_defer_packet_records(
     return records
 
 
+def current_adopted_authority_sha256() -> str | None:
+    return _current_adopted_authority_sha256()
+
+
+def current_adopted_authority_epoch() -> str | None:
+    return _current_adopted_authority_epoch()
+
+
+def semantic_defer_packet_records(
+    *,
+    verify_sources: bool,
+) -> list[tuple[Path, dict[str, Any], frozenset[str]]]:
+    return _semantic_defer_packet_records(verify_sources=verify_sources)
+
+
 def _release_semantic_defer_packet(
     packet_path: Path,
     *,

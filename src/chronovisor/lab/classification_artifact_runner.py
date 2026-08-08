@@ -26,7 +26,7 @@ from chronovisor.classification.classification_bundle import (
     resolve_authority,
     rollback_authority,
 )
-from chronovisor.classification.classification_engine import _page_payload
+from chronovisor.classification.classification_engine import page_payload
 from chronovisor.core.durable_state import read_sealed_json, write_sealed_json
 from chronovisor.core.timeutil import utc_iso_milliseconds as _now
 from chronovisor.ingest.page_registry import PageRegistry
@@ -191,7 +191,7 @@ def run_artifact_only_sweep(
             or registry_row.get("status") != "active"
         ):
             continue
-        pages.append(inference_dto(_page_payload(root, str(uid), registry_row)))
+        pages.append(inference_dto(page_payload(root, str(uid), registry_row)))
     if provider.evidence_index is not None:
         provider.evidence_index.prefetch_dense_queries(
             [provider._page_text(page) for page in pages],

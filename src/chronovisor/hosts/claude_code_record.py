@@ -236,6 +236,9 @@ def _claude_semantic_view(item_type: Any, content: Any) -> tuple[str, str]:
     return _claude_record_role(item_type, semantic_content, text), text
 
 
+claude_semantic_view = _claude_semantic_view
+
+
 def sanitize_message_content(content: Any) -> Any:
     """Build a semantic-only view; the raw ``event`` remains untouched."""
     if isinstance(content, str):

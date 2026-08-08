@@ -1408,6 +1408,9 @@ def _config_error(config: DecisionRouterConfig) -> str | None:
     return None
 
 
+config_error = _config_error
+
+
 @dataclass(frozen=True)
 class RouterPolicyResolution:
     """The exact model policy selected for this router process."""
@@ -4341,6 +4344,7 @@ __all__ = [
     "ModelMetadataProvider",
     "RouterPolicyResolution",
     "canonical_agreement_signature",
+    "config_error",
     "decision_effective_request",
     "decision_request_fingerprint_sha256",
     "decision_system_with_policy",
