@@ -441,7 +441,7 @@ def test_exact_source_and_analyzer_manifests_are_separately_sealed() -> None:
         ANALYZER_MANIFEST_SHA256,
     )
     assert source["counts"] == {"files": 296, "bytes": 7_456_781}
-    assert analyzer["counts"] == {"files": 15, "bytes": 578_253}
+    assert analyzer["counts"] == {"files": 15, "bytes": 571_254}
 
 
 def test_precommit_toolchain_manifest_is_third_independent_seal(

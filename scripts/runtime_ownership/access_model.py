@@ -3,205 +3,15 @@
 from __future__ import annotations
 
 import ast
-import contextvars
 import hashlib
 import json
-import sys
-import threading
-from collections.abc import Callable, Iterator, Mapping, Sequence
-from contextlib import contextmanager
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 from typing import Any, Literal
 
 MAX_BINDING_PATHS_PER_RESOURCE = 64
 MAX_FLOW_VARIANTS = 64
-MAX_FLOW_REPR_CACHE_ENTRIES = 4096
-MAX_FLOW_REPR_CACHE_BYTES = 32 * 1024 * 1024
-MAX_FLOW_REPR_CACHE_FINGERPRINTS = 4096
-MAX_FLOW_REPR_CACHE_BUCKET_ENTRIES = 8
-_FLOW_REPR_FINGERPRINT_RETAINED_BYTES = 128
-_FLOW_REPR_BUCKET_RETAINED_BYTES = 256
-_FLOW_REPR_ENTRY_RETAINED_BYTES = 128
-
-
-@dataclass(frozen=True)
-class _FlowReprCacheStats:
-    hits: int
-    misses: int
-    skips: int
-    peak_entries: int
-    peak_bytes: int
-    peak_fingerprints: int
-    current_entries: int
-    current_bytes: int
-    current_fingerprints: int
-    closed: bool
-
-
-def _deep_flow_key_bytes(value: object) -> int | None:
-    if type(value) is tuple:
-        retained_bytes = sys.getsizeof(value)
-        for item in value:
-            item_bytes = _deep_flow_key_bytes(item)
-            if item_bytes is None:
-                return None
-            retained_bytes += item_bytes
-        return retained_bytes
-    if value is None or type(value) in {str, bool, int}:
-        return sys.getsizeof(value)
-    return None
-
-
-class _FlowReprCache:
-    """Exact per-analysis repr cache with bounded repeat-only admission."""
-
-    def __init__(
-        self,
-        *,
-        max_entries: int,
-        max_bytes: int,
-        max_fingerprints: int,
-    ) -> None:
-        if type(max_entries) is not int or max_entries < 1:
-            raise ValueError("max_entries must be a positive exact integer")
-        if type(max_bytes) is not int or max_bytes < 1:
-            raise ValueError("max_bytes must be a positive exact integer")
-        if type(max_fingerprints) is not int or max_fingerprints < 1:
-            raise ValueError("max_fingerprints must be a positive exact integer")
-        self._max_entries = max_entries
-        self._max_bytes = max_bytes
-        self._max_fingerprints = max_fingerprints
-        self._seen_fingerprints: set[int] = set()
-        self._buckets: dict[int, list[tuple[tuple[Any, ...], str]]] = {}
-        self._entry_count = 0
-        self._retained_bytes = 0
-        self._hits = 0
-        self._misses = 0
-        self._skips = 0
-        self._peak_entries = 0
-        self._peak_bytes = 0
-        self._peak_fingerprints = 0
-        self._closed = False
-        self._lock = threading.RLock()
-
-    def render(self, key: tuple[Any, ...]) -> str:
-        with self._lock:
-            if self._closed:
-                return repr(key)
-            fingerprint = hash(key)
-            bucket = self._buckets.get(fingerprint)
-            for cached_key, cached_rendered in bucket or ():
-                if cached_key == key:
-                    self._hits += 1
-                    return cached_rendered
-            self._misses += 1
-            rendered = repr(key)
-            if fingerprint not in self._seen_fingerprints:
-                if (
-                    len(self._seen_fingerprints) < self._max_fingerprints
-                    and self._max_bytes - self._retained_bytes
-                    >= _FLOW_REPR_FINGERPRINT_RETAINED_BYTES
-                ):
-                    self._seen_fingerprints.add(fingerprint)
-                    self._retained_bytes += _FLOW_REPR_FINGERPRINT_RETAINED_BYTES
-                    self._peak_fingerprints = max(
-                        self._peak_fingerprints, len(self._seen_fingerprints)
-                    )
-                    self._peak_bytes = max(
-                        self._peak_bytes, self._retained_bytes
-                    )
-                self._skips += 1
-                return rendered
-            if self._entry_count >= self._max_entries:
-                self._skips += 1
-                return rendered
-            if bucket is not None and len(bucket) >= MAX_FLOW_REPR_CACHE_BUCKET_ENTRIES:
-                self._skips += 1
-                return rendered
-            key_bytes = _deep_flow_key_bytes(key)
-            if key_bytes is None:
-                self._skips += 1
-                return rendered
-            entry_bytes = (
-                key_bytes
-                + sys.getsizeof(rendered)
-                + _FLOW_REPR_ENTRY_RETAINED_BYTES
-                + (_FLOW_REPR_BUCKET_RETAINED_BYTES if bucket is None else 0)
-            )
-            if entry_bytes > self._max_bytes - self._retained_bytes:
-                self._skips += 1
-                return rendered
-            if bucket is None:
-                bucket = []
-                self._buckets[fingerprint] = bucket
-            bucket.append((key, rendered))
-            self._entry_count += 1
-            self._retained_bytes += entry_bytes
-            self._peak_entries = max(self._peak_entries, self._entry_count)
-            self._peak_bytes = max(self._peak_bytes, self._retained_bytes)
-            return rendered
-
-    def close(self) -> None:
-        with self._lock:
-            self._closed = True
-            self._buckets.clear()
-            self._seen_fingerprints.clear()
-            self._entry_count = 0
-            self._retained_bytes = 0
-
-    def stats(self) -> _FlowReprCacheStats:
-        with self._lock:
-            return _FlowReprCacheStats(
-                hits=self._hits,
-                misses=self._misses,
-                skips=self._skips,
-                peak_entries=self._peak_entries,
-                peak_bytes=self._peak_bytes,
-                peak_fingerprints=self._peak_fingerprints,
-                current_entries=self._entry_count,
-                current_bytes=self._retained_bytes,
-                current_fingerprints=len(self._seen_fingerprints),
-                closed=self._closed,
-            )
-
-
-_FLOW_REPR_CACHE: contextvars.ContextVar[_FlowReprCache | None] = (
-    contextvars.ContextVar("runtime_access_flow_repr_cache", default=None)
-)
-
-
-def _current_flow_repr_cache() -> _FlowReprCache | None:
-    return _FLOW_REPR_CACHE.get()
-
-
-@contextmanager
-def _scoped_flow_repr_cache(
-    *,
-    max_entries: int = MAX_FLOW_REPR_CACHE_ENTRIES,
-    max_bytes: int = MAX_FLOW_REPR_CACHE_BYTES,
-    max_fingerprints: int = MAX_FLOW_REPR_CACHE_FINGERPRINTS,
-) -> Iterator[_FlowReprCache]:
-    cache = _FlowReprCache(
-        max_entries=max_entries,
-        max_bytes=max_bytes,
-        max_fingerprints=max_fingerprints,
-    )
-    token = _FLOW_REPR_CACHE.set(cache)
-    try:
-        yield cache
-    finally:
-        try:
-            cache.close()
-        finally:
-            _FLOW_REPR_CACHE.reset(token)
-
-
-def _flow_key_repr(key: tuple[Any, ...]) -> str:
-    cache = _current_flow_repr_cache()
-    if cache is None:
-        return repr(key)
-    return cache.render(key)
 
 
 @dataclass(frozen=True)
@@ -1012,7 +822,7 @@ def _normalize_flow_variants(
         if not variant.has_origins:
             continue
         resource_variants.setdefault(_flow_value_key(variant), variant)
-    ordered_keys = sorted(resource_variants, key=_flow_key_repr)
+    ordered_keys = sorted(resource_variants, key=repr)
     return (
         tuple(
             _without_variants(resource_variants[key])
@@ -2574,10 +2384,6 @@ __all__ = [
     "FILE_UNKNOWN_ATTRIBUTE_OBJECT_TYPE",
     "MAX_BINDING_PATHS_PER_RESOURCE",
     "MAX_FLOW_VARIANTS",
-    "MAX_FLOW_REPR_CACHE_ENTRIES",
-    "MAX_FLOW_REPR_CACHE_BYTES",
-    "MAX_FLOW_REPR_CACHE_FINGERPRINTS",
-    "MAX_FLOW_REPR_CACHE_BUCKET_ENTRIES",
     "OS_FD_OBJECT_TYPE",
     "OS_FLAG_OBJECT_PREFIX",
     "OS_OPEN_ACCESS_FLAGS",
@@ -2652,12 +2458,6 @@ __all__ = [
     "precise_stdlib_module_name",
     "replace_runtime_object_aliases",
     "open_mode_from_expression",
-    "_FlowReprCache",
-    "_FlowReprCacheStats",
-    "_current_flow_repr_cache",
-    "_deep_flow_key_bytes",
-    "_flow_key_repr",
-    "_scoped_flow_repr_cache",
     "opaque_structured_flow_value",
     "sqlite_handle_kind",
     "socket_constant_name",

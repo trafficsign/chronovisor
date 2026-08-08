@@ -3,14 +3,12 @@ from __future__ import annotations
 import gc
 import json
 import sys
-from collections.abc import Iterator, Mapping
-from contextlib import contextmanager
+from collections.abc import Mapping
 from dataclasses import replace
 from typing import Any
 
 import pytest
 
-from scripts.runtime_ownership import access as access_module
 from scripts.runtime_ownership.access import (
     AnalysisNonConvergenceError as PublicAnalysisNonConvergenceError,
 )
@@ -24,8 +22,6 @@ from scripts.runtime_ownership.access_model import (
     AnalysisNonConvergenceError,
     AnalysisProgress,
     _call_ordinals,
-    _current_flow_repr_cache,
-    _FlowReprCache,
 )
 from scripts.runtime_ownership.access_statements import _analyze_legacy_block
 from tests.runtime_access_v2_helpers import joined_access_rows, joined_escape_rows
@@ -428,28 +424,6 @@ def test_two_argument_api_remains_byte_identical() -> None:
     assert _canonical_bytes(legacy_call) == _canonical_bytes(explicit_call)
 
 
-def test_discover_repr_cache_is_semantically_invisible(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    source = (
-        "from chronovisor.state import STATE_FILE\n"
-        "def choose(flag):\n"
-        "    if flag:\n"
-        "        return STATE_FILE\n"
-        "    return STATE_FILE\n"
-        "choose(flag).exists()\n"
-    )
-    cached = _discover(source, optimize_gc=False)
-
-    @contextmanager
-    def without_cache() -> Iterator[None]:
-        yield
-
-    monkeypatch.setattr(access_module, "_scoped_flow_repr_cache", without_cache)
-    uncached = _discover(source, optimize_gc=False)
-    assert _canonical_bytes(cached) == _canonical_bytes(uncached)
-
-
 @pytest.mark.parametrize("invalid", [0, 1, "yes"])
 def test_optimize_gc_requires_an_exact_bool(invalid: object) -> None:
     with pytest.raises(ValueError, match="optimize_gc must be an exact bool"):
@@ -488,70 +462,6 @@ def test_callback_failure_is_explicit_and_unwinds_known_call_depth() -> None:
             gc.enable()
         else:
             gc.disable()
-
-
-def test_repr_cache_is_fresh_and_closed_after_all_exit_paths(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    captured: list[_FlowReprCache] = []
-    real_scope = access_module._scoped_flow_repr_cache
-
-    @contextmanager
-    def capture_scope() -> Iterator[_FlowReprCache]:
-        with real_scope() as cache:
-            captured.append(cache)
-            yield cache
-
-    monkeypatch.setattr(access_module, "_scoped_flow_repr_cache", capture_scope)
-    source = "from chronovisor.state import STATE_FILE\nSTATE_FILE.exists()\n"
-    _discover(source, optimize_gc=False)
-    _discover(source, optimize_gc=False)
-
-    with pytest.raises(UnicodeDecodeError):
-        discover_access_facts(
-            {"src/chronovisor/broken.py": b"\xff"},
-            [],
-            optimize_gc=False,
-        )
-
-    class RunFailure(RuntimeError):
-        pass
-
-    def fail_run(_analysis: _AccessAnalysis) -> dict[str, Any]:
-        raise RunFailure("run failed")
-
-    with monkeypatch.context() as run_patch:
-        run_patch.setattr(access_module._AccessAnalysis, "run", fail_run)
-        with pytest.raises(RunFailure, match="run failed"):
-            _discover(source, optimize_gc=False)
-
-    def fail_callback(_event: Mapping[str, object]) -> None:
-        raise _ProgressCallbackFailure("observer failed")
-
-    with pytest.raises(_ProgressCallbackFailure, match="observer failed"):
-        _discover(
-            source,
-            progress=AnalysisProgress(
-                callback=fail_callback,
-                event_interval_work_units=1,
-            ),
-            optimize_gc=False,
-        )
-
-    with pytest.raises(AnalysisNonConvergenceError):
-        _discover(
-            source,
-            limits=replace(AnalysisLimits(), max_outer_iterations=1),
-            optimize_gc=False,
-        )
-
-    assert len(captured) == 6
-    assert len({id(cache) for cache in captured}) == len(captured)
-    assert all(cache.stats().closed for cache in captured)
-    assert all(cache.stats().current_entries == 0 for cache in captured)
-    assert all(cache.stats().current_bytes == 0 for cache in captured)
-    assert all(cache.stats().current_fingerprints == 0 for cache in captured)
-    assert _current_flow_repr_cache() is None
 
 
 @pytest.mark.parametrize("initially_enabled", [True, False])
