@@ -12,8 +12,8 @@ from chronovisor.classification.classification_bundle import (
     resolve_authority,
 )
 from chronovisor.classification.classification_engine import CandidateIndex
-from chronovisor.core.durable_state import read_sealed_json
 from chronovisor.classification.classification_fixture_contract import inference_dto
+from chronovisor.core.durable_state import read_sealed_json
 from chronovisor.lab.classification_library_evidence import (
     LibraryEvidenceIndex,
     LibraryEvidenceProvider,

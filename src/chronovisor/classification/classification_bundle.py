@@ -8,17 +8,17 @@ from pathlib import Path
 from typing import Any
 
 from chronovisor.classification.classification import ClassificationError
+from chronovisor.classification.classification_fixture_contract import (
+    DISABLED_BASELINE_SCHEMA,
+    sha256_bytes,
+    sha256_file,
+)
 from chronovisor.core.durable_state import (
     DurableStateError,
     read_sealed_json,
     write_sealed_json,
 )
 from chronovisor.core.timeutil import utc_iso_milliseconds as _now
-from chronovisor.classification.classification_fixture_contract import (
-    DISABLED_BASELINE_SCHEMA,
-    sha256_bytes,
-    sha256_file,
-)
 
 CANDIDATE_BUNDLE_SCHEMA = "chronovisor.classification-candidate-bundle.v1"
 ADOPTION_PAYLOAD_SCHEMA = "chronovisor.classification-adoption-payload.v1"

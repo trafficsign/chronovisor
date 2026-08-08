@@ -12,12 +12,14 @@ from typing import Any
 
 from chronovisor.classification.classification import ClassificationError
 from chronovisor.classification.classification_engine import run_consensus_batches
-from chronovisor.core import ollama
-from chronovisor.core.durable_state import write_sealed_json
 from chronovisor.classification.classification_fixture_contract import (
     sha256_bytes,
+)
+from chronovisor.classification.classification_fixture_contract import (
     write_jsonl as _write_jsonl,
 )
+from chronovisor.core import ollama
+from chronovisor.core.durable_state import write_sealed_json
 from chronovisor.research.research_scheduler import foreground_lane
 
 PAIRED_JUDGMENT_SCHEMA = "chronovisor.classification-paired-judgment.v1"
