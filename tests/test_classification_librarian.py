@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 from chronovisor.classification import (
+    classification_calibration,
     classification_engine,
     classification_model_worker,
 )
@@ -25,7 +26,6 @@ from chronovisor.classification.classification import (
     validate_controlled_subject,
     validate_record,
 )
-from chronovisor.lab import classification_calibration
 from chronovisor.librarian.librarian import (
     capture_baseline,
     run_legacy_udc_shadow,

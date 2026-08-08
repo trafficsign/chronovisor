@@ -84,15 +84,81 @@ P4A_RETIRED_MOVED_SITE_IDS = (
     "arch:e3e8f26b41ac88d106b2d9a357f71293eba715a14a27cebd717278fa49d66f95",
     "arch:e767a86ee1c2c1ba318ad5fec467355b673266eedea548500ecf197b340eebbc",
 )
+P5_RETIRED_EXCEPTION_IDS = (
+    "arch:171347b3036f3dba27546589a302e02f6d22314fffe9c50e95e25a59b49c7a94",
+    "arch:283761a1ce09a52dd6f4edb6f512e0c409fbbaea514131f7a6243d7d8dc53176",
+    "arch:396f651d94c790b548203581fc4ed5e9b0bbea9045bab821818b23fea411d4af",
+    "arch:e92c8cafb5290b6af5d0a1d279113712d9cc61b81ca067882b50cdcb835a4d7a",
+)
+P5_RETIRED_SITE_IDS = (
+    "arch:01cb4b6b71c55182506795a04ff2f7f6afdbb25b50c73bcdfedcf59311366214",
+    "arch:0460fd594ff4b716cbfada7cb5fc442f70073aa662555968c21b7d80f6264ba9",
+    "arch:0a7f8dbd9c0820140f0314ba614fde315692fcacd879df9a782af6da2066063d",
+    "arch:18631bd52be071b4118f39d7842761c91f59aeee003f788c601d29926d190689",
+    "arch:1a32a5682df507ee4cb4533c587f999d508fb5e6616147655a2e05f8e68d7243",
+    "arch:24b8a1df86943033712a99f5ebe2ecc3f78001197b7398540bb18c235916614c",
+    "arch:24c748ee21fddaa489f0c5d4e5a4c19909f0f0d379a0704b1852471be41187bb",
+    "arch:31b34e33d357942860b85fbb2a04099c031c70cf8f7af5700765a18db75516c0",
+    "arch:322e6015fd54a49009f3e862509620cd8b819404c1216610750977346901c046",
+    "arch:33f58c9af87fda9ba5d418afe4cc74e2216a4022f2dbeb37b52b83ef0097dbf6",
+    "arch:3ad1047710ff2624c4db3e26a60198fa91c20fb6bb2bc4781a3b851b89b72e7a",
+    "arch:5e9a02e874e2ffe42d46e9d77caca146ff943cb1a9af034efab8b15f64a55c14",
+    "arch:639b1bfedebd222a9dd168ac33999f9058fdba166bd54d0208d5b89dfaf55bf3",
+    "arch:6f859bfb682d8333a37483c3e76fabb85d5310cf647810e4a7969fd78bf01bea",
+    "arch:720a675ffaa72d9b18758180feff7385941e447ceb8e426b6ec26666a01593c1",
+    "arch:763463291a58c9fa862528ee05538df38e1cce5820334058ecb2f175fd3f5995",
+    "arch:785f95fa09621d520ac9e4647d1eeb482c6bfe90e87a9d00a6b65ca0637f7511",
+    "arch:7a7c6d99100b9a3a6014fb5099ffa600f383750baf72f2774418f9994a5b6aea",
+    "arch:8411b73350b2f822018630fd1f5215431d91d141e51ffc9ef86e6e52843bece6",
+    "arch:8bc1cfd637090afb4291cdd75d002ec8440b96162e852a7a44ab3403ed77c8e5",
+    "arch:941cb43f84962cb177f6e8195dc1f14941287500af76c811d2edd678ae05cdd3",
+    "arch:944125e390d8dc58c4ffd8f780c07e9b595d0da5cc7e606dbbddf0c0cc88959b",
+    "arch:9646b4ffcfcafefa72f16f86d3457d15fde91dc3840ac48cb79060f3ed64507e",
+    "arch:973d50db45fcfdffdecc9d4dc326680f63211d5c7f3aa3b46090a26f976ac277",
+    "arch:9c0bf8955ee18b265cfc68983104d38c95ff2ff7dcdbf177683cc54c1b5ce716",
+    "arch:a34416aa9a7011bf78a5563a1cc091a49e7ca0cc846701fa5c8b5ce2fdf80b61",
+    "arch:a366743216a7ce9a3e54c84b3695671afe072f71aeb4c36ed2900e2a87ea95cf",
+    "arch:a8a8c2c4a683c87a7d170ea336825ced1bed2c71ed6e92c11da69d3641f7a161",
+    "arch:aa807a3c573b0f052ce29cd7222cc1c10d4ca24671f9460c1354d334a627e88e",
+    "arch:ad404ebda399c485621c4d0d9647a0bc71a623fe7d1f676aa3d028e3f44a9591",
+    "arch:b016c5b1f651885c447f3f1e9e4d0a9e4164f3a6b9164c828936baa9b0eef80f",
+    "arch:b68228dd95edfb7820cb517437be0b54f4a8b43d5bccec5a6676bd59d04fa227",
+    "arch:baed967eb71e9fbeb06707096af5bc811dac59a32b31189f2a582688df5ab6c6",
+    "arch:bc4b9a3ec3d27c54ac23b9d217edf9f75b9c0a1e8a550cb304dd850279464997",
+    "arch:bce8001163b7aa8ebd5d95b8db6e1bd782dc153c6deac100e7d73fe61597b88c",
+    "arch:c3fe7109db9e6487f7638f1c1c42b5d560b093bd9a63a5e63e4c227d74e03946",
+    "arch:cba8a669f8dc249ccd8d3b37f9e1486c463de27b20f280442a1528df2846fc06",
+    "arch:d0916a604d0adb6a7ce17b3b222d93e00ac34486242cffff8ea8256d58dd932b",
+    "arch:d3197fe29c5799aec77cc2ed8c30953a48096e5c68556beb2ed600899a313c2a",
+    "arch:ec49510cceb5e7f9d3a76a6c7069a2b41d19e0b11256fc37b81804a01aa5ba9b",
+    "arch:eeb0719681660954298c1a66b356a3e296db86c868fc5b36d2bc3c243753fc37",
+    "arch:eecf48345365f12f9c10b90244e2e78fa3b2a25b6c6e77ffa3690ed236796114",
+    "arch:efbcf5ca8b62c357f7cc1e77e9fb8828c808866ee76ba3488dae02ade165877c",
+    "arch:f585ebdf6516a4beae52be95fdc8df6e4cb6e08fc9e5bc48507fa953cda89745",
+    "arch:f7f46f11a378529f43d59ec9abb75f4664879cd942538b1bd237be9a7a2a2f71",
+    "arch:f8bbb02b7eec6ff3cfbb0f15ebca32ede6757f230a18a86656ba26e80a006fec",
+    "arch:fdd09cc9b8294d7bfd12da71eda5c5d050d6707089e5cdd2213712fd673fcc84",
+    "arch:fea1f17ed67a467ea624ed1f272a10f035e9a7edb250cbc9f93784a589faf680",
+)
+P5_RETIRED_STATIC_SITE_IDS = (
+    "arch:0460fd594ff4b716cbfada7cb5fc442f70073aa662555968c21b7d80f6264ba9",
+    "arch:720a675ffaa72d9b18758180feff7385941e447ceb8e426b6ec26666a01593c1",
+    "arch:d3197fe29c5799aec77cc2ed8c30953a48096e5c68556beb2ed600899a313c2a",
+)
 RETIREMENT_HISTORY = {
-    "exception_semantic_ids": (
-        P3_RETIRED_CLASSIFICATION_LAB_EDGE_ID,
-        *P4C_RETIRED_EXCEPTION_IDS,
-        P4_RETIRED_SEARCH_LAB_PRIVATE_EXCEPTION_ID,
-        P4_RETIRED_SEARCH_LAB_EDGE_ID,
-        P2_RETIRED_PRIVATE_EXCEPTION_ID,
-        P4A_RETIRED_OPS_LAB_EDGE_ID,
-        P4A_RETIRED_OPS_LAB_DYNAMIC_SITE_ID,
+    "exception_semantic_ids": tuple(
+        sorted(
+            (
+                P3_RETIRED_CLASSIFICATION_LAB_EDGE_ID,
+                *P4C_RETIRED_EXCEPTION_IDS,
+                P4_RETIRED_SEARCH_LAB_PRIVATE_EXCEPTION_ID,
+                P4_RETIRED_SEARCH_LAB_EDGE_ID,
+                P2_RETIRED_PRIVATE_EXCEPTION_ID,
+                P4A_RETIRED_OPS_LAB_EDGE_ID,
+                P4A_RETIRED_OPS_LAB_DYNAMIC_SITE_ID,
+                *P5_RETIRED_EXCEPTION_IDS,
+            )
+        )
     ),
     "cross_domain_site_semantic_ids": tuple(
         sorted(
@@ -104,14 +170,20 @@ RETIREMENT_HISTORY = {
                 P4A_RETIRED_OPS_LAB_STATIC_SITE_ID,
                 *P4A_RETIRED_MOVED_SITE_IDS,
                 P4_RETIRED_SEARCH_LAB_SITE_ID,
+                *P5_RETIRED_SITE_IDS,
             )
         )
     ),
-    "production_to_lab_edge_semantic_ids": (
-        P3_RETIRED_CLASSIFICATION_LAB_EDGE_ID,
-        P4C_RETIRED_EXCEPTION_IDS[1],
-        P4_RETIRED_SEARCH_LAB_EDGE_ID,
-        P4A_RETIRED_OPS_LAB_EDGE_ID,
+    "production_to_lab_edge_semantic_ids": tuple(
+        sorted(
+            (
+                P3_RETIRED_CLASSIFICATION_LAB_EDGE_ID,
+                P4C_RETIRED_EXCEPTION_IDS[1],
+                P4_RETIRED_SEARCH_LAB_EDGE_ID,
+                P4A_RETIRED_OPS_LAB_EDGE_ID,
+                P5_RETIRED_EXCEPTION_IDS[2],
+            )
+        )
     ),
     "production_to_lab_static_site_semantic_ids": tuple(
         sorted(
@@ -121,6 +193,7 @@ RETIREMENT_HISTORY = {
                 *P4C_RETIRED_DECISION_LAB_SITE_IDS,
                 P4A_RETIRED_OPS_LAB_STATIC_SITE_ID,
                 P4_RETIRED_SEARCH_LAB_SITE_ID,
+                *P5_RETIRED_STATIC_SITE_IDS,
             )
         )
     ),
@@ -359,9 +432,9 @@ def _without_persisted_retirement_history(
     }
     active_counts = normalized["counts"]["active"]
     active_counts["exceptions"] += len(RETIREMENT_HISTORY["exception_semantic_ids"])
-    active_counts["by_category"]["cross_domain_edge"] += 4
+    active_counts["by_category"]["cross_domain_edge"] += 5
     active_counts["by_category"]["dynamic_import"] += 1
-    active_counts["by_category"]["private_symbol_import"] += 4
+    active_counts["by_category"]["private_symbol_import"] += 7
     active_counts["cross_domain_sites"] += len(
         RETIREMENT_HISTORY["cross_domain_site_semantic_ids"]
     )
@@ -502,7 +575,7 @@ def test_architecture_fitness_rejects_new_edge_and_scc_growth(
 
     assert report["passed"] is False
     assert report["violations"]["new_edges"] == [["core", "ops"]]
-    assert len(report["violations"]["scc_regressions"][0]) == 13
+    assert len(report["violations"]["scc_regressions"][0]) == 12
 
 
 def test_namespace_package_is_inventoried_and_rejected(
@@ -766,8 +839,8 @@ def test_current_exception_ledger_seed_and_schema_inventory_are_exact(
 
     assert detected_ids == ledger_ids == set(seed["exception_semantic_ids"]["active"])
     _assert_exact_retirement_history(architecture, seed)
-    assert len(edge_rows) == current["worktree_architecture"]["edge_count"] == 91
-    assert sum(len(row["sites"]) for row in edge_rows) == len(raw_cross_sites) == 1251
+    assert len(edge_rows) == current["worktree_architecture"]["edge_count"] == 90
+    assert sum(len(row["sites"]) for row in edge_rows) == len(raw_cross_sites) == 1245
     assert {
         field: counts[field]
         for field in (
@@ -779,17 +852,17 @@ def test_current_exception_ledger_seed_and_schema_inventory_are_exact(
             "compatibility_contracts",
         )
     } == {
-        "exceptions": 153,
-        "cross_domain_sites": 1251,
-        "production_to_lab_edges": 1,
-        "production_to_lab_static_sites": 3,
+        "exceptions": 149,
+        "cross_domain_sites": 1245,
+        "production_to_lab_edges": 0,
+        "production_to_lab_static_sites": 0,
         "production_to_lab_dynamic_sites": 0,
         "compatibility_contracts": 289,
     }
     assert counts["by_category"] == {
-        "cross_domain_edge": 91,
+        "cross_domain_edge": 90,
         "dynamic_import": 23,
-        "private_symbol_import": 27,
+        "private_symbol_import": 24,
         "schema_manifest_implementation_import": 12,
     }
     assert counts["compatibility_by_kind"] == {
@@ -1153,12 +1226,13 @@ def test_production_to_lab_static_and_dynamic_site_growth_are_explicit(
         row
         for row in source["import_sites"]
         if row["category"] == "cross_domain_import"
-        and row["target_package"] == "lab"
     )
     static_site = {
         **static_template,
         "source_package": "classification",
         "source_module": "chronovisor.classification.new_lab_static",
+        "target_package": "lab",
+        "target_module": "chronovisor.lab.new_static",
         "occurrence": 1,
         "line": 1,
     }
@@ -1215,6 +1289,7 @@ def test_exception_metadata_routes_to_real_owner_and_removal_campaign(
     assert ("cross_domain_edge", "decision", "lab") not in by_key
     assert ("private_symbol_import", "decision", "lab") not in by_key
     assert ("cross_domain_edge", "ops", "lab") not in by_key
+    assert ("cross_domain_edge", "librarian", "lab") not in by_key
     assert P2_RETIRED_PRIVATE_EXCEPTION_ID not in {
         row["semantic_id"] for row in rows
     }
@@ -1226,12 +1301,7 @@ def test_exception_metadata_routes_to_real_owner_and_removal_campaign(
     ]["retired"] == list(RETIREMENT_HISTORY["cross_domain_site_semantic_ids"])
     assert current["architecture_exception_baseline"][
         "production_to_lab_edge_semantic_ids"
-    ]["retired"] == [
-        P3_RETIRED_CLASSIFICATION_LAB_EDGE_ID,
-        P4C_RETIRED_EXCEPTION_IDS[1],
-        P4_RETIRED_SEARCH_LAB_EDGE_ID,
-        P4A_RETIRED_OPS_LAB_EDGE_ID,
-    ]
+    ]["retired"] == list(RETIREMENT_HISTORY["production_to_lab_edge_semantic_ids"])
     assert current["architecture_exception_baseline"][
         "production_to_lab_static_site_semantic_ids"
     ]["retired"] == list(
@@ -1249,7 +1319,6 @@ def test_exception_metadata_routes_to_real_owner_and_removal_campaign(
     assert P3_RETIRED_PROVIDER_SITE_ID not in current[
         "architecture_exception_baseline"
     ]["cross_domain_site_semantic_ids"]["active"]
-    assert by_key[("cross_domain_edge", "librarian", "lab")]["removal_campaign"] == "P5"
     assert {
         row["removal_campaign"]
         for row in rows
@@ -1261,7 +1330,6 @@ def test_exception_metadata_routes_to_real_owner_and_removal_campaign(
         if row["category"] == "private_symbol_import" and row["target_package"] != "lab"
     } == {"P8"}
     assert {row["removal_campaign"] for row in rows} == {
-        "P5",
         "P6",
         "P8",
         "Q",

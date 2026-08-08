@@ -165,7 +165,7 @@ def _tokens(value: str) -> set[str]:
     }
 
 
-def _page_payload(root: Path, uid: str, row: Mapping[str, Any]) -> dict[str, Any]:
+def page_payload(root: Path, uid: str, row: Mapping[str, Any]) -> dict[str, Any]:
     path = root / str(row.get("path") or "")
     text = path.read_text(encoding="utf-8")
     meta, body = frontmatter.parse(text)
@@ -194,6 +194,9 @@ def _page_payload(root: Path, uid: str, row: Mapping[str, Any]) -> dict[str, Any
         ),
         "excerpt": excerpt,
     }
+
+
+_page_payload = page_payload
 
 
 class CandidateIndex:

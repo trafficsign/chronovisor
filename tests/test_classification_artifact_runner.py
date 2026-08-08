@@ -8,13 +8,15 @@ from chronovisor.classification.classification_bundle import (
     ADOPTED_MANIFEST_SCHEMA,
     activate_decision_only,
 )
+from chronovisor.classification.classification_fixture_set import (
+    create_disabled_baseline_manifest,
+)
 from chronovisor.core.durable_state import write_sealed_json
-from chronovisor.lab import classification_migration
 from chronovisor.lab.classification_artifact_runner import (
     _resolver_drill,
     storage_manifest,
 )
-from chronovisor.lab.classification_fixture_set import create_disabled_baseline_manifest
+from chronovisor.librarian import classification_migration
 
 
 def test_decision_only_pointer_blocks_mutating_migration(

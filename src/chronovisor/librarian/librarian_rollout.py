@@ -8,11 +8,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from chronovisor.classification.classification_engine import fixture_paths
-from chronovisor.core.durable_state import file_lock, write_sealed_json
-from chronovisor.core.store import CHRONOVISOR_ROOT
-from chronovisor.core.timeutil import utc_iso_milliseconds as _now
-from chronovisor.lab.classification_calibration import (
+from chronovisor.classification.classification_calibration import (
     adjudicate,
     adjudication_path,
     calibrate,
@@ -20,11 +16,15 @@ from chronovisor.lab.classification_calibration import (
     distribution,
     lock,
 )
-from chronovisor.lab.classification_migration import (
+from chronovisor.classification.classification_engine import fixture_paths
+from chronovisor.core.durable_state import file_lock, write_sealed_json
+from chronovisor.core.store import CHRONOVISOR_ROOT
+from chronovisor.core.timeutil import utc_iso_milliseconds as _now
+from chronovisor.librarian.classification_migration import (
     migrate_active_metadata,
     run_full_model_shadow,
 )
-from chronovisor.lab.librarian_burn import run_burn
+from chronovisor.librarian.librarian_burn import run_burn
 from chronovisor.librarian.librarian_merge import run_merge_migration
 from chronovisor.librarian.librarian_release import (
     advance_migration_observation,
