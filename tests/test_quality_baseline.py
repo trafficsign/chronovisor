@@ -55,7 +55,10 @@ def test_quality_tools_are_scoped_to_the_staged_baseline() -> None:
         "SIM115",
         "SIM117",
     ]
-    assert project["tool"]["mypy"]["files"] == ["src/chronovisor/core"]
+    assert project["tool"]["mypy"]["files"] == [
+        "src/chronovisor/core",
+        "src/chronovisor/knowledge_graph",
+    ]
     assert project["tool"]["mypy"]["strict"] is True
 
 
