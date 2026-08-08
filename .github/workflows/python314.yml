@@ -12,7 +12,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
-      CHRONOVISOR_ROOT: ${{ runner.temp }}/chronovisor-python314-test-root
       PYTHONDONTWRITEBYTECODE: "1"
     steps:
       - uses: actions/checkout@v4
@@ -22,6 +21,9 @@ jobs:
         with:
           enable-cache: true
           python-version: "3.14"
+      - name: Set isolated Chronovisor root
+        shell: bash
+        run: printf 'CHRONOVISOR_ROOT=%s\n' "$RUNNER_TEMP/chronovisor-python314-test-root" >> "$GITHUB_ENV"
       - run: uv sync --frozen
       - name: Assert standard CPython 3.14 GIL runtime
         run: |
@@ -47,10 +49,7 @@ jobs:
           uv run --frozen python scripts/architecture_baseline.py \
             --check docs/refactoring/architecture-baseline.json
           uv run --frozen pytest -q \
-            tests/test_architecture_baseline.py \
-            tests/test_runtime_state_manifests.py \
-            tests/test_runtime_state_machine_facts.py \
-            tests/test_runtime_access_watchdog.py
+            tests/test_architecture_baseline.py
       - name: Isolated full test suite
         run: >-
           uv run --frozen pytest -q
