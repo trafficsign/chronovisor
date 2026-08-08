@@ -73,6 +73,38 @@ DEFAULT_REPAIRS: dict[tuple[str, str], str] = {
         "chronovisor-classification-librarian-plan",
         "critical-action-items-before-execution",
     ): "10. Critical Action Items Before Execution",
+    (
+        "local-ai-hardware-strategy-2026",
+        "section_22",
+    ): "22. M4 Max 128GB の「物理的再現不可能性」と供給逼迫の構造的終着点",
+    (
+        "child-record-segment-structure",
+        "Phase Field Details",
+    ): "Segment Phase Field Flexibility",
+    (
+        "child-record-policy-v2-production-instance",
+        "eleventh-instance-boundary-hardening",
+    ): "Campaign Boundary Hardening Instance (2026-08-07)",
+    (
+        "child-record-policy-v2-production-instance",
+        "twelfth-instance-v2-only-migration",
+    ): "Campaign v2-Only Migration Instance (2026-08-07)",
+    (
+        "child-record-policy-v2-production-instance",
+        "sixteenth-instance-parallelization-strategy",
+    ): "Campaign Parallelization Strategy Instance (2026-08-07)",
+    (
+        "child-record-policy-v2-production-instance",
+        "fourth-instance-final-review",
+    ): "Campaign Final Review Instance (2026-08-06)",
+    (
+        "child-record-policy-v2-production-instance",
+        "fifteenth-instance-p1-analysis",
+    ): "Campaign P1 Analysis Instance (2026-08-07)",
+    (
+        "child-record-policy-v2-production-instance",
+        "ninth-instance-frozen-dependency-hardening",
+    ): "Campaign Frozen Dependency Reference Hardening Instance (2026-08-06)",
 }
 
 
