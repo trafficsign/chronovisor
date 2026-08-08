@@ -111,7 +111,7 @@ ignore = ["UP042", "SIM105", "SIM115", "SIM117"]
 "src/chronovisor/deadman_observer.py" = ["UP017"]
 
 [tool.mypy]
-files = ["src/chronovisor/core"]
+files = ["src/chronovisor/core", "src/chronovisor/knowledge_graph"]
 strict = true
 show_error_codes = true
 warn_unused_configs = true
