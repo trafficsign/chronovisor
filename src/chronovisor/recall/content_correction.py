@@ -2343,7 +2343,7 @@ def run_frontier_judge(
                 "triage_review": dict(triage_review or {}),
             }
         )
-    from chronovisor.decision.frontier_review import run_structured_review
+    from chronovisor.decision.routine_review import run_structured_review
 
     return run_structured_review(
         _frontier_prompt(
@@ -2683,7 +2683,7 @@ def run_frontier_classification_judge(
     }
     if reviewer is not None:
         return reviewer(bundle)
-    from chronovisor.decision.frontier_review import run_structured_review
+    from chronovisor.decision.routine_review import run_structured_review
 
     return run_structured_review(
         _frontier_classification_prompt(

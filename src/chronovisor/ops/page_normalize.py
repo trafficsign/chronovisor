@@ -114,7 +114,7 @@ def normalize_pages(
                     details=details,
                 )
                 if reviewer is None:
-                    from chronovisor.decision.frontier_review import (
+                    from chronovisor.decision.routine_review import (
                         run_structured_review,
                     )
 

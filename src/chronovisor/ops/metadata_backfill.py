@@ -26,7 +26,7 @@ PROPOSAL_VERSION = 2
 
 
 def _reviewer(prompt: str, schema: dict[str, Any]) -> Mapping[str, Any] | str:
-    from chronovisor.decision.frontier_review import run_structured_review
+    from chronovisor.decision.routine_review import run_structured_review
 
     return run_structured_review(
         prompt,

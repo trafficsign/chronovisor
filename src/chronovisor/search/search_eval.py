@@ -2045,13 +2045,13 @@ def run_frontier_label_review(
     repo_root: Path = REPO_ROOT,
     timeout: int | None = None,
 ) -> dict[str, Any]:
-    from chronovisor.decision import frontier_review
+    from chronovisor.decision import routine_review
 
     prompt = build_frontier_label_prompt(row)
     timeout_seconds = timeout or int(
         os.environ.get("CHRONOVISOR_FRONTIER_TIMEOUT_SECONDS", "3600")
     )
-    raw = frontier_review.run_structured_review(
+    raw = routine_review.run_structured_review(
         prompt,
         FRONTIER_LABEL_SCHEMA,
         repo_root=repo_root,
@@ -3883,13 +3883,13 @@ def review_search_policy_with_frontier(
     timeout: int | None = None,
 ) -> dict[str, Any]:
     """Ask the frontier model for the final veto on a validated policy."""
-    from chronovisor.decision import frontier_review
+    from chronovisor.decision import routine_review
     from chronovisor.decision.decision_lane_prompts import build_search_self_tune_prompt
 
     prompt = build_search_self_tune_prompt(record)
-    return frontier_review.run_structured_review(
+    return routine_review.run_structured_review(
         prompt,
-        frontier_review.FRONTIER_DECISION_SCHEMA,
+        routine_review.FRONTIER_DECISION_SCHEMA,
         repo_root=repo_root,
         timeout=timeout
         or int(os.environ.get("CHRONOVISOR_FRONTIER_TIMEOUT_SECONDS", "3600")),

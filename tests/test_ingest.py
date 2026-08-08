@@ -4783,7 +4783,7 @@ class TestRunIngestPartialFailure:
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         from chronovisor.core import jobs
-        from chronovisor.decision import failure_supervisor, frontier_review
+        from chronovisor.decision import failure_supervisor, routine_review
         from chronovisor.ingest import ingest
 
         plan = [
@@ -4811,7 +4811,7 @@ class TestRunIngestPartialFailure:
 
         def reviewer(proposal: dict) -> dict:
             review_calls.append(proposal)
-            return frontier_review._validated_structured_result(
+            return routine_review._validated_structured_result(
                 None,
                 ingest.INGEST_FRONTIER_DECISION_SCHEMA,
                 reviewer="local_consensus",

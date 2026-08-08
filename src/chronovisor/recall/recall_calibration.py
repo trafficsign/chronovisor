@@ -951,16 +951,16 @@ def review_calibration_with_frontier(
     *,
     timeout: int | None = None,
 ) -> dict[str, Any]:
-    from chronovisor.decision import frontier_review
+    from chronovisor.decision import routine_review
     from chronovisor.decision.decision_lane_prompts import (
         build_recall_calibration_prompt,
     )
 
     prompt = build_recall_calibration_prompt(artifact)
     repo_root = Path(__file__).resolve().parents[3]
-    return frontier_review.run_structured_review(
+    return routine_review.run_structured_review(
         prompt,
-        frontier_review.FRONTIER_DECISION_SCHEMA,
+        routine_review.FRONTIER_DECISION_SCHEMA,
         repo_root=repo_root,
         timeout=timeout or 3600,
         execute_patch=False,

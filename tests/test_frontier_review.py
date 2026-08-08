@@ -10,7 +10,7 @@ import pytest
 
 from chronovisor.core import ollama
 from chronovisor.core.runtime_config import DecisionRouterConfig
-from chronovisor.decision import decision_router, frontier_review
+from chronovisor.decision import decision_router, frontier_review, routine_review
 from chronovisor.decision.decision_router import DecisionRouterResult
 from chronovisor.search import semantic_hold
 from tests.semantic_hold_support import semantic_authority, semantic_review
@@ -218,17 +218,17 @@ def isolate_frontier_activity(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
         lambda *_args, **_kwargs: None,
     )
     monkeypatch.setattr(
-        frontier_review,
+        routine_review,
         "STRUCTURED_REVIEW_HOLD_CACHE_ROOT",
         tmp_path / "structured-review-holds",
     )
     monkeypatch.setattr(
-        frontier_review,
+        routine_review,
         "_structured_authority_observation",
         lambda _authority: "0" * 64,
     )
     monkeypatch.setattr(
-        frontier_review,
+        routine_review,
         "_current_structured_authority",
         lambda lane: (
             semantic_authority(lane, artifact_sha256="d" * 64),
@@ -1249,7 +1249,7 @@ def test_routine_structured_review_uses_local_transport_and_never_subprocesses(
     monkeypatch.setenv("CHRONOVISOR_TEST_STRUCTURED_REVIEW_CMD", "/bin/forbidden")
     schema = frontier_review.FRONTIER_DECISION_SCHEMA
 
-    result = frontier_review.run_structured_review(
+    result = routine_review.run_structured_review(
         "review this",
         schema,
         repo_root=tmp_path,
@@ -1290,7 +1290,7 @@ def test_structured_review_defers_mutating_majority_with_conservative_vote(
     monkeypatch.setattr(decision_router, "DecisionRouter", router)
     monkeypatch.setenv("CHRONOVISOR_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
 
-    result = frontier_review.run_structured_review(
+    result = routine_review.run_structured_review(
         "review this",
         frontier_review.FRONTIER_DECISION_SCHEMA,
         repo_root=tmp_path,
@@ -1347,7 +1347,7 @@ def test_structured_review_keeps_invalid_veto_evidence_operational(
     monkeypatch.setattr(decision_router, "DecisionRouter", router)
     monkeypatch.setenv("CHRONOVISOR_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
 
-    result = frontier_review.run_structured_review(
+    result = routine_review.run_structured_review(
         "review this",
         frontier_review.FRONTIER_DECISION_SCHEMA,
         repo_root=tmp_path,
@@ -1372,7 +1372,7 @@ def test_structured_review_types_three_valid_distinct_semantic_no_quorum(
     monkeypatch.setattr(decision_router, "DecisionRouter", router)
     monkeypatch.setenv("CHRONOVISOR_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
 
-    result = frontier_review.run_structured_review(
+    result = routine_review.run_structured_review(
         "review this",
         frontier_review.FRONTIER_DECISION_SCHEMA,
         repo_root=tmp_path,
@@ -1416,7 +1416,7 @@ def test_structured_review_shares_one_router_config_with_initial_authority(
 
     def current_authority(_lane: str):
         authority_configs.append(
-            frontier_review._STRUCTURED_REVIEW_ROUTER_CONFIG.get()
+            routine_review._STRUCTURED_REVIEW_ROUTER_CONFIG.get()
         )
         return authority_box["value"], None
 
@@ -1427,13 +1427,13 @@ def test_structured_review_shares_one_router_config_with_initial_authority(
     )
     monkeypatch.setattr(decision_router, "DecisionRouter", CapturingRouter)
     monkeypatch.setattr(
-        frontier_review,
+        routine_review,
         "_current_structured_authority",
         current_authority,
     )
     monkeypatch.setenv("CHRONOVISOR_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
 
-    result = frontier_review.run_structured_review(
+    result = routine_review.run_structured_review(
         "review this",
         frontier_review.FRONTIER_DECISION_SCHEMA,
         repo_root=tmp_path,
@@ -1458,7 +1458,7 @@ def test_structured_review_reuses_exact_epoch_semantic_hold_without_model_call(
         _cache_test_router_class(authority_box, calls),
     )
     monkeypatch.setattr(
-        frontier_review,
+        routine_review,
         "_current_structured_authority",
         lambda lane: (
             authority_box["value"],
@@ -1469,14 +1469,14 @@ def test_structured_review_reuses_exact_epoch_semantic_hold_without_model_call(
     prompt = "SENSITIVE_PROMPT_MUST_NOT_BE_PERSISTED"
     system = "SENSITIVE_SYSTEM_MUST_NOT_BE_PERSISTED"
 
-    first = frontier_review.run_structured_review(
+    first = routine_review.run_structured_review(
         prompt,
         frontier_review.FRONTIER_DECISION_SCHEMA,
         repo_root=tmp_path,
         decision_lane="recall_auto_apply",
         system=system,
     )
-    second = frontier_review.run_structured_review(
+    second = routine_review.run_structured_review(
         prompt,
         frontier_review.FRONTIER_DECISION_SCHEMA,
         repo_root=tmp_path,
@@ -1509,25 +1509,25 @@ def test_structured_review_reuses_cached_hold_after_observation_generation_chang
         _cache_test_router_class(authority_box, calls),
     )
     monkeypatch.setattr(
-        frontier_review,
+        routine_review,
         "_current_structured_authority",
         lambda _lane: (authority_box["value"], None),
     )
     monkeypatch.setattr(
-        frontier_review,
+        routine_review,
         "_structured_authority_observation",
         lambda _authority: observation_box["value"],
     )
     monkeypatch.setenv("CHRONOVISOR_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
 
-    first = frontier_review.run_structured_review(
+    first = routine_review.run_structured_review(
         "same request",
         frontier_review.FRONTIER_DECISION_SCHEMA,
         repo_root=tmp_path,
         decision_lane="recall_auto_apply",
     )
     observation_box["value"] = "1" * 64
-    restored = frontier_review.run_structured_review(
+    restored = routine_review.run_structured_review(
         "same request",
         frontier_review.FRONTIER_DECISION_SCHEMA,
         repo_root=tmp_path,
@@ -1555,18 +1555,18 @@ def test_structured_review_restores_cached_a_after_authority_a_b_a(
         _cache_test_router_class(authority_box, calls),
     )
     monkeypatch.setattr(
-        frontier_review,
+        routine_review,
         "_current_structured_authority",
         lambda _lane: (authority_box["value"], None),
     )
     monkeypatch.setattr(
-        frontier_review,
+        routine_review,
         "_structured_authority_observation",
         lambda _authority: observation_box["value"],
     )
     monkeypatch.setenv("CHRONOVISOR_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
 
-    result_a = frontier_review.run_structured_review(
+    result_a = routine_review.run_structured_review(
         "same request",
         frontier_review.FRONTIER_DECISION_SCHEMA,
         repo_root=tmp_path,
@@ -1574,7 +1574,7 @@ def test_structured_review_restores_cached_a_after_authority_a_b_a(
     )
     authority_box["value"] = authority_b
     observation_box["value"] = "1" * 64
-    result_b = frontier_review.run_structured_review(
+    result_b = routine_review.run_structured_review(
         "same request",
         frontier_review.FRONTIER_DECISION_SCHEMA,
         repo_root=tmp_path,
@@ -1582,7 +1582,7 @@ def test_structured_review_restores_cached_a_after_authority_a_b_a(
     )
     authority_box["value"] = authority_a
     observation_box["value"] = "2" * 64
-    restored_a = frontier_review.run_structured_review(
+    restored_a = routine_review.run_structured_review(
         "same request",
         frontier_review.FRONTIER_DECISION_SCHEMA,
         repo_root=tmp_path,
@@ -1608,13 +1608,13 @@ def test_structured_review_discards_cached_result_if_observation_drifts_during_l
         _cache_test_router_class(authority_box, calls),
     )
     monkeypatch.setattr(
-        frontier_review,
+        routine_review,
         "_current_structured_authority",
         lambda _lane: (authority_box["value"], None),
     )
     monkeypatch.setenv("CHRONOVISOR_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
 
-    frontier_review.run_structured_review(
+    routine_review.run_structured_review(
         "same request",
         frontier_review.FRONTIER_DECISION_SCHEMA,
         repo_root=tmp_path,
@@ -1622,12 +1622,12 @@ def test_structured_review_discards_cached_result_if_observation_drifts_during_l
     )
     observations = iter(["1" * 64, "1" * 64, "2" * 64])
     monkeypatch.setattr(
-        frontier_review,
+        routine_review,
         "_structured_authority_observation",
         lambda _authority: next(observations),
     )
 
-    result = frontier_review.run_structured_review(
+    result = routine_review.run_structured_review(
         "same request",
         frontier_review.FRONTIER_DECISION_SCHEMA,
         repo_root=tmp_path,
@@ -1652,12 +1652,12 @@ def test_structured_review_discards_current_result_if_authority_drifts_during_st
         _cache_test_router_class(authority_box, calls),
     )
     monkeypatch.setattr(
-        frontier_review,
+        routine_review,
         "_current_structured_authority",
         lambda _lane: (authority_box["value"], None),
     )
     monkeypatch.setattr(
-        frontier_review,
+        routine_review,
         "_structured_authority_observation",
         lambda _authority: observation_box["value"],
     )
@@ -1675,7 +1675,7 @@ def test_structured_review_discards_current_result_if_authority_drifts_during_st
     )
     monkeypatch.setenv("CHRONOVISOR_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
 
-    drifted = frontier_review.run_structured_review(
+    drifted = routine_review.run_structured_review(
         "same request",
         frontier_review.FRONTIER_DECISION_SCHEMA,
         repo_root=tmp_path,
@@ -1690,7 +1690,7 @@ def test_structured_review_discards_current_result_if_authority_drifts_during_st
     assert len(list(entries.glob("*.json"))) == 1
     assert calls == ["same request|None"]
 
-    restored = frontier_review.run_structured_review(
+    restored = routine_review.run_structured_review(
         "same request",
         frontier_review.FRONTIER_DECISION_SCHEMA,
         repo_root=tmp_path,
@@ -1713,24 +1713,24 @@ def test_structured_review_does_not_use_cache_when_initial_observation_unavailab
         _cache_test_router_class(authority_box, calls),
     )
     monkeypatch.setattr(
-        frontier_review,
+        routine_review,
         "_current_structured_authority",
         lambda _lane: (authority_box["value"], None),
     )
     monkeypatch.setenv("CHRONOVISOR_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
 
-    frontier_review.run_structured_review(
+    routine_review.run_structured_review(
         "same request",
         frontier_review.FRONTIER_DECISION_SCHEMA,
         repo_root=tmp_path,
         decision_lane="recall_auto_apply",
     )
     monkeypatch.setattr(
-        frontier_review,
+        routine_review,
         "_structured_authority_observation",
         lambda _authority: None,
     )
-    result = frontier_review.run_structured_review(
+    result = routine_review.run_structured_review(
         "same request",
         frontier_review.FRONTIER_DECISION_SCHEMA,
         repo_root=tmp_path,
@@ -1755,13 +1755,13 @@ def test_structured_review_does_not_return_cache_when_post_observation_unavailab
         _cache_test_router_class(authority_box, calls),
     )
     monkeypatch.setattr(
-        frontier_review,
+        routine_review,
         "_current_structured_authority",
         lambda _lane: (authority_box["value"], None),
     )
     monkeypatch.setenv("CHRONOVISOR_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
 
-    frontier_review.run_structured_review(
+    routine_review.run_structured_review(
         "same request",
         frontier_review.FRONTIER_DECISION_SCHEMA,
         repo_root=tmp_path,
@@ -1769,11 +1769,11 @@ def test_structured_review_does_not_return_cache_when_post_observation_unavailab
     )
     observations = iter(["1" * 64, "1" * 64, None])
     monkeypatch.setattr(
-        frontier_review,
+        routine_review,
         "_structured_authority_observation",
         lambda _authority: next(observations),
     )
-    result = frontier_review.run_structured_review(
+    result = routine_review.run_structured_review(
         "same request",
         frontier_review.FRONTIER_DECISION_SCHEMA,
         repo_root=tmp_path,
@@ -1798,7 +1798,7 @@ def test_structured_review_cache_lock_entry_failure_falls_back_once(
         _cache_test_router_class(authority_box, calls),
     )
     monkeypatch.setattr(
-        frontier_review,
+        routine_review,
         "_current_structured_authority",
         lambda lane: (authority_box["value"], None),
     )
@@ -1815,7 +1815,7 @@ def test_structured_review_cache_lock_entry_failure_falls_back_once(
     )
     monkeypatch.setenv("CHRONOVISOR_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
 
-    result = frontier_review.run_structured_review(
+    result = routine_review.run_structured_review(
         "same request",
         frontier_review.FRONTIER_DECISION_SCHEMA,
         repo_root=tmp_path,
@@ -1838,14 +1838,14 @@ def test_structured_review_cache_misses_prompt_system_and_authority_changes(
         _cache_test_router_class(authority_box, calls),
     )
     monkeypatch.setattr(
-        frontier_review,
+        routine_review,
         "_current_structured_authority",
         lambda lane: (authority_box["value"], None),
     )
     monkeypatch.setenv("CHRONOVISOR_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
 
     def run(prompt: str, system: str | None) -> dict[str, object]:
-        return frontier_review.run_structured_review(
+        return routine_review.run_structured_review(
             prompt,
             frontier_review.FRONTIER_DECISION_SCHEMA,
             repo_root=tmp_path,
@@ -1882,12 +1882,12 @@ def test_structured_review_does_not_store_after_authority_aba_observation(
         _cache_test_router_class(authority_box, calls),
     )
     monkeypatch.setattr(
-        frontier_review,
+        routine_review,
         "_current_structured_authority",
         lambda lane: (authority_box["value"], None),
     )
     monkeypatch.setattr(
-        frontier_review,
+        routine_review,
         "_structured_authority_observation",
         lambda _authority: next(observations),
     )
@@ -1896,7 +1896,7 @@ def test_structured_review_does_not_store_after_authority_aba_observation(
     results = []
     for _index in range(3):
         results.append(
-            frontier_review.run_structured_review(
+            routine_review.run_structured_review(
                 "same request",
                 frontier_review.FRONTIER_DECISION_SCHEMA,
                 repo_root=tmp_path,
@@ -1933,18 +1933,18 @@ def test_structured_review_discards_any_model_result_after_authority_drift(
         _cache_test_router_class(authority_box, calls, outcome=outcome),
     )
     monkeypatch.setattr(
-        frontier_review,
+        routine_review,
         "_current_structured_authority",
         lambda lane: (authority_box["value"], None),
     )
     monkeypatch.setattr(
-        frontier_review,
+        routine_review,
         "_structured_authority_observation",
         lambda _authority: next(observations),
     )
     monkeypatch.setenv("CHRONOVISOR_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
 
-    result = frontier_review.run_structured_review(
+    result = routine_review.run_structured_review(
         "same request",
         frontier_review.FRONTIER_DECISION_SCHEMA,
         repo_root=tmp_path,
@@ -1972,23 +1972,23 @@ def test_structured_review_authority_guard_survives_cache_lock_failure(
         _cache_test_router_class(authority_box, calls),
     )
     monkeypatch.setattr(
-        frontier_review,
+        routine_review,
         "_current_structured_authority",
         lambda lane: (authority_box["value"], None),
     )
     monkeypatch.setattr(
-        frontier_review,
+        routine_review,
         "_structured_authority_observation",
         lambda _authority: next(observations),
     )
     monkeypatch.setattr(
-        frontier_review.semantic_hold.StructuredReviewSemanticHoldCache,
+        routine_review.semantic_hold.StructuredReviewSemanticHoldCache,
         "locked",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("lock failed")),
     )
     monkeypatch.setenv("CHRONOVISOR_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
 
-    result = frontier_review.run_structured_review(
+    result = routine_review.run_structured_review(
         "same request",
         frontier_review.FRONTIER_DECISION_SCHEMA,
         repo_root=tmp_path,
@@ -2013,14 +2013,14 @@ def test_structured_review_never_caches_non_semantic_outcomes(
         _cache_test_router_class(authority_box, calls, outcome=outcome),
     )
     monkeypatch.setattr(
-        frontier_review,
+        routine_review,
         "_current_structured_authority",
         lambda lane: (authority_box["value"], None),
     )
     monkeypatch.setenv("CHRONOVISOR_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
 
     for _index in range(2):
-        frontier_review.run_structured_review(
+        routine_review.run_structured_review(
             "same request",
             frontier_review.FRONTIER_DECISION_SCHEMA,
             repo_root=tmp_path,
@@ -2054,7 +2054,7 @@ def test_structured_review_keeps_non_three_way_no_quorum_operational(
     monkeypatch.setattr(decision_router, "DecisionRouter", router)
     monkeypatch.setenv("CHRONOVISOR_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
 
-    result = frontier_review.run_structured_review(
+    result = routine_review.run_structured_review(
         "review this",
         frontier_review.FRONTIER_DECISION_SCHEMA,
         repo_root=tmp_path,
@@ -2106,7 +2106,7 @@ def test_structured_review_local_model_failures_quarantine_without_tie_or_fronti
     monkeypatch.setenv("CHRONOVISOR_DECISION_POLICY_RECALL_AUTO_APPLY", "shadow")
     schema = frontier_review.FRONTIER_DECISION_SCHEMA
 
-    result = frontier_review.run_structured_review(
+    result = routine_review.run_structured_review(
         "review this",
         schema,
         repo_root=tmp_path,
@@ -2152,7 +2152,7 @@ def test_structured_review_rejects_incomplete_approved_json(
     )
     schema = frontier_review.FRONTIER_DECISION_SCHEMA
 
-    result = frontier_review.run_structured_review(
+    result = routine_review.run_structured_review(
         "review this",
         schema,
         repo_root=tmp_path,
@@ -2170,7 +2170,7 @@ def test_local_structured_result_preserves_optional_schema_properties() -> None:
 
     schema = INGEST_FRONTIER_DECISION_SCHEMA
 
-    result = frontier_review._validated_structured_result(
+    result = routine_review._validated_structured_result(
         {
             "decision": "apply_available",
             "summary": "required fields are valid",
@@ -2201,7 +2201,7 @@ def test_local_structured_result_preserves_optional_schema_properties() -> None:
 def test_ingest_structured_failure_envelope_uses_retry_decision() -> None:
     from chronovisor.ingest.ingest import INGEST_FRONTIER_DECISION_SCHEMA
 
-    result = frontier_review._validated_structured_result(
+    result = routine_review._validated_structured_result(
         None,
         INGEST_FRONTIER_DECISION_SCHEMA,
         reviewer="local_consensus",
@@ -2252,7 +2252,7 @@ def test_structured_review_forwards_optional_system_to_local_router(
     monkeypatch.setenv("CHRONOVISOR_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
     marker = "CHRONOVISOR_READ_BACK_EVIDENCE_POLICY=2"
 
-    result = frontier_review.run_structured_review(
+    result = routine_review.run_structured_review(
         "review this",
         frontier_review.FRONTIER_DECISION_SCHEMA,
         repo_root=tmp_path,

@@ -1323,7 +1323,7 @@ def run_frontier_policy_audit(
     reviewer: Any | None = None,
     authority: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    from chronovisor.decision import frontier_review
+    from chronovisor.decision import routine_review
 
     if authority is None:
         authority, authority_error = decision_authority.current_semantic_authority(
@@ -1350,9 +1350,9 @@ def run_frontier_policy_audit(
     )
     prompt = build_frontier_audit_prompt(record, best, reasons)
     if reviewer is None:
-        payload = frontier_review.run_structured_review(
+        payload = routine_review.run_structured_review(
             prompt,
-            frontier_review.FRONTIER_DECISION_SCHEMA,
+            routine_review.FRONTIER_DECISION_SCHEMA,
             repo_root=repo,
             timeout=timeout_seconds,
             execute_patch=False,

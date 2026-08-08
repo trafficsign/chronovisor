@@ -435,7 +435,7 @@ def propose_repair(
                 authority, authority_error = current_semantic_authority("local_repair")
                 if authority is None or authority_error is not None:
                     return deterministic
-                from chronovisor.decision.frontier_review import run_structured_review
+                from chronovisor.decision.routine_review import run_structured_review
 
                 review = run_structured_review(
                     build_prompt(packet),

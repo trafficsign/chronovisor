@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import errno
 import hashlib
 import json
-import math
 import os
 import re
 import shlex
@@ -14,10 +12,8 @@ import subprocess
 import tempfile
 import time
 import uuid
-from collections import Counter
-from collections.abc import Iterator, Mapping
-from contextlib import ExitStack, contextmanager, suppress
-from contextvars import ContextVar
+from collections.abc import Iterator
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, replace
 from datetime import datetime
 from html import unescape
@@ -27,6 +23,7 @@ from urllib.parse import urlparse
 
 from chronovisor.core.runtime_config import uvx_runtime_command
 from chronovisor.core.store import CHRONOVISOR_ROOT
+from chronovisor.decision import routine_review as _routine_review
 from chronovisor.decision.decision_schema_manifest import FRONTIER_DECISION_SCHEMA
 from chronovisor.ops import runtime_status
 from chronovisor.ops.convergence import (
@@ -35,14 +32,13 @@ from chronovisor.ops.convergence import (
 from chronovisor.ops.convergence import (
     is_human_required_failure,
 )
-from chronovisor.search import semantic_hold
 
 FRONTIER_ACTIVITY_DIR = CHRONOVISOR_ROOT / "runtime" / "frontier-reviews" / "active"
-STRUCTURED_REVIEW_HOLD_CACHE_ROOT: Path | None = None
-_STRUCTURED_REVIEW_ROUTER_CONFIG: ContextVar[Any | None] = ContextVar(
-    "structured_review_router_config",
-    default=None,
+semantic_hold = _routine_review.semantic_hold
+STRUCTURED_REVIEW_HOLD_CACHE_ROOT = (
+    _routine_review.STRUCTURED_REVIEW_HOLD_CACHE_ROOT
 )
+_STRUCTURED_REVIEW_ROUTER_CONFIG = _routine_review._STRUCTURED_REVIEW_ROUTER_CONFIG
 
 def _bounded_timeout(timeout: int | None) -> int:
     requested = timeout or int(
@@ -767,443 +763,6 @@ def _extract_json_object(text: str) -> dict[str, Any] | None:
     return None
 
 
-def _structured_route_result(
-    routed: Any,
-    *,
-    schema: dict[str, Any],
-    decision_lane: str | None,
-    lane_mode: str,
-    router_policy_source: str,
-    policy_audit: dict[str, Any],
-) -> dict[str, Any]:
-    """Convert one trusted local-router result into the compatibility envelope."""
-
-    routed_residency = getattr(routed, "residency", None)
-    residency = routed_residency if isinstance(routed_residency, Mapping) else {}
-    decision_execution = {
-        "execution_fingerprint": residency.get("execution_fingerprint"),
-        "decision_artifact_seal_sha256": residency.get(
-            "decision_artifact_seal_sha256"
-        ),
-    }
-
-    if lane_mode == "shadow":
-        reason = f"decision_lane_shadow:{decision_lane}"
-        failure = _frontier_failure(
-            "local_decision_shadow_only",
-            "local_quarantined",
-            reason,
-            human_required=False,
-        )
-        result = _structured_failure_payload(
-            schema,
-            summary=reason,
-            failure=failure,
-            reviewer="local_consensus_shadow",
-        )
-        result["local_consensus"] = routed.audit_record()
-        result["decision_policy"] = policy_audit
-        result["decision_execution"] = decision_execution
-        return result
-    if router_policy_source != "adopted_artifact":
-        reason = f"decision_lane_unadopted:{decision_lane}"
-        failure = _frontier_failure(
-            "local_decision_artifact_required",
-            "local_quarantined",
-            reason,
-            human_required=False,
-        )
-        result = _structured_failure_payload(
-            schema,
-            summary=reason,
-            failure=failure,
-            reviewer="local_policy",
-        )
-        result["local_consensus"] = routed.audit_record()
-        result["decision_policy"] = policy_audit
-        result["decision_execution"] = decision_execution
-        return result
-    if routed.ok and isinstance(routed.decision, dict):
-        result = _validated_structured_result(
-            routed.decision,
-            schema,
-            reviewer="local_consensus",
-        )
-        result["local_consensus"] = routed.audit_record()
-        result["decision_policy"] = policy_audit
-        result["decision_execution"] = decision_execution
-        return result
-
-    reason = (
-        routed.quarantine_reason or routed.failure_class or "local consensus failed"
-    )
-    valid_signatures = {
-        vote.signature_sha256
-        for vote in routed.votes
-        if vote.valid and vote.signature_sha256 is not None
-    }
-    vote_signature_sha256s = [vote.signature_sha256 for vote in routed.votes]
-    three_valid_votes = bool(
-        len(routed.votes) == 3 and all(vote.valid for vote in routed.votes)
-    )
-    conservative_veto_semantic_no_quorum = bool(
-        routed.failure_class == "local_consensus_failed"
-        and routed.quarantine_reason
-        == "mutating_local_majority_vetoed_by_conservative_vote"
-        and len(vote_signature_sha256s) == 3
-        and all(
-            isinstance(signature, str)
-            and re.fullmatch(r"[0-9a-f]{64}", signature) is not None
-            for signature in vote_signature_sha256s
-        )
-        and sorted(Counter(vote_signature_sha256s).values()) == [1, 2]
-    )
-    three_way_semantic_no_quorum = bool(
-        three_valid_votes
-        and (
-            (
-                routed.quarantine_reason == "local_models_did_not_reach_two_vote_quorum"
-                and len(valid_signatures) == 3
-            )
-            or conservative_veto_semantic_no_quorum
-        )
-    )
-    failure = _frontier_failure(
-        (
-            semantic_hold.LOCAL_SEMANTIC_NO_QUORUM
-            if three_way_semantic_no_quorum
-            else "local_consensus_failed"
-        ),
-        "local_quarantined",
-        reason,
-        human_required=False,
-    )
-    result = _structured_failure_payload(
-        schema,
-        summary=reason,
-        failure=failure,
-        reviewer="local_consensus",
-    )
-    result["local_consensus"] = routed.audit_record()
-    result["decision_policy"] = policy_audit
-    result["decision_execution"] = decision_execution
-    return result
-
-
-def _structured_semantic_cache_result_error(
-    result: object,
-    *,
-    schema: dict[str, Any],
-    policy_audit: dict[str, Any],
-    authority: dict[str, Any],
-) -> str | None:
-    """Validate a cached failure against this exact schema and authority."""
-
-    if not isinstance(result, dict):
-        return "structured semantic cache result is missing"
-    lane = policy_audit.get("lane")
-    if not isinstance(lane, str) or not lane:
-        return "structured semantic cache lane is missing"
-    if result.get("decision_policy") != policy_audit:
-        return "structured semantic cache policy changed"
-    if not semantic_hold.is_local_semantic_no_quorum(result):
-        return "structured semantic cache no-quorum proof is invalid"
-    consensus = result.get("local_consensus")
-    assert isinstance(consensus, dict)
-    reason = consensus.get("quarantine_reason")
-    assert isinstance(reason, str)
-    decision_execution = result.get("decision_execution")
-    if not isinstance(decision_execution, dict) or set(decision_execution) != {
-        "execution_fingerprint",
-        "decision_artifact_seal_sha256",
-    }:
-        return "structured semantic cache execution provenance is invalid"
-    if any(
-        value is not None
-        and (
-            not isinstance(value, str)
-            or re.fullmatch(r"[0-9a-f]{64}", value) is None
-        )
-        for value in decision_execution.values()
-    ):
-        return "structured semantic cache execution provenance is invalid"
-    expected = _structured_failure_payload(
-        schema,
-        summary=reason,
-        failure=_frontier_failure(
-            semantic_hold.LOCAL_SEMANTIC_NO_QUORUM,
-            "local_quarantined",
-            reason,
-            human_required=False,
-        ),
-        reviewer="local_consensus",
-    )
-    expected["local_consensus"] = consensus
-    expected["decision_policy"] = policy_audit
-    expected["decision_execution"] = decision_execution
-    if result != expected:
-        return "structured semantic cache failure payload is not canonical"
-    try:
-        semantic_hold.build_semantic_no_quorum_hold(
-            lane,
-            {"validation": "structured_review_cache"},
-            authority,
-            result,
-        )
-    except (TypeError, ValueError) as exc:
-        return f"structured semantic cache authority is invalid:{exc}"
-    return None
-
-
-def _structured_authority_observation(
-    authority: dict[str, Any],
-) -> str | None:
-    """Return an opaque mutable-source generation for the in-flight guard."""
-
-    try:
-        return semantic_hold.structured_review_authority_observation_sha256(
-            authority,
-            router_config=_STRUCTURED_REVIEW_ROUTER_CONFIG.get(),
-        )
-    except Exception:
-        # Enabled adopted lanes fail closed before inference when the mutable
-        # authority generation cannot be observed.
-        return None
-
-
-def _current_structured_authority(
-    lane: str,
-) -> tuple[dict[str, Any] | None, str | None]:
-    """Resolve lane authority behind a narrow, test-isolated seam."""
-
-    from chronovisor.decision.decision_authority import current_semantic_authority
-
-    return current_semantic_authority(
-        lane,
-        router_config=_STRUCTURED_REVIEW_ROUTER_CONFIG.get(),
-    )
-
-
-def _structured_subprocess_failure(
-    exc: subprocess.TimeoutExpired | OSError,
-    *,
-    reviewer: str,
-    schema: dict[str, Any],
-) -> dict[str, Any]:
-    """Normalize process-launch failures at the structured-review boundary."""
-
-    if isinstance(exc, subprocess.TimeoutExpired):
-        # A timeout is always retryable even when partial stderr happens to
-        # contain stale auth-like text from the child process.
-        failure = _frontier_failure(
-            "network_transient",
-            "frontier_retry",
-            "frontier call timed out and can be retried automatically",
-            human_required=False,
-        )
-    else:
-        detail = redact_sensitive_text(f"{exc.__class__.__name__}: {exc}")
-        failure = classify_frontier_failure(detail)
-        lower = detail.lower()
-        unavailable_errnos = {errno.ENOENT, errno.ENOTDIR, errno.EACCES, errno.ENOEXEC}
-        unavailable_markers = (
-            "no such file or directory",
-            "executable not found",
-            "permission denied",
-            "exec format error",
-        )
-        if failure.failure_class == "unknown_frontier_failure" and (
-            getattr(exc, "errno", None) in unavailable_errnos
-            or any(marker in lower for marker in unavailable_markers)
-        ):
-            failure = _frontier_failure(
-                "frontier_tool_unavailable",
-                "frontier_retry",
-                f"{reviewer} executable could not be started",
-            )
-    return _structured_failure_payload(
-        schema,
-        summary=failure.summary,
-        failure=failure,
-        reviewer=reviewer,
-    )
-
-
-def _schema_type_matches(value: Any, expected: str) -> bool:
-    if expected == "object":
-        return isinstance(value, dict)
-    if expected == "array":
-        return isinstance(value, list)
-    if expected == "string":
-        return isinstance(value, str)
-    if expected == "boolean":
-        return isinstance(value, bool)
-    if expected == "number":
-        return isinstance(value, (int, float)) and not isinstance(value, bool)
-    if expected == "integer":
-        return isinstance(value, int) and not isinstance(value, bool)
-    if expected == "null":
-        return value is None
-    return True
-
-
-def _structured_validation_error(
-    value: Any,
-    schema: dict[str, Any],
-    *,
-    path: str = "$",
-) -> str | None:
-    expected = schema.get("type")
-    allowed_types = expected if isinstance(expected, list) else [expected]
-    allowed_types = [item for item in allowed_types if isinstance(item, str)]
-    if allowed_types and not any(
-        _schema_type_matches(value, item) for item in allowed_types
-    ):
-        return f"{path}: expected {'|'.join(allowed_types)}"
-    if "enum" in schema and value not in schema.get("enum", []):
-        return f"{path}: value is outside enum"
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
-        if not math.isfinite(float(value)):
-            return f"{path}: number must be finite"
-        if "minimum" in schema and value < schema["minimum"]:
-            return f"{path}: below minimum"
-        if "maximum" in schema and value > schema["maximum"]:
-            return f"{path}: above maximum"
-    if isinstance(value, list):
-        if "minItems" in schema and len(value) < int(schema["minItems"]):
-            return f"{path}: too few items"
-        if "maxItems" in schema and len(value) > int(schema["maxItems"]):
-            return f"{path}: too many items"
-        item_schema = schema.get("items")
-        if isinstance(item_schema, dict):
-            for index, item in enumerate(value):
-                error = _structured_validation_error(
-                    item, item_schema, path=f"{path}[{index}]"
-                )
-                if error:
-                    return error
-    if isinstance(value, dict):
-        properties = schema.get("properties")
-        properties = properties if isinstance(properties, dict) else {}
-        required = schema.get("required")
-        required = required if isinstance(required, list) else []
-        missing = [name for name in required if name not in value]
-        if missing:
-            return f"{path}: missing required fields: {', '.join(str(name) for name in missing)}"
-        if schema.get("additionalProperties") is False:
-            extras = sorted(set(value) - set(properties))
-            if extras:
-                return f"{path}: unexpected fields: {', '.join(extras)}"
-        for name, child_schema in properties.items():
-            if name not in value or not isinstance(child_schema, dict):
-                continue
-            error = _structured_validation_error(
-                value[name], child_schema, path=f"{path}.{name}"
-            )
-            if error:
-                return error
-    return None
-
-
-def _failure_default(name: str, schema: dict[str, Any], summary: str) -> Any:
-    enum = schema.get("enum")
-    if isinstance(enum, list) and enum:
-        if name == "decision":
-            for safe_decision in (
-                "needs_retry",
-                "retry",
-                "rejected",
-                "quarantined",
-            ):
-                if safe_decision in enum:
-                    return safe_decision
-        return enum[0]
-    expected = schema.get("type")
-    types = expected if isinstance(expected, list) else [expected]
-    if "null" in types:
-        return None
-    if name == "decision" and "string" in types:
-        return "needs_retry"
-    if name in {"summary", "reason", "notes"} and "string" in types:
-        return summary
-    if name == "confidence" and "number" in types:
-        return 0.0
-    if "string" in types:
-        return ""
-    if "number" in types or "integer" in types:
-        return 0
-    if "boolean" in types:
-        return False
-    if "array" in types:
-        return []
-    if "object" in types:
-        return {}
-    return None
-
-
-def _structured_failure_payload(
-    schema: dict[str, Any],
-    *,
-    summary: str,
-    failure: FrontierFailure,
-    reviewer: str,
-    diagnostics: str = "",
-) -> dict[str, Any]:
-    strict_schema, _repair = _strict_schema_with_repair(schema)
-    properties = strict_schema.get("properties")
-    properties = properties if isinstance(properties, dict) else {}
-    payload = {
-        name: _failure_default(name, field_schema, summary)
-        for name, field_schema in properties.items()
-        if isinstance(field_schema, dict)
-    }
-    failure_payload = failure.to_dict()
-    if diagnostics:
-        redacted = redact_sensitive_text(diagnostics)
-        failure_payload["diagnostics_tail"] = redacted[-4000:]
-        failure_payload["diagnostics_sha256"] = hashlib.sha256(
-            redacted.encode("utf-8")
-        ).hexdigest()
-    payload["frontier_failure"] = failure_payload
-    payload["human_required"] = failure.human_required
-    payload["reviewer"] = reviewer
-    return payload
-
-
-def _validated_structured_result(
-    parsed: dict[str, Any] | None,
-    schema: dict[str, Any],
-    *,
-    reviewer: str,
-) -> dict[str, Any]:
-    if parsed is None:
-        failure = _frontier_failure(
-            "schema_invalid",
-            "pending_frontier_review",
-            "frontier output did not contain JSON",
-        )
-        return _structured_failure_payload(
-            schema, summary=failure.summary, failure=failure, reviewer=reviewer
-        )
-    # The local router already validates against the caller's production
-    # schema.  ``_strict_schema_with_repair`` exists only for frontier CLI
-    # providers that require every property to appear in their output schema;
-    # applying that provider compatibility rewrite here silently turns
-    # legitimate optional fields (for example ingest repair instructions)
-    # into required result fields after a successful local quorum.
-    error = _structured_validation_error(parsed, schema)
-    if error:
-        failure = _frontier_failure(
-            "schema_invalid",
-            "pending_frontier_review",
-            f"frontier output failed schema validation: {error}",
-        )
-        return _structured_failure_payload(
-            schema, summary=failure.summary, failure=failure, reviewer=reviewer
-        )
-    result = dict(parsed)
-    result["reviewer"] = reviewer
-    return result
 
 
 def _parse_result(text: str) -> FrontierResult:
@@ -1616,6 +1175,22 @@ def _extract_json_object(text: str) -> dict[str, Any] | None:
     return None
 
 
+
+_structured_route_result = _routine_review._structured_route_result
+_structured_semantic_cache_result_error = (
+    _routine_review._structured_semantic_cache_result_error
+)
+_structured_authority_observation = (
+    _routine_review._structured_authority_observation
+)
+_current_structured_authority = _routine_review._current_structured_authority
+_schema_type_matches = _routine_review._schema_type_matches
+_structured_validation_error = _routine_review._structured_validation_error
+_failure_default = _routine_review._failure_default
+_structured_failure_payload = _routine_review._structured_failure_payload
+_validated_structured_result = _routine_review._validated_structured_result
+
+
 def run_structured_review(
     prompt: str,
     schema: dict[str, Any],
@@ -1632,283 +1207,39 @@ def run_structured_review(
     record_replay: bool = True,
     system: str | None = None,
 ) -> dict[str, Any]:
-    """Resolve a routine structured decision using local models only.
+    """Compatibility export for the routine local-consensus entry point."""
 
-    This compatibility entry point is intentionally unable to invoke Codex,
-    Claude, a custom frontier command, or the code-repair path.  The legacy
-    frontier-shaped failure envelope is retained so existing callers can fail
-    closed without losing their durable queue semantics.
-    """
-    del (
-        repo_root,
-        timeout,
-        execute_patch,
-        command_env,
-        model_override,
-        reasoning_effort_override,
+    _routine_review.STRUCTURED_REVIEW_HOLD_CACHE_ROOT = (
+        STRUCTURED_REVIEW_HOLD_CACHE_ROOT
     )
-
-    from chronovisor.decision.decision_policy import resolve_decision_policy
-    from chronovisor.decision.decision_router import (
-        DecisionRouter,
-        decision_request_fingerprint_sha256,
-        load_decision_router_config,
+    _routine_review._structured_route_result = _structured_route_result
+    _routine_review._structured_semantic_cache_result_error = (
+        _structured_semantic_cache_result_error
     )
-    from chronovisor.decision.decision_schema_manifest import (
-        production_schema_manifest,
-        schema_sha256,
+    _routine_review._structured_authority_observation = (
+        _structured_authority_observation
     )
-
-    lane_policy, lane_mode, lane_error = resolve_decision_policy(decision_lane)
-    policy_audit = {
-        "lane": decision_lane,
-        "kind": lane_policy.kind if lane_policy is not None else None,
-        "schema_name": lane_policy.schema_name if lane_policy is not None else None,
-        "mode": lane_mode,
-        "error": lane_error,
-    }
-    if lane_error is not None or lane_mode == "off":
-        reason = lane_error or f"decision_lane_off:{decision_lane}"
-        failure = _frontier_failure(
-            "local_decision_policy_blocked",
-            "local_quarantined",
-            reason,
-            human_required=False,
-        )
-        result = _structured_failure_payload(
-            schema,
-            summary=reason,
-            failure=failure,
-            reviewer="local_policy",
-        )
-        result["decision_policy"] = policy_audit
-        return result
-
-    if lane_policy is None or lane_policy.kind not in {"consensus", "local_batch"}:
-        reason = f"decision_lane_not_structured:{decision_lane}"
-        failure = _frontier_failure(
-            "local_decision_policy_kind_invalid",
-            "local_quarantined",
-            reason,
-            human_required=False,
-        )
-        result = _structured_failure_payload(
-            schema,
-            summary=reason,
-            failure=failure,
-            reviewer="local_policy",
-        )
-        result["decision_policy"] = policy_audit
-        return result
-
-    expected_digest = production_schema_manifest().get(str(lane_policy.schema_name))
-    actual_digest = schema_sha256(schema)
-    policy_audit["expected_schema_sha256"] = expected_digest
-    policy_audit["actual_schema_sha256"] = actual_digest
-    if expected_digest is None or actual_digest != expected_digest:
-        reason = f"decision_lane_schema_mismatch:{decision_lane}"
-        failure = _frontier_failure(
-            "local_decision_schema_mismatch",
-            "local_quarantined",
-            reason,
-            human_required=False,
-        )
-        result = _structured_failure_payload(
-            schema,
-            summary=reason,
-            failure=failure,
-            reviewer="local_policy",
-        )
-        result["decision_policy"] = policy_audit
-        return result
-
-    # Resolve one immutable configuration snapshot for the authority seal and
-    # router constructed for this review.  The later guard calls intentionally
-    # run outside this context so a live authority change still fails closed.
-    review_router_config = load_decision_router_config()
-
-    authority: dict[str, Any] | None = None
-    authority_observation_sha256: str | None = None
-    cache_epoch: dict[str, Any] | None = None
-    if isinstance(decision_lane, str) and decision_lane and lane_mode == "enabled":
-        config_token = _STRUCTURED_REVIEW_ROUTER_CONFIG.set(review_router_config)
-        try:
-            candidate_authority, authority_error = _current_structured_authority(
-                decision_lane
-            )
-            if authority_error is None and isinstance(candidate_authority, dict):
-                expected_policy_authority = {
-                    "kind": lane_policy.kind,
-                    "schema_name": lane_policy.schema_name,
-                    "mode": lane_mode,
-                    "error": lane_error,
-                }
-                if candidate_authority.get("policy") == expected_policy_authority:
-                    candidate_observation_sha256 = _structured_authority_observation(
-                        candidate_authority
-                    )
-                    try:
-                        if candidate_observation_sha256 is None:
-                            raise ValueError("authority observation unavailable")
-                        effective_request_sha256 = decision_request_fingerprint_sha256(
-                            prompt=prompt,
-                            schema=schema,
-                            system=system,
-                            decision_lane=decision_lane,
-                        )
-                        cache_epoch = semantic_hold.build_structured_review_hold_epoch(
-                            lane=decision_lane,
-                            authority=candidate_authority,
-                            schema_sha256=actual_digest,
-                            prompt=prompt,
-                            system=system,
-                            effective_request_sha256=effective_request_sha256,
-                        )
-                    except (TypeError, ValueError):
-                        cache_epoch = None
-                    else:
-                        authority = candidate_authority
-                        authority_observation_sha256 = (
-                            candidate_observation_sha256
-                        )
-        finally:
-            _STRUCTURED_REVIEW_ROUTER_CONFIG.reset(config_token)
-
-    router = DecisionRouter(
-        config=review_router_config,
+    _routine_review._current_structured_authority = _current_structured_authority
+    _routine_review._schema_type_matches = _schema_type_matches
+    _routine_review._structured_validation_error = _structured_validation_error
+    _routine_review._failure_default = _failure_default
+    _routine_review._structured_failure_payload = _structured_failure_payload
+    _routine_review._validated_structured_result = _validated_structured_result
+    return _routine_review.run_structured_review(
+        prompt,
+        schema,
+        repo_root=repo_root,
         audit_root=audit_root,
-        audit_role=decision_lane or model_role,
-        record_replay=record_replay,
-        require_adopted=lane_mode == "enabled",
+        timeout=timeout,
+        execute_patch=execute_patch,
+        command_env=command_env,
+        model_role=model_role,
         decision_lane=decision_lane,
+        model_override=model_override,
+        reasoning_effort_override=reasoning_effort_override,
+        record_replay=record_replay,
+        system=system,
     )
-    policy_audit["router_policy"] = router.policy.audit_record()
-    cache_eligible = bool(
-        authority is not None
-        and cache_epoch is not None
-        and router.policy.source == "adopted_artifact"
-        and router.policy.audit_record() == authority.get("router")
-    )
-
-    def authority_guard_error(stage: str) -> str | None:
-        if (
-            authority is None
-            or authority_observation_sha256 is None
-            or not isinstance(decision_lane, str)
-        ):
-            return f"decision authority observation unavailable {stage} local review"
-        current_authority, current_error = _current_structured_authority(decision_lane)
-        current_observation = (
-            _structured_authority_observation(current_authority)
-            if isinstance(current_authority, dict)
-            else None
-        )
-        if current_error is not None or current_observation is None:
-            return f"decision authority observation unavailable {stage} local review"
-        if (
-            current_authority != authority
-            or current_observation != authority_observation_sha256
-        ):
-            return f"decision authority changed {stage} local review"
-        return None
-
-    def authority_failure(reason: str) -> dict[str, Any]:
-        failure_class = (
-            "decision_authority_changed"
-            if "changed" in reason
-            else "decision_authority_unavailable"
-        )
-        result = _structured_failure_payload(
-            schema,
-            summary=reason,
-            failure=_frontier_failure(
-                failure_class,
-                "local_retry",
-                reason,
-                human_required=False,
-            ),
-            reviewer="local_policy",
-        )
-        result["decision_policy"] = policy_audit
-        return result
-
-    def route_once() -> dict[str, Any]:
-        routed = (
-            router.decide(prompt, schema)
-            if system is None
-            else router.decide(prompt, schema, system=system)
-        )
-        return _structured_route_result(
-            routed,
-            schema=schema,
-            decision_lane=decision_lane,
-            lane_mode=lane_mode,
-            router_policy_source=router.policy.source,
-            policy_audit=policy_audit,
-        )
-
-    if lane_mode == "enabled" and router.policy.source == "adopted_artifact":
-        if not cache_eligible:
-            return authority_failure(
-                "decision authority observation unavailable before local review"
-            )
-        assert authority is not None
-        assert authority_observation_sha256 is not None
-        assert cache_epoch is not None
-        assert isinstance(decision_lane, str)
-        cache = semantic_hold.StructuredReviewSemanticHoldCache(
-            root=STRUCTURED_REVIEW_HOLD_CACHE_ROOT
-        )
-        with ExitStack() as stack:
-            try:
-                lease = stack.enter_context(
-                    cache.locked(
-                        lane=decision_lane,
-                        epoch=cache_epoch,
-                        authority=authority,
-                    )
-                )
-            except (OSError, TypeError, ValueError):
-                lease = None
-            pre_error = authority_guard_error("before")
-            if pre_error is not None:
-                return authority_failure(pre_error)
-            if lease is not None:
-                cached = lease.load()
-                if cached is not None and (
-                    _structured_semantic_cache_result_error(
-                        cached,
-                        schema=schema,
-                        policy_audit=policy_audit,
-                        authority=authority,
-                    )
-                    is None
-                ):
-                    post_error = authority_guard_error("during")
-                    return (
-                        cached if post_error is None else authority_failure(post_error)
-                    )
-            result = route_once()
-            post_error = authority_guard_error("during")
-            if post_error is not None:
-                return authority_failure(post_error)
-            if lease is not None and (
-                _structured_semantic_cache_result_error(
-                    result,
-                    schema=schema,
-                    policy_audit=policy_audit,
-                    authority=authority,
-                )
-                is None
-            ):
-                with suppress(OSError, TypeError, ValueError):
-                    lease.store(result)
-                post_store_error = authority_guard_error("during")
-                if post_store_error is not None:
-                    return authority_failure(post_store_error)
-            return result
-
-    return route_once()
 
 
 def _git_probe(

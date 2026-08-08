@@ -136,7 +136,7 @@ def run_ingest_frontier_review(
     if reviewer is not None:
         return normalize_ingest_frontier_review(reviewer(proposal), proposal=proposal)
 
-    from chronovisor.decision.frontier_review import run_structured_review
+    from chronovisor.decision.routine_review import run_structured_review
 
     if prompt_builder is None:
         from chronovisor.decision.decision_lane_prompts import (

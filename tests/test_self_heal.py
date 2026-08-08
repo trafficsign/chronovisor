@@ -244,8 +244,8 @@ def _install_local_no_quorum_router(
     from chronovisor.decision import (
         decision_policy,
         decision_router,
-        frontier_review,
         local_repair,
+        routine_review,
     )
     from chronovisor.search import semantic_hold
 
@@ -324,17 +324,17 @@ def _install_local_no_quorum_router(
         lambda _lane: (authority, None),
     )
     monkeypatch.setattr(
-        frontier_review,
+        routine_review,
         "STRUCTURED_REVIEW_HOLD_CACHE_ROOT",
         cache_root,
     )
     monkeypatch.setattr(
-        frontier_review,
+        routine_review,
         "_current_structured_authority",
         lambda lane: local_repair.current_semantic_authority(lane),
     )
     monkeypatch.setattr(
-        frontier_review,
+        routine_review,
         "_structured_authority_observation",
         lambda current: semantic_hold.canonical_sha256(
             {"authority": current, "fixture_generation": "stable"}
@@ -665,8 +665,8 @@ def test_local_consensus_repair_carries_authority_seal(
     from chronovisor.decision import (
         decision_policy,
         decision_router,
-        frontier_review,
         local_repair,
+        routine_review,
     )
     from chronovisor.decision.decision_router import canonical_agreement_signature
     from chronovisor.decision.local_repair import LOCAL_REPAIR_SCHEMA
@@ -764,17 +764,17 @@ def test_local_consensus_repair_carries_authority_seal(
         lambda _lane: (authority, None),
     )
     monkeypatch.setattr(
-        frontier_review,
+        routine_review,
         "STRUCTURED_REVIEW_HOLD_CACHE_ROOT",
         isolated_wiki / "runtime" / "structured-review-holds",
     )
     monkeypatch.setattr(
-        frontier_review,
+        routine_review,
         "_current_structured_authority",
         lambda lane: local_repair.current_semantic_authority(lane),
     )
     monkeypatch.setattr(
-        frontier_review,
+        routine_review,
         "_structured_authority_observation",
         lambda current: semantic_hold.canonical_sha256(
             {"authority": current, "fixture_generation": "stable"}
@@ -874,7 +874,7 @@ def test_local_repair_recovers_model_return_crash_from_common_cache_after_aba(
     isolated_wiki: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor.decision import frontier_review, local_repair
+    from chronovisor.decision import local_repair, routine_review
 
     authority_a, calls = _install_local_no_quorum_router(
         monkeypatch,
@@ -890,7 +890,7 @@ def test_local_repair_recovers_model_return_crash_from_common_cache_after_aba(
         lambda _lane: (authority_box["value"], None),
     )
     monkeypatch.setattr(
-        frontier_review,
+        routine_review,
         "_structured_authority_observation",
         lambda _authority: observation_box["value"],
     )

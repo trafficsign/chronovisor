@@ -688,7 +688,7 @@ def _review_query_hint(
     from chronovisor.decision.decision_lane_prompts import (
         build_read_back_repair_request,
     )
-    from chronovisor.decision.frontier_review import run_structured_review
+    from chronovisor.decision.routine_review import run_structured_review
 
     prompt, system = build_read_back_repair_request(
         proposal,

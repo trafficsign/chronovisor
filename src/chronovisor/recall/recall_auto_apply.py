@@ -467,7 +467,7 @@ def review_auto_apply_with_frontier(
     timeout: int | None = None,
 ) -> dict[str, Any]:
     """Ask the frontier model for the authoritative action verdict."""
-    from chronovisor.decision import frontier_review
+    from chronovisor.decision import routine_review
     from chronovisor.decision.decision_lane_prompts import (
         build_recall_auto_apply_prompt,
     )
@@ -476,9 +476,9 @@ def review_auto_apply_with_frontier(
     timeout_seconds = timeout or int(
         os.environ.get("CHRONOVISOR_RECALL_AUTO_APPLY_FRONTIER_TIMEOUT", "1800")
     )
-    return frontier_review.run_structured_review(
+    return routine_review.run_structured_review(
         prompt,
-        frontier_review.FRONTIER_DECISION_SCHEMA,
+        routine_review.FRONTIER_DECISION_SCHEMA,
         repo_root=Path(__file__).resolve().parents[3],
         timeout=timeout_seconds,
         execute_patch=False,

@@ -465,7 +465,7 @@ def test_read_back_contracts_exactly_match_the_production_request_builder(
         }
 
     monkeypatch.setattr(
-        "chronovisor.decision.frontier_review.run_structured_review",
+        "chronovisor.decision.routine_review.run_structured_review",
         fake_review,
     )
     first = rows[0]

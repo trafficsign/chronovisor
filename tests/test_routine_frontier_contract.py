@@ -68,10 +68,29 @@ def test_only_self_heal_can_call_guarded_frontier_repair() -> None:
         assert "evidence" in {keyword.arg for keyword in call.keywords}
 
 
+def test_routine_review_cannot_reach_frontier_execution() -> None:
+    tree = _tree("decision/routine_review.py")
+    imported_modules = {
+        alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Import)
+        for alias in node.names
+    } | {
+        node.module or ""
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom)
+    }
+    called = _called_names(tree)
+
+    assert "subprocess" not in imported_modules
+    assert "_run_codex" not in called
+    assert "run_frontier_review" not in called
+
+
 def test_codex_subprocess_is_reachable_only_inside_guarded_entrypoint() -> None:
     tree = _tree("decision/frontier_review.py")
     calling_functions: set[str] = set()
-    structured_review: ast.FunctionDef | None = None
+    compatibility_review: ast.FunctionDef | None = None
     for node in tree.body:
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
@@ -79,15 +98,15 @@ def test_codex_subprocess_is_reachable_only_inside_guarded_entrypoint() -> None:
         if "_run_codex" in called:
             calling_functions.add(node.name)
         if node.name == "run_structured_review":
-            structured_review = node
+            compatibility_review = node
 
     assert calling_functions == {"run_frontier_review"}
-    assert structured_review is not None
-    structured_calls = _called_names(structured_review)
-    assert "_run_codex" not in structured_calls
+    assert compatibility_review is not None
+    compatibility_calls = _called_names(compatibility_review)
+    assert "_run_codex" not in compatibility_calls
     assert "run" not in {
         node.func.attr
-        for node in ast.walk(structured_review)
+        for node in ast.walk(compatibility_review)
         if isinstance(node, ast.Call)
         and isinstance(node.func, ast.Attribute)
         and isinstance(node.func.value, ast.Name)

@@ -28,7 +28,7 @@ from chronovisor.core.frontmatter import parse as parse_frontmatter
 from chronovisor.core.frontmatter import patch as patch_frontmatter
 from chronovisor.core.link_fix import atomic_write
 from chronovisor.core.runtime_config import load_ingest_config, runtime_repo_root
-from chronovisor.decision import frontier_review
+from chronovisor.decision import routine_review
 from chronovisor.decision.decision_authority import (
     compare_semantic_authority,
     current_semantic_authority,
@@ -377,7 +377,7 @@ def _default_local_reviewer(
 def _default_frontier_reviewer(
     prompt: str, schema: dict[str, Any]
 ) -> Mapping[str, Any] | str:
-    return frontier_review.run_structured_review(
+    return routine_review.run_structured_review(
         prompt,
         schema,
         repo_root=REPO_ROOT,

@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from chronovisor.decision import decision_policy, decision_router, frontier_review
+from chronovisor.decision import decision_policy, decision_router, routine_review
 from chronovisor.decision.decision_policy import (
     DECISION_POLICIES,
     decision_policy_snapshot,
@@ -16,7 +16,7 @@ from chronovisor.decision.decision_router import DecisionRouterResult
 from chronovisor.decision.decision_schema_manifest import production_decision_schemas
 from tests.semantic_hold_support import semantic_authority
 
-SCHEMA = frontier_review.FRONTIER_DECISION_SCHEMA
+SCHEMA = routine_review.FRONTIER_DECISION_SCHEMA
 
 
 class FakeRouter:
@@ -65,7 +65,7 @@ def isolate_structured_review_runtime(
     FakeRouter.router_audit = dict(router_audit)
     cache_root = tmp_path / "structured-review-holds"
     cache_roots: list[Path] = []
-    real_cache = frontier_review.semantic_hold.StructuredReviewSemanticHoldCache
+    real_cache = routine_review.semantic_hold.StructuredReviewSemanticHoldCache
 
     def isolated_cache(*, root: Path | None = None):
         assert root is not None
@@ -75,17 +75,17 @@ def isolate_structured_review_runtime(
         return real_cache(root=root)
 
     monkeypatch.setattr(
-        frontier_review,
+        routine_review,
         "STRUCTURED_REVIEW_HOLD_CACHE_ROOT",
         cache_root,
     )
     monkeypatch.setattr(
-        frontier_review.semantic_hold,
+        routine_review.semantic_hold,
         "StructuredReviewSemanticHoldCache",
         isolated_cache,
     )
     monkeypatch.setattr(
-        frontier_review,
+        routine_review,
         "_current_structured_authority",
         lambda lane: (
             semantic_authority(lane, artifact_sha256=artifact_sha256),
@@ -93,7 +93,7 @@ def isolate_structured_review_runtime(
         ),
     )
     monkeypatch.setattr(
-        frontier_review,
+        routine_review,
         "_structured_authority_observation",
         lambda _authority: "0" * 64,
     )
@@ -107,7 +107,7 @@ def test_unknown_lane_fails_closed_without_starting_models(
     FakeRouter.calls = 0
     monkeypatch.setattr(decision_router, "DecisionRouter", FakeRouter)
 
-    result = frontier_review.run_structured_review(
+    result = routine_review.run_structured_review(
         "review",
         SCHEMA,
         repo_root=tmp_path,
@@ -130,7 +130,7 @@ def test_shadow_lane_collects_vote_but_cannot_authorize_mutation(
     monkeypatch.setattr(decision_router, "DecisionRouter", FakeRouter)
     monkeypatch.setattr(decision_policy, "load_toml_file", lambda *_args: {})
 
-    result = frontier_review.run_structured_review(
+    result = routine_review.run_structured_review(
         "review",
         SCHEMA,
         repo_root=tmp_path,
@@ -152,7 +152,7 @@ def test_enabled_lane_requires_adopted_artifact(
     monkeypatch.setattr(decision_router, "DecisionRouter", FakeRouter)
     monkeypatch.setenv("CHRONOVISOR_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
 
-    result = frontier_review.run_structured_review(
+    result = routine_review.run_structured_review(
         "review",
         SCHEMA,
         repo_root=tmp_path,
@@ -176,7 +176,7 @@ def test_enabled_lane_can_return_only_adopted_consensus(
     monkeypatch.setattr(decision_router, "DecisionRouter", FakeRouter)
     monkeypatch.setenv("CHRONOVISOR_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
 
-    result = frontier_review.run_structured_review(
+    result = routine_review.run_structured_review(
         "review",
         SCHEMA,
         repo_root=tmp_path,
@@ -186,7 +186,7 @@ def test_enabled_lane_can_return_only_adopted_consensus(
     assert result["decision"] == "approved"
     assert result["decision_policy"]["router_policy"]["source"] == "adopted_artifact"
     cache_root = isolate_structured_review_runtime.cache_root
-    assert cache_root == frontier_review.STRUCTURED_REVIEW_HOLD_CACHE_ROOT
+    assert cache_root == routine_review.STRUCTURED_REVIEW_HOLD_CACHE_ROOT
     assert isolate_structured_review_runtime.cache_roots == [cache_root.resolve()]
     assert list((cache_root / "locks").glob("*.lock"))
 
@@ -262,7 +262,7 @@ def test_schema_mismatch_stops_before_any_model(
     monkeypatch.setattr(decision_router, "DecisionRouter", FakeRouter)
     monkeypatch.setenv("CHRONOVISOR_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
 
-    result = frontier_review.run_structured_review(
+    result = routine_review.run_structured_review(
         "review",
         {
             "type": "object",
@@ -287,7 +287,7 @@ def test_non_structured_lane_cannot_enter_model_router(
     FakeRouter.calls = 0
     monkeypatch.setattr(decision_router, "DecisionRouter", FakeRouter)
 
-    result = frontier_review.run_structured_review(
+    result = routine_review.run_structured_review(
         "review",
         SCHEMA,
         repo_root=tmp_path,

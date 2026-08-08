@@ -1669,7 +1669,7 @@ def _review_deferred_duplicate(
     from chronovisor.decision.decision_lane_prompts import (
         build_autonomy_duplicate_review_prompt,
     )
-    from chronovisor.decision.frontier_review import run_structured_review
+    from chronovisor.decision.routine_review import run_structured_review
 
     prompt = build_autonomy_duplicate_review_prompt(candidate)
     return run_structured_review(
@@ -2453,7 +2453,7 @@ def _review_retention_candidate(
     from chronovisor.decision.decision_lane_prompts import (
         build_autonomy_retention_review_prompt,
     )
-    from chronovisor.decision.frontier_review import run_structured_review
+    from chronovisor.decision.routine_review import run_structured_review
 
     prompt = build_autonomy_retention_review_prompt(candidate)
     return run_structured_review(

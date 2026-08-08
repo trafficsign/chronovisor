@@ -1031,7 +1031,7 @@ def _review_orphan_proposal(
     from chronovisor.decision.decision_lane_prompts import (
         build_orphan_link_review_prompt,
     )
-    from chronovisor.decision.frontier_review import run_structured_review
+    from chronovisor.decision.routine_review import run_structured_review
 
     prompt = build_orphan_link_review_prompt(candidate)
     return run_structured_review(

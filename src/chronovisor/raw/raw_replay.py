@@ -1699,7 +1699,7 @@ def _review_indeterminate_rows(
         if reviewer is not None:
             raw_review = reviewer(prompt, RAW_REPLAY_RECONCILIATION_SCHEMA)
         else:
-            from chronovisor.decision.frontier_review import run_structured_review
+            from chronovisor.decision.routine_review import run_structured_review
 
             raw_review = run_structured_review(
                 prompt,
