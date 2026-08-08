@@ -6,5 +6,5 @@ RUNTIME_SOURCE="${CHRONOVISOR_RUNTIME_SOURCE:-git+ssh://git@github.com/trafficsi
 PATH="/Users/trafficsign/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/opt/homebrew/sbin:/usr/sbin:/sbin"
 export PATH CHRONOVISOR_REPO_ROOT="${CHRONOVISOR_REPO_ROOT:-$PROJECT_DIR}"
 
-exec uvx --python 3.14 --refresh-package chronovisor --from "$RUNTIME_SOURCE" \
+exec uvx --python /opt/homebrew/bin/python3.14 --refresh-package chronovisor --from "$RUNTIME_SOURCE" \
   chronovisor-lab classification-library-pilot "$@"
