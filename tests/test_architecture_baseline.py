@@ -291,6 +291,13 @@ R4_RETIRED_ROUTINE_REVIEW_SITE_IDS = (
     "arch:ef6f56ffd387d3538cc9e04112ef37bf646ff2f5fb35e4f76a19f6a58d8d5940",
     "arch:fb2f2abe1096e870dad5228173f4a70708e242d0f6f19853d4525c1e7c42080e",
 )
+S_RETIRED_PREFETCH_SITE_IDS = (
+    "arch:18029d733218880572bb07bad67caf20d8bf45f52efebbd637b6030f7f874d81",
+    "arch:3627981bd6863ed029059ed65b070ba8398e4924777780899adf5a3ccdcd9e8b",
+    "arch:69f9252bd7630104d82e93f126e4658b598aaa7346629c8eff81ce2130c93e7a",
+    "arch:aa400f09e2db4b388521b3792e5e6fc883d12f28310984567254487e0166f088",
+    "arch:c5854d44b491487581356c43000abf8b3ff484c76a7461b8d224e3cb1fe38969",
+)
 RETIREMENT_HISTORY = {
     "exception_semantic_ids": tuple(
         sorted(
@@ -328,6 +335,7 @@ RETIREMENT_HISTORY = {
                 *R_RETIRED_PUBLICATION_SITE_IDS,
                 *R3_RETIRED_READ_BACK_SITE_IDS,
                 *R4_RETIRED_ROUTINE_REVIEW_SITE_IDS,
+                *S_RETIRED_PREFETCH_SITE_IDS,
             )
         )
     ),
@@ -1032,7 +1040,7 @@ def test_current_exception_ledger_seed_and_schema_inventory_are_exact(
     assert detected_ids == ledger_ids == set(seed["exception_semantic_ids"]["active"])
     _assert_exact_retirement_history(architecture, seed)
     assert len(edge_rows) == current["worktree_architecture"]["edge_count"] == 90
-    assert sum(len(row["sites"]) for row in edge_rows) == len(raw_cross_sites) == 1255
+    assert sum(len(row["sites"]) for row in edge_rows) == len(raw_cross_sites) == 1256
     assert {
         field: counts[field]
         for field in (
@@ -1045,7 +1053,7 @@ def test_current_exception_ledger_seed_and_schema_inventory_are_exact(
         )
     } == {
         "exceptions": 90,
-        "cross_domain_sites": 1255,
+        "cross_domain_sites": 1256,
         "production_to_lab_edges": 0,
         "production_to_lab_static_sites": 0,
         "production_to_lab_dynamic_sites": 0,
