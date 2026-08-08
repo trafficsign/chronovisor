@@ -2118,7 +2118,7 @@ def _uv_archive_root(archive_path: str) -> Path | None:
     """Normalize a uv runtime identity path to its immutable archive root.
 
     ``runtime_identity()`` reports the Python library directory (for example,
-    ``archive-v0/<id>/lib/python3.13``), while ``ps`` exposes entry points under
+    ``archive-v0/<id>/lib/python3.13`` or ``archive-v0/<id>/lib/python3.14``), while ``ps`` exposes entry points under
     ``archive-v0/<id>/bin``.  Bind both observations to the exact archive-id
     path instead of relying on a substring that can also match a sibling id.
     """

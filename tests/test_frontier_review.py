@@ -1144,14 +1144,16 @@ def test_runtime_restart_verifies_new_pid_and_archive(
     assert result["services"][1]["status"] == "not_running"
 
 
+@pytest.mark.parametrize("python_directory", ("python3.13", "python3.14"))
 def test_pid_tree_matches_runtime_identity_lib_path_to_exact_uv_archive(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    python_directory: str,
 ) -> None:
     archive_base = tmp_path / "archive-v0"
     expected = archive_base / "expected-id"
     sibling = archive_base / "expected-id-other"
-    identity_path = expected / "lib" / "python3.13"
+    identity_path = expected / "lib" / python_directory
     ps_output = "\n".join(
         (
             "100 1 /usr/bin/launch-wrapper dashboard",

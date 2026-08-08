@@ -4146,9 +4146,11 @@ def test_verified_local_repair_dry_run_is_byte_for_byte_read_only(
     assert not (isolated_wiki / "runtime" / "failures" / "locks").exists()
 
 
+@pytest.mark.parametrize("python_directory", ("python3.13", "python3.14"))
 def test_verified_local_repair_git_state_binds_clean_pushed_runtime(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    python_directory: str,
 ) -> None:
     from chronovisor.core import runtime_config
     from chronovisor.ops import self_heal
@@ -4177,7 +4179,7 @@ def test_verified_local_repair_git_state_binds_clean_pushed_runtime(
     git("update-ref", "refs/remotes/origin/main", commit)
     monkeypatch.setattr(self_heal, "_repo_root", lambda: repo)
     archive_root = tmp_path / "cache" / "archive-v0" / "runtime-id"
-    archive_path = archive_root / "lib" / "python3.13"
+    archive_path = archive_root / "lib" / python_directory
     module_path = archive_path / "site-packages" / "chronovisor" / "runtime_config.py"
     module_path.parent.mkdir(parents=True)
     module_path.write_text("# installed runtime\n", encoding="utf-8")

@@ -6,7 +6,7 @@ RUNTIME_SOURCE="${CHRONOVISOR_RUNTIME_SOURCE:-git+ssh://git@github.com/trafficsi
 PATH="/Users/trafficsign/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/opt/homebrew/sbin:/usr/sbin:/sbin"
 export PATH CHRONOVISOR_REPO_ROOT="${CHRONOVISOR_REPO_ROOT:-$PROJECT_DIR}"
 
-exec uvx \
+exec uvx --python 3.14 \
   --refresh-package chronovisor \
   --with "torch==2.13.0" \
   --with "transformers==5.14.1" \

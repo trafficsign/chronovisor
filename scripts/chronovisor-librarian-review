@@ -5,7 +5,7 @@ set -eu
 # rollout process is intentionally one-shot, so this periodic worker owns the
 # post-release collection catch-up path.  State and receipts are persisted by
 # the Librarian; suppress the very large registry JSON from the launchd log.
-/Users/trafficsign/.local/bin/uvx \
+/Users/trafficsign/.local/bin/uvx --python 3.14 \
   --refresh-package chronovisor \
   --from git+ssh://git@github.com/trafficsign/chronovisor \
   chronovisor-librarian \
@@ -14,7 +14,7 @@ set -eu
   --json \
   >/dev/null
 
-/Users/trafficsign/.local/bin/uvx \
+/Users/trafficsign/.local/bin/uvx --python 3.14 \
   --refresh-package chronovisor \
   --from git+ssh://git@github.com/trafficsign/chronovisor \
   chronovisor-librarian \
@@ -25,7 +25,7 @@ set -eu
   --review-role primary \
   --json
 
-exec /Users/trafficsign/.local/bin/uvx \
+exec /Users/trafficsign/.local/bin/uvx --python 3.14 \
   --refresh-package chronovisor \
   --from git+ssh://git@github.com/trafficsign/chronovisor \
   chronovisor-librarian \
