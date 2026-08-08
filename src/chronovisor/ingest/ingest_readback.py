@@ -14,19 +14,6 @@ def _runtime():
     return ingest
 
 
-def _runtime_call(name: str):
-    def call(*args: Any, **kwargs: Any) -> Any:
-        return getattr(_runtime(), name)(*args, **kwargs)
-
-    return call
-
-
-_runtime_read_back_failure_log = _runtime_call("_read_back_failure_log")
-_runtime_read_back_query = _runtime_call("_read_back_query")
-_runtime_read_back_run_log = _runtime_call("_read_back_run_log")
-_safe_log = _runtime_call("_safe_log")
-
-
 def _read_back_failure_log() -> Path:
     return _runtime().PAGES_DIR.parent / "runtime" / "ingest-read-back-failures.jsonl"
 
@@ -53,6 +40,7 @@ def _read_back_query(meta: dict, page_id: str) -> str:
 def verify_changed_pages_read_back(page_ids: list[str], *, top_n: int = 10) -> dict:
     if not page_ids:
         return {"checked": 0, "passed": 0, "failed": []}
+    runtime = _runtime()
     try:
         from chronovisor.search.index_store import get_store
         from chronovisor.search.search import search
@@ -60,7 +48,7 @@ def verify_changed_pages_read_back(page_ids: list[str], *, top_n: int = 10) -> d
         store = get_store()
         store.refresh()
     except Exception as e:
-        _safe_log(f"ingest | read-back unavailable: {e}")
+        runtime._safe_log(f"ingest | read-back unavailable: {e}")
         return {"checked": 0, "passed": 0, "failed": [{"error": str(e)}]}
 
     checked = 0
@@ -71,7 +59,7 @@ def verify_changed_pages_read_back(page_ids: list[str], *, top_n: int = 10) -> d
         if meta is None:
             failed.append({"page_id": page_id, "reason": "missing-meta"})
             continue
-        query = _runtime_read_back_query(meta, page_id)
+        query = _read_back_query(meta, page_id)
         if not query:
             failed.append({"page_id": page_id, "reason": "empty-query"})
             continue
@@ -113,7 +101,7 @@ def verify_changed_pages_read_back(page_ids: list[str], *, top_n: int = 10) -> d
         "failed": failed,
     }
     try:
-        run_path = _runtime_read_back_run_log()
+        run_path = _read_back_run_log()
         run_path.parent.mkdir(parents=True, exist_ok=True)
         with run_path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
@@ -121,19 +109,19 @@ def verify_changed_pages_read_back(page_ids: list[str], *, top_n: int = 10) -> d
         pass
     if failed:
         try:
-            log_path = _runtime_read_back_failure_log()
+            log_path = _read_back_failure_log()
             log_path.parent.mkdir(parents=True, exist_ok=True)
             with log_path.open("a", encoding="utf-8") as f:
                 f.write(json.dumps(record, ensure_ascii=False) + "\n")
         except OSError:
             pass
-        _safe_log(
+        runtime._safe_log(
             f"ingest | read-back: {len(failed)} failed of {checked} checked",
             level="warn",
             outcome_kind="read_back_warning",
         )
     elif checked:
-        _safe_log(f"ingest | read-back: {checked} checked ok")
+        runtime._safe_log(f"ingest | read-back: {checked} checked ok")
 
     return {"checked": checked, "passed": passed, "failed": failed}
 
@@ -187,4 +175,4 @@ def _refresh_ingest_derived_artifacts(
             runtime._safe_log(
                 f"ingest | state register refresh failed (non-fatal): {exc}"
             )
-    return runtime._verify_changed_pages_read_back(changed_pages)
+    return verify_changed_pages_read_back(changed_pages)

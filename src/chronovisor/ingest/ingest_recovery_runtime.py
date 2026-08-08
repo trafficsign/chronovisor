@@ -11,6 +11,7 @@ from typing import Any
 
 from chronovisor.core.jobs import JobStatus
 from chronovisor.decision import decision_authority
+from chronovisor.ingest import ingest_readback
 
 
 def _runtime():
@@ -54,7 +55,6 @@ _matching_ingest_review_stall_error = _runtime_call("_matching_ingest_review_sta
 _persist_ingest_review_continuation_marker = _runtime_call("_persist_ingest_review_continuation_marker")
 _persist_ingest_review_shard_manifest = _runtime_call("_persist_ingest_review_shard_manifest")
 _now = _runtime_call("_now")
-_refresh_ingest_derived_artifacts = _runtime_call("_refresh_ingest_derived_artifacts")
 
 from chronovisor.ingest.ingest import (  # noqa: E402
     _INGEST_FRONTIER_LEGACY_ARTIFACT_SCHEMA_VERSION,
@@ -799,7 +799,7 @@ def complete_pretriage_terminal_recovery(
             # Derived refresh is intentionally inside the same proof/effect
             # locks. A stale or concurrently replaced terminal artifact must
             # fail before even rebuildable claims/index side effects occur.
-            read_back_result = _refresh_ingest_derived_artifacts(
+            read_back_result = ingest_readback._refresh_ingest_derived_artifacts(
                 changed_pages,
                 source_raw=source_raw,
             )

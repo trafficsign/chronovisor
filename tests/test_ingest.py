@@ -6427,7 +6427,7 @@ class TestOrchestrator:
     ) -> None:
         from chronovisor.core.runtime_config import DecisionRouterConfig
         from chronovisor.decision import failure_supervisor
-        from chronovisor.ingest import ingest, orchestrator
+        from chronovisor.ingest import ingest, ingest_readback, orchestrator
         from chronovisor.ops import runtime_status
 
         raw_path = isolated_wiki / "raw" / "eight-shard-continuation.md"
@@ -6486,7 +6486,7 @@ class TestOrchestrator:
             ),
         )
         monkeypatch.setattr(
-            ingest,
+            ingest_readback,
             "_refresh_ingest_derived_artifacts",
             lambda *_args, **_kwargs: {"checked": 0, "passed": 0, "failed": []},
         )
@@ -6566,7 +6566,7 @@ class TestOrchestrator:
     ) -> None:
         from chronovisor.core.runtime_config import DecisionRouterConfig
         from chronovisor.decision import failure_supervisor
-        from chronovisor.ingest import ingest, orchestrator
+        from chronovisor.ingest import ingest, ingest_readback, orchestrator
 
         raw_path = isolated_wiki / "raw" / "shard-repair-continuation.md"
         raw_content = "One exact shard needs repair before bounded review resumes."
@@ -6646,7 +6646,7 @@ class TestOrchestrator:
             ),
         )
         monkeypatch.setattr(
-            ingest,
+            ingest_readback,
             "_refresh_ingest_derived_artifacts",
             lambda *_args, **_kwargs: {"checked": 0, "passed": 0, "failed": []},
         )
@@ -7818,7 +7818,7 @@ class TestPerRawOrchestrator:
     def test_applied_artifact_recovers_before_model_and_ack_protects_later_update(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from chronovisor.ingest import ingest, orchestrator
+        from chronovisor.ingest import ingest, ingest_readback, orchestrator
         from chronovisor.raw import raw_completion_ack
 
         raw_path = isolated_wiki / "raw" / "pretriage-crash.md"
@@ -7849,7 +7849,7 @@ class TestPerRawOrchestrator:
         monkeypatch.setattr(ingest, "_triage_with_progress", forbidden_triage)
         monkeypatch.setattr(ingest, "_generate_local_operations", forbidden_generation)
         monkeypatch.setattr(
-            ingest,
+            ingest_readback,
             "_refresh_ingest_derived_artifacts",
             lambda *_args, **_kwargs: {"checked": 0, "passed": 0, "failed": []},
         )
@@ -7924,7 +7924,7 @@ class TestPerRawOrchestrator:
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         from chronovisor.core.jobs import JobStatus, job_store
-        from chronovisor.ingest import ingest
+        from chronovisor.ingest import ingest, ingest_readback
 
         raw_content = "terminal proof changes before the recovery lock"
         self._seed_applied_terminal_artifact(
@@ -7950,7 +7950,7 @@ class TestPerRawOrchestrator:
             changing_proof,
         )
         monkeypatch.setattr(
-            ingest,
+            ingest_readback,
             "_refresh_ingest_derived_artifacts",
             lambda *_args, **_kwargs: derived_calls.append("refresh") or {},
         )
@@ -7973,7 +7973,7 @@ class TestPerRawOrchestrator:
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         from chronovisor.core.jobs import JobStatus, job_store
-        from chronovisor.ingest import ingest
+        from chronovisor.ingest import ingest, ingest_readback
 
         raw_content = "durably reviewed as a semantic noop"
 
@@ -7997,7 +7997,7 @@ class TestPerRawOrchestrator:
             lambda: pytest.fail("confirmed-noop recovery reached Ollama"),
         )
         monkeypatch.setattr(
-            ingest,
+            ingest_readback,
             "_refresh_ingest_derived_artifacts",
             lambda *_args, **_kwargs: {"checked": 0, "passed": 0, "failed": []},
         )
@@ -9622,7 +9622,7 @@ class TestReadBackVerification:
     def test_changed_page_passes_when_search_returns_page(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from chronovisor.ingest import ingest
+        from chronovisor.ingest import ingest_readback
         from chronovisor.search import index_store, search
         from chronovisor.search.search_types import ScoredPage
 
@@ -9650,14 +9650,14 @@ class TestReadBackVerification:
             ),
         )
 
-        result = ingest._verify_changed_pages_read_back(["p"])
+        result = ingest_readback.verify_changed_pages_read_back(["p"])
 
         assert result == {"checked": 1, "passed": 1, "failed": []}
 
     def test_verify_resolves_query_and_log_paths_through_ingest_facade(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from chronovisor.ingest import ingest
+        from chronovisor.ingest import ingest, ingest_readback
         from chronovisor.search import index_store, search
 
         queries: list[tuple[dict, str]] = []
@@ -9677,12 +9677,14 @@ class TestReadBackVerification:
 
         monkeypatch.setattr(index_store, "get_store", lambda: Store())
         monkeypatch.setattr(search, "search", lambda *_a, **_k: ([], "hybrid"))
-        monkeypatch.setattr(ingest, "_read_back_query", query)
-        monkeypatch.setattr(ingest, "_read_back_run_log", lambda: run_log)
-        monkeypatch.setattr(ingest, "_read_back_failure_log", lambda: failure_log)
+        monkeypatch.setattr(ingest_readback, "_read_back_query", query)
+        monkeypatch.setattr(ingest_readback, "_read_back_run_log", lambda: run_log)
+        monkeypatch.setattr(
+            ingest_readback, "_read_back_failure_log", lambda: failure_log
+        )
         monkeypatch.setattr(ingest, "_safe_log", lambda *_a, **_k: None)
 
-        result = ingest._verify_changed_pages_read_back(["p"])
+        result = ingest_readback.verify_changed_pages_read_back(["p"])
 
         assert queries == [({"page_id": "p", "title": "ignored"}, "p")]
         assert result["failed"][0]["query"] == "patched query"
@@ -9692,7 +9694,7 @@ class TestReadBackVerification:
     def test_refresh_waits_for_semantic_delta_before_read_back(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from chronovisor.ingest import ingest
+        from chronovisor.ingest import ingest, ingest_readback
         from chronovisor.ops import state_register
         from chronovisor.recall import claims
         from chronovisor.search import index_store, search
@@ -9728,9 +9730,11 @@ class TestReadBackVerification:
                 ("state", list(page_ids), kwargs["source_raw"])
             ),
         )
-        monkeypatch.setattr(ingest, "_verify_changed_pages_read_back", read_back)
+        monkeypatch.setattr(
+            ingest_readback, "verify_changed_pages_read_back", read_back
+        )
 
-        result = ingest._refresh_ingest_derived_artifacts(
+        result = ingest_readback._refresh_ingest_derived_artifacts(
             ["p"],
             source_raw="raw.md",
         )
@@ -9748,7 +9752,7 @@ class TestReadBackVerification:
     def test_refresh_failures_are_logged_and_nonfatal(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from chronovisor.ingest import ingest
+        from chronovisor.ingest import ingest, ingest_readback
         from chronovisor.ops import state_register
         from chronovisor.recall import claims
         from chronovisor.search import index_store, search
@@ -9778,9 +9782,13 @@ class TestReadBackVerification:
             lambda *_a, **_k: fail("state"),
         )
         monkeypatch.setattr(ingest, "_safe_log", logs.append)
-        monkeypatch.setattr(ingest, "_verify_changed_pages_read_back", read_back)
+        monkeypatch.setattr(
+            ingest_readback, "verify_changed_pages_read_back", read_back
+        )
 
-        result = ingest._refresh_ingest_derived_artifacts(["p"], source_raw="raw.md")
+        result = ingest_readback._refresh_ingest_derived_artifacts(
+            ["p"], source_raw="raw.md"
+        )
 
         assert result == {"checked": 1, "passed": 1, "failed": []}
         assert events == ["index", "store", "semantic", "claims", "state", "read-back"]

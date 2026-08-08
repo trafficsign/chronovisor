@@ -49,6 +49,7 @@ from chronovisor.decision.local_structured import (
     required_structured_context_tokens,
     validate_json,
 )
+from chronovisor.ingest import ingest_readback
 from chronovisor.ingest.ingest_review import (
     normalize_ingest_frontier_review as _normalize_ingest_frontier_review_core,
 )
@@ -4025,46 +4026,6 @@ def _safe_log(
     )
 
 
-def _read_back_failure_log() -> Path:
-    from chronovisor.ingest.ingest_readback import (
-        _read_back_failure_log as implementation,
-    )
-
-    return implementation()
-
-
-def _read_back_run_log() -> Path:
-    from chronovisor.ingest.ingest_readback import _read_back_run_log as implementation
-
-    return implementation()
-
-
-def _read_back_query(meta: dict, page_id: str) -> str:
-    from chronovisor.ingest.ingest_readback import _read_back_query as implementation
-
-    return implementation(meta, page_id)
-
-
-def _verify_changed_pages_read_back(
-    page_ids: list[str], *, top_n: int = 10
-) -> dict:
-    from chronovisor.ingest.ingest_readback import verify_changed_pages_read_back
-
-    return verify_changed_pages_read_back(page_ids, top_n=top_n)
-
-
-def _refresh_ingest_derived_artifacts(
-    changed_pages: list[str],
-    *,
-    source_raw: str | None,
-) -> dict[str, Any]:
-    from chronovisor.ingest.ingest_readback import (
-        _refresh_ingest_derived_artifacts as implementation,
-    )
-
-    return implementation(changed_pages, source_raw=source_raw)
-
-
 def _complete_pretriage_terminal_recovery(
     recovery: dict[str, Any],
     *,
@@ -4686,7 +4647,7 @@ def _complete_ingest_run(
 
     # Pages are already durable. Derived-artifact failures must not undo the
     # apply or suppress the raw-completion callback.
-    read_back_result = _refresh_ingest_derived_artifacts(
+    read_back_result = ingest_readback._refresh_ingest_derived_artifacts(
         created + updated,
         source_raw=source_raw,
     )
