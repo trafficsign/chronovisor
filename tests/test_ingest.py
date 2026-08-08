@@ -9837,6 +9837,12 @@ class TestTriagePlanSchema:
         ]
         for repetition_bound in ("minItems", "maxItems", "minLength", "maxLength"):
             assert repetition_bound not in encoded
+        assert "at most 8 operations" in ollama.TRIAGE_SYSTEM_PROMPT
+        assert "filename to 200 characters" in ollama.TRIAGE_SYSTEM_PROMPT
+        assert "title to 300" in ollama.TRIAGE_SYSTEM_PROMPT
+        assert "summary to 2000" in ollama.TRIAGE_SYSTEM_PROMPT
+        assert "1 to 32 keywords" in ollama.TRIAGE_SYSTEM_PROMPT
+        assert "each at most 200 characters" in ollama.TRIAGE_SYSTEM_PROMPT
         assert _TRIAGE_PLAN_VALIDATION_SCHEMA["maxItems"] == 8
         properties = _TRIAGE_PLAN_VALIDATION_SCHEMA["items"]["properties"]
         assert properties["filename"]["maxLength"] == 200
@@ -11887,6 +11893,10 @@ class TestIngestContextAdmission:
         assert "do not repeat, summarize, or rewrite" in calls[1][0]
         assert partial not in calls[1][0]
         assert f"at most {calls[0][1]['num_predict'] // 2} output tokens" in calls[1][0]
+        assert calls[1][1]["num_predict"] == calls[0][1]["num_predict"]
+        assert "within 4096 output tokens" in calls[1][1]["system"]
+        assert "`=== UPDATE PAGE: memory/new.md ===`" in calls[1][1]["system"]
+        assert "exact final line `=== END PAGE ===`" in calls[1][1]["system"]
         assert diagnostics["attempts"] == 2
         assert diagnostics["repair_turns"] == 1
         assert diagnostics["output_truncation_retries"] == 1
@@ -12000,11 +12010,11 @@ class TestIngestContextAdmission:
                 for index in range(3)
             ]
         )
-        prompts: list[str] = []
+        calls: list[tuple[str, dict]] = []
         progress: list[dict] = []
 
-        def fake_generate(prompt: str, **_kwargs):
-            prompts.append(prompt)
+        def fake_generate(prompt: str, **kwargs):
+            calls.append((prompt, kwargs))
             return next(responses)
 
         monkeypatch.setattr(ingest, "_generate_with_progress", fake_generate)
@@ -12025,10 +12035,18 @@ class TestIngestContextAdmission:
                 progress_callback=progress.append,
             )
 
-        assert len(prompts) == 3
-        assert "PARTIAL_0" not in prompts[1]
-        assert "PARTIAL_1" not in prompts[2]
-        assert all("ORIGINAL_GROUNDED_EVIDENCE" in prompt for prompt in prompts)
+        assert len(calls) == 3
+        assert "PARTIAL_0" not in calls[1][0]
+        assert "PARTIAL_1" not in calls[2][0]
+        assert all("ORIGINAL_GROUNDED_EVIDENCE" in prompt for prompt, _ in calls)
+        assert len({kwargs["num_predict"] for _, kwargs in calls}) == 1
+        assert "within 4096 output tokens" in calls[1][1]["system"]
+        assert "within 2048 output tokens" in calls[2][1]["system"]
+        assert "within 4096 output tokens" not in calls[2][1]["system"]
+        for prompt, kwargs in calls[1:]:
+            assert "`=== NEW PAGE: memory/new.md ===`" in kwargs["system"]
+            assert "exact final line `=== END PAGE ===`" in kwargs["system"]
+            assert "PARTIAL_" not in prompt
         assert diagnostics["attempts"] == 3
         assert diagnostics["failure_class"] == "output_truncated"
         assert diagnostics["output_truncation_retries"] == 2

@@ -332,6 +332,20 @@ not explicit in the raw evidence.
                                 filename=filename,
                                 max_output_tokens=target_tokens,
                             )
+                            expected_wrapper = (
+                                "NEW" if op_type == "create" else "UPDATE"
+                            )
+                            generate_kwargs["system"] = (
+                                system_prompt
+                                + "\n\nHIGH-PRIORITY OUTPUT-TRUNCATION "
+                                + "REPLACEMENT RULES:\n"
+                                + "- Return a shorter complete replacement within "
+                                + f"{target_tokens} output tokens.\n"
+                                + "- Start with exactly "
+                                + f"`=== {expected_wrapper} PAGE: {filename} ===`.\n"
+                                + "- Finish with the exact final line "
+                                + "`=== END PAGE ===`; never omit the end marker.\n"
+                            )
                             messages = [
                                 {"role": "user", "content": prompt},
                                 {"role": "user", "content": retry_prompt},
