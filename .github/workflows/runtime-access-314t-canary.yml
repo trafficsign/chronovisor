@@ -1,0 +1,54 @@
+name: Runtime access CPython 3.14t canary
+
+on:
+  pull_request:
+  push:
+
+permissions:
+  contents: read
+
+jobs:
+  runtime-access-314t:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.14t"
+
+      - name: Install CPython 3.14t
+        shell: bash
+        run: uv python install 3.14t
+
+      - name: Resolve CPython 3.14t interpreter
+        shell: bash
+        run: |
+          set -euo pipefail
+          interpreter="$(uv python find 3.14t --no-project --no-python-downloads --resolve-links)"
+          printf 'PYTHON_314T=%s\n' "$interpreter" >> "$GITHUB_ENV"
+
+      - name: Assert free-threaded runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$PYTHON_314T" -I -B - <<'PY'
+          import sys
+          import sysconfig
+
+          assert sys.implementation.name == "cpython"
+          assert sys.version_info[:2] == (3, 14)
+          assert sys._is_gil_enabled() is False
+          py_gil_disabled = sysconfig.get_config_var("Py_GIL_DISABLED")
+          assert type(py_gil_disabled) is int and py_gil_disabled == 1
+          PY
+
+      - name: Run runtime-access canary
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$PYTHON_314T" -I -B scripts/runtime_access_314t_canary.py
