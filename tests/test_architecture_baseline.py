@@ -222,6 +222,33 @@ P8_RETIRED_SITE_IDS = (
     "arch:e0f682cdefa0a5826d0fd863f8567461073a1ff7d7b2a81ddf69368cf4fc9f37",
     "arch:ffe37b3f777b7be66e4a055426d26f1a7750aa4654290db9a8e7e824e94f643b",
 )
+Q_RETIRED_EXCEPTION_IDS = (
+    "arch:09562a56e206b46c00dc6162c8a25877c5be0922d341d59a27b2760461794009",
+    "arch:35d25704d99867a9d6ddc85775fa35dd9a8c0c348ff81a4c77b63ba45394d27f",
+    "arch:65a25466b54a85c7fac4b98ae2385decda3a097626a4e25032f76b20bd78d123",
+    "arch:722e44de84dc21d1453258284767bd62da53acdda4a5aa2714f7cc3966279cf2",
+    "arch:80497e420c350de929b19520f4b5e582f7aeef43a7e4fd7fcc83ce0f2e6e2400",
+    "arch:c607c67a56e1bf3727164569f5762c28562c14de6c2dd65118037798e1bc5422",
+    "arch:e6c724f0b06379d55660232c4ceb93edbead8217dfcc5b93377edff9077c7948",
+    "arch:f8662161b0b513d566a2c1371d78ffc02e39c4ee310c04f34598a275f0c16169",
+)
+R_RETIRED_EXCEPTION_IDS = (
+    "arch:0a0ecf52ab0c563bda61e75cce2798f692b54d14d6f3b49e7e0751fb44730beb",
+    "arch:399d92dc378092ffa44dab2d26f9f424864e0ac5bfabebac84547350033450cf",
+    "arch:5174f3ba292ee22c6d157040e15c0a79b16043c72f725e5512a8c31da4e8f4e7",
+    "arch:60a5b5c668b37aa3ee7d70a4e44bdad889568df6d841871b2ef6749d64eefde0",
+    "arch:60cfc7ccff32195d69cf1ff12e387cc4f0d078047822ff8705ff6bcbec1cb7d4",
+    "arch:76453fde7eec05f39031c86510e5016812fabf38593116a4adecc42f1976a652",
+    "arch:788ec9ed6692f1a4670d5aea47cd4022e0b28007a34d792b7159c49bef286088",
+    "arch:a5d4ad8bde7f5dfaa9f357b83e7201f6e89095519c5c8a54071dc9e43324d859",
+    "arch:a781da4d245f5995f5df1879d052252ad9b6bd5ebcd0dfc76e0194fd5ca1f1d3",
+    "arch:a856d00f2db0a1f2faa9f184c07d656628c69257272735f151e06261534daeb0",
+    "arch:b71370ce6a32319293a1e43fe04b9d9a15c2865165e04a23b53047fdfb5a94cd",
+    "arch:c29d98a39da94b2c3cce80e59e0f4176265401935709254ea5cea9c0650fe6fe",
+    "arch:dc1051ce8daa96c7d4657ffcc600992231da8aff2421b5e72e9f00a0a3a798d0",
+    "arch:dfa983ef75c1cb9dc5780530a6f4d36ea41242e4a9de1903a1f9818ea057c3c8",
+    "arch:e1077a94466a205536c6e25a117027d5f77c06c0cc55482f925787412c9513ea",
+)
 RETIREMENT_HISTORY = {
     "exception_semantic_ids": tuple(
         sorted(
@@ -236,6 +263,8 @@ RETIREMENT_HISTORY = {
                 *P5_RETIRED_EXCEPTION_IDS,
                 *P6_RETIRED_EXCEPTION_IDS,
                 *P8_RETIRED_EXCEPTION_IDS,
+                *Q_RETIRED_EXCEPTION_IDS,
+                *R_RETIRED_EXCEPTION_IDS,
             )
         )
     ),
@@ -514,7 +543,9 @@ def _without_persisted_retirement_history(
     active_counts = normalized["counts"]["active"]
     active_counts["exceptions"] += len(RETIREMENT_HISTORY["exception_semantic_ids"])
     active_counts["by_category"]["cross_domain_edge"] += 5
-    active_counts["by_category"]["dynamic_import"] += 1
+    active_counts["by_category"]["dynamic_import"] = (
+        1 + len(Q_RETIRED_EXCEPTION_IDS) + len(R_RETIRED_EXCEPTION_IDS)
+    )
     active_counts["by_category"]["private_symbol_import"] = 31
     active_counts["by_category"]["schema_manifest_implementation_import"] = len(
         P6_RETIRED_EXCEPTION_IDS
@@ -928,7 +959,7 @@ def test_current_exception_ledger_seed_and_schema_inventory_are_exact(
     assert detected_ids == ledger_ids == set(seed["exception_semantic_ids"]["active"])
     _assert_exact_retirement_history(architecture, seed)
     assert len(edge_rows) == current["worktree_architecture"]["edge_count"] == 90
-    assert sum(len(row["sites"]) for row in edge_rows) == len(raw_cross_sites) == 1245
+    assert sum(len(row["sites"]) for row in edge_rows) == len(raw_cross_sites) == 1260
     assert {
         field: counts[field]
         for field in (
@@ -940,8 +971,8 @@ def test_current_exception_ledger_seed_and_schema_inventory_are_exact(
             "compatibility_contracts",
         )
     } == {
-        "exceptions": 113,
-        "cross_domain_sites": 1245,
+        "exceptions": 90,
+        "cross_domain_sites": 1260,
         "production_to_lab_edges": 0,
         "production_to_lab_static_sites": 0,
         "production_to_lab_dynamic_sites": 0,
@@ -949,7 +980,6 @@ def test_current_exception_ledger_seed_and_schema_inventory_are_exact(
     }
     assert counts["by_category"] == {
         "cross_domain_edge": 90,
-        "dynamic_import": 23,
     }
     assert counts["compatibility_by_kind"] == {
         "console_entrypoint": 51,
@@ -1008,7 +1038,9 @@ def test_new_sensitive_exception_cannot_self_authorize_in_ledger_and_seed(
     source, ledger, compatibility, seed, frozen, previous = _exception_inputs(current)
     previous = copy.deepcopy(seed)
     template = next(
-        row for row in source["import_sites"] if row["category"] == "dynamic_import"
+        row
+        for row in current["source"]["import_sites"]
+        if row["category"] == "dynamic_import" and row["target_package"] == "ops"
     )
     import_site = {
         **template,
@@ -1175,10 +1207,21 @@ def test_exception_rows_reject_unrecorded_stale_duplicate_content_and_metadata(
     current: dict[str, Any],
 ) -> None:
     source, ledger, compatibility, seed, frozen, previous = _exception_inputs(current)
-    dynamic = next(
-        row for row in ledger["exceptions"] if row["category"] == "dynamic_import"
+    dynamic = copy.deepcopy(
+        next(
+            row
+            for row in current["source"]["import_sites"]
+            if row["category"] == "dynamic_import" and row["target_package"] == "ops"
+        )
     )
-    ledger["exceptions"].remove(dynamic)
+    source["import_sites"].append(dynamic)
+    _move_seed_id(
+        seed,
+        "exception_semantic_ids",
+        dynamic["semantic_id"],
+        target="active",
+    )
+    _sync_seed_and_ledger_counts(architecture, source, ledger, compatibility, seed)
     violations = _exception_violations(
         architecture, source, ledger, compatibility, seed, frozen, previous
     )
@@ -1186,17 +1229,36 @@ def test_exception_rows_reject_unrecorded_stale_duplicate_content_and_metadata(
     assert violations["baseline_semantic_id_non_subset"] == [dynamic["semantic_id"]]
 
     source, ledger, compatibility, seed, frozen, previous = _exception_inputs(current)
-    dynamic = next(
-        row for row in ledger["exceptions"] if row["category"] == "dynamic_import"
+    dynamic_rows = [
+        copy.deepcopy(row)
+        for row in current["source"]["import_sites"]
+        if row["category"] == "dynamic_import" and row["target_package"] == "ops"
+    ][:2]
+    dynamic, identity_row = dynamic_rows
+    source["import_sites"].extend(dynamic_rows)
+    ledger["exceptions"].extend(
+        {**row, **architecture._exception_metadata(row)} for row in dynamic_rows
     )
+    for row in dynamic_rows:
+        _move_seed_id(
+            seed,
+            "exception_semantic_ids",
+            row["semantic_id"],
+            target="active",
+        )
+    _sync_seed_and_ledger_counts(architecture, source, ledger, compatibility, seed)
     stale = {
         **dynamic,
         "source_module": f"{dynamic['source_module']}.stale",
         "occurrence": 1,
+        **architecture._exception_metadata(dynamic),
     }
     stale["semantic_id"] = architecture._semantic_id(stale)
     ledger["exceptions"].append(stale)
-    duplicate = copy.deepcopy(dynamic)
+    duplicate = {
+        **copy.deepcopy(dynamic),
+        **architecture._exception_metadata(dynamic),
+    }
     ledger["exceptions"].append(duplicate)
     for row in ledger["exceptions"]:
         if row["semantic_id"] == dynamic["semantic_id"]:
@@ -1314,7 +1376,7 @@ def test_production_to_lab_static_and_dynamic_site_growth_are_explicit(
     static_site["semantic_id"] = architecture._semantic_id(static_site)
     dynamic_template = next(
         row
-        for row in source["import_sites"]
+        for row in current["source"]["import_sites"]
         if row["category"] == "dynamic_import"
     )
     dynamic_site = {
@@ -1404,11 +1466,7 @@ def test_exception_metadata_routes_to_real_owner_and_removal_campaign(
         for row in rows
         if row["category"] == "private_symbol_import" and row["target_package"] != "lab"
     } == set()
-    assert {row["removal_campaign"] for row in rows} == {
-        "Q",
-        "R",
-        "S",
-    }
+    assert {row["removal_campaign"] for row in rows} == {"S"}
     assert all(row["owner"].startswith("chronovisor.") for row in rows)
     assert all(row["owner"] != "chronovisor-architecture" for row in rows)
     assert all(

@@ -607,12 +607,11 @@ def _run_sleep_cycle(
         max_frontier_calls=6,
         max_mutations=3,
     )
+    import chronovisor.recall.content_correction as content_correction
+
     content_corrections = _run_lane(
         "content_corrections",
-        lambda: __import__(
-            "chronovisor.recall.content_correction",
-            fromlist=["run_pending_corrections"],
-        ).run_pending_corrections(
+        lambda: content_correction.run_pending_corrections(
             max_items=6,
             budget=correction_budget,
             dry_run=dry_run,
@@ -629,11 +628,11 @@ def _run_sleep_cycle(
         "retention", lambda: build_retention_scores(write=not dry_run)
     )
     claims = artifact_lane("claims", lambda: rebuild_claim_index(write=not dry_run))
+    import chronovisor.recall.claims as recall_claims
+
     claim_conflicts = _run_lane(
         "claim_conflicts",
-        lambda: __import__(
-            "chronovisor.recall.claims", fromlist=["review_claim_conflicts"]
-        ).review_claim_conflicts(
+        lambda: recall_claims.review_claim_conflicts(
             limit=per_lane_frontier,
             write=not dry_run,
         ),
@@ -652,41 +651,41 @@ def _run_sleep_cycle(
     state_register = artifact_lane(
         "state_register", lambda: refresh_state_register(write=not dry_run)
     )
+    import chronovisor.ops.page_normalize as page_normalize
+
     page_normalization = artifact_lane(
         "page_normalization",
-        lambda: __import__(
-            "chronovisor.ops.page_normalize", fromlist=["normalize_pages"]
-        ).normalize_pages(
+        lambda: page_normalize.normalize_pages(
             write=not dry_run,
             limit=100,
             max_frontier_calls=per_lane_frontier,
         ),
     )
+    import chronovisor.ops.metadata_backfill as metadata_backfill_ops
+
     metadata_backfill = _run_lane(
         "metadata_backfill",
-        lambda: __import__(
-            "chronovisor.ops.metadata_backfill", fromlist=["backfill_metadata"]
-        ).backfill_metadata(
+        lambda: metadata_backfill_ops.backfill_metadata(
             limit=per_lane_frontier,
             max_frontier_calls=per_lane_frontier,
             dry_run=dry_run,
         ),
     )
+    import chronovisor.ops.entities as entities
+
     entity_backfill = _run_lane(
         "entity_backfill",
-        lambda: __import__(
-            "chronovisor.ops.entities", fromlist=["backfill_entities"]
-        ).backfill_entities(
+        lambda: entities.backfill_entities(
             limit=per_lane_frontier,
             max_frontier_calls=per_lane_frontier,
             dry_run=dry_run,
         ),
     )
+    import chronovisor.librarian.librarian as librarian
+
     librarian_shadow = _run_lane(
         "librarian_shadow",
-        lambda: __import__(
-            "chronovisor.librarian.librarian", fromlist=["run_shadow"]
-        ).run_shadow(
+        lambda: librarian.run_shadow(
             root=CHRONOVISOR_ROOT,
             limit=100,
             full_sweep=False,
@@ -694,28 +693,26 @@ def _run_sleep_cycle(
         ),
         max_elapsed_seconds=2 * 60,
     )
-    librarian_cleanup = (
-        {"status": "skipped", "reason": "dry_run"}
-        if dry_run
-        else _run_lane(
+    if dry_run:
+        librarian_cleanup = {"status": "skipped", "reason": "dry_run"}
+    else:
+        import chronovisor.librarian.librarian_release as librarian_release
+        import chronovisor.librarian.merge_transaction as merge_transaction
+        import chronovisor.ops.migration_snapshot as migration_snapshot
+
+        librarian_cleanup = _run_lane(
             "librarian_cleanup",
             lambda: {
                 "status": "ok",
-                "release": __import__(
-                    "chronovisor.librarian.librarian_release",
-                    fromlist=["finalize_if_ready"],
-                ).finalize_if_ready(CHRONOVISOR_ROOT),
-                "restore_points": __import__(
-                    "chronovisor.ops.migration_snapshot",
-                    fromlist=["cleanup_expired_restore_points"],
-                ).cleanup_expired_restore_points(CHRONOVISOR_ROOT),
-                "transaction_preimages": __import__(
-                    "chronovisor.librarian.merge_transaction",
-                    fromlist=["cleanup_expired_preimages"],
-                ).cleanup_expired_preimages(CHRONOVISOR_ROOT),
+                "release": librarian_release.finalize_if_ready(CHRONOVISOR_ROOT),
+                "restore_points": migration_snapshot.cleanup_expired_restore_points(
+                    CHRONOVISOR_ROOT
+                ),
+                "transaction_preimages": merge_transaction.cleanup_expired_preimages(
+                    CHRONOVISOR_ROOT
+                ),
             },
         )
-    )
     integrity = (
         artifact_lane(
             "memory_integrity", lambda: run_eval(limit=eval_limit, write=not dry_run)
@@ -769,43 +766,42 @@ def _run_sleep_cycle(
         ),
     }
     if dry_run:
+        import chronovisor.ingest.orchestrator as ingest_orchestrator
+
         lint_due = _run_lane(
             "lint_due",
-            lambda: __import__(
-                "chronovisor.ingest.orchestrator", fromlist=["run_lint_if_due"]
-            ).run_lint_if_due(dry_run=True),
+            lambda: ingest_orchestrator.run_lint_if_due(dry_run=True),
         )
     else:
         lint_allowed, lint_reason = lane_budgets["lint"].consume("mutation")
-        lint_due = (
-            _run_lane(
+        if lint_allowed:
+            import chronovisor.ingest.orchestrator as ingest_orchestrator
+
+            lint_due = _run_lane(
                 "lint_due",
-                lambda: __import__(
-                    "chronovisor.ingest.orchestrator", fromlist=["run_lint_if_due"]
-                ).run_lint_if_due(dry_run=False),
+                lambda: ingest_orchestrator.run_lint_if_due(dry_run=False),
             )
-            if lint_allowed
-            else {
+        else:
+            lint_due = {
                 "status": "budget_deferred",
                 "lane": "lint_due",
                 "reason": lint_reason,
             }
-        )
+    import chronovisor.ops.lint_repair as lint_repair_ops
+
     lint_repair = _run_lane(
         "lint_repair",
-        lambda: __import__(
-            "chronovisor.ops.lint_repair", fromlist=["run_lint_repair"]
-        ).run_lint_repair(
+        lambda: lint_repair_ops.run_lint_repair(
             max_items=5,
             budget=lane_budgets["lint"],
             dry_run=dry_run,
         ),
     )
+    import chronovisor.ingest.read_back_repair as read_back_repair_ops
+
     read_back_repair = _run_lane(
         "read_back_repair",
-        lambda: __import__(
-            "chronovisor.ingest.read_back_repair", fromlist=["run_read_back_repair"]
-        ).run_read_back_repair(
+        lambda: read_back_repair_ops.run_read_back_repair(
             max_items=5,
             budget=lane_budgets["read_back_repair"],
             dry_run=dry_run,
@@ -840,61 +836,56 @@ def _run_sleep_cycle(
     raw_replay = {"status": "ok", "queue_refresh": raw_queue, "drain": raw_drain}
     if any(item.get("status") == "error" for item in (raw_queue, raw_drain)):
         raw_replay["status"] = "error"
+    import chronovisor.raw.raw_archive as raw_archive_ops
+
     raw_archive = _run_lane(
         "raw_archive",
-        lambda: __import__(
-            "chronovisor.raw.raw_archive", fromlist=["seal_eligible"]
-        ).seal_eligible(
+        lambda: raw_archive_ops.seal_eligible(
             CHRONOVISOR_ROOT / "raw",
             dry_run=dry_run,
             max_segments=4,
         ),
     )
 
-    search_labels = (
-        _run_lane(
+    if eval_limit > 0:
+        import chronovisor.search.search_eval as search_eval
+
+        search_labels = _run_lane(
             "search_label_queue",
-            lambda: __import__(
-                "chronovisor.search.search_eval", fromlist=["build_label_queue"]
-            ).build_label_queue(
+            lambda: search_eval.build_label_queue(
                 limit=eval_limit,
                 dry_run=dry_run,
                 budget=lane_budgets["labels"],
             ),
         )
-        if eval_limit > 0
-        else {"status": "skipped", "reason": "eval_limit_zero"}
-    )
-    search_label_review = (
-        _run_lane(
+        import chronovisor.search.search_eval as search_eval_review
+
+        search_label_review = _run_lane(
             "search_label_review",
-            lambda: __import__(
-                "chronovisor.search.search_eval",
-                fromlist=["review_label_queue_with_frontier"],
-            ).review_label_queue_with_frontier(
+            lambda: search_eval_review.review_label_queue_with_frontier(
                 limit=min(2, eval_limit),
                 max_attempts=3,
                 dry_run=dry_run,
                 budget=lane_budgets["labels"],
             ),
         )
-        if eval_limit > 0
-        else {"status": "skipped", "reason": "eval_limit_zero"}
-    )
+    else:
+        search_labels = {"status": "skipped", "reason": "eval_limit_zero"}
+        search_label_review = {"status": "skipped", "reason": "eval_limit_zero"}
+    import chronovisor.recall.recall_auto_apply as recall_auto_apply_ops
+
     recall_auto_apply = _run_lane(
         "recall_auto_apply",
-        lambda: __import__(
-            "chronovisor.recall.recall_auto_apply", fromlist=["apply_feedback_file"]
-        ).apply_feedback_file(
+        lambda: recall_auto_apply_ops.apply_feedback_file(
             dry_run=dry_run,
             budget=lane_budgets["recall_auto_apply"],
         ),
     )
+    import chronovisor.ops.self_heal as self_heal_ops
+
     self_heal = _run_lane(
         "self_heal",
-        lambda: __import__(
-            "chronovisor.ops.self_heal", fromlist=["run_pending"]
-        ).run_pending(
+        lambda: self_heal_ops.run_pending(
             max_packets=1,
             enable_frontier=False,
             dry_run=dry_run,
@@ -949,11 +940,11 @@ def _run_sleep_cycle(
             max_evaluations=2,
         ),
     )
+    import chronovisor.recall.recall_calibration as recall_calibration
+
     calibration = _run_lane(
         "recall_calibration",
-        lambda: __import__(
-            "chronovisor.recall.recall_calibration", fromlist=["run_due"]
-        ).run_due(
+        lambda: recall_calibration.run_due(
             min_interval_hours=7 * 24,
             max_samples=2000,
             max_recomputed_features=50,
@@ -962,11 +953,11 @@ def _run_sleep_cycle(
             budget=lane_budgets["calibration"],
         ),
     )
+    import chronovisor.search.search_eval as search_eval
+
     search_self_tune = _run_lane(
         "search_self_tune",
-        lambda: __import__(
-            "chronovisor.search.search_eval", fromlist=["run_self_tune_due"]
-        ).run_self_tune_due(
+        lambda: search_eval.run_self_tune_due(
             min_interval_hours=7 * 24,
             apply=True,
             dry_run=dry_run,
@@ -977,12 +968,11 @@ def _run_sleep_cycle(
         ),
         max_elapsed_seconds=125,
     )
+    import chronovisor.research.research_consolidation as research_consolidation_ops
+
     research_consolidation = _run_lane(
         "research_consolidation",
-        lambda: __import__(
-            "chronovisor.research.research_consolidation",
-            fromlist=["run_consolidation"],
-        ).run_consolidation(dry_run=dry_run),
+        lambda: research_consolidation_ops.run_consolidation(dry_run=dry_run),
     )
     payload = {
         "status": "ok",
@@ -1052,23 +1042,22 @@ def _run_sleep_cycle(
             retention_budget=lane_budgets["autonomy_retention"],
         ),
     )
+    import chronovisor.ops.autonomy as autonomy
+
     payload["duplicate_frontier"] = _run_lane(
         "duplicate_frontier",
-        lambda: __import__(
-            "chronovisor.ops.autonomy",
-            fromlist=["resolve_deferred_duplicates_with_frontier"],
-        ).resolve_deferred_duplicates_with_frontier(
+        lambda: autonomy.resolve_deferred_duplicates_with_frontier(
             duplicates,
             budget=lane_budgets["duplicates"],
             dry_run=dry_run,
             inventory_complete=len(duplicates) < duplicate_limit,
         ),
     )
+    import chronovisor.ops.orphan_link as orphan_link
+
     payload["orphan_links"] = _run_lane(
         "orphan_links",
-        lambda: __import__(
-            "chronovisor.ops.orphan_link", fromlist=["run_autonomous"]
-        ).run_autonomous(
+        lambda: orphan_link.run_autonomous(
             orphan_limit=2,
             max_candidates=2,
             budget=lane_budgets["orphans"],

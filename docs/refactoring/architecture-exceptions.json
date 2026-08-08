@@ -1,15 +1,14 @@
 {
   "schema_version": 2,
   "source_baseline_head": "d404a6b20d00e3bcd1d4cdb89edfa5a718c51833",
-  "baseline_sha256": "fbad80d83853ebf3fdd84ee265fe3d43878403e0979684f12bb6821a0beabd46",
+  "baseline_sha256": "dd6e1a4577c4a83e7272bfa751e8833f509898830019ede7adf41515d5609ec6",
   "semantic_identity": "cross-domain edges use category+source_package+target_package; statement exceptions use category+source_package+source_module+scope_kind+scope+statement_kind+target_package+target_module+symbols+occurrence; source line is diagnostic and normalized statement content is verified independently",
   "counts": {
-    "exceptions": 113,
+    "exceptions": 90,
     "by_category": {
-      "cross_domain_edge": 90,
-      "dynamic_import": 23
+      "cross_domain_edge": 90
     },
-    "cross_domain_sites": 1245,
+    "cross_domain_sites": 1260,
     "production_to_lab_edges": 0,
     "production_to_lab_static_sites": 0,
     "production_to_lab_dynamic_sites": 0,
@@ -1229,44 +1228,6 @@
       "deadline": "2026-12-31",
       "removal_campaign": "S",
       "rationale": "Remove the librarian->recall package edge through a published contract."
-    },
-    {
-      "category": "dynamic_import",
-      "source_package": "ops",
-      "source_module": "chronovisor.ops.sleep_cycle",
-      "scope_kind": "function",
-      "scope": "_run_sleep_cycle",
-      "statement_kind": "__import__",
-      "target_package": "ops",
-      "target_module": "chronovisor.ops.page_normalize",
-      "symbols": [],
-      "content_sha256": "f960f112b728a8df475375972c9a1668d24d8c3e2bc9a6e91417231b589c0283",
-      "line": 657,
-      "occurrence": 1,
-      "semantic_id": "arch:09562a56e206b46c00dc6162c8a25877c5be0922d341d59a27b2760461794009",
-      "owner": "chronovisor.ops.sleep_cycle",
-      "deadline": "2026-10-31",
-      "removal_campaign": "Q",
-      "rationale": "Move the ops->ops runtime import into explicit composition."
-    },
-    {
-      "category": "dynamic_import",
-      "source_package": "ops",
-      "source_module": "chronovisor.ops.sleep_cycle",
-      "scope_kind": "function",
-      "scope": "_run_sleep_cycle",
-      "statement_kind": "__import__",
-      "target_package": "recall",
-      "target_module": "chronovisor.recall.recall_calibration",
-      "symbols": [],
-      "content_sha256": "3ec049af78f87a417223f7e57d95217ab63ed98ce558f614a983858fc98bab20",
-      "line": 954,
-      "occurrence": 1,
-      "semantic_id": "arch:0a0ecf52ab0c563bda61e75cce2798f692b54d14d6f3b49e7e0751fb44730beb",
-      "owner": "chronovisor.ops.sleep_cycle",
-      "deadline": "2026-11-30",
-      "removal_campaign": "R",
-      "rationale": "Move the ops->recall runtime import into explicit composition."
     },
     {
       "category": "cross_domain_edge",
@@ -4273,6 +4234,18 @@
           "line": 47
         },
         {
+          "semantic_id": "arch:12b682589113e2a55f3504492acfd26638ce6d050f3713e5c9eb9c0be98898d5",
+          "source_module": "chronovisor.ops.sleep_cycle",
+          "scope_kind": "function",
+          "scope": "_run_sleep_cycle",
+          "statement_kind": "import",
+          "target_module": "chronovisor.ingest.read_back_repair",
+          "symbols": [],
+          "content_sha256": "17f1ef95ae380862884cf25e722cf4f4afd0474edd32427cc8d19fa3db2610b9",
+          "occurrence": 1,
+          "line": 800
+        },
+        {
           "semantic_id": "arch:177fda9ce2e9e19ff57c80b0e37eb6c108fae84a52bfd6537a4a728dfccb4740",
           "source_module": "chronovisor.ops.repair_runbook",
           "scope_kind": "function",
@@ -4343,6 +4316,18 @@
           "content_sha256": "2635cb667ef8ba32e2a7dc68c4ad7e49bea7c503f0ed91125da3400cc436be1b",
           "occurrence": 1,
           "line": 3942
+        },
+        {
+          "semantic_id": "arch:3a295281869011c5c98786b6dd9d72917336f148e7addeb5ee2f09a0bf25628d",
+          "source_module": "chronovisor.ops.sleep_cycle",
+          "scope_kind": "function",
+          "scope": "_run_sleep_cycle",
+          "statement_kind": "import",
+          "target_module": "chronovisor.ingest.orchestrator",
+          "symbols": [],
+          "content_sha256": "705ecdb01e351ec8a1d473b03b342aa05dc6aae1817e48c9b4bd1356bd7a0ce1",
+          "occurrence": 2,
+          "line": 778
         },
         {
           "semantic_id": "arch:511905bd9ecf53f8065b367f58bc8dbc571679acd747175b4d9ee9ee20f981e2",
@@ -4544,6 +4529,18 @@
           "content_sha256": "bd9aa92c46ab5a65725a193b30997f3e060ce54e8bce71023f40b5edc8dc7c58",
           "occurrence": 1,
           "line": 19
+        },
+        {
+          "semantic_id": "arch:e82f2bd6701fcf544a8e00939f60acad63f84332b0c35ea9ffd2e613017f6748",
+          "source_module": "chronovisor.ops.sleep_cycle",
+          "scope_kind": "function",
+          "scope": "_run_sleep_cycle",
+          "statement_kind": "import",
+          "target_module": "chronovisor.ingest.orchestrator",
+          "symbols": [],
+          "content_sha256": "705ecdb01e351ec8a1d473b03b342aa05dc6aae1817e48c9b4bd1356bd7a0ce1",
+          "occurrence": 1,
+          "line": 769
         },
         {
           "semantic_id": "arch:f733d0a0b357fd425297da69f4659b476b5a6db5b35dcd4efdc06ff1098e4b6a",
@@ -6471,6 +6468,18 @@
           "line": 1202
         },
         {
+          "semantic_id": "arch:b7c929993dfd70ff4ba3e7c2f54d65d5f79645104dba9358a80d30f81dc7de1c",
+          "source_module": "chronovisor.ops.sleep_cycle",
+          "scope_kind": "function",
+          "scope": "_run_sleep_cycle",
+          "statement_kind": "import",
+          "target_module": "chronovisor.raw.raw_archive",
+          "symbols": [],
+          "content_sha256": "cca6b242f51dc98f35836a7760f65dce7607db1d047a21d987ce18e0e4f6e99d",
+          "occurrence": 1,
+          "line": 839
+        },
+        {
           "semantic_id": "arch:c64f99c187a916baddf3fcb6775aab2adb81dae6b7c9557c2470d11a961fe5fc",
           "source_module": "chronovisor.ops.dashboard",
           "scope_kind": "function",
@@ -6876,44 +6885,6 @@
       "rationale": "Remove the lab->decision package edge through a published contract."
     },
     {
-      "category": "dynamic_import",
-      "source_package": "ops",
-      "source_module": "chronovisor.ops.sleep_cycle",
-      "scope_kind": "function",
-      "scope": "_run_sleep_cycle",
-      "statement_kind": "__import__",
-      "target_package": "ops",
-      "target_module": "chronovisor.ops.migration_snapshot",
-      "symbols": [],
-      "content_sha256": "5862f090baf3fab469c03c4a63b3c26e95ca20241ba099486fb75d950c37b8d6",
-      "line": 708,
-      "occurrence": 1,
-      "semantic_id": "arch:35d25704d99867a9d6ddc85775fa35dd9a8c0c348ff81a4c77b63ba45394d27f",
-      "owner": "chronovisor.ops.sleep_cycle",
-      "deadline": "2026-10-31",
-      "removal_campaign": "Q",
-      "rationale": "Move the ops->ops runtime import into explicit composition."
-    },
-    {
-      "category": "dynamic_import",
-      "source_package": "ops",
-      "source_module": "chronovisor.ops.sleep_cycle",
-      "scope_kind": "function",
-      "scope": "_run_sleep_cycle",
-      "statement_kind": "__import__",
-      "target_package": "ingest",
-      "target_module": "chronovisor.ingest.orchestrator",
-      "symbols": [],
-      "content_sha256": "e4c4d6e59bafef9517168da6d4991e41ae329d30479515d0131ad0013c8426d0",
-      "line": 783,
-      "occurrence": 2,
-      "semantic_id": "arch:399d92dc378092ffa44dab2d26f9f424864e0ac5bfabebac84547350033450cf",
-      "owner": "chronovisor.ops.sleep_cycle",
-      "deadline": "2026-11-30",
-      "removal_campaign": "R",
-      "rationale": "Move the ops->ingest runtime import into explicit composition."
-    },
-    {
       "category": "cross_domain_edge",
       "source_package": "hosts",
       "target_package": "ingest",
@@ -7215,6 +7186,18 @@
           "line": 4273
         },
         {
+          "semantic_id": "arch:1908d0bea49003029140cd12f4ebdb8a5585b54f2aaefc66d04f015be66fa373",
+          "source_module": "chronovisor.ops.sleep_cycle",
+          "scope_kind": "function",
+          "scope": "_run_sleep_cycle",
+          "statement_kind": "import",
+          "target_module": "chronovisor.librarian.librarian",
+          "symbols": [],
+          "content_sha256": "0339f9dde0804558381c0c32c23ac3241d4e2be3bf6d30be80d1ad54241766af",
+          "occurrence": 1,
+          "line": 684
+        },
+        {
           "semantic_id": "arch:5ca5cbf1142cfe5b804a2fbf01a0e6b9d7e64f91efcfc6ff3850ca8b5d6ead9b",
           "source_module": "chronovisor.ops.dashboard",
           "scope_kind": "function",
@@ -7243,6 +7226,18 @@
           "line": 888
         },
         {
+          "semantic_id": "arch:7534422d511c8bf307fe8ba998dd73fecdb68eb8d121800a1212eb75468cf43c",
+          "source_module": "chronovisor.ops.sleep_cycle",
+          "scope_kind": "function",
+          "scope": "_run_sleep_cycle",
+          "statement_kind": "import",
+          "target_module": "chronovisor.librarian.merge_transaction",
+          "symbols": [],
+          "content_sha256": "6a2635f1ffd993a89694c4eb701c39449d79ef8ad220f20a952dd1efcea825a0",
+          "occurrence": 1,
+          "line": 700
+        },
+        {
           "semantic_id": "arch:8eef4f0f2c6aead4ba828ae064b3b90f8ee36a2370e54726428970d998697656",
           "source_module": "chronovisor.ops.health",
           "scope_kind": "function",
@@ -7269,6 +7264,18 @@
           "content_sha256": "c1951e98bb5da8e747d0cc0f1c386987eddd315833cfd63e0f08345e7436de5c",
           "occurrence": 1,
           "line": 104
+        },
+        {
+          "semantic_id": "arch:cc9628dc69fb93855285d7316a65c68829f71914e6303ba584e2a97abcb85035",
+          "source_module": "chronovisor.ops.sleep_cycle",
+          "scope_kind": "function",
+          "scope": "_run_sleep_cycle",
+          "statement_kind": "import",
+          "target_module": "chronovisor.librarian.librarian_release",
+          "symbols": [],
+          "content_sha256": "b4820c0c97d1a70c4e757037366a5dbb924be5020f65f1068d7423ab1eba99a0",
+          "occurrence": 1,
+          "line": 699
         },
         {
           "semantic_id": "arch:ced341ded339205b72f1b1a922d34fc6de357680cbf47cc8ddc3c882ee54c11c",
@@ -8780,25 +8787,6 @@
       "rationale": "Remove the raw->hosts package edge through a published contract."
     },
     {
-      "category": "dynamic_import",
-      "source_package": "ops",
-      "source_module": "chronovisor.ops.sleep_cycle",
-      "scope_kind": "function",
-      "scope": "_run_sleep_cycle",
-      "statement_kind": "__import__",
-      "target_package": "ingest",
-      "target_module": "chronovisor.ingest.orchestrator",
-      "symbols": [],
-      "content_sha256": "e4c4d6e59bafef9517168da6d4991e41ae329d30479515d0131ad0013c8426d0",
-      "line": 774,
-      "occurrence": 1,
-      "semantic_id": "arch:5174f3ba292ee22c6d157040e15c0a79b16043c72f725e5512a8c31da4e8f4e7",
-      "owner": "chronovisor.ops.sleep_cycle",
-      "deadline": "2026-11-30",
-      "removal_campaign": "R",
-      "rationale": "Move the ops->ingest runtime import into explicit composition."
-    },
-    {
       "category": "cross_domain_edge",
       "source_package": "recall",
       "target_package": "librarian",
@@ -9179,44 +9167,6 @@
       "rationale": "Remove the recall->ops package edge through a published contract."
     },
     {
-      "category": "dynamic_import",
-      "source_package": "ops",
-      "source_module": "chronovisor.ops.sleep_cycle",
-      "scope_kind": "function",
-      "scope": "_run_sleep_cycle",
-      "statement_kind": "__import__",
-      "target_package": "librarian",
-      "target_module": "chronovisor.librarian.librarian_release",
-      "symbols": [],
-      "content_sha256": "0227006d509d44fda99f49f7febdf17f4d11d347333d7d70674b9da74f4214e9",
-      "line": 704,
-      "occurrence": 1,
-      "semantic_id": "arch:60a5b5c668b37aa3ee7d70a4e44bdad889568df6d841871b2ef6749d64eefde0",
-      "owner": "chronovisor.ops.sleep_cycle",
-      "deadline": "2026-11-30",
-      "removal_campaign": "R",
-      "rationale": "Move the ops->librarian runtime import into explicit composition."
-    },
-    {
-      "category": "dynamic_import",
-      "source_package": "ops",
-      "source_module": "chronovisor.ops.sleep_cycle",
-      "scope_kind": "function",
-      "scope": "_run_sleep_cycle",
-      "statement_kind": "__import__",
-      "target_package": "ingest",
-      "target_module": "chronovisor.ingest.read_back_repair",
-      "symbols": [],
-      "content_sha256": "765de75d26e892e3a3d3f15e518cb631e2a870eb7f3fcb226ced890fa53d2f59",
-      "line": 806,
-      "occurrence": 1,
-      "semantic_id": "arch:60cfc7ccff32195d69cf1ff12e387cc4f0d078047822ff8705ff6bcbec1cb7d4",
-      "owner": "chronovisor.ops.sleep_cycle",
-      "deadline": "2026-11-30",
-      "removal_campaign": "R",
-      "rationale": "Move the ops->ingest runtime import into explicit composition."
-    },
-    {
       "category": "cross_domain_edge",
       "source_package": "ops",
       "target_package": "recall",
@@ -9293,6 +9243,18 @@
           "line": 57
         },
         {
+          "semantic_id": "arch:35ede95bfa2fe458372cae6f3f6222507abcca54dde898ebad18141265d92ec7",
+          "source_module": "chronovisor.ops.sleep_cycle",
+          "scope_kind": "function",
+          "scope": "_run_sleep_cycle",
+          "statement_kind": "import",
+          "target_module": "chronovisor.recall.recall_calibration",
+          "symbols": [],
+          "content_sha256": "c757023ea5b0a045ca20d6e88b7f15ebeb54e834dfcd1f1facddf758e0b0f47b",
+          "occurrence": 1,
+          "line": 943
+        },
+        {
           "semantic_id": "arch:44d16bb542b701150ea86946a8a30a6f853b78b114896affa09e15bc03ad1caa",
           "source_module": "chronovisor.ops.retention",
           "scope_kind": "module",
@@ -9305,6 +9267,18 @@
           "content_sha256": "ea61635403728639073fce0740cc5147cf18cd29028de896a568c4f27af491a2",
           "occurrence": 1,
           "line": 21
+        },
+        {
+          "semantic_id": "arch:516703e85b99b04c170d6c7de890b6a60d806e34a8c4b950d5db2143a58b5f12",
+          "source_module": "chronovisor.ops.sleep_cycle",
+          "scope_kind": "function",
+          "scope": "_run_sleep_cycle",
+          "statement_kind": "import",
+          "target_module": "chronovisor.recall.recall_auto_apply",
+          "symbols": [],
+          "content_sha256": "9ed00c694b26c96c20035595846645c0fd7e0d4d9b1ba3b37a4a6f0e455be0ea",
+          "occurrence": 1,
+          "line": 875
         },
         {
           "semantic_id": "arch:52e5f240f3f62eda499762d5bdb0633eb1521bb4c16d815164268d4d889ec4f8",
@@ -9420,6 +9394,18 @@
           "line": 16
         },
         {
+          "semantic_id": "arch:9c763bdc5edad7bcaf7ea2f5a2b01121a44e83c77bb5da228e285033a9329474",
+          "source_module": "chronovisor.ops.sleep_cycle",
+          "scope_kind": "function",
+          "scope": "_run_sleep_cycle",
+          "statement_kind": "import",
+          "target_module": "chronovisor.recall.claims",
+          "symbols": [],
+          "content_sha256": "45d00359b399536c5d23a0426e93f40d749e77a8169d0a62eda4f6d13c4d9212",
+          "occurrence": 1,
+          "line": 631
+        },
+        {
           "semantic_id": "arch:9fe600f705e18111510aafd050d9f361e8070fe6d2085b9af4d87ddf03eb0379",
           "source_module": "chronovisor.ops.dashboard",
           "scope_kind": "function",
@@ -9432,6 +9418,18 @@
           "content_sha256": "a00a59c665fdfe11c716fb47945238d267cd363eb82f2b8077693fe3ccd9afaf",
           "occurrence": 1,
           "line": 3905
+        },
+        {
+          "semantic_id": "arch:a6a1475b84122b4b66eab795e6c859dbef0d8a14e4dff502d9d68cdb6245a54b",
+          "source_module": "chronovisor.ops.sleep_cycle",
+          "scope_kind": "function",
+          "scope": "_run_sleep_cycle",
+          "statement_kind": "import",
+          "target_module": "chronovisor.recall.content_correction",
+          "symbols": [],
+          "content_sha256": "d2e2ba221ae44d4d9291a7bf5c8d33ea55296e872c51ea9f1db7fb3b27c947be",
+          "occurrence": 1,
+          "line": 610
         },
         {
           "semantic_id": "arch:b09a3cfd7a82e572afb83b3b60d4ec53f82c0f47b3b02495e88fa022bed25035",
@@ -9743,25 +9741,6 @@
       "deadline": "2026-12-31",
       "removal_campaign": "S",
       "rationale": "Remove the ingest->recall package edge through a published contract."
-    },
-    {
-      "category": "dynamic_import",
-      "source_package": "ops",
-      "source_module": "chronovisor.ops.sleep_cycle",
-      "scope_kind": "function",
-      "scope": "_run_sleep_cycle",
-      "statement_kind": "__import__",
-      "target_package": "ops",
-      "target_module": "chronovisor.ops.metadata_backfill",
-      "symbols": [],
-      "content_sha256": "c58e1fd0befc569d425dd23d79a4cde6ad3a550f2232de7f83e90b9391f14a8f",
-      "line": 667,
-      "occurrence": 1,
-      "semantic_id": "arch:65a25466b54a85c7fac4b98ae2385decda3a097626a4e25032f76b20bd78d123",
-      "owner": "chronovisor.ops.sleep_cycle",
-      "deadline": "2026-10-31",
-      "removal_campaign": "Q",
-      "rationale": "Move the ops->ops runtime import into explicit composition."
     },
     {
       "category": "cross_domain_edge",
@@ -11875,25 +11854,6 @@
       "rationale": "Remove the librarian->ingest package edge through a published contract."
     },
     {
-      "category": "dynamic_import",
-      "source_package": "ops",
-      "source_module": "chronovisor.ops.sleep_cycle",
-      "scope_kind": "function",
-      "scope": "_run_sleep_cycle",
-      "statement_kind": "__import__",
-      "target_package": "ops",
-      "target_module": "chronovisor.ops.autonomy",
-      "symbols": [],
-      "content_sha256": "5647c7b154d57903166394fc9a14d71cb0d37533c92b9987eceb4599e37f5778",
-      "line": 1057,
-      "occurrence": 1,
-      "semantic_id": "arch:722e44de84dc21d1453258284767bd62da53acdda4a5aa2714f7cc3966279cf2",
-      "owner": "chronovisor.ops.sleep_cycle",
-      "deadline": "2026-10-31",
-      "removal_campaign": "Q",
-      "rationale": "Move the ops->ops runtime import into explicit composition."
-    },
-    {
       "category": "cross_domain_edge",
       "source_package": "recall",
       "target_package": "ingest",
@@ -12056,44 +12016,6 @@
       "rationale": "Remove the recall->ingest package edge through a published contract."
     },
     {
-      "category": "dynamic_import",
-      "source_package": "ops",
-      "source_module": "chronovisor.ops.sleep_cycle",
-      "scope_kind": "function",
-      "scope": "_run_sleep_cycle",
-      "statement_kind": "__import__",
-      "target_package": "search",
-      "target_module": "chronovisor.search.search_eval",
-      "symbols": [],
-      "content_sha256": "f79b95ec381d349d44fa0b11af2dfa7856e6851aaf2085ecbfbdf9df7d257a95",
-      "line": 871,
-      "occurrence": 2,
-      "semantic_id": "arch:76453fde7eec05f39031c86510e5016812fabf38593116a4adecc42f1976a652",
-      "owner": "chronovisor.ops.sleep_cycle",
-      "deadline": "2026-11-30",
-      "removal_campaign": "R",
-      "rationale": "Move the ops->search runtime import into explicit composition."
-    },
-    {
-      "category": "dynamic_import",
-      "source_package": "ops",
-      "source_module": "chronovisor.ops.sleep_cycle",
-      "scope_kind": "function",
-      "scope": "_run_sleep_cycle",
-      "statement_kind": "__import__",
-      "target_package": "recall",
-      "target_module": "chronovisor.recall.recall_auto_apply",
-      "symbols": [],
-      "content_sha256": "adce9d8f9fdd852c8ab88a876d6d0b098c8f27bf48c4b3407b1aa7733010ace5",
-      "line": 886,
-      "occurrence": 1,
-      "semantic_id": "arch:788ec9ed6692f1a4670d5aea47cd4022e0b28007a34d792b7159c49bef286088",
-      "owner": "chronovisor.ops.sleep_cycle",
-      "deadline": "2026-11-30",
-      "removal_campaign": "R",
-      "rationale": "Move the ops->recall runtime import into explicit composition."
-    },
-    {
       "category": "cross_domain_edge",
       "source_package": "hosts",
       "target_package": "librarian",
@@ -12132,25 +12054,6 @@
       "deadline": "2026-12-31",
       "removal_campaign": "S",
       "rationale": "Remove the hosts->librarian package edge through a published contract."
-    },
-    {
-      "category": "dynamic_import",
-      "source_package": "ops",
-      "source_module": "chronovisor.ops.sleep_cycle",
-      "scope_kind": "function",
-      "scope": "_run_sleep_cycle",
-      "statement_kind": "__import__",
-      "target_package": "ops",
-      "target_module": "chronovisor.ops.self_heal",
-      "symbols": [],
-      "content_sha256": "132ea603bf7ec9456010ebb4181a82f7390415210b18a0019541df489a067f90",
-      "line": 895,
-      "occurrence": 1,
-      "semantic_id": "arch:80497e420c350de929b19520f4b5e582f7aeef43a7e4fd7fcc83ce0f2e6e2400",
-      "owner": "chronovisor.ops.sleep_cycle",
-      "deadline": "2026-10-31",
-      "removal_campaign": "Q",
-      "rationale": "Move the ops->ops runtime import into explicit composition."
     },
     {
       "category": "cross_domain_edge",
@@ -15067,63 +14970,6 @@
       "rationale": "Remove the raw->ingest package edge through a published contract."
     },
     {
-      "category": "dynamic_import",
-      "source_package": "ops",
-      "source_module": "chronovisor.ops.sleep_cycle",
-      "scope_kind": "function",
-      "scope": "_run_sleep_cycle",
-      "statement_kind": "__import__",
-      "target_package": "raw",
-      "target_module": "chronovisor.raw.raw_archive",
-      "symbols": [],
-      "content_sha256": "1bc6c604e570bfdc08f4ae259f63f04669cefb77dc3d1b32555ac685a588d749",
-      "line": 845,
-      "occurrence": 1,
-      "semantic_id": "arch:a5d4ad8bde7f5dfaa9f357b83e7201f6e89095519c5c8a54071dc9e43324d859",
-      "owner": "chronovisor.ops.sleep_cycle",
-      "deadline": "2026-11-30",
-      "removal_campaign": "R",
-      "rationale": "Move the ops->raw runtime import into explicit composition."
-    },
-    {
-      "category": "dynamic_import",
-      "source_package": "ops",
-      "source_module": "chronovisor.ops.sleep_cycle",
-      "scope_kind": "function",
-      "scope": "_run_sleep_cycle",
-      "statement_kind": "__import__",
-      "target_package": "librarian",
-      "target_module": "chronovisor.librarian.merge_transaction",
-      "symbols": [],
-      "content_sha256": "15a92fda044f25f4db13d8ca41f939ad39f9e6b467df08779792887fc12cf2f2",
-      "line": 712,
-      "occurrence": 1,
-      "semantic_id": "arch:a781da4d245f5995f5df1879d052252ad9b6bd5ebcd0dfc76e0194fd5ca1f1d3",
-      "owner": "chronovisor.ops.sleep_cycle",
-      "deadline": "2026-11-30",
-      "removal_campaign": "R",
-      "rationale": "Move the ops->librarian runtime import into explicit composition."
-    },
-    {
-      "category": "dynamic_import",
-      "source_package": "ops",
-      "source_module": "chronovisor.ops.sleep_cycle",
-      "scope_kind": "function",
-      "scope": "_run_sleep_cycle",
-      "statement_kind": "__import__",
-      "target_package": "search",
-      "target_module": "chronovisor.search.search_eval",
-      "symbols": [],
-      "content_sha256": "fc9ebdc3cab92e5284645a7077058117782cb486a69fb3686f277f6ec1ab3a5e",
-      "line": 967,
-      "occurrence": 3,
-      "semantic_id": "arch:a856d00f2db0a1f2faa9f184c07d656628c69257272735f151e06261534daeb0",
-      "owner": "chronovisor.ops.sleep_cycle",
-      "deadline": "2026-11-30",
-      "removal_campaign": "R",
-      "rationale": "Move the ops->search runtime import into explicit composition."
-    },
-    {
       "category": "cross_domain_edge",
       "source_package": "classification",
       "target_package": "ops",
@@ -15183,6 +15029,18 @@
           "content_sha256": "d8de190eb8d3ff543f47d551c033f95a33f93d6ceae6e2524d59638ec3b4efdd",
           "occurrence": 1,
           "line": 685
+        },
+        {
+          "semantic_id": "arch:f8e77b3f1a6e731d596e03ee8710e4a61212010e64b1517038e0333d166f03db",
+          "source_module": "chronovisor.ops.sleep_cycle",
+          "scope_kind": "function",
+          "scope": "_run_sleep_cycle",
+          "statement_kind": "import",
+          "target_module": "chronovisor.research.research_consolidation",
+          "symbols": [],
+          "content_sha256": "7d316fda2b2cc555ed4743be8b692b953c8705646e094e74e3cd5e41ad77659f",
+          "occurrence": 1,
+          "line": 971
         }
       ],
       "semantic_id": "arch:b3853b95a203259460387b8acb89820c7e11b52682f47f7656ee28789b947b98",
@@ -15218,25 +15076,6 @@
       "deadline": "2026-12-31",
       "removal_campaign": "S",
       "rationale": "Remove the research->recall package edge through a published contract."
-    },
-    {
-      "category": "dynamic_import",
-      "source_package": "ops",
-      "source_module": "chronovisor.ops.sleep_cycle",
-      "scope_kind": "function",
-      "scope": "_run_sleep_cycle",
-      "statement_kind": "__import__",
-      "target_package": "search",
-      "target_module": "chronovisor.search.search_eval",
-      "symbols": [],
-      "content_sha256": "2c2b51cef78a8f16ddfb4663e4434386084d3d1d5302b495013ca07a2d6c6c07",
-      "line": 857,
-      "occurrence": 1,
-      "semantic_id": "arch:b71370ce6a32319293a1e43fe04b9d9a15c2865165e04a23b53047fdfb5a94cd",
-      "owner": "chronovisor.ops.sleep_cycle",
-      "deadline": "2026-11-30",
-      "removal_campaign": "R",
-      "rationale": "Move the ops->search runtime import into explicit composition."
     },
     {
       "category": "cross_domain_edge",
@@ -15334,25 +15173,6 @@
       "rationale": "Remove the lab->search package edge through a published contract."
     },
     {
-      "category": "dynamic_import",
-      "source_package": "ops",
-      "source_module": "chronovisor.ops.sleep_cycle",
-      "scope_kind": "function",
-      "scope": "_run_sleep_cycle",
-      "statement_kind": "__import__",
-      "target_package": "librarian",
-      "target_module": "chronovisor.librarian.librarian",
-      "symbols": [],
-      "content_sha256": "5a497a7245662628e20e9cbb4066a03692fc350e244c4da572bbfd1eafaf01b4",
-      "line": 687,
-      "occurrence": 1,
-      "semantic_id": "arch:c29d98a39da94b2c3cce80e59e0f4176265401935709254ea5cea9c0650fe6fe",
-      "owner": "chronovisor.ops.sleep_cycle",
-      "deadline": "2026-11-30",
-      "removal_campaign": "R",
-      "rationale": "Move the ops->librarian runtime import into explicit composition."
-    },
-    {
       "category": "cross_domain_edge",
       "source_package": "decision",
       "target_package": "search",
@@ -15407,25 +15227,6 @@
       "deadline": "2026-12-31",
       "removal_campaign": "S",
       "rationale": "Remove the decision->search package edge through a published contract."
-    },
-    {
-      "category": "dynamic_import",
-      "source_package": "ops",
-      "source_module": "chronovisor.ops.sleep_cycle",
-      "scope_kind": "function",
-      "scope": "_run_sleep_cycle",
-      "statement_kind": "__import__",
-      "target_package": "ops",
-      "target_module": "chronovisor.ops.lint_repair",
-      "symbols": [],
-      "content_sha256": "9ff3ddf9ca464774e426ddfc1be7d1768a4fad9eb011827ce3d0bad81e2223dd",
-      "line": 796,
-      "occurrence": 1,
-      "semantic_id": "arch:c607c67a56e1bf3727164569f5762c28562c14de6c2dd65118037798e1bc5422",
-      "owner": "chronovisor.ops.sleep_cycle",
-      "deadline": "2026-10-31",
-      "removal_campaign": "Q",
-      "rationale": "Move the ops->ops runtime import into explicit composition."
     },
     {
       "category": "cross_domain_edge",
@@ -19133,6 +18934,18 @@
           "line": 873
         },
         {
+          "semantic_id": "arch:7e9ecf5465543a4d6ddd06d9a3ff65869f6a6c37f2267f8986e14d023e260b93",
+          "source_module": "chronovisor.ops.sleep_cycle",
+          "scope_kind": "function",
+          "scope": "_run_sleep_cycle",
+          "statement_kind": "import",
+          "target_module": "chronovisor.search.search_eval",
+          "symbols": [],
+          "content_sha256": "ccf68c94a8761e60be565b723087364a4fe96fe6edd1b73e7ad3dd2a8f25838a",
+          "occurrence": 1,
+          "line": 851
+        },
+        {
           "semantic_id": "arch:82ed2190e159034659bf0e939e6b33e06eb8f8ed270fc8cdf933a16c48a4c7e5",
           "source_module": "chronovisor.ops.golden_expand",
           "scope_kind": "module",
@@ -19204,6 +19017,18 @@
           "content_sha256": "7a523e7c733bf4c48cc28e570bc6cf37a1380bfdec252e93f3786bacb3176995",
           "occurrence": 1,
           "line": 16
+        },
+        {
+          "semantic_id": "arch:a191f4e654ac1011f6ecc04a5684581a3d8f386a98c3df28a735c537b406d2da",
+          "source_module": "chronovisor.ops.sleep_cycle",
+          "scope_kind": "function",
+          "scope": "_run_sleep_cycle",
+          "statement_kind": "import",
+          "target_module": "chronovisor.search.search_eval",
+          "symbols": [],
+          "content_sha256": "bd75ad07978e360edba89a00d04df62b101eed4ed1924f8eec9c3683d0a77c34",
+          "occurrence": 2,
+          "line": 861
         },
         {
           "semantic_id": "arch:b641f106f418c9456985b3025368e9534a5e1742775c3e9d76d1a1cd0e5a92b4",
@@ -19294,6 +19119,18 @@
           "line": 524
         },
         {
+          "semantic_id": "arch:d7809e7d5c38a81d74721dc80ea0a8b1f5c79c5a1e677538004f112f1944db57",
+          "source_module": "chronovisor.ops.sleep_cycle",
+          "scope_kind": "function",
+          "scope": "_run_sleep_cycle",
+          "statement_kind": "import",
+          "target_module": "chronovisor.search.search_eval",
+          "symbols": [],
+          "content_sha256": "ccf68c94a8761e60be565b723087364a4fe96fe6edd1b73e7ad3dd2a8f25838a",
+          "occurrence": 3,
+          "line": 956
+        },
+        {
           "semantic_id": "arch:e46b4faa10b0d660623045d93d1919e666c4092aa2f6687f77eebae8266be8f1",
           "source_module": "chronovisor.ops.orphan_link",
           "scope_kind": "function",
@@ -19313,25 +19150,6 @@
       "deadline": "2026-12-31",
       "removal_campaign": "S",
       "rationale": "Remove the ops->search package edge through a published contract."
-    },
-    {
-      "category": "dynamic_import",
-      "source_package": "ops",
-      "source_module": "chronovisor.ops.sleep_cycle",
-      "scope_kind": "function",
-      "scope": "_run_sleep_cycle",
-      "statement_kind": "__import__",
-      "target_package": "recall",
-      "target_module": "chronovisor.recall.content_correction",
-      "symbols": [],
-      "content_sha256": "3f60b231c4df51150e8ed3317c904a86e4388f6ed1923b3221178afaec1a5a0a",
-      "line": 612,
-      "occurrence": 1,
-      "semantic_id": "arch:dc1051ce8daa96c7d4657ffcc600992231da8aff2421b5e72e9f00a0a3a798d0",
-      "owner": "chronovisor.ops.sleep_cycle",
-      "deadline": "2026-11-30",
-      "removal_campaign": "R",
-      "rationale": "Move the ops->recall runtime import into explicit composition."
     },
     {
       "category": "cross_domain_edge",
@@ -19372,63 +19190,6 @@
       "deadline": "2026-12-31",
       "removal_campaign": "S",
       "rationale": "Remove the knowledge_graph->search package edge through a published contract."
-    },
-    {
-      "category": "dynamic_import",
-      "source_package": "ops",
-      "source_module": "chronovisor.ops.sleep_cycle",
-      "scope_kind": "function",
-      "scope": "_run_sleep_cycle",
-      "statement_kind": "__import__",
-      "target_package": "recall",
-      "target_module": "chronovisor.recall.claims",
-      "symbols": [],
-      "content_sha256": "72cc6725c35c71cb56078c9c1d91784b223cbfd147db8237d5beb91f9bed9b5c",
-      "line": 634,
-      "occurrence": 1,
-      "semantic_id": "arch:dfa983ef75c1cb9dc5780530a6f4d36ea41242e4a9de1903a1f9818ea057c3c8",
-      "owner": "chronovisor.ops.sleep_cycle",
-      "deadline": "2026-11-30",
-      "removal_campaign": "R",
-      "rationale": "Move the ops->recall runtime import into explicit composition."
-    },
-    {
-      "category": "dynamic_import",
-      "source_package": "ops",
-      "source_module": "chronovisor.ops.sleep_cycle",
-      "scope_kind": "function",
-      "scope": "_run_sleep_cycle",
-      "statement_kind": "__import__",
-      "target_package": "research",
-      "target_module": "chronovisor.research.research_consolidation",
-      "symbols": [],
-      "content_sha256": "91add2a2fb24a800fca7b8d577582645ce8a04dcea0c36345146e27429feb2bb",
-      "line": 982,
-      "occurrence": 1,
-      "semantic_id": "arch:e1077a94466a205536c6e25a117027d5f77c06c0cc55482f925787412c9513ea",
-      "owner": "chronovisor.ops.sleep_cycle",
-      "deadline": "2026-11-30",
-      "removal_campaign": "R",
-      "rationale": "Move the ops->research runtime import into explicit composition."
-    },
-    {
-      "category": "dynamic_import",
-      "source_package": "ops",
-      "source_module": "chronovisor.ops.sleep_cycle",
-      "scope_kind": "function",
-      "scope": "_run_sleep_cycle",
-      "statement_kind": "__import__",
-      "target_package": "ops",
-      "target_module": "chronovisor.ops.orphan_link",
-      "symbols": [],
-      "content_sha256": "14fb2af2e6af87f990aa3350e33ca21c1d24af49ac8eed988cf164921455d248",
-      "line": 1069,
-      "occurrence": 1,
-      "semantic_id": "arch:e6c724f0b06379d55660232c4ceb93edbead8217dfcc5b93377edff9077c7948",
-      "owner": "chronovisor.ops.sleep_cycle",
-      "deadline": "2026-10-31",
-      "removal_campaign": "Q",
-      "rationale": "Move the ops->ops runtime import into explicit composition."
     },
     {
       "category": "cross_domain_edge",
@@ -19512,25 +19273,6 @@
       "deadline": "2026-12-31",
       "removal_campaign": "S",
       "rationale": "Remove the decision->ingest package edge through a published contract."
-    },
-    {
-      "category": "dynamic_import",
-      "source_package": "ops",
-      "source_module": "chronovisor.ops.sleep_cycle",
-      "scope_kind": "function",
-      "scope": "_run_sleep_cycle",
-      "statement_kind": "__import__",
-      "target_package": "ops",
-      "target_module": "chronovisor.ops.entities",
-      "symbols": [],
-      "content_sha256": "40aaa6d2739df955eae5acf137cbf9041bc9fb7535970aa63d2771387f52d13f",
-      "line": 677,
-      "occurrence": 1,
-      "semantic_id": "arch:f8662161b0b513d566a2c1371d78ffc02e39c4ee310c04f34598a275f0c16169",
-      "owner": "chronovisor.ops.sleep_cycle",
-      "deadline": "2026-10-31",
-      "removal_campaign": "Q",
-      "rationale": "Move the ops->ops runtime import into explicit composition."
     },
     {
       "category": "cross_domain_edge",
