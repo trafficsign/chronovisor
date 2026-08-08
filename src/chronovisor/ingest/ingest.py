@@ -4026,26 +4026,23 @@ def _safe_log(
 
 
 def _read_back_failure_log() -> Path:
-    return PAGES_DIR.parent / "runtime" / "ingest-read-back-failures.jsonl"
+    from chronovisor.ingest.ingest_readback import (
+        _read_back_failure_log as implementation,
+    )
+
+    return implementation()
 
 
 def _read_back_run_log() -> Path:
-    return PAGES_DIR.parent / "runtime" / "ingest-read-back-runs.jsonl"
+    from chronovisor.ingest.ingest_readback import _read_back_run_log as implementation
+
+    return implementation()
 
 
 def _read_back_query(meta: dict, page_id: str) -> str:
-    questions = meta.get("recall_questions")
-    if isinstance(questions, list):
-        for question in questions:
-            if isinstance(question, str) and question.strip():
-                return question.strip()
-    summary = meta.get("summary")
-    if isinstance(summary, str) and summary.strip():
-        return summary.strip()
-    title = meta.get("title")
-    if isinstance(title, str) and title.strip():
-        return title.strip()
-    return page_id
+    from chronovisor.ingest.ingest_readback import _read_back_query as implementation
+
+    return implementation(meta, page_id)
 
 
 def _verify_changed_pages_read_back(
@@ -4061,48 +4058,11 @@ def _refresh_ingest_derived_artifacts(
     *,
     source_raw: str | None,
 ) -> dict[str, Any]:
-    """Refresh rebuildable indexes and return the normal read-back result."""
+    from chronovisor.ingest.ingest_readback import (
+        _refresh_ingest_derived_artifacts as implementation,
+    )
 
-    try:
-        _rebuild_index()
-    except Exception as exc:
-        _safe_log(f"ingest | index.md rebuild failed (non-fatal): {exc}")
-
-    try:
-        from chronovisor.search.index_store import get_store
-
-        get_store().refresh()
-    except Exception as exc:
-        _safe_log(f"ingest | index_store refresh failed: {exc}")
-
-    if changed_pages:
-        try:
-            from chronovisor.search.search import update_embeddings
-
-            # Read-back is a correctness gate, so publication of the delta
-            # index must complete before retrieval is evaluated. The previous
-            # fire-and-forget enqueue produced false misses that passed when
-            # the same query was repeated after the worker caught up.
-            update_embeddings(page_ids=changed_pages, strict=True)
-        except Exception as exc:
-            _safe_log(f"ingest | semantic index enqueue failed: {exc}")
-        try:
-            from chronovisor.recall.claims import append_page_claims
-
-            append_page_claims(
-                changed_pages,
-                source_raw=source_raw or "",
-                op="ingest",
-            )
-        except Exception as exc:
-            _safe_log(f"ingest | claim ledger failed (non-fatal): {exc}")
-        try:
-            from chronovisor.ops.state_register import refresh_state_register
-
-            refresh_state_register(changed_pages, source_raw=source_raw or "")
-        except Exception as exc:
-            _safe_log(f"ingest | state register refresh failed (non-fatal): {exc}")
-    return _verify_changed_pages_read_back(changed_pages)
+    return implementation(changed_pages, source_raw=source_raw)
 
 
 def _complete_pretriage_terminal_recovery(

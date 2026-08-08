@@ -60,3 +60,24 @@ def test_artifact_paths_resolve_patched_pages_dir_at_call_time(
     assert proposal.parent == expected_root
     assert review.parent == expected_root
     assert str(proposal).startswith(str(tmp_path))
+
+
+def test_read_back_log_paths_resolve_patched_pages_dir_at_call_time(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from chronovisor.ingest import ingest
+
+    first_pages = tmp_path / "first" / "pages"
+    monkeypatch.setattr(ingest, "PAGES_DIR", first_pages)
+    assert ingest._read_back_failure_log() == (
+        tmp_path / "first" / "runtime" / "ingest-read-back-failures.jsonl"
+    )
+    assert ingest._read_back_run_log() == (
+        tmp_path / "first" / "runtime" / "ingest-read-back-runs.jsonl"
+    )
+
+    second_pages = tmp_path / "second" / "pages"
+    monkeypatch.setattr(ingest, "PAGES_DIR", second_pages)
+    assert ingest._read_back_failure_log().parent == tmp_path / "second" / "runtime"
+    assert ingest._read_back_run_log().parent == tmp_path / "second" / "runtime"

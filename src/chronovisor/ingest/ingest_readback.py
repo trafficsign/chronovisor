@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import time
+from pathlib import Path
 from typing import Any
 
 
@@ -20,10 +21,33 @@ def _runtime_call(name: str):
     return call
 
 
-_read_back_failure_log = _runtime_call("_read_back_failure_log")
-_read_back_query = _runtime_call("_read_back_query")
-_read_back_run_log = _runtime_call("_read_back_run_log")
+_runtime_read_back_failure_log = _runtime_call("_read_back_failure_log")
+_runtime_read_back_query = _runtime_call("_read_back_query")
+_runtime_read_back_run_log = _runtime_call("_read_back_run_log")
 _safe_log = _runtime_call("_safe_log")
+
+
+def _read_back_failure_log() -> Path:
+    return _runtime().PAGES_DIR.parent / "runtime" / "ingest-read-back-failures.jsonl"
+
+
+def _read_back_run_log() -> Path:
+    return _runtime().PAGES_DIR.parent / "runtime" / "ingest-read-back-runs.jsonl"
+
+
+def _read_back_query(meta: dict, page_id: str) -> str:
+    questions = meta.get("recall_questions")
+    if isinstance(questions, list):
+        for question in questions:
+            if isinstance(question, str) and question.strip():
+                return question.strip()
+    summary = meta.get("summary")
+    if isinstance(summary, str) and summary.strip():
+        return summary.strip()
+    title = meta.get("title")
+    if isinstance(title, str) and title.strip():
+        return title.strip()
+    return page_id
 
 
 def verify_changed_pages_read_back(page_ids: list[str], *, top_n: int = 10) -> dict:
@@ -47,7 +71,7 @@ def verify_changed_pages_read_back(page_ids: list[str], *, top_n: int = 10) -> d
         if meta is None:
             failed.append({"page_id": page_id, "reason": "missing-meta"})
             continue
-        query = _read_back_query(meta, page_id)
+        query = _runtime_read_back_query(meta, page_id)
         if not query:
             failed.append({"page_id": page_id, "reason": "empty-query"})
             continue
@@ -89,7 +113,7 @@ def verify_changed_pages_read_back(page_ids: list[str], *, top_n: int = 10) -> d
         "failed": failed,
     }
     try:
-        run_path = _read_back_run_log()
+        run_path = _runtime_read_back_run_log()
         run_path.parent.mkdir(parents=True, exist_ok=True)
         with run_path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
@@ -97,7 +121,7 @@ def verify_changed_pages_read_back(page_ids: list[str], *, top_n: int = 10) -> d
         pass
     if failed:
         try:
-            log_path = _read_back_failure_log()
+            log_path = _runtime_read_back_failure_log()
             log_path.parent.mkdir(parents=True, exist_ok=True)
             with log_path.open("a", encoding="utf-8") as f:
                 f.write(json.dumps(record, ensure_ascii=False) + "\n")
@@ -112,3 +136,55 @@ def verify_changed_pages_read_back(page_ids: list[str], *, top_n: int = 10) -> d
         _safe_log(f"ingest | read-back: {checked} checked ok")
 
     return {"checked": checked, "passed": passed, "failed": failed}
+
+
+def _refresh_ingest_derived_artifacts(
+    changed_pages: list[str],
+    *,
+    source_raw: str | None,
+) -> dict[str, Any]:
+    """Refresh rebuildable indexes and return the normal read-back result."""
+
+    runtime = _runtime()
+    try:
+        runtime._rebuild_index()
+    except Exception as exc:
+        runtime._safe_log(f"ingest | index.md rebuild failed (non-fatal): {exc}")
+
+    try:
+        from chronovisor.search.index_store import get_store
+
+        get_store().refresh()
+    except Exception as exc:
+        runtime._safe_log(f"ingest | index_store refresh failed: {exc}")
+
+    if changed_pages:
+        try:
+            from chronovisor.search.search import update_embeddings
+
+            # Read-back is a correctness gate, so publication of the delta
+            # index must complete before retrieval is evaluated. The previous
+            # fire-and-forget enqueue produced false misses that passed when
+            # the same query was repeated after the worker caught up.
+            update_embeddings(page_ids=changed_pages, strict=True)
+        except Exception as exc:
+            runtime._safe_log(f"ingest | semantic index enqueue failed: {exc}")
+        try:
+            from chronovisor.recall.claims import append_page_claims
+
+            append_page_claims(
+                changed_pages,
+                source_raw=source_raw or "",
+                op="ingest",
+            )
+        except Exception as exc:
+            runtime._safe_log(f"ingest | claim ledger failed (non-fatal): {exc}")
+        try:
+            from chronovisor.ops.state_register import refresh_state_register
+
+            refresh_state_register(changed_pages, source_raw=source_raw or "")
+        except Exception as exc:
+            runtime._safe_log(
+                f"ingest | state register refresh failed (non-fatal): {exc}"
+            )
+    return runtime._verify_changed_pages_read_back(changed_pages)

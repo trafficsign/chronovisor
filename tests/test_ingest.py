@@ -9654,6 +9654,41 @@ class TestReadBackVerification:
 
         assert result == {"checked": 1, "passed": 1, "failed": []}
 
+    def test_verify_resolves_query_and_log_paths_through_ingest_facade(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from chronovisor.ingest import ingest
+        from chronovisor.search import index_store, search
+
+        queries: list[tuple[dict, str]] = []
+        run_log = isolated_wiki / "runtime" / "patched-runs.jsonl"
+        failure_log = isolated_wiki / "runtime" / "patched-failures.jsonl"
+
+        class Store:
+            def refresh(self) -> None:
+                pass
+
+            def meta(self, page_id: str) -> dict:
+                return {"page_id": page_id, "title": "ignored"}
+
+        def query(meta: dict, page_id: str) -> str:
+            queries.append((meta, page_id))
+            return "patched query"
+
+        monkeypatch.setattr(index_store, "get_store", lambda: Store())
+        monkeypatch.setattr(search, "search", lambda *_a, **_k: ([], "hybrid"))
+        monkeypatch.setattr(ingest, "_read_back_query", query)
+        monkeypatch.setattr(ingest, "_read_back_run_log", lambda: run_log)
+        monkeypatch.setattr(ingest, "_read_back_failure_log", lambda: failure_log)
+        monkeypatch.setattr(ingest, "_safe_log", lambda *_a, **_k: None)
+
+        result = ingest._verify_changed_pages_read_back(["p"])
+
+        assert queries == [({"page_id": "p", "title": "ignored"}, "p")]
+        assert result["failed"][0]["query"] == "patched query"
+        assert run_log.exists()
+        assert failure_log.exists()
+
     def test_refresh_waits_for_semantic_delta_before_read_back(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -9679,11 +9714,19 @@ class TestReadBackVerification:
         monkeypatch.setattr(ingest, "_rebuild_index", lambda: events.append("index"))
         monkeypatch.setattr(index_store, "get_store", lambda: Store())
         monkeypatch.setattr(search, "update_embeddings", update_embeddings)
-        monkeypatch.setattr(claims, "append_page_claims", lambda *_a, **_k: None)
+        monkeypatch.setattr(
+            claims,
+            "append_page_claims",
+            lambda page_ids, **kwargs: events.append(
+                ("claims", list(page_ids), kwargs["source_raw"], kwargs["op"])
+            ),
+        )
         monkeypatch.setattr(
             state_register,
             "refresh_state_register",
-            lambda *_a, **_k: None,
+            lambda page_ids, **kwargs: events.append(
+                ("state", list(page_ids), kwargs["source_raw"])
+            ),
         )
         monkeypatch.setattr(ingest, "_verify_changed_pages_read_back", read_back)
 
@@ -9693,9 +9736,61 @@ class TestReadBackVerification:
         )
 
         assert result == {"checked": 1, "passed": 1, "failed": []}
-        assert events.index(("semantic-index", ["p"], True)) < events.index(
-            ("read-back", ["p"], 10)
+        assert events == [
+            "index",
+            "store-refresh",
+            ("semantic-index", ["p"], True),
+            ("claims", ["p"], "raw.md", "ingest"),
+            ("state", ["p"], "raw.md"),
+            ("read-back", ["p"], 10),
+        ]
+
+    def test_refresh_failures_are_logged_and_nonfatal(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from chronovisor.ingest import ingest
+        from chronovisor.ops import state_register
+        from chronovisor.recall import claims
+        from chronovisor.search import index_store, search
+
+        events: list[str] = []
+        logs: list[str] = []
+
+        def fail(stage: str) -> None:
+            events.append(stage)
+            raise RuntimeError(stage)
+
+        class Store:
+            def refresh(self) -> None:
+                fail("store")
+
+        def read_back(page_ids, *, top_n=10):
+            events.append("read-back")
+            return {"checked": len(page_ids), "passed": len(page_ids), "failed": []}
+
+        monkeypatch.setattr(ingest, "_rebuild_index", lambda: fail("index"))
+        monkeypatch.setattr(index_store, "get_store", lambda: Store())
+        monkeypatch.setattr(search, "update_embeddings", lambda **_kwargs: fail("semantic"))
+        monkeypatch.setattr(claims, "append_page_claims", lambda *_a, **_k: fail("claims"))
+        monkeypatch.setattr(
+            state_register,
+            "refresh_state_register",
+            lambda *_a, **_k: fail("state"),
         )
+        monkeypatch.setattr(ingest, "_safe_log", logs.append)
+        monkeypatch.setattr(ingest, "_verify_changed_pages_read_back", read_back)
+
+        result = ingest._refresh_ingest_derived_artifacts(["p"], source_raw="raw.md")
+
+        assert result == {"checked": 1, "passed": 1, "failed": []}
+        assert events == ["index", "store", "semantic", "claims", "state", "read-back"]
+        assert logs == [
+            "ingest | index.md rebuild failed (non-fatal): index",
+            "ingest | index_store refresh failed: store",
+            "ingest | semantic index enqueue failed: semantic",
+            "ingest | claim ledger failed (non-fatal): claims",
+            "ingest | state register refresh failed (non-fatal): state",
+        ]
 
 
 # ---------------------------------------------------------------------------
