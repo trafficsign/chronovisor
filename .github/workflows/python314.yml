@@ -1,0 +1,64 @@
+name: Python 3.14 compatibility
+
+on:
+  pull_request:
+  push:
+
+permissions:
+  contents: read
+
+jobs:
+  cpython-314-gil:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      CHRONOVISOR_ROOT: ${{ runner.temp }}/chronovisor-python314-test-root
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          python-version: "3.14"
+      - run: uv sync --frozen
+      - name: Assert standard CPython 3.14 GIL runtime
+        run: |
+          uv run --frozen python - <<'PY'
+          import sys
+          import sysconfig
+
+          assert sys.version_info[:2] == (3, 14), sys.version
+          assert sys._is_gil_enabled() == True
+          assert sysconfig.get_config_var("Py_GIL_DISABLED") in (0, None)
+
+          import httpx  # noqa: F401
+          import mcp  # noqa: F401
+          import numpy  # noqa: F401
+          import zstandard  # noqa: F401
+          PY
+      - run: uv run --frozen python -m compileall -q src scripts
+      - run: uv run --frozen ruff check --no-cache src scripts tests
+      - run: uv run --frozen mypy
+      - run: uv run --frozen lint-imports --no-cache
+      - name: Architecture and runtime-analysis contracts
+        run: |
+          uv run --frozen python scripts/architecture_baseline.py \
+            --check docs/refactoring/architecture-baseline.json
+          uv run --frozen pytest -q \
+            tests/test_architecture_baseline.py \
+            tests/test_runtime_state_manifests.py \
+            tests/test_runtime_state_machine_facts.py \
+            tests/test_runtime_access_watchdog.py
+      - name: Isolated full test suite
+        run: >-
+          uv run --frozen pytest -q
+          --junitxml=${{ runner.temp }}/chronovisor-python314-junit.xml
+      - name: Upload Python 3.14 pytest JUnit
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: chronovisor-python314-pytest-junit
+          path: ${{ runner.temp }}/chronovisor-python314-junit.xml
+          if-no-files-found: warn
