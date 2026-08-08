@@ -326,6 +326,14 @@ S_RETIRED_TAG_REPAIR_SITE_IDS = (
     "arch:49c462b10b2c029051d342395e6d7db683ac39762bdb9de50cc0220795c6411b",
     "arch:77f73d1142097fe49dbbdaa1e28e5fb24073201787975d0f1ce0f8c672e69803",
 )
+V_RETIRED_RECALL_SHIM_SITE_IDS = (
+    "arch:3896d20fb9ddf2c56d06af026b9b40d6399902891ab291f3a6eba063ba8b4d28",
+    "arch:c99c20705c2ffb63854eb252145ab9e7f20ea9b0adb7eef8892e39abb52ceb1c",
+)
+V_RETIRED_RECALL_SHIM_COMPATIBILITY_IDS = (
+    "compat:3efe700f80c082597d4af026983c1fadd79d4c0cbbbd1109f23a96251691daa7",
+    "compat:4bac6807f206d6657db39ba60a869a4ecbacf65c6cd2af1df9deb3c4b2163c51",
+)
 RETIREMENT_HISTORY = {
     "exception_semantic_ids": tuple(
         sorted(
@@ -367,6 +375,7 @@ RETIREMENT_HISTORY = {
                 *S_RETIRED_COFIRE_SITE_IDS,
                 *S_RETIRED_NEGATIVE_FEEDBACK_SITE_IDS,
                 *S_RETIRED_TAG_REPAIR_SITE_IDS,
+                *V_RETIRED_RECALL_SHIM_SITE_IDS,
             )
         )
     ),
@@ -396,7 +405,9 @@ RETIREMENT_HISTORY = {
     "production_to_lab_dynamic_site_semantic_ids": (
         P4A_RETIRED_OPS_LAB_DYNAMIC_SITE_ID,
     ),
-    "compatibility_semantic_ids": (),
+    "compatibility_semantic_ids": tuple(
+        sorted(V_RETIRED_RECALL_SHIM_COMPATIBILITY_IDS)
+    ),
 }
 
 DiagnosticPath = tuple[str | int, ...]
@@ -677,6 +688,12 @@ def _without_persisted_retirement_history(
     )
     active_counts["production_to_lab_dynamic_sites"] += len(
         RETIREMENT_HISTORY["production_to_lab_dynamic_site_semantic_ids"]
+    )
+    active_counts["compatibility_contracts"] += len(
+        RETIREMENT_HISTORY["compatibility_semantic_ids"]
+    )
+    active_counts["compatibility_by_kind"]["module_string"] += len(
+        RETIREMENT_HISTORY["compatibility_semantic_ids"]
     )
     return normalized
 
@@ -1071,7 +1088,7 @@ def test_current_exception_ledger_seed_and_schema_inventory_are_exact(
     assert detected_ids == ledger_ids == set(seed["exception_semantic_ids"]["active"])
     _assert_exact_retirement_history(architecture, seed)
     assert len(edge_rows) == current["worktree_architecture"]["edge_count"] == 90
-    assert sum(len(row["sites"]) for row in edge_rows) == len(raw_cross_sites) == 1260
+    assert sum(len(row["sites"]) for row in edge_rows) == len(raw_cross_sites) == 1258
     assert {
         field: counts[field]
         for field in (
@@ -1084,11 +1101,11 @@ def test_current_exception_ledger_seed_and_schema_inventory_are_exact(
         )
     } == {
         "exceptions": 90,
-        "cross_domain_sites": 1260,
+        "cross_domain_sites": 1258,
         "production_to_lab_edges": 0,
         "production_to_lab_static_sites": 0,
         "production_to_lab_dynamic_sites": 0,
-        "compatibility_contracts": 289,
+        "compatibility_contracts": 287,
     }
     assert counts["by_category"] == {
         "cross_domain_edge": 90,
@@ -1096,7 +1113,7 @@ def test_current_exception_ledger_seed_and_schema_inventory_are_exact(
     assert counts["compatibility_by_kind"] == {
         "console_entrypoint": 51,
         "lab_dispatch": 15,
-        "module_string": 223,
+        "module_string": 221,
     }
     assert counts["schema_manifest_implementation"] == {
         "background_decision_schemas": {"statements": 0, "symbols": 0},
