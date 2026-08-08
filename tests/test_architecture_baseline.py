@@ -310,6 +310,18 @@ S_RETIRED_COFIRE_SITE_IDS = (
     "arch:cf52eb3049cfb070fc264c5969319c27722614ffef0dd578dd62df7c26588c2c",
     "arch:d33cbdf98f18c36dd59ac0134a2245fdd9018939e204f36728d637eca9225ca1",
 )
+S_RETIRED_NEGATIVE_FEEDBACK_SITE_IDS = (
+    "arch:1a19a5319fb73c28bf811298e1a4345ac1a146e135c2faf40795439c4e0a40a1",
+    "arch:21c2972ad6636e5d36784d5bcc9088d5d18481c3437f9bf9dad0bf2c5a376743",
+    "arch:2e9b0c80f2f7e1cb28110af7e3cee5b54450c8097479befc13e42a6bfb349516",
+    "arch:70911008b6d8c41db6598bc051bb1202ff6993ffda46c82ffe3949b9d9ef956e",
+    "arch:7663a22bfe26f9777b9b42f2fdc929c36b2d64393601662046c4afada429e993",
+    "arch:93c0f9869e4a44ae8f282edb4fc1db293ee0a1ec8ac5dea001713a6ce4331948",
+    "arch:ae8419d0982a723ccd0521e3599333c934d752398e627272e56a694d97414019",
+    "arch:b0eeaf11c8025f47c7a600e9fd20cddb08737a114af616137d3b54318d1c0bc9",
+    "arch:bc92a5366183fec3c55cc884ba0f8b5525fe546dff6d5c9715c84775a72730ee",
+    "arch:bf39769e496c6ba998bf202dd93586ce2a2e06e31810513416c7d0b815fa8770",
+)
 RETIREMENT_HISTORY = {
     "exception_semantic_ids": tuple(
         sorted(
@@ -349,6 +361,7 @@ RETIREMENT_HISTORY = {
                 *R4_RETIRED_ROUTINE_REVIEW_SITE_IDS,
                 *S_RETIRED_PREFETCH_SITE_IDS,
                 *S_RETIRED_COFIRE_SITE_IDS,
+                *S_RETIRED_NEGATIVE_FEEDBACK_SITE_IDS,
             )
         )
     ),
@@ -1053,7 +1066,7 @@ def test_current_exception_ledger_seed_and_schema_inventory_are_exact(
     assert detected_ids == ledger_ids == set(seed["exception_semantic_ids"]["active"])
     _assert_exact_retirement_history(architecture, seed)
     assert len(edge_rows) == current["worktree_architecture"]["edge_count"] == 90
-    assert sum(len(row["sites"]) for row in edge_rows) == len(raw_cross_sites) == 1254
+    assert sum(len(row["sites"]) for row in edge_rows) == len(raw_cross_sites) == 1259
     assert {
         field: counts[field]
         for field in (
@@ -1066,7 +1079,7 @@ def test_current_exception_ledger_seed_and_schema_inventory_are_exact(
         )
     } == {
         "exceptions": 90,
-        "cross_domain_sites": 1254,
+        "cross_domain_sites": 1259,
         "production_to_lab_edges": 0,
         "production_to_lab_static_sites": 0,
         "production_to_lab_dynamic_sites": 0,
