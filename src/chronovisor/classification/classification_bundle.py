@@ -14,7 +14,7 @@ from chronovisor.core.durable_state import (
     write_sealed_json,
 )
 from chronovisor.core.timeutil import utc_iso_milliseconds as _now
-from chronovisor.lab.classification_fixture_set import (
+from chronovisor.classification.classification_fixture_contract import (
     DISABLED_BASELINE_SCHEMA,
     sha256_bytes,
     sha256_file,
