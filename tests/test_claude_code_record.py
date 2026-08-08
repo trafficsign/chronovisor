@@ -12,6 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from chronovisor.core.store import RuntimeContext
 from chronovisor.hosts import claude_code_record
 from chronovisor.raw.raw_semantic_projection import project_parent_raw
 from chronovisor.raw.save_transaction import make_save_transaction
@@ -598,6 +599,101 @@ def test_v2_save_accepts_one_oversized_native_record(
     assert result["after_line"] == 0
     assert result["scanned_until_line"] == 1
     assert json.loads(state.read_text())["files"][str(session)]["last_saved_line"] == 1
+
+
+@pytest.mark.parametrize(
+    "max_chars",
+    [claude_code_record.DEFAULT_MAX_CHARS, 128],
+    ids=["normal", "multi-chunk"],
+)
+def test_runtime_context_keeps_v2_stop_capture_under_supplied_root(
+    tmp_path: Path, monkeypatch, max_chars: int
+) -> None:
+    session = tmp_path / "session.jsonl"
+    runtime = RuntimeContext(tmp_path / "runtime-context")
+    forbidden_default = tmp_path / "global-default"
+    sample_session(session)
+    monkeypatch.setenv("CHRONOVISOR_RAW_LAYOUT", "v2")
+    monkeypatch.setattr(claude_code_record, "RAW_DIR", forbidden_default / "raw")
+    monkeypatch.setattr(
+        claude_code_record,
+        "DEFAULT_STATE_FILE",
+        forbidden_default / "claude-code-save-state.json",
+    )
+    args = args_for(session, claude_code_record.DEFAULT_STATE_FILE, ignore_state=True)
+    args.state_file = None
+    args.max_chars = max_chars
+
+    result = claude_code_record.run(args, context=runtime)
+    save_results = result.get("save_results", [result["save_result"]])
+
+    assert result["status"] == "saved"
+    if max_chars == claude_code_record.DEFAULT_MAX_CHARS:
+        assert result["chunk_count"] == 1
+    else:
+        assert result["chunk_count"] > 1
+    assert result["scanned_until_line"] == 8
+    assert all(
+        Path(save_result["path"]).is_relative_to(runtime.raw_dir)
+        for save_result in save_results
+    )
+    assert json.loads(runtime.claude_code_state_file.read_text())["files"][str(session)][
+        "last_saved_line"
+    ] == 8
+    assert runtime.pages_dir.is_dir()
+    assert runtime.system_dir.is_dir()
+    assert not forbidden_default.exists()
+
+
+def test_explicit_default_state_file_remains_an_override(tmp_path: Path) -> None:
+    parser = claude_code_record.build_parser()
+    runtime = RuntimeContext(tmp_path / "runtime-context")
+
+    assert parser.parse_args([]).state_file is None
+    explicit = parser.parse_args(
+        ["--state-file", str(claude_code_record.DEFAULT_STATE_FILE)]
+    )
+    assert claude_code_record._resolve_state_file(explicit, context=runtime) == (
+        claude_code_record.DEFAULT_STATE_FILE
+    )
+
+
+def test_runtime_context_rejects_legacy_layout_before_global_publish(
+    tmp_path: Path, monkeypatch
+) -> None:
+    session = tmp_path / "session.jsonl"
+    runtime = RuntimeContext(tmp_path / "runtime-context")
+    forbidden_default = tmp_path / "global-default"
+    sample_session(session)
+    runtime.root.mkdir()
+    runtime.config_file.write_text(
+        '[decision_policies]\nraw_capture = "enabled"\n[raw]\nlayout = "legacy"\n'
+    )
+    monkeypatch.delenv("CHRONOVISOR_RAW_LAYOUT", raising=False)
+    monkeypatch.delenv("CHRONOVISOR_DECISION_POLICY_RAW_CAPTURE", raising=False)
+    monkeypatch.setattr(claude_code_record, "RAW_DIR", forbidden_default / "raw")
+    monkeypatch.setattr(
+        claude_code_record,
+        "DEFAULT_STATE_FILE",
+        forbidden_default / "claude-code-save-state.json",
+    )
+    calls: list[None] = []
+
+    def fail_global_publish(*_args, **_kwargs):
+        calls.append(None)
+        pytest.fail("RuntimeContext must not call the global legacy writer")
+
+    monkeypatch.setattr(claude_code_record, "save_raw", fail_global_publish)
+    args = args_for(session, claude_code_record.DEFAULT_STATE_FILE, ignore_state=True)
+    args.state_file = None
+
+    with pytest.raises(
+        claude_code_record.ClaudeCodeSaveError, match="RuntimeContext.*v2"
+    ):
+        claude_code_record.run(args, context=runtime)
+
+    assert calls == []
+    assert not forbidden_default.exists()
 
 
 def test_one_stop_drains_every_bounded_transcript_chunk(

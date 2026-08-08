@@ -37,6 +37,7 @@ def test_runtime_context_derives_paths_and_preserves_default_aliases(
     assert context.system_dir == tmp_path / "system"
     assert context.config_file == tmp_path / "config.toml"
     assert context.codex_state_file == tmp_path / "codex-save-state.json"
+    assert context.claude_code_state_file == tmp_path / "claude-code-save-state.json"
     assert context.model_lab_replay_file == (
         tmp_path / "runtime" / "model-lab" / "replay.jsonl"
     )

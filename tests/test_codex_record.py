@@ -600,6 +600,42 @@ def test_explicit_default_state_file_remains_an_override(tmp_path: Path) -> None
     )
 
 
+def test_runtime_context_rejects_legacy_layout_before_global_publish(
+    tmp_path: Path, monkeypatch
+) -> None:
+    session = tmp_path / "session.jsonl"
+    runtime = RuntimeContext(tmp_path / "runtime-context")
+    forbidden_default = tmp_path / "global-default"
+    sample_session(session)
+    runtime.root.mkdir()
+    runtime.config_file.write_text(
+        '[decision_policies]\nraw_capture = "enabled"\n[raw]\nlayout = "legacy"\n'
+    )
+    monkeypatch.delenv("CHRONOVISOR_RAW_LAYOUT", raising=False)
+    monkeypatch.delenv("CHRONOVISOR_DECISION_POLICY_RAW_CAPTURE", raising=False)
+    monkeypatch.setattr(codex_record, "RAW_DIR", forbidden_default / "raw")
+    monkeypatch.setattr(
+        codex_record,
+        "DEFAULT_STATE_FILE",
+        forbidden_default / "codex-save-state.json",
+    )
+    calls: list[None] = []
+
+    def fail_global_publish(*_args, **_kwargs):
+        calls.append(None)
+        pytest.fail("RuntimeContext must not call the global legacy writer")
+
+    monkeypatch.setattr(codex_record, "save_raw", fail_global_publish)
+    args = args_for(session, codex_record.DEFAULT_STATE_FILE, ignore_state=True)
+    args.state_file = None
+
+    with pytest.raises(codex_record.CodexSaveError, match="RuntimeContext.*v2"):
+        codex_record.run(args, context=runtime)
+
+    assert calls == []
+    assert not forbidden_default.exists()
+
+
 def test_shadow_save_compares_legacy_records_with_native_source(
     tmp_path: Path, monkeypatch
 ) -> None:

@@ -1048,6 +1048,8 @@ def _run_save_transaction(
     if args.max_chars < 1:
         raise CodexSaveError("max_chars must be a positive byte limit")
     layout = raw_layout_mode(chronovisor_root=raw_dir.parent)
+    if context is not None and layout != "v2":
+        raise CodexSaveError("RuntimeContext capture requires raw layout v2")
     if (
         layout != "v2"
         and len(_serialized_records_bytes([transcript_slice.records[0]]))
