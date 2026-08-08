@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 import ast
+import builtins
+import contextvars
 import json
 import random
-from collections import Counter
+import sys
+import threading
+from collections import Counter, deque
 from collections.abc import Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -14,11 +19,18 @@ from scripts.runtime_ownership import access_model
 from scripts.runtime_ownership.access import discover_access_facts
 from scripts.runtime_ownership.access_facts import AccessFactCollector
 from scripts.runtime_ownership.access_model import (
+    _MAX_FLOW_REPR_CACHE_BYTES,
+    _MAX_FLOW_REPR_CACHE_ENTRIES,
+    _MAX_FLOW_REPR_CACHE_WITNESSES,
     MAX_FLOW_VARIANTS,
     FlowValue,
     SyntaxSite,
+    _current_flow_repr_cache,
+    _flow_key_repr,
     _flow_value_key,
+    _FlowReprCache,
     _normalize_flow_variants,
+    _scoped_flow_repr_cache,
     _without_variants,
     candidate_flow_variants,
     exclusive_flow_join,
@@ -89,6 +101,44 @@ def _reference_exclusive_flow_join(
             }
         )
     return result
+
+
+def _normalized_key_result(
+    values: Sequence[FlowValue],
+) -> tuple[tuple[tuple[Any, ...], ...], bool]:
+    normalized, overflowed = _normalize_flow_variants(values)
+    return tuple(map(_flow_value_key, normalized)), overflowed
+
+
+def _recursive_retained_size(value: object, seen: set[int]) -> int:
+    identity = id(value)
+    if identity in seen:
+        return 0
+    seen.add(identity)
+    retained = sys.getsizeof(value)
+    if isinstance(value, dict):
+        return retained + sum(
+            _recursive_retained_size(key, seen)
+            + _recursive_retained_size(item, seen)
+            for key, item in value.items()
+        )
+    if isinstance(value, (list, tuple, deque, set, frozenset)):
+        return retained + sum(
+            _recursive_retained_size(item, seen) for item in value
+        )
+    namespace = getattr(value, "__dict__", None)
+    if isinstance(namespace, dict):
+        retained += _recursive_retained_size(namespace, seen)
+    return retained
+
+
+def _flow_key(token: str) -> tuple[Any, ...]:
+    return _flow_value_key(
+        FlowValue(
+            origins={RESOURCE_ID: frozenset({(token,)})},
+            object_types={f"object:{token}"},
+        )
+    )
 
 
 def _random_flow_value(
@@ -349,6 +399,513 @@ def test_nested_variants_do_not_split_canonical_duplicate(
     assert normalized == (expected,)
     assert stripped_ids == [id(first)]
     assert overflowed is False
+
+
+def test_flow_repr_cache_is_exact_for_random_reverse_and_overflow_cases() -> None:
+    generator = random.Random(0xCACE)
+    cases: list[list[FlowValue]] = []
+    for _ in range(48):
+        values = [
+            _random_flow_value(generator)
+            for _ in range(generator.randrange(2, 24))
+        ]
+        cases.extend((values, list(reversed(values))))
+    cases.append(
+        [
+            FlowValue(
+                origins={RESOURCE_ID: frozenset({(f"overflow:{index}",)})}
+            )
+            for index in range(MAX_FLOW_VARIANTS + 11)
+        ]
+    )
+
+    for values in cases:
+        uncached = _normalized_key_result(values)
+        with _scoped_flow_repr_cache() as cache:
+            cached = _normalized_key_result(values)
+            cached_again = _normalized_key_result(values)
+            cached_third = _normalized_key_result(values)
+            stats = cache.stats()
+        assert repr(cached).encode() == repr(uncached).encode()
+        assert repr(cached_again).encode() == repr(uncached).encode()
+        assert repr(cached_third).encode() == repr(uncached).encode()
+        assert stats.peak_entries <= _MAX_FLOW_REPR_CACHE_ENTRIES
+        assert stats.peak_witnesses <= _MAX_FLOW_REPR_CACHE_WITNESSES
+        assert stats.peak_bytes <= _MAX_FLOW_REPR_CACHE_BYTES
+
+
+def test_flow_repr_cache_fastpaths_never_consult_cache() -> None:
+    originless = FlowValue(object_types={"originless"})
+    single = FlowValue(origins={RESOURCE_ID: frozenset({("single",)})})
+    duplicate = single.copy()
+    duplicate.variants = (FlowValue(object_types={"ignored"}),)
+
+    with _scoped_flow_repr_cache() as cache:
+        assert _normalize_flow_variants(()) == ((), False)
+        assert _normalize_flow_variants((originless,)) == ((), False)
+        assert _normalize_flow_variants((single,)) == (
+            (_without_variants(single),),
+            False,
+        )
+        assert _normalize_flow_variants((single, duplicate)) == (
+            (_without_variants(single),),
+            False,
+        )
+        stats = cache.stats()
+
+    assert stats.hits == stats.misses == stats.admissions == 0
+    assert stats.current_entries == stats.current_witnesses == 0
+
+
+def test_flow_repr_cache_retains_immutable_snapshot_not_mutable_flow_graph() -> None:
+    value = FlowValue(
+        origins={RESOURCE_ID: frozenset({("before",)})},
+        object_types={"before"},
+        structured_items=(FlowValue(object_types={"nested-before"}),),
+    )
+    original_key = _flow_value_key(value)
+    with _scoped_flow_repr_cache() as cache:
+        assert _flow_key_repr(original_key) == repr(original_key)
+        assert _flow_key_repr(original_key) == repr(original_key)
+        assert _flow_key_repr(original_key) == repr(original_key)
+        _mutate_mutable_flow_graph(value)
+        mutated_key = _flow_value_key(value)
+        assert mutated_key != original_key
+        assert _flow_key_repr(mutated_key) == repr(mutated_key)
+        stats = cache.stats()
+        retained_keys = [entry[1] for entry in cache._fifo]
+
+    assert stats.hits == 1
+    assert stats.misses == 3
+    assert retained_keys == [original_key]
+    assert all(
+        not isinstance(item, FlowValue)
+        for key in retained_keys
+        for item in key
+    )
+
+
+def test_flow_repr_cache_evicts_witnesses_and_entries_then_relearns_phase() -> None:
+    def values(prefix: str) -> tuple[FlowValue, ...]:
+        return tuple(
+            FlowValue(
+                origins={RESOURCE_ID: frozenset({(f"{prefix}:{index}",)})}
+            )
+            for index in range(4)
+        )
+
+    phase_a = values("phase-a")
+    phase_b = values("phase-b")
+    with _scoped_flow_repr_cache(
+        max_entries=4,
+        max_witnesses=4,
+        max_bytes=1_000_000,
+    ) as cache:
+        expected_a = _normalized_key_result(phase_a)
+        assert _normalized_key_result(phase_a) == expected_a
+        assert _normalized_key_result(phase_a) == expected_a
+        for index in range(12):
+            churn = values(f"churn:{index}")
+            expected_churn, expected_overflow = (
+                _reference_normalize_flow_variants(churn)
+            )
+            assert _normalized_key_result(churn) == (
+                tuple(map(_flow_value_key, expected_churn)),
+                expected_overflow,
+            )
+        before_b = cache.stats()
+        expected_b = _normalized_key_result(phase_b)
+        after_first = cache.stats()
+        assert _normalized_key_result(phase_b) == expected_b
+        after_second = cache.stats()
+        assert _normalized_key_result(phase_b) == expected_b
+        after_third = cache.stats()
+
+    assert after_first.misses - before_b.misses == 4
+    assert after_second.misses - after_first.misses == 4
+    assert after_third.hits - after_second.hits == 4
+    assert after_second.entry_evictions - before_b.entry_evictions == 4
+    assert after_third.witness_evictions > 0
+    assert after_third.current_entries == 4
+    assert after_third.current_witnesses == 0
+
+
+def test_flow_repr_cache_unique_stream_retains_only_bounded_witnesses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        access_model,
+        "hash",
+        lambda key: key[0],
+        raising=False,
+    )
+    with _scoped_flow_repr_cache() as cache:
+        for index in range(10_000):
+            key = (index,)
+            assert _flow_key_repr(key) == repr(key)
+        stats = cache.stats()
+
+    assert stats.hits == 0
+    assert stats.misses == 10_000
+    assert stats.admissions == 0
+    assert stats.current_entries == 0
+    assert stats.current_witnesses == _MAX_FLOW_REPR_CACHE_WITNESSES
+    assert (
+        stats.witness_evictions
+        == 10_000 - _MAX_FLOW_REPR_CACHE_WITNESSES
+    )
+    assert stats.peak_bytes <= _MAX_FLOW_REPR_CACHE_BYTES
+
+
+def test_flow_repr_cache_constant_hash_collision_is_exact_and_linearly_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(access_model, "hash", lambda _key: 7, raising=False)
+    keys = [_flow_key(f"collision:{index}") for index in range(65)]
+    with _scoped_flow_repr_cache() as cache:
+        for key in keys[:64]:
+            assert _flow_key_repr(key) == builtins.repr(key)
+            assert _flow_key_repr(key) == builtins.repr(key)
+        bucket = cache._buckets[7]
+        assert len(bucket) == 64
+        assert all(
+            entry[1] == key
+            for entry, key in zip(bucket, keys[:64], strict=True)
+        )
+        hits_before = cache.stats().hits
+        for key in keys[:64]:
+            assert _flow_key_repr(key) == builtins.repr(key)
+        assert cache.stats().hits - hits_before == 64
+        assert _flow_key_repr(keys[64]) == builtins.repr(keys[64])
+        assert _flow_key_repr(keys[64]) == builtins.repr(keys[64])
+        stats = cache.stats()
+        bucket_after = list(cache._buckets[7])
+
+    assert len(bucket_after) == 64
+    assert [entry[1] for entry in bucket_after] == keys[1:]
+    assert stats.entry_evictions == 1
+    assert stats.peak_entries == 64
+
+
+@pytest.mark.parametrize(
+    "token",
+    [
+        "ascii:" + "x" * 10_000,
+        "cjk:" + "漢字" * 5_000,
+        "emoji:" + "🙂" * 5_000,
+    ],
+)
+def test_flow_repr_cache_accounting_bounds_entire_retained_graph(
+    token: str,
+) -> None:
+    key = _flow_key(token)
+    with _scoped_flow_repr_cache() as cache:
+        assert _current_flow_repr_cache() is cache
+        for _ in range(3):
+            assert _flow_key_repr(key) == repr(key)
+        stats = cache.stats()
+        actual_graph_bytes = _recursive_retained_size(
+            (cache, _current_flow_repr_cache()), set()
+        )
+
+    assert actual_graph_bytes <= stats.current_bytes
+    assert stats.current_bytes <= _MAX_FLOW_REPR_CACHE_BYTES
+    assert stats.peak_bytes <= _MAX_FLOW_REPR_CACHE_BYTES
+    assert cache.stats().current_bytes == 0
+
+
+def test_flow_repr_cache_rejects_tiny_cap_oversized_and_unknown_keys(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with pytest.raises(ValueError, match="too small"):
+        _FlowReprCache(max_bytes=1)
+
+    hot = ("hot",)
+    oversized = ("x" * 20_000,)
+    with _scoped_flow_repr_cache(max_bytes=16_384) as cache:
+        assert _flow_key_repr(hot) == repr(hot)
+        assert _flow_key_repr(hot) == repr(hot)
+        assert _flow_key_repr(hot) == repr(hot)
+        assert _flow_key_repr(oversized) == repr(oversized)
+        assert _flow_key_repr(oversized) == repr(oversized)
+        assert _flow_key_repr(hot) == repr(hot)
+        oversized_stats = cache.stats()
+        retained_hot = [entry[1] for entry in cache._fifo]
+    assert retained_hot == [hot]
+    assert oversized_stats.current_entries == 1
+    assert oversized_stats.skips == 1
+    assert oversized_stats.peak_bytes <= 16_384
+
+    class UnknownHashable:
+        def __init__(self) -> None:
+            self.payload = "x" * (2 * _MAX_FLOW_REPR_CACHE_BYTES)
+
+        def __hash__(self) -> int:
+            return 29
+
+        def __sizeof__(self) -> int:
+            raise AssertionError("custom __sizeof__ must not run")
+
+    unknown = ("unknown", UnknownHashable())
+    with _scoped_flow_repr_cache() as cache:
+        expected = repr(unknown)
+        assert _flow_key_repr(unknown) == expected
+        assert _flow_key_repr(unknown) == expected
+        unknown_stats = cache.stats()
+    assert unknown_stats.current_entries == 0
+    assert unknown_stats.current_witnesses == 0
+    assert unknown_stats.misses == 1
+    assert unknown_stats.skips == 1
+    assert unknown_stats.peak_witnesses == 1
+    assert unknown_stats.peak_bytes <= _MAX_FLOW_REPR_CACHE_BYTES
+
+    class RaisingEquality:
+        def __repr__(self) -> str:
+            return "raising-equality"
+
+        def __eq__(self, _other: object) -> bool:
+            raise AssertionError("custom __eq__ must not run")
+
+        def __hash__(self) -> int:
+            raise AssertionError("custom __hash__ must not run")
+
+        def __sizeof__(self) -> int:
+            raise AssertionError("custom __sizeof__ must not run")
+
+    monkeypatch.setattr(access_model, "hash", lambda _key: 7, raising=False)
+    safe = ("same-prefix", "safe")
+    unsupported = ("same-prefix", RaisingEquality())
+    with _scoped_flow_repr_cache() as cache:
+        assert _flow_key_repr(safe) == repr(safe)
+        assert _flow_key_repr(safe) == repr(safe)
+        assert _flow_key_repr(unsupported) == repr(unsupported)
+        protocol_stats = cache.stats()
+    assert protocol_stats.current_entries == 1
+    assert protocol_stats.skips == 1
+
+
+def test_flow_repr_cache_unsafe_prefix_never_invokes_custom_protocols(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class UnsafePrefix:
+        def __repr__(self) -> str:
+            return "unsafe-prefix"
+
+        def __hash__(self) -> int:
+            raise AssertionError("custom __hash__ must not run")
+
+        def __eq__(self, _other: object) -> bool:
+            raise AssertionError("custom __eq__ must not run")
+
+        def __sizeof__(self) -> int:
+            raise AssertionError("custom __sizeof__ must not run")
+
+    def forbidden_hash(_value: object) -> int:
+        raise AssertionError("unsafe prefix must not reach fingerprint hash")
+
+    monkeypatch.setattr(access_model, "hash", forbidden_hash, raising=False)
+    key = (UnsafePrefix(), "tail")
+    expected = repr(key)
+    with _scoped_flow_repr_cache() as cache:
+        assert _flow_key_repr(key) == expected
+        assert _flow_key_repr(key) == expected
+        stats = cache.stats()
+
+    assert stats.hits == stats.misses == stats.admissions == 0
+    assert stats.skips == 2
+    assert stats.current_entries == stats.current_witnesses == 0
+
+
+def test_flow_repr_cache_unsafe_tail_stays_baseline_and_cannot_false_hit() -> None:
+    class UnsafeTail:
+        def __repr__(self) -> str:
+            return "unsafe-tail"
+
+        def __hash__(self) -> int:
+            raise AssertionError("custom __hash__ must not run")
+
+        def __eq__(self, _other: object) -> bool:
+            raise AssertionError("custom __eq__ must not run")
+
+        def __sizeof__(self) -> int:
+            raise AssertionError("custom __sizeof__ must not run")
+
+    prefix = tuple(f"prefix:{index}" for index in range(8))
+    unsafe = (*prefix, UnsafeTail())
+    expected_unsafe = repr(unsafe)
+    with _scoped_flow_repr_cache() as cache:
+        assert _flow_key_repr(unsafe) == expected_unsafe
+        after_first = cache.stats()
+        assert _flow_key_repr(unsafe) == expected_unsafe
+        after_second = cache.stats()
+
+        safe = (*prefix, "safe-tail")
+        assert _flow_key_repr(safe) == repr(safe)
+        assert _flow_key_repr(safe) == repr(safe)
+        after_safe = cache.stats()
+        assert _flow_key_repr(unsafe) == expected_unsafe
+        final = cache.stats()
+
+    assert after_first.misses == 1
+    assert after_first.current_witnesses == 1
+    assert after_second.skips == 1
+    assert after_second.current_witnesses == 0
+    assert after_safe.admissions == 1
+    assert after_safe.current_entries == 1
+    assert final.hits == 0
+    assert final.skips == 2
+    assert final.current_entries == 1
+
+
+def test_flow_repr_cache_reentrant_tail_repr_keeps_witness_accounting_exact() -> None:
+    active_cache: list[_FlowReprCache] = []
+    nested_outputs: list[str] = []
+    safe = ("reentrant-prefix", "safe-tail")
+
+    class ReentrantTail:
+        reenter = True
+
+        def __repr__(self) -> str:
+            if self.reenter and active_cache:
+                self.reenter = False
+                nested_outputs.append(active_cache[0].render(safe))
+            return "reentrant-tail"
+
+    unsafe = ("reentrant-prefix", ReentrantTail())
+    expected = repr(unsafe)
+    with _scoped_flow_repr_cache() as cache:
+        active_cache.append(cache)
+        assert cache.render(unsafe) == expected
+        after_reentry = cache.stats()
+        assert cache._witness_bytes == sum(
+            sys.getsizeof(fingerprint) for fingerprint in cache._witnesses
+        )
+
+        assert cache.render(unsafe) == expected
+        after_discard = cache.stats()
+        assert cache._witness_bytes == 0
+        assert cache._witnesses == {}
+
+        assert cache.render(unsafe) == expected
+        assert cache.render(unsafe) == expected
+        after_repeat = cache.stats()
+        assert cache._witness_bytes == sum(
+            sys.getsizeof(fingerprint) for fingerprint in cache._witnesses
+        )
+        active_cache.clear()
+
+    assert nested_outputs == [repr(safe)]
+    assert after_reentry.current_witnesses == 1
+    assert after_discard.current_witnesses == 0
+    assert after_repeat.current_witnesses == 0
+    assert after_repeat.current_bytes <= _MAX_FLOW_REPR_CACHE_BYTES
+    assert after_repeat.peak_bytes <= _MAX_FLOW_REPR_CACHE_BYTES
+    assert cache.stats().current_bytes == 0
+
+    closing_cache: list[_FlowReprCache] = []
+
+    class ClosingTail:
+        def __repr__(self) -> str:
+            if closing_cache:
+                closing_cache[0].close()
+            return "closing-tail"
+
+    closing = ("closing-prefix", ClosingTail())
+    expected_closing = repr(closing)
+    with _scoped_flow_repr_cache() as cache:
+        closing_cache.append(cache)
+        assert cache.render(closing) == expected_closing
+        assert cache.render(closing) == expected_closing
+        closed_stats = cache.stats()
+        closing_cache.clear()
+
+    assert closed_stats.closed is True
+    assert closed_stats.current_entries == 0
+    assert closed_stats.current_witnesses == 0
+    assert closed_stats.current_bytes == 0
+    assert cache._witness_bytes == 0
+    assert cache._witnesses == {}
+
+
+def test_flow_repr_cache_same_prefix_collisions_are_exact_and_bounded() -> None:
+    prefix = tuple(f"shared-prefix:{index}" for index in range(8))
+    keys = [(*prefix, f"tail:{index}") for index in range(200)]
+    with _scoped_flow_repr_cache() as cache:
+        for key in keys:
+            assert _flow_key_repr(key) == repr(key)
+        before_probes = cache.stats()
+        assert _flow_key_repr(keys[0]) == repr(keys[0])
+        assert cache.stats().hits == before_probes.hits
+        assert _flow_key_repr(keys[-1]) == repr(keys[-1])
+        final = cache.stats()
+        bucket_lengths = [len(bucket) for bucket in cache._buckets.values()]
+
+    assert before_probes.hits == 0
+    assert before_probes.admissions == 100
+    assert before_probes.current_entries == _MAX_FLOW_REPR_CACHE_ENTRIES
+    assert before_probes.entry_evictions == 36
+    assert final.hits == 1
+    assert max(bucket_lengths) <= _MAX_FLOW_REPR_CACHE_ENTRIES
+    assert final.peak_entries <= _MAX_FLOW_REPR_CACHE_ENTRIES
+    assert final.peak_bytes <= _MAX_FLOW_REPR_CACHE_BYTES
+
+
+@pytest.mark.parametrize("max_bytes", [11_578, 11_579, 11_580, 11_581, 11_582])
+def test_flow_repr_cache_admission_boundary_never_exceeds_cap(
+    max_bytes: int,
+) -> None:
+    key = ("x" * 1_000,)
+    with _scoped_flow_repr_cache(max_bytes=max_bytes) as cache:
+        assert _flow_key_repr(key) == repr(key)
+        assert _flow_key_repr(key) == repr(key)
+        assert _flow_key_repr(key) == repr(key)
+        stats = cache.stats()
+
+    assert stats.current_bytes <= max_bytes
+    assert stats.peak_bytes <= max_bytes
+    assert stats.current_entries in {0, 1}
+
+
+def test_flow_repr_cache_nested_and_copied_contexts_are_thread_safe() -> None:
+    key = _flow_key("context")
+    assert _current_flow_repr_cache() is None
+    with _scoped_flow_repr_cache() as outer:
+        assert _current_flow_repr_cache() is outer
+        with _scoped_flow_repr_cache() as inner:
+            assert _current_flow_repr_cache() is inner
+            assert _flow_key_repr(key) == repr(key)
+        assert inner.stats().closed is True
+        assert _current_flow_repr_cache() is outer
+
+        contexts = [contextvars.copy_context(), contextvars.copy_context()]
+        barrier = threading.Barrier(3)
+
+        def exercise() -> list[str]:
+            barrier.wait()
+            return [_flow_key_repr(key) for _ in range(4)]
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = [
+                executor.submit(context.run, exercise) for context in contexts
+            ]
+            barrier.wait()
+            results = [future.result() for future in futures]
+        stats = outer.stats()
+
+    assert results == [[repr(key)] * 4, [repr(key)] * 4]
+    assert stats.admissions == 1
+    assert stats.hits == 6
+    assert stats.misses == 2
+    assert outer.stats().closed is True
+    assert outer.stats().current_entries == 0
+    assert _current_flow_repr_cache() is None
+    assert all(
+        context.run(_current_flow_repr_cache) is outer for context in contexts
+    )
+    assert all(
+        context.run(_flow_key_repr, key) == repr(key) for context in contexts
+    )
+    assert outer.stats().current_entries == 0
 
 
 def test_nested_only_originless_variant_is_skipped() -> None:

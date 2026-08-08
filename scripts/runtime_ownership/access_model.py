@@ -3,15 +3,437 @@
 from __future__ import annotations
 
 import ast
+import contextvars
 import hashlib
 import json
-from collections.abc import Callable, Mapping, Sequence
+import sys
+import threading
+from collections import deque
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 MAX_BINDING_PATHS_PER_RESOURCE = 64
 MAX_FLOW_VARIANTS = 64
+_MAX_FLOW_REPR_CACHE_ENTRIES = 64
+_MAX_FLOW_REPR_CACHE_WITNESSES = 128
+_MAX_FLOW_REPR_CACHE_BYTES = 16 * 1024 * 1024
+_FLOW_REPR_CACHE_FIXED_RETAINED_BYTES = 8192
+_FLOW_REPR_FINGERPRINT_FIELDS = 1
+
+_FlowReprCacheEntry = tuple[int, tuple[Any, ...], str, int]
+
+
+@dataclass(frozen=True)
+class _FlowReprCacheStats:
+    hits: int
+    misses: int
+    admissions: int
+    entry_evictions: int
+    witness_evictions: int
+    skips: int
+    peak_entries: int
+    peak_witnesses: int
+    peak_bytes: int
+    current_entries: int
+    current_witnesses: int
+    current_bytes: int
+    closed: bool
+
+
+def _deep_flow_key_retained_bytes(
+    value: object,
+    *,
+    remaining: int,
+) -> int | None:
+    """Return a conservative deep size for the exact immutable key domain."""
+
+    value_type = type(value)
+    if (
+        value_type is not tuple
+        and value is not None
+        and value_type is not str
+        and value_type is not bool
+        and value_type is not int
+    ):
+        return None
+    retained_bytes = sys.getsizeof(value)
+    if retained_bytes > remaining:
+        return None
+    if value_type is tuple:
+        tuple_value = cast(tuple[object, ...], value)
+        for item in tuple_value:
+            item_bytes = _deep_flow_key_retained_bytes(
+                item,
+                remaining=remaining - retained_bytes,
+            )
+            if item_bytes is None:
+                return None
+            retained_bytes += item_bytes
+        return retained_bytes
+    return retained_bytes
+
+
+def _is_exact_flow_key_tree(value: object) -> bool:
+    """Reject custom protocols before hashing, comparing, or sizing a key."""
+
+    pending = [value]
+    pop_pending = pending.pop
+    extend_pending = pending.extend
+    while pending:
+        item = pop_pending()
+        item_type = type(item)
+        if item_type is tuple:
+            extend_pending(cast(tuple[object, ...], item))
+            continue
+        if (
+            item is None
+            or item_type is str
+            or item_type is bool
+            or item_type is int
+        ):
+            continue
+        return False
+    return True
+
+
+def _exact_flow_key_prefix(value: object) -> tuple[Any, ...] | None:
+    """Return the safe shallow prefix without invoking custom protocols."""
+
+    if type(value) is not tuple:
+        return None
+    key = cast(tuple[Any, ...], value)
+    prefix = key[:_FLOW_REPR_FINGERPRINT_FIELDS]
+    if not _is_exact_flow_key_tree(prefix):
+        return None
+    return prefix
+
+
+def _is_exact_flow_key_tail(key: tuple[Any, ...]) -> bool:
+    """Validate the remainder after the already-validated exact prefix."""
+
+    return _is_exact_flow_key_tree(key[_FLOW_REPR_FINGERPRINT_FIELDS:])
+
+
+class _FlowReprCache:
+    """Exact per-analysis repr cache with evicting repeat admission."""
+
+    def __init__(
+        self,
+        *,
+        max_entries: int = _MAX_FLOW_REPR_CACHE_ENTRIES,
+        max_witnesses: int = _MAX_FLOW_REPR_CACHE_WITNESSES,
+        max_bytes: int = _MAX_FLOW_REPR_CACHE_BYTES,
+    ) -> None:
+        for name, value in (
+            ("max_entries", max_entries),
+            ("max_witnesses", max_witnesses),
+            ("max_bytes", max_bytes),
+        ):
+            if type(value) is not int or value < 1:
+                raise ValueError(f"{name} must be a positive exact integer")
+        minimum_bytes = (
+            _FLOW_REPR_CACHE_FIXED_RETAINED_BYTES
+            + 2 * sys.getsizeof({})
+            + sys.getsizeof(deque())
+        )
+        if max_bytes < minimum_bytes:
+            raise ValueError(
+                "max_bytes is too small for empty flow repr cache metadata"
+            )
+        self._max_entries = max_entries
+        self._max_witnesses = max_witnesses
+        self._max_bytes = max_bytes
+        self._witnesses: dict[int, None] = {}
+        self._witness_bytes = 0
+        self._buckets: dict[int, list[_FlowReprCacheEntry]] = {}
+        self._fifo: deque[_FlowReprCacheEntry] = deque()
+        self._entry_count = 0
+        self._entry_bytes = 0
+        self._hits = 0
+        self._misses = 0
+        self._admissions = 0
+        self._entry_evictions = 0
+        self._witness_evictions = 0
+        self._skips = 0
+        self._peak_entries = 0
+        self._peak_witnesses = 0
+        self._peak_bytes = 0
+        self._closed = False
+        self._lock = threading.RLock()
+        self._record_peaks_unlocked()
+
+    def _container_bytes_unlocked(self) -> int:
+        return (
+            sys.getsizeof(self._witnesses)
+            + sys.getsizeof(self._buckets)
+            + sum(sys.getsizeof(bucket) for bucket in self._buckets.values())
+            + sys.getsizeof(self._fifo)
+        )
+
+    def _retained_bytes_unlocked(self) -> int:
+        if self._closed:
+            return 0
+        return (
+            _FLOW_REPR_CACHE_FIXED_RETAINED_BYTES
+            + self._container_bytes_unlocked()
+            + self._witness_bytes
+            + self._entry_bytes
+        )
+
+    def _record_peaks_unlocked(self) -> None:
+        self._peak_entries = max(self._peak_entries, self._entry_count)
+        self._peak_witnesses = max(
+            self._peak_witnesses, len(self._witnesses)
+        )
+        self._peak_bytes = max(
+            self._peak_bytes, self._retained_bytes_unlocked()
+        )
+
+    def _evict_witness_unlocked(self) -> None:
+        fingerprint = next(iter(self._witnesses))
+        self._discard_witness_unlocked(fingerprint)
+        self._witness_evictions += 1
+
+    def _discard_witness_unlocked(self, fingerprint: int) -> None:
+        retained_fingerprint = next(
+            item for item in self._witnesses if item == fingerprint
+        )
+        del self._witnesses[fingerprint]
+        self._witness_bytes -= sys.getsizeof(retained_fingerprint)
+        if not self._witnesses:
+            self._witnesses.clear()
+
+    def _remember_witness_unlocked(self, fingerprint: int) -> None:
+        if self._closed or fingerprint in self._witnesses:
+            return
+        self._witnesses[fingerprint] = None
+        self._witness_bytes += sys.getsizeof(fingerprint)
+        while len(self._witnesses) > self._max_witnesses:
+            self._evict_witness_unlocked()
+        while (
+            self._witnesses
+            and self._retained_bytes_unlocked() > self._max_bytes
+        ):
+            self._evict_witness_unlocked()
+        self._record_peaks_unlocked()
+
+    def _evict_entry_unlocked(self) -> None:
+        entry = self._fifo.popleft()
+        fingerprint = entry[0]
+        bucket = self._buckets[fingerprint]
+        if not bucket or bucket[0] is not entry:
+            raise AssertionError("flow repr FIFO and collision bucket diverged")
+        del bucket[0]
+        if not bucket:
+            del self._buckets[fingerprint]
+        self._entry_count -= 1
+        self._entry_bytes -= entry[3]
+        self._entry_evictions += 1
+        if not self._fifo:
+            self._fifo.clear()
+        if not self._buckets:
+            self._buckets.clear()
+
+    @staticmethod
+    def _entry_retained_bytes(
+        fingerprint: int,
+        key: tuple[Any, ...],
+        rendered: str,
+        *,
+        max_bytes: int,
+    ) -> int | None:
+        try:
+            key_bytes = _deep_flow_key_retained_bytes(
+                key,
+                remaining=max_bytes,
+            )
+        except RecursionError:
+            return None
+        if key_bytes is None:
+            return None
+        provisional: _FlowReprCacheEntry = (fingerprint, key, rendered, 0)
+        retained_bytes = (
+            key_bytes
+            + sys.getsizeof(rendered)
+            + sys.getsizeof(fingerprint)
+            + sys.getsizeof(provisional)
+        )
+        retained_bytes += sys.getsizeof(retained_bytes)
+        return retained_bytes
+
+    def render(self, key: tuple[Any, ...]) -> str:
+        with self._lock:
+            if self._closed:
+                return repr(key)
+            prefix = _exact_flow_key_prefix(key)
+            if prefix is None:
+                self._skips += 1
+                return repr(key)
+            fingerprint = hash(prefix)
+            bucket = self._buckets.get(fingerprint)
+            witnessed = fingerprint in self._witnesses
+            if bucket is None and not witnessed:
+                self._misses += 1
+                rendered = repr(key)
+                self._remember_witness_unlocked(fingerprint)
+                return rendered
+
+            if not _is_exact_flow_key_tail(key):
+                if witnessed:
+                    self._discard_witness_unlocked(fingerprint)
+                self._skips += 1
+                return repr(key)
+            if bucket is not None:
+                for cached_entry in bucket:
+                    if cached_entry[1] == key:
+                        self._hits += 1
+                        return cached_entry[2]
+
+            self._misses += 1
+            rendered = repr(key)
+            if not witnessed:
+                self._remember_witness_unlocked(fingerprint)
+                return rendered
+
+            self._discard_witness_unlocked(fingerprint)
+
+            entry_bytes = self._entry_retained_bytes(
+                fingerprint,
+                key,
+                rendered,
+                max_bytes=self._max_bytes
+                - _FLOW_REPR_CACHE_FIXED_RETAINED_BYTES,
+            )
+            if entry_bytes is None:
+                self._skips += 1
+                return rendered
+            candidate_entry: _FlowReprCacheEntry = (
+                fingerprint,
+                key,
+                rendered,
+                entry_bytes,
+            )
+            empty_bucket: list[_FlowReprCacheEntry] = []
+            empty_bucket.append(candidate_entry)
+            empty_fifo: deque[_FlowReprCacheEntry] = deque()
+            empty_fifo.append(candidate_entry)
+            empty_admission_bytes = (
+                _FLOW_REPR_CACHE_FIXED_RETAINED_BYTES
+                + sys.getsizeof({})
+                + sys.getsizeof({fingerprint: empty_bucket})
+                + sys.getsizeof(empty_bucket)
+                + sys.getsizeof(empty_fifo)
+                + entry_bytes
+            )
+            if empty_admission_bytes > self._max_bytes:
+                self._skips += 1
+                self._record_peaks_unlocked()
+                return rendered
+            while (
+                self._witnesses
+                and self._retained_bytes_unlocked() + entry_bytes
+                > self._max_bytes
+            ):
+                self._evict_witness_unlocked()
+            while self._entry_count and (
+                self._entry_count >= self._max_entries
+                or self._retained_bytes_unlocked() + entry_bytes
+                > self._max_bytes
+            ):
+                self._evict_entry_unlocked()
+            self._buckets.setdefault(fingerprint, []).append(candidate_entry)
+            self._fifo.append(candidate_entry)
+            self._entry_count += 1
+            self._entry_bytes += entry_bytes
+            self._admissions += 1
+            while (
+                self._witnesses
+                and self._retained_bytes_unlocked() > self._max_bytes
+            ):
+                self._evict_witness_unlocked()
+            while (
+                self._entry_count > 1
+                and self._retained_bytes_unlocked() > self._max_bytes
+            ):
+                self._evict_entry_unlocked()
+            if self._retained_bytes_unlocked() > self._max_bytes:
+                self._evict_entry_unlocked()
+                self._skips += 1
+                self._record_peaks_unlocked()
+                return rendered
+            if not self._fifo or self._fifo[-1] is not candidate_entry:
+                raise AssertionError("flow repr admission evicted its new entry")
+            self._record_peaks_unlocked()
+            return rendered
+
+    def close(self) -> None:
+        with self._lock:
+            self._closed = True
+            self._witnesses.clear()
+            self._buckets.clear()
+            self._fifo.clear()
+            self._witness_bytes = 0
+            self._entry_count = 0
+            self._entry_bytes = 0
+
+    def stats(self) -> _FlowReprCacheStats:
+        with self._lock:
+            return _FlowReprCacheStats(
+                hits=self._hits,
+                misses=self._misses,
+                admissions=self._admissions,
+                entry_evictions=self._entry_evictions,
+                witness_evictions=self._witness_evictions,
+                skips=self._skips,
+                peak_entries=self._peak_entries,
+                peak_witnesses=self._peak_witnesses,
+                peak_bytes=self._peak_bytes,
+                current_entries=self._entry_count,
+                current_witnesses=len(self._witnesses),
+                current_bytes=self._retained_bytes_unlocked(),
+                closed=self._closed,
+            )
+
+
+_FLOW_REPR_CACHE: contextvars.ContextVar[_FlowReprCache | None] = (
+    contextvars.ContextVar("runtime_access_flow_repr_cache", default=None)
+)
+
+
+def _current_flow_repr_cache() -> _FlowReprCache | None:
+    return _FLOW_REPR_CACHE.get()
+
+
+@contextmanager
+def _scoped_flow_repr_cache(
+    *,
+    max_entries: int = _MAX_FLOW_REPR_CACHE_ENTRIES,
+    max_witnesses: int = _MAX_FLOW_REPR_CACHE_WITNESSES,
+    max_bytes: int = _MAX_FLOW_REPR_CACHE_BYTES,
+) -> Iterator[_FlowReprCache]:
+    cache = _FlowReprCache(
+        max_entries=max_entries,
+        max_witnesses=max_witnesses,
+        max_bytes=max_bytes,
+    )
+    token = _FLOW_REPR_CACHE.set(cache)
+    try:
+        yield cache
+    finally:
+        try:
+            cache.close()
+        finally:
+            _FLOW_REPR_CACHE.reset(token)
+
+
+def _flow_key_repr(key: tuple[Any, ...]) -> str:
+    cache = _current_flow_repr_cache()
+    if cache is None:
+        return repr(key)
+    return cache.render(key)
 
 
 @dataclass(frozen=True)
@@ -835,7 +1257,7 @@ def _normalize_flow_variants(
     if len(resource_variants) == 1:
         return (_without_variants(next(iter(resource_variants.values()))),), False
 
-    ordered_keys = sorted(resource_variants, key=repr)
+    ordered_keys = sorted(resource_variants, key=_flow_key_repr)
     return (
         tuple(
             _without_variants(resource_variants[key])
