@@ -1095,7 +1095,7 @@ def dispatch(args: argparse.Namespace) -> int:
             print(f"missed\t{data['missed']}")
         return 0
     if args.command == "cofire":
-        from chronovisor.search.cofire import build_cofire_graph
+        from chronovisor.recall.cofire import build_cofire_graph
 
         data = build_cofire_graph(
             limit=max(1, args.limit),

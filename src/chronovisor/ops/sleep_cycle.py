@@ -516,12 +516,12 @@ def _run_sleep_cycle(
     )
     from chronovisor.recall import recall_improvement
     from chronovisor.recall.claims import rebuild_claim_index
+    from chronovisor.recall.cofire import build_cofire_graph
     from chronovisor.recall.duplicate_review import (
         build_duplicate_review_queue,
         write_review_queue,
     )
     from chronovisor.recall.recall_prefetch import build_prefetch_cache
-    from chronovisor.search.cofire import build_cofire_graph
 
     try:
         per_lane_frontier = max(

@@ -151,7 +151,7 @@ def _patch_sleep_dependencies(monkeypatch) -> None:
         lambda: {"memory_integrity": {"capture_rate": 0.5}, "queues": {}},
     )
     monkeypatch.setattr(
-        "chronovisor.search.cofire.build_cofire_graph",
+        "chronovisor.recall.cofire.build_cofire_graph",
         lambda write=True: {"edges": 2, "nodes": 2, "graph": {}},
     )
     monkeypatch.setattr(
@@ -432,7 +432,7 @@ def test_sleep_lane_error_isolated_as_partial(monkeypatch) -> None:
 def test_sleep_artifact_lane_error_does_not_block_consumers(monkeypatch) -> None:
     _patch_sleep_dependencies(monkeypatch)
     monkeypatch.setattr(
-        "chronovisor.search.cofire.build_cofire_graph",
+        "chronovisor.recall.cofire.build_cofire_graph",
         lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("cofire boom")),
     )
 
@@ -548,7 +548,7 @@ def test_sleep_dry_run_sets_and_restores_process_read_only_guard(monkeypatch) ->
     observed: list[str | None] = []
     monkeypatch.delenv("CHRONOVISOR_READ_ONLY", raising=False)
     monkeypatch.setattr(
-        "chronovisor.search.cofire.build_cofire_graph",
+        "chronovisor.recall.cofire.build_cofire_graph",
         lambda write=True: (
             observed.append(os.environ.get("CHRONOVISOR_READ_ONLY"))
             or {"edges": 0, "nodes": 0, "graph": {}}
