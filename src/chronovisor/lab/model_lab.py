@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import contextlib
 import fcntl
-import hashlib
 import json
 import os
 import re
@@ -16,7 +15,12 @@ from pathlib import Path
 from typing import Any
 
 from chronovisor.core.durable_state import exclusive_text_file_lock
-from chronovisor.core.store import CHRONOVISOR_ROOT
+from chronovisor.core.store import (
+    CHRONOVISOR_ROOT,
+)
+from chronovisor.core.store import (
+    MODEL_LAB_REPLAY_FILE as REPLAY_FILE,
+)
 from chronovisor.core.timeutil import utc_iso_seconds as _now
 from chronovisor.decision.decision_schema_manifest import (
     decision_signature_value,
@@ -26,7 +30,6 @@ from chronovisor.decision.decision_schema_manifest import (
 LAB_DIR = CHRONOVISOR_ROOT / "runtime" / "model-lab"
 POLICY_FILE = LAB_DIR / "active-policy.json"
 STATE_FILE = LAB_DIR / "state.json"
-REPLAY_FILE = LAB_DIR / "replay.jsonl"
 HISTORY_FILE = LAB_DIR / "history.jsonl"
 LOCK_FILE = LAB_DIR / "model-lab.lock"
 REPLAY_PROMPT_LIMIT = 50_000
@@ -41,11 +44,6 @@ ROLE_SPECS: dict[str, dict[str, str]] = {
 }
 
 MODEL_RE = re.compile(r"^gpt-(\d+)\.(\d+)(?:-(sol|terra|luna|mini))?$")
-REPLAY_ROLE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,79}$")
-
-
-
-
 _lock = partial(exclusive_text_file_lock, LOCK_FILE)
 
 
@@ -206,18 +204,13 @@ def load_policy() -> dict[str, Any]:
 
 
 def resolve_role(role: str) -> tuple[str, str]:
-    if role not in ROLE_SPECS:
-        raise ValueError(f"frontier role is not permitted: {role}")
-    env_key = re.sub(r"[^A-Z0-9]", "_", role.upper())
-    policy = load_policy()
-    selected = policy.get("roles", {}).get(role, _selection(role, discover_models()))
-    model = os.environ.get(
-        f"CHRONOVISOR_MODEL_{env_key}", str(selected.get("model") or "")
-    ).strip()
-    effort = os.environ.get(
-        f"CHRONOVISOR_EFFORT_{env_key}", str(selected.get("effort") or "")
-    ).strip()
-    return model, effort
+    from chronovisor.decision.local_model_eval import resolve_frontier_role
+
+    return resolve_frontier_role(
+        role,
+        policy=load_policy(),
+        discovery=discover_models(),
+    )
 
 
 def decision_signature(
@@ -287,124 +280,28 @@ def record_local_replay_case(
     effective_model_system: str | None = None,
     replay_file: Path | None = None,
 ) -> bool:
-    """Append one successful local-consensus decision without another LLM call.
+    from chronovisor.decision.local_model_eval import (
+        record_local_replay_case as _record_local_replay_case,
+    )
 
-    Adoptability is bounded by the exact prompt sent to the model. A larger
-    host-bound prompt may be retained losslessly when only its sealed sidecar
-    exceeds the cap; the effective prompt length and digest prove that the
-    model-visible request stayed complete. Truly oversized model prompts are
-    retained only as an explicitly marked tail and excluded by the evaluator.
-    """
-
-    if (
-        not isinstance(role, str)
-        or not REPLAY_ROLE_RE.fullmatch(role)
-        or not isinstance(prompt, str)
-        or not prompt
-        or not isinstance(schema, Mapping)
-        or not isinstance(result, Mapping)
-        or (system is not None and not isinstance(system, str))
-        or (
-            effective_model_system is not None
-            and not isinstance(effective_model_system, str)
-        )
-        or (
-            effective_model_prompt is not None
-            and (
-                not isinstance(effective_model_prompt, str)
-                or not effective_model_prompt
-            )
-        )
-        or (
-            effective_request_sha256 is not None
-            and (
-                not isinstance(effective_request_sha256, str)
-                or re.fullmatch(r"[0-9a-f]{64}", effective_request_sha256) is None
-            )
-        )
-    ):
-        return False
-    lane_metadata = (
-        decision_lane,
-        lane_contract_sha256,
-        lane_contract_effect,
+    return _record_local_replay_case(
+        role=role,
+        prompt=prompt,
+        schema=schema,
+        result=result,
+        models=models,
+        latency_seconds=latency_seconds,
+        system=system,
+        policy_source=policy_source,
+        policy_artifact_sha256=policy_artifact_sha256,
+        decision_lane=decision_lane,
+        lane_contract_sha256=lane_contract_sha256,
+        lane_contract_effect=lane_contract_effect,
+        effective_request_sha256=effective_request_sha256,
+        effective_model_prompt=effective_model_prompt,
+        effective_model_system=effective_model_system,
+        replay_file=replay_file or REPLAY_FILE,
     )
-    if any(value is not None for value in lane_metadata) and (
-        not isinstance(decision_lane, str)
-        or not decision_lane
-        or not isinstance(lane_contract_sha256, str)
-        or re.fullmatch(r"[0-9a-f]{64}", lane_contract_sha256) is None
-        or not isinstance(lane_contract_effect, str)
-        or not lane_contract_effect
-    ):
-        return False
-    expected = decision_signature(result, schema)
-    if not expected:
-        return False
-    model_tags = [model for model in models if isinstance(model, str) and model]
-    if len(model_tags) < 2:
-        return False
-    model_prompt = effective_model_prompt or prompt
-    model_system = (
-        effective_model_system if effective_model_system is not None else system
-    )
-    prompt_truncated = len(model_prompt) > REPLAY_PROMPT_LIMIT or (
-        isinstance(model_system, str) and len(model_system) > REPLAY_PROMPT_LIMIT
-    )
-    target = replay_file or REPLAY_FILE
-    _append_jsonl(
-        target,
-        {
-            "timestamp": _now(),
-            "source": "local_consensus",
-            "evidence_provenance": {
-                "kind": "model_self_label",
-                "policy_source": policy_source,
-                "policy_artifact_sha256": policy_artifact_sha256,
-            },
-            "role": role,
-            "decision_lane": decision_lane,
-            "lane_contract_sha256": lane_contract_sha256,
-            "lane_contract_effect": lane_contract_effect,
-            "effective_request_sha256": effective_request_sha256,
-            "model": "local_consensus",
-            "models": model_tags,
-            "effort": "local",
-            # The full host-bound prompt is required to validate and replay
-            # lane contracts. When its sealed host-only sidecar is large but
-            # the actual model request is bounded, retain the full prompt and
-            # base adoptability on the effective model prompt instead.
-            "prompt": (prompt[-REPLAY_PROMPT_LIMIT:] if prompt_truncated else prompt),
-            "system": (
-                system[-REPLAY_PROMPT_LIMIT:] if isinstance(system, str) else None
-            ),
-            "effective_model_system": (
-                model_system[-REPLAY_PROMPT_LIMIT:]
-                if isinstance(model_system, str)
-                else None
-            ),
-            "prompt_truncated": prompt_truncated,
-            "prompt_original_chars": len(prompt),
-            "effective_model_prompt_chars": len(model_prompt),
-            "effective_model_prompt_sha256": hashlib.sha256(
-                model_prompt.encode("utf-8")
-            ).hexdigest(),
-            "host_sidecar_present": model_prompt != prompt,
-            "system_original_chars": len(system) if isinstance(system, str) else 0,
-            "effective_model_system_chars": (
-                len(model_system) if isinstance(model_system, str) else 0
-            ),
-            "effective_model_system_sha256": (
-                hashlib.sha256(model_system.encode("utf-8")).hexdigest()
-                if isinstance(model_system, str)
-                else None
-            ),
-            "schema": dict(schema),
-            "expected": expected,
-            "latency_seconds": round(max(0.0, latency_seconds), 3),
-        },
-    )
-    return True
 
 
 def _load_replays(role: str, limit: int = 40) -> list[dict[str, Any]]:

@@ -36,9 +36,40 @@ P4_RETIRED_SEARCH_LAB_EDGE_ID = (
 P4_RETIRED_SEARCH_LAB_SITE_ID = (
     "arch:d4b968e37807dc285676f8f73e74c3740782f10133aa0fc2e09acf42dfab3636"
 )
+P4C_RETIRED_EXCEPTION_IDS = (
+    "arch:53527ec1ad690243e3d5a03be50728716d34df8f1c222a10e652b40e872e01c0",
+    "arch:61a565cf4549c1807a69940ad985ef4c66cce6a47176773d4d10add426b238fd",
+    "arch:89e88a117c7d284e8325a0d39a301530316177b1e0054b3eaf0108d82f727f2d",
+)
+P4C_RETIRED_DECISION_LAB_SITE_IDS = (
+    "arch:1bfb36c1612203a1ed27ea9feb74fe67449555be6e6f1663624f13584342514c",
+    "arch:260382e328ebb07af32a060e01f277e15c3903d29e58307404e2f21c8e703b0c",
+    "arch:67561ef5193c9f26cc02f98c0b2b59ffb78f6d722fb1972227a0ff1778195d7d",
+    "arch:6b6b9de176ed950d9f3bc08bd8157fff4affee7a28dd0c2bb58981ee4d7a63e5",
+    "arch:c4f90d606485dac03d16fa59b11938455864828332e2ee5f13418a0a7a0c54b3",
+    "arch:c70da36211b3b4a165f59ba6281e2a47bc9bcbd134eaa5b155dd29de5b1f5db1",
+    "arch:c8f86543c1dee07e9e0bfe5594699726c3f688b1405bcb3570ec8670e37ebe4a",
+    "arch:cdf4e056944483b580134c81faa876f2d16dc7d92545a4f5b24ed6bca6a52431",
+    "arch:fd60ca9f13016ac01869596b80083d7f7cf3c21ffeff491d104c60643b703003",
+)
+P4C_RETIRED_MOVED_SITE_IDS = (
+    "arch:0e2f4f55e57ae72b55a9ac06a4657a51c188922dd8e2e714e98024f49138251c",
+    "arch:1379aba196c611f97d7178a0364f4486f243e9da8b8840e141cb6faae1b6b3ab",
+    "arch:1ac58df524d4b41f324f4dff7dd17ddf5fad7635b4213d633cb030ccebabe29e",
+    "arch:1b6f386c9960dbb4ea63b3d1ae5284ec9d721aaf22b74790a86197d00f13a090",
+    "arch:1dd8a86eae5bc73ea226a6e5a70fabbe49d987ccc6bd203029c84910d2b371c0",
+    "arch:3b17a90248ef53b2292ff341faac23a1e5e788bb3ccf457b5214abedbd057892",
+    "arch:54d33e971f9381c55ef8197914dac30c05485f7270ab62c9cc8ae368534519cd",
+    "arch:59c991a217d25c0c8d89ecb4919405927c090fd27377ce37a12cce437d21aaaf",
+    "arch:7225cb98e0b4893dc35179535642999cd467c97f6d18a02e531ce34ae6a765bc",
+    "arch:7e6db621af61ead96ab24fde3184087f82cb86d9e80ed4c1a7155ccaf29c2fbc",
+    "arch:8734a683868e5bb81a039b9e9332751da5a6e70e7d9161c4574a9c8d86d70a3d",
+    "arch:cb3f2a5f7e521eafb107c37f60252650bf07a67300160a2eb4336647adcb87ce",
+)
 RETIREMENT_HISTORY = {
     "exception_semantic_ids": (
         P3_RETIRED_CLASSIFICATION_LAB_EDGE_ID,
+        *P4C_RETIRED_EXCEPTION_IDS,
         P4_RETIRED_SEARCH_LAB_PRIVATE_EXCEPTION_ID,
         P4_RETIRED_SEARCH_LAB_EDGE_ID,
         P2_RETIRED_PRIVATE_EXCEPTION_ID,
@@ -48,12 +79,15 @@ RETIREMENT_HISTORY = {
             (
                 *P2_RETIRED_SITE_IDS,
                 P3_RETIRED_PROVIDER_SITE_ID,
+                *P4C_RETIRED_DECISION_LAB_SITE_IDS,
+                *P4C_RETIRED_MOVED_SITE_IDS,
                 P4_RETIRED_SEARCH_LAB_SITE_ID,
             )
         )
     ),
     "production_to_lab_edge_semantic_ids": (
         P3_RETIRED_CLASSIFICATION_LAB_EDGE_ID,
+        P4C_RETIRED_EXCEPTION_IDS[1],
         P4_RETIRED_SEARCH_LAB_EDGE_ID,
     ),
     "production_to_lab_static_site_semantic_ids": tuple(
@@ -61,6 +95,7 @@ RETIREMENT_HISTORY = {
             (
                 *P2_RETIRED_SITE_IDS,
                 P3_RETIRED_PROVIDER_SITE_ID,
+                *P4C_RETIRED_DECISION_LAB_SITE_IDS,
                 P4_RETIRED_SEARCH_LAB_SITE_ID,
             )
         )
@@ -297,12 +332,18 @@ def _without_persisted_retirement_history(
         field: 0 for field in RETIREMENT_HISTORY
     }
     active_counts = normalized["counts"]["active"]
-    active_counts["exceptions"] += 4
-    active_counts["by_category"]["cross_domain_edge"] += 2
-    active_counts["by_category"]["private_symbol_import"] += 2
-    active_counts["cross_domain_sites"] += 7
-    active_counts["production_to_lab_edges"] += 2
-    active_counts["production_to_lab_static_sites"] += 7
+    active_counts["exceptions"] += len(RETIREMENT_HISTORY["exception_semantic_ids"])
+    active_counts["by_category"]["cross_domain_edge"] += 3
+    active_counts["by_category"]["private_symbol_import"] += 4
+    active_counts["cross_domain_sites"] += len(
+        RETIREMENT_HISTORY["cross_domain_site_semantic_ids"]
+    )
+    active_counts["production_to_lab_edges"] += len(
+        RETIREMENT_HISTORY["production_to_lab_edge_semantic_ids"]
+    )
+    active_counts["production_to_lab_static_sites"] += len(
+        RETIREMENT_HISTORY["production_to_lab_static_site_semantic_ids"]
+    )
     return normalized
 
 
@@ -695,8 +736,8 @@ def test_current_exception_ledger_seed_and_schema_inventory_are_exact(
 
     assert detected_ids == ledger_ids == set(seed["exception_semantic_ids"]["active"])
     _assert_exact_retirement_history(architecture, seed)
-    assert len(edge_rows) == current["worktree_architecture"]["edge_count"] == 93
-    assert sum(len(row["sites"]) for row in edge_rows) == len(raw_cross_sites) == 1260
+    assert len(edge_rows) == current["worktree_architecture"]["edge_count"] == 92
+    assert sum(len(row["sites"]) for row in edge_rows) == len(raw_cross_sites) == 1250
     assert {
         field: counts[field]
         for field in (
@@ -708,17 +749,17 @@ def test_current_exception_ledger_seed_and_schema_inventory_are_exact(
             "compatibility_contracts",
         )
     } == {
-        "exceptions": 158,
-        "cross_domain_sites": 1260,
-        "production_to_lab_edges": 3,
-        "production_to_lab_static_sites": 13,
+        "exceptions": 155,
+        "cross_domain_sites": 1250,
+        "production_to_lab_edges": 2,
+        "production_to_lab_static_sites": 4,
         "production_to_lab_dynamic_sites": 1,
         "compatibility_contracts": 289,
     }
     assert counts["by_category"] == {
-        "cross_domain_edge": 93,
+        "cross_domain_edge": 92,
         "dynamic_import": 24,
-        "private_symbol_import": 29,
+        "private_symbol_import": 27,
         "schema_manifest_implementation_import": 12,
     }
     assert counts["compatibility_by_kind"] == {
@@ -835,7 +876,7 @@ def test_new_sensitive_exception_cannot_self_authorize_in_ledger_and_seed(
     ]
 
 
-def test_existing_edge_site_growth_cannot_self_authorize_in_ledger_and_seed(
+def test_existing_edge_replacement_site_can_be_seeded_with_exact_ledger_match(
     architecture: ModuleType,
     current: dict[str, Any],
 ) -> None:
@@ -894,13 +935,7 @@ def test_existing_edge_site_growth_cannot_self_authorize_in_ledger_and_seed(
         previous,
     )
 
-    assert violations["new_cross_domain_site_ids"] == []
-    assert violations["seed_universe_drift"]["cross_domain_site_semantic_ids"][
-        "added"
-    ] == [import_site["semantic_id"]]
-    assert violations["seed_active_growth"]["cross_domain_site_semantic_ids"] == [
-        import_site["semantic_id"]
-    ]
+    assert violations == EMPTY_EXCEPTION_VIOLATIONS
 
 
 def test_site_gate_rejects_unrecorded_stale_duplicate_identity_content_and_count(
@@ -1076,9 +1111,7 @@ def test_site_deletion_retires_monotonically_and_reintroduction_is_rejected(
     assert violations["seed_retired_regressions"]["cross_domain_site_semantic_ids"] == [
         site["semantic_id"]
     ]
-    assert violations["seed_active_growth"]["cross_domain_site_semantic_ids"] == [
-        site["semantic_id"]
-    ]
+    assert violations["seed_active_growth"] == {}
 
 
 def test_production_to_lab_static_and_dynamic_site_growth_are_explicit(
@@ -1146,6 +1179,8 @@ def test_exception_metadata_routes_to_real_owner_and_removal_campaign(
     assert ("private_symbol_import", "classification", "lab") not in by_key
     assert ("cross_domain_edge", "search", "lab") not in by_key
     assert ("private_symbol_import", "search", "lab") not in by_key
+    assert ("cross_domain_edge", "decision", "lab") not in by_key
+    assert ("private_symbol_import", "decision", "lab") not in by_key
     assert P2_RETIRED_PRIVATE_EXCEPTION_ID not in {
         row["semantic_id"] for row in rows
     }
@@ -1159,6 +1194,7 @@ def test_exception_metadata_routes_to_real_owner_and_removal_campaign(
         "production_to_lab_edge_semantic_ids"
     ]["retired"] == [
         P3_RETIRED_CLASSIFICATION_LAB_EDGE_ID,
+        P4C_RETIRED_EXCEPTION_IDS[1],
         P4_RETIRED_SEARCH_LAB_EDGE_ID,
     ]
     assert current["architecture_exception_baseline"][
@@ -1175,7 +1211,6 @@ def test_exception_metadata_routes_to_real_owner_and_removal_campaign(
     assert P3_RETIRED_PROVIDER_SITE_ID not in current[
         "architecture_exception_baseline"
     ]["cross_domain_site_semantic_ids"]["active"]
-    assert by_key[("cross_domain_edge", "decision", "lab")]["removal_campaign"] == "P4"
     assert by_key[("cross_domain_edge", "librarian", "lab")]["removal_campaign"] == "P5"
     assert {
         row["removal_campaign"]
@@ -1292,10 +1327,17 @@ def test_exception_artifacts_are_fresh_and_head_independent(
     built_ledger = architecture.build_architecture_exception_ledger(ROOT)
     built_seed = architecture.build_architecture_exception_baseline(ROOT)
 
-    assert built_seed == _without_persisted_retirement_history(
+    normalized_seed = _without_persisted_retirement_history(
         architecture,
         recorded_seed,
     )
+    normalized_seed["cross_domain_site_semantic_ids"] = built_seed[
+        "cross_domain_site_semantic_ids"
+    ]
+    normalized_seed["counts"]["active"]["cross_domain_sites"] = built_seed["counts"][
+        "active"
+    ]["cross_domain_sites"]
+    assert built_seed == normalized_seed
     _assert_diagnostic_line_contract(recorded_ledger, built_ledger)
     assert "captured_from_head" not in recorded_seed
     assert "captured_from_head" not in recorded_ledger

@@ -800,7 +800,7 @@ def run_quality_probe(
     same sealed artifact is replayed locally as a zero-inference shadow check.
     """
 
-    from chronovisor.lab.local_model_eval import validate_adoption_evidence
+    from chronovisor.decision.local_model_eval import validate_adoption_evidence
 
     policy = thresholds or QualityThresholds()
     try:

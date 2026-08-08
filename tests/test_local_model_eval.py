@@ -10,6 +10,7 @@ import pytest
 
 from chronovisor.core import ollama
 from chronovisor.core.runtime_config import DecisionRouterConfig
+from chronovisor.decision import local_model_eval
 from chronovisor.decision.decision_router import (
     DECISION_REQUEST_FINGERPRINT_VERSION,
     DECISION_SEMANTICS_POLICY_VERSION,
@@ -17,17 +18,16 @@ from chronovisor.decision.decision_router import (
 )
 from chronovisor.decision.decision_schema_manifest import schema_sha256
 from chronovisor.decision.frontier_review import FRONTIER_DECISION_SCHEMA
-from chronovisor.decision.local_repair import LOCAL_REPAIR_SCHEMA
-from chronovisor.decision.local_structured import ChatRequest
-from chronovisor.ingest.ingest import INGEST_FRONTIER_DECISION_SCHEMA
-from chronovisor.lab import local_model_eval
-from chronovisor.lab.local_model_eval import (
+from chronovisor.decision.local_model_eval import (
     ReplayInputError,
     ResumeMismatchError,
     evaluate_replays,
     inspect_replays,
     main,
 )
+from chronovisor.decision.local_repair import LOCAL_REPAIR_SCHEMA
+from chronovisor.decision.local_structured import ChatRequest
+from chronovisor.ingest.ingest import INGEST_FRONTIER_DECISION_SCHEMA
 from chronovisor.ops.autonomy import DUPLICATE_FRONTIER_SCHEMA
 from chronovisor.ops.orphan_link import ORPHAN_FRONTIER_SCHEMA
 from chronovisor.recall.content_correction import (

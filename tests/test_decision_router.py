@@ -45,18 +45,7 @@ from chronovisor.decision.decision_schema_manifest import (
     production_decision_schemas,
 )
 from chronovisor.decision.frontier_review import FRONTIER_DECISION_SCHEMA
-from chronovisor.decision.local_repair import LOCAL_REPAIR_SCHEMA
-from chronovisor.decision.local_structured import (
-    STRUCTURED_GENERATION_POLICY_VERSION,
-    ChatRequest,
-    required_structured_context_tokens,
-    structured_generation_policy,
-    structured_generation_policy_sha256,
-    structured_request_sha256,
-)
-from chronovisor.ingest.ingest import INGEST_FRONTIER_DECISION_SCHEMA
-from chronovisor.lab.adoption_corpus import contract_candidates
-from chronovisor.lab.local_model_eval import (
+from chronovisor.decision.local_model_eval import (
     ARTIFACT_SCHEMA_VERSION,
     EVALUATOR_POLICY_VERSION,
     AdoptionThresholds,
@@ -70,6 +59,17 @@ from chronovisor.lab.local_model_eval import (
     replay_effect_context,
     replay_semantic_effect,
 )
+from chronovisor.decision.local_repair import LOCAL_REPAIR_SCHEMA
+from chronovisor.decision.local_structured import (
+    STRUCTURED_GENERATION_POLICY_VERSION,
+    ChatRequest,
+    required_structured_context_tokens,
+    structured_generation_policy,
+    structured_generation_policy_sha256,
+    structured_request_sha256,
+)
+from chronovisor.ingest.ingest import INGEST_FRONTIER_DECISION_SCHEMA
+from chronovisor.lab.adoption_corpus import contract_candidates
 from chronovisor.ops.autonomy import DUPLICATE_FRONTIER_SCHEMA
 from chronovisor.ops.lint import SAFE_FIX_REVIEW_SCHEMA
 from chronovisor.ops.lint_repair import TAG_REPAIR_SCHEMA

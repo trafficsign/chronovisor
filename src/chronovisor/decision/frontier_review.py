@@ -1562,9 +1562,9 @@ def _run_codex(
             json.dumps(strict_schema, indent=2) + "\n",
             encoding="utf-8",
         )
-        from chronovisor.lab.model_lab import resolve_role
+        from chronovisor.decision.local_model_eval import resolve_frontier_role
 
-        model, reasoning_effort = resolve_role("code_repair")
+        model, reasoning_effort = resolve_frontier_role("code_repair")
         invocation = _build_codex_exec_invocation(
             codex,
             repo_root=repo_root,

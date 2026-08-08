@@ -10,8 +10,8 @@ from chronovisor.decision import background_lane_qualification as qualification
 from chronovisor.decision.decision_lane_contract_cases import (
     background_decision_lane_contract_case_specs,
 )
+from chronovisor.decision.local_model_eval import evaluate_replays
 from chronovisor.decision.local_structured import ChatRequest
-from chronovisor.lab.local_model_eval import evaluate_replays
 
 LANE = "recall_answer_adjudication"
 

@@ -56,7 +56,7 @@ ReplayEvaluator = Callable[..., dict[str, Any]]
 def _metadata(
     models: Sequence[str], provider: MetadataProvider | None = None
 ) -> dict[str, Any]:
-    from chronovisor.lab.local_model_eval import (
+    from chronovisor.decision.local_model_eval import (
         _safe_model_metadata,
         fetch_local_model_metadata,
         validate_model_metadata_identity,
@@ -242,7 +242,7 @@ def _validated_evaluation(
     evaluator: ReplayEvaluator | None,
     execute: bool,
 ) -> dict[str, Any]:
-    from chronovisor.lab.local_model_eval import (
+    from chronovisor.decision.local_model_eval import (
         AdoptionThresholds,
         adoption_case_derived_evidence,
         adoption_gate,

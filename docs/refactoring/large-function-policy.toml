@@ -120,7 +120,7 @@ rationale = "Deterministic preregistered cohort selection where sequential filte
 tests = ["tests/test_adoption_corpus.py"]
 
 [[functions]]
-path = "src/chronovisor/lab/local_model_eval.py"
+path = "src/chronovisor/decision/local_model_eval.py"
 qualname = "load_replay_corpus"
 baseline_lines = 434
 disposition = "retained"
@@ -129,7 +129,7 @@ rationale = "Fail-closed replay corpus decoder whose sequential compatibility ga
 tests = ["tests/test_local_model_eval.py"]
 
 [[functions]]
-path = "src/chronovisor/lab/local_model_eval.py"
+path = "src/chronovisor/decision/local_model_eval.py"
 qualname = "adoption_case_derived_evidence"
 baseline_lines = 489
 disposition = "retained"

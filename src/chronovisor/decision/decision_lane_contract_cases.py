@@ -195,8 +195,8 @@ def _make_case(
         decision_signature_value,
         production_decision_schemas,
     )
+    from chronovisor.decision.local_model_eval import replay_semantic_effect
     from chronovisor.decision.local_structured import validate_json
-    from chronovisor.lab.local_model_eval import replay_semantic_effect
 
     schemas = {**production_decision_schemas(), **background_decision_schemas()}
     schema = schemas[schema_name]
