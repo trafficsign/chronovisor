@@ -23,6 +23,8 @@ PLAN = (
     / "plans"
     / "P2-classification-fixture-contract.json"
 )
+P2_H1_COMMIT = "fea114e63f610ec2a51dab89a946655c6e27854d"
+P2_H2_COMMIT = "5276dea5e8e58f8d0a0b0a397a6f896b157ca0e9"
 
 
 def _load_script() -> ModuleType:
@@ -125,7 +127,11 @@ def _clone_with_evidence_parent(
         migrations.RECEIPT_HARDENING_COMMIT,
     )
     for relative in migrations.RECEIPT_HARDENING_PATHS:
-        shutil.copyfile(ROOT / relative, repo / relative)
+        if relative == "tests/test_architecture_migrations.py":
+            frozen_test = migrations._git_file(ROOT, P2_H1_COMMIT, relative)
+            (repo / relative).write_bytes(frozen_test)
+        else:
+            shutil.copyfile(ROOT / relative, repo / relative)
     _git(repo, "add", "--", *migrations.RECEIPT_HARDENING_PATHS)
     evidence_parent = _commit(repo, "refactor: make P2 receipt failures fail closed")
     plan = migrations.load_plan(repo / migrations.PLAN_PATH)
@@ -169,6 +175,9 @@ def test_p2_plan_validates_fixed_h0_and_gate_history(
 ) -> None:
     plan = migrations.load_plan(PLAN)
     report = migrations.validate_plan(ROOT, plan)
+    receipt = migrations.load_receipt(ROOT / migrations.RECEIPT_PATH)
+    tip_commit = _git_text(ROOT, "rev-parse", "HEAD")
+    verified = migrations.verify_receipt(ROOT, plan, receipt, tip_commit)
 
     assert report == {
         "migration_id": migrations.MIGRATION_ID,
@@ -178,7 +187,15 @@ def test_p2_plan_validates_fixed_h0_and_gate_history(
         "site_count": 5,
         "state": "valid-h0-plan",
     }
-    assert not (ROOT / migrations.RECEIPT_PATH).exists()
+    assert receipt["plan_sha256"] == plan["plan_sha256"]
+    assert receipt["h1_commit"] == P2_H1_COMMIT
+    assert verified == {
+        "migration_id": migrations.MIGRATION_ID,
+        "h1_commit": receipt["h1_commit"],
+        "h2_commit": P2_H2_COMMIT,
+        "tip_commit": tip_commit,
+        "state": "valid-h2-receipt",
+    }
 
 
 def test_p2_plan_separates_h2_retirement_from_p3_retention(
