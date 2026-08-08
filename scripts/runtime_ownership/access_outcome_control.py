@@ -117,7 +117,20 @@ def analyze_loop(
     head_env, head_objects = copy_state(entry_env, entry_objects)
     stable_result = BlockResult(False, [])
     exhaustion_env, exhaustion_objects = copy_state(head_env, head_objects)
+    iteration = 0
+    subject = (
+        f"{actor}:{type(statement).__name__}:"
+        f"{int(statement.lineno)}:{int(statement.col_offset)}"
+    )
     while True:
+        iteration += 1
+        engine.progress.record_work(
+            phase="cfg_loop",
+            subject=subject,
+            counter="cfg_loop_iterations",
+            iteration=iteration,
+            limits=engine.limits,
+        )
         body_env, body_objects = copy_state(head_env, head_objects)
         if isinstance(statement, ast.While):
             _record_snapshot(prefix_states, body_env, body_objects)
@@ -168,6 +181,12 @@ def analyze_loop(
         if next_env == head_env and next_objects == head_objects:
             stable_result = body_result
             break
+        engine.progress.require_stable_or_within_limit(
+            phase="cfg_loop",
+            subject=subject,
+            iteration=iteration,
+            limit=engine.limits.max_cfg_loop_iterations,
+        )
         head_env, head_objects = next_env, next_objects
 
     outcomes: list[Outcome] = []

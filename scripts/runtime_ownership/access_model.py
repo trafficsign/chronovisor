@@ -5,13 +5,199 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 from typing import Any, Literal
 
 MAX_BINDING_PATHS_PER_RESOURCE = 64
 MAX_FLOW_VARIANTS = 64
+
+
+@dataclass(frozen=True)
+class AnalysisLimits:
+    """Finite per-invocation bounds for deterministic access analysis.
+
+    The generous global cap is a last guard across many individually bounded
+    modules, functions, loops, and known calls, not a normal stopping condition.
+    """
+
+    max_module_export_iterations: int = 128
+    max_outer_iterations: int = 128
+    max_function_summary_iterations: int = 128
+    max_cfg_loop_iterations: int = 128
+    max_legacy_loop_iterations: int = 128
+    max_known_call_depth: int = 256
+    max_work_units: int = 10_000_000
+
+    def __post_init__(self) -> None:
+        for name, value in vars(self).items():
+            if type(value) is not int or value < 1:
+                raise ValueError(f"{name} must be a positive exact integer")
+
+
+class AnalysisNonConvergenceError(ValueError):
+    """Deterministic analysis failure with a machine-readable payload."""
+
+    def __init__(
+        self,
+        *,
+        phase: str,
+        subject: str,
+        iteration: int,
+        limit: int,
+        counters: Mapping[str, int],
+    ) -> None:
+        self.payload: dict[str, object] = {
+            "phase": phase,
+            "subject": subject,
+            "iteration": iteration,
+            "limit": limit,
+            "counters": {name: counters[name] for name in sorted(counters)},
+        }
+        super().__init__(
+            json.dumps(self.payload, sort_keys=True, separators=(",", ":"))
+        )
+
+
+@dataclass
+class AnalysisProgress:
+    """Mutable deterministic counters and work-throttled progress events."""
+
+    callback: Callable[[Mapping[str, object]], None] | None = None
+    event_interval_work_units: int = 1024
+    work_units: int = field(default=0, init=False)
+    module_export_iterations: int = field(default=0, init=False)
+    outer_iterations: int = field(default=0, init=False)
+    function_summary_iterations: int = field(default=0, init=False)
+    cfg_loop_iterations: int = field(default=0, init=False)
+    legacy_loop_iterations: int = field(default=0, init=False)
+    module_analyses: int = field(default=0, init=False)
+    function_analyses: int = field(default=0, init=False)
+    known_calls: int = field(default=0, init=False)
+    known_call_depth: int = field(default=0, init=False)
+    max_observed_known_call_depth: int = field(default=0, init=False)
+    events: list[dict[str, object]] = field(default_factory=list, init=False)
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.event_interval_work_units) is not int
+            or self.event_interval_work_units < 1
+        ):
+            raise ValueError(
+                "event_interval_work_units must be a positive exact integer"
+            )
+
+    def reset(self) -> None:
+        for name in (
+            "work_units",
+            "module_export_iterations",
+            "outer_iterations",
+            "function_summary_iterations",
+            "cfg_loop_iterations",
+            "legacy_loop_iterations",
+            "module_analyses",
+            "function_analyses",
+            "known_calls",
+            "known_call_depth",
+            "max_observed_known_call_depth",
+        ):
+            setattr(self, name, 0)
+        self.events.clear()
+
+    def counters(self) -> dict[str, int]:
+        return {
+            "cfg_loop_iterations": self.cfg_loop_iterations,
+            "function_analyses": self.function_analyses,
+            "function_summary_iterations": self.function_summary_iterations,
+            "known_call_depth": self.known_call_depth,
+            "known_calls": self.known_calls,
+            "legacy_loop_iterations": self.legacy_loop_iterations,
+            "max_observed_known_call_depth": self.max_observed_known_call_depth,
+            "module_analyses": self.module_analyses,
+            "module_export_iterations": self.module_export_iterations,
+            "outer_iterations": self.outer_iterations,
+            "work_units": self.work_units,
+        }
+
+    def record_work(
+        self,
+        *,
+        phase: str,
+        subject: str,
+        counter: str,
+        iteration: int,
+        limits: AnalysisLimits,
+    ) -> None:
+        if self.work_units >= limits.max_work_units:
+            raise AnalysisNonConvergenceError(
+                phase="global_work",
+                subject=f"{phase}:{subject}",
+                iteration=self.work_units + 1,
+                limit=limits.max_work_units,
+                counters=self.counters(),
+            )
+        self.work_units += 1
+        setattr(self, counter, int(getattr(self, counter)) + 1)
+        if self.work_units % self.event_interval_work_units:
+            return
+        counter_values = self.counters()
+        event: dict[str, object] = {
+            "phase": phase,
+            "subject": subject,
+            "iteration": iteration,
+            "work_units": self.work_units,
+            "counters": counter_values,
+        }
+        self.events.append(event)
+        if self.callback is not None:
+            self.callback({**event, "counters": dict(counter_values)})
+
+    def require_stable_or_within_limit(
+        self,
+        *,
+        phase: str,
+        subject: str,
+        iteration: int,
+        limit: int,
+    ) -> None:
+        if iteration >= limit:
+            raise AnalysisNonConvergenceError(
+                phase=phase,
+                subject=subject,
+                iteration=iteration,
+                limit=limit,
+                counters=self.counters(),
+            )
+
+    def enter_known_call(
+        self, *, subject: str, limits: AnalysisLimits
+    ) -> None:
+        next_depth = self.known_call_depth + 1
+        self.record_work(
+            phase="known_call",
+            subject=subject,
+            counter="known_calls",
+            iteration=self.known_calls + 1,
+            limits=limits,
+        )
+        if next_depth > limits.max_known_call_depth:
+            raise AnalysisNonConvergenceError(
+                phase="known_call_depth",
+                subject=subject,
+                iteration=next_depth,
+                limit=limits.max_known_call_depth,
+                counters=self.counters(),
+            )
+        self.known_call_depth = next_depth
+        self.max_observed_known_call_depth = max(
+            self.max_observed_known_call_depth, next_depth
+        )
+
+    def exit_known_call(self) -> None:
+        if not self.known_call_depth:
+            raise AssertionError("known-call depth underflow")
+        self.known_call_depth -= 1
 
 STDLIB_BUILTINS_CALLS = frozenset({"open"})
 STDLIB_DATACLASSES_CALLS = frozenset({"dataclass", "field"})
@@ -2181,6 +2367,9 @@ def _open_mode(node: ast.Call, *, mode_index: int) -> OpenModeResult:
 
 
 __all__ = [
+    "AnalysisLimits",
+    "AnalysisNonConvergenceError",
+    "AnalysisProgress",
     "FCNTL_LOCK_FLAGS",
     "FCNTL_LOCK_FLAG_BITS",
     "FCNTL_LOCK_MASK_OBJECT_PREFIX",

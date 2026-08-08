@@ -32,6 +32,8 @@ from .access_model import (
     STDLIB_SQLITE3_CALLS,
     STDLIB_SQLITE3_TYPES,
     SUPPORTED_STDLIB_MODULES,
+    AnalysisLimits,
+    AnalysisProgress,
     FlowValue,
     exclusive_flow_join,
     fcntl_lock_mask_value,
@@ -55,6 +57,8 @@ ExportState = tuple[
 
 
 class ImportEngine(Protocol):
+    limits: AnalysisLimits
+    progress: AnalysisProgress
     module_exports: dict[str, dict[str, FlowValue]]
     module_star_exports: dict[str, dict[str, FlowValue]]
     module_star_definite: dict[str, frozenset[str]]
@@ -481,7 +485,11 @@ def build_module_exports(
     package_modules: frozenset[str],
     known_modules: frozenset[str],
     origin_symbols: Mapping[SymbolKey, FlowValue],
+    limits: AnalysisLimits | None = None,
+    progress: AnalysisProgress | None = None,
 ) -> ModuleExportTable:
+    resolved_limits = limits or AnalysisLimits()
+    resolved_progress = progress or AnalysisProgress()
     dependencies = _export_dependencies(
         trees,
         package_modules=package_modules,
@@ -490,7 +498,16 @@ def build_module_exports(
     _reject_origin_cycles(dependencies, frozenset(origin_symbols))
 
     summaries = {module: ModuleExportSummary.empty() for module in trees}
+    iteration = 0
     while True:
+        iteration += 1
+        resolved_progress.record_work(
+            phase="module_exports",
+            subject="all-modules",
+            counter="module_export_iterations",
+            iteration=iteration,
+            limits=resolved_limits,
+        )
         exports = {module: summary.bindings for module, summary in summaries.items()}
         star_exports = {
             module: summary.star_bindings for module, summary in summaries.items()
@@ -523,6 +540,12 @@ def build_module_exports(
         }
         if next_summaries == summaries:
             return ModuleExportTable(next_summaries)
+        resolved_progress.require_stable_or_within_limit(
+            phase="module_exports",
+            subject="all-modules",
+            iteration=iteration,
+            limit=resolved_limits.max_module_export_iterations,
+        )
         summaries = next_summaries
 
 

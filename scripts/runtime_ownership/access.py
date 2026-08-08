@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import ast
-from collections.abc import Iterable, Mapping, Sequence
+import gc
+import sys
+import threading
+from collections.abc import Iterable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from typing import Any
 
 from .access_expressions import evaluate_generic_expression
@@ -28,6 +32,8 @@ from .access_model import (
     SQLITE_UNKNOWN_ATTRIBUTE_OBJECT_TYPE,
     SUPPORTED_STDLIB_MODULES,
     UNRESOLVED_RUNTIME_OBJECT_ALTERNATIVE_TYPE,
+    AnalysisLimits,
+    AnalysisProgress,
     DataclassInfo,
     FlowValue,
     FunctionInfo,
@@ -59,6 +65,7 @@ from .access_statements import analyze_block, evaluate_control_expression
 
 _CALL_MODULE_STATE_PREFIX = "\0runtime-module-state:"
 _CALL_CLOSURE_STATE_PREFIX = "\0runtime-closure-state:"
+_GC_OPTIMIZATION_LOCK = threading.RLock()
 
 _SOCKET_ORIGIN_ALIASES = {
     "unix://$HOME/.chronovisor/runtime/semantic.sock": (
@@ -220,7 +227,12 @@ class _AccessAnalysis:
         self,
         snapshot: Mapping[str, bytes],
         resource_candidates: Iterable[Mapping[str, Any]],
+        *,
+        limits: AnalysisLimits,
+        progress: AnalysisProgress,
     ) -> None:
+        self.limits = limits
+        self.progress = progress
         self.snapshot = dict(snapshot)
         self.trees: dict[str, ast.Module] = {}
         self.paths: dict[str, str] = {}
@@ -325,6 +337,8 @@ class _AccessAnalysis:
             package_modules=self.package_modules,
             known_modules=self.known_modules,
             origin_symbols=self.origin_symbols,
+            limits=self.limits,
+            progress=self.progress,
         )
         self.module_exports = export_table.bindings
         self.module_star_exports = export_table.star_bindings
@@ -398,13 +412,38 @@ class _AccessAnalysis:
         self._persistent_changed = False
 
     def run(self) -> dict[str, Any]:
+        outer_iteration = 0
         while True:
+            outer_iteration += 1
+            self.progress.record_work(
+                phase="outer",
+                subject="all-modules-and-functions",
+                counter="outer_iterations",
+                iteration=outer_iteration,
+                limits=self.limits,
+            )
             self._persistent_changed = False
             for module, tree in sorted(self.trees.items()):
+                self.progress.record_work(
+                    phase="module_analysis",
+                    subject=module,
+                    counter="module_analyses",
+                    iteration=self.progress.module_analyses + 1,
+                    limits=self.limits,
+                )
                 self._analyze_module(module, tree)
             module_changed = self._persistent_changed
             function_changed = False
+            summary_iteration = 0
             while True:
+                summary_iteration += 1
+                self.progress.record_work(
+                    phase="function_summary",
+                    subject=f"outer:{outer_iteration}",
+                    counter="function_summary_iterations",
+                    iteration=summary_iteration,
+                    limits=self.limits,
+                )
                 self._persistent_changed = False
                 for ref, info in sorted(self.functions.items()):
                     if (
@@ -416,13 +455,32 @@ class _AccessAnalysis:
                         continue
                     if not self._function_has_origin_inputs(info):
                         continue
+                    self.progress.record_work(
+                        phase="function_analysis",
+                        subject=ref,
+                        counter="function_analyses",
+                        iteration=self.progress.function_analyses + 1,
+                        limits=self.limits,
+                    )
                     self._analyze_function(info)
                 if not self._persistent_changed:
                     break
                 function_changed = True
+                self.progress.require_stable_or_within_limit(
+                    phase="function_summary",
+                    subject=f"outer:{outer_iteration}",
+                    iteration=summary_iteration,
+                    limit=self.limits.max_function_summary_iterations,
+                )
             self._persistent_changed = module_changed or function_changed
             if not self._persistent_changed:
                 break
+            self.progress.require_stable_or_within_limit(
+                phase="outer",
+                subject="all-modules-and-functions",
+                iteration=outer_iteration,
+                limit=self.limits.max_outer_iterations,
+            )
         return self.facts.result()
 
     def _function_has_origin_inputs(self, info: FunctionInfo) -> bool:
@@ -1420,6 +1478,42 @@ class _AccessAnalysis:
             or target in self._active_local_calls
         ):
             return None
+        self.progress.enter_known_call(subject=target, limits=self.limits)
+        try:
+            return self._execute_known_call_active(
+                target,
+                argument_values,
+                keyword_values,
+                actor=actor,
+                module=module,
+                node=node,
+                ordinal=ordinal,
+                env=env,
+                object_env=object_env,
+                closure_instance=closure_instance,
+                bound_receiver=bound_receiver,
+                receiver_out=receiver_out,
+            )
+        finally:
+            self.progress.exit_known_call()
+
+    def _execute_known_call_active(
+        self,
+        target: str,
+        argument_values: Sequence[FlowValue],
+        keyword_values: Mapping[str, FlowValue],
+        *,
+        actor: str,
+        module: str,
+        node: ast.Call,
+        ordinal: int,
+        env: dict[str, FlowValue],
+        object_env: dict[str, set[str]],
+        closure_instance: str | None,
+        bound_receiver: FlowValue | None,
+        receiver_out: list[FlowValue] | None,
+    ) -> FlowValue:
+        info = self.functions[target]
         module_env, module_objects, external_state_prefix = self._call_module_state(
             info.module,
             actor=actor,
@@ -2057,13 +2151,70 @@ def _is_declared_dataclass_decorator(
 def discover_access_facts(
     snapshot: Mapping[str, bytes],
     resource_candidates: Iterable[Mapping[str, Any]],
+    *,
+    limits: AnalysisLimits | None = None,
+    progress: AnalysisProgress | None = None,
+    optimize_gc: bool | None = None,
 ) -> dict[str, Any]:
     """Discover concrete access and fail-closed escape facts."""
 
-    return _AccessAnalysis(snapshot, resource_candidates).run()
+    resolved_limits = limits or AnalysisLimits()
+    resolved_progress = progress or AnalysisProgress()
+    if not isinstance(resolved_limits, AnalysisLimits):
+        raise TypeError("limits must be AnalysisLimits or None")
+    if not isinstance(resolved_progress, AnalysisProgress):
+        raise TypeError("progress must be AnalysisProgress or None")
+    if optimize_gc is not None and type(optimize_gc) is not bool:
+        raise ValueError("optimize_gc must be an exact bool or None")
+    resolved_progress.reset()
+    analysis = _AccessAnalysis(
+        snapshot,
+        resource_candidates,
+        limits=resolved_limits,
+        progress=resolved_progress,
+    )
+    should_optimize_gc = (
+        _default_optimize_gc() if optimize_gc is None else optimize_gc
+    )
+    if not should_optimize_gc:
+        return analysis.run()
+    with _scoped_gc_disabled():
+        return analysis.run()
+
+
+def _default_optimize_gc() -> bool:
+    if sys.implementation.name != "cpython":
+        return False
+    is_gil_enabled = getattr(sys, "_is_gil_enabled", None)
+    return is_gil_enabled is None or bool(is_gil_enabled())
+
+
+@contextmanager
+def _scoped_gc_disabled() -> Iterator[None]:
+    """Disable cyclic GC during one run and restore process GC configuration."""
+
+    with _GC_OPTIMIZATION_LOCK:
+        was_enabled = gc.isenabled()
+        thresholds = gc.get_threshold()
+        debug = gc.get_debug()
+        callbacks = tuple(gc.callbacks)
+        if was_enabled:
+            gc.disable()
+        try:
+            yield
+        finally:
+            gc.set_threshold(*thresholds)
+            gc.set_debug(debug)
+            gc.callbacks[:] = callbacks
+            if was_enabled:
+                gc.enable()
+            else:
+                gc.disable()
 
 
 __all__ = [
+    "AnalysisLimits",
+    "AnalysisProgress",
     "FlowValue",
     "FunctionInfo",
     "discover_access_facts",

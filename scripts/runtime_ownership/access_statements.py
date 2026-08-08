@@ -481,7 +481,23 @@ def _loop_paths(
     changed = False
     returned = FlowValue()
     exit_env, exit_objects = _copy_state(env, object_env)
+    iteration = 0
+    subject_node = while_test or target
+    subject_kind = "while" if while_test is not None else "for"
+    subject = (
+        f"{actor}:{subject_kind}:"
+        f"{int(getattr(subject_node, 'lineno', 0))}:"
+        f"{int(getattr(subject_node, 'col_offset', 0))}"
+    )
     while True:
+        iteration += 1
+        engine.progress.record_work(
+            phase="legacy_loop",
+            subject=subject,
+            counter="legacy_loop_iterations",
+            iteration=iteration,
+            limits=engine.limits,
+        )
         body_env, body_objects = _copy_state(head_env, head_objects)
         if while_test is not None:
             evaluate_control_expression(
@@ -531,6 +547,12 @@ def _loop_paths(
         )
         if next_env == head_env and next_objects == head_objects:
             break
+        engine.progress.require_stable_or_within_limit(
+            phase="legacy_loop",
+            subject=subject,
+            iteration=iteration,
+            limit=engine.limits.max_legacy_loop_iterations,
+        )
         head_env, head_objects = next_env, next_objects
 
     loop_env, loop_objects = _copy_state(head_env, head_objects)
