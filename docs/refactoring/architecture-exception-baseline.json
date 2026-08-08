@@ -17,7 +17,6 @@
       "arch:0c315d9e256e7bb9456fd74b1b1601db457ad0b21a7d736e809f70e294a3ebbb",
       "arch:0dd175ac5f39948a2ea0105bd57085bc0ad73146211af3bb2fd4145ce3e85500",
       "arch:0ecbbca457e89e9972910b3cc3c5cf13a3a97b7c85255035ff1fffa7c46821cd",
-      "arch:0f37f016df9c2c328a0edc59fd3b3c4b8039921bde3fdaaede27d59f34be9f60",
       "arch:11c80628d958dcc6b21e259ee77d412a97af4cb5511f0429c84a484202a6a596",
       "arch:15835d8d9944f0e658cc02b10678ba13f3b54d065a43e40b6e3014bf91253bed",
       "arch:171347b3036f3dba27546589a302e02f6d22314fffe9c50e95e25a59b49c7a94",
@@ -167,6 +166,7 @@
       "arch:fedd0ae465b3a8a7721a34636e92abf3b51f9d401a1244f54749cb78ac4c5dae"
     ],
     "retired": [
+      "arch:0f37f016df9c2c328a0edc59fd3b3c4b8039921bde3fdaaede27d59f34be9f60",
       "arch:97b784f974ebdf78ae0226731f9b421e381ac04bad98dd104435367c618f52e9"
     ]
   },
@@ -758,7 +758,6 @@
       "arch:78b855ea2e2dc87fdd8dda4fdf41e0ab3f0d9b0bfe02de5aeb3afee47148faf7",
       "arch:78cccbf0b14f6d2a62dd8d0dd6ea0395630cb3ee07f189abd7d93d25474582b6",
       "arch:7907a1745716f1d6f9408a3946ff2eed397b7257858d4fe5699787fb1c6e9d7d",
-      "arch:7923c8117584e014f1a6d93283fb7ce9eb012f2cdb7e6228171c5fffb58aecc1",
       "arch:79a68d07913ba738b0296bb1b2930c6d30318fcbfb3508b0b6b10780e23b65c4",
       "arch:79ad071bf86dfa2e4cacad5eb182569fb88631fa806d24e59de78c08196915d0",
       "arch:7a1979838b5d70c477342e09933f2877d3970c5d467a74c3d801c6898e919588",
@@ -1437,6 +1436,7 @@
     ],
     "retired": [
       "arch:0d799ce1e29887c64caf095e2640a148aa9e90326aaef4c45a476ae13c33e85b",
+      "arch:7923c8117584e014f1a6d93283fb7ce9eb012f2cdb7e6228171c5fffb58aecc1",
       "arch:7d200838738a191b653ce5829735d820b786746b2a6329bf9cc98610ff57dd32",
       "arch:a36a5c65819a0aab93f8c971dee29537ef65da12069950b9fdab4b270bb9c9d7",
       "arch:c7056bd3c53d85c0dfb27edae2aead5bac51065e169b7b87ef3f21b4363d3ca2",
@@ -1445,13 +1445,14 @@
   },
   "production_to_lab_edge_semantic_ids": {
     "active": [
-      "arch:0f37f016df9c2c328a0edc59fd3b3c4b8039921bde3fdaaede27d59f34be9f60",
       "arch:396f651d94c790b548203581fc4ed5e9b0bbea9045bab821818b23fea411d4af",
       "arch:61a565cf4549c1807a69940ad985ef4c66cce6a47176773d4d10add426b238fd",
       "arch:95ae240af520b7872ef42f68074e124a12bc04c5f937d508f8135a6a8a23d03a",
       "arch:eb2b813a6f4420f60df925a80375c90dea7fc85dcc15240272b743e739b509a7"
     ],
-    "retired": []
+    "retired": [
+      "arch:0f37f016df9c2c328a0edc59fd3b3c4b8039921bde3fdaaede27d59f34be9f60"
+    ]
   },
   "production_to_lab_static_site_semantic_ids": {
     "active": [
@@ -1461,7 +1462,6 @@
       "arch:67561ef5193c9f26cc02f98c0b2b59ffb78f6d722fb1972227a0ff1778195d7d",
       "arch:6b6b9de176ed950d9f3bc08bd8157fff4affee7a28dd0c2bb58981ee4d7a63e5",
       "arch:720a675ffaa72d9b18758180feff7385941e447ceb8e426b6ec26666a01593c1",
-      "arch:7923c8117584e014f1a6d93283fb7ce9eb012f2cdb7e6228171c5fffb58aecc1",
       "arch:7dc55845add1f43bc44723139de24db48ad92ca39be88c436b8d3c6bc5f960b0",
       "arch:c4f90d606485dac03d16fa59b11938455864828332e2ee5f13418a0a7a0c54b3",
       "arch:c70da36211b3b4a165f59ba6281e2a47bc9bcbd134eaa5b155dd29de5b1f5db1",
@@ -1473,6 +1473,7 @@
     ],
     "retired": [
       "arch:0d799ce1e29887c64caf095e2640a148aa9e90326aaef4c45a476ae13c33e85b",
+      "arch:7923c8117584e014f1a6d93283fb7ce9eb012f2cdb7e6228171c5fffb58aecc1",
       "arch:7d200838738a191b653ce5829735d820b786746b2a6329bf9cc98610ff57dd32",
       "arch:a36a5c65819a0aab93f8c971dee29537ef65da12069950b9fdab4b270bb9c9d7",
       "arch:c7056bd3c53d85c0dfb27edae2aead5bac51065e169b7b87ef3f21b4363d3ca2",
@@ -1781,16 +1782,16 @@
   },
   "counts": {
     "active": {
-      "exceptions": 161,
+      "exceptions": 160,
       "by_category": {
-        "cross_domain_edge": 95,
+        "cross_domain_edge": 94,
         "dynamic_import": 24,
         "private_symbol_import": 30,
         "schema_manifest_implementation_import": 12
       },
-      "cross_domain_sites": 1262,
-      "production_to_lab_edges": 5,
-      "production_to_lab_static_sites": 15,
+      "cross_domain_sites": 1261,
+      "production_to_lab_edges": 4,
+      "production_to_lab_static_sites": 14,
       "production_to_lab_dynamic_sites": 1,
       "compatibility_contracts": 289,
       "compatibility_by_kind": {
@@ -1810,10 +1811,10 @@
       }
     },
     "retired": {
-      "exception_semantic_ids": 1,
-      "cross_domain_site_semantic_ids": 5,
-      "production_to_lab_edge_semantic_ids": 0,
-      "production_to_lab_static_site_semantic_ids": 5,
+      "exception_semantic_ids": 2,
+      "cross_domain_site_semantic_ids": 6,
+      "production_to_lab_edge_semantic_ids": 1,
+      "production_to_lab_static_site_semantic_ids": 6,
       "production_to_lab_dynamic_site_semantic_ids": 0,
       "compatibility_semantic_ids": 0
     }

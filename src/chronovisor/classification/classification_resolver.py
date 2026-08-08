@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from chronovisor.classification.classification import ClassificationError, UDCPackage
 from chronovisor.classification.classification_bundle import (
@@ -14,29 +14,55 @@ from chronovisor.classification.classification_bundle import (
 from chronovisor.classification.classification_engine import CandidateIndex
 from chronovisor.classification.classification_fixture_contract import inference_dto
 from chronovisor.core.durable_state import read_sealed_json
-from chronovisor.lab.classification_library_evidence import (
-    LibraryEvidenceIndex,
-    LibraryEvidenceProvider,
-)
+
+
+class CandidateProvider(Protocol):
+    def candidates(
+        self,
+        page: Mapping[str, Any],
+        *,
+        arms: Sequence[str],
+        limit: int,
+    ) -> Mapping[str, Any]: ...
+
+
+class CandidateProviderFactory(Protocol):
+    def __call__(
+        self,
+        *,
+        package: UDCPackage,
+        provider_manifest: Path,
+    ) -> CandidateProvider: ...
 
 
 class ResolvedCandidateIndex:
-    def __init__(self, root: Path, package: UDCPackage) -> None:
+    def __init__(
+        self,
+        root: Path,
+        package: UDCPackage,
+        *,
+        provider_factory: CandidateProviderFactory | None = None,
+    ) -> None:
         self.root = root
         self.package = package
         self.resolution = resolve_authority(root)
         self.official = CandidateIndex(package)
-        self.provider: LibraryEvidenceProvider | None = None
+        self.provider: CandidateProvider | None = None
         if self.resolution["status"] == "active":
             target = self.resolution["target"]
             candidate_path = Path(str(target.get("candidate_bundle_path") or ""))
             candidate = read_sealed_json(candidate_path)
             if candidate.get("schema") != CANDIDATE_BUNDLE_SCHEMA:
                 raise ClassificationError("adopted candidate bundle is invalid")
+            if provider_factory is None:
+                raise ClassificationError(
+                    "classification authority resolution failed: "
+                    "active authority requires a provider factory"
+                )
             provider_manifest = Path(str(candidate.get("provider_manifest_path") or ""))
-            self.provider = LibraryEvidenceProvider(
+            self.provider = provider_factory(
                 package=package,
-                evidence_index=LibraryEvidenceIndex(provider_manifest),
+                provider_manifest=provider_manifest,
             )
             self.arms = tuple(
                 candidate.get("run_config", {}).get("provider_arms") or ("B1b", "B3")
@@ -70,5 +96,11 @@ class ResolvedCandidateIndex:
 def production_candidate_index(
     root: Path,
     package: UDCPackage,
+    *,
+    provider_factory: CandidateProviderFactory | None = None,
 ) -> ResolvedCandidateIndex:
-    return ResolvedCandidateIndex(root, package)
+    return ResolvedCandidateIndex(
+        root,
+        package,
+        provider_factory=provider_factory,
+    )

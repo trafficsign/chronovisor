@@ -21,11 +21,26 @@ P2_RETIRED_SITE_IDS = (
     "arch:c7056bd3c53d85c0dfb27edae2aead5bac51065e169b7b87ef3f21b4363d3ca2",
     "arch:e821d535f1969c514f6f49a2338ec36e382d3a6b82040c593bf28f580d86c97d",
 )
-P2_RETIREMENT_HISTORY = {
-    "exception_semantic_ids": (P2_RETIRED_PRIVATE_EXCEPTION_ID,),
-    "cross_domain_site_semantic_ids": P2_RETIRED_SITE_IDS,
-    "production_to_lab_edge_semantic_ids": (),
-    "production_to_lab_static_site_semantic_ids": P2_RETIRED_SITE_IDS,
+P3_RETIRED_CLASSIFICATION_LAB_EDGE_ID = (
+    "arch:0f37f016df9c2c328a0edc59fd3b3c4b8039921bde3fdaaede27d59f34be9f60"
+)
+P3_RETIRED_PROVIDER_SITE_ID = (
+    "arch:7923c8117584e014f1a6d93283fb7ce9eb012f2cdb7e6228171c5fffb58aecc1"
+)
+RETIREMENT_HISTORY = {
+    "exception_semantic_ids": (
+        P3_RETIRED_CLASSIFICATION_LAB_EDGE_ID,
+        P2_RETIRED_PRIVATE_EXCEPTION_ID,
+    ),
+    "cross_domain_site_semantic_ids": tuple(
+        sorted((*P2_RETIRED_SITE_IDS, P3_RETIRED_PROVIDER_SITE_ID))
+    ),
+    "production_to_lab_edge_semantic_ids": (
+        P3_RETIRED_CLASSIFICATION_LAB_EDGE_ID,
+    ),
+    "production_to_lab_static_site_semantic_ids": tuple(
+        sorted((*P2_RETIRED_SITE_IDS, P3_RETIRED_PROVIDER_SITE_ID))
+    ),
     "production_to_lab_dynamic_site_semantic_ids": (),
     "compatibility_semantic_ids": (),
 }
@@ -222,20 +237,20 @@ def _move_seed_id(
     seed[field][target].sort()
 
 
-def _assert_exact_p2_retirement_history(
+def _assert_exact_retirement_history(
     architecture: ModuleType,
     seed: dict[str, Any],
 ) -> None:
-    assert set(P2_RETIREMENT_HISTORY) == set(
+    assert set(RETIREMENT_HISTORY) == set(
         architecture.EXCEPTION_BASELINE_ID_FIELDS
     )
     assert {
         field: tuple(seed[field]["retired"])
         for field in architecture.EXCEPTION_BASELINE_ID_FIELDS
-    } == P2_RETIREMENT_HISTORY
+    } == RETIREMENT_HISTORY
     assert seed["counts"]["retired"] == {
         field: len(retired_ids)
-        for field, retired_ids in P2_RETIREMENT_HISTORY.items()
+        for field, retired_ids in RETIREMENT_HISTORY.items()
     }
     assert all(
         set(seed[field]["active"]).isdisjoint(seed[field]["retired"])
@@ -243,25 +258,27 @@ def _assert_exact_p2_retirement_history(
     )
 
 
-def _without_persisted_p2_retirement_history(
+def _without_persisted_retirement_history(
     architecture: ModuleType,
     seed: dict[str, Any],
 ) -> dict[str, Any]:
     normalized = copy.deepcopy(seed)
-    _assert_exact_p2_retirement_history(architecture, normalized)
-    for field, retired_ids in P2_RETIREMENT_HISTORY.items():
+    _assert_exact_retirement_history(architecture, normalized)
+    for field, retired_ids in RETIREMENT_HISTORY.items():
         normalized[field]["active"] = sorted(
             (*normalized[field]["active"], *retired_ids)
         )
         normalized[field]["retired"] = []
     normalized["counts"]["retired"] = {
-        field: 0 for field in P2_RETIREMENT_HISTORY
+        field: 0 for field in RETIREMENT_HISTORY
     }
     active_counts = normalized["counts"]["active"]
-    active_counts["exceptions"] += 1
+    active_counts["exceptions"] += 2
+    active_counts["by_category"]["cross_domain_edge"] += 1
     active_counts["by_category"]["private_symbol_import"] += 1
-    active_counts["cross_domain_sites"] += 5
-    active_counts["production_to_lab_static_sites"] += 5
+    active_counts["cross_domain_sites"] += 6
+    active_counts["production_to_lab_edges"] += 1
+    active_counts["production_to_lab_static_sites"] += 6
     return normalized
 
 
@@ -653,9 +670,9 @@ def test_current_exception_ledger_seed_and_schema_inventory_are_exact(
     counts = seed["counts"]["active"]
 
     assert detected_ids == ledger_ids == set(seed["exception_semantic_ids"]["active"])
-    _assert_exact_p2_retirement_history(architecture, seed)
-    assert len(edge_rows) == current["worktree_architecture"]["edge_count"] == 95
-    assert sum(len(row["sites"]) for row in edge_rows) == len(raw_cross_sites) == 1262
+    _assert_exact_retirement_history(architecture, seed)
+    assert len(edge_rows) == current["worktree_architecture"]["edge_count"] == 94
+    assert sum(len(row["sites"]) for row in edge_rows) == len(raw_cross_sites) == 1261
     assert {
         field: counts[field]
         for field in (
@@ -667,15 +684,15 @@ def test_current_exception_ledger_seed_and_schema_inventory_are_exact(
             "compatibility_contracts",
         )
     } == {
-        "exceptions": 161,
-        "cross_domain_sites": 1262,
-        "production_to_lab_edges": 5,
-        "production_to_lab_static_sites": 15,
+        "exceptions": 160,
+        "cross_domain_sites": 1261,
+        "production_to_lab_edges": 4,
+        "production_to_lab_static_sites": 14,
         "production_to_lab_dynamic_sites": 1,
         "compatibility_contracts": 289,
     }
     assert counts["by_category"] == {
-        "cross_domain_edge": 95,
+        "cross_domain_edge": 94,
         "dynamic_import": 24,
         "private_symbol_import": 30,
         "schema_manifest_implementation_import": 12,
@@ -704,7 +721,7 @@ def test_current_exception_ledger_seed_and_schema_inventory_are_exact(
 
 
 @pytest.mark.parametrize("mutation", ["extra", "wrong"])
-def test_p2_retirement_history_rejects_extra_or_wrong_id(
+def test_retirement_history_rejects_extra_or_wrong_id(
     architecture: ModuleType,
     current: dict[str, Any],
     mutation: str,
@@ -716,7 +733,7 @@ def test_p2_retirement_history_rejects_extra_or_wrong_id(
         seed["cross_domain_site_semantic_ids"]["retired"][0] = "arch:" + "f" * 64
 
     with pytest.raises(AssertionError):
-        _assert_exact_p2_retirement_history(architecture, seed)
+        _assert_exact_retirement_history(architecture, seed)
 
 
 def test_actual_schema_exceptions_are_registry_imports_not_consumers(
@@ -1049,11 +1066,11 @@ def test_production_to_lab_static_and_dynamic_site_growth_are_explicit(
         row
         for row in source["import_sites"]
         if row["category"] == "cross_domain_import"
-        and row["source_package"] == "classification"
         and row["target_package"] == "lab"
     )
     static_site = {
         **static_template,
+        "source_package": "classification",
         "source_module": "chronovisor.classification.new_lab_static",
         "occurrence": 1,
         "line": 1,
@@ -1101,21 +1118,34 @@ def test_exception_metadata_routes_to_real_owner_and_removal_campaign(
         for row in rows
     }
 
-    classification_edge = by_key[("cross_domain_edge", "classification", "lab")]
-    assert classification_edge["removal_campaign"] == "P3"
-    assert classification_edge["deadline"] == architecture.CAMPAIGN_DEADLINES["P3"]
+    assert ("cross_domain_edge", "classification", "lab") not in by_key
     assert ("private_symbol_import", "classification", "lab") not in by_key
     assert P2_RETIRED_PRIVATE_EXCEPTION_ID not in {
         row["semantic_id"] for row in rows
     }
     assert current["architecture_exception_baseline"]["exception_semantic_ids"][
         "retired"
-    ] == [
-        P2_RETIRED_PRIVATE_EXCEPTION_ID
-    ]
+    ] == list(RETIREMENT_HISTORY["exception_semantic_ids"])
+    assert current["architecture_exception_baseline"][
+        "cross_domain_site_semantic_ids"
+    ]["retired"] == list(RETIREMENT_HISTORY["cross_domain_site_semantic_ids"])
+    assert current["architecture_exception_baseline"][
+        "production_to_lab_edge_semantic_ids"
+    ]["retired"] == [P3_RETIRED_CLASSIFICATION_LAB_EDGE_ID]
+    assert current["architecture_exception_baseline"][
+        "production_to_lab_static_site_semantic_ids"
+    ]["retired"] == list(
+        RETIREMENT_HISTORY["production_to_lab_static_site_semantic_ids"]
+    )
     assert P2_RETIRED_PRIVATE_EXCEPTION_ID not in current[
         "architecture_exception_baseline"
     ]["exception_semantic_ids"]["active"]
+    assert P3_RETIRED_CLASSIFICATION_LAB_EDGE_ID not in current[
+        "architecture_exception_baseline"
+    ]["exception_semantic_ids"]["active"]
+    assert P3_RETIRED_PROVIDER_SITE_ID not in current[
+        "architecture_exception_baseline"
+    ]["cross_domain_site_semantic_ids"]["active"]
     assert by_key[("cross_domain_edge", "decision", "lab")]["removal_campaign"] == "P4"
     assert by_key[("cross_domain_edge", "librarian", "lab")]["removal_campaign"] == "P5"
     assert {
@@ -1129,7 +1159,6 @@ def test_exception_metadata_routes_to_real_owner_and_removal_campaign(
         if row["category"] == "private_symbol_import" and row["target_package"] != "lab"
     } == {"P8"}
     assert {row["removal_campaign"] for row in rows} == {
-        "P3",
         "P4",
         "P5",
         "P6",
@@ -1234,7 +1263,7 @@ def test_exception_artifacts_are_fresh_and_head_independent(
     built_ledger = architecture.build_architecture_exception_ledger(ROOT)
     built_seed = architecture.build_architecture_exception_baseline(ROOT)
 
-    assert built_seed == _without_persisted_p2_retirement_history(
+    assert built_seed == _without_persisted_retirement_history(
         architecture,
         recorded_seed,
     )

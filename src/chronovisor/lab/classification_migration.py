@@ -46,8 +46,6 @@ CLASSIFICATION_INDEX_SCHEMA = "chronovisor.classification-index.v1"
 MIGRATION_RECEIPT_SCHEMA = "chronovisor.classification-migration-receipt.v1"
 
 
-
-
 def _active_pages(root: Path, state: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
     return {
         str(uid): dict(row)
@@ -132,7 +130,11 @@ def run_full_model_shadow(
     package = load_udc_package(root)
     if not package.complete:
         raise RuntimeError("full model shadow requires the complete UDC package")
-    index = production_candidate_index(root, package)
+    index = production_candidate_index(
+        root,
+        package,
+        provider_factory=_library_evidence_provider_factory,
+    )
     authority_epoch = int(authority.get("authority_epoch") or 1)
     authority_digest = (
         str(authority.get("threshold_version") or "")
@@ -542,6 +544,22 @@ def main(argv: list[str] | None = None) -> int:
         result = classification_authority_status(args.root)
     print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
     return 0
+
+
+def _library_evidence_provider_factory(
+    *,
+    package: Any,
+    provider_manifest: Path,
+) -> Any:
+    from chronovisor.lab.classification_library_evidence import (
+        LibraryEvidenceIndex,
+        LibraryEvidenceProvider,
+    )
+
+    return LibraryEvidenceProvider(
+        package=package,
+        evidence_index=LibraryEvidenceIndex(provider_manifest),
+    )
 
 
 if __name__ == "__main__":
