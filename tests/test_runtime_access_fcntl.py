@@ -1056,5 +1056,5 @@ def test_fcntl_ids_are_line_stable_and_production_inventory_is_complete() -> Non
         and not any(isinstance(argument, ast.Starred) for argument in call.args)
         for call in flock_calls
     )
-    assert len(fdopen_calls) == 38
+    assert len(fdopen_calls) == 39
     assert len(fdopen_calls) >= 8
