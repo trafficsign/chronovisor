@@ -419,6 +419,76 @@ def _expected_raw_manifest(*paths: Path) -> dict[str, str]:
     }
 
 
+def _generated_projection_child(chronovisor_root: Path) -> Path:
+    from chronovisor.raw.raw_semantic_projection import (
+        project_parent_raw,
+        verify_projection_bundle,
+    )
+    from chronovisor.raw.save_transaction import (
+        attach_save_transaction_marker,
+        make_save_transaction,
+    )
+
+    parent = chronovisor_root / "raw" / "projection-parent.md"
+    transaction = make_save_transaction(
+        host="codex",
+        session_file=chronovisor_root / "codex-session.jsonl",
+        session_id="self-heal-projection",
+        after_line=0,
+        until_line=1,
+    )
+    content = "\n".join(
+        [
+            "# Codex Session Transcript Delta",
+            "",
+            "- Source: Codex",
+            "- Capture mode: deterministic-lossless",
+            "",
+            "## Transcript Delta",
+            "",
+            "```json",
+            json.dumps(
+                [{"line": 1, "role": "user", "text": "repair evidence"}],
+                ensure_ascii=False,
+                indent=2,
+            ),
+            "```",
+            "",
+        ]
+    )
+    parent.write_text(
+        attach_save_transaction_marker(transaction, content),
+        encoding="utf-8",
+    )
+    projected = project_parent_raw(
+        parent,
+        output_dir=(chronovisor_root / "runtime" / "raw-projections" / "artifacts"),
+        max_child_bytes=16_000,
+    )
+    assert projected.manifest_path is not None
+    assert verify_projection_bundle(projected.manifest_path)["children"]
+    assert len(projected.child_paths) == 1
+    return projected.child_paths[0]
+
+
+def _bind_operational_release_to_raw(
+    chronovisor_root: Path,
+    release_case: tuple[Path, dict[str, str]],
+    raw_path: Path,
+) -> tuple[Path, dict[str, str]]:
+    packet_path, kwargs = release_case
+    state_path = chronovisor_root / "runtime" / "failures" / "state.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    entry = state["failures"].pop("broken.md")
+    raw = raw_path.read_bytes()
+    entry["raw_sha256"] = hashlib.sha256(raw).hexdigest()
+    entry["raw_bytes"] = len(raw)
+    state["failures"][raw_path.name] = entry
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    kwargs["expected_raw_sha256"] = {raw_path.name: hashlib.sha256(raw).hexdigest()}
+    return packet_path, kwargs
+
+
 @pytest.fixture()
 def operational_release_case(
     isolated_wiki: Path,
@@ -468,6 +538,52 @@ def operational_release_case(
         "repair_commit": "a" * 40,
         "reason": "bounded output repair",
     }
+
+
+@pytest.mark.parametrize("bundle_state", ("valid", "tampered", "symlink"))
+def test_verified_local_repair_reads_only_verified_projection_child_evidence(
+    isolated_wiki: Path,
+    operational_release_case: tuple[Path, dict[str, str]],
+    bundle_state: str,
+) -> None:
+    from chronovisor.ops import self_heal
+
+    child = _generated_projection_child(isolated_wiki)
+    original = child.read_bytes()
+    if bundle_state == "tampered":
+        child.write_bytes(original + b" ")
+    elif bundle_state == "symlink":
+        outside = isolated_wiki / "runtime" / "projection-child-copy.md"
+        outside.write_bytes(original)
+        child.unlink()
+        child.symlink_to(outside)
+    packet_path, kwargs = _bind_operational_release_to_raw(
+        isolated_wiki,
+        operational_release_case,
+        child,
+    )
+    before = packet_path.read_bytes()
+
+    result = self_heal.release_operational_failure_after_local_repair(
+        packet_path,
+        **kwargs,
+        dry_run=True,
+    )
+
+    assert packet_path.read_bytes() == before
+    if bundle_state == "valid":
+        assert result["accepted"] is True
+        assert result["verified_local_repair"]["affected_raws"] == [
+            {
+                "filename": child.name,
+                "sha256": hashlib.sha256(original).hexdigest(),
+                "bytes": len(original),
+                "binding_source": "failure_state",
+            }
+        ]
+    else:
+        assert result["accepted"] is False
+        assert result["reason"] == "affected_raw_evidence_unavailable"
 
 
 def _mark_system_code_repair(

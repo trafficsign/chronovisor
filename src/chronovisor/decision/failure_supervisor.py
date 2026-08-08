@@ -1719,6 +1719,43 @@ def _record_operational_launch_result(
         _save_state(state)
 
 
+def verified_projection_child_bytes(raw_file: str, *, artifact_dir: Path) -> bytes:
+    """Read an exact child only after its durable projection bundle verifies."""
+
+    match = re.fullmatch(
+        r"semantic-([0-9a-f]{64})-child-[0-9]{8}-[0-9a-f]{64}\.md",
+        raw_file,
+    )
+    if match is None:
+        raise ValueError("affected_raw_missing")
+    child_path = artifact_dir / raw_file
+    manifest_path = artifact_dir / f"semantic-{match.group(1)}.manifest.json"
+    if child_path.is_symlink() or manifest_path.is_symlink():
+        raise ValueError("projection_evidence_symlink")
+    resolved_dir = artifact_dir.resolve(strict=True)
+    resolved_child = child_path.resolve(strict=True)
+    if (
+        resolved_child.parent != resolved_dir
+        or manifest_path.resolve(strict=True).parent != resolved_dir
+    ):
+        raise ValueError("projection_evidence_outside_artifact_dir")
+
+    from chronovisor.raw import raw_semantic_projection
+
+    manifest = raw_semantic_projection.verify_projection_bundle(manifest_path)
+    children = manifest.get("children")
+    if (
+        not isinstance(children, list)
+        or sum(
+            isinstance(row, dict) and row.get("filename") == raw_file
+            for row in children
+        )
+        != 1
+    ):
+        raise ValueError("projection_child_not_in_manifest")
+    return child_path.read_bytes()
+
+
 def _valid_projection_child_bundle(raw_path: Path, entry: dict[str, Any]) -> bool:
     """Return true only when a previously failed child now has a valid bundle."""
 
@@ -1727,24 +1764,11 @@ def _valid_projection_child_bundle(raw_path: Path, entry: dict[str, Any]) -> boo
         not in SEMANTIC_PROJECTION_OPERATIONAL_FAILURE_CLASSES
     ):
         return False
-    match = re.fullmatch(
-        r"semantic-([0-9a-f]{64})-child-[0-9]{8}-[0-9a-f]{64}\.md",
-        raw_path.name,
-    )
-    if match is None or not raw_path.is_file():
-        return False
-    manifest_path = raw_path.parent / f"semantic-{match.group(1)}.manifest.json"
     try:
-        from chronovisor.raw.raw_semantic_projection import verify_projection_bundle
-
-        manifest = verify_projection_bundle(manifest_path)
+        verified_projection_child_bytes(raw_path.name, artifact_dir=raw_path.parent)
     except (OSError, ValueError, TypeError):
         return False
-    children = manifest.get("children")
-    return isinstance(children, list) and any(
-        isinstance(row, dict) and row.get("filename") == raw_path.name
-        for row in children
-    )
+    return True
 
 
 def _projection_parent_can_retry(raw_path: Path, entry: dict[str, Any]) -> bool:

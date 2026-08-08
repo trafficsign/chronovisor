@@ -592,6 +592,10 @@ V_RETIRED_LAB_DISPATCH_COMPATIBILITY_IDS = (
     "compat:f24720c5eb7c46af0dc7a7d347228e5761d0fa05db17722f60b946f17558667d",
     "compat:f47b2f959d10b77bc24ec3d363a0b7fbd9523799beb2c8f806c12fdb2110d84f",
 )
+FINAL_RETIRED_PROJECTION_REPLACEMENT_SITE_IDS = (
+    "arch:258413d5360b8db7f162ac61c060f6476ba684b99e9e53dbc515cb6318a4c8b2",
+    "arch:c217aacdc549c1316a8de1f0dac24ffe3edc55946c56b6a46103b3693a4eaeb2",
+)
 RETIREMENT_HISTORY = {
     "exception_semantic_ids": tuple(
         sorted(
@@ -637,6 +641,7 @@ RETIREMENT_HISTORY = {
                 *V_RETIRED_RECALL_SHIM_SITE_IDS,
                 *V_RETIRED_REMAINING_SHIM_SITE_IDS,
                 *V_RETIRED_DURABLE_MODULE_MAPPING_SITE_IDS,
+                *FINAL_RETIRED_PROJECTION_REPLACEMENT_SITE_IDS,
             )
         )
     ),

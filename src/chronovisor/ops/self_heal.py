@@ -1100,7 +1100,10 @@ def _release_operational_failure_after_local_repair_unlocked(
             **details,
         )
 
-    from chronovisor.decision.failure_supervisor import SEMANTIC_NO_QUORUM_FAILURE_CLASS
+    from chronovisor.decision.failure_supervisor import (
+        SEMANTIC_NO_QUORUM_FAILURE_CLASS,
+        verified_projection_child_bytes,
+    )
 
     if (
         packet.get("failure_class") == SEMANTIC_NO_QUORUM_FAILURE_CLASS
@@ -1206,9 +1209,19 @@ def _release_operational_failure_after_local_repair_unlocked(
             if Path(raw_file).name != raw_file:
                 raise ValueError("affected_raw_invalid")
             unit = raw_store.resolve(raw_file)
-            if unit is None:
-                raise ValueError("affected_raw_missing")
-            raw = raw_store.read_bytes(unit)
+            raw = (
+                raw_store.read_bytes(unit)
+                if unit is not None
+                else verified_projection_child_bytes(
+                    raw_file,
+                    artifact_dir=(
+                        chronovisor_store.CHRONOVISOR_ROOT
+                        / "runtime"
+                        / "raw-projections"
+                        / "artifacts"
+                    ),
+                )
+            )
             digest = hashlib.sha256(raw).hexdigest()
             expected_digest = expected_raw_manifest[raw_file]
             if digest != expected_digest:
