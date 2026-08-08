@@ -817,11 +817,24 @@ def _flow_value_key(value: FlowValue) -> tuple[Any, ...]:
 def _normalize_flow_variants(
     variants: Sequence[FlowValue],
 ) -> tuple[tuple[FlowValue, ...], bool]:
+    if not variants:
+        return (), False
+    if len(variants) == 1:
+        variant = variants[0]
+        if not variant.has_origins:
+            return (), False
+        return (_without_variants(variant),), False
+
     resource_variants: dict[tuple[Any, ...], FlowValue] = {}
     for variant in variants:
         if not variant.has_origins:
             continue
         resource_variants.setdefault(_flow_value_key(variant), variant)
+    if not resource_variants:
+        return (), False
+    if len(resource_variants) == 1:
+        return (_without_variants(next(iter(resource_variants.values()))),), False
+
     ordered_keys = sorted(resource_variants, key=repr)
     return (
         tuple(
@@ -924,7 +937,12 @@ def exclusive_flow_join(alternatives: Sequence[FlowValue]) -> FlowValue:
     has_originless_alternative = False
     tainted_resources: set[str] = set()
     for alternative in materialized:
-        result = result.merged(_without_top_variants(alternative))
+        merge_value = (
+            _without_top_variants(alternative)
+            if alternative.variants
+            else alternative
+        )
+        result = result.merged(merge_value)
         variants.extend(_all_flow_variants(alternative))
         has_originless_alternative |= alternative.has_originless_alternative or (
             not alternative.has_origins and alternative.has_analysis_state

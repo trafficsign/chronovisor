@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import json
 import random
 from collections import Counter
 from collections.abc import Mapping, Sequence
@@ -53,15 +54,54 @@ def _reference_normalize_flow_variants(
     )
 
 
+def _reference_exclusive_flow_join(
+    alternatives: Sequence[FlowValue],
+) -> FlowValue:
+    """Preserve the pre-optimization exclusive join for exact comparisons."""
+
+    materialized = list(alternatives)
+    result = FlowValue()
+    variants: list[FlowValue] = []
+    has_originless_alternative = False
+    tainted_resources: set[str] = set()
+    for alternative in materialized:
+        result = result.merged(
+            access_model._without_top_variants(alternative)
+        )
+        variants.extend(access_model._all_flow_variants(alternative))
+        has_originless_alternative |= (
+            alternative.has_originless_alternative
+            or (not alternative.has_origins and alternative.has_analysis_state)
+        )
+        tainted_resources.update(alternative.variant_tainted_resource_ids)
+    result.has_originless_alternative = has_originless_alternative
+    result.variant_tainted_resource_ids = frozenset(tainted_resources)
+    result.variants, variant_overflow = _reference_normalize_flow_variants(
+        variants
+    )
+    if variant_overflow:
+        result.overflowed = frozenset(
+            set(result.overflowed)
+            | {
+                resource_id
+                for variant in variants
+                for resource_id in variant.origins
+            }
+        )
+    return result
+
+
 def _random_flow_value(
     generator: random.Random,
     *,
     depth: int = 0,
 ) -> FlowValue:
     token = generator.randrange(8)
+    secondary_resource = "runtime-resource:secondary-socket"
+    resource_id = RESOURCE_ID if token % 2 else secondary_resource
     origins: dict[str, frozenset[tuple[str, ...]]] = (
         {
-            RESOURCE_ID: frozenset(
+            resource_id: frozenset(
                 {(f"random:{token}", f"depth:{depth}")}
             )
         }
@@ -89,14 +129,51 @@ def _random_flow_value(
     return FlowValue(
         origins=origins,
         object_types={f"object:{token % 4}"} if token % 2 else set(),
+        overflowed=(frozenset({resource_id}) if origins and token % 5 == 0 else frozenset()),
         module_refs={f"module:{token % 3}"} if token % 3 else set(),
+        call_targets={f"call:{token % 3}"} if token % 4 else set(),
+        class_targets={f"class:{token % 3}"} if token % 5 else set(),
         unknown_callable=bool(token % 2),
+        closure_instances={(f"closure:{token}", f"actor:{depth}")}
+        if token % 3 == 1
+        else set(),
         structured_items=structured_items,
+        runtime_object_ids={f"object-id:{token}"} if token % 3 == 2 else set(),
+        runtime_close_ids={f"close-id:{token}"} if token % 4 == 2 else set(),
+        runtime_descriptor_ids={f"descriptor-id:{token}"}
+        if token % 5 == 2
+        else set(),
+        instance_ids={f"instance:{token}"} if token % 3 == 0 else set(),
         attribute_values=attribute_values,
         attribute_values_complete=bool(attribute_values) and token % 2 == 0,
         attribute_values_ambiguous=bool(attribute_values) and token % 3 == 0,
         variants=variants,
+        has_originless_alternative=token % 5 == 3,
+        variant_tainted_resource_ids=(
+            frozenset({resource_id}) if origins and token % 4 == 3 else frozenset()
+        ),
     )
+
+
+def _mutate_mutable_flow_graph(value: FlowValue) -> None:
+    """Mutate every mutable container recursively to expose shared graphs."""
+
+    value.origins["runtime-resource:mutated"] = frozenset({("mutated",)})
+    value.object_types.add("mutated")
+    value.module_refs.add("mutated")
+    value.call_targets.add("mutated")
+    value.class_targets.add("mutated")
+    value.closure_instances.add(("mutated", "mutated"))
+    value.runtime_object_ids.add("mutated")
+    value.runtime_close_ids.add("mutated")
+    value.runtime_descriptor_ids.add("mutated")
+    value.instance_ids.add("mutated")
+    for item in value.structured_items or ():
+        _mutate_mutable_flow_graph(item)
+    for attribute in value.attribute_values.values():
+        _mutate_mutable_flow_graph(attribute)
+    for variant in value.variants:
+        _mutate_mutable_flow_graph(variant)
 
 
 def _candidate(
@@ -352,6 +429,194 @@ def test_optimized_normalization_matches_reference_on_bounded_cases() -> None:
         assert actual_overflow is expected_overflow
 
 
+def test_normalization_trivial_and_unique_paths_do_not_render_keys(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    originless = FlowValue(object_types={"originless"})
+    single = FlowValue(
+        origins={RESOURCE_ID: frozenset({("single",)})},
+        structured_items=(FlowValue(object_types={"nested"}),),
+    )
+    duplicate = single.copy()
+    duplicate.variants = (FlowValue(object_types={"ignored"}),)
+    builtin_repr = repr
+    rendered: list[object] = []
+    keyed: list[int] = []
+    original_flow_value_key = access_model._flow_value_key
+    key_in_progress = False
+
+    def forbidden_repr(value: object) -> str:
+        rendered.append(value)
+        raise AssertionError("trivial normalization rendered a flow key")
+
+    def forbidden_flow_value_key(value: FlowValue) -> tuple[Any, ...]:
+        raise AssertionError(f"trivial normalization keyed {value!r}")
+
+    with monkeypatch.context() as context:
+        context.setattr(
+            access_model, "repr", forbidden_repr, raising=False
+        )
+        context.setattr(
+            access_model, "_flow_value_key", forbidden_flow_value_key
+        )
+        assert _normalize_flow_variants(()) == ((), False)
+        assert _normalize_flow_variants((originless,)) == ((), False)
+        assert _normalize_flow_variants((single,)) == (
+            (_without_variants(single),),
+            False,
+        )
+
+    def tracked_flow_value_key(value: FlowValue) -> tuple[Any, ...]:
+        nonlocal key_in_progress
+        if key_in_progress:
+            return original_flow_value_key(value)
+        keyed.append(id(value))
+        key_in_progress = True
+        try:
+            return original_flow_value_key(value)
+        finally:
+            key_in_progress = False
+
+    with monkeypatch.context() as context:
+        context.setattr(
+            access_model, "repr", forbidden_repr, raising=False
+        )
+        context.setattr(
+            access_model, "_flow_value_key", tracked_flow_value_key
+        )
+        assert _normalize_flow_variants((single, duplicate)) == (
+            (_without_variants(single),),
+            False,
+        )
+    assert rendered == []
+    assert keyed == [id(single), id(duplicate)]
+
+    first = FlowValue(origins={RESOURCE_ID: frozenset({("first",)})})
+    second = FlowValue(origins={RESOURCE_ID: frozenset({("second",)})})
+
+    def tracked_repr(value: object) -> str:
+        rendered.append(value)
+        return builtin_repr(value)
+
+    with monkeypatch.context() as context:
+        context.setattr(access_model, "repr", tracked_repr, raising=False)
+        normalized, overflowed = _normalize_flow_variants((first, second))
+    assert len(normalized) == 2
+    assert overflowed is False
+    assert len(rendered) == 2
+
+
+def test_exclusive_join_matches_reference_for_adversarial_values() -> None:
+    generator = random.Random(0xA11CE)
+    cases: list[list[FlowValue]] = [
+        [],
+        [FlowValue()],
+        [FlowValue(origins={RESOURCE_ID: frozenset({("single",)})})],
+    ]
+    for _ in range(64):
+        values = [
+            _random_flow_value(generator)
+            for _ in range(generator.randrange(1, 18))
+        ]
+        if values:
+            duplicate = values[0].copy()
+            duplicate.variants = (
+                FlowValue(object_types={"ignored-duplicate-variant"}),
+            )
+            values.append(duplicate)
+        cases.extend((values, list(reversed(values))))
+
+    for alternatives in cases:
+        before = [alternative.copy() for alternative in alternatives]
+        expected = _reference_exclusive_flow_join(alternatives)
+        actual = exclusive_flow_join(alternatives)
+        assert actual == expected
+        assert _flow_value_key(actual) == _flow_value_key(expected)
+        assert alternatives == before
+
+
+def test_exclusive_join_only_strips_truthy_top_variants(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    direct = FlowValue(
+        origins={RESOURCE_ID: frozenset({("direct",)})},
+        structured_items=(FlowValue(object_types={"direct-nested"}),),
+    )
+    branched = FlowValue(
+        origins={RESOURCE_ID: frozenset({("outer",)})},
+        variants=(
+            FlowValue(origins={RESOURCE_ID: frozenset({("variant",)})}),
+        ),
+    )
+    expected = _reference_exclusive_flow_join((direct, branched))
+    stripped_ids: list[int] = []
+    original = access_model._without_top_variants
+
+    def tracked(value: FlowValue) -> FlowValue:
+        stripped_ids.append(id(value))
+        return original(value)
+
+    monkeypatch.setattr(access_model, "_without_top_variants", tracked)
+
+    assert exclusive_flow_join((direct, branched)) == expected
+    assert stripped_ids == [id(branched)]
+
+
+def test_exclusive_join_preserves_shortcut_counterexamples_and_copy_isolation() -> None:
+    nested = FlowValue(
+        origins={RESOURCE_ID: frozenset({("outer",)})},
+        object_types={"outer"},
+        overflowed=frozenset({RESOURCE_ID}),
+        module_refs={"module"},
+        call_targets={"call"},
+        class_targets={"class"},
+        closure_instances={("closure", "actor")},
+        structured_items=(
+            FlowValue(
+                origins={RESOURCE_ID: frozenset({("structured",)})},
+                object_types={"structured"},
+            ),
+        ),
+        runtime_object_ids={"object-id"},
+        runtime_close_ids={"close-id"},
+        runtime_descriptor_ids={"descriptor-id"},
+        instance_ids={"instance"},
+        attribute_values={
+            "field": FlowValue(
+                origins={RESOURCE_ID: frozenset({("attribute",)})},
+                object_types={"attribute"},
+            )
+        },
+        attribute_values_complete=True,
+        variants=(
+            FlowValue(
+                origins={RESOURCE_ID: frozenset({("variant",)})},
+                object_types={"variant"},
+            ),
+        ),
+        has_originless_alternative=True,
+        variant_tainted_resource_ids=frozenset({RESOURCE_ID}),
+    )
+    direct = FlowValue(
+        origins={RESOURCE_ID: frozenset({("direct",)})},
+        object_types={"direct"},
+    )
+    alternatives = [nested, direct]
+    before = [alternative.copy() for alternative in alternatives]
+
+    result = exclusive_flow_join(alternatives)
+    assert result == _reference_exclusive_flow_join(alternatives)
+    _mutate_mutable_flow_graph(result)
+    assert alternatives == before
+
+    single = exclusive_flow_join((direct,))
+    equal = exclusive_flow_join((direct, direct.copy()))
+    assert len(single.variants) == 1
+    assert len(equal.variants) == 1
+    assert single == _reference_exclusive_flow_join((direct,))
+    assert equal == _reference_exclusive_flow_join((direct, direct.copy()))
+
+
 def test_originless_exclusive_state_is_retained_for_simultaneous_merges() -> None:
     first = exclusive_flow_join(
         [
@@ -420,22 +685,30 @@ def test_variant_overflow_survives_transforms_rejoin_and_fact_collection() -> No
         path="src/chronovisor/consumer.py",
         line=1,
     )
-    collector = AccessFactCollector(
-        {RESOURCE_ID: "unix://$HOME/.chronovisor/runtime/test.sock"},
-        {id(expression.value): site},
-    )
-    collector.record_access(
-        forward,
-        node=expression.value,
-        actor="chronovisor.consumer:exercise",
-        mode="read",
-        operation="path.exists",
-        sink="pathlib.Path.exists",
-        path="src/chronovisor/consumer.py",
-        line=1,
-        ordinal=1,
-    )
-    projected = collector.result()
+    projected_results: list[dict[str, Any]] = []
+    for joined in (forward, reverse):
+        collector = AccessFactCollector(
+            {RESOURCE_ID: "unix://$HOME/.chronovisor/runtime/test.sock"},
+            {id(expression.value): site},
+        )
+        collector.record_access(
+            joined,
+            node=expression.value,
+            actor="chronovisor.consumer:exercise",
+            mode="read",
+            operation="path.exists",
+            sink="pathlib.Path.exists",
+            path="src/chronovisor/consumer.py",
+            line=1,
+            ordinal=1,
+        )
+        projected_results.append(collector.result())
+    projected = projected_results[0]
+    assert json.dumps(
+        projected_results[0], sort_keys=True, separators=(",", ":")
+    ).encode() == json.dumps(
+        projected_results[1], sort_keys=True, separators=(",", ":")
+    ).encode()
     assert projected["access_facts"][0]["provenance_complete"] is False
     assert any(
         row["reason"] == "provenance_overflow"
