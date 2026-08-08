@@ -10,7 +10,6 @@ import hashlib
 import json
 import os
 import re
-import stat
 import subprocess
 from collections.abc import Mapping, Sequence
 from pathlib import Path, PurePosixPath
@@ -25,6 +24,7 @@ H0_SEED_COMMIT = "6cbcd1e617c631bee23de0cf8c6597f324485205"
 GATE_HYGIENE_COMMIT = "f1208ee3914e7ec402b84ebda16423f57065e041"
 EVIDENCE_HARDENING_COMMIT = "63371cf32937948da784292fc8fc6db15e6a4679"
 REVIEW_FIX_COMMIT = "6094b59f508bc30b8a3a73240d297f03d1704f59"
+RECEIPT_HARDENING_COMMIT = "6ddb7cf007ceeaadd1e90d54608724495cd38d86"
 CANONICAL_PLAN_SHA256 = (
     "bedd3ad58736a1489115a76ef5638cc9adf522c687226f7c0a6156e20868ae69"
 )
@@ -109,7 +109,7 @@ RECEIPT_HARDENING_PATHS = (
     "tests/test_architecture_migrations.py",
 )
 RECEIPT_HARDENING_TEST_SHA256 = (
-    "834edd1475eacf251a92abf613cbc41f69b8026774fd176284a564341b90d465"
+    "79fe6c9e6918378bf3d9cea5f100ff83a2e035653b1028d9201e102fbc99e3c4"
 )
 EXPECTED_H0_ACTIVE_COUNTS = {
     "exceptions": 162,
@@ -983,6 +983,7 @@ def _validate_fixed_history(root: Path, plan: Mapping[str, Any]) -> None:
     gate_hygiene = _commit(root, str(plan["history"]["gate_hygiene_commit"]))
     evidence_hardening = _commit(root, EVIDENCE_HARDENING_COMMIT)
     review_fix = _commit(root, REVIEW_FIX_COMMIT)
+    receipt_hardening = _commit(root, RECEIPT_HARDENING_COMMIT)
     if _single_parent(root, h0_seed) != source_parent:
         raise MigrationValidationError("H0 seed parent identity drift")
     _require_transition(
@@ -1028,6 +1029,23 @@ def _validate_fixed_history(root: Path, plan: Mapping[str, Any]) -> None:
     if _git_file(root, review_fix, PLAN_PATH.as_posix()) != _canonical_json_bytes(plan):
         raise MigrationValidationError(
             "fixed review-fix plan differs from supplied canonical plan"
+        )
+    if _single_parent(root, receipt_hardening) != review_fix:
+        raise MigrationValidationError("receipt-hardening parent identity drift")
+    _require_transition(
+        root,
+        review_fix,
+        receipt_hardening,
+        {path: "M" for path in RECEIPT_HARDENING_PATHS},
+        context="review-fix->receipt-hardening",
+    )
+    if _git_file(
+        root,
+        receipt_hardening,
+        PLAN_PATH.as_posix(),
+    ) != _canonical_json_bytes(plan):
+        raise MigrationValidationError(
+            "fixed receipt-hardening plan differs from supplied canonical plan"
         )
 
 
@@ -1187,14 +1205,14 @@ def validate_history(
 
     validate_plan(root, plan)
     evidence_parent = _commit(root, evidence_parent_revision)
-    if _single_parent(root, evidence_parent) != REVIEW_FIX_COMMIT:
-        raise MigrationValidationError("receipt-hardening parent identity drift")
+    if _single_parent(root, evidence_parent) != RECEIPT_HARDENING_COMMIT:
+        raise MigrationValidationError("evidence parent identity drift")
     _require_transition(
         root,
-        REVIEW_FIX_COMMIT,
+        RECEIPT_HARDENING_COMMIT,
         evidence_parent,
         {path: "M" for path in RECEIPT_HARDENING_PATHS},
-        context="review-fix->receipt-hardening",
+        context="receipt-hardening->evidence-parent",
     )
     if _git_file(root, evidence_parent, PLAN_PATH.as_posix()) != _canonical_json_bytes(
         plan
@@ -1824,37 +1842,14 @@ def write_canonical_json(path: Path, payload: Mapping[str, Any]) -> None:
     path.write_bytes(_canonical_json_bytes(payload))
 
 
-def _remove_created_output(
-    parent_fd: int,
-    name: str,
-    created: os.stat_result,
-) -> None:
-    """Remove the output only while the directory entry is the created inode."""
-
-    try:
-        current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
-    except (FileNotFoundError, OSError):
-        return
-    if (
-        current.st_dev,
-        current.st_ino,
-        stat.S_IFMT(current.st_mode),
-    ) != (
-        created.st_dev,
-        created.st_ino,
-        stat.S_IFMT(created.st_mode),
-    ):
-        return
-    try:
-        os.unlink(name, dir_fd=parent_fd)
-    except FileNotFoundError:
-        return
-
-
 def _write_new_canonical_json(path: Path, payload: Mapping[str, Any]) -> None:
-    """Create a canonical artifact without following or replacing a final entry."""
+    """Create once, leaving any failed output for explicit operator inspection."""
 
     raw = _canonical_json_bytes(payload)
+    retained_notice = (
+        "receipt output was left in place; inspect and remove it explicitly "
+        "before retry"
+    )
     directory_flags = os.O_RDONLY
     for flag_name in ("O_CLOEXEC", "O_DIRECTORY", "O_NOFOLLOW"):
         directory_flags |= getattr(os, flag_name, 0)
@@ -1879,9 +1874,8 @@ def _write_new_canonical_json(path: Path, payload: Mapping[str, Any]) -> None:
             raise MigrationValidationError(
                 f"cannot exclusively create receipt output: {exc}"
             ) from exc
-        created: os.stat_result | None = None
         try:
-            created = os.fstat(output_fd)
+            os.fstat(output_fd)
             offset = 0
             while offset < len(raw):
                 written = os.write(output_fd, raw[offset:])
@@ -1891,23 +1885,27 @@ def _write_new_canonical_json(path: Path, payload: Mapping[str, Any]) -> None:
                     )
                 offset += written
             os.fsync(output_fd)
-        except (MigrationValidationError, OSError) as exc:
-            if created is not None:
-                _remove_created_output(parent_fd, path.name, created)
-            if isinstance(exc, MigrationValidationError):
-                raise
+        except MigrationValidationError as exc:
+            raise MigrationValidationError(f"{exc}; {retained_notice}") from exc
+        except OSError as exc:
             raise MigrationValidationError(
-                f"cannot write receipt output: {exc}"
+                f"cannot write receipt output: {exc}; {retained_notice}"
             ) from exc
         finally:
             try:
                 os.close(output_fd)
             except OSError as exc:
                 raise MigrationValidationError(
-                    f"cannot close receipt output: {exc}"
+                    f"cannot close receipt output: {exc}; {retained_notice}"
                 ) from exc
     finally:
-        os.close(parent_fd)
+        try:
+            os.close(parent_fd)
+        except OSError as exc:
+            raise MigrationValidationError(
+                "cannot close receipt output directory: "
+                f"{exc}; {retained_notice}"
+            ) from exc
 
 
 def _untracked_output_path(root: Path, value: Path) -> tuple[Path, str]:

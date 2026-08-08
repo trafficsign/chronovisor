@@ -6,6 +6,7 @@ import importlib.util
 import json
 import os
 import shutil
+import stat
 import subprocess
 from pathlib import Path
 from types import ModuleType
@@ -121,12 +122,12 @@ def _clone_with_evidence_parent(
         "checkout",
         "--quiet",
         "--detach",
-        migrations.REVIEW_FIX_COMMIT,
+        migrations.RECEIPT_HARDENING_COMMIT,
     )
     for relative in migrations.RECEIPT_HARDENING_PATHS:
         shutil.copyfile(ROOT / relative, repo / relative)
     _git(repo, "add", "--", *migrations.RECEIPT_HARDENING_PATHS)
-    evidence_parent = _commit(repo, "refactor: make P2 receipt creation race-safe")
+    evidence_parent = _commit(repo, "refactor: make P2 receipt failures fail closed")
     plan = migrations.load_plan(repo / migrations.PLAN_PATH)
     return repo, plan, evidence_parent
 
@@ -525,7 +526,7 @@ def test_evidence_history_rejects_extra_path_and_plan_byte_drift(
         "checkout",
         "--quiet",
         "--detach",
-        migrations.REVIEW_FIX_COMMIT,
+        migrations.RECEIPT_HARDENING_COMMIT,
     )
     for relative in migrations.RECEIPT_HARDENING_PATHS:
         shutil.copyfile(ROOT / relative, repo / relative)
@@ -548,7 +549,7 @@ def test_evidence_history_rejects_extra_path_and_plan_byte_drift(
         "checkout",
         "--quiet",
         "--detach",
-        migrations.REVIEW_FIX_COMMIT,
+        migrations.RECEIPT_HARDENING_COMMIT,
     )
     for relative in migrations.RECEIPT_HARDENING_PATHS:
         shutil.copyfile(ROOT / relative, repo / relative)
@@ -568,7 +569,7 @@ def test_evidence_history_rejects_extra_path_and_plan_byte_drift(
         migrations.validate_history(repo, plan, drift)
 
 
-def test_history_rejects_h1_directly_atop_fixed_review_fix(
+def test_history_rejects_h1_directly_atop_fixed_receipt_hardening(
     migrations: ModuleType, tmp_path: Path
 ) -> None:
     repo = tmp_path / "h1-without-evidence-parent"
@@ -578,13 +579,19 @@ def test_history_rejects_h1_directly_atop_fixed_review_fix(
         check=True,
         capture_output=True,
     )
-    _git(repo, "checkout", "--quiet", "--detach", migrations.REVIEW_FIX_COMMIT)
+    _git(
+        repo,
+        "checkout",
+        "--quiet",
+        "--detach",
+        migrations.RECEIPT_HARDENING_COMMIT,
+    )
     plan = migrations.load_plan(repo / migrations.PLAN_PATH)
     h1 = _write_h1(repo, migrations, plan)
 
     with pytest.raises(
         migrations.MigrationValidationError,
-        match="receipt-hardening parent identity",
+        match="evidence parent identity",
     ):
         migrations.validate_h1(repo, plan, h1)
 
@@ -599,7 +606,13 @@ def test_history_rejects_alternate_evidence_parent_with_test_drift(
         check=True,
         capture_output=True,
     )
-    _git(repo, "checkout", "--quiet", "--detach", migrations.REVIEW_FIX_COMMIT)
+    _git(
+        repo,
+        "checkout",
+        "--quiet",
+        "--detach",
+        migrations.RECEIPT_HARDENING_COMMIT,
+    )
     shutil.copyfile(
         ROOT / "scripts/architecture_migrations.py",
         repo / "scripts/architecture_migrations.py",
@@ -922,7 +935,7 @@ def test_receipt_output_rejects_post_validation_symlink_swap(
     assert victim.read_bytes() == b"unchanged\n"
 
 
-def test_receipt_output_write_failure_removes_only_created_entry(
+def test_receipt_output_write_failure_leaves_created_inode_mode_0600(
     migrations: ModuleType,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -934,16 +947,30 @@ def test_receipt_output_write_failure_removes_only_created_entry(
         repo, Path("receipt.json")
     )
 
-    def fail_write(_fd: int, _raw: bytes) -> int:
+    created_identity: tuple[int, int] | None = None
+
+    def fail_write(fd: int, _raw: bytes) -> int:
+        nonlocal created_identity
+        created = os.fstat(fd)
+        created_identity = (created.st_dev, created.st_ino)
         raise OSError("injected write failure")
 
+    def unexpected_unlink(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("receipt failure cleanup must never unlink final output")
+
     monkeypatch.setattr(migrations.os, "write", fail_write)
+    monkeypatch.setattr(migrations.os, "unlink", unexpected_unlink)
     with pytest.raises(migrations.MigrationValidationError, match="cannot write"):
         migrations._write_new_canonical_json(output, {"state": "failure"})
-    assert not output.exists()
+    created = output.lstat()
+    assert created_identity == (created.st_dev, created.st_ino)
+    assert stat.S_ISREG(created.st_mode)
+    assert stat.S_IMODE(created.st_mode) == 0o600
+    with pytest.raises(migrations.MigrationValidationError, match="already exist"):
+        migrations._untracked_output_path(repo, Path("receipt.json"))
 
 
-def test_receipt_output_failure_does_not_unlink_swapped_entry(
+def test_receipt_output_failure_does_not_unlink_swapped_symlink(
     migrations: ModuleType,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -956,17 +983,119 @@ def test_receipt_output_failure_does_not_unlink_swapped_entry(
     )
     victim = tmp_path / "write-failure-victim.json"
     victim.write_bytes(b"safe\n")
+    real_unlink = os.unlink
 
     def swap_then_fail(_fd: int, _raw: bytes) -> int:
-        output.unlink()
+        real_unlink(output)
         output.symlink_to(victim)
         raise OSError("injected swap failure")
 
+    def unexpected_unlink(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("receipt failure cleanup must never unlink final output")
+
     monkeypatch.setattr(migrations.os, "write", swap_then_fail)
+    monkeypatch.setattr(migrations.os, "unlink", unexpected_unlink)
     with pytest.raises(migrations.MigrationValidationError, match="cannot write"):
         migrations._write_new_canonical_json(output, {"state": "failure"})
     assert output.is_symlink()
     assert victim.read_bytes() == b"safe\n"
+
+
+def test_receipt_output_failure_does_not_unlink_swapped_regular_victim(
+    migrations: ModuleType,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = tmp_path / "failed-regular-swap-output"
+    repo.mkdir()
+    _git(repo, "init", "--quiet")
+    output, _relative = migrations._untracked_output_path(
+        repo, Path("receipt.json")
+    )
+    victim = tmp_path / "regular-write-failure-victim.json"
+    victim.write_bytes(b"regular-safe\n")
+    victim_identity = (victim.stat().st_dev, victim.stat().st_ino)
+    real_unlink = os.unlink
+
+    def swap_then_fail(_fd: int, _raw: bytes) -> int:
+        real_unlink(output)
+        os.link(victim, output)
+        raise OSError("injected regular swap failure")
+
+    def unexpected_unlink(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("receipt failure cleanup must never unlink final output")
+
+    monkeypatch.setattr(migrations.os, "write", swap_then_fail)
+    monkeypatch.setattr(migrations.os, "unlink", unexpected_unlink)
+    with pytest.raises(migrations.MigrationValidationError, match="cannot write"):
+        migrations._write_new_canonical_json(output, {"state": "failure"})
+    assert (output.stat().st_dev, output.stat().st_ino) == victim_identity
+    assert output.read_bytes() == b"regular-safe\n"
+    assert victim.read_bytes() == b"regular-safe\n"
+
+
+def test_receipt_output_fstat_failure_leaves_created_entry(
+    migrations: ModuleType,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = tmp_path / "failed-fstat-output"
+    repo.mkdir()
+    _git(repo, "init", "--quiet")
+    output, _relative = migrations._untracked_output_path(
+        repo, Path("receipt.json")
+    )
+
+    def fail_fstat(_fd: int) -> os.stat_result:
+        raise OSError("injected fstat failure")
+
+    monkeypatch.setattr(migrations.os, "fstat", fail_fstat)
+    with pytest.raises(migrations.MigrationValidationError, match="cannot write"):
+        migrations._write_new_canonical_json(output, {"state": "failure"})
+    created = output.lstat()
+    assert stat.S_ISREG(created.st_mode)
+    assert stat.S_IMODE(created.st_mode) == 0o600
+
+
+@pytest.mark.parametrize("operation", ["fsync", "close"])
+def test_receipt_output_sync_or_close_failure_leaves_created_entry(
+    migrations: ModuleType,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+) -> None:
+    repo = tmp_path / f"failed-{operation}-output"
+    repo.mkdir()
+    _git(repo, "init", "--quiet")
+    output, _relative = migrations._untracked_output_path(
+        repo, Path("receipt.json")
+    )
+    if operation == "fsync":
+
+        def fail_fsync(_fd: int) -> None:
+            raise OSError("injected fsync failure")
+
+        monkeypatch.setattr(migrations.os, "fsync", fail_fsync)
+        error = "cannot write"
+    else:
+        real_close = os.close
+        failed = False
+
+        def close_then_fail(fd: int) -> None:
+            nonlocal failed
+            real_close(fd)
+            if not failed:
+                failed = True
+                raise OSError("injected close failure")
+
+        monkeypatch.setattr(migrations.os, "close", close_then_fail)
+        error = "cannot close receipt output"
+
+    with pytest.raises(migrations.MigrationValidationError, match=error):
+        migrations._write_new_canonical_json(output, {"state": "failure"})
+    created = output.lstat()
+    assert stat.S_ISREG(created.st_mode)
+    assert stat.S_IMODE(created.st_mode) == 0o600
 
 
 def test_production_contract_has_no_lab_import() -> None:
