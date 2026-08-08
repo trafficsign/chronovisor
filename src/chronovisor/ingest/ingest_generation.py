@@ -43,6 +43,7 @@ load_ingest_config = _runtime_call("load_ingest_config")
 
 from chronovisor.ingest.ingest import (  # noqa: E402
     _DEFAULT_GENERATE_WITH_PROGRESS,
+    _MAX_COMPACT_UPDATE_SELECTED_BYTES,
     _MAX_PAGE_GENERATION_REPAIR_TURNS,
     _MAX_PAGE_GENERATION_RESPONSES,
     _PAGE_GENERATION_CONTEXT_SAFETY_TOKENS,
@@ -130,7 +131,7 @@ not explicit in the raw evidence.
         compact_context = _build_compact_update_context(
             op,
             raw_content,
-            max_selected_bytes=config.max_related_context_bytes,
+            max_selected_bytes=_MAX_COMPACT_UPDATE_SELECTED_BYTES,
         )
         if compact_context is not None:
             context = compact_context.text

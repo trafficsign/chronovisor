@@ -9909,6 +9909,92 @@ class TestTriagePlanSchema:
         feedback = transport.requests[1].messages[-1]["content"]
         assert '"keyword":"createPathDepth"' in feedback
 
+    @pytest.mark.parametrize(
+        ("feedback_bytes", "expect_repair"),
+        [(4_025, True), (4_097, False)],
+    )
+    def test_live_triage_uses_exact_4kib_feedback_byte_cap(
+        self,
+        isolated_wiki: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        feedback_bytes: int,
+        expect_repair: bool,
+    ) -> None:
+        from chronovisor.decision import local_structured
+        from chronovisor.ingest import ingest
+
+        invalid = [
+            {
+                "type": "update",
+                "filename": "missing.md",
+                "title": "Missing page",
+                "keywords": ["missing", "repair"],
+                "summary": "This schema-valid update needs a foldered create.",
+            }
+        ]
+        repaired = [
+            {
+                "type": "create",
+                "filename": "memory/repaired-feedback.md",
+                "title": "Repaired feedback",
+                "keywords": ["repair", "feedback"],
+                "summary": "The exact validator feedback reached repair.",
+            }
+        ]
+
+        def issue_with_message(message: str) -> object:
+            return ingest.ValidationIssue(
+                pointer="/0/filename",
+                keyword="exactFeedback",
+                expected="a grounded foldered create",
+                received={"type": "string", "value": "missing.md"},
+                message=message,
+            )
+
+        def render_feedback(issue: object) -> str:
+            errors = json.dumps(
+                [issue.to_dict()],
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            return local_structured._REPAIR_TEMPLATE.format(errors=errors)
+
+        base_feedback = render_feedback(issue_with_message(""))
+        filler = "F" * (feedback_bytes - len(base_feedback.encode("utf-8")))
+        issue = issue_with_message(filler)
+        expected_feedback = render_feedback(issue)
+        assert len(expected_feedback.encode("utf-8")) == feedback_bytes
+
+        def validation_issues(value, **_kwargs):
+            return [issue] if value == invalid else []
+
+        monkeypatch.setattr(
+            ingest,
+            "_triage_plan_validation_issues",
+            validation_issues,
+        )
+        responses = [json.dumps(invalid)]
+        if expect_repair:
+            responses.append(json.dumps(repaired))
+        transport = _QueueStructuredTransport(*responses)
+
+        if expect_repair:
+            assert ingest._triage("raw content", transport=transport) == repaired
+            assert len(transport.requests) == 2
+            repair_feedback = transport.requests[1].messages[-1]["content"]
+            assert repair_feedback == expected_feedback
+            assert filler in repair_feedback
+        else:
+            with pytest.raises(ingest.IngestTriageFailure) as raised:
+                ingest._triage(
+                    "raw content",
+                    transport=transport,
+                    raise_on_failure=True,
+                )
+            assert raised.value.failure_class == "feedback_too_large"
+            assert len(transport.requests) == 1
+
     def test_live_triage_repairs_missing_bare_update_into_foldered_create(
         self, isolated_wiki: Path
     ) -> None:
@@ -11187,15 +11273,24 @@ class TestOversizedAppendOnlyUpdateContext:
         from chronovisor.core.runtime_config import IngestConfig
         from chronovisor.ingest import ingest
 
+        section_prefix = (
+            "# Product value\nproduct value and performance evidence\n"
+        )
+        strongest_section = section_prefix + "x" * (
+            12 * 1_024 - len(section_prefix.encode("utf-8"))
+        )
+        assert len(strongest_section.encode("utf-8")) == 12 * 1_024
         page_text = (
             "---\ntitle: Interview Narrative\nupdated: 2026-01-01\n---\n"
-            "# Product value\nproduct value and performance evidence\n"
+            "# Historical background\nOMITTED-FULL-PAGE-BODY\n"
+            + strongest_section
         )
         page_path = _seed_page(
             isolated_wiki,
             "career/interview-narrative-product-value-vs-politics.md",
             page_text,
         )
+        original_page_bytes = page_path.read_bytes()
         op = {
             "type": "update",
             "filename": "career/interview-narrative-product-value-vs-politics.md",
@@ -11204,6 +11299,7 @@ class TestOversizedAppendOnlyUpdateContext:
             "summary": "Add product-value interview evidence",
         }
         raw = "RAW-291077 product value and performance evidence"
+        original_raw_bytes = raw.encode("utf-8")
         empty_prompt = ingest._build_page_generation_prompt(
             context="",
             raw_content=raw,
@@ -11278,11 +11374,10 @@ class TestOversizedAppendOnlyUpdateContext:
         compact_prompt, kwargs = calls[0]
         assert raw in compact_prompt
         assert full_context not in compact_prompt
+        assert page_text not in compact_prompt
+        assert "OMITTED-FULL-PAGE-BODY" not in compact_prompt
         assert "Complete deterministic H1/H2 section manifest (TSV):" in compact_prompt
-        assert (
-            "# Product value\nproduct value and performance evidence\n"
-            in compact_prompt
-        )
+        assert strongest_section in compact_prompt
         assert "Omitted section bytes are still present on disk" in kwargs["system"]
         assert kwargs["num_predict"] == 8_192
         assert diagnostics["original_required_num_ctx"] == 291_077
@@ -11296,7 +11391,8 @@ class TestOversizedAppendOnlyUpdateContext:
             result["_compact_update_preimage_sha256"]
             == diagnostics["context_page_sha256"]
         )
-        assert page_path.read_text(encoding="utf-8") == page_text
+        assert page_path.read_bytes() == original_page_bytes
+        assert raw.encode("utf-8") == original_raw_bytes
 
     def test_compaction_unavailable_preserves_adaptive_full_context_fallback(
         self,
