@@ -109,9 +109,38 @@ def _preempt_requested(run_id: str) -> bool:
 
 def sync_pending() -> bool:
     try:
-        return any(path.is_file() for path in SYNC_DIR.iterdir())
-    except OSError:
+        markers = [path for path in SYNC_DIR.iterdir() if path.is_file()]
+    except FileNotFoundError:
         return False
+    except OSError:
+        return True
+    for marker in markers:
+        try:
+            payload = json.loads(marker.read_text(encoding="utf-8"))
+            pid = payload["pid"]
+            marker_id = payload["marker_id"]
+            if (
+                not isinstance(pid, int)
+                or isinstance(pid, bool)
+                or pid <= 0
+                or not isinstance(marker_id, str)
+                or not isinstance(payload["ts"], str)
+                or not payload["ts"]
+                or marker.name != f"{pid}-{marker_id}.json"
+                or uuid.UUID(marker_id).hex != marker_id
+            ):
+                return True
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            try:
+                marker.unlink()
+            except OSError:
+                return True
+            continue
+        except (OSError, KeyError, TypeError, ValueError):
+            return True
+        return True
+    return False
 
 
 @dataclass(frozen=True)

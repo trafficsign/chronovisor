@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import os
 import sys
 import time
 
@@ -124,6 +126,37 @@ def test_foreground_does_not_wait_for_non_model_research_phase(
             assert receipt.research_overlap is True
             assert receipt.preempted is False
             assert receipt.resource_wait_ms <= 50
+
+
+def test_sync_pending_removes_dead_process_marker(tmp_path, monkeypatch) -> None:
+    _paths(tmp_path, monkeypatch)
+    marker_id = "0" * 32
+    marker = research_scheduler.SYNC_DIR / f"12345-{marker_id}.json"
+    marker.parent.mkdir(parents=True)
+    marker.write_text(
+        json.dumps({"pid": 12345, "marker_id": marker_id, "ts": "now"})
+    )
+
+    def dead_process(_pid: int, _signal: int) -> None:
+        raise ProcessLookupError
+
+    monkeypatch.setattr(research_scheduler.os, "kill", dead_process)
+
+    assert research_scheduler.sync_pending() is False
+    assert marker.exists() is False
+
+
+def test_sync_pending_keeps_live_process_marker(tmp_path, monkeypatch) -> None:
+    _paths(tmp_path, monkeypatch)
+    marker_id = "0" * 32
+    marker = research_scheduler.SYNC_DIR / f"{os.getpid()}-{marker_id}.json"
+    marker.parent.mkdir(parents=True)
+    marker.write_text(
+        json.dumps({"pid": os.getpid(), "marker_id": marker_id, "ts": "now"})
+    )
+
+    assert research_scheduler.sync_pending() is True
+    assert marker.exists() is True
 
 
 def test_sync_pending_prevents_model_child_start(tmp_path, monkeypatch) -> None:
