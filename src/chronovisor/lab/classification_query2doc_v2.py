@@ -27,6 +27,11 @@ from chronovisor.classification.classification_query_worker_v2 import (
 )
 from chronovisor.core import ollama
 from chronovisor.core.durable_state import read_sealed_json, write_sealed_json
+from chronovisor.core.research_scheduler import (
+    research_lane,
+    run_cancellable_command,
+    sync_pending,
+)
 from chronovisor.core.runtime_config import load_decision_router_config
 from chronovisor.core.store import CHRONOVISOR_ROOT
 from chronovisor.core.timeutil import utc_iso_milliseconds as _now
@@ -35,11 +40,6 @@ from chronovisor.lab.classification_profile_pilot import (
     query_profile_index,
 )
 from chronovisor.lab.classification_query2doc_pilot import candidate_blind_page
-from chronovisor.research.research_scheduler import (
-    research_lane,
-    run_cancellable_command,
-    sync_pending,
-)
 
 ARTIFACT_SCHEMA = "chronovisor.classification-query2doc-artifact.v2"
 DEV_EVALUATION_SCHEMA = "chronovisor.classification-query2doc-v2-dev-evaluation.v1"

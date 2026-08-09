@@ -134,9 +134,9 @@ def test_chronovisor_jobs_reads_durable_deep_retrieval_job(monkeypatch) -> None:
 
 
 def test_v2_deep_dive_uses_bounded_wiki_only_kernel(tmp_path, monkeypatch) -> None:
+    from chronovisor.core import research_scheduler
     from chronovisor.research import (
         research_orchestrator,
-        research_scheduler,
         research_store,
     )
 

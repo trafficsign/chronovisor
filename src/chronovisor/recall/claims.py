@@ -6,4 +6,10 @@ import sys
 
 from chronovisor.search import claims as _claims
 
+
+def main() -> int:
+    """Run the claim ledger command-line interface."""
+    return _claims.main()
+
+
 sys.modules[__name__] = _claims

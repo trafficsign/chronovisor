@@ -12,13 +12,13 @@ from dataclasses import dataclass, field
 from queue import Empty, Queue
 from typing import Any, Protocol
 
-from chronovisor.core.runtime_config import load_decision_router_config
-from chronovisor.research.research_config import ResearchConfig, load_research_config
-from chronovisor.research.research_scheduler import (
+from chronovisor.core.research_scheduler import (
     ResearchLease,
     research_lane,
     run_cancellable_command,
 )
+from chronovisor.core.runtime_config import load_decision_router_config
+from chronovisor.research.research_config import ResearchConfig, load_research_config
 from chronovisor.research.research_store import ResearchStore, compact_event_context
 from chronovisor.research.research_tools import ToolContext, execute_tool
 from chronovisor.research.research_types import (

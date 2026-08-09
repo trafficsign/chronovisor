@@ -20,7 +20,7 @@ from chronovisor.classification.classification_fixture_contract import (
 )
 from chronovisor.core import ollama
 from chronovisor.core.durable_state import write_sealed_json
-from chronovisor.research.research_scheduler import foreground_lane
+from chronovisor.core.research_scheduler import foreground_lane
 
 PAIRED_JUDGMENT_SCHEMA = "chronovisor.classification-paired-judgment.v1"
 RESOURCE_GATE_SCHEMA = "chronovisor.classification-resource-ready-gate.v1"

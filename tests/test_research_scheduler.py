@@ -3,7 +3,7 @@ from __future__ import annotations
 import sys
 import time
 
-from chronovisor.research import research_scheduler
+from chronovisor.core import research_scheduler
 
 
 def _paths(tmp_path, monkeypatch) -> None:

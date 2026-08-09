@@ -36,15 +36,15 @@ from chronovisor.core import frontmatter
 from chronovisor.core.durable_state import write_sealed_json
 from chronovisor.core.hashutil import sha256_prefixed_text as _sha256_text
 from chronovisor.core.jsonl import write_jsonl as _write_jsonl
-from chronovisor.core.store import CHRONOVISOR_ROOT
-from chronovisor.core.timeutil import utc_iso_milliseconds as _now
-from chronovisor.ingest.page_registry import PageRegistry
-from chronovisor.ops.convergence import ConvergenceStore, RetryPolicy
-from chronovisor.research.research_scheduler import (
+from chronovisor.core.research_scheduler import (
     research_lane,
     run_cancellable_command,
     sync_pending,
 )
+from chronovisor.core.store import CHRONOVISOR_ROOT
+from chronovisor.core.timeutil import utc_iso_milliseconds as _now
+from chronovisor.ingest.page_registry import PageRegistry
+from chronovisor.ops.convergence import ConvergenceStore, RetryPolicy
 
 ENGINE_VERSION = "2"
 FIXTURE_SCHEMA = "chronovisor.classification-fixture.v1"

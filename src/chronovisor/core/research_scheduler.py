@@ -141,8 +141,8 @@ def foreground_lane(*, preempt_grace_ms: int = 250) -> Iterator[ForegroundReceip
     overlap = active is not None
     model_overlap = _model_is_active(active)
     preempt_signal_sent = False
-    if model_overlap:
-        model_pid = active.get("model_pid") if active is not None else None
+    if model_overlap and active is not None:
+        model_pid = active.get("model_pid")
         if isinstance(model_pid, int) and model_pid > 1:
             try:
                 # The model worker is deliberately an isolated, stateless

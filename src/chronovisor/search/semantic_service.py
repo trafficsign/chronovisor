@@ -484,7 +484,7 @@ class SemanticServiceState:
 
     def _pause_background_work(self) -> bool:
         if self.config.incremental_pause_during_research:
-            from chronovisor.research import research_scheduler
+            from chronovisor.core import research_scheduler
 
             if (
                 research_scheduler.sync_pending()

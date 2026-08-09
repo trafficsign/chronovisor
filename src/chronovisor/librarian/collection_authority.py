@@ -29,14 +29,14 @@ from chronovisor.core.durable_state import (
     write_sealed_json,
 )
 from chronovisor.core.page_identity import new_page_uid, normalize_page_uid
+from chronovisor.core.research_scheduler import (
+    research_lane,
+    run_cancellable_command,
+)
 from chronovisor.core.store import CHRONOVISOR_ROOT
 from chronovisor.core.timeutil import utc_iso_milliseconds as _now
 from chronovisor.ingest.page_registry import PageRegistry
 from chronovisor.ingest.uid_link_index import build_uid_link_index
-from chronovisor.research.research_scheduler import (
-    research_lane,
-    run_cancellable_command,
-)
 
 COLLECTION_REGISTRY_SCHEMA = "chronovisor.collection-registry.v1"
 COLLECTION_RECEIPT_SCHEMA = "chronovisor.collection-lifecycle-receipt.v1"

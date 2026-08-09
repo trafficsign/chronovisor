@@ -2613,7 +2613,7 @@ def run_recall(
 ) -> RecallResult:
     """Run synchronous recall while preempting low-priority research work."""
 
-    from chronovisor.research.research_scheduler import foreground_lane
+    from chronovisor.core.research_scheduler import foreground_lane
 
     with foreground_lane(preempt_grace_ms=250) as receipt:
         result = _run_recall_impl(

@@ -29,17 +29,17 @@ from chronovisor.classification.classification_anchor_set_worker import (
 from chronovisor.classification.classification_fixture_set import sha256_file
 from chronovisor.core import ollama
 from chronovisor.core.durable_state import read_sealed_json, write_sealed_json
+from chronovisor.core.research_scheduler import (
+    research_lane,
+    run_cancellable_command,
+    sync_pending,
+)
 from chronovisor.core.runtime_config import load_decision_router_config
 from chronovisor.core.store import CHRONOVISOR_ROOT
 from chronovisor.core.timeutil import utc_iso_milliseconds as _now
 from chronovisor.lab.classification_anchor_dev import (
     deterministic_evidence_capsule,
     load_burned40,
-)
-from chronovisor.research.research_scheduler import (
-    research_lane,
-    run_cancellable_command,
-    sync_pending,
 )
 
 EVALUATION_SCHEMA = "chronovisor.classification-anchor-set-dev.v1"

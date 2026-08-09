@@ -8,14 +8,14 @@ import uuid
 from collections.abc import Callable
 from typing import Any
 
-from chronovisor.core.runtime_config import load_decision_router_config
-from chronovisor.research.evidence_bundle import EvidenceBundle
-from chronovisor.research.research_config import ResearchConfig
-from chronovisor.research.research_scheduler import (
+from chronovisor.core.research_scheduler import (
     ResearchLease,
     research_lane,
     run_cancellable_command,
 )
+from chronovisor.core.runtime_config import load_decision_router_config
+from chronovisor.research.evidence_bundle import EvidenceBundle
+from chronovisor.research.research_config import ResearchConfig
 from chronovisor.research.research_store import ResearchStore
 from chronovisor.research.research_types import BudgetUsage
 

@@ -10,9 +10,9 @@ from chronovisor.research.research_store import ResearchStore
 
 
 def test_service_writes_bundle_audit_and_receipt(tmp_path: Path, monkeypatch) -> None:
+    from chronovisor.core import research_scheduler
     from chronovisor.research import (
         research_auditor,
-        research_scheduler,
         research_store,
     )
 

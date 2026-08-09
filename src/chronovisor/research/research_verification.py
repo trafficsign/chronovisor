@@ -12,9 +12,9 @@ from typing import Any
 
 import httpx
 
+from chronovisor.core.research_scheduler import foreground_lane, research_lane
 from chronovisor.research.research_config import ResearchConfig, WebConfig
 from chronovisor.research.research_orchestrator import PlannerResponse, run_research
-from chronovisor.research.research_scheduler import foreground_lane, research_lane
 from chronovisor.research.research_security import guard_egress_query, guard_url
 from chronovisor.research.research_store import ResearchStore, reduce_events
 from chronovisor.research.research_types import Action, ActionType, parse_action
@@ -130,7 +130,7 @@ def run_verification() -> dict[str, Any]:
         checks.append(_check("redirect-loop-and-oversized-content", "uv run pytest -q tests/test_web_fetch.py", redirect_and_oversize))
 
         def outage_terminal_and_sync_overlap() -> None:
-            from chronovisor.research import research_scheduler
+            from chronovisor.core import research_scheduler
 
             scheduler_root = root / "scheduler"
             research_scheduler.RUNTIME_DIR = scheduler_root
