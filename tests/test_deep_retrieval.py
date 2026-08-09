@@ -4,11 +4,11 @@ import json
 from pathlib import Path
 
 from chronovisor.core.runtime_config import DecisionRouterConfig
+from chronovisor.core.search import ScoredPage
 from chronovisor.hosts import server
 from chronovisor.research import deep_retrieval
 from chronovisor.search.research_config import ResearchConfig
 from chronovisor.search.research_store import ResearchStore
-from chronovisor.search.search import ScoredPage
 
 
 def _tool(function):

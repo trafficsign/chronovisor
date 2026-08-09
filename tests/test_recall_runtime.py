@@ -13,6 +13,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from chronovisor.core.search import ScoredPage
 from chronovisor.recall.recall_runtime import (
     ContextItem,
     RecallBudgetExhausted,
@@ -42,7 +43,6 @@ from chronovisor.recall.recall_runtime import (
     strip_non_user_blocks,
     warm_recall_model,
 )
-from chronovisor.search.search import ScoredPage
 
 
 @pytest.fixture(autouse=True)

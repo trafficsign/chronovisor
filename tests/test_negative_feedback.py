@@ -14,7 +14,7 @@ from chronovisor.core.runtime_config import (
     NegativeFeedbackConfig,
     load_negative_feedback_config,
 )
-from chronovisor.search.search import ScoredPage
+from chronovisor.core.search import ScoredPage
 
 
 def page(page_id: str, score: float) -> ScoredPage:

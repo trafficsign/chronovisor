@@ -14,10 +14,10 @@ from typing import Any
 from chronovisor.core.frontmatter import parse as parse_frontmatter
 from chronovisor.core.index_store import get_store
 from chronovisor.core.runtime_config import load_decision_router_config
+from chronovisor.core.search import ScoredPage
+from chronovisor.core.search import search as run_search
 from chronovisor.core.store import find_page
 from chronovisor.decision.local_structured import ChatTransport, LocalStructuredSession
-from chronovisor.search.search import ScoredPage
-from chronovisor.search.search import search as run_search
 
 
 def _compact(text: str, *, limit: int) -> str:

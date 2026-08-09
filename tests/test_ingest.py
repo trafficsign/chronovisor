@@ -891,10 +891,9 @@ def isolated_wiki(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     for d in (pages, raw, system, index_dir):
         d.mkdir(parents=True, exist_ok=True)
 
-    from chronovisor.core import index_store, ollama, page_mutation, store
+    from chronovisor.core import index_store, ollama, page_mutation, search, store
     from chronovisor.ingest import ingest, orchestrator
     from chronovisor.ops import runtime_status
-    from chronovisor.search import search
 
     monkeypatch.setattr(store, "CHRONOVISOR_ROOT", chronovisor_root)
     monkeypatch.setattr(store, "PAGES_DIR", pages)
@@ -9632,10 +9631,9 @@ class TestReadBackVerification:
     def test_changed_page_passes_when_search_returns_page(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from chronovisor.core import index_store
+        from chronovisor.core import index_store, search
         from chronovisor.core.search_types import ScoredPage
         from chronovisor.ingest import ingest_readback
-        from chronovisor.search import search
 
         class Store:
             def refresh(self) -> None:
@@ -9668,9 +9666,8 @@ class TestReadBackVerification:
     def test_verify_resolves_query_and_log_paths_through_ingest_facade(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from chronovisor.core import index_store
+        from chronovisor.core import index_store, search
         from chronovisor.ingest import ingest, ingest_readback
-        from chronovisor.search import search
 
         queries: list[tuple[dict, str]] = []
         run_log = isolated_wiki / "runtime" / "patched-runs.jsonl"
@@ -9706,9 +9703,8 @@ class TestReadBackVerification:
     def test_refresh_waits_for_semantic_delta_before_read_back(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from chronovisor.core import claims, index_store
+        from chronovisor.core import claims, index_store, search
         from chronovisor.ingest import ingest, ingest_readback, state_register
-        from chronovisor.search import search
 
         events: list[object] = []
 
@@ -9763,9 +9759,8 @@ class TestReadBackVerification:
     def test_refresh_failures_are_logged_and_nonfatal(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from chronovisor.core import claims, index_store
+        from chronovisor.core import claims, index_store, search
         from chronovisor.ingest import ingest, ingest_readback, state_register
-        from chronovisor.search import search
 
         events: list[str] = []
         logs: list[str] = []

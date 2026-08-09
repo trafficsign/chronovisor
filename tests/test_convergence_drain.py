@@ -1041,9 +1041,8 @@ def test_unreadable_orphan_page_is_indeterminate(monkeypatch) -> None:
 def test_orphan_semantic_outage_is_indeterminate_not_empty_inventory(
     monkeypatch,
 ) -> None:
-    from chronovisor.core import index_store
+    from chronovisor.core import index_store, search
     from chronovisor.ops import orphan_link
-    from chronovisor.search import search
 
     class Index:
         def refresh(self) -> None:

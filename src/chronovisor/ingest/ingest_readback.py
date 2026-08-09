@@ -43,7 +43,7 @@ def verify_changed_pages_read_back(page_ids: list[str], *, top_n: int = 10) -> d
     runtime = _runtime()
     try:
         from chronovisor.core.index_store import get_store
-        from chronovisor.search.search import search
+        from chronovisor.core.search import search
 
         store = get_store()
         store.refresh()
@@ -148,7 +148,7 @@ def _refresh_ingest_derived_artifacts(
 
     if changed_pages:
         try:
-            from chronovisor.search.search import update_embeddings
+            from chronovisor.core.search import update_embeddings
 
             # Read-back is a correctness gate, so publication of the delta
             # index must complete before retrieval is evaluated. The previous

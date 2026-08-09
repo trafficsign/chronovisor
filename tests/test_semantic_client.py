@@ -1,5 +1,5 @@
 from chronovisor.core.runtime_config import SearchEmbeddingConfig
-from chronovisor.search.semantic_client import selected_for_rollout
+from chronovisor.core.semantic_client import selected_for_rollout
 
 
 def test_rollout_selection_is_stable_and_respects_modes() -> None:

@@ -32,18 +32,7 @@ from chronovisor.core.runtime_config import (
     SearchEmbeddingConfig,
     load_search_embedding_config,
 )
-from chronovisor.core.semantic_jobs import (
-    claim_next,
-    complete,
-    enqueue_pages,
-    enqueue_rebuild,
-    fail,
-    job_status,
-    prune_completed_jobs,
-)
-from chronovisor.core.store import CHRONOVISOR_ROOT, SYSTEM_DIR, find_page
-from chronovisor.search.accelerator_lease import accelerator_lease
-from chronovisor.search.semantic_index import (
+from chronovisor.core.semantic_index import (
     SEMANTIC_ROOT,
     SemanticIndexError,
     activate_generation,
@@ -60,6 +49,17 @@ from chronovisor.search.semantic_index import (
     upgrade_generation_with_ann,
     write_page_delta,
 )
+from chronovisor.core.semantic_jobs import (
+    claim_next,
+    complete,
+    enqueue_pages,
+    enqueue_rebuild,
+    fail,
+    job_status,
+    prune_completed_jobs,
+)
+from chronovisor.core.store import CHRONOVISOR_ROOT, SYSTEM_DIR, find_page
+from chronovisor.search.accelerator_lease import accelerator_lease
 from chronovisor.search.semantic_model import (
     NemotronEncoder,
     semantic_runtime_versions,
@@ -764,7 +764,7 @@ def main() -> None:
     if args.command == "serve":
         serve(config)
         return
-    from chronovisor.search import semantic_client
+    from chronovisor.core import semantic_client
 
     if args.command == "archive-legacy":
         result = archive_legacy_search_index()

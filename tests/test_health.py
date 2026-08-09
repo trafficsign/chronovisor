@@ -56,7 +56,7 @@ def test_semantic_index_kpi_requires_matching_live_service(
         ),
     )
     monkeypatch.setattr(
-        "chronovisor.search.semantic_index.semantic_index_status",
+        "chronovisor.core.semantic_index.semantic_index_status",
         lambda: {
             "status": "ok",
             "coverage": 1.0,

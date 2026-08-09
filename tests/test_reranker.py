@@ -6,8 +6,8 @@ import threading
 from chronovisor.core import reranker
 from chronovisor.core.reranker import RerankOutcome, rerank_results
 from chronovisor.core.runtime_config import RerankerConfig
+from chronovisor.core.search import ScoredPage
 from chronovisor.hosts import server
-from chronovisor.search.search import ScoredPage
 
 
 def page(page_id: str, score: float = 1.0) -> ScoredPage:
@@ -197,7 +197,7 @@ def test_chronovisor_search_uses_reranker_only_when_enabled(monkeypatch) -> None
         )
 
     from chronovisor.core import runtime_config
-    from chronovisor.search import search as search_mod
+    from chronovisor.core import search as search_mod
 
     monkeypatch.setattr(search_mod, "search", fake_search)
     monkeypatch.setattr(
@@ -251,7 +251,7 @@ def test_chronovisor_search_reranks_after_tag_filter(monkeypatch) -> None:
         )
 
     from chronovisor.core import runtime_config
-    from chronovisor.search import search as search_mod
+    from chronovisor.core import search as search_mod
 
     monkeypatch.setattr(search_mod, "search", fake_search)
     monkeypatch.setattr(

@@ -797,9 +797,9 @@ def _orphan_inventory(
     sources: set[str],
 ) -> tuple[dict[str, set[str]], set[tuple[str, str]]]:
     from chronovisor.core.index_store import get_store
+    from chronovisor.core.search import semantic_search
     from chronovisor.decision.decision_authority import current_semantic_authority
     from chronovisor.ops import orphan_link
-    from chronovisor.search.search import semantic_search
 
     try:
         index = get_store()

@@ -89,8 +89,8 @@ def test_collision_feedback_indices_refer_to_original_plan() -> None:
 def test_ingest_validator_requests_semantic_merge_in_same_session(
     monkeypatch,
 ) -> None:
+    from chronovisor.core import search
     from chronovisor.ingest import ingest
-    from chronovisor.search import search
 
     invalid = [
         _operation(summary=f"fact {index}", keywords=[f"keyword-{index}"])

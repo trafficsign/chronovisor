@@ -5,10 +5,11 @@ from pathlib import Path
 import pytest
 
 from chronovisor.core import pipeline as pipeline_mod
+from chronovisor.core import search
 from chronovisor.core.reranker import RerankOutcome
 from chronovisor.core.runtime_config import NegativeFeedbackConfig, RerankerConfig
-from chronovisor.search import search, search_eval
-from chronovisor.search.search import ScoredPage
+from chronovisor.core.search import ScoredPage
+from chronovisor.search import search_eval
 
 
 def page(page_id: str, score: float, *, status: str = "active") -> ScoredPage:

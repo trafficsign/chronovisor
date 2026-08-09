@@ -43,10 +43,16 @@ def isolated_wiki(
     for d in (pages, raw, system, runtime):
         d.mkdir(parents=True, exist_ok=True)
 
-    from chronovisor.core import claims, index_store, ollama, page_mutation, store
+    from chronovisor.core import (
+        claims,
+        index_store,
+        ollama,
+        page_mutation,
+        search,
+        store,
+    )
     from chronovisor.ingest import ingest, orchestrator, state_register
     from chronovisor.ops import background_jobs, runtime_status
-    from chronovisor.search import search
 
     monkeypatch.setattr(store, "CHRONOVISOR_ROOT", chronovisor_root)
     monkeypatch.setattr(store, "PAGES_DIR", pages)

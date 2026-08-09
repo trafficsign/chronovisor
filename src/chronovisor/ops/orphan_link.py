@@ -234,7 +234,7 @@ def gather_candidates(
     embedding store. The default falls back to ``search.semantic_search``.
     """
     if semantic_search_fn is None:
-        from chronovisor.search.search import semantic_search
+        from chronovisor.core.search import semantic_search
 
         # Orphan resolution must distinguish a healthy empty result from the
         # search layer's normal fail-open ``[]``. Strict mode preserves that

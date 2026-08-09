@@ -866,8 +866,8 @@ def chronovisor_search(
     from chronovisor.core.pipeline import apply_rerank_stage
     from chronovisor.core.reranker import rerank_results
     from chronovisor.core.runtime_config import load_reranker_config
-    from chronovisor.search.search import last_search_trace
-    from chronovisor.search.search import search as run_search
+    from chronovisor.core.search import last_search_trace
+    from chronovisor.core.search import search as run_search
 
     store = get_store()
     store.refresh()
@@ -1139,7 +1139,7 @@ def chronovisor_reindex() -> str:
     Call this after bulk changes or to initialize semantic search.
     """
     from chronovisor.core.runtime_config import load_search_embedding_config
-    from chronovisor.search.search import update_embeddings
+    from chronovisor.core.search import update_embeddings
 
     config = load_search_embedding_config()
     count = update_embeddings()
@@ -1645,7 +1645,7 @@ def main():
     with contextlib.suppress(Exception):
         get_store().refresh()
     try:
-        from chronovisor.search.search import get_bm25
+        from chronovisor.core.search import get_bm25
 
         get_bm25().build()
     except Exception:

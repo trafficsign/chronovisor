@@ -1,4 +1,4 @@
-"""Search engine — BM25 + semantic search with RRF fusion."""
+"""Core search engine with BM25 and semantic RRF fusion."""
 
 import contextlib
 import hashlib
@@ -10,10 +10,10 @@ import re
 import sqlite3
 import struct
 import threading
-from collections import Counter, deque
+from collections import deque
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from chronovisor.core.frontmatter import parse as parse_frontmatter
 from chronovisor.core.lexical_index import LexicalIndex
@@ -106,7 +106,7 @@ def _is_reference_result(result: ScoredPage) -> bool:
     )
 
 
-def _folder_from_meta(meta: dict) -> str:
+def _folder_from_meta(meta: dict[str, Any]) -> str:
     try:
         parent = Path(meta["path"]).parent
         if parent != PAGES_DIR:
@@ -116,11 +116,11 @@ def _folder_from_meta(meta: dict) -> str:
     return ""
 
 
-def _meta_page_type(meta: dict, *, folder: str = "") -> str:
+def _meta_page_type(meta: dict[str, Any], *, folder: str = "") -> str:
     return _normalize_page_type(meta.get("page_type"), folder=folder)
 
 
-def _meta_sensitivity(meta: dict, *, folder: str = "") -> str:
+def _meta_sensitivity(meta: dict[str, Any], *, folder: str = "") -> str:
     return _normalize_sensitivity(meta.get("sensitivity"), folder=folder)
 
 
@@ -131,7 +131,7 @@ def _refresh_store_for_search(store: object) -> None:
     if callable(refresh_if_stale):
         refresh_if_stale()
         return
-    refresh = store.refresh
+    refresh = cast(Any, store).refresh
     refresh()
 
 
@@ -665,10 +665,11 @@ def _embedding_count() -> int:
     except sqlite3.OperationalError:
         return 0
     try:
-        return conn.execute(
+        row = conn.execute(
             "SELECT COUNT(*) FROM embeddings WHERE model = ? AND text_prefix = ?",
             (model, document_prefix),
-        ).fetchone()[0]
+        ).fetchone()
+        return int(row[0]) if row else 0
     finally:
         conn.close()
 
@@ -710,7 +711,8 @@ def _markdown_chunks(content: str, title: str) -> list[str]:
     heading = title
     buffer: list[str] = []
 
-    summary = meta.get("summary") if isinstance(meta.get("summary"), str) else ""
+    summary_value = meta.get("summary")
+    summary = summary_value if isinstance(summary_value, str) else ""
     entities = meta.get("entities") if isinstance(meta.get("entities"), list) else []
     page_type = meta.get("type") if isinstance(meta.get("type"), str) else ""
     updated = meta.get("updated") if isinstance(meta.get("updated"), str) else ""
@@ -1098,13 +1100,13 @@ def update_embeddings(
         return 0
     unique = sorted({page_id for page_id in page_ids if page_id})
     if strict:
-        from chronovisor.search.semantic_client import index_pages
+        from chronovisor.core.semantic_client import index_pages
 
         response = index_pages(unique, config, wait=True)
         return int(response.get("pages_updated") or 0)
 
+    from chronovisor.core.semantic_index import extract_page_documents
     from chronovisor.core.store import SYSTEM_DIR, find_page
-    from chronovisor.search.semantic_index import extract_page_documents
 
     hashes: dict[str, str] = {}
     for page_id in unique:
@@ -1138,7 +1140,7 @@ def semantic_search(
             timeout_ms=timeout_ms,
         )
 
-    from chronovisor.search import semantic_client
+    from chronovisor.core import semantic_client
 
     use_new = semantic_client.selected_for_rollout(query, config)
     if config.rollout_mode == "shadow":
@@ -1191,7 +1193,7 @@ def semantic_verify(
     config = load_search_embedding_config()
     if not page_ids or not config.enabled or config.backend != "nemotron_service":
         return []
-    from chronovisor.search import semantic_client
+    from chronovisor.core import semantic_client
 
     if not semantic_client.selected_for_rollout(query, config):
         return []
@@ -1680,7 +1682,7 @@ def usage_prior_results(
             lines = deque(f, maxlen=1000)
     except OSError:
         return []
-    scores: Counter[str] = Counter()
+    scores: dict[str, float] = {}
     decay = max(0.0, min(1.0, float(decay)))
     cap = max(0.0, float(cap))
     for age, line in enumerate(reversed(lines)):
@@ -1695,7 +1697,7 @@ def usage_prior_results(
             "injected_pages", []
         ):
             if isinstance(page_id, str) and page_id in candidate_ids:
-                scores[page_id] = min(cap, scores[page_id] + weight)
+                scores[page_id] = min(cap, scores.get(page_id, 0.0) + weight)
     if not scores:
         return []
     from chronovisor.core.index_store import get_store
@@ -1703,7 +1705,8 @@ def usage_prior_results(
     store = get_store()
     _refresh_store_for_search(store)
     out: list[ScoredPage] = []
-    for page_id, score in scores.most_common(limit):
+    ranked = sorted(scores.items(), key=lambda item: item[1], reverse=True)[:limit]
+    for page_id, score in ranked:
         meta = store.meta(page_id)
         if meta is None:
             continue
@@ -1814,7 +1817,7 @@ def search(
         and search_embedding.enabled
         and search_embedding.backend == "nemotron_service"
     ):
-        from chronovisor.search.semantic_client import selected_for_rollout
+        from chronovisor.core.semantic_client import selected_for_rollout
 
         if selected_for_rollout(query, search_embedding):
             weights.update(

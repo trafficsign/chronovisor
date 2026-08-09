@@ -1334,7 +1334,7 @@ def test_production_candidate_discovery_uses_strict_semantic_health_boundary(
     isolated_pages: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor.search import search
+    from chronovisor.core import search
 
     store = _FakeStore()
     store.add_page("target")

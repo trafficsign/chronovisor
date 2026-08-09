@@ -15,8 +15,8 @@ from pathlib import Path
 import numpy as np
 
 from chronovisor.core.index_store import get_store
+from chronovisor.core.search import iter_all_embeddings
 from chronovisor.core.store import CHRONOVISOR_ROOT
-from chronovisor.search.search import iter_all_embeddings
 
 REVIEW_QUEUE = CHRONOVISOR_ROOT / "review" / "duplicate-candidates.jsonl"
 

@@ -1,4 +1,4 @@
-"""Fail-open client for the local Nemotron semantic service."""
+"""Core fail-open client for the local Nemotron semantic service."""
 
 from __future__ import annotations
 
@@ -140,7 +140,7 @@ def search(
         return []
 
     from chronovisor.core.index_store import get_store
-    from chronovisor.search.search import (
+    from chronovisor.core.search import (
         _REFERENCE_PAGE_TYPE,
         _folder_from_meta,
         _meta_page_type,
@@ -211,7 +211,7 @@ def verify(
         return []
 
     from chronovisor.core.index_store import get_store
-    from chronovisor.search.search import (
+    from chronovisor.core.search import (
         _folder_from_meta,
         _meta_page_type,
         _meta_sensitivity,

@@ -13,6 +13,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from chronovisor.core import semantic_client
 from chronovisor.core.durable_state import exclusive_text_file_lock
 from chronovisor.core.runtime_config import load_search_embedding_config
 from chronovisor.core.store import CHRONOVISOR_ROOT, find_page
@@ -20,7 +21,6 @@ from chronovisor.recall.recall_field_schema import (
     RecallFieldConfig,
     load_recall_field_config,
 )
-from chronovisor.search import semantic_client
 
 CANDIDATE_TRACE_FILE = (
     CHRONOVISOR_ROOT / "runtime" / "recall-field" / "candidate-trace.jsonl"

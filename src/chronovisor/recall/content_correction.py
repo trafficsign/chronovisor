@@ -2909,7 +2909,7 @@ def _refresh_after_apply(page_ids: list[str]) -> dict[str, Any]:
         result["page_index"] = f"error:{exc.__class__.__name__}"
         result["errors"].append(f"page_index:{exc}")
     try:
-        from chronovisor.search.search import get_bm25
+        from chronovisor.core.search import get_bm25
 
         get_bm25().build()
         result["bm25"] = "ok"
@@ -2918,7 +2918,7 @@ def _refresh_after_apply(page_ids: list[str]) -> dict[str, Any]:
         result["errors"].append(f"bm25:{exc}")
     try:
         from chronovisor.core.runtime_config import load_search_embedding_config
-        from chronovisor.search.search import update_embeddings
+        from chronovisor.core.search import update_embeddings
 
         search_embedding = load_search_embedding_config()
         if search_embedding.backend == "legacy_ollama":
@@ -2959,7 +2959,7 @@ def _refresh_after_apply(page_ids: list[str]) -> dict[str, Any]:
 
 
 def _semantic_readback(mutations: list[PreparedPageMutation]) -> dict[str, Any]:
-    from chronovisor.search.search import semantic_search
+    from chronovisor.core.search import semantic_search
 
     rows: list[dict[str, Any]] = []
     errors: list[str] = []

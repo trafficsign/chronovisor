@@ -6,11 +6,10 @@ import sqlite3
 import pytest
 
 from chronovisor.core import index_store as index_store_mod
-from chronovisor.core import ollama
+from chronovisor.core import ollama, search
 from chronovisor.core.knowledge_graph_retrieval import CommunityCandidate
 from chronovisor.core.runtime_config import EmbeddingConfig, SearchEmbeddingConfig
-from chronovisor.search import search
-from chronovisor.search.search import (
+from chronovisor.core.search import (
     ScoredPage,
     apply_filters,
     fuse_results,

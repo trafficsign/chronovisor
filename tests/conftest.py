@@ -416,7 +416,7 @@ def isolate_operator_raw_layout(monkeypatch: pytest.MonkeyPatch) -> None:
 def isolate_operator_search_rollout(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep tests from enqueueing work against the live semantic service."""
 
-    from chronovisor.search import search
+    from chronovisor.core import search
 
     monkeypatch.setattr(
         search,

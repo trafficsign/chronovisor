@@ -29,6 +29,7 @@ from chronovisor.core.runtime_config import (
     active_config_file,
     normalize_audit_config,
 )
+from chronovisor.core.search import search as run_search
 from chronovisor.decision.local_structured import ChatTransport, LocalStructuredSession
 from chronovisor.recall.recall_runtime import (
     RECALL_CONFIG_FILE,
@@ -40,7 +41,6 @@ from chronovisor.recall.recall_runtime import (
     recall_log_snapshot,
     stable_prompt_hash,
 )
-from chronovisor.search.search import search as run_search
 
 DEFAULT_STATE_FILE = RECALL_DIR / "audit-state.json"
 DEFAULT_LOCK_FILE = RECALL_DIR / "audit.lock"

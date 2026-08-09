@@ -480,7 +480,7 @@ def migrate_active_metadata(
         registry_state=final_registry,
         write=True,
     )
-    from chronovisor.search.search import get_bm25
+    from chronovisor.core.search import get_bm25
 
     get_bm25().build(force=True)
     try:

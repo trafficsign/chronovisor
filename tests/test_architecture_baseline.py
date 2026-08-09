@@ -1589,6 +1589,74 @@ S_RETIRED_KNOWLEDGE_GRAPH_CORE_SITE_IDS = (
     "arch:fd1e10da48de66aef387570cc14166380c4464d883efce3fad8c448714087141",
     "arch:fd2a5838f8cc59bdfcf72d5ce5912661f7a1c658a962f606d3b29a75225dd77d",
 )
+S_RETIRED_SEARCH_ENGINE_CORE_EDGE_IDS = (
+    "arch:2971201e16841ab06cf4a7fbe1acc249a11c6636ecb0e4043c6da4f6a8cb9b21",
+    "arch:81993fc53fa3850eef12b7367b46c8f4aa313d3f5d5172d00cdf0b00f66f1323",
+    "arch:935ca7446b6d81b45f3f59452f31b6b9706b2ee64f5212d5b417aaf327b55c96",
+)
+S_RETIRED_SEARCH_ENGINE_CORE_SITE_IDS = (
+    "arch:01855dd44d1bbcafaed5e31a146e2a14a477c6f1b0c88ef0bac3d0c07ec941c0",
+    "arch:0199ce183f31110da32f899062fc87314f71eb41e5bf6333f6068c51e9a3e4a0",
+    "arch:0ba7150c5a80ccb5a4fe63fbb0e4963c2ddc3bfa34fa72c1892c428e1847f5cb",
+    "arch:0ec30874a3dd34dc2f9036c4ef70911289df66d0cc1717bab6c69cef55a86129",
+    "arch:11806d351a4aa75c4d07563556f445a1ab4f61d173bdc57e9023ad2bf6325ba1",
+    "arch:131df9f096b039728fecb853707781b6a0000777848844bcb79f6a002c570018",
+    "arch:14ca765ec6107e83f3b864b94dded8347bdb4269386e9be3d4e73f713ac0f9fb",
+    "arch:16cc41db3db7a69399576e2735f8c7e4393e1fae23c67d88a2c3cf71a63871fb",
+    "arch:179fc652de8ef37297b9e2985af52ddd0884e867635c6fcb52f97e153ce2b8fe",
+    "arch:1b3784b8749940c9c99751d38d244b777f230156c07d0a6e9c3d34cc773f3efc",
+    "arch:1ca15c2390aa241b15822fd926a37030c96585026de1676b9a206d926262688f",
+    "arch:228d82e9af9485f7b7f586e25674ecc9c6fef023830b5947b7ddeb084f9522e9",
+    "arch:275dd71675d8ddd0445eab17e3c98321c9470b21407d4fe85d9a627d94e56c28",
+    "arch:29e016a823e6594e785ca01552d7f5530edf25e039daf74dc7e0a0e1598def1a",
+    "arch:2aad7a2d5ded4da6b3b9ce56e539f830ae20d0b5b3e42134ec91bd854b4c3989",
+    "arch:2f6b320f11667a149c65906570a299975e22d3fe1784c630c9b618cfee598339",
+    "arch:323ff5362eceaa99310c6d395aa4d11e8ebd053bd76fcd7ad94cbf35b40feaa8",
+    "arch:3618bf329a3ff79c26b84d78305faa6bdc2de1594f74a2050d7c9a39f6cffb30",
+    "arch:36a23237a85f2f9fd3b2d469250727bbe370d6cf129b803eb5f08ed780d9cb6e",
+    "arch:392c649c48f76d21d3b66089aa25322eb544a95bccf0c89ffe2291252533461e",
+    "arch:3e238646efde6e254c9828b3679ab90afbaa98d659f658e9035970ecfb5f7f86",
+    "arch:45e86a7b70abe9b54abb1fb19388fdff2b6f5a61957380b68e0c0ba1a4d34672",
+    "arch:472a3b561344c61f762ada8e5857c4d37d4844ef9766c55aeb76cd94cf1cf448",
+    "arch:4baf2f5e4d00e8eda36c6dc627c097feb08537234d653a76ff9081c4868e5e04",
+    "arch:4d6fd35657da6202916b98374bcc4864f8b48eb7aaf86059309649d3b29250ab",
+    "arch:58fb1d88d413c4a867e63f041453121f966e5207d92f05a5f879fe7029be3110",
+    "arch:5b3d66ab0f2eaab192df7f0811a9a4a9f240c472d34a1261ef30e89ad15ccdb3",
+    "arch:670f4d0cafe14f6f939d2bd0801999589d8175eba4ee2ed4b0f33a6887960532",
+    "arch:6c9ae6e1bc0c36ffef03642ce61440075484d81c730bd703889295c8c2aad3de",
+    "arch:7104c9c4e0970df829a03007b828651a1decf207286c03a952d3de6eecc2d286",
+    "arch:72149f4d917ab0bcbc90202c487bdb6b41579c195b18e86f8136f35bd8d18ac5",
+    "arch:75ed4282200e5258b28825d06f25c4d6430a3dec8965fa79e117e8cf19b43be5",
+    "arch:80d0d9a646feafae3bf14f70f12e2b4b2e3a342061a26ede5a5e57774285288a",
+    "arch:81f8b08d289ca48ad82689fb1b8dd19e03fb0c9011b3f0a76be968b5a1972620",
+    "arch:9396752e8dfe0c59f96219ef2f27af9d915dc3cf3a085c89f6cc6c5e1d29e66d",
+    "arch:9599e57dbba3c85879df07d2dd509674585ad0ca093343a4bb737b2bfbbf1167",
+    "arch:9c82972d1ff786b468a860cff5c8c30316f4511a647943b7b1c2e8e7ba1cc1bf",
+    "arch:9f974bdcf16047ae1ca8a91c31308225ccfeb4fe41b83f225e39d5a5afcdfa75",
+    "arch:9fbff3881c7eecff43cf8fde6983508622a54a1b3dfbf9aa8f8dc0fc4e2467d8",
+    "arch:a9f8d58eca3fef8390a032f1974f3299e63555d1fbbe9e2dd7c7406bc1378757",
+    "arch:acf690842ca90b603f8b6ddb24b78d5d422f6e03429c8c2ebcdc8bbae63b81d6",
+    "arch:b073e785f8ec97dac1e0dfae232c163ab9c19518adb9951156525b794f391544",
+    "arch:b3b0c45a5d94cf463c17aca78eca0d87583fbe023e3f53bd935a527c8fdfb3b9",
+    "arch:ba150d117e1e9cbbe7a3e74a4da11576645db27585be89a03015bc75afde4b22",
+    "arch:bc8bf05beddcd7a44fcf98a29e2661a5a8af471d75e70ebd8daeeb432ad737c7",
+    "arch:c14544bde772f541235b31f25696a0788e9a69add38cbc96d619548db2fc4174",
+    "arch:c3d0bdd78996b0dbb4ad0f30dc1d2d04fcc8031de5914e42862e886f0a410bf4",
+    "arch:c72f41f3dcabb504725799e429e64fbc378344cf040f8bfd8313a55d3413878a",
+    "arch:d29aacefd39758d0ac4f14d93e3c5adac180eb78587a36f592843d31b789848c",
+    "arch:d6b4c5aeb02e8ee060160a047b91b4d8f7a5c9ab466c743a31384f1f762ee90d",
+    "arch:d91ac18a8a89e86bac377eaed6c7035136ec2cd5743b92991f7443cde56b4f30",
+    "arch:dc4974d83fd6a4392fe051e608fbdfdf82e5ac47a69702427307521b2b095318",
+    "arch:dc739cabce7e240a201da385b84745eb3f3bb1bc7e44cbc31ab996bb77fafa84",
+    "arch:dfff086a2da0aa8b76045030ce81d0d9b3bef9ef74c14d9e5ffc09137a4cc6da",
+    "arch:e407a8d47ec03a9f6393e40402931447a159d0c65ddecb7df8cc73962e07d158",
+    "arch:e46b4faa10b0d660623045d93d1919e666c4092aa2f6687f77eebae8266be8f1",
+    "arch:e695c13fcec2c397e4d27e11a13acc66dd87411c3566ef83e6833d171a93cb5e",
+    "arch:f3706759b5a016470f2363a25275b35bd72aa5e188d34c125acdfa12fe9e4df3",
+    "arch:f397e3a5f8b1ddb60a3eba89baf62d63d53951680171749050c31b6cce991b09",
+    "arch:f76dae51112d2d2b3674412ec1d4062690850f2b2b4a08b4165c671ec1f9c268",
+    "arch:f859fc4e490c51121a3fdc848a7319677b266095efa9281c7438c3938603fdab",
+)
 FINAL_RETIRED_PROJECTION_REPLACEMENT_SITE_IDS = (
     "arch:258413d5360b8db7f162ac61c060f6476ba684b99e9e53dbc515cb6318a4c8b2",
     "arch:c217aacdc549c1316a8de1f0dac24ffe3edc55946c56b6a46103b3693a4eaeb2",
@@ -1638,6 +1706,7 @@ RETIREMENT_HISTORY = {
                 *S_RETIRED_RAW_STORAGE_EDGE_IDS,
                 *S_RETIRED_RAW_PIPELINE_EDGE_IDS,
                 *S_RETIRED_KNOWLEDGE_GRAPH_CORE_EDGE_IDS,
+                *S_RETIRED_SEARCH_ENGINE_CORE_EDGE_IDS,
                 *V_RETIRED_REMAINING_SHIM_EXCEPTION_IDS,
             )
         )
@@ -1706,6 +1775,7 @@ RETIREMENT_HISTORY = {
                 *S_RETIRED_SEARCH_RANKING_CORE_SITE_IDS,
                 *S_RETIRED_SEARCH_RUNTIME_CORE_SITE_IDS,
                 *S_RETIRED_KNOWLEDGE_GRAPH_CORE_SITE_IDS,
+                *S_RETIRED_SEARCH_ENGINE_CORE_SITE_IDS,
                 *V_RETIRED_RECALL_SHIM_SITE_IDS,
                 *V_RETIRED_REMAINING_SHIM_SITE_IDS,
                 *V_RETIRED_DURABLE_MODULE_MAPPING_SITE_IDS,
@@ -2037,6 +2107,7 @@ def _without_persisted_retirement_history(
         + len(S_RETIRED_RAW_STORAGE_EDGE_IDS)
         + len(S_RETIRED_RAW_PIPELINE_EDGE_IDS)
         + len(S_RETIRED_KNOWLEDGE_GRAPH_CORE_EDGE_IDS)
+        + len(S_RETIRED_SEARCH_ENGINE_CORE_EDGE_IDS)
         + len(V_RETIRED_REMAINING_SHIM_EXCEPTION_IDS)
     )
     active_counts["by_category"]["dynamic_import"] = (
@@ -2465,8 +2536,8 @@ def test_current_exception_ledger_seed_and_schema_inventory_are_exact(
 
     assert detected_ids == ledger_ids == set(seed["exception_semantic_ids"]["active"])
     _assert_exact_retirement_history(architecture, seed)
-    assert len(edge_rows) == current["worktree_architecture"]["edge_count"] == 48
-    assert sum(len(row["sites"]) for row in edge_rows) == len(raw_cross_sites) == 1407
+    assert len(edge_rows) == current["worktree_architecture"]["edge_count"] == 45
+    assert sum(len(row["sites"]) for row in edge_rows) == len(raw_cross_sites) == 1379
     assert {
         field: counts[field]
         for field in (
@@ -2478,15 +2549,15 @@ def test_current_exception_ledger_seed_and_schema_inventory_are_exact(
             "compatibility_contracts",
         )
     } == {
-        "exceptions": 48,
-        "cross_domain_sites": 1407,
+        "exceptions": 45,
+        "cross_domain_sites": 1379,
         "production_to_lab_edges": 0,
         "production_to_lab_static_sites": 0,
         "production_to_lab_dynamic_sites": 0,
         "compatibility_contracts": 51,
     }
     assert counts["by_category"] == {
-        "cross_domain_edge": 48,
+        "cross_domain_edge": 45,
     }
     assert counts["compatibility_by_kind"] == {
         "console_entrypoint": 51,

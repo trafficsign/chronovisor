@@ -15,7 +15,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from chronovisor.search.search import search
+from chronovisor.core.search import search
 from chronovisor.search.search_eval import (
     DEFAULT_VARIANTS,
     GOLDEN_FILE,

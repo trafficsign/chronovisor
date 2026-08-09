@@ -1157,7 +1157,7 @@ def _search_candidate_metas(op: dict) -> list[dict]:
 
     try:
         from chronovisor.core.index_store import get_store
-        from chronovisor.search.search import search
+        from chronovisor.core.search import search
 
         results, _mode = search(query, top_n=5, semantic=True)
         store = get_store()
@@ -1815,7 +1815,7 @@ def _search_related_pages(
 ) -> list[Path]:
     """Search for related pages using keywords. Uses BM25 if available, falls back to simple matching."""
     try:
-        from chronovisor.search.search import get_bm25
+        from chronovisor.core.search import get_bm25
 
         bm25 = get_bm25()
         bm25.build()

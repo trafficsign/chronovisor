@@ -17,7 +17,7 @@ from chronovisor.core.claims import (
     rebuild_claim_index,
     search_claims,
 )
-from chronovisor.search.search import search
+from chronovisor.core.search import search
 
 
 def oracle_bundle(

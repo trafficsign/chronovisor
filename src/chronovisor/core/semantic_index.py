@@ -1,4 +1,4 @@
-"""Immutable semantic index generations with a durable incremental delta.
+"""Core semantic index generations with a durable incremental delta.
 
 The base generation is never edited after ``COMPLETE`` is published.  Small
 page updates are stored in a generation-scoped delta SQLite database and
@@ -32,6 +32,7 @@ from chronovisor.core import frontmatter
 from chronovisor.core.hashutil import sha256_bytes as _sha256_bytes
 from chronovisor.core.hashutil import sha256_file as _sha256_file
 from chronovisor.core.page_identity import normalize_page_uid
+from chronovisor.core.search_types import FRONTMATTER_RE
 from chronovisor.core.store import CHRONOVISOR_ROOT, page_id_from_path
 
 SEMANTIC_ROOT = CHRONOVISOR_ROOT / ".index" / "semantic"
@@ -140,11 +141,7 @@ def _repo_commit() -> str:
 def extract_page_documents(path: Path) -> list[SemanticDocument]:
     """Project one canonical page into page/question/chunk documents."""
 
-    from chronovisor.search.search import (
-        FRONTMATTER_RE,
-        _markdown_chunks,
-        _recall_questions_from_content,
-    )
+    from chronovisor.core.search import _markdown_chunks, _recall_questions_from_content
 
     try:
         content = path.read_text(encoding="utf-8")
@@ -164,40 +161,45 @@ def extract_page_documents(path: Path) -> list[SemanticDocument]:
     questions = _recall_questions_from_content(content)
     recall_text = "\n".join(f"Q: {question}" for question in questions)
     page_text = f"{title}\n\n{recall_text}\n\n{FRONTMATTER_RE.sub('', content)[:2000]}"
-    common = {
-        "page_id": page_id,
-        "source_path": str(path),
-        "source_sha256": source_sha256,
-        "source_mtime_ns": mtime_ns,
-        "page_uid": page_uid,
-    }
     documents = [
         SemanticDocument(
             doc_id=identity,
+            page_id=page_id,
             kind="page",
             ordinal=-1,
             text=page_text,
-            **common,
+            source_path=str(path),
+            source_sha256=source_sha256,
+            source_mtime_ns=mtime_ns,
+            page_uid=page_uid,
         )
     ]
     documents.extend(
-        SemanticDocument(
-            doc_id=f"{identity}#q{index}",
-            kind="question",
-            ordinal=index,
-            text=question,
-            **common,
-        )
+            SemanticDocument(
+                doc_id=f"{identity}#q{index}",
+                page_id=page_id,
+                kind="question",
+                ordinal=index,
+                text=question,
+                source_path=str(path),
+                source_sha256=source_sha256,
+                source_mtime_ns=mtime_ns,
+                page_uid=page_uid,
+            )
         for index, question in enumerate(questions)
     )
     documents.extend(
-        SemanticDocument(
-            doc_id=f"{identity}#c{index}",
-            kind="chunk",
-            ordinal=index,
-            text=chunk,
-            **common,
-        )
+            SemanticDocument(
+                doc_id=f"{identity}#c{index}",
+                page_id=page_id,
+                kind="chunk",
+                ordinal=index,
+                text=chunk,
+                source_path=str(path),
+                source_sha256=source_sha256,
+                source_mtime_ns=mtime_ns,
+                page_uid=page_uid,
+            )
         for index, chunk in enumerate(_markdown_chunks(content, title))
     )
     return documents
@@ -207,7 +209,7 @@ def extract_all_documents(
     paths: Iterable[Path] | None = None,
 ) -> list[SemanticDocument]:
     if paths is None:
-        from chronovisor.search.search import searchable_pages
+        from chronovisor.core.search import searchable_pages
 
         paths = searchable_pages()
     documents: list[SemanticDocument] = []
@@ -310,7 +312,7 @@ def _build_ann_index(path: Path, vectors: np.ndarray) -> tuple[str, int, str]:
     if len(vectors) < 64:
         return "", 0, ""
     try:
-        from usearch.index import Index
+        from usearch.index import Index  # type: ignore[import-not-found]
     except ImportError:
         return "", 0, ""
     dimensions = min(DEFAULT_COARSE_DIMENSIONS, int(vectors.shape[1]))
@@ -761,7 +763,7 @@ class LoadedGeneration:
         vector = self._normalized_query(query_vector)
         by_page = self._score_base_rows(
             vector,
-            self._candidate_rows(vector, top_n=top_n),
+            self._candidate_rows(vector, top_n=top_n).tolist(),
         )
         for page_id, score in self._score_delta(vector).items():
             if score > by_page.get(page_id, float("-inf")):
@@ -1032,7 +1034,7 @@ def semantic_index_status(*, root: Path = SEMANTIC_ROOT) -> dict[str, Any]:
                         indexed_mtimes[str(page_id)] = int(source_mtime_ns)
             finally:
                 connection.close()
-        from chronovisor.search.search import searchable_pages
+        from chronovisor.core.search import searchable_pages
 
         current_mtimes: dict[str, int] = {}
         for path in searchable_pages():
