@@ -413,6 +413,17 @@ S_RETIRED_MIGRATION_SNAPSHOT_SITE_IDS = (
     "arch:a3356c42b8a0491255399afc77391d19e38b009c2b41cff9ee2ad5f9d42073ce",
     "arch:dd46dfaa6bed5b170639da9e96667c25d8a2937372660f599474668d802f0c71",
 )
+S_RETIRED_RUNTIME_STATUS_SITE_IDS = (
+    "arch:1c989f4902886d315590bd17002f10ad9dc2ff1033a76efc4771a38383fc2825",
+    "arch:1cb67741efbfa2341d94de2621c7dcbc24d7c2a101320f56bb748297bd545e0b",
+    "arch:33693d046af1e9452717148d0afeb58f0b8dedb703d56019394ebf928bb1835d",
+    "arch:450532c6fe5094d19e88b89e02a307748d27e45390eed9daca42ab76ef0612a4",
+    "arch:592d921217d005a676c2a4bcda2feff9a39bc6934bb8ae989b857f87bd04bcab",
+    "arch:851b27f9c6e1304d27c055cf33bb02b704011bd84e513adbf556ad1a081fd3f1",
+    "arch:940f800b3795904f65104fb83f395da685713348242c5ba8106859bc4e64783b",
+    "arch:9db6f1d2281c060aad6183398164f0e43710d010bf8e325b0e67bc9efb5c7767",
+    "arch:c6664a07b7d3d67a9a64bf420d75857f0718365126d19e4bb19f09d59e1fe7b6",
+)
 V_RETIRED_RECALL_SHIM_SITE_IDS = (
     "arch:3896d20fb9ddf2c56d06af026b9b40d6399902891ab291f3a6eba063ba8b4d28",
     "arch:c99c20705c2ffb63854eb252145ab9e7f20ea9b0adb7eef8892e39abb52ceb1c",
@@ -733,6 +744,7 @@ RETIREMENT_HISTORY = {
                 *S_RETIRED_PAGE_MUTATION_SITE_IDS,
                 *S_RETIRED_CORE_PRIMITIVE_SITE_IDS,
                 *S_RETIRED_MIGRATION_SNAPSHOT_SITE_IDS,
+                *S_RETIRED_RUNTIME_STATUS_SITE_IDS,
                 *V_RETIRED_RECALL_SHIM_SITE_IDS,
                 *V_RETIRED_REMAINING_SHIM_SITE_IDS,
                 *V_RETIRED_DURABLE_MODULE_MAPPING_SITE_IDS,
@@ -1468,7 +1480,7 @@ def test_current_exception_ledger_seed_and_schema_inventory_are_exact(
     assert detected_ids == ledger_ids == set(seed["exception_semantic_ids"]["active"])
     _assert_exact_retirement_history(architecture, seed)
     assert len(edge_rows) == current["worktree_architecture"]["edge_count"] == 84
-    assert sum(len(row["sites"]) for row in edge_rows) == len(raw_cross_sites) == 1277
+    assert sum(len(row["sites"]) for row in edge_rows) == len(raw_cross_sites) == 1280
     assert {
         field: counts[field]
         for field in (
@@ -1481,7 +1493,7 @@ def test_current_exception_ledger_seed_and_schema_inventory_are_exact(
         )
     } == {
         "exceptions": 84,
-        "cross_domain_sites": 1277,
+        "cross_domain_sites": 1280,
         "production_to_lab_edges": 0,
         "production_to_lab_static_sites": 0,
         "production_to_lab_dynamic_sites": 0,

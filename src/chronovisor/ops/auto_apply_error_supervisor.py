@@ -9,8 +9,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from chronovisor.core import runtime_status
 from chronovisor.core import store as chronovisor_store
-from chronovisor.ops import runtime_status
 
 AUTO_APPLY_ERROR_THRESHOLD = 3
 MAX_CLUSTER_SAMPLES = 8

@@ -18,11 +18,11 @@ from functools import wraps
 from pathlib import Path
 from typing import Any
 
+from chronovisor.core import runtime_status
 from chronovisor.core.durable_state import fsync_directory as _fsync_directory
 from chronovisor.core.link_fix import atomic_write
 from chronovisor.core.ollama import is_available
 from chronovisor.core.store import CHRONOVISOR_ROOT, LOG_FILE, RAW_DIR
-from chronovisor.ops import runtime_status
 
 # Config
 INGEST_THRESHOLD = 5  # Trigger ingest after N raw files

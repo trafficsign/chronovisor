@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from chronovisor.core import ollama as ollama_runtime
+from chronovisor.core import runtime_status
 from chronovisor.core.jobs import JobStatus, job_store
 from chronovisor.core.ollama import (
     GENERATE_SYSTEM_PROMPT as GENERATE_SYSTEM_PROMPT,
@@ -231,7 +232,6 @@ from chronovisor.ingest.triage_plan import (
     collapse_exact_duplicate_operations,
     distinct_target_collisions,
 )
-from chronovisor.ops import runtime_status
 from chronovisor.ops.entities import patch_entities_frontmatter
 from chronovisor.search.search_types import tokenize
 

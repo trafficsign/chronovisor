@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+from chronovisor.core import runtime_status
 from chronovisor.core import store as chronovisor_store
 from chronovisor.core.alias_store import add_alias
 from chronovisor.core.page_mutation import decision_authority_lock
@@ -43,7 +44,6 @@ from chronovisor.decision.semantic_hold import (
     persisted_semantic_no_quorum_hold,
     semantic_no_quorum_hold_error,
 )
-from chronovisor.ops import runtime_status
 from chronovisor.ops.convergence import (
     is_human_required_failure,
     is_human_required_result,

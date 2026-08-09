@@ -21,10 +21,10 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+from chronovisor.core import runtime_status
 from chronovisor.core.runtime_config import uvx_runtime_command
 from chronovisor.core.store import CHRONOVISOR_ROOT
 from chronovisor.decision.decision_schema_manifest import FRONTIER_DECISION_SCHEMA
-from chronovisor.ops import runtime_status
 from chronovisor.ops.convergence import (
     HUMAN_REQUIRED_FAILURE_CLASSES as CONVERGENCE_HUMAN_REQUIRED_FAILURE_CLASSES,
 )

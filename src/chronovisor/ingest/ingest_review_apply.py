@@ -6,6 +6,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+from chronovisor.core import runtime_status
 from chronovisor.decision import decision_authority
 from chronovisor.ingest.ingest_review_plan import (
     IngestReviewBudgetExhausted,
@@ -21,7 +22,6 @@ from chronovisor.ingest.ingest_schemas import (
     INGEST_FRONTIER_ARTIFACT_SCHEMA_VERSION,
     INGEST_REVIEW_SHARD_SCHEMA_VERSION,
 )
-from chronovisor.ops import runtime_status
 
 
 def _runtime():

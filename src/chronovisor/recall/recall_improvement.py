@@ -26,12 +26,12 @@ from chronovisor.core.canonical_json import (
 )
 from chronovisor.core.page_mutation import decision_authority_lock
 from chronovisor.core.runtime_config import load_toml_file, runtime_repo_root
+from chronovisor.core.runtime_status import safe_append_event, safe_append_metric
 from chronovisor.decision import decision_authority
 from chronovisor.decision.local_structured import (
     LocalStructuredSession,
     ValidationIssue,
 )
-from chronovisor.ops.runtime_status import safe_append_event, safe_append_metric
 from chronovisor.recall.recall_eval import (
     RecallExample,
     build_dataset,

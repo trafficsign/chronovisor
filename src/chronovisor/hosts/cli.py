@@ -11,6 +11,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
+from chronovisor.core import runtime_status
 from chronovisor.core import store as chronovisor_store
 from chronovisor.core.runtime_config import (
     config_summary,
@@ -18,7 +19,6 @@ from chronovisor.core.runtime_config import (
     runtime_identity,
     uvx_runtime_command,
 )
-from chronovisor.ops import runtime_status
 from chronovisor.recall.recall_runtime import (
     RECALL_DIR,
     RECALL_FEEDBACK_FILE,

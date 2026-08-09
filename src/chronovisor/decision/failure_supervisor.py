@@ -20,9 +20,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from chronovisor.core import runtime_status
 from chronovisor.core import store as chronovisor_store
 from chronovisor.core.link_fix import atomic_write
-from chronovisor.ops import runtime_status
 
 FAILURE_THRESHOLD = 3
 _FAILURE_STATE_THREAD_LOCK = threading.RLock()
