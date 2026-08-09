@@ -84,8 +84,11 @@ def _transformer_scores(
     query: str, passages: list[str], config: RerankerConfig
 ) -> list[float]:
     try:
-        import torch
-        from transformers import AutoModelForSequenceClassification, AutoTokenizer
+        import torch  # type: ignore[import-not-found, unused-ignore]
+        from transformers import (  # type: ignore[import-not-found, unused-ignore]
+            AutoModelForSequenceClassification,
+            AutoTokenizer,
+        )
     except Exception as exc:  # pragma: no cover - exercised via missing-dep tests
         raise RuntimeError(f"transformers backend unavailable: {exc}") from exc
 
