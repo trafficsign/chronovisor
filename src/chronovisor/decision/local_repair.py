@@ -9,6 +9,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
+from chronovisor.core.page_mutation import decision_authority_lock
 from chronovisor.decision.decision_authority import (
     compare_semantic_authority,
     current_semantic_authority,
@@ -24,7 +25,6 @@ from chronovisor.decision.semantic_hold import (
     canonical_sha256,
     is_local_semantic_no_quorum,
 )
-from chronovisor.ingest.page_mutation import decision_authority_lock
 
 ALLOWED_ACTIONS = {
     "resolve_update_target",

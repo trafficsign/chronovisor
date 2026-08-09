@@ -26,12 +26,12 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from chronovisor.core.link_fix import atomic_write
+from chronovisor.core.page_mutation import find_mutation_page
 from chronovisor.core.runtime_config import (
     NegativeFeedbackConfig,
     load_negative_feedback_config,
 )
 from chronovisor.core.store import CHRONOVISOR_ROOT
-from chronovisor.ingest.page_mutation import find_mutation_page
 from chronovisor.search import feedback_ledger
 from chronovisor.search.feedback_ledger import trusted_negative_feedback_rows
 from chronovisor.search.search_types import ScoredPage, tokenize

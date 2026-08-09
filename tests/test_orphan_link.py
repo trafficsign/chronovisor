@@ -316,7 +316,7 @@ def isolated_pages(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         cand = pages_dir / f"{page_id}.md"
         return cand if cand.exists() else None
 
-    from chronovisor.ingest import page_mutation
+    from chronovisor.core import page_mutation
 
     monkeypatch.setattr(
         page_mutation,

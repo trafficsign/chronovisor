@@ -43,8 +43,8 @@ def isolated_wiki(
     for d in (pages, raw, system, runtime):
         d.mkdir(parents=True, exist_ok=True)
 
-    from chronovisor.core import ollama, store
-    from chronovisor.ingest import ingest, orchestrator, page_mutation
+    from chronovisor.core import ollama, page_mutation, store
+    from chronovisor.ingest import ingest, orchestrator
     from chronovisor.ops import background_jobs, runtime_status, state_register
     from chronovisor.recall import claims
     from chronovisor.search import index_store, search

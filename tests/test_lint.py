@@ -26,7 +26,7 @@ def isolate_decision_authority_lock(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor.ingest import page_mutation
+    from chronovisor.core import page_mutation
 
     monkeypatch.setattr(
         page_mutation,

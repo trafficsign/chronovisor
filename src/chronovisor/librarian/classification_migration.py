@@ -32,8 +32,8 @@ from chronovisor.core import frontmatter
 from chronovisor.core.durable_state import write_sealed_json
 from chronovisor.core.hashutil import sha256_bytes as _sha256_bytes
 from chronovisor.core.link_fix import atomic_write
+from chronovisor.core.page_mutation import chronovisor_mutation_lock
 from chronovisor.core.store import CHRONOVISOR_ROOT
-from chronovisor.ingest.page_mutation import chronovisor_mutation_lock
 from chronovisor.ingest.page_registry import PageRegistry
 from chronovisor.librarian.librarian import _append_event, _now_iso
 from chronovisor.ops.migration_snapshot import (

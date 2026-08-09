@@ -12,7 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from chronovisor.ingest import page_mutation
+from chronovisor.core import page_mutation
 from chronovisor.ops.convergence import ConvergenceStore, CycleBudget, RetryPolicy
 from chronovisor.recall import content_correction
 from chronovisor.search.feedback_ledger import active_feedback_rows

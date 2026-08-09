@@ -25,6 +25,7 @@ from typing import Any
 from chronovisor.core.canonical_json import (
     canonical_json_sha256_stringifying as _canonical_json_sha256,
 )
+from chronovisor.core.page_mutation import decision_authority_lock
 from chronovisor.core.runtime_config import (
     load_negative_feedback_config,
     load_reranker_config,
@@ -43,7 +44,6 @@ from chronovisor.decision.semantic_hold import (
     persisted_semantic_no_quorum_hold,
     semantic_no_quorum_hold_error,
 )
-from chronovisor.ingest.page_mutation import decision_authority_lock
 from chronovisor.ops.convergence import is_human_required_result
 from chronovisor.search.feedback_ledger import active_feedback_rows
 from chronovisor.search.negative_feedback import apply_penalties, penalties_for_query

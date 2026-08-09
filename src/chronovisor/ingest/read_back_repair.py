@@ -20,6 +20,10 @@ from typing import Any
 from chronovisor.core import store as chronovisor_store
 from chronovisor.core.durable_state import atomic_write_bytes, canonical_bytes
 from chronovisor.core.frontmatter import parse as parse_frontmatter
+from chronovisor.core.page_mutation import (
+    chronovisor_mutation_lock,
+    decision_authority_lock,
+)
 from chronovisor.core.runtime_config import runtime_repo_root
 from chronovisor.decision import decision_authority
 from chronovisor.decision.decision_schema_manifest import READ_BACK_FRONTIER_SCHEMA
@@ -31,10 +35,6 @@ from chronovisor.decision.semantic_hold import (
     is_local_semantic_no_quorum,
     persisted_semantic_no_quorum_hold,
     semantic_no_quorum_hold_error,
-)
-from chronovisor.ingest.page_mutation import (
-    chronovisor_mutation_lock,
-    decision_authority_lock,
 )
 from chronovisor.ingest.read_back_integrity import (
     scan_jsonl_prefix,

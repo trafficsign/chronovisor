@@ -14,8 +14,8 @@ from chronovisor.core.frontmatter import (
     propose_nested_resolution,
 )
 from chronovisor.core.link_fix import atomic_write
+from chronovisor.core.page_mutation import chronovisor_mutation_lock
 from chronovisor.core.store import CHRONOVISOR_ROOT, PAGES_DIR, page_id_from_path
-from chronovisor.ingest.page_mutation import chronovisor_mutation_lock
 
 
 def _sha256_identity(value: str) -> str:

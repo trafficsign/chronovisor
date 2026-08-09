@@ -17,12 +17,12 @@ from typing import Any
 from chronovisor.core.frontmatter import parse as parse_frontmatter
 from chronovisor.core.frontmatter import patch as patch_frontmatter
 from chronovisor.core.link_fix import atomic_write
-from chronovisor.core.store import PAGES_DIR, SYSTEM_DIR
-from chronovisor.ingest.page_mutation import (
+from chronovisor.core.page_mutation import (
     ACTIVE_CLAIM_FRONTMATTER_FIELDS,
     chronovisor_mutation_lock,
     enforce_correction_constraints,
 )
+from chronovisor.core.store import PAGES_DIR, SYSTEM_DIR
 
 
 @dataclass(frozen=True)

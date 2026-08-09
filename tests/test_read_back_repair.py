@@ -11,7 +11,8 @@ from pathlib import Path
 
 import pytest
 
-from chronovisor.ingest import page_mutation, read_back_repair
+from chronovisor.core import page_mutation
+from chronovisor.ingest import read_back_repair
 from chronovisor.ops.convergence import CycleBudget
 from chronovisor.recall import recall_hints
 

@@ -27,6 +27,10 @@ from typing import Any
 
 from chronovisor.core.frontmatter import parse as parse_frontmatter
 from chronovisor.core.frontmatter import patch as patch_frontmatter
+from chronovisor.core.page_mutation import (
+    chronovisor_mutation_lock,
+    decision_authority_lock,
+)
 from chronovisor.core.runtime_config import (
     runtime_identity,
     runtime_repo_root,
@@ -50,10 +54,6 @@ from chronovisor.decision.semantic_hold import (
     is_local_semantic_no_quorum,
     persisted_semantic_no_quorum_hold,
     semantic_no_quorum_hold_error,
-)
-from chronovisor.ingest.page_mutation import (
-    chronovisor_mutation_lock,
-    decision_authority_lock,
 )
 from chronovisor.ops.convergence import (
     ConvergenceStateError,

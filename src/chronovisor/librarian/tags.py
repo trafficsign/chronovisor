@@ -31,8 +31,8 @@ import re
 from datetime import date
 
 from chronovisor.core.link_fix import atomic_write
+from chronovisor.core.page_mutation import chronovisor_mutation_lock
 from chronovisor.core.store import SYSTEM_DIR
-from chronovisor.ingest.page_mutation import chronovisor_mutation_lock
 
 # ---------------------------------------------------------------------------
 # Taxonomy v0.1 — seed tags

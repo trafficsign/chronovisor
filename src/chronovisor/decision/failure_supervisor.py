@@ -1420,7 +1420,7 @@ def record_current_semantic_no_quorum_defer(
     if authority_sha256 is None:
         raise ValueError("semantic no-quorum defer requires an authority artifact hash")
 
-    from chronovisor.ingest.page_mutation import decision_authority_lock
+    from chronovisor.core.page_mutation import decision_authority_lock
 
     authority_lock_path = chronovisor_store.CHRONOVISOR_ROOT / "runtime" / "decision-authority.lock"
     with decision_authority_lock(authority_lock_path):

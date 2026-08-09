@@ -26,6 +26,7 @@ from chronovisor.core.durable_state import sidecar_exclusive_lock as _queue_lock
 from chronovisor.core.frontmatter import parse as parse_frontmatter
 from chronovisor.core.hashutil import sha256_file as _sha256_path
 from chronovisor.core.jobs import JobStatus, job_store
+from chronovisor.core.page_mutation import decision_authority_lock
 from chronovisor.core.store import CHRONOVISOR_ROOT, RAW_DIR
 from chronovisor.core.timeutil import iso_seconds as _iso
 from chronovisor.decision.decision_authority import (
@@ -47,7 +48,6 @@ from chronovisor.decision.semantic_hold import (
     persisted_semantic_no_quorum_hold,
     semantic_no_quorum_hold_error,
 )
-from chronovisor.ingest.page_mutation import decision_authority_lock
 from chronovisor.ops.convergence import is_human_required_result
 from chronovisor.raw.raw_store import RawStore
 

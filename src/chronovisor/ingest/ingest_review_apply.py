@@ -131,7 +131,7 @@ def _apply_authorized_ingest_review(
 ) -> dict[str, Any]:
     """Bind an approved verdict to stable authority and perform its effect."""
 
-    from chronovisor.ingest.page_mutation import decision_authority_lock
+    from chronovisor.core.page_mutation import decision_authority_lock
 
     with decision_authority_lock():
         current_authority, current_authority_error = _current_ingest_review_authority(

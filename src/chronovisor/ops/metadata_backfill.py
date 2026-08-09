@@ -11,10 +11,10 @@ from typing import Any
 
 from chronovisor.core.frontmatter import parse, patch
 from chronovisor.core.link_fix import atomic_write
+from chronovisor.core.page_mutation import chronovisor_mutation_lock
 from chronovisor.core.runtime_config import runtime_repo_root
 from chronovisor.core.store import CHRONOVISOR_ROOT, all_pages, page_id_from_path
 from chronovisor.ingest.ingest import ensure_recall_metadata_frontmatter
-from chronovisor.ingest.page_mutation import chronovisor_mutation_lock
 from chronovisor.ops.lint import (
     build_semantic_mutation_proposal,
     review_semantic_mutation,

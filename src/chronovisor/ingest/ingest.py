@@ -2380,7 +2380,7 @@ def _reserved_system_page_collision_keys() -> frozenset[str]:
     """
 
     from chronovisor.core import store as _wiki
-    from chronovisor.ingest.page_mutation import CORRECTABLE_SYSTEM_PAGE_IDS
+    from chronovisor.core.page_mutation import CORRECTABLE_SYSTEM_PAGE_IDS
 
     page_ids = set(CORRECTABLE_SYSTEM_PAGE_IDS)
     try:
@@ -3151,7 +3151,7 @@ def rollback_ingest_proposal_artifact(
         }
 
     from chronovisor.core.link_fix import atomic_write
-    from chronovisor.ingest.page_mutation import chronovisor_mutation_lock
+    from chronovisor.core.page_mutation import chronovisor_mutation_lock
 
     def read_optional(item: PreparedIngestOperation) -> str | None:
         return _read_optional_exact_utf8(item.path)
@@ -3612,7 +3612,7 @@ def _run_ingest_sharded_review(
     authority: dict[str, Any],
     frontier_budget: "_FrontierCallBudget | None" = None,
 ) -> dict[str, Any]:
-    from chronovisor.ingest.page_mutation import decision_authority_lock
+    from chronovisor.core.page_mutation import decision_authority_lock
 
     return _run_ingest_sharded_review_core(
         plan,
@@ -4662,7 +4662,7 @@ def _complete_ingest_run(
     if frontier_status == "confirmed_noop":
         # A no-op has no page CAS receipt. Keep the semantic authority epoch
         # fixed through the terminal job transition and raw retirement.
-        from chronovisor.ingest.page_mutation import decision_authority_lock
+        from chronovisor.core.page_mutation import decision_authority_lock
 
         confirmed_authority = frontier_result.get("authority")
         confirmed_review = frontier_result.get("review")

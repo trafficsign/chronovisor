@@ -14,8 +14,8 @@ from typing import Any
 from chronovisor.core.durable_state import atomic_write_bytes, write_sealed_json
 from chronovisor.core.hashutil import sha256_bytes as _sha256_bytes
 from chronovisor.core.link_fix import atomic_write
+from chronovisor.core.page_mutation import chronovisor_mutation_lock
 from chronovisor.core.timeutil import utc_now as _now
-from chronovisor.ingest.page_mutation import chronovisor_mutation_lock
 from chronovisor.ingest.page_registry import PageRegistry
 from chronovisor.librarian.merge_ledger import (
     MergeCoverageError,

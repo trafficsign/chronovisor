@@ -23,6 +23,10 @@ from chronovisor.core.link_fix import (
     position_in_spans,
     protected_spans,
 )
+from chronovisor.core.page_mutation import (
+    chronovisor_mutation_lock,
+    decision_authority_lock,
+)
 from chronovisor.core.runtime_config import runtime_repo_root
 from chronovisor.core.store import CHRONOVISOR_ROOT, SYSTEM_DIR, find_page
 from chronovisor.decision.decision_authority import (
@@ -39,10 +43,6 @@ from chronovisor.decision.semantic_hold import (
 )
 from chronovisor.decision.semantic_hold import (
     canonical_sha256 as semantic_hold_sha256,
-)
-from chronovisor.ingest.page_mutation import (
-    chronovisor_mutation_lock,
-    decision_authority_lock,
 )
 from chronovisor.librarian.tags import (
     parse_tags,

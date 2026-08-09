@@ -24,6 +24,10 @@ from chronovisor.core.frontmatter import parse as parse_frontmatter
 from chronovisor.core.frontmatter import patch as patch_frontmatter
 from chronovisor.core.jsonl import read_jsonl
 from chronovisor.core.link_fix import atomic_write
+from chronovisor.core.page_mutation import (
+    chronovisor_mutation_lock,
+    decision_authority_lock,
+)
 from chronovisor.core.runtime_config import active_config_file
 from chronovisor.decision import decision_authority
 from chronovisor.decision.semantic_hold import (
@@ -34,10 +38,6 @@ from chronovisor.decision.semantic_hold import (
     is_local_semantic_no_quorum,
     persisted_semantic_no_quorum_hold,
     semantic_no_quorum_hold_error,
-)
-from chronovisor.ingest.page_mutation import (
-    chronovisor_mutation_lock,
-    decision_authority_lock,
 )
 from chronovisor.librarian.tags import record_new_tag, validate_tag
 from chronovisor.ops.convergence import is_human_required_result

@@ -48,7 +48,7 @@ def apply_prepared_operations(
     written: list[PreparedIngestOperation] = []
     created: list[str] = []
     updated: list[str] = []
-    from chronovisor.ingest.page_mutation import (
+    from chronovisor.core.page_mutation import (
         PageMutationError,
         chronovisor_mutation_lock,
         enforce_correction_constraints,

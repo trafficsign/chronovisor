@@ -17,8 +17,8 @@ from chronovisor.core.link_fix import (
     position_in_spans,
     protected_spans,
 )
+from chronovisor.core.page_mutation import chronovisor_mutation_lock
 from chronovisor.core.store import CHRONOVISOR_ROOT
-from chronovisor.ingest.page_mutation import chronovisor_mutation_lock
 from chronovisor.ingest.page_registry import PageRegistry
 from chronovisor.ingest.uid_link_index import build_uid_link_index
 from chronovisor.ops.migration_snapshot import (

@@ -19,6 +19,10 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from chronovisor.core.page_mutation import (
+    chronovisor_mutation_lock,
+    decision_authority_lock,
+)
 from chronovisor.decision import decision_authority
 from chronovisor.decision.semantic_hold import (
     LOCAL_SEMANTIC_NO_QUORUM,
@@ -26,10 +30,6 @@ from chronovisor.decision.semantic_hold import (
     canonical_sha256,
     is_local_semantic_no_quorum,
     persisted_semantic_no_quorum_hold,
-)
-from chronovisor.ingest.page_mutation import (
-    chronovisor_mutation_lock,
-    decision_authority_lock,
 )
 from chronovisor.ops.convergence import is_human_required_result
 from chronovisor.recall.recall_eval import read_jsonl

@@ -2450,7 +2450,7 @@ def test_atomic_adoption_artifact_publish_uses_authority_epoch(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor.ingest import page_mutation
+    from chronovisor.core import page_mutation
 
     held = False
 

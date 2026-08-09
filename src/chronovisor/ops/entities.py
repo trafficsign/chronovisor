@@ -14,9 +14,9 @@ from typing import Any
 from chronovisor.core.frontmatter import parse, patch
 from chronovisor.core.hashutil import sha256_text as _sha256_text
 from chronovisor.core.link_fix import atomic_write
+from chronovisor.core.page_mutation import chronovisor_mutation_lock
 from chronovisor.core.runtime_config import runtime_repo_root
 from chronovisor.core.store import CHRONOVISOR_ROOT, all_pages, page_id_from_path
-from chronovisor.ingest.page_mutation import chronovisor_mutation_lock
 from chronovisor.ops.lint import (
     StructuredReviewer,
     _review_packet_error,

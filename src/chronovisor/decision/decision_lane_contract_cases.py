@@ -568,7 +568,7 @@ def _classification_cases() -> list[tuple[str, str | None, dict[str, Any]]]:
 
 
 def _content_review_cases() -> list[tuple[str, str | None, dict[str, Any]]]:
-    from chronovisor.ingest.page_mutation import ExactReplacement, PreparedPageMutation
+    from chronovisor.core.page_mutation import ExactReplacement, PreparedPageMutation
     from chronovisor.recall.content_correction import frontier_prompt
 
     check_names = (

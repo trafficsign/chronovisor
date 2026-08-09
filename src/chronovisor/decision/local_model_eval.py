@@ -3131,7 +3131,7 @@ def adoption_gate(
 
 
 def _atomic_json(path: Path, payload: Mapping[str, Any]) -> None:
-    from chronovisor.ingest.page_mutation import decision_authority_lock
+    from chronovisor.core.page_mutation import decision_authority_lock
 
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary = tempfile.mkstemp(

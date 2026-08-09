@@ -890,8 +890,8 @@ def isolated_wiki(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     for d in (pages, raw, system, index_dir):
         d.mkdir(parents=True, exist_ok=True)
 
-    from chronovisor.core import ollama, store
-    from chronovisor.ingest import ingest, orchestrator, page_mutation
+    from chronovisor.core import ollama, page_mutation, store
+    from chronovisor.ingest import ingest, orchestrator
     from chronovisor.ops import runtime_status
     from chronovisor.search import index_store, search
 
@@ -1269,7 +1269,7 @@ class TestApplyOperations:
     def test_stale_ingest_cannot_reintroduce_applied_content_correction(
         self, isolated_wiki: Path
     ) -> None:
-        from chronovisor.ingest import page_mutation
+        from chronovisor.core import page_mutation
 
         path = _seed_page(
             isolated_wiki,
@@ -1313,7 +1313,7 @@ class TestApplyOperations:
     def test_stale_ingest_cannot_resurrect_correction_under_new_slug(
         self, isolated_wiki: Path
     ) -> None:
-        from chronovisor.ingest import page_mutation
+        from chronovisor.core import page_mutation
 
         _seed_page(
             isolated_wiki,
@@ -12832,7 +12832,7 @@ class TestLogFailuresDontBreakRollback:
         """A correction committed after ingest prepare must not be overwritten."""
         from contextlib import contextmanager
 
-        from chronovisor.ingest import page_mutation
+        from chronovisor.core import page_mutation
 
         target = isolated_wiki / "pages" / "x" / "page.md"
         target.parent.mkdir(parents=True, exist_ok=True)

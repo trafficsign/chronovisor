@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from chronovisor.ingest import page_mutation
+from chronovisor.core import page_mutation
 from chronovisor.ops import state_register
 from chronovisor.recall import recall_runtime
 from chronovisor.recall.recall_runtime import (

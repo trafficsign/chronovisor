@@ -16,8 +16,8 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
+from chronovisor.core.page_mutation import find_mutation_page
 from chronovisor.core.store import CHRONOVISOR_ROOT, find_page
-from chronovisor.ingest.page_mutation import find_mutation_page
 
 PAGE_IGNORED_RETRACTION_KIND = "page_ignored_retracted"
 RECALL_DIR = CHRONOVISOR_ROOT / "recall"

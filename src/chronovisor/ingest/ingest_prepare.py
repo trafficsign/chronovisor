@@ -320,7 +320,7 @@ def prepare_operations(
     # *before* frontier review, including creates under a brand-new slug.
     # The lock-time pass below then acts only as a staleness detector.
     constrained_plans: list[PreparedIngestOperation] = []
-    from chronovisor.ingest.page_mutation import (
+    from chronovisor.core.page_mutation import (
         PageMutationError,
         enforce_correction_constraints,
     )

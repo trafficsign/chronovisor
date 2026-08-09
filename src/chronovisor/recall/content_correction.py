@@ -31,6 +31,17 @@ from chronovisor.core.canonical_json import (
 )
 from chronovisor.core.frontmatter import parse as parse_frontmatter
 from chronovisor.core.jsonl_write import append_jsonl_durable
+from chronovisor.core.page_mutation import (
+    ExactReplacement,
+    PageMutationError,
+    PreparedPageMutation,
+    apply_prepared_mutations,
+    chronovisor_mutation_lock,
+    decision_authority_lock,
+    find_mutation_page,
+    prepare_page_mutation,
+    rollback_prepared_mutations,
+)
 from chronovisor.core.runtime_config import load_ingest_config, runtime_repo_root
 from chronovisor.core.store import CHRONOVISOR_ROOT, find_page, init_chronovisor
 from chronovisor.decision.decision_authority import (
@@ -46,17 +57,6 @@ from chronovisor.decision.decision_schema_manifest import (
     FRONTIER_REVIEW_SCHEMA,
 )
 from chronovisor.decision.local_structured import ChatRequest, LocalStructuredSession
-from chronovisor.ingest.page_mutation import (
-    ExactReplacement,
-    PageMutationError,
-    PreparedPageMutation,
-    apply_prepared_mutations,
-    chronovisor_mutation_lock,
-    decision_authority_lock,
-    find_mutation_page,
-    prepare_page_mutation,
-    rollback_prepared_mutations,
-)
 from chronovisor.ops.convergence import (
     ConvergenceStore,
     CycleBudget,

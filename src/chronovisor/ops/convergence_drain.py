@@ -1845,7 +1845,7 @@ def resume(
             else 1_800.0
         )
         lane_exception: BaseException | None = None
-        from chronovisor.ingest.page_mutation import decision_authority_lock
+        from chronovisor.core.page_mutation import decision_authority_lock
 
         with decision_authority_lock(
             chronovisor_store.CHRONOVISOR_ROOT / "runtime" / "decision-authority.lock"

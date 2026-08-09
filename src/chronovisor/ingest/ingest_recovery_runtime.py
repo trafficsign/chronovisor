@@ -772,7 +772,7 @@ def complete_pretriage_terminal_recovery(
         recovery.get("updated") or []
     )
 
-    from chronovisor.ingest.page_mutation import (
+    from chronovisor.core.page_mutation import (
         chronovisor_mutation_lock,
         decision_authority_lock,
     )
