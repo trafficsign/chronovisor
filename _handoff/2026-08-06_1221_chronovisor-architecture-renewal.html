@@ -55,6 +55,10 @@ pre{background:#eee;padding:0.8rem 1rem;border-radius:6px;overflow:auto;line-hei
 .warn{border-left-color:var(--warn)}
 .checklist span{width:100%}
 .checklist span > ul{margin-top:0.35rem}
+.subchecklist{list-style:none;padding-left:0;margin:0.4rem 0}
+.subchecklist li{display:flex;align-items:flex-start;gap:0.5rem}
+.subchecklist input[type=checkbox]{margin-top:0.42rem;flex-shrink:0}
+.subchecklist input[type=checkbox]:checked + span{color:var(--done);text-decoration:line-through}
 .exit{color:var(--muted);font-size:0.92rem}
 @media print{
   body{font-size:11pt;max-width:none;margin:0;padding:1rem}
@@ -96,30 +100,36 @@ pre{background:#eee;padding:0.8rem 1rem;border-radius:6px;overflow:auto;line-hei
 <li>一括rename・一括移動・全層同時切替のbig-bang refactorをしない。各Campaignは単独でgreen・rollback可能にする。</li>
 <li>外部API、51 console script名、durable worker module名、CLI引数、MCP schema、HTTP/SSE/WebSocket payloadを、明示的なversioned migrationなしに変えない。</li>
 <li><code>~/.chronovisor</code>のpath、保存byte列、cursor、receipt、queue順序、artifact identity、authority hash、lock/CAS/fsync/rollback順序を「内部整理」として暗黙変更しない。</li>
-<li><code>runtime/</code>を再生成可能なcacheとして一括削除・移動しない。projectionと、durable queue・authority artifact・receipt・identity registryをowner registryで区別する。</li>
-<li>ingest、background jobs、semantic SQLite lease、page mutation、decision authority、Ollama、accelerator、sleep/convergenceのlockを一つの汎用lockへ統合しない。</li>
 <li>Recallのdeadline・fail-open、mutation/authorityのfail-closed、model budget、single-flight、idempotencyを弱めない。</li>
 <li>大型関数capの引き上げ、lint除外、mypy ignore、テスト削除、goldenの無条件更新で見かけ上greenにしない。</li>
-<li>同名・類似helperを、timezone、invalid-row handling、locking、fsync、byte format、例外方針の一致を証明せず統合しない。</li>
-<li>静的zero-inboundだけでmoduleやscriptを削除しない。entry point、<code>python -m</code>、LaunchAgent、durable job string、docs、runtime archiveを照合する。</li>
-<li>本番<code>~/.chronovisor</code>をpytestのrootに使わない。隔離rootと持続的JUnitを必須にする。</li>
 <li>Cortexのノード数・光量・動き・イベント頻度を落として性能を作らない。UI redesignや新機能をrefactor commitへ混ぜない。</li>
 <li>既存の未追跡<code>_handoff/2026-06-11_0042_recall-redesign.md</code>と<code>logs/</code>を編集・stage・削除しない。</li>
 <li>local checkoutだけを本番扱いしない。push済みcommit、runtime archive、running process、health、live behaviorが一致するまで完了にしない。</li>
 </ul>
 </section>
 
+<section data-section="作業原則">
+<h2>作業原則（Campaign P の教訓から追加）</h2>
+<div class="callout warn">
+<strong>Campaign P で13億トークン・$160相当を消費し、成果はP0〜P3の数コミットのみ。</strong>以下の原則はその反省から追加した。
+</div>
+<ul>
+<li><strong>ツール・ゲート・ledger・静的解析フレームワークを新規作成しない。</strong>既存のテストスイート（3220 passed）とlint（Ruff/mypy/Import Linter）が安全ネット。それで十分。</li>
+<li><strong>やることは「コードを移動する → import を直す → テストが通る → コミット」だけ。</strong>移動の安全性を事前証明するインフラは作らない。壊れたらテストで検出し、直すか revert する。</li>
+<li><strong>1トランチ = 最大10コミット。</strong>超えたらスコープが広すぎる。分割するか切り捨てる。</li>
+<li><strong>同じファイルへの perf → reseal を2回繰り返したら、その最適化は打ち切り。</strong>ループ検出したら自動で切り上げる。</li>
+<li><strong>リファクタリング対象外の「改善」に逸れない。</strong>パフォーマンス改善、新機能、周辺ツール開発を始めたら、それは脱線。</li>
+<li><strong>成果は <code>git diff --stat</code> で測る。</strong>「ledger を作った」「gate を追加した」は成果にカウントしない。コード自体が動いていなければ未完了。</li>
+</ul>
+</section>
+
 <section data-section="前提・仮定">
 <h2>前提・仮定</h2>
 <ul>
-<li>計画作成時点の基準は<code>a17b870</code>。Campaign A–Nはcommit ancestryと完了handoff上で完了済み。</li>
-<li>前回debt closure後の88 commitsで、対象140 filesに約62,344 additions / 1,100 deletionsが入り、現在はPython 281 modules・200,634行、frontend 16,979行、pytest collection 3,107 items。</li>
-<li>現行13 packagesのうち<code>core</code>以外の12 production/lab packagesが一つの循環依存成分。Import Linterは<code>core</code>の外向き依存禁止1契約だけを検証し、後発の<code>knowledge_graph</code>はdomain inventoryにも未登録。</li>
-<li>現在の基準線はgreenではない。RuffはF821が28件、strict mypyは1件、大型関数policyは既存cap超過2件と未登録300行超4件を含む。大規模移動より先に直す。</li>
-<li>最大hotspotは<code>recall/recall_answer_eval.py</code> 9,093行、<code>recall/content_correction.py</code> 5,988行、<code>ops/dashboard.py</code> 5,833行、<code>ingest/ingest.py</code> 5,397行、<code>dashboard_static/cortex.js</code> 5,606行。</li>
-<li><code>core.store</code>、<code>core.runtime_config</code>、<code>core.durable_state</code>、<code>core.ollama</code>は高fan-inで、global root、file I/O、locks、model transport、resource scheduling、telemetryが広範囲へ波及する。</li>
-<li><code>runtime/</code>にはobservability projectionだけでなく、durable queue、completion receipt、authority artifact、page identity registryが混在する。物理pathの整理より所有protocolの明文化を優先する。</li>
-<li>計画時点の本番archiveはDashboard=<code>a17b870</code>、Ingest/Semantic=<code>4aaeeb5</code>、Reranker=<code>940e050</code>でmixed-version。異常とは限らないため、IPC/API/stateは最低1世代の新旧相互運用を必須とする。</li>
+<li>計画作成時点の基準は<code>a17b870</code>。Campaign A–N完了済み。Campaign O完了済み（baseline green）。</li>
+<li>Python 281 modules・200,634行、frontend 16,979行、pytest 3,220 passed。</li>
+<li>現行13 packagesのうち<code>core</code>以外の12 production/lab packagesが一つの循環依存成分。</li>
+<li>最大hotspot: <code>recall_answer_eval.py</code> 9,093行、<code>content_correction.py</code> 5,988行、<code>dashboard.py</code> 5,833行、<code>cortex.js</code> 5,606行、<code>ingest.py</code> 5,397行。</li>
 </ul>
 
 <h2>目標アーキテクチャ</h2>
@@ -161,95 +171,103 @@ production ──X──&gt; lab implementation</pre>
 <section data-section="実行手順">
 <h2>実行手順</h2>
 <ol class="checklist">
-<li><input type="checkbox" checked><span><strong>Campaign O — Green baselineと不変条件の固定</strong>
-  <ul>
-    <li>専用branchを作り、HEAD、worktree、package/import graph、hotspot、51 entry points、7 tracked plist、authority/schema hash、production healthをmachine-readable baseline artifactへ記録する。</li>
-    <li>現在のRuff・mypy・large-function policy failureを、先にcharacterization testを足してから修正する。cap引上げや対象除外は禁止。</li>
-    <li><code>knowledge_graph</code>をdomain inventoryとcore forbidden listへ追加し、現存edge/SCCを出力するarchitecture fitness scriptを追加する。</li>
-    <li>隔離rootで全pytestをJUnit付き実行し、失敗・flaky・外部service依存を分類する。CIにはまず現行コマンドとartifact保存をそのまま載せる。</li>
-    <li>Recall/Save/Ingest/repair、Dashboard/Cortexについてgolden payload、durable bytes、latency/frame/memoryの変更前基準を採取する。</li>
+<li><input type="checkbox" checked><span><strong>Campaign O — Green baselineと不変条件の固定</strong> <em>— 完了</em>
+  <ul class="subchecklist">
+    <li><input type="checkbox" checked><span>Ruff/mypy/large-function policy failureを修正し、architecture baselineを固定。</span></li>
+    <li><input type="checkbox" checked><span>authoritative隔離pytestを完走（3220 passed）。</span></li>
+    <li><input type="checkbox" checked><span>model activity、repository hash／mtime／statusの不変条件を確認。</span></li>
   </ul>
-  <div class="exit"><strong>Exit:</strong> 既存挙動のまま全baseline gateがgreen。以降の各Campaignが同一基準で比較可能。</div>
+  <div class="exit"><strong>Exit:</strong> 全baseline gateがgreen。完了済み。</div>
 </span></li>
 
-<li><input type="checkbox"><span><strong>Campaign P — Contracts、ownership、依存fitness</strong> <em>— in progress (P0)</em>
-  <ul>
-    <li>ADRで上記layer、許可依存、public API、compatibility期間を確定する。package名の変更自体を目的にしない。</li>
-    <li>durable artifact／queue／lock／socket／schema／workerごとに、単一writer、reader、lock scope、version、retention、recovery ownerをregistry化する。</li>
-    <li>本番<code>classification</code>/<code>decision</code>が参照するlab utility・adoption schema/validatorをproduction contractへ移し、production→<code>lab</code>をImport Linterで禁止する。</li>
-    <li>新規cross-domain edge禁止を先に有効化し、既存edgeは期限・owner・除去Campaign付きledgerでのみ許可する。例外の増加をCIで拒否する。</li>
-    <li>private symbolのcross-domain importと、schema manifestが実装定数をimport収集する構造を、明示registry/contractへ反転する。</li>
+<li><input type="checkbox" checked><span><strong>Campaign P — production→lab依存の除去と依存方向の固定</strong> <em>— 完了</em>
+  <ul class="subchecklist">
+    <li><input type="checkbox" checked><span><strong>P0:</strong> layer／public API／compatibility方針とbaselineを固定。</span></li>
+    <li><input type="checkbox" checked><span><strong>P1:</strong> runtime-state ownershipとlock protocolを固定。</span></li>
+    <li><input type="checkbox" checked><span><strong>P2:</strong> classification→lab import siteを除去。</span></li>
+    <li><input type="checkbox" checked><span><strong>P3:</strong> receipt contractをproduction ownerへ移動。</span></li>
+    <li><input type="checkbox" checked><span><strong>P4:</strong> <code>ops</code>／<code>search</code>／<code>decision</code>→<code>lab</code> edgeを除去。</span></li>
+    <li><input type="checkbox" checked><span><strong>P5:</strong> <code>librarian</code>→<code>lab</code>依存を除去。</span></li>
+    <li><input type="checkbox" checked><span><strong>P6:</strong> schema manifestからimplementation constantへの依存を反転。</span></li>
+    <li><input type="checkbox" checked><span><strong>P7:</strong> 残存production→lab dispatch経路をproduction contractへ切替。</span></li>
+    <li><input type="checkbox" checked><span><strong>P8:</strong> cross-domain private importを公開contractまたはownerへ移動。</span></li>
+    <li><input type="checkbox" checked><span><strong>P9:</strong> 既存Import LinterをS/Uへ折り込み。新規ツールは作成しない。</span></li>
   </ul>
-  <div class="exit"><strong>Exit:</strong> production→labがゼロ。新しい循環edgeは追加不能。すべてのruntime stateにownerがある。</div>
+  <div class="exit"><strong>Exit:</strong> production→labがゼロ。テスト全green。</div>
 </span></li>
 
-<li><input type="checkbox"><span><strong>Campaign Q — RuntimeContextとdurable infrastructure</strong>
-  <ul>
-    <li><code>RuntimeContext</code>/<code>RuntimeLayout</code>と、clock・filesystem・lock・process・model・socketのportを定義し、composition rootで実装を注入する。</li>
-    <li>import時に固定される<code>CHRONOVISOR_ROOT</code>や派生pathをcompatibility adapterの背後へ置き、小さいvertical sliceから明示contextへ移す。</li>
-    <li>atomic write、sealed JSON、append-only JSONL、directory fsync、file lock、CASを共通durable primitivesへ集約する。ただしbyte formatと順序が一致するvariantだけを統合する。</li>
-    <li>共通化するのはprimitiveであり、各ownerのlock lifetime、lease、retry、tombstone、ACK protocolは統合しない。MCP process-local jobとdurable background queue、JSON queueとSQLite semantic queueを別contractとして保持する。</li>
-    <li><code>core.ollama</code>をtransport、resource lease/residency、calibration、activity telemetryへ責務分離し、callerには狭いclient/lease portだけを公開する。</li>
-    <li>schema migrationはdual-read/single-write、crash recovery、旧artifact replay、rollback testを備え、live readerがゼロになるまで旧readerを消さない。</li>
-    <li>最初のproduction pilotはread-onlyなDashboard snapshot queryにし、次にHook/MCP adapterへ広げる。authority mutation pathをpilotにしない。</li>
+<li><input type="checkbox" checked><span><strong>Campaign Q — RuntimeContextの導入</strong> <em>— 完了</em>
+  <ul class="subchecklist">
+    <li><input type="checkbox" checked><span><code>RuntimeContext</code>をvertical slice単位で導入。</span></li>
+    <li><input type="checkbox" checked><span>Ollama componentをtransport／lease／calibration／telemetryへ分割。</span></li>
+    <li><input type="checkbox" checked><span>byte-stableなatomic／sealed JSON／append-only primitiveを共通ownerへ移動。</span></li>
   </ul>
-  <div class="exit"><strong>Exit:</strong> 移行済みuse caseをtemporary root/fake clock/fake clientで起動でき、production bytes/hash/lock順序がbaselineと一致。</div>
+  <div class="exit"><strong>Exit:</strong> 移行済みuse caseをtemporary rootで起動でき、既存テスト全green。</div>
 </span></li>
 
-<li><input type="checkbox"><span><strong>Campaign R — 4つのruntime loopをvertical sliceで再構成</strong>
-  <ul>
-    <li><strong>R1 Capture/Stop:</strong> host parser、lossless delta、receipt、audit enqueueをtyped use caseへ分離。Stopの即時returnとbyte-exact性を守る。</li>
-    <li><strong>R2 Recall/UserPromptSubmit:</strong> evidence gate、search/graph、processor、Field、publicationを一つのdeadline-aware application serviceへ整理し、各段をport化。最終BM25 fallbackとfail-openを保持する。</li>
-    <li><strong>R3 Ingest/convergence:</strong> prepare/review/apply/read-backを明示state machineへし、transaction owner、authority check、lease、CAS、rollback、terminal stateを型で表す。巨大compatibility facadeは薄い委譲だけにする。</li>
-    <li><strong>R4 Exceptional repair:</strong> routine uncertaintyとfrontier code repairをpackage境界でも分離し、incident evidence/budget/24h guardだけがrepair adapterへ到達できるようにする。</li>
-    <li>各sliceはcharacterization → 新実装shadow/adapter → byte/payload比較 → canary →旧経路retireの順で独立commit・独立rollbackする。</li>
-    <li>service protocol変更はserverのadditive reader/fieldを先にdeployし、health確認後にclientを切替える。queueはexpand → drain → contract、authority/schema変更は最後に行う。</li>
+<li><input type="checkbox" checked><span><strong>Campaign R — 4つのruntime loopの責務分離</strong> <em>— 完了</em>
+  <ul class="subchecklist">
+    <li><input type="checkbox" checked><span><strong>R1 Capture/Stop:</strong> parser、delta、receipt、audit enqueueを分離。</span></li>
+    <li><input type="checkbox" checked><span><strong>R2 Recall:</strong> search/graph、processor、publicationを整理し、fail-openを保持。</span></li>
+    <li><input type="checkbox" checked><span><strong>R3 Ingest:</strong> prepare/review/apply/read-backを分離。</span></li>
+    <li><input type="checkbox" checked><span><strong>R4 Repair:</strong> routine uncertaintyとfrontier repairをpackage境界で分離。</span></li>
   </ul>
-  <div class="exit"><strong>Exit:</strong> 4 loopのorchestrator、domain policy、I/O adapterが分離し、各use caseに直接テスト可能な入口が一つある。</div>
+  <div class="exit"><strong>Exit:</strong> 4 loopの責務が分離し、テスト全green。</div>
 </span></li>
 
-<li><input type="checkbox"><span><strong>Campaign S — Package cycle closureとouter layerの縮小</strong>
-  <ul>
-    <li><code>decision↔ops</code>、<code>recall↔search</code>、<code>decision↔ingest</code>、<code>ingest↔ops</code>等を、Campaign Rで得たports/eventsへ置換し、SCCを一辺ずつ縮める。</li>
-    <li><code>hosts.server</code>からraw atomic publish、search/read、status assembly、ingest triggerの実装をuse caseへ移し、MCP serialization adapterへ縮小する。</li>
-    <li><code>ops</code>内のdomain mutationを各domain application serviceへ戻し、<code>ops</code>はscheduling/composition/observabilityだけにする。</li>
-    <li>script・<code>python -m</code>・durable module string・LaunchAgent参照を全数追跡し、compatibility wrapper経由でcanonical targetへ移す。</li>
+<li><input type="checkbox"><span><strong>Campaign S — Package循環依存の解消</strong> <em>— in progress</em>
+  <ul class="subchecklist">
+    <li><input type="checkbox"><span><strong>S1 hosts boundary:</strong> host compositionを<code>hosts</code>へ集約し、domainからの逆依存を解消。<em>— in progress</em></span></li>
+    <li><input type="checkbox"><span><strong>S2 mutation/authority ownership:</strong> mutationとauthority primitiveを正規ownerへ移動。<em>— in progress</em></span></li>
+    <li><input type="checkbox"><span><strong>S3 remaining 11-package SCC zero:</strong> 残る11-package SCCをゼロにする。<em>— in progress</em></span></li>
+    <li><input type="checkbox"><span><strong>S4 Import Linter layer exit:</strong> 最終layer contractをgreenにする。<em>— in progress</em></span></li>
   </ul>
-  <div class="exit"><strong>Exit:</strong> production top-level package graphに複数node SCCがなく、Import Linterのlayer contractが全てgreen。</div>
+  <p class="exit">Committed progress: <code>5725194</code>、<code>926d460</code>、<code>06fac590</code>。current graphは<code>85 edges</code>、SCCは依然<code>11 packages</code>。</p>
+  <div class="exit"><strong>Exit:</strong> production package graphに複数node SCCがなく、Import Linter全green。</div>
 </span></li>
 
-<li><input type="checkbox"><span><strong>Campaign T — Dashboard/Cortexとentrypoint surface</strong>
-  <ul>
-    <li>Dashboard backendをsnapshot query/materializer、Cortex event stream、auth、HTTP/SSE/WebSocket transport、static servingへ分割する。observerからdomain mutationを起こさない。</li>
-    <li><code>app.js</code>をAPI client・normalized store・panel rendererへ、<code>cortex.js</code>をscene state・layout/simulation・event effects・renderer・controlsへ分割し、明示module APIにする。</li>
-    <li>Cortexは単一<code>requestAnimationFrame</code> scheduler、bounded queue/object pool、visibility pause、cold/live refresh分離を維持し、Nodeで実行できるbehavior testへ文字列assertionを置換する。</li>
-    <li>51 console script名はcompatibility wrapperとして維持しつつ、共通launcher/command registryへ集約する。obsolete候補はruntime参照監査後だけ削除する。</li>
-    <li>既存viewportでDOM寸法・重なり・stream freshnessを実測し、60秒steady stateとRecall/Save連打でframe pacing、event-to-visual latency、memory slopeがbaseline以下であることを確認する。</li>
+<li><input type="checkbox"><span><strong>Campaign T — Dashboard/Cortexの責務分離</strong> <em>— final verification pending</em>
+  <ul class="subchecklist">
+    <li><input type="checkbox" checked><span>Dashboard backendをquery／stream／transport／staticへ分割。</span></li>
+    <li><input type="checkbox" checked><span><code>app.js</code>と<code>cortex.js</code>を責務別componentへ分割。</span></li>
+    <li><input type="checkbox" checked><span>51 console script名を維持し、launcher経路を確認。</span></li>
+    <li><input type="checkbox"><span>最終visual／live verificationで表示・操作・リアルタイム性の非退行を確認。</span></li>
   </ul>
-  <div class="exit"><strong>Exit:</strong> 表示・操作・リアルタイム性を維持し、backend/frontend各責務が独立テスト可能。51 entry pointsは全てcallable。</div>
+  <div class="exit"><strong>Exit:</strong> 表示・操作が維持され、backend/frontendが分離。テスト全green。</div>
 </span></li>
 
-<li><input type="checkbox"><span><strong>Campaign U — 品質面の全面引き上げ</strong>
-  <ul>
-    <li>strict mypyを<code>core/contracts</code>からapplication/domainへpackage単位で拡張し、broad ignoreなしで完了させる。</li>
-    <li>pytestをunit/contract/integration/liveのmarkerへ分類し、authority・durability・recovery・deadline pathのbranch coverage baselineと低下禁止を導入する。</li>
-    <li>architecture graph、large-function policy、public API、entrypoint、launchd、schema/hash、forward/reverse importsを単一verification commandとCI artifactへ統合する。</li>
-    <li>重複helperとdead-code候補をownership registryに照らして処理し、統合しないvariantには差異をtest/docで残す。</li>
-    <li>巨大関数はlock/transaction境界を壊さず、pure projection・validation・effect adapterから分ける。すべてpolicyに個別rationaleとcapを持たせる。</li>
+<li><input type="checkbox" checked><span><strong>Campaign U — 型・品質の整理</strong> <em>— 完了</em>
+  <ul class="subchecklist">
+    <li><input type="checkbox" checked><span>strict mypyを対象packageへ拡張。</span></li>
+    <li><input type="checkbox" checked><span>dead helperと重複helperを整理。</span></li>
+    <li><input type="checkbox" checked><span>large responsibilityをlock／transaction境界を維持して分割。</span></li>
   </ul>
-  <div class="exit"><strong>Exit:</strong> local/CIの同一gateがgreenで、architecture・型・durability契約が新規変更を自動拒否できる。</div>
+  <div class="exit"><strong>Exit:</strong> Ruff/mypy/Import Linter/pytest全green。</div>
 </span></li>
 
-<li><input type="checkbox"><span><strong>Campaign V — Compatibility retirement、最終監査、本番切替</strong>
-  <ul>
-    <li>旧adapter/schema/module pathごとにlive利用ゼロ、queue drain済み、migration/replay成功、rollback可能を証明してから削除する。</li>
-    <li>architecture docs、runtime ownership registry、operator runbook、failure/rollback手順、Campaign O–V完了記録を更新する。</li>
-    <li>隔離全pytestのJUnit、全static/architecture gate、51 entry points、全tracked plist、authority/schema hash、golden bytes/payload、Cortex perfを最終確認する。</li>
-    <li>意図したfileだけcommitし、push後に影響LaunchAgentだけ再起動する。runtime archiveの<code>direct_url.json</code> commit、PID、health、Recall/Save/Ingest/Cortex live smokeを照合する。</li>
-    <li>異常時は直前のpush済みcommitへ戻し、同じserviceを再起動してruntime reader互換とhealthを確認する。</li>
+<li><input type="checkbox"><span><strong>Campaign V — 互換層の退役と本番切替</strong> <em>— cutover pending</em>
+  <ul class="subchecklist">
+    <li><input type="checkbox" checked><span>legacy adapterと旧module pathを削除。</span></li>
+    <li><input type="checkbox"><span>final commitをpushし、production runtimeをcutover。</span></li>
+    <li><input type="checkbox"><span>rollback readinessを確認し、cutover後verificationを完走。</span></li>
   </ul>
-  <div class="exit"><strong>Exit:</strong> GitHub、本番archive、running process、health、live behaviorが同じ完成commitを指し、旧互換層が証拠に基づいて閉鎖済み。</div>
+  <div class="exit"><strong>Exit:</strong> push済みcommitと本番が一致し、healthとlive smokeが成功。</div>
 </span></li>
+
+</ol>
+
+<h3>最終 operational closure</h3>
+<div class="callout">
+<p><progress value="77" max="221">34.8%</progress> <strong>Success 77 / Held 1 / Actionable 143</strong></p>
+<p class="exit">2026-08-09 17:54:04のbatch19 terminal evidence。分母<code>221</code>はqueueの瞬間値ではなく、完了判定まで固定するmanifest総数。</p>
+</div>
+<ol class="checklist">
+<li><input type="checkbox"><span>fixed221 manifestのdrainを完了。</span></li>
+<li><input type="checkbox" checked><span>Held 1件をvalid current-authority holdとして分類。</span></li>
+<li><input type="checkbox"><span>semantic／reranker／ingestをfinal commitへcutover。semantic／rerankerは現在interim 7dで、SCC作業継続によりfinal commitは更新される。</span></li>
+<li><input type="checkbox"><span>runtime archive、running PID、healthのcommitを最終値へ完全一致。</span></li>
+<li><input type="checkbox"><span>final live auditを完走。</span></li>
+<li><input type="checkbox"><span>plan statusを<code>done</code>へ変更。</span></li>
 </ol>
 </section>
 
@@ -265,15 +283,11 @@ production ──X──&gt; lab implementation</pre>
 <section data-section="完了条件">
 <h2>完了条件</h2>
 <ul>
-<li>Campaign O–Vの全checkboxと実行ログが、その場で更新されている。</li>
-<li>production package graphに複数packageのSCCがなく、<code>core/contracts</code>の外向き依存、production→<code>lab</code>、domain→<code>hosts/ops</code>の逆依存がゼロ。</li>
-<li>runtime artifact/queue/lock/socket/schema/workerのownerが一意で、version/recovery/retentionがregistryと実装で一致。</li>
-<li>Ruff、strict mypy、Import Linter、large-function、architecture、compileall、entrypoint、plist、全pytestが全てgreen。</li>
-<li>51 console entry points、MCP/HTTP/SSE/WebSocket contract、durable module path、既存artifact replayに後方互換があるか、明示migrationが完了。</li>
-<li>少なくとも1世代のmixed-version service/client/state相互運用がtestと段階deployで証明されている。</li>
-<li>authority hashes、保存bytes、I/O順序、deadline/fail-open/fail-closed、rollback/idempotencyが変更前と同一。意図的変更はversioned migrationと比較証跡がある。</li>
-<li>Dashboard/Cortexの視覚品質、live freshness、frame pacing、event-to-visual latency、steady-state memoryがbaselineから退行しない。</li>
-<li>push済みcommitと全affected production runtimeが一致し、healthとtask-specific live smokeが成功。</li>
+<li>production package graphに複数packageのSCCがゼロ。production→<code>lab</code>依存がゼロ。</li>
+<li>Ruff、mypy、Import Linter、全pytestがgreen。</li>
+<li>51 console entry pointsが全てcallable。</li>
+<li>Dashboard/Cortexの表示・操作が退行しない。</li>
+<li>push済みcommitと本番runtimeが一致し、healthとlive smokeが成功。</li>
 <li>ユーザー所有の未追跡ファイルに変更がない。</li>
 </ul>
 </section>
@@ -281,25 +295,39 @@ production ──X──&gt; lab implementation</pre>
 <section data-section="検証手順">
 <h2>検証手順</h2>
 <ol>
-<li>各Campaign開始前に対象use caseのcharacterization/goldenを追加し、変更前実装でpassすることを確認する。</li>
-<li>各commit前に次を実行する。
+<li>各commit前に既存lint/testを実行する。
 <pre>uv run --frozen ruff check --no-cache src scripts tests
 uv run --frozen mypy
 uv run --frozen lint-imports --no-cache
-uv run --frozen pytest -q tests/test_large_function_policy.py
-uv run --frozen python -m compileall -q src scripts
-git diff --check</pre></li>
-<li>architecture verificationでpackage graph、SCC、forbidden edge、production→lab、cross-domain private import、ownership registryの完全性を検証する。</li>
-<li>隔離全スイートを持続的JUnit付きで実行し、process outputではなくXMLの<code>errors=0</code>、<code>failures=0</code>を確認する。
+uv run --frozen python -m compileall -q src scripts</pre></li>
+<li>Campaign完了時に隔離全スイートを実行する。
 <pre>test_root="$(mktemp -d -t chronovisor-refactor-test)"
 CHRONOVISOR_ROOT="$test_root" PYTHONDONTWRITEBYTECODE=1 \
   uv run --frozen pytest -q \
   --junitxml=/tmp/chronovisor-refactor-junit.xml</pre></li>
-<li>全console targetのimport/callable、forward/reverse module import、<code>launchd/*.plist</code>の<code>plutil -lint</code>を実行する。</li>
-<li>固定fixtureでdurable byte/hash、authority identity、schema manifest、queue/receipt順序、recovery/rollbackをbefore/after比較する。</li>
-<li>Dashboard/Cortexは指定viewportのDOM実測、60秒steady-state、Recall/Save burst、tab visibility切替をbrowser performance evidenceとscreenshotで確認する。</li>
-<li>production cutoverでは<code>push → affected LaunchAgent restart → runtime archive commit → PID/health → task-specific live smoke</code>の順で確認する。</li>
+<li>Campaign V でのみ: push → LaunchAgent再起動 → health確認 → live smoke。</li>
 </ol>
+</section>
+
+<section data-section="見積もり">
+<h2>見積もり（2026-08-08 改訂）</h2>
+<div class="callout warn">
+<strong>注意:</strong> Codex の元見積もり（基準400時間）はツール構築込みの作業速度がベース。「ツールを作らず普通にリファクタリングする」前提で下方修正。
+</div>
+<table>
+<thead><tr><th>Campaign</th><th>内容</th><th>見積commit</th><th>現実的時間</th></tr></thead>
+<tbody>
+<tr><td>P4–P9</td><td>lab依存除去、private import修正</td><td>8–14</td><td>15–25h</td></tr>
+<tr><td>Q</td><td>RuntimeContext導入</td><td>5–7</td><td>12–20h</td></tr>
+<tr><td>R</td><td>4 runtime loop分離</td><td>8–10</td><td>20–35h</td></tr>
+<tr><td>S</td><td>循環依存解消 90 edge</td><td>8–10</td><td>15–30h</td></tr>
+<tr><td>T</td><td>Dashboard/Cortex分離</td><td>6–8</td><td>12–25h</td></tr>
+<tr><td>U</td><td>型・品質整理</td><td>4–8</td><td>8–15h</td></tr>
+<tr><td>V</td><td>互換層退役・本番切替</td><td>4–6</td><td>6–12h</td></tr>
+<tr><td colspan="2"><strong>合計</strong></td><td><strong>43–63</strong></td><td><strong>88–162h</strong></td></tr>
+</tbody>
+</table>
+<p>1 writer・40h/週換算で約2–4週。トークン効率が Campaign P 後半の水準に戻らない前提。</p>
 </section>
 
 <section class="blockers" data-section="ブロッカー">
@@ -322,6 +350,7 @@ CHRONOVISOR_ROOT="$test_root" PYTHONDONTWRITEBYTECODE=1 \
 </ul>
 </section>
 
+
 <section data-section="実行ログ">
 <h2>実行ログ</h2>
 <ol class="log">
@@ -333,6 +362,8 @@ CHRONOVISOR_ROOT="$test_root" PYTHONDONTWRITEBYTECODE=1 \
 <li><time>2026-08-06 16:23</time><span>Campaign P の P0 を開始。layer／public API／compatibility方針をADRへ固定し、現行<code>95</code> package edgeと全<code>1267</code> cross-domain import site、private／dynamic／schema-manifest例外、legacy module string／console entry pointを機械生成ledgerへ記録。新規・stale・metadata欠落・production→lab増加・compatibility driftを拒否するfitness gateとfocused testを追加中。Campaign Pはin progress・未チェックのまま維持。</span></li>
 <li><time>2026-08-06 17:03</time><span>Campaign P0 acceptance fixを完了。schema registry→implementationをproduction <code>11 statements / 13 symbols</code>、background <code>1 / 5</code>として正方向にcharacterizeし、現行<code>95</code> edge／<code>1267</code> static site／<code>24</code> dynamic／<code>31</code> privateを、Campaign O固定commit由来のactive/retired seedと詳細ledgerで三者照合するshrink-only gateへ更新。production→labは<code>5</code> edge／<code>20</code> static site／<code>1</code> dynamic siteを個別固定し、15 lab dispatchを含む<code>289</code> compatibility contract、実owner・P2–S removal順序、mixed-version retirement/rollback条件を記録した。focused pytest <code>24 passed</code>、Ruff、script/configured mypy、Import Linter、architecture verify、seed/ledger byte再生成比較、diff checkはすべてgreen。Campaign Pはin progress・未チェックのまま維持。</span></li>
 <li><time>2026-08-06 17:22</time><span>P0 final hardeningを完了。classification→<code>lab</code> package edgeのzero到達点をP3へ補正し、P2はsite milestoneとして分離。schema registryはtarget allowlistや<code>_SCHEMA</code> suffixに依存せずscope内の全uppercase implementation constantを検出し、現行<code>12 statements / 18 symbols</code>を維持した。固定source head <code>d404a6b20d00e3bcd1d4cdb89edfa5a718c51833</code>をliteral characterizationとvalid previous seedとの連続性で拘束し、module constant／current seed／ledgerの同時変更も拒否する。focused pytest <code>26 passed</code>、Ruff、script/configured mypy、Import Linter、architecture verify、seed/ledger byte再生成比較、diff checkはすべてgreen。Campaign Pはin progress・未チェックのまま維持。</span></li>
+<li><time>2026-08-06 19:08</time><span>Campaign P1 runtime-state ownership guardを実装。固定commit <code>5d3564fab652cf5f5520b8734c7b67c67ecdd93d</code>由来のshrink-only seedと詳細registryで、<code>454 resources / 732 discoveries / 138 exclusions</code>、console <code>51</code>、launchd <code>7</code>、lab dispatch <code>15</code>、module-worker site <code>15</code>、lock protocol site <code>104</code>を三者照合する。lexical alias ownership、unversioned format、artifact-sidecar／worker-lease／global-protocol scope、socket server/client、wrapper invocationを明示し、search-label 3 writerとclaims 2 writerをshared sidecar flockへ統一。Campaign PはP1検証中・未チェックのまま維持。</span></li>
+<li><time>2026-08-09 17:54:04</time><span>batch19 terminal evidenceを反映。fixed manifest <code>221</code>件は<code>Success 77 / Held 1 / Actionable 143</code>、進捗<code>34.8%</code>。ack mismatchは<code>0/0</code>、batch resultは<code>processed 10 / defer 0 / fail 0</code>、self-healは<code>ok</code>。runtime snapshotはsemantic <code>PID 73474/73515</code>・commit <code>7d008db</code>・health <code>ok/ready</code>、reranker <code>PID 74010/74075</code>・commit <code>7d008db</code>・health <code>ok/ready</code>・drift <code>false</code>、ingest <code>PID 66675/66701</code>・commit <code>a8de90e</code>でbatch20を実行中。SCC final commitとingest cutoverは未完了のため、final cutover／archive／health項目は未チェック、plan statusは<code>running</code>を維持。</span></li>
 </ol>
 </section>
 
