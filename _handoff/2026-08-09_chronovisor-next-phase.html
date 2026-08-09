@@ -285,6 +285,7 @@ adapter families compose and register supported components
 <ul>
 <li><time datetime="2026-08-10T08:33:07+09:00">2026-08-10 08:33 JST</time> — 前段完了を確認（HEAD <code>43c7a3f</code>、前段 Plan の plan-meta / badge は done / done、必須 checkbox は 48 / 48 完了）。Campaign W の実装を開始。</li>
 <li><time datetime="2026-08-10T08:43:49+09:00">2026-08-10 08:43 JST</time> — W1–W3 foundation tranche を <code>e88d486</code> で commit。provider-neutral contract / exact-role composition / Ollama adapter を追加し、focused 8 tests、Ollama / embedding 回帰 69 tests、architecture 36 tests、mypy、ruff、import boundary が green。consumer migration と live 検証は未実施のため W1–W3 checkbox は未完了のまま。</li>
+<li><time datetime="2026-08-10T08:55:18+09:00">2026-08-10 08:55 JST</time> — W2 security foundation tranche を <code>2af40c0</code> で commit。全 request の source classification 必須化、local / remote route の fail-closed 判定、remote の既定 egress policy、role × data class opt-in、拒否時 backend call 0 件、no fallback、安全な failure category / telemetry と content-redacted repr / error を追加。focused 19 tests、Ollama / embedding 回帰を含む 80 tests、mypy、ruff、import boundary が green。retry / budget / credential / remote adapter / consumer migration / live 検証は未実施のため W2 checkbox は未完了のまま。</li>
 </ul>
 </section>
 
