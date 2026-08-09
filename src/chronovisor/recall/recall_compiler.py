@@ -11,7 +11,7 @@ from typing import Any
 
 from chronovisor.core.durable_state import exclusive_text_file_lock
 from chronovisor.core.store import CHRONOVISOR_ROOT, find_page
-from chronovisor.recall.claims import CLAIM_INDEX_FILE
+from chronovisor.search.claims import CLAIM_INDEX_FILE
 from chronovisor.search.search_types import tokenize
 
 _STRUCTURED_INTENT_RE = re.compile(

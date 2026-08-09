@@ -9696,8 +9696,7 @@ class TestReadBackVerification:
     ) -> None:
         from chronovisor.ingest import ingest, ingest_readback
         from chronovisor.ops import state_register
-        from chronovisor.recall import claims
-        from chronovisor.search import index_store, search
+        from chronovisor.search import claims, index_store, search
 
         events: list[object] = []
 
@@ -9754,8 +9753,7 @@ class TestReadBackVerification:
     ) -> None:
         from chronovisor.ingest import ingest, ingest_readback
         from chronovisor.ops import state_register
-        from chronovisor.recall import claims
-        from chronovisor.search import index_store, search
+        from chronovisor.search import claims, index_store, search
 
         events: list[str] = []
         logs: list[str] = []

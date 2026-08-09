@@ -12,7 +12,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from chronovisor.recall.claims import (
+from chronovisor.search.claims import (
     CLAIM_INDEX_FILE,
     rebuild_claim_index,
     search_claims,

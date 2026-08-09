@@ -515,13 +515,13 @@ def _run_sleep_cycle(
         run_pending_queue,
     )
     from chronovisor.recall import recall_improvement
-    from chronovisor.recall.claims import rebuild_claim_index
     from chronovisor.recall.cofire import build_cofire_graph
     from chronovisor.recall.duplicate_review import (
         build_duplicate_review_queue,
         write_review_queue,
     )
     from chronovisor.recall.recall_prefetch import build_prefetch_cache
+    from chronovisor.search.claims import rebuild_claim_index
 
     try:
         per_lane_frontier = max(
@@ -628,7 +628,7 @@ def _run_sleep_cycle(
         "retention", lambda: build_retention_scores(write=not dry_run)
     )
     claims = artifact_lane("claims", lambda: rebuild_claim_index(write=not dry_run))
-    import chronovisor.recall.claims as recall_claims
+    import chronovisor.search.claims as recall_claims
 
     claim_conflicts = _run_lane(
         "claim_conflicts",

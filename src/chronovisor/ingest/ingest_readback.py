@@ -158,7 +158,7 @@ def _refresh_ingest_derived_artifacts(
         except Exception as exc:
             runtime._safe_log(f"ingest | semantic index enqueue failed: {exc}")
         try:
-            from chronovisor.recall.claims import append_page_claims
+            from chronovisor.search.claims import append_page_claims
 
             append_page_claims(
                 changed_pages,

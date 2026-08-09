@@ -7,7 +7,12 @@ from pathlib import Path
 
 import pytest
 
-from chronovisor.recall import claims
+from chronovisor.recall import claims as legacy_claims
+from chronovisor.search import claims
+
+
+def test_legacy_claims_module_is_search_implementation() -> None:
+    assert legacy_claims is claims
 
 
 def _append_claim_worker(

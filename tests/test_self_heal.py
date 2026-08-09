@@ -46,8 +46,7 @@ def isolated_wiki(
     from chronovisor.core import ollama, page_mutation, store
     from chronovisor.ingest import ingest, orchestrator
     from chronovisor.ops import background_jobs, runtime_status, state_register
-    from chronovisor.recall import claims
-    from chronovisor.search import index_store, search
+    from chronovisor.search import claims, index_store, search
 
     monkeypatch.setattr(store, "CHRONOVISOR_ROOT", chronovisor_root)
     monkeypatch.setattr(store, "PAGES_DIR", pages)
