@@ -236,7 +236,7 @@ def _safe_mutation_requests(
     ]
     | None = None,
 ) -> list[tuple[str, str | None, dict[str, Any]]]:
-    from chronovisor.ops.lint import (
+    from chronovisor.decision.lint_mutation_contract import (
         build_safe_fix_prompt,
         build_semantic_mutation_proposal,
     )
@@ -1329,7 +1329,7 @@ def _lint_safe_mutation_cases() -> list[tuple[str, str | None, dict[str, Any]]]:
         "broken_link_plaintext",
         "broken_link_retarget",
     ]
-    from chronovisor.ops.lint import (
+    from chronovisor.decision.lint_mutation_contract import (
         build_safe_fix_prompt,
         build_semantic_mutation_proposal,
     )

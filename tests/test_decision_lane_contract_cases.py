@@ -562,7 +562,9 @@ def test_shared_page_mutation_contracts_use_reachable_evidence_states() -> None:
 
 
 def test_insufficient_semantic_packet_stops_before_model_contract() -> None:
-    from chronovisor.ops.lint import build_semantic_review_packet
+    from chronovisor.decision.lint_mutation_contract import (
+        build_semantic_review_packet,
+    )
 
     packet, receipt = build_semantic_review_packet(
         page_id="too-large-for-review",

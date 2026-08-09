@@ -1136,9 +1136,14 @@ class TestSafeFixReviewPackets:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        from chronovisor.decision import lint_mutation_contract as lint_contract
         from chronovisor.ops import lint as lint_mod
 
-        monkeypatch.setattr(lint_mod, "SAFE_FIX_REVIEW_PACKET_MAX_CHARS", 400)
+        monkeypatch.setattr(
+            lint_contract,
+            "SAFE_FIX_REVIEW_PACKET_MAX_CHARS",
+            400,
+        )
         before = "source " * 2_000
         after = "generated " * 2_000
         proposal = lint_mod.build_semantic_mutation_proposal(
@@ -1182,6 +1187,7 @@ class TestSafeFixReviewPackets:
         self,
         tmp_path: Path,
     ) -> None:
+        from chronovisor.decision import lint_mutation_contract as lint_contract
         from chronovisor.ops import lint as lint_mod
 
         proposal = lint_mod.build_semantic_mutation_proposal(
@@ -1193,7 +1199,7 @@ class TestSafeFixReviewPackets:
         )
         tampered = json.loads(json.dumps(proposal))
         tampered["review_packet"]["postimage"] = "attacker-selected postimage"
-        tampered["details"]["review_receipt"] = lint_mod._review_receipt_from_packet(
+        tampered["details"]["review_receipt"] = lint_contract.review_receipt_from_packet(
             tampered["review_packet"]
         )
 
