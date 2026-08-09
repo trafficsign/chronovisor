@@ -222,7 +222,7 @@ production ──X──&gt; lab implementation</pre>
     <li><input type="checkbox"><span><strong>S3 remaining 11-package SCC zero:</strong> 残る11-package SCCをゼロにする。<em>— in progress</em></span></li>
     <li><input type="checkbox"><span><strong>S4 Import Linter layer exit:</strong> 最終layer contractをgreenにする。<em>— in progress</em></span></li>
   </ul>
-  <p class="exit">Committed progress: <code>5725194</code>、<code>926d460</code>、<code>06fac590</code>、<code>28b7603</code>、<code>c65cb12</code>、<code>b2c8ad0</code>。current graphは<code>83 edges</code>、SCCは依然<code>11 packages</code>。</p>
+  <p class="exit">Committed progress: <code>5725194</code>、<code>926d460</code>、<code>06fac590</code>、<code>28b7603</code>、<code>c65cb12</code>、<code>b2c8ad0</code>、<code>59552a8</code>、<code>4030343</code>、<code>26509ec</code>。current graphは<code>79 edges</code>、SCCは依然<code>11 packages</code>。</p>
   <div class="exit"><strong>Exit:</strong> production package graphに複数node SCCがなく、Import Linter全green。</div>
 </span></li>
 
@@ -366,6 +366,7 @@ CHRONOVISOR_ROOT="$test_root" PYTHONDONTWRITEBYTECODE=1 \
 <li><time>2026-08-09 18:25:01</time><span>cycle24 terminal evidenceを反映。fixed manifest <code>221</code>件は<code>Success 80 / Held 2 / Actionable 139</code>、進捗<code>36.2%</code>。ack mismatchは<code>0</code>、batch resultは<code>10/10 success</code>、self-healは<code>ok</code>。runtime snapshotはsemantic <code>PID 73474/73515</code>・commit <code>7d008db</code>・health <code>ok</code>、reranker <code>PID 74010/74075</code>・commit <code>7d008db</code>・health <code>ok</code>、ingest <code>PID 66675/66701</code>・commit <code>a8de90e</code>で<code>waiting</code>。SCC final commitとingest cutoverは未完了のため、final cutover／archive／health項目は未チェック、plan statusは<code>running</code>を維持。</span></li>
 <li><time>2026-08-09 18:56</time><span>completion policyをbounded validationへ補正。released 7 failure classesはruntime <code>a8de90e</code>で評価済み、full suiteも全fixをcoverしているためmonitorを終了した。fixed221の全drain、残る<code>Actionable 139</code>、total約<code>400</code>件のpending queueはExit criterionに使用せず、通常のbackground processingとして継続する。final runtime cutover／live audit／plan doneは未完了のため、plan statusは<code>running</code>を維持。</span></li>
 <li><time>2026-08-09 20:01</time><span>Campaign SのSCC commits 5–7（<code>28b7603</code>、<code>c65cb12</code>、<code>b2c8ad0</code>）を反映。<code>migration_snapshot</code>、<code>runtime_status</code>、<code>background_jobs</code>を<code>core</code>へ移動し、<code>librarian→ops</code>と<code>research→ops</code>のedgeをretireした。新規edgeは<code>0</code>、current graphは<code>83 edges</code>、SCCは依然<code>11 packages</code>。full suiteは<code>3348 passed / 1 skipped</code>。Campaign SとS1–S4はin progress・未チェック、plan statusは<code>running</code>を維持。</span></li>
+<li><time>2026-08-09 20:42</time><span>Campaign Sの新SCC tranche commits 1–3（<code>59552a8</code>、<code>4030343</code>、<code>26509ec</code>）を反映。<code>decision→ingest</code>、<code>ingest→librarian</code>、<code>recall→librarian</code>、<code>decision→search</code>のedgeをretireした。新規edgeは<code>0</code>、current graphは<code>79 edges</code>、SCCは依然<code>11 packages</code>。full suiteは<code>3349 passed / 1 skipped</code>。Campaign SとS1–S4はin progress・未チェック、plan statusは<code>running</code>を維持。</span></li>
 </ol>
 </section>
 
