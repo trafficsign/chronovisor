@@ -26,6 +26,7 @@ from chronovisor.ingest.ingest import (
     _reconcile_links,
     _strip_all_frontmatter,
 )
+from chronovisor.raw import record_raw as raw_record
 
 # ---------------------------------------------------------------------------
 # _extract_json_array
@@ -12549,7 +12550,7 @@ class TestWikiIngestRouting:
         )
 
         # Patch RAW_DIR in server (it grabbed the path at import time).
-        monkeypatch.setattr(server, "RAW_DIR", isolated_wiki / "raw")
+        monkeypatch.setattr(raw_record, "RAW_DIR", isolated_wiki / "raw")
 
         # Stub the orchestrator path so we don't actually start ingest.
         captured = {"called": False, "force": None}
@@ -12584,7 +12585,7 @@ class TestWikiSaveRawRouting:
             if hasattr(server.chronovisor_record, "fn")
             else server.chronovisor_record
         )
-        monkeypatch.setattr(server, "RAW_DIR", isolated_wiki / "raw")
+        monkeypatch.setattr(raw_record, "RAW_DIR", isolated_wiki / "raw")
         monkeypatch.setattr(
             orchestrator, "should_ingest", lambda: (False, "below threshold")
         )
@@ -12617,7 +12618,7 @@ class TestWikiSaveRawRouting:
             if hasattr(server.chronovisor_record, "fn")
             else server.chronovisor_record
         )
-        monkeypatch.setattr(server, "RAW_DIR", isolated_wiki / "raw")
+        monkeypatch.setattr(raw_record, "RAW_DIR", isolated_wiki / "raw")
         monkeypatch.setattr(
             orchestrator, "should_ingest", lambda: (False, "below threshold")
         )
@@ -12645,7 +12646,7 @@ class TestWikiSaveRawRouting:
             if hasattr(server.chronovisor_record, "fn")
             else server.chronovisor_record
         )
-        monkeypatch.setattr(server, "RAW_DIR", isolated_wiki / "raw")
+        monkeypatch.setattr(raw_record, "RAW_DIR", isolated_wiki / "raw")
         monkeypatch.setattr(
             orchestrator, "should_ingest", lambda: (False, "below threshold")
         )
@@ -12697,7 +12698,7 @@ class TestWikiSaveRawRouting:
             if hasattr(server.chronovisor_record, "fn")
             else server.chronovisor_record
         )
-        monkeypatch.setattr(server, "RAW_DIR", isolated_wiki / "raw")
+        monkeypatch.setattr(raw_record, "RAW_DIR", isolated_wiki / "raw")
         monkeypatch.setattr(
             orchestrator, "should_ingest", lambda: (False, "below threshold")
         )
@@ -12737,7 +12738,7 @@ class TestWikiSaveRawRouting:
             if hasattr(server.chronovisor_record, "fn")
             else server.chronovisor_record
         )
-        monkeypatch.setattr(server, "RAW_DIR", isolated_wiki / "raw")
+        monkeypatch.setattr(raw_record, "RAW_DIR", isolated_wiki / "raw")
         monkeypatch.setattr(
             orchestrator, "should_ingest", lambda: (True, "threshold met")
         )
@@ -12768,7 +12769,7 @@ class TestWikiSaveRawRouting:
             if hasattr(server.chronovisor_record, "fn")
             else server.chronovisor_record
         )
-        monkeypatch.setattr(server, "RAW_DIR", isolated_wiki / "raw")
+        monkeypatch.setattr(raw_record, "RAW_DIR", isolated_wiki / "raw")
         monkeypatch.setattr(
             orchestrator, "should_ingest", lambda: (False, "below threshold")
         )
@@ -12798,7 +12799,7 @@ class TestWikiSaveRawRouting:
             if hasattr(server.chronovisor_record, "fn")
             else server.chronovisor_record
         )
-        monkeypatch.setattr(server, "RAW_DIR", isolated_wiki / "raw")
+        monkeypatch.setattr(raw_record, "RAW_DIR", isolated_wiki / "raw")
         monkeypatch.setattr(
             orchestrator, "should_ingest", lambda: (False, "below threshold")
         )
@@ -12958,12 +12959,11 @@ class TestRawFilenameCollision:
     def test_allocate_raw_path_returns_unique_paths_under_contention(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from chronovisor.hosts import server
 
         # Patch RAW_DIR in server so allocate writes into the isolated wiki.
-        monkeypatch.setattr(server, "RAW_DIR", isolated_wiki / "raw")
+        monkeypatch.setattr(raw_record, "RAW_DIR", isolated_wiki / "raw")
 
-        paths = {server._allocate_raw_path() for _ in range(50)}
+        paths = {raw_record.allocate_raw_path() for _ in range(50)}
         assert len(paths) == 50  # all unique
         for p in paths:
             assert p.exists()
@@ -12972,12 +12972,11 @@ class TestRawFilenameCollision:
     def test_allocate_raw_path_creates_raw_dir_if_missing(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from chronovisor.hosts import server
 
         raw_dir = tmp_path / "wiki" / "raw"
-        monkeypatch.setattr(server, "RAW_DIR", raw_dir)
+        monkeypatch.setattr(raw_record, "RAW_DIR", raw_dir)
 
-        path = server._allocate_raw_path(prefix="codex", topic_slug="readable-name")
+        path = raw_record.allocate_raw_path(prefix="codex", topic_slug="readable-name")
 
         assert path.exists()
         assert path.parent == raw_dir
@@ -13216,13 +13215,13 @@ class TestRawAllocationParallel:
         from chronovisor.hosts import server
         from chronovisor.ingest import orchestrator
 
-        monkeypatch.setattr(server, "RAW_DIR", isolated_wiki / "raw")
+        monkeypatch.setattr(raw_record, "RAW_DIR", isolated_wiki / "raw")
         tool_fn = (
             server.chronovisor_record.fn
             if hasattr(server.chronovisor_record, "fn")
             else server.chronovisor_record
         )
-        real_link = server._link_raw_no_replace
+        real_link = raw_record.link_raw_no_replace
         ready_to_publish = threading.Event()
         allow_publish = threading.Event()
 
@@ -13232,7 +13231,7 @@ class TestRawAllocationParallel:
             assert allow_publish.wait(5)
             real_link(staging, target)
 
-        monkeypatch.setattr(server, "_link_raw_no_replace", paused_link)
+        monkeypatch.setattr(raw_record, "link_raw_no_replace", paused_link)
         content = "complete raw payload\n" * 100
 
         with ThreadPoolExecutor(max_workers=1) as pool:
@@ -13270,16 +13269,15 @@ class TestRawAllocationParallel:
         import threading
         from concurrent.futures import ThreadPoolExecutor
 
-        from chronovisor.hosts import server
 
-        monkeypatch.setattr(server, "RAW_DIR", isolated_wiki / "raw")
+        monkeypatch.setattr(raw_record, "RAW_DIR", isolated_wiki / "raw")
 
         N = 50
         barrier = threading.Barrier(N)
 
         def worker() -> Path:
             barrier.wait()  # all threads release at once → maximize collision
-            return server._allocate_raw_path()
+            return raw_record.allocate_raw_path()
 
         with ThreadPoolExecutor(max_workers=N) as ex:
             paths = list(ex.map(lambda _i: worker(), range(N)))
@@ -13293,11 +13291,10 @@ class TestRawAllocationParallel:
     ) -> None:
         """A malicious or malformed session_id ('../escape') must NOT let
         the raw file land outside RAW_DIR."""
-        from chronovisor.hosts import server
 
-        monkeypatch.setattr(server, "RAW_DIR", isolated_wiki / "raw")
+        monkeypatch.setattr(raw_record, "RAW_DIR", isolated_wiki / "raw")
 
-        path = server._allocate_raw_path(prefix="../../etc/passwd")
+        path = raw_record.allocate_raw_path(prefix="../../etc/passwd")
         assert path.parent == (isolated_wiki / "raw")
         # Sanitizer collapses path-traversal chars to dashes.
         assert "../" not in path.name

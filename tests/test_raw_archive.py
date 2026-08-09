@@ -6,7 +6,7 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from chronovisor.hosts import server
+from chronovisor.raw import record_raw as raw_record
 from chronovisor.raw.raw_archive import (
     archive_status,
     export_raw,
@@ -111,9 +111,9 @@ def test_v2_manual_raw_is_published_directly_under_capture_date(
 ) -> None:
     raw_dir = tmp_path / "raw"
     monkeypatch.setenv("CHRONOVISOR_RAW_LAYOUT", "v2")
-    monkeypatch.setattr(server, "RAW_DIR", raw_dir)
+    monkeypatch.setattr(raw_record, "RAW_DIR", raw_dir)
 
-    path = server._publish_raw("manual bytes\n", prefix="api")
+    path = raw_record.publish_raw("manual bytes\n", prefix="api")
 
     assert path.read_bytes() == b"manual bytes\n"
     assert path.relative_to(raw_dir).parts[:3] == tuple(capture_date().split("/"))

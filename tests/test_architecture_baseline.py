@@ -696,6 +696,15 @@ S_RETIRED_EVIDENCE_GROUNDING_SITE_IDS = (
     "arch:6897abd7eb99462964bc91e1c2ad852b8155bea0b36d07bb6828b640b1f3ffd0",
     "arch:706094af98241c600d34d9824487ed9b281b8e03eb0940028c197c376a26da9f",
 )
+S_RETIRED_RAW_RECORD_SITE_IDS = (
+    "arch:6a910d26b5bff52223d9b69a0dc9a3cace3f0e9944982943d1c85533bceef5d3",
+    "arch:8f2f1b2cf8e12591aa3a4e139786086309e6536e54a0a301420677daa6586fe8",
+    "arch:9d279fb64a6a23839119ee153b77205d7cdf7d3a294fd0d95a9ebe90293120ad",
+    "arch:9e2c0e92197963776eed3b2028003ada788c9b74231aa060b019b3bc5453d92b",
+    "arch:a537decadabe6c9057e8f251a3173893ef09467995f3b0b1d558078045923500",
+    "arch:ab9b7b4be78b11481edbfbcc17693ae523056a917355773cc7fe75e82ece9fe9",
+    "arch:ca8b808824717b8f186534a227a79dbd7af22c9f96e40b7ac3c600e73a156a71",
+)
 V_RETIRED_RECALL_SHIM_SITE_IDS = (
     "arch:3896d20fb9ddf2c56d06af026b9b40d6399902891ab291f3a6eba063ba8b4d28",
     "arch:c99c20705c2ffb63854eb252145ab9e7f20ea9b0adb7eef8892e39abb52ceb1c",
@@ -1054,6 +1063,7 @@ RETIREMENT_HISTORY = {
                 *S_RETIRED_RECALL_CONTRACT_SITE_IDS,
                 *S_RETIRED_FAILURE_SUPERVISOR_SITE_IDS,
                 *S_RETIRED_EVIDENCE_GROUNDING_SITE_IDS,
+                *S_RETIRED_RAW_RECORD_SITE_IDS,
                 *V_RETIRED_RECALL_SHIM_SITE_IDS,
                 *V_RETIRED_REMAINING_SHIM_SITE_IDS,
                 *V_RETIRED_DURABLE_MODULE_MAPPING_SITE_IDS,
@@ -1806,7 +1816,7 @@ def test_current_exception_ledger_seed_and_schema_inventory_are_exact(
     assert detected_ids == ledger_ids == set(seed["exception_semantic_ids"]["active"])
     _assert_exact_retirement_history(architecture, seed)
     assert len(edge_rows) == current["worktree_architecture"]["edge_count"] == 64
-    assert sum(len(row["sites"]) for row in edge_rows) == len(raw_cross_sites) == 1357
+    assert sum(len(row["sites"]) for row in edge_rows) == len(raw_cross_sites) == 1356
     assert {
         field: counts[field]
         for field in (
@@ -1819,7 +1829,7 @@ def test_current_exception_ledger_seed_and_schema_inventory_are_exact(
         )
     } == {
         "exceptions": 64,
-        "cross_domain_sites": 1357,
+        "cross_domain_sites": 1356,
         "production_to_lab_edges": 0,
         "production_to_lab_static_sites": 0,
         "production_to_lab_dynamic_sites": 0,
