@@ -44,45 +44,7 @@ from chronovisor.hosts.codex_capture_delta import (
 from chronovisor.hosts.codex_capture_delta import (
     bounded_transcript_slice as bounded_transcript_slice,
 )
-from chronovisor.hosts.codex_transcript import (
-    FILE_CHANGE_TOOLS as FILE_CHANGE_TOOLS,
-)
-from chronovisor.hosts.codex_transcript import (
-    TranscriptRecord as TranscriptRecord,
-)
-from chronovisor.hosts.codex_transcript import (
-    TranscriptSlice as TranscriptSlice,
-)
-from chronovisor.hosts.codex_transcript import (
-    _codex_semantic_view as _codex_semantic_view,
-)
-from chronovisor.hosts.codex_transcript import (
-    _is_tool_payload_type as _is_tool_payload_type,
-)
-from chronovisor.hosts.codex_transcript import (
-    codex_semantic_view as codex_semantic_view,
-)
-from chronovisor.hosts.codex_transcript import (
-    extract_transcript_slice as extract_transcript_slice,
-)
-from chronovisor.hosts.codex_transcript import (
-    format_transcript as format_transcript,
-)
-from chronovisor.hosts.codex_transcript import (
-    is_injected_context as is_injected_context,
-)
-from chronovisor.hosts.codex_transcript import (
-    message_content_text as message_content_text,
-)
-from chronovisor.hosts.codex_transcript import (
-    read_session_meta as read_session_meta,
-)
-from chronovisor.hosts.codex_transcript import (
-    sanitize_message_content as sanitize_message_content,
-)
-from chronovisor.hosts.codex_transcript import (
-    serialize_transcript_records as serialize_transcript_records,
-)
+from chronovisor.raw import codex_transcript as _codex_transcript
 from chronovisor.raw.raw_segment import copy_source_interval
 from chronovisor.raw.raw_store import raw_layout_mode
 from chronovisor.raw.save_transaction import (
@@ -99,6 +61,20 @@ from chronovisor.research.evidence_grounding import (
     ProtectedLiteralGroundingError,
     validate_protected_literals,
 )
+
+FILE_CHANGE_TOOLS = _codex_transcript.FILE_CHANGE_TOOLS
+TranscriptRecord = _codex_transcript.TranscriptRecord
+TranscriptSlice = _codex_transcript.TranscriptSlice
+_codex_semantic_view = _codex_transcript._codex_semantic_view
+_is_tool_payload_type = _codex_transcript._is_tool_payload_type
+codex_semantic_view = _codex_transcript.codex_semantic_view
+extract_transcript_slice = _codex_transcript.extract_transcript_slice
+format_transcript = _codex_transcript.format_transcript
+is_injected_context = _codex_transcript.is_injected_context
+message_content_text = _codex_transcript.message_content_text
+read_session_meta = _codex_transcript.read_session_meta
+sanitize_message_content = _codex_transcript.sanitize_message_content
+serialize_transcript_records = _codex_transcript.serialize_transcript_records
 
 # Kept as parser/API compatibility values for the legacy manual writer helpers.
 # The normal save path is deterministic and never resolves or starts a model.

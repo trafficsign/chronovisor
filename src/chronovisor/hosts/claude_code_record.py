@@ -47,45 +47,7 @@ from chronovisor.hosts.claude_code_capture_delta import (
 from chronovisor.hosts.claude_code_capture_delta import (
     bounded_transcript_slice as bounded_transcript_slice,
 )
-from chronovisor.hosts.claude_code_transcript import (
-    FILE_CHANGE_TOOLS as FILE_CHANGE_TOOLS,
-)
-from chronovisor.hosts.claude_code_transcript import (
-    TranscriptRecord as TranscriptRecord,
-)
-from chronovisor.hosts.claude_code_transcript import (
-    TranscriptSlice as TranscriptSlice,
-)
-from chronovisor.hosts.claude_code_transcript import (
-    _claude_record_role as _claude_record_role,
-)
-from chronovisor.hosts.claude_code_transcript import (
-    _claude_semantic_view as _claude_semantic_view,
-)
-from chronovisor.hosts.claude_code_transcript import (
-    _content_has_file_changes as _content_has_file_changes,
-)
-from chronovisor.hosts.claude_code_transcript import (
-    claude_semantic_view as claude_semantic_view,
-)
-from chronovisor.hosts.claude_code_transcript import (
-    extract_transcript_slice as extract_transcript_slice,
-)
-from chronovisor.hosts.claude_code_transcript import (
-    format_transcript as format_transcript,
-)
-from chronovisor.hosts.claude_code_transcript import (
-    is_injected_context as is_injected_context,
-)
-from chronovisor.hosts.claude_code_transcript import (
-    message_content_text as message_content_text,
-)
-from chronovisor.hosts.claude_code_transcript import (
-    sanitize_message_content as sanitize_message_content,
-)
-from chronovisor.hosts.claude_code_transcript import (
-    serialize_transcript_records as serialize_transcript_records,
-)
+from chronovisor.raw import claude_code_transcript as _claude_code_transcript
 from chronovisor.raw.raw_segment import copy_source_interval
 from chronovisor.raw.raw_store import raw_layout_mode
 from chronovisor.raw.save_transaction import (
@@ -102,6 +64,20 @@ from chronovisor.research.evidence_grounding import (
     ProtectedLiteralGroundingError,
     validate_protected_literals,
 )
+
+FILE_CHANGE_TOOLS = _claude_code_transcript.FILE_CHANGE_TOOLS
+TranscriptRecord = _claude_code_transcript.TranscriptRecord
+TranscriptSlice = _claude_code_transcript.TranscriptSlice
+_claude_record_role = _claude_code_transcript._claude_record_role
+_claude_semantic_view = _claude_code_transcript._claude_semantic_view
+_content_has_file_changes = _claude_code_transcript._content_has_file_changes
+claude_semantic_view = _claude_code_transcript.claude_semantic_view
+extract_transcript_slice = _claude_code_transcript.extract_transcript_slice
+format_transcript = _claude_code_transcript.format_transcript
+is_injected_context = _claude_code_transcript.is_injected_context
+message_content_text = _claude_code_transcript.message_content_text
+sanitize_message_content = _claude_code_transcript.sanitize_message_content
+serialize_transcript_records = _claude_code_transcript.serialize_transcript_records
 
 DEFAULT_STATE_FILE = DEFAULT_CONTEXT.claude_code_state_file
 DEFAULT_MAX_CHARS = 120_000

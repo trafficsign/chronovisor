@@ -477,6 +477,13 @@ S_RETIRED_DECISION_SEARCH_SITE_IDS = (
     "arch:beab45582c8207887a4aee15812ca9ab015742d4c52fc00fb61ee510d3c45408",
     "arch:bf0fbc85fcfa66108d3dd12a99293b2ddaecdfaa60a94095dfe4f2878996fbad",
 )
+S_RETIRED_RAW_TRANSCRIPT_EDGE_IDS = (
+    "arch:505df1e6b1df3baab16a96d8f48cd4a8c979825d4c19ba50350061ff09d8ea3b",
+)
+S_RETIRED_RAW_TRANSCRIPT_SITE_IDS = (
+    "arch:9122dbbe7a3c2018f1f4cdcf7737e769806b442e3f851cb224af64340ee50a2a",
+    "arch:b716b52746c1d60f09b92cdc9602e8ca2ac3c23e65245d8e3ad0c0f14abd21ec",
+)
 V_RETIRED_RECALL_SHIM_SITE_IDS = (
     "arch:3896d20fb9ddf2c56d06af026b9b40d6399902891ab291f3a6eba063ba8b4d28",
     "arch:c99c20705c2ffb63854eb252145ab9e7f20ea9b0adb7eef8892e39abb52ceb1c",
@@ -771,6 +778,7 @@ RETIREMENT_HISTORY = {
                 *S_RETIRED_READ_BACK_POLICY_EDGE_IDS,
                 *S_RETIRED_INGEST_LIFECYCLE_EDGE_IDS,
                 *S_RETIRED_DECISION_SEARCH_EDGE_IDS,
+                *S_RETIRED_RAW_TRANSCRIPT_EDGE_IDS,
                 *V_RETIRED_REMAINING_SHIM_EXCEPTION_IDS,
             )
         )
@@ -806,6 +814,7 @@ RETIREMENT_HISTORY = {
                 *S_RETIRED_READ_BACK_POLICY_SITE_IDS,
                 *S_RETIRED_INGEST_LIFECYCLE_SITE_IDS,
                 *S_RETIRED_DECISION_SEARCH_SITE_IDS,
+                *S_RETIRED_RAW_TRANSCRIPT_SITE_IDS,
                 *V_RETIRED_RECALL_SHIM_SITE_IDS,
                 *V_RETIRED_REMAINING_SHIM_SITE_IDS,
                 *V_RETIRED_DURABLE_MODULE_MAPPING_SITE_IDS,
@@ -1116,6 +1125,7 @@ def _without_persisted_retirement_history(
         + len(S_RETIRED_READ_BACK_POLICY_EDGE_IDS)
         + len(S_RETIRED_INGEST_LIFECYCLE_EDGE_IDS)
         + len(S_RETIRED_DECISION_SEARCH_EDGE_IDS)
+        + len(S_RETIRED_RAW_TRANSCRIPT_EDGE_IDS)
         + len(V_RETIRED_REMAINING_SHIM_EXCEPTION_IDS)
     )
     active_counts["by_category"]["dynamic_import"] = (
@@ -1544,8 +1554,8 @@ def test_current_exception_ledger_seed_and_schema_inventory_are_exact(
 
     assert detected_ids == ledger_ids == set(seed["exception_semantic_ids"]["active"])
     _assert_exact_retirement_history(architecture, seed)
-    assert len(edge_rows) == current["worktree_architecture"]["edge_count"] == 79
-    assert sum(len(row["sites"]) for row in edge_rows) == len(raw_cross_sites) == 1280
+    assert len(edge_rows) == current["worktree_architecture"]["edge_count"] == 78
+    assert sum(len(row["sites"]) for row in edge_rows) == len(raw_cross_sites) == 1282
     assert {
         field: counts[field]
         for field in (
@@ -1557,15 +1567,15 @@ def test_current_exception_ledger_seed_and_schema_inventory_are_exact(
             "compatibility_contracts",
         )
     } == {
-        "exceptions": 79,
-        "cross_domain_sites": 1280,
+        "exceptions": 78,
+        "cross_domain_sites": 1282,
         "production_to_lab_edges": 0,
         "production_to_lab_static_sites": 0,
         "production_to_lab_dynamic_sites": 0,
         "compatibility_contracts": 51,
     }
     assert counts["by_category"] == {
-        "cross_domain_edge": 79,
+        "cross_domain_edge": 78,
     }
     assert counts["compatibility_by_kind"] == {
         "console_entrypoint": 51,

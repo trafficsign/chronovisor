@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from chronovisor.hosts.claude_code_transcript import (
+from chronovisor.raw.claude_code_transcript import (
     TranscriptRecord,
     TranscriptSlice,
     serialize_transcript_records,
