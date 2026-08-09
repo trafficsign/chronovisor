@@ -168,7 +168,7 @@ def _refresh_ingest_derived_artifacts(
         except Exception as exc:
             runtime._safe_log(f"ingest | claim ledger failed (non-fatal): {exc}")
         try:
-            from chronovisor.ops.state_register import refresh_state_register
+            from chronovisor.ingest.state_register import refresh_state_register
 
             refresh_state_register(changed_pages, source_raw=source_raw or "")
         except Exception as exc:

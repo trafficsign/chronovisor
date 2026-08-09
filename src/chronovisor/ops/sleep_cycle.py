@@ -498,6 +498,7 @@ def _run_sleep_cycle(
     duplicate_limit: int = 200,
     dry_run: bool = False,
 ) -> dict[str, Any]:
+    from chronovisor.ingest.state_register import refresh_state_register
     from chronovisor.ops.autonomy import run_autonomy_cycle
     from chronovisor.ops.convergence import ConvergenceStore, CycleBudget
     from chronovisor.ops.distill import export_distill_dataset
@@ -507,7 +508,6 @@ def _run_sleep_cycle(
     from chronovisor.ops.memory_integrity import run_eval
     from chronovisor.ops.reflection import write_reflection_page
     from chronovisor.ops.snapshot import snapshot_chronovisor
-    from chronovisor.ops.state_register import refresh_state_register
     from chronovisor.raw.raw_replay import (
         AUTO_SIGNAL_SOURCES,
         build_queue,

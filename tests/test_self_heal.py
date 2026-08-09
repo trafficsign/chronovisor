@@ -44,8 +44,8 @@ def isolated_wiki(
         d.mkdir(parents=True, exist_ok=True)
 
     from chronovisor.core import ollama, page_mutation, store
-    from chronovisor.ingest import ingest, orchestrator
-    from chronovisor.ops import background_jobs, runtime_status, state_register
+    from chronovisor.ingest import ingest, orchestrator, state_register
+    from chronovisor.ops import background_jobs, runtime_status
     from chronovisor.search import claims, index_store, search
 
     monkeypatch.setattr(store, "CHRONOVISOR_ROOT", chronovisor_root)

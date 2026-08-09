@@ -257,7 +257,7 @@ def _patch_sleep_dependencies(monkeypatch) -> None:
         lambda write=True: {"path": "/tmp/reflection.md"},
     )
     monkeypatch.setattr(
-        "chronovisor.ops.state_register.refresh_state_register",
+        "chronovisor.ingest.state_register.refresh_state_register",
         lambda write=True: {"pages": ["p"]},
     )
     monkeypatch.setattr(

@@ -934,6 +934,14 @@ S_RETIRED_LIBRARIAN_RUNTIME_SITE_IDS = (
     "arch:fd4827357c438dffce44a32f861ab684279c321126089c80c19ceb3fc2625445",
     "arch:fe13ea2ecd21755a70c47d330acab19f317c7d4fcba30a60b5fa969b597ba4dc",
 )
+S_RETIRED_STATE_REGISTER_SITE_IDS = (
+    "arch:086c23414a824d812f844f8ca63f598e4f194049573f02116e8f16a5d73431c5",
+    "arch:59c2a24fd481c217661b34318b597048c855b72863a3f6ef08d5bba1aa3f34f5",
+    "arch:716c5f36c9c9b3bd2a9ed0c8b12e56ef90eacb637d2d4b0a600417f9a3b54700",
+    "arch:9675714c2fb10316c0ff13a915ce6c0947898e906fd43c3f05dd03a6d04998f3",
+    "arch:c030f7322081ddede01fcd853982e9c0de322500331409d7ce19a3d9d82bbd46",
+    "arch:f38a41b9e798eed9b251129251cdcf484bbce5b99d859b524134f3061f36826b",
+)
 V_RETIRED_RECALL_SHIM_SITE_IDS = (
     "arch:3896d20fb9ddf2c56d06af026b9b40d6399902891ab291f3a6eba063ba8b4d28",
     "arch:c99c20705c2ffb63854eb252145ab9e7f20ea9b0adb7eef8892e39abb52ceb1c",
@@ -1303,6 +1311,7 @@ RETIREMENT_HISTORY = {
                 *S_RETIRED_RESEARCH_RUNTIME_SITE_IDS,
                 *S_RETIRED_CLASSIFICATION_CLOSURE_SITE_IDS,
                 *S_RETIRED_LIBRARIAN_RUNTIME_SITE_IDS,
+                *S_RETIRED_STATE_REGISTER_SITE_IDS,
                 *V_RETIRED_RECALL_SHIM_SITE_IDS,
                 *V_RETIRED_REMAINING_SHIM_SITE_IDS,
                 *V_RETIRED_DURABLE_MODULE_MAPPING_SITE_IDS,
@@ -2059,7 +2068,7 @@ def test_current_exception_ledger_seed_and_schema_inventory_are_exact(
     assert detected_ids == ledger_ids == set(seed["exception_semantic_ids"]["active"])
     _assert_exact_retirement_history(architecture, seed)
     assert len(edge_rows) == current["worktree_architecture"]["edge_count"] == 56
-    assert sum(len(row["sites"]) for row in edge_rows) == len(raw_cross_sites) == 1391
+    assert sum(len(row["sites"]) for row in edge_rows) == len(raw_cross_sites) == 1390
     assert {
         field: counts[field]
         for field in (
@@ -2072,7 +2081,7 @@ def test_current_exception_ledger_seed_and_schema_inventory_are_exact(
         )
     } == {
         "exceptions": 56,
-        "cross_domain_sites": 1391,
+        "cross_domain_sites": 1390,
         "production_to_lab_edges": 0,
         "production_to_lab_static_sites": 0,
         "production_to_lab_dynamic_sites": 0,

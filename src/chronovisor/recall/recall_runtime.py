@@ -40,7 +40,7 @@ from chronovisor.core.store import (
 )
 from chronovisor.decision.local_structured import LocalStructuredSession
 from chronovisor.decision.recall_policy_contract import RecallPolicy as RecallPolicy
-from chronovisor.ops.state_register import format_state_context, should_inject_state
+from chronovisor.ingest.state_register import format_state_context, should_inject_state
 from chronovisor.recall import recall_publication as _recall_publication
 from chronovisor.recall.recall_prompt import (
     CODEX_INTERNAL_SUGGESTION_RE,
