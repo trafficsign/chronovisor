@@ -53,6 +53,14 @@ def test_reviewed_anchor_repair_is_snapshot_backed_and_code_safe(
 def test_default_repairs_cover_reviewed_live_anchor_debt() -> None:
     expected = {
         (
+            "decision-router-cloud-provider-neutrality",
+            "quorum・veto・schema・proof",
+        ): "Immutable Core (変更不可)",
+        (
+            "decision-router-cloud-provider-neutrality",
+            "不変の制約",
+        ): "Immutable Core (変更不可)",
+        (
             "local-ai-hardware-strategy-2026",
             "section_22",
         ): "22. M4 Max 128GB の「物理的再現不可能性」と供給逼迫の構造的終着点",
