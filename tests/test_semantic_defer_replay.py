@@ -10,8 +10,8 @@ from types import SimpleNamespace
 import pytest
 
 from chronovisor.core.jobs import JobStatus
+from chronovisor.ingest import raw_replay
 from chronovisor.ingest.convergence import CycleBudget
-from chronovisor.raw import raw_replay
 
 
 def _write_jsonl(path: Path, rows: list[dict]) -> None:
@@ -27,7 +27,7 @@ def _read_jsonl(path: Path) -> list[dict]:
 
 
 def _isolate_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Path]:
-    from chronovisor.raw import failure_supervisor
+    from chronovisor.ingest import failure_supervisor
 
     paths = {
         "raw": tmp_path / "raw",
@@ -62,8 +62,8 @@ def test_auto_signals_skip_semantic_defer_until_authority_artifact_changes(
 ) -> None:
     from chronovisor.core import runtime_config, store
     from chronovisor.decision import decision_router
+    from chronovisor.ingest import failure_supervisor
     from chronovisor.ops import runtime_status
-    from chronovisor.raw import failure_supervisor
 
     paths = _isolate_paths(tmp_path, monkeypatch)
     monkeypatch.setattr(store, "CHRONOVISOR_ROOT", tmp_path)
@@ -386,7 +386,7 @@ def test_no_quorum_from_replay_publishes_one_terminal_defer_without_retry(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor.raw import failure_supervisor
+    from chronovisor.ingest import failure_supervisor
 
     paths = _isolate_paths(tmp_path, monkeypatch)
     raw = paths["raw"] / "20260714-replay-semantic-split.md"
@@ -590,7 +590,7 @@ def test_legacy_no_quorum_reconcile_is_model_free_bounded_and_scope_exact(
     monkeypatch: pytest.MonkeyPatch,
     limit_axis: str,
 ) -> None:
-    from chronovisor.raw import failure_supervisor
+    from chronovisor.ingest import failure_supervisor
 
     paths = _isolate_paths(tmp_path, monkeypatch)
     authority_sha256 = "b" * 64
@@ -892,7 +892,7 @@ def test_newer_operational_hold_outranks_legacy_no_quorum_history(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor.raw import failure_supervisor
+    from chronovisor.ingest import failure_supervisor
 
     paths = _isolate_paths(tmp_path, monkeypatch)
     raw = paths["raw"] / "20260714-operational-hold-wins.md"
@@ -978,7 +978,7 @@ def test_legacy_semantic_reconcile_obeys_shared_cycle_budget_before_writes(
     monkeypatch: pytest.MonkeyPatch,
     exhausted: str,
 ) -> None:
-    from chronovisor.raw import failure_supervisor
+    from chronovisor.ingest import failure_supervisor
 
     paths = _isolate_paths(tmp_path, monkeypatch)
     raw = paths["raw"] / f"20260714-budget-{exhausted}.md"
@@ -1107,7 +1107,7 @@ def test_dry_run_previews_future_and_cooldown_legacy_semantic_reconcile(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor.raw import failure_supervisor
+    from chronovisor.ingest import failure_supervisor
 
     paths = _isolate_paths(tmp_path, monkeypatch)
     authority_sha256 = "9" * 64
@@ -1192,7 +1192,7 @@ def test_oversized_legacy_semantic_reconcile_is_read_only_and_fully_uncharged(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor.raw import failure_supervisor
+    from chronovisor.ingest import failure_supervisor
 
     paths = _isolate_paths(tmp_path, monkeypatch)
     raw = paths["raw"] / "20260714-oversized-semantic.md"
@@ -1295,7 +1295,7 @@ def test_dry_run_verifies_only_bounded_semantic_candidates(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor.raw import failure_supervisor
+    from chronovisor.ingest import failure_supervisor
 
     paths = _isolate_paths(tmp_path, monkeypatch)
     authority_sha256 = "7" * 64
@@ -1440,7 +1440,7 @@ def test_dry_run_reports_shared_budget_denial_without_source_verification(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor.raw import failure_supervisor
+    from chronovisor.ingest import failure_supervisor
 
     paths = _isolate_paths(tmp_path, monkeypatch)
     raw = paths["raw"] / "20260714-dry-budget-denied.md"
@@ -1526,7 +1526,7 @@ def test_successful_replay_releases_failure_supervisor_for_actual_raw(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor.raw import failure_supervisor
+    from chronovisor.ingest import failure_supervisor
 
     paths = _isolate_paths(tmp_path, monkeypatch)
     raw = paths["raw"] / "20260714-authority-released-success.md"
@@ -1627,7 +1627,7 @@ def test_completion_survives_reset_failure_and_retries_cleanup_without_replay(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor.raw import failure_supervisor
+    from chronovisor.ingest import failure_supervisor
 
     paths = _isolate_paths(tmp_path, monkeypatch)
     raw = paths["raw"] / "20260714-reset-retry.md"
@@ -1746,7 +1746,7 @@ def test_pending_failure_reset_obeys_mutation_budget_without_queue_rewrite(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor.raw import failure_supervisor
+    from chronovisor.ingest import failure_supervisor
 
     paths = _isolate_paths(tmp_path, monkeypatch)
     raw = paths["raw"] / "20260714-reset-budget.md"

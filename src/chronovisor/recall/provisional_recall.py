@@ -22,7 +22,7 @@ from chronovisor.core.durable_state import (
     write_sealed_json,
 )
 from chronovisor.core.sealed_artifact_decoder import schema_matches
-from chronovisor.raw.raw_semantic_projection import (
+from chronovisor.ingest.raw_semantic_projection import (
     PROJECTION_CHILD_SCHEMA,
     PROJECTION_POLICY_VERSION,
     verify_projection_child,
@@ -146,11 +146,11 @@ def _projection_entry(path: Path) -> dict[str, Any] | None:
 
 
 def sync_index(*, chronovisor_root: Path) -> dict[str, Any]:
-    from chronovisor.raw.failure_supervisor import (
+    from chronovisor.ingest.failure_supervisor import (
         SEMANTIC_NO_QUORUM_DEFER_REASON,
         operational_deferred_raw_files,
     )
-    from chronovisor.raw.raw_replay import is_raw_retracted
+    from chronovisor.ingest.raw_replay import is_raw_retracted
 
     raw_dir = chronovisor_root / "raw"
     artifact_dir = chronovisor_root / "runtime" / "raw-projections" / "artifacts"

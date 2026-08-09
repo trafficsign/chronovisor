@@ -17,8 +17,8 @@ from chronovisor.core.save_transaction import make_save_transaction
 from chronovisor.core.store import RuntimeContext
 from chronovisor.core.transcript import ClaudeCodeSaveError
 from chronovisor.hosts import claude_code_record
+from chronovisor.ingest.raw_semantic_projection import project_parent_raw
 from chronovisor.raw import claude_code_capture_delta
-from chronovisor.raw.raw_semantic_projection import project_parent_raw
 
 
 def test_transcript_api_is_reexported_from_raw_modules() -> None:

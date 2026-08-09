@@ -1742,7 +1742,7 @@ def verified_projection_child_bytes(raw_file: str, *, artifact_dir: Path) -> byt
     ):
         raise ValueError("projection_evidence_outside_artifact_dir")
 
-    from chronovisor.raw import raw_semantic_projection
+    from chronovisor.ingest import raw_semantic_projection
 
     manifest = raw_semantic_projection.verify_projection_bundle(manifest_path)
     children = manifest.get("children")
@@ -1783,7 +1783,7 @@ def _projection_parent_can_retry(raw_path: Path, entry: dict[str, Any]) -> bool:
     ):
         return False
     try:
-        from chronovisor.raw.raw_semantic_projection import (
+        from chronovisor.ingest.raw_semantic_projection import (
             projection_bundle_state_for_parent,
         )
 

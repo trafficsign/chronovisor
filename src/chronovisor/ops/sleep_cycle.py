@@ -499,6 +499,11 @@ def _run_sleep_cycle(
     dry_run: bool = False,
 ) -> dict[str, Any]:
     from chronovisor.ingest.convergence import ConvergenceStore, CycleBudget
+    from chronovisor.ingest.raw_replay import (
+        AUTO_SIGNAL_SOURCES,
+        build_queue,
+        run_pending_queue,
+    )
     from chronovisor.ingest.snapshot import snapshot_chronovisor
     from chronovisor.ingest.state_register import refresh_state_register
     from chronovisor.ops.autonomy import run_autonomy_cycle
@@ -508,11 +513,6 @@ def _run_sleep_cycle(
     from chronovisor.ops.hubs import build_hub_pages
     from chronovisor.ops.memory_integrity import run_eval
     from chronovisor.ops.reflection import write_reflection_page
-    from chronovisor.raw.raw_replay import (
-        AUTO_SIGNAL_SOURCES,
-        build_queue,
-        run_pending_queue,
-    )
     from chronovisor.recall import recall_improvement
     from chronovisor.recall.cofire import build_cofire_graph
     from chronovisor.recall.duplicate_review import (

@@ -39,19 +39,18 @@ from chronovisor.decision.quality_guard import (
     register_last_known_good,
     run_quality_probe,
 )
+from chronovisor.ingest import failure_supervisor, raw_replay, read_back_repair
 from chronovisor.ingest import managed_hold_sync as managed_hold
-from chronovisor.ingest import read_back_repair
+from chronovisor.ingest.raw_semantic_projection import (
+    PROJECTION_CHILD_SCHEMA,
+    PROJECTION_POLICY_VERSION,
+)
 from chronovisor.ingest.read_back_integrity import (
     scan_jsonl_prefix,
     verify_prior_prefix,
 )
 from chronovisor.ops import burn_monitor, health, repair_runbook
 from chronovisor.ops.deadman import inspect_heartbeat, write_heartbeat
-from chronovisor.raw import failure_supervisor, raw_replay
-from chronovisor.raw.raw_semantic_projection import (
-    PROJECTION_CHILD_SCHEMA,
-    PROJECTION_POLICY_VERSION,
-)
 from chronovisor.recall.provisional_recall import search_provisional
 
 SCHEMA = {

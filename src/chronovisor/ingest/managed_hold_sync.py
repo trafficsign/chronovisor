@@ -130,7 +130,7 @@ def sync_ingest_semantic_holds(
 ) -> dict[str, Any]:
     inventory = ingest_semantic_hold_inventory(chronovisor_root)
     try:
-        from chronovisor.raw.failure_supervisor import (
+        from chronovisor.ingest.failure_supervisor import (
             current_adopted_authority_epoch,
         )
 
@@ -144,7 +144,7 @@ def sync_ingest_semantic_holds(
         if isinstance(raw_file, str)
     }
     try:
-        from chronovisor.raw.failure_supervisor import raw_failure_snapshot
+        from chronovisor.ingest.failure_supervisor import raw_failure_snapshot
 
         current_failures = raw_failure_snapshot(raw_files)
     except Exception:

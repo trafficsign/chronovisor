@@ -265,11 +265,11 @@ def _patch_sleep_dependencies(monkeypatch) -> None:
         lambda limit, write=True: {"capture_rate": 0.5, "rows": []},
     )
     monkeypatch.setattr(
-        "chronovisor.raw.raw_replay.build_queue",
+        "chronovisor.ingest.raw_replay.build_queue",
         lambda **kwargs: {"count": kwargs["limit"], "status": "ok"},
     )
     monkeypatch.setattr(
-        "chronovisor.raw.raw_replay.run_pending_queue",
+        "chronovisor.ingest.raw_replay.run_pending_queue",
         lambda **kwargs: {"count": kwargs["max_runs"], "status": "ok"},
     )
     monkeypatch.setattr(
@@ -355,7 +355,7 @@ def test_run_sleep_cycle_coordinates_safe_steps(monkeypatch) -> None:
         drain_kwargs.update(kwargs)
         return {"count": kwargs["max_runs"], "status": "ok"}
 
-    monkeypatch.setattr("chronovisor.raw.raw_replay.run_pending_queue", fake_drain)
+    monkeypatch.setattr("chronovisor.ingest.raw_replay.run_pending_queue", fake_drain)
 
     payload = sleep_cycle.run_sleep_cycle(raw_limit=3, eval_limit=4, duplicate_limit=5)
 

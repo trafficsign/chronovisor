@@ -1062,7 +1062,7 @@ class SystemIncidentSupervisor:
             }
 
         try:
-            from chronovisor.raw.failure_supervisor import (
+            from chronovisor.ingest.failure_supervisor import (
                 OPERATIONAL_SELF_HEAL_FAILURE_CLASSES,
             )
         except ImportError:

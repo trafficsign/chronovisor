@@ -208,8 +208,8 @@ def test_save_load_attributes_held_projection_child_to_saved_parent(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from chronovisor.ingest import raw_semantic_projection
     from chronovisor.ops import dashboard
-    from chronovisor.raw import raw_semantic_projection
 
     chronovisor_root = tmp_path / "wiki"
     raw_dir = chronovisor_root / "raw"
@@ -351,8 +351,8 @@ def test_projection_parent_resolution_reuses_one_raw_store_snapshot(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from chronovisor.core import raw_store
+    from chronovisor.ingest import raw_semantic_projection
     from chronovisor.ops import dashboard
-    from chronovisor.raw import raw_semantic_projection
 
     raw_dir = tmp_path / "raw"
     raw_dir.mkdir()
@@ -644,9 +644,13 @@ def test_orchestrator_reports_terminal_semantic_defer_without_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from chronovisor.core import jobs, runtime_config
-    from chronovisor.ingest import ingest, orchestrator
+    from chronovisor.ingest import (
+        failure_supervisor,
+        ingest,
+        orchestrator,
+        raw_semantic_projection,
+    )
     from chronovisor.ops import runtime_status
-    from chronovisor.raw import failure_supervisor, raw_semantic_projection
 
     chronovisor_root = tmp_path / "wiki"
     raw_dir = chronovisor_root / "raw"

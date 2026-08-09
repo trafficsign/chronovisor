@@ -401,7 +401,7 @@ def _completed_projection_artifact_ids(
     Any incomplete, orphaned, held, or partially processed bundle stays flat.
     """
 
-    from chronovisor.raw.raw_semantic_projection import verify_projection_bundle
+    from chronovisor.ingest.raw_semantic_projection import verify_projection_bundle
 
     eligible: set[str] = set()
     for manifest_path in sorted(raw_dir.glob("semantic-*.manifest.json")):

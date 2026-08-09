@@ -1601,8 +1601,7 @@ class TestIngestFrontierGate:
         authority_state: str,
     ) -> None:
         from chronovisor.core import jobs
-        from chronovisor.ingest import ingest
-        from chronovisor.raw import failure_supervisor
+        from chronovisor.ingest import failure_supervisor, ingest
 
         authority_a = self._production_authority("a")
         authority_b = self._production_authority("b")
@@ -1734,8 +1733,7 @@ class TestIngestFrontierGate:
         publication_authority: str | None,
     ) -> None:
         from chronovisor.core import jobs
-        from chronovisor.ingest import ingest
-        from chronovisor.raw import failure_supervisor
+        from chronovisor.ingest import failure_supervisor, ingest
 
         authority_a = self._production_authority("a")
         authority_sha256: list[str | None] = ["a" * 64]
@@ -4785,8 +4783,7 @@ class TestRunIngestPartialFailure:
     ) -> None:
         from chronovisor.core import jobs
         from chronovisor.decision import routine_review
-        from chronovisor.ingest import ingest
-        from chronovisor.raw import failure_supervisor
+        from chronovisor.ingest import failure_supervisor, ingest
 
         plan = [
             {
@@ -6428,9 +6425,13 @@ class TestOrchestrator:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         from chronovisor.core.runtime_config import DecisionRouterConfig
-        from chronovisor.ingest import ingest, ingest_readback, orchestrator
+        from chronovisor.ingest import (
+            failure_supervisor,
+            ingest,
+            ingest_readback,
+            orchestrator,
+        )
         from chronovisor.ops import runtime_status
-        from chronovisor.raw import failure_supervisor
 
         raw_path = isolated_wiki / "raw" / "eight-shard-continuation.md"
         raw_content = "Eight grounded memories require bounded local review."
@@ -6567,8 +6568,12 @@ class TestOrchestrator:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         from chronovisor.core.runtime_config import DecisionRouterConfig
-        from chronovisor.ingest import ingest, ingest_readback, orchestrator
-        from chronovisor.raw import failure_supervisor
+        from chronovisor.ingest import (
+            failure_supervisor,
+            ingest,
+            ingest_readback,
+            orchestrator,
+        )
 
         raw_path = isolated_wiki / "raw" / "shard-repair-continuation.md"
         raw_content = "One exact shard needs repair before bounded review resumes."
@@ -6755,8 +6760,11 @@ class TestOrchestrator:
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         from chronovisor.ingest import ingest as ingest_mod
-        from chronovisor.ingest import orchestrator
-        from chronovisor.raw import raw_completion_ack, raw_semantic_projection
+        from chronovisor.ingest import (
+            orchestrator,
+            raw_completion_ack,
+            raw_semantic_projection,
+        )
 
         record = json.dumps(
             [{"line": 7, "role": "user", "text": "remember projected record"}],
@@ -6993,9 +7001,12 @@ class TestOrchestrator:
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         from chronovisor.core import background_jobs
+        from chronovisor.ingest import (
+            failure_supervisor,
+            orchestrator,
+            raw_semantic_projection,
+        )
         from chronovisor.ingest import ingest as ingest_mod
-        from chronovisor.ingest import orchestrator
-        from chronovisor.raw import failure_supervisor, raw_semantic_projection
 
         record = json.dumps([{"role": "user", "text": "grounded record"}])
         record_sha256, paths = self._write_capture_fragments(
@@ -7056,8 +7067,7 @@ class TestOrchestrator:
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         from chronovisor.ingest import ingest as ingest_mod
-        from chronovisor.ingest import orchestrator
-        from chronovisor.raw import raw_semantic_projection
+        from chronovisor.ingest import orchestrator, raw_semantic_projection
 
         record_sha256, paths = self._write_capture_fragments(
             isolated_wiki / "raw",
@@ -7767,8 +7777,7 @@ class TestPerRawOrchestrator:
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         from chronovisor.core.jobs import JobStatus, job_store
-        from chronovisor.ingest import orchestrator
-        from chronovisor.raw import raw_completion_ack
+        from chronovisor.ingest import orchestrator, raw_completion_ack
 
         raw_path = isolated_wiki / "raw" / "ack-state-failure.md"
         raw_path.write_text("stable source bytes", encoding="utf-8")
@@ -7819,8 +7828,12 @@ class TestPerRawOrchestrator:
     def test_applied_artifact_recovers_before_model_and_ack_protects_later_update(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from chronovisor.ingest import ingest, ingest_readback, orchestrator
-        from chronovisor.raw import raw_completion_ack
+        from chronovisor.ingest import (
+            ingest,
+            ingest_readback,
+            orchestrator,
+            raw_completion_ack,
+        )
 
         raw_path = isolated_wiki / "raw" / "pretriage-crash.md"
         raw_content = "page applied, process crashed before raw ACK"
@@ -8055,8 +8068,7 @@ class TestPerRawOrchestrator:
         corruption: str,
     ) -> None:
         from chronovisor.core import background_jobs
-        from chronovisor.ingest import orchestrator
-        from chronovisor.raw import raw_completion_ack
+        from chronovisor.ingest import orchestrator, raw_completion_ack
 
         raw_path = isolated_wiki / "raw" / f"ack-{corruption}.md"
         raw_path.write_text("original source", encoding="utf-8")
@@ -8098,8 +8110,7 @@ class TestPerRawOrchestrator:
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         from chronovisor.core import background_jobs
-        from chronovisor.ingest import orchestrator
-        from chronovisor.raw import raw_completion_ack
+        from chronovisor.ingest import orchestrator, raw_completion_ack
 
         raw_path = isolated_wiki / "raw" / "ack-publish-failure.md"
         raw_path.write_text("source survives", encoding="utf-8")
@@ -8374,7 +8385,7 @@ class TestPerRawOrchestrator:
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         from chronovisor.core import background_jobs
-        from chronovisor.raw import failure_supervisor
+        from chronovisor.ingest import failure_supervisor
 
         raw_path = isolated_wiki / "raw" / "frontier-loop.md"
         raw_path.write_text("grounded source", encoding="utf-8")
@@ -8403,7 +8414,7 @@ class TestPerRawOrchestrator:
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         from chronovisor.core import background_jobs
-        from chronovisor.raw import failure_supervisor
+        from chronovisor.ingest import failure_supervisor
 
         raw_path = isolated_wiki / "raw" / "local-consensus-loop.md"
         raw_path.write_text("grounded source", encoding="utf-8")
@@ -8432,7 +8443,7 @@ class TestPerRawOrchestrator:
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         from chronovisor.core import background_jobs
-        from chronovisor.raw import failure_supervisor
+        from chronovisor.ingest import failure_supervisor
 
         first_raw = isolated_wiki / "raw" / "first-authority-failure.md"
         second_raw = isolated_wiki / "raw" / "second-authority-failure.md"
@@ -8496,7 +8507,7 @@ class TestPerRawOrchestrator:
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         from chronovisor.core import background_jobs
-        from chronovisor.raw import failure_supervisor
+        from chronovisor.ingest import failure_supervisor
 
         raw_path = isolated_wiki / "raw" / "authority-recovered.md"
         raw_path.write_text("grounded source", encoding="utf-8")
@@ -8529,7 +8540,7 @@ class TestPerRawOrchestrator:
     def test_semantic_hold_reenters_ingest_after_executable_policy_epoch_change(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from chronovisor.raw import failure_supervisor
+        from chronovisor.ingest import failure_supervisor
 
         artifact = "a" * 64
         epoch = ["b" * 64]
@@ -8568,7 +8579,7 @@ class TestPerRawOrchestrator:
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         from chronovisor.core import background_jobs
-        from chronovisor.raw import failure_supervisor
+        from chronovisor.ingest import failure_supervisor
 
         raw_path = isolated_wiki / "raw" / "generation-contract.md"
         raw_path.write_text("grounded source", encoding="utf-8")
@@ -8597,7 +8608,7 @@ class TestPerRawOrchestrator:
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         from chronovisor.core import background_jobs
-        from chronovisor.raw import failure_supervisor
+        from chronovisor.ingest import failure_supervisor
 
         raw_path = isolated_wiki / "raw" / "generation-transport.md"
         raw_path.write_text("grounded source", encoding="utf-8")
@@ -8656,7 +8667,7 @@ class TestPerRawOrchestrator:
     def test_legacy_sonnet_fallback_error_is_not_tracked_as_raw_failure(
         self, isolated_wiki: Path
     ) -> None:
-        from chronovisor.raw import failure_supervisor
+        from chronovisor.ingest import failure_supervisor
 
         raw_path = isolated_wiki / "raw" / "legacy.md"
         raw_path.write_text("body")
@@ -8686,7 +8697,7 @@ class TestPerRawOrchestrator:
     def test_transient_runtime_failure_stays_pending_without_quarantine(
         self, isolated_wiki: Path, error: str
     ) -> None:
-        from chronovisor.raw import failure_supervisor
+        from chronovisor.ingest import failure_supervisor
 
         raw_path = isolated_wiki / "raw" / "large.md"
         raw_path.write_text("large source", encoding="utf-8")
@@ -8805,7 +8816,7 @@ class TestPerRawOrchestrator:
         expected_class: str,
     ) -> None:
         from chronovisor.core import background_jobs
-        from chronovisor.raw import failure_supervisor
+        from chronovisor.ingest import failure_supervisor
 
         raw_path = isolated_wiki / "raw" / "large.md"
         raw_path.write_text("large source", encoding="utf-8")
@@ -8857,7 +8868,7 @@ class TestPerRawOrchestrator:
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         from chronovisor.core import background_jobs
-        from chronovisor.raw import failure_supervisor
+        from chronovisor.ingest import failure_supervisor
 
         first_raw = isolated_wiki / "raw" / "first.md"
         second_raw = isolated_wiki / "raw" / "second.md"
@@ -8898,7 +8909,7 @@ class TestPerRawOrchestrator:
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         from chronovisor.core import background_jobs
-        from chronovisor.raw import failure_supervisor
+        from chronovisor.ingest import failure_supervisor
 
         raw_path = isolated_wiki / "raw" / "system-defect.md"
         raw_path.write_text("valid source", encoding="utf-8")
@@ -9000,7 +9011,7 @@ class TestPerRawOrchestrator:
     def test_projection_failure_class_separates_source_from_runtime_defects(
         self,
     ) -> None:
-        from chronovisor.raw import failure_supervisor
+        from chronovisor.ingest import failure_supervisor
 
         conflict = failure_supervisor.classify_failure(
             "raw semantic projection failed [artifact_conflict]: "
@@ -9026,7 +9037,7 @@ class TestPerRawOrchestrator:
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         from chronovisor.core import background_jobs
-        from chronovisor.raw import failure_supervisor
+        from chronovisor.ingest import failure_supervisor
 
         raw_path = isolated_wiki / "raw" / "still-broken.md"
         raw_path.write_text("valid source", encoding="utf-8")
@@ -9060,9 +9071,12 @@ class TestPerRawOrchestrator:
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         from chronovisor.core import background_jobs
+        from chronovisor.ingest import (
+            failure_supervisor,
+            orchestrator,
+            raw_semantic_projection,
+        )
         from chronovisor.ingest import ingest as ingest_mod
-        from chronovisor.ingest import orchestrator
-        from chronovisor.raw import failure_supervisor, raw_semantic_projection
 
         parent = TestOrchestrator._write_transcript_raw(
             isolated_wiki / "raw",
@@ -9122,8 +9136,7 @@ class TestPerRawOrchestrator:
     ) -> None:
         from chronovisor.core import background_jobs
         from chronovisor.ingest import ingest as ingest_mod
-        from chronovisor.ingest import orchestrator
-        from chronovisor.raw import raw_semantic_projection
+        from chronovisor.ingest import orchestrator, raw_semantic_projection
 
         parent = TestOrchestrator._write_transcript_raw(
             isolated_wiki / "raw",
@@ -9167,7 +9180,7 @@ class TestPerRawOrchestrator:
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         from chronovisor.core import background_jobs
-        from chronovisor.raw import failure_supervisor, raw_semantic_projection
+        from chronovisor.ingest import failure_supervisor, raw_semantic_projection
 
         parent = TestOrchestrator._write_transcript_raw(
             isolated_wiki / "raw",
@@ -9201,7 +9214,7 @@ class TestPerRawOrchestrator:
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         from chronovisor.core import background_jobs
-        from chronovisor.raw import failure_supervisor, raw_semantic_projection
+        from chronovisor.ingest import failure_supervisor, raw_semantic_projection
 
         parent = TestOrchestrator._write_transcript_raw(
             isolated_wiki / "raw",
@@ -9260,8 +9273,7 @@ class TestPerRawOrchestrator:
     def test_projection_directory_fsync_failure_keeps_parent_pending_then_resumes(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from chronovisor.ingest import orchestrator
-        from chronovisor.raw import raw_semantic_projection
+        from chronovisor.ingest import orchestrator, raw_semantic_projection
 
         parent = TestOrchestrator._write_transcript_raw(
             isolated_wiki / "raw",
@@ -9307,7 +9319,7 @@ class TestPerRawOrchestrator:
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         from chronovisor.core import background_jobs
-        from chronovisor.raw import failure_supervisor
+        from chronovisor.ingest import failure_supervisor
 
         parent = isolated_wiki / "raw" / "no-manifest-parent.md"
         parent.write_text("valid source with no projection intent", encoding="utf-8")
@@ -9330,7 +9342,7 @@ class TestPerRawOrchestrator:
     ) -> None:
         import threading
 
-        from chronovisor.raw import failure_supervisor
+        from chronovisor.ingest import failure_supervisor
 
         deferred_raw = isolated_wiki / "raw" / "deferred.md"
         writer_raw = isolated_wiki / "raw" / "writer.md"
@@ -9412,7 +9424,7 @@ class TestPerRawOrchestrator:
         packet_state: str,
     ) -> None:
         from chronovisor.core import background_jobs
-        from chronovisor.raw import failure_supervisor
+        from chronovisor.ingest import failure_supervisor
 
         raw_path = isolated_wiki / "raw" / "deferred.md"
         raw_path.write_text("valid source", encoding="utf-8")

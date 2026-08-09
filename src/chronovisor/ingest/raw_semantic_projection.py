@@ -1108,7 +1108,7 @@ def project_reassembled_raws(
 
     if not raw_paths:
         raise RawSemanticProjectionError("reassembled projection has no parent raws")
-    from chronovisor.raw.raw_capture_fragments import (
+    from chronovisor.ingest.raw_capture_fragments import (
         RawCaptureFragmentError,
         group_capture_fragments,
         parse_capture_fragment,

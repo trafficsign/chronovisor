@@ -12,6 +12,7 @@ from chronovisor.core.save_transaction import (
     attach_save_transaction_marker,
     make_save_transaction,
 )
+from chronovisor.ingest.raw_semantic_projection import project_parent_raw
 from chronovisor.raw import record_raw as raw_record
 from chronovisor.raw.raw_archive import (
     archive_status,
@@ -21,7 +22,6 @@ from chronovisor.raw.raw_archive import (
     seal_eligible,
     verify_archive,
 )
-from chronovisor.raw.raw_semantic_projection import project_parent_raw
 
 
 def _open_segment(raw_dir: Path, source: Path, payload: bytes):

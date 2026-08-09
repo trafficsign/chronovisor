@@ -8,8 +8,8 @@ from types import SimpleNamespace
 import pytest
 
 from chronovisor.core.jobs import JobStatus
+from chronovisor.ingest import raw_replay
 from chronovisor.ingest.convergence import CycleBudget
-from chronovisor.raw import raw_replay
 
 
 def _write_jsonl(path: Path, rows: list[dict]) -> None:
@@ -26,7 +26,7 @@ def _read_jsonl(path: Path) -> list[dict]:
 
 
 def _isolate_paths(tmp_path: Path, monkeypatch) -> dict[str, Path]:
-    from chronovisor.raw import failure_supervisor
+    from chronovisor.ingest import failure_supervisor
 
     paths = {
         "raw": tmp_path / "raw",
@@ -149,7 +149,7 @@ def test_operational_hold_blocks_existing_queue_selection_until_release(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor.raw import failure_supervisor
+    from chronovisor.ingest import failure_supervisor
 
     paths = _isolate_paths(tmp_path, monkeypatch)
     raw = paths["raw"] / "20260714-operational-selection.md"
@@ -224,7 +224,7 @@ def test_operational_hold_published_after_running_marker_cancels_launch_and_resu
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor.raw import failure_supervisor
+    from chronovisor.ingest import failure_supervisor
 
     paths = _isolate_paths(tmp_path, monkeypatch)
     raw = paths["raw"] / "20260714-operational-race.md"

@@ -2063,7 +2063,7 @@ def test_large_complete_repacket_covers_the_112k_gate_bucket() -> None:
             "build_orphan_link_review_prompt",
         ),
         (
-            "chronovisor.raw.raw_replay",
+            "chronovisor.ingest.raw_replay",
             "_review_indeterminate_rows",
             "build_raw_replay_reconciliation_prompt",
         ),

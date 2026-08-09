@@ -237,7 +237,7 @@ rationale = "Declarative maintenance-lane wiring with low branch density; one sh
 tests = ["tests/test_sleep_cycle.py"]
 
 [[functions]]
-path = "src/chronovisor/raw/raw_replay.py"
+path = "src/chronovisor/ingest/raw_replay.py"
 qualname = "_review_indeterminate_rows"
 baseline_lines = 354
 disposition = "retained"
@@ -246,7 +246,7 @@ rationale = "One bounded reconciliation batch keeps proposal construction, autho
 tests = ["tests/test_raw_replay.py"]
 
 [[functions]]
-path = "src/chronovisor/raw/raw_replay.py"
+path = "src/chronovisor/ingest/raw_replay.py"
 qualname = "run_pending_queue"
 baseline_lines = 665
 disposition = "retained"

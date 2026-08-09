@@ -990,7 +990,7 @@ def dispatch(args: argparse.Namespace) -> int:
             )
         return 0
     if args.command == "raw-replay":
-        from chronovisor.raw import raw_replay
+        from chronovisor.ingest import raw_replay
 
         data = (
             raw_replay.run_replay(since=args.since, limit=max(1, args.limit or 1))

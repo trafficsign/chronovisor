@@ -293,8 +293,8 @@ def get_pending_raw_files() -> list[Path]:
     A raw with ``raw_status: retracted`` remains on disk as audit evidence,
     but is never offered to normal ingest.
     """
-    from chronovisor.raw.failure_supervisor import operational_deferred_raw_files
-    from chronovisor.raw.raw_replay import is_raw_retracted
+    from chronovisor.ingest.failure_supervisor import operational_deferred_raw_files
+    from chronovisor.ingest.raw_replay import is_raw_retracted
 
     state = _load_state()
     processed = set(state.get("processed_raw_files", []))
@@ -720,7 +720,7 @@ def _prepare_pending_raw_units(
 ) -> tuple[list[_PendingRawUnit], list[dict], list[dict]]:
     """Separate normal raws from validated, complete fragment transport sets."""
 
-    from chronovisor.raw.raw_capture_fragments import (
+    from chronovisor.ingest.raw_capture_fragments import (
         RawCaptureFragmentError,
         group_capture_fragments,
         parse_capture_fragment,
@@ -1136,7 +1136,7 @@ def run_pending_ingest(
         from chronovisor.core.raw_store import raw_layout_mode
         from chronovisor.core.runtime_config import load_ingest_config
         from chronovisor.ingest.ingest import run_ingest
-        from chronovisor.raw.raw_completion_ack import (
+        from chronovisor.ingest.raw_completion_ack import (
             RawCompletionAckError,
             RawCompletionStatePending,
             load_valid_receipt,
@@ -1144,7 +1144,7 @@ def run_pending_ingest(
             receipt_path,
             receipt_summary,
         )
-        from chronovisor.raw.raw_semantic_projection import (
+        from chronovisor.ingest.raw_semantic_projection import (
             ProjectionCapacityError,
             ProjectionConflictError,
             RawSemanticProjectionError,
@@ -1552,7 +1552,7 @@ def run_pending_ingest(
                     succeeded_filenames.extend(source_filenames)
                     succeeded_units += 1
                     try:
-                        from chronovisor.raw.failure_supervisor import (
+                        from chronovisor.ingest.failure_supervisor import (
                             reset_raw_failure,
                         )
 
@@ -1586,7 +1586,7 @@ def run_pending_ingest(
                         }
                     else:
                         try:
-                            from chronovisor.raw.failure_supervisor import (
+                            from chronovisor.ingest.failure_supervisor import (
                                 record_raw_failure,
                                 result_to_dict,
                             )

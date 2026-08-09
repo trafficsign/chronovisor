@@ -1042,7 +1042,7 @@ def _add_sample(row: dict[str, Any], key: str, value: str, limit: int = 6) -> No
 def _operational_deferred_raw_statuses(raw_paths: list[Path]) -> dict[str, str]:
     """Return active queue holds keyed by immutable raw filename."""
 
-    from chronovisor.raw.failure_supervisor import operational_deferred_raw_files
+    from chronovisor.ingest.failure_supervisor import operational_deferred_raw_files
 
     return operational_deferred_raw_files(raw_paths)
 
@@ -1135,7 +1135,7 @@ def _projection_parent_raw_names_by_child(
     """Resolve projection children to verified lossless saved raws."""
 
     from chronovisor.core.raw_store import RawStore
-    from chronovisor.raw.raw_semantic_projection import verify_projection_bundle
+    from chronovisor.ingest.raw_semantic_projection import verify_projection_bundle
 
     raw_store = RawStore(raw_dir)
     verified_archives: set[Path] = set()
@@ -4315,7 +4315,7 @@ def build_snapshot() -> dict[str, Any]:
         if isinstance(processed_raw_files, list)
         else set()
     )
-    from chronovisor.raw.raw_replay import is_raw_retracted
+    from chronovisor.ingest.raw_replay import is_raw_retracted
 
     pending = sum(
         1
