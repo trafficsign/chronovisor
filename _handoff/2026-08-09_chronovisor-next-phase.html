@@ -125,6 +125,7 @@ adapter families compose and register supported components
 
 <h3>設計原則</h3>
 <ul>
+<li>Chronovisor OSS はソフトウェア本体を配布し、各ユーザーの私有知識はローカルの <code>pages/</code> に蓄積する。OKF は初期リリースで interchange / sync product を作るためではなく、知識を proprietary format に閉じ込めない on-disk canonical / portability boundary として採用する。</li>
 <li><code>raw/</code> は不変の原本として1 byte も変更しない。<code>system/</code> は特権内部領域として <code>pages/</code> bundle の対象外とし、必要なら将来別 bundle として設計する。</li>
 <li>旧形式を読めるのは offline の migration executable だけとする。cutover 後の production runtime は新 canonical だけを read / write し、旧新混在や長期 dual-read / dual-write を許さない。</li>
 <li>rollback は旧形式の併存ではなく、cutover 前の一貫 snapshot を atomic restore する。Chronovisor 独自 field は OKF extension として意味を保ち、unknown field も保持する。</li>
@@ -152,11 +153,11 @@ adapter families compose and register supported components
 <li><strong>X4: offline cutover preflight</strong> — writers / services を停止して jobs を drain し、<code>pages/</code>、index、state、decision preimage / artifact 等の一貫 snapshot と <code>raw/</code> 全 hash を記録する。</li>
 <li><strong>X5: atomic cutover / rebuild</strong> — staging migration を全検証後に atomic swap し、lexical / semantic / link / backlink / UID / KG 等の index をすべて再構築する。page bytes / frontmatter hash に依存する decision review / CAS / preimage / artifact は旧値を再利用せず、無効化して正規手順で再生成する。</li>
 <li><strong>X6: production restart / live verification</strong> — production を新 canonical だけで再起動し、health、主要 workflow、live read / write と mixed-state 不在を確認する。</li>
-<li><strong>X7: import / export</strong> — canonical OKF bundle を export 可能にする。external OKF import は staging / dry-run / collision 検出を経て既存 review / apply から取り込み、live <code>pages/</code> の直接上書きを禁止する。OSS interoperability の境界として文書化する。</li>
+<li><strong>X7: portability / conformance</strong> — repository 内で version 固定した conformance validator により <code>pages/</code> をその場で検証し、<code>pages/</code> 自体を portable bundle として filesystem-native に copy / backup / restore する手順を文書化する。初期リリースでは専用 import / export CLI と external bundle の merge / sync / update / overwrite workflow、interchange 用 conversion engine を作らず、実需が確認されるまで延期して Campaign X の完了条件に含めない。</li>
 <li><strong>X8: optional LLM enrichment</strong> — <code>type</code> / <code>description</code> 等の精緻化は cutover 後の別作業とし、migration の完了条件に含めない。</li>
 </ol>
 
-<div class="exit"><strong>Exit Criteria:</strong> 前後で page 数、UID 集合、解決済み edge 集合が一致し、body は link 表記以外不変であること。新規 broken link が 0、全 concept の <code>type</code> が non-empty、全 frontmatter が YAML parse 可能で、Campaign X で実装または採用して repository 内で version 固定した OKF v0.2 spec §11 conformance validation が green であること。migration 2回目の diff が 0 で、<code>raw/</code> の全 bytes / hash が不変であること。全 index 再構築後の search / recall / ingest / lint / decision と必要な local production live smoke が green であること。mixed canonical state がなく、snapshot の atomic rollback を演習・検証済みであること。schema / version 境界を持ち、OKF 後続 version は明示 migration として扱い、v0.2 への無期限固定も暗黙追従もしないこと。</div>
+<div class="exit"><strong>Exit Criteria:</strong> 前後で page 数、UID 集合、解決済み edge 集合が一致し、body は link 表記以外不変であること。新規 broken link が 0、全 concept の <code>type</code> が non-empty、全 frontmatter が YAML parse 可能で、Campaign X で実装または採用して repository 内で version 固定した OKF v0.2 spec §11 conformance validation が green であること。<code>pages/</code> が変換なしでそのまま portable bundle として validation を通り、filesystem-native な copy / backup / restore 手順が文書化されていること。専用 import / export CLI と external bundle の merge / sync / update / overwrite workflow は初期リリースおよび Campaign X の完了条件に含めないこと。migration 2回目の diff が 0 で、<code>raw/</code> の全 bytes / hash が不変であること。全 index 再構築後の search / recall / ingest / lint / decision と必要な local production live smoke が green であること。mixed canonical state がなく、snapshot の atomic rollback を演習・検証済みであること。schema / version 境界を持ち、OKF 後続 version は明示 migration として扱い、v0.2 への無期限固定も暗黙追従もしないこと。</div>
 </section>
 
 <!-- ============================================================ -->
