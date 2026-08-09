@@ -891,7 +891,7 @@ def chronovisor_search(
     except PageRegistryError:
         registry_state = PageRegistry.empty()
     try:
-        from chronovisor.classification.classification import (
+        from chronovisor.recall.classification import (
             classification_authority_status,
         )
 

@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-from chronovisor.classification.classification import default_udc_package
 from chronovisor.lab.classification_library_eval import (
     evaluate_candidate_results,
     evaluate_external_test_results,
     evaluate_paired_decisions,
     unsupported_candidate_notations,
 )
+from chronovisor.recall.classification import default_udc_package
 
 
 def test_candidate_eval_joins_gold_only_in_evaluator() -> None:

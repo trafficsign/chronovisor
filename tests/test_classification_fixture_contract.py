@@ -5,9 +5,9 @@ import json
 import stat
 from pathlib import Path
 
-from chronovisor.classification import classification_fixture_contract as contract
-from chronovisor.classification import classification_fixture_set as fixture_set
 from chronovisor.core.jsonl_write import write_jsonl_atomic as fixture_writer
+from chronovisor.recall import classification_fixture_contract as contract
+from chronovisor.recall import classification_fixture_set as fixture_set
 
 
 def test_contract_preserves_legacy_schema_hash_and_dto_behavior(tmp_path: Path) -> None:

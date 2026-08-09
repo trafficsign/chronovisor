@@ -17,14 +17,14 @@ from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from chronovisor.classification.classification import (
-    UDCPackage,
-    load_udc_package,
-)
-from chronovisor.classification.classification_engine import CandidateIndex
 from chronovisor.core import embedding, ollama
 from chronovisor.core.hashutil import sha256_prefixed_bytes as _sha256_bytes
 from chronovisor.core.runtime_config import load_decision_router_config
+from chronovisor.recall.classification import (
+    UDCPackage,
+    load_udc_package,
+)
+from chronovisor.recall.classification_engine import CandidateIndex
 
 DIAGNOSTIC_SCHEMA = "chronovisor.classification-diagnostic.v1"
 PILOT_SCHEMA = "chronovisor.classification-method-pilot.v1"

@@ -214,7 +214,7 @@ def classification_authority_status(
     package = package or load_udc_package(root)
     pointer_path = root / "classification" / "authority" / "active.json"
     if pointer_path.exists():
-        from chronovisor.classification.classification_bundle import resolve_authority
+        from chronovisor.recall.classification_bundle import resolve_authority
 
         resolved = resolve_authority(root)
         common = {

@@ -17,27 +17,6 @@ from typing import Any, Protocol
 
 import numpy as np
 
-from chronovisor.classification.classification import (
-    ClassificationError,
-    UDCPackage,
-    load_udc_package,
-)
-from chronovisor.classification.classification_embedding_worker import (
-    SCHEMA as EMBEDDING_WORKER_SCHEMA,
-)
-from chronovisor.classification.classification_engine import (
-    DEFAULT_CANDIDATE_LIMIT,
-    CandidateIndex,
-)
-from chronovisor.classification.classification_fixture_set import (
-    INFERENCE_DTO_SCHEMA,
-    read_jsonl,
-    sha256_bytes,
-    sha256_file,
-)
-from chronovisor.classification.classification_library_sources import (
-    EXTERNAL_PACKAGE_SCHEMA,
-)
 from chronovisor.core.durable_state import read_sealed_json, write_sealed_json
 from chronovisor.core.research_scheduler import (
     research_lane,
@@ -46,6 +25,27 @@ from chronovisor.core.research_scheduler import (
 )
 from chronovisor.core.runtime_config import load_embedding_config
 from chronovisor.core.timeutil import utc_iso_milliseconds as _now
+from chronovisor.recall.classification import (
+    ClassificationError,
+    UDCPackage,
+    load_udc_package,
+)
+from chronovisor.recall.classification_embedding_worker import (
+    SCHEMA as EMBEDDING_WORKER_SCHEMA,
+)
+from chronovisor.recall.classification_engine import (
+    DEFAULT_CANDIDATE_LIMIT,
+    CandidateIndex,
+)
+from chronovisor.recall.classification_fixture_set import (
+    INFERENCE_DTO_SCHEMA,
+    read_jsonl,
+    sha256_bytes,
+    sha256_file,
+)
+from chronovisor.recall.classification_library_sources import (
+    EXTERNAL_PACKAGE_SCHEMA,
+)
 
 INDEX_SCHEMA = "chronovisor.library-evidence-index.v1"
 EVIDENCE_SCHEMA = "chronovisor.classification-library-evidence.v1"

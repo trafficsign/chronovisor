@@ -12,62 +12,9 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from chronovisor.classification.classification import (
-    ClassificationError,
-    classification_authority_status,
-    load_udc_package,
-)
-from chronovisor.classification.classification_bundle import (
-    activate_decision_only,
-    create_adopted_manifest,
-    create_candidate_bundle,
-    digest_dag,
-    pointer_paths,
-    probe_decision_only_authority,
-    rollback_authority,
-)
-from chronovisor.classification.classification_engine import (
-    DEFAULT_CANDIDATE_LIMIT,
-    ENGINE_VERSION,
-    run_consensus_batches,
-)
 from chronovisor.classification.classification_evidence_judgment import (
     ARMS,
     paired_rows,
-)
-from chronovisor.classification.classification_fixture_set import (
-    build_fixture_pool,
-    create_disabled_baseline_manifest,
-    fixture_set_paths,
-    fixture_slice_flags,
-    inference_rows,
-    lock_fixture_set,
-    read_jsonl,
-    sha256_bytes,
-    sha256_file,
-)
-from chronovisor.classification.classification_library_evidence import (
-    LibraryEvidenceIndex,
-    LibraryEvidenceProvider,
-    build_dense_index,
-    build_source_index,
-    embed_texts_cancellable,
-    external_test_cases,
-)
-from chronovisor.classification.classification_library_sources import (
-    atomic_write,
-    czech_authority_contract,
-    czech_bibliography_contract,
-    download_file,
-    fetch_oai_window,
-    ndl_bibliography_contract,
-    ndlsh_contract,
-    normalize_ndl_oai_records,
-    normalize_ndlsh_rdf,
-    parse_marcxml_records,
-    stable_sample,
-    validate_ndl_provider,
-    write_external_package,
 )
 from chronovisor.classification.classification_resource_burn import run_resource_burn
 from chronovisor.classification.classification_retention import (
@@ -103,6 +50,59 @@ from chronovisor.lab.classification_library_eval import (
     unsupported_candidate_notations,
 )
 from chronovisor.lab.classification_pilot import AuthoritativeCandidateIndex
+from chronovisor.recall.classification import (
+    ClassificationError,
+    classification_authority_status,
+    load_udc_package,
+)
+from chronovisor.recall.classification_bundle import (
+    activate_decision_only,
+    create_adopted_manifest,
+    create_candidate_bundle,
+    digest_dag,
+    pointer_paths,
+    probe_decision_only_authority,
+    rollback_authority,
+)
+from chronovisor.recall.classification_engine import (
+    DEFAULT_CANDIDATE_LIMIT,
+    ENGINE_VERSION,
+    run_consensus_batches,
+)
+from chronovisor.recall.classification_fixture_set import (
+    build_fixture_pool,
+    create_disabled_baseline_manifest,
+    fixture_set_paths,
+    fixture_slice_flags,
+    inference_rows,
+    lock_fixture_set,
+    read_jsonl,
+    sha256_bytes,
+    sha256_file,
+)
+from chronovisor.recall.classification_library_evidence import (
+    LibraryEvidenceIndex,
+    LibraryEvidenceProvider,
+    build_dense_index,
+    build_source_index,
+    embed_texts_cancellable,
+    external_test_cases,
+)
+from chronovisor.recall.classification_library_sources import (
+    atomic_write,
+    czech_authority_contract,
+    czech_bibliography_contract,
+    download_file,
+    fetch_oai_window,
+    ndl_bibliography_contract,
+    ndlsh_contract,
+    normalize_ndl_oai_records,
+    normalize_ndlsh_rdf,
+    parse_marcxml_records,
+    stable_sample,
+    validate_ndl_provider,
+    write_external_package,
+)
 
 PILOT_STATE_SCHEMA = "chronovisor.classification-library-pilot-state.v1"
 FIXTURE_EPOCH = "epoch-3-library-evidence-v1"
@@ -248,7 +248,7 @@ def _model_policy() -> dict[str, Any]:
         "engine_version": ENGINE_VERSION,
         "worker_code_sha256": sha256_file(
             Path(__file__).resolve().parents[1]
-            / "classification"
+            / "recall"
             / "classification_model_worker.py"
         ),
         "calibration_code_sha256": sha256_file(
@@ -1710,7 +1710,7 @@ def _phase_e7a_sweep(root: Path, state: dict[str, Any]) -> dict[str, Any]:
             | {
                 sha256_file(
                     Path(__file__).resolve().parents[1]
-                    / "classification"
+                    / "recall"
                     / "classification_library_sources.py"
                 )
             }
@@ -1734,17 +1734,17 @@ def _phase_e7a_sweep(root: Path, state: dict[str, Any]) -> dict[str, Any]:
                 (
                     sha256_file(
                         Path(__file__).resolve().parents[1]
-                        / "classification"
+                        / "recall"
                         / "classification_library_evidence.py"
                     ),
                     sha256_file(
                         Path(__file__).resolve().parents[1]
-                        / "classification"
+                        / "recall"
                         / "classification_embedding_worker.py"
                     ),
                     sha256_file(
                         Path(__file__).resolve().parents[1]
-                        / "classification"
+                        / "recall"
                         / "classification_resolver.py"
                     ),
                 )

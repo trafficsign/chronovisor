@@ -8,8 +8,8 @@ import sys
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from chronovisor.classification.classification import ClassificationError
 from chronovisor.core import ollama
+from chronovisor.recall.classification import ClassificationError
 
 WORKER_SCHEMA = "chronovisor.classification-direct-decision-worker.v2"
 DECISION_SCHEMA = "chronovisor.classification-direct-decision.v2"

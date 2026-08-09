@@ -4,8 +4,9 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import ClassVar
 
-from chronovisor.classification import classification_library_sources
-from chronovisor.classification.classification_library_sources import (
+from chronovisor.core.durable_state import write_sealed_json
+from chronovisor.recall import classification_library_sources
+from chronovisor.recall.classification_library_sources import (
     MARC_NS,
     czech_bibliography_contract,
     download_file,
@@ -16,7 +17,6 @@ from chronovisor.classification.classification_library_sources import (
     stable_sample,
     validate_ndl_provider,
 )
-from chronovisor.core.durable_state import write_sealed_json
 
 
 def _record(fields: str) -> ET.Element:

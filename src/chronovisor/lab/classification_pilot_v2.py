@@ -9,7 +9,6 @@ from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from chronovisor.classification.classification import UDCPackage, load_udc_package
 from chronovisor.lab.classification_pilot import (
     HOLD,
     NONE,
@@ -22,6 +21,7 @@ from chronovisor.lab.classification_pilot import (
     _write_json,
     score_prediction,
 )
+from chronovisor.recall.classification import UDCPackage, load_udc_package
 
 V2_SCHEMA = "chronovisor.classification-method-pilot.v2"
 V2_ENGINE_VERSION = 12

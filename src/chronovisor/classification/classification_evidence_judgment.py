@@ -10,17 +10,17 @@ from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from chronovisor.classification.classification import ClassificationError
-from chronovisor.classification.classification_engine import run_consensus_batches
-from chronovisor.classification.classification_fixture_contract import (
-    sha256_bytes,
-)
-from chronovisor.classification.classification_fixture_contract import (
-    write_jsonl as _write_jsonl,
-)
 from chronovisor.core import ollama
 from chronovisor.core.durable_state import write_sealed_json
 from chronovisor.core.research_scheduler import foreground_lane
+from chronovisor.recall.classification import ClassificationError
+from chronovisor.recall.classification_engine import run_consensus_batches
+from chronovisor.recall.classification_fixture_contract import (
+    sha256_bytes,
+)
+from chronovisor.recall.classification_fixture_contract import (
+    write_jsonl as _write_jsonl,
+)
 
 PAIRED_JUDGMENT_SCHEMA = "chronovisor.classification-paired-judgment.v1"
 RESOURCE_GATE_SCHEMA = "chronovisor.classification-resource-ready-gate.v1"

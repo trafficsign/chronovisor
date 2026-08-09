@@ -8,7 +8,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from chronovisor.classification.classification import ClassificationError, UDCPackage
+from chronovisor.recall.classification import ClassificationError, UDCPackage
 
 NAVIGATION_GRAPH_SCHEMA = "chronovisor.udc-navigation-graph.v1"
 ROOT_NOTATIONS = ("0", "1", "2", "3", "5", "6", "7", "8", "9")

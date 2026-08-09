@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from chronovisor.classification.classification import ClassificationError
+from chronovisor.recall.classification import ClassificationError
 
 ANCHOR_SET_SCHEMA = "chronovisor.cvo-anchor-set.v1"
 ANCHOR_EPOCH = "cvo-anchor-v0"

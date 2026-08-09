@@ -3,17 +3,17 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from chronovisor.classification import classification_library_evidence
-from chronovisor.classification.classification import default_udc_package
-from chronovisor.classification.classification_fixture_set import inference_dto
-from chronovisor.classification.classification_library_evidence import (
+from chronovisor.recall import classification_library_evidence
+from chronovisor.recall.classification import default_udc_package
+from chronovisor.recall.classification_fixture_set import inference_dto
+from chronovisor.recall.classification_library_evidence import (
     LibraryEvidenceIndex,
     LibraryEvidenceProvider,
     build_dense_index,
     build_source_index,
     external_test_cases,
 )
-from chronovisor.classification.classification_library_sources import (
+from chronovisor.recall.classification_library_sources import (
     czech_authority_contract,
     czech_bibliography_contract,
     ndlsh_contract,

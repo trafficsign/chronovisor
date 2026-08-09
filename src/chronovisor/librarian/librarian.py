@@ -15,12 +15,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from chronovisor.classification.classification import (
-    classification_authority_status,
-    classification_source_sha256,
-    load_udc_package,
-    propose_from_legacy_metadata,
-)
 from chronovisor.core import frontmatter
 from chronovisor.core.durable_state import write_sealed_json
 from chronovisor.core.store import CHRONOVISOR_ROOT
@@ -30,6 +24,12 @@ from chronovisor.librarian.librarian_status import (
     STATE_SCHEMA,
     build_librarian_status,
     load_librarian_state,
+)
+from chronovisor.recall.classification import (
+    classification_authority_status,
+    classification_source_sha256,
+    load_udc_package,
+    propose_from_legacy_metadata,
 )
 
 EVENT_SCHEMA = "chronovisor.librarian-event.v1"

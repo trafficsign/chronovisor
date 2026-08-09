@@ -268,7 +268,7 @@ def _library_evidence_status(root: Path) -> dict[str, Any]:
         if receipt.get("status") in {"failed", "blocked", "rejected", "unreadable"}
     ]
     try:
-        from chronovisor.classification.classification_bundle import resolve_authority
+        from chronovisor.recall.classification_bundle import resolve_authority
 
         resolver = resolve_authority(root)
     except (DurableStateError, OSError, ValueError, json.JSONDecodeError) as exc:
@@ -1054,7 +1054,7 @@ def build_librarian_status(
 
             authority = collection_authority_status(root)
         else:
-            from chronovisor.classification.classification import (
+            from chronovisor.recall.classification import (
                 classification_authority_status,
             )
 

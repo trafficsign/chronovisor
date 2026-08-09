@@ -3,9 +3,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from chronovisor.classification.classification import UDCPackage
-from chronovisor.classification.classification_fixture_set import sha256_file
-from chronovisor.classification.classification_library_sources import MARC_NS
 from chronovisor.core.durable_state import read_sealed_json, write_sealed_json
 from chronovisor.lab.classification_annif import (
     _mapped_notations,
@@ -15,6 +12,9 @@ from chronovisor.lab.classification_annif import (
     finalize_czech_checkpoint,
     write_projects,
 )
+from chronovisor.recall.classification import UDCPackage
+from chronovisor.recall.classification_fixture_set import sha256_file
+from chronovisor.recall.classification_library_sources import MARC_NS
 
 
 def _package() -> UDCPackage:

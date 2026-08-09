@@ -7,11 +7,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
-from chronovisor.classification import classification_engine
 from chronovisor.ingest import ingest, ingest_review_apply, orchestrator
 from chronovisor.librarian import collection_authority
 from chronovisor.ops import self_heal
-from chronovisor.recall import content_correction
+from chronovisor.recall import classification_engine, content_correction
 
 
 def test_ingest_job_result_keeps_legacy_alias_without_page_bodies() -> None:
@@ -239,7 +238,7 @@ def test_selected_orchestrators_stay_below_campaign_k_size_caps() -> None:
         package / "librarian" / "collection_authority.py": {
             "review_collection_queue": 220
         },
-        package / "classification" / "classification_engine.py": {
+        package / "recall" / "classification_engine.py": {
             "run_consensus_batches": 150
         },
     }

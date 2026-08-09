@@ -21,17 +21,6 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from chronovisor.classification.classification import (
-    CALIBRATION_SCHEMA,
-    CLASSIFICATION_SCHEMA,
-    ClassificationError,
-    ClassificationRecord,
-    Subject,
-    UDCPackage,
-    classification_source_sha256,
-    load_udc_package,
-    validate_record,
-)
 from chronovisor.core import frontmatter
 from chronovisor.core.durable_state import write_sealed_json
 from chronovisor.core.hashutil import sha256_prefixed_text as _sha256_text
@@ -45,6 +34,17 @@ from chronovisor.core.store import CHRONOVISOR_ROOT
 from chronovisor.core.timeutil import utc_iso_milliseconds as _now
 from chronovisor.ingest.page_registry import PageRegistry
 from chronovisor.ops.convergence import ConvergenceStore, RetryPolicy
+from chronovisor.recall.classification import (
+    CALIBRATION_SCHEMA,
+    CLASSIFICATION_SCHEMA,
+    ClassificationError,
+    ClassificationRecord,
+    Subject,
+    UDCPackage,
+    classification_source_sha256,
+    load_udc_package,
+    validate_record,
+)
 
 ENGINE_VERSION = "2"
 FIXTURE_SCHEMA = "chronovisor.classification-fixture.v1"

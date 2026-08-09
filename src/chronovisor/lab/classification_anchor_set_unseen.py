@@ -10,21 +10,6 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from chronovisor.classification.classification import ClassificationError
-from chronovisor.classification.classification_anchor import (
-    UNRESOLVED_ANCHOR_ID,
-    AnchorSet,
-    default_anchor_gold_path,
-    default_anchor_set_path,
-    load_anchor_set,
-)
-from chronovisor.classification.classification_anchor_worker import (
-    PROMPT_SHA256 as CORE_PROMPT_SHA256,
-)
-from chronovisor.classification.classification_fixture_set import (
-    read_jsonl,
-    sha256_file,
-)
 from chronovisor.core import ollama
 from chronovisor.core.durable_state import read_sealed_json, write_sealed_json
 from chronovisor.core.runtime_config import load_decision_router_config
@@ -50,6 +35,21 @@ from chronovisor.lab.harness import (
     LabHarness,
     require_contract,
     require_file_hashes,
+)
+from chronovisor.recall.classification import ClassificationError
+from chronovisor.recall.classification_anchor import (
+    UNRESOLVED_ANCHOR_ID,
+    AnchorSet,
+    default_anchor_gold_path,
+    default_anchor_set_path,
+    load_anchor_set,
+)
+from chronovisor.recall.classification_anchor_worker import (
+    PROMPT_SHA256 as CORE_PROMPT_SHA256,
+)
+from chronovisor.recall.classification_fixture_set import (
+    read_jsonl,
+    sha256_file,
 )
 
 SELECTION_SCHEMA = "chronovisor.classification-anchor-set-unseen-selection.v1"

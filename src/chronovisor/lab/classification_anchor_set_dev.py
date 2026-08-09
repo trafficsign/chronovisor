@@ -13,20 +13,12 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from chronovisor.classification.classification import ClassificationError
-from chronovisor.classification.classification_anchor import (
-    UNRESOLVED_ANCHOR_ID,
-    AnchorSet,
-    default_anchor_set_path,
-    load_anchor_set,
-)
 from chronovisor.classification.classification_anchor_set_worker import (
     PROMPT_SHA256,
     SELECTION_SCHEMA,
     SUBJECT_SCHEMA,
     WORKER_SCHEMA,
 )
-from chronovisor.classification.classification_fixture_set import sha256_file
 from chronovisor.core import ollama
 from chronovisor.core.durable_state import read_sealed_json, write_sealed_json
 from chronovisor.core.research_scheduler import (
@@ -41,6 +33,14 @@ from chronovisor.lab.classification_anchor_dev import (
     deterministic_evidence_capsule,
     load_burned40,
 )
+from chronovisor.recall.classification import ClassificationError
+from chronovisor.recall.classification_anchor import (
+    UNRESOLVED_ANCHOR_ID,
+    AnchorSet,
+    default_anchor_set_path,
+    load_anchor_set,
+)
+from chronovisor.recall.classification_fixture_set import sha256_file
 
 EVALUATION_SCHEMA = "chronovisor.classification-anchor-set-dev.v1"
 CASE_SCHEMA = "chronovisor.classification-anchor-set-case.v1"

@@ -8,15 +8,6 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from chronovisor.classification.classification_calibration import (
-    adjudicate,
-    adjudication_path,
-    calibrate,
-    calibration_input_fingerprint,
-    distribution,
-    lock,
-)
-from chronovisor.classification.classification_engine import fixture_paths
 from chronovisor.core.durable_state import file_lock, write_sealed_json
 from chronovisor.core.store import CHRONOVISOR_ROOT
 from chronovisor.core.timeutil import utc_iso_milliseconds as _now
@@ -33,6 +24,15 @@ from chronovisor.librarian.librarian_release import (
     reconcile_librarian_state,
     start_soak,
 )
+from chronovisor.recall.classification_calibration import (
+    adjudicate,
+    adjudication_path,
+    calibrate,
+    calibration_input_fingerprint,
+    distribution,
+    lock,
+)
+from chronovisor.recall.classification_engine import fixture_paths
 
 ROLLOUT_SCHEMA = "chronovisor.librarian-rollout.v1"
 

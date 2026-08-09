@@ -761,6 +761,120 @@ S_RETIRED_RESEARCH_RUNTIME_SITE_IDS = (
     "arch:dfe4a678d75db08cb7946b49c0c8bb9a8b91dca5156ad938dfe15591844f4a54",
     "arch:f8e77b3f1a6e731d596e03ee8710e4a61212010e64b1517038e0333d166f03db",
 )
+S_RETIRED_CLASSIFICATION_CLOSURE_EDGE_IDS = (
+    "arch:329ec085dfe396f06de73d5ded173f07d3a5651b45eb71a47e191032ccee599d",
+    "arch:32ae12e96a079c37db50f843a3f8c9044da6c71df27e1eff1e3e4aa78eea06b4",
+    "arch:a2e1d8dac532163f1c51455e22cc1b66aa0500d0ced01124d019e19abe1cd5cd",
+)
+S_RETIRED_CLASSIFICATION_CLOSURE_SITE_IDS = (
+    "arch:0608f7ceeb777222b91c01ca2f184f4179d797179cd4ce47ef32edf3df66cbfb",
+    "arch:06911dc23ae3c2b8476c71645c619e4abf6a8b12cc52a85da2248b7d27148606",
+    "arch:06a7600930606b6fdf1ea5ce504663110ccf24931d79632709193d73020ac6c8",
+    "arch:098897a9d00681d038169cd683c45cf9335721ef9ae7576a5d40e8456b1705ea",
+    "arch:0afb3f08e84d37daad4aa5e1a83a6e7a598dc750d39e4d225f3a18ffe0e59216",
+    "arch:0c38a342e45da53b68d739a45378a22f4625bc07c31641e50a482f4f96795420",
+    "arch:12f336040af41d5a463cf193a34c88c9fe9ba6560fa87d2742df30881259d867",
+    "arch:141d8e635f8bd720453de0eba11dc5a119f081b5be334fb42dabcefd934f3e5d",
+    "arch:16d5507d2027dfbf6268a7ba7ced89125f12dd76331af7d090b79ac450a1819f",
+    "arch:1761e0863780d1e46e91553e60265a9c564e3add5a6a1efb3faa5bd96202c5b0",
+    "arch:188227c9eb61fc1827e73945f9710bc3b25194d018986623aa97f7d6d6c77a79",
+    "arch:18d85c4b11cbd8e49ca7183d02879e6b111661a6921cee15cd387d4797c5ef2e",
+    "arch:1a08e97a892d5988882cf3b6d1613d046eb995ca80795cc6a523e343fa944009",
+    "arch:1a1183d1ce8ac12f261e423e896b1b6175626be87b3ba8c5c521b8fa02258f52",
+    "arch:1b5ce6dca7eab96f036a494eb5c63369a17cca99e70295382ee8cffcba3ec4f6",
+    "arch:23171fa478d77b0df6758da2cf76eeca4a57a269080490f586b4375b906aab90",
+    "arch:232b6843af088179c90e943936e6eb94450c62c02523401260396216280e95a1",
+    "arch:23df8fd88bdff1223604798f39f37082d8a81eaa19dc4b6f2bb8ba8ded2cafe7",
+    "arch:27cb05dc35b25e7fe0c55427628e3398731b1de07a581bf9af184389bf777542",
+    "arch:2a0053832b6bd47f1e00e2f1c1541e955852b0cafd2ec07274016183889eeb21",
+    "arch:30b7585a1a241b1b490fa1019ed0bf465a7f819c3f959cf6c09cddd10692a189",
+    "arch:30f1c285e8a5377b62aacf55f64bbb54094868f9e5a9152a81cd902a2a650f30",
+    "arch:3264644d8456417f5a04a0c2798cad2effc1892a7bbe6b47563c41d32b97157c",
+    "arch:348ea286f4791e2b7928dc4b2e67e94611df78118086b18e584a75d76cdbb659",
+    "arch:353bdb98ffb6339153d4e56bd4c496f58b01af9e8e3ba87fda0a402cf07b17fc",
+    "arch:35aaccea1a75ef1b3027c572d5e3964357c3d790b348564a92acbaf91802b7e8",
+    "arch:38d2e0517a2181d7856425224f21103b84958e88a3bbf7424e07fd40f38dd11e",
+    "arch:3a4718462cfd0c4e191872dc21cb7e637e362eb84837521c27bed60f194402e4",
+    "arch:3f5cf62f52214e91b84ab1875f7b4933f270c03fda673872cefce6e8bb3c269f",
+    "arch:403188c6c608a64c6fc129f880e8df590fcbc1826992d51d95dead06c3a34c06",
+    "arch:4167f90332cb09272a524688e3f9344ba6c60ab14cdcde84d9980118053f301c",
+    "arch:416e43be89f257195483a7828d593b524070a65cd83bb2011b9c81d19cd570b6",
+    "arch:421fa772c938e40be17a702a75f94c7f452196fd825b1eba9df07b573b68cd05",
+    "arch:4da0859c99dd3d8570747620c7c9a856c7495936476b2616a435c4ccdb2aa6ee",
+    "arch:5976f9c5323f5715a9b8489e596df942e8e4f6a61e174ffeab532625d4127c81",
+    "arch:5b95eb00b507a172114bb29484e9065c5565d40b6788519d93baa49fc79a1d83",
+    "arch:5ba413001ef76e38e1a258b62d58ea15f264bc63b347b05eb53eb4c9ac035628",
+    "arch:5bfe640f899512157d1ca1b17217261a28ead9a30687cfad1b8360ac5534c358",
+    "arch:5cb22aceda35898e7efb47e7f2b2ab42515c64e3a6123b3c046a226793ceaefb",
+    "arch:5dd954d688bb8b1b19307c8fb962f60d04e7df37ef1a524a91420fd08f053738",
+    "arch:65fd992597362d0494de336eac594380f8ceeefafa1cb48fb66cedc4c90a9f6b",
+    "arch:69ec6624ba260509c41d9fb805813d2021c8275ce8a0ce1843d3c97c89ccf214",
+    "arch:6c2380cdd105c8ebad0b59c6e7b9fc91efb90bb7b59212a51dd7824e9aabf31c",
+    "arch:7414b1914a2625d2969266d737707fb2adcbc2942e99ce4a85251d5f07d6682c",
+    "arch:74ff395de77e40f04dd9903c96fbca399b0d9a85652841fa35a62acb44cd6f5a",
+    "arch:7751d32c97951eea4538c1e2fffc5c14e19a967f0ef995aecf0f3528a799f17d",
+    "arch:7af08f40ee4f438c545b2109e5af3622056423f5a1a321d145412539704ab803",
+    "arch:7c3c5b1007012402b49d78ce74874b197d1d92b802a29627dca6c0767099dbad",
+    "arch:7e49beb6a0beb37783ef10f3d8b6ac4988027843a0a5c8ffbc86a2ba50af31a8",
+    "arch:7f04bfc1025f92782571a1593a4e3042ad39557837d8f9125275c826ef68ca08",
+    "arch:7f1066d9ece59336bb60df6bbdcbfd7fca9d258195ef19aca3c4e721227d2e92",
+    "arch:7f9d4d20d61901f27e949693c5dde0dec6d7db5a7bc607af0ebeb70ef5b6a061",
+    "arch:7fd5ebd36efaf06dc773b66db41a98ecc083ad4880040c45a2a82d43ecf6faba",
+    "arch:8194540aa15ab8a156c3dfe2df8fe66c203a3e9972aa9f4ce16c9325796b6989",
+    "arch:81a8cd29373d185ba55a8af80fb8198c95f81205903658155d2c76fd61509ae8",
+    "arch:824333f5c3225001b10ee21bf8849e522abe259c8cd4e9aeee9795aac8854089",
+    "arch:8a01868de5853505f03dac5df8dd8049ff9a3171e4a394280d60f999cd6a8b35",
+    "arch:8de9592fb7ba4378a41fe2fcbc10aa31e63dd44a1180c3c003fd52df368c2924",
+    "arch:8e18330335e403fb85b9860c700a39fb4b007a2ab0ff9990667e2d925a4db327",
+    "arch:91ea621e31fcdb14965df2df57105680a5c90c223459be5b34e0a26169a3c295",
+    "arch:93f9d0e84621fa71f95a3a0a05055bbe0f335272920cf0c08db9fc48915efe2c",
+    "arch:95d2b7156f15b2caca35cb3552f756d41b1a1e1f1d51590aae8299ed311fe1cf",
+    "arch:9d66c02f46c4542a291933f35b1f02bb61c5abe2baf5e28828606b4b99a12160",
+    "arch:a1eb26c436eade21c68b3e0f3f07ef8c96b663cdcc745bc6a1d22fdc00bfb355",
+    "arch:a3f2636abb908dd383e238567b4c5239b373a0c08a6c69624a11b1b0299a2a8f",
+    "arch:a74c93b2be86dec0f3b80170e19978ee97c1e3bbe8121e112b67c2787f26da4a",
+    "arch:a782aec0f5f2539606801827220142197c794d8fcfd27914174879ebe8bd38c5",
+    "arch:ab3eaf528571a6715d88ebccc693fb0cee1c2db6e80dda783f96632cceee2b4e",
+    "arch:acb3f2f4dba924136b1973d792fc9919c157a28f563d428e6ea74c9151efec5c",
+    "arch:b00a2567db3ea814d64bdd66db2f148a5f31dd3b1e91676afb7057976c101605",
+    "arch:b1cc72bba159c3131a4d9f8ab2cb759dff3b7a999c8abba356ee0848087f47c9",
+    "arch:b37ecd029c3729c1a9e762622b45cfd8970d7f8d2ab93df91e6f1157258d4914",
+    "arch:b7e229d89efad3c6fd68822f5ae3eb93c4f53309d19af1a41ccd565384b40309",
+    "arch:b9193a9622dd9d85123e693da153ac7bad8ca90d79393bd45e979b862b610df3",
+    "arch:b96cf1a2c8e7286bb00522c750352e6858aa55334cc8c5c736a9bf4c98fec535",
+    "arch:bc20da8dbf549740038312109bc16f2f679ceeecf9996f80b3903d5fa169f6b9",
+    "arch:beb227a7becfca0bc6701ac122d19608cb2c1467091632bb30d2d95a4d00f2d6",
+    "arch:bf7756facf37bc7163c0aa2717312fa24775620d97507a3725fd81d12fb10158",
+    "arch:c02da69b0ca3a254d1263fde375ee90baba8ea9c646642f5db531a620e2683e1",
+    "arch:c18c52fe8fc05a35b46a3c05f3704b675873a38be454bbed0e3ef536a14abd9c",
+    "arch:c50af264b1e0db48d641908acdcc139a62558892274c897c42db49818d87e4c7",
+    "arch:c5762cf9ad3f61147a8fd2dfecfd1f8a608ab66d99156db46db618df58132de3",
+    "arch:c899489ae1504aac86495a88d0be130baf4738f60a922757b98e8d4c6017d0aa",
+    "arch:cb2bfb9dcaee7f326c442bf233d58452a60e71493bbf7e639e84dbf0ddaf7f97",
+    "arch:cb6940865547dc7e8e64daf9866316a0108c9ae87bcc94043517c1bb9409cda9",
+    "arch:cecf6d064bfca381bf1ac949a0009b21e11cc87918a8b739d9d7dc78695e83c4",
+    "arch:cf7ce0ef8ff36806b364450aec21ed634d634caf55f6b08f6308b0174aae2ff4",
+    "arch:cfc76e2470669c6008702cc11495a16fecef1a81746dae92be7a24bfb49297df",
+    "arch:d02e72f92dcf98a226a26edec859ab4d14a191530c04a117c1a199d0e895027c",
+    "arch:d38afcced9b2dbf03ca0e61f05b92f5df17f8fd861416678a7b6eecbcf209814",
+    "arch:d6098592d9b47922606230c2eba9714043776bff0e6d60eef4526250b0107717",
+    "arch:d965f5835e5b662a48147577705caabe1903dc07360134202020669ff6eb9e84",
+    "arch:daf746492d2d91dd2a2c8bc40e79e09ee399e88a6bba8257e4112cc707b16a3d",
+    "arch:db66db1b039f8515e756a280e8b7e4783f74872aaf6ae5aef4521ed04c8e99a4",
+    "arch:dba2c3186dcc0eca71950042165c0111b9cb57b2f465d08494d3566354b168c3",
+    "arch:de6a4299146f7366de7421560b05faf0ddc4bdf612e3959745d3144a02197e18",
+    "arch:dea4e22c398a763bb9fde9398d6e0c2cd57fbe151a0292e71e50a9b69e4dd237",
+    "arch:e28f61b210f8a546d0fd225ccc5d7bbf31705af0273f3ee6ce728ca00927e6a1",
+    "arch:e7a7093fa0ace8ccd7d5cb83f30604f6fe9d217aca5ce79da170f710b9701806",
+    "arch:ed86b60b2f623363d198e85441e5fd17b22eb5ce652f421d62de11aa3339c77a",
+    "arch:ee0eb772b00a921bc52781c9b59a4a2370fb2e2dc532f0da87aa48e6866c02c8",
+    "arch:ef8bf4b3d31683a1085f31b6bc76254925278ecaa237ac846ded986545104bac",
+    "arch:f024e4a862e435ba4a04c8afe5a3b0f520e5564918a08b7b47b2ebab85bc593e",
+    "arch:f08140bd1dfd6e413e9af362b73f82dea910c08904109be79e6b3763e4ea835c",
+    "arch:f154a9c7d14b1713b29f0e4a6416264f0eb946f86b47f9c7cd7f2e06ad7d9a21",
+    "arch:f852112ec13f4250a82ba7caba206cc988b36f93c8c138d93198b7c3e71bbe47",
+    "arch:fcedf8624b00fc8ef7b762f20300b7dbe876a4535886351b49400a02c109e0ba",
+)
 V_RETIRED_RECALL_SHIM_SITE_IDS = (
     "arch:3896d20fb9ddf2c56d06af026b9b40d6399902891ab291f3a6eba063ba8b4d28",
     "arch:c99c20705c2ffb63854eb252145ab9e7f20ea9b0adb7eef8892e39abb52ceb1c",
@@ -1070,6 +1184,7 @@ RETIREMENT_HISTORY = {
                 *S_RETIRED_EVIDENCE_GROUNDING_EDGE_IDS,
                 *S_RETIRED_HOST_RECORD_EDGE_IDS,
                 *S_RETIRED_RESEARCH_RUNTIME_EDGE_IDS,
+                *S_RETIRED_CLASSIFICATION_CLOSURE_EDGE_IDS,
                 *V_RETIRED_REMAINING_SHIM_EXCEPTION_IDS,
             )
         )
@@ -1126,6 +1241,7 @@ RETIREMENT_HISTORY = {
                 *S_RETIRED_CODEX_RECORD_SITE_IDS,
                 *S_RETIRED_HOST_RECORD_SITE_IDS,
                 *S_RETIRED_RESEARCH_RUNTIME_SITE_IDS,
+                *S_RETIRED_CLASSIFICATION_CLOSURE_SITE_IDS,
                 *V_RETIRED_RECALL_SHIM_SITE_IDS,
                 *V_RETIRED_REMAINING_SHIM_SITE_IDS,
                 *V_RETIRED_DURABLE_MODULE_MAPPING_SITE_IDS,
@@ -1451,6 +1567,7 @@ def _without_persisted_retirement_history(
         + len(S_RETIRED_EVIDENCE_GROUNDING_EDGE_IDS)
         + len(S_RETIRED_HOST_RECORD_EDGE_IDS)
         + len(S_RETIRED_RESEARCH_RUNTIME_EDGE_IDS)
+        + len(S_RETIRED_CLASSIFICATION_CLOSURE_EDGE_IDS)
         + len(V_RETIRED_REMAINING_SHIM_EXCEPTION_IDS)
     )
     active_counts["by_category"]["dynamic_import"] = (
@@ -1615,7 +1732,7 @@ def test_architecture_fitness_rejects_new_edge_and_scc_growth(
 
     assert report["passed"] is False
     assert report["violations"]["new_edges"] == [["core", "ops"]]
-    assert len(report["violations"]["scc_regressions"][0]) == 10
+    assert len(report["violations"]["scc_regressions"][0]) == 9
 
 
 def test_namespace_package_is_inventoried_and_rejected(
@@ -1879,8 +1996,8 @@ def test_current_exception_ledger_seed_and_schema_inventory_are_exact(
 
     assert detected_ids == ledger_ids == set(seed["exception_semantic_ids"]["active"])
     _assert_exact_retirement_history(architecture, seed)
-    assert len(edge_rows) == current["worktree_architecture"]["edge_count"] == 61
-    assert sum(len(row["sites"]) for row in edge_rows) == len(raw_cross_sites) == 1370
+    assert len(edge_rows) == current["worktree_architecture"]["edge_count"] == 58
+    assert sum(len(row["sites"]) for row in edge_rows) == len(raw_cross_sites) == 1392
     assert {
         field: counts[field]
         for field in (
@@ -1892,15 +2009,15 @@ def test_current_exception_ledger_seed_and_schema_inventory_are_exact(
             "compatibility_contracts",
         )
     } == {
-        "exceptions": 61,
-        "cross_domain_sites": 1370,
+        "exceptions": 58,
+        "cross_domain_sites": 1392,
         "production_to_lab_edges": 0,
         "production_to_lab_static_sites": 0,
         "production_to_lab_dynamic_sites": 0,
         "compatibility_contracts": 51,
     }
     assert counts["by_category"] == {
-        "cross_domain_edge": 61,
+        "cross_domain_edge": 58,
     }
     assert counts["compatibility_by_kind"] == {
         "console_entrypoint": 51,

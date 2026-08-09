@@ -21,20 +21,25 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from chronovisor.classification.classification import (
+from chronovisor.core.durable_state import read_sealed_json, write_sealed_json
+from chronovisor.core.jsonl_write import atomic_replace_text as _atomic_write_text
+from chronovisor.core.jsonl_write import write_jsonl_atomic as _write_jsonl
+from chronovisor.core.store import CHRONOVISOR_ROOT
+from chronovisor.core.timeutil import utc_iso_milliseconds as _now
+from chronovisor.recall.classification import (
     ClassificationError,
     UDCPackage,
     load_udc_package,
 )
-from chronovisor.classification.classification_fixture_set import (
+from chronovisor.recall.classification_fixture_set import (
     read_jsonl,
     sha256_file,
 )
-from chronovisor.classification.classification_library_evidence import (
+from chronovisor.recall.classification_library_evidence import (
     COMPOSITE_UDC_RE,
     split_for_group,
 )
-from chronovisor.classification.classification_library_sources import (
+from chronovisor.recall.classification_library_sources import (
     MARC_NS,
     czech_bibliography_contract,
     fetch_oai_window,
@@ -42,11 +47,6 @@ from chronovisor.classification.classification_library_sources import (
     stable_sample,
     write_external_package,
 )
-from chronovisor.core.durable_state import read_sealed_json, write_sealed_json
-from chronovisor.core.jsonl_write import atomic_replace_text as _atomic_write_text
-from chronovisor.core.jsonl_write import write_jsonl_atomic as _write_jsonl
-from chronovisor.core.store import CHRONOVISOR_ROOT
-from chronovisor.core.timeutil import utc_iso_milliseconds as _now
 
 ANNIF_VERSION = "1.4.1"
 ANNIF_DISTRIBUTION = f"annif[fasttext]=={ANNIF_VERSION}"

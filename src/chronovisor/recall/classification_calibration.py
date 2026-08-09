@@ -12,11 +12,16 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from chronovisor.classification.classification import (
+from chronovisor.core.durable_state import read_sealed_json, write_sealed_json
+from chronovisor.core.jsonl import write_jsonl as _write_jsonl
+from chronovisor.core.runtime_config import load_decision_router_config
+from chronovisor.core.store import CHRONOVISOR_ROOT
+from chronovisor.core.timeutil import utc_iso_milliseconds as _now
+from chronovisor.recall.classification import (
     CALIBRATION_SCHEMA,
     load_udc_package,
 )
-from chronovisor.classification.classification_engine import (
+from chronovisor.recall.classification_engine import (
     ENGINE_VERSION,
     adopt_calibration,
     build_fixture_candidates,
@@ -25,12 +30,7 @@ from chronovisor.classification.classification_engine import (
     lock_fixtures,
     run_consensus_batches,
 )
-from chronovisor.classification.classification_fixture_set import load_fixture_set
-from chronovisor.core.durable_state import read_sealed_json, write_sealed_json
-from chronovisor.core.jsonl import write_jsonl as _write_jsonl
-from chronovisor.core.runtime_config import load_decision_router_config
-from chronovisor.core.store import CHRONOVISOR_ROOT
-from chronovisor.core.timeutil import utc_iso_milliseconds as _now
+from chronovisor.recall.classification_fixture_set import load_fixture_set
 
 DISTRIBUTION_SCHEMA = "chronovisor.classification-distribution.v1"
 DEV_AUDIT_SCHEMA = "chronovisor.classification-dev-audit.v1"
@@ -611,7 +611,7 @@ def install_package(root: Path, source: Path) -> dict[str, Any]:
     package = load_udc_package(None)
     source_package = json.loads(source.read_text(encoding="utf-8"))
     if source_package.get("release") != package.release:
-        from chronovisor.classification.classification import UDCPackage
+        from chronovisor.recall.classification import UDCPackage
 
         package = UDCPackage.load(source)
     target = root / "classification" / "udc-package.json"

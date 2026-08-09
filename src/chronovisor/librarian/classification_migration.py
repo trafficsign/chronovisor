@@ -12,22 +12,6 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from chronovisor.classification.classification import (
-    classification_authority_status,
-    classification_frontmatter,
-    load_udc_package,
-    record_from_dict,
-    render_call_number,
-    validate_record,
-)
-from chronovisor.classification.classification_engine import (
-    page_payload,
-    record_from_consensus,
-    run_consensus_batches,
-)
-from chronovisor.classification.classification_resolver import (
-    production_candidate_index,
-)
 from chronovisor.core import frontmatter
 from chronovisor.core.durable_state import write_sealed_json
 from chronovisor.core.hashutil import sha256_bytes as _sha256_bytes
@@ -41,6 +25,22 @@ from chronovisor.core.page_mutation import chronovisor_mutation_lock
 from chronovisor.core.store import CHRONOVISOR_ROOT
 from chronovisor.ingest.page_registry import PageRegistry
 from chronovisor.librarian.librarian import _append_event, _now_iso
+from chronovisor.recall.classification import (
+    classification_authority_status,
+    classification_frontmatter,
+    load_udc_package,
+    record_from_dict,
+    render_call_number,
+    validate_record,
+)
+from chronovisor.recall.classification_engine import (
+    page_payload,
+    record_from_consensus,
+    run_consensus_batches,
+)
+from chronovisor.recall.classification_resolver import (
+    production_candidate_index,
+)
 
 CLASSIFICATION_INDEX_SCHEMA = "chronovisor.classification-index.v1"
 MIGRATION_RECEIPT_SCHEMA = "chronovisor.classification-migration-receipt.v1"
@@ -551,7 +551,7 @@ def _library_evidence_provider_factory(
     package: Any,
     provider_manifest: Path,
 ) -> Any:
-    from chronovisor.classification.classification_library_evidence import (
+    from chronovisor.recall.classification_library_evidence import (
         LibraryEvidenceIndex,
         LibraryEvidenceProvider,
     )

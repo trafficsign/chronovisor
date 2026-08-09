@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from chronovisor.classification.classification import UDCPackage
 from chronovisor.lab.classification_pilot import (
     AuthoritativeCandidateIndex,
     PilotRunner,
@@ -11,6 +10,7 @@ from chronovisor.lab.classification_pilot import (
     score_prediction,
     summarize_cases,
 )
+from chronovisor.recall.classification import UDCPackage
 
 
 def _package() -> UDCPackage:

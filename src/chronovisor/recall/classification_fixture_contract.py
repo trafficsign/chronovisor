@@ -15,7 +15,7 @@ from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
-from chronovisor.classification.classification import ClassificationError
+from chronovisor.recall.classification import ClassificationError
 
 DISABLED_BASELINE_SCHEMA = "chronovisor.classification-disabled-baseline.v1"
 INFERENCE_DTO_SCHEMA = "chronovisor.classification-inference-dto.v1"

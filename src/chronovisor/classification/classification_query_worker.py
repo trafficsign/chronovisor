@@ -8,8 +8,8 @@ import sys
 from collections.abc import Mapping
 from typing import Any
 
-from chronovisor.classification.classification import ClassificationError
 from chronovisor.core import ollama
+from chronovisor.recall.classification import ClassificationError
 
 WORKER_SCHEMA = "chronovisor.classification-query2doc-worker.v1"
 QUERY_SCHEMA = "chronovisor.classification-subject-query.v1"

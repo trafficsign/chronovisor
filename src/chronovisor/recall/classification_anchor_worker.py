@@ -1,4 +1,4 @@
-"""Isolated local-model worker for unordered one-or-two CVO anchor sets."""
+"""Isolated local-model worker for flat CVO anchor selection."""
 
 from __future__ import annotations
 
@@ -12,23 +12,20 @@ from chronovisor.core import ollama
 from chronovisor.recall.classification import ClassificationError
 from chronovisor.recall.classification_anchor import UNRESOLVED_ANCHOR_ID
 
-WORKER_SCHEMA = "chronovisor.classification-anchor-set-worker.v1"
-SUBJECT_SCHEMA = "chronovisor.classification-anchor-set-subject.v1"
-SELECTION_SCHEMA = "chronovisor.classification-anchor-set-selection.v1"
+WORKER_SCHEMA = "chronovisor.classification-anchor-worker.v1"
+SUBJECT_SCHEMA = "chronovisor.classification-anchor-subject.v1"
+SELECTION_SCHEMA = "chronovisor.classification-anchor-selection.v1"
 POLICY = {
     "contract_version": 1,
-    "purpose": "select an unordered set of one or two co-primary CVO anchors",
+    "purpose": "select a Chronovisor operational anchor without direct UDC mapping",
     "rules": [
-        "Classify the principal subject, not literal product names or metaphors.",
-        "One anchor is the default and is sufficient when it contains the subject.",
-        "Use two anchors only when both are independently central and neither subsumes the other.",
-        "Never add a second anchor merely for context, examples, tools, or uncertainty.",
-        "Every returned anchor consumes a scarce assignment budget.",
-        "Use unresolved alone only when no existing anchor contains the subject.",
+        "Classify the principal subject, not a literal product name or metaphor.",
+        "Use modern bilingual anchor definitions, inclusions and exclusions.",
+        "Choose exactly one primary anchor.",
+        "Choose at most one secondary anchor only for a genuine second subject.",
+        "Use unresolved only when no existing anchor contains the subject.",
     ],
     "forbidden_inputs": [
-        "target_anchor_ids",
-        "defensible_anchor_ids",
         "expected_primary_anchor_ids",
         "expected_primary_notations",
         "gold_rationale",
@@ -61,16 +58,16 @@ def _selection_schema(anchor_ids: Sequence[str]) -> dict[str, Any]:
     return {
         "type": "object",
         "additionalProperties": False,
-        "required": ["anchor_ids", "rationale"],
+        "required": ["primary_anchor_id", "secondary_anchor_ids", "rationale"],
         "properties": {
-            "anchor_ids": {
+            "primary_anchor_id": {"type": "string", "enum": list(anchor_ids)},
+            "secondary_anchor_ids": {
                 "type": "array",
-                "minItems": 1,
-                "maxItems": 2,
+                "maxItems": 1,
                 "uniqueItems": True,
                 "items": {"type": "string", "enum": list(anchor_ids)},
             },
-            "rationale": {"type": "string", "minLength": 1, "maxLength": 420},
+            "rationale": {"type": "string", "minLength": 1, "maxLength": 320},
         },
     }
 
@@ -79,17 +76,13 @@ def validate_subject(value: Mapping[str, Any]) -> dict[str, Any]:
     central = str(value.get("central_subject") or "").strip()
     rationale = str(value.get("rationale") or "").strip()
     raw_secondary = value.get("secondary_subjects")
-    secondary = (
-        [
-            str(item).strip()[:120]
-            for item in raw_secondary
-            if str(item).strip()
-        ]
-        if isinstance(raw_secondary, list)
-        else []
-    )
+    secondary = [
+        str(item).strip()[:120]
+        for item in raw_secondary
+        if str(item).strip()
+    ] if isinstance(raw_secondary, list) else []
     if not central or not rationale:
-        raise ClassificationError("CVO set subject extraction is incomplete")
+        raise ClassificationError("CVO subject extraction is incomplete")
     return {
         "schema": SUBJECT_SCHEMA,
         "central_subject": central[:180],
@@ -102,31 +95,30 @@ def validate_selection(
     value: Mapping[str, Any],
     anchor_ids: Sequence[str],
 ) -> dict[str, Any]:
-    raw_ids = value.get("anchor_ids")
-    selected = (
-        [
-            str(item)
-            for item in raw_ids
-            if str(item) in anchor_ids
-        ]
-        if isinstance(raw_ids, list)
-        else []
-    )
-    selected = sorted(dict.fromkeys(selected))[:2]
-    rationale = str(value.get("rationale") or "").strip()[:420]
+    primary = str(value.get("primary_anchor_id") or "")
+    rationale = str(value.get("rationale") or "").strip()[:320]
+    raw_secondary = value.get("secondary_anchor_ids")
+    secondary = [
+        str(item)
+        for item in raw_secondary
+        if str(item) in anchor_ids and str(item) != primary
+    ] if isinstance(raw_secondary, list) else []
+    secondary = list(dict.fromkeys(secondary))[:1]
     invalid_reason = ""
-    if not selected:
-        selected = [UNRESOLVED_ANCHOR_ID]
-        invalid_reason = "no_valid_anchor"
-    elif UNRESOLVED_ANCHOR_ID in selected and len(selected) > 1:
-        selected = [UNRESOLVED_ANCHOR_ID]
-        invalid_reason = "unresolved_must_be_alone"
+    if primary not in anchor_ids:
+        primary = UNRESOLVED_ANCHOR_ID
+        secondary = []
+        invalid_reason = "primary_outside_anchor_set"
+    elif primary == UNRESOLVED_ANCHOR_ID:
+        secondary = []
     if not rationale:
-        selected = [UNRESOLVED_ANCHOR_ID]
+        primary = UNRESOLVED_ANCHOR_ID
+        secondary = []
         invalid_reason = invalid_reason or "missing_rationale"
     return {
         "schema": SELECTION_SCHEMA,
-        "anchor_ids": selected,
+        "primary_anchor_id": primary,
+        "secondary_anchor_ids": secondary,
         "rationale": rationale,
         "invalid_reason": invalid_reason,
     }
@@ -143,16 +135,16 @@ def _chat(
 ) -> tuple[Mapping[str, Any], str]:
     observed_digest = ollama.model_digests([model]).get(model, "")
     if observed_digest != expected_digest:
-        raise ClassificationError("CVO anchor-set worker model digest changed")
+        raise ClassificationError("CVO anchor worker model digest changed")
     response = ollama.chat(
         [
             {
                 "role": "system",
                 "content": (
                     "You are a multilingual classifier for a personal knowledge "
-                    "system. Return only schema-valid JSON. One anchor is the "
-                    "default. A second anchor is costly and is allowed only when "
-                    "the document has two independently central operational domains."
+                    "system. Return only schema-valid JSON. Prefer the document's "
+                    "principal operational domain over incidental names, examples "
+                    "or implementation details."
                 ),
             },
             {
@@ -163,10 +155,10 @@ def _chat(
         model=model,
         format=dict(schema),
         num_ctx=16_384,
-        num_predict=800,
+        num_predict=700,
         keep_alive=keep_alive,
         read_timeout_ms=read_timeout_ms,
-        max_output_chars=7_000,
+        max_output_chars=6_000,
         temperature=0,
         seed=0,
         think=False,
@@ -174,17 +166,15 @@ def _chat(
     try:
         value = json.loads(str(response))
     except json.JSONDecodeError as exc:
-        raise ClassificationError(
-            "CVO anchor-set worker returned malformed JSON"
-        ) from exc
+        raise ClassificationError("CVO anchor worker returned malformed JSON") from exc
     if not isinstance(value, Mapping):
-        raise ClassificationError("CVO anchor-set worker returned a non-object")
+        raise ClassificationError("CVO anchor worker returned a non-object")
     return value, observed_digest
 
 
 def run(payload: Mapping[str, Any]) -> dict[str, Any]:
     if payload.get("schema") != WORKER_SCHEMA:
-        raise ClassificationError("unsupported CVO anchor-set worker schema")
+        raise ClassificationError("unsupported CVO anchor worker schema")
     operation = str(payload.get("operation") or "")
     model = str(payload.get("model") or "")
     model_digest = str(payload.get("model_digest") or "")
@@ -196,7 +186,7 @@ def run(payload: Mapping[str, Any]) -> dict[str, Any]:
         or not isinstance(page, Mapping)
         or set(page) - {"title", "summary", "evidence_excerpt"}
     ):
-        raise ClassificationError("CVO anchor-set worker input is incomplete")
+        raise ClassificationError("CVO anchor worker input is incomplete")
     common = {"policy": POLICY, "document_evidence": dict(page)}
     if operation == "extract":
         raw, observed_digest = _chat(
@@ -206,7 +196,7 @@ def run(payload: Mapping[str, Any]) -> dict[str, Any]:
                 **common,
                 "instruction": (
                     "State the principal library subject independently of anchor "
-                    "labels. Separate genuine co-primary subjects from examples."
+                    "labels. Separate genuine secondary subjects from examples."
                 ),
             },
             schema=_subject_schema(),
@@ -218,9 +208,7 @@ def run(payload: Mapping[str, Any]) -> dict[str, Any]:
         subject = payload.get("subject")
         anchors = payload.get("anchors")
         if not isinstance(subject, Mapping) or not isinstance(anchors, list):
-            raise ClassificationError(
-                "CVO anchor-set classification input is incomplete"
-            )
+            raise ClassificationError("CVO anchor classification input is incomplete")
         cards = [
             {
                 "id": str(row.get("id") or ""),
@@ -240,7 +228,7 @@ def run(payload: Mapping[str, Any]) -> dict[str, Any]:
             or len(anchor_ids) != len(set(anchor_ids))
             or UNRESOLVED_ANCHOR_ID not in anchor_ids
         ):
-            raise ClassificationError("CVO anchor-set cards are invalid")
+            raise ClassificationError("CVO anchor cards are invalid")
         raw, observed_digest = _chat(
             model=model,
             expected_digest=model_digest,
@@ -249,9 +237,9 @@ def run(payload: Mapping[str, Any]) -> dict[str, Any]:
                 "extracted_subject": dict(subject),
                 "anchor_cards": cards,
                 "instruction": (
-                    "Return one anchor unless two distinct anchors are both "
-                    "necessary to describe the principal subject. Do not hedge "
-                    "with a second anchor. Do not use UDC."
+                    "Select the one operational anchor that best contains the "
+                    "principal subject. Add one secondary anchor only when the "
+                    "document has a genuine second subject. Do not use UDC."
                 ),
             },
             schema=_selection_schema(anchor_ids),
@@ -274,7 +262,7 @@ def main() -> int:
     try:
         payload = json.loads(sys.stdin.read())
         if not isinstance(payload, Mapping):
-            raise ClassificationError("CVO anchor-set payload must be an object")
+            raise ClassificationError("CVO anchor payload must be an object")
         print(json.dumps(run(payload), ensure_ascii=False, sort_keys=True))
         return 0
     except (

@@ -12,12 +12,6 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from chronovisor.classification.classification import (
-    ClassificationError,
-    default_udc_package,
-)
-from chronovisor.classification.classification_engine import CandidateIndex
-from chronovisor.classification.classification_fixture_set import sha256_file
 from chronovisor.classification.classification_query_worker_v2 import (
     HEADING_ROLES,
     QUERY_POLICY,
@@ -40,6 +34,12 @@ from chronovisor.lab.classification_profile_pilot import (
     query_profile_index,
 )
 from chronovisor.lab.classification_query2doc_pilot import candidate_blind_page
+from chronovisor.recall.classification import (
+    ClassificationError,
+    default_udc_package,
+)
+from chronovisor.recall.classification_engine import CandidateIndex
+from chronovisor.recall.classification_fixture_set import sha256_file
 
 ARTIFACT_SCHEMA = "chronovisor.classification-query2doc-artifact.v2"
 DEV_EVALUATION_SCHEMA = "chronovisor.classification-query2doc-v2-dev-evaluation.v1"

@@ -4,13 +4,13 @@ from pathlib import Path
 
 import pytest
 
-from chronovisor.classification.classification import ClassificationError
 from chronovisor.classification.classification_retention import (
     build_audit_retention_manifest,
     refuse_automatic_audit_deletion,
     required_update_validation,
     validate_update_validation,
 )
+from chronovisor.recall.classification import ClassificationError
 
 
 def test_semantic_updates_require_fresh_sentinel() -> None:

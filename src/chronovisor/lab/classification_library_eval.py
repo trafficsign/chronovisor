@@ -10,12 +10,12 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from chronovisor.classification.classification import ClassificationError, UDCPackage
-from chronovisor.classification.classification_fixture_set import (
+from chronovisor.core.durable_state import write_sealed_json
+from chronovisor.recall.classification import ClassificationError, UDCPackage
+from chronovisor.recall.classification_fixture_set import (
     read_jsonl,
     sha256_bytes,
 )
-from chronovisor.core.durable_state import write_sealed_json
 
 CANDIDATE_EVAL_SCHEMA = "chronovisor.classification-candidate-eval.v1"
 PAIRED_EVAL_SCHEMA = "chronovisor.classification-paired-eval.v1"

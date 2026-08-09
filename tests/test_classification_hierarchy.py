@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-from chronovisor.classification.classification import default_udc_package
 from chronovisor.classification.classification_hierarchy import (
     ROOT_NOTATIONS,
     build_navigation_graph,
     deterministic_evidence_capsule,
     is_primary_navigation_concept,
 )
+from chronovisor.recall.classification import default_udc_package
 
 
 def test_navigation_graph_preserves_ranges_and_contracts_auxiliary_headers() -> None:

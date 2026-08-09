@@ -4,11 +4,6 @@ import json
 
 import pytest
 
-from chronovisor.classification.classification import ClassificationError
-from chronovisor.classification.classification_anchor import (
-    UNRESOLVED_ANCHOR_ID,
-    load_anchor_set,
-)
 from chronovisor.classification.classification_anchor_set_worker import (
     validate_selection,
 )
@@ -22,6 +17,11 @@ from chronovisor.lab.classification_anchor_set_unseen import (
     GOLD_SCHEMA,
     OUTPUT_CONTRACT_EPOCH,
     _load_manual_gold,
+)
+from chronovisor.recall.classification import ClassificationError
+from chronovisor.recall.classification_anchor import (
+    UNRESOLVED_ANCHOR_ID,
+    load_anchor_set,
 )
 
 

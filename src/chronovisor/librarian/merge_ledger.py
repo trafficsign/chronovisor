@@ -11,8 +11,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from chronovisor.classification.classification import strongest_sensitivity
 from chronovisor.core.hashutil import sha256_text as _sha256_text
+from chronovisor.recall.classification import strongest_sensitivity
 
 LEDGER_SCHEMA = "chronovisor.merge-ledger.v1"
 RECEIPT_SCHEMA = "chronovisor.merge-receipt.v1"

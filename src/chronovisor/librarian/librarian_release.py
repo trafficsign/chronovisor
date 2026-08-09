@@ -13,12 +13,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from chronovisor.classification.classification import (
-    classification_authority_status,
-    default_udc_package,
-    load_udc_package,
-)
-from chronovisor.classification.classification_engine import librarian_convergence_store
 from chronovisor.core.durable_state import write_sealed_json
 from chronovisor.core.link_fix import extract_wiki_links
 from chronovisor.core.migration_snapshot import (
@@ -32,6 +26,12 @@ from chronovisor.ingest.uid_link_index import build_uid_link_index
 from chronovisor.librarian.librarian import capture_baseline
 from chronovisor.librarian.librarian_status import STATE_SCHEMA, load_librarian_state
 from chronovisor.librarian.merge_transaction import cleanup_expired_preimages
+from chronovisor.recall.classification import (
+    classification_authority_status,
+    default_udc_package,
+    load_udc_package,
+)
+from chronovisor.recall.classification_engine import librarian_convergence_store
 
 ADR_SCHEMA = "chronovisor.librarian-adr.v1"
 SOAK_SCHEMA = "chronovisor.librarian-soak.v2"

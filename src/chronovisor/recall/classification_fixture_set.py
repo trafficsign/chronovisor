@@ -16,23 +16,23 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from chronovisor.classification.classification import (
-    ClassificationError,
-    classification_authority_status,
-    load_udc_package,
-)
-from chronovisor.classification.classification_engine import (
-    DEFAULT_CANDIDATE_LIMIT,
-    ENGINE_VERSION,
-    CandidateIndex,
-    _page_payload,
-)
 from chronovisor.core import frontmatter
 from chronovisor.core.durable_state import read_sealed_json, write_sealed_json
 from chronovisor.core.hashutil import sha256_prefixed_bytes as sha256_bytes
 from chronovisor.core.jsonl_write import write_jsonl_atomic as _write_jsonl
 from chronovisor.core.timeutil import utc_iso_milliseconds as _now
 from chronovisor.ingest.page_registry import PageRegistry
+from chronovisor.recall.classification import (
+    ClassificationError,
+    classification_authority_status,
+    load_udc_package,
+)
+from chronovisor.recall.classification_engine import (
+    DEFAULT_CANDIDATE_LIMIT,
+    ENGINE_VERSION,
+    CandidateIndex,
+    _page_payload,
+)
 
 FIXTURE_SET_SCHEMA = "chronovisor.classification-fixture-set.v1"
 DISABLED_BASELINE_SCHEMA = "chronovisor.classification-disabled-baseline.v1"

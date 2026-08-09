@@ -8,12 +8,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from chronovisor.classification.classification import ClassificationError
-from chronovisor.classification.classification_fixture_contract import (
+from chronovisor.core.durable_state import write_sealed_json
+from chronovisor.recall.classification import ClassificationError
+from chronovisor.recall.classification_fixture_contract import (
     sha256_bytes,
     sha256_file,
 )
-from chronovisor.core.durable_state import write_sealed_json
 
 RETENTION_SCHEMA = "chronovisor.classification-audit-retention.v1"
 UPDATE_POLICY_SCHEMA = "chronovisor.classification-update-policy.v1"

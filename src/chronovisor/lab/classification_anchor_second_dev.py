@@ -12,12 +12,6 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from chronovisor.classification.classification import ClassificationError
-from chronovisor.classification.classification_anchor import (
-    UNRESOLVED_ANCHOR_ID,
-    AnchorSet,
-    load_anchor_set,
-)
 from chronovisor.core import ollama
 from chronovisor.core.durable_state import read_sealed_json, write_sealed_json
 from chronovisor.core.research_scheduler import (
@@ -40,6 +34,12 @@ from chronovisor.lab.classification_anchor_set_dev import (
     score_anchor_set,
     summarize_metrics,
     validate_set_gold,
+)
+from chronovisor.recall.classification import ClassificationError
+from chronovisor.recall.classification_anchor import (
+    UNRESOLVED_ANCHOR_ID,
+    AnchorSet,
+    load_anchor_set,
 )
 
 CALL_SCHEMA = "chronovisor.classification-anchor-second-call.v1"

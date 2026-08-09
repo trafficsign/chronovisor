@@ -8,8 +8,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from chronovisor.classification.classification import ClassificationError
-from chronovisor.classification.classification_anchor import UNRESOLVED_ANCHOR_ID
+from chronovisor.recall.classification import ClassificationError
+from chronovisor.recall.classification_anchor import UNRESOLVED_ANCHOR_ID
 
 VOCABULARY_SCHEMA = "chronovisor.controlled-vocabulary.v1"
 

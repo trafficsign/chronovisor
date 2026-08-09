@@ -6,14 +6,14 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, Protocol
 
-from chronovisor.classification.classification import ClassificationError, UDCPackage
-from chronovisor.classification.classification_bundle import (
+from chronovisor.core.durable_state import read_sealed_json
+from chronovisor.recall.classification import ClassificationError, UDCPackage
+from chronovisor.recall.classification_bundle import (
     CANDIDATE_BUNDLE_SCHEMA,
     resolve_authority,
 )
-from chronovisor.classification.classification_engine import CandidateIndex
-from chronovisor.classification.classification_fixture_contract import inference_dto
-from chronovisor.core.durable_state import read_sealed_json
+from chronovisor.recall.classification_engine import CandidateIndex
+from chronovisor.recall.classification_fixture_contract import inference_dto
 
 
 class CandidateProvider(Protocol):

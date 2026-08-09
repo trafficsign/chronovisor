@@ -13,7 +13,6 @@ from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from chronovisor.classification.classification import strongest_sensitivity
 from chronovisor.core import frontmatter
 from chronovisor.core.durable_state import write_sealed_json
 from chronovisor.core.link_fix import (
@@ -33,6 +32,7 @@ from chronovisor.librarian.librarian import _append_event, _now_iso
 from chronovisor.librarian.merge_ledger import build_source_inventory
 from chronovisor.librarian.merge_transaction import apply_merge_plan, prepare_merge_plan
 from chronovisor.raw.raw_store import RawStore
+from chronovisor.recall.classification import strongest_sensitivity
 from chronovisor.recall.duplicate_review import build_duplicate_review_queue
 
 DISPOSITION_SCHEMA = "chronovisor.librarian-dispositions.v1"

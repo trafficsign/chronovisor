@@ -14,7 +14,6 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from chronovisor.classification.classification import ClassificationError
 from chronovisor.classification.classification_evidence_judgment import (
     current_resident_models,
 )
@@ -30,6 +29,7 @@ from chronovisor.core.runtime_config import (
 )
 from chronovisor.core.store import CHRONOVISOR_ROOT
 from chronovisor.ops.convergence import ConvergenceStore, RetryPolicy
+from chronovisor.recall.classification import ClassificationError
 from chronovisor.recall.recall_runtime import RecallPolicy, RecallRequest, run_recall
 
 SCHEMA = "chronovisor.classification-resource-overlap-burn.v1"

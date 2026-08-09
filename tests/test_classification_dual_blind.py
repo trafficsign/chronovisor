@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from chronovisor.classification import classification_model_worker
-from chronovisor.classification.classification_engine import CONSENSUS_SCHEMA
+from chronovisor.recall import classification_model_worker
+from chronovisor.recall.classification_engine import CONSENSUS_SCHEMA
 
 
 def test_dual_blind_hides_primary_from_challenger_and_can_adjudicate_hold(

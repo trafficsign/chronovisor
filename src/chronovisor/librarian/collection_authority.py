@@ -20,7 +20,6 @@ from pathlib import Path
 from statistics import median
 from typing import Any
 
-from chronovisor.classification.classification_anchor import load_anchor_set
 from chronovisor.core.durable_state import (
     DurableStateError,
     canonical_sha256,
@@ -37,6 +36,7 @@ from chronovisor.core.store import CHRONOVISOR_ROOT
 from chronovisor.core.timeutil import utc_iso_milliseconds as _now
 from chronovisor.ingest.page_registry import PageRegistry
 from chronovisor.ingest.uid_link_index import build_uid_link_index
+from chronovisor.recall.classification_anchor import load_anchor_set
 
 COLLECTION_REGISTRY_SCHEMA = "chronovisor.collection-registry.v1"
 COLLECTION_RECEIPT_SCHEMA = "chronovisor.collection-lifecycle-receipt.v1"
@@ -2093,8 +2093,8 @@ def _propose_collection_crosswalk(
     collection_uid: str,
     model_digests: Mapping[str, str],
 ) -> tuple[str | None, list[dict[str, Any]], int]:
-    from chronovisor.classification.classification_anchor import UNRESOLVED_ANCHOR_ID
-    from chronovisor.classification.classification_anchor_worker import (
+    from chronovisor.recall.classification_anchor import UNRESOLVED_ANCHOR_ID
+    from chronovisor.recall.classification_anchor_worker import (
         PROMPT_SHA256,
         WORKER_SCHEMA,
     )
@@ -2179,8 +2179,8 @@ def ensure_autonomous_crosswalk(
 ) -> dict[str, Any]:
     """Create sealed runtime crosswalks for newly discovered collections."""
 
-    from chronovisor.classification.classification_anchor import UNRESOLVED_ANCHOR_ID
     from chronovisor.core import ollama
+    from chronovisor.recall.classification_anchor import UNRESOLVED_ANCHOR_ID
 
     registry_state = dict(state or CollectionRegistry(root).load())
     base = load_crosswalk()

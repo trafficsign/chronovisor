@@ -19,25 +19,25 @@ from typing import Any
 
 import numpy as np
 
-from chronovisor.classification.classification import (
-    ClassificationError,
-    UDCPackage,
-    default_udc_package,
-)
-from chronovisor.classification.classification_fixture_set import (
-    read_jsonl,
-    sha256_file,
-)
-from chronovisor.classification.classification_library_evidence import (
-    DENSE_MODEL_LICENSE,
-    DENSE_TRAINING_CORPUS_LICENSE,
-    embed_texts_cancellable,
-)
 from chronovisor.core.durable_state import read_sealed_json, write_sealed_json
 from chronovisor.core.jsonl_write import write_jsonl_atomic as _write_jsonl
 from chronovisor.core.runtime_config import load_embedding_config
 from chronovisor.core.store import CHRONOVISOR_ROOT
 from chronovisor.core.timeutil import utc_iso_milliseconds as _now
+from chronovisor.recall.classification import (
+    ClassificationError,
+    UDCPackage,
+    default_udc_package,
+)
+from chronovisor.recall.classification_fixture_set import (
+    read_jsonl,
+    sha256_file,
+)
+from chronovisor.recall.classification_library_evidence import (
+    DENSE_MODEL_LICENSE,
+    DENSE_TRAINING_CORPUS_LICENSE,
+    embed_texts_cancellable,
+)
 
 PROFILE_SCHEMA = "chronovisor.classification-profile-index.v1"
 EVALUATION_SCHEMA = "chronovisor.classification-profile-evaluation.v1"
