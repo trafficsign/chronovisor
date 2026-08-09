@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>Chronovisor 次フェーズ計画（Campaign W〜 / OSS 準備 / 研究知見）</title>
+<style>
+:root{
+  --fg:#1a1a1a; --muted:#666; --bg:#fafaf7; --accent:#2c5aa0;
+  --done:#888; --warn:#c0392b; --ok:#2e7d32; --rule:#e0e0d8;
+  --code-bg:#eee;
+}
+*{box-sizing:border-box}
+body{
+  font-family:-apple-system,'Hiragino Kaku Gothic ProN','Yu Gothic',sans-serif;
+  color:var(--fg); background:var(--bg);
+  max-width:880px; margin:2rem auto; padding:0 1.5rem;
+  line-height:1.7; font-size:15px;
+}
+header{
+  border-bottom:2px solid var(--rule); padding-bottom:1rem; margin-bottom:1.5rem;
+}
+h1{font-size:1.6rem;margin:0 0 0.5rem 0}
+h2{font-size:1.15rem;margin:1.75rem 0 0.5rem 0;padding-bottom:0.25rem;border-bottom:1px solid var(--rule)}
+h3{font-size:1.05rem;margin:1.25rem 0 0.4rem 0}
+h4{font-size:0.95rem;margin:1rem 0 0.3rem 0}
+.meta-bar{display:flex;gap:1rem;font-size:0.85rem;color:var(--muted);flex-wrap:wrap;align-items:center}
+.badge{
+  display:inline-block;padding:0.15rem 0.7rem;border-radius:1rem;
+  background:#16a085;color:#fff;font-weight:600;font-size:0.8rem;
+}
+section{margin:0 0 0.5rem 0}
+ul,ol{padding-left:1.5rem;margin:0.5rem 0}
+li{margin:0.25rem 0}
+code{background:var(--code-bg);padding:0.1rem 0.35rem;border-radius:3px;font-size:0.9em;font-family:'SF Mono',Menlo,monospace}
+table{width:100%;border-collapse:collapse;margin:0.75rem 0 1rem;font-size:0.92rem}
+th,td{padding:0.45rem 0.55rem;border:1px solid var(--rule);vertical-align:top;text-align:left}
+th{background:#f3f1eb}
+pre{background:#eee;padding:0.8rem 1rem;border-radius:6px;overflow:auto;line-height:1.45;font-size:0.84rem}
+.callout{background:#f3f1eb;border-left:3px solid var(--accent);padding:0.65rem 0.9rem;border-radius:4px;margin:0.75rem 0}
+.callout.warn{border-left-color:var(--warn)}
+.exit{color:var(--muted);font-size:0.92rem}
+</style>
+</head>
+<body>
+
+<header>
+<h1>Chronovisor 次フェーズ計画</h1>
+<div class="meta-bar">
+<span class="badge">draft</span>
+<span>作成: 2026-08-09</span>
+<span>前提: Campaign O–V 完了後</span>
+</div>
+</header>
+
+<section>
+<h2>概要</h2>
+<p>Campaign O–V（アーキテクチャ刷新）の完了を前提に、次フェーズとして取り組む事項をまとめる。OSS 公開準備、LLM Transport の抽象化、研究知見の反映を含む。</p>
+<p>O–V 計画は <code>_handoff/2026-08-06_1221_chronovisor-architecture-renewal.html</code> を参照。</p>
+</section>
+
+<!-- ============================================================ -->
+<section>
+<h2>Campaign W — 共通 LLM Runtime と Provider 互換化</h2>
+
+<div class="callout">
+<strong>動機:</strong> Chronovisor の同じコアと同じワークフローを、ローカル Ollama でも API キー型 provider でも動かせるようにする。Ollama 経路を OpenAI に置き換えたり二重実装したりするのではなく、既存のローカル最適化を保ったまま、一般的な PC でもローカルモデルなしで主要機能を利用できる構成を追加する。
+</div>
+
+<h3>現状</h3>
+<ul>
+<li><code>ollama.py</code> facade と <code>ollama_transport.py</code> は分離済みで、Ollama native API を使う既存経路がある</li>
+<li>ingest / decision / recall / lint / search が共有できる provider-neutral な runtime contract と、role 単位の provider / model 選択は未整備</li>
+<li>retry / timeout / budget / telemetry / structured output / token usage / error の扱いが、provider をまたぐ共通実行規約になっていない</li>
+</ul>
+
+<h3>設計原則</h3>
+<pre>ingest / decision / recall / lint / search
+              │ role + capability
+              ▼
+      shared LLM runtime contract
+          ├─ Ollama native driver
+          └─ OpenAI-compatible driver</pre>
+<p>application 側は provider 名で分岐せず、role と必要な capability を runtime に要求する。provider 固有機能は driver の optional capability として隔離し、共通ワークフローの意味論を変えない。</p>
+
+<h3>ステップ</h3>
+<ol>
+<li><strong>W1: 共通 runtime contract</strong> — 既存の Ollama facade / transport の上位に、chat / generate / embedding / structured output を正規化する単一 contract を追加する。各 application workflow は provider ではなく role / capability を指定して呼び出す。</li>
+<li><strong>W2: 共通実行規約</strong> — retry / timeout / budget / telemetry / structured output / token usage / error normalization を runtime に集約し、どの driver でも同じ成功・失敗・観測の形式を返す。</li>
+<li><strong>W3: adapter の並存</strong> — Ollama native driver は <code>/api/generate</code>、<code>/api/chat</code>、<code>/api/embed</code> を使い、calibration / lease / model residency / unload などのローカル固有能力を optional capability として保持する。OpenAI-compatible driver は <code>/v1/chat/completions</code>、<code>/v1/embeddings</code> 等を同じ contract に正規化する。SDK 採用は adapter 内部の実装選択であり、既存 transport の強制置換とはしない。</li>
+<li><strong>W4: role profile 設定</strong> — 正本である <code>~/.chronovisor/config.toml</code> の既存 schema を provider / model profile で最小限拡張し、role ごとに選択できるようにする。同一ワークフローを local-only、API-only、必要な場合は混在構成で実行可能にし、embedding / semantic / rerank 等の必須 capability が API provider または明示設定した別 provider で満たされることを起動時に検証する。</li>
+<li><strong>W5: 段階移行と OSS 最小構成</strong> — 既存 Ollama 経路を維持しながら各 workflow を共通 runtime に接続する。Ollama もローカルモデルもない一般的な PC で、API key と最小設定だけにより ingest / decision / recall / lint / search が現在と同じ主要機能で動く手順と example config を用意する。BM25-only fallback を残す場合は明示的な degraded mode とし、feature parity の受入条件には数えない。</li>
+</ol>
+
+<div class="exit"><strong>Exit Criteria:</strong> application workflow に provider 分岐がなく、同じ runtime contract を経由すること。Ollama / ローカルモデルなし + API key のみでも必要な embedding / semantic / rerank capability を満たし、主要機能が feature parity で動作すること。既存 Ollama native 経路の回帰テストに加え、両 adapter の contract test と ingest / decision / recall / lint / search の workflow parity test matrix が green であること。</div>
+</section>
+
+<!-- ============================================================ -->
+<section>
+<h2>OSS 公開準備</h2>
+
+<h3>OpenAI Codex Open Source Fund</h3>
+<p>応募対象: $25K API クレジット + 6ヶ月 ChatGPT Pro。Chronovisor は実装の大半を Codex で行っており、要件を満たす見込み。</p>
+
+<h3>公開前に必要な作業</h3>
+<ul>
+<li>Campaign W の完了（Ollama 必須を解消）</li>
+<li><code>.env</code> / API キー / ローカルパスのハードコード除去</li>
+<li>LICENSE ファイルの追加</li>
+<li>README（セットアップ手順、最小構成、アーキテクチャ概要）</li>
+<li><code>config.toml.example</code> の同梱</li>
+</ul>
+</section>
+
+<!-- ============================================================ -->
+<section>
+<h2>研究知見: Filesystem-Based Memory for LLM Agents</h2>
+<div class="callout">
+<strong>論文:</strong> arXiv 2607.26637v1 — <em>Filesystem-Based Memory for LLM Agents</em> (2026-07)
+</div>
+
+<h3>論文の概要</h3>
+<p>ファイルシステムをLLMエージェントのメモリストアとして形式化し、3つのエージェント役割（management/search/execution）で運用する枠組み。会話メモリと手続きスキルの2設定で、5つのRQに答える大規模実験。ベンチマーク: LoCoMo, PersonaMem (32k/128k), REALTALK, ALFWorld。モデル: gpt-5.4-nano〜gpt-5.4。</p>
+
+<h3>Chronovisor に直接関係する知見</h3>
+<table>
+<thead><tr><th>知見</th><th>論文の根拠</th><th>Chronovisor への影響</th></tr></thead>
+<tbody>
+<tr>
+<td><strong>Reorganizer はデフォルトで LOSSY</strong></td>
+<td>condense 版は REALTALK で correctness がほぼ半減（41.2 vs 77.6）。preserve 版で回復。ただし小ストア（PersonaMem 32k）では condense が優位</td>
+<td><strong>ingest の Ollama プロンプトに fact 保存ルールを追加すべき</strong></td>
+</tr>
+<tr>
+<td><strong>Search agent の強さが回答品質に直結</strong></td>
+<td>management の強さは構造スタイルを買うが品質に直接効かない。search の強さは単調に寄与（nano→mini→gpt-5.4 で 62→71→83）</td>
+<td>management=Ollama（弱）、search=Claude（強）の構成は理にかなう。<strong>search チェーンの品質改善が最もアウトカムに効く</strong></td>
+</tr>
+<tr>
+<td><strong>BM25 キーワード検索の併用が効く</strong></td>
+<td>Shell ツールセット（bash + BM25）が mini management で最高成績 82.9%</td>
+<td><strong>semantic search + keyword 一致パスの併用</strong></td>
+</tr>
+<tr>
+<td><strong>ツールセットがストアの形を決める</strong></td>
+<td>同じモデル・指示でもツールを変えると構造が桁違いに変わる</td>
+<td><strong>MCP ツール設計変更時は Wiki 構造への副作用を意識する</strong></td>
+</tr>
+<tr>
+<td><strong>Taxonomy 準拠は最強モデル以外で侵食される</strong></td>
+<td>schema 準拠は全モデルで時間経過とともに劣化。gpt-5.4 のみがほぼ維持</td>
+<td><strong>chronovisor_check を ingest のたびに回す</strong>のが理想</td>
+</tr>
+<tr>
+<td><strong>Curated store は元を取る</strong></td>
+<td>Curated がデプロイコスト最安（$4.3 vs Episode log $9.0）</td>
+<td>raw→pages パイプラインの方向性は正しい。<strong>キュレーション投資はランニングコストで回収</strong></td>
+</tr>
+<tr>
+<td><strong>蓄積は弱いエージェントほど価値がある</strong></td>
+<td>No store → 蓄積ありの改善幅は弱い実行エージェントで +7.1、強いほうで +1.4</td>
+<td><strong>初回セッションの onboarding 品質がメモリの ROI を決める</strong></td>
+</tr>
+<tr>
+<td><strong>初期メモリは生き残る</strong></td>
+<td>chain 終了時点で gpt-5.4 curator でも 63% が edited-in-place、17% が untouched</td>
+<td><strong>初期ページの品質が長期的に重要</strong>。初期 ingest の品質管理を厚くする</td>
+</tr>
+</tbody>
+</table>
+
+<h3>アクション候補（優先順）</h3>
+<ol>
+<li><strong>ingest プロンプトに preserve ルール追加</strong> — 最小コストで最大インパクト</li>
+<li><strong>chronovisor_search に keyword 検索パス追加</strong> — semantic + BM25 併用</li>
+<li><strong>ingest 後に自動 lint 実行</strong> — chronovisor_check をパイプラインに組み込む</li>
+<li><strong>ツール設計の構造影響を文書化</strong> — MCP ツール変更が Wiki 構造にどう影響するか ADR に記録</li>
+</ol>
+
+<div class="callout warn">
+<strong>注意:</strong> 論文は「構造の精緻さ自体は回答品質を買わない」ことも示している。整理しすぎへの過剰投資は避ける。
+</div>
+</section>
+
+<!-- ============================================================ -->
+<section>
+<h2>OKF（Open Knowledge Format）互換性</h2>
+<div class="callout">
+<strong>参照:</strong> <a href="https://zenn.dev/finatext/articles/2ea88e4b1c2e5b">LLM Wikiパターンの標準化 OKF</a> — Google Cloud が2026年6月に発表した LLM Wiki の標準仕様。
+</div>
+<p>OKF は「Markdown + YAML フロントマター」で知識を構造化し、ファイル間リンクで知識グラフを形成する仕様。Chronovisor の pages/ と構造が一致する。</p>
+
+<table>
+<thead><tr><th>OKF の要素</th><th>Chronovisor の対応</th><th>差分</th></tr></thead>
+<tbody>
+<tr><td>Markdown + YAML フロントマター</td><td>pages/ の <code>.md</code> + メタデータ</td><td>フロントマター形式を OKF 互換に調整</td></tr>
+<tr><td>ファイル間 Markdown リンク → 知識グラフ</td><td><code>[[wikilink]]</code> でページ間接続</td><td>互換（記法の差異のみ）</td></tr>
+<tr><td>アトミックノート</td><td>1トピック1ページ</td><td>互換</td></tr>
+<tr><td><code>type</code> フィールド（必須）</td><td>ページ種別あり</td><td>フィールド名を <code>type</code> に統一</td></tr>
+</tbody>
+</table>
+
+<h4>OKF が「足りない」と指摘する3点と Chronovisor の対応</h4>
+<ol>
+<li><strong>語彙の未統一</strong> — Chronovisor は <code>schema.md</code> で独自語彙を定義済み。OKF 語彙が標準化されたら追従</li>
+<li><strong>LLM の生成品質</strong> — Semantic Projection で対処中</li>
+<li><strong>更新の仕組みがない</strong> — ingest パイプラインで解決済み。OKF エコシステムの中での差別化ポイント</li>
+</ol>
+
+<h4>アクション</h4>
+<ul>
+<li>pages/ のフロントマターを OKF 互換形式に調整。コスト極小（フィールド名のリネーム程度）</li>
+<li>対応タイミングは Campaign W と同時期、または独立した小タスクとして</li>
+</ul>
+</section>
+
+</body>
+</html>
