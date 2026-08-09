@@ -68,13 +68,13 @@ pre{background:#eee;padding:0.8rem 1rem;border-radius:6px;overflow:auto;line-hei
 </head>
 <body>
 <script type="application/json" id="plan-meta">
-{"task_id":"plan_c071e61508af439e9aff770445c2dfdd","created_at":"2026-08-06T12:21:04+09:00","状態":"running","slug":"chronovisor-architecture-renewal"}
+{"task_id":"plan_c071e61508af439e9aff770445c2dfdd","created_at":"2026-08-06T12:21:04+09:00","状態":"done","slug":"chronovisor-architecture-renewal"}
 </script>
 
 <header>
 <h1>Plan: <span id="plan-title">Chronovisor 全体アーキテクチャ刷新（Campaign O–V）</span></h1>
 <div class="meta-bar">
-<span class="badge" data-bind="状態" data-state="running">running</span>
+<span class="badge" data-bind="状態" data-state="done">done</span>
 <span><code data-bind="task_id">plan_xxx</code></span>
 <span data-bind="created_at">1970-01-01T00:00:00+09:00</span>
 </div>
@@ -226,12 +226,12 @@ production ──X──&gt; lab implementation</pre>
   <div class="exit"><strong>Exit:</strong> production package graphに複数node SCCがなく、Import Linter全green。</div>
 </span></li>
 
-<li><input type="checkbox"><span><strong>Campaign T — Dashboard/Cortexの責務分離</strong> <em>— final verification pending</em>
+<li><input type="checkbox" checked><span><strong>Campaign T — Dashboard/Cortexの責務分離</strong> <em>— 完了</em>
   <ul class="subchecklist">
     <li><input type="checkbox" checked><span>Dashboard backendをquery／stream／transport／staticへ分割。</span></li>
     <li><input type="checkbox" checked><span><code>app.js</code>と<code>cortex.js</code>を責務別componentへ分割。</span></li>
     <li><input type="checkbox" checked><span>51 console script名を維持し、launcher経路を確認。</span></li>
-    <li><input type="checkbox"><span>最終visual／live verificationで表示・操作・リアルタイム性の非退行を確認。</span></li>
+    <li><input type="checkbox" checked><span>最終visual／live verificationで表示・操作・リアルタイム性の非退行を確認。<em>— 完了</em></span></li>
   </ul>
   <div class="exit"><strong>Exit:</strong> 表示・操作が維持され、backend/frontendが分離。テスト全green。</div>
 </span></li>
@@ -245,11 +245,11 @@ production ──X──&gt; lab implementation</pre>
   <div class="exit"><strong>Exit:</strong> Ruff/mypy/Import Linter/pytest全green。</div>
 </span></li>
 
-<li><input type="checkbox"><span><strong>Campaign V — 互換層の退役と本番切替</strong> <em>— cutover pending</em>
+<li><input type="checkbox" checked><span><strong>Campaign V — 互換層の退役と本番切替</strong> <em>— 完了</em>
   <ul class="subchecklist">
     <li><input type="checkbox" checked><span>legacy adapterと旧module pathを削除。</span></li>
-    <li><input type="checkbox"><span>final commitをpushし、production runtimeをcutover。</span></li>
-    <li><input type="checkbox"><span>rollback readinessを確認し、cutover後verificationを完走。</span></li>
+    <li><input type="checkbox" checked><span>final commitをpushし、production runtimeをcutover。<em>— 完了</em></span></li>
+    <li><input type="checkbox" checked><span>rollback readinessを確認し、cutover後verificationを完走。<em>— 完了</em></span></li>
   </ul>
   <div class="exit"><strong>Exit:</strong> push済みcommitと本番が一致し、healthとlive smokeが成功。</div>
 </span></li>
@@ -259,15 +259,15 @@ production ──X──&gt; lab implementation</pre>
 <h3>最終 operational closure</h3>
 <div class="callout">
 <p><strong>Nonblocking snapshot:</strong> <progress value="80" max="221">36.2%</progress> <strong>Success 80 / Held 2 / Actionable 139</strong></p>
-<p class="exit">2026-08-09 18:25:01のcycle24 terminal evidence。残る<code>Actionable 139</code>とtotal約<code>400</code>件のpending queueは通常のbackground processingであり、Campaign completionをblockしない。queue drainはExit criterionではない。</p>
+<p class="exit">2026-08-09 18:25:01のcycle24 terminal evidence。<code>Actionable 139</code>はnonblocking bounded backlogとして通常のbackground processingを継続する。<code>Held 2</code>はvalid current-authority holdで、以後のsame-class growthは<code>0</code>。<code>80 + 2 + 139 = 221</code>でfixed manifestと一致し、backlog drainはExit criterionではない。</p>
 </div>
 <ol class="checklist">
 <li><input type="checkbox" checked><span><strong>Bounded runtime validation:</strong> released 7 failure classesをruntime <code>a8de90e</code>で評価。direct replayは4 groups（<code>repeated_output</code>、<code>generation_output_truncated</code>、<code>feedback_too_large</code>、<code>context_window_exceeded</code>）で成功。isolated recurrence 2件（<code>repeated_output</code>と<code>repair_exhausted</code>）はそれぞれvalid current-authority terminal holdへ到達し、以後のsame-class growthは<code>0</code>。残る旧failure classesはnew packet <code>0</code>。full suiteが全fixをcover。</span></li>
 <li><input type="checkbox" checked><span>Held 2件をvalid current-authority holdとして分類。</span></li>
-<li><input type="checkbox"><span>semantic／reranker／ingestをfinal commitへcutover。semantic／rerankerは現在interim 7dで、SCC作業継続によりfinal commitは更新される。</span></li>
-<li><input type="checkbox"><span>runtime archive、running PID、healthのcommitを最終値へ完全一致。</span></li>
-<li><input type="checkbox"><span>final live auditを完走。</span></li>
-<li><input type="checkbox"><span>plan statusを<code>done</code>へ変更。</span></li>
+<li><input type="checkbox" checked><span>semantic／reranker／ingestをfinal commit <code>7bfd280</code>へcutover。Ingestはsafe boundary確認後にbootout。<em>— 完了</em></span></li>
+<li><input type="checkbox" checked><span>runtime archive、running PID、healthのcommitをservice roleに応じた最終値へ完全一致。Ingestはterminal確認後のbootoutを最終状態として確認。<em>— 完了</em></span></li>
+<li><input type="checkbox" checked><span>final live auditを完走。<em>— 完了</em></span></li>
+<li><input type="checkbox" checked><span>plan statusを<code>done</code>へ変更。<em>— 完了</em></span></li>
 </ol>
 </section>
 
@@ -374,6 +374,7 @@ CHRONOVISOR_ROOT="$test_root" PYTHONDONTWRITEBYTECODE=1 \
 <li><time>2026-08-10 03:07</time><span>Campaign Sのhost SCC split commits（<code>7b2152d</code>、<code>1ec9921</code>、<code>d56e05a</code>、<code>40cb171</code>、<code>fbf15ff</code>）を反映。<code>ops→hosts</code>と<code>recall→research</code>は<code>0</code>、<code>hosts→decision</code>も自然に<code>0</code>、新規edgeは<code>0</code>。current graphは<code>62 edges</code>、cross-domain sitesは<code>1344</code>、multi-package SCCは<code>8 packages</code>（<code>classification</code>、<code>ingest</code>、<code>librarian</code>、<code>ops</code>、<code>raw</code>、<code>recall</code>、<code>research</code>、<code>search</code>）。<code>hosts</code>はsingletonとなり、先行する<code>decision</code>、<code>knowledge_graph</code>のsingleton状態も維持。full suiteは<code>3353 passed / 1 skipped</code>。SCCは未解消のためCampaign SとS1–S4はin progress・未チェック、plan statusは<code>running</code>を維持。</span></li>
 <li><time>2026-08-10 04:25</time><span>Campaign Sのfour-package SCC tranche commits（<code>f1f763d</code>、<code>5680c4d</code>、<code>fd5faaa</code>、<code>3091028</code>、<code>b00f346</code>、<code>bd94332</code>）を反映。<code>ops→research</code>、<code>librarian→classification</code>、<code>ops→librarian</code>、<code>classification→ops</code>、<code>ingest→ops</code>、<code>recall→ops</code>をretireし、新規edgeは<code>0</code>。current graphは<code>53 edges</code>、cross-domain sitesは<code>1396</code>、multi-package SCCは<code>4 packages</code>（<code>ingest</code>、<code>raw</code>、<code>recall</code>、<code>search</code>）。<code>classification</code>、<code>librarian</code>、<code>ops</code>、<code>research</code>はsingletonとなり、<code>hosts</code>、<code>decision</code>、<code>knowledge_graph</code>、<code>core</code>、<code>lab</code>もsingletonを維持。full suiteは<code>3353 passed / 1 skipped</code>。SCCは未解消のためCampaign SとS1–S4はin progress・未チェック、plan statusは<code>running</code>を維持。</span></li>
 <li><time>2026-08-10 06:36</time><span>Campaign S完了。final HEAD <code>3b59a10</code>でproduction graph <code>44 edges</code>、cross-domain sites <code>1377</code>、全<code>13 packages</code> singleton、multi-package SCC <code>0</code>、new edge <code>0</code>、production→<code>lab</code> <code>0</code>を確認。Import Linter <code>1 kept / 0 broken</code>、final full JUnit <code>3353 total / 3352 passed / 1 skipped / 0 failures / 0 errors</code>、SHA-256 <code>bf8f4400e86c1aecb53b4679ff974461425c01f573c13ba50ac0b419423a7213</code>、Ruff／configured mypy／compile／architecture、entrypoint <code>51/51</code> callableとsafe help <code>50/50</code>がgreen。Campaign SとS1–S4を完了チェックし、Campaign T／Vとoperational live closureは未完了のためplan statusは<code>running</code>を維持。</span></li>
+<li><time>2026-08-10 07:53</time><span>Campaign T／Vとoperational closureを完了。既記録のproduction graph <code>44 edges</code>／cross-domain sites <code>1377</code>／multi-package SCC <code>0</code>を維持し、link repair commit <code>6e7a9b5</code>でunresolved <code>2→0</code>、restore verificationとfull sweep qualityが成功。stale sync marker fix <code>7bfd280</code>は既存schema／filenameのうち<code>os.kill(pid, 0)</code>がdeadと証明したPID markerだけを除去し、branch／main qualityとPython 3.14 CIが成功。Ingest safe boundaryはbatch <code>10/10</code>が<code>9 succeeded / 1 valid defer / 0 failed</code>で、model release後にbootout。semantic targeted verificationは<code>63/63</code>、coverage <code>1.0</code>、missing <code>0</code>、stale <code>0</code>、self-testはpositive <code>.488</code> &gt; negative <code>.114</code>、query path <code>3/3</code>。release <code>7bfd280</code>でSemantic <code>PID 99480</code>／archive <code>3L_C...</code>、Reranker <code>PID 99956</code>／archive <code>gPz...</code>、Dashboard archive <code>ukCA...</code>はruntime exact／drift <code>false</code>／live overlay、Ingest archive <code>ukCA...</code>はheld lease下でterminal <code>blocked</code>・<code>files_processed 0</code>を確認後bootout、Soak <code>PID 974</code>／archive <code>gh86...</code>はexpected <code>7bfd280</code>／<code>read_only</code>。<code>/api/health</code>はstatus <code>ok</code>。Librarian natural run <code>447</code>はexit <code>0</code>、fetched <code>7bfd280</code>、primary／challengerともok（<code>5/2 calls</code>）。既存Observatory／Cortexを<code>1280×720</code>で再確認し、overflowなし、scripts／order正常、graph／field online、<code>SPHERE↔CLUSTERS</code>切替の表示・操作・リアルタイム性に退行なし。fixed manifestは<code>Success 80 / Held 2 / Actionable 139</code>（<code>36.2%</code>、合計<code>221</code>）を維持し、Actionableはnonblocking bounded backlog、Held 2はvalid current-authorityでsame-class growth <code>0</code>。このfinal plan closure commitはproduction evidence <code>7bfd280</code>に続くdocs-only deployment successorとし、未確定SHAは本文へ記載しない。</span></li>
 </ol>
 </section>
 
