@@ -6328,7 +6328,7 @@ class TestOrchestrator:
         name: str,
         records: list[dict],
     ) -> Path:
-        from chronovisor.raw.save_transaction import (
+        from chronovisor.core.save_transaction import (
             attach_save_transaction_marker,
             make_save_transaction,
         )
@@ -6371,7 +6371,7 @@ class TestOrchestrator:
         omit_indices: set[int] | None = None,
         prefix: str = "fragment",
     ) -> tuple[str, list[Path]]:
-        from chronovisor.raw.save_transaction import (
+        from chronovisor.core.save_transaction import (
             attach_save_transaction_marker,
             make_save_transaction,
         )
@@ -12632,12 +12632,12 @@ class TestWikiSaveRawRouting:
     def test_idempotency_key_accepts_different_self_verified_retry_receipt(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from chronovisor.hosts import server
-        from chronovisor.ingest import orchestrator
-        from chronovisor.raw.save_transaction import (
+        from chronovisor.core.save_transaction import (
             attach_save_transaction_marker,
             make_save_transaction,
         )
+        from chronovisor.hosts import server
+        from chronovisor.ingest import orchestrator
 
         tool_fn = (
             server.chronovisor_record.fn
@@ -12684,12 +12684,12 @@ class TestWikiSaveRawRouting:
     def test_idempotency_key_rejects_corrupt_existing_receipt(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from chronovisor.hosts import server
-        from chronovisor.ingest import orchestrator
-        from chronovisor.raw.save_transaction import (
+        from chronovisor.core.save_transaction import (
             attach_save_transaction_marker,
             make_save_transaction,
         )
+        from chronovisor.hosts import server
+        from chronovisor.ingest import orchestrator
 
         tool_fn = (
             server.chronovisor_record.fn

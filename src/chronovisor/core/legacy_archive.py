@@ -11,15 +11,15 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeGuard
 
 import zstandard as zstd
 
 from chronovisor.core.hashutil import sha256_bytes as _sha256
 from chronovisor.core.hashutil import sha256_file as _sha256_path
 from chronovisor.core.link_fix import atomic_write
+from chronovisor.core.raw_segment import CAPTURE_TIMEZONE, RawSegmentCorrupt
 from chronovisor.core.sealed_artifact_decoder import schema_matches
-from chronovisor.raw.raw_segment import CAPTURE_TIMEZONE, RawSegmentCorrupt
 
 LEGACY_ARCHIVE_SCHEMA = "chronovisor.raw-legacy-archive.v1"
 DEFAULT_ARCHIVE_BYTES = 128 * 1024 * 1024
@@ -40,7 +40,7 @@ class LegacyArchiveMember:
 
 
 
-def _safe_raw_id(value: object) -> bool:
+def _safe_raw_id(value: object) -> TypeGuard[str]:
     """Accept historical Unicode basenames without weakening path safety."""
 
     return (
@@ -124,7 +124,9 @@ def iter_legacy_members(raw_dir: Path) -> Iterator[LegacyArchiveMember]:
             )
 
 
-def _iter_tar_members(archive_path: Path):
+def _iter_tar_members(
+    archive_path: Path,
+) -> Iterator[tuple[tarfile.TarFile, tarfile.TarInfo]]:
     with archive_path.open("rb") as source:
         with zstd.ZstdDecompressor(max_window_size=256 * 1024 * 1024).stream_reader(
             source

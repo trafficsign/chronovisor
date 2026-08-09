@@ -350,8 +350,9 @@ def test_projection_parent_resolution_reuses_one_raw_store_snapshot(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from chronovisor.core import raw_store
     from chronovisor.ops import dashboard
-    from chronovisor.raw import raw_semantic_projection, raw_store
+    from chronovisor.raw import raw_semantic_projection
 
     raw_dir = tmp_path / "raw"
     raw_dir.mkdir()
@@ -410,8 +411,8 @@ def test_projection_parent_resolution_reuses_one_raw_store_snapshot(
 def test_projection_parent_resolution_verifies_archive_once_without_member_reads(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    from chronovisor.core import legacy_archive
     from chronovisor.ops import dashboard
-    from chronovisor.raw import legacy_archive
 
     raw_dir = tmp_path / "raw"
     raw_dir.mkdir()

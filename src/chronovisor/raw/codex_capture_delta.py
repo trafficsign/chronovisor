@@ -4,12 +4,12 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from chronovisor.raw.codex_transcript import (
+from chronovisor.core.codex_transcript import (
     TranscriptRecord,
     TranscriptSlice,
     serialize_transcript_records,
 )
-from chronovisor.raw.transcript import CodexSaveError as CodexSaveError
+from chronovisor.core.transcript import CodexSaveError as CodexSaveError
 
 
 def bounded_transcript_slice(

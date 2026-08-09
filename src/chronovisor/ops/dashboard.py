@@ -1096,7 +1096,7 @@ def _projection_parent_name(
     parent_name = f"save-{expected_idempotency_key}.md"
     try:
         if raw_store is None:
-            from chronovisor.raw.raw_store import RawStore
+            from chronovisor.core.raw_store import RawStore
 
             raw_store = RawStore(raw_dir)
         unit = raw_store.resolve(parent_name)
@@ -1106,7 +1106,7 @@ def _projection_parent_name(
             # Verify the compressed archive object once, then use the member
             # digest bound into that verified manifest. Reopening each member
             # separately repeatedly decompressed the same tar stream.
-            from chronovisor.raw.legacy_archive import verify_legacy_manifest
+            from chronovisor.core.legacy_archive import verify_legacy_manifest
 
             member = unit.archive_member
             archive_path = getattr(member, "archive_path", None)
@@ -1134,8 +1134,8 @@ def _projection_parent_raw_names_by_child(
 ) -> dict[str, set[str]]:
     """Resolve projection children to verified lossless saved raws."""
 
+    from chronovisor.core.raw_store import RawStore
     from chronovisor.raw.raw_semantic_projection import verify_projection_bundle
-    from chronovisor.raw.raw_store import RawStore
 
     raw_store = RawStore(raw_dir)
     verified_archives: set[Path] = set()
@@ -1268,7 +1268,7 @@ def _save_history_snapshot(
             for path in effective_raw_paths
         ]
     elif raw_dir.exists():
-        from chronovisor.raw.raw_store import RawStore
+        from chronovisor.core.raw_store import RawStore
 
         store = RawStore(raw_dir)
         reference_dir = raw_dir.parent / "runtime" / "raw-projections" / "parents"
@@ -4271,7 +4271,7 @@ def build_snapshot() -> dict[str, Any]:
 
     cached_status = runtime_status.read_status()
     orch_state = orchestrator._load_state()
-    from chronovisor.raw.raw_store import RawStore
+    from chronovisor.core.raw_store import RawStore
 
     raw_dir = CHRONOVISOR_ROOT / "raw"
     raw_store = RawStore(raw_dir)

@@ -128,7 +128,7 @@ def capture_baseline(
         sensitivity_counts[str(meta.get("sensitivity") or "normal")] += 1
     raw_count = 0
     try:
-        from chronovisor.raw.raw_store import RawStore
+        from chronovisor.core.raw_store import RawStore
 
         raw_count = sum(1 for _unit in RawStore(root / "raw").iter_units())
     except Exception:

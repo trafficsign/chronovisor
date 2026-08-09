@@ -334,7 +334,7 @@ def reconcile_librarian_state(
         and not link_index["unresolved_count"]
     )
     try:
-        from chronovisor.raw.raw_store import RawStore
+        from chronovisor.core.raw_store import RawStore
 
         raw_units = sum(1 for _unit in RawStore(root / "raw").iter_units())
     except Exception:

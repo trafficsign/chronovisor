@@ -7,6 +7,10 @@ from pathlib import Path
 
 import pytest
 
+from chronovisor.core.save_transaction import (
+    attach_save_transaction_marker,
+    make_save_transaction,
+)
 from chronovisor.raw.raw_semantic_projection import (
     PROJECTION_BUNDLE_RECEIPT_SCHEMA,
     PROJECTION_CHILD_SCHEMA,
@@ -16,10 +20,6 @@ from chronovisor.raw.raw_semantic_projection import (
     project_reassembled_raws,
     projection_bundle_state_for_parent,
     verify_projection_bundle,
-)
-from chronovisor.raw.save_transaction import (
-    attach_save_transaction_marker,
-    make_save_transaction,
 )
 
 

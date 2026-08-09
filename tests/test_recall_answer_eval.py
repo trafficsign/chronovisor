@@ -12,7 +12,7 @@ from typing import Any
 import pytest
 
 from chronovisor.core.durable_state import DurableStateError, seal_object
-from chronovisor.raw.raw_segment import append_capture
+from chronovisor.core.raw_segment import append_capture
 from chronovisor.recall import recall_answer_eval
 from chronovisor.recall.recall_runtime import stable_prompt_hash
 

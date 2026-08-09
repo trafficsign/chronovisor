@@ -983,7 +983,7 @@ def test_source_recall_provenance_uses_exact_turn_time_for_repeated_prompt(
 def test_capture_cursor_processes_delayed_corrections_exactly_once(
     monkeypatch, tmp_path: Path
 ) -> None:
-    from chronovisor.raw import codex_transcript
+    from chronovisor.core import codex_transcript
 
     records = [
         SimpleNamespace(role="user", line=1, text="same source prompt"),
@@ -1043,7 +1043,7 @@ def test_capture_skips_normal_turns_but_advances_cursor_idempotently(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    from chronovisor.raw import codex_transcript
+    from chronovisor.core import codex_transcript
 
     session_file = tmp_path / "session.jsonl"
     transcript = SimpleNamespace(
@@ -1106,7 +1106,7 @@ def test_capture_bare_denial_requires_real_recall_candidate(
     has_recall_candidate: bool,
     expected: int,
 ) -> None:
-    from chronovisor.raw import codex_transcript
+    from chronovisor.core import codex_transcript
 
     session_file = tmp_path / "session.jsonl"
     page = tmp_path / "memory.md"
@@ -1627,7 +1627,7 @@ def test_capture_hook_only_enqueues_negative_feedback_without_draining_models(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    from chronovisor.raw import codex_transcript
+    from chronovisor.core import codex_transcript
 
     session_file = tmp_path / "session.jsonl"
     transcript = SimpleNamespace(

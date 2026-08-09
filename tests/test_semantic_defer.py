@@ -212,7 +212,8 @@ def test_defer_reconciliation_shares_one_raw_snapshot_across_packets(
     semantic_defer_wiki: tuple[Path, Path],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor.raw import failure_supervisor, raw_store
+    from chronovisor.core import raw_store
+    from chronovisor.raw import failure_supervisor
 
     chronovisor_root, artifact = semantic_defer_wiki
     error = _no_quorum_error(_sha256(artifact))

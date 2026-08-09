@@ -17,8 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from chronovisor.core.sealed_artifact_decoder import schema_matches
-from chronovisor.raw.raw_segment import (
+from chronovisor.core.raw_segment import (
     RawSegmentCommit,
     RawSegmentCorrupt,
     manifest_commits,
@@ -26,6 +25,7 @@ from chronovisor.raw.raw_segment import (
     read_open_range,
     read_sealed_range,
 )
+from chronovisor.core.sealed_artifact_decoder import schema_matches
 
 RawLayoutMode = Literal["legacy", "shadow", "v2"]
 RawStorageKind = Literal[
@@ -138,7 +138,7 @@ class RawStore:
                 )
 
     def _legacy_archive_units(self) -> Iterator[RawUnit]:
-        from chronovisor.raw.legacy_archive import iter_legacy_members
+        from chronovisor.core.legacy_archive import iter_legacy_members
 
         for member in iter_legacy_members(self.raw_dir):
             # Projection manifests/receipts/noop records may share a legacy
@@ -253,7 +253,7 @@ class RawStore:
                 )
             return value
         if unit.storage == "legacy_archive":
-            from chronovisor.raw.legacy_archive import (
+            from chronovisor.core.legacy_archive import (
                 LegacyArchiveMember,
                 read_legacy_member,
             )
@@ -345,7 +345,7 @@ class RawStore:
         if unit.commit is not None:
             payload["commit"] = unit.commit.to_dict()
         elif unit.storage == "legacy_archive":
-            from chronovisor.raw.legacy_archive import LegacyArchiveMember
+            from chronovisor.core.legacy_archive import LegacyArchiveMember
 
             if not isinstance(unit.archive_member, LegacyArchiveMember):
                 raise RawSegmentCorrupt("archived Raw has no member evidence")

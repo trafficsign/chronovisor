@@ -419,13 +419,13 @@ def _expected_raw_manifest(*paths: Path) -> dict[str, str]:
 
 
 def _generated_projection_child(chronovisor_root: Path) -> Path:
+    from chronovisor.core.save_transaction import (
+        attach_save_transaction_marker,
+        make_save_transaction,
+    )
     from chronovisor.raw.raw_semantic_projection import (
         project_parent_raw,
         verify_projection_bundle,
-    )
-    from chronovisor.raw.save_transaction import (
-        attach_save_transaction_marker,
-        make_save_transaction,
     )
 
     parent = chronovisor_root / "raw" / "projection-parent.md"

@@ -29,6 +29,10 @@ from typing import Any
 from chronovisor.core.canonical_json import (
     canonical_json_sha256_stringifying as _canonical_json_sha256,
 )
+from chronovisor.core.evidence_grounding import (
+    ProtectedLiteralGroundingError,
+    validate_protected_literals,
+)
 from chronovisor.core.frontmatter import parse as parse_frontmatter
 from chronovisor.core.jsonl_write import append_jsonl_durable
 from chronovisor.core.page_mutation import (
@@ -95,10 +99,6 @@ from chronovisor.ingest.convergence import (
     ConvergenceStore,
     CycleBudget,
     stable_item_key,
-)
-from chronovisor.raw.evidence_grounding import (
-    ProtectedLiteralGroundingError,
-    validate_protected_literals,
 )
 from chronovisor.recall.recall_auditor import (
     TurnContext,
@@ -974,9 +974,9 @@ def capture_session_corrections(
     dry_run: bool = False,
 ) -> dict[str, Any]:
     if host == "codex":
-        from chronovisor.raw.codex_transcript import extract_transcript_slice
+        from chronovisor.core.codex_transcript import extract_transcript_slice
     elif host == "claude-code":
-        from chronovisor.raw.claude_code_transcript import extract_transcript_slice
+        from chronovisor.core.claude_code_transcript import extract_transcript_slice
     else:
         raise ValueError(f"unsupported correction host: {host}")
     transcript = extract_transcript_slice(session_file, after_line=0)
@@ -5368,14 +5368,14 @@ def _resolve_session_file(
     resolved_session_id = session_id or hints.get("session_id")
     resolved_cwd = cwd or hints.get("cwd") or os.environ.get("PWD", "")
     if host == "codex":
-        from chronovisor.raw.codex_transcript import find_session_file
+        from chronovisor.core.codex_transcript import find_session_file
 
         return find_session_file(
             session_id=resolved_session_id,
             cwd=resolved_cwd,
             sessions_root=None,
         )
-    from chronovisor.raw.claude_code_transcript import find_session_file
+    from chronovisor.core.claude_code_transcript import find_session_file
 
     return find_session_file(
         session_id=resolved_session_id,

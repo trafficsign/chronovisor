@@ -963,7 +963,7 @@ def _semantic_packet_source_raws(
             return None
         if verify_sources:
             try:
-                from chronovisor.raw.raw_store import RawStore
+                from chronovisor.core.raw_store import RawStore
 
                 store = raw_store or RawStore(chronovisor_store.RAW_DIR)
                 unit = store.resolve(filename)
@@ -991,7 +991,7 @@ def _semantic_defer_packet_records(
         return []
     raw_store = None
     if verify_sources:
-        from chronovisor.raw.raw_store import RawStore
+        from chronovisor.core.raw_store import RawStore
 
         raw_store = RawStore(chronovisor_store.RAW_DIR)
     records: list[tuple[Path, dict[str, Any], frozenset[str]]] = []
@@ -1842,7 +1842,7 @@ def _operational_deferred_raw_files_unlocked(
     if not isinstance(failures, dict):
         failures = {}
     if raw_paths is None:
-        from chronovisor.raw.raw_store import RawStore
+        from chronovisor.core.raw_store import RawStore
 
         store = RawStore(chronovisor_store.RAW_DIR)
         reference_dir = chronovisor_store.RAW_DIR.parent / "runtime" / "raw-projections" / "parents"
@@ -1908,7 +1908,7 @@ def _operational_deferred_raw_files_unlocked(
                 continue
         raw_path = available_paths.get(raw_file)
         if raw_path is None:
-            from chronovisor.raw.raw_store import RawStore
+            from chronovisor.core.raw_store import RawStore
 
             store = RawStore(chronovisor_store.RAW_DIR)
             unit = store.resolve(raw_file)

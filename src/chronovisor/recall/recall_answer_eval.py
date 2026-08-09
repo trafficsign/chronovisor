@@ -40,11 +40,20 @@ from chronovisor.core.durable_state import (
     canonical_sha256 as _sealed_canonical_sha,
 )
 from chronovisor.core.jsonl_write import append_jsonl_durable
+from chronovisor.core.raw_segment import copy_source_interval
+from chronovisor.core.raw_store import RawStore
 from chronovisor.core.recall_log_schema import (
     join_used_recall_episodes,
     page_ids_from_record,
 )
 from chronovisor.core.recall_runtime_paths import RECALL_DIR
+from chronovisor.core.save_transaction import (
+    find_published_save_transaction,
+    make_save_transaction,
+    parse_save_transaction_receipt,
+    save_session_key,
+    validate_published_save_receipt,
+)
 from chronovisor.core.store import (
     CHRONOVISOR_ROOT,
     INDEX_FILE,
@@ -65,15 +74,6 @@ from chronovisor.decision.machine_consensus_receipt import (
     load_machine_consensus_receipt,
     search_label_candidate_packet_error,
     validate_machine_consensus_receipt,
-)
-from chronovisor.raw.raw_segment import copy_source_interval
-from chronovisor.raw.raw_store import RawStore
-from chronovisor.raw.save_transaction import (
-    find_published_save_transaction,
-    make_save_transaction,
-    parse_save_transaction_receipt,
-    save_session_key,
-    validate_published_save_receipt,
 )
 from chronovisor.recall.content_correction import complete_turns, source_recall_record
 from chronovisor.recall.recall_confidence import (
@@ -1105,9 +1105,9 @@ def _raw_slice(path: Path, start_line: int, end_line: int) -> tuple[bytes, str]:
 
 def _extract(host: str, session_file: Path) -> Any:
     if host == "codex":
-        from chronovisor.raw.codex_transcript import extract_transcript_slice
+        from chronovisor.core.codex_transcript import extract_transcript_slice
     elif host == "claude-code":
-        from chronovisor.raw.claude_code_transcript import extract_transcript_slice
+        from chronovisor.core.claude_code_transcript import extract_transcript_slice
     else:
         raise ValueError(f"unsupported answer capture host: {host}")
     return extract_transcript_slice(session_file, after_line=0)

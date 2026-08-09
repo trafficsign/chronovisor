@@ -27,6 +27,7 @@ from chronovisor.core.frontmatter import parse as parse_frontmatter
 from chronovisor.core.hashutil import sha256_file as _sha256_path
 from chronovisor.core.jobs import JobStatus, job_store
 from chronovisor.core.page_mutation import decision_authority_lock
+from chronovisor.core.raw_store import RawStore
 from chronovisor.core.store import CHRONOVISOR_ROOT, RAW_DIR
 from chronovisor.core.timeutil import iso_seconds as _iso
 from chronovisor.decision.decision_authority import (
@@ -49,7 +50,6 @@ from chronovisor.decision.semantic_hold import (
     persisted_semantic_no_quorum_hold,
     semantic_no_quorum_hold_error,
 )
-from chronovisor.raw.raw_store import RawStore
 
 RAW_DATE_RE = re.compile(r"(20\d{6})")
 QUEUE_FILE = CHRONOVISOR_ROOT / "review" / "raw-replay-queue.jsonl"
@@ -499,7 +499,7 @@ def _resolve_raw_path(raw_name: str, preferred: object = None) -> Path | None:
     for path in candidates:
         if path.is_file():
             return path
-    from chronovisor.raw.raw_store import RawStore
+    from chronovisor.core.raw_store import RawStore
 
     store = RawStore(RAW_DIR)
     unit = store.resolve(raw_name)
@@ -514,7 +514,7 @@ def _resolve_raw_path(raw_name: str, preferred: object = None) -> Path | None:
 def _logical_raw_bytes(raw_name: str, path: Path) -> bytes:
     """Read the immutable logical Raw behind a flat file or reference."""
 
-    from chronovisor.raw.raw_store import RawStore
+    from chronovisor.core.raw_store import RawStore
 
     store = RawStore(RAW_DIR)
     referenced = store.resolve_reference(path)
@@ -542,9 +542,9 @@ def _replay_ingest_content(
     the replay lifecycle keeps its existing one-job/one-completion contract.
     """
 
+    from chronovisor.core.raw_store import RawStore
     from chronovisor.core.runtime_config import load_ingest_config
     from chronovisor.raw.raw_semantic_projection import project_native_transcript
-    from chronovisor.raw.raw_store import RawStore
 
     store = RawStore(RAW_DIR)
     unit = store.resolve_reference(path) or store.resolve(raw_name)
@@ -590,7 +590,7 @@ def _replay_ingest_content(
 
 
 def _logical_raw_date(raw_name: str, path: Path) -> str:
-    from chronovisor.raw.raw_store import RawStore
+    from chronovisor.core.raw_store import RawStore
 
     store = RawStore(RAW_DIR)
     unit = store.resolve_reference(path) or store.resolve(raw_name)

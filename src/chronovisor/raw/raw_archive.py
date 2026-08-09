@@ -12,11 +12,11 @@ from pathlib import Path
 from typing import Any
 
 from chronovisor.core.hashutil import sha256_bytes as _sha256
-from chronovisor.raw.legacy_archive import (
+from chronovisor.core.legacy_archive import (
     migrate_processed_legacy,
     verify_legacy_manifest,
 )
-from chronovisor.raw.raw_segment import (
+from chronovisor.core.raw_segment import (
     CAPTURE_TIMEZONE,
     RawSegmentCorrupt,
     journal_path_for,
@@ -26,7 +26,7 @@ from chronovisor.raw.raw_segment import (
     seal_segment,
     verify_manifest,
 )
-from chronovisor.raw.raw_store import RawStore
+from chronovisor.core.raw_store import RawStore
 
 _PROJECTION_MANIFEST_RE = re.compile(
     r"^semantic-(?P<projection>[0-9a-f]{64})\.manifest\.json$"

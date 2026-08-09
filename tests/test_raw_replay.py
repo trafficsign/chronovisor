@@ -365,7 +365,7 @@ def test_select_raws_stops_reading_bodies_after_limit(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    from chronovisor.raw.raw_store import RawStore
+    from chronovisor.core.raw_store import RawStore
 
     paths = _isolate_paths(tmp_path, monkeypatch)
     first = paths["raw"] / "20260701-codex-first.md"

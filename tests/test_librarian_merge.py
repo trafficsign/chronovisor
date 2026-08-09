@@ -3,9 +3,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from chronovisor.core.legacy_archive import migrate_processed_legacy
 from chronovisor.ingest.page_registry import PageRegistry
 from chronovisor.librarian.librarian_merge import prepare_cluster_plan
-from chronovisor.raw.legacy_archive import migrate_processed_legacy
 from chronovisor.recall.merge_transaction import (
     apply_merge_plan,
     cleanup_expired_preimages,

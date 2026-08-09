@@ -152,7 +152,7 @@ def _raw_host(path: Path) -> str:
 
 
 def capture_kpi() -> dict[str, Any]:
-    from chronovisor.raw.raw_store import RawStore
+    from chronovisor.core.raw_store import RawStore
 
     raws = tuple(RawStore(RAW_DIR).iter_units()) if RAW_DIR.exists() else ()
     artifact_dir = CHRONOVISOR_ROOT / "runtime" / "raw-projections" / "artifacts"

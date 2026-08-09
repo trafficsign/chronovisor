@@ -28,12 +28,12 @@ from chronovisor.core.canonical_json import (
 )
 from chronovisor.core.durable_state import fsync_directory as _fsync_directory
 from chronovisor.core.hashutil import sha256_bytes as _sha256
-from chronovisor.core.sealed_artifact_decoder import schema_matches
-from chronovisor.raw.raw_segment import RawSegmentCommit
-from chronovisor.raw.save_transaction import (
+from chronovisor.core.raw_segment import RawSegmentCommit
+from chronovisor.core.save_transaction import (
     SaveTransactionReceipt,
     parse_save_transaction_receipt,
 )
+from chronovisor.core.sealed_artifact_decoder import schema_matches
 
 PROJECTION_POLICY_VERSION = 2
 PROJECTION_MANIFEST_SCHEMA = "chronovisor.raw-semantic-projection-manifest.v1"
@@ -983,7 +983,7 @@ def project_native_transcript(
         phase: str | None = None
         event_type: str | None = None
         if commit.host == "codex":
-            from chronovisor.raw.codex_transcript import codex_semantic_view
+            from chronovisor.core.codex_transcript import codex_semantic_view
 
             item_type = event.get("type")
             payload = event.get("payload")
@@ -1006,7 +1006,7 @@ def project_native_transcript(
                 "phase": phase,
             }
         elif commit.host == "claude-code":
-            from chronovisor.raw.claude_code_transcript import claude_semantic_view
+            from chronovisor.core.claude_code_transcript import claude_semantic_view
 
             item_type = event.get("type")
             message = event.get("message")

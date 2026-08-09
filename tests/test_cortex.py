@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from chronovisor.core.durable_state import write_sealed_json
+from chronovisor.core.raw_segment import RawSegmentReceipt, append_capture
 from chronovisor.knowledge_graph.schema import (
     EvidenceRef,
     RelationRecord,
@@ -18,7 +19,6 @@ from chronovisor.knowledge_graph.schema import (
 )
 from chronovisor.knowledge_graph.store import KnowledgeGraphStore
 from chronovisor.ops import cortex, dashboard
-from chronovisor.raw.raw_segment import RawSegmentReceipt, append_capture
 from chronovisor.recall.recall_field_schema import (
     ActivationNode,
     FieldEvent,

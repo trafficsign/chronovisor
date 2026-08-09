@@ -18,7 +18,7 @@ from collections.abc import Iterable
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeGuard
 from zoneinfo import ZoneInfo
 
 import zstandard as zstd
@@ -133,7 +133,7 @@ class RawSegmentReceipt:
         }
 
 
-def _is_sha256(value: object) -> bool:
+def _is_sha256(value: object) -> TypeGuard[str]:
     return (
         isinstance(value, str)
         and len(value) == 64

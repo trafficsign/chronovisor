@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from chronovisor.raw.raw_store import RawStore
+from chronovisor.core.raw_store import RawStore
 
 _MARKER_PREFIX = "<!-- chronovisor-save-transaction:"
 _MARKER_SUFFIX = "-->"
@@ -151,8 +151,8 @@ def publish_transcript_capture(
 ) -> dict[str, Any]:
     """Publish according to the reversible legacy/shadow/v2 feature flag."""
 
-    from chronovisor.raw.raw_segment import append_capture
-    from chronovisor.raw.raw_store import raw_layout_mode
+    from chronovisor.core.raw_segment import append_capture
+    from chronovisor.core.raw_store import raw_layout_mode
 
     mode = raw_layout_mode(chronovisor_root=raw_dir.parent)
     if mode == "legacy":
@@ -285,8 +285,8 @@ def publish_oversized_shadow(
 ) -> dict[str, Any]:
     """Mirror a legacy fragment set as one native source record in shadow mode."""
 
-    from chronovisor.raw.raw_segment import append_capture, copy_source_interval
-    from chronovisor.raw.raw_store import raw_layout_mode
+    from chronovisor.core.raw_segment import append_capture, copy_source_interval
+    from chronovisor.core.raw_store import raw_layout_mode
 
     if raw_layout_mode(chronovisor_root=raw_dir.parent) != "shadow":
         return {}
@@ -525,7 +525,7 @@ def find_published_save_transaction(
             candidates.append(
                 PublishedSaveTransaction(transaction=transaction, path=path)
             )
-    from chronovisor.raw.legacy_archive import iter_legacy_members, read_legacy_member
+    from chronovisor.core.legacy_archive import iter_legacy_members, read_legacy_member
 
     for member in iter_legacy_members(raw_dir):
         if not member.raw_id.startswith(prefix):

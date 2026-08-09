@@ -4,12 +4,12 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from chronovisor.raw.claude_code_transcript import (
+from chronovisor.core.claude_code_transcript import (
     TranscriptRecord,
     TranscriptSlice,
     serialize_transcript_records,
 )
-from chronovisor.raw.transcript import ClaudeCodeSaveError as ClaudeCodeSaveError
+from chronovisor.core.transcript import ClaudeCodeSaveError as ClaudeCodeSaveError
 
 
 def bounded_transcript_slice(

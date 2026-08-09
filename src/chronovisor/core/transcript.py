@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -15,7 +16,7 @@ class ClaudeCodeSaveError(RuntimeError):
     """Raised when the Claude Code save flow cannot complete."""
 
 
-def iter_jsonl(path: Path):
+def iter_jsonl(path: Path) -> Iterator[tuple[int, dict[str, Any]]]:
     with path.open() as handle:
         for line_no, line in enumerate(handle, start=1):
             try:

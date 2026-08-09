@@ -298,7 +298,7 @@ def get_pending_raw_files() -> list[Path]:
 
     state = _load_state()
     processed = set(state.get("processed_raw_files", []))
-    from chronovisor.raw.raw_store import RawStore
+    from chronovisor.core.raw_store import RawStore
 
     raw_store = RawStore(RAW_DIR)
     reference_dir = RAW_DIR.parent / "runtime" / "raw-projections" / "parents"
@@ -748,7 +748,7 @@ def _prepare_pending_raw_units(
             fragments.append(fragment)
             fragment_paths.add(path)
 
-    from chronovisor.raw.raw_store import RawStore
+    from chronovisor.core.raw_store import RawStore
 
     raw_store = RawStore(RAW_DIR)
     units: list[_PendingRawUnit] = []
@@ -1133,6 +1133,7 @@ def run_pending_ingest(
         # before publishing the durable in-flight reservation; otherwise a
         # long-lived MCP process can leave a false-live ``__pending__`` slot.
         from chronovisor.core.jobs import JobStatus, job_store
+        from chronovisor.core.raw_store import raw_layout_mode
         from chronovisor.core.runtime_config import load_ingest_config
         from chronovisor.ingest.ingest import run_ingest
         from chronovisor.raw.raw_completion_ack import (
@@ -1152,7 +1153,6 @@ def run_pending_ingest(
             project_reassembled_raws,
             verify_projection_bundle,
         )
-        from chronovisor.raw.raw_store import raw_layout_mode
 
         initial_ollama_status = get_ollama_status()
         authority_preflight = ingest_authority_preflight(
@@ -1379,7 +1379,7 @@ def run_pending_ingest(
                         / "artifacts"
                     )
                     if unit.native_raw_bytes is not None:
-                        from chronovisor.raw.raw_segment import RawSegmentCommit
+                        from chronovisor.core.raw_segment import RawSegmentCommit
 
                         if not isinstance(unit.native_commit, RawSegmentCommit):
                             raise RuntimeError("native Raw unit lost its commit")

@@ -1118,7 +1118,7 @@ def _release_operational_failure_after_local_repair_unlocked(
     affected_raws: list[dict[str, Any]] = []
     legacy_state_raws: list[str] = []
     try:
-        from chronovisor.raw.raw_store import RawStore
+        from chronovisor.core.raw_store import RawStore
 
         raw_store = RawStore(chronovisor_store.RAW_DIR)
         for raw_file, entry in affected_group:

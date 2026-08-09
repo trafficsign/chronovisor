@@ -9,11 +9,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from chronovisor.raw.transcript import (
+from chronovisor.core.transcript import (
     CodexSaveError,
     iter_jsonl,
 )
-from chronovisor.raw.transcript import (
+from chronovisor.core.transcript import (
     content_has_capture_payload as _content_has_capture_payload,
 )
 
@@ -302,10 +302,11 @@ def message_content_text(content: Any) -> str:
         for part in content:
             text = ""
             if isinstance(part, dict):
+                candidate_text = part.get("text")
                 if part.get("type") in {"input_text", "output_text"}:
-                    text = part.get("text") if isinstance(part.get("text"), str) else ""
-                elif isinstance(part.get("text"), str):
-                    text = part["text"]
+                    text = candidate_text if isinstance(candidate_text, str) else ""
+                elif isinstance(candidate_text, str):
+                    text = candidate_text
             elif isinstance(part, str):
                 text = part
             if text and not is_injected_context(text):

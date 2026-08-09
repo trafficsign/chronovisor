@@ -16,6 +16,7 @@ from typing import Any
 from chronovisor.core.durable_state import DurableStateError, read_sealed_json
 from chronovisor.core.frontmatter import parse as parse_frontmatter
 from chronovisor.core.link_fix import extract_targets
+from chronovisor.core.raw_segment import RawSegmentCommit, RawSegmentCorrupt
 from chronovisor.knowledge_graph.store import KnowledgeGraphStore
 from chronovisor.ops.cortex_stream import (
     websocket_accept as websocket_accept,
@@ -23,7 +24,6 @@ from chronovisor.ops.cortex_stream import (
 from chronovisor.ops.cortex_stream import (
     websocket_text_frame as websocket_text_frame,
 )
-from chronovisor.raw.raw_segment import RawSegmentCommit, RawSegmentCorrupt
 
 _GRAPH_CACHE_LOCK = threading.Lock()
 _GRAPH_CACHE: dict[str, dict[str, Any]] = {}

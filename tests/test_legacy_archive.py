@@ -7,15 +7,15 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from chronovisor.raw.legacy_archive import (
+from chronovisor.core.legacy_archive import (
     iter_legacy_members,
     migrate_processed_legacy,
     read_legacy_member,
     verify_legacy_manifest,
 )
+from chronovisor.core.raw_segment import RawSegmentCorrupt
+from chronovisor.core.raw_store import RawStore
 from chronovisor.raw.raw_archive import archive_status
-from chronovisor.raw.raw_segment import RawSegmentCorrupt
-from chronovisor.raw.raw_store import RawStore
 
 
 def _legacy_files(raw_dir: Path) -> tuple[Path, Path]:

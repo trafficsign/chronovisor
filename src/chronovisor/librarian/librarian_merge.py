@@ -25,10 +25,10 @@ from chronovisor.core.migration_snapshot import (
     create_incremental_restore_point,
     restore_drill,
 )
+from chronovisor.core.raw_store import RawStore
 from chronovisor.core.store import CHRONOVISOR_ROOT
 from chronovisor.ingest.page_registry import PageRegistry, PageRegistryError
 from chronovisor.ingest.uid_link_index import build_uid_link_index
-from chronovisor.raw.raw_store import RawStore
 from chronovisor.recall.classification import strongest_sensitivity
 from chronovisor.recall.duplicate_review import build_duplicate_review_queue
 from chronovisor.recall.librarian import append_librarian_event, librarian_now_iso

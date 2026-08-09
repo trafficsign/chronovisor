@@ -7,11 +7,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from chronovisor.raw.transcript import (
+from chronovisor.core.transcript import (
     ClaudeCodeSaveError,
     iter_jsonl,
 )
-from chronovisor.raw.transcript import (
+from chronovisor.core.transcript import (
     content_has_capture_payload as _content_has_capture_payload,
 )
 

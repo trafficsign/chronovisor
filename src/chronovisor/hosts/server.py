@@ -312,11 +312,11 @@ def chronovisor_log(limit: int = 20) -> str:
 
 def _raw_defer_counts() -> tuple[int, int, int]:
     """Return raw total plus semantic and operational queue-hold counts."""
+    from chronovisor.core.raw_store import RawStore
     from chronovisor.raw.failure_supervisor import (
         SEMANTIC_NO_QUORUM_DEFER_REASON,
         operational_deferred_raw_files,
     )
-    from chronovisor.raw.raw_store import RawStore
 
     raw_store = RawStore(RAW_DIR)
     reference_dir = RAW_DIR.parent / "runtime" / "raw-projections" / "parents"
@@ -1504,7 +1504,7 @@ def chronovisor_provenance(page: str) -> str:
     # Find raw files that might be the source.
     # raw files are walked in mtime-descending order; once a file exceeds the
     # threshold, every subsequent file also exceeds it, so we can break.
-    from chronovisor.raw.raw_store import RawStore
+    from chronovisor.core.raw_store import RawStore
 
     raw_candidates = []
     raw_store = RawStore(RAW_DIR)
