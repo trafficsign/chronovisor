@@ -54,7 +54,7 @@ from chronovisor.decision.entity_backfill_contract import (
 from chronovisor.decision.entity_backfill_contract import (
     validate_entity_backfill_proposal as validate_entity_backfill_proposal,
 )
-from chronovisor.ops.lint import (
+from chronovisor.ingest.lint import (
     StructuredReviewer,
     build_semantic_mutation_proposal,
     review_semantic_mutation,

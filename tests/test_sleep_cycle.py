@@ -143,7 +143,7 @@ def test_run_lane_defers_before_cycle_finalization_reserve(monkeypatch) -> None:
 
 def _patch_sleep_dependencies(monkeypatch) -> None:
     monkeypatch.setattr(
-        "chronovisor.ops.snapshot.snapshot_chronovisor",
+        "chronovisor.ingest.snapshot.snapshot_chronovisor",
         lambda reason: {"status": "clean", "reason": reason},
     )
     monkeypatch.setattr(
@@ -529,7 +529,7 @@ def test_sleep_dry_run_does_not_snapshot_or_write_history(monkeypatch) -> None:
     writes: list[dict] = []
     monkeypatch.setattr(sleep_cycle, "_append_history", lambda row: writes.append(row))
     monkeypatch.setattr(
-        "chronovisor.ops.snapshot.snapshot_chronovisor",
+        "chronovisor.ingest.snapshot.snapshot_chronovisor",
         lambda _reason: (_ for _ in ()).throw(AssertionError("snapshot must not run")),
     )
 

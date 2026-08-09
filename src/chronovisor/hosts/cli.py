@@ -959,7 +959,7 @@ def dispatch(args: argparse.Namespace) -> int:
     if args.command == "hold-report":
         return _dispatch_hold_report(args.json)
     if args.command == "snapshot":
-        from chronovisor.ops.snapshot import snapshot_chronovisor
+        from chronovisor.ingest.snapshot import snapshot_chronovisor
 
         data = snapshot_chronovisor(args.reason, allow_empty=args.allow_empty)
         if args.json:

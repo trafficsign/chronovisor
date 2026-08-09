@@ -26,7 +26,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 import contextlib
 
 from chronovisor.core.store import CHRONOVISOR_ROOT, PAGES_DIR
-from chronovisor.ops.lint import check
+from chronovisor.ingest.lint import check
 from chronovisor.raw.legacy_semantic_write import (
     block_legacy_semantic_mutation,
 )

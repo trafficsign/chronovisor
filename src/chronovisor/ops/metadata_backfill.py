@@ -15,7 +15,7 @@ from chronovisor.core.page_mutation import chronovisor_mutation_lock
 from chronovisor.core.runtime_config import runtime_repo_root
 from chronovisor.core.store import CHRONOVISOR_ROOT, all_pages, page_id_from_path
 from chronovisor.ingest.ingest import ensure_recall_metadata_frontmatter
-from chronovisor.ops.lint import (
+from chronovisor.ingest.lint import (
     build_semantic_mutation_proposal,
     review_semantic_mutation,
     semantic_review_effect_lock,

@@ -13476,7 +13476,7 @@ class TestLinkFixProtectedRegions:
         assert extract_targets(text, strip=True) == ["real"]
 
     def test_lint_replace_leaves_code_frontmatter_and_inline_code(self) -> None:
-        from chronovisor.ops.lint import _replace_link_in_content
+        from chronovisor.ingest.lint import _replace_link_in_content
 
         content = (
             "---\ntitle: [[ghost]]\n---\n"
@@ -13494,7 +13494,7 @@ class TestLinkFixProtectedRegions:
         assert "[[other]]" in new_content
 
     def test_lint_plaintext_fallback_uses_alias(self) -> None:
-        from chronovisor.ops.lint import _replace_link_in_content
+        from chronovisor.ingest.lint import _replace_link_in_content
 
         new_content, count = _replace_link_in_content(
             "See [[ghost|visible name]] and [[ghost#old]].",

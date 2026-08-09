@@ -92,7 +92,7 @@ def normalize_pages(
             conflicts.append({"path": str(path), **result})
             if write:
                 from chronovisor.core.runtime_config import runtime_repo_root
-                from chronovisor.ops.lint import (
+                from chronovisor.ingest.lint import (
                     build_semantic_mutation_proposal,
                     review_semantic_mutation,
                     semantic_review_effect_lock,

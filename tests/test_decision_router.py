@@ -69,9 +69,9 @@ from chronovisor.decision.local_structured import (
     structured_request_sha256,
 )
 from chronovisor.ingest.ingest import INGEST_FRONTIER_DECISION_SCHEMA
+from chronovisor.ingest.lint import SAFE_FIX_REVIEW_SCHEMA
 from chronovisor.lab.adoption_corpus import contract_candidates
 from chronovisor.ops.autonomy import DUPLICATE_FRONTIER_SCHEMA
-from chronovisor.ops.lint import SAFE_FIX_REVIEW_SCHEMA
 from chronovisor.ops.lint_repair import TAG_REPAIR_SCHEMA
 from chronovisor.ops.orphan_link import ORPHAN_FRONTIER_SCHEMA
 from chronovisor.recall.content_correction import (

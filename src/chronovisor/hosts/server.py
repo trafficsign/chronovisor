@@ -1211,7 +1211,7 @@ def chronovisor_check() -> str:
     Issues include: broken links, stale pages, orphan pages, duplicates.
     Does NOT auto-fix anything.
     """
-    from chronovisor.ops.lint import check, issue_lane, summarize_issues
+    from chronovisor.ingest.lint import check, issue_lane, summarize_issues
 
     issues = check()
     issue_limit = 40
@@ -1254,7 +1254,7 @@ def chronovisor_apply(dry_run: bool = False, fuzzy: bool = True) -> str:
         dry_run: True なら実際には書き込まず actions のプレビューだけ返す。
         fuzzy: False にすると broken_link の自動書き換えを無効化する (より保守的)。
     """
-    from chronovisor.ops.lint import (
+    from chronovisor.ingest.lint import (
         apply_safe_fixes,
         check,
         issue_lane,
@@ -1266,7 +1266,7 @@ def chronovisor_apply(dry_run: bool = False, fuzzy: bool = True) -> str:
     snapshot = {"status": "skipped", "reason": "dry_run"} if dry_run else None
     if snapshot is None:
         try:
-            from chronovisor.ops.snapshot import snapshot_chronovisor
+            from chronovisor.ingest.snapshot import snapshot_chronovisor
 
             snapshot = snapshot_chronovisor("before chronovisor_apply")
         except Exception as exc:

@@ -825,7 +825,7 @@ def _build_safe_fix_prompt(
 
 build_safe_fix_prompt = _build_safe_fix_prompt
 
-# Public cross-package names; ops.lint re-exports its historical private seams.
+# Public cross-package names; ingest.lint re-exports its historical private seams.
 canonical_hash = _canonical_hash
 render_review_packet = _render_review_packet
 render_safe_fix_prompt = _render_safe_fix_prompt

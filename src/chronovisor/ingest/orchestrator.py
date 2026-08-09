@@ -1739,7 +1739,7 @@ def run_lint_if_due(*, dry_run: bool = False) -> dict:
     if not should:
         return {"triggered": False, "reason": reason}
 
-    from chronovisor.ops.lint import (
+    from chronovisor.ingest.lint import (
         apply_safe_fixes,
         check,
         summarize_issues,
@@ -1748,7 +1748,7 @@ def run_lint_if_due(*, dry_run: bool = False) -> dict:
 
     issues = check()
     try:
-        from chronovisor.ops.snapshot import snapshot_chronovisor
+        from chronovisor.ingest.snapshot import snapshot_chronovisor
 
         snapshot = (
             {"status": "skipped", "reason": "dry_run"}

@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from chronovisor.ops.snapshot import snapshot_chronovisor
+from chronovisor.ingest.snapshot import snapshot_chronovisor
 
 
 @pytest.mark.skipif(shutil.which("git") is None, reason="git is required")
