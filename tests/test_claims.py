@@ -7,12 +7,13 @@ from pathlib import Path
 
 import pytest
 
-from chronovisor.recall import claims as legacy_claims
-from chronovisor.search import claims
+from chronovisor.core import claims
+from chronovisor.recall import claims as review_claims
 
 
-def test_legacy_claims_module_is_search_implementation() -> None:
-    assert legacy_claims is claims
+def test_recall_claims_owns_cli_and_reexports_core_api() -> None:
+    assert review_claims.rebuild_claim_index is claims.rebuild_claim_index
+    assert review_claims.search_claims is claims.search_claims
 
 
 def _append_claim_worker(
@@ -182,10 +183,10 @@ def test_default_conflict_review_preserves_all_claims(
         + "\n",
         encoding="utf-8",
     )
-    monkeypatch.setattr(claims, "CLAIM_CONFLICT_FILE", conflict_file)
-    monkeypatch.setattr(claims, "CLAIM_REVIEW_FILE", review_file)
+    monkeypatch.setattr(review_claims, "CLAIM_CONFLICT_FILE", conflict_file)
+    monkeypatch.setattr(review_claims, "CLAIM_REVIEW_FILE", review_file)
 
-    result = claims.review_claim_conflicts()
+    result = review_claims.review_claim_conflicts()
 
     review = result["results"][0]["review"]
     assert review["decision"] == "preserved"
@@ -204,11 +205,11 @@ def test_disabled_conflict_lane_preserves_queue_without_review_or_write(
         json.dumps({"conflict_id": "conflict-1", "claims": []}) + "\n",
         encoding="utf-8",
     )
-    monkeypatch.setattr(claims, "CLAIM_CONFLICT_FILE", conflict_file)
-    monkeypatch.setattr(claims, "CLAIM_REVIEW_FILE", review_file)
+    monkeypatch.setattr(review_claims, "CLAIM_CONFLICT_FILE", conflict_file)
+    monkeypatch.setattr(review_claims, "CLAIM_REVIEW_FILE", review_file)
     monkeypatch.setenv("CHRONOVISOR_DECISION_POLICY_CLAIMS_CONFLICT", "off")
 
-    result = claims.review_claim_conflicts(
+    result = review_claims.review_claim_conflicts(
         reviewer=lambda *_args, **_kwargs: pytest.fail("disabled lane must not review")
     )
 

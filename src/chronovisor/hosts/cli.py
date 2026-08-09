@@ -1143,7 +1143,7 @@ def dispatch(args: argparse.Namespace) -> int:
             print(render_summary(data))
         return 0
     if args.command == "claims":
-        from chronovisor.search.claims import (
+        from chronovisor.core.claims import (
             rebuild_claim_index,
             sanitize_claim_ledger,
             search_claims,

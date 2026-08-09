@@ -186,11 +186,11 @@ def _patch_sleep_dependencies(monkeypatch) -> None:
         lambda write=True: {"counts": {"pages": 2}, "pages": {}},
     )
     monkeypatch.setattr(
-        "chronovisor.search.claims.rebuild_claim_index",
+        "chronovisor.core.claims.rebuild_claim_index",
         lambda write=True: {"claims": 3},
     )
     monkeypatch.setattr(
-        "chronovisor.search.claims.review_claim_conflicts",
+        "chronovisor.recall.claims.review_claim_conflicts",
         lambda **kwargs: {"status": "ok", "write": kwargs["write"]},
     )
     monkeypatch.setattr(

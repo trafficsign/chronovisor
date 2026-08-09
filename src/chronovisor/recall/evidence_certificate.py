@@ -125,7 +125,7 @@ def supporting_span(
     if isinstance(summary, str) and summary.strip():
         candidates.append((summary.strip(), 0))
     try:
-        from chronovisor.search.claims import page_claims
+        from chronovisor.core.claims import page_claims
 
         for claim in page_claims(page_id):
             claim_span = claim.get("evidence_span")

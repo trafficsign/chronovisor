@@ -29,6 +29,7 @@ from typing import Any
 from chronovisor.core.canonical_json import (
     canonical_json_sha256_stringifying as _canonical_json_sha256,
 )
+from chronovisor.core.claims import rebuild_claim_index
 from chronovisor.core.evidence_grounding import (
     ProtectedLiteralGroundingError,
     validate_protected_literals,
@@ -122,7 +123,6 @@ from chronovisor.recall.recall_runtime import (
     _feedback_exclusive_lock,
     recall_log_snapshot,
 )
-from chronovisor.search.claims import rebuild_claim_index
 
 PROJECT_ROOT = runtime_repo_root()
 LANE = "content_correction"

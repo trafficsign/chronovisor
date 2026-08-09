@@ -498,6 +498,7 @@ def _run_sleep_cycle(
     duplicate_limit: int = 200,
     dry_run: bool = False,
 ) -> dict[str, Any]:
+    from chronovisor.core.claims import rebuild_claim_index
     from chronovisor.ingest.convergence import ConvergenceStore, CycleBudget
     from chronovisor.ingest.raw_replay import (
         AUTO_SIGNAL_SOURCES,
@@ -520,7 +521,6 @@ def _run_sleep_cycle(
         write_review_queue,
     )
     from chronovisor.recall.recall_prefetch import build_prefetch_cache
-    from chronovisor.search.claims import rebuild_claim_index
     from chronovisor.search.retention import build_retention_scores
 
     try:
@@ -628,11 +628,11 @@ def _run_sleep_cycle(
         "retention", lambda: build_retention_scores(write=not dry_run)
     )
     claims = artifact_lane("claims", lambda: rebuild_claim_index(write=not dry_run))
-    import chronovisor.search.claims as recall_claims
+    from chronovisor.recall.claims import review_claim_conflicts
 
     claim_conflicts = _run_lane(
         "claim_conflicts",
-        lambda: recall_claims.review_claim_conflicts(
+        lambda: review_claim_conflicts(
             limit=per_lane_frontier,
             write=not dry_run,
         ),

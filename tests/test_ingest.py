@@ -9706,9 +9706,9 @@ class TestReadBackVerification:
     def test_refresh_waits_for_semantic_delta_before_read_back(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from chronovisor.core import index_store
+        from chronovisor.core import claims, index_store
         from chronovisor.ingest import ingest, ingest_readback, state_register
-        from chronovisor.search import claims, search
+        from chronovisor.search import search
 
         events: list[object] = []
 
@@ -9763,9 +9763,9 @@ class TestReadBackVerification:
     def test_refresh_failures_are_logged_and_nonfatal(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from chronovisor.core import index_store
+        from chronovisor.core import claims, index_store
         from chronovisor.ingest import ingest, ingest_readback, state_register
-        from chronovisor.search import claims, search
+        from chronovisor.search import search
 
         events: list[str] = []
         logs: list[str] = []

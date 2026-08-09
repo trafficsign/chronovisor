@@ -1494,6 +1494,23 @@ S_RETIRED_SEARCH_CORE_PRIMITIVE_SITE_IDS = (
     "arch:f481e2259f7daf6d5bce82372f24d8c360a89c0a706a7db849616b641403d83f",
     "arch:fac6035b891c30bdf04ff9877da4b3f5d2b82a6f67f13cab4bfd22f87ca0f3f5",
 )
+S_RETIRED_SEARCH_CLAIM_CORE_SITE_IDS = (
+    "arch:1b32444f73c626eb34f35860e60828b32f94f58e829f9cbfc6a175b6909e8f8c",
+    "arch:33b5293c3c355bc8df728778f6ad385760c3f43f2af607035b934ca5bab2d678",
+    "arch:373ece9c0b05abfdac38d20a83aa96ab5e2d21f22eaf0bd043d888685af3eae7",
+    "arch:48060b0a4d34d146a4a80630499474783be52590082b2f7a0e5252a436ae5f57",
+    "arch:4d483cb236384c02f509b80cd437e41909ccd94a6da591dc1ce78adbb8e2502a",
+    "arch:5839eff8f2ca86359a915b8f182d2df59754ad33ef169d32cf2fc6b8d6b131ab",
+    "arch:61c0902355c7fca8e3b53e2a1a6f3d68472680867998da63c69d1465572f97de",
+    "arch:7a8e96022ed2b6a015d6be9f99cd7ad464eca4ce7c56ebcffeedcb94d2ab925f",
+    "arch:85fd107e15dfff00ccaaba200df5cd747171c48dc222cc47d6ca631f5b128048",
+    "arch:8c84c24b6f324b9b623e8cc09287512e74c612aaf193a2a7b414fe05f937365f",
+    "arch:aa44d7a6eafd292df5d5882a73a48ec190c89be5ef3b33fb454ada9b1d5fbb71",
+    "arch:aa7bf89303cb95a23505077bc7f664371b91c2a7a85c5347ffae3d1688b45ef7",
+    "arch:b78e070cfa117d268c427f0c39c78e32b13231fccd78681e480638b19ef7f8a4",
+    "arch:e5622799376d633d15b4e8c7f2f35134641ac377733d9408c4197a67d5d3b178",
+    "arch:f3145b6140bb8ffdec54ba9a5d049b94a4206348ce9e7fd52f7f3a7ccf7f6d73",
+)
 FINAL_RETIRED_PROJECTION_REPLACEMENT_SITE_IDS = (
     "arch:258413d5360b8db7f162ac61c060f6476ba684b99e9e53dbc515cb6318a4c8b2",
     "arch:c217aacdc549c1316a8de1f0dac24ffe3edc55946c56b6a46103b3693a4eaeb2",
@@ -1606,6 +1623,7 @@ RETIREMENT_HISTORY = {
                 *S_RETIRED_RAW_STORAGE_SITE_IDS,
                 *S_RETIRED_RAW_PIPELINE_SITE_IDS,
                 *S_RETIRED_SEARCH_CORE_PRIMITIVE_SITE_IDS,
+                *S_RETIRED_SEARCH_CLAIM_CORE_SITE_IDS,
                 *V_RETIRED_RECALL_SHIM_SITE_IDS,
                 *V_RETIRED_REMAINING_SHIM_SITE_IDS,
                 *V_RETIRED_DURABLE_MODULE_MAPPING_SITE_IDS,
@@ -2365,7 +2383,7 @@ def test_current_exception_ledger_seed_and_schema_inventory_are_exact(
     assert detected_ids == ledger_ids == set(seed["exception_semantic_ids"]["active"])
     _assert_exact_retirement_history(architecture, seed)
     assert len(edge_rows) == current["worktree_architecture"]["edge_count"] == 49
-    assert sum(len(row["sites"]) for row in edge_rows) == len(raw_cross_sites) == 1420
+    assert sum(len(row["sites"]) for row in edge_rows) == len(raw_cross_sites) == 1416
     assert {
         field: counts[field]
         for field in (
@@ -2378,7 +2396,7 @@ def test_current_exception_ledger_seed_and_schema_inventory_are_exact(
         )
     } == {
         "exceptions": 49,
-        "cross_domain_sites": 1420,
+        "cross_domain_sites": 1416,
         "production_to_lab_edges": 0,
         "production_to_lab_static_sites": 0,
         "production_to_lab_dynamic_sites": 0,
