@@ -629,6 +629,14 @@ S_RETIRED_ENTITY_CONTRACT_SITE_IDS = (
     "arch:c6226b5173c3cc77fc31529d6218e1bca3cb21a0aaf3fb7ca17d4935a57d40f6",
     "arch:c6325520c463ebb71b006924fe1a7724e7f87ce550460869f4e5afd8c0ab9db2",
 )
+S_RETIRED_SELF_HEAL_PRIMITIVES_EDGE_IDS = (
+    "arch:04f3596a6c0dc3acbc3d1ef4dcbb8eebedb2335764f44cd678a8188b1f10f90a",
+)
+S_RETIRED_SELF_HEAL_PRIMITIVES_SITE_IDS = (
+    "arch:5b3fea450cf873a771c190e308c2543ce6d95e393b80f289061e1ca997a595f9",
+    "arch:9cb68acba89b58ddbd5441d21e3877eef4864c8a751267e52600ceeeef66dea9",
+    "arch:acf5694ab39bfc7b43c348d3988004f6145899ba13d2954d85d1e7294f3dd8d8",
+)
 V_RETIRED_RECALL_SHIM_SITE_IDS = (
     "arch:3896d20fb9ddf2c56d06af026b9b40d6399902891ab291f3a6eba063ba8b4d28",
     "arch:c99c20705c2ffb63854eb252145ab9e7f20ea9b0adb7eef8892e39abb52ceb1c",
@@ -932,6 +940,7 @@ RETIREMENT_HISTORY = {
                 *S_RETIRED_GRAPH_MAINTENANCE_EDGE_IDS,
                 *S_RETIRED_EMBEDDING_EDGE_IDS,
                 *S_RETIRED_INGEST_RECALL_EDGE_IDS,
+                *S_RETIRED_SELF_HEAL_PRIMITIVES_EDGE_IDS,
                 *V_RETIRED_REMAINING_SHIM_EXCEPTION_IDS,
             )
         )
@@ -978,6 +987,7 @@ RETIREMENT_HISTORY = {
                 *S_RETIRED_INGEST_RECALL_SITE_IDS,
                 *S_RETIRED_LINT_CONTRACT_SITE_IDS,
                 *S_RETIRED_ENTITY_CONTRACT_SITE_IDS,
+                *S_RETIRED_SELF_HEAL_PRIMITIVES_SITE_IDS,
                 *V_RETIRED_RECALL_SHIM_SITE_IDS,
                 *V_RETIRED_REMAINING_SHIM_SITE_IDS,
                 *V_RETIRED_DURABLE_MODULE_MAPPING_SITE_IDS,
@@ -1297,6 +1307,7 @@ def _without_persisted_retirement_history(
         + len(S_RETIRED_GRAPH_MAINTENANCE_EDGE_IDS)
         + len(S_RETIRED_EMBEDDING_EDGE_IDS)
         + len(S_RETIRED_INGEST_RECALL_EDGE_IDS)
+        + len(S_RETIRED_SELF_HEAL_PRIMITIVES_EDGE_IDS)
         + len(V_RETIRED_REMAINING_SHIM_EXCEPTION_IDS)
     )
     active_counts["by_category"]["dynamic_import"] = (
@@ -1725,8 +1736,8 @@ def test_current_exception_ledger_seed_and_schema_inventory_are_exact(
 
     assert detected_ids == ledger_ids == set(seed["exception_semantic_ids"]["active"])
     _assert_exact_retirement_history(architecture, seed)
-    assert len(edge_rows) == current["worktree_architecture"]["edge_count"] == 68
-    assert sum(len(row["sites"]) for row in edge_rows) == len(raw_cross_sites) == 1330
+    assert len(edge_rows) == current["worktree_architecture"]["edge_count"] == 67
+    assert sum(len(row["sites"]) for row in edge_rows) == len(raw_cross_sites) == 1339
     assert {
         field: counts[field]
         for field in (
@@ -1738,15 +1749,15 @@ def test_current_exception_ledger_seed_and_schema_inventory_are_exact(
             "compatibility_contracts",
         )
     } == {
-        "exceptions": 68,
-        "cross_domain_sites": 1330,
+        "exceptions": 67,
+        "cross_domain_sites": 1339,
         "production_to_lab_edges": 0,
         "production_to_lab_static_sites": 0,
         "production_to_lab_dynamic_sites": 0,
         "compatibility_contracts": 51,
     }
     assert counts["by_category"] == {
-        "cross_domain_edge": 68,
+        "cross_domain_edge": 67,
     }
     assert counts["compatibility_by_kind"] == {
         "console_entrypoint": 51,

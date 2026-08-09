@@ -13,7 +13,7 @@ import subprocess
 import tempfile
 import uuid
 from collections.abc import Mapping, Sequence
-from contextlib import contextmanager, nullcontext, suppress
+from contextlib import contextmanager, nullcontext
 from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -23,7 +23,37 @@ from urllib.parse import urlsplit
 from chronovisor.core import runtime_status
 from chronovisor.core import store as chronovisor_store
 from chronovisor.core.alias_store import add_alias
+from chronovisor.core.background_jobs import start_self_heal_background
 from chronovisor.core.page_mutation import decision_authority_lock
+from chronovisor.core.self_heal_cancellation import (
+    PACKET_CANCELLATION_SCHEMA_VERSION as PACKET_CANCELLATION_SCHEMA_VERSION,
+)
+from chronovisor.core.self_heal_cancellation import (
+    PACKET_CANCELLATION_STATUS as PACKET_CANCELLATION_STATUS,
+)
+from chronovisor.core.self_heal_cancellation import (
+    PACKET_CANCELLATION_STATUSES as _PACKET_CANCELLATION_STATUSES,
+)
+from chronovisor.core.self_heal_cancellation import (
+    PACKET_SUCCESS_STATUSES,
+    packet_cancellation_dir,
+    packet_cancellation_path,
+)
+from chronovisor.core.self_heal_cancellation import (
+    VERIFIED_LOCAL_REPAIR_CANCELLATION_STATUS as VERIFIED_LOCAL_REPAIR_CANCELLATION_STATUS,
+)
+from chronovisor.core.self_heal_cancellation import (
+    read_json as _read_json,
+)
+from chronovisor.core.self_heal_cancellation import (
+    read_packet_cancellation as _read_packet_cancellation,
+)
+from chronovisor.core.self_heal_cancellation import (
+    request_packet_cancellation as request_packet_cancellation,
+)
+from chronovisor.core.self_heal_cancellation import (
+    write_json as _write_json,
+)
 from chronovisor.decision.decision_authority import (
     compare_semantic_authority,
     current_semantic_authority,
@@ -49,6 +79,11 @@ from chronovisor.ops.convergence import (
     is_human_required_result,
 )
 
+start_background = start_self_heal_background
+_packet_cancellation_dir = packet_cancellation_dir
+_packet_cancellation_path = packet_cancellation_path
+_PACKET_SUCCESS_STATUSES = PACKET_SUCCESS_STATUSES
+
 SELF_HEAL_STATUSES = {
     "pending_local_repair",
     "local_repair_failed",
@@ -73,13 +108,6 @@ RUNNING_STATUSES = {
     "frontier_running",
 }
 
-PACKET_CANCELLATION_SCHEMA_VERSION = 1
-PACKET_CANCELLATION_STATUS = "superseded_semantic_defer"
-VERIFIED_LOCAL_REPAIR_CANCELLATION_STATUS = "superseded_verified_local_repair"
-_PACKET_CANCELLATION_STATUSES = frozenset(
-    {PACKET_CANCELLATION_STATUS, VERIFIED_LOCAL_REPAIR_CANCELLATION_STATUS}
-)
-_PACKET_SUCCESS_STATUSES = frozenset({"local_repair_applied", "frontier_approved"})
 _SYSTEM_INCIDENT_PRESTART_STATUSES = frozenset(
     {
         "pending_frontier",
@@ -166,8 +194,6 @@ def _packet_dir() -> Path:
     return _failures_dir() / "packets"
 
 
-def _packet_cancellation_dir() -> Path:
-    return _failures_dir() / "packet-cancellations"
 
 
 def _local_repair_dir() -> Path:
@@ -202,29 +228,6 @@ def _notification_file() -> Path:
     return _failures_dir() / "notifications.json"
 
 
-def _read_json(path: Path) -> dict[str, Any]:
-    return json.loads(path.read_text(encoding="utf-8"))
-
-
-def _write_json(path: Path, data: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(
-        prefix=f".{path.name}.",
-        suffix=".tmp",
-        dir=path.parent,
-    )
-    tmp = Path(tmp_name)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(data, handle, indent=2, ensure_ascii=False, default=str)
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp, path)
-    except Exception:
-        with suppress(OSError):
-            tmp.unlink()
-        raise
 
 
 class _PacketCancellationRequested(RuntimeError):
@@ -235,93 +238,6 @@ class _PacketCancellationRequested(RuntimeError):
         self.result = result
 
 
-def _packet_cancellation_path(packet_path: Path) -> Path:
-    return _packet_cancellation_dir() / f"{packet_path.name}.json"
-
-
-def _read_packet_cancellation(
-    packet_path: Path,
-    packet: dict[str, Any] | None = None,
-) -> dict[str, Any] | None:
-    path = _packet_cancellation_path(packet_path)
-    try:
-        cancellation = _read_json(path)
-    except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError):
-        return None
-    resolved_packet = str(packet_path.expanduser().resolve(strict=False))
-    if (
-        not isinstance(cancellation, dict)
-        or cancellation.get("schema_version") != PACKET_CANCELLATION_SCHEMA_VERSION
-        or cancellation.get("status") not in _PACKET_CANCELLATION_STATUSES
-        or cancellation.get("packet_path") != resolved_packet
-        or not isinstance(cancellation.get("requested_at"), str)
-        or not str(cancellation.get("requested_at") or "").strip()
-    ):
-        return None
-    if packet is not None:
-        for field in ("failure_id", "fingerprint"):
-            expected = cancellation.get(field)
-            observed = packet.get(field)
-            if expected is not None and expected != observed:
-                return None
-    return cancellation
-
-
-def request_packet_cancellation(
-    packet_path: Path,
-    *,
-    reason: str,
-    superseded_by_packet: Path,
-    cancellation_status: str = PACKET_CANCELLATION_STATUS,
-) -> dict[str, Any]:
-    """Publish a lock-free cancellation observed by an in-flight worker.
-
-    A worker owns the packet lock for the duration of local/frontier inference,
-    so waiting for that lock would make supersession ineffective.  This sidecar
-    is the durable out-of-band CAS signal.  The worker checks it after model
-    calls and immediately before every mutation or frontier boundary.
-    """
-
-    resolved = packet_path.expanduser().resolve(strict=False)
-    superseded_by = superseded_by_packet.expanduser().resolve(strict=False)
-    if cancellation_status not in _PACKET_CANCELLATION_STATUSES:
-        raise ValueError("packet cancellation status is not allowlisted")
-    try:
-        loaded_packet = _read_json(resolved)
-    except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError):
-        loaded_packet = {}
-    packet = loaded_packet if isinstance(loaded_packet, dict) else {}
-    if packet.get("status") in _PACKET_SUCCESS_STATUSES:
-        return {
-            "accepted": False,
-            "reason": "packet_already_completed",
-            "packet_path": str(resolved),
-            "status": packet.get("status"),
-        }
-    cancellation_path = _packet_cancellation_path(resolved)
-    prior = _read_packet_cancellation(resolved, packet)
-    requested_at = (
-        str(prior.get("requested_at"))
-        if isinstance(prior, dict)
-        else datetime.now().isoformat()
-    )
-    cancellation = {
-        "schema_version": PACKET_CANCELLATION_SCHEMA_VERSION,
-        "status": cancellation_status,
-        "packet_path": str(resolved),
-        "packet_name": resolved.name,
-        "failure_id": packet.get("failure_id"),
-        "fingerprint": packet.get("fingerprint"),
-        "requested_at": requested_at,
-        "reason": str(reason).strip() or "superseded",
-        "superseded_by_packet": str(superseded_by),
-    }
-    _write_json(cancellation_path, cancellation)
-    return {
-        "accepted": True,
-        "cancellation_path": str(cancellation_path),
-        **cancellation,
-    }
 
 
 def _apply_packet_cancellation(
@@ -3756,28 +3672,6 @@ def run_auto_apply_error_self_heal(
     }
 
 
-def start_background(packet_path: Path) -> dict[str, Any] | None:
-    """Durably queue routine self-heal without detaching a Python worker.
-
-    The historical name is retained for callers in the failure supervisors.
-    Execution belongs to the single-flight converge queue; this function never
-    starts a process and never enables the exceptional frontier repair plane.
-    """
-
-    if os.environ.get("CHRONOVISOR_SELF_HEAL_AUTORUN", "1") in {"0", "false", "False"}:
-        return None
-    if os.environ.get("PYTEST_CURRENT_TEST"):
-        return None
-    from chronovisor.core.background_jobs import enqueue_job
-
-    resolved = packet_path.expanduser().resolve(strict=False)
-    return enqueue_job(
-        name="self-heal",
-        module="chronovisor.ops.self_heal",
-        args=["--packet", str(resolved)],
-        env={},
-        stdin_text="",
-    )
 
 
 def enqueue_system_code_repair(packet_path: Path) -> dict[str, Any]:

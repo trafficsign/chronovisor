@@ -754,9 +754,9 @@ def _launch_self_heal(packet_path: Path) -> str | None:
     """Submit a published packet and return a serializable launch error."""
 
     try:
-        from chronovisor.ops.self_heal import start_background
+        from chronovisor.core.background_jobs import start_self_heal_background
 
-        start_background(packet_path)
+        start_self_heal_background(packet_path)
     except Exception as exc:
         error = f"{exc.__class__.__name__}: {exc}"
         runtime_status.safe_append_event(
@@ -1192,7 +1192,9 @@ def _supersede_replaced_operational_packets(
             or packet.get("status") not in _CANCELLABLE_OPERATIONAL_PACKET_STATUSES
         ):
             continue
-        from chronovisor.ops.self_heal import request_packet_cancellation
+        from chronovisor.core.self_heal_cancellation import (
+            request_packet_cancellation,
+        )
 
         cancellation = request_packet_cancellation(
             packet_path,

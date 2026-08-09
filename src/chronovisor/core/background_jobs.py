@@ -304,6 +304,27 @@ def enqueue_job(
         return {**job, "enqueued": True, "coalesced": False}
 
 
+def start_self_heal_background(packet_path: Path) -> dict[str, Any] | None:
+    """Durably queue routine self-heal without detaching a Python worker."""
+
+    if os.environ.get("CHRONOVISOR_SELF_HEAL_AUTORUN", "1") in {
+        "0",
+        "false",
+        "False",
+    }:
+        return None
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        return None
+    resolved = packet_path.expanduser().resolve(strict=False)
+    return enqueue_job(
+        name="self-heal",
+        module="chronovisor.ops.self_heal",
+        args=["--packet", str(resolved)],
+        env={},
+        stdin_text="",
+    )
+
+
 def cancel_matching_jobs(
     *,
     name: str,

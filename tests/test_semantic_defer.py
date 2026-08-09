@@ -750,8 +750,8 @@ def test_semantic_defer_survives_unreadable_packet_during_cancellation_publish(
     monkeypatch: pytest.MonkeyPatch,
     reader_mode: str,
 ) -> None:
+    from chronovisor.core import self_heal_cancellation
     from chronovisor.decision import failure_supervisor
-    from chronovisor.ops import self_heal
 
     chronovisor_root, artifact = semantic_defer_wiki
     raw_path = chronovisor_root / "raw" / f"cancel-{reader_mode}.md"
@@ -767,9 +767,9 @@ def test_semantic_defer_survives_unreadable_packet_during_cancellation_publish(
         def unavailable(_path: Path) -> dict[str, object]:
             raise FileNotFoundError("simulated cancellation read race")
 
-        monkeypatch.setattr(self_heal, "_read_json", unavailable)
+        monkeypatch.setattr(self_heal_cancellation, "read_json", unavailable)
     else:
-        monkeypatch.setattr(self_heal, "_read_json", lambda _path: [])
+        monkeypatch.setattr(self_heal_cancellation, "read_json", lambda _path: [])
 
     semantic = failure_supervisor.record_raw_failure(
         raw_path=raw_path,

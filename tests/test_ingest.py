@@ -6990,10 +6990,10 @@ class TestOrchestrator:
     def test_failed_fragment_projection_is_deferred_without_moving_group(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        from chronovisor.core import background_jobs
         from chronovisor.decision import failure_supervisor
         from chronovisor.ingest import ingest as ingest_mod
         from chronovisor.ingest import orchestrator
-        from chronovisor.ops import self_heal
         from chronovisor.raw import raw_semantic_projection
 
         record = json.dumps([{"role": "user", "text": "grounded record"}])
@@ -7025,7 +7025,7 @@ class TestOrchestrator:
             "project_reassembled_raws",
             fail_projection,
         )
-        monkeypatch.setattr(self_heal, "start_background", lambda _path: None)
+        monkeypatch.setattr(background_jobs, "start_self_heal_background", lambda _path: None)
 
         result = orchestrator.run_pending_ingest(force=True)
         second = orchestrator.run_pending_ingest(force=True)
@@ -8053,14 +8053,14 @@ class TestPerRawOrchestrator:
         monkeypatch: pytest.MonkeyPatch,
         corruption: str,
     ) -> None:
+        from chronovisor.core import background_jobs
         from chronovisor.ingest import orchestrator
-        from chronovisor.ops import self_heal
         from chronovisor.raw import raw_completion_ack
 
         raw_path = isolated_wiki / "raw" / f"ack-{corruption}.md"
         raw_path.write_text("original source", encoding="utf-8")
         calls = self._install_single_page_ingest(monkeypatch, isolated_wiki)
-        monkeypatch.setattr(self_heal, "start_background", lambda _path: None)
+        monkeypatch.setattr(background_jobs, "start_self_heal_background", lambda _path: None)
         completed = orchestrator.run_pending_ingest(force=True)
         assert completed["files_processed"] == [raw_path.name]
 
@@ -8096,14 +8096,14 @@ class TestPerRawOrchestrator:
     def test_receipt_publication_failure_defers_without_reingest(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        from chronovisor.core import background_jobs
         from chronovisor.ingest import orchestrator
-        from chronovisor.ops import self_heal
         from chronovisor.raw import raw_completion_ack
 
         raw_path = isolated_wiki / "raw" / "ack-publish-failure.md"
         raw_path.write_text("source survives", encoding="utf-8")
         calls = self._install_single_page_ingest(monkeypatch, isolated_wiki)
-        monkeypatch.setattr(self_heal, "start_background", lambda _path: None)
+        monkeypatch.setattr(background_jobs, "start_self_heal_background", lambda _path: None)
         monkeypatch.setattr(
             raw_completion_ack,
             "atomic_write",
@@ -8372,13 +8372,13 @@ class TestPerRawOrchestrator:
     def test_frontier_nonconvergence_immediately_queues_self_heal(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        from chronovisor.core import background_jobs
         from chronovisor.decision import failure_supervisor
-        from chronovisor.ops import self_heal
 
         raw_path = isolated_wiki / "raw" / "frontier-loop.md"
         raw_path.write_text("grounded source", encoding="utf-8")
         started: list[Path] = []
-        monkeypatch.setattr(self_heal, "start_background", started.append)
+        monkeypatch.setattr(background_jobs, "start_self_heal_background", started.append)
 
         result = failure_supervisor.record_raw_failure(
             raw_path=raw_path,
@@ -8401,13 +8401,13 @@ class TestPerRawOrchestrator:
     def test_local_consensus_nonconvergence_immediately_queues_self_heal(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        from chronovisor.core import background_jobs
         from chronovisor.decision import failure_supervisor
-        from chronovisor.ops import self_heal
 
         raw_path = isolated_wiki / "raw" / "local-consensus-loop.md"
         raw_path.write_text("grounded source", encoding="utf-8")
         started: list[Path] = []
-        monkeypatch.setattr(self_heal, "start_background", started.append)
+        monkeypatch.setattr(background_jobs, "start_self_heal_background", started.append)
 
         result = failure_supervisor.record_raw_failure(
             raw_path=raw_path,
@@ -8430,15 +8430,15 @@ class TestPerRawOrchestrator:
     def test_invalid_local_authority_is_one_operational_failure_not_bad_raws(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        from chronovisor.core import background_jobs
         from chronovisor.decision import failure_supervisor
-        from chronovisor.ops import self_heal
 
         first_raw = isolated_wiki / "raw" / "first-authority-failure.md"
         second_raw = isolated_wiki / "raw" / "second-authority-failure.md"
         first_raw.write_text("first grounded source", encoding="utf-8")
         second_raw.write_text("second grounded source", encoding="utf-8")
         started: list[Path] = []
-        monkeypatch.setattr(self_heal, "start_background", started.append)
+        monkeypatch.setattr(background_jobs, "start_self_heal_background", started.append)
         error = (
             "local consensus authority unavailable: "
             "adoption_artifact_invalid:evaluation evidence is inconsistent"
@@ -8494,12 +8494,12 @@ class TestPerRawOrchestrator:
     def test_valid_adopted_authority_releases_invalid_artifact_hold(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        from chronovisor.core import background_jobs
         from chronovisor.decision import failure_supervisor
-        from chronovisor.ops import self_heal
 
         raw_path = isolated_wiki / "raw" / "authority-recovered.md"
         raw_path.write_text("grounded source", encoding="utf-8")
-        monkeypatch.setattr(self_heal, "start_background", lambda _path: None)
+        monkeypatch.setattr(background_jobs, "start_self_heal_background", lambda _path: None)
 
         result = failure_supervisor.record_raw_failure(
             raw_path=raw_path,
@@ -8566,13 +8566,13 @@ class TestPerRawOrchestrator:
     def test_generation_repair_exhaustion_is_operational_not_bad_raw(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        from chronovisor.core import background_jobs
         from chronovisor.decision import failure_supervisor
-        from chronovisor.ops import self_heal
 
         raw_path = isolated_wiki / "raw" / "generation-contract.md"
         raw_path.write_text("grounded source", encoding="utf-8")
         started: list[Path] = []
-        monkeypatch.setattr(self_heal, "start_background", started.append)
+        monkeypatch.setattr(background_jobs, "start_self_heal_background", started.append)
 
         result = failure_supervisor.record_raw_failure(
             raw_path=raw_path,
@@ -8595,13 +8595,13 @@ class TestPerRawOrchestrator:
     def test_generation_transport_error_is_operational_not_transient(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        from chronovisor.core import background_jobs
         from chronovisor.decision import failure_supervisor
-        from chronovisor.ops import self_heal
 
         raw_path = isolated_wiki / "raw" / "generation-transport.md"
         raw_path.write_text("grounded source", encoding="utf-8")
         started: list[Path] = []
-        monkeypatch.setattr(self_heal, "start_background", started.append)
+        monkeypatch.setattr(background_jobs, "start_self_heal_background", started.append)
 
         result = failure_supervisor.record_raw_failure(
             raw_path=raw_path,
@@ -8803,13 +8803,13 @@ class TestPerRawOrchestrator:
         error: str,
         expected_class: str,
     ) -> None:
+        from chronovisor.core import background_jobs
         from chronovisor.decision import failure_supervisor
-        from chronovisor.ops import self_heal
 
         raw_path = isolated_wiki / "raw" / "large.md"
         raw_path.write_text("large source", encoding="utf-8")
         started: list[Path] = []
-        monkeypatch.setattr(self_heal, "start_background", started.append)
+        monkeypatch.setattr(background_jobs, "start_self_heal_background", started.append)
 
         first = failure_supervisor.record_raw_failure(
             raw_path=raw_path,
@@ -8855,15 +8855,15 @@ class TestPerRawOrchestrator:
     def test_same_operational_fingerprint_across_raws_reuses_one_self_heal(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        from chronovisor.core import background_jobs
         from chronovisor.decision import failure_supervisor
-        from chronovisor.ops import self_heal
 
         first_raw = isolated_wiki / "raw" / "first.md"
         second_raw = isolated_wiki / "raw" / "second.md"
         first_raw.write_text("first source", encoding="utf-8")
         second_raw.write_text("second source", encoding="utf-8")
         started: list[Path] = []
-        monkeypatch.setattr(self_heal, "start_background", started.append)
+        monkeypatch.setattr(background_jobs, "start_self_heal_background", started.append)
         error = "triage structured failure [schema_invalid]: malformed schema"
 
         first = failure_supervisor.record_raw_failure(
@@ -8896,8 +8896,8 @@ class TestPerRawOrchestrator:
     def test_operational_self_heal_launch_failure_is_durable_and_not_retried(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        from chronovisor.core import background_jobs
         from chronovisor.decision import failure_supervisor
-        from chronovisor.ops import self_heal
 
         raw_path = isolated_wiki / "raw" / "system-defect.md"
         raw_path.write_text("valid source", encoding="utf-8")
@@ -8908,7 +8908,7 @@ class TestPerRawOrchestrator:
             starts += 1
             raise RuntimeError("queue ledger unavailable")
 
-        monkeypatch.setattr(self_heal, "start_background", fail_start)
+        monkeypatch.setattr(background_jobs, "start_self_heal_background", fail_start)
         error = "triage structured failure [schema_invalid]: malformed schema"
 
         first = failure_supervisor.record_raw_failure(
@@ -8949,10 +8949,10 @@ class TestPerRawOrchestrator:
     def test_operational_defer_skips_second_run_and_repair_success_retries(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        from chronovisor.core import background_jobs
         from chronovisor.core.jobs import JobStatus, job_store
         from chronovisor.ingest import ingest as ingest_mod
         from chronovisor.ingest import orchestrator
-        from chronovisor.ops import self_heal
 
         raw_path = isolated_wiki / "raw" / "operational.md"
         raw_path.write_text("valid source", encoding="utf-8")
@@ -8977,7 +8977,7 @@ class TestPerRawOrchestrator:
 
         monkeypatch.setattr(ingest_mod, "run_ingest", run_ingest)
         monkeypatch.setattr(orchestrator, "is_available", lambda: True)
-        monkeypatch.setattr(self_heal, "start_background", lambda _path: None)
+        monkeypatch.setattr(background_jobs, "start_self_heal_background", lambda _path: None)
 
         first = orchestrator.run_pending_ingest(force=True)
         second = orchestrator.run_pending_ingest(force=True)
@@ -9024,13 +9024,13 @@ class TestPerRawOrchestrator:
     def test_repeated_failure_after_repair_success_queues_fresh_packet(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        from chronovisor.core import background_jobs
         from chronovisor.decision import failure_supervisor
-        from chronovisor.ops import self_heal
 
         raw_path = isolated_wiki / "raw" / "still-broken.md"
         raw_path.write_text("valid source", encoding="utf-8")
         started: list[Path] = []
-        monkeypatch.setattr(self_heal, "start_background", started.append)
+        monkeypatch.setattr(background_jobs, "start_self_heal_background", started.append)
         error = "triage structured failure [schema_invalid]: malformed schema"
 
         first = failure_supervisor.record_raw_failure(
@@ -9058,10 +9058,10 @@ class TestPerRawOrchestrator:
     def test_valid_projection_child_bundle_releases_old_projection_failure(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        from chronovisor.core import background_jobs
         from chronovisor.decision import failure_supervisor
         from chronovisor.ingest import ingest as ingest_mod
         from chronovisor.ingest import orchestrator
-        from chronovisor.ops import self_heal
         from chronovisor.raw import raw_semantic_projection
 
         parent = TestOrchestrator._write_transcript_raw(
@@ -9076,7 +9076,7 @@ class TestPerRawOrchestrator:
         )
         child = projection.child_paths[0]
         orchestrator.mark_raw_processed([parent.name])
-        monkeypatch.setattr(self_heal, "start_background", lambda _path: None)
+        monkeypatch.setattr(background_jobs, "start_self_heal_background", lambda _path: None)
 
         recorded = failure_supervisor.record_raw_failure(
             raw_path=child,
@@ -9120,9 +9120,9 @@ class TestPerRawOrchestrator:
     def test_tampered_projection_child_is_never_quarantined_as_source_raw(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        from chronovisor.core import background_jobs
         from chronovisor.ingest import ingest as ingest_mod
         from chronovisor.ingest import orchestrator
-        from chronovisor.ops import self_heal
         from chronovisor.raw import raw_semantic_projection
 
         parent = TestOrchestrator._write_transcript_raw(
@@ -9138,7 +9138,7 @@ class TestPerRawOrchestrator:
         child = projection.child_paths[0]
         orchestrator.mark_raw_processed([parent.name])
         child.write_text("tampered derived artifact", encoding="utf-8")
-        monkeypatch.setattr(self_heal, "start_background", lambda _path: None)
+        monkeypatch.setattr(background_jobs, "start_self_heal_background", lambda _path: None)
         monkeypatch.setattr(orchestrator, "is_available", lambda: True)
         monkeypatch.setattr(
             ingest_mod,
@@ -9166,8 +9166,8 @@ class TestPerRawOrchestrator:
     def test_completed_projection_parent_bundle_retries_after_commit_crash(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        from chronovisor.core import background_jobs
         from chronovisor.decision import failure_supervisor
-        from chronovisor.ops import self_heal
         from chronovisor.raw import raw_semantic_projection
 
         parent = TestOrchestrator._write_transcript_raw(
@@ -9180,7 +9180,7 @@ class TestPerRawOrchestrator:
             output_dir=isolated_wiki / "raw",
             max_child_bytes=24_000,
         )
-        monkeypatch.setattr(self_heal, "start_background", lambda _path: None)
+        monkeypatch.setattr(background_jobs, "start_self_heal_background", lambda _path: None)
         recorded = failure_supervisor.record_raw_failure(
             raw_path=parent,
             error=(
@@ -9201,8 +9201,8 @@ class TestPerRawOrchestrator:
     def test_incomplete_projection_parent_bundle_is_resumable_but_tamper_is_not(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        from chronovisor.core import background_jobs
         from chronovisor.decision import failure_supervisor
-        from chronovisor.ops import self_heal
         from chronovisor.raw import raw_semantic_projection
 
         parent = TestOrchestrator._write_transcript_raw(
@@ -9228,7 +9228,7 @@ class TestPerRawOrchestrator:
                 output_dir=isolated_wiki / "raw",
                 max_child_bytes=1_400,
             )
-        monkeypatch.setattr(self_heal, "start_background", lambda _path: None)
+        monkeypatch.setattr(background_jobs, "start_self_heal_background", lambda _path: None)
         failure_supervisor.record_raw_failure(
             raw_path=parent,
             error=(
@@ -9308,12 +9308,12 @@ class TestPerRawOrchestrator:
     def test_projection_internal_failure_without_manifest_stays_deferred(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        from chronovisor.core import background_jobs
         from chronovisor.decision import failure_supervisor
-        from chronovisor.ops import self_heal
 
         parent = isolated_wiki / "raw" / "no-manifest-parent.md"
         parent.write_text("valid source with no projection intent", encoding="utf-8")
-        monkeypatch.setattr(self_heal, "start_background", lambda _path: None)
+        monkeypatch.setattr(background_jobs, "start_self_heal_background", lambda _path: None)
         failure_supervisor.record_raw_failure(
             raw_path=parent,
             error=(
@@ -9413,12 +9413,12 @@ class TestPerRawOrchestrator:
         monkeypatch: pytest.MonkeyPatch,
         packet_state: str,
     ) -> None:
+        from chronovisor.core import background_jobs
         from chronovisor.decision import failure_supervisor
-        from chronovisor.ops import self_heal
 
         raw_path = isolated_wiki / "raw" / "deferred.md"
         raw_path.write_text("valid source", encoding="utf-8")
-        monkeypatch.setattr(self_heal, "start_background", lambda _path: None)
+        monkeypatch.setattr(background_jobs, "start_self_heal_background", lambda _path: None)
         result = failure_supervisor.record_raw_failure(
             raw_path=raw_path,
             error="triage structured failure [schema_invalid]: malformed schema",
