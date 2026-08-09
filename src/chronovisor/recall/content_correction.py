@@ -56,11 +56,11 @@ from chronovisor.decision.decision_schema_manifest import (
     FRONTIER_CLASSIFICATION_SCHEMA,
     FRONTIER_REVIEW_SCHEMA,
 )
+from chronovisor.decision.frontier_guard import is_human_required_failure
 from chronovisor.decision.local_structured import ChatRequest, LocalStructuredSession
 from chronovisor.ops.convergence import (
     ConvergenceStore,
     CycleBudget,
-    is_human_required_failure,
     stable_item_key,
 )
 from chronovisor.recall.recall_auditor import (

@@ -6,7 +6,9 @@ from pathlib import Path
 
 import pytest
 
+from chronovisor.decision import frontier_guard
 from chronovisor.decision.semantic_hold import persisted_semantic_no_quorum_hold
+from chronovisor.ops import convergence
 from chronovisor.ops.convergence import (
     ConvergenceStateError,
     ConvergenceStore,
@@ -21,6 +23,16 @@ from chronovisor.ops.convergence import (
 from tests.semantic_hold_support import semantic_authority, semantic_review
 
 NOW = datetime(2026, 7, 10, 12, 0, tzinfo=UTC)
+
+
+def test_human_required_api_is_reexported_from_frontier_guard() -> None:
+    assert convergence.is_human_required_failure is frontier_guard.is_human_required_failure
+    assert convergence.frontier_failure_class is frontier_guard.frontier_failure_class
+    assert convergence.is_human_required_result is frontier_guard.is_human_required_result
+    assert (
+        convergence.HUMAN_REQUIRED_FAILURE_CLASSES
+        is frontier_guard.HUMAN_REQUIRED_FAILURE_CLASSES
+    )
 
 
 def _store(tmp_path: Path, *, policy: RetryPolicy | None = None) -> ConvergenceStore:

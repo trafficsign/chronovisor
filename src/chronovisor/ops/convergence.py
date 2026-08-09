@@ -39,6 +39,18 @@ from typing import Any, Literal
 
 from chronovisor.core import store as chronovisor_store
 from chronovisor.core.timeutil import ensure_utc as _utc_now
+from chronovisor.decision.frontier_guard import (
+    HUMAN_REQUIRED_FAILURE_CLASSES as HUMAN_REQUIRED_FAILURE_CLASSES,
+)
+from chronovisor.decision.frontier_guard import (
+    frontier_failure_class as frontier_failure_class,
+)
+from chronovisor.decision.frontier_guard import (
+    is_human_required_failure as is_human_required_failure,
+)
+from chronovisor.decision.frontier_guard import (
+    is_human_required_result as is_human_required_result,
+)
 from chronovisor.decision.semantic_hold import (
     LOCAL_SEMANTIC_NO_QUORUM,
     build_semantic_no_quorum_hold,
@@ -55,20 +67,6 @@ LOCAL_STATUSES = frozenset({"pending_local", "local_retry", "local_running"})
 FRONTIER_STATUSES = frozenset(
     {"pending_frontier", "frontier_retry", "frontier_running"}
 )
-
-# This allowlist is intentionally narrow.  A model saying "ask a human" is
-# not enough to enter human_required; the failure must be an external access
-# or capability boundary classified by deterministic code.
-HUMAN_REQUIRED_FAILURE_CLASSES = frozenset(
-    {
-        "auth_required",
-        "oauth_required",
-        "quota_or_billing_required",
-        "keychain_permission_required",
-        "secret_store_permission_required",
-    }
-)
-
 
 class ConvergenceError(RuntimeError):
     """Base error for convergence state operations."""
@@ -440,41 +438,6 @@ def exponential_backoff_seconds(
     if base_seconds < 0 or max_seconds < 0:
         raise ValueError("backoff bounds must be >= 0")
     return min(max_seconds, base_seconds * (2 ** (attempt - 1)))
-
-
-def is_human_required_failure(failure_class: str | None) -> bool:
-    return bool(failure_class and failure_class in HUMAN_REQUIRED_FAILURE_CLASSES)
-
-
-def frontier_failure_class(result: object) -> str | None:
-    """Return the machine-classified failure class from a frontier result.
-
-    ``human_required`` is deliberately *not* accepted as evidence.  It is a
-    derived presentation field and may also be emitted by a model or an older
-    worker.  Only the deterministic failure class crosses the external
-    authority boundary.
-    """
-
-    if not isinstance(result, Mapping):
-        return None
-    direct = result.get("failure_class")
-    if isinstance(direct, str) and direct:
-        return direct
-    for key in ("frontier_failure", "failure"):
-        nested = result.get(key)
-        if isinstance(nested, Mapping):
-            failure_class = frontier_failure_class(nested)
-            if failure_class:
-                return failure_class
-    return None
-
-
-def is_human_required_result(result: object) -> bool:
-    """Classify a frontier payload without trusting model-authored booleans."""
-
-    return is_human_required_failure(frontier_failure_class(result))
-
-
 
 
 def _iso(now: datetime | None = None) -> str:

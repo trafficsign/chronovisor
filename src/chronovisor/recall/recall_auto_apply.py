@@ -31,6 +31,7 @@ from chronovisor.core.page_mutation import (
 from chronovisor.core.runtime_config import active_config_file
 from chronovisor.core.tag_rules import validate_tag
 from chronovisor.decision import decision_authority
+from chronovisor.decision.frontier_guard import is_human_required_result
 from chronovisor.decision.semantic_hold import (
     LOCAL_SEMANTIC_NO_QUORUM,
     build_semantic_no_quorum_hold,
@@ -41,7 +42,6 @@ from chronovisor.decision.semantic_hold import (
     semantic_no_quorum_hold_error,
 )
 from chronovisor.ingest.tag_lifecycle import record_new_tag
-from chronovisor.ops.convergence import is_human_required_result
 from chronovisor.recall.recall_hints import (
     add_query_hint,
     load_query_hints,

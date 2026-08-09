@@ -39,6 +39,7 @@ from chronovisor.decision.decision_authority import (
 from chronovisor.decision.decision_schema_manifest import (
     RAW_REPLAY_RECONCILIATION_SCHEMA,
 )
+from chronovisor.decision.frontier_guard import is_human_required_result
 from chronovisor.decision.semantic_hold import (
     LOCAL_SEMANTIC_NO_QUORUM,
     build_semantic_no_quorum_hold,
@@ -48,7 +49,6 @@ from chronovisor.decision.semantic_hold import (
     persisted_semantic_no_quorum_hold,
     semantic_no_quorum_hold_error,
 )
-from chronovisor.ops.convergence import is_human_required_result
 from chronovisor.raw.raw_store import RawStore
 
 RAW_DATE_RE = re.compile(r"(20\d{6})")

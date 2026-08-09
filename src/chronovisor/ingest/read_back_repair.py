@@ -30,6 +30,7 @@ from chronovisor.decision.decision_lane_prompts import (
     READ_BACK_EVIDENCE_POLICY_MARKER as READ_BACK_EVIDENCE_POLICY_MARKER,
 )
 from chronovisor.decision.decision_schema_manifest import READ_BACK_FRONTIER_SCHEMA
+from chronovisor.decision.frontier_guard import HUMAN_REQUIRED_FAILURE_CLASSES
 from chronovisor.decision.semantic_hold import (
     LOCAL_SEMANTIC_NO_QUORUM,
     build_semantic_no_quorum_hold,
@@ -43,7 +44,6 @@ from chronovisor.ingest.read_back_integrity import (
     scan_jsonl_prefix,
     verify_prior_prefix,
 )
-from chronovisor.ops.convergence import HUMAN_REQUIRED_FAILURE_CLASSES
 from chronovisor.recall import recall_hints
 
 FAILURE_FILE = chronovisor_store.CHRONOVISOR_ROOT / "runtime" / "ingest-read-back-failures.jsonl"

@@ -36,6 +36,7 @@ from chronovisor.core.store import CHRONOVISOR_ROOT, find_page
 from chronovisor.decision import decision_authority
 from chronovisor.decision import decision_lane_prompts as _decision_lane_prompts
 from chronovisor.decision.decision_schema_manifest import FRONTIER_LABEL_SCHEMA
+from chronovisor.decision.frontier_guard import is_human_required_result
 from chronovisor.decision.semantic_hold import (
     LOCAL_SEMANTIC_NO_QUORUM,
     build_semantic_no_quorum_hold,
@@ -45,7 +46,6 @@ from chronovisor.decision.semantic_hold import (
     persisted_semantic_no_quorum_hold,
     semantic_no_quorum_hold_error,
 )
-from chronovisor.ops.convergence import is_human_required_result
 from chronovisor.search.feedback_ledger import active_feedback_rows
 from chronovisor.search.negative_feedback import apply_penalties, penalties_for_query
 from chronovisor.search.pipeline import (

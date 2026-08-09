@@ -24,6 +24,7 @@ from chronovisor.core.page_mutation import (
     decision_authority_lock,
 )
 from chronovisor.decision import decision_authority
+from chronovisor.decision.frontier_guard import is_human_required_result
 from chronovisor.decision.semantic_hold import (
     LOCAL_SEMANTIC_NO_QUORUM,
     build_semantic_no_quorum_hold,
@@ -31,7 +32,6 @@ from chronovisor.decision.semantic_hold import (
     is_local_semantic_no_quorum,
     persisted_semantic_no_quorum_hold,
 )
-from chronovisor.ops.convergence import is_human_required_result
 from chronovisor.recall.recall_eval import read_jsonl
 from chronovisor.recall.recall_runtime import (
     RECALL_FEEDBACK_FILE,

@@ -47,6 +47,19 @@ TERMINAL_STATUSES = frozenset(
 )
 FINISH_OUTCOMES = TERMINAL_STATUSES - {"abandoned", "released"}
 
+# This allowlist is intentionally narrow. A model saying "ask a human" is
+# not enough to enter human_required; the failure must be an external access
+# or capability boundary classified by deterministic code.
+HUMAN_REQUIRED_FAILURE_CLASSES = frozenset(
+    {
+        "auth_required",
+        "oauth_required",
+        "quota_or_billing_required",
+        "keychain_permission_required",
+        "secret_store_permission_required",
+    }
+)
+
 _PROCESS_IDENTITY_MATCH = "match"
 _PROCESS_IDENTITY_MISMATCH = "mismatch"
 _PROCESS_IDENTITY_UNAVAILABLE = "unavailable"
@@ -149,6 +162,39 @@ def _mapping_keys(value: object) -> Iterator[str]:
     elif isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
         for nested in value:
             yield from _mapping_keys(nested)
+
+
+def is_human_required_failure(failure_class: str | None) -> bool:
+    return bool(failure_class and failure_class in HUMAN_REQUIRED_FAILURE_CLASSES)
+
+
+def frontier_failure_class(result: object) -> str | None:
+    """Return the machine-classified failure class from a frontier result.
+
+    ``human_required`` is deliberately *not* accepted as evidence. It is a
+    derived presentation field and may also be emitted by a model or an older
+    worker. Only the deterministic failure class crosses the external
+    authority boundary.
+    """
+
+    if not isinstance(result, Mapping):
+        return None
+    direct = result.get("failure_class")
+    if isinstance(direct, str) and direct:
+        return direct
+    for key in ("frontier_failure", "failure"):
+        nested = result.get(key)
+        if isinstance(nested, Mapping):
+            failure_class = frontier_failure_class(nested)
+            if failure_class:
+                return failure_class
+    return None
+
+
+def is_human_required_result(result: object) -> bool:
+    """Classify a frontier payload without trusting model-authored booleans."""
+
+    return is_human_required_failure(frontier_failure_class(result))
 
 
 class FrontierGuardError(RuntimeError):
