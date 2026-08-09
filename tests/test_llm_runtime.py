@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import nullcontext
+from typing import cast
 
 import pytest
 
@@ -9,6 +10,7 @@ from chronovisor.core.llm_runtime import (
     BackendContractError,
     BackendExecutionError,
     CapabilityUnavailableError,
+    EgressDeniedError,
     EmbeddingRequest,
     EmbeddingResult,
     EmbeddingRoute,
@@ -22,12 +24,31 @@ from chronovisor.core.llm_runtime import (
     RerankRequest,
     RerankResult,
     RerankRoute,
+    RouteConfigurationError,
+    RouteLocation,
+    RuntimeFailureTelemetry,
+    SourceClassificationError,
+    SourceDataClass,
+    SourceDataClassification,
+    SourceSensitivity,
 )
 from chronovisor.core.ollama_adapter import OllamaAdapter, compose_ollama_runtime
+
+NORMAL_PAGE = SourceDataClassification(SourceDataClass.PAGE, SourceSensitivity.NORMAL)
+NORMAL_SNIPPET = SourceDataClassification(
+    SourceDataClass.DERIVED_SNIPPET, SourceSensitivity.NORMAL
+)
+RAW_NORMAL = SourceDataClassification(SourceDataClass.RAW, SourceSensitivity.NORMAL)
+RAW_HIGH = SourceDataClassification(SourceDataClass.RAW, SourceSensitivity.HIGH)
+SYSTEM_NORMAL = SourceDataClassification(
+    SourceDataClass.SYSTEM, SourceSensitivity.NORMAL
+)
+PAGE_HIGH = SourceDataClassification(SourceDataClass.PAGE, SourceSensitivity.HIGH)
 
 
 class FakeBackend:
     provider = "fake"
+    location = RouteLocation.LOCAL
 
     def generate(self, request: GenerationInput, *, model: str) -> GenerationResult:
         content = (
@@ -63,11 +84,20 @@ def test_runtime_routes_each_capability_without_fallback() -> None:
         rerank={"search": RerankRoute(backend, "reranker")},
     )
 
-    assert runtime.generate("review", GenerationRequest("hello")).model == "writer"
-    assert runtime.embed("search", EmbeddingRequest(("a",))).model == "embedder"
-    assert runtime.rerank("search", RerankRequest("q", ("a", "b"))).model == "reranker"
+    assert (
+        runtime.generate("review", GenerationRequest("hello", RAW_HIGH)).model
+        == "writer"
+    )
+    assert (
+        runtime.embed("search", EmbeddingRequest(("a",), NORMAL_PAGE)).model
+        == "embedder"
+    )
+    assert (
+        runtime.rerank("search", RerankRequest("q", ("a", "b"), NORMAL_PAGE)).model
+        == "reranker"
+    )
     with pytest.raises(CapabilityUnavailableError):
-        runtime.generate("search", GenerationRequest("no fallback"))
+        runtime.generate("search", GenerationRequest("no fallback", NORMAL_PAGE))
 
 
 @pytest.mark.parametrize(
@@ -92,7 +122,7 @@ def test_runtime_rejects_invalid_embedding_contract(
     )
 
     with pytest.raises(BackendContractError, match=reason):
-        runtime.embed("search", EmbeddingRequest(("a", "b")))
+        runtime.embed("search", EmbeddingRequest(("a", "b"), NORMAL_PAGE))
 
 
 def test_runtime_rejects_invalid_rerank_contract() -> None:
@@ -107,21 +137,171 @@ def test_runtime_rejects_invalid_rerank_contract() -> None:
     runtime = LLMRuntime(rerank={"search": RerankRoute(InvalidRerank(), "reranker")})
 
     with pytest.raises(BackendContractError, match="invalid ranking indices"):
-        runtime.rerank("search", RerankRequest("q", ("a", "b")))
+        runtime.rerank("search", RerankRequest("q", ("a", "b"), NORMAL_PAGE))
 
 
 def test_runtime_normalizes_backend_errors_without_fallback() -> None:
+    canary = "CANARY_PROVIDER_SECRET"
+    events: list[RuntimeFailureTelemetry] = []
+
     class BrokenGeneration(FakeBackend):
         def generate(self, request: GenerationInput, *, model: str) -> GenerationResult:
-            raise OSError("provider detail")
+            raise OSError(canary)
 
     runtime = LLMRuntime(
-        generation={"review": GenerationRoute(BrokenGeneration(), "writer")}
+        generation={"review": GenerationRoute(BrokenGeneration(), "writer")},
+        telemetry=events.append,
     )
+    request = GenerationRequest(canary, NORMAL_PAGE, system=canary)
 
     with pytest.raises(BackendExecutionError, match="fake generation backend") as exc:
-        runtime.generate("review", GenerationRequest("hello"))
-    assert isinstance(exc.value.__cause__, OSError)
+        runtime.generate("review", request)
+    assert exc.value.__cause__ is None
+    assert exc.value.__context__ is None
+    assert events == [
+        RuntimeFailureTelemetry(
+            category="backend_error",
+            role="review",
+            capability="generation",
+            provider="fake",
+            location="local",
+        )
+    ]
+    assert canary not in repr(request)
+    assert canary not in str(exc.value)
+    assert canary not in repr(exc.value)
+    assert canary not in repr(events)
+
+
+class CountingRemoteBackend(FakeBackend):
+    location = RouteLocation.REMOTE
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def generate(self, request: GenerationInput, *, model: str) -> GenerationResult:
+        self.calls.append("generation")
+        return super().generate(request, model=model)
+
+    def embed(self, request: EmbeddingRequest, *, model: str) -> EmbeddingResult:
+        self.calls.append("embedding")
+        return super().embed(request, model=model)
+
+    def rerank(self, request: RerankRequest, *, model: str) -> RerankResult:
+        self.calls.append("rerank")
+        return super().rerank(request, model=model)
+
+
+def test_runtime_requires_classification_before_backend_call() -> None:
+    backend = CountingRemoteBackend()
+    runtime = LLMRuntime(generation={"review": GenerationRoute(backend, "writer")})
+    unclassified = cast(SourceDataClassification, None)
+
+    with pytest.raises(SourceClassificationError):
+        runtime.generate("review", GenerationRequest("secret", unclassified))
+
+    assert backend.calls == []
+
+
+@pytest.mark.parametrize("source", [NORMAL_PAGE, NORMAL_SNIPPET])
+def test_remote_default_allows_only_normal_cloud_eligible_data(
+    source: SourceDataClassification,
+) -> None:
+    backend = CountingRemoteBackend()
+    runtime = LLMRuntime(generation={"review": GenerationRoute(backend, "writer")})
+
+    runtime.generate("review", GenerationRequest("content", source))
+
+    assert backend.calls == ["generation"]
+
+
+@pytest.mark.parametrize("source", [RAW_NORMAL, SYSTEM_NORMAL, PAGE_HIGH, RAW_HIGH])
+def test_remote_default_denies_restricted_data_before_backend_call(
+    source: SourceDataClassification,
+) -> None:
+    backend = CountingRemoteBackend()
+    events: list[RuntimeFailureTelemetry] = []
+    runtime = LLMRuntime(
+        generation={"review": GenerationRoute(backend, "writer")},
+        telemetry=events.append,
+    )
+
+    with pytest.raises(EgressDeniedError):
+        runtime.generate("review", GenerationRequest("content", source))
+
+    assert backend.calls == []
+    assert events[0].category == "egress_denied"
+    assert events[0].location == "remote"
+
+
+def test_remote_egress_opt_in_is_scoped_to_exact_role_and_data_class() -> None:
+    backend = CountingRemoteBackend()
+    route = GenerationRoute(backend, "writer")
+    runtime = LLMRuntime(
+        generation={"review": route, "other": route},
+        remote_egress_opt_ins={("review", SourceDataClass.RAW)},
+    )
+
+    runtime.generate("review", GenerationRequest("raw", RAW_HIGH))
+    with pytest.raises(EgressDeniedError):
+        runtime.generate("other", GenerationRequest("raw", RAW_HIGH))
+    with pytest.raises(EgressDeniedError):
+        runtime.generate("review", GenerationRequest("system", SYSTEM_NORMAL))
+
+    assert backend.calls == ["generation"]
+
+
+def test_remote_denial_covers_all_capabilities_without_fallback() -> None:
+    backend = CountingRemoteBackend()
+    runtime = LLMRuntime(
+        generation={"review": GenerationRoute(backend, "writer")},
+        embedding={"search": EmbeddingRoute(backend, "embedder")},
+        rerank={"search": RerankRoute(backend, "reranker")},
+    )
+
+    with pytest.raises(EgressDeniedError):
+        runtime.generate("review", GenerationRequest("raw", RAW_NORMAL))
+    with pytest.raises(EgressDeniedError):
+        runtime.embed("search", EmbeddingRequest(("raw",), RAW_NORMAL))
+    with pytest.raises(EgressDeniedError):
+        runtime.rerank("search", RerankRequest("q", ("raw",), RAW_NORMAL))
+
+    assert backend.calls == []
+
+
+def test_invalid_route_location_fails_closed() -> None:
+    class InvalidRouteBackend(CountingRemoteBackend):
+        location = cast(RouteLocation, "cloud")
+
+    backend = InvalidRouteBackend()
+    runtime = LLMRuntime(generation={"review": GenerationRoute(backend, "writer")})
+
+    with pytest.raises(RouteConfigurationError):
+        runtime.generate("review", GenerationRequest("content", NORMAL_PAGE))
+
+    assert backend.calls == []
+
+
+def test_request_and_result_repr_hide_content() -> None:
+    canary = "CANARY_PRIVATE_CONTENT"
+    values = [
+        GenerationRequest(canary, NORMAL_PAGE, system=canary, format={canary: canary}),
+        MessageGenerationRequest(
+            messages=({"role": "user", "content": canary},),
+            format={canary: canary},
+            source=NORMAL_PAGE,
+            num_ctx=8,
+            max_output_tokens=1,
+            keep_alive="0",
+            timeout_ms=1,
+            max_output_chars=1,
+        ),
+        EmbeddingRequest((canary,), NORMAL_PAGE),
+        RerankRequest(canary, (canary,), NORMAL_PAGE),
+        GenerationResult(canary, "fake", "model", metadata={canary: canary}),
+    ]
+
+    assert all(canary not in repr(value) for value in values)
 
 
 def test_ollama_adapter_preserves_generate_options_and_normalizes(monkeypatch) -> None:
@@ -145,6 +325,7 @@ def test_ollama_adapter_preserves_generate_options_and_normalizes(monkeypatch) -
         "ingest",
         GenerationRequest(
             "prompt",
+            NORMAL_PAGE,
             system="system",
             format={"type": "object"},
             num_ctx=4096,
@@ -204,6 +385,7 @@ def test_ollama_adapter_preserves_chat_and_embedding_paths(monkeypatch) -> None:
         MessageGenerationRequest(
             messages=({"role": "user", "content": "vote"},),
             format={"type": "object"},
+            source=NORMAL_PAGE,
             num_ctx=8192,
             max_output_tokens=64,
             keep_alive="10m",
@@ -212,7 +394,7 @@ def test_ollama_adapter_preserves_chat_and_embedding_paths(monkeypatch) -> None:
             think="low",
         ),
     )
-    embedded = runtime.embed("search", EmbeddingRequest(("a", "b"), 9000))
+    embedded = runtime.embed("search", EmbeddingRequest(("a", "b"), NORMAL_PAGE, 9000))
 
     assert chat.content == "{}"
     assert chat.usage.input_tokens == 11

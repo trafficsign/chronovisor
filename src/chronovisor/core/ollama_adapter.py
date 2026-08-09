@@ -16,6 +16,7 @@ from chronovisor.core.llm_runtime import (
     GenerationRoute,
     LLMRuntime,
     MessageGenerationRequest,
+    RouteLocation,
     TokenUsage,
 )
 
@@ -24,6 +25,7 @@ class OllamaAdapter:
     """Compose generation, embedding, and local control on the shared facade."""
 
     provider = "ollama"
+    location = RouteLocation.LOCAL
 
     def generate(self, request: GenerationInput, *, model: str) -> GenerationResult:
         if isinstance(request, MessageGenerationRequest):
