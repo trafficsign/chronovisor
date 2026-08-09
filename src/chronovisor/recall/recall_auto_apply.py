@@ -40,7 +40,7 @@ from chronovisor.decision.semantic_hold import (
     persisted_semantic_no_quorum_hold,
     semantic_no_quorum_hold_error,
 )
-from chronovisor.librarian.tags import record_new_tag
+from chronovisor.ingest.tag_lifecycle import record_new_tag
 from chronovisor.ops.convergence import is_human_required_result
 from chronovisor.recall.recall_hints import (
     add_query_hint,

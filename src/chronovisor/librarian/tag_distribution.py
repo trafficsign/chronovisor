@@ -27,13 +27,13 @@ from typing import Any
 
 from chronovisor.core.runtime_config import load_decision_router_config
 from chronovisor.core.store import find_page
-from chronovisor.decision.local_structured import ChatRequest, LocalStructuredSession
-from chronovisor.librarian.tags import (
+from chronovisor.core.tag_rules import (
     AXIS_LIMITS,
     SEED_TAGS,
     parse_tags,
     validate_axis_counts,
 )
+from chronovisor.decision.local_structured import ChatRequest, LocalStructuredSession
 
 # ---------------------------------------------------------------------------
 # Types

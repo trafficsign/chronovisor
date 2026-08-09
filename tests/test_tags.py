@@ -7,8 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from chronovisor.librarian import tags as tags_mod
-from chronovisor.librarian.tags import (
+from chronovisor.ingest import tag_lifecycle as tags_mod
+from chronovisor.ingest.tag_lifecycle import (
     AXIS_LIMITS,
     SEED_TAGS,
     VALID_PREFIXES,

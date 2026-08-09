@@ -50,7 +50,7 @@ def isolated_wiki(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
     from chronovisor.core import store
     from chronovisor.ingest import ingest
-    from chronovisor.librarian import tags as tags_mod
+    from chronovisor.ingest import tag_lifecycle as tags_mod
     from chronovisor.ops import lint
     from chronovisor.search import index_store
 

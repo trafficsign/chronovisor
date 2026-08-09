@@ -39,12 +39,12 @@ from chronovisor.decision.quality_guard import (
     register_last_known_good,
     run_quality_probe,
 )
+from chronovisor.ingest import managed_hold_sync as managed_hold
 from chronovisor.ingest import read_back_repair
 from chronovisor.ingest.read_back_integrity import (
     scan_jsonl_prefix,
     verify_prior_prefix,
 )
-from chronovisor.librarian import managed_hold
 from chronovisor.ops import burn_monitor, health, repair_runbook
 from chronovisor.ops.deadman import inspect_heartbeat, write_heartbeat
 from chronovisor.raw import raw_replay

@@ -173,7 +173,7 @@ def apply_prepared_operations(
     # Tag changelog entries are derived audit data.  They are emitted only
     # after the exact semantic page batch has frontier approval and commits.
     if created:
-        from chronovisor.librarian.tags import record_new_tag
+        from chronovisor.ingest.tag_lifecycle import record_new_tag
 
         created_ids = set(created)
         for entry in planned:

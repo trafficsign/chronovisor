@@ -184,7 +184,7 @@ def _drain(
     orchestrator.reset_stale_lock()
     runtime_status.reset_stale_runtime_status()
     try:
-        from chronovisor.librarian.managed_hold import sync_ingest_semantic_holds
+        from chronovisor.ingest.managed_hold_sync import sync_ingest_semantic_holds
 
         managed_holds = sync_ingest_semantic_holds(chronovisor_root=CHRONOVISOR_ROOT)
     except Exception as exc:

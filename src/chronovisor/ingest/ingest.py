@@ -2507,7 +2507,7 @@ def _process_tags_in_body(
       3. ``record_new_tag`` — append truly-new tags to the changelog
     """
     from chronovisor.core.tag_rules import validate_tag
-    from chronovisor.librarian.tags import dedupe_with_existing, record_new_tag
+    from chronovisor.ingest.tag_lifecycle import dedupe_with_existing, record_new_tag
 
     meta, _ = parse(body)
     tags_raw = meta.get("tags")

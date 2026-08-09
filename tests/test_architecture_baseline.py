@@ -446,6 +446,25 @@ S_RETIRED_READ_BACK_POLICY_SITE_IDS = (
     "arch:0a834cbb04559ddceac9f399ac781fa9dde80c142eafbff6896750041eed77ba",
     "arch:6adffc3912f1717556de5b1fbe04fef69ef259945939a93fcd0144ec51a9155a",
 )
+S_RETIRED_INGEST_LIFECYCLE_EDGE_IDS = (
+    "arch:54a9ac060999e0d218673b5184cfa933a8903a87ca9e2bd56289c2c603c98334",
+    "arch:662c2e62c824e2857bd6089b267590497c5d385f8f5b402a8c02ccbaa5429759",
+)
+S_RETIRED_INGEST_LIFECYCLE_SITE_IDS = (
+    "arch:0a5740ba3741c584ceff2c39fd57c8ea390fedddc3048021a1f8cbc398d3a622",
+    "arch:0f687a20cd8a4207301258dde58681553111c899dc6673aaf30b311b6dc73719",
+    "arch:1fa178c63af6de646611fae0ec673e56c43ff7be8df322cfbe2f70983fb537db",
+    "arch:25811dc740f3344b4ffaab27804025208d927a51194f556afb76cfa23d6f5a1e",
+    "arch:3e1cf03370d2fff1f1be02272d1db19f04a4072209cd4d8f0a0c5e1c21a09fd1",
+    "arch:4807da3321e84d1de6eee823a26fbe9739675cbaffe49baab714cbb6b9e74adb",
+    "arch:918eee694ea40d8a3a8323121268bf98a66f82282b30fc432298c589030a668a",
+    "arch:a0cce550965af556535eb4624ee753b4f9a01d682d8daafbce949378a389a968",
+    "arch:aae0089ab3707b5db5760f861e54bec4ad8154e23403254e01ee2f0162b55341",
+    "arch:cc02068bebd36de0b2e7d9f8584000c9c937b920dd1f4621d6750d458aff9830",
+    "arch:ce870d4cb46e7ef0ae23667a438ff052ecf2fc04d264acc15ea2b032afe5c469",
+    "arch:d85bcce4656e449eec746751adb105f6e0c47e867667130269bf123d11dae5cf",
+    "arch:de7c3a7e559192aaa5fd135eba4a52f76f3d6f92699626803b533f8b3a768e57",
+)
 V_RETIRED_RECALL_SHIM_SITE_IDS = (
     "arch:3896d20fb9ddf2c56d06af026b9b40d6399902891ab291f3a6eba063ba8b4d28",
     "arch:c99c20705c2ffb63854eb252145ab9e7f20ea9b0adb7eef8892e39abb52ceb1c",
@@ -738,6 +757,7 @@ RETIREMENT_HISTORY = {
                 *S_RETIRED_MIGRATION_SNAPSHOT_EDGE_IDS,
                 *S_RETIRED_BACKGROUND_JOBS_EDGE_IDS,
                 *S_RETIRED_READ_BACK_POLICY_EDGE_IDS,
+                *S_RETIRED_INGEST_LIFECYCLE_EDGE_IDS,
                 *V_RETIRED_REMAINING_SHIM_EXCEPTION_IDS,
             )
         )
@@ -771,6 +791,7 @@ RETIREMENT_HISTORY = {
                 *S_RETIRED_RUNTIME_STATUS_SITE_IDS,
                 *S_RETIRED_BACKGROUND_JOBS_SITE_IDS,
                 *S_RETIRED_READ_BACK_POLICY_SITE_IDS,
+                *S_RETIRED_INGEST_LIFECYCLE_SITE_IDS,
                 *V_RETIRED_RECALL_SHIM_SITE_IDS,
                 *V_RETIRED_REMAINING_SHIM_SITE_IDS,
                 *V_RETIRED_DURABLE_MODULE_MAPPING_SITE_IDS,
@@ -1079,6 +1100,7 @@ def _without_persisted_retirement_history(
         + len(S_RETIRED_MIGRATION_SNAPSHOT_EDGE_IDS)
         + len(S_RETIRED_BACKGROUND_JOBS_EDGE_IDS)
         + len(S_RETIRED_READ_BACK_POLICY_EDGE_IDS)
+        + len(S_RETIRED_INGEST_LIFECYCLE_EDGE_IDS)
         + len(V_RETIRED_REMAINING_SHIM_EXCEPTION_IDS)
     )
     active_counts["by_category"]["dynamic_import"] = (
@@ -1507,8 +1529,8 @@ def test_current_exception_ledger_seed_and_schema_inventory_are_exact(
 
     assert detected_ids == ledger_ids == set(seed["exception_semantic_ids"]["active"])
     _assert_exact_retirement_history(architecture, seed)
-    assert len(edge_rows) == current["worktree_architecture"]["edge_count"] == 82
-    assert sum(len(row["sites"]) for row in edge_rows) == len(raw_cross_sites) == 1285
+    assert len(edge_rows) == current["worktree_architecture"]["edge_count"] == 80
+    assert sum(len(row["sites"]) for row in edge_rows) == len(raw_cross_sites) == 1283
     assert {
         field: counts[field]
         for field in (
@@ -1520,15 +1542,15 @@ def test_current_exception_ledger_seed_and_schema_inventory_are_exact(
             "compatibility_contracts",
         )
     } == {
-        "exceptions": 82,
-        "cross_domain_sites": 1285,
+        "exceptions": 80,
+        "cross_domain_sites": 1283,
         "production_to_lab_edges": 0,
         "production_to_lab_static_sites": 0,
         "production_to_lab_dynamic_sites": 0,
         "compatibility_contracts": 51,
     }
     assert counts["by_category"] == {
-        "cross_domain_edge": 82,
+        "cross_domain_edge": 80,
     }
     assert counts["compatibility_by_kind"] == {
         "console_entrypoint": 51,
