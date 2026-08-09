@@ -23,6 +23,7 @@ from chronovisor.core.page_mutation import (
     chronovisor_mutation_lock,
     decision_authority_lock,
 )
+from chronovisor.core.recall_runtime_paths import RECALL_DIR
 from chronovisor.decision import decision_authority
 from chronovisor.decision.frontier_guard import is_human_required_result
 from chronovisor.decision.semantic_hold import (
@@ -43,7 +44,6 @@ from chronovisor.recall.recall_runtime import (
     load_policy,
     run_recall,
 )
-from chronovisor.recall.recall_runtime_paths import RECALL_DIR
 
 CALIBRATION_FILE = RECALL_DIR / "calibration.json"
 CALIBRATION_HISTORY_FILE = RECALL_DIR / "calibration-history.jsonl"

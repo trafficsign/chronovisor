@@ -40,6 +40,11 @@ from chronovisor.core.durable_state import (
     canonical_sha256 as _sealed_canonical_sha,
 )
 from chronovisor.core.jsonl_write import append_jsonl_durable
+from chronovisor.core.recall_log_schema import (
+    join_used_recall_episodes,
+    page_ids_from_record,
+)
+from chronovisor.core.recall_runtime_paths import RECALL_DIR
 from chronovisor.core.store import (
     CHRONOVISOR_ROOT,
     INDEX_FILE,
@@ -77,12 +82,7 @@ from chronovisor.recall.recall_confidence import (
     manifest_sha256,
     wilson_interval,
 )
-from chronovisor.recall.recall_log_schema import (
-    join_used_recall_episodes,
-    page_ids_from_record,
-)
 from chronovisor.recall.recall_runtime import RECALL_LOG_FILE, RECALL_PULL_LOG_FILE
-from chronovisor.recall.recall_runtime_paths import RECALL_DIR
 
 ANSWER_EPISODE_LEDGER = RECALL_DIR / "answer-episodes.jsonl"
 ANSWER_CAPTURE_CURSOR = (

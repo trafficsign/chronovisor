@@ -1182,7 +1182,7 @@ def dispatch(args: argparse.Namespace) -> int:
             print(f"path\t{data['path']}")
         return 0
     if args.command == "retention":
-        from chronovisor.ops.retention import build_retention_scores
+        from chronovisor.search.retention import build_retention_scores
 
         data = build_retention_scores(limit=max(1, args.limit), write=not args.no_write)
         public = {key: value for key, value in data.items() if key != "pages"}

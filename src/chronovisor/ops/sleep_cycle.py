@@ -506,7 +506,6 @@ def _run_sleep_cycle(
     from chronovisor.ops.hubs import build_hub_pages
     from chronovisor.ops.memory_integrity import run_eval
     from chronovisor.ops.reflection import write_reflection_page
-    from chronovisor.ops.retention import build_retention_scores
     from chronovisor.ops.snapshot import snapshot_chronovisor
     from chronovisor.ops.state_register import refresh_state_register
     from chronovisor.raw.raw_replay import (
@@ -522,6 +521,7 @@ def _run_sleep_cycle(
     )
     from chronovisor.recall.recall_prefetch import build_prefetch_cache
     from chronovisor.search.claims import rebuild_claim_index
+    from chronovisor.search.retention import build_retention_scores
 
     try:
         per_lane_frontier = max(

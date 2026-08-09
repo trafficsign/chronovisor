@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Any
 
 from chronovisor.core.jsonl_write import append_jsonl_durable
+from chronovisor.core.recall_runtime_paths import RECALL_DIR
 from chronovisor.core.runtime_config import active_config_file
 from chronovisor.core.store import (
     CHRONOVISOR_ROOT,
@@ -61,7 +62,6 @@ from chronovisor.recall.recall_publication import (
     context_item_annotations as context_item_annotations,
 )
 from chronovisor.recall.recall_publication import result_to_dict as result_to_dict
-from chronovisor.recall.recall_runtime_paths import RECALL_DIR
 from chronovisor.search.index_store import get_store
 from chronovisor.search.search import last_search_trace
 from chronovisor.search.search import search as run_search

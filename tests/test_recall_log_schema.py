@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from chronovisor.recall.recall_log_schema import (
+from chronovisor.core.recall_log_schema import (
     canonicalize_page_ids,
     join_used_recall_episodes,
     page_ids_from_record,

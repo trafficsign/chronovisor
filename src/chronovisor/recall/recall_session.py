@@ -14,8 +14,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from chronovisor.core.recall_runtime_paths import RECALL_DIR
 from chronovisor.recall.recall_prompt import normalize_recall_prompt
-from chronovisor.recall.recall_runtime_paths import RECALL_DIR
 
 SESSIONS_DIR = RECALL_DIR / "sessions"
 DEFAULT_TTL_SECONDS = 7 * 24 * 60 * 60

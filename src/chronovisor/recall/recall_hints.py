@@ -130,7 +130,7 @@ def canonicalize_query_hint_targets(
     """Resolve page aliases in the mutable query-hint view."""
 
     from chronovisor.core.alias_store import load_aliases
-    from chronovisor.recall.recall_log_schema import canonicalize_page_ids
+    from chronovisor.core.recall_log_schema import canonicalize_page_ids
 
     path = _hint_path(path)
     alias_map = aliases if aliases is not None else load_aliases()
@@ -270,7 +270,7 @@ def matching_hint_page_ids(queries: list[str], *, limit: int = 3, path: Path | N
         return []
     path = _hint_path(path)
     from chronovisor.core.alias_store import load_aliases
-    from chronovisor.recall.recall_log_schema import canonicalize_page_ids
+    from chronovisor.core.recall_log_schema import canonicalize_page_ids
 
     aliases = load_aliases()
     out: list[str] = []

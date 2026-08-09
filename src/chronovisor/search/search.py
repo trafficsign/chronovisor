@@ -1402,7 +1402,7 @@ def fuse_results(
     retention_weight = max(0.0, float(weights.get("retention_prior", 0.0)))
     if retention_weight:
         try:
-            from chronovisor.ops.retention import retention_score
+            from chronovisor.search.retention import retention_score
 
             for page_id in list(scores):
                 prior = retention_score(page_id)

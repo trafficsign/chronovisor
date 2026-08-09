@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import importlib
 import json
 from datetime import date
 from pathlib import Path
 
-from chronovisor.ops import retention
+from chronovisor.search import retention
+
+
+def test_ops_module_is_same_retention_module_object() -> None:
+    assert importlib.import_module("chronovisor.ops.retention") is retention
 
 
 class FakeStore:

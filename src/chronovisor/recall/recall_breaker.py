@@ -12,9 +12,9 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from chronovisor.core.recall_runtime_paths import RECALL_DIR
 from chronovisor.core.timeutil import iso_seconds as _iso
 from chronovisor.core.timeutil import utc_now as _now
-from chronovisor.recall.recall_runtime_paths import RECALL_DIR
 
 BREAKER_FILE = RECALL_DIR / "circuit-breaker.json"
 

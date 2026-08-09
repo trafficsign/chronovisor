@@ -182,7 +182,7 @@ def _patch_sleep_dependencies(monkeypatch) -> None:
         },
     )
     monkeypatch.setattr(
-        "chronovisor.ops.retention.build_retention_scores",
+        "chronovisor.search.retention.build_retention_scores",
         lambda write=True: {"counts": {"pages": 2}, "pages": {}},
     )
     monkeypatch.setattr(

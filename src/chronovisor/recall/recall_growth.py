@@ -13,6 +13,7 @@ from typing import Any
 
 from chronovisor.core.durable_state import exclusive_text_file_lock
 from chronovisor.core.link_fix import atomic_write
+from chronovisor.core.recall_log_schema import join_used_recall_episodes
 from chronovisor.core.store import CHRONOVISOR_ROOT, find_page
 from chronovisor.recall.recall_answer_eval import (
     ANSWER_ADAPTER_REGISTRY,
@@ -42,7 +43,6 @@ from chronovisor.recall.recall_learning import (
     verify_policy_history,
     write_last_known_good,
 )
-from chronovisor.recall.recall_log_schema import join_used_recall_episodes
 
 RUNTIME_DIR = CHRONOVISOR_ROOT / "runtime" / "recall-field"
 GROWTH_STATE_FILE = RUNTIME_DIR / "growth-state.json"

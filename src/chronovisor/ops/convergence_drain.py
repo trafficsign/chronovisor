@@ -873,7 +873,7 @@ def _retention_inventory(
     set[tuple[str, str]],
 ]:
     from chronovisor.ops import autonomy
-    from chronovisor.ops.retention import build_retention_scores
+    from chronovisor.search.retention import build_retention_scores
 
     all_sources = current_sources | legacy_sources
     try:

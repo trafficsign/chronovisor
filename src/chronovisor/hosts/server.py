@@ -451,7 +451,7 @@ def _validate_used_recall_decision(
     """Resolve a used receipt to one durable Recall decision before accepting it."""
 
     from chronovisor.core.jsonl import read_jsonl
-    from chronovisor.recall.recall_log_schema import page_ids_from_record
+    from chronovisor.core.recall_log_schema import page_ids_from_record
     from chronovisor.recall.recall_runtime import RECALL_LOG_FILE, RECALL_PULL_LOG_FILE
 
     matches = [

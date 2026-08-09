@@ -11,12 +11,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from chronovisor.recall.recall_log_schema import (
+from chronovisor.core.recall_log_schema import (
     canonicalize_page_ids,
     join_used_recall_episodes,
     page_ids_from_record,
 )
-from chronovisor.recall.recall_runtime_paths import RECALL_DIR
+from chronovisor.core.recall_runtime_paths import RECALL_DIR
 from chronovisor.search.prefetch import (
     PREFETCH_DB_FILE,
     PREFETCH_FILE,
