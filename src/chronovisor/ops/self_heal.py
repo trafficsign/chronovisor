@@ -37,16 +37,16 @@ from chronovisor.decision.local_repair import (
     propose_repair,
     semantic_hold_epoch,
 )
+from chronovisor.decision.semantic_hold import (
+    LOCAL_SEMANTIC_NO_QUORUM,
+    persisted_semantic_no_quorum_hold,
+    semantic_no_quorum_hold_error,
+)
 from chronovisor.ingest.page_mutation import decision_authority_lock
 from chronovisor.ops import runtime_status
 from chronovisor.ops.convergence import (
     is_human_required_failure,
     is_human_required_result,
-)
-from chronovisor.search.semantic_hold import (
-    LOCAL_SEMANTIC_NO_QUORUM,
-    persisted_semantic_no_quorum_hold,
-    semantic_no_quorum_hold_error,
 )
 
 SELF_HEAL_STATUSES = {

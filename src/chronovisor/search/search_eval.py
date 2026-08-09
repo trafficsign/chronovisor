@@ -34,6 +34,15 @@ from chronovisor.core.runtime_config import (
 from chronovisor.core.store import CHRONOVISOR_ROOT, SYSTEM_DIR, find_page
 from chronovisor.decision import decision_authority
 from chronovisor.decision.decision_schema_manifest import FRONTIER_LABEL_SCHEMA
+from chronovisor.decision.semantic_hold import (
+    LOCAL_SEMANTIC_NO_QUORUM,
+    build_semantic_no_quorum_hold,
+    canonical_sha256,
+    frontier_failure_class,
+    is_local_semantic_no_quorum,
+    persisted_semantic_no_quorum_hold,
+    semantic_no_quorum_hold_error,
+)
 from chronovisor.ingest.page_mutation import decision_authority_lock
 from chronovisor.ops.convergence import is_human_required_result
 from chronovisor.search.feedback_ledger import active_feedback_rows
@@ -63,15 +72,6 @@ from chronovisor.search.search import (
 )
 from chronovisor.search.search import (
     DEFAULT_FUSION_WEIGHTS as DEFAULT_FUSION_WEIGHTS,
-)
-from chronovisor.search.semantic_hold import (
-    LOCAL_SEMANTIC_NO_QUORUM,
-    build_semantic_no_quorum_hold,
-    canonical_sha256,
-    frontier_failure_class,
-    is_local_semantic_no_quorum,
-    persisted_semantic_no_quorum_hold,
-    semantic_no_quorum_hold_error,
 )
 
 REPO_ROOT = runtime_repo_root()

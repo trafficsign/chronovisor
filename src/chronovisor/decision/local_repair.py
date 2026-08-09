@@ -19,12 +19,12 @@ from chronovisor.decision.decision_schema_manifest import (
     LOCAL_REPAIR_SCHEMA,
     schema_sha256,
 )
-from chronovisor.ingest.page_mutation import decision_authority_lock
-from chronovisor.search.semantic_hold import (
+from chronovisor.decision.semantic_hold import (
     build_semantic_no_quorum_hold,
     canonical_sha256,
     is_local_semantic_no_quorum,
 )
+from chronovisor.ingest.page_mutation import decision_authority_lock
 
 ALLOWED_ACTIONS = {
     "resolve_update_target",

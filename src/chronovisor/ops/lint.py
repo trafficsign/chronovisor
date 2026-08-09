@@ -32,6 +32,14 @@ from chronovisor.decision.decision_authority import (
     semantic_verdict_authority_error,
 )
 from chronovisor.decision.decision_schema_manifest import SAFE_FIX_REVIEW_SCHEMA
+from chronovisor.decision.semantic_hold import (
+    build_semantic_no_quorum_hold,
+    is_local_semantic_no_quorum,
+    persisted_semantic_no_quorum_hold,
+)
+from chronovisor.decision.semantic_hold import (
+    canonical_sha256 as semantic_hold_sha256,
+)
 from chronovisor.ingest.page_mutation import (
     chronovisor_mutation_lock,
     decision_authority_lock,
@@ -42,14 +50,6 @@ from chronovisor.librarian.tags import (
     validate_tag,
 )
 from chronovisor.search.index_store import get_store
-from chronovisor.search.semantic_hold import (
-    build_semantic_no_quorum_hold,
-    is_local_semantic_no_quorum,
-    persisted_semantic_no_quorum_hold,
-)
-from chronovisor.search.semantic_hold import (
-    canonical_sha256 as semantic_hold_sha256,
-)
 
 STALE_DAYS = 90  # Pages not updated in this many days are flagged
 REPO_ROOT = runtime_repo_root()

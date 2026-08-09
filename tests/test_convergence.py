@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from chronovisor.decision.semantic_hold import persisted_semantic_no_quorum_hold
 from chronovisor.ops.convergence import (
     ConvergenceStateError,
     ConvergenceStore,
@@ -17,7 +18,6 @@ from chronovisor.ops.convergence import (
     is_human_required_result,
     stable_item_key,
 )
-from chronovisor.search.semantic_hold import persisted_semantic_no_quorum_hold
 from tests.semantic_hold_support import semantic_authority, semantic_review
 
 NOW = datetime(2026, 7, 10, 12, 0, tzinfo=UTC)

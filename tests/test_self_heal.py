@@ -246,8 +246,8 @@ def _install_local_no_quorum_router(
         decision_router,
         local_repair,
         routine_review,
+        semantic_hold,
     )
-    from chronovisor.search import semantic_hold
 
     models = ["primary-model", "challenger-model", "tie-model"]
     router_audit = {
@@ -783,10 +783,10 @@ def test_local_consensus_repair_carries_authority_seal(
         decision_router,
         local_repair,
         routine_review,
+        semantic_hold,
     )
     from chronovisor.decision.decision_router import canonical_agreement_signature
     from chronovisor.decision.local_repair import LOCAL_REPAIR_SCHEMA
-    from chronovisor.search import semantic_hold
 
     models = ["primary-model", "challenger-model", "tie-model"]
     router_audit = {
@@ -913,7 +913,7 @@ def test_local_repair_no_quorum_builds_strict_semantic_hold(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from chronovisor.decision import local_repair
-    from chronovisor.search.semantic_hold import persisted_semantic_no_quorum_hold
+    from chronovisor.decision.semantic_hold import persisted_semantic_no_quorum_hold
 
     authority, calls = _install_local_no_quorum_router(
         monkeypatch,

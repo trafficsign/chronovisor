@@ -23,6 +23,15 @@ from chronovisor.core.frontmatter import parse as parse_frontmatter
 from chronovisor.core.runtime_config import runtime_repo_root
 from chronovisor.decision import decision_authority
 from chronovisor.decision.decision_schema_manifest import READ_BACK_FRONTIER_SCHEMA
+from chronovisor.decision.semantic_hold import (
+    LOCAL_SEMANTIC_NO_QUORUM,
+    build_semantic_no_quorum_hold,
+    canonical_sha256,
+    frontier_failure_class,
+    is_local_semantic_no_quorum,
+    persisted_semantic_no_quorum_hold,
+    semantic_no_quorum_hold_error,
+)
 from chronovisor.ingest.page_mutation import (
     chronovisor_mutation_lock,
     decision_authority_lock,
@@ -33,15 +42,6 @@ from chronovisor.ingest.read_back_integrity import (
 )
 from chronovisor.ops.convergence import HUMAN_REQUIRED_FAILURE_CLASSES
 from chronovisor.recall import recall_hints
-from chronovisor.search.semantic_hold import (
-    LOCAL_SEMANTIC_NO_QUORUM,
-    build_semantic_no_quorum_hold,
-    canonical_sha256,
-    frontier_failure_class,
-    is_local_semantic_no_quorum,
-    persisted_semantic_no_quorum_hold,
-    semantic_no_quorum_hold_error,
-)
 
 FAILURE_FILE = chronovisor_store.CHRONOVISOR_ROOT / "runtime" / "ingest-read-back-failures.jsonl"
 LEDGER_FILE = chronovisor_store.CHRONOVISOR_ROOT / "runtime" / "ingest-read-back-repair.json"

@@ -14,10 +14,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from chronovisor.decision import semantic_hold
 from chronovisor.decision.decision_schema_manifest import (
     FRONTIER_DECISION_SCHEMA as FRONTIER_DECISION_SCHEMA,
 )
-from chronovisor.search import semantic_hold
 
 STRUCTURED_REVIEW_HOLD_CACHE_ROOT: Path | None = None
 _STRUCTURED_REVIEW_ROUTER_CONFIG: ContextVar[Any | None] = ContextVar(

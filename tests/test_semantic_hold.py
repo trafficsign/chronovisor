@@ -9,8 +9,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from chronovisor.decision import semantic_hold
 from chronovisor.decision.decision_router import QUORUM_SAFETY_POLICY_VERSION
-from chronovisor.search import semantic_hold
 from tests.semantic_hold_support import (
     semantic_authority as _authority,
 )

@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
+from chronovisor.decision import semantic_hold
 from chronovisor.decision.decision_router import QUORUM_SAFETY_POLICY_VERSION
-from chronovisor.search import semantic_hold
 
 
 def semantic_authority(

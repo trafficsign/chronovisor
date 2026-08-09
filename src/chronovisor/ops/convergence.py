@@ -39,7 +39,7 @@ from typing import Any, Literal
 
 from chronovisor.core import store as chronovisor_store
 from chronovisor.core.timeutil import ensure_utc as _utc_now
-from chronovisor.search.semantic_hold import (
+from chronovisor.decision.semantic_hold import (
     LOCAL_SEMANTIC_NO_QUORUM,
     build_semantic_no_quorum_hold,
     persisted_semantic_no_quorum_hold,

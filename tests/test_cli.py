@@ -130,7 +130,7 @@ def test_hold_report_cli_aggregates_both_read_only_stores_as_json_and_text(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    from chronovisor.search import semantic_hold
+    from chronovisor.decision import semantic_hold
     from tests.semantic_hold_support import (
         semantic_authority,
         semantic_review,

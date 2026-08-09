@@ -20,6 +20,13 @@ from pathlib import Path
 from typing import Any
 
 from chronovisor.decision import decision_authority
+from chronovisor.decision.semantic_hold import (
+    LOCAL_SEMANTIC_NO_QUORUM,
+    build_semantic_no_quorum_hold,
+    canonical_sha256,
+    is_local_semantic_no_quorum,
+    persisted_semantic_no_quorum_hold,
+)
 from chronovisor.ingest.page_mutation import (
     chronovisor_mutation_lock,
     decision_authority_lock,
@@ -37,13 +44,6 @@ from chronovisor.recall.recall_runtime import (
     run_recall,
 )
 from chronovisor.recall.recall_runtime_paths import RECALL_DIR
-from chronovisor.search.semantic_hold import (
-    LOCAL_SEMANTIC_NO_QUORUM,
-    build_semantic_no_quorum_hold,
-    canonical_sha256,
-    is_local_semantic_no_quorum,
-    persisted_semantic_no_quorum_hold,
-)
 
 CALIBRATION_FILE = RECALL_DIR / "calibration.json"
 CALIBRATION_HISTORY_FILE = RECALL_DIR / "calibration-history.jsonl"

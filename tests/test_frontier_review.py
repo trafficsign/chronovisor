@@ -10,9 +10,13 @@ import pytest
 
 from chronovisor.core import ollama
 from chronovisor.core.runtime_config import DecisionRouterConfig
-from chronovisor.decision import decision_router, frontier_review, routine_review
+from chronovisor.decision import (
+    decision_router,
+    frontier_review,
+    routine_review,
+    semantic_hold,
+)
 from chronovisor.decision.decision_router import DecisionRouterResult
-from chronovisor.search import semantic_hold
 from tests.semantic_hold_support import semantic_authority, semantic_review
 
 CODEX_EXEC_HELP = """

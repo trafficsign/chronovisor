@@ -44,6 +44,13 @@ from chronovisor.decision.decision_schema_manifest import (
     DUPLICATE_FRONTIER_SCHEMA,
     RETENTION_FRONTIER_SCHEMA,
 )
+from chronovisor.decision.semantic_hold import (
+    LOCAL_SEMANTIC_NO_QUORUM,
+    canonical_sha256,
+    is_local_semantic_no_quorum,
+    persisted_semantic_no_quorum_hold,
+    semantic_no_quorum_hold_error,
+)
 from chronovisor.ingest.page_mutation import (
     chronovisor_mutation_lock,
     decision_authority_lock,
@@ -55,13 +62,6 @@ from chronovisor.ops.convergence import (
     InvalidTransition,
     is_human_required_result,
     stable_item_key,
-)
-from chronovisor.search.semantic_hold import (
-    LOCAL_SEMANTIC_NO_QUORUM,
-    canonical_sha256,
-    is_local_semantic_no_quorum,
-    persisted_semantic_no_quorum_hold,
-    semantic_no_quorum_hold_error,
 )
 
 AUTONOMY_DIR = CHRONOVISOR_ROOT / "autonomy"

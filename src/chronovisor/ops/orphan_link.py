@@ -57,11 +57,11 @@ from chronovisor.decision.decision_authority import (
 )
 from chronovisor.decision.decision_schema_manifest import ORPHAN_FRONTIER_SCHEMA
 from chronovisor.decision.local_structured import ChatRequest, LocalStructuredSession
+from chronovisor.decision.semantic_hold import is_local_semantic_no_quorum
 from chronovisor.ingest.page_mutation import (
     chronovisor_mutation_lock,
     decision_authority_lock,
 )
-from chronovisor.search.semantic_hold import is_local_semantic_no_quorum
 
 DECISIONS_FILE = CHRONOVISOR_ROOT / "autonomy" / "orphan-link-decisions.jsonl"
 PROJECT_ROOT = runtime_repo_root()

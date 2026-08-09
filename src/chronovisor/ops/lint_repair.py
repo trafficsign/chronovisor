@@ -43,6 +43,13 @@ from chronovisor.decision.decision_lane_prompts import (
 )
 from chronovisor.decision.decision_schema_manifest import TAG_REPAIR_SCHEMA
 from chronovisor.decision.local_structured import ChatTransport, LocalStructuredSession
+from chronovisor.decision.semantic_hold import (
+    LOCAL_SEMANTIC_NO_QUORUM,
+    canonical_sha256,
+    is_local_semantic_no_quorum,
+    persisted_semantic_no_quorum_hold,
+    semantic_no_quorum_hold_error,
+)
 from chronovisor.ingest.page_mutation import (
     chronovisor_mutation_lock,
     decision_authority_lock,
@@ -60,13 +67,6 @@ from chronovisor.ops.convergence import (
     CycleBudget,
     is_human_required_result,
     stable_item_key,
-)
-from chronovisor.search.semantic_hold import (
-    LOCAL_SEMANTIC_NO_QUORUM,
-    canonical_sha256,
-    is_local_semantic_no_quorum,
-    persisted_semantic_no_quorum_hold,
-    semantic_no_quorum_hold_error,
 )
 
 REPAIR_RESOLVER_VERSION = "lint-repair-v1"

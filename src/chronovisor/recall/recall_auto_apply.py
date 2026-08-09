@@ -26,6 +26,15 @@ from chronovisor.core.jsonl import read_jsonl
 from chronovisor.core.link_fix import atomic_write
 from chronovisor.core.runtime_config import active_config_file
 from chronovisor.decision import decision_authority
+from chronovisor.decision.semantic_hold import (
+    LOCAL_SEMANTIC_NO_QUORUM,
+    build_semantic_no_quorum_hold,
+    canonical_sha256,
+    frontier_failure_class,
+    is_local_semantic_no_quorum,
+    persisted_semantic_no_quorum_hold,
+    semantic_no_quorum_hold_error,
+)
 from chronovisor.ingest.page_mutation import (
     chronovisor_mutation_lock,
     decision_authority_lock,
@@ -42,15 +51,6 @@ from chronovisor.recall.recall_runtime import (
     RECALL_DIR,
     RECALL_FEEDBACK_FILE,
     append_jsonl,
-)
-from chronovisor.search.semantic_hold import (
-    LOCAL_SEMANTIC_NO_QUORUM,
-    build_semantic_no_quorum_hold,
-    canonical_sha256,
-    frontier_failure_class,
-    is_local_semantic_no_quorum,
-    persisted_semantic_no_quorum_hold,
-    semantic_no_quorum_hold_error,
 )
 
 AUTO_ACTIONS = frozenset({"alias", "query_hint", "page_tag"})

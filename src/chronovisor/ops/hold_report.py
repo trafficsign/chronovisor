@@ -17,7 +17,7 @@ from chronovisor.core.durable_state import (
     read_sealed_json,
 )
 from chronovisor.decision.decision_router import QUORUM_SAFETY_POLICY_VERSION
-from chronovisor.search.semantic_hold import STRUCTURED_REVIEW_HOLD_CACHE_KIND
+from chronovisor.decision.semantic_hold import STRUCTURED_REVIEW_HOLD_CACHE_KIND
 
 HOLD_REPORT_SCHEMA_VERSION = 1
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
