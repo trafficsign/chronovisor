@@ -32,8 +32,9 @@ from chronovisor.core.runtime_config import (
     load_search_embedding_config,
     runtime_repo_root,
 )
-from chronovisor.core.store import CHRONOVISOR_ROOT, SYSTEM_DIR, find_page
+from chronovisor.core.store import CHRONOVISOR_ROOT, find_page
 from chronovisor.decision import decision_authority
+from chronovisor.decision import decision_lane_prompts as _decision_lane_prompts
 from chronovisor.decision.decision_schema_manifest import FRONTIER_LABEL_SCHEMA
 from chronovisor.decision.semantic_hold import (
     LOCAL_SEMANTIC_NO_QUORUM,
@@ -112,7 +113,15 @@ FRONTIER_TERMINAL_STATUSES = {
 }
 DEFAULT_QUARANTINE_RETRY_SECONDS = 6 * 60 * 60
 SEARCH_LABEL_LANE = "search_label"
-SEARCH_LABEL_PROMPT_POLICY_VERSION = 2
+SEARCH_LABEL_PROMPT_POLICY_VERSION = (
+    _decision_lane_prompts.SEARCH_LABEL_PROMPT_POLICY_VERSION
+)
+_str_tuple = _decision_lane_prompts._str_tuple
+_str_list = _decision_lane_prompts._str_list
+_page_for_label = _decision_lane_prompts._page_for_label
+_page_excerpt = _decision_lane_prompts._page_excerpt
+_candidate_label_pages = _decision_lane_prompts._candidate_label_pages
+build_frontier_label_prompt = _decision_lane_prompts.build_frontier_label_prompt
 SEARCH_SELF_TUNE_LANE = "search_self_tune"
 SEARCH_REVIEW_ARTIFACT_SCHEMA_VERSION = 2
 RQ_PROJECTION_POLICY_SHA256 = canonical_sha256(
@@ -452,18 +461,6 @@ def append_jsonl(path: Path, row: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as f:
         f.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
-
-
-def _str_tuple(value: Any) -> tuple[str, ...]:
-    if not isinstance(value, list):
-        return ()
-    return tuple(
-        dict.fromkeys(item for item in value if isinstance(item, str) and item)
-    )
-
-
-def _str_list(value: Any) -> list[str]:
-    return list(_str_tuple(value))
 
 
 def _label_candidate_payload(row: Mapping[str, Any]) -> dict[str, Any]:
@@ -1800,140 +1797,6 @@ def build_label_queue(
         "changed": changed,
         "note": "Candidates are not added to search-golden.jsonl until trusted frontier review.",
     }
-
-
-def _page_for_label(page_id: str) -> Path | None:
-    page = find_page(page_id)
-    if page is not None:
-        return page
-    system_page = SYSTEM_DIR / f"{page_id}.md"
-    return system_page if system_page.exists() else None
-
-
-def _page_excerpt(page_id: str, *, limit: int = 1800) -> dict[str, Any]:
-    path = _page_for_label(page_id)
-    if path is None:
-        return {"page_id": page_id, "exists": False, "path": "", "excerpt": ""}
-    try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError as exc:
-        return {
-            "page_id": page_id,
-            "exists": False,
-            "path": str(path),
-            "error": str(exc),
-            "excerpt": "",
-        }
-    return {
-        "page_id": page_id,
-        "exists": True,
-        "path": str(path),
-        "excerpt": text[:limit],
-    }
-
-
-def _candidate_label_pages(row: dict[str, Any]) -> list[str]:
-    pages: list[str] = []
-    for field in ("expected_pages", "negative_pages", "stale_pages"):
-        pages.extend(_str_list(row.get(field)))
-    return list(dict.fromkeys(pages))
-
-
-def build_frontier_label_prompt(
-    row: dict[str, Any],
-    *,
-    page_excerpts: list[dict[str, Any]] | None = None,
-) -> str:
-    """Build the production label-review request from bound page evidence.
-
-    Normal callers leave ``page_excerpts`` unset and the builder reads the
-    current Wiki pages itself.  Deterministic adoption contracts may provide
-    sealed, production-shaped page snapshots so their request hashes do not
-    depend on mutable live Wiki content.  Supplied evidence must cover the
-    exact candidate ids once each and may not invent an extra page.
-    """
-
-    candidate_pages = _candidate_label_pages(row)
-    if page_excerpts is None:
-        bound_excerpts = [_page_excerpt(page_id) for page_id in candidate_pages]
-    else:
-        by_page: dict[str, dict[str, Any]] = {}
-        for item in page_excerpts:
-            if not isinstance(item, dict):
-                raise ValueError("label page evidence must contain objects")
-            page_id = item.get("page_id")
-            exists = item.get("exists")
-            path = item.get("path")
-            excerpt = item.get("excerpt")
-            if (
-                not isinstance(page_id, str)
-                or not page_id
-                or page_id in by_page
-                or not isinstance(exists, bool)
-                or not isinstance(path, str)
-                or not isinstance(excerpt, str)
-                or (exists and (not path or not excerpt))
-            ):
-                raise ValueError("label page evidence is malformed")
-            by_page[page_id] = dict(item)
-        if set(by_page) != set(candidate_pages):
-            raise ValueError("label page evidence must match exact candidate pages")
-        bound_excerpts = [by_page[page_id] for page_id in candidate_pages]
-
-    payload = {
-        "query": str(row.get("query") or ""),
-        "candidate_labels": {
-            "expected_pages": _str_list(row.get("expected_pages")),
-            "negative_pages": _str_list(row.get("negative_pages")),
-            "stale_pages": _str_list(row.get("stale_pages")),
-        },
-        "metadata": {
-            "split": row.get("split"),
-            "language": row.get("language"),
-            "kind": row.get("kind"),
-            "source": row.get("source"),
-            "ref": row.get("ref"),
-            "ts": row.get("ts"),
-        },
-        "page_excerpts": bound_excerpts,
-    }
-    schema = FRONTIER_LABEL_SCHEMA
-    return f"""\
-You are the final autonomous label reviewer for Chronovisor search evaluation.
-Search label policy version: {SEARCH_LABEL_PROMPT_POLICY_VERSION}.
-
-Goal:
-- Decide whether the candidate labels are trustworthy for the user's search query.
-- Promote only labels that are clearly supported by the query and page excerpts.
-- Keep false positives out of search-golden.jsonl.
-- Do not edit files, run commands, ask a human, or invent unrelated page ids.
-
-Decision policy:
-- Treat each candidate bucket as a claim. expected_pages must answer the query,
-  negative_pages must not answer it, and stale_pages must be relevant but outdated.
-- Require a direct topical, factual, or causal connection between the query and
-  each page excerpt. Shared broad words, emotional tone, analogy, or a merely
-  possible thematic connection are not enough for expected_pages.
-- An expected page must materially help answer the actual query as written. A
-  page that only matches background context or one isolated term is a false positive.
-- Do not repair a wrong label by moving page ids between buckets.
-- approved: at least one candidate page was supplied and every candidate bucket
-  assignment is supported. Return the three candidate arrays exactly as supplied.
-- rejected: at least one available excerpt clearly contradicts its assigned bucket.
-  Return all three arrays empty so the candidate set cannot be promoted.
-- uncertain: evidence is insufficient or ambiguous. A meaningful ambiguous query with
-  no candidate labels is uncertain, not approved or needs_retry. Return all three
-  arrays empty.
-- needs_retry: context is malformed or any candidate page has exists=false or a
-  missing excerpt. Missing candidate evidence is needs_retry, not rejected or
-  uncertain. Return all three arrays empty.
-
-Return JSON only matching this schema:
-{json.dumps(schema, ensure_ascii=False, indent=2)}
-
-Candidate:
-{json.dumps(payload, ensure_ascii=False, indent=2)}
-"""
 
 
 def _frontier_label_failure(

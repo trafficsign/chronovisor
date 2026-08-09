@@ -33,6 +33,7 @@ from chronovisor.decision.decision_lane_prompts import (
     READ_BACK_EVIDENCE_POLICY_MARKER,
     build_autonomy_duplicate_review_prompt,
     build_autonomy_retention_review_prompt,
+    build_frontier_label_prompt,
     build_frontier_tag_repair_prompt,
     build_identity_preflight_receipt,
     build_ingest_reconciliation_prompt,
@@ -2355,8 +2356,6 @@ def _recall_improvement_cases() -> list[tuple[str, str | None, dict[str, Any]]]:
 
 
 def _search_label_cases() -> list[tuple[str, str | None, dict[str, Any]]]:
-    from chronovisor.search.search_eval import build_frontier_label_prompt
-
     definitions = [
         (
             "approved",

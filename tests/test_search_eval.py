@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from chronovisor.core.runtime_config import RerankerConfig
+from chronovisor.decision import decision_lane_prompts
 from chronovisor.decision.decision_router import canonical_agreement_signature
 from chronovisor.decision.decision_schema_manifest import production_decision_schemas
 from chronovisor.ops import golden_expand
@@ -20,6 +21,21 @@ from chronovisor.search import search_eval
 from chronovisor.search.feedback_ledger import feedback_row_sha256
 from chronovisor.search.reranker import RerankOutcome
 from chronovisor.search.search import ScoredPage
+
+
+def test_frontier_label_prompt_reexports_decision_implementation() -> None:
+    assert (
+        search_eval.build_frontier_label_prompt
+        is decision_lane_prompts.build_frontier_label_prompt
+    )
+    assert search_eval._str_tuple is decision_lane_prompts._str_tuple
+    assert search_eval._str_list is decision_lane_prompts._str_list
+    assert search_eval._page_for_label is decision_lane_prompts._page_for_label
+    assert search_eval._page_excerpt is decision_lane_prompts._page_excerpt
+    assert (
+        search_eval._candidate_label_pages
+        is decision_lane_prompts._candidate_label_pages
+    )
 
 
 def page(page_id: str, score: float = 1.0, *, status: str = "active") -> ScoredPage:

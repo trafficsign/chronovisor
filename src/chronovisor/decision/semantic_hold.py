@@ -38,15 +38,15 @@ from chronovisor.decision.decision_authority import (
     semantic_authority_shape_error,
     semantic_verdict_authority_provenance_error,
 )
-from chronovisor.search.semantic_epoch import (
+from chronovisor.decision.semantic_epoch import (
     STRUCTURED_REVIEW_HOLD_EPOCH_VERSION,
     build_structured_review_epoch,
     structured_review_epoch_error,
 )
-from chronovisor.search.semantic_epoch import (
+from chronovisor.decision.semantic_epoch import (
     is_sha256 as _is_sha256,
 )
-from chronovisor.search.semantic_epoch import (
+from chronovisor.decision.semantic_epoch import (
     opaque_text_sha256 as _opaque_text_sha256,
 )
 

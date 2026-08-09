@@ -12,6 +12,7 @@ import hashlib
 import json
 import re
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
 from chronovisor.core.canonical_json import (
@@ -22,13 +23,17 @@ from chronovisor.core.canonical_json import (
 )
 from chronovisor.core.frontmatter import parse as parse_frontmatter
 from chronovisor.core.hashutil import sha256_text as _sha256_text
+from chronovisor.core.store import SYSTEM_DIR, find_page
 from chronovisor.core.tag_rules import (
     SEED_TAGS,
     parse_tags,
     validate_axis_counts,
     validate_tag,
 )
-from chronovisor.decision.decision_schema_manifest import TAG_REPAIR_SCHEMA
+from chronovisor.decision.decision_schema_manifest import (
+    FRONTIER_LABEL_SCHEMA,
+    TAG_REPAIR_SCHEMA,
+)
 
 INGEST_REPAIR_OPTION_POLICY_VERSION = 2
 INGEST_REPAIR_OPTION_ID_RE = re.compile(r"^rp_[0-9a-f]{32}$")
@@ -43,6 +48,153 @@ INGEST_REPAIR_HOST_BLOCK = "HOST_ONLY_INGEST_REPAIR_PREFLIGHT_JSON"
 INGEST_REPAIR_MODEL_BLOCK = "DETERMINISTIC_INGEST_REPAIR_PREFLIGHT_JSON"
 INGEST_REVIEW_MODEL_BLOCK = "INGEST_REVIEW_PROJECTION_JSON"
 TAG_REVIEW_CONTRACT_VERSION = 2
+SEARCH_LABEL_PROMPT_POLICY_VERSION = 2
+
+
+def _str_tuple(value: Any) -> tuple[str, ...]:
+    if not isinstance(value, list):
+        return ()
+    return tuple(
+        dict.fromkeys(item for item in value if isinstance(item, str) and item)
+    )
+
+
+def _str_list(value: Any) -> list[str]:
+    return list(_str_tuple(value))
+
+
+def _page_for_label(page_id: str) -> Path | None:
+    page = find_page(page_id)
+    if page is not None:
+        return page
+    system_page = SYSTEM_DIR / f"{page_id}.md"
+    return system_page if system_page.exists() else None
+
+
+def _page_excerpt(page_id: str, *, limit: int = 1800) -> dict[str, Any]:
+    path = _page_for_label(page_id)
+    if path is None:
+        return {"page_id": page_id, "exists": False, "path": "", "excerpt": ""}
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        return {
+            "page_id": page_id,
+            "exists": False,
+            "path": str(path),
+            "error": str(exc),
+            "excerpt": "",
+        }
+    return {
+        "page_id": page_id,
+        "exists": True,
+        "path": str(path),
+        "excerpt": text[:limit],
+    }
+
+
+def _candidate_label_pages(row: dict[str, Any]) -> list[str]:
+    pages: list[str] = []
+    for field in ("expected_pages", "negative_pages", "stale_pages"):
+        pages.extend(_str_list(row.get(field)))
+    return list(dict.fromkeys(pages))
+
+
+def build_frontier_label_prompt(
+    row: dict[str, Any],
+    *,
+    page_excerpts: list[dict[str, Any]] | None = None,
+) -> str:
+    """Build the production label-review request from bound page evidence.
+
+    Normal callers leave ``page_excerpts`` unset and the builder reads the
+    current Wiki pages itself.  Deterministic adoption contracts may provide
+    sealed, production-shaped page snapshots so their request hashes do not
+    depend on mutable live Wiki content.  Supplied evidence must cover the
+    exact candidate ids once each and may not invent an extra page.
+    """
+
+    candidate_pages = _candidate_label_pages(row)
+    if page_excerpts is None:
+        bound_excerpts = [_page_excerpt(page_id) for page_id in candidate_pages]
+    else:
+        by_page: dict[str, dict[str, Any]] = {}
+        for item in page_excerpts:
+            if not isinstance(item, dict):
+                raise ValueError("label page evidence must contain objects")
+            page_id = item.get("page_id")
+            exists = item.get("exists")
+            path = item.get("path")
+            excerpt = item.get("excerpt")
+            if (
+                not isinstance(page_id, str)
+                or not page_id
+                or page_id in by_page
+                or not isinstance(exists, bool)
+                or not isinstance(path, str)
+                or not isinstance(excerpt, str)
+                or (exists and (not path or not excerpt))
+            ):
+                raise ValueError("label page evidence is malformed")
+            by_page[page_id] = dict(item)
+        if set(by_page) != set(candidate_pages):
+            raise ValueError("label page evidence must match exact candidate pages")
+        bound_excerpts = [by_page[page_id] for page_id in candidate_pages]
+
+    payload = {
+        "query": str(row.get("query") or ""),
+        "candidate_labels": {
+            "expected_pages": _str_list(row.get("expected_pages")),
+            "negative_pages": _str_list(row.get("negative_pages")),
+            "stale_pages": _str_list(row.get("stale_pages")),
+        },
+        "metadata": {
+            "split": row.get("split"),
+            "language": row.get("language"),
+            "kind": row.get("kind"),
+            "source": row.get("source"),
+            "ref": row.get("ref"),
+            "ts": row.get("ts"),
+        },
+        "page_excerpts": bound_excerpts,
+    }
+    schema = FRONTIER_LABEL_SCHEMA
+    return f"""\
+You are the final autonomous label reviewer for Chronovisor search evaluation.
+Search label policy version: {SEARCH_LABEL_PROMPT_POLICY_VERSION}.
+
+Goal:
+- Decide whether the candidate labels are trustworthy for the user's search query.
+- Promote only labels that are clearly supported by the query and page excerpts.
+- Keep false positives out of search-golden.jsonl.
+- Do not edit files, run commands, ask a human, or invent unrelated page ids.
+
+Decision policy:
+- Treat each candidate bucket as a claim. expected_pages must answer the query,
+  negative_pages must not answer it, and stale_pages must be relevant but outdated.
+- Require a direct topical, factual, or causal connection between the query and
+  each page excerpt. Shared broad words, emotional tone, analogy, or a merely
+  possible thematic connection are not enough for expected_pages.
+- An expected page must materially help answer the actual query as written. A
+  page that only matches background context or one isolated term is a false positive.
+- Do not repair a wrong label by moving page ids between buckets.
+- approved: at least one candidate page was supplied and every candidate bucket
+  assignment is supported. Return the three candidate arrays exactly as supplied.
+- rejected: at least one available excerpt clearly contradicts its assigned bucket.
+  Return all three arrays empty so the candidate set cannot be promoted.
+- uncertain: evidence is insufficient or ambiguous. A meaningful ambiguous query with
+  no candidate labels is uncertain, not approved or needs_retry. Return all three
+  arrays empty.
+- needs_retry: context is malformed or any candidate page has exists=false or a
+  missing excerpt. Missing candidate evidence is needs_retry, not rejected or
+  uncertain. Return all three arrays empty.
+
+Return JSON only matching this schema:
+{json.dumps(schema, ensure_ascii=False, indent=2)}
+
+Candidate:
+{json.dumps(payload, ensure_ascii=False, indent=2)}
+"""
 
 
 def tag_repair_page_excerpt(text: str, *, limit: int = 6000) -> str:
@@ -1841,8 +1993,10 @@ __all__ = [
     "INGEST_PROPOSAL_KIND",
     "INGEST_PROPOSAL_SCHEMA_VERSION",
     "READ_BACK_EVIDENCE_POLICY_MARKER",
+    "SEARCH_LABEL_PROMPT_POLICY_VERSION",
     "build_autonomy_duplicate_review_prompt",
     "build_autonomy_retention_review_prompt",
+    "build_frontier_label_prompt",
     "build_ingest_review_projection",
     "build_ingest_reconciliation_prompt",
     "build_orphan_link_review_prompt",
