@@ -3677,7 +3677,7 @@ def run_auto_apply_error_self_heal(
 def enqueue_system_code_repair(packet_path: Path) -> dict[str, Any]:
     """Durably enqueue one trusted repair-plane packet without spawning.
 
-    Only :mod:`chronovisor.ops.system_incident_supervisor` should call this
+    Only :mod:`chronovisor.ingest.system_incident_supervisor` should call this
     helper.  The converge worker owns execution through the background-job
     ledger; watchdog and hook processes must never detach a worker directly.
     """
