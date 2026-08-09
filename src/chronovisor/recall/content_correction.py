@@ -96,6 +96,10 @@ from chronovisor.ops.convergence import (
     CycleBudget,
     stable_item_key,
 )
+from chronovisor.raw.evidence_grounding import (
+    ProtectedLiteralGroundingError,
+    validate_protected_literals,
+)
 from chronovisor.recall.recall_auditor import (
     TurnContext,
     hook_hints_for_host,
@@ -111,10 +115,6 @@ from chronovisor.recall.recall_runtime import (
     _build_feedback_record,
     _feedback_exclusive_lock,
     recall_log_snapshot,
-)
-from chronovisor.research.evidence_grounding import (
-    ProtectedLiteralGroundingError,
-    validate_protected_literals,
 )
 from chronovisor.search.claims import rebuild_claim_index
 from chronovisor.search.feedback_ledger import (

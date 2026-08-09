@@ -48,6 +48,10 @@ from chronovisor.hosts.claude_code_capture_delta import (
     bounded_transcript_slice as bounded_transcript_slice,
 )
 from chronovisor.raw import claude_code_transcript as _claude_code_transcript
+from chronovisor.raw.evidence_grounding import (
+    ProtectedLiteralGroundingError,
+    validate_protected_literals,
+)
 from chronovisor.raw.raw_segment import copy_source_interval
 from chronovisor.raw.raw_store import raw_layout_mode
 from chronovisor.raw.save_transaction import (
@@ -59,10 +63,6 @@ from chronovisor.raw.save_transaction import (
     publish_transcript_capture,
     save_transaction_lock,
     validate_published_save_receipt,
-)
-from chronovisor.research.evidence_grounding import (
-    ProtectedLiteralGroundingError,
-    validate_protected_literals,
 )
 
 FILE_CHANGE_TOOLS = _claude_code_transcript.FILE_CHANGE_TOOLS
