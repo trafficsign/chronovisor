@@ -101,7 +101,7 @@ def run_l1(
     dry_run: bool = False,
 ) -> dict[str, Any]:
     if action == "recover-hold-leases":
-        from chronovisor.librarian.managed_hold import ManagedHoldStore
+        from chronovisor.core.managed_hold import ManagedHoldStore
 
         store = ManagedHoldStore(
             chronovisor_root / "runtime" / "managed-holds" / "state.json"

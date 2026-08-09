@@ -27,158 +27,30 @@ the apply path.
 from __future__ import annotations
 
 import os
-import re
 from datetime import date
 
 from chronovisor.core.link_fix import atomic_write
 from chronovisor.core.page_mutation import chronovisor_mutation_lock
 from chronovisor.core.store import SYSTEM_DIR
+from chronovisor.core.tag_rules import (
+    AXIS_LIMITS,
+    SEED_TAGS,
+    VALID_PREFIXES,
+    parse_tags,
+    validate_axis_counts,
+    validate_tag,
+)
 
-# ---------------------------------------------------------------------------
-# Taxonomy v0.1 — seed tags
-# ---------------------------------------------------------------------------
-
-
-SEED_TAGS: dict[str, list[str]] = {
-    "d/": [
-        "d/ai-industry",
-        "d/hardware",
-        "d/geopolitics",
-        "d/health",
-        "d/finance",
-        "d/personal-strategy",
-        "d/tools-config",
-        "d/japan",
-        "d/theory",
-        "d/paranormal",
-    ],
-    "t/": [
-        "t/analysis",
-        "t/chat-log",
-        "t/howto",
-        "t/reference",
-        "t/decision",
-        "t/scenario",
-        "t/news-summary",
-    ],
-    "s/": [
-        "s/2026",
-        "s/evergreen",
-        "s/historical",
-    ],
-}
-
-
-# Axis -> (min_count, max_count). ``s/`` uses None upper bound conventions
-# but here we keep an explicit (1, 1) so all four limits are uniform.
-AXIS_LIMITS: dict[str, tuple[int, int]] = {
-    "d/": (1, 3),
-    "t/": (1, 1),
-    "s/": (1, 1),
-}
-
-
-VALID_PREFIXES: tuple[str, ...] = ("d/", "t/", "s/")
-
-
-# ``s/`` is the only axis where a digit-leading body (years) is allowed.
-# Other axes must start with a letter.
-_AXIS_BODY_REGEX = {
-    "d/": re.compile(r"^[a-z][a-z0-9-]*$"),
-    "t/": re.compile(r"^[a-z][a-z0-9-]*$"),
-    "s/": re.compile(r"^[a-z0-9][a-z0-9-]*$"),
-}
-
-_MAX_WORDS_PER_TAG = 2  # rule 3: 3+ words go to keywords, not tags
-
-
-# ---------------------------------------------------------------------------
-# Form validation
-# ---------------------------------------------------------------------------
-
-
-def validate_tag(tag: str) -> tuple[bool, str]:
-    """Validate a single tag against form rules (1-6 from generation rules v1.0).
-
-    Returns ``(is_valid, reason)``. ``reason`` is empty for valid tags.
-    """
-    if not isinstance(tag, str):
-        return False, "tag must be a string"
-
-    if not tag or tag != tag.strip():
-        return False, "empty or has surrounding whitespace"
-
-    matched_prefix: str | None = None
-    for prefix in VALID_PREFIXES:
-        if tag.startswith(prefix):
-            matched_prefix = prefix
-            break
-    if matched_prefix is None:
-        return False, f"missing required prefix (one of {VALID_PREFIXES})"
-
-    body = tag[len(matched_prefix):]
-    if not body:
-        return False, "empty body after prefix"
-
-    if not _AXIS_BODY_REGEX[matched_prefix].fullmatch(body):
-        if matched_prefix == "s/":
-            return False, "s/ body must be ASCII kebab-case (digits ok)"
-        return False, f"{matched_prefix} body must be ASCII kebab-case starting with a letter"
-
-    # Word count: hyphens delimit words. ``personal-strategy`` is 2 words.
-    word_count = len([w for w in body.split("-") if w])
-    if word_count > _MAX_WORDS_PER_TAG:
-        return False, f"too many words (max {_MAX_WORDS_PER_TAG}); use keywords instead"
-
-    return True, ""
-
-
-def parse_tags(tags: list[str]) -> dict[str, list[str]]:
-    """Group tags by their axis prefix.
-
-    Tags that don't match any known prefix go under the empty-string key
-    so callers can surface them as form violations without losing the
-    raw value.
-    """
-    out: dict[str, list[str]] = {p: [] for p in VALID_PREFIXES}
-    out[""] = []
-    for tag in tags:
-        if not isinstance(tag, str):
-            out[""].append(repr(tag))
-            continue
-        for prefix in VALID_PREFIXES:
-            if tag.startswith(prefix):
-                out[prefix].append(tag)
-                break
-        else:
-            out[""].append(tag)
-    return out
-
-
-def validate_axis_counts(parsed: dict[str, list[str]]) -> list[str]:
-    """Return a list of human-readable violation messages.
-
-    Empty list = the tag set satisfies axis count constraints. The check
-    is informational at apply time — chronovisor_check lint enforces it.
-    """
-    violations: list[str] = []
-    for prefix, (min_n, max_n) in AXIS_LIMITS.items():
-        n = len(parsed.get(prefix, []))
-        if n < min_n:
-            violations.append(
-                f"{prefix} has {n} tag(s); requires at least {min_n}"
-            )
-        if n > max_n:
-            violations.append(
-                f"{prefix} has {n} tag(s); allows at most {max_n}"
-            )
-    unknown = parsed.get("", [])
-    if unknown:
-        violations.append(
-            f"unknown prefix: {', '.join(unknown[:5])}"
-            + ("..." if len(unknown) > 5 else "")
-        )
-    return violations
+__all__ = [
+    "AXIS_LIMITS",
+    "SEED_TAGS",
+    "VALID_PREFIXES",
+    "dedupe_with_existing",
+    "parse_tags",
+    "record_new_tag",
+    "validate_axis_counts",
+    "validate_tag",
+]
 
 
 # ---------------------------------------------------------------------------

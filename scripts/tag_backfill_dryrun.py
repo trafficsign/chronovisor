@@ -32,11 +32,11 @@ from chronovisor.core.frontmatter import parse as fm_parse
 from chronovisor.core.frontmatter import patch as fm_patch
 from chronovisor.core.ollama import generate as _ollama_generate
 from chronovisor.core.store import find_page
+from chronovisor.core.tag_rules import SEED_TAGS
 from chronovisor.librarian.tag_distribution import (
     TAG_REPORT_SYSTEM_PROMPT,
     parse_llm_response,
 )
-from chronovisor.librarian.tags import SEED_TAGS
 from chronovisor.search.index_store import get_store
 
 DRY_RUN_DIR = Path.home() / ".chronovisor" / ".tag-backfill-dryrun"

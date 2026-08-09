@@ -18,6 +18,7 @@ from chronovisor.core.durable_state import (
     read_sealed_json,
     write_sealed_json,
 )
+from chronovisor.core.managed_hold import ManagedHoldStore
 from chronovisor.core.runtime_config import DecisionRouterConfig
 from chronovisor.decision import decision_authority, decision_router, failure_supervisor
 from chronovisor.decision.decision_artifact import (
@@ -44,7 +45,6 @@ from chronovisor.ingest.read_back_integrity import (
     verify_prior_prefix,
 )
 from chronovisor.librarian import managed_hold
-from chronovisor.librarian.managed_hold import ManagedHoldStore
 from chronovisor.ops import burn_monitor, health, repair_runbook
 from chronovisor.ops.deadman import inspect_heartbeat, write_heartbeat
 from chronovisor.raw import raw_replay

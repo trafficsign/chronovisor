@@ -29,6 +29,7 @@ from chronovisor.core.page_mutation import (
 )
 from chronovisor.core.runtime_config import runtime_repo_root
 from chronovisor.core.store import CHRONOVISOR_ROOT, SYSTEM_DIR, find_page
+from chronovisor.core.tag_rules import parse_tags, validate_axis_counts, validate_tag
 from chronovisor.decision.decision_authority import (
     compare_semantic_authority,
     current_semantic_authority,
@@ -43,11 +44,6 @@ from chronovisor.decision.semantic_hold import (
 )
 from chronovisor.decision.semantic_hold import (
     canonical_sha256 as semantic_hold_sha256,
-)
-from chronovisor.librarian.tags import (
-    parse_tags,
-    validate_axis_counts,
-    validate_tag,
 )
 from chronovisor.search.index_store import get_store
 

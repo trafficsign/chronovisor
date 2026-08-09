@@ -22,13 +22,13 @@ from chronovisor.core.canonical_json import (
 )
 from chronovisor.core.frontmatter import parse as parse_frontmatter
 from chronovisor.core.hashutil import sha256_text as _sha256_text
-from chronovisor.decision.decision_schema_manifest import TAG_REPAIR_SCHEMA
-from chronovisor.librarian.tags import (
+from chronovisor.core.tag_rules import (
     SEED_TAGS,
     parse_tags,
     validate_axis_counts,
     validate_tag,
 )
+from chronovisor.decision.decision_schema_manifest import TAG_REPAIR_SCHEMA
 
 INGEST_REPAIR_OPTION_POLICY_VERSION = 2
 INGEST_REPAIR_OPTION_ID_RE = re.compile(r"^rp_[0-9a-f]{32}$")

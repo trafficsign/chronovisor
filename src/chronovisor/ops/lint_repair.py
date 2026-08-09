@@ -32,6 +32,12 @@ from chronovisor.core.page_mutation import (
     decision_authority_lock,
 )
 from chronovisor.core.runtime_config import load_ingest_config, runtime_repo_root
+from chronovisor.core.tag_rules import (
+    SEED_TAGS,
+    parse_tags,
+    validate_axis_counts,
+    validate_tag,
+)
 from chronovisor.decision import routine_review
 from chronovisor.decision.decision_authority import (
     compare_semantic_authority,
@@ -53,12 +59,6 @@ from chronovisor.decision.semantic_hold import (
     is_local_semantic_no_quorum,
     persisted_semantic_no_quorum_hold,
     semantic_no_quorum_hold_error,
-)
-from chronovisor.librarian.tags import (
-    SEED_TAGS,
-    parse_tags,
-    validate_axis_counts,
-    validate_tag,
 )
 from chronovisor.ops.convergence import (
     FRONTIER_STATUSES,

@@ -337,8 +337,8 @@ def read_back_kpi() -> dict[str, Any]:
 
 def autonomy_hardening_kpi() -> dict[str, Any]:
     from chronovisor.core.durable_state import DurableStateError, read_sealed_json
+    from chronovisor.core.managed_hold import ManagedHoldStore
     from chronovisor.decision.quality_guard import quality_snapshot
-    from chronovisor.librarian.managed_hold import ManagedHoldStore
     from chronovisor.ops.deadman import inspect_heartbeat
     from chronovisor.recall.provisional_recall import snapshot as provisional_snapshot
 
