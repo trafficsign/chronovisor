@@ -258,12 +258,12 @@ production ──X──&gt; lab implementation</pre>
 
 <h3>最終 operational closure</h3>
 <div class="callout">
-<p><progress value="77" max="221">34.8%</progress> <strong>Success 77 / Held 1 / Actionable 143</strong></p>
-<p class="exit">2026-08-09 17:54:04のbatch19 terminal evidence。分母<code>221</code>はqueueの瞬間値ではなく、完了判定まで固定するmanifest総数。</p>
+<p><progress value="80" max="221">36.2%</progress> <strong>Success 80 / Held 2 / Actionable 139</strong></p>
+<p class="exit">2026-08-09 18:25:01のcycle24 terminal evidence。分母<code>221</code>はqueueの瞬間値ではなく、完了判定まで固定するmanifest総数。</p>
 </div>
 <ol class="checklist">
 <li><input type="checkbox"><span>fixed221 manifestのdrainを完了。</span></li>
-<li><input type="checkbox" checked><span>Held 1件をvalid current-authority holdとして分類。</span></li>
+<li><input type="checkbox" checked><span>Held 2件をvalid current-authority holdとして分類。</span></li>
 <li><input type="checkbox"><span>semantic／reranker／ingestをfinal commitへcutover。semantic／rerankerは現在interim 7dで、SCC作業継続によりfinal commitは更新される。</span></li>
 <li><input type="checkbox"><span>runtime archive、running PID、healthのcommitを最終値へ完全一致。</span></li>
 <li><input type="checkbox"><span>final live auditを完走。</span></li>
@@ -363,7 +363,7 @@ CHRONOVISOR_ROOT="$test_root" PYTHONDONTWRITEBYTECODE=1 \
 <li><time>2026-08-06 17:03</time><span>Campaign P0 acceptance fixを完了。schema registry→implementationをproduction <code>11 statements / 13 symbols</code>、background <code>1 / 5</code>として正方向にcharacterizeし、現行<code>95</code> edge／<code>1267</code> static site／<code>24</code> dynamic／<code>31</code> privateを、Campaign O固定commit由来のactive/retired seedと詳細ledgerで三者照合するshrink-only gateへ更新。production→labは<code>5</code> edge／<code>20</code> static site／<code>1</code> dynamic siteを個別固定し、15 lab dispatchを含む<code>289</code> compatibility contract、実owner・P2–S removal順序、mixed-version retirement/rollback条件を記録した。focused pytest <code>24 passed</code>、Ruff、script/configured mypy、Import Linter、architecture verify、seed/ledger byte再生成比較、diff checkはすべてgreen。Campaign Pはin progress・未チェックのまま維持。</span></li>
 <li><time>2026-08-06 17:22</time><span>P0 final hardeningを完了。classification→<code>lab</code> package edgeのzero到達点をP3へ補正し、P2はsite milestoneとして分離。schema registryはtarget allowlistや<code>_SCHEMA</code> suffixに依存せずscope内の全uppercase implementation constantを検出し、現行<code>12 statements / 18 symbols</code>を維持した。固定source head <code>d404a6b20d00e3bcd1d4cdb89edfa5a718c51833</code>をliteral characterizationとvalid previous seedとの連続性で拘束し、module constant／current seed／ledgerの同時変更も拒否する。focused pytest <code>26 passed</code>、Ruff、script/configured mypy、Import Linter、architecture verify、seed/ledger byte再生成比較、diff checkはすべてgreen。Campaign Pはin progress・未チェックのまま維持。</span></li>
 <li><time>2026-08-06 19:08</time><span>Campaign P1 runtime-state ownership guardを実装。固定commit <code>5d3564fab652cf5f5520b8734c7b67c67ecdd93d</code>由来のshrink-only seedと詳細registryで、<code>454 resources / 732 discoveries / 138 exclusions</code>、console <code>51</code>、launchd <code>7</code>、lab dispatch <code>15</code>、module-worker site <code>15</code>、lock protocol site <code>104</code>を三者照合する。lexical alias ownership、unversioned format、artifact-sidecar／worker-lease／global-protocol scope、socket server/client、wrapper invocationを明示し、search-label 3 writerとclaims 2 writerをshared sidecar flockへ統一。Campaign PはP1検証中・未チェックのまま維持。</span></li>
-<li><time>2026-08-09 17:54:04</time><span>batch19 terminal evidenceを反映。fixed manifest <code>221</code>件は<code>Success 77 / Held 1 / Actionable 143</code>、進捗<code>34.8%</code>。ack mismatchは<code>0/0</code>、batch resultは<code>processed 10 / defer 0 / fail 0</code>、self-healは<code>ok</code>。runtime snapshotはsemantic <code>PID 73474/73515</code>・commit <code>7d008db</code>・health <code>ok/ready</code>、reranker <code>PID 74010/74075</code>・commit <code>7d008db</code>・health <code>ok/ready</code>・drift <code>false</code>、ingest <code>PID 66675/66701</code>・commit <code>a8de90e</code>でbatch20を実行中。SCC final commitとingest cutoverは未完了のため、final cutover／archive／health項目は未チェック、plan statusは<code>running</code>を維持。</span></li>
+<li><time>2026-08-09 18:25:01</time><span>cycle24 terminal evidenceを反映。fixed manifest <code>221</code>件は<code>Success 80 / Held 2 / Actionable 139</code>、進捗<code>36.2%</code>。ack mismatchは<code>0</code>、batch resultは<code>10/10 success</code>、self-healは<code>ok</code>。runtime snapshotはsemantic <code>PID 73474/73515</code>・commit <code>7d008db</code>・health <code>ok</code>、reranker <code>PID 74010/74075</code>・commit <code>7d008db</code>・health <code>ok</code>、ingest <code>PID 66675/66701</code>・commit <code>a8de90e</code>で<code>waiting</code>。SCC final commitとingest cutoverは未完了のため、final cutover／archive／health項目は未チェック、plan statusは<code>running</code>を維持。</span></li>
 </ol>
 </section>
 
