@@ -10,10 +10,10 @@ import pytest
 
 from chronovisor.decision.decision_router import canonical_agreement_signature
 from chronovisor.decision.decision_schema_manifest import production_decision_schemas
+from chronovisor.decision.recall_improvement_contract import PolicyProposal
+from chronovisor.decision.recall_policy_contract import RecallPolicy
 from chronovisor.ops.convergence import CycleBudget
 from chronovisor.recall import recall_improvement
-from chronovisor.recall.recall_improvement import PolicyProposal
-from chronovisor.recall.recall_runtime import RecallPolicy
 
 
 def _improvement_authority(epoch: str) -> dict:

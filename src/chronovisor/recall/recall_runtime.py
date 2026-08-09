@@ -39,6 +39,7 @@ from chronovisor.core.store import (
     init_chronovisor,
 )
 from chronovisor.decision.local_structured import LocalStructuredSession
+from chronovisor.decision.recall_policy_contract import RecallPolicy as RecallPolicy
 from chronovisor.ops.state_register import format_state_context, should_inject_state
 from chronovisor.recall import recall_publication as _recall_publication
 from chronovisor.recall.recall_prompt import (
@@ -177,75 +178,6 @@ CHITCHAT_TERMS = [
     "こんにちは",
     "こんばんは",
 ]
-
-
-@dataclass
-class RecallPolicy:
-    enabled: bool = True
-    search_threshold: float = 0.35
-    read_threshold: float = 0.65
-    # Keep the contract-fixture fallback stable. Deployments that opt into a
-    # larger recall envelope must set this explicitly in [recall.budgets].
-    max_context_chars: int = 600
-    max_state_context_chars: int = 1600
-    max_total_context_chars: int = 2402
-    max_pages: int = 3
-    max_queries: int = 3
-    total_timeout_ms: int = 4000
-    deterministic_fallback_reserve_ms: int = 600
-    circuit_breaker_failures: int = 2
-    circuit_breaker_cooldown_seconds: int = 60
-    semantic: bool = True
-    gate_mode: str = "evidence"  # legacy | evidence
-    context_style: str = "cards"  # legacy | cards
-    log_decisions: bool = True
-    avoid_heavy_personal_context_in_chitchat: bool = True
-    use_feedback_suppressions: bool = True
-    fail_silent_on_judge_unavailable: bool = True
-    judge_mode: str = "auto"  # off | auto | always
-    judge_model: str = "ornith:9b-q4_K_M"
-    judge_think: bool = False
-    judge_timeout_ms: int = 2000
-    judge_num_ctx: int = 4096
-    judge_num_predict: int = 64
-    judge_keep_alive: str = "24h"
-    warmup_timeout_ms: int = 15000
-    judge_include_queries: bool = False
-    rewrite_enabled: bool = True
-    rewrite_model: str = "ornith:9b-q4_K_M"
-    rewrite_timeout_ms: int = 3000
-    fusion_anchor: float = 0.9
-    fusion_bm25: float = 1.0
-    fusion_semantic: float = 0.6
-    fusion_graph: float = 0.3
-    fusion_context: float = 0.25
-    fusion_usage_prior: float = 0.0
-    fusion_bm25_score_bonus: float = 0.005
-    fusion_bm25_rank_bonus: float = 0.006
-    fusion_bm25_rank_decay: float = 0.006
-    fusion_semantic_min_top_score: float = 0.45
-    fusion_semantic_min_margin: float = 0.002
-    fusion_semantic_low_confidence_weight: float = 0.25
-    fusion_usage_prior_decay: float = 0.98
-    fusion_usage_prior_cap: float = 3.0
-    calibration_enabled: bool = True
-    calibration_min_samples: int = 500
-    calibration_holdout_ratio: float = 0.2
-    calibration_min_improvement: float = 0.02
-    session_ttl_seconds: int = 7 * 24 * 60 * 60
-    processor_enabled: bool = False
-    processor_shadow_enabled: bool = False
-    processor_auto_enable: bool = False
-    processor_max_candidates: int = 10
-    processor_max_pointer_cards: int = 6
-    processor_max_rich_evidence: int = 2
-    processor_injection_token_budget: int = 1200
-    processor_certificate_required: bool = True
-    processor_judge_enabled: bool = True
-    processor_judge_model: str = ""
-    processor_judge_timeout_ms: int = 900
-    processor_escalation_model: str = "maxwell1500/ornith-35b:Q5_K_M"
-    processor_escalation_timeout_ms: int = 900
 
 
 class RecallWallClockTimeout(BaseException):

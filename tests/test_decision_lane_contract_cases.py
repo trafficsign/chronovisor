@@ -792,9 +792,9 @@ def test_recall_improvement_contracts_are_post_gate_production_candidates() -> N
 
 
 def test_recall_improvement_regression_is_stopped_before_model_audit() -> None:
-    from chronovisor.recall.recall_improvement import _gate_candidate
+    from chronovisor.decision.recall_improvement_contract import gate_candidate
 
-    accepted, checks = _gate_candidate(
+    accepted, checks = gate_candidate(
         baseline_dev={"score": 0.70, "metrics": {}},
         baseline_holdout={
             "score": 0.94,

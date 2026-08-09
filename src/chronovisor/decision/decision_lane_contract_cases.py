@@ -2207,13 +2207,15 @@ def _recall_calibration_cases() -> list[tuple[str, str | None, dict[str, Any]]]:
 
 
 def _recall_improvement_cases() -> list[tuple[str, str | None, dict[str, Any]]]:
-    from chronovisor.recall.recall_improvement import (
+    from chronovisor.decision.recall_improvement_contract import (
         PolicyProposal,
         build_frontier_audit_prompt,
         build_recall_improvement_candidate_record,
     )
-    from chronovisor.recall.recall_policy_store import apply_policy_overrides
-    from chronovisor.recall.recall_runtime import RecallPolicy
+    from chronovisor.decision.recall_policy_contract import (
+        RecallPolicy,
+        apply_policy_overrides,
+    )
 
     # Every review case is post-gate by construction. Regressing or unavailable
     # evaluation evidence is tested at `_gate_candidate` and never reaches the

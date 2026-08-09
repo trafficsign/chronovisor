@@ -10,6 +10,19 @@ from typing import Any
 
 from chronovisor.core.jsonl import read_jsonl as _strict_read_jsonl
 from chronovisor.core.store import CHRONOVISOR_ROOT
+from chronovisor.decision.recall_policy_contract import (
+    ALLOWED_POLICY_FIELDS as ALLOWED_POLICY_FIELDS,
+)
+from chronovisor.decision.recall_policy_contract import FALSE_VALUES as FALSE_VALUES
+from chronovisor.decision.recall_policy_contract import (
+    apply_policy_overrides as apply_policy_overrides,
+)
+from chronovisor.decision.recall_policy_contract import (
+    normalize_policy_overrides as normalize_policy_overrides,
+)
+from chronovisor.decision.recall_policy_contract import (
+    policy_snapshot as policy_snapshot,
+)
 
 IMPROVEMENT_DIR = CHRONOVISOR_ROOT / "runtime" / "recall-improvement"
 ACTIVE_POLICY_FILE = IMPROVEMENT_DIR / "active-policy.json"
@@ -20,102 +33,9 @@ SCHEDULE_FILE = IMPROVEMENT_DIR / "schedule-state.json"
 RUNS_DIR = IMPROVEMENT_DIR / "runs"
 FRONTIER_AUDIT_DIR = IMPROVEMENT_DIR / "frontier-audits"
 
-FALSE_VALUES = {"0", "false", "False", "no", "NO", "off", "OFF"}
-
-ALLOWED_POLICY_FIELDS: dict[str, dict[str, Any]] = {
-    "search_threshold": {"type": float, "min": 0.05, "max": 0.9},
-    "read_threshold": {"type": float, "min": 0.1, "max": 0.95},
-    "max_context_chars": {"type": int, "min": 400, "max": 3000},
-    "max_pages": {"type": int, "min": 1, "max": 6},
-    "max_queries": {"type": int, "min": 1, "max": 6},
-    "semantic": {"type": bool},
-    "rewrite_enabled": {"type": bool},
-    "fusion_anchor": {"type": float, "min": 0.0, "max": 2.0},
-    "fusion_bm25": {"type": float, "min": 0.0, "max": 2.0},
-    "fusion_semantic": {"type": float, "min": 0.0, "max": 2.0},
-    "fusion_graph": {"type": float, "min": 0.0, "max": 1.0},
-    "fusion_context": {"type": float, "min": 0.0, "max": 1.0},
-    "fusion_usage_prior": {"type": float, "min": 0.0, "max": 1.0},
-    "fusion_bm25_score_bonus": {"type": float, "min": 0.0, "max": 0.05},
-    "fusion_bm25_rank_bonus": {"type": float, "min": 0.0, "max": 0.05},
-    "fusion_bm25_rank_decay": {"type": float, "min": 0.0, "max": 0.05},
-    "fusion_semantic_min_top_score": {"type": float, "min": 0.0, "max": 1.0},
-    "fusion_semantic_min_margin": {"type": float, "min": 0.0, "max": 0.05},
-    "fusion_semantic_low_confidence_weight": {"type": float, "min": 0.0, "max": 1.0},
-}
-
-
 def improvement_policy_enabled() -> bool:
     value = os.environ.get("CHRONOVISOR_RECALL_IMPROVEMENT_POLICY")
     return value not in FALSE_VALUES
-
-
-def _coerce_value(field: str, value: Any) -> Any:
-    spec = ALLOWED_POLICY_FIELDS[field]
-    wanted = spec["type"]
-    if wanted is bool:
-        if isinstance(value, bool):
-            return value
-        if isinstance(value, str):
-            if value in {"1", "true", "True", "yes", "YES", "on", "ON"}:
-                return True
-            if value in FALSE_VALUES:
-                return False
-        raise ValueError(f"{field} must be boolean")
-    if wanted is int:
-        if isinstance(value, bool):
-            raise ValueError(f"{field} must be int")
-        coerced = int(value)
-    else:
-        if isinstance(value, bool):
-            raise ValueError(f"{field} must be number")
-        coerced = float(value)
-    minimum = spec.get("min")
-    maximum = spec.get("max")
-    if minimum is not None and coerced < minimum:
-        raise ValueError(f"{field} below minimum {minimum}")
-    if maximum is not None and coerced > maximum:
-        raise ValueError(f"{field} above maximum {maximum}")
-    return coerced
-
-
-def normalize_policy_overrides(raw: Any) -> dict[str, Any]:
-    if not isinstance(raw, dict):
-        return {}
-    overrides: dict[str, Any] = {}
-    for field, value in raw.items():
-        key = str(field).strip().replace("-", "_")
-        if key not in ALLOWED_POLICY_FIELDS:
-            continue
-        try:
-            overrides[key] = _coerce_value(key, value)
-        except (TypeError, ValueError):
-            continue
-    search = overrides.get("search_threshold")
-    read = overrides.get("read_threshold")
-    if isinstance(search, int | float) and isinstance(read, int | float) and read <= search:
-        overrides["read_threshold"] = min(0.95, float(search) + 0.05)
-    return overrides
-
-
-def apply_policy_overrides(policy: Any, overrides: dict[str, Any]) -> list[str]:
-    applied: list[str] = []
-    normalized = normalize_policy_overrides(overrides)
-    for field, value in normalized.items():
-        if hasattr(policy, field):
-            setattr(policy, field, value)
-            applied.append(field)
-    if getattr(policy, "read_threshold", 1.0) <= getattr(policy, "search_threshold", 0.0):
-        policy.read_threshold = min(0.95, float(policy.search_threshold) + 0.05)
-    return applied
-
-
-def policy_snapshot(policy: Any) -> dict[str, Any]:
-    return {
-        field: getattr(policy, field)
-        for field in ALLOWED_POLICY_FIELDS
-        if hasattr(policy, field)
-    }
 
 
 def read_json_file(path: Path) -> dict[str, Any]:

@@ -1,14 +1,14 @@
 {
   "schema_version": 2,
   "source_baseline_head": "d404a6b20d00e3bcd1d4cdb89edfa5a718c51833",
-  "baseline_sha256": "676c9165fe7e8c7fc6883feabba68c9cfbe442838492a62439ed49ce299ce068",
+  "baseline_sha256": "1dfd0a0613c38d8a4b44ea7365559cd287efdde4f20a68c4ddc4100392226150",
   "semantic_identity": "cross-domain edges use category+source_package+target_package; statement exceptions use category+source_package+source_module+scope_kind+scope+statement_kind+target_package+target_module+symbols+occurrence; source line is diagnostic and normalized statement content is verified independently",
   "counts": {
-    "exceptions": 67,
+    "exceptions": 66,
     "by_category": {
-      "cross_domain_edge": 67
+      "cross_domain_edge": 66
     },
-    "cross_domain_sites": 1350,
+    "cross_domain_sites": 1368,
     "production_to_lab_edges": 0,
     "production_to_lab_static_sites": 0,
     "production_to_lab_dynamic_sites": 0,
@@ -852,7 +852,7 @@
           ],
           "content_sha256": "178f7c8ea47cc910b2bb0de81fc2697be43984cb8cccd3407c636c4a8ecd396f",
           "occurrence": 1,
-          "line": 1390
+          "line": 1322
         }
       ],
       "semantic_id": "arch:0b07a8e1378fd72c1810237243b725da4faed5f04c25584689cfd3ef52f77ffd",
@@ -1037,6 +1037,34 @@
           "line": 3119
         },
         {
+          "semantic_id": "arch:133b65f4d3215b2294fd73ccddb9383847b41aff8b462282ef8edc97c7546410",
+          "source_module": "chronovisor.recall.recall_improvement",
+          "scope_kind": "module",
+          "scope": "<module>",
+          "statement_kind": "from",
+          "target_module": "chronovisor.decision.recall_improvement_contract",
+          "symbols": [
+            "candidate_blocker_summary"
+          ],
+          "content_sha256": "94838cc0a48e448a7785454d3d075c7889cd8efbb10f6b8f57f07453e0a92db9",
+          "occurrence": 1,
+          "line": 50
+        },
+        {
+          "semantic_id": "arch:17dcd27135e97d8980cd468da70a1cf6b7af4513dab3b64a426f9e5629691f37",
+          "source_module": "chronovisor.recall.recall_runtime",
+          "scope_kind": "module",
+          "scope": "<module>",
+          "statement_kind": "from",
+          "target_module": "chronovisor.decision.recall_policy_contract",
+          "symbols": [
+            "RecallPolicy"
+          ],
+          "content_sha256": "4cc4e120a4b96534410df1a5c3d989f98e68ab27827777b649dc4e74e3aaed60",
+          "occurrence": 1,
+          "line": 42
+        },
+        {
           "semantic_id": "arch:191d306abedb3eabb16e9e15ca55a925fea579f11d93ef48d257b82f2eaac9fd",
           "source_module": "chronovisor.recall.content_correction",
           "scope_kind": "module",
@@ -1049,6 +1077,20 @@
           "content_sha256": "b8440d7ed3f3aa4cefe3c5770a490868a00bf5e90fed9fc96b11f6afeff5dd94",
           "occurrence": 1,
           "line": 92
+        },
+        {
+          "semantic_id": "arch:1abda2bcd3b80ab8f5e9705cca0723f1b4b9c8b09239beae5582c69c1bbcdf1b",
+          "source_module": "chronovisor.recall.recall_policy_store",
+          "scope_kind": "module",
+          "scope": "<module>",
+          "statement_kind": "from",
+          "target_module": "chronovisor.decision.recall_policy_contract",
+          "symbols": [
+            "normalize_policy_overrides"
+          ],
+          "content_sha256": "ef80de18f83eb540eb111d583e0c7b6047188934c78d883e266c6a2e766d8619",
+          "occurrence": 1,
+          "line": 20
         },
         {
           "semantic_id": "arch:1ba9d7847e0773eb3cd6265864243cb1f282c03b2cd5ab590a2ce29c524d2044",
@@ -1080,6 +1122,20 @@
           "line": 149
         },
         {
+          "semantic_id": "arch:27a11eee20dcfe9d6e1fce1b6aea7c1d4f9635909a08265523352f85fefb0d36",
+          "source_module": "chronovisor.recall.recall_improvement",
+          "scope_kind": "module",
+          "scope": "<module>",
+          "statement_kind": "from",
+          "target_module": "chronovisor.decision.recall_policy_contract",
+          "symbols": [
+            "normalize_policy_overrides"
+          ],
+          "content_sha256": "ef80de18f83eb540eb111d583e0c7b6047188934c78d883e266c6a2e766d8619",
+          "occurrence": 1,
+          "line": 76
+        },
+        {
           "semantic_id": "arch:2b67d5411edae35ff515c6398435026c71126bbb0b0a4309be0abb44d8f1fc67",
           "source_module": "chronovisor.recall.recall_calibration",
           "scope_kind": "module",
@@ -1109,6 +1165,38 @@
           "line": 88
         },
         {
+          "semantic_id": "arch:3360240c4d4bd008a12ae67c33c5701ae4d6e7eb82626e0c45ff0604f613dde5",
+          "source_module": "chronovisor.recall.recall_improvement",
+          "scope_kind": "module",
+          "scope": "<module>",
+          "statement_kind": "from",
+          "target_module": "chronovisor.decision.recall_improvement_contract",
+          "symbols": [
+            "candidate_blockers",
+            "filter_blocker_counts",
+            "gate_candidate",
+            "latency_p95",
+            "top_blocker_rows"
+          ],
+          "content_sha256": "e35bec679f8c0fe38f8300d4efc974f975d87a86bec4d2394cf40d0060940e36",
+          "occurrence": 1,
+          "line": 53
+        },
+        {
+          "semantic_id": "arch:34fe6c4c4cd426752b7b784369878bf99ea533ba4efc69575a76ba534eda0800",
+          "source_module": "chronovisor.recall.recall_improvement",
+          "scope_kind": "module",
+          "scope": "<module>",
+          "statement_kind": "from",
+          "target_module": "chronovisor.decision.recall_improvement_contract",
+          "symbols": [
+            "PolicyProposal"
+          ],
+          "content_sha256": "f64629a8147f436eb81f5452b0cd1607ae2db60626448de75791413a10913e73",
+          "occurrence": 1,
+          "line": 38
+        },
+        {
           "semantic_id": "arch:3593de0f0d9cc70b4f44a0231fc4d05bc10d45262bfb7407c5d60f23d1f14724",
           "source_module": "chronovisor.recall.recall_runtime",
           "scope_kind": "module",
@@ -1121,6 +1209,34 @@
           "content_sha256": "f3aadbdeb27236cb2ad188be3aa4ba5b5d77beb40d8a844ef3f96a1a76c68b4e",
           "occurrence": 1,
           "line": 41
+        },
+        {
+          "semantic_id": "arch:42e2c0929c590788f11d357ef4dd08072a4dfd306cf6684bbb6b086fb066f985",
+          "source_module": "chronovisor.recall.recall_improvement",
+          "scope_kind": "module",
+          "scope": "<module>",
+          "statement_kind": "from",
+          "target_module": "chronovisor.decision.recall_improvement_contract",
+          "symbols": [
+            "PROPOSER_VISIBLE_BLOCKERS"
+          ],
+          "content_sha256": "703063ee5afd2f26143ecea03368b661432087ccca5f4bd316dbfc55e1620721",
+          "occurrence": 1,
+          "line": 35
+        },
+        {
+          "semantic_id": "arch:431550e09896fbc20eaaf8c84fc892cf3526d52663c7c4232aebdf7235a98d25",
+          "source_module": "chronovisor.recall.recall_policy_store",
+          "scope_kind": "module",
+          "scope": "<module>",
+          "statement_kind": "from",
+          "target_module": "chronovisor.decision.recall_policy_contract",
+          "symbols": [
+            "apply_policy_overrides"
+          ],
+          "content_sha256": "d44facadc480ed297e1b433e8bd11a52ba573fd17edb9d13a7953c620231fcd0",
+          "occurrence": 1,
+          "line": 17
         },
         {
           "semantic_id": "arch:440d0e313a018f0256d3bb7ca919803fb7b3b88c438a416f01e06826c4883e36",
@@ -1180,6 +1296,20 @@
           "line": 74
         },
         {
+          "semantic_id": "arch:6da6240fa348b377e7861ac07d50ac682744fc97a7ef256eba05dc7714e24e58",
+          "source_module": "chronovisor.recall.recall_improvement",
+          "scope_kind": "module",
+          "scope": "<module>",
+          "statement_kind": "from",
+          "target_module": "chronovisor.decision.recall_improvement_contract",
+          "symbols": [
+            "proposer_visible_rejection_blockers"
+          ],
+          "content_sha256": "ca134c47b4219cbad5765d4d52a2011e2f57f71132ba82776bc3cc822ed0c286",
+          "occurrence": 1,
+          "line": 66
+        },
+        {
           "semantic_id": "arch:6efc0b5bbb85f2ad2564a73ec4965c095e5cd0647206f5f150f37b8eff191d7e",
           "source_module": "chronovisor.recall.content_correction",
           "scope_kind": "module",
@@ -1218,6 +1348,20 @@
           "content_sha256": "5a09c2cdb0e01e4218f05e9b03e05668d99d7c0c2cce31a5da513660241bbb19",
           "occurrence": 1,
           "line": 59
+        },
+        {
+          "semantic_id": "arch:7d44ff98cd726cf0877b5e43a98cfc0bd8307ef4636c5983bbd48ee6f27b10e7",
+          "source_module": "chronovisor.recall.recall_improvement",
+          "scope_kind": "module",
+          "scope": "<module>",
+          "statement_kind": "from",
+          "target_module": "chronovisor.decision.recall_policy_contract",
+          "symbols": [
+            "policy_snapshot"
+          ],
+          "content_sha256": "ce2c9f279a590b4403e949ff9d0a142514d9828e1825962ea7b0ac2d058fd1f4",
+          "occurrence": 1,
+          "line": 79
         },
         {
           "semantic_id": "arch:7ece53f297b67c8069438b573a3716f39de06cfa3786f4873b38aff59fd29d27",
@@ -1281,6 +1425,34 @@
           "line": 471
         },
         {
+          "semantic_id": "arch:9565699f332f87a9d1a3d3bb4205ac9717520e9df097db86bf771c85ddcd0f4d",
+          "source_module": "chronovisor.recall.recall_policy_store",
+          "scope_kind": "module",
+          "scope": "<module>",
+          "statement_kind": "from",
+          "target_module": "chronovisor.decision.recall_policy_contract",
+          "symbols": [
+            "ALLOWED_POLICY_FIELDS"
+          ],
+          "content_sha256": "5318139fafcac87e16b338bbf9b3890031494407cdc40deafcbb672e946a3254",
+          "occurrence": 1,
+          "line": 13
+        },
+        {
+          "semantic_id": "arch:979ab748434fb08faf173e14f84729330b05cc39a0183204c6d5ea03db1b1986",
+          "source_module": "chronovisor.recall.recall_improvement",
+          "scope_kind": "module",
+          "scope": "<module>",
+          "statement_kind": "from",
+          "target_module": "chronovisor.decision.recall_improvement_contract",
+          "symbols": [
+            "build_frontier_audit_prompt"
+          ],
+          "content_sha256": "5dd2645ec694a7eefac173ec062b4562b8ca3337f81db1a4882641f718d80b7e",
+          "occurrence": 1,
+          "line": 44
+        },
+        {
           "semantic_id": "arch:9c63b63b568e66d97a9205eef8b65be5c8fcf1adcac6144a6c536ddf3655d523",
           "source_module": "chronovisor.recall.content_correction",
           "scope_kind": "module",
@@ -1293,6 +1465,34 @@
           "content_sha256": "134c8f1ec416397cc28609cf133120f9dbfc86465c65e2a4483022d55708bf27",
           "occurrence": 1,
           "line": 56
+        },
+        {
+          "semantic_id": "arch:9c745613e94335c123617d6c2d244746ea7556e9d130a004be2b6ac64b43d3f9",
+          "source_module": "chronovisor.recall.recall_improvement",
+          "scope_kind": "module",
+          "scope": "<module>",
+          "statement_kind": "from",
+          "target_module": "chronovisor.decision.recall_policy_contract",
+          "symbols": [
+            "ALLOWED_POLICY_FIELDS"
+          ],
+          "content_sha256": "5318139fafcac87e16b338bbf9b3890031494407cdc40deafcbb672e946a3254",
+          "occurrence": 1,
+          "line": 69
+        },
+        {
+          "semantic_id": "arch:a3e02005487292495ee31312058ffb851ea3922d162732c82c903fb31660aee1",
+          "source_module": "chronovisor.recall.recall_improvement",
+          "scope_kind": "module",
+          "scope": "<module>",
+          "statement_kind": "from",
+          "target_module": "chronovisor.decision.recall_improvement_contract",
+          "symbols": [
+            "json_default"
+          ],
+          "content_sha256": "e4695e0eb5c62f91e3062120430faa88a1a9194e754c2c4a5646edb1a3735fd0",
+          "occurrence": 1,
+          "line": 60
         },
         {
           "semantic_id": "arch:a3f00d34686de11de790d2e983f6e255b472fec82fd23c1313d0b7afdf367fee",
@@ -1320,7 +1520,7 @@
           ],
           "content_sha256": "1da0d58353f28b183cf2f1ed3698484d43b925b135b3d85ccaa96b7cf90055d6",
           "occurrence": 1,
-          "line": 1326
+          "line": 1017
         },
         {
           "semantic_id": "arch:aa61b6cf54f38da79a1302a199f2773dc896e5e3885c640b318683bed503d7e8",
@@ -1393,6 +1593,62 @@
           "line": 955
         },
         {
+          "semantic_id": "arch:b86065d352cad38383c0a8ae9077558c17e30766b11de0b6a4e85a4d5c777515",
+          "source_module": "chronovisor.recall.recall_improvement",
+          "scope_kind": "module",
+          "scope": "<module>",
+          "statement_kind": "from",
+          "target_module": "chronovisor.decision.recall_improvement_contract",
+          "symbols": [
+            "adoption_gate_summary"
+          ],
+          "content_sha256": "d586b944c2ec74965b3f26052f891c1b4d6948b7cb15939c557383cd2101f775",
+          "occurrence": 1,
+          "line": 41
+        },
+        {
+          "semantic_id": "arch:bd56b5e1911360a22304e535b89cc73283ed2ca0b3616aa2c8f660723e6fbbc1",
+          "source_module": "chronovisor.recall.recall_improvement",
+          "scope_kind": "module",
+          "scope": "<module>",
+          "statement_kind": "from",
+          "target_module": "chronovisor.decision.recall_improvement_contract",
+          "symbols": [
+            "proposer_adoption_gate_summary"
+          ],
+          "content_sha256": "b0a48d1f685670196133cc3aafc40750e12db51241015ef779199b37e8531b5a",
+          "occurrence": 1,
+          "line": 63
+        },
+        {
+          "semantic_id": "arch:bdc55940125279713bf63740482cb342bfd7d4d8c913efbf83056b0788d55dbf",
+          "source_module": "chronovisor.recall.recall_improvement",
+          "scope_kind": "module",
+          "scope": "<module>",
+          "statement_kind": "from",
+          "target_module": "chronovisor.decision.recall_improvement_contract",
+          "symbols": [
+            "build_recall_improvement_candidate_record"
+          ],
+          "content_sha256": "7ec91065b865bc848b71df0bb33d98f75f4429a6e56487c1e29628d3681487c8",
+          "occurrence": 1,
+          "line": 47
+        },
+        {
+          "semantic_id": "arch:c597de5f7d7ea6aea517152289fb3e5255a53f821ba56bd2d4fb95c573cb1c7a",
+          "source_module": "chronovisor.recall.recall_policy_store",
+          "scope_kind": "module",
+          "scope": "<module>",
+          "statement_kind": "from",
+          "target_module": "chronovisor.decision.recall_policy_contract",
+          "symbols": [
+            "policy_snapshot"
+          ],
+          "content_sha256": "ce2c9f279a590b4403e949ff9d0a142514d9828e1825962ea7b0ac2d058fd1f4",
+          "occurrence": 1,
+          "line": 23
+        },
+        {
           "semantic_id": "arch:c751ba1254b772334efcac57d9057235876ab5abd82eac4e1713f56753ad176a",
           "source_module": "chronovisor.recall.recall_processor",
           "scope_kind": "module",
@@ -1448,6 +1704,20 @@
           "content_sha256": "f758999c15aff7cf582a464ca7ce6d7e17668fd0dfc7e4163e9aa93507728408",
           "occurrence": 1,
           "line": 472
+        },
+        {
+          "semantic_id": "arch:d301b3fdd7eda77c0fc675656efb0902cf513922a86253b2af312453547b8b1a",
+          "source_module": "chronovisor.recall.recall_improvement",
+          "scope_kind": "module",
+          "scope": "<module>",
+          "statement_kind": "from",
+          "target_module": "chronovisor.decision.recall_policy_contract",
+          "symbols": [
+            "apply_policy_overrides"
+          ],
+          "content_sha256": "d44facadc480ed297e1b433e8bd11a52ba573fd17edb9d13a7953c620231fcd0",
+          "occurrence": 1,
+          "line": 73
         },
         {
           "semantic_id": "arch:d56e35ecc9709b650455b4800af2f8c6e6c771a16a4148b6b3bea98319b15e1b",
@@ -1521,6 +1791,20 @@
           "content_sha256": "7eda7e69a6ed2812826a1ada0873b6f41fc9b25f69b78f14aab7e34f68a0433b",
           "occurrence": 1,
           "line": 50
+        },
+        {
+          "semantic_id": "arch:e5d8ac3b18189460af1087d6b003aa4e49dae91d5b6758938e86d7b3b458a59b",
+          "source_module": "chronovisor.recall.recall_policy_store",
+          "scope_kind": "module",
+          "scope": "<module>",
+          "statement_kind": "from",
+          "target_module": "chronovisor.decision.recall_policy_contract",
+          "symbols": [
+            "FALSE_VALUES"
+          ],
+          "content_sha256": "fe4e5b3e8a02681acab974758d6176f7cbf852354f0222fa045081bdfefd4617",
+          "occurrence": 1,
+          "line": 16
         },
         {
           "semantic_id": "arch:e97e6108391b40aa03119dd2f57118c739d9e1a73eb4a9fa6028a474164e303d",
@@ -1598,6 +1882,20 @@
           "content_sha256": "8eb440a2955ac585c50021c2983848c0d74edc29e756a7f88c19897b5a87db72",
           "occurrence": 1,
           "line": 2291
+        },
+        {
+          "semantic_id": "arch:fc5d79f927cc1a06e0db6d3eb73d6781cff311e142c83bc3e3857679d1191442",
+          "source_module": "chronovisor.recall.recall_improvement",
+          "scope_kind": "module",
+          "scope": "<module>",
+          "statement_kind": "from",
+          "target_module": "chronovisor.decision.recall_policy_contract",
+          "symbols": [
+            "RecallPolicy"
+          ],
+          "content_sha256": "4cc4e120a4b96534410df1a5c3d989f98e68ab27827777b649dc4e74e3aaed60",
+          "occurrence": 1,
+          "line": 72
         }
       ],
       "semantic_id": "arch:0ecbbca457e89e9972910b3cc3c5cf13a3a97b7c85255035ff1fffa7c46821cd",
@@ -2875,7 +3173,7 @@
           ],
           "content_sha256": "cb02812bf3e9374f6110f805551daef423c1c543f5a05a7dbbf8156a7ffc89fe",
           "occurrence": 1,
-          "line": 1757
+          "line": 1689
         },
         {
           "semantic_id": "arch:19d98cf56f5afa28ed4901349231bb32ff20e2478523778dca9a86ccb20a958a",
@@ -3072,7 +3370,7 @@
           ],
           "content_sha256": "8ea974150b3b85b94aba51fb886c036315a9465036967368163418e0e20f7d4d",
           "occurrence": 1,
-          "line": 2663
+          "line": 2595
         },
         {
           "semantic_id": "arch:381d4903c6f1a6ba31ad87d139a8f700cf430c8aa1f9d9206fd99941bb3d3915",
@@ -3466,7 +3764,7 @@
           ],
           "content_sha256": "b9eea2a83824b957d112fcb7373cea6d5b05e7fdca07850be315239a8e9b236c",
           "occurrence": 1,
-          "line": 391
+          "line": 323
         },
         {
           "semantic_id": "arch:8d8aab19ffd451f3841dd624d558529e609258eebbe8d7365b0a7e89d6c848c3",
@@ -3870,7 +4168,7 @@
           ],
           "content_sha256": "cb02812bf3e9374f6110f805551daef423c1c543f5a05a7dbbf8156a7ffc89fe",
           "occurrence": 1,
-          "line": 1693
+          "line": 1625
         },
         {
           "semantic_id": "arch:d7f2dd2428833b51c14e838d5420b93301ead7801c412d1cb1efc58b36637464",
@@ -4078,7 +4376,7 @@
           ],
           "content_sha256": "23af258fa9a7936b5ca592c62f163eefca7f648e9f84381e9d1c5fc70a3a5f80",
           "occurrence": 1,
-          "line": 1730
+          "line": 1662
         }
       ],
       "semantic_id": "arch:222a5b72bc52b00e8547b1c89da0d92542d02de70590ee454eda0ab5feb6116f",
@@ -4750,7 +5048,7 @@
           ],
           "content_sha256": "bdad961606ef262009aa226482951ff2f993b14fe5ec964dfd96233046e180ab",
           "occurrence": 1,
-          "line": 66
+          "line": 67
         },
         {
           "semantic_id": "arch:0199ce183f31110da32f899062fc87314f71eb41e5bf6333f6068c51e9a3e4a0",
@@ -5008,7 +5306,7 @@
           ],
           "content_sha256": "44b7fd65ba921a3372a494caa9ad1723b4e1f5ccb975e4f2bdbd7e93da47cc5d",
           "occurrence": 1,
-          "line": 67
+          "line": 68
         },
         {
           "semantic_id": "arch:85fd107e15dfff00ccaaba200df5cd747171c48dc222cc47d6ca631f5b128048",
@@ -5093,7 +5391,7 @@
           ],
           "content_sha256": "4851beb79e685b6377050b64a7f8bd80276003a96cc1656898270c7407d3e0a2",
           "occurrence": 1,
-          "line": 65
+          "line": 107
         },
         {
           "semantic_id": "arch:c2cacd6fd17fc9b96b73d9a6986046a9f70dedbc7dd64319fa1546a1f34de8f8",
@@ -5194,7 +5492,7 @@
           ],
           "content_sha256": "7a523e7c733bf4c48cc28e570bc6cf37a1380bfdec252e93f3786bacb3176995",
           "occurrence": 1,
-          "line": 65
+          "line": 66
         },
         {
           "semantic_id": "arch:d7c5290382207b83156a4d5cbc5056814e86739ccd5dc445c27c9fdc73271ccf",
@@ -5208,7 +5506,7 @@
           ],
           "content_sha256": "82e9792231c8870c866c105a9d7db75881748e8c53d355a6919a2c78cbc25e34",
           "occurrence": 1,
-          "line": 1669
+          "line": 1601
         },
         {
           "semantic_id": "arch:e146950eb886fe7517423603ddb8147f255b72fc098acc6c4e719c50c688d118",
@@ -8962,7 +9260,7 @@
           ],
           "content_sha256": "6495d24f4a406d89edfc94f3853e33dfe901476e17c7d071e0a5763d0ef674e6",
           "occurrence": 1,
-          "line": 42
+          "line": 43
         },
         {
           "semantic_id": "arch:10529215bc0de75ca6f5836f49a51324b37bb98704df1565b02b7646573c5ad4",
@@ -9548,62 +9846,6 @@
       "deadline": "2026-12-31",
       "removal_campaign": "S",
       "rationale": "Remove the ops->knowledge_graph package edge through a published contract."
-    },
-    {
-      "category": "cross_domain_edge",
-      "source_package": "decision",
-      "target_package": "recall",
-      "sites": [
-        {
-          "semantic_id": "arch:4ae0fa896e2c92a1f2946cef79cd3d1aaa7b86c90e171ead214bbbae9e2d2798",
-          "source_module": "chronovisor.decision.decision_lane_contract_cases",
-          "scope_kind": "function",
-          "scope": "_recall_improvement_cases",
-          "statement_kind": "from",
-          "target_module": "chronovisor.recall.recall_improvement",
-          "symbols": [
-            "PolicyProposal",
-            "build_frontier_audit_prompt",
-            "build_recall_improvement_candidate_record"
-          ],
-          "content_sha256": "c4ca3e6798bff82bc441465ea0ae8021b520f2d904a91d0906113553c6e2615b",
-          "occurrence": 1,
-          "line": 2210
-        },
-        {
-          "semantic_id": "arch:85af762f04190a96065bc9f6485e46ad1d563aab188c7614070dcbfac4ef4ae4",
-          "source_module": "chronovisor.decision.decision_lane_contract_cases",
-          "scope_kind": "function",
-          "scope": "_recall_improvement_cases",
-          "statement_kind": "from",
-          "target_module": "chronovisor.recall.recall_policy_store",
-          "symbols": [
-            "apply_policy_overrides"
-          ],
-          "content_sha256": "dc5eeee74fe375a2927a241f3d1687299b7b4bbdda795e2177459de4c1eaf775",
-          "occurrence": 1,
-          "line": 2215
-        },
-        {
-          "semantic_id": "arch:d853bea9b7e5cce2fc45d721cef212975e02d7d52b3a680609743bc91838c1d3",
-          "source_module": "chronovisor.decision.decision_lane_contract_cases",
-          "scope_kind": "function",
-          "scope": "_recall_improvement_cases",
-          "statement_kind": "from",
-          "target_module": "chronovisor.recall.recall_runtime",
-          "symbols": [
-            "RecallPolicy"
-          ],
-          "content_sha256": "1880611a8ad16038e652aa5856c21780513f05a4184ff94ce78d3fecc7207af2",
-          "occurrence": 1,
-          "line": 2216
-        }
-      ],
-      "semantic_id": "arch:62b24a2f5282705364e645a9243f2ca8a8f4e5f9c10edd8e379de26a02a0cf6b",
-      "owner": "chronovisor.decision",
-      "deadline": "2026-12-31",
-      "removal_campaign": "S",
-      "rationale": "Remove the decision->recall package edge through a published contract."
     },
     {
       "category": "cross_domain_edge",
@@ -12104,7 +12346,7 @@
           ],
           "content_sha256": "c83b588833684d3a07f8e8c6f739d8d3f40a39520bc602a0a287e746df4de6e7",
           "occurrence": 1,
-          "line": 1656
+          "line": 1588
         },
         {
           "semantic_id": "arch:45f23cc07aad61317f53f4a0ad565568ee0f8a698790a190a8de0b466a5d1d47",
@@ -12176,7 +12418,7 @@
           ],
           "content_sha256": "ddafcb6e7c3c057428ab2fb5dc997df2a47b45b5bbe9468271fa37424ae35926",
           "occurrence": 1,
-          "line": 1731
+          "line": 1663
         }
       ],
       "semantic_id": "arch:7534962275f5cac248244898874a8d5f7613d70ba2d64360b2223e351c3aab87",
