@@ -478,11 +478,13 @@ def test_entity_contract_model_coverage_contains_only_reachable_terminals() -> N
 def test_entity_contract_builder_fails_if_production_preflight_rejects(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor.decision import decision_lane_contract_cases
-    from chronovisor.ops import entities
+    from chronovisor.decision import (
+        decision_lane_contract_cases,
+        entity_backfill_contract,
+    )
 
     monkeypatch.setattr(
-        entities,
+        entity_backfill_contract,
         "validate_entity_backfill_proposal",
         lambda *_args, **_kwargs: False,
     )
@@ -492,7 +494,9 @@ def test_entity_contract_builder_fails_if_production_preflight_rejects(
 
 
 def test_entity_preflight_rejects_alias_incomplete_fixture_before_model() -> None:
-    from chronovisor.ops.entities import validate_entity_backfill_proposal
+    from chronovisor.decision.entity_backfill_contract import (
+        validate_entity_backfill_proposal,
+    )
 
     case = next(
         case

@@ -774,7 +774,7 @@ def _content_review_cases() -> list[tuple[str, str | None, dict[str, Any]]]:
 
 
 def _entity_backfill_cases() -> list[tuple[str, str | None, dict[str, Any]]]:
-    from chronovisor.ops.entities import (
+    from chronovisor.decision.entity_backfill_contract import (
         patch_entities_frontmatter,
         review_evidence,
         validate_entity_backfill_proposal,

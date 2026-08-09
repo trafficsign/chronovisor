@@ -830,6 +830,7 @@ canonical_hash = _canonical_hash
 render_review_packet = _render_review_packet
 render_safe_fix_prompt = _render_safe_fix_prompt
 review_receipt_from_packet = _review_receipt_from_packet
+review_packet_error = _review_packet_error
 
 
 def build_semantic_mutation_proposal(

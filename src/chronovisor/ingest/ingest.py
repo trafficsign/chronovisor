@@ -40,6 +40,7 @@ from chronovisor.core.store import (
     page_id_from_path,
 )
 from chronovisor.decision import decision_authority
+from chronovisor.decision.entity_backfill_contract import patch_entities_frontmatter
 from chronovisor.decision.local_structured import (
     ChatRequest as ChatRequest,
 )
@@ -232,7 +233,6 @@ from chronovisor.ingest.triage_plan import (
     collapse_exact_duplicate_operations,
     distinct_target_collisions,
 )
-from chronovisor.ops.entities import patch_entities_frontmatter
 from chronovisor.search.search_types import tokenize
 
 # ---------------------------------------------------------------------------
