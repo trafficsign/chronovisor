@@ -1,15 +1,15 @@
-"""Codex transcript delta selection."""
+"""Claude Code transcript delta selection."""
 
 from __future__ import annotations
 
 from dataclasses import replace
 
-from chronovisor.raw.codex_transcript import (
+from chronovisor.raw.claude_code_transcript import (
     TranscriptRecord,
     TranscriptSlice,
     serialize_transcript_records,
 )
-from chronovisor.raw.transcript import CodexSaveError as CodexSaveError
+from chronovisor.raw.transcript import ClaudeCodeSaveError as ClaudeCodeSaveError
 
 
 def bounded_transcript_slice(
@@ -19,13 +19,13 @@ def bounded_transcript_slice(
 ) -> TranscriptSlice:
     """Return a byte-bounded ordered prefix; never admit an oversized first row."""
     if max_chars < 1:
-        raise CodexSaveError("max_chars must be a positive byte limit")
-    if len(_serialized_records_bytes(transcript_slice.records)) <= max_chars:
+        raise ClaudeCodeSaveError("max_chars must be a positive byte limit")
+    if len(serialized_records_bytes(transcript_slice.records)) <= max_chars:
         return transcript_slice
     selected: list[TranscriptRecord] = []
     for record in transcript_slice.records:
         candidate = [*selected, record]
-        if len(_serialized_records_bytes(candidate)) > max_chars:
+        if len(serialized_records_bytes(candidate)) > max_chars:
             break
         selected.append(record)
     return replace(
@@ -56,5 +56,5 @@ def bounded_transcript_slice_for_layout(
     )
 
 
-def _serialized_records_bytes(records: list[TranscriptRecord]) -> bytes:
+def serialized_records_bytes(records: list[TranscriptRecord]) -> bytes:
     return serialize_transcript_records(records).encode("utf-8")

@@ -705,6 +705,13 @@ S_RETIRED_RAW_RECORD_SITE_IDS = (
     "arch:ab9b7b4be78b11481edbfbcc17693ae523056a917355773cc7fe75e82ece9fe9",
     "arch:ca8b808824717b8f186534a227a79dbd7af22c9f96e40b7ac3c600e73a156a71",
 )
+S_RETIRED_AGENT_SAVE_SITE_IDS = (
+    "arch:05467cadd90ef73374ffa4830ecab80a86e1c58f81807128853400aca2cf99ad",
+    "arch:4b8a00f33792dfb2447c33cb5ffbe75d2daa7b550fbad2deeb96cb38b8883fb5",
+    "arch:a99e2cd9d6e281eb873c71fa67ec03c3a0616277bce93eb57c3926ea541e5f3c",
+    "arch:b637c3a51020550a5afd044c6e746742d79dafc8c7252bbdce36a5f5277b6bed",
+    "arch:df288e9e9b01968edb1da0c92e01ff8a98ad7ef68cf236318c70cb18ec8110f5",
+)
 V_RETIRED_RECALL_SHIM_SITE_IDS = (
     "arch:3896d20fb9ddf2c56d06af026b9b40d6399902891ab291f3a6eba063ba8b4d28",
     "arch:c99c20705c2ffb63854eb252145ab9e7f20ea9b0adb7eef8892e39abb52ceb1c",
@@ -1064,6 +1071,7 @@ RETIREMENT_HISTORY = {
                 *S_RETIRED_FAILURE_SUPERVISOR_SITE_IDS,
                 *S_RETIRED_EVIDENCE_GROUNDING_SITE_IDS,
                 *S_RETIRED_RAW_RECORD_SITE_IDS,
+                *S_RETIRED_AGENT_SAVE_SITE_IDS,
                 *V_RETIRED_RECALL_SHIM_SITE_IDS,
                 *V_RETIRED_REMAINING_SHIM_SITE_IDS,
                 *V_RETIRED_DURABLE_MODULE_MAPPING_SITE_IDS,
@@ -1816,7 +1824,7 @@ def test_current_exception_ledger_seed_and_schema_inventory_are_exact(
     assert detected_ids == ledger_ids == set(seed["exception_semantic_ids"]["active"])
     _assert_exact_retirement_history(architecture, seed)
     assert len(edge_rows) == current["worktree_architecture"]["edge_count"] == 64
-    assert sum(len(row["sites"]) for row in edge_rows) == len(raw_cross_sites) == 1356
+    assert sum(len(row["sites"]) for row in edge_rows) == len(raw_cross_sites) == 1360
     assert {
         field: counts[field]
         for field in (
@@ -1829,7 +1837,7 @@ def test_current_exception_ledger_seed_and_schema_inventory_are_exact(
         )
     } == {
         "exceptions": 64,
-        "cross_domain_sites": 1356,
+        "cross_domain_sites": 1360,
         "production_to_lab_edges": 0,
         "production_to_lab_static_sites": 0,
         "production_to_lab_dynamic_sites": 0,

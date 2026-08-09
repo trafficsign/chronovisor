@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from chronovisor.core.link_fix import atomic_write
+from chronovisor.raw.record_raw import record_raw
 
 _RAW_KEYWORD_FORBIDDEN_CHARS = frozenset(",[]:#{}\n\r")
 
@@ -178,17 +179,15 @@ def save_raw(
     trigger_ingest: bool,
     idempotency_key: str,
 ) -> dict[str, Any]:
-    from chronovisor.hosts.server import chronovisor_record
-
-    result = chronovisor_record(
+    result = record_raw(
         content=content,
         session_id=session_id,
         keywords=keywords,
         trigger_ingest=trigger_ingest,
         idempotency_key=idempotency_key,
     )
-    parsed = json.loads(result)
-    return parsed if isinstance(parsed, dict) else {"result": parsed}
+    result.pop("accepted_keywords", None)
+    return result
 
 
 def read_hook_payload(stdin_text: str | None) -> dict[str, Any]:
