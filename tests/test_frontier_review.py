@@ -508,6 +508,11 @@ def test_run_codex_schema_failure_does_not_spawn_an_unguarded_rescue_session(
 
 
 def test_redacts_secrets_and_allows_only_official_urls() -> None:
+    from chronovisor.core import background_jobs
+
+    assert frontier_review.SECRET_PATTERNS is background_jobs.SECRET_PATTERNS
+    assert frontier_review._redact_match is background_jobs._redact_match
+    assert frontier_review.redact_sensitive_text is background_jobs.redact_sensitive_text
     text = "Authorization: Bearer sk-this-secret-should-disappear"
 
     redacted = frontier_review.redact_sensitive_text(text)

@@ -1048,7 +1048,7 @@ def _prepare_linked_incident_for_verified_release(
                 }
 
         try:
-            from chronovisor.ops.background_jobs import cancel_matching_jobs
+            from chronovisor.core.background_jobs import cancel_matching_jobs
 
             background = cancel_matching_jobs(
                 name="system-code-repair",
@@ -3768,7 +3768,7 @@ def start_background(packet_path: Path) -> dict[str, Any] | None:
         return None
     if os.environ.get("PYTEST_CURRENT_TEST"):
         return None
-    from chronovisor.ops.background_jobs import enqueue_job
+    from chronovisor.core.background_jobs import enqueue_job
 
     resolved = packet_path.expanduser().resolve(strict=False)
     return enqueue_job(
@@ -3788,7 +3788,7 @@ def enqueue_system_code_repair(packet_path: Path) -> dict[str, Any]:
     ledger; watchdog and hook processes must never detach a worker directly.
     """
 
-    from chronovisor.ops.background_jobs import enqueue_job
+    from chronovisor.core.background_jobs import enqueue_job
 
     resolved = packet_path.expanduser().resolve(strict=False)
     packet = _read_json(resolved)
@@ -4214,7 +4214,7 @@ _BACKGROUND_QUARANTINE_STATUSES = frozenset(
 def _background_exit_code(result: dict[str, Any]) -> int:
     """Map durable repair state to the background-ledger exit protocol."""
 
-    from chronovisor.ops.background_jobs import (
+    from chronovisor.core.background_jobs import (
         QUARANTINE_EXIT_CODE,
         RETRYABLE_EXIT_CODE,
     )

@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+from chronovisor.core import background_jobs as _background_jobs
 from chronovisor.core import runtime_status
 from chronovisor.core.runtime_config import uvx_runtime_command
 from chronovisor.core.store import CHRONOVISOR_ROOT
@@ -94,13 +95,9 @@ DEFAULT_FRONTIER_REASONING_EFFORT = "medium"
 
 HUMAN_REQUIRED_FAILURE_CLASSES = CONVERGENCE_HUMAN_REQUIRED_FAILURE_CLASSES
 
-SECRET_PATTERNS = [
-    re.compile(r"(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{12,}"),
-    re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]{12,}"),
-    re.compile(r"(?i)(api[_-]?key['\"=\s:]+)[A-Za-z0-9._~+/=-]{8,}"),
-    re.compile(r"(?i)(token['\"=\s:]+)[A-Za-z0-9._~+/=-]{8,}"),
-    re.compile(r"(?i)(cookie['\"=\s:]+)[^\s\n;]{8,}"),
-]
+SECRET_PATTERNS = _background_jobs.SECRET_PATTERNS
+_redact_match = _background_jobs._redact_match
+redact_sensitive_text = _background_jobs.redact_sensitive_text
 
 
 @dataclass(frozen=True)
@@ -163,19 +160,6 @@ class FrontierResult:
             "verified": self.verified,
             "verification": self.verification,
         }
-
-
-def redact_sensitive_text(text: str | None) -> str:
-    redacted = text or ""
-    for pattern in SECRET_PATTERNS:
-        redacted = pattern.sub(_redact_match, redacted)
-    return redacted
-
-
-def _redact_match(match: re.Match[str]) -> str:
-    if match.groups():
-        return f"{match.group(1)}[REDACTED]"
-    return "[REDACTED]"
 
 
 def is_allowed_official_url(url: str) -> bool:

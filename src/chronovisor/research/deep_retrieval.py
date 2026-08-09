@@ -352,7 +352,7 @@ def start_deep_dive(
 ) -> str:
     """Durably enqueue a deep retrieval run that survives MCP restarts."""
 
-    from chronovisor.ops.background_jobs import enqueue_job
+    from chronovisor.core.background_jobs import enqueue_job
 
     run_id = uuid.uuid4().hex
     job = enqueue_job(

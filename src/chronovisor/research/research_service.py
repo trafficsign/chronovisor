@@ -10,7 +10,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import replace
 from typing import Any
 
-from chronovisor.ops.background_jobs import enqueue_job
+from chronovisor.core.background_jobs import enqueue_job
 from chronovisor.research.evidence_bundle import (
     ClaimAssessment,
     build_bundle,

@@ -642,7 +642,7 @@ def convergence_kpi() -> dict[str, Any]:
 
 
 def capture_pipeline_kpi() -> dict[str, Any]:
-    from chronovisor.ops.background_jobs import snapshot as job_snapshot
+    from chronovisor.core.background_jobs import snapshot as job_snapshot
 
     sweeper_path = CHRONOVISOR_ROOT / "runtime" / "session-sweeper-latest.json"
     try:

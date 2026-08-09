@@ -321,7 +321,7 @@ def log_file(prefix: str) -> Path:
 
 def spawn_task(task: BackgroundTask, stdin_text: str) -> dict[str, Any]:
     """Durably enqueue hook work without starting a detached process."""
-    from chronovisor.ops.background_jobs import enqueue_job
+    from chronovisor.core.background_jobs import enqueue_job
 
     job = enqueue_job(
         name=task.name,

@@ -1603,7 +1603,7 @@ def chronovisor_jobs(job_id: str | None = None) -> str:
     if job_id:
         job = job_store.get(job_id)
         if not job:
-            from chronovisor.ops.background_jobs import get_job
+            from chronovisor.core.background_jobs import get_job
 
             durable = get_job(job_id)
             if durable is None:

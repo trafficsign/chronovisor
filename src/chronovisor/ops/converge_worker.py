@@ -140,7 +140,7 @@ def run_converge(
     orphan_limit: int = 8,
     maintenance_max_elapsed_seconds: float = 15 * 60,
 ) -> dict[str, Any]:
-    from chronovisor.ops.background_jobs import retry_due
+    from chronovisor.core.background_jobs import retry_due
     from chronovisor.ops.self_heal import enqueue_due_system_repairs
     from chronovisor.ops.session_sweeper import run_sweeper
 

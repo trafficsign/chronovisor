@@ -16,7 +16,7 @@ ROUTINE_MODULES = (
     "ops/converge_worker.py",
     "ops/convergence.py",
     "hosts/hook_dispatcher.py",
-    "ops/background_jobs.py",
+    "core/background_jobs.py",
 )
 
 

@@ -158,7 +158,7 @@ def run_l1(
             "models": results,
         }
     if action == "resend-due-queues":
-        from chronovisor.ops import background_jobs
+        from chronovisor.core import background_jobs
 
         if dry_run:
             return {

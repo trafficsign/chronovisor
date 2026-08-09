@@ -8,11 +8,16 @@ from types import SimpleNamespace
 
 import pytest
 
+from chronovisor.core import background_jobs as core_background_jobs
 from chronovisor.core.frontmatter import normalize_nested, parse
 from chronovisor.core.jsonl import read_jsonl
 from chronovisor.hosts import codex_record
 from chronovisor.ops import background_jobs, session_sweeper
 from chronovisor.recall import recall_hints
+
+
+def test_ops_background_jobs_is_core_module_alias() -> None:
+    assert background_jobs is core_background_jobs
 
 
 def test_jsonl_reader_preserves_unicode_line_separator(tmp_path: Path) -> None:
