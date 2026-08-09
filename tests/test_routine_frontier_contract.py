@@ -7,7 +7,7 @@ from pathlib import Path
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1] / "src" / "chronovisor"
 ROUTINE_MODULES = (
-    "hosts/codex_record.py",
+    "raw/codex_record.py",
     "hosts/claude_code_record.py",
     "ingest/ingest.py",
     "recall/content_correction.py",
