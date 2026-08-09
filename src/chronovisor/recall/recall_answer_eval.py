@@ -3083,8 +3083,8 @@ def _legacy_machine_source_ledger_entry_error(entry: object) -> str:
         return "machine_answer_source_entry_invalid"
     row = dict(entry["search_row"])
     try:
-        from chronovisor.search.search_eval import (
-            FRONTIER_LABEL_SCHEMA,
+        from chronovisor.decision.decision_schema_manifest import FRONTIER_LABEL_SCHEMA
+        from chronovisor.recall.search_label_contract import (
             label_candidate_payload,
             label_review_artifact_error,
             label_tuple_from_review,
@@ -3340,7 +3340,9 @@ def _search_label_candidate_subject(packet: Mapping[str, Any]) -> dict[str, Any]
 def _freeze_search_label_candidate_packet(row: Mapping[str, Any]) -> dict[str, Any]:
     """Freeze one preregistered RQ only while its exact page bytes still match."""
 
-    from chronovisor.search.search_eval import auto_candidate_preregistration_error
+    from chronovisor.recall.search_label_contract import (
+        auto_candidate_preregistration_error,
+    )
 
     preregistration_error = auto_candidate_preregistration_error(row)
     if preregistration_error:
@@ -4426,7 +4428,10 @@ def build_independent_answer_benchmark(
         or len({str(row.get("entry_sha256") or "") for row in manual_entries if isinstance(row, Mapping)}) != 94
     ):
         return {"status": "held", "reason": "manual94_authority_invalid"}
-    from chronovisor.search.search_eval import load_examples, sealed_manifest_entry
+    from chronovisor.recall.search_label_contract import (
+        load_examples,
+        sealed_manifest_entry,
+    )
 
     golden_by_entry: dict[str, list[Any]] = {}
     for example in load_examples(golden_file, reviewed_only=True):

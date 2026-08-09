@@ -567,8 +567,8 @@ def compiler_metrics(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
 def retrieval_locked_e2e_status(path: Path) -> dict[str, Any]:
     """Recompute the case-level, reviewed manual-94 retrieval gate."""
 
+    from chronovisor.recall import search_label_contract
     from chronovisor.recall.recall_runtime import page_uid_for_id
-    from chronovisor.search import search_eval
 
     payload = _read_json(path)
     seal = payload.get("snapshot_sha256")
@@ -828,7 +828,7 @@ def retrieval_locked_e2e_status(path: Path) -> dict[str, Any]:
             ).encode()
         ).hexdigest()
     )
-    canonical_manifest_path = search_eval.MANUAL_MANIFEST_FILE
+    canonical_manifest_path = search_label_contract.MANUAL_MANIFEST_FILE
     canonical_manifest = _read_json(canonical_manifest_path)
     try:
         canonical_manifest_file_sha256 = hashlib.sha256(

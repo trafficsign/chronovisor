@@ -72,7 +72,7 @@ def _locked_gate(tmp_path: Path) -> Path:
 def _manual94_case_gate(
     tmp_path: Path, monkeypatch
 ) -> Path:
-    from chronovisor.recall import recall_runtime
+    from chronovisor.recall import recall_runtime, search_label_contract
     from chronovisor.search import search_eval
 
     pages: dict[str, Path] = {}
@@ -215,12 +215,12 @@ def _manual94_case_gate(
     os.utime(cohort_file, (frozen_epoch, frozen_epoch))
     canonical_manifest_file = tmp_path / "manual-94-manifest.json"
     search_eval.write_sealed_manifest(
-        search_eval.load_examples(cohort_file),
+        search_label_contract.load_examples(cohort_file),
         canonical_manifest_file,
         review_ledger_file=cohort_file,
     )
     monkeypatch.setattr(
-        search_eval,
+        search_label_contract,
         "MANUAL_MANIFEST_FILE",
         canonical_manifest_file,
     )
@@ -562,7 +562,7 @@ def test_manual94_counts_every_selected_nonexpected_page_as_false_positive(
 def test_manual94_rejects_ghost_selection_and_changed_canonical_cohort(
     tmp_path: Path, monkeypatch
 ) -> None:
-    from chronovisor.search import search_eval
+    from chronovisor.recall import search_label_contract
 
     artifact = _manual94_case_gate(tmp_path, monkeypatch)
     payload = json.loads(artifact.read_text(encoding="utf-8"))
@@ -605,7 +605,7 @@ def test_manual94_rejects_ghost_selection_and_changed_canonical_cohort(
     assert recall_growth.retrieval_locked_e2e_status(artifact)["passed"] is False
 
     artifact = _manual94_case_gate(tmp_path, monkeypatch)
-    manifest_path = search_eval.MANUAL_MANIFEST_FILE
+    manifest_path = search_label_contract.MANUAL_MANIFEST_FILE
     canonical = json.loads(manifest_path.read_text(encoding="utf-8"))
     canonical["entries"][0]["expected_pages"] = ["changed-label"]
     unsigned_manifest = {

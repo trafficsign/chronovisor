@@ -64,7 +64,9 @@ def _machine_search_gold_authority_error(row: Mapping[str, Any]) -> str:
     """Require the exact canonical search-label artifact for auto candidates."""
 
     try:
-        from chronovisor.search.search_eval import authoritative_search_label_error
+        from chronovisor.recall.search_label_contract import (
+            authoritative_search_label_error,
+        )
 
         error = authoritative_search_label_error(row)
     except Exception as exc:
@@ -931,7 +933,7 @@ def default_label_ledger_inputs() -> dict[str, Path]:
         RECALL_LOG_FILE,
         RECALL_PULL_LOG_FILE,
     )
-    from chronovisor.search.search_eval import GOLDEN_FILE
+    from chronovisor.recall.search_label_contract import GOLDEN_FILE
 
     return {
         "certificate_file": CERTIFICATE_LEDGER,
