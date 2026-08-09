@@ -499,6 +499,8 @@ def _run_sleep_cycle(
     dry_run: bool = False,
 ) -> dict[str, Any]:
     from chronovisor.core.claims import rebuild_claim_index
+    from chronovisor.core.prefetch import build_prefetch_cache
+    from chronovisor.core.retention import build_retention_scores
     from chronovisor.ingest.convergence import ConvergenceStore, CycleBudget
     from chronovisor.ingest.raw_replay import (
         AUTO_SIGNAL_SOURCES,
@@ -520,8 +522,6 @@ def _run_sleep_cycle(
         build_duplicate_review_queue,
         write_review_queue,
     )
-    from chronovisor.recall.recall_prefetch import build_prefetch_cache
-    from chronovisor.search.retention import build_retention_scores
 
     try:
         per_lane_frontier = max(

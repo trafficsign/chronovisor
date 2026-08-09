@@ -1111,7 +1111,7 @@ def dispatch(args: argparse.Namespace) -> int:
             print(f"edges\t{public['edges']}")
         return 0
     if args.command == "prefetch":
-        from chronovisor.recall.recall_prefetch import build_prefetch_cache
+        from chronovisor.core.prefetch import build_prefetch_cache
 
         data = build_prefetch_cache(limit=max(1, args.limit), write=not args.no_write)
         public = {
@@ -1182,7 +1182,7 @@ def dispatch(args: argparse.Namespace) -> int:
             print(f"path\t{data['path']}")
         return 0
     if args.command == "retention":
-        from chronovisor.search.retention import build_retention_scores
+        from chronovisor.core.retention import build_retention_scores
 
         data = build_retention_scores(limit=max(1, args.limit), write=not args.no_write)
         public = {key: value for key, value in data.items() if key != "pages"}

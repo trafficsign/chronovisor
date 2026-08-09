@@ -172,7 +172,7 @@ def test_associative_graph_reaches_two_hops_with_path_trace(monkeypatch) -> None
 
     monkeypatch.setattr(index_store, "get_store", lambda: FakeStore())
     monkeypatch.setattr(
-        "chronovisor.search.cofire.neighbors",
+        "chronovisor.core.cofire.neighbors",
         lambda *_args, **_kwargs: [],
     )
 

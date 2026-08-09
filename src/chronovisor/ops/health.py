@@ -79,8 +79,8 @@ def semantic_index_kpi() -> dict[str, Any]:
             "rollout_mode": config.rollout_mode,
             "enabled": config.enabled,
         }
+    from chronovisor.core.semantic_jobs import job_status
     from chronovisor.search.semantic_index import semantic_index_status
-    from chronovisor.search.semantic_jobs import job_status
 
     index = semantic_index_status()
     jobs = job_status()

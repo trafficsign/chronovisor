@@ -111,7 +111,7 @@ def typed_neighbors(
             add(target, weight, "entity")
 
     try:
-        from chronovisor.search.cofire import neighbors as cofire_neighbors
+        from chronovisor.core.cofire import neighbors as cofire_neighbors
 
         for row in cofire_neighbors(
             page_id,

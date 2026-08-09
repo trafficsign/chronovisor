@@ -64,7 +64,7 @@ def test_semantic_index_kpi_requires_matching_live_service(
         },
     )
     monkeypatch.setattr(
-        "chronovisor.search.semantic_jobs.job_status",
+        "chronovisor.core.semantic_jobs.job_status",
         lambda: {"status": "ok", "counts": {}},
     )
     payload = health.semantic_index_kpi()

@@ -963,7 +963,7 @@ def test_truncated_retention_inventory_never_rejects_unlisted_target(
     monkeypatch,
 ) -> None:
     monkeypatch.setattr(
-        "chronovisor.search.retention.build_retention_scores",
+        "chronovisor.core.retention.build_retention_scores",
         lambda **_kwargs: {
             "status": "ok",
             "pages": {},
@@ -989,7 +989,7 @@ def test_malformed_retention_inventory_marks_every_target_indeterminate(
     monkeypatch,
 ) -> None:
     monkeypatch.setattr(
-        "chronovisor.search.retention.build_retention_scores",
+        "chronovisor.core.retention.build_retention_scores",
         lambda **_kwargs: {
             "status": "ok",
             "pages": {},

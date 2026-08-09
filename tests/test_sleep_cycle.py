@@ -173,7 +173,7 @@ def _patch_sleep_dependencies(monkeypatch) -> None:
         },
     )
     monkeypatch.setattr(
-        "chronovisor.recall.recall_prefetch.build_prefetch_cache",
+        "chronovisor.core.prefetch.build_prefetch_cache",
         lambda write=True: {
             "status": "ok",
             "episodes": 1,
@@ -182,7 +182,7 @@ def _patch_sleep_dependencies(monkeypatch) -> None:
         },
     )
     monkeypatch.setattr(
-        "chronovisor.search.retention.build_retention_scores",
+        "chronovisor.core.retention.build_retention_scores",
         lambda write=True: {"counts": {"pages": 2}, "pages": {}},
     )
     monkeypatch.setattr(

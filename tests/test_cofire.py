@@ -4,12 +4,12 @@ import hashlib
 import json
 from pathlib import Path
 
+from chronovisor.core.cofire import neighbors
 from chronovisor.core.durable_state import write_sealed_json
 from chronovisor.core.feedback_ledger import feedback_row_sha256
 from chronovisor.recall import cofire
 from chronovisor.recall.cofire import build_cofire_graph
 from chronovisor.recall.recall_field_schema import session_hash
-from chronovisor.search.cofire import neighbors
 
 
 def test_build_cofire_graph_counts_repeated_context_pairs(tmp_path: Path) -> None:

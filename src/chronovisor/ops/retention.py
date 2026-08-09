@@ -1,15 +1,10 @@
-"""Compatibility alias for the search retention module."""
+"""Console owner for core retention score maintenance."""
 
 from __future__ import annotations
 
-import sys
-
-from chronovisor.search import retention as _retention
+from chronovisor.core.retention import main as _main
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     """Run the retention command-line interface."""
-    return _retention.main()
-
-
-sys.modules[__name__] = _retention
+    return _main(argv)

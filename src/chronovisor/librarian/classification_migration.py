@@ -484,7 +484,7 @@ def migrate_active_metadata(
 
     get_bm25().build(force=True)
     try:
-        from chronovisor.search.semantic_jobs import enqueue_rebuild
+        from chronovisor.core.semantic_jobs import enqueue_rebuild
 
         semantic_rebuild_job_id = enqueue_rebuild()
     except Exception as exc:

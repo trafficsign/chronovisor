@@ -1,4 +1,4 @@
-"""FSRS-inspired retention scores for memory ranking."""
+"""Core FSRS-inspired retention scores for memory ranking."""
 
 from __future__ import annotations
 

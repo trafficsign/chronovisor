@@ -5,11 +5,13 @@ import json
 from datetime import date
 from pathlib import Path
 
-from chronovisor.search import retention
+from chronovisor.core import retention
 
 
-def test_ops_module_is_same_retention_module_object() -> None:
-    assert importlib.import_module("chronovisor.ops.retention") is retention
+def test_ops_module_delegates_to_core_retention_cli() -> None:
+    ops_retention = importlib.import_module("chronovisor.ops.retention")
+
+    assert ops_retention._main is retention.main
 
 
 class FakeStore:

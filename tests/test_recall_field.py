@@ -137,7 +137,7 @@ def test_effective_config_enables_positive_edges_before_authority(monkeypatch) -
 
 
 def test_fixed_replay_is_deterministic_and_uses_shadow_buffer(monkeypatch) -> None:
-    from chronovisor.search import cofire
+    from chronovisor.core import cofire
 
     monkeypatch.setattr(cofire, "neighbors", lambda *_args, **_kwargs: [])
     graph = FakeGraphStore()
@@ -208,7 +208,7 @@ def test_candidate_mode_uses_active_buffer_for_fallback_and_topic_reset() -> Non
 
 
 def test_field_topic_reset_capacity_and_negative_activation(monkeypatch) -> None:
-    from chronovisor.search import cofire
+    from chronovisor.core import cofire
 
     monkeypatch.setattr(cofire, "neighbors", lambda *_args, **_kwargs: [])
     graph = FakeGraphStore()
@@ -271,7 +271,7 @@ def test_topic_shift_distinguishes_stable_pronoun_and_abrupt_switch() -> None:
 
 
 def test_exposure_cofire_is_not_an_authority_edge(monkeypatch) -> None:
-    from chronovisor.search import cofire
+    from chronovisor.core import cofire
 
     monkeypatch.setattr(
         cofire,
@@ -307,7 +307,7 @@ def test_exposure_cofire_is_not_an_authority_edge(monkeypatch) -> None:
 def test_teacher_commit_is_inactive_until_next_turn(
     tmp_path: Path, monkeypatch
 ) -> None:
-    from chronovisor.search import cofire
+    from chronovisor.core import cofire
 
     monkeypatch.setattr(cofire, "neighbors", lambda *_args, **_kwargs: [])
     cfg = config()
@@ -680,7 +680,7 @@ def test_store_seal_corrupt_recovery_retention_and_concurrency(
 def test_store_separates_sessions_orders_events_and_expires_ttl(
     tmp_path: Path, monkeypatch
 ) -> None:
-    from chronovisor.search import cofire
+    from chronovisor.core import cofire
 
     monkeypatch.setattr(cofire, "neighbors", lambda *_args, **_kwargs: [])
     cfg = config(session_ttl_seconds=60)
@@ -717,7 +717,7 @@ def test_mcp_activity_targets_latest_session_for_client_host(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    from chronovisor.search import cofire
+    from chronovisor.core import cofire
 
     monkeypatch.setattr(cofire, "neighbors", lambda *_args, **_kwargs: [])
     monkeypatch.setattr(recall_field, "get_store", FakeGraphStore)
@@ -759,7 +759,7 @@ def test_mcp_record_stimulates_current_working_set_without_inventing_pages(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    from chronovisor.search import cofire
+    from chronovisor.core import cofire
 
     monkeypatch.setattr(cofire, "neighbors", lambda *_args, **_kwargs: [])
     monkeypatch.setattr(recall_field, "get_store", FakeGraphStore)
@@ -794,7 +794,7 @@ def test_mcp_record_stimulates_current_working_set_without_inventing_pages(
 def test_field_update_p95_is_below_50ms_and_has_no_prompt_body(
     monkeypatch,
 ) -> None:
-    from chronovisor.search import cofire
+    from chronovisor.core import cofire
 
     monkeypatch.setattr(cofire, "neighbors", lambda *_args, **_kwargs: [])
     graph = FakeGraphStore()

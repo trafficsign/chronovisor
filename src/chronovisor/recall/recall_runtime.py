@@ -1598,7 +1598,7 @@ def prefetch_page_ids_for_request(
     if request is None:
         return []
     try:
-        from chronovisor.search.prefetch import prefetch_page_ids
+        from chronovisor.core.prefetch import prefetch_page_ids
 
         return prefetch_page_ids(
             host=request.host,

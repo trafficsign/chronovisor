@@ -1,4 +1,4 @@
-"""Durable semantic indexing jobs shared by ingest and the model service."""
+"""Core semantic indexing jobs shared by ingest and the model service."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 from chronovisor.core.store import CHRONOVISOR_ROOT
 from chronovisor.core.timeutil import utc_now as _now
@@ -287,7 +288,7 @@ def fail(
         connection.close()
 
 
-def job_status(*, path: Path = SEMANTIC_JOBS_DB) -> dict:
+def job_status(*, path: Path = SEMANTIC_JOBS_DB) -> dict[str, Any]:
     if not path.exists():
         return {
             "status": "missing",

@@ -32,6 +32,15 @@ from chronovisor.core.runtime_config import (
     SearchEmbeddingConfig,
     load_search_embedding_config,
 )
+from chronovisor.core.semantic_jobs import (
+    claim_next,
+    complete,
+    enqueue_pages,
+    enqueue_rebuild,
+    fail,
+    job_status,
+    prune_completed_jobs,
+)
 from chronovisor.core.store import CHRONOVISOR_ROOT, SYSTEM_DIR, find_page
 from chronovisor.search.accelerator_lease import accelerator_lease
 from chronovisor.search.semantic_index import (
@@ -50,15 +59,6 @@ from chronovisor.search.semantic_index import (
     semantic_index_status,
     upgrade_generation_with_ann,
     write_page_delta,
-)
-from chronovisor.search.semantic_jobs import (
-    claim_next,
-    complete,
-    enqueue_pages,
-    enqueue_rebuild,
-    fail,
-    job_status,
-    prune_completed_jobs,
 )
 from chronovisor.search.semantic_model import (
     NemotronEncoder,

@@ -1091,7 +1091,7 @@ def update_embeddings(
     if not config.enabled or config.backend == "legacy_ollama":
         return _legacy_update_embeddings(page_ids=page_ids, strict=strict)
 
-    from chronovisor.search.semantic_jobs import enqueue_pages, enqueue_rebuild
+    from chronovisor.core.semantic_jobs import enqueue_pages, enqueue_rebuild
 
     if page_ids is None:
         enqueue_rebuild()
@@ -1212,7 +1212,7 @@ def context_seed_results(query: str, *, limit: int = 4) -> list[ScoredPage]:
 
     try:
         from chronovisor.core.index_store import get_store
-        from chronovisor.search.prefetch import prefetch_page_ids
+        from chronovisor.core.prefetch import prefetch_page_ids
 
         page_ids = prefetch_page_ids(
             host="",
@@ -1402,7 +1402,7 @@ def fuse_results(
     retention_weight = max(0.0, float(weights.get("retention_prior", 0.0)))
     if retention_weight:
         try:
-            from chronovisor.search.retention import retention_score
+            from chronovisor.core.retention import retention_score
 
             for page_id in list(scores):
                 prior = retention_score(page_id)

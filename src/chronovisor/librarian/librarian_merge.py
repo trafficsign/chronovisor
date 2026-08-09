@@ -619,8 +619,8 @@ def run_merge_migration(
         )
     semantic_rebuild_job_id = None
     if receipt["committed"]:
+        from chronovisor.core.semantic_jobs import enqueue_rebuild
         from chronovisor.search.search import get_bm25
-        from chronovisor.search.semantic_jobs import enqueue_rebuild
 
         get_bm25().build(force=True)
         semantic_rebuild_job_id = enqueue_rebuild()
