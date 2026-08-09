@@ -91,7 +91,7 @@ def dedupe_with_existing(
         return new_tag
 
     try:
-        from chronovisor.search.embedding import most_similar
+        from chronovisor.core.embedding import most_similar
         result = most_similar(new_tag, same_axis, threshold=threshold)
     except Exception:
         return new_tag

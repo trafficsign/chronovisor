@@ -145,8 +145,8 @@ def consolidate_entity_candidates(
     embedding_status = "not_needed"
     if len(candidates) >= 2:
         try:
+            from chronovisor.core.embedding import embed_texts
             from chronovisor.core.runtime_config import load_embedding_config
-            from chronovisor.search.embedding import embed_texts
 
             vectors = embed_texts([str(row.get("mention") or "") for row in candidates])
             embeddings = {

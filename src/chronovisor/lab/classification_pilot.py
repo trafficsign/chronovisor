@@ -22,10 +22,9 @@ from chronovisor.classification.classification import (
     load_udc_package,
 )
 from chronovisor.classification.classification_engine import CandidateIndex
-from chronovisor.core import ollama
+from chronovisor.core import embedding, ollama
 from chronovisor.core.hashutil import sha256_prefixed_bytes as _sha256_bytes
 from chronovisor.core.runtime_config import load_decision_router_config
-from chronovisor.search import embedding
 
 DIAGNOSTIC_SCHEMA = "chronovisor.classification-diagnostic.v1"
 PILOT_SCHEMA = "chronovisor.classification-method-pilot.v1"

@@ -286,7 +286,7 @@ def test_entity_merge_snapshot_keeps_local_vote_receipts(
         lambda *args, **kwargs: router,
     )
     monkeypatch.setattr(
-        "chronovisor.search.embedding.embed_texts",
+        "chronovisor.core.embedding.embed_texts",
         lambda values: [[1.0, 0.0] for _ in values],
     )
 

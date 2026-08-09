@@ -250,7 +250,7 @@ class MultiPathCandidateIndex(AuthoritativeCandidateIndex):
 
     @staticmethod
     def _cosine(left: list[float], right: list[float]) -> float:
-        from chronovisor.search.embedding import cosine
+        from chronovisor.core.embedding import cosine
 
         return cosine(left, right)
 

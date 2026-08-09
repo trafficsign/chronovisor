@@ -1,4 +1,4 @@
-"""Embedding helpers via the configured Ollama embedding model.
+"""Shared embedding helpers via the configured Ollama embedding model.
 
 Thin layer over :func:`ollama.embed` adding a disk cache keyed by
 ``sha256(model|text)`` plus cosine similarity. Used by the tag
@@ -101,7 +101,7 @@ def embed_texts(texts: list[str]) -> list[list[float]]:
             _write_cached(_cache_path(t), v)
 
     # All slots filled by this point.
-    return [v for v in cached if v is not None]  # type: ignore[return-value]
+    return [v for v in cached if v is not None]
 
 
 def cosine(a: list[float], b: list[float]) -> float:
