@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from chronovisor.classification import classification_resource_burn
+from chronovisor.recall import classification_resource_burn
 
 
 def test_resource_burn_requires_every_stage_and_persists_gate(

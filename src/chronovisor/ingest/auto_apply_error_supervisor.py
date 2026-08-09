@@ -270,7 +270,7 @@ def supervise_error_records(
                 )
                 if start_background:
                     try:
-                        from chronovisor.ops.self_heal import (
+                        from chronovisor.ingest.self_heal import (
                             start_background as start_self_heal,
                         )
 

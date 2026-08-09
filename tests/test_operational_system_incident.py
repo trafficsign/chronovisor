@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from chronovisor.decision.frontier_guard import EvidenceValidationError
-from chronovisor.ops.system_incident_supervisor import (
+from chronovisor.ingest.system_incident_supervisor import (
     IncidentStateError,
     SystemIncidentSupervisor,
 )
@@ -257,7 +257,7 @@ def test_incident_sync_rereads_status_after_source_lock(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor.ops import system_incident_supervisor as incident_module
+    from chronovisor.ingest import system_incident_supervisor as incident_module
 
     supervisor, source_path, _state_path, _enqueued = _fixture(
         tmp_path,
@@ -336,7 +336,7 @@ def test_legacy_incident_without_epoch_remains_valid_but_partial_epoch_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor.ops import system_incident_supervisor as incident_module
+    from chronovisor.ingest import system_incident_supervisor as incident_module
 
     supervisor, source_path, _state_path, enqueued = _fixture(
         tmp_path,
@@ -689,8 +689,9 @@ def test_operational_incident_enqueue_contract_accepts_only_bound_producer(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor.ops import background_jobs, self_heal
-    from chronovisor.ops import system_incident_supervisor as incident_module
+    from chronovisor.ingest import self_heal
+    from chronovisor.ingest import system_incident_supervisor as incident_module
+    from chronovisor.ops import background_jobs
 
     supervisor, source_path, _state_path, _enqueued = _fixture(
         tmp_path,
@@ -747,7 +748,8 @@ def test_terminal_routine_self_heal_routes_through_incident_supervisor(
 ) -> None:
     from chronovisor.core import store
     from chronovisor.decision.local_repair import LocalRepairDecision
-    from chronovisor.ops import background_jobs, runtime_status, self_heal
+    from chronovisor.ingest import self_heal
+    from chronovisor.ops import background_jobs, runtime_status
 
     chronovisor_root = tmp_path / "wiki"
     monkeypatch.setattr(store, "CHRONOVISOR_ROOT", chronovisor_root)

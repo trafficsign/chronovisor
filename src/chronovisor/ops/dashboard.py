@@ -41,7 +41,7 @@ from chronovisor.core.sealed_artifact_decoder import schema_matches
 from chronovisor.core.store import CHRONOVISOR_ROOT, LOG_FILE, init_chronovisor
 from chronovisor.decision.decision_router import resolve_router_policy
 from chronovisor.ingest import orchestrator
-from chronovisor.ops.convergence import is_human_required_result
+from chronovisor.ingest.convergence import is_human_required_result
 from chronovisor.ops.cortex import (
     CortexEventCursor,
     build_cortex_field_projection,

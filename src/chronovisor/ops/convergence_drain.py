@@ -29,7 +29,7 @@ from chronovisor.core.canonical_json import (
     canonical_json_bytes_stringifying as _canonical_bytes,
 )
 from chronovisor.core.timeutil import utc_now as _now
-from chronovisor.ops.convergence import (
+from chronovisor.ingest.convergence import (
     FRONTIER_STATUSES,
     LOCAL_STATUSES,
     TERMINAL_STATUSES,

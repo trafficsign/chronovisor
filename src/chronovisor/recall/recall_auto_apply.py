@@ -1784,7 +1784,7 @@ def apply_feedback_records(
         errors = [action for action in actions if action.get("status") == "error"]
         if errors:
             try:
-                from chronovisor.ops.auto_apply_error_supervisor import (
+                from chronovisor.ingest.auto_apply_error_supervisor import (
                     supervise_error_records,
                 )
 

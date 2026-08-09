@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from chronovisor.core.jobs import JobStatus
-from chronovisor.ops.convergence import CycleBudget
+from chronovisor.ingest.convergence import CycleBudget
 from chronovisor.raw import raw_replay
 
 

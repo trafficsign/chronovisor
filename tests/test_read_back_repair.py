@@ -13,7 +13,7 @@ import pytest
 
 from chronovisor.core import page_mutation
 from chronovisor.ingest import read_back_repair, recall_hints
-from chronovisor.ops.convergence import CycleBudget
+from chronovisor.ingest.convergence import CycleBudget
 
 NOW = datetime(2026, 7, 10, 12, 0, tzinfo=UTC)
 

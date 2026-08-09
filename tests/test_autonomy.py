@@ -13,8 +13,8 @@ import pytest
 from chronovisor.core.frontmatter import parse as parse_frontmatter
 from chronovisor.decision.decision_router import canonical_agreement_signature
 from chronovisor.decision.decision_schema_manifest import production_decision_schemas
+from chronovisor.ingest.convergence import ConvergenceStore, CycleBudget, RetryPolicy
 from chronovisor.ops import autonomy
-from chronovisor.ops.convergence import ConvergenceStore, CycleBudget, RetryPolicy
 from tests.semantic_hold_support import semantic_authority, semantic_review
 
 NOW = datetime(2026, 7, 10, 12, 0, tzinfo=UTC)

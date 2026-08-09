@@ -10,7 +10,6 @@ from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from chronovisor.core import ollama
 from chronovisor.core.durable_state import write_sealed_json
 from chronovisor.core.research_scheduler import foreground_lane
 from chronovisor.recall.classification import ClassificationError
@@ -20,6 +19,9 @@ from chronovisor.recall.classification_fixture_contract import (
 )
 from chronovisor.recall.classification_fixture_contract import (
     write_jsonl as _write_jsonl,
+)
+from chronovisor.recall.classification_resource_burn import (
+    current_resident_models as current_resident_models,
 )
 
 PAIRED_JUDGMENT_SCHEMA = "chronovisor.classification-paired-judgment.v1"
@@ -305,13 +307,3 @@ def measure_recall_overlap(
         if not success or latency > 4_000:
             misses += 1
     return latencies, misses
-
-
-def current_resident_models() -> list[str]:
-    return sorted(
-        {
-            str(row.get("name") or row.get("model") or "")
-            for row in ollama.resident_model_rows()
-            if str(row.get("name") or row.get("model") or "")
-        }
-    )

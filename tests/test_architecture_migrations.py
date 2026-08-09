@@ -1120,7 +1120,7 @@ def test_production_contract_has_no_lab_import() -> None:
         ROOT
         / "src"
         / "chronovisor"
-        / "classification"
+        / "recall"
         / ("classification_fixture_contract.py")
     )
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))

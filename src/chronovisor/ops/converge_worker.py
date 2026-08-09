@@ -15,8 +15,8 @@ def run_maintenance_batch(
 ) -> dict[str, Any]:
     """Drain existing semantic maintenance without rebuilding sleep artifacts."""
 
+    from chronovisor.ingest.convergence import ConvergenceStore, CycleBudget
     from chronovisor.ops.autonomy import resolve_deferred_duplicates_with_frontier
-    from chronovisor.ops.convergence import ConvergenceStore, CycleBudget
     from chronovisor.ops.lint_repair import run_lint_repair
     from chronovisor.ops.orphan_link import run_autonomous
     from chronovisor.recall.content_correction import run_pending_corrections
@@ -141,7 +141,7 @@ def run_converge(
     maintenance_max_elapsed_seconds: float = 15 * 60,
 ) -> dict[str, Any]:
     from chronovisor.core.background_jobs import retry_due
-    from chronovisor.ops.self_heal import enqueue_due_system_repairs
+    from chronovisor.ingest.self_heal import enqueue_due_system_repairs
     from chronovisor.ops.session_sweeper import run_sweeper
 
     payload: dict[str, Any] = {

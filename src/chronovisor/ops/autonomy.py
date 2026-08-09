@@ -55,7 +55,7 @@ from chronovisor.decision.semantic_hold import (
     persisted_semantic_no_quorum_hold,
     semantic_no_quorum_hold_error,
 )
-from chronovisor.ops.convergence import (
+from chronovisor.ingest.convergence import (
     ConvergenceStateError,
     ConvergenceStore,
     CycleBudget,
@@ -3501,7 +3501,7 @@ def _read_watchdog_health(
     try:
         return health_snapshot(), None
     except Exception as exc:
-        from chronovisor.ops.system_incident_supervisor import (
+        from chronovisor.ingest.system_incident_supervisor import (
             safe_exception_diagnostic,
             supervise_health_snapshot_exception,
         )

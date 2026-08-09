@@ -303,7 +303,9 @@ def _drain(
         processed = len(result.get("files_processed", []))
         total_processed += processed
         try:
-            from chronovisor.ops.self_heal import run_pending as run_pending_self_heal
+            from chronovisor.ingest.self_heal import (
+                run_pending as run_pending_self_heal,
+            )
 
             self_heal_result = run_pending_self_heal(
                 max_packets=1,

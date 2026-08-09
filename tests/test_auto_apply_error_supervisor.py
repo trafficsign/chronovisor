@@ -53,11 +53,11 @@ def _auto_apply_error(index: int) -> dict[str, object]:
 def test_auto_apply_errors_create_self_heal_packet_after_threshold(
     isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from chronovisor.ops import auto_apply_error_supervisor as supervisor
+    from chronovisor.ingest import auto_apply_error_supervisor as supervisor
 
     started: list[Path] = []
     monkeypatch.setattr(
-        "chronovisor.ops.self_heal.start_background",
+        "chronovisor.ingest.self_heal.start_background",
         lambda path: started.append(path),
     )
 
@@ -79,7 +79,7 @@ def test_auto_apply_errors_create_self_heal_packet_after_threshold(
 
 
 def test_auto_apply_errors_below_threshold_do_not_create_packet(isolated_wiki: Path) -> None:
-    from chronovisor.ops import auto_apply_error_supervisor as supervisor
+    from chronovisor.ingest import auto_apply_error_supervisor as supervisor
 
     result = supervisor.supervise_error_records(
         [_auto_apply_error(1), _auto_apply_error(2)],
@@ -91,7 +91,7 @@ def test_auto_apply_errors_below_threshold_do_not_create_packet(isolated_wiki: P
 
 
 def test_auto_apply_errors_accumulate_across_runs(isolated_wiki: Path) -> None:
-    from chronovisor.ops import auto_apply_error_supervisor as supervisor
+    from chronovisor.ingest import auto_apply_error_supervisor as supervisor
 
     first = supervisor.supervise_error_records([_auto_apply_error(1)], threshold=3, start_background=False)
     second = supervisor.supervise_error_records([_auto_apply_error(2)], threshold=3, start_background=False)
@@ -106,7 +106,7 @@ def test_auto_apply_errors_accumulate_across_runs(isolated_wiki: Path) -> None:
 
 
 def test_auto_apply_error_supervisor_dry_run_writes_nothing(isolated_wiki: Path) -> None:
-    from chronovisor.ops import auto_apply_error_supervisor as supervisor
+    from chronovisor.ingest import auto_apply_error_supervisor as supervisor
 
     result = supervisor.supervise_error_records(
         [_auto_apply_error(1), _auto_apply_error(2), _auto_apply_error(3)],
@@ -125,7 +125,7 @@ def test_auto_apply_error_supervisor_dry_run_writes_nothing(isolated_wiki: Path)
 def test_auto_apply_error_self_heal_cli_path_uses_existing_pipeline(
     isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from chronovisor.ops import self_heal
+    from chronovisor.ingest import self_heal
 
     log_file = isolated_wiki / "recall" / "auto-apply.jsonl"
     log_file.write_text(

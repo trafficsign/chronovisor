@@ -60,7 +60,7 @@ from chronovisor.decision.semantic_hold import (
     persisted_semantic_no_quorum_hold,
     semantic_no_quorum_hold_error,
 )
-from chronovisor.ops.convergence import (
+from chronovisor.ingest.convergence import (
     FRONTIER_STATUSES,
     TERMINAL_STATUSES,
     ConvergenceStore,

@@ -8,8 +8,8 @@ import pytest
 
 from chronovisor.decision import frontier_guard
 from chronovisor.decision.semantic_hold import persisted_semantic_no_quorum_hold
-from chronovisor.ops import convergence
-from chronovisor.ops.convergence import (
+from chronovisor.ingest import convergence
+from chronovisor.ingest.convergence import (
     ConvergenceStateError,
     ConvergenceStore,
     CycleBudget,

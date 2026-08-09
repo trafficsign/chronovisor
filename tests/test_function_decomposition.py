@@ -72,7 +72,7 @@ def test_orchestrator_unit_keyword_and_event_decisions_are_deterministic() -> No
 def test_self_heal_read_back_retirement_classification_is_ordered() -> None:
     import json
 
-    from chronovisor.ops.self_heal import _read_back_packet_retirement_kind
+    from chronovisor.ingest.self_heal import _read_back_packet_retirement_kind
 
     transient = {
         "failure_class": "read_back.repeated_miss",

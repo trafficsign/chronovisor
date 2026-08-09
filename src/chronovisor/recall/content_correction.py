@@ -91,7 +91,7 @@ from chronovisor.decision.decision_schema_manifest import (
 )
 from chronovisor.decision.frontier_guard import is_human_required_failure
 from chronovisor.decision.local_structured import ChatRequest, LocalStructuredSession
-from chronovisor.ops.convergence import (
+from chronovisor.ingest.convergence import (
     ConvergenceStore,
     CycleBudget,
     stable_item_key,

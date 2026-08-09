@@ -14,9 +14,6 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from chronovisor.classification.classification_evidence_judgment import (
-    current_resident_models,
-)
 from chronovisor.core import ollama, research_scheduler
 from chronovisor.core.durable_state import write_sealed_json
 from chronovisor.core.research_scheduler import (
@@ -28,11 +25,21 @@ from chronovisor.core.runtime_config import (
     load_embedding_config,
 )
 from chronovisor.core.store import CHRONOVISOR_ROOT
-from chronovisor.ops.convergence import ConvergenceStore, RetryPolicy
+from chronovisor.ingest.convergence import ConvergenceStore, RetryPolicy
 from chronovisor.recall.classification import ClassificationError
 from chronovisor.recall.recall_runtime import RecallPolicy, RecallRequest, run_recall
 
 SCHEMA = "chronovisor.classification-resource-overlap-burn.v1"
+
+
+def current_resident_models() -> list[str]:
+    return sorted(
+        {
+            str(row.get("name") or row.get("model") or "")
+            for row in ollama.resident_model_rows()
+            if str(row.get("name") or row.get("model") or "")
+        }
+    )
 
 
 def _percentile(values: list[int], quantile: float) -> int:

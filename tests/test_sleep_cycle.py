@@ -230,15 +230,15 @@ def _patch_sleep_dependencies(monkeypatch) -> None:
         lambda: {"ok": True},
     )
     monkeypatch.setattr(
-        "chronovisor.ops.convergence.ConvergenceStore.resume_due_quarantined",
+        "chronovisor.ingest.convergence.ConvergenceStore.resume_due_quarantined",
         lambda self, **kwargs: {"status": "ok"},
     )
     monkeypatch.setattr(
-        "chronovisor.ops.convergence.ConvergenceStore.resume_due_human_required",
+        "chronovisor.ingest.convergence.ConvergenceStore.resume_due_human_required",
         lambda self, **kwargs: {"status": "ok"},
     )
     monkeypatch.setattr(
-        "chronovisor.ops.convergence.ConvergenceStore.reap_expired_leases",
+        "chronovisor.ingest.convergence.ConvergenceStore.reap_expired_leases",
         lambda self, **kwargs: {"status": "ok"},
     )
     monkeypatch.setattr(
@@ -301,7 +301,7 @@ def _patch_sleep_dependencies(monkeypatch) -> None:
         lambda **kwargs: {"status": "ok", "dry_run": kwargs["dry_run"]},
     )
     monkeypatch.setattr(
-        "chronovisor.ops.self_heal.run_pending",
+        "chronovisor.ingest.self_heal.run_pending",
         lambda **kwargs: {"status": "ok", "dry_run": kwargs["dry_run"]},
     )
     monkeypatch.setattr(
@@ -484,7 +484,7 @@ def test_sleep_reserves_one_frontier_slot_for_every_decision_lane(monkeypatch) -
         lambda **kwargs: spend("labels", kwargs["budget"]),
     )
     monkeypatch.setattr(
-        "chronovisor.ops.self_heal.run_pending",
+        "chronovisor.ingest.self_heal.run_pending",
         lambda **kwargs: spend("self_heal", kwargs["frontier_budget"]),
     )
     monkeypatch.setattr(

@@ -16,7 +16,6 @@ from chronovisor.classification.classification_evidence_judgment import (
     ARMS,
     paired_rows,
 )
-from chronovisor.classification.classification_resource_burn import run_resource_burn
 from chronovisor.classification.classification_retention import (
     build_audit_retention_manifest,
     required_update_validation,
@@ -103,6 +102,7 @@ from chronovisor.recall.classification_library_sources import (
     validate_ndl_provider,
     write_external_package,
 )
+from chronovisor.recall.classification_resource_burn import run_resource_burn
 
 PILOT_STATE_SCHEMA = "chronovisor.classification-library-pilot-state.v1"
 FIXTURE_EPOCH = "epoch-3-library-evidence-v1"

@@ -9,8 +9,8 @@ from pathlib import Path
 import pytest
 
 from chronovisor.core import store as chronovisor_store
+from chronovisor.ingest.convergence import ConvergenceStore
 from chronovisor.ops import convergence_drain
-from chronovisor.ops.convergence import ConvergenceStore
 
 
 def _store(tmp_path: Path) -> ConvergenceStore:

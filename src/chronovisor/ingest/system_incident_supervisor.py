@@ -682,7 +682,7 @@ class SystemIncidentSupervisor:
     def _enqueue_packet(self, packet_path: Path) -> Mapping[str, Any]:
         if self._enqueue is not None:
             return self._enqueue(packet_path)
-        from chronovisor.ops.self_heal import enqueue_system_code_repair
+        from chronovisor.ingest.self_heal import enqueue_system_code_repair
 
         return enqueue_system_code_repair(packet_path)
 

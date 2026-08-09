@@ -498,10 +498,10 @@ def _run_sleep_cycle(
     duplicate_limit: int = 200,
     dry_run: bool = False,
 ) -> dict[str, Any]:
+    from chronovisor.ingest.convergence import ConvergenceStore, CycleBudget
     from chronovisor.ingest.snapshot import snapshot_chronovisor
     from chronovisor.ingest.state_register import refresh_state_register
     from chronovisor.ops.autonomy import run_autonomy_cycle
-    from chronovisor.ops.convergence import ConvergenceStore, CycleBudget
     from chronovisor.ops.distill import export_distill_dataset
     from chronovisor.ops.golden_expand import expand_golden_from_recall_questions
     from chronovisor.ops.health import health_snapshot
@@ -881,7 +881,7 @@ def _run_sleep_cycle(
             budget=lane_budgets["recall_auto_apply"],
         ),
     )
-    import chronovisor.ops.self_heal as self_heal_ops
+    import chronovisor.ingest.self_heal as self_heal_ops
 
     self_heal = _run_lane(
         "self_heal",

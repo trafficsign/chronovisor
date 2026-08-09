@@ -177,7 +177,7 @@ def test_apply_suggestion_rolls_back_only_its_owned_write_under_lock(
 def test_autonomous_orphan_lane_applies_once(
     tmp_path: Path, isolated_pages: Path
 ) -> None:
-    from chronovisor.ops.convergence import ConvergenceStore, RetryPolicy
+    from chronovisor.ingest.convergence import ConvergenceStore, RetryPolicy
 
     _seed_page(isolated_pages, "source", "durable anchor")
     _seed_page(isolated_pages, "target", "target topic")
@@ -232,7 +232,7 @@ def test_orphan_no_quorum_is_cached_until_authority_epoch_changes(
     isolated_pages: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor.ops.convergence import ConvergenceStore, RetryPolicy
+    from chronovisor.ingest.convergence import ConvergenceStore, RetryPolicy
 
     _seed_page(isolated_pages, "source", "durable anchor")
     _seed_page(isolated_pages, "target", "target topic")
@@ -733,7 +733,7 @@ def test_apply_suggestion_never_nests_inside_existing_wiki_link(
 
 
 def _autonomous_state(tmp_path: Path, *, max_local_attempts: int = 2):
-    from chronovisor.ops.convergence import ConvergenceStore, RetryPolicy
+    from chronovisor.ingest.convergence import ConvergenceStore, RetryPolicy
 
     return ConvergenceStore(
         tmp_path / "state.json",
@@ -1179,7 +1179,7 @@ def test_frontier_retry_keeps_durable_local_suggestion(
     tmp_path: Path,
     isolated_pages: Path,
 ) -> None:
-    from chronovisor.ops.convergence import CycleBudget
+    from chronovisor.ingest.convergence import CycleBudget
 
     store, semantic = _autonomous_fixture(isolated_pages)
     state = _autonomous_state(tmp_path)
@@ -1225,7 +1225,7 @@ def test_elapsed_budget_stops_before_candidate_discovery(
     tmp_path: Path,
     isolated_pages: Path,
 ) -> None:
-    from chronovisor.ops.convergence import CycleBudget
+    from chronovisor.ingest.convergence import CycleBudget
 
     store = _FakeStore()
     store.add_page("orphan", body="Target")
@@ -1255,7 +1255,7 @@ def test_elapsed_budget_stops_before_candidate_discovery(
 def test_exhausted_local_lane_stops_before_active_candidate_discovery(
     tmp_path: Path,
 ) -> None:
-    from chronovisor.ops.convergence import CycleBudget
+    from chronovisor.ingest.convergence import CycleBudget
 
     store = _FakeStore()
     store.add_page("orphan", body="Target")

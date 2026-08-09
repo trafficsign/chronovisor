@@ -138,7 +138,7 @@ rationale = "One deterministic evidence projection with coupled metrics and prov
 tests = ["tests/test_local_model_eval.py"]
 
 [[functions]]
-path = "src/chronovisor/librarian/librarian_status.py"
+path = "src/chronovisor/recall/librarian_status.py"
 qualname = "_library_evidence_status"
 baseline_lines = 435
 disposition = "retained"
@@ -147,7 +147,7 @@ rationale = "Schema-shaped dashboard projection dominated by one literal return 
 tests = ["tests/test_dashboard_librarian.py"]
 
 [[functions]]
-path = "src/chronovisor/librarian/librarian_status.py"
+path = "src/chronovisor/recall/librarian_status.py"
 qualname = "build_librarian_status"
 baseline_lines = 314
 disposition = "decomposed"
@@ -219,7 +219,7 @@ rationale = "Per-orphan convergence transaction couples proposal freshness, auth
 tests = ["tests/test_orphan_link.py"]
 
 [[functions]]
-path = "src/chronovisor/ops/self_heal.py"
+path = "src/chronovisor/ingest/self_heal.py"
 qualname = "_handle_packet_unlocked"
 baseline_lines = 766
 disposition = "retained"

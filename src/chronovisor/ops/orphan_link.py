@@ -1058,7 +1058,7 @@ def run_autonomous(
     dry_run: bool = False,
 ) -> dict[str, Any]:
     """Boundedly drain orphan proposals through local + frontier review."""
-    from chronovisor.ops.convergence import (
+    from chronovisor.ingest.convergence import (
         TERMINAL_STATUSES,
         ConvergenceStore,
         CycleBudget,

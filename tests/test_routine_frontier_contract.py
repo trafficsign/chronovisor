@@ -14,7 +14,7 @@ ROUTINE_MODULES = (
     "recall/recall_improvement.py",
     "ops/sleep_cycle.py",
     "ops/converge_worker.py",
-    "ops/convergence.py",
+    "ingest/convergence.py",
     "hosts/hook_dispatcher.py",
     "core/background_jobs.py",
 )
@@ -63,8 +63,8 @@ def test_only_self_heal_can_call_guarded_frontier_repair() -> None:
         if calls:
             callers[str(path.relative_to(PACKAGE_ROOT))] = calls
 
-    assert set(callers) == {"ops/self_heal.py"}
-    for call in callers["ops/self_heal.py"]:
+    assert set(callers) == {"ingest/self_heal.py"}
+    for call in callers["ingest/self_heal.py"]:
         assert "evidence" in {keyword.arg for keyword in call.keywords}
 
 

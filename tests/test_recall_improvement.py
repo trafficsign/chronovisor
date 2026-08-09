@@ -12,7 +12,7 @@ from chronovisor.decision.decision_router import canonical_agreement_signature
 from chronovisor.decision.decision_schema_manifest import production_decision_schemas
 from chronovisor.decision.recall_improvement_contract import PolicyProposal
 from chronovisor.decision.recall_policy_contract import RecallPolicy
-from chronovisor.ops.convergence import CycleBudget
+from chronovisor.ingest.convergence import CycleBudget
 from chronovisor.recall import recall_improvement
 
 

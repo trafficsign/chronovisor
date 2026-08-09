@@ -32,8 +32,8 @@ from chronovisor.core.research_scheduler import (
 )
 from chronovisor.core.store import CHRONOVISOR_ROOT
 from chronovisor.core.timeutil import utc_iso_milliseconds as _now
+from chronovisor.ingest.convergence import ConvergenceStore, RetryPolicy
 from chronovisor.ingest.page_registry import PageRegistry
-from chronovisor.ops.convergence import ConvergenceStore, RetryPolicy
 from chronovisor.recall.classification import (
     CALIBRATION_SCHEMA,
     CLASSIFICATION_SCHEMA,

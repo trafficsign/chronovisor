@@ -105,7 +105,7 @@ def test_terminal_semantic_defer_preserves_raw_and_never_starts_self_heal(
     semantic_defer_wiki: tuple[Path, Path],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor.ops import self_heal
+    from chronovisor.ingest import self_heal
     from chronovisor.raw import failure_supervisor
 
     chronovisor_root, artifact = semantic_defer_wiki
@@ -612,7 +612,7 @@ def test_in_flight_operational_worker_observes_semantic_defer_cancellation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from chronovisor.decision.local_repair import LocalRepairDecision
-    from chronovisor.ops import self_heal
+    from chronovisor.ingest import self_heal
     from chronovisor.raw import failure_supervisor
 
     chronovisor_root, artifact = semantic_defer_wiki
@@ -714,7 +714,7 @@ def test_cancellation_dry_run_is_byte_for_byte_read_only(
     semantic_defer_wiki: tuple[Path, Path],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor.ops import self_heal
+    from chronovisor.ingest import self_heal
     from chronovisor.raw import failure_supervisor
 
     chronovisor_root, _artifact = semantic_defer_wiki

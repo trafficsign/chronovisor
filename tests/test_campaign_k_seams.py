@@ -7,8 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
-from chronovisor.ingest import ingest, ingest_review_apply, orchestrator
-from chronovisor.ops import self_heal
+from chronovisor.ingest import ingest, ingest_review_apply, orchestrator, self_heal
 from chronovisor.recall import (
     classification_engine,
     collection_authority,
@@ -231,7 +230,7 @@ def test_selected_orchestrators_stay_below_campaign_k_size_caps() -> None:
     targets = {
         package / "ingest" / "ingest.py": {"run_ingest": 525},
         package / "ingest" / "orchestrator.py": {"run_pending_ingest": 750},
-        package / "ops" / "self_heal.py": {"_handle_packet_unlocked": 780},
+        package / "ingest" / "self_heal.py": {"_handle_packet_unlocked": 780},
         package / "recall" / "content_correction.py": {
             "_process_frontier_item": 860
         },
