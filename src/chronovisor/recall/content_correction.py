@@ -961,9 +961,9 @@ def capture_session_corrections(
     dry_run: bool = False,
 ) -> dict[str, Any]:
     if host == "codex":
-        from chronovisor.hosts.codex_record import extract_transcript_slice
+        from chronovisor.raw.codex_transcript import extract_transcript_slice
     elif host == "claude-code":
-        from chronovisor.hosts.claude_code_record import extract_transcript_slice
+        from chronovisor.raw.claude_code_transcript import extract_transcript_slice
     else:
         raise ValueError(f"unsupported correction host: {host}")
     transcript = extract_transcript_slice(session_file, after_line=0)
@@ -5763,14 +5763,14 @@ def _resolve_session_file(
     resolved_session_id = session_id or hints.get("session_id")
     resolved_cwd = cwd or hints.get("cwd") or os.environ.get("PWD", "")
     if host == "codex":
-        from chronovisor.hosts.codex_record import find_session_file
+        from chronovisor.raw.codex_transcript import find_session_file
 
         return find_session_file(
             session_id=resolved_session_id,
             cwd=resolved_cwd,
             sessions_root=None,
         )
-    from chronovisor.hosts.claude_code_record import find_session_file
+    from chronovisor.raw.claude_code_transcript import find_session_file
 
     return find_session_file(
         session_id=resolved_session_id,

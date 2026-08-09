@@ -983,7 +983,7 @@ def test_source_recall_provenance_uses_exact_turn_time_for_repeated_prompt(
 def test_capture_cursor_processes_delayed_corrections_exactly_once(
     monkeypatch, tmp_path: Path
 ) -> None:
-    from chronovisor.hosts import codex_record
+    from chronovisor.raw import codex_transcript
 
     records = [
         SimpleNamespace(role="user", line=1, text="same source prompt"),
@@ -993,7 +993,7 @@ def test_capture_cursor_processes_delayed_corrections_exactly_once(
     ]
     transcript = SimpleNamespace(records=records, session_id="s1", cwd="/repo")
     monkeypatch.setattr(
-        codex_record, "extract_transcript_slice", lambda *_args, **_kwargs: transcript
+        codex_transcript, "extract_transcript_slice", lambda *_args, **_kwargs: transcript
     )
     monkeypatch.setattr(
         content_correction, "_source_pull_pages", lambda *_args, **_kwargs: []
@@ -1043,7 +1043,7 @@ def test_capture_skips_normal_turns_but_advances_cursor_idempotently(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    from chronovisor.hosts import codex_record
+    from chronovisor.raw import codex_transcript
 
     session_file = tmp_path / "session.jsonl"
     transcript = SimpleNamespace(
@@ -1057,7 +1057,7 @@ def test_capture_skips_normal_turns_but_advances_cursor_idempotently(
         cwd="/repo",
     )
     monkeypatch.setattr(
-        codex_record,
+        codex_transcript,
         "extract_transcript_slice",
         lambda *_args, **_kwargs: transcript,
     )
@@ -1106,7 +1106,7 @@ def test_capture_bare_denial_requires_real_recall_candidate(
     has_recall_candidate: bool,
     expected: int,
 ) -> None:
-    from chronovisor.hosts import codex_record
+    from chronovisor.raw import codex_transcript
 
     session_file = tmp_path / "session.jsonl"
     page = tmp_path / "memory.md"
@@ -1122,7 +1122,7 @@ def test_capture_bare_denial_requires_real_recall_candidate(
         cwd="/repo",
     )
     monkeypatch.setattr(
-        codex_record,
+        codex_transcript,
         "extract_transcript_slice",
         lambda *_args, **_kwargs: transcript,
     )
@@ -1627,7 +1627,7 @@ def test_capture_hook_only_enqueues_negative_feedback_without_draining_models(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    from chronovisor.hosts import codex_record
+    from chronovisor.raw import codex_transcript
 
     session_file = tmp_path / "session.jsonl"
     transcript = SimpleNamespace(
@@ -1641,7 +1641,7 @@ def test_capture_hook_only_enqueues_negative_feedback_without_draining_models(
         cwd="/repo",
     )
     monkeypatch.setattr(
-        codex_record,
+        codex_transcript,
         "extract_transcript_slice",
         lambda *_args, **_kwargs: transcript,
     )

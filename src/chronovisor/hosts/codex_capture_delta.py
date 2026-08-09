@@ -9,10 +9,7 @@ from chronovisor.raw.codex_transcript import (
     TranscriptSlice,
     serialize_transcript_records,
 )
-
-
-class CodexSaveError(RuntimeError):
-    """Raised when the Codex save flow cannot complete."""
+from chronovisor.raw.transcript import CodexSaveError as CodexSaveError
 
 
 def bounded_transcript_slice(

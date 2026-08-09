@@ -9,11 +9,8 @@ from __future__ import annotations
 
 import argparse
 import json
-import signal
 import sys
-import threading
-import time
-from contextlib import contextmanager, suppress
+from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
@@ -35,49 +32,9 @@ USER_PROMPT_EVENTS = {"user-prompt-submit", "userpromptsubmit", "prompt-submit"}
 STOP_EVENTS = {"stop"}
 
 
-class RecallWallClockTimeout(BaseException):
-    """Hard-stop a synchronous Recall hook without being swallowed downstream."""
-
-
-@contextmanager
-def recall_wall_clock_deadline(timeout_ms: int):
-    """Apply a process-local hard deadline when running on the main Unix thread."""
-
-    if (
-        timeout_ms <= 0
-        or threading.current_thread() is not threading.main_thread()
-        or not hasattr(signal, "SIGALRM")
-        or not hasattr(signal, "setitimer")
-    ):
-        yield
-        return
-
-    def timeout_handler(_signum: int, _frame: Any) -> None:
-        raise RecallWallClockTimeout(f"recall exceeded {timeout_ms}ms")
-
-    previous_handler = signal.getsignal(signal.SIGALRM)
-    previous_timer = signal.getitimer(signal.ITIMER_REAL)
-    started = time.monotonic()
-    signal.signal(signal.SIGALRM, timeout_handler)
-    signal.setitimer(signal.ITIMER_REAL, timeout_ms / 1000.0)
-    try:
-        yield
-    finally:
-        signal.setitimer(signal.ITIMER_REAL, 0)
-        signal.signal(signal.SIGALRM, previous_handler)
-        if previous_timer[0] > 0:
-            elapsed = time.monotonic() - started
-            signal.setitimer(
-                signal.ITIMER_REAL,
-                max(0.0, previous_timer[0] - elapsed),
-                previous_timer[1],
-            )
-
-
-def recall_outer_deadline_ms(policy: recall_runtime.RecallPolicy) -> int:
-    """Return the final host boundary; ``run_recall`` owns its inner reserve."""
-
-    return max(100, int(policy.total_timeout_ms))
+RecallWallClockTimeout = recall_runtime.RecallWallClockTimeout
+recall_outer_deadline_ms = recall_runtime.recall_outer_deadline_ms
+recall_wall_clock_deadline = recall_runtime.recall_wall_clock_deadline
 
 
 def recall_inner_budget_ms(policy: recall_runtime.RecallPolicy) -> int:

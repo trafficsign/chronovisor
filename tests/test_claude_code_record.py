@@ -13,15 +13,24 @@ from types import SimpleNamespace
 import pytest
 
 from chronovisor.core.store import RuntimeContext
-from chronovisor.hosts import claude_code_record
+from chronovisor.hosts import claude_code_capture_delta, claude_code_record
 from chronovisor.raw import claude_code_transcript
 from chronovisor.raw.raw_semantic_projection import project_parent_raw
 from chronovisor.raw.save_transaction import make_save_transaction
+from chronovisor.raw.transcript import ClaudeCodeSaveError
 
 
-def test_transcript_types_are_reexported_from_parser_module() -> None:
+def test_transcript_api_is_reexported_from_raw_modules() -> None:
     assert claude_code_record.TranscriptRecord is claude_code_transcript.TranscriptRecord
     assert claude_code_record.TranscriptSlice is claude_code_transcript.TranscriptSlice
+    assert (
+        claude_code_record.claude_code_projects_root
+        is claude_code_transcript.claude_code_projects_root
+    )
+    assert claude_code_record.find_session_file is claude_code_transcript.find_session_file
+    assert claude_code_record.hook_hints is claude_code_transcript.hook_hints
+    assert claude_code_record.ClaudeCodeSaveError is ClaudeCodeSaveError
+    assert claude_code_capture_delta.ClaudeCodeSaveError is ClaudeCodeSaveError
 
 
 def write_jsonl(path: Path, rows: list[dict]) -> None:

@@ -11,6 +11,12 @@ from chronovisor.ops import background_jobs
 from chronovisor.recall import recall_breaker, recall_runtime
 
 
+def test_recall_deadline_api_is_reexported_from_recall_runtime() -> None:
+    assert hook_dispatcher.RecallWallClockTimeout is recall_runtime.RecallWallClockTimeout
+    assert hook_dispatcher.recall_outer_deadline_ms is recall_runtime.recall_outer_deadline_ms
+    assert hook_dispatcher.recall_wall_clock_deadline is recall_runtime.recall_wall_clock_deadline
+
+
 @pytest.fixture(autouse=True)
 def isolate_recall_breaker(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(recall_breaker, "BREAKER_FILE", tmp_path / "breaker.json")

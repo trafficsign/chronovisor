@@ -8,9 +8,12 @@ from pathlib import Path
 from typing import Any
 
 from chronovisor.raw.transcript import (
+    ClaudeCodeSaveError,
+    iter_jsonl,
+)
+from chronovisor.raw.transcript import (
     content_has_capture_payload as _content_has_capture_payload,
 )
-from chronovisor.raw.transcript import iter_jsonl
 
 FILE_CHANGE_TOOLS = frozenset({"Edit", "Write"})
 
@@ -35,6 +38,56 @@ class TranscriptSlice:
     after_line: int = 0
     has_file_changes: bool = False
     user_turn_count: int = 0
+
+
+def claude_code_projects_root() -> Path:
+    return Path.home() / ".claude" / "projects"
+
+
+def find_session_file(
+    *,
+    session_id: str | None = None,
+    transcript_path: str | None = None,
+) -> Path:
+    if transcript_path:
+        p = Path(transcript_path).expanduser()
+        if p.exists():
+            return p
+
+    root = claude_code_projects_root()
+    if not root.exists():
+        raise ClaudeCodeSaveError(f"Claude Code projects root does not exist: {root}")
+
+    candidates = sorted(root.rglob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
+    if not candidates:
+        raise ClaudeCodeSaveError(f"No Claude Code session logs found under: {root}")
+
+    if session_id:
+        for candidate in candidates:
+            if session_id in candidate.name:
+                return candidate
+
+    return candidates[0]
+
+
+def hook_hints(payload: dict[str, Any]) -> dict[str, str]:
+    hints: dict[str, str] = {}
+    for key in ("session_id", "sessionId"):
+        val = payload.get(key)
+        if isinstance(val, str) and val:
+            hints["session_id"] = val
+            break
+    for key in ("transcript_path", "transcriptPath", "session_file", "sessionFile"):
+        val = payload.get(key)
+        if isinstance(val, str) and val:
+            hints["transcript_path"] = val
+            break
+    for key in ("cwd", "working_directory"):
+        val = payload.get(key)
+        if isinstance(val, str) and val:
+            hints["cwd"] = val
+            break
+    return hints
 
 
 def extract_transcript_slice(path: Path, *, after_line: int = 0) -> TranscriptSlice:

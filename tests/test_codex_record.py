@@ -13,15 +13,22 @@ from types import SimpleNamespace
 import pytest
 
 from chronovisor.core.store import RuntimeContext
-from chronovisor.hosts import codex_record
+from chronovisor.hosts import codex_capture_delta, codex_record
 from chronovisor.raw import codex_transcript
 from chronovisor.raw.raw_semantic_projection import project_parent_raw
 from chronovisor.raw.save_transaction import make_save_transaction
+from chronovisor.raw.transcript import CodexSaveError
 
 
-def test_transcript_types_are_reexported_from_parser_module() -> None:
+def test_transcript_api_is_reexported_from_raw_modules() -> None:
     assert codex_record.TranscriptRecord is codex_transcript.TranscriptRecord
     assert codex_record.TranscriptSlice is codex_transcript.TranscriptSlice
+    assert codex_record.codex_home is codex_transcript.codex_home
+    assert codex_record.default_sessions_root is codex_transcript.default_sessions_root
+    assert codex_record.find_session_file is codex_transcript.find_session_file
+    assert codex_record.hook_hints is codex_transcript.hook_hints
+    assert codex_record.CodexSaveError is CodexSaveError
+    assert codex_capture_delta.CodexSaveError is CodexSaveError
 
 
 def write_jsonl(path: Path, rows: list[dict]) -> None:

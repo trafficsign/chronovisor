@@ -68,8 +68,12 @@ TranscriptSlice = _codex_transcript.TranscriptSlice
 _codex_semantic_view = _codex_transcript._codex_semantic_view
 _is_tool_payload_type = _codex_transcript._is_tool_payload_type
 codex_semantic_view = _codex_transcript.codex_semantic_view
+codex_home = _codex_transcript.codex_home
+default_sessions_root = _codex_transcript.default_sessions_root
 extract_transcript_slice = _codex_transcript.extract_transcript_slice
+find_session_file = _codex_transcript.find_session_file
 format_transcript = _codex_transcript.format_transcript
+hook_hints = _codex_transcript.hook_hints
 is_injected_context = _codex_transcript.is_injected_context
 message_content_text = _codex_transcript.message_content_text
 read_session_meta = _codex_transcript.read_session_meta
@@ -120,114 +124,6 @@ class WriterResult:
     reason: str
     rejected_keywords: list[str]
     evidence_quotes: list[str] = field(default_factory=list)
-
-
-def codex_home() -> Path:
-    """Return the Codex home used for session logs."""
-    configured = os.environ.get("CODEX_HOME")
-    if configured:
-        return Path(configured).expanduser()
-    default_config = Path.home() / ".config" / "codex"
-    if default_config.exists():
-        return default_config
-    return Path.home() / ".codex"
-
-
-def default_sessions_root() -> Path:
-    return codex_home() / "sessions"
-
-
-def hook_hints(payload: dict[str, Any]) -> dict[str, str]:
-    hints: dict[str, str] = {}
-
-    session_id = _find_string_value(
-        payload,
-        ("session_id", "sessionId", "conversation_id", "conversationId", "rollout_id"),
-        uuid_like=True,
-    )
-    if session_id:
-        hints["session_id"] = session_id
-
-    cwd = _find_string_value(payload, ("cwd", "working_directory", "workspace"))
-    if cwd:
-        hints["cwd"] = cwd
-
-    session_file = _find_string_value(
-        payload,
-        ("session_file", "sessionFile", "transcript_path", "transcriptPath", "path"),
-        suffix=".jsonl",
-    )
-    if session_file:
-        hints["session_file"] = session_file
-
-    return hints
-
-
-def _find_string_value(
-    value: Any,
-    keys: tuple[str, ...],
-    *,
-    uuid_like: bool = False,
-    suffix: str | None = None,
-) -> str | None:
-    if isinstance(value, dict):
-        for key in keys:
-            found = value.get(key)
-            if isinstance(found, str) and _matches_hint(found, uuid_like, suffix):
-                return found
-        for child in value.values():
-            found = _find_string_value(child, keys, uuid_like=uuid_like, suffix=suffix)
-            if found:
-                return found
-    elif isinstance(value, list):
-        for child in value:
-            found = _find_string_value(child, keys, uuid_like=uuid_like, suffix=suffix)
-            if found:
-                return found
-    return None
-
-
-def _matches_hint(value: str, uuid_like: bool, suffix: str | None) -> bool:
-    text = value.strip()
-    if not text:
-        return False
-    if suffix and not text.endswith(suffix):
-        return False
-    return not (uuid_like and not _looks_like_uuid(text))
-
-
-def _looks_like_uuid(value: str) -> bool:
-    parts = value.split("-")
-    return (
-        len(parts) == 5
-        and [len(part) for part in parts] == [8, 4, 4, 4, 12]
-        and all(all(ch in "0123456789abcdefABCDEF" for ch in part) for part in parts)
-    )
-
-
-def find_session_file(
-    *,
-    session_id: str | None = None,
-    cwd: str | None = None,
-    sessions_root: Path | None = None,
-) -> Path:
-    root = sessions_root or default_sessions_root()
-    if not root.exists():
-        raise CodexSaveError(f"Codex sessions root does not exist: {root}")
-
-    candidates = sorted(root.rglob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
-    if not candidates:
-        raise CodexSaveError(f"No Codex session logs found under: {root}")
-
-    if session_id or cwd:
-        for candidate in candidates:
-            meta = read_session_meta(candidate)
-            if session_id and meta.get("id") == session_id:
-                return candidate
-            if cwd and meta.get("cwd") == cwd:
-                return candidate
-
-    return candidates[0]
 
 
 def build_writer_prompt(transcript_slice: TranscriptSlice, *, max_chars: int) -> str:

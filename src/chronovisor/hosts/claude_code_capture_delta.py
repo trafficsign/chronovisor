@@ -9,10 +9,7 @@ from chronovisor.raw.claude_code_transcript import (
     TranscriptSlice,
     serialize_transcript_records,
 )
-
-
-class ClaudeCodeSaveError(RuntimeError):
-    pass
+from chronovisor.raw.transcript import ClaudeCodeSaveError as ClaudeCodeSaveError
 
 
 def bounded_transcript_slice(

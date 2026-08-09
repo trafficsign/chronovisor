@@ -71,9 +71,12 @@ TranscriptSlice = _claude_code_transcript.TranscriptSlice
 _claude_record_role = _claude_code_transcript._claude_record_role
 _claude_semantic_view = _claude_code_transcript._claude_semantic_view
 _content_has_file_changes = _claude_code_transcript._content_has_file_changes
+claude_code_projects_root = _claude_code_transcript.claude_code_projects_root
 claude_semantic_view = _claude_code_transcript.claude_semantic_view
 extract_transcript_slice = _claude_code_transcript.extract_transcript_slice
+find_session_file = _claude_code_transcript.find_session_file
 format_transcript = _claude_code_transcript.format_transcript
+hook_hints = _claude_code_transcript.hook_hints
 is_injected_context = _claude_code_transcript.is_injected_context
 message_content_text = _claude_code_transcript.message_content_text
 sanitize_message_content = _claude_code_transcript.sanitize_message_content
@@ -127,40 +130,6 @@ class WriterResult:
 
 # ---------------------------------------------------------------------------
 # Session file discovery
-# ---------------------------------------------------------------------------
-
-def claude_code_projects_root() -> Path:
-    return Path.home() / ".claude" / "projects"
-
-
-def find_session_file(
-    *,
-    session_id: str | None = None,
-    transcript_path: str | None = None,
-) -> Path:
-    if transcript_path:
-        p = Path(transcript_path).expanduser()
-        if p.exists():
-            return p
-
-    root = claude_code_projects_root()
-    if not root.exists():
-        raise ClaudeCodeSaveError(f"Claude Code projects root does not exist: {root}")
-
-    candidates = sorted(root.rglob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
-    if not candidates:
-        raise ClaudeCodeSaveError(f"No Claude Code session logs found under: {root}")
-
-    if session_id:
-        for candidate in candidates:
-            if session_id in candidate.name:
-                return candidate
-
-    return candidates[0]
-
-
-# ---------------------------------------------------------------------------
-# LLM interaction
 # ---------------------------------------------------------------------------
 
 def build_writer_prompt(transcript_slice: TranscriptSlice, *, max_chars: int) -> str:
@@ -569,30 +538,6 @@ def build_raw_content(
 
 # ---------------------------------------------------------------------------
 # Hook payload helpers
-# ---------------------------------------------------------------------------
-
-def hook_hints(payload: dict[str, Any]) -> dict[str, str]:
-    hints: dict[str, str] = {}
-    for key in ("session_id", "sessionId"):
-        val = payload.get(key)
-        if isinstance(val, str) and val:
-            hints["session_id"] = val
-            break
-    for key in ("transcript_path", "transcriptPath", "session_file", "sessionFile"):
-        val = payload.get(key)
-        if isinstance(val, str) and val:
-            hints["transcript_path"] = val
-            break
-    for key in ("cwd", "working_directory"):
-        val = payload.get(key)
-        if isinstance(val, str) and val:
-            hints["cwd"] = val
-            break
-    return hints
-
-
-# ---------------------------------------------------------------------------
-# Main entry point
 # ---------------------------------------------------------------------------
 
 def _run_save_transaction(

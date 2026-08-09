@@ -547,11 +547,11 @@ def read_hook_payload(stdin_text: str | None) -> dict[str, Any]:
 
 def hook_hints_for_host(host: str, payload: dict[str, Any]) -> dict[str, str]:
     if host == "codex":
-        from chronovisor.hosts.codex_record import hook_hints
+        from chronovisor.raw.codex_transcript import hook_hints
 
         return hook_hints(payload)
     if host == "claude-code":
-        from chronovisor.hosts.claude_code_record import hook_hints
+        from chronovisor.raw.claude_code_transcript import hook_hints
 
         return hook_hints(payload)
     hints: dict[str, str] = {}
@@ -582,7 +582,7 @@ def resolve_session_file(args: argparse.Namespace, hints: dict[str, str]) -> Pat
     session_id = args.session_id or hints.get("session_id")
     cwd = args.cwd or hints.get("cwd") or os.environ.get("PWD", "")
     if args.host == "codex":
-        from chronovisor.hosts.codex_record import find_session_file
+        from chronovisor.raw.codex_transcript import find_session_file
 
         return find_session_file(
             session_id=session_id,
@@ -590,7 +590,7 @@ def resolve_session_file(args: argparse.Namespace, hints: dict[str, str]) -> Pat
             sessions_root=Path(args.sessions_root).expanduser() if args.sessions_root else None,
         )
     if args.host == "claude-code":
-        from chronovisor.hosts.claude_code_record import find_session_file
+        from chronovisor.raw.claude_code_transcript import find_session_file
 
         return find_session_file(session_id=session_id, transcript_path=None)
     raise ValueError("--session-file is required for generic host transcript auditing")
@@ -600,9 +600,9 @@ def extract_turn_from_session(args: argparse.Namespace, hints: dict[str, str], s
     session_file = resolve_session_file(args, hints)
     after_line = 0 if args.ignore_state else saved_line_for(state, session_file)
     if args.host == "codex":
-        from chronovisor.hosts.codex_record import extract_transcript_slice
+        from chronovisor.raw.codex_transcript import extract_transcript_slice
     elif args.host == "claude-code":
-        from chronovisor.hosts.claude_code_record import extract_transcript_slice
+        from chronovisor.raw.claude_code_transcript import extract_transcript_slice
     else:
         raise ValueError("generic host requires --prompt and --assistant-response")
 

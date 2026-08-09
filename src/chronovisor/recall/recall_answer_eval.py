@@ -1105,9 +1105,9 @@ def _raw_slice(path: Path, start_line: int, end_line: int) -> tuple[bytes, str]:
 
 def _extract(host: str, session_file: Path) -> Any:
     if host == "codex":
-        from chronovisor.hosts.codex_record import extract_transcript_slice
+        from chronovisor.raw.codex_transcript import extract_transcript_slice
     elif host == "claude-code":
-        from chronovisor.hosts.claude_code_record import extract_transcript_slice
+        from chronovisor.raw.claude_code_transcript import extract_transcript_slice
     else:
         raise ValueError(f"unsupported answer capture host: {host}")
     return extract_transcript_slice(session_file, after_line=0)

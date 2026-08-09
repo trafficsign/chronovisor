@@ -256,7 +256,7 @@ def evaluate_examples(
                 cwd=example.cwd,
                 session_id="",
             )
-            from chronovisor.hosts.hook_dispatcher import (
+            from chronovisor.recall.recall_runtime import (
                 RecallWallClockTimeout,
                 recall_outer_deadline_ms,
                 recall_wall_clock_deadline,

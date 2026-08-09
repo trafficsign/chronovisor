@@ -7,6 +7,14 @@ from pathlib import Path
 from typing import Any
 
 
+class CodexSaveError(RuntimeError):
+    """Raised when the Codex save flow cannot complete."""
+
+
+class ClaudeCodeSaveError(RuntimeError):
+    """Raised when the Claude Code save flow cannot complete."""
+
+
 def iter_jsonl(path: Path):
     with path.open() as handle:
         for line_no, line in enumerate(handle, start=1):
