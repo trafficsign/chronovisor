@@ -1718,6 +1718,9 @@ def build_raw_replay_reconciliation_prompt(evidence: dict[str, Any]) -> str:
     )
 
 
+READ_BACK_EVIDENCE_POLICY_MARKER = "CHRONOVISOR_READ_BACK_EVIDENCE_POLICY=2"
+
+
 def build_read_back_repair_request(
     proposal: dict[str, Any],
     *,
@@ -1837,6 +1840,7 @@ Candidate evidence:
 __all__ = [
     "INGEST_PROPOSAL_KIND",
     "INGEST_PROPOSAL_SCHEMA_VERSION",
+    "READ_BACK_EVIDENCE_POLICY_MARKER",
     "build_autonomy_duplicate_review_prompt",
     "build_autonomy_retention_review_prompt",
     "build_ingest_review_projection",

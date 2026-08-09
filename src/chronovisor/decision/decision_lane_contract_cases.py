@@ -30,6 +30,7 @@ from chronovisor.core.canonical_json import (
 )
 from chronovisor.decision.decision_lane_prompts import (
     INGEST_PROPOSAL_SCHEMA_VERSION,
+    READ_BACK_EVIDENCE_POLICY_MARKER,
     build_autonomy_duplicate_review_prompt,
     build_autonomy_retention_review_prompt,
     build_frontier_tag_repair_prompt,
@@ -1957,8 +1958,6 @@ def _read_back_cases() -> list[tuple[str, str | None, dict[str, Any]]]:
             },
             "reason": "ingest read-back not-in-top-results",
         }
-        from chronovisor.ingest.read_back_repair import READ_BACK_EVIDENCE_POLICY_MARKER
-
         prompt, system = build_read_back_repair_request(
             proposal,
             evidence_policy_marker=READ_BACK_EVIDENCE_POLICY_MARKER,

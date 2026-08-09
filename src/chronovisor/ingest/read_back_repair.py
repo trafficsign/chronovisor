@@ -26,6 +26,9 @@ from chronovisor.core.page_mutation import (
 )
 from chronovisor.core.runtime_config import runtime_repo_root
 from chronovisor.decision import decision_authority
+from chronovisor.decision.decision_lane_prompts import (
+    READ_BACK_EVIDENCE_POLICY_MARKER as READ_BACK_EVIDENCE_POLICY_MARKER,
+)
 from chronovisor.decision.decision_schema_manifest import READ_BACK_FRONTIER_SCHEMA
 from chronovisor.decision.semantic_hold import (
     LOCAL_SEMANTIC_NO_QUORUM,
@@ -49,7 +52,6 @@ SCHEMA_VERSION = 2
 TERMINAL_STATUSES = frozenset({"applied", "rejected", "quarantined", "human_required"})
 DEFAULT_QUARANTINE_COOLDOWN_SECONDS = 6 * 60 * 60
 PROJECT_ROOT = runtime_repo_root()
-READ_BACK_EVIDENCE_POLICY_MARKER = "CHRONOVISOR_READ_BACK_EVIDENCE_POLICY=2"
 READ_BACK_DECISION_LANE = "read_back_repair"
 TARGET_PAGE_TITLE_MAX_CHARS = 500
 TARGET_PAGE_EXCERPT_MAX_CHARS = 8_000

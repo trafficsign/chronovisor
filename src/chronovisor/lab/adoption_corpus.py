@@ -58,6 +58,9 @@ from chronovisor.decision.decision_lane_contracts import (
     lane_contract_sha256,
     model_backed_lane_names,
 )
+from chronovisor.decision.decision_lane_prompts import (
+    READ_BACK_EVIDENCE_POLICY_MARKER,
+)
 from chronovisor.decision.decision_router import (
     DECISION_REQUEST_FINGERPRINT_VERSION,
     decision_context_buckets,
@@ -78,10 +81,7 @@ from chronovisor.decision.local_model_eval import (
     load_replay_corpus,
     replay_semantic_effect,
 )
-from chronovisor.ingest.read_back_repair import (
-    READ_BACK_EVIDENCE_POLICY_MARKER,
-    READ_BACK_FRONTIER_SCHEMA,
-)
+from chronovisor.ingest.read_back_repair import READ_BACK_FRONTIER_SCHEMA
 from chronovisor.recall.content_correction import (
     LEGACY_UNFILTERED_SIGNAL,
     correction_signal,
