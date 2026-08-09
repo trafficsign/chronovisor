@@ -10,7 +10,7 @@ from typing import Any
 from chronovisor.core.jsonl_write import append_jsonl_durable
 from chronovisor.core.store import CHRONOVISOR_ROOT
 from chronovisor.research.evidence_bundle import EvidenceBundle
-from chronovisor.research.research_store import ResearchStore
+from chronovisor.search.research_store import ResearchStore
 
 AUDIT_LOG = CHRONOVISOR_ROOT / "review" / "research-audit.jsonl"
 

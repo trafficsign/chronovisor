@@ -17,7 +17,7 @@ import zstandard
 from chronovisor.core.jsonl_write import append_jsonl_durable
 from chronovisor.core.store import CHRONOVISOR_ROOT
 from chronovisor.core.timeutil import utc_now as _now
-from chronovisor.research.research_types import EvidenceArtifact
+from chronovisor.search.research_types import EvidenceArtifact
 
 
 def _iso(value: datetime | None = None) -> str:

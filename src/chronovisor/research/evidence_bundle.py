@@ -9,8 +9,8 @@ from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
-from chronovisor.research.research_store import ResearchStore
-from chronovisor.research.research_types import ClaimKind, ClaimStatus, EvidenceArtifact
+from chronovisor.search.research_store import ResearchStore
+from chronovisor.search.research_types import ClaimKind, ClaimStatus, EvidenceArtifact
 
 
 @dataclass(frozen=True)

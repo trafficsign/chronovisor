@@ -29,7 +29,7 @@ def main(argv: list[str] | None = None) -> int:
         "use_llm": payload.get("use_llm") is not False,
     }
     if args.engine == "v2":
-        from chronovisor.research.research_config import load_research_config
+        from chronovisor.search.research_config import load_research_config
 
         config = load_research_config()
         result = run_deep_dive_v2(query, config=config, **options)

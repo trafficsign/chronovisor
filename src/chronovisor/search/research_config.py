@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from chronovisor.core.runtime_config import load_toml_file
-from chronovisor.research.research_types import ResearchBudget
+from chronovisor.search.research_types import ResearchBudget
 
 
 def _int(data: dict[str, Any], key: str, default: int, minimum: int = 0) -> int:

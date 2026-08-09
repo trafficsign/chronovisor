@@ -19,14 +19,14 @@ import httpx
 import zstandard
 
 from chronovisor.core.store import CHRONOVISOR_ROOT
-from chronovisor.research.research_config import WebConfig
 from chronovisor.research.research_security import (
     Resolver,
     external_content_metadata,
     guard_url,
     resolve_host,
 )
-from chronovisor.research.research_store import ResearchStore
+from chronovisor.search.research_config import WebConfig
+from chronovisor.search.research_store import ResearchStore
 
 CACHE_DIR = CHRONOVISOR_ROOT / "runtime" / "research" / "web-cache"
 ALLOWED_MIME = (

@@ -251,14 +251,14 @@ def run_deep_dive_v2(
 ) -> dict[str, Any]:
     """Run the shared research kernel with Wiki-only authority."""
 
-    from chronovisor.research.research_config import load_research_config
     from chronovisor.research.research_orchestrator import (
         DeterministicPlanner,
         LocalPlanner,
         run_research,
     )
-    from chronovisor.research.research_store import ResearchStore
-    from chronovisor.research.research_types import ActionType
+    from chronovisor.search.research_config import load_research_config
+    from chronovisor.search.research_store import ResearchStore
+    from chronovisor.search.research_types import ActionType
 
     selected = config or load_research_config()
     selected = replace(

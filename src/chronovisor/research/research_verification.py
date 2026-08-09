@@ -13,13 +13,13 @@ from typing import Any
 import httpx
 
 from chronovisor.core.research_scheduler import foreground_lane, research_lane
-from chronovisor.research.research_config import ResearchConfig, WebConfig
 from chronovisor.research.research_orchestrator import PlannerResponse, run_research
 from chronovisor.research.research_security import guard_egress_query, guard_url
-from chronovisor.research.research_store import ResearchStore, reduce_events
-from chronovisor.research.research_types import Action, ActionType, parse_action
 from chronovisor.research.web_fetch import fetch_web
 from chronovisor.research.web_provider import HttpSearchProvider, search_web
+from chronovisor.search.research_config import ResearchConfig, WebConfig
+from chronovisor.search.research_store import ResearchStore, reduce_events
+from chronovisor.search.research_types import Action, ActionType, parse_action
 
 
 def _check(name: str, command: str, function: Callable[[], None]) -> dict[str, Any]:

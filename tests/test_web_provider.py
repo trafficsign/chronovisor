@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from chronovisor.research.research_config import WebConfig
 from chronovisor.research.web_provider import (
     FederatedSearchProvider,
     FixtureSearchProvider,
@@ -10,6 +9,7 @@ from chronovisor.research.web_provider import (
     route_source_packs,
     search_web,
 )
+from chronovisor.search.research_config import WebConfig
 
 
 def test_fixture_search_runs_before_live_egress_is_enabled(

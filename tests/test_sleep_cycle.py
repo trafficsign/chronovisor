@@ -321,7 +321,7 @@ def _patch_sleep_dependencies(monkeypatch) -> None:
         lambda **kwargs: {"status": "skipped", "dry_run": kwargs["dry_run"]},
     )
     monkeypatch.setattr(
-        "chronovisor.research.research_consolidation.run_consolidation",
+        "chronovisor.search.research_consolidation.run_consolidation",
         lambda **kwargs: {
             "status": "ok",
             "dry_run": kwargs["dry_run"],

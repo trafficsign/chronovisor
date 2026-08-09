@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from chronovisor.research.research_config import load_research_config
-from chronovisor.research.research_consolidation import run_consolidation
+from chronovisor.search.research_config import load_research_config
+from chronovisor.search.research_consolidation import run_consolidation
 
 
 def test_research_config_defaults_fail_closed(tmp_path) -> None:

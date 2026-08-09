@@ -9,8 +9,8 @@ from chronovisor.research.evidence_bundle import (
     deterministic_citations,
     simple_assess_claims,
 )
-from chronovisor.research.research_store import ResearchStore
-from chronovisor.research.research_types import ClaimKind, ClaimStatus, EvidenceArtifact
+from chronovisor.search.research_store import ResearchStore
+from chronovisor.search.research_types import ClaimKind, ClaimStatus, EvidenceArtifact
 
 
 def _artifact(
@@ -73,7 +73,7 @@ def test_unrelated_negation_does_not_contradict_identifier_claim() -> None:
 
 
 def test_bundle_is_durable_and_rebuildable(tmp_path: Path, monkeypatch) -> None:
-    from chronovisor.research import research_store
+    from chronovisor.search import research_store
 
     monkeypatch.setattr(research_store, "CHRONOVISOR_ROOT", tmp_path / "wiki")
     store = ResearchStore(root=tmp_path / "runtime")

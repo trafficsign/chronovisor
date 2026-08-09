@@ -747,6 +747,20 @@ S_RETIRED_HOST_RECORD_SITE_IDS = (
     "arch:bacea4fae8dbc9711f1567021e49247480cc6c52f7b937815f957b7b1dfc0fda",
     "arch:dd13c44ab8c645e167499f5e11533a93d1e03fdf2aa74cb880e1e39588ca6c54",
 )
+S_RETIRED_RESEARCH_RUNTIME_EDGE_IDS = (
+    "arch:b3853b95a203259460387b8acb89820c7e11b52682f47f7656ee28789b947b98",
+)
+S_RETIRED_RESEARCH_RUNTIME_SITE_IDS = (
+    "arch:164c48eb72fa661245ba9cba7b231af5547026c3816137222263cf2f788b5341",
+    "arch:2b3ce41fc74111ba3d5c7e14b26a8e1ca405c20d42382755680cc334353b9f1b",
+    "arch:717de472ebfa4644653efa578dece9128a7a5ae5d2b846d8d821bee89040c65d",
+    "arch:bf8653e47c245127acb950f5e62158feac9f0ec9df6dc6390b256247b1763aed",
+    "arch:cb6a9206a8731ca909ca23bef851eb68f60f6ed8f9402c339260cf99b7cbbb85",
+    "arch:d5e34cef2fcb37516c0576627bfd464ac42c00c13e664f5ac7c074332e52c033",
+    "arch:de64e28f5cb48f586e993d152f561456baaf3c4cb82a56c80b044f04d94434ab",
+    "arch:dfe4a678d75db08cb7946b49c0c8bb9a8b91dca5156ad938dfe15591844f4a54",
+    "arch:f8e77b3f1a6e731d596e03ee8710e4a61212010e64b1517038e0333d166f03db",
+)
 V_RETIRED_RECALL_SHIM_SITE_IDS = (
     "arch:3896d20fb9ddf2c56d06af026b9b40d6399902891ab291f3a6eba063ba8b4d28",
     "arch:c99c20705c2ffb63854eb252145ab9e7f20ea9b0adb7eef8892e39abb52ceb1c",
@@ -1055,6 +1069,7 @@ RETIREMENT_HISTORY = {
                 *S_RETIRED_FAILURE_SUPERVISOR_EDGE_IDS,
                 *S_RETIRED_EVIDENCE_GROUNDING_EDGE_IDS,
                 *S_RETIRED_HOST_RECORD_EDGE_IDS,
+                *S_RETIRED_RESEARCH_RUNTIME_EDGE_IDS,
                 *V_RETIRED_REMAINING_SHIM_EXCEPTION_IDS,
             )
         )
@@ -1110,6 +1125,7 @@ RETIREMENT_HISTORY = {
                 *S_RETIRED_AGENT_SAVE_SITE_IDS,
                 *S_RETIRED_CODEX_RECORD_SITE_IDS,
                 *S_RETIRED_HOST_RECORD_SITE_IDS,
+                *S_RETIRED_RESEARCH_RUNTIME_SITE_IDS,
                 *V_RETIRED_RECALL_SHIM_SITE_IDS,
                 *V_RETIRED_REMAINING_SHIM_SITE_IDS,
                 *V_RETIRED_DURABLE_MODULE_MAPPING_SITE_IDS,
@@ -1434,6 +1450,7 @@ def _without_persisted_retirement_history(
         + len(S_RETIRED_FAILURE_SUPERVISOR_EDGE_IDS)
         + len(S_RETIRED_EVIDENCE_GROUNDING_EDGE_IDS)
         + len(S_RETIRED_HOST_RECORD_EDGE_IDS)
+        + len(S_RETIRED_RESEARCH_RUNTIME_EDGE_IDS)
         + len(V_RETIRED_REMAINING_SHIM_EXCEPTION_IDS)
     )
     active_counts["by_category"]["dynamic_import"] = (
@@ -1598,7 +1615,7 @@ def test_architecture_fitness_rejects_new_edge_and_scc_growth(
 
     assert report["passed"] is False
     assert report["violations"]["new_edges"] == [["core", "ops"]]
-    assert len(report["violations"]["scc_regressions"][0]) == 11
+    assert len(report["violations"]["scc_regressions"][0]) == 10
 
 
 def test_namespace_package_is_inventoried_and_rejected(
@@ -1862,8 +1879,8 @@ def test_current_exception_ledger_seed_and_schema_inventory_are_exact(
 
     assert detected_ids == ledger_ids == set(seed["exception_semantic_ids"]["active"])
     _assert_exact_retirement_history(architecture, seed)
-    assert len(edge_rows) == current["worktree_architecture"]["edge_count"] == 62
-    assert sum(len(row["sites"]) for row in edge_rows) == len(raw_cross_sites) == 1344
+    assert len(edge_rows) == current["worktree_architecture"]["edge_count"] == 61
+    assert sum(len(row["sites"]) for row in edge_rows) == len(raw_cross_sites) == 1370
     assert {
         field: counts[field]
         for field in (
@@ -1875,15 +1892,15 @@ def test_current_exception_ledger_seed_and_schema_inventory_are_exact(
             "compatibility_contracts",
         )
     } == {
-        "exceptions": 62,
-        "cross_domain_sites": 1344,
+        "exceptions": 61,
+        "cross_domain_sites": 1370,
         "production_to_lab_edges": 0,
         "production_to_lab_static_sites": 0,
         "production_to_lab_dynamic_sites": 0,
         "compatibility_contracts": 51,
     }
     assert counts["by_category"] == {
-        "cross_domain_edge": 62,
+        "cross_domain_edge": 61,
     }
     assert counts["compatibility_by_kind"] == {
         "console_entrypoint": 51,

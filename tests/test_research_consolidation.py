@@ -5,12 +5,12 @@ from pathlib import Path
 
 import pytest
 
-from chronovisor.research.research_config import ResearchConfig
-from chronovisor.research.research_consolidation import (
+from chronovisor.search.research_config import ResearchConfig
+from chronovisor.search.research_consolidation import (
     ALLOWED_OPERATIONS,
     run_consolidation,
 )
-from chronovisor.research.research_store import ResearchStore
+from chronovisor.search.research_store import ResearchStore
 
 
 def _receipt(store: ResearchStore, run_id: str, claim: str) -> None:
@@ -40,7 +40,7 @@ def _config() -> ResearchConfig:
 
 
 def test_receipt_gated_proposal_only_and_latest_wins(tmp_path: Path, monkeypatch) -> None:
-    from chronovisor.research import research_store
+    from chronovisor.search import research_store
 
     monkeypatch.setattr(research_store, "CHRONOVISOR_ROOT", tmp_path / "wiki")
     store = ResearchStore(root=tmp_path / "runs")
@@ -66,7 +66,7 @@ def test_receipt_gated_proposal_only_and_latest_wins(tmp_path: Path, monkeypatch
 
 
 def test_failure_does_not_advance_cursor(tmp_path: Path, monkeypatch) -> None:
-    from chronovisor.research import research_consolidation, research_store
+    from chronovisor.search import research_consolidation, research_store
 
     monkeypatch.setattr(research_store, "CHRONOVISOR_ROOT", tmp_path / "wiki")
     store = ResearchStore(root=tmp_path / "runs")
@@ -89,7 +89,7 @@ def test_failure_does_not_advance_cursor(tmp_path: Path, monkeypatch) -> None:
 
 
 def test_without_receipt_never_runs_even_when_forced(tmp_path: Path, monkeypatch) -> None:
-    from chronovisor.research import research_store
+    from chronovisor.search import research_store
 
     monkeypatch.setattr(research_store, "CHRONOVISOR_ROOT", tmp_path / "wiki")
     store = ResearchStore(root=tmp_path / "runs")

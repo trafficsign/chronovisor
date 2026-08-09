@@ -682,7 +682,7 @@ def ingest_liveness_kpi() -> dict[str, Any]:
 def research_kpi(*, limit: int = 200) -> dict[str, Any]:
     """Bounded summary of durable research traces for dashboard/alerts."""
 
-    from chronovisor.research.research_config import load_research_config
+    from chronovisor.search.research_config import load_research_config
 
     root = CHRONOVISOR_ROOT / "runtime" / "research"
     runs_root = root / "runs"

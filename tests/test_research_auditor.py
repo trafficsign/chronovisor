@@ -4,13 +4,13 @@ from pathlib import Path
 
 from chronovisor.research.evidence_bundle import build_bundle, simple_assess_claims
 from chronovisor.research.research_auditor import audit_research_run
-from chronovisor.research.research_store import ResearchStore
+from chronovisor.search.research_store import ResearchStore
 
 
 def test_auditor_records_missing_evidence_without_mutation(
     tmp_path: Path, monkeypatch
 ) -> None:
-    from chronovisor.research import research_store
+    from chronovisor.search import research_store
 
     monkeypatch.setattr(research_store, "CHRONOVISOR_ROOT", tmp_path / "wiki")
     store = ResearchStore(root=tmp_path / "research")
@@ -32,7 +32,7 @@ def test_auditor_records_missing_evidence_without_mutation(
 def test_web_backed_claim_does_not_report_deep_research_as_avoidable(
     tmp_path: Path, monkeypatch
 ) -> None:
-    from chronovisor.research import research_store
+    from chronovisor.search import research_store
 
     monkeypatch.setattr(research_store, "CHRONOVISOR_ROOT", tmp_path / "wiki")
     store = ResearchStore(root=tmp_path / "research")
@@ -74,7 +74,7 @@ def test_web_backed_claim_does_not_report_deep_research_as_avoidable(
 def test_locally_supported_claim_reports_later_deep_research_as_avoidable(
     tmp_path: Path, monkeypatch
 ) -> None:
-    from chronovisor.research import research_store
+    from chronovisor.search import research_store
 
     monkeypatch.setattr(research_store, "CHRONOVISOR_ROOT", tmp_path / "wiki")
     store = ResearchStore(root=tmp_path / "research")

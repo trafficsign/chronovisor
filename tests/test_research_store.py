@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
-from chronovisor.research.research_store import (
+from chronovisor.search.research_store import (
     ResearchStore,
     compact_event_context,
     reduce_events,

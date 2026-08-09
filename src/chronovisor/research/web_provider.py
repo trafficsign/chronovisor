@@ -19,8 +19,8 @@ import httpx
 
 from chronovisor.core.jsonl_write import append_jsonl_durable
 from chronovisor.core.store import CHRONOVISOR_ROOT
-from chronovisor.research.research_config import WebConfig
 from chronovisor.research.research_security import guard_egress_query, guard_url
+from chronovisor.search.research_config import WebConfig
 
 WEB_TRACE = CHRONOVISOR_ROOT / "runtime" / "research" / "web-egress.jsonl"
 USER_AGENT = "Chronovisor/0.1 (+https://github.com/trafficsign/chronovisor)"

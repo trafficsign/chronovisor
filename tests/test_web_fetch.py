@@ -4,8 +4,8 @@ import gzip
 
 import httpx
 
-from chronovisor.research.research_config import WebConfig
 from chronovisor.research.web_fetch import fetch_web
+from chronovisor.search.research_config import WebConfig
 
 
 def PUBLIC(_host, _port):

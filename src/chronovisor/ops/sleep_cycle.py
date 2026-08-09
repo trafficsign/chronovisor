@@ -968,7 +968,7 @@ def _run_sleep_cycle(
         ),
         max_elapsed_seconds=125,
     )
-    import chronovisor.research.research_consolidation as research_consolidation_ops
+    import chronovisor.search.research_consolidation as research_consolidation_ops
 
     research_consolidation = _run_lane(
         "research_consolidation",

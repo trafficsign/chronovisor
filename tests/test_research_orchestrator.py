@@ -7,15 +7,15 @@ from chronovisor.core.research_scheduler import (
     ResearchLease,
 )
 from chronovisor.research import research_orchestrator
-from chronovisor.research.research_config import CompactionConfig, ResearchConfig
 from chronovisor.research.research_orchestrator import (
     DeterministicPlanner,
     LocalPlanner,
     PlannerResponse,
     ResearchState,
 )
-from chronovisor.research.research_store import ResearchStore
-from chronovisor.research.research_types import ResearchBudget
+from chronovisor.search.research_config import CompactionConfig, ResearchConfig
+from chronovisor.search.research_store import ResearchStore
+from chronovisor.search.research_types import ResearchBudget
 
 
 def _isolate_scheduler(tmp_path, monkeypatch) -> None:

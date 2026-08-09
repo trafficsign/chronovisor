@@ -6,8 +6,8 @@ from pathlib import Path
 from chronovisor.core.runtime_config import DecisionRouterConfig
 from chronovisor.hosts import server
 from chronovisor.research import deep_retrieval
-from chronovisor.research.research_config import ResearchConfig
-from chronovisor.research.research_store import ResearchStore
+from chronovisor.search.research_config import ResearchConfig
+from chronovisor.search.research_store import ResearchStore
 from chronovisor.search.search import ScoredPage
 
 
@@ -135,10 +135,8 @@ def test_chronovisor_jobs_reads_durable_deep_retrieval_job(monkeypatch) -> None:
 
 def test_v2_deep_dive_uses_bounded_wiki_only_kernel(tmp_path, monkeypatch) -> None:
     from chronovisor.core import research_scheduler
-    from chronovisor.research import (
-        research_orchestrator,
-        research_store,
-    )
+    from chronovisor.research import research_orchestrator
+    from chronovisor.search import research_store
 
     scheduler_root = tmp_path / "scheduler"
     monkeypatch.setattr(research_scheduler, "SYNC_DIR", scheduler_root / "sync")

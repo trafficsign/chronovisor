@@ -10,7 +10,7 @@ from chronovisor.decision.local_structured import (
     LocalStructuredSession,
     ValidationIssue,
 )
-from chronovisor.research.research_types import parse_action
+from chronovisor.search.research_types import parse_action
 
 
 def _validate_action(value: Any) -> list[ValidationIssue]:

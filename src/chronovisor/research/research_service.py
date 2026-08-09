@@ -19,10 +19,10 @@ from chronovisor.research.evidence_bundle import (
 )
 from chronovisor.research.research_auditor import audit_research_run
 from chronovisor.research.research_challenge import challenge_bundle
-from chronovisor.research.research_config import ResearchConfig, load_research_config
 from chronovisor.research.research_orchestrator import Planner, run_research
-from chronovisor.research.research_store import ResearchStore
-from chronovisor.research.research_types import BudgetUsage, ClaimStatus
+from chronovisor.search.research_config import ResearchConfig, load_research_config
+from chronovisor.search.research_store import ResearchStore
+from chronovisor.search.research_types import BudgetUsage, ClaimStatus
 
 
 def _usage_from_summary(summary: Mapping[str, Any]) -> BudgetUsage:

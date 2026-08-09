@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from chronovisor.research.research_types import (
+from chronovisor.search.research_types import (
     BudgetUsage,
     ResearchBudget,
     parse_action,
