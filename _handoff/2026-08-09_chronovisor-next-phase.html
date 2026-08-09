@@ -63,7 +63,7 @@ pre{background:#eee;padding:0.8rem 1rem;border-radius:6px;overflow:auto;line-hei
 <h2>Campaign W — 共通 LLM Runtime と Provider 互換化</h2>
 
 <div class="callout">
-<strong>動機:</strong> Chronovisor の同じコアと同じワークフローを、ローカル Ollama でも API キー型 provider でも動かせるようにする。Ollama 経路を OpenAI に置き換えたり二重実装したりするのではなく、既存のローカル最適化を保ったまま、一般的な PC でもローカルモデルなしで主要機能を利用できる構成を追加する。
+<strong>動機:</strong> Chronovisor の同じコアと公開 workflow を、local-only / cloud-only / hybrid の各構成で利用できる共通 runtime に接続する。Ollama 経路を OpenAI に置き換えたり二重実装したりするのではなく、既存のローカル最適化を保ったまま、cloud provider も同じ正規化 contract に参加できるようにする。local-only を唯一の production-supported 構成とし、cloud-only / hybrid は experimental / best-effort とする。
 </div>
 
 <h3>現状</h3>
@@ -81,17 +81,20 @@ pre{background:#eee;padding:0.8rem 1rem;border-radius:6px;overflow:auto;line-hei
           ├─ Ollama native driver
           └─ OpenAI-compatible driver</pre>
 <p>application 側は provider 名で分岐せず、role と必要な capability を runtime に要求する。provider 固有機能は driver の optional capability として隔離し、共通ワークフローの意味論を変えない。</p>
+<p>role に設定した provider / model が失敗しても、別 provider へ暗黙に fallback しない。provider 間の fallback / escalation は、将来導入する場合も明示 policy としてのみ定義する。</p>
 
 <h3>ステップ</h3>
 <ol>
 <li><strong>W1: 共通 runtime contract</strong> — 既存の Ollama facade / transport の上位に、chat / generate / embedding / structured output を正規化する単一 contract を追加する。各 application workflow は provider ではなく role / capability を指定して呼び出す。</li>
-<li><strong>W2: 共通実行規約</strong> — retry / timeout / budget / telemetry / structured output / token usage / error normalization を runtime に集約し、どの driver でも同じ成功・失敗・観測の形式を返す。</li>
+<li><strong>W2: 共通実行規約</strong> — retry / timeout / budget / telemetry / structured output / token usage / error normalization を runtime に集約し、どの driver でも同じ成功・失敗・観測の形式を返す。role に設定された provider / model の失敗時はその失敗を返し、別 provider へ暗黙に fallback しない。</li>
 <li><strong>W3: adapter の並存</strong> — Ollama native driver は <code>/api/generate</code>、<code>/api/chat</code>、<code>/api/embed</code> を使い、calibration / lease / model residency / unload などのローカル固有能力を optional capability として保持する。OpenAI-compatible driver は <code>/v1/chat/completions</code>、<code>/v1/embeddings</code> 等を同じ contract に正規化する。SDK 採用は adapter 内部の実装選択であり、既存 transport の強制置換とはしない。</li>
-<li><strong>W4: role profile 設定</strong> — 正本である <code>~/.chronovisor/config.toml</code> の既存 schema を provider / model profile で最小限拡張し、role ごとに選択できるようにする。同一ワークフローを local-only、API-only、必要な場合は混在構成で実行可能にし、embedding / semantic / rerank 等の必須 capability が API provider または明示設定した別 provider で満たされることを起動時に検証する。</li>
-<li><strong>W5: 段階移行と OSS 最小構成</strong> — 既存 Ollama 経路を維持しながら各 workflow を共通 runtime に接続する。Ollama もローカルモデルもない一般的な PC で、API key と最小設定だけにより ingest / decision / recall / lint / search が現在と同じ主要機能で動く手順と example config を用意する。BM25-only fallback を残す場合は明示的な degraded mode とし、feature parity の受入条件には数えない。</li>
+<li><strong>W4: provider / role profile 設定</strong> — 正本である <code>~/.chronovisor/config.toml</code> の既存 schema を provider / model profile で最小限拡張する。default provider / model と role 単位 override を組み合わせ、local-only / cloud-only / hybrid をすべて第一級の設定として表現できるようにする。embedding / semantic / rerank 等、各 role の必須 capability が設定先 provider / model で満たされることを起動時に検証する。</li>
+<li><strong>W5: 段階移行と公開 workflow</strong> — 既存 Ollama 経路を維持しながら ingest / decision / recall / lint / search を共通 runtime に接続し、各構成の example config と support boundary を文書化する。cloud-only / hybrid は local-only と同品質という未検証の feature parity を保証せず、同じ公開 workflow と正規化 contract を提供する experimental / best-effort 実装として扱う。BM25-only fallback を残す場合は明示的な degraded mode とし、provider 障害時の暗黙 fallback には使わない。</li>
+<li><strong>W6: 障害の正規化と可視化</strong> — provider 失敗を共通エラーへ正規化し、Dashboard に role、設定済み provider / model、category（401 / 429 / 5xx / timeout 等）、last failure time、retry count、request ID（取得できる場合）を表示する。API key と prompt 本文は Dashboard、ログ、telemetry のいずれにも表示・記録しない。</li>
+<li><strong>W7: validation と support boundary</strong> — full 実機 E2E と品質 eval は local-only だけを必須とする。cloud-only / hybrid の必須検証は、ネットワーク、API key、課金を不要にした offline fake HTTP adapter contract test と routing test とし、最低限 chat success、structured JSON、<code>finish_reason</code> / <code>usage</code> 欠落、401 / 429 / 5xx / timeout、embedding の順序・件数、role routing、capability validation、no silent fallback を網羅する。必要な workflow には fake runtime による smoke test を追加する。実 OpenAI 等への live smoke は credential-gated の任意 manual / release check とし、Campaign W の完了条件には含めないため、ユーザーに必須の API 費用は発生しない。</li>
 </ol>
 
-<div class="exit"><strong>Exit Criteria:</strong> application workflow に provider 分岐がなく、同じ runtime contract を経由すること。Ollama / ローカルモデルなし + API key のみでも必要な embedding / semantic / rerank capability を満たし、主要機能が feature parity で動作すること。既存 Ollama native 経路の回帰テストに加え、両 adapter の contract test と ingest / decision / recall / lint / search の workflow parity test matrix が green であること。</div>
+<div class="exit"><strong>Exit Criteria:</strong> application workflow に provider 分岐がなく、すべて同じ runtime contract を経由すること。default provider / model と role 単位 override により local-only / cloud-only / hybrid を設定でき、起動時 capability validation と no silent fallback が成立すること。唯一の production-supported 構成である local-only は既存 Ollama native 経路の回帰、full 実機 E2E、品質 eval が green であること。experimental / best-effort の cloud-only / hybrid は、同じ公開 workflow と正規化 contract を提供し、offline fake HTTP adapter contract test、routing test、必要な fake runtime workflow smoke が green であること。provider 障害の共通エラーと安全な Dashboard 表示が検証され、API key と prompt 本文を表示・記録しないこと。credential-gated の実 provider live smoke と cloud / local の未検証な feature parity は完了条件に含めないこと。</div>
 </section>
 
 <!-- ============================================================ -->
