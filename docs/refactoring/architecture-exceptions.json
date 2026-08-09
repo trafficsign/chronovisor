@@ -1,14 +1,14 @@
 {
   "schema_version": 2,
   "source_baseline_head": "d404a6b20d00e3bcd1d4cdb89edfa5a718c51833",
-  "baseline_sha256": "6c1893575112b1ae0e47d56e2c0dd7827fb0c4b3e987f3400073a3bdfc8a82f9",
+  "baseline_sha256": "9b6396249069bbf452b23dd2657ea6bda6460fbfeb99548f8972e92636f3c72f",
   "semantic_identity": "cross-domain edges use category+source_package+target_package; statement exceptions use category+source_package+source_module+scope_kind+scope+statement_kind+target_package+target_module+symbols+occurrence; source line is diagnostic and normalized statement content is verified independently",
   "counts": {
     "exceptions": 44,
     "by_category": {
       "cross_domain_edge": 44
     },
-    "cross_domain_sites": 1378,
+    "cross_domain_sites": 1377,
     "production_to_lab_edges": 0,
     "production_to_lab_static_sites": 0,
     "production_to_lab_dynamic_sites": 0,
@@ -15659,20 +15659,6 @@
           "content_sha256": "7fc02adf1940bdc9769d63293f420dededa1cc1c38283000f0f8081a877cacb8",
           "occurrence": 1,
           "line": 33
-        },
-        {
-          "semantic_id": "arch:68ae9b141c12b5af9ccde4bddb0e067f89ce70b4c5c7dd1f043b1120857b917a",
-          "source_module": "chronovisor.ops.runtime_status",
-          "scope_kind": "module",
-          "scope": "<module>",
-          "statement_kind": "from",
-          "target_module": "chronovisor.core",
-          "symbols": [
-            "runtime_status"
-          ],
-          "content_sha256": "003cf0a68dd16b53f65ec9b22687a2f371cc98a2551fddac27ab5332ee9fae60",
-          "occurrence": 1,
-          "line": 7
         },
         {
           "semantic_id": "arch:6abea93531746954bc3f07972aed6fa28f360a625be3d7c85d4a83eec67304da",

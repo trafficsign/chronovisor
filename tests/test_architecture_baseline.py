@@ -419,6 +419,7 @@ S_RETIRED_RUNTIME_STATUS_SITE_IDS = (
     "arch:33693d046af1e9452717148d0afeb58f0b8dedb703d56019394ebf928bb1835d",
     "arch:450532c6fe5094d19e88b89e02a307748d27e45390eed9daca42ab76ef0612a4",
     "arch:592d921217d005a676c2a4bcda2feff9a39bc6934bb8ae989b857f87bd04bcab",
+    "arch:68ae9b141c12b5af9ccde4bddb0e067f89ce70b4c5c7dd1f043b1120857b917a",
     "arch:851b27f9c6e1304d27c055cf33bb02b704011bd84e513adbf556ad1a081fd3f1",
     "arch:940f800b3795904f65104fb83f395da685713348242c5ba8106859bc4e64783b",
     "arch:9db6f1d2281c060aad6183398164f0e43710d010bf8e325b0e67bc9efb5c7767",
@@ -2553,7 +2554,7 @@ def test_current_exception_ledger_seed_and_schema_inventory_are_exact(
     assert detected_ids == ledger_ids == set(seed["exception_semantic_ids"]["active"])
     _assert_exact_retirement_history(architecture, seed)
     assert len(edge_rows) == current["worktree_architecture"]["edge_count"] == 44
-    assert sum(len(row["sites"]) for row in edge_rows) == len(raw_cross_sites) == 1378
+    assert sum(len(row["sites"]) for row in edge_rows) == len(raw_cross_sites) == 1377
     assert {
         field: counts[field]
         for field in (
@@ -2566,7 +2567,7 @@ def test_current_exception_ledger_seed_and_schema_inventory_are_exact(
         )
     } == {
         "exceptions": 44,
-        "cross_domain_sites": 1378,
+        "cross_domain_sites": 1377,
         "production_to_lab_edges": 0,
         "production_to_lab_static_sites": 0,
         "production_to_lab_dynamic_sites": 0,

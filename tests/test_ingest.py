@@ -560,8 +560,8 @@ def test_generate_one_failure_logs_are_confined_to_isolated_wiki(
     monkeypatch: pytest.MonkeyPatch,
     isolated_wiki: Path,
 ) -> None:
+    from chronovisor.core import runtime_status
     from chronovisor.ingest import ingest
-    from chronovisor.ops import runtime_status
 
     def fake_generate(_prompt: str, **_kwargs) -> str:
         raise RuntimeError("isolated transport sentinel")
@@ -891,9 +891,15 @@ def isolated_wiki(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     for d in (pages, raw, system, index_dir):
         d.mkdir(parents=True, exist_ok=True)
 
-    from chronovisor.core import index_store, ollama, page_mutation, search, store
+    from chronovisor.core import (
+        index_store,
+        ollama,
+        page_mutation,
+        runtime_status,
+        search,
+        store,
+    )
     from chronovisor.ingest import ingest, orchestrator
-    from chronovisor.ops import runtime_status
 
     monkeypatch.setattr(store, "CHRONOVISOR_ROOT", chronovisor_root)
     monkeypatch.setattr(store, "PAGES_DIR", pages)
@@ -6423,6 +6429,7 @@ class TestOrchestrator:
         isolated_wiki: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        from chronovisor.core import runtime_status
         from chronovisor.core.runtime_config import DecisionRouterConfig
         from chronovisor.ingest import (
             failure_supervisor,
@@ -6430,7 +6437,6 @@ class TestOrchestrator:
             ingest_readback,
             orchestrator,
         )
-        from chronovisor.ops import runtime_status
 
         raw_path = isolated_wiki / "raw" / "eight-shard-continuation.md"
         raw_content = "Eight grounded memories require bounded local review."
@@ -7486,9 +7492,9 @@ class TestOrchestrator:
     def test_run_pending_ingest_does_not_turn_global_authority_outage_into_raw_failures(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        from chronovisor.core import runtime_status
         from chronovisor.ingest import ingest as ingest_mod
         from chronovisor.ingest import orchestrator
-        from chronovisor.ops import runtime_status
 
         raw_path = isolated_wiki / "raw" / "authority-blocked.md"
         raw_path.write_text("valid immutable source", encoding="utf-8")

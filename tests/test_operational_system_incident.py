@@ -746,10 +746,10 @@ def test_terminal_routine_self_heal_routes_through_incident_supervisor(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor.core import store
+    from chronovisor.core import runtime_status, store
     from chronovisor.decision.local_repair import LocalRepairDecision
     from chronovisor.ingest import self_heal
-    from chronovisor.ops import background_jobs, runtime_status
+    from chronovisor.ops import background_jobs
 
     chronovisor_root = tmp_path / "wiki"
     monkeypatch.setattr(store, "CHRONOVISOR_ROOT", chronovisor_root)

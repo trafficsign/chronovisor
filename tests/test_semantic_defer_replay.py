@@ -60,10 +60,9 @@ def test_auto_signals_skip_semantic_defer_until_authority_artifact_changes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor.core import runtime_config, store
+    from chronovisor.core import runtime_config, runtime_status, store
     from chronovisor.decision import decision_router
     from chronovisor.ingest import failure_supervisor
-    from chronovisor.ops import runtime_status
 
     paths = _isolate_paths(tmp_path, monkeypatch)
     monkeypatch.setattr(store, "CHRONOVISOR_ROOT", tmp_path)

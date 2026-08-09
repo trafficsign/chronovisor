@@ -14,9 +14,8 @@ def semantic_defer_wiki(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> tuple[Path, Path]:
-    from chronovisor.core import runtime_config, store
+    from chronovisor.core import runtime_config, runtime_status, store
     from chronovisor.decision import decision_router
-    from chronovisor.ops import runtime_status
 
     chronovisor_root = tmp_path / "wiki"
     raw_dir = chronovisor_root / "raw"

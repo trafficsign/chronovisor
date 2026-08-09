@@ -4,12 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from chronovisor.core import runtime_status as core_runtime_status
-from chronovisor.ops import runtime_status
-
-
-def test_ops_module_is_core_module_alias() -> None:
-    assert runtime_status is core_runtime_status
+from chronovisor.core import runtime_status
 
 
 def patch_runtime(tmp_path: Path, monkeypatch) -> Path:

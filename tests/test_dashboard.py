@@ -12,10 +12,11 @@ from types import SimpleNamespace
 
 import pytest
 
+from chronovisor.core import runtime_status
 from chronovisor.core.durable_state import write_sealed_json
 from chronovisor.core.runtime_config import SearchEmbeddingConfig
 from chronovisor.ingest import orchestrator
-from chronovisor.ops import dashboard, runtime_status
+from chronovisor.ops import dashboard
 
 
 @pytest.fixture(autouse=True)

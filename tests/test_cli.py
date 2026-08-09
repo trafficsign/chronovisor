@@ -8,10 +8,9 @@ from pathlib import Path
 
 import pytest
 
-from chronovisor.core import runtime_config, store
+from chronovisor.core import runtime_config, runtime_status, store
 from chronovisor.core.durable_state import write_sealed_json
 from chronovisor.hosts import cli
-from chronovisor.ops import runtime_status
 from chronovisor.recall import recall_runtime
 
 

@@ -482,10 +482,10 @@ def test_snapshot_separates_semantic_and_operational_holds_once(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor.core import runtime_config
+    from chronovisor.core import runtime_config, runtime_status
     from chronovisor.decision import decision_policy
     from chronovisor.ingest import orchestrator
-    from chronovisor.ops import dashboard, runtime_status
+    from chronovisor.ops import dashboard
 
     chronovisor_root = tmp_path / "wiki"
     raw_dir = chronovisor_root / "raw"
@@ -643,14 +643,13 @@ def test_orchestrator_reports_terminal_semantic_defer_without_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor.core import jobs, runtime_config
+    from chronovisor.core import jobs, runtime_config, runtime_status
     from chronovisor.ingest import (
         failure_supervisor,
         ingest,
         orchestrator,
         raw_semantic_projection,
     )
-    from chronovisor.ops import runtime_status
 
     chronovisor_root = tmp_path / "wiki"
     raw_dir = chronovisor_root / "raw"
