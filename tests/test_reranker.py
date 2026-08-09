@@ -3,10 +3,10 @@ from __future__ import annotations
 import json
 import threading
 
+from chronovisor.core import reranker
+from chronovisor.core.reranker import RerankOutcome, rerank_results
 from chronovisor.core.runtime_config import RerankerConfig
 from chronovisor.hosts import server
-from chronovisor.search import reranker
-from chronovisor.search.reranker import RerankOutcome, rerank_results
 from chronovisor.search.search import ScoredPage
 
 
@@ -40,7 +40,7 @@ def test_rerank_results_applies_scores_without_touching_tail(monkeypatch) -> Non
 
         return score
 
-    monkeypatch.setattr(reranker, "_score_fn", fake_score_fn)
+    monkeypatch.setattr(reranker, "score_fn", fake_score_fn)
     monkeypatch.setattr(reranker, "find_page", lambda _page_id: None)
 
     outcome = rerank_results(
@@ -76,7 +76,7 @@ def test_rerank_results_rejects_partial_score_vectors(monkeypatch) -> None:
     monkeypatch.setattr(reranker, "find_page", lambda _page_id: None)
     monkeypatch.setattr(
         reranker,
-        "_score_fn",
+        "score_fn",
         lambda _config: lambda _query, _passages, _cfg: [0.9],
     )
 

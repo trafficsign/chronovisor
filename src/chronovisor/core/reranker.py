@@ -1,4 +1,4 @@
-"""Optional cross-encoder reranking for interactive MCP search."""
+"""Core cross-encoder reranking for interactive MCP search."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from chronovisor.core.runtime_config import RerankerConfig, load_reranker_config
 from chronovisor.core.search_types import ScoredPage
 from chronovisor.core.store import find_page
 
-_FRONTMATTER_RE = re.compile(r"^---\n.*?\n---\n?", re.DOTALL)
+FRONTMATTER_RE = re.compile(r"^---\n.*?\n---\n?", re.DOTALL)
 _MODEL_CACHE: dict[tuple[str, str, str], Any] = {}
 _MODEL_LOCK = threading.RLock()
 _WARMUP_LOCK = threading.Lock()
@@ -45,7 +45,7 @@ def _candidate_text(page: ScoredPage, *, max_chars: int = 2400) -> str:
             content = path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
             content = ""
-        body = _FRONTMATTER_RE.sub("", content).strip()
+        body = FRONTMATTER_RE.sub("", content).strip()
     if page.snippet:
         body = f"{page.snippet}\n\n{body}"
     return f"{page.title}\n\n{body[:max_chars]}".strip()
@@ -139,7 +139,7 @@ def _flagembedding_scores(
     query: str, passages: list[str], config: RerankerConfig
 ) -> list[float]:
     try:
-        from FlagEmbedding import FlagReranker
+        from FlagEmbedding import FlagReranker  # type: ignore[import-not-found]
     except Exception as exc:  # pragma: no cover - exercised via missing-dep tests
         raise RuntimeError(f"FlagEmbedding backend unavailable: {exc}") from exc
 
@@ -165,7 +165,7 @@ def _flagembedding_scores(
     return [float(score) for score in raw_scores]
 
 
-def _score_fn(
+def score_fn(
     config: RerankerConfig,
 ) -> Callable[[str, list[str], RerankerConfig], list[float]]:
     backend = config.backend.lower()
@@ -184,7 +184,7 @@ def warm_reranker(config: RerankerConfig | None = None) -> dict[str, Any]:
         return {"status": "disabled", "reason": "config_disabled"}
     started = time.perf_counter()
     try:
-        scores = _score_fn(cfg)("reranker warmup", ["reranker warmup"], cfg)
+        scores = score_fn(cfg)("reranker warmup", ["reranker warmup"], cfg)
     except Exception as exc:
         return {
             "status": "unavailable",
@@ -359,7 +359,7 @@ def rerank_results(
     passages = [_candidate_text(page) for page in head]
     started = time.perf_counter()
     try:
-        scores = _score_fn(cfg)(query, passages, cfg)
+        scores = score_fn(cfg)(query, passages, cfg)
     except Exception as exc:
         return RerankOutcome(
             candidates,

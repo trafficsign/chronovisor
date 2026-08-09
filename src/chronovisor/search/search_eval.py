@@ -26,7 +26,17 @@ from chronovisor.core.canonical_json import (
     canonical_json_sha256_stringifying as _canonical_json_sha256,
 )
 from chronovisor.core.feedback_ledger import active_feedback_rows
+from chronovisor.core.negative_feedback import apply_penalties, penalties_for_query
 from chronovisor.core.page_mutation import decision_authority_lock
+from chronovisor.core.pipeline import (
+    PipelineConfig,
+    PipelineDependencies,
+    apply_negative_feedback_stage,
+    apply_rerank_stage,
+    production_pipeline_config,
+    run_search_pipeline,
+)
+from chronovisor.core.reranker import rerank_results
 from chronovisor.core.runtime_config import (
     load_negative_feedback_config,
     load_reranker_config,
@@ -47,16 +57,6 @@ from chronovisor.decision.semantic_hold import (
     persisted_semantic_no_quorum_hold,
     semantic_no_quorum_hold_error,
 )
-from chronovisor.search.negative_feedback import apply_penalties, penalties_for_query
-from chronovisor.search.pipeline import (
-    PipelineConfig,
-    PipelineDependencies,
-    apply_negative_feedback_stage,
-    apply_rerank_stage,
-    production_pipeline_config,
-    run_search_pipeline,
-)
-from chronovisor.search.reranker import rerank_results
 from chronovisor.search.search import (
     ACTIVE_SEARCH_POLICY_FILE,
     apply_filters,
@@ -1145,7 +1145,7 @@ def _eval_rerank_results(
 
     if config.service.enabled and config.service.mode in {"shadow", "canary", "on"}:
         try:
-            from chronovisor.search import reranker_client
+            from chronovisor.core import reranker_client
 
             return reranker_client.rerank(
                 query,

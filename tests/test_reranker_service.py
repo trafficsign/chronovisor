@@ -7,9 +7,10 @@ from pathlib import Path
 
 import pytest
 
+from chronovisor.core import reranker_client
 from chronovisor.core.runtime_config import RerankerConfig, RerankerServiceConfig
 from chronovisor.core.search_types import ScoredPage
-from chronovisor.search import reranker_client, reranker_service
+from chronovisor.search import reranker_service
 
 
 def page(page_id: str, score: float = 1.0) -> ScoredPage:

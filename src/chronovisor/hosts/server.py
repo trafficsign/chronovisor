@@ -863,9 +863,9 @@ def chronovisor_search(
         session_id: Optional session id for recall pull feedback.
         decision_id: Optional automatic-Recall decision id for turn tracing.
     """
+    from chronovisor.core.pipeline import apply_rerank_stage
+    from chronovisor.core.reranker import rerank_results
     from chronovisor.core.runtime_config import load_reranker_config
-    from chronovisor.search.pipeline import apply_rerank_stage
-    from chronovisor.search.reranker import rerank_results
     from chronovisor.search.search import last_search_trace
     from chronovisor.search.search import search as run_search
 
@@ -1625,7 +1625,7 @@ def main():
     # serializes a truly immediate search against the same model instance.
     reranker_warmup = None
     try:
-        from chronovisor.search.reranker import start_reranker_warmup
+        from chronovisor.core.reranker import start_reranker_warmup
 
         reranker_warmup = start_reranker_warmup()
     except Exception:

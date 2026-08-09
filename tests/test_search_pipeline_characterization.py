@@ -4,10 +4,10 @@ from pathlib import Path
 
 import pytest
 
+from chronovisor.core import pipeline as pipeline_mod
+from chronovisor.core.reranker import RerankOutcome
 from chronovisor.core.runtime_config import NegativeFeedbackConfig, RerankerConfig
-from chronovisor.search import pipeline as pipeline_mod
 from chronovisor.search import search, search_eval
-from chronovisor.search.reranker import RerankOutcome
 from chronovisor.search.search import ScoredPage
 
 

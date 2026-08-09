@@ -8,7 +8,7 @@ import time
 from dataclasses import dataclass, replace
 from typing import Any
 
-from chronovisor.core import ollama
+from chronovisor.core import ollama, reranker_client
 from chronovisor.core.runtime_config import load_reranker_config
 from chronovisor.core.search_types import tokenize
 from chronovisor.decision.local_structured import ChatRequest, LocalStructuredSession
@@ -18,7 +18,6 @@ from chronovisor.recall.evidence_certificate import (
     certify_candidate,
 )
 from chronovisor.recall.rubric_calibration import load_active_rubric
-from chronovisor.search import reranker_client
 
 
 @dataclass(frozen=True)

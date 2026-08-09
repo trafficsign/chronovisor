@@ -1,4 +1,4 @@
-"""Shared search pipeline orchestration."""
+"""Shared core search pipeline orchestration."""
 
 from __future__ import annotations
 

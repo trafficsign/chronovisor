@@ -16,6 +16,13 @@ from pathlib import Path
 from typing import Any
 
 from chronovisor.core.frontmatter import parse as parse_frontmatter
+from chronovisor.core.lexical_index import LexicalIndex
+from chronovisor.core.negative_feedback import apply_penalties, penalties_for_query
+from chronovisor.core.pipeline import (
+    PipelineDependencies,
+    production_pipeline_config,
+    run_search_pipeline,
+)
 from chronovisor.core.runtime_config import (
     DEFAULT_EMBEDDING_MODEL,
     load_embedding_config,
@@ -29,13 +36,6 @@ from chronovisor.core.store import (
     SYSTEM_DIR,
     all_pages,
     page_id_from_path,
-)
-from chronovisor.search.lexical_index import LexicalIndex
-from chronovisor.search.negative_feedback import apply_penalties, penalties_for_query
-from chronovisor.search.pipeline import (
-    PipelineDependencies,
-    production_pipeline_config,
-    run_search_pipeline,
 )
 
 

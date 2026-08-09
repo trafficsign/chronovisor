@@ -18,6 +18,15 @@ from typing import Any
 
 from chronovisor.core.link_fix import atomic_write
 from chronovisor.core.ollama import model_activity
+from chronovisor.core.reranker import (
+    FRONTMATTER_RE as _FRONTMATTER_RE,
+)
+from chronovisor.core.reranker import (
+    score_fn as _score_fn,
+)
+from chronovisor.core.reranker import (
+    warm_reranker,
+)
 from chronovisor.core.runtime_config import (
     RerankerConfig,
     load_reranker_config,
@@ -25,7 +34,6 @@ from chronovisor.core.runtime_config import (
 )
 from chronovisor.core.store import CHRONOVISOR_ROOT, find_page
 from chronovisor.search.accelerator_lease import accelerator_lease
-from chronovisor.search.reranker import _FRONTMATTER_RE, _score_fn, warm_reranker
 
 SERVICE_STATUS_FILE = CHRONOVISOR_ROOT / "runtime" / "reranker-service-status.json"
 PASSAGE_CACHE_SIZE = 512
@@ -296,7 +304,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "status":
         payload = _read_status()
     else:
-        from chronovisor.search import reranker_client
+        from chronovisor.core import reranker_client
 
         try:
             payload = (

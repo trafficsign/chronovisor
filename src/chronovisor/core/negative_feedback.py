@@ -1,4 +1,4 @@
-"""Query-conditioned negative feedback penalties for search ranking.
+"""Query-conditioned negative feedback penalties for core search ranking.
 
 Recall feedback already records pages that were injected for a prompt and then
 ignored (``injection_ignored``), explicitly flagged (``false-positive``), or
@@ -20,10 +20,10 @@ import hashlib
 import json
 import os
 import threading
-from collections import Counter
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any, cast
 
 from chronovisor.core import feedback_ledger
 from chronovisor.core.feedback_ledger import trusted_negative_feedback_rows
@@ -59,7 +59,7 @@ class _FeedbackEntry:
 
 @dataclass
 class _Cache:
-    key: tuple | None = None
+    key: tuple[object, ...] | None = None
     entries: list[_FeedbackEntry] = field(default_factory=list)
 
 
@@ -234,7 +234,7 @@ def _load_entries(config: NegativeFeedbackConfig) -> list[_FeedbackEntry]:
         stat = path.stat()
     except OSError:
         return []
-    cache_key = (
+    cache_key: tuple[object, ...] = (
         str(path),
         stat.st_mtime_ns,
         stat.st_size,
@@ -526,7 +526,7 @@ def contextual_negative_trace(
 
     trace: dict[str, dict[str, object]] = {}
     for page_id, matches in matched_entries.items():
-        token_weights: Counter[str] = Counter()
+        token_weights: dict[str, float] = {}
         strongest_jaccard = 0.0
         newest_ts: datetime | None = None
         evidence_kinds: set[str] = set()
@@ -536,9 +536,9 @@ def contextual_negative_trace(
             if _ts_rank(entry.ts) > _ts_rank(newest_ts):
                 newest_ts = entry.ts
             for token in entry.tokens:
-                token_weights[token] += jaccard
+                token_weights[token] = token_weights.get(token, 0.0) + jaccard
         centroid_tokens = frozenset(
-            token for token, _weight in token_weights.most_common(48)
+            sorted(token_weights, key=token_weights.__getitem__, reverse=True)[:48]
         )
         centroid_union = len(query_tokens | centroid_tokens)
         centroid_similarity = (
@@ -576,7 +576,9 @@ def contextual_negative_trace(
                 protected[page_id] = (jaccard, entry.ts)
     for page_id, (pos_jaccard, positive_ts) in protected.items():
         row = trace.get(page_id)
-        penalty = float(row.get("penalty") or 0.0) if row else None
+        penalty = (
+            float(cast(Any, row.get("penalty") or 0.0)) if row else None
+        )
         confirmed_ts = newest_confirmed_ignored.get(page_id)
         confirmed_is_newer = page_id in newest_confirmed_ignored and _ts_rank(
             confirmed_ts
@@ -597,12 +599,14 @@ def penalties_for_query(
     """Return strong contextual penalties only; never infer from exposure."""
 
     return {
-        page_id: float(row["penalty"])
+        page_id: float(cast(Any, row["penalty"]))
         for page_id, row in contextual_negative_trace(query, config).items()
     }
 
 
-def apply_penalties(results, penalties: dict[str, float]):
+def apply_penalties(
+    results: list[ScoredPage], penalties: dict[str, float]
+) -> list[ScoredPage]:
     """Demote penalized pages by scaling their fused score, then re-sort."""
     if not penalties:
         return results

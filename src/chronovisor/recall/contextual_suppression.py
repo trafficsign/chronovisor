@@ -6,9 +6,9 @@ import math
 from typing import Any
 
 from chronovisor.core.index_store import get_store
+from chronovisor.core.negative_feedback import contextual_negative_trace
 from chronovisor.core.runtime_config import load_negative_feedback_config
 from chronovisor.core.search_types import tokenize
-from chronovisor.search.negative_feedback import contextual_negative_trace
 
 
 def _coverage(query_tokens: set[str], text: str) -> float:

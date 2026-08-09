@@ -1,4 +1,4 @@
-"""Persistent inverted-BM25 and exact-anchor retrieval.
+"""Core persistent inverted-BM25 and exact-anchor retrieval.
 
 Pages remain the source of truth.  This SQLite database is a disposable,
 incrementally refreshed search projection. Japanese text uses Chronovisor's
@@ -16,6 +16,7 @@ import time
 from collections import Counter
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 from chronovisor.core.frontmatter import parse as parse_frontmatter
 from chronovisor.core.search_types import ScoredPage, tokenize
@@ -66,7 +67,7 @@ def _anchor_terms(
     page_id: str,
     title: str,
     folder: str,
-    frontmatter: dict,
+    frontmatter: dict[str, Any],
 ) -> dict[str, float]:
     weighted: dict[str, float] = {}
 
