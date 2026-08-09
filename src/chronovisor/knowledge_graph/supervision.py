@@ -8,7 +8,7 @@ from typing import Any
 
 from chronovisor.core.durable_state import read_sealed_json
 from chronovisor.core.jsonl import read_jsonl
-from chronovisor.knowledge_graph.store import KnowledgeGraphStore
+from chronovisor.core.knowledge_graph_store import KnowledgeGraphStore
 
 
 def advance_used_relations(

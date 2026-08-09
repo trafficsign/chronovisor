@@ -1,4 +1,4 @@
-"""Reusable typed graph-neighbor generation for Search and Recall Field."""
+"""Core typed graph-neighbor generation for Search and Recall Field."""
 
 from __future__ import annotations
 
@@ -136,7 +136,7 @@ def typed_neighbors(
 
     if include_typed_relations:
         try:
-            from chronovisor.knowledge_graph.retrieval import (
+            from chronovisor.core.knowledge_graph_retrieval import (
                 entity_merge_neighbors,
                 relation_neighbors,
             )

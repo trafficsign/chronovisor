@@ -1,4 +1,4 @@
-"""Versioned, privacy-safe contracts for the typed graph data plane."""
+"""Core versioned, privacy-safe contracts for the typed graph data plane."""
 
 from __future__ import annotations
 

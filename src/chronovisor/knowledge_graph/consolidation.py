@@ -11,14 +11,14 @@ from typing import Any
 
 from chronovisor.core.durable_state import read_sealed_json
 from chronovisor.core.jsonl_write import append_jsonl_durable
+from chronovisor.core.knowledge_graph_schema import sha256
+from chronovisor.core.knowledge_graph_store import KnowledgeGraphStore
 from chronovisor.core.store import CHRONOVISOR_ROOT
 from chronovisor.decision.graph_decisions import (
     ENTITY_MERGE_VERIFICATION_SCHEMA,
     build_entity_merge_verification_prompt,
 )
 from chronovisor.knowledge_graph.consensus import _router_for_producer
-from chronovisor.knowledge_graph.schema import sha256
-from chronovisor.knowledge_graph.store import KnowledgeGraphStore
 
 
 def normalize_mention(value: str) -> str:

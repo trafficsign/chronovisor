@@ -1319,7 +1319,9 @@ def search_candidates(
             query_plan=str(actual_trace.get("query_plan") or ""),
         )
         try:
-            from chronovisor.knowledge_graph.retrieval import shadow_candidate_paths
+            from chronovisor.core.knowledge_graph_retrieval import (
+                shadow_candidate_paths,
+            )
 
             shadow_paths = shadow_candidate_paths(
                 [str(result.page_id) for result in results[:20]], query=query

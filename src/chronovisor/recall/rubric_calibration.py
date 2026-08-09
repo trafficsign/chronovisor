@@ -19,6 +19,7 @@ from chronovisor.core.durable_state import (
     write_sealed_json,
 )
 from chronovisor.core.jsonl_write import append_jsonl_durable
+from chronovisor.core.knowledge_graph_schema import sha256
 from chronovisor.core.runtime_config import load_decision_router_config
 from chronovisor.core.store import CHRONOVISOR_ROOT
 from chronovisor.decision.graph_decisions import (
@@ -29,7 +30,6 @@ from chronovisor.decision.graph_decisions import (
 )
 from chronovisor.decision.local_structured import LocalStructuredSession
 from chronovisor.knowledge_graph.consensus import router_for_producer
-from chronovisor.knowledge_graph.schema import sha256
 
 RUBRIC_ROOT = CHRONOVISOR_ROOT / "runtime" / "recall-rubric"
 MIN_RUBRIC_SESSIONS = 5

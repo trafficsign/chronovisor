@@ -10,15 +10,36 @@ from types import SimpleNamespace
 import pytest
 
 from chronovisor.core.durable_state import DurableStateError, read_sealed_json
+from chronovisor.core.knowledge_graph_config import (
+    GraphRetrievalConfig,
+    KnowledgeGraphConfig,
+    load_config,
+)
+from chronovisor.core.knowledge_graph_retrieval import (
+    community_candidates,
+    entity_merge_neighbors,
+    relation_neighbors,
+    trace_paths,
+)
+from chronovisor.core.knowledge_graph_rollout import (
+    CANARY_SAMPLE_UNIT,
+    advance_rollout,
+    applied_canary_session_count,
+    rollback,
+)
+from chronovisor.core.knowledge_graph_schema import (
+    ConsensusReceipt,
+    ConsensusVote,
+    EvidenceRef,
+    RelationRecord,
+    relation_id,
+    sha256,
+)
+from chronovisor.core.knowledge_graph_store import KnowledgeGraphStore
 from chronovisor.knowledge_graph.builder import run_builder_cycle
 from chronovisor.knowledge_graph.communities import (
     build_communities,
     summarize_communities,
-)
-from chronovisor.knowledge_graph.config import (
-    GraphRetrievalConfig,
-    KnowledgeGraphConfig,
-    load_config,
 )
 from chronovisor.knowledge_graph.consensus import verify_pending_relations
 from chronovisor.knowledge_graph.consolidation import (
@@ -36,27 +57,6 @@ from chronovisor.knowledge_graph.evaluation import (
     run_evaluation_cycle,
     validate_baseline,
 )
-from chronovisor.knowledge_graph.retrieval import (
-    community_candidates,
-    entity_merge_neighbors,
-    relation_neighbors,
-    trace_paths,
-)
-from chronovisor.knowledge_graph.rollout import (
-    CANARY_SAMPLE_UNIT,
-    advance_rollout,
-    applied_canary_session_count,
-    rollback,
-)
-from chronovisor.knowledge_graph.schema import (
-    ConsensusReceipt,
-    ConsensusVote,
-    EvidenceRef,
-    RelationRecord,
-    relation_id,
-    sha256,
-)
-from chronovisor.knowledge_graph.store import KnowledgeGraphStore
 from chronovisor.knowledge_graph.supervision import (
     advance_used_entities,
     promote_authoritative_entities,

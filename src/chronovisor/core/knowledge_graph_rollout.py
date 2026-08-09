@@ -1,4 +1,4 @@
-"""Sealed candidate/canary rollout with automatic fail-closed rollback."""
+"""Core candidate/canary rollout with automatic fail-closed rollback."""
 
 from __future__ import annotations
 

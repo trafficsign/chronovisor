@@ -15,9 +15,9 @@ from typing import Any
 
 from chronovisor.core.durable_state import DurableStateError, read_sealed_json
 from chronovisor.core.frontmatter import parse as parse_frontmatter
+from chronovisor.core.knowledge_graph_store import KnowledgeGraphStore
 from chronovisor.core.link_fix import extract_targets
 from chronovisor.core.raw_segment import RawSegmentCommit, RawSegmentCorrupt
-from chronovisor.knowledge_graph.store import KnowledgeGraphStore
 from chronovisor.ops.cortex_stream import (
     websocket_accept as websocket_accept,
 )

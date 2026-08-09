@@ -11,10 +11,14 @@ from time import monotonic
 from typing import Any
 
 from chronovisor.core.durable_state import read_sealed_json
+from chronovisor.core.knowledge_graph_config import KnowledgeGraphConfig
+from chronovisor.core.knowledge_graph_schema import (
+    CommunityRecord,
+    RelationRecord,
+    sha256,
+)
+from chronovisor.core.knowledge_graph_store import KnowledgeGraphStore
 from chronovisor.decision.local_structured import LocalStructuredSession
-from chronovisor.knowledge_graph.config import KnowledgeGraphConfig
-from chronovisor.knowledge_graph.schema import CommunityRecord, RelationRecord, sha256
-from chronovisor.knowledge_graph.store import KnowledgeGraphStore
 
 COMMUNITY_SUMMARY_SCHEMA: dict[str, Any] = {
     "type": "object",

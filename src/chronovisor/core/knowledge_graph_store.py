@@ -1,4 +1,4 @@
-"""Durable append-only relation ledger and sealed materialized snapshots."""
+"""Core append-only relation ledger and sealed materialized snapshots."""
 
 from __future__ import annotations
 
@@ -17,8 +17,7 @@ from chronovisor.core.durable_state import (
     read_sealed_json,
     write_sealed_json,
 )
-from chronovisor.core.store import CHRONOVISOR_ROOT
-from chronovisor.knowledge_graph.schema import (
+from chronovisor.core.knowledge_graph_schema import (
     RELATION_ACTIONS,
     SCHEMA_VERSION,
     RelationRecord,
@@ -26,6 +25,7 @@ from chronovisor.knowledge_graph.schema import (
     sha256,
     validate_event,
 )
+from chronovisor.core.store import CHRONOVISOR_ROOT
 
 
 class KnowledgeGraphStore:

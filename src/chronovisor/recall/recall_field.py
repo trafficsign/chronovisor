@@ -18,6 +18,7 @@ from chronovisor.core.feedback_ledger import (
     read_jsonl_rows,
     trusted_negative_feedback_row_error,
 )
+from chronovisor.core.graph_edges import typed_neighbors
 from chronovisor.core.index_store import get_store
 from chronovisor.core.jsonl_write import append_jsonl_durable
 from chronovisor.core.store import CHRONOVISOR_ROOT
@@ -33,7 +34,6 @@ from chronovisor.recall.recall_field_schema import (
     topic_transition,
 )
 from chronovisor.recall.recall_field_store import RecallFieldStore
-from chronovisor.search.graph_edges import typed_neighbors
 
 NEGATIVE_APPLICATION_LEDGER = (
     CHRONOVISOR_ROOT / "recall" / "field" / "negative-applications.jsonl"

@@ -1465,7 +1465,7 @@ def graph_expand_results(
     if decay <= 0 or not results:
         return []
     from chronovisor.core.index_store import get_store
-    from chronovisor.knowledge_graph.retrieval import (
+    from chronovisor.core.knowledge_graph_retrieval import (
         classify_query,
         community_candidates,
     )
@@ -1489,7 +1489,7 @@ def graph_expand_results(
     expanded: dict[str, ScoredPage] = {}
     trace: dict[str, dict[str, Any]] = {}
     visited_states = 0
-    from chronovisor.search.graph_edges import typed_neighbors
+    from chronovisor.core.graph_edges import typed_neighbors
 
     query = str(getattr(_GRAPH_QUERY, "value", ""))
     rollout_key = str(getattr(_GRAPH_ROLLOUT, "value", ""))

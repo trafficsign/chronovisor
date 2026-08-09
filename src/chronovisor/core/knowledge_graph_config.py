@@ -1,4 +1,4 @@
-"""Feature flags and bounded resource policy for the typed graph."""
+"""Core feature flags and bounded resource policy for the typed graph."""
 
 from __future__ import annotations
 

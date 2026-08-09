@@ -1,4 +1,4 @@
-"""Typed relation provider, query planning, and browser-safe path traces."""
+"""Core relation provider, query planning, and browser-safe path traces."""
 
 from __future__ import annotations
 
@@ -13,10 +13,10 @@ from dataclasses import replace as dataclass_replace
 from typing import Any
 
 from chronovisor.core.durable_state import DurableStateError, read_sealed_json
+from chronovisor.core.knowledge_graph_config import KnowledgeGraphConfig, load_config
+from chronovisor.core.knowledge_graph_rollout import selected_for_canary
+from chronovisor.core.knowledge_graph_store import KnowledgeGraphStore
 from chronovisor.core.store import CHRONOVISOR_ROOT
-from chronovisor.knowledge_graph.config import KnowledgeGraphConfig, load_config
-from chronovisor.knowledge_graph.rollout import selected_for_canary
-from chronovisor.knowledge_graph.store import KnowledgeGraphStore
 
 GLOBAL_QUERY_RE = re.compile(
     r"(?:全体|まとめ|傾向|横断|共通|overview|overall|across|synthesize)", re.IGNORECASE

@@ -1169,7 +1169,7 @@ def run_variant(
     started = time.perf_counter()
     config, needs_rerank = _variant_pipeline_config(variant, top_n=top_n)
     deps = _pipeline_dependencies()
-    from chronovisor.knowledge_graph.retrieval import retrieval_mode_override
+    from chronovisor.core.knowledge_graph_retrieval import retrieval_mode_override
 
     typed_mode = typed_retrieval_mode or "shadow"
     with retrieval_mode_override(typed_mode), graph_query_context(query):

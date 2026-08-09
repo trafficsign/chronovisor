@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from chronovisor.core.graph_edges import typed_neighbors
 from chronovisor.recall import recall_field
 from chronovisor.recall.recall_field_schema import (
     ActivationNode,
@@ -21,7 +22,6 @@ from chronovisor.recall.recall_field_schema import (
     topic_transition,
 )
 from chronovisor.recall.recall_field_store import RecallFieldStore
-from chronovisor.search.graph_edges import typed_neighbors
 
 
 class FakeGraphStore:

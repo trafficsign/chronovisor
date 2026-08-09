@@ -7,8 +7,8 @@ import pytest
 
 from chronovisor.core import index_store as index_store_mod
 from chronovisor.core import ollama
+from chronovisor.core.knowledge_graph_retrieval import CommunityCandidate
 from chronovisor.core.runtime_config import EmbeddingConfig, SearchEmbeddingConfig
-from chronovisor.knowledge_graph.retrieval import CommunityCandidate
 from chronovisor.search import search
 from chronovisor.search.search import (
     ScoredPage,
@@ -207,9 +207,8 @@ def test_global_query_uses_community_branch_without_relation_traversal(
                 "entities": [],
             }
 
-    from chronovisor.core import index_store
-    from chronovisor.knowledge_graph import retrieval
-    from chronovisor.search import graph_edges
+    from chronovisor.core import graph_edges, index_store
+    from chronovisor.core import knowledge_graph_retrieval as retrieval
 
     monkeypatch.setattr(index_store, "get_store", lambda: FakeStore())
     monkeypatch.setattr(

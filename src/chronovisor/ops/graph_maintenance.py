@@ -13,13 +13,20 @@ from typing import Any
 
 from chronovisor.core.durable_state import read_sealed_json, write_sealed_json
 from chronovisor.core.jsonl_write import append_jsonl_durable
+from chronovisor.core.knowledge_graph_config import KnowledgeGraphConfig, load_config
+from chronovisor.core.knowledge_graph_rollout import (
+    CANARY_SAMPLE_UNIT,
+    advance_rollout,
+    applied_canary_session_count,
+)
+from chronovisor.core.knowledge_graph_schema import sha256
+from chronovisor.core.knowledge_graph_store import KnowledgeGraphStore
 from chronovisor.core.store import CHRONOVISOR_ROOT
 from chronovisor.knowledge_graph.builder import run_builder_cycle
 from chronovisor.knowledge_graph.communities import (
     build_communities,
     summarize_communities,
 )
-from chronovisor.knowledge_graph.config import KnowledgeGraphConfig, load_config
 from chronovisor.knowledge_graph.consensus import verify_pending_relations
 from chronovisor.knowledge_graph.consolidation import consolidate_entity_candidates
 from chronovisor.knowledge_graph.evaluation import (
@@ -28,13 +35,6 @@ from chronovisor.knowledge_graph.evaluation import (
     run_evaluation_cycle,
     validate_baseline,
 )
-from chronovisor.knowledge_graph.rollout import (
-    CANARY_SAMPLE_UNIT,
-    advance_rollout,
-    applied_canary_session_count,
-)
-from chronovisor.knowledge_graph.schema import sha256
-from chronovisor.knowledge_graph.store import KnowledgeGraphStore
 from chronovisor.knowledge_graph.supervision import (
     advance_used_entities,
     advance_used_relations,

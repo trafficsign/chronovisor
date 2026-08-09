@@ -1,12 +1,12 @@
 """Typed, evidence-bound knowledge graph for Chronovisor Recall."""
 
-from chronovisor.knowledge_graph.config import KnowledgeGraphConfig, load_config
-from chronovisor.knowledge_graph.schema import (
+from chronovisor.core.knowledge_graph_config import KnowledgeGraphConfig, load_config
+from chronovisor.core.knowledge_graph_schema import (
     EvidenceRef,
     RelationRecord,
     relation_id,
 )
-from chronovisor.knowledge_graph.store import KnowledgeGraphStore
+from chronovisor.core.knowledge_graph_store import KnowledgeGraphStore
 
 __all__ = [
     "EvidenceRef",

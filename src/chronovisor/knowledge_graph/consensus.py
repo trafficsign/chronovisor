@@ -9,6 +9,12 @@ from pathlib import Path
 from typing import Any
 
 from chronovisor.core.jsonl_write import append_jsonl_durable
+from chronovisor.core.knowledge_graph_schema import (
+    ConsensusReceipt,
+    ConsensusVote,
+    sha256,
+)
+from chronovisor.core.knowledge_graph_store import KnowledgeGraphStore
 from chronovisor.core.runtime_config import load_decision_router_config
 from chronovisor.core.store import CHRONOVISOR_ROOT
 from chronovisor.decision.decision_router import DecisionRouter, DecisionRouterResult
@@ -16,12 +22,6 @@ from chronovisor.decision.graph_decisions import (
     RELATION_VERIFICATION_SCHEMA,
     build_relation_verification_prompt,
 )
-from chronovisor.knowledge_graph.schema import (
-    ConsensusReceipt,
-    ConsensusVote,
-    sha256,
-)
-from chronovisor.knowledge_graph.store import KnowledgeGraphStore
 
 RECEIPT_LEDGER = (
     CHRONOVISOR_ROOT / "runtime" / "typed-graph" / "consensus-receipts.jsonl"

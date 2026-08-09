@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from chronovisor.core.durable_state import read_sealed_json, write_sealed_json
-from chronovisor.knowledge_graph.schema import sha256
+from chronovisor.core.knowledge_graph_schema import sha256
 
 EVALUATION_ARMS = (
     "current",

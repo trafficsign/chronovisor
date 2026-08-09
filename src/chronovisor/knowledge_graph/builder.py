@@ -16,11 +16,8 @@ from pathlib import Path
 from typing import Any
 
 from chronovisor.core.frontmatter import parse as parse_frontmatter
-from chronovisor.core.link_fix import extract_targets
-from chronovisor.core.store import CHRONOVISOR_ROOT
-from chronovisor.decision.local_structured import LocalStructuredSession
-from chronovisor.knowledge_graph.config import KnowledgeGraphConfig, load_config
-from chronovisor.knowledge_graph.schema import (
+from chronovisor.core.knowledge_graph_config import KnowledgeGraphConfig, load_config
+from chronovisor.core.knowledge_graph_schema import (
     EntityCandidate,
     EvidenceRef,
     RelationRecord,
@@ -28,7 +25,10 @@ from chronovisor.knowledge_graph.schema import (
     relation_id,
     sha256,
 )
-from chronovisor.knowledge_graph.store import KnowledgeGraphStore
+from chronovisor.core.knowledge_graph_store import KnowledgeGraphStore
+from chronovisor.core.link_fix import extract_targets
+from chronovisor.core.store import CHRONOVISOR_ROOT
+from chronovisor.decision.local_structured import LocalStructuredSession
 
 GRAPH_BUILDER_POLICY_VERSION = 1
 GRAPH_BUILDER_RUBRIC_SHA256 = sha256(
