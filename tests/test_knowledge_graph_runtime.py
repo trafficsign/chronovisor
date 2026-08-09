@@ -4,7 +4,6 @@ from pathlib import Path
 from typing import Any
 
 from chronovisor.core.durable_state import read_sealed_json, write_sealed_json
-from chronovisor.knowledge_graph import runtime
 from chronovisor.knowledge_graph.config import (
     GraphRetrievalConfig,
     KnowledgeGraphConfig,
@@ -13,6 +12,7 @@ from chronovisor.knowledge_graph.evaluation import capture_baseline
 from chronovisor.knowledge_graph.rollout import advance_rollout
 from chronovisor.knowledge_graph.schema import sha256
 from chronovisor.knowledge_graph.store import KnowledgeGraphStore
+from chronovisor.ops import graph_maintenance as runtime
 
 
 def _config() -> KnowledgeGraphConfig:

@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from chronovisor.core.store import CHRONOVISOR_ROOT
-from chronovisor.knowledge_graph.runtime import run_graph_maintenance
+from chronovisor.ops.graph_maintenance import run_graph_maintenance
 from chronovisor.ops.model_lab import run_due as run_model_lab_due
 from chronovisor.recall.recall_growth import run_growth_cycle
 

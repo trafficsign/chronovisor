@@ -7,8 +7,8 @@ from pathlib import Path
 from typing import Any
 
 from chronovisor.core.durable_state import read_sealed_json
+from chronovisor.core.jsonl import read_jsonl
 from chronovisor.knowledge_graph.store import KnowledgeGraphStore
-from chronovisor.recall.recall_label_factory import read_jsonl
 
 
 def advance_used_relations(
