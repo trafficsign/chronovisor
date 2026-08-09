@@ -7595,6 +7595,66 @@ class TestOrchestrator:
             or "pending" in second["reason"].lower()
         )
 
+    @pytest.mark.parametrize("lint_error", [False, True])
+    def test_successful_batch_runs_bounded_post_ingest_lint_once(
+        self,
+        isolated_wiki: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        lint_error: bool,
+    ) -> None:
+        from chronovisor.ingest import ingest as ingest_mod
+        from chronovisor.ingest import lint, orchestrator
+
+        raw_path = isolated_wiki / "raw" / "lint-after-success.md"
+        raw_path.write_text("source-grounded fact", encoding="utf-8")
+
+        def fake_run_ingest(
+            _content,
+            _job_id,
+            on_complete=None,
+            **_kwargs,
+        ) -> None:
+            assert on_complete is not None
+            on_complete()
+
+        calls = 0
+
+        def check() -> list[dict]:
+            nonlocal calls
+            calls += 1
+            if lint_error:
+                raise RuntimeError("private lint detail")
+            return [
+                {
+                    "type": "broken_link",
+                    "severity": "high",
+                    "page": "example",
+                    "detail": "private lint detail",
+                    "auto_fixable": True,
+                }
+            ]
+
+        monkeypatch.setattr(ingest_mod, "run_ingest", fake_run_ingest)
+        monkeypatch.setattr(orchestrator, "is_available", lambda: True)
+        monkeypatch.setattr(lint, "check", check)
+
+        result = orchestrator.run_pending_ingest(force=True)
+
+        assert calls == 1
+        assert result["files_processed"] == [raw_path.name]
+        assert result["per_raw"][0]["succeeded"] is True
+        if lint_error:
+            assert result["post_ingest_lint"] == {
+                "status": "error",
+                "error_category": "RuntimeError",
+            }
+        else:
+            assert result["post_ingest_lint"]["status"] == "ok"
+            assert result["post_ingest_lint"]["summary"]["by_type"] == {
+                "broken_link": 1
+            }
+        assert "private lint detail" not in str(result)
+
     def test_run_pending_ingest_can_limit_pilot_to_one_semantic_unit(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

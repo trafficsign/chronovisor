@@ -976,6 +976,19 @@ def _ingest_batch_result(
     }
 
 
+def _post_ingest_lint_summary() -> dict[str, Any]:
+    """Run the read-only wiki check without risking a durable ingest result."""
+
+    try:
+        from chronovisor.ingest.lint import check, summarize_issues
+
+        return {"status": "ok", "summary": summarize_issues(check())}
+    except Exception as exc:
+        error_category = type(exc).__name__
+        _orch_log(f"orchestrator | post-ingest lint failed: {error_category}")
+        return {"status": "error", "error_category": error_category}
+
+
 @_serialize_ingest_across_processes
 def run_pending_ingest(
     force: bool = False,
@@ -1699,7 +1712,7 @@ def run_pending_ingest(
             llm=None,
         )
 
-        return _ingest_batch_result(
+        result = _ingest_batch_result(
             reason=reason,
             job_ids=job_ids,
             filenames=filenames,
@@ -1714,6 +1727,9 @@ def run_pending_ingest(
             processor=get_ollama_status()["processor"],
             elapsed=elapsed,
         )
+        if succeeded_filenames:
+            result["post_ingest_lint"] = _post_ingest_lint_summary()
+        return result
 
 
 def _coerce_str_list(value: object) -> list[str] | None:

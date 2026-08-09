@@ -439,13 +439,19 @@ WRONG output (do NOT do these):
 Each top-level element of the array MUST be an object with a "type" field.
 """
 
-GENERATE_SYSTEM_PROMPT = """\
+PRESERVE_SOURCE_FACTS_RULE = (
+    "Preserve every relevant source-grounded fact; do not omit names, numbers, "
+    "dates, or decisions when summarizing."
+)
+
+GENERATE_SYSTEM_PROMPT = f"""\
 You are a knowledge wiki structuring engine. Generate content for a SINGLE NEW wiki page.
 
 Rules:
 - Frontmatter MUST include: title, updated, AND tags
 - Use the exact current date supplied in the user prompt for `updated`
 - Never invent or infer dates that are absent from the raw evidence
+- {PRESERVE_SOURCE_FACTS_RULE}
 - Cross-references: use [[wiki-link]] notation (page ID only, no folder path)
 - Write content in Japanese
 - Focus on facts, decisions, and technical knowledge
@@ -480,7 +486,7 @@ from a controlled taxonomy. Three axes:
    genuinely novel categories, not synonyms of existing ones.
 
 Output exactly one page block:
-=== NEW PAGE: {filename} ===
+=== NEW PAGE: {{filename}} ===
 ---
 title: Page Title
 updated: YYYY-MM-DD
@@ -495,19 +501,20 @@ The final non-whitespace line MUST be exactly `=== END PAGE ===`. Keep the
 page concise enough to emit that closing line before stopping.
 """
 
-UPDATE_SYSTEM_PROMPT = """\
+UPDATE_SYSTEM_PROMPT = f"""\
 You are a knowledge wiki structuring engine. Append content to an EXISTING wiki page.
 
 Rules:
 - DO NOT output frontmatter (no `---`, no title:, no updated: lines). The existing page already has frontmatter; your output is appended to its body.
 - Never invent or infer dates that are absent from the raw evidence. Do not add a dated heading unless that date appears explicitly in the raw evidence.
+- {PRESERVE_SOURCE_FACTS_RULE}
 - DO NOT repeat content that already exists on the page (it is provided in context).
 - Output ONLY the new section(s) to add — Japanese prose, headings, lists, code, etc.
 - Cross-references: use [[wiki-link]] notation (page ID only, no folder path)
 - Focus on facts, decisions, and technical knowledge
 
 Output exactly one block:
-=== UPDATE PAGE: {filename} ===
+=== UPDATE PAGE: {{filename}} ===
 New section(s) here. Markdown body only — NO frontmatter delimiters.
 
 === END PAGE ===

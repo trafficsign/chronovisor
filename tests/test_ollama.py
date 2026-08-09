@@ -282,6 +282,16 @@ def test_generation_prompts_forbid_invented_dates() -> None:
     assert "Never invent or infer dates" in ollama.UPDATE_SYSTEM_PROMPT
 
 
+def test_create_and_update_prompts_preserve_source_grounded_facts() -> None:
+    rule = ollama.PRESERVE_SOURCE_FACTS_RULE
+    assert all(
+        term in rule
+        for term in ("source-grounded fact", "names", "numbers", "dates", "decisions")
+    )
+    assert rule in ollama.GENERATE_SYSTEM_PROMPT
+    assert rule in ollama.UPDATE_SYSTEM_PROMPT
+
+
 def test_generate_streams_progress_and_returns_text(monkeypatch) -> None:
     client = _StreamClient()
     monkeypatch.setattr(ollama, "_client", lambda: client)
