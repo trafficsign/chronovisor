@@ -203,8 +203,8 @@ def test_materialized_reference_projects_native_transcript_without_copying_it(
 def test_v2_parent_and_semantic_child_use_separate_physical_stores(
     tmp_path: Path, monkeypatch
 ) -> None:
-    from chronovisor.decision import failure_supervisor
     from chronovisor.ingest import orchestrator
+    from chronovisor.raw import failure_supervisor
 
     raw_dir = tmp_path / "raw"
     source = tmp_path / "session.jsonl"
@@ -249,8 +249,8 @@ def test_v2_parent_and_semantic_child_use_separate_physical_stores(
 def test_processed_segment_is_not_materialized_into_pending_cache(
     tmp_path: Path, monkeypatch
 ) -> None:
-    from chronovisor.decision import failure_supervisor
     from chronovisor.ingest import orchestrator
+    from chronovisor.raw import failure_supervisor
 
     raw_dir = tmp_path / "raw"
     source = tmp_path / "session.jsonl"

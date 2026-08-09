@@ -649,6 +649,45 @@ S_RETIRED_RECALL_CONTRACT_SITE_IDS = (
     "arch:85af762f04190a96065bc9f6485e46ad1d563aab188c7614070dcbfac4ef4ae4",
     "arch:d853bea9b7e5cce2fc45d721cef212975e02d7d52b3a680609743bc91838c1d3",
 )
+S_RETIRED_FAILURE_SUPERVISOR_EDGE_IDS = (
+    "arch:9f39a64cb9539bc9ef5eb7326fc5f1f726bfe0ea5907a0f74db1236afebfe8c3",
+)
+S_RETIRED_FAILURE_SUPERVISOR_SITE_IDS = (
+    "arch:02623a88474e0a32eaacd39056396c51a3940ceb4a84a8b22b4c0bb007123363",
+    "arch:05b771fb4dbc9cb506b72e9192791c7680f2ef8a21132d02fc85d95296acc38d",
+    "arch:0deee3d120ecc42474a7178b9f9977471048998e00dd0332780cd24b6e10c4c5",
+    "arch:182ecd290a4abacd2bcd6a2cccf5d717aa0b0ed38edd278cd16c82b1c1b776a1",
+    "arch:1cebf89a3225b648c41b09c4cd7b10b4709abc102b34f07c35ee66fd707def59",
+    "arch:1e4ac1ad7cbc8bdccb4fb4d4c154be90f665461e02fea76d3417b1a485c133c5",
+    "arch:21c9eceb9aef091de94c96d466562929a8ccbfc9d0d4fbc312939968e84a1497",
+    "arch:2617c8b0223c28a6660d110b511d43225485ee3335aa7c287ddeccabc9a4b440",
+    "arch:2e2fe58f1d6c0340970163c581f8434c1cb0d483d90098a34d5f40ab73091c1e",
+    "arch:30d509a6cee7189c75a36a91c0938ac071bbd07b96b8cf9d67532fe9142ca34c",
+    "arch:3228a321a308f3ea33f5c3fffa6ed160453fb5100bab5ba40c1fd7f4ef0e9b49",
+    "arch:3ef66d65a83555d2fc3805e63df39d85c8e5dd3b1f9f32ad5442bd0943c6bb04",
+    "arch:4245f2fadc5e364af226ebefc26dea2cde47e4d66c7ff804781445692d336a30",
+    "arch:432331f43bc617b2abad57784178f9a81e3ea54a5cfe95ffc3a9cb7282c324c5",
+    "arch:46ffa212367c68391da5d408bd5474721fd085a662e22a7dc16fee033fbfc669",
+    "arch:47c6655b42cc9812f6df2dba9731267026cabf035e4aeee7920947c2bdbf7c09",
+    "arch:49cd278f46edb4549bb304ec7ce6f35f3b0f6156bbf9b27ea7af1667111e387c",
+    "arch:557232e59a49610ccdacf06186dcf5d7342aa0176b7fa80d4f7d4b75279d74e6",
+    "arch:5aacbfeee99fc0cabc2a769a0e81ef46057201419fd33a00e8f4ceeeaa8470bf",
+    "arch:61414429fa69d79822b66721b2c35547090dd73ade421a875397e74082f8aa23",
+    "arch:78b51c02e745d92262679d82315fae53833c1d4c2675790dd9fd4526ebdb601a",
+    "arch:82df7c4ca9f7e5d08af89adbf8e07f32acc653c84a47853dde95001370c5fb66",
+    "arch:83bd80f31e208f8d1f6ab7909953d2ef6d8020ab5147f2edf3f85bdb5fc7e43c",
+    "arch:8712f8e89122f72162313cd14e7af364dd9d1516d9c78fb7282b331c5e635c85",
+    "arch:880ac604be5c3dc1d39b79ec854c2ab47c646cd5dae3506e7e73123868d317f8",
+    "arch:938950c6712af1a7348f401350ed92dd778a3ffc4aef624d30729f06d686776e",
+    "arch:9da4a9ca9e6130e99c74fca625e1021c1ae90ccf36191d4eae5f47599bf8e440",
+    "arch:9f34d2ec8a8fe626c432f404dcfbe0e8e6ba9f9a3b193e41db373128a77fc96a",
+    "arch:afab14eb9bfe5d50fb6f65957163fab46a1fbdc33941d3ebbb7cbf7a250594d6",
+    "arch:b0bdeedfb7d5a2dded83d62191e8231b02c99cc0ba31858327f7f81c2b10c8bf",
+    "arch:c69ad967a2e7235539e12b716ebbce5c9994b19b022001c63acc550e00d50156",
+    "arch:e6e8966091104e4564d3d87785dc1476f1c9d23263533b055208345672d2e4e9",
+    "arch:ebafc791df2bef7f53a381291731e3514236eec82b122061605647975bcc1956",
+    "arch:fa56fa837fd3074a05a7765bfc9e7ddb34f887eaac2578ed6e780ffd79b59cec",
+)
 V_RETIRED_RECALL_SHIM_SITE_IDS = (
     "arch:3896d20fb9ddf2c56d06af026b9b40d6399902891ab291f3a6eba063ba8b4d28",
     "arch:c99c20705c2ffb63854eb252145ab9e7f20ea9b0adb7eef8892e39abb52ceb1c",
@@ -954,6 +993,7 @@ RETIREMENT_HISTORY = {
                 *S_RETIRED_INGEST_RECALL_EDGE_IDS,
                 *S_RETIRED_SELF_HEAL_PRIMITIVES_EDGE_IDS,
                 *S_RETIRED_RECALL_CONTRACT_EDGE_IDS,
+                *S_RETIRED_FAILURE_SUPERVISOR_EDGE_IDS,
                 *V_RETIRED_REMAINING_SHIM_EXCEPTION_IDS,
             )
         )
@@ -1003,6 +1043,7 @@ RETIREMENT_HISTORY = {
                 *S_RETIRED_SELF_HEAL_PRIMITIVES_SITE_IDS,
                 *S_RETIRED_CONTENT_CORRECTION_CONTRACT_SITE_IDS,
                 *S_RETIRED_RECALL_CONTRACT_SITE_IDS,
+                *S_RETIRED_FAILURE_SUPERVISOR_SITE_IDS,
                 *V_RETIRED_RECALL_SHIM_SITE_IDS,
                 *V_RETIRED_REMAINING_SHIM_SITE_IDS,
                 *V_RETIRED_DURABLE_MODULE_MAPPING_SITE_IDS,
@@ -1324,6 +1365,7 @@ def _without_persisted_retirement_history(
         + len(S_RETIRED_INGEST_RECALL_EDGE_IDS)
         + len(S_RETIRED_SELF_HEAL_PRIMITIVES_EDGE_IDS)
         + len(S_RETIRED_RECALL_CONTRACT_EDGE_IDS)
+        + len(S_RETIRED_FAILURE_SUPERVISOR_EDGE_IDS)
         + len(V_RETIRED_REMAINING_SHIM_EXCEPTION_IDS)
     )
     active_counts["by_category"]["dynamic_import"] = (
@@ -1752,8 +1794,8 @@ def test_current_exception_ledger_seed_and_schema_inventory_are_exact(
 
     assert detected_ids == ledger_ids == set(seed["exception_semantic_ids"]["active"])
     _assert_exact_retirement_history(architecture, seed)
-    assert len(edge_rows) == current["worktree_architecture"]["edge_count"] == 66
-    assert sum(len(row["sites"]) for row in edge_rows) == len(raw_cross_sites) == 1368
+    assert len(edge_rows) == current["worktree_architecture"]["edge_count"] == 65
+    assert sum(len(row["sites"]) for row in edge_rows) == len(raw_cross_sites) == 1357
     assert {
         field: counts[field]
         for field in (
@@ -1765,15 +1807,15 @@ def test_current_exception_ledger_seed_and_schema_inventory_are_exact(
             "compatibility_contracts",
         )
     } == {
-        "exceptions": 66,
-        "cross_domain_sites": 1368,
+        "exceptions": 65,
+        "cross_domain_sites": 1357,
         "production_to_lab_edges": 0,
         "production_to_lab_static_sites": 0,
         "production_to_lab_dynamic_sites": 0,
         "compatibility_contracts": 51,
     }
     assert counts["by_category"] == {
-        "cross_domain_edge": 66,
+        "cross_domain_edge": 65,
     }
     assert counts["compatibility_by_kind"] == {
         "console_entrypoint": 51,

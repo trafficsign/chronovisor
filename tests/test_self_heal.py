@@ -3079,7 +3079,7 @@ def test_operational_failure_state_binds_each_raw_exact_bytes(
     isolated_wiki: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor.decision import failure_supervisor
+    from chronovisor.raw import failure_supervisor
 
     primary = isolated_wiki / "raw" / "primary.md"
     related = isolated_wiki / "raw" / "related.md"
@@ -3123,8 +3123,8 @@ def test_repeated_operational_failure_preserves_invalid_binding_and_release_refu
     monkeypatch: pytest.MonkeyPatch,
     stored_binding: dict[str, object],
 ) -> None:
-    from chronovisor.decision import failure_supervisor
     from chronovisor.ops import self_heal
+    from chronovisor.raw import failure_supervisor
 
     raw_path = isolated_wiki / "raw" / "partial-binding.md"
     raw_path.write_bytes(b"immutable\r\nsource\n")
@@ -3190,8 +3190,8 @@ def test_verified_local_repair_releases_exact_operational_packet(
     isolated_wiki: Path,
     operational_release_case: tuple[Path, dict[str, str]],
 ) -> None:
-    from chronovisor.decision import failure_supervisor
     from chronovisor.ops import self_heal
+    from chronovisor.raw import failure_supervisor
 
     packet_path, kwargs = operational_release_case
     raw_path = isolated_wiki / "raw" / "broken.md"
@@ -3260,8 +3260,9 @@ def test_verified_local_repair_releases_operational_local_quarantine(
     operational_release_case: tuple[Path, dict[str, str]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor.decision import failure_supervisor, local_repair
+    from chronovisor.decision import local_repair
     from chronovisor.ops import self_heal
+    from chronovisor.raw import failure_supervisor
 
     packet_path, kwargs = operational_release_case
     raw_path = isolated_wiki / "raw" / "broken.md"
@@ -4007,8 +4008,8 @@ def test_verified_local_repair_cached_retry_survives_partial_and_full_state_clea
     operational_release_case: tuple[Path, dict[str, str]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor.decision import failure_supervisor
     from chronovisor.ops import self_heal
+    from chronovisor.raw import failure_supervisor
 
     packet_path, kwargs = operational_release_case
     first_raw = isolated_wiki / "raw" / "broken.md"
@@ -4063,8 +4064,8 @@ def test_verified_local_repair_cached_retry_refuses_different_receipt_evidence(
     operational_release_case: tuple[Path, dict[str, str]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor.decision import failure_supervisor
     from chronovisor.ops import self_heal
+    from chronovisor.raw import failure_supervisor
 
     packet_path, fixture_kwargs = operational_release_case
     raw_path = isolated_wiki / "raw" / "broken.md"
@@ -4129,8 +4130,8 @@ def test_verified_local_repair_freezes_group_until_packet_commit(
     operational_release_case: tuple[Path, dict[str, str]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor.decision import failure_supervisor
     from chronovisor.ops import self_heal
+    from chronovisor.raw import failure_supervisor
 
     packet_path, kwargs = operational_release_case
     late_raw = isolated_wiki / "raw" / "late.md"
@@ -4181,8 +4182,8 @@ def test_operational_release_lock_order_does_not_block_state_writer(
     operational_release_case: tuple[Path, dict[str, str]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor.decision import failure_supervisor
     from chronovisor.ops import self_heal
+    from chronovisor.raw import failure_supervisor
 
     packet_path, kwargs = operational_release_case
     late_raw = isolated_wiki / "raw" / "late.md"

@@ -146,7 +146,7 @@ def _projection_entry(path: Path) -> dict[str, Any] | None:
 
 
 def sync_index(*, chronovisor_root: Path) -> dict[str, Any]:
-    from chronovisor.decision.failure_supervisor import (
+    from chronovisor.raw.failure_supervisor import (
         SEMANTIC_NO_QUORUM_DEFER_REASON,
         operational_deferred_raw_files,
     )

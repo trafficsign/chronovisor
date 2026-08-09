@@ -1,14 +1,14 @@
 {
   "schema_version": 2,
   "source_baseline_head": "d404a6b20d00e3bcd1d4cdb89edfa5a718c51833",
-  "baseline_sha256": "1dfd0a0613c38d8a4b44ea7365559cd287efdde4f20a68c4ddc4100392226150",
+  "baseline_sha256": "4c1e2f60bd38fc6148a62f96ddb78204a4f2e97271adca1ea31738ffa0647f87",
   "semantic_identity": "cross-domain edges use category+source_package+target_package; statement exceptions use category+source_package+source_module+scope_kind+scope+statement_kind+target_package+target_module+symbols+occurrence; source line is diagnostic and normalized statement content is verified independently",
   "counts": {
-    "exceptions": 66,
+    "exceptions": 65,
     "by_category": {
-      "cross_domain_edge": 66
+      "cross_domain_edge": 65
     },
-    "cross_domain_sites": 1368,
+    "cross_domain_sites": 1357,
     "production_to_lab_edges": 0,
     "production_to_lab_static_sites": 0,
     "production_to_lab_dynamic_sites": 0,
@@ -881,21 +881,6 @@
           "line": 26
         },
         {
-          "semantic_id": "arch:83bd80f31e208f8d1f6ab7909953d2ef6d8020ab5147f2edf3f85bdb5fc7e43c",
-          "source_module": "chronovisor.hosts.server",
-          "scope_kind": "function",
-          "scope": "_raw_defer_counts",
-          "statement_kind": "from",
-          "target_module": "chronovisor.decision.failure_supervisor",
-          "symbols": [
-            "SEMANTIC_NO_QUORUM_DEFER_REASON",
-            "operational_deferred_raw_files"
-          ],
-          "content_sha256": "e2689b3f87d4e2612c08346e1e17003d7408280806a905ae51f6dc4244911420",
-          "occurrence": 1,
-          "line": 319
-        },
-        {
           "semantic_id": "arch:bacea4fae8dbc9711f1567021e49247480cc6c52f7b937815f957b7b1dfc0fda",
           "source_module": "chronovisor.hosts.claude_code_record",
           "scope_kind": "module",
@@ -1105,21 +1090,6 @@
           "content_sha256": "1da0d58353f28b183cf2f1ed3698484d43b925b135b3d85ccaa96b7cf90055d6",
           "occurrence": 1,
           "line": 954
-        },
-        {
-          "semantic_id": "arch:1cebf89a3225b648c41b09c4cd7b10b4709abc102b34f07c35ee66fd707def59",
-          "source_module": "chronovisor.recall.provisional_recall",
-          "scope_kind": "function",
-          "scope": "sync_index",
-          "statement_kind": "from",
-          "target_module": "chronovisor.decision.failure_supervisor",
-          "symbols": [
-            "SEMANTIC_NO_QUORUM_DEFER_REASON",
-            "operational_deferred_raw_files"
-          ],
-          "content_sha256": "e2689b3f87d4e2612c08346e1e17003d7408280806a905ae51f6dc4244911420",
-          "occurrence": 1,
-          "line": 149
         },
         {
           "semantic_id": "arch:27a11eee20dcfe9d6e1fce1b6aea7c1d4f9635909a08265523352f85fefb0d36",
@@ -1980,20 +1950,6 @@
           "line": 11
         },
         {
-          "semantic_id": "arch:0deee3d120ecc42474a7178b9f9977471048998e00dd0332780cd24b6e10c4c5",
-          "source_module": "chronovisor.ingest.managed_hold_sync",
-          "scope_kind": "function",
-          "scope": "sync_ingest_semantic_holds",
-          "statement_kind": "from",
-          "target_module": "chronovisor.decision.failure_supervisor",
-          "symbols": [
-            "current_adopted_authority_epoch"
-          ],
-          "content_sha256": "5c10ff45d3a79d32d916c0b2d204227a5261426d6251a075bbe6b41a568f18dc",
-          "occurrence": 1,
-          "line": 133
-        },
-        {
           "semantic_id": "arch:0e6b056851bb04770b3242d678f1b8522c34500751bfe99100844540d2723e75",
           "source_module": "chronovisor.ingest.ingest",
           "scope_kind": "module",
@@ -2128,35 +2084,6 @@
           "line": 8
         },
         {
-          "semantic_id": "arch:4245f2fadc5e364af226ebefc26dea2cde47e4d66c7ff804781445692d336a30",
-          "source_module": "chronovisor.ingest.managed_hold_sync",
-          "scope_kind": "function",
-          "scope": "sync_ingest_semantic_holds",
-          "statement_kind": "from",
-          "target_module": "chronovisor.decision.failure_supervisor",
-          "symbols": [
-            "raw_failure_snapshot"
-          ],
-          "content_sha256": "13b2b710af5bb5d686844e9d7d4a1778821b6feb55371d0a1f0ea3d2c2ddbb47",
-          "occurrence": 1,
-          "line": 147
-        },
-        {
-          "semantic_id": "arch:49cd278f46edb4549bb304ec7ce6f35f3b0f6156bbf9b27ea7af1667111e387c",
-          "source_module": "chronovisor.ingest.orchestrator",
-          "scope_kind": "function",
-          "scope": "run_pending_ingest",
-          "statement_kind": "from",
-          "target_module": "chronovisor.decision.failure_supervisor",
-          "symbols": [
-            "record_raw_failure",
-            "result_to_dict"
-          ],
-          "content_sha256": "718844055b7631abab7087becdb9ad7d37138f4c96745a9d0577d56d482f12dd",
-          "occurrence": 1,
-          "line": 1589
-        },
-        {
           "semantic_id": "arch:4a25416288260ad2586b4ddf78a504bc1ff61a79fb65c31bec4367910dd09657",
           "source_module": "chronovisor.ingest.ingest_triage",
           "scope_kind": "module",
@@ -2183,20 +2110,6 @@
           "content_sha256": "75f83b4cea5be7d6379fca2977de2f31f61277e76a5ddc38def746163861a9a9",
           "occurrence": 1,
           "line": 28
-        },
-        {
-          "semantic_id": "arch:61414429fa69d79822b66721b2c35547090dd73ade421a875397e74082f8aa23",
-          "source_module": "chronovisor.ingest.orchestrator",
-          "scope_kind": "function",
-          "scope": "run_pending_ingest",
-          "statement_kind": "from",
-          "target_module": "chronovisor.decision.failure_supervisor",
-          "symbols": [
-            "reset_raw_failure"
-          ],
-          "content_sha256": "d2751b3afaa6ed8a637f3f714fc2ce7d7e11d0185781d47c3520f8736199327a",
-          "occurrence": 1,
-          "line": 1555
         },
         {
           "semantic_id": "arch:67ae6911ed6ce8e2b1ea4e26c252b5339042763fe6d8a1d4d815747d08a0291f",
@@ -2269,20 +2182,6 @@
           "line": 13
         },
         {
-          "semantic_id": "arch:9da4a9ca9e6130e99c74fca625e1021c1ae90ccf36191d4eae5f47599bf8e440",
-          "source_module": "chronovisor.ingest.orchestrator",
-          "scope_kind": "function",
-          "scope": "get_pending_raw_files",
-          "statement_kind": "from",
-          "target_module": "chronovisor.decision.failure_supervisor",
-          "symbols": [
-            "operational_deferred_raw_files"
-          ],
-          "content_sha256": "f39e50e5b891c9a9d56edcdd7c8a02ee794d1116f436d13c1f3a87148a77d6b9",
-          "occurrence": 1,
-          "line": 296
-        },
-        {
           "semantic_id": "arch:ac32c5500d325e343bb1703490817714c155ff6d600f09bae55f6e1e7a7e67c7",
           "source_module": "chronovisor.ingest.ingest_review_plan",
           "scope_kind": "module",
@@ -2295,20 +2194,6 @@
           "content_sha256": "85618d6ecd416d18c43344b96b5dd002cda2c74cdbc4c69b272ac6629e135f72",
           "occurrence": 1,
           "line": 10
-        },
-        {
-          "semantic_id": "arch:afab14eb9bfe5d50fb6f65957163fab46a1fbdc33941d3ebbb7cbf7a250594d6",
-          "source_module": "chronovisor.ingest.read_back_repair",
-          "scope_kind": "function",
-          "scope": "run_read_back_repair",
-          "statement_kind": "from",
-          "target_module": "chronovisor.decision.failure_supervisor",
-          "symbols": [
-            "queue_operational_failure"
-          ],
-          "content_sha256": "0ca53e202dfbad7af679108256b74d35e9074c256f5276b7605ca812fc1a5646",
-          "occurrence": 1,
-          "line": 1383
         },
         {
           "semantic_id": "arch:b2066668613bab561b791109ab8238f33d0f7281918d5f9a54b79215ccb7b7e2",
@@ -5023,6 +4908,21 @@
           "content_sha256": "15471ed13cc2d3a5e7bd6750141701824cfee287d70ac1451cc8b3070a782272",
           "occurrence": 1,
           "line": 323
+        },
+        {
+          "semantic_id": "arch:fd59be68dbe513b636a8c4e44935096fb0f8d6df23640fd99f283f1987466566",
+          "source_module": "chronovisor.hosts.server",
+          "scope_kind": "function",
+          "scope": "_raw_defer_counts",
+          "statement_kind": "from",
+          "target_module": "chronovisor.raw.failure_supervisor",
+          "symbols": [
+            "SEMANTIC_NO_QUORUM_DEFER_REASON",
+            "operational_deferred_raw_files"
+          ],
+          "content_sha256": "d9f6d16fd4832981da2e62424cdce144633f4d45af21032bbe9a9133beaf1cff",
+          "occurrence": 1,
+          "line": 319
         }
       ],
       "semantic_id": "arch:26f62f5fb3372de1496c7053e3738c83f850f2bd73e7902eceaf45d8fcbf65b9",
@@ -5731,6 +5631,21 @@
           "content_sha256": "252da6db3da756255c65cc490066a41277f1b12af6fc7e32bf68cb93841a8cec",
           "occurrence": 1,
           "line": 69
+        },
+        {
+          "semantic_id": "arch:6401498dd4edd99846642bf02fb4a3ec6f8f36509f95041a3ea4a1928acbbbb2",
+          "source_module": "chronovisor.recall.provisional_recall",
+          "scope_kind": "function",
+          "scope": "sync_index",
+          "statement_kind": "from",
+          "target_module": "chronovisor.raw.failure_supervisor",
+          "symbols": [
+            "SEMANTIC_NO_QUORUM_DEFER_REASON",
+            "operational_deferred_raw_files"
+          ],
+          "content_sha256": "d9f6d16fd4832981da2e62424cdce144633f4d45af21032bbe9a9133beaf1cff",
+          "occurrence": 1,
+          "line": 149
         },
         {
           "semantic_id": "arch:75da5f19da69a4e2564434f686abebeb4eff0bd784af042480c518801fc13b24",
@@ -6893,6 +6808,20 @@
           "line": 4460
         },
         {
+          "semantic_id": "arch:25e2c74deaf2a7e6aa672f9dcdacaf0c4d67ee8c507f60c5897db6d79650a1ec",
+          "source_module": "chronovisor.ops.system_incident_supervisor",
+          "scope_kind": "function",
+          "scope": "SystemIncidentSupervisor.observe_operational_failure_packet",
+          "statement_kind": "from",
+          "target_module": "chronovisor.raw.failure_supervisor",
+          "symbols": [
+            "OPERATIONAL_SELF_HEAL_FAILURE_CLASSES"
+          ],
+          "content_sha256": "9992c7fdb89f8221bbcc19fe34eaabf660efbdb3d6dcb98c95a29a205635a749",
+          "occurrence": 1,
+          "line": 1065
+        },
+        {
           "semantic_id": "arch:2c00cb9ccec3d03342cf1a4c575e3350bd6451f353e4fa9154a14c829fba4408",
           "source_module": "chronovisor.ops.sleep_cycle",
           "scope_kind": "function",
@@ -6909,6 +6838,20 @@
           "line": 511
         },
         {
+          "semantic_id": "arch:35e77324afdbf85d92310cd40b011a5f0a8a7181450c11419f8242b3b9e4f11c",
+          "source_module": "chronovisor.ops.dashboard",
+          "scope_kind": "function",
+          "scope": "_operational_deferred_raw_statuses",
+          "statement_kind": "from",
+          "target_module": "chronovisor.raw.failure_supervisor",
+          "symbols": [
+            "operational_deferred_raw_files"
+          ],
+          "content_sha256": "3cb58dc1e1b620753327d7368a570328a9b2a93b4ac0573387cabec3eb8ef090",
+          "occurrence": 1,
+          "line": 1045
+        },
+        {
           "semantic_id": "arch:371c9807a5ca2b355c602377604d792ba47129f2cb267f70c7e0471b11e2a713",
           "source_module": "chronovisor.ops.dashboard",
           "scope_kind": "function",
@@ -6921,6 +6864,21 @@
           "content_sha256": "15471ed13cc2d3a5e7bd6750141701824cfee287d70ac1451cc8b3070a782272",
           "occurrence": 1,
           "line": 1271
+        },
+        {
+          "semantic_id": "arch:39943c49978dd3450109e3661b39f6516d4f62bbe7722f5e0ba9018a65fe4ab1",
+          "source_module": "chronovisor.ops.self_heal",
+          "scope_kind": "function",
+          "scope": "release_operational_failure_after_local_repair",
+          "statement_kind": "from",
+          "target_module": "chronovisor.raw.failure_supervisor",
+          "symbols": [
+            "lock_operational_failure_group",
+            "operational_failure_group_snapshot"
+          ],
+          "content_sha256": "81ed3cb356a4f0c32a3e53e91ade295add7abb0cdb4fc14fbe48412c6cd2f5c9",
+          "occurrence": 1,
+          "line": 1345
         },
         {
           "semantic_id": "arch:57703a24c709b144362d4a233f1d37c93399ae730122245c236494e724d8e3a5",
@@ -7076,6 +7034,21 @@
           "line": 1138
         },
         {
+          "semantic_id": "arch:d95235861344317c9c7009eaf12bfeb7c5d904c48340f5048fe5c4397b4e039d",
+          "source_module": "chronovisor.ops.self_heal",
+          "scope_kind": "function",
+          "scope": "_release_operational_failure_after_local_repair_unlocked",
+          "statement_kind": "from",
+          "target_module": "chronovisor.raw.failure_supervisor",
+          "symbols": [
+            "SEMANTIC_NO_QUORUM_FAILURE_CLASS",
+            "verified_projection_child_bytes"
+          ],
+          "content_sha256": "1564938bc6508bf1262af5c223c5c55c0da2c327043848459a2496f00b6c7c1e",
+          "occurrence": 1,
+          "line": 1019
+        },
+        {
           "semantic_id": "arch:e13faa5d11847fcad02503776b4e717103a582c91c21adf3022af34d2db1963f",
           "source_module": "chronovisor.ops.memory_integrity",
           "scope_kind": "module",
@@ -7089,6 +7062,20 @@
           "content_sha256": "4c658176d8f5c1794fc1ec5804c8a16b6bb799693affa0f0ddc294bbab2b0d96",
           "occurrence": 1,
           "line": 20
+        },
+        {
+          "semantic_id": "arch:f7a47defac8367a5bc76ddb50fe039123c348870fd60c859cce02fcf36592113",
+          "source_module": "chronovisor.ops.self_heal",
+          "scope_kind": "function",
+          "scope": "_is_operational_source_packet",
+          "statement_kind": "from",
+          "target_module": "chronovisor.raw.failure_supervisor",
+          "symbols": [
+            "OPERATIONAL_SELF_HEAL_FAILURE_CLASSES"
+          ],
+          "content_sha256": "9992c7fdb89f8221bbcc19fe34eaabf660efbdb3d6dcb98c95a29a205635a749",
+          "occurrence": 1,
+          "line": 2132
         }
       ],
       "semantic_id": "arch:2a4adbb143179d1e9346415026883bd4c2c172c7356f41ae1a515dbb33ea3dd8",
@@ -7681,6 +7668,20 @@
           "line": 25
         },
         {
+          "semantic_id": "arch:43735378ae0e997ab445df134422cf0e1805cbfecad937700234ad92312b5803",
+          "source_module": "chronovisor.raw.failure_supervisor",
+          "scope_kind": "module",
+          "scope": "<module>",
+          "statement_kind": "from",
+          "target_module": "chronovisor.core",
+          "symbols": [
+            "store"
+          ],
+          "content_sha256": "9e7a97b044d22e9d1e788380a310b393c4669dab6334b587a41e29bafc84e8e9",
+          "occurrence": 1,
+          "line": 24
+        },
+        {
           "semantic_id": "arch:4b396f1accdd76d28d16d43f24243aac82be103979ef31951d76f113454092c4",
           "source_module": "chronovisor.raw.raw_replay",
           "scope_kind": "function",
@@ -7722,6 +7723,20 @@
           "content_sha256": "694f154d1632ef40cbe1bafdbcb279cd0996c6e5f78505eea6618035b559bde3",
           "occurrence": 1,
           "line": 30
+        },
+        {
+          "semantic_id": "arch:6e094f8fc2d369a8c2991ee94f26d79d71aefd82c9acf47618f6702dd6a9cca9",
+          "source_module": "chronovisor.raw.failure_supervisor",
+          "scope_kind": "module",
+          "scope": "<module>",
+          "statement_kind": "from",
+          "target_module": "chronovisor.core",
+          "symbols": [
+            "runtime_status"
+          ],
+          "content_sha256": "df1a69d2aeddf56a0843b396f6add76aa28dab4c04bf3606c6981da4e9aae2b7",
+          "occurrence": 1,
+          "line": 23
         },
         {
           "semantic_id": "arch:7190d37d42e16b66f9b1f4be8a7efa3fd402610f89b8cd6e2d3d44f314313439",
@@ -7778,6 +7793,20 @@
           "content_sha256": "29f2a1ffaa5d8d5743f4effc8ae58b17f7441e7938749a7ca9dafe811cdbfacf",
           "occurrence": 1,
           "line": 19
+        },
+        {
+          "semantic_id": "arch:84fb39a809d540fcc706e8a781675e21e17fc5e86543fe0d365552d9438e16a1",
+          "source_module": "chronovisor.raw.failure_supervisor",
+          "scope_kind": "function",
+          "scope": "_current_adopted_authority_sha256",
+          "statement_kind": "from",
+          "target_module": "chronovisor.core",
+          "symbols": [
+            "runtime_config"
+          ],
+          "content_sha256": "2af449fd2162b68216caa6b491ccad15a903588c7a25e6d073016a6dc1257d0f",
+          "occurrence": 1,
+          "line": 800
         },
         {
           "semantic_id": "arch:896cf46a75b4f5a287199e5d68d1c4201888fce00a529580badb9f6f63f2a51d",
@@ -7850,6 +7879,20 @@
           "line": 29
         },
         {
+          "semantic_id": "arch:982ebd461dd490eab1c5b48c7daed671cd494ca134139956de5b7e6aef780aa2",
+          "source_module": "chronovisor.raw.failure_supervisor",
+          "scope_kind": "function",
+          "scope": "record_current_semantic_no_quorum_defer",
+          "statement_kind": "from",
+          "target_module": "chronovisor.core.page_mutation",
+          "symbols": [
+            "decision_authority_lock"
+          ],
+          "content_sha256": "83b862351ccc4292f04c5e15862f5644a85097d866ee606b83a9bb4863012fcb",
+          "occurrence": 1,
+          "line": 1425
+        },
+        {
           "semantic_id": "arch:99e4f9b9839ad0b3a7b72d85c4eb242afad034b6d8221c1937212fb720b877f3",
           "source_module": "chronovisor.raw.raw_segment",
           "scope_kind": "module",
@@ -7890,6 +7933,20 @@
           "content_sha256": "cb02812bf3e9374f6110f805551daef423c1c543f5a05a7dbbf8156a7ffc89fe",
           "occurrence": 1,
           "line": 26
+        },
+        {
+          "semantic_id": "arch:b0994b45dc36cf7ccff700bcbdb118ddcb5e7faf24aa3af7dab0bc8af403c010",
+          "source_module": "chronovisor.raw.failure_supervisor",
+          "scope_kind": "function",
+          "scope": "_launch_self_heal",
+          "statement_kind": "from",
+          "target_module": "chronovisor.core.background_jobs",
+          "symbols": [
+            "start_self_heal_background"
+          ],
+          "content_sha256": "e3cafd19c9e2d7fa1f81d7690ec935cc1bd3c9a09f4d461fb15957e7ff881878",
+          "occurrence": 1,
+          "line": 757
         },
         {
           "semantic_id": "arch:b2c6beebee0b9d312d18af7e2abead00729a549105ea3384084e9067750d9c4a",
@@ -7934,6 +7991,20 @@
           "line": 26
         },
         {
+          "semantic_id": "arch:d65c3eb12bee797c9b8ef623cbb19c4d43f0e05697f8d5f3108291efb91a4ffa",
+          "source_module": "chronovisor.raw.failure_supervisor",
+          "scope_kind": "module",
+          "scope": "<module>",
+          "statement_kind": "from",
+          "target_module": "chronovisor.core.link_fix",
+          "symbols": [
+            "atomic_write"
+          ],
+          "content_sha256": "f5c5569b0e1730d7e91232a28e43a375f2188de5149ce3397d94beb1f8bae6be",
+          "occurrence": 1,
+          "line": 25
+        },
+        {
           "semantic_id": "arch:e05649c18a87d9dafc59f0c3bccbaefd3212630c9d43a7d9a1d8a1aaf98b5188",
           "source_module": "chronovisor.raw.raw_semantic_projection",
           "scope_kind": "module",
@@ -7946,6 +8017,20 @@
           "content_sha256": "29f2a1ffaa5d8d5743f4effc8ae58b17f7441e7938749a7ca9dafe811cdbfacf",
           "occurrence": 1,
           "line": 31
+        },
+        {
+          "semantic_id": "arch:e8d4c34db432d61a42b52c56133fc9eb9bb9f5c1802976dbe23597fe9fef9a0a",
+          "source_module": "chronovisor.raw.failure_supervisor",
+          "scope_kind": "function",
+          "scope": "_supersede_replaced_operational_packets",
+          "statement_kind": "from",
+          "target_module": "chronovisor.core.self_heal_cancellation",
+          "symbols": [
+            "request_packet_cancellation"
+          ],
+          "content_sha256": "50a858e2381c1d36b8f87994261ae7345ec281c26413675dae693ba158288704",
+          "occurrence": 1,
+          "line": 1195
         },
         {
           "semantic_id": "arch:f3a7651d6dc8fb9b9a0350d2780b65b33c81bdab3e501851744cd1639c31735b",
@@ -15228,102 +15313,6 @@
     },
     {
       "category": "cross_domain_edge",
-      "source_package": "decision",
-      "target_package": "raw",
-      "sites": [
-        {
-          "semantic_id": "arch:3ef66d65a83555d2fc3805e63df39d85c8e5dd3b1f9f32ad5442bd0943c6bb04",
-          "source_module": "chronovisor.decision.failure_supervisor",
-          "scope_kind": "function",
-          "scope": "_semantic_packet_source_raws",
-          "statement_kind": "from",
-          "target_module": "chronovisor.raw.raw_store",
-          "symbols": [
-            "RawStore"
-          ],
-          "content_sha256": "15471ed13cc2d3a5e7bd6750141701824cfee287d70ac1451cc8b3070a782272",
-          "occurrence": 1,
-          "line": 966
-        },
-        {
-          "semantic_id": "arch:432331f43bc617b2abad57784178f9a81e3ea54a5cfe95ffc3a9cb7282c324c5",
-          "source_module": "chronovisor.decision.failure_supervisor",
-          "scope_kind": "function",
-          "scope": "_projection_parent_can_retry",
-          "statement_kind": "from",
-          "target_module": "chronovisor.raw.raw_semantic_projection",
-          "symbols": [
-            "projection_bundle_state_for_parent"
-          ],
-          "content_sha256": "ce38efc65fafb242b95ab0aa961a24d5a88df9b6b1e82c4ce002d95fdf657c0f",
-          "occurrence": 1,
-          "line": 1786
-        },
-        {
-          "semantic_id": "arch:5aacbfeee99fc0cabc2a769a0e81ef46057201419fd33a00e8f4ceeeaa8470bf",
-          "source_module": "chronovisor.decision.failure_supervisor",
-          "scope_kind": "function",
-          "scope": "_operational_deferred_raw_files_unlocked",
-          "statement_kind": "from",
-          "target_module": "chronovisor.raw.raw_store",
-          "symbols": [
-            "RawStore"
-          ],
-          "content_sha256": "15471ed13cc2d3a5e7bd6750141701824cfee287d70ac1451cc8b3070a782272",
-          "occurrence": 1,
-          "line": 1845
-        },
-        {
-          "semantic_id": "arch:938950c6712af1a7348f401350ed92dd778a3ffc4aef624d30729f06d686776e",
-          "source_module": "chronovisor.decision.failure_supervisor",
-          "scope_kind": "function",
-          "scope": "_operational_deferred_raw_files_unlocked",
-          "statement_kind": "from",
-          "target_module": "chronovisor.raw.raw_store",
-          "symbols": [
-            "RawStore"
-          ],
-          "content_sha256": "15471ed13cc2d3a5e7bd6750141701824cfee287d70ac1451cc8b3070a782272",
-          "occurrence": 2,
-          "line": 1911
-        },
-        {
-          "semantic_id": "arch:b0bdeedfb7d5a2dded83d62191e8231b02c99cc0ba31858327f7f81c2b10c8bf",
-          "source_module": "chronovisor.decision.failure_supervisor",
-          "scope_kind": "function",
-          "scope": "_semantic_defer_packet_records",
-          "statement_kind": "from",
-          "target_module": "chronovisor.raw.raw_store",
-          "symbols": [
-            "RawStore"
-          ],
-          "content_sha256": "15471ed13cc2d3a5e7bd6750141701824cfee287d70ac1451cc8b3070a782272",
-          "occurrence": 1,
-          "line": 994
-        },
-        {
-          "semantic_id": "arch:fa56fa837fd3074a05a7765bfc9e7ddb34f887eaac2578ed6e780ffd79b59cec",
-          "source_module": "chronovisor.decision.failure_supervisor",
-          "scope_kind": "function",
-          "scope": "verified_projection_child_bytes",
-          "statement_kind": "from",
-          "target_module": "chronovisor.raw",
-          "symbols": [
-            "raw_semantic_projection"
-          ],
-          "content_sha256": "99bb3c870107fc880678efc2a8ea28f400abdd625b37b19460a5981ef1b57b3a",
-          "occurrence": 1,
-          "line": 1745
-        }
-      ],
-      "semantic_id": "arch:9f39a64cb9539bc9ef5eb7326fc5f1f726bfe0ea5907a0f74db1236afebfe8c3",
-      "owner": "chronovisor.decision",
-      "deadline": "2026-12-31",
-      "removal_campaign": "S",
-      "rationale": "Remove the decision->raw package edge through a published contract."
-    },
-    {
-      "category": "cross_domain_edge",
       "source_package": "librarian",
       "target_package": "classification",
       "sites": [
@@ -15744,6 +15733,20 @@
       "target_package": "raw",
       "sites": [
         {
+          "semantic_id": "arch:003571e2dcce070a431b0254cfbcb79771bba0cb7dad10da7b320867cd7f8615",
+          "source_module": "chronovisor.ingest.managed_hold_sync",
+          "scope_kind": "function",
+          "scope": "sync_ingest_semantic_holds",
+          "statement_kind": "from",
+          "target_module": "chronovisor.raw.failure_supervisor",
+          "symbols": [
+            "raw_failure_snapshot"
+          ],
+          "content_sha256": "b488aa0841f7b7298930ae26b92c009441f33b0592d15d6b463930abb801bb8a",
+          "occurrence": 1,
+          "line": 147
+        },
+        {
           "semantic_id": "arch:1f281faf2324041d21a11b92be5b5fb8fb569b8f448620db97711b2b59c1379e",
           "source_module": "chronovisor.ingest.orchestrator",
           "scope_kind": "function",
@@ -15764,6 +15767,20 @@
           "line": 1146
         },
         {
+          "semantic_id": "arch:3596cabccc2ccc6f056860a8c9d21af90c745e7bc625eb35d9ee7bf0bfab35fc",
+          "source_module": "chronovisor.ingest.managed_hold_sync",
+          "scope_kind": "function",
+          "scope": "sync_ingest_semantic_holds",
+          "statement_kind": "from",
+          "target_module": "chronovisor.raw.failure_supervisor",
+          "symbols": [
+            "current_adopted_authority_epoch"
+          ],
+          "content_sha256": "e2efc4c49174a30b0028a746cbb0230141adcfb2359a357f0cae5bd6000b0a42",
+          "occurrence": 1,
+          "line": 133
+        },
+        {
           "semantic_id": "arch:401a99fc1801a9221bb00e8fecd895d0d431b3644266b1e376681618c8ec4737",
           "source_module": "chronovisor.ingest.orchestrator",
           "scope_kind": "function",
@@ -15778,6 +15795,20 @@
           "content_sha256": "63ec717f7913fe56e2b959ec7c9308a4e0b19bfa9171fad84bb8bf76b8d513f5",
           "occurrence": 1,
           "line": 723
+        },
+        {
+          "semantic_id": "arch:445ba3c7eac9b9f5e59d7c16e5e9a1046b1bb219ee44f48476746d062204c3e6",
+          "source_module": "chronovisor.ingest.orchestrator",
+          "scope_kind": "function",
+          "scope": "run_pending_ingest",
+          "statement_kind": "from",
+          "target_module": "chronovisor.raw.failure_supervisor",
+          "symbols": [
+            "reset_raw_failure"
+          ],
+          "content_sha256": "cbc9f36dda0147f0049b7917a1dcea3651dfa41549356db8f9865263a82aee50",
+          "occurrence": 1,
+          "line": 1555
         },
         {
           "semantic_id": "arch:66e72eb1418f5752f745b53dea3c6c735b4fe2c67b24e34e7a4b07cefaea4ad2",
@@ -15799,6 +15830,20 @@
           "line": 1138
         },
         {
+          "semantic_id": "arch:6e95070164d90aa3b76d781eb2c6a43e3392a5317c4dd0e348e9f814601b0bec",
+          "source_module": "chronovisor.ingest.read_back_repair",
+          "scope_kind": "function",
+          "scope": "run_read_back_repair",
+          "statement_kind": "from",
+          "target_module": "chronovisor.raw.failure_supervisor",
+          "symbols": [
+            "queue_operational_failure"
+          ],
+          "content_sha256": "6f0a7b29305018f84d396f638257bde3c9650f3c917e9494e797a8b39351db4d",
+          "occurrence": 1,
+          "line": 1383
+        },
+        {
           "semantic_id": "arch:782cb39609f117c65edfbe1f1fb83813fe9e93af94a5fd035b709455787b6030",
           "source_module": "chronovisor.ingest.orchestrator",
           "scope_kind": "function",
@@ -15811,6 +15856,20 @@
           "content_sha256": "89c9f32e9609fbb92416092d91414bbd6952ecdcadc319d0659e76b37fdee650",
           "occurrence": 1,
           "line": 1382
+        },
+        {
+          "semantic_id": "arch:80a455aa6ada9f294d652785c301aa590021f2c6293083ea7366b9f32035323b",
+          "source_module": "chronovisor.ingest.orchestrator",
+          "scope_kind": "function",
+          "scope": "get_pending_raw_files",
+          "statement_kind": "from",
+          "target_module": "chronovisor.raw.failure_supervisor",
+          "symbols": [
+            "operational_deferred_raw_files"
+          ],
+          "content_sha256": "3cb58dc1e1b620753327d7368a570328a9b2a93b4ac0573387cabec3eb8ef090",
+          "occurrence": 1,
+          "line": 296
         },
         {
           "semantic_id": "arch:b4fd742b9a047c95fee479b0765683ab0ae8c9db17197ae9bfebc9db3cb3d5c2",
@@ -15839,6 +15898,21 @@
           "content_sha256": "15471ed13cc2d3a5e7bd6750141701824cfee287d70ac1451cc8b3070a782272",
           "occurrence": 1,
           "line": 751
+        },
+        {
+          "semantic_id": "arch:e1bd33bbb9befb8fcb5962e43af8cdea7cabf564cc5902381229cf2f5e8ea0b6",
+          "source_module": "chronovisor.ingest.orchestrator",
+          "scope_kind": "function",
+          "scope": "run_pending_ingest",
+          "statement_kind": "from",
+          "target_module": "chronovisor.raw.failure_supervisor",
+          "symbols": [
+            "record_raw_failure",
+            "result_to_dict"
+          ],
+          "content_sha256": "049b21c13570f4a55139ffa65efffa05661007973a2946a5e890566c17c177a3",
+          "occurrence": 1,
+          "line": 1589
         },
         {
           "semantic_id": "arch:e69e47e88b92a3ec219a77ba9fc35fcb9d5147b93b73c96669e612f22472f199",
@@ -16609,20 +16683,6 @@
           "line": 18
         },
         {
-          "semantic_id": "arch:05b771fb4dbc9cb506b72e9192791c7680f2ef8a21132d02fc85d95296acc38d",
-          "source_module": "chronovisor.decision.failure_supervisor",
-          "scope_kind": "module",
-          "scope": "<module>",
-          "statement_kind": "from",
-          "target_module": "chronovisor.core.link_fix",
-          "symbols": [
-            "atomic_write"
-          ],
-          "content_sha256": "f5c5569b0e1730d7e91232a28e43a375f2188de5149ce3397d94beb1f8bae6be",
-          "occurrence": 1,
-          "line": 25
-        },
-        {
           "semantic_id": "arch:07f9f822a8ca796111987775150a387c35c97e7992089b0ece222f15f21a19bf",
           "source_module": "chronovisor.decision.content_correction_contract",
           "scope_kind": "module",
@@ -16737,20 +16797,6 @@
           "line": 3357
         },
         {
-          "semantic_id": "arch:182ecd290a4abacd2bcd6a2cccf5d717aa0b0ed38edd278cd16c82b1c1b776a1",
-          "source_module": "chronovisor.decision.failure_supervisor",
-          "scope_kind": "function",
-          "scope": "record_current_semantic_no_quorum_defer",
-          "statement_kind": "from",
-          "target_module": "chronovisor.core.page_mutation",
-          "symbols": [
-            "decision_authority_lock"
-          ],
-          "content_sha256": "83b862351ccc4292f04c5e15862f5644a85097d866ee606b83a9bb4863012fcb",
-          "occurrence": 1,
-          "line": 1425
-        },
-        {
           "semantic_id": "arch:1f171af94c38125a1f221b247dca12ecab9a326f0ff2a10d6b229225fa197e9f",
           "source_module": "chronovisor.decision.frontier_review",
           "scope_kind": "module",
@@ -16847,34 +16893,6 @@
           "content_sha256": "23af258fa9a7936b5ca592c62f163eefca7f648e9f84381e9d1c5fc70a3a5f80",
           "occurrence": 1,
           "line": 16
-        },
-        {
-          "semantic_id": "arch:30d509a6cee7189c75a36a91c0938ac071bbd07b96b8cf9d67532fe9142ca34c",
-          "source_module": "chronovisor.decision.failure_supervisor",
-          "scope_kind": "function",
-          "scope": "_current_adopted_authority_sha256",
-          "statement_kind": "from",
-          "target_module": "chronovisor.core",
-          "symbols": [
-            "runtime_config"
-          ],
-          "content_sha256": "2af449fd2162b68216caa6b491ccad15a903588c7a25e6d073016a6dc1257d0f",
-          "occurrence": 1,
-          "line": 800
-        },
-        {
-          "semantic_id": "arch:3228a321a308f3ea33f5c3fffa6ed160453fb5100bab5ba40c1fd7f4ef0e9b49",
-          "source_module": "chronovisor.decision.failure_supervisor",
-          "scope_kind": "function",
-          "scope": "_launch_self_heal",
-          "statement_kind": "from",
-          "target_module": "chronovisor.core.background_jobs",
-          "symbols": [
-            "start_self_heal_background"
-          ],
-          "content_sha256": "e3cafd19c9e2d7fa1f81d7690ec935cc1bd3c9a09f4d461fb15957e7ff881878",
-          "occurrence": 1,
-          "line": 757
         },
         {
           "semantic_id": "arch:325c36ac99898061673506e472d6a92e50c308352e97fc70ced08e716cea1850",
@@ -17165,20 +17183,6 @@
           "line": 11
         },
         {
-          "semantic_id": "arch:8712f8e89122f72162313cd14e7af364dd9d1516d9c78fb7282b331c5e635c85",
-          "source_module": "chronovisor.decision.failure_supervisor",
-          "scope_kind": "module",
-          "scope": "<module>",
-          "statement_kind": "from",
-          "target_module": "chronovisor.core",
-          "symbols": [
-            "store"
-          ],
-          "content_sha256": "9e7a97b044d22e9d1e788380a310b393c4669dab6334b587a41e29bafc84e8e9",
-          "occurrence": 1,
-          "line": 24
-        },
-        {
           "semantic_id": "arch:8758b7d8a869e9fa0bff0528b65d7276ab8a4be0b75b21b2cef02ada3f6adfc2",
           "source_module": "chronovisor.decision.semantic_hold",
           "scope_kind": "module",
@@ -17191,20 +17195,6 @@
           "content_sha256": "944af25f5176fe2312863295709a1d52a4559066799927a7a2e1c735c8e9ce0f",
           "occurrence": 1,
           "line": 36
-        },
-        {
-          "semantic_id": "arch:880ac604be5c3dc1d39b79ec854c2ab47c646cd5dae3506e7e73123868d317f8",
-          "source_module": "chronovisor.decision.failure_supervisor",
-          "scope_kind": "function",
-          "scope": "_supersede_replaced_operational_packets",
-          "statement_kind": "from",
-          "target_module": "chronovisor.core.self_heal_cancellation",
-          "symbols": [
-            "request_packet_cancellation"
-          ],
-          "content_sha256": "50a858e2381c1d36b8f87994261ae7345ec281c26413675dae693ba158288704",
-          "occurrence": 1,
-          "line": 1195
         },
         {
           "semantic_id": "arch:88d164ae7e1ef9a94a39f7fcda78102efd03798607f9d9abe0c5424ede4106cb",
@@ -17599,20 +17589,6 @@
           "line": 575
         },
         {
-          "semantic_id": "arch:e6e8966091104e4564d3d87785dc1476f1c9d23263533b055208345672d2e4e9",
-          "source_module": "chronovisor.decision.failure_supervisor",
-          "scope_kind": "module",
-          "scope": "<module>",
-          "statement_kind": "from",
-          "target_module": "chronovisor.core",
-          "symbols": [
-            "runtime_status"
-          ],
-          "content_sha256": "df1a69d2aeddf56a0843b396f6add76aa28dab4c04bf3606c6981da4e9aae2b7",
-          "occurrence": 1,
-          "line": 23
-        },
-        {
           "semantic_id": "arch:ecee5a97008d34b207c73047bee1a4cfacc7768fa31e23e12ab91bd812a561de",
           "source_module": "chronovisor.decision.semantic_hold",
           "scope_kind": "module",
@@ -17754,21 +17730,6 @@
           "content_sha256": "9b9c9ff7e91d64550419c106c5836de84cc9d74f638a95e66e49efdb7fdf3fb2",
           "occurrence": 1,
           "line": 51
-        },
-        {
-          "semantic_id": "arch:02623a88474e0a32eaacd39056396c51a3940ceb4a84a8b22b4c0bb007123363",
-          "source_module": "chronovisor.ops.self_heal",
-          "scope_kind": "function",
-          "scope": "_release_operational_failure_after_local_repair_unlocked",
-          "statement_kind": "from",
-          "target_module": "chronovisor.decision.failure_supervisor",
-          "symbols": [
-            "SEMANTIC_NO_QUORUM_FAILURE_CLASS",
-            "verified_projection_child_bytes"
-          ],
-          "content_sha256": "822f4b3d74046f6fa14e3b69d9152e978098984d8e87dd098e864d5d7f3372e7",
-          "occurrence": 1,
-          "line": 1019
         },
         {
           "semantic_id": "arch:03db09e752755e5319cbcfe74ee48ac2aeec4580ba7291770195c112999a129e",
@@ -17948,21 +17909,6 @@
           "line": 54
         },
         {
-          "semantic_id": "arch:1e4ac1ad7cbc8bdccb4fb4d4c154be90f665461e02fea76d3417b1a485c133c5",
-          "source_module": "chronovisor.ops.self_heal",
-          "scope_kind": "function",
-          "scope": "release_operational_failure_after_local_repair",
-          "statement_kind": "from",
-          "target_module": "chronovisor.decision.failure_supervisor",
-          "symbols": [
-            "lock_operational_failure_group",
-            "operational_failure_group_snapshot"
-          ],
-          "content_sha256": "b85695e4ab166aa659364cb53673aed3cdbd4e6d38c368db6b74e7484d208ccd",
-          "occurrence": 1,
-          "line": 1345
-        },
-        {
           "semantic_id": "arch:208c1de34ea3148b1c88f402486171f927e1d02615f6e3a8308c3cfc56eb5acc",
           "source_module": "chronovisor.ops.lint",
           "scope_kind": "module",
@@ -17975,20 +17921,6 @@
           "content_sha256": "2e9f89979bd864ed666580fd7cf8a4198af5af0a5e0acf62e2c8b525ab876a67",
           "occurrence": 1,
           "line": 57
-        },
-        {
-          "semantic_id": "arch:21c9eceb9aef091de94c96d466562929a8ccbfc9d0d4fbc312939968e84a1497",
-          "source_module": "chronovisor.ops.dashboard",
-          "scope_kind": "function",
-          "scope": "_operational_deferred_raw_statuses",
-          "statement_kind": "from",
-          "target_module": "chronovisor.decision.failure_supervisor",
-          "symbols": [
-            "operational_deferred_raw_files"
-          ],
-          "content_sha256": "f39e50e5b891c9a9d56edcdd7c8a02ee794d1116f436d13c1f3a87148a77d6b9",
-          "occurrence": 1,
-          "line": 1045
         },
         {
           "semantic_id": "arch:25359958022ae993294488f879a25522aaa52cd03d228f6575f2403137ec91c4",
@@ -18105,20 +18037,6 @@
           "content_sha256": "a7d5b2361c1e993fb1968ab527ce2bcb6b76ea231a5360ee92038b1bad51103a",
           "occurrence": 1,
           "line": 39
-        },
-        {
-          "semantic_id": "arch:47c6655b42cc9812f6df2dba9731267026cabf035e4aeee7920947c2bdbf7c09",
-          "source_module": "chronovisor.ops.self_heal",
-          "scope_kind": "function",
-          "scope": "_is_operational_source_packet",
-          "statement_kind": "from",
-          "target_module": "chronovisor.decision.failure_supervisor",
-          "symbols": [
-            "OPERATIONAL_SELF_HEAL_FAILURE_CLASSES"
-          ],
-          "content_sha256": "86e3db03813db9e57febddd82dda8e126f33cade276815f80c69963f7df91963",
-          "occurrence": 1,
-          "line": 2132
         },
         {
           "semantic_id": "arch:47ce88f988da3430b6735bd246e601b0702218f051e1fbdededfd92fa9dc650b",
@@ -18354,20 +18272,6 @@
           "content_sha256": "d2f813795c582db6d197eb6872e1bc3b99dd7b3f779af088e611a78d847bf91c",
           "occurrence": 1,
           "line": 55
-        },
-        {
-          "semantic_id": "arch:82df7c4ca9f7e5d08af89adbf8e07f32acc653c84a47853dde95001370c5fb66",
-          "source_module": "chronovisor.ops.system_incident_supervisor",
-          "scope_kind": "function",
-          "scope": "SystemIncidentSupervisor.observe_operational_failure_packet",
-          "statement_kind": "from",
-          "target_module": "chronovisor.decision.failure_supervisor",
-          "symbols": [
-            "OPERATIONAL_SELF_HEAL_FAILURE_CLASSES"
-          ],
-          "content_sha256": "86e3db03813db9e57febddd82dda8e126f33cade276815f80c69963f7df91963",
-          "occurrence": 1,
-          "line": 1065
         },
         {
           "semantic_id": "arch:8529683137548bbfa1fb1c596f44ee1344207abf9cad0eda3fbc1aec629933cc",
@@ -19105,68 +19009,6 @@
       "target_package": "decision",
       "sites": [
         {
-          "semantic_id": "arch:2617c8b0223c28a6660d110b511d43225485ee3335aa7c287ddeccabc9a4b440",
-          "source_module": "chronovisor.raw.raw_replay",
-          "scope_kind": "function",
-          "scope": "_preview_semantic_no_quorum_defer",
-          "statement_kind": "from",
-          "target_module": "chronovisor.decision.failure_supervisor",
-          "symbols": [
-            "SEMANTIC_NO_QUORUM_DEFER_REASON",
-            "SEMANTIC_NO_QUORUM_FAILURE_CLASS",
-            "classify_failure",
-            "current_adopted_authority_sha256"
-          ],
-          "content_sha256": "3b47ba7de0df84cd77e20255b8abc92d264e9ca018cfbedee9aa20d1f92654b8",
-          "occurrence": 1,
-          "line": 2439
-        },
-        {
-          "semantic_id": "arch:2e2fe58f1d6c0340970163c581f8434c1cb0d483d90098a34d5f40ab73091c1e",
-          "source_module": "chronovisor.raw.raw_replay",
-          "scope_kind": "function",
-          "scope": "_cheap_semantic_no_quorum_candidate",
-          "statement_kind": "from",
-          "target_module": "chronovisor.decision.failure_supervisor",
-          "symbols": [
-            "SEMANTIC_NO_QUORUM_DEFER_REASON",
-            "SEMANTIC_NO_QUORUM_FAILURE_CLASS",
-            "classify_failure",
-            "current_adopted_authority_sha256"
-          ],
-          "content_sha256": "3b47ba7de0df84cd77e20255b8abc92d264e9ca018cfbedee9aa20d1f92654b8",
-          "occurrence": 1,
-          "line": 2490
-        },
-        {
-          "semantic_id": "arch:46ffa212367c68391da5d408bd5474721fd085a662e22a7dc16fee033fbfc669",
-          "source_module": "chronovisor.raw.raw_replay",
-          "scope_kind": "function",
-          "scope": "_active_operational_deferred_raw_statuses",
-          "statement_kind": "from",
-          "target_module": "chronovisor.decision.failure_supervisor",
-          "symbols": [
-            "operational_deferred_raw_files"
-          ],
-          "content_sha256": "f39e50e5b891c9a9d56edcdd7c8a02ee794d1116f436d13c1f3a87148a77d6b9",
-          "occurrence": 1,
-          "line": 203
-        },
-        {
-          "semantic_id": "arch:557232e59a49610ccdacf06186dcf5d7342aa0176b7fa80d4f7d4b75279d74e6",
-          "source_module": "chronovisor.raw.raw_replay",
-          "scope_kind": "function",
-          "scope": "_reconcile_pending_failure_resets",
-          "statement_kind": "from",
-          "target_module": "chronovisor.decision.failure_supervisor",
-          "symbols": [
-            "reset_raw_failure"
-          ],
-          "content_sha256": "d2751b3afaa6ed8a637f3f714fc2ce7d7e11d0185781d47c3520f8736199327a",
-          "occurrence": 1,
-          "line": 2917
-        },
-        {
           "semantic_id": "arch:56695a355607fd72d62926f0c2585e8320928578ced2265f9a7fb6045f6c1c6c",
           "source_module": "chronovisor.raw.raw_replay",
           "scope_kind": "module",
@@ -19187,6 +19029,21 @@
           "line": 43
         },
         {
+          "semantic_id": "arch:671334bf46cec9e83a744fd0295bc81176e4360c5c590c40ec1a0b131bd648a0",
+          "source_module": "chronovisor.raw.failure_supervisor",
+          "scope_kind": "function",
+          "scope": "_current_adopted_authority_epoch",
+          "statement_kind": "from",
+          "target_module": "chronovisor.decision.decision_router",
+          "symbols": [
+            "DECISION_SEMANTICS_POLICY_VERSION",
+            "QUORUM_SAFETY_POLICY_VERSION"
+          ],
+          "content_sha256": "a83d43fa1ca6f427e8a5e1b23ed9c826a1a4497a60395efa98d208521e5ebd2e",
+          "occurrence": 1,
+          "line": 840
+        },
+        {
           "semantic_id": "arch:75cabe27458967013ae648e701c8d9434a51f066134417ab6f4f8da467c1e5ff",
           "source_module": "chronovisor.raw.raw_replay",
           "scope_kind": "module",
@@ -19205,22 +19062,6 @@
           "line": 32
         },
         {
-          "semantic_id": "arch:78b51c02e745d92262679d82315fae53833c1d4c2675790dd9fd4526ebdb601a",
-          "source_module": "chronovisor.raw.raw_replay",
-          "scope_kind": "function",
-          "scope": "_active_semantic_defer_packet_evidence",
-          "statement_kind": "from",
-          "target_module": "chronovisor.decision.failure_supervisor",
-          "symbols": [
-            "SEMANTIC_NO_QUORUM_DEFER_REASON",
-            "current_adopted_authority_epoch",
-            "semantic_defer_packet_records"
-          ],
-          "content_sha256": "4c28ed341f4094ca310fc57922aaf7503a632b5d58ad6fee40759c964024151c",
-          "occurrence": 1,
-          "line": 2604
-        },
-        {
           "semantic_id": "arch:979713860da5e22cfefff7f311b40019586e3a9639f6630cd5a4bb77372b26fa",
           "source_module": "chronovisor.raw.raw_replay",
           "scope_kind": "function",
@@ -19235,18 +19076,33 @@
           "line": 1688
         },
         {
-          "semantic_id": "arch:9f34d2ec8a8fe626c432f404dcfbe0e8e6ba9f9a3b193e41db373128a77fc96a",
-          "source_module": "chronovisor.raw.raw_replay",
+          "semantic_id": "arch:99d92958da93f53d0e5c2f1d1b86515cf0283f5ec277b8357c2b15cf457d9da5",
+          "source_module": "chronovisor.raw.failure_supervisor",
           "scope_kind": "function",
-          "scope": "_active_terminal_semantic_deferred_raw_names",
+          "scope": "_current_adopted_authority_sha256",
           "statement_kind": "from",
-          "target_module": "chronovisor.decision.failure_supervisor",
+          "target_module": "chronovisor.decision.decision_router",
           "symbols": [
-            "operational_deferred_raw_files"
+            "resolve_router_policy"
           ],
-          "content_sha256": "f39e50e5b891c9a9d56edcdd7c8a02ee794d1116f436d13c1f3a87148a77d6b9",
+          "content_sha256": "d1ef573cec062b8929cb8acea2d7ea770ed9d93a73d747ccc705eff1aaa80d8c",
           "occurrence": 1,
-          "line": 186
+          "line": 801
+        },
+        {
+          "semantic_id": "arch:9d019679b9c3174ec3ad72706a751722c6d22ae9f11d88f13707c3f2424685a0",
+          "source_module": "chronovisor.raw.failure_supervisor",
+          "scope_kind": "function",
+          "scope": "_current_adopted_authority_epoch",
+          "statement_kind": "from",
+          "target_module": "chronovisor.decision.decision_lane_contracts",
+          "symbols": [
+            "LANE_CONTRACT_POLICY_VERSION",
+            "lane_contract_manifest_sha256"
+          ],
+          "content_sha256": "c11d02fa788b1da9904ca826fdcddd25e763380da1ba2f6e117f040ec1de5456",
+          "occurrence": 1,
+          "line": 836
         },
         {
           "semantic_id": "arch:bfb28f4676affa4dcee1c74676daeac0757d728e4731cba8a54ec26b3ae35ae1",
@@ -19263,24 +19119,6 @@
           "line": 1702
         },
         {
-          "semantic_id": "arch:c69ad967a2e7235539e12b716ebbce5c9994b19b022001c63acc550e00d50156",
-          "source_module": "chronovisor.raw.raw_replay",
-          "scope_kind": "function",
-          "scope": "_publish_semantic_no_quorum_defer",
-          "statement_kind": "from",
-          "target_module": "chronovisor.decision.failure_supervisor",
-          "symbols": [
-            "SEMANTIC_NO_QUORUM_DEFER_REASON",
-            "SEMANTIC_NO_QUORUM_FAILURE_CLASS",
-            "classify_failure",
-            "current_adopted_authority_sha256",
-            "record_semantic_no_quorum_defer_unless_operational_hold"
-          ],
-          "content_sha256": "35d3b061e5e1379372c221c7ae0008afe4d8f2e64cb62867db7f99af7a1b1b27",
-          "occurrence": 1,
-          "line": 2371
-        },
-        {
           "semantic_id": "arch:e8ad73c463c7f521b03c76c09f1319298bd3c07803ba740b5012ddbff2bc95dc",
           "source_module": "chronovisor.raw.raw_replay",
           "scope_kind": "module",
@@ -19293,20 +19131,6 @@
           "content_sha256": "abb9daecd27b7c1b6d8500264d9f256e2f37f1dcbd11e606e4012c0e66bfb005",
           "occurrence": 1,
           "line": 39
-        },
-        {
-          "semantic_id": "arch:ebafc791df2bef7f53a381291731e3514236eec82b122061605647975bcc1956",
-          "source_module": "chronovisor.raw.raw_replay",
-          "scope_kind": "function",
-          "scope": "_run_candidate.record_processed",
-          "statement_kind": "from",
-          "target_module": "chronovisor.decision.failure_supervisor",
-          "symbols": [
-            "reset_raw_failure"
-          ],
-          "content_sha256": "d2751b3afaa6ed8a637f3f714fc2ce7d7e11d0185781d47c3520f8736199327a",
-          "occurrence": 1,
-          "line": 3094
         },
         {
           "semantic_id": "arch:f9fc267010ca2d70dee5c210073b8fba75159fdb6b51d4b5ea708271b1118610",

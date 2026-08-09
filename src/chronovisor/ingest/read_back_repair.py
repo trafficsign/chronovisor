@@ -1380,7 +1380,7 @@ def run_read_back_repair(
             and not entry.get("self_heal_packet_path")
             and _should_queue_operational_self_heal(failure, entry)
         ):
-            from chronovisor.decision.failure_supervisor import (
+            from chronovisor.raw.failure_supervisor import (
                 queue_operational_failure,
             )
 

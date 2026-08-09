@@ -20,7 +20,7 @@ from chronovisor.core.durable_state import (
 )
 from chronovisor.core.managed_hold import ManagedHoldStore
 from chronovisor.core.runtime_config import DecisionRouterConfig
-from chronovisor.decision import decision_authority, decision_router, failure_supervisor
+from chronovisor.decision import decision_authority, decision_router
 from chronovisor.decision.decision_artifact import (
     DecisionArtifactStore,
     execution_fingerprint,
@@ -47,7 +47,7 @@ from chronovisor.ingest.read_back_integrity import (
 )
 from chronovisor.ops import burn_monitor, health, repair_runbook
 from chronovisor.ops.deadman import inspect_heartbeat, write_heartbeat
-from chronovisor.raw import raw_replay
+from chronovisor.raw import failure_supervisor, raw_replay
 from chronovisor.raw.raw_semantic_projection import (
     PROJECTION_CHILD_SCHEMA,
     PROJECTION_POLICY_VERSION,

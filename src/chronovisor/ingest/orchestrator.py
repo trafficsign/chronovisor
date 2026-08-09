@@ -293,7 +293,7 @@ def get_pending_raw_files() -> list[Path]:
     A raw with ``raw_status: retracted`` remains on disk as audit evidence,
     but is never offered to normal ingest.
     """
-    from chronovisor.decision.failure_supervisor import operational_deferred_raw_files
+    from chronovisor.raw.failure_supervisor import operational_deferred_raw_files
     from chronovisor.raw.raw_replay import is_raw_retracted
 
     state = _load_state()
@@ -1552,7 +1552,7 @@ def run_pending_ingest(
                     succeeded_filenames.extend(source_filenames)
                     succeeded_units += 1
                     try:
-                        from chronovisor.decision.failure_supervisor import (
+                        from chronovisor.raw.failure_supervisor import (
                             reset_raw_failure,
                         )
 
@@ -1586,7 +1586,7 @@ def run_pending_ingest(
                         }
                     else:
                         try:
-                            from chronovisor.decision.failure_supervisor import (
+                            from chronovisor.raw.failure_supervisor import (
                                 record_raw_failure,
                                 result_to_dict,
                             )

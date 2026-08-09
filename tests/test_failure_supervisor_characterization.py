@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 
 from chronovisor.core import store
-from chronovisor.decision import failure_supervisor
+from chronovisor.raw import failure_supervisor
 
 
 def test_corrupt_failure_state_fails_closed_to_empty_snapshot(

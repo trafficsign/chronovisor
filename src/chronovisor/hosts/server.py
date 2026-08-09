@@ -316,7 +316,7 @@ def chronovisor_log(limit: int = 20) -> str:
 
 def _raw_defer_counts() -> tuple[int, int, int]:
     """Return raw total plus semantic and operational queue-hold counts."""
-    from chronovisor.decision.failure_supervisor import (
+    from chronovisor.raw.failure_supervisor import (
         SEMANTIC_NO_QUORUM_DEFER_REASON,
         operational_deferred_raw_files,
     )

@@ -1042,7 +1042,7 @@ def _add_sample(row: dict[str, Any], key: str, value: str, limit: int = 6) -> No
 def _operational_deferred_raw_statuses(raw_paths: list[Path]) -> dict[str, str]:
     """Return active queue holds keyed by immutable raw filename."""
 
-    from chronovisor.decision.failure_supervisor import operational_deferred_raw_files
+    from chronovisor.raw.failure_supervisor import operational_deferred_raw_files
 
     return operational_deferred_raw_files(raw_paths)
 

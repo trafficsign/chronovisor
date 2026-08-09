@@ -43,7 +43,7 @@ def _seed_raws(root: Path) -> Path:
 def _patch_deferred_statuses(
     monkeypatch: pytest.MonkeyPatch,
 ) -> list[list[str]]:
-    from chronovisor.decision import failure_supervisor
+    from chronovisor.raw import failure_supervisor
 
     scans: list[list[str]] = []
 

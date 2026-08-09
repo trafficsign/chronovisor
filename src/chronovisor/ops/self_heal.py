@@ -1016,7 +1016,7 @@ def _release_operational_failure_after_local_repair_unlocked(
             **details,
         )
 
-    from chronovisor.decision.failure_supervisor import (
+    from chronovisor.raw.failure_supervisor import (
         SEMANTIC_NO_QUORUM_FAILURE_CLASS,
         verified_projection_child_bytes,
     )
@@ -1342,7 +1342,7 @@ def release_operational_failure_after_local_repair(
         "verification_result": verification_result,
         "dry_run": dry_run,
     }
-    from chronovisor.decision.failure_supervisor import (
+    from chronovisor.raw.failure_supervisor import (
         lock_operational_failure_group,
         operational_failure_group_snapshot,
     )
@@ -2129,7 +2129,7 @@ def _trusted_repair_packet_job_id(
 
 def _is_operational_source_packet(packet: dict[str, Any]) -> bool:
     try:
-        from chronovisor.decision.failure_supervisor import (
+        from chronovisor.raw.failure_supervisor import (
             OPERATIONAL_SELF_HEAL_FAILURE_CLASSES,
         )
     except ImportError:

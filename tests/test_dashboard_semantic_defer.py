@@ -643,10 +643,9 @@ def test_orchestrator_reports_terminal_semantic_defer_without_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from chronovisor.core import jobs, runtime_config
-    from chronovisor.decision import failure_supervisor
     from chronovisor.ingest import ingest, orchestrator
     from chronovisor.ops import runtime_status
-    from chronovisor.raw import raw_semantic_projection
+    from chronovisor.raw import failure_supervisor, raw_semantic_projection
 
     chronovisor_root = tmp_path / "wiki"
     raw_dir = chronovisor_root / "raw"

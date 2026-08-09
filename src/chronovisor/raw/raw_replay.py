@@ -183,7 +183,7 @@ def _active_terminal_semantic_deferred_raw_names() -> frozenset[str]:
     semantic no-quorum defer. Raw replay must not bypass either kind of hold.
     """
 
-    from chronovisor.decision.failure_supervisor import operational_deferred_raw_files
+    from chronovisor.raw.failure_supervisor import operational_deferred_raw_files
 
     deferred = operational_deferred_raw_files()
     return frozenset(deferred)
@@ -200,7 +200,7 @@ def _active_operational_deferred_raw_statuses(
     queue rows keeps the supervisor lookup bounded to the actual work set.
     """
 
-    from chronovisor.decision.failure_supervisor import operational_deferred_raw_files
+    from chronovisor.raw.failure_supervisor import operational_deferred_raw_files
 
     raw_paths: list[Path] | None = None
     if rows is not None:
@@ -2368,7 +2368,7 @@ def _publish_semantic_no_quorum_defer(
     legacy failed/quarantined rows safe without another model call.
     """
 
-    from chronovisor.decision.failure_supervisor import (
+    from chronovisor.raw.failure_supervisor import (
         SEMANTIC_NO_QUORUM_DEFER_REASON,
         SEMANTIC_NO_QUORUM_FAILURE_CLASS,
         classify_failure,
@@ -2436,7 +2436,7 @@ def _preview_semantic_no_quorum_defer(
 ) -> dict[str, Any] | None:
     """Prove that a legacy error is publishable without writing its packet."""
 
-    from chronovisor.decision.failure_supervisor import (
+    from chronovisor.raw.failure_supervisor import (
         SEMANTIC_NO_QUORUM_DEFER_REASON,
         SEMANTIC_NO_QUORUM_FAILURE_CLASS,
         classify_failure,
@@ -2487,7 +2487,7 @@ def _cheap_semantic_no_quorum_candidate(
     authority hash, and file existence only.
     """
 
-    from chronovisor.decision.failure_supervisor import (
+    from chronovisor.raw.failure_supervisor import (
         SEMANTIC_NO_QUORUM_DEFER_REASON,
         SEMANTIC_NO_QUORUM_FAILURE_CLASS,
         classify_failure,
@@ -2601,7 +2601,7 @@ def _active_semantic_defer_packet_evidence(
     raw_name = _raw_name(dict(row))
     if not raw_name or raw_name not in active_raws:
         return None
-    from chronovisor.decision.failure_supervisor import (
+    from chronovisor.raw.failure_supervisor import (
         SEMANTIC_NO_QUORUM_DEFER_REASON,
         current_adopted_authority_epoch,
         semantic_defer_packet_records,
@@ -2914,7 +2914,7 @@ def _reconcile_pending_failure_resets(
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], bool]:
     """Finish supervisor cleanup proven pending by the completion journal."""
 
-    from chronovisor.decision.failure_supervisor import reset_raw_failure
+    from chronovisor.raw.failure_supervisor import reset_raw_failure
 
     reconciled: list[dict[str, Any]] = []
     budget_deferred: list[dict[str, Any]] = []
@@ -3091,7 +3091,7 @@ def _run_candidate(
                 # only after the durable completion marker exists, so an old
                 # semantic packet cannot re-hold a successfully replayed raw if
                 # authority resolution later fails or rolls back.
-                from chronovisor.decision.failure_supervisor import reset_raw_failure
+                from chronovisor.raw.failure_supervisor import reset_raw_failure
 
                 try:
                     reset_raw_failure(_raw_name(row) or Path(raw).name)

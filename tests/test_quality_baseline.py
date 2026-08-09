@@ -4,8 +4,7 @@ import ast
 import tomllib
 from pathlib import Path
 
-from chronovisor.decision import failure_supervisor
-from chronovisor.raw import raw_replay
+from chronovisor.raw import failure_supervisor, raw_replay
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
