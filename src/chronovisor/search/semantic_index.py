@@ -141,7 +141,7 @@ def extract_page_documents(path: Path) -> list[SemanticDocument]:
     """Project one canonical page into page/question/chunk documents."""
 
     from chronovisor.search.search import (
-        _FRONTMATTER_RE,
+        FRONTMATTER_RE,
         _markdown_chunks,
         _recall_questions_from_content,
     )
@@ -163,7 +163,7 @@ def extract_page_documents(path: Path) -> list[SemanticDocument]:
     title = title_match.group(1).strip() if title_match else page_id
     questions = _recall_questions_from_content(content)
     recall_text = "\n".join(f"Q: {question}" for question in questions)
-    page_text = f"{title}\n\n{recall_text}\n\n{_FRONTMATTER_RE.sub('', content)[:2000]}"
+    page_text = f"{title}\n\n{recall_text}\n\n{FRONTMATTER_RE.sub('', content)[:2000]}"
     common = {
         "page_id": page_id,
         "source_path": str(path),

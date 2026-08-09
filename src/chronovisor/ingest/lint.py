@@ -15,6 +15,7 @@ from typing import Any
 
 from chronovisor.core.canonical_json import canonical_json_permissive as _canonical_json
 from chronovisor.core.hashutil import sha256_text as _sha256_text
+from chronovisor.core.index_store import get_store
 from chronovisor.core.link_fix import (
     WIKI_LINK_RE,
     atomic_write,
@@ -74,7 +75,6 @@ from chronovisor.decision.semantic_hold import (
 from chronovisor.decision.semantic_hold import (
     canonical_sha256 as semantic_hold_sha256,
 )
-from chronovisor.search.index_store import get_store
 
 STALE_DAYS = 90  # Pages not updated in this many days are flagged
 REPO_ROOT = runtime_repo_root()
@@ -403,7 +403,7 @@ def _safe_fix_artifact_dir(path: Path | None = None) -> Path:
         return path
     # Resolve this dynamically: isolated tests and embedded runtimes patch the
     # index-store Wiki root after this module has already been imported.
-    from chronovisor.search import index_store
+    from chronovisor.core import index_store
 
     return Path(index_store.CHRONOVISOR_ROOT) / "runtime" / "lint-safe-fixes"
 

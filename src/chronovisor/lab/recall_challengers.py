@@ -41,7 +41,7 @@ def _page_collection(limit: int = 0) -> tuple[list[str], list[str]]:
     """Return stable full-corpus page IDs/text for an isolated lab index."""
 
     from chronovisor.core.frontmatter import parse
-    from chronovisor.search.index_store import get_store
+    from chronovisor.core.index_store import get_store
 
     store = get_store()
     store.refresh_if_stale()

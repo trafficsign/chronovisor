@@ -31,6 +31,7 @@ from chronovisor.core.ollama import (
     is_available,
 )
 from chronovisor.core.runtime_config import load_ingest_config
+from chronovisor.core.search_types import tokenize
 from chronovisor.core.store import (
     INDEX_FILE,
     LOG_FILE,
@@ -233,7 +234,6 @@ from chronovisor.ingest.triage_plan import (
     collapse_exact_duplicate_operations,
     distinct_target_collisions,
 )
-from chronovisor.search.search_types import tokenize
 
 # ---------------------------------------------------------------------------
 # Stage 1: Triage — analyze raw content and produce a structured plan
@@ -1089,7 +1089,7 @@ def _relative_page_filename(path: Path) -> str:
 
 def _existing_candidate_metas() -> list[dict]:
     try:
-        from chronovisor.search.index_store import get_store
+        from chronovisor.core.index_store import get_store
 
         store = get_store()
         store.refresh()
@@ -1156,7 +1156,7 @@ def _search_candidate_metas(op: dict) -> list[dict]:
         return []
 
     try:
-        from chronovisor.search.index_store import get_store
+        from chronovisor.core.index_store import get_store
         from chronovisor.search.search import search
 
         results, _mode = search(query, top_n=5, semantic=True)

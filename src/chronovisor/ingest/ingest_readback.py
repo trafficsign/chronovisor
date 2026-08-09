@@ -42,7 +42,7 @@ def verify_changed_pages_read_back(page_ids: list[str], *, top_n: int = 10) -> d
         return {"checked": 0, "passed": 0, "failed": []}
     runtime = _runtime()
     try:
-        from chronovisor.search.index_store import get_store
+        from chronovisor.core.index_store import get_store
         from chronovisor.search.search import search
 
         store = get_store()
@@ -140,7 +140,7 @@ def _refresh_ingest_derived_artifacts(
         runtime._safe_log(f"ingest | index.md rebuild failed (non-fatal): {exc}")
 
     try:
-        from chronovisor.search.index_store import get_store
+        from chronovisor.core.index_store import get_store
 
         get_store().refresh()
     except Exception as exc:

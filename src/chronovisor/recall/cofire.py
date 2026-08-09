@@ -10,6 +10,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from chronovisor.core.feedback_ledger import (
+    feedback_row_sha256,
+    trusted_negative_feedback_rows,
+)
 from chronovisor.core.recall_log_schema import (
     canonicalize_page_ids,
     join_used_recall_episodes,
@@ -23,10 +27,6 @@ from chronovisor.recall.recall_answer_eval import (
 )
 from chronovisor.recall.recall_field_schema import session_hash
 from chronovisor.search.cofire import COFIRE_FILE
-from chronovisor.search.feedback_ledger import (
-    feedback_row_sha256,
-    trusted_negative_feedback_rows,
-)
 
 RECALL_LOG_FILE = RECALL_DIR / "recall-log.jsonl"
 RECALL_PULL_LOG_FILE = RECALL_DIR / "pull-log.jsonl"

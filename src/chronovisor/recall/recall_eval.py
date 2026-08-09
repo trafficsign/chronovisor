@@ -13,6 +13,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from chronovisor.core.feedback_ledger import active_feedback_rows
 from chronovisor.core.store import CHRONOVISOR_ROOT
 from chronovisor.recall.recall_runtime import (
     RECALL_FEEDBACK_FILE,
@@ -23,7 +24,6 @@ from chronovisor.recall.recall_runtime import (
     load_policy,
     run_recall,
 )
-from chronovisor.search.feedback_ledger import active_feedback_rows
 
 BASELINE_DIR = CHRONOVISOR_ROOT / "runtime" / "eval"
 

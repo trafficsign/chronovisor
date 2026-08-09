@@ -5,11 +5,11 @@ import json
 from pathlib import Path
 
 from chronovisor.core.durable_state import write_sealed_json
+from chronovisor.core.feedback_ledger import feedback_row_sha256
 from chronovisor.recall import cofire
 from chronovisor.recall.cofire import build_cofire_graph
 from chronovisor.recall.recall_field_schema import session_hash
 from chronovisor.search.cofire import neighbors
-from chronovisor.search.feedback_ledger import feedback_row_sha256
 
 
 def test_build_cofire_graph_counts_repeated_context_pairs(tmp_path: Path) -> None:
@@ -120,7 +120,7 @@ def _write_train_answer_artifact(path: Path, page_hashes: dict[str, str]) -> Non
 def test_verified_train_outcomes_build_positive_graph_and_exact_negative_retracts(
     tmp_path: Path, monkeypatch
 ) -> None:
-    from chronovisor.search import feedback_ledger
+    from chronovisor.core import feedback_ledger
 
     pages = {}
     hashes = {}

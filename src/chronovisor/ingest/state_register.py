@@ -213,7 +213,7 @@ def refresh_state_register(
     path: Path = STATE_PAGE,
 ) -> dict[str, Any]:
     """Refresh the working-memory state from recently changed wiki pages."""
-    from chronovisor.search.index_store import get_store
+    from chronovisor.core.index_store import get_store
 
     store = get_store()
     store.refresh()

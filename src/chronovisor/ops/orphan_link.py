@@ -408,7 +408,7 @@ def run_dry_run(
     before committing to the full ~335-orphan sweep).
     """
     if store is None:
-        from chronovisor.search.index_store import get_store
+        from chronovisor.core.index_store import get_store
 
         store = get_store()
         store.refresh()
@@ -1073,7 +1073,7 @@ def run_autonomous(
     )
     recovered_keys = {str(row.get("key") or "") for row in recovered}
     if store is None:
-        from chronovisor.search.index_store import get_store
+        from chronovisor.core.index_store import get_store
 
         store = get_store()
         store.refresh()

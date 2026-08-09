@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from chronovisor.core.runtime_config import NegativeFeedbackConfig, RerankerConfig
-from chronovisor.search.search_types import ScoredPage
+from chronovisor.core.search_types import ScoredPage
 
 
 @dataclass(frozen=True)

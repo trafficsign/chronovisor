@@ -24,6 +24,7 @@ from typing import Any
 from chronovisor.core.canonical_json import (
     canonical_json_sha256_stringifying as _canonical_json_sha256,
 )
+from chronovisor.core.feedback_ledger import active_feedback_rows
 from chronovisor.core.page_mutation import decision_authority_lock
 from chronovisor.core.runtime_config import load_toml_file, runtime_repo_root
 from chronovisor.core.runtime_status import safe_append_event, safe_append_metric
@@ -104,7 +105,6 @@ from chronovisor.recall.recall_runtime import (
     RECALL_LOG_FILE,
     load_policy,
 )
-from chronovisor.search.feedback_ledger import active_feedback_rows
 
 _candidate_blockers = candidate_blockers
 _filter_blocker_counts = filter_blocker_counts

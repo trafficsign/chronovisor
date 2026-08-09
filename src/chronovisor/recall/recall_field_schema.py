@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from chronovisor.core.runtime_config import active_config_file, load_toml_file
-from chronovisor.search.search_types import tokenize
+from chronovisor.core.search_types import tokenize
 
 FIELD_SCHEMA_VERSION = 2
 FIELD_EVENT_KINDS = frozenset(

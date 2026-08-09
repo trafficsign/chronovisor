@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+from chronovisor.core.search_types import ScoredPage
 from chronovisor.recall.contextual_suppression import ranking_components
-from chronovisor.search.search_types import ScoredPage
 
 
 class Graph:

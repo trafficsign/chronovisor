@@ -30,6 +30,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from chronovisor.core.frontmatter import parse as fm_parse
 from chronovisor.core.frontmatter import patch as fm_patch
+from chronovisor.core.index_store import get_store
 from chronovisor.core.ollama import generate as _ollama_generate
 from chronovisor.core.store import find_page
 from chronovisor.core.tag_rules import SEED_TAGS
@@ -37,7 +38,6 @@ from chronovisor.librarian.tag_distribution import (
     TAG_REPORT_SYSTEM_PROMPT,
     parse_llm_response,
 )
-from chronovisor.search.index_store import get_store
 
 DRY_RUN_DIR = Path.home() / ".chronovisor" / ".tag-backfill-dryrun"
 PLAN_INBOX = Path.home() / "projects" / "plan" / "inbox"

@@ -13,8 +13,8 @@ from typing import Any
 
 from chronovisor.core.durable_state import exclusive_text_file_lock
 from chronovisor.core.frontmatter import parse
+from chronovisor.core.search_types import tokenize
 from chronovisor.core.store import CHRONOVISOR_ROOT, find_page
-from chronovisor.search.search_types import tokenize
 
 CERTIFICATE_LEDGER = CHRONOVISOR_ROOT / "recall" / "evidence-certificate-ledger.jsonl"
 CERTIFICATE_LEDGER_LOCK = CERTIFICATE_LEDGER.parent / "evidence-certificate-ledger.jsonl.lock"

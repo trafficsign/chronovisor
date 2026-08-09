@@ -492,7 +492,8 @@ def _repair_evidence_digest(
 
 
 def _reset_derived_index_singletons() -> None:
-    from chronovisor.search import index_store, search
+    from chronovisor.core import index_store
+    from chronovisor.search import search
 
     with index_store._store_lock:
         index_store._store = None
@@ -525,7 +526,8 @@ def _default_health_repair(attempt: int, *, dry_run: bool) -> Mapping[str, Any]:
     if attempt != 2:
         raise ValueError("unsupported health repair attempt")
 
-    from chronovisor.search import index_store, search
+    from chronovisor.core import index_store
+    from chronovisor.search import search
 
     cache_paths = (
         index_store.PAGES_INDEX_FILE,

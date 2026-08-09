@@ -11,11 +11,11 @@ from pathlib import Path
 from typing import Any
 
 from chronovisor.core.runtime_config import RerankerConfig
+from chronovisor.core.search_types import ScoredPage
 from chronovisor.search.reranker import (
     RerankOutcome,
     apply_reranker_scores,
 )
-from chronovisor.search.search_types import ScoredPage
 
 
 class RerankerServiceUnavailable(RuntimeError):

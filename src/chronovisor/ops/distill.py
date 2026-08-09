@@ -9,8 +9,8 @@ from pathlib import Path
 from typing import Any
 
 from chronovisor.core.frontmatter import parse
+from chronovisor.core.index_store import get_store
 from chronovisor.core.store import CHRONOVISOR_ROOT, find_page
-from chronovisor.search.index_store import get_store
 
 DISTILL_DIR = CHRONOVISOR_ROOT / "distill"
 DISTILL_FILE = DISTILL_DIR / "wiki-qa.jsonl"

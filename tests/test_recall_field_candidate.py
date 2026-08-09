@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import json
 
+from chronovisor.core.search_types import ScoredPage
 from chronovisor.recall import recall_field_candidate
 from chronovisor.recall.recall_field_schema import RecallFieldConfig
-from chronovisor.search.search_types import ScoredPage
 
 
 def page(page_id: str, score: float = 1.0) -> ScoredPage:

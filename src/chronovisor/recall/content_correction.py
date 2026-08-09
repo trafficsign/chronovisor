@@ -33,6 +33,12 @@ from chronovisor.core.evidence_grounding import (
     ProtectedLiteralGroundingError,
     validate_protected_literals,
 )
+from chronovisor.core.feedback_ledger import (
+    PAGE_IGNORED_RETRACTION_KIND,
+    feedback_row_sha256,
+    read_jsonl_rows,
+    retracted_page_ignored_targets,
+)
 from chronovisor.core.frontmatter import parse as parse_frontmatter
 from chronovisor.core.jsonl_write import append_jsonl_durable
 from chronovisor.core.page_mutation import (
@@ -117,12 +123,6 @@ from chronovisor.recall.recall_runtime import (
     recall_log_snapshot,
 )
 from chronovisor.search.claims import rebuild_claim_index
-from chronovisor.search.feedback_ledger import (
-    PAGE_IGNORED_RETRACTION_KIND,
-    feedback_row_sha256,
-    read_jsonl_rows,
-    retracted_page_ignored_targets,
-)
 
 PROJECT_ROOT = runtime_repo_root()
 LANE = "content_correction"
@@ -2901,7 +2901,7 @@ def _classification_directive_error(
 def _refresh_after_apply(page_ids: list[str]) -> dict[str, Any]:
     result: dict[str, Any] = {"pages": page_ids, "errors": []}
     try:
-        from chronovisor.search.index_store import get_store
+        from chronovisor.core.index_store import get_store
 
         get_store().refresh()
         result["page_index"] = "ok"

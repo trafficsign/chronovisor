@@ -236,7 +236,7 @@ def test_duplicate_resolution_routes_exact_high_confidence_pair_without_mutation
     monkeypatch.setattr(
         autonomy, "find_page", lambda page_id: tmp_path / f"{page_id}.md"
     )
-    monkeypatch.setattr("chronovisor.search.index_store.get_store", lambda: None)
+    monkeypatch.setattr("chronovisor.core.index_store.get_store", lambda: None)
     monkeypatch.setattr(
         autonomy,
         "_page_quality",

@@ -3,10 +3,10 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from chronovisor.core.runtime_config import RerankerConfig, RerankerServiceConfig
+from chronovisor.core.search_types import ScoredPage
 from chronovisor.recall import recall_processor
 from chronovisor.recall.evidence_certificate import EvidenceCertificate
 from chronovisor.search.reranker import RerankOutcome
-from chronovisor.search.search_types import ScoredPage
 
 
 def page(page_id: str) -> ScoredPage:

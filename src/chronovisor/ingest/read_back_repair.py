@@ -749,7 +749,7 @@ def _ensure_query_hint(
 
 
 def _target_meta_present(page_id: str) -> bool:
-    from chronovisor.search.index_store import get_store
+    from chronovisor.core.index_store import get_store
 
     store = get_store()
     store.refresh()

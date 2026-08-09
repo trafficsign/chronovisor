@@ -28,7 +28,7 @@ _CJK_RANGES = (
     ("\uff66", "\uff9f"),  # Halfwidth Katakana
 )
 
-_FRONTMATTER_RE = re.compile(r"^---\n.*?\n---\n", re.DOTALL)
+FRONTMATTER_RE = re.compile(r"^---\n.*?\n---\n", re.DOTALL)
 
 
 def _is_cjk(ch: str) -> bool:
@@ -37,7 +37,7 @@ def _is_cjk(ch: str) -> bool:
 
 def tokenize(text: str) -> list[str]:
     """Tokenize text: ASCII words + CJK character bigrams."""
-    text = _FRONTMATTER_RE.sub("", text)
+    text = FRONTMATTER_RE.sub("", text)
     text_lower = text.lower()
 
     tokens: list[str] = []

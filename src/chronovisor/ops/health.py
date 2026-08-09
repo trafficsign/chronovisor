@@ -10,6 +10,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from chronovisor.core.index_store import get_store
 from chronovisor.core.jsonl import count_jsonl, read_jsonl
 from chronovisor.core.store import CHRONOVISOR_ROOT, RAW_DIR
 from chronovisor.decision.decision_authority import semantic_authority_shape_error
@@ -18,7 +19,6 @@ from chronovisor.decision.semantic_hold import (
     canonical_sha256,
     persisted_semantic_no_quorum_hold,
 )
-from chronovisor.search.index_store import get_store
 
 
 def _jsonl_count(path: Path) -> int:

@@ -22,12 +22,12 @@ from chronovisor.core.durable_state import (
     write_sealed_json,
 )
 from chronovisor.core.sealed_artifact_decoder import schema_matches
+from chronovisor.core.search_types import tokenize
 from chronovisor.ingest.raw_semantic_projection import (
     PROJECTION_CHILD_SCHEMA,
     PROJECTION_POLICY_VERSION,
     verify_projection_child,
 )
-from chronovisor.search.search_types import tokenize
 
 PROVISIONAL_SCHEMA_VERSION = 1
 MAX_HITS = 3

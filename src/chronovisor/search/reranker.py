@@ -11,8 +11,8 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from chronovisor.core.runtime_config import RerankerConfig, load_reranker_config
+from chronovisor.core.search_types import ScoredPage
 from chronovisor.core.store import find_page
-from chronovisor.search.search_types import ScoredPage
 
 _FRONTMATTER_RE = re.compile(r"^---\n.*?\n---\n?", re.DOTALL)
 _MODEL_CACHE: dict[tuple[str, str, str], Any] = {}

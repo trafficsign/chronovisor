@@ -22,6 +22,7 @@ from chronovisor.core.runtime_config import (
     load_negative_feedback_config,
     load_search_embedding_config,
 )
+from chronovisor.core.search_types import FRONTMATTER_RE, ScoredPage
 from chronovisor.core.store import (
     CHRONOVISOR_ROOT,
     PAGES_DIR,
@@ -36,7 +37,6 @@ from chronovisor.search.pipeline import (
     production_pipeline_config,
     run_search_pipeline,
 )
-from chronovisor.search.search_types import _FRONTMATTER_RE, ScoredPage
 
 
 def searchable_pages() -> list[Path]:
@@ -866,7 +866,7 @@ def _legacy_update_embeddings(
         questions = _recall_questions_from_content(content)
         recall_text = "\n".join(f"Q: {q}" for q in questions)
         embed_text = (
-            f"{title}\n\n{recall_text}\n\n{_FRONTMATTER_RE.sub('', content)[:2000]}"
+            f"{title}\n\n{recall_text}\n\n{FRONTMATTER_RE.sub('', content)[:2000]}"
         )
         pages_to_process.append(("page", pid, -1, embed_text, mtime))
         for idx, question in enumerate(questions):
@@ -939,8 +939,8 @@ def _legacy_semantic_search(
     each stored vector carries a precomputed `norm`, and the query norm
     is computed once. Inner loop is therefore one dot product per page.
     """
+    from chronovisor.core.index_store import get_store
     from chronovisor.core.ollama import embed, is_available
-    from chronovisor.search.index_store import get_store
 
     if not is_available():
         if strict:
@@ -1211,7 +1211,7 @@ def context_seed_results(query: str, *, limit: int = 4) -> list[ScoredPage]:
     """Use only explicit recall-used evidence as a weak independent entrance."""
 
     try:
-        from chronovisor.search.index_store import get_store
+        from chronovisor.core.index_store import get_store
         from chronovisor.search.prefetch import prefetch_page_ids
 
         page_ids = prefetch_page_ids(
@@ -1464,11 +1464,11 @@ def graph_expand_results(
     _GRAPH_TRACE.paths = {}
     if decay <= 0 or not results:
         return []
+    from chronovisor.core.index_store import get_store
     from chronovisor.knowledge_graph.retrieval import (
         classify_query,
         community_candidates,
     )
-    from chronovisor.search.index_store import get_store
 
     store = get_store()
     _refresh_store_for_search(store)
@@ -1698,7 +1698,7 @@ def usage_prior_results(
                 scores[page_id] = min(cap, scores[page_id] + weight)
     if not scores:
         return []
-    from chronovisor.search.index_store import get_store
+    from chronovisor.core.index_store import get_store
 
     store = get_store()
     _refresh_store_for_search(store)

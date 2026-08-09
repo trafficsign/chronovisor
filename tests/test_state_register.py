@@ -104,7 +104,7 @@ def test_refresh_state_register_writes_recent_pages(
         def all_pages_meta(self, include_system: bool = False):
             return []
 
-    monkeypatch.setattr("chronovisor.search.index_store.get_store", lambda: FakeStore())
+    monkeypatch.setattr("chronovisor.core.index_store.get_store", lambda: FakeStore())
 
     payload = state_register.refresh_state_register(["recent-page"], path=path)
 
@@ -166,7 +166,7 @@ def test_refresh_preserves_approved_current_state_correction(
         def all_pages_meta(self, include_system: bool = False):
             return []
 
-    monkeypatch.setattr("chronovisor.search.index_store.get_store", lambda: FakeStore())
+    monkeypatch.setattr("chronovisor.core.index_store.get_store", lambda: FakeStore())
     payload = state_register.refresh_state_register(["machine"], path=path)
     written = path.read_text(encoding="utf-8")
 
@@ -218,7 +218,7 @@ def test_refresh_state_register_skips_placeholder_pages(
         def all_pages_meta(self, include_system: bool = False):
             return [{"page_id": "baz"}, {"page_id": "real"}]
 
-    monkeypatch.setattr("chronovisor.search.index_store.get_store", lambda: FakeStore())
+    monkeypatch.setattr("chronovisor.core.index_store.get_store", lambda: FakeStore())
 
     payload = state_register.refresh_state_register(path=path)
 
@@ -267,7 +267,7 @@ def test_refresh_state_register_skips_deprecated_pages(
         def all_pages_meta(self, include_system: bool = False):
             return [{"page_id": "old"}, {"page_id": "active"}]
 
-    monkeypatch.setattr("chronovisor.search.index_store.get_store", lambda: FakeStore())
+    monkeypatch.setattr("chronovisor.core.index_store.get_store", lambda: FakeStore())
 
     payload = state_register.refresh_state_register(path=path)
 

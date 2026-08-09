@@ -15,6 +15,7 @@ except ModuleNotFoundError:
     from mcp.server.mcpserver import Context
     from mcp.server.mcpserver import MCPServer as FastMCP
 from chronovisor.core.frontmatter import parse as _frontmatter_parse
+from chronovisor.core.index_store import get_store
 from chronovisor.core.link_fix import extract_targets as _extract_targets
 from chronovisor.core.store import (
     CHRONOVISOR_ROOT,
@@ -26,7 +27,6 @@ from chronovisor.core.store import (
 )
 from chronovisor.ingest.page_registry import PageRegistry, PageRegistryError
 from chronovisor.raw.record_raw import ingest_raw, record_raw
-from chronovisor.search.index_store import get_store
 
 mcp = FastMCP(
     "chronovisor",

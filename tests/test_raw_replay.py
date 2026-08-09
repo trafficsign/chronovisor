@@ -1561,9 +1561,8 @@ def test_replay_ingest_cannot_restore_claim_removed_by_applied_correction(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    from chronovisor.core import page_mutation, store
+    from chronovisor.core import index_store, page_mutation, store
     from chronovisor.ingest import ingest
-    from chronovisor.search import index_store
 
     paths = _isolate_paths(tmp_path, monkeypatch)
     pages = tmp_path / "pages"

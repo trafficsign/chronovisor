@@ -165,11 +165,12 @@ def trusted_negative_feedback_row_error(
     evidence = matching[0].get("evidence_features")
     field = evidence.get("field_shadow") if isinstance(evidence, dict) else None
     topic_epoch = field.get("topic_epoch") if isinstance(field, dict) else None
+    session_hash = field.get("session_hash") if isinstance(field, dict) else None
     if (
         not isinstance(topic_epoch, int)
         or isinstance(topic_epoch, bool)
         or topic_epoch < 0
-        or field.get("session_hash") in {None, ""}
+        or session_hash in {None, ""}
     ):
         return "field_topic_binding_missing"
     recalled_pages = {

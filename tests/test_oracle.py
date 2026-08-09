@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+from chronovisor.core.search_types import ScoredPage
 from chronovisor.research import oracle
-from chronovisor.search.search_types import ScoredPage
 
 
 def test_oracle_bundle_returns_pages_and_claims(monkeypatch) -> None:

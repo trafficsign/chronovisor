@@ -13,9 +13,9 @@ from types import SimpleNamespace
 import pytest
 
 from chronovisor.core import page_mutation
+from chronovisor.core.feedback_ledger import active_feedback_rows
 from chronovisor.ingest.convergence import ConvergenceStore, CycleBudget, RetryPolicy
 from chronovisor.recall import content_correction
-from chronovisor.search.feedback_ledger import active_feedback_rows
 
 ALL_CHECKS = {
     "user_correction_supported": True,
@@ -2797,9 +2797,9 @@ def test_backoff_item_does_not_starve_newer_correction(
 def test_refresh_fails_closed_when_target_embedding_was_not_updated(
     monkeypatch,
 ) -> None:
-    from chronovisor.core import ollama
+    from chronovisor.core import index_store, ollama
     from chronovisor.ingest import ingest
-    from chronovisor.search import index_store, search
+    from chronovisor.search import search
 
     monkeypatch.setattr(
         index_store, "get_store", lambda: SimpleNamespace(refresh=lambda: None)

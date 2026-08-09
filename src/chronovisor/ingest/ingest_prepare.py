@@ -229,7 +229,7 @@ def prepare_operations(
                     tag_values.update(tag for tag in tags if isinstance(tag, str))
             existing_tags_snapshot = sorted(tag_values)
         else:
-            from chronovisor.search.index_store import get_store
+            from chronovisor.core.index_store import get_store
 
             store = get_store()
             store.refresh()

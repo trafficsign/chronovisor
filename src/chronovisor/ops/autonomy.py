@@ -158,7 +158,7 @@ def _git(args: list[str], *, cwd: Path = CHRONOVISOR_ROOT) -> subprocess.Complet
 
 
 def _page_meta(page_id: str) -> dict[str, Any]:
-    from chronovisor.search.index_store import get_store
+    from chronovisor.core.index_store import get_store
 
     store = get_store()
     store.refresh()
@@ -166,7 +166,7 @@ def _page_meta(page_id: str) -> dict[str, Any]:
 
 
 def _page_quality(page_id: str, meta: dict[str, Any] | None = None) -> float:
-    from chronovisor.search.index_store import get_store
+    from chronovisor.core.index_store import get_store
 
     meta = meta or _page_meta(page_id)
     if not meta:

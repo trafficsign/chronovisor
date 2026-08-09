@@ -1,6 +1,6 @@
 from chronovisor.core.runtime_config import SearchEmbeddingConfig
+from chronovisor.core.search_types import ScoredPage
 from chronovisor.search import search, semantic_client, semantic_jobs
-from chronovisor.search.search_types import ScoredPage
 
 
 def _config(*, mode: str = "on") -> SearchEmbeddingConfig:

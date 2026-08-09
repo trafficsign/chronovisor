@@ -9,9 +9,9 @@ from dataclasses import dataclass
 from typing import Any
 
 from chronovisor.core.frontmatter import parse as parse_frontmatter
+from chronovisor.core.index_store import get_store
 from chronovisor.core.raw_store import RawStore
 from chronovisor.core.store import CHRONOVISOR_ROOT, RAW_DIR, find_page
-from chronovisor.search.index_store import get_store
 from chronovisor.search.research_config import ResearchConfig
 from chronovisor.search.research_store import ResearchStore
 from chronovisor.search.research_types import Action, ActionType

@@ -10,6 +10,7 @@ from typing import Any
 
 from chronovisor.core import ollama
 from chronovisor.core.runtime_config import load_reranker_config
+from chronovisor.core.search_types import tokenize
 from chronovisor.decision.local_structured import ChatRequest, LocalStructuredSession
 from chronovisor.recall.evidence_certificate import (
     EvidenceCertificate,
@@ -18,7 +19,6 @@ from chronovisor.recall.evidence_certificate import (
 )
 from chronovisor.recall.rubric_calibration import load_active_rubric
 from chronovisor.search import reranker_client
-from chronovisor.search.search_types import tokenize
 
 
 @dataclass(frozen=True)

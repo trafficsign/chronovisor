@@ -21,6 +21,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from chronovisor.core.frontmatter import parse as _frontmatter_parse
 from chronovisor.core.link_fix import atomic_write, extract_targets
@@ -111,7 +112,7 @@ def _normalize_sensitivity(value: object, *, path: Path | None = None) -> str:
     return "normal"
 
 
-def _parse_frontmatter(text: str) -> dict:
+def _parse_frontmatter(text: str) -> dict[str, Any]:
     """Thin wrapper around :func:`frontmatter.parse` returning only the
     metadata dict. Kept as a local function so existing call sites in
     this module don't need to change."""
@@ -179,7 +180,7 @@ class PageEntry:
     entities: list[str] = field(default_factory=list)
     sensitivity: str = "normal"
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "page_id": self.page_id,
             "path": self.path,
@@ -205,11 +206,11 @@ class PageEntry:
         }
 
     @classmethod
-    def from_dict(cls, d: dict) -> PageEntry:
+    def from_dict(cls, d: dict[str, Any]) -> PageEntry:
         # Defensively coerce list-of-string fields: a manually edited
         # cache file or a future-format mismatch shouldn't crash the
         # singleton at startup.
-        def _coerce_str_list(value):
+        def _coerce_str_list(value: object) -> list[str]:
             if isinstance(value, list) and all(isinstance(v, str) for v in value):
                 return list(value)
             return []
@@ -516,7 +517,7 @@ class IndexStore:
         # broken cache from a manual edit) collapses to an empty list so
         # the rest of the system can rely on the type without
         # re-validating.
-        def _coerce_str_list(value):
+        def _coerce_str_list(value: object) -> list[str]:
             if isinstance(value, list) and all(isinstance(v, str) for v in value):
                 return list(value)
             return []
@@ -619,7 +620,7 @@ class IndexStore:
 
     # -- public read API --------------------------------------------------
 
-    def meta(self, page_id: str) -> dict | None:
+    def meta(self, page_id: str) -> dict[str, Any] | None:
         with self._lock:
             entry = self._entries.get(page_id)
             if entry is None:
@@ -707,7 +708,7 @@ class IndexStore:
                 return set(self._entries.keys())
             return {pid for pid, e in self._entries.items() if not e.is_system}
 
-    def all_pages_meta(self, include_system: bool = False) -> list[dict]:
+    def all_pages_meta(self, include_system: bool = False) -> list[dict[str, Any]]:
         """Return meta dicts for every page, in mtime-descending order.
 
         Mirrors `chronovisor_index`'s sort: `path.stat().st_mtime` desc. We sort

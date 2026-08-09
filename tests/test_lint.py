@@ -48,10 +48,9 @@ def isolated_wiki(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     for d in (pages, raw, system, index_dir):
         d.mkdir(parents=True, exist_ok=True)
 
-    from chronovisor.core import store
+    from chronovisor.core import index_store, store
     from chronovisor.ingest import ingest, lint
     from chronovisor.ingest import tag_lifecycle as tags_mod
-    from chronovisor.search import index_store
 
     monkeypatch.setattr(store, "CHRONOVISOR_ROOT", chronovisor_root)
     monkeypatch.setattr(store, "PAGES_DIR", pages)

@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from chronovisor.core.runtime_config import SearchEmbeddingConfig
-from chronovisor.search.search_types import ScoredPage
+from chronovisor.core.search_types import ScoredPage
 
 
 class SemanticServiceUnavailable(RuntimeError):
@@ -139,7 +139,7 @@ def search(
     if not isinstance(rows, list):
         return []
 
-    from chronovisor.search.index_store import get_store
+    from chronovisor.core.index_store import get_store
     from chronovisor.search.search import (
         _REFERENCE_PAGE_TYPE,
         _folder_from_meta,
@@ -210,7 +210,7 @@ def verify(
     if not isinstance(rows, list):
         return []
 
-    from chronovisor.search.index_store import get_store
+    from chronovisor.core.index_store import get_store
     from chronovisor.search.search import (
         _folder_from_meta,
         _meta_page_type,

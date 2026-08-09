@@ -10,9 +10,9 @@ from pathlib import Path
 from typing import Any
 
 from chronovisor.core.durable_state import exclusive_text_file_lock
+from chronovisor.core.search_types import tokenize
 from chronovisor.core.store import CHRONOVISOR_ROOT, find_page
 from chronovisor.search.claims import CLAIM_INDEX_FILE
-from chronovisor.search.search_types import tokenize
 
 _STRUCTURED_INTENT_RE = re.compile(
     r"(?:価格|値段|容量|状態|ステータス|モデル|何GB|何TB|何%|"

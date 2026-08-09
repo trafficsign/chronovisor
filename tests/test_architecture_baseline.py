@@ -1443,6 +1443,57 @@ S_RETIRED_RAW_PIPELINE_SITE_IDS = (
     "arch:fb191369db6ca1f4aeaf2f0bb05e78d2e0d5f2ad66b1979f261f7f42d37f7429",
     "arch:fd59be68dbe513b636a8c4e44935096fb0f8d6df23640fd99f283f1987466566",
 )
+S_RETIRED_SEARCH_CORE_PRIMITIVE_SITE_IDS = (
+    "arch:0c5b8f66447023c746d8ce922044fe2880bc3bbafe0c103e91cc3f0a8d97b5b9",
+    "arch:0f32b10807d31f3e8102ee0af83903a097ba724988ae1ec90fbc09f60ea23c53",
+    "arch:0f51fcf0bbe85797908ebd78ca32dc0b74bddde7e8debc6994bdcb1141ec93fb",
+    "arch:13e490a9eb933097fb9b15bef9ed0a6600f93ca71b3d9a9ad324ee58eba38d2c",
+    "arch:1f6e200cfd873ab75bfe2e58434dad20a2237d1afea15f886c582982f9e43797",
+    "arch:27f97d338b57e6bf2b3e9c40082b140944df5117f9ba94682c36a65a230389cf",
+    "arch:2a0780918773ce4597f5813c305fccc748c6d32141865ebf5651d0529d5e67fe",
+    "arch:35ea942df2cc94d1340befa7f889374bee8031eabe9e89908762270ef52102b9",
+    "arch:3b13af0c6cd1d104ff4da6165099b91fef9b0074d63b54798485c38e517d8a32",
+    "arch:3e04ebc4f3bc6608280435295e4dceab7525b988a51f950264ea1b8725227314",
+    "arch:3f85f00ece8b53f98903eb2826d7f48fad4ec69255a460e671f1917b87c92dff",
+    "arch:4441a42af6a6fcc7136fdd3e3607e5699ab9443074e98246dd59ebb8da278c86",
+    "arch:445a6466d565a63f389501677bc0ec3c562c910b61e14aab824846f805047254",
+    "arch:4bcc6358cf65cbd34faff3431803136dbafaed2af03ced8cf874932642b9dfd7",
+    "arch:4d87013327bcb610d296dd9d3cf6b07f33f5435199a6649770ec195594bd3edf",
+    "arch:4e1f77d6406cb8b38227939e20db081198a7b686c83abeefc6e613b5609a56fb",
+    "arch:4ec1d57308df3ae87156a48cbd27637b26bb5ce4326b7e70c779362e1474f6a9",
+    "arch:5c0a9b635dc568c7d6ae0fcda2a8b1847b955e559820fb204c5763164890df12",
+    "arch:5e0f1f04940b887c080ac80818134f46e9979433a3e1c3855f5bf668157da8b6",
+    "arch:5f30c2bc204c44712e9a4ef19a8f2530831d0720712376b6e0c6894fa15ee53f",
+    "arch:6562aeaab2181ee966c7b7626af952e4f26f914364b54712b58495622ecf66e5",
+    "arch:67483e0922babde00b569cc9b7a9a4c93081856949978b6b538cca7189ff8d9d",
+    "arch:6b47bfd0f8e576febde035a1c69237de7c2e1e9e8c90dff52392581c4a16543e",
+    "arch:71a299d0569ecdb7b59bf19fc43a0cc1fffbff2d9f4fd7f3a75cfbe8586fdb83",
+    "arch:7329ed0cd8d62c015afb393e3223dcbad36a0502c2beaf3ce0d5c2b83bbdc09e",
+    "arch:747956c9b788bb469353556a46cf056a6be0f9fd900e4481a91c7bae1993d84c",
+    "arch:770b5f09bf0fc3b557f7a93145f3b14ee115abded16ef5b1e3d09d2ad9802374",
+    "arch:7a1b8faf26bf90b422bd8243b796f7e6fba5eec16818f02108f5b2f4cc55104c",
+    "arch:7ca4d67fad0135d249f821ba4e6f87551f822e1451162263a533b76e9002a897",
+    "arch:7f998f961c2688c446627fc37e2aca2a6f65b7de5fb7e36ca3cd43da76dbe70f",
+    "arch:83101597ca9f3e7ed6ddab70c1af8dfe4c07322618ff4b8a81b0d4d361ae2421",
+    "arch:8a88f43d5f83b5a5d76c706607ead210dd11b5f8eb956c14e318adec5ca4d8dd",
+    "arch:98c36ae3fb1679a00a20b12bfe7e56949ea5f0f5d207be60eaaeccf52c27d130",
+    "arch:b641f106f418c9456985b3025368e9534a5e1742775c3e9d76d1a1cd0e5a92b4",
+    "arch:b98f70933fde95bd96a37828fe764fcf4d5b3101d799687ebc9691205bfdae38",
+    "arch:bfa8a8d310f89d2b5302bb238a9d90d36dc0f6427e2412da13d5a5a3fd35f622",
+    "arch:c1c904c2ede137c51dfda0c42f4239cc4e0c3191172ec591b3083aa497ac0791",
+    "arch:cb9425fdfb96f9f863281137399f5d329b667e85fbd004b82199fcbc2e97e252",
+    "arch:cd05d2e5db9426179325b85998a9cb69d3e9a406ebd03061827c4173df167e79",
+    "arch:ce8c68f3a683fc33d4a70805b246fef7cda6a105001d501de13995b9ae90d969",
+    "arch:d01040cd1ad1278a178b62ee7422a5127e5ca376fb1868fb8ed41cd706e23a12",
+    "arch:e146950eb886fe7517423603ddb8147f255b72fc098acc6c4e719c50c688d118",
+    "arch:e6c32da91355d961738164dcc208eae8c1a56e6ce114b949e9e0bc760892f2d2",
+    "arch:e7bd77abf3526524bed269a8c1a9e6d59ae32895a6227fefb574fd2f54695862",
+    "arch:f0499ddf5200a76a8c1fc0db0f0a5eca41f64a36bcd325005ea3cb43570a5b9c",
+    "arch:f2cdeeb314ed720c5ccffc0cee741f3bd1af11f48b9dcc7d4788fe30d6643226",
+    "arch:f32cf86bf52822adeb9f0c3e6358069cf87b4e0b7ca78451a600db19bfdfd21f",
+    "arch:f481e2259f7daf6d5bce82372f24d8c360a89c0a706a7db849616b641403d83f",
+    "arch:fac6035b891c30bdf04ff9877da4b3f5d2b82a6f67f13cab4bfd22f87ca0f3f5",
+)
 FINAL_RETIRED_PROJECTION_REPLACEMENT_SITE_IDS = (
     "arch:258413d5360b8db7f162ac61c060f6476ba684b99e9e53dbc515cb6318a4c8b2",
     "arch:c217aacdc549c1316a8de1f0dac24ffe3edc55946c56b6a46103b3693a4eaeb2",
@@ -1554,6 +1605,7 @@ RETIREMENT_HISTORY = {
                 *S_RETIRED_SELF_HEAL_CLOSURE_SITE_IDS,
                 *S_RETIRED_RAW_STORAGE_SITE_IDS,
                 *S_RETIRED_RAW_PIPELINE_SITE_IDS,
+                *S_RETIRED_SEARCH_CORE_PRIMITIVE_SITE_IDS,
                 *V_RETIRED_RECALL_SHIM_SITE_IDS,
                 *V_RETIRED_REMAINING_SHIM_SITE_IDS,
                 *V_RETIRED_DURABLE_MODULE_MAPPING_SITE_IDS,
@@ -2313,7 +2365,7 @@ def test_current_exception_ledger_seed_and_schema_inventory_are_exact(
     assert detected_ids == ledger_ids == set(seed["exception_semantic_ids"]["active"])
     _assert_exact_retirement_history(architecture, seed)
     assert len(edge_rows) == current["worktree_architecture"]["edge_count"] == 49
-    assert sum(len(row["sites"]) for row in edge_rows) == len(raw_cross_sites) == 1406
+    assert sum(len(row["sites"]) for row in edge_rows) == len(raw_cross_sites) == 1420
     assert {
         field: counts[field]
         for field in (
@@ -2326,7 +2378,7 @@ def test_current_exception_ledger_seed_and_schema_inventory_are_exact(
         )
     } == {
         "exceptions": 49,
-        "cross_domain_sites": 1406,
+        "cross_domain_sites": 1420,
         "production_to_lab_edges": 0,
         "production_to_lab_static_sites": 0,
         "production_to_lab_dynamic_sites": 0,

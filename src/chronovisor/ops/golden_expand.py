@@ -9,13 +9,13 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from chronovisor.core.index_store import get_store
 from chronovisor.core.recall_runtime_paths import RECALL_DIR
 from chronovisor.core.store import find_page
 from chronovisor.recall.recall_answer_eval import (
     BOUNDED_EVIDENCE_PROJECTION_POLICY_SHA256,
 )
 from chronovisor.recall.recall_runtime import page_uid_for_id
-from chronovisor.search.index_store import get_store
 from chronovisor.search.search_eval import assign_split, language_bucket, query_kind
 
 GOLDEN_FILE = RECALL_DIR / "search-golden.jsonl"

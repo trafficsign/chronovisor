@@ -781,7 +781,7 @@ def run_dry_run(
     generate_fn: Callable[..., str] | None = None,
 ) -> dict:
     if store is None:
-        from chronovisor.search.index_store import get_store
+        from chronovisor.core.index_store import get_store
         store = get_store()
         store.refresh()
     page_ids = sorted(store.all_page_ids(include_system=False))

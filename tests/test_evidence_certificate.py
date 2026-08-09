@@ -4,9 +4,9 @@ import json
 import stat
 from pathlib import Path
 
+from chronovisor.core.search_types import ScoredPage
 from chronovisor.recall import evidence_certificate
 from chronovisor.recall.evidence_certificate import EvidenceCertificate
-from chronovisor.search.search_types import ScoredPage
 
 
 def candidate(page_id: str, *, score: float, snippet: str = "") -> ScoredPage:
