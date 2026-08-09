@@ -4228,7 +4228,7 @@ def build_fast_snapshot() -> dict[str, Any]:
     """Return the live status shell without scanning Raw or audit history."""
 
     init_chronovisor()
-    from chronovisor.librarian.librarian_status import build_librarian_status
+    from chronovisor.recall.librarian_status import build_librarian_status
 
     status = runtime_status.read_status()
     if not isinstance(status, dict):
@@ -4267,7 +4267,7 @@ def build_fast_snapshot() -> dict[str, Any]:
 
 def build_snapshot() -> dict[str, Any]:
     init_chronovisor()
-    from chronovisor.librarian.librarian_status import build_librarian_status
+    from chronovisor.recall.librarian_status import build_librarian_status
 
     cached_status = runtime_status.read_status()
     orch_state = orchestrator._load_state()

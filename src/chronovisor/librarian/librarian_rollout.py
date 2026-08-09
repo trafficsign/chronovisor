@@ -17,13 +17,6 @@ from chronovisor.librarian.classification_migration import (
 )
 from chronovisor.librarian.librarian_burn import run_burn
 from chronovisor.librarian.librarian_merge import run_merge_migration
-from chronovisor.librarian.librarian_release import (
-    advance_migration_observation,
-    capture_phase0_artifacts,
-    finalize_if_ready,
-    reconcile_librarian_state,
-    start_soak,
-)
 from chronovisor.recall.classification_calibration import (
     adjudicate,
     adjudication_path,
@@ -33,6 +26,13 @@ from chronovisor.recall.classification_calibration import (
     lock,
 )
 from chronovisor.recall.classification_engine import fixture_paths
+from chronovisor.recall.librarian_release import (
+    advance_migration_observation,
+    capture_phase0_artifacts,
+    finalize_if_ready,
+    reconcile_librarian_state,
+    start_soak,
+)
 
 ROLLOUT_SCHEMA = "chronovisor.librarian-rollout.v1"
 
@@ -92,7 +92,7 @@ def _run_stage(
 def _run_collection_rollout(root: Path) -> dict[str, Any]:
     """Resume ADR-0001 through the shared burn, merge and release gates."""
 
-    from chronovisor.librarian.collection_authority import (
+    from chronovisor.recall.collection_authority import (
         collection_authority_status,
         run_collection_librarian,
     )

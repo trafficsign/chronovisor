@@ -206,11 +206,11 @@ def _patch_sleep_dependencies(monkeypatch) -> None:
         lambda **kwargs: {"status": "ok", "dry_run": kwargs["dry_run"]},
     )
     monkeypatch.setattr(
-        "chronovisor.librarian.librarian.run_shadow",
+        "chronovisor.recall.librarian.run_shadow",
         lambda **kwargs: {"status": "ok", "dry_run": kwargs["dry_run"]},
     )
     monkeypatch.setattr(
-        "chronovisor.librarian.librarian_release.finalize_if_ready",
+        "chronovisor.recall.librarian_release.finalize_if_ready",
         lambda _root: {"status": "not_started"},
     )
     monkeypatch.setattr(
@@ -218,7 +218,7 @@ def _patch_sleep_dependencies(monkeypatch) -> None:
         lambda _root: {"deleted": [], "retained": []},
     )
     monkeypatch.setattr(
-        "chronovisor.librarian.merge_transaction.cleanup_expired_preimages",
+        "chronovisor.recall.merge_transaction.cleanup_expired_preimages",
         lambda _root: {"deleted": [], "retained": []},
     )
     monkeypatch.setattr(

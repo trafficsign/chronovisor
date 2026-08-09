@@ -885,7 +885,7 @@ def _lint_queue_kpi(queue_path: Path, convergence_path: Path) -> dict[str, int]:
 
 def health_snapshot() -> dict[str, Any]:
     from chronovisor.core.runtime_config import runtime_identity
-    from chronovisor.librarian.librarian_status import build_librarian_status
+    from chronovisor.recall.librarian_status import build_librarian_status
 
     coverage = summary_coverage()
     duplicate_queue = CHRONOVISOR_ROOT / "review" / "duplicate-candidates.jsonl"

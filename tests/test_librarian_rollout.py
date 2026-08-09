@@ -4,7 +4,8 @@ import json
 from pathlib import Path
 
 from chronovisor.core.durable_state import read_sealed_json, write_sealed_json
-from chronovisor.librarian import collection_authority, librarian_rollout
+from chronovisor.librarian import librarian_rollout
+from chronovisor.recall import collection_authority
 
 
 def _write(path: Path, payload: dict) -> None:

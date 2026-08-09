@@ -28,12 +28,12 @@ from chronovisor.core.migration_snapshot import (
 from chronovisor.core.store import CHRONOVISOR_ROOT
 from chronovisor.ingest.page_registry import PageRegistry, PageRegistryError
 from chronovisor.ingest.uid_link_index import build_uid_link_index
-from chronovisor.librarian.librarian import _append_event, _now_iso
-from chronovisor.librarian.merge_ledger import build_source_inventory
-from chronovisor.librarian.merge_transaction import apply_merge_plan, prepare_merge_plan
 from chronovisor.raw.raw_store import RawStore
 from chronovisor.recall.classification import strongest_sensitivity
 from chronovisor.recall.duplicate_review import build_duplicate_review_queue
+from chronovisor.recall.librarian import append_librarian_event, librarian_now_iso
+from chronovisor.recall.merge_ledger import build_source_inventory
+from chronovisor.recall.merge_transaction import apply_merge_plan, prepare_merge_plan
 
 DISPOSITION_SCHEMA = "chronovisor.librarian-dispositions.v1"
 PILOT_SCHEMA = "chronovisor.librarian-pilot.v1"
@@ -460,7 +460,7 @@ def _load_dispositions(root: Path) -> dict[str, Any]:
     if not path.exists():
         return {
             "schema": DISPOSITION_SCHEMA,
-            "generated_at": _now_iso(),
+            "generated_at": librarian_now_iso(),
             "scope_generation": "",
             "pages": {},
             "clusters": {},
@@ -591,7 +591,7 @@ def run_merge_migration(
         dispositions["scope_generation"] = hashlib.sha256(
             "\n".join(sorted(current["pages"])).encode("utf-8")
         ).hexdigest()
-    dispositions["generated_at"] = _now_iso()
+    dispositions["generated_at"] = librarian_now_iso()
     write_sealed_json(
         root / "runtime" / "librarian" / "migration-dispositions.json",
         dispositions,
@@ -636,7 +636,7 @@ def run_merge_migration(
         receipt,
         backup=True,
     )
-    _append_event(
+    append_librarian_event(
         root / "runtime" / "librarian" / "events.jsonl",
         {
             "event": "merge_migration",

@@ -17,7 +17,7 @@ from chronovisor.core.link_fix import atomic_write
 from chronovisor.core.page_mutation import chronovisor_mutation_lock
 from chronovisor.core.timeutil import utc_now as _now
 from chronovisor.ingest.page_registry import PageRegistry
-from chronovisor.librarian.merge_ledger import (
+from chronovisor.recall.merge_ledger import (
     MergeCoverageError,
     MergeLedger,
     build_source_inventory,

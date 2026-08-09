@@ -381,7 +381,7 @@ def chronovisor_status() -> str:
     except Exception:
         health = {}
     try:
-        from chronovisor.librarian.librarian_status import build_librarian_status
+        from chronovisor.recall.librarian_status import build_librarian_status
 
         librarian = build_librarian_status(CHRONOVISOR_ROOT)
     except Exception:
@@ -604,7 +604,7 @@ def chronovisor_init() -> str:
 
     page_count = store.page_count(include_system=False)
     try:
-        from chronovisor.librarian.librarian_status import build_librarian_status
+        from chronovisor.recall.librarian_status import build_librarian_status
 
         librarian = build_librarian_status(CHRONOVISOR_ROOT)
     except Exception:

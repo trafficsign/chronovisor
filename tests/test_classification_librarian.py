@@ -9,11 +9,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from chronovisor.librarian.librarian import (
-    capture_baseline,
-    run_legacy_udc_shadow,
-)
-from chronovisor.librarian.librarian_status import build_librarian_status
 from chronovisor.recall import (
     classification_calibration,
     classification_engine,
@@ -31,6 +26,11 @@ from chronovisor.recall.classification import (
     validate_controlled_subject,
     validate_record,
 )
+from chronovisor.recall.librarian import (
+    capture_baseline,
+    run_legacy_udc_shadow,
+)
+from chronovisor.recall.librarian_status import build_librarian_status
 
 
 def _write_page(path: Path, *, tags: str = "") -> None:

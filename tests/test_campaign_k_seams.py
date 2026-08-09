@@ -8,9 +8,12 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from chronovisor.ingest import ingest, ingest_review_apply, orchestrator
-from chronovisor.librarian import collection_authority
 from chronovisor.ops import self_heal
-from chronovisor.recall import classification_engine, content_correction
+from chronovisor.recall import (
+    classification_engine,
+    collection_authority,
+    content_correction,
+)
 
 
 def test_ingest_job_result_keeps_legacy_alias_without_page_bodies() -> None:
@@ -235,7 +238,7 @@ def test_selected_orchestrators_stay_below_campaign_k_size_caps() -> None:
         package / "ingest" / "ingest_review_apply.py": {
             "review_and_apply_ingest_operations": 700
         },
-        package / "librarian" / "collection_authority.py": {
+        package / "recall" / "collection_authority.py": {
             "review_collection_queue": 220
         },
         package / "recall" / "classification_engine.py": {

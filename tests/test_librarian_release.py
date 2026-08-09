@@ -2,7 +2,7 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 
-from chronovisor.librarian import librarian_release
+from chronovisor.recall import librarian_release
 
 NOW = datetime(2026, 7, 25, 9, 0, tzinfo=UTC)
 

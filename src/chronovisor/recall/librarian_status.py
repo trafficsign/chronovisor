@@ -13,7 +13,7 @@ from typing import Any
 from chronovisor.core.durable_state import DurableStateError, read_sealed_json
 from chronovisor.core.timeutil import iso_seconds as _iso
 from chronovisor.ingest.page_registry import PageRegistry, PageRegistryError
-from chronovisor.librarian.merge_ledger import MergeLedger
+from chronovisor.recall.merge_ledger import MergeLedger
 
 SNAPSHOT_SCHEMA = "chronovisor.librarian-status.v1"
 STATE_SCHEMA = "chronovisor.librarian-state.v1"
@@ -1048,7 +1048,7 @@ def build_librarian_status(
             root / "runtime" / "librarian" / "collection-registry.json"
         )
         if collection_registry_path.is_file():
-            from chronovisor.librarian.collection_authority import (
+            from chronovisor.recall.collection_authority import (
                 collection_authority_status,
             )
 

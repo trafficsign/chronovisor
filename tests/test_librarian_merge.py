@@ -5,11 +5,11 @@ from pathlib import Path
 
 from chronovisor.ingest.page_registry import PageRegistry
 from chronovisor.librarian.librarian_merge import prepare_cluster_plan
-from chronovisor.librarian.merge_transaction import (
+from chronovisor.raw.legacy_archive import migrate_processed_legacy
+from chronovisor.recall.merge_transaction import (
     apply_merge_plan,
     cleanup_expired_preimages,
 )
-from chronovisor.raw.legacy_archive import migrate_processed_legacy
 
 
 def _page(

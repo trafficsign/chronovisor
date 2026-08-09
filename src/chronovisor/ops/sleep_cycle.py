@@ -681,7 +681,7 @@ def _run_sleep_cycle(
             dry_run=dry_run,
         ),
     )
-    import chronovisor.librarian.librarian as librarian
+    import chronovisor.recall.librarian as librarian
 
     librarian_shadow = _run_lane(
         "librarian_shadow",
@@ -697,8 +697,8 @@ def _run_sleep_cycle(
         librarian_cleanup = {"status": "skipped", "reason": "dry_run"}
     else:
         import chronovisor.core.migration_snapshot as migration_snapshot
-        import chronovisor.librarian.librarian_release as librarian_release
-        import chronovisor.librarian.merge_transaction as merge_transaction
+        import chronovisor.recall.librarian_release as librarian_release
+        import chronovisor.recall.merge_transaction as merge_transaction
 
         librarian_cleanup = _run_lane(
             "librarian_cleanup",

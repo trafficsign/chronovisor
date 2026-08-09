@@ -1406,7 +1406,7 @@ def review_collection_queue(
     """Review queued anomalies locally without assignment mutation."""
 
     from chronovisor.core import frontmatter, ollama
-    from chronovisor.librarian.collection_anomaly_worker import (
+    from chronovisor.recall.collection_anomaly_worker import (
         PROMPT_SHA256,
         WORKER_SCHEMA,
     )

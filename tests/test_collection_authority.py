@@ -10,8 +10,8 @@ import pytest
 from chronovisor.core.durable_state import read_sealed_json, write_sealed_json
 from chronovisor.core.page_identity import new_page_uid
 from chronovisor.ingest.page_registry import PageRegistry
-from chronovisor.librarian import collection_anomaly_worker, collection_authority
-from chronovisor.librarian.collection_authority import (
+from chronovisor.recall import collection_anomaly_worker, collection_authority
+from chronovisor.recall.collection_authority import (
     CollectionAuthorityError,
     CollectionRegistry,
     adjudicate_collection_review_queue,

@@ -24,7 +24,6 @@ from chronovisor.core.migration_snapshot import (
 from chronovisor.core.page_mutation import chronovisor_mutation_lock
 from chronovisor.core.store import CHRONOVISOR_ROOT
 from chronovisor.ingest.page_registry import PageRegistry
-from chronovisor.librarian.librarian import _append_event, _now_iso
 from chronovisor.recall.classification import (
     classification_authority_status,
     classification_frontmatter,
@@ -41,6 +40,7 @@ from chronovisor.recall.classification_engine import (
 from chronovisor.recall.classification_resolver import (
     production_candidate_index,
 )
+from chronovisor.recall.librarian import append_librarian_event, librarian_now_iso
 
 CLASSIFICATION_INDEX_SCHEMA = "chronovisor.classification-index.v1"
 MIGRATION_RECEIPT_SCHEMA = "chronovisor.classification-migration-receipt.v1"
@@ -88,7 +88,7 @@ def build_classification_index(
         }
     payload = {
         "schema": CLASSIFICATION_INDEX_SCHEMA,
-        "generated_at": _now_iso(),
+        "generated_at": librarian_now_iso(),
         "registry_generation": int(registry_state.get("generation") or 0),
         "package_release": package.release,
         "package_checksum": package.checksum,
@@ -244,7 +244,7 @@ def run_full_model_shadow(
     receipt = {
         "schema": MIGRATION_RECEIPT_SCHEMA,
         "event": "full_model_shadow",
-        "timestamp": _now_iso(),
+        "timestamp": librarian_now_iso(),
         "selected": len(rows),
         "proposed": len(rows) - holds,
         "held": holds,
@@ -255,7 +255,7 @@ def run_full_model_shadow(
         "duration_seconds": round(time.monotonic() - started, 3),
         "model_calls_are_local_only": True,
     }
-    _append_event(
+    append_librarian_event(
         root / "runtime" / "librarian" / "events.jsonl",
         receipt,
     )
@@ -465,7 +465,7 @@ def migrate_active_metadata(
             "restore_verified": True,
         }
         batches.append(batch_receipt)
-        _append_event(
+        append_librarian_event(
             root / "runtime" / "librarian" / "events.jsonl",
             {
                 "event": "classification_migration_batch",
@@ -495,7 +495,7 @@ def migrate_active_metadata(
     receipt = {
         "schema": MIGRATION_RECEIPT_SCHEMA,
         "event": "phase6_metadata_migration",
-        "timestamp": _now_iso(),
+        "timestamp": librarian_now_iso(),
         "status": "ok",
         "observed": len(pages),
         "migrated": migrated,
