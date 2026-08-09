@@ -57,7 +57,7 @@ pre{background:#eee;padding:0.8rem 1rem;border-radius:6px;overflow:auto;line-hei
 
 <section>
 <h2>概要</h2>
-<p>Campaign O–V（アーキテクチャ刷新）の完了を前提に、次フェーズとして取り組む事項をまとめる。OSS 公開準備、LLM Transport の抽象化、研究知見の反映を含む。</p>
+<p>Campaign O–V（アーキテクチャ刷新）の完了を前提に、次フェーズとして取り組む事項をまとめる。Campaign W の共通 LLM Runtime、Campaign X の OKF v0.2 canonical migration、OSS 公開準備、研究知見の反映を含む。</p>
 <p>O–V 計画は <code>_handoff/2026-08-06_1221_chronovisor-architecture-renewal.html</code> を参照。</p>
 </section>
 
@@ -114,6 +114,52 @@ adapter families compose and register supported components
 
 <!-- ============================================================ -->
 <section>
+<h2>Campaign X — OKF v0.2 Canonical Migration</h2>
+
+<div class="callout">
+<strong>Decision:</strong> OSS 公開前に <code>pages/</code> を <code>OKF v0.2-compatible Chronovisor superset</code> の内部 canonical bundle へ一括移行する。runtime / index 全体にまたがる変更だが、conversion 自体は LLM を必須としない決定論的な one-shot migration とし、長期 dual-read / dual-write は採用しない。
+</div>
+
+<p><strong>公式参照:</strong> <a href="https://github.com/GoogleCloudPlatform/knowledge-catalog/blob/main/okf/SPEC.md">Open Knowledge Format specification</a>、<a href="https://cloud.google.com/blog/products/data-analytics/okf-v0-2-adds-trust-signals/">Google Cloud: OKF v0.2</a>。実装対象は現行の v0.2 とするが、正式標準化または凍結済みとは扱わない。</p>
+
+<h3>設計原則</h3>
+<ul>
+<li><code>raw/</code> は不変の原本として1 byte も変更しない。<code>system/</code> は特権内部領域として <code>pages/</code> bundle の対象外とし、必要なら将来別 bundle として設計する。</li>
+<li>旧形式を読めるのは offline の migration executable だけとする。cutover 後の production runtime は新 canonical だけを read / write し、旧新混在や長期 dual-read / dual-write を許さない。</li>
+<li>rollback は旧形式の併存ではなく、cutover 前の一貫 snapshot を atomic restore する。Chronovisor 独自 field は OKF extension として意味を保ち、unknown field も保持する。</li>
+<li>nested YAML を正しく parse / serialize し、unknown key / value の意味を semantic round-trip で保持できる正式な YAML parser / serializer を採用し、正規表現や ad hoc parser を canonical 経路に残さない。</li>
+</ul>
+
+<h3>Deterministic mapping</h3>
+<table>
+<thead><tr><th>現行要素</th><th>OKF v0.2 canonical mapping</th><th>不変条件</th></tr></thead>
+<tbody>
+<tr><td><code>type</code> 欠落</td><td>機械的に <code>Concept</code> を設定</td><td>任意の精緻化は cutover 後の別作業</td></tr>
+<tr><td><code>summary</code></td><td>OKF <code>description</code> へ移し、runtime / index も <code>description</code> を canonical とする</td><td>内容を要約し直さない</td></tr>
+<tr><td><code>status: active/deprecated/archived</code></td><td>意味衝突を避けて <code>chronovisor_status</code> extension へ移す。OKF <code>status: draft/stable/deprecated</code> は正確に写像できる時だけ設定</td><td>根拠のない OKF status を捏造しない</td></tr>
+<tr><td><code>updated</code>、<code>uid</code>、tags、raw_keywords、entities、recall_questions、classification*、sensitivity 等</td><td>必要な Chronovisor extension として保持</td><td>unknown field を落とさず、<code>generated</code> / <code>verified</code> / <code>sources</code> を根拠なく生成しない</td></tr>
+<tr><td><code>[[target]]</code>、<code>[[target|label]]</code>、<code>[[target#section]]</code></td><td>registry / path 解決により bundle-relative な standard Markdown link へ決定論的に変換</td><td>code / frontmatter 内は変更せず、broken link を明示記録し、移行で新規 broken を作らない</td></tr>
+<tr><td>root / subdir の <code>index.md</code> と <code>log.md</code></td><td>OKF reserved 形式へ再生成し、root index に <code>okf_version: "0.2"</code> を設定</td><td>派生 index として canonical pages から再現可能にする</td></tr>
+</tbody>
+</table>
+
+<h3>ステップ</h3>
+<ol>
+<li><strong>X1: mapping / invariants の固定</strong> — field、path、link、reserved file、extension、schema / version 境界と、前後比較する不変条件を fixture と仕様に固定する。OKF v0.2 spec §11 準拠の conformance validator / fixtures を repository 内で version 固定する。</li>
+<li><strong>X2: 新 runtime 対応</strong> — 正式 YAML 処理、standard Markdown link の extraction / resolution、prompt / writer、search / lint / backlink / UID / KG を新 canonical へ対応させる。cutover 後に旧形式を読む production code path は残さない。</li>
+<li><strong>X3: idempotent migration tool</strong> — dry-run manifest と staging output を生成し、old→new の hash / path / link mapping を記録する。本文は link 表記以外変更せず、LLM を必須経路に置かない。</li>
+<li><strong>X4: offline cutover preflight</strong> — writers / services を停止して jobs を drain し、<code>pages/</code>、index、state、decision preimage / artifact 等の一貫 snapshot と <code>raw/</code> 全 hash を記録する。</li>
+<li><strong>X5: atomic cutover / rebuild</strong> — staging migration を全検証後に atomic swap し、lexical / semantic / link / backlink / UID / KG 等の index をすべて再構築する。page bytes / frontmatter hash に依存する decision review / CAS / preimage / artifact は旧値を再利用せず、無効化して正規手順で再生成する。</li>
+<li><strong>X6: production restart / live verification</strong> — production を新 canonical だけで再起動し、health、主要 workflow、live read / write と mixed-state 不在を確認する。</li>
+<li><strong>X7: import / export</strong> — canonical OKF bundle を export 可能にする。external OKF import は staging / dry-run / collision 検出を経て既存 review / apply から取り込み、live <code>pages/</code> の直接上書きを禁止する。OSS interoperability の境界として文書化する。</li>
+<li><strong>X8: optional LLM enrichment</strong> — <code>type</code> / <code>description</code> 等の精緻化は cutover 後の別作業とし、migration の完了条件に含めない。</li>
+</ol>
+
+<div class="exit"><strong>Exit Criteria:</strong> 前後で page 数、UID 集合、解決済み edge 集合が一致し、body は link 表記以外不変であること。新規 broken link が 0、全 concept の <code>type</code> が non-empty、全 frontmatter が YAML parse 可能で、Campaign X で実装または採用して repository 内で version 固定した OKF v0.2 spec §11 conformance validation が green であること。migration 2回目の diff が 0 で、<code>raw/</code> の全 bytes / hash が不変であること。全 index 再構築後の search / recall / ingest / lint / decision と必要な local production live smoke が green であること。mixed canonical state がなく、snapshot の atomic rollback を演習・検証済みであること。schema / version 境界を持ち、OKF 後続 version は明示 migration として扱い、v0.2 への無期限固定も暗黙追従もしないこと。</div>
+</section>
+
+<!-- ============================================================ -->
+<section>
 <h2>OSS 公開準備</h2>
 
 <h3>OpenAI Codex Open Source Fund</h3>
@@ -122,6 +168,7 @@ adapter families compose and register supported components
 <h3>公開前に必要な作業</h3>
 <ul>
 <li>Campaign W の完了（Ollama 必須を解消）</li>
+<li>Campaign X の完了（<code>pages/</code> の OKF v0.2 canonical migration）</li>
 <li><code>.env</code> / API キー / ローカルパスのハードコード除去</li>
 <li>LICENSE ファイルの追加</li>
 <li>README（セットアップ手順、最小構成、アーキテクチャ概要）</li>
@@ -197,38 +244,6 @@ adapter families compose and register supported components
 <div class="callout warn">
 <strong>注意:</strong> 論文は「構造の精緻さ自体は回答品質を買わない」ことも示している。整理しすぎへの過剰投資は避ける。
 </div>
-</section>
-
-<!-- ============================================================ -->
-<section>
-<h2>OKF（Open Knowledge Format）互換性</h2>
-<div class="callout">
-<strong>参照:</strong> <a href="https://zenn.dev/finatext/articles/2ea88e4b1c2e5b">LLM Wikiパターンの標準化 OKF</a> — Google Cloud が2026年6月に発表した LLM Wiki の標準仕様。
-</div>
-<p>OKF は「Markdown + YAML フロントマター」で知識を構造化し、ファイル間リンクで知識グラフを形成する仕様。Chronovisor の pages/ と構造が一致する。</p>
-
-<table>
-<thead><tr><th>OKF の要素</th><th>Chronovisor の対応</th><th>差分</th></tr></thead>
-<tbody>
-<tr><td>Markdown + YAML フロントマター</td><td>pages/ の <code>.md</code> + メタデータ</td><td>フロントマター形式を OKF 互換に調整</td></tr>
-<tr><td>ファイル間 Markdown リンク → 知識グラフ</td><td><code>[[wikilink]]</code> でページ間接続</td><td>互換（記法の差異のみ）</td></tr>
-<tr><td>アトミックノート</td><td>1トピック1ページ</td><td>互換</td></tr>
-<tr><td><code>type</code> フィールド（必須）</td><td>ページ種別あり</td><td>フィールド名を <code>type</code> に統一</td></tr>
-</tbody>
-</table>
-
-<h4>OKF が「足りない」と指摘する3点と Chronovisor の対応</h4>
-<ol>
-<li><strong>語彙の未統一</strong> — Chronovisor は <code>schema.md</code> で独自語彙を定義済み。OKF 語彙が標準化されたら追従</li>
-<li><strong>LLM の生成品質</strong> — Semantic Projection で対処中</li>
-<li><strong>更新の仕組みがない</strong> — ingest パイプラインで解決済み。OKF エコシステムの中での差別化ポイント</li>
-</ol>
-
-<h4>アクション</h4>
-<ul>
-<li>pages/ のフロントマターを OKF 互換形式に調整。コスト極小（フィールド名のリネーム程度）</li>
-<li>対応タイミングは Campaign W と同時期、または独立した小タスクとして</li>
-</ul>
 </section>
 
 </body>
