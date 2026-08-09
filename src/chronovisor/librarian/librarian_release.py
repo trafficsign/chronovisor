@@ -21,6 +21,10 @@ from chronovisor.classification.classification import (
 from chronovisor.classification.classification_engine import librarian_convergence_store
 from chronovisor.core.durable_state import write_sealed_json
 from chronovisor.core.link_fix import extract_wiki_links
+from chronovisor.core.migration_snapshot import (
+    cleanup_expired_restore_points,
+    restore_drill,
+)
 from chronovisor.core.store import CHRONOVISOR_ROOT
 from chronovisor.core.timeutil import iso_seconds as _iso
 from chronovisor.ingest.page_registry import PageRegistry
@@ -28,10 +32,6 @@ from chronovisor.ingest.uid_link_index import build_uid_link_index
 from chronovisor.librarian.librarian import capture_baseline
 from chronovisor.librarian.librarian_status import STATE_SCHEMA, load_librarian_state
 from chronovisor.librarian.merge_transaction import cleanup_expired_preimages
-from chronovisor.ops.migration_snapshot import (
-    cleanup_expired_restore_points,
-    restore_drill,
-)
 
 ADR_SCHEMA = "chronovisor.librarian-adr.v1"
 SOAK_SCHEMA = "chronovisor.librarian-soak.v2"

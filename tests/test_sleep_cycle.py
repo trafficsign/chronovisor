@@ -214,7 +214,7 @@ def _patch_sleep_dependencies(monkeypatch) -> None:
         lambda _root: {"status": "not_started"},
     )
     monkeypatch.setattr(
-        "chronovisor.ops.migration_snapshot.cleanup_expired_restore_points",
+        "chronovisor.core.migration_snapshot.cleanup_expired_restore_points",
         lambda _root: {"deleted": [], "retained": []},
     )
     monkeypatch.setattr(

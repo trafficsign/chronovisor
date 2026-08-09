@@ -22,16 +22,16 @@ from chronovisor.core.link_fix import (
     position_in_spans,
     protected_spans,
 )
+from chronovisor.core.migration_snapshot import (
+    create_incremental_restore_point,
+    restore_drill,
+)
 from chronovisor.core.store import CHRONOVISOR_ROOT
 from chronovisor.ingest.page_registry import PageRegistry, PageRegistryError
 from chronovisor.ingest.uid_link_index import build_uid_link_index
 from chronovisor.librarian.librarian import _append_event, _now_iso
 from chronovisor.librarian.merge_ledger import build_source_inventory
 from chronovisor.librarian.merge_transaction import apply_merge_plan, prepare_merge_plan
-from chronovisor.ops.migration_snapshot import (
-    create_incremental_restore_point,
-    restore_drill,
-)
 from chronovisor.raw.raw_store import RawStore
 from chronovisor.recall.duplicate_review import build_duplicate_review_queue
 
