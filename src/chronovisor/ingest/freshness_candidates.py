@@ -1,4 +1,4 @@
-"""Durably enqueue time-sensitive ingest claims without verifying in-band."""
+"""Ingest-owned queue for time-sensitive claims not verified in-band."""
 
 from __future__ import annotations
 

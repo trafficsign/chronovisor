@@ -1,4 +1,4 @@
-"""Recall query hints learned from missed-candidate feedback."""
+"""Ingest-owned Recall query hints learned from missed-candidate feedback."""
 
 from __future__ import annotations
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from chronovisor.recall.freshness_candidates import enqueue_from_operations
+from chronovisor.ingest.freshness_candidates import enqueue_from_operations
 
 
 @dataclass

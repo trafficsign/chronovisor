@@ -1653,7 +1653,7 @@ def observe_processor_shadow(
 
 def query_hint_page_ids(queries: list[str], *, limit: int) -> list[str]:
     try:
-        from chronovisor.recall.recall_hints import matching_hint_page_ids
+        from chronovisor.ingest.recall_hints import matching_hint_page_ids
 
         return matching_hint_page_ids(queries, limit=limit)
     except Exception:

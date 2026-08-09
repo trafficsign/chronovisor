@@ -178,7 +178,7 @@ def prompt_stimuli(prompt: str, *, limit: int = 12) -> list[FieldStimulus]:
     stimuli: dict[str, FieldStimulus] = {}
 
     try:
-        from chronovisor.recall.recall_hints import matching_hint_page_ids
+        from chronovisor.ingest.recall_hints import matching_hint_page_ids
 
         for page_id in matching_hint_page_ids([prompt], limit=min(3, limit)):
             stimuli[page_id] = FieldStimulus(

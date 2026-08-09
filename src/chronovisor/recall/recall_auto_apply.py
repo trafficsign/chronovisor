@@ -41,12 +41,12 @@ from chronovisor.decision.semantic_hold import (
     persisted_semantic_no_quorum_hold,
     semantic_no_quorum_hold_error,
 )
-from chronovisor.ingest.tag_lifecycle import record_new_tag
-from chronovisor.recall.recall_hints import (
+from chronovisor.ingest.recall_hints import (
     add_query_hint,
     load_query_hints,
     normalize_query_text,
 )
+from chronovisor.ingest.tag_lifecycle import record_new_tag
 from chronovisor.recall.recall_runtime import (
     RECALL_CONFIG_FILE,
     RECALL_DIR,

@@ -40,11 +40,11 @@ from chronovisor.decision.semantic_hold import (
     persisted_semantic_no_quorum_hold,
     semantic_no_quorum_hold_error,
 )
+from chronovisor.ingest import recall_hints
 from chronovisor.ingest.read_back_integrity import (
     scan_jsonl_prefix,
     verify_prior_prefix,
 )
-from chronovisor.recall import recall_hints
 
 FAILURE_FILE = chronovisor_store.CHRONOVISOR_ROOT / "runtime" / "ingest-read-back-failures.jsonl"
 LEDGER_FILE = chronovisor_store.CHRONOVISOR_ROOT / "runtime" / "ingest-read-back-repair.json"

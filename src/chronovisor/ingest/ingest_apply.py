@@ -193,7 +193,7 @@ def apply_prepared_operations(
     # Only a small durable candidate record is emitted here; verification is
     # handled asynchronously by the explicit/Sleep research lane.
     try:
-        from chronovisor.recall.freshness_candidates import enqueue_from_operations
+        from chronovisor.ingest.freshness_candidates import enqueue_from_operations
 
         enqueue_from_operations(planned)
     except Exception as exc:

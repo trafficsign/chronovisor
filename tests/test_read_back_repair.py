@@ -12,9 +12,8 @@ from pathlib import Path
 import pytest
 
 from chronovisor.core import page_mutation
-from chronovisor.ingest import read_back_repair
+from chronovisor.ingest import read_back_repair, recall_hints
 from chronovisor.ops.convergence import CycleBudget
-from chronovisor.recall import recall_hints
 
 NOW = datetime(2026, 7, 10, 12, 0, tzinfo=UTC)
 
