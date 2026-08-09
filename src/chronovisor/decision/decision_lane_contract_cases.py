@@ -445,7 +445,9 @@ def _retention_cases() -> list[tuple[str, str | None, dict[str, Any]]]:
 
 
 def _classification_cases() -> list[tuple[str, str | None, dict[str, Any]]]:
-    from chronovisor.recall.content_correction import frontier_classification_prompt
+    from chronovisor.decision.content_correction_contract import (
+        frontier_classification_prompt,
+    )
 
     check_names = (
         "user_correction_supported",
@@ -571,7 +573,7 @@ def _classification_cases() -> list[tuple[str, str | None, dict[str, Any]]]:
 
 def _content_review_cases() -> list[tuple[str, str | None, dict[str, Any]]]:
     from chronovisor.core.page_mutation import ExactReplacement, PreparedPageMutation
-    from chronovisor.recall.content_correction import frontier_prompt
+    from chronovisor.decision.content_correction_contract import frontier_prompt
 
     check_names = (
         "user_correction_supported",

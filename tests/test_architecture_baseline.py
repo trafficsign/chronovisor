@@ -637,6 +637,10 @@ S_RETIRED_SELF_HEAL_PRIMITIVES_SITE_IDS = (
     "arch:9cb68acba89b58ddbd5441d21e3877eef4864c8a751267e52600ceeeef66dea9",
     "arch:acf5694ab39bfc7b43c348d3988004f6145899ba13d2954d85d1e7294f3dd8d8",
 )
+S_RETIRED_CONTENT_CORRECTION_CONTRACT_SITE_IDS = (
+    "arch:99b45a10d1424fcbf918ce09cdcea6d70a3caa3044f1fb807efd70df9e7f7bd1",
+    "arch:9aa8369c75f34d75f49096e05f1cdc764fa156738526cdee3c4d241546c4c10c",
+)
 V_RETIRED_RECALL_SHIM_SITE_IDS = (
     "arch:3896d20fb9ddf2c56d06af026b9b40d6399902891ab291f3a6eba063ba8b4d28",
     "arch:c99c20705c2ffb63854eb252145ab9e7f20ea9b0adb7eef8892e39abb52ceb1c",
@@ -988,6 +992,7 @@ RETIREMENT_HISTORY = {
                 *S_RETIRED_LINT_CONTRACT_SITE_IDS,
                 *S_RETIRED_ENTITY_CONTRACT_SITE_IDS,
                 *S_RETIRED_SELF_HEAL_PRIMITIVES_SITE_IDS,
+                *S_RETIRED_CONTENT_CORRECTION_CONTRACT_SITE_IDS,
                 *V_RETIRED_RECALL_SHIM_SITE_IDS,
                 *V_RETIRED_REMAINING_SHIM_SITE_IDS,
                 *V_RETIRED_DURABLE_MODULE_MAPPING_SITE_IDS,
@@ -1737,7 +1742,7 @@ def test_current_exception_ledger_seed_and_schema_inventory_are_exact(
     assert detected_ids == ledger_ids == set(seed["exception_semantic_ids"]["active"])
     _assert_exact_retirement_history(architecture, seed)
     assert len(edge_rows) == current["worktree_architecture"]["edge_count"] == 67
-    assert sum(len(row["sites"]) for row in edge_rows) == len(raw_cross_sites) == 1339
+    assert sum(len(row["sites"]) for row in edge_rows) == len(raw_cross_sites) == 1350
     assert {
         field: counts[field]
         for field in (
@@ -1750,7 +1755,7 @@ def test_current_exception_ledger_seed_and_schema_inventory_are_exact(
         )
     } == {
         "exceptions": 67,
-        "cross_domain_sites": 1339,
+        "cross_domain_sites": 1350,
         "production_to_lab_edges": 0,
         "production_to_lab_static_sites": 0,
         "production_to_lab_dynamic_sites": 0,
