@@ -28,9 +28,6 @@ primary_model = "maxwell1500/ornith-35b:Q5_K_M"
 challenger_model = "gpt-oss:20b"
 tie_break_model = "gemma4:26b"
 
-[recall.gate]
-model = "ornith:9b-q4_K_M"
-
 [research]
 enabled = false
 mode = "explicit"
@@ -151,6 +148,16 @@ capability = "generation"
 provider = "local"
 model = "maxwell1500/ornith-35b:Q5_K_M"
 
+[llm.roles."recall.gate"]
+capability = "generation"
+provider = "local"
+model = "ornith:9b-q4_K_M"
+
+[llm.roles."recall.query_rewriter"]
+capability = "generation"
+provider = "local"
+model = "ornith:9b-q4_K_M"
+
 # Each classification vote remains an independently replaceable single route.
 [llm.roles."classification.primary"]
 capability = "generation"
@@ -254,6 +261,16 @@ model = "gpt-oss:20b"
 # provider = "openai"
 # model = "gpt-5-mini"
 #
+# [llm.roles."recall.gate"]
+# capability = "generation"
+# provider = "openai"
+# model = "gpt-5-mini"
+#
+# [llm.roles."recall.query_rewriter"]
+# capability = "generation"
+# provider = "openai"
+# model = "gpt-5-mini"
+#
 # [llm.roles."ingest.generation"]
 # capability = "generation"
 # provider = "openai"
@@ -287,6 +304,14 @@ model = "gpt-oss:20b"
 #
 # [[llm.egress_opt_in]]
 # role = "recall.auditor"
+# data_class = "raw"
+#
+# [[llm.egress_opt_in]]
+# role = "recall.gate"
+# data_class = "raw"
+#
+# [[llm.egress_opt_in]]
+# role = "recall.query_rewriter"
 # data_class = "raw"
 #
 # [[llm.egress_opt_in]]

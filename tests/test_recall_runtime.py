@@ -13,7 +13,19 @@ from types import SimpleNamespace
 
 import pytest
 
+from chronovisor.core import llm_config, ollama
+from chronovisor.core.llm_runtime import (
+    BackendCapabilities,
+    GenerationResult,
+    GenerationRoute,
+    LLMRuntime,
+    MessageGenerationRequest,
+    RouteLocation,
+    SourceDataClass,
+    SourceSensitivity,
+)
 from chronovisor.core.search import ScoredPage
+from chronovisor.recall import recall_runtime
 from chronovisor.recall.recall_runtime import (
     ContextItem,
     RecallBudgetExhausted,
@@ -623,7 +635,7 @@ def test_obvious_read_does_not_wait_for_auto_judge(monkeypatch) -> None:
     assert result.confidence >= policy.read_threshold
 
 
-def test_gate_config_overrides_flat_model_and_budget(tmp_path) -> None:
+def test_gate_config_ignores_legacy_models_and_loads_budget(tmp_path) -> None:
     config = tmp_path / "flat-config.toml"
     config.write_text(
         """
@@ -640,7 +652,7 @@ max_total_context_chars = 1300
 failures = 3
 cooldown_seconds = 90
 
-[gate]
+[recall.gate]
 model = "qwen3.5:4b-mlx"
 think = false
 timeout_ms = 1200
@@ -649,14 +661,16 @@ num_predict = 128
 keep_alive = "1h"
 warmup_timeout_ms = 9000
 
-[rewrite]
+[recall.rewrite]
+model = "legacy-rewriter"
 timeout_ms = 1400
 """
     )
 
     policy = load_policy(config)
 
-    assert policy.judge_model == "qwen3.5:4b-mlx"
+    assert not hasattr(policy, "judge_model")
+    assert not hasattr(policy, "rewrite_model")
     assert policy.judge_think is False
     assert policy.judge_timeout_ms == 1200
     assert policy.judge_num_ctx == 2048
@@ -846,14 +860,16 @@ fail_silent_on_judge_unavailable = false
     assert asdict(load_policy(nested)) == asdict(load_policy(flat))
 
 
-def test_gate_defaults_keep_model_resident_and_rewrite_timeout_longer(tmp_path) -> None:
+def test_gate_defaults_keep_runtime_resident_and_rewrite_timeout_longer(
+    tmp_path: Path,
+) -> None:
     config = tmp_path / "config.toml"
     config.write_text("enabled = true\n")
 
     policy = load_policy(config)
 
-    assert policy.judge_model == "ornith:9b-q4_K_M"
-    assert policy.rewrite_model == "ornith:9b-q4_K_M"
+    assert not hasattr(policy, "judge_model")
+    assert not hasattr(policy, "rewrite_model")
     assert policy.judge_keep_alive == "24h"
     assert policy.warmup_timeout_ms == 15000
     assert policy.rewrite_timeout_ms == 3000
@@ -944,6 +960,177 @@ sync_recall = false
     assert load_policy(config).semantic is False
 
 
+class _RemoteRecallBackend:
+    provider = "remote-test"
+    location = RouteLocation.REMOTE
+
+    def __init__(self, *responses: str) -> None:
+        self.responses = list(responses)
+        self.requests: list[tuple[MessageGenerationRequest, str]] = []
+
+    def generate(
+        self, request: MessageGenerationRequest, *, model: str
+    ) -> GenerationResult:
+        self.requests.append((request, model))
+        return GenerationResult(
+            content=self.responses.pop(0),
+            provider=self.provider,
+            model=model,
+            completed=True,
+            finish_reason="stop",
+        )
+
+
+def _install_remote_recall_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+    backend: _RemoteRecallBackend,
+    *,
+    allowed_roles: set[str],
+) -> None:
+    runtime = LLMRuntime(
+        generation={
+            recall_runtime.RECALL_GATE_RUNTIME_ROLE: GenerationRoute(
+                backend,
+                "remote-gate",
+                BackendCapabilities(True, False, structured_output=True),
+            ),
+            recall_runtime.RECALL_QUERY_REWRITER_RUNTIME_ROLE: GenerationRoute(
+                backend,
+                "remote-rewriter",
+                BackendCapabilities(True, False, structured_output=True),
+            ),
+        },
+        remote_egress_opt_ins={
+            (role, SourceDataClass.RAW) for role in allowed_roles
+        },
+    )
+    monkeypatch.setattr(llm_config, "load_default_llm_runtime", lambda: runtime)
+
+
+def _forbid_ollama_controls(monkeypatch: pytest.MonkeyPatch) -> None:
+    def forbidden(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("remote recall route touched an Ollama control")
+
+    for name in (
+        "chat",
+        "generate",
+        "is_available",
+        "model_digests",
+        "model_resource_lease",
+        "model_resource_lease_mode",
+        "plan_model_residency",
+        "resident_model_rows",
+        "unload_model",
+        "unload_named_model",
+    ):
+        monkeypatch.setattr(ollama, name, forbidden)
+
+
+def test_remote_recall_judge_and_rewriter_use_raw_high_without_ollama_controls(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from chronovisor.core import store
+
+    backend = _RemoteRecallBackend(
+        json.dumps({"decision": "search", "confidence": 0.5, "reason": "必要"}),
+        json.dumps({"queries": ["explicit query"], "confidence": 0.8}),
+    )
+    _install_remote_recall_runtime(
+        monkeypatch,
+        backend,
+        allowed_roles={
+            recall_runtime.RECALL_GATE_RUNTIME_ROLE,
+            recall_runtime.RECALL_QUERY_REWRITER_RUNTIME_ROLE,
+        },
+    )
+    _forbid_ollama_controls(monkeypatch)
+    monkeypatch.setattr(store, "CHRONOVISOR_ROOT", tmp_path)
+    request = RecallRequest("test", "UserPromptSubmit", "前のあれ")
+
+    score, _queries, reason = run_local_judge(request, 0.5, RecallPolicy())
+    rewritten, confidence, rewrite_reason = run_query_rewriter(
+        request,
+        {"past_reference": ["前の"], "ambiguity": ["あれ"]},
+        RecallPolicy(),
+        "",
+    )
+
+    assert score == 0.5
+    assert reason == "必要"
+    assert rewritten == ["explicit query"]
+    assert confidence == 0.8
+    assert rewrite_reason == "rewrite ok"
+    assert [model for _request, model in backend.requests] == [
+        "remote-gate",
+        "remote-rewriter",
+    ]
+    assert all(
+        request.source.data_class is SourceDataClass.RAW
+        and request.source.sensitivity is SourceSensitivity.HIGH
+        for request, _model in backend.requests
+    )
+
+
+def test_remote_recall_egress_denial_preserves_fail_silent_fallbacks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from chronovisor.core import store
+
+    backend = _RemoteRecallBackend()
+    _install_remote_recall_runtime(monkeypatch, backend, allowed_roles=set())
+    _forbid_ollama_controls(monkeypatch)
+    monkeypatch.setattr(store, "CHRONOVISOR_ROOT", tmp_path)
+    request = RecallRequest("test", "UserPromptSubmit", "前のあれ")
+
+    score, queries, reason = run_local_judge(request, 0.5, RecallPolicy())
+    rewritten, confidence, rewrite_reason = run_query_rewriter(
+        request,
+        {"past_reference": ["前の"], "ambiguity": ["あれ"]},
+        RecallPolicy(),
+        "",
+    )
+
+    assert score is None
+    assert queries == []
+    assert reason.startswith("judge unavailable:")
+    assert rewritten == []
+    assert confidence == 0.0
+    assert rewrite_reason.startswith("rewrite fallback:")
+    assert backend.requests == []
+
+
+@pytest.mark.parametrize(
+    ("role", "structured", "category"),
+    [
+        ("wrong.role", True, "route_configuration_invalid"),
+        (recall_runtime.RECALL_GATE_RUNTIME_ROLE, False, "capability_unavailable"),
+    ],
+)
+def test_recall_route_validation_fails_before_backend_or_control(
+    role: str,
+    structured: bool,
+    category: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        ollama,
+        "runtime_generation_routes",
+        lambda _roles: (
+            ollama.RuntimeGenerationRoute(
+                role, "remote-test", "remote-gate", "remote", structured
+            ),
+        ),
+    )
+    _forbid_ollama_controls(monkeypatch)
+
+    with pytest.raises(ollama.RuntimeBridgeError) as invalid:
+        recall_runtime._recall_runtime_route(
+            recall_runtime.RECALL_GATE_RUNTIME_ROLE
+        )
+
+    assert invalid.value.category == category
+
+
 def test_local_judge_uses_gate_generation_options(monkeypatch) -> None:
     from chronovisor.recall import recall_runtime
 
@@ -975,8 +1162,16 @@ def test_local_judge_uses_gate_generation_options(monkeypatch) -> None:
             )
 
     monkeypatch.setattr(recall_runtime, "LocalStructuredSession", FakeSession)
+    monkeypatch.setattr(
+        ollama,
+        "runtime_generation_routes",
+        lambda roles: (
+            ollama.RuntimeGenerationRoute(
+                roles[0], "ollama", "qwen3.5:4b-mlx", "local", True
+            ),
+        ),
+    )
     policy = RecallPolicy(
-        judge_model="qwen3.5:4b-mlx",
         judge_think=False,
         judge_timeout_ms=1200,
         judge_num_ctx=2048,
@@ -998,6 +1193,10 @@ def test_local_judge_uses_gate_generation_options(monkeypatch) -> None:
     assert isinstance(session, dict)
     assert session["model"] == "qwen3.5:4b-mlx"
     assert session["role"] == "recall_judge"
+    assert session["runtime_role"] == recall_runtime.RECALL_GATE_RUNTIME_ROLE
+    assert session["runtime_location"] == "local"
+    assert session["source_data_class"] == "raw"
+    assert session["source_sensitivity"] == "high"
     assert session["num_ctx"] == 2048
     assert session["num_predict"] == 128
     assert "transport" not in session
@@ -1019,7 +1218,16 @@ def test_local_judge_decision_bounds_confidence(monkeypatch) -> None:
             )
 
     monkeypatch.setattr(recall_runtime, "LocalStructuredSession", FakeSession)
-    policy = RecallPolicy(judge_model="qwen3.5:4b-mlx", judge_timeout_ms=2000)
+    monkeypatch.setattr(
+        ollama,
+        "runtime_generation_routes",
+        lambda roles: (
+            ollama.RuntimeGenerationRoute(
+                roles[0], "ollama", "qwen3.5:4b-mlx", "local", True
+            ),
+        ),
+    )
+    policy = RecallPolicy(judge_timeout_ms=2000)
 
     score, _queries, reason = run_local_judge(
         RecallRequest(
@@ -1050,6 +1258,15 @@ def test_query_rewriter_timeout_falls_back_with_reason(monkeypatch) -> None:
             )
 
     monkeypatch.setattr(recall_runtime, "LocalStructuredSession", FakeSession)
+    monkeypatch.setattr(
+        ollama,
+        "runtime_generation_routes",
+        lambda roles: (
+            ollama.RuntimeGenerationRoute(
+                roles[0], "ollama", "rewrite-model", "local", True
+            ),
+        ),
+    )
 
     queries, confidence, reason = run_query_rewriter(
         RecallRequest(host="test", event="UserPromptSubmit", prompt="前のあれ"),
@@ -1061,7 +1278,12 @@ def test_query_rewriter_timeout_falls_back_with_reason(monkeypatch) -> None:
     assert queries == []
     assert confidence == 0.0
     assert reason == "rewrite fallback: completion_incomplete"
+    assert captured["model"] == "rewrite-model"
     assert captured["role"] == "recall_query_rewriter"
+    assert captured["runtime_role"] == recall_runtime.RECALL_QUERY_REWRITER_RUNTIME_ROLE
+    assert captured["runtime_location"] == "local"
+    assert captured["source_data_class"] == "raw"
+    assert captured["source_sensitivity"] == "high"
     assert "transport" not in captured
 
 
@@ -1079,11 +1301,23 @@ def test_warm_recall_model_uses_configured_keep_alive(monkeypatch) -> None:
             return SimpleNamespace(ok=True, value={}, failure_class=None)
 
     monkeypatch.setattr(recall_runtime, "LocalStructuredSession", FakeSession)
+    route_models = {
+        recall_runtime.RECALL_GATE_RUNTIME_ROLE: "ornith:9b-q4_K_M",
+        recall_runtime.RECALL_QUERY_REWRITER_RUNTIME_ROLE: "qwen3.5:4b-mlx",
+    }
+    monkeypatch.setattr(
+        ollama,
+        "runtime_generation_routes",
+        lambda roles: tuple(
+            ollama.RuntimeGenerationRoute(
+                role, "ollama", route_models[role], "local", True
+            )
+            for role in roles
+        ),
+    )
 
     result = warm_recall_model(
         RecallPolicy(
-            judge_model="ornith:9b-q4_K_M",
-            rewrite_model="qwen3.5:4b-mlx",
             judge_keep_alive="1h",
         )
     )
@@ -1094,6 +1328,10 @@ def test_warm_recall_model_uses_configured_keep_alive(monkeypatch) -> None:
     assert [session["num_ctx"] for session in captured] == [4096, 4096]
     assert all(session["num_ctx"] != 128 for session in captured)
     assert all(session["role"] == "recall_warmup" for session in captured)
+    assert [session["runtime_role"] for session in captured] == list(route_models)
+    assert all(session["runtime_location"] == "local" for session in captured)
+    assert all(session["source_data_class"] == "raw" for session in captured)
+    assert all(session["source_sensitivity"] == "high" for session in captured)
     assert all("transport" not in session for session in captured)
     for session_kwargs in captured:
         session = real_session(**session_kwargs)
@@ -1103,6 +1341,57 @@ def test_warm_recall_model_uses_configured_keep_alive(monkeypatch) -> None:
             system=None,
         )
         assert failure is None
+
+
+def test_warm_recall_model_uses_both_remote_roles_without_ollama_controls(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from chronovisor.core import store
+
+    backend = _RemoteRecallBackend("{}", "{}")
+    _install_remote_recall_runtime(
+        monkeypatch,
+        backend,
+        allowed_roles={
+            recall_runtime.RECALL_GATE_RUNTIME_ROLE,
+            recall_runtime.RECALL_QUERY_REWRITER_RUNTIME_ROLE,
+        },
+    )
+    _forbid_ollama_controls(monkeypatch)
+    monkeypatch.setattr(store, "CHRONOVISOR_ROOT", tmp_path)
+
+    result = warm_recall_model(RecallPolicy())
+
+    assert result["ok"] is True
+    assert result["models"] == ["remote-gate", "remote-rewriter"]
+    assert [model for _request, model in backend.requests] == result["models"]
+    assert all(
+        request.source.data_class is SourceDataClass.RAW
+        and request.source.sensitivity is SourceSensitivity.HIGH
+        for request, _model in backend.requests
+    )
+
+
+def test_warm_recall_model_enforces_remote_egress_per_role(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from chronovisor.core import store
+
+    backend = _RemoteRecallBackend("{}")
+    _install_remote_recall_runtime(
+        monkeypatch,
+        backend,
+        allowed_roles={recall_runtime.RECALL_GATE_RUNTIME_ROLE},
+    )
+    _forbid_ollama_controls(monkeypatch)
+    monkeypatch.setattr(store, "CHRONOVISOR_ROOT", tmp_path)
+
+    result = warm_recall_model(RecallPolicy())
+
+    assert result["ok"] is False
+    assert result["models"] == ["remote-gate"]
+    assert result["errors"] == {"remote-rewriter": "egress_denied"}
+    assert [model for _request, model in backend.requests] == ["remote-gate"]
 
 
 def test_run_recall_records_rewrite_fallback_metrics(monkeypatch) -> None:

@@ -109,6 +109,16 @@ capability = "generation"
 provider = "local"
 model = "maxwell1500/ornith-35b:Q5_K_M"
 
+[llm.roles."recall.gate"]
+capability = "generation"
+provider = "local"
+model = "ornith:9b-q4_K_M"
+
+[llm.roles."recall.query_rewriter"]
+capability = "generation"
+provider = "local"
+model = "ornith:9b-q4_K_M"
+
 [decision_router]
 # Routine structured decisions require a two-vote local quorum. The complete
 # request-token budget, including both possible JSON-repair turns, selects the
@@ -322,13 +332,12 @@ search = 0.35
 read = 0.65
 
 [recall.gate]
-model = "ornith:9b-q4_K_M"
 think = false
 timeout_ms = 3000
 num_ctx = 4096
 num_predict = 64
 include_queries = false
-# How long ollama keeps the gate/rewrite model resident after a call.
+# How long local Ollama keeps the gate/rewrite model resident after a call.
 # Default "24h" avoids cold-start timeouts on the synchronous recall path.
 keep_alive = "24h"
 # Used by `chronovisor-recall --warmup` before hook sessions.
@@ -416,7 +425,6 @@ cooldown_seconds = 60
 
 [recall.rewrite]
 enabled = true
-model = "ornith:9b-q4_K_M"
 timeout_ms = 3000
 
 [recall.fusion]
@@ -477,6 +485,12 @@ Auditor model routing is fixed by `llm.roles."recall.auditor"`. Legacy
 are accepted but ignored. Auditor inputs are classified as `raw/high`; remote
 providers require an explicit `recall.auditor` + `raw` egress opt-in and never
 fall back to another provider.
+
+Synchronous recall routing is fixed by `llm.roles."recall.gate"` and
+`llm.roles."recall.query_rewriter"`. Legacy top-level `model`,
+`[recall].model`, `[recall.gate].model`, and `[recall.rewrite].model` values
+are accepted but ignored. Both inputs are `raw/high`; remote providers require
+an explicit role + `raw` egress opt-in and never fall back to another provider.
 
 ## Decision quorum safety
 

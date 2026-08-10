@@ -29,10 +29,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from chronovisor.core import ollama, runtime_config
 from chronovisor.core.index_store import get_store
 from chronovisor.core.jsonl_write import append_jsonl_durable
 from chronovisor.core.recall_runtime_paths import RECALL_DIR
-from chronovisor.core.runtime_config import active_config_file
 from chronovisor.core.search import last_search_trace
 from chronovisor.core.search import search as run_search
 from chronovisor.core.store import (
@@ -70,12 +70,14 @@ from chronovisor.recall.recall_publication import result_to_dict as result_to_di
 
 RECALL_LOG_FILE = RECALL_DIR / "recall-log.jsonl"
 RECALL_FEEDBACK_FILE = RECALL_DIR / "feedback.jsonl"
-RECALL_CONFIG_FILE = active_config_file()
+RECALL_CONFIG_FILE = runtime_config.active_config_file()
 RECALL_PULL_LOG_FILE = RECALL_DIR / "pull-log.jsonl"
 RECALL_CALIBRATION_FILE = RECALL_DIR / "calibration.json"
 TYPED_GRAPH_TRACE_FILE = (
     CHRONOVISOR_ROOT / "runtime" / "typed-graph" / "candidate-trace.jsonl"
 )
+RECALL_GATE_RUNTIME_ROLE = "recall.gate"
+RECALL_QUERY_REWRITER_RUNTIME_ROLE = "recall.query_rewriter"
 
 TRIVIAL_PROMPT_RE = re.compile(
     r"^\s*(はい|いいえ|うん|おう|ok|okay|yes|no|y|n|ありがとう|thanks|thx|了解|りょ)\s*[。.!！?？]*\s*$",
@@ -278,9 +280,18 @@ class RecallBudgetExhausted(TimeoutError):
     """Raised when the synchronous recall wall-clock budget is exhausted."""
 
 
+def _recall_runtime_route(role: str) -> ollama.RuntimeGenerationRoute:
+    route = ollama.runtime_generation_routes((role,))[0]
+    if route.role != role:
+        raise ollama.RuntimeBridgeError("route_configuration_invalid")
+    if not route.structured_output:
+        raise ollama.RuntimeBridgeError("capability_unavailable")
+    return route
+
+
 def load_policy(path: Path = RECALL_CONFIG_FILE) -> RecallPolicy:
     policy = RecallPolicy()
-    path = active_config_file(path)
+    path = runtime_config.active_config_file(path)
     if path.exists():
         try:
             data = tomllib.loads(path.read_text())
@@ -348,10 +359,6 @@ def _apply_config(policy: RecallPolicy, data: dict[str, Any]) -> None:
     enabled = recall_root.get("enabled", data.get("enabled"))
     if isinstance(enabled, bool):
         policy.enabled = enabled
-    model = recall_root.get("model", data.get("model"))
-    if isinstance(model, str):
-        policy.judge_model = model
-
     def section(name: str) -> dict[str, Any]:
         nested = recall_root.get(name)
         if isinstance(nested, dict):
@@ -412,8 +419,6 @@ def _apply_config(policy: RecallPolicy, data: dict[str, Any]) -> None:
 
     gate = section("gate")
     if gate:
-        if isinstance(gate.get("model"), str):
-            policy.judge_model = gate["model"]
         if isinstance(gate.get("think"), bool):
             policy.judge_think = gate["think"]
         if isinstance(gate.get("timeout_ms"), int):
@@ -435,8 +440,6 @@ def _apply_config(policy: RecallPolicy, data: dict[str, Any]) -> None:
     if rewrite:
         if isinstance(rewrite.get("enabled"), bool):
             policy.rewrite_enabled = rewrite["enabled"]
-        if isinstance(rewrite.get("model"), str):
-            policy.rewrite_model = rewrite["model"]
         if isinstance(rewrite.get("timeout_ms"), int):
             policy.rewrite_timeout_ms = max(200, rewrite["timeout_ms"])
 
@@ -780,9 +783,14 @@ def run_local_judge(
         schema["properties"]["queries"] = {"type": "array", "items": {"type": "string"}}
 
     try:
+        route = _recall_runtime_route(RECALL_GATE_RUNTIME_ROLE)
         result = LocalStructuredSession(
-            model=policy.judge_model,
+            model=route.model,
             role="recall_judge",
+            runtime_role=RECALL_GATE_RUNTIME_ROLE,
+            runtime_location=route.location,
+            source_data_class="raw",
+            source_sensitivity="high",
             num_ctx=policy.judge_num_ctx,
             num_predict=policy.judge_num_predict,
             keep_alive=policy.judge_keep_alive,
@@ -909,9 +917,14 @@ def run_query_rewriter(
         "required": ["queries", "confidence"],
     }
     try:
+        route = _recall_runtime_route(RECALL_QUERY_REWRITER_RUNTIME_ROLE)
         result = LocalStructuredSession(
-            model=policy.rewrite_model or policy.judge_model,
+            model=route.model,
             role="recall_query_rewriter",
+            runtime_role=RECALL_QUERY_REWRITER_RUNTIME_ROLE,
+            runtime_location=route.location,
+            source_data_class="raw",
+            source_sensitivity="high",
             num_ctx=policy.judge_num_ctx,
             num_predict=96,
             keep_alive=policy.judge_keep_alive,
@@ -956,25 +969,20 @@ def run_query_rewriter(
 
 
 def warm_recall_model(policy: RecallPolicy) -> dict[str, Any]:
-    """Warm the gate/rewrite Ollama model so sync recall avoids cold starts."""
+    """Warm the fixed gate/rewrite routes so sync recall avoids cold starts."""
     started = time.monotonic()
-    models = list(
-        dict.fromkeys(
-            model.strip()
-            for model in (
-                policy.judge_model,
-                policy.rewrite_model or policy.judge_model,
-            )
-            if model.strip()
-        )
-    )[:2]
     warmed: list[str] = []
     errors: dict[str, str] = {}
-    for model in models:
+    for role in (RECALL_GATE_RUNTIME_ROLE, RECALL_QUERY_REWRITER_RUNTIME_ROLE):
         try:
+            route = _recall_runtime_route(role)
             result = LocalStructuredSession(
-                model=model,
+                model=route.model,
                 role="recall_warmup",
+                runtime_role=role,
+                runtime_location=route.location,
+                source_data_class="raw",
+                source_sensitivity="high",
                 num_ctx=policy.judge_num_ctx,
                 num_predict=16,
                 keep_alive=policy.judge_keep_alive,
@@ -990,11 +998,12 @@ def warm_recall_model(policy: RecallPolicy) -> dict[str, Any]:
                 {"type": "object", "maxProperties": 0},
             )
             if not result.ok:
-                errors[model] = result.failure_class or "structured_failure"
+                errors[route.model] = result.failure_class or "structured_failure"
                 continue
-            warmed.append(model)
+            if route.model not in warmed:
+                warmed.append(route.model)
         except Exception as exc:
-            errors[model] = exc.__class__.__name__
+            errors[role] = exc.__class__.__name__
     return {
         "ok": not errors,
         "models": warmed,

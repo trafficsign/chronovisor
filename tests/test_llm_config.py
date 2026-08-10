@@ -531,6 +531,8 @@ def test_repository_example_has_representative_local_role_map() -> None:
         "recall.certificate_judge.primary",
         "recall.certificate_judge.escalation",
         "recall.auditor",
+        "recall.gate",
+        "recall.query_rewriter",
         "knowledge.relation_extraction",
         "knowledge.community_summary",
         "ingest.generation",
@@ -569,6 +571,10 @@ def test_repository_example_has_representative_local_role_map() -> None:
     auditor = config.roles["recall.auditor"]
     assert auditor.provider_id == "local"
     assert auditor.model == "maxwell1500/ornith-35b:Q5_K_M"
+    recall_gate = config.roles["recall.gate"]
+    recall_rewriter = config.roles["recall.query_rewriter"]
+    assert recall_gate.provider_id == recall_rewriter.provider_id == "local"
+    assert recall_gate.model == recall_rewriter.model == "ornith:9b-q4_K_M"
     ingest_generation = config.roles["ingest.generation"]
     assert ingest_generation.provider_id == "local"
     assert ingest_generation.model == "maxwell1500/ornith-35b:Q5_K_M"

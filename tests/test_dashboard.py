@@ -3084,17 +3084,23 @@ def test_model_status_snapshot_combines_ollama_and_config(monkeypatch) -> None:
         "load_audit_policy",
         lambda: SimpleNamespace(enabled=True),
     )
+    role_models = {
+        dashboard.AUDITOR_RUNTIME_ROLE: "qwen3.6:35b-a3b-mxfp8",
+        dashboard.RECALL_GATE_RUNTIME_ROLE: "qwen3.5:4b-mlx",
+        dashboard.RECALL_QUERY_REWRITER_RUNTIME_ROLE: "qwen3.5:4b-mlx",
+    }
     monkeypatch.setattr(
         dashboard,
         "runtime_generation_routes",
-        lambda roles: (
+        lambda roles: tuple(
             ollama.RuntimeGenerationRoute(
-                role=roles[0],
+                role=role,
                 provider="ollama",
-                model="qwen3.6:35b-a3b-mxfp8",
+                model=role_models[role],
                 location="local",
                 structured_output=True,
-            ),
+            )
+            for role in roles
         ),
     )
     monkeypatch.setattr(
@@ -3102,9 +3108,7 @@ def test_model_status_snapshot_combines_ollama_and_config(monkeypatch) -> None:
         "load_policy",
         lambda: SimpleNamespace(
             judge_mode="auto",
-            judge_model="qwen3.5:4b-mlx",
             rewrite_enabled=True,
-            rewrite_model="qwen3.5:4b-mlx",
         ),
     )
     monkeypatch.setattr(
@@ -3184,6 +3188,11 @@ def test_configured_model_roles_use_adopted_router_triplet(monkeypatch) -> None:
         dashboard.recall_runtime,
         "load_policy",
         lambda: SimpleNamespace(judge_mode="off", rewrite_enabled=False),
+    )
+    monkeypatch.setattr(
+        dashboard,
+        "runtime_generation_routes",
+        lambda _roles: pytest.fail("disabled recall roles resolved runtime config"),
     )
     monkeypatch.setattr(dashboard, "configured_models", lambda _models=None: ())
     monkeypatch.setattr(dashboard, "load_decision_router_config", lambda: bootstrap)

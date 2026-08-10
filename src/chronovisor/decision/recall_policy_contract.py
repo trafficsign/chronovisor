@@ -58,7 +58,6 @@ class RecallPolicy:
     use_feedback_suppressions: bool = True
     fail_silent_on_judge_unavailable: bool = True
     judge_mode: str = "auto"  # off | auto | always
-    judge_model: str = "ornith:9b-q4_K_M"
     judge_think: bool = False
     judge_timeout_ms: int = 2000
     judge_num_ctx: int = 4096
@@ -67,7 +66,6 @@ class RecallPolicy:
     warmup_timeout_ms: int = 15000
     judge_include_queries: bool = False
     rewrite_enabled: bool = True
-    rewrite_model: str = "ornith:9b-q4_K_M"
     rewrite_timeout_ms: int = 3000
     fusion_anchor: float = 0.9
     fusion_bm25: float = 1.0

@@ -104,6 +104,8 @@ ACTIVE_BATCH_STAGES = {
 }
 DECISION_ROUTER_DASHBOARD_CACHE_SECONDS = 15.0
 AUDITOR_RUNTIME_ROLE = "recall.auditor"
+RECALL_GATE_RUNTIME_ROLE = "recall.gate"
+RECALL_QUERY_REWRITER_RUNTIME_ROLE = "recall.query_rewriter"
 # Live runtime status is overlaid at response time; expensive cold aggregates
 # only need this bounded active refresh cadence.
 SNAPSHOT_ACTIVE_CACHE_SECONDS = 30.0
@@ -475,12 +477,22 @@ def _configured_model_roles() -> dict[str, set[str]]:
 
     try:
         recall_policy = recall_runtime.load_policy()
+        configured_recall_roles: list[tuple[str, str]] = []
         if getattr(recall_policy, "judge_mode", "auto") != "off":
-            _add_model_role(roles, getattr(recall_policy, "judge_model", ""), "gate")
+            configured_recall_roles.append((RECALL_GATE_RUNTIME_ROLE, "gate"))
         if getattr(recall_policy, "rewrite_enabled", False):
-            _add_model_role(
-                roles, getattr(recall_policy, "rewrite_model", ""), "rewrite"
+            configured_recall_roles.append(
+                (RECALL_QUERY_REWRITER_RUNTIME_ROLE, "rewrite")
             )
+        if configured_recall_roles:
+            resolved_recall_routes = runtime_generation_routes(
+                tuple(role for role, _label in configured_recall_roles)
+            )
+            for (role, label), route in zip(
+                configured_recall_roles, resolved_recall_routes, strict=True
+            ):
+                if route.role == role and route.structured_output:
+                    _add_model_role(roles, route.model, label)
     except Exception:
         pass
 
