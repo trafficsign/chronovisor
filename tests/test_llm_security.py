@@ -217,6 +217,8 @@ class RecordingSender:
 def _transport(
     sender: RecordingSender,
     *,
+    profile_id: str = "openai-primary",
+    binding_profile_id: str = "openai-primary",
     endpoint: str = "https://api.example.com/v1",
     binding_endpoint: str = "https://api.example.com",
     binding_scheme: AuthScheme = AuthScheme.BEARER,
@@ -224,9 +226,12 @@ def _transport(
     events: list[CredentialFailureTelemetry] | None = None,
 ) -> AuthenticatedTransport:
     return AuthenticatedTransport(
+        profile_id=profile_id,
         endpoint=endpoint,
         secret=SecretValue(CANARY),
-        binding=CredentialBinding.bind(binding_endpoint, binding_scheme),
+        binding=CredentialBinding.bind(
+            binding_profile_id, binding_endpoint, binding_scheme
+        ),
         auth_scheme=requested_scheme,
         sender=sender,
         telemetry=None if events is None else events.append,
@@ -248,13 +253,34 @@ def test_transport_injects_auth_only_at_wire_and_never_follows_redirects() -> No
 
 
 @pytest.mark.parametrize(
-    "binding_endpoint, binding_scheme, requested_scheme",
+    "profile_id, binding_profile_id, binding_endpoint, binding_scheme, requested_scheme",
     [
-        ("https://other.example.com", AuthScheme.BEARER, AuthScheme.BEARER),
-        ("https://api.example.com", AuthScheme.X_API_KEY, AuthScheme.BEARER),
+        (
+            "openai-primary",
+            "other-profile",
+            "https://api.example.com",
+            AuthScheme.BEARER,
+            AuthScheme.BEARER,
+        ),
+        (
+            "openai-primary",
+            "openai-primary",
+            "https://other.example.com",
+            AuthScheme.BEARER,
+            AuthScheme.BEARER,
+        ),
+        (
+            "openai-primary",
+            "openai-primary",
+            "https://api.example.com",
+            AuthScheme.X_API_KEY,
+            AuthScheme.BEARER,
+        ),
     ],
 )
 def test_transport_rejects_binding_mismatch_before_sender_call(
+    profile_id: str,
+    binding_profile_id: str,
     binding_endpoint: str,
     binding_scheme: AuthScheme,
     requested_scheme: AuthScheme,
@@ -264,12 +290,58 @@ def test_transport_rejects_binding_mismatch_before_sender_call(
     with pytest.raises(CredentialSecurityError) as exc:
         _transport(
             sender,
+            profile_id=profile_id,
+            binding_profile_id=binding_profile_id,
             binding_endpoint=binding_endpoint,
             binding_scheme=binding_scheme,
             requested_scheme=requested_scheme,
         )
 
     assert exc.value.category is CredentialFailureCategory.ORIGIN_MISMATCH
+    assert sender.calls == []
+
+
+@pytest.mark.parametrize(
+    "profile_id",
+    ["", "OpenAI", " openai", "openai/default", "openai primary", "1openai"],
+)
+def test_credential_binding_rejects_noncanonical_profile_id(
+    profile_id: str,
+) -> None:
+    with pytest.raises(CredentialSecurityError) as exc:
+        CredentialBinding.bind(profile_id, "https://api.example.com", AuthScheme.BEARER)
+
+    assert exc.value.category is CredentialFailureCategory.ORIGIN_MISMATCH
+
+
+@pytest.mark.parametrize(
+    "header",
+    [
+        "Host",
+        "Content-Length",
+        "Transfer-Encoding",
+        "Connection",
+        "Proxy-Connection",
+        "Upgrade",
+        "TE",
+        "Trailer",
+        "Authorization",
+        "Proxy-Authorization",
+        "X-API-Key",
+    ],
+)
+def test_transport_rejects_caller_authority_framing_and_auth_headers(
+    header: str,
+) -> None:
+    sender = RecordingSender()
+    transport = _transport(sender)
+
+    with pytest.raises(CredentialSecurityError) as exc:
+        transport.send(
+            "https://api.example.com/v1/chat", headers={header.swapcase(): CANARY}
+        )
+
+    assert exc.value.category is CredentialFailureCategory.ENDPOINT_REJECTED
     assert sender.calls == []
 
 

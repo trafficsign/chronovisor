@@ -19,6 +19,7 @@ _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 _KEYRING_TARGET = re.compile(
     r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z"
 )
+_PROFILE_ID = re.compile(r"[a-z][a-z0-9._-]{0,63}\Z")
 _HTTP_TOKEN = re.compile(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+\Z")
 _CREDENTIAL_QUERY_NAMES = frozenset(
     {
@@ -34,11 +35,19 @@ _CREDENTIAL_QUERY_NAMES = frozenset(
         "token",
     }
 )
-_AUTH_HEADERS = frozenset(
+_CALLER_FORBIDDEN_HEADERS = frozenset(
     {
         "api-key",
         "authorization",
+        "connection",
+        "content-length",
+        "host",
         "proxy-authorization",
+        "proxy-connection",
+        "te",
+        "trailer",
+        "transfer-encoding",
+        "upgrade",
         "x-api-key",
         "x-goog-api-key",
     }
@@ -291,7 +300,7 @@ def _validated_headers(
                 not isinstance(name, str)
                 or not isinstance(value, str)
                 or _HTTP_TOKEN.fullmatch(name) is None
-                or name.lower() in _AUTH_HEADERS
+                or name.lower() in _CALLER_FORBIDDEN_HEADERS
                 or any(
                     ord(character) < 32 or ord(character) == 127 for character in value
                 )
@@ -413,13 +422,30 @@ class AuthScheme(StrEnum):
 
 @dataclass(frozen=True)
 class CredentialBinding:
+    profile_id: str
     origin: str
     auth_scheme: AuthScheme
 
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.profile_id, str)
+            or _PROFILE_ID.fullmatch(self.profile_id) is None
+            or not isinstance(self.auth_scheme, AuthScheme)
+        ):
+            raise _error(CredentialFailureCategory.ORIGIN_MISMATCH)
+        canonical = canonical_endpoint(self.origin, cloud_secret=True)
+        if canonical.origin != self.origin:
+            raise _error(CredentialFailureCategory.ORIGIN_MISMATCH)
+
     @classmethod
-    def bind(cls, endpoint: str, auth_scheme: AuthScheme | str) -> CredentialBinding:
+    def bind(
+        cls,
+        profile_id: str,
+        endpoint: str,
+        auth_scheme: AuthScheme | str,
+    ) -> CredentialBinding:
         canonical = canonical_endpoint(endpoint, cloud_secret=True)
-        return cls(canonical.origin, AuthScheme.parse(auth_scheme))
+        return cls(profile_id, canonical.origin, AuthScheme.parse(auth_scheme))
 
 
 class RequestSender(Protocol):
@@ -434,6 +460,7 @@ class AuthenticatedTransport:
     def __init__(
         self,
         *,
+        profile_id: str,
         endpoint: str,
         secret: SecretValue,
         binding: CredentialBinding,
@@ -449,7 +476,9 @@ class AuthenticatedTransport:
         bound = canonical_endpoint(binding.origin, cloud_secret=True)
         requested_scheme = AuthScheme.parse(auth_scheme)
         if (
-            canonical.origin != bound.origin
+            profile_id != binding.profile_id
+            or _PROFILE_ID.fullmatch(profile_id) is None
+            or canonical.origin != bound.origin
             or requested_scheme is not binding.auth_scheme
         ):
             raise _error(CredentialFailureCategory.ORIGIN_MISMATCH, telemetry)
