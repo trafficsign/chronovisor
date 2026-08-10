@@ -38,7 +38,18 @@ def _stub_lanes(monkeypatch: Any, *, busy: bool) -> None:
     monkeypatch.setattr(
         runtime,
         "run_builder_cycle",
-        lambda **_kwargs: {"status": "ok", "external_model_calls": 0},
+        lambda **_kwargs: {
+            "status": "ok",
+            "external_model_calls": 0,
+            "route_identity": {
+                "role": "knowledge.relation_extraction",
+                "provider": "ollama",
+                "model": "gemma4:26b",
+                "location": "local",
+            },
+            "model_sha256": "a" * 64,
+            "local_model_digest": "local-a",
+        },
     )
     monkeypatch.setattr(
         runtime,
@@ -66,7 +77,18 @@ def _stub_lanes(monkeypatch: Any, *, busy: bool) -> None:
         "summarize_communities",
         lambda rows, **_kwargs: (
             rows,
-            {"status": "ok", "external_model_calls": 0},
+            {
+                "status": "ok",
+                "external_model_calls": 0,
+                "route_identity": {
+                    "role": "knowledge.community_summary",
+                    "provider": "ollama",
+                    "model": "gemma4:26b",
+                    "location": "local",
+                },
+                "model_sha256": "b" * 64,
+                "local_model_digest": "local-b",
+            },
         ),
     )
     monkeypatch.setattr(
@@ -139,12 +161,55 @@ def test_runtime_reports_machine_checked_engineering_and_maturity_gates(
     assert result["rollout"]["rubric_sha256"] == sha256(
         {"rubric": "builtin", "version": 1}
     )
+    assert result["rollout"]["model_manifest_sha256"] == sha256(
+        [
+            {
+                "role": "knowledge.relation_extraction",
+                "provider": "ollama",
+                "model": "gemma4:26b",
+                "location": "local",
+                "model_sha256": "a" * 64,
+                "local_model_digest": "local-a",
+            },
+            {
+                "role": "knowledge.community_summary",
+                "provider": "ollama",
+                "model": "gemma4:26b",
+                "location": "local",
+                "model_sha256": "b" * 64,
+                "local_model_digest": "local-b",
+            },
+        ]
+    )
     assert result["rollout"]["sample_unit"] == "distinct_applied_session_hashes"
     assert result["rubric_gold"]["steps_run"] == 4
     assert result["authority"]["current"]["relation_strong"] == 0
     assert result["rollout"]["gates"]["authority:relation_strong"] is False
     assert result["rollout"]["gates"]["authority:rubric_sessions"] is False
     assert result["rollout"]["gates"]["learning:rubric_adopted"] is False
+
+
+def test_rollout_fails_closed_when_runtime_route_is_unresolved(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    _capture_baseline(tmp_path)
+    _stub_lanes(monkeypatch, busy=False)
+    monkeypatch.setattr(
+        runtime,
+        "run_builder_cycle",
+        lambda **_kwargs: {
+            "status": "partial",
+            "external_model_calls": 0,
+            "route_identity": {},
+            "model_sha256": "",
+            "local_model_digest": "",
+        },
+    )
+
+    result = runtime.run_graph_maintenance(root=tmp_path, config=_config())
+
+    assert result["rollout"]["gates"]["runtime_routes_resolved"] is False
+    assert result["rollout"]["canary_percent"] == 0
 
 
 def test_resource_pause_preserves_existing_canary_artifact(

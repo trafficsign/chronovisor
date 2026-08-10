@@ -530,6 +530,8 @@ def test_repository_example_has_representative_local_role_map() -> None:
         "recall.answer.scorer",
         "recall.certificate_judge.primary",
         "recall.certificate_judge.escalation",
+        "knowledge.relation_extraction",
+        "knowledge.community_summary",
         "ingest.generation",
         "lint.tag_repair",
         "lint.orphan_link",
@@ -568,6 +570,8 @@ def test_repository_example_has_representative_local_role_map() -> None:
     assert ingest_generation.model == "maxwell1500/ornith-35b:Q5_K_M"
     assert config.roles["lint.tag_repair"].model == ingest_generation.model
     assert config.roles["lint.orphan_link"].model == ingest_generation.model
+    assert config.roles["knowledge.relation_extraction"].model == "gemma4:26b"
+    assert config.roles["knowledge.community_summary"].model == "gemma4:26b"
     assert (
         config.roles["recall.content_correction.proposer"].model
         == ingest_generation.model

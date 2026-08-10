@@ -668,9 +668,6 @@ the SQLite projection is built successfully.
 [knowledge_graph]
 enabled = true
 mode = "shadow" # off | shadow | candidate | active
-external_models_allowed = false
-extractor_model = "gemma4:26b"
-community_summary_model = "gemma4:26b"
 local_extraction_enabled = true
 max_changed_pages_per_cycle = 25
 max_queue_size = 500
@@ -691,11 +688,28 @@ per_predicate_cap = 4
 hub_penalty = 0.15
 ```
 
-Only bare local Ollama model names and `ollama://` or `local://` identifiers are
-accepted. Enabling `external_models_allowed` or configuring an HTTP/provider
-model fails closed; the typed graph has no cloud-model fallback. Builder and
-community-summary budgets share the daily model-seconds ceiling. The worker
-also pauses while foreground model activity holds the shared resource lease.
+Provider and model selection is fixed by the shared runtime roles below; the
+legacy `extractor_model`, `community_summary_model`, and
+`external_models_allowed` keys are accepted but ignored.
+
+```toml
+[llm.roles."knowledge.relation_extraction"]
+capability = "generation"
+provider = "local"
+model = "gemma4:26b"
+
+[llm.roles."knowledge.community_summary"]
+capability = "generation"
+provider = "local"
+model = "gemma4:26b"
+```
+
+Builder and community-summary budgets share the daily model-seconds ceiling.
+The worker also pauses while foreground model activity holds the shared
+resource lease. Page excerpts are classified before inference; `system/`
+excerpts remain `system/high`, while ordinary Wiki pages are `page/high`.
+Remote routes therefore require explicit role-by-data-class egress opt-in for
+both classes; a denial sends no outbound request and does not fall back.
 
 The configured mode is not authority by itself. Promotion is controlled by a
 sealed evaluation artifact and proceeds automatically by session hash through

@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from chronovisor.core import ollama
+from chronovisor.core.knowledge_graph_schema import sha256
 from chronovisor.core.runtime_config import active_config_file, load_toml_file
 
 VALID_MODES = frozenset({"off", "shadow", "candidate", "active"})
-LOCAL_MODEL_PREFIXES = ("", "ollama://", "local://")
+RELATION_EXTRACTION_RUNTIME_ROLE = "knowledge.relation_extraction"
+COMMUNITY_SUMMARY_RUNTIME_ROLE = "knowledge.community_summary"
 
 
 @dataclass(frozen=True)
@@ -26,9 +30,6 @@ class GraphRetrievalConfig:
 class KnowledgeGraphConfig:
     enabled: bool = True
     mode: str = "shadow"
-    external_models_allowed: bool = False
-    extractor_model: str = "gemma4:26b"
-    community_summary_model: str = "gemma4:26b"
     local_extraction_enabled: bool = True
     max_changed_pages_per_cycle: int = 25
     max_model_seconds_per_day: int = 7_200
@@ -60,13 +61,43 @@ def _mode(value: Any, default: str) -> str:
     return candidate if candidate in VALID_MODES else "off"
 
 
-def model_is_local(model: str) -> bool:
-    """Reject HTTP/provider model identifiers at the configuration boundary."""
+def resolve_knowledge_generation_identity(
+    role: str,
+) -> tuple[dict[str, str], str]:
+    """Resolve one fixed route and optional local Ollama digest."""
 
-    value = model.strip().lower()
-    if "://" not in value:
-        return bool(value)
-    return value.startswith(("ollama://", "local://"))
+    route = ollama.runtime_generation_routes((role,))[0]
+    if route.role != role:
+        raise ollama.RuntimeBridgeError("route_configuration_invalid")
+    if not route.structured_output:
+        raise ollama.RuntimeBridgeError("capability_unavailable")
+    identity = {
+        "role": route.role,
+        "provider": route.provider,
+        "model": route.model,
+        "location": route.location,
+    }
+    local_digest = ""
+    if route.provider == "ollama" and route.location == "local":
+        try:
+            local_digest = ollama.model_digests((route.model,)).get(route.model, "")
+        except Exception:
+            # Optional identity metadata must never become an availability gate.
+            pass
+    return identity, local_digest
+
+
+def knowledge_generation_sha256(
+    route_identity: Mapping[str, str], local_model_digest: str = ""
+) -> str:
+    """Hash the provider-neutral route plus an observed local digest, if any."""
+
+    return sha256(
+        {
+            "route_identity": dict(route_identity),
+            "local_model_digest": local_model_digest,
+        }
+    )
 
 
 def load_config(path: Path | str | None = None) -> KnowledgeGraphConfig:
@@ -76,21 +107,9 @@ def load_config(path: Path | str | None = None) -> KnowledgeGraphConfig:
         return KnowledgeGraphConfig()
     retrieval_value = section.get("retrieval")
     retrieval_section = retrieval_value if isinstance(retrieval_value, dict) else {}
-    model = str(section.get("extractor_model") or "gemma4:26b").strip()
-    summary_model = str(
-        section.get("community_summary_model") or model or "gemma4:26b"
-    ).strip()
-    external_allowed = section.get("external_models_allowed") is True
-    if not model_is_local(model) or not model_is_local(summary_model):
-        raise ValueError("knowledge graph local model requirement violated")
-    if external_allowed:
-        raise ValueError("knowledge graph external models are not supported")
     return KnowledgeGraphConfig(
         enabled=section.get("enabled") is not False,
         mode=_mode(section.get("mode"), "shadow"),
-        external_models_allowed=external_allowed,
-        extractor_model=model,
-        community_summary_model=summary_model,
         local_extraction_enabled=section.get("local_extraction_enabled") is not False,
         max_changed_pages_per_cycle=_integer(
             section.get("max_changed_pages_per_cycle"), 25, 1, 1_000

@@ -66,6 +66,16 @@ capability = "embedding"
 provider = "local"
 model = "bge-m3"
 
+[llm.roles."knowledge.relation_extraction"]
+capability = "generation"
+provider = "local"
+model = "gemma4:26b"
+
+[llm.roles."knowledge.community_summary"]
+capability = "generation"
+provider = "local"
+model = "gemma4:26b"
+
 [llm.roles."classification.embedding"]
 capability = "embedding"
 provider = "local"

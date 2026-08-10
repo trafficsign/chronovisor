@@ -54,7 +54,6 @@ REQUIRED_LEARNING_GATES = (
     "rubric_learning",
     "rubric_adopted",
     "four_arm_evaluation",
-    "external_calls_zero",
 )
 
 
@@ -555,8 +554,8 @@ def _run_maintenance_lanes(
 def _evaluation_artifacts(
     *,
     root: Path,
-    config: KnowledgeGraphConfig,
     store: KnowledgeGraphStore,
+    lanes: Mapping[str, Any],
     busy: bool,
     dry_run: bool,
 ) -> dict[str, Any]:
@@ -617,10 +616,23 @@ def _evaluation_artifacts(
         "four_arm": four_arm,
         "evaluation": evaluation,
         "model_manifest": [
-            config.extractor_model,
-            "maxwell1500/ornith-35b:Q5_K_M",
-            "gpt-oss:20b",
-            "gemma4:26b",
+            {
+                "role": str(route.get("role") or role),
+                "provider": str(route.get("provider") or "unresolved"),
+                "model": str(route.get("model") or "unresolved"),
+                "location": str(route.get("location") or "invalid"),
+                "model_sha256": str(status.get("model_sha256") or ""),
+                "local_model_digest": str(status.get("local_model_digest") or ""),
+            }
+            for role, status in (
+                ("knowledge.relation_extraction", lanes["builder"]),
+                ("knowledge.community_summary", lanes["community_summary"]),
+            )
+            for route in (
+                status.get("route_identity")
+                if isinstance(status.get("route_identity"), dict)
+                else {},
+            )
         ],
     }
 
@@ -747,8 +759,21 @@ def _rollout_and_authority(
         artifacts["four_arm"],
         evaluation,
     ) + _evaluation_external_call_detected(evaluation)
-    rollout_gates["external_calls_zero"] = (
-        not config.external_models_allowed and external_calls == 0
+    rollout_gates["runtime_routes_resolved"] = all(
+        isinstance(identity, dict)
+        and set(identity) == {"role", "provider", "model", "location"}
+        and identity.get("role") == role
+        and isinstance(identity.get("provider"), str)
+        and bool(identity["provider"])
+        and isinstance(identity.get("model"), str)
+        and bool(identity["model"])
+        and identity.get("location") in {"local", "remote"}
+        and _is_sha256(status.get("model_sha256"))
+        for role, status in (
+            ("knowledge.relation_extraction", lanes["builder"]),
+            ("knowledge.community_summary", lanes["community_summary"]),
+        )
+        for identity in (status.get("route_identity"),)
     )
     canary_samples = applied_canary_session_count(
         root / "runtime" / "typed-graph" / "candidate-trace.jsonl"
@@ -771,7 +796,7 @@ def _rollout_and_authority(
             manifest_sha256=str(evaluation.get("manifest_sha256") or ""),
             relation_snapshot_sha256=artifacts["relation_sha"],
             rubric_sha256=artifacts["rubric_sha"],
-            model_manifest_sha256=sha256(sorted(artifacts["model_manifest"])),
+            model_manifest_sha256=sha256(artifacts["model_manifest"]),
         )
     else:
         rollout = advance_rollout(
@@ -781,7 +806,7 @@ def _rollout_and_authority(
             manifest_sha256=str(evaluation.get("manifest_sha256") or ""),
             relation_snapshot_sha256=artifacts["relation_sha"],
             rubric_sha256=artifacts["rubric_sha"],
-            model_manifest_sha256=sha256(sorted(artifacts["model_manifest"])),
+            model_manifest_sha256=sha256(artifacts["model_manifest"]),
         )
     counts, relation_authority, entity_authority, authority, mature = (
         _authority_snapshot(
@@ -806,9 +831,6 @@ def _rollout_and_authority(
         "sealed_model_manifest": _is_sha256(rollout.get("model_manifest_sha256")),
         "automatic_canary": rollout.get("sample_unit") == CANARY_SAMPLE_UNIT,
         "current_fallback": rollout.get("rollback_teacher") == "current",
-        "external_calls_zero": (
-            not config.external_models_allowed and external_calls == 0
-        ),
     }
     return {
         "counts": counts,
@@ -835,7 +857,11 @@ def run_graph_maintenance(
         root=root, config=cfg, store=store, busy=busy, dry_run=dry_run
     )
     artifacts = _evaluation_artifacts(
-        root=root, config=cfg, store=store, busy=busy, dry_run=dry_run
+        root=root,
+        store=store,
+        lanes=lanes,
+        busy=busy,
+        dry_run=dry_run,
     )
     decision = _rollout_and_authority(
         root=root,

@@ -9,10 +9,14 @@ from types import SimpleNamespace
 
 import pytest
 
+from chronovisor.core import knowledge_graph_config as graph_config_module
 from chronovisor.core.durable_state import DurableStateError, read_sealed_json
 from chronovisor.core.knowledge_graph_config import (
+    COMMUNITY_SUMMARY_RUNTIME_ROLE,
+    RELATION_EXTRACTION_RUNTIME_ROLE,
     GraphRetrievalConfig,
     KnowledgeGraphConfig,
+    knowledge_generation_sha256,
     load_config,
 )
 from chronovisor.core.knowledge_graph_retrieval import (
@@ -28,6 +32,7 @@ from chronovisor.core.knowledge_graph_rollout import (
     rollback,
 )
 from chronovisor.core.knowledge_graph_schema import (
+    CommunityRecord,
     ConsensusReceipt,
     ConsensusVote,
     EvidenceRef,
@@ -36,6 +41,8 @@ from chronovisor.core.knowledge_graph_schema import (
     sha256,
 )
 from chronovisor.core.knowledge_graph_store import KnowledgeGraphStore
+from chronovisor.knowledge_graph import builder as builder_module
+from chronovisor.knowledge_graph import communities as communities_module
 from chronovisor.knowledge_graph.builder import run_builder_cycle
 from chronovisor.knowledge_graph.communities import (
     build_communities,
@@ -430,22 +437,334 @@ def test_communities_use_only_verified_relations() -> None:
     assert rows[1].relation_id not in communities[0].relation_ids
 
 
-def test_external_model_config_fails_closed(tmp_path: Path) -> None:
+def test_legacy_model_selectors_are_accepted_but_ignored(tmp_path: Path) -> None:
     path = tmp_path / "config.toml"
     path.write_text(
         '[knowledge_graph]\nextractor_model="https://external.example/model"\n',
         encoding="utf-8",
     )
 
-    with pytest.raises(ValueError, match="local model"):
-        load_config(path)
+    first = load_config(path)
 
     path.write_text(
         '[knowledge_graph]\nexternal_models_allowed=true\nextractor_model="gemma4:26b"\n',
         encoding="utf-8",
     )
-    with pytest.raises(ValueError, match="not supported"):
-        load_config(path)
+    second = load_config(path)
+
+    assert first == KnowledgeGraphConfig()
+    assert second == KnowledgeGraphConfig()
+    assert not hasattr(first, "extractor_model")
+
+
+def test_generation_identity_uses_no_ollama_metadata_for_remote_route(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    route = SimpleNamespace(
+        role=RELATION_EXTRACTION_RUNTIME_ROLE,
+        provider="remote-test",
+        model="remote-model",
+        location="remote",
+        structured_output=True,
+    )
+    monkeypatch.setattr(
+        graph_config_module.ollama,
+        "runtime_generation_routes",
+        lambda _roles: (route,),
+    )
+    monkeypatch.setattr(
+        graph_config_module.ollama,
+        "model_digests",
+        lambda _models: pytest.fail("remote route must not query Ollama metadata"),
+    )
+
+    identity, digest = graph_config_module.resolve_knowledge_generation_identity(
+        RELATION_EXTRACTION_RUNTIME_ROLE
+    )
+
+    assert identity == {
+        "role": RELATION_EXTRACTION_RUNTIME_ROLE,
+        "provider": "remote-test",
+        "model": "remote-model",
+        "location": "remote",
+    }
+    assert digest == ""
+
+
+def test_generation_identity_rejects_non_structured_route(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    route = SimpleNamespace(
+        role=RELATION_EXTRACTION_RUNTIME_ROLE,
+        provider="remote-test",
+        model="remote-model",
+        location="remote",
+        structured_output=False,
+    )
+    monkeypatch.setattr(
+        graph_config_module.ollama,
+        "runtime_generation_routes",
+        lambda _roles: (route,),
+    )
+
+    with pytest.raises(graph_config_module.ollama.RuntimeBridgeError) as raised:
+        graph_config_module.resolve_knowledge_generation_identity(
+            RELATION_EXTRACTION_RUNTIME_ROLE
+        )
+
+    assert raised.value.category == "capability_unavailable"
+
+
+def test_relation_extraction_uses_fixed_runtime_role_and_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sessions: list[dict[str, object]] = []
+
+    class Session:
+        def __init__(self, **kwargs: object) -> None:
+            sessions.append(kwargs)
+
+        def run(self, _prompt: str, schema: object, **_kwargs: object) -> object:
+            value = (
+                {
+                    "mentions": [
+                        {"mention": "beta", "entity_type": "page", "source_line": 1}
+                    ]
+                }
+                if schema is builder_module.MENTION_SCHEMA
+                else {
+                    "relations": [
+                        {
+                            "target_page_id": "beta",
+                            "predicate": "references",
+                            "direction": "forward",
+                            "source_line": 1,
+                            "evidence_text": "[[beta]]",
+                            "confidence": 1.0,
+                        }
+                    ]
+                }
+            )
+            return SimpleNamespace(ok=True, value=value, attempts=(object(),))
+
+    monkeypatch.setattr(builder_module, "LocalStructuredSession", Session)
+
+    result = builder_module.local_structured_extract(
+        "alpha",
+        "See [[beta]].\n",
+        (),
+        expected_model="graph:test",
+        expected_location="local",
+        source_data_class="system",
+        audit_root=tmp_path,
+    )
+
+    assert result["relations"][0]["target_page_id"] == "beta"
+    assert len(sessions) == 2
+    assert all(
+        row["model"] == "graph:test"
+        and row["runtime_role"] == RELATION_EXTRACTION_RUNTIME_ROLE
+        and row["runtime_location"] == "local"
+        and row["source_data_class"] == "system"
+        and row["source_sensitivity"] == "high"
+        and row["resource_lease_timeout_ms"] == 25
+        and "resource_managed" not in row
+        for row in sessions
+    )
+    assert [row["num_predict"] for row in sessions] == [1_200, 1_600]
+
+
+def test_builder_migrates_legacy_cache_per_page_and_retries_failures(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pages = tmp_path / "pages"
+    pages.mkdir()
+    for name in ("a", "b", "c"):
+        (pages / f"{name}.md").write_text(f"See [[target-{name}]].\n")
+    store = KnowledgeGraphStore(tmp_path / "knowledge-graph")
+    route = {
+        "role": RELATION_EXTRACTION_RUNTIME_ROLE,
+        "provider": "ollama",
+        "model": "graph:test",
+        "location": "local",
+    }
+    monkeypatch.setattr(
+        builder_module,
+        "resolve_knowledge_generation_identity",
+        lambda _role: (route, "digest-a"),
+    )
+
+    def extract(
+        _page_id: str,
+        _content: str,
+        _seeds: object,
+        **kwargs: object,
+    ) -> dict[str, object]:
+        return {"mentions": [], "relations": []}
+
+    monkeypatch.setattr(builder_module, "local_structured_extract", extract)
+    cfg = replace(KnowledgeGraphConfig(), max_changed_pages_per_cycle=1)
+
+    results = [
+        run_builder_cycle(root=tmp_path, store=store, config=cfg)
+        for _index in range(4)
+    ]
+    state = read_sealed_json(store.builder_state_file)
+
+    assert [row["changed_pages"] for row in results] == [1, 1, 1, 0]
+    assert len(state["page_extractor_sha256"]) == 3
+    assert set(state["page_extractor_sha256"].values()) == {
+        knowledge_generation_sha256(route, "digest-a")
+    }
+
+    def fail(
+        _page_id: str,
+        _content: str,
+        _seeds: object,
+        **kwargs: object,
+    ) -> dict[str, object]:
+        raise RuntimeError("offline failure")
+
+    monkeypatch.setattr(builder_module, "local_structured_extract", fail)
+    monkeypatch.setattr(
+        builder_module,
+        "resolve_knowledge_generation_identity",
+        lambda _role: ({**route, "model": "graph:changed"}, "digest-b"),
+    )
+    failed = run_builder_cycle(root=tmp_path, store=store, config=cfg)
+    failed_again = run_builder_cycle(root=tmp_path, store=store, config=cfg)
+
+    assert failed["status"] == failed_again["status"] == "partial"
+    assert failed["changed_pages"] == failed_again["changed_pages"] == 1
+
+
+def test_builder_unresolved_route_does_not_rescan_unchanged_legacy_pages(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pages = tmp_path / "pages"
+    pages.mkdir()
+    page = pages / "a.md"
+    page.write_text("See [[b]].\n")
+    store = KnowledgeGraphStore(tmp_path / "knowledge-graph")
+    store.write_derived_snapshot(
+        "builder",
+        {
+            "schema_version": 1,
+            "page_digests": {"a": sha256(page.read_text())},
+        },
+    )
+    monkeypatch.setattr(
+        builder_module,
+        "resolve_knowledge_generation_identity",
+        lambda _role: (_ for _ in ()).throw(RuntimeError("route unavailable")),
+    )
+    monkeypatch.setattr(
+        builder_module,
+        "local_structured_extract",
+        lambda *_args, **_kwargs: pytest.fail(
+            "unresolved route must not enter the model path"
+        ),
+    )
+
+    result = run_builder_cycle(
+        root=tmp_path,
+        store=store,
+        config=KnowledgeGraphConfig(),
+    )
+
+    assert result["status"] == "partial"
+    assert result["changed_pages"] == 0
+    assert result["external_model_calls"] == 0
+
+
+def test_builder_missing_optional_digest_uses_route_only_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pages = tmp_path / "pages"
+    pages.mkdir()
+    (pages / "a.md").write_text("See [[b]].\n")
+    store = KnowledgeGraphStore(tmp_path / "knowledge-graph")
+    route = {
+        "role": RELATION_EXTRACTION_RUNTIME_ROLE,
+        "provider": "ollama",
+        "model": "graph:test",
+        "location": "local",
+    }
+    monkeypatch.setattr(
+        builder_module,
+        "local_structured_extract",
+        lambda *_args, **_kwargs: {"mentions": [], "relations": []},
+    )
+    monkeypatch.setattr(
+        builder_module,
+        "resolve_knowledge_generation_identity",
+        lambda _role: (route, "digest-observed"),
+    )
+    run_builder_cycle(root=tmp_path, store=store, config=KnowledgeGraphConfig())
+    monkeypatch.setattr(
+        builder_module,
+        "resolve_knowledge_generation_identity",
+        lambda _role: (route, ""),
+    )
+
+    result = run_builder_cycle(
+        root=tmp_path,
+        store=store,
+        config=KnowledgeGraphConfig(),
+    )
+    state = read_sealed_json(store.builder_state_file)
+
+    assert result["status"] == "ok"
+    assert result["changed_pages"] == 1
+    assert result["local_model_digest"] == ""
+    assert result["model_sha256"] == knowledge_generation_sha256(route)
+    assert state["extractor_local_model_digest"] == ""
+    assert state["page_extractor_sha256"] == {
+        "a": knowledge_generation_sha256(route)
+    }
+
+
+def test_builder_route_change_stales_prior_model_relations(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pages = tmp_path / "pages"
+    pages.mkdir()
+    (pages / "a.md").write_text("See [[b]].\n")
+    store = KnowledgeGraphStore(tmp_path / "knowledge-graph")
+    route = {
+        "role": RELATION_EXTRACTION_RUNTIME_ROLE,
+        "provider": "ollama",
+        "model": "graph:one",
+        "location": "local",
+    }
+
+    def extract(
+        _page_id: str,
+        _content: str,
+        _seeds: object,
+        **kwargs: object,
+    ) -> dict[str, object]:
+        return {"mentions": [], "relations": []}
+
+    monkeypatch.setattr(builder_module, "local_structured_extract", extract)
+    monkeypatch.setattr(
+        builder_module,
+        "resolve_knowledge_generation_identity",
+        lambda _role: (route, "digest-one"),
+    )
+    run_builder_cycle(root=tmp_path, store=store, config=KnowledgeGraphConfig())
+    monkeypatch.setattr(
+        builder_module,
+        "resolve_knowledge_generation_identity",
+        lambda _role: ({**route, "model": "graph:two"}, "digest-two"),
+    )
+    run_builder_cycle(root=tmp_path, store=store, config=KnowledgeGraphConfig())
+
+    rows = store.relations()
+    assert {row.status for row in rows} == {"proposed", "stale"}
+    assert next(row for row in rows if row.status == "stale").reason_code == (
+        "model_identity_changed"
+    )
 
 
 def test_baseline_and_four_arm_contract(tmp_path: Path) -> None:
@@ -701,7 +1020,9 @@ def test_no_quorum_and_unknown_endpoint_are_held(tmp_path: Path) -> None:
     assert store.relations()[0].reason_code == "no_quorum"
 
 
-def test_community_summaries_are_local_cached_and_source_bound(tmp_path: Path) -> None:
+def test_community_summaries_are_cached_and_source_bound(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     pages = tmp_path / "pages"
     pages.mkdir()
     (pages / "a.md").write_text("Alpha source.\n", encoding="utf-8")
@@ -709,6 +1030,11 @@ def test_community_summaries_are_local_cached_and_source_bound(tmp_path: Path) -
     store = KnowledgeGraphStore(tmp_path / "knowledge-graph")
     communities = build_communities([relation("a", "b", status="verified")])
     calls: list[str] = []
+    monkeypatch.setattr(
+        communities_module,
+        "resolve_knowledge_generation_identity",
+        lambda _role: pytest.fail("injected summarizer must not resolve runtime"),
+    )
 
     summarized, status = summarize_communities(
         communities,
@@ -739,6 +1065,142 @@ def test_community_summaries_are_local_cached_and_source_bound(tmp_path: Path) -
     assert summarized[0].summary_sha256 != communities[0].summary_sha256
     assert second["reused"] == 1
     assert reused[0].summary == "Alpha and Beta are connected."
+
+
+def test_community_summary_uses_fixed_route_mixed_source_and_route_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "pages").mkdir()
+    (tmp_path / "system").mkdir()
+    (tmp_path / "pages" / "a.md").write_text("Alpha source.\n")
+    (tmp_path / "system" / "b.md").write_text("System source.\n")
+    store = KnowledgeGraphStore(tmp_path / "knowledge-graph")
+    communities = build_communities([relation("a", "b", status="verified")])
+    route = {
+        "role": COMMUNITY_SUMMARY_RUNTIME_ROLE,
+        "provider": "remote-test",
+        "model": "summary:one",
+        "location": "remote",
+    }
+    monkeypatch.setattr(
+        communities_module,
+        "resolve_knowledge_generation_identity",
+        lambda _role: (route, ""),
+    )
+    calls: list[tuple[str, str, str]] = []
+
+    def summarize(
+        _community: object,
+        source: str,
+        **kwargs: object,
+    ) -> tuple[str, bool]:
+        calls.append(
+            (
+                str(kwargs["expected_model"]),
+                str(kwargs["expected_location"]),
+                str(kwargs["source_data_class"]),
+            )
+        )
+        assert "System source" in source
+        return "Shared subject.", True
+
+    monkeypatch.setattr(communities_module, "_local_summary", summarize)
+    first, status = summarize_communities(
+        communities,
+        root=tmp_path,
+        store=store,
+        config=KnowledgeGraphConfig(),
+    )
+    store.write_derived_snapshot(
+        "communities",
+        {
+            "schema_version": 1,
+            "communities": {row.community_id: asdict(row) for row in first},
+        },
+    )
+    reused, second = summarize_communities(
+        communities,
+        root=tmp_path,
+        store=store,
+        config=KnowledgeGraphConfig(),
+    )
+
+    assert calls == [("summary:one", "remote", "system")]
+    assert status["external_model_calls"] == 1
+    assert second["reused"] == 1
+    assert reused[0].summary == "Shared subject."
+
+    changed_route = {**route, "model": "summary:two"}
+    monkeypatch.setattr(
+        communities_module,
+        "resolve_knowledge_generation_identity",
+        lambda _role: (changed_route, ""),
+    )
+    changed, third = summarize_communities(
+        communities,
+        root=tmp_path,
+        store=store,
+        config=KnowledgeGraphConfig(),
+    )
+
+    assert third["generated"] == 1
+    assert changed[0].model_sha256 != first[0].model_sha256
+    assert calls[-1] == ("summary:two", "remote", "system")
+
+
+def test_community_summary_session_binds_exact_runtime_route(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: list[dict[str, object]] = []
+
+    class Session:
+        def __init__(self, **kwargs: object) -> None:
+            captured.append(kwargs)
+
+        def run(self, *_args: object, **_kwargs: object) -> object:
+            return SimpleNamespace(
+                ok=True,
+                value={"summary": "Bound summary."},
+                attempts=(object(),),
+            )
+
+    monkeypatch.setattr(communities_module, "LocalStructuredSession", Session)
+    summary, ok = communities_module._local_summary(
+        CommunityRecord(
+            community_id="community_test",
+            member_page_ids=("a",),
+            relation_ids=("rel_a",),
+            source_digests=("a" * 64,),
+            summary_sha256="b" * 64,
+            generated_at="2026-08-10T00:00:00+00:00",
+        ),
+        "source",
+        expected_model="summary:test",
+        expected_location="remote",
+        source_data_class="system",
+        audit_root=tmp_path,
+    )
+
+    assert (summary, ok) == ("Bound summary.", True)
+    assert captured == [
+        {
+            "model": "summary:test",
+            "runtime_role": COMMUNITY_SUMMARY_RUNTIME_ROLE,
+            "runtime_location": "remote",
+            "source_data_class": "system",
+            "source_sensitivity": "high",
+            "role": "community_summary:primary",
+            "audit_root": tmp_path,
+            "num_ctx": 16_384,
+            "num_predict": 500,
+            "keep_alive": "20m",
+            "read_timeout_ms": 180_000,
+            "max_input_chars": 18_000,
+            "max_output_chars": 2_000,
+            "max_responses": 2,
+            "resource_lease_timeout_ms": 25,
+        }
+    ]
 
 
 def test_global_query_candidates_use_eligible_community_relations(

@@ -224,16 +224,29 @@ def mark_stale_source(
     *,
     page_id: str,
     current_content_sha256: str,
+    current_model_sha256: str | None = None,
     store: KnowledgeGraphStore,
 ) -> dict[str, Any]:
     stale = 0
     for record in store.relations():
         if record.source_page_id != page_id or record.status in {"stale", "retracted"}:
             continue
-        if any(row.content_sha256 == current_content_sha256 for row in record.evidence):
+        content_matches = any(
+            row.content_sha256 == current_content_sha256 for row in record.evidence
+        )
+        model_matches = (
+            current_model_sha256 is None
+            or record.model_sha256 == current_model_sha256
+        )
+        if content_matches and model_matches:
             continue
-        updated = replace(record, status="stale", reason_code="source_digest_changed")
-        store.append(updated, action="stale", reason_code="source_digest_changed")
+        reason = (
+            "source_digest_changed"
+            if not content_matches
+            else "model_identity_changed"
+        )
+        updated = replace(record, status="stale", reason_code=reason)
+        store.append(updated, action="stale", reason_code=reason)
         stale += 1
     return {"status": "ok", "stale_relations": stale}
 
