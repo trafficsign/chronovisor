@@ -7,7 +7,11 @@ from pathlib import Path
 
 import pytest
 
-from chronovisor.core.canonical_json import canonical_json_line_bytes_strict
+from chronovisor.core.canonical_document import parse_document
+from chronovisor.core.canonical_json import (
+    canonical_json_line_bytes_strict,
+    canonical_json_sha256_strict,
+)
 from chronovisor.core.okf_cutover import (
     CUTOVER_FAULT_POINTS,
     execute_okf_cutover,
@@ -106,6 +110,48 @@ def test_cutover_publishes_all_assets_and_keeps_rollback_backup(tmp_path: Path) 
         "present"
     ] is True
     assert not (workspace / RESTART_REFUSAL_FILENAME).exists()
+    assert okf_startup_allowed(source, runtime, "run-001")
+
+
+def test_system_identity_hashes_survive_interrupted_cutover_recovery(
+    tmp_path: Path,
+) -> None:
+    source, runtime, workspace = _setup(tmp_path)
+    manifest_path = workspace / "dry-run-manifest.json"
+    manifest_raw = manifest_path.read_bytes()
+    system_documents = json.loads(manifest_raw)["system_documents"]
+
+    def crash(point: str) -> None:
+        if point == "publish-system:after-rename":
+            raise InjectedCrash(point)
+
+    with pytest.raises(InjectedCrash, match="publish-system:after-rename"):
+        execute_okf_cutover(
+            source,
+            runtime,
+            "run-001",
+            is_quiescent=lambda: True,
+            fault_inject=crash,
+        )
+    assert recover_okf_cutover(
+        source, runtime, "run-001", is_quiescent=lambda: True
+    ) == "rollback-complete"
+    assert manifest_path.read_bytes() == manifest_raw
+
+    staged_system = workspace / "staging" / "system"
+    for item in system_documents:
+        document = parse_document(
+            (staged_system / item["relative_path"]).read_bytes()
+        )
+        identity_source = item["identity_source"]
+        identity = (
+            item["relative_path"]
+            if identity_source == "relative_path"
+            else document.metadata[identity_source]
+        )
+        assert item["identity_sha256"] == canonical_json_sha256_strict(
+            {"source": identity_source, "value": identity}
+        )
     assert okf_startup_allowed(source, runtime, "run-001")
 
 

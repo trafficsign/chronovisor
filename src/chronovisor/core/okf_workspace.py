@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import re
 from contextlib import suppress
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path, PurePosixPath
 
 from chronovisor.core.canonical_document import (
@@ -14,22 +14,22 @@ from chronovisor.core.canonical_document import (
     parse_document,
     serialize_document,
 )
-from chronovisor.core.canonical_json import canonical_json_line_bytes_strict
+from chronovisor.core.canonical_json import (
+    canonical_json_line_bytes_strict,
+    canonical_json_sha256_strict,
+)
 from chronovisor.core.durable_state import atomic_write_bytes, fsync_directory
 from chronovisor.core.okf_prepare import (
-    ConvertedDocument,
     MigrationPlan,
     Namespace,
     RawSource,
     SourceDocument,
-    UnresolvedLink,
     convert_wikilinks,
     prepare_okf_migration,
     require_resolved_links,
 )
 from chronovisor.core.okf_v02 import (
     OKF_VERSION,
-    VALID_STATUSES,
     ConformanceIssue,
     validate_pages_bundle,
 )
@@ -42,6 +42,26 @@ RESTART_REFUSAL_FILENAME = "restart-refusal.json"
 
 _RUN_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}")
 _ROOT_RESERVED = ("index.md", "log.md", "schema.md")
+_MISSING = object()
+_SYSTEM_STATUS_MAPPING = {
+    "missing": "stable",
+    "active": "stable",
+    "draft": "draft",
+    "stable": "stable",
+    "deprecated": "deprecated",
+    "archived": "deprecated",
+}
+
+
+@dataclass(frozen=True, slots=True)
+class _ConvertedSystemDocument:
+    relative_path: str
+    data: bytes
+    input_status: str
+    output_status: str
+    identity_source: str
+    identity_sha256: str
+    resolved_link_count: int
 
 
 def prepare_okf_workspace(
@@ -305,7 +325,7 @@ def _system_inputs(plan: MigrationPlan) -> tuple[SourceDocument, ...]:
 def _convert_system_documents(
     sources: tuple[SourceDocument, ...],
     page_catalog: dict[str, str],
-) -> tuple[ConvertedDocument, ...]:
+) -> tuple[_ConvertedSystemDocument, ...]:
     system_catalog = _catalog(sources)
     overlap = sorted(set(page_catalog).intersection(system_catalog))
     if overlap:
@@ -317,8 +337,8 @@ def _convert_system_documents(
             for page_id, relative_path in page_catalog.items()
         },
     }
-    converted: list[ConvertedDocument] = []
-    unresolved: list[UnresolvedLink] = []
+    converted: list[_ConvertedSystemDocument] = []
+    unresolved: list[str] = []
     for source in sources:
         try:
             document = parse_document(source.data)
@@ -326,33 +346,69 @@ def _convert_system_documents(
             raise ValueError(
                 f"system document is not full-YAML canonical: {source.relative_path}"
             ) from exc
-        status = document.metadata.get("status")
-        if not isinstance(status, str) or status not in VALID_STATUSES:
-            raise ValueError(
-                f"system document status must be explicit canonical lifecycle: "
-                f"{source.relative_path}"
-            )
-        identity = document.metadata.get("uid") or document.metadata.get("identity")
-        uid = (
-            identity.strip()
-            if isinstance(identity, str) and identity.strip()
-            else source.relative_path
+        metadata = dict(document.metadata)
+        identity_source, identity_sha256 = _system_identity(
+            metadata, source.relative_path
         )
-        body, _, missing = convert_wikilinks(
+        status = metadata.get("status", _MISSING)
+        if status is _MISSING:
+            input_status = "missing"
+        elif (
+            isinstance(status, str)
+            and status != "missing"
+            and status in _SYSTEM_STATUS_MAPPING
+        ):
+            input_status = status
+        else:
+            raise ValueError(
+                "invalid system lifecycle status: "
+                f"{source.relative_path} (identity_sha256={identity_sha256})"
+            )
+        output_status = _SYSTEM_STATUS_MAPPING[input_status]
+        metadata["status"] = output_status
+        metadata.pop("chronovisor_status", None)
+        body, resolved_count, missing = convert_wikilinks(
             document.body,
             source.relative_path,
-            uid,
+            identity_sha256,
             catalog,
         )
-        unresolved.extend(missing)
+        if missing:
+            unresolved.append(
+                f"{source.relative_path} (identity_sha256={identity_sha256}, "
+                f"count={len(missing)})"
+            )
         output = serialize_document(
-            CanonicalDocument(metadata=dict(document.metadata), body=body)
+            CanonicalDocument(metadata=metadata, body=body)
         )
-        converted.append(ConvertedDocument(source.relative_path, output, uid))
+        converted.append(
+            _ConvertedSystemDocument(
+                source.relative_path,
+                output,
+                input_status,
+                output_status,
+                identity_source,
+                identity_sha256,
+                resolved_count,
+            )
+        )
     if unresolved:
-        details = ", ".join(f"{item.uid}={item.target!r}" for item in unresolved)
-        raise ValueError(f"unresolved system wikilinks: {details}")
+        raise ValueError(f"unresolved system wikilinks: {', '.join(unresolved)}")
     return tuple(converted)
+
+
+def _system_identity(
+    metadata: dict[str, object], relative_path: str
+) -> tuple[str, str]:
+    for source in ("uid", "identity"):
+        value = metadata.get(source)
+        if isinstance(value, str) and value.strip():
+            return source, canonical_json_sha256_strict(
+                {"source": source, "value": value.strip()}
+            )
+    return "relative_path", canonical_json_sha256_strict(
+        {"source": "relative_path", "value": relative_path}
+    )
 
 
 def _markdown_label(value: str) -> str:
@@ -453,7 +509,7 @@ def _manifest(
     activity: bytes,
     reserved_outputs: dict[str, bytes],
     system_inputs: tuple[SourceDocument, ...],
-    system_outputs: tuple[ConvertedDocument, ...],
+    system_outputs: tuple[_ConvertedSystemDocument, ...],
     run_id: str,
 ) -> dict[str, object]:
     system_output_by_path = {item.relative_path: item for item in system_outputs}
@@ -465,6 +521,24 @@ def _manifest(
         "state": "validated",
         "documents": [asdict(item) for item in plan.manifest.documents],
         "status_cohorts": [asdict(item) for item in plan.manifest.status_cohorts],
+        "system_status_cohorts": [
+            {
+                "input_status": input_status,
+                "output_status": output_status,
+                "count": len(members),
+                "identity_set_sha256": canonical_json_sha256_strict(
+                    sorted(item.identity_sha256 for item in members)
+                ),
+            }
+            for input_status, output_status in _SYSTEM_STATUS_MAPPING.items()
+            for members in [
+                tuple(
+                    item
+                    for item in system_outputs
+                    if item.input_status == input_status
+                )
+            ]
+        ],
         "unresolved_links": [asdict(item) for item in plan.manifest.unresolved_links],
         "raw_files": [asdict(item) for item in plan.manifest.raw_files],
         "reserved_documents": [
@@ -490,7 +564,17 @@ def _manifest(
                 "source_scope": (
                     "root" if item.relative_path == "schema.md" else "system"
                 ),
-                "uid": system_output_by_path[item.relative_path].uid,
+                "input_status": system_output_by_path[item.relative_path].input_status,
+                "output_status": system_output_by_path[item.relative_path].output_status,
+                "identity_source": system_output_by_path[
+                    item.relative_path
+                ].identity_source,
+                "identity_sha256": system_output_by_path[
+                    item.relative_path
+                ].identity_sha256,
+                "resolved_link_count": system_output_by_path[
+                    item.relative_path
+                ].resolved_link_count,
                 "source_sha256": hashlib.sha256(item.data).hexdigest(),
                 "output_sha256": hashlib.sha256(
                     system_output_by_path[item.relative_path].data

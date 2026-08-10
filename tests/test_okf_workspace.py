@@ -9,6 +9,7 @@ import pytest
 
 from chronovisor.core import durable_state, okf_workspace
 from chronovisor.core.canonical_document import parse_document
+from chronovisor.core.canonical_json import canonical_json_sha256_strict
 from chronovisor.core.okf_prepare import RawSource
 from chronovisor.core.okf_v02 import ConformanceIssue, validate_pages_bundle
 from chronovisor.core.okf_workspace import prepare_okf_workspace
@@ -73,14 +74,35 @@ def test_workspace_stages_validated_namespaces_without_touching_source(
     assert page.metadata["status"] == "stable"
     assert page.body == b"Read [the target](<../deep/target.md#Section heading>).\n"
     system_state = parse_document((system / "current-state.md").read_bytes())
-    assert system_state.metadata["status"] == "stable"
-    assert system_state.metadata["registry_state"] == "internal"
+    source_state = parse_document((source / "system" / "current-state.md").read_bytes())
+    expected_state_metadata = dict(source_state.metadata)
+    expected_state_metadata["status"] = "stable"
+    expected_state_metadata.pop("chronovisor_status")
+    assert system_state.metadata == expected_state_metadata
+    assert system_state.metadata["summary"] == "Private state summary stays a summary."
+    assert "description" not in system_state.metadata
     assert system_state.body == (
         b"System links to [the portable target](../pages/deep/target.md) "
         b"from outside the OKF bundle.\n"
     )
     schema = parse_document((system / "schema.md").read_bytes())
-    assert schema.metadata["identity"] == "canonical-schema"
+    source_schema = parse_document((source / "schema.md").read_bytes())
+    expected_schema_metadata = dict(source_schema.metadata)
+    expected_schema_metadata["status"] = "stable"
+    expected_schema_metadata.pop("chronovisor_status")
+    assert schema.metadata == expected_schema_metadata
+    assert schema.body == source_schema.body
+    for name in (
+        "claude-code.md",
+        "lessons-learned.md",
+        "tag-changelog.md",
+        "user-profile.md",
+    ):
+        before_system = parse_document((source / "system" / name).read_bytes())
+        after_system = parse_document((system / name).read_bytes())
+        assert after_system.metadata == {**before_system.metadata, "status": "stable"}
+        assert after_system.body == before_system.body
+    assert "type" not in parse_document((system / "claude-code.md").read_bytes()).metadata
 
     activity = [
         json.loads(line)
@@ -98,14 +120,80 @@ def test_workspace_stages_validated_namespaces_without_touching_source(
         ("log.md", "pages/log.md"),
         ("schema.md", "system/schema.md"),
     ]
+    system_manifest = manifest["system_documents"]
     assert {
         (item["relative_path"], item["source_scope"])
-        for item in manifest["system_documents"]
-    } == {("current-state.md", "system"), ("schema.md", "root")}
+        for item in system_manifest
+    } == {
+        ("claude-code.md", "system"),
+        ("current-state.md", "system"),
+        ("lessons-learned.md", "system"),
+        ("schema.md", "root"),
+        ("tag-changelog.md", "system"),
+        ("user-profile.md", "system"),
+    }
+    assert all(
+        set(item)
+        == {
+            "relative_path",
+            "source_scope",
+            "input_status",
+            "output_status",
+            "identity_source",
+            "identity_sha256",
+            "resolved_link_count",
+            "source_sha256",
+            "output_sha256",
+        }
+        for item in system_manifest
+    )
+    assert all(item["input_status"] == "missing" for item in system_manifest)
+    assert all(item["output_status"] == "stable" for item in system_manifest)
+    assert {
+        item["relative_path"]: item["resolved_link_count"]
+        for item in system_manifest
+    } == {
+        "claude-code.md": 0,
+        "current-state.md": 1,
+        "lessons-learned.md": 0,
+        "schema.md": 0,
+        "tag-changelog.md": 0,
+        "user-profile.md": 0,
+    }
+    system_by_path = {item["relative_path"]: item for item in system_manifest}
+    assert system_by_path["current-state.md"]["identity_source"] == "identity"
+    assert system_by_path["current-state.md"][
+        "identity_sha256"
+    ] == canonical_json_sha256_strict(
+        {"source": "identity", "value": "current-state"}
+    )
+    assert system_by_path["claude-code.md"]["identity_source"] == "relative_path"
+    assert system_by_path["claude-code.md"][
+        "identity_sha256"
+    ] == canonical_json_sha256_strict(
+        {"source": "relative_path", "value": "claude-code.md"}
+    )
+    missing_cohort = next(
+        item
+        for item in manifest["system_status_cohorts"]
+        if item["input_status"] == "missing"
+    )
+    assert missing_cohort == {
+        "input_status": "missing",
+        "output_status": "stable",
+        "count": 6,
+        "identity_set_sha256": canonical_json_sha256_strict(
+            sorted(item["identity_sha256"] for item in system_manifest)
+        ),
+    }
+    assert len(manifest["system_status_cohorts"]) == 6
     assert manifest["unresolved_links"] == []
     assert manifest["raw_files"][0]["relative_path"] == "sessions/session.jsonl"
     assert b"merged" not in manifest_raw
     assert b"workspace-fixture" not in manifest_raw
+    assert b"canonical-schema" not in manifest_raw
+    assert b"Private state summary stays a summary" not in manifest_raw
+    assert b"Private history body" not in manifest_raw
     assert not {
         "current-state.md",
         "schema.md",
@@ -129,6 +217,138 @@ def test_workspace_stages_validated_namespaces_without_touching_source(
     }
 
 
+def test_system_status_mapping_preserves_private_extensions_without_page_transforms(
+    tmp_path: Path,
+) -> None:
+    source, runtime = _roots(tmp_path)
+    (source / "system" / "active.md").write_text(
+        "---\n"
+        "uid: private-active-id\n"
+        "status: active\n"
+        "summary: Keep this field\n"
+        "chronovisor_status: indexed\n"
+        "---\n"
+        "Active private body.\n"
+    )
+    (source / "system" / "archived.md").write_text(
+        "---\n"
+        "identity: private-archived-id\n"
+        "status: archived\n"
+        "archive_reason: private reason remains private\n"
+        "archive_provenance: private provenance remains private\n"
+        "---\n"
+        "Archived private body.\n"
+    )
+
+    workspace = prepare_okf_workspace(source, runtime, "system-statuses")
+    system = workspace / "staging" / "system"
+    active = parse_document((system / "active.md").read_bytes())
+    archived = parse_document((system / "archived.md").read_bytes())
+
+    assert active.metadata == {
+        "uid": "private-active-id",
+        "status": "stable",
+        "summary": "Keep this field",
+    }
+    assert active.body == b"Active private body.\n"
+    assert archived.metadata == {
+        "identity": "private-archived-id",
+        "status": "deprecated",
+        "archive_reason": "private reason remains private",
+        "archive_provenance": "private provenance remains private",
+    }
+    assert archived.body == b"Archived private body.\n"
+    assert "description" not in active.metadata
+    assert "type" not in active.metadata
+
+    manifest_raw = (workspace / "dry-run-manifest.json").read_bytes()
+    manifest = json.loads(manifest_raw)
+    cohorts = {
+        item["input_status"]: (item["output_status"], item["count"])
+        for item in manifest["system_status_cohorts"]
+    }
+    assert cohorts["missing"] == ("stable", 6)
+    assert cohorts["active"] == ("stable", 1)
+    assert cohorts["archived"] == ("deprecated", 1)
+    assert b"private-active-id" not in manifest_raw
+    assert b"private-archived-id" not in manifest_raw
+    assert b"private reason remains private" not in manifest_raw
+    assert b"Archived private body" not in manifest_raw
+    activity = (workspace / "staging" / "activity.jsonl").read_text().splitlines()
+    assert len(activity) == 1
+    assert "private reason remains private" not in activity[0]
+
+
+@pytest.mark.parametrize(
+    "status_yaml",
+    ["private-unknown-status", "missing", "[private-non-string-status]", "null"],
+)
+def test_system_invalid_status_fails_before_journal_without_private_values(
+    tmp_path: Path, status_yaml: str
+) -> None:
+    source, runtime = _roots(tmp_path)
+    (source / "system" / "bad.md").write_text(
+        "---\n"
+        "uid: private-system-identity\n"
+        f"status: {status_yaml}\n"
+        "title: Private system title\n"
+        "---\n"
+        "Private system body.\n"
+    )
+    expected_hash = canonical_json_sha256_strict(
+        {"source": "uid", "value": "private-system-identity"}
+    )
+
+    with pytest.raises(ValueError, match=expected_hash) as raised:
+        prepare_okf_workspace(source, runtime, "bad-system-status")
+
+    message = str(raised.value)
+    assert "bad.md" in message
+    assert "private-system-identity" not in message
+    assert "private-unknown-status" not in message
+    assert "private-non-string-status" not in message
+    assert "Private system title" not in message
+    assert "Private system body" not in message
+    assert not (runtime / "migrations").exists()
+
+
+def test_system_identity_hash_is_idempotent_across_repeated_preparation(
+    tmp_path: Path,
+) -> None:
+    source_a, runtime_a = _roots(tmp_path / "a")
+    source_b, runtime_b = _roots(tmp_path / "b")
+
+    workspace_a = prepare_okf_workspace(source_a, runtime_a, "repeat-a")
+    workspace_b = prepare_okf_workspace(source_b, runtime_b, "repeat-b")
+    manifest_a = json.loads((workspace_a / "dry-run-manifest.json").read_bytes())
+    manifest_b = json.loads((workspace_b / "dry-run-manifest.json").read_bytes())
+
+    assert _snapshot(workspace_a / "staging") == _snapshot(workspace_b / "staging")
+    assert manifest_a["system_documents"] == manifest_b["system_documents"]
+    assert manifest_a["system_status_cohorts"] == manifest_b[
+        "system_status_cohorts"
+    ]
+
+
+def test_system_unresolved_link_error_does_not_disclose_private_target(
+    tmp_path: Path,
+) -> None:
+    source, runtime = _roots(tmp_path)
+    path = source / "system" / "current-state.md"
+    path.write_bytes(path.read_bytes() + b"[[private-system-target]]\n")
+    expected_hash = canonical_json_sha256_strict(
+        {"source": "identity", "value": "current-state"}
+    )
+
+    with pytest.raises(ValueError, match=expected_hash) as raised:
+        prepare_okf_workspace(source, runtime, "private-unresolved")
+
+    message = str(raised.value)
+    assert "current-state.md" in message
+    assert "private-system-target" not in message
+    assert not (runtime / "migrations").exists()
+
+
 def test_workspace_rejects_cross_volume_before_writing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -149,7 +369,7 @@ def test_workspace_rejects_cross_volume_before_writing(
     ("mutation", "message"),
     [
         ("page-to-system", "unresolved wikilinks"),
-        ("invalid-system-status", "explicit canonical lifecycle"),
+        ("invalid-system-status", "invalid system lifecycle"),
         ("unsafe-path", "bundle-relative"),
     ],
 )
@@ -162,7 +382,9 @@ def test_workspace_preflight_rejects_unsafe_inputs(
         path.write_bytes(path.read_bytes() + b"[[current-state]]\n")
     elif mutation == "invalid-system-status":
         path = source / "system" / "current-state.md"
-        path.write_text(path.read_text().replace("status: stable", "status: internal"))
+        path.write_text(
+            path.read_text().replace("registry_state: internal", "status: internal")
+        )
     else:
         (source / "raw" / "bad\\path.jsonl").write_text("unsafe")
 

@@ -1,7 +1,7 @@
 ---
 identity: canonical-schema
 type: PrivateSchema
-status: stable
 registry_state: authoritative
+chronovisor_status: indexed
 ---
 Root schema moves to the privileged system namespace.
