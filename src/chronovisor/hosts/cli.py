@@ -15,11 +15,6 @@ from typing import Any, Never
 
 from chronovisor.core import runtime_status
 from chronovisor.core import store as chronovisor_store
-from chronovisor.core.llm_security import (
-    CredentialRef,
-    CredentialSecurityError,
-    OSKeyringCredentialStore,
-)
 from chronovisor.core.runtime_config import (
     config_summary,
     load_hook_policy,
@@ -892,8 +887,8 @@ def _dispatch_hold_report(as_json: bool) -> int:
     return 0
 
 
-def _credential_store() -> OSKeyringCredentialStore:
-    return OSKeyringCredentialStore()
+def _credential_store() -> runtime_status.OSKeyringCredentialStore:
+    return runtime_status.OSKeyringCredentialStore()
 
 
 def _credential_result(present: bool, category: str, *, as_json: bool) -> None:
@@ -907,7 +902,9 @@ def _credential_result(present: bool, category: str, *, as_json: bool) -> None:
 
 def _dispatch_credentials(args: argparse.Namespace) -> int:
     try:
-        ref = CredentialRef.parse(f"oskeyring:{args.profile_account}")
+        ref = runtime_status.CredentialRef.parse(
+            f"oskeyring:{args.profile_account}"
+        )
         store = _credential_store()
         if args.credentials_command == "set":
             if not sys.stdin.isatty():
@@ -926,7 +923,7 @@ def _dispatch_credentials(args: argparse.Namespace) -> int:
             result = store.status(ref)
         else:
             result = store.delete(ref)
-    except CredentialSecurityError as exc:
+    except runtime_status.CredentialSecurityError as exc:
         _credential_result(False, exc.category.value, as_json=args.json)
         return 1
     _credential_result(result.present, result.category, as_json=args.json)

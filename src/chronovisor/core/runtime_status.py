@@ -10,6 +10,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from chronovisor.core.llm_security import CredentialRef as CredentialRef
+from chronovisor.core.llm_security import (
+    CredentialSecurityError as CredentialSecurityError,
+)
+from chronovisor.core.llm_security import (
+    OSKeyringCredentialStore as OSKeyringCredentialStore,
+)
 from chronovisor.core.store import CHRONOVISOR_ROOT
 
 RUNTIME_DIR = CHRONOVISOR_ROOT / "runtime"
