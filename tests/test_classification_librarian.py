@@ -46,6 +46,33 @@ def _runtime_route(
     }
 
 
+def test_calibration_config_digest_binds_runtime_routes(monkeypatch) -> None:
+    routes = [
+        _runtime_route("classification.primary", "primary"),
+        _runtime_route("classification.challenger", "challenger"),
+        _runtime_route("classification.tie_break", "tie-break"),
+    ]
+    monkeypatch.setattr(
+        classification_calibration,
+        "resolve_consensus_runtime_routes",
+        lambda: tuple(routes),
+    )
+    baseline = classification_calibration._config_digest()
+
+    routes[0] = {**routes[0], "provider": "another-provider"}
+    assert classification_calibration._config_digest() != baseline
+
+    routes[0] = {
+        **routes[0],
+        "provider": "ollama",
+        "location": "local",
+        "model_digest": "sha256:model-v1",
+    }
+    local_baseline = classification_calibration._config_digest()
+    routes[0] = {**routes[0], "model_digest": "sha256:model-v2"}
+    assert classification_calibration._config_digest() != local_baseline
+
+
 def _write_page(path: Path, *, tags: str = "") -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tag_line = f"tags: [{tags}]\n" if tags else ""

@@ -14,12 +14,12 @@ from typing import Any
 
 from chronovisor.core.durable_state import read_sealed_json, write_sealed_json
 from chronovisor.core.jsonl import write_jsonl as _write_jsonl
-from chronovisor.core.runtime_config import load_decision_router_config
 from chronovisor.core.store import CHRONOVISOR_ROOT
 from chronovisor.core.timeutil import utc_iso_milliseconds as _now
 from chronovisor.recall.classification import (
     CALIBRATION_SCHEMA,
     load_udc_package,
+    resolve_consensus_runtime_routes,
 )
 from chronovisor.recall.classification_engine import (
     ENGINE_VERSION,
@@ -321,17 +321,17 @@ def apply_dev_audit(root: Path, audit_path: Path) -> dict[str, Any]:
 
 
 def _config_digest() -> str:
-    config = load_decision_router_config()
     payload = json.dumps(
         {
-            "primary_model": config.primary_model,
-            "challenger_model": config.challenger_model,
-            "tie_break_model": config.tie_break_model,
+            "runtime_routes": list(resolve_consensus_runtime_routes()),
             "engine": f"classification-consensus-v{ENGINE_VERSION}",
         },
+        ensure_ascii=False,
         sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
     )
-    return "sha256:" + hashlib.sha256(payload.encode()).hexdigest()
+    return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def calibration_input_fingerprint(
