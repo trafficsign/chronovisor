@@ -1,4 +1,4 @@
-"""Tests for the Ollama client wrapper."""
+"""Tests for the Ollama facade and structured-runtime bridge."""
 
 from __future__ import annotations
 
@@ -97,6 +97,7 @@ def test_runtime_bridge_exposes_only_safe_failure_category(
     assert str(failure.value) == "capability_unavailable"
     assert failure.value.__cause__ is None
     assert ollama.RuntimeBridgeError("secret payload!").category == "backend_error"
+    assert ollama.RuntimeBridgeError("secret_canary").category == "backend_error"
 
 
 class _StreamResponse:

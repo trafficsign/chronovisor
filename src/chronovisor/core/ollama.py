@@ -1,4 +1,4 @@
-"""Ollama API client for Ingest/Lint operations."""
+"""Ollama API facade and temporary structured-runtime migration bridge."""
 
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, contextmanager
@@ -61,13 +61,14 @@ MODEL = DEFAULT_INGEST_MODEL
 
 
 def _safe_runtime_bridge_category(value: object) -> str:
+    from chronovisor.core.llm_config import LLMConfigFailureCategory
+    from chronovisor.core.llm_runtime import SAFE_FAILURE_CATEGORIES
+
     normalized = getattr(value, "value", value)
-    if (
-        isinstance(normalized, str)
-        and 0 < len(normalized) <= 64
-        and normalized == normalized.casefold()
-        and normalized.replace("_", "").isalnum()
-    ):
+    allowed = SAFE_FAILURE_CATEGORIES | frozenset(
+        category.value for category in LLMConfigFailureCategory
+    )
+    if isinstance(normalized, str) and normalized in allowed:
         return normalized
     return "backend_error"
 
