@@ -15,7 +15,11 @@ from typing import Any
 
 from chronovisor.core.durable_state import DurableStateError, read_sealed_json
 from chronovisor.core.frontmatter import parse as parse_frontmatter
-from chronovisor.core.index_store import contained_file
+from chronovisor.core.index_store import (
+    PAGE_RESERVED_FILENAMES,
+    SYSTEM_RESERVED_FILENAMES,
+    contained_file,
+)
 from chronovisor.core.knowledge_graph_store import KnowledgeGraphStore
 from chronovisor.core.link_fix import extract_targets
 from chronovisor.core.raw_segment import RawSegmentCommit, RawSegmentCorrupt
@@ -131,9 +135,9 @@ class _Page:
 
 def _page_sources(root: Path) -> list[tuple[Path, str]]:
     sources: list[tuple[Path, str]] = []
-    for directory, source_kind, recursive in (
-        (root / "pages", "pages", True),
-        (root / "system", "system", False),
+    for directory, source_kind, recursive, reserved in (
+        (root / "pages", "pages", True, PAGE_RESERVED_FILENAMES),
+        (root / "system", "system", False, SYSTEM_RESERVED_FILENAMES),
     ):
         if not directory.is_dir():
             continue
@@ -142,6 +146,8 @@ def _page_sources(root: Path) -> list[tuple[Path, str]]:
                 directory.rglob("*.md") if recursive else directory.glob("*.md")
             )
             for path in candidates:
+                if path.name in reserved:
+                    continue
                 if (resolved := contained_file(path, directory)) is not None:
                     sources.append((resolved, source_kind))
         except (OSError, RuntimeError):

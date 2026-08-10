@@ -3789,6 +3789,18 @@ def test_knowledge_mix_snapshot_groups_pages_by_category(
     (pages_dir / "ai" / "agent-memory.md").write_text("a" * 20, encoding="utf-8")
     (pages_dir / "ai" / "evals.md").write_text("b" * 10, encoding="utf-8")
     (pages_dir / "macos" / "display.md").write_text("c" * 15, encoding="utf-8")
+    for relative in (
+        "index.md",
+        "log.md",
+        "schema.md",
+        "ai/index.md",
+        "ai/log.md",
+        "ai/schema.md",
+    ):
+        (pages_dir / relative).write_text("reserved", encoding="utf-8")
+    outside = chronovisor_root / "outside.md"
+    outside.write_text("outside", encoding="utf-8")
+    (pages_dir / "outside-link.md").symlink_to(outside)
 
     monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", chronovisor_root)
 

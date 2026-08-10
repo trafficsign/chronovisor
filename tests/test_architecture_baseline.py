@@ -1693,6 +1693,11 @@ X2_RETIRED_CANONICAL_WRITER_SITE_IDS = (
     "arch:e8493b726f1e80a2bf99b0113e333272c0428cb4796fbb0b934f47cb9496509e",
     "arch:f31361d0fcc2bec1383df68e81ade34fa1e9ad64b7587f7a70f8c00cf7e2a274",
 )
+X2_RETIRED_RESERVED_SCAN_SITE_IDS = (
+    "arch:2c8d6e8ae180f293555a4ecb3d3db2220e8d957d3d2448a6cee13939341a219c",
+    "arch:9173bd8b2fc7f59a7afd7e9959fb2ff9c8e98115fb8c4d807e4a475189cfd64e",
+    "arch:9ac0d7b49d5343bb0a6493e3f06e8949d08c36fc3d6c5873c4b123bc9a05527a",
+)
 W6A_RETIRED_CLASSIFICATION_RUNTIME_SITE_IDS = (
     "arch:1769e98a4961cd3b1838967625ea3c4b6e9f19430c5b7fff63d8a0fdb31f9713",
     "arch:31d2e2d705ac18c3c042ddaa704735d895a784f7f5233c8af9824a3c84058aed",
@@ -1848,6 +1853,7 @@ RETIREMENT_HISTORY = {
                 *FINAL_RETIRED_PROJECTION_REPLACEMENT_SITE_IDS,
                 X2_RETIRED_SERVER_WIKI_LINK_SITE_ID,
                 *X2_RETIRED_CANONICAL_WRITER_SITE_IDS,
+                *X2_RETIRED_RESERVED_SCAN_SITE_IDS,
                 *W6A_RETIRED_CLASSIFICATION_RUNTIME_SITE_IDS,
                 *W6B_RETIRED_NEMOTRON_RUNTIME_SITE_IDS,
                 *W6C_RETIRED_KNOWLEDGE_EMBEDDING_SITE_IDS,
@@ -2603,7 +2609,7 @@ def test_current_exception_ledger_seed_and_schema_inventory_are_exact(
     assert detected_ids == ledger_ids == set(seed["exception_semantic_ids"]["active"])
     _assert_exact_retirement_history(architecture, seed)
     assert len(edge_rows) == current["worktree_architecture"]["edge_count"] == 44
-    assert sum(len(row["sites"]) for row in edge_rows) == len(raw_cross_sites) == 1374
+    assert sum(len(row["sites"]) for row in edge_rows) == len(raw_cross_sites) == 1376
     assert {
         field: counts[field]
         for field in (
@@ -2616,7 +2622,7 @@ def test_current_exception_ledger_seed_and_schema_inventory_are_exact(
         )
     } == {
         "exceptions": 44,
-            "cross_domain_sites": 1374,
+        "cross_domain_sites": 1376,
         "production_to_lab_edges": 0,
         "production_to_lab_static_sites": 0,
         "production_to_lab_dynamic_sites": 0,

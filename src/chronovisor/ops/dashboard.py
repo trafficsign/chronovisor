@@ -22,7 +22,7 @@ from urllib.parse import parse_qsl, urlparse
 
 import httpx
 
-from chronovisor.core import runtime_status
+from chronovisor.core import index_store, runtime_status
 from chronovisor.core.ollama import OLLAMA_URL, embedding_model, ingest_model
 from chronovisor.core.runtime_config import (
     load_decision_router_config,
@@ -911,11 +911,14 @@ def _knowledge_mix_snapshot() -> dict[str, Any]:
     categories: dict[str, dict[str, Any]] = {}
     if pages_dir.exists():
         for path in pages_dir.rglob("*.md"):
-            if not path.is_file():
+            if path.name in index_store.PAGE_RESERVED_FILENAMES:
+                continue
+            resolved = index_store.contained_file(path, pages_dir)
+            if resolved is None:
                 continue
             try:
-                rel = path.relative_to(pages_dir)
-                page_bytes = path.stat().st_size
+                rel = resolved.relative_to(pages_dir.resolve())
+                page_bytes = resolved.stat().st_size
             except Exception:
                 continue
             category = rel.parts[0] if len(rel.parts) > 1 else "root"

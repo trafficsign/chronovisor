@@ -39,6 +39,7 @@ from chronovisor.core.durable_state import (
 from chronovisor.core.durable_state import (
     canonical_sha256 as _sealed_canonical_sha,
 )
+from chronovisor.core.index_store import PAGE_RESERVED_FILENAMES, contained_file
 from chronovisor.core.jsonl_write import append_jsonl_durable
 from chronovisor.core.raw_segment import copy_source_interval
 from chronovisor.core.raw_store import RawStore
@@ -2118,9 +2119,15 @@ def builtin_field_environment_identity() -> dict[str, Any]:
     search_config = load_search_embedding_config()
     corpus_rows: list[str] = []
     for path in sorted(PAGES_DIR.rglob("*.md")):
+        if path.name in PAGE_RESERVED_FILENAMES:
+            continue
+        resolved = contained_file(path, PAGES_DIR)
+        if resolved is None:
+            continue
         try:
             corpus_rows.append(
-                f"{path.relative_to(PAGES_DIR)}:{hashlib.sha256(path.read_bytes()).hexdigest()}"
+                f"{resolved.relative_to(PAGES_DIR.resolve())}:"
+                f"{hashlib.sha256(resolved.read_bytes()).hexdigest()}"
             )
         except OSError:
             continue

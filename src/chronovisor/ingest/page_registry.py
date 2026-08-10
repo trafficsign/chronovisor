@@ -17,7 +17,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from chronovisor.core import frontmatter
+from chronovisor.core import frontmatter, index_store
 from chronovisor.core.hashutil import sha256_bytes as _sha256
 from chronovisor.core.page_identity import new_page_uid, normalize_page_uid
 
@@ -144,9 +144,29 @@ class PageRegistry:
 
     @staticmethod
     def _page_paths(root: Path, *, include_system: bool) -> list[Path]:
-        paths = sorted((root / "pages").rglob("*.md"))
+        paths: list[Path] = []
+        namespaces = [(root / "pages", index_store.PAGE_RESERVED_FILENAMES, True)]
         if include_system:
-            paths.extend(sorted((root / "system").glob("*.md")))
+            namespaces.append(
+                (
+                    root / "system",
+                    index_store.SYSTEM_RESERVED_FILENAMES,
+                    False,
+                )
+            )
+        for directory, reserved, recursive in namespaces:
+            if not directory.is_dir():
+                continue
+            candidates = (
+                directory.rglob("*.md") if recursive else directory.glob("*.md")
+            )
+            paths.extend(
+                resolved
+                for path in sorted(candidates)
+                if path.name not in reserved
+                and (resolved := index_store.contained_file(path, directory))
+                is not None
+            )
         return paths
 
     def ensure_manifest(

@@ -11,6 +11,10 @@ from pathlib import Path
 from typing import Any
 
 from chronovisor.core.durable_state import DurableStateError, read_sealed_json
+from chronovisor.core.index_store import (
+    PAGE_RESERVED_FILENAMES,
+    SYSTEM_RESERVED_FILENAMES,
+)
 from chronovisor.core.timeutil import iso_seconds as _iso
 from chronovisor.ingest.page_registry import PageRegistry, PageRegistryError
 from chronovisor.recall.merge_ledger import MergeLedger
@@ -84,13 +88,25 @@ def _observed_scope(root: Path, registry: Mapping[str, Any]) -> dict[str, Any]:
             actual[str(path.relative_to(root))] = path.stat()
         except FileNotFoundError:
             continue
-    registered = {
-        str(row.get("path") or ""): row
-        for row in (registry.get("pages") or {}).values()
-        if isinstance(row, Mapping)
-        and row.get("status") != "superseded"
-        and row.get("path")
-    }
+    registered: dict[str, Mapping[str, Any]] = {}
+    for row in (registry.get("pages") or {}).values():
+        if (
+            not isinstance(row, Mapping)
+            or row.get("status") == "superseded"
+            or not row.get("path")
+        ):
+            continue
+        relative = str(row["path"])
+        reserved = (
+            PAGE_RESERVED_FILENAMES
+            if relative.startswith("pages/")
+            else SYSTEM_RESERVED_FILENAMES
+            if relative.startswith("system/")
+            else frozenset()
+        )
+        if Path(relative).name in reserved:
+            continue
+        registered[relative] = row
     unregistered = sorted(set(actual) - set(registered))
     missing = sorted(set(registered) - set(actual))
     collection_unregistered = sorted(

@@ -1137,6 +1137,44 @@ def test_builtin_field_environment_replay_uses_shared_production_seams(
     ) == ""
 
 
+def test_field_environment_corpus_ignores_reserved_documents(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pages = tmp_path / "pages"
+    concept = pages / "concept-index.md"
+    concept.parent.mkdir(parents=True)
+    concept.write_text("concept", encoding="utf-8")
+    for relative in (
+        "index.md",
+        "log.md",
+        "schema.md",
+        "nested/index.md",
+        "nested/log.md",
+        "nested/schema.md",
+    ):
+        path = pages / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(relative, encoding="utf-8")
+    outside = tmp_path / "outside.md"
+    outside.write_text("outside", encoding="utf-8")
+    (pages / "outside-link.md").symlink_to(outside)
+    monkeypatch.setattr(recall_answer_eval, "PAGES_DIR", pages)
+    monkeypatch.setattr(recall_answer_eval, "INDEX_FILE", tmp_path / "index.json")
+
+    before = recall_answer_eval.builtin_field_environment_identity()["corpus_sha256"]
+    (pages / "nested" / "index.md").write_text("changed", encoding="utf-8")
+    reserved_changed = recall_answer_eval.builtin_field_environment_identity()[
+        "corpus_sha256"
+    ]
+    concept.write_text("concept changed", encoding="utf-8")
+    concept_changed = recall_answer_eval.builtin_field_environment_identity()[
+        "corpus_sha256"
+    ]
+
+    assert reserved_changed == before
+    assert concept_changed != before
+
+
 def test_independent_field_replay_never_loads_live_state(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

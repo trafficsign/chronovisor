@@ -147,6 +147,41 @@ def test_build_cortex_graph_skips_descendant_symlinks(tmp_path: Path) -> None:
     assert "Inside secret" not in encoded
 
 
+def test_build_cortex_graph_excludes_reserved_documents_by_namespace(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "chronovisor"
+    _write_page(
+        root / "pages" / "concept-index.md",
+        title="Concept index",
+        body="A normal concept.",
+    )
+    for relative in (
+        "pages/index.md",
+        "pages/log.md",
+        "pages/schema.md",
+        "pages/nested/index.md",
+        "pages/nested/log.md",
+        "pages/nested/schema.md",
+        "system/index.md",
+        "system/log.md",
+    ):
+        _write_page(root / relative, title="Reserved", body="Reserved body.")
+    _write_page(
+        root / "system" / "schema.md",
+        title="System schema",
+        body="Privileged system schema.",
+    )
+
+    graph = cortex.build_cortex_graph(root, use_cache=False)
+
+    assert [node["id"] for node in graph["nodes"]] == ["concept-index", "schema"]
+    assert graph["categories"] == [
+        {"id": "root", "count": 1},
+        {"id": "system", "count": 1},
+    ]
+
+
 def test_build_cortex_graph_skips_symlinked_namespace_roots(tmp_path: Path) -> None:
     root = tmp_path / "chronovisor"
     root.mkdir()
