@@ -9,6 +9,7 @@ import pytest
 
 from chronovisor.core.runtime_config import SearchEmbeddingConfig
 from chronovisor.ops import autonomy, health
+from tests.semantic_hold_support import semantic_authority
 
 
 def test_semantic_index_kpi_is_inactive_when_rollout_is_off(
@@ -355,11 +356,7 @@ def test_convergence_kpi_splits_semantic_defer_from_operational_quarantine(
 
 def test_health_accepts_only_self_hashed_legacy_semantic_migration() -> None:
     lane = autonomy.DUPLICATE_FRONTIER_LANE
-    authority = {
-        "source": "injected_reviewer_boundary",
-        "authority_version": 1,
-        "lane": lane,
-    }
+    authority = semantic_authority(lane)
     original = {
         "quarantine_reason": "retry_exhausted:frontier",
         "frontier_attempts": 3,

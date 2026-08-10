@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -20,6 +21,11 @@ def test_recall_deadline_api_is_reexported_from_recall_runtime() -> None:
 @pytest.fixture(autouse=True)
 def isolate_recall_breaker(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(recall_breaker, "BREAKER_FILE", tmp_path / "breaker.json")
+    monkeypatch.setattr(
+        hook_dispatcher,
+        "okf_startup_status",
+        lambda _root: SimpleNamespace(allowed=True),
+    )
 
 
 def _isolate_background_jobs(monkeypatch, tmp_path: Path) -> None:

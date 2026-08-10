@@ -31,6 +31,9 @@ class FakeRouter:
             audit_record=lambda: dict(policy_audit),
         )
 
+    def authority_router(self) -> dict[str, object]:
+        return dict(type(self).router_audit)
+
     def decide(self, _prompt, _schema):
         type(self).calls += 1
         return DecisionRouterResult(
@@ -87,7 +90,7 @@ def isolate_structured_review_runtime(
     monkeypatch.setattr(
         routine_review,
         "_current_structured_authority",
-        lambda lane: (
+        lambda lane, **_kwargs: (
             semantic_authority(lane, artifact_sha256=artifact_sha256),
             None,
         ),
@@ -95,7 +98,7 @@ def isolate_structured_review_runtime(
     monkeypatch.setattr(
         routine_review,
         "_structured_authority_observation",
-        lambda _authority: "0" * 64,
+        lambda _authority, **_kwargs: "0" * 64,
     )
     return SimpleNamespace(cache_root=cache_root, cache_roots=cache_roots)
 
@@ -143,7 +146,7 @@ def test_shadow_lane_collects_vote_but_cannot_authorize_mutation(
     assert result["frontier_failure"]["failure_class"] == "local_decision_shadow_only"
 
 
-def test_enabled_lane_requires_adopted_artifact(
+def test_enabled_lane_requires_runtime_mapped_routes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -166,13 +169,13 @@ def test_enabled_lane_requires_adopted_artifact(
     )
 
 
-def test_enabled_lane_can_return_only_adopted_consensus(
+def test_enabled_lane_can_return_only_runtime_mapped_consensus(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     isolate_structured_review_runtime: SimpleNamespace,
 ) -> None:
     FakeRouter.calls = 0
-    FakeRouter.source = "adopted_artifact"
+    FakeRouter.source = "runtime_role_mapping"
     monkeypatch.setattr(decision_router, "DecisionRouter", FakeRouter)
     monkeypatch.setenv("CHRONOVISOR_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
 
@@ -184,7 +187,9 @@ def test_enabled_lane_can_return_only_adopted_consensus(
     )
 
     assert result["decision"] == "approved"
-    assert result["decision_policy"]["router_policy"]["source"] == "adopted_artifact"
+    assert result["decision_policy"]["router_policy"]["source"] == (
+        "runtime_role_mapping"
+    )
     cache_root = isolate_structured_review_runtime.cache_root
     assert cache_root == routine_review.STRUCTURED_REVIEW_HOLD_CACHE_ROOT
     assert isolate_structured_review_runtime.cache_roots == [cache_root.resolve()]
