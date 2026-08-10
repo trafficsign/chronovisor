@@ -36,7 +36,7 @@ from chronovisor.core.pipeline import (
     production_pipeline_config,
     run_search_pipeline,
 )
-from chronovisor.core.reranker import rerank_results
+from chronovisor.core.reranker import RerankOutcome, rerank_results, safe_reranker_error
 from chronovisor.core.runtime_config import (
     load_negative_feedback_config,
     load_reranker_config,
@@ -785,7 +785,7 @@ def _eval_rerank_results(
     *,
     config: Any,
 ) -> Any:
-    """Use the production resident service, with local inference as fallback."""
+    """Use the selected production topology without changing providers on failure."""
 
     if config.service.enabled and config.service.mode in {"shadow", "canary", "on"}:
         try:
@@ -797,8 +797,21 @@ def _eval_rerank_results(
                 config=config,
                 timeout_ms=config.service.timeout_ms,
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            reason = (
+                exc.category
+                if isinstance(exc, reranker_client.RerankerServiceUnavailable)
+                else safe_reranker_error(exc)
+            )
+            return RerankOutcome(
+                candidates,
+                {
+                    "status": "unavailable",
+                    "reason": reason,
+                    "execution": "service",
+                    "degraded": True,
+                },
+            )
     return rerank_results(query, candidates, config=config)
 
 

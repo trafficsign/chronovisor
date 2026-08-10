@@ -538,7 +538,10 @@ def _configured_model_roles() -> dict[str, set[str]]:
     try:
         reranker = load_reranker_config()
         if reranker.enabled:
-            _add_model_role(roles, reranker.model, "rerank")
+            rerank_route = llm_config.load_default_llm_runtime().resolve_rerank(
+                "search.rerank"
+            )
+            _add_model_role(roles, rerank_route.model, "rerank")
     except Exception:
         pass
 

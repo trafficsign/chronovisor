@@ -112,7 +112,8 @@ def test_shadow_reranker_fails_open(monkeypatch) -> None:
     )
 
     assert payload["status"] == "unavailable"
-    assert payload["reason"] == "RuntimeError"
+    assert payload["reason"] == "reranker_unavailable"
+    assert payload["degraded"] is True
 
 
 def test_active_reranker_changes_candidate_order(monkeypatch) -> None:
@@ -166,6 +167,8 @@ def test_active_reranker_failure_returns_original_candidates(monkeypatch) -> Non
 
     assert ranked is candidates
     assert metadata["fail_open"] is True
+    assert metadata["reason"] == "reranker_unavailable"
+    assert metadata["degraded"] is True
 
 
 def certificate(page_id: str, *, outcome: str = "pass") -> EvidenceCertificate:
@@ -251,6 +254,40 @@ def test_selection_is_dynamic_and_caps_rich_and_pointer_counts(monkeypatch) -> N
     assert [item.evidence_kind for item in selected].count("pointer") == 4
     assert metadata["selected_count"] == 6
     assert metadata["ledger_written"] == 8
+
+
+def test_selection_uses_resolved_rerank_route_model(monkeypatch) -> None:
+    seen: list[dict[str, Any] | None] = []
+
+    def certify(_query, value, **kwargs):
+        seen.append(kwargs.get("reranker_score"))
+        return certificate(value.page_id)
+
+    monkeypatch.setattr(recall_processor, "certify_candidate", certify)
+    monkeypatch.setattr(recall_processor, "append_certificates", lambda _values: 1)
+
+    recall_processor.select_certified_candidates(
+        "query",
+        [page("page-a")],
+        reranker_metadata={
+            "route": {
+                "role": "search.rerank",
+                "provider": "provider",
+                "model": "route-model",
+                "location": "remote",
+            },
+            "candidate_count": 1,
+            "scores": [{"page_id": "page-a", "raw_score": 1.0}],
+        },
+        max_candidates=1,
+        max_pointer_cards=1,
+        max_rich_evidence=1,
+        injection_token_budget=1200,
+        certificate_required=True,
+    )
+
+    assert seen[0] is not None
+    assert seen[0]["model_revision"] == "route-model"
 
 
 def test_selection_abstains_when_every_certificate_rejects(monkeypatch) -> None:

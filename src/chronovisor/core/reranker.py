@@ -2,18 +2,28 @@
 
 from __future__ import annotations
 
+import hashlib
 import math
-import re
 import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Any
 
+from chronovisor.core.canonical_document import (
+    CanonicalDocumentError,
+    parse_document,
+)
+from chronovisor.core.index_store import IndexStore, contained_file, get_store
 from chronovisor.core.llm_runtime import (
+    SAFE_FAILURE_CATEGORIES,
+    LLMRuntime,
+    LLMRuntimeError,
     RerankItem,
     RerankRequest,
     RerankResult,
+    ResolvedRerankRoute,
     RouteLocation,
     SourceDataClass,
     SourceDataClassification,
@@ -21,9 +31,25 @@ from chronovisor.core.llm_runtime import (
 )
 from chronovisor.core.runtime_config import RerankerConfig, load_reranker_config
 from chronovisor.core.search_types import ScoredPage
-from chronovisor.core.store import find_page
+from chronovisor.core.store import PAGES_DIR, SYSTEM_DIR
 
-FRONTMATTER_RE = re.compile(r"^---\n.*?\n---\n?", re.DOTALL)
+RERANK_RUNTIME_ROLE = "search.rerank"
+QUERY_SOURCE = SourceDataClassification(
+    SourceDataClass.RAW,
+    SourceSensitivity.NORMAL,
+)
+_NORMAL_PAGE_SOURCE = SourceDataClassification(
+    SourceDataClass.PAGE,
+    SourceSensitivity.NORMAL,
+)
+_HIGH_PAGE_SOURCE = SourceDataClassification(
+    SourceDataClass.PAGE,
+    SourceSensitivity.HIGH,
+)
+_SYSTEM_SOURCE = SourceDataClassification(
+    SourceDataClass.SYSTEM,
+    SourceSensitivity.HIGH,
+)
 _MODEL_CACHE: dict[tuple[str, str, str], Any] = {}
 _MODEL_LOCK = threading.RLock()
 _WARMUP_LOCK = threading.Lock()
@@ -46,18 +72,98 @@ class RerankScore:
     margin_to_next: float
 
 
-def _candidate_text(page: ScoredPage, *, max_chars: int = 2400) -> str:
-    path = find_page(page.page_id)
-    body = ""
-    if path is not None:
-        try:
-            content = path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
-            content = ""
-        body = FRONTMATTER_RE.sub("", content).strip()
-    if page.snippet:
-        body = f"{page.snippet}\n\n{body}"
-    return f"{page.title}\n\n{body[:max_chars]}".strip()
+def _route_identity(route: ResolvedRerankRoute) -> dict[str, str]:
+    return {
+        "role": route.role,
+        "provider": route.provider,
+        "model": route.model,
+        "location": route.location.value,
+    }
+
+
+def safe_reranker_error(exc: Exception) -> str:
+    category = getattr(exc, "category", "")
+    return (
+        category
+        if isinstance(exc, LLMRuntimeError) and category in SAFE_FAILURE_CATEGORIES
+        else "reranker_unavailable"
+    )
+
+
+def resolve_rerank_candidate(
+    candidate: ScoredPage | str,
+    *,
+    store: IndexStore | None,
+    max_chars: int = 2400,
+) -> tuple[
+    str,
+    SourceDataClassification,
+    tuple[str, str, int, int, str],
+]:
+    """Resolve passage bytes and their egress classification from one index row."""
+
+    page_id = candidate.page_id if isinstance(candidate, ScoredPage) else candidate
+    title = candidate.title if isinstance(candidate, ScoredPage) else page_id
+    snippet = candidate.snippet if isinstance(candidate, ScoredPage) else ""
+    fallback = f"{title}\n\n{snippet}".strip() or page_id
+    fallback_bytes = fallback.encode("utf-8")
+    invalid = (
+        fallback,
+        _SYSTEM_SOURCE,
+        (
+            "invalid",
+            "",
+            0,
+            len(fallback_bytes),
+            hashlib.sha256(fallback_bytes).hexdigest(),
+        ),
+    )
+    try:
+        if store is None:
+            return invalid
+        metadata = store.meta(page_id)
+        if not isinstance(metadata, dict):
+            return invalid
+        namespace = metadata.get("namespace")
+        path_value = metadata.get("path")
+        if namespace not in {"pages", "system"} or not isinstance(path_value, str):
+            return invalid
+        path = contained_file(
+            Path(path_value),
+            SYSTEM_DIR if namespace == "system" else PAGES_DIR,
+        )
+        if path is None:
+            return invalid
+        stat = path.stat()
+        data = path.read_bytes()
+        document = parse_document(data)
+        body = document.body.decode("utf-8").strip()
+    except (CanonicalDocumentError, OSError, RuntimeError, UnicodeDecodeError):
+        return invalid
+    source = (
+        _SYSTEM_SOURCE
+        if namespace == "system"
+        else _NORMAL_PAGE_SOURCE
+        if document.metadata.get("sensitivity") == "normal"
+        else _HIGH_PAGE_SOURCE
+    )
+    resolved_title = metadata.get("title")
+    if not isinstance(resolved_title, str) or not resolved_title.strip():
+        resolved_title = title
+    if snippet:
+        body = f"{snippet}\n\n{body}"
+    passage = f"{resolved_title}\n\n{body[:max_chars]}".strip()
+    return (
+        passage,
+        source,
+        (
+            namespace,
+            str(path),
+            stat.st_mtime_ns,
+            stat.st_size,
+            hashlib.sha256(data).hexdigest(),
+        ),
+    )
 
 
 def _select_torch_device(torch_mod: Any, requested: str) -> str:
@@ -215,49 +321,13 @@ class LocalRerankBackend:
             items=tuple(items),
             provider=self.provider,
             model=model,
-            metadata={"backend": config.backend},
         )
 
 
-# The compatibility path is local-only, so no source content can cross an egress
-# boundary before consumers migrate to passing their own classification.
-_LOCAL_RERANK_SOURCE = SourceDataClassification(
-    SourceDataClass.PAGE,
-    SourceSensitivity.NORMAL,
-)
-
-
-def score_fn(
-    config: RerankerConfig,
-) -> Callable[[str, list[str], RerankerConfig], list[float]]:
-    """Compatibility callable backed by the provider-neutral local component."""
-
-    backend = LocalRerankBackend(config)
-
-    def score(
-        query: str,
-        passages: list[str],
-        call_config: RerankerConfig,
-    ) -> list[float]:
-        active_backend = (
-            backend if call_config == config else LocalRerankBackend(call_config)
-        )
-        result = active_backend.rerank(
-            RerankRequest(
-                query=query,
-                candidates=tuple(passages),
-                source=_LOCAL_RERANK_SOURCE,
-            ),
-            model=call_config.model,
-        )
-        return [
-            item.score for item in sorted(result.items, key=lambda item: item.index)
-        ]
-
-    return score
-
-
-def warm_reranker(config: RerankerConfig | None = None) -> dict[str, Any]:
+def warm_reranker(
+    config: RerankerConfig | None = None,
+    runtime: LLMRuntime | None = None,
+) -> dict[str, Any]:
     """Load and exercise the configured reranker before the first search."""
 
     cfg = config or load_reranker_config()
@@ -265,18 +335,28 @@ def warm_reranker(config: RerankerConfig | None = None) -> dict[str, Any]:
         return {"status": "disabled", "reason": "config_disabled"}
     started = time.perf_counter()
     try:
-        scores = score_fn(cfg)("reranker warmup", ["reranker warmup"], cfg)
+        if runtime is None:
+            from chronovisor.core.llm_config import load_default_llm_runtime
+
+            runtime = load_default_llm_runtime()
+        route = runtime.resolve_rerank(RERANK_RUNTIME_ROLE)
+        result = runtime.rerank(
+            RERANK_RUNTIME_ROLE,
+            RerankRequest(
+                "reranker warmup",
+                ("reranker warmup",),
+                QUERY_SOURCE,
+                candidate_sources=(_NORMAL_PAGE_SOURCE,),
+            ),
+        )
     except Exception as exc:
         return {
             "status": "unavailable",
-            "reason": str(exc),
-            "model": cfg.model,
-            "backend": cfg.backend,
+            "reason": safe_reranker_error(exc),
         }
     return {
-        "status": "ready" if len(scores) == 1 else "unavailable",
-        "model": cfg.model,
-        "backend": cfg.backend,
+        "status": "ready" if len(result.items) == 1 else "unavailable",
+        "route": _route_identity(route),
         "latency_ms": int(round((time.perf_counter() - started) * 1000)),
     }
 
@@ -316,8 +396,6 @@ def apply_reranker_scores(
     head = candidates[:rerank_n]
     tail = candidates[rerank_n:]
     base_metadata = {
-        "model": config.model,
-        "backend": config.backend,
         "candidate_count": rerank_n,
         **(metadata or {}),
     }
@@ -329,11 +407,9 @@ def apply_reranker_scores(
             {
                 **base_metadata,
                 "status": "unavailable",
-                "reason": (
-                    "reranker returned invalid score cardinality or "
-                    "non-finite scores"
-                ),
+                "reason": "invalid_response",
                 "score_count": len(raw_scores),
+                "degraded": True,
             },
         )
 
@@ -426,8 +502,6 @@ def rerank_results(
             {
                 "status": "disabled",
                 "reason": "config_disabled",
-                "model": cfg.model,
-                "backend": cfg.backend,
             },
         )
     if not candidates:
@@ -437,26 +511,52 @@ def rerank_results(
 
     rerank_n = min(max(1, cfg.top_n), len(candidates))
     head = candidates[:rerank_n]
-    passages = [_candidate_text(page) for page in head]
     started = time.perf_counter()
     try:
-        scores = score_fn(cfg)(query, passages, cfg)
+        from chronovisor.core.llm_config import load_default_llm_runtime
+
+        runtime = load_default_llm_runtime()
+        route = runtime.resolve_rerank(RERANK_RUNTIME_ROLE)
+        store = get_store()
+        try:
+            store.refresh()
+            candidate_store: IndexStore | None = store
+        except Exception:
+            candidate_store = None
+        resolved = [
+            resolve_rerank_candidate(page, store=candidate_store) for page in head
+        ]
+        result = runtime.rerank(
+            RERANK_RUNTIME_ROLE,
+            RerankRequest(
+                query,
+                tuple(passage for passage, _source, _identity in resolved),
+                QUERY_SOURCE,
+                candidate_sources=tuple(
+                    source for _passage, source, _identity in resolved
+                ),
+            ),
+        )
     except Exception as exc:
         return RerankOutcome(
             candidates,
             {
                 "status": "unavailable",
-                "reason": str(exc),
-                "model": cfg.model,
-                "backend": cfg.backend,
+                "reason": safe_reranker_error(exc),
                 "candidate_count": rerank_n,
+                "degraded": True,
             },
         )
 
     elapsed_ms = int(round((time.perf_counter() - started) * 1000))
+    scores_by_index = sorted(result.items, key=lambda item: item.index)
     return apply_reranker_scores(
         candidates,
-        [float(score) for score in scores],
+        [float(item.score) for item in scores_by_index],
         config=cfg,
-        metadata={"latency_ms": elapsed_ms, "execution": "in_process"},
+        metadata={
+            "latency_ms": elapsed_ms,
+            "execution": "in_process",
+            "route": _route_identity(route),
+        },
     )

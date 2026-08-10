@@ -169,8 +169,6 @@ def apply_rerank_stage(
             metadata={
                 "status": "skipped",
                 "reason": "sort_by_not_relevance",
-                "model": reranker_config.model,
-                "backend": reranker_config.backend,
             },
             applied=False,
         )

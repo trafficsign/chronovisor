@@ -424,8 +424,8 @@ def test_reranker_config_reads_nested_search_section(
         """
 [search.reranker]
 enabled = true
-model = "BAAI/bge-reranker-v2-m3"
-backend = "transformers"
+model = "legacy-selector"
+backend = "flagembedding"
 top_n = 20
 max_length = 1024
 batch_size = 4
@@ -447,12 +447,12 @@ queue_size = 12
     cfg = runtime_config.load_reranker_config()
 
     assert cfg.enabled is True
-    assert cfg.model == "BAAI/bge-reranker-v2-m3"
-    assert cfg.backend == "transformers"
     assert cfg.top_n == 20
-    assert cfg.max_length == 1024
-    assert cfg.batch_size == 4
-    assert cfg.device == "mps"
+    assert cfg.model == runtime_config.RerankerConfig.model
+    assert cfg.backend == runtime_config.RerankerConfig.backend
+    assert cfg.max_length == runtime_config.RerankerConfig.max_length
+    assert cfg.batch_size == runtime_config.RerankerConfig.batch_size
+    assert cfg.device == runtime_config.RerankerConfig.device
     assert cfg.weight == 0.4
     assert cfg.service.enabled is True
     assert cfg.service.socket == "/tmp/chronovisor-reranker.sock"

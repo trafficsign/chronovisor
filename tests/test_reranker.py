@@ -2,19 +2,31 @@ from __future__ import annotations
 
 import json
 import threading
+from pathlib import Path
+from typing import Any
 
-from chronovisor.core import reranker
+import pytest
+
+from chronovisor.core import llm_config, reranker
+from chronovisor.core.canonical_document import CanonicalDocument, serialize_document
 from chronovisor.core.llm_runtime import (
     LLMRuntime,
     RerankItem,
     RerankRequest,
     RerankResult,
     RerankRoute,
+    RouteLocation,
     SourceDataClass,
     SourceDataClassification,
     SourceSensitivity,
 )
-from chronovisor.core.reranker import RerankOutcome, rerank_results
+from chronovisor.core.reranker import (
+    QUERY_SOURCE,
+    RERANK_RUNTIME_ROLE,
+    RerankOutcome,
+    apply_reranker_scores,
+    rerank_results,
+)
 from chronovisor.core.runtime_config import RerankerConfig
 from chronovisor.core.search import ScoredPage
 from chronovisor.hosts import server
@@ -30,6 +42,44 @@ def page(page_id: str, score: float = 1.0) -> ScoredPage:
     )
 
 
+class FakeRerankBackend:
+    provider = "fake-reranker"
+    location = RouteLocation.LOCAL
+
+    def __init__(self, scores: list[float] | None = None) -> None:
+        self.scores = scores or [0.1, 0.9]
+        self.requests: list[RerankRequest] = []
+
+    def rerank(self, request: RerankRequest, *, model: str) -> RerankResult:
+        self.requests.append(request)
+        return RerankResult(
+            tuple(
+                RerankItem(index, score) for index, score in enumerate(self.scores)
+            ),
+            self.provider,
+            model,
+        )
+
+
+def install_runtime(monkeypatch, backend: FakeRerankBackend) -> LLMRuntime:
+    runtime = LLMRuntime(
+        rerank={RERANK_RUNTIME_ROLE: RerankRoute(backend, "route-model")}
+    )
+    monkeypatch.setattr(llm_config, "load_default_llm_runtime", lambda: runtime)
+    monkeypatch.setattr(
+        reranker,
+        "resolve_rerank_candidate",
+        lambda candidate, **_kwargs: (
+            candidate.page_id,
+            SourceDataClassification(
+                SourceDataClass.PAGE, SourceSensitivity.NORMAL
+            ),
+            ("pages", candidate.page_id, 1, 1, candidate.page_id),
+        ),
+    )
+    return runtime
+
+
 def test_rerank_results_disabled_preserves_order() -> None:
     candidates = [page("a"), page("b")]
 
@@ -41,17 +91,8 @@ def test_rerank_results_disabled_preserves_order() -> None:
 
 def test_rerank_results_applies_scores_without_touching_tail(monkeypatch) -> None:
     candidates = [page("a"), page("b"), page("c")]
-
-    def fake_score_fn(config):
-        def score(query, passages, cfg):
-            assert query == "query"
-            assert len(passages) == 2
-            return [0.1, 0.9]
-
-        return score
-
-    monkeypatch.setattr(reranker, "score_fn", fake_score_fn)
-    monkeypatch.setattr(reranker, "find_page", lambda _page_id: None)
+    backend = FakeRerankBackend()
+    install_runtime(monkeypatch, backend)
 
     outcome = rerank_results(
         "query",
@@ -66,32 +107,46 @@ def test_rerank_results_applies_scores_without_touching_tail(monkeypatch) -> Non
     assert [row["page_id"] for row in outcome.metadata["scores"]] == ["b", "a"]
     assert [detail.raw_score for detail in outcome.scores] == [0.9, 0.1]
     assert round(outcome.scores[0].margin_to_next, 6) == 0.8
+    assert backend.requests[0].source == QUERY_SOURCE
+    assert backend.requests[0].candidate_sources == (
+        SourceDataClassification(SourceDataClass.PAGE, SourceSensitivity.NORMAL),
+    ) * 2
+    assert outcome.metadata["route"] == {
+        "role": RERANK_RUNTIME_ROLE,
+        "provider": "fake-reranker",
+        "model": "route-model",
+        "location": "local",
+    }
 
 
-def test_rerank_results_unavailable_preserves_order() -> None:
+def test_rerank_results_unavailable_preserves_order(monkeypatch) -> None:
     candidates = [page("a"), page("b")]
+
+    class FailingBackend(FakeRerankBackend):
+        def rerank(self, request: RerankRequest, *, model: str) -> RerankResult:
+            raise RuntimeError("SECRET backend detail")
+
+    install_runtime(monkeypatch, FailingBackend())
 
     outcome = rerank_results(
         "query",
         candidates,
-        config=RerankerConfig(enabled=True, backend="missing"),
+        config=RerankerConfig(enabled=True),
     )
 
     assert outcome.results == candidates
     assert outcome.metadata["status"] == "unavailable"
+    assert outcome.metadata["reason"] == "backend_error"
+    assert outcome.metadata["degraded"] is True
+    assert "SECRET" not in repr(outcome.metadata)
 
 
 def test_rerank_results_rejects_partial_score_vectors(monkeypatch) -> None:
     candidates = [page("a"), page("b")]
-    monkeypatch.setattr(reranker, "find_page", lambda _page_id: None)
-    monkeypatch.setattr(
-        reranker,
-        "score_fn",
-        lambda _config: lambda _query, _passages, _cfg: [0.9],
-    )
-
-    outcome = rerank_results(
-        "query", candidates, config=RerankerConfig(enabled=True, top_n=2)
+    outcome = apply_reranker_scores(
+        candidates,
+        [0.9],
+        config=RerankerConfig(enabled=True, top_n=2),
     )
 
     assert outcome.results == candidates
@@ -102,7 +157,7 @@ def test_rerank_results_rejects_partial_score_vectors(monkeypatch) -> None:
 def test_llm_runtime_routes_to_local_rerank_backend(
     monkeypatch,
 ) -> None:
-    config = RerankerConfig(enabled=True, backend="transformers", model="reranker")
+    config = RerankerConfig(enabled=True, backend="transformers", model="legacy")
     seen: list[tuple[str, list[str], str]] = []
 
     def fake_impl(_config):
@@ -130,29 +185,121 @@ def test_llm_runtime_routes_to_local_rerank_backend(
     assert seen == [("query", ["first", "second"], "reranker")]
     assert result.items == (RerankItem(1, 0.9), RerankItem(0, 0.1))
     assert result.provider == "local-reranker"
-    assert result.metadata == {"backend": "transformers"}
+    assert result.model == "reranker"
+    assert result.metadata == {}
 
 
-def test_score_fn_compatibility_delegates_to_local_backend(monkeypatch) -> None:
-    config = RerankerConfig(enabled=True, model="reranker")
-    seen: list[RerankRequest] = []
+@pytest.mark.parametrize(
+    ("namespace", "sensitivity", "expected_class", "expected_sensitivity"),
+    [
+        ("pages", "normal", SourceDataClass.PAGE, SourceSensitivity.NORMAL),
+        ("pages", "high", SourceDataClass.PAGE, SourceSensitivity.HIGH),
+        ("pages", None, SourceDataClass.PAGE, SourceSensitivity.HIGH),
+        ("pages", "unknown", SourceDataClass.PAGE, SourceSensitivity.HIGH),
+        ("system", "normal", SourceDataClass.SYSTEM, SourceSensitivity.HIGH),
+    ],
+)
+def test_candidate_resolver_uses_canonical_namespace_and_sensitivity(
+    tmp_path: Path,
+    monkeypatch,
+    namespace: str,
+    sensitivity: str | None,
+    expected_class: SourceDataClass,
+    expected_sensitivity: SourceSensitivity,
+) -> None:
+    pages = tmp_path / "pages"
+    system = tmp_path / "system"
+    pages.mkdir()
+    system.mkdir()
+    root = system if namespace == "system" else pages
+    path = root / "candidate.md"
+    metadata: dict[str, Any] = {
+        "title": "Canonical title",
+        "status": "stable",
+        "type": "knowledge",
+    }
+    if sensitivity is not None:
+        metadata["sensitivity"] = sensitivity
+    path.write_bytes(
+        serialize_document(CanonicalDocument(metadata=metadata, body=b"body only"))
+    )
 
-    def fake_rerank(self, request, *, model):
-        seen.append(request)
-        return RerankResult(
-            items=(RerankItem(1, 0.9), RerankItem(0, 0.1)),
-            provider=self.provider,
-            model=model,
+    class Store:
+        def meta(self, _page_id: str) -> dict[str, Any]:
+            return {
+                "namespace": namespace,
+                "path": str(path),
+                "title": "Canonical title",
+                "sensitivity": "normal",
+            }
+
+    monkeypatch.setattr(reranker, "PAGES_DIR", pages)
+    monkeypatch.setattr(reranker, "SYSTEM_DIR", system)
+
+    passage, source, identity = reranker.resolve_rerank_candidate(
+        "candidate", store=Store()  # type: ignore[arg-type]
+    )
+
+    assert passage == "Canonical title\n\nbody only"
+    assert source == SourceDataClassification(expected_class, expected_sensitivity)
+    assert identity[:2] == (namespace, str(path))
+
+
+def test_candidate_resolver_missing_or_invalid_is_system_high() -> None:
+    passage, source, identity = reranker.resolve_rerank_candidate(
+        page("missing"), store=None
+    )
+
+    assert passage == "missing"
+    assert source == SourceDataClassification(
+        SourceDataClass.SYSTEM, SourceSensitivity.HIGH
+    )
+    assert identity[0] == "invalid"
+
+
+def test_candidate_resolver_never_reads_symlinked_outside_bytes(
+    tmp_path: Path, monkeypatch
+) -> None:
+    pages = tmp_path / "pages"
+    system = tmp_path / "system"
+    outside = tmp_path / "outside"
+    pages.mkdir()
+    system.mkdir()
+    outside.mkdir()
+    secret = "CANARY_OUTSIDE_BYTES"
+    outside_page = outside / "candidate.md"
+    outside_page.write_text(secret, encoding="utf-8")
+    leaf_link = pages / "candidate.md"
+    descendant = pages / "linked"
+    try:
+        leaf_link.symlink_to(outside_page)
+        descendant.symlink_to(outside, target_is_directory=True)
+    except OSError:
+        pytest.skip("symlinks unavailable")
+
+    class Store:
+        def __init__(self, path: Path) -> None:
+            self.path = path
+
+        def meta(self, _page_id: str) -> dict[str, Any]:
+            return {
+                "namespace": "pages",
+                "path": str(self.path),
+                "title": "candidate",
+                "sensitivity": "normal",
+            }
+
+    monkeypatch.setattr(reranker, "PAGES_DIR", pages)
+    monkeypatch.setattr(reranker, "SYSTEM_DIR", system)
+    for path in (leaf_link, descendant / "candidate.md"):
+        passage, source, identity = reranker.resolve_rerank_candidate(
+            "candidate", store=Store(path)  # type: ignore[arg-type]
         )
-
-    monkeypatch.setattr(reranker.LocalRerankBackend, "rerank", fake_rerank)
-
-    scores = reranker.score_fn(config)("query", ["first", "second"], config)
-
-    assert scores == [0.1, 0.9]
-    assert len(seen) == 1
-    assert seen[0].query == "query"
-    assert seen[0].candidates == ("first", "second")
+        assert secret not in passage
+        assert source == SourceDataClassification(
+            SourceDataClass.SYSTEM, SourceSensitivity.HIGH
+        )
+        assert identity[0] == "invalid"
 
 
 def test_transformer_loader_prefers_complete_local_snapshot() -> None:
@@ -209,11 +356,11 @@ def test_transformer_loader_allows_first_install_fallback() -> None:
 
 
 def test_start_reranker_warmup_is_single_daemon(monkeypatch) -> None:
-    started: list[str] = []
+    started: list[bool] = []
     release = threading.Event()
 
     def fake_warm(config):
-        started.append(config.model)
+        started.append(config.enabled)
         release.wait(1)
         return {"status": "ready"}
 
@@ -229,7 +376,7 @@ def test_start_reranker_warmup_is_single_daemon(monkeypatch) -> None:
     assert first.daemon is True
     release.set()
     first.join(1)
-    assert started == [config.model]
+    assert started == [True]
 
 
 def test_chronovisor_search_uses_reranker_only_when_enabled(monkeypatch) -> None:
@@ -254,8 +401,6 @@ def test_chronovisor_search_uses_reranker_only_when_enabled(monkeypatch) -> None
             [candidates[1], candidates[0]],
             {
                 "status": "applied",
-                "model": config.model,
-                "backend": config.backend,
                 "candidate_count": 2,
                 "weight": config.weight,
                 "latency_ms": 3,
@@ -308,8 +453,6 @@ def test_chronovisor_search_reranks_after_tag_filter(monkeypatch) -> None:
             candidates,
             {
                 "status": "applied",
-                "model": config.model,
-                "backend": config.backend,
                 "candidate_count": len(candidates),
                 "weight": config.weight,
                 "latency_ms": 2,

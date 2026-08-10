@@ -157,6 +157,8 @@ def test_local_only_config_composes_ollama_and_transformer_reranker() -> None:
     assert isinstance(runtime._generation["answer"].backend, OllamaAdapter)
     assert isinstance(runtime._embedding["embed"].backend, OllamaAdapter)
     assert isinstance(runtime._rerank["rerank"].backend, LocalRerankBackend)
+    assert runtime.resolve_rerank("rerank").model == "local-reranker"
+    assert runtime._rerank["rerank"].backend.config.batch_size == 4
     assert resolver.calls == []
 
 

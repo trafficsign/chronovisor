@@ -900,9 +900,6 @@ def load_reranker_config(path: Path | str | None = None) -> RerankerConfig:
     if not isinstance(reranker, dict):
         return RerankerConfig()
 
-    model = reranker.get("model")
-    backend = reranker.get("backend")
-    device = reranker.get("device")
     raw_service = reranker.get("service")
     service_data: dict[str, Any] = raw_service if isinstance(raw_service, dict) else {}
     service_mode = str(service_data.get("mode") or "off").strip().lower()
@@ -911,16 +908,7 @@ def load_reranker_config(path: Path | str | None = None) -> RerankerConfig:
     service_socket = service_data.get("socket")
     return RerankerConfig(
         enabled=reranker.get("enabled") is True,
-        model=model
-        if isinstance(model, str) and model.strip()
-        else RerankerConfig.model,
-        backend=backend
-        if isinstance(backend, str) and backend.strip()
-        else RerankerConfig.backend,
         top_n=_positive_int(reranker.get("top_n"), RerankerConfig.top_n),
-        max_length=_positive_int(reranker.get("max_length"), RerankerConfig.max_length),
-        batch_size=_positive_int(reranker.get("batch_size"), RerankerConfig.batch_size),
-        device=device if isinstance(device, str) else "",
         weight=_nonnegative_float(reranker.get("weight"), RerankerConfig.weight),
         service=RerankerServiceConfig(
             enabled=service_data.get("enabled") is True,

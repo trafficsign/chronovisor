@@ -526,6 +526,41 @@ def test_run_variant_can_apply_hybrid_reranker(monkeypatch) -> None:
     assert payload["stages"]["observed"]["page_gate"] is True
 
 
+def test_eval_service_failure_never_falls_back_in_process(monkeypatch) -> None:
+    from chronovisor.core import reranker_client
+    from chronovisor.core.runtime_config import RerankerServiceConfig
+
+    candidates = [page("a", 2.0), page("b", 1.0)]
+    config = RerankerConfig(
+        enabled=True,
+        service=RerankerServiceConfig(enabled=True, mode="on"),
+    )
+    monkeypatch.setattr(
+        reranker_client,
+        "rerank",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            reranker_client.RerankerServiceUnavailable("transport_error")
+        ),
+    )
+    monkeypatch.setattr(
+        search_eval,
+        "rerank_results",
+        lambda *_args, **_kwargs: pytest.fail("in-process provider fallback"),
+    )
+
+    outcome = search_eval._eval_rerank_results(
+        "private query", candidates, config=config
+    )
+
+    assert outcome.results is candidates
+    assert outcome.metadata == {
+        "status": "unavailable",
+        "reason": "transport_error",
+        "execution": "service",
+        "degraded": True,
+    }
+
+
 def test_cli_build_golden_json(tmp_path, capsys) -> None:
     feedback_file = tmp_path / "feedback.jsonl"
     log_file = tmp_path / "recall-log.jsonl"

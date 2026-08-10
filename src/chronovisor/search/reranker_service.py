@@ -1,10 +1,9 @@
-"""Resident single-worker service for BGE cross-encoder reranking."""
+"""Resident single-worker service for provider-neutral reranking."""
 
 from __future__ import annotations
 
 import argparse
 import contextlib
-import hashlib
 import json
 import os
 import signal
@@ -16,15 +15,21 @@ from collections import OrderedDict, deque
 from pathlib import Path
 from typing import Any
 
+from chronovisor.core import index_store, llm_config
 from chronovisor.core.link_fix import atomic_write
+from chronovisor.core.llm_runtime import (
+    SAFE_FAILURE_CATEGORIES,
+    LLMRuntime,
+    RerankRequest,
+    RouteLocation,
+    SourceDataClassification,
+)
 from chronovisor.core.ollama import model_activity
 from chronovisor.core.reranker import (
-    FRONTMATTER_RE as _FRONTMATTER_RE,
-)
-from chronovisor.core.reranker import (
-    score_fn as _score_fn,
-)
-from chronovisor.core.reranker import (
+    QUERY_SOURCE,
+    RERANK_RUNTIME_ROLE,
+    resolve_rerank_candidate,
+    safe_reranker_error,
     warm_reranker,
 )
 from chronovisor.core.runtime_config import (
@@ -32,7 +37,7 @@ from chronovisor.core.runtime_config import (
     load_reranker_config,
     runtime_identity,
 )
-from chronovisor.core.store import CHRONOVISOR_ROOT, find_page, okf_startup_status
+from chronovisor.core.store import CHRONOVISOR_ROOT, okf_startup_status
 from chronovisor.search.accelerator_lease import accelerator_lease
 
 SERVICE_STATUS_FILE = CHRONOVISOR_ROOT / "runtime" / "reranker-service-status.json"
@@ -41,6 +46,29 @@ PASSAGE_CACHE_SIZE = 512
 
 class ServiceBusy(RuntimeError):
     pass
+
+
+_SERVICE_FAILURE_CATEGORIES = SAFE_FAILURE_CATEGORIES | {
+    "reranker_unavailable",
+    "service_busy",
+    "service_unavailable",
+}
+
+
+def _safe_category(value: object) -> str:
+    return (
+        value
+        if isinstance(value, str) and value in _SERVICE_FAILURE_CATEGORIES
+        else "reranker_unavailable"
+    )
+
+
+def _safe_service_error(exc: Exception) -> str:
+    return (
+        "service_busy"
+        if isinstance(exc, ServiceBusy)
+        else _safe_category(safe_reranker_error(exc))
+    )
 
 
 def _percentile(values: list[float], quantile: float) -> float:
@@ -52,54 +80,73 @@ def _percentile(values: list[float], quantile: float) -> float:
 
 
 class RerankerServiceState:
-    def __init__(self, config: RerankerConfig) -> None:
+    def __init__(
+        self,
+        config: RerankerConfig,
+        *,
+        llm_runtime: LLMRuntime | None = None,
+    ) -> None:
         self.config = config
+        self._llm_runtime = llm_runtime or llm_config.load_default_llm_runtime()
+        self._route = self._llm_runtime.resolve_rerank(RERANK_RUNTIME_ROLE)
+        self._store = index_store.get_store()
         self._work_lock = threading.Lock()
         self._slots = threading.BoundedSemaphore(config.service.queue_size)
         self._passages: OrderedDict[
-            str, tuple[int, int, str, str]
+            str,
+            tuple[
+                tuple[str, str, int, int, str],
+                str,
+                SourceDataClassification,
+            ],
         ] = OrderedDict()
         self._latencies: deque[float] = deque(maxlen=2_000)
         self._requests = 0
         self._errors = 0
         self._last_error = ""
-        self._runtime = runtime_identity()
-        self._warm = warm_reranker(config)
+        self._runtime_identity = runtime_identity()
+        self._warm = self._warm_route()
         self._publish_status()
 
     @property
     def ready(self) -> bool:
         return self._warm.get("status") == "ready"
 
-    def _candidate_passage(self, page_id: str) -> tuple[str, str]:
-        path = find_page(page_id)
-        if path is None:
-            return page_id, hashlib.sha256(page_id.encode("utf-8")).hexdigest()
-        try:
-            stat = path.stat()
-        except OSError:
-            return page_id, hashlib.sha256(page_id.encode("utf-8")).hexdigest()
+    def _local_resources(self) -> contextlib.ExitStack:
+        stack = contextlib.ExitStack()
+        if (
+            self._route.provider == "local-reranker"
+            and self._route.location is RouteLocation.LOCAL
+        ):
+            stack.enter_context(
+                accelerator_lease(timeout_ms=self.config.service.timeout_ms)
+            )
+            stack.enter_context(
+                model_activity(
+                    model=self._route.model,
+                    operation="rerank",
+                    pipeline="recall",
+                )
+            )
+        return stack
+
+    def _warm_route(self) -> dict[str, Any]:
+        with self._local_resources():
+            return warm_reranker(self.config, self._llm_runtime)
+
+    def _candidate_passage(
+        self, page_id: str, *, store: index_store.IndexStore | None
+    ) -> tuple[str, SourceDataClassification, str]:
+        passage, source, identity = resolve_rerank_candidate(page_id, store=store)
         cached = self._passages.get(page_id)
-        if cached is not None and cached[:2] == (stat.st_mtime_ns, stat.st_size):
+        if cached is not None and cached[0] == identity:
             self._passages.move_to_end(page_id)
-            return cached[2], cached[3]
-        try:
-            content = path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
-            content = ""
-        body = _FRONTMATTER_RE.sub("", content).strip()
-        passage = f"{page_id}\n\n{body[:2400]}".strip()
-        digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
-        self._passages[page_id] = (
-            stat.st_mtime_ns,
-            stat.st_size,
-            passage,
-            digest,
-        )
+            return cached[1], cached[2], cached[0][-1]
+        self._passages[page_id] = (identity, passage, source)
         self._passages.move_to_end(page_id)
         while len(self._passages) > PASSAGE_CACHE_SIZE:
             self._passages.popitem(last=False)
-        return passage, digest
+        return passage, source, identity[-1]
 
     def _status_payload(self) -> dict[str, Any]:
         latencies = list(self._latencies)
@@ -108,9 +155,12 @@ class RerankerServiceState:
             "ready": self.ready,
             "pid": os.getpid(),
             "observed_at_epoch": time.time(),
-            "model": self.config.model,
-            "backend": self.config.backend,
-            "device": self.config.device or "auto",
+            "route": {
+                "role": self._route.role,
+                "provider": self._route.provider,
+                "model": self._route.model,
+                "location": self._route.location.value,
+            },
             "socket": str(Path(self.config.service.socket).expanduser()),
             "warmup": self._warm,
             "requests": {
@@ -128,7 +178,7 @@ class RerankerServiceState:
                 "capacity": PASSAGE_CACHE_SIZE,
             },
             "last_error": self._last_error,
-            "runtime": self._runtime,
+            "runtime": self._runtime_identity,
         }
 
     def _publish_status(self) -> None:
@@ -146,7 +196,7 @@ class RerankerServiceState:
 
     def note_error(self, exc: Exception) -> None:
         self._errors += 1
-        self._last_error = f"{type(exc).__name__}: {exc}"
+        self._last_error = _safe_service_error(exc)
         self._publish_status()
 
     def _rerank(self, query: str, page_ids: list[str]) -> dict[str, Any]:
@@ -163,26 +213,38 @@ class RerankerServiceState:
         started = time.perf_counter()
         try:
             with self._work_lock:
+                try:
+                    self._store.refresh()
+                    candidate_store: index_store.IndexStore | None = self._store
+                except Exception:
+                    candidate_store = None
                 passages_and_hashes = [
-                    self._candidate_passage(page_id) for page_id in page_ids
+                    self._candidate_passage(page_id, store=candidate_store)
+                    for page_id in page_ids
                 ]
-                with accelerator_lease(
-                    timeout_ms=self.config.service.timeout_ms
-                ):
-                    with model_activity(
-                        model=self.config.model,
-                        operation="rerank",
-                        pipeline="recall",
-                    ):
-                        scores = _score_fn(self.config)(
+                with self._local_resources():
+                    result = self._llm_runtime.rerank(
+                        RERANK_RUNTIME_ROLE,
+                        RerankRequest(
                             query,
-                            [passage for passage, _digest in passages_and_hashes],
-                            self.config,
-                        )
+                            tuple(
+                                passage
+                                for passage, _source, _digest in passages_and_hashes
+                            ),
+                            QUERY_SOURCE,
+                            timeout_ms=self.config.service.timeout_ms,
+                            candidate_sources=tuple(
+                                source
+                                for _passage, source, _digest in passages_and_hashes
+                            ),
+                        ),
+                    )
         finally:
             self._slots.release()
-        if len(scores) != len(page_ids):
-            raise RuntimeError("reranker returned incomplete score vector")
+        raw_scores = {
+            item.index: float(item.score)
+            for item in result.items
+        }
         elapsed_ms = (time.perf_counter() - started) * 1_000
         self._latencies.append(elapsed_ms)
         self._requests += 1
@@ -197,12 +259,20 @@ class RerankerServiceState:
                     "raw_score": float(score),
                     "content_sha256": digest,
                 }
-                for page_id, score, (_passage, digest) in zip(
-                    page_ids, scores, passages_and_hashes, strict=True
+                for page_id, score, (_passage, _source, digest) in zip(
+                    page_ids,
+                    (raw_scores[index] for index in range(len(page_ids))),
+                    passages_and_hashes,
+                    strict=True,
                 )
             ],
             "latency_ms": int(round(elapsed_ms)),
-            "revision": self.config.model,
+            "route": {
+                "role": self._route.role,
+                "provider": self._route.provider,
+                "model": self._route.model,
+                "location": self._route.location.value,
+            },
         }
 
     def handle(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -210,9 +280,15 @@ class RerankerServiceState:
         if method == "health":
             return {"status": "ok", **self._status_payload()}
         if method == "warm":
-            self._warm = warm_reranker(self.config)
+            self._warm = self._warm_route()
             self._publish_status()
-            return {"status": "ok", "warmup": self._warm}
+            if self._warm.get("status") == "ready":
+                return {"status": "ok", "warmup": self._warm}
+            return {
+                "status": "unavailable",
+                "error": _safe_category(self._warm.get("reason")),
+                "warmup": self._warm,
+            }
         if method == "rerank":
             query = payload.get("query")
             page_ids = payload.get("page_ids")
@@ -239,7 +315,7 @@ class _Handler(socketserver.StreamRequestHandler):
             self.server.state.note_error(exc)  # type: ignore[attr-defined]
             response = {
                 "status": "error",
-                "error": f"{type(exc).__name__}: {exc}",
+                "error": _safe_service_error(exc),
             }
         with contextlib.suppress(OSError):
             self.wfile.write(
@@ -257,7 +333,7 @@ def serve(config: RerankerConfig | None = None) -> None:
         raise SystemExit(75)
     config = config or load_reranker_config()
     if not config.enabled:
-        raise SystemExit("BGE reranker is disabled in config")
+        raise SystemExit("reranker is disabled in config")
     socket_path = Path(config.service.socket).expanduser()
     socket_path.parent.mkdir(parents=True, exist_ok=True)
     socket_path.unlink(missing_ok=True)
@@ -281,13 +357,13 @@ def serve(config: RerankerConfig | None = None) -> None:
 def _read_status() -> dict[str, Any]:
     try:
         payload = json.loads(SERVICE_STATUS_FILE.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        return {"status": "unavailable", "error": str(exc)}
+    except (OSError, json.JSONDecodeError):
+        return {"status": "unavailable", "error": "service_unavailable"}
     return payload if isinstance(payload, dict) else {"status": "unavailable"}
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Chronovisor BGE reranker service")
+    parser = argparse.ArgumentParser(description="Chronovisor reranker service")
     parser.add_argument(
         "command", nargs="?", choices=("serve", "status", "health", "warm"), default="serve"
     )
@@ -322,7 +398,10 @@ def main(argv: list[str] | None = None) -> int:
                 else reranker_client.warm(config)
             )
         except Exception as exc:
-            payload = {"status": "unavailable", "error": str(exc)}
+            payload = {
+                "status": "unavailable",
+                "error": _safe_service_error(exc),
+            }
     if args.json:
         print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
     else:

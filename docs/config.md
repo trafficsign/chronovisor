@@ -235,14 +235,9 @@ max_age_days = 180
 max_entries = 500
 
 [search.reranker]
-# Optional model contract shared by MCP, eval, and the resident service.
+# Provider-independent rollout shared by MCP, eval, and the resident service.
 enabled = false
-backend = "transformers"
-model = "BAAI/bge-reranker-v2-m3"
 top_n = 10
-max_length = 384
-batch_size = 10
-device = "mps"
 weight = 1.0
 
 [search.reranker.service]
@@ -582,16 +577,18 @@ candidate/shadow. Only a valid promotion permits active Field authority.
 ## Optional Reranker
 
 Install the optional local reranker dependencies with `uv sync --extra reranker`
-before enabling `[search.reranker]`. The production profile enables the
-Hugging Face `BAAI/bge-reranker-v2-m3` cross-encoder for the first 10 MCP
-`chronovisor_search` candidates. The synchronous recall hook never calls the
-reranker.
+before enabling `[search.reranker]`. The fixed `search.rerank` LLM role is the
+only provider/model selector. For a local Transformers route, configure
+`backend`, `device`, `max_length`, and `batch_size` only on its
+`[llm.providers.<id>]` table. Legacy copies of those keys, or `model`, under
+`[search.reranker]` are accepted but ignored.
 
-The tuned local profile reranks only the first 10 fused candidates with a 384
-token passage ceiling and equal reciprocal-rank weight (`weight = 1.0`). Keep
-the feature disabled until a reviewed locked-holdout sample improves Recall/MRR
-without worsening negative-hit rate; the synchronous prompt hook is never part
-of this adoption.
+The default topology reranks only the first 10 fused candidates with equal
+reciprocal-rank weight (`weight = 1.0`). The resident service mode is a rollout
+choice, not a provider fallback: service failure preserves original order and
+reports degraded metadata. Remote routes classify the query as `raw/normal`
+and each candidate from canonical index metadata; raw queries, high-sensitivity
+pages, and system documents require explicit role/data-class egress opt-ins.
 
 ## Recall Defaults
 

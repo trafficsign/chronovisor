@@ -1616,10 +1616,7 @@ def chronovisor_tick() -> str:
 def main():
     """Run the ``chronovisor-mcp`` command-line entry point."""
     init_chronovisor()
-    # Importing torch, resolving the Hugging Face snapshot, and compiling the
-    # first MPS inference used to add ~15 s to the first interactive search.
-    # Warm it in parallel with the existing index startup work. reranker.py
-    # serializes a truly immediate search against the same model instance.
+    # Warm the fixed rerank route in parallel with existing index startup work.
     reranker_warmup = None
     try:
         from chronovisor.core.reranker import start_reranker_warmup

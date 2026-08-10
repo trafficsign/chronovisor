@@ -19,6 +19,21 @@ model = "bge-m3"
 [search.embedding]
 enabled = false
 
+[search.reranker]
+# Model/provider selection lives only in llm.roles."search.rerank".
+enabled = false
+top_n = 10
+weight = 1.0
+
+[search.reranker.service]
+enabled = false
+socket = "~/.chronovisor/runtime/reranker.sock"
+timeout_ms = 1000
+# off | shadow | canary | on
+mode = "off"
+canary_percent = 0
+queue_size = 8
+
 [ingest]
 # Numeric generation limits live here; the model is selected only by the
 # fixed llm.roles."ingest.generation" route below.
@@ -337,6 +352,19 @@ model = "gpt-oss:20b"
 #
 # [[llm.egress_opt_in]]
 # role = "search.semantic.incremental"
+# data_class = "system"
+#
+# Remote reranking validates the raw query and every candidate independently:
+# [[llm.egress_opt_in]]
+# role = "search.rerank"
+# data_class = "raw"
+#
+# [[llm.egress_opt_in]]
+# role = "search.rerank"
+# data_class = "page"
+#
+# [[llm.egress_opt_in]]
+# role = "search.rerank"
 # data_class = "system"
 #
 # Hybrid note: Anthropic/Claude, DeepSeek, Kimi, and Z.AI/GLM profiles currently

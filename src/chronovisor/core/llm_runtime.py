@@ -8,7 +8,7 @@ from collections.abc import Callable, Iterable, Mapping
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any, Protocol, TypeVar
+from typing import Any, NoReturn, Protocol, TypeVar
 
 from chronovisor.core.llm_security import MAX_REQUEST_TIMEOUT_MS
 
@@ -307,6 +307,7 @@ class RerankRequest:
     candidates: tuple[str, ...] = field(repr=False)
     source: SourceDataClassification
     timeout_ms: int | None = None
+    candidate_sources: tuple[SourceDataClassification, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -378,6 +379,14 @@ class ResolvedGenerationRoute:
 
 @dataclass(frozen=True)
 class ResolvedEmbeddingRoute:
+    role: str
+    provider: str
+    model: str
+    location: RouteLocation
+
+
+@dataclass(frozen=True)
+class ResolvedRerankRoute:
     role: str
     provider: str
     model: str
@@ -565,6 +574,14 @@ class LLMRuntime:
             location=route.backend.location,
             source=request.source,
         )
+        for source in request.candidate_sources or ():
+            self._preflight(
+                role=role,
+                capability="rerank",
+                provider=route.backend.provider,
+                location=route.backend.location,
+                source=source,
+            )
         result = self._invoke(
             lambda: route.backend.rerank(request, model=route.model),
             role=role,
@@ -579,6 +596,19 @@ class LLMRuntime:
             provider=route.backend.provider,
             location=location,
             request_id=_result_request_id(result),
+        )
+
+    def resolve_rerank(self, role: str) -> ResolvedRerankRoute:
+        """Return one immutable configured rerank route without invoking it."""
+
+        route = _resolve(self._rerank, role, "rerank")
+        if not isinstance(route.backend.location, RouteLocation):
+            raise RouteConfigurationError(role, "rerank")
+        return ResolvedRerankRoute(
+            role=role,
+            provider=route.backend.provider,
+            model=route.model,
+            location=route.backend.location,
         )
 
     def _local_control_for(self, role: str) -> LocalRuntimeControl | None:
@@ -631,25 +661,71 @@ class LLMRuntime:
             budgets = (("request", None, 0, False),)
         for field_name, value, maximum, optional in budgets:
             if not _valid_budget(value, maximum, optional=optional):
-                self._emit_failure(
-                    RequestValidationError.category,
-                    role=role,
-                    capability=capability,
-                    provider=provider,
-                    location=location if isinstance(location, RouteLocation) else None,
+                self._reject_request(
+                    role, capability, provider, location, field_name
                 )
-                raise RequestValidationError(role, capability, field_name)
+        if isinstance(request, RerankRequest):
+            if not isinstance(request.query, str) or not request.query.strip():
+                self._reject_request(role, capability, provider, location, "query")
+            if (
+                not isinstance(request.candidates, tuple)
+                or not request.candidates
+                or not all(
+                    isinstance(candidate, str) and candidate.strip()
+                    for candidate in request.candidates
+                )
+            ):
+                self._reject_request(
+                    role, capability, provider, location, "candidates"
+                )
+            sources = request.candidate_sources
+            if sources is None:
+                if location is not RouteLocation.LOCAL:
+                    self._reject_request(
+                        role,
+                        capability,
+                        provider,
+                        location,
+                        "candidate_sources",
+                    )
+            elif (
+                not isinstance(sources, tuple)
+                or len(sources) != len(request.candidates)
+                or not all(
+                    isinstance(source, SourceDataClassification)
+                    and isinstance(source.data_class, SourceDataClass)
+                    and isinstance(source.sensitivity, SourceSensitivity)
+                    for source in sources
+                )
+            ):
+                self._reject_request(
+                    role,
+                    capability,
+                    provider,
+                    location,
+                    "candidate_sources",
+                )
         if isinstance(request, EmbeddingRequest) and not isinstance(
             request.purpose, EmbeddingPurpose
         ):
-            self._emit_failure(
-                RequestValidationError.category,
-                role=role,
-                capability=capability,
-                provider=provider,
-                location=location if isinstance(location, RouteLocation) else None,
-            )
-            raise RequestValidationError(role, capability, "purpose")
+            self._reject_request(role, capability, provider, location, "purpose")
+
+    def _reject_request(
+        self,
+        role: str,
+        capability: str,
+        provider: str,
+        location: object,
+        field_name: str,
+    ) -> NoReturn:
+        self._emit_failure(
+            RequestValidationError.category,
+            role=role,
+            capability=capability,
+            provider=provider,
+            location=location if isinstance(location, RouteLocation) else None,
+        )
+        raise RequestValidationError(role, capability, field_name)
 
     def _preflight(
         self,

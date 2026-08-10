@@ -71,9 +71,14 @@ def rank_recall_candidates(
         return candidates, {
             "status": "unavailable",
             "mode": mode,
-            "reason": type(exc).__name__,
+            "reason": (
+                exc.category
+                if isinstance(exc, reranker_client.RerankerServiceUnavailable)
+                else "reranker_unavailable"
+            ),
             "latency_ms": int(round((time.perf_counter() - started) * 1_000)),
             "fail_open": True,
+            "degraded": True,
         }
     return outcome.results, {
         **outcome.metadata,
@@ -546,7 +551,10 @@ def select_certified_candidates(
     from chronovisor.recall.contextual_suppression import ranking_components
 
     suppression_components = ranking_components(query, candidates)
-    model_revision = str(metadata.get("model") or metadata.get("revision") or "")
+    route = metadata.get("route")
+    model_revision = (
+        str(route.get("model") or "") if isinstance(route, Mapping) else ""
+    )
     raw_scores = {
         str(row.get("page_id") or ""): {
             **row,
@@ -693,8 +701,13 @@ def shadow_rerank_candidates(
     except Exception as exc:
         return {
             "status": "unavailable",
-            "reason": type(exc).__name__,
+            "reason": (
+                exc.category
+                if isinstance(exc, reranker_client.RerankerServiceUnavailable)
+                else "reranker_unavailable"
+            ),
             "latency_ms": int(round((time.perf_counter() - started) * 1_000)),
+            "degraded": True,
         }
     after = [candidate.page_id for candidate in outcome.results[: config.top_n]]
     overlap = len(set(before[:5]) & set(after[:5]))

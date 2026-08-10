@@ -361,9 +361,99 @@ def test_remote_denial_covers_all_capabilities_without_fallback() -> None:
     with pytest.raises(EgressDeniedError):
         runtime.embed("search", EmbeddingRequest(("raw",), RAW_NORMAL))
     with pytest.raises(EgressDeniedError):
-        runtime.rerank("search", RerankRequest("q", ("raw",), RAW_NORMAL))
+        runtime.rerank(
+            "search",
+            RerankRequest(
+                "q",
+                ("raw",),
+                RAW_NORMAL,
+                candidate_sources=(NORMAL_PAGE,),
+            ),
+        )
 
     assert backend.calls == []
+
+
+def test_remote_rerank_requires_exact_candidate_sources_before_backend() -> None:
+    backend = CountingRemoteBackend()
+    events: list[RuntimeFailureTelemetry] = []
+    runtime = LLMRuntime(
+        rerank={"search.rerank": RerankRoute(backend, "reranker")},
+        remote_egress_opt_ins={("search.rerank", SourceDataClass.RAW)},
+        telemetry=events.append,
+    )
+
+    for candidate_sources in (None, (), (NORMAL_PAGE, NORMAL_PAGE)):
+        with pytest.raises(RequestValidationError) as exc:
+            runtime.rerank(
+                "search.rerank",
+                RerankRequest(
+                    "query",
+                    ("candidate",),
+                    RAW_NORMAL,
+                    candidate_sources=candidate_sources,
+                ),
+            )
+        assert exc.value.field_name == "candidate_sources"
+
+    assert backend.calls == []
+    assert [event.category for event in events] == ["request_invalid"] * 3
+
+
+def test_remote_rerank_preflights_query_and_every_candidate() -> None:
+    backend = CountingRemoteBackend()
+    runtime = LLMRuntime(
+        rerank={"search.rerank": RerankRoute(backend, "reranker")},
+        remote_egress_opt_ins={("search.rerank", SourceDataClass.RAW)},
+    )
+
+    with pytest.raises(EgressDeniedError):
+        runtime.rerank(
+            "search.rerank",
+            RerankRequest(
+                "query",
+                ("normal page", "high page"),
+                RAW_NORMAL,
+                candidate_sources=(NORMAL_PAGE, PAGE_HIGH),
+            ),
+        )
+
+    assert backend.calls == []
+
+
+def test_remote_rerank_explicit_opt_in_preserves_route_identity() -> None:
+    backend = CountingRemoteBackend()
+    runtime = LLMRuntime(
+        rerank={"search.rerank": RerankRoute(backend, "reranker")},
+        remote_egress_opt_ins={
+            ("search.rerank", SourceDataClass.RAW),
+            ("search.rerank", SourceDataClass.SYSTEM),
+        },
+    )
+
+    route = runtime.resolve_rerank("search.rerank")
+    result = runtime.rerank(
+        "search.rerank",
+        RerankRequest(
+            "query",
+            ("system",),
+            RAW_NORMAL,
+            candidate_sources=(
+                SourceDataClassification(
+                    SourceDataClass.SYSTEM, SourceSensitivity.HIGH
+                ),
+            ),
+        ),
+    )
+
+    assert (route.role, route.provider, route.model, route.location) == (
+        "search.rerank",
+        "fake",
+        "reranker",
+        RouteLocation.REMOTE,
+    )
+    assert result.model == "reranker"
+    assert backend.calls == ["rerank"]
 
 
 def test_invalid_route_location_fails_closed() -> None:
