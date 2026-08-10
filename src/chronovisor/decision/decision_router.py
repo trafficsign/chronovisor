@@ -1649,6 +1649,11 @@ class DecisionRouter:
             and route.provider == "ollama"
             and route.location == "local"
         )
+        if transport is not None and live_resource_control is True:
+            self._local_roles = self._all_local_roles
+        self._observed_roles = (
+            self._all_local_roles if model_observer is not None else self._local_roles
+        )
         self._local_models = tuple(
             dict.fromkeys(
                 self.routes[role].model
@@ -2360,7 +2365,7 @@ class DecisionRouter:
     def _observe_vote(self, vote: DecisionVote) -> DecisionVote:
         """Attach live runner facts without making observation decision-critical."""
 
-        if not self.observe_runtime or vote.role not in self._local_roles:
+        if not self.observe_runtime or vote.role not in self._observed_roles:
             return replace(vote, runtime_observation_status="not_requested")
         try:
             observed = self.model_observer(vote.model)
