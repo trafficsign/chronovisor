@@ -193,6 +193,23 @@ def test_generic_profile_uses_same_data_contract_and_model_scoped_structured() -
 
 
 @pytest.mark.parametrize(
+    "endpoint",
+    [
+        "https://localhost/v1",
+        "https://127.0.0.1/v1",
+        "https://10.0.0.1/v1",
+        "https://169.254.169.254/v1",
+        "https://[ff00::1]/v1",
+    ],
+)
+def test_generic_profile_rejects_ssrf_targets_before_any_request(endpoint: str) -> None:
+    with pytest.raises(ProviderAdapterError) as exc:
+        generic_openai_profile("private-gateway", endpoint, CREDENTIAL_REF)
+
+    assert exc.value.category is ProviderFailureCategory.PROFILE_INVALID
+
+
+@pytest.mark.parametrize(
     "profile_id",
     [
         "openai",

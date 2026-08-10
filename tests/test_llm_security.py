@@ -338,6 +338,39 @@ def test_endpoint_policy_canonicalizes_origin_and_limits_plain_http() -> None:
     assert local.is_loopback
 
 
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "https://localhost/v1",
+        "https://api.localhost/v1",
+        "https://0.0.0.0/v1",
+        "https://127.0.0.1/v1",
+        "https://10.0.0.1/v1",
+        "https://169.254.169.254/v1",
+        "https://224.0.0.1/v1",
+        "https://240.0.0.1/v1",
+        "https://[::]/v1",
+        "https://[::1]/v1",
+        "https://[fc00::1]/v1",
+        "https://[fe80::1]/v1",
+        "https://[ff00::1]/v1",
+    ],
+)
+def test_cloud_endpoint_policy_rejects_local_and_special_ip_literals(
+    endpoint: str,
+) -> None:
+    with pytest.raises(CredentialSecurityError) as exc:
+        canonical_endpoint(endpoint, cloud_secret=True)
+
+    assert exc.value.category is CredentialFailureCategory.ENDPOINT_REJECTED
+
+
+def test_local_loopback_endpoint_remains_available_without_cloud_secret() -> None:
+    endpoint = canonical_endpoint("http://127.0.0.1:11434/api", cloud_secret=False)
+
+    assert endpoint.origin == "http://127.0.0.1:11434"
+
+
 class RecordingSender:
     def __init__(self, *, failure: Exception | None = None) -> None:
         self.calls: list[tuple[Request, bool, float]] = []

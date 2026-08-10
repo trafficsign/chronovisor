@@ -499,6 +499,27 @@ def _canonical_host(host: str) -> tuple[str, bool]:
     return canonical, address.is_loopback
 
 
+def _forbidden_cloud_host(host: str) -> bool:
+    """Reject local and special-use literal targets for credentialed endpoints."""
+
+    if host == "localhost" or host.endswith(".localhost"):
+        return True
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return any(
+        (
+            address.is_unspecified,
+            address.is_loopback,
+            address.is_private,
+            address.is_link_local,
+            address.is_multicast,
+            address.is_reserved,
+        )
+    )
+
+
 def _has_credential_query(query: str) -> bool:
     for key, _value in parse_qsl(query, keep_blank_values=True):
         normalized = re.sub(r"[^a-z0-9]", "", key.lower())
@@ -539,6 +560,8 @@ def canonical_endpoint(value: str, *, cloud_secret: bool) -> CanonicalEndpoint:
     ):
         raise _error(CredentialFailureCategory.ENDPOINT_REJECTED)
     host, is_loopback = _canonical_host(parsed.hostname)
+    if cloud_secret and _forbidden_cloud_host(host):
+        raise _error(CredentialFailureCategory.ENDPOINT_REJECTED)
     if scheme == "http" and (not is_loopback or cloud_secret):
         raise _error(CredentialFailureCategory.ENDPOINT_REJECTED)
     default_port = 443 if scheme == "https" else 80
