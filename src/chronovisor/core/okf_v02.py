@@ -46,7 +46,7 @@ def validate_concept(
     if not isinstance(concept_type, str) or not concept_type.strip():
         issues.append(ConformanceIssue("error", "type_required", path, "type"))
     status = metadata.get("status")
-    if status is not None and (
+    if "status" in metadata and (
         not isinstance(status, str) or status not in VALID_STATUSES
     ):
         issues.append(ConformanceIssue("error", "status_invalid", path, "status"))
@@ -55,6 +55,17 @@ def validate_concept(
         for field in RECOMMENDED_FIELDS
         if not _non_empty(metadata.get(field))
     )
+    return tuple(issues)
+
+
+def validate_production_concept(
+    metadata: Mapping[str, Any], *, path: str = ""
+) -> tuple[ConformanceIssue, ...]:
+    """Apply Chronovisor's stricter writer contract to one OKF concept."""
+
+    issues = list(validate_concept(metadata, path=path))
+    if "status" not in metadata:
+        issues.append(ConformanceIssue("error", "status_required", path, "status"))
     return tuple(issues)
 
 

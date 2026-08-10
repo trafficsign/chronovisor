@@ -7,14 +7,19 @@ import pytest
 from chronovisor.core.canonical_document import (
     CanonicalDocument,
     CanonicalDocumentError,
+    ResolvedMarkdownLink,
     extract_markdown_links,
     parse_document,
+    patch_document_metadata,
+    resolve_internal_markdown_link,
+    resolve_internal_markdown_links,
     serialize_document,
 )
 from chronovisor.core.okf_v02 import (
     scan_concept_paths,
     validate_concept,
     validate_pages_bundle,
+    validate_production_concept,
 )
 
 FIXTURE_ROOT = Path(__file__).parent / "fixtures" / "okf_v02"
@@ -94,6 +99,128 @@ def test_serializer_never_rewrites_supplied_body_bytes() -> None:
         CanonicalDocument(metadata={"type": "Concept"}, body=body)
     )
     assert parse_document(rendered).body == body
+
+
+def test_metadata_patch_adds_updates_and_deletes_without_touching_body() -> None:
+    source = (FIXTURE_ROOT / "pages" / "topics" / "nested.md").read_bytes()
+    original = parse_document(source)
+
+    patched = parse_document(
+        patch_document_metadata(
+            source,
+            {
+                "status": "deprecated",
+                "new_extension": {"nested": [True, None]},
+            },
+            delete=("description",),
+        )
+    )
+
+    assert patched.metadata["status"] == "deprecated"
+    assert "description" not in patched.metadata
+    assert patched.metadata["new_extension"] == {"nested": [True, None]}
+    assert patched.metadata["chronovisor_extension"] == original.metadata[
+        "chronovisor_extension"
+    ]
+    assert patched.body == original.body
+
+    with pytest.raises(CanonicalDocumentError, match="update and delete"):
+        patch_document_metadata(
+            source,
+            {"status": "stable"},
+            delete=("status",),
+        )
+
+
+def test_production_concept_requires_explicit_canonical_status() -> None:
+    assert not [
+        issue
+        for issue in validate_production_concept(
+            {"type": "Concept", "status": "stable"}
+        )
+        if issue.severity == "error"
+    ]
+    assert {
+        issue.code
+        for issue in validate_production_concept({"type": "Concept"})
+        if issue.severity == "error"
+    } == {"status_required"}
+    assert {
+        issue.code
+        for issue in validate_production_concept(
+            {"type": "", "status": "active"}
+        )
+        if issue.severity == "error"
+    } == {"type_required", "status_invalid"}
+    assert {
+        issue.code
+        for issue in validate_production_concept(
+            {"type": "Concept", "status": None}
+        )
+        if issue.severity == "error"
+    } == {"status_invalid"}
+
+
+def test_link_extraction_owns_frontmatter_and_code_protection() -> None:
+    markdown = """---
+reference: "[Frontmatter](ignored-frontmatter.md)"
+---
+[Prose](kept.md)
+`[Inline](ignored-inline.md)`
+
+~~~markdown
+[Fence](ignored-fence.md)
+~~~
+
+![Image](ignored-image.png)
+"""
+
+    assert extract_markdown_links(markdown) == ("kept.md",)
+
+
+def test_internal_link_resolution_is_namespace_aware_and_pure() -> None:
+    body = """[Index](../index.md#Bundle)
+[Root](/guide.md)
+[External](https://example.test/page.md)
+[Mail](mailto:owner@example.test)
+[Same](source.md#here)
+[Fragment](#here)
+"""
+
+    assert resolve_internal_markdown_links(
+        body,
+        source_namespace="pages",
+        source_path="topics/source.md",
+    ) == (
+        ResolvedMarkdownLink("pages", "index.md", "Bundle"),
+        ResolvedMarkdownLink("pages", "guide.md"),
+    )
+    assert resolve_internal_markdown_links(
+        "[Page](../pages/topics/topic.md#Part) [Schema](/schema.md)",
+        source_namespace="system",
+        source_path="state.md",
+    ) == (
+        ResolvedMarkdownLink("pages", "topics/topic.md", "Part"),
+        ResolvedMarkdownLink("system", "schema.md"),
+    )
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        "../escape.md",
+        "%2e%2e/escape.md",
+        "%252e%252e/escape.md",
+        "/system/private.md",
+    ],
+)
+def test_pages_link_resolution_fails_closed_at_boundaries(target: str) -> None:
+    with pytest.raises(CanonicalDocumentError, match="escapes|crosses"):
+        resolve_internal_markdown_link(
+            target,
+            source_namespace="pages",
+            source_path="source.md",
+        )
 
 
 def test_duplicate_yaml_keys_fail_closed() -> None:
