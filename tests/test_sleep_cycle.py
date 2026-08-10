@@ -108,16 +108,21 @@ def test_run_lane_interrupts_at_lane_runtime_budget(
         tmp_path / "sleep-cycle-active-lane.json",
     )
 
+    completed = False
+
+    def slow_lane() -> None:
+        nonlocal completed
+        sleep_cycle.time.sleep(0.2)
+        completed = True
+
     payload = sleep_cycle._run_lane(
-        "slow",
-        lambda: sleep_cycle.time.sleep(0.2),
-        max_elapsed_seconds=0.02,
+        "slow", slow_lane, max_elapsed_seconds=0.02
     )
 
     assert payload["status"] == "budget_deferred"
     assert payload["lane"] == "slow"
     assert payload["reason"] == "lane runtime budget exhausted"
-    assert payload["elapsed_ms"] < 150
+    assert completed is False
     active = json.loads(sleep_cycle.ACTIVE_LANE_FILE.read_text(encoding="utf-8"))
     assert active["lane"] == "slow"
     assert active["status"] == "budget_deferred"

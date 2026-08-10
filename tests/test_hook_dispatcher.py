@@ -26,6 +26,7 @@ def isolate_recall_breaker(monkeypatch, tmp_path: Path) -> None:
         "okf_startup_status",
         lambda _root: SimpleNamespace(allowed=True),
     )
+    monkeypatch.setattr(hook_dispatcher, "init_chronovisor", lambda: None)
 
 
 def _isolate_background_jobs(monkeypatch, tmp_path: Path) -> None:
