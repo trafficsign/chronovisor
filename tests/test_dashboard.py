@@ -2798,7 +2798,7 @@ def test_cached_snapshot_rebuilds_after_a_source_changes_during_build(
     assert calls == 2
 
 
-def test_cached_snapshot_ignores_local_consensus_live_file_churn(
+def test_cached_snapshot_ignores_consensus_live_churn_but_tracks_audit(
     tmp_path: Path, monkeypatch
 ) -> None:
     _reset_snapshot_fingerprint_cache()
@@ -2851,8 +2851,6 @@ def test_cached_snapshot_ignores_local_consensus_live_file_churn(
     summary_temporary = consensus_dir / ".summary.tmp"
     summary_temporary.write_text('{"revision": 2}\n', encoding="utf-8")
     os.replace(summary_temporary, summary)
-    with audit.open("a", encoding="utf-8") as handle:
-        handle.write('{"revision": 2}\n')
     with trace.open("a", encoding="utf-8") as handle:
         handle.write('{"revision": 2}\n')
 
@@ -2861,19 +2859,14 @@ def test_cached_snapshot_ignores_local_consensus_live_file_churn(
     assert after_create == before
     assert dashboard._cached_snapshot()["serial"] == 1
 
-    marker.unlink()
-    summary_temporary.write_text('{"revision": 3}\n', encoding="utf-8")
-    os.replace(summary_temporary, summary)
     with audit.open("a", encoding="utf-8") as handle:
-        handle.write('{"revision": 3}\n')
-    with trace.open("a", encoding="utf-8") as handle:
-        handle.write('{"revision": 3}\n')
+        handle.write('{"revision": 2}\n')
 
     dashboard._invalidate_snapshot_fingerprint_probe()
-    after_remove = dashboard._build_snapshot_source_fingerprint()
-    assert after_remove == before
-    assert dashboard._cached_snapshot()["serial"] == 1
-    assert calls == 1
+    after_audit = dashboard._build_snapshot_source_fingerprint()
+    assert after_audit != before
+    assert dashboard._cached_snapshot()["serial"] == 2
+    assert calls == 2
 
 
 def test_build_snapshot_surfaces_frontier_human_required(
@@ -3055,6 +3048,26 @@ def test_runtime_failure_snapshot_is_safe_exact_deterministic_and_bounded(
             "timestamp": "2026-08-10T10:02:00+09:00",
             "configured_model": "writer-b",
         },
+        {
+            "kind": "runtime_failure",
+            "category": "backend_error",
+            "role": "invalid.timestamp",
+            "capability": "generation",
+            "provider": "fake",
+            "location": "local",
+            "retry_count": 0,
+            "timestamp": "not-a-timestamp",
+        },
+        {
+            "kind": "runtime_failure",
+            "category": "backend_error",
+            "role": "naive.timestamp",
+            "capability": "generation",
+            "provider": "fake",
+            "location": "local",
+            "retry_count": 0,
+            "timestamp": "2026-08-10T20:00:00",
+        },
         *[
             {
                 "kind": "runtime_failure",
@@ -3069,21 +3082,175 @@ def test_runtime_failure_snapshot_is_safe_exact_deterministic_and_bounded(
         ],
     ]
 
-    snapshot = dashboard._runtime_failure_snapshot(events)
+    snapshot = dashboard._runtime_failure_snapshot(events, decision_rows=[])
     serialized = json.dumps(snapshot, ensure_ascii=False)
 
     assert len(snapshot["runtime_failures"]) == 64
-    assert snapshot["runtime_failures"][0]["role"] == "role.069"
-    assert snapshot["last_failure"]["role"] == "role.069"
+    assert snapshot["runtime_failures"][0]["role"] == "review"
+    assert snapshot["last_failure"]["role"] == "review"
+    assert snapshot["last_failure"]["category"] == "timeout"
     assert canary not in serialized
 
-    focused = dashboard._runtime_failure_snapshot(events[:4])
+    focused = dashboard._runtime_failure_snapshot(events[:4], decision_rows=[])
     assert focused["runtime_failures"] == [focused["last_failure"]]
     assert focused["last_failure"]["configured_model"] == "writer-a"
     assert focused["last_failure"]["category"] == "timeout"
-    assert dashboard._runtime_failure_snapshot(events[:3])["last_failure"][
-        "request_id"
-    ] == "req_safe_2"
+    assert (
+        dashboard._runtime_failure_snapshot(events[:3], decision_rows=[])[
+            "last_failure"
+        ]["request_id"]
+        == "req_safe_2"
+    )
+
+
+def test_runtime_failure_projects_invalid_votes_safely_by_timestamp_and_bounds(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    chronovisor_root = tmp_path / "wiki"
+    audit_file = chronovisor_root / "runtime" / "local-consensus" / "audit.jsonl"
+    audit_file.parent.mkdir(parents=True)
+    monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", chronovisor_root)
+    roles = {
+        role: SimpleNamespace(
+            provider_id="configured-provider",
+            model=f"configured-{role.rsplit('.', 1)[-1]}",
+            capability="generation",
+        )
+        for role in (
+            "classification.primary",
+            "classification.challenger",
+            "classification.tie_break",
+            "runtime.role",
+        )
+    }
+    monkeypatch.setattr(
+        dashboard.llm_config,
+        "load_llm_config",
+        lambda: SimpleNamespace(
+            providers={
+                "configured-provider": SimpleNamespace(
+                    kind="openai",
+                    profile=SimpleNamespace(profile_id="fake"),
+                )
+            },
+            roles=roles,
+        ),
+    )
+    canary = "W7-CANARY?credential=secret prompt session"
+
+    def decision(
+        timestamp: str,
+        role: str,
+        *,
+        provider: str = "fake",
+        reason: str = "returned_model_mismatch",
+    ) -> dict[str, object]:
+        return {
+            "kind": "decision",
+            "timestamp": timestamp,
+            "prompt": canary,
+            "error": canary,
+            "content": canary,
+            "votes": [
+                {
+                    "valid": False,
+                    "role": role.rsplit(".", 1)[-1],
+                    "invalid_reason": reason,
+                    "model": canary,
+                    "returned_model": canary,
+                    "credential": canary,
+                    "session": {"error": canary, "request_id": canary},
+                    "route_provenance": {
+                        "role": role,
+                        "provider": provider,
+                        "location": "remote",
+                        "model": canary,
+                        "revision": canary,
+                    },
+                }
+            ],
+        }
+
+    audit_file.write_text(
+        "\n".join(
+            json.dumps(row)
+            for row in (
+                decision(
+                    "2026-08-10T10:05:00+09:00",
+                    "classification.challenger",
+                    reason="egress_denied",
+                ),
+                decision(
+                    "2026-08-10T10:00:00+09:00",
+                    "classification.primary",
+                ),
+                decision(
+                    "2026-08-10T10:02:00+09:00",
+                    "classification.tie_break",
+                    provider="drifted-provider",
+                ),
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    snapshot = dashboard._runtime_failure_snapshot(
+        [
+            {
+                "kind": "runtime_failure",
+                "category": "http_429",
+                "role": "runtime.role",
+                "capability": "generation",
+                "provider": "fake",
+                "location": "remote",
+                "retry_count": 1,
+                "timestamp": "2026-08-10T10:03:00+09:00",
+                "request_id": "req-safe",
+            }
+        ]
+    )
+    failures = snapshot["runtime_failures"]
+    by_role = {row["role"]: row for row in failures}
+
+    assert [row["role"] for row in failures] == [
+        "classification.challenger",
+        "runtime.role",
+        "classification.tie_break",
+        "classification.primary",
+    ]
+    assert snapshot["last_failure"] == failures[0]
+    assert by_role["classification.challenger"]["category"] == "egress_denied"
+    assert by_role["classification.primary"]["category"] == "vote_invalid"
+    assert by_role["classification.primary"]["configured_model"] == (
+        "configured-primary"
+    )
+    assert "configured_model" not in by_role["classification.tie_break"]
+    for role in (
+        "classification.primary",
+        "classification.challenger",
+        "classification.tie_break",
+    ):
+        assert by_role[role]["capability"] == "generation"
+        assert by_role[role]["retry_count"] == 0
+        assert "request_id" not in by_role[role]
+    assert canary not in json.dumps(snapshot, ensure_ascii=False)
+
+    valid = decision(
+        "2026-08-10T11:00:00+09:00",
+        "classification.primary",
+    )
+    valid["votes"][0]["valid"] = True
+    unknown = decision(
+        "2026-08-10T11:01:00+09:00",
+        "classification.unknown",
+    )
+    mismatched = decision(
+        "2026-08-10T11:02:00+09:00",
+        "classification.primary",
+    )
+    mismatched["votes"][0]["role"] = "challenger"
+    assert dashboard._decision_vote_failure_events([valid, unknown, mismatched]) == []
 
 
 @pytest.mark.parametrize(
@@ -3126,10 +3293,10 @@ def test_runtime_failure_joins_exact_configured_backend_provider(
     }
 
     joined = dashboard._runtime_failure_snapshot(
-        [{**base, "provider": event_provider}]
+        [{**base, "provider": event_provider}], decision_rows=[]
     )["last_failure"]
     drifted = dashboard._runtime_failure_snapshot(
-        [{**base, "provider": "other-provider"}]
+        [{**base, "provider": "other-provider"}], decision_rows=[]
     )["last_failure"]
     wrong_location = dashboard._runtime_failure_snapshot(
         [
@@ -3138,7 +3305,8 @@ def test_runtime_failure_joins_exact_configured_backend_provider(
                 "provider": event_provider,
                 "location": "remote" if base["location"] == "local" else "local",
             }
-        ]
+        ],
+        decision_rows=[],
     )["last_failure"]
 
     assert joined["configured_model"] == "configured-model"
@@ -3214,6 +3382,34 @@ def test_runtime_failure_invalidates_model_cache_and_overlays_stale_snapshot(
     assert overlaid["last_failure"]["category"] == "http_429"
     assert overlaid["last_failure"]["configured_model"] == "writer"
     assert overlaid["runtime_failures"] == [overlaid["last_failure"]]
+
+
+def test_decision_audit_invalidates_model_and_snapshot_fingerprints(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    chronovisor_root = tmp_path / "wiki"
+    runtime_dir = chronovisor_root / "runtime"
+    audit_file = runtime_dir / "local-consensus" / "audit.jsonl"
+    audit_file.parent.mkdir(parents=True)
+    monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", chronovisor_root)
+    monkeypatch.setattr(dashboard, "LOG_FILE", chronovisor_root / "log.md")
+    monkeypatch.setattr(
+        orchestrator, "STATE_FILE", chronovisor_root / ".orchestrator_state.json"
+    )
+    monkeypatch.setattr(runtime_status, "STATUS_FILE", runtime_dir / "status.json")
+    monkeypatch.setattr(runtime_status, "EVENTS_FILE", runtime_dir / "events.jsonl")
+    monkeypatch.setattr(runtime_status, "METRICS_FILE", runtime_dir / "metrics.jsonl")
+
+    model_before = dashboard._model_status_materialization_fingerprint({"models": []})
+    snapshot_before = dashboard._build_snapshot_source_fingerprint()
+    audit_file.write_text('{"kind":"decision"}\n', encoding="utf-8")
+
+    assert (
+        dashboard._model_status_materialization_fingerprint({"models": []})
+        != model_before
+    )
+    assert dashboard._build_snapshot_source_fingerprint() != snapshot_before
 
 
 def test_model_fleet_runtime_failure_renderer_uses_text_only() -> None:
@@ -3349,7 +3545,18 @@ def test_model_status_snapshot_combines_ollama_and_config(monkeypatch) -> None:
             rewrite_enabled=True,
         ),
     )
-    monkeypatch.setattr(dashboard, "embedding_model", lambda: "bge-m3")
+    monkeypatch.setattr(
+        dashboard.llm_config,
+        "load_default_llm_runtime",
+        lambda: SimpleNamespace(
+            resolve_embedding=lambda role: SimpleNamespace(
+                role=role,
+                provider="ollama",
+                model="bge-m3",
+                location=SimpleNamespace(value="local"),
+            )
+        ),
+    )
     monkeypatch.setattr(
         dashboard,
         "load_reranker_config",
@@ -3418,7 +3625,26 @@ def test_configured_model_roles_use_runtime_router_triplet(monkeypatch) -> None:
         )
 
     monkeypatch.setattr(dashboard, "runtime_generation_routes", configured_routes)
-    monkeypatch.setattr(dashboard, "embedding_model", lambda: "")
+    monkeypatch.setattr(
+        ollama,
+        "embedding_model",
+        lambda: (_ for _ in ()).throw(AssertionError("legacy selector used")),
+    )
+    resolved: list[str] = []
+    monkeypatch.setattr(
+        dashboard.llm_config,
+        "load_default_llm_runtime",
+        lambda: SimpleNamespace(
+            resolve_embedding=lambda role: (
+                resolved.append(role)
+                or SimpleNamespace(
+                    provider="ollama",
+                    model="route-selected-knowledge",
+                    location=SimpleNamespace(value="local"),
+                )
+            )
+        ),
+    )
     monkeypatch.setattr(
         dashboard,
         "load_reranker_config",
@@ -3431,9 +3657,12 @@ def test_configured_model_roles_use_runtime_router_triplet(monkeypatch) -> None:
         "route-primary",
         "route-challenger",
         "route-tie",
+        "route-selected-knowledge",
     }
+    assert roles["route-selected-knowledge"] == {"embed"}
+    assert resolved == ["knowledge.embedding"]
 
-    resolved: list[str] = []
+    resolved.clear()
     monkeypatch.setattr(
         dashboard,
         "load_search_embedding_config",
@@ -3447,7 +3676,11 @@ def test_configured_model_roles_use_runtime_router_triplet(monkeypatch) -> None:
                 resolved.append(role)
                 or SimpleNamespace(
                     provider="ollama",
-                    model="route-selected-embedding",
+                    model=(
+                        "route-selected-knowledge"
+                        if role == "knowledge.embedding"
+                        else "route-selected-embedding"
+                    ),
                     location=SimpleNamespace(value="local"),
                 )
             )
@@ -3457,6 +3690,7 @@ def test_configured_model_roles_use_runtime_router_triplet(monkeypatch) -> None:
     roles = dashboard._configured_model_roles()
 
     assert resolved == [
+        "knowledge.embedding",
         "search.semantic.foreground",
         "search.semantic.incremental",
     ]
@@ -3471,10 +3705,17 @@ def test_configured_model_roles_use_runtime_router_triplet(monkeypatch) -> None:
         dashboard.llm_config,
         "load_default_llm_runtime",
         lambda: SimpleNamespace(
-            resolve_embedding=lambda _role: SimpleNamespace(
-                provider="ollama",
-                model="route-selected-embedding",
-                location=SimpleNamespace(value="local"),
+            resolve_embedding=lambda role: (
+                resolved.append(role)
+                or SimpleNamespace(
+                    provider="ollama",
+                    model=(
+                        "route-selected-knowledge"
+                        if role == "knowledge.embedding"
+                        else "route-selected-embedding"
+                    ),
+                    location=SimpleNamespace(value="local"),
+                )
             ),
             resolve_rerank=lambda role: (
                 resolved.append(role)
@@ -3520,7 +3761,6 @@ def test_dashboard_omits_remote_and_non_ollama_generation_routes(
             for index, role in enumerate(roles)
         ),
     )
-    monkeypatch.setattr(dashboard, "embedding_model", lambda: "")
     monkeypatch.setattr(
         dashboard,
         "load_search_embedding_config",

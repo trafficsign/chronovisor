@@ -121,7 +121,9 @@ the active ingest stage (`Raw -> Triage -> Generate -> Apply -> Index`), the
 current raw/job if one is running, and the last completed raw while idle. `Model
 Fleet` combines configured roles with Ollama installed/loaded state, so unused
 local models should not appear once they are removed from config and from the
-local model store. Local review activity is labeled as local consensus, with
+local model store. Only exact local Ollama routes are listed; remote and other
+local providers are not presented as Ollama fleet members. Local review
+activity is labeled as local consensus, with
 bounded completion counts for first-pass validity, repaired responses, repair
 turns, pair agreement, tie-break use, and unresolved quarantine. Save Load and
 Batch Yield render artifact-bound ingest semantic defers separately from
@@ -622,7 +624,7 @@ failures do not use semantic defer and continue through the separate bounded
 repair queue.
 
 Changing the `ingest.generation` route model does not require a semantic reindex unless
-`[embedding].model` also changes.
+the `llm.roles."knowledge.embedding"` route identity also changes.
 
 Before generation, ingest now runs a conservative search-before-create gate.
 High-confidence duplicate `create` ops are rewritten to `update` ops when an

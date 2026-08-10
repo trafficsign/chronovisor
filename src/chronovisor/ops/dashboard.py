@@ -25,7 +25,6 @@ import httpx
 from chronovisor.core import index_store, llm_config, runtime_status
 from chronovisor.core.ollama import (
     OLLAMA_URL,
-    embedding_model,
     ingest_model,
     runtime_generation_routes,
 )
@@ -499,8 +498,17 @@ def _configured_model_roles() -> dict[str, set[str]]:
     except Exception:
         pass
 
-    with contextlib.suppress(Exception):
-        _add_model_role(roles, embedding_model(), "embed")
+    try:
+        embedding_route = llm_config.load_default_llm_runtime().resolve_embedding(
+            "knowledge.embedding"
+        )
+        if (
+            embedding_route.provider == "ollama"
+            and embedding_route.location.value == "local"
+        ):
+            _add_model_role(roles, embedding_route.model, "embed")
+    except Exception:
+        pass
 
     try:
         search_embedding = load_search_embedding_config()
@@ -592,16 +600,86 @@ def _configured_runtime_backend(provider: Any) -> tuple[str, str] | None:
     }.get(kind)
 
 
+def _failure_timestamp(value: object) -> tuple[float | None, str | None]:
+    if not isinstance(value, str):
+        return None, None
+    try:
+        timestamp = datetime.fromisoformat(value)
+        if timestamp.tzinfo is None or timestamp.utcoffset() is None:
+            return None, None
+        return timestamp.timestamp(), timestamp.isoformat(timespec="seconds")
+    except (OSError, OverflowError, ValueError):
+        return None, None
+
+
+def _decision_vote_failure_events(
+    rows: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    if rows is None:
+        rows = _read_jsonl_file(
+            CHRONOVISOR_ROOT / "runtime" / "local-consensus" / "audit.jsonl",
+            limit=runtime_status.MAX_EVENTS,
+        )
+    events: list[dict[str, Any]] = []
+    expected_roles = dict(
+        zip(
+            DECISION_RUNTIME_ROLES,
+            ("primary", "challenger", "tie_break"),
+            strict=True,
+        )
+    )
+    for row in rows:
+        votes = row.get("votes")
+        if (
+            row.get("kind") != "decision"
+            or _failure_timestamp(row.get("timestamp"))[0] is None
+            or not isinstance(votes, list)
+        ):
+            continue
+        for vote in votes:
+            provenance = (
+                vote.get("route_provenance") if isinstance(vote, dict) else None
+            )
+            if (
+                not isinstance(vote, dict)
+                or vote.get("valid") is not False
+                or not isinstance(provenance, dict)
+                or provenance.get("role") not in expected_roles
+                or vote.get("role") != expected_roles.get(provenance.get("role"))
+            ):
+                continue
+            events.append(
+                {
+                    "kind": "runtime_failure",
+                    "category": (
+                        "egress_denied"
+                        if vote.get("invalid_reason") == "egress_denied"
+                        else "vote_invalid"
+                    ),
+                    "role": provenance.get("role"),
+                    "capability": "generation",
+                    "provider": provenance.get("provider"),
+                    "location": provenance.get("location"),
+                    "retry_count": 0,
+                    "timestamp": row["timestamp"],
+                }
+            )
+    return events
+
+
 def _runtime_failure_snapshot(
     events: list[dict[str, Any]] | None = None,
+    *,
+    decision_rows: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     if events is None:
         events = runtime_status.read_events(limit=runtime_status.MAX_EVENTS)
 
     configured_config: Any = None
-    latest: dict[tuple[str, str], tuple[int, dict[str, Any]]] = {}
-    last_failure: tuple[int, dict[str, Any]] | None = None
-    for index, raw in enumerate(events):
+    latest: dict[tuple[str, str], tuple[tuple[float, int], dict[str, Any]]] = {}
+    last_failure: tuple[tuple[float, int], dict[str, Any]] | None = None
+    merged_events = [*events, *_decision_vote_failure_events(decision_rows)]
+    for index, raw in enumerate(merged_events):
         if not isinstance(raw, dict) or raw.get("kind") != "runtime_failure":
             continue
         request_id = llm_config.safe_metadata_identifier(raw.get("request_id"))
@@ -626,12 +704,9 @@ def _runtime_failure_snapshot(
             "location": event.location,
             "retry_count": event.retry_count,
         }
-        try:
-            timestamp = datetime.fromisoformat(raw["timestamp"])
-        except (KeyError, TypeError, ValueError):
-            pass
-        else:
-            row["timestamp"] = timestamp.isoformat(timespec="seconds")
+        timestamp_epoch, timestamp = _failure_timestamp(raw.get("timestamp"))
+        if timestamp is not None:
+            row["timestamp"] = timestamp
         if event.request_id is not None:
             row["request_id"] = event.request_id
 
@@ -659,16 +734,20 @@ def _runtime_failure_snapshot(
         if configured_model is not None:
             row["configured_model"] = configured_model
 
+        order = (timestamp_epoch if timestamp_epoch is not None else -math.inf, index)
         key = (event.role, configured_model or "")
-        latest[key] = (index, row)
-        last_failure = (index, row)
+        if key not in latest or order > latest[key][0]:
+            latest[key] = (order, row)
+        if last_failure is None or order > last_failure[0]:
+            last_failure = (order, row)
 
     rows = [
         row
-        for _index, row in sorted(
+        for _order, row in sorted(
             latest.values(),
             key=lambda item: (
-                -item[0],
+                -item[0][0],
+                -item[0][1],
                 str(item[1]["role"]),
                 str(item[1].get("configured_model") or ""),
             ),
@@ -4315,6 +4394,7 @@ def _model_status_materialization_fingerprint(ollama: dict[str, Any]) -> str:
         CHRONOVISOR_ROOT / "config.toml",
         CHRONOVISOR_ROOT / "runtime" / "model-lab" / "active-policy.json",
         CHRONOVISOR_ROOT / "runtime" / "model-lab" / "state.json",
+        CHRONOVISOR_ROOT / "runtime" / "local-consensus" / "audit.jsonl",
         runtime_status.STATUS_FILE,
         runtime_status.EVENTS_FILE,
     ]
@@ -4670,9 +4750,8 @@ def _snapshot_fixed_source_paths() -> tuple[Path, ...]:
     # Directory identities are the immediate coarse signal. Append/in-place
     # cold inputs that do not move a directory entry are intentionally bounded
     # by the 30s active / 60s idle snapshot TTL instead of triggering rebuilds.
-    # Local Consensus live files are also excluded here: processing activity
-    # and /api/local-consensus remain live, while the aggregate snapshot is
-    # deliberately bounded by the same active/idle TTLs.
+    # Local Consensus live markers stay excluded. Its bounded decision audit
+    # is tracked because invalid votes feed model failure telemetry.
     return (
         CHRONOVISOR_ROOT / "raw",
         CHRONOVISOR_ROOT / "pages",
@@ -4690,6 +4769,7 @@ def _snapshot_fixed_source_paths() -> tuple[Path, ...]:
         CHRONOVISOR_ROOT / "runtime" / "failures" / "state.json",
         CHRONOVISOR_ROOT / "runtime" / "failures" / "failure-registry.jsonl",
         CHRONOVISOR_ROOT / "runtime" / "convergence" / "state.json",
+        CHRONOVISOR_ROOT / "runtime" / "local-consensus" / "audit.jsonl",
         CHRONOVISOR_ROOT / "runtime" / "frontier-reviews" / "active",
         CHRONOVISOR_ROOT / "runtime" / "frontier-repair" / "state.json",
         CHRONOVISOR_ROOT / "runtime" / "frontier-repair" / "events.jsonl",

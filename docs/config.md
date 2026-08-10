@@ -60,10 +60,16 @@ content_correction = true
 recall_improve = false
 
 [embedding]
-# Tuned search profile. If omitted, runtime falls back to nomic-embed-text.
+# Compatibility-only keys. They are accepted but ignored by provider-neutral
+# knowledge embedding; the fixed route below is the only model selector.
 model = "bge-m3"
 document_prefix = ""
 query_prefix = ""
+
+[llm.roles."knowledge.embedding"]
+capability = "embedding"
+provider = "local"
+model = "bge-m3"
 
 [ingest]
 # Ingest generation routing is fixed by llm.roles."ingest.generation". Legacy
@@ -716,14 +722,16 @@ disables rewrite, semantic search, and judge while keeping BM25 available.
 
 ## Search embeddings
 
-The search encoder is independent from the utility `[embedding]` model used
-for duplicate and tag workflows. Set `enabled = false` for explicit BM25-only
-execution. When enabled, both semantic runtime roles must resolve to the same
-provider, model, location, and vector dimensions. Service or egress failure is
-reported as a semantic failure and never selects another provider or the old
-SQLite embedding path. Legacy `[search.embedding]` `backend`, `model`, and
-`fallback` keys are accepted but ignored; the two fixed roles are the only
-provider/model selectors.
+The search encoder is independent from the fixed `knowledge.embedding` route
+used for duplicate and tag workflows. Legacy `[embedding]` keys are accepted
+but ignored by that provider-neutral path; `llm.roles."knowledge.embedding"`
+is its only provider/model selector. Set `enabled = false` for explicit
+BM25-only execution. When enabled, both semantic runtime roles must resolve to
+the same provider, model, location, and vector dimensions. Service or egress
+failure is reported as a semantic failure and never selects another provider
+or the old SQLite embedding path. Legacy `[search.embedding]` `backend`,
+`model`, and `fallback` keys are accepted but ignored; the two fixed roles are
+the only provider/model selectors.
 
 ```toml
 [search.embedding]

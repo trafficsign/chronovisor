@@ -24,6 +24,7 @@ SAFE_FAILURE_CATEGORIES = frozenset(
         "capability_unavailable",
         "source_classification_required",
         "egress_denied",
+        "vote_invalid",
         "route_configuration_invalid",
         "profile_invalid",
         "invalid_request",
