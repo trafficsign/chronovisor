@@ -8,7 +8,7 @@
 
   <key>ProgramArguments</key>
   <array>
-    <string>/Users/trafficsign/projects/personal/chronovisor/scripts/chronovisor-ingest-drain</string>
+    <string>@@PROJECT_ROOT@@/scripts/chronovisor-ingest-drain</string>
     <string>--watch</string>
     <string>--max-batches</string>
     <string>24</string>
@@ -19,14 +19,18 @@
   </array>
 
   <key>WorkingDirectory</key>
-  <string>/Users/trafficsign/projects/personal/chronovisor</string>
+  <string>@@PROJECT_ROOT@@</string>
 
   <key>EnvironmentVariables</key>
   <dict>
     <key>HOME</key>
-    <string>/Users/trafficsign</string>
+    <string>@@HOME@@</string>
     <key>PATH</key>
-    <string>/Users/trafficsign/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/opt/homebrew/sbin:/usr/sbin:/sbin</string>
+    <string>@@PATH@@</string>
+    <key>CHRONOVISOR_UVX</key>
+    <string>@@UVX@@</string>
+    <key>CHRONOVISOR_PYTHON</key>
+    <string>@@PYTHON@@</string>
   </dict>
 
   <key>RunAtLoad</key>
@@ -39,9 +43,9 @@
   <integer>30</integer>
 
   <key>StandardOutPath</key>
-  <string>/Users/trafficsign/.chronovisor/logs/ingest-drain.launchd.out.log</string>
+  <string>@@HOME@@/.chronovisor/logs/ingest-drain.launchd.out.log</string>
 
   <key>StandardErrorPath</key>
-  <string>/Users/trafficsign/.chronovisor/logs/ingest-drain.launchd.err.log</string>
+  <string>@@HOME@@/.chronovisor/logs/ingest-drain.launchd.err.log</string>
 </dict>
 </plist>

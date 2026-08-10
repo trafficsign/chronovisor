@@ -34,6 +34,21 @@ host hooks.
 chronovisor-dashboard --host 127.0.0.1 --port 8765
 ```
 
+The tracked launchd files are install-time templates, not plists to copy
+directly. Install and start the general services with the allowlisted renderer:
+
+```sh
+scripts/install-launchd-service dashboard
+scripts/install-launchd-service ingest-drain
+scripts/install-launchd-service librarian-review
+scripts/install-launchd-service library-evidence
+```
+
+The installer resolves the checkout, home directory, `uvx`, and Python paths
+before loading the rendered plist. The semantic, reranker, and SearXNG services
+retain their dedicated installers below because those commands also perform
+service-specific setup and readiness checks.
+
 ### Semantic retrieval service
 
 Install the pinned Nemotron service after its model snapshot is present in the

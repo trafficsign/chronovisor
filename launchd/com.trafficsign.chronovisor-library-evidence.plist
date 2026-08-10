@@ -6,19 +6,23 @@
   <string>com.trafficsign.chronovisor-library-evidence</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/Users/trafficsign/projects/personal/chronovisor/scripts/chronovisor-library-evidence</string>
+    <string>@@PROJECT_ROOT@@/scripts/chronovisor-library-evidence</string>
     <string>run-once</string>
     <string>--repo-root</string>
-    <string>/Users/trafficsign/projects/personal/chronovisor</string>
+    <string>@@PROJECT_ROOT@@</string>
   </array>
   <key>WorkingDirectory</key>
-  <string>/Users/trafficsign/projects/personal/chronovisor</string>
+  <string>@@PROJECT_ROOT@@</string>
   <key>EnvironmentVariables</key>
   <dict>
     <key>HOME</key>
-    <string>/Users/trafficsign</string>
+    <string>@@HOME@@</string>
     <key>PATH</key>
-    <string>/Users/trafficsign/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/opt/homebrew/sbin:/usr/sbin:/sbin</string>
+    <string>@@PATH@@</string>
+    <key>CHRONOVISOR_UVX</key>
+    <string>@@UVX@@</string>
+    <key>CHRONOVISOR_PYTHON</key>
+    <string>@@PYTHON@@</string>
   </dict>
   <key>StartInterval</key>
   <integer>15</integer>
@@ -27,8 +31,8 @@
   <key>LowPriorityIO</key>
   <true/>
   <key>StandardOutPath</key>
-  <string>/Users/trafficsign/.chronovisor/runtime/librarian/library-evidence.stdout.log</string>
+  <string>@@HOME@@/.chronovisor/runtime/librarian/library-evidence.stdout.log</string>
   <key>StandardErrorPath</key>
-  <string>/Users/trafficsign/.chronovisor/runtime/librarian/library-evidence.stderr.log</string>
+  <string>@@HOME@@/.chronovisor/runtime/librarian/library-evidence.stderr.log</string>
 </dict>
 </plist>

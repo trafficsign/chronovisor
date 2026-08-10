@@ -11,6 +11,12 @@ readonly LAUNCH_AGENT="$HOME/Library/LaunchAgents/com.trafficsign.chronovisor-se
 readonly LABEL="com.trafficsign.chronovisor-searxng"
 readonly REVISION="ef8f6470e0473a1548f175217aaa7b9346ce6973"
 readonly DOMAIN="gui/$(/usr/bin/id -u)"
+readonly UV="${CHRONOVISOR_UV:-$(command -v uv 2>/dev/null || true)}"
+
+if [[ "$UV" != /* || ! -f "$UV" || ! -x "$UV" ]]; then
+  print -u2 "uv not found; set CHRONOVISOR_UV to an absolute executable path"
+  exit 127
+fi
 
 mkdir -p "$RUNTIME_ROOT" "$CONFIG_ROOT" "$HOME/.chronovisor/logs" "${LAUNCH_AGENT:h}"
 
@@ -22,12 +28,12 @@ fi
 /usr/bin/git -C "$SOURCE_ROOT" checkout --detach "$REVISION"
 
 if [[ ! -x "$VENV/bin/python" ]]; then
-  /Users/trafficsign/.local/bin/uv venv --python 3.13 "$VENV"
+  "$UV" venv --python 3.13 "$VENV"
 fi
-/Users/trafficsign/.local/bin/uv pip install \
+"$UV" pip install \
   --python "$VENV/bin/python" \
   setuptools pyyaml msgspec typing-extensions pybind11 granian
-/Users/trafficsign/.local/bin/uv pip install \
+"$UV" pip install \
   --python "$VENV/bin/python" \
   --no-build-isolation \
   --editable "$SOURCE_ROOT"
@@ -35,9 +41,11 @@ fi
 /usr/bin/install -m 0600 \
   "$PROJECT_ROOT/deploy/searxng/settings.yml" \
   "$CONFIG_ROOT/settings.yml"
-/usr/bin/install -m 0644 \
+"$PROJECT_ROOT/scripts/chronovisor-render-launchd" \
   "$PROJECT_ROOT/launchd/com.trafficsign.chronovisor-searxng.plist" \
-  "$LAUNCH_AGENT"
+  "$LAUNCH_AGENT" \
+  --project-root "$PROJECT_ROOT" \
+  --home "$HOME"
 
 /bin/launchctl bootout "$DOMAIN/$LABEL" >/dev/null 2>&1 || true
 /bin/launchctl bootstrap "$DOMAIN" "$LAUNCH_AGENT"

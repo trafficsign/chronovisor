@@ -1,0 +1,31 @@
+#!/bin/zsh
+set -euo pipefail
+
+readonly SERVICE="${1:-}"
+case "$SERVICE" in
+  dashboard | ingest-drain | librarian-review | library-evidence) ;;
+  *)
+    print -u2 "usage: $0 {dashboard|ingest-drain|librarian-review|library-evidence}"
+    exit 64
+    ;;
+esac
+
+readonly SCRIPT_DIR="${0:A:h}"
+readonly PROJECT_ROOT="${SCRIPT_DIR:h}"
+readonly LABEL="com.trafficsign.chronovisor-$SERVICE"
+readonly LAUNCH_AGENT="$HOME/Library/LaunchAgents/$LABEL.plist"
+readonly DOMAIN="gui/$(/usr/bin/id -u)"
+
+mkdir -p \
+  "$HOME/.chronovisor/logs" \
+  "$HOME/.chronovisor/runtime/librarian" \
+  "${LAUNCH_AGENT:h}"
+"$PROJECT_ROOT/scripts/chronovisor-render-launchd" \
+  "$PROJECT_ROOT/launchd/$LABEL.plist" \
+  "$LAUNCH_AGENT" \
+  --project-root "$PROJECT_ROOT" \
+  --home "$HOME"
+
+/bin/launchctl bootout "$DOMAIN/$LABEL" >/dev/null 2>&1 || true
+/bin/launchctl bootstrap "$DOMAIN" "$LAUNCH_AGENT"
+/bin/launchctl kickstart -k "$DOMAIN/$LABEL"

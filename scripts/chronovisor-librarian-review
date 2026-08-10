@@ -5,31 +5,34 @@ set -eu
 # rollout process is intentionally one-shot, so this periodic worker owns the
 # post-release collection catch-up path.  State and receipts are persisted by
 # the Librarian; suppress the very large registry JSON from the launchd log.
-/Users/trafficsign/.local/bin/uvx --python /opt/homebrew/bin/python3.14 \
+CHRONOVISOR_WRAPPER_DIR=$(CDPATH= cd "$(dirname "$0")" && pwd -P)
+. "$CHRONOVISOR_WRAPPER_DIR/chronovisor-runtime-env"
+
+"$CHRONOVISOR_UVX" --python "$CHRONOVISOR_PYTHON" \
   --refresh-package chronovisor \
-  --from git+ssh://git@github.com/trafficsign/chronovisor \
+  --from "$RUNTIME_SOURCE" \
   chronovisor-librarian \
-  --root /Users/trafficsign/.chronovisor \
+  --root "$CHRONOVISOR_ROOT" \
   --full-sweep \
   --json \
   >/dev/null
 
-/Users/trafficsign/.local/bin/uvx --python /opt/homebrew/bin/python3.14 \
+"$CHRONOVISOR_UVX" --python "$CHRONOVISOR_PYTHON" \
   --refresh-package chronovisor \
-  --from git+ssh://git@github.com/trafficsign/chronovisor \
+  --from "$RUNTIME_SOURCE" \
   chronovisor-librarian \
-  --root /Users/trafficsign/.chronovisor \
+  --root "$CHRONOVISOR_ROOT" \
   --review-collection-queue \
   --limit "${CHRONOVISOR_LIBRARIAN_REVIEW_LIMIT:-5}" \
   --review-model "${CHRONOVISOR_LIBRARIAN_REVIEW_MODEL:-gemma4:26b}" \
   --review-role primary \
   --json
 
-exec /Users/trafficsign/.local/bin/uvx --python /opt/homebrew/bin/python3.14 \
+exec "$CHRONOVISOR_UVX" --python "$CHRONOVISOR_PYTHON" \
   --refresh-package chronovisor \
-  --from git+ssh://git@github.com/trafficsign/chronovisor \
+  --from "$RUNTIME_SOURCE" \
   chronovisor-librarian \
-  --root /Users/trafficsign/.chronovisor \
+  --root "$CHRONOVISOR_ROOT" \
   --review-collection-queue \
   --limit "${CHRONOVISOR_LIBRARIAN_CHALLENGE_LIMIT:-5}" \
   --review-model "${CHRONOVISOR_LIBRARIAN_CHALLENGER_MODEL:-gpt-oss:20b}" \

@@ -1,12 +1,10 @@
 #!/bin/sh
 set -eu
 
-PROJECT_DIR="/Users/trafficsign/projects/personal/chronovisor"
-RUNTIME_SOURCE="${CHRONOVISOR_RUNTIME_SOURCE:-git+ssh://git@github.com/trafficsign/chronovisor}"
-PATH="/Users/trafficsign/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/opt/homebrew/sbin:/usr/sbin:/sbin"
-export PATH CHRONOVISOR_REPO_ROOT="${CHRONOVISOR_REPO_ROOT:-$PROJECT_DIR}"
+CHRONOVISOR_WRAPPER_DIR=$(CDPATH= cd "$(dirname "$0")" && pwd -P)
+. "$CHRONOVISOR_WRAPPER_DIR/chronovisor-runtime-env"
 
-exec uvx --python /opt/homebrew/bin/python3.14 \
+exec "$CHRONOVISOR_UVX" --python "$CHRONOVISOR_PYTHON" \
   --refresh-package chronovisor \
   --with "torch==2.13.0" \
   --with "transformers==5.14.1" \

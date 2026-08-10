@@ -1,0 +1,39 @@
+#!/bin/sh
+
+chronovisor_resolve_executable() {
+  chronovisor_value=$1
+  shift
+  if [ -z "$chronovisor_value" ]; then
+    for chronovisor_name do
+      chronovisor_value=$(command -v "$chronovisor_name" 2>/dev/null || true)
+      [ -n "$chronovisor_value" ] && break
+    done
+  fi
+  case "$chronovisor_value" in
+    /*) ;;
+    *) echo "required executable not found: $*" >&2; return 127 ;;
+  esac
+  [ -f "$chronovisor_value" ] && [ -x "$chronovisor_value" ] || {
+    echo "not executable: $chronovisor_value" >&2
+    return 126
+  }
+  printf '%s\n' "$chronovisor_value"
+}
+
+: "${HOME:?HOME is required}"
+CHRONOVISOR_WRAPPER_DIR=${CHRONOVISOR_WRAPPER_DIR:-$(CDPATH= cd "$(dirname "$0")" && pwd -P)}
+CHRONOVISOR_REPO_ROOT=${CHRONOVISOR_REPO_ROOT:-$(dirname "$CHRONOVISOR_WRAPPER_DIR")}
+case "$CHRONOVISOR_REPO_ROOT" in
+  /*) ;;
+  *) echo "CHRONOVISOR_REPO_ROOT must be absolute" >&2; exit 64 ;;
+esac
+[ -d "$CHRONOVISOR_REPO_ROOT" ] || {
+  echo "repository root does not exist: $CHRONOVISOR_REPO_ROOT" >&2
+  exit 66
+}
+
+CHRONOVISOR_UVX=$(chronovisor_resolve_executable "${CHRONOVISOR_UVX:-}" uvx)
+CHRONOVISOR_PYTHON=$(chronovisor_resolve_executable "${CHRONOVISOR_PYTHON:-}" python3.14)
+CHRONOVISOR_ROOT=${CHRONOVISOR_ROOT:-$HOME/.chronovisor}
+RUNTIME_SOURCE=${CHRONOVISOR_RUNTIME_SOURCE:-git+https://github.com/trafficsign/chronovisor.git}
+export CHRONOVISOR_REPO_ROOT CHRONOVISOR_ROOT CHRONOVISOR_UVX CHRONOVISOR_PYTHON

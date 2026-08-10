@@ -8,9 +8,11 @@ readonly LABEL="com.trafficsign.chronovisor-semantic"
 readonly DOMAIN="gui/$(/usr/bin/id -u)"
 
 mkdir -p "$HOME/.chronovisor/logs" "${LAUNCH_AGENT:h}"
-/usr/bin/install -m 0644 \
+"$PROJECT_ROOT/scripts/chronovisor-render-launchd" \
   "$PROJECT_ROOT/launchd/com.trafficsign.chronovisor-semantic.plist" \
-  "$LAUNCH_AGENT"
+  "$LAUNCH_AGENT" \
+  --project-root "$PROJECT_ROOT" \
+  --home "$HOME"
 
 /bin/launchctl bootout "$DOMAIN/$LABEL" >/dev/null 2>&1 || true
 for _attempt in {1..20}; do
