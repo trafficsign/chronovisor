@@ -20,8 +20,10 @@ from chronovisor.core.llm_config import (
     parse_llm_config,
 )
 from chronovisor.core.llm_runtime import (
+    CapabilityUnavailableError,
     EmbeddingRequest,
     GenerationRequest,
+    RouteLocation,
     SourceDataClass,
     SourceDataClassification,
     SourceSensitivity,
@@ -364,6 +366,215 @@ def test_hybrid_config_routes_local_and_remote_without_domain_provider_inputs() 
     assert config.egress_opt_ins == {("answer", SourceDataClass.SYSTEM)}
 
 
+def test_cloud_only_representative_roles_use_one_openai_backend() -> None:
+    decision_specs = {
+        "classification.primary": ("gpt-5", "deployment-primary"),
+        "classification.challenger": ("gpt-5-mini", "deployment-challenger"),
+        "classification.tie_break": ("gpt-5-nano", "deployment-tie-break"),
+    }
+    decision_roles = {
+        role: {
+            "capability": "generation",
+            "provider": "remote",
+            "model": model,
+            "required_capabilities": ["structured_output"],
+            "revision": revision,
+        }
+        for role, (model, revision) in decision_specs.items()
+    }
+    embedding_roles = {
+        role: {
+            "capability": "embedding",
+            "provider": "remote",
+            "model": "text-embedding-3-large",
+        }
+        for role in (
+            "search.semantic.foreground",
+            "search.semantic.incremental",
+            "knowledge.embedding",
+            "classification.embedding",
+        )
+    }
+    config = parse_llm_config(
+        {
+            "llm": {
+                "providers": {"remote": _provider("openai")},
+                "roles": {
+                    "librarian.review": {
+                        "capability": "generation",
+                        "provider": "remote",
+                        "model": "gpt-5-mini",
+                    },
+                    **decision_roles,
+                    **embedding_roles,
+                },
+            }
+        }
+    )
+    resolver = CountingResolver()
+
+    runtime = build_llm_runtime(
+        config, resolver=resolver, sender_factory=lambda _profile: FakeSender()
+    )
+
+    generation_routes = {
+        role: runtime.resolve_generation(role) for role in runtime._generation
+    }
+    assert {
+        role: (route.provider, route.model, route.location, route.revision)
+        for role, route in generation_routes.items()
+    } == {
+        "librarian.review": ("remote", "gpt-5-mini", RouteLocation.REMOTE, None),
+        **{
+            role: ("remote", model, RouteLocation.REMOTE, revision)
+            for role, (model, revision) in decision_specs.items()
+        },
+    }
+    embedding_routes = {
+        role: runtime.resolve_embedding(role) for role in runtime._embedding
+    }
+    assert {
+        role: (route.provider, route.model, route.location)
+        for role, route in embedding_routes.items()
+    } == {
+        role: ("remote", "text-embedding-3-large", RouteLocation.REMOTE)
+        for role in embedding_roles
+    }
+    assert {type(route.backend) for route in runtime._generation.values()} == {
+        OpenAICompatibleAdapter
+    }
+    assert {type(route.backend) for route in runtime._embedding.values()} == {
+        OpenAICompatibleAdapter
+    }
+    assert runtime._local_controls == {}
+    assert all(
+        generation_routes[role].capabilities.structured_output
+        for role in decision_roles
+    )
+    assert "search.rerank" not in config.roles
+    with pytest.raises(CapabilityUnavailableError):
+        runtime.resolve_rerank("search.rerank")
+    assert len(resolver.calls) == 1
+
+
+def test_hybrid_representative_roles_keep_only_tie_break_and_rerank_local() -> None:
+    remote_decision_specs = {
+        "classification.primary": ("gpt-5-mini", "deployment-primary"),
+        "classification.challenger": ("gpt-5-nano", "deployment-challenger"),
+    }
+    remote_decision_roles = {
+        role: {
+            "capability": "generation",
+            "provider": "remote",
+            "model": model,
+            "required_capabilities": ["structured_output"],
+            "revision": revision,
+        }
+        for role, (model, revision) in remote_decision_specs.items()
+    }
+    remote_generation_roles = {
+        "librarian.review": {
+            "capability": "generation",
+            "provider": "remote",
+            "model": "gpt-5",
+        },
+        **remote_decision_roles,
+    }
+    remote_embedding_roles = {
+        role: {
+            "capability": "embedding",
+            "provider": "remote",
+            "model": "text-embedding-3-large",
+        }
+        for role in (
+            "search.semantic.foreground",
+            "search.semantic.incremental",
+            "knowledge.embedding",
+            "classification.embedding",
+        )
+    }
+    config = parse_llm_config(
+        {
+            "llm": {
+                "providers": {
+                    "remote": _provider("openai"),
+                    "local": {"kind": "ollama"},
+                    "reranker": {"kind": "local-transformers"},
+                },
+                "roles": {
+                    **remote_generation_roles,
+                    "classification.tie_break": {
+                        "capability": "generation",
+                        "provider": "local",
+                        "model": "local-tie-break",
+                        "required_capabilities": ["structured_output"],
+                    },
+                    **remote_embedding_roles,
+                    "search.rerank": {
+                        "capability": "rerank",
+                        "provider": "reranker",
+                        "model": "local-reranker",
+                    },
+                },
+            }
+        }
+    )
+    resolver = CountingResolver()
+
+    runtime = build_llm_runtime(
+        config, resolver=resolver, sender_factory=lambda _profile: FakeSender()
+    )
+
+    generation_routes = {
+        role: runtime.resolve_generation(role) for role in runtime._generation
+    }
+    assert {
+        role: (route.provider, route.model, route.location, route.revision)
+        for role, route in generation_routes.items()
+    } == {
+        "librarian.review": ("remote", "gpt-5", RouteLocation.REMOTE, None),
+        **{
+            role: ("remote", model, RouteLocation.REMOTE, revision)
+            for role, (model, revision) in remote_decision_specs.items()
+        },
+        "classification.tie_break": (
+            "ollama",
+            "local-tie-break",
+            RouteLocation.LOCAL,
+            None,
+        ),
+    }
+    embedding_routes = {
+        role: runtime.resolve_embedding(role) for role in runtime._embedding
+    }
+    assert {
+        role: (route.provider, route.model, route.location)
+        for role, route in embedding_routes.items()
+    } == {
+        role: ("remote", "text-embedding-3-large", RouteLocation.REMOTE)
+        for role in remote_embedding_roles
+    }
+    assert {
+        role: type(route.backend) for role, route in runtime._generation.items()
+    } == {
+        **{role: OpenAICompatibleAdapter for role in remote_generation_roles},
+        "classification.tie_break": OllamaAdapter,
+    }
+    assert {type(route.backend) for route in runtime._embedding.values()} == {
+        OpenAICompatibleAdapter
+    }
+    assert type(runtime._rerank["search.rerank"].backend) is LocalRerankBackend
+    assert set(runtime._local_controls) == {"classification.tie_break"}
+    rerank = runtime.resolve_rerank("search.rerank")
+    assert (rerank.role, rerank.provider, rerank.model, rerank.location) == (
+        "search.rerank",
+        "local-reranker",
+        "local-reranker",
+        RouteLocation.LOCAL,
+    )
+    assert len(resolver.calls) == 1
+
+
 @pytest.mark.parametrize("kind", CURATED_PROFILE_IDS)
 def test_every_curated_provider_parses_with_conservative_generation(kind: str) -> None:
     config = parse_llm_config(_remote_payload(kind=kind))
@@ -375,7 +586,7 @@ def test_every_curated_provider_parses_with_conservative_generation(kind: str) -
     assert not provider.profile.capabilities.tools
 
 
-@pytest.mark.parametrize("model", ["gpt-5-mini", "gpt-5"])
+@pytest.mark.parametrize("model", ["gpt-5", "gpt-5-mini", "gpt-5-nano"])
 def test_verified_curated_openai_models_resolve_structured_output(model: str) -> None:
     payload = _remote_payload(kind="openai")
     role = payload["llm"]["roles"]["answer"]  # type: ignore[index]
@@ -397,8 +608,9 @@ def test_verified_curated_openai_models_resolve_structured_output(model: str) ->
     ("kind", "model"),
     [
         ("openai", "unverified-openai-model"),
-        ("openai-compatible", "gpt-5-mini"),
         ("openai-compatible", "gpt-5"),
+        ("openai-compatible", "gpt-5-mini"),
+        ("openai-compatible", "gpt-5-nano"),
     ],
 )
 def test_unverified_remote_structured_output_fails_closed(

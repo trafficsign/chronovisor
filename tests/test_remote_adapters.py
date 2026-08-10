@@ -138,13 +138,13 @@ def test_curated_profiles_are_immutable_conservative_capability_truth() -> None:
 
     assert all(
         _curated("openai").capabilities_for(model).structured_output
-        for model in ("gpt-5-mini", "gpt-5")
+        for model in ("gpt-5", "gpt-5-mini", "gpt-5-nano")
     )
     assert all(
         not _curated(profile_id).capabilities_for(model).structured_output
         for profile_id in CURATED_PROFILE_IDS
         if profile_id != "openai"
-        for model in ("gpt-5-mini", "gpt-5")
+        for model in ("gpt-5", "gpt-5-mini", "gpt-5-nano")
     )
 
 
@@ -198,7 +198,7 @@ def test_generic_profile_uses_same_data_contract_and_model_scoped_structured() -
     )
     assert all(
         not generic.capabilities_for(model).structured_output
-        for model in ("gpt-5-mini", "gpt-5")
+        for model in ("gpt-5", "gpt-5-mini", "gpt-5-nano")
     )
     assert profile.capabilities.embedding
     with pytest.raises(ProviderAdapterError):

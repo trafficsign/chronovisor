@@ -230,7 +230,7 @@ _CURATED_SPECS = MappingProxyType(
     }
 )
 _CURATED_STRUCTURED_OUTPUT_MODELS = MappingProxyType(
-    {"openai": frozenset({"gpt-5-mini", "gpt-5"})}
+    {"openai": frozenset({"gpt-5", "gpt-5-mini", "gpt-5-nano"})}
 )
 CURATED_PROFILE_IDS = tuple(_CURATED_SPECS)
 
