@@ -1,3 +1,9 @@
+---
+type: Log
+title: Example bundle history
+producer_extension:
+  preserved: true
+---
 # Bundle update log
 
 ## 2026-08-09

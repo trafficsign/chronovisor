@@ -147,16 +147,13 @@ def test_reserved_documents_are_validated_at_every_level(tmp_path: Path) -> None
     (pages_root / "log.md").write_text(
         "# Updates\n\n## 2026-02-30\n* Invalid date\n## 2026-08-10\n* Out of order\n"
     )
-    (nested / "log.md").write_text(
-        "---\ngenerated: true\n---\n# Updates\n\n* Ungrouped prose\n"
-    )
+    (nested / "log.md").write_text("# Updates\n\n* Ungrouped prose\n")
 
     issues = validate_pages_bundle(pages_root)
     assert {issue.code for issue in issues if issue.severity == "error"} == {
         "index_frontmatter_forbidden",
         "index_link_missing",
         "log_date_invalid",
-        "log_frontmatter_forbidden",
         "log_entry_ungrouped",
     }
     assert {issue.code for issue in issues if issue.severity == "warning"} == {
@@ -176,6 +173,45 @@ def test_log_dates_must_be_newest_first_but_action_labels_are_optional(
     )
     assert {issue.code for issue in validate_pages_bundle(pages_root)} == {
         "log_dates_not_newest_first"
+    }
+
+
+def test_log_allows_parseable_frontmatter_and_unknown_keys(tmp_path: Path) -> None:
+    pages_root = tmp_path / "pages"
+    pages_root.mkdir()
+    (pages_root / "log.md").write_text(
+        "---\ntype: Log\ntitle: Bundle history\nproducer_extension: kept\n---\n"
+        "# Bundle history\n\n## 2026-07-01\n\n- Verified the bundle.\n"
+    )
+
+    assert validate_pages_bundle(pages_root) == ()
+
+
+def test_log_rejects_malformed_frontmatter(tmp_path: Path) -> None:
+    pages_root = tmp_path / "pages"
+    pages_root.mkdir()
+    (pages_root / "log.md").write_text(
+        "---\ntype: [\n---\n# Bundle history\n\n## 2026-07-01\n- Entry\n"
+    )
+
+    assert {
+        (issue.severity, issue.code) for issue in validate_pages_bundle(pages_root)
+    } == {("error", "document_invalid")}
+
+
+def test_index_rejects_entries_without_a_relative_target(tmp_path: Path) -> None:
+    pages_root = tmp_path / "pages"
+    pages_root.mkdir()
+    (pages_root / "index.md").write_text(
+        "# Concepts\n\n"
+        "* [Valid](valid.md) - description\n"
+        "* [External](https://example.test/page.md) - description\n"
+        "* [Root absolute](/page.md) - description\n"
+        "* Missing link - description\n"
+    )
+
+    assert {issue.code for issue in validate_pages_bundle(pages_root)} == {
+        "index_entry_invalid"
     }
 
 

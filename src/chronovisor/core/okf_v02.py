@@ -163,17 +163,25 @@ def _validate_index(
         return tuple(issues)
 
     has_heading = False
+    invalid_entry = False
     relative_entry_lines: list[str] = []
     for line in text.splitlines():
         if _HEADING_RE.fullmatch(line):
             has_heading = True
-        elif has_heading and _LIST_RE.fullmatch(line) and _has_relative_link(line):
-            relative_entry_lines.append(line)
+        elif has_heading and _LIST_RE.fullmatch(line):
+            if _has_relative_link(line):
+                relative_entry_lines.append(line)
+            else:
+                invalid_entry = True
     if not has_heading:
         issues.append(ConformanceIssue("error", "index_heading_missing", relative_path))
     if not relative_entry_lines:
         issues.append(ConformanceIssue("error", "index_link_missing", relative_path))
-    elif any(not re.search(r"\)\s+-\s+\S", line) for line in relative_entry_lines):
+    if invalid_entry:
+        issues.append(ConformanceIssue("error", "index_entry_invalid", relative_path))
+    if relative_entry_lines and any(
+        not re.search(r"\)\s+-\s+\S", line) for line in relative_entry_lines
+    ):
         issues.append(
             ConformanceIssue(
                 "warning", "index_description_missing", relative_path, "description"
@@ -194,9 +202,6 @@ def _validate_log(path: Path, relative_path: str) -> tuple[ConformanceIssue, ...
             body = parse_document(raw).body
         except CanonicalDocumentError:
             return (ConformanceIssue("error", "document_invalid", relative_path),)
-        issues.append(
-            ConformanceIssue("error", "log_frontmatter_forbidden", relative_path)
-        )
     try:
         lines = body.decode("utf-8").splitlines()
     except UnicodeDecodeError:
