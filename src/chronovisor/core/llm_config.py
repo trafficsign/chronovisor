@@ -14,6 +14,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import cast
 
+from chronovisor.core import runtime_status
 from chronovisor.core.anthropic_adapter import compose_anthropic_adapter
 from chronovisor.core.llm_runtime import (
     BackendCapabilities,
@@ -24,7 +25,11 @@ from chronovisor.core.llm_runtime import (
     LLMRuntime,
     RerankBackend,
     RerankRoute,
+    RuntimeFailureTelemetry,
     SourceDataClass,
+)
+from chronovisor.core.llm_runtime import (
+    safe_metadata_identifier as safe_metadata_identifier,
 )
 from chronovisor.core.llm_security import (
     AuthScheme,
@@ -470,6 +475,7 @@ def build_llm_runtime(
     resolver: CredentialResolver | None = None,
     sender_factory: SenderFactory | None = None,
     search_embedding_config: SearchEmbeddingConfig | None = None,
+    telemetry: Callable[[RuntimeFailureTelemetry], None] | None = None,
 ) -> LLMRuntime:
     if resolver is None:
         resolver = CredentialResolver()
@@ -576,6 +582,7 @@ def build_llm_runtime(
         rerank=rerank,
         local_controls=local_controls,
         remote_egress_opt_ins=config.egress_opt_ins,
+        telemetry=telemetry,
     )
 
 
@@ -584,11 +591,13 @@ def load_llm_runtime(
     *,
     resolver: CredentialResolver | None = None,
     sender_factory: SenderFactory | None = None,
+    telemetry: Callable[[RuntimeFailureTelemetry], None] | None = None,
 ) -> LLMRuntime:
     return build_llm_runtime(
         load_llm_config(path),
         resolver=resolver,
         sender_factory=sender_factory,
+        telemetry=telemetry,
     )
 
 
@@ -596,4 +605,4 @@ def load_llm_runtime(
 def load_default_llm_runtime() -> LLMRuntime:
     """Load the process-wide runtime from the canonical configuration."""
 
-    return load_llm_runtime()
+    return load_llm_runtime(telemetry=runtime_status.append_runtime_failure)

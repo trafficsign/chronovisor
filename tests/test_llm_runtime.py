@@ -5,7 +5,7 @@ from typing import cast
 
 import pytest
 
-from chronovisor.core import ollama
+from chronovisor.core import llm_config, ollama, runtime_status
 from chronovisor.core.llm_runtime import (
     MAX_CONTEXT_TOKENS,
     MAX_OUTPUT_CHARS,
@@ -33,6 +33,7 @@ from chronovisor.core.llm_runtime import (
     RouteConfigurationError,
     RouteLocation,
     RuntimeFailureTelemetry,
+    SafeBackendError,
     SourceClassificationError,
     SourceDataClass,
     SourceDataClassification,
@@ -564,6 +565,135 @@ def test_runtime_failure_telemetry_rejects_non_allowlisted_fields() -> None:
             "remote",
             request_id="request id with spaces",
         )
+
+
+@pytest.mark.parametrize(
+    ("category", "expected_retries", "expected_calls"),
+    [
+        ("http_401", 0, 1),
+        ("http_429", 2, 3),
+        ("http_5xx", 2, 3),
+        ("timeout", 2, 3),
+        ("credential_missing", 0, 1),
+        ("egress_denied", 0, 0),
+    ],
+)
+def test_runtime_failure_sink_records_only_safe_default_runtime_metadata(
+    tmp_path,
+    monkeypatch,
+    category: str,
+    expected_retries: int,
+    expected_calls: int,
+) -> None:
+    runtime_dir = tmp_path / "runtime"
+    monkeypatch.setattr(runtime_status, "RUNTIME_DIR", runtime_dir)
+    monkeypatch.setattr(runtime_status, "STATUS_FILE", runtime_dir / "status.json")
+    monkeypatch.setattr(runtime_status, "EVENTS_FILE", runtime_dir / "events.jsonl")
+    monkeypatch.setattr(runtime_status, "METRICS_FILE", runtime_dir / "metrics.jsonl")
+    canary = "W7 CANARY secret?credential"
+
+    class OfflineBackend(CountingRemoteBackend):
+        def generate(self, request: GenerationInput, *, model: str) -> GenerationResult:
+            self.calls.append("generation")
+            raise SafeBackendError(
+                category,
+                request_id=(canary if category == "http_401" else "req_safe_1"),
+                transient=category in {"http_429", "http_5xx", "timeout"},
+            )
+
+    backend = OfflineBackend()
+    runtime = LLMRuntime(
+        generation={"review": GenerationRoute(backend, canary)},
+        max_retries=2,
+        telemetry=runtime_status.append_runtime_failure,
+    )
+    source = RAW_HIGH if category == "egress_denied" else NORMAL_PAGE
+
+    with pytest.raises((BackendExecutionError, EgressDeniedError)):
+        runtime.generate("review", GenerationRequest(canary, source, system=canary))
+
+    event = runtime_status.read_events(limit=10)[-1]
+    assert event == {
+        "timestamp": event["timestamp"],
+        "level": "error",
+        "message": "llm runtime | request failed",
+        "kind": "runtime_failure",
+        "category": category,
+        "role": "review",
+        "capability": "generation",
+        "provider": "fake",
+        "location": "remote",
+        "retry_count": expected_retries,
+        **(
+            {"request_id": "req_safe_1"}
+            if category in {"http_429", "http_5xx", "timeout", "credential_missing"}
+            else {}
+        ),
+    }
+    assert len(backend.calls) == expected_calls
+    assert canary not in runtime_status.STATUS_FILE.read_text(encoding="utf-8")
+    assert canary not in runtime_status.EVENTS_FILE.read_text(encoding="utf-8")
+
+
+def test_unit_runtime_failure_does_not_write_runtime_status(
+    tmp_path, monkeypatch
+) -> None:
+    runtime_dir = tmp_path / "runtime"
+    monkeypatch.setattr(runtime_status, "RUNTIME_DIR", runtime_dir)
+    monkeypatch.setattr(runtime_status, "STATUS_FILE", runtime_dir / "status.json")
+    monkeypatch.setattr(runtime_status, "EVENTS_FILE", runtime_dir / "events.jsonl")
+    monkeypatch.setattr(runtime_status, "METRICS_FILE", runtime_dir / "metrics.jsonl")
+
+    class OfflineBackend(FakeBackend):
+        def generate(self, request: GenerationInput, *, model: str) -> GenerationResult:
+            raise SafeBackendError("http_401")
+
+    runtime = LLMRuntime(
+        generation={"review": GenerationRoute(OfflineBackend(), "writer")}
+    )
+
+    with pytest.raises(BackendExecutionError):
+        runtime.generate("review", GenerationRequest("prompt", NORMAL_PAGE))
+
+    assert not runtime_dir.exists()
+
+
+def test_runtime_failure_sink_revalidates_telemetry_at_write_boundary(
+    tmp_path, monkeypatch
+) -> None:
+    runtime_dir = tmp_path / "runtime"
+    monkeypatch.setattr(runtime_status, "RUNTIME_DIR", runtime_dir)
+    monkeypatch.setattr(runtime_status, "STATUS_FILE", runtime_dir / "status.json")
+    monkeypatch.setattr(runtime_status, "EVENTS_FILE", runtime_dir / "events.jsonl")
+    event = RuntimeFailureTelemetry(
+        "http_401", "review", "generation", "fake", "remote"
+    )
+    object.__setattr__(event, "role", "unsafe role")
+
+    runtime_status.append_runtime_failure(event)
+
+    assert not runtime_dir.exists()
+
+
+def test_only_default_runtime_loader_wires_runtime_failure_sink(monkeypatch) -> None:
+    seen: list[object] = []
+    expected = object()
+
+    monkeypatch.setattr(llm_config, "load_llm_config", lambda path=None: object())
+
+    def build(_config: object, **kwargs: object) -> object:
+        seen.append(kwargs.get("telemetry"))
+        return expected
+
+    monkeypatch.setattr(llm_config, "build_llm_runtime", build)
+    llm_config.load_default_llm_runtime.cache_clear()
+    try:
+        assert llm_config.load_llm_runtime() is expected
+        assert llm_config.load_default_llm_runtime() is expected
+    finally:
+        llm_config.load_default_llm_runtime.cache_clear()
+
+    assert seen == [None, runtime_status.append_runtime_failure]
 
 
 def test_request_and_result_repr_hide_content() -> None:

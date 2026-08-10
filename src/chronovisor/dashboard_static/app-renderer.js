@@ -2319,7 +2319,34 @@ function modelRoleLabel(role) {
   return MODEL_ROLE_LABELS[role] || fmt(role);
 }
 
-function renderModelStatus(modelStatus) {
+function renderRuntimeFailures(failures) {
+  const rows = Array.isArray(failures) ? failures.slice(0, 8) : [];
+  els.modelFailureFeed.textContent = "";
+  els.modelFailureFeed.hidden = !rows.length;
+  rows.forEach((failure) => {
+    const row = document.createElement("div");
+    row.className = "event";
+    const time = document.createElement("time");
+    time.textContent = timeLabel(failure.timestamp);
+    const badge = document.createElement("span");
+    badge.className = "event-level failure";
+    badge.textContent = fmt(failure.category, "failure");
+    const message = document.createElement("span");
+    message.className = "event-message";
+    message.textContent = [
+      failure.role,
+      failure.configured_model || failure.provider,
+      failure.capability,
+      failure.location,
+      intValue(failure.retry_count) ? `${intValue(failure.retry_count)} retries` : null,
+      failure.request_id ? `request ${failure.request_id}` : null,
+    ].filter(Boolean).join(" · ");
+    row.append(time, badge, message);
+    els.modelFailureFeed.appendChild(row);
+  });
+}
+
+function renderModelStatus(modelStatus, runtimeFailures) {
   const data = modelStatus || {};
   const summary = data.summary || {};
   const models = Array.isArray(data.models) ? [...data.models] : [];
@@ -2335,6 +2362,7 @@ function renderModelStatus(modelStatus) {
   els.modelCaption.textContent = data.available
     ? `${formatBytes(summary.loaded_size_bytes)} loaded · ${formatBytes(summary.installed_size_bytes)} installed`
     : shortName(data.error || "Ollama offline");
+  renderRuntimeFailures(runtimeFailures);
 
   els.modelGrid.innerHTML = "";
   if (!models.length) {
@@ -2773,7 +2801,7 @@ function render(snapshot) {
   renderKnowledgeMix(snapshot.knowledge_mix || {});
   renderLibrarian(snapshot.librarian || {});
   renderHealth(snapshot.health || {});
-  renderModelStatus(modelStatus);
+  renderModelStatus(modelStatus, snapshot.runtime_failures || []);
   renderModelLab(snapshot.model_lab || {});
   renderEvents(snapshot.events || []);
   drawLineChart(els.pendingChart, snapshot.save_history || {}, status);

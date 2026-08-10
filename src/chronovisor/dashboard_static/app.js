@@ -151,6 +151,7 @@ const els = {
   modelLoaded: document.getElementById("model-loaded"),
   modelConfigured: document.getElementById("model-configured"),
   modelMissing: document.getElementById("model-missing"),
+  modelFailureFeed: document.getElementById("model-failure-feed"),
   modelGrid: document.getElementById("model-grid"),
   modelLabCaption: document.getElementById("model-lab-caption"),
   modelLabRoles: document.getElementById("model-lab-roles"),

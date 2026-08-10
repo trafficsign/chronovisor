@@ -597,6 +597,111 @@ def _external_configured_model(name: str, roles: set[str]) -> bool:
     )
 
 
+def _configured_runtime_backend(provider: Any) -> tuple[str, str] | None:
+    profile = getattr(provider, "profile", None)
+    profile_id = llm_config.safe_metadata_identifier(
+        getattr(profile, "profile_id", None)
+    )
+    if profile_id is not None:
+        return (profile_id, "remote")
+    kind = getattr(provider, "kind", None)
+    if not isinstance(kind, str):
+        return None
+    return {
+        "ollama": ("ollama", "local"),
+        "local-transformers": ("local-reranker", "local"),
+        "nemotron": ("nemotron", "local"),
+    }.get(kind)
+
+
+def _runtime_failure_snapshot(
+    events: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    if events is None:
+        events = runtime_status.read_events(limit=runtime_status.MAX_EVENTS)
+
+    configured_config: Any = None
+    latest: dict[tuple[str, str], tuple[int, dict[str, Any]]] = {}
+    last_failure: tuple[int, dict[str, Any]] | None = None
+    for index, raw in enumerate(events):
+        if not isinstance(raw, dict) or raw.get("kind") != "runtime_failure":
+            continue
+        request_id = llm_config.safe_metadata_identifier(raw.get("request_id"))
+        try:
+            event = llm_config.RuntimeFailureTelemetry(
+                category=raw["category"],
+                role=raw["role"],
+                capability=raw["capability"],
+                provider=raw["provider"],
+                location=raw["location"],
+                retry_count=raw["retry_count"],
+                request_id=request_id,
+            )
+        except (KeyError, TypeError, ValueError):
+            continue
+        row: dict[str, Any] = {
+            "kind": "runtime_failure",
+            "category": event.category,
+            "role": event.role,
+            "capability": event.capability,
+            "provider": event.provider,
+            "location": event.location,
+            "retry_count": event.retry_count,
+        }
+        try:
+            timestamp = datetime.fromisoformat(raw["timestamp"])
+        except (KeyError, TypeError, ValueError):
+            pass
+        else:
+            row["timestamp"] = timestamp.isoformat(timespec="seconds")
+        if event.request_id is not None:
+            row["request_id"] = event.request_id
+
+        if configured_config is None:
+            try:
+                configured_config = llm_config.load_llm_config()
+            except Exception:
+                configured_config = False
+        configured = (
+            configured_config.roles.get(event.role) if configured_config else None
+        )
+        configured_model = None
+        if configured is not None:
+            configured_capability = getattr(
+                configured.capability, "value", configured.capability
+            )
+            configured_backend = _configured_runtime_backend(
+                configured_config.providers.get(configured.provider_id)
+            )
+            if (
+                configured_backend == (event.provider, event.location)
+                and configured_capability == event.capability
+            ):
+                configured_model = llm_config.safe_metadata_identifier(configured.model)
+        if configured_model is not None:
+            row["configured_model"] = configured_model
+
+        key = (event.role, configured_model or "")
+        latest[key] = (index, row)
+        last_failure = (index, row)
+
+    rows = [
+        row
+        for _index, row in sorted(
+            latest.values(),
+            key=lambda item: (
+                -item[0],
+                str(item[1]["role"]),
+                str(item[1].get("configured_model") or ""),
+            ),
+        )[:64]
+    ]
+    return {
+        "runtime_failures": rows,
+        "last_failure": last_failure[1] if last_failure is not None else None,
+    }
+
+
 def _model_status_snapshot(ollama: dict[str, Any] | None = None) -> dict[str, Any]:
     running_snapshot = ollama or _ollama_snapshot()
     installed_snapshot = _ollama_tags_snapshot()
@@ -4233,6 +4338,8 @@ def _model_status_materialization_fingerprint(ollama: dict[str, Any]) -> str:
         CHRONOVISOR_ROOT / "config.toml",
         CHRONOVISOR_ROOT / "runtime" / "model-lab" / "active-policy.json",
         CHRONOVISOR_ROOT / "runtime" / "model-lab" / "state.json",
+        runtime_status.STATUS_FILE,
+        runtime_status.EVENTS_FILE,
     ]
     model_identity = hashlib.sha256(
         _canonical_json_bytes(ollama.get("models") or [])
@@ -4253,10 +4360,13 @@ def build_fast_snapshot() -> dict[str, Any]:
     status = runtime_status.read_status()
     if not isinstance(status, dict):
         status = {}
+    runtime_events = runtime_status.read_events(limit=runtime_status.MAX_EVENTS)
+    failures = _runtime_failure_snapshot(runtime_events)
     return {
         "status": status,
-        "events": runtime_status.read_events(limit=40)[-40:],
+        "events": runtime_events[-40:],
         "metrics": runtime_status.read_metrics(limit=60)[-60:],
+        **failures,
         "local_consensus": status.get("local_consensus") or {},
         "frontier_repair": status.get("frontier_repair") or {},
         "ollama": {},
@@ -4454,9 +4564,9 @@ def build_snapshot() -> dict[str, Any]:
             "files_failed": 0,
         }
     )
-    events = (runtime_status.read_events(limit=120) + _recent_log_events(limit=80))[
-        -160:
-    ]
+    runtime_events = runtime_status.read_events(limit=runtime_status.MAX_EVENTS)
+    failures = _runtime_failure_snapshot(runtime_events)
+    events = (runtime_events[-120:] + _recent_log_events(limit=80))[-160:]
     ollama = _ollama_snapshot()
     model_status = _safe_snapshot_component(
         "model_status",
@@ -4506,6 +4616,7 @@ def build_snapshot() -> dict[str, Any]:
         "raw_archive": raw_archive,
         "ollama": ollama,
         "model_status": model_status,
+        **failures,
         "librarian": _safe_snapshot_component(
             "librarian",
             lambda: build_librarian_status(CHRONOVISOR_ROOT),
@@ -4972,9 +5083,11 @@ def _snapshot_with_live_status(snapshot: dict[str, Any]) -> dict[str, Any]:
     if isinstance(llm, dict):
         status["llm"] = dict(llm)
     _mark_batch_activity(status)
+    failures = _runtime_failure_snapshot()
     return {
         **snapshot,
         "status": status,
+        **failures,
         "_dashboard": {**dashboard_state, "live_overlay": True},
     }
 
@@ -5333,12 +5446,16 @@ class DashboardHandler(BaseHTTPRequestHandler):
             elif path == "/api/cortex/events":
                 self._cortex_events_response(parsed.query)
             elif path == "/api/model-status":
-                snapshot = _cached_snapshot(allow_stale=True)
+                snapshot = _snapshot_with_live_status(
+                    _cached_snapshot(allow_stale=True)
+                )
                 _json_response(
                     self,
                     {
                         "model_status": snapshot["model_status"],
                         "ollama": snapshot["ollama"],
+                        "runtime_failures": snapshot["runtime_failures"],
+                        "last_failure": snapshot["last_failure"],
                     },
                 )
             elif path.startswith("/static/"):

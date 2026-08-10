@@ -10,6 +10,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from chronovisor.core.llm_runtime import RuntimeFailureTelemetry
 from chronovisor.core.llm_security import CredentialRef as CredentialRef
 from chronovisor.core.llm_security import (
     CredentialSecurityError as CredentialSecurityError,
@@ -141,6 +142,37 @@ def append_event(level: str, message: str, **fields: Any) -> dict[str, Any]:
         status_fields["last_problem"] = record
     write_status(status_fields)
     return record
+
+
+def append_runtime_failure(event: RuntimeFailureTelemetry) -> None:
+    """Append one strictly allowlisted LLM failure to bounded runtime status."""
+
+    if type(event) is not RuntimeFailureTelemetry:
+        return
+    try:
+        safe = RuntimeFailureTelemetry(
+            category=event.category,
+            role=event.role,
+            capability=event.capability,
+            provider=event.provider,
+            location=event.location,
+            retry_count=event.retry_count,
+            request_id=event.request_id,
+        )
+    except (AttributeError, TypeError, ValueError):
+        return
+    fields: dict[str, Any] = {
+        "kind": "runtime_failure",
+        "category": safe.category,
+        "role": safe.role,
+        "capability": safe.capability,
+        "provider": safe.provider,
+        "location": safe.location,
+        "retry_count": safe.retry_count,
+    }
+    if safe.request_id is not None:
+        fields["request_id"] = safe.request_id
+    safe_append_event("error", "llm runtime | request failed", **fields)
 
 
 def append_metric(kind: str, **fields: Any) -> dict[str, Any]:

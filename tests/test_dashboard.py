@@ -3008,6 +3008,251 @@ def test_build_snapshot_surfaces_frontier_human_required(
     assert self_heal["watch"]["frontier_preflight"]["ok"] is False
 
 
+def test_runtime_failure_snapshot_is_safe_exact_deterministic_and_bounded(
+    monkeypatch,
+) -> None:
+    canary = "W7 CANARY secret?credential"
+    configured = SimpleNamespace(
+        providers={
+            "fake-config": SimpleNamespace(
+                kind="openai", profile=SimpleNamespace(profile_id="fake")
+            )
+        },
+        roles={
+            "review": SimpleNamespace(
+                provider_id="fake-config",
+                model="writer-a",
+                capability="generation",
+            )
+        }
+    )
+    monkeypatch.setattr(dashboard.llm_config, "load_llm_config", lambda: configured)
+    events = [
+        {"kind": "other", "error": canary},
+        {
+            "kind": "runtime_failure",
+            "category": "http_401",
+            "role": "review",
+            "capability": "generation",
+            "provider": "fake",
+            "location": "remote",
+            "retry_count": 0,
+            "timestamp": "2026-08-10T10:00:00+09:00",
+            "configured_model": canary,
+            "request_id": canary,
+            "error": canary,
+            "prompt": canary,
+            "content": canary,
+            "credential": canary,
+        },
+        {
+            "kind": "runtime_failure",
+            "category": "http_429",
+            "role": "review",
+            "capability": "generation",
+            "provider": "fake",
+            "location": "remote",
+            "retry_count": 2,
+            "timestamp": "2026-08-10T10:01:00+09:00",
+            "request_id": "req_safe_2",
+        },
+        {
+            "kind": "runtime_failure",
+            "category": "timeout",
+            "role": "review",
+            "capability": "generation",
+            "provider": "fake",
+            "location": "remote",
+            "retry_count": 1,
+            "timestamp": "2026-08-10T10:02:00+09:00",
+            "configured_model": "writer-b",
+        },
+        *[
+            {
+                "kind": "runtime_failure",
+                "category": "backend_error",
+                "role": f"role.{index:03d}",
+                "capability": "generation",
+                "provider": "fake",
+                "location": "local",
+                "retry_count": 0,
+            }
+            for index in range(70)
+        ],
+    ]
+
+    snapshot = dashboard._runtime_failure_snapshot(events)
+    serialized = json.dumps(snapshot, ensure_ascii=False)
+
+    assert len(snapshot["runtime_failures"]) == 64
+    assert snapshot["runtime_failures"][0]["role"] == "role.069"
+    assert snapshot["last_failure"]["role"] == "role.069"
+    assert canary not in serialized
+
+    focused = dashboard._runtime_failure_snapshot(events[:4])
+    assert focused["runtime_failures"] == [focused["last_failure"]]
+    assert focused["last_failure"]["configured_model"] == "writer-a"
+    assert focused["last_failure"]["category"] == "timeout"
+    assert dashboard._runtime_failure_snapshot(events[:3])["last_failure"][
+        "request_id"
+    ] == "req_safe_2"
+
+
+@pytest.mark.parametrize(
+    ("kind", "profile_id", "event_provider", "capability"),
+    [
+        ("ollama", None, "ollama", "generation"),
+        ("openai", "remote-profile", "remote-profile", "generation"),
+        ("local-transformers", None, "local-reranker", "rerank"),
+    ],
+)
+def test_runtime_failure_joins_exact_configured_backend_provider(
+    monkeypatch,
+    kind: str,
+    profile_id: str | None,
+    event_provider: str,
+    capability: str,
+) -> None:
+    provider = SimpleNamespace(
+        kind=kind,
+        profile=(SimpleNamespace(profile_id=profile_id) if profile_id else None),
+    )
+    config = SimpleNamespace(
+        providers={"configured-provider": provider},
+        roles={
+            "exact.role": SimpleNamespace(
+                provider_id="configured-provider",
+                model="configured-model",
+                capability=capability,
+            )
+        },
+    )
+    monkeypatch.setattr(dashboard.llm_config, "load_llm_config", lambda: config)
+    base = {
+        "kind": "runtime_failure",
+        "category": "backend_error",
+        "role": "exact.role",
+        "capability": capability,
+        "location": "local" if profile_id is None else "remote",
+        "retry_count": 0,
+    }
+
+    joined = dashboard._runtime_failure_snapshot(
+        [{**base, "provider": event_provider}]
+    )["last_failure"]
+    drifted = dashboard._runtime_failure_snapshot(
+        [{**base, "provider": "other-provider"}]
+    )["last_failure"]
+    wrong_location = dashboard._runtime_failure_snapshot(
+        [
+            {
+                **base,
+                "provider": event_provider,
+                "location": "remote" if base["location"] == "local" else "local",
+            }
+        ]
+    )["last_failure"]
+
+    assert joined["configured_model"] == "configured-model"
+    assert "configured_model" not in drifted
+    assert "configured_model" not in wrong_location
+
+
+def test_runtime_failure_invalidates_model_cache_and_overlays_stale_snapshot(
+    tmp_path: Path, monkeypatch
+) -> None:
+    chronovisor_root = tmp_path / "wiki"
+    runtime_dir = chronovisor_root / "runtime"
+    runtime_dir.mkdir(parents=True)
+    monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", chronovisor_root)
+    monkeypatch.setattr(dashboard, "LOG_FILE", chronovisor_root / "log.md")
+    monkeypatch.setattr(runtime_status, "RUNTIME_DIR", runtime_dir)
+    monkeypatch.setattr(runtime_status, "STATUS_FILE", runtime_dir / "status.json")
+    monkeypatch.setattr(runtime_status, "EVENTS_FILE", runtime_dir / "events.jsonl")
+    monkeypatch.setattr(runtime_status, "METRICS_FILE", runtime_dir / "metrics.jsonl")
+    monkeypatch.setattr(
+        dashboard.llm_config,
+        "load_llm_config",
+        lambda: SimpleNamespace(
+            providers={
+                "fake-config": SimpleNamespace(
+                    kind="openai", profile=SimpleNamespace(profile_id="fake")
+                )
+            },
+            roles={
+                "review": SimpleNamespace(
+                    provider_id="fake-config",
+                    model="writer",
+                    capability="generation",
+                )
+            }
+        ),
+    )
+    monkeypatch.setattr(orchestrator, "_load_state", lambda: {})
+    monkeypatch.setattr(
+        dashboard,
+        "_canonicalize_runtime_status",
+        lambda status, _state, *, pending: status,
+    )
+    runtime_status.write_status({"state": "idle"})
+    model_before = dashboard._model_status_materialization_fingerprint({"models": []})
+    snapshot_before = dashboard._build_snapshot_source_fingerprint()
+
+    runtime_status.append_runtime_failure(
+        dashboard.llm_config.RuntimeFailureTelemetry(
+            "http_429",
+            "review",
+            "generation",
+            "fake",
+            "remote",
+            retry_count=2,
+            request_id="req_safe_3",
+        )
+    )
+
+    model_after = dashboard._model_status_materialization_fingerprint({"models": []})
+    snapshot_after = dashboard._build_snapshot_source_fingerprint()
+    overlaid = dashboard._snapshot_with_live_status(
+        {
+            "status": {"state": "idle"},
+            "model_status": {"models": []},
+            "runtime_failures": [],
+            "last_failure": None,
+        }
+    )
+
+    assert model_after != model_before
+    assert snapshot_after != snapshot_before
+    assert overlaid["last_failure"]["category"] == "http_429"
+    assert overlaid["last_failure"]["configured_model"] == "writer"
+    assert overlaid["runtime_failures"] == [overlaid["last_failure"]]
+
+
+def test_model_fleet_runtime_failure_renderer_uses_text_only() -> None:
+    page = (dashboard.STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    app = (dashboard.STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    renderer = (dashboard.STATIC_DIR / "app-renderer.js").read_text(encoding="utf-8")
+    source = Path(dashboard.__file__).read_text(encoding="utf-8")
+    block = renderer.split("function renderRuntimeFailures(failures)", 1)[1].split(
+        "function renderModelStatus", 1
+    )[0]
+    route = source.split('elif path == "/api/model-status":', 1)[1].split(
+        'elif path.startswith("/static/"):', 1
+    )[0]
+
+    assert 'id="model-failure-feed"' in page
+    assert "modelFailureFeed: document.getElementById" in app
+    assert "textContent" in block
+    assert "innerHTML" not in block
+    assert "configured_model" in block
+    assert "request_id" in block
+    assert "snapshot.runtime_failures" in renderer
+    assert '"runtime_failures": snapshot["runtime_failures"]' in route
+    assert '"last_failure": snapshot["last_failure"]' in route
+    assert "_snapshot_with_live_status(" in route
+    assert "W7 CANARY" not in page + app + renderer
+
+
 def test_model_status_snapshot_combines_ollama_and_config(monkeypatch) -> None:
     monkeypatch.setattr(
         dashboard,

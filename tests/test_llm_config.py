@@ -8,7 +8,7 @@ from urllib.request import Request
 import httpx
 import pytest
 
-from chronovisor.core import llm_config
+from chronovisor.core import llm_config, runtime_status
 from chronovisor.core.anthropic_adapter import AnthropicMessagesAdapter
 from chronovisor.core.llm_config import (
     LLMConfigError,
@@ -44,10 +44,12 @@ def test_default_runtime_loader_caches_one_process_runtime(
 ) -> None:
     expected = object()
     calls = 0
+    telemetry: list[object] = []
 
-    def load(**_kwargs: object) -> object:
+    def load(**kwargs: object) -> object:
         nonlocal calls
         calls += 1
+        telemetry.append(kwargs.get("telemetry"))
         return expected
 
     load_default_llm_runtime.cache_clear()
@@ -56,6 +58,7 @@ def test_default_runtime_loader_caches_one_process_runtime(
         assert load_default_llm_runtime() is expected
         assert load_default_llm_runtime() is expected
         assert calls == 1
+        assert telemetry == [runtime_status.append_runtime_failure]
     finally:
         load_default_llm_runtime.cache_clear()
 
