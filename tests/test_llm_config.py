@@ -31,10 +31,12 @@ from chronovisor.core.llm_security import (
     CredentialSecurityError,
     SecretValue,
 )
+from chronovisor.core.nemotron_adapter import NemotronEmbeddingBackend
 from chronovisor.core.ollama_adapter import OllamaAdapter
 from chronovisor.core.openai_compatible_adapter import OpenAICompatibleAdapter
 from chronovisor.core.provider_profiles import CURATED_PROFILE_IDS, ProviderProfile
 from chronovisor.core.reranker import LocalRerankBackend
+from chronovisor.core.runtime_config import SearchEmbeddingConfig
 
 
 def test_default_runtime_loader_caches_one_process_runtime(
@@ -156,6 +158,68 @@ def test_local_only_config_composes_ollama_and_transformer_reranker() -> None:
     assert isinstance(runtime._embedding["embed"].backend, OllamaAdapter)
     assert isinstance(runtime._rerank["rerank"].backend, LocalRerankBackend)
     assert resolver.calls == []
+
+
+def test_local_nemotron_roles_compose_lazy_device_bound_backends() -> None:
+    config = parse_llm_config(
+        {
+            "llm": {
+                "providers": {
+                    "foreground": {"kind": "nemotron", "device": "mps"},
+                    "incremental": {"kind": "nemotron", "device": "cpu"},
+                },
+                "roles": {
+                    "search.semantic.foreground": {
+                        "capability": "embedding",
+                        "provider": "foreground",
+                        "model": "nemotron-test",
+                    },
+                    "search.semantic.incremental": {
+                        "capability": "embedding",
+                        "provider": "incremental",
+                        "model": "nemotron-test",
+                    },
+                },
+            }
+        }
+    )
+    search_config = SearchEmbeddingConfig(model="nemotron-test", dimensions=2)
+
+    runtime = build_llm_runtime(config, search_embedding_config=search_config)
+
+    foreground = runtime._embedding["search.semantic.foreground"].backend
+    incremental = runtime._embedding["search.semantic.incremental"].backend
+    assert isinstance(foreground, NemotronEmbeddingBackend)
+    assert isinstance(incremental, NemotronEmbeddingBackend)
+    assert foreground.device == "mps"
+    assert incremental.device == "cpu"
+    assert foreground.incremental is False
+    assert incremental.incremental is True
+    assert foreground._model is None
+    assert incremental._model is None
+
+
+def test_local_nemotron_role_device_mismatch_fails_before_model_loading() -> None:
+    config = parse_llm_config(
+        {
+            "llm": {
+                "providers": {"wrong": {"kind": "nemotron", "device": "cpu"}},
+                "roles": {
+                    "search.semantic.foreground": {
+                        "capability": "embedding",
+                        "provider": "wrong",
+                        "model": "nemotron-test",
+                    }
+                },
+            }
+        }
+    )
+
+    with pytest.raises(LLMConfigError):
+        build_llm_runtime(
+            config,
+            search_embedding_config=SearchEmbeddingConfig(model="nemotron-test"),
+        )
 
 
 def test_one_remote_profile_resolves_once_and_routes_generation_and_embedding() -> None:
@@ -436,6 +500,8 @@ def test_repository_example_has_representative_local_role_map() -> None:
 
     assert set(config.roles) >= {
         "search.semantic",
+        "search.semantic.foreground",
+        "search.semantic.incremental",
         "search.rerank",
         "librarian.review",
         "classification.primary",

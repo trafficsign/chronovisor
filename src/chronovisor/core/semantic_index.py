@@ -14,7 +14,6 @@ import hashlib
 import json
 import math
 import os
-import re
 import shutil
 import sqlite3
 import tempfile
@@ -28,11 +27,13 @@ from typing import Any
 
 import numpy as np
 
-from chronovisor.core import frontmatter
+from chronovisor.core.canonical_document import (
+    CanonicalDocumentError,
+    parse_document,
+)
 from chronovisor.core.hashutil import sha256_bytes as _sha256_bytes
 from chronovisor.core.hashutil import sha256_file as _sha256_file
 from chronovisor.core.page_identity import normalize_page_uid
-from chronovisor.core.search_types import FRONTMATTER_RE
 from chronovisor.core.store import CHRONOVISOR_ROOT, page_id_from_path
 
 SEMANTIC_ROOT = CHRONOVISOR_ROOT / ".index" / "semantic"
@@ -95,10 +96,6 @@ def _utc_now() -> str:
     return datetime.now(UTC).isoformat(timespec="milliseconds")
 
 
-
-
-
-
 def _fsync_directory(path: Path) -> None:
     descriptor = os.open(path, os.O_RDONLY)
     try:
@@ -141,26 +138,38 @@ def _repo_commit() -> str:
 def extract_page_documents(path: Path) -> list[SemanticDocument]:
     """Project one canonical page into page/question/chunk documents."""
 
-    from chronovisor.core.search import _markdown_chunks, _recall_questions_from_content
+    from chronovisor.core import search as search_core
 
     try:
-        content = path.read_text(encoding="utf-8")
+        source = path.read_bytes()
+        document = parse_document(source)
+        body = document.body.decode("utf-8")
         mtime_ns = path.stat().st_mtime_ns
-    except (OSError, UnicodeDecodeError):
+    except (CanonicalDocumentError, OSError, UnicodeDecodeError):
+        return []
+    metadata = document.metadata
+    if metadata.get("status") != "stable":
         return []
     page_id = page_id_from_path(path)
-    metadata, _body = frontmatter.parse(content)
     try:
         page_uid = normalize_page_uid(metadata.get("uid"))
     except ValueError:
         page_uid = ""
     identity = page_uid or page_id
-    source_sha256 = _sha256_bytes(content.encode("utf-8"))
-    title_match = re.search(r"title:\s*(.+)", content)
-    title = title_match.group(1).strip() if title_match else page_id
-    questions = _recall_questions_from_content(content)
+    source_sha256 = _sha256_bytes(source)
+    title_value = metadata.get("title")
+    title = title_value.strip() or page_id if isinstance(title_value, str) else page_id
+    description_value = metadata.get("description")
+    description = (
+        description_value.strip() if isinstance(description_value, str) else ""
+    )
+    questions = search_core._recall_questions(metadata)
     recall_text = "\n".join(f"Q: {question}" for question in questions)
-    page_text = f"{title}\n\n{recall_text}\n\n{FRONTMATTER_RE.sub('', content)[:2000]}"
+    page_text = "\n\n".join(
+        part
+        for part in (title or page_id, description, recall_text, body[:2000])
+        if part
+    )
     documents = [
         SemanticDocument(
             doc_id=identity,
@@ -175,32 +184,34 @@ def extract_page_documents(path: Path) -> list[SemanticDocument]:
         )
     ]
     documents.extend(
-            SemanticDocument(
-                doc_id=f"{identity}#q{index}",
-                page_id=page_id,
-                kind="question",
-                ordinal=index,
-                text=question,
-                source_path=str(path),
-                source_sha256=source_sha256,
-                source_mtime_ns=mtime_ns,
-                page_uid=page_uid,
-            )
+        SemanticDocument(
+            doc_id=f"{identity}#q{index}",
+            page_id=page_id,
+            kind="question",
+            ordinal=index,
+            text=question,
+            source_path=str(path),
+            source_sha256=source_sha256,
+            source_mtime_ns=mtime_ns,
+            page_uid=page_uid,
+        )
         for index, question in enumerate(questions)
     )
     documents.extend(
-            SemanticDocument(
-                doc_id=f"{identity}#c{index}",
-                page_id=page_id,
-                kind="chunk",
-                ordinal=index,
-                text=chunk,
-                source_path=str(path),
-                source_sha256=source_sha256,
-                source_mtime_ns=mtime_ns,
-                page_uid=page_uid,
-            )
-        for index, chunk in enumerate(_markdown_chunks(content, title))
+        SemanticDocument(
+            doc_id=f"{identity}#c{index}",
+            page_id=page_id,
+            kind="chunk",
+            ordinal=index,
+            text=chunk,
+            source_path=str(path),
+            source_sha256=source_sha256,
+            source_mtime_ns=mtime_ns,
+            page_uid=page_uid,
+        )
+        for index, chunk in enumerate(
+            search_core._markdown_chunks(body, title, metadata)
+        )
     )
     return documents
 

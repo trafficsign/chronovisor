@@ -23,6 +23,11 @@ _MODEL_METHODS = frozenset(
 
 # These are the only production runtime boundaries allowed to touch providers.
 RUNTIME_BOUNDARIES = {
+    "src/chronovisor/core/nemotron_adapter.py": {
+        "model_class.SentenceTransformer": 2,
+        "model_method.encode_document": 1,
+        "model_method.encode_query": 1,
+    },
     "src/chronovisor/core/ollama_adapter.py": {
         "ollama.chat": 1,
         "ollama.embed": 1,
@@ -55,11 +60,6 @@ LEGACY_PRODUCTION_BYPASSES = {
     "src/chronovisor/recall/collection_anomaly_worker.py": {"ollama.chat": 1},
     "src/chronovisor/recall/recall_answer_adapters.py": {"ollama.chat": 1},
     "src/chronovisor/recall/recall_processor.py": {"ollama.chat": 1},
-    "src/chronovisor/search/semantic_model.py": {
-        "model_class.SentenceTransformer": 2,
-        "model_method.encode_document": 1,
-        "model_method.encode_query": 1,
-    },
 }
 
 # These tools do not run in production workflows; each exception carries its reason.

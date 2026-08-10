@@ -1,4 +1,3 @@
-
 import threading
 import time
 from collections import OrderedDict, deque
@@ -7,12 +6,39 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+from chronovisor.core.llm_runtime import (
+    EmbeddingPurpose,
+    EmbeddingRequest,
+    EmbeddingResult,
+    EmbeddingRoute,
+    LLMRuntime,
+    RouteLocation,
+)
+from chronovisor.core.runtime_config import SearchEmbeddingConfig
+from chronovisor.search.semantic_model import SemanticModelError
 from chronovisor.search.semantic_service import (
+    DOCUMENT_SOURCE,
+    FOREGROUND_ROLE,
+    INCREMENTAL_ROLE,
     QueryBatcher,
     SemanticServiceState,
     ServiceBusy,
     _drifted_page_ids,
 )
+
+
+class FakeEmbeddingBackend:
+    provider = "nemotron"
+    location = RouteLocation.LOCAL
+
+    def __init__(self) -> None:
+        self.requests: list[EmbeddingRequest] = []
+
+    def embed(self, request: EmbeddingRequest, *, model: str) -> EmbeddingResult:
+        self.requests.append(request)
+        return EmbeddingResult(
+            tuple((1.0, 0.0) for _ in request.texts), self.provider, model
+        )
 
 
 def test_drifted_page_ids_are_deduplicated_across_states() -> None:
@@ -23,6 +49,85 @@ def test_drifted_page_ids_are_deduplicated_across_states() -> None:
             "deleted_page_ids": ["gone"],
         }
     ) == ["changed", "gone", "new", "shared"]
+
+
+def test_semantic_routes_reject_remote_before_any_embedding_call() -> None:
+    class RemoteBackend(FakeEmbeddingBackend):
+        provider = "cloud"
+        location = RouteLocation.REMOTE
+
+    backend = RemoteBackend()
+    runtime = LLMRuntime(
+        embedding={
+            FOREGROUND_ROLE: EmbeddingRoute(backend, "model"),
+            INCREMENTAL_ROLE: EmbeddingRoute(backend, "model"),
+        }
+    )
+    state = object.__new__(SemanticServiceState)
+    state.config = SearchEmbeddingConfig(model="model")
+    state._runtime = runtime
+
+    with pytest.raises(SemanticModelError):
+        state._validate_runtime_routes()
+
+    assert backend.requests == []
+
+
+def test_semantic_routes_reject_model_change_until_index_rebuild() -> None:
+    backend = FakeEmbeddingBackend()
+    runtime = LLMRuntime(
+        embedding={
+            FOREGROUND_ROLE: EmbeddingRoute(backend, "changed-model"),
+            INCREMENTAL_ROLE: EmbeddingRoute(backend, "changed-model"),
+        }
+    )
+    state = object.__new__(SemanticServiceState)
+    state.config = SearchEmbeddingConfig(model="indexed-model")
+    state._runtime = runtime
+
+    with pytest.raises(SemanticModelError):
+        state._validate_runtime_routes()
+
+    assert backend.requests == []
+
+
+def test_semantic_runtime_vectors_pass_role_purpose_and_page_source() -> None:
+    backend = FakeEmbeddingBackend()
+    state = object.__new__(SemanticServiceState)
+    state.config = SearchEmbeddingConfig(model="model", dimensions=2)
+    state._runtime = LLMRuntime(
+        embedding={FOREGROUND_ROLE: EmbeddingRoute(backend, "model")}
+    )
+
+    vectors = state._runtime_vectors(
+        FOREGROUND_ROLE,
+        ["document"],
+        EmbeddingPurpose.DOCUMENT,
+    )
+
+    assert vectors.shape == (1, 2)
+    assert backend.requests[0].purpose is EmbeddingPurpose.DOCUMENT
+    assert backend.requests[0].source == DOCUMENT_SOURCE
+
+
+def test_incremental_model_is_released_when_lazy_self_test_fails() -> None:
+    released: list[str] = []
+
+    def fail(_role: str) -> dict[str, object]:
+        raise SemanticModelError("failed")
+
+    state = object.__new__(SemanticServiceState)
+    state._cpu_ready = False
+    state._runtime = SimpleNamespace(
+        release_embedding=lambda role: released.append(role)
+    )
+    state._self_test_role = fail
+
+    with pytest.raises(SemanticModelError):
+        state._ensure_cpu()
+
+    assert released == [INCREMENTAL_ROLE]
+    assert state._cpu_ready is False
 
 
 def test_query_batcher_combines_concurrent_requests() -> None:
@@ -44,8 +149,7 @@ def test_query_batcher_combines_concurrent_requests() -> None:
 
         with ThreadPoolExecutor(max_workers=4) as pool:
             futures = [
-                pool.submit(batcher.submit, f"q{index}", 1, 1.0)
-                for index in range(4)
+                pool.submit(batcher.submit, f"q{index}", 1, 1.0) for index in range(4)
             ]
             assert all(future.result()[0][0] == "page" for future in futures)
         assert len(calls) == 1
@@ -87,9 +191,7 @@ def test_search_reuses_cached_query_vector_without_batcher() -> None:
     state._publish_status = lambda: pytest.fail(
         "status publication must stay off the foreground path"
     )
-    state._search_vector = lambda cached, top_n: [
-        ("page", float(cached[0]) + top_n)
-    ]
+    state._search_vector = lambda cached, top_n: [("page", float(cached[0]) + top_n)]
     state._batcher = SimpleNamespace(
         submit=lambda *_args, **_kwargs: pytest.fail("batcher was called")
     )

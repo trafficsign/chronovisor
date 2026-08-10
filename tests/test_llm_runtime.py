@@ -15,6 +15,7 @@ from chronovisor.core.llm_runtime import (
     BackendExecutionError,
     CapabilityUnavailableError,
     EgressDeniedError,
+    EmbeddingPurpose,
     EmbeddingRequest,
     EmbeddingResult,
     EmbeddingRoute,
@@ -104,6 +105,57 @@ def test_runtime_routes_each_capability_without_fallback() -> None:
     )
     with pytest.raises(CapabilityUnavailableError):
         runtime.generate("search", GenerationRequest("no fallback", NORMAL_PAGE))
+
+
+def test_embedding_purpose_defaults_to_document_and_is_validated() -> None:
+    backend = FakeBackend()
+    runtime = LLMRuntime(embedding={"search": EmbeddingRoute(backend, "embedder")})
+
+    assert (
+        EmbeddingRequest(("document",), NORMAL_PAGE).purpose
+        is EmbeddingPurpose.DOCUMENT
+    )
+    assert (
+        runtime.embed(
+            "search",
+            EmbeddingRequest(("query",), NORMAL_PAGE, purpose=EmbeddingPurpose.QUERY),
+        ).model
+        == "embedder"
+    )
+    with pytest.raises(RequestValidationError) as exc:
+        runtime.embed(
+            "search",
+            EmbeddingRequest(
+                ("invalid",),
+                NORMAL_PAGE,
+                purpose=cast(EmbeddingPurpose, "query"),
+            ),
+        )
+    assert exc.value.field_name == "purpose"
+
+
+def test_runtime_releases_only_local_embedding_backends() -> None:
+    class ClosableBackend(FakeBackend):
+        def __init__(self) -> None:
+            self.closed = 0
+
+        def close(self) -> None:
+            self.closed += 1
+
+    local = ClosableBackend()
+    remote = CountingRemoteBackend()
+    remote.close = lambda: pytest.fail("remote backend must not be released")  # type: ignore[attr-defined]
+    runtime = LLMRuntime(
+        embedding={
+            "local": EmbeddingRoute(local, "local-model"),
+            "remote": EmbeddingRoute(remote, "remote-model"),
+        }
+    )
+
+    runtime.release_embedding("local")
+    runtime.release_embedding("remote")
+
+    assert local.closed == 1
 
 
 @pytest.mark.parametrize(

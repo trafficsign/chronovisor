@@ -34,6 +34,7 @@ from chronovisor.core.llm_security import (
     CredentialSecurityError,
     RequestSender,
 )
+from chronovisor.core.nemotron_adapter import NemotronEmbeddingBackend
 from chronovisor.core.ollama_adapter import OllamaAdapter
 from chronovisor.core.openai_compatible_adapter import compose_openai_compatible_adapter
 from chronovisor.core.provider_profiles import (
@@ -45,7 +46,12 @@ from chronovisor.core.provider_profiles import (
     generic_openai_profile,
 )
 from chronovisor.core.reranker import LocalRerankBackend
-from chronovisor.core.runtime_config import CONFIG_FILE, RerankerConfig
+from chronovisor.core.runtime_config import (
+    CONFIG_FILE,
+    RerankerConfig,
+    SearchEmbeddingConfig,
+    load_search_embedding_config,
+)
 
 _PROFILE_ID = re.compile(r"[a-z][a-z0-9._-]{0,63}\Z")
 _ROLE_ID = re.compile(r"[a-z][a-z0-9._-]{0,127}\Z")
@@ -105,6 +111,7 @@ class ProviderDefinition:
     capabilities: BackendCapabilities
     profile: ProviderProfile | None = None
     reranker_config: RerankerConfig | None = None
+    embedding_device: str | None = None
 
     def capabilities_for(self, model: str) -> BackendCapabilities:
         return (
@@ -229,9 +236,7 @@ def _remote_profile(
             },
         )
         try:
-            auth_scheme = AuthScheme.parse(
-                _string(table.get("auth_scheme", "bearer"))
-            )
+            auth_scheme = AuthScheme.parse(_string(table.get("auth_scheme", "bearer")))
             profile = generic_openai_profile(
                 provider_id,
                 _string(table.get("endpoint")),
@@ -309,6 +314,17 @@ def _provider(provider_id: str, value: object) -> ProviderDefinition:
             kind,
             BackendCapabilities(generation=False, embedding=False, rerank=True),
             reranker_config=config,
+        )
+    if kind == "nemotron":
+        _exact_keys(table, {"kind", "device"})
+        device = _string(table.get("device"))
+        if device not in {"mps", "cpu"}:
+            raise _fail()
+        return ProviderDefinition(
+            provider_id,
+            kind,
+            BackendCapabilities(generation=False, embedding=True),
+            embedding_device=device,
         )
     if kind in CURATED_PROFILE_IDS or kind == ProviderProtocol.OPENAI_COMPATIBLE.value:
         return _remote_profile(provider_id, kind, table)
@@ -453,10 +469,46 @@ def build_llm_runtime(
     *,
     resolver: CredentialResolver | None = None,
     sender_factory: SenderFactory | None = None,
+    search_embedding_config: SearchEmbeddingConfig | None = None,
 ) -> LLMRuntime:
     if resolver is None:
         resolver = CredentialResolver()
     used_provider_ids = {role.provider_id for role in config.roles.values()}
+    nemotron_provider_ids = {
+        provider_id
+        for provider_id in used_provider_ids
+        if config.providers[provider_id].kind == "nemotron"
+    }
+    if nemotron_provider_ids and search_embedding_config is None:
+        search_embedding_config = load_search_embedding_config()
+    incremental_provider_id: str | None = None
+    if search_embedding_config is not None:
+        for role_name, expected_device in (
+            ("search.semantic.foreground", search_embedding_config.query_device),
+            (
+                "search.semantic.incremental",
+                search_embedding_config.incremental_device,
+            ),
+        ):
+            role = config.roles.get(role_name)
+            if role is None:
+                continue
+            provider = config.providers[role.provider_id]
+            if provider.kind == "nemotron":
+                if provider.embedding_device != expected_device:
+                    raise _fail()
+                if role_name == "search.semantic.incremental":
+                    incremental_provider_id = role.provider_id
+        foreground = config.roles.get("search.semantic.foreground")
+        incremental = config.roles.get("search.semantic.incremental")
+        if (
+            foreground is not None
+            and incremental is not None
+            and config.providers[foreground.provider_id].kind == "nemotron"
+            and config.providers[incremental.provider_id].kind == "nemotron"
+            and foreground.provider_id == incremental.provider_id
+        ):
+            raise _fail()
     backends: dict[str, object] = {}
     for provider_id in used_provider_ids:
         provider = config.providers[provider_id]
@@ -466,6 +518,16 @@ def build_llm_runtime(
             if provider.reranker_config is None:
                 raise _fail()
             backends[provider_id] = LocalRerankBackend(provider.reranker_config)
+        elif provider.kind == "nemotron":
+            if provider.embedding_device is None:
+                raise _fail()
+            if search_embedding_config is None:
+                raise _fail()
+            backends[provider_id] = NemotronEmbeddingBackend(
+                search_embedding_config,
+                device=provider.embedding_device,
+                incremental=provider_id == incremental_provider_id,
+            )
         elif provider.profile is not None:
             sender = (
                 sender_factory(provider.profile) if sender_factory is not None else None

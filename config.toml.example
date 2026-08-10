@@ -47,6 +47,14 @@ backend = "transformers"
 batch_size = 10
 max_length = 384
 
+[llm.providers.semantic_foreground]
+kind = "nemotron"
+device = "mps"
+
+[llm.providers.semantic_incremental]
+kind = "nemotron"
+device = "cpu"
+
 [llm.roles."search.semantic"]
 capability = "embedding"
 provider = "local"
@@ -56,6 +64,16 @@ model = "bge-m3"
 capability = "rerank"
 provider = "local_reranker"
 model = "BAAI/bge-reranker-v2-m3"
+
+[llm.roles."search.semantic.foreground"]
+capability = "embedding"
+provider = "semantic_foreground"
+model = "nvidia/Nemotron-3-Embed-1B-BF16"
+
+[llm.roles."search.semantic.incremental"]
+capability = "embedding"
+provider = "semantic_incremental"
+model = "nvidia/Nemotron-3-Embed-1B-BF16"
 
 [llm.roles."librarian.review"]
 capability = "generation"

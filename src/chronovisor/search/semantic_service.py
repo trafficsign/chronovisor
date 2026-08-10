@@ -19,14 +19,24 @@ import socketserver
 import threading
 import time
 from collections import OrderedDict, deque
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from concurrent.futures import Future
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 
 from chronovisor.core.link_fix import atomic_write
+from chronovisor.core.llm_config import load_default_llm_runtime
+from chronovisor.core.llm_runtime import (
+    EmbeddingPurpose,
+    EmbeddingRequest,
+    LLMRuntime,
+    RouteLocation,
+    SourceDataClass,
+    SourceDataClassification,
+    SourceSensitivity,
+)
 from chronovisor.core.ollama import model_activity
 from chronovisor.core.runtime_config import (
     SearchEmbeddingConfig,
@@ -34,6 +44,7 @@ from chronovisor.core.runtime_config import (
 )
 from chronovisor.core.semantic_index import (
     SEMANTIC_ROOT,
+    LoadedGeneration,
     SemanticIndexError,
     activate_generation,
     archive_legacy_search_index,
@@ -61,12 +72,18 @@ from chronovisor.core.semantic_jobs import (
 from chronovisor.core.store import CHRONOVISOR_ROOT, SYSTEM_DIR, find_page
 from chronovisor.search.accelerator_lease import accelerator_lease
 from chronovisor.search.semantic_model import (
-    NemotronEncoder,
+    SemanticModelError,
     semantic_runtime_versions,
 )
 
 SERVICE_STATUS_FILE = CHRONOVISOR_ROOT / "runtime" / "semantic-service-status.json"
 QUERY_CACHE_TTL_SECONDS = 600.0
+FOREGROUND_ROLE = "search.semantic.foreground"
+INCREMENTAL_ROLE = "search.semantic.incremental"
+QUERY_SOURCE = SourceDataClassification(SourceDataClass.RAW, SourceSensitivity.NORMAL)
+DOCUMENT_SOURCE = SourceDataClassification(
+    SourceDataClass.PAGE, SourceSensitivity.NORMAL
+)
 
 
 class ServiceBusy(RuntimeError):
@@ -98,7 +115,9 @@ class QueryBatcher:
         self._window_seconds = max(0, window_ms) / 1_000
         self._max_batch = max(1, max_batch)
         self._available = available
-        self._queue: queue.Queue[tuple[str, int, Future]] = queue.Queue(maxsize=64)
+        self._queue: queue.Queue[tuple[str, int, Future[list[tuple[str, float]]]]] = (
+            queue.Queue(maxsize=64)
+        )
         self._stopped = threading.Event()
         self._thread = threading.Thread(
             target=self._run, name="semantic-query-batcher", daemon=True
@@ -106,7 +125,7 @@ class QueryBatcher:
         self._thread.start()
 
     def submit(self, query: str, top_n: int, timeout: float) -> list[tuple[str, float]]:
-        future: Future = Future()
+        future: Future[list[tuple[str, float]]] = Future()
         try:
             self._queue.put_nowait((query, top_n, future))
         except queue.Full as exc:
@@ -140,7 +159,9 @@ class QueryBatcher:
                 continue
             try:
                 vectors = self._encode([item[0] for item in batch], self._max_batch)
-                for vector, (_query, top_n, future) in zip(vectors, batch, strict=False):
+                for vector, (_query, top_n, future) in zip(
+                    vectors, batch, strict=False
+                ):
                     future.set_result(self._search(vector, top_n))
             except BaseException as exc:
                 for _query, _top_n, future in batch:
@@ -184,25 +205,25 @@ class SemanticServiceState:
         self,
         config: SearchEmbeddingConfig,
         *,
-        encoder_factory: Callable[..., NemotronEncoder] = NemotronEncoder,
+        runtime: LLMRuntime | None = None,
         root: Path = SEMANTIC_ROOT,
     ) -> None:
         self.config = config
         self.root = root
-        self._encoder_factory = encoder_factory
+        self._runtime = runtime or load_default_llm_runtime()
+        self._validate_runtime_routes()
         self._model_lock = threading.Lock()
         self._generation_lock = threading.RLock()
         self._maintenance = threading.Event()
         self._stopped = threading.Event()
-        self._foreground = encoder_factory(config, device=config.query_device)
-        self._self_test = self._foreground.self_test()
+        self._self_test = self._self_test_role(FOREGROUND_ROLE)
         self._parity_text = "Chronovisorの意味検索インデックス整合性テスト"
-        self._parity_reference = self._foreground.encode_documents(
-            [self._parity_text], 1
-        )[0]
-        self._generation = None
+        self._parity_reference = self._embed_foreground_documents([self._parity_text])[
+            0
+        ]
+        self._generation: LoadedGeneration | None = None
         self._last_error = ""
-        self._cpu_encoder: NemotronEncoder | None = None
+        self._cpu_ready = False
         self._cpu_last_used = 0.0
         self._last_job_prune = 0.0
         self._last_drift_scan = 0.0
@@ -236,9 +257,106 @@ class SemanticServiceState:
         self._stopped.set()
         self._batcher.close()
         self._worker.join(timeout=2)
-        if self._cpu_encoder is not None:
-            self._cpu_encoder.close()
-        self._foreground.close()
+        if self._cpu_ready:
+            self._runtime.release_embedding(INCREMENTAL_ROLE)
+        self._runtime.release_embedding(FOREGROUND_ROLE)
+
+    def _validate_runtime_routes(self) -> None:
+        routes = (
+            self._runtime.resolve_embedding(FOREGROUND_ROLE),
+            self._runtime.resolve_embedding(INCREMENTAL_ROLE),
+        )
+        if any(
+            route.location is not RouteLocation.LOCAL
+            or route.provider != "nemotron"
+            or route.model != self.config.model
+            for route in routes
+        ):
+            raise SemanticModelError(
+                "semantic roles require the configured local Nemotron model"
+            )
+
+    def _runtime_vectors(
+        self,
+        role: str,
+        texts: list[str],
+        purpose: EmbeddingPurpose,
+        *,
+        timeout_ms: int | None = None,
+    ) -> np.ndarray:
+        result = self._runtime.embed(
+            role,
+            EmbeddingRequest(
+                tuple(texts),
+                QUERY_SOURCE if purpose is EmbeddingPurpose.QUERY else DOCUMENT_SOURCE,
+                timeout_ms,
+                purpose,
+            ),
+        )
+        matrix = np.asarray(result.vectors, dtype=np.float32)
+        if matrix.shape != (len(texts), self.config.dimensions):
+            raise SemanticModelError(
+                "semantic runtime dimensions do not match the configured index"
+            )
+        return np.ascontiguousarray(matrix, dtype=np.float32)
+
+    def _embed_foreground(
+        self, texts: list[str], purpose: EmbeddingPurpose
+    ) -> np.ndarray:
+        with self._model_lock:
+            with accelerator_lease(timeout_ms=self.config.query_timeout_ms):
+                with model_activity(
+                    model=self.config.model,
+                    operation="search",
+                    pipeline="recall",
+                ):
+                    return self._runtime_vectors(
+                        FOREGROUND_ROLE,
+                        texts,
+                        purpose,
+                        timeout_ms=self.config.query_timeout_ms,
+                    )
+
+    def _embed_foreground_documents(self, texts: list[str]) -> np.ndarray:
+        return self._embed_foreground(texts, EmbeddingPurpose.DOCUMENT)
+
+    def _embed_incremental_documents(self, texts: list[str]) -> np.ndarray:
+        with model_activity(
+            model=self.config.model,
+            operation="generate",
+            pipeline="improve",
+        ):
+            return self._runtime_vectors(
+                INCREMENTAL_ROLE, texts, EmbeddingPurpose.DOCUMENT
+            )
+
+    def _self_test_role(self, role: str) -> dict[str, object]:
+        embed = (
+            self._embed_foreground
+            if role == FOREGROUND_ROLE
+            else lambda texts, purpose: self._runtime_vectors(role, texts, purpose)
+        )
+        query = embed(["Chronovisorの検索インデックス"], EmbeddingPurpose.QUERY)[0]
+        documents = embed(
+            [
+                "ChronovisorはローカルAI向けの記憶検索システムです。",
+                "夕食のレシピと材料についてのメモです。",
+            ],
+            EmbeddingPurpose.DOCUMENT,
+        )
+        scores = documents @ query
+        if not float(scores[0]) > float(scores[1]):
+            raise SemanticModelError("known-vector ranking self-test failed")
+        return {
+            "device": (
+                self.config.query_device
+                if role == FOREGROUND_ROLE
+                else self.config.incremental_device
+            ),
+            "dimensions": int(query.shape[0]),
+            "positive_score": float(scores[0]),
+            "negative_score": float(scores[1]),
+        }
 
     def _query_available(self) -> bool:
         return self._generation is not None and not self._maintenance.is_set()
@@ -357,15 +475,8 @@ class SemanticServiceState:
         with self._metrics_lock:
             self._query_errors += 1
 
-    def _encode_queries(self, queries: list[str], batch_size: int) -> np.ndarray:
-        with self._model_lock:
-            with accelerator_lease(timeout_ms=self.config.query_timeout_ms):
-                with model_activity(
-                    model=self.config.model,
-                    operation="search",
-                    pipeline="recall",
-                ):
-                    vectors = self._foreground.encode_queries(queries, batch_size)
+    def _encode_queries(self, queries: list[str], _batch_size: int) -> np.ndarray:
+        vectors = self._embed_foreground(queries, EmbeddingPurpose.QUERY)
         now = time.monotonic()
         with self._query_cache_lock:
             for query, vector in zip(queries, vectors, strict=False):
@@ -382,10 +493,7 @@ class SemanticServiceState:
         now = time.monotonic()
         with self._query_cache_lock:
             cached = self._query_vector_cache.get(query)
-            if (
-                cached is not None
-                and now - cached[0] <= QUERY_CACHE_TTL_SECONDS
-            ):
+            if cached is not None and now - cached[0] <= QUERY_CACHE_TTL_SECONDS:
                 self._query_vector_cache.move_to_end(query)
                 return cached[1]
             if cached is not None:
@@ -403,7 +511,7 @@ class SemanticServiceState:
             generation = self._generation
             if generation is None:
                 raise ServiceBusy("no active semantic generation")
-            return generation.search(vector, top_n=top_n)
+            return generation.search(cast(Sequence[float], vector), top_n=top_n)
 
     def search(
         self, query: str, top_n: int, *, timeout_ms: int | None = None
@@ -452,7 +560,7 @@ class SemanticServiceState:
             generation = self._generation
             if generation is None:
                 raise ServiceBusy("no active semantic generation")
-            rows = generation.score_pages(vector, unique)
+            rows = generation.score_pages(cast(Sequence[float], vector), unique)
         return {
             "status": "ok",
             "generation_id": generation.manifest.generation_id,
@@ -491,33 +599,36 @@ class SemanticServiceState:
                 or research_scheduler.ACTIVE_FILE.exists()
             ):
                 return True
-        return bool(self.config.incremental_pause_during_ingest_generation and _ingest_is_active())
+        return bool(
+            self.config.incremental_pause_during_ingest_generation
+            and _ingest_is_active()
+        )
 
-    def _cpu(self) -> NemotronEncoder:
-        if self._cpu_encoder is None:
-            candidate = self._encoder_factory(
-                self.config, device=self.config.incremental_device
-            )
-            candidate.self_test()
-            cpu_vector = candidate.encode_documents([self._parity_text], 1)[0]
-            parity = float(cpu_vector @ self._parity_reference)
-            if parity < 0.999:
-                candidate.close()
-                raise RuntimeError(
-                    f"CPU/MPS semantic vector parity failed: cosine={parity:.6f}"
-                )
-            self._cpu_encoder = candidate
+    def _ensure_cpu(self) -> None:
+        if not self._cpu_ready:
+            try:
+                self._self_test_role(INCREMENTAL_ROLE)
+                cpu_vector = self._embed_incremental_documents([self._parity_text])[0]
+                parity = float(cpu_vector @ self._parity_reference)
+                if parity < 0.999:
+                    raise RuntimeError(
+                        f"CPU/MPS semantic vector parity failed: cosine={parity:.6f}"
+                    )
+            except Exception:
+                self._runtime.release_embedding(INCREMENTAL_ROLE)
+                self._cpu_ready = False
+                raise
+            self._cpu_ready = True
         self._cpu_last_used = time.monotonic()
-        return self._cpu_encoder
 
     def _unload_idle_cpu(self) -> None:
         if (
-            self._cpu_encoder is not None
+            self._cpu_ready
             and time.monotonic() - self._cpu_last_used
             >= self.config.incremental_idle_unload_seconds
         ):
-            self._cpu_encoder.close()
-            self._cpu_encoder = None
+            self._runtime.release_embedding(INCREMENTAL_ROLE)
+            self._cpu_ready = False
 
     def _index_page(self, page_id: str, *, expected_hash: str) -> None:
         generation = self._generation
@@ -533,15 +644,10 @@ class SemanticServiceState:
             enqueue_pages([page_id], source_hashes={page_id: current_hash})
             return
         if documents:
-            encoder = self._cpu()
-            with model_activity(
-                model=self.config.model,
-                operation="generate",
-                pipeline="improve",
-            ):
-                vectors = encoder.encode_documents(
-                    [document.text for document in documents], 1
-                )
+            self._ensure_cpu()
+            vectors = self._embed_incremental_documents(
+                [document.text for document in documents]
+            )
             refreshed = extract_page_documents(path) if path is not None else []
             refreshed_hash = refreshed[0].source_sha256 if refreshed else ""
             if refreshed_hash != current_hash:
@@ -574,7 +680,13 @@ class SemanticServiceState:
                 ):
                     manifest = build_generation(
                         documents,
-                        encode_documents=self._foreground.encode_documents,
+                        encode_documents=lambda texts, _batch_size: (
+                            self._runtime_vectors(
+                                FOREGROUND_ROLE,
+                                list(texts),
+                                EmbeddingPurpose.DOCUMENT,
+                            )
+                        ),
                         model=self.config.model,
                         revision=self.config.revision,
                         dimensions=self.config.dimensions,

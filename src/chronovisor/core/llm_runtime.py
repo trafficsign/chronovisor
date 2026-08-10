@@ -185,6 +185,11 @@ class SourceSensitivity(StrEnum):
     HIGH = "high"
 
 
+class EmbeddingPurpose(StrEnum):
+    DOCUMENT = "document"
+    QUERY = "query"
+
+
 @dataclass(frozen=True)
 class SourceDataClassification:
     data_class: SourceDataClass
@@ -286,6 +291,7 @@ class EmbeddingRequest:
     texts: tuple[str, ...] = field(repr=False)
     source: SourceDataClassification
     timeout_ms: int | None = None
+    purpose: EmbeddingPurpose = EmbeddingPurpose.DOCUMENT
 
 
 @dataclass(frozen=True)
@@ -368,6 +374,14 @@ class ResolvedGenerationRoute:
     model: str
     location: RouteLocation
     capabilities: BackendCapabilities
+
+
+@dataclass(frozen=True)
+class ResolvedEmbeddingRoute:
+    role: str
+    provider: str
+    model: str
+    location: RouteLocation
 
 
 @dataclass(frozen=True)
@@ -516,6 +530,29 @@ class LLMRuntime:
             location=location,
         )
 
+    def resolve_embedding(self, role: str) -> ResolvedEmbeddingRoute:
+        """Return one immutable configured embedding route without invoking it."""
+
+        route = _resolve(self._embedding, role, "embedding")
+        if not isinstance(route.backend.location, RouteLocation):
+            raise RouteConfigurationError(role, "embedding")
+        return ResolvedEmbeddingRoute(
+            role=role,
+            provider=route.backend.provider,
+            model=route.model,
+            location=route.backend.location,
+        )
+
+    def release_embedding(self, role: str) -> None:
+        """Release an optional local embedding model without exposing its backend."""
+
+        route = _resolve(self._embedding, role, "embedding")
+        if route.backend.location is not RouteLocation.LOCAL:
+            return
+        close = getattr(route.backend, "close", None)
+        if callable(close):
+            close()
+
     def rerank(self, role: str, request: RerankRequest) -> RerankResult:
         route = _resolve(self._rerank, role, "rerank")
         self._validate_request(
@@ -602,6 +639,17 @@ class LLMRuntime:
                     location=location if isinstance(location, RouteLocation) else None,
                 )
                 raise RequestValidationError(role, capability, field_name)
+        if isinstance(request, EmbeddingRequest) and not isinstance(
+            request.purpose, EmbeddingPurpose
+        ):
+            self._emit_failure(
+                RequestValidationError.category,
+                role=role,
+                capability=capability,
+                provider=provider,
+                location=location if isinstance(location, RouteLocation) else None,
+            )
+            raise RequestValidationError(role, capability, "purpose")
 
     def _preflight(
         self,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -13,6 +14,7 @@ from chronovisor.core.semantic_index import (
     activate_generation,
     archive_legacy_search_index,
     build_generation,
+    extract_page_documents,
     load_active_generation,
     prune_expired_legacy_archives,
     read_active,
@@ -21,6 +23,58 @@ from chronovisor.core.semantic_index import (
     validate_generation,
     write_page_delta,
 )
+
+
+def test_extract_page_documents_uses_full_canonical_yaml_and_body(
+    tmp_path: Path,
+) -> None:
+    source = b"""---
+status: stable
+type: knowledge
+title: Nested YAML title
+description: Canonical summary
+recall_questions:
+  - Where is the answer?
+metadata:
+  nested:
+    enabled: true
+---
+# Body heading
+
+Body text only.
+"""
+    path = tmp_path / "canonical-page.md"
+    path.write_bytes(source)
+
+    documents = extract_page_documents(path)
+
+    page = documents[0]
+    assert page.kind == "page"
+    assert page.source_sha256 == hashlib.sha256(source).hexdigest()
+    assert "Nested YAML title" in page.text
+    assert "Canonical summary" in page.text
+    assert "Q: Where is the answer?" in page.text
+    assert "Body text only." in page.text
+    assert "metadata:" not in page.text
+    assert [document.text for document in documents if document.kind == "question"] == [
+        "Where is the answer?"
+    ]
+    chunks = [document.text for document in documents if document.kind == "chunk"]
+    assert chunks and "Summary: Canonical summary" in chunks[0]
+    assert "Body text only." in "\n".join(chunks)
+
+
+@pytest.mark.parametrize("status", ["draft", "deprecated"])
+def test_extract_page_documents_excludes_non_stable_pages(
+    tmp_path: Path, status: str
+) -> None:
+    path = tmp_path / f"{status}.md"
+    path.write_text(
+        f"---\nstatus: {status}\ntype: knowledge\ntitle: Hidden\n---\nBody\n",
+        encoding="utf-8",
+    )
+
+    assert extract_page_documents(path) == []
 
 
 def _documents(version: str = "a") -> list[SemanticDocument]:
