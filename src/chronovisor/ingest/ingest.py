@@ -35,10 +35,6 @@ from chronovisor.core.ollama import (
 from chronovisor.core.ollama import (
     UPDATE_SYSTEM_PROMPT as UPDATE_SYSTEM_PROMPT,
 )
-from chronovisor.core.ollama import (
-    generate,
-    is_available,
-)
 from chronovisor.core.runtime_config import load_ingest_config
 from chronovisor.core.search_types import tokenize
 from chronovisor.core.store import (
@@ -225,13 +221,7 @@ from chronovisor.ingest.ingest_schemas import (
     TRIAGE_PLAN_VALIDATION_SCHEMA as _TRIAGE_PLAN_VALIDATION_SCHEMA,
 )
 from chronovisor.ingest.ingest_transport import (
-    generate_with_progress as _generate_with_progress_core,
-)
-from chronovisor.ingest.ingest_transport import (
     llm_progress_callback as _llm_progress_callback_core,
-)
-from chronovisor.ingest.ingest_transport import (
-    structured_chat_transport as _structured_chat_transport_core,
 )
 from chronovisor.ingest.ingest_transport import (
     structured_generate_transport as _structured_generate_transport_core,
@@ -358,7 +348,6 @@ def _generate_with_progress(
     system: str | None,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
     format: dict[str, Any] | str | None = None,
-    model: str | None = None,
     num_ctx: int | None = None,
     num_predict: int | None = None,
     keep_alive: str | None = None,
@@ -367,21 +356,27 @@ def _generate_with_progress(
     seed: int | None = None,
     return_metadata: bool = False,
 ) -> str | ollama_runtime.GenerateResponse:
-    return _generate_with_progress_core(
-        generate,
-        prompt,
-        system=system,
-        progress_callback=progress_callback,
-        format=format,
-        model=model,
-        num_ctx=num_ctx,
-        num_predict=num_predict,
-        keep_alive=keep_alive,
-        read_timeout_ms=read_timeout_ms,
-        temperature=temperature,
-        seed=seed,
-        return_metadata=return_metadata,
-    )
+    try:
+        response = ollama_runtime.runtime_generate(
+            prompt,
+            system=system,
+            runtime_role=ollama_runtime.INGEST_GENERATION_RUNTIME_ROLE,
+            source_data_class="raw",
+            source_sensitivity="high",
+            progress_callback=progress_callback,
+            format=format,
+            num_ctx=num_ctx,
+            num_predict=num_predict,
+            keep_alive=keep_alive,
+            read_timeout_ms=read_timeout_ms,
+            temperature=temperature,
+            seed=seed,
+        )
+    except Exception as error:
+        if progress_callback is not None:
+            progress_callback({"event": "error", "active": False, "error": str(error)})
+        raise
+    return response if return_metadata else response.content
 
 
 _DEFAULT_GENERATE_WITH_PROGRESS = _generate_with_progress
@@ -397,7 +392,9 @@ def _structured_generate_transport(
     )
 
 
-def _structured_chat_transport() -> ChatTransport:
+def _structured_chat_transport(
+    source_data_class: str = "raw",
+) -> ChatTransport:
     """Preserve native chat roles for production structured repair turns.
 
     The historical ingest seam above flattens messages into one generate
@@ -408,7 +405,24 @@ def _structured_chat_transport() -> ChatTransport:
     ``LocalStructuredSession`` repairs against.
     """
 
-    return _structured_chat_transport_core(ollama_runtime.chat)
+    def transport(request: ChatRequest) -> ollama_runtime.ChatResponse:
+        return ollama_runtime.runtime_structured_chat(
+            request.messages,
+            runtime_role=ollama_runtime.INGEST_GENERATION_RUNTIME_ROLE,
+            source_data_class=source_data_class,
+            source_sensitivity="high",
+            format=request.schema,
+            num_ctx=request.num_ctx,
+            num_predict=request.num_predict,
+            keep_alive=request.keep_alive,
+            read_timeout_ms=request.read_timeout_ms,
+            max_output_chars=request.max_output_chars,
+            temperature=request.temperature,
+            seed=request.seed,
+            think=request.think,
+        )
+
+    return transport
 
 
 def _triage_with_progress(
@@ -513,7 +527,12 @@ def _select_ingest_context(
     )
 
 
-def _admit_ingest_context(config: Any, requested_num_ctx: int) -> int:
+def _admit_ingest_context(
+    config: Any,
+    requested_num_ctx: int,
+    *,
+    model: str,
+) -> int:
     """Use the shared measured-residency planner for one ingest runner."""
 
     def evict_unrelated_residents() -> int:
@@ -525,13 +544,13 @@ def _admit_ingest_context(config: Any, requested_num_ctx: int) -> int:
                 f"resident model probe failed: {type(exc).__name__}: {exc}",
             ) from exc
         evicted = 0
-        for model in sorted(resident_models):
-            if model == config.model:
+        for resident_model in sorted(resident_models):
+            if resident_model == model:
                 continue
-            if not ollama_runtime.unload_named_model(model):
+            if not ollama_runtime.unload_named_model(resident_model):
                 raise IngestTriageFailure(
                     "capacity_unavailable",
-                    f"unable to verify ingest runner eviction: {model}",
+                    f"unable to verify ingest runner eviction: {resident_model}",
                 )
             evicted += 1
         return evicted
@@ -539,7 +558,7 @@ def _admit_ingest_context(config: Any, requested_num_ctx: int) -> int:
     def residency_plan():
         try:
             return ollama_runtime.plan_model_residency(
-                [config.model],
+                [model],
                 num_ctx=requested_num_ctx,
                 max_num_ctx=config.max_num_ctx,
                 reserve_bytes=config.memory_reserve_gib * ollama_runtime.GIB,
@@ -581,7 +600,7 @@ def _admit_ingest_context(config: Any, requested_num_ctx: int) -> int:
                 "capacity_unavailable",
                 f"unable to verify incompatible ingest runner eviction: {model}",
             )
-    return max(requested_num_ctx, plan.context_for(config.model))
+    return max(requested_num_ctx, plan.context_for(model))
 
 
 def _emit_triage_failure(
@@ -2578,8 +2597,6 @@ def _generate_recall_metadata(
 ) -> dict[str, Any]:
     fallback = _fallback_recall_metadata(title, body, page_id)
     try:
-        if not is_available():
-            return fallback
         prompt = {
             "task": "Create retrievability metadata for this wiki page.",
             "rules": [
@@ -2611,18 +2628,44 @@ def _generate_recall_metadata(
             transport is None
             and _generate_with_progress is _DEFAULT_GENERATE_WITH_PROGRESS
         )
+        route = (
+            ollama_runtime.runtime_generation_routes(
+                (ollama_runtime.INGEST_GENERATION_RUNTIME_ROLE,)
+            )[0]
+            if live_transport
+            else None
+        )
+        if route is not None and not route.structured_output:
+            raise ollama_runtime.RuntimeBridgeError("capability_unavailable")
+        local_ollama = (
+            route is not None
+            and route.provider == "ollama"
+            and route.location == "local"
+        )
         lease = (
             ollama_runtime.model_resource_lease(exclusive=True)
-            if live_transport
+            if local_ollama
             else nullcontext()
         )
         with lease:
-            if live_transport:
-                selected_num_ctx = _admit_ingest_context(config, selected_num_ctx)
+            if local_ollama and route is not None:
+                selected_num_ctx = _admit_ingest_context(
+                    config,
+                    selected_num_ctx,
+                    model=route.model,
+                )
             result = LocalStructuredSession(
-                model=config.model,
-                transport=transport or _structured_generate_transport(),
+                model=route.model if route is not None else "injected",
+                transport=transport
+                or (
+                    None if live_transport else _structured_generate_transport()
+                ),
                 role="ingest_recall_metadata",
+                runtime_role=ollama_runtime.INGEST_GENERATION_RUNTIME_ROLE,
+                runtime_location=route.location if route is not None else None,
+                source_data_class="derived_snippet",
+                source_sensitivity="high",
+                resource_managed=local_ollama,
                 num_ctx=selected_num_ctx,
                 num_predict=metadata_num_predict,
                 keep_alive=config.keep_alive,
@@ -4863,10 +4906,10 @@ def run_ingest(
             failed = False
             return
 
-        processor = "ollama" if is_available() else "unavailable"
-        job_store.update(job_id, processor=processor)
-        if processor == "unavailable":
-            raise RuntimeError("ollama unavailable; no fallback processor configured")
+        route = ollama_runtime.runtime_generation_routes(
+            (ollama_runtime.INGEST_GENERATION_RUNTIME_ROLE,)
+        )[0]
+        job_store.update(job_id, processor=route.provider)
 
         # Production semantic ingest cannot succeed without an adopted local
         # authority.  Resolve that proof before spending any triage or page-
@@ -5302,7 +5345,12 @@ def start_ingest(
     resulting operations can pass it through without changing positional
     argument order.
     """
-    processor = "ollama" if is_available() else "unavailable"
+    try:
+        processor = ollama_runtime.runtime_generation_routes(
+            (ollama_runtime.INGEST_GENERATION_RUNTIME_ROLE,)
+        )[0].provider
+    except ollama_runtime.RuntimeBridgeError:
+        processor = "unavailable"
     job = job_store.create(processor=processor)
 
     thread = threading.Thread(

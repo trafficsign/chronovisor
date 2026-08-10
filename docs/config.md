@@ -66,10 +66,12 @@ document_prefix = ""
 query_prefix = ""
 
 [ingest]
+# Ingest generation routing is fixed by llm.roles."ingest.generation". This
+# legacy model key remains for maintenance consumers outside the ingest flow.
+model = "maxwell1500/ornith-35b:Q5_K_M"
 # Select the smallest safe bucket for each complete ingest request. A larger
 # resident runner is reused so a backlog grows monotonically rather than
 # shrinking and reloading between raws.
-model = "maxwell1500/ornith-35b:Q5_K_M"
 keep_alive = "20m"
 temperature = 0.3
 num_ctx = 32768

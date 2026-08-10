@@ -91,7 +91,7 @@ Exceptional system repair
   used by Path-oriented queues. They contain stable Raw IDs, hashes, and commit
   evidence, not a physical locator or second transcript copy. Semantic projection resolves and verifies the
   authoritative Raw bytes before use.
-- `runtime/ingest-liveness.json`: Ollama readiness, pending Raw count,
+- `runtime/ingest-liveness.json`: ingest-runtime readiness, pending Raw count,
   outage duration, and recovery transition for the persistent drain worker.
 - `runtime/provisional-recall/`: a capped, citation-only search namespace for
   verified projections of semantically deferred Raw units. Ranking uses
@@ -158,8 +158,8 @@ Exceptional system repair
   removes the open data/journal. Existing processed flat Raw can separately be
   shadow-packed as byte-exact `legacy-part-NNN.tar.zst`; unprocessed, held,
   quarantined, and current-day files are excluded.
-- **Local structured session**: sends a schema-constrained Ollama chat request.
-  If validation fails, it returns the exact schema errors to the same chat and
+- **Local structured session**: sends a schema-constrained request through its
+  fixed LLM runtime role. If validation fails, it returns the exact schema errors to the same chat and
   allows at most two repair turns. Input, output, feedback, timeout, and context
   limits are fixed; exhaustion fails closed.
 - **Decision router**: asks `maxwell1500/ornith-35b:Q5_K_M` and `gpt-oss:20b`

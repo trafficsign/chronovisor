@@ -25,6 +25,23 @@ CHALLENGER = "challenger:test"
 TIE_BREAK = "tie-break:test"
 MODELS = (PRIMARY, CHALLENGER, TIE_BREAK)
 
+
+def _ingest_route(
+    model: str = PRIMARY,
+    *,
+    provider: str = "ollama",
+    location: str = "local",
+) -> tuple:
+    return (
+        ollama.RuntimeGenerationRoute(
+            role=ollama.INGEST_GENERATION_RUNTIME_ROLE,
+            provider=provider,
+            model=model,
+            location=location,
+            structured_output=True,
+        ),
+    )
+
 SCHEMA = {
     "type": "object",
     "additionalProperties": False,
@@ -453,8 +470,9 @@ def test_router_production_reuses_an_ingest_sized_resident_context(
 
     monkeypatch.setattr(
         "chronovisor.decision.decision_router.load_ingest_config",
-        lambda: IngestConfig(model=PRIMARY, max_num_ctx=262_144),
+        lambda: IngestConfig(max_num_ctx=262_144),
     )
+    monkeypatch.setattr(ollama, "runtime_generation_routes", lambda _roles: _ingest_route())
 
     def planner(_models: tuple[str, ...], **kwargs: Any) -> ollama.ModelResidencyPlan:
         observed.append((kwargs["max_num_ctx"], dict(kwargs["reuse_context_ceilings"])))
@@ -501,7 +519,44 @@ def test_router_does_not_share_ingest_ceiling_with_a_different_primary(
     observed: dict[str, int] = {}
     monkeypatch.setattr(
         "chronovisor.decision.decision_router.load_ingest_config",
-        lambda: IngestConfig(model="other:test", max_num_ctx=262_144),
+        lambda: IngestConfig(max_num_ctx=262_144),
+    )
+    monkeypatch.setattr(
+        ollama,
+        "runtime_generation_routes",
+        lambda _roles: _ingest_route("other:test"),
+    )
+
+    def planner(_models: tuple[str, ...], **kwargs: Any) -> ollama.ModelResidencyPlan:
+        observed.update(kwargs["reuse_context_ceilings"])
+        return _plan(1)
+
+    router = DecisionRouter(
+        config=_config(),
+        transport=EventTransport({}, []),
+        resolve_adoption=False,
+        record_replay=False,
+        residency_planner=planner,
+        live_resource_control=True,
+    )
+
+    router._residency_plan(98_304)
+
+    assert observed == {model: 131_072 for model in MODELS}
+
+
+def test_router_does_not_share_ingest_ceiling_with_non_ollama_local_route(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: dict[str, int] = {}
+    monkeypatch.setattr(
+        "chronovisor.decision.decision_router.load_ingest_config",
+        lambda: IngestConfig(max_num_ctx=262_144),
+    )
+    monkeypatch.setattr(
+        ollama,
+        "runtime_generation_routes",
+        lambda _roles: _ingest_route(provider="local-test"),
     )
 
     def planner(_models: tuple[str, ...], **kwargs: Any) -> ollama.ModelResidencyPlan:
@@ -528,8 +583,9 @@ def test_router_duplicate_model_keeps_the_largest_role_reuse_ceiling(
     observed: dict[str, int] = {}
     monkeypatch.setattr(
         "chronovisor.decision.decision_router.load_ingest_config",
-        lambda: IngestConfig(model=PRIMARY, max_num_ctx=262_144),
+        lambda: IngestConfig(max_num_ctx=262_144),
     )
+    monkeypatch.setattr(ollama, "runtime_generation_routes", lambda _roles: _ingest_route())
 
     def planner(_models: tuple[str, ...], **kwargs: Any) -> ollama.ModelResidencyPlan:
         observed.update(kwargs["reuse_context_ceilings"])
@@ -555,8 +611,9 @@ def test_router_preserves_legacy_exact_signature_residency_planner(
     observed: list[tuple[int, int, bool]] = []
     monkeypatch.setattr(
         "chronovisor.decision.decision_router.load_ingest_config",
-        lambda: IngestConfig(model=PRIMARY, max_num_ctx=262_144),
+        lambda: IngestConfig(max_num_ctx=262_144),
     )
+    monkeypatch.setattr(ollama, "runtime_generation_routes", lambda _roles: _ingest_route())
 
     def planner(
         _models: tuple[str, ...],

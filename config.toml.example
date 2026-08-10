@@ -20,6 +20,8 @@ model = "bge-m3"
 enabled = false
 
 [ingest]
+# Legacy maintenance consumers still read this key. Ingest generation itself
+# is routed only by llm.roles."ingest.generation" below.
 model = "maxwell1500/ornith-35b:Q5_K_M"
 
 [decision_router]
@@ -111,6 +113,11 @@ provider = "local"
 model = "ornith:9b-q4_K_M"
 
 [llm.roles."recall.certificate_judge.escalation"]
+capability = "generation"
+provider = "local"
+model = "maxwell1500/ornith-35b:Q5_K_M"
+
+[llm.roles."ingest.generation"]
 capability = "generation"
 provider = "local"
 model = "maxwell1500/ornith-35b:Q5_K_M"
@@ -213,6 +220,11 @@ model = "gpt-oss:20b"
 # provider = "openai"
 # model = "gpt-5"
 #
+# [llm.roles."ingest.generation"]
+# capability = "generation"
+# provider = "openai"
+# model = "gpt-5-mini"
+#
 # [llm.roles."search.semantic"]
 # capability = "embedding"
 # provider = "openai"
@@ -238,6 +250,14 @@ model = "gpt-oss:20b"
 # [[llm.egress_opt_in]]
 # role = "recall.certificate_judge.escalation"
 # data_class = "raw"
+#
+# [[llm.egress_opt_in]]
+# role = "ingest.generation"
+# data_class = "raw"
+#
+# [[llm.egress_opt_in]]
+# role = "ingest.generation"
+# data_class = "derived_snippet"
 #
 # Hybrid note: Anthropic/Claude, DeepSeek, Kimi, and Z.AI/GLM profiles currently
 # advertise generation only. Route `search.semantic` to local Ollama or a

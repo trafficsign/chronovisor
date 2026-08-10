@@ -44,10 +44,11 @@ def _record_liveness(
     previous = _read_liveness()
     now = datetime.now().isoformat(timespec="seconds")
     previous_status = str(previous.get("status") or "")
-    waiting = status == "waiting_for_ollama"
+    waiting = status == "waiting_for_ingest_runtime"
     authority_blocked = status == "blocked_by_decision_authority"
     blocked = waiting or authority_blocked
     previous_blocked = previous_status in {
+        "waiting_for_ingest_runtime",
         "waiting_for_ollama",
         "blocked_by_decision_authority",
     }
@@ -56,7 +57,7 @@ def _record_liveness(
         "status": status,
         "observed_at": now,
         "pending_raws": max(0, int(pending)),
-        "ollama_available": not waiting,
+        "ingest_runtime_available": not waiting,
         "authority_available": not authority_blocked,
         "alert": authority_blocked or (waiting and pending > 0),
         "retryable": blocked,
@@ -119,7 +120,12 @@ def _release_ingest_runner() -> dict[str, Any]:
     """Release the heavy ingest runner after a complete drain cycle."""
 
     try:
-        model = ollama.ingest_model()
+        route = ollama.runtime_generation_routes(
+            (ollama.INGEST_GENERATION_RUNTIME_ROLE,)
+        )[0]
+        if route.provider != "ollama" or route.location != "local":
+            return {"status": "not_applicable", "released": False}
+        model = route.model
         resident = ollama.resident_model_rows()
     except Exception as exc:
         result = {
@@ -208,12 +214,28 @@ def _drain(
             "managed_holds": managed_holds,
         }
 
-    ollama_available = ollama.is_available()
-    if not ollama_available and pending_start > 0:
+    try:
+        ingest_route = ollama.runtime_generation_routes(
+            (ollama.INGEST_GENERATION_RUNTIME_ROLE,)
+        )[0]
+    except ollama.RuntimeBridgeError:
+        ingest_route = None
+    local_ollama = (
+        ingest_route is not None
+        and ingest_route.provider == "ollama"
+        and ingest_route.location == "local"
+    )
+    runtime_available = ingest_route is not None and (
+        not local_ollama or ollama.is_available()
+    )
+    if not runtime_available and pending_start > 0:
         liveness = _record_liveness(
-            "waiting_for_ollama",
+            "waiting_for_ingest_runtime",
             pending=pending_start,
-            error="ollama unavailable; raw capture remains durable and drain will retry",
+            error=(
+                "ingest runtime unavailable; raw capture remains durable and "
+                "drain will retry"
+            ),
         )
         if liveness["transitioned"]:
             _append_jsonl(
@@ -230,12 +252,12 @@ def _drain(
                 },
             )
         return {
-            "status": "waiting_for_ollama",
+            "status": "waiting_for_ingest_runtime",
             "pending_start": pending_start,
             "pending_after": pending_start,
             "batches_run": 0,
             "files_processed": 0,
-            "stop_reason": "ollama unavailable",
+            "stop_reason": "ingest runtime unavailable",
             "elapsed_seconds": round(time.time() - started, 2),
             "log_file": str(log_path),
             "alert": True,
@@ -244,7 +266,7 @@ def _drain(
             "managed_holds": managed_holds,
         }
     authority_preflight = (
-        orchestrator.ingest_authority_preflight() if ollama_available else None
+        orchestrator.ingest_authority_preflight() if runtime_available else None
     )
     if authority_preflight is not None and not authority_preflight["ok"]:
         liveness = _record_liveness(

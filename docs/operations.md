@@ -568,14 +568,18 @@ with the five deterministic/guarded lanes, the post-adoption production state
 is 24 enabled and 0 shadow. If artifact validation later fails, enabled semantic
 lanes quarantine before inference rather than falling back to bootstrap models.
 
-## Ingest Model
+## Ingest Generation Runtime
 
-The page-generation path reads `[ingest]` from `~/.chronovisor/config.toml`. The
-production profile selects the smallest safe 32K/64K/128K/256K context bucket
-for the complete request envelope. A compatible larger resident Ornith 35B
-runner is reused, so backlog processing grows monotonically rather than
-shrinking and reloading between raws. The 256K bucket evicts unrelated Ollama
-runners before admission. Inputs that cannot fit fail closed; deterministic
+Triage, page generation, and recall metadata use the fixed
+`llm.roles."ingest.generation"` route. `[ingest]` supplies generation budgets;
+its legacy `model` key is still consumed by maintenance callers outside this
+flow and will be retired in a separate bounded migration. The production
+profile selects the smallest safe 32K/64K/128K/256K context bucket for the
+complete request envelope. A local Ollama route reuses a compatible larger
+runner, so backlog processing grows monotonically rather than shrinking and
+reloading between raws. The 256K bucket evicts unrelated Ollama runners before
+admission. Remote and non-Ollama routes do not probe or control Ollama. Inputs
+that cannot fit fail closed; deterministic
 transcript captures are projected to complete, byte-exact user/assistant text
 while the lossless raw remains on disk. Every recognized transcript projection
 is first materialized as one verified content-addressed child; oversized
@@ -617,7 +621,7 @@ fails closed. Runtime, transport, capacity, schema, and other operational
 failures do not use semantic defer and continue through the separate bounded
 repair queue.
 
-Changing the ingest model does not require a semantic reindex unless
+Changing the `ingest.generation` route model does not require a semantic reindex unless
 `[embedding].model` also changes.
 
 Before generation, ingest now runs a conservative search-before-create gate.
@@ -644,11 +648,13 @@ when the normal recall gate decides `none`. Arbitrary pages cannot enter this
 layer. System notifications and internal prompts remain filtered before this
 path.
 
-The persistent ingest drain probes Ollama before starting semantic work. If it
+The persistent ingest drain resolves the fixed runtime before starting semantic
+work and probes Ollama only for a local Ollama route. If the configured runtime
 is unavailable, Raw capture remains durable, the drain writes
-`runtime/ingest-liveness.json`, health becomes `alert`, and no failing ingest
-job is started. The watcher retries on its normal interval and records the
-recovery transition before automatically draining the backlog.
+`runtime/ingest-liveness.json` with `waiting_for_ingest_runtime`, health becomes
+`alert`, and no failing ingest job is started. The watcher retries on its normal
+interval and records the recovery transition before automatically draining the
+backlog.
 
 ## Sensitivity Tiers
 

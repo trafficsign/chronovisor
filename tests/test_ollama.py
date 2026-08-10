@@ -16,13 +16,17 @@ import pytest
 from chronovisor.core import llm_config, ollama, ollama_calibration, ollama_transport
 from chronovisor.core.llm_runtime import (
     CapabilityUnavailableError,
+    GenerationRequest,
     GenerationResult,
     MessageGenerationRequest,
     RouteLocation,
+    SafeBackendError,
     SourceDataClass,
+    SourceDataClassification,
     SourceSensitivity,
     TokenUsage,
 )
+from chronovisor.core.ollama_adapter import OllamaAdapter
 from chronovisor.core.runtime_config import EmbeddingConfig, IngestConfig
 
 
@@ -79,6 +83,92 @@ def test_runtime_structured_bridge_builds_typed_request_and_preserves_metadata(
     assert seen[0][0] == "review.remote"
     assert seen[0][1].source.data_class is SourceDataClass.PAGE
     assert seen[0][1].source.sensitivity is SourceSensitivity.NORMAL
+
+
+def test_runtime_raw_bridge_builds_typed_request_and_preserves_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[tuple[str, GenerationRequest]] = []
+
+    class Runtime:
+        def generate(self, role: str, request: GenerationRequest) -> GenerationResult:
+            seen.append((role, request))
+            return GenerationResult(
+                content="page",
+                provider="remote",
+                model="configured",
+                completed=True,
+                finish_reason="stop",
+                usage=TokenUsage(input_tokens=7, output_tokens=3),
+                metadata={"streamed": True},
+            )
+
+    monkeypatch.setattr(llm_config, "load_default_llm_runtime", lambda: Runtime())
+
+    response = ollama.runtime_generate(
+        "raw transcript",
+        "system",
+        runtime_role="ingest.generation",
+        source_data_class="raw",
+        source_sensitivity="high",
+        format={"type": "object"},
+        num_ctx=8192,
+        num_predict=64,
+        keep_alive="2m",
+        read_timeout_ms=60_000,
+        temperature=0.3,
+        seed=0,
+    )
+
+    assert response == ollama.GenerateResponse(
+        content="page",
+        done=True,
+        done_reason="stop",
+        prompt_eval_count=7,
+        eval_count=3,
+        streamed=True,
+    )
+    role, request = seen[0]
+    assert role == "ingest.generation"
+    assert request.prompt == "raw transcript"
+    assert request.source.data_class is SourceDataClass.RAW
+    assert request.source.sensitivity is SourceSensitivity.HIGH
+
+
+@pytest.mark.parametrize(
+    ("error", "category"),
+    [
+        (httpx.ReadTimeout("SECRET timeout detail"), "timeout"),
+        (httpx.ConnectError("SECRET daemon address"), "transport_error"),
+    ],
+)
+def test_ollama_adapter_maps_daemon_outage_to_safe_transient_category(
+    monkeypatch: pytest.MonkeyPatch,
+    error: httpx.TransportError,
+    category: str,
+) -> None:
+    monkeypatch.setattr(
+        ollama,
+        "generate",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(error),
+    )
+
+    with pytest.raises(SafeBackendError) as raised:
+        OllamaAdapter().generate(
+            GenerationRequest(
+                prompt="raw",
+                source=SourceDataClassification(
+                    SourceDataClass.RAW,
+                    SourceSensitivity.HIGH,
+                ),
+            ),
+            model="ingest:test",
+        )
+
+    assert raised.value.safe_category == category
+    assert raised.value.transient is True
+    assert str(raised.value) == category
+    assert "SECRET" not in str(raised.value)
 
 
 def test_runtime_bridge_exposes_only_safe_failure_category(
@@ -390,7 +480,6 @@ def test_generate_streams_progress_and_returns_text(monkeypatch) -> None:
         ollama,
         "load_ingest_config",
         lambda: IngestConfig(
-            model="qwen3.6:35b-a3b-mxfp8",
             keep_alive="10m",
             temperature=0.1,
             num_ctx=2048,
@@ -401,7 +490,11 @@ def test_generate_streams_progress_and_returns_text(monkeypatch) -> None:
     )
     updates: list[dict] = []
 
-    result = ollama.generate("prompt", progress_callback=updates.append)
+    result = ollama.generate(
+        "prompt",
+        model="qwen3.6:35b-a3b-mxfp8",
+        progress_callback=updates.append,
+    )
 
     assert result == "hello"
     assert client.payload["stream"] is True
@@ -521,6 +614,7 @@ def test_generate_can_return_explicit_completion_metadata(monkeypatch) -> None:
 
     result = ollama.generate(
         "prompt",
+        model="ingest:test",
         progress_callback=lambda _event: None,
         return_metadata=True,
     )
@@ -543,6 +637,7 @@ def test_generate_metadata_preserves_incomplete_stream_for_fail_closed_caller(
 
     result = ollama.generate(
         "prompt",
+        model="ingest:test",
         progress_callback=lambda _event: None,
         return_metadata=True,
     )
@@ -952,7 +1047,7 @@ def test_public_heavy_operations_take_expected_resource_lease(monkeypatch) -> No
     monkeypatch.setattr(ollama, "_client", lambda: _PostClient())
     monkeypatch.setattr(ollama, "_ollama_resource_rows", lambda: ({}, {}))
 
-    assert ollama.generate("prompt") == "ok"
+    assert ollama.generate("prompt", model="ingest:test") == "ok"
     assert (
         ollama.chat(
             [{"role": "user", "content": "prompt"}],

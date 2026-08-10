@@ -268,17 +268,30 @@ not explicit in the raw evidence.
         live_transport = (
             _runtime()._generate_with_progress is _DEFAULT_GENERATE_WITH_PROGRESS
         )
+        route = (
+            ollama_runtime.runtime_generation_routes(
+                (ollama_runtime.INGEST_GENERATION_RUNTIME_ROLE,)
+            )[0]
+            if live_transport
+            else None
+        )
+        local_ollama = (
+            route is not None
+            and route.provider == "ollama"
+            and route.location == "local"
+        )
         lease = (
             ollama_runtime.model_resource_lease(exclusive=True)
-            if live_transport
+            if local_ollama
             else nullcontext()
         )
         with lease:
-            if live_transport:
+            if local_ollama and route is not None:
                 try:
                     selected_num_ctx = _admit_ingest_context(
                         config,
                         selected_num_ctx,
+                        model=route.model,
                     )
                 except IngestTriageFailure as exc:
                     raise RuntimeError(
@@ -289,7 +302,6 @@ not explicit in the raw evidence.
                 "progress_callback": progress_callback,
             }
             optional = {
-                "model": config.model,
                 "num_ctx": selected_num_ctx,
                 "num_predict": selected_num_predict,
                 "keep_alive": config.keep_alive,

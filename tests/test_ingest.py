@@ -16,10 +16,21 @@ from pathlib import Path
 
 import pytest
 
-from chronovisor.core import ollama
+from chronovisor.core import llm_config, ollama
 from chronovisor.core.canonical_document import (
     parse_document,
     patch_document_metadata,
+)
+from chronovisor.core.llm_runtime import (
+    BackendCapabilities,
+    GenerationRequest,
+    GenerationResult,
+    GenerationRoute,
+    LLMRuntime,
+    MessageGenerationRequest,
+    RouteLocation,
+    SourceDataClass,
+    SourceSensitivity,
 )
 from chronovisor.ingest.ingest import (
     IngestApplyError,
@@ -31,6 +42,92 @@ from chronovisor.ingest.ingest import (
     _strip_all_frontmatter,
 )
 from chronovisor.raw import record_raw as raw_record
+
+_REAL_RUNTIME_GENERATION_ROUTES = ollama.runtime_generation_routes
+
+
+class _RemoteIngestBackend:
+    provider = "remote-test"
+    location = RouteLocation.REMOTE
+
+    def __init__(self, *responses: str) -> None:
+        self.responses = list(responses)
+        self.requests: list[GenerationRequest | MessageGenerationRequest] = []
+
+    def generate(
+        self,
+        request: GenerationRequest | MessageGenerationRequest,
+        *,
+        model: str,
+    ) -> GenerationResult:
+        self.requests.append(request)
+        return GenerationResult(
+            content=self.responses.pop(0),
+            provider=self.provider,
+            model=model,
+            completed=True,
+            finish_reason="stop",
+        )
+
+
+def _install_remote_ingest_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+    backend: _RemoteIngestBackend,
+    *,
+    egress: tuple[SourceDataClass, ...],
+) -> None:
+    runtime = LLMRuntime(
+        generation={
+            "ingest.generation": GenerationRoute(
+                backend,
+                "remote-model",
+                BackendCapabilities(
+                    generation=True,
+                    embedding=False,
+                    structured_output=True,
+                ),
+            )
+        },
+        remote_egress_opt_ins={
+            ("ingest.generation", data_class) for data_class in egress
+        },
+    )
+    monkeypatch.setattr(llm_config, "load_default_llm_runtime", lambda: runtime)
+    monkeypatch.setattr(
+        ollama,
+        "runtime_generation_routes",
+        _REAL_RUNTIME_GENERATION_ROUTES,
+    )
+
+
+def _forbid_remote_ingest_ollama(monkeypatch: pytest.MonkeyPatch) -> None:
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("remote ingest touched Ollama API or resource control")
+
+    for name in (
+        "chat",
+        "generate",
+        "is_available",
+        "model_digests",
+        "model_resource_lease",
+        "model_resource_lease_mode",
+        "plan_model_residency",
+        "resident_model_rows",
+        "unload_model",
+        "unload_named_model",
+    ):
+        monkeypatch.setattr(ollama, name, forbidden)
+
+
+@pytest.fixture(autouse=True)
+def _legacy_direct_ingest_test_seams(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Let pre-runtime tests replace retired module attributes locally."""
+
+    from chronovisor.ingest import ingest, orchestrator
+
+    monkeypatch.setattr(ingest, "generate", None, raising=False)
+    monkeypatch.setattr(ingest, "is_available", None, raising=False)
+    monkeypatch.setattr(orchestrator, "is_available", None, raising=False)
 
 # ---------------------------------------------------------------------------
 # _extract_json_array
@@ -657,7 +754,8 @@ def test_generate_one_holds_one_exclusive_lease_across_repair_session(
         finally:
             events.append(("lease_exit", exclusive))
 
-    def fake_admit(_config, requested_num_ctx: int) -> int:
+    def fake_admit(_config, requested_num_ctx: int, *, model: str) -> int:
+        assert model == "ornith:test"
         events.append(("admit", requested_num_ctx))
         return requested_num_ctx
 
@@ -675,7 +773,6 @@ def test_generate_one_holds_one_exclusive_lease_across_repair_session(
         ingest,
         "load_ingest_config",
         lambda: IngestConfig(
-            model="ornith:test",
             num_ctx=32768,
             max_num_ctx=65536,
             num_predict=4096,
@@ -684,7 +781,7 @@ def test_generate_one_holds_one_exclusive_lease_across_repair_session(
     monkeypatch.setattr(ingest, "_build_focused_context", lambda *_a, **_k: "ctx")
     monkeypatch.setattr(ingest, "_admit_ingest_context", fake_admit)
     monkeypatch.setattr(ingest.ollama_runtime, "model_resource_lease", fake_lease)
-    monkeypatch.setattr(ingest, "generate", fake_generate)
+    monkeypatch.setattr(ingest.ollama_runtime, "runtime_generate", fake_generate)
 
     assert ingest._generate_with_progress is ingest._DEFAULT_GENERATE_WITH_PROGRESS
     result = ingest._generate_one(
@@ -710,6 +807,92 @@ def test_generate_one_holds_one_exclusive_lease_across_repair_session(
     second_prompt = [value for name, value in events if name == "generate"][1]
     assert isinstance(second_prompt, str)
     assert f"<ASSISTANT>\n{invalid}" in second_prompt
+
+
+def test_remote_ingest_routes_raw_and_derived_high_without_ollama_controls(
+    monkeypatch: pytest.MonkeyPatch,
+    isolated_wiki: Path,
+) -> None:
+    del isolated_wiki
+    from chronovisor.core import search
+    from chronovisor.ingest import ingest
+
+    page = (
+        "=== NEW PAGE: memory/remote.md ===\n"
+        "---\ntitle: Remote\nupdated: 2026-08-10\nstatus: stable\n"
+        "type: knowledge\n---\nbody\n=== END PAGE ==="
+    )
+    backend = _RemoteIngestBackend(
+        "[]",
+        page,
+        json.dumps(
+            {"summary": "remote", "recall_questions": ["remote question?"]}
+        ),
+    )
+    _install_remote_ingest_runtime(
+        monkeypatch,
+        backend,
+        egress=(SourceDataClass.RAW, SourceDataClass.DERIVED_SNIPPET),
+    )
+    _forbid_remote_ingest_ollama(monkeypatch)
+    monkeypatch.setattr(search, "search", lambda *_args, **_kwargs: ([], None))
+    monkeypatch.setattr(ingest, "_build_focused_context", lambda *_a, **_k: "")
+
+    assert ingest._triage("remote raw", raise_on_failure=True) == []
+    generated = ingest._generate_one(
+        {
+            "type": "create",
+            "filename": "memory/remote.md",
+            "title": "Remote",
+            "summary": "remote page",
+        },
+        "remote raw",
+    )
+    assert generated is not None
+    assert generated["filename"] == "memory/remote.md"
+    assert ingest._generate_recall_metadata("Remote", "body", "memory/remote") == {
+        "summary": "remote",
+        "recall_questions": ["remote question?"],
+    }
+    assert [request.source.data_class for request in backend.requests] == [
+        SourceDataClass.RAW,
+        SourceDataClass.RAW,
+        SourceDataClass.DERIVED_SNIPPET,
+    ]
+    assert all(
+        request.source.sensitivity is SourceSensitivity.HIGH
+        for request in backend.requests
+    )
+
+
+def test_remote_high_egress_denial_has_no_backend_or_provider_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+    isolated_wiki: Path,
+) -> None:
+    del isolated_wiki
+    from chronovisor.ingest import ingest
+
+    backend = _RemoteIngestBackend("must not run")
+    _install_remote_ingest_runtime(monkeypatch, backend, egress=())
+    _forbid_remote_ingest_ollama(monkeypatch)
+    monkeypatch.setattr(ingest, "_build_focused_context", lambda *_a, **_k: "")
+
+    assert ingest._triage("high raw") is None
+    assert (
+        ingest._generate_one(
+            {
+                "type": "create",
+                "filename": "memory/denied.md",
+                "title": "Denied",
+                "summary": "denied page",
+            },
+            "high raw",
+        )
+        is None
+    )
+    fallback = ingest._fallback_recall_metadata("Denied", "body", "memory/denied")
+    assert ingest._generate_recall_metadata("Denied", "body", "memory/denied") == fallback
+    assert backend.requests == []
 
 
 def test_generate_one_rejects_context_accounting_at_admitted_boundary(
@@ -742,7 +925,6 @@ def test_generate_one_rejects_context_accounting_at_admitted_boundary(
         ingest,
         "load_ingest_config",
         lambda: IngestConfig(
-            model="ornith:test",
             num_ctx=32768,
             max_num_ctx=32768,
             num_predict=4096,
@@ -788,7 +970,6 @@ def test_generate_one_oversized_full_repair_envelope_fails_before_resources(
         ingest,
         "load_ingest_config",
         lambda: IngestConfig(
-            model="ornith:test",
             num_ctx=32768,
             max_num_ctx=32768,
             num_predict=4096,
@@ -968,6 +1149,20 @@ def isolated_wiki(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(ollama, "is_available", lambda: False)
     monkeypatch.setattr(ingest, "is_available", lambda: False)
     monkeypatch.setattr(orchestrator, "is_available", lambda: False)
+    monkeypatch.setattr(
+        ollama,
+        "runtime_generation_routes",
+        lambda roles: tuple(
+            ollama.RuntimeGenerationRoute(
+                role=role,
+                provider="ollama",
+                model="ornith:test",
+                location="local",
+                structured_output=True,
+            )
+            for role in roles
+        ),
+    )
 
     real_ensure_page_metadata = ingest._ensure_page_metadata_frontmatter
 
@@ -6222,7 +6417,7 @@ class TestRawKeywordsMetadataPropagation:
         monkeypatch.setattr(
             ingest,
             "_admit_ingest_context",
-            lambda _config, selected: selected,
+            lambda _config, selected, *, model: selected,
         )
 
     def test_metadata_raw_keywords_lands_on_every_operation(
@@ -6273,7 +6468,7 @@ class TestRawKeywordsMetadataPropagation:
         op = {"type": "create", "filename": "misc/p0.md", "title": "P"}
         monkeypatch.setattr(
             ingest,
-            "generate",
+            "_generate_with_progress",
             lambda *_a, **_kw: (
                 "=== NEW PAGE: misc/p0.md ===\n"
                 "---\ntitle: P\nupdated: 2026-04-28\nstatus: stable\ntype: knowledge\n---\nbody\n"
@@ -6296,7 +6491,7 @@ class TestRawKeywordsMetadataPropagation:
         op = {"type": "create", "filename": "misc/p0.md", "title": "P"}
         monkeypatch.setattr(
             ingest,
-            "generate",
+            "_generate_with_progress",
             lambda *_a, **_kw: (
                 "=== NEW PAGE: misc/p0.md ===\n"
                 "---\ntitle: P\nupdated: 2026-04-28\nstatus: stable\ntype: knowledge\n---\nbody\n"
@@ -8712,7 +8907,7 @@ class TestPerRawOrchestrator:
             raw_path.name: "pending_local_repair"
         }
 
-    def test_generation_transport_error_is_operational_not_transient(
+    def test_generation_transport_error_is_transient_daemon_outage(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         from chronovisor.core import background_jobs
@@ -8727,52 +8922,55 @@ class TestPerRawOrchestrator:
 
         result = failure_supervisor.record_raw_failure(
             raw_path=raw_path,
-            error="ingest generation transport_error: Ollama connection reset",
+            error="ingest generation transport_error: backend unavailable",
             raw_text="grounded source",
         )
 
         assert result.failure_class == "ingest.generation_transport_error"
-        assert result.tracked is True
-        assert result.transient is False
+        assert result.attempts == 0
+        assert result.tracked is False
+        assert result.transient is True
         assert result.quarantined is False
-        assert result.packet_path is not None
+        assert result.packet_path is None
         assert raw_path.exists()
-        assert started == [Path(result.packet_path)]
-        assert failure_supervisor.operational_deferred_raw_files([raw_path]) == {
-            raw_path.name: "pending_local_repair"
-        }
+        assert started == []
+        assert failure_supervisor.operational_deferred_raw_files([raw_path]) == {}
 
-    def test_ollama_unavailable_stays_pending_without_self_heal_packet(
+    def test_remote_ingest_status_does_not_probe_ollama(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A local model outage is infrastructure state, not a bad raw.
-
-        It must not accumulate per-raw attempts or quarantine otherwise valid
-        source material into the self-heal queue.
-        """
+        del isolated_wiki
         from chronovisor.ingest import ingest as ingest_mod
         from chronovisor.ingest import orchestrator
 
-        raw_path = isolated_wiki / "raw" / "model-memory.md"
-        raw_path.write_text("body")
+        monkeypatch.setattr(
+            ingest_mod.ollama_runtime,
+            "runtime_generation_routes",
+            lambda roles: tuple(
+                ingest_mod.ollama_runtime.RuntimeGenerationRoute(
+                    role=role,
+                    provider="remote-test",
+                    model="remote-model",
+                    location="remote",
+                    structured_output=True,
+                )
+                for role in roles
+            ),
+        )
+        monkeypatch.setattr(
+            orchestrator,
+            "is_available",
+            lambda: pytest.fail("remote status probed Ollama"),
+        )
 
-        monkeypatch.setattr(orchestrator, "is_available", lambda: False)
-        monkeypatch.setattr(ingest_mod, "is_available", lambda: False)
-
-        result = {}
-        for _ in range(3):
-            result = orchestrator.run_pending_ingest(force=True)
-
-        supervision = result["per_raw"][0]["supervision"]
-        assert supervision["failure_class"] == "ingest.ollama_unavailable"
-        assert supervision["attempts"] == 0
-        assert supervision["tracked"] is False
-        assert supervision["transient"] is True
-        assert supervision["quarantined"] is False
-        assert raw_path.exists()
-        assert orchestrator.get_pending_raw_files() == [raw_path]
-        packets_dir = isolated_wiki / "runtime" / "failures" / "packets"
-        assert not packets_dir.exists() or list(packets_dir.iterdir()) == []
+        assert orchestrator.get_ollama_status() == {
+            "available": True,
+            "processor": "remote-test",
+            "role": "ingest.generation",
+            "provider": "remote-test",
+            "model": "remote-model",
+            "location": "remote",
+        }
 
     def test_legacy_sonnet_fallback_error_is_not_tracked_as_raw_failure(
         self, isolated_wiki: Path
@@ -10885,9 +11083,13 @@ class TestTriagePlanSchema:
         def fake_chat(messages, **kwargs):
             captured["messages"] = messages
             captured.update(kwargs)
-            return "[]"
+            return ingest.ollama_runtime.ChatResponse(content="[]")
 
-        monkeypatch.setattr(ingest.ollama_runtime, "chat", fake_chat)
+        monkeypatch.setattr(
+            ingest.ollama_runtime,
+            "runtime_structured_chat",
+            fake_chat,
+        )
         request = ChatRequest(
             model="ornith:test",
             messages=(
@@ -10906,35 +11108,67 @@ class TestTriagePlanSchema:
             seed=0,
         )
 
-        assert ingest._structured_chat_transport()(request) == "[]"
-        assert captured["messages"] == [dict(message) for message in request.messages]
-        assert captured["return_metadata"] is True
+        assert ingest._structured_chat_transport()(request).content == "[]"
+        assert captured["messages"] == request.messages
+        assert captured["runtime_role"] == "ingest.generation"
+        assert captured["source_data_class"] == "raw"
+        assert captured["source_sensitivity"] == "high"
         assert captured["format"] == request.schema
 
     def test_production_triage_selects_native_chat_transport(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from contextlib import nullcontext
-
         from chronovisor.ingest import ingest
 
-        native = _QueueStructuredTransport("[]")
-        monkeypatch.setattr(ingest, "_structured_chat_transport", lambda: native)
+        captured: list[dict[str, str]] = []
+        controls: list[str] = []
+
+        @contextmanager
+        def lease(**_kwargs):
+            controls.append("lease")
+            yield
+
+        def admit(_config, selected, *, model):
+            assert model == "ornith:test"
+            controls.append("plan")
+            return selected
+
+        def native(messages, **_kwargs):
+            captured.extend(dict(message) for message in messages)
+            return ingest.ollama_runtime.ChatResponse(content="[]")
+
+        monkeypatch.setattr(
+            ingest.ollama_runtime,
+            "runtime_structured_chat",
+            native,
+        )
         monkeypatch.setattr(
             ingest.ollama_runtime,
             "model_resource_lease",
-            lambda **_kwargs: nullcontext(),
+            lease,
         )
         monkeypatch.setattr(
-            ingest, "_admit_ingest_context", lambda _config, selected: selected
+            ingest.ollama_runtime,
+            "model_resource_lease_mode",
+            lambda: "exclusive",
+        )
+        monkeypatch.setattr(
+            ingest.ollama_runtime,
+            "plan_model_residency",
+            lambda *_args, **_kwargs: pytest.fail("triage planned twice"),
+        )
+        monkeypatch.setattr(
+            ingest,
+            "_admit_ingest_context",
+            admit,
         )
 
         assert ingest._triage("ephemeral raw", raise_on_failure=True) == []
-        assert len(native.requests) == 1
-        assert [message["role"] for message in native.requests[0].messages] == [
+        assert [message["role"] for message in captured] == [
             "system",
             "user",
         ]
+        assert controls == ["lease", "plan"]
 
     def test_successful_triage_clears_live_progress(self, isolated_wiki: Path) -> None:
         from chronovisor.ingest import ingest
@@ -11776,7 +12010,6 @@ class TestIngestContextAdmission:
         from chronovisor.ingest import ingest
 
         config = IngestConfig(
-            model="ornith:ingest",
             num_ctx=32768,
             max_num_ctx=262144,
             memory_reserve_gib=16,
@@ -11818,7 +12051,10 @@ class TestIngestContextAdmission:
 
         monkeypatch.setattr(ollama, "plan_model_residency", fake_plan)
 
-        assert ingest._admit_ingest_context(config, 262144) == 262144
+        assert (
+            ingest._admit_ingest_context(config, 262144, model="ornith:ingest")
+            == 262144
+        )
         assert unloaded == ["decision:35b", "recall:9b"]
         assert planned["models"] == ["ornith:ingest"]
         assert planned["num_ctx"] == 262144
@@ -11834,7 +12070,6 @@ class TestIngestContextAdmission:
         from chronovisor.ingest import ingest
 
         config = IngestConfig(
-            model="ornith:ingest",
             num_ctx=32768,
             max_num_ctx=262144,
             memory_reserve_gib=16,
@@ -11875,7 +12110,10 @@ class TestIngestContextAdmission:
 
         monkeypatch.setattr(ollama, "plan_model_residency", fake_plan)
 
-        assert ingest._admit_ingest_context(config, 65536) == 65536
+        assert (
+            ingest._admit_ingest_context(config, 65536, model="ornith:ingest")
+            == 65536
+        )
         assert len(plan_calls) == 2
         assert unloaded == ["decision:35b", "recall:9b"]
 
@@ -12426,7 +12664,6 @@ class TestRecallMetadataStructuredSession:
             ingest,
             "load_ingest_config",
             lambda: IngestConfig(
-                model="ornith:test",
                 num_ctx=32768,
                 max_num_ctx=262144,
             ),

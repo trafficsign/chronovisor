@@ -2110,12 +2110,19 @@ class DecisionRouter:
             if self.reuse_larger_context:
                 try:
                     ingest_config = load_ingest_config()
+                    ingest_route = ollama.runtime_generation_routes(
+                        (ollama.INGEST_GENERATION_RUNTIME_ROLE,)
+                    )[0]
                 except Exception:
                     ingest_config = None
+                    ingest_route = None
                 if (
                     "primary" in self._local_roles
                     and ingest_config is not None
-                    and ingest_config.model == self.config.primary_model
+                    and ingest_route is not None
+                    and ingest_route.provider == "ollama"
+                    and ingest_route.location == "local"
+                    and ingest_route.model == self.config.primary_model
                     and not isinstance(ingest_config.max_num_ctx, bool)
                     and isinstance(ingest_config.max_num_ctx, int)
                 ):

@@ -14,17 +14,17 @@ import pytest
 def ingest_ollama_unavailable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> list[str]:
-    """Stub the import-by-value availability consumer used by ingest."""
+    """Stub the provider-neutral runtime status consumed by self-heal."""
 
     from chronovisor.ingest import orchestrator
 
     calls: list[str] = []
 
-    def unavailable() -> bool:
-        calls.append("is_available")
-        return False
+    def unavailable() -> dict[str, object]:
+        calls.append("get_ollama_status")
+        return {"available": False, "processor": "unavailable"}
 
-    monkeypatch.setattr(orchestrator, "is_available", unavailable)
+    monkeypatch.setattr(orchestrator, "get_ollama_status", unavailable)
     return calls
 
 
@@ -151,7 +151,7 @@ def isolated_wiki(
     return chronovisor_root
 
 
-def test_ingest_ollama_fixture_patches_import_by_value_consumer(
+def test_ingest_runtime_fixture_patches_provider_neutral_status(
     monkeypatch: pytest.MonkeyPatch,
     ingest_ollama_unavailable: list[str],
 ) -> None:
@@ -160,8 +160,8 @@ def test_ingest_ollama_fixture_patches_import_by_value_consumer(
 
     monkeypatch.setattr(ollama, "is_available", lambda: True)
 
-    assert orchestrator.is_available() is False
-    assert ingest_ollama_unavailable == ["is_available"]
+    assert orchestrator.get_ollama_status()["available"] is False
+    assert ingest_ollama_unavailable == ["get_ollama_status"]
 
 
 def _seed_page(chronovisor_root: Path, rel: str) -> None:
@@ -633,8 +633,8 @@ def test_operational_source_rejects_direct_raw_action(
     from chronovisor.ingest import self_heal
 
     packet = {
-        "failure_class": "ingest.generation_transport_error",
-        "raw_file": "generation-transport.md",
+        "failure_class": "ingest.generation_validation_failed",
+        "raw_file": "generation-validation.md",
     }
     decision = LocalRepairDecision(
         status="resolved",
@@ -659,13 +659,13 @@ def test_operational_source_routes_resolved_raw_action_to_system_incident(
     packet = json.loads(packet_path.read_text(encoding="utf-8"))
     packet.update(
         {
-            "failure_class": "ingest.generation_transport_error",
-            "fingerprint": "ingest.generation_transport_error:connection-reset",
-            "raw_file": "generation-transport.md",
+            "failure_class": "ingest.generation_validation_failed",
+            "fingerprint": "ingest.generation_validation_failed:invalid-page",
+            "raw_file": "generation-validation.md",
         }
     )
     packet_path.write_text(json.dumps(packet), encoding="utf-8")
-    raw_path = isolated_wiki / "raw" / "generation-transport.md"
+    raw_path = isolated_wiki / "raw" / "generation-validation.md"
     raw_path.write_text("grounded source", encoding="utf-8")
     decision = LocalRepairDecision(
         status="resolved",
@@ -706,7 +706,7 @@ def test_operational_source_routes_resolved_raw_action_to_system_incident(
     assert result["system_incident"]["status"] == "pending"
     assert updated["status"] == "local_quarantined"
     assert raw_path.exists()
-    assert promoted == [(packet_path, "ingest.generation_transport_error")]
+    assert promoted == [(packet_path, "ingest.generation_validation_failed")]
 
 
 def test_deterministic_single_alias_repair_applies_locally_without_frontier(

@@ -6,6 +6,8 @@ from collections.abc import Mapping
 from contextlib import AbstractContextManager
 from typing import Any
 
+import httpx
+
 from chronovisor.core import ollama
 from chronovisor.core.llm_runtime import (
     BackendCapabilities,
@@ -18,6 +20,7 @@ from chronovisor.core.llm_runtime import (
     LLMRuntime,
     MessageGenerationRequest,
     RouteLocation,
+    SafeBackendError,
     TokenUsage,
 )
 
@@ -29,28 +32,33 @@ class OllamaAdapter:
     location = RouteLocation.LOCAL
 
     def generate(self, request: GenerationInput, *, model: str) -> GenerationResult:
-        if isinstance(request, MessageGenerationRequest):
-            return self._chat(request, model=model)
-        format_value: dict[str, Any] | str | None = (
-            dict(request.format)
-            if isinstance(request.format, Mapping)
-            else request.format
-        )
-        output = ollama.generate(
-            request.prompt,
-            request.system,
-            format=format_value,
-            progress_callback=request.progress_callback,
-            model=model,
-            num_ctx=request.num_ctx,
-            num_predict=request.max_output_tokens,
-            keep_alive=request.keep_alive,
-            read_timeout_ms=request.timeout_ms,
-            temperature=request.temperature,
-            seed=request.seed,
-            return_metadata=True,
-        )
-        return self._normalize_generation(output, model=model)
+        try:
+            if isinstance(request, MessageGenerationRequest):
+                return self._chat(request, model=model)
+            format_value: dict[str, Any] | str | None = (
+                dict(request.format)
+                if isinstance(request.format, Mapping)
+                else request.format
+            )
+            output = ollama.generate(
+                request.prompt,
+                request.system,
+                format=format_value,
+                progress_callback=request.progress_callback,
+                model=model,
+                num_ctx=request.num_ctx,
+                num_predict=request.max_output_tokens,
+                keep_alive=request.keep_alive,
+                read_timeout_ms=request.timeout_ms,
+                temperature=request.temperature,
+                seed=request.seed,
+                return_metadata=True,
+            )
+            return self._normalize_generation(output, model=model)
+        except httpx.TimeoutException:
+            raise SafeBackendError("timeout", transient=True) from None
+        except httpx.TransportError:
+            raise SafeBackendError("transport_error", transient=True) from None
 
     def _chat(
         self, request: MessageGenerationRequest, *, model: str
@@ -72,9 +80,14 @@ class OllamaAdapter:
         return self._normalize_generation(output, model=model)
 
     def embed(self, request: EmbeddingRequest, *, model: str) -> EmbeddingResult:
-        vectors = ollama.embed(
-            list(request.texts), model=model, read_timeout_ms=request.timeout_ms
-        )
+        try:
+            vectors = ollama.embed(
+                list(request.texts), model=model, read_timeout_ms=request.timeout_ms
+            )
+        except httpx.TimeoutException:
+            raise SafeBackendError("timeout", transient=True) from None
+        except httpx.TransportError:
+            raise SafeBackendError("transport_error", transient=True) from None
         return EmbeddingResult(
             vectors=tuple(tuple(vector) for vector in vectors),
             provider=self.provider,

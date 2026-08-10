@@ -21,7 +21,6 @@ from typing import Any
 from chronovisor.core import runtime_status
 from chronovisor.core.durable_state import fsync_directory as _fsync_directory
 from chronovisor.core.link_fix import atomic_write
-from chronovisor.core.ollama import is_available
 from chronovisor.core.store import CHRONOVISOR_ROOT, LOG_FILE, RAW_DIR
 
 # Config
@@ -438,11 +437,29 @@ def mark_lint_complete() -> None:
 
 
 def get_ollama_status() -> dict:
-    """Get Ollama status with caching."""
-    available = is_available()
+    """Report the configured ingest generation route without probing a backend."""
+    from chronovisor.ingest import ingest as ingest_runtime
+
+    try:
+        route = ingest_runtime.ollama_runtime.runtime_generation_routes(
+            (ingest_runtime.ollama_runtime.INGEST_GENERATION_RUNTIME_ROLE,)
+        )[0]
+    except ingest_runtime.ollama_runtime.RuntimeBridgeError:
+        return {
+            "available": False,
+            "processor": "unavailable",
+            "role": ingest_runtime.ollama_runtime.INGEST_GENERATION_RUNTIME_ROLE,
+            "provider": None,
+            "model": None,
+            "location": None,
+        }
     return {
-        "available": available,
-        "processor": "ollama" if available else "unavailable",
+        "available": True,
+        "processor": route.provider,
+        "role": route.role,
+        "provider": route.provider,
+        "model": route.model,
+        "location": route.location,
     }
 
 
@@ -1265,7 +1282,7 @@ def run_pending_ingest(
                 # Anything that isn't a list of strings is normalized to [].
                 raw_keywords = _raw_unit_keywords(unit.raw_keywords, raw_text)
 
-                processor = "ollama" if is_available() else "unavailable"
+                processor = get_ollama_status()["processor"]
                 job = job_store.create(processor=processor)
                 job_ids.append(job.job_id)
                 runtime_status.safe_write_status(

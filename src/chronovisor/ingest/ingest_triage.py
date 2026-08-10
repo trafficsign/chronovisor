@@ -149,25 +149,47 @@ Analyze the raw data above. Output a JSON array of page operations (create/updat
             and _runtime()._generate_with_progress
             is _DEFAULT_GENERATE_WITH_PROGRESS
         )
+        route = (
+            ollama_runtime.runtime_generation_routes(
+                (ollama_runtime.INGEST_GENERATION_RUNTIME_ROLE,)
+            )[0]
+            if live_transport
+            else None
+        )
+        if route is not None and not route.structured_output:
+            raise IngestTriageFailure(
+                "capability_unavailable",
+                "ingest.generation requires structured output",
+            )
+        local_ollama = (
+            route is not None
+            and route.provider == "ollama"
+            and route.location == "local"
+        )
         lease = (
             ollama_runtime.model_resource_lease(exclusive=True)
-            if live_transport
+            if local_ollama
             else nullcontext()
         )
         with lease:
-            if live_transport:
-                selected_num_ctx = _admit_ingest_context(config, selected_num_ctx)
-            session_transport = transport
-            if session_transport is None:
-                session_transport = (
-                    _structured_chat_transport()
-                    if live_transport
-                    else _structured_generate_transport(progress_callback)
+            if local_ollama and route is not None:
+                selected_num_ctx = _admit_ingest_context(
+                    config,
+                    selected_num_ctx,
+                    model=route.model,
                 )
+            session_transport = transport
+            if session_transport is None and not live_transport:
+                session_transport = _structured_generate_transport(progress_callback)
             result = LocalStructuredSession(
-                model=config.model,
+                model=route.model if route is not None else "injected",
                 transport=session_transport,
                 role="ingest_triage",
+                runtime_role=ollama_runtime.INGEST_GENERATION_RUNTIME_ROLE,
+                runtime_location=route.location if route is not None else None,
+                source_data_class="raw",
+                source_sensitivity="high",
+                resource_managed=local_ollama,
                 num_ctx=selected_num_ctx,
                 num_predict=triage_num_predict,
                 keep_alive=config.keep_alive,
@@ -189,6 +211,12 @@ Analyze the raw data above. Output a JSON array of page operations (create/updat
             )
     except IngestContextCapacityError as exc:
         failure = IngestTriageFailure("context_window_exceeded", str(exc))
+        _emit_triage_failure(progress_callback, failure)
+        if raise_on_failure:
+            raise failure from exc
+        return None
+    except ollama_runtime.RuntimeBridgeError as exc:
+        failure = IngestTriageFailure(exc.category, exc.category)
         _emit_triage_failure(progress_callback, failure)
         if raise_on_failure:
             raise failure from exc

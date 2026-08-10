@@ -5,6 +5,8 @@ import os
 import time
 from pathlib import Path
 
+import pytest
+
 from chronovisor.core.runtime_config import SearchEmbeddingConfig
 from chronovisor.ops import autonomy, health
 
@@ -165,8 +167,12 @@ def test_latest_memory_integrity_reads_summary(tmp_path: Path, monkeypatch) -> N
     assert payload["capture_rate"] == 0.5
 
 
-def test_ingest_liveness_kpi_alerts_when_ollama_blocks_pending_raws(
-    tmp_path: Path, monkeypatch
+@pytest.mark.parametrize(
+    "runtime_status",
+    ["waiting_for_ingest_runtime", "waiting_for_ollama"],
+)
+def test_ingest_liveness_kpi_alerts_when_runtime_blocks_pending_raws(
+    tmp_path: Path, monkeypatch, runtime_status: str
 ) -> None:
     chronovisor_root = tmp_path / "wiki"
     state_path = chronovisor_root / "runtime" / "ingest-liveness.json"
@@ -174,7 +180,7 @@ def test_ingest_liveness_kpi_alerts_when_ollama_blocks_pending_raws(
     state_path.write_text(
         json.dumps(
             {
-                "status": "waiting_for_ollama",
+                "status": runtime_status,
                 "pending_raws": 7,
                 "observed_at": "2026-07-17T12:00:00",
             }
@@ -186,7 +192,7 @@ def test_ingest_liveness_kpi_alerts_when_ollama_blocks_pending_raws(
     payload = health.ingest_liveness_kpi()
 
     assert payload["status"] == "alert"
-    assert payload["runtime_status"] == "waiting_for_ollama"
+    assert payload["runtime_status"] == runtime_status
     assert payload["pending_raws"] == 7
 
 

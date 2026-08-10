@@ -22,6 +22,20 @@ def _disable_runtime_status_reset(
     )
     monkeypatch.setattr(ingest_drain, "CHRONOVISOR_ROOT", tmp_path / "wiki")
     monkeypatch.setattr(ingest_drain.ollama, "ingest_model", lambda: "ornith:test")
+    monkeypatch.setattr(
+        ingest_drain.ollama,
+        "runtime_generation_routes",
+        lambda roles: tuple(
+            ingest_drain.ollama.RuntimeGenerationRoute(
+                role=role,
+                provider="ollama",
+                model="ornith:test",
+                location="local",
+                structured_output=True,
+            )
+            for role in roles
+        ),
+    )
     monkeypatch.setattr(ingest_drain.ollama, "resident_model_rows", lambda: {})
     monkeypatch.setattr(ingest_drain.ollama, "is_available", lambda: True)
     monkeypatch.setattr(
@@ -92,6 +106,52 @@ def test_release_ingest_runner_does_not_wake_absent_model(
         "status": "not_resident",
         "released": False,
         "model": "ornith:test",
+    }
+
+
+def test_remote_drain_skips_all_ollama_probes_and_release_controls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        ingest_drain.ollama,
+        "runtime_generation_routes",
+        lambda roles: tuple(
+            ingest_drain.ollama.RuntimeGenerationRoute(
+                role=role,
+                provider="remote-test",
+                model="remote-model",
+                location="remote",
+                structured_output=True,
+            )
+            for role in roles
+        ),
+    )
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("remote ingest drain touched Ollama")
+
+    for name in (
+        "is_available",
+        "resident_model_rows",
+        "unload_named_model",
+        "model_resource_lease",
+        "plan_model_residency",
+    ):
+        monkeypatch.setattr(ingest_drain.ollama, name, forbidden)
+    monkeypatch.setattr(
+        ingest_drain.orchestrator,
+        "get_pending_raw_files",
+        lambda: [],
+    )
+    monkeypatch.setattr(ingest_drain, "init_chronovisor", lambda: None)
+    monkeypatch.setattr(ingest_drain.orchestrator, "reset_stale_lock", lambda: None)
+
+    result = ingest_drain._drain(max_batches=1, sleep_seconds=0)
+
+    assert result["status"] == "drained"
+    assert ingest_drain._release_ingest_runner() == {
+        "status": "not_applicable",
+        "released": False,
     }
 
 
@@ -287,7 +347,7 @@ def test_parser_reads_max_units_from_environment(
     assert args.max_units == 1
 
 
-def test_drain_waits_for_ollama_and_recovers_without_losing_pending_raws(
+def test_drain_waits_for_ingest_runtime_and_recovers_without_losing_pending_raws(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -311,7 +371,9 @@ def test_drain_waits_for_ollama_and_recovers_without_losing_pending_raws(
 
     waiting = ingest_drain.drain(max_batches=1, sleep_seconds=0, log_file=log_file)
 
-    assert waiting["status"] == "waiting_for_ollama"
+    assert waiting["status"] == "waiting_for_ingest_runtime"
+    assert waiting["stop_reason"] == "ingest runtime unavailable"
+    assert waiting["liveness"]["ingest_runtime_available"] is False
     assert waiting["pending_after"] == 2
     assert waiting["alert"] is True
     assert state["runs"] == 0
@@ -323,6 +385,36 @@ def test_drain_waits_for_ollama_and_recovers_without_losing_pending_raws(
     assert recovered["pending_after"] == 0
     assert state["runs"] == 1
     assert recovered["liveness"]["last_recovered_at"]
+
+
+def test_route_failure_reports_generic_runtime_wait_without_ollama_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(ingest_drain, "init_chronovisor", lambda: None)
+    monkeypatch.setattr(ingest_drain.orchestrator, "reset_stale_lock", lambda: None)
+    monkeypatch.setattr(
+        ingest_drain.orchestrator,
+        "get_pending_raw_files",
+        lambda: [object()],
+    )
+    monkeypatch.setattr(
+        ingest_drain.ollama,
+        "runtime_generation_routes",
+        lambda _roles: (_ for _ in ()).throw(
+            ingest_drain.ollama.RuntimeBridgeError("route_configuration_invalid")
+        ),
+    )
+    monkeypatch.setattr(
+        ingest_drain.ollama,
+        "is_available",
+        lambda: pytest.fail("unresolved route probed Ollama"),
+    )
+
+    result = ingest_drain._drain(max_batches=1, sleep_seconds=0)
+
+    assert result["status"] == "waiting_for_ingest_runtime"
+    assert result["stop_reason"] == "ingest runtime unavailable"
+    assert "ollama" not in result["liveness"]["error"].casefold()
 
 
 def test_drain_blocks_globally_before_raw_processing_when_authority_is_invalid(

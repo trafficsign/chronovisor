@@ -49,12 +49,7 @@ RUNTIME_BOUNDARIES = {
 }
 
 # Existing direct production access is migration debt, not an allow-list.
-LEGACY_PRODUCTION_BYPASSES = {
-    "src/chronovisor/ingest/ingest.py": {
-        "ollama.chat": 1,
-        "ollama.generate": 1,
-    },
-}
+LEGACY_PRODUCTION_BYPASSES = {}
 
 # These tools do not run in production workflows; each exception carries its reason.
 NON_PRODUCTION_EXCEPTIONS = {

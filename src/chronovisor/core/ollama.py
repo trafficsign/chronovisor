@@ -59,6 +59,7 @@ ChatResponse = _ollama_transport.ChatResponse
 GenerateResponse = _ollama_transport.GenerateResponse
 
 MODEL = DEFAULT_INGEST_MODEL
+INGEST_GENERATION_RUNTIME_ROLE = "ingest.generation"
 
 
 def _safe_runtime_bridge_category(value: object) -> str:
@@ -229,6 +230,69 @@ def runtime_structured_chat(
     )
 
 
+def runtime_generate(
+    prompt: str,
+    system: str | None = None,
+    *,
+    runtime_role: str,
+    source_data_class: str,
+    source_sensitivity: str,
+    format: Mapping[str, Any] | str | None = None,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    num_ctx: int | None = None,
+    num_predict: int | None = None,
+    keep_alive: str | None = None,
+    read_timeout_ms: int | None = None,
+    temperature: int | float | None = None,
+    seed: int | None = None,
+) -> GenerateResponse:
+    """Run one raw prompt through the cached provider-neutral runtime."""
+
+    from chronovisor.core.llm_config import LLMConfigError, load_default_llm_runtime
+    from chronovisor.core.llm_runtime import (
+        GenerationRequest,
+        LLMRuntimeError,
+        SourceDataClass,
+        SourceDataClassification,
+        SourceSensitivity,
+    )
+
+    try:
+        source = SourceDataClassification(
+            SourceDataClass(source_data_class),
+            SourceSensitivity(source_sensitivity),
+        )
+    except ValueError:
+        raise RuntimeBridgeError("source_classification_required") from None
+    try:
+        result = load_default_llm_runtime().generate(
+            runtime_role,
+            GenerationRequest(
+                prompt=prompt,
+                system=system,
+                format=dict(format) if isinstance(format, Mapping) else format,
+                progress_callback=progress_callback,
+                source=source,
+                num_ctx=num_ctx,
+                max_output_tokens=num_predict,
+                keep_alive=keep_alive,
+                timeout_ms=read_timeout_ms,
+                temperature=temperature,
+                seed=seed,
+            ),
+        )
+    except (LLMConfigError, LLMRuntimeError) as exc:
+        raise RuntimeBridgeError(_runtime_bridge_category(exc)) from None
+    return GenerateResponse(
+        content=result.content,
+        done=result.completed,
+        done_reason=result.finish_reason,
+        prompt_eval_count=result.usage.input_tokens,
+        eval_count=result.usage.output_tokens,
+        streamed=result.metadata.get("streamed") is True,
+    )
+
+
 # ponytail: temporary facade bridge; delete after final W6 callers own runtime types.
 
 
@@ -372,7 +436,7 @@ def model_activity(
 
 
 def ingest_model() -> str:
-    return load_ingest_config().model
+    return runtime_generation_routes((INGEST_GENERATION_RUNTIME_ROLE,))[0].model
 
 
 def _num_ctx_for_prompt(
@@ -551,7 +615,9 @@ def embed(
 
 def unload_model() -> None:
     """Explicitly unload model to free memory."""
-    unload_named_model(ingest_model())
+    route = runtime_generation_routes((INGEST_GENERATION_RUNTIME_ROLE,))[0]
+    if route.provider == "ollama" and route.location == "local":
+        unload_named_model(route.model)
 
 
 TRIAGE_SYSTEM_PROMPT = """\
