@@ -3,29 +3,22 @@
 from __future__ import annotations
 
 import argparse
-import base64
-import binascii
 import contextlib
-import getpass
 import hashlib
 import hmac
 import ipaddress
 import json
 import math
-import os
 import re
-import secrets
-import socket
 import subprocess
 import threading
 import time
 from datetime import date, datetime, timedelta
 from http import HTTPStatus
-from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qsl, urlencode, urlparse
+from urllib.parse import parse_qsl, urlparse
 
 import httpx
 
@@ -62,19 +55,6 @@ from chronovisor.recall import recall_runtime
 from chronovisor.recall.recall_auditor import load_audit_policy
 from chronovisor.recall.recall_improvement import configured_models
 
-DASHBOARD_ACCESS_COOKIE = "chronovisor_dashboard_access"
-DASHBOARD_ACCESS_QUERY = "access_token"
-DASHBOARD_TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{32,128}$")
-DASHBOARD_SESSION_MAX_AGE_SECONDS = 365 * 24 * 60 * 60
-DASHBOARD_CREDENTIAL_VERSION = 1
-DASHBOARD_PASSWORD_ALGORITHM = "scrypt"
-DASHBOARD_PASSWORD_SCRYPT_N = 2**14
-DASHBOARD_PASSWORD_SCRYPT_R = 8
-DASHBOARD_PASSWORD_SCRYPT_P = 1
-DASHBOARD_PASSWORD_DKLEN = 32
-DASHBOARD_LOGIN_ATTEMPT_LIMIT = 5
-DASHBOARD_LOGIN_ATTEMPT_WINDOW_SECONDS = 5 * 60
-_LOCK_TYPE = type(threading.Lock())
 LOG_LINE_RE = re.compile(r"^- \[(?P<time>[^\]]+)\] (?P<message>.*)$")
 RAW_DATE_RE = re.compile(r"(?:^|[^0-9])(?P<stamp>20\d{6})(?:[^0-9]|$)")
 SEMANTIC_PROJECTION_CHILD_RE = re.compile(
@@ -4959,161 +4939,6 @@ def _snapshot_with_live_status(snapshot: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _load_or_create_dashboard_token(path: Path) -> str:
-    try:
-        existing = path.read_text(encoding="utf-8").strip()
-    except FileNotFoundError:
-        existing = ""
-    if existing:
-        if DASHBOARD_TOKEN_RE.fullmatch(existing) is None:
-            raise RuntimeError(f"dashboard access token is malformed: {path}")
-        os.chmod(path, 0o600)
-        return existing
-
-    path.parent.mkdir(parents=True, exist_ok=True)
-    token = secrets.token_urlsafe(32)
-    try:
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    except FileExistsError as exc:
-        existing = path.read_text(encoding="utf-8").strip()
-        if DASHBOARD_TOKEN_RE.fullmatch(existing) is None:
-            raise RuntimeError(f"dashboard access token is malformed: {path}") from exc
-        os.chmod(path, 0o600)
-        return existing
-    with os.fdopen(fd, "w", encoding="utf-8") as handle:
-        handle.write(token + "\n")
-        handle.flush()
-        os.fsync(handle.fileno())
-    return token
-
-
-def _rotate_dashboard_token(path: Path) -> str:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    token = secrets.token_urlsafe(32)
-    temporary = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
-    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(token + "\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-        os.chmod(path, 0o600)
-    finally:
-        with contextlib.suppress(FileNotFoundError):
-            temporary.unlink()
-    return token
-
-
-def _password_digest(password: str, salt: bytes) -> bytes:
-    return hashlib.scrypt(
-        password.encode("utf-8"),
-        salt=salt,
-        n=DASHBOARD_PASSWORD_SCRYPT_N,
-        r=DASHBOARD_PASSWORD_SCRYPT_R,
-        p=DASHBOARD_PASSWORD_SCRYPT_P,
-        dklen=DASHBOARD_PASSWORD_DKLEN,
-        maxmem=64 * 1024 * 1024,
-    )
-
-
-def _write_dashboard_credentials(path: Path, username: str, password: str) -> None:
-    username = username.strip()
-    if not username or len(username) > 64:
-        raise ValueError("dashboard username must contain 1 to 64 characters")
-    if not password:
-        raise ValueError("dashboard password must not be empty")
-
-    salt = secrets.token_bytes(16)
-    digest = _password_digest(password, salt)
-    payload = {
-        "version": DASHBOARD_CREDENTIAL_VERSION,
-        "username": username,
-        "password": {
-            "algorithm": DASHBOARD_PASSWORD_ALGORITHM,
-            "salt": base64.b64encode(salt).decode("ascii"),
-            "digest": base64.b64encode(digest).decode("ascii"),
-            "n": DASHBOARD_PASSWORD_SCRYPT_N,
-            "r": DASHBOARD_PASSWORD_SCRYPT_R,
-            "p": DASHBOARD_PASSWORD_SCRYPT_P,
-            "dklen": DASHBOARD_PASSWORD_DKLEN,
-        },
-        "created_at": datetime.now().astimezone().isoformat(),
-    }
-    encoded = (json.dumps(payload, ensure_ascii=False, indent=2) + "\n").encode()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
-    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    try:
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(encoded)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-        os.chmod(path, 0o600)
-    finally:
-        with contextlib.suppress(FileNotFoundError):
-            temporary.unlink()
-
-
-def _load_dashboard_credentials(path: Path) -> dict[str, Any] | None:
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        return None
-    except (OSError, json.JSONDecodeError) as exc:
-        raise RuntimeError(f"dashboard credentials are unreadable: {path}") from exc
-    if not isinstance(payload, dict):
-        raise RuntimeError(f"dashboard credentials are malformed: {path}")
-    password = payload.get("password")
-    if (
-        payload.get("version") != DASHBOARD_CREDENTIAL_VERSION
-        or not isinstance(payload.get("username"), str)
-        or not isinstance(password, dict)
-        or password.get("algorithm") != DASHBOARD_PASSWORD_ALGORITHM
-    ):
-        raise RuntimeError(f"dashboard credentials are malformed: {path}")
-    try:
-        salt = base64.b64decode(str(password["salt"]), validate=True)
-        digest = base64.b64decode(str(password["digest"]), validate=True)
-    except (KeyError, ValueError, binascii.Error) as exc:
-        raise RuntimeError(f"dashboard credentials are malformed: {path}") from exc
-    if len(salt) != 16 or len(digest) != DASHBOARD_PASSWORD_DKLEN:
-        raise RuntimeError(f"dashboard credentials are malformed: {path}")
-    expected_parameters = {
-        "n": DASHBOARD_PASSWORD_SCRYPT_N,
-        "r": DASHBOARD_PASSWORD_SCRYPT_R,
-        "p": DASHBOARD_PASSWORD_SCRYPT_P,
-        "dklen": DASHBOARD_PASSWORD_DKLEN,
-    }
-    if any(password.get(key) != value for key, value in expected_parameters.items()):
-        raise RuntimeError(f"dashboard credentials are malformed: {path}")
-    os.chmod(path, 0o600)
-    return payload
-
-
-def _dashboard_credentials_match(
-    credentials: dict[str, Any] | None,
-    username: str,
-    password: str,
-) -> bool:
-    if not credentials:
-        return False
-    stored_password = credentials.get("password")
-    if not isinstance(stored_password, dict):
-        return False
-    try:
-        salt = base64.b64decode(str(stored_password["salt"]), validate=True)
-        expected = base64.b64decode(str(stored_password["digest"]), validate=True)
-        actual = _password_digest(password, salt)
-    except (KeyError, ValueError, binascii.Error):
-        return False
-    stored_username = str(credentials.get("username") or "")
-    return hmac.compare_digest(username, stored_username) and hmac.compare_digest(
-        actual, expected
-    )
-
-
 def _normalized_client_ip(
     value: object,
 ) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
@@ -5137,149 +4962,19 @@ def _private_client_scope(value: object) -> str:
     return "public"
 
 
-def _dashboard_lan_hosts() -> list[str]:
-    local_name = re.sub(
-        r"[^A-Za-z0-9-]", "-", socket.gethostname().split(".")[0]
-    ).strip("-")
-    mdns_hosts = [f"{local_name}.local"] if local_name else []
-    private_hosts: list[str] = []
-    link_local_hosts: list[str] = []
-    for interface in ("en0", "en1"):
-        try:
-            result = subprocess.run(
-                ["/usr/sbin/ipconfig", "getifaddr", interface],
-                capture_output=True,
-                check=False,
-                text=True,
-                timeout=1,
-            )
-        except (OSError, subprocess.SubprocessError):
-            continue
-        candidate = result.stdout.strip()
-        address = _normalized_client_ip(candidate)
-        if address is None or _private_client_scope(candidate) != "private":
-            continue
-        target = link_local_hosts if address.is_link_local else private_hosts
-        if candidate not in target:
-            target.append(candidate)
-
-    # The share button copies the first URL. Prefer the directly routable LAN
-    # address because mDNS is not available on every phone/PC and a link-local
-    # address is usually the inactive interface on a multi-homed Mac.
-    return [*private_hosts, *mdns_hosts, *link_local_hosts]
+def _dashboard_bind_host_is_loopback(host: str) -> bool:
+    return host.casefold() in {"localhost", "127.0.0.1"}
 
 
 class DashboardHandler(BaseHTTPRequestHandler):
     server_version = "LLMWikiDashboard/0.1"
 
-    def _access_token(self) -> str:
-        return str(getattr(self.server, "lan_access_token", "") or "")
-
-    def _credentials(self) -> dict[str, Any] | None:
-        value = getattr(self.server, "dashboard_credentials", None)
-        return value if isinstance(value, dict) else None
-
     def _is_loopback(self) -> bool:
         return _private_client_scope(self.client_address[0]) == "loopback"
 
-    def _cookie_authorized(self, token: str) -> bool:
-        try:
-            cookies = SimpleCookie()
-            cookies.load(self.headers.get("Cookie", ""))
-            supplied = cookies.get(DASHBOARD_ACCESS_COOKIE)
-        except Exception:
-            return False
-        return bool(supplied and hmac.compare_digest(supplied.value, token))
-
-    def _set_access_cookie(self, token: str, *, max_age: int) -> None:
-        value = token if max_age > 0 else ""
-        self.send_header(
-            "Set-Cookie",
-            f"{DASHBOARD_ACCESS_COOKIE}={value}; Path=/; Max-Age={max_age}; "
-            "HttpOnly; SameSite=Strict",
-        )
-
-    def _redirect_after_token(self, parsed: Any, token: str) -> None:
-        clean_query = urlencode(
-            [
-                (key, value)
-                for key, value in parse_qsl(parsed.query, keep_blank_values=True)
-                if key != DASHBOARD_ACCESS_QUERY
-            ]
-        )
-        location = parsed.path or "/"
-        if clean_query:
-            location += f"?{clean_query}"
-        self.send_response(HTTPStatus.SEE_OTHER)
-        self.send_header("Location", location)
-        self._set_access_cookie(
-            token,
-            max_age=DASHBOARD_SESSION_MAX_AGE_SECONDS,
-        )
-        self.send_header("Cache-Control", "no-store")
-        _send_security_headers(self)
-        self.end_headers()
-
-    def _basic_authorized(self, credentials: dict[str, Any] | None) -> bool:
-        authorization = self.headers.get("Authorization", "")
-        scheme, separator, encoded = authorization.partition(" ")
-        if not separator or scheme.lower() != "basic" or not encoded:
-            return False
-        try:
-            decoded = base64.b64decode(encoded, validate=True).decode("utf-8")
-        except (UnicodeDecodeError, ValueError, binascii.Error):
-            return False
-        username, separator, password = decoded.partition(":")
-        if not separator:
-            return False
-        return _dashboard_credentials_match(credentials, username, password)
-
-    def _login_attempt_state(self) -> tuple[threading.Lock, dict[str, list[float]]]:
-        lock = getattr(self.server, "login_attempt_lock", None)
-        attempts = getattr(self.server, "login_attempts", None)
-        if not isinstance(lock, _LOCK_TYPE):
-            lock = threading.Lock()
-            self.server.login_attempt_lock = lock  # type: ignore[attr-defined]
-        if not isinstance(attempts, dict):
-            attempts = {}
-            self.server.login_attempts = attempts  # type: ignore[attr-defined]
-        return lock, attempts
-
-    def _login_is_rate_limited(self) -> bool:
-        lock, attempts = self._login_attempt_state()
-        client = str(self.client_address[0])
-        cutoff = time.monotonic() - DASHBOARD_LOGIN_ATTEMPT_WINDOW_SECONDS
-        with lock:
-            recent = [stamp for stamp in attempts.get(client, []) if stamp >= cutoff]
-            attempts[client] = recent
-            return len(recent) >= DASHBOARD_LOGIN_ATTEMPT_LIMIT
-
-    def _record_login_failure(self) -> None:
-        lock, attempts = self._login_attempt_state()
-        client = str(self.client_address[0])
-        cutoff = time.monotonic() - DASHBOARD_LOGIN_ATTEMPT_WINDOW_SECONDS
-        with lock:
-            recent = [stamp for stamp in attempts.get(client, []) if stamp >= cutoff]
-            recent.append(time.monotonic())
-            attempts[client] = recent
-
-    def _clear_login_failures(self) -> None:
-        lock, attempts = self._login_attempt_state()
-        with lock:
-            attempts.pop(str(self.client_address[0]), None)
-
-    def _deny_basic_auth(
-        self,
-        status: HTTPStatus = HTTPStatus.UNAUTHORIZED,
-        message: str = "Authentication required.",
-    ) -> None:
+    def _deny_remote(self, status: HTTPStatus, message: str) -> None:
         body = message.encode("utf-8")
         self.send_response(status)
-        if status == HTTPStatus.UNAUTHORIZED:
-            self.send_header(
-                "WWW-Authenticate",
-                'Basic realm="Chronovisor Dashboard", charset="UTF-8"',
-            )
         self.send_header("Content-Type", "text/plain; charset=utf-8")
         self.send_header("Cache-Control", "no-store")
         _send_security_headers(self)
@@ -5287,108 +4982,39 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _deny_remote(self, status: HTTPStatus, message: str) -> None:
-        body = (
-            "<!doctype html><meta charset='utf-8'><title>Dashboard access</title>"
-            f"<p>{message}</p>"
-        ).encode()
-        self.send_response(status)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
-        self.send_header("Cache-Control", "no-store")
-        _send_security_headers(self)
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def _authorize(self, parsed: Any) -> bool:
-        scope = _private_client_scope(self.client_address[0])
-        token = self._access_token()
-        lan_enabled = bool(getattr(self.server, "lan_access_enabled", False))
-        supplied = dict(parse_qsl(parsed.query, keep_blank_values=True)).get(
-            DASHBOARD_ACCESS_QUERY,
-            "",
-        )
-        if scope == "loopback":
-            if (
-                lan_enabled
-                and token
-                and supplied
-                and hmac.compare_digest(supplied, token)
-            ):
-                self._redirect_after_token(parsed, token)
-                return False
-            return True
-        if not lan_enabled:
-            self._deny_remote(HTTPStatus.FORBIDDEN, "LAN access is disabled.")
+    def _browser_boundary_allows(self) -> bool:
+        if not self._is_loopback():
+            self._deny_remote(HTTPStatus.FORBIDDEN, "Loopback access only.")
             return False
-        if scope != "private":
-            self._deny_remote(
-                HTTPStatus.FORBIDDEN, "Only private-network clients are allowed."
-            )
+        port = int(self.server.server_address[1])
+        allowed_hosts = {
+            f"localhost:{port}",
+            f"127.0.0.1:{port}",
+            f"[::1]:{port}",
+        }
+        hosts = self.headers.get_all("Host", [])
+        host = hosts[0].strip().casefold() if len(hosts) == 1 else ""
+        if host not in allowed_hosts:
+            self._deny_remote(HTTPStatus.MISDIRECTED_REQUEST, "Request rejected.")
             return False
-        if token and supplied and hmac.compare_digest(supplied, token):
-            self._redirect_after_token(parsed, token)
+        origins = self.headers.get_all("Origin", [])
+        origin = origins[0].strip().casefold() if len(origins) == 1 else ""
+        websocket = self.headers.get("Upgrade", "").casefold() == "websocket"
+        if len(origins) > 1 or (origin and origin != f"http://{host}"):
+            self._deny_remote(HTTPStatus.FORBIDDEN, "Request rejected.")
             return False
-        if token and self._cookie_authorized(token):
-            return True
-        credentials = self._credentials()
-        if credentials is None:
-            self._deny_basic_auth(
-                HTTPStatus.SERVICE_UNAVAILABLE,
-                "Dashboard credentials are not configured on the Mac.",
-            )
-            return False
-        if self._login_is_rate_limited():
-            self._deny_basic_auth(
-                HTTPStatus.TOO_MANY_REQUESTS,
-                "Too many attempts. Try again in five minutes.",
-            )
-            return False
-        authorization = self.headers.get("Authorization", "")
-        if not authorization.lower().startswith("basic "):
-            self._deny_basic_auth()
-            return False
-        if not self._basic_authorized(credentials):
-            self._record_login_failure()
-            if self._login_is_rate_limited():
-                self._deny_basic_auth(
-                    HTTPStatus.TOO_MANY_REQUESTS,
-                    "Too many attempts. Try again in five minutes.",
-                )
-            else:
-                self._deny_basic_auth()
-            return False
-        self._clear_login_failures()
-        if token:
-            # Safari does not reliably reuse HTTP Basic credentials for every
-            # HTML, static asset, API, and WebSocket request. Promote the first
-            # successful login to the same scoped HttpOnly session used by the
-            # recovery link so navigation never triggers another challenge.
-            self._redirect_after_token(parsed, token)
+        if websocket and not origin:
+            self._deny_remote(HTTPStatus.FORBIDDEN, "Request rejected.")
             return False
         return True
 
     def _lan_access_response(self) -> None:
-        if not self._is_loopback():
-            _json_response(self, {"enabled": False}, status=HTTPStatus.FORBIDDEN)
-            return
-        enabled = bool(getattr(self.server, "lan_access_enabled", False))
-        token = self._access_token()
-        port = int(self.server.server_address[1])
-        urls = (
-            [
-                f"http://{host}:{port}/?{DASHBOARD_ACCESS_QUERY}={token}"
-                for host in _dashboard_lan_hosts()
-            ]
-            if enabled and token
-            else []
-        )
         _json_response(
             self,
             {
-                "enabled": enabled,
-                "urls": urls,
-                "trusted_lan_only": True,
+                "enabled": False,
+                "urls": [],
+                "trusted_lan_only": False,
             },
         )
 
@@ -5545,7 +5171,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
         path = parsed.path
-        if not self._authorize(parsed):
+        if not self._browser_boundary_allows():
             return
         try:
             if path == "/":
@@ -5683,14 +5309,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 _file_response(self, target)
             else:
                 self.send_error(HTTPStatus.NOT_FOUND)
-        except Exception as exc:
+        except Exception:
             if path.startswith("/api/"):
                 _json_response(
                     self,
                     {
                         "status": "error",
-                        "error_class": exc.__class__.__name__,
-                        "error": str(exc),
+                        "category": "internal_error",
+                        "error": "Dashboard request failed.",
                     },
                     status=HTTPStatus.INTERNAL_SERVER_ERROR,
                 )
@@ -5706,28 +5332,14 @@ def serve(
     port: int,
     *,
     lan: bool = False,
-    access_token_file: Path | None = None,
-    credentials_file: Path | None = None,
 ) -> None:
-    init_chronovisor()
-    token_path = (
-        access_token_file or CHRONOVISOR_ROOT / "runtime" / "dashboard-access-token"
-    )
-    credentials_path = (
-        credentials_file or CHRONOVISOR_ROOT / "runtime" / "dashboard-credentials.json"
-    )
-    token = _load_or_create_dashboard_token(token_path) if lan else ""
-    credentials = _load_dashboard_credentials(credentials_path) if lan else None
-    server = ThreadingHTTPServer((host, port), DashboardHandler)
-    server.lan_access_enabled = lan  # type: ignore[attr-defined]
-    server.lan_access_token = token  # type: ignore[attr-defined]
-    server.dashboard_credentials = credentials  # type: ignore[attr-defined]
-    server.login_attempt_lock = threading.Lock()  # type: ignore[attr-defined]
-    server.login_attempts = {}  # type: ignore[attr-defined]
-    print(f"Chronovisor dashboard: http://{host}:{port}")
     if lan:
-        print(f"LAN access enabled with token file: {token_path}")
-        print(f"LAN password credentials file: {credentials_path}")
+        raise ValueError("LAN dashboard access is disabled; use loopback only")
+    if not _dashboard_bind_host_is_loopback(host):
+        raise ValueError("dashboard host must be localhost or 127.0.0.1")
+    init_chronovisor()
+    server = ThreadingHTTPServer((host, port), DashboardHandler)
+    print(f"Chronovisor dashboard: http://{host}:{port}")
     server.serve_forever()
 
 
@@ -5738,48 +5350,20 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--lan",
         action="store_true",
-        help="Bind for trusted private-network access and require authentication.",
+        help="Disabled: the dashboard supports loopback access only.",
     )
-    parser.add_argument("--access-token-file", type=Path)
-    parser.add_argument("--credentials-file", type=Path)
-    parser.add_argument(
-        "--set-credentials",
-        action="store_true",
-        help="Prompt for and store hashed dashboard credentials, then exit.",
-    )
-    parser.add_argument("--username", default="admin")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     """Run the ``chronovisor-dashboard`` command-line entry point."""
-    args = build_parser().parse_args(argv)
-    token_path = (
-        args.access_token_file
-        or CHRONOVISOR_ROOT / "runtime" / "dashboard-access-token"
-    )
-    credentials_path = (
-        args.credentials_file
-        or CHRONOVISOR_ROOT / "runtime" / "dashboard-credentials.json"
-    )
-    if args.set_credentials:
-        password = getpass.getpass("Dashboard password: ")
-        confirmation = getpass.getpass("Confirm dashboard password: ")
-        if password != confirmation:
-            raise SystemExit("dashboard passwords do not match")
-        _write_dashboard_credentials(credentials_path, args.username, password)
-        _rotate_dashboard_token(token_path)
-        print(f"Dashboard credentials stored: {credentials_path}")
-        print("Existing dashboard sessions and recovery links were revoked.")
-        return 0
-    host = "0.0.0.0" if args.lan and args.host == "127.0.0.1" else args.host
-    serve(
-        host,
-        args.port,
-        lan=args.lan,
-        access_token_file=args.access_token_file,
-        credentials_file=credentials_path,
-    )
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.lan:
+        parser.error("--lan is disabled; the dashboard supports loopback access only")
+    if not _dashboard_bind_host_is_loopback(args.host):
+        parser.error("--host must be localhost or 127.0.0.1")
+    serve(args.host, args.port, lan=args.lan)
     return 0
 
 
