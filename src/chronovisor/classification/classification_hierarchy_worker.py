@@ -10,12 +10,17 @@ from typing import Any
 
 from chronovisor.classification.classification_hierarchy import ROOT_NOTATIONS
 from chronovisor.core import ollama
-from chronovisor.recall.classification import ClassificationError
+from chronovisor.recall.classification import (
+    ClassificationError,
+    resolve_structured_route,
+    route_identity,
+)
 
 WORKER_SCHEMA = "chronovisor.classification-hierarchy-worker.v2"
 EXTRACTION_SCHEMA = "chronovisor.classification-hierarchy-subject.v1"
 STEP_SCHEMA = "chronovisor.classification-hierarchy-step.v1"
 AUDIT_SCHEMA = "chronovisor.classification-hierarchy-audit.v1"
+RUNTIME_ROLE = "classification.hierarchy"
 HOLD = "HOLD"
 STEP_STOP = "__STOP_AT_PARENT__"
 POLICY = {
@@ -177,17 +182,14 @@ def validate_audit(
 
 def _chat(
     *,
-    model: str,
-    model_digest: str,
-    expected_digest: str,
+    runtime_role: str,
+    source_sensitivity: str,
     payload: Mapping[str, Any],
     schema: Mapping[str, Any],
     keep_alive: str,
     read_timeout_ms: int,
 ) -> Mapping[str, Any]:
-    if model_digest != expected_digest:
-        raise ClassificationError("hierarchy worker model digest changed")
-    response = ollama.chat(
+    response = ollama.runtime_structured_chat(
         [
             {
                 "role": "system",
@@ -203,7 +205,9 @@ def _chat(
                 "content": json.dumps(payload, ensure_ascii=False, sort_keys=True),
             },
         ],
-        model=model,
+        runtime_role=runtime_role,
+        source_data_class="page",
+        source_sensitivity=source_sensitivity,
         format=dict(schema),
         num_ctx=16_384,
         num_predict=700,
@@ -215,7 +219,7 @@ def _chat(
         think=False,
     )
     try:
-        value = json.loads(str(response))
+        value = json.loads(response.content)
     except json.JSONDecodeError as exc:
         raise ClassificationError("hierarchy worker returned malformed JSON") from exc
     if not isinstance(value, Mapping):
@@ -227,18 +231,16 @@ def run(payload: Mapping[str, Any]) -> dict[str, Any]:
     if payload.get("schema") != WORKER_SCHEMA:
         raise ClassificationError("unsupported hierarchy worker schema")
     operation = str(payload.get("operation") or "")
-    model = str(payload.get("model") or "")
-    expected_digest = str(payload.get("model_digest") or "")
     page = payload.get("page")
     if (
         operation not in {"extract", "navigate", "audit"}
-        or not model
-        or not expected_digest
         or not isinstance(page, Mapping)
         or set(page) - {"title", "summary", "evidence_excerpt"}
     ):
         raise ClassificationError("hierarchy worker input is incomplete")
-    observed_digest = ollama.model_digests([model]).get(model, "")
+    route, observed_digest, sensitivity = resolve_structured_route(
+        payload, role=RUNTIME_ROLE
+    )
     common = {
         "policy": POLICY,
         "operation": operation,
@@ -246,9 +248,8 @@ def run(payload: Mapping[str, Any]) -> dict[str, Any]:
     }
     if operation == "extract":
         raw = _chat(
-            model=model,
-            model_digest=observed_digest,
-            expected_digest=expected_digest,
+            runtime_role=route.role,
+            source_sensitivity=sensitivity,
             payload={
                 **common,
                 "instruction": (
@@ -277,13 +278,12 @@ def run(payload: Mapping[str, Any]) -> dict[str, Any]:
             for card in options
             if isinstance(card, Mapping)
         ]
-        choices = [card["notation"] for card in cards]
+        choices: list[str] = [str(card["notation"]) for card in cards]
         if len(cards) != len(options) or len(choices) != len(set(choices)):
             raise ClassificationError("hierarchy navigation cards are invalid")
         raw = _chat(
-            model=model,
-            model_digest=observed_digest,
-            expected_digest=expected_digest,
+            runtime_role=route.role,
+            source_sensitivity=sensitivity,
             payload={
                 **common,
                 "extracted_subject": payload.get("subject"),
@@ -314,9 +314,8 @@ def run(payload: Mapping[str, Any]) -> dict[str, Any]:
         if not isinstance(paths, list) or not allowed:
             raise ClassificationError("hierarchy audit paths are invalid")
         raw = _chat(
-            model=model,
-            model_digest=observed_digest,
-            expected_digest=expected_digest,
+            runtime_role=route.role,
+            source_sensitivity=sensitivity,
             payload={
                 **common,
                 "extracted_subject": payload.get("subject"),
@@ -337,8 +336,9 @@ def run(payload: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "schema": WORKER_SCHEMA,
         "operation": operation,
-        "model": model,
+        "model": route.model,
         "model_digest": observed_digest,
+        "route_identity": route_identity(route),
         "prompt_sha256": PROMPT_SHA256,
         "model_calls": 1,
         "result": result,

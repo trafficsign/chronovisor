@@ -9,10 +9,15 @@ from collections.abc import Mapping
 from typing import Any
 
 from chronovisor.core import ollama
-from chronovisor.recall.classification import ClassificationError
+from chronovisor.recall.classification import (
+    ClassificationError,
+    resolve_structured_route,
+    route_identity,
+)
 
 WORKER_SCHEMA = "chronovisor.classification-query2doc-worker.v1"
 QUERY_SCHEMA = "chronovisor.classification-subject-query.v1"
+RUNTIME_ROLE = "classification.query"
 QUERY_POLICY = {
     "role": "professional-library-subject-indexer",
     "task": (
@@ -110,10 +115,8 @@ def _string_list(
 def run(payload: Mapping[str, Any]) -> dict[str, Any]:
     if payload.get("schema") != WORKER_SCHEMA:
         raise ClassificationError("unsupported query2doc worker schema")
-    model = str(payload.get("model") or "")
-    expected_digest = str(payload.get("model_digest") or "")
     page = payload.get("page")
-    if not model or not expected_digest or not isinstance(page, Mapping):
+    if not isinstance(page, Mapping):
         raise ClassificationError("query2doc worker input is incomplete")
     if set(page) - set(QUERY_POLICY["input_fields"]):
         raise ClassificationError("query2doc page contains forbidden fields")
@@ -122,10 +125,10 @@ def run(payload: Mapping[str, Any]) -> dict[str, Any]:
     excerpt = str(page.get("excerpt") or "")
     if not uid or not title or not excerpt:
         raise ClassificationError("query2doc page requires uid, title and excerpt")
-    observed_digest = ollama.model_digests([model]).get(model, "")
-    if not observed_digest or observed_digest != expected_digest:
-        raise ClassificationError("query2doc model digest changed before generation")
-    response = ollama.chat(
+    route, observed_digest, sensitivity = resolve_structured_route(
+        payload, role=RUNTIME_ROLE
+    )
+    response = ollama.runtime_structured_chat(
         [
             {
                 "role": "system",
@@ -147,7 +150,9 @@ def run(payload: Mapping[str, Any]) -> dict[str, Any]:
                 ),
             },
         ],
-        model=model,
+        runtime_role=route.role,
+        source_data_class="page",
+        source_sensitivity=sensitivity,
         format=_format_schema(),
         num_ctx=16_384,
         num_predict=512,
@@ -159,7 +164,7 @@ def run(payload: Mapping[str, Any]) -> dict[str, Any]:
         think=False,
     )
     try:
-        raw_query = json.loads(str(response))
+        raw_query = json.loads(response.content)
     except json.JSONDecodeError as exc:
         raise ClassificationError("query2doc model returned malformed JSON") from exc
     if not isinstance(raw_query, Mapping):
@@ -192,8 +197,9 @@ def run(payload: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "schema": WORKER_SCHEMA,
         "uid": uid,
-        "model": model,
+        "model": route.model,
         "model_digest": observed_digest,
+        "route_identity": route_identity(route),
         "prompt_sha256": QUERY_PROMPT_SHA256,
         "model_calls": 1,
         "query": query,

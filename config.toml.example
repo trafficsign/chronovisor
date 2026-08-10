@@ -78,6 +78,51 @@ capability = "generation"
 provider = "local"
 model = "gemma4:26b"
 
+[llm.roles."classification.anchor_set"]
+capability = "generation"
+provider = "local"
+model = "maxwell1500/ornith-35b:Q5_K_M"
+
+[llm.roles."classification.decision"]
+capability = "generation"
+provider = "local"
+model = "maxwell1500/ornith-35b:Q5_K_M"
+
+[llm.roles."classification.direct_decision"]
+capability = "generation"
+provider = "local"
+model = "maxwell1500/ornith-35b:Q5_K_M"
+
+[llm.roles."classification.hierarchy"]
+capability = "generation"
+provider = "local"
+model = "maxwell1500/ornith-35b:Q5_K_M"
+
+[llm.roles."classification.query"]
+capability = "generation"
+provider = "local"
+model = "maxwell1500/ornith-35b:Q5_K_M"
+
+[llm.roles."classification.query_v2"]
+capability = "generation"
+provider = "local"
+model = "maxwell1500/ornith-35b:Q5_K_M"
+
+[llm.roles."classification.anchor"]
+capability = "generation"
+provider = "local"
+model = "gpt-oss:20b"
+
+[llm.roles."classification.anchor.primary"]
+capability = "generation"
+provider = "local"
+model = "gemma4:26b"
+
+[llm.roles."classification.anchor.challenger"]
+capability = "generation"
+provider = "local"
+model = "gpt-oss:20b"
+
 # Cloud-only alternative: one OpenAI credential/profile can serve both roles.
 # Store it with `chronovisor credentials set openai/default`; never put its
 # value here. Replace the corresponding local role tables above when enabling.

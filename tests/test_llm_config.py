@@ -441,4 +441,13 @@ def test_repository_example_has_representative_local_role_map() -> None:
         "classification.primary",
         "classification.challenger",
         "classification.tie_break",
+        "classification.anchor_set",
+        "classification.decision",
+        "classification.direct_decision",
+        "classification.hierarchy",
+        "classification.query",
+        "classification.query_v2",
+        "classification.anchor",
+        "classification.anchor.primary",
+        "classification.anchor.challenger",
     }

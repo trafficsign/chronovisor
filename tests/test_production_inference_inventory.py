@@ -45,29 +45,12 @@ RUNTIME_BOUNDARIES = {
 
 # Existing direct production access is migration debt, not an allow-list.
 LEGACY_PRODUCTION_BYPASSES = {
-    "src/chronovisor/classification/classification_anchor_set_worker.py": {
-        "ollama.chat": 1
-    },
-    "src/chronovisor/classification/classification_decision_worker.py": {
-        "ollama.chat": 1
-    },
-    "src/chronovisor/classification/classification_direct_decision_worker.py": {
-        "ollama.chat": 1
-    },
-    "src/chronovisor/classification/classification_hierarchy_worker.py": {
-        "ollama.chat": 1
-    },
-    "src/chronovisor/classification/classification_query_worker.py": {"ollama.chat": 1},
-    "src/chronovisor/classification/classification_query_worker_v2.py": {
-        "ollama.chat": 1
-    },
     "src/chronovisor/core/embedding.py": {"ollama.embed": 2},
     "src/chronovisor/core/search.py": {"ollama.embed": 3},
     "src/chronovisor/ingest/ingest.py": {
         "ollama.chat": 1,
         "ollama.generate": 1,
     },
-    "src/chronovisor/recall/classification_anchor_worker.py": {"ollama.chat": 1},
     "src/chronovisor/recall/classification_embedding_worker.py": {"ollama.embed": 1},
     "src/chronovisor/recall/classification_model_worker.py": {"ollama.chat": 1},
     "src/chronovisor/recall/collection_anomaly_worker.py": {"ollama.chat": 1},

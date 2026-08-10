@@ -9,10 +9,15 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from chronovisor.core import ollama
-from chronovisor.recall.classification import ClassificationError
+from chronovisor.recall.classification import (
+    ClassificationError,
+    resolve_structured_route,
+    route_identity,
+)
 
 WORKER_SCHEMA = "chronovisor.classification-direct-decision-worker.v2"
 DECISION_SCHEMA = "chronovisor.classification-direct-decision.v2"
+RUNTIME_ROLE = "classification.direct_decision"
 HOLD = "HOLD"
 DIRECT_POLICY = {
     "role": "professional-library-classifier",
@@ -132,15 +137,11 @@ def validate_direct_decision(
 def run(payload: Mapping[str, Any]) -> dict[str, Any]:
     if payload.get("schema") != WORKER_SCHEMA:
         raise ClassificationError("unsupported direct decision worker schema")
-    model = str(payload.get("model") or "")
-    expected_digest = str(payload.get("model_digest") or "")
     page = payload.get("page")
     subject_headings = payload.get("subject_headings")
     candidates = payload.get("candidates")
     if (
-        not model
-        or not expected_digest
-        or not isinstance(page, Mapping)
+        not isinstance(page, Mapping)
         or not isinstance(subject_headings, list)
         or not isinstance(candidates, list)
         or not 1 <= len(candidates) <= 12
@@ -165,10 +166,10 @@ def run(payload: Mapping[str, Any]) -> dict[str, Any]:
     ]
     if len(cards) != len(candidates):
         raise ClassificationError("direct decision candidate card is invalid")
-    observed_digest = ollama.model_digests([model]).get(model, "")
-    if observed_digest != expected_digest:
-        raise ClassificationError("direct decision model digest changed")
-    response = ollama.chat(
+    route, observed_digest, sensitivity = resolve_structured_route(
+        payload, role=RUNTIME_ROLE
+    )
+    response = ollama.runtime_structured_chat(
         [
             {
                 "role": "system",
@@ -194,7 +195,9 @@ def run(payload: Mapping[str, Any]) -> dict[str, Any]:
                 ),
             },
         ],
-        model=model,
+        runtime_role=route.role,
+        source_data_class="page",
+        source_sensitivity=sensitivity,
         format=_format_schema(cards),
         num_ctx=16_384,
         num_predict=700,
@@ -206,7 +209,7 @@ def run(payload: Mapping[str, Any]) -> dict[str, Any]:
         think=False,
     )
     try:
-        raw = json.loads(str(response))
+        raw = json.loads(response.content)
     except json.JSONDecodeError as exc:
         raise ClassificationError("direct decision returned malformed JSON") from exc
     if not isinstance(raw, Mapping):
@@ -215,8 +218,9 @@ def run(payload: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "schema": WORKER_SCHEMA,
         "uid": uid,
-        "model": model,
+        "model": route.model,
         "model_digest": observed_digest,
+        "route_identity": route_identity(route),
         "prompt_sha256": DIRECT_PROMPT_SHA256,
         "model_calls": 1,
         "decision": decision,

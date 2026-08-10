@@ -9,12 +9,24 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from chronovisor.core import ollama
-from chronovisor.recall.classification import ClassificationError
+from chronovisor.recall.classification import (
+    ClassificationError,
+    resolve_structured_route,
+    route_identity,
+)
 from chronovisor.recall.classification_anchor import UNRESOLVED_ANCHOR_ID
 
 WORKER_SCHEMA = "chronovisor.classification-anchor-worker.v1"
 SUBJECT_SCHEMA = "chronovisor.classification-anchor-subject.v1"
 SELECTION_SCHEMA = "chronovisor.classification-anchor-selection.v1"
+RUNTIME_ROLE = "classification.anchor"
+RUNTIME_ROLES = frozenset(
+    {
+        RUNTIME_ROLE,
+        "classification.anchor.primary",
+        "classification.anchor.challenger",
+    }
+)
 POLICY = {
     "contract_version": 1,
     "purpose": "select a Chronovisor operational anchor without direct UDC mapping",
@@ -126,17 +138,14 @@ def validate_selection(
 
 def _chat(
     *,
-    model: str,
-    expected_digest: str,
+    runtime_role: str,
+    source_sensitivity: str,
     content: Mapping[str, Any],
     schema: Mapping[str, Any],
     keep_alive: str,
     read_timeout_ms: int,
-) -> tuple[Mapping[str, Any], str]:
-    observed_digest = ollama.model_digests([model]).get(model, "")
-    if observed_digest != expected_digest:
-        raise ClassificationError("CVO anchor worker model digest changed")
-    response = ollama.chat(
+) -> Mapping[str, Any]:
+    response = ollama.runtime_structured_chat(
         [
             {
                 "role": "system",
@@ -152,7 +161,9 @@ def _chat(
                 "content": json.dumps(content, ensure_ascii=False, sort_keys=True),
             },
         ],
-        model=model,
+        runtime_role=runtime_role,
+        source_data_class="page",
+        source_sensitivity=source_sensitivity,
         format=dict(schema),
         num_ctx=16_384,
         num_predict=700,
@@ -164,34 +175,35 @@ def _chat(
         think=False,
     )
     try:
-        value = json.loads(str(response))
+        value = json.loads(response.content)
     except json.JSONDecodeError as exc:
         raise ClassificationError("CVO anchor worker returned malformed JSON") from exc
     if not isinstance(value, Mapping):
         raise ClassificationError("CVO anchor worker returned a non-object")
-    return value, observed_digest
+    return value
 
 
 def run(payload: Mapping[str, Any]) -> dict[str, Any]:
     if payload.get("schema") != WORKER_SCHEMA:
         raise ClassificationError("unsupported CVO anchor worker schema")
     operation = str(payload.get("operation") or "")
-    model = str(payload.get("model") or "")
-    model_digest = str(payload.get("model_digest") or "")
     page = payload.get("page")
     if (
         operation not in {"extract", "classify"}
-        or not model
-        or not model_digest
         or not isinstance(page, Mapping)
         or set(page) - {"title", "summary", "evidence_excerpt"}
     ):
         raise ClassificationError("CVO anchor worker input is incomplete")
+    route, observed_digest, sensitivity = resolve_structured_route(
+        payload,
+        role=RUNTIME_ROLE,
+        allowed_roles=RUNTIME_ROLES,
+    )
     common = {"policy": POLICY, "document_evidence": dict(page)}
     if operation == "extract":
-        raw, observed_digest = _chat(
-            model=model,
-            expected_digest=model_digest,
+        raw = _chat(
+            runtime_role=route.role,
+            source_sensitivity=sensitivity,
             content={
                 **common,
                 "instruction": (
@@ -222,16 +234,16 @@ def run(payload: Mapping[str, Any]) -> dict[str, Any]:
             for row in anchors
             if isinstance(row, Mapping)
         ]
-        anchor_ids = [card["id"] for card in cards]
+        anchor_ids: list[str] = [str(card["id"]) for card in cards]
         if (
             not 30 <= len(cards) <= 60
             or len(anchor_ids) != len(set(anchor_ids))
             or UNRESOLVED_ANCHOR_ID not in anchor_ids
         ):
             raise ClassificationError("CVO anchor cards are invalid")
-        raw, observed_digest = _chat(
-            model=model,
-            expected_digest=model_digest,
+        raw = _chat(
+            runtime_role=route.role,
+            source_sensitivity=sensitivity,
             content={
                 **common,
                 "extracted_subject": dict(subject),
@@ -250,8 +262,9 @@ def run(payload: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "schema": WORKER_SCHEMA,
         "operation": operation,
-        "model": model,
+        "model": route.model,
         "model_digest": observed_digest,
+        "route_identity": route_identity(route),
         "prompt_sha256": PROMPT_SHA256,
         "model_calls": 1,
         "result": result,

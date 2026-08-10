@@ -9,10 +9,15 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from chronovisor.core import ollama
-from chronovisor.recall.classification import ClassificationError
+from chronovisor.recall.classification import (
+    ClassificationError,
+    resolve_structured_route,
+    route_identity,
+)
 
 WORKER_SCHEMA = "chronovisor.classification-decision-worker.v1"
 DECISION_SCHEMA = "chronovisor.classification-candidate-decision.v1"
+RUNTIME_ROLE = "classification.decision"
 HOLD = "HOLD"
 SUPPORT_VALUES = ("yes", "no", "uncertain")
 EVIDENCE_VALUES = ("direct", "inferred", "none", "contradicted")
@@ -280,14 +285,10 @@ def validate_decision(
 def run(payload: Mapping[str, Any]) -> dict[str, Any]:
     if payload.get("schema") != WORKER_SCHEMA:
         raise ClassificationError("unsupported decision worker schema")
-    model = str(payload.get("model") or "")
-    expected_digest = str(payload.get("model_digest") or "")
     page = payload.get("page")
     candidates = payload.get("candidates")
     if (
-        not model
-        or not expected_digest
-        or not isinstance(page, Mapping)
+        not isinstance(page, Mapping)
         or not isinstance(candidates, list)
         or not 1 <= len(candidates) <= 12
     ):
@@ -310,15 +311,15 @@ def run(payload: Mapping[str, Any]) -> dict[str, Any]:
     ]
     if len(candidate_cards) != len(candidates):
         raise ClassificationError("decision worker candidate card is invalid")
-    observed_digest = ollama.model_digests([model]).get(model, "")
-    if not observed_digest or observed_digest != expected_digest:
-        raise ClassificationError("decision worker model digest changed")
+    route, observed_digest, sensitivity = resolve_structured_route(
+        payload, role=RUNTIME_ROLE
+    )
     model_input = {
         "policy": DECISION_POLICY,
         "document": dict(page),
         "official_candidates": candidate_cards,
     }
-    response = ollama.chat(
+    response = ollama.runtime_structured_chat(
         [
             {
                 "role": "system",
@@ -339,7 +340,9 @@ def run(payload: Mapping[str, Any]) -> dict[str, Any]:
                 ),
             },
         ],
-        model=model,
+        runtime_role=route.role,
+        source_data_class="page",
+        source_sensitivity=sensitivity,
         format=_format_schema(candidate_cards),
         num_ctx=16_384,
         num_predict=1_900,
@@ -351,7 +354,7 @@ def run(payload: Mapping[str, Any]) -> dict[str, Any]:
         think=False,
     )
     try:
-        raw_decision = json.loads(str(response))
+        raw_decision = json.loads(response.content)
     except json.JSONDecodeError as exc:
         raise ClassificationError("decision worker returned malformed JSON") from exc
     if not isinstance(raw_decision, Mapping):
@@ -360,8 +363,9 @@ def run(payload: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "schema": WORKER_SCHEMA,
         "uid": uid,
-        "model": model,
+        "model": route.model,
         "model_digest": observed_digest,
+        "route_identity": route_identity(route),
         "prompt_sha256": DECISION_PROMPT_SHA256,
         "model_calls": 1,
         "decision": decision,

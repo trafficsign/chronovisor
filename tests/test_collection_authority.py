@@ -25,15 +25,24 @@ from chronovisor.recall.collection_authority import (
 )
 
 
-def _page(path: Path, uid: str, *, links: tuple[str, ...] = ()) -> None:
+def _page(
+    path: Path,
+    uid: str,
+    *,
+    links: tuple[str, ...] = (),
+    sensitivity: str | None = None,
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         "---\n"
         f"title: {path.stem}\n"
         f"uid: {uid}\n"
         "updated: 2026-07-27\n"
-        "---\n\n"
-        f"# {path.stem}\n\n" + "\n".join(f"[[{value}]]" for value in links) + "\n",
+        + (f"sensitivity: {sensitivity}\n" if sensitivity else "")
+        + "---\n\n"
+        + f"# {path.stem}\n\n"
+        + "\n".join(f"[[{value}]]" for value in links)
+        + "\n",
         encoding="utf-8",
     )
 
@@ -111,6 +120,23 @@ def test_new_collection_crosswalk_is_local_consensus_and_runtime_sealed(
         uid_factory=iter(_uids(10, start=120)).__next__,
     )
     state = registry.sync_from_pages()["registry"]
+    routes = (
+        ollama.RuntimeGenerationRoute(
+            role="classification.anchor.primary",
+            provider="local",
+            model="gemma4:26b",
+            location="local",
+            structured_output=True,
+        ),
+        ollama.RuntimeGenerationRoute(
+            role="classification.anchor.challenger",
+            provider="local",
+            model="gpt-oss:20b",
+            location="local",
+            structured_output=True,
+        ),
+    )
+    monkeypatch.setattr(ollama, "runtime_generation_routes", lambda _roles: routes)
     monkeypatch.setattr(
         ollama,
         "model_digests",
@@ -142,6 +168,181 @@ def test_new_collection_crosswalk_is_local_consensus_and_runtime_sealed(
         {"anchor_id": "cvo:anchor:0001", "relation": "exact"}
     ]
     assert read_sealed_json(Path(result["path"]))["frontier_calls"] == 0
+
+
+def test_remote_collection_crosswalk_never_touches_local_ollama_controls(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from chronovisor.core import ollama
+    from chronovisor.recall.classification_anchor_worker import (
+        PROMPT_SHA256,
+        WORKER_SCHEMA,
+    )
+
+    page_uid = _uids(1, start=215)[0]
+    _page(
+        tmp_path / "pages" / "remote-topic" / "note.md",
+        page_uid,
+        sensitivity="normal",
+    )
+    registry = CollectionRegistry(
+        tmp_path,
+        uid_factory=iter(_uids(10, start=220)).__next__,
+    )
+    state = registry.sync_from_pages()["registry"]
+    routes = (
+        ollama.RuntimeGenerationRoute(
+            role="classification.anchor.primary",
+            provider="remote-a",
+            model="model-a",
+            location="remote",
+            structured_output=True,
+        ),
+        ollama.RuntimeGenerationRoute(
+            role="classification.anchor.challenger",
+            provider="remote-b",
+            model="model-b",
+            location="remote",
+            structured_output=True,
+        ),
+    )
+    by_role = {route.role: route for route in routes}
+
+    def call_worker(*, payload, purpose, timeout_seconds=720.0):
+        del purpose, timeout_seconds
+        assert payload["source_sensitivity"] == "normal"
+        route = by_role[str(payload["runtime_role"])]
+        operation = str(payload["operation"])
+        result = (
+            {
+                "central_subject": "Remote topic",
+                "secondary_subjects": [],
+                "rationale": "The page has one principal subject.",
+            }
+            if operation == "extract"
+            else {
+                "primary_anchor_id": "cvo:anchor:0001",
+                "secondary_anchor_ids": [],
+                "rationale": "The anchor contains the subject.",
+            }
+        )
+        return {
+            "schema": WORKER_SCHEMA,
+            "operation": operation,
+            "model": route.model,
+            "model_digest": None,
+            "route_identity": {
+                "role": route.role,
+                "provider": route.provider,
+                "model": route.model,
+                "location": route.location,
+            },
+            "prompt_sha256": PROMPT_SHA256,
+            "model_calls": 1,
+            "result": result,
+        }
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("remote crosswalk touched Ollama metadata")
+
+    monkeypatch.setattr(ollama, "runtime_generation_routes", lambda _roles: routes)
+    monkeypatch.setattr(ollama, "model_digests", forbidden)
+    monkeypatch.setattr(
+        collection_authority,
+        "_call_crosswalk_anchor_worker",
+        call_worker,
+    )
+
+    result = ensure_autonomous_crosswalk(tmp_path, state=state, use_models=True)
+    runtime = read_sealed_json(Path(result["path"]))
+    entry = next(row for row in runtime["entries"] if row["slug"] == "remote-topic")
+
+    assert result["model_calls"] == 4
+    assert entry["review_required"] is False
+    assert entry["authority"] == "model_consensus"
+    assert entry["route_identities"] == [
+        {
+            "role": route.role,
+            "provider": route.provider,
+            "model": route.model,
+            "location": route.location,
+        }
+        for route in routes
+    ]
+    assert "model_digests" not in entry
+
+
+def test_collection_capsule_defaults_unknown_sensitivity_high(tmp_path: Path) -> None:
+    page_uid = _uids(1, start=315)[0]
+    _page(tmp_path / "pages" / "sensitive-topic" / "note.md", page_uid)
+    registry = CollectionRegistry(
+        tmp_path,
+        uid_factory=iter(_uids(10, start=320)).__next__,
+    )
+    state = registry.sync_from_pages()["registry"]
+    collection_uid = next(
+        uid
+        for uid, row in state["collections"].items()
+        if row["slug"] == "sensitive-topic"
+    )
+
+    capsule = collection_authority._collection_crosswalk_capsule(
+        tmp_path,
+        state=state,
+        collection_uid=collection_uid,
+    )
+
+    assert capsule["source_sensitivity"] == "high"
+
+
+def test_collection_crosswalk_rejects_duplicate_route_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from chronovisor.core import ollama
+
+    page_uid = _uids(1, start=415)[0]
+    _page(
+        tmp_path / "pages" / "duplicate-route" / "note.md",
+        page_uid,
+        sensitivity="normal",
+    )
+    registry = CollectionRegistry(
+        tmp_path,
+        uid_factory=iter(_uids(10, start=420)).__next__,
+    )
+    state = registry.sync_from_pages()["registry"]
+    routes = tuple(
+        ollama.RuntimeGenerationRoute(
+            role=role,
+            provider="remote",
+            model="same-model",
+            location="remote",
+            structured_output=True,
+        )
+        for role in (
+            "classification.anchor.primary",
+            "classification.anchor.challenger",
+        )
+    )
+
+    monkeypatch.setattr(ollama, "runtime_generation_routes", lambda _roles: routes)
+    monkeypatch.setattr(
+        collection_authority,
+        "_propose_collection_crosswalk",
+        lambda *_args, **_kwargs: pytest.fail("duplicate route reached inference"),
+    )
+
+    result = ensure_autonomous_crosswalk(tmp_path, state=state, use_models=True)
+    runtime = read_sealed_json(Path(result["path"]))
+    entry = next(
+        row for row in runtime["entries"] if row["slug"] == "duplicate-route"
+    )
+
+    assert result["model_calls"] == 0
+    assert entry["review_required"] is True
+    assert entry["route_identities"] == []
 
 
 def _review_worker_result(

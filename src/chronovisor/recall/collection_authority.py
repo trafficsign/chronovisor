@@ -44,8 +44,13 @@ COLLECTION_QUEUE_SCHEMA = "chronovisor.collection-review-queue.v1"
 COLLECTION_DECISION_SCHEMA = "chronovisor.collection-review-decisions.v1"
 COLLECTION_EVALUATION_SCHEMA = "chronovisor.collection-authority-evaluation.v1"
 COLLECTION_QUALITY_SCHEMA = "chronovisor.collection-quality.v1"
+COLLECTION_CROSSWALK_AUTO_SCHEMA = "chronovisor.collection-crosswalk-auto.v2"
 DEFAULT_CHALLENGER_MODEL = "gpt-oss:20b"
-AUTONOMOUS_DECISION_AUTHORITY = "local_model_consensus"
+AUTONOMOUS_DECISION_AUTHORITY = "model_consensus"
+_CROSSWALK_RUNTIME_ROLES = (
+    "classification.anchor.primary",
+    "classification.anchor.challenger",
+)
 
 
 class CollectionAuthorityError(RuntimeError):
@@ -161,7 +166,7 @@ def load_crosswalk(
                     f"autonomous crosswalk is invalid: {exc}"
                 ) from exc
             if (
-                runtime.get("schema") != "chronovisor.collection-crosswalk-auto.v1"
+                runtime.get("schema") != COLLECTION_CROSSWALK_AUTO_SCHEMA
                 or runtime.get("base_checksum") != payload.get("checksum")
                 or not isinstance(runtime.get("entries"), list)
             ):
@@ -2023,21 +2028,32 @@ def _collection_crosswalk_capsule(
     page_state = PageRegistry(root).load()
     page_rows = page_state.get("pages") or {}
     samples = []
+    all_normal = True
     for page_uid, assignment in sorted((state.get("assignments") or {}).items()):
         if (
             not isinstance(assignment, Mapping)
             or assignment.get("collection_uid") != collection_uid
-            or not isinstance(page_rows.get(page_uid), Mapping)
         ):
             continue
-        path = root / str(page_rows[page_uid].get("path") or "")
+        page_row = page_rows.get(page_uid)
+        if not isinstance(page_row, Mapping):
+            all_normal = False
+            continue
+        path = root / str(page_row.get("path") or "")
         if not path.is_file():
+            all_normal = False
             continue
         try:
             text = path.read_text(encoding="utf-8")
             meta, body = frontmatter.parse(text)
         except (OSError, UnicodeError):
+            all_normal = False
             continue
+        if (
+            str(page_row.get("sensitivity") or "") != "normal"
+            or str(meta.get("sensitivity") or "") != "normal"
+        ):
+            all_normal = False
         samples.append(
             {
                 "title": str(meta.get("title") or path.stem),
@@ -2055,6 +2071,7 @@ def _collection_crosswalk_capsule(
         "evidence_excerpt": "\n\n".join(
             f"{row['title']}\n{row['excerpt']}" for row in samples
         )[:4_000],
+        "source_sensitivity": "normal" if samples and all_normal else "high",
     }
 
 
@@ -2091,7 +2108,7 @@ def _propose_collection_crosswalk(
     *,
     state: Mapping[str, Any],
     collection_uid: str,
-    model_digests: Mapping[str, str],
+    routes: Sequence[Any],
 ) -> tuple[str | None, list[dict[str, Any]], int]:
     from chronovisor.recall.classification_anchor import UNRESOLVED_ANCHOR_ID
     from chronovisor.recall.classification_anchor_worker import (
@@ -2105,15 +2122,20 @@ def _propose_collection_crosswalk(
         state=state,
         collection_uid=collection_uid,
     )
+    source_sensitivity = capsule.pop("source_sensitivity")
     selections = []
     calls = 0
-    for model, digest in model_digests.items():
-        if not digest:
-            continue
+    for route in routes:
+        route_identity = {
+            "role": route.role,
+            "provider": route.provider,
+            "model": route.model,
+            "location": route.location,
+        }
         common = {
             "schema": WORKER_SCHEMA,
-            "model": model,
-            "model_digest": digest,
+            "runtime_role": route.role,
+            "source_sensitivity": source_sensitivity,
             "page": capsule,
             "keep_alive": "0",
             "read_timeout_ms": 660_000,
@@ -2127,7 +2149,10 @@ def _propose_collection_crosswalk(
             not isinstance(extracted, Mapping)
             or extracted.get("schema") != WORKER_SCHEMA
             or extracted.get("prompt_sha256") != PROMPT_SHA256
-            or extracted.get("model_digest") != digest
+            or extracted.get("model") != route.model
+            or extracted.get("route_identity") != route_identity
+            or (route.location == "local" and not extracted.get("model_digest"))
+            or (route.location != "local" and extracted.get("model_digest") is not None)
             or not isinstance(extracted.get("result"), Mapping)
         ):
             continue
@@ -2145,15 +2170,18 @@ def _propose_collection_crosswalk(
             not isinstance(classified, Mapping)
             or classified.get("schema") != WORKER_SCHEMA
             or classified.get("prompt_sha256") != PROMPT_SHA256
-            or classified.get("model_digest") != digest
+            or classified.get("model") != route.model
+            or classified.get("route_identity") != route_identity
+            or classified.get("model_digest") != extracted.get("model_digest")
             or not isinstance(classified.get("result"), Mapping)
         ):
             continue
         selection = dict(classified["result"])
         selections.append(
             {
-                "model": model,
-                "model_digest": digest,
+                "model": route.model,
+                "model_digest": extracted.get("model_digest"),
+                "route_identity": route_identity,
                 "subject": dict(extracted["result"]),
                 "selection": selection,
             }
@@ -2163,7 +2191,7 @@ def _propose_collection_crosswalk(
     }
     accepted = (
         next(iter(exact_ids))
-        if len(selections) == len(model_digests) == 2
+        if len(selections) == len(routes) == 2
         and len(exact_ids) == 1
         and UNRESOLVED_ANCHOR_ID not in exact_ids
         else None
@@ -2190,12 +2218,12 @@ def ensure_autonomous_crosswalk(
     except DurableStateError:
         runtime = {}
     if (
-        runtime.get("schema") != "chronovisor.collection-crosswalk-auto.v1"
+        runtime.get("schema") != COLLECTION_CROSSWALK_AUTO_SCHEMA
         or runtime.get("base_checksum") != base["checksum"]
         or not isinstance(runtime.get("entries"), list)
     ):
         runtime = {
-            "schema": "chronovisor.collection-crosswalk-auto.v1",
+            "schema": COLLECTION_CROSSWALK_AUTO_SCHEMA,
             "base_checksum": base["checksum"],
             "updated_at": None,
             "entries": [],
@@ -2207,11 +2235,40 @@ def ensure_autonomous_crosswalk(
         for row in runtime["entries"]
         if isinstance(row, Mapping) and str(row.get("slug") or "")
     }
-    models = [
-        str(load_contract()["anomaly_reviewer"]["default_model"]),
-        DEFAULT_CHALLENGER_MODEL,
+    try:
+        routes = (
+            ollama.runtime_generation_routes(_CROSSWALK_RUNTIME_ROLES)
+            if use_models
+            else ()
+        )
+    except ollama.RuntimeBridgeError:
+        routes = ()
+    if len({(route.provider, route.model) for route in routes}) != len(routes):
+        routes = ()
+    route_identities = [
+        {
+            "role": route.role,
+            "provider": route.provider,
+            "model": route.model,
+            "location": route.location,
+        }
+        for route in routes
     ]
-    model_digests = ollama.model_digests(models) if use_models else {}
+    local_routes = [route for route in routes if route.location == "local"]
+    local_model_digests = (
+        ollama.model_digests([route.model for route in local_routes])
+        if local_routes
+        else {}
+    )
+    route_model_digests = {
+        route.role: local_model_digests.get(route.model, "")
+        for route in local_routes
+    }
+    routes_ready = bool(
+        len(routes) == len(_CROSSWALK_RUNTIME_ROLES)
+        and all(route.structured_output for route in routes)
+        and all(route_model_digests.values())
+    )
     calls = 0
     changed = False
     for collection_uid, raw_collection in sorted(
@@ -2228,6 +2285,11 @@ def ensure_autonomous_crosswalk(
         if not slug or slug in base["by_slug"]:
             continue
         previous = entries.get(slug)
+        previous_routes = (
+            list((previous or {}).get("route_identities") or [])
+            if isinstance(previous, Mapping)
+            else []
+        )
         previous_digests = (
             dict((previous or {}).get("model_digests") or {})
             if isinstance(previous, Mapping)
@@ -2235,24 +2297,26 @@ def ensure_autonomous_crosswalk(
         )
         should_attempt = bool(
             use_models
-            and len(model_digests) == 2
-            and all(model_digests.values())
-            and previous_digests != model_digests
+            and routes_ready
+            and (
+                previous_routes != route_identities
+                or previous_digests != route_model_digests
+            )
         )
         if previous is not None and not should_attempt:
             continue
         accepted = None
-        evidence = []
+        evidence: list[dict[str, Any]] = []
         if should_attempt:
             accepted, evidence, new_calls = _propose_collection_crosswalk(
                 root,
                 state=registry_state,
                 collection_uid=str(collection_uid),
-                model_digests=model_digests,
+                routes=routes,
             )
             calls += new_calls
         anchor_id = accepted or UNRESOLVED_ANCHOR_ID
-        entries[slug] = {
+        entry = {
             "slug": slug,
             "label": str(collection.get("label") or slug.replace("-", " ")),
             "review_required": accepted is None,
@@ -2263,9 +2327,12 @@ def ensure_autonomous_crosswalk(
                 else "autonomous_fail_closed_unresolved"
             ),
             "decided_at": _now(),
-            "model_digests": dict(model_digests),
+            "route_identities": route_identities,
             "evidence": evidence,
         }
+        if route_model_digests:
+            entry["model_digests"] = route_model_digests
+        entries[slug] = entry
         changed = True
     if changed or not path.is_file():
         runtime = {

@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Iterable, Mapping
+from collections.abc import Collection, Iterable, Mapping
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-from chronovisor.core import frontmatter
+from chronovisor.core import frontmatter, ollama
 
 CLASSIFICATION_SCHEMA = 'chronovisor.classification.classification.v1'
 PACKAGE_SCHEMA = "chronovisor.udcs-package.v1"
@@ -34,6 +34,56 @@ CALIBRATION_SCHEMA = "chronovisor.classification-calibration.v1"
 
 class ClassificationError(ValueError):
     """Raised when a classification record or taxonomy package is invalid."""
+
+
+_RUNTIME_SENSITIVITIES = frozenset({"normal", "high"})
+
+
+def resolve_structured_route(
+    payload: Mapping[str, Any],
+    *,
+    role: str,
+    allowed_roles: Collection[str] | None = None,
+) -> tuple[ollama.RuntimeGenerationRoute, str | None, str]:
+    runtime_role = str(payload.get("runtime_role") or role)
+    if runtime_role not in (allowed_roles if allowed_roles is not None else {role}):
+        raise ClassificationError("classification runtime role is invalid")
+    sensitivity = payload.get("source_sensitivity", "high")
+    if not isinstance(sensitivity, str) or sensitivity not in _RUNTIME_SENSITIVITIES:
+        raise ClassificationError("classification source sensitivity is invalid")
+    try:
+        route = ollama.runtime_generation_routes((runtime_role,))[0]
+    except ollama.RuntimeBridgeError as exc:
+        raise ClassificationError(
+            f"classification runtime route is unavailable: {exc.category}"
+        ) from None
+    if route.role != runtime_role:
+        raise ClassificationError("classification runtime route identity mismatch")
+    if not route.structured_output:
+        raise ClassificationError("classification route lacks structured output")
+    requested_model = payload.get("model")
+    if requested_model not in (None, "") and str(requested_model) != route.model:
+        raise ClassificationError("classification runtime model changed")
+    requested_digest = payload.get("model_digest")
+    if route.location != "local":
+        if requested_digest not in (None, ""):
+            raise ClassificationError("remote route rejects local model digest")
+        return route, None, sensitivity
+    digest = ollama.model_digests([route.model]).get(route.model, "")
+    if not digest:
+        raise ClassificationError("classification model digest is unavailable")
+    if requested_digest not in (None, "") and str(requested_digest) != digest:
+        raise ClassificationError("classification model digest changed")
+    return route, digest, sensitivity
+
+
+def route_identity(route: ollama.RuntimeGenerationRoute) -> dict[str, str]:
+    return {
+        "role": route.role,
+        "provider": route.provider,
+        "model": route.model,
+        "location": route.location,
+    }
 
 
 @dataclass(frozen=True)
