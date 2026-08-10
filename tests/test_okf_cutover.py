@@ -26,12 +26,15 @@ class InjectedCrash(RuntimeError):
     pass
 
 
-def _setup(tmp_path: Path) -> tuple[Path, Path, Path]:
+def _setup(
+    tmp_path: Path, *, old_activity_present: bool = True
+) -> tuple[Path, Path, Path]:
     source = tmp_path / "source"
     shutil.copytree(FIXTURE, source)
     runtime = tmp_path / "runtime"
     runtime.mkdir()
-    (runtime / "activity.jsonl").write_bytes(b'{"legacy":true}\n')
+    if old_activity_present:
+        (runtime / "activity.jsonl").write_bytes(b'{"legacy":true}\n')
     workspace = prepare_okf_workspace(source, runtime, "run-001")
     return source, runtime, workspace
 
@@ -44,11 +47,14 @@ def _tree(root: Path) -> dict[str, bytes]:
     }
 
 
-def _live(source: Path, runtime: Path) -> tuple[dict[str, bytes], ...]:
+def _live(
+    source: Path, runtime: Path
+) -> tuple[dict[str, bytes], dict[str, bytes], dict[str, bytes | None]]:
+    activity = runtime / "activity.jsonl"
     return (
         _tree(source / "pages"),
         _tree(source / "system"),
-        {"activity.jsonl": (runtime / "activity.jsonl").read_bytes()},
+        {"activity.jsonl": activity.read_bytes() if activity.exists() else None},
     )
 
 
@@ -96,7 +102,40 @@ def test_cutover_publishes_all_assets_and_keeps_rollback_backup(tmp_path: Path) 
     ) == old
     assert _static_source(source) == static
     assert _state(workspace) == "committed"
+    assert json.loads((workspace / "journal.json").read_bytes())["old_activity"][
+        "present"
+    ] is True
     assert not (workspace / RESTART_REFUSAL_FILENAME).exists()
+    assert okf_startup_allowed(source, runtime, "run-001")
+
+
+def test_cutover_accepts_absent_old_activity_and_records_skipped_backup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, runtime, workspace = _setup(tmp_path, old_activity_present=False)
+    new_activity = (workspace / "staging" / "activity.jsonl").read_bytes()
+    destinations: list[Path] = []
+    real_rename = os.rename
+
+    def tracked_rename(
+        source_path: str | os.PathLike[str],
+        destination_path: str | os.PathLike[str],
+    ) -> None:
+        destinations.append(Path(destination_path))
+        real_rename(source_path, destination_path)
+
+    monkeypatch.setattr("chronovisor.core.okf_cutover.os.rename", tracked_rename)
+
+    assert execute_okf_cutover(
+        source, runtime, "run-001", is_quiescent=lambda: True
+    ) == "committed"
+
+    journal = json.loads((workspace / "journal.json").read_bytes())
+    assert journal["old_activity"] == {"present": False}
+    assert "backup-activity:skipped" in journal["completed"]
+    assert not (workspace / "rollback-backup" / "activity.jsonl").exists()
+    assert workspace / "rollback-backup" / "activity.jsonl" not in destinations
+    assert (runtime / "activity.jsonl").read_bytes() == new_activity
     assert okf_startup_allowed(source, runtime, "run-001")
 
 
@@ -147,11 +186,16 @@ def test_manifest_drift_is_rejected_before_first_rename(
     assert renames == 0
 
 
+@pytest.mark.parametrize(
+    "old_activity_present", [True, False], ids=["old-activity", "old-absent"]
+)
 @pytest.mark.parametrize("fault_point", CUTOVER_FAULT_POINTS)
 def test_every_cutover_boundary_recovers_to_all_old_or_all_new(
-    tmp_path: Path, fault_point: str
+    tmp_path: Path, fault_point: str, old_activity_present: bool
 ) -> None:
-    source, runtime, workspace = _setup(tmp_path)
+    source, runtime, workspace = _setup(
+        tmp_path, old_activity_present=old_activity_present
+    )
     old = _live(source, runtime)
     new = (
         _tree(workspace / "staging" / "pages"),

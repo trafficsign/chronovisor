@@ -27,6 +27,7 @@ from chronovisor.core.okf_workspace import (
 
 CutoverState = Literal["committed", "rollback-complete"]
 FaultInjector = Callable[[str], None]
+_OldActivity = tuple[int, str] | None
 
 _RUN_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}")
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
@@ -91,7 +92,7 @@ class _Asset:
     live: Path
     staged: Path
     backup: Path
-    old: Mapping[str, str] | tuple[int, str]
+    old: Mapping[str, str] | tuple[int, str] | None
     new: Mapping[str, str] | tuple[int, str]
     directory: bool
 
@@ -140,6 +141,9 @@ def execute_okf_cutover(
                 completed=completed,
                 old_activity=old_activity,
                 fault_inject=fault_inject,
+                source_may_be_absent=(
+                    asset.name == "backup-activity" and old_activity is None
+                ),
             )
         for asset in _assets(context, old_activity):
             _move(
@@ -151,6 +155,7 @@ def execute_okf_cutover(
                 completed=completed,
                 old_activity=old_activity,
                 fault_inject=fault_inject,
+                source_may_be_absent=False,
             )
 
         states = _asset_states(context, old_activity)
@@ -234,6 +239,7 @@ def recover_okf_cutover(
                     completed=completed,
                     old_activity=old_activity,
                     fault_inject=None,
+                    source_may_be_absent=False,
                 )
         states = _asset_states(context, old_activity)
         for asset in _assets(context, old_activity):
@@ -247,6 +253,7 @@ def recover_okf_cutover(
                     completed=completed,
                     old_activity=old_activity,
                     fault_inject=None,
+                    source_may_be_absent=False,
                 )
         if any(
             value != "old" for value in _asset_states(context, old_activity).values()
@@ -382,7 +389,7 @@ def _expected(manifest: Mapping[str, object]) -> _Expected:
     )
 
 
-def _validate_prepared(context: _Context) -> tuple[int, str]:
+def _validate_prepared(context: _Context) -> _OldActivity:
     expected_gate = {
         "schema": JOURNAL_SCHEMA,
         "version": SCHEMA_VERSION,
@@ -398,7 +405,7 @@ def _validate_prepared(context: _Context) -> tuple[int, str]:
     if context.backup.exists() or context.backup.is_symlink():
         raise ValueError("rollback backup already exists")
     _validate_static_source(context)
-    old_activity = _file_identity(context.runtime / "activity.jsonl")
+    old_activity = _optional_file_identity(context.runtime / "activity.jsonl")
     states = _asset_states(context, old_activity)
     if any(state != "old" for state in states.values()):
         raise ValueError("prepared workspace paths do not match old/live and new/staged")
@@ -412,7 +419,7 @@ def _validate_static_source(context: _Context) -> None:
             raise ValueError(f"reserved source changed: {path}")
 
 
-def _assets(context: _Context, old_activity: tuple[int, str]) -> tuple[_Asset, ...]:
+def _assets(context: _Context, old_activity: _OldActivity) -> tuple[_Asset, ...]:
     return (
         _Asset(
             "backup-pages",
@@ -445,7 +452,7 @@ def _assets(context: _Context, old_activity: tuple[int, str]) -> tuple[_Asset, .
 
 
 def _asset_states(
-    context: _Context, old_activity: tuple[int, str]
+    context: _Context, old_activity: _OldActivity
 ) -> dict[str, Literal["old", "new", "missing-live"]]:
     result: dict[str, Literal["old", "new", "missing-live"]] = {}
     for asset in _assets(context, old_activity):
@@ -461,6 +468,20 @@ def _asset_states(
                 raise ValueError("all cutover assets must be on the same volume")
         if staged and backup and live:
             raise ValueError(f"duplicate cutover asset locations: {asset.name}")
+        if asset.old is None:
+            if backup:
+                raise ValueError("absent old activity unexpectedly has a backup")
+            if live:
+                if staged:
+                    raise ValueError("absent old activity has duplicate new copies")
+                _require_identity(asset.live, asset.new, asset.directory)
+                result[asset.name] = "new"
+            else:
+                if not staged:
+                    raise ValueError("staged activity is missing")
+                _require_identity(asset.staged, asset.new, asset.directory)
+                result[asset.name] = "old"
+            continue
         if backup:
             _require_identity(asset.backup, asset.old, asset.directory)
         if staged:
@@ -484,14 +505,16 @@ def _asset_states(
 
 
 def _require_identity(
-    path: Path, expected: Mapping[str, str] | tuple[int, str], directory: bool
+    path: Path,
+    expected: Mapping[str, str] | tuple[int, str] | None,
+    directory: bool,
 ) -> None:
     if directory:
         if not isinstance(expected, Mapping):
             raise TypeError("directory identity must be a mapping")
         _require_tree(path, expected)
     else:
-        if not isinstance(expected, tuple):
+        if expected is None or not isinstance(expected, tuple):
             raise TypeError("file identity must be a size/hash tuple")
         observed = _file_identity(path)
         if expected[0] >= 0 and observed[0] != expected[0]:
@@ -508,8 +531,9 @@ def _move(
     *,
     mode: str,
     completed: list[str],
-    old_activity: tuple[int, str],
+    old_activity: _OldActivity,
     fault_inject: FaultInjector | None,
+    source_may_be_absent: bool,
 ) -> None:
     _checkpoint(fault_inject, f"{name}:before-intent-journal")
     _write_journal(
@@ -525,13 +549,18 @@ def _move(
     if destination.exists() or destination.is_symlink():
         raise FileExistsError(f"cutover destination already exists: {destination}")
     _reject_symlink(source, f"cutover source {name}")
-    os.rename(source, destination)
+    source_exists = source.exists()
+    if source_exists:
+        os.rename(source, destination)
+    elif not source_may_be_absent:
+        raise FileNotFoundError(f"cutover source is missing: {source}")
     _checkpoint(fault_inject, f"{name}:after-rename")
-    _fsync_asset(destination)
+    if source_exists:
+        _fsync_asset(destination)
     for parent in {source.parent, destination.parent}:
         fsync_directory(parent)
     _checkpoint(fault_inject, f"{name}:after-fsync")
-    completed.append(name)
+    completed.append(name if source_exists else f"{name}:skipped")
     _write_journal(
         context,
         state="in-progress",
@@ -547,7 +576,7 @@ def _move(
 def _finish(
     context: _Context,
     state: CutoverState,
-    old_activity: tuple[int, str],
+    old_activity: _OldActivity,
     completed: list[str],
     *,
     fault_inject: FaultInjector | None,
@@ -574,7 +603,7 @@ def _write_journal(
     phase: str,
     step: str | None,
     completed: list[str],
-    old_activity: tuple[int, str],
+    old_activity: _OldActivity,
 ) -> None:
     _write_object(
         context.journal,
@@ -588,10 +617,15 @@ def _write_journal(
             "phase": phase,
             "step": step,
             "completed": list(completed),
-            "old_activity": {
-                "size": old_activity[0],
-                "sha256": old_activity[1],
-            },
+            "old_activity": (
+                {"present": False}
+                if old_activity is None
+                else {
+                    "present": True,
+                    "size": old_activity[0],
+                    "sha256": old_activity[1],
+                }
+            ),
         },
     )
 
@@ -653,15 +687,23 @@ def _require_active_sentinel(context: _Context) -> None:
 
 def _old_activity(
     journal: Mapping[str, object], context: _Context, *, prepared: bool
-) -> tuple[int, str]:
+) -> _OldActivity:
     if prepared:
-        states = _asset_states(context, _file_identity(context.runtime / "activity.jsonl"))
+        old_activity = _optional_file_identity(context.runtime / "activity.jsonl")
+        states = _asset_states(context, old_activity)
         if any(value != "old" for value in states.values()):
             raise ValueError("prepared workspace paths are inconsistent")
-        return _file_identity(context.runtime / "activity.jsonl")
+        return old_activity
     item = journal.get("old_activity")
     if not isinstance(item, dict):
         raise ValueError("migration journal has no old activity identity")
+    present = item.get("present")
+    if present is False:
+        if set(item) != {"present"}:
+            raise ValueError("absent old activity identity must not contain a hash")
+        return None
+    if present is not True:
+        raise ValueError("migration journal old activity presence is invalid")
     size = item.get("size")
     if not isinstance(size, int) or isinstance(size, bool) or size < 0:
         raise ValueError("migration journal old activity size is invalid")
@@ -716,6 +758,11 @@ def _file_identity(path: Path) -> tuple[int, str]:
         raise ValueError(f"managed file is missing: {path}")
     data = path.read_bytes()
     return len(data), hashlib.sha256(data).hexdigest()
+
+
+def _optional_file_identity(path: Path) -> _OldActivity:
+    _reject_symlink(path, "managed file")
+    return _file_identity(path) if path.exists() else None
 
 
 def _fsync_asset(path: Path) -> None:
