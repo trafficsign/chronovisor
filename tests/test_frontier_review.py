@@ -14,6 +14,7 @@ from chronovisor.core.runtime_config import DecisionRouterConfig
 from chronovisor.decision import (
     decision_router,
     frontier_review,
+    local_model_eval,
     routine_review,
     semantic_hold,
 )
@@ -82,6 +83,47 @@ def _one_runner_residency_plan(
     )
 
 
+def _use_local_runtime(monkeypatch: pytest.MonkeyPatch, chat) -> None:
+    models = ("ornith:test", "gpt-oss:test", "gemma:test")
+    routes = tuple(
+        ollama.RuntimeGenerationRoute(
+            role=f"classification.{role}",
+            provider="ollama",
+            model=model,
+            location="local",
+            structured_output=True,
+            protocol="ollama-native",
+            endpoint_sha256="f" * 64,
+        )
+        for role, model in zip(
+            ("primary", "challenger", "tie_break"), models, strict=True
+        )
+    )
+    digests = dict(zip(models, ("d" * 64, "2" * 64, "3" * 64), strict=True))
+    routes_by_role = {route.role: route for route in routes}
+    monkeypatch.setattr(
+        ollama,
+        "runtime_generation_routes",
+        lambda roles: tuple(routes_by_role[role] for role in roles),
+    )
+    monkeypatch.setattr(ollama, "runtime_structured_chat", chat)
+    monkeypatch.setattr(
+        local_model_eval,
+        "fetch_local_model_metadata",
+        lambda requested: {
+            "engine": {"name": "ollama", "version": "test"},
+            "models": {
+                model: {
+                    "name": model,
+                    "digest": digests[model],
+                    "details": {"quantization_level": "Q4_K_M"},
+                }
+                for model in requested
+            },
+        },
+    )
+
+
 def _quarantined_router_class(
     *,
     valid: tuple[bool, bool, bool],
@@ -99,9 +141,12 @@ def _quarantined_router_class(
     class QuarantinedLocalRouter:
         def __init__(self, **_kwargs) -> None:
             self.policy = SimpleNamespace(
-                source="adopted_artifact",
+                source="runtime_role_mapping",
                 audit_record=lambda: dict(router_audit),
             )
+
+        def authority_router(self, *, refresh=False):
+            return dict(router_audit)
 
         def decide(self, _prompt, _schema):
             return SimpleNamespace(
@@ -140,9 +185,14 @@ def _cache_test_router_class(
             router = authority["router"]
             assert isinstance(router, dict)
             self.policy = SimpleNamespace(
-                source="adopted_artifact",
+                source="runtime_role_mapping",
                 audit_record=lambda: dict(router),
             )
+
+        def authority_router(self, *, refresh=False):
+            router = authority_box["value"]["router"]
+            assert isinstance(router, dict)
+            return dict(router)
 
         def decide(self, prompt, _schema, *, system=None):
             calls.append(f"{prompt}|{system}")
@@ -230,12 +280,12 @@ def isolate_frontier_activity(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setattr(
         routine_review,
         "_structured_authority_observation",
-        lambda _authority: "0" * 64,
+        lambda _authority, **_kwargs: "0" * 64,
     )
     monkeypatch.setattr(
         routine_review,
         "_current_structured_authority",
-        lambda lane: (
+        lambda lane, **_kwargs: (
             semantic_authority(lane, artifact_sha256="d" * 64),
             None,
         ),
@@ -1236,19 +1286,21 @@ def test_routine_structured_review_uses_local_transport_and_never_subprocesses(
 ) -> None:
     calls: list[str] = []
 
-    def fake_chat(_messages, *, model: str, **_kwargs) -> str:
-        calls.append(model)
-        return json.dumps(
-            {
-                "decision": "approved",
-                "summary": f"local vote from {model}",
-                "tests_run": [],
-                "commit": None,
-                "committed": False,
-                "pushed": False,
-                "risk": None,
-                "notes": None,
-            }
+    def fake_chat(_messages, *, expected_model: str, **_kwargs):
+        calls.append(expected_model)
+        return ollama.ChatResponse(
+            content=json.dumps(
+                {
+                    "decision": "approved",
+                    "summary": f"local vote from {expected_model}",
+                    "tests_run": [],
+                    "commit": None,
+                    "committed": False,
+                    "pushed": False,
+                    "risk": None,
+                    "notes": None,
+                }
+            )
         )
 
     def forbidden_subprocess(*_args, **_kwargs):
@@ -1261,20 +1313,11 @@ def test_routine_structured_review_uses_local_transport_and_never_subprocesses(
         "load_decision_router_config",
         _local_router_config,
     )
-    monkeypatch.setattr(ollama, "chat", fake_chat)
+    _use_local_runtime(monkeypatch, fake_chat)
     monkeypatch.setattr(
         ollama,
         "plan_model_residency",
         _one_runner_residency_plan,
-    )
-    monkeypatch.setattr(
-        decision_router,
-        "resolve_router_policy",
-        lambda config, **_kwargs: decision_router.RouterPolicyResolution(
-            config=config,
-            source="adopted_artifact",
-            artifact_sha256="d" * 64,
-        ),
     )
     monkeypatch.setenv("CHRONOVISOR_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
     # Block the actual Frontier entrypoint without sabotaging the local
@@ -1342,7 +1385,9 @@ def test_structured_review_defers_mutating_majority_with_conservative_vote(
         == "mutating_local_majority_vetoed_by_conservative_vote"
     )
     assert result["human_required"] is False
-    assert result["decision_policy"]["router_policy"]["artifact_sha256"] == ("d" * 64)
+    assert result["decision_policy"]["router_policy"]["routes"][0]["ollama"][
+        "digest"
+    ] == ("d" * 64)
 
 
 @pytest.mark.parametrize(
@@ -1420,7 +1465,9 @@ def test_structured_review_types_three_valid_distinct_semantic_no_quorum(
     assert result["local_consensus"]["quarantine_reason"] == (
         "local_models_did_not_reach_two_vote_quorum"
     )
-    assert result["decision_policy"]["router_policy"]["artifact_sha256"] == ("d" * 64)
+    assert result["decision_policy"]["router_policy"]["routes"][0]["ollama"][
+        "digest"
+    ] == ("d" * 64)
     assert result["human_required"] is False
 
 
@@ -1449,7 +1496,7 @@ def test_structured_review_shares_one_router_config_with_initial_authority(
             result.residency = {}
             return result
 
-    def current_authority(_lane: str):
+    def current_authority(_lane: str, **_kwargs):
         authority_configs.append(
             routine_review._STRUCTURED_REVIEW_ROUTER_CONFIG.get()
         )
@@ -1495,7 +1542,7 @@ def test_structured_review_reuses_exact_epoch_semantic_hold_without_model_call(
     monkeypatch.setattr(
         routine_review,
         "_current_structured_authority",
-        lambda lane: (
+        lambda lane, **_kwargs: (
             authority_box["value"],
             None,
         ),
@@ -1546,12 +1593,12 @@ def test_structured_review_reuses_cached_hold_after_observation_generation_chang
     monkeypatch.setattr(
         routine_review,
         "_current_structured_authority",
-        lambda _lane: (authority_box["value"], None),
+        lambda _lane, **_kwargs: (authority_box["value"], None),
     )
     monkeypatch.setattr(
         routine_review,
         "_structured_authority_observation",
-        lambda _authority: observation_box["value"],
+        lambda _authority, **_kwargs: observation_box["value"],
     )
     monkeypatch.setenv("CHRONOVISOR_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
 
@@ -1592,12 +1639,12 @@ def test_structured_review_restores_cached_a_after_authority_a_b_a(
     monkeypatch.setattr(
         routine_review,
         "_current_structured_authority",
-        lambda _lane: (authority_box["value"], None),
+        lambda _lane, **_kwargs: (authority_box["value"], None),
     )
     monkeypatch.setattr(
         routine_review,
         "_structured_authority_observation",
-        lambda _authority: observation_box["value"],
+        lambda _authority, **_kwargs: observation_box["value"],
     )
     monkeypatch.setenv("CHRONOVISOR_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
 
@@ -1645,7 +1692,7 @@ def test_structured_review_discards_cached_result_if_observation_drifts_during_l
     monkeypatch.setattr(
         routine_review,
         "_current_structured_authority",
-        lambda _lane: (authority_box["value"], None),
+        lambda _lane, **_kwargs: (authority_box["value"], None),
     )
     monkeypatch.setenv("CHRONOVISOR_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
 
@@ -1659,7 +1706,7 @@ def test_structured_review_discards_cached_result_if_observation_drifts_during_l
     monkeypatch.setattr(
         routine_review,
         "_structured_authority_observation",
-        lambda _authority: next(observations),
+        lambda _authority, **_kwargs: next(observations),
     )
 
     result = routine_review.run_structured_review(
@@ -1689,12 +1736,12 @@ def test_structured_review_discards_current_result_if_authority_drifts_during_st
     monkeypatch.setattr(
         routine_review,
         "_current_structured_authority",
-        lambda _lane: (authority_box["value"], None),
+        lambda _lane, **_kwargs: (authority_box["value"], None),
     )
     monkeypatch.setattr(
         routine_review,
         "_structured_authority_observation",
-        lambda _authority: observation_box["value"],
+        lambda _authority, **_kwargs: observation_box["value"],
     )
     original_store = semantic_hold.StructuredReviewHoldLease.store
 
@@ -1750,7 +1797,7 @@ def test_structured_review_does_not_use_cache_when_initial_observation_unavailab
     monkeypatch.setattr(
         routine_review,
         "_current_structured_authority",
-        lambda _lane: (authority_box["value"], None),
+        lambda _lane, **_kwargs: (authority_box["value"], None),
     )
     monkeypatch.setenv("CHRONOVISOR_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
 
@@ -1763,7 +1810,7 @@ def test_structured_review_does_not_use_cache_when_initial_observation_unavailab
     monkeypatch.setattr(
         routine_review,
         "_structured_authority_observation",
-        lambda _authority: None,
+        lambda _authority, **_kwargs: None,
     )
     result = routine_review.run_structured_review(
         "same request",
@@ -1792,7 +1839,7 @@ def test_structured_review_does_not_return_cache_when_post_observation_unavailab
     monkeypatch.setattr(
         routine_review,
         "_current_structured_authority",
-        lambda _lane: (authority_box["value"], None),
+        lambda _lane, **_kwargs: (authority_box["value"], None),
     )
     monkeypatch.setenv("CHRONOVISOR_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
 
@@ -1806,7 +1853,7 @@ def test_structured_review_does_not_return_cache_when_post_observation_unavailab
     monkeypatch.setattr(
         routine_review,
         "_structured_authority_observation",
-        lambda _authority: next(observations),
+        lambda _authority, **_kwargs: next(observations),
     )
     result = routine_review.run_structured_review(
         "same request",
@@ -1835,7 +1882,7 @@ def test_structured_review_cache_lock_entry_failure_falls_back_once(
     monkeypatch.setattr(
         routine_review,
         "_current_structured_authority",
-        lambda lane: (authority_box["value"], None),
+        lambda lane, **_kwargs: (authority_box["value"], None),
     )
 
     @contextmanager
@@ -1875,7 +1922,7 @@ def test_structured_review_cache_misses_prompt_system_and_authority_changes(
     monkeypatch.setattr(
         routine_review,
         "_current_structured_authority",
-        lambda lane: (authority_box["value"], None),
+        lambda lane, **_kwargs: (authority_box["value"], None),
     )
     monkeypatch.setenv("CHRONOVISOR_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
 
@@ -1919,12 +1966,12 @@ def test_structured_review_does_not_store_after_authority_aba_observation(
     monkeypatch.setattr(
         routine_review,
         "_current_structured_authority",
-        lambda lane: (authority_box["value"], None),
+        lambda lane, **_kwargs: (authority_box["value"], None),
     )
     monkeypatch.setattr(
         routine_review,
         "_structured_authority_observation",
-        lambda _authority: next(observations),
+        lambda _authority, **_kwargs: next(observations),
     )
     monkeypatch.setenv("CHRONOVISOR_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
 
@@ -1970,12 +2017,12 @@ def test_structured_review_discards_any_model_result_after_authority_drift(
     monkeypatch.setattr(
         routine_review,
         "_current_structured_authority",
-        lambda lane: (authority_box["value"], None),
+        lambda lane, **_kwargs: (authority_box["value"], None),
     )
     monkeypatch.setattr(
         routine_review,
         "_structured_authority_observation",
-        lambda _authority: next(observations),
+        lambda _authority, **_kwargs: next(observations),
     )
     monkeypatch.setenv("CHRONOVISOR_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
 
@@ -2009,12 +2056,12 @@ def test_structured_review_authority_guard_survives_cache_lock_failure(
     monkeypatch.setattr(
         routine_review,
         "_current_structured_authority",
-        lambda lane: (authority_box["value"], None),
+        lambda lane, **_kwargs: (authority_box["value"], None),
     )
     monkeypatch.setattr(
         routine_review,
         "_structured_authority_observation",
-        lambda _authority: next(observations),
+        lambda _authority, **_kwargs: next(observations),
     )
     monkeypatch.setattr(
         routine_review.semantic_hold.StructuredReviewSemanticHoldCache,
@@ -2050,7 +2097,7 @@ def test_structured_review_never_caches_non_semantic_outcomes(
     monkeypatch.setattr(
         routine_review,
         "_current_structured_authority",
-        lambda lane: (authority_box["value"], None),
+        lambda lane, **_kwargs: (authority_box["value"], None),
     )
     monkeypatch.setenv("CHRONOVISOR_DECISION_POLICY_RECALL_AUTO_APPLY", "enabled")
 
@@ -2108,16 +2155,16 @@ def test_structured_review_local_model_failures_quarantine_without_tie_or_fronti
 ) -> None:
     calls: list[str] = []
 
-    def failed_chat(_messages, *, model: str, **_kwargs) -> str:
-        calls.append(model)
-        raise RuntimeError(f"{model} unavailable")
+    def failed_chat(_messages, *, expected_model: str, **_kwargs):
+        calls.append(expected_model)
+        raise RuntimeError(f"{expected_model} unavailable")
 
     monkeypatch.setattr(
         decision_router,
         "load_decision_router_config",
         _local_router_config,
     )
-    monkeypatch.setattr(ollama, "chat", failed_chat)
+    _use_local_runtime(monkeypatch, failed_chat)
     monkeypatch.setattr(
         ollama,
         "plan_model_residency",
@@ -2128,14 +2175,6 @@ def test_structured_review_local_model_failures_quarantine_without_tie_or_fronti
         "_run_codex",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(
             AssertionError("local failures must not fall back to frontier")
-        ),
-    )
-    monkeypatch.setattr(
-        decision_router,
-        "resolve_router_policy",
-        lambda config, **_kwargs: decision_router.RouterPolicyResolution(
-            config=config,
-            source="adopted_artifact",
         ),
     )
     monkeypatch.setenv("CHRONOVISOR_DECISION_POLICY_RECALL_AUTO_APPLY", "shadow")
@@ -2165,9 +2204,12 @@ def test_structured_review_rejects_incomplete_approved_json(
             router_audit = semantic_authority(artifact_sha256="d" * 64)["router"]
             assert isinstance(router_audit, dict)
             self.policy = SimpleNamespace(
-                source="adopted_artifact",
+                source="runtime_role_mapping",
                 audit_record=lambda: dict(router_audit),
             )
+
+        def authority_router(self, *, refresh=False):
+            return dict(self.policy.audit_record())
 
         def decide(self, _prompt, _schema):
             return DecisionRouterResult(
@@ -2258,9 +2300,12 @@ def test_structured_review_forwards_optional_system_to_local_router(
             router_audit = semantic_authority(artifact_sha256="d" * 64)["router"]
             assert isinstance(router_audit, dict)
             self.policy = SimpleNamespace(
-                source="adopted_artifact",
+                source="runtime_role_mapping",
                 audit_record=lambda: dict(router_audit),
             )
+
+        def authority_router(self, *, refresh=False):
+            return dict(self.policy.audit_record())
 
         def decide(self, prompt, schema, *, system=None):
             captured.update(prompt=prompt, schema=schema, system=system)
