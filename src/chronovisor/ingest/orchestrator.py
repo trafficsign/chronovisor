@@ -1004,10 +1004,7 @@ def run_pending_ingest(
     individually so a single raw's failure doesn't block retry of the
     others — and so partial-batch progress survives a server crash.
 
-    The ``_INGEST_LOCK`` (in-process) serializes concurrent calls; the
-    ``current_job_id`` state slot is reserved at batch start and cleared
-    in the outer ``finally`` so cross-process observers (and the startup
-    ``reset_stale_lock``) still see the batch as in flight.
+    The lock and durable state slot serialize each batch until outer cleanup.
 
     Args:
         force: When True, bypass the ``INGEST_THRESHOLD`` check and trigger
