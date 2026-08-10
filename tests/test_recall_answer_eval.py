@@ -95,6 +95,16 @@ def _write_rows(path: Path, rows: list[dict]) -> None:
     path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
 
 
+def _answer_route(role: str, model: str) -> dict[str, str | None]:
+    return {
+        "role": role,
+        "provider": "fixture",
+        "model": model,
+        "location": "remote",
+        "model_digest": None,
+    }
+
+
 def test_pair_protocol_is_independent_of_evaluation_run_time() -> None:
     evidence = {
         "seed": 1729,
@@ -113,6 +123,41 @@ def test_pair_protocol_is_independent_of_evaluation_run_time() -> None:
     assert first["arm_order"] in (
         ["field_on", "field_off"],
         ["field_off", "field_on"],
+    )
+
+
+def test_answer_identity_v2_rejects_legacy_and_route_model_mismatch() -> None:
+    legacy = {
+        "runner_id": "legacy",
+        "model": "runner-model",
+        "system_sha256": "a" * 64,
+        "sampler_sha256": "b" * 64,
+        "policy_sha256": "c" * 64,
+    }
+    current = {
+        "identity_schema": recall_answer_eval.ANSWER_ADAPTER_IDENTITY_SCHEMA,
+        "runner_id": "current",
+        "route_identity": _answer_route("recall.answer.runner", "runner-model"),
+        "model": "runner-model",
+        "model_digest": None,
+        "system_sha256": "a" * 64,
+        "sampler_sha256": "b" * 64,
+        "policy_sha256": "c" * 64,
+    }
+
+    assert (
+        recall_answer_eval._identity_error(
+            legacy, recall_answer_eval._REQUIRED_RUNNER_IDENTITY
+        )
+        == "missing_identity_schema"
+    )
+    mismatched = copy.deepcopy(current)
+    mismatched["route_identity"]["model"] = "changed"
+    assert (
+        recall_answer_eval._identity_error(
+            mismatched, recall_answer_eval._REQUIRED_RUNNER_IDENTITY
+        )
+        == "invalid_route_identity"
     )
 
 
@@ -332,16 +377,22 @@ def test_evaluate_answer_episodes_projects_forbidden_gold_fields_for_scorer(
         for episode in episodes
     }
     runner_identity = {
+        "identity_schema": recall_answer_eval.ANSWER_ADAPTER_IDENTITY_SCHEMA,
         "runner_id": "runner-1",
+        "route_identity": _answer_route("recall.answer.runner", "fixture-runner"),
         "model": "fixture-runner",
+        "model_digest": None,
         "system_sha256": "a" * 64,
         "sampler_sha256": "b" * 64,
         "policy_sha256": "c" * 64,
     }
     scorer_identity = {
+        "identity_schema": recall_answer_eval.ANSWER_ADAPTER_IDENTITY_SCHEMA,
         "scorer_id": "scorer-1",
         "version": "1",
+        "route_identity": _answer_route("recall.answer.scorer", "fixture-scorer"),
         "model": "fixture-scorer",
+        "model_digest": None,
         "system_sha256": "d" * 64,
         "sampler_sha256": "e" * 64,
         "policy_sha256": "f" * 64,
@@ -604,16 +655,22 @@ def test_evaluate_independent_answer_benchmark_projects_forbidden_gold_fields(
         }
     sample_evidence_sha = next(iter(gold_entries.values()))["evidence_sha256"]
     runner_identity = {
+        "identity_schema": recall_answer_eval.ANSWER_ADAPTER_IDENTITY_SCHEMA,
         "runner_id": "runner-1",
+        "route_identity": _answer_route("recall.answer.runner", "fixture-runner"),
         "model": "fixture-runner",
+        "model_digest": None,
         "system_sha256": "a" * 64,
         "sampler_sha256": "b" * 64,
         "policy_sha256": "c" * 64,
     }
     scorer_identity = {
+        "identity_schema": recall_answer_eval.ANSWER_ADAPTER_IDENTITY_SCHEMA,
         "scorer_id": "scorer-1",
         "version": "1",
+        "route_identity": _answer_route("recall.answer.scorer", "fixture-scorer"),
         "model": "fixture-scorer",
+        "model_digest": None,
         "system_sha256": "d" * 64,
         "sampler_sha256": "e" * 64,
         "policy_sha256": "f" * 64,
@@ -1279,16 +1336,22 @@ def test_real_train_and_locked_artifact_set_reaches_growth_gate(
     train_gold = gold_manifest("train")
     locked_gold = gold_manifest("locked-test")
     runner_identity = {
+        "identity_schema": recall_answer_eval.ANSWER_ADAPTER_IDENTITY_SCHEMA,
         "runner_id": "artifact-set-runner",
+        "route_identity": _answer_route("recall.answer.runner", "fixture-model"),
         "model": "fixture-model",
+        "model_digest": None,
         "system_sha256": "a" * 64,
         "sampler_sha256": "b" * 64,
         "policy_sha256": "d" * 64,
     }
     scorer_base = {
+        "identity_schema": recall_answer_eval.ANSWER_ADAPTER_IDENTITY_SCHEMA,
         "scorer_id": "artifact-set-scorer",
         "version": "1",
+        "route_identity": _answer_route("recall.answer.scorer", "fixture-scorer"),
         "model": "fixture-scorer",
+        "model_digest": None,
         "system_sha256": "1" * 64,
         "sampler_sha256": "2" * 64,
         "policy_sha256": "3" * 64,
@@ -1801,8 +1864,11 @@ def test_paired_fake_runner_is_sealed_and_missing_seams_hold(
     )
     monkeypatch.setattr(recall_answer_eval, "_context_for_episode", lambda _episode: ("context", ""))
     runner_identity = {
+        "identity_schema": recall_answer_eval.ANSWER_ADAPTER_IDENTITY_SCHEMA,
         "runner_id": "fake",
+        "route_identity": _answer_route("recall.answer.runner", "fake-model"),
         "model": "fake-model",
+        "model_digest": None,
         "system_sha256": "a" * 64,
         "sampler_sha256": "b" * 64,
         "policy_sha256": "d" * 64,
@@ -1884,9 +1950,14 @@ def test_paired_fake_runner_is_sealed_and_missing_seams_hold(
         }
     )
     scorer_identity = {
+        "identity_schema": recall_answer_eval.ANSWER_ADAPTER_IDENTITY_SCHEMA,
         "scorer_id": "fake",
         "version": "1",
+        "route_identity": _answer_route(
+            "recall.answer.scorer", "fake-scorer-model"
+        ),
         "model": "fake-scorer-model",
+        "model_digest": None,
         "system_sha256": "1" * 64,
         "sampler_sha256": "2" * 64,
         "policy_sha256": "3" * 64,
@@ -2990,6 +3061,113 @@ def test_machine_calibration_controls_are_exact_40_20_20_and_regenerated() -> No
     assert subject["control"] == controls[0]
     assert subject["control_sha256"] == recall_answer_eval._canonical_sha(
         controls[0]
+    )
+
+
+def test_machine_calibration_receipt_does_not_couple_scorer_to_tie_break(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scorer_identity = {
+        "identity_schema": recall_answer_eval.ANSWER_ADAPTER_IDENTITY_SCHEMA,
+        "scorer_id": "fixture-scorer",
+        "version": "2",
+        "route_identity": _answer_route("recall.answer.scorer", "scorer-model"),
+        "model": "scorer-model",
+        "model_digest": None,
+        "system_sha256": "a" * 64,
+        "sampler_sha256": "b" * 64,
+        "policy_sha256": "c" * 64,
+        "rubric_sha256": "d" * 64,
+        "evidence_manifest_sha256": "e" * 64,
+        "calibration_protocol_sha256": "f" * 64,
+    }
+    benchmark_sha = "1" * 64
+    control = {
+        "control_id": "2" * 64,
+        "pair_id": "3" * 64,
+        "pair_arm": "a",
+        "variant": "positive",
+        "answer": "answer",
+        "answer_sha256": "4" * 64,
+        "expected_scores": {dimension: 1.0 for dimension in recall_answer_eval.ANSWER_DIMENSIONS},
+        "expected_scores_sha256": "5" * 64,
+        "query_sha256": "6" * 64,
+        "evidence_sha256": "7" * 64,
+        "component_sha256": "8" * 64,
+        "source_packet": {},
+        "source_packet_sha256": "9" * 64,
+    }
+    protocol = recall_answer_eval._preregistered_pair_protocol(
+        seed=recall_answer_eval.ANSWER_AUTHORITY_SEED,
+        episode_id=control["control_id"],
+        episode_sha256=control["source_packet_sha256"],
+        split_manifest_sha256=benchmark_sha,
+        gold_manifest_sha256=benchmark_sha,
+        adapter_registry_sha256=recall_answer_eval._canonical_sha(scorer_identity),
+        evaluation_kind="machine-scorer-calibration-v2",
+    )
+    scoring = {
+        **protocol["scoring"],
+        "evidence_manifest_sha256": benchmark_sha,
+        "rubric_sha256": scorer_identity["rubric_sha256"],
+    }
+    case = {
+        "control_id": control["control_id"],
+        "control": control,
+        "consensus_receipt_sha256": "a" * 64,
+        "scoring": scoring,
+        "scorer_scores": {
+            dimension: 1.0 for dimension in recall_answer_eval.ANSWER_DIMENSIONS
+        },
+        "execution_receipt_sha256": "b" * 64,
+    }
+    receipt = {
+        "created_at": "2026-08-02T00:00:00Z",
+        "authority": {
+            "router": {
+                "models": ["router-primary", "router-challenger", "router-tie"]
+            }
+        },
+    }
+    monkeypatch.setattr(
+        recall_answer_eval,
+        "load_machine_consensus_receipt",
+        lambda *_args, **_kwargs: {"passed": True, "receipt": receipt},
+    )
+    monkeypatch.setattr(
+        recall_answer_eval,
+        "validate_machine_consensus_receipt",
+        lambda *_args, **_kwargs: {
+            "passed": True,
+            "artifact": {
+                "provenance": {
+                    "vote_manifest": [
+                        {"role": "primary"},
+                        {"role": "challenger"},
+                    ]
+                }
+            },
+        },
+    )
+    monkeypatch.setattr(
+        recall_answer_eval, "_execution_receipt_error", lambda **_kwargs: ""
+    )
+
+    assert (
+        recall_answer_eval._machine_calibration_case_error(
+            case,
+            control=control,
+            benchmark={
+                "manifest_sha256": benchmark_sha,
+                "payload": {"frozen_at": "2026-08-01T00:00:00Z"},
+            },
+            scorer_identity=scorer_identity,
+            consensus_ledger_file=tmp_path / "consensus.jsonl",
+            execution_ledger_file=tmp_path / "execution.jsonl",
+            chronovisor_root=tmp_path,
+        )
+        == ""
     )
 
 

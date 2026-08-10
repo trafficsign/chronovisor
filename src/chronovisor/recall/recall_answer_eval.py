@@ -149,17 +149,31 @@ SCORER_CALIBRATION_MAE_CEILING = 0.10
 SCORER_CALIBRATION_ABS_BIAS_CEILING = 0.05
 SCORER_CALIBRATION_WITHIN_TOLERANCE_LCB_FLOOR = 0.80
 SCORER_CALIBRATION_PREFERENCE_LCB_FLOOR = 0.80
-_REQUIRED_RUNNER_IDENTITY = (
-    "runner_id",
+ANSWER_ADAPTER_IDENTITY_SCHEMA = "chronovisor.recall-answer-adapter-identity.v2"
+_ANSWER_ROUTE_IDENTITY_KEYS = {
+    "role",
+    "provider",
     "model",
+    "location",
+    "model_digest",
+}
+_REQUIRED_RUNNER_IDENTITY = (
+    "identity_schema",
+    "runner_id",
+    "route_identity",
+    "model",
+    "model_digest",
     "system_sha256",
     "sampler_sha256",
     "policy_sha256",
 )
 _REQUIRED_SCORER_IDENTITY = (
+    "identity_schema",
     "scorer_id",
     "version",
+    "route_identity",
     "model",
+    "model_digest",
     "system_sha256",
     "sampler_sha256",
     "policy_sha256",
@@ -168,9 +182,12 @@ _REQUIRED_SCORER_IDENTITY = (
     "calibration_protocol_sha256",
 )
 _REQUIRED_CALIBRATION_SCORER_IDENTITY = (
+    "identity_schema",
     "scorer_id",
     "version",
+    "route_identity",
     "model",
+    "model_digest",
     "system_sha256",
     "sampler_sha256",
     "policy_sha256",
@@ -741,10 +758,52 @@ def _manifest_digest_valid(manifest: Mapping[str, Any]) -> bool:
 def _identity_error(identity: Mapping[str, Any], required: Sequence[str]) -> str:
     for key in required:
         value = identity.get(key)
+        if key == "route_identity":
+            continue
+        if key == "model_digest":
+            if key not in identity or (
+                value is not None
+                and (not isinstance(value, str) or not value.strip())
+            ):
+                return f"invalid_{key}"
+            continue
         if not isinstance(value, str) or not value.strip():
             return f"missing_{key}"
         if key.endswith("_sha256") and not _valid_sha(value):
             return f"invalid_{key}"
+    if "route_identity" in required:
+        route = identity.get("route_identity")
+        expected_role = (
+            "recall.answer.runner"
+            if "runner_id" in required
+            else "recall.answer.scorer"
+        )
+        if (
+            identity.get("identity_schema") != ANSWER_ADAPTER_IDENTITY_SCHEMA
+            or not isinstance(route, Mapping)
+            or set(route) != _ANSWER_ROUTE_IDENTITY_KEYS
+            or route.get("role") != expected_role
+            or not isinstance(route.get("provider"), str)
+            or not str(route["provider"]).strip()
+            or not isinstance(route.get("model"), str)
+            or not str(route["model"]).strip()
+            or route.get("location") not in {"local", "remote"}
+            or route.get("model") != identity.get("model")
+            or route.get("model_digest") != identity.get("model_digest")
+            or (
+                route.get("provider") == "ollama"
+                and route.get("location") == "local"
+                and (
+                    not isinstance(route.get("model_digest"), str)
+                    or not str(route["model_digest"]).strip()
+                )
+            )
+            or (
+                (route.get("provider") != "ollama" or route.get("location") != "local")
+                and route.get("model_digest") is not None
+            )
+        ):
+            return "invalid_route_identity"
     return ""
 
 
@@ -6326,7 +6385,6 @@ def _machine_calibration_case_error(
         != ["primary", "challenger"]
         or not isinstance(models, list)
         or len(models) != 3
-        or scorer_identity.get("model") != models[2]
         or causal_error
     ):
         return "machine_calibration_consensus_invalid"
@@ -6836,7 +6894,6 @@ def validate_machine_scorer_calibration_artifact(
             != ["primary", "challenger"]
             or not isinstance(models, list)
             or len(models) != 3
-            or scorer_identity.get("model") != models[2]
             or not isinstance(scores, Mapping)
             or set(scores) != set(ANSWER_DIMENSIONS)
             or any(not _finite_unit_score(scores.get(name)) for name in ANSWER_DIMENSIONS)

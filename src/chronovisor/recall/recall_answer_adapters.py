@@ -1,4 +1,4 @@
-"""Built-in Ollama answer runner/scorer for autonomous Recall benchmarks."""
+"""Built-in runtime-routed answer runner/scorer for Recall benchmarks."""
 
 from __future__ import annotations
 
@@ -14,6 +14,10 @@ RUNNER_SYSTEM = (
     "Answer the user's question using only the supplied Recall context. "
     "If the context is insufficient, say so. Return the registered JSON object."
 )
+IDENTITY_SCHEMA = "chronovisor.recall-answer-adapter-identity.v2"
+RUNNER_RUNTIME_ROLE = "recall.answer.runner"
+SCORER_RUNTIME_ROLE = "recall.answer.scorer"
+_RUNTIME_ROLES = (RUNNER_RUNTIME_ROLE, SCORER_RUNTIME_ROLE)
 SCORER_SYSTEM = (
     "Score whether the candidate answer is supported by the frozen independent "
     "reference evidence. Do not reward lexical similarity alone. Return the "
@@ -48,32 +52,61 @@ SAMPLER_SHA256 = canonical_sha256(
 def builtin_answer_adapter_identities(
     *, rubric_sha256: str, evidence_manifest_sha256: str
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    config = load_decision_router_config()
-    runner_model = config.primary_model
-    scorer_model = config.tie_break_model
-    digests = ollama.model_digests([runner_model, scorer_model])
-    runner_digest = str(digests.get(runner_model) or "")
-    scorer_digest = str(digests.get(scorer_model) or "")
+    routes = ollama.runtime_generation_routes(_RUNTIME_ROLES)
     if (
-        not runner_digest
-        or not scorer_digest
-        or runner_model == scorer_model
-        or runner_digest == scorer_digest
+        tuple(route.role for route in routes) != _RUNTIME_ROLES
+        or not all(route.structured_output for route in routes)
+        or len({(route.provider, route.model, route.location) for route in routes}) != 2
+    ):
+        raise RuntimeError("independent answer runner/scorer models unavailable")
+    local_models = list(
+        dict.fromkeys(
+            route.model
+            for route in routes
+            if route.provider == "ollama" and route.location == "local"
+        )
+    )
+    digests = ollama.model_digests(local_models) if local_models else {}
+
+    def route_identity(route: ollama.RuntimeGenerationRoute) -> dict[str, Any]:
+        digest = (
+            str(digests.get(route.model) or "")
+            if route.provider == "ollama" and route.location == "local"
+            else None
+        )
+        if digest == "":
+            raise RuntimeError("independent answer runner/scorer models unavailable")
+        return {
+            "role": route.role,
+            "provider": route.provider,
+            "model": route.model,
+            "location": route.location,
+            "model_digest": digest,
+        }
+
+    runner_route = route_identity(routes[0])
+    scorer_route = route_identity(routes[1])
+    if runner_route["model_digest"] is not None and (
+        runner_route["model_digest"] == scorer_route["model_digest"]
     ):
         raise RuntimeError("independent answer runner/scorer models unavailable")
     runner = {
-        "runner_id": "builtin-ollama-answer-runner-v1",
-        "model": runner_model,
-        "model_digest": runner_digest,
+        "identity_schema": IDENTITY_SCHEMA,
+        "runner_id": "builtin-runtime-answer-runner-v2",
+        "route_identity": runner_route,
+        "model": runner_route["model"],
+        "model_digest": runner_route["model_digest"],
         "system_sha256": canonical_sha256(RUNNER_SYSTEM),
         "sampler_sha256": SAMPLER_SHA256,
         "policy_sha256": RUNNER_POLICY_SHA256,
     }
     scorer = {
-        "scorer_id": "builtin-ollama-evidence-scorer-v1",
-        "version": "1",
-        "model": scorer_model,
-        "model_digest": scorer_digest,
+        "identity_schema": IDENTITY_SCHEMA,
+        "scorer_id": "builtin-runtime-evidence-scorer-v2",
+        "version": "2",
+        "route_identity": scorer_route,
+        "model": scorer_route["model"],
+        "model_digest": scorer_route["model_digest"],
         "system_sha256": canonical_sha256(SCORER_SYSTEM),
         "sampler_sha256": SAMPLER_SHA256,
         "policy_sha256": SCORER_POLICY_SHA256,
@@ -87,24 +120,29 @@ def builtin_answer_adapter_identities(
 
 
 def _chat_json(
-    *, model: str, messages: list[dict[str, str]], schema: Mapping[str, Any], seed: int
+    *,
+    runtime_role: str,
+    messages: list[dict[str, str]],
+    schema: Mapping[str, Any],
+    seed: int,
 ) -> dict[str, Any]:
     config = load_decision_router_config()
-    with ollama.model_resource_lease(exclusive=True):
-        raw = ollama.chat(
-            messages,
-            model=model,
-            format=dict(schema),
-            num_ctx=config.num_ctx,
-            num_predict=config.num_predict,
-            keep_alive="0",
-            read_timeout_ms=config.read_timeout_ms,
-            max_output_chars=config.max_output_chars,
-            temperature=0,
-            seed=seed,
-            think=False,
-        )
-    value = json.loads(raw)
+    response = ollama.runtime_structured_chat(
+        messages,
+        runtime_role=runtime_role,
+        source_data_class="raw",
+        source_sensitivity="high",
+        format=dict(schema),
+        num_ctx=config.num_ctx,
+        num_predict=config.num_predict,
+        keep_alive="0",
+        read_timeout_ms=config.read_timeout_ms,
+        max_output_chars=config.max_output_chars,
+        temperature=0,
+        seed=seed,
+        think=False,
+    )
+    value = json.loads(response.content)
     if not isinstance(value, dict):
         raise ValueError("answer adapter returned a non-object")
     return value
@@ -118,7 +156,7 @@ def builtin_ollama_answer_runner(
     )
     seed = int(generation.get("seed") or 0)
     value = _chat_json(
-        model=str(identity["model"]),
+        runtime_role=RUNNER_RUNTIME_ROLE,
         messages=[
             {"role": "system", "content": RUNNER_SYSTEM},
             {
@@ -169,7 +207,7 @@ def builtin_ollama_answer_scorer(
     )
     seed = int(scoring.get("seed") or 0)
     dimensions = _chat_json(
-        model=str(identity["model"]),
+        runtime_role=SCORER_RUNTIME_ROLE,
         messages=[
             {"role": "system", "content": SCORER_SYSTEM},
             {
@@ -196,6 +234,9 @@ def builtin_ollama_answer_scorer(
 
 
 __all__ = [
+    "IDENTITY_SCHEMA",
+    "RUNNER_RUNTIME_ROLE",
+    "SCORER_RUNTIME_ROLE",
     "builtin_answer_adapter_identities",
     "builtin_ollama_answer_runner",
     "builtin_ollama_answer_scorer",

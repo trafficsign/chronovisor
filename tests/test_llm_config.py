@@ -506,6 +506,8 @@ def test_repository_example_has_representative_local_role_map() -> None:
         "search.rerank",
         "librarian.review",
         "librarian.review.challenger",
+        "recall.answer.runner",
+        "recall.answer.scorer",
         "classification.primary",
         "classification.challenger",
         "classification.tie_break",
@@ -529,3 +531,6 @@ def test_repository_example_has_representative_local_role_map() -> None:
     librarian = config.roles["librarian.review"]
     challenger = config.roles["librarian.review.challenger"]
     assert librarian.model != challenger.model
+    answer_runner = config.roles["recall.answer.runner"]
+    answer_scorer = config.roles["recall.answer.scorer"]
+    assert answer_runner.model != answer_scorer.model

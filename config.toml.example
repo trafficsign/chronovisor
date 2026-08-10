@@ -95,6 +95,16 @@ capability = "generation"
 provider = "local"
 model = "gpt-oss:20b"
 
+[llm.roles."recall.answer.runner"]
+capability = "generation"
+provider = "local"
+model = "maxwell1500/ornith-35b:Q5_K_M"
+
+[llm.roles."recall.answer.scorer"]
+capability = "generation"
+provider = "local"
+model = "gemma4:26b"
+
 # Each classification vote remains an independently replaceable single route.
 [llm.roles."classification.primary"]
 capability = "generation"
@@ -173,6 +183,16 @@ model = "gpt-oss:20b"
 # provider = "openai"
 # model = "gpt-5"
 #
+# [llm.roles."recall.answer.runner"]
+# capability = "generation"
+# provider = "openai"
+# model = "gpt-5-mini"
+#
+# [llm.roles."recall.answer.scorer"]
+# capability = "generation"
+# provider = "openai"
+# model = "gpt-5"
+#
 # [llm.roles."search.semantic"]
 # capability = "embedding"
 # provider = "openai"
@@ -182,6 +202,14 @@ model = "gpt-oss:20b"
 # [[llm.egress_opt_in]]
 # role = "librarian.review"
 # data_class = "system"
+#
+# [[llm.egress_opt_in]]
+# role = "recall.answer.runner"
+# data_class = "raw"
+#
+# [[llm.egress_opt_in]]
+# role = "recall.answer.scorer"
+# data_class = "raw"
 #
 # Hybrid note: Anthropic/Claude, DeepSeek, Kimi, and Z.AI/GLM profiles currently
 # advertise generation only. Route `search.semantic` to local Ollama or a
