@@ -31,9 +31,10 @@ tie_break_model = "override-tie"
 
     config = load_research_config(path)
 
-    assert config.planner_model != "override-planner"
-    assert config.challenge_model != "override-challenge"
-    assert config.tie_break_model != "override-tie"
+    assert all(
+        not hasattr(config, key)
+        for key in ("planner_model", "challenge_model", "tie_break_model")
+    )
 
 
 def test_invalid_consolidation_mutation_mode_is_blocked(tmp_path) -> None:

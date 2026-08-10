@@ -268,7 +268,7 @@ def run_deep_dive_v2(
             max_iterations=max(1, min(5, int(max_iterations))),
         ),
     )
-    planner = LocalPlanner(selected.planner_model) if use_llm else DeterministicPlanner()
+    planner = LocalPlanner() if use_llm else DeterministicPlanner()
     store = ResearchStore()
     summary = run_research(
         query,

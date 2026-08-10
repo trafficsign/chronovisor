@@ -93,9 +93,6 @@ class CompactionConfig:
 class ResearchConfig:
     enabled: bool = False
     mode: str = "off"
-    planner_model: str = "maxwell1500/ornith-35b:Q5_K_M"
-    challenge_model: str = "gpt-oss:20b"
-    tie_break_model: str = "gemma4:26b"
     max_depth: int = 1
     budgets: ResearchBudget = field(default_factory=ResearchBudget)
     resources: ResourceConfig = field(default_factory=ResourceConfig)

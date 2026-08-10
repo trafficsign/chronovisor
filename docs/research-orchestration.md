@@ -110,9 +110,6 @@ Replay/Holdout and local consensus remain the adoption gates.
 [research]
 enabled = true
 mode = "explicit"
-planner_model = "maxwell1500/ornith-35b:Q5_K_M"
-challenge_model = "gpt-oss:20b"
-tie_break_model = "gemma4:26b"
 
 [research.web]
 adapter_enabled = true
