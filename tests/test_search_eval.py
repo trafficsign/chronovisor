@@ -21,6 +21,8 @@ from chronovisor.decision.decision_schema_manifest import production_decision_sc
 from chronovisor.ingest.convergence import CycleBudget
 from chronovisor.ops import golden_expand
 from chronovisor.search import search_eval
+from tests.semantic_hold_support import semantic_authority
+from tests.test_decision_authority import _vote_audit
 
 
 def test_frontier_label_prompt_reexports_decision_implementation() -> None:
@@ -78,27 +80,12 @@ def authority(lane: str, marker: str = "a") -> dict:
     schema_name = (
         "search_label" if lane == search_eval.SEARCH_LABEL_LANE else "generic_decision"
     )
-    router = {
-        "source": "adopted_artifact",
-        "artifact_sha256": marker * 64,
-        "error": None,
-        "models": ["primary", "challenger", "tie"],
-    }
-    return {
-        "source": "adopted_local_consensus",
-        "authority_version": 1,
-        "lane": lane,
-        "lane_contract_sha256": marker * 64,
-        "lane_contract_manifest_sha256": marker * 64,
-        "lane_contract_case_manifest_sha256": marker * 64,
-        "policy": {
-            "kind": "local_batch",
-            "schema_name": schema_name,
-            "mode": "enabled",
-            "error": None,
-        },
-        "router": router,
-    }
+    return semantic_authority(
+        lane,
+        artifact_sha256=marker * 64,
+        kind="local_batch",
+        schema_name=schema_name,
+    )
 
 
 def authority_review(lane: str, marker: str = "a", **values) -> dict:
@@ -112,24 +99,22 @@ def authority_review(lane: str, marker: str = "a", **values) -> dict:
         "local_consensus": {
             "status": "agreed",
             "ok": True,
+            "conservative_veto_fired": False,
+            "conservative_veto_bypassed_by_lane_policy": False,
+            "dissent_effect_class": None,
+            "quorum_safety_policy_version": expected[
+                "quorum_safety_policy_version"
+            ],
             "agreement_sha256": marker * 64,
             "failure_class": None,
             "quarantine_reason": None,
+            "num_ctx": 16_384,
+            "residency": {},
             "votes": [
-                {
-                    "model": "primary",
-                    "role": "primary",
-                    "valid": True,
-                    "signature_sha256": marker * 64,
-                    "invalid_reason": None,
-                },
-                {
-                    "model": "challenger",
-                    "role": "challenger",
-                    "valid": True,
-                    "signature_sha256": marker * 64,
-                    "invalid_reason": None,
-                },
+                _vote_audit("primary", expected["router"]["routes"][0], marker * 64),
+                _vote_audit(
+                    "challenger", expected["router"]["routes"][1], marker * 64
+                ),
             ],
         },
     }

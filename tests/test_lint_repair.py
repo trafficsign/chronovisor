@@ -9,11 +9,13 @@ from pathlib import Path
 import pytest
 
 from chronovisor.core.frontmatter import parse as parse_frontmatter
+from chronovisor.decision.decision_authority import AUTHORITY_VERSION
 from chronovisor.decision.decision_router import canonical_agreement_signature
 from chronovisor.decision.decision_schema_manifest import production_decision_schemas
 from chronovisor.ingest.convergence import ConvergenceStore, CycleBudget, RetryPolicy
 from chronovisor.ops import lint_repair
 from tests.semantic_hold_support import semantic_authority, semantic_review
+from tests.test_decision_authority import _vote_audit
 
 NOW = datetime(2026, 7, 10, 12, 0, tzinfo=UTC)
 VALID_TAGS = ["d/tools-config", "t/howto", "s/evergreen"]
@@ -34,54 +36,33 @@ def isolate_decision_authority_lock(
 
 
 def _semantic_authority(digest: str) -> dict:
-    return {
-        "source": "adopted_local_consensus",
-        "authority_version": 1,
-        "lane": lint_repair.TAG_REPAIR_DECISION_LANE,
-        "lane_contract_sha256": "1" * 64,
-        "lane_contract_manifest_sha256": "2" * 64,
-        "lane_contract_case_manifest_sha256": "3" * 64,
-        "policy": {
-            "kind": "consensus",
-            "schema_name": "lint_tag_repair",
-            "mode": "enabled",
-            "error": None,
-        },
-        "router": {
-            "source": "adopted_artifact",
-            "artifact_sha256": digest,
-            "error": None,
-            "models": ["primary", "challenger", "tie"],
-        },
-    }
+    return semantic_authority(
+        lint_repair.TAG_REPAIR_DECISION_LANE,
+        artifact_sha256=digest,
+        schema_name="lint_tag_repair",
+    )
 
 
 def _local_consensus_proof(review: dict, authority: dict) -> dict:
     schema = production_decision_schemas()[authority["policy"]["schema_name"]]
     signature = canonical_agreement_signature(review, schema=schema)
     agreement = hashlib.sha256(signature.encode("utf-8")).hexdigest()
-    models = authority["router"]["models"]
+    routes = authority["router"]["routes"]
     return {
         "status": "agreed",
         "ok": True,
+        "conservative_veto_fired": False,
+        "conservative_veto_bypassed_by_lane_policy": False,
+        "dissent_effect_class": None,
+        "quorum_safety_policy_version": authority["quorum_safety_policy_version"],
         "agreement_sha256": agreement,
         "failure_class": None,
         "quarantine_reason": None,
+        "num_ctx": 16_384,
+        "residency": {},
         "votes": [
-            {
-                "role": "primary",
-                "model": models[0],
-                "valid": True,
-                "signature_sha256": agreement,
-                "invalid_reason": None,
-            },
-            {
-                "role": "challenger",
-                "model": models[1],
-                "valid": True,
-                "signature_sha256": agreement,
-                "invalid_reason": None,
-            },
+            _vote_audit("primary", routes[0], agreement),
+            _vote_audit("challenger", routes[1], agreement),
         ],
     }
 
@@ -487,7 +468,7 @@ def test_durable_frontier_verdict_is_reused_after_pre_apply_budget_failure(
     assert artifact_payload["schema_version"] == 2
     assert artifact_payload["authority"] == {
         "source": "injected_reviewer_boundary",
-        "authority_version": 1,
+        "authority_version": AUTHORITY_VERSION,
         "lane": lint_repair.TAG_REPAIR_DECISION_LANE,
     }
     assert page_path.read_text(encoding="utf-8") == original

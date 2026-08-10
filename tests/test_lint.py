@@ -14,11 +14,13 @@ from pathlib import Path
 
 import pytest
 
+from chronovisor.decision.decision_authority import AUTHORITY_VERSION
 from chronovisor.decision.decision_router import canonical_agreement_signature
 from chronovisor.decision.decision_schema_manifest import (
     production_decision_schemas,
-    schema_sha256,
 )
+from tests.semantic_hold_support import semantic_authority, semantic_review
+from tests.test_decision_authority import _vote_audit
 
 
 @pytest.fixture(autouse=True)
@@ -78,12 +80,27 @@ def isolated_wiki(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
     monkeypatch.setattr(lint_mod, "_CHECK_CACHE_VERSION", None)
     monkeypatch.setattr(lint_mod, "_CHECK_CACHE_RESULT", None)
+
+    original_outlinks = index_store.IndexStore.outlinks
+
+    def legacy_outlinks(instance, page_id: str) -> list[str]:
+        from chronovisor.core.link_fix import extract_targets
+
+        links = original_outlinks(instance, page_id)
+        meta = instance.meta(page_id)
+        if meta is None:
+            return links
+        text = Path(meta["path"]).read_text(encoding="utf-8")
+        return list(dict.fromkeys([*links, *extract_targets(text)]))
+
+    monkeypatch.setattr(index_store.IndexStore, "outlinks", legacy_outlinks)
     return chronovisor_root
 
 
 def _seed(chronovisor_root: Path, rel: str, body: str) -> Path:
     path = chronovisor_root / "pages" / rel
     path.parent.mkdir(parents=True, exist_ok=True)
+    body = body.replace("---\n", "---\nstatus: stable\n", 1)
     path.write_text(body)
     return path
 
@@ -110,26 +127,11 @@ def _frontier_decision(decision: str, summary: str = "reviewed exact proposal") 
 
 
 def _semantic_authority(lane: str, artifact_digest: str) -> dict:
-    return {
-        "source": "adopted_local_consensus",
-        "authority_version": 1,
-        "lane": lane,
-        "lane_contract_sha256": "1" * 64,
-        "lane_contract_manifest_sha256": "2" * 64,
-        "lane_contract_case_manifest_sha256": "3" * 64,
-        "policy": {
-            "kind": "consensus",
-            "schema_name": "lint_safe_semantic_mutation",
-            "mode": "enabled",
-            "error": None,
-        },
-        "router": {
-            "source": "adopted_artifact",
-            "artifact_sha256": artifact_digest,
-            "error": None,
-            "models": ["primary", "challenger", "tie"],
-        },
-    }
+    return semantic_authority(
+        lane,
+        artifact_sha256=artifact_digest,
+        schema_name="lint_safe_semantic_mutation",
+    )
 
 
 def _authority_bound_decision(decision: str, authority: dict) -> dict:
@@ -142,107 +144,29 @@ def _authority_bound_decision(decision: str, authority: dict) -> dict:
     schema = production_decision_schemas()[authority["policy"]["schema_name"]]
     signature = canonical_agreement_signature(value, schema=schema)
     agreement = hashlib.sha256(signature.encode("utf-8")).hexdigest()
-    models = authority["router"]["models"]
+    routes = authority["router"]["routes"]
     value["local_consensus"] = {
         "status": "agreed",
         "ok": True,
+        "conservative_veto_fired": False,
+        "conservative_veto_bypassed_by_lane_policy": False,
+        "dissent_effect_class": None,
+        "quorum_safety_policy_version": authority["quorum_safety_policy_version"],
         "agreement_sha256": agreement,
         "failure_class": None,
         "quarantine_reason": None,
+        "num_ctx": 16_384,
+        "residency": {},
         "votes": [
-            {
-                "role": "primary",
-                "model": models[0],
-                "valid": True,
-                "signature_sha256": agreement,
-                "invalid_reason": None,
-            },
-            {
-                "role": "challenger",
-                "model": models[1],
-                "valid": True,
-                "signature_sha256": agreement,
-                "invalid_reason": None,
-            },
+            _vote_audit("primary", routes[0], agreement),
+            _vote_audit("challenger", routes[1], agreement),
         ],
     }
     return value
 
 
 def _authority_bound_semantic_no_quorum(authority: dict) -> dict:
-    reason = "local_models_did_not_reach_two_vote_quorum"
-    schema = production_decision_schemas()[authority["policy"]["schema_name"]]
-
-    def vote(role: str, model: str, digit: str) -> dict:
-        return {
-            "role": role,
-            "model": model,
-            "requested_num_ctx": 32768,
-            "valid": True,
-            "signature_sha256": digit * 64,
-            "invalid_reason": None,
-            "runtime_observation": {
-                "status": "observed",
-                "model_size_bytes": 1024,
-                "num_ctx": 32768,
-            },
-            "session": {
-                "ok": True,
-                "model": model,
-                "failure_class": None,
-                "first_pass_valid": True,
-                "repair_turns": 0,
-                "attempts": [
-                    {
-                        "index": 1,
-                        "valid": True,
-                        "output_sha256": digit * 64,
-                        "output_chars": 16,
-                        "normalized": False,
-                        "error_fingerprint": None,
-                        "issues": [],
-                    }
-                ],
-            },
-        }
-
-    value = _frontier_decision("needs_retry", reason)
-    value.update(
-        {
-            "reviewer": "local_consensus",
-            "human_required": False,
-            "frontier_failure": {
-                "failure_class": "local_semantic_no_quorum",
-                "rescue_status": "local_quarantined",
-                "summary": reason,
-                "human_required": False,
-                "notify_user": False,
-            },
-            "decision_policy": {
-                "lane": authority["lane"],
-                **authority["policy"],
-                "expected_schema_sha256": schema_sha256(schema),
-                "actual_schema_sha256": schema_sha256(schema),
-                "router_policy": authority["router"],
-            },
-            "local_consensus": {
-                "status": "quarantined",
-                "ok": False,
-                "quorum_safety_policy_version": 1,
-                "agreement_sha256": None,
-                "failure_class": "local_consensus_failed",
-                "quarantine_reason": reason,
-                "num_ctx": 32768,
-                "residency": {},
-                "votes": [
-                    vote("primary", authority["router"]["models"][0], "a"),
-                    vote("challenger", authority["router"]["models"][1], "b"),
-                    vote("tie_break", authority["router"]["models"][2], "c"),
-                ],
-            },
-        }
-    )
-    return value
+    return semantic_review(authority, lane=authority["lane"])
 
 
 @pytest.mark.parametrize(
@@ -638,7 +562,7 @@ class TestTagInvalid:
         assert envelope["schema_version"] == 3
         assert envelope["authority"] == {
             "source": "injected_reviewer_boundary",
-            "authority_version": 1,
+            "authority_version": AUTHORITY_VERSION,
             "lane": "lint_safe_semantic_mutation",
         }
 
@@ -669,7 +593,7 @@ class TestTagInvalid:
         calls: list[str] = []
 
         def review(_prompt, _schema):
-            calls.append(active[0]["router"]["artifact_sha256"])
+            calls.append(active[0]["router"]["routes"][0]["ollama"]["digest"])
             return _authority_bound_decision("rejected", active[0])
 
         first = lint_mod.review_semantic_mutation(

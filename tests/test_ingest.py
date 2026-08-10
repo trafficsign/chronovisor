@@ -5046,8 +5046,28 @@ class TestRunIngestPartialFailure:
         authority_sha256: str | None,
         semantic_defer: bool,
     ) -> None:
-        from chronovisor.core import jobs
+        from chronovisor.core import durable_state, jobs
         from chronovisor.ingest import ingest
+        from tests.semantic_hold_support import semantic_authority
+
+        current_authority = semantic_authority(
+            "ingest_reconciliation",
+            artifact_sha256="d" * 64,
+            schema_name="ingest_reconciliation",
+        )
+        expected_authority_sha256 = durable_state.canonical_sha256(current_authority)
+        resolve_authority = ingest._current_ingest_review_authority
+
+        def current_authority_for_review(*, reviewer):
+            if reviewer is None:
+                return current_authority, None
+            return resolve_authority(reviewer=reviewer)
+
+        monkeypatch.setattr(
+            ingest,
+            "_current_ingest_review_authority",
+            current_authority_for_review,
+        )
 
         plan = [
             {
@@ -5098,7 +5118,12 @@ class TestRunIngestPartialFailure:
                     ],
                 },
             }
-            if authority_sha256 is not None:
+            if authority_sha256 == "d" * 64:
+                review["decision_policy"] = {
+                    **current_authority["policy"],
+                    "router_policy": current_authority["router"],
+                }
+            elif authority_sha256 is not None:
                 review["decision_policy"] = {
                     "router_policy": {"artifact_sha256": authority_sha256}
                 }
@@ -5119,7 +5144,7 @@ class TestRunIngestPartialFailure:
         if semantic_defer:
             assert str(finished.error) == (
                 "local consensus semantic no quorum "
-                f"[authority_sha256={authority_sha256}]: "
+                f"[authority_sha256={expected_authority_sha256}]: "
                 "local_models_did_not_reach_two_vote_quorum"
             )
             assert "authority unavailable" not in str(finished.error)

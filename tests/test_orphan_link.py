@@ -15,6 +15,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from chronovisor.decision.decision_authority import AUTHORITY_VERSION
 from chronovisor.ops import orphan_link as ol_mod
 from chronovisor.ops.orphan_link import (
     OrphanReport,
@@ -385,7 +386,9 @@ def test_orphan_no_quorum_is_cached_until_authority_epoch_changes(
     assert changed_authority["results"][0]["status"] == "quarantined"
     assert calls == 2
     held_authorities = {
-        item["result"]["semantic_hold"]["authority"]["router"]["artifact_sha256"]
+        item["result"]["semantic_hold"]["authority"]["router"]["routes"][0][
+            "ollama"
+        ]["digest"]
         for item in state.list_items(lane=ol_mod.DECISION_LANE)
         if isinstance(item.get("result"), dict)
         and isinstance(item["result"].get("semantic_hold"), dict)
@@ -943,7 +946,7 @@ def test_frontier_approval_is_not_overridden_by_confidence_metadata(
     assert durable["schema_version"] == 2
     assert durable["authority"] == {
         "source": "injected_reviewer_boundary",
-        "authority_version": 1,
+        "authority_version": AUTHORITY_VERSION,
         "lane": "orphan_link",
     }
 
@@ -957,7 +960,7 @@ def test_orphan_effect_fails_closed_when_authority_changes_before_apply(
     state = _autonomous_state(tmp_path)
     authority = {
         "source": "injected_reviewer_boundary",
-        "authority_version": 1,
+        "authority_version": AUTHORITY_VERSION,
         "lane": "orphan_link",
     }
     calls = 0

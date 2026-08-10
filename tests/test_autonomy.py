@@ -16,6 +16,7 @@ from chronovisor.decision.decision_schema_manifest import production_decision_sc
 from chronovisor.ingest.convergence import ConvergenceStore, CycleBudget, RetryPolicy
 from chronovisor.ops import autonomy
 from tests.semantic_hold_support import semantic_authority, semantic_review
+from tests.test_decision_authority import _vote_audit
 
 NOW = datetime(2026, 7, 10, 12, 0, tzinfo=UTC)
 
@@ -79,26 +80,11 @@ def _authority(lane: str, *, artifact_sha256: str = "a" * 64) -> dict:
         if lane == autonomy.DUPLICATE_FRONTIER_LANE
         else "retention"
     )
-    return {
-        "source": "adopted_local_consensus",
-        "authority_version": 1,
-        "lane": lane,
-        "lane_contract_sha256": "b" * 64,
-        "lane_contract_manifest_sha256": "c" * 64,
-        "lane_contract_case_manifest_sha256": "d" * 64,
-        "policy": {
-            "kind": "consensus",
-            "schema_name": schema_name,
-            "mode": "enabled",
-            "error": None,
-        },
-        "router": {
-            "source": "adopted_artifact",
-            "artifact_sha256": artifact_sha256,
-            "error": None,
-            "models": ["primary", "challenger", "tie-break"],
-        },
-    }
+    return semantic_authority(
+        lane,
+        artifact_sha256=artifact_sha256,
+        schema_name=schema_name,
+    )
 
 
 def _decision_policy(authority: dict) -> dict:
@@ -112,28 +98,22 @@ def _local_consensus_proof(review: dict, authority: dict) -> dict:
     schema = production_decision_schemas()[authority["policy"]["schema_name"]]
     signature = canonical_agreement_signature(review, schema=schema)
     agreement = hashlib.sha256(signature.encode("utf-8")).hexdigest()
-    models = authority["router"]["models"]
+    routes = authority["router"]["routes"]
     return {
         "status": "agreed",
         "ok": True,
+        "conservative_veto_fired": False,
+        "conservative_veto_bypassed_by_lane_policy": False,
+        "dissent_effect_class": None,
+        "quorum_safety_policy_version": authority["quorum_safety_policy_version"],
         "agreement_sha256": agreement,
         "failure_class": None,
         "quarantine_reason": None,
+        "num_ctx": 16_384,
+        "residency": {},
         "votes": [
-            {
-                "role": "primary",
-                "model": models[0],
-                "valid": True,
-                "signature_sha256": agreement,
-                "invalid_reason": None,
-            },
-            {
-                "role": "challenger",
-                "model": models[1],
-                "valid": True,
-                "signature_sha256": agreement,
-                "invalid_reason": None,
-            },
+            _vote_audit("primary", routes[0], agreement),
+            _vote_audit("challenger", routes[1], agreement),
         ],
     }
 
