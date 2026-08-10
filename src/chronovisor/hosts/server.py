@@ -3,9 +3,8 @@
 import contextlib
 import hashlib
 import json
-import re
 from collections.abc import Callable
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +13,7 @@ try:
 except ModuleNotFoundError:
     from mcp.server.mcpserver import Context
     from mcp.server.mcpserver import MCPServer as FastMCP
+from chronovisor.core import activity_log, runtime_status
 from chronovisor.core.frontmatter import parse as _frontmatter_parse
 from chronovisor.core.index_store import (
     PAGE_RESERVED_FILENAMES,
@@ -23,8 +23,8 @@ from chronovisor.core.index_store import (
     stable_indexed_document_path,
 )
 from chronovisor.core.store import (
+    ACTIVITY_FILE,
     CHRONOVISOR_ROOT,
-    LOG_FILE,
     RAW_DIR,
     init_chronovisor,
     okf_runtime_operation,
@@ -300,15 +300,10 @@ def chronovisor_log(limit: int = 20) -> str:
     Args:
         limit: Number of recent log entries to return
     """
-    if not LOG_FILE.exists():
-        return json.dumps({"entries": []})
-
-    lines = LOG_FILE.read_text().splitlines()
-    # Skip frontmatter and header
-    log_lines = [line for line in lines if line.startswith("- ")]
-    recent = log_lines[-limit:] if len(log_lines) > limit else log_lines
-
-    return json.dumps({"entries": recent}, ensure_ascii=False)
+    return json.dumps(
+        {"entries": activity_log.read_activity(ACTIVITY_FILE, limit=limit)},
+        ensure_ascii=False,
+    )
 
 
 def _raw_defer_counts() -> tuple[int, int, int]:
@@ -413,16 +408,19 @@ def chronovisor_status() -> str:
 
 
 def _append_log(message: str) -> None:
-    """Append an entry to log.md."""
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
-    with open(LOG_FILE, "a") as f:
-        f.write(f"\n- [{timestamp}] {message}")
+    """Append one validated operational activity record."""
 
-    # Update log frontmatter
-    content = LOG_FILE.read_text()
-    today = date.today().isoformat()
-    content = re.sub(r"updated: .+", f"updated: {today}", content, count=1)
-    LOG_FILE.write_text(content)
+    activity_log.append_activity(
+        message,
+        source="mcp",
+        level=activity_log_level(message),
+        root=CHRONOVISOR_ROOT,
+        path=ACTIVITY_FILE,
+    )
+
+
+def activity_log_level(message: str) -> str:
+    return runtime_status.classify_log_message(message)
 
 
 def _append_pull_log(record: dict) -> bool:
@@ -1544,10 +1542,10 @@ def chronovisor_provenance(page: str) -> str:
 
     # Check log for ingest records
     log_entries = []
-    if LOG_FILE.exists():
-        for line in LOG_FILE.read_text().splitlines():
-            if page in line and "ingest" in line:
-                log_entries.append(line.strip())
+    for row in activity_log.iter_activity(ACTIVITY_FILE):
+        message = row["message"]
+        if page in message and "ingest" in message:
+            log_entries.append(message)
 
     return json.dumps(
         {

@@ -22,7 +22,7 @@ from urllib.parse import parse_qsl, urlparse
 
 import httpx
 
-from chronovisor.core import index_store, llm_config, runtime_status
+from chronovisor.core import activity_log, index_store, llm_config, runtime_status
 from chronovisor.core.ollama import (
     OLLAMA_URL,
     ingest_model,
@@ -36,8 +36,8 @@ from chronovisor.core.runtime_config import (
 )
 from chronovisor.core.sealed_artifact_decoder import schema_matches
 from chronovisor.core.store import (
+    ACTIVITY_FILE,
     CHRONOVISOR_ROOT,
-    LOG_FILE,
     init_chronovisor,
     okf_runtime_operation,
 )
@@ -63,13 +63,12 @@ from chronovisor.recall import recall_runtime
 from chronovisor.recall.recall_auditor import load_audit_policy
 from chronovisor.recall.recall_improvement import PROPOSER_RUNTIME_ROLES
 
-LOG_LINE_RE = re.compile(r"^- \[(?P<time>[^\]]+)\] (?P<message>.*)$")
 RAW_DATE_RE = re.compile(r"(?:^|[^0-9])(?P<stamp>20\d{6})(?:[^0-9]|$)")
 SEMANTIC_PROJECTION_CHILD_RE = re.compile(
     r"^semantic-(?P<projection>[0-9a-f]{64})-child-[0-9]{8}-[0-9a-f]{64}\.md$"
 )
 LOG_PAGE_CHANGE_RE = re.compile(
-    r"^- \[(?P<time>[^\]]+)\] ingest \| (?P<kind>created|updated) (?P<page>.+)$"
+    r"^ingest \| (?P<kind>created|updated) (?P<page>.+)$"
 )
 SELF_HEAL_PENDING_STATUSES = {
     "pending_local_repair",
@@ -989,21 +988,7 @@ def _merge_metric_history(
 
 
 def _recent_log_events(limit: int = 80) -> list[dict[str, Any]]:
-    events: list[dict[str, Any]] = []
-    for line in runtime_status.tail_text_lines(LOG_FILE, limit=limit):
-        match = LOG_LINE_RE.match(line)
-        if not match:
-            continue
-        message = match.group("message")
-        events.append(
-            {
-                "timestamp": match.group("time"),
-                "level": runtime_status.classify_log_message(message),
-                "message": message,
-                "source": "log.md",
-            }
-        )
-    return events
+    return [dict(row) for row in activity_log.read_activity(ACTIVITY_FILE, limit=limit)]
 
 
 def _read_json_file(path: Path) -> dict[str, Any] | None:
@@ -1690,15 +1675,11 @@ def _save_history_snapshot(
         deferred_statuses=deferred_statuses,
     )
 
-    try:
-        log_lines = LOG_FILE.read_text(encoding="utf-8").splitlines()
-    except Exception:
-        log_lines = []
-    for line in log_lines:
-        match = LOG_PAGE_CHANGE_RE.match(line)
+    for activity in activity_log.iter_activity(ACTIVITY_FILE):
+        match = LOG_PAGE_CHANGE_RE.match(activity["message"])
         if not match:
             continue
-        changed_date = _date_from_value(match.group("time"))
+        changed_date = _date_from_value(activity["timestamp"])
         if changed_date is None or changed_date < start or changed_date > end:
             continue
         row = rows[changed_date.isoformat()]
@@ -1829,7 +1810,7 @@ def _save_history_snapshot(
         "paths": {
             "raw_dir": str(raw_dir),
             "drain_logs": str(logs_dir),
-            "log_file": str(LOG_FILE),
+            "log_file": str(ACTIVITY_FILE),
         },
     }
 
@@ -4312,7 +4293,7 @@ def _local_consensus_materialization_fingerprint() -> str:
 
 def _save_history_materialization_fingerprint(raw_paths: list[Path]) -> str:
     paths = [
-        LOG_FILE,
+        ACTIVITY_FILE,
         orchestrator.STATE_FILE,
         CHRONOVISOR_ROOT / "runtime" / "failures" / "state.json",
     ]
@@ -4797,7 +4778,7 @@ def _snapshot_fixed_source_paths() -> tuple[Path, ...]:
         CHRONOVISOR_ROOT / "recall" / "calibration.json",
         CHRONOVISOR_ROOT / "recall" / "calibration-history.jsonl",
         CHRONOVISOR_ROOT / "config.toml",
-        LOG_FILE,
+        ACTIVITY_FILE,
         orchestrator.STATE_FILE,
         runtime_status.EVENTS_FILE,
         runtime_status.METRICS_FILE,
@@ -5311,7 +5292,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             CHRONOVISOR_ROOT,
             recall_log=recall_runtime.RECALL_LOG_FILE,
             pull_log=recall_runtime.RECALL_PULL_LOG_FILE,
-            activity_log=LOG_FILE,
+            activity_log=ACTIVITY_FILE,
             field_session=str(params.get("session") or ""),
             follow_field_sessions=params.get("follow") == "latest",
             after_seq=max(0, int(params.get("after_seq") or 0))

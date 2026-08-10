@@ -175,7 +175,7 @@ def _validate_index(
                 invalid_entry = True
     if not has_heading:
         issues.append(ConformanceIssue("error", "index_heading_missing", relative_path))
-    if not relative_entry_lines:
+    if not relative_entry_lines and (not root or _has_stable_concept(path.parent)):
         issues.append(ConformanceIssue("error", "index_link_missing", relative_path))
     if invalid_entry:
         issues.append(ConformanceIssue("error", "index_entry_invalid", relative_path))
@@ -188,6 +188,18 @@ def _validate_index(
             )
         )
     return tuple(issues)
+
+
+def _has_stable_concept(pages_root: Path) -> bool:
+    for concept_path in scan_concept_paths(pages_root):
+        try:
+            if parse_document(concept_path.read_bytes()).metadata.get("status") == (
+                "stable"
+            ):
+                return True
+        except (CanonicalDocumentError, OSError):
+            continue
+    return False
 
 
 def _validate_log(path: Path, relative_path: str) -> tuple[ConformanceIssue, ...]:

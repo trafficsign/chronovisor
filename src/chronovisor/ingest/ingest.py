@@ -14,8 +14,8 @@ from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 
+from chronovisor.core import activity_log, page_mutation, runtime_status
 from chronovisor.core import ollama as ollama_runtime
-from chronovisor.core import runtime_status
 from chronovisor.core.canonical_document import (
     CanonicalDocument,
     CanonicalDocumentError,
@@ -46,7 +46,8 @@ from chronovisor.core.ollama import (
 from chronovisor.core.runtime_config import load_ingest_config
 from chronovisor.core.search_types import tokenize
 from chronovisor.core.store import (
-    LOG_FILE,
+    ACTIVITY_FILE,
+    CHRONOVISOR_ROOT,
     PAGES_DIR,
     SYSTEM_DIR,
     all_pages,
@@ -2450,9 +2451,7 @@ def _reserved_system_page_collision_keys() -> frozenset[str]:
     """
 
     from chronovisor.core import store as _wiki
-    from chronovisor.core.page_mutation import CORRECTABLE_SYSTEM_PAGE_IDS
-
-    page_ids = set(CORRECTABLE_SYSTEM_PAGE_IDS)
+    page_ids = set(page_mutation.CORRECTABLE_SYSTEM_PAGE_IDS)
     try:
         page_ids.update(
             resolved.stem
@@ -3260,15 +3259,13 @@ def rollback_ingest_proposal_artifact(
         }
 
     from chronovisor.core.link_fix import atomic_write
-    from chronovisor.core.page_mutation import chronovisor_mutation_lock
-
     def read_optional(item: PreparedIngestOperation) -> str | None:
         return _read_optional_exact_utf8(_revalidate_prepared_path(item))
 
     rolled_back: list[PreparedIngestOperation] = []
     already_rolled_back: list[str] = []
     try:
-        with chronovisor_mutation_lock():
+        with page_mutation.chronovisor_mutation_lock():
             states: dict[str, str] = {}
             for item in planned:
                 try:
@@ -3724,8 +3721,6 @@ def _run_ingest_sharded_review(
     authority: dict[str, Any],
     frontier_budget: "_FrontierCallBudget | None" = None,
 ) -> dict[str, Any]:
-    from chronovisor.core.page_mutation import decision_authority_lock
-
     return _run_ingest_sharded_review_core(
         plan,
         source_key=source_key,
@@ -3741,7 +3736,7 @@ def _run_ingest_sharded_review(
             current_authority=_current_ingest_review_authority,
             authority_error=_ingest_review_authority_error,
             write_and_readback=_write_and_readback_ingest_review_artifact,
-            authority_lock=decision_authority_lock,
+            authority_lock=page_mutation.decision_authority_lock,
         ),
     )
 
@@ -4069,9 +4064,10 @@ def _review_and_apply_ingest_operations(
 
 
 def _rebuild_index() -> None:
-    """Refresh the rebuildable canonical page/backlink projection."""
+    """Refresh both the canonical store and portable pages/index.md."""
 
-    get_store().refresh()
+    with page_mutation.chronovisor_mutation_lock(pages_dir=PAGES_DIR):
+        get_store().refresh()
 
 
 def rebuild_index() -> None:
@@ -4079,7 +4075,7 @@ def rebuild_index() -> None:
 
 
 def _append_log(message: str) -> None:
-    """Append to log.md. Failures are intentionally swallowed.
+    """Append to the operational activity journal. Failures are swallowed.
 
     A dropped log line is recoverable; an exception escaping into the
     ingest pipeline is not. Letting an IO error here propagate would,
@@ -4088,12 +4084,14 @@ def _append_log(message: str) -> None:
     leaving disk pages persisted but raws marked pending, so the next
     tick collides on every page we just created.
     """
-    from datetime import datetime
-
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
     try:
-        with open(LOG_FILE, "a") as f:
-            f.write(f"\n- [{timestamp}] {message}")
+        activity_log.append_activity(
+            message,
+            source="ingest",
+            level=runtime_status.classify_log_message(message),
+            root=CHRONOVISOR_ROOT,
+            path=ACTIVITY_FILE,
+        )
     except Exception:
         pass
 
@@ -4749,11 +4747,9 @@ def _complete_ingest_run(
     if frontier_status == "confirmed_noop":
         # A no-op has no page CAS receipt. Keep the semantic authority epoch
         # fixed through the terminal job transition and raw retirement.
-        from chronovisor.core.page_mutation import decision_authority_lock
-
         confirmed_authority = frontier_result.get("authority")
         confirmed_review = frontier_result.get("review")
-        with decision_authority_lock():
+        with page_mutation.decision_authority_lock():
             current_authority, current_authority_error = (
                 _current_ingest_review_authority(reviewer=frontier_reviewer)
             )

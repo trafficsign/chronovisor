@@ -18,10 +18,10 @@ from functools import wraps
 from pathlib import Path
 from typing import Any
 
-from chronovisor.core import runtime_status
+from chronovisor.core import activity_log, runtime_status
 from chronovisor.core.durable_state import fsync_directory as _fsync_directory
 from chronovisor.core.link_fix import atomic_write
-from chronovisor.core.store import CHRONOVISOR_ROOT, LOG_FILE, RAW_DIR
+from chronovisor.core.store import ACTIVITY_FILE, CHRONOVISOR_ROOT, RAW_DIR
 
 # Config
 INGEST_THRESHOLD = 5  # Trigger ingest after N raw files
@@ -413,13 +413,16 @@ def _raws_are_durably_processed(filenames: list[str]) -> bool:
 
 
 def _orch_log(message: str) -> None:
-    """Best-effort log to LOG_FILE. Failures are swallowed so a wedged log
-    file can't break the orchestrator loop.
+    """Best-effort activity append; a wedged journal cannot break the loop.
     """
     try:
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
-        with open(LOG_FILE, "a") as f:
-            f.write(f"\n- [{timestamp}] {message}")
+        activity_log.append_activity(
+            message,
+            source="orchestrator",
+            level=runtime_status.classify_log_message(message),
+            root=CHRONOVISOR_ROOT,
+            path=ACTIVITY_FILE,
+        )
     except Exception:
         pass
     runtime_status.safe_append_event(

@@ -237,7 +237,7 @@ def repair_known_anchors(
     registry_path = root / "runtime" / "librarian" / "page-registry.json"
     registry_preimage = registry_path.read_bytes() if registry_path.is_file() else None
     try:
-        with chronovisor_mutation_lock():
+        with chronovisor_mutation_lock(pages_dir=root / "pages"):
             for path, original in page_preimages.items():
                 if path.read_bytes() != original:
                     raise RuntimeError(f"stale anchor repair CAS: {path}")
@@ -256,7 +256,7 @@ def repair_known_anchors(
                     f"reviewed anchor repairs remain unresolved: {remaining_known[:3]}"
                 )
     except Exception:
-        with chronovisor_mutation_lock():
+        with chronovisor_mutation_lock(pages_dir=root / "pages"):
             for path, original in page_preimages.items():
                 atomic_write(path, original.decode("utf-8"))
             if registry_preimage is not None:

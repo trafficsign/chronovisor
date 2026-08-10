@@ -105,9 +105,10 @@ def test_runtime_context_derives_paths_and_preserves_default_aliases(
     assert context.model_lab_replay_file == (
         tmp_path / "runtime" / "model-lab" / "replay.jsonl"
     )
-    assert context.index_file == tmp_path / "index.md"
-    assert context.log_file == tmp_path / "log.md"
-    assert context.schema_file == tmp_path / "schema.md"
+    assert context.index_file == tmp_path / "pages" / "index.md"
+    assert context.log_file == tmp_path / "pages" / "log.md"
+    assert context.schema_file == tmp_path / "system" / "schema.md"
+    assert context.activity_file == tmp_path / "runtime" / "activity.jsonl"
     assert store.DEFAULT_CONTEXT.root == store.CHRONOVISOR_ROOT
     assert store.DEFAULT_CONTEXT.raw_dir == store.RAW_DIR
     assert store.DEFAULT_CONTEXT.pages_dir == store.PAGES_DIR
@@ -116,17 +117,20 @@ def test_runtime_context_derives_paths_and_preserves_default_aliases(
     assert store.DEFAULT_CONTEXT.index_file == store.INDEX_FILE
     assert store.DEFAULT_CONTEXT.log_file == store.LOG_FILE
     assert store.DEFAULT_CONTEXT.schema_file == store.SCHEMA_FILE
+    assert store.DEFAULT_CONTEXT.activity_file == store.ACTIVITY_FILE
 
 
-def test_init_chronovisor_no_arg_preserves_legacy_path_seams(
+def test_init_chronovisor_no_arg_uses_final_reserved_paths(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(store, "RAW_DIR", tmp_path / "legacy-raw")
-    monkeypatch.setattr(store, "PAGES_DIR", tmp_path / "legacy-pages")
-    monkeypatch.setattr(store, "SYSTEM_DIR", tmp_path / "legacy-system")
-    monkeypatch.setattr(store, "INDEX_FILE", tmp_path / "legacy-index.md")
-    monkeypatch.setattr(store, "LOG_FILE", tmp_path / "legacy-log.md")
-    monkeypatch.setattr(store, "SCHEMA_FILE", tmp_path / "legacy-schema.md")
+    root = tmp_path / "wiki"
+    monkeypatch.setattr(store, "RAW_DIR", root / "raw")
+    monkeypatch.setattr(store, "PAGES_DIR", root / "pages")
+    monkeypatch.setattr(store, "SYSTEM_DIR", root / "system")
+    monkeypatch.setattr(store, "INDEX_FILE", root / "pages" / "index.md")
+    monkeypatch.setattr(store, "LOG_FILE", root / "pages" / "log.md")
+    monkeypatch.setattr(store, "SCHEMA_FILE", root / "system" / "schema.md")
+    monkeypatch.setattr(store, "ACTIVITY_FILE", root / "runtime" / "activity.jsonl")
 
     store.init_chronovisor()
 
@@ -136,6 +140,7 @@ def test_init_chronovisor_no_arg_preserves_legacy_path_seams(
     assert store.INDEX_FILE.is_file()
     assert store.LOG_FILE.is_file()
     assert store.SCHEMA_FILE.is_file()
+    assert store.ACTIVITY_FILE.is_file()
 
 
 def test_schema_decoder_accepts_only_exact_canonical_schema() -> None:

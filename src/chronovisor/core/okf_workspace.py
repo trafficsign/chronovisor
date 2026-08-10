@@ -3,11 +3,19 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from contextlib import suppress
 from dataclasses import asdict, dataclass
+from datetime import datetime
 from pathlib import Path, PurePosixPath
+from typing import TypedDict
 
+from chronovisor.core.activity_log import (
+    activity_record,
+    deterministic_event_id,
+    validated_activity_bytes,
+)
 from chronovisor.core.canonical_document import (
     CanonicalDocument,
     CanonicalDocumentError,
@@ -37,6 +45,11 @@ from chronovisor.core.okf_v02 import (
     ConformanceIssue,
     validate_pages_bundle,
 )
+from chronovisor.core.reserved_documents import (
+    render_pages_index,
+    render_pages_log,
+    stable_page_index_entry,
+)
 
 SCHEMA_VERSION = 1
 MANIFEST_SCHEMA = "chronovisor.okf-migration-manifest.v1"
@@ -45,6 +58,9 @@ SENTINEL_SCHEMA = "chronovisor.okf-restart-refusal.v1"
 RESTART_REFUSAL_FILENAME = "restart-refusal.json"
 
 _RUN_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}")
+_LEGACY_LOG_LINE_RE = re.compile(
+    r"^- \[(?P<timestamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2})\] (?P<message>.+)$"
+)
 _ROOT_RESERVED = ("index.md", "log.md", "schema.md")
 _MISSING = object()
 _SYSTEM_STATUS_MAPPING = {
@@ -66,6 +82,13 @@ class _ConvertedSystemDocument:
     identity_source: str
     identity_sha256: str
     resolved_link_count: int
+
+
+class _ActivitySegment(TypedDict):
+    name: str
+    length: int
+    sha256: str
+    event_ids: list[str]
 
 
 def prepare_okf_workspace(
@@ -114,6 +137,8 @@ def _prepare_okf_workspace_locked(
         raw_files=raw_sources,
     )
     require_resolved_links(plan)
+    legacy_activity, legacy_log_sha256 = _legacy_activity(reserved_sources)
+    existing_activity = _existing_activity(runtime_root)
     reserved_outputs = _reserved_outputs(plan)
     system_inputs = _system_inputs(plan)
     system_outputs = _convert_system_documents(system_inputs, page_catalog)
@@ -145,8 +170,15 @@ def _prepare_okf_workspace_locked(
             _write(
                 staging_system / system_document.relative_path, system_document.data
             )
-        activity = _activity_jsonl(plan)
-        _write(staging / "activity.jsonl", activity)
+        activity, activity_segments = _activity_jsonl(
+            plan,
+            legacy_activity,
+            existing_activity,
+        )
+        activity_path = staging / "activity.jsonl"
+        _write(activity_path, activity)
+        if validated_activity_bytes(activity_path) != activity:
+            raise ValueError("staged activity validation mismatch")
         _require_staged_inventory(
             staging_pages,
             {
@@ -182,6 +214,9 @@ def _prepare_okf_workspace_locked(
             reserved_outputs,
             system_inputs,
             system_outputs,
+            legacy_activity,
+            legacy_log_sha256,
+            activity_segments,
             run_id,
         )
         manifest_raw = canonical_json_line_bytes_strict(manifest)
@@ -292,37 +327,14 @@ def _catalog(sources: tuple[SourceDocument, ...]) -> dict[str, str]:
 
 
 def _reserved_outputs(plan: MigrationPlan) -> dict[str, bytes]:
-    index_rows: list[str] = []
+    index_entries = []
     for converted in plan.converted_documents:
-        metadata = parse_document(converted.data).metadata
-        title = metadata.get("title")
-        label = (
-            title.strip() if isinstance(title, str) and title.strip() else converted.uid
-        )
-        destination = converted.relative_path
-        if any(character.isspace() for character in destination):
-            destination = f"<{destination}>"
-        description = metadata.get("description")
-        suffix = (
-            f" - {description.strip()}"
-            if isinstance(description, str) and description.strip()
-            else ""
-        )
-        index_rows.append(f"- [{_markdown_label(label)}]({destination}){suffix}")
-    index_body = "# Chronovisor pages\n"
-    if index_rows:
-        index_body += "\n" + "\n".join(index_rows) + "\n"
-
-    # Detailed migration history already lives in activity.jsonl and the manifest.
-    log_body = "# Derived change history\n"
+        entry = stable_page_index_entry(converted.data, converted.relative_path)
+        if entry is not None:
+            index_entries.append(entry)
     return {
-        "index.md": serialize_document(
-            CanonicalDocument(
-                metadata={"okf_version": OKF_VERSION},
-                body=index_body.encode(),
-            )
-        ),
-        "log.md": log_body.encode(),
+        "index.md": render_pages_index(index_entries),
+        "log.md": render_pages_log(),
     }
 
 
@@ -429,10 +441,6 @@ def _system_identity(
     )
 
 
-def _markdown_label(value: str) -> str:
-    return value.replace("\\", "\\\\").replace("]", "\\]")
-
-
 def _write(path: Path, data: bytes) -> None:
     _mkdir_durable(path.parent)
     atomic_write_bytes(path, data, backup=False, min_free_bytes=0)
@@ -513,12 +521,131 @@ def _require_semantic_roundtrip(pages_root: Path, system_root: Path) -> None:
                 raise ValueError(f"semantic round-trip changed document: {relative}")
 
 
-def _activity_jsonl(plan: MigrationPlan) -> bytes:
-    return (
-        ("\n".join(event.payload_json for event in plan.events) + "\n").encode()
-        if plan.events
-        else b""
+def _legacy_activity(
+    reserved_sources: tuple[SourceDocument, ...],
+) -> tuple[tuple[dict[str, str], ...], str]:
+    source = next(
+        item for item in reserved_sources if item.relative_path == "log.md"
     )
+    rows: list[dict[str, str]] = []
+    try:
+        lines = source.data.decode("utf-8").splitlines()
+    except UnicodeDecodeError as exc:
+        raise ValueError("legacy root log is not UTF-8") from exc
+    source_sha256 = hashlib.sha256(source.data).hexdigest()
+    records: list[tuple[str, list[str]]] = []
+    current: tuple[str, list[str]] | None = None
+    in_frontmatter = False
+    frontmatter_complete = False
+    for line in lines:
+        if not records and current is None:
+            if line == "---" and not frontmatter_complete:
+                in_frontmatter = not in_frontmatter
+                if not in_frontmatter:
+                    frontmatter_complete = True
+                continue
+            if in_frontmatter or not line.strip() or line.startswith("#"):
+                continue
+        if line.startswith("- ["):
+            match = _LEGACY_LOG_LINE_RE.fullmatch(line)
+            if match is None:
+                raise ValueError("legacy root log contains a malformed activity row")
+            if current is not None:
+                records.append(current)
+            current = (match.group("timestamp"), [match.group("message")])
+            continue
+        if current is None:
+            raise ValueError("legacy root log contains an orphan continuation")
+        current[1].append(line)
+    if in_frontmatter:
+        raise ValueError("legacy root log frontmatter is unterminated")
+    if current is not None:
+        records.append(current)
+
+    for ordinal, (raw_timestamp, message_lines) in enumerate(records):
+        try:
+            timestamp = datetime.strptime(
+                raw_timestamp, "%Y-%m-%d %H:%M"
+            ).isoformat(timespec="minutes")
+            message = "\n".join(message_lines).rstrip("\n")
+            rows.append(
+                activity_record(
+                    message,
+                    source="legacy-log",
+                    timestamp=timestamp,
+                    event_id=deterministic_event_id(
+                        source_sha256,
+                        str(ordinal),
+                        timestamp,
+                        message,
+                    ),
+                )
+            )
+        except ValueError as exc:
+            raise ValueError("legacy root log contains an invalid activity row") from exc
+    return tuple(rows), source_sha256
+
+
+def _activity_jsonl(
+    plan: MigrationPlan,
+    legacy_activity: tuple[dict[str, str], ...],
+    existing_activity: bytes,
+) -> tuple[bytes, tuple[_ActivitySegment, ...]]:
+    legacy_rows = tuple(canonical_json_line_bytes_strict(row) for row in legacy_activity)
+    archive_rows = tuple(
+        canonical_json_line_bytes_strict(
+            {**json.loads(event.payload_json), "event_id": event.event_id}
+        )
+        for event in plan.events
+    )
+    segment_bytes = (
+        ("legacy_root_log", b"".join(legacy_rows)),
+        ("existing_runtime_activity", existing_activity),
+        ("archive_metadata", b"".join(archive_rows)),
+    )
+    segments = tuple(
+        _ActivitySegment(
+            name=name,
+            length=len(raw),
+            sha256=hashlib.sha256(raw).hexdigest(),
+            event_ids=_activity_event_ids(raw),
+        )
+        for name, raw in segment_bytes
+    )
+    event_ids = [
+        event_id
+        for segment in segments
+        for event_id in segment["event_ids"]
+        if isinstance(event_id, str)
+    ]
+    if len(event_ids) != len(set(event_ids)):
+        raise ValueError("activity migration contains duplicate event IDs")
+    return b"".join(raw for _name, raw in segment_bytes), segments
+
+
+def _existing_activity(runtime_root: Path) -> bytes:
+    path = runtime_root / "activity.jsonl"
+    if path.is_symlink():
+        raise ValueError("existing runtime activity is unsafe")
+    if not path.exists():
+        return b""
+    if not path.is_file():
+        raise ValueError("existing runtime activity is unsafe")
+    return validated_activity_bytes(path)
+
+
+def _activity_event_ids(raw: bytes) -> list[str]:
+    event_ids: list[str] = []
+    for line in raw.splitlines():
+        try:
+            payload = json.loads(line)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError("activity migration row is invalid") from exc
+        event_id = payload.get("event_id") if isinstance(payload, dict) else None
+        if not isinstance(event_id, str):
+            raise ValueError("activity migration row is missing event_id")
+        event_ids.append(event_id)
+    return event_ids
 
 
 def _manifest(
@@ -528,6 +655,9 @@ def _manifest(
     reserved_outputs: dict[str, bytes],
     system_inputs: tuple[SourceDocument, ...],
     system_outputs: tuple[_ConvertedSystemDocument, ...],
+    legacy_activity: tuple[dict[str, str], ...],
+    legacy_log_sha256: str,
+    activity_segments: tuple[_ActivitySegment, ...],
     run_id: str,
 ) -> dict[str, object]:
     system_output_by_path = {item.relative_path: item for item in system_outputs}
@@ -601,7 +731,11 @@ def _manifest(
             for item in system_inputs
         ],
         "activity": {
-            "event_count": len(plan.events),
+            "event_count": sum(
+                len(segment["event_ids"])
+                for segment in activity_segments
+                if isinstance(segment.get("event_ids"), list)
+            ),
             "sha256": hashlib.sha256(activity).hexdigest(),
             "events": [
                 {
@@ -614,6 +748,45 @@ def _manifest(
                 }
                 for event in plan.events
             ],
+            "legacy_log": {
+                "event_count": len(legacy_activity),
+                "source_sha256": legacy_log_sha256,
+                "payload_sha256": [
+                    hashlib.sha256(canonical_json_line_bytes_strict(row)).hexdigest()
+                    for row in legacy_activity
+                ],
+            },
+            "segments": list(activity_segments),
+            "immutable_prefix": {
+                "length": len(activity),
+                "sha256": hashlib.sha256(activity).hexdigest(),
+                "event_ids": [
+                    *(
+                        event_id
+                        for segment in activity_segments
+                        for event_id in segment["event_ids"]
+                        if isinstance(event_id, str)
+                    ),
+                ],
+                "payload_sha256": [
+                    *(
+                        hashlib.sha256(line + b"\n").hexdigest()
+                        for line in activity.splitlines()
+                    ),
+                ],
+                "schemas": [
+                    *(
+                        str(
+                            payload.get("schema")
+                            or payload.get("type")
+                            or ""
+                        )
+                        for payload in (
+                            json.loads(line) for line in activity.splitlines()
+                        )
+                    ),
+                ],
+            },
         },
         "conformance": [asdict(issue) for issue in issues],
     }

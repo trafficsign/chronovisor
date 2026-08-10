@@ -20,7 +20,7 @@ import threading
 from collections.abc import Iterator, Mapping
 from contextlib import AbstractContextManager, contextmanager, suppress
 from pathlib import Path
-from typing import Any
+from typing import IO, Any
 
 from chronovisor.core.canonical_json import canonical_json_line_bytes_strict
 
@@ -40,6 +40,94 @@ class DiskPressureError(DurableStateError):
 
 class StateSealError(DurableStateError):
     """A JSON object is missing or does not match its content seal."""
+
+
+@contextmanager
+def open_regular_nofollow(path: Path) -> Iterator[IO[bytes]]:
+    """Open one regular file while refusing symlinks in every path component."""
+
+    absolute = path.absolute()
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    directory_flags |= getattr(os, "O_CLOEXEC", 0)
+    directory_fd = os.open(absolute.anchor, directory_flags)
+    file_fd = -1
+    try:
+        for part in absolute.parent.parts[1:]:
+            next_fd = os.open(part, directory_flags, dir_fd=directory_fd)
+            os.close(directory_fd)
+            directory_fd = next_fd
+        flags = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+        file_fd = os.open(absolute.name, flags, dir_fd=directory_fd)
+        if not stat.S_ISREG(os.fstat(file_fd).st_mode):
+            raise ValueError("path is not a regular file")
+        with os.fdopen(file_fd, "rb", closefd=False) as handle:
+            yield handle
+    finally:
+        if file_fd >= 0:
+            os.close(file_fd)
+        os.close(directory_fd)
+
+
+def atomic_write_bytes_at(directory_fd: int, name: str, raw: bytes) -> None:
+    """Atomically publish one regular file relative to a pinned directory fd."""
+
+    if not isinstance(raw, bytes):
+        raise TypeError("raw must be bytes")
+    if not name or name != Path(name).name or name in {".", ".."}:
+        raise ValueError("atomic filename must be one safe path component")
+    try:
+        existing = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        existing = None
+    if existing is not None and not stat.S_ISREG(existing.st_mode):
+        raise ValueError("atomic destination is not a regular file")
+    filesystem = os.fstatvfs(directory_fd)
+    free = filesystem.f_bavail * filesystem.f_frsize
+    if free < len(raw) * 2:
+        raise DiskPressureError("insufficient free space for durable write")
+    temporary = f".{name}.{os.getpid()}.{os.urandom(8).hex()}.tmp"
+    descriptor = -1
+    published = False
+    try:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+        flags |= getattr(os, "O_CLOEXEC", 0)
+        descriptor = os.open(temporary, flags, 0o600, dir_fd=directory_fd)
+        offset = 0
+        while offset < len(raw):
+            written = os.write(descriptor, raw[offset:])
+            if written <= 0:
+                raise OSError("atomic write made no progress")
+            offset += written
+        os.fsync(descriptor)
+        os.close(descriptor)
+        descriptor = -1
+        os.replace(
+            temporary,
+            name,
+            src_dir_fd=directory_fd,
+            dst_dir_fd=directory_fd,
+        )
+        published = True
+        os.fsync(directory_fd)
+        flags = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+        descriptor = os.open(name, flags, dir_fd=directory_fd)
+        snapshot = os.fstat(descriptor)
+        if not stat.S_ISREG(snapshot.st_mode) or snapshot.st_size != len(raw):
+            raise DurableStateError("durable read-back identity mismatch")
+        observed = bytearray()
+        while len(observed) < len(raw):
+            chunk = os.read(descriptor, len(raw) - len(observed))
+            if not chunk:
+                break
+            observed.extend(chunk)
+        if bytes(observed) != raw:
+            raise DurableStateError("durable read-back mismatch")
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if not published:
+            with suppress(FileNotFoundError):
+                os.unlink(temporary, dir_fd=directory_fd)
 
 
 def canonical_bytes(value: Any) -> bytes:

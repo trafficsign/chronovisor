@@ -8,6 +8,8 @@ from pathlib import Path
 
 import pytest
 
+from chronovisor.core import okf_cutover
+from chronovisor.core.activity_log import activity_record
 from chronovisor.core.canonical_document import parse_document
 from chronovisor.core.canonical_json import (
     canonical_json_line_bytes_strict,
@@ -38,6 +40,41 @@ class InjectedCrash(RuntimeError):
     pass
 
 
+def test_directory_snapshot_restarts_once_when_an_entry_vanishes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (tmp_path / "stable").write_text("body")
+    real_scandir = os.scandir
+    calls = 0
+
+    class VanishingEntry:
+        name = ".atomic.tmp"
+
+        def stat(self, *, follow_symlinks: bool = False) -> os.stat_result:
+            del follow_symlinks
+            raise FileNotFoundError
+
+    class VanishingScan:
+        def __enter__(self):
+            return iter((VanishingEntry(),))
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+    def flaky_scandir(path: Path):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return VanishingScan()
+        return real_scandir(path)
+
+    monkeypatch.setattr(okf_cutover.os, "scandir", flaky_scandir)
+
+    assert okf_cutover._directory_entries(tmp_path) == {"stable": "file"}
+    assert calls == 2
+
+
 def _setup(
     tmp_path: Path, *, old_activity_present: bool = True
 ) -> tuple[Path, Path, Path]:
@@ -46,7 +83,16 @@ def _setup(
     runtime = tmp_path / "runtime"
     runtime.mkdir()
     if old_activity_present:
-        (runtime / "activity.jsonl").write_bytes(b'{"legacy":true}\n')
+        (runtime / "activity.jsonl").write_bytes(
+            canonical_json_line_bytes_strict(
+                activity_record(
+                    "pre-migration activity",
+                    source="test",
+                    timestamp="2026-08-11T00:00:00+09:00",
+                    event_id="activity-" + "1" * 64,
+                )
+            )
+        )
     workspace = prepare_okf_workspace(source, runtime, "run-001")
     return source, runtime, workspace
 
@@ -127,6 +173,39 @@ def test_cutover_publishes_all_assets_and_keeps_rollback_backup(tmp_path: Path) 
         "run-001",
     )
     assert not okf_startup_allowed(source, runtime, "run-001")
+
+
+@pytest.mark.parametrize(
+    "operation",
+    [execute_okf_cutover, recover_okf_cutover],
+)
+def test_prepared_activity_drift_refuses_before_any_cutover_mutation(
+    tmp_path: Path,
+    operation,
+) -> None:
+    source, runtime, workspace = _setup(tmp_path)
+    activity = runtime / "activity.jsonl"
+    activity.write_bytes(
+        activity.read_bytes()
+        + canonical_json_line_bytes_strict(
+            activity_record(
+                "arrived after prepare",
+                source="test",
+                timestamp="2026-08-11T00:01:00+09:00",
+                event_id="activity-" + "9" * 64,
+            )
+        )
+    )
+    live_before = _live(source, runtime)
+    workspace_before = _tree(workspace)
+
+    with pytest.raises(ValueError, match="activity changed"):
+        operation(source, runtime, "run-001", is_quiescent=lambda: True)
+
+    assert _live(source, runtime) == live_before
+    assert _tree(workspace) == workspace_before
+    assert not (workspace / "cutover.lock").exists()
+    assert _state(workspace) == "prepared"
 
 
 def test_system_identity_hashes_survive_interrupted_cutover_recovery(

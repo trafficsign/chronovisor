@@ -143,7 +143,7 @@ class PreparedPageMutation:
 
 
 @contextmanager
-def _reentrant_exclusive_lock(lock_path: Path) -> Iterator[None]:
+def _reentrant_exclusive_lock(lock_path: Path) -> Iterator[bool]:
     """Hold one process lock, allowing only same-thread nested entry."""
 
     lock_path = lock_path.resolve(strict=False)
@@ -159,7 +159,7 @@ def _reentrant_exclusive_lock(lock_path: Path) -> Iterator[None]:
     if depth:
         depths[identity] = depth + 1
         try:
-            yield
+            yield False
         finally:
             remaining = depths[identity] - 1
             if remaining:
@@ -175,7 +175,7 @@ def _reentrant_exclusive_lock(lock_path: Path) -> Iterator[None]:
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
         locked = True
         depths[identity] = 1
-        yield
+        yield True
     finally:
         try:
             depths.pop(identity, None)
@@ -186,12 +186,33 @@ def _reentrant_exclusive_lock(lock_path: Path) -> Iterator[None]:
 
 
 @contextmanager
-def chronovisor_mutation_lock(path: Path | None = None) -> Iterator[None]:
+def chronovisor_mutation_lock(
+    path: Path | None = None,
+    *,
+    pages_dir: Path | None = None,
+) -> Iterator[None]:
     """Serialize writers; nested same-thread mutations share the outer lease."""
 
-    with okf_runtime_operation(CHRONOVISOR_ROOT):
-        with _reentrant_exclusive_lock(path or CHRONOVISOR_MUTATION_LOCK):
-            yield
+    target_pages = pages_dir or CHRONOVISOR_ROOT / "pages"
+    operation_root = target_pages.parent
+    lock_path = path or operation_root / "runtime" / "chronovisor-mutation.lock"
+    with okf_runtime_operation(operation_root):
+        with _reentrant_exclusive_lock(lock_path) as outermost:
+            completed = False
+            try:
+                yield
+                completed = True
+            finally:
+                if outermost:
+                    try:
+                        from chronovisor.core.reserved_documents import (
+                            rebuild_pages_index,
+                        )
+
+                        rebuild_pages_index(target_pages)
+                    except Exception:
+                        if completed:
+                            raise
 
 
 @contextmanager

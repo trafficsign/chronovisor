@@ -52,7 +52,7 @@ def isolated_wiki(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     for name in ("index.md", "log.md", "schema.md"):
         (chronovisor_root / name).write_text("", encoding="utf-8")
 
-    from chronovisor.core import index_store, store
+    from chronovisor.core import index_store, page_mutation, store
     from chronovisor.ingest import ingest, lint
     from chronovisor.ingest import tag_lifecycle as tags_mod
     from chronovisor.ops import page_normalize
@@ -61,10 +61,18 @@ def isolated_wiki(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(store, "PAGES_DIR", pages)
     monkeypatch.setattr(store, "RAW_DIR", raw)
     monkeypatch.setattr(store, "SYSTEM_DIR", system)
-    monkeypatch.setattr(store, "INDEX_FILE", chronovisor_root / "index.md")
-    monkeypatch.setattr(store, "LOG_FILE", chronovisor_root / "log.md")
+    monkeypatch.setattr(store, "INDEX_FILE", pages / "index.md")
+    monkeypatch.setattr(store, "LOG_FILE", pages / "log.md")
+    monkeypatch.setattr(
+        store, "ACTIVITY_FILE", chronovisor_root / "runtime" / "activity.jsonl"
+    )
     monkeypatch.setattr(ingest, "PAGES_DIR", pages)
-    monkeypatch.setattr(ingest, "LOG_FILE", chronovisor_root / "log.md")
+    monkeypatch.setattr(ingest, "CHRONOVISOR_ROOT", chronovisor_root)
+    monkeypatch.setattr(
+        ingest, "ACTIVITY_FILE", chronovisor_root / "runtime" / "activity.jsonl"
+    )
+    monkeypatch.setattr(page_mutation, "CHRONOVISOR_ROOT", chronovisor_root)
+    monkeypatch.setattr(page_mutation, "PAGES_DIR", pages)
     monkeypatch.setattr(index_store, "CHRONOVISOR_ROOT", chronovisor_root)
     monkeypatch.setattr(index_store, "PAGES_DIR", pages)
     monkeypatch.setattr(index_store, "SYSTEM_DIR", system)

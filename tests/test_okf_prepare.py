@@ -101,6 +101,37 @@ def test_prepare_converts_metadata_links_and_archive_event() -> None:
     }
 
 
+@pytest.mark.parametrize(
+    ("yaml_value", "expected"),
+    [
+        ("[merged, duplicate]", '["merged","duplicate"]'),
+        ("{source: review, rank: 1}", '{"rank":1,"source":"review"}'),
+        ("2026-08-11", "2026-08-11"),
+    ],
+)
+def test_archive_metadata_values_are_deterministic_activity_text(
+    yaml_value: str,
+    expected: str,
+) -> None:
+    source = SourceDocument(
+        "archive.md",
+        (
+            "---\n"
+            "uid: uid-archive\n"
+            "status: archived\n"
+            f"archive_reason: {yaml_value}\n"
+            "---\n"
+            "Archived body.\n"
+        ).encode(),
+    )
+
+    first = prepare_okf_migration((source,), catalog={})
+    second = prepare_okf_migration((source,), catalog={})
+
+    assert first.events == second.events
+    assert json.loads(first.events[0].payload_json)["archive_reason"] == expected
+
+
 def test_prepare_converts_wikilink_labels_and_anchors_outside_code() -> None:
     source = SourceDocument(
         "notes/source.md",

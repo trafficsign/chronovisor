@@ -403,7 +403,7 @@ def migrate_active_metadata(
         owned: dict[Path, bytes] = {}
         adopted_records: dict[str, Any] = {}
         try:
-            with chronovisor_mutation_lock():
+            with chronovisor_mutation_lock(pages_dir=root / "pages"):
                 for uid, row in batch:
                     path = root / str(row["path"])
                     original = path.read_bytes()
@@ -432,7 +432,7 @@ def migrate_active_metadata(
                     owned[path] = updated_bytes
                     adopted_records[uid] = adopted.to_dict()
         except Exception:
-            with chronovisor_mutation_lock():
+            with chronovisor_mutation_lock(pages_dir=root / "pages"):
                 for path, original in preimages.items():
                     if path.read_bytes() == owned.get(path):
                         atomic_write(path, original.decode("utf-8"))

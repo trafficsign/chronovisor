@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from chronovisor.core import runtime_status
+from chronovisor.core import live_layout, reserved_documents, runtime_status
 from chronovisor.core import store as chronovisor_store
 from chronovisor.core.alias_store import add_alias
 from chronovisor.core.background_jobs import start_self_heal_background
@@ -3856,15 +3856,18 @@ def _patch_chronovisor_paths(chronovisor_root: Path) -> dict[str, Any]:
             "SYSTEM_DIR": chronovisor_store.SYSTEM_DIR,
             "INDEX_FILE": chronovisor_store.INDEX_FILE,
             "LOG_FILE": chronovisor_store.LOG_FILE,
+            "SCHEMA_FILE": chronovisor_store.SCHEMA_FILE,
+            "ACTIVITY_FILE": chronovisor_store.ACTIVITY_FILE,
         },
         "ingest": {
             "PAGES_DIR": ingest.PAGES_DIR,
-            "LOG_FILE": ingest.LOG_FILE,
+            "CHRONOVISOR_ROOT": ingest.CHRONOVISOR_ROOT,
+            "ACTIVITY_FILE": ingest.ACTIVITY_FILE,
         },
         "orchestrator": {
             "RAW_DIR": orchestrator.RAW_DIR,
             "CHRONOVISOR_ROOT": orchestrator.CHRONOVISOR_ROOT,
-            "LOG_FILE": orchestrator.LOG_FILE,
+            "ACTIVITY_FILE": orchestrator.ACTIVITY_FILE,
             "STATE_FILE": orchestrator.STATE_FILE,
         },
         "runtime_status": {
@@ -3879,15 +3882,24 @@ def _patch_chronovisor_paths(chronovisor_root: Path) -> dict[str, Any]:
     chronovisor_store.PAGES_DIR = pages
     chronovisor_store.RAW_DIR = raw
     chronovisor_store.SYSTEM_DIR = system
-    chronovisor_store.INDEX_FILE = chronovisor_root / "index.md"
-    chronovisor_store.LOG_FILE = chronovisor_root / "log.md"
+    chronovisor_store.INDEX_FILE = pages / "index.md"
+    chronovisor_store.LOG_FILE = pages / "log.md"
+    chronovisor_store.SCHEMA_FILE = system / "schema.md"
+    chronovisor_store.ACTIVITY_FILE = runtime / "activity.jsonl"
 
     ingest.PAGES_DIR = pages
-    ingest.LOG_FILE = chronovisor_root / "log.md"
+    ingest.CHRONOVISOR_ROOT = chronovisor_root
+    ingest.ACTIVITY_FILE = runtime / "activity.jsonl"
     orchestrator.RAW_DIR = raw
     orchestrator.CHRONOVISOR_ROOT = chronovisor_root
-    orchestrator.LOG_FILE = chronovisor_root / "log.md"
+    orchestrator.ACTIVITY_FILE = runtime / "activity.jsonl"
     orchestrator.STATE_FILE = chronovisor_root / ".orchestrator_state.json"
+
+    chronovisor_store.INDEX_FILE.write_bytes(reserved_documents.render_pages_index(()))
+    chronovisor_store.LOG_FILE.write_bytes(reserved_documents.render_pages_log())
+    chronovisor_store.SCHEMA_FILE.write_text(chronovisor_store.SCHEMA_CONTENT)
+    chronovisor_store.ACTIVITY_FILE.touch(mode=0o600)
+    live_layout.write_live_layout_proof(chronovisor_root, state="ready")
 
     runtime_status.RUNTIME_DIR = runtime
     runtime_status.STATUS_FILE = runtime / "status.json"

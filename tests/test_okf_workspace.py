@@ -8,8 +8,12 @@ from pathlib import Path
 import pytest
 
 from chronovisor.core import durable_state, okf_workspace
+from chronovisor.core.activity_log import activity_record, valid_activity_file
 from chronovisor.core.canonical_document import parse_document
-from chronovisor.core.canonical_json import canonical_json_sha256_strict
+from chronovisor.core.canonical_json import (
+    canonical_json_line_bytes_strict,
+    canonical_json_sha256_strict,
+)
 from chronovisor.core.okf_prepare import RawSource
 from chronovisor.core.okf_v02 import ConformanceIssue, validate_pages_bundle
 from chronovisor.core.okf_workspace import prepare_okf_workspace
@@ -72,6 +76,7 @@ def test_workspace_stages_validated_namespaces_without_touching_source(
     assert "archive_reason" not in log
     assert "archive_provenance" not in log
 
+
     page = parse_document((pages / "notes" / "source.md").read_bytes())
     assert page.metadata["status"] == "stable"
     assert page.body == b"Read [the target](<../deep/target.md#Section heading>).\n"
@@ -110,6 +115,7 @@ def test_workspace_stages_validated_namespaces_without_touching_source(
         json.loads(line)
         for line in (workspace / "staging" / "activity.jsonl").read_text().splitlines()
     ]
+    assert valid_activity_file(workspace / "staging" / "activity.jsonl")
     assert activity[0]["archive_reason"] == "merged"
     manifest_path = workspace / "dry-run-manifest.json"
     manifest_raw = manifest_path.read_bytes()
@@ -217,6 +223,76 @@ def test_workspace_stages_validated_namespaces_without_touching_source(
         **journal,
         "schema": okf_workspace.SENTINEL_SCHEMA,
     }
+
+
+def test_workspace_preserves_legacy_multiline_and_existing_activity_order(
+    tmp_path: Path,
+) -> None:
+    source, runtime = _roots(tmp_path)
+    (source / "log.md").write_text(
+        "---\ntitle: Legacy log\n---\n# Change log\n\n"
+        "- [2026-08-09 10:00] first message\n"
+        "unindented continuation\n\n"
+        "- [2026-08-10 11:30] second message\n"
+    )
+    existing = activity_record(
+        "already written to final activity",
+        source="test",
+        timestamp="2026-08-11T09:00:00+09:00",
+        event_id="activity-" + "2" * 64,
+    )
+    (runtime / "activity.jsonl").write_bytes(
+        canonical_json_line_bytes_strict(existing)
+    )
+
+    workspace = prepare_okf_workspace(source, runtime, "activity-order")
+    rows = [
+        json.loads(line)
+        for line in (workspace / "staging" / "activity.jsonl")
+        .read_bytes()
+        .splitlines()
+    ]
+
+    assert [row.get("source") or row.get("type") for row in rows] == [
+        "legacy-log",
+        "legacy-log",
+        "test",
+        "okf_archive_metadata_migrated",
+    ]
+    assert rows[0]["message"] == "first message\nunindented continuation"
+    assert len({row["event_id"] for row in rows}) == len(rows)
+    manifest = json.loads((workspace / "dry-run-manifest.json").read_bytes())
+    assert [segment["name"] for segment in manifest["activity"]["segments"]] == [
+        "legacy_root_log",
+        "existing_runtime_activity",
+        "archive_metadata",
+    ]
+    assert manifest["activity"]["immutable_prefix"]["event_ids"] == [
+        row["event_id"] for row in rows
+    ]
+    assert "first message" not in (
+        workspace / "staging" / "pages" / "log.md"
+    ).read_text()
+
+
+@pytest.mark.parametrize(
+    "log_text",
+    [
+        "# Log\n- [2026-08-11] malformed\n",
+        "# Log\norphan payload\n- [2026-08-11 09:00] valid\n",
+    ],
+)
+def test_workspace_rejects_malformed_or_orphan_legacy_log(
+    tmp_path: Path,
+    log_text: str,
+) -> None:
+    source, runtime = _roots(tmp_path)
+    (source / "log.md").write_text(log_text)
+
+    with pytest.raises(ValueError, match="legacy root log"):
+        prepare_okf_workspace(source, runtime, "bad-log")
+
+    assert not (runtime / "migrations").exists()
 
 
 def test_system_status_mapping_preserves_private_extensions_without_page_transforms(

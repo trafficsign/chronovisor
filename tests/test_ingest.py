@@ -680,9 +680,9 @@ def test_generate_one_failure_logs_are_confined_to_isolated_wiki(
     )
 
     assert result is None
-    assert isolated_wiki / "log.md" == ingest.LOG_FILE
+    assert isolated_wiki / "runtime" / "activity.jsonl" == ingest.ACTIVITY_FILE
     assert isolated_wiki / "runtime" / "events.jsonl" == runtime_status.EVENTS_FILE
-    assert "isolated transport sentinel" in ingest.LOG_FILE.read_text()
+    assert "isolated transport sentinel" in ingest.ACTIVITY_FILE.read_text()
     assert "isolated transport sentinel" in runtime_status.EVENTS_FILE.read_text()
 
 
@@ -1106,12 +1106,23 @@ def isolated_wiki(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(store, "PAGES_DIR", pages)
     monkeypatch.setattr(store, "RAW_DIR", raw)
     monkeypatch.setattr(store, "SYSTEM_DIR", system)
-    monkeypatch.setattr(store, "INDEX_FILE", chronovisor_root / "index.md")
-    monkeypatch.setattr(store, "LOG_FILE", chronovisor_root / "log.md")
+    monkeypatch.setattr(store, "INDEX_FILE", pages / "index.md")
+    monkeypatch.setattr(store, "LOG_FILE", pages / "log.md")
+    monkeypatch.setattr(
+        store, "ACTIVITY_FILE", chronovisor_root / "runtime" / "activity.jsonl"
+    )
     monkeypatch.setattr(ingest, "PAGES_DIR", pages)
-    monkeypatch.setattr(ingest, "LOG_FILE", chronovisor_root / "log.md")
+    monkeypatch.setattr(ingest, "CHRONOVISOR_ROOT", chronovisor_root)
+    monkeypatch.setattr(
+        ingest, "ACTIVITY_FILE", chronovisor_root / "runtime" / "activity.jsonl"
+    )
     monkeypatch.setattr(orchestrator, "RAW_DIR", raw)
     monkeypatch.setattr(orchestrator, "CHRONOVISOR_ROOT", chronovisor_root)
+    monkeypatch.setattr(
+        orchestrator,
+        "ACTIVITY_FILE",
+        chronovisor_root / "runtime" / "activity.jsonl",
+    )
     monkeypatch.setattr(
         orchestrator, "STATE_FILE", chronovisor_root / ".orchestrator_state.json"
     )
@@ -1126,6 +1137,7 @@ def isolated_wiki(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         chronovisor_root / "runtime" / "decision-authority.lock",
     )
     monkeypatch.setattr(page_mutation, "PAGES_DIR", pages)
+    monkeypatch.setattr(page_mutation, "CHRONOVISOR_ROOT", chronovisor_root)
     monkeypatch.setattr(runtime_status, "RUNTIME_DIR", chronovisor_root / "runtime")
     monkeypatch.setattr(
         runtime_status, "STATUS_FILE", chronovisor_root / "runtime" / "status.json"
@@ -4618,7 +4630,8 @@ class TestIngestProposalRollback:
             },
         )
         target = isolated_wiki / "pages" / "memory" / "frontier-only.md"
-        target.write_text("a later independent edit\n", encoding="utf-8")
+        independent = target.read_text(encoding="utf-8") + "\nA later edit.\n"
+        target.write_text(independent, encoding="utf-8")
         proposal_path, _review_path = ingest._ingest_artifact_paths(
             result["source_key"]
         )
@@ -4630,7 +4643,7 @@ class TestIngestProposalRollback:
 
         assert rolled_back["status"] == "conflict"
         assert rolled_back["page_id"] == "frontier-only"
-        assert target.read_text(encoding="utf-8") == "a later independent edit\n"
+        assert target.read_text(encoding="utf-8") == independent
 
 
 class TestApplyRawKeywordsPatch:
@@ -4897,6 +4910,7 @@ class TestSafeResolvePagePath:
         self,
         isolated_wiki: Path,
     ) -> None:
+        from chronovisor.core.okf_cutover import OKFStartupBlocked
         from chronovisor.ingest import ingest
 
         planned, totals = ingest._prepare_operations(
@@ -4922,7 +4936,7 @@ class TestSafeResolvePagePath:
 
         assert ingest._prepared_plan_is_recoverable(planned) is False
         assert ingest._prepared_plan_is_fully_applied(planned) is False
-        with pytest.raises(IngestApplyError, match="filename escapes PAGES_DIR"):
+        with pytest.raises(OKFStartupBlocked, match="unsafe_legacy_layout"):
             ingest._apply_prepared_operations(planned, link_totals=totals)
 
         assert outside_page.read_bytes() == outside_before

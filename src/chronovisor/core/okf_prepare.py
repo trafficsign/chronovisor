@@ -345,9 +345,14 @@ def _move_summary(metadata: dict[str, object], uid: str) -> None:
 def _archive_event(
     metadata: dict[str, object], uid: str, relative_path: str
 ) -> ArchiveEvent | None:
-    archived = {
-        field: metadata.pop(field) for field in _ARCHIVE_FIELDS if field in metadata
-    }
+    archived: dict[str, str] = {}
+    for field in _ARCHIVE_FIELDS:
+        if field not in metadata:
+            continue
+        value = _archive_value(metadata.pop(field))
+        if not value:
+            raise ValueError(f"empty archive metadata: {uid}:{field}")
+        archived[field] = value
     if not archived:
         return None
     payload = {
@@ -357,12 +362,21 @@ def _archive_event(
         **archived,
     }
     event_id = "okf-archive-" + canonical_json_sha256_stringifying_strict(payload)
+    payload["event_id"] = event_id
     return ArchiveEvent(
         event_id=event_id,
         uid=uid,
         relative_path=relative_path,
         payload_json=canonical_json_stringifying_strict(payload),
     )
+
+
+def _archive_value(value: object) -> str:
+    if isinstance(value, str):
+        return value
+    if value is None or isinstance(value, (bool, int, float, list, tuple, dict)):
+        return canonical_json_stringifying_strict(value)
+    return str(value)
 
 
 def convert_wikilinks(

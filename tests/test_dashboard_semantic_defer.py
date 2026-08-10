@@ -58,7 +58,9 @@ def test_save_load_segments_semantic_defer_returns_to_pending_after_release(
         encoding="utf-8",
     )
     monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", chronovisor_root)
-    monkeypatch.setattr(dashboard, "LOG_FILE", chronovisor_root / "log.md")
+    monkeypatch.setattr(
+        dashboard, "ACTIVITY_FILE", chronovisor_root / "runtime" / "activity.jsonl"
+    )
     active_deferred = {names["deferred"]: "semantic_no_quorum"}
     monkeypatch.setattr(
         dashboard,
@@ -149,7 +151,9 @@ def test_save_load_shard_continuation_is_pending_not_failed(
         encoding="utf-8",
     )
     monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", chronovisor_root)
-    monkeypatch.setattr(dashboard, "LOG_FILE", chronovisor_root / "log.md")
+    monkeypatch.setattr(
+        dashboard, "ACTIVITY_FILE", chronovisor_root / "runtime" / "activity.jsonl"
+    )
     monkeypatch.setattr(
         dashboard,
         "_operational_deferred_raw_statuses",
@@ -258,7 +262,9 @@ def test_save_load_attributes_held_projection_child_to_saved_parent(
     }
     active_deferred = {child_name: "semantic_no_quorum"}
     monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", chronovisor_root)
-    monkeypatch.setattr(dashboard, "LOG_FILE", chronovisor_root / "log.md")
+    monkeypatch.setattr(
+        dashboard, "ACTIVITY_FILE", chronovisor_root / "runtime" / "activity.jsonl"
+    )
     monkeypatch.setattr(
         dashboard,
         "_operational_deferred_raw_statuses",
@@ -663,7 +669,11 @@ def test_orchestrator_reports_terminal_semantic_defer_without_failure(
 
     monkeypatch.setattr(orchestrator, "CHRONOVISOR_ROOT", chronovisor_root)
     monkeypatch.setattr(orchestrator, "RAW_DIR", raw_dir)
-    monkeypatch.setattr(orchestrator, "LOG_FILE", chronovisor_root / "log.md")
+    monkeypatch.setattr(
+        orchestrator,
+        "ACTIVITY_FILE",
+        chronovisor_root / "runtime" / "activity.jsonl",
+    )
     monkeypatch.setattr(
         orchestrator, "STATE_FILE", chronovisor_root / ".orchestrator_state.json"
     )

@@ -95,6 +95,7 @@ class _Expected:
     new_system: dict[str, str]
     raw: dict[str, tuple[int, str]]
     reserved: dict[str, str]
+    prepared_activity: tuple[int, str]
     new_activity: tuple[int, str]
 
 
@@ -296,6 +297,27 @@ def _discover_unmigrated(source_root: Path) -> OKFStartupDecision:
             return _blocked("unsafe_legacy_layout")
         return OKFStartupDecision(True, "legacy", "unmigrated", "ok")
 
+    from chronovisor.core.live_layout import read_live_layout_proof
+
+    proof_path = source_root / "runtime" / "bootstrap-layout.json"
+    if _path_kind(proof_path) != "absent":
+        if _path_kind(proof_path) != "file":
+            return _blocked("unsafe_bootstrap_layout")
+        proof = read_live_layout_proof(source_root)
+        if proof is None:
+            return _blocked("bootstrap_proof_invalid")
+        if proof["state"] == "in-progress":
+            if not _is_resumable_final_bootstrap(source_root):
+                return _blocked("bootstrap_proof_invalid")
+            return _blocked("bootstrap_in_progress", state="in-progress")
+        if _is_canonical_live_layout(source_root, proof):
+            return OKFStartupDecision(True, "okf_v0_2", "ready", "ok")
+        return _blocked("bootstrap_proof_invalid")
+    if _path_kind(source_root / "runtime" / "bootstrap-layout.lock") == "file":
+        if _is_resumable_final_bootstrap(source_root):
+            return _blocked("bootstrap_in_progress", state="in-progress")
+        return _blocked("bootstrap_proof_invalid")
+
     entries = _directory_entries(source_root)
     if any(_BOOTSTRAP_ENTRIES.get(name) != kind for name, kind in entries.items()):
         return _blocked("unsafe_bootstrap_layout")
@@ -308,6 +330,112 @@ def _discover_unmigrated(source_root: Path) -> OKFStartupDecision:
         if children:
             return _blocked("content_without_migration")
     return OKFStartupDecision(True, "bootstrap", "uninitialized", "ok")
+
+
+def _is_canonical_live_layout(
+    source_root: Path, proof: Mapping[str, object]
+) -> bool:
+    """Recognize one bounded, sealed final layout without scanning the corpus."""
+
+    from chronovisor.core.activity_log import activity_prefix_matches
+    from chronovisor.core.live_layout import (
+        file_sha256_nofollow,
+        valid_index_shape_nofollow,
+    )
+
+    pages = source_root / "pages"
+    system = source_root / "system"
+    activity = source_root / "runtime" / "activity.jsonl"
+    required = (
+        pages / "index.md",
+        pages / "log.md",
+        system / "schema.md",
+        activity,
+    )
+    if any(_path_kind(path) != "file" for path in required):
+        return False
+    if _unsafe_legacy_root(source_root):
+        return False
+    try:
+        if not valid_index_shape_nofollow(pages / "index.md"):
+            return False
+        if file_sha256_nofollow(pages / "log.md") != proof.get("log_sha256"):
+            return False
+        if file_sha256_nofollow(system / "schema.md") != proof.get("schema_sha256"):
+            return False
+        prefix = proof.get("activity_prefix")
+        if not isinstance(prefix, dict):
+            return False
+        prefix_length = prefix.get("length")
+        if not isinstance(prefix_length, int) or isinstance(prefix_length, bool):
+            return False
+        prefix_sha256 = prefix.get("sha256")
+        if not isinstance(prefix_sha256, str) or not activity_prefix_matches(
+            activity,
+            length=prefix_length,
+            sha256=prefix_sha256,
+        ):
+            return False
+    except (OSError, RuntimeError, ValueError):
+        return False
+    return True
+
+
+def _is_resumable_final_bootstrap(source_root: Path) -> bool:
+    """Allow only exact partial files emitted by fresh init itself."""
+
+    from chronovisor.core.live_layout import LIVE_LAYOUT_LOCK, LIVE_LAYOUT_PROOF
+    from chronovisor.core.reserved_documents import (
+        render_pages_index,
+        render_pages_log,
+    )
+    from chronovisor.core.store import SCHEMA_CONTENT
+
+    entries = _directory_entries(source_root)
+    if any(_BOOTSTRAP_ENTRIES.get(name) != kind for name, kind in entries.items()):
+        return False
+    expected_directories = {
+        "pages": {
+            "index.md": render_pages_index(()),
+            "log.md": render_pages_log(),
+        },
+        "system": {"schema.md": SCHEMA_CONTENT.encode("utf-8")},
+    }
+    for name, expected in expected_directories.items():
+        directory = source_root / name
+        if _path_kind(directory) == "absent":
+            continue
+        if _path_kind(directory) != "directory":
+            return False
+        children = _directory_entries(directory)
+        if any(expected.get(child) is None or kind != "file" for child, kind in children.items()):
+            return False
+        try:
+            if any((directory / child).read_bytes() != expected[child] for child in children):
+                return False
+        except OSError:
+            return False
+    for name in ("raw", "logs"):
+        directory = source_root / name
+        if _path_kind(directory) == "directory" and _directory_entries(directory):
+            return False
+    runtime = source_root / "runtime"
+    if _path_kind(runtime) != "directory":
+        return False
+    runtime_entries = _directory_entries(runtime)
+    allowed_runtime = {
+        "okf-writer.lock",
+        LIVE_LAYOUT_LOCK,
+        LIVE_LAYOUT_PROOF,
+        "activity.jsonl",
+    }
+    if any(name not in allowed_runtime or kind != "file" for name, kind in runtime_entries.items()):
+        return False
+    activity = runtime / "activity.jsonl"
+    try:
+        return _path_kind(activity) == "absent" or activity.read_bytes() == b""
+    except OSError:
+        return False
 
 
 def _unsafe_legacy_root(source_root: Path) -> bool:
@@ -349,12 +477,19 @@ def _has_symlink_component(path: Path) -> bool:
 
 
 def _directory_entries(path: Path) -> dict[str, str]:
-    entries: dict[str, str] = {}
-    with os.scandir(path) as iterator:
-        for entry in iterator:
-            mode = entry.stat(follow_symlinks=False).st_mode
-            entries[entry.name] = _mode_kind(mode)
-    return entries
+    for attempt in range(2):
+        entries: dict[str, str] = {}
+        try:
+            with os.scandir(path) as iterator:
+                for entry in iterator:
+                    mode = entry.stat(follow_symlinks=False).st_mode
+                    entries[entry.name] = _mode_kind(mode)
+        except FileNotFoundError:
+            if attempt:
+                raise
+        else:
+            return entries
+    raise RuntimeError("directory snapshot retry exhausted")
 
 
 def _path_kind(path: Path) -> str:
@@ -410,9 +545,9 @@ def _execute_okf_cutover_locked(
 ) -> CutoverState:
 
     context = _context(source_root, runtime_root, run_id)
+    _validate_prepared(context)
     _reject_symlink(context.workspace / "cutover.lock", "cutover lock")
     with file_lock(context.workspace / "cutover.lock"):
-        _validate_prepared(context)
         if not is_quiescent():
             raise RuntimeError("OKF cutover requires a quiescent runtime")
         old_activity = _validate_prepared(context)
@@ -499,6 +634,12 @@ def _recover_okf_cutover_locked(
 ) -> CutoverState:
 
     context = _context(source_root, runtime_root, run_id)
+    preflight_journal = _read_canonical_object(
+        context.journal, "migration journal"
+    )
+    _require_gate_identity(preflight_journal, context, JOURNAL_SCHEMA)
+    if preflight_journal.get("state") == "prepared":
+        _validate_prepared(context)
     _reject_symlink(context.workspace / "cutover.lock", "cutover lock")
     with file_lock(context.workspace / "cutover.lock"):
         if not is_quiescent():
@@ -843,6 +984,22 @@ def _expected(manifest: Mapping[str, object]) -> _Expected:
     if not isinstance(count, int) or isinstance(count, bool) or count < 0:
         raise ValueError("migration manifest activity count is invalid")
     staged_activity = activity.get("sha256")
+    segments = _object_list(activity, "segments")
+    if [segment.get("name") for segment in segments] != [
+        "legacy_root_log",
+        "existing_runtime_activity",
+        "archive_metadata",
+    ]:
+        raise ValueError("migration manifest activity segments are invalid")
+    prepared_segment = segments[1]
+    prepared_size = prepared_segment.get("length")
+    if (
+        not isinstance(prepared_size, int)
+        or isinstance(prepared_size, bool)
+        or prepared_size < 0
+    ):
+        raise ValueError("migration manifest existing activity size is invalid")
+    prepared_activity = (prepared_size, _sha(prepared_segment.get("sha256")))
     return _Expected(
         old_pages,
         old_system,
@@ -850,6 +1007,7 @@ def _expected(manifest: Mapping[str, object]) -> _Expected:
         new_system,
         raw,
         reserved,
+        prepared_activity,
         (-1, _sha(staged_activity)),
     )
 
@@ -871,6 +1029,14 @@ def _validate_prepared(context: _Context) -> _OldActivity:
         raise ValueError("rollback backup already exists")
     _validate_static_source(context)
     old_activity = _optional_file_identity(context.runtime / "activity.jsonl")
+    if old_activity is None:
+        if context.expected.prepared_activity != (
+            0,
+            hashlib.sha256(b"").hexdigest(),
+        ):
+            raise ValueError("prepared activity snapshot is missing")
+    elif old_activity != context.expected.prepared_activity:
+        raise ValueError("live activity changed after workspace preparation")
     states = _asset_states(context, old_activity)
     if any(state != "old" for state in states.values()):
         raise ValueError("prepared workspace paths do not match old/live and new/staged")
@@ -1322,11 +1488,7 @@ def _old_activity(
     journal: Mapping[str, object], context: _Context, *, prepared: bool
 ) -> _OldActivity:
     if prepared:
-        old_activity = _optional_file_identity(context.runtime / "activity.jsonl")
-        states = _asset_states(context, old_activity)
-        if any(value != "old" for value in states.values()):
-            raise ValueError("prepared workspace paths are inconsistent")
-        return old_activity
+        return _validate_prepared(context)
     item = journal.get("old_activity")
     if not isinstance(item, dict):
         raise ValueError("migration journal has no old activity identity")

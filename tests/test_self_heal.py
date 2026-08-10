@@ -78,13 +78,14 @@ def isolated_wiki(
     monkeypatch.setattr(store, "PAGES_DIR", pages)
     monkeypatch.setattr(store, "RAW_DIR", raw)
     monkeypatch.setattr(store, "SYSTEM_DIR", system)
-    monkeypatch.setattr(store, "INDEX_FILE", chronovisor_root / "index.md")
-    monkeypatch.setattr(store, "LOG_FILE", chronovisor_root / "log.md")
+    monkeypatch.setattr(store, "INDEX_FILE", pages / "index.md")
+    monkeypatch.setattr(store, "LOG_FILE", pages / "log.md")
+    monkeypatch.setattr(store, "ACTIVITY_FILE", runtime / "activity.jsonl")
     monkeypatch.setattr(ingest, "PAGES_DIR", pages)
-    monkeypatch.setattr(ingest, "LOG_FILE", chronovisor_root / "log.md")
+    monkeypatch.setattr(ingest, "ACTIVITY_FILE", runtime / "activity.jsonl")
     monkeypatch.setattr(orchestrator, "RAW_DIR", raw)
     monkeypatch.setattr(orchestrator, "CHRONOVISOR_ROOT", chronovisor_root)
-    monkeypatch.setattr(orchestrator, "LOG_FILE", chronovisor_root / "log.md")
+    monkeypatch.setattr(orchestrator, "ACTIVITY_FILE", runtime / "activity.jsonl")
     monkeypatch.setattr(
         orchestrator,
         "STATE_FILE",

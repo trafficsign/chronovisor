@@ -30,6 +30,10 @@ THRESHOLD_POLICY = {
     "cooldown_seconds": 3600,
     "incident_budget_per_day": 4,
 }
+_LIVE_LAYOUT_LOG_SHA256 = "479d37f9f41843b9847e18adee9dcce1fc26cb8862341f94b996ca26037977d0"
+_LIVE_LAYOUT_SCHEMA_SHA256 = "0cc24c0be93ed3eef4ab534ccb95e77fc5e377529255ed07a52c4c509abf6a7b"
+_EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
+_INDEX_PREFIX = b"---\nokf_version: '0.2'\n---\n# Chronovisor pages\n"
 
 
 class WriterGateBlocked(RuntimeError):
@@ -66,6 +70,95 @@ def _require_safe_tree(directory_fd: int, flags: int) -> None:
             os.close(child_fd)
 
 
+def _read_regular(directory_fd: int, name: str, *, limit: int) -> bytes:
+    flags = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    descriptor = os.open(name, flags, dir_fd=directory_fd)
+    try:
+        snapshot = os.fstat(descriptor)
+        if not stat.S_ISREG(snapshot.st_mode) or snapshot.st_size > limit:
+            raise WriterGateBlocked
+        raw = os.read(descriptor, snapshot.st_size + 1)
+        if len(raw) != snapshot.st_size:
+            raise WriterGateBlocked
+        return raw
+    finally:
+        os.close(descriptor)
+
+
+def _require_regular(directory_fd: int, name: str, *, limit: int) -> None:
+    flags = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    descriptor = os.open(name, flags, dir_fd=directory_fd)
+    try:
+        snapshot = os.fstat(descriptor)
+        if not stat.S_ISREG(snapshot.st_mode) or snapshot.st_size > limit:
+            raise WriterGateBlocked
+    finally:
+        os.close(descriptor)
+
+
+def _read_regular_prefix(directory_fd: int, name: str, prefix: bytes, *, limit: int) -> None:
+    flags = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    descriptor = os.open(name, flags, dir_fd=directory_fd)
+    try:
+        snapshot = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(snapshot.st_mode)
+            or snapshot.st_size > limit
+            or os.read(descriptor, len(prefix)) != prefix
+        ):
+            raise WriterGateBlocked
+    finally:
+        os.close(descriptor)
+
+
+def _require_live_layout_proof(
+    root_fd: int, runtime_fd: int, directory_flags: int
+) -> None:
+    try:
+        proof = verify(
+            json.loads(
+                _read_regular(runtime_fd, "bootstrap-layout.json", limit=4096)
+            )
+        )
+    except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise WriterGateBlocked from exc
+    if (
+        proof.get("schema") != "chronovisor.live-layout.v1"
+        or proof.get("version") != 1
+        or proof.get("state") != "ready"
+        or proof.get("index_renderer_version") != 1
+        or proof.get("paths")
+        != {
+            "index": "pages/index.md",
+            "log": "pages/log.md",
+            "schema": "system/schema.md",
+            "activity": "runtime/activity.jsonl",
+        }
+        or proof.get("log_sha256") != _LIVE_LAYOUT_LOG_SHA256
+        or proof.get("schema_sha256") != _LIVE_LAYOUT_SCHEMA_SHA256
+        or proof.get("activity_prefix")
+        != {"length": 0, "sha256": _EMPTY_SHA256}
+    ):
+        raise WriterGateBlocked
+    pages_fd = os.open("pages", directory_flags, dir_fd=root_fd)
+    system_fd = os.open("system", directory_flags, dir_fd=root_fd)
+    try:
+        _read_regular_prefix(
+            pages_fd, "index.md", _INDEX_PREFIX, limit=16 * 1024 * 1024
+        )
+        log = _read_regular(pages_fd, "log.md", limit=4096)
+        schema = _read_regular(system_fd, "schema.md", limit=64 * 1024)
+        _require_regular(runtime_fd, "activity.jsonl", limit=64 * 1024 * 1024)
+    finally:
+        os.close(system_fd)
+        os.close(pages_fd)
+    if (
+        hashlib.sha256(log).hexdigest() != _LIVE_LAYOUT_LOG_SHA256
+        or hashlib.sha256(schema).hexdigest() != _LIVE_LAYOUT_SCHEMA_SHA256
+    ):
+        raise WriterGateBlocked
+
+
 @contextlib.contextmanager
 def writer_gate(chronovisor_root: Path):
     """Pin the root parent shared while rejecting non-legacy/migrating roots."""
@@ -89,9 +182,12 @@ def writer_gate(chronovisor_root: Path):
                 for mode in entries.values()
             ):
                 raise WriterGateBlocked
-            for name in ("index.md", "log.md", "schema.md"):
-                if not stat.S_ISREG(entries.get(name, 0)):
-                    raise WriterGateBlocked
+            legacy_reserved = tuple(
+                stat.S_ISREG(entries.get(name, 0))
+                for name in ("index.md", "log.md", "schema.md")
+            )
+            if any(legacy_reserved) and not all(legacy_reserved):
+                raise WriterGateBlocked
             if "config.toml" in entries and not stat.S_ISREG(entries["config.toml"]):
                 raise WriterGateBlocked
             for name in ("logs", "runtime"):
@@ -108,8 +204,31 @@ def writer_gate(chronovisor_root: Path):
                 finally:
                     os.close(child_fd)
             runtime_fd = os.open("runtime", flags, dir_fd=root_fd)
-            if "migrations" in _entries(runtime_fd):
+            runtime_entries = _entries(runtime_fd)
+            if "migrations" in runtime_entries:
                 raise WriterGateBlocked
+            if not all(legacy_reserved):
+                if any(legacy_reserved):
+                    raise WriterGateBlocked
+                if not stat.S_ISREG(runtime_entries.get("activity.jsonl", 0)):
+                    raise WriterGateBlocked
+                for directory, names in (
+                    ("pages", ("index.md", "log.md")),
+                    ("system", ("schema.md",)),
+                ):
+                    if not stat.S_ISDIR(entries.get(directory, 0)):
+                        raise WriterGateBlocked
+                    directory_fd = os.open(directory, flags, dir_fd=root_fd)
+                    try:
+                        child_entries = _entries(directory_fd)
+                        if any(
+                            not stat.S_ISREG(child_entries.get(name, 0))
+                            for name in names
+                        ):
+                            raise WriterGateBlocked
+                    finally:
+                        os.close(directory_fd)
+                _require_live_layout_proof(root_fd, runtime_fd, flags)
             entered = True
             yield
         finally:

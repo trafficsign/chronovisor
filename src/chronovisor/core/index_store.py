@@ -171,6 +171,15 @@ def canonical_document_path(
     return resolved
 
 
+def canonical_document_bytes(path: Path, root: Path) -> bytes | None:
+    """Read one contained file image with the canonical scanner's drift checks."""
+
+    resolved = contained_file(path, root)
+    if resolved is None:
+        return None
+    return _read_bytes_stable(resolved, root)
+
+
 def canonical_document_paths(
     pages_dir: Path,
     *,

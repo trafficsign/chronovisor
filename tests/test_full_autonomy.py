@@ -407,6 +407,46 @@ def test_independent_observer_main_blocks_without_mutation_when_parent_busy(
     assert not (root / "autonomy").exists()
 
 
+def test_independent_observer_allows_only_sealed_final_layout(
+    tmp_path: Path,
+) -> None:
+    observer_path = (
+        Path(__file__).parents[1] / "src" / "chronovisor" / "deadman_observer.py"
+    )
+    spec = importlib.util.spec_from_file_location("deadman_observer_final", observer_path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    from chronovisor.core.store import RuntimeContext, init_chronovisor
+
+    root = tmp_path / "wiki"
+    init_chronovisor(RuntimeContext(root))
+    read_names: list[str] = []
+    original_read_regular = module._read_regular
+
+    def tracked_read_regular(directory_fd: int, name: str, *, limit: int) -> bytes:
+        read_names.append(name)
+        return original_read_regular(directory_fd, name, limit=limit)
+
+    module._read_regular = tracked_read_regular
+    with module.writer_gate(root):
+        pass
+    assert "activity.jsonl" not in read_names
+
+    (root / "pages" / "log.md").write_text(
+        "# Derived change history\n\n## 2026-08-11\n- leaked activity\n"
+    )
+    with pytest.raises(module.WriterGateBlocked):
+        with module.writer_gate(root):
+            pass
+
+    (root / "pages" / "log.md").write_text("# Derived change history\n")
+    (root / "runtime" / "migrations").mkdir()
+    with pytest.raises(module.WriterGateBlocked):
+        with module.writer_gate(root):
+            pass
+
+
 def test_independent_observer_main_rejects_symlink_root_without_mutation(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

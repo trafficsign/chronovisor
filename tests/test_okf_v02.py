@@ -138,6 +138,10 @@ def test_reserved_documents_are_validated_at_every_level(tmp_path: Path) -> None
     pages_root = tmp_path / "pages"
     nested = pages_root / "nested"
     nested.mkdir(parents=True)
+    (pages_root / "page.md").write_text(
+        "---\ntitle: Page\ndescription: A page\nresource: local\ntags: [test]\n"
+        "updated: 2026-08-11\nstatus: stable\ntype: knowledge\n---\nBody.\n"
+    )
     (pages_root / "index.md").write_text(
         "* [Before section](premature.md) - ignored\n# Missing grouped link\n"
     )

@@ -253,7 +253,7 @@ def apply_merge_plan(
     registry_preimage = registry.path.read_bytes()
     registry_owned: bytes | None = None
     try:
-        with chronovisor_mutation_lock():
+        with chronovisor_mutation_lock(pages_dir=root / "pages"):
             for row in plan.get("inputs") or []:
                 path = root / str(row["path"])
                 raw = path.read_bytes()
@@ -325,7 +325,7 @@ def apply_merge_plan(
             )
     except Exception as exc:
         rollback: dict[str, bool] = {}
-        with chronovisor_mutation_lock():
+        with chronovisor_mutation_lock(pages_dir=root / "pages"):
             for path, original in original_bytes.items():
                 current = path.read_bytes() if path.exists() else None
                 owned = owned_bytes.get(path, current)

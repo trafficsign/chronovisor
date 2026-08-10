@@ -14,6 +14,8 @@ from types import SimpleNamespace
 import pytest
 
 from chronovisor.core import ollama, runtime_status
+from chronovisor.core.activity_log import activity_record
+from chronovisor.core.canonical_json import canonical_json_line_bytes_strict
 from chronovisor.core.durable_state import write_sealed_json
 from chronovisor.core.runtime_config import SearchEmbeddingConfig
 from chronovisor.ingest import orchestrator
@@ -77,6 +79,15 @@ def _reset_snapshot_fingerprint_cache() -> None:
             }
         )
         dashboard._SNAPSHOT_FINGERPRINT_CONDITION.notify_all()
+
+
+def _activity_bytes(*rows: tuple[str, str]) -> bytes:
+    return b"".join(
+        canonical_json_line_bytes_strict(
+            activity_record(message, source="ingest", timestamp=timestamp)
+        )
+        for timestamp, message in rows
+    )
 
 
 def test_typed_graph_dashboard_snapshot_separates_engineering_and_authority(
@@ -1607,7 +1618,11 @@ def test_build_snapshot_combines_runtime_and_queue(tmp_path: Path, monkeypatch) 
         "load_decision_router_config",
         lambda: SimpleNamespace(num_ctx=32768),
     )
-    monkeypatch.setattr(dashboard, "LOG_FILE", chronovisor_root / "log.md")
+    monkeypatch.setattr(
+        dashboard,
+        "ACTIVITY_FILE",
+        chronovisor_root / "runtime" / "activity.jsonl",
+    )
     monkeypatch.setattr(runtime_status, "RUNTIME_DIR", runtime_dir)
     monkeypatch.setattr(runtime_status, "STATUS_FILE", runtime_dir / "status.json")
     monkeypatch.setattr(runtime_status, "EVENTS_FILE", runtime_dir / "events.jsonl")
@@ -1620,8 +1635,11 @@ def test_build_snapshot_combines_runtime_and_queue(tmp_path: Path, monkeypatch) 
     monkeypatch.setattr(store, "RAW_DIR", raw_dir)
     monkeypatch.setattr(store, "PAGES_DIR", chronovisor_root / "pages")
     monkeypatch.setattr(store, "SYSTEM_DIR", chronovisor_root / "system")
-    monkeypatch.setattr(store, "INDEX_FILE", chronovisor_root / "index.md")
-    monkeypatch.setattr(store, "LOG_FILE", chronovisor_root / "log.md")
+    monkeypatch.setattr(store, "INDEX_FILE", chronovisor_root / "pages" / "index.md")
+    monkeypatch.setattr(store, "LOG_FILE", chronovisor_root / "pages" / "log.md")
+    monkeypatch.setattr(
+        store, "ACTIVITY_FILE", runtime_dir / "activity.jsonl"
+    )
     monkeypatch.setattr(orchestrator, "RAW_DIR", raw_dir)
     monkeypatch.setattr(
         orchestrator, "STATE_FILE", chronovisor_root / ".orchestrator_state.json"
@@ -2108,7 +2126,11 @@ def test_snapshot_fingerprint_tracks_explicit_runtime_cold_sources(
     artifact_dir = runtime_dir / "raw-projections" / "artifacts"
     artifact_dir.mkdir(parents=True)
     monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", chronovisor_root)
-    monkeypatch.setattr(dashboard, "LOG_FILE", chronovisor_root / "log.md")
+    monkeypatch.setattr(
+        dashboard,
+        "ACTIVITY_FILE",
+        chronovisor_root / "runtime" / "activity.jsonl",
+    )
     monkeypatch.setattr(
         orchestrator, "STATE_FILE", chronovisor_root / ".orchestrator_state.json"
     )
@@ -2176,7 +2198,11 @@ def test_cached_snapshot_ignores_live_status_churn_but_refreshes_cold_sources(
     runtime_dir = chronovisor_root / "runtime"
     runtime_dir.mkdir(parents=True)
     monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", chronovisor_root)
-    monkeypatch.setattr(dashboard, "LOG_FILE", chronovisor_root / "log.md")
+    monkeypatch.setattr(
+        dashboard,
+        "ACTIVITY_FILE",
+        chronovisor_root / "runtime" / "activity.jsonl",
+    )
     monkeypatch.setattr(
         orchestrator, "STATE_FILE", chronovisor_root / ".orchestrator_state.json"
     )
@@ -2251,7 +2277,11 @@ def test_cached_snapshot_refreshes_on_semantic_runtime_epoch_change(
     runtime_dir = chronovisor_root / "runtime"
     runtime_dir.mkdir(parents=True)
     monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", chronovisor_root)
-    monkeypatch.setattr(dashboard, "LOG_FILE", chronovisor_root / "log.md")
+    monkeypatch.setattr(
+        dashboard,
+        "ACTIVITY_FILE",
+        chronovisor_root / "runtime" / "activity.jsonl",
+    )
     monkeypatch.setattr(
         orchestrator, "STATE_FILE", chronovisor_root / ".orchestrator_state.json"
     )
@@ -2315,7 +2345,11 @@ def test_cached_snapshot_uses_30_second_cold_ttl_while_active(
     chronovisor_root = tmp_path / "wiki"
     chronovisor_root.mkdir()
     monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", chronovisor_root)
-    monkeypatch.setattr(dashboard, "LOG_FILE", chronovisor_root / "log.md")
+    monkeypatch.setattr(
+        dashboard,
+        "ACTIVITY_FILE",
+        chronovisor_root / "runtime" / "activity.jsonl",
+    )
     monkeypatch.setattr(
         orchestrator, "STATE_FILE", chronovisor_root / ".orchestrator_state.json"
     )
@@ -2762,7 +2796,11 @@ def test_cached_snapshot_rebuilds_after_a_source_changes_during_build(
     runtime_dir = chronovisor_root / "runtime"
     runtime_dir.mkdir(parents=True)
     monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", chronovisor_root)
-    monkeypatch.setattr(dashboard, "LOG_FILE", chronovisor_root / "log.md")
+    monkeypatch.setattr(
+        dashboard,
+        "ACTIVITY_FILE",
+        chronovisor_root / "runtime" / "activity.jsonl",
+    )
     monkeypatch.setattr(
         orchestrator, "STATE_FILE", chronovisor_root / ".orchestrator_state.json"
     )
@@ -2814,7 +2852,11 @@ def test_cached_snapshot_ignores_consensus_live_churn_but_tracks_audit(
     audit.write_text('{"revision": 1}\n', encoding="utf-8")
     trace.write_text('{"revision": 1}\n', encoding="utf-8")
     monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", chronovisor_root)
-    monkeypatch.setattr(dashboard, "LOG_FILE", chronovisor_root / "log.md")
+    monkeypatch.setattr(
+        dashboard,
+        "ACTIVITY_FILE",
+        chronovisor_root / "runtime" / "activity.jsonl",
+    )
     monkeypatch.setattr(
         orchestrator, "STATE_FILE", chronovisor_root / ".orchestrator_state.json"
     )
@@ -2881,7 +2923,11 @@ def test_build_snapshot_surfaces_frontier_human_required(
 
     monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", chronovisor_root)
     monkeypatch.setattr(dashboard, "init_chronovisor", lambda: None)
-    monkeypatch.setattr(dashboard, "LOG_FILE", chronovisor_root / "log.md")
+    monkeypatch.setattr(
+        dashboard,
+        "ACTIVITY_FILE",
+        chronovisor_root / "runtime" / "activity.jsonl",
+    )
     monkeypatch.setattr(runtime_status, "RUNTIME_DIR", runtime_dir)
     monkeypatch.setattr(runtime_status, "STATUS_FILE", runtime_dir / "status.json")
     monkeypatch.setattr(runtime_status, "EVENTS_FILE", runtime_dir / "events.jsonl")
@@ -2894,8 +2940,11 @@ def test_build_snapshot_surfaces_frontier_human_required(
     monkeypatch.setattr(store, "RAW_DIR", raw_dir)
     monkeypatch.setattr(store, "PAGES_DIR", chronovisor_root / "pages")
     monkeypatch.setattr(store, "SYSTEM_DIR", chronovisor_root / "system")
-    monkeypatch.setattr(store, "INDEX_FILE", chronovisor_root / "index.md")
-    monkeypatch.setattr(store, "LOG_FILE", chronovisor_root / "log.md")
+    monkeypatch.setattr(store, "INDEX_FILE", chronovisor_root / "pages" / "index.md")
+    monkeypatch.setattr(store, "LOG_FILE", chronovisor_root / "pages" / "log.md")
+    monkeypatch.setattr(
+        store, "ACTIVITY_FILE", runtime_dir / "activity.jsonl"
+    )
     monkeypatch.setattr(orchestrator, "RAW_DIR", raw_dir)
     monkeypatch.setattr(
         orchestrator, "STATE_FILE", chronovisor_root / ".orchestrator_state.json"
@@ -3321,7 +3370,11 @@ def test_runtime_failure_invalidates_model_cache_and_overlays_stale_snapshot(
     runtime_dir = chronovisor_root / "runtime"
     runtime_dir.mkdir(parents=True)
     monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", chronovisor_root)
-    monkeypatch.setattr(dashboard, "LOG_FILE", chronovisor_root / "log.md")
+    monkeypatch.setattr(
+        dashboard,
+        "ACTIVITY_FILE",
+        chronovisor_root / "runtime" / "activity.jsonl",
+    )
     monkeypatch.setattr(runtime_status, "RUNTIME_DIR", runtime_dir)
     monkeypatch.setattr(runtime_status, "STATUS_FILE", runtime_dir / "status.json")
     monkeypatch.setattr(runtime_status, "EVENTS_FILE", runtime_dir / "events.jsonl")
@@ -3393,7 +3446,11 @@ def test_decision_audit_invalidates_model_and_snapshot_fingerprints(
     audit_file = runtime_dir / "local-consensus" / "audit.jsonl"
     audit_file.parent.mkdir(parents=True)
     monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", chronovisor_root)
-    monkeypatch.setattr(dashboard, "LOG_FILE", chronovisor_root / "log.md")
+    monkeypatch.setattr(
+        dashboard,
+        "ACTIVITY_FILE",
+        chronovisor_root / "runtime" / "activity.jsonl",
+    )
     monkeypatch.setattr(
         orchestrator, "STATE_FILE", chronovisor_root / ".orchestrator_state.json"
     )
@@ -4049,10 +4106,11 @@ def test_save_history_snapshot_combines_raw_drain_and_log(
     logs_dir = chronovisor_root / "logs"
     raw_dir.mkdir(parents=True)
     logs_dir.mkdir(parents=True)
-    log_file = chronovisor_root / "log.md"
+    activity_file = chronovisor_root / "runtime" / "activity.jsonl"
+    activity_file.parent.mkdir(parents=True)
 
     monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", chronovisor_root)
-    monkeypatch.setattr(dashboard, "LOG_FILE", log_file)
+    monkeypatch.setattr(dashboard, "ACTIVITY_FILE", activity_file)
 
     raw_names = [
         "20260701-120000-codex-dashboard-save-history-aaaaaaaa.md",
@@ -4078,16 +4136,21 @@ def test_save_history_snapshot_combines_raw_drain_and_log(
         json.dumps(drain_record) + "\n",
         encoding="utf-8",
     )
-    log_file.write_text(
-        "\n".join(
-            [
-                "# Change Log",
-                "- [2026-07-01 12:31] ingest | created save-history-dashboard",
-                "- [2026-07-01 12:32] ingest | updated chronovisor-dashboard",
-                "- [2026-07-02 12:32] ingest | updated save-history-dashboard",
-            ]
-        ),
-        encoding="utf-8",
+    activity_file.write_bytes(
+        _activity_bytes(
+            (
+                "2026-07-01T12:31:00+00:00",
+                "ingest | created save-history-dashboard",
+            ),
+            (
+                "2026-07-01T12:32:00+00:00",
+                "ingest | updated chronovisor-dashboard",
+            ),
+            (
+                "2026-07-02T12:32:00+00:00",
+                "ingest | updated save-history-dashboard",
+            ),
+        )
     )
 
     history = dashboard._save_history_snapshot(days=4, today=date(2026, 7, 4))
@@ -4172,7 +4235,11 @@ def test_save_history_snapshot_reconciles_processed_orchestrator_state(
     )
 
     monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", chronovisor_root)
-    monkeypatch.setattr(dashboard, "LOG_FILE", chronovisor_root / "log.md")
+    monkeypatch.setattr(
+        dashboard,
+        "ACTIVITY_FILE",
+        chronovisor_root / "runtime" / "activity.jsonl",
+    )
 
     history = dashboard._save_history_snapshot(days=1, today=date(2026, 7, 4))
     day = history["days"][0]
@@ -4209,7 +4276,11 @@ def test_save_history_excludes_generated_semantic_projection_children(
     (raw_dir / child_name).write_text("derived child", encoding="utf-8")
 
     monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", chronovisor_root)
-    monkeypatch.setattr(dashboard, "LOG_FILE", chronovisor_root / "log.md")
+    monkeypatch.setattr(
+        dashboard,
+        "ACTIVITY_FILE",
+        chronovisor_root / "runtime" / "activity.jsonl",
+    )
 
     history = dashboard._save_history_snapshot(days=1, today=date(2026, 7, 4))
 
@@ -4253,7 +4324,11 @@ def test_save_history_expands_fragment_group_status_and_processed_wins(
     drain_log.write_text(json.dumps(failed) + "\n", encoding="utf-8")
 
     monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", chronovisor_root)
-    monkeypatch.setattr(dashboard, "LOG_FILE", chronovisor_root / "log.md")
+    monkeypatch.setattr(
+        dashboard,
+        "ACTIVITY_FILE",
+        chronovisor_root / "runtime" / "activity.jsonl",
+    )
 
     failed_history = dashboard._save_history_snapshot(days=1, today=date(2026, 7, 4))
     assert failed_history["totals"]["failed_bytes"] == 6
@@ -4283,7 +4358,11 @@ def test_save_history_expands_fragment_group_status_and_processed_wins(
 
 def test_save_history_snapshot_empty_wiki(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", tmp_path / "wiki")
-    monkeypatch.setattr(dashboard, "LOG_FILE", tmp_path / "wiki" / "log.md")
+    monkeypatch.setattr(
+        dashboard,
+        "ACTIVITY_FILE",
+        tmp_path / "wiki" / "runtime" / "activity.jsonl",
+    )
 
     history = dashboard._save_history_snapshot(days=2, today=date(2026, 7, 4))
 
@@ -4307,7 +4386,11 @@ def test_save_history_only_includes_segment_detail_for_recent_chart_window(
     (raw_dir / recent_name).write_text("recent", encoding="utf-8")
 
     monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", chronovisor_root)
-    monkeypatch.setattr(dashboard, "LOG_FILE", chronovisor_root / "log.md")
+    monkeypatch.setattr(
+        dashboard,
+        "ACTIVITY_FILE",
+        chronovisor_root / "runtime" / "activity.jsonl",
+    )
 
     history = dashboard._save_history_snapshot(days=31, today=date(2026, 7, 31))
     by_date = {row["date"]: row for row in history["days"]}

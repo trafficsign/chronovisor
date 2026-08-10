@@ -11,6 +11,8 @@ from unittest.mock import patch
 
 import pytest
 
+from chronovisor.core.activity_log import activity_record
+from chronovisor.core.canonical_json import canonical_json_line_bytes_strict
 from chronovisor.core.durable_state import write_sealed_json
 from chronovisor.core.knowledge_graph_schema import (
     EvidenceRef,
@@ -67,6 +69,19 @@ def _append_v2_capture(root: Path, *, after_line: int) -> RawSegmentReceipt:
             source_bytes=f'{{"line":{until_line}}}\n'.encode(),
             record_count=1,
         )
+
+
+def _activity_bytes(*messages: str) -> bytes:
+    return b"".join(
+        canonical_json_line_bytes_strict(
+            activity_record(
+                message,
+                source="ingest",
+                timestamp=f"2026-07-29T22:10:{index:02d}+00:00",
+            )
+        )
+        for index, message in enumerate(messages)
+    )
 
 
 def test_build_cortex_graph_uses_local_wiki_without_exposing_bodies(
@@ -736,9 +751,10 @@ def test_cortex_event_cursor_maps_durable_activity_to_firing_events(
     root = tmp_path / "chronovisor"
     recall_log = root / "recall" / "recall-log.jsonl"
     pull_log = root / "recall" / "pull-log.jsonl"
-    activity_log = root / "log.md"
+    activity_log = root / "runtime" / "activity.jsonl"
     raw_dir = root / "raw"
     pull_log.parent.mkdir(parents=True)
+    activity_log.parent.mkdir(parents=True)
     raw_dir.mkdir(parents=True)
     recall_log.write_text("", encoding="utf-8")
     pull_log.write_text("", encoding="utf-8")
@@ -797,10 +813,7 @@ def test_cortex_event_cursor_maps_durable_activity_to_firing_events(
     )
     (raw_dir / "capture.md").write_text("raw", encoding="utf-8")
     os.utime(raw_dir, ns=(raw_mtime + 1, raw_mtime + 1))
-    activity_log.write_text(
-        "- [22:14:00] ingest | updated folder/page-c.md\n",
-        encoding="utf-8",
-    )
+    activity_log.write_bytes(_activity_bytes("ingest | updated folder/page-c.md"))
 
     events = cursor.poll()
 
@@ -861,23 +874,19 @@ def test_cortex_event_cursor_maps_durable_activity_to_firing_events(
 
 def test_cortex_event_cursor_projects_ingest_lifecycle_phases(tmp_path: Path) -> None:
     root = tmp_path / "chronovisor"
-    activity_log = root / "log.md"
+    activity_log = root / "runtime" / "activity.jsonl"
     activity_log.parent.mkdir(parents=True)
     activity_log.write_text("", encoding="utf-8")
     cursor = cortex.CortexEventCursor(root, activity_log=activity_log)
 
-    activity_log.write_text(
-        "\n".join(
-            [
-                "- [22:10:00] ingest | stage 1: triage started",
-                "- [22:10:01] ingest | generating 1/1: semantic-projection/page-d",
-                "- [22:10:02] ingest | authorization: local -> apply_available",
-                "- [22:10:03] ingest | created semantic-projection/page-d.md",
-                "- [22:10:04] ingest | completed in 4.0s",
-            ]
+    activity_log.write_bytes(
+        _activity_bytes(
+            "ingest | stage 1: triage started",
+            "ingest | generating 1/1: semantic-projection/page-d",
+            "ingest | authorization: local -> apply_available",
+            "ingest | created semantic-projection/page-d.md",
+            "ingest | completed in 4.0s",
         )
-        + "\n",
-        encoding="utf-8",
     )
 
     events = cursor.poll()
@@ -899,6 +908,18 @@ def test_cortex_event_cursor_projects_ingest_lifecycle_phases(tmp_path: Path) ->
         "apply",
         "complete",
     ]
+
+
+def test_cortex_event_cursor_does_not_follow_activity_symlink(tmp_path: Path) -> None:
+    root = tmp_path / "chronovisor"
+    activity_path = root / "runtime" / "activity.jsonl"
+    activity_path.parent.mkdir(parents=True)
+    cursor = cortex.CortexEventCursor(root, activity_log=activity_path)
+    outside = tmp_path / "outside.jsonl"
+    outside.write_bytes(_activity_bytes("ingest | created secret.md"))
+    activity_path.symlink_to(outside)
+
+    assert cursor.poll() == []
 
 
 def test_cortex_event_cursor_bounds_and_sanitizes_page_ids(tmp_path: Path) -> None:
@@ -943,7 +964,8 @@ def test_cortex_latest_field_stream_includes_real_memory_io(tmp_path: Path) -> N
     event_root.mkdir(parents=True)
     recall_log = root / "recall" / "recall-log.jsonl"
     pull_log = root / "recall" / "pull-log.jsonl"
-    activity_log = root / "log.md"
+    activity_log = root / "runtime" / "activity.jsonl"
+    activity_log.parent.mkdir(parents=True, exist_ok=True)
     recall_log.write_text("", encoding="utf-8")
     pull_log.write_text("", encoding="utf-8")
     activity_log.write_text("", encoding="utf-8")
@@ -998,10 +1020,7 @@ def test_cortex_latest_field_stream_includes_real_memory_io(tmp_path: Path) -> N
         encoding="utf-8",
     )
     receipt = _append_v2_capture(root, after_line=1)
-    activity_log.write_text(
-        "- [22:10:03] ingest | updated page-b.md\n",
-        encoding="utf-8",
-    )
+    activity_log.write_bytes(_activity_bytes("ingest | updated page-b.md"))
 
     events = cursor.poll()
 
@@ -1213,7 +1232,8 @@ def test_cortex_event_cursor_tails_only_selected_field_session(
     event_path.write_text("", encoding="utf-8")
     recall_log = root / "recall" / "recall-log.jsonl"
     pull_log = root / "recall" / "pull-log.jsonl"
-    activity_log = root / "log.md"
+    activity_log = root / "runtime" / "activity.jsonl"
+    activity_log.parent.mkdir(parents=True, exist_ok=True)
     recall_log.write_text("", encoding="utf-8")
     pull_log.write_text("", encoding="utf-8")
     activity_log.write_text("", encoding="utf-8")
@@ -1273,10 +1293,7 @@ def test_cortex_event_cursor_tails_only_selected_field_session(
         + receipt.commit_path.read_text(encoding="utf-8"),
         encoding="utf-8",
     )
-    activity_log.write_text(
-        "- [22:10:03] ingest | updated page-ingested.md\n",
-        encoding="utf-8",
-    )
+    activity_log.write_bytes(_activity_bytes("ingest | updated page-ingested.md"))
 
     events = cursor.poll()
 

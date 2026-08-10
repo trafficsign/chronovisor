@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import stat
 import threading
 import time
 from collections import deque
@@ -14,6 +16,7 @@ from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from chronovisor.core import activity_log as operational_activity
 from chronovisor.core.canonical_document import (
     Namespace,
     parse_document,
@@ -1180,7 +1183,7 @@ class CortexEventCursor:
         self.root = root.expanduser().resolve()
         self.recall_log = recall_log or self.root / "recall" / "recall-log.jsonl"
         self.pull_log = pull_log or self.root / "recall" / "pull-log.jsonl"
-        self.activity_log = activity_log or self.root / "log.md"
+        self.activity_log = activity_log or self.root / "runtime" / "activity.jsonl"
         self.raw_dir = self.root / "raw"
         self.field_session = (
             field_session if _FIELD_SESSION_RE.fullmatch(field_session) else ""
@@ -1236,19 +1239,27 @@ class CortexEventCursor:
         return stat.st_dev, stat.st_ino
 
     def _tail_lines(self, path: Path) -> list[str]:
-        size = self._file_size(path)
-        offset = self._offsets.get(path, 0)
-        if size < offset:
-            offset = 0
-            self._remainders.pop(path, None)
-        if size == offset:
-            return []
+        descriptor = -1
         try:
-            with path.open("rb") as handle:
-                handle.seek(offset)
-                chunk = handle.read()
+            flags = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+            descriptor = os.open(path, flags)
+            snapshot = os.fstat(descriptor)
+            if not stat.S_ISREG(snapshot.st_mode):
+                return []
+            size = snapshot.st_size
+            offset = self._offsets.get(path, 0)
+            if size < offset:
+                offset = 0
+                self._remainders.pop(path, None)
+            if size == offset:
+                return []
+            os.lseek(descriptor, offset, os.SEEK_SET)
+            chunk = os.read(descriptor, min(size - offset, 1024 * 1024))
         except OSError:
             return []
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
         self._offsets[path] = offset + len(chunk)
         data = self._remainders.pop(path, b"") + chunk
         if data and not data.endswith(b"\n"):
@@ -1649,8 +1660,14 @@ class CortexEventCursor:
 
     def _ingest_events(self) -> list[dict[str, Any]]:
         events: list[dict[str, Any]] = []
-        for line in self._tail_lines(self.activity_log):
-            match = _INGEST_PAGE_RE.search(line)
+        activities, offset = operational_activity.read_activity_delta(
+            self.activity_log,
+            offset=self._offsets.get(self.activity_log, 0),
+        )
+        self._offsets[self.activity_log] = offset
+        for activity in activities:
+            message = activity["message"]
+            match = _INGEST_PAGE_RE.search(message)
             if match:
                 page_id = Path(match.group("page").strip()).stem
                 operation = match.group("operation")
@@ -1665,7 +1682,7 @@ class CortexEventCursor:
                     )
                 )
                 continue
-            match = _INGEST_GENERATE_RE.search(line)
+            match = _INGEST_GENERATE_RE.search(message)
             if match:
                 page_id = Path(match.group("page").strip()).stem
                 events.append(
@@ -1677,7 +1694,7 @@ class CortexEventCursor:
                         phase="generate",
                     )
                 )
-            elif _INGEST_STAGE_RE.search(line):
+            elif _INGEST_STAGE_RE.search(message):
                 events.append(
                     self._event(
                         "ingest",
@@ -1687,7 +1704,7 @@ class CortexEventCursor:
                         phase="triage",
                     )
                 )
-            elif _INGEST_AUTH_RE.search(line):
+            elif _INGEST_AUTH_RE.search(message):
                 events.append(
                     self._event(
                         "ingest",
@@ -1697,7 +1714,7 @@ class CortexEventCursor:
                         phase="consensus",
                     )
                 )
-            elif _INGEST_COMPLETE_RE.search(line):
+            elif _INGEST_COMPLETE_RE.search(message):
                 events.append(
                     self._event(
                         "ingest",
