@@ -113,6 +113,16 @@ class TokenUsage:
 
 
 @dataclass(frozen=True)
+class BackendCapabilities:
+    generation: bool
+    embedding: bool
+    structured_output: bool = False
+    streaming: bool = False
+    tools: bool = False
+    rerank: bool = False
+
+
+@dataclass(frozen=True)
 class GenerationRequest:
     prompt: str = field(repr=False)
     source: SourceDataClassification
