@@ -1,0 +1,58 @@
+{
+  "catalog": {
+    "destination": "deep/nested/destination.md"
+  },
+  "documents": [
+    {
+      "path": "notes/missing.md",
+      "data": "---\nuid: uid-missing\ntitle: Legacy: unsafe YAML\n---\nMissing status.\n"
+    },
+    {
+      "path": "notes/active.md",
+      "data": "---\nuid: uid-active\nsummary: Legacy summary\nstatus: active\nchronovisor_status: indexed\narchive_reason: merged\narchive_provenance: migration-test\nsuperseded_by: destination\n---\nBefore [[destination]] after [[unknown]].\n\n`[[destination]]`\n\n```text\n[[destination]]\n```\n"
+    },
+    {
+      "path": "notes/draft.md",
+      "data": "---\nuid: uid-draft\ntype: Concept\nstatus: draft\n---\nDraft.\n"
+    },
+    {
+      "path": "notes/stable.md",
+      "data": "---\nuid: uid-stable\ntype: Concept\nstatus: stable\nextension:\n  nested:\n    - one\n    - two\n---\nStable.\n"
+    },
+    {
+      "path": "notes/deprecated.md",
+      "data": "---\nuid: uid-deprecated\ntype: Concept\nstatus: deprecated\nsuperseded_by: destination\n---\nDeprecated.\n"
+    },
+    {
+      "path": "notes/archived.md",
+      "data": "---\nuid: uid-archived\ntype: Concept\nstatus: archived\n---\nArchived.\n"
+    },
+    {
+      "path": "index.md",
+      "data": "reserved root index"
+    },
+    {
+      "path": "log.md",
+      "data": "reserved root log"
+    },
+    {
+      "path": "schema.md",
+      "data": "reserved root schema"
+    },
+    {
+      "path": "current-state.md",
+      "namespace": "system",
+      "data": "private system document"
+    }
+  ],
+  "invalid": {
+    "path": "notes/invalid.md",
+    "data": "---\nuid: uid-invalid\ntype: Concept\nstatus: obsolete\n---\nInvalid.\n"
+  },
+  "raw": [
+    {
+      "path": "sessions/raw.jsonl",
+      "data": "{\"immutable\":true}\n"
+    }
+  ]
+}
