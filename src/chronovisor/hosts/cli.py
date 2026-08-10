@@ -589,6 +589,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Show the installed package revision without reading Wiki content.",
     )
     runtime_identity_parser.add_argument("--json", action="store_true")
+    okf_parser = sub.add_parser("okf", help="Inspect or prepare the OKF migration.")
+    okf_sub = okf_parser.add_subparsers(dest="okf_command", required=True)
+    okf_status = okf_sub.add_parser("status", help="Inspect the OKF startup gate.")
+    okf_status.add_argument("--root", type=Path)
+    okf_status.add_argument("--json", action="store_true")
+    okf_prepare = okf_sub.add_parser("prepare", help="Prepare one offline workspace.")
+    okf_prepare.add_argument("--run-id", required=True)
+    okf_prepare.add_argument("--root", type=Path)
+    okf_prepare.add_argument("--json", action="store_true")
     doctor_parser = sub.add_parser("doctor", help="Run operational checks.")
     doctor_parser.add_argument("--json", action="store_true")
     _configure_credentials_parser(sub)
@@ -951,6 +960,8 @@ def _dispatch_credentials(args: argparse.Namespace) -> int:
 
 def dispatch(args: argparse.Namespace) -> int:
     """Dispatch one already-parsed command while preserving its exit contract."""
+    if args.command == "okf":
+        return _dispatch_okf(args)
     if args.command == "credentials":
         return _dispatch_credentials(args)
     if args.command == "status":
@@ -1441,6 +1452,55 @@ def dispatch(args: argparse.Namespace) -> int:
                     f"{data.get('from_run_id') or '--'} -> {data.get('to_run_id') or '--'}"
                 )
             return 0
+    return 0
+
+
+def _dispatch_okf(args: argparse.Namespace) -> int:
+    from dataclasses import asdict
+
+    root = args.root or chronovisor_store.CHRONOVISOR_ROOT
+    decision = chronovisor_store.okf_startup_status(root)
+    if args.okf_command == "status":
+        data = asdict(decision)
+        if args.json:
+            print(json.dumps(data, sort_keys=True))
+        else:
+            for key in ("allowed", "layout", "state", "category", "run_id"):
+                print(f"{key}\t{data[key] if data[key] is not None else '--'}")
+        return 0 if decision.allowed else 75
+
+    if not decision.allowed or decision.state not in {"uninitialized", "unmigrated"}:
+        data = {
+            "prepared": False,
+            "category": decision.category if not decision.allowed else "already_migrated",
+        }
+        if args.json:
+            print(json.dumps(data, sort_keys=True))
+        else:
+            print("prepared\tfalse")
+            print(f"category\t{data['category']}")
+        return 75
+    try:
+        chronovisor_store.prepare_okf_startup(root, args.run_id)
+    except (OSError, RuntimeError, TypeError, ValueError):
+        data = {"prepared": False, "category": "prepare_failed"}
+        if args.json:
+            print(json.dumps(data, sort_keys=True))
+        else:
+            print("prepared\tfalse")
+            print("category\tprepare_failed")
+        return 75
+    data = {
+        "prepared": True,
+        "category": "ok",
+        "run_id": args.run_id,
+        "workspace": f"runtime/migrations/{args.run_id}",
+    }
+    if args.json:
+        print(json.dumps(data, sort_keys=True))
+    else:
+        for key in ("prepared", "category", "run_id", "workspace"):
+            print(f"{key}\t{data[key]}")
     return 0
 
 

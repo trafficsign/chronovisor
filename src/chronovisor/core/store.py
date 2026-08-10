@@ -3,6 +3,10 @@
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from chronovisor.core.okf_cutover import OKFStartupDecision
 
 DEFAULT_ROOT = Path.home() / ".chronovisor"
 
@@ -167,6 +171,20 @@ def page_id_from_path(path: Path) -> str:
     return path.stem
 
 
+def okf_startup_status(root: Path) -> "OKFStartupDecision":
+    """Return the read-only OKF startup decision for one data root."""
+    from chronovisor.core.okf_cutover import discover_okf_startup
+
+    return discover_okf_startup(root, root / "runtime")
+
+
+def prepare_okf_startup(root: Path, run_id: str) -> Path:
+    """Prepare one offline OKF workspace below the root's runtime directory."""
+    from chronovisor.core.okf_workspace import prepare_okf_workspace
+
+    return prepare_okf_workspace(root, root / "runtime", run_id)
+
+
 def init_chronovisor(context: RuntimeContext | None = None) -> None:
     """Initialize the Chronovisor directory structure."""
     if context is None:
@@ -186,10 +204,18 @@ def init_chronovisor(context: RuntimeContext | None = None) -> None:
             context.schema_file,
         )
 
+    from chronovisor.core.okf_cutover import require_okf_startup_allowed
+
+    startup = require_okf_startup_allowed(root, root / "runtime")
+
     for directory in (root, raw_dir, pages_dir, system_dir):
         directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         directory.chmod(0o700)
 
+    if startup.layout == "okf_v0_2":
+        return
+
+    # Transitional legacy/bootstrap writer; removed after the OKF live cutover.
     if not index_file.exists():
         index_file.write_text(
             "---\ntitle: Index\nupdated: 1970-01-01\n---\n\n"

@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -95,6 +96,234 @@ class _Asset:
     old: Mapping[str, str] | tuple[int, str] | None
     new: Mapping[str, str] | tuple[int, str]
     directory: bool
+
+
+@dataclass(frozen=True, slots=True)
+class OKFStartupDecision:
+    """Content-free startup decision derived only from durable disk state."""
+
+    allowed: bool
+    layout: str
+    state: str
+    category: str
+    run_id: str | None = None
+
+
+class OKFStartupBlocked(RuntimeError):
+    """Startup was refused without exposing paths or migration contents."""
+
+    def __init__(self, decision: OKFStartupDecision) -> None:
+        self.decision = decision
+        super().__init__(f"OKF startup blocked: {decision.category}")
+
+
+_WORKSPACE_ENTRIES = {
+    "cutover.lock": "file",
+    "dry-run-manifest.json": "file",
+    "journal.json": "file",
+    "receipt.json": "file",
+    RESTART_REFUSAL_FILENAME: "file",
+    "rollback-backup": "directory",
+    "staging": "directory",
+}
+_BOOTSTRAP_ENTRIES = {
+    "config.toml": "file",
+    "logs": "directory",
+    "pages": "directory",
+    "raw": "directory",
+    "runtime": "directory",
+    "system": "directory",
+}
+_ROOT_RESERVED = ("index.md", "log.md", "schema.md")
+
+
+def discover_okf_startup(source_root: Path, runtime_root: Path) -> OKFStartupDecision:
+    """Inspect one root without mutation and return its fail-closed startup state."""
+
+    try:
+        if _has_symlink_component(source_root) or _has_symlink_component(runtime_root):
+            return _blocked("unsafe_source_root")
+        source_kind = _path_kind(source_root)
+        if source_kind not in {"absent", "directory"}:
+            return _blocked("unsafe_source_root")
+
+        runtime_kind = _path_kind(runtime_root)
+        if runtime_kind not in {"absent", "directory"}:
+            return _blocked("unsafe_runtime_root")
+        migrations = runtime_root / "migrations"
+        migrations_kind = _path_kind(migrations)
+        if migrations_kind != "absent":
+            if migrations_kind != "directory":
+                return _blocked("unsafe_migration_directory")
+            return _discover_migration(source_root, runtime_root, migrations)
+        if source_kind == "absent":
+            return OKFStartupDecision(True, "bootstrap", "uninitialized", "ok")
+        return _discover_unmigrated(source_root)
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return _blocked("startup_inspection_failed")
+
+
+def require_okf_startup_allowed(
+    source_root: Path, runtime_root: Path
+) -> OKFStartupDecision:
+    """Return the startup decision or raise a content-free refusal."""
+
+    decision = discover_okf_startup(source_root, runtime_root)
+    if not decision.allowed:
+        raise OKFStartupBlocked(decision)
+    return decision
+
+
+def _discover_migration(
+    source_root: Path, runtime_root: Path, migrations: Path
+) -> OKFStartupDecision:
+    entries = _directory_entries(migrations)
+    if not entries:
+        return _blocked("migration_residue")
+    if any(
+        not _RUN_ID_RE.fullmatch(name) or kind != "directory"
+        for name, kind in entries.items()
+    ):
+        return _blocked("unsafe_migration_directory")
+    if len(entries) != 1:
+        return _blocked("multiple_migrations")
+
+    run_id = next(iter(entries))
+    workspace = migrations / run_id
+    unsafe = _tree_has_unsafe_entry(workspace)
+    if unsafe:
+        return _blocked("unsafe_migration_workspace", run_id=run_id)
+    workspace_entries = _directory_entries(workspace)
+    if workspace_entries == {"receipt.json": "file"}:
+        return _blocked("receipt_validation_unsupported", run_id=run_id)
+    if any(
+        _WORKSPACE_ENTRIES.get(name) != kind for name, kind in workspace_entries.items()
+    ):
+        return _blocked("unsafe_migration_workspace", run_id=run_id)
+    if RESTART_REFUSAL_FILENAME in workspace_entries:
+        return _blocked("restart_refusal_active", run_id=run_id)
+    if not {"dry-run-manifest.json", "journal.json"}.issubset(workspace_entries):
+        return _blocked("migration_proof_invalid", run_id=run_id)
+    try:
+        journal = _read_canonical_object(
+            workspace / "journal.json", "migration journal"
+        )
+    except (OSError, TypeError, ValueError):
+        return _blocked("migration_proof_invalid", run_id=run_id)
+    observed_state = journal.get("state")
+    state = (
+        observed_state
+        if observed_state
+        in {
+            "prepared",
+            "in-progress",
+            "committed",
+            "rollback-complete",
+        }
+        else "unknown"
+    )
+    if state not in {"committed", "rollback-complete"}:
+        return _blocked("migration_nonterminal", state=state, run_id=run_id)
+    if not okf_startup_allowed(source_root, runtime_root, run_id):
+        return _blocked("migration_proof_invalid", state=state, run_id=run_id)
+    return OKFStartupDecision(
+        True,
+        "okf_v0_2" if state == "committed" else "legacy",
+        state,
+        "ok",
+        run_id,
+    )
+
+
+def _discover_unmigrated(source_root: Path) -> OKFStartupDecision:
+    reserved = {name: _path_kind(source_root / name) for name in _ROOT_RESERVED}
+    if any(kind not in {"absent", "file"} for kind in reserved.values()):
+        return _blocked("unsafe_legacy_layout")
+    present = sum(kind == "file" for kind in reserved.values())
+    if 0 < present < len(_ROOT_RESERVED):
+        return _blocked("partial_legacy_layout")
+    if present == len(_ROOT_RESERVED):
+        if _unsafe_legacy_root(source_root):
+            return _blocked("unsafe_legacy_layout")
+        return OKFStartupDecision(True, "legacy", "unmigrated", "ok")
+
+    entries = _directory_entries(source_root)
+    if any(_BOOTSTRAP_ENTRIES.get(name) != kind for name, kind in entries.items()):
+        return _blocked("unsafe_bootstrap_layout")
+    for name, kind in entries.items():
+        if kind == "directory" and _directory_entries(source_root / name):
+            return _blocked("content_without_migration")
+    return OKFStartupDecision(True, "bootstrap", "uninitialized", "ok")
+
+
+def _unsafe_legacy_root(source_root: Path) -> bool:
+    entries = _directory_entries(source_root)
+    if any(kind not in {"file", "directory"} for kind in entries.values()):
+        return True
+    for name in ("raw", "pages", "system", "runtime", "logs"):
+        if name in entries and entries[name] != "directory":
+            return True
+        if (
+            name in {"raw", "pages", "system"}
+            and name in entries
+            and _tree_has_unsafe_entry(source_root / name)
+        ):
+            return True
+    return "config.toml" in entries and entries["config.toml"] != "file"
+
+
+def _tree_has_unsafe_entry(root: Path) -> bool:
+    pending = [root]
+    while pending:
+        directory = pending.pop()
+        for name, kind in _directory_entries(directory).items():
+            if kind not in {"file", "directory"}:
+                return True
+            if kind == "directory":
+                pending.append(directory / name)
+    return False
+
+
+def _has_symlink_component(path: Path) -> bool:
+    current = path.absolute()
+    while True:
+        if _path_kind(current) == "symlink":
+            return True
+        if current == current.parent:
+            return False
+        current = current.parent
+
+
+def _directory_entries(path: Path) -> dict[str, str]:
+    entries: dict[str, str] = {}
+    with os.scandir(path) as iterator:
+        for entry in iterator:
+            mode = entry.stat(follow_symlinks=False).st_mode
+            entries[entry.name] = _mode_kind(mode)
+    return entries
+
+
+def _path_kind(path: Path) -> str:
+    try:
+        return _mode_kind(path.lstat().st_mode)
+    except FileNotFoundError:
+        return "absent"
+
+
+def _mode_kind(mode: int) -> str:
+    if stat.S_ISREG(mode):
+        return "file"
+    if stat.S_ISDIR(mode):
+        return "directory"
+    if stat.S_ISLNK(mode):
+        return "symlink"
+    return "unsupported"
+
+
+def _blocked(
+    category: str, *, state: str = "blocked", run_id: str | None = None
+) -> OKFStartupDecision:
+    return OKFStartupDecision(False, "blocked", state, category, run_id)
 
 
 def execute_okf_cutover(

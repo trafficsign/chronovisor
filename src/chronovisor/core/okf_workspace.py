@@ -429,7 +429,7 @@ def _mkdir_durable(path: Path) -> None:
         return
     if not path.parent.exists():
         _mkdir_durable(path.parent)
-    path.mkdir()
+    path.mkdir(mode=0o700)
     fsync_directory(path.parent)
 
 
