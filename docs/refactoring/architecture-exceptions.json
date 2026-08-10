@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "source_baseline_head": "d404a6b20d00e3bcd1d4cdb89edfa5a718c51833",
-  "baseline_sha256": "2ed9582da7f6f3f279ca57fee7619323c4735f85851eb5eeb769c8705775a60a",
+  "baseline_sha256": "4cbaeeec21054e3598bfb5a4306a02720f41ea4e6275563cea373995a6dedfe4",
   "semantic_identity": "cross-domain edges use category+source_package+target_package; statement exceptions use category+source_package+source_module+scope_kind+scope+statement_kind+target_package+target_module+symbols+occurrence; source line is diagnostic and normalized statement content is verified independently",
   "counts": {
     "exceptions": 44,
@@ -1744,7 +1744,7 @@
           ],
           "content_sha256": "1da0d58353f28b183cf2f1ed3698484d43b925b135b3d85ccaa96b7cf90055d6",
           "occurrence": 1,
-          "line": 1007
+          "line": 1015
         },
         {
           "semantic_id": "arch:aa61b6cf54f38da79a1302a199f2773dc896e5e3885c640b318683bed503d7e8",
@@ -4759,20 +4759,6 @@
           "line": 14
         },
         {
-          "semantic_id": "arch:381d4903c6f1a6ba31ad87d139a8f700cf430c8aa1f9d9206fd99941bb3d3915",
-          "source_module": "chronovisor.recall.rubric_calibration",
-          "scope_kind": "module",
-          "scope": "<module>",
-          "statement_kind": "from",
-          "target_module": "chronovisor.core.runtime_config",
-          "symbols": [
-            "load_decision_router_config"
-          ],
-          "content_sha256": "2732b02339baac93338cb46c88e1940bca7e393b066603ce2a4118f72490f0b2",
-          "occurrence": 1,
-          "line": 23
-        },
-        {
           "semantic_id": "arch:3a70bf003be202249c7767c723b909cc3dbcaffae431529e99b2785714e194a8",
           "source_module": "chronovisor.recall.collection_authority",
           "scope_kind": "module",
@@ -4887,7 +4873,7 @@
           ],
           "content_sha256": "4242bb4bde7fb49acb149c12ead114a7ae4ae4bcd0c7fa594c315be66719223c",
           "occurrence": 1,
-          "line": 22
+          "line": 23
         },
         {
           "semantic_id": "arch:481984632fedacd224bcf25a71537b66e21ae35de639d39c4ff3f175cdb40e61",
@@ -5276,7 +5262,7 @@
           ],
           "content_sha256": "02cf87c6db2008cd41847c1b26b03cf3936e447c30c3f6cb42a0587bfad55739",
           "occurrence": 1,
-          "line": 15
+          "line": 16
         },
         {
           "semantic_id": "arch:67f3934139366b99334af7bda839cb9027dde69203ba276db6d7eb94d2f467e9",
@@ -5998,6 +5984,21 @@
           "line": 10
         },
         {
+          "semantic_id": "arch:9b5f5911427c7b130121cc6e7e2e086277c88bc47130aac6c4980fcd52803d12",
+          "source_module": "chronovisor.recall.rubric_calibration",
+          "scope_kind": "module",
+          "scope": "<module>",
+          "statement_kind": "from",
+          "target_module": "chronovisor.core",
+          "symbols": [
+            "index_store",
+            "ollama"
+          ],
+          "content_sha256": "8d29b9589efd65b9d8eebf613f9f09013df79c072ba96a6f4d663aef3b320462",
+          "occurrence": 1,
+          "line": 15
+        },
+        {
           "semantic_id": "arch:a11187329c63a1e62159112c6d4bc95b3088f8b1fb4f0f1c484ba8ad6915ba10",
           "source_module": "chronovisor.recall.classification_resolver",
           "scope_kind": "module",
@@ -6296,7 +6297,7 @@
           ],
           "content_sha256": "ffce896a81f9f840e5e0a3759769fc6717f867eeac0d681fe2faa58d11beaf6f",
           "occurrence": 1,
-          "line": 21
+          "line": 22
         },
         {
           "semantic_id": "arch:ba27d21d36badf5f41bb0b18f05ec786118bdd950027ed42db2d098158027a16",
@@ -6482,7 +6483,7 @@
           ],
           "content_sha256": "f998db59007eb15e313cec9fe9abc8ec7eeabd4aa6779e1b915d7eab5010b0cd",
           "occurrence": 1,
-          "line": 16
+          "line": 17
         },
         {
           "semantic_id": "arch:cc27d055de483289728c435d54a45ba86bb21d0c31f9c4933be94f86588e7c97",

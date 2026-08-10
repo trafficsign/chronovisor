@@ -45,7 +45,7 @@ def test_default_runtime_loader_caches_one_process_runtime(
     expected = object()
     calls = 0
 
-    def load() -> object:
+    def load(**_kwargs: object) -> object:
         nonlocal calls
         calls += 1
         return expected
@@ -564,6 +564,7 @@ def test_repository_example_has_representative_local_role_map() -> None:
         "recall.query_rewriter",
         "recall.policy_proposer.primary",
         "recall.policy_proposer.challenger",
+        "recall.rubric.variant",
         "research.planner",
         "research.challenge",
         "research.tie_break",
@@ -633,6 +634,13 @@ def test_repository_example_has_representative_local_role_map() -> None:
     )
     for role in proposer_roles:
         assert f'# role = "{role}"\n# data_class = "raw"' in text
+    rubric_variant = config.roles["recall.rubric.variant"]
+    assert rubric_variant.provider_id == "local"
+    assert rubric_variant.model == "gemma4:26b"
+    assert rubric_variant.required_capabilities == ("structured_output",)
+    assert (
+        '# role = "recall.rubric.variant"\n# data_class = "raw"' in text
+    )
     assert [
         config.roles[role].model
         for role in (

@@ -131,6 +131,12 @@ provider = "local"
 model = "gemma4:26b"
 required_capabilities = ["structured_output"]
 
+[llm.roles."recall.rubric.variant"]
+capability = "generation"
+provider = "local"
+model = "gemma4:26b"
+required_capabilities = ["structured_output"]
+
 [llm.roles."research.planner"]
 capability = "generation"
 provider = "local"
@@ -174,6 +180,9 @@ required_capabilities = ["structured_output"]
 # data_class = "raw"
 # [[llm.egress_opt_in]]
 # role = "recall.policy_proposer.challenger"
+# data_class = "raw"
+# [[llm.egress_opt_in]]
+# role = "recall.rubric.variant"
 # data_class = "raw"
 
 [decision_router]
@@ -544,6 +553,15 @@ output and classify inputs as `raw/high`; remote providers require each exact
 role + `raw` opt-in and never fall back to another provider. Legacy
 `[recall_improvement].models` and `CHRONOVISOR_RECALL_IMPROVEMENT_MODELS`
 cannot select runtime models, and CLI `--models` is unavailable.
+
+Offline Recall rubric variants use only the fixed structured role
+`llm.roles."recall.rubric.variant"`; there is no model fallback. Every prompt
+contains the raw user query. Page-namespace cases are therefore classified as
+`raw/high`, and a remote route requires the exact role + `raw` opt-in. A
+system-namespace excerpt is `system/high` and currently runs locally only:
+until generation supports separate raw-query and system-excerpt preflight, a
+remote system case is denied before any backend call even when egress opt-ins
+exist.
 
 Deep Retrieval v1 requery generation is fixed by
 `llm.roles."research.deep_retrieval_requery"`; Decision Router model fields do

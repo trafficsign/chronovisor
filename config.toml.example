@@ -180,6 +180,12 @@ provider = "local"
 model = "gemma4:26b"
 required_capabilities = ["structured_output"]
 
+[llm.roles."recall.rubric.variant"]
+capability = "generation"
+provider = "local"
+model = "gemma4:26b"
+required_capabilities = ["structured_output"]
+
 [llm.roles."research.planner"]
 capability = "generation"
 provider = "local"
@@ -317,6 +323,12 @@ model = "gpt-oss:20b"
 # provider = "openai"
 # model = "gpt-5-mini"
 #
+# [llm.roles."recall.rubric.variant"]
+# capability = "generation"
+# provider = "openai"
+# model = "gpt-5-mini"
+# required_capabilities = ["structured_output"]
+#
 # [llm.roles."ingest.generation"]
 # capability = "generation"
 # provider = "openai"
@@ -371,6 +383,10 @@ model = "gpt-oss:20b"
 #
 # [[llm.egress_opt_in]]
 # role = "recall.policy_proposer.challenger"
+# data_class = "raw"
+#
+# [[llm.egress_opt_in]]
+# role = "recall.rubric.variant"
 # data_class = "raw"
 #
 # [[llm.egress_opt_in]]

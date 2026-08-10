@@ -12,6 +12,7 @@ from pathlib import Path
 from time import monotonic
 from typing import Any
 
+from chronovisor.core import index_store, ollama
 from chronovisor.core.canonical_json import canonical_json_sha256_stringifying
 from chronovisor.core.durable_state import (
     DurableStateError,
@@ -20,7 +21,6 @@ from chronovisor.core.durable_state import (
 )
 from chronovisor.core.jsonl_write import append_jsonl_durable
 from chronovisor.core.knowledge_graph_schema import sha256
-from chronovisor.core.runtime_config import load_decision_router_config
 from chronovisor.core.store import CHRONOVISOR_ROOT
 from chronovisor.decision.graph_decisions import (
     RECALL_RUBRIC_CALIBRATION_SCHEMA,
@@ -39,6 +39,27 @@ LAST_KNOWN_GOOD_FILE = RUBRIC_ROOT / "last-known-good.json"
 STATUS_FILE = RUBRIC_ROOT / "status.json"
 RUBRIC_SCHEMA_VERSION = 1
 RUBRIC_GOLD_STATE_FILE = RUBRIC_ROOT / "gold-builder-state.json"
+RUBRIC_VARIANT_RUNTIME_ROLE = "recall.rubric.variant"
+_CONSENSUS_ROLES = ("primary", "challenger", "tie_break")
+_CONSENSUS_RUNTIME_ROLES = tuple(
+    f"classification.{role}" for role in _CONSENSUS_ROLES
+)
+_NO_REMOTE_CALL_FAILURES = frozenset(
+    {
+        "capability_unavailable",
+        "context_window_exceeded",
+        "egress_denied",
+        "input_invalid",
+        "llm_capability_unavailable",
+        "llm_config_parse_error",
+        "llm_config_schema_invalid",
+        "llm_config_unavailable",
+        "request_invalid",
+        "route_configuration_invalid",
+        "schema_invalid",
+        "source_classification_required",
+    }
+)
 DEFAULT_RUBRIC = (
     "Pass only answer-bearing evidence that is topically relevant, adds "
     "information not already present, is worth reading now, and is neither "
@@ -76,19 +97,139 @@ RUBRIC_VARIANTS = {
 }
 
 
-def _page_excerpt(root: Path, page_id: str) -> str:
-    candidates = [
-        root / "pages" / f"{page_id}.md",
-        root / "system" / f"{page_id}.md",
-    ]
-    if (root / "pages").exists():
-        candidates.extend((root / "pages").rglob(f"{page_id}.md"))
-    for path in candidates:
+def _page_excerpt_source(root: Path, page_id: str) -> tuple[str, str]:
+    """Read one contained page and retain its namespace for egress policy."""
+
+    if (
+        not page_id.strip()
+        or Path(page_id).name != page_id
+        or page_id in {".", ".."}
+        or "\\" in page_id
+        or "\x00" in page_id
+        or any(character in page_id for character in "*?[]")
+    ):
+        return "", "page"
+    for namespace in ("pages", "system"):
+        namespace_root = root / namespace
+        candidates = [namespace_root / f"{page_id}.md"]
         try:
-            return path.read_text(encoding="utf-8")[:2_000]
-        except (OSError, UnicodeError):
-            continue
-    return ""
+            candidates.extend(namespace_root.rglob(f"{page_id}.md"))
+        except (OSError, RuntimeError):
+            pass
+        for candidate in dict.fromkeys(candidates):
+            path = index_store.contained_file(candidate, namespace_root)
+            if path is None or path.stem != page_id:
+                continue
+            try:
+                return (
+                    path.read_text(encoding="utf-8")[:2_000],
+                    "system" if namespace == "system" else "page",
+                )
+            except (OSError, UnicodeError):
+                continue
+    return "", "page"
+
+
+def _page_excerpt(root: Path, page_id: str) -> str:
+    return _page_excerpt_source(root, page_id)[0]
+
+
+def _validated_route(
+    route: object,
+    *,
+    role: str,
+) -> ollama.RuntimeGenerationRoute:
+    if (
+        not isinstance(route, ollama.RuntimeGenerationRoute)
+        or route.role != role
+        or not route.provider
+        or not route.model
+        or route.location not in {"local", "remote"}
+    ):
+        raise ollama.RuntimeBridgeError("route_configuration_invalid")
+    if not route.structured_output:
+        raise ollama.RuntimeBridgeError("capability_unavailable")
+    return route
+
+
+def _route_manifest(
+    variant_route: ollama.RuntimeGenerationRoute,
+    router: Any,
+) -> tuple[dict[str, Any], str]:
+    routes = [variant_route]
+    routes.extend(
+        _validated_route(router.routes.get(role), role=runtime_role)
+        for role, runtime_role in zip(
+            _CONSENSUS_ROLES, _CONSENSUS_RUNTIME_ROLES, strict=True
+        )
+    )
+    local_ollama_models = tuple(
+        dict.fromkeys(
+            route.model
+            for route in routes
+            if route.provider == "ollama" and route.location == "local"
+        )
+    )
+    digests: Mapping[str, str] = {}
+    if local_ollama_models:
+        try:
+            observed = ollama.model_digests(local_ollama_models)
+            if isinstance(observed, Mapping):
+                digests = observed
+        except Exception:
+            pass
+    manifest = {
+        "schema_version": 1,
+        "routes": [
+            {
+                "role": route.role,
+                "provider": route.provider,
+                "model": route.model,
+                "location": route.location,
+                "model_digest": (
+                    str(digests.get(route.model) or "") or None
+                    if route.provider == "ollama" and route.location == "local"
+                    else None
+                ),
+            }
+            for route in routes
+        ],
+    }
+    return manifest, canonical_json_sha256_stringifying(manifest)
+
+
+def _cycle_runtime(decision_lane: str) -> tuple[
+    ollama.RuntimeGenerationRoute,
+    Any,
+    dict[str, Any],
+    str,
+]:
+    """Resolve one fixed variant route and one reusable consensus router."""
+
+    try:
+        variant_routes = ollama.runtime_generation_routes(
+            (RUBRIC_VARIANT_RUNTIME_ROLE,)
+        )
+        if len(variant_routes) != 1:
+            raise ollama.RuntimeBridgeError("route_configuration_invalid")
+        variant_route = _validated_route(
+            variant_routes[0], role=RUBRIC_VARIANT_RUNTIME_ROLE
+        )
+        router = router_for_producer("deterministic", decision_lane)
+        config_error = getattr(router, "config_error", None)
+        if config_error:
+            safe_error = str(config_error)
+            raise ollama.RuntimeBridgeError(
+                safe_error
+                if safe_error in _NO_REMOTE_CALL_FAILURES
+                else "route_configuration_invalid"
+            )
+        manifest, manifest_sha256 = _route_manifest(variant_route, router)
+    except ollama.RuntimeBridgeError:
+        raise
+    except Exception:
+        raise ollama.RuntimeBridgeError("backend_error") from None
+    return variant_route, router, manifest, manifest_sha256
 
 
 def _gold_stratum(row: Mapping[str, Any], *, page_id: str, gold: bool) -> str:
@@ -293,7 +434,11 @@ def _usefulness_prediction(value: Mapping[str, Any] | None) -> bool | str:
     )
 
 
-def _locked_gold_rows(path: Path) -> list[dict[str, Any]]:
+def _locked_gold_rows(
+    path: Path,
+    *,
+    manifest_sha256: str | None = None,
+) -> list[dict[str, Any]]:
     """Load only rows carrying the current privacy and split contract."""
 
     rows: list[dict[str, Any]] = []
@@ -313,8 +458,23 @@ def _locked_gold_rows(path: Path) -> list[dict[str, Any]]:
             value = json.loads(line)
         except json.JSONDecodeError:
             continue
+        route_manifest = value.get("route_manifest") if isinstance(value, dict) else None
+        route_manifest_sha256 = (
+            value.get("route_manifest_sha256") if isinstance(value, dict) else None
+        )
+        manifest_valid = bool(
+            isinstance(route_manifest, dict)
+            and isinstance(route_manifest_sha256, str)
+            and route_manifest_sha256
+            == canonical_json_sha256_stringifying(route_manifest)
+            and (
+                manifest_sha256 is None
+                or route_manifest_sha256 == manifest_sha256
+            )
+        )
         if (
             isinstance(value, dict)
+            and manifest_valid
             and value.get("reviewed") is True
             and str(value.get("split") or "") in {"train", "dev", "locked-test"}
             and re.fullmatch(r"[0-9a-f]{64}", str(value.get("session_hash") or ""))
@@ -328,10 +488,19 @@ def _judge_variant(
     case: Mapping[str, Any],
     *,
     rubric_name: str,
-    model: str,
+    route: ollama.RuntimeGenerationRoute,
     root: Path,
-) -> tuple[bool | str, float]:
-    excerpt = _page_excerpt(root, str(case.get("page_id") or ""))
+) -> tuple[bool | str | None, float, int]:
+    try:
+        route = _validated_route(route, role=RUBRIC_VARIANT_RUNTIME_ROLE)
+    except ollama.RuntimeBridgeError:
+        return None, 0.0, 0
+    excerpt, namespace = _page_excerpt_source(
+        root, str(case.get("page_id") or "")
+    )
+    if namespace == "system" and route.location == "remote":
+        return None, 0.0, 0
+    source_data_class = "system" if namespace == "system" else "raw"
     evidence = {
         "query": str(case.get("query") or "")[:1_000],
         "page_id": str(case.get("page_id") or ""),
@@ -343,41 +512,57 @@ def _judge_variant(
             "certificate_present": True,
         },
     }
-    result = LocalStructuredSession(
-        model=model,
-        role=f"recall_rubric:{rubric_name}",
-        audit_root=root / "runtime" / "recall-rubric" / "structured-audit",
-        num_ctx=8_192,
-        num_predict=160,
-        keep_alive="20m",
-        read_timeout_ms=180_000,
-        max_input_chars=12_000,
-        max_output_chars=2_000,
-        max_responses=2,
-        resource_managed=True,
-        resource_lease_timeout_ms=25,
-    ).run(
-        build_recall_usefulness_prompt(evidence, RUBRIC_VARIANTS[rubric_name]),
-        RECALL_USEFULNESS_SCHEMA,
-        system="Return one local recall-usefulness decision as JSON only.",
-    )
+    try:
+        result = LocalStructuredSession(
+            model=route.model,
+            runtime_role=RUBRIC_VARIANT_RUNTIME_ROLE,
+            runtime_location=route.location,
+            source_data_class=source_data_class,
+            source_sensitivity="high",
+            role=f"recall_rubric:{rubric_name}",
+            audit_root=root / "runtime" / "recall-rubric" / "structured-audit",
+            num_ctx=8_192,
+            num_predict=160,
+            keep_alive="20m",
+            read_timeout_ms=180_000,
+            max_input_chars=12_000,
+            max_output_chars=2_000,
+            max_responses=2,
+            resource_lease_timeout_ms=25,
+        ).run(
+            build_recall_usefulness_prompt(evidence, RUBRIC_VARIANTS[rubric_name]),
+            RECALL_USEFULNESS_SCHEMA,
+            system="Return one recall-usefulness decision as JSON only.",
+        )
+    except Exception:
+        return None, 0.0, 0
     value = result.value if result.ok and isinstance(result.value, dict) else None
     confidence = float(value.get("confidence") or 0.0) if value else 0.0
-    return _usefulness_prediction(value), max(0.0, min(1.0, confidence))
+    external_calls = int(
+        route.location == "remote"
+        and result.failure_class not in _NO_REMOTE_CALL_FAILURES
+    )
+    return (
+        _usefulness_prediction(value) if result.ok else None,
+        max(0.0, min(1.0, confidence)),
+        external_calls,
+    )
 
 
-def _judge_consensus(case: Mapping[str, Any], *, root: Path) -> dict[str, Any]:
-    excerpt = _page_excerpt(root, str(case.get("page_id") or ""))
+def _judge_consensus(
+    case: Mapping[str, Any],
+    *,
+    root: Path,
+    router: Any,
+) -> dict[str, Any]:
+    excerpt, namespace = _page_excerpt_source(
+        root, str(case.get("page_id") or "")
+    )
     evidence = {
         "query": str(case.get("query") or "")[:1_000],
         "page_id": str(case.get("page_id") or ""),
         "page_excerpt": excerpt,
     }
-    result = router_for_producer("deterministic", "recall_usefulness_judgment").decide(
-        build_recall_usefulness_prompt(evidence, RUBRIC_VARIANTS["calibrated"]),
-        RECALL_USEFULNESS_SCHEMA,
-        decision_lane="recall_usefulness_judgment",
-    )
     output: dict[str, Any] = {
         "primary": "abstain",
         "primary_confidence": 0.0,
@@ -385,16 +570,43 @@ def _judge_consensus(case: Mapping[str, Any], *, root: Path) -> dict[str, Any]:
         "challenger_confidence": 0.0,
         "tie_break": "abstain",
         "tie_break_confidence": 0.0,
-        "ensemble": _usefulness_prediction(
-            result.value if isinstance(result.value, dict) else None
-        ),
-        "ensemble_confidence": float(
-            result.value.get("confidence") or 0.0
-            if isinstance(result.value, dict)
-            else 0.0
-        ),
-        "consensus_receipt_sha256": result.agreement_sha256,
+        "ensemble": "abstain",
+        "ensemble_confidence": 0.0,
+        "consensus_receipt_sha256": None,
+        "external_model_calls": 0,
+        "retry": False,
     }
+    if namespace == "system" and any(
+        router.routes[role].location == "remote" for role in _CONSENSUS_ROLES
+    ):
+        output["retry"] = True
+        return output
+    source = ollama.source_data_classification(
+        "system" if namespace == "system" else "raw", "high"
+    )
+    try:
+        result = router.decide(
+            build_recall_usefulness_prompt(evidence, RUBRIC_VARIANTS["calibrated"]),
+            RECALL_USEFULNESS_SCHEMA,
+            decision_lane="recall_usefulness_judgment",
+            source=source,
+        )
+    except Exception:
+        output["retry"] = True
+        return output
+    output.update(
+        {
+            "ensemble": _usefulness_prediction(
+                result.value if isinstance(result.value, dict) else None
+            ),
+            "ensemble_confidence": float(
+                result.value.get("confidence") or 0.0
+                if isinstance(result.value, dict)
+                else 0.0
+            ),
+            "consensus_receipt_sha256": result.agreement_sha256,
+        }
+    )
     for vote in result.votes:
         role = vote.role if vote.role in {"primary", "challenger", "tie_break"} else ""
         if not role:
@@ -404,6 +616,14 @@ def _judge_consensus(case: Mapping[str, Any], *, root: Path) -> dict[str, Any]:
         output[f"{role}_confidence"] = (
             float(value.get("confidence") or 0.0) if value else 0.0
         )
+        route = router.routes[role]
+        if (
+            route.location == "remote"
+            and vote.runtime_observation_status != "artifact_replay"
+            and vote.result.failure_class not in _NO_REMOTE_CALL_FAILURES
+        ):
+            output["external_model_calls"] += 1
+    output["retry"] = not result.ok
     return output
 
 
@@ -433,9 +653,47 @@ def build_locked_gold_cycle(
         if state.get("date") == today
         else 0.0
     )
-    completed = {
+    existing_completed = {
         str(row.get("case_id") or "")
         for row in _locked_gold_rows(output_file)
+        if str(row.get("case_id") or "")
+    }
+    if not cases:
+        return {
+            "status": "complete",
+            "cases": len(existing_completed),
+            "pending": False,
+            "external_model_calls": 0,
+        }
+    if (
+        dry_run
+        or steps_today >= max(0, max_steps_per_day)
+        or model_seconds_today >= max_model_seconds_per_day
+    ):
+        return {
+            "status": "waiting",
+            "reason": "dry_run_or_daily_budget",
+            "cases": len(existing_completed),
+            "pending": True,
+            "external_model_calls": 0,
+        }
+    try:
+        variant_route, router, route_manifest, route_manifest_sha256 = (
+            _cycle_runtime("recall_usefulness_judgment")
+        )
+    except ollama.RuntimeBridgeError as exc:
+        return {
+            "status": "held",
+            "reason": exc.category,
+            "cases": 0,
+            "pending": True,
+            "external_model_calls": 0,
+        }
+    completed = {
+        str(row.get("case_id") or "")
+        for row in _locked_gold_rows(
+            output_file, manifest_sha256=route_manifest_sha256
+        )
         if str(row.get("case_id") or "")
     }
     pending_value = state.get("pending")
@@ -451,47 +709,48 @@ def build_locked_gold_cycle(
     )
     if case is None:
         case = next((row for row in cases if row["case_id"] not in completed), None)
-        pending = {
-            key: value for key, value in (case or {}).items() if key not in {"query"}
-        }
+        pending = {"case_id": str((case or {}).get("case_id") or "")}
     if case is None:
         return {
             "status": "complete",
             "cases": len(completed),
             "pending": False,
+            "route_manifest": route_manifest,
+            "route_manifest_sha256": route_manifest_sha256,
             "external_model_calls": 0,
         }
-    if (
-        dry_run
-        or steps_today >= max(0, max_steps_per_day)
-        or model_seconds_today >= max_model_seconds_per_day
-    ):
-        return {
-            "status": "waiting",
-            "reason": "dry_run_or_daily_budget",
-            "cases": len(completed),
-            "pending": True,
-            "external_model_calls": 0,
-        }
+    if pending.get("route_manifest_sha256") != route_manifest_sha256:
+        pending = {"case_id": case["case_id"]}
+    pending["route_manifest"] = route_manifest
+    pending["route_manifest_sha256"] = route_manifest_sha256
     predictions_value = pending.get("predictions")
     predictions = dict(predictions_value) if isinstance(predictions_value, dict) else {}
+    case_external_calls = max(0, int(pending.get("external_model_calls") or 0))
     next_variant = next(
         (name for name in RUBRIC_VARIANTS if name not in predictions), None
     )
     started = monotonic()
     if next_variant is not None:
-        model = load_decision_router_config().tie_break_model
-        prediction, confidence = _judge_variant(
-            case, rubric_name=next_variant, model=model, root=root
+        prediction, confidence, external_calls = _judge_variant(
+            case,
+            rubric_name=next_variant,
+            route=variant_route,
+            root=root,
         )
-        predictions[next_variant] = prediction
-        predictions[f"{next_variant}_confidence"] = confidence
+        if prediction is not None:
+            predictions[next_variant] = prediction
+            predictions[f"{next_variant}_confidence"] = confidence
         step = next_variant
     else:
-        predictions.update(_judge_consensus(case, root=root))
+        consensus = _judge_consensus(case, root=root, router=router)
+        external_calls = max(0, int(consensus.pop("external_model_calls", 0)))
+        retry = consensus.pop("retry", False) is True
+        if not retry:
+            predictions.update(consensus)
         step = "local_consensus"
     elapsed = max(0.0, monotonic() - started)
     pending["predictions"] = predictions
+    pending["external_model_calls"] = case_external_calls + external_calls
     required = {
         *RUBRIC_VARIANTS,
         "primary",
@@ -515,9 +774,11 @@ def build_locked_gold_cycle(
                     "session_hash": case["session_hash"],
                     "reviewed": True,
                     "review_receipt_sha256": sha256(case["review_receipt_id"]),
+                    "route_manifest": route_manifest,
+                    "route_manifest_sha256": route_manifest_sha256,
                     **predictions,
                     "observed_at": datetime.now(UTC).isoformat(timespec="seconds"),
-                    "external_model_calls": 0,
+                    "external_model_calls": case_external_calls + external_calls,
                 }
             ],
             sort_keys=True,
@@ -533,12 +794,14 @@ def build_locked_gold_cycle(
         "cases": len(completed),
         "available_cases": len(cases),
         "pending": pending,
+        "route_manifest": route_manifest,
+        "route_manifest_sha256": route_manifest_sha256,
         "completed_case_ids": sorted(completed),
         "steps_today": steps_today + 1,
         "model_seconds_today": round(model_seconds_today + elapsed, 3),
-        "external_model_calls": 0,
+        "external_model_calls": external_calls,
     }
-    return payload if dry_run else write_sealed_json(state_file, payload)
+    return write_sealed_json(state_file, payload)
 
 
 def build_rubric_artifact(
@@ -547,13 +810,22 @@ def build_rubric_artifact(
     task: str = "recall_usefulness",
     case_refs: Sequence[str] = (),
     model_sha256: str = "",
+    route_manifest: Mapping[str, Any] | None = None,
+    route_manifest_sha256: str = "",
     version: int = 1,
 ) -> dict[str, Any]:
     if not rubric_text.strip() or len(rubric_text) > 8_000:
         raise ValueError("rubric text must be bounded and non-empty")
+    manifest = dict(route_manifest or {})
+    if manifest and route_manifest_sha256 != canonical_json_sha256_stringifying(
+        manifest
+    ):
+        raise ValueError("route manifest hash is invalid")
+    bound_model_sha256 = route_manifest_sha256 or model_sha256
     core = {
         "schema_version": RUBRIC_SCHEMA_VERSION,
-        "rubric_id": "rubric_" + sha256([task, version, rubric_text])[:24],
+        "rubric_id": "rubric_"
+        + sha256([task, version, rubric_text, route_manifest_sha256])[:24],
         "version": version,
         "task": task,
         "objective_checks": [
@@ -570,7 +842,9 @@ def build_rubric_artifact(
         ],
         "rubric_text": rubric_text,
         "case_ref_sha256s": sorted(sha256(value) for value in case_refs),
-        "model_sha256": model_sha256,
+        "model_sha256": bound_model_sha256,
+        "route_manifest": manifest,
+        "route_manifest_sha256": route_manifest_sha256,
         "prompt_sha256": sha256([task, rubric_text, sorted(case_refs)]),
         "created_at": datetime.now(UTC).isoformat(timespec="seconds"),
     }
@@ -887,6 +1161,244 @@ def evaluate_rubric_variants(
     return {"metrics": metrics, "eligible": eligible, "winner": winner}
 
 
+def _append_rubric_outcomes(
+    *,
+    outcomes_file: Path,
+    artifact: Mapping[str, Any],
+    selected: Sequence[Mapping[str, Any]],
+) -> None:
+    existing_ids: set[str] = set()
+    try:
+        existing_ids = {
+            str(json.loads(line).get("rubric_id") or "")
+            for line in outcomes_file.read_text(encoding="utf-8").splitlines()
+        }
+    except (OSError, json.JSONDecodeError):
+        pass
+    outcome_rows = [
+        {
+            "schema_version": 1,
+            "rubric_id": f"{artifact['rubric_id']}:{sha256(str(row.get('case_id') or row.get('query_sha256') or ''))[:12]}",
+            "subject_id": artifact["rubric_id"],
+            "query_sha256": str(
+                row.get("query_sha256") or sha256(str(row.get("case_id") or ""))
+            ),
+            "polarity": "positive",
+            "quality": "gold",
+            "receipt_id": str(
+                row.get("review_receipt_id") or "reviewed_locked_gold"
+            ),
+            "observed_at": str(row.get("observed_at") or ""),
+        }
+        for row in selected
+        if f"{artifact['rubric_id']}:{sha256(str(row.get('case_id') or row.get('query_sha256') or ''))[:12]}"
+        not in existing_ids
+    ]
+    if outcome_rows:
+        append_jsonl_durable(outcomes_file, outcome_rows, sort_keys=True)
+
+
+def _complete_calibration_cycle(
+    *,
+    router: Any | None,
+    route_manifest: Mapping[str, Any],
+    route_manifest_sha256: str,
+    artifact: Mapping[str, Any],
+    selected: Sequence[Mapping[str, Any]],
+    session_count: int,
+    winner: str,
+    comparison: Mapping[str, Any],
+    judge_metrics: Mapping[str, Any],
+    candidate_file: Path,
+    status_file: Path,
+    outcomes_file: Path,
+    active_file: Path,
+    last_known_good_file: Path,
+    dry_run: bool,
+) -> dict[str, Any]:
+    try:
+        rollback_artifact = read_sealed_json(
+            last_known_good_file, recover_backup=True
+        )
+    except DurableStateError:
+        rollback_artifact = {}
+    calibration_evidence = {
+        "rubric_id": artifact["rubric_id"],
+        "candidate_sha256": artifact["artifact_sha256"],
+        "route_manifest_sha256": route_manifest_sha256,
+        "case_manifest_sha256": sha256(
+            sorted(str(row.get("query_sha256") or "") for row in selected)
+        ),
+        "comparison": comparison,
+        "judge_metrics": judge_metrics,
+        "gold_count": len(selected),
+        "rollback_target": {
+            "present": bool(rollback_artifact),
+            "artifact_sha256": (
+                canonical_json_sha256_stringifying(rollback_artifact)
+                if rollback_artifact
+                else None
+            ),
+        },
+    }
+    calibration_epoch = datetime.now(UTC).date().isoformat()
+    try:
+        prior_status = read_sealed_json(status_file, recover_backup=True)
+    except DurableStateError:
+        prior_status = {}
+    cached_receipt = prior_status.get("consensus")
+    cache_hit = bool(
+        isinstance(cached_receipt, dict)
+        and prior_status.get("candidate_sha256") == artifact["artifact_sha256"]
+        and prior_status.get("calibration_epoch") == calibration_epoch
+        and prior_status.get("route_manifest_sha256") == route_manifest_sha256
+        and cached_receipt.get("route_manifest_sha256") == route_manifest_sha256
+    )
+    consensus_result = None
+    consensus_failure_class = None
+    if not dry_run and not cache_hit:
+        assert router is not None
+        try:
+            consensus_result = router.decide(
+                build_recall_rubric_calibration_prompt(calibration_evidence),
+                RECALL_RUBRIC_CALIBRATION_SCHEMA,
+                decision_lane="recall_rubric_calibration",
+                source=ollama.source_data_classification(
+                    "derived_snippet", "high"
+                ),
+            )
+        except Exception:
+            consensus_failure_class = "backend_error"
+    consensus_value = (
+        consensus_result.value
+        if consensus_result is not None and isinstance(consensus_result.value, dict)
+        else {}
+    )
+    consensus_passed = (
+        bool(cached_receipt.get("passed"))
+        if cache_hit and isinstance(cached_receipt, dict)
+        else bool(
+            consensus_result is not None
+            and consensus_result.ok
+            and consensus_value.get("decision") == "approved"
+            and consensus_value.get("holdout_non_regression") is True
+            and consensus_value.get("calibration_improved") is True
+            and consensus_value.get("coverage_preserved") is True
+            and consensus_value.get("rollback_safe") is True
+        )
+    )
+    external_model_calls = (
+        0
+        if consensus_result is None
+        else sum(
+            1
+            for vote in consensus_result.votes
+            if router is not None
+            and router.routes[vote.role].location == "remote"
+            and vote.runtime_observation_status != "artifact_replay"
+            and vote.result.failure_class not in _NO_REMOTE_CALL_FAILURES
+        )
+    )
+    consensus_receipt = (
+        dict(cached_receipt)
+        if cache_hit and isinstance(cached_receipt, dict)
+        else {
+            "receipt_id": "rubric_receipt_"
+            + sha256(
+                [
+                    artifact["artifact_sha256"],
+                    getattr(consensus_result, "agreement_sha256", ""),
+                    consensus_passed,
+                ]
+            )[:20],
+            "passed": consensus_passed,
+            "route_manifest_sha256": route_manifest_sha256,
+            "agreement_sha256": getattr(consensus_result, "agreement_sha256", ""),
+            "failure_class": getattr(
+                consensus_result, "failure_class", consensus_failure_class
+            ),
+            "vote_manifest_sha256": sha256(
+                [
+                    vote.signature_sha256
+                    for vote in getattr(consensus_result, "votes", ())
+                ]
+            ),
+            "external_model_calls": external_model_calls,
+        }
+    )
+    if not dry_run and not cache_hit:
+        append_jsonl_durable(
+            outcomes_file.parent / "consensus-receipts.jsonl",
+            [
+                {
+                    "schema_version": 1,
+                    "rubric_id": artifact["rubric_id"],
+                    "route_manifest_sha256": route_manifest_sha256,
+                    **consensus_receipt,
+                }
+            ],
+            sort_keys=True,
+        )
+    if not dry_run and not consensus_passed:
+        return write_sealed_json(
+            status_file,
+            {
+                "schema_version": 1,
+                "generated_at": datetime.now(UTC).isoformat(timespec="seconds"),
+                "status": "held",
+                "candidate_sha256": artifact["artifact_sha256"],
+                "calibration_epoch": calibration_epoch,
+                "route_manifest": dict(route_manifest),
+                "route_manifest_sha256": route_manifest_sha256,
+                "samples": len(selected),
+                "sessions": session_count,
+                "winner": winner,
+                "comparison": comparison,
+                "judge_metrics": judge_metrics,
+                "gates": {"local_consensus": False},
+                "consensus": consensus_receipt,
+                "external_model_calls": external_model_calls,
+            },
+        )
+    result = (
+        promote_candidate(
+            candidate_file=candidate_file,
+            active_file=active_file,
+            last_known_good_file=last_known_good_file,
+            metrics=judge_metrics,
+            gold_count=len(selected),
+            status_file=status_file,
+        )
+        if not dry_run
+        else {"status": "dry_run", "gates": {}}
+    )
+    result_gate_value = result.get("gates")
+    result_gates = result_gate_value if isinstance(result_gate_value, Mapping) else {}
+    payload = {
+        **result,
+        "samples": len(selected),
+        "sessions": session_count,
+        "winner": winner,
+        "comparison": comparison,
+        "judge_metrics": judge_metrics,
+        "consensus": consensus_receipt,
+        "candidate_sha256": artifact["artifact_sha256"],
+        "calibration_epoch": calibration_epoch,
+        "route_manifest": dict(route_manifest),
+        "route_manifest_sha256": route_manifest_sha256,
+        "gates": {**dict(result_gates), "local_consensus": consensus_passed},
+        "external_model_calls": external_model_calls,
+    }
+    if not dry_run:
+        write_sealed_json(status_file, payload)
+        _append_rubric_outcomes(
+            outcomes_file=outcomes_file,
+            artifact=artifact,
+            selected=selected,
+        )
+    return payload
+
+
 def run_calibration_cycle(
     *,
     rows_file: Path = RUBRIC_ROOT / "locked-gold.jsonl",
@@ -899,7 +1411,46 @@ def run_calibration_cycle(
 ) -> dict[str, Any]:
     """Auto-compare 10/30-case rubric variants and adopt only sealed winners."""
 
-    rows = _locked_gold_rows(rows_file)
+    durable_rows = _locked_gold_rows(rows_file)
+    if not durable_rows:
+        payload = {
+            "schema_version": 1,
+            "generated_at": datetime.now(UTC).isoformat(timespec="seconds"),
+            "status": "collecting",
+            "samples": 0,
+            "sessions": 0,
+            "next_gate": 10,
+            "next_session_gate": MIN_RUBRIC_SESSIONS,
+            "winner": "current",
+            "comparison": {"metrics": {}, "eligible": [], "winner": "current"},
+            "external_model_calls": 0,
+        }
+        return payload if dry_run else write_sealed_json(status_file, payload)
+    router: Any | None = None
+    if dry_run:
+        route_manifest = (
+            dict(durable_rows[0].get("route_manifest") or {})
+            if durable_rows
+            else {}
+        )
+        route_manifest_sha256 = (
+            str(durable_rows[0].get("route_manifest_sha256") or "")
+            if durable_rows
+            else ""
+        )
+    else:
+        try:
+            _variant_route, router, route_manifest, route_manifest_sha256 = (
+                _cycle_runtime("recall_rubric_calibration")
+            )
+        except ollama.RuntimeBridgeError as exc:
+            return {
+                "schema_version": 1,
+                "status": "held",
+                "reason": exc.category,
+                "external_model_calls": 0,
+            }
+    rows = _locked_gold_rows(rows_file, manifest_sha256=route_manifest_sha256)
     selected = select_diverse_cases(rows, limit=30)
     selected_sessions = {
         str(row.get("session_hash") or "")
@@ -919,7 +1470,8 @@ def run_calibration_cycle(
             str(row.get("case_id") or row.get("query_sha256") or "")
             for row in selected[:sample_gate]
         ],
-        model_sha256=sha256("local-three-model-calibration-v1"),
+        route_manifest=route_manifest,
+        route_manifest_sha256=route_manifest_sha256,
         version=sample_gate or 1,
     )
     judge_metrics = (
@@ -940,169 +1492,25 @@ def run_calibration_cycle(
             "next_session_gate": MIN_RUBRIC_SESSIONS,
             "winner": winner,
             "comparison": comparison,
+            "route_manifest": route_manifest,
+            "route_manifest_sha256": route_manifest_sha256,
             "external_model_calls": 0,
         }
         return payload if dry_run else write_sealed_json(status_file, payload)
-    calibration_evidence = {
-        "rubric_id": artifact["rubric_id"],
-        "candidate_sha256": artifact["artifact_sha256"],
-        "case_manifest_sha256": sha256(
-            sorted(str(row.get("query_sha256") or "") for row in selected)
-        ),
-        "comparison": comparison,
-        "judge_metrics": judge_metrics,
-        "gold_count": len(selected),
-        "rollback_target": str(last_known_good_file),
-    }
-    calibration_epoch = datetime.now(UTC).date().isoformat()
-    try:
-        prior_status = read_sealed_json(status_file, recover_backup=True)
-    except DurableStateError:
-        prior_status = {}
-    cached_receipt = prior_status.get("consensus")
-    cache_hit = bool(
-        isinstance(cached_receipt, dict)
-        and prior_status.get("candidate_sha256") == artifact["artifact_sha256"]
-        and prior_status.get("calibration_epoch") == calibration_epoch
+    return _complete_calibration_cycle(
+        router=router,
+        route_manifest=route_manifest,
+        route_manifest_sha256=route_manifest_sha256,
+        artifact=artifact,
+        selected=selected,
+        session_count=len(selected_sessions),
+        winner=winner,
+        comparison=comparison,
+        judge_metrics=judge_metrics,
+        candidate_file=candidate_file,
+        status_file=status_file,
+        outcomes_file=outcomes_file,
+        active_file=active_file,
+        last_known_good_file=last_known_good_file,
+        dry_run=dry_run,
     )
-    consensus_result = (
-        None
-        if dry_run or cache_hit
-        else router_for_producer("deterministic", "recall_rubric_calibration").decide(
-            build_recall_rubric_calibration_prompt(calibration_evidence),
-            RECALL_RUBRIC_CALIBRATION_SCHEMA,
-            decision_lane="recall_rubric_calibration",
-        )
-    )
-    consensus_value = (
-        consensus_result.value
-        if consensus_result is not None and isinstance(consensus_result.value, dict)
-        else {}
-    )
-    consensus_passed = (
-        bool(cached_receipt.get("passed"))
-        if cache_hit and isinstance(cached_receipt, dict)
-        else bool(
-            consensus_result is not None
-            and consensus_result.ok
-            and consensus_value.get("decision") == "approved"
-            and consensus_value.get("holdout_non_regression") is True
-            and consensus_value.get("calibration_improved") is True
-            and consensus_value.get("coverage_preserved") is True
-            and consensus_value.get("rollback_safe") is True
-        )
-    )
-    consensus_receipt = (
-        dict(cached_receipt)
-        if cache_hit and isinstance(cached_receipt, dict)
-        else {
-            "receipt_id": "rubric_receipt_"
-            + sha256(
-                [
-                    artifact["artifact_sha256"],
-                    getattr(consensus_result, "agreement_sha256", ""),
-                    consensus_passed,
-                ]
-            )[:20],
-            "passed": consensus_passed,
-            "agreement_sha256": getattr(consensus_result, "agreement_sha256", ""),
-            "failure_class": getattr(consensus_result, "failure_class", None),
-            "vote_manifest_sha256": sha256(
-                [
-                    vote.signature_sha256
-                    for vote in getattr(consensus_result, "votes", ())
-                ]
-            ),
-            "external_model_calls": 0,
-        }
-    )
-    if not dry_run and not cache_hit:
-        append_jsonl_durable(
-            outcomes_file.parent / "consensus-receipts.jsonl",
-            [
-                {
-                    "schema_version": 1,
-                    "rubric_id": artifact["rubric_id"],
-                    **consensus_receipt,
-                }
-            ],
-            sort_keys=True,
-        )
-    if not dry_run and not consensus_passed:
-        return write_sealed_json(
-            status_file,
-            {
-                "schema_version": 1,
-                "generated_at": datetime.now(UTC).isoformat(timespec="seconds"),
-                "status": "held",
-                "candidate_sha256": artifact["artifact_sha256"],
-                "calibration_epoch": calibration_epoch,
-                "samples": len(selected),
-                "sessions": len(selected_sessions),
-                "winner": winner,
-                "comparison": comparison,
-                "judge_metrics": judge_metrics,
-                "gates": {"local_consensus": False},
-                "consensus": consensus_receipt,
-                "external_model_calls": 0,
-            },
-        )
-    result = (
-        promote_candidate(
-            candidate_file=candidate_file,
-            active_file=active_file,
-            last_known_good_file=last_known_good_file,
-            metrics=judge_metrics,
-            gold_count=len(selected),
-            status_file=status_file,
-        )
-        if not dry_run
-        else {"status": "dry_run", "gates": {}}
-    )
-    result_gate_value = result.get("gates")
-    result_gates = result_gate_value if isinstance(result_gate_value, Mapping) else {}
-    payload = {
-        **result,
-        "samples": len(selected),
-        "sessions": len(selected_sessions),
-        "winner": winner,
-        "comparison": comparison,
-        "judge_metrics": judge_metrics,
-        "consensus": consensus_receipt,
-        "candidate_sha256": artifact["artifact_sha256"],
-        "calibration_epoch": calibration_epoch,
-        "gates": {**dict(result_gates), "local_consensus": consensus_passed},
-        "external_model_calls": 0,
-    }
-    if not dry_run:
-        write_sealed_json(status_file, payload)
-        existing_ids: set[str] = set()
-        try:
-            existing_ids = {
-                str(json.loads(line).get("rubric_id") or "")
-                for line in outcomes_file.read_text(encoding="utf-8").splitlines()
-            }
-        except (OSError, json.JSONDecodeError):
-            pass
-        outcome_rows = [
-            {
-                "schema_version": 1,
-                "rubric_id": f"{artifact['rubric_id']}:{sha256(str(row.get('case_id') or row.get('query_sha256') or ''))[:12]}",
-                "subject_id": artifact["rubric_id"],
-                "query_sha256": str(
-                    row.get("query_sha256") or sha256(str(row.get("case_id") or ""))
-                ),
-                "polarity": "positive",
-                "quality": "gold",
-                "receipt_id": str(
-                    row.get("review_receipt_id") or "reviewed_locked_gold"
-                ),
-                "observed_at": str(row.get("observed_at") or ""),
-            }
-            for row in selected
-            if f"{artifact['rubric_id']}:{sha256(str(row.get('case_id') or row.get('query_sha256') or ''))[:12]}"
-            not in existing_ids
-        ]
-        if outcome_rows:
-            append_jsonl_durable(outcomes_file, outcome_rows, sort_keys=True)
-    return payload
