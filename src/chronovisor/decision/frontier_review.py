@@ -16,7 +16,6 @@ from collections.abc import Iterator
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, replace
 from datetime import datetime
-from html import unescape
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -160,9 +159,15 @@ class FrontierResult:
 
 def is_allowed_official_url(url: str) -> bool:
     parsed = urlparse(url)
-    if parsed.scheme != "https" or not parsed.netloc:
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or parsed.port not in {None, 443}
+    ):
         return False
-    host = parsed.netloc.lower()
+    host = parsed.hostname.casefold().rstrip(".")
     if host == "github.com":
         path = parsed.path.lower()
         return any(
@@ -182,74 +187,25 @@ def official_frontier_reference_urls() -> list[str]:
     return [url for url in urls if is_allowed_official_url(url)]
 
 
-def collect_official_frontier_docs(query: str, *, max_docs: int = 3) -> dict[str, Any]:
-    if os.environ.get("CHRONOVISOR_FRONTIER_DOC_LOOKUP", "1") in {"0", "false", "False"}:
+def collect_official_frontier_docs(
+    query: str,
+    *,
+    max_docs: int = 3,
+) -> dict[str, Any]:
+    if os.environ.get("CHRONOVISOR_FRONTIER_DOC_LOOKUP", "1") in {
+        "0",
+        "false",
+        "False",
+    }:
         return {"attempted": False, "reason": "disabled", "documents": []}
 
-    try:
-        import httpx
-    except Exception as exc:
-        return {
-            "attempted": False,
-            "reason": f"httpx unavailable: {exc}",
-            "documents": [],
-        }
-
-    documents: list[dict[str, Any]] = []
-    errors: list[dict[str, str]] = []
-    tokens = [
-        token for token in re.findall(r"[A-Za-z][A-Za-z0-9_-]{2,}", query.lower())[:12]
-    ]
-    for url in official_frontier_reference_urls()[:max_docs]:
-        try:
-            response = httpx.get(url, timeout=3.0, follow_redirects=True)
-            response.raise_for_status()
-        except Exception as exc:
-            errors.append({"url": url, "error": str(exc)})
-            continue
-        final_url = str(response.url)
-        if not is_allowed_official_url(final_url):
-            errors.append(
-                {"url": url, "error": f"redirected outside allowlist: {final_url}"}
-            )
-            continue
-        text = _html_to_text(response.text)
-        snippet = _best_doc_snippet(text, tokens)
-        documents.append(
-            {
-                "url": final_url,
-                "status_code": response.status_code,
-                "snippet": redact_sensitive_text(snippet),
-            }
-        )
+    del query
     return {
-        "attempted": True,
-        "allowlist": official_frontier_reference_urls(),
-        "documents": documents,
-        "errors": errors,
+        "attempted": False,
+        "reason": "disabled_by_security_policy",
+        "allowlist": official_frontier_reference_urls()[:max_docs],
+        "documents": [],
     }
-
-
-def _html_to_text(text: str) -> str:
-    text = re.sub(r"(?is)<(script|style).*?</\1>", " ", text)
-    text = re.sub(r"(?s)<[^>]+>", " ", text)
-    return re.sub(r"\s+", " ", unescape(text)).strip()
-
-
-def _best_doc_snippet(text: str, tokens: list[str], *, limit: int = 1200) -> str:
-    if len(text) <= limit:
-        return text
-    lower = text.lower()
-    best_idx = 0
-    best_score = -1
-    for match in re.finditer(r"[.!?]\s+", text):
-        idx = match.end()
-        window = lower[idx : idx + limit]
-        score = sum(1 for token in tokens if token in window)
-        if score > best_score:
-            best_idx = idx
-            best_score = score
-    return text[best_idx : best_idx + limit]
 
 
 def _frontier_failure(

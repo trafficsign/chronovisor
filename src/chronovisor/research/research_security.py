@@ -5,10 +5,28 @@ from __future__ import annotations
 import ipaddress
 import re
 import socket
+import ssl
 import unicodedata
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
+from typing import Any, cast
 from urllib.parse import urlsplit
+
+import httpcore
+import httpx
+
+__all__ = [
+    "EgressPolicyError",
+    "PolicyDecision",
+    "Resolver",
+    "external_content_metadata",
+    "guard_egress_query",
+    "guard_url",
+    "guarded_http_client",
+    "invisible_unicode",
+    "resolve_host",
+]
 
 _SECRET_PATTERNS = (
     re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"),
@@ -17,7 +35,9 @@ _SECRET_PATTERNS = (
 )
 _EMAIL = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.I)
 _PHONE = re.compile(r"(?<!\d)(?:\+?81[- ]?)?0\d{1,4}[- ]?\d{1,4}[- ]?\d{3,4}(?!\d)")
-_PRIVATE_PATH = re.compile(r"(?:^|\s)(?:/Users/[^/\s]+|/home/[^/\s]+|[A-Za-z]:\\Users\\[^\\\s]+)")
+_PRIVATE_PATH = re.compile(
+    r"(?:^|\s)(?:/Users/[^/\s]+|/home/[^/\s]+|[A-Za-z]:\\Users\\[^\\\s]+)"
+)
 _INJECTION_MARKERS = (
     "ignore previous instructions",
     "ignore all previous",
@@ -88,7 +108,7 @@ Resolver = Callable[[str, int], list[str]]
 def resolve_host(host: str, port: int) -> list[str]:
     return sorted(
         {
-            row[4][0]
+            str(row[4][0])
             for row in socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
         }
     )
@@ -120,9 +140,129 @@ def guard_url(
         return PolicyDecision(False, "dns_failure"), ()
     if not addresses:
         return PolicyDecision(False, "dns_empty"), ()
-    if not all(_public_ip(address, allow_private_network=allow_private_network) for address in addresses):
+    if not all(
+        _public_ip(address, allow_private_network=allow_private_network)
+        for address in addresses
+    ):
         return PolicyDecision(False, "private_or_special_address"), addresses
     return PolicyDecision(True, "allowed", parsed.geturl()), addresses
+
+
+class EgressPolicyError(ValueError):
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+class _PinnedBackend(httpcore.SyncBackend):
+    def __init__(self, host: str, port: int, address: str) -> None:
+        self.host = host.casefold().rstrip(".")
+        self.port = port
+        self.address = address
+
+    def connect_tcp(
+        self,
+        host: str,
+        port: int,
+        timeout: float | None = None,
+        local_address: str | None = None,
+        socket_options: Any = None,
+    ) -> httpcore.NetworkStream:
+        if host.casefold().rstrip(".") != self.host or port != self.port:
+            raise httpcore.ConnectError("connection origin escaped validated URL")
+        return super().connect_tcp(
+            self.address,
+            port,
+            timeout=timeout,
+            local_address=local_address,
+            socket_options=socket_options,
+        )
+
+
+class _CoreStream(httpx.SyncByteStream):
+    def __init__(self, stream: Iterable[bytes]) -> None:
+        self.stream = stream
+
+    def __iter__(self) -> Iterator[bytes]:
+        yield from self.stream
+
+    def close(self) -> None:
+        close = getattr(self.stream, "close", None)
+        if close is not None:
+            close()
+
+
+class _PinnedTransport(httpx.BaseTransport):
+    def __init__(self, host: str, port: int, address: str) -> None:
+        self.pool = httpcore.ConnectionPool(
+            ssl_context=ssl.create_default_context(),
+            max_connections=1,
+            max_keepalive_connections=0,
+            network_backend=_PinnedBackend(host, port, address),
+        )
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        core_request = httpcore.Request(
+            request.method,
+            httpcore.URL(
+                scheme=request.url.raw_scheme,
+                host=request.url.raw_host,
+                port=request.url.port,
+                target=request.url.raw_path,
+            ),
+            headers=request.headers.raw,
+            content=request.stream,
+            extensions=request.extensions,
+        )
+        try:
+            response = self.pool.handle_request(core_request)
+        except (
+            httpcore.NetworkError,
+            httpcore.ProtocolError,
+            httpcore.ProxyError,
+            httpcore.TimeoutException,
+            httpcore.UnsupportedProtocol,
+        ) as exc:
+            raise httpx.TransportError(str(exc)) from exc
+        return httpx.Response(
+            response.status,
+            headers=response.headers,
+            stream=_CoreStream(cast(Iterable[bytes], response.stream)),
+            extensions=response.extensions,
+        )
+
+    def close(self) -> None:
+        self.pool.close()
+
+
+@contextmanager
+def guarded_http_client(
+    url: str,
+    *,
+    resolver: Resolver = resolve_host,
+    allow_private_network: bool = False,
+    client: httpx.Client | None = None,
+) -> Iterator[tuple[httpx.Client, tuple[str, ...]]]:
+    policy, addresses = guard_url(
+        url,
+        resolver=resolver,
+        allow_private_network=allow_private_network,
+    )
+    if not policy.allowed:
+        raise EgressPolicyError(policy.reason)
+    if client is not None:
+        yield client, addresses
+        return
+    parsed = urlsplit(url)
+    assert parsed.hostname is not None
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    host = parsed.hostname.encode("idna").decode("ascii")
+    with httpx.Client(
+        transport=_PinnedTransport(host, port, addresses[0]),
+        follow_redirects=False,
+        trust_env=False,
+    ) as pinned:
+        yield pinned, addresses
 
 
 def external_content_metadata(text: str) -> dict[str, object]:

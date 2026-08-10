@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from typing import ClassVar
+
+import httpx
+import pytest
 
 from chronovisor.core.durable_state import write_sealed_json
 from chronovisor.recall import classification_library_sources
+from chronovisor.recall.classification import ClassificationError
 from chronovisor.recall.classification_library_sources import (
     MARC_NS,
     czech_bibliography_contract,
@@ -122,7 +125,6 @@ def test_ndl_unknown_provider_is_rejected() -> None:
 
 def test_oai_resumption_checkpoint_replays_without_network(
     tmp_path: Path,
-    monkeypatch,
 ) -> None:
     responses = [
         (
@@ -139,29 +141,15 @@ def test_oai_resumption_checkpoint_replays_without_network(
         ).encode(),
     ]
 
-    class Response:
-        def __init__(self, content):
-            self.content = content
-
-        def raise_for_status(self):
-            return None
-
-    class Client:
-        def __init__(self, *args, **kwargs):
-            self.calls = 0
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *args):
-            return None
-
-        def get(self, _url, params):
-            value = responses.pop(0)
-            self.calls += 1
-            return Response(value)
-
-    monkeypatch.setattr(classification_library_sources.httpx, "Client", Client)
+    client = httpx.Client(
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(
+                200,
+                headers={"content-type": "application/xml"},
+                content=responses.pop(0),
+            )
+        )
+    )
     checkpoint = tmp_path / "oai"
     first, receipt = fetch_oai_window(
         base_url="https://example.invalid/oai",
@@ -169,20 +157,20 @@ def test_oai_resumption_checkpoint_replays_without_network(
         from_date="2026-01-01",
         until_date="2026-01-02",
         checkpoint_dir=checkpoint,
+        client=client,
+        resolver=lambda _host, _port: ["93.184.216.34"],
     )
 
     assert receipt["request_count"] == 2
     assert receipt["record_count"] == 2
     assert b"one" in first and b"two" in first
 
-    class OfflineClient(Client):
-        def get(self, _url, params):
-            raise AssertionError("completed checkpoint must not refetch")
-
-    monkeypatch.setattr(
-        classification_library_sources.httpx,
-        "Client",
-        OfflineClient,
+    offline = httpx.Client(
+        transport=httpx.MockTransport(
+            lambda _request: (_ for _ in ()).throw(
+                AssertionError("completed checkpoint must not refetch")
+            )
+        )
     )
     replay, replay_receipt = fetch_oai_window(
         base_url="https://example.invalid/oai",
@@ -190,6 +178,8 @@ def test_oai_resumption_checkpoint_replays_without_network(
         from_date="2026-01-01",
         until_date="2026-01-02",
         checkpoint_dir=checkpoint,
+        client=offline,
+        resolver=lambda _host, _port: ["93.184.216.34"],
     )
     assert replay == first
     assert replay_receipt["resumed_pages"] == 2
@@ -197,7 +187,6 @@ def test_oai_resumption_checkpoint_replays_without_network(
 
 def test_download_resumes_only_from_matching_content_range(
     tmp_path: Path,
-    monkeypatch,
 ) -> None:
     target = tmp_path / "archive.gz"
     partial = tmp_path / ".archive.gz.part"
@@ -211,38 +200,101 @@ def test_download_resumes_only_from_matching_content_range(
         },
     )
 
-    class Stream:
-        status_code = 206
-        headers: ClassVar[dict[str, str]] = {
-            "content-range": "bytes 3-5/6",
-            "etag": '"v1"',
-            "last-modified": "today",
-            "content-type": "application/gzip",
-        }
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *args):
-            return None
-
-        def raise_for_status(self):
-            return None
-
-        def iter_bytes(self):
-            yield b"def"
-
-    monkeypatch.setattr(
-        classification_library_sources.httpx,
-        "stream",
-        lambda *args, **kwargs: Stream(),
+    client = httpx.Client(
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(
+                206,
+                headers={
+                    "content-range": "bytes 3-5/6",
+                    "etag": '"v1"',
+                    "last-modified": "today",
+                    "content-type": "application/gzip",
+                },
+                content=b"def",
+                request=request,
+            )
+        )
     )
     receipt = download_file(
         "https://example.invalid/archive.gz",
         target,
         size_cap_bytes=100,
+        client=client,
+        resolver=lambda _host, _port: ["93.184.216.34"],
     )
 
     assert target.read_bytes() == b"abcdef"
     assert receipt["resumed_from_bytes"] == 3
     assert receipt["reused_complete_file"] is False
+
+
+def test_oai_rejects_token_loop_and_cross_origin_redirect(tmp_path: Path) -> None:
+    loop_body = (
+        b'<OAI-PMH xmlns="http://www.openarchives.org/OAI/2.0/">'
+        b"<ListRecords><resumptionToken>same</resumptionToken>"
+        b"</ListRecords></OAI-PMH>"
+    )
+    loop_client = httpx.Client(
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(
+                200,
+                headers={"content-type": "application/xml"},
+                content=loop_body,
+            )
+        )
+    )
+    with pytest.raises(ClassificationError, match="token loop"):
+        fetch_oai_window(
+            base_url="https://example.invalid/oai",
+            metadata_prefix="marc21",
+            from_date="2026-01-01",
+            until_date="2026-01-02",
+            checkpoint_dir=tmp_path / "loop",
+            client=loop_client,
+            resolver=lambda _host, _port: ["93.184.216.34"],
+        )
+
+    redirect_client = httpx.Client(
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(
+                302, headers={"location": "http://127.0.0.1/private"}
+            )
+        )
+    )
+    with pytest.raises(ClassificationError, match="cross-origin"):
+        fetch_oai_window(
+            base_url="https://example.invalid/oai",
+            metadata_prefix="marc21",
+            from_date="2026-01-01",
+            until_date="2026-01-02",
+            client=redirect_client,
+            resolver=lambda _host, _port: ["93.184.216.34"],
+        )
+
+
+def test_download_reuse_requires_matching_complete_checkpoint(tmp_path: Path) -> None:
+    target = tmp_path / "archive.gz"
+    target.write_bytes(b"archive")
+
+    with pytest.raises(ClassificationError, match="matching checkpoint"):
+        download_file(
+            "https://example.invalid/archive.gz",
+            target,
+            size_cap_bytes=100,
+        )
+
+
+def test_classification_source_guard_rejects_mixed_dns_and_invalid_port() -> None:
+    policy, _addresses = classification_library_sources._guard_url(
+        "https://example.invalid/source",
+        resolver=lambda _host, _port: ["93.184.216.34", "127.0.0.1"],
+    )
+    assert policy.reason == "private_or_special_address"
+
+    with pytest.raises(ClassificationError, match="invalid"):
+        fetch_oai_window(
+            base_url="https://example.invalid:bad/oai",
+            metadata_prefix="marc21",
+            from_date="2026-01-01",
+            until_date="2026-01-02",
+        )

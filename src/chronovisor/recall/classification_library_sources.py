@@ -9,15 +9,23 @@ from __future__ import annotations
 
 import hashlib
 import io
+import ipaddress
 import json
 import os
+import re
+import socket
+import ssl
+import time
 import xml.etree.ElementTree as ET
 from collections import Counter
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
+from urllib.parse import urljoin, urlsplit
 
+import httpcore
 import httpx
 
 from chronovisor.core.durable_state import read_sealed_json, write_sealed_json
@@ -36,12 +44,256 @@ MARC_NS = "http://www.loc.gov/MARC21/slim"
 RDF_NS = "http://www.w3.org/1999/02/22-rdf-syntax-ns#"
 SKOS_NS = "http://www.w3.org/2004/02/skos/core#"
 MAX_DOWNLOAD_BYTES = 2 * 1024**3
+_REDIRECT_CODES = {301, 302, 303, 307, 308}
 
 _atomic_write = atomic_write
 
+# ponytail: duplicate until Campaign P9; frozen cross-domain import sites forbid a shared seam.
 
 
+@dataclass(frozen=True)
+class _PolicyDecision:
+    allowed: bool
+    reason: str
 
+
+def _public_ip(address: str) -> bool:
+    try:
+        ip = ipaddress.ip_address(address.split("%", 1)[0])
+    except ValueError:
+        return False
+    return not (
+        ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_reserved
+        or ip.is_multicast
+        or ip.is_unspecified
+    )
+
+
+Resolver = Callable[[str, int], list[str]]
+
+
+def resolve_host(host: str, port: int) -> list[str]:
+    return sorted(
+        {
+            str(row[4][0])
+            for row in socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+        }
+    )
+
+
+def _guard_url(
+    url: str,
+    *,
+    resolver: Resolver = resolve_host,
+) -> tuple[_PolicyDecision, tuple[str, ...]]:
+    try:
+        parsed = urlsplit(url)
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    except ValueError:
+        return _PolicyDecision(False, "invalid_url"), ()
+    if parsed.scheme not in {"http", "https"}:
+        return _PolicyDecision(False, "unsupported_scheme"), ()
+    if not parsed.hostname:
+        return _PolicyDecision(False, "missing_hostname"), ()
+    if parsed.username or parsed.password:
+        return _PolicyDecision(False, "url_credentials_forbidden"), ()
+    host = parsed.hostname.casefold().rstrip(".")
+    if host == "localhost" or host.endswith(".localhost") or host.endswith(".local"):
+        return _PolicyDecision(False, "local_hostname"), ()
+    try:
+        addresses = tuple(resolver(host, port))
+    except OSError:
+        return _PolicyDecision(False, "dns_failure"), ()
+    if not addresses:
+        return _PolicyDecision(False, "dns_empty"), ()
+    if not all(_public_ip(address) for address in addresses):
+        return _PolicyDecision(False, "private_or_special_address"), addresses
+    return _PolicyDecision(True, "allowed"), addresses
+
+
+class EgressPolicyError(ValueError):
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+class _PinnedBackend(httpcore.SyncBackend):
+    def __init__(self, host: str, port: int, address: str) -> None:
+        self.host = host.casefold().rstrip(".")
+        self.port = port
+        self.address = address
+
+    def connect_tcp(
+        self,
+        host: str,
+        port: int,
+        timeout: float | None = None,
+        local_address: str | None = None,
+        socket_options: Any = None,
+    ) -> httpcore.NetworkStream:
+        if host.casefold().rstrip(".") != self.host or port != self.port:
+            raise httpcore.ConnectError("connection origin escaped validated URL")
+        return super().connect_tcp(
+            self.address,
+            port,
+            timeout=timeout,
+            local_address=local_address,
+            socket_options=socket_options,
+        )
+
+
+class _CoreStream(httpx.SyncByteStream):
+    def __init__(self, stream: Iterable[bytes]) -> None:
+        self.stream = stream
+
+    def __iter__(self) -> Iterator[bytes]:
+        yield from self.stream
+
+    def close(self) -> None:
+        close = getattr(self.stream, "close", None)
+        if close is not None:
+            close()
+
+
+class _PinnedTransport(httpx.BaseTransport):
+    def __init__(self, host: str, port: int, address: str) -> None:
+        self.pool = httpcore.ConnectionPool(
+            ssl_context=ssl.create_default_context(),
+            max_connections=1,
+            max_keepalive_connections=0,
+            network_backend=_PinnedBackend(host, port, address),
+        )
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        core_request = httpcore.Request(
+            request.method,
+            httpcore.URL(
+                scheme=request.url.raw_scheme,
+                host=request.url.raw_host,
+                port=request.url.port,
+                target=request.url.raw_path,
+            ),
+            headers=request.headers.raw,
+            content=request.stream,
+            extensions=request.extensions,
+        )
+        try:
+            response = self.pool.handle_request(core_request)
+        except (
+            httpcore.NetworkError,
+            httpcore.ProtocolError,
+            httpcore.ProxyError,
+            httpcore.TimeoutException,
+            httpcore.UnsupportedProtocol,
+        ) as exc:
+            raise httpx.TransportError(str(exc)) from exc
+        return httpx.Response(
+            response.status,
+            headers=response.headers,
+            stream=_CoreStream(cast(Iterable[bytes], response.stream)),
+            extensions=response.extensions,
+        )
+
+    def close(self) -> None:
+        self.pool.close()
+
+
+@contextmanager
+def guarded_http_client(
+    url: str,
+    *,
+    resolver: Resolver = resolve_host,
+    client: httpx.Client | None = None,
+) -> Iterator[tuple[httpx.Client, tuple[str, ...]]]:
+    policy, addresses = _guard_url(url, resolver=resolver)
+    if not policy.allowed:
+        raise EgressPolicyError(policy.reason)
+    if client is not None:
+        yield client, addresses
+        return
+    parsed = urlsplit(url)
+    assert parsed.hostname is not None
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    host = parsed.hostname.encode("idna").decode("ascii")
+    with httpx.Client(
+        transport=_PinnedTransport(host, port, addresses[0]),
+        follow_redirects=False,
+        trust_env=False,
+    ) as pinned:
+        yield pinned, addresses
+
+
+def _origin(url: str) -> tuple[str, str, int]:
+    parsed = urlsplit(url)
+    return (
+        parsed.scheme.casefold(),
+        (parsed.hostname or "").casefold().rstrip("."),
+        parsed.port or (443 if parsed.scheme.casefold() == "https" else 80),
+    )
+
+
+@contextmanager
+def _safe_stream(
+    url: str,
+    *,
+    headers: Mapping[str, str] | None,
+    params: Mapping[str, str | None] | None,
+    deadline: float,
+    resolver: Resolver,
+    client: httpx.Client | None,
+    max_redirects: int = 3,
+) -> Iterator[tuple[httpx.Response, str]]:
+    try:
+        current = url
+        origin = _origin(url)
+        visited: set[str] = set()
+        request_params = params
+        for _attempt in range(max_redirects + 1):
+            if current in visited:
+                raise ClassificationError("source redirect loop")
+            visited.add(current)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise ClassificationError("source total deadline exceeded")
+            with (
+                guarded_http_client(
+                    current,
+                    resolver=resolver,
+                    client=client,
+                ) as (http, _addresses),
+                http.stream(
+                    "GET",
+                    current,
+                    headers=headers,
+                    params=request_params,
+                    follow_redirects=False,
+                    timeout=remaining,
+                ) as response,
+            ):
+                request_params = None
+                if response.status_code in _REDIRECT_CODES:
+                    location = response.headers.get("location")
+                    if not location:
+                        raise ClassificationError("source redirect lacks location")
+                    target = urljoin(str(response.url), location)
+                    if _origin(target) != origin:
+                        raise ClassificationError(
+                            "source cross-origin redirect rejected"
+                        )
+                    current = target
+                    continue
+                yield response, current
+                return
+        raise ClassificationError("source redirect limit exceeded")
+    except ClassificationError:
+        raise
+    except EgressPolicyError as exc:
+        raise ClassificationError(f"source URL rejected: {exc.reason}") from exc
+    except ValueError as exc:
+        raise ClassificationError("source URL or response metadata is invalid") from exc
 
 
 def _canonical_json(payload: Mapping[str, Any]) -> bytes:
@@ -590,11 +842,16 @@ def fetch_oai_window(
     size_cap_bytes: int = MAX_DOWNLOAD_BYTES,
     extract_oai_records: bool = False,
     checkpoint_dir: Path | None = None,
+    max_pages: int = 10_000,
+    client: httpx.Client | None = None,
+    resolver: Resolver = resolve_host,
 ) -> tuple[bytes, dict[str, Any]]:
     """Fetch a fixed OAI-PMH window while preserving every response page."""
 
     if size_cap_bytes <= 0 or size_cap_bytes > MAX_DOWNLOAD_BYTES:
         raise ClassificationError("OAI size cap is unsafe")
+    if max_pages <= 0:
+        raise ClassificationError("OAI page cap is unsafe")
     identity = {
         "base_url": base_url,
         "metadata_prefix": metadata_prefix,
@@ -622,6 +879,8 @@ def fetch_oai_window(
     if checkpoint.get("identity_sha256") != identity_sha256:
         raise ClassificationError("OAI checkpoint belongs to another source window")
     pages = list(checkpoint.get("pages") or [])
+    if len(pages) > max_pages:
+        raise ClassificationError("OAI checkpoint exceeds page cap")
     resumed_pages = len(pages)
     for page in pages:
         path = Path(str(page.get("path") or ""))
@@ -632,27 +891,57 @@ def fetch_oai_window(
         ):
             raise ClassificationError("OAI checkpoint page is missing or corrupt")
     token = checkpoint.get("next_token")
+    seen_tokens = {str(token)} if token else set()
     total = int(checkpoint.get("response_bytes") or 0)
     requests = len(pages)
-    with httpx.Client(timeout=timeout_seconds, follow_redirects=True) as client:
-        while not checkpoint.get("complete"):
-            params = (
-                {"verb": "ListRecords", "resumptionToken": token}
-                if token
-                else {
-                    "verb": "ListRecords",
-                    "metadataPrefix": metadata_prefix,
-                    "from": from_date,
-                    "until": until_date,
-                    **({"set": set_spec} if set_spec else {}),
-                }
-            )
-            response = client.get(base_url, params=params)
+    deadline = time.monotonic() + max(0.1, timeout_seconds)
+    while not checkpoint.get("complete"):
+        if requests >= max_pages:
+            raise ClassificationError("OAI page cap exceeded")
+        params = (
+            {"verb": "ListRecords", "resumptionToken": str(token)}
+            if token
+            else {
+                "verb": "ListRecords",
+                "metadataPrefix": metadata_prefix,
+                "from": from_date,
+                "until": until_date,
+                **({"set": set_spec} if set_spec else {}),
+            }
+        )
+        with _safe_stream(
+            base_url,
+            headers={"Accept": "application/xml,text/xml"},
+            params=params,
+            deadline=deadline,
+            resolver=resolver,
+            client=client,
+        ) as (response, _final_url):
             response.raise_for_status()
-            content = response.content
+            content_type = (
+                response.headers.get("content-type", "")
+                .split(";", 1)[0]
+                .casefold()
+                .strip()
+            )
+            if content_type not in {"application/xml", "text/xml"}:
+                raise ClassificationError("OAI response MIME is not XML")
+            declared = response.headers.get("content-length")
+            if declared and total + int(declared) > size_cap_bytes:
+                raise ClassificationError(
+                    "OAI declared response exceeds package size cap"
+                )
+            chunks: list[bytes] = []
+            page_total = 0
+            for chunk in response.iter_bytes():
+                if time.monotonic() >= deadline:
+                    raise ClassificationError("OAI total deadline exceeded")
+                page_total += len(chunk)
+                if total + page_total > size_cap_bytes:
+                    raise ClassificationError("OAI response exceeded package size cap")
+                chunks.append(chunk)
+            content = b"".join(chunks)
             total += len(content)
-            if total > size_cap_bytes:
-                raise ClassificationError("OAI response exceeded package size cap")
             requests += 1
             xml = ET.fromstring(content)
             record_tag = OAI_NS if extract_oai_records else MARC_NS
@@ -663,7 +952,14 @@ def fetch_oai_window(
             page_bytes = b"\n".join(records)
             node = xml.find(f".//{{{OAI_NS}}}resumptionToken")
             token = (node.text or "").strip() if node is not None else ""
+            if len(token) > 4096:
+                raise ClassificationError("OAI resumption token is too large")
+            if token and token in seen_tokens:
+                raise ClassificationError("OAI resumption token loop")
+            if token:
+                seen_tokens.add(token)
             if checkpoint_dir is not None:
+                assert checkpoint_path is not None
                 page_path = checkpoint_dir / "pages" / f"{requests:06d}.xml"
                 _atomic_write(page_path, page_bytes)
                 pages.append(
@@ -690,9 +986,9 @@ def fetch_oai_window(
                         "record_count": len(records),
                     }
                 )
-            if not token:
-                checkpoint["complete"] = True
-                break
+        if not token:
+            checkpoint["complete"] = True
+            break
     record_pages = [
         (
             Path(str(page["path"])).read_bytes()
@@ -735,50 +1031,93 @@ def download_file(
     *,
     size_cap_bytes: int,
     timeout_seconds: float = 120.0,
+    client: httpx.Client | None = None,
+    resolver: Resolver = resolve_host,
 ) -> dict[str, Any]:
     if size_cap_bytes <= 0 or size_cap_bytes > MAX_DOWNLOAD_BYTES:
         raise ClassificationError("download size cap is unsafe")
     target.parent.mkdir(parents=True, exist_ok=True)
+    partial = target.with_name(f".{target.name}.part")
+    checkpoint_path = target.with_name(f".{target.name}.part.json")
+    checkpoint = read_sealed_json(checkpoint_path) if checkpoint_path.exists() else {}
     if target.is_file():
         if target.stat().st_size > size_cap_bytes:
             raise ClassificationError("existing download exceeds source size cap")
+        if (
+            checkpoint.get("url") != url
+            or checkpoint.get("complete") is not True
+            or checkpoint.get("bytes") != target.stat().st_size
+            or checkpoint.get("target_sha256") != sha256_file(target)
+        ):
+            raise ClassificationError("complete download lacks matching checkpoint")
         return {
             "url": url,
             "path": str(target),
             "bytes": target.stat().st_size,
             "sha256": sha256_file(target),
-            "etag": None,
-            "last_modified": None,
-            "content_type": None,
+            "etag": checkpoint.get("etag"),
+            "last_modified": checkpoint.get("last_modified"),
+            "content_type": checkpoint.get("content_type"),
             "resumed_from_bytes": target.stat().st_size,
             "reused_complete_file": True,
         }
-    partial = target.with_name(f".{target.name}.part")
-    checkpoint_path = target.with_name(f".{target.name}.part.json")
     offset = partial.stat().st_size if partial.exists() else 0
-    checkpoint = read_sealed_json(checkpoint_path) if checkpoint_path.exists() else {}
     if offset and checkpoint.get("url") != url:
         raise ClassificationError("partial download belongs to another URL")
+    checkpoint_etag = str(checkpoint.get("etag") or "")
+    if offset and (not checkpoint_etag or checkpoint_etag.startswith("W/")):
+        offset = 0
     request_headers = {}
     if offset:
         request_headers["Range"] = f"bytes={offset}-"
-        if checkpoint.get("etag"):
-            request_headers["If-Range"] = str(checkpoint["etag"])
-    with httpx.stream(
-        "GET",
+        request_headers["If-Range"] = checkpoint_etag
+    deadline = time.monotonic() + max(0.1, timeout_seconds)
+    with _safe_stream(
         url,
         headers=request_headers,
-        timeout=timeout_seconds,
-        follow_redirects=True,
-    ) as response:
+        params=None,
+        deadline=deadline,
+        resolver=resolver,
+        client=client,
+    ) as (response, final_url):
         response.raise_for_status()
         append = bool(offset and response.status_code == 206)
         if offset and response.status_code not in {200, 206}:
             raise ClassificationError("download server returned unsafe range response")
-        if append and not str(response.headers.get("content-range") or "").startswith(
-            f"bytes {offset}-"
-        ):
-            raise ClassificationError("download server returned mismatched range")
+        if not offset and response.status_code == 206:
+            raise ClassificationError("download server returned unsolicited range")
+        content_type = (
+            response.headers.get("content-type", "").split(";", 1)[0].casefold().strip()
+        )
+        if content_type not in {
+            "application/gzip",
+            "application/zip",
+            "application/octet-stream",
+            "application/rdf+xml",
+            "application/xml",
+            "application/x-gzip",
+            "text/xml",
+        }:
+            raise ClassificationError("download response MIME is unsupported")
+        expected_total: int | None = None
+        if append:
+            match = re.fullmatch(
+                r"bytes (\d+)-(\d+)/(\d+|\*)",
+                str(response.headers.get("content-range") or ""),
+            )
+            if not match or int(match.group(1)) != offset:
+                raise ClassificationError("download server returned mismatched range")
+            if int(match.group(2)) < offset:
+                raise ClassificationError("download server returned invalid range")
+            if match.group(3) == "*":
+                raise ClassificationError("download range lacks exact total")
+            expected_total = int(match.group(3))
+            if int(match.group(2)) >= expected_total:
+                raise ClassificationError("download range exceeds exact total")
+            if expected_total > size_cap_bytes:
+                raise ClassificationError("download range exceeds source size cap")
+            if str(response.headers.get("etag") or "") != checkpoint_etag:
+                raise ClassificationError("download server returned incompatible ETag")
         total = offset if append else 0
         headers = {
             "etag": response.headers.get("etag"),
@@ -798,14 +1137,21 @@ def download_file(
             },
             backup=True,
         )
+        declared = response.headers.get("content-length")
+        if declared and total + int(declared) > size_cap_bytes:
+            raise ClassificationError("download declared size exceeds source size cap")
         with partial.open("ab" if append else "wb") as handle:
             for chunk in response.iter_bytes():
+                if time.monotonic() >= deadline:
+                    raise ClassificationError("download total deadline exceeded")
                 total += len(chunk)
                 if total > size_cap_bytes:
                     raise ClassificationError("download exceeded source size cap")
                 handle.write(chunk)
             handle.flush()
             os.fsync(handle.fileno())
+        if expected_total is not None and total != expected_total:
+            raise ClassificationError("download ended before declared range completed")
     os.replace(partial, target)
     os.chmod(target, 0o600)
     write_sealed_json(
@@ -813,6 +1159,7 @@ def download_file(
         {
             "schema": "chronovisor.download-checkpoint.v1",
             "url": url,
+            "final_url": final_url,
             **headers,
             "partial_path": str(partial),
             "resumed_from_bytes": offset if append else 0,

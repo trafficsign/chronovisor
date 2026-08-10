@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import json
-import sys
+import socket
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 
+import httpx
 import pytest
 
 from chronovisor.core import ollama
@@ -644,33 +645,34 @@ def test_run_codex_adapts_to_missing_cli_options(tmp_path: Path, monkeypatch) ->
     } >= {"--cd", "--output-schema", "--output-last-message"}
 
 
-def test_collect_official_frontier_docs_uses_allowlist(monkeypatch) -> None:
-    class FakeResponse:
-        status_code = 200
-        url = "https://platform.openai.com/docs"
-        text = (
-            "<html><body><h1>Codex exec</h1><p>Use official commands.</p></body></html>"
-        )
+def test_collect_official_frontier_docs_respects_disabled_env(monkeypatch) -> None:
+    monkeypatch.setenv("CHRONOVISOR_FRONTIER_DOC_LOOKUP", "0")
 
-        def raise_for_status(self) -> None:
-            return None
+    result = frontier_review.collect_official_frontier_docs("codex")
 
-    class FakeHttpx:
-        @staticmethod
-        def get(url, **_kwargs):
-            assert frontier_review.is_allowed_official_url(url)
-            return FakeResponse()
+    assert result == {"attempted": False, "reason": "disabled", "documents": []}
 
+
+def test_collect_official_frontier_docs_is_fail_closed_without_network(
+    monkeypatch,
+) -> None:
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("frontier docs security policy must start no network")
+
+    monkeypatch.setenv("CHRONOVISOR_FRONTIER_DOC_LOOKUP", "1")
     monkeypatch.setenv(
         "CHRONOVISOR_FRONTIER_DOC_URLS",
         "https://platform.openai.com/docs,https://example.com/bad",
     )
-    monkeypatch.setitem(sys.modules, "httpx", FakeHttpx)
+    monkeypatch.setattr(httpx, "get", forbidden)
+    monkeypatch.setattr(httpx, "stream", forbidden)
+    monkeypatch.setattr(socket, "getaddrinfo", forbidden)
 
     result = frontier_review.collect_official_frontier_docs("codex exec option")
 
-    assert result["attempted"] is True
-    assert result["documents"]
+    assert result["attempted"] is False
+    assert result["reason"] == "disabled_by_security_policy"
+    assert result["documents"] == []
     assert all(
         frontier_review.is_allowed_official_url(url) for url in result["allowlist"]
     )
