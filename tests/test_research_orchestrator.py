@@ -27,6 +27,18 @@ def _isolate_scheduler(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(research_scheduler, "SCHEDULER_LOG", root / "log.jsonl")
 
 
+def _route_planner(monkeypatch) -> None:
+    monkeypatch.setattr(
+        research_orchestrator.ollama,
+        "runtime_generation_routes",
+        lambda roles: (
+            research_orchestrator.ollama.RuntimeGenerationRoute(
+                roles[0], "ollama", "route-planner", "local", True
+            ),
+        ),
+    )
+
+
 def test_deterministic_kernel_terminalizes_every_action(tmp_path, monkeypatch) -> None:
     _isolate_scheduler(tmp_path, monkeypatch)
 
@@ -117,9 +129,10 @@ def test_action_contract_rejects_wrong_arguments_before_execution(
 
 def test_local_planner_preserves_transport_failure_class(monkeypatch) -> None:
     calls = []
+    _route_planner(monkeypatch)
 
-    def run_worker(*_args, **kwargs):
-        calls.append(kwargs)
+    def run_worker(*args, **kwargs):
+        calls.append((args, kwargs))
         return CancellableResult(
             "completed",
             value={
@@ -149,13 +162,25 @@ def test_local_planner_preserves_transport_failure_class(monkeypatch) -> None:
     )
 
     assert response.status == "error"
-    assert response.error == "transport_error: connection reset"
+    assert response.error == "transport_error"
     assert response.latency_ms == 123
-    assert calls[0]["timeout_seconds"] == 90.0
+    assert response.route_identity == {
+        "role": "research.planner",
+        "provider": "ollama",
+        "model": "route-planner",
+        "location": "local",
+    }
+    request = research_orchestrator.json.loads(calls[0][0][1])
+    assert request["operation"] == "planner"
+    assert request["expected_model"] == "route-planner"
+    assert request["expected_location"] == "local"
+    assert not {"model", "role", "provider", "schema", "system"} & set(request)
+    assert calls[0][1]["timeout_seconds"] == 90.0
 
 
 def test_local_planner_session_timeout_respects_run_deadline(monkeypatch) -> None:
     calls = []
+    _route_planner(monkeypatch)
 
     def run_worker(*_args, **kwargs):
         calls.append(kwargs)
@@ -185,6 +210,55 @@ def test_local_planner_session_timeout_respects_run_deadline(monkeypatch) -> Non
 
     assert response.status == "timeout"
     assert 0 < calls[0]["timeout_seconds"] <= 5
+
+
+def test_model_planner_route_identity_is_durable_and_legacy_selector_is_ignored(
+    tmp_path, monkeypatch
+) -> None:
+    _isolate_scheduler(tmp_path, monkeypatch)
+    _route_planner(monkeypatch)
+    monkeypatch.setattr(
+        research_orchestrator,
+        "execute_tool",
+        lambda *_args: {"status": "ok", "results": []},
+    )
+    monkeypatch.setattr(
+        research_orchestrator,
+        "run_cancellable_command",
+        lambda *_args, **_kwargs: CancellableResult(
+            "completed",
+            value={
+                "ok": True,
+                "value": {
+                    "type": "finish",
+                    "arguments": {"answer": "done"},
+                    "rationale": "complete",
+                },
+                "first_pass_valid": True,
+                "repair_turns": 0,
+            },
+        ),
+    )
+    store = ResearchStore(tmp_path / "store")
+
+    result = research_orchestrator.run_research(
+        "goal",
+        config=ResearchConfig(enabled=True, mode="explicit"),
+        planner=LocalPlanner("ignored-selector"),
+        store=store,
+    )
+
+    action = next(
+        row
+        for row in store.events(result["research_run_id"])
+        if row["kind"] == "action"
+    )
+    assert action["route"] == {
+        "role": "research.planner",
+        "provider": "ollama",
+        "model": "route-planner",
+        "location": "local",
+    }
 
 
 def test_transport_error_retries_without_counting_malformed(

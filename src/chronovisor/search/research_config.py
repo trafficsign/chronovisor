@@ -227,13 +227,6 @@ def load_research_config(path: Path | str | None = None) -> ResearchConfig:
     return ResearchConfig(
         enabled=enabled,
         mode=mode,
-        planner_model=str(data.get("planner_model") or ResearchConfig.planner_model),
-        challenge_model=str(
-            data.get("challenge_model") or ResearchConfig.challenge_model
-        ),
-        tie_break_model=str(
-            data.get("tie_break_model") or ResearchConfig.tie_break_model
-        ),
         max_depth=min(1, _int(data, "max_depth", 1)),
         budgets=budget,
         resources=resources,

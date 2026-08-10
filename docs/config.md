@@ -119,6 +119,36 @@ capability = "generation"
 provider = "local"
 model = "ornith:9b-q4_K_M"
 
+[llm.roles."research.planner"]
+capability = "generation"
+provider = "local"
+model = "maxwell1500/ornith-35b:Q5_K_M"
+required_capabilities = ["structured_output"]
+
+[llm.roles."research.challenge"]
+capability = "generation"
+provider = "local"
+model = "gpt-oss:20b"
+required_capabilities = ["structured_output"]
+
+[llm.roles."research.tie_break"]
+capability = "generation"
+provider = "local"
+model = "gemma4:26b"
+required_capabilities = ["structured_output"]
+
+# All research prompts are raw/high. Remote routes require all three exact
+# opt-ins; denial reaches no backend and has no local fallback.
+# [[llm.egress_opt_in]]
+# role = "research.planner"
+# data_class = "raw"
+# [[llm.egress_opt_in]]
+# role = "research.challenge"
+# data_class = "raw"
+# [[llm.egress_opt_in]]
+# role = "research.tie_break"
+# data_class = "raw"
+
 [decision_router]
 # Routine structured decisions require a two-vote local quorum. The complete
 # request-token budget, including both possible JSON-repair turns, selects the
@@ -254,9 +284,8 @@ queue_size = 8
 # auto/shadow still fail closed until protected capacity is proved.
 enabled = true
 mode = "explicit"
-planner_model = "maxwell1500/ornith-35b:Q5_K_M"
-challenge_model = "gpt-oss:20b"
-tie_break_model = "gemma4:26b"
+# Provider/model selection is fixed by llm.roles."research.*". Legacy model
+# keys are accepted but ignored.
 max_depth = 1
 
 [research.budgets]

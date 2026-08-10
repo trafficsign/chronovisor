@@ -562,6 +562,9 @@ def test_repository_example_has_representative_local_role_map() -> None:
         "recall.auditor",
         "recall.gate",
         "recall.query_rewriter",
+        "research.planner",
+        "research.challenge",
+        "research.tie_break",
         "knowledge.relation_extraction",
         "knowledge.community_summary",
         "ingest.generation",
@@ -612,6 +615,18 @@ def test_repository_example_has_representative_local_role_map() -> None:
     recall_rewriter = config.roles["recall.query_rewriter"]
     assert recall_gate.provider_id == recall_rewriter.provider_id == "local"
     assert recall_gate.model == recall_rewriter.model == "ornith:9b-q4_K_M"
+    assert [
+        config.roles[role].model
+        for role in (
+            "research.planner",
+            "research.challenge",
+            "research.tie_break",
+        )
+    ] == [
+        "maxwell1500/ornith-35b:Q5_K_M",
+        "gpt-oss:20b",
+        "gemma4:26b",
+    ]
     ingest_generation = config.roles["ingest.generation"]
     assert ingest_generation.provider_id == "local"
     assert ingest_generation.model == "maxwell1500/ornith-35b:Q5_K_M"

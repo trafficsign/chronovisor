@@ -168,6 +168,24 @@ capability = "generation"
 provider = "local"
 model = "ornith:9b-q4_K_M"
 
+[llm.roles."research.planner"]
+capability = "generation"
+provider = "local"
+model = "maxwell1500/ornith-35b:Q5_K_M"
+required_capabilities = ["structured_output"]
+
+[llm.roles."research.challenge"]
+capability = "generation"
+provider = "local"
+model = "gpt-oss:20b"
+required_capabilities = ["structured_output"]
+
+[llm.roles."research.tie_break"]
+capability = "generation"
+provider = "local"
+model = "gemma4:26b"
+required_capabilities = ["structured_output"]
+
 # Each classification vote remains an independently replaceable single route.
 [llm.roles."classification.primary"]
 capability = "generation"
@@ -327,6 +345,18 @@ model = "gpt-oss:20b"
 #
 # [[llm.egress_opt_in]]
 # role = "recall.query_rewriter"
+# data_class = "raw"
+#
+# [[llm.egress_opt_in]]
+# role = "research.planner"
+# data_class = "raw"
+#
+# [[llm.egress_opt_in]]
+# role = "research.challenge"
+# data_class = "raw"
+#
+# [[llm.egress_opt_in]]
+# role = "research.tie_break"
 # data_class = "raw"
 #
 # [[llm.egress_opt_in]]

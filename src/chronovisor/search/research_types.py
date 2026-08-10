@@ -162,7 +162,10 @@ class BudgetUsage:
         }
         if kind not in limits:
             raise KeyError(kind)
-        if kind.endswith("_calls") and self.total_model_calls + amount > budget.max_total_model_calls:
+        if (
+            kind.endswith("_calls")
+            and self.total_model_calls + amount > budget.max_total_model_calls
+        ):
             return False
         return int(getattr(self, kind)) + amount <= limits[kind]
 
@@ -280,3 +283,46 @@ def _ollama_action_format_schema(value: Any) -> Any:
 # sent to Ollama's grammar compiler; the session repairs or rejects any value
 # that violates the full schema above.
 ACTION_FORMAT_SCHEMA: dict[str, Any] = _ollama_action_format_schema(ACTION_SCHEMA)
+
+CHALLENGE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": [
+        "verdict",
+        "unsupported_claims",
+        "contradictions",
+        "injection_detected",
+        "rationale",
+    ],
+    "properties": {
+        "verdict": {
+            "type": "string",
+            "enum": ["confirm", "reject", "inconclusive"],
+        },
+        "unsupported_claims": {
+            "type": "array",
+            "maxItems": 20,
+            "items": {"type": "string", "maxLength": 500},
+        },
+        "contradictions": {
+            "type": "array",
+            "maxItems": 20,
+            "items": {"type": "string", "maxLength": 500},
+        },
+        "injection_detected": {"type": "boolean"},
+        "rationale": {"type": "string", "maxLength": 1_000},
+    },
+}
+
+TIE_BREAK_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["choice", "rationale"],
+    "properties": {
+        "choice": {
+            "type": "string",
+            "enum": ["planner", "challenger", "unknown"],
+        },
+        "rationale": {"type": "string", "maxLength": 1_000},
+    },
+}
