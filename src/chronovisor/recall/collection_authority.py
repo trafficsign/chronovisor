@@ -2044,6 +2044,86 @@ def autonomously_finalize_collection_queue(root: Path) -> dict[str, Any]:
     }
 
 
+def _explicit_collection_decisions(
+    raw_decisions: list[Any],
+) -> dict[str, dict[str, Any]]:
+    explicit: dict[str, dict[str, Any]] = {}
+    for raw_decision in raw_decisions:
+        if not isinstance(raw_decision, Mapping):
+            raise CollectionAuthorityError("collection review decision is malformed")
+        decision = dict(raw_decision)
+        candidate_id = str(decision.get("candidate_id") or "")
+        if not candidate_id or candidate_id in explicit:
+            raise CollectionAuthorityError(
+                "collection review decision IDs must be unique"
+            )
+        if decision.get("action") not in {"move", "preserve"}:
+            raise CollectionAuthorityError(
+                f"unsupported collection review action: {candidate_id}"
+            )
+        if not str(decision.get("rationale") or "").strip():
+            raise CollectionAuthorityError(
+                f"collection review rationale is missing: {candidate_id}"
+            )
+        explicit[candidate_id] = decision
+    return explicit
+
+
+def _preserve_refreshed_candidates(
+    root: Path,
+    queue_path: Path,
+    refreshed: dict[str, Any],
+    preserve_reasons: list[Any],
+    manifest: Mapping[str, Any],
+    registry: CollectionRegistry,
+) -> tuple[dict[str, Any], int]:
+    new_preserves = 0
+    if not preserve_reasons or not refreshed["open"]:
+        return refreshed, new_preserves
+    refreshed_queue = read_sealed_json(queue_path)
+    for candidate_id, raw_row in (refreshed_queue.get("items") or {}).items():
+        if (
+            not isinstance(raw_row, Mapping)
+            or raw_row.get("status") not in {"queued", "review_recommended"}
+            or raw_row.get("reason") not in preserve_reasons
+        ):
+            continue
+        row = dict(raw_row)
+        row["status"] = "dismissed"
+        row["resolved_at"] = _now()
+        row["resolution"] = "host_preserve_original_order"
+        row["host_decision"] = {
+            "action": "preserve",
+            "rationale": (
+                "Existing collection remains the primary archival authority; "
+                "cross-collection links are relational evidence only."
+            ),
+            "authority": str(
+                manifest.get("decision_authority") or "host_adjudication"
+            ),
+            "decided_at": str(manifest.get("approved_at") or _now()),
+        }
+        refreshed_queue["items"][candidate_id] = row
+        new_preserves += 1
+    if new_preserves:
+        adjudication = dict(refreshed_queue.get("host_adjudication") or {})
+        adjudication["blanket_preserves"] = (
+            int(adjudication.get("blanket_preserves") or 0) + new_preserves
+        )
+        adjudication["preserves"] = (
+            int(adjudication.get("preserves") or 0) + new_preserves
+        )
+        refreshed_queue["host_adjudication"] = adjudication
+        _checkpoint_review_queue(
+            queue_path,
+            refreshed_queue,
+            base_reviewer_calls=int(refreshed_queue.get("reviewer_calls") or 0),
+            reviewed_count=0,
+        )
+        refreshed = refresh_review_queue(root, state=registry.load())
+    return refreshed, new_preserves
+
+
 def adjudicate_collection_review_queue(
     root: Path,
     manifest: Mapping[str, Any],
@@ -2117,26 +2197,7 @@ def adjudicate_collection_review_queue(
             key=lambda row: (row["slug"], row["label"]),
         )
 
-    explicit: dict[str, dict[str, Any]] = {}
-    for raw_decision in raw_decisions:
-        if not isinstance(raw_decision, Mapping):
-            raise CollectionAuthorityError("collection review decision is malformed")
-        decision = dict(raw_decision)
-        candidate_id = str(decision.get("candidate_id") or "")
-        if not candidate_id or candidate_id in explicit:
-            raise CollectionAuthorityError(
-                "collection review decision IDs must be unique"
-            )
-        if decision.get("action") not in {"move", "preserve"}:
-            raise CollectionAuthorityError(
-                f"unsupported collection review action: {candidate_id}"
-            )
-        if not str(decision.get("rationale") or "").strip():
-            raise CollectionAuthorityError(
-                f"collection review rationale is missing: {candidate_id}"
-            )
-        explicit[candidate_id] = decision
-
+    explicit = _explicit_collection_decisions(raw_decisions)
     decisions = dict(explicit)
     for candidate_id, row in items.items():
         if row.get("reason") in preserve_reasons and candidate_id not in decisions:
@@ -2342,49 +2403,9 @@ def adjudicate_collection_review_queue(
         reviewed_count=0,
     )
     refreshed = refresh_review_queue(root, state=registry.load())
-    new_preserves = 0
-    if preserve_reasons and refreshed["open"]:
-        refreshed_queue = read_sealed_json(queue_path)
-        for candidate_id, raw_row in (refreshed_queue.get("items") or {}).items():
-            if (
-                not isinstance(raw_row, Mapping)
-                or raw_row.get("status") not in {"queued", "review_recommended"}
-                or raw_row.get("reason") not in preserve_reasons
-            ):
-                continue
-            row = dict(raw_row)
-            row["status"] = "dismissed"
-            row["resolved_at"] = _now()
-            row["resolution"] = "host_preserve_original_order"
-            row["host_decision"] = {
-                "action": "preserve",
-                "rationale": (
-                    "Existing collection remains the primary archival authority; "
-                    "cross-collection links are relational evidence only."
-                ),
-                "authority": str(
-                    manifest.get("decision_authority") or "host_adjudication"
-                ),
-                "decided_at": str(manifest.get("approved_at") or _now()),
-            }
-            refreshed_queue["items"][candidate_id] = row
-            new_preserves += 1
-        if new_preserves:
-            adjudication = dict(refreshed_queue.get("host_adjudication") or {})
-            adjudication["blanket_preserves"] = (
-                int(adjudication.get("blanket_preserves") or 0) + new_preserves
-            )
-            adjudication["preserves"] = (
-                int(adjudication.get("preserves") or 0) + new_preserves
-            )
-            refreshed_queue["host_adjudication"] = adjudication
-            _checkpoint_review_queue(
-                queue_path,
-                refreshed_queue,
-                base_reviewer_calls=int(refreshed_queue.get("reviewer_calls") or 0),
-                reviewed_count=0,
-            )
-            refreshed = refresh_review_queue(root, state=registry.load())
+    refreshed, new_preserves = _preserve_refreshed_candidates(
+        root, queue_path, refreshed, preserve_reasons, manifest, registry
+    )
     return {
         "status": "ok",
         "explicit_decisions": len(explicit),
