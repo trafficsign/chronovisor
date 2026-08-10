@@ -8,6 +8,7 @@ from typing import Any
 
 from chronovisor.core import ollama
 from chronovisor.core.llm_runtime import (
+    BackendCapabilities,
     EmbeddingRequest,
     EmbeddingResult,
     EmbeddingRoute,
@@ -133,7 +134,15 @@ def compose_ollama_runtime(
     local_roles = generation_roles.keys() | embedding_roles.keys()
     return LLMRuntime(
         generation={
-            role: GenerationRoute(adapter, model)
+            role: GenerationRoute(
+                adapter,
+                model,
+                BackendCapabilities(
+                    generation=True,
+                    embedding=True,
+                    structured_output=True,
+                ),
+            )
             for role, model in generation_roles.items()
         },
         embedding={

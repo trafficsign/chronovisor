@@ -251,6 +251,9 @@ class ChatTransport(Protocol):
     ) -> str | ollama.ChatResponse | ollama.GenerateResponse: ...
 
 
+ChatTransportOutput = str | ollama.ChatResponse | ollama.GenerateResponse
+
+
 _TRUNCATED_DONE_REASONS = {
     "length",
     "max_length",
@@ -1835,6 +1838,7 @@ class LocalStructuredSession:
         transport: ChatTransport | None = None,
         role: str = "structured",
         runtime_role: str = _DEFAULT_RUNTIME_ROLE,
+        runtime_location: str | None = None,
         source_data_class: str = "system",
         source_sensitivity: str = "high",
         audit_root: Path | None = None,
@@ -1861,6 +1865,8 @@ class LocalStructuredSession:
             or SAFE_RUNTIME_ROLE_RE.fullmatch(runtime_role) is None
         ):
             raise ValueError("runtime_role must be a safe lower-case identifier")
+        if runtime_location not in {None, "local", "remote"}:
+            raise ValueError("runtime_location must be local or remote")
         if (
             not isinstance(source_data_class, str)
             or source_data_class not in _SOURCE_DATA_CLASSES
@@ -1919,6 +1925,7 @@ class LocalStructuredSession:
         self.model = model.strip()
         self.role = role.strip()
         self.runtime_role = runtime_role
+        self.runtime_location = runtime_location
         self.source_data_class = source_data_class
         self.source_sensitivity = source_sensitivity
         self._uses_default_transport = transport is None
@@ -2024,6 +2031,39 @@ class LocalStructuredSession:
             f"{CONTEXT_SAFETY_TOKENS}>{effective_num_ctx})",
         )
 
+    def _call_transport(
+        self,
+        request: ChatRequest,
+        attempts: Sequence[StructuredAttempt],
+    ) -> tuple[ChatTransportOutput, LocalStructuredResult | None]:
+        try:
+            return self.transport(request), None
+        except ollama.OutputTooLargeError as exc:
+            failure = self._failure("output_too_large", str(exc), attempts)
+        except (TimeoutError, httpx.TimeoutException) as exc:
+            failure = self._failure(
+                "transport_timeout",
+                f"{type(exc).__name__}: {str(exc)[:500]}",
+                attempts,
+            )
+        except ollama.RuntimeBridgeError as exc:
+            failure = self._failure(
+                exc.category if self._uses_default_transport else "transport_error",
+                (
+                    exc.category
+                    if self._uses_default_transport
+                    else f"{type(exc).__name__}: {str(exc)[:500]}"
+                ),
+                attempts,
+            )
+        except Exception as exc:
+            failure = self._failure(
+                "transport_error",
+                f"{type(exc).__name__}: {str(exc)[:500]}",
+                attempts,
+            )
+        return "", failure
+
     def _run_impl(
         self,
         prompt: str,
@@ -2088,34 +2128,11 @@ class LocalStructuredSession:
             )
             if activity_update is not None:
                 activity_update("generate" if index == 0 else "repair", index)
-            try:
-                transport_output = self.transport(request)
-            except ollama.OutputTooLargeError as exc:
-                return self._failure("output_too_large", str(exc), attempts)
-            except (TimeoutError, httpx.TimeoutException) as exc:
-                return self._failure(
-                    "transport_timeout",
-                    f"{type(exc).__name__}: {str(exc)[:500]}",
-                    attempts,
-                )
-            except ollama.RuntimeBridgeError as exc:
-                if self._uses_default_transport:
-                    return self._failure(
-                        exc.category,
-                        exc.category,
-                        attempts,
-                    )
-                return self._failure(
-                    "transport_error",
-                    f"{type(exc).__name__}: {str(exc)[:500]}",
-                    attempts,
-                )
-            except Exception as exc:
-                return self._failure(
-                    "transport_error",
-                    f"{type(exc).__name__}: {str(exc)[:500]}",
-                    attempts,
-                )
+            transport_output, transport_failure = self._call_transport(
+                request, attempts
+            )
+            if transport_failure is not None:
+                return transport_failure
             if activity_update is not None:
                 activity_update("validate", index)
             if isinstance(
@@ -2386,8 +2403,8 @@ class LocalStructuredSession:
                     result = preflight_failure
                 else:
                     try:
-                        location = ollama.runtime_generation_location(
-                            self.runtime_role
+                        location = self.runtime_location or (
+                            ollama.runtime_generation_location(self.runtime_role)
                         )
                     except ollama.RuntimeBridgeError as exc:
                         result = self._failure(

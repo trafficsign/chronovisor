@@ -487,7 +487,9 @@ def build_llm_runtime(
         backend = backends[role.provider_id]
         if role.capability is RoleCapability.GENERATION:
             generation[role_name] = GenerationRoute(
-                cast(GenerationBackend, backend), role.model
+                cast(GenerationBackend, backend),
+                role.model,
+                config.providers[role.provider_id].capabilities_for(role.model),
             )
         elif role.capability is RoleCapability.EMBEDDING:
             embedding[role_name] = EmbeddingRoute(

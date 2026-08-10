@@ -2,6 +2,7 @@
 
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, contextmanager
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
@@ -83,6 +84,73 @@ class RuntimeBridgeError(RuntimeError):
 
 def _runtime_bridge_category(exc: Exception) -> str:
     return _safe_runtime_bridge_category(getattr(exc, "category", None))
+
+
+@dataclass(frozen=True)
+class RuntimeGenerationRoute:
+    role: str
+    provider: str
+    model: str
+    location: str
+    structured_output: bool
+
+
+def runtime_generation_routes(roles: Sequence[str]) -> tuple[RuntimeGenerationRoute, ...]:
+    """Resolve exact configured identities once without invoking a backend."""
+
+    from chronovisor.core.llm_config import LLMConfigError, load_default_llm_runtime
+    from chronovisor.core.llm_runtime import LLMRuntimeError
+
+    try:
+        runtime = load_default_llm_runtime()
+        return tuple(
+            RuntimeGenerationRoute(
+                role=route.role,
+                provider=route.provider,
+                model=route.model,
+                location=route.location.value,
+                structured_output=route.capabilities.structured_output,
+            )
+            for route in (runtime.resolve_generation(role) for role in roles)
+        )
+    except (LLMConfigError, LLMRuntimeError) as exc:
+        raise RuntimeBridgeError(_runtime_bridge_category(exc)) from None
+
+
+def source_data_classification(data_class: str, sensitivity: str) -> object:
+    """Build the canonical runtime classification without exporting runtime types."""
+
+    from chronovisor.core.llm_runtime import (
+        SourceDataClass,
+        SourceDataClassification,
+        SourceSensitivity,
+    )
+
+    try:
+        return SourceDataClassification(
+            SourceDataClass(data_class),
+            SourceSensitivity(sensitivity),
+        )
+    except ValueError:
+        raise RuntimeBridgeError("source_classification_required") from None
+
+
+def source_data_classification_values(source: object) -> tuple[str, str]:
+    """Validate and unwrap one canonical source classification."""
+
+    from chronovisor.core.llm_runtime import (
+        SourceDataClass,
+        SourceDataClassification,
+        SourceSensitivity,
+    )
+
+    if (
+        not isinstance(source, SourceDataClassification)
+        or not isinstance(source.data_class, SourceDataClass)
+        or not isinstance(source.sensitivity, SourceSensitivity)
+    ):
+        raise RuntimeBridgeError("source_classification_required")
+    return source.data_class.value, source.sensitivity.value
 
 
 def runtime_generation_location(role: str) -> str:

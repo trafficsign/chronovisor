@@ -1,4 +1,4 @@
-"""Local-only semantic decision routing with a two-vote quorum."""
+"""Provider-neutral semantic decision routing with a two-vote quorum."""
 
 from __future__ import annotations
 
@@ -77,6 +77,12 @@ ModelMetadataProvider = Callable[[Sequence[str]], Mapping[str, Any]]
 ResidencyPlanner = Callable[..., ollama.ModelResidencyPlan]
 ModelObserver = Callable[[str], tuple[int, int] | None]
 ModelUnloader = Callable[[str], bool]
+_DECISION_RUNTIME_ROLES = (
+    "classification.primary",
+    "classification.challenger",
+    "classification.tie_break",
+)
+_ROLE_NAMES = ("primary", "challenger", "tie_break")
 AUDIT_ROLE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,79}$")
 DECISION_SEMANTICS_POLICY_VERSION = 12
 QUORUM_SAFETY_POLICY_VERSION = 2
@@ -1229,6 +1235,7 @@ def _decision_value_validator(
 class DecisionVote:
     role: str
     model: str
+    provider: str
     result: LocalStructuredResult
     requested_num_ctx: int
     signature: str | None = None
@@ -1253,6 +1260,7 @@ class DecisionVote:
 
         return {
             "role": self.role,
+            "provider": self.provider,
             "model": self.model,
             "requested_num_ctx": self.requested_num_ctx,
             "valid": self.valid,
@@ -1328,7 +1336,11 @@ class DecisionRouterResult:
         }
 
 
-def _config_error(config: DecisionRouterConfig) -> str | None:
+def _config_error(
+    config: DecisionRouterConfig,
+    *,
+    model_identities: Sequence[tuple[str, str]] | None = None,
+) -> str | None:
     models = (
         config.primary_model.strip(),
         config.challenger_model.strip(),
@@ -1336,8 +1348,13 @@ def _config_error(config: DecisionRouterConfig) -> str | None:
     )
     if not all(models):
         return "all three decision model tags are required"
-    if len(set(models)) != len(models):
-        return "primary, challenger, and tie-break models must be distinct"
+    identities: Sequence[object] = model_identities or models
+    if len(set(identities)) != len(identities):
+        return (
+            "primary, challenger, and tie-break models must be distinct"
+            if model_identities is None
+            else "decision roles must resolve to distinct provider/model identities"
+        )
     if config.quorum != 2:
         return "decision router quorum must be exactly 2"
     integer_minimums = {
@@ -1471,7 +1488,7 @@ def resolve_router_policy(
 
 
 class DecisionRouter:
-    """Reach a local two-model quorum without any frontier fallback."""
+    """Reach a configured two-model quorum without provider fallback."""
 
     def __init__(
         self,
@@ -1498,21 +1515,88 @@ class DecisionRouter:
         if not isinstance(audit_role, str) or not AUDIT_ROLE_RE.fullmatch(audit_role):
             raise ValueError("audit_role must be a safe identifier of at most 80 chars")
         baseline_config = config or load_decision_router_config()
-        self._adoption_artifact_nominated = bool(
-            baseline_config.adoption_artifact.strip()
-        )
-        self.policy = (
-            resolve_router_policy(
-                baseline_config,
-                model_metadata_provider=model_metadata_provider,
+        route_error: str | None = None
+        if transport is None:
+            try:
+                resolved_routes = ollama.runtime_generation_routes(
+                    _DECISION_RUNTIME_ROLES
+                )
+            except ollama.RuntimeBridgeError as exc:
+                resolved_routes = ()
+                route_error = exc.category
+            if resolved_routes and not all(
+                route.structured_output for route in resolved_routes
+            ):
+                route_error = "capability_unavailable"
+            self.routes = (
+                dict(zip(_ROLE_NAMES, resolved_routes, strict=True))
+                if resolved_routes
+                else {}
             )
-            if resolve_adoption
-            else RouterPolicyResolution(
-                config=baseline_config,
-                source="evaluation_candidate",
+            routed_config = (
+                replace(
+                    baseline_config,
+                    primary_model=self.routes["primary"].model,
+                    challenger_model=self.routes["challenger"].model,
+                    tie_break_model=self.routes["tie_break"].model,
+                    adoption_artifact="",
+                )
+                if self.routes
+                else replace(baseline_config, adoption_artifact="")
             )
-        )
+            self.policy = RouterPolicyResolution(
+                config=routed_config,
+                source="runtime_role_mapping",
+                error=route_error,
+            )
+            self._adoption_artifact_nominated = False
+        else:
+            self.routes = {
+                role: ollama.RuntimeGenerationRoute(
+                    role=f"classification.{role}",
+                    provider="custom_transport",
+                    model=model,
+                    location="local",
+                    structured_output=True,
+                )
+                for role, model in zip(
+                    _ROLE_NAMES,
+                    (
+                        baseline_config.primary_model,
+                        baseline_config.challenger_model,
+                        baseline_config.tie_break_model,
+                    ),
+                    strict=True,
+                )
+            }
+            self._adoption_artifact_nominated = bool(
+                baseline_config.adoption_artifact.strip()
+            )
+            self.policy = (
+                resolve_router_policy(
+                    baseline_config,
+                    model_metadata_provider=model_metadata_provider,
+                )
+                if resolve_adoption
+                else RouterPolicyResolution(
+                    config=baseline_config,
+                    source="evaluation_candidate",
+                )
+            )
         self.config = self.policy.config
+        if transport is not None:
+            self.routes = {
+                role: replace(route, model=model)
+                for (role, route), model in zip(
+                    self.routes.items(),
+                    (
+                        self.config.primary_model,
+                        self.config.challenger_model,
+                        self.config.tie_break_model,
+                    ),
+                    strict=True,
+                )
+            }
         self.require_adopted = bool(require_adopted)
         self.transport = transport
         self.agreement_key = agreement_key
@@ -1521,9 +1605,30 @@ class DecisionRouter:
         self.record_replay = record_replay and audit_role != "model_eval"
         self.replay_path = replay_path
         self.audit_store = LocalConsensusAuditStore(audit_root)
-        self.config_error = _config_error(self.config)
+        route_identities = (
+            tuple((route.provider, route.model) for route in self.routes.values())
+            if transport is None and self.routes
+            else None
+        )
+        self.config_error = route_error or _config_error(
+            self.config,
+            model_identities=route_identities,
+        )
+        self._local_roles = frozenset(
+            role for role, route in self.routes.items() if route.location == "local"
+        )
+        self._local_models = tuple(
+            dict.fromkeys(
+                self.routes[role].model
+                for role in _ROLE_NAMES
+                if role in self._local_roles
+            )
+        )
+        self._defer_local_control_until_tie = self._local_roles == {"tie_break"}
+        self.record_replay = self.record_replay and len(self._local_roles) == 3
         self.live_resource_control = bool(
             self.config.adaptive_residency
+            and self._local_roles
             and (
                 live_resource_control
                 if live_resource_control is not None
@@ -1618,6 +1723,15 @@ class DecisionRouter:
             "max_feedback_chars": self.config.max_feedback_chars,
             "read_timeout_ms": self.config.read_timeout_ms,
             "quorum": self.config.quorum,
+            "routes": [
+                {
+                    "role": route.role,
+                    "provider": route.provider,
+                    "model": route.model,
+                    "location": route.location,
+                }
+                for route in self.routes.values()
+            ],
         }
         return (
             *execution_fingerprint(
@@ -1665,10 +1779,22 @@ class DecisionRouter:
             if row.get("signature_sha256") != signature_sha256:
                 continue
             model = row.get("model")
+            provider = row.get("provider")
             role = row.get("role")
-            if not isinstance(model, str) or not isinstance(role, str):
+            if (
+                not isinstance(model, str)
+                or not isinstance(role, str)
+            ):
                 continue
-            if expected_models.get(role) != model:
+            route = self.routes.get(role)
+            if (
+                expected_models.get(role) != model
+                or route is None
+                or (
+                    self.policy.source == "runtime_role_mapping"
+                    and route.provider != provider
+                )
+            ):
                 raise DecisionArtifactError(
                     "canonical decision proof voter differs from current policy"
                 )
@@ -1676,6 +1802,7 @@ class DecisionRouter:
                 DecisionVote(
                     role=role,
                     model=model,
+                    provider=route.provider,
                     result=LocalStructuredResult(ok=True, model=model, value=value),
                     requested_num_ctx=context_tier,
                     signature=signature,
@@ -1686,7 +1813,8 @@ class DecisionRouter:
         if (
             len(votes) < self.config.quorum
             or len({vote.role for vote in votes}) < self.config.quorum
-            or len({vote.model for vote in votes}) < self.config.quorum
+            or len({(vote.provider, vote.model) for vote in votes})
+            < self.config.quorum
         ):
             raise DecisionArtifactError(
                 "canonical decision quorum proof does not satisfy current policy"
@@ -1718,10 +1846,20 @@ class DecisionRouter:
         vote_manifest = [
             {
                 "role": vote.role,
+                **(
+                    {"provider": vote.provider}
+                    if self.policy.source == "runtime_role_mapping"
+                    else {}
+                ),
                 "model": vote.model,
                 "model_identity_sha256": canonical_sha256(
                     {
                         "role": vote.role,
+                        **(
+                            {"provider": vote.provider}
+                            if self.policy.source == "runtime_role_mapping"
+                            else {}
+                        ),
                         "model": vote.model,
                         "adoption_artifact_sha256": self.policy.artifact_sha256,
                     }
@@ -1735,6 +1873,11 @@ class DecisionRouter:
         proof = [
             {
                 "role": vote.role,
+                **(
+                    {"provider": vote.provider}
+                    if self.policy.source == "runtime_role_mapping"
+                    else {}
+                ),
                 "model": vote.model,
                 "signature_sha256": vote.signature_sha256,
             }
@@ -1762,7 +1905,10 @@ class DecisionRouter:
         )
 
     def _adoption_requirement_error(self) -> str | None:
-        if not self.require_adopted or self.policy.source == "adopted_artifact":
+        if (
+            not self.require_adopted
+            or self.policy.source in {"adopted_artifact", "runtime_role_mapping"}
+        ):
             return None
         if not self._adoption_artifact_nominated:
             return "adoption_artifact_required:not_nominated"
@@ -1774,12 +1920,20 @@ class DecisionRouter:
         keep_alive: str,
         role: str,
         num_ctx: int,
+        source: object | None = None,
     ) -> LocalStructuredSession:
+        source = source or ollama.source_data_classification("system", "high")
+        source_data_class, source_sensitivity = (
+            ollama.source_data_classification_values(source)
+        )
         return LocalStructuredSession(
             model=model,
             transport=self.transport,
             role=f"{self.audit_role}:{role}",
             runtime_role=f"classification.{role}",
+            runtime_location=self.routes[role].location,
+            source_data_class=source_data_class,
+            source_sensitivity=source_sensitivity,
             audit_root=self.audit_root,
             num_ctx=num_ctx,
             num_predict=self.config.num_predict,
@@ -1804,8 +1958,9 @@ class DecisionRouter:
         agreement_key: AgreementKey | None,
         decision_lane: str | None,
         ingest_repair_contract: _IngestRepairContract | None,
+        source: object | None,
     ) -> DecisionVote:
-        result = self._session(model, keep_alive, role, num_ctx).run(
+        result = self._session(model, keep_alive, role, num_ctx, source).run(
             prompt,
             schema,
             system=system,
@@ -1846,6 +2001,7 @@ class DecisionRouter:
             return DecisionVote(
                 role=role,
                 model=model,
+                provider=self.routes[role].provider,
                 result=result,
                 requested_num_ctx=num_ctx,
                 invalid_reason=result.failure_class or "structured_session_failed",
@@ -1860,6 +2016,7 @@ class DecisionRouter:
             return DecisionVote(
                 role=role,
                 model=model,
+                provider=self.routes[role].provider,
                 result=result,
                 requested_num_ctx=num_ctx,
                 invalid_reason=f"agreement_key_error:{type(exc).__name__}",
@@ -1873,6 +2030,7 @@ class DecisionRouter:
         return DecisionVote(
             role=role,
             model=model,
+            provider=self.routes[role].provider,
             result=result,
             requested_num_ctx=num_ctx,
             signature=signature,
@@ -1902,11 +2060,7 @@ class DecisionRouter:
     ) -> ollama.ModelResidencyPlan:
         """Return auditable zero-admission state without a live resource probe."""
 
-        models = (
-            self.config.primary_model,
-            self.config.challenger_model,
-            self.config.tie_break_model,
-        )
+        models = self._local_models
         return ollama.ModelResidencyPlan(
             num_ctx=num_ctx,
             max_resident_models=0,
@@ -1923,13 +2077,14 @@ class DecisionRouter:
             reuse_larger_context=self.reuse_larger_context,
         )
 
-    def _residency_plan(self, num_ctx: int) -> ollama.ModelResidencyPlan:
-        models = (
-            self.config.primary_model,
-            self.config.challenger_model,
-            self.config.tie_break_model,
-        )
-        if not self.live_resource_control:
+    def _residency_plan(
+        self,
+        num_ctx: int,
+        *,
+        control: bool = True,
+    ) -> ollama.ModelResidencyPlan:
+        models = self._local_models
+        if not self.live_resource_control or not control:
             return ollama.ModelResidencyPlan(
                 num_ctx=num_ctx,
                 max_resident_models=self.config.max_resident_models,
@@ -1958,7 +2113,8 @@ class DecisionRouter:
                 except Exception:
                     ingest_config = None
                 if (
-                    ingest_config is not None
+                    "primary" in self._local_roles
+                    and ingest_config is not None
                     and ingest_config.model == self.config.primary_model
                     and not isinstance(ingest_config.max_num_ctx, bool)
                     and isinstance(ingest_config.max_num_ctx, int)
@@ -2018,7 +2174,7 @@ class DecisionRouter:
     def _observe_vote(self, vote: DecisionVote) -> DecisionVote:
         """Attach live runner facts without making observation decision-critical."""
 
-        if not self.observe_runtime:
+        if not self.observe_runtime or vote.role not in self._local_roles:
             return replace(vote, runtime_observation_status="not_requested")
         try:
             observed = self.model_observer(vote.model)
@@ -2043,7 +2199,7 @@ class DecisionRouter:
         )
 
     def _evict_model(self, model: str, events: list[dict[str, Any]]) -> bool:
-        if not self.live_resource_control:
+        if not self.live_resource_control or model not in self._local_models:
             return True
         try:
             ok = bool(self.model_unloader(model))
@@ -3016,7 +3172,17 @@ class DecisionRouter:
         system: str | None = None,
         agreement_key: AgreementKey | None = None,
         decision_lane: str | None = None,
+        source: object | None = None,
     ) -> DecisionRouterResult:
+        source = source or ollama.source_data_classification("system", "high")
+        try:
+            ollama.source_data_classification_values(source)
+        except ollama.RuntimeBridgeError as exc:
+            return self._quarantined(
+                (),
+                "source_classification_required",
+                failure_class=exc.category,
+            )
         effective_lane = (
             decision_lane if decision_lane is not None else self.decision_lane
         )
@@ -3048,6 +3214,18 @@ class DecisionRouter:
                     failure_class="lane_contract_invalid",
                 )
 
+        if self.config_error is not None:
+            return self._decide_locked(
+                prompt,
+                schema,
+                system=system,
+                agreement_key=agreement_key,
+                decision_lane=effective_lane,
+                ingest_repair_contract=ingest_repair_contract,
+                replay_prompt=replay_prompt,
+                source=source,
+            )
+
         # Enabled production lanes must never spend a token under a nominated
         # policy that failed adoption validation.  Shadow/evaluation lanes and
         # an empty bootstrap remain executable by design.
@@ -3060,6 +3238,7 @@ class DecisionRouter:
                 decision_lane=effective_lane,
                 ingest_repair_contract=ingest_repair_contract,
                 replay_prompt=replay_prompt,
+                source=source,
             )
         if self.artifact_replay and effective_lane is not None:
             from chronovisor.core import store
@@ -3118,7 +3297,10 @@ class DecisionRouter:
             )
 
         def execute() -> DecisionRouterResult:
-            if self.live_resource_control:
+            if (
+                self.live_resource_control
+                and not self._defer_local_control_until_tie
+            ):
                 with ollama.model_resource_lease(exclusive=True):
                     return self._decide_locked(
                         prompt,
@@ -3128,6 +3310,7 @@ class DecisionRouter:
                         decision_lane=effective_lane,
                         ingest_repair_contract=ingest_repair_contract,
                         replay_prompt=replay_prompt,
+                        source=source,
                     )
             return self._decide_locked(
                 prompt,
@@ -3137,6 +3320,7 @@ class DecisionRouter:
                 decision_lane=effective_lane,
                 ingest_repair_contract=ingest_repair_contract,
                 replay_prompt=replay_prompt,
+                source=source,
             )
 
         result = execute()
@@ -3166,25 +3350,27 @@ class DecisionRouter:
                 )
         return result
 
-    def _decide_locked(
+    def _model_fits(
+        self,
+        role: str,
+        model: str,
+        plan: ollama.ModelResidencyPlan,
+    ) -> bool:
+        if not self.live_resource_control or role not in self._local_roles:
+            return True
+        estimate = plan.estimate(model)
+        return bool(
+            plan.capacity_bytes > 0
+            and estimate > 0
+            and estimate <= plan.capacity_bytes
+        )
+
+    def _request_plan(
         self,
         prompt: str,
         schema: Mapping[str, Any],
-        *,
-        system: str | None = None,
-        agreement_key: AgreementKey | None = None,
-        decision_lane: str | None = None,
-        ingest_repair_contract: _IngestRepairContract | None = None,
-        replay_prompt: str | None = None,
-    ) -> DecisionRouterResult:
-        started = time.monotonic()
-        effective_system = decision_system_with_policy(schema, system)
-        request_sha256 = structured_request_sha256(
-            prompt,
-            schema,
-            effective_system,
-        )
-        eviction_events: list[dict[str, Any]] = []
+        effective_system: str | None,
+    ) -> tuple[Any, int, int, ollama.ModelResidencyPlan]:
         request_preflight = (
             None
             if self.config_error
@@ -3198,21 +3384,54 @@ class DecisionRouter:
         if request_preflight is not None and request_preflight.ok:
             try:
                 required_num_ctx, selected_num_ctx = self._request_context(
-                    prompt,
-                    schema,
-                    effective_system,
+                    prompt, schema, effective_system
                 )
             except Exception:
                 required_num_ctx = self.config.num_ctx + 1
                 selected_num_ctx = self.config.num_ctx
-            residency_plan = self._residency_plan(selected_num_ctx)
+            plan = self._residency_plan(
+                selected_num_ctx,
+                control=not self._defer_local_control_until_tie,
+            )
         else:
             required_num_ctx = self.config.num_ctx + 1
             selected_num_ctx = self.config.num_ctx
-            residency_plan = self._no_probe_residency_plan(
+            plan = self._no_probe_residency_plan(
                 selected_num_ctx,
                 source="request_preflight_failed_no_probe",
             )
+        return request_preflight, required_num_ctx, selected_num_ctx, plan
+
+    def _decide_locked(
+        self,
+        prompt: str,
+        schema: Mapping[str, Any],
+        *,
+        system: str | None = None,
+        agreement_key: AgreementKey | None = None,
+        decision_lane: str | None = None,
+        ingest_repair_contract: _IngestRepairContract | None = None,
+        replay_prompt: str | None = None,
+        source: object | None = None,
+    ) -> DecisionRouterResult:
+        started = time.monotonic()
+        effective_system = decision_system_with_policy(schema, system)
+        request_sha256 = structured_request_sha256(
+            prompt,
+            schema,
+            effective_system,
+        )
+        eviction_events: list[dict[str, Any]] = []
+        (
+            request_preflight,
+            required_num_ctx,
+            selected_num_ctx,
+            residency_plan,
+        ) = self._request_plan(
+            prompt,
+            schema,
+            effective_system,
+        )
         def finalize(result: DecisionRouterResult) -> DecisionRouterResult:
             if result.ok:
                 try:
@@ -3255,7 +3474,11 @@ class DecisionRouter:
             attempted_evictions = {
                 str(event.get("model") or "") for event in eviction_events
             }
-            for model in dict.fromkeys(vote.model for vote in result.votes):
+            for model in dict.fromkeys(
+                vote.model
+                for vote in result.votes
+                if vote.role in self._local_roles
+            ):
                 if model in attempted_evictions:
                     continue
                 self._evict_model(model, eviction_events)
@@ -3451,29 +3674,22 @@ class DecisionRouter:
                 )
             )
 
-        def model_fits(model: str) -> bool:
-            if not self.live_resource_control:
-                return True
-            estimate = residency_plan.estimate(model)
-            return bool(
-                residency_plan.capacity_bytes > 0
-                and estimate > 0
-                and estimate <= residency_plan.capacity_bytes
-            )
-
         # The required pair must each fit alone before the first token is
         # generated. The optional tie-break is checked only after a real pair
         # disagreement; a large third model must not block a valid two-vote
         # quorum that never needs it.
         non_fitting_models = [
             model
-            for model in (
-                self.config.primary_model,
-                self.config.challenger_model,
+            for role, model in (
+                ("primary", self.config.primary_model),
+                ("challenger", self.config.challenger_model),
             )
-            if not model_fits(model)
+            if not self._model_fits(role, model, residency_plan)
         ]
-        if residency_plan.max_resident_models < 1 or non_fitting_models:
+        required_pair_has_local_role = bool({"primary", "challenger"} & self._local_roles)
+        if (
+            required_pair_has_local_role and residency_plan.max_resident_models < 1
+        ) or non_fitting_models:
             return finalize(
                 self._quarantined(
                     (),
@@ -3519,7 +3735,7 @@ class DecisionRouter:
 
         key = agreement_key if agreement_key is not None else self.agreement_key
         votes: list[DecisionVote] = []
-        if not model_fits(self.config.primary_model):
+        if not self._model_fits("primary", self.config.primary_model, residency_plan):
             return finalize(
                 self._quarantined(
                     votes,
@@ -3540,6 +3756,7 @@ class DecisionRouter:
                     agreement_key=key,
                     decision_lane=decision_lane,
                     ingest_repair_contract=ingest_repair_contract,
+                    source=source,
                 )
             )
         )
@@ -3553,7 +3770,9 @@ class DecisionRouter:
                     failure_class="local_resource_quarantined",
                 )
             )
-        if not model_fits(self.config.challenger_model):
+        if not self._model_fits(
+            "challenger", self.config.challenger_model, residency_plan
+        ):
             return finalize(
                 self._quarantined(
                     votes,
@@ -3574,6 +3793,7 @@ class DecisionRouter:
                     agreement_key=key,
                     decision_lane=decision_lane,
                     ingest_repair_contract=ingest_repair_contract,
+                    source=source,
                 )
             )
         )
@@ -3594,77 +3814,100 @@ class DecisionRouter:
         if not any(vote.valid for vote in votes):
             return finalize(self._quarantined(votes, "primary_and_challenger_invalid"))
 
-        if not model_fits(self.config.tie_break_model):
-            return finalize(
-                self._quarantined(
-                    votes,
-                    "tie_break_runner_no_longer_fits_reserved_memory",
-                    failure_class="local_resource_quarantined",
-                )
-            )
-        if self.live_resource_control and residency_plan.max_resident_models == 2:
-            pair_models = (
-                self.config.primary_model,
-                self.config.challenger_model,
-            )
-            keep = min(pair_models, key=residency_plan.estimate)
-            evict = [model for model in pair_models if model != keep]
-            tie_pair_bytes = residency_plan.estimate(keep) + residency_plan.estimate(
-                self.config.tie_break_model
-            )
-            tie_upshift_margin = max(
-                ollama.RESIDENCY_UPSHIFT_MIN_HEADROOM_BYTES,
-                int(tie_pair_bytes * ollama.RESIDENCY_UPSHIFT_HEADROOM_RATIO),
-            )
-            if (
-                self.config.tie_break_model not in residency_plan.calibrated_models
-                or tie_pair_bytes + tie_upshift_margin > residency_plan.capacity_bytes
+        control = contextlib.nullcontext()
+        if self._defer_local_control_until_tie:
+            control = ollama.model_resource_lease(exclusive=True)
+        with control:
+            if self._defer_local_control_until_tie:
+                residency_plan = self._residency_plan(selected_num_ctx)
+            if not self._model_fits(
+                "tie_break", self.config.tie_break_model, residency_plan
             ):
-                evict = list(pair_models)
-            for model in evict:
-                if not self._evict_model(model, eviction_events):
-                    return finalize(
-                        self._quarantined(
-                            votes,
-                            "unable_to_verify_pair_runner_eviction_before_tie",
-                            failure_class="local_resource_quarantined",
-                        )
+                return finalize(
+                    self._quarantined(
+                        votes,
+                        "tie_break_runner_no_longer_fits_reserved_memory",
+                        failure_class="local_resource_quarantined",
                     )
-
-        votes.append(
-            self._observe_vote(
-                self._vote(
-                    role="tie_break",
-                    model=self.config.tie_break_model,
-                    keep_alive=self.config.tie_break_keep_alive,
-                    num_ctx=residency_plan.context_for(self.config.tie_break_model),
-                    prompt=prompt,
-                    schema=schema,
-                    system=effective_system,
-                    agreement_key=key,
-                    decision_lane=decision_lane,
-                    ingest_repair_contract=ingest_repair_contract,
+                )
+            if (
+                self.live_resource_control
+                and "tie_break" in self._local_roles
+                and residency_plan.max_resident_models == 2
+            ):
+                pair_models = tuple(
+                    model
+                    for role, model in (
+                        ("primary", self.config.primary_model),
+                        ("challenger", self.config.challenger_model),
+                    )
+                    if role in self._local_roles
+                )
+                keep = (
+                    min(pair_models, key=residency_plan.estimate)
+                    if pair_models
+                    else None
+                )
+                evict = [model for model in pair_models if model != keep]
+                tie_pair_bytes = residency_plan.estimate(
+                    self.config.tie_break_model
+                ) + (residency_plan.estimate(keep) if keep is not None else 0)
+                tie_upshift_margin = max(
+                    ollama.RESIDENCY_UPSHIFT_MIN_HEADROOM_BYTES,
+                    int(tie_pair_bytes * ollama.RESIDENCY_UPSHIFT_HEADROOM_RATIO),
+                )
+                if (
+                    self.config.tie_break_model not in residency_plan.calibrated_models
+                    or tie_pair_bytes + tie_upshift_margin
+                    > residency_plan.capacity_bytes
+                ):
+                    evict = list(pair_models)
+                for model in evict:
+                    if not self._evict_model(model, eviction_events):
+                        return finalize(
+                            self._quarantined(
+                                votes,
+                                "unable_to_verify_pair_runner_eviction_before_tie",
+                                failure_class="local_resource_quarantined",
+                            )
+                        )
+            votes.append(
+                self._observe_vote(
+                    self._vote(
+                        role="tie_break",
+                        model=self.config.tie_break_model,
+                        keep_alive=self.config.tie_break_keep_alive,
+                        num_ctx=residency_plan.context_for(
+                            self.config.tie_break_model
+                        ),
+                        prompt=prompt,
+                        schema=schema,
+                        system=effective_system,
+                        agreement_key=key,
+                        decision_lane=decision_lane,
+                        ingest_repair_contract=ingest_repair_contract,
+                        source=source,
+                    )
                 )
             )
-        )
-        if residency_plan.max_resident_models == 1 and not self._evict_model(
-            self.config.tie_break_model, eviction_events
-        ):
+            if residency_plan.max_resident_models == 1 and not self._evict_model(
+                self.config.tie_break_model, eviction_events
+            ):
+                return finalize(
+                    self._quarantined(
+                        votes,
+                        "unable_to_verify_tie_break_runner_eviction",
+                        failure_class="local_resource_quarantined",
+                    )
+                )
             return finalize(
-                self._quarantined(
+                self._resolve_tie_break_votes(
                     votes,
-                    "unable_to_verify_tie_break_runner_eviction",
-                    failure_class="local_resource_quarantined",
+                    schema,
+                    prompt=prompt,
+                    decision_lane=decision_lane,
                 )
             )
-        return finalize(
-            self._resolve_tie_break_votes(
-                votes,
-                schema,
-                prompt=prompt,
-                decision_lane=decision_lane,
-            )
-        )
 
 
 __all__ = [

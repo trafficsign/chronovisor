@@ -352,6 +352,22 @@ class LocalRuntimeControl(Protocol):
 class GenerationRoute:
     backend: GenerationBackend
     model: str
+    capabilities: BackendCapabilities = field(
+        default_factory=lambda: BackendCapabilities(
+            generation=True,
+            embedding=False,
+            structured_output=False,
+        )
+    )
+
+
+@dataclass(frozen=True)
+class ResolvedGenerationRoute:
+    role: str
+    provider: str
+    model: str
+    location: RouteLocation
+    capabilities: BackendCapabilities
 
 
 @dataclass(frozen=True)
@@ -457,10 +473,21 @@ class LLMRuntime:
     def generation_location(self, role: str) -> RouteLocation:
         """Return the configured generation location without invoking a backend."""
 
+        return self.resolve_generation(role).location
+
+    def resolve_generation(self, role: str) -> ResolvedGenerationRoute:
+        """Return one immutable configured route without invoking its backend."""
+
         route = _resolve(self._generation, role, "generation")
         if not isinstance(route.backend.location, RouteLocation):
             raise RouteConfigurationError(role, "generation")
-        return route.backend.location
+        return ResolvedGenerationRoute(
+            role=role,
+            provider=route.backend.provider,
+            model=route.model,
+            location=route.backend.location,
+            capabilities=route.capabilities,
+        )
 
     def embed(self, role: str, request: EmbeddingRequest) -> EmbeddingResult:
         route = _resolve(self._embedding, role, "embedding")
