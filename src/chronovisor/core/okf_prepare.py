@@ -217,7 +217,7 @@ def prepare_okf_migration(
         if event is not None:
             events.append(event)
 
-        body, resolved_count, missing = _convert_links(
+        body, resolved_count, missing = convert_wikilinks(
             document.body, relative_path, uid, normalized_catalog
         )
         unresolved.extend(missing)
@@ -365,12 +365,14 @@ def _archive_event(
     )
 
 
-def _convert_links(
+def convert_wikilinks(
     body: bytes,
     source_path: str,
     uid: str,
     catalog: Mapping[str, str],
 ) -> tuple[bytes, int, tuple[UnresolvedLink, ...]]:
+    """Convert prose wikilinks using a caller-supplied destination catalog."""
+
     try:
         text = body.decode("utf-8")
     except UnicodeDecodeError as exc:

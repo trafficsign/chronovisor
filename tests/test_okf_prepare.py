@@ -8,7 +8,7 @@ from typing import Any
 import pytest
 
 from chronovisor.core.canonical_document import extract_markdown_links, parse_document
-from chronovisor.migration.okf_prepare import (
+from chronovisor.core.okf_prepare import (
     InvalidStatusError,
     RawSource,
     SourceDocument,
