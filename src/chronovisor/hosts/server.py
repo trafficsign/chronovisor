@@ -182,10 +182,17 @@ def chronovisor_read(
     store.refresh()
 
     path = _find_page_with_alias(page)
+    allow_alias = path is not None and path.stem != page
     if not path:
         # Check system/ directory
         path = SYSTEM_DIR / f"{page}.md"
-    if not path or not path.exists():
+    path = find_page(
+        page,
+        candidate=path,
+        allowed_roots=(CHRONOVISOR_ROOT / "pages", SYSTEM_DIR),
+        allow_alias=allow_alias,
+    )
+    if path is None:
         return json.dumps({"error": f"Page '{page}' not found"})
 
     canonical_page_id = path.stem

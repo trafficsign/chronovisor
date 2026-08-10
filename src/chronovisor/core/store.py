@@ -80,15 +80,86 @@ def all_pages() -> list[Path]:
     return list(PAGES_DIR.rglob("*.md"))
 
 
-def find_page(page_id: str) -> Path | None:
+def _valid_page_id(page_id: object) -> bool:
+    return bool(
+        isinstance(page_id, str)
+        and page_id.strip()
+        and page_id.strip() not in {".", ".."}
+        and "/" not in page_id
+        and "\\" not in page_id
+        and "\x00" not in page_id
+        and not any(character in page_id for character in "*?[]")
+        and not Path(page_id).is_absolute()
+    )
+
+
+def _resolve_page_path(
+    page_id: str,
+    path: Path,
+    *,
+    allowed_roots: tuple[Path, ...],
+    allow_alias: bool = False,
+) -> Path | None:
+    """Resolve one page path only when its location is safe to read."""
+    if not _valid_page_id(page_id):
+        return None
+
+    try:
+        resolved = path.resolve(strict=True)
+    except (OSError, RuntimeError):
+        return None
+    if not resolved.is_file() or (not allow_alias and resolved.stem != page_id):
+        return None
+
+    for root in allowed_roots:
+        try:
+            resolved.relative_to(root.resolve(strict=True))
+        except (OSError, RuntimeError, ValueError):
+            continue
+        return resolved
+    return None
+
+
+def find_page(
+    page_id: str,
+    *,
+    candidate: Path | None = None,
+    allowed_roots: tuple[Path, ...] | None = None,
+    allow_alias: bool = False,
+) -> Path | None:
     """Find a page by ID (filename without extension). Searches subdirectories."""
+    if not _valid_page_id(page_id):
+        return None
+    roots = allowed_roots if allowed_roots is not None else (PAGES_DIR,)
+    if candidate is not None:
+        return _resolve_page_path(
+            page_id,
+            candidate,
+            allowed_roots=roots,
+            allow_alias=allow_alias,
+        )
+
     # Direct flat path (most common case)
-    flat = PAGES_DIR / f"{page_id}.md"
-    if flat.exists():
+    flat = _resolve_page_path(
+        page_id,
+        PAGES_DIR / f"{page_id}.md",
+        allowed_roots=roots,
+    )
+    if flat is not None:
         return flat
     # Search subdirectories
-    matches = list(PAGES_DIR.rglob(f"{page_id}.md"))
-    return matches[0] if matches else None
+    try:
+        for path in PAGES_DIR.rglob(f"{page_id}.md"):
+            resolved = _resolve_page_path(
+                page_id,
+                path,
+                allowed_roots=roots,
+            )
+            if resolved is not None:
+                return resolved
+    except (OSError, RuntimeError):
+        pass
+    return None
 
 
 def page_id_from_path(path: Path) -> str:

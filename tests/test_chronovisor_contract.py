@@ -159,7 +159,11 @@ def test_server_alias_read_returns_and_traces_only_canonical_page_id(
 
     monkeypatch.setattr(server, "get_store", FakeStore)
     monkeypatch.setattr(server, "CHRONOVISOR_ROOT", tmp_path)
-    monkeypatch.setattr(server, "find_page", lambda _page_id: None)
+    monkeypatch.setattr(
+        server,
+        "find_page",
+        lambda _page_id, **kwargs: kwargs.get("candidate"),
+    )
     monkeypatch.setattr(alias_store, "resolve_alias_path", lambda _page_id: target)
     monkeypatch.setattr(server, "_append_pull_log", pull_rows.append)
 
