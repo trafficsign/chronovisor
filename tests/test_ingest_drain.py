@@ -7,7 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from chronovisor.ingest import ingest_drain
+from chronovisor.core.okf_cutover import OKFStartupDecision
+from chronovisor.ingest import ingest_drain, managed_hold_sync, self_heal
 
 
 @pytest.fixture(autouse=True)
@@ -15,12 +16,31 @@ def _disable_runtime_status_reset(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    runtime_root = tmp_path / "wiki"
+    (runtime_root / "runtime").mkdir(parents=True)
     monkeypatch.setattr(
         ingest_drain.runtime_status,
         "reset_stale_runtime_status",
         lambda: False,
     )
-    monkeypatch.setattr(ingest_drain, "CHRONOVISOR_ROOT", tmp_path / "wiki")
+    monkeypatch.setattr(ingest_drain, "CHRONOVISOR_ROOT", runtime_root)
+    monkeypatch.setattr(
+        ingest_drain,
+        "okf_startup_status",
+        lambda _root: OKFStartupDecision(
+            True, "bootstrap", "uninitialized", "ok"
+        ),
+    )
+    monkeypatch.setattr(
+        managed_hold_sync,
+        "sync_ingest_semantic_holds",
+        lambda **_kwargs: {"status": "ok"},
+    )
+    monkeypatch.setattr(
+        self_heal,
+        "run_pending",
+        lambda **_kwargs: {"status": "ok"},
+    )
     monkeypatch.setattr(ingest_drain.ollama, "ingest_model", lambda: "ornith:test")
     monkeypatch.setattr(
         ingest_drain.ollama,

@@ -131,6 +131,18 @@ def args_for(session_file: Path, state_file: Path, *, ignore_state: bool = False
     )
 
 
+def _allow_runtime_context_startup(monkeypatch: pytest.MonkeyPatch) -> None:
+    from chronovisor.core import okf_cutover
+
+    monkeypatch.setattr(
+        okf_cutover,
+        "require_okf_startup_allowed",
+        lambda _source, _runtime: okf_cutover.OKFStartupDecision(
+            True, "bootstrap", "uninitialized", "ok"
+        ),
+    )
+
+
 def _canonical_json_bytes(value: object) -> bytes:
     return json.dumps(
         value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
@@ -625,6 +637,7 @@ def test_v2_save_accepts_one_oversized_native_record(
 def test_runtime_context_keeps_v2_stop_capture_under_supplied_root(
     tmp_path: Path, monkeypatch, max_chars: int
 ) -> None:
+    _allow_runtime_context_startup(monkeypatch)
     session = tmp_path / "session.jsonl"
     runtime = RuntimeContext(tmp_path / "runtime-context")
     forbidden_default = tmp_path / "global-default"
@@ -677,6 +690,7 @@ def test_explicit_default_state_file_remains_an_override(tmp_path: Path) -> None
 def test_runtime_context_rejects_legacy_layout_before_global_publish(
     tmp_path: Path, monkeypatch
 ) -> None:
+    _allow_runtime_context_startup(monkeypatch)
     session = tmp_path / "session.jsonl"
     runtime = RuntimeContext(tmp_path / "runtime-context")
     forbidden_default = tmp_path / "global-default"

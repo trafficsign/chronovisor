@@ -13,6 +13,11 @@ from types import SimpleNamespace
 import pytest
 
 from chronovisor.core import page_mutation
+from chronovisor.core.canonical_document import (
+    CanonicalDocumentError,
+    parse_document,
+    patch_document_metadata,
+)
 from chronovisor.core.feedback_ledger import active_feedback_rows
 from chronovisor.ingest.convergence import ConvergenceStore, CycleBudget, RetryPolicy
 from chronovisor.recall import content_correction
@@ -356,7 +361,25 @@ def _adopted_authority(lane: str, *, artifact_digit: str = "d") -> dict:
     }
 
 
+def _stabilize_page_fixtures(pages: Path) -> None:
+    for page in pages.rglob("*.md"):
+        try:
+            data = page.read_bytes()
+            metadata = parse_document(data).metadata
+        except CanonicalDocumentError:
+            continue
+        updates: dict[str, str] = {}
+        if "status" not in metadata:
+            updates["status"] = "stable"
+        if "type" not in metadata:
+            updates["type"] = "memory"
+        if updates:
+            page.write_bytes(patch_document_metadata(data, updates))
+
+
 def _patch_page_lookup(monkeypatch, pages: Path) -> None:
+    _stabilize_page_fixtures(pages)
+
     def lookup(page_id: str) -> Path | None:
         candidate = pages / f"{page_id}.md"
         return candidate if candidate.exists() else None
@@ -572,9 +595,11 @@ def test_exact_readback_failure_rolls_back_owned_page_bytes(
     pages = tmp_path / "pages"
     pages.mkdir()
     page = pages / "memory.md"
-    original = "---\ntitle: Memory\n---\nOld exact fact.\n"
-    page.write_text(original, encoding="utf-8")
+    page.write_text(
+        "---\ntitle: Memory\n---\nOld exact fact.\n", encoding="utf-8"
+    )
     _patch_page_lookup(monkeypatch, pages)
+    original = page.read_text(encoding="utf-8")
     monkeypatch.setattr(
         content_correction,
         "_refresh_and_verify",
@@ -1942,8 +1967,8 @@ def test_frontier_approval_cannot_apply_tampered_ungrounded_literals(
         "---\ntitle: Memory\n---\nInstalled RAM is 16GB.\n",
         encoding="utf-8",
     )
-    before = page.read_bytes()
     _patch_page_lookup(monkeypatch, pages)
+    before = page.read_bytes()
     monkeypatch.setattr(content_correction, "PROPOSALS_DIR", tmp_path / "proposals")
     store = _store(tmp_path)
     merged = content_correction.enqueue_event(_event(), store=store)
@@ -2025,8 +2050,8 @@ def test_response_misquote_never_changes_page(tmp_path: Path, monkeypatch) -> No
     pages.mkdir()
     page = pages / "memory.md"
     page.write_text("---\ntitle: Memory\n---\nCorrect page text.\n", encoding="utf-8")
-    before = page.read_bytes()
     _patch_page_lookup(monkeypatch, pages)
+    before = page.read_bytes()
     store = _store(tmp_path)
     merged = content_correction.enqueue_event(_event(), store=store)
 
@@ -2075,8 +2100,8 @@ def test_wrong_retrieval_requires_frontier_and_records_only_page_scoped_feedback
     page.write_text(
         "---\ntitle: Memory\n---\nCorrect but irrelevant page.\n", encoding="utf-8"
     )
-    before = page.read_bytes()
     _patch_page_lookup(monkeypatch, pages)
+    before = page.read_bytes()
     monkeypatch.setattr(content_correction, "PROPOSALS_DIR", tmp_path / "proposals")
     monkeypatch.setattr(
         content_correction, "CONTENT_FEEDBACK_FILE", tmp_path / "content-feedback.jsonl"
@@ -2669,8 +2694,8 @@ def test_nonmutation_triage_artifact_is_revised_when_page_evidence_changes(
     pages.mkdir()
     page = pages / "memory.md"
     page.write_text("---\ntitle: Memory\n---\nOld irrelevant page.\n", encoding="utf-8")
-    original_hash = hashlib.sha256(page.read_bytes()).hexdigest()
     _patch_page_lookup(monkeypatch, pages)
+    original_hash = hashlib.sha256(page.read_bytes()).hexdigest()
     feedback_file = tmp_path / "feedback.jsonl"
     monkeypatch.setattr(content_correction, "RECALL_FEEDBACK_FILE", feedback_file)
     monkeypatch.setattr(recall_runtime, "RECALL_FEEDBACK_FILE", feedback_file)
@@ -2732,8 +2757,8 @@ def test_rejected_triage_artifact_is_revised_when_page_evidence_changes(
     page.write_text(
         "---\ntitle: Memory\n---\nInstalled RAM is 16GB.\n", encoding="utf-8"
     )
-    before = page.read_bytes()
     _patch_page_lookup(monkeypatch, pages)
+    before = page.read_bytes()
     store = _store(tmp_path)
     merged = content_correction.enqueue_event(_event(), store=store)
     original_complete = store.complete
@@ -2798,8 +2823,8 @@ def test_backoff_item_does_not_starve_newer_correction(
     page.write_text(
         "---\ntitle: Memory\n---\nInstalled RAM is 16GB.\n", encoding="utf-8"
     )
-    before = page.read_bytes()
     _patch_page_lookup(monkeypatch, pages)
+    before = page.read_bytes()
     store = _store(tmp_path)
     first_event = _event()
     second_event = _event()
@@ -3081,8 +3106,8 @@ def test_frontier_can_demote_local_page_correction_without_mutating(
     page.write_text(
         "---\ntitle: Memory\n---\nInstalled RAM is 16GB.\n", encoding="utf-8"
     )
-    before = page.read_bytes()
     _patch_page_lookup(monkeypatch, pages)
+    before = page.read_bytes()
     store = _store(tmp_path)
     merged = content_correction.enqueue_event(_event(), store=store)
 
@@ -3117,8 +3142,8 @@ def test_mutation_rejection_is_durable_then_requests_fresh_local_patch(
     page.write_text(
         "---\ntitle: Memory\n---\nInstalled RAM is 16GB.\n", encoding="utf-8"
     )
-    before = page.read_bytes()
     _patch_page_lookup(monkeypatch, pages)
+    before = page.read_bytes()
     store = _store(tmp_path)
     merged = content_correction.enqueue_event(_event(), store=store)
     original_enqueue = content_correction.enqueue_event
@@ -3242,8 +3267,8 @@ def test_patch_rejection_is_not_overridden_by_confidence_metadata(
     page.write_text(
         "---\ntitle: Memory\n---\nInstalled RAM is 16GB.\n", encoding="utf-8"
     )
-    before = page.read_bytes()
     _patch_page_lookup(monkeypatch, pages)
+    before = page.read_bytes()
     store = _store(tmp_path)
     merged = content_correction.enqueue_event(_event(), store=store)
 
@@ -3285,8 +3310,8 @@ def test_patch_rejection_revalidates_review_authority_before_requeue(
     page.write_text(
         "---\ntitle: Memory\n---\nInstalled RAM is 16GB.\n", encoding="utf-8"
     )
-    before = page.read_bytes()
     _patch_page_lookup(monkeypatch, pages)
+    before = page.read_bytes()
     store = _store(tmp_path)
     merged = content_correction.enqueue_event(_event(), store=store)
     calls = 0
@@ -3401,8 +3426,8 @@ def _create_review_semantic_hold(
         "---\ntitle: Memory\n---\nInstalled RAM is 16GB.\n",
         encoding="utf-8",
     )
-    before = page.read_bytes()
     _patch_page_lookup(monkeypatch, pages)
+    before = page.read_bytes()
     monkeypatch.setattr(
         content_correction,
         "_current_content_review_authority",
@@ -3562,8 +3587,8 @@ def test_mutation_review_semantic_no_quorum_holds_without_page_write(
         "---\ntitle: Memory\n---\nInstalled RAM is 16GB.\n",
         encoding="utf-8",
     )
-    before = page.read_bytes()
     _patch_page_lookup(monkeypatch, pages)
+    before = page.read_bytes()
     store = _store(tmp_path)
     merged = content_correction.enqueue_event(_event(), store=store)
 
@@ -3657,8 +3682,8 @@ def test_mutation_semantic_hold_dry_run_is_byte_identical(
         "---\ntitle: Memory\n---\nInstalled RAM is 16GB.\n",
         encoding="utf-8",
     )
-    before_page = page.read_bytes()
     _patch_page_lookup(monkeypatch, pages)
+    before_page = page.read_bytes()
     store = _store(tmp_path)
     merged = content_correction.enqueue_event(_event(), store=store)
     key = str(merged["item"]["key"])
@@ -3850,8 +3875,8 @@ def test_mutation_no_quorum_cannot_cross_inflight_authority_epoch(
         "---\ntitle: Memory\n---\nInstalled RAM is 16GB.\n",
         encoding="utf-8",
     )
-    before = page.read_bytes()
     _patch_page_lookup(monkeypatch, pages)
+    before = page.read_bytes()
     store = _store(tmp_path)
     merged = content_correction.enqueue_event(_event(), store=store)
     key = str(merged["item"]["key"])
@@ -3958,8 +3983,8 @@ def test_mutation_no_quorum_rejects_embedded_router_epoch_mismatch(
         "---\ntitle: Memory\n---\nInstalled RAM is 16GB.\n",
         encoding="utf-8",
     )
-    before = page.read_bytes()
     _patch_page_lookup(monkeypatch, pages)
+    before = page.read_bytes()
     store = _store(tmp_path)
     merged = content_correction.enqueue_event(_event(), store=store)
     key = str(merged["item"]["key"])
@@ -4083,8 +4108,8 @@ def test_mutation_hold_revalidates_authority_inside_publish_lock(
         "---\ntitle: Memory\n---\nInstalled RAM is 16GB.\n",
         encoding="utf-8",
     )
-    before = page.read_bytes()
     _patch_page_lookup(monkeypatch, pages)
+    before = page.read_bytes()
     store = _store(tmp_path)
     merged = content_correction.enqueue_event(_event(), store=store)
     key = str(merged["item"]["key"])
@@ -4420,8 +4445,8 @@ def test_frontier_budget_counts_triage_and_mutation_review_separately(
     page.write_text(
         "---\ntitle: Memory\n---\nInstalled RAM is 16GB.\n", encoding="utf-8"
     )
-    before = page.read_bytes()
     _patch_page_lookup(monkeypatch, pages)
+    before = page.read_bytes()
     store = _store(tmp_path)
     content_correction.enqueue_event(_event(), store=store)
     proposal = _ram_proposal(hashlib.sha256(before).hexdigest())
@@ -4472,8 +4497,8 @@ def test_saved_unapplied_review_cannot_cross_decision_authority_epoch(
     page.write_text(
         "---\ntitle: Memory\n---\nInstalled RAM is 16GB.\n", encoding="utf-8"
     )
-    before = page.read_bytes()
     _patch_page_lookup(monkeypatch, pages)
+    before = page.read_bytes()
     store = _store(tmp_path)
     content_correction.enqueue_event(_event(), store=store)
     proposal = _ram_proposal(hashlib.sha256(before).hexdigest())
@@ -4634,6 +4659,7 @@ def test_allowlisted_system_memory_page_is_corrected_end_to_end(
         "---\ntitle: User Profile\n---\nPreferred editor is Vim.\n",
         encoding="utf-8",
     )
+    _stabilize_page_fixtures(system)
     _patch_page_lookup(monkeypatch, pages)
     monkeypatch.setattr(page_mutation, "SYSTEM_DIR", system)
     event = _event("user-profile")
