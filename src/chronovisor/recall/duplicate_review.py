@@ -15,7 +15,7 @@ from pathlib import Path
 import numpy as np
 
 from chronovisor.core.index_store import get_store
-from chronovisor.core.search import iter_all_embeddings
+from chronovisor.core.semantic_index import SemanticIndexError, load_active_generation
 from chronovisor.core.store import CHRONOVISOR_ROOT
 
 REVIEW_QUEUE = CHRONOVISOR_ROOT / "review" / "duplicate-candidates.jsonl"
@@ -189,16 +189,38 @@ def embedding_duplicate_candidates(
     limit: int = 200,
 ) -> list[DuplicateCandidate]:
     meta_by_id = {str(meta.get("page_id", "")): meta for meta in metas}
-    rows = [
-        (pid, vec, norm)
-        for pid, vec, _mtime, norm in iter_all_embeddings()
-        if pid in meta_by_id and norm > 0
-    ]
+    generation = load_active_generation()
+    rows: list[tuple[str, np.ndarray, float]] = []
+    sources: tuple[tuple[np.ndarray, list[str], list[str], set[str]], ...] = (
+        (
+            generation.vectors,
+            generation.page_ids,
+            generation.kinds,
+            generation.overridden_pages,
+        ),
+        (
+            generation.delta_vectors,
+            generation.delta_page_ids,
+            generation.delta_kinds,
+            set(),
+        ),
+    )
+    for vectors, page_ids, kinds, excluded_pages in sources:
+        for raw_vector, page_id, kind in zip(vectors, page_ids, kinds, strict=True):
+            if kind != "page" or page_id in excluded_pages or page_id not in meta_by_id:
+                continue
+            vector = np.asarray(raw_vector, dtype=np.float64)
+            norm = float(np.linalg.norm(vector))
+            if (
+                vector.shape != (generation.manifest.dimensions,)
+                or not np.isfinite(vector).all()
+                or not np.isfinite(norm)
+                or norm <= 1e-12
+            ):
+                raise SemanticIndexError("active semantic page vector is invalid")
+            rows.append((page_id, vector, norm))
     if not rows or limit <= 0:
         return []
-    dimensions = Counter(len(vector) for _pid, vector, _norm in rows)
-    dimension = dimensions.most_common(1)[0][0]
-    rows = [row for row in rows if len(row[1]) == dimension]
     matrix = np.asarray([row[1] for row in rows], dtype=np.float64)
     norms = np.asarray([row[2] for row in rows], dtype=np.float64)
     matrix /= norms[:, np.newaxis]

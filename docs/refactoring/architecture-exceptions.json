@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "source_baseline_head": "d404a6b20d00e3bcd1d4cdb89edfa5a718c51833",
-  "baseline_sha256": "3632e7cca0a33678e6a174c29baa23885f4c2d5ce2ba84312816bacd934fd8a8",
+  "baseline_sha256": "f9f5b32277f020357501c1525f9e5dfa6b2f3befda6f8734aed38dee8dc8f61c",
   "semantic_identity": "cross-domain edges use category+source_package+target_package; statement exceptions use category+source_package+source_module+scope_kind+scope+statement_kind+target_package+target_module+symbols+occurrence; source line is diagnostic and normalized statement content is verified independently",
   "counts": {
     "exceptions": 44,
@@ -4673,20 +4673,6 @@
           "line": 2601
         },
         {
-          "semantic_id": "arch:3196b8f0d1c1a5f3e88d7bf9310ebb82ee31a8eb0793520fec77c52da103c144",
-          "source_module": "chronovisor.recall.duplicate_review",
-          "scope_kind": "module",
-          "scope": "<module>",
-          "statement_kind": "from",
-          "target_module": "chronovisor.core.search",
-          "symbols": [
-            "iter_all_embeddings"
-          ],
-          "content_sha256": "eaf3134b89e9b585c328bf21b7fd40e6f5ce2fe1fe86d5b68c1bf450293a2452",
-          "occurrence": 1,
-          "line": 18
-        },
-        {
           "semantic_id": "arch:3670750faed361eb998bbb603639e9608a6ede7e8a6f72f0d9c39ba0da6f12ba",
           "source_module": "chronovisor.recall.cofire",
           "scope_kind": "module",
@@ -6698,6 +6684,21 @@
           "content_sha256": "1feb1251a1f9cad8fd3b47503f3029d7db68565c0c69f9616beecbf9ad0062f5",
           "occurrence": 1,
           "line": 17
+        },
+        {
+          "semantic_id": "arch:d9d24069792136150c586836f742413755ba9efdb6823c067c73e9739cac61bb",
+          "source_module": "chronovisor.recall.duplicate_review",
+          "scope_kind": "module",
+          "scope": "<module>",
+          "statement_kind": "from",
+          "target_module": "chronovisor.core.semantic_index",
+          "symbols": [
+            "SemanticIndexError",
+            "load_active_generation"
+          ],
+          "content_sha256": "636f007b97ceb7fa96ef16652a46e4a69762e8bdb8bded781f6f80dda1346a68",
+          "occurrence": 1,
+          "line": 18
         },
         {
           "semantic_id": "arch:dbaf3f095d61a4e55a5b03fa5d32b2db65a886a5efc3ba10412621f4fb049574",
