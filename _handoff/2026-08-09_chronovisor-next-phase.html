@@ -212,9 +212,9 @@ adapter families compose and register supported components
 
 <!-- ============================================================ -->
 <section>
-<h2>研究知見: Filesystem-Based Memory for LLM Agents</h2>
+<h2>研究知見: Filesystem-Based Memory for LLM Agents: Organization, Evolution, and Sustainability</h2>
 <div class="callout">
-<strong>論文:</strong> arXiv 2607.26637v1 — <em>Filesystem-Based Memory for LLM Agents</em> (2026-07)
+<strong>論文:</strong> arXiv 2607.26637v1 — <em>Filesystem-Based Memory for LLM Agents: Organization, Evolution, and Sustainability</em> (2026-07)
 </div>
 
 <h3>論文の概要</h3>
@@ -231,13 +231,13 @@ adapter families compose and register supported components
 </tr>
 <tr>
 <td><strong>Search agent の強さが回答品質に直結</strong></td>
-<td>management の強さは構造スタイルを買うが品質に直接効かない。search の強さは単調に寄与（nano→mini→gpt-5.4 で 62→71→83）</td>
-<td>management=Ollama（弱）、search=Claude（強）の構成は理にかなう。<strong>search チェーンの品質改善が最もアウトカムに効く</strong></td>
+<td>PersonaMem 128k の固定3 store平均では search model が nano→mini→gpt-5.4 で約62→71→79。83.3は gpt-5.4 search が nano-built store を読む単セルであり平均ではない</td>
+<td>現行の <strong>BM25 + optional local semantic / rerank</strong> を維持し、search チェーンの品質を測定する</td>
 </tr>
 <tr>
-<td><strong>BM25 キーワード検索の併用が効く</strong></td>
-<td>Shell ツールセット（bash + BM25）が mini management で最高成績 82.9%</td>
-<td><strong>semantic search + keyword 一致パスの併用</strong></td>
+<td><strong>Keyword 経路は検索の堅牢性を支える</strong></td>
+<td>82.9%は BM25 なしの Shell-only。Center+BM25 は75.0%、Center は76.4%で statistical tie のため、82.9%をBM25併用の根拠にはできない</td>
+<td>既存の <strong>BM25 keyword path</strong> を lexical fallback / complement として維持する</td>
 </tr>
 <tr>
 <td><strong>ツールセットがストアの形を決める</strong></td>
@@ -245,34 +245,34 @@ adapter families compose and register supported components
 <td><strong>MCP ツール設計変更時は Wiki 構造への副作用を意識する</strong></td>
 </tr>
 <tr>
-<td><strong>Taxonomy 準拠は最強モデル以外で侵食される</strong></td>
-<td>schema 準拠は全モデルで時間経過とともに劣化。gpt-5.4 のみがほぼ維持</td>
-<td><strong>chronovisor_check を ingest のたびに回す</strong>のが理想</td>
+<td><strong>Taxonomy 準拠はほとんどの store で侵食される</strong></td>
+<td>schema 準拠はほとんどの store で時間とともに劣化し、最強 management model のみ roughly constant</td>
+<td><strong>ingest 成功後に read-only check を毎回実行</strong>して drift を観測する</td>
 </tr>
 <tr>
-<td><strong>Curated store は元を取る</strong></td>
-<td>Curated がデプロイコスト最安（$4.3 vs Episode log $9.0）</td>
-<td>raw→pages パイプラインの方向性は正しい。<strong>キュレーション投資はランニングコストで回収</strong></td>
+<td><strong>Curated store は条件付きで deploy cost を下げる</strong></td>
+<td>deploy cost は Curated 4.3¢/task、Episode log 9.0¢/task、No-store 3.2¢/task。store build cost は別計上</td>
+<td>raw→pages の反復コストは評価するが、<strong>build cost を含む TCO なしに回収を断定しない</strong></td>
 </tr>
 <tr>
-<td><strong>蓄積は弱いエージェントほど価値がある</strong></td>
-<td>No store → 蓄積ありの改善幅は弱い実行エージェントで +7.1、強いほうで +1.4</td>
-<td><strong>初回セッションの onboarding 品質がメモリの ROI を決める</strong></td>
+<td><strong>長い蓄積 chain の効果は示唆的</strong></td>
+<td>+7.1 / +1.4 は No-store 比較ではなく、Episode log の full 140-task accumulated chain と3本の短い chain の比較</td>
+<td>長期運用で executor 別に再測定し、<strong>suggestive な結果を一般化しない</strong></td>
 </tr>
 <tr>
 <td><strong>初期メモリは生き残る</strong></td>
-<td>chain 終了時点で gpt-5.4 curator でも 63% が edited-in-place、17% が untouched</td>
-<td><strong>初期ページの品質が長期的に重要</strong>。初期 ingest の品質管理を厚くする</td>
+<td>gpt-5.4 curator の untouched は1/14（7%）で、大半は in-place edit。untouched 63%は nano、17%は mini / Shell</td>
+<td>初期ページを固定物と見なさず、<strong>長期の update / merge substrate</strong> として品質を測る</td>
 </tr>
 </tbody>
 </table>
 
 <h3>アクション候補（優先順）</h3>
 <ol class="checklist">
-<li><input type="checkbox"><span><strong>ingest プロンプトに preserve ルール追加</strong> — 最小コストで最大インパクト</span></li>
-<li><input type="checkbox"><span><strong>chronovisor_search に keyword 検索パス追加</strong> — semantic + BM25 併用</span></li>
-<li><input type="checkbox"><span><strong>ingest 後に自動 lint 実行</strong> — chronovisor_check をパイプラインに組み込む</span></li>
-<li><input type="checkbox"><span><strong>ツール設計の構造影響を文書化</strong> — MCP ツール変更が Wiki 構造にどう影響するか ADR に記録</span></li>
+<li><input type="checkbox" checked><span><strong>ingest プロンプトに preserve ルール追加</strong> — 最小コストで最大インパクト</span></li>
+<li><input type="checkbox" checked><span><strong>chronovisor_search に keyword 検索パス追加</strong> — semantic + BM25 併用</span></li>
+<li><input type="checkbox" checked><span><strong>ingest 後に自動 lint 実行</strong> — chronovisor_check をパイプラインに組み込む</span></li>
+<li><input type="checkbox" checked><span><strong>ツール設計の構造影響を文書化</strong> — MCP ツール変更が Wiki 構造にどう影響するか ADR に記録</span></li>
 </ol>
 
 <div class="callout warn">
@@ -286,6 +286,7 @@ adapter families compose and register supported components
 <li><time datetime="2026-08-10T08:33:07+09:00">2026-08-10 08:33 JST</time> — 前段完了を確認（HEAD <code>43c7a3f</code>、前段 Plan の plan-meta / badge は done / done、必須 checkbox は 48 / 48 完了）。Campaign W の実装を開始。</li>
 <li><time datetime="2026-08-10T08:43:49+09:00">2026-08-10 08:43 JST</time> — W1–W3 foundation tranche を <code>e88d486</code> で commit。provider-neutral contract / exact-role composition / Ollama adapter を追加し、focused 8 tests、Ollama / embedding 回帰 69 tests、architecture 36 tests、mypy、ruff、import boundary が green。consumer migration と live 検証は未実施のため W1–W3 checkbox は未完了のまま。</li>
 <li><time datetime="2026-08-10T08:55:18+09:00">2026-08-10 08:55 JST</time> — W2 security foundation tranche を <code>2af40c0</code> で commit。全 request の source classification 必須化、local / remote route の fail-closed 判定、remote の既定 egress policy、role × data class opt-in、拒否時 backend call 0 件、no fallback、安全な failure category / telemetry と content-redacted repr / error を追加。focused 19 tests、Ollama / embedding 回帰を含む 80 tests、mypy、ruff、import boundary が green。retry / budget / credential / remote adapter / consumer migration / live 検証は未実施のため W2 checkbox は未完了のまま。</li>
+<li><time datetime="2026-08-10T09:00:14+09:00">2026-08-10 09:00 JST</time> — 研究知見からの具体的アクション4項目を <code>4e39fc6</code> で完了: CREATE / UPDATE preserve rule、既存 BM25 keyword path の focused tests再確認、成功batch後の bounded read-only lint、MCP tool構造影響 ADR。focused 12 tests と関連回帰103 tests（既存BM25 testsを含む）、ruff、mypy、import boundary が green。未実施なし。</li>
 </ul>
 </section>
 
