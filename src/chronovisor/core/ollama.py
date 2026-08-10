@@ -60,6 +60,107 @@ GenerateResponse = _ollama_transport.GenerateResponse
 MODEL = DEFAULT_INGEST_MODEL
 
 
+def _safe_runtime_bridge_category(value: object) -> str:
+    normalized = getattr(value, "value", value)
+    if (
+        isinstance(normalized, str)
+        and 0 < len(normalized) <= 64
+        and normalized == normalized.casefold()
+        and normalized.replace("_", "").isalnum()
+    ):
+        return normalized
+    return "backend_error"
+
+
+class RuntimeBridgeError(RuntimeError):
+    """Safe provider-neutral failure exposed during the consumer migration."""
+
+    def __init__(self, category: str) -> None:
+        self.category = _safe_runtime_bridge_category(category)
+        super().__init__(self.category)
+
+
+def _runtime_bridge_category(exc: Exception) -> str:
+    return _safe_runtime_bridge_category(getattr(exc, "category", None))
+
+
+def runtime_generation_location(role: str) -> str:
+    """Return the configured location without exposing backend controls."""
+
+    from chronovisor.core.llm_config import LLMConfigError, load_default_llm_runtime
+    from chronovisor.core.llm_runtime import LLMRuntimeError
+
+    try:
+        return load_default_llm_runtime().generation_location(role).value
+    except (LLMConfigError, LLMRuntimeError) as exc:
+        raise RuntimeBridgeError(_runtime_bridge_category(exc)) from None
+
+
+def runtime_structured_chat(
+    messages: Sequence[Mapping[str, str]],
+    *,
+    runtime_role: str,
+    source_data_class: str,
+    source_sensitivity: str,
+    format: Mapping[str, Any],
+    num_ctx: int,
+    num_predict: int,
+    keep_alive: str,
+    read_timeout_ms: int,
+    max_output_chars: int,
+    temperature: int | float,
+    seed: int,
+    think: bool | str,
+) -> ChatResponse:
+    """Run one structured turn through the cached provider-neutral runtime."""
+
+    from chronovisor.core.llm_config import LLMConfigError, load_default_llm_runtime
+    from chronovisor.core.llm_runtime import (
+        LLMRuntimeError,
+        MessageGenerationRequest,
+        SourceDataClass,
+        SourceDataClassification,
+        SourceSensitivity,
+    )
+
+    try:
+        source = SourceDataClassification(
+            SourceDataClass(source_data_class),
+            SourceSensitivity(source_sensitivity),
+        )
+    except ValueError:
+        raise RuntimeBridgeError("source_classification_required") from None
+    try:
+        result = load_default_llm_runtime().generate(
+            runtime_role,
+            MessageGenerationRequest(
+                messages=tuple(dict(message) for message in messages),
+                format=dict(format),
+                source=source,
+                num_ctx=num_ctx,
+                max_output_tokens=num_predict,
+                keep_alive=keep_alive,
+                timeout_ms=read_timeout_ms,
+                max_output_chars=max_output_chars,
+                temperature=temperature,
+                seed=seed,
+                think=think,
+            ),
+        )
+    except (LLMConfigError, LLMRuntimeError) as exc:
+        raise RuntimeBridgeError(_runtime_bridge_category(exc)) from None
+    return ChatResponse(
+        content=result.content,
+        prompt_eval_count=result.usage.input_tokens,
+        eval_count=result.usage.output_tokens,
+        done=result.completed,
+        done_reason=result.finish_reason,
+    )
+
+
+# ponytail: temporary facade bridge; delete after final W6 callers own runtime types.
+
+
 def _client() -> httpx.Client:
     return _ollama_transport.client(base_url=OLLAMA_URL)
 

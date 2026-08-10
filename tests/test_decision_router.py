@@ -161,6 +161,19 @@ def _config(**overrides: object) -> DecisionRouterConfig:
     return DecisionRouterConfig(**values)
 
 
+def test_vote_runtime_role_is_stable_and_separate_from_audit_role() -> None:
+    router = DecisionRouter(
+        config=_config(),
+        transport=ModelTransport({}),
+        audit_role="ingest_review",
+    )
+
+    session = router._session("ornith:test", "20m", "primary", 16_384)
+
+    assert session.role == "ingest_review:primary"
+    assert session.runtime_role == "classification.primary"
+
+
 def _sha256_json(value: object) -> str:
     encoded = json.dumps(
         value,

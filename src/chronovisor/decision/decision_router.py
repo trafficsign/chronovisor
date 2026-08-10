@@ -1779,6 +1779,7 @@ class DecisionRouter:
             model=model,
             transport=self.transport,
             role=f"{self.audit_role}:{role}",
+            runtime_role=f"classification.{role}",
             audit_root=self.audit_root,
             num_ctx=num_ctx,
             num_predict=self.config.num_predict,

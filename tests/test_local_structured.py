@@ -13,7 +13,19 @@ from typing import Any
 import httpx
 import pytest
 
-from chronovisor.core import ollama
+from chronovisor.core import llm_config, ollama
+from chronovisor.core.llm_runtime import (
+    GenerationResult,
+    GenerationRoute,
+    LLMRuntime,
+    MessageGenerationRequest,
+    RouteLocation,
+    SourceDataClass,
+    SourceDataClassification,
+    SourceSensitivity,
+    TokenUsage,
+)
+from chronovisor.core.ollama_adapter import OllamaAdapter
 from chronovisor.decision.local_structured import (
     STRUCTURED_GENERATION_POLICY_VERSION,
     ChatRequest,
@@ -130,6 +142,120 @@ def _session(transport: QueueTransport, **overrides: Any) -> LocalStructuredSess
     }
     options.update(overrides)
     return LocalStructuredSession(model="local:test", transport=transport, **options)
+
+
+def _install_default_local_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    model: str = "local:test",
+) -> LLMRuntime:
+    adapter = OllamaAdapter()
+    runtime = LLMRuntime(
+        generation={"librarian.review": GenerationRoute(adapter, model)},
+        local_controls={"librarian.review": adapter},
+    )
+    monkeypatch.setattr(llm_config, "load_default_llm_runtime", lambda: runtime)
+    return runtime
+
+
+class _RemoteGenerationBackend:
+    provider = "remote-test"
+    location = RouteLocation.REMOTE
+
+    def __init__(self) -> None:
+        self.requests: list[MessageGenerationRequest] = []
+
+    def generate(self, request: object, *, model: str) -> GenerationResult:
+        assert isinstance(request, MessageGenerationRequest)
+        self.requests.append(request)
+        return GenerationResult(
+            content='{"decision":"apply","summary":"remote"}',
+            provider=self.provider,
+            model=model,
+            completed=True,
+            finish_reason="stop",
+            usage=TokenUsage(input_tokens=12, output_tokens=8),
+        )
+
+
+def _reject_ollama_control(monkeypatch: pytest.MonkeyPatch) -> None:
+    def rejected(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("remote structured generation must not touch Ollama control")
+
+    for name in (
+        "model_resource_lease_mode",
+        "model_resource_lease",
+        "plan_model_residency",
+        "unload_named_model",
+        "chat",
+    ):
+        monkeypatch.setattr(ollama, name, rejected)
+
+
+def test_default_transport_routes_remote_without_ollama_control(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    backend = _RemoteGenerationBackend()
+    runtime = LLMRuntime(
+        generation={
+            "review.remote": GenerationRoute(backend, "configured-remote-model")
+        }
+    )
+    monkeypatch.setattr(llm_config, "load_default_llm_runtime", lambda: runtime)
+    _reject_ollama_control(monkeypatch)
+
+    result = LocalStructuredSession(
+        model="legacy-local-model",
+        runtime_role="review.remote",
+        source_data_class="page",
+        source_sensitivity="normal",
+        audit_root=tmp_path / "audit",
+    ).run("decide", SCHEMA)
+
+    assert result.ok is True
+    assert result.model == "legacy-local-model"
+    assert len(backend.requests) == 1
+    assert backend.requests[0].source == SourceDataClassification(
+        SourceDataClass.PAGE,
+        SourceSensitivity.NORMAL,
+    )
+
+
+def test_default_transport_egress_denial_is_safe_and_call_free(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    backend = _RemoteGenerationBackend()
+    runtime = LLMRuntime(
+        generation={"review.remote": GenerationRoute(backend, "remote-model")}
+    )
+    monkeypatch.setattr(llm_config, "load_default_llm_runtime", lambda: runtime)
+    _reject_ollama_control(monkeypatch)
+
+    result = LocalStructuredSession(
+        model="legacy-local-model",
+        runtime_role="review.remote",
+        audit_root=tmp_path / "audit",
+    ).run("decide", SCHEMA)
+
+    assert result.ok is False
+    assert result.failure_class == "egress_denied"
+    assert backend.requests == []
+
+
+def test_custom_transport_does_not_load_default_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        llm_config,
+        "load_default_llm_runtime",
+        lambda: pytest.fail("custom transport must not load the default runtime"),
+    )
+    transport = QueueTransport('{"decision":"apply","summary":"custom"}')
+
+    result = _session(transport).run("decide", SCHEMA)
+
+    assert result.ok is True
+    assert len(transport.requests) == 1
 
 
 def test_activity_marker_tracks_redacted_structured_phase(tmp_path: Path) -> None:
@@ -297,6 +423,19 @@ def test_activity_role_rejects_payload_like_values() -> None:
             model="local:test",
             role="private user prompt with spaces",
             transport=QueueTransport('{"decision":"apply","summary":"unused"}'),
+        )
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    (("source_data_class", "private"), ("source_sensitivity", "secret")),
+)
+def test_source_classification_rejects_unknown_values(field: str, value: str) -> None:
+    with pytest.raises(ValueError, match=field):
+        LocalStructuredSession(
+            model="local:test",
+            transport=QueueTransport("{}"),
+            **{field: value},
         )
 
 
@@ -902,6 +1041,7 @@ def test_output_limit_on_every_turn_fails_operationally_after_bounded_repairs() 
 def test_default_transport_reuses_larger_resident_context_without_eviction(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    _install_default_local_runtime(monkeypatch, model="configured:test")
     monkeypatch.setenv("CHRONOVISOR_OLLAMA_RESOURCE_LOCK", str(tmp_path / "resource.lock"))
     planner_calls: list[dict[str, Any]] = []
     chat_contexts: list[int] = []
@@ -915,6 +1055,7 @@ def test_default_transport_reuses_larger_resident_context_without_eviction(
         )
 
     def chat(_messages: list[dict[str, str]], **kwargs: Any) -> ollama.ChatResponse:
+        assert kwargs["model"] == "configured:test"
         chat_contexts.append(kwargs["num_ctx"])
         return ollama.ChatResponse(
             content='{"decision":"apply","summary":"ok"}',
@@ -931,7 +1072,7 @@ def test_default_transport_reuses_larger_resident_context_without_eviction(
     )
 
     result = LocalStructuredSession(
-        model="local:test",
+        model="legacy:test",
         audit_root=tmp_path / "audit",
         num_ctx=32_768,
         num_predict=256,
@@ -976,6 +1117,11 @@ def test_default_transport_oversize_input_has_no_runner_side_effects(
         chat_calls.append((args, kwargs))
         pytest.fail("oversize input must not reach Ollama")
 
+    monkeypatch.setattr(
+        llm_config,
+        "load_default_llm_runtime",
+        lambda: pytest.fail("oversize input must fail before runtime loading"),
+    )
     monkeypatch.setattr(ollama, "plan_model_residency", planner)
     monkeypatch.setattr(ollama, "unload_named_model", unload)
     monkeypatch.setattr(ollama, "chat", chat)
@@ -1003,6 +1149,8 @@ def test_default_transport_oversize_input_has_no_runner_side_effects(
 def test_default_transport_maps_resource_lease_timeout_to_capacity_unavailable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    _install_default_local_runtime(monkeypatch)
+
     @contextmanager
     def busy_lease(**_kwargs: object) -> Iterator[None]:
         raise TimeoutError("busy")
@@ -1036,6 +1184,7 @@ def test_default_transport_maps_resource_lease_timeout_to_capacity_unavailable(
 def test_default_transport_holds_exclusive_lease_across_all_repair_turns(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    _install_default_local_runtime(monkeypatch)
     monkeypatch.setenv("CHRONOVISOR_OLLAMA_RESOURCE_LOCK", str(tmp_path / "resource.lock"))
     large_entered = threading.Event()
     release_large = threading.Event()

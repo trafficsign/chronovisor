@@ -9,6 +9,7 @@ import tomllib
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from enum import StrEnum
+from functools import cache
 from pathlib import Path
 from types import MappingProxyType
 from typing import cast
@@ -516,3 +517,10 @@ def load_llm_runtime(
         resolver=resolver,
         sender_factory=sender_factory,
     )
+
+
+@cache
+def load_default_llm_runtime() -> LLMRuntime:
+    """Load the process-wide runtime from the canonical configuration."""
+
+    return load_llm_runtime()

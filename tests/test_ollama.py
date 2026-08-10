@@ -13,8 +13,90 @@ from contextlib import contextmanager
 import httpx
 import pytest
 
-from chronovisor.core import ollama, ollama_calibration, ollama_transport
+from chronovisor.core import llm_config, ollama, ollama_calibration, ollama_transport
+from chronovisor.core.llm_runtime import (
+    CapabilityUnavailableError,
+    GenerationResult,
+    MessageGenerationRequest,
+    RouteLocation,
+    SourceDataClass,
+    SourceSensitivity,
+    TokenUsage,
+)
 from chronovisor.core.runtime_config import EmbeddingConfig, IngestConfig
+
+
+def test_runtime_structured_bridge_builds_typed_request_and_preserves_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[tuple[str, MessageGenerationRequest]] = []
+
+    class Runtime:
+        def generation_location(self, role: str) -> RouteLocation:
+            assert role == "review.remote"
+            return RouteLocation.REMOTE
+
+        def generate(
+            self, role: str, request: MessageGenerationRequest
+        ) -> GenerationResult:
+            seen.append((role, request))
+            return GenerationResult(
+                content="{}",
+                provider="remote",
+                model="configured",
+                completed=True,
+                finish_reason="stop",
+                usage=TokenUsage(input_tokens=11, output_tokens=2),
+            )
+
+    runtime = Runtime()
+    monkeypatch.setattr(llm_config, "load_default_llm_runtime", lambda: runtime)
+
+    assert ollama.runtime_generation_location("review.remote") == "remote"
+    response = ollama.runtime_structured_chat(
+        ({"role": "user", "content": "review"},),
+        runtime_role="review.remote",
+        source_data_class="page",
+        source_sensitivity="normal",
+        format={"type": "object"},
+        num_ctx=8192,
+        num_predict=64,
+        keep_alive="2m",
+        read_timeout_ms=60_000,
+        max_output_chars=1000,
+        temperature=0,
+        seed=0,
+        think=False,
+    )
+
+    assert response == ollama.ChatResponse(
+        content="{}",
+        prompt_eval_count=11,
+        eval_count=2,
+        done=True,
+        done_reason="stop",
+    )
+    assert seen[0][0] == "review.remote"
+    assert seen[0][1].source.data_class is SourceDataClass.PAGE
+    assert seen[0][1].source.sensitivity is SourceSensitivity.NORMAL
+
+
+def test_runtime_bridge_exposes_only_safe_failure_category(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Runtime:
+        def generation_location(self, role: str) -> RouteLocation:
+            raise CapabilityUnavailableError(role, "generation")
+
+    monkeypatch.setattr(llm_config, "load_default_llm_runtime", lambda: Runtime())
+
+    with pytest.raises(ollama.RuntimeBridgeError) as failure:
+        ollama.runtime_generation_location("missing")
+
+    assert failure.value.category == "capability_unavailable"
+    assert str(failure.value) == "capability_unavailable"
+    assert failure.value.__cause__ is None
+    assert ollama.RuntimeBridgeError("secret payload!").category == "backend_error"
 
 
 class _StreamResponse:

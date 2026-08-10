@@ -63,7 +63,6 @@ LEGACY_PRODUCTION_BYPASSES = {
     },
     "src/chronovisor/core/embedding.py": {"ollama.embed": 2},
     "src/chronovisor/core/search.py": {"ollama.embed": 3},
-    "src/chronovisor/decision/local_structured.py": {"ollama.chat": 1},
     "src/chronovisor/ingest/ingest.py": {
         "ollama.chat": 1,
         "ollama.generate": 1,

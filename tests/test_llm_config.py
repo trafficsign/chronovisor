@@ -8,11 +8,13 @@ from urllib.request import Request
 import httpx
 import pytest
 
+from chronovisor.core import llm_config
 from chronovisor.core.anthropic_adapter import AnthropicMessagesAdapter
 from chronovisor.core.llm_config import (
     LLMConfigError,
     LLMConfigFailureCategory,
     build_llm_runtime,
+    load_default_llm_runtime,
     load_llm_config,
     parse_llm_config,
 )
@@ -33,6 +35,28 @@ from chronovisor.core.ollama_adapter import OllamaAdapter
 from chronovisor.core.openai_compatible_adapter import OpenAICompatibleAdapter
 from chronovisor.core.provider_profiles import CURATED_PROFILE_IDS, ProviderProfile
 from chronovisor.core.reranker import LocalRerankBackend
+
+
+def test_default_runtime_loader_caches_one_process_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    expected = object()
+    calls = 0
+
+    def load() -> object:
+        nonlocal calls
+        calls += 1
+        return expected
+
+    load_default_llm_runtime.cache_clear()
+    monkeypatch.setattr(llm_config, "load_llm_runtime", load)
+    try:
+        assert load_default_llm_runtime() is expected
+        assert load_default_llm_runtime() is expected
+        assert calls == 1
+    finally:
+        load_default_llm_runtime.cache_clear()
+
 
 CANARY = "sk-CANARY-LLM-CONFIG"
 NORMAL_PAGE = SourceDataClassification(SourceDataClass.PAGE, SourceSensitivity.NORMAL)

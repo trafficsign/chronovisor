@@ -454,6 +454,14 @@ class LLMRuntime:
             request_id=_result_request_id(result),
         )
 
+    def generation_location(self, role: str) -> RouteLocation:
+        """Return the configured generation location without invoking a backend."""
+
+        route = _resolve(self._generation, role, "generation")
+        if not isinstance(route.backend.location, RouteLocation):
+            raise RouteConfigurationError(role, "generation")
+        return route.backend.location
+
     def embed(self, role: str, request: EmbeddingRequest) -> EmbeddingResult:
         route = _resolve(self._embedding, role, "embedding")
         self._validate_request(
