@@ -1,8 +1,6 @@
-"""Derived UID edge index for wiki links.
+"""Derived UID edge index for canonical Markdown links.
 
-Markdown remains slug-oriented for Obsidian.  This projection resolves link
-targets to stable UIDs and keeps classification concepts out of the ordinary
-wikilink namespace.
+This projection resolves exact canonical paths and redirects to stable UIDs.
 """
 
 from __future__ import annotations
@@ -11,11 +9,15 @@ import hashlib
 import json
 import re
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
+from chronovisor.core.canonical_document import (
+    Namespace,
+    parse_document,
+    resolve_internal_markdown_links,
+)
 from chronovisor.core.durable_state import write_sealed_json
-from chronovisor.core.link_fix import extract_wiki_links
 from chronovisor.ingest.page_registry import PageRegistry
 
 SCHEMA = "chronovisor.uid-link-index.v1"
@@ -58,49 +60,41 @@ def build_uid_link_index(
     registry = registry or PageRegistry(root)
     manifest = registry.ensure_manifest(write=write)
     state = manifest["registry"]
+    stable_pages = registry.stable_pages(state)
     edges: list[dict[str, str]] = []
     unresolved: list[dict[str, str]] = []
     reverse: dict[str, list[str]] = {}
     anchors: dict[str, list[str]] = {}
     heading_index: dict[str, set[str]] = {}
-    for uid, row in state["pages"].items():
-        if not isinstance(row, dict) or row.get("status") == "superseded":
-            continue
+    for uid, row in stable_pages.items():
         path = root / str(row.get("path") or "")
         if path.exists():
             heading_index[str(uid)] = _heading_anchors(path.read_text(encoding="utf-8"))
 
-    for source_uid, row in sorted(state["pages"].items()):
-        if not isinstance(row, dict) or row.get("status") == "superseded":
-            continue
+    for source_uid, row in sorted(stable_pages.items()):
         path = root / str(row.get("path") or "")
         if not path.exists():
             continue
-        text = path.read_text(encoding="utf-8")
-        for raw_target in extract_wiki_links(text, strip=True):
-            target_text = str(raw_target).split("|", 1)[0].strip()
-            page_key, _, anchor = target_text.partition("#")
-            target_uid = state.get("keys", {}).get(page_key.casefold())
-            if target_uid is None:
-                ambiguous = state.get("ambiguous_keys", {}).get(page_key.casefold())
-                if isinstance(ambiguous, list):
-                    exact = [
-                        uid
-                        for uid in ambiguous
-                        if str(
-                            (state.get("pages", {}).get(uid) or {}).get("page_id")
-                            or ""
-                        ).casefold()
-                        == page_key.casefold()
-                    ]
-                    if len(exact) == 1:
-                        target_uid = exact[0]
-            target = (
-                state.get("pages", {}).get(target_uid)
-                if isinstance(target_uid, str)
-                else None
+        raw = path.read_bytes()
+        document = parse_document(raw)
+        relative = path.relative_to(root)
+        namespace: Namespace = "system" if relative.parts[0] == "system" else "pages"
+        source_path = PurePosixPath(*relative.parts[1:]).as_posix()
+        for link in resolve_internal_markdown_links(
+            document.body,
+            source_namespace=namespace,
+            source_path=source_path,
+        ):
+            page_key = (
+                f"{link.namespace}/"
+                f"{PurePosixPath(link.path).with_suffix('').as_posix()}"
             )
-            if target is None:
+            anchor = link.fragment or ""
+            target = PageRegistry.resolve_from_state(state, page_key)
+            if (
+                not isinstance(target, dict)
+                or target.get("uid") not in stable_pages
+            ):
                 unresolved.append(
                     {
                         "source_uid": source_uid,
@@ -111,6 +105,9 @@ def build_uid_link_index(
                 )
                 continue
             target_uid = str(target["uid"])
+            anchor_map = target.get("anchor_map")
+            if anchor and isinstance(anchor_map, dict):
+                anchor = str(anchor_map.get(anchor, anchor))
             if anchor and anchor.casefold() not in heading_index.get(target_uid, set()):
                 unresolved.append(
                     {

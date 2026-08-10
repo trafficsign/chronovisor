@@ -472,7 +472,7 @@ def external_test_cases(
                 "tags": [],
                 "raw_keywords": [],
                 "page_type": "reference",
-                "lifecycle": "active",
+                "lifecycle": "stable",
                 "language": str(source.get("language") or ""),
                 "sensitivity": "normal",
                 "fixture_group_id": f"external:{package_name}:{group_id}",

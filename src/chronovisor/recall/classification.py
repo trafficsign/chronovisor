@@ -24,7 +24,7 @@ VALID_FORMS = {
     "profile",
     "knowledge",
 }
-VALID_LIFECYCLES = {"active", "historical", "superseded", "experimental", "held"}
+VALID_LIFECYCLES = {"draft", "stable", "deprecated"}
 VALID_EVIDENCE = {"raw-grounded", "derived", "external", "mixed"}
 SENSITIVITY_ORDER = {"normal": 0, "personal": 1, "restricted": 2, "high": 2}
 CVO_SUBJECT_SCHEMA = "chronovisor.cvo-subject.v1"
@@ -639,7 +639,7 @@ def propose_from_legacy_metadata(
         facets={
             "project": [],
             "form": _form_from_tags(tags, page_type),
-            "lifecycle": (lifecycle if lifecycle in VALID_LIFECYCLES else "active"),
+            "lifecycle": (lifecycle if lifecycle in VALID_LIFECYCLES else "stable"),
             "temporal": {"kind": "evergreen"},
             "evidence": "derived",
             "sensitivity": (

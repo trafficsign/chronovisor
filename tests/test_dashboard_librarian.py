@@ -91,6 +91,8 @@ def test_collection_first_status_exposes_registry_quality(
             f"title: {name}\n"
             f"uid: {uid}\n"
             "updated: 2026-07-27\n"
+            "status: stable\n"
+            "type: knowledge\n"
             "---\n\n"
             f"# {name}\n",
             encoding="utf-8",
@@ -101,7 +103,8 @@ def test_collection_first_status_exposes_registry_quality(
         "title: Archived\n"
         "uid: 019f0000-0004-7000-8000-000000000004\n"
         "updated: 2026-07-27\n"
-        "status: archived\n"
+        "status: deprecated\n"
+        "type: knowledge\n"
         "---\n\n"
         "# Archived\n",
         encoding="utf-8",
@@ -136,6 +139,8 @@ def test_collection_review_queue_is_visible_but_not_catch_up_work(
         "title: Model\n"
         "uid: 019f0000-0100-7000-8000-000000000100\n"
         "updated: 2026-07-27\n"
+        "status: stable\n"
+        "type: knowledge\n"
         "---\n\n"
         "# Model\n",
         encoding="utf-8",
@@ -234,6 +239,8 @@ def test_collection_review_required_is_terminal_with_visible_hold(
         "title: Note\n"
         "uid: 019f0000-0101-7000-8000-000000000101\n"
         "updated: 2026-07-27\n"
+        "status: stable\n"
+        "type: knowledge\n"
         "---\n\n"
         "# Note\n",
         encoding="utf-8",
@@ -270,7 +277,8 @@ def test_fast_status_payload_can_be_built_from_shadow_state(tmp_path: Path) -> N
     page = tmp_path / "pages" / "alpha.md"
     page.parent.mkdir(parents=True)
     page.write_text(
-        "---\ntitle: Alpha\nupdated: 2026-07-25\ntags: [d/ai]\n---\n\n# Alpha\n",
+        "---\ntitle: Alpha\nupdated: 2026-07-25\nstatus: stable\n"
+        "type: knowledge\ntags: [d/ai]\n---\n\n# Alpha\n",
         encoding="utf-8",
     )
     run_legacy_udc_shadow(root=tmp_path, full_sweep=True)
@@ -594,7 +602,8 @@ def test_status_overlays_latest_locked_calibration_quality(tmp_path: Path) -> No
     page = tmp_path / "pages" / "alpha.md"
     page.parent.mkdir(parents=True)
     page.write_text(
-        "---\ntitle: Alpha\nupdated: 2026-07-25\ntags: [d/ai]\n---\n\n# Alpha\n",
+        "---\ntitle: Alpha\nupdated: 2026-07-25\nstatus: stable\n"
+        "type: knowledge\ntags: [d/ai]\n---\n\n# Alpha\n",
         encoding="utf-8",
     )
     run_legacy_udc_shadow(root=tmp_path, full_sweep=True)

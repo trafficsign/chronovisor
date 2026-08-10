@@ -46,14 +46,8 @@ CLASSIFICATION_INDEX_SCHEMA = "chronovisor.classification-index.v1"
 MIGRATION_RECEIPT_SCHEMA = "chronovisor.classification-migration-receipt.v1"
 
 
-def _active_pages(root: Path, state: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
-    return {
-        str(uid): dict(row)
-        for uid, row in state.get("pages", {}).items()
-        if isinstance(row, Mapping)
-        and row.get("status") != "superseded"
-        and (root / str(row.get("path") or "")).is_file()
-    }
+def _stable_pages(root: Path, state: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
+    return PageRegistry(root).stable_pages(state)
 
 
 def build_classification_index(
@@ -67,7 +61,7 @@ def build_classification_index(
     by_notation: dict[str, list[str]] = defaultdict(list)
     by_status: dict[str, list[str]] = defaultdict(list)
     assignments: dict[str, dict[str, Any]] = {}
-    for uid, row in _active_pages(root, registry_state).items():
+    for uid, row in _stable_pages(root, registry_state).items():
         classification = row.get("classification")
         if not isinstance(classification, Mapping):
             continue
@@ -142,7 +136,7 @@ def run_full_model_shadow(
         else ""
     )
     rows: list[dict[str, Any]] = []
-    for uid, row in sorted(_active_pages(root, state).items()):
+    for uid, row in sorted(_stable_pages(root, state).items()):
         page = page_payload(root, uid, row)
         classification = row.get("classification")
         evidence = (
@@ -217,7 +211,7 @@ def run_full_model_shadow(
     latest = registry.load()
     index_payload = build_classification_index(root, registry_state=latest, write=True)
     remaining = 0
-    for uid, row in _active_pages(root, latest).items():
+    for uid, row in _stable_pages(root, latest).items():
         page = page_payload(root, uid, row)
         classification = row.get("classification")
         evidence = (
@@ -326,7 +320,7 @@ def migrate_active_metadata(
     batch_size: int = 100,
     dry_run: bool = False,
 ) -> dict[str, Any]:
-    """CAS-backfill UID and adopted classification into every Active page."""
+    """CAS-backfill UID and adopted classification into every stable page."""
 
     authority = classification_authority_status(root)
     if not authority["active"]:
@@ -349,7 +343,7 @@ def migrate_active_metadata(
     package = load_udc_package(root)
     registry = PageRegistry(root)
     state = registry.ensure_manifest(write=True)["registry"]
-    pages = _active_pages(root, state)
+    pages = _stable_pages(root, state)
     pending = []
     for uid, row in sorted(pages.items()):
         path = root / str(row["path"])

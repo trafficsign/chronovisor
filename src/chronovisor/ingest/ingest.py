@@ -4,12 +4,12 @@ import ast
 import base64
 import hashlib
 import json
+import os
 import re
 import threading
 from collections.abc import Callable
 from contextlib import nullcontext, suppress
 from dataclasses import dataclass
-from datetime import date
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
@@ -26,6 +26,13 @@ from chronovisor.core.canonical_document import (
     validate_canonical_document,
 )
 from chronovisor.core.durable_state import canonical_sha256 as durable_canonical_sha256
+from chronovisor.core.index_store import (
+    PAGE_RESERVED_FILENAMES,
+    SYSTEM_RESERVED_FILENAMES,
+    canonical_document_path,
+    get_store,
+    stable_indexed_document_path,
+)
 from chronovisor.core.jobs import JobStatus, job_store
 from chronovisor.core.ollama import (
     GENERATE_SYSTEM_PROMPT as GENERATE_SYSTEM_PROMPT,
@@ -39,9 +46,9 @@ from chronovisor.core.ollama import (
 from chronovisor.core.runtime_config import load_ingest_config
 from chronovisor.core.search_types import tokenize
 from chronovisor.core.store import (
-    INDEX_FILE,
     LOG_FILE,
     PAGES_DIR,
+    SYSTEM_DIR,
     all_pages,
     find_page,
     page_id_from_path,
@@ -1018,14 +1025,33 @@ def _filename_allowed_for_create(filename: str) -> bool:
 def _triage_update_target_exists(filename: str) -> bool:
     """Return whether an update target resolves to a committed knowledge page."""
 
+    return _resolve_stable_update_target(filename, emit_logs=False) is not None
+
+
+def _resolve_stable_update_target(
+    filename: str,
+    *,
+    emit_logs: bool = False,
+) -> Path | None:
+    """Resolve an update target through the canonical stable page boundary."""
+
     try:
-        requested = _safe_resolve_page_path(filename)
-        if requested.exists():
-            return True
-        resolved = _find_page_resilient(requested.stem, emit_logs=False)
+        lexical = _safe_resolve_page_path(filename)
     except IngestApplyError:
-        return False
-    return resolved is not None and resolved.exists()
+        return None
+    if os.path.lexists(lexical):
+        candidate = lexical
+    else:
+        candidate = _find_page_resilient(lexical.stem, emit_logs=emit_logs)
+    if candidate is None:
+        return None
+    return canonical_document_path(
+        candidate,
+        PAGES_DIR,
+        namespace="pages",
+        reserved_filenames=PAGE_RESERVED_FILENAMES,
+        require_stable=True,
+    )
 
 
 def _normalize_triage_plan(plan: list[dict]) -> list[dict]:
@@ -1051,14 +1077,15 @@ def _normalize_triage_plan(plan: list[dict]) -> list[dict]:
         try:
             full_path = _safe_resolve_page_path(filename)
             page_id = full_path.stem
-            existing_path = (
-                full_path if full_path.exists() else _find_page_resilient(page_id)
-            )
+            existing_path = _resolve_stable_update_target(filename)
         except IngestApplyError:
             normalized.append(op)
             continue
 
-        if existing_path is not None and existing_path.exists():
+        if existing_path is not None:
+            normalized.append(op)
+            continue
+        if os.path.lexists(full_path):
             normalized.append(op)
             continue
 
@@ -1118,8 +1145,6 @@ def _relative_page_filename(path: Path) -> str:
 
 def _existing_candidate_metas() -> list[dict]:
     try:
-        from chronovisor.core.index_store import get_store
-
         store = get_store()
         store.refresh()
         metas: list[dict] = []
@@ -1185,7 +1210,6 @@ def _search_candidate_metas(op: dict) -> list[dict]:
         return []
 
     try:
-        from chronovisor.core.index_store import get_store
         from chronovisor.core.search import search
 
         results, _mode = search(query, top_n=5, semantic=True)
@@ -1342,7 +1366,7 @@ def _build_focused_context(
     if op.get("type") == "update":
         filename = op.get("filename", "")
         page_id = filename.replace(".md", "").split("/")[-1]
-        existing_path = find_page(page_id)
+        existing_path = _resolve_stable_update_target(filename)
         if existing_path:
             current_path = existing_path
             lines.append(f"--- Current content of [[{page_id}]] ---")
@@ -1611,7 +1635,7 @@ def _build_compact_update_context(
         return None
     filename = str(op.get("filename") or "")
     page_id = filename.replace(".md", "").split("/")[-1]
-    existing_path = find_page(page_id)
+    existing_path = _resolve_stable_update_target(filename)
     if existing_path is None:
         return None
     page_text = _read_exact_utf8(existing_path)
@@ -1849,7 +1873,22 @@ def _search_related_pages(
         bm25 = get_bm25()
         bm25.build()
         results = bm25.query(" ".join(keywords), top_n=top_n)
-        return [find_page(r.page_id) for r in results if find_page(r.page_id)]
+        index = get_store()
+        index.refresh()
+        paths = [
+            path
+            for result in results
+            if (
+                path := stable_indexed_document_path(
+                    index.meta(result.page_id),
+                    pages_dir=PAGES_DIR,
+                    system_dir=SYSTEM_DIR,
+                )
+            )
+            is not None
+        ]
+        if paths:
+            return paths
     except Exception:
         pass
 
@@ -2334,7 +2373,7 @@ def _safe_resolve_page_path(filename: str) -> Path:
       * symlink-escape after resolution
       * empty / whitespace-only / dotfile-only filenames
 
-    Returns the resolved path; raises :class:`IngestApplyError` otherwise.
+    Returns the lexical path; raises :class:`IngestApplyError` otherwise.
     """
     if not filename or not filename.strip():
         raise IngestApplyError("empty filename")
@@ -2349,9 +2388,11 @@ def _safe_resolve_page_path(filename: str) -> Path:
         raise IngestApplyError(f"absolute filename refused: {filename!r}")
     if any(part in ("..", "") for part in candidate.parts):
         raise IngestApplyError(f"parent-traversal filename refused: {filename!r}")
-    # Disallow filenames that resolve outside PAGES_DIR (e.g. via symlink).
+    # Resolve only for containment validation. Keep and return the lexical path
+    # so later canonical checks cannot lose a leaf or parent symlink identity.
     pages_root = PAGES_DIR.resolve()
-    full = (PAGES_DIR / candidate).resolve()
+    lexical = PAGES_DIR / candidate
+    full = lexical.resolve()
     try:
         full.relative_to(pages_root)
     except ValueError as e:
@@ -2360,7 +2401,28 @@ def _safe_resolve_page_path(filename: str) -> Path:
     if full.name in (".md", ""):
         raise IngestApplyError(f"degenerate filename: {filename!r}")
 
-    return full
+    current = PAGES_DIR
+    for part in candidate.parts:
+        current /= part
+        if current.is_symlink():
+            raise IngestApplyError(f"symlink filename refused: {filename!r}")
+
+    return lexical
+
+
+def _revalidate_prepared_path(entry: PreparedIngestOperation) -> Path:
+    """Recheck a prepared lexical target immediately before filesystem I/O."""
+
+    try:
+        relative = entry.path.relative_to(PAGES_DIR)
+    except ValueError as exc:
+        raise IngestApplyError(
+            f"prepared path escapes PAGES_DIR: {entry.page_id!r}"
+        ) from exc
+    path = _safe_resolve_page_path(relative.as_posix())
+    if path != entry.path:
+        raise IngestApplyError(f"prepared path identity changed: {entry.page_id!r}")
+    return path
 
 
 def _normalize_for_collision(name: str) -> str:
@@ -2393,7 +2455,18 @@ def _reserved_system_page_collision_keys() -> frozenset[str]:
     page_ids = set(CORRECTABLE_SYSTEM_PAGE_IDS)
     try:
         page_ids.update(
-            path.stem for path in _wiki.SYSTEM_DIR.rglob("*.md") if path.is_file()
+            resolved.stem
+            for path in _wiki.SYSTEM_DIR.rglob("*.md")
+            if (
+                resolved := canonical_document_path(
+                    path,
+                    _wiki.SYSTEM_DIR,
+                    namespace="system",
+                    reserved_filenames=SYSTEM_RESERVED_FILENAMES,
+                    require_stable=False,
+                )
+            )
+            is not None
         )
     except OSError:
         # Core system ids remain fail-closed when an optional directory scan is
@@ -2431,7 +2504,13 @@ def _normalize_for_loose_page_id(name: str) -> str:
 def _find_page_casefold(page_id: str) -> Path | None:
     """find_page with macOS-case-insensitive + NFC-normalized semantics."""
     direct = find_page(page_id)
-    if direct is not None:
+    if direct is not None and canonical_document_path(
+        direct,
+        PAGES_DIR,
+        namespace="pages",
+        reserved_filenames=PAGE_RESERVED_FILENAMES,
+        require_stable=True,
+    ) is not None:
         # ``Path.rglob('foo.md')`` can return a query-spelled path on a
         # case-insensitive filesystem even when the directory entry is
         # actually ``Foo.md``.  Preserve the filesystem spelling because the
@@ -2444,7 +2523,7 @@ def _find_page_casefold(page_id: str) -> Path | None:
             pass
         return direct
     target = _normalize_for_collision(page_id)
-    for p in PAGES_DIR.rglob("*.md"):
+    for p in all_pages():
         if _normalize_for_collision(p.stem) == target:
             return p
     return None
@@ -2475,7 +2554,7 @@ def _find_page_resilient(page_id: str, *, emit_logs: bool = True) -> Path | None
         return None
     matches = [
         p
-        for p in PAGES_DIR.rglob("*.md")
+        for p in all_pages()
         if _normalize_for_loose_page_id(p.stem) == target
     ]
     if not matches:
@@ -3184,7 +3263,7 @@ def rollback_ingest_proposal_artifact(
     from chronovisor.core.page_mutation import chronovisor_mutation_lock
 
     def read_optional(item: PreparedIngestOperation) -> str | None:
-        return _read_optional_exact_utf8(item.path)
+        return _read_optional_exact_utf8(_revalidate_prepared_path(item))
 
     rolled_back: list[PreparedIngestOperation] = []
     already_rolled_back: list[str] = []
@@ -3225,9 +3304,11 @@ def rollback_ingest_proposal_artifact(
                     if states[item.page_id] == "preimage":
                         continue
                     if item.previous_text is None:
-                        item.path.unlink()
+                        _revalidate_prepared_path(item).unlink()
                     else:
-                        atomic_write(item.path, item.previous_text)
+                        atomic_write(
+                            _revalidate_prepared_path(item), item.previous_text
+                        )
                     if read_optional(item) != item.previous_text:
                         raise IngestApplyError(
                             f"rollback verification failed: {item.page_id}"
@@ -3240,8 +3321,9 @@ def rollback_ingest_proposal_artifact(
                         if read_optional(item) != item.previous_text:
                             restored[item.page_id] = False
                             continue
-                        item.path.parent.mkdir(parents=True, exist_ok=True)
-                        atomic_write(item.path, item.new_body)
+                        path = _revalidate_prepared_path(item)
+                        path.parent.mkdir(parents=True, exist_ok=True)
+                        atomic_write(_revalidate_prepared_path(item), item.new_body)
                         restored[item.page_id] = read_optional(item) == item.new_body
                     except Exception:
                         restored[item.page_id] = False
@@ -3302,8 +3384,8 @@ def _prepared_plan_is_recoverable(planned: list[PreparedIngestOperation]) -> boo
 
     for item in planned:
         try:
-            current = _read_optional_exact_utf8(item.path)
-        except (OSError, UnicodeDecodeError):
+            current = _read_optional_exact_utf8(_revalidate_prepared_path(item))
+        except (IngestApplyError, OSError, UnicodeDecodeError):
             return False
         if current not in {item.previous_text, item.new_body}:
             return False
@@ -3500,8 +3582,8 @@ def _prepared_plan_is_fully_applied(
         return False
     for item in planned:
         try:
-            current = _read_optional_exact_utf8(item.path)
-        except (OSError, UnicodeDecodeError):
+            current = _read_optional_exact_utf8(_revalidate_prepared_path(item))
+        except (IngestApplyError, OSError, UnicodeDecodeError):
             return False
         if current != item.new_body:
             return False
@@ -3987,24 +4069,9 @@ def _review_and_apply_ingest_operations(
 
 
 def _rebuild_index() -> None:
-    """Rebuild index.md from all pages."""
-    pages = sorted(all_pages())
-    lines = [
-        "---",
-        "title: Index",
-        f"updated: {date.today().isoformat()}",
-        "---",
-        "",
-        "# Wiki Index",
-        "",
-    ]
-    for p in pages:
-        content = p.read_text()
-        title_match = re.search(r"title:\s*(.+)", content)
-        title = title_match.group(1) if title_match else p.stem
-        lines.append(f"- [[{p.stem}]] — {title}")
+    """Refresh the rebuildable canonical page/backlink projection."""
 
-    INDEX_FILE.write_text("\n".join(lines) + "\n")
+    get_store().refresh()
 
 
 def rebuild_index() -> None:

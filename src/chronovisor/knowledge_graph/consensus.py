@@ -8,6 +8,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+from chronovisor.core import index_store, store
 from chronovisor.core.jsonl_write import append_jsonl_durable
 from chronovisor.core.knowledge_graph_schema import (
     ConsensusReceipt,
@@ -15,7 +16,6 @@ from chronovisor.core.knowledge_graph_schema import (
     sha256,
 )
 from chronovisor.core.knowledge_graph_store import KnowledgeGraphStore
-from chronovisor.core.store import CHRONOVISOR_ROOT
 from chronovisor.decision.decision_router import DecisionRouter, DecisionRouterResult
 from chronovisor.decision.graph_decisions import (
     RELATION_VERIFICATION_SCHEMA,
@@ -23,7 +23,10 @@ from chronovisor.decision.graph_decisions import (
 )
 
 RECEIPT_LEDGER = (
-    CHRONOVISOR_ROOT / "runtime" / "typed-graph" / "consensus-receipts.jsonl"
+    store.CHRONOVISOR_ROOT
+    / "runtime"
+    / "typed-graph"
+    / "consensus-receipts.jsonl"
 )
 RouterFactory = Callable[[str], DecisionRouter]
 _CANONICAL_PRODUCER_ROLES = frozenset(("primary", "challenger", "tie_break"))
@@ -44,36 +47,35 @@ def _router_for_producer(
 router_for_producer = _router_for_producer
 
 
-def _page_paths(root: Path, page_id: str) -> tuple[Path, ...]:
-    direct = (
-        root / "pages" / f"{page_id}.md",
-        root / "system" / f"{page_id}.md",
+def canonical_graph_page_paths(root: Path) -> dict[str, Path]:
+    """Return the canonical stable graph corpus keyed by unique page stem."""
+
+    paths = index_store.canonical_document_paths(
+        root / "pages", system_dir=root / "system", require_stable=True
     )
-    found = [path for path in direct if path.is_file()]
-    basename = Path(page_id).name
-    pages = root / "pages"
-    if pages.exists() and not found and basename not in {"", ".", ".."}:
-        found.extend(path for path in pages.rglob(f"{basename}.md") if path.is_file())
-    return tuple(dict.fromkeys(found))
+    by_id: dict[str, Path] = {}
+    for path in paths:
+        if path.stem in by_id:
+            raise ValueError(f"duplicate graph page id: {path.stem}")
+        by_id[path.stem] = path
+    return by_id
 
 
-def _page_exists(root: Path, page_id: str) -> bool:
-    return bool(_page_paths(root, page_id))
-
-
-def _source_digest_valid(root: Path, page_id: str, digest: str) -> bool:
-    for path in _page_paths(root, page_id):
-        try:
-            if hashlib.sha256(path.read_bytes()).hexdigest() == digest:
-                return True
-        except OSError:
-            continue
-    return False
+def _source_digest_valid(
+    page_paths: Mapping[str, Path], page_id: str, digest: str
+) -> bool:
+    path = page_paths.get(page_id)
+    if path is None:
+        return False
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest() == digest
+    except OSError:
+        return False
 
 
 def verify_pending_relations(
     *,
-    root: Path = CHRONOVISOR_ROOT,
+    root: Path = store.CHRONOVISOR_ROOT,
     store: KnowledgeGraphStore | None = None,
     receipt_file: Path = RECEIPT_LEDGER,
     router_factory: RouterFactory = _router_for_producer,
@@ -84,14 +86,26 @@ def verify_pending_relations(
     pending = [row for row in graph_store.relations(statuses={"proposed"})][
         : max(0, limit)
     ]
+    try:
+        page_paths = canonical_graph_page_paths(root)
+    except ValueError:
+        return {
+            "status": "blocked",
+            "reason": "duplicate_page_id",
+            "verified": 0,
+            "held": 0,
+            "vetoed": 0,
+            "external_model_calls": 0,
+        }
     verified = held = vetoed = external_model_calls = 0
     for record in pending:
         digest_valid = all(
-            _source_digest_valid(root, evidence.page_id, evidence.content_sha256)
+            _source_digest_valid(page_paths, evidence.page_id, evidence.content_sha256)
             for evidence in record.evidence
         )
-        endpoints_known = _page_exists(root, record.source_page_id) and _page_exists(
-            root, record.target_page_id
+        endpoints_known = (
+            record.source_page_id in page_paths
+            and record.target_page_id in page_paths
         )
         if not digest_valid or not endpoints_known:
             outcome = "held"

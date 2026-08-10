@@ -383,11 +383,8 @@ def _stabilize_page_fixtures(pages: Path) -> None:
 def _patch_page_lookup(monkeypatch, pages: Path) -> None:
     _stabilize_page_fixtures(pages)
 
-    def lookup(page_id: str) -> Path | None:
-        candidate = pages / f"{page_id}.md"
-        return candidate if candidate.exists() else None
-
     monkeypatch.setattr(page_mutation, "PAGES_DIR", pages)
+    monkeypatch.setattr(page_mutation, "SYSTEM_DIR", pages.parent / "system")
     monkeypatch.setattr(
         page_mutation,
         "CHRONOVISOR_MUTATION_LOCK",
@@ -398,8 +395,6 @@ def _patch_page_lookup(monkeypatch, pages: Path) -> None:
         "DECISION_AUTHORITY_LOCK",
         pages.parent / "runtime" / "decision-authority.lock",
     )
-    monkeypatch.setattr(page_mutation, "find_page", lookup)
-    monkeypatch.setattr(content_correction, "find_page", lookup)
     monkeypatch.setattr(
         content_correction,
         "PROPOSALS_DIR",
@@ -906,13 +901,14 @@ def test_complete_turns_preserves_consecutive_user_correction_fragments(
 def test_build_event_uses_previous_turn_recall_pages(
     monkeypatch, tmp_path: Path
 ) -> None:
-    page = tmp_path / "memory.md"
-    page.write_text("memory", encoding="utf-8")
-    monkeypatch.setattr(
-        content_correction,
-        "find_page",
-        lambda page_id: page if page_id == "memory" else None,
+    pages = tmp_path / "pages"
+    pages.mkdir()
+    page = pages / "memory.md"
+    page.write_text(
+        "---\ntitle: Memory\nstatus: stable\ntype: knowledge\n---\nmemory\n",
+        encoding="utf-8",
     )
+    _patch_page_lookup(monkeypatch, pages)
     monkeypatch.setattr(
         content_correction, "_source_pull_pages", lambda *args, **kwargs: []
     )
@@ -2552,7 +2548,8 @@ def test_page_change_after_local_proposal_requeues_fresh_local_candidate(
     assert local["status"] == "pending_frontier"
 
     page.write_text(
-        "---\ntitle: Memory\n---\nExternal update.\nInstalled RAM is 16GB.\n",
+        "---\ntitle: Memory\nstatus: stable\ntype: memory\n---\n"
+        "External update.\nInstalled RAM is 16GB.\n",
         encoding="utf-8",
     )
     result = content_correction._process_frontier_item(

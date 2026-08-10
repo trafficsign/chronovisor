@@ -11,7 +11,7 @@ import json
 import shutil
 import tempfile
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -179,18 +179,14 @@ def run_artifact_only_sweep(
     started = time.monotonic()
     output_dir.mkdir(parents=True, exist_ok=True)
     before = _tree_manifest(protected_paths(root))
-    registry = PageRegistry(root).load()
+    page_registry = PageRegistry(root)
+    registry = page_registry.load()
     provider = LibraryEvidenceProvider(
         package=load_udc_package(root),
         evidence_index=LibraryEvidenceIndex(evidence_index_manifest),
     )
     pages = []
-    for uid, registry_row in sorted(registry.get("pages", {}).items()):
-        if (
-            not isinstance(registry_row, Mapping)
-            or registry_row.get("status") != "active"
-        ):
-            continue
+    for uid, registry_row in sorted(page_registry.stable_pages(registry).items()):
         pages.append(inference_dto(page_payload(root, str(uid), registry_row)))
     if provider.evidence_index is not None:
         provider.evidence_index.prefetch_dense_queries(

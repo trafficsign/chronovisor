@@ -25,8 +25,9 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
+from chronovisor.core.index_store import get_store, stable_indexed_document_path
 from chronovisor.core.runtime_config import load_decision_router_config
-from chronovisor.core.store import find_page
+from chronovisor.core.store import PAGES_DIR, SYSTEM_DIR
 from chronovisor.core.tag_rules import (
     AXIS_LIMITS,
     SEED_TAGS,
@@ -475,7 +476,13 @@ def minority_sample(
 
 def _page_head_for_prompt(page_id: str, max_chars: int = 2000) -> tuple[str, str]:
     """Return ``(title, body_head)``. Empty strings when the page is gone."""
-    path = find_page(page_id)
+    store = get_store()
+    store.refresh()
+    path = stable_indexed_document_path(
+        store.meta(page_id),
+        pages_dir=PAGES_DIR,
+        system_dir=SYSTEM_DIR,
+    )
     if path is None:
         return "", ""
     try:
@@ -793,7 +800,6 @@ def run_dry_run(
     generate_fn: Callable[..., str] | None = None,
 ) -> dict:
     if store is None:
-        from chronovisor.core.index_store import get_store
         store = get_store()
         store.refresh()
     page_ids = sorted(store.all_page_ids(include_system=False))

@@ -24,6 +24,7 @@ from chronovisor.core.knowledge_graph_schema import (
 )
 from chronovisor.core.knowledge_graph_store import KnowledgeGraphStore
 from chronovisor.decision.local_structured import LocalStructuredSession
+from chronovisor.knowledge_graph.consensus import canonical_graph_page_paths
 
 COMMUNITY_SUMMARY_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -141,16 +142,19 @@ def build_communities(
     return output
 
 
-def _page_excerpt(root: Path, page_id: str) -> tuple[str, str]:
-    for data_class, path in (
-        ("page", root / "pages" / f"{page_id}.md"),
-        ("system", root / "system" / f"{page_id}.md"),
-    ):
-        try:
-            return path.read_text(encoding="utf-8")[:2_000], data_class
-        except (OSError, UnicodeError):
-            continue
-    return "", "page"
+def _page_excerpt(
+    root: Path,
+    page_paths: Mapping[str, Path],
+    page_id: str,
+) -> tuple[str, str]:
+    path = page_paths.get(page_id)
+    if path is None:
+        return "", "page"
+    try:
+        data_class = "system" if root / "system" in path.parents else "page"
+        return path.read_text(encoding="utf-8")[:2_000], data_class
+    except (OSError, UnicodeError):
+        return "", "page"
 
 
 def _local_summary(
@@ -253,6 +257,7 @@ def summarize_communities(
         else sha256([COMMUNITY_SUMMARY_RUNTIME_ROLE, "unresolved"])
     )
     output: list[CommunityRecord] = []
+    page_paths = canonical_graph_page_paths(root)
     generated = reused = failed = attempted = 0
     external_model_calls = 0
     elapsed = 0.0
@@ -293,7 +298,7 @@ def summarize_communities(
         source_data_class = "page"
         digest_manifest = ",".join(community.source_digests[:16])
         for page_id in community.member_page_ids[:8]:
-            excerpt, data_class = _page_excerpt(root, page_id)
+            excerpt, data_class = _page_excerpt(root, page_paths, page_id)
             if excerpt:
                 if data_class == "system":
                     source_data_class = "system"

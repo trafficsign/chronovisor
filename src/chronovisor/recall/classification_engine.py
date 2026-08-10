@@ -37,6 +37,7 @@ from chronovisor.ingest.page_registry import PageRegistry
 from chronovisor.recall.classification import (
     CALIBRATION_SCHEMA,
     CLASSIFICATION_SCHEMA,
+    VALID_LIFECYCLES,
     ClassificationError,
     ClassificationRecord,
     Subject,
@@ -189,7 +190,7 @@ def page_payload(root: Path, uid: str, row: Mapping[str, Any]) -> dict[str, Any]
         "tags": tags,
         "raw_keywords": raw_keywords,
         "page_type": str(meta.get("type") or "knowledge"),
-        "lifecycle": str(meta.get("status") or "active"),
+        "lifecycle": str(meta.get("status") or "stable"),
         "sensitivity": str(
             meta.get("sensitivity") or row.get("sensitivity") or "normal"
         ),
@@ -380,8 +381,8 @@ def record_from_consensus(
             "lifecycle": (
                 str(page.get("lifecycle"))
                 if str(page.get("lifecycle"))
-                in {"active", "historical", "superseded", "experimental", "held"}
-                else "active"
+                in VALID_LIFECYCLES
+                else "stable"
             ),
             "temporal": {"kind": "evergreen"},
             "evidence": "mixed",
@@ -428,13 +429,7 @@ def build_fixture_candidates(
     package = load_udc_package(root)
     candidate_index = CandidateIndex(package)
     buckets: dict[tuple[str, str, str], list[dict[str, Any]]] = defaultdict(list)
-    for uid, row in sorted(manifest["pages"].items()):
-        if (
-            not isinstance(row, Mapping)
-            or row.get("status") == "superseded"
-            or not (root / str(row.get("path") or "")).exists()
-        ):
-            continue
+    for uid, row in sorted(registry.stable_pages(manifest).items()):
         page = _page_payload(root, uid, row)
         candidates = candidate_index.candidates(page)
         seed = str(candidates[0]["notation"])[0:1] or "0"

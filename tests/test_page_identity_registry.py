@@ -16,7 +16,7 @@ from chronovisor.ingest.uid_link_index import build_uid_link_index
 def _page(path: Path, title: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
-        f"---\ntitle: {title}\nupdated: 2026-07-25\n---\n\n# {title}\n",
+        f"---\ntitle: {title}\nstatus: stable\ntype: knowledge\nupdated: 2026-07-25\n---\n\n# {title}\n",
         encoding="utf-8",
     )
 
@@ -59,7 +59,7 @@ def test_registry_rejects_duplicate_uid(tmp_path: Path) -> None:
         path = tmp_path / "pages" / f"{name}.md"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
-            f"---\ntitle: {name}\nupdated: 2026-07-25\nuid: {uid}\n---\n",
+            f"---\ntitle: {name}\nstatus: stable\ntype: knowledge\nupdated: 2026-07-25\nuid: {uid}\n---\n",
             encoding="utf-8",
         )
     with pytest.raises(PageRegistryError, match="duplicate page UID"):
@@ -89,7 +89,7 @@ def test_uid_link_index_reports_missing_anchor(tmp_path: Path) -> None:
     source = tmp_path / "pages" / "source.md"
     _page(source, "Source")
     source.write_text(
-        source.read_text(encoding="utf-8") + "\n[[target#Missing]]\n",
+        source.read_text(encoding="utf-8") + "\n[target](<target.md#Missing>)\n",
         encoding="utf-8",
     )
 
@@ -98,6 +98,66 @@ def test_uid_link_index_reports_missing_anchor(tmp_path: Path) -> None:
     assert index["edge_count"] == 0
     assert index["unresolved_count"] == 1
     assert index["unresolved"][0]["reason"] == "missing_anchor"
+
+
+def test_uid_link_index_resolves_redirect_chain_and_composes_anchor_maps(
+    tmp_path: Path,
+) -> None:
+    for name in ("old", "middle"):
+        _page(tmp_path / "pages" / f"{name}.md", name.title())
+    final = tmp_path / "pages" / "final.md"
+    _page(final, "Final")
+    final.write_text(
+        final.read_text(encoding="utf-8") + "\n## New anchor\n",
+        encoding="utf-8",
+    )
+    source = tmp_path / "pages" / "source.md"
+    _page(source, "Source")
+    source.write_text(
+        source.read_text(encoding="utf-8")
+        + "\n[legacy](<old.md#old-anchor>)\n",
+        encoding="utf-8",
+    )
+    registry = PageRegistry(tmp_path)
+    registry.ensure_manifest()
+    old = registry.resolve("old")
+    middle = registry.resolve("middle")
+    target = registry.resolve("final")
+    assert old and middle and target
+    registry.add_redirect(
+        middle["uid"],
+        target["uid"],
+        anchor_map={"middle-anchor": "New anchor"},
+    )
+    registry.add_redirect(
+        old["uid"],
+        middle["uid"],
+        anchor_map={"old-anchor": "middle-anchor"},
+    )
+
+    resolved = registry.resolve("old")
+    index = build_uid_link_index(tmp_path, registry=registry)
+
+    assert resolved and resolved["anchor_map"]["old-anchor"] == "New anchor"
+    assert index["unresolved_count"] == 0
+    assert index["edges"] == [
+        {
+            "source_uid": registry.resolve("source")["uid"],
+            "target_uid": target["uid"],
+            "anchor": "New anchor",
+        }
+    ]
+
+    final.write_text(
+        final.read_text(encoding="utf-8").replace(
+            "status: stable", "status: deprecated"
+        ),
+        encoding="utf-8",
+    )
+    registry.ensure_manifest()
+    deprecated = build_uid_link_index(tmp_path, registry=registry)
+    assert deprecated["edge_count"] == 0
+    assert deprecated["unresolved"][0]["reason"] == "missing_target"
 
 
 def test_duplicate_stem_requires_uid_or_relative_path(tmp_path: Path) -> None:
@@ -143,7 +203,6 @@ def test_server_does_not_bypass_ambiguous_registry_key(
     _page(second, "Two")
     PageRegistry(tmp_path).ensure_manifest()
     monkeypatch.setattr(server, "CHRONOVISOR_ROOT", tmp_path)
-    monkeypatch.setattr(server, "find_page", lambda _page_id: first)
 
     assert server._find_page_with_alias("same") is None
     assert server._find_page_with_alias("pages/two/same") == second

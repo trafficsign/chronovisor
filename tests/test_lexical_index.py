@@ -16,6 +16,8 @@ def test_inverted_bm25_and_anchor_channels_find_japanese_and_metadata(
     target.write_text(
         """---
 title: Nemotron 検索設計
+status: stable
+type: knowledge
 updated: 2026-07-24
 tags: [d/ai-tools, t/retrieval]
 entities: [NVIDIA, Nemotron]
@@ -29,6 +31,8 @@ raw_keywords: [agentic retrieval]
     other.write_text(
         """---
 title: unrelated
+status: stable
+type: knowledge
 updated: 2026-07-24
 ---
 別の記録。
@@ -52,7 +56,7 @@ updated: 2026-07-24
 def test_inverted_bm25_refresh_removes_deleted_pages(tmp_path: Path) -> None:
     page = tmp_path / "obsolete.md"
     page.write_text(
-        "---\ntitle: Obsolete\nupdated: 2026-07-24\n---\nretired token\n",
+        "---\ntitle: Obsolete\nstatus: stable\ntype: knowledge\nupdated: 2026-07-24\n---\nretired token\n",
         encoding="utf-8",
     )
     index = LexicalIndex(
@@ -67,3 +71,50 @@ def test_inverted_bm25_refresh_removes_deleted_pages(tmp_path: Path) -> None:
     index.build(force=True)
 
     assert index.query("retired") == []
+
+
+def test_lexical_index_includes_only_canonical_stable_pages_and_system(
+    tmp_path: Path,
+) -> None:
+    pages = tmp_path / "pages"
+    system = tmp_path / "system"
+    pages.mkdir()
+    system.mkdir()
+    documents = {
+        pages / "stable.md": (
+            "---\ntitle: Stable\nstatus: stable\ntype: knowledge\n---\n"
+            "stabletoken\n"
+        ),
+        pages / "draft.md": (
+            "---\ntitle: Draft\nstatus: draft\ntype: knowledge\n---\ndrafttoken\n"
+        ),
+        pages / "deprecated.md": (
+            "---\ntitle: Deprecated\nstatus: deprecated\ntype: knowledge\n---\n"
+            "deprecatedtoken\n"
+        ),
+        pages / "missing-type.md": (
+            "---\ntitle: Missing\nstatus: stable\n---\nmissingtypetoken\n"
+        ),
+        pages / "legacy-link.md": (
+            "---\ntitle: Legacy\nstatus: stable\ntype: knowledge\n---\n"
+            "[[stable]] legacytoken\n"
+        ),
+        system / "current-state.md": (
+            "---\ntitle: Current\nstatus: stable\n---\n"
+            "[Stable](</pages/stable.md>) systemtoken\n"
+        ),
+    }
+    for path, content in documents.items():
+        path.write_text(content, encoding="utf-8")
+    index = LexicalIndex(
+        path=tmp_path / "lexical.sqlite",
+        pages=lambda: list(documents),
+        refresh_interval_seconds=0,
+    )
+
+    index.build()
+
+    assert [row.page_id for row in index.query("stabletoken")] == ["stable"]
+    assert [row.page_id for row in index.query("systemtoken")] == ["current-state"]
+    for excluded in ("drafttoken", "deprecatedtoken", "missingtypetoken", "legacytoken"):
+        assert index.query(excluded) == []

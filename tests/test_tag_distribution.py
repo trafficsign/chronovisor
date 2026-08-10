@@ -64,13 +64,25 @@ def isolated_pages(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     from chronovisor.core import store as wiki_mod
     monkeypatch.setattr(wiki_mod, "PAGES_DIR", pages_dir)
 
-    def fake_find_page(page_id: str):
-        # Search recursively across folders.
-        for cand in pages_dir.rglob(f"{page_id}.md"):
-            return cand
-        return None
+    class PromptStore:
+        def refresh(self) -> None:
+            return None
 
-    monkeypatch.setattr(td, "find_page", fake_find_page)
+        def meta(self, page_id: str):
+            matches = list(pages_dir.rglob(f"{page_id}.md"))
+            if len(matches) != 1:
+                return None
+            path = matches[0]
+            return {
+                "status": "stable",
+                "path": str(path),
+                "relative_path": path.relative_to(pages_dir).as_posix(),
+                "is_system": False,
+            }
+
+    monkeypatch.setattr(td, "get_store", PromptStore)
+    monkeypatch.setattr(td, "PAGES_DIR", pages_dir)
+    monkeypatch.setattr(td, "SYSTEM_DIR", tmp_path / "system")
     return pages_dir
 
 
@@ -78,7 +90,8 @@ def _seed(pages_dir: Path, page_id: str, *, folder: str = "", body: str = "body"
     target = pages_dir / folder / f"{page_id}.md" if folder else pages_dir / f"{page_id}.md"
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(
-        f"---\ntitle: {page_id}\nupdated: 2026-05-08\n---\n{body}\n"
+        f"---\ntitle: {page_id}\nupdated: 2026-05-08\n"
+        f"status: stable\ntype: knowledge\n---\n{body}\n"
     )
     return target
 
@@ -102,6 +115,8 @@ class _FakeStoreWithPaths:
             "is_system": False,
             "updated": "2026-05-08",
             "path": str(path),
+            "status": "stable",
+            "relative_path": path.relative_to(self._pages_dir).as_posix(),
         }
 
     def all_page_ids(self, include_system: bool = False) -> set[str]:

@@ -79,6 +79,8 @@ def _write_page(path: Path, *, tags: str = "") -> None:
     path.write_text(
         "---\n"
         f"title: {path.stem}\n"
+        "status: stable\n"
+        "type: knowledge\n"
         "updated: 2026-07-25\n"
         f"{tag_line}"
         "---\n\n"
@@ -92,7 +94,7 @@ def test_bootstrap_classification_cannot_become_authority() -> None:
     record = propose_from_legacy_metadata(
         tags=["d/ai", "t/architecture"],
         page_type="architecture",
-        lifecycle="active",
+        lifecycle="stable",
         sensitivity="normal",
         evidence_ref="page-sha256:abc",
         package=package,

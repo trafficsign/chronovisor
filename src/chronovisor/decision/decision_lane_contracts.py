@@ -54,8 +54,8 @@ _LANE_SEMANTICS: dict[str, LaneSemantics] = {
     ),
     "autonomy_retention": LaneSemantics(
         "One soft-retention candidate with current-use, provenance, and replacement evidence.",
-        "Archive only when the page is no longer useful and soft archival preserves every distinct event and source of truth.",
-        "archive is a reversible archive mutation; keep_active is no mutation; needs_retry is a hold.",
+        "Deprecate only when the page is no longer useful and reversible deprecation preserves every distinct event and source of truth.",
+        "deprecate is a reversible page mutation; keep_stable is no mutation; needs_retry is a hold.",
     ),
     "content_correction_classification": LaneSemantics(
         "One correction event, local proposal, complete candidate-page evidence, and prepared mutation identities.",
@@ -182,6 +182,7 @@ LANE_PROMPT_POLICY_VERSIONS: dict[str, int] = {lane: 8 for lane in _LANE_SEMANTI
 LANE_PROMPT_POLICY_VERSIONS["ingest_reconciliation"] = 16
 LANE_PROMPT_POLICY_VERSIONS["raw_replay_reconciliation"] = 9
 LANE_PROMPT_POLICY_VERSIONS["recall_auto_apply"] = 9
+LANE_PROMPT_POLICY_VERSIONS["autonomy_retention"] = 9
 
 
 _REQUIRED_COVERAGE_LABELS: dict[str, tuple[str, ...]] = {
@@ -192,8 +193,8 @@ _REQUIRED_COVERAGE_LABELS: dict[str, tuple[str, ...]] = {
         'decision="supersede_right"',
     ),
     "autonomy_retention": (
-        'decision="archive"',
-        'decision="keep_active"',
+        'decision="deprecate"',
+        'decision="keep_stable"',
         'decision="needs_retry"',
     ),
     "content_correction_classification": (
@@ -328,7 +329,7 @@ _REQUIRED_EFFECTS: dict[str, tuple[str, ...]] = {
         "page_mutation:supersede_left",
         "page_mutation:supersede_right",
     ),
-    "autonomy_retention": ("archive", "hold", "no_page_mutation"),
+    "autonomy_retention": ("hold", "no_page_mutation", "page_mutation:deprecate"),
     "content_correction_classification": (
         "hold",
         "negative_retrieval_feedback",

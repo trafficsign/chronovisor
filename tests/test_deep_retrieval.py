@@ -40,7 +40,8 @@ def page(page_id: str, score: float = 1.0) -> ScoredPage:
 
 
 class FakeStore:
-    def __init__(self) -> None:
+    def __init__(self, paths: dict[str, Path]) -> None:
+        self.paths = paths
         self.outlink_map = {"alpha": ["beta"], "beta": [], "target": []}
         self.backlink_map = {"alpha": [], "beta": ["alpha"], "target": []}
 
@@ -53,8 +54,10 @@ class FakeStore:
         return {
             "title": page_id.title(),
             "updated": "2026-06-11",
-            "path": f"/tmp/{page_id}.md",
-            "status": "active",
+            "path": str(self.paths[page_id]),
+            "status": "stable",
+            "relative_path": f"{page_id}.md",
+            "is_system": False,
         }
 
     def outlinks(self, page_id: str) -> list[str]:
@@ -66,10 +69,13 @@ class FakeStore:
 
 def test_run_deep_dive_searches_reads_links_and_requeries(tmp_path, monkeypatch) -> None:
     paths = {}
+    pages_dir = tmp_path / "pages"
+    pages_dir.mkdir()
     for page_id in ("alpha", "beta", "target"):
-        path = tmp_path / f"{page_id}.md"
+        path = pages_dir / f"{page_id}.md"
         path.write_text(
-            f"---\ntitle: {page_id.title()}\nupdated: 2026-06-11\n---\nBody for {page_id}",
+            f"---\ntitle: {page_id.title()}\nupdated: 2026-06-11\n"
+            f"status: stable\ntype: knowledge\n---\nBody for {page_id}",
             encoding="utf-8",
         )
         paths[page_id] = path
@@ -79,8 +85,8 @@ def test_run_deep_dive_searches_reads_links_and_requeries(tmp_path, monkeypatch)
             return [page("alpha")], "hybrid"
         return [page("target")], "hybrid"
 
-    monkeypatch.setattr(deep_retrieval, "get_store", lambda: FakeStore())
-    monkeypatch.setattr(deep_retrieval, "find_page", lambda page_id: paths.get(page_id))
+    monkeypatch.setattr(deep_retrieval, "get_store", lambda: FakeStore(paths))
+    monkeypatch.setattr(deep_retrieval, "PAGES_DIR", pages_dir)
     monkeypatch.setattr(deep_retrieval, "run_search", fake_search)
     monkeypatch.setattr(deep_retrieval, "_llm_requeries", lambda *args, **kwargs: ["q2"])
 
@@ -89,6 +95,96 @@ def test_run_deep_dive_searches_reads_links_and_requeries(tmp_path, monkeypatch)
     assert [item["query"] for item in result["iterations"]] == ["q1", "q2"]
     assert result["iterations"][0]["linked_page_ids"] == ["beta"]
     assert {page["page_id"] for page in result["pages"]} == {"alpha", "beta", "target"}
+
+
+@pytest.mark.parametrize("drift", ["symlink", "external_path"])
+def test_research_reads_revalidate_indexed_path_containment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    drift: str,
+) -> None:
+    from chronovisor.research import research_tools
+
+    pages_dir = tmp_path / "wiki" / "pages"
+    pages_dir.mkdir(parents=True)
+    page = pages_dir / "secret.md"
+    canonical = (
+        "---\ntitle: Secret\nstatus: stable\ntype: knowledge\n---\nSECRET BODY\n"
+    )
+    page.write_text(canonical, encoding="utf-8")
+    external = tmp_path / "external.md"
+    external.write_text(canonical, encoding="utf-8")
+    indexed_path = page
+    if drift == "symlink":
+        page.unlink()
+        page.symlink_to(external)
+    else:
+        indexed_path = external
+
+    class DriftedStore(FakeStore):
+        def __init__(self) -> None:
+            super().__init__({"secret": indexed_path})
+
+        def meta(self, page_id: str):
+            if page_id != "secret":
+                return None
+            return {
+                "title": "Secret",
+                "updated": "2026-06-11",
+                "path": str(indexed_path),
+                "status": "stable",
+                "relative_path": "secret.md",
+                "is_system": False,
+            }
+
+    store = DriftedStore()
+    monkeypatch.setattr(research_tools, "get_store", lambda: store)
+    monkeypatch.setattr(research_tools, "PAGES_DIR", pages_dir)
+    monkeypatch.setattr(deep_retrieval, "get_store", lambda: store)
+    monkeypatch.setattr(deep_retrieval, "PAGES_DIR", pages_dir)
+
+    with pytest.raises(FileNotFoundError):
+        research_tools.chronovisor_read({"page_id": "secret"}, None)  # type: ignore[arg-type]
+    assert deep_retrieval._page_record("secret") is None
+
+
+@pytest.mark.parametrize("status", ["draft", "deprecated"])
+def test_research_reads_exclude_nonstable_model_selected_page(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    status: str,
+) -> None:
+    from chronovisor.research import research_tools
+
+    path = tmp_path / "secret.md"
+    path.write_text(
+        f"---\ntitle: Secret\nstatus: {status}\ntype: knowledge\n---\nSECRET BODY",
+        encoding="utf-8",
+    )
+
+    class NonStableStore:
+        def refresh(self) -> None:
+            return None
+
+        def meta(self, page_id: str):
+            if page_id != "secret":
+                return None
+            return {"status": status, "path": str(path), "title": "Secret"}
+
+        def outlinks(self, _page_id: str) -> list[str]:
+            return ["secret"]
+
+        def backlinks(self, _page_id: str) -> list[str]:
+            return []
+
+    store = NonStableStore()
+    monkeypatch.setattr(research_tools, "get_store", lambda: store)
+    monkeypatch.setattr(deep_retrieval, "get_store", lambda: store)
+
+    with pytest.raises(FileNotFoundError):
+        research_tools.chronovisor_read({"page_id": "secret"}, None)  # type: ignore[arg-type]
+    assert deep_retrieval._page_record("secret") is None
+    assert deep_retrieval._linked_page_ids(["source"], limit=5) == []
 
 
 def test_start_deep_dive_enqueues_durable_worker(monkeypatch) -> None:
@@ -398,14 +494,26 @@ def test_remote_egress_denial_uses_only_deterministic_requery_fallback(
         queries.append(query)
         return ([page("alpha")] if len(queries) == 1 else []), "bm25"
 
+    paths: dict[str, Path] = {}
+    pages_dir = tmp_path / "pages"
+    pages_dir.mkdir()
+    for page_id in ("alpha", "beta", "target"):
+        path = pages_dir / f"{page_id}.md"
+        path.write_text(
+            f"---\ntitle: {page_id.title()}\nstatus: stable\ntype: knowledge\n---\n"
+            f"Body for {page_id}",
+            encoding="utf-8",
+        )
+        paths[page_id] = path
+
     monkeypatch.setattr(
         llm_config,
         "load_default_llm_runtime",
         lambda: _remote_runtime(backend, allow_egress=False),
     )
     monkeypatch.setattr(store, "CHRONOVISOR_ROOT", tmp_path)
-    monkeypatch.setattr(deep_retrieval, "get_store", lambda: FakeStore())
-    monkeypatch.setattr(deep_retrieval, "find_page", lambda _page_id: None)
+    monkeypatch.setattr(deep_retrieval, "get_store", lambda: FakeStore(paths))
+    monkeypatch.setattr(deep_retrieval, "PAGES_DIR", pages_dir)
     monkeypatch.setattr(deep_retrieval, "run_search", fake_search)
     _forbid_ollama_controls(monkeypatch)
 

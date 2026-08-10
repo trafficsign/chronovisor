@@ -1656,8 +1656,8 @@ def _semantic_effect(
 
     if "retention" in schema_names:
         return {
-            "archive": "archive",
-            "keep_active": "no_page_mutation",
+            "deprecate": "page_mutation:deprecate",
+            "keep_stable": "no_page_mutation",
             "needs_retry": "hold",
         }.get(decision)
 
@@ -1816,7 +1816,7 @@ def replay_semantic_effect(
 
 _MUTATING_EFFECTS = frozenset(
     {
-        "archive",
+        "page_mutation:deprecate",
         "mark_raw_processed",
         "negative_retrieval_feedback",
         "page_mutation",

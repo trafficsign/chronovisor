@@ -11,11 +11,17 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from chronovisor.core.frontmatter import parse as parse_frontmatter
-from chronovisor.core.index_store import get_store
+from chronovisor.core.canonical_document import (
+    CanonicalDocumentError,
+    validate_canonical_document,
+)
+from chronovisor.core.index_store import (
+    get_store,
+    stable_indexed_document_path,
+)
 from chronovisor.core.search import ScoredPage
 from chronovisor.core.search import search as run_search
-from chronovisor.core.store import find_page
+from chronovisor.core.store import PAGES_DIR, SYSTEM_DIR
 from chronovisor.decision.local_structured import ChatTransport, LocalStructuredSession
 
 REQUERY_RUNTIME_ROLE = "research.deep_retrieval_requery"
@@ -27,25 +33,32 @@ def _compact(text: str, *, limit: int) -> str:
 
 def _page_record(page_id: str, *, max_chars: int = 1200) -> dict[str, Any] | None:
     store = get_store()
+    store.refresh()
     meta = store.meta(page_id)
-    path = find_page(page_id)
-    if meta is None and path is None:
+    path = stable_indexed_document_path(
+        meta,
+        pages_dir=PAGES_DIR,
+        system_dir=SYSTEM_DIR,
+    )
+    if path is None or not isinstance(meta, dict):
         return None
+    namespace = "system" if meta.get("is_system") else "pages"
+    relative_path = str(meta["relative_path"])
     title = page_id
     updated = "unknown"
     body = ""
-    if path is not None:
-        try:
-            content = path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
-            content = ""
-        parsed_meta, parsed_body = parse_frontmatter(content)
-        body = parsed_body
-        title = str(parsed_meta.get("title") or title)
-        updated = str(parsed_meta.get("updated") or updated)
-    if meta is not None:
-        title = str(meta.get("title") or title)
-        updated = str(meta.get("updated") or updated)
+    try:
+        document = validate_canonical_document(
+            path.read_bytes(),
+            namespace=namespace,
+            path=relative_path,
+            require_stable=True,
+        )
+        body = document.body.decode("utf-8")
+    except (CanonicalDocumentError, OSError, UnicodeDecodeError):
+        return None
+    title = str(document.metadata.get("title") or meta.get("title") or title)
+    updated = str(document.metadata.get("updated") or meta.get("updated") or updated)
     return {
         "page_id": page_id,
         "title": title,
@@ -76,7 +89,8 @@ def _linked_page_ids(page_ids: list[str], *, limit: int) -> list[str]:
         for candidate in store.outlinks(page_id) + store.backlinks(page_id):
             if candidate in seen:
                 continue
-            if store.meta(candidate) is None and find_page(candidate) is None:
+            meta = store.meta(candidate)
+            if not isinstance(meta, dict) or meta.get("status") != "stable":
                 continue
             seen.add(candidate)
             linked.append(candidate)

@@ -1114,12 +1114,9 @@ def _knowledge_mix_snapshot() -> dict[str, Any]:
     pages_dir = CHRONOVISOR_ROOT / "pages"
     categories: dict[str, dict[str, Any]] = {}
     if pages_dir.exists():
-        for path in pages_dir.rglob("*.md"):
-            if path.name in index_store.PAGE_RESERVED_FILENAMES:
-                continue
-            resolved = index_store.contained_file(path, pages_dir)
-            if resolved is None:
-                continue
+        for resolved in index_store.canonical_document_paths(
+            pages_dir, require_stable=True
+        ):
             try:
                 rel = resolved.relative_to(pages_dir.resolve())
                 page_bytes = resolved.stat().st_size

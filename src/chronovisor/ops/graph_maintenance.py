@@ -469,6 +469,23 @@ def _run_maintenance_lanes(
         dry_run=dry_run,
         resource_busy=busy,
     )
+    if builder.get("status") == "blocked":
+        blocked = {
+            "status": "blocked",
+            "reason": str(builder.get("reason") or "builder_blocked"),
+            "external_model_calls": 0,
+        }
+        return {
+            "builder": builder,
+            "consensus": blocked,
+            "used": blocked,
+            "entities": blocked,
+            "used_entities": blocked,
+            "communities": [],
+            "community_summary": {**blocked, "generated": 0},
+            "rubric_gold": blocked,
+            "rubric_cycle": blocked,
+        }
     consensus = (
         _paused()
         if busy
@@ -856,6 +873,22 @@ def run_graph_maintenance(
     lanes = _run_maintenance_lanes(
         root=root, config=cfg, store=store, busy=busy, dry_run=dry_run
     )
+    if lanes["builder"].get("status") == "blocked":
+        return {
+            "schema_version": 1,
+            "status": "blocked",
+            "mode": cfg.mode,
+            "builder": lanes["builder"],
+            "consensus": lanes["consensus"],
+            "used_paths": lanes["used"],
+            "used_entities": lanes["used_entities"],
+            "entities": lanes["entities"],
+            "communities": 0,
+            "community_summary": lanes["community_summary"],
+            "rubric": lanes["rubric_cycle"],
+            "rubric_gold": lanes["rubric_gold"],
+            "external_model_calls": 0,
+        }
     artifacts = _evaluation_artifacts(
         root=root,
         store=store,

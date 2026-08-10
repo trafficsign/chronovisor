@@ -5,7 +5,9 @@ import math
 import os
 import subprocess
 import threading
+from contextlib import nullcontext
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -37,7 +39,7 @@ def _write_page(
     path.parent.mkdir(parents=True, exist_ok=True)
     tag_line = f"tags: [{', '.join(tags or [])}]\n" if tags else ""
     path.write_text(
-        f"---\ntitle: {title}\nupdated: 2026-07-29\n{tag_line}---\n{body}\n",
+        f"---\ntitle: {title}\nstatus: stable\ntype: knowledge\nupdated: 2026-07-29\n{tag_line}---\n{body}\n",
         encoding="utf-8",
     )
 
@@ -48,19 +50,23 @@ def _append_v2_capture(root: Path, *, after_line: int) -> RawSegmentReceipt:
     idempotency_key = (
         f"codex-{session_key}-from{after_line}-to{until_line}"
     )
-    return append_capture(
-        raw_dir=root / "raw",
-        raw_id=f"save-{idempotency_key}.md",
-        idempotency_key=idempotency_key,
-        host="codex",
-        session_key=session_key,
-        session_id="cortex-test-session",
-        source_file=root / "session.jsonl",
-        after_line=after_line,
-        until_line=until_line,
-        source_bytes=f'{{"line":{until_line}}}\n'.encode(),
-        record_count=1,
-    )
+    with patch(
+        "chronovisor.core.store.okf_runtime_operation",
+        lambda *_args, **_kwargs: nullcontext(),
+    ):
+        return append_capture(
+            raw_dir=root / "raw",
+            raw_id=f"save-{idempotency_key}.md",
+            idempotency_key=idempotency_key,
+            host="codex",
+            session_key=session_key,
+            session_id="cortex-test-session",
+            source_file=root / "session.jsonl",
+            after_line=after_line,
+            until_line=until_line,
+            source_bytes=f'{{"line":{until_line}}}\n'.encode(),
+            record_count=1,
+        )
 
 
 def test_build_cortex_graph_uses_local_wiki_without_exposing_bodies(
@@ -70,13 +76,13 @@ def test_build_cortex_graph_uses_local_wiki_without_exposing_bodies(
     _write_page(
         root / "pages" / "alpha" / "page-a.md",
         title="Alpha <private>",
-        body="Links to [[page-b]] and [[missing-page]].",
+        body="Links to [page-b](<../beta/page-b.md>) and [missing-page](<missing-page.md>).",
         tags=["d/example"],
     )
     _write_page(
         root / "pages" / "beta" / "page-b.md",
         title="Beta",
-        body="Back to [[page-a]].",
+        body="Back to [page-a](<../alpha/page-a.md>).",
     )
     _write_page(
         root / "system" / "current-state.md",
@@ -94,7 +100,7 @@ def test_build_cortex_graph_uses_local_wiki_without_exposing_bodies(
     assert graph["meta"] == {
         "generated": "2026-07-29T22:00:00+09:00",
         "commit": "0123456",
-        "totalLines": 19,
+        "totalLines": 25,
         "static": 2,
         "deferred": 1,
         "spawn": 0,
@@ -511,6 +517,35 @@ def test_cortex_projects_typed_relations_with_nested_page_ids(tmp_path: Path) ->
     assert graph["nodes"][relation["source"]]["id"] == "a"
     assert graph["nodes"][relation["target"]]["id"] == "b"
     assert relation["source_page_id"] == "topic/a"
+
+
+def test_cortex_community_projection_uses_stem_ids_for_nodes_and_hulls(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "chronovisor"
+    _write_page(root / "pages" / "topic" / "a.md", title="A", body="Alpha")
+    _write_page(root / "pages" / "b.md", title="B", body="Beta")
+    KnowledgeGraphStore(root / "knowledge-graph").write_derived_snapshot(
+        "communities",
+        {
+            "communities": {
+                "community-one": {
+                    "member_page_ids": ["pages/topic/a", "pages/b"],
+                    "relation_ids": [],
+                    "source_digests": [],
+                }
+            }
+        },
+    )
+
+    graph = cortex.build_cortex_graph(root, use_cache=False)
+
+    community = graph["typedGraph"]["communities"][0]
+    assert community["member_page_ids"] == ["a", "b"]
+    nodes = {node["id"]: node for node in graph["nodes"]}
+    assert nodes["a"]["communities"] == ["community-one"]
+    assert nodes["b"]["communities"] == ["community-one"]
+    assert all(page_id in nodes for page_id in community["member_page_ids"])
 
 
 def test_cortex_relation_detail_lookup_is_bounded_and_sorted(

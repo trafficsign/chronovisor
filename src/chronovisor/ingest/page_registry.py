@@ -1,7 +1,7 @@
 """Durable page identity, redirect, and classification registry.
 
-The registry is metadata only.  Page bodies remain under ``pages/`` and
-``system/``; superseded bodies are not copied here.  Read resolution is pure:
+The registry is metadata only. Page bodies remain under ``pages/`` and
+``system/``; redirect source bodies are not copied here. Read resolution is pure:
 redirect following never rewrites or compresses the registry.
 """
 
@@ -17,7 +17,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from chronovisor.core import frontmatter, index_store
+from chronovisor.core import canonical_document, frontmatter, index_store
 from chronovisor.core.hashutil import sha256_bytes as _sha256
 from chronovisor.core.page_identity import new_page_uid, normalize_page_uid
 
@@ -40,6 +40,26 @@ def _normalize_key(value: object) -> str:
     text = str(value or "").strip()
     text = text.removesuffix(".md")
     return text.casefold()
+
+
+def _compose_anchor_maps(
+    incoming: Mapping[str, str],
+    downstream: Mapping[str, str],
+) -> dict[str, str]:
+    """Compose redirect anchor maps from source through the final target."""
+
+    normalized_downstream = {
+        str(source): str(target) for source, target in downstream.items()
+    }
+    if not incoming:
+        return normalized_downstream
+    return {
+        **normalized_downstream,
+        **{
+            str(source): normalized_downstream.get(str(middle), str(middle))
+            for source, middle in incoming.items()
+        },
+    }
 
 
 def _legacy_aliases(root: Path) -> dict[str, str]:
@@ -127,7 +147,58 @@ class PageRegistry:
         for field in ("pages", "keys", "ambiguous_keys", "redirects"):
             if not isinstance(data.get(field), dict):
                 raise PageRegistryError(f"registry field {field!r} must be an object")
+        for uid, row in data["pages"].items():
+            if not isinstance(row, dict) or row.get("uid") != uid:
+                raise PageRegistryError(f"registry page {uid!r} is malformed")
+            canonical_uid = row.get("canonical_uid")
+            redirect = data["redirects"].get(uid)
+            if canonical_uid is not None and (
+                not isinstance(redirect, dict)
+                or redirect.get("to_uid") != canonical_uid
+            ):
+                raise PageRegistryError(
+                    f"registry redirect state is inconsistent for {uid!r}"
+                )
         return data
+
+    def stable_pages(
+        self,
+        state: Mapping[str, Any] | None = None,
+    ) -> dict[str, dict[str, Any]]:
+        """Return current stable, non-redirect canonical page rows."""
+
+        snapshot = state if state is not None else self.load()
+        redirects = snapshot.get("redirects")
+        redirect_uids = set(redirects) if isinstance(redirects, Mapping) else set()
+        return {
+            str(uid): dict(row)
+            for uid, row in snapshot["pages"].items()
+            if isinstance(row, Mapping)
+            and row.get("status") == "stable"
+            and not row.get("canonical_uid")
+            and uid not in redirect_uids
+            and self._canonical_stable_path(row) is not None
+        }
+
+    def _canonical_stable_path(self, row: Mapping[str, Any]) -> Path | None:
+        raw_path = str(row.get("path") or "")
+        if raw_path.startswith("pages/"):
+            directory = self.root / "pages"
+            namespace: canonical_document.Namespace = "pages"
+            reserved = index_store.PAGE_RESERVED_FILENAMES
+        elif raw_path.startswith("system/"):
+            directory = self.root / "system"
+            namespace = "system"
+            reserved = index_store.SYSTEM_RESERVED_FILENAMES
+        else:
+            return None
+        return index_store.canonical_document_path(
+            self.root / raw_path,
+            directory,
+            namespace=namespace,
+            reserved_filenames=reserved,
+            require_stable=True,
+        )
 
     def _append_event(self, event: Mapping[str, Any]) -> None:
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
@@ -144,30 +215,14 @@ class PageRegistry:
 
     @staticmethod
     def _page_paths(root: Path, *, include_system: bool) -> list[Path]:
-        paths: list[Path] = []
-        namespaces = [(root / "pages", index_store.PAGE_RESERVED_FILENAMES, True)]
-        if include_system:
-            namespaces.append(
-                (
-                    root / "system",
-                    index_store.SYSTEM_RESERVED_FILENAMES,
-                    False,
-                )
+        try:
+            return index_store.canonical_document_paths(
+                root / "pages",
+                system_dir=root / "system" if include_system else None,
+                strict=True,
             )
-        for directory, reserved, recursive in namespaces:
-            if not directory.is_dir():
-                continue
-            candidates = (
-                directory.rglob("*.md") if recursive else directory.glob("*.md")
-            )
-            paths.extend(
-                resolved
-                for path in sorted(candidates)
-                if path.name not in reserved
-                and (resolved := index_store.contained_file(path, directory))
-                is not None
-            )
-        return paths
+        except index_store.CanonicalDocumentError as exc:
+            raise PageRegistryError(str(exc)) from exc
 
     def ensure_manifest(
         self,
@@ -200,6 +255,23 @@ class PageRegistry:
             created: list[str] = []
             updated: list[str] = []
             legacy_aliases = _legacy_aliases(self.root)
+
+            for uid, redirect in state["redirects"].items():
+                row = pages.get(uid)
+                if not isinstance(row, dict) or not isinstance(redirect, dict):
+                    raise PageRegistryError(f"registry redirect {uid!r} is malformed")
+                canonical_uid = normalize_page_uid(redirect.get("to_uid"))
+                if (
+                    row.get("status") not in canonical_document.PAGE_STATUSES
+                    or row.get("canonical_uid") != canonical_uid
+                ):
+                    pages[uid] = {
+                        **row,
+                        "status": "deprecated",
+                        "canonical_uid": canonical_uid,
+                        "updated_at": _now_iso(),
+                    }
+                    updated.append(uid)
 
             for path in self._page_paths(self.root, include_system=include_system):
                 raw = path.read_bytes()
@@ -266,7 +338,7 @@ class PageRegistry:
                     "page_id": page_id,
                     "path": rel,
                     "legacy_keys": sorted({page_id, *legacy_keys}),
-                    "status": str(meta.get("status") or "active"),
+                    "status": str(meta["status"]),
                     "canonical_uid": None,
                     "content_sha256": _sha256(raw),
                     "content_size": len(raw),
@@ -304,8 +376,8 @@ class PageRegistry:
                         updated.append(uid)
                 pages[uid] = row
 
-            # Historical/superseded entries remain in metadata.  Current active
-            # pages missing from disk are never silently deleted.
+            # Historical entries remain metadata-only. Missing pages are never
+            # silently deleted.
             keys: dict[str, str] = {}
             ambiguous_keys: dict[str, list[str]] = {}
             for uid, row in pages.items():
@@ -472,11 +544,12 @@ class PageRegistry:
             target = normalize_page_uid(redirect.get("to_uid"))
             raw_anchor_map = redirect.get("anchor_map")
             if isinstance(raw_anchor_map, dict):
-                anchor_map.update(
+                anchor_map = _compose_anchor_maps(
+                    anchor_map,
                     {
                         str(source): str(target_anchor)
                         for source, target_anchor in raw_anchor_map.items()
-                    }
+                    },
                 )
             uid = target
         raise PageRegistryError(f"redirect hop limit exceeded for {key!r}")
@@ -490,10 +563,13 @@ class PageRegistry:
 
     def path_for(self, key: object) -> Path | None:
         resolved = self.resolve(key)
-        if resolved is None:
+        if (
+            resolved is None
+            or resolved.get("status") != "stable"
+            or resolved.get("canonical_uid")
+        ):
             return None
-        path = self.root / str(resolved["path"])
-        return path if path.exists() else None
+        return self._canonical_stable_path(resolved)
 
     def update_page(
         self,
@@ -560,8 +636,9 @@ class PageRegistry:
                     break
                 raw_map = redirect.get("anchor_map")
                 if isinstance(raw_map, dict):
-                    combined.update(
-                        {str(key): str(value) for key, value in raw_map.items()}
+                    combined = _compose_anchor_maps(
+                        combined,
+                        {str(key): str(value) for key, value in raw_map.items()},
                     )
                 current = normalize_page_uid(redirect.get("to_uid"))
             else:
@@ -573,7 +650,6 @@ class PageRegistry:
                 "created_at": _now_iso(),
             }
             source_row = dict(state["pages"][source])
-            source_row["status"] = "superseded"
             source_row["canonical_uid"] = current
             source_row["updated_at"] = _now_iso()
             state["pages"][source] = source_row
@@ -635,8 +711,9 @@ class PageRegistry:
                         break
                     raw_map = redirect.get("anchor_map")
                     if isinstance(raw_map, dict):
-                        combined.update(
-                            {str(key): str(value) for key, value in raw_map.items()}
+                        combined = _compose_anchor_maps(
+                            combined,
+                            {str(key): str(value) for key, value in raw_map.items()},
                         )
                     current = normalize_page_uid(redirect.get("to_uid"))
                 else:
@@ -647,7 +724,6 @@ class PageRegistry:
                     "created_at": _now_iso(),
                 }
                 source_row = dict(state["pages"][source])
-                source_row["status"] = "superseded"
                 source_row["canonical_uid"] = current
                 source_row["updated_at"] = _now_iso()
                 state["pages"][source] = source_row

@@ -107,18 +107,34 @@ def resolve_target_path(target: str) -> Path | None:
         return None
     if ref.endswith(".md"):
         ref = ref[:-3]
-    if "/" in ref:
-        path = (chronovisor_store.PAGES_DIR / f"{ref}.md").resolve()
-        try:
-            path.relative_to(chronovisor_store.PAGES_DIR.resolve())
-        except ValueError:
-            return None
-        return path if path.exists() else None
+    from chronovisor.core.index_store import (
+        PAGE_RESERVED_FILENAMES,
+        canonical_document_path,
+    )
 
-    flat = chronovisor_store.PAGES_DIR / f"{ref}.md"
-    if flat.exists():
-        return flat
-    matches = list(chronovisor_store.PAGES_DIR.rglob(f"{ref}.md"))
+    if "/" in ref:
+        return canonical_document_path(
+            chronovisor_store.PAGES_DIR / f"{ref}.md",
+            chronovisor_store.PAGES_DIR,
+            namespace="pages",
+            reserved_filenames=PAGE_RESERVED_FILENAMES,
+            require_stable=True,
+        )
+
+    matches = [
+        resolved
+        for path in chronovisor_store.PAGES_DIR.rglob(f"{ref}.md")
+        if (
+            resolved := canonical_document_path(
+                path,
+                chronovisor_store.PAGES_DIR,
+                namespace="pages",
+                reserved_filenames=PAGE_RESERVED_FILENAMES,
+                require_stable=True,
+            )
+        )
+        is not None
+    ]
     return matches[0] if len(matches) == 1 else None
 
 

@@ -60,7 +60,7 @@ def test_frontier_label_prompt_reexports_decision_implementation() -> None:
     )
 
 
-def page(page_id: str, score: float = 1.0, *, status: str = "active") -> ScoredPage:
+def page(page_id: str, score: float = 1.0, *, status: str = "stable") -> ScoredPage:
     return ScoredPage(
         page_id=page_id,
         title=page_id,
@@ -486,14 +486,14 @@ def test_run_variant_filters_lifecycle_pages(monkeypatch) -> None:
         def query(self, query: str, top_n: int = 20):
             return [
                 page("old", 2.0, status="deprecated"),
-                page("active", 1.0),
+                page("stable", 1.0),
             ]
 
     monkeypatch.setattr(search_eval, "get_bm25", lambda: FakeBM25())
 
     payload = search_eval.run_variant("anything", "bm25", top_n=10)
 
-    assert [result.page_id for result in payload["results"]] == ["active"]
+    assert [result.page_id for result in payload["results"]] == ["stable"]
 
 
 def test_run_variant_can_apply_hybrid_reranker(monkeypatch) -> None:

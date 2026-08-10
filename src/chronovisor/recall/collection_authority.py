@@ -334,13 +334,10 @@ class CollectionRegistry:
         manifest = page_registry.ensure_manifest(write=not dry_run)
         page_state = manifest["registry"]
         page_generation = int(page_state.get("generation") or 0)
-        active_pages = {
-            str(uid): row
-            for uid, row in page_state["pages"].items()
-            if isinstance(row, Mapping)
-            and row.get("status") == "active"
-            and str(row.get("path") or "").startswith("pages/")
-            and (self.root / str(row.get("path") or "")).is_file()
+        stable_pages = {
+            uid: row
+            for uid, row in page_registry.stable_pages(page_state).items()
+            if str(row.get("path") or "").startswith("pages/")
         }
         lock = nullcontext() if dry_run else file_lock(self.lock_path)
         with lock:
@@ -360,7 +357,7 @@ class CollectionRegistry:
                 "assignments": {
                     str(uid): dict(row)
                     for uid, row in before["assignments"].items()
-                    if uid in active_pages
+                    if uid in stable_pages
                 },
             }
             created_collections: list[str] = []
@@ -388,7 +385,7 @@ class CollectionRegistry:
             discovered_slugs = sorted(
                 {
                     slug
-                    for row in active_pages.values()
+                    for row in stable_pages.values()
                     if (slug := _physical_collection_slug(row.get("path")))
                 }
             )
@@ -416,7 +413,7 @@ class CollectionRegistry:
 
             changed_assignments = 0
             assignments: dict[str, dict[str, Any]] = {}
-            for page_uid, page in sorted(active_pages.items()):
+            for page_uid, page in sorted(stable_pages.items()):
                 previous = state["assignments"].get(page_uid)
                 preserve_logical = (
                     isinstance(previous, Mapping)
@@ -779,7 +776,7 @@ def _load_page_index(root: Path) -> dict[str, Any]:
 
 def _page_id_maps(
     state: Mapping[str, Any],
-    page_registry: Mapping[str, Any],
+    stable_pages: Mapping[str, Mapping[str, Any]],
 ) -> tuple[dict[str, str], dict[str, str], dict[str, str]]:
     collection_by_uid = {
         str(uid): str(row.get("slug") or "")
@@ -790,9 +787,7 @@ def _page_id_maps(
     uid_by_page_id: dict[str, str] = {}
     slug_by_page_uid: dict[str, str] = {}
     assignments = state.get("assignments") or {}
-    for page_uid, row in (page_registry.get("pages") or {}).items():
-        if not isinstance(row, Mapping) or row.get("status") != "active":
-            continue
+    for page_uid, row in stable_pages.items():
         assignment = assignments.get(page_uid)
         if not isinstance(assignment, Mapping):
             continue
@@ -814,11 +809,12 @@ def build_review_candidates(
 
     registry_state = state or CollectionRegistry(root).load()
     crosswalk = load_crosswalk(root=root)
-    page_registry = PageRegistry(root).load()
+    registry = PageRegistry(root)
+    stable_pages = registry.stable_pages()
     page_index = _load_page_index(root)
     slug_by_page_id, _uid_by_page_id, slug_by_page_uid = _page_id_maps(
         registry_state,
-        page_registry,
+        stable_pages,
     )
     entries = page_index.get("entries") or {}
     candidates: dict[str, dict[str, Any]] = {}
@@ -834,7 +830,7 @@ def build_review_candidates(
             reasons.append(("unclassified", None, {}))
         if crosswalk_row.get("review_required"):
             reasons.append(("collection_requires_review", None, {}))
-        page_row = (page_registry.get("pages") or {}).get(page_uid) or {}
+        page_row = stable_pages.get(str(page_uid)) or {}
         page_id = str(page_row.get("page_id") or "")
         outgoing = (
             entries.get(page_id, {}).get("outlinks") or []
@@ -1053,11 +1049,11 @@ def collection_quality_snapshot(
     registry_state = state or CollectionRegistry(root).load()
     crosswalk = load_crosswalk(root=root)
     contract = load_contract()
-    page_registry = PageRegistry(root).load()
+    stable_pages = PageRegistry(root).stable_pages()
     page_index = _load_page_index(root)
     slug_by_page_id, _uid_by_page_id, slug_by_page_uid = _page_id_maps(
         registry_state,
-        page_registry,
+        stable_pages,
     )
     counts = Counter(slug_by_page_uid.values())
     total = sum(counts.values())
@@ -1682,7 +1678,8 @@ def review_collection_queue(
     _stale_legacy_open_reviews(queue.get("items") or {}, queue_schema)
     queue["schema"] = COLLECTION_QUEUE_SCHEMA
     state = CollectionRegistry(root).load()
-    page_state = PageRegistry(root).load()
+    page_registry = PageRegistry(root)
+    page_state = {"pages": page_registry.stable_pages()}
     collections = sorted(
         [
             {
@@ -1878,7 +1875,8 @@ def autonomously_finalize_collection_queue(root: Path) -> dict[str, Any]:
         raise CollectionAuthorityError("collection review queue schema mismatch")
     queue["schema"] = COLLECTION_QUEUE_SCHEMA
     state = CollectionRegistry(root).load()
-    page_state = PageRegistry(root).load()
+    page_registry = PageRegistry(root)
+    page_state = {"pages": page_registry.stable_pages()}
     crosswalk = load_crosswalk(root=root)
     collections = sorted(
         [
@@ -2166,7 +2164,8 @@ def adjudicate_collection_review_queue(
         raise CollectionAuthorityError(
             f"collection generation changed: {generation} != {expected_generation}"
         )
-    page_state = PageRegistry(root).load()
+    page_registry = PageRegistry(root)
+    page_state = {"pages": page_registry.stable_pages()}
     collection_by_slug = {
         str(row.get("slug") or ""): str(uid)
         for uid, row in state["collections"].items()
@@ -2433,8 +2432,7 @@ def _collection_crosswalk_capsule(
     from chronovisor.core import frontmatter
 
     collection = state["collections"][collection_uid]
-    page_state = PageRegistry(root).load()
-    page_rows = page_state.get("pages") or {}
+    page_rows = PageRegistry(root).stable_pages()
     samples = []
     all_normal = True
     for page_uid, assignment in sorted((state.get("assignments") or {}).items()):

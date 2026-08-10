@@ -116,8 +116,14 @@ def test_merge_transaction_requires_activation_and_redirects_old_uid(
 ) -> None:
     pages = tmp_path / "pages"
     pages.mkdir()
-    alpha_text = "---\ntitle: Alpha\n---\n\nAlpha uses 42GB.\n"
-    beta_text = "---\ntitle: Beta\n---\n\nBeta date is 2026-07-25.\n"
+    alpha_text = (
+        "---\ntitle: Alpha\nstatus: stable\ntype: knowledge\n---\n\n"
+        "Alpha uses 42GB.\n"
+    )
+    beta_text = (
+        "---\ntitle: Beta\nstatus: stable\ntype: knowledge\n---\n\n"
+        "Beta date is 2026-07-25.\n"
+    )
     (pages / "alpha.md").write_text(alpha_text, encoding="utf-8")
     (pages / "beta.md").write_text(beta_text, encoding="utf-8")
     registry = PageRegistry(tmp_path)

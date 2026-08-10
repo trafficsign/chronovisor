@@ -52,10 +52,12 @@ def _page(
     path.write_text(
         "---\n"
         f"title: {title}\n"
+        "status: stable\n"
+        "type: knowledge\n"
         "updated: 2026-07-25\n"
         f"sensitivity: {sensitivity}\n"
         + (
-            "recall_questions: [" + ", ".join(recall_questions) + "]\n"
+            "recall_questions: " + json.dumps(recall_questions) + "\n"
             if recall_questions
             else ""
         )
@@ -63,6 +65,26 @@ def _page(
         f"# {title}\n\n{body}\n",
         encoding="utf-8",
     )
+
+
+def test_cluster_plan_rejects_stale_noncanonical_registry_source(
+    tmp_path: Path,
+) -> None:
+    alpha = tmp_path / "pages" / "alpha.md"
+    beta = tmp_path / "pages" / "beta.md"
+    _page(alpha, "Alpha", "Alpha fact.")
+    _page(beta, "Beta", "Beta fact.")
+    registry = PageRegistry(tmp_path)
+    registry.ensure_manifest()
+    beta.write_text(
+        beta.read_text(encoding="utf-8").replace(
+            "status: stable", "status: deprecated"
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(KeyError, match="beta"):
+        prepare_cluster_plan(tmp_path, page_keys=["alpha", "beta"])
 
 
 def test_cluster_plan_and_transaction_preserve_links_provenance_and_sensitivity(
@@ -83,7 +105,8 @@ def test_cluster_plan_and_transaction_preserve_links_provenance_and_sensitivity(
     _page(
         tmp_path / "pages" / "incoming.md",
         "Incoming",
-        "[[alpha]] [[alpha]] [[beta#Details|legacy detail]]",
+        "[Alpha](<alpha.md>) [Alpha again](<alpha.md>) "
+        "[legacy detail](<beta.md#Details>)",
     )
     for name in ("alpha-source.md", "beta-source.md"):
         raw = tmp_path / "raw" / name
@@ -141,7 +164,7 @@ def test_cluster_plan_and_transaction_preserve_links_provenance_and_sensitivity(
     )
     assert registry.resolve(loser_uid)["uid"] == canonical_uid
     incoming = (tmp_path / "pages" / "incoming.md").read_text(encoding="utf-8")
-    assert f"[[{loser_page_id}#" not in incoming
+    assert f"<{loser_page_id}.md#" not in incoming
     assert "legacy detail" in incoming
     assert Path(result["preimage"]).is_dir()
     cleanup = cleanup_expired_preimages(tmp_path, force=True)
@@ -213,7 +236,7 @@ def test_transaction_restores_owned_pages_when_registry_commit_fails(
     _page(
         tmp_path / "pages" / "incoming.md",
         "Incoming",
-        "[[beta|legacy]]",
+        "[legacy](<beta.md>)",
     )
     for name in ("alpha-source.md", "beta-source.md"):
         raw = tmp_path / "raw" / name
@@ -251,5 +274,5 @@ def test_transaction_restores_owned_pages_when_registry_commit_fails(
     assert result["status"] == "rolled_back"
     assert "injected registry failure" in result["error"]
     assert all(path.read_bytes() == content for path, content in before.items())
-    assert registry.resolve("alpha")["status"] == "active"
-    assert registry.resolve("beta")["status"] == "active"
+    assert registry.resolve("alpha")["status"] == "stable"
+    assert registry.resolve("beta")["status"] == "stable"

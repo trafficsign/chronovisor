@@ -38,12 +38,16 @@ def isolate_decision_authority_lock(
     )
     monkeypatch.setattr(retention, "CHRONOVISOR_ROOT", tmp_path)
     monkeypatch.setattr(autonomy, "CHRONOVISOR_ROOT", tmp_path)
+    monkeypatch.setattr(autonomy, "PAGES_DIR", tmp_path)
+    monkeypatch.setattr(autonomy, "SYSTEM_DIR", tmp_path / "system")
+    monkeypatch.setattr(autonomy, "find_page", None, raising=False)
     monkeypatch.setattr(page_mutation, "CHRONOVISOR_ROOT", tmp_path)
 
 
 def _write_page(path: Path, title: str, body: str) -> None:
     path.write_text(
-        f"---\ntitle: {title}\nstatus: active\nupdated: 2026-07-10\n---\n{body}\n",
+        f"---\ntitle: {title}\nstatus: stable\ntype: knowledge\n"
+        f"updated: 2026-07-10\n---\n{body}\n",
         encoding="utf-8",
     )
 
@@ -212,12 +216,8 @@ def test_duplicate_resolution_routes_exact_high_confidence_pair_without_mutation
             "path": str(tmp_path / "thin.md"),
         },
     }
-    (tmp_path / "rich.md").write_text(
-        "---\ntitle: Same\nupdated: 2026-07-06\n---\nRich\n", encoding="utf-8"
-    )
-    (tmp_path / "thin.md").write_text(
-        "---\ntitle: Same\nupdated: 2026-07-06\n---\nThin\n", encoding="utf-8"
-    )
+    _write_page(tmp_path / "rich.md", "Same", "Rich")
+    _write_page(tmp_path / "thin.md", "Same", "Thin")
     monkeypatch.setattr(autonomy, "_page_meta", lambda page_id: pages.get(page_id, {}))
     monkeypatch.setattr(
         autonomy, "find_page", lambda page_id: tmp_path / f"{page_id}.md"
@@ -289,7 +289,7 @@ def test_deterministic_duplicate_proposal_never_calls_lifecycle_writer(
         == "deterministic_heuristic_is_proposal_only"
     )
     meta, body = parse_frontmatter((tmp_path / "b.md").read_text(encoding="utf-8"))
-    assert meta["status"] == "active"
+    assert meta["status"] == "stable"
     assert "superseded_by" not in meta
     assert body == "Loser\n"
     assert (tmp_path / "b.md").read_bytes() == before
@@ -328,6 +328,46 @@ def test_soft_supersede_preserves_correction_that_lands_before_locked_cas(
     assert loser.read_text(encoding="utf-8") == corrected
 
 
+def test_duplicate_frontier_never_supersedes_draft_loser(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    winner = tmp_path / "winner.md"
+    loser = tmp_path / "loser.md"
+    _write_page(winner, "Same", "Winner")
+    _write_page(loser, "Same", "Loser")
+    loser.write_text(
+        loser.read_text(encoding="utf-8").replace("status: stable", "status: draft"),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        autonomy, "find_page", lambda page_id: {"winner": winner, "loser": loser}.get(page_id)
+    )
+    loser_hash = hashlib.sha256(loser.read_bytes()).hexdigest()
+    winner_hash = hashlib.sha256(winner.read_bytes()).hexdigest()
+
+    effect, error = autonomy._prepare_duplicate_effect_receipt(
+        decision="supersede_left",
+        left="loser",
+        right="winner",
+        page_hashes={"loser": loser_hash, "winner": winner_hash},
+        decision_at=NOW.isoformat(),
+        approval_key="approval",
+    )
+    result = autonomy._soft_supersede_page(
+        loser="loser",
+        winner="winner",
+        expected_loser_hash=loser_hash,
+        expected_winner_hash=winner_hash,
+        decision_at=NOW.isoformat(),
+    )
+
+    assert effect is None
+    assert error == "loser_is_not_stable"
+    assert result == {"status": "retry", "reason": "loser_is_not_stable"}
+    assert "status: draft" in loser.read_text(encoding="utf-8")
+
+
 def test_lifecycle_writers_defer_pages_with_pending_content_correction(
     monkeypatch,
     tmp_path: Path,
@@ -356,15 +396,15 @@ def test_lifecycle_writers_defer_pages_with_pending_content_correction(
         decision_at=NOW.isoformat(),
         correction_store=store,
     )
-    archive = autonomy.apply_retention_archives(
+    deprecate = autonomy.apply_retention_archives(
         {
-            "archive_candidates": ["old"],
+            "deprecation_candidates": ["old"],
             "pages": {"old": {"score": 0.1}},
         },
         write=False,
         correction_store=store,
         reviewer=lambda _candidate: {
-            "decision": "archive",
+            "decision": "deprecate",
             "confidence": 0.99,
             "summary": "Obsolete duplicate",
         },
@@ -377,10 +417,10 @@ def test_lifecycle_writers_defer_pages_with_pending_content_correction(
         (tmp_path / "loser.md").read_text(encoding="utf-8")
     )
     old_meta, _ = parse_frontmatter((tmp_path / "old.md").read_text(encoding="utf-8"))
-    assert loser_meta["status"] == "active"
-    assert old_meta["status"] == "active"
-    assert archive["applied"] == 0
-    assert archive["decisions"][0]["reason"] == "pending_content_correction"
+    assert loser_meta["status"] == "stable"
+    assert old_meta["status"] == "stable"
+    assert deprecate["applied"] == 0
+    assert deprecate["decisions"][0]["reason"] == "pending_content_correction"
 
 
 def test_lifecycle_guard_keeps_auto_resumable_quarantine_protected(
@@ -1215,7 +1255,7 @@ def test_frontier_duplicate_content_cas_refuses_concurrent_page_change(
 
     assert result["status_counts"] == {"frontier_retry": 1}
     meta, body = parse_frontmatter((pages / "b.md").read_text(encoding="utf-8"))
-    assert meta["status"] == "active"
+    assert meta["status"] == "stable"
     assert "superseded_by" not in meta
     assert body.endswith("concurrent update\n")
 
@@ -1280,7 +1320,7 @@ def test_autonomy_normalizers_preserve_production_authority_audits() -> None:
     )
     retention = autonomy._normalize_retention_frontier_review(
         _authority_bound_review(
-            "keep_active",
+            "keep_stable",
             0.95,
             "Still current",
             retention_authority,
@@ -1670,7 +1710,7 @@ def test_retention_archive_obeys_mutation_budget(monkeypatch, tmp_path: Path) ->
     page = tmp_path / "old.md"
     _write_page(page, "Old", "Body")
     monkeypatch.setattr(autonomy, "find_page", lambda _page_id: page)
-    payload = {"archive_candidates": ["old"], "pages": {"old": {"score": 0.1}}}
+    payload = {"deprecation_candidates": ["old"], "pages": {"old": {"score": 0.1}}}
     budget = _frontier_budget(mutations=0)
 
     result = autonomy.apply_retention_archives(
@@ -1679,7 +1719,7 @@ def test_retention_archive_obeys_mutation_budget(monkeypatch, tmp_path: Path) ->
         budget=budget,
         convergence_store=_convergence_store(tmp_path),
         reviewer=lambda _candidate: {
-            "decision": "archive",
+            "decision": "deprecate",
             "confidence": 0.99,
             "summary": "Obsolete",
         },
@@ -1689,30 +1729,73 @@ def test_retention_archive_obeys_mutation_budget(monkeypatch, tmp_path: Path) ->
     assert result["applied"] == 0
     assert result["decisions"][0]["status"] == "frontier_retry"
     meta, _body = parse_frontmatter(page.read_text(encoding="utf-8"))
-    assert meta["status"] == "active"
+    assert meta["status"] == "stable"
 
 
-def test_retention_skips_already_archived_without_starving_next_candidate(
+def test_retention_frontier_never_deprecates_draft_page(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    page = tmp_path / "old.md"
+    _write_page(page, "Old", "Body")
+    page.write_text(
+        page.read_text(encoding="utf-8").replace("status: stable", "status: draft"),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(autonomy, "find_page", lambda _page_id: page)
+    page_hash = hashlib.sha256(page.read_bytes()).hexdigest()
+
+    effect, error = autonomy._prepare_retention_effect_receipt(
+        decision="deprecate",
+        page_id="old",
+        page_hash=page_hash,
+        decision_at=NOW.isoformat(),
+        approval_key="approval",
+    )
+    patched = autonomy._patch_page_status(
+        "old", {"status": "deprecated"}, expected_hash=page_hash
+    )
+    result = autonomy.apply_retention_archives(
+        {"deprecation_candidates": ["old"], "pages": {"old": {"score": 0.1}}},
+        write=False,
+        convergence_store=_convergence_store(tmp_path),
+        reviewer=lambda _candidate: pytest.fail("draft page must not be reviewed"),
+        now=NOW,
+    )
+
+    assert effect is None
+    assert error == "page_is_not_stable"
+    assert patched == {
+        "status": "retry",
+        "reason": "page_is_not_stable",
+        "page_id": "old",
+    }
+    assert result["applied"] == 0
+    assert result["decisions"][0]["reason"] == "deprecation_page_is_not_stable"
+    assert "status: draft" in page.read_text(encoding="utf-8")
+
+
+def test_retention_skips_already_deprecated_without_starving_next_candidate(
     monkeypatch, tmp_path: Path
 ) -> None:
-    archived = tmp_path / "archived.md"
-    active = tmp_path / "active.md"
-    _write_page(archived, "Archived", "Old")
-    _write_page(active, "Active", "Old")
-    archived.write_text(
-        archived.read_text(encoding="utf-8").replace(
-            "status: active", "status: archived"
+    deprecated = tmp_path / "deprecated.md"
+    stable = tmp_path / "stable.md"
+    _write_page(deprecated, "Archived", "Old")
+    _write_page(stable, "Active", "Old")
+    deprecated.write_text(
+        deprecated.read_text(encoding="utf-8").replace(
+            "status: stable", "status: deprecated"
         ),
         encoding="utf-8",
     )
     monkeypatch.setattr(
         autonomy,
         "find_page",
-        lambda page_id: {"archived": archived, "active": active}.get(page_id),
+        lambda page_id: {"deprecated": deprecated, "stable": stable}.get(page_id),
     )
     payload = {
-        "archive_candidates": ["archived", "active"],
-        "pages": {"archived": {"score": 0.1}, "active": {"score": 0.1}},
+        "deprecation_candidates": ["deprecated", "stable"],
+        "pages": {"deprecated": {"score": 0.1}, "stable": {"score": 0.1}},
     }
     budget = _frontier_budget(mutations=1)
 
@@ -1723,7 +1806,7 @@ def test_retention_skips_already_archived_without_starving_next_candidate(
         budget=budget,
         convergence_store=_convergence_store(tmp_path),
         reviewer=lambda _candidate: {
-            "decision": "archive",
+            "decision": "deprecate",
             "confidence": 0.99,
             "summary": "Obsolete",
         },
@@ -1732,11 +1815,11 @@ def test_retention_skips_already_archived_without_starving_next_candidate(
 
     assert result["applied"] == 1
     assert [row["action"] for row in result["decisions"]] == [
-        "already_archived",
-        "archive",
+        "already_deprecated",
+        "deprecate",
     ]
-    active_meta, _body = parse_frontmatter(active.read_text(encoding="utf-8"))
-    assert active_meta["status"] == "archived"
+    active_meta, _body = parse_frontmatter(stable.read_text(encoding="utf-8"))
+    assert active_meta["status"] == "deprecated"
     assert budget.snapshot()["used"]["mutation"] == 1
 
 
@@ -1749,7 +1832,7 @@ def test_retention_frontier_rejection_keeps_page_active_and_is_cached(
     monkeypatch.setattr(autonomy, "find_page", lambda _page_id: page)
     store = _convergence_store(tmp_path)
     payload = {
-        "archive_candidates": ["useful"],
+        "deprecation_candidates": ["useful"],
         "pages": {"useful": {"score": 0.05}},
     }
     calls = 0
@@ -1758,7 +1841,7 @@ def test_retention_frontier_rejection_keeps_page_active_and_is_cached(
         nonlocal calls
         calls += 1
         return {
-            "decision": "keep_active",
+            "decision": "keep_stable",
             "confidence": 0.98,
             "summary": "The page contains a distinct current fact",
         }
@@ -1784,7 +1867,7 @@ def test_retention_frontier_rejection_keeps_page_active_and_is_cached(
     assert second["status_counts"] == {"rejected": 1}
     assert calls == 1
     meta, body = parse_frontmatter(page.read_text(encoding="utf-8"))
-    assert meta["status"] == "active"
+    assert meta["status"] == "stable"
     assert body == "Distinct source of truth\n"
 
 
@@ -1796,7 +1879,7 @@ def test_retention_no_quorum_is_terminal_and_reused_without_model_call(
     _write_page(page, "Old", "Still semantically ambiguous")
     monkeypatch.setattr(autonomy, "find_page", lambda _page_id: page)
     store = _convergence_store(tmp_path)
-    payload = {"archive_candidates": ["old"], "pages": {"old": {"score": 0.01}}}
+    payload = {"deprecation_candidates": ["old"], "pages": {"old": {"score": 0.01}}}
     authority = semantic_authority(
         autonomy.RETENTION_FRONTIER_LANE,
         schema_name="retention",
@@ -1849,13 +1932,13 @@ def test_retention_reuses_durable_approval_after_mutation_budget_retry(
     _write_page(page, "Old", "Redundant historical cache")
     monkeypatch.setattr(autonomy, "find_page", lambda _page_id: page)
     store = _convergence_store(tmp_path)
-    payload = {"archive_candidates": ["old"], "pages": {"old": {"score": 0.01}}}
+    payload = {"deprecation_candidates": ["old"], "pages": {"old": {"score": 0.01}}}
     calls = 0
 
     def reviewer(_candidate: dict) -> dict:
         nonlocal calls
         calls += 1
-        return {"decision": "archive", "confidence": 0.01, "summary": "Redundant"}
+        return {"decision": "deprecate", "confidence": 0.01, "summary": "Redundant"}
 
     first = autonomy.apply_retention_archives(
         payload,
@@ -1881,8 +1964,8 @@ def test_retention_reuses_durable_approval_after_mutation_budget_retry(
     assert second["frontier_calls"] == 0
     assert calls == 1
     meta, body = parse_frontmatter(page.read_text(encoding="utf-8"))
-    assert meta["status"] == "archived"
-    assert meta["autonomy_decision"] == "retention_frontier_archive"
+    assert meta["status"] == "deprecated"
+    assert meta["autonomy_decision"] == "retention_frontier_deprecate"
     assert meta["frontier_approval_key"].startswith("autonomy_retention:")
     assert body == "Redundant historical cache\n"
 
@@ -1924,12 +2007,12 @@ def test_retention_effect_revalidates_authority_inside_lock(
         ),
     )
     result = autonomy.apply_retention_archives(
-        {"archive_candidates": ["old"], "pages": {"old": {"score": 0.01}}},
+        {"deprecation_candidates": ["old"], "pages": {"old": {"score": 0.01}}},
         write=False,
         budget=_frontier_budget(calls=1, mutations=1),
         convergence_store=store,
         reviewer=lambda _candidate: _authority_bound_review(
-            "archive",
+            "deprecate",
             0.99,
             "Redundant",
             initial_authority,
@@ -1962,14 +2045,14 @@ def test_retention_recovers_convergence_after_crash_following_archive(
         return real_complete(key, status, **kwargs)
 
     monkeypatch.setattr(store, "complete", crash_after_write)
-    payload = {"archive_candidates": ["old"], "pages": {"old": {"score": 0.01}}}
+    payload = {"deprecation_candidates": ["old"], "pages": {"old": {"score": 0.01}}}
     with pytest.raises(RuntimeError, match="simulated retention crash"):
         autonomy.apply_retention_archives(
             payload,
             write=False,
             convergence_store=store,
             reviewer=lambda _candidate: {
-                "decision": "archive",
+                "decision": "deprecate",
                 "confidence": 0.99,
                 "summary": "Redundant",
             },
@@ -1977,7 +2060,7 @@ def test_retention_recovers_convergence_after_crash_following_archive(
         )
 
     meta, _body = parse_frontmatter(page.read_text(encoding="utf-8"))
-    assert meta["status"] == "archived"
+    assert meta["status"] == "deprecated"
     monkeypatch.setattr(store, "complete", real_complete)
     recovered = autonomy.apply_retention_archives(
         payload,
@@ -1989,7 +2072,7 @@ def test_retention_recovers_convergence_after_crash_following_archive(
         now=NOW + timedelta(seconds=1),
     )
 
-    assert recovered["decisions"][0]["action"] == "already_archived"
+    assert recovered["decisions"][0]["action"] == "already_deprecated"
     assert recovered["decisions"][0]["convergence_status"] == "applied"
     assert recovered["decisions"][0]["recovery_only"] is True
     assert recovered["decisions"][0]["semantic_effect"] is False
@@ -2013,14 +2096,14 @@ def test_retention_does_not_recover_from_frontmatter_only_postimage_match(
         return real_complete(key, status, **kwargs)
 
     monkeypatch.setattr(store, "complete", crash_after_write)
-    payload = {"archive_candidates": ["old"], "pages": {"old": {"score": 0.01}}}
+    payload = {"deprecation_candidates": ["old"], "pages": {"old": {"score": 0.01}}}
     with pytest.raises(RuntimeError, match="simulated retention crash"):
         autonomy.apply_retention_archives(
             payload,
             write=False,
             convergence_store=store,
             reviewer=lambda _candidate: {
-                "decision": "archive",
+                "decision": "deprecate",
                 "confidence": 0.99,
                 "summary": "Redundant",
             },
@@ -2047,7 +2130,7 @@ def test_retention_does_not_recover_from_frontmatter_only_postimage_match(
         now=NOW + timedelta(seconds=1),
     )
 
-    assert result["decisions"][0]["action"] == "already_archived"
+    assert result["decisions"][0]["action"] == "already_deprecated"
     assert "convergence_status" not in result["decisions"][0]
     item = store.list_items(lane=autonomy.RETENTION_FRONTIER_LANE)[0]
     assert item["status"] != "applied"
@@ -2065,7 +2148,7 @@ def test_retention_dry_run_is_byte_for_byte_and_state_read_only(
     budget = _frontier_budget(calls=1, mutations=1)
 
     result = autonomy.apply_retention_archives(
-        {"archive_candidates": ["old"], "pages": {"old": {"score": 0.01}}},
+        {"deprecation_candidates": ["old"], "pages": {"old": {"score": 0.01}}},
         apply=False,
         write=False,
         budget=budget,
@@ -2095,13 +2178,13 @@ def test_page_status_patch_rejects_stale_snapshot(monkeypatch, tmp_path: Path) -
     monkeypatch.setattr(autonomy, "find_page", lambda _page_id: page)
 
     result = autonomy._patch_page_status(
-        "old", {"status": "archived"}, expected_hash="stale"
+        "old", {"status": "deprecated"}, expected_hash="stale"
     )
 
     assert result["status"] == "retry"
     assert result["reason"] == "page_changed_before_apply"
     meta, _body = parse_frontmatter(page.read_text(encoding="utf-8"))
-    assert meta["status"] == "active"
+    assert meta["status"] == "stable"
 
 
 def test_watchdog_alerts_when_sleep_never_ran(monkeypatch, tmp_path: Path) -> None:

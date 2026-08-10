@@ -15,7 +15,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from chronovisor.core import store as chronovisor_store
+from chronovisor.core import index_store, store
 from chronovisor.core.alias_store import add_alias, load_aliases
 from chronovisor.core.canonical_json import (
     canonical_json_sha256_stringifying as _canonical_json_sha256,
@@ -54,6 +54,8 @@ from chronovisor.recall.recall_runtime import (
     append_jsonl,
 )
 
+chronovisor_store = store
+
 AUTO_ACTIONS = frozenset({"alias", "query_hint", "page_tag"})
 REVIEW_ACTIONS = frozenset({"few_shot", "threshold"})
 VALIDATED_AUTO_LANE = "validated-auto"
@@ -68,6 +70,21 @@ TERMINAL_CONVERGENCE_STATUSES = frozenset(
 DEFAULT_QUARANTINE_COOLDOWN_SECONDS = 6 * 60 * 60
 AUTO_APPLY_REVIEW_SCHEMA_VERSION = 2
 AUTO_APPLY_DECISION_LANE = "recall_auto_apply"
+
+
+def _stable_page_path(page_id: str) -> Path | None:
+    path = index_store.canonical_document_path_for_id(
+        page_id,
+        pages_dir=store.PAGES_DIR,
+        system_dir=store.SYSTEM_DIR,
+    )
+    if path is None:
+        return None
+    try:
+        path.relative_to(store.PAGES_DIR.resolve(strict=True))
+    except (OSError, RuntimeError, ValueError):
+        return None
+    return path
 
 
 @dataclass(frozen=True)
@@ -300,7 +317,7 @@ def _bounded_page_evidence(page_id: str, *, max_chars: int = 4_000) -> dict[str,
             "content": "",
             "content_truncated": False,
         }
-    path = chronovisor_store.find_page(page_id)
+    path = _stable_page_path(page_id)
     if path is None:
         return {
             "page_id": page_id,
@@ -983,11 +1000,11 @@ def eligible_records(
 
 
 def _page_ref(page_id: str) -> str:
-    path = chronovisor_store.find_page(page_id)
+    path = _stable_page_path(page_id)
     if path is None:
         raise ValueError(f"page does not exist: {page_id!r}")
     try:
-        return str(path.relative_to(chronovisor_store.PAGES_DIR).with_suffix(""))
+        return str(path.relative_to(store.PAGES_DIR).with_suffix(""))
     except ValueError:
         return path.stem
 
@@ -1203,7 +1220,7 @@ def apply_page_tag(
     payload = action_payload(record)
     pages = expected_pages(record)
     page_id = str(payload.get("page_id") or (pages[0] if pages else ""))
-    path = chronovisor_store.find_page(page_id)
+    path = _stable_page_path(page_id)
     if path is None:
         if not allow_fallback:
             return {
@@ -2176,9 +2193,7 @@ def main(argv: list[str] | None = None) -> int:
     from chronovisor.core.okf_cutover import OKFStartupBlocked
 
     try:
-        with chronovisor_store.okf_runtime_operation(
-            chronovisor_store.CHRONOVISOR_ROOT
-        ):
+        with store.okf_runtime_operation(store.CHRONOVISOR_ROOT):
             result = apply_feedback_file(
                 feedback_file=Path(args.feedback_file).expanduser(),
                 config_file=Path(args.config).expanduser(),

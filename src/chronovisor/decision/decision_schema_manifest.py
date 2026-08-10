@@ -161,7 +161,7 @@ RETENTION_FRONTIER_SCHEMA: dict[str, Any] = {
     "properties": {
         "decision": {
             "type": "string",
-            "enum": ["archive", "keep_active", "needs_retry"],
+            "enum": ["deprecate", "keep_stable", "needs_retry"],
         },
         "confidence": {"type": "number", "minimum": 0, "maximum": 1},
         "summary": {"type": "string"},

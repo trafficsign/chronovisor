@@ -143,7 +143,6 @@ def test_refresh_preserves_approved_current_state_correction(
         "CHRONOVISOR_MUTATION_LOCK",
         tmp_path / "runtime" / "wiki-mutation.lock",
     )
-    monkeypatch.setattr(page_mutation, "find_page", lambda _page_id: None)
     prepared = page_mutation.prepare_page_mutation(
         "current-state",
         [

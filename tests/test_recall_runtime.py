@@ -1997,6 +1997,94 @@ def test_recall_log_also_writes_live_episode_snapshot(tmp_path, monkeypatch) -> 
     assert live["pages"] == ["page-a"]
 
 
+@pytest.mark.parametrize("status", ["draft", "deprecated"])
+def test_nonstable_page_never_enters_recall_body_or_log_hash(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    status: str,
+) -> None:
+    from chronovisor.core import store as core_store
+
+    root = tmp_path / "wiki"
+    pages = root / "pages"
+    pages.mkdir(parents=True)
+    page = pages / "secret.md"
+    page.write_text(
+        f"---\ntitle: Secret\nstatus: {status}\ntype: knowledge\n---\nSECRET BODY\n",
+        encoding="utf-8",
+    )
+    log_file = root / "recall" / "recall-log.jsonl"
+    monkeypatch.setattr(core_store, "PAGES_DIR", pages)
+    monkeypatch.setattr(recall_runtime, "CHRONOVISOR_ROOT", root)
+    monkeypatch.setattr(recall_runtime, "RECALL_LOG_FILE", log_file)
+    result = RecallResult(
+        status="ok",
+        decision="read",
+        confidence=0.8,
+        queries=["secret"],
+        reasons=["test"],
+        matched_terms={},
+        decision_id="d1",
+        context_items=[
+            ContextItem(
+                page_id="secret",
+                title="Secret",
+                updated="2026-07-05",
+                score=1.0,
+            )
+        ],
+    )
+
+    assert recall_runtime.find_readable_page("secret") is None
+    assert recall_runtime.page_summary("secret") == ""
+    assert recall_runtime.excerpt_page("secret", ["secret"]) == ""
+    assert recall_runtime.context_item_from_page_id(
+        "secret", ["secret"], "read", score=1.0
+    ) is None
+    recall_runtime.append_recall_log(
+        RecallRequest(
+            host="codex",
+            event="UserPromptSubmit",
+            prompt="secret",
+            cwd="/repo",
+        ),
+        result,
+    )
+    logged = json.loads(log_file.read_text(encoding="utf-8"))
+    assert logged["context_items"][0]["content_sha256"] == ""
+
+
+def test_find_readable_page_is_root_bound_and_rejects_duplicate_nested_stems(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    selected_root = tmp_path / "selected"
+    other_root = tmp_path / "other"
+    nested = selected_root / "pages" / "nested" / "target.md"
+    nested.parent.mkdir(parents=True)
+    nested.write_text(
+        "---\ntitle: Target\nstatus: stable\ntype: knowledge\n---\nSELECTED\n",
+        encoding="utf-8",
+    )
+    other = other_root / "pages" / "target.md"
+    other.parent.mkdir(parents=True)
+    other.write_text(
+        "---\ntitle: Other\nstatus: stable\ntype: knowledge\n---\nOTHER\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(recall_runtime, "CHRONOVISOR_ROOT", other_root)
+
+    assert recall_runtime.find_readable_page("target", root=selected_root) == nested
+
+    duplicate = selected_root / "pages" / "second" / "target.md"
+    duplicate.parent.mkdir()
+    duplicate.write_text(
+        "---\ntitle: Duplicate\nstatus: stable\ntype: knowledge\n---\nDUPLICATE\n",
+        encoding="utf-8",
+    )
+    assert recall_runtime.find_readable_page("target", root=selected_root) is None
+
+
 def test_feedback_writer_uses_configurable_path(tmp_path, monkeypatch) -> None:
     from chronovisor.recall import recall_runtime
 

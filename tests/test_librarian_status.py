@@ -8,7 +8,10 @@ from chronovisor.recall.librarian_status import _observed_scope
 
 def _page(path: Path, body: str = "body") -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(f"---\ntitle: {path.stem}\n---\n{body}\n", encoding="utf-8")
+    path.write_text(
+        f"---\ntitle: {path.stem}\nstatus: stable\ntype: knowledge\n---\n{body}\n",
+        encoding="utf-8",
+    )
 
 
 def test_observed_scope_ignores_reserved_documents(tmp_path: Path) -> None:
@@ -35,7 +38,7 @@ def test_observed_scope_ignores_reserved_documents(tmp_path: Path) -> None:
     ):
         state["pages"][f"legacy-reserved-{index}"] = {
             "path": relative,
-            "status": "active",
+            "status": "stable",
         }
 
     before = _observed_scope(tmp_path, state)

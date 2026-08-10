@@ -7,15 +7,17 @@ import hashlib
 import json
 import tempfile
 from collections.abc import Mapping
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
+from chronovisor.core.canonical_document import (
+    Namespace,
+    ResolvedMarkdownLink,
+    rewrite_internal_markdown_links,
+)
 from chronovisor.core.durable_state import write_sealed_json
 from chronovisor.core.link_fix import (
-    WIKI_LINK_RE,
     atomic_write,
-    position_in_spans,
-    protected_spans,
 )
 from chronovisor.core.migration_snapshot import (
     create_incremental_restore_point,
@@ -119,34 +121,51 @@ DEFAULT_REPAIRS: dict[tuple[str, str], str] = {
 def _rewrite(
     text: str,
     repairs: Mapping[tuple[str, str], str],
+    *,
+    registry: PageRegistry,
+    registry_state: Mapping[str, Any],
+    source_namespace: Namespace,
+    source_path: str,
 ) -> tuple[str, list[dict[str, str]]]:
-    spans = protected_spans(text)
     applied: list[dict[str, str]] = []
 
-    def replace(match: Any) -> str:
-        if position_in_spans(match.start(), spans):
-            return match.group(0)
-        value = str(match.group(1))
-        target_and_anchor, separator, label = value.partition("|")
-        target, marker, anchor = target_and_anchor.partition("#")
-        if not marker:
-            return match.group(0)
-        replacement = repairs.get((target.strip(), anchor.strip()))
+    def replace(
+        link: ResolvedMarkdownLink,
+        _label: str,
+    ) -> ResolvedMarkdownLink | None:
+        if not link.fragment:
+            return None
+        target = (
+            f"{link.namespace}/"
+            f"{PurePosixPath(link.path).with_suffix('').as_posix()}"
+        )
+        resolved = registry.resolve_from_state(registry_state, target)
+        if not isinstance(resolved, Mapping):
+            return None
+        target_uid = str(resolved.get("uid") or "")
+        replacement = repairs.get((target_uid, link.fragment))
         if replacement is None:
-            return match.group(0)
-        new_value = f"{target}#{replacement}"
-        if separator:
-            new_value += f"|{label}"
+            return None
         applied.append(
             {
-                "target": target.strip(),
-                "old_anchor": anchor.strip(),
+                "target": target_uid,
+                "old_anchor": link.fragment,
                 "new_anchor": replacement,
             }
         )
-        return f"[[{new_value}]]"
+        return ResolvedMarkdownLink(
+            namespace=link.namespace,
+            path=link.path,
+            fragment=replacement,
+        )
 
-    return WIKI_LINK_RE.sub(replace, text), applied
+    rewritten, _count = rewrite_internal_markdown_links(
+        text,
+        source_namespace=source_namespace,
+        source_path=source_path,
+        rewrite=replace,
+    )
+    return rewritten, applied
 
 
 def repair_known_anchors(
@@ -158,17 +177,38 @@ def repair_known_anchors(
 
     registry = PageRegistry(root)
     state = registry.ensure_manifest(write=True)["registry"]
+    repairs_by_uid: dict[tuple[str, str], str] = {}
+    repair_targets: set[tuple[str, str]] = set()
+    for (target, anchor), replacement in repairs.items():
+        resolved = registry.resolve_from_state(state, target)
+        if not isinstance(resolved, Mapping):
+            continue
+        repairs_by_uid[(str(resolved["uid"]), anchor)] = replacement
+        repair_targets.add(
+            (
+                PurePosixPath(str(resolved["path"])).with_suffix("").as_posix(),
+                anchor,
+            )
+        )
     before_index = build_uid_link_index(root, registry=registry, write=False)
     page_preimages: dict[Path, bytes] = {}
     updates: dict[Path, tuple[str, list[dict[str, str]]]] = {}
-    for row in state["pages"].values():
-        if not isinstance(row, Mapping) or row.get("status") == "superseded":
-            continue
+    for row in registry.stable_pages(state).values():
         path = root / str(row.get("path") or "")
-        if not path.is_file():
-            continue
         original = path.read_bytes()
-        updated, applied = _rewrite(original.decode("utf-8"), repairs)
+        relative = path.relative_to(root)
+        namespace: Namespace = (
+            "system" if relative.parts[0] == "system" else "pages"
+        )
+        source_path = PurePosixPath(*relative.parts[1:]).as_posix()
+        updated, applied = _rewrite(
+            original.decode("utf-8"),
+            repairs_by_uid,
+            registry=registry,
+            registry_state=state,
+            source_namespace=namespace,
+            source_path=source_path,
+        )
         if applied and updated.encode("utf-8") != original:
             page_preimages[path] = original
             updates[path] = (updated, applied)
@@ -208,7 +248,8 @@ def repair_known_anchors(
             remaining_known = [
                 row
                 for row in after_index["unresolved"]
-                if (str(row.get("target")), str(row.get("anchor"))) in repairs
+                if (str(row.get("target")), str(row.get("anchor")))
+                in repair_targets
             ]
             if remaining_known:
                 raise RuntimeError(

@@ -640,7 +640,7 @@ def _similar_existing_pages(requested_page_id: str | None) -> list[str]:
 
     target = loose_key(requested_page_id)
     matches: list[str] = []
-    for path in chronovisor_store.PAGES_DIR.rglob("*.md"):
+    for path in chronovisor_store.all_pages():
         stem = path.stem
         if loose_key(stem) == target:
             try:

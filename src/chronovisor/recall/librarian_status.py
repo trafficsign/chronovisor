@@ -14,6 +14,7 @@ from chronovisor.core.durable_state import DurableStateError, read_sealed_json
 from chronovisor.core.index_store import (
     PAGE_RESERVED_FILENAMES,
     SYSTEM_RESERVED_FILENAMES,
+    canonical_document_paths,
 )
 from chronovisor.core.timeutil import iso_seconds as _iso
 from chronovisor.ingest.page_registry import PageRegistry, PageRegistryError
@@ -83,7 +84,11 @@ def _observed_scope(root: Path, registry: Mapping[str, Any]) -> dict[str, Any]:
     """Compare live Markdown with the last persisted registry snapshot."""
 
     actual: dict[str, Any] = {}
-    for path in PageRegistry._page_paths(root, include_system=True):
+    for path in canonical_document_paths(
+        root / "pages",
+        system_dir=root / "system",
+        require_stable=True,
+    ):
         try:
             actual[str(path.relative_to(root))] = path.stat()
         except FileNotFoundError:
@@ -92,7 +97,8 @@ def _observed_scope(root: Path, registry: Mapping[str, Any]) -> dict[str, Any]:
     for row in (registry.get("pages") or {}).values():
         if (
             not isinstance(row, Mapping)
-            or row.get("status") == "superseded"
+            or row.get("status") != "stable"
+            or row.get("canonical_uid")
             or not row.get("path")
         ):
             continue
@@ -116,8 +122,8 @@ def _observed_scope(root: Path, registry: Mapping[str, Any]) -> dict[str, Any]:
         relative
         for relative in missing
         if relative.startswith("pages/")
-        and str((registered.get(relative) or {}).get("status") or "active")
-        == "active"
+        and str((registered.get(relative) or {}).get("status") or "stable")
+        == "stable"
     )
     changed: list[str] = []
     collection_changed: list[str] = []
@@ -133,9 +139,9 @@ def _observed_scope(root: Path, registry: Mapping[str, Any]) -> dict[str, Any]:
     collection_rows = []
     for relative, stat in sorted(actual.items()):
         row = registered.get(relative)
-        status = str(row.get("status") or "active") if row else "active"
+        status = str(row.get("status") or "stable") if row else "stable"
         in_collection_scope = (
-            relative.startswith("pages/") and status == "active"
+            relative.startswith("pages/") and status == "stable"
         )
         collection_actual_total += int(in_collection_scope)
         collection_registered_current += int(

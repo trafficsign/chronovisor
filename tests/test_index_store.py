@@ -39,6 +39,9 @@ def _seed(chronovisor_root: Path, rel: str, body: str) -> Path:
         closing = body.find("\n---\n", 4)
         if closing >= 0 and "\nstatus:" not in body[:closing]:
             body = body.replace("---\n", "---\nstatus: stable\n", 1)
+        closing = body.find("\n---\n", 4)
+        if closing >= 0 and "\ntype:" not in body[:closing]:
+            body = body.replace("---\n", "---\ntype: knowledge\n", 1)
     path = chronovisor_root / "pages" / rel
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(body)
@@ -198,11 +201,11 @@ class TestBuildEntryRawKeywords:
         entry = IndexStore._build_entry("bad", path, False, st.st_mtime_ns, st.st_size)
         assert entry is None
 
-    def test_car_spec_infers_reference_page_type(self, isolated_index: Path) -> None:
+    def test_car_spec_preserves_reference_page_type(self, isolated_index: Path) -> None:
         path = _seed(
             isolated_index,
             "car-spec/123.md",
-            "---\ntitle: 123\nupdated: 2026-01-01\n---\nbody\n",
+            "---\ntitle: 123\ntype: reference\nupdated: 2026-01-01\n---\nbody\n",
         )
         st = path.stat()
         entry = IndexStore._build_entry("123", path, False, st.st_mtime_ns, st.st_size)
@@ -260,7 +263,7 @@ class TestBuildEntryRawKeywords:
 
 
 class TestRawKeywordsAccessor:
-    def test_standard_markdown_targets_build_outlinks_and_backlinks(
+    def test_legacy_wikilink_rejects_entire_page(
         self, isolated_index: Path
     ) -> None:
         _seed(
@@ -273,8 +276,9 @@ class TestRawKeywordsAccessor:
 
         store.refresh()
 
-        assert store.outlinks("source") == ["current-page"]
-        assert store.backlinks("current-page") == ["source"]
+        assert store.meta("source") is None
+        assert store.outlinks("source") == []
+        assert store.backlinks("current-page") == []
         assert store.backlinks("legacy") == []
 
     def test_read_only_refresh_rebuilds_memory_without_persisting(
@@ -388,7 +392,8 @@ class TestRefreshWindow:
         store.refresh()
 
         path.write_text(
-            "---\ntitle: After\nupdated: 2026-01-02\nstatus: stable\n---\nlonger body\n"
+            "---\ntitle: After\nupdated: 2026-01-02\nstatus: stable\n"
+            "type: knowledge\n---\nlonger body\n"
         )
         store.refresh_if_stale(max_age_seconds=60)
         assert store.meta("p")["title"] == "Before"
@@ -481,6 +486,28 @@ class TestSchemaMigration:
 
 
 class TestCanonicalIndex:
+    def test_changed_entry_rejects_missing_type_and_legacy_wikilink(
+        self, isolated_index: Path
+    ) -> None:
+        pages = isolated_index / "pages"
+        missing_type = pages / "missing-type.md"
+        legacy_link = pages / "legacy-link.md"
+        missing_type.write_text(
+            "---\ntitle: Missing\nstatus: stable\n---\nbody\n",
+            encoding="utf-8",
+        )
+        legacy_link.write_text(
+            "---\ntitle: Legacy\nstatus: stable\ntype: knowledge\n---\n"
+            "[[target]]\n",
+            encoding="utf-8",
+        )
+
+        store = IndexStore()
+        store.refresh()
+
+        assert store.meta("missing-type") is None
+        assert store.meta("legacy-link") is None
+
     def test_full_yaml_and_namespace_aware_standard_links(
         self, isolated_index: Path
     ) -> None:
@@ -639,3 +666,43 @@ status: stable
         assert store.outlinks("source") == ["stable-target"]
         assert store.meta("draft-target")["status"] == "draft"
         assert store.meta("deprecated-target")["status"] == "deprecated"
+
+
+def test_page_id_resolver_validates_only_exact_filename_candidates(
+    isolated_index: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for index in range(40):
+        _seed(
+            isolated_index,
+            f"bulk/{index}/other-{index}.md",
+            f"---\ntitle: Other {index}\nstatus: stable\n---\nbody\n",
+        )
+    target = _seed(
+        isolated_index,
+        "nested/target.md",
+        "---\ntitle: Target\nstatus: stable\n---\nbody\n",
+    )
+    calls: list[Path] = []
+    real = index_store_mod.canonical_document_path
+
+    def tracking(path: Path, *args: object, **kwargs: object) -> Path | None:
+        calls.append(path)
+        return real(path, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(index_store_mod, "canonical_document_path", tracking)
+
+    assert index_store_mod.canonical_document_path_for_id(
+        "target",
+        pages_dir=isolated_index / "pages",
+        system_dir=isolated_index / "system",
+    ) == target.resolve()
+    assert calls == [target, isolated_index / "system" / "target.md"]
+
+    calls.clear()
+    assert index_store_mod.canonical_document_path_for_id(
+        "../target",
+        pages_dir=isolated_index / "pages",
+        system_dir=isolated_index / "system",
+    ) is None
+    assert calls == []

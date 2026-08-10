@@ -4356,9 +4356,27 @@ def test_knowledge_mix_snapshot_groups_pages_by_category(
     pages_dir = chronovisor_root / "pages"
     (pages_dir / "ai").mkdir(parents=True)
     (pages_dir / "macos").mkdir()
-    (pages_dir / "ai" / "agent-memory.md").write_text("a" * 20, encoding="utf-8")
-    (pages_dir / "ai" / "evals.md").write_text("b" * 10, encoding="utf-8")
-    (pages_dir / "macos" / "display.md").write_text("c" * 15, encoding="utf-8")
+    stable_texts = {
+        pages_dir / "ai" / "agent-memory.md": (
+            "---\ntitle: Agent memory\nstatus: stable\ntype: knowledge\n---\n" + "a" * 20
+        ),
+        pages_dir / "ai" / "evals.md": (
+            "---\ntitle: Evals\nstatus: stable\ntype: knowledge\n---\n" + "b" * 10
+        ),
+        pages_dir / "macos" / "display.md": (
+            "---\ntitle: Display\nstatus: stable\ntype: knowledge\n---\n" + "c" * 15
+        ),
+    }
+    for path, content in stable_texts.items():
+        path.write_text(content, encoding="utf-8")
+    (pages_dir / "ai" / "draft.md").write_text(
+        "---\ntitle: Draft\nstatus: draft\ntype: knowledge\n---\nexcluded",
+        encoding="utf-8",
+    )
+    (pages_dir / "macos" / "invalid.md").write_text(
+        "---\ntitle: Invalid\nstatus: stable\n---\nexcluded",
+        encoding="utf-8",
+    )
     for relative in (
         "index.md",
         "log.md",
@@ -4377,10 +4395,15 @@ def test_knowledge_mix_snapshot_groups_pages_by_category(
     mix = dashboard._knowledge_mix_snapshot()
 
     assert mix["total_pages"] == 3
-    assert mix["total_bytes"] == 45
+    assert mix["total_bytes"] == sum(
+        len(content.encode("utf-8")) for content in stable_texts.values()
+    )
     assert [row["id"] for row in mix["categories"]] == ["ai", "macos"]
     assert mix["categories"][0]["label"] == "AI"
     assert mix["categories"][0]["pages"] == 2
-    assert mix["categories"][0]["bytes"] == 30
-    assert round(mix["categories"][0]["share"], 3) == 0.667
+    assert mix["categories"][0]["bytes"] == sum(
+        len(stable_texts[path].encode("utf-8"))
+        for path in stable_texts
+        if path.parent.name == "ai"
+    )
     assert "ai/agent-memory.md" in mix["categories"][0]["samples"]

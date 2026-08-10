@@ -49,10 +49,13 @@ def isolated_wiki(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     index_dir = chronovisor_root / ".index"
     for d in (pages, raw, system, index_dir):
         d.mkdir(parents=True, exist_ok=True)
+    for name in ("index.md", "log.md", "schema.md"):
+        (chronovisor_root / name).write_text("", encoding="utf-8")
 
     from chronovisor.core import index_store, store
     from chronovisor.ingest import ingest, lint
     from chronovisor.ingest import tag_lifecycle as tags_mod
+    from chronovisor.ops import page_normalize
 
     monkeypatch.setattr(store, "CHRONOVISOR_ROOT", chronovisor_root)
     monkeypatch.setattr(store, "PAGES_DIR", pages)
@@ -61,7 +64,6 @@ def isolated_wiki(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(store, "INDEX_FILE", chronovisor_root / "index.md")
     monkeypatch.setattr(store, "LOG_FILE", chronovisor_root / "log.md")
     monkeypatch.setattr(ingest, "PAGES_DIR", pages)
-    monkeypatch.setattr(ingest, "INDEX_FILE", chronovisor_root / "index.md")
     monkeypatch.setattr(ingest, "LOG_FILE", chronovisor_root / "log.md")
     monkeypatch.setattr(index_store, "CHRONOVISOR_ROOT", chronovisor_root)
     monkeypatch.setattr(index_store, "PAGES_DIR", pages)
@@ -72,8 +74,9 @@ def isolated_wiki(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         index_store, "BACKLINKS_INDEX_FILE", index_dir / "backlinks.json"
     )
     monkeypatch.setattr(index_store, "_store", None)
-    monkeypatch.setattr(lint, "SYSTEM_DIR", system)
+    monkeypatch.setattr(lint, "CHRONOVISOR_ROOT", chronovisor_root)
     monkeypatch.setattr(tags_mod, "SYSTEM_DIR", system)
+    monkeypatch.setattr(page_normalize, "CHRONOVISOR_ROOT", chronovisor_root)
     # Reset the lint check cache between tests; without this a
     # per-corpus-version cache hit could replay a previous test's issues.
     import chronovisor.ingest.lint as lint_mod
@@ -81,26 +84,22 @@ def isolated_wiki(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(lint_mod, "_CHECK_CACHE_VERSION", None)
     monkeypatch.setattr(lint_mod, "_CHECK_CACHE_RESULT", None)
 
-    original_outlinks = index_store.IndexStore.outlinks
-
-    def legacy_outlinks(instance, page_id: str) -> list[str]:
-        from chronovisor.core.link_fix import extract_targets
-
-        links = original_outlinks(instance, page_id)
-        meta = instance.meta(page_id)
-        if meta is None:
-            return links
-        text = Path(meta["path"]).read_text(encoding="utf-8")
-        return list(dict.fromkeys([*links, *extract_targets(text)]))
-
-    monkeypatch.setattr(index_store.IndexStore, "outlinks", legacy_outlinks)
     return chronovisor_root
 
 
 def _seed(chronovisor_root: Path, rel: str, body: str) -> Path:
     path = chronovisor_root / "pages" / rel
     path.parent.mkdir(parents=True, exist_ok=True)
-    body = body.replace("---\n", "---\nstatus: stable\n", 1)
+    prefix, separator, content = body.partition("---\n")
+    if not separator:
+        raise ValueError("test page must contain frontmatter")
+    metadata, closing, page_body = content.partition("---\n")
+    if not closing:
+        raise ValueError("test page frontmatter must be closed")
+    fields = "status: stable\n"
+    if "\ntype:" not in f"\n{metadata}":
+        fields += "type: knowledge\n"
+    body = f"{prefix}{separator}{fields}{metadata}{closing}{page_body}"
     path.write_text(body)
     return path
 
@@ -405,7 +404,8 @@ class TestTagMissing:
         _seed(
             isolated_wiki,
             "car-spec/123.md",
-            "---\ntitle: 123\nupdated: 2020-01-01\ntype: reference\n---\n[[missing]]\n",
+            "---\ntitle: 123\nupdated: 2020-01-01\ntype: reference\n---\n"
+            "[missing](<../missing.md>)\n",
         )
         issues = check()
         assert [issue for issue in issues if issue["page"] == "123"] == []
@@ -798,6 +798,69 @@ class TestTagInvalid:
 
 
 class TestBrokenLinkFrontierGate:
+    def test_link_to_deprecated_target_is_broken(
+        self,
+        isolated_wiki: Path,
+    ) -> None:
+        from chronovisor.ingest.lint import check
+
+        _seed(
+            isolated_wiki,
+            "source.md",
+            "---\ntitle: Source\n---\n[Target](<target.md>)\n",
+        )
+        target = _seed(
+            isolated_wiki,
+            "target.md",
+            "---\ntitle: Target\n---\nbody\n",
+        )
+        assert _by_type(check(), "broken_link", "source") == []
+
+        target.write_text(
+            target.read_text(encoding="utf-8").replace(
+                "status: stable", "status: deprecated"
+            ),
+            encoding="utf-8",
+        )
+
+        broken = _by_type(check(), "broken_link", "source")
+        assert len(broken) == 1
+        assert broken[0]["target"] == "pages/target"
+
+    @pytest.mark.parametrize("issue_type", ["broken_link", "tag_invalid"])
+    def test_safe_fixes_never_mutate_deprecated_source(
+        self,
+        isolated_wiki: Path,
+        issue_type: str,
+    ) -> None:
+        from chronovisor.ingest import lint as lint_mod
+
+        source = _seed(
+            isolated_wiki,
+            "source.md",
+            "---\ntitle: Source\ntags: [invalid]\n---\n[Missing](<missing.md>)\n",
+        )
+        deprecated = source.read_text(encoding="utf-8").replace(
+            "status: stable", "status: deprecated"
+        )
+        source.write_text(deprecated, encoding="utf-8")
+        issue = {
+            "type": issue_type,
+            "page": "source",
+            "target": "pages/missing",
+            "auto_fixable": True,
+        }
+
+        actions = lint_mod.apply_safe_fixes(
+            [issue],
+            reviewer=lambda *_args: pytest.fail(
+                "deprecated source must not reach the reviewer"
+            ),
+        )
+
+        assert actions == []
+        assert source.read_text(encoding="utf-8") == deprecated
+
     def test_retarget_requires_frontier_and_binds_exact_preimage(
         self,
         isolated_wiki: Path,
@@ -807,7 +870,8 @@ class TestBrokenLinkFrontierGate:
         source = _seed(
             isolated_wiki,
             "source.md",
-            "---\ntitle: Source\ntags: [d/ai, t/analysis, s/2026]\n---\n[[known-pag|Known]]\n",
+            "---\ntitle: Source\ntags: [d/ai, t/analysis, s/2026]\n---\n"
+            "[Known](<known-pag.md>)\n",
         )
         _seed(
             isolated_wiki,
@@ -822,8 +886,8 @@ class TestBrokenLinkFrontierGate:
 
         actions = apply_safe_fixes(check(), reviewer=approve)
 
-        assert actions == ["[source] [[known-pag]] → [[known-page]] (1x)"]
-        assert "[[known-page|Known]]" in source.read_text(encoding="utf-8")
+        assert actions == ["[source] pages/known-pag → pages/known-page (1x)"]
+        assert "[Known](<known-page.md>)" in source.read_text(encoding="utf-8")
         assert len(prompts) == 1
         assert '"expected_sha256"' in prompts[0]
         assert '"operation": "broken_link_retarget"' in prompts[0]
@@ -837,7 +901,8 @@ class TestBrokenLinkFrontierGate:
         source = _seed(
             isolated_wiki,
             "source.md",
-            "---\ntitle: Source\ntags: [d/ai, t/analysis, s/2026]\n---\n[[missing-target]]\n",
+            "---\ntitle: Source\ntags: [d/ai, t/analysis, s/2026]\n---\n"
+            "[missing target](<missing-target.md>)\n",
         )
         original = source.read_text(encoding="utf-8")
 
@@ -876,7 +941,7 @@ class TestBrokenLinkFrontierGate:
             isolated_wiki,
             "source.md",
             "---\ntitle: Source\ntags: [d/ai, t/analysis, s/2026]\n---\n"
-            "[[known-pag]]\n",
+            "[known](<known-pag.md>)\n",
         )
         original = source.read_text(encoding="utf-8")
         _seed(

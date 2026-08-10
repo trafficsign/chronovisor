@@ -426,10 +426,10 @@ def _decision_mutates_durable_state(
             return False
         return None
 
-    if decision_enum == {"archive", "keep_active", "needs_retry"}:
-        if decision == "archive":
+    if decision_enum == {"deprecate", "keep_stable", "needs_retry"}:
+        if decision == "deprecate":
             return True
-        if decision in {"keep_active", "needs_retry"}:
+        if decision in {"keep_stable", "needs_retry"}:
             return False
         return None
 

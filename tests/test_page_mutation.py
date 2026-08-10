@@ -27,17 +27,11 @@ def _page(path: Path, *, title: str, body: str) -> None:
 
 def _patch_pages(monkeypatch, pages: Path) -> None:
     monkeypatch.setattr(page_mutation, "PAGES_DIR", pages)
+    monkeypatch.setattr(page_mutation, "SYSTEM_DIR", pages.parent / "system")
     monkeypatch.setattr(
         page_mutation,
         "CHRONOVISOR_MUTATION_LOCK",
         pages.parent / "wiki-mutation.lock",
-    )
-    monkeypatch.setattr(
-        page_mutation,
-        "find_page",
-        lambda page_id: (
-            (pages / f"{page_id}.md") if (pages / f"{page_id}.md").exists() else None
-        ),
     )
 
 
@@ -649,7 +643,7 @@ def test_mutation_rejects_non_stable_lifecycle(
     )
     _patch_pages(monkeypatch, pages)
 
-    with pytest.raises(page_mutation.PageMutationError, match="not mutable"):
+    with pytest.raises(page_mutation.PageMutationError, match="page not found"):
         page_mutation.prepare_page_mutation(
             "memory",
             [{"old_text": "Old fact.", "new_text": "New fact."}],

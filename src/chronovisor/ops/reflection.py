@@ -72,7 +72,7 @@ def build_reflection_markdown(
             f"- Search golden examples: {_fmt(queues.get('search_golden'))}",
             "",
             "## Next Checks",
-            "- Review archive candidates from retention output before excluding anything.",
+            "- Review deprecation candidates from retention output before excluding anything.",
             "- Promote high-confidence duplicate candidates through the review lane.",
             "- Keep generated reflections cited by metric source, not as standalone facts.",
             "",

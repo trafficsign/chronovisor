@@ -3859,7 +3859,6 @@ def _patch_chronovisor_paths(chronovisor_root: Path) -> dict[str, Any]:
         },
         "ingest": {
             "PAGES_DIR": ingest.PAGES_DIR,
-            "INDEX_FILE": ingest.INDEX_FILE,
             "LOG_FILE": ingest.LOG_FILE,
         },
         "orchestrator": {
@@ -3884,7 +3883,6 @@ def _patch_chronovisor_paths(chronovisor_root: Path) -> dict[str, Any]:
     chronovisor_store.LOG_FILE = chronovisor_root / "log.md"
 
     ingest.PAGES_DIR = pages
-    ingest.INDEX_FILE = chronovisor_root / "index.md"
     ingest.LOG_FILE = chronovisor_root / "log.md"
     orchestrator.RAW_DIR = raw
     orchestrator.CHRONOVISOR_ROOT = chronovisor_root
@@ -3916,7 +3914,9 @@ def _restore_chronovisor_paths(snapshot: dict[str, Any]) -> None:
 def run_sandbox_drill(*, use_qwen: bool = True) -> dict[str, Any]:
     """Exercise pending raw -> failure packet -> self-heal -> retry success."""
 
-    sandbox_root = Path(tempfile.mkdtemp(prefix="chronovisor-self-heal-drill-"))
+    sandbox_root = Path(
+        tempfile.mkdtemp(prefix="chronovisor-self-heal-drill-")
+    ).resolve()
     path_snapshot = _patch_chronovisor_paths(sandbox_root)
 
     page = (
@@ -3927,7 +3927,9 @@ def run_sandbox_drill(*, use_qwen: bool = True) -> dict[str, Any]:
     )
     page.parent.mkdir(parents=True, exist_ok=True)
     page.write_text(
-        "---\ntitle: Opus\nupdated: 2026-01-01\n---\nold\n", encoding="utf-8"
+        "---\ntitle: Opus\nupdated: 2026-01-01\nstatus: stable\n"
+        "type: knowledge\n---\nold\n",
+        encoding="utf-8",
     )
     raw_path = sandbox_root / "raw" / "broken.md"
     raw_path.write_text("sandbox drill raw\n", encoding="utf-8")

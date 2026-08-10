@@ -2,10 +2,74 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from chronovisor.core import sealed_artifact_decoder, store
+
+
+def test_direct_search_revalidates_exact_stable_namespace_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from chronovisor.hosts import server
+
+    root = tmp_path / "wiki"
+    pages = root / "pages"
+    system = root / "system"
+    pages.mkdir(parents=True)
+    system.mkdir()
+    (pages / "same.md").write_text(
+        "---\ntitle: Wrong\nstatus: deprecated\ntype: knowledge\n---\nWRONG PAGE\n",
+        encoding="utf-8",
+    )
+    stable_system = system / "same.md"
+    stable_system.write_text(
+        "---\ntitle: Same\nstatus: stable\ntype: knowledge\n---\nSYSTEM NEEDLE\n",
+        encoding="utf-8",
+    )
+    drifted = pages / "drifted.md"
+    drifted.write_text(
+        "---\ntitle: Drifted\nstatus: deprecated\ntype: knowledge\n---\nDRIFT NEEDLE\n",
+        encoding="utf-8",
+    )
+
+    class FakeStore:
+        def meta(self, page_id: str):
+            if page_id == "same":
+                return {
+                    "status": "stable",
+                    "path": str(stable_system),
+                    "relative_path": "same.md",
+                    "is_system": True,
+                }
+            return {
+                "status": "stable",
+                "path": str(drifted),
+                "relative_path": "drifted.md",
+                "is_system": False,
+            }
+
+        def tags(self, _page_id: str) -> list[str]:
+            return []
+
+    monkeypatch.setattr(server, "CHRONOVISOR_ROOT", root)
+    hits = server._direct_search_hits(
+        [
+            SimpleNamespace(page_id="same", title="Same", updated="now", score=1.0),
+            SimpleNamespace(
+                page_id="drifted", title="Drifted", updated="now", score=0.9
+            ),
+        ],
+        query="needle",
+        store=FakeStore(),
+        registry_row=lambda _page_id: {},
+    )
+
+    assert [hit["page_id"] for hit in hits] == ["same"]
+    assert "SYSTEM NEEDLE" in hits[0]["snippets"][0]
+    assert "WRONG PAGE" not in json.dumps(hits)
 
 
 def test_resolve_root_uses_only_canonical_root(
@@ -126,8 +190,11 @@ def test_server_read_path_resolves_durable_page_alias(
 
     target = tmp_path / "pages" / "chronovisor" / "chronovisor-system.md"
     target.parent.mkdir(parents=True)
-    target.write_text("# Chronovisor\n", encoding="utf-8")
-    monkeypatch.setattr(server, "find_page", lambda _page_id: None)
+    target.write_text(
+        "---\ntitle: Chronovisor\nstatus: stable\ntype: knowledge\n---\n# Chronovisor\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(server, "CHRONOVISOR_ROOT", tmp_path)
     monkeypatch.setattr(alias_store, "resolve_alias_path", lambda _page_id: target)
 
     assert server._find_page_with_alias("previous-page-id") == target
@@ -141,7 +208,10 @@ def test_server_alias_read_returns_and_traces_only_canonical_page_id(
 
     target = tmp_path / "pages" / "chronovisor" / "chronovisor-system.md"
     target.parent.mkdir(parents=True)
-    target.write_text("# Chronovisor\n", encoding="utf-8")
+    target.write_text(
+        "---\ntitle: Chronovisor\nstatus: stable\ntype: knowledge\n---\n# Chronovisor\n",
+        encoding="utf-8",
+    )
     calls: list[tuple[str, str]] = []
     pull_rows: list[dict] = []
 
@@ -159,11 +229,6 @@ def test_server_alias_read_returns_and_traces_only_canonical_page_id(
 
     monkeypatch.setattr(server, "get_store", FakeStore)
     monkeypatch.setattr(server, "CHRONOVISOR_ROOT", tmp_path)
-    monkeypatch.setattr(
-        server,
-        "find_page",
-        lambda _page_id, **kwargs: kwargs.get("candidate"),
-    )
     monkeypatch.setattr(alias_store, "resolve_alias_path", lambda _page_id: target)
     monkeypatch.setattr(server, "_append_pull_log", pull_rows.append)
 
@@ -197,3 +262,62 @@ def test_server_alias_read_returns_and_traces_only_canonical_page_id(
             "requested_page_id": "previous-page-id",
         }
     ]
+
+
+def test_server_read_uses_existing_registry_as_fail_closed_authority(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from chronovisor.hosts import server
+    from chronovisor.ingest.page_registry import PageRegistry
+
+    root = tmp_path / "wiki"
+    pages = root / "pages"
+    system = root / "system"
+    pages.mkdir(parents=True)
+    system.mkdir()
+
+    def write_page(path: Path, status: str, body: str) -> None:
+        path.write_text(
+            f"---\ntitle: {path.stem}\nstatus: {status}\ntype: knowledge\n---\n{body}\n",
+            encoding="utf-8",
+        )
+
+    for page_id, status in (
+        ("stable", "stable"),
+        ("draft", "draft"),
+        ("deprecated", "deprecated"),
+        ("old", "stable"),
+    ):
+        write_page(pages / f"{page_id}.md", status, page_id)
+    registry = PageRegistry(root)
+    registry.ensure_manifest()
+    registry.add_redirect(registry.resolve("old")["uid"], registry.resolve("stable")["uid"])
+    write_page(pages / "unregistered.md", "stable", "unregistered")
+    write_page(system / "unregistered-system.md", "stable", "system")
+
+    class FakeStore:
+        def refresh(self) -> None:
+            return None
+
+        def meta(self, _page_id: str) -> None:
+            return None
+
+        def outlinks(self, _page_id: str) -> list[str]:
+            return []
+
+        def backlinks(self, _page_id: str) -> list[str]:
+            return []
+
+    monkeypatch.setattr(server, "CHRONOVISOR_ROOT", root)
+    monkeypatch.setattr(server, "get_store", FakeStore)
+    monkeypatch.setattr(server, "_append_pull_log", lambda _row: None)
+    read = getattr(server.chronovisor_read, "fn", server.chronovisor_read)
+
+    redirected = json.loads(read("old"))
+    assert redirected["page_id"] == "stable"
+    assert "stable" in redirected["content"]
+    for page_id in ("draft", "deprecated", "unregistered", "unregistered-system"):
+        assert json.loads(read(page_id)) == {
+            "error": f"Page '{page_id}' not found"
+        }

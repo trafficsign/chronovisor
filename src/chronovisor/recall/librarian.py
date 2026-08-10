@@ -48,7 +48,11 @@ def _now_iso() -> str:
 def _scope_generation(root: Path, pages: Mapping[str, Any]) -> str:
     rows = []
     for row in pages.values():
-        if not isinstance(row, Mapping) or row.get("status") == "superseded":
+        if (
+            not isinstance(row, Mapping)
+            or row.get("status") != "stable"
+            or row.get("canonical_uid")
+        ):
             continue
         relative = str(row.get("path") or "")
         stat = (root / relative).stat()
@@ -113,15 +117,10 @@ def capture_baseline(
 
     registry = PageRegistry(root)
     manifest = registry.ensure_manifest(write=False)
-    pages = manifest["registry"]["pages"]
+    pages = registry.stable_pages(manifest["registry"])
     tag_counts: Counter[str] = Counter()
     sensitivity_counts: Counter[str] = Counter()
     for row in pages.values():
-        if not isinstance(row, Mapping):
-            continue
-        path = root / str(row.get("path") or "")
-        if not path.exists():
-            continue
         try:
             meta, _text = _page_metadata(root, row)
         except (OSError, UnicodeError):
@@ -201,13 +200,7 @@ def run_legacy_udc_shadow(
     registry = PageRegistry(root)
     manifest = registry.ensure_manifest(write=not dry_run)
     registry_state = manifest["registry"]
-    pages = {
-        uid: row
-        for uid, row in registry_state["pages"].items()
-        if isinstance(row, Mapping)
-        and row.get("status") != "superseded"
-        and (root / str(row.get("path") or "")).exists()
-    }
+    pages = registry.stable_pages(registry_state)
     scope_generation = _scope_generation(root, pages)
     package = load_udc_package(root)
     authority = classification_authority_status(root, package=package)
@@ -246,7 +239,7 @@ def run_legacy_udc_shadow(
             record = propose_from_legacy_metadata(
                 tags=[str(value) for value in tags],
                 page_type=str(meta.get("type") or "knowledge"),
-                lifecycle=str(meta.get("status") or "active"),
+                lifecycle=str(meta.get("status") or "stable"),
                 sensitivity=str(
                     meta.get("sensitivity") or row.get("sensitivity") or "normal"
                 ),
@@ -278,13 +271,7 @@ def run_legacy_udc_shadow(
         )
     )
     current_registry = registry_state if dry_run else registry.load()
-    current_pages = [
-        row
-        for row in current_registry["pages"].values()
-        if isinstance(row, Mapping)
-        and row.get("status") != "superseded"
-        and (root / str(row.get("path") or "")).exists()
-    ]
+    current_pages = list(registry.stable_pages(current_registry).values())
     proposed = sum(
         isinstance(row.get("classification"), Mapping) for row in current_pages
     )
@@ -468,12 +455,12 @@ def run_shadow(
     assignments = collection_state.get("assignments") or {}
     collections = collection_state.get("collections") or {}
     total = len(assignments)
+    page_registry = PageRegistry(root)
+    stable_pages = page_registry.stable_pages()
     review_required = {
         str(uid)
-        for uid, row in PageRegistry(root).load()["pages"].items()
-        if isinstance(row, Mapping)
-        and row.get("status") == "active"
-        and row.get("collection_status") == "review_required"
+        for uid, row in stable_pages.items()
+        if row.get("collection_status") == "review_required"
     }
     unclassified = sum(
         isinstance(row, Mapping) and row.get("status") == "unclassified"
@@ -487,11 +474,8 @@ def run_shadow(
         root,
         {
             uid: row
-            for uid, row in PageRegistry(root).load()["pages"].items()
-            if isinstance(row, Mapping)
-            and row.get("status") == "active"
-            and str(row.get("path") or "").startswith("pages/")
-            and (root / str(row.get("path") or "")).is_file()
+            for uid, row in stable_pages.items()
+            if str(row.get("path") or "").startswith("pages/")
         },
     )
     link_path = root / "runtime" / "librarian" / "uid-link-index.json"

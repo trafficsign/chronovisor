@@ -262,14 +262,23 @@ def test_derived_memory_kpi_counts_generated_artifacts(
         "{}\n", encoding="utf-8"
     )
     (chronovisor_root / "recall" / "retention.json").write_text(
-        json.dumps({"counts": {"pages": 5, "archive_candidates": 1}}),
+        json.dumps({"counts": {"pages": 5, "deprecation_candidates": 1}}),
         encoding="utf-8",
     )
     (chronovisor_root / "distill" / "wiki-qa.jsonl").write_text(
         "{}\n{}\n{}\n", encoding="utf-8"
     )
     (chronovisor_root / "pages" / "hubs" / "ai-hub.md").write_text(
-        "hub", encoding="utf-8"
+        "---\ntitle: AI hub\nstatus: stable\ntype: knowledge\n---\nhub",
+        encoding="utf-8",
+    )
+    (chronovisor_root / "pages" / "hubs" / "draft.md").write_text(
+        "---\ntitle: Draft\nstatus: draft\ntype: knowledge\n---\ndraft",
+        encoding="utf-8",
+    )
+    (chronovisor_root / "pages" / "hubs" / "invalid.md").write_text(
+        "---\ntitle: Invalid\nstatus: stable\n---\ninvalid",
+        encoding="utf-8",
     )
     monkeypatch.setattr(health, "CHRONOVISOR_ROOT", chronovisor_root)
 

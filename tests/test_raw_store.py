@@ -12,6 +12,12 @@ from chronovisor.core.raw_store import RawStore, raw_layout_mode
 from chronovisor.ingest.raw_semantic_projection import project_native_transcript
 
 
+@pytest.fixture(autouse=True)
+def _legacy_root(tmp_path: Path) -> None:
+    for name in ("index.md", "log.md", "schema.md"):
+        (tmp_path / name).write_text("legacy\n", encoding="utf-8")
+
+
 def _append(raw_dir: Path, source: Path, payload: bytes):
     return append_capture(
         raw_dir=raw_dir,

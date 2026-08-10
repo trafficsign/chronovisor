@@ -131,7 +131,7 @@ def _knowledge_metas() -> list[dict]:
     for item in store.all_pages_meta(include_system=False):
         if item.get("page_type") == "reference":
             continue
-        if item.get("status") not in (None, "active"):
+        if item.get("status") != "stable":
             continue
         meta = store.meta(str(item.get("page_id", "")))
         if meta is not None:

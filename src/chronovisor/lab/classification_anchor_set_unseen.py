@@ -228,7 +228,7 @@ def select_unseen_rows(
             or not str(row.get("source_sha256") or "")
             or not group_id
             or group_id in seen_groups
-            or row.get("lifecycle") != "active"
+            or row.get("lifecycle") != "stable"
             or str(row.get("sensitivity") or "normal") != "normal"
         ):
             continue

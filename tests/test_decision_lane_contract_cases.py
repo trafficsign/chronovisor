@@ -411,9 +411,10 @@ def test_lane_contract_case_source_version_tracks_the_resealed_cases() -> None:
         if lane
         not in {
             "ingest_reconciliation",
-            "raw_replay_reconciliation",
-            "recall_auto_apply",
-        }
+                "raw_replay_reconciliation",
+                "recall_auto_apply",
+                "autonomy_retention",
+            }
     } == {8}
 
 

@@ -35,6 +35,8 @@ def _frontier_approves_existing_auto_apply_tests(
     from chronovisor.recall import recall_auditor
 
     monkeypatch.setattr(store, "CHRONOVISOR_ROOT", root)
+    monkeypatch.setattr(store, "PAGES_DIR", root / "pages")
+    monkeypatch.setattr(store, "SYSTEM_DIR", root / "system")
     monkeypatch.setattr(page_mutation, "CHRONOVISOR_ROOT", root)
     monkeypatch.setattr(index_store, "CHRONOVISOR_ROOT", root)
     monkeypatch.setattr(index_store, "INDEX_DIR", root / ".index")
@@ -127,7 +129,9 @@ def _page(root: Path, page_id: str, body: str = "Recall hook body") -> Path:
     path = root / "pages" / "ai" / f"{page_id}.md"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
-        f"---\ntitle: {page_id}\nupdated: 2026-06-02\ntags: [d/tools-config, t/analysis, s/2026]\n---\n\n{body}\n",
+        f"---\ntitle: {page_id}\nupdated: 2026-06-02\nstatus: stable\n"
+        f"type: knowledge\ntags: [d/tools-config, t/analysis, s/2026]\n"
+        f"---\n\n{body}\n",
         encoding="utf-8",
     )
     return path
@@ -160,6 +164,7 @@ def test_bounded_page_evidence_seals_snapshot_status_and_full_hash(
     path = _page(pages_root, "target-page", body="0123456789")
     monkeypatch.setattr(store, "CHRONOVISOR_ROOT", pages_root)
     monkeypatch.setattr(store, "PAGES_DIR", pages_root / "pages")
+    monkeypatch.setattr(recall_runtime, "CHRONOVISOR_ROOT", pages_root)
 
     evidence = recall_auto_apply._bounded_page_evidence("target-page", max_chars=8)
 
@@ -175,6 +180,7 @@ def test_query_hint_auto_apply_feeds_runtime_context(tmp_path, monkeypatch) -> N
     hints_file = tmp_path / "query-hints.json"
     monkeypatch.setattr(store, "CHRONOVISOR_ROOT", pages_root)
     monkeypatch.setattr(store, "PAGES_DIR", pages_root / "pages")
+    monkeypatch.setattr(recall_runtime, "CHRONOVISOR_ROOT", pages_root)
     monkeypatch.setattr(recall_hints, "QUERY_HINTS_FILE", hints_file)
     monkeypatch.setattr(recall_runtime, "init_chronovisor", lambda: None)
 

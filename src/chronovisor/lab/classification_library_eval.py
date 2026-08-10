@@ -85,14 +85,8 @@ def _host_facets(row: Mapping[str, Any]) -> dict[str, str]:
     }:
         form = "knowledge"
     lifecycle = str(row.get("lifecycle") or "")
-    if lifecycle not in {
-        "active",
-        "historical",
-        "superseded",
-        "experimental",
-        "held",
-    }:
-        lifecycle = "active"
+    if lifecycle not in {"draft", "stable", "deprecated"}:
+        lifecycle = "stable"
     sensitivity = str(row.get("sensitivity") or "")
     if sensitivity not in {"normal", "personal", "restricted", "high"}:
         sensitivity = "normal"

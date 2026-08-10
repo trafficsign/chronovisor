@@ -81,7 +81,6 @@ def isolated_wiki(
     monkeypatch.setattr(store, "INDEX_FILE", chronovisor_root / "index.md")
     monkeypatch.setattr(store, "LOG_FILE", chronovisor_root / "log.md")
     monkeypatch.setattr(ingest, "PAGES_DIR", pages)
-    monkeypatch.setattr(ingest, "INDEX_FILE", chronovisor_root / "index.md")
     monkeypatch.setattr(ingest, "LOG_FILE", chronovisor_root / "log.md")
     monkeypatch.setattr(orchestrator, "RAW_DIR", raw)
     monkeypatch.setattr(orchestrator, "CHRONOVISOR_ROOT", chronovisor_root)
@@ -186,7 +185,10 @@ def test_ingest_runtime_fixture_patches_provider_neutral_status(
 def _seed_page(chronovisor_root: Path, rel: str) -> None:
     path = chronovisor_root / "pages" / rel
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("---\ntitle: T\nupdated: 2026-01-01\n---\nbody\n")
+    path.write_text(
+        "---\ntitle: T\nupdated: 2026-01-01\nstatus: stable\n"
+        "type: knowledge\n---\nbody\n"
+    )
 
 
 def _write_packet(chronovisor_root: Path) -> Path:

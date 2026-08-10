@@ -278,7 +278,7 @@ def test_chronovisor_read_forwards_turn_trace_without_marking_page_used(
             return []
 
     monkeypatch.setattr(server, "get_store", FakeStore)
-    monkeypatch.setattr(server, "find_page", lambda _page, **_kwargs: page)
+    monkeypatch.setattr(server, "_find_page_with_alias", lambda _page: page)
     monkeypatch.setattr(server, "_append_pull_log", recorded.append)
 
     result = json.loads(
@@ -331,7 +331,7 @@ def test_mcp_client_host_and_read_field_attribution(
         session = Session()
 
     monkeypatch.setattr(server, "get_store", FakeStore)
-    monkeypatch.setattr(server, "find_page", lambda _page, **_kwargs: page)
+    monkeypatch.setattr(server, "_find_page_with_alias", lambda _page: page)
     monkeypatch.setattr(server, "_append_pull_log", recorded.append)
     monkeypatch.setattr(
         server,

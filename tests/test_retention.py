@@ -31,9 +31,9 @@ class FakeStore:
 
     def all_pages_meta(self, include_system: bool = False):
         return [
-            {"page_id": "used", "page_type": "knowledge", "updated": "2026-07-01"},
-            {"page_id": "linked", "page_type": "knowledge", "updated": "2025-01-01"},
-            {"page_id": "ref", "page_type": "reference", "updated": "2026-07-01"},
+            {"page_id": "used", "page_type": "knowledge", "updated": "2026-07-01", "status": "stable"},
+            {"page_id": "linked", "page_type": "knowledge", "updated": "2025-01-01", "status": "stable"},
+            {"page_id": "ref", "page_type": "reference", "updated": "2026-07-01", "status": "stable"},
         ]
 
     def meta(self, page_id: str):
@@ -72,7 +72,7 @@ def test_build_retention_scores_strengthens_used_pages(tmp_path: Path, monkeypat
     assert payload["pages"]["used"]["score"] > 0
     assert payload["pages"]["used"]["exposure_count"] == 2
     assert payload["pages"]["linked"]["cold_start_prior"] > 0
-    assert "linked" not in payload["archive_candidates"]
+    assert "linked" not in payload["deprecation_candidates"]
     assert payload["pages"]["ref"]["score"] == 0.0
     assert retention.retention_score("used", path=output) > 0
 

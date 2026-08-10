@@ -36,12 +36,14 @@ def _page(
     path.write_text(
         "---\n"
         f"title: {path.stem}\n"
+        "status: stable\n"
+        "type: knowledge\n"
         f"uid: {uid}\n"
         "updated: 2026-07-27\n"
         + (f"sensitivity: {sensitivity}\n" if sensitivity else "")
         + "---\n\n"
         + f"# {path.stem}\n\n"
-        + "\n".join(f"[[{value}]]" for value in links)
+        + "\n".join(f"[{value}](<{value}.md>)" for value in links)
         + "\n",
         encoding="utf-8",
     )

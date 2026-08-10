@@ -6754,8 +6754,8 @@
   ],
   "contract_hashes": {
     "decision_authority": {
-      "lane_contract_manifest_sha256": "9af11b07dc833561096127839ecafd9057390180ab0db7d531ec5d0953fdfcfe",
-      "lane_contract_case_manifest_sha256": "a3a8b84e249b4a6bf36ba3f3584bd6fae45ac4fa521c83c34637879e9b2473eb",
+      "lane_contract_manifest_sha256": "c95785b77e4c565150a2dbaecfe522f13e528d412e6f8305286731ebd83cd343",
+      "lane_contract_case_manifest_sha256": "69576c347c6989c7bd22fee5f8b8a8a0b360d6033ceff66f2693784085eecd94",
       "structured_generation_policy_sha256": "8afa74215bf6217f2a6b0de916beca77df2f48e66c241145512fb35a2d8f8915"
     },
     "production_schema_manifest": {
@@ -6771,20 +6771,20 @@
         "orphan_link": "56cec9a46f6ec572b92096765c4841a18b9b4301c36fe6dc3524fadcf55ff62f",
         "raw_replay_reconciliation": "ae8258a6cd44d22303b1ba99c646816567e0d8b983db4338624a531476214ed9",
         "read_back_repair": "56cec9a46f6ec572b92096765c4841a18b9b4301c36fe6dc3524fadcf55ff62f",
-        "retention": "63c0b5e6d8f19c8cc4451a5b24b66ab1bc021e2387dd0594512c2c2a8dc0dc7d",
+        "retention": "b9258244497c71ff7eec2cbea3fb98fa394977ced1030f83bb0e6837358e098b",
         "search_label": "a7cbeeaa849b57c82de2c3e125d650875a09840e12105ccfb87765bd5a3b759d"
       },
       "canonical_mapping_sha256": {
-        "sha256": "1541981873a0669f5ef7234c9b4490fe3c3f00872d1a584b182a3a33799fbea2",
+        "sha256": "938aceee8b448a3d1cee0403d15a2de847eedb19a99d1a94663ef23b0f37f91b",
         "semantics": "canonical name-to-schema-digest mapping"
       },
       "artifact_validator_sorted_rows_sha256": {
-        "sha256": "299b9e5c7c1b5f0195e6437890c111c82cbf63545333eebab83e7b42a870ed58",
+        "sha256": "3845e9cf4f8aed838b3c1febf50dd4667cd2d0bf275c29cc8b08635dbeafd5f7",
         "semantics": "DecisionRouter adoption validator sorted name/sha256 rows"
       }
     },
     "production_signature_manifest": {
-      "sha256": "057a9edf3c0d88f579bef8c0836535714aefba73fdba6a15b9b9072f46540f05",
+      "sha256": "6f9b30220ada8a8351af5cbd8cc66528d390c4bdff570b26c6f7c9fe628c7716",
       "semantics": "canonical action-signature policy mapping"
     },
     "repository_fixtures": {

@@ -16,6 +16,7 @@ import json
 import os
 import threading
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -23,8 +24,8 @@ from typing import Any
 from chronovisor.core.canonical_document import (
     CanonicalDocumentError,
     Namespace,
-    parse_document,
     resolve_internal_markdown_links,
+    validate_canonical_document,
 )
 from chronovisor.core.link_fix import atomic_write
 from chronovisor.core.store import (
@@ -34,7 +35,7 @@ from chronovisor.core.store import (
     okf_runtime_operation,
 )
 
-SCHEMA_VERSION = 11  # canonical YAML, paths, links, and lifecycle eligibility
+SCHEMA_VERSION = 12  # canonical YAML, exact link identities, and lifecycle eligibility
 INDEX_DIR = CHRONOVISOR_ROOT / ".index"
 PAGES_INDEX_FILE = INDEX_DIR / "pages.json"
 BACKLINKS_INDEX_FILE = INDEX_DIR / "backlinks.json"
@@ -137,6 +138,162 @@ def _read_bytes_stable(path: Path, root: Path, retries: int = 1) -> bytes | None
             return data
         last = data
     return last
+
+
+def canonical_document_path(
+    path: Path,
+    root: Path,
+    *,
+    namespace: Namespace,
+    reserved_filenames: frozenset[str],
+    require_stable: bool = False,
+) -> Path | None:
+    """Return one contained, non-reserved canonical document."""
+
+    if path.name in reserved_filenames:
+        return None
+    resolved = contained_file(path, root)
+    if resolved is None:
+        return None
+    data = _read_bytes_stable(resolved, root)
+    if data is None:
+        return None
+    try:
+        relative_path = resolved.relative_to(root.resolve(strict=True)).as_posix()
+        validate_canonical_document(
+            data,
+            namespace=namespace,
+            path=relative_path,
+            require_stable=require_stable,
+        )
+    except (CanonicalDocumentError, OSError, RuntimeError, ValueError):
+        return None
+    return resolved
+
+
+def canonical_document_paths(
+    pages_dir: Path,
+    *,
+    system_dir: Path | None = None,
+    require_stable: bool = False,
+    strict: bool = False,
+) -> list[Path]:
+    """Enumerate canonical, non-reserved documents in exact namespaces."""
+
+    namespaces: list[tuple[Path, Namespace, frozenset[str], bool]] = [
+        (pages_dir, "pages", PAGE_RESERVED_FILENAMES, True)
+    ]
+    if system_dir is not None:
+        namespaces.append((system_dir, "system", SYSTEM_RESERVED_FILENAMES, False))
+    paths: list[Path] = []
+    for directory, namespace, reserved, recursive in namespaces:
+        if not directory.is_dir():
+            continue
+        try:
+            candidates = (
+                directory.rglob("*.md") if recursive else directory.glob("*.md")
+            )
+            for path in sorted(candidates):
+                if path.name in reserved:
+                    continue
+                resolved = canonical_document_path(
+                    path,
+                    directory,
+                    namespace=namespace,
+                    reserved_filenames=reserved,
+                    require_stable=require_stable,
+                )
+                if resolved is not None:
+                    paths.append(resolved)
+                elif strict:
+                    raise CanonicalDocumentError(
+                        f"invalid canonical document: {path}"
+                    )
+        except (OSError, RuntimeError) as exc:
+            if strict:
+                raise CanonicalDocumentError(
+                    f"cannot enumerate canonical namespace: {directory}"
+                ) from exc
+            continue
+    return paths
+
+
+def stable_indexed_document_path(
+    metadata: Mapping[str, Any] | None,
+    *,
+    pages_dir: Path = PAGES_DIR,
+    system_dir: Path = SYSTEM_DIR,
+) -> Path | None:
+    """Revalidate one indexed identity against its exact stable namespace path."""
+
+    if (
+        not isinstance(metadata, Mapping)
+        or metadata.get("status") != "stable"
+        or not isinstance(metadata.get("path"), str)
+        or not isinstance(metadata.get("relative_path"), str)
+    ):
+        return None
+    is_system = metadata.get("is_system") is True
+    namespace: Namespace = "system" if is_system else "pages"
+    root = system_dir if is_system else pages_dir
+    resolved = canonical_document_path(
+        root / str(metadata["relative_path"]),
+        root,
+        namespace=namespace,
+        reserved_filenames=(
+            SYSTEM_RESERVED_FILENAMES if is_system else PAGE_RESERVED_FILENAMES
+        ),
+        require_stable=True,
+    )
+    return resolved if resolved is not None and resolved == Path(metadata["path"]) else None
+
+
+def canonical_document_path_for_id(
+    page_id: str,
+    *,
+    pages_dir: Path = PAGES_DIR,
+    system_dir: Path = SYSTEM_DIR,
+    require_stable: bool = True,
+) -> Path | None:
+    """Resolve a canonical page only when its global stem is unique."""
+
+    if (
+        not page_id
+        or page_id in {".", ".."}
+        or any(char in page_id for char in "/\\\0*?[]")
+    ):
+        return None
+    try:
+        page_candidates = list(pages_dir.rglob(f"{page_id}.md"))
+    except (OSError, RuntimeError):
+        page_candidates = []
+    candidates: list[tuple[Path, Path, Namespace, frozenset[str]]] = [
+        *(
+            (path, pages_dir, "pages", PAGE_RESERVED_FILENAMES)
+            for path in page_candidates
+        ),
+        (
+            system_dir / f"{page_id}.md",
+            system_dir,
+            "system",
+            SYSTEM_RESERVED_FILENAMES,
+        ),
+    ]
+    matches = {
+        resolved
+        for path, root, namespace, reserved in candidates
+        if (
+            resolved := canonical_document_path(
+                path,
+                root,
+                namespace=namespace,
+                reserved_filenames=reserved,
+                require_stable=require_stable,
+            )
+        )
+        is not None
+    }
+    return next(iter(matches)) if len(matches) == 1 else None
 
 
 @dataclass
@@ -275,6 +432,7 @@ class IndexStore:
     def __init__(self) -> None:
         self._lock = threading.RLock()
         self._entries: dict[str, PageEntry] = {}
+        self._canonical_entries: dict[str, PageEntry] = {}
         self._page_order: list[str] = []  # rglob scan order, preserved for parity
         self._backlinks: dict[str, list[str]] = {}
         self._tag_pages: dict[str, list[str]] = {}
@@ -313,6 +471,7 @@ class IndexStore:
         except (KeyError, TypeError, ValueError):
             return
         self._entries = entries
+        self._rebuild_canonical_entries()
         self._page_order = [pid for pid in order if pid in entries]
         self._backlinks = backlinks
         self._rebuild_associations()
@@ -444,6 +603,7 @@ class IndexStore:
                 changed = True
 
             if changed:
+                self._rebuild_canonical_entries()
                 self._rebuild_backlinks()
                 self._rebuild_associations()
                 self._persistence_dirty = True
@@ -498,10 +658,14 @@ class IndexStore:
         if data is None:
             return None
         try:
-            document = parse_document(data)
-            status = _normalize_lifecycle_status(document.metadata.get("status"))
             namespace: Namespace = "system" if is_system else "pages"
             relative_path = resolved.relative_to(root.resolve(strict=True)).as_posix()
+            document = validate_canonical_document(
+                data,
+                namespace=namespace,
+                path=relative_path,
+            )
+            status = _normalize_lifecycle_status(document.metadata.get("status"))
             resolved_links = resolve_internal_markdown_links(
                 document.body,
                 source_namespace=namespace,
@@ -514,7 +678,7 @@ class IndexStore:
         title = title_value if isinstance(title_value, str) else resolved.stem
         updated = str(fm.get("updated") or "unknown")
         outlinks = [
-            PurePosixPath(link.path).stem
+            f"{link.namespace}/{PurePosixPath(link.path).with_suffix('').as_posix()}"
             for link in resolved_links
             if PurePosixPath(link.path).name
             not in (
@@ -598,17 +762,27 @@ class IndexStore:
             if entry is None or entry.status != "stable":
                 continue
             for target in entry.outlinks:
-                if target == source_pid:
+                target_entry = self._canonical_entries.get(target)
+                if target_entry is not None and target_entry.page_id == source_pid:
                     continue
-                target_entry = self._entries.get(target)
                 if target_entry is not None and target_entry.status != "stable":
                     continue
-                src_set = seen.setdefault(target, set())
+                target_pid = target_entry.page_id if target_entry is not None else target
+                src_set = seen.setdefault(target_pid, set())
                 if source_pid in src_set:
                     continue
                 src_set.add(source_pid)
-                backlinks.setdefault(target, []).append(source_pid)
+                backlinks.setdefault(target_pid, []).append(source_pid)
         self._backlinks = backlinks
+
+    def _rebuild_canonical_entries(self) -> None:
+        self._canonical_entries = {
+            (
+                f"{'system' if entry.is_system else 'pages'}/"
+                f"{PurePosixPath(entry.relative_path).with_suffix('').as_posix()}"
+            ): entry
+            for entry in self._entries.values()
+        }
 
     def _rebuild_associations(self) -> None:
         tag_pages: dict[str, list[str]] = {}
@@ -670,12 +844,38 @@ class IndexStore:
             entry = self._entries.get(page_id)
             if entry is None:
                 return []
-            return [
-                target
-                for target in entry.outlinks
-                if (target_entry := self._entries.get(target)) is None
-                or target_entry.status == "stable"
-            ]
+            projected: list[str] = []
+            for target in entry.outlinks:
+                target_entry = self._canonical_entries.get(target)
+                if target_entry is not None and target_entry.status != "stable":
+                    continue
+                projected.append(
+                    target_entry.page_id if target_entry is not None else target
+                )
+            return projected
+
+    def canonical_outlinks(self, page_id: str) -> list[str]:
+        """Return exact ``namespace/path`` identities for canonical links."""
+
+        with self._lock:
+            entry = self._entries.get(page_id)
+            if entry is None:
+                return []
+            return list(entry.outlinks)
+
+    def all_canonical_page_keys(self, include_system: bool = False) -> set[str]:
+        """Return exact ``namespace/path`` identities for stable documents."""
+
+        with self._lock:
+            return {
+                (
+                    f"{'system' if entry.is_system else 'pages'}/"
+                    f"{PurePosixPath(entry.relative_path).with_suffix('').as_posix()}"
+                )
+                for entry in self._entries.values()
+                if entry.status == "stable"
+                and (include_system or not entry.is_system)
+            }
 
     def raw_keywords(self, page_id: str) -> list[str]:
         """Return the page's frontmatter ``raw_keywords`` list.

@@ -16,10 +16,7 @@ from chronovisor.core.canonical_document import (
     patch_document_metadata,
     validate_canonical_document,
 )
-from chronovisor.core.index_store import (
-    PAGE_RESERVED_FILENAMES,
-    SYSTEM_RESERVED_FILENAMES,
-)
+from chronovisor.core.index_store import canonical_document_paths
 
 
 def _runtime() -> ModuleType:
@@ -79,16 +76,16 @@ def _prepare_context(
         # leave runtime/index artifacts untouched, so scan the corpus directly.
         from chronovisor.core import store as _wiki
 
-        page_paths = [
-            path
-            for path in _runtime().PAGES_DIR.rglob("*.md")
-            if path.name not in PAGE_RESERVED_FILENAMES
-        ]
-        system_paths = [
-            path
-            for path in _wiki.SYSTEM_DIR.rglob("*.md")
-            if path.name not in SYSTEM_RESERVED_FILENAMES
-        ]
+        page_paths = canonical_document_paths(
+            _runtime().PAGES_DIR,
+            require_stable=True,
+        )
+        all_paths = canonical_document_paths(
+            _runtime().PAGES_DIR,
+            system_dir=_wiki.SYSTEM_DIR,
+            require_stable=True,
+        )
+        system_paths = all_paths[len(page_paths) :]
         allowed_targets: set[tuple[Namespace, str]] = set()
         for raw_namespace, root, paths in (
             ("pages", _runtime().PAGES_DIR, page_paths),
@@ -101,13 +98,12 @@ def _prepare_context(
                     .relative_to(root.resolve(strict=False))
                     .as_posix()
                 )
-                document = validate_canonical_document(
+                validate_canonical_document(
                     path.read_bytes(),
                     namespace=namespace,
                     path=relative_path,
                 )
-                if document.metadata["status"] == "stable":
-                    allowed_targets.add((namespace, relative_path))
+                allowed_targets.add((namespace, relative_path))
         reserved_system_ids = {
             _normalize_for_collision(path.stem) for path in system_paths
         }

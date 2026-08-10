@@ -1581,7 +1581,6 @@ def test_replay_ingest_cannot_restore_claim_removed_by_applied_correction(
     )
     monkeypatch.setattr(store, "PAGES_DIR", pages)
     monkeypatch.setattr(ingest, "PAGES_DIR", pages)
-    monkeypatch.setattr(ingest, "INDEX_FILE", tmp_path / "index.md")
     monkeypatch.setattr(ingest, "LOG_FILE", tmp_path / "log.md")
     monkeypatch.setattr(page_mutation, "PAGES_DIR", pages)
     monkeypatch.setattr(page_mutation, "CHRONOVISOR_ROOT", tmp_path)

@@ -1277,7 +1277,10 @@ def dispatch(args: argparse.Namespace) -> int:
             print(json.dumps(public, ensure_ascii=False, indent=2, default=str))
         else:
             print(f"pages\t{public['counts']['pages']}")
-            print(f"archive_candidates\t{public['counts']['archive_candidates']}")
+            print(
+                "deprecation_candidates\t"
+                f"{public['counts']['deprecation_candidates']}"
+            )
         return 0
     if args.command == "reflect":
         from chronovisor.ops.reflection import write_reflection_page

@@ -113,7 +113,7 @@ def page_claims(page_id: str, *, source_raw: str = "", op: str = "index") -> lis
     entities_value = meta.get("entities")
     entities = entities_value if isinstance(entities_value, list) else []
     page_type = meta.get("type") if isinstance(meta.get("type"), str) else "knowledge"
-    status = meta.get("status") if isinstance(meta.get("status"), str) else "active"
+    status = meta.get("status") if isinstance(meta.get("status"), str) else ""
     base = {
         "recorded_at": datetime.now().isoformat(timespec="seconds"),
         "source_page": page_id,
@@ -122,8 +122,8 @@ def page_claims(page_id: str, *, source_raw: str = "", op: str = "index") -> lis
         "page_type": page_type,
         "entities": entities,
         "valid_from": updated,
-        "valid_to": None if status == "active" else updated,
-        "status": "active" if status == "active" else "expired",
+        "valid_to": None if status == "stable" else updated,
+        "status": "active" if status == "stable" else "expired",
         "source_sha256": source_sha256,
     }
     claims: list[dict[str, Any]] = [

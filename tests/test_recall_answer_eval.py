@@ -1155,7 +1155,15 @@ def test_field_environment_corpus_ignores_reserved_documents(
     pages = tmp_path / "pages"
     concept = pages / "concept-index.md"
     concept.parent.mkdir(parents=True)
-    concept.write_text("concept", encoding="utf-8")
+    concept.write_text(
+        "---\ntitle: Concept\nstatus: stable\ntype: knowledge\n---\nconcept\n",
+        encoding="utf-8",
+    )
+    draft = pages / "draft.md"
+    draft.write_text(
+        "---\ntitle: Draft\nstatus: draft\ntype: knowledge\n---\ndraft\n",
+        encoding="utf-8",
+    )
     for relative in (
         "index.md",
         "log.md",
@@ -1171,14 +1179,14 @@ def test_field_environment_corpus_ignores_reserved_documents(
     outside.write_text("outside", encoding="utf-8")
     (pages / "outside-link.md").symlink_to(outside)
     monkeypatch.setattr(recall_answer_eval, "PAGES_DIR", pages)
-    monkeypatch.setattr(recall_answer_eval, "INDEX_FILE", tmp_path / "index.json")
 
     before = recall_answer_eval.builtin_field_environment_identity()["corpus_sha256"]
     (pages / "nested" / "index.md").write_text("changed", encoding="utf-8")
+    draft.write_text(draft.read_text(encoding="utf-8") + "changed", encoding="utf-8")
     reserved_changed = recall_answer_eval.builtin_field_environment_identity()[
         "corpus_sha256"
     ]
-    concept.write_text("concept changed", encoding="utf-8")
+    concept.write_text(concept.read_text(encoding="utf-8") + "changed", encoding="utf-8")
     concept_changed = recall_answer_eval.builtin_field_environment_identity()[
         "corpus_sha256"
     ]

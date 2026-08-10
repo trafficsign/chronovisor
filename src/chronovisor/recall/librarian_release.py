@@ -10,11 +10,15 @@ import tempfile
 from collections import Counter
 from collections.abc import Mapping
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
+from chronovisor.core.canonical_document import (
+    Namespace,
+    parse_document,
+    resolve_internal_markdown_links,
+)
 from chronovisor.core.durable_state import write_sealed_json
-from chronovisor.core.link_fix import extract_wiki_links
 from chronovisor.core.migration_snapshot import (
     cleanup_expired_restore_points,
     restore_drill,
@@ -67,12 +71,8 @@ def _json(path: Path) -> dict[str, Any]:
 
 def _scope_generation(root: Path, state: Mapping[str, Any]) -> str:
     rows = []
-    for uid, row in sorted((state.get("pages") or {}).items()):
-        if not isinstance(row, Mapping) or row.get("status") == "superseded":
-            continue
+    for uid, row in sorted(PageRegistry(root).stable_pages(state).items()):
         path = root / str(row.get("path") or "")
-        if not path.is_file():
-            continue
         stat = path.stat()
         rows.append((str(uid), str(row.get("path")), stat.st_size, stat.st_mtime_ns))
     encoded = json.dumps(rows, sort_keys=True, separators=(",", ":")).encode()
@@ -215,34 +215,38 @@ def verify_uid_link_foundation(root: Path = CHRONOVISOR_ROOT) -> dict[str, Any]:
     registry = PageRegistry(root)
     state = registry.ensure_manifest(write=True)["registry"]
     index = build_uid_link_index(root, registry=registry, write=True)
-    active = {
-        uid: row
-        for uid, row in state["pages"].items()
-        if isinstance(row, Mapping)
-        and row.get("status") != "superseded"
-        and (root / str(row.get("path") or "")).is_file()
-    }
-    legacy_links = 0
-    for row in active.values():
-        text = (root / str(row["path"])).read_text(encoding="utf-8")
-        legacy_links += len(extract_wiki_links(text, strip=True))
-    projected_links = int(index["edge_count"]) + int(index["unresolved_count"])
-    if projected_links != legacy_links:
-        raise RuntimeError(
-            f"UID graph parity failed: {projected_links} != {legacy_links}"
+    stable = registry.stable_pages(state)
+    canonical_links = 0
+    for row in stable.values():
+        path = root / str(row["path"])
+        document = parse_document(path.read_bytes())
+        relative = path.relative_to(root)
+        namespace: Namespace = "system" if relative.parts[0] == "system" else "pages"
+        source_path = PurePosixPath(*relative.parts[1:]).as_posix()
+        canonical_links += len(
+            resolve_internal_markdown_links(
+                document.body,
+                source_namespace=namespace,
+                source_path=source_path,
+            )
         )
-    if len(active) != len(set(active)):
-        raise RuntimeError("duplicate active UID")
-    paths = [str(row["path"]) for row in active.values()]
+    projected_links = int(index["edge_count"]) + int(index["unresolved_count"])
+    if projected_links != canonical_links:
+        raise RuntimeError(
+            f"UID graph parity failed: {projected_links} != {canonical_links}"
+        )
+    if len(stable) != len(set(stable)):
+        raise RuntimeError("duplicate stable UID")
+    paths = [str(row["path"]) for row in stable.values()]
     if len(paths) != len(set(paths)):
-        raise RuntimeError("duplicate active page path")
+        raise RuntimeError("duplicate stable page path")
     ambiguous = state.get("ambiguous_keys")
     collision_count = len(ambiguous) if isinstance(ambiguous, dict) else 0
     receipt = {
         "status": "verified",
-        "active_pages": len(active),
-        "unique_uids": len(active),
-        "legacy_link_count": legacy_links,
+        "stable_pages": len(stable),
+        "unique_uids": len(stable),
+        "canonical_link_count": canonical_links,
         "uid_edge_count": int(index["edge_count"]),
         "unresolved_count": int(index["unresolved_count"]),
         "graph_parity": True,
@@ -294,20 +298,14 @@ def reconcile_librarian_state(
 
     registry = PageRegistry(root)
     state = registry.ensure_manifest(write=True)["registry"]
-    active = {
-        uid: row
-        for uid, row in state["pages"].items()
-        if isinstance(row, Mapping)
-        and row.get("status") != "superseded"
-        and (root / str(row.get("path") or "")).is_file()
-    }
-    total = len(active)
+    stable = registry.stable_pages(state)
+    total = len(stable)
     status_counts = Counter(
         str(row.get("classification_status") or "unclassified")
-        for row in active.values()
+        for row in stable.values()
     )
     classified = sum(
-        isinstance(row.get("classification"), Mapping) for row in active.values()
+        isinstance(row.get("classification"), Mapping) for row in stable.values()
     )
     terminal = status_counts["adopted"] + status_counts["held"]
     link_index = build_uid_link_index(root, registry=registry, write=True)
@@ -435,11 +433,11 @@ def reconcile_librarian_state(
             "queue_items": len(queue_items),
         },
         "growth": {
-            "active_pages": total,
+            "stable_pages": total,
             "raw_logical_units": raw_units,
             "active_page_delta": page_delta,
             "raw_unit_delta": raw_delta,
-            "active_pages_per_day": page_delta / baseline_days,
+            "stable_pages_per_day": page_delta / baseline_days,
             "raw_units_per_day": raw_delta / baseline_days,
             "baseline_at": baseline.get("captured_at"),
         },

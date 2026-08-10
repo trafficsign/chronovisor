@@ -82,8 +82,13 @@ SCHEMA_FILE = DEFAULT_CONTEXT.schema_file
 
 
 def all_pages() -> list[Path]:
-    """Return all wiki pages (supports subdirectories)."""
-    return list(PAGES_DIR.rglob("*.md"))
+    """Return stable, non-reserved Wiki pages (supports subdirectories)."""
+
+    from chronovisor.core.index_store import (
+        canonical_document_paths,
+    )
+
+    return canonical_document_paths(PAGES_DIR, require_stable=True)
 
 
 def _valid_page_id(page_id: object) -> bool:
@@ -271,6 +276,8 @@ SCHEMA_CONTENT = """\
 ---
 title: Chronovisor Schema
 updated: 2026-04-10
+status: stable
+type: knowledge
 ---
 
 # Chronovisor Schema
@@ -283,17 +290,19 @@ updated: 2026-04-10
 - Example: `jt-v10-probability-contexts.md`
 
 ## Frontmatter
-Minimal, AI-first. Only two fields:
+Minimal canonical fields:
 ```yaml
 ---
 title: Page Title
 updated: YYYY-MM-DD
+status: stable
+type: knowledge
 ---
 ```
 
 ## Cross-references
-Use `[[wiki-link]]` notation.
-- Example: `[[jt-v10-probability-contexts]]`
+Use relative canonical Markdown links.
+- Example: `[JT v10 probability contexts](<jt-v10-probability-contexts.md>)`
 - Links are bidirectional (backlinks tracked by read endpoint).
 
 ## Update Rules

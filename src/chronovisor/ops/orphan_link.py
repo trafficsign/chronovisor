@@ -6,7 +6,7 @@ frontier-approved suggestion with a content compare-and-swap.
 
 The report lists the existing
 ``source`` pages most likely to benefit from gaining an inbound
-``[[orphan]]`` link. Direction matters: this module proposes
+canonical Markdown link. Direction matters: this module proposes
 ``source_page → orphan_page`` edges, NOT the reverse — adding outbound
 links from the orphan would not change ``orphan_count``.
 
@@ -41,6 +41,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
+from chronovisor.core import canonical_document, index_store
 from chronovisor.core.hashutil import sha256_bytes as _sha256_bytes
 from chronovisor.core.link_fix import atomic_write, protected_spans
 from chronovisor.core.page_mutation import (
@@ -51,7 +52,7 @@ from chronovisor.core.runtime_config import (
     load_decision_router_config,
     runtime_repo_root,
 )
-from chronovisor.core.store import CHRONOVISOR_ROOT, find_page
+from chronovisor.core.store import CHRONOVISOR_ROOT, PAGES_DIR, SYSTEM_DIR
 from chronovisor.decision.decision_authority import (
     compare_semantic_authority,
     current_semantic_authority,
@@ -65,7 +66,7 @@ from chronovisor.decision.semantic_hold import is_local_semantic_no_quorum
 
 DECISIONS_FILE = CHRONOVISOR_ROOT / "autonomy" / "orphan-link-decisions.jsonl"
 PROJECT_ROOT = runtime_repo_root()
-RESOLVER_VERSION = "orphan-link-v1"
+RESOLVER_VERSION = "orphan-link-v2-canonical-markdown"
 DECISION_LANE = "orphan_link"
 ORPHAN_LINK_RUNTIME_ROLE = "lint.orphan_link"
 
@@ -118,7 +119,7 @@ You will be given:
   - TARGET page: title + body head
 
 Your job: judge whether the SOURCE page's content would naturally
-warrant a [[wiki-link]] to TARGET, and where to place it.
+warrant a canonical Markdown link to TARGET, and where to place it.
 
 Output a SINGLE JSON object with exactly these fields, no extra text:
 
@@ -198,7 +199,7 @@ def parse_llm_response(raw: str) -> dict | None:
 
 def _page_head(page_id: str, max_chars: int = 500) -> str:
     """Return ``title + first N body chars`` for prompt construction."""
-    path = find_page(page_id)
+    path = _canonical_page_path(page_id)
     if path is None:
         return ""
     try:
@@ -418,9 +419,7 @@ def run_dry_run(
     before committing to the full ~335-orphan sweep).
     """
     if store is None:
-        from chronovisor.core.index_store import get_store
-
-        store = get_store()
+        store = index_store.get_store()
         store.refresh()
     orphans = store.orphans(include_system=False)
     if orphan_limit is not None:
@@ -481,7 +480,7 @@ def run_dry_run(
 
 
 def _content_hash(page_id: str) -> str:
-    path = find_page(page_id)
+    path = _canonical_page_path(page_id)
     if path is None:
         return "missing"
     try:
@@ -490,27 +489,40 @@ def _content_hash(page_id: str) -> str:
         return "unreadable"
 
 
-def _wiki_link_spans(text: str) -> list[tuple[int, int]]:
-    """Return spans for complete and dangling wiki links.
+def _canonical_page_path(page_id: str) -> Path | None:
+    path = index_store.canonical_document_path_for_id(
+        page_id,
+        pages_dir=PAGES_DIR,
+        system_dir=SYSTEM_DIR,
+    )
+    if path is None:
+        return None
+    try:
+        path.relative_to(PAGES_DIR.resolve(strict=True))
+    except (OSError, RuntimeError, ValueError):
+        return None
+    return path
 
-    Anchors inside an existing ``[[...]]`` must never be wrapped again: doing
-    so creates nested markup that the wiki-link parser cannot recover from.
-    """
-    spans: list[tuple[int, int]] = []
-    offset = 0
-    while True:
-        start = text.find("[[", offset)
-        if start < 0:
-            break
-        end = text.find("]]", start + 2)
-        if end < 0:
-            line_end = text.find("\n", start + 2)
-            spans.append((start, len(text) if line_end < 0 else line_end))
-            offset = len(text) if line_end < 0 else line_end + 1
-            continue
-        spans.append((start, end + 2))
-        offset = end + 2
-    return spans
+
+def _relative_page_path(path: Path) -> str:
+    return path.relative_to(PAGES_DIR.resolve(strict=True)).as_posix()
+
+
+def _has_target_link(data: bytes, *, source_path: str, target_path: str) -> bool:
+    document = canonical_document.validate_canonical_document(
+        data,
+        namespace="pages",
+        path=source_path,
+        require_stable=True,
+    )
+    return any(
+        link.namespace == "pages" and link.path == target_path
+        for link in canonical_document.resolve_internal_markdown_links(
+            document.body,
+            source_namespace="pages",
+            source_path=source_path,
+        )
+    )
 
 
 def _sanitize_section_heading(value: object) -> str:
@@ -530,25 +542,52 @@ def _sanitize_section_heading(value: object) -> str:
 
 def _render_suggestion_postimage(
     original: str,
-    orphan_id: str,
     suggestion: Suggestion,
+    *,
+    source_path: str,
+    target_path: str,
 ) -> str:
     """Render the exact source-page postimage without mutating the Wiki."""
-    updated = original
+    data = original.encode("utf-8")
+    document = canonical_document.validate_canonical_document(
+        data,
+        namespace="pages",
+        path=source_path,
+        require_stable=True,
+    )
+    body = document.body.decode("utf-8")
+    prefix = data[: len(data) - len(document.body)] if document.body else data
     anchor = suggestion.suggested_anchor.strip()
     if (
         "\n" in anchor
         or "\r" in anchor
-        or "[[" in anchor
-        or "]]" in anchor
         or len(anchor) > 200
     ):
         anchor = ""
+    link = canonical_document.format_internal_markdown_link(
+        anchor or Path(target_path).stem,
+        source_namespace="pages",
+        source_path=source_path,
+        target_namespace="pages",
+        target_path=target_path,
+    )
+
+    def validated(updated_body: str) -> str:
+        postimage = prefix + updated_body.encode("utf-8")
+        canonical_document.validate_canonical_document(
+            postimage,
+            namespace="pages",
+            path=source_path,
+            require_stable=True,
+        )
+        return postimage.decode("utf-8")
+
     if anchor:
-        spans = sorted([*protected_spans(original), *_wiki_link_spans(original)])
-        positions = [
-            match.start() for match in re.finditer(re.escape(anchor), original)
+        spans = [
+            *protected_spans(body),
+            *canonical_document.markdown_link_spans(body),
         ]
+        positions = [match.start() for match in re.finditer(re.escape(anchor), body)]
         position = next(
             (
                 pos
@@ -561,15 +600,14 @@ def _render_suggestion_postimage(
             None,
         )
         if position is not None:
-            replacement = f"[[{orphan_id}|{anchor}]]"
-            updated = (
-                original[:position] + replacement + original[position + len(anchor) :]
-            )
-    if updated == original:
-        section = _sanitize_section_heading(suggestion.suggested_section)
-        suffix = "" if original.endswith("\n") else "\n"
-        updated = f"{original}{suffix}\n## {section}\n\n- [[{orphan_id}]]\n"
-    return updated
+            candidate = body[:position] + link + body[position + len(anchor) :]
+            try:
+                return validated(candidate)
+            except canonical_document.CanonicalDocumentError:
+                pass
+    section = _sanitize_section_heading(suggestion.suggested_section)
+    suffix = "" if body.endswith("\n") else "\n"
+    return validated(f"{body}{suffix}\n## {section}\n\n- {link}\n")
 
 
 def _prepare_suggestion_effect(
@@ -582,8 +620,8 @@ def _prepare_suggestion_effect(
     claim_owner: str,
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
     """Build a durable, exact-CAS page effect from current page bytes."""
-    source_path = find_page(suggestion.source_page_id)
-    target_path = find_page(orphan_id)
+    source_path = _canonical_page_path(suggestion.source_page_id)
+    target_path = _canonical_page_path(orphan_id)
     if source_path is None or target_path is None:
         return None, {"status": "error", "reason": "source_or_target_missing"}
     try:
@@ -592,7 +630,17 @@ def _prepare_suggestion_effect(
         original = source_preimage.decode("utf-8")
     except (OSError, UnicodeDecodeError) as exc:
         return None, {"status": "error", "reason": f"read_error:{exc}"}
-    if re.search(r"\[\[" + re.escape(orphan_id) + r"(?:[#|\]])", original):
+    source_relative = _relative_page_path(source_path)
+    target_relative = _relative_page_path(target_path)
+    try:
+        already_linked = _has_target_link(
+            source_preimage,
+            source_path=source_relative,
+            target_path=target_relative,
+        )
+    except canonical_document.CanonicalDocumentError as exc:
+        return None, {"status": "error", "reason": f"canonical_error:{exc}"}
+    if already_linked:
         return None, {
             "status": "already_applied",
             "source": suggestion.source_page_id,
@@ -600,7 +648,15 @@ def _prepare_suggestion_effect(
             "recovery_only": False,
             "semantic_effect": False,
         }
-    postimage = _render_suggestion_postimage(original, orphan_id, suggestion)
+    try:
+        postimage = _render_suggestion_postimage(
+            original,
+            suggestion,
+            source_path=source_relative,
+            target_path=target_relative,
+        )
+    except canonical_document.CanonicalDocumentError as exc:
+        return None, {"status": "error", "reason": f"canonical_error:{exc}"}
     postimage_bytes = postimage.encode("utf-8")
     return (
         {
@@ -739,8 +795,8 @@ def _apply_prepared_effect(payload: Mapping[str, Any]) -> dict[str, Any]:
     """Apply only the exact postimage authorized by a durable effect artifact."""
     source_id = str(payload.get("source_page_id") or "")
     target_id = str(payload.get("target_page_id") or "")
-    source_path = find_page(source_id)
-    target_path = find_page(target_id)
+    source_path = _canonical_page_path(source_id)
+    target_path = _canonical_page_path(target_id)
     if source_path is None or target_path is None:
         return {"status": "error", "reason": "source_or_target_missing"}
     postimage = payload.get("source_postimage")
@@ -749,8 +805,24 @@ def _apply_prepared_effect(payload: Mapping[str, Any]) -> dict[str, Any]:
     postimage_bytes = postimage.encode("utf-8")
     if _sha256_bytes(postimage_bytes) != payload.get("source_postimage_sha256"):
         return {"status": "error", "reason": "source_postimage_hash_mismatch"}
+    source_relative = _relative_page_path(source_path)
+    target_relative = _relative_page_path(target_path)
+    try:
+        if not _has_target_link(
+            postimage_bytes,
+            source_path=source_relative,
+            target_path=target_relative,
+        ):
+            return {"status": "error", "reason": "source_postimage_link_missing"}
+    except canonical_document.CanonicalDocumentError as exc:
+        return {"status": "error", "reason": f"canonical_error:{exc}"}
     try:
         with chronovisor_mutation_lock():
+            if (
+                _canonical_page_path(source_id) != source_path
+                or _canonical_page_path(target_id) != target_path
+            ):
+                return {"status": "retry", "reason": "source_or_target_changed"}
             source_before = source_path.read_bytes()
             target_before = target_path.read_bytes()
             source_hash = _sha256_bytes(source_before)
@@ -834,8 +906,8 @@ def _recover_pending_effects(
                     }
                 )
             continue
-        source_path = find_page(str(payload.get("source_page_id") or ""))
-        target_path = find_page(str(payload.get("target_page_id") or ""))
+        source_path = _canonical_page_path(str(payload.get("source_page_id") or ""))
+        target_path = _canonical_page_path(str(payload.get("target_page_id") or ""))
         try:
             source_hash = (
                 _sha256_bytes(source_path.read_bytes())
@@ -903,8 +975,8 @@ def apply_suggestion(
     dry_run: bool = False,
 ) -> dict[str, Any]:
     """Apply one frontier-approved inbound link with a content CAS."""
-    source_path = find_page(suggestion.source_page_id)
-    target_path = find_page(orphan_id)
+    source_path = _canonical_page_path(suggestion.source_page_id)
+    target_path = _canonical_page_path(orphan_id)
     if source_path is None or target_path is None:
         return {"status": "error", "reason": "source_or_target_missing"}
     try:
@@ -912,14 +984,32 @@ def apply_suggestion(
         target_preimage = target_path.read_bytes()
     except OSError as exc:
         return {"status": "error", "reason": f"read_error:{exc}"}
-    if re.search(r"\[\[" + re.escape(orphan_id) + r"(?:[#|\]])", original):
+    source_relative = _relative_page_path(source_path)
+    target_relative = _relative_page_path(target_path)
+    try:
+        already_linked = _has_target_link(
+            original.encode("utf-8"),
+            source_path=source_relative,
+            target_path=target_relative,
+        )
+    except canonical_document.CanonicalDocumentError as exc:
+        return {"status": "error", "reason": f"canonical_error:{exc}"}
+    if already_linked:
         return {
             "status": "already_applied",
             "source": suggestion.source_page_id,
             "target": orphan_id,
         }
 
-    updated = _render_suggestion_postimage(original, orphan_id, suggestion)
+    try:
+        updated = _render_suggestion_postimage(
+            original,
+            suggestion,
+            source_path=source_relative,
+            target_path=target_relative,
+        )
+    except canonical_document.CanonicalDocumentError as exc:
+        return {"status": "error", "reason": f"canonical_error:{exc}"}
     if dry_run:
         return {
             "status": "dry_run",
@@ -931,6 +1021,11 @@ def apply_suggestion(
     try:
         with chronovisor_mutation_lock():
             try:
+                if (
+                    _canonical_page_path(suggestion.source_page_id) != source_path
+                    or _canonical_page_path(orphan_id) != target_path
+                ):
+                    return {"status": "retry", "reason": "source_or_target_changed"}
                 if source_path.read_text(encoding="utf-8") != original:
                     return {"status": "retry", "reason": "source_changed_before_apply"}
                 if target_path.read_bytes() != target_preimage:
@@ -947,7 +1042,15 @@ def apply_suggestion(
                     except OSError:
                         pass
                 return {"status": "error", "reason": f"write_error:{exc}"}
-            if f"[[{orphan_id}" not in written or target_after != target_preimage:
+            try:
+                verified = _has_target_link(
+                    written.encode("utf-8"),
+                    source_path=source_relative,
+                    target_path=target_relative,
+                )
+            except canonical_document.CanonicalDocumentError:
+                verified = False
+            if not verified or target_after != target_preimage:
                 # Roll back under the same lock, and only while the page still
                 # contains our exact bytes.  A foreign post-write edit wins.
                 try:
@@ -1083,9 +1186,7 @@ def run_autonomous(
     )
     recovered_keys = {str(row.get("key") or "") for row in recovered}
     if store is None:
-        from chronovisor.core.index_store import get_store
-
-        store = get_store()
+        store = index_store.get_store()
         store.refresh()
     cycle_budget = budget or CycleBudget(
         max_local_calls=max(1, orphan_limit * max_candidates),

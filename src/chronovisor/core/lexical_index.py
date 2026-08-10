@@ -18,13 +18,15 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from chronovisor.core.frontmatter import parse as parse_frontmatter
+from chronovisor.core.canonical_document import (
+    CanonicalDocumentError,
+    Namespace,
+    validate_canonical_document,
+)
 from chronovisor.core.search_types import ScoredPage, tokenize
-from chronovisor.core.store import PAGES_DIR, page_id_from_path
+from chronovisor.core.store import PAGES_DIR, SYSTEM_DIR, page_id_from_path
 
-SCHEMA_VERSION = 5
-ACTIVE_STATUS = "active"
-VALID_STATUSES = {"active", "deprecated", "archived"}
+SCHEMA_VERSION = 6
 VALID_PAGE_TYPES = {
     "knowledge",
     "reference",
@@ -35,11 +37,6 @@ VALID_PAGE_TYPES = {
     "lesson",
     "decision",
 }
-
-
-def _status(value: object) -> str:
-    normalized = str(value or "").strip().lower()
-    return normalized if normalized in VALID_STATUSES else ACTIVE_STATUS
 
 
 def _page_type(value: object, folder: str) -> str:
@@ -276,12 +273,33 @@ class LexicalIndex:
             prepared_anchors: list[tuple[str, str, float]] = []
             prepared_postings: list[tuple[str, str, int]] = []
             prepared_ids: list[str] = []
+            ineligible_ids: list[str] = []
             for page_id, (path, mtime_ns, size) in changed:
                 try:
-                    content = path.read_text(encoding="utf-8")
-                except (OSError, UnicodeDecodeError):
+                    data = path.read_bytes()
+                    content = data.decode("utf-8")
+                    namespace_root, namespace_name = next(
+                        (
+                            (parent, "system" if parent.name == "system" else "pages")
+                            for parent in (PAGES_DIR, SYSTEM_DIR, *path.parents)
+                            if parent.name in {"pages", "system"}
+                            and path.is_relative_to(parent)
+                        ),
+                        (path.parent, "pages"),
+                    )
+                    namespace: Namespace = (
+                        "system" if namespace_name == "system" else "pages"
+                    )
+                    document = validate_canonical_document(
+                        data,
+                        namespace=namespace,
+                        path=path.relative_to(namespace_root).as_posix(),
+                        require_stable=True,
+                    )
+                except (OSError, UnicodeDecodeError, CanonicalDocumentError):
+                    ineligible_ids.append(page_id)
                     continue
-                frontmatter, _body = parse_frontmatter(content)
+                frontmatter = document.metadata
                 title_value = frontmatter.get("title")
                 title = (
                     title_value.strip()
@@ -311,7 +329,7 @@ class LexicalIndex:
                         title,
                         folder,
                         updated,
-                        _status(frontmatter.get("status")),
+                        "stable",
                         superseded_by,
                         page_type,
                         _sensitivity(frontmatter.get("sensitivity"), folder),
@@ -358,7 +376,7 @@ class LexicalIndex:
                 )
             with connection:
                 affected_term_ids: set[int] = set()
-                for page_id in (*removed, *prepared_ids):
+                for page_id in {*removed, *prepared_ids, *ineligible_ids}:
                     page_ordinal = ordinals.get(page_id)
                     if page_ordinal is not None:
                         affected_term_ids.update(

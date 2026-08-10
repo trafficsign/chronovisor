@@ -15,13 +15,17 @@ except ModuleNotFoundError:
     from mcp.server.mcpserver import Context
     from mcp.server.mcpserver import MCPServer as FastMCP
 from chronovisor.core.frontmatter import parse as _frontmatter_parse
-from chronovisor.core.index_store import get_store
+from chronovisor.core.index_store import (
+    PAGE_RESERVED_FILENAMES,
+    canonical_document_path,
+    canonical_document_path_for_id,
+    get_store,
+    stable_indexed_document_path,
+)
 from chronovisor.core.store import (
     CHRONOVISOR_ROOT,
     LOG_FILE,
     RAW_DIR,
-    SYSTEM_DIR,
-    find_page,
     init_chronovisor,
     okf_runtime_operation,
 )
@@ -131,26 +135,35 @@ def _find_page_with_alias(page_id: str) -> Path | None:
     """Resolve a canonical page or a durable legacy page-id alias."""
 
     registry = PageRegistry(CHRONOVISOR_ROOT)
-    try:
-        registry_path = registry.path_for(page_id)
-        if registry_path is not None:
-            return registry_path
-    except PageRegistryError:
-        # Once the registry exists, ambiguous/corrupt identity must fail closed.
-        # Falling back to stem lookup could select an arbitrary duplicate.
-        if registry.path.exists():
+    if registry.path.exists():
+        try:
+            return registry.path_for(page_id)
+        except PageRegistryError:
             return None
-    path = find_page(page_id)
+    path = canonical_document_path_for_id(
+        page_id,
+        pages_dir=CHRONOVISOR_ROOT / "pages",
+        system_dir=CHRONOVISOR_ROOT / "system",
+    )
     if path is not None:
         return path
     try:
         from chronovisor.core.alias_store import resolve_alias_path
 
-        return resolve_alias_path(page_id)
+        alias_path = resolve_alias_path(page_id)
     except Exception:
         # Read paths remain fail-closed to a normal not-found result when the
         # optional alias ledger is absent or malformed.
         return None
+    if alias_path is None:
+        return None
+    return canonical_document_path(
+        alias_path,
+        CHRONOVISOR_ROOT / "pages",
+        namespace="pages",
+        reserved_filenames=PAGE_RESERVED_FILENAMES,
+        require_stable=True,
+    )
 
 
 @mcp.tool()
@@ -173,16 +186,6 @@ def chronovisor_read(
     store.refresh()
 
     path = _find_page_with_alias(page)
-    allow_alias = path is not None and path.stem != page
-    if not path:
-        # Check system/ directory
-        path = SYSTEM_DIR / f"{page}.md"
-    path = find_page(
-        page,
-        candidate=path,
-        allowed_roots=(CHRONOVISOR_ROOT / "pages", SYSTEM_DIR),
-        allow_alias=allow_alias,
-    )
     if path is None:
         return json.dumps({"error": f"Page '{page}' not found"})
 
@@ -612,8 +615,8 @@ def chronovisor_init() -> str:
         }
     system_pages = {}
     for page_id in ("user-profile", "current-state", "lessons-learned"):
-        path = SYSTEM_DIR / f"{page_id}.md"
-        if not path.exists():
+        path = _find_page_with_alias(page_id)
+        if path is None:
             system_pages[page_id] = {"error": f"Page '{page_id}' not found"}
             continue
         content = path.read_text()
@@ -706,11 +709,19 @@ def _direct_search_hits(
     query_terms = query.lower().split()
     direct_hits = []
     for result in results:
-        path = find_page(result.page_id)
-        content = path.read_text() if path else None
-        snippet = (
-            _extract_snippet(content, query_terms) if content is not None else None
+        meta = store.meta(result.page_id)
+        path = stable_indexed_document_path(
+            meta,
+            pages_dir=CHRONOVISOR_ROOT / "pages",
+            system_dir=CHRONOVISOR_ROOT / "system",
         )
+        if path is None:
+            continue
+        try:
+            content = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        snippet = _extract_snippet(content, query_terms)
         identity = registry_row(result.page_id)
         classification = identity.get("classification")
         direct_hits.append(

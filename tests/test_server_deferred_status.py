@@ -122,7 +122,6 @@ def test_chronovisor_init_reports_deferred_counts_in_parallel_bootstrap_status(
         )
     scans = _patch_deferred_statuses(monkeypatch)
     monkeypatch.setattr(server, "RAW_DIR", raw_dir)
-    monkeypatch.setattr(server, "SYSTEM_DIR", system_dir)
     monkeypatch.setattr(server, "CHRONOVISOR_ROOT", tmp_path)
     monkeypatch.setattr(server, "get_store", lambda: _Store())
     monkeypatch.setattr(

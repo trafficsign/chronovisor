@@ -416,7 +416,13 @@ def test_chronovisor_search_uses_reranker_only_when_enabled(monkeypatch) -> None
     )
     monkeypatch.setattr(reranker, "rerank_results", fake_rerank)
     monkeypatch.setattr(server, "get_store", lambda: FakeStore())
-    monkeypatch.setattr(server, "find_page", lambda _page_id: None)
+    monkeypatch.setattr(
+        server,
+        "_direct_search_hits",
+        lambda results, **_kwargs: [
+            {"page_id": result.page_id} for result in results
+        ],
+    )
 
     tool_fn = (
         server.chronovisor_search.fn
@@ -468,7 +474,13 @@ def test_chronovisor_search_reranks_after_tag_filter(monkeypatch) -> None:
     )
     monkeypatch.setattr(reranker, "rerank_results", fake_rerank)
     monkeypatch.setattr(server, "get_store", lambda: FakeStore())
-    monkeypatch.setattr(server, "find_page", lambda _page_id: None)
+    monkeypatch.setattr(
+        server,
+        "_direct_search_hits",
+        lambda results, **_kwargs: [
+            {"page_id": result.page_id} for result in results
+        ],
+    )
 
     tool_fn = (
         server.chronovisor_search.fn

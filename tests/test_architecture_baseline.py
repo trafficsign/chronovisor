@@ -1698,6 +1698,52 @@ X2_RETIRED_RESERVED_SCAN_SITE_IDS = (
     "arch:9173bd8b2fc7f59a7afd7e9959fb2ff9c8e98115fb8c4d807e4a475189cfd64e",
     "arch:9ac0d7b49d5343bb0a6493e3f06e8949d08c36fc3d6c5873c4b123bc9a05527a",
 )
+X_RETIRED_STABLE_RUNTIME_SITE_IDS = (
+    "arch:06466922ae000e9d3f89146eb70643b09c760b36bb23f65338966577e8a99768",
+    "arch:0aaccc45241a6e959255c24846e15059102566d05dc4fd1b908a6cbf23692ce2",
+    "arch:0fbfd698b1aef4227b28cb4fa19213ab5dfeee007d0d066973c2271500c953a6",
+    "arch:113b289884b59ba46d8dc5eee96c772eb8ad281523da4637e046d41d93f7af93",
+    "arch:15bee8be95cf30a735d09fca3cafe4fa4718a05e43d1a509816f99f27e8a9ed6",
+    "arch:17155767018efa82ec7b0daa39f3b012d35f57ed034bb4f0e13c815331bd47ce",
+    "arch:19387ddbfc6474f17bde6a8f2c580de13fb49b23a1302a40e33cd0bd66cd722e",
+    "arch:1a760bf9aef8254a6aae7b42a07102ae4305ed93329493dd6f2cb61ca4e2ea32",
+    "arch:1db8f01581f8ea6663a3252e6d91d2ed9b2591ca43ea090676cf254f1771b174",
+    "arch:1e214230798cea45b4ce1d679218a1175ebca13b541fb2c378ec6b2808fa7443",
+    "arch:1f6ffbcd86a28d716b8129b0f35305e0b6d5e04d5d637d11a4cc6e79a26bc046",
+    "arch:2ebe6ccac8aca9ff92514abdcf02da1756fe66e8055f09d093076677f9b9cea2",
+    "arch:359f1154164b30954fdbf64d06d7367dc14eb8a825ab17cf3485086d23a90c39",
+    "arch:42a349843dcee36975e7382d30f08969a53c0d307f31775277ca40dc092174e3",
+    "arch:480b9e317ee5fd684119423182f866e2aa5cdebff384b691b594141d1cd7a70c",
+    "arch:4edc0bcd23094e2d7cb975d45bb3b8a4fef3a1ba11cf7d35de718a4fbdf885ce",
+    "arch:54ca4987934abcfba43568230d9724b1051b3660d1147ebe77216e8ac6b9fd70",
+    "arch:5adb364bedb6b3939630999182a1bfd12f1901d894b1613adbbf59adb9a5b906",
+    "arch:6cfe1c846f41de42349593651df8697840da0f8a87e1148fb81937184e00a8a2",
+    "arch:645dc042ae5357b646c1a73aeea8bed902dbca41e9b3d1dd4ca0c64e43c1774e",
+    "arch:70671b11bb921b9fc8bf547c036a55d1a45cdb0b5477b6ccdc66b2972f931c4b",
+    "arch:81ee6171dd973a1731b1b3e43c6a64f9a69fd60388ce8ef9ab63220ceea0f2b3",
+    "arch:8e78e605693a033eee5e20174653e1aed75388189f1969c2b3913eb50d818f0f",
+    "arch:92e7651bb720679cdc56df0815ea78e0bf6df2de87c4dd6ea9cd4bb5111de258",
+    "arch:95152c38b4e5baba9c873caf15b7c4b8c5cfaf06cd47e5a8467eaa04f3bae84d",
+    "arch:96f721cfd3525ecfc049ca0244a5d14bc3008b655c967ac5377f92f69784d4a6",
+    "arch:98063a0c5e742c22388c1a073030cd68a0352b4fcedbda7dd5adba8f36720b8c",
+    "arch:9c64388cc78f2d7434fc8840df2fb819ddb77e7037cd3689dc4d7f570d194dbb",
+    "arch:ab1bbef694d99542d769ec7ed306342680c61275a29a5a46bc39a51e9be3554b",
+    "arch:a8111d209e2e73823bdb4d6dd0674d786dcd142546fbaf68cad56e36a16dbce5",
+    "arch:b8dfdc1e441b4305600b9f2a5699295e28e6aed9a16df40db206e91f5d1e4f33",
+    "arch:b918f22222ead1af197155bc5115fa35e6e31f184cd8e7d0a1cb61bda57929b7",
+    "arch:c922e38ded6ae3e22f68da10d677d4c512b5cd77bd76196796e0944ef5d0e4fb",
+    "arch:c2a7a69749cbe0db6d4bddff0965f8b6fc3e558b86cd7efbf307fe294d4431d4",
+    "arch:d75e6811387cf573900e12444692c5ac8ffe05afca22fb100c4e2a6ed54c997f",
+    "arch:d8590a86d437b8c16ad28e9e0eb25c6b8ef04219ac84abfe1661265cc627fb92",
+    "arch:e1dbaff88655b787da64a1c32e2836df139efcde37cff1d07c5dc17039d847ee",
+    "arch:e0e0f986cf30ca286150bc6d9e5bcb141d1d5a95c1fc3c818e0e16dd00a021c7",
+    "arch:e5385e13b847756eba32d4fafdae3e6c3fbb8aad92bf09b995854f5f77fa4142",
+    "arch:fa2a3c7f19e0cd8fc087f773b247275e093f781a8d3238afa85a3d49870be17d",
+    "arch:fee1a31d3e537bd27eac1c756cce7189fea5fa83aee68ffb95b40a193e620a01",
+    "arch:f9e6680e5de21cfcb91c704d16e341cbf40aa23850fa00e70b51af7eda20edb2",
+    "arch:f596061f965506a37da9b2a6c285631b670c11075d19d3fa9b1344fc9327ef4a",
+    "arch:fc50ba257b7222031409e66fba79865ec3ccdcf66b1586c7bc929311a7efec68",
+)
 W6A_RETIRED_CLASSIFICATION_RUNTIME_SITE_IDS = (
     "arch:1769e98a4961cd3b1838967625ea3c4b6e9f19430c5b7fff63d8a0fdb31f9713",
     "arch:31d2e2d705ac18c3c042ddaa704735d895a784f7f5233c8af9824a3c84058aed",
@@ -1994,6 +2040,7 @@ RETIREMENT_HISTORY = {
                 X2_RETIRED_SERVER_WIKI_LINK_SITE_ID,
                 *X2_RETIRED_CANONICAL_WRITER_SITE_IDS,
                 *X2_RETIRED_RESERVED_SCAN_SITE_IDS,
+                *X_RETIRED_STABLE_RUNTIME_SITE_IDS,
                 *W6A_RETIRED_CLASSIFICATION_RUNTIME_SITE_IDS,
                 *W6B_RETIRED_NEMOTRON_RUNTIME_SITE_IDS,
                 *W6C_RETIRED_KNOWLEDGE_EMBEDDING_SITE_IDS,
@@ -2440,16 +2487,16 @@ def test_baseline_labels_repository_contract_hash_semantics(
     schema = hashes["production_schema_manifest"]
     signature = hashes["production_signature_manifest"]
     assert authority["lane_contract_case_manifest_sha256"] == (
-        "a3a8b84e249b4a6bf36ba3f3584bd6fae45ac4fa521c83c34637879e9b2473eb"
+        "69576c347c6989c7bd22fee5f8b8a8a0b360d6033ceff66f2693784085eecd94"
     )
     assert schema["canonical_mapping_sha256"]["sha256"] == (
-        "1541981873a0669f5ef7234c9b4490fe3c3f00872d1a584b182a3a33799fbea2"
+        "938aceee8b448a3d1cee0403d15a2de847eedb19a99d1a94663ef23b0f37f91b"
     )
     assert schema["artifact_validator_sorted_rows_sha256"]["sha256"] == (
-        "299b9e5c7c1b5f0195e6437890c111c82cbf63545333eebab83e7b42a870ed58"
+        "3845e9cf4f8aed838b3c1febf50dd4667cd2d0bf275c29cc8b08635dbeafd5f7"
     )
     assert signature["sha256"] == (
-        "057a9edf3c0d88f579bef8c0836535714aefba73fdba6a15b9b9072f46540f05"
+        "6f9b30220ada8a8351af5cbd8cc66528d390c4bdff570b26c6f7c9fe628c7716"
     )
     assert hashes == current["contract_hashes"]
 
@@ -2769,7 +2816,7 @@ def test_current_exception_ledger_seed_and_schema_inventory_are_exact(
     assert detected_ids == ledger_ids == set(seed["exception_semantic_ids"]["active"])
     _assert_exact_retirement_history(architecture, seed)
     assert len(edge_rows) == current["worktree_architecture"]["edge_count"] == 44
-    assert sum(len(row["sites"]) for row in edge_rows) == len(raw_cross_sites) == 1418
+    assert sum(len(row["sites"]) for row in edge_rows) == len(raw_cross_sites) == 1416
     assert {
         field: counts[field]
         for field in (
@@ -2780,9 +2827,9 @@ def test_current_exception_ledger_seed_and_schema_inventory_are_exact(
             "production_to_lab_dynamic_sites",
             "compatibility_contracts",
         )
-    } == {
-        "exceptions": 44,
-            "cross_domain_sites": 1418,
+        } == {
+            "exceptions": 44,
+            "cross_domain_sites": 1416,
         "production_to_lab_edges": 0,
         "production_to_lab_static_sites": 0,
         "production_to_lab_dynamic_sites": 0,

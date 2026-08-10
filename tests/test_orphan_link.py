@@ -196,7 +196,80 @@ def test_apply_suggestion_inserts_frontier_approved_link(isolated_pages: Path) -
     result = apply_suggestion("target", suggestion)
 
     assert result["status"] == "applied"
-    assert "[[target|durable anchor]]" in (isolated_pages / "source.md").read_text()
+    assert "[durable anchor](<target.md>)" in (
+        isolated_pages / "source.md"
+    ).read_text()
+
+
+def test_apply_suggestion_renders_nested_relative_link_and_detects_fragment(
+    isolated_pages: Path,
+) -> None:
+    _seed_page(isolated_pages, "nested/source", "The durable anchor belongs here.")
+    _seed_page(isolated_pages, "topics/target", "## Details\n\nTarget body")
+    suggestion = Suggestion(
+        source_page_id="source",
+        confidence=0.9,
+        reason="related",
+        suggested_anchor="durable anchor",
+        suggested_section="Related",
+    )
+
+    applied = apply_suggestion("target", suggestion)
+
+    source = isolated_pages / "nested" / "source.md"
+    assert applied["status"] == "applied"
+    assert "[durable anchor](<../topics/target.md>)" in source.read_text(
+        encoding="utf-8"
+    )
+
+    _seed_page(
+        isolated_pages,
+        "nested/linked",
+        "Existing [Target](<../topics/target.md#details>).",
+    )
+    linked = apply_suggestion(
+        "target",
+        Suggestion(
+            source_page_id="linked",
+            confidence=0.9,
+            reason="related",
+            suggested_anchor="Target",
+            suggested_section="Related",
+        ),
+    )
+
+    assert linked["status"] == "already_applied"
+    assert (isolated_pages / "nested" / "linked.md").read_text(
+        encoding="utf-8"
+    ).count("target.md#details") == 1
+
+
+def test_apply_suggestion_fails_closed_on_page_system_id_collision(
+    isolated_pages: Path,
+) -> None:
+    _seed_page(isolated_pages, "source", "The durable anchor belongs here.")
+    _seed_page(isolated_pages, "target", "Target body")
+    system_dir = ol_mod.SYSTEM_DIR
+    system_dir.mkdir()
+    (system_dir / "target.md").write_text(
+        "---\ntitle: System target\nstatus: stable\n---\nSystem body\n",
+        encoding="utf-8",
+    )
+    before = (isolated_pages / "source.md").read_bytes()
+
+    result = apply_suggestion(
+        "target",
+        Suggestion(
+            source_page_id="source",
+            confidence=0.9,
+            reason="related",
+            suggested_anchor="durable anchor",
+            suggested_section="Related",
+        ),
+    )
+
+    assert result == {"status": "error", "reason": "source_or_target_missing"}
+    assert (isolated_pages / "source.md").read_bytes() == before
 
 
 def test_apply_suggestion_preserves_correction_that_lands_before_locked_cas(
@@ -314,7 +387,7 @@ def test_autonomous_orphan_lane_applies_once(
 
     assert first["results"][0]["status"] == "applied"
     assert second["results"][0]["status"] == "applied"
-    assert (isolated_pages / "source.md").read_text().count("[[target") == 1
+    assert (isolated_pages / "source.md").read_text().count("(<target.md>)") == 1
 
 
 def test_orphan_no_quorum_is_cached_until_authority_epoch_changes(
@@ -394,19 +467,14 @@ def test_orphan_no_quorum_is_cached_until_authority_epoch_changes(
         and isinstance(item["result"].get("semantic_hold"), dict)
     }
     assert held_authorities == {"a" * 64, "9" * 64}
-    assert "[[target" not in (isolated_pages / "source.md").read_text()
+    assert "(<target.md>)" not in (isolated_pages / "source.md").read_text()
 
 
 @pytest.fixture()
 def isolated_pages(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Stub ``find_page`` so ``_page_head`` reads from tmp_path instead
-    of the real corpus."""
+    """Point canonical orphan-link resolution at an isolated Wiki."""
     pages_dir = tmp_path / "pages"
     pages_dir.mkdir()
-
-    def fake_find_page(page_id: str):
-        cand = pages_dir / f"{page_id}.md"
-        return cand if cand.exists() else None
 
     from chronovisor.core import page_mutation
 
@@ -415,13 +483,17 @@ def isolated_pages(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         "DECISION_AUTHORITY_LOCK",
         tmp_path / "runtime" / "decision-authority.lock",
     )
-    monkeypatch.setattr(ol_mod, "find_page", fake_find_page)
+    monkeypatch.setattr(ol_mod, "PAGES_DIR", pages_dir)
+    monkeypatch.setattr(ol_mod, "SYSTEM_DIR", tmp_path / "system")
     return pages_dir
 
 
 def _seed_page(pages_dir: Path, page_id: str, body: str = "body content") -> None:
-    (pages_dir / f"{page_id}.md").write_text(
-        f"---\ntitle: {page_id}\nupdated: 2026-05-08\n---\n{body}\n"
+    path = pages_dir / f"{page_id}.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        f"---\ntitle: {page_id}\nupdated: 2026-05-08\n"
+        f"status: stable\ntype: knowledge\n---\n{body}\n"
     )
 
 
@@ -801,10 +873,16 @@ class TestFormatReport:
         assert "0.91" in text
 
 
-def test_apply_suggestion_never_nests_inside_existing_wiki_link(
+def test_apply_suggestion_never_nests_inside_existing_markdown_link(
     isolated_pages: Path,
 ) -> None:
-    _seed_page(isolated_pages, "source", "Existing [[other|durable anchor]].")
+    _seed_page(
+        isolated_pages,
+        "source",
+        "Existing [durable anchor](<other.md>) and [Beta](<beta.md>).",
+    )
+    _seed_page(isolated_pages, "other", "Other body")
+    _seed_page(isolated_pages, "beta", "Beta body")
     _seed_page(isolated_pages, "target", "Target body")
     suggestion = Suggestion(
         source_page_id="source",
@@ -818,10 +896,34 @@ def test_apply_suggestion_never_nests_inside_existing_wiki_link(
     text = (isolated_pages / "source.md").read_text(encoding="utf-8")
 
     assert result["status"] == "applied"
-    assert "[[other|durable anchor]]" in text
-    assert "[[target|durable anchor]]" not in text
-    assert "## Related\n\n- [[target]]" in text
+    assert "[durable anchor](<other.md>)" in text
+    assert "[Beta](<beta.md>)" in text
+    assert "## Related\n\n- [durable anchor](<target.md>)" in text
     assert "injected" not in text
+
+
+def test_apply_suggestion_skips_anchor_inside_markdown_link_target(
+    isolated_pages: Path,
+) -> None:
+    _seed_page(isolated_pages, "source", "Existing [Beta](<beta.md>).")
+    _seed_page(isolated_pages, "beta", "Beta body")
+    _seed_page(isolated_pages, "target", "Target body")
+
+    result = apply_suggestion(
+        "target",
+        Suggestion(
+            source_page_id="source",
+            confidence=0.9,
+            reason="related",
+            suggested_anchor="beta.md",
+            suggested_section="Related",
+        ),
+    )
+    text = (isolated_pages / "source.md").read_text(encoding="utf-8")
+
+    assert result["status"] == "applied"
+    assert "Existing [Beta](<beta.md>)." in text
+    assert "## Related\n\n- [beta.md](<target.md>)" in text
 
 
 def _autonomous_state(tmp_path: Path, *, max_local_attempts: int = 2):
@@ -941,7 +1043,9 @@ def test_frontier_approval_is_not_overridden_by_confidence_metadata(
     )
 
     assert result["results"][0]["status"] == "applied"
-    assert "[[target" in (isolated_pages / "source.md").read_text(encoding="utf-8")
+    assert "(<target.md>)" in (
+        isolated_pages / "source.md"
+    ).read_text(encoding="utf-8")
     durable = state.list_items()[0]["result"]
     assert durable["schema_version"] == 2
     assert durable["authority"] == {
@@ -988,7 +1092,9 @@ def test_orphan_effect_fails_closed_when_authority_changes_before_apply(
     )
 
     assert result["results"][0]["status"] == "frontier_retry"
-    assert "[[target" not in (isolated_pages / "source.md").read_text(encoding="utf-8")
+    assert "(<target.md>)" not in (
+        isolated_pages / "source.md"
+    ).read_text(encoding="utf-8")
 
 
 def test_orphan_exact_postimage_recovers_before_absent_source_retirement(
@@ -1030,7 +1136,7 @@ def test_orphan_exact_postimage_recovers_before_absent_source_retirement(
     assert artifact["schema_version"] == 2
     assert artifact["convergence_key"] == pending["key"]
     assert artifact["source_postimage_sha256"] == hashlib.sha256(source).hexdigest()
-    assert (isolated_pages / "source.md").read_text().count("[[target") == 1
+    assert (isolated_pages / "source.md").read_text().count("(<target.md>)") == 1
 
     # A refreshed index no longer reports the target as orphaned. Recovery
     # must therefore happen before retire_absent_sources can reject the item.
@@ -1061,7 +1167,7 @@ def test_orphan_exact_postimage_recovers_before_absent_source_retirement(
     durable = state.get(pending["key"])
     assert durable["result"]["recovery_only"] is True
     assert durable["result"]["semantic_effect"] is False
-    assert (isolated_pages / "source.md").read_text().count("[[target") == 1
+    assert (isolated_pages / "source.md").read_text().count("(<target.md>)") == 1
 
 
 def test_orphan_recovery_never_reapplies_when_postimage_is_not_exact(
@@ -1117,7 +1223,7 @@ def test_orphan_recovery_never_reapplies_when_postimage_is_not_exact(
 
     assert pending["key"] in result["retired"]
     assert state.get(pending["key"])["status"] == "rejected"
-    assert source_path.read_text(encoding="utf-8").count("[[target") == 1
+    assert source_path.read_text(encoding="utf-8").count("(<target.md>)") == 1
     assert source_path.read_text(encoding="utf-8").endswith("foreign edit\n")
 
 
@@ -1178,7 +1284,9 @@ def test_malformed_frontier_approval_retries_without_mutation(
 
     assert result["results"][0]["status"] == "frontier_retry"
     assert state.list_items()[0]["status"] == "frontier_retry"
-    assert "[[target" not in (isolated_pages / "source.md").read_text(encoding="utf-8")
+    assert "(<target.md>)" not in (
+        isolated_pages / "source.md"
+    ).read_text(encoding="utf-8")
 
 
 def test_local_model_error_retries_but_valid_low_score_rejects(
@@ -1264,7 +1372,9 @@ def test_no_candidate_does_not_starve_later_real_work(
 
     assert [entry["status"] for entry in result["results"]] == ["rejected", "applied"]
     assert result["work_items"] == 1
-    assert "[[b-target" in (isolated_pages / "source.md").read_text(encoding="utf-8")
+    assert "(<b-target.md>)" in (
+        isolated_pages / "source.md"
+    ).read_text(encoding="utf-8")
 
 
 def test_frontier_retry_keeps_durable_local_suggestion(
@@ -1310,7 +1420,9 @@ def test_frontier_retry_keeps_durable_local_suggestion(
 
     assert first["results"][0]["status"] == "frontier_budget_exhausted"
     assert second["results"][0]["status"] == "applied"
-    assert "[[target" in (isolated_pages / "source.md").read_text(encoding="utf-8")
+    assert "(<target.md>)" in (
+        isolated_pages / "source.md"
+    ).read_text(encoding="utf-8")
 
 
 def test_elapsed_budget_stops_before_candidate_discovery(

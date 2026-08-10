@@ -781,10 +781,10 @@ def _retention_inventory(
         ("retention_frontier", source) for source in legacy_sources
     }
     pages_value = payload.get("pages")
-    candidates_value = payload.get("archive_candidates")
+    candidates_value = payload.get("deprecation_candidates")
     counts_value = payload.get("counts")
     total_candidates = (
-        counts_value.get("archive_candidates")
+        counts_value.get("deprecation_candidates")
         if isinstance(counts_value, Mapping)
         else None
     )
@@ -843,7 +843,7 @@ def _retention_inventory(
                     "metadata": {
                         "page_id": source,
                         "retention": row,
-                        "local_recommendation": "archive",
+                        "local_recommendation": "deprecate",
                     },
                     "derived_from_lane": "retention_frontier",
                 }
@@ -853,7 +853,7 @@ def _retention_inventory(
         {
             **payload,
             "pages": pages,
-            "archive_candidates": scoped_candidates,
+            "deprecation_candidates": scoped_candidates,
         },
         derived_items,
         uncertain,

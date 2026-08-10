@@ -10,7 +10,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from chronovisor.core.index_store import get_store
+from chronovisor.core.index_store import canonical_document_paths, get_store
 from chronovisor.core.jsonl import count_jsonl, read_jsonl
 from chronovisor.core.store import CHRONOVISOR_ROOT, RAW_DIR
 from chronovisor.decision.decision_authority import semantic_authority_shape_error
@@ -277,6 +277,9 @@ def derived_memory_kpi() -> dict[str, Any]:
     except (OSError, json.JSONDecodeError):
         retention = {}
     retention_counts = retention.get("counts") if isinstance(retention, dict) else {}
+    stable_pages = canonical_document_paths(
+        CHRONOVISOR_ROOT / "pages", require_stable=True
+    )
     return {
         "claims": _jsonl_count(CHRONOVISOR_ROOT / "claims" / "claims-index.jsonl"),
         "golden": _jsonl_count(CHRONOVISOR_ROOT / "recall" / "search-golden.jsonl"),
@@ -284,12 +287,15 @@ def derived_memory_kpi() -> dict[str, Any]:
         "retention_pages": int(retention_counts.get("pages") or 0)
         if isinstance(retention_counts, dict)
         else 0,
-        "archive_candidates": int(retention_counts.get("archive_candidates") or 0)
+        "deprecation_candidates": int(
+            retention_counts.get("deprecation_candidates") or 0
+        )
         if isinstance(retention_counts, dict)
         else 0,
-        "hubs": len(list((CHRONOVISOR_ROOT / "pages" / "hubs").glob("*.md")))
-        if (CHRONOVISOR_ROOT / "pages" / "hubs").exists()
-        else 0,
+        "hubs": sum(
+            path.parent == (CHRONOVISOR_ROOT / "pages" / "hubs").resolve()
+            for path in stable_pages
+        ),
     }
 
 

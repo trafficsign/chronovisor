@@ -14,7 +14,7 @@ class ScoredPage:
     updated: str
     score: float
     snippet: str = ""
-    status: str = "active"
+    status: str = "stable"
     superseded_by: str = ""
     page_type: str = "knowledge"
     sensitivity: str = "normal"

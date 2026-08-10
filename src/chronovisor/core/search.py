@@ -73,9 +73,7 @@ def _normalize_lifecycle_status(value: object) -> str:
     normalized = value.strip().lower() if isinstance(value, str) else ""
     if normalized in _VALID_LIFECYCLE_STATUSES:
         return normalized
-    # LexicalIndex still projects the former active label; keep that internal
-    # compatibility seam while every search result exposes canonical status.
-    return _STABLE_STATUS if normalized in {"", "active"} else "draft"
+    return "draft"
 
 
 def _normalize_page_type(value: object, *, folder: str = "") -> str:

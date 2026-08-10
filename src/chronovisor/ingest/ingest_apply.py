@@ -20,6 +20,7 @@ def _runtime_call(name: str):
 
 _normalize_for_collision = _runtime_call("_normalize_for_collision")
 _read_optional_exact_utf8 = _runtime_call("_read_optional_exact_utf8")
+_revalidate_prepared_path = _runtime_call("_revalidate_prepared_path")
 _reserved_system_page_collision_keys = _runtime_call("_reserved_system_page_collision_keys")
 _safe_log = _runtime_call("_safe_log")
 
@@ -92,7 +93,7 @@ def apply_prepared_operations(
                         f"content correction constraints changed before ingest apply: "
                         f"{entry.page_id}"
                     )
-                current = _read_optional_exact_utf8(entry.path)
+                current = _read_optional_exact_utf8(_revalidate_prepared_path(entry))
                 if current == entry.new_body:
                     # Power-loss recovery: this exact reviewed postimage was
                     # already installed, so finish the batch idempotently.
@@ -106,12 +107,13 @@ def apply_prepared_operations(
                         f"{entry.page_id}"
                     )
                 if entry.op_type == "create":
-                    entry.path.parent.mkdir(parents=True, exist_ok=True)
+                    path = _revalidate_prepared_path(entry)
+                    path.parent.mkdir(parents=True, exist_ok=True)
                     if current is not None:
                         raise IngestApplyError(
                             f"page appeared before ingest create: {entry.page_id}"
                         )
-                    atomic_write(entry.path, entry.new_body)
+                    atomic_write(_revalidate_prepared_path(entry), entry.new_body)
                     # Append BEFORE logging so a log failure could never drop
                     # an entry from the rollback set. _safe_log additionally
                     # ensures a logging exception (which atomic_write success
@@ -128,7 +130,7 @@ def apply_prepared_operations(
                         raise IngestApplyError(
                             f"page changed before ingest apply: {entry.page_id}"
                         )
-                    atomic_write(entry.path, entry.new_body)
+                    atomic_write(_revalidate_prepared_path(entry), entry.new_body)
                     written.append(entry)
                     updated.append(entry.page_id)
                     _safe_log(f"ingest | updated {entry.page_id}")
@@ -140,16 +142,21 @@ def apply_prepared_operations(
             for entry in reversed(written):
                 try:
                     if entry.op_type == "create":
-                        if _read_optional_exact_utf8(entry.path) == entry.new_body:
-                            entry.path.unlink()
-                        elif entry.path.exists():
+                        path = _revalidate_prepared_path(entry)
+                        if _read_optional_exact_utf8(path) == entry.new_body:
+                            _revalidate_prepared_path(entry).unlink()
+                        elif _revalidate_prepared_path(entry).exists():
                             rollback_errors.append(
                                 f"{entry.page_id}: skipped (modified by another writer)"
                             )
                     else:
-                        if _read_optional_exact_utf8(entry.path) == entry.new_body:
-                            atomic_write(entry.path, entry.previous_text or "")
-                        elif entry.path.exists():
+                        path = _revalidate_prepared_path(entry)
+                        if _read_optional_exact_utf8(path) == entry.new_body:
+                            atomic_write(
+                                _revalidate_prepared_path(entry),
+                                entry.previous_text or "",
+                            )
+                        elif _revalidate_prepared_path(entry).exists():
                             rollback_errors.append(
                                 f"{entry.page_id}: skipped (modified by another writer)"
                             )

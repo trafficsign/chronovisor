@@ -144,7 +144,7 @@ def _build_retention_scores_locked(
     store = get_store()
     store.refresh()
     pages: dict[str, dict[str, Any]] = {}
-    archive_candidates: list[str] = []
+    deprecation_candidates: list[str] = []
     for meta in store.all_pages_meta(include_system=False):
         page_id = str(meta.get("page_id") or "")
         if not page_id:
@@ -177,7 +177,7 @@ def _build_retention_scores_locked(
             score = max(score, cold_start)
         if page_type == "reference":
             score = 0.0
-        archive_ready = (
+        deprecation_ready = (
             score < 0.18
             and age > 365
             and seen == 0
@@ -185,10 +185,10 @@ def _build_retention_scores_locked(
             and not summary_present
             and not question_count
             and page_type in {"episodic", "knowledge"}
-            and str(meta.get("status") or "active") == "active"
+            and str(meta.get("status") or "") == "stable"
         )
-        if archive_ready:
-            archive_candidates.append(page_id)
+        if deprecation_ready:
+            deprecation_candidates.append(page_id)
         pages[page_id] = {
             "page_id": page_id,
             "page_type": page_type,
@@ -209,10 +209,10 @@ def _build_retention_scores_locked(
         "status": "ok",
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "pages": pages,
-        "archive_candidates": archive_candidates[:200],
+        "deprecation_candidates": deprecation_candidates[:200],
         "counts": {
             "pages": len(pages),
-            "archive_candidates": len(archive_candidates),
+            "deprecation_candidates": len(deprecation_candidates),
             "feedback_rows": len(_read_recent_jsonl(feedback_file, limit=limit)),
         },
     }
@@ -340,7 +340,10 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(public, ensure_ascii=False, indent=2))
     else:
         print(f"pages\t{public['counts']['pages']}")
-        print(f"archive_candidates\t{public['counts']['archive_candidates']}")
+        print(
+            "deprecation_candidates\t"
+            f"{public['counts']['deprecation_candidates']}"
+        )
     return 0
 
 

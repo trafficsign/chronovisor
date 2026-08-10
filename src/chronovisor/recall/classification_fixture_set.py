@@ -211,9 +211,7 @@ def build_fixture_pool(
     index = CandidateIndex(package)
     representative: dict[str, dict[str, Any]] = {}
     basis_by_group: dict[str, str] = {}
-    for uid, row in state["pages"].items():
-        if not isinstance(row, Mapping) or row.get("status") != "active":
-            continue
+    for uid, row in registry.stable_pages(state).items():
         if str(uid) in used_uids:
             continue
         payload = _page_payload(root, str(uid), row)

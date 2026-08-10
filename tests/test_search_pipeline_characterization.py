@@ -12,7 +12,7 @@ from chronovisor.core.search import ScoredPage
 from chronovisor.search import search_eval
 
 
-def page(page_id: str, score: float, *, status: str = "active") -> ScoredPage:
+def page(page_id: str, score: float, *, status: str = "stable") -> ScoredPage:
     return ScoredPage(
         page_id=page_id,
         title=page_id,
@@ -51,6 +51,8 @@ def test_pipeline_module_does_not_import_upper_layers() -> None:
 def test_production_search_calls_bounded_graph_and_skips_usage_prior(
     monkeypatch,
 ) -> None:
+    from chronovisor.core import retention
+
     bm25 = FakeBM25([page("bm25-a", 10.0), page("bm25-b", 9.0)])
     graph_calls: list[dict[str, object]] = []
 
@@ -76,6 +78,12 @@ def test_production_search_calls_bounded_graph_and_skips_usage_prior(
     monkeypatch.setattr(
         search, "load_negative_feedback_config", disabled_negative_feedback
     )
+    monkeypatch.setattr(
+        search,
+        "load_active_fusion_weights",
+        lambda: dict(search.DEFAULT_FUSION_WEIGHTS),
+    )
+    monkeypatch.setattr(retention, "retention_score", lambda _page_id: 0.0)
 
     results, search_mode = search.search("query", top_n=3, semantic=True)
 
@@ -85,11 +93,16 @@ def test_production_search_calls_bounded_graph_and_skips_usage_prior(
     assert graph_calls == [
         {"page_ids": ["bm25-a", "bm25-b", "sem-a"], "decay": 0.3, "limit": 100}
     ]
-    assert [(result.page_id, result.score) for result in results] == pytest.approx(
+    assert [result.page_id for result in results] == [
+        "bm25-a",
+        "bm25-b",
+        "sem-a",
+    ]
+    assert [result.score for result in results] == pytest.approx(
         [
-            ("bm25-a", 0.027666666666666666),
-            ("bm25-b", 0.02089344262295082),
-            ("sem-a", 0.01),
+            0.027666666666666666,
+            0.02089344262295082,
+            0.01,
         ]
     )
 
@@ -191,7 +204,7 @@ def test_hybrid_current_tracks_production_when_default_graph_weight_changes(
     monkeypatch,
 ) -> None:
     def fake_graph(results: list[ScoredPage], *, decay: float = 0.5, limit: int = 50):
-        assert decay == 0.5
+        assert decay == 0.3
         return [page("graph-a", 5.0)]
 
     for module in (search, search_eval):

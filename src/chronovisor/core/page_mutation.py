@@ -23,13 +23,13 @@ from chronovisor.core.canonical_document import (
     validate_canonical_document,
 )
 from chronovisor.core.hashutil import sha256_bytes as _sha256_bytes
+from chronovisor.core.index_store import canonical_document_path_for_id
 from chronovisor.core.jsonl_write import append_jsonl_durable
 from chronovisor.core.link_fix import atomic_write, protected_spans
 from chronovisor.core.store import (
     CHRONOVISOR_ROOT,
     PAGES_DIR,
     SYSTEM_DIR,
-    find_page,
     okf_runtime_operation,
 )
 
@@ -220,15 +220,21 @@ def find_mutation_page(page_id: str) -> Path | None:
     the source of a recalled factual error.
     """
 
-    path = find_page(page_id)
-    if path is not None:
+    path = canonical_document_path_for_id(
+        page_id,
+        pages_dir=PAGES_DIR,
+        system_dir=SYSTEM_DIR,
+    )
+    if path is None:
+        return None
+    try:
+        path.relative_to(PAGES_DIR.resolve(strict=True))
         return path
+    except (OSError, RuntimeError, ValueError):
+        pass
     if page_id not in CORRECTABLE_SYSTEM_PAGE_IDS:
         return None
-    candidate = SYSTEM_DIR / f"{page_id}.md"
-    if candidate.is_symlink() or not candidate.is_file():
-        return None
-    return candidate
+    return path
 
 
 def correction_constraints_file() -> Path:

@@ -8,11 +8,17 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from chronovisor.core.frontmatter import parse as parse_frontmatter
-from chronovisor.core.index_store import get_store
+from chronovisor.core.canonical_document import (
+    CanonicalDocumentError,
+    validate_canonical_document,
+)
+from chronovisor.core.index_store import (
+    get_store,
+    stable_indexed_document_path,
+)
 from chronovisor.core.raw_store import RawStore
 from chronovisor.core.search import search as run_search
-from chronovisor.core.store import CHRONOVISOR_ROOT, RAW_DIR, find_page
+from chronovisor.core.store import CHRONOVISOR_ROOT, PAGES_DIR, RAW_DIR, SYSTEM_DIR
 from chronovisor.search.research_config import ResearchConfig
 from chronovisor.search.research_store import ResearchStore
 from chronovisor.search.research_types import Action, ActionType
@@ -58,13 +64,30 @@ def chronovisor_read(arguments: dict[str, Any], _context: ToolContext) -> dict[s
     page_id = str(arguments.get("page_id") or "").strip()
     if not page_id:
         raise ValueError("page_id is required")
-    path = find_page(page_id)
-    if path is None:
-        raise FileNotFoundError(page_id)
-    content = path.read_text(encoding="utf-8")
-    metadata, body = parse_frontmatter(content)
-    max_chars = _bounded_int(arguments.get("max_chars"), default=12_000, minimum=500, maximum=50_000)
     index = get_store()
+    index.refresh()
+    indexed = index.meta(page_id)
+    path = stable_indexed_document_path(
+        indexed,
+        pages_dir=PAGES_DIR,
+        system_dir=SYSTEM_DIR,
+    )
+    if path is None or not isinstance(indexed, dict):
+        raise FileNotFoundError(page_id)
+    namespace = "system" if indexed.get("is_system") else "pages"
+    relative_path = str(indexed["relative_path"])
+    try:
+        document = validate_canonical_document(
+            path.read_bytes(),
+            namespace=namespace,
+            path=relative_path,
+            require_stable=True,
+        )
+        body = document.body.decode("utf-8")
+    except (CanonicalDocumentError, OSError, UnicodeDecodeError) as exc:
+        raise FileNotFoundError(page_id) from exc
+    metadata = document.metadata
+    max_chars = _bounded_int(arguments.get("max_chars"), default=12_000, minimum=500, maximum=50_000)
     return {
         "page_id": page_id,
         "title": str(metadata.get("title") or page_id),

@@ -4,32 +4,37 @@ import difflib
 import fcntl
 import hashlib
 import json
-import re
 import threading
 from collections import Counter
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from datetime import date
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
+from chronovisor.core.canonical_document import (
+    Namespace,
+    ResolvedMarkdownLink,
+    rewrite_internal_markdown_links,
+)
 from chronovisor.core.canonical_json import canonical_json_permissive as _canonical_json
 from chronovisor.core.hashutil import sha256_text as _sha256_text
-from chronovisor.core.index_store import get_store
+from chronovisor.core.index_store import (
+    PAGE_RESERVED_FILENAMES,
+    SYSTEM_RESERVED_FILENAMES,
+    canonical_document_path,
+    get_store,
+)
 from chronovisor.core.link_fix import (
-    WIKI_LINK_RE,
     atomic_write,
     find_fuzzy_match,
-    normalize_link_target,
-    position_in_spans,
-    protected_spans,
 )
 from chronovisor.core.page_mutation import (
     chronovisor_mutation_lock,
     decision_authority_lock,
 )
 from chronovisor.core.runtime_config import runtime_repo_root
-from chronovisor.core.store import CHRONOVISOR_ROOT, SYSTEM_DIR, find_page
+from chronovisor.core.store import CHRONOVISOR_ROOT, find_page
 from chronovisor.core.tag_rules import parse_tags, validate_axis_counts, validate_tag
 from chronovisor.decision.decision_authority import (
     compare_semantic_authority,
@@ -93,7 +98,7 @@ def _collect_all_page_ids() -> set[str]:
 
     Backed by the IndexStore. Refresh is the caller's responsibility.
     """
-    return get_store().all_page_ids(include_system=True)
+    return get_store().all_canonical_page_keys(include_system=True)
 
 
 def check() -> list[dict]:
@@ -118,7 +123,7 @@ def check() -> list[dict]:
 
     # System pages are part of the broken_link universe but are not
     # themselves linted (they're treated as a fixed reference set).
-    all_page_ids = store.all_page_ids(include_system=True)
+    all_page_ids = store.all_canonical_page_keys(include_system=True)
     pages_meta = store.all_pages_meta(include_system=False)
     lintable_pages_meta = [m for m in pages_meta if m.get("page_type") != "reference"]
     page_count = len(lintable_pages_meta)
@@ -126,10 +131,9 @@ def check() -> list[dict]:
     for meta in lintable_pages_meta:
         page_id = meta["page_id"]
 
-        # 1. Broken links — outlinks come pre-normalized + code-fence-stripped
-        #    from the index (same `extract_targets(strip=True)` semantics).
+        # 1. Broken canonical Markdown links.
         seen_broken: set[str] = set()
-        for target in store.outlinks(page_id):
+        for target in store.canonical_outlinks(page_id):
             if target in all_page_ids or target in seen_broken:
                 continue
             seen_broken.add(target)
@@ -138,7 +142,8 @@ def check() -> list[dict]:
                     "type": "broken_link",
                     "severity": "high",
                     "page": page_id,
-                    "detail": f"Link [[{target}]] points to non-existent page",
+                    "target": target,
+                    "detail": f"Link {target} points to non-existent page",
                     "auto_fixable": True,
                 }
             )
@@ -332,17 +337,21 @@ def write_repair_queue(
 
 
 def _broken_link_target(issue: dict) -> str | None:
-    """issue["detail"] から target page_id を取り出す。"""
-    m = re.search(r"\[\[([^\]]+)\]\]", issue.get("detail", ""))
-    if not m:
-        return None
-    return m.group(1).strip()
+    """Return the exact canonical target recorded by the lint pass."""
+
+    target = issue.get("target")
+    return target.strip() if isinstance(target, str) and target.strip() else None
 
 
 def _replace_link_in_content(
-    content: str, target: str, replacement: str | None
+    content: str,
+    target: str,
+    replacement: str | None,
+    *,
+    source_namespace: Namespace,
+    source_path: str,
 ) -> tuple[str, int]:
-    """``[[target]]`` / ``[[target|label]]`` / ``[[target#sec]]`` を置換。
+    """Retarget or unwrap one exact broken canonical Markdown link.
 
     Args:
         content: 対象ファイルの本文
@@ -352,46 +361,37 @@ def _replace_link_in_content(
     Returns:
         (new_content, count) — count は置換された箇所数
     """
-    skip_ranges = protected_spans(content)
-    changed = 0
-
-    def _repl(m: re.Match) -> str:
-        nonlocal changed
-        if position_in_spans(m.start(), skip_ranges):
-            return m.group(0)
-
-        inside = m.group(1)
-        if normalize_link_target(inside) != target:
-            return m.group(0)
-
+    def replace(
+        link: ResolvedMarkdownLink,
+        label: str,
+    ) -> ResolvedMarkdownLink | str | None:
+        canonical_target = (
+            f"{link.namespace}/"
+            f"{PurePosixPath(link.path).with_suffix('').as_posix()}"
+        )
+        if canonical_target != target:
+            return None
         if replacement and replacement != target:
-            changed += 1
-            return f"[[{replacement}{_retarget_tail(inside)}]]"
-        # plaintext fallback
-        changed += 1
-        return _display_text_for_unwrap(inside, target)
+            replacement_namespace, _, replacement_path = replacement.partition("/")
+            if replacement_namespace not in {"pages", "system"} or not replacement_path:
+                return None
+            namespace: Namespace = (
+                "system" if replacement_namespace == "system" else "pages"
+            )
+            return ResolvedMarkdownLink(
+                namespace=namespace,
+                path=f"{replacement_path}.md",
+                fragment=link.fragment,
+            )
+        visible = label.replace(r"\[", "[").replace(r"\]", "]")
+        return visible or PurePosixPath(link.path).stem
 
-    new_content = WIKI_LINK_RE.sub(_repl, content)
-    return new_content, changed
-
-
-def _retarget_tail(link_inside: str) -> str:
-    """Return the anchor/alias suffix after the normalized target."""
-    target_part, sep, alias = link_inside.partition("|")
-    if "#" in target_part:
-        _target, anchor_body = target_part.split("#", 1)
-        anchor = "#" + anchor_body
-    else:
-        anchor = ""
-    return anchor + (sep + alias if sep else "")
-
-
-def _display_text_for_unwrap(link_inside: str, target: str) -> str:
-    """Plaintext replacement for an unresolvable wiki link."""
-    _target_part, sep, alias = link_inside.partition("|")
-    if sep:
-        return alias
-    return target
+    return rewrite_internal_markdown_links(
+        content,
+        source_namespace=source_namespace,
+        source_path=source_path,
+        rewrite=replace,
+    )
 
 
 
@@ -636,7 +636,7 @@ def _review_packet_error(
                 current_lookup = _build_target_lookup_receipt(
                     store=store,
                     target=target,
-                    page_ids=store.all_page_ids(include_system=True),
+                    page_ids=store.all_canonical_page_keys(include_system=True),
                 )
             except Exception:
                 return "target_lookup_index_unavailable"
@@ -650,12 +650,10 @@ def _review_packet_error(
                     str,
                 ):
                     return "replacement_evidence_missing"
-                replacement_path = find_page(replacement)
-                if replacement_path is None:
-                    system_candidate = SYSTEM_DIR / f"{replacement}.md"
-                    replacement_path = (
-                        system_candidate if system_candidate.is_file() else None
-                    )
+                replacement_path = CHRONOVISOR_ROOT / f"{replacement}.md"
+                replacement_path = (
+                    replacement_path if replacement_path.is_file() else None
+                )
                 try:
                     current_replacement = (
                         replacement_path.read_text(encoding="utf-8")
@@ -1327,13 +1325,19 @@ def _build_target_lookup_receipt(
     page_ids: set[str],
 ) -> dict[str, Any]:
     sorted_ids = sorted(page_ids)
+    target_namespace = target.partition("/")[0]
+    replacement_ids = {
+        page_id
+        for page_id in page_ids
+        if page_id.partition("/")[0] == target_namespace
+    }
     fuzzy_candidates = difflib.get_close_matches(
         target,
-        sorted_ids,
+        sorted(replacement_ids),
         n=5,
         cutoff=0.6,
     )
-    fuzzy_candidate = find_fuzzy_match(target, page_ids)
+    fuzzy_candidate = find_fuzzy_match(target, replacement_ids)
     core = {
         "schema_version": 1,
         "kind": "broken_link_target_lookup_receipt",
@@ -1359,7 +1363,7 @@ def _target_lookup_receipt_is_current(
 ) -> bool:
     try:
         store.refresh()
-        current_ids = store.all_page_ids(include_system=True)
+        current_ids = store.all_canonical_page_keys(include_system=True)
         current = _build_target_lookup_receipt(
             store=store,
             target=target,
@@ -1438,6 +1442,37 @@ def _atomic_write_if_unchanged(
         return False
 
 
+def _stable_issue_path(page_id: str) -> Path | None:
+    """Resolve one lint mutation target through the canonical stable boundary."""
+
+    path = find_page(page_id)
+    if path is None:
+        return None
+    try:
+        relative = path.relative_to(CHRONOVISOR_ROOT)
+    except ValueError:
+        return None
+    if not relative.parts:
+        return None
+    if relative.parts[0] == "pages":
+        namespace: Namespace = "pages"
+        root = CHRONOVISOR_ROOT / "pages"
+        reserved = PAGE_RESERVED_FILENAMES
+    elif relative.parts[0] == "system":
+        namespace = "system"
+        root = CHRONOVISOR_ROOT / "system"
+        reserved = SYSTEM_RESERVED_FILENAMES
+    else:
+        return None
+    return canonical_document_path(
+        path,
+        root,
+        namespace=namespace,
+        reserved_filenames=reserved,
+        require_stable=True,
+    )
+
+
 def apply_safe_fixes(
     issues: list[dict],
     dry_run: bool = False,
@@ -1460,7 +1495,7 @@ def apply_safe_fixes(
     store.refresh()
     actions: list[str] = []
     mutated = False
-    all_page_ids = store.all_page_ids(include_system=True)
+    all_page_ids = store.all_canonical_page_keys(include_system=True)
     frontier_reviewer = reviewer or _default_safe_fix_reviewer
     injected_reviewer = reviewer is not None
     durable_dir = _safe_fix_artifact_dir(artifact_dir)
@@ -1474,7 +1509,7 @@ def apply_safe_fixes(
                 continue
 
             page_id = issue["page"]
-            path = find_page(page_id)
+            path = _stable_issue_path(page_id)
             if not path:
                 continue
 
@@ -1495,12 +1530,10 @@ def apply_safe_fixes(
             replacement_guards: tuple[tuple[Path, str], ...] = ()
             replacement_evidence: dict[str, Any] | None = None
             if replacement and replacement != target:
-                replacement_path = find_page(replacement)
-                if replacement_path is None:
-                    system_candidate = SYSTEM_DIR / f"{replacement}.md"
-                    replacement_path = (
-                        system_candidate if system_candidate.is_file() else None
-                    )
+                replacement_path = CHRONOVISOR_ROOT / f"{replacement}.md"
+                replacement_path = (
+                    replacement_path if replacement_path.is_file() else None
+                )
                 if replacement_path is None:
                     continue
                 try:
@@ -1518,14 +1551,25 @@ def apply_safe_fixes(
             except (OSError, UnicodeDecodeError):
                 continue
 
-            new_content, count = _replace_link_in_content(content, target, replacement)
+            relative = path.relative_to(CHRONOVISOR_ROOT)
+            source_namespace: Namespace = (
+                "system" if relative.parts[0] == "system" else "pages"
+            )
+            source_path = PurePosixPath(*relative.parts[1:]).as_posix()
+            new_content, count = _replace_link_in_content(
+                content,
+                target,
+                replacement,
+                source_namespace=source_namespace,
+                source_path=source_path,
+            )
             if count == 0 or new_content == content:
                 continue
 
             if replacement and replacement != target:
-                label = f"[{page_id}] [[{target}]] → [[{replacement}]] ({count}x)"
+                label = f"[{page_id}] {target} → {replacement} ({count}x)"
             else:
-                label = f"[{page_id}] [[{target}]] → plaintext ({count}x)"
+                label = f"[{page_id}] {target} → plaintext ({count}x)"
 
             if dry_run:
                 actions.append(f"[dry-run] {label}")
@@ -1607,7 +1651,7 @@ def apply_safe_fixes(
             # the deterministic result is only a proposal until the frontier
             # reviewer authorizes this exact page preimage and output hash.
             page_id = issue["page"]
-            path = find_page(page_id)
+            path = _stable_issue_path(page_id)
             if not path:
                 continue
             try:

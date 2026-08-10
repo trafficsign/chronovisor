@@ -369,26 +369,26 @@ def _duplicate_cases() -> list[tuple[str, str | None, dict[str, Any]]]:
 def _retention_cases() -> list[tuple[str, str | None, dict[str, Any]]]:
     rows = [
         (
-            "archive",
+            "deprecate",
             {
                 "page_id": "retired-stub",
                 "page_sha256": "4" * 64,
                 "snapshot_status": "verified",
-                "active_recall_uses": 0,
+                "current_recall_uses": 0,
                 "canonical_successor": "current-guide",
                 "successor_contains_all_content": True,
                 "successor_verified": True,
                 "distinct_event": False,
                 "current_fact": False,
-                "soft_archive_reversible": True,
+                "soft_deprecation_reversible": True,
             },
         ),
         (
-            "keep_active",
+            "keep_stable",
             {
                 "page_id": "current-profile",
                 "page_sha256": "5" * 64,
-                "active_recall_uses": 14,
+                "current_recall_uses": 14,
                 "canonical_successor": None,
                 "distinct_event": True,
             },
@@ -403,35 +403,35 @@ def _retention_cases() -> list[tuple[str, str | None, dict[str, Any]]]:
             },
         ),
         (
-            "keep_active",
+            "keep_stable",
             {
                 "page_id": "rare-but-distinct-event",
                 "page_sha256": "6" * 64,
-                "active_recall_uses": 0,
+                "current_recall_uses": 0,
                 "distinct_event": True,
                 "local_score": 0.02,
             },
         ),
         (
-            "archive",
+            "deprecate",
             {
                 "page_id": "verified-redirect",
                 "page_sha256": "7" * 64,
                 "snapshot_status": "verified",
-                "active_recall_uses": 0,
+                "current_recall_uses": 0,
                 "canonical_successor": "complete-canonical-page",
                 "successor_contains_all_content": True,
                 "successor_verified": True,
                 "redirect_verified": True,
                 "distinct_event": False,
                 "current_fact": False,
-                "soft_archive_reversible": True,
+                "soft_deprecation_reversible": True,
             },
         ),
     ]
     summaries = {
-        "archive": "Exact successor evidence makes soft archival reversible and lossless.",
-        "keep_active": "Current or distinct evidence must remain active.",
+        "deprecate": "Exact successor evidence makes soft deprecation reversible and lossless.",
+        "keep_stable": "Current or distinct evidence must remain stable.",
         "needs_retry": "The immutable page snapshot is unavailable.",
     }
     return [

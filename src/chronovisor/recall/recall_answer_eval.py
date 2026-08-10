@@ -39,7 +39,7 @@ from chronovisor.core.durable_state import (
 from chronovisor.core.durable_state import (
     canonical_sha256 as _sealed_canonical_sha,
 )
-from chronovisor.core.index_store import PAGE_RESERVED_FILENAMES, contained_file
+from chronovisor.core.index_store import canonical_document_paths
 from chronovisor.core.jsonl_write import append_jsonl_durable
 from chronovisor.core.raw_segment import copy_source_interval
 from chronovisor.core.raw_store import RawStore
@@ -57,7 +57,6 @@ from chronovisor.core.save_transaction import (
 )
 from chronovisor.core.store import (
     CHRONOVISOR_ROOT,
-    INDEX_FILE,
     PAGES_DIR,
     find_page,
     init_chronovisor,
@@ -2119,12 +2118,7 @@ def builtin_field_environment_identity() -> dict[str, Any]:
     policy = load_policy()
     search_config = load_search_embedding_config()
     corpus_rows: list[str] = []
-    for path in sorted(PAGES_DIR.rglob("*.md")):
-        if path.name in PAGE_RESERVED_FILENAMES:
-            continue
-        resolved = contained_file(path, PAGES_DIR)
-        if resolved is None:
-            continue
+    for resolved in canonical_document_paths(PAGES_DIR, require_stable=True):
         try:
             corpus_rows.append(
                 f"{resolved.relative_to(PAGES_DIR.resolve())}:"
@@ -2133,9 +2127,10 @@ def builtin_field_environment_identity() -> dict[str, Any]:
         except OSError:
             continue
     try:
-        index_sha = hashlib.sha256(INDEX_FILE.read_bytes()).hexdigest()
+        index_path = CHRONOVISOR_ROOT / ".index" / "pages.json"
+        index_sha = hashlib.sha256(index_path.read_bytes()).hexdigest()
     except OSError:
-        index_sha = _canonical_sha({"missing": str(INDEX_FILE)})
+        index_sha = _canonical_sha({"missing": str(index_path)})
     candidate_delta = {
         "base_lkg_artifact_sha256": lkg_artifact_sha,
         "effective_field_config": asdict(effective_field_config),

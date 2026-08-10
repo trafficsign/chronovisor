@@ -726,7 +726,7 @@ def build_label_ledger(
                     )
                 )
 
-    # Only explicit, still-active page corrections are negative supervision.
+    # Only explicit, still-unresolved page corrections are negative supervision.
     # Passive exposure and generic ``injection_ignored`` events remain non-negative.
     labels.extend(
         _explicit_feedback_labels(

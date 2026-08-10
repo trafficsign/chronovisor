@@ -5,22 +5,20 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import re
 import tempfile
 import time
 from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from chronovisor.core import frontmatter
-from chronovisor.core.durable_state import write_sealed_json
-from chronovisor.core.link_fix import (
-    WIKI_LINK_RE,
-    normalize_link_target,
-    position_in_spans,
-    protected_spans,
+from chronovisor.core.canonical_document import (
+    Namespace,
+    ResolvedMarkdownLink,
+    rewrite_internal_markdown_links,
 )
+from chronovisor.core.durable_state import write_sealed_json
 from chronovisor.core.migration_snapshot import (
     create_incremental_restore_point,
     restore_drill,
@@ -140,35 +138,52 @@ def _rewrite_links(
     registry: PageRegistry,
     registry_state: Mapping[str, Any],
     loser_uids: set[str],
-    canonical_page_id: str,
+    source_namespace: Namespace,
+    source_path: str,
+    canonical_namespace: Namespace,
+    canonical_path: str,
+    output_namespace: Namespace | None = None,
+    output_path: str | None = None,
 ) -> tuple[str, int, set[str]]:
-    protected = protected_spans(text)
     changed = 0
     anchors: set[str] = set()
 
-    def replace(match: re.Match[str]) -> str:
+    def replace(link: ResolvedMarkdownLink, _label: str) -> ResolvedMarkdownLink:
         nonlocal changed
-        if position_in_spans(match.start(), protected):
-            return match.group(0)
-        inside = match.group(1)
-        target = normalize_link_target(inside)
+        target = (
+            f"{link.namespace}/"
+            f"{PurePosixPath(link.path).with_suffix('').as_posix()}"
+        )
         try:
             resolved = registry.resolve_from_state(registry_state, target)
         except PageRegistryError:
             resolved = None
         if resolved is None or str(resolved["uid"]) not in loser_uids:
-            return match.group(0)
-        target_part, separator, alias = inside.partition("|")
-        _old_target, hash_separator, anchor = target_part.partition("#")
-        if anchor:
-            anchors.add(anchor)
-        suffix = (f"#{anchor}" if hash_separator else "") + (
-            f"|{alias}" if separator else ""
-        )
+            return link
+        if link.fragment:
+            anchors.add(link.fragment)
         changed += 1
-        return f"[[{canonical_page_id}{suffix}]]"
+        return ResolvedMarkdownLink(
+            namespace=canonical_namespace,
+            path=canonical_path,
+            fragment=link.fragment,
+        )
 
-    return WIKI_LINK_RE.sub(replace, text), changed, anchors
+    rewritten, _rendered_changes = rewrite_internal_markdown_links(
+        text,
+        source_namespace=source_namespace,
+        source_path=source_path,
+        rewrite=replace,
+        output_namespace=output_namespace,
+        output_path=output_path,
+    )
+    return rewritten, changed, anchors
+
+
+def _canonical_location(root: Path, path: Path) -> tuple[Namespace, str]:
+    relative = path.relative_to(root)
+    namespace: Namespace = "system" if relative.parts[0] == "system" else "pages"
+    return namespace, PurePosixPath(*relative.parts[1:]).as_posix()
 
 
 def _build_union_output(
@@ -181,13 +196,13 @@ def _build_union_output(
 ) -> tuple[str, dict[str, str], set[str]]:
     canonical = next(row for row in source_rows if str(row["uid"]) == canonical_uid)
     canonical_path = root / str(canonical["path"])
+    canonical_namespace, canonical_relative = _canonical_location(root, canonical_path)
     canonical_text = canonical_path.read_text(encoding="utf-8")
     canonical_meta, canonical_body = frontmatter.parse(canonical_text)
     source_metadata = [canonical_meta]
     loser_uids = {
         str(row["uid"]) for row in source_rows if str(row["uid"]) != canonical_uid
     }
-    canonical_id = canonical_path.stem
     all_anchors: set[str] = set()
     sections = [
         canonical_body.rstrip(),
@@ -198,6 +213,8 @@ def _build_union_output(
         if str(row["uid"]) == canonical_uid:
             continue
         source_text = (root / str(row["path"])).read_text(encoding="utf-8")
+        source_path = root / str(row["path"])
+        source_namespace, source_relative = _canonical_location(root, source_path)
         source_meta, source_body = frontmatter.parse(source_text)
         source_metadata.append(source_meta)
         rewritten, _count, anchors = _rewrite_links(
@@ -205,7 +222,12 @@ def _build_union_output(
             registry=registry,
             registry_state=registry_state,
             loser_uids=loser_uids,
-            canonical_page_id=canonical_id,
+            source_namespace=source_namespace,
+            source_path=source_relative,
+            canonical_namespace=canonical_namespace,
+            canonical_path=canonical_relative,
+            output_namespace=canonical_namespace,
+            output_path=canonical_relative,
         )
         all_anchors.update(anchors)
         title = str(source_meta.get("title") or Path(str(row["path"])).stem)
@@ -258,26 +280,27 @@ def _incoming_rewrites(
     source_uids = {str(row["uid"]) for row in source_rows}
     loser_uids = source_uids - {canonical_uid}
     canonical = next(row for row in source_rows if str(row["uid"]) == canonical_uid)
-    canonical_page_id = (root / str(canonical["path"])).stem
+    canonical_path = root / str(canonical["path"])
+    canonical_namespace, canonical_relative = _canonical_location(root, canonical_path)
     updates: dict[str, str] = {}
     anchors: set[str] = set()
-    for uid, row in registry_state["pages"].items():
+    for uid, row in registry.stable_pages(registry_state).items():
         if (
             uid in source_uids
-            or not isinstance(row, Mapping)
-            or row.get("status") == "superseded"
         ):
             continue
         path = root / str(row.get("path") or "")
-        if not path.is_file():
-            continue
         text = path.read_text(encoding="utf-8")
+        source_namespace, source_relative = _canonical_location(root, path)
         rewritten, count, found_anchors = _rewrite_links(
             text,
             registry=registry,
             registry_state=registry_state,
             loser_uids=loser_uids,
-            canonical_page_id=canonical_page_id,
+            source_namespace=source_namespace,
+            source_path=source_relative,
+            canonical_namespace=canonical_namespace,
+            canonical_path=canonical_relative,
         )
         if count:
             updates[str(uid)] = rewritten
@@ -313,15 +336,16 @@ def prepare_cluster_plan(
 ) -> dict[str, Any]:
     registry = PageRegistry(root)
     registry_state = registry.load()
+    stable_pages = registry.stable_pages(registry_state)
     rows_by_uid = {}
     for key in page_keys:
         row = registry.resolve_from_state(registry_state, key)
-        if row is None:
+        if row is None or row.get("uid") not in stable_pages:
             raise KeyError(key)
-        rows_by_uid[str(row["uid"])] = row
+        rows_by_uid[str(row["uid"])] = stable_pages[str(row["uid"])]
     rows = list(rows_by_uid.values())
     if len(rows) < 2:
-        raise ValueError("merge cluster requires at least two active pages")
+        raise ValueError("merge cluster requires at least two stable pages")
     raw_refs = _load_raw_refs(
         root,
         registry,
@@ -579,7 +603,8 @@ def _run_merge_migration_locked(
         for uid, row in current["pages"].items():
             if (
                 isinstance(row, Mapping)
-                and row.get("status") != "superseded"
+                and row.get("status") == "stable"
+                and not row.get("canonical_uid")
                 and uid not in dispositions["pages"]
             ):
                 classification_status = str(row.get("classification_status") or "")

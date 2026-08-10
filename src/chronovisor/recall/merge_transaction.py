@@ -61,18 +61,19 @@ def prepare_merge_plan(
 
     registry = PageRegistry(root)
     state = registry.load()
+    stable_pages = registry.stable_pages(state)
     resolved = {}
     for key in source_keys:
-        row = registry.resolve(key)
-        if row is None:
+        row = registry.resolve_from_state(state, key)
+        if row is None or row.get("uid") not in stable_pages:
             raise KeyError(key)
-        resolved[str(row["uid"])] = row
-    canonical = registry.resolve(canonical_key)
-    if canonical is None:
+        resolved[str(row["uid"])] = stable_pages[str(row["uid"])]
+    canonical = registry.resolve_from_state(state, canonical_key)
+    if canonical is None or canonical.get("uid") not in stable_pages:
         raise KeyError(canonical_key)
     canonical_uid = str(canonical["uid"])
     if canonical_uid not in resolved:
-        resolved[canonical_uid] = canonical
+        resolved[canonical_uid] = stable_pages[canonical_uid]
     source_texts: dict[str, str] = {}
     inputs: list[dict[str, Any]] = []
     sensitivities: list[str] = []
@@ -124,9 +125,10 @@ def prepare_merge_plan(
         )
     affected = []
     for key, content in sorted((affected_page_updates or {}).items()):
-        row = registry.resolve(key)
-        if row is None:
+        row = registry.resolve_from_state(state, key)
+        if row is None or row.get("uid") not in stable_pages:
             raise KeyError(key)
+        row = stable_pages[str(row["uid"])]
         path = root / str(row["path"])
         raw = path.read_bytes()
         affected.append(

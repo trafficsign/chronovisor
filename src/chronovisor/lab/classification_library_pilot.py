@@ -463,14 +463,8 @@ def _phase_e0_adjudicate(root: Path, state: dict[str, Any]) -> dict[str, Any]:
                     "lifecycle": (
                         str(row.get("lifecycle"))
                         if str(row.get("lifecycle"))
-                        in {
-                            "active",
-                            "historical",
-                            "superseded",
-                            "experimental",
-                            "held",
-                        }
-                        else "active"
+                        in {"draft", "stable", "deprecated"}
+                        else "stable"
                     ),
                     "evidence": "mixed",
                     "sensitivity": (

@@ -21,7 +21,8 @@ def _valid_okf_root(
 def _page(path: Path, title: str, body: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
-        f"---\ntitle: {title}\n---\n\n# {title}\n\n{body}\n",
+        f"---\ntitle: {title}\nstatus: stable\ntype: knowledge\n"
+        f"---\n\n# {title}\n\n{body}\n",
         encoding="utf-8",
     )
 
@@ -37,7 +38,8 @@ def test_reviewed_anchor_repair_is_snapshot_backed_and_code_safe(
     _page(
         tmp_path / "pages" / "source.md",
         "Source",
-        "Read [[target#old|label]].\n\n```md\n[[target#old|example]]\n```\n",
+        "Read [label](<target.md#old>).\n\n"
+        "```md\n[example](<target.md#old>)\n```\n",
     )
 
     result = repair_known_anchors(
@@ -50,8 +52,8 @@ def test_reviewed_anchor_repair_is_snapshot_backed_and_code_safe(
     assert result["before_unresolved"] == 1
     assert result["after_unresolved"] == 0
     assert result["links_changed"] == 1
-    assert "[[target#New heading|label]]" in text
-    assert "[[target#old|example]]" in text
+    assert "[label](<target.md#New%20heading>)" in text
+    assert "[example](<target.md#old>)" in text
     restore = (
         tmp_path
         / "runtime"

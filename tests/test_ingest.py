@@ -13,6 +13,7 @@ import os
 from contextlib import contextmanager
 from datetime import date, datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -1088,6 +1089,8 @@ def isolated_wiki(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     index_dir = chronovisor_root / ".index"
     for d in (pages, raw, system, index_dir):
         d.mkdir(parents=True, exist_ok=True)
+    for name in ("index.md", "log.md", "schema.md"):
+        (chronovisor_root / name).write_text("", encoding="utf-8")
 
     from chronovisor.core import (
         index_store,
@@ -1106,7 +1109,6 @@ def isolated_wiki(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(store, "INDEX_FILE", chronovisor_root / "index.md")
     monkeypatch.setattr(store, "LOG_FILE", chronovisor_root / "log.md")
     monkeypatch.setattr(ingest, "PAGES_DIR", pages)
-    monkeypatch.setattr(ingest, "INDEX_FILE", chronovisor_root / "index.md")
     monkeypatch.setattr(ingest, "LOG_FILE", chronovisor_root / "log.md")
     monkeypatch.setattr(orchestrator, "RAW_DIR", raw)
     monkeypatch.setattr(orchestrator, "CHRONOVISOR_ROOT", chronovisor_root)
@@ -1459,6 +1461,39 @@ class TestApplyOperations:
         assert created == []
         assert updated == ["canonical-target"]
         assert "new" in path.read_text()
+
+    def test_update_and_alias_targets_require_stable_nonreserved_pages(
+        self, isolated_wiki: Path
+    ) -> None:
+        from chronovisor.core.alias_store import add_alias
+
+        for page_id, status in (("draft-target", "draft"), ("old-target", "deprecated")):
+            _seed_page(
+                isolated_wiki,
+                f"nested/{page_id}.md",
+                f"---\ntitle: {page_id}\nstatus: {status}\ntype: knowledge\n"
+                "---\nold\n",
+            )
+            with pytest.raises(IngestApplyError, match="update target not found"):
+                _apply_operations(
+                    [
+                        {
+                            "type": "update",
+                            "filename": f"{page_id}.md",
+                            "content": "new",
+                        }
+                    ]
+                )
+            with pytest.raises(ValueError, match="alias target does not exist"):
+                add_alias(f"alias-{page_id}", f"nested/{page_id}")
+
+        _seed_page(
+            isolated_wiki,
+            "index.md",
+            "---\ntitle: Reserved\nstatus: stable\ntype: knowledge\n---\nold\n",
+        )
+        with pytest.raises(ValueError, match="alias target does not exist"):
+            add_alias("reserved-alias", "index")
 
     def test_update_appends_without_frontmatter_injection(
         self, isolated_wiki: Path
@@ -4815,6 +4850,82 @@ class TestSafeResolvePagePath:
             _safe_resolve_page_path("")
         with pytest.raises(IngestApplyError):
             _safe_resolve_page_path("   ")
+
+    def test_leaf_and_parent_symlinks_never_mutate(
+        self,
+        isolated_wiki: Path,
+    ) -> None:
+        from chronovisor.ingest.ingest import _safe_resolve_page_path
+
+        pages = isolated_wiki / "pages"
+        target_dir = pages / "real"
+        target_dir.mkdir()
+        target = target_dir / "target.md"
+        target.write_text(
+            "---\ntitle: Target\nstatus: stable\ntype: knowledge\n---\nORIGINAL\n",
+            encoding="utf-8",
+        )
+        leaf_alias = pages / "alias.md"
+        leaf_alias.symlink_to(target)
+        parent_alias = pages / "linked"
+        parent_alias.symlink_to(target_dir, target_is_directory=True)
+        original = target.read_bytes()
+
+        with pytest.raises(IngestApplyError, match="symlink filename"):
+            _safe_resolve_page_path("alias.md")
+        with pytest.raises(IngestApplyError, match="symlink filename"):
+            _safe_resolve_page_path("linked/new.md")
+        with pytest.raises(IngestApplyError):
+            _apply_operations(
+                [{"type": "update", "filename": "alias.md", "content": "changed"}]
+            )
+        with pytest.raises(IngestApplyError):
+            _apply_operations(
+                [
+                    {
+                        "type": "create",
+                        "filename": "linked/new.md",
+                        "content": "---\ntitle: New\nstatus: stable\ntype: knowledge\n---\nnew",
+                    }
+                ]
+            )
+
+        assert target.read_bytes() == original
+        assert not (target_dir / "new.md").exists()
+
+    def test_apply_rechecks_parent_symlink_after_prepare(
+        self,
+        isolated_wiki: Path,
+    ) -> None:
+        from chronovisor.ingest import ingest
+
+        planned, totals = ingest._prepare_operations(
+            [
+                {
+                    "type": "create",
+                    "filename": "swapped/new.md",
+                    "content": (
+                        "---\ntitle: New\nupdated: 2026-08-11\n"
+                        "status: stable\ntype: knowledge\n---\nnew\n"
+                    ),
+                }
+            ]
+        )
+        outside = isolated_wiki / "outside"
+        outside.mkdir()
+        outside_page = outside / "new.md"
+        outside_page.write_text(planned[0].new_body, encoding="utf-8")
+        outside_before = outside_page.read_bytes()
+        (isolated_wiki / "pages" / "swapped").symlink_to(
+            outside, target_is_directory=True
+        )
+
+        assert ingest._prepared_plan_is_recoverable(planned) is False
+        assert ingest._prepared_plan_is_fully_applied(planned) is False
+        with pytest.raises(IngestApplyError, match="filename escapes PAGES_DIR"):
+            ingest._apply_prepared_operations(planned, link_totals=totals)
+
+        assert outside_page.read_bytes() == outside_before
 
     def test_apply_rejects_traversal_before_writing(self, isolated_wiki: Path) -> None:
         # Even a single traversal op poisons the whole batch — nothing writes.
@@ -10517,14 +10628,22 @@ class TestTriagePlanSchema:
         assert reserved[0].pointer == "/0/filename"
         assert "preserve every unrelated valid operation" in str(reserved[0].expected)
 
+    @pytest.mark.parametrize("status", ["draft", "stable", "deprecated"])
+    @pytest.mark.parametrize("read_only", [False, True])
     def test_host_validator_reserves_every_installed_system_page(
         self,
         isolated_wiki: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        status: str,
+        read_only: bool,
     ) -> None:
         from chronovisor.ingest import ingest
 
+        if read_only:
+            monkeypatch.setenv("CHRONOVISOR_READ_ONLY", "1")
         (isolated_wiki / "system" / "claude-code.md").write_text(
-            "---\ntitle: Claude Code\n---\noperational system memory\n",
+            f"---\ntitle: Claude Code\nstatus: {status}\n"
+            "---\noperational system memory\n",
             encoding="utf-8",
         )
 
@@ -10710,6 +10829,66 @@ class TestTriagePlanSchema:
         ]
 
         assert _validate_triage_plan(plan, coerce_missing_updates=True) == plan
+
+    @pytest.mark.parametrize("status", ["draft", "deprecated"])
+    def test_nonstable_update_is_not_retyped_or_used_as_generation_context(
+        self,
+        isolated_wiki: Path,
+        status: str,
+    ) -> None:
+        from chronovisor.ingest import ingest
+
+        page = _seed_page(
+            isolated_wiki,
+            "memory/nonstable.md",
+            f"---\ntitle: Nonstable\nstatus: {status}\ntype: knowledge\n---\nSECRET BODY\n",
+        )
+        original = page.read_bytes()
+        operation = {"type": "update", "filename": "memory/nonstable.md"}
+
+        assert ingest._normalize_triage_plan([operation]) == [operation]
+        assert ingest._validate_triage_plan(
+            [operation], coerce_missing_updates=True
+        ) is None
+        assert ingest._build_focused_context(operation, "raw") == ""
+        assert (
+            ingest._build_compact_update_context(
+                operation,
+                "raw",
+                max_selected_bytes=1_024,
+            )
+            is None
+        )
+        assert page.read_bytes() == original
+
+    def test_symlink_update_is_not_adopted_or_retyped(
+        self,
+        isolated_wiki: Path,
+    ) -> None:
+        from chronovisor.ingest import ingest
+
+        target = _seed_page(
+            isolated_wiki,
+            "memory/target.md",
+            "---\ntitle: Target\nstatus: stable\ntype: knowledge\n---\nSECRET BODY\n",
+        )
+        alias = isolated_wiki / "pages" / "memory" / "alias.md"
+        alias.symlink_to(target)
+        original = target.read_bytes()
+        operation = {"type": "update", "filename": "memory/alias.md"}
+
+        assert ingest._triage_update_target_exists("memory/alias.md") is False
+        assert ingest._normalize_triage_plan([operation]) == [operation]
+        assert ingest._build_focused_context(operation, "raw") == ""
+        assert (
+            ingest._build_compact_update_context(
+                operation,
+                "raw",
+                max_selected_bytes=1_024,
+            )
+            is None
+        )
+        assert target.read_bytes() == original
 
     def test_missing_update_without_summary_gets_neutral_create_topic(
         self, isolated_wiki: Path
@@ -12569,6 +12748,56 @@ class TestIngestContextAdmission:
         assert calls == 1
 
 
+def test_search_related_pages_uses_exact_stable_system_index_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from chronovisor.core import search
+    from chronovisor.ingest import ingest
+
+    pages = tmp_path / "pages"
+    system = tmp_path / "system"
+    pages.mkdir()
+    system.mkdir()
+    (pages / "same.md").write_text(
+        "---\ntitle: Wrong\nstatus: deprecated\ntype: knowledge\n---\nSECRET PAGE\n",
+        encoding="utf-8",
+    )
+    stable_system = system / "same.md"
+    stable_system.write_text(
+        "---\ntitle: Same\nstatus: stable\ntype: knowledge\n---\nSYSTEM BODY\n",
+        encoding="utf-8",
+    )
+
+    class FakeBM25:
+        def build(self) -> None:
+            return None
+
+        def query(self, _query: str, *, top_n: int):
+            assert top_n == 8
+            return [SimpleNamespace(page_id="same")]
+
+    class FakeIndex:
+        def refresh(self) -> None:
+            return None
+
+        def meta(self, page_id: str):
+            assert page_id == "same"
+            return {
+                "status": "stable",
+                "path": str(stable_system),
+                "relative_path": "same.md",
+                "is_system": True,
+            }
+
+    monkeypatch.setattr(search, "get_bm25", lambda: FakeBM25())
+    monkeypatch.setattr(ingest, "get_store", lambda: FakeIndex())
+    monkeypatch.setattr(ingest, "PAGES_DIR", pages)
+    monkeypatch.setattr(ingest, "SYSTEM_DIR", system)
+
+    assert ingest._search_related_pages(["same"]) == [stable_system]
+
+
 class TestRecallMetadataStructuredSession:
     def test_page_metadata_preserves_nested_unknown_yaml_and_body_bytes(
         self, monkeypatch: pytest.MonkeyPatch
@@ -12826,12 +13055,14 @@ class TestApplyPreparePhase:
         assert not (isolated_wiki / "pages" / "b" / "dup.md").exists()
 
     @pytest.mark.parametrize("op_type", ["create", "update"])
+    @pytest.mark.parametrize("status", ["draft", "stable", "deprecated"])
     def test_system_page_id_is_reserved_from_ingest(
-        self, isolated_wiki: Path, op_type: str
+        self, isolated_wiki: Path, op_type: str, status: str
     ) -> None:
         system_page = isolated_wiki / "system" / "lessons-learned.md"
         system_page.write_text(
-            "---\ntitle: System Lessons\nupdated: 2026-07-11\nstatus: stable\ntype: knowledge\n---\ncanonical\n"
+            f"---\ntitle: System Lessons\nupdated: 2026-07-11\nstatus: {status}\n"
+            "type: knowledge\n---\ncanonical\n"
         )
         op = {
             "type": op_type,
@@ -13629,54 +13860,6 @@ class TestRebuildIndexNonFatal:
         # Page is on disk despite rebuild failure.
         assert (isolated_wiki / "pages" / "ai" / "foo.md").exists()
 
-    def test_real_rebuild_index_io_failure_still_completes(
-        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Stronger version: don't mock _rebuild_index — let it actually run,
-        but make INDEX_FILE be a directory so the real write_text raises
-        IsADirectoryError. We still expect COMPLETED + on_complete."""
-        from chronovisor.core import jobs
-        from chronovisor.ingest import ingest as ingest_mod
-
-        # Replace INDEX_FILE with a directory (cannot write_text).
-        idx_path = isolated_wiki / "index.md"
-        idx_path.mkdir(parents=True, exist_ok=False)
-        monkeypatch.setattr(ingest_mod, "INDEX_FILE", idx_path)
-
-        monkeypatch.setattr(ingest_mod, "is_available", lambda: True)
-        monkeypatch.setattr(
-            ingest_mod,
-            "_triage",
-            lambda _content: [
-                {"type": "create", "filename": "ai/bar.md", "title": "Bar"}
-            ],
-        )
-        monkeypatch.setattr(
-            ingest_mod,
-            "_generate_one",
-            lambda _op, _raw, **_kw: {
-                "type": "create",
-                "filename": "ai/bar.md",
-                "content": (
-                    "---\ntitle: Bar\nupdated: 2026-04-28\nstatus: stable\ntype: knowledge\n---\nbody"
-                ),
-            },
-        )
-
-        on_complete_calls = []
-        job = jobs.job_store.create(processor="ollama")
-        ingest_mod.run_ingest(
-            "raw",
-            job.job_id,
-            on_complete=lambda: on_complete_calls.append(True),
-            frontier_reviewer=ingest_mod._run_ingest_frontier_review,
-        )
-
-        finished = jobs.job_store.get(job.job_id)
-        assert finished.status == jobs.JobStatus.COMPLETED, finished.error
-        assert on_complete_calls == [True]
-
-
 # ---------------------------------------------------------------------------
 # R5: parallel raw allocation
 # ---------------------------------------------------------------------------
@@ -13918,13 +14101,12 @@ class TestWikiInit:
         for page_id in ("user-profile", "current-state", "lessons-learned"):
             (isolated_wiki / "system" / f"{page_id}.md").write_text(
                 f"---\ntitle: {page_id}\nupdated: 2026-04-28\nstatus: stable\ntype: knowledge\n---\n"
-                f"body for [[{page_id}]]\n"
+                f"body for [{page_id}](<{page_id}.md>)\n"
             )
         (isolated_wiki / "raw" / "pending.md").write_text("raw")
 
         monkeypatch.setattr(server, "CHRONOVISOR_ROOT", isolated_wiki)
         monkeypatch.setattr(server, "RAW_DIR", isolated_wiki / "raw")
-        monkeypatch.setattr(server, "SYSTEM_DIR", isolated_wiki / "system")
         monkeypatch.setattr(ollama, "is_available", lambda: False)
 
         payload = json.loads(server.chronovisor_init())
@@ -13939,7 +14121,7 @@ class TestWikiInit:
             "lessons-learned",
         }
         assert (
-            "body for [[user-profile]]"
+            "body for [user-profile](<user-profile.md>)"
             in payload["system_pages"]["user-profile"]["content"]
         )
 
@@ -13960,27 +14142,35 @@ class TestLinkFixProtectedRegions:
         from chronovisor.ingest.lint import _replace_link_in_content
 
         content = (
-            "---\ntitle: [[ghost]]\n---\n"
-            "body [[ghost#sec|Ghost Page]] and [[other]]\n"
-            "`[[ghost]]`\n"
-            "```python\nx = data[[ghost]]\n```\n"
+            "---\ntitle: '[ghost](<ghost.md>)'\n---\n"
+            "body [Ghost Page](<ghost.md#sec>) and [other](<other.md>)\n"
+            "`[ghost](<ghost.md>)`\n"
+            "```python\nx = '[ghost](<ghost.md>)'\n```\n"
         )
-        new_content, count = _replace_link_in_content(content, "ghost", "real-page")
+        new_content, count = _replace_link_in_content(
+            content,
+            "pages/ghost",
+            "pages/real-page",
+            source_namespace="pages",
+            source_path="source.md",
+        )
 
         assert count == 1
-        assert "title: [[ghost]]" in new_content
-        assert "`[[ghost]]`" in new_content
-        assert "x = data[[ghost]]" in new_content
-        assert "[[real-page#sec|Ghost Page]]" in new_content
-        assert "[[other]]" in new_content
+        assert "title: '[ghost](<ghost.md>)'" in new_content
+        assert "`[ghost](<ghost.md>)`" in new_content
+        assert "x = '[ghost](<ghost.md>)'" in new_content
+        assert "[Ghost Page](<real-page.md#sec>)" in new_content
+        assert "[other](<other.md>)" in new_content
 
     def test_lint_plaintext_fallback_uses_alias(self) -> None:
         from chronovisor.ingest.lint import _replace_link_in_content
 
         new_content, count = _replace_link_in_content(
-            "See [[ghost|visible name]] and [[ghost#old]].",
-            "ghost",
+            "See [visible name](<ghost.md>) and [ghost](<ghost.md#old>).",
+            "pages/ghost",
             None,
+            source_namespace="pages",
+            source_path="source.md",
         )
 
         assert count == 2

@@ -5,7 +5,7 @@ from __future__ import annotations
 import posixpath
 import re
 import unicodedata
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import Any, Literal, cast
@@ -14,7 +14,7 @@ from urllib.parse import quote, unquote, urlsplit
 import yaml  # type: ignore[import-untyped]
 
 _MARKDOWN_LINK_RE = re.compile(
-    r"(?<![!\\])\[(?:\\[^\n]|[^\]\\\n])*\]\(\s*"
+    r"(?<![!\\])\[(?P<label>(?:\\[^\n]|[^\]\\\n])*)\]\(\s*"
     r"(?P<target><[^>\n]+>|(?:[^\s()\n]+|\([^()\n]*\))+)"
     r"(?:\s+(?:\"[^\"\n]*\"|'[^'\n]*'|\([^()\n]*\)))?\s*\)"
 )
@@ -201,16 +201,13 @@ def format_internal_markdown_link(
 
     source = _source_document_path(source_namespace, source_path)
     target = _source_document_path(target_namespace, target_path)
-    if source.namespace == "pages" and target.namespace == "system":
-        raise CanonicalDocumentError("pages links cannot cross into system")
-    if source.namespace == target.namespace:
-        destination = posixpath.relpath(
-            target.path,
-            start=PurePosixPath(source.path).parent.as_posix(),
-        )
-    else:
-        destination = f"/{target.namespace}/{target.path}"
-    rendered_target = quote(destination, safe="/-._~")
+    rendered_target = _format_internal_target(
+        source_namespace=source.namespace,
+        source_path=source.path,
+        target_namespace=target.namespace,
+        target_path=target.path,
+        fragment=None,
+    )
     if "\r" in label or "\n" in label:
         raise CanonicalDocumentError("Markdown link label cannot contain newlines")
     rendered_label = label.replace("\\", "\\\\").replace("[", "\\[").replace("]", "\\]")
@@ -234,6 +231,18 @@ def extract_markdown_links(body: bytes | str) -> tuple[str, ...]:
         match.group("target").removeprefix("<").removesuffix(">")
         for match in _MARKDOWN_LINK_RE.finditer(text)
         if not _position_in_spans(match.start(), spans)
+    )
+
+
+def markdown_link_spans(body: bytes | str) -> tuple[tuple[int, int], ...]:
+    """Return exact inline-link spans outside frontmatter and code."""
+
+    text = _decode_body(body) if isinstance(body, bytes) else body
+    protected = _protected_spans(text)
+    return tuple(
+        match.span()
+        for match in _MARKDOWN_LINK_RE.finditer(text)
+        if not _position_in_spans(match.start(), protected)
     )
 
 
@@ -323,6 +332,88 @@ def resolve_internal_markdown_links(
         )
         is not None
     )
+
+
+InternalLinkRewrite = Callable[
+    [ResolvedMarkdownLink, str], ResolvedMarkdownLink | str | None
+]
+
+
+def rewrite_internal_markdown_links(
+    body: bytes | str,
+    *,
+    source_namespace: Namespace,
+    source_path: str,
+    rewrite: InternalLinkRewrite,
+    output_namespace: Namespace | None = None,
+    output_path: str | None = None,
+) -> tuple[str, int]:
+    """Rewrite resolved internal links while preserving unrelated Markdown."""
+
+    text = _decode_body(body) if isinstance(body, bytes) else body
+    spans = _protected_spans(text)
+    rendered_namespace = output_namespace or source_namespace
+    rendered_path = output_path or source_path
+    changed = 0
+
+    def replace(match: re.Match[str]) -> str:
+        nonlocal changed
+        if _position_in_spans(match.start(), spans):
+            return match.group(0)
+        raw_target = match.group("target").removeprefix("<").removesuffix(">")
+        resolved = resolve_internal_markdown_link(
+            raw_target,
+            source_namespace=source_namespace,
+            source_path=source_path,
+        )
+        if resolved is None:
+            return match.group(0)
+        replacement = rewrite(resolved, match.group("label"))
+        if replacement is None:
+            return match.group(0)
+        if isinstance(replacement, str):
+            rendered = replacement
+        else:
+            target = _format_internal_target(
+                source_namespace=rendered_namespace,
+                source_path=rendered_path,
+                target_namespace=replacement.namespace,
+                target_path=replacement.path,
+                fragment=replacement.fragment,
+            )
+            target_start = match.start("target") - match.start()
+            target_end = match.end("target") - match.start()
+            rendered = match.group(0)[:target_start] + f"<{target}>" + match.group(0)[target_end:]
+        if rendered != match.group(0):
+            changed += 1
+        return rendered
+
+    return _MARKDOWN_LINK_RE.sub(replace, text), changed
+
+
+def _format_internal_target(
+    *,
+    source_namespace: Namespace,
+    source_path: str,
+    target_namespace: Namespace,
+    target_path: str,
+    fragment: str | None,
+) -> str:
+    source = _source_document_path(source_namespace, source_path)
+    target = _source_document_path(target_namespace, target_path)
+    if source.namespace == "pages" and target.namespace == "system":
+        raise CanonicalDocumentError("pages links cannot cross into system")
+    if source.namespace == target.namespace:
+        destination = posixpath.relpath(
+            target.path,
+            start=PurePosixPath(source.path).parent.as_posix(),
+        )
+    else:
+        destination = f"/{target.namespace}/{target.path}"
+    rendered = quote(destination, safe="/-._~")
+    if fragment:
+        rendered += f"#{quote(fragment, safe='-._~')}"
+    return rendered
 
 
 def _protected_spans(text: str) -> list[tuple[int, int]]:

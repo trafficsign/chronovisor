@@ -8,20 +8,22 @@ import re
 import threading
 import time
 from collections import deque
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
+from chronovisor.core.canonical_document import (
+    Namespace,
+    parse_document,
+    resolve_internal_markdown_links,
+)
 from chronovisor.core.durable_state import DurableStateError, read_sealed_json
-from chronovisor.core.frontmatter import parse as parse_frontmatter
 from chronovisor.core.index_store import (
-    PAGE_RESERVED_FILENAMES,
-    SYSTEM_RESERVED_FILENAMES,
-    contained_file,
+    canonical_document_paths,
 )
 from chronovisor.core.knowledge_graph_store import KnowledgeGraphStore
-from chronovisor.core.link_fix import extract_targets
 from chronovisor.core.raw_segment import RawSegmentCommit, RawSegmentCorrupt
 from chronovisor.ops.cortex_stream import (
     websocket_accept as websocket_accept,
@@ -124,6 +126,7 @@ def _project_cortex_page_ids(values: Any) -> list[str]:
 class _Page:
     path: Path
     page_id: str
+    canonical_key: str
     category: str
     title: str
     updated: str
@@ -134,25 +137,14 @@ class _Page:
 
 
 def _page_sources(root: Path) -> list[tuple[Path, str]]:
-    sources: list[tuple[Path, str]] = []
-    for directory, source_kind, recursive, reserved in (
-        (root / "pages", "pages", True, PAGE_RESERVED_FILENAMES),
-        (root / "system", "system", False, SYSTEM_RESERVED_FILENAMES),
-    ):
-        if not directory.is_dir():
-            continue
-        try:
-            candidates = (
-                directory.rglob("*.md") if recursive else directory.glob("*.md")
-            )
-            for path in candidates:
-                if path.name in reserved:
-                    continue
-                if (resolved := contained_file(path, directory)) is not None:
-                    sources.append((resolved, source_kind))
-        except (OSError, RuntimeError):
-            continue
-    return sorted(sources, key=lambda item: str(item[0]))
+    return [
+        (path, "system" if root / "system" in path.parents else "pages")
+        for path in canonical_document_paths(
+            root / "pages",
+            system_dir=root / "system",
+            require_stable=True,
+        )
+    ]
 
 
 def _source_fingerprint(
@@ -205,10 +197,15 @@ def _string_list(value: Any) -> tuple[str, ...]:
 
 def _read_page(path: Path, source_kind: str, root: Path) -> _Page | None:
     try:
-        content = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
+        raw = path.read_bytes()
+        content = raw.decode("utf-8")
+        document = parse_document(raw)
+    except (OSError, UnicodeDecodeError, ValueError):
         return None
-    metadata, _body = parse_frontmatter(content)
+    metadata = document.metadata
+    namespace: Namespace = "system" if source_kind == "system" else "pages"
+    namespace_root = root / namespace
+    relative_path = path.relative_to(namespace_root).as_posix()
     if source_kind == "system":
         category = "system"
     else:
@@ -220,19 +217,24 @@ def _read_page(path: Path, source_kind: str, root: Path) -> _Page | None:
     return _Page(
         path=path,
         page_id=page_id,
+        canonical_key=(
+            f"{namespace}/{PurePosixPath(relative_path).with_suffix('').as_posix()}"
+        ),
         category=category,
         title=title,
         updated=updated,
         tags=_string_list(metadata.get("tags")),
         line_count=max(1, content.count("\n") + 1),
         byte_count=len(content.encode("utf-8")),
-        targets=tuple(extract_targets(content, strip=True)),
+        targets=tuple(
+            f"{link.namespace}/{PurePosixPath(link.path).with_suffix('').as_posix()}"
+            for link in resolve_internal_markdown_links(
+                document.body,
+                source_namespace=namespace,
+                source_path=relative_path,
+            )
+        ),
     )
-
-
-def _target_key(value: str) -> str:
-    normalized = value.strip().removesuffix(".md")
-    return normalized.rsplit("/", 1)[-1].casefold()
 
 
 def _build_graph(
@@ -252,13 +254,29 @@ def _build_graph(
     index_by_key: dict[str, int] = {}
     ambiguous_keys: set[str] = set()
     for index, page in enumerate(pages):
-        key = page.page_id.casefold()
+        key = page.canonical_key.casefold()
         if key in index_by_key:
             ambiguous_keys.add(key)
         else:
             index_by_key[key] = index
     for key in ambiguous_keys:
         index_by_key.pop(key, None)
+    page_key_by_id: dict[str, str] = {}
+    ambiguous_page_ids: set[str] = set()
+    for page in pages:
+        page_id = page.page_id.casefold()
+        if page_id in page_key_by_id:
+            ambiguous_page_ids.add(page_id)
+        else:
+            page_key_by_id[page_id] = page.canonical_key.casefold()
+    for page_id in ambiguous_page_ids:
+        page_key_by_id.pop(page_id, None)
+    page_id_by_key = {
+        key: page.page_id
+        for page in pages
+        if (key := page.canonical_key.casefold()) in index_by_key
+        and page_key_by_id.get(page.page_id.casefold()) == key
+    }
 
     edges: list[list[int]] = []
     edge_keys: set[tuple[int, int]] = set()
@@ -267,7 +285,7 @@ def _build_graph(
     fan_out = [0] * len(pages)
     for source_index, page in enumerate(pages):
         for target in page.targets:
-            target_index = index_by_key.get(_target_key(target))
+            target_index = index_by_key.get(target.casefold())
             if target_index is None:
                 unresolved += 1
                 continue
@@ -306,7 +324,12 @@ def _build_graph(
         }
         for index, page in enumerate(pages)
     ]
-    typed_graph = _typed_graph_projection(root, index_by_key=index_by_key)
+    typed_graph = _typed_graph_projection(
+        root,
+        index_by_key=index_by_key,
+        page_key_by_id=page_key_by_id,
+        page_id_by_key=page_id_by_key,
+    )
     memberships = typed_graph.pop("memberships")
     for node in nodes:
         node["communities"] = memberships.get(node["id"], [])
@@ -337,10 +360,30 @@ def _safe_sealed(path: Path) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def _graph_page_key(
+    value: str,
+    index_by_key: dict[str, int],
+    page_key_by_id: Mapping[str, str],
+) -> str | None:
+    """Map legacy KG page paths to exact canonical Cortex node keys."""
+
+    normalized = value.strip().removeprefix("/").removesuffix(".md").casefold()
+    if normalized.startswith(("pages/", "system/")):
+        page_id = PurePosixPath(normalized).name
+        return (
+            normalized
+            if normalized in index_by_key and page_key_by_id.get(page_id) == normalized
+            else None
+        )
+    return page_key_by_id.get(PurePosixPath(normalized).name)
+
+
 def _typed_graph_projection(
     root: Path,
     *,
     index_by_key: dict[str, int],
+    page_key_by_id: Mapping[str, str],
+    page_id_by_key: Mapping[str, str],
 ) -> dict[str, Any]:
     """Return browser-safe relation topology without lazy detail payloads."""
 
@@ -351,8 +394,14 @@ def _typed_graph_projection(
         records = []
     relations: list[dict[str, Any]] = []
     for record in records:
-        source_index = index_by_key.get(_target_key(record.source_page_id))
-        target_index = index_by_key.get(_target_key(record.target_page_id))
+        source_key = _graph_page_key(
+            record.source_page_id, index_by_key, page_key_by_id
+        )
+        target_key = _graph_page_key(
+            record.target_page_id, index_by_key, page_key_by_id
+        )
+        source_index = index_by_key.get(source_key) if source_key else None
+        target_index = index_by_key.get(target_key) if target_key else None
         if source_index is None or target_index is None:
             continue
         relation = {
@@ -401,8 +450,14 @@ def _typed_graph_projection(
                     if len(relations) >= 2_000:
                         relation_limit_reached = True
                         break
-                    source_index = index_by_key.get(_target_key(source_page_id))
-                    target_index = index_by_key.get(_target_key(target_page_id))
+                    source_key = _graph_page_key(
+                        source_page_id, index_by_key, page_key_by_id
+                    )
+                    target_key = _graph_page_key(
+                        target_page_id, index_by_key, page_key_by_id
+                    )
+                    source_index = index_by_key.get(source_key) if source_key else None
+                    target_index = index_by_key.get(target_key) if target_key else None
                     if source_index is None or target_index is None:
                         continue
                     relation = {
@@ -434,11 +489,11 @@ def _typed_graph_projection(
         for community_id, value in sorted(community_values.items()):
             if not isinstance(value, dict):
                 continue
-            community_members: list[str] = [
-                _target_key(str(page_id))
-                for page_id in value.get("member_page_ids") or []
-                if _target_key(str(page_id)) in index_by_key
-            ]
+            community_members = []
+            for page_id in value.get("member_page_ids") or []:
+                key = _graph_page_key(str(page_id), index_by_key, page_key_by_id)
+                if key is not None and (node_id := page_id_by_key.get(key)) is not None:
+                    community_members.append(node_id)
             for member_page_id in community_members:
                 memberships.setdefault(member_page_id, []).append(str(community_id))
             communities.append(

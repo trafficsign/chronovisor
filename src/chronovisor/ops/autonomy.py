@@ -25,6 +25,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from chronovisor.core import index_store
 from chronovisor.core.frontmatter import parse as parse_frontmatter
 from chronovisor.core.frontmatter import patch as patch_frontmatter
 from chronovisor.core.page_mutation import (
@@ -36,7 +37,12 @@ from chronovisor.core.runtime_config import (
     runtime_repo_root,
     uvx_runtime_command,
 )
-from chronovisor.core.store import CHRONOVISOR_ROOT, find_page, okf_runtime_operation
+from chronovisor.core.store import (
+    CHRONOVISOR_ROOT,
+    PAGES_DIR,
+    SYSTEM_DIR,
+    okf_runtime_operation,
+)
 from chronovisor.decision.decision_authority import (
     compare_semantic_authority,
     current_semantic_authority,
@@ -87,8 +93,28 @@ DUPLICATE_FRONTIER_LANE = "autonomy_duplicate_resolution"
 RETENTION_FRONTIER_LANE = "autonomy_retention"
 CONTENT_CORRECTION_LANE = "content_correction"
 DUPLICATE_FRONTIER_RESOLVER_VERSION = "duplicate-frontier-v3-exact-postimage"
-RETENTION_FRONTIER_RESOLVER_VERSION = "retention-frontier-v3-exact-postimage"
+RETENTION_FRONTIER_RESOLVER_VERSION = "retention-frontier-v4-canonical-deprecation"
 LEGACY_SEMANTIC_HOLD_KIND = "legacy_local_semantic_no_quorum_fail_closed"
+
+
+def _canonical_lifecycle_page(
+    page_id: str, *, require_stable: bool
+) -> Path | None:
+    path = index_store.canonical_document_path_for_id(
+        page_id,
+        pages_dir=PAGES_DIR,
+        system_dir=SYSTEM_DIR,
+        require_stable=require_stable,
+    )
+    if path is None:
+        return None
+    try:
+        path.relative_to(PAGES_DIR.resolve(strict=True))
+    except (OSError, RuntimeError, ValueError):
+        return None
+    return path
+
+
 def _now() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
@@ -158,16 +184,12 @@ def _git(args: list[str], *, cwd: Path = CHRONOVISOR_ROOT) -> subprocess.Complet
 
 
 def _page_meta(page_id: str) -> dict[str, Any]:
-    from chronovisor.core.index_store import get_store
-
-    store = get_store()
+    store = index_store.get_store()
     store.refresh()
     return store.meta(page_id) or {}
 
 
 def _page_quality(page_id: str, meta: dict[str, Any] | None = None) -> float:
-    from chronovisor.core.index_store import get_store
-
     meta = meta or _page_meta(page_id)
     if not meta:
         return -1.0
@@ -185,7 +207,7 @@ def _page_quality(page_id: str, meta: dict[str, Any] | None = None) -> float:
         except OSError:
             pass
     try:
-        store = get_store()
+        store = index_store.get_store()
         score += min(2.0, len(store.backlinks(page_id)) * 0.3)
         score += min(1.0, len(store.outlinks(page_id)) * 0.1)
     except Exception:
@@ -402,8 +424,8 @@ def _prepare_duplicate_effect_receipt(
 ) -> tuple[dict[str, Any] | None, str | None]:
     if decision not in {"supersede_left", "supersede_right", "keep_both"}:
         return None, "duplicate effect decision is invalid"
-    left_path = find_page(left)
-    right_path = find_page(right)
+    left_path = _canonical_lifecycle_page(left, require_stable=False)
+    right_path = _canonical_lifecycle_page(right, require_stable=False)
     if left_path is None or right_path is None:
         return None, "winner_or_loser_missing"
     try:
@@ -440,8 +462,10 @@ def _prepare_duplicate_effect_receipt(
         return None, f"effect_preimage_parse_error:{exc}"
     if loser_meta.get("status") == "deprecated":
         return None, "loser_already_superseded"
-    if winner_meta.get("status") in {"deprecated", "archived"}:
-        return None, "winner_is_not_active"
+    if loser_meta.get("status") != "stable":
+        return None, "loser_is_not_stable"
+    if winner_meta.get("status") != "stable":
+        return None, "winner_is_not_stable"
     postimage, render_error = _render_frontmatter_postimage(
         raw_by_page[loser],
         {
@@ -475,9 +499,9 @@ def _prepare_retention_effect_receipt(
     decision_at: str,
     approval_key: str,
 ) -> tuple[dict[str, Any] | None, str | None]:
-    if decision not in {"archive", "keep_active"}:
+    if decision not in {"deprecate", "keep_stable"}:
         return None, "retention effect decision is invalid"
-    path = find_page(page_id)
+    path = _canonical_lifecycle_page(page_id, require_stable=False)
     if path is None:
         return None, "page_not_found"
     try:
@@ -486,25 +510,30 @@ def _prepare_retention_effect_receipt(
         return None, f"effect_preimage_read_error:{exc}"
     if hashlib.sha256(original).hexdigest() != page_hash:
         return None, "content_changed_before_approval"
+    try:
+        original_meta, _body = parse_frontmatter(original.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as exc:
+        return None, f"effect_preimage_parse_error:{exc}"
+    if original_meta.get("status") != "stable":
+        return None, "page_is_not_stable"
     receipt = {
         "receipt_version": 1,
-        "operation": "keep_active" if decision == "keep_active" else "soft_archive",
+        "operation": "keep_stable" if decision == "keep_stable" else "soft_deprecate",
         "decision": decision,
         "decision_at": decision_at,
         "targets": {"page_id": page_id},
         "preimages": {page_id: _bytes_receipt(original)},
         "postimages": {},
     }
-    if decision == "keep_active":
+    if decision == "keep_stable":
         return receipt, None
     postimage, render_error = _render_frontmatter_postimage(
         original,
         {
-            "status": "archived",
-            "autonomy_decision": "retention_frontier_archive",
+            "status": "deprecated",
+            "autonomy_decision": "retention_frontier_deprecate",
             "autonomy_decision_at": decision_at,
             "frontier_approval_key": approval_key,
-            "archive_reason": "frontier_approved_reversible_soft_archive",
         },
     )
     if render_error is not None or postimage is None:
@@ -601,7 +630,7 @@ def _retention_semantic_epoch(
         "page_id": page_id,
         "page_hash": page_hash,
         "retention": dict(retention),
-        "local_recommendation": "archive",
+        "local_recommendation": "deprecate",
     }
 
 
@@ -967,14 +996,14 @@ def _retention_effect_receipt_error(
         or receipt["preimages"][page_id].get("sha256") != page_hash
     ):
         return "retention effect receipt identity mismatch"
-    if decision == "keep_active":
-        if receipt.get("operation") != "keep_active" or receipt.get("postimages") != {}:
+    if decision == "keep_stable":
+        if receipt.get("operation") != "keep_stable" or receipt.get("postimages") != {}:
             return "retention keep receipt mismatch"
         return None
-    if receipt.get("operation") != "soft_archive" or set(
+    if receipt.get("operation") != "soft_deprecate" or set(
         receipt.get("postimages", {})
     ) != {page_id}:
-        return "retention archive receipt mismatch"
+        return "retention deprecation receipt mismatch"
     return None
 
 
@@ -985,7 +1014,7 @@ def _current_pages_match_postimages(receipt: dict[str, Any]) -> bool:
     if not isinstance(postimages, dict) or not postimages:
         return False
     for page_id, expected in postimages.items():
-        path = find_page(page_id)
+        path = _canonical_lifecycle_page(page_id, require_stable=False)
         if path is None:
             return False
         try:
@@ -1071,7 +1100,7 @@ def _finalize_frontier_receipt(
             set(artifact_hashes) != {page_id}
             or effect_receipt.get("targets") != {"page_id": page_id}
             or effect_receipt.get("decision") != expected_decision
-            or effect_receipt.get("operation") != "soft_archive"
+            or effect_receipt.get("operation") != "soft_deprecate"
         ):
             return None
     if not _current_pages_match_postimages(effect_receipt):
@@ -1106,7 +1135,7 @@ def _patch_page_status(
     effect_receipt: dict[str, Any] | None = None,
     correction_store: ConvergenceStore | None = None,
 ) -> dict[str, Any]:
-    path = find_page(page_id)
+    path = _canonical_lifecycle_page(page_id, require_stable=False)
     if path is None:
         return {"status": "skipped", "reason": "page_not_found", "page_id": page_id}
     try:
@@ -1130,6 +1159,20 @@ def _patch_page_status(
         return {
             "status": "retry",
             "reason": "effect_receipt_preimage_mismatch",
+            "page_id": page_id,
+        }
+    try:
+        original_meta, _body = parse_frontmatter(text)
+    except ValueError as exc:
+        return {
+            "status": "retry",
+            "reason": f"page_parse_error:{exc}",
+            "page_id": page_id,
+        }
+    if original_meta.get("status") != "stable":
+        return {
+            "status": "retry",
+            "reason": "page_is_not_stable",
             "page_id": page_id,
         }
     new_text = patch_frontmatter(text, updates)
@@ -1323,7 +1366,7 @@ def _canonical_duplicate_record(record: dict[str, Any]) -> dict[str, Any] | None
 def _duplicate_page_snapshot(
     page_id: str, *, excerpt_chars: int = 5000
 ) -> dict[str, Any]:
-    path = find_page(page_id)
+    path = _canonical_lifecycle_page(page_id, require_stable=False)
     if path is None:
         return {
             "page_id": page_id,
@@ -1350,7 +1393,9 @@ def _duplicate_page_snapshot(
     excerpt = re.sub(r"\s+", " ", body).strip()[:excerpt_chars]
     return {
         "page_id": page_id,
-        "status": "ok",
+        "status": (
+            "ok" if meta.get("status") in {"stable", "deprecated"} else "nonstable"
+        ),
         "content_hash": hashlib.sha256(raw).hexdigest(),
         "path": str(path),
         "meta": meta,
@@ -1425,8 +1470,8 @@ def _soft_supersede_page(
     correction_store: ConvergenceStore | None = None,
 ) -> dict[str, Any]:
     """Soft-supersede one page with content CAS; never delete or merge bodies."""
-    loser_path = find_page(loser)
-    winner_path = find_page(winner)
+    loser_path = _canonical_lifecycle_page(loser, require_stable=False)
+    winner_path = _canonical_lifecycle_page(winner, require_stable=False)
     if loser_path is None or winner_path is None:
         return {"status": "retry", "reason": "winner_or_loser_missing"}
     try:
@@ -1459,8 +1504,10 @@ def _soft_supersede_page(
         if loser_meta.get("superseded_by") == winner:
             return {"status": "already_applied", "loser": loser, "winner": winner}
         return {"status": "retry", "reason": "loser_already_superseded_elsewhere"}
-    if winner_meta.get("status") in {"deprecated", "archived"}:
-        return {"status": "retry", "reason": "winner_is_not_active"}
+    if loser_meta.get("status") != "stable":
+        return {"status": "retry", "reason": "loser_is_not_stable"}
+    if winner_meta.get("status") != "stable":
+        return {"status": "retry", "reason": "winner_is_not_stable"}
 
     updates = {
         "status": "deprecated",
@@ -2467,6 +2514,14 @@ def _review_retention_candidate(
     )
 
 
+def _retention_snapshot_error(snapshot_status: object) -> str:
+    return (
+        "deprecation_page_is_not_stable"
+        if snapshot_status == "nonstable"
+        else "deprecation_page_snapshot_unavailable"
+    )
+
+
 def apply_retention_archives(
     retention_payload: dict[str, Any],
     *,
@@ -2481,8 +2536,8 @@ def apply_retention_archives(
     now: datetime | None = None,
     eligible_keys: set[str] | None = None,
 ) -> dict[str, Any]:
-    """Frontier-review retention proposals before reversible soft archival."""
-    candidates = retention_payload.get("archive_candidates")
+    """Frontier-review retention proposals before reversible deprecation."""
+    candidates = retention_payload.get("deprecation_candidates")
     if not isinstance(candidates, list):
         candidates = []
     pages = retention_payload.get("pages")
@@ -2516,7 +2571,7 @@ def apply_retention_archives(
         row = pages.get(page_id) if isinstance(pages.get(page_id), dict) else {}
         snapshot = _duplicate_page_snapshot(page_id)
         decision: dict[str, Any] = {
-            "type": "archive_frontier_decision",
+            "type": "deprecation_frontier_decision",
             "ts": decision_at,
             "page_id": page_id,
             "action": "defer",
@@ -2525,7 +2580,7 @@ def apply_retention_archives(
             "reason": "frontier_approval_required",
         }
         if snapshot.get("status") != "ok":
-            decision["reason"] = "archive_page_snapshot_unavailable"
+            decision["reason"] = _retention_snapshot_error(snapshot.get("status"))
             decisions.append(decision)
             if write and not dry_run and eligible_keys is None:
                 _append_jsonl(DECISIONS_FILE, decision)
@@ -2542,7 +2597,7 @@ def apply_retention_archives(
         snapshot_meta = (
             snapshot.get("meta") if isinstance(snapshot.get("meta"), dict) else {}
         )
-        if snapshot_meta.get("status") == "archived":
+        if snapshot_meta.get("status") == "deprecated":
             approval_key = snapshot_meta.get("frontier_approval_key")
             recovered = None
             if (
@@ -2554,14 +2609,14 @@ def apply_retention_archives(
                     state,
                     lane=RETENTION_FRONTIER_LANE,
                     key=approval_key,
-                    expected_decision="archive",
+                    expected_decision="deprecate",
                     receipt={"status": "already_applied", "page_id": page_id},
                     now=now,
                 )
             decision.update(
                 {
-                    "action": "already_archived",
-                    "reason": "retention_archive_already_applied",
+                    "action": "already_deprecated",
+                    "reason": "retention_deprecation_already_applied",
                     "result": {"status": "already_applied", "page_id": page_id},
                     "recovery_only": True,
                     "semantic_effect": False,
@@ -2580,6 +2635,12 @@ def apply_retention_archives(
             if write and not dry_run:
                 _append_jsonl(DECISIONS_FILE, decision)
             continue
+        if snapshot_meta.get("status") != "stable":
+            decision["reason"] = "deprecation_page_is_not_stable"
+            decisions.append(decision)
+            if write and not dry_run and eligible_keys is None:
+                _append_jsonl(DECISIONS_FILE, decision)
+            continue
         if actionable_seen >= max(0, limit):
             break
         actionable_seen += 1
@@ -2591,7 +2652,7 @@ def apply_retention_archives(
             metadata={
                 "page_id": page_id,
                 "retention": row,
-                "local_recommendation": "archive",
+                "local_recommendation": "deprecate",
             },
             now=now,
             dry_run=dry_run,
@@ -2690,9 +2751,9 @@ def apply_retention_archives(
         if status in {"applied", "rejected", "quarantined", "human_required"}:
             decision.update(
                 {
-                    "action": "archive"
+                    "action": "deprecate"
                     if status == "applied"
-                    else "keep_active"
+                    else "keep_stable"
                     if status == "rejected"
                     else "defer",
                     "reason": f"cached_{status}",
@@ -2786,7 +2847,7 @@ def apply_retention_archives(
             approval,
             lane=RETENTION_FRONTIER_LANE,
             current_authority=authority,
-            allowed_decisions={"archive", "keep_active"},
+            allowed_decisions={"deprecate", "keep_stable"},
         )
         if approval_authority_error is not None:
             transition = state.fail_attempt(
@@ -2839,7 +2900,7 @@ def apply_retention_archives(
                 "meta": snapshot["meta"],
                 "excerpt": snapshot["excerpt"],
                 "retention": row,
-                "local_recommendation": "archive",
+                "local_recommendation": "deprecate",
             }
             try:
                 raw_review = (
@@ -2851,7 +2912,6 @@ def apply_retention_archives(
                 from chronovisor.decision.frontier_review import (
                     classify_frontier_failure,
                 )
-
                 raw_review = {
                     "decision": "needs_retry",
                     "confidence": 0.0,
@@ -2917,7 +2977,6 @@ def apply_retention_archives(
         effect_receipt = (
             approval.get("effect_receipt") if isinstance(approval, dict) else None
         )
-
         result: dict[str, Any] | None = None
         if frontier_decision == "needs_retry":
             if is_local_semantic_no_quorum(review):
@@ -2972,7 +3031,7 @@ def apply_retention_archives(
                     owner=owner,
                     now=now,
                 )
-        elif frontier_decision == "keep_active":
+        elif frontier_decision == "keep_stable":
             with decision_authority_lock():
                 epoch_error = _autonomy_authority_epoch_error(
                     authority,
@@ -2993,7 +3052,7 @@ def apply_retention_archives(
                     transition = state.complete(
                         key,
                         "rejected",
-                        result={"decision": "keep_active", "frontier": review},
+                        result={"decision": "keep_stable", "frontier": review},
                         owner=owner,
                         now=now,
                     )
@@ -3031,13 +3090,10 @@ def apply_retention_archives(
                         result = _patch_page_status(
                             page_id,
                             {
-                                "status": "archived",
-                                "autonomy_decision": "retention_frontier_archive",
+                                "status": "deprecated",
+                                "autonomy_decision": "retention_frontier_deprecate",
                                 "autonomy_decision_at": receipt_decision_at,
                                 "frontier_approval_key": key,
-                                "archive_reason": (
-                                    "frontier_approved_reversible_soft_archive"
-                                ),
                             },
                             expected_hash=str(snapshot["content_hash"]),
                             effect_receipt=effect_receipt,
@@ -3064,10 +3120,10 @@ def apply_retention_archives(
         decision.update(
             {
                 "action": (
-                    "archive"
-                    if frontier_decision == "archive"
-                    else "keep_active"
-                    if frontier_decision == "keep_active"
+                    "deprecate"
+                    if frontier_decision == "deprecate"
+                    else "keep_stable"
+                    if frontier_decision == "keep_stable"
                     else "defer"
                 ),
                 "apply": bool(
@@ -3086,7 +3142,6 @@ def apply_retention_archives(
         decisions.append(decision)
         if write:
             _append_jsonl(DECISIONS_FILE, decision)
-
     status_counts: dict[str, int] = {}
     for decision in decisions:
         status = str(decision.get("status") or decision.get("reason") or "unknown")
@@ -3871,7 +3926,9 @@ def build_digest(payload: dict[str, Any], *, write: bool = True) -> dict[str, An
         payload.get("duplicates") if isinstance(payload.get("duplicates"), dict) else {}
     )
     retention = (
-        payload.get("archives") if isinstance(payload.get("archives"), dict) else {}
+        payload.get("deprecations")
+        if isinstance(payload.get("deprecations"), dict)
+        else {}
     )
     guard = (
         payload.get("regression_guard")
@@ -3885,7 +3942,7 @@ def build_digest(payload: dict[str, Any], *, write: bool = True) -> dict[str, An
         f"- Status: {watchdog.get('status', payload.get('status', 'unknown'))}",
         f"- Alerts: {len(watchdog.get('alerts', []) or [])}",
         f"- Duplicate decisions: {duplicate.get('applied', 0)} applied, {duplicate.get('deferred', 0)} deferred",
-        f"- Retention archives: {retention.get('applied', 0)} applied",
+        f"- Retention deprecations: {retention.get('applied', 0)} applied",
         f"- Regression guard: {guard.get('status', 'unknown')}",
     ]
     if watchdog.get("alerts"):
@@ -3918,7 +3975,7 @@ def run_autonomy_cycle(
         write=not dry_run,
         budget=budget,
     )
-    archive_result = apply_retention_archives(
+    deprecation_result = apply_retention_archives(
         retention,
         apply=not dry_run,
         write=not dry_run,
@@ -3939,7 +3996,7 @@ def run_autonomy_cycle(
         "ts": _now(),
         "dry_run": dry_run,
         "duplicates": duplicate_result,
-        "archives": archive_result,
+        "deprecations": deprecation_result,
         "watchdog": watchdog,
         "regression_guard": guard,
     }

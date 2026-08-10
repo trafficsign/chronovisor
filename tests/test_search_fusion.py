@@ -38,7 +38,7 @@ def page(
     page_id: str,
     score: float,
     *,
-    status: str = "active",
+    status: str = "stable",
     folder: str = "",
     page_type: str = "knowledge",
 ) -> ScoredPage:
@@ -133,7 +133,7 @@ def test_global_query_uses_community_branch_without_relation_traversal(
                 "title": page_id,
                 "updated": "2026-08-01",
                 "path": f"/tmp/pages/{page_id}.md",
-                "status": "active",
+                "status": "stable",
                 "entities": [],
             }
 
@@ -253,7 +253,7 @@ def test_apply_filters_exposes_only_canonical_stable_pages() -> None:
             page("stable", 1.0, status="stable"),
             page("draft", 2.0, status="draft"),
             page("old", 2.0, status="deprecated"),
-            page("gone", 3.0, status="archived"),
+            page("draft", 3.0, status="draft"),
         ]
     )
 
@@ -319,7 +319,7 @@ def test_usage_prior_applies_recency_decay_and_cap(tmp_path, monkeypatch) -> Non
                 "title": page_id,
                 "updated": "2026-06-11",
                 "path": str(tmp_path / f"{page_id}.md"),
-                "status": "active",
+                "status": "stable",
                 "superseded_by": "",
             }
 

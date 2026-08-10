@@ -30,21 +30,23 @@ from pathlib import Path
 from typing import Any
 
 from chronovisor.core import ollama, runtime_config
-from chronovisor.core.index_store import get_store
+from chronovisor.core.index_store import (
+    canonical_document_path_for_id,
+    get_store,
+)
 from chronovisor.core.jsonl_write import append_jsonl_durable
 from chronovisor.core.recall_runtime_paths import RECALL_DIR
 from chronovisor.core.search import last_search_trace
 from chronovisor.core.search import search as run_search
 from chronovisor.core.store import (
     CHRONOVISOR_ROOT,
-    SYSTEM_DIR,
-    find_page,
     init_chronovisor,
     okf_runtime_operation,
     okf_startup_status,
 )
 from chronovisor.decision.local_structured import LocalStructuredSession
 from chronovisor.decision.recall_policy_contract import RecallPolicy as RecallPolicy
+from chronovisor.ingest.page_registry import PageRegistry, PageRegistryError
 from chronovisor.ingest.state_register import format_state_context, should_inject_state
 from chronovisor.recall import recall_publication as _recall_publication
 from chronovisor.recall.recall_prompt import (
@@ -1666,9 +1668,6 @@ def page_uid_for_id(page_id: str) -> str:
     """Resolve the durable UID without changing the legacy page-id API."""
 
     try:
-        from chronovisor.core.store import CHRONOVISOR_ROOT
-        from chronovisor.ingest.page_registry import PageRegistry
-
         row = PageRegistry(CHRONOVISOR_ROOT).resolve(page_id)
     except Exception:
         row = None
@@ -1779,14 +1778,23 @@ def best_excerpt_index(body_lower: str, terms: list[str], *, max_chars: int) -> 
     return best_idx
 
 
-def find_readable_page(page_id: str) -> Path | None:
-    path = find_page(page_id)
-    if path is not None:
-        return path
-    system_path = SYSTEM_DIR / f"{page_id}.md"
-    if system_path.exists():
-        return system_path
-    return None
+def find_readable_page(page_id: str, *, root: Path | None = None) -> Path | None:
+    """Resolve one root-bound, uniquely identified stable canonical page."""
+
+    wiki_root = root or CHRONOVISOR_ROOT
+    registry = PageRegistry(wiki_root)
+    if registry.path.exists():
+        try:
+            return registry.path_for(page_id)
+        except PageRegistryError:
+            return None
+    pages_dir = wiki_root / "pages"
+    system_dir = wiki_root / "system"
+    return canonical_document_path_for_id(
+        page_id,
+        pages_dir=pages_dir,
+        system_dir=system_dir,
+    )
 
 
 def strip_frontmatter(content: str) -> str:
@@ -2667,7 +2675,7 @@ def _elapsed_ms(started: float) -> int:
 def append_recall_log(request: RecallRequest, result: RecallResult) -> None:
     page_bindings: list[dict[str, str]] = []
     for item in result.context_items:
-        path = find_page(item.page_id)
+        path = find_readable_page(item.page_id)
         try:
             content_sha = hashlib.sha256(path.read_bytes()).hexdigest() if path else ""
         except OSError:
