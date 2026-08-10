@@ -186,6 +186,12 @@ provider = "local"
 model = "gemma4:26b"
 required_capabilities = ["structured_output"]
 
+[llm.roles."research.deep_retrieval_requery"]
+capability = "generation"
+provider = "local"
+model = "maxwell1500/ornith-35b:Q5_K_M"
+required_capabilities = ["structured_output"]
+
 # Each classification vote remains an independently replaceable single route.
 [llm.roles."classification.primary"]
 capability = "generation"
@@ -357,6 +363,10 @@ model = "gpt-oss:20b"
 #
 # [[llm.egress_opt_in]]
 # role = "research.tie_break"
+# data_class = "raw"
+#
+# [[llm.egress_opt_in]]
+# role = "research.deep_retrieval_requery"
 # data_class = "raw"
 #
 # [[llm.egress_opt_in]]

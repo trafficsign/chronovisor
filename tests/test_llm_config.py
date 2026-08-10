@@ -565,6 +565,7 @@ def test_repository_example_has_representative_local_role_map() -> None:
         "research.planner",
         "research.challenge",
         "research.tie_break",
+        "research.deep_retrieval_requery",
         "knowledge.relation_extraction",
         "knowledge.community_summary",
         "ingest.generation",
@@ -627,6 +628,14 @@ def test_repository_example_has_representative_local_role_map() -> None:
         "gpt-oss:20b",
         "gemma4:26b",
     ]
+    deep_retrieval_requery = config.roles["research.deep_retrieval_requery"]
+    assert deep_retrieval_requery.provider_id == "local"
+    assert deep_retrieval_requery.model == "maxwell1500/ornith-35b:Q5_K_M"
+    assert deep_retrieval_requery.required_capabilities == ("structured_output",)
+    assert (
+        '# role = "research.deep_retrieval_requery"\n# data_class = "raw"'
+        in text
+    )
     ingest_generation = config.roles["ingest.generation"]
     assert ingest_generation.provider_id == "local"
     assert ingest_generation.model == "maxwell1500/ornith-35b:Q5_K_M"

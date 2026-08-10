@@ -137,7 +137,13 @@ provider = "local"
 model = "gemma4:26b"
 required_capabilities = ["structured_output"]
 
-# All research prompts are raw/high. Remote routes require all three exact
+[llm.roles."research.deep_retrieval_requery"]
+capability = "generation"
+provider = "local"
+model = "maxwell1500/ornith-35b:Q5_K_M"
+required_capabilities = ["structured_output"]
+
+# All research prompts are raw/high. Remote routes require the exact
 # opt-ins; denial reaches no backend and has no local fallback.
 # [[llm.egress_opt_in]]
 # role = "research.planner"
@@ -147,6 +153,9 @@ required_capabilities = ["structured_output"]
 # data_class = "raw"
 # [[llm.egress_opt_in]]
 # role = "research.tie_break"
+# data_class = "raw"
+# [[llm.egress_opt_in]]
+# role = "research.deep_retrieval_requery"
 # data_class = "raw"
 
 [decision_router]
@@ -515,6 +524,12 @@ Synchronous recall routing is fixed by `llm.roles."recall.gate"` and
 `[recall].model`, `[recall.gate].model`, and `[recall.rewrite].model` values
 are accepted but ignored. Both inputs are `raw/high`; remote providers require
 an explicit role + `raw` egress opt-in and never fall back to another provider.
+
+Deep Retrieval v1 requery generation is fixed by
+`llm.roles."research.deep_retrieval_requery"`; Decision Router model fields do
+not select it. Inputs are `raw/high`, so remote providers require the exact
+role + `raw` opt-in. Denial or provider failure uses only the deterministic
+query fallback, never another provider or a local model.
 
 ## Decision quorum safety
 

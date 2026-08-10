@@ -2,8 +2,22 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
-from chronovisor.core.runtime_config import DecisionRouterConfig
+import pytest
+
+from chronovisor.core import llm_config, ollama, runtime_config, store
+from chronovisor.core.llm_runtime import (
+    BackendCapabilities,
+    GenerationResult,
+    GenerationRoute,
+    LLMRuntime,
+    MessageGenerationRequest,
+    RouteLocation,
+    SourceDataClass,
+    SourceDataClassification,
+    SourceSensitivity,
+)
 from chronovisor.core.search import ScoredPage
 from chronovisor.hosts import server
 from chronovisor.research import deep_retrieval
@@ -176,23 +190,7 @@ def test_v2_deep_dive_uses_bounded_wiki_only_kernel(tmp_path, monkeypatch) -> No
     assert result["pages"][0]["page_id"] == "target"
 
 
-def _router_config() -> DecisionRouterConfig:
-    return DecisionRouterConfig(
-        primary_model="ornith:test",
-        challenger_model="gpt-oss:test",
-        tie_break_model="gemma:test",
-        num_ctx=16_384,
-        num_predict=512,
-        read_timeout_ms=5_000,
-        max_input_chars=20_000,
-        max_output_chars=2_000,
-        max_feedback_chars=2_000,
-    )
-
-
 def test_llm_requeries_repairs_invalid_json_in_same_session(monkeypatch) -> None:
-    from chronovisor.core import ollama
-
     responses = iter(
         [
             '{"queries":["next"],"extra":true}',
@@ -205,9 +203,6 @@ def test_llm_requeries_repairs_invalid_json_in_same_session(monkeypatch) -> None
         requests.append(request)
         return next(responses)
 
-    monkeypatch.setattr(ollama, "is_available", lambda: True)
-    monkeypatch.setattr(deep_retrieval, "load_decision_router_config", _router_config)
-
     queries = deep_retrieval._llm_requeries(
         "original",
         "current",
@@ -218,21 +213,17 @@ def test_llm_requeries_repairs_invalid_json_in_same_session(monkeypatch) -> None
 
     assert queries == ["next query"]
     assert len(requests) == 2
+    assert requests[0].model == "injected:deep-retrieval-requery"
     assert len(requests[1].messages) == 4
 
 
 def test_llm_requeries_fails_closed_after_repeated_invalid_json(monkeypatch) -> None:
-    from chronovisor.core import ollama
-
     calls = 0
 
     def transport(_request):
         nonlocal calls
         calls += 1
         return '{"queries":[]}'
-
-    monkeypatch.setattr(ollama, "is_available", lambda: True)
-    monkeypatch.setattr(deep_retrieval, "load_decision_router_config", _router_config)
 
     queries = deep_retrieval._llm_requeries(
         "original",
@@ -250,12 +241,19 @@ def test_injected_requery_transport_does_not_pollute_production_audit(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    from chronovisor.core import ollama, store
-
     chronovisor_root = tmp_path / "wiki"
     monkeypatch.setattr(store, "CHRONOVISOR_ROOT", chronovisor_root)
-    monkeypatch.setattr(ollama, "is_available", lambda: True)
-    monkeypatch.setattr(deep_retrieval, "load_decision_router_config", _router_config)
+    monkeypatch.setattr(
+        llm_config,
+        "load_default_llm_runtime",
+        lambda: pytest.fail("injected transport loaded runtime configuration"),
+    )
+    monkeypatch.setattr(
+        runtime_config,
+        "load_decision_router_config",
+        lambda: pytest.fail("injected transport loaded Decision Router config"),
+    )
+    _forbid_ollama_controls(monkeypatch)
 
     queries = deep_retrieval._llm_requeries(
         "original",
@@ -267,3 +265,171 @@ def test_injected_requery_transport_does_not_pollute_production_audit(
 
     assert queries == ["follow up"]
     assert not (chronovisor_root / "runtime" / "local-consensus").exists()
+
+
+def test_production_requery_uses_fixed_raw_high_runtime_role(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class Session:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+        def run(self, *_args: object, **_kwargs: object) -> SimpleNamespace:
+            return SimpleNamespace(ok=True, value={"queries": ["follow up"]})
+
+    monkeypatch.setattr(deep_retrieval, "LocalStructuredSession", Session)
+    monkeypatch.setattr(
+        runtime_config,
+        "load_decision_router_config",
+        lambda: pytest.fail("legacy Decision Router model selected requery execution"),
+    )
+
+    queries = deep_retrieval._llm_requeries(
+        "original",
+        "current",
+        [],
+        limit=1,
+    )
+
+    assert queries == ["follow up"]
+    assert captured["model"] is None
+    assert captured["runtime_role"] == deep_retrieval.REQUERY_RUNTIME_ROLE
+    assert captured["source_data_class"] == "raw"
+    assert captured["source_sensitivity"] == "high"
+    assert captured["num_ctx"] == 114_688
+    assert captured["num_predict"] == 512
+    assert captured["max_output_chars"] == 2_000
+
+
+class _RemoteBackend:
+    provider = "remote-test"
+    location = RouteLocation.REMOTE
+
+    def __init__(self, *, fail: bool = False) -> None:
+        self.fail = fail
+        self.requests: list[tuple[MessageGenerationRequest, str]] = []
+
+    def generate(
+        self, request: MessageGenerationRequest, *, model: str
+    ) -> GenerationResult:
+        self.requests.append((request, model))
+        if self.fail:
+            raise RuntimeError("provider failed")
+        return GenerationResult(
+            content='{"queries":["remote follow up"]}',
+            provider=self.provider,
+            model=model,
+            finish_reason="stop",
+        )
+
+
+def _remote_runtime(backend: _RemoteBackend, *, allow_egress: bool) -> LLMRuntime:
+    return LLMRuntime(
+        generation={
+            deep_retrieval.REQUERY_RUNTIME_ROLE: GenerationRoute(
+                backend,
+                "remote-requery-model",
+                BackendCapabilities(True, False, structured_output=True),
+            )
+        },
+        remote_egress_opt_ins=(
+            {(deep_retrieval.REQUERY_RUNTIME_ROLE, SourceDataClass.RAW)}
+            if allow_egress
+            else set()
+        ),
+    )
+
+
+def _forbid_ollama_controls(monkeypatch: pytest.MonkeyPatch) -> None:
+    def forbidden(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("remote deep retrieval touched an Ollama control")
+
+    for name in (
+        "chat",
+        "generate",
+        "is_available",
+        "model_digests",
+        "model_resource_lease",
+        "model_resource_lease_mode",
+        "plan_model_residency",
+        "resident_model_rows",
+        "unload_model",
+        "unload_named_model",
+    ):
+        monkeypatch.setattr(ollama, name, forbidden)
+
+
+def test_remote_requery_succeeds_without_ollama_controls(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    backend = _RemoteBackend()
+    monkeypatch.setattr(
+        llm_config,
+        "load_default_llm_runtime",
+        lambda: _remote_runtime(backend, allow_egress=True),
+    )
+    monkeypatch.setattr(store, "CHRONOVISOR_ROOT", tmp_path)
+    _forbid_ollama_controls(monkeypatch)
+
+    queries = deep_retrieval._llm_requeries(
+        "original",
+        "current",
+        [{"page_id": "page-a", "title": "A", "snippet": "body"}],
+        limit=2,
+    )
+
+    assert queries == ["remote follow up"]
+    assert len(backend.requests) == 1
+    request, model = backend.requests[0]
+    assert model == "remote-requery-model"
+    assert request.source == SourceDataClassification(
+        SourceDataClass.RAW,
+        SourceSensitivity.HIGH,
+    )
+
+
+def test_remote_egress_denial_uses_only_deterministic_requery_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    backend = _RemoteBackend()
+    queries: list[str] = []
+
+    def fake_search(query: str, top_n: int, semantic: bool):
+        queries.append(query)
+        return ([page("alpha")] if len(queries) == 1 else []), "bm25"
+
+    monkeypatch.setattr(
+        llm_config,
+        "load_default_llm_runtime",
+        lambda: _remote_runtime(backend, allow_egress=False),
+    )
+    monkeypatch.setattr(store, "CHRONOVISOR_ROOT", tmp_path)
+    monkeypatch.setattr(deep_retrieval, "get_store", lambda: FakeStore())
+    monkeypatch.setattr(deep_retrieval, "find_page", lambda _page_id: None)
+    monkeypatch.setattr(deep_retrieval, "run_search", fake_search)
+    _forbid_ollama_controls(monkeypatch)
+
+    assert deep_retrieval._llm_requeries("q1", "q1", [], limit=2) == []
+    result = deep_retrieval.run_deep_dive("q1", max_iterations=2, fanout=1)
+
+    assert backend.requests == []
+    assert queries == ["q1", "q1 Alpha Beta"]
+    assert result["iterations"][0]["next_queries"] == ["q1 Alpha Beta"]
+
+
+def test_remote_provider_failure_has_no_retry_or_local_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    backend = _RemoteBackend(fail=True)
+    monkeypatch.setattr(
+        llm_config,
+        "load_default_llm_runtime",
+        lambda: _remote_runtime(backend, allow_egress=True),
+    )
+    monkeypatch.setattr(store, "CHRONOVISOR_ROOT", tmp_path)
+    _forbid_ollama_controls(monkeypatch)
+
+    queries = deep_retrieval._llm_requeries("original", "current", [], limit=2)
+
+    assert queries == []
+    assert len(backend.requests) == 1

@@ -13,11 +13,12 @@ from typing import Any
 
 from chronovisor.core.frontmatter import parse as parse_frontmatter
 from chronovisor.core.index_store import get_store
-from chronovisor.core.runtime_config import load_decision_router_config
 from chronovisor.core.search import ScoredPage
 from chronovisor.core.search import search as run_search
 from chronovisor.core.store import find_page
 from chronovisor.decision.local_structured import ChatTransport, LocalStructuredSession
+
+REQUERY_RUNTIME_ROLE = "research.deep_retrieval_requery"
 
 
 def _compact(text: str, *, limit: int) -> str:
@@ -115,10 +116,6 @@ def _llm_requeries(
     limit: int,
     transport: ChatTransport | None = None,
 ) -> list[str]:
-    from chronovisor.core.ollama import is_available
-
-    if not is_available():
-        return []
     page_lines = "\n".join(
         f"- {page['page_id']}: {page.get('title', '')} :: {page.get('snippet', '')[:220]}"
         for page in pages[:6]
@@ -130,20 +127,23 @@ def _llm_requeries(
         f"Current query: {current_query}\n"
         f"Read pages:\n{page_lines}\n"
     )
-    config = load_decision_router_config()
-    def run_session(audit_root: Path | None = None):
+
+    def run_session(audit_root: Path | None = None) -> Any:
         return LocalStructuredSession(
-            model=config.primary_model,
+            model="injected:deep-retrieval-requery" if transport is not None else None,
             transport=transport,
-            role="deep_retrieval_requery",
+            role=REQUERY_RUNTIME_ROLE,
+            runtime_role=REQUERY_RUNTIME_ROLE if transport is None else None,
+            source_data_class="raw",
+            source_sensitivity="high",
             audit_root=audit_root,
-            num_ctx=config.num_ctx,
-            num_predict=min(config.num_predict, 512),
-            keep_alive=config.primary_keep_alive,
-            read_timeout_ms=config.read_timeout_ms,
-            max_input_chars=config.max_input_chars,
-            max_output_chars=min(config.max_output_chars, 2_000),
-            max_feedback_chars=config.max_feedback_chars,
+            num_ctx=114_688,
+            num_predict=512,
+            keep_alive="20m",
+            read_timeout_ms=660_000,
+            max_input_chars=93_000,
+            max_output_chars=2_000,
+            max_feedback_chars=2_000,
         ).run(
             prompt,
             REQUERY_SCHEMA,
