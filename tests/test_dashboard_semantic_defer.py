@@ -667,7 +667,6 @@ def test_orchestrator_reports_terminal_semantic_defer_without_failure(
     monkeypatch.setattr(
         orchestrator, "STATE_FILE", chronovisor_root / ".orchestrator_state.json"
     )
-    monkeypatch.setattr(orchestrator, "is_available", lambda: True)
     monkeypatch.setattr(
         orchestrator,
         "get_ollama_status",

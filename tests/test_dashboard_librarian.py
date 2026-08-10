@@ -21,6 +21,16 @@ def _isolate_model_inventory(monkeypatch: pytest.MonkeyPatch) -> None:
     from chronovisor.core import ollama
 
     monkeypatch.setattr(ollama, "model_digests", lambda _models: {})
+    monkeypatch.setattr(
+        ollama,
+        "runtime_generation_routes",
+        lambda roles: tuple(
+            ollama.RuntimeGenerationRoute(
+                role, "fixture", f"fixture-{index}", "local", True
+            )
+            for index, role in enumerate(roles)
+        ),
+    )
 
 
 def test_dashboard_static_contract_exposes_librarian_progress() -> None:
