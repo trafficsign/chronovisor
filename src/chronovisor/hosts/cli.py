@@ -6,6 +6,7 @@ import argparse
 import getpass
 import hashlib
 import json
+import os
 import re
 import shlex
 import sys
@@ -27,8 +28,14 @@ from chronovisor.recall.recall_runtime import (
     RECALL_LOG_FILE,
 )
 
-CODEX_HOOKS_FILE = Path.home() / ".config/codex/hooks.json"
-CODEX_CONFIG_FILE = Path.home() / ".config/codex/config.toml"
+
+def _codex_home() -> Path:
+    return Path(os.environ.get("CODEX_HOME") or "~/.config/codex").expanduser()
+
+
+CODEX_HOME = _codex_home()
+CODEX_HOOKS_FILE = CODEX_HOME / "hooks.json"
+CODEX_CONFIG_FILE = CODEX_HOME / "config.toml"
 CLAUDE_SETTINGS_FILE = Path.home() / "dotfiles/claude/settings.json"
 USER_PROMPT_HOOK_TIMEOUT_MS = 7000
 STOP_HOOK_TIMEOUT_MS = 5000
@@ -238,14 +245,11 @@ def install_codex_hooks(
         data, "UserPromptSubmit"
     ) | _chronovisor_codex_state_indexes(data, "Stop")
 
+    codex_home_env = f"CODEX_HOME={shlex.quote(str(CODEX_HOOKS_FILE.parent))}"
     user_command = (
-        "CODEX_HOME=/Users/trafficsign/.config/codex "
-        f"{prefix} --host codex --event UserPromptSubmit --hook"
+        f"{codex_home_env} {prefix} --host codex --event UserPromptSubmit --hook"
     )
-    stop_command = (
-        "CODEX_HOME=/Users/trafficsign/.config/codex "
-        f"{prefix} --host codex --event Stop --hook"
-    )
+    stop_command = f"{codex_home_env} {prefix} --host codex --event Stop --hook"
     user_hook = _hook("command", user_command, USER_PROMPT_HOOK_TIMEOUT_MS)
     stop_hook = _hook("command", stop_command, STOP_HOOK_TIMEOUT_MS)
     _replace_event_chronovisor_hooks(data, "UserPromptSubmit", [user_hook])
@@ -267,7 +271,10 @@ def install_codex_hooks(
     if not dry_run:
         write_json(CODEX_HOOKS_FILE, data)
         update_codex_trust_state(
-            CODEX_CONFIG_FILE, hashes, remove_indexes=stale_state_indexes
+            CODEX_CONFIG_FILE,
+            CODEX_HOOKS_FILE,
+            hashes,
+            remove_indexes=stale_state_indexes,
         )
     return {
         "host": "codex",
@@ -308,12 +315,12 @@ def install_claude_code_hooks(
     }
 
 
-def _state_key(event_and_index: str) -> str:
-    return f"/Users/trafficsign/.config/codex/hooks.json:{event_and_index}"
+def _state_key(hooks_file: Path, event_and_index: str) -> str:
+    return f"{hooks_file}:{event_and_index}"
 
 
 def _section_header(key: str) -> str:
-    return f'[hooks.state."{key}"]'
+    return f"[hooks.state.{json.dumps(key, ensure_ascii=False)}]"
 
 
 def _render_state_section(key: str, trusted_hash: str) -> list[str]:
@@ -327,6 +334,7 @@ def _render_state_section(key: str, trusted_hash: str) -> list[str]:
 
 def update_codex_trust_state(
     config_file: Path,
+    hooks_file: Path,
     hashes: dict[str, str],
     *,
     remove_indexes: set[str] | None = None,
@@ -337,20 +345,21 @@ def update_codex_trust_state(
         lines = ["[hooks.state]\n", "\n"]
 
     desired = {
-        _state_key(index): trusted_hash for index, trusted_hash in hashes.items()
+        _state_key(hooks_file, index): trusted_hash
+        for index, trusted_hash in hashes.items()
     }
-    remove = {_state_key(index) for index in (remove_indexes or set())}
+    remove = {_state_key(hooks_file, index) for index in (remove_indexes or set())}
     seen: set[str] = set()
     out: list[str] = []
     i = 0
-    section_re = re.compile(r'^\[hooks\.state\."(.+)"\]\s*$')
+    section_re = re.compile(r'^\[hooks\.state\.("(?:[^"\\]|\\.)*")\]\s*$')
     while i < len(lines):
         match = section_re.match(lines[i].strip())
         if not match:
             out.append(lines[i])
             i += 1
             continue
-        key = match.group(1)
+        key = json.loads(match.group(1))
         j = i + 1
         while j < len(lines) and not lines[j].startswith("["):
             j += 1
@@ -556,6 +565,17 @@ def _configure_hold_report_parser(subparsers: Any) -> None:
     parser.add_argument("--json", action="store_true")
 
 
+def _configure_credentials_parser(subparsers: Any) -> None:
+    parser = subparsers.add_parser(
+        "credentials", help="Manage OS-native LLM credentials."
+    )
+    commands = parser.add_subparsers(dest="credentials_command", required=True)
+    for command in ("set", "status", "delete"):
+        command_parser = commands.add_parser(command)
+        command_parser.add_argument("profile_account")
+        command_parser.add_argument("--json", action="store_true")
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the complete stable CLI command tree without executing a handler."""
     parser = SafeArgumentParser(description="Operate and inspect Chronovisor.")
@@ -571,16 +591,7 @@ def build_parser() -> argparse.ArgumentParser:
     runtime_identity_parser.add_argument("--json", action="store_true")
     doctor_parser = sub.add_parser("doctor", help="Run operational checks.")
     doctor_parser.add_argument("--json", action="store_true")
-    credentials_parser = sub.add_parser(
-        "credentials", help="Manage OS-native LLM credentials."
-    )
-    credentials_sub = credentials_parser.add_subparsers(
-        dest="credentials_command", required=True
-    )
-    for command in ("set", "status", "delete"):
-        credential_parser = credentials_sub.add_parser(command)
-        credential_parser.add_argument("profile_account")
-        credential_parser.add_argument("--json", action="store_true")
+    _configure_credentials_parser(sub)
     hooks_parser = sub.add_parser("hooks", help="Inspect host hook configuration.")
     hooks_sub = hooks_parser.add_subparsers(dest="hooks_command", required=True)
     hooks_inspect = hooks_sub.add_parser("inspect", help="List configured host hooks.")
@@ -872,7 +883,6 @@ def build_parser() -> argparse.ArgumentParser:
         "rollback", help="Rollback accepted recall policy."
     )
     recall_improve_rollback.add_argument("--json", action="store_true")
-
     return parser
 
 
@@ -884,6 +894,15 @@ def _dispatch_hold_report(as_json: bool) -> int:
         print(json.dumps(data, ensure_ascii=False, indent=2, default=str))
     else:
         print(render_hold_report(data))
+    return 0
+
+
+def _dispatch_status(as_json: bool) -> int:
+    data = build_status()
+    if as_json:
+        print(json.dumps(data, ensure_ascii=False, indent=2, default=str))
+    else:
+        print_plain_status(data)
     return 0
 
 
@@ -935,12 +954,7 @@ def dispatch(args: argparse.Namespace) -> int:
     if args.command == "credentials":
         return _dispatch_credentials(args)
     if args.command == "status":
-        data = build_status()
-        if args.json:
-            print(json.dumps(data, ensure_ascii=False, indent=2, default=str))
-        else:
-            print_plain_status(data)
-        return 0
+        return _dispatch_status(args.json)
     if args.command == "runtime-identity":
         data = runtime_identity()
         if args.json:

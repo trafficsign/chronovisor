@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
+import tomllib
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -367,10 +369,18 @@ def test_sleep_cli_non_json_handles_locked_cycle(monkeypatch, capsys) -> None:
     assert "reason\tsleep cycle already in progress" in output
 
 
+def test_codex_home_empty_env_uses_user_config(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("CODEX_HOME", "")
+
+    assert cli._codex_home() == tmp_path / ".config/codex"
+
+
 def test_install_codex_hooks_replaces_existing_entries_and_trust(tmp_path, monkeypatch) -> None:
     patch_wiki(tmp_path, monkeypatch)
-    hooks_file = tmp_path / "codex/hooks.json"
-    config_file = tmp_path / "codex/config.toml"
+    codex_home = tmp_path / "codex home;$(touch should-not-exist)'\""
+    hooks_file = codex_home / "hooks.json"
+    config_file = codex_home / "config.toml"
     hooks_file.parent.mkdir(parents=True)
     hooks_file.write_text(
         json.dumps(
@@ -417,15 +427,15 @@ def test_install_codex_hooks_replaces_existing_entries_and_trust(tmp_path, monke
             [
                 "[hooks.state]",
                 "",
-                '[hooks.state."/Users/trafficsign/.config/codex/hooks.json:user_prompt_submit:0:1"]',
+                f"[hooks.state.{json.dumps(f'{hooks_file}:user_prompt_submit:0:1')}]",
                 "enabled = true",
                 'trusted_hash = "old-user"',
                 "",
-                '[hooks.state."/Users/trafficsign/.config/codex/hooks.json:stop:0:1"]',
+                f"[hooks.state.{json.dumps(f'{hooks_file}:stop:0:1')}]",
                 "enabled = true",
                 'trusted_hash = "old-stop-save"',
                 "",
-                '[hooks.state."/Users/trafficsign/.config/codex/hooks.json:stop:0:2"]',
+                f"[hooks.state.{json.dumps(f'{hooks_file}:stop:0:2')}]",
                 "enabled = true",
                 'trusted_hash = "old-stop-audit"',
                 "",
@@ -433,6 +443,8 @@ def test_install_codex_hooks_replaces_existing_entries_and_trust(tmp_path, monke
         ),
         encoding="utf-8",
     )
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    monkeypatch.setattr(cli, "CODEX_HOME", codex_home)
     monkeypatch.setattr(cli, "CODEX_HOOKS_FILE", hooks_file)
     monkeypatch.setattr(cli, "CODEX_CONFIG_FILE", config_file)
 
@@ -441,21 +453,23 @@ def test_install_codex_hooks_replaces_existing_entries_and_trust(tmp_path, monke
     installed = json.loads(hooks_file.read_text(encoding="utf-8"))
     user_hooks = installed["hooks"]["UserPromptSubmit"][0]["hooks"]
     stop_hooks = installed["hooks"]["Stop"][0]["hooks"]
+    codex_home_env = f"CODEX_HOME={shlex.quote(str(codex_home))}"
+    user_command = (
+        f"{codex_home_env} "
+        "chronovisor-hook --host codex --event UserPromptSubmit --hook"
+    )
+    stop_command = f"{codex_home_env} chronovisor-hook --host codex --event Stop --hook"
     assert [hook["command"] for hook in user_hooks] == [
         "cmux notify",
-        (
-            "CODEX_HOME=/Users/trafficsign/.config/codex "
-            "chronovisor-hook --host codex --event UserPromptSubmit --hook"
-        ),
+        user_command,
     ]
+    assert shlex.split(user_command)[0] == f"CODEX_HOME={codex_home}"
     assert user_hooks[-1]["timeout"] == 7000
     assert [hook["command"] for hook in stop_hooks] == [
         "cmux stop",
-        (
-            "CODEX_HOME=/Users/trafficsign/.config/codex "
-            "chronovisor-hook --host codex --event Stop --hook"
-        ),
+        stop_command,
     ]
+    assert shlex.split(stop_command)[0] == f"CODEX_HOME={codex_home}"
     assert stop_hooks[-1]["timeout"] == 5000
     assert set(result["trusted_hashes"]) == {"user_prompt_submit:0:1", "stop:0:1"}
     config_text = config_file.read_text(encoding="utf-8")
@@ -463,8 +477,15 @@ def test_install_codex_hooks_replaces_existing_entries_and_trust(tmp_path, monke
     assert "old-stop-save" not in config_text
     assert "old-stop-audit" not in config_text
     assert "stop:0:2" not in config_text
-    assert result["trusted_hashes"]["user_prompt_submit:0:1"] in config_text
-    assert result["trusted_hashes"]["stop:0:1"] in config_text
+    state = tomllib.loads(config_text)["hooks"]["state"]
+    user_key = f"{hooks_file}:user_prompt_submit:0:1"
+    stop_key = f"{hooks_file}:stop:0:1"
+    assert set(state) == {user_key, stop_key}
+    assert (
+        state[user_key]["trusted_hash"]
+        == result["trusted_hashes"]["user_prompt_submit:0:1"]
+    )
+    assert state[stop_key]["trusted_hash"] == result["trusted_hashes"]["stop:0:1"]
 
 
 def test_install_claude_code_hooks_preserves_non_wiki_entries(tmp_path, monkeypatch) -> None:
