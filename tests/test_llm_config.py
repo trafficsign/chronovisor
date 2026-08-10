@@ -508,6 +508,8 @@ def test_repository_example_has_representative_local_role_map() -> None:
         "librarian.review.challenger",
         "recall.answer.runner",
         "recall.answer.scorer",
+        "recall.certificate_judge.primary",
+        "recall.certificate_judge.escalation",
         "classification.primary",
         "classification.challenger",
         "classification.tie_break",
@@ -534,3 +536,6 @@ def test_repository_example_has_representative_local_role_map() -> None:
     answer_runner = config.roles["recall.answer.runner"]
     answer_scorer = config.roles["recall.answer.scorer"]
     assert answer_runner.model != answer_scorer.model
+    certificate_primary = config.roles["recall.certificate_judge.primary"]
+    certificate_escalation = config.roles["recall.certificate_judge.escalation"]
+    assert certificate_primary.model != certificate_escalation.model

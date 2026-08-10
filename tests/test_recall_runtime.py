@@ -731,9 +731,9 @@ escalation_timeout_ms = 700
     assert policy.processor_injection_token_budget == 1200
     assert policy.processor_certificate_required is True
     assert policy.processor_judge_enabled is True
-    assert policy.processor_judge_model == "judge-9b"
+    assert not hasattr(policy, "processor_judge_model")
     assert policy.processor_judge_timeout_ms == 800
-    assert policy.processor_escalation_model == "judge-35b"
+    assert not hasattr(policy, "processor_escalation_model")
     assert policy.processor_escalation_timeout_ms == 700
 
 

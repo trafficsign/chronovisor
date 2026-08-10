@@ -97,9 +97,7 @@ class RecallPolicy:
     processor_injection_token_budget: int = 1200
     processor_certificate_required: bool = True
     processor_judge_enabled: bool = True
-    processor_judge_model: str = ""
     processor_judge_timeout_ms: int = 900
-    processor_escalation_model: str = "maxwell1500/ornith-35b:Q5_K_M"
     processor_escalation_timeout_ms: int = 900
 
 
@@ -115,6 +113,7 @@ def _coerce_value(field: str, value: Any) -> Any:
             if value in FALSE_VALUES:
                 return False
         raise ValueError(f"{field} must be boolean")
+    coerced: int | float
     if wanted is int:
         if isinstance(value, bool):
             raise ValueError(f"{field} must be int")

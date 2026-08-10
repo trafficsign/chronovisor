@@ -185,7 +185,7 @@ class RecallWallClockTimeout(BaseException):
 
 
 @contextmanager
-def recall_wall_clock_deadline(timeout_ms: int):
+def recall_wall_clock_deadline(timeout_ms: int) -> Iterator[None]:
     """Apply a process-local hard deadline when running on the main Unix thread."""
 
     if (
@@ -469,12 +469,8 @@ def _apply_config(policy: RecallPolicy, data: dict[str, Any]) -> None:
             policy.processor_certificate_required = processor["certificate_required"]
         if isinstance(processor.get("judge_enabled"), bool):
             policy.processor_judge_enabled = processor["judge_enabled"]
-        if isinstance(processor.get("judge_model"), str):
-            policy.processor_judge_model = processor["judge_model"]
         if isinstance(processor.get("judge_timeout_ms"), int):
             policy.processor_judge_timeout_ms = max(200, processor["judge_timeout_ms"])
-        if isinstance(processor.get("escalation_model"), str):
-            policy.processor_escalation_model = processor["escalation_model"]
         if isinstance(processor.get("escalation_timeout_ms"), int):
             policy.processor_escalation_timeout_ms = max(
                 300, processor["escalation_timeout_ms"]

@@ -343,9 +343,10 @@ max_rich_evidence = 2
 injection_token_budget = 1200
 certificate_required = true
 judge_enabled = true
-judge_model = "ornith:9b-q4_K_M"
+# Model routing is fixed by llm.roles."recall.certificate_judge.primary" and
+# llm.roles."recall.certificate_judge.escalation". Legacy judge_model and
+# escalation_model keys are accepted but ignored.
 judge_timeout_ms = 900
-escalation_model = "maxwell1500/ornith-35b:Q5_K_M"
 escalation_timeout_ms = 900
 
 [recall.field]

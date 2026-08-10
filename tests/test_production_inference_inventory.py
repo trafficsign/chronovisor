@@ -54,7 +54,6 @@ LEGACY_PRODUCTION_BYPASSES = {
         "ollama.chat": 1,
         "ollama.generate": 1,
     },
-    "src/chronovisor/recall/recall_processor.py": {"ollama.chat": 1},
 }
 
 # These tools do not run in production workflows; each exception carries its reason.

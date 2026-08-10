@@ -105,6 +105,16 @@ capability = "generation"
 provider = "local"
 model = "gemma4:26b"
 
+[llm.roles."recall.certificate_judge.primary"]
+capability = "generation"
+provider = "local"
+model = "ornith:9b-q4_K_M"
+
+[llm.roles."recall.certificate_judge.escalation"]
+capability = "generation"
+provider = "local"
+model = "maxwell1500/ornith-35b:Q5_K_M"
+
 # Each classification vote remains an independently replaceable single route.
 [llm.roles."classification.primary"]
 capability = "generation"
@@ -193,6 +203,16 @@ model = "gpt-oss:20b"
 # provider = "openai"
 # model = "gpt-5"
 #
+# [llm.roles."recall.certificate_judge.primary"]
+# capability = "generation"
+# provider = "openai"
+# model = "gpt-5-mini"
+#
+# [llm.roles."recall.certificate_judge.escalation"]
+# capability = "generation"
+# provider = "openai"
+# model = "gpt-5"
+#
 # [llm.roles."search.semantic"]
 # capability = "embedding"
 # provider = "openai"
@@ -209,6 +229,14 @@ model = "gpt-oss:20b"
 #
 # [[llm.egress_opt_in]]
 # role = "recall.answer.scorer"
+# data_class = "raw"
+#
+# [[llm.egress_opt_in]]
+# role = "recall.certificate_judge.primary"
+# data_class = "raw"
+#
+# [[llm.egress_opt_in]]
+# role = "recall.certificate_judge.escalation"
 # data_class = "raw"
 #
 # Hybrid note: Anthropic/Claude, DeepSeek, Kimi, and Z.AI/GLM profiles currently
