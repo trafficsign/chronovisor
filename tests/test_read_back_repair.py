@@ -14,6 +14,8 @@ import pytest
 from chronovisor.core import page_mutation
 from chronovisor.ingest import read_back_repair, recall_hints
 from chronovisor.ingest.convergence import CycleBudget
+from tests.semantic_hold_support import _vote as _authority_vote
+from tests.semantic_hold_support import semantic_authority
 
 NOW = datetime(2026, 7, 10, 12, 0, tzinfo=UTC)
 
@@ -37,50 +39,30 @@ def _approve(_proposal: dict) -> dict:
 
 
 def _semantic_authority(epoch: str) -> dict:
-    return {
-        "source": "adopted_local_consensus",
-        "authority_version": 1,
-        "lane": "read_back_repair",
-        "lane_contract_sha256": "1" * 64,
-        "lane_contract_manifest_sha256": "2" * 64,
-        "lane_contract_case_manifest_sha256": "3" * 64,
-        "policy": {
-            "kind": "consensus",
-            "schema_name": "read_back_repair",
-            "mode": "enabled",
-            "error": None,
-        },
-        "router": {
-            "source": "adopted_artifact",
-            "artifact_sha256": epoch * 64,
-            "error": None,
-            "models": ["primary", "challenger", "tie"],
-        },
-    }
+    return semantic_authority(
+        "read_back_repair",
+        artifact_sha256=epoch * 64,
+        schema_name="read_back_repair",
+    )
 
 
-def _local_consensus_proof(agreement: str) -> dict:
+def _local_consensus_proof(agreement: str, authority: dict) -> dict:
+    routes = authority["router"]["routes"]
     return {
         "status": "agreed",
         "ok": True,
+        "conservative_veto_fired": False,
+        "conservative_veto_bypassed_by_lane_policy": False,
+        "dissent_effect_class": None,
+        "quorum_safety_policy_version": authority["quorum_safety_policy_version"],
         "agreement_sha256": agreement,
         "failure_class": None,
         "quarantine_reason": None,
+        "num_ctx": 32_768,
+        "residency": {},
         "votes": [
-            {
-                "role": "primary",
-                "model": "primary",
-                "valid": True,
-                "signature_sha256": agreement,
-                "invalid_reason": None,
-            },
-            {
-                "role": "challenger",
-                "model": "challenger",
-                "valid": True,
-                "signature_sha256": agreement,
-                "invalid_reason": None,
-            },
+            _authority_vote("primary", routes[0], agreement),
+            _authority_vote("challenger", routes[1], agreement),
         ],
     }
 
@@ -105,7 +87,8 @@ def _authority_bound_review(authority: dict, *, decision: str = "approved") -> d
         schema=production_decision_schemas()["read_back_repair"],
     )
     review["local_consensus"] = _local_consensus_proof(
-        hashlib.sha256(signature.encode("utf-8")).hexdigest()
+        hashlib.sha256(signature.encode("utf-8")).hexdigest(),
+        authority,
     )
     return review
 

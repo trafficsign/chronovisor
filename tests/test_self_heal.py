@@ -9,6 +9,10 @@ from types import SimpleNamespace
 
 import pytest
 
+from chronovisor.decision.decision_authority import AUTHORITY_VERSION
+from tests.semantic_hold_support import _vote as _authority_vote
+from tests.semantic_hold_support import semantic_authority, semantic_review
+
 
 @pytest.fixture()
 def ingest_ollama_unavailable(
@@ -188,59 +192,6 @@ def _write_packet(chronovisor_root: Path) -> Path:
     return path
 
 
-def _strict_no_quorum_audit(models: list[str]) -> dict:
-    reason = "local_models_did_not_reach_two_vote_quorum"
-
-    def vote(role: str, model: str, digit: str) -> dict:
-        return {
-            "role": role,
-            "model": model,
-            "requested_num_ctx": 32768,
-            "valid": True,
-            "signature_sha256": digit * 64,
-            "invalid_reason": None,
-            "runtime_observation": {
-                "status": "observed",
-                "model_size_bytes": 1024,
-                "num_ctx": 32768,
-            },
-            "session": {
-                "ok": True,
-                "model": model,
-                "failure_class": None,
-                "first_pass_valid": True,
-                "repair_turns": 0,
-                "attempts": [
-                    {
-                        "index": 1,
-                        "valid": True,
-                        "output_sha256": digit * 64,
-                        "output_chars": 16,
-                        "normalized": False,
-                        "error_fingerprint": None,
-                        "issues": [],
-                    }
-                ],
-            },
-        }
-
-    return {
-        "status": "quarantined",
-        "ok": False,
-        "quorum_safety_policy_version": 1,
-        "agreement_sha256": None,
-        "failure_class": "local_consensus_failed",
-        "quarantine_reason": reason,
-        "num_ctx": 32768,
-        "residency": {},
-        "votes": [
-            vote("primary", models[0], "a"),
-            vote("challenger", models[1], "b"),
-            vote("tie_break", models[2], "c"),
-        ],
-    }
-
-
 def _install_local_no_quorum_router(
     monkeypatch: pytest.MonkeyPatch,
     *,
@@ -255,33 +206,18 @@ def _install_local_no_quorum_router(
         semantic_hold,
     )
 
-    models = ["primary-model", "challenger-model", "tie-model"]
-    router_audit = {
-        "source": "adopted_artifact",
-        "artifact_sha256": artifact_digit * 64,
-        "error": None,
-        "models": models,
-    }
-    authority = {
-        "source": "adopted_local_consensus",
-        "authority_version": 1,
-        "lane": "local_repair",
-        "lane_contract_sha256": "a" * 64,
-        "lane_contract_manifest_sha256": "b" * 64,
-        "lane_contract_case_manifest_sha256": "c" * 64,
-        "policy": {
-            "kind": "consensus",
-            "schema_name": "local_repair",
-            "mode": "enabled",
-            "error": None,
-        },
-        "router": router_audit,
-    }
-    audit = _strict_no_quorum_audit(models)
+    authority = semantic_authority(
+        "local_repair",
+        artifact_sha256=artifact_digit * 64,
+        schema_name="local_repair",
+    )
+    router_audit = authority["router"]
+    assert isinstance(router_audit, dict)
+    audit = semantic_review(authority, lane="local_repair")["local_consensus"]
     calls: list[str] = []
 
     class FakePolicy:
-        source = "adopted_artifact"
+        source = "runtime_role_mapping"
 
         @staticmethod
         def audit_record():
@@ -314,6 +250,10 @@ def _install_local_no_quorum_router(
             calls.append(artifact_digit)
             return FakeResult()
 
+        def authority_router(self, *, refresh: bool = False):
+            del refresh
+            return router_audit
+
     monkeypatch.setattr(
         decision_policy,
         "resolve_decision_policy",
@@ -337,12 +277,12 @@ def _install_local_no_quorum_router(
     monkeypatch.setattr(
         routine_review,
         "_current_structured_authority",
-        lambda lane: local_repair.current_semantic_authority(lane),
+        lambda lane, **_kwargs: local_repair.current_semantic_authority(lane),
     )
     monkeypatch.setattr(
         routine_review,
         "_structured_authority_observation",
-        lambda current: semantic_hold.canonical_sha256(
+        lambda current, **_kwargs: semantic_hold.canonical_sha256(
             {"authority": current, "fixture_generation": "stable"}
         ),
     )
@@ -794,28 +734,15 @@ def test_local_consensus_repair_carries_authority_seal(
     from chronovisor.decision.decision_router import canonical_agreement_signature
     from chronovisor.decision.local_repair import LOCAL_REPAIR_SCHEMA
 
-    models = ["primary-model", "challenger-model", "tie-model"]
-    router_audit = {
-        "source": "adopted_artifact",
-        "artifact_sha256": "d" * 64,
-        "error": None,
-        "models": models,
-    }
-    authority = {
-        "source": "adopted_local_consensus",
-        "authority_version": 1,
-        "lane": "local_repair",
-        "lane_contract_sha256": "a" * 64,
-        "lane_contract_manifest_sha256": "b" * 64,
-        "lane_contract_case_manifest_sha256": "c" * 64,
-        "policy": {
-            "kind": "consensus",
-            "schema_name": "local_repair",
-            "mode": "enabled",
-            "error": None,
-        },
-        "router": router_audit,
-    }
+    authority = semantic_authority(
+        "local_repair",
+        artifact_sha256="d" * 64,
+        schema_name="local_repair",
+    )
+    router_audit = authority["router"]
+    assert isinstance(router_audit, dict)
+    routes = router_audit["routes"]
+    assert isinstance(routes, list)
     policy = decision_policy.DECISION_POLICIES["local_repair"]
     action = {
         "status": "resolved",
@@ -825,9 +752,26 @@ def test_local_consensus_repair_carries_authority_seal(
     }
     signature = canonical_agreement_signature(action, schema=LOCAL_REPAIR_SCHEMA)
     agreement = hashlib.sha256(signature.encode("utf-8")).hexdigest()
+    audit = {
+        "status": "agreed",
+        "ok": True,
+        "conservative_veto_fired": False,
+        "conservative_veto_bypassed_by_lane_policy": False,
+        "dissent_effect_class": None,
+        "quorum_safety_policy_version": authority["quorum_safety_policy_version"],
+        "agreement_sha256": agreement,
+        "failure_class": None,
+        "quarantine_reason": None,
+        "num_ctx": 16_384,
+        "residency": {},
+        "votes": [
+            _authority_vote("primary", routes[0], agreement),
+            _authority_vote("challenger", routes[1], agreement),
+        ],
+    }
 
     class FakePolicy:
-        source = "adopted_artifact"
+        source = "runtime_role_mapping"
 
         @staticmethod
         def audit_record():
@@ -839,31 +783,7 @@ def test_local_consensus_repair_carries_authority_seal(
 
         @staticmethod
         def audit_record():
-            return {
-                "status": "agreed",
-                "ok": True,
-                "agreement_sha256": agreement,
-                "failure_class": None,
-                "quarantine_reason": None,
-                "num_ctx": 16_384,
-                "residency": None,
-                "votes": [
-                    {
-                        "role": role,
-                        "model": model,
-                        "valid": index < 2,
-                        "signature_sha256": agreement if index < 2 else None,
-                        "invalid_reason": None,
-                    }
-                    for index, (role, model) in enumerate(
-                        zip(
-                            ("primary", "challenger", "tie_break"),
-                            models,
-                            strict=True,
-                        )
-                    )
-                ],
-            }
+            return audit
 
     class FakeRouter:
         policy = FakePolicy()
@@ -873,6 +793,10 @@ def test_local_consensus_repair_carries_authority_seal(
 
         def decide(self, *_args, **_kwargs):
             return FakeResult()
+
+        def authority_router(self, *, refresh: bool = False):
+            del refresh
+            return router_audit
 
     monkeypatch.setattr(
         decision_policy,
@@ -893,12 +817,12 @@ def test_local_consensus_repair_carries_authority_seal(
     monkeypatch.setattr(
         routine_review,
         "_current_structured_authority",
-        lambda lane: local_repair.current_semantic_authority(lane),
+        lambda lane, **_kwargs: local_repair.current_semantic_authority(lane),
     )
     monkeypatch.setattr(
         routine_review,
         "_structured_authority_observation",
-        lambda current: semantic_hold.canonical_sha256(
+        lambda current, **_kwargs: semantic_hold.canonical_sha256(
             {"authority": current, "fixture_generation": "stable"}
         ),
     )
@@ -1014,7 +938,7 @@ def test_local_repair_recovers_model_return_crash_from_common_cache_after_aba(
     monkeypatch.setattr(
         routine_review,
         "_structured_authority_observation",
-        lambda _authority: observation_box["value"],
+        lambda _authority, **_kwargs: observation_box["value"],
     )
     packet = {
         "failure_id": "semantic-crash-window",
@@ -1292,7 +1216,7 @@ def test_local_consensus_repair_fails_closed_when_authority_changes_before_effec
         source="local_consensus",
         authority={
             "source": "injected_reviewer_boundary",
-            "authority_version": 1,
+            "authority_version": AUTHORITY_VERSION,
             "lane": "local_repair",
         },
         decision_policy={},

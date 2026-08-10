@@ -12,12 +12,15 @@ import pytest
 from chronovisor.core import page_mutation, store
 from chronovisor.core.frontmatter import parse as parse_frontmatter
 from chronovisor.core.link_fix import atomic_write
+from chronovisor.decision.decision_authority import AUTHORITY_VERSION
 from chronovisor.decision.decision_router import canonical_agreement_signature
 from chronovisor.decision.decision_schema_manifest import production_decision_schemas
 from chronovisor.ingest import recall_hints
 from chronovisor.ingest.convergence import CycleBudget
-from chronovisor.recall import recall_auto_apply
+from chronovisor.recall import recall_auto_apply, recall_runtime
 from chronovisor.recall.recall_runtime import RecallPolicy, collect_context
+from tests.semantic_hold_support import _vote as _authority_vote
+from tests.semantic_hold_support import semantic_authority
 
 
 @pytest.fixture(autouse=True)
@@ -28,7 +31,7 @@ def _frontier_approves_existing_auto_apply_tests(monkeypatch) -> None:
         lambda lane, **_kwargs: (
             {
                 "source": "injected_reviewer_boundary",
-                "authority_version": 1,
+                "authority_version": AUTHORITY_VERSION,
                 "lane": lane,
             },
             None,
@@ -46,26 +49,11 @@ def _frontier_approves_existing_auto_apply_tests(monkeypatch) -> None:
 
 def _production_authority(epoch: str) -> dict[str, object]:
     digest = (epoch[:1] or "a") * 64
-    return {
-        "source": "adopted_local_consensus",
-        "authority_version": 1,
-        "lane": "recall_auto_apply",
-        "lane_contract_sha256": "1" * 64,
-        "lane_contract_manifest_sha256": "2" * 64,
-        "lane_contract_case_manifest_sha256": "3" * 64,
-        "policy": {
-            "kind": "semantic",
-            "schema_name": "generic_decision",
-            "mode": "enabled",
-            "error": None,
-        },
-        "router": {
-            "source": "adopted_artifact",
-            "artifact_sha256": digest,
-            "error": None,
-            "models": ["primary", "challenger", "tie-break"],
-        },
-    }
+    return semantic_authority(
+        "recall_auto_apply",
+        artifact_sha256=digest,
+        kind="semantic",
+    )
 
 
 def _review(decision: str, authority: dict[str, object]) -> dict[str, object]:
@@ -90,29 +78,23 @@ def _review(decision: str, authority: dict[str, object]) -> dict[str, object]:
     agreement = hashlib.sha256(signature.encode("utf-8")).hexdigest()
     router = authority["router"]
     assert isinstance(router, dict)
-    models = router["models"]
-    assert isinstance(models, list)
+    routes = router["routes"]
+    assert isinstance(routes, list)
     review["local_consensus"] = {
         "status": "agreed",
         "ok": True,
+        "conservative_veto_fired": False,
+        "conservative_veto_bypassed_by_lane_policy": False,
+        "dissent_effect_class": None,
+        "quorum_safety_policy_version": authority["quorum_safety_policy_version"],
         "agreement_sha256": agreement,
         "failure_class": None,
         "quarantine_reason": None,
+        "num_ctx": 32_768,
+        "residency": {},
         "votes": [
-            {
-                "valid": True,
-                "signature_sha256": agreement,
-                "invalid_reason": None,
-                "model": models[0],
-                "role": "primary",
-            },
-            {
-                "valid": True,
-                "signature_sha256": agreement,
-                "invalid_reason": None,
-                "model": models[1],
-                "role": "challenger",
-            },
+            _authority_vote("primary", routes[0], agreement),
+            _authority_vote("challenger", routes[1], agreement),
         ],
     }
     return review
@@ -171,6 +153,7 @@ def test_query_hint_auto_apply_feeds_runtime_context(tmp_path, monkeypatch) -> N
     monkeypatch.setattr(store, "CHRONOVISOR_ROOT", pages_root)
     monkeypatch.setattr(store, "PAGES_DIR", pages_root / "pages")
     monkeypatch.setattr(recall_hints, "QUERY_HINTS_FILE", hints_file)
+    monkeypatch.setattr(recall_runtime, "init_chronovisor", lambda: None)
 
     result = recall_auto_apply.apply_feedback_records(
         [_candidate("query_hint", page_id="claude-code-recall-hook-implementation")],
@@ -401,7 +384,9 @@ def test_saved_approval_is_not_reused_after_authority_changes(
     )
     artifact = Path(deferred["actions"][0]["frontier_artifact"])
     assert (
-        json.loads(artifact.read_text())["authority"]["router"]["artifact_sha256"]
+        json.loads(artifact.read_text())["authority"]["router"]["routes"][0]["ollama"][
+            "digest"
+        ]
         == "a" * 64
     )
 
@@ -419,7 +404,9 @@ def test_saved_approval_is_not_reused_after_authority_changes(
     assert rejected["actions"][0]["status"] == "frontier_rejected"
     assert rejected["actions"][0]["frontier_artifact_reused"] is False
     assert (
-        json.loads(artifact.read_text())["authority"]["router"]["artifact_sha256"]
+        json.loads(artifact.read_text())["authority"]["router"]["routes"][0]["ollama"][
+            "digest"
+        ]
         == "b" * 64
     )
     assert not hints_file.exists()

@@ -19,8 +19,10 @@ from chronovisor.core.canonical_document import (
     patch_document_metadata,
 )
 from chronovisor.core.feedback_ledger import active_feedback_rows
+from chronovisor.decision.decision_authority import AUTHORITY_VERSION
 from chronovisor.ingest.convergence import ConvergenceStore, CycleBudget, RetryPolicy
 from chronovisor.recall import content_correction
+from tests.semantic_hold_support import semantic_authority, semantic_review
 
 ALL_CHECKS = {
     "user_correction_supported": True,
@@ -331,6 +333,9 @@ def _semantic_no_quorum_review_with_authority(
     authority: dict,
 ) -> dict:
     review = _semantic_no_quorum_review(bundle)
+    lane = authority["lane"]
+    assert isinstance(lane, str)
+    review["local_consensus"] = semantic_review(authority, lane=lane)["local_consensus"]
     review["decision_policy"] = {
         **dict(authority["policy"]),
         "router_policy": dict(authority["router"]),
@@ -339,26 +344,11 @@ def _semantic_no_quorum_review_with_authority(
 
 
 def _adopted_authority(lane: str, *, artifact_digit: str = "d") -> dict:
-    return {
-        "source": "adopted_local_consensus",
-        "authority_version": 1,
-        "lane": lane,
-        "lane_contract_sha256": "a" * 64,
-        "lane_contract_manifest_sha256": "b" * 64,
-        "lane_contract_case_manifest_sha256": "c" * 64,
-        "policy": {
-            "kind": "consensus",
-            "schema_name": lane,
-            "mode": "enabled",
-            "error": None,
-        },
-        "router": {
-            "source": "adopted_artifact",
-            "artifact_sha256": artifact_digit * 64,
-            "error": None,
-            "models": ["model-a", "model-b", "model-c"],
-        },
-    }
+    return semantic_authority(
+        lane,
+        artifact_sha256=artifact_digit * 64,
+        schema_name=lane,
+    )
 
 
 def _stabilize_page_fixtures(pages: Path) -> None:
@@ -3323,7 +3313,7 @@ def test_patch_rejection_revalidates_review_authority_before_requeue(
             return None, "decision_lane_not_enabled:content_correction_review:shadow"
         return {
             "source": "injected_reviewer_boundary",
-            "authority_version": 1,
+            "authority_version": AUTHORITY_VERSION,
             "lane": "content_correction_review",
         }, None
 
@@ -4524,7 +4514,7 @@ def test_saved_unapplied_review_cannot_cross_decision_authority_epoch(
         lambda **_kwargs: (
             {
                 "source": "injected_reviewer_boundary",
-                "authority_version": 2,
+                "authority_version": AUTHORITY_VERSION + 1,
                 "lane": "content_correction_review",
             },
             None,
@@ -4612,7 +4602,7 @@ def test_nonmutation_effect_revalidates_classification_authority_inside_lock(
         if inside_effect_lock:
             return {
                 **original_authority,
-                "authority_version": 2,
+                "authority_version": AUTHORITY_VERSION + 1,
             }, None
         return original_authority, None
 

@@ -9,29 +9,16 @@ from chronovisor.decision.decision_schema_manifest import production_decision_sc
 from chronovisor.ingest.convergence import CycleBudget
 from chronovisor.recall import recall_calibration
 from chronovisor.recall.recall_runtime import RecallPolicy
+from tests.semantic_hold_support import _vote as _authority_vote
+from tests.semantic_hold_support import semantic_authority
 
 
 def _calibration_authority(epoch: str) -> dict:
-    return {
-        "source": "adopted_local_consensus",
-        "authority_version": 1,
-        "lane": "recall_calibration",
-        "lane_contract_sha256": "1" * 64,
-        "lane_contract_manifest_sha256": "2" * 64,
-        "lane_contract_case_manifest_sha256": "3" * 64,
-        "policy": {
-            "kind": "local_batch",
-            "schema_name": "generic_decision",
-            "mode": "enabled",
-            "error": None,
-        },
-        "router": {
-            "source": "adopted_artifact",
-            "artifact_sha256": epoch * 64,
-            "error": None,
-            "models": ["primary", "challenger", "tie"],
-        },
-    }
+    return semantic_authority(
+        "recall_calibration",
+        artifact_sha256=epoch * 64,
+        kind="local_batch",
+    )
 
 
 def _calibration_review(authority: dict, *, decision: str = "approved") -> dict:
@@ -55,28 +42,22 @@ def _calibration_review(authority: dict, *, decision: str = "approved") -> dict:
         schema=production_decision_schemas()[schema_name],
     )
     agreement = hashlib.sha256(signature.encode("utf-8")).hexdigest()
-    models = authority["router"]["models"]
+    routes = authority["router"]["routes"]
     review["local_consensus"] = {
         "status": "agreed",
         "ok": True,
+        "conservative_veto_fired": False,
+        "conservative_veto_bypassed_by_lane_policy": False,
+        "dissent_effect_class": None,
+        "quorum_safety_policy_version": authority["quorum_safety_policy_version"],
         "agreement_sha256": agreement,
         "failure_class": None,
         "quarantine_reason": None,
+        "num_ctx": 32_768,
+        "residency": {},
         "votes": [
-            {
-                "role": "primary",
-                "model": models[0],
-                "valid": True,
-                "signature_sha256": agreement,
-                "invalid_reason": None,
-            },
-            {
-                "role": "challenger",
-                "model": models[1],
-                "valid": True,
-                "signature_sha256": agreement,
-                "invalid_reason": None,
-            },
+            _authority_vote("primary", routes[0], agreement),
+            _authority_vote("challenger", routes[1], agreement),
         ],
     }
     return review
