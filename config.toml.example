@@ -90,6 +90,11 @@ capability = "generation"
 provider = "local"
 model = "maxwell1500/ornith-35b:Q5_K_M"
 
+[llm.roles."librarian.review.challenger"]
+capability = "generation"
+provider = "local"
+model = "gpt-oss:20b"
+
 # Each classification vote remains an independently replaceable single route.
 [llm.roles."classification.primary"]
 capability = "generation"
@@ -162,6 +167,11 @@ model = "gpt-oss:20b"
 # capability = "generation"
 # provider = "openai"
 # model = "gpt-5-mini"
+#
+# [llm.roles."librarian.review.challenger"]
+# capability = "generation"
+# provider = "openai"
+# model = "gpt-5"
 #
 # [llm.roles."search.semantic"]
 # capability = "embedding"

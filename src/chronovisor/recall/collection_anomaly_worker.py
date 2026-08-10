@@ -1,18 +1,38 @@
-"""Isolated local-model reviewer for collection-placement anomalies."""
+"""Isolated fixed-role reviewer for collection-placement anomalies."""
 
 from __future__ import annotations
 
 import hashlib
 import json
 import sys
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 from chronovisor.core import ollama
 from chronovisor.recall.collection_authority import CollectionAuthorityError
 
-WORKER_SCHEMA = "chronovisor.collection-anomaly-worker.v1"
-REVIEW_SCHEMA = "chronovisor.collection-anomaly-review.v1"
+WORKER_SCHEMA = "chronovisor.collection-anomaly-worker.v2"
+REVIEW_SCHEMA = "chronovisor.collection-anomaly-review.v2"
+RUNTIME_ROLES = {
+    "primary": "librarian.review",
+    "challenger": "librarian.review.challenger",
+}
+_OVERRIDES = frozenset(
+    {"model", "model_digest", "provider", "route_identity", "runtime_role"}
+)
+_FIELDS = frozenset(
+    {
+        "schema",
+        "review_role",
+        "source_data_class",
+        "source_sensitivity",
+        "read_timeout_ms",
+        "candidate",
+        "document",
+        "collections",
+        "review_input_sha256",
+    }
+)
 POLICY = {
     "role": "review-only collection placement anomaly detector",
     "rules": [
@@ -24,19 +44,62 @@ POLICY = {
     ],
     "mutation_capability": False,
 }
-PROMPT_SHA256 = "sha256:" + hashlib.sha256(
-    json.dumps(POLICY, ensure_ascii=False, sort_keys=True).encode()
-).hexdigest()
+PROMPT_SHA256 = (
+    "sha256:"
+    + hashlib.sha256(
+        json.dumps(POLICY, ensure_ascii=False, sort_keys=True).encode()
+    ).hexdigest()
+)
+
+
+def review_input_sha256(
+    candidate: Mapping[str, Any],
+    document: Mapping[str, Any],
+    collections: Sequence[Mapping[str, Any]],
+    *,
+    source_data_class: str,
+    source_sensitivity: str,
+) -> str:
+    payload = {
+        "candidate": dict(candidate),
+        "document": dict(document),
+        "collections": [dict(row) for row in collections],
+        "source_data_class": source_data_class,
+        "source_sensitivity": source_sensitivity,
+    }
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+def route_identity(route: ollama.RuntimeGenerationRoute) -> dict[str, str]:
+    return {
+        "role": route.role,
+        "provider": route.provider,
+        "model": route.model,
+        "location": route.location,
+    }
+
+
+def route_model_digest(route: ollama.RuntimeGenerationRoute) -> str | None:
+    if route.provider != "ollama" or route.location != "local":
+        return None
+    digest = ollama.model_digests([route.model]).get(route.model, "")
+    if not digest:
+        raise CollectionAuthorityError("anomaly reviewer model digest is unavailable")
+    return digest
 
 
 def _generation_profile(model: str) -> tuple[int, bool | str]:
     """Return a bounded profile that leaves room for model-family reasoning."""
 
     if model.partition(":")[0] == "gpt-oss":
-        # gpt-oss may consume the entire output budget in its hidden reasoning
-        # channel when thinking is disabled. A small explicit reasoning budget
-        # produces the schema-constrained answer reliably while remaining
-        # bounded and local-only.
+        # gpt-oss needs a small explicit reasoning budget to reliably reach
+        # the schema-constrained answer within this bounded review call.
         return 1_800, "low"
     return 700, False
 
@@ -71,33 +134,55 @@ def _schema(slugs: list[str]) -> dict[str, Any]:
 
 
 def run(payload: Mapping[str, Any]) -> dict[str, Any]:
+    if _OVERRIDES.intersection(payload):
+        raise CollectionAuthorityError("anomaly worker route overrides are forbidden")
+    if set(payload) != _FIELDS:
+        raise CollectionAuthorityError("anomaly worker payload fields are invalid")
     if payload.get("schema") != WORKER_SCHEMA:
         raise CollectionAuthorityError("unsupported anomaly worker schema")
-    model = str(payload.get("model") or "")
-    expected_digest = str(payload.get("model_digest") or "")
+    review_role = payload.get("review_role")
+    source_data_class = payload.get("source_data_class")
+    source_sensitivity = payload.get("source_sensitivity")
+    read_timeout_ms = payload.get("read_timeout_ms")
     candidate = payload.get("candidate")
     document = payload.get("document")
     collections = payload.get("collections")
     if (
-        not model
-        or not expected_digest
+        review_role not in RUNTIME_ROLES
+        or source_data_class not in {"page", "system"}
+        or source_sensitivity not in {"normal", "high"}
+        or not isinstance(read_timeout_ms, int)
+        or isinstance(read_timeout_ms, bool)
+        or read_timeout_ms < 1
         or not isinstance(candidate, Mapping)
         or not isinstance(document, Mapping)
         or not isinstance(collections, list)
+        or not all(isinstance(row, Mapping) for row in collections)
     ):
         raise CollectionAuthorityError("anomaly worker input is incomplete")
+    expected_input_sha256 = review_input_sha256(
+        candidate,
+        document,
+        collections,
+        source_data_class=str(source_data_class),
+        source_sensitivity=str(source_sensitivity),
+    )
+    if payload.get("review_input_sha256") != expected_input_sha256:
+        raise CollectionAuthorityError("anomaly worker input digest changed")
+    runtime_role = RUNTIME_ROLES[str(review_role)]
+    route = ollama.runtime_generation_routes((runtime_role,))[0]
+    if not route.structured_output:
+        raise CollectionAuthorityError("anomaly reviewer requires structured output")
+    model_digest = route_model_digest(route)
     slugs = sorted(
         {
             str(row.get("slug") or "")
             for row in collections
-            if isinstance(row, Mapping) and str(row.get("slug") or "")
+            if str(row.get("slug") or "")
         }
     )
-    observed_digest = ollama.model_digests([model]).get(model, "")
-    if observed_digest != expected_digest:
-        raise CollectionAuthorityError("anomaly reviewer model digest changed")
-    num_predict, think = _generation_profile(model)
-    response = ollama.chat(
+    num_predict, think = _generation_profile(route.model)
+    response = ollama.runtime_structured_chat(
         [
             {
                 "role": "system",
@@ -121,19 +206,21 @@ def run(payload: Mapping[str, Any]) -> dict[str, Any]:
                 ),
             },
         ],
-        model=model,
+        runtime_role=runtime_role,
+        source_data_class=str(source_data_class),
+        source_sensitivity=str(source_sensitivity),
         format=_schema(slugs),
         num_ctx=8_192,
         num_predict=num_predict,
         keep_alive="0",
-        read_timeout_ms=int(payload.get("read_timeout_ms") or 660_000),
+        read_timeout_ms=read_timeout_ms,
         max_output_chars=6_000,
         temperature=0,
         seed=0,
         think=think,
     )
     try:
-        raw = json.loads(str(response))
+        raw = json.loads(response.content)
     except json.JSONDecodeError as exc:
         raise CollectionAuthorityError(
             "anomaly reviewer returned malformed JSON"
@@ -145,8 +232,7 @@ def run(payload: Mapping[str, Any]) -> dict[str, Any]:
     rationale = str(raw.get("rationale") or "").strip()[:500]
     evidence = str(raw.get("evidence") or "").strip()[:300]
     if (
-        decision
-        not in {"no_issue", "review_recommended", "insufficient_evidence"}
+        decision not in {"no_issue", "review_recommended", "insufficient_evidence"}
         or suggested not in {"", *slugs}
         or not rationale
         or not evidence
@@ -156,9 +242,13 @@ def run(payload: Mapping[str, Any]) -> dict[str, Any]:
         suggested = ""
     return {
         "schema": WORKER_SCHEMA,
-        "model": model,
-        "model_digest": observed_digest,
+        "model": route.model,
+        "route_identity": route_identity(route),
+        "model_digest": model_digest,
         "prompt_sha256": PROMPT_SHA256,
+        "review_input_sha256": expected_input_sha256,
+        "source_data_class": source_data_class,
+        "source_sensitivity": source_sensitivity,
         "model_calls": 1,
         "page_mutations": 0,
         "assignment_mutations": 0,

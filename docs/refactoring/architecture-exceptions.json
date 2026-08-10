@@ -1,14 +1,14 @@
 {
   "schema_version": 2,
   "source_baseline_head": "d404a6b20d00e3bcd1d4cdb89edfa5a718c51833",
-  "baseline_sha256": "e18e1a246ddc4e8fec6d0be3509629d68c80ebce10e51aa08db94e2802321204",
+  "baseline_sha256": "1935759d6f40a842a0fa2c46620c50c9a718c59dd607e5696ce17444531dfd8c",
   "semantic_identity": "cross-domain edges use category+source_package+target_package; statement exceptions use category+source_package+source_module+scope_kind+scope+statement_kind+target_package+target_module+symbols+occurrence; source line is diagnostic and normalized statement content is verified independently",
   "counts": {
     "exceptions": 44,
     "by_category": {
       "cross_domain_edge": 44
     },
-    "cross_domain_sites": 1376,
+    "cross_domain_sites": 1375,
     "production_to_lab_edges": 0,
     "production_to_lab_static_sites": 0,
     "production_to_lab_dynamic_sites": 0,
@@ -6272,7 +6272,7 @@
           ],
           "content_sha256": "8ea1e97de8abd8b273611e31d1231244d9916cc098046ac812cfd61f8002ff4f",
           "occurrence": 1,
-          "line": 2025
+          "line": 2412
         },
         {
           "semantic_id": "arch:b85e0d573324c14fe20eab13d02f0dcee21850e68bd2e6dcd55a775f18b54d13",
@@ -6456,7 +6456,7 @@
           ],
           "content_sha256": "e95ae9bee1d3a1a29398860ddd41b2b3614348ddd2ffd54c63b66dc046feb1c3",
           "occurrence": 1,
-          "line": 2210
+          "line": 2597
         },
         {
           "semantic_id": "arch:c923f39e8ed11c148944e45da2a12ce9765bdb443a0d745ea316bef39e378fe0",
@@ -7099,21 +7099,6 @@
           "content_sha256": "14f236863e49e2a33408114e2f2d40fae268af566cf3e4f7d43aa251fc80242d",
           "occurrence": 1,
           "line": 18
-        },
-        {
-          "semantic_id": "arch:fbd11edd1492645bec730b4e2e6d105213dd93ea02b26d7319886beb7f4e7617",
-          "source_module": "chronovisor.recall.collection_authority",
-          "scope_kind": "function",
-          "scope": "review_collection_queue",
-          "statement_kind": "from",
-          "target_module": "chronovisor.core",
-          "symbols": [
-            "frontmatter",
-            "ollama"
-          ],
-          "content_sha256": "fbe40ed78762b22d9abe19317f44e0540603e1f832f85e88b2f1752a14395df4",
-          "occurrence": 1,
-          "line": 1413
         }
       ],
       "semantic_id": "arch:222a5b72bc52b00e8547b1c89da0d92542d02de70590ee454eda0ab5feb6116f",

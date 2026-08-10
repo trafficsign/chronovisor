@@ -63,6 +63,10 @@ def test_collection_contract_and_crosswalk_are_frozen_and_fully_audited() -> Non
 
     assert contract["decision"] == "existing_collection_is_primary_authority"
     assert contract["anomaly_reviewer"]["assignment_mutation_capability"] is False
+    assert contract["consensus_adjudicator"]["runtime_roles"] == [
+        "librarian.review",
+        "librarian.review.challenger",
+    ]
     assert crosswalk["epoch"] == "collection-crosswalk-v3"
     assert len(crosswalk["entries"]) == 67
     assert len(crosswalk["by_slug"]) == 67
@@ -346,12 +350,14 @@ def test_collection_crosswalk_rejects_duplicate_route_identity(
 
 
 def _review_worker_result(
+    stdin_text: str,
     *,
+    route,
     decision: str = "no_issue",
-    model: str = "gemma4:26b",
-    digest: str = "digest",
+    digest: str | None = "digest-primary",
     suggested: str | None = None,
 ) -> SimpleNamespace:
+    payload = json.loads(stdin_text)
     if suggested is None:
         suggested = "ai" if decision == "review_recommended" else ""
     return SimpleNamespace(
@@ -359,9 +365,13 @@ def _review_worker_result(
         error=None,
         value={
             "schema": collection_anomaly_worker.WORKER_SCHEMA,
-            "model": model,
+            "model": route.model,
+            "route_identity": collection_anomaly_worker.route_identity(route),
             "model_digest": digest,
             "prompt_sha256": collection_anomaly_worker.PROMPT_SHA256,
+            "review_input_sha256": payload["review_input_sha256"],
+            "source_data_class": payload["source_data_class"],
+            "source_sensitivity": payload["source_sensitivity"],
             "model_calls": 1,
             "page_mutations": 0,
             "assignment_mutations": 0,
@@ -376,6 +386,96 @@ def _review_worker_result(
     )
 
 
+def _review_routes(monkeypatch: pytest.MonkeyPatch):
+    from chronovisor.core import ollama
+
+    routes = (
+        ollama.RuntimeGenerationRoute(
+            "librarian.review", "ollama", "gemma4:26b", "local", True
+        ),
+        ollama.RuntimeGenerationRoute(
+            "librarian.review.challenger",
+            "ollama",
+            "gpt-oss:20b",
+            "local",
+            True,
+        ),
+    )
+    monkeypatch.setattr(ollama, "runtime_generation_routes", lambda _roles: routes)
+    monkeypatch.setattr(
+        ollama,
+        "model_digests",
+        lambda _models: {
+            "gemma4:26b": "digest-primary",
+            "gpt-oss:20b": "digest-challenger",
+        },
+    )
+    return routes
+
+
+def _bound_review(
+    root: Path,
+    row: dict,
+    route,
+    digest: str | None,
+    *,
+    decision: str,
+    suggested: str = "",
+) -> dict:
+    state = CollectionRegistry(root).load()
+    collections = sorted(
+        [
+            {"slug": value["slug"], "label": value["label"]}
+            for value in state["collections"].values()
+            if value["status"] == "active"
+        ],
+        key=lambda value: (value["slug"], value["label"]),
+    )
+    current = collection_authority._current_review_input(
+        root,
+        row,
+        PageRegistry(root).load(),
+        collections,
+    )
+    assert current is not None
+    _, _, source_class, sensitivity, input_sha256 = current
+    return {
+        "schema": collection_anomaly_worker.REVIEW_SCHEMA,
+        "decision": decision,
+        "suggested_collection_slug": suggested,
+        "rationale": "The original collection remains defensible.",
+        "evidence": "The page content matches its original order.",
+        **collection_authority._review_binding(
+            collection_anomaly_worker.route_identity(route),
+            digest,
+            collection_anomaly_worker.PROMPT_SHA256,
+            input_sha256,
+            source_class,
+            sensitivity,
+        ),
+        "reviewed_at": "2026-07-27T00:00:00+00:00",
+    }
+
+
+@pytest.mark.parametrize(
+    ("sensitivity", "expected"),
+    [("normal", "normal"), (None, "high"), ("unknown", "high")],
+)
+def test_collection_review_source_requires_exact_registry_and_frontmatter_sensitivity(
+    tmp_path: Path,
+    sensitivity: str | None,
+    expected: str,
+) -> None:
+    page_uid = _uids(1, start=48)[0]
+    _page(tmp_path / "system" / "current-state.md", page_uid, sensitivity=sensitivity)
+    page = PageRegistry(tmp_path).ensure_manifest()["registry"]["pages"][page_uid]
+
+    document = collection_authority._review_document(tmp_path, page)
+
+    assert document is not None
+    assert document[1:] == ("system", expected)
+
+
 def test_collection_no_issue_review_is_checkpointed_and_dismissed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -386,10 +486,7 @@ def test_collection_no_issue_review_is_checkpointed_and_dismissed(
     )
     CollectionRegistry(tmp_path).sync_from_pages()
     collection_authority.refresh_review_queue(tmp_path)
-    monkeypatch.setattr(
-        "chronovisor.core.ollama.model_digests",
-        lambda _models: {"gemma4:26b": "digest"},
-    )
+    routes = _review_routes(monkeypatch)
     monkeypatch.setattr(
         collection_authority,
         "research_lane",
@@ -398,7 +495,9 @@ def test_collection_no_issue_review_is_checkpointed_and_dismissed(
     monkeypatch.setattr(
         collection_authority,
         "run_cancellable_command",
-        lambda *_args, **_kwargs: _review_worker_result(),
+        lambda _command, stdin, *_args, **_kwargs: _review_worker_result(
+            stdin, route=routes[0]
+        ),
     )
 
     result = collection_authority.review_collection_queue(
@@ -432,24 +531,16 @@ def test_existing_no_issue_review_is_reconciled_without_another_call(
     CollectionRegistry(tmp_path).sync_from_pages()
     queue = collection_authority.refresh_review_queue(tmp_path)
     item = next(iter(queue["items"].values()))
-    item["model_review"] = {
-        "schema": collection_anomaly_worker.REVIEW_SCHEMA,
-        "decision": "no_issue",
-        "suggested_collection_slug": "",
-        "rationale": "The original collection remains defensible.",
-        "evidence": "The page content matches its original order.",
-        "model": "gemma4:26b",
-        "model_digest": "digest",
-        "prompt_sha256": collection_anomaly_worker.PROMPT_SHA256,
-        "reviewed_at": "2026-07-27T00:00:00+00:00",
-    }
+    routes = _review_routes(monkeypatch)
+    item["model_review"] = _bound_review(
+        tmp_path,
+        item,
+        routes[0],
+        "digest-primary",
+        decision="no_issue",
+    )
     queue_path = tmp_path / "runtime" / "librarian" / "collection-review-queue.json"
     write_sealed_json(queue_path, queue, backup=True)
-    monkeypatch.setattr(
-        "chronovisor.core.ollama.model_digests",
-        lambda _models: {"gemma4:26b": "digest"},
-    )
-
     result = collection_authority.review_collection_queue(
         tmp_path,
         limit=0,
@@ -476,24 +567,18 @@ def test_collection_challenger_rejects_move_and_preserves_original_order(
     CollectionRegistry(tmp_path).sync_from_pages()
     queue = collection_authority.refresh_review_queue(tmp_path)
     item = next(iter(queue["items"].values()))
+    routes = _review_routes(monkeypatch)
     item["status"] = "review_recommended"
-    item["model_review"] = {
-        "schema": collection_anomaly_worker.REVIEW_SCHEMA,
-        "decision": "review_recommended",
-        "suggested_collection_slug": "ai",
-        "rationale": "The page may fit AI.",
-        "evidence": "The page mentions AI.",
-        "model": "gemma4:26b",
-        "model_digest": "primary-digest",
-        "prompt_sha256": collection_anomaly_worker.PROMPT_SHA256,
-        "reviewed_at": "2026-07-27T00:00:00+00:00",
-    }
+    item["model_review"] = _bound_review(
+        tmp_path,
+        item,
+        routes[0],
+        "digest-primary",
+        decision="review_recommended",
+        suggested="ai",
+    )
     queue_path = tmp_path / "runtime" / "librarian" / "collection-review-queue.json"
     write_sealed_json(queue_path, queue, backup=True)
-    monkeypatch.setattr(
-        "chronovisor.core.ollama.model_digests",
-        lambda _models: {"gpt-oss:20b": "challenger-digest"},
-    )
     monkeypatch.setattr(
         collection_authority,
         "research_lane",
@@ -502,9 +587,10 @@ def test_collection_challenger_rejects_move_and_preserves_original_order(
     monkeypatch.setattr(
         collection_authority,
         "run_cancellable_command",
-        lambda *_args, **_kwargs: _review_worker_result(
-            model="gpt-oss:20b",
-            digest="challenger-digest",
+        lambda _command, stdin, *_args, **_kwargs: _review_worker_result(
+            stdin,
+            route=routes[1],
+            digest="digest-challenger",
         ),
     )
 
@@ -539,24 +625,18 @@ def test_collection_challenger_records_consensus_without_mutation(
     CollectionRegistry(tmp_path).sync_from_pages()
     queue = collection_authority.refresh_review_queue(tmp_path)
     item = next(iter(queue["items"].values()))
+    routes = _review_routes(monkeypatch)
     item["status"] = "review_recommended"
-    item["model_review"] = {
-        "schema": collection_anomaly_worker.REVIEW_SCHEMA,
-        "decision": "review_recommended",
-        "suggested_collection_slug": "ai",
-        "rationale": "The page may fit AI.",
-        "evidence": "The page mentions AI.",
-        "model": "gemma4:26b",
-        "model_digest": "primary-digest",
-        "prompt_sha256": collection_anomaly_worker.PROMPT_SHA256,
-        "reviewed_at": "2026-07-27T00:00:00+00:00",
-    }
+    item["model_review"] = _bound_review(
+        tmp_path,
+        item,
+        routes[0],
+        "digest-primary",
+        decision="review_recommended",
+        suggested="ai",
+    )
     queue_path = tmp_path / "runtime" / "librarian" / "collection-review-queue.json"
     write_sealed_json(queue_path, queue, backup=True)
-    monkeypatch.setattr(
-        "chronovisor.core.ollama.model_digests",
-        lambda _models: {"gpt-oss:20b": "challenger-digest"},
-    )
     monkeypatch.setattr(
         collection_authority,
         "research_lane",
@@ -565,10 +645,11 @@ def test_collection_challenger_records_consensus_without_mutation(
     monkeypatch.setattr(
         collection_authority,
         "run_cancellable_command",
-        lambda *_args, **_kwargs: _review_worker_result(
+        lambda _command, stdin, *_args, **_kwargs: _review_worker_result(
+            stdin,
+            route=routes[1],
             decision="review_recommended",
-            model="gpt-oss:20b",
-            digest="challenger-digest",
+            digest="digest-challenger",
             suggested="ai",
         ),
     )
@@ -598,10 +679,7 @@ def test_collection_review_checkpoint_survives_later_worker_failure(
     _page(tmp_path / "pages" / "misc" / "second.md", second_uid)
     CollectionRegistry(tmp_path).sync_from_pages()
     collection_authority.refresh_review_queue(tmp_path)
-    monkeypatch.setattr(
-        "chronovisor.core.ollama.model_digests",
-        lambda _models: {"gemma4:26b": "digest"},
-    )
+    routes = _review_routes(monkeypatch)
     monkeypatch.setattr(
         collection_authority,
         "research_lane",
@@ -609,11 +687,11 @@ def test_collection_review_checkpoint_survives_later_worker_failure(
     )
     calls = 0
 
-    def run_worker(*_args, **_kwargs):
+    def run_worker(_command, stdin, *_args, **_kwargs):
         nonlocal calls
         calls += 1
         if calls == 1:
-            return _review_worker_result()
+            return _review_worker_result(stdin, route=routes[0])
         raise RuntimeError("simulated worker crash")
 
     monkeypatch.setattr(
@@ -648,10 +726,7 @@ def test_collection_review_stops_batch_when_model_lane_is_deferred(
     _page(tmp_path / "pages" / "misc" / "second.md", second_uid)
     CollectionRegistry(tmp_path).sync_from_pages()
     collection_authority.refresh_review_queue(tmp_path)
-    monkeypatch.setattr(
-        "chronovisor.core.ollama.model_digests",
-        lambda _models: {"gemma4:26b": "digest"},
-    )
+    _review_routes(monkeypatch)
     monkeypatch.setattr(
         collection_authority,
         "research_lane",
@@ -685,6 +760,154 @@ def test_collection_review_stops_batch_when_model_lane_is_deferred(
     assert result["reviewer_calls"] == 0
     assert len(result["deferred"]) == 1
     assert result["deferred"][0]["reason"] == "sync_pending"
+
+
+def test_collection_review_rejects_duplicate_routes_before_model_controls(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from chronovisor.core import ollama
+
+    routes = tuple(
+        ollama.RuntimeGenerationRoute(role, "remote", "same", "remote", True)
+        for role in ("librarian.review", "librarian.review.challenger")
+    )
+    monkeypatch.setattr(ollama, "runtime_generation_routes", lambda _roles: routes)
+    monkeypatch.setattr(
+        ollama,
+        "model_digests",
+        lambda _models: pytest.fail("duplicate routes queried local digests"),
+    )
+    monkeypatch.setattr(
+        collection_authority,
+        "run_cancellable_command",
+        lambda *_args, **_kwargs: pytest.fail("duplicate routes spawned a worker"),
+    )
+
+    with pytest.raises(CollectionAuthorityError, match="not independent"):
+        collection_authority.review_collection_queue(tmp_path)
+
+
+def test_review_model_is_only_a_resolved_model_assertion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    routes = _review_routes(monkeypatch)
+    digest_calls = 0
+
+    def digests(_models):
+        nonlocal digest_calls
+        digest_calls += 1
+        return {}
+
+    monkeypatch.setattr(collection_anomaly_worker.ollama, "model_digests", digests)
+    monkeypatch.setattr(
+        collection_authority,
+        "run_cancellable_command",
+        lambda *_args, **_kwargs: pytest.fail("model assertion spawned a worker"),
+    )
+
+    with pytest.raises(CollectionAuthorityError, match="assertion does not match"):
+        collection_authority.review_collection_queue(
+            tmp_path,
+            model="not-" + routes[0].model,
+        )
+
+    assert digest_calls == 0
+
+
+def test_remote_collection_review_captures_normal_page_source_without_controls(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from chronovisor.core import ollama
+
+    _page(
+        tmp_path / "pages" / "misc" / "note.md",
+        _uids(1, start=90)[0],
+        sensitivity="normal",
+    )
+    CollectionRegistry(tmp_path).sync_from_pages()
+    collection_authority.refresh_review_queue(tmp_path)
+    routes = (
+        ollama.RuntimeGenerationRoute(
+            "librarian.review", "remote-a", "model-a", "remote", True
+        ),
+        ollama.RuntimeGenerationRoute(
+            "librarian.review.challenger", "remote-b", "model-b", "remote", True
+        ),
+    )
+    monkeypatch.setattr(ollama, "runtime_generation_routes", lambda _roles: routes)
+    monkeypatch.setattr(
+        ollama,
+        "model_digests",
+        lambda _models: pytest.fail("remote route queried Ollama digests"),
+    )
+    lanes = []
+    monkeypatch.setattr(
+        collection_authority,
+        "research_lane",
+        lambda *_args, **kwargs: lanes.append(kwargs) or nullcontext(object()),
+    )
+    captured = []
+
+    def worker(_command, stdin, *_args, **_kwargs):
+        captured.append(json.loads(stdin))
+        return _review_worker_result(stdin, route=routes[0], digest=None)
+
+    monkeypatch.setattr(collection_authority, "run_cancellable_command", worker)
+
+    result = collection_authority.review_collection_queue(tmp_path, limit=1)
+
+    assert result["route_identity"]["location"] == "remote"
+    assert result["model_digest"] is None
+    assert captured[0]["source_data_class"] == "page"
+    assert captured[0]["source_sensitivity"] == "normal"
+    assert lanes[0]["needs_model"] is False
+
+
+@pytest.mark.parametrize("drift", ["prompt", "route", "digest", "input"])
+def test_collection_review_identity_drift_is_stale_without_inference(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    drift: str,
+) -> None:
+    page_uid = _uids(1, start=95)[0]
+    path = tmp_path / "pages" / "misc" / "note.md"
+    _page(path, page_uid, sensitivity="normal")
+    CollectionRegistry(tmp_path).sync_from_pages()
+    queue = collection_authority.refresh_review_queue(tmp_path)
+    routes = _review_routes(monkeypatch)
+    row = next(iter(queue["items"].values()))
+    row["model_review"] = _bound_review(
+        tmp_path,
+        row,
+        routes[0],
+        "digest-primary",
+        decision="no_issue",
+    )
+    if drift == "prompt":
+        row["model_review"]["prompt_sha256"] = "changed"
+    elif drift == "route":
+        row["model_review"]["route_identity"]["provider"] = "changed"
+    elif drift == "digest":
+        row["model_review"]["model_digest"] = "changed"
+    else:
+        path.write_text(path.read_text() + "changed\n", encoding="utf-8")
+    queue_path = tmp_path / "runtime" / "librarian" / "collection-review-queue.json"
+    write_sealed_json(queue_path, queue, backup=True)
+    monkeypatch.setattr(
+        collection_authority,
+        "run_cancellable_command",
+        lambda *_args, **_kwargs: pytest.fail("stale cache invoked inference"),
+    )
+
+    result = collection_authority.review_collection_queue(tmp_path, limit=0)
+    stale = read_sealed_json(queue_path)["items"][row["candidate_id"]]
+
+    assert result["reviewer_calls"] == 0
+    assert stale["status"] == "queued"
+    assert stale["stale_review_reason"] == "primary_evidence_not_current"
 
 
 def test_collection_lifecycle_is_cas_receipted_and_non_destructive(
@@ -969,6 +1192,7 @@ def test_incremental_adjudication_does_not_reopen_terminal_required_items(
 
 def test_local_consensus_moves_and_disagreement_preserves_without_host(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     move_uid, preserve_uid, ai_uid = _uids(3, start=470)
     _page(tmp_path / "pages" / "misc" / "move.md", move_uid)
@@ -980,6 +1204,7 @@ def test_local_consensus_moves_and_disagreement_preserves_without_host(
     )
     registry.sync_from_pages()
     queue = collection_authority.refresh_review_queue(tmp_path)
+    routes = _review_routes(monkeypatch)
     for candidate_id, raw_row in queue["items"].items():
         row = dict(raw_row)
         if row["page_uid"] == move_uid:
@@ -989,14 +1214,22 @@ def test_local_consensus_moves_and_disagreement_preserves_without_host(
         else:
             continue
         row["status"] = "review_recommended"
-        row["model_review"] = {
-            "decision": "review_recommended",
-            "suggested_collection_slug": primary_slug,
-        }
-        row["challenger_review"] = {
-            "decision": "review_recommended",
-            "suggested_collection_slug": challenger_slug,
-        }
+        row["model_review"] = _bound_review(
+            tmp_path,
+            row,
+            routes[0],
+            "digest-primary",
+            decision="review_recommended",
+            suggested=primary_slug,
+        )
+        row["challenger_review"] = _bound_review(
+            tmp_path,
+            row,
+            routes[1],
+            "digest-challenger",
+            decision="review_recommended",
+            suggested=challenger_slug,
+        )
         queue["items"][candidate_id] = row
     write_sealed_json(
         tmp_path / "runtime" / "librarian" / "collection-review-queue.json",
@@ -1025,6 +1258,88 @@ def test_local_consensus_moves_and_disagreement_preserves_without_host(
     assert preserve_row["resolution"] == (
         "autonomous_fail_closed_preserve_original_order"
     )
+
+
+@pytest.mark.parametrize(
+    "legacy_schema",
+    ["chronovisor.collection-review-queue.v1", None],
+)
+def test_legacy_open_review_stays_stale_after_schema_checkpoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    legacy_schema: str | None,
+) -> None:
+    page_uid, ai_uid = _uids(2, start=540)
+    _page(tmp_path / "pages" / "misc" / "note.md", page_uid)
+    _page(tmp_path / "pages" / "ai" / "reference.md", ai_uid)
+    registry = CollectionRegistry(tmp_path)
+    registry.sync_from_pages()
+    queue = collection_authority.refresh_review_queue(tmp_path)
+    routes = _review_routes(monkeypatch)
+    row = next(
+        value for value in queue["items"].values() if value["page_uid"] == page_uid
+    )
+    row["status"] = "review_recommended"
+    row["model_review"] = _bound_review(
+        tmp_path,
+        row,
+        routes[0],
+        "digest-primary",
+        decision="review_recommended",
+        suggested="ai",
+    )
+    row["challenger_review"] = _bound_review(
+        tmp_path,
+        row,
+        routes[1],
+        "digest-challenger",
+        decision="review_recommended",
+        suggested="ai",
+    )
+    if legacy_schema is not None:
+        for review in (row["model_review"], row["challenger_review"]):
+            review.pop("route_identity")
+            review.pop("review_input_sha256")
+    if legacy_schema is None:
+        queue.pop("schema")
+    else:
+        queue["schema"] = legacy_schema
+    queue_path = tmp_path / "runtime" / "librarian" / "collection-review-queue.json"
+    write_sealed_json(queue_path, queue, backup=True)
+
+    review = collection_authority.review_collection_queue(tmp_path, limit=0)
+    finalized = autonomously_finalize_collection_queue(tmp_path)
+    persisted = read_sealed_json(queue_path)
+    stale = persisted["items"][row["candidate_id"]]
+
+    assert review["reviewer_calls"] == 0
+    assert finalized["moves"] == 0
+    assert stale["status"] == "queued"
+    assert stale["stale_review_reason"] == "primary_evidence_not_current"
+    assert (
+        registry.load()["assignments"][page_uid]["collection_uid"]
+        == registry.load()["slug_index"]["misc"]
+    )
+
+
+def test_legacy_terminal_review_history_is_preserved(tmp_path: Path) -> None:
+    page_uid = _uids(1, start=560)[0]
+    _page(tmp_path / "pages" / "misc" / "note.md", page_uid)
+    CollectionRegistry(tmp_path).sync_from_pages()
+    queue = collection_authority.refresh_review_queue(tmp_path)
+    row = next(iter(queue["items"].values()))
+    row["status"] = "dismissed"
+    row["model_review"] = {"schema": "chronovisor.collection-anomaly-review.v1"}
+    queue["schema"] = "chronovisor.collection-review-queue.v1"
+    queue_path = tmp_path / "runtime" / "librarian" / "collection-review-queue.json"
+    write_sealed_json(queue_path, queue, backup=True)
+
+    refreshed = collection_authority.refresh_review_queue(tmp_path)
+
+    persisted = refreshed["items"][row["candidate_id"]]
+    assert refreshed["schema"] == collection_authority.COLLECTION_QUEUE_SCHEMA
+    assert persisted["model_review"] == row["model_review"]
+    assert "stale_review_reason" not in persisted
 
 
 def test_review_candidates_detect_misc_and_cross_collection_affinity(
@@ -1199,49 +1514,82 @@ def test_unseen_evaluation_honors_locked_assignment_or_review_contract(
     assert result["model_calls"] == 0
 
 
-def test_anomaly_worker_is_review_only(
+def _anomaly_worker_payload(
+    *,
+    review_role: str = "primary",
+    source_data_class: str = "page",
+    source_sensitivity: str = "normal",
+) -> dict:
+    candidate = {
+        "current_collection_slug": "misc",
+        "reason": "collection_requires_review",
+    }
+    document = {
+        "title": "Chronovisor soak",
+        "summary": "",
+        "evidence_excerpt": "Validation.",
+    }
+    collections = [
+        {"slug": "misc", "label": "Misc"},
+        {"slug": "chronovisor", "label": "Chronovisor"},
+    ]
+    return {
+        "schema": collection_anomaly_worker.WORKER_SCHEMA,
+        "review_role": review_role,
+        "source_data_class": source_data_class,
+        "source_sensitivity": source_sensitivity,
+        "read_timeout_ms": 660_000,
+        "candidate": candidate,
+        "document": document,
+        "collections": collections,
+        "review_input_sha256": collection_anomaly_worker.review_input_sha256(
+            candidate,
+            document,
+            collections,
+            source_data_class=source_data_class,
+            source_sensitivity=source_sensitivity,
+        ),
+    }
+
+
+def test_anomaly_worker_is_review_only_and_binds_local_route(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(
-        collection_anomaly_worker.ollama,
-        "model_digests",
-        lambda _models: {"gemma4:test": "sha256:model"},
+    from chronovisor.core import ollama
+
+    route = ollama.RuntimeGenerationRoute(
+        "librarian.review", "ollama", "gemma4:test", "local", True
     )
+    digest_calls = 0
+
+    def digests(_models):
+        nonlocal digest_calls
+        digest_calls += 1
+        return {"gemma4:test": "sha256:model"}
+
+    monkeypatch.setattr(ollama, "runtime_generation_routes", lambda _roles: (route,))
+    monkeypatch.setattr(ollama, "model_digests", digests)
     monkeypatch.setattr(
-        collection_anomaly_worker.ollama,
-        "chat",
-        lambda *_args, **_kwargs: json.dumps(
-            {
-                "decision": "review_recommended",
-                "suggested_collection_slug": "chronovisor",
-                "rationale": "The page describes Chronovisor validation.",
-                "evidence": "Title and body both describe a soak test.",
-            }
+        ollama,
+        "runtime_structured_chat",
+        lambda *_args, **_kwargs: ollama.ChatResponse(
+            content=json.dumps(
+                {
+                    "decision": "review_recommended",
+                    "suggested_collection_slug": "chronovisor",
+                    "rationale": "The page describes Chronovisor validation.",
+                    "evidence": "Title and body both describe a soak test.",
+                }
+            )
         ),
     )
 
-    result = collection_anomaly_worker.run(
-        {
-            "schema": collection_anomaly_worker.WORKER_SCHEMA,
-            "model": "gemma4:test",
-            "model_digest": "sha256:model",
-            "candidate": {
-                "current_collection_slug": "misc",
-                "reason": "collection_requires_review",
-            },
-            "document": {
-                "title": "Chronovisor soak",
-                "summary": "",
-                "evidence_excerpt": "Validation.",
-            },
-            "collections": [
-                {"slug": "misc", "label": "Misc"},
-                {"slug": "chronovisor", "label": "Chronovisor"},
-            ],
-        }
-    )
+    result = collection_anomaly_worker.run(_anomaly_worker_payload())
 
     assert result["result"]["decision"] == "review_recommended"
+    assert result["route_identity"] == collection_anomaly_worker.route_identity(route)
+    assert result["model_digest"] == "sha256:model"
+    assert digest_calls == 1
     assert result["model_calls"] == 1
     assert result["page_mutations"] == 0
     assert result["assignment_mutations"] == 0
@@ -1250,43 +1598,246 @@ def test_anomaly_worker_is_review_only(
 def test_anomaly_worker_gpt_oss_reserves_bounded_reasoning_budget(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from chronovisor.core import ollama
+
     observed: dict[str, object] = {}
+    route = ollama.RuntimeGenerationRoute(
+        "librarian.review", "ollama", "gpt-oss:20b", "local", True
+    )
+    monkeypatch.setattr(ollama, "runtime_generation_routes", lambda _roles: (route,))
     monkeypatch.setattr(
-        collection_anomaly_worker.ollama,
+        ollama,
         "model_digests",
         lambda _models: {"gpt-oss:20b": "sha256:model"},
     )
 
-    def _chat(*_args: object, **kwargs: object) -> str:
+    def structured_chat(*_args: object, **kwargs: object):
         observed.update(kwargs)
-        return json.dumps(
-            {
-                "decision": "no_issue",
-                "suggested_collection_slug": "",
-                "rationale": "The current collection is defensible.",
-                "evidence": "The title and excerpt match the collection.",
-            }
+        return ollama.ChatResponse(
+            content=json.dumps(
+                {
+                    "decision": "no_issue",
+                    "suggested_collection_slug": "",
+                    "rationale": "The current collection is defensible.",
+                    "evidence": "The title and excerpt match the collection.",
+                }
+            )
         )
 
-    monkeypatch.setattr(collection_anomaly_worker.ollama, "chat", _chat)
+    monkeypatch.setattr(ollama, "runtime_structured_chat", structured_chat)
 
-    collection_anomaly_worker.run(
-        {
-            "schema": collection_anomaly_worker.WORKER_SCHEMA,
-            "model": "gpt-oss:20b",
-            "model_digest": "sha256:model",
-            "candidate": {
-                "current_collection_slug": "chronovisor",
-                "reason": "collection_requires_review",
-            },
-            "document": {
-                "title": "Chronovisor",
-                "summary": "",
-                "evidence_excerpt": "Validation.",
-            },
-            "collections": [{"slug": "chronovisor", "label": "Chronovisor"}],
-        }
-    )
+    collection_anomaly_worker.run(_anomaly_worker_payload())
 
     assert observed["num_predict"] == 1_800
     assert observed["think"] == "low"
+
+
+def _remote_anomaly_runtime(monkeypatch: pytest.MonkeyPatch, backend_calls: list):
+    from chronovisor.core import llm_config
+    from chronovisor.core.llm_runtime import (
+        BackendCapabilities,
+        GenerationResult,
+        GenerationRoute,
+        LLMRuntime,
+        RouteLocation,
+    )
+
+    class Backend:
+        provider = "remote-test"
+        location = RouteLocation.REMOTE
+
+        def generate(self, request, *, model):
+            backend_calls.append((request, model))
+            return GenerationResult(
+                content=json.dumps(
+                    {
+                        "decision": "no_issue",
+                        "suggested_collection_slug": "",
+                        "rationale": "The current collection is defensible.",
+                        "evidence": "The page content matches the collection.",
+                    }
+                ),
+                provider=self.provider,
+                model=model,
+            )
+
+    runtime = LLMRuntime(
+        generation={
+            "librarian.review": GenerationRoute(
+                Backend(),
+                "remote-model",
+                BackendCapabilities(
+                    generation=True,
+                    embedding=False,
+                    structured_output=True,
+                ),
+            )
+        }
+    )
+    monkeypatch.setattr(llm_config, "load_default_llm_runtime", lambda: runtime)
+    return runtime
+
+
+def _forbid_ollama_controls(monkeypatch: pytest.MonkeyPatch) -> None:
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("remote review touched an Ollama control")
+
+    for name in (
+        "chat",
+        "model_digests",
+        "model_resource_lease",
+        "plan_model_residency",
+        "resident_model_rows",
+        "unload_named_model",
+        "unload_model",
+    ):
+        monkeypatch.setattr(collection_anomaly_worker.ollama, name, forbidden)
+
+
+def test_remote_anomaly_worker_succeeds_without_ollama_controls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend_calls: list = []
+    _remote_anomaly_runtime(monkeypatch, backend_calls)
+    _forbid_ollama_controls(monkeypatch)
+
+    result = collection_anomaly_worker.run(_anomaly_worker_payload())
+
+    assert len(backend_calls) == 1
+    assert result["route_identity"] == {
+        "role": "librarian.review",
+        "provider": "remote-test",
+        "model": "remote-model",
+        "location": "remote",
+    }
+    assert result["model_digest"] is None
+
+
+def test_local_non_ollama_anomaly_worker_has_no_guessed_digest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from chronovisor.core import ollama
+
+    route = ollama.RuntimeGenerationRoute(
+        "librarian.review", "local-engine", "local-model", "local", True
+    )
+    monkeypatch.setattr(ollama, "runtime_generation_routes", lambda _roles: (route,))
+    monkeypatch.setattr(
+        ollama,
+        "model_digests",
+        lambda _models: pytest.fail("non-Ollama route queried an Ollama digest"),
+    )
+    monkeypatch.setattr(
+        ollama,
+        "runtime_structured_chat",
+        lambda *_args, **_kwargs: ollama.ChatResponse(
+            content=json.dumps(
+                {
+                    "decision": "no_issue",
+                    "suggested_collection_slug": "",
+                    "rationale": "The current collection is defensible.",
+                    "evidence": "The page matches the collection.",
+                }
+            )
+        ),
+    )
+
+    result = collection_anomaly_worker.run(_anomaly_worker_payload())
+
+    assert result["model_digest"] is None
+
+
+def test_remote_high_system_anomaly_worker_is_denied_before_backend(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from chronovisor.core import ollama
+
+    backend_calls: list = []
+    _remote_anomaly_runtime(monkeypatch, backend_calls)
+    _forbid_ollama_controls(monkeypatch)
+
+    with pytest.raises(ollama.RuntimeBridgeError) as failure:
+        collection_anomaly_worker.run(
+            _anomaly_worker_payload(
+                source_data_class="system",
+                source_sensitivity="high",
+            )
+        )
+
+    assert failure.value.category == "egress_denied"
+    assert backend_calls == []
+
+
+@pytest.mark.parametrize("override", ["model", "provider", "runtime_role"])
+def test_anomaly_worker_rejects_route_overrides_before_resolve(
+    monkeypatch: pytest.MonkeyPatch,
+    override: str,
+) -> None:
+    resolves = 0
+
+    def resolve(_roles):
+        nonlocal resolves
+        resolves += 1
+        return ()
+
+    monkeypatch.setattr(
+        collection_anomaly_worker.ollama,
+        "runtime_generation_routes",
+        resolve,
+    )
+    payload = _anomaly_worker_payload()
+    payload[override] = "forbidden"
+
+    with pytest.raises(CollectionAuthorityError, match="overrides are forbidden"):
+        collection_anomaly_worker.run(payload)
+
+    assert resolves == 0
+
+
+def test_anomaly_worker_missing_local_digest_never_calls_backend(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from chronovisor.core import ollama
+
+    route = ollama.RuntimeGenerationRoute(
+        "librarian.review", "ollama", "missing", "local", True
+    )
+    backends = 0
+    monkeypatch.setattr(ollama, "runtime_generation_routes", lambda _roles: (route,))
+    monkeypatch.setattr(ollama, "model_digests", lambda _models: {})
+
+    def backend(*_args, **_kwargs):
+        nonlocal backends
+        backends += 1
+        return "{}"
+
+    monkeypatch.setattr(ollama, "runtime_structured_chat", backend)
+
+    with pytest.raises(CollectionAuthorityError, match="digest is unavailable"):
+        collection_anomaly_worker.run(_anomaly_worker_payload())
+
+    assert backends == 0
+
+
+def test_anomaly_worker_requires_structured_route_before_controls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from chronovisor.core import ollama
+
+    route = ollama.RuntimeGenerationRoute(
+        "librarian.review", "ollama", "model", "local", False
+    )
+    monkeypatch.setattr(ollama, "runtime_generation_routes", lambda _roles: (route,))
+    monkeypatch.setattr(
+        ollama,
+        "model_digests",
+        lambda _models: pytest.fail("unstructured route queried model controls"),
+    )
+    monkeypatch.setattr(
+        ollama,
+        "runtime_structured_chat",
+        lambda *_args, **_kwargs: pytest.fail("unstructured route called backend"),
+    )
+
+    with pytest.raises(CollectionAuthorityError, match="requires structured output"):
+        collection_anomaly_worker.run(_anomaly_worker_payload())

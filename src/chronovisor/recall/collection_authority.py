@@ -40,13 +40,17 @@ from chronovisor.recall.classification_anchor import load_anchor_set
 
 COLLECTION_REGISTRY_SCHEMA = "chronovisor.collection-registry.v1"
 COLLECTION_RECEIPT_SCHEMA = "chronovisor.collection-lifecycle-receipt.v1"
-COLLECTION_QUEUE_SCHEMA = "chronovisor.collection-review-queue.v1"
+COLLECTION_QUEUE_SCHEMA = "chronovisor.collection-review-queue.v2"
+COLLECTION_REVIEW_SCHEMA = "chronovisor.collection-anomaly-review.v2"
 COLLECTION_DECISION_SCHEMA = "chronovisor.collection-review-decisions.v1"
 COLLECTION_EVALUATION_SCHEMA = "chronovisor.collection-authority-evaluation.v1"
 COLLECTION_QUALITY_SCHEMA = "chronovisor.collection-quality.v1"
 COLLECTION_CROSSWALK_AUTO_SCHEMA = "chronovisor.collection-crosswalk-auto.v2"
-DEFAULT_CHALLENGER_MODEL = "gpt-oss:20b"
 AUTONOMOUS_DECISION_AUTHORITY = "model_consensus"
+_ANOMALY_RUNTIME_ROLES = {
+    "primary": "librarian.review",
+    "challenger": "librarian.review.challenger",
+}
 _CROSSWALK_RUNTIME_ROLES = (
     "classification.anchor.primary",
     "classification.anchor.challenger",
@@ -121,9 +125,12 @@ def load_contract(path: Path | None = None) -> dict[str, Any]:
     if reviewer.get("assignment_mutation_capability") is not False:
         raise CollectionAuthorityError("anomaly reviewer must be review-only")
     if (
-        adjudicator.get("required_local_models") != 2
+        reviewer.get("runtime_role") != _ANOMALY_RUNTIME_ROLES["primary"]
+        or reviewer.get("runtime_bypass_calls") != 0
+        or adjudicator.get("required_routes") != 2
+        or adjudicator.get("runtime_roles") != list(_ANOMALY_RUNTIME_ROLES.values())
         or adjudicator.get("agreement") != "same_audited_target"
-        or adjudicator.get("frontier_calls") != 0
+        or adjudicator.get("runtime_bypass_calls") != 0
         or adjudicator.get("page_mutation_capability") is not False
     ):
         raise CollectionAuthorityError(
@@ -896,6 +903,19 @@ def build_review_candidates(
     )
 
 
+def _stale_legacy_open_reviews(items: Mapping[str, Any], schema: object) -> None:
+    if schema == COLLECTION_QUEUE_SCHEMA:
+        return
+    for row in items.values():
+        if (
+            isinstance(row, dict)
+            and row.get("status") in {"queued", "review_recommended"}
+            and ("model_review" in row or "challenger_review" in row)
+        ):
+            row["status"] = "queued"
+            row["stale_review_reason"] = "legacy_route_or_input_identity"
+
+
 def refresh_review_queue(
     root: Path,
     *,
@@ -913,6 +933,7 @@ def refresh_review_queue(
         for key, row in (previous.get("items") or {}).items()
         if isinstance(row, Mapping)
     }
+    _stale_legacy_open_reviews(items, previous.get("schema"))
     candidates = build_review_candidates(root, state=state)
     max_open = int(gates["review_queue_open_max"])
     max_new = int(gates["review_queue_new_per_run_max"])
@@ -973,8 +994,9 @@ def _checkpoint_review_queue(
     base_reviewer_calls: int,
     reviewed_count: int,
 ) -> None:
-    """Persist review progress after every completed local-model call."""
+    """Persist review progress after every completed runtime call."""
 
+    queue["schema"] = COLLECTION_QUEUE_SCHEMA
     queue["updated_at"] = _now()
     queue["reviewer_calls"] = base_reviewer_calls + reviewed_count
     queue["frontier_calls"] = 0
@@ -1337,22 +1359,52 @@ def _collection_worker_contract_matches(
     worker: Mapping[str, Any],
     *,
     schema: str,
-    model: str,
-    model_digest: str,
-    prompt_sha256: str,
+    review_schema: str,
+    binding: Mapping[str, Any],
 ) -> bool:
     """Check the non-mutating single-call anomaly worker contract."""
 
+    result = worker.get("result")
     return (
         worker.get("schema") == schema
-        and worker.get("model") == model
-        and worker.get("model_digest") == model_digest
-        and worker.get("prompt_sha256") == prompt_sha256
+        and all(worker.get(key) == value for key, value in binding.items())
         and int(worker.get("model_calls") or 0) == 1
         and int(worker.get("page_mutations") or 0) == 0
         and int(worker.get("assignment_mutations") or 0) == 0
-        and isinstance(worker.get("result"), Mapping)
+        and isinstance(result, Mapping)
+        and result.get("schema") == review_schema
     )
+
+
+def _review_evidence_matches(
+    review: object,
+    *,
+    binding: Mapping[str, Any],
+) -> bool:
+    return (
+        isinstance(review, Mapping)
+        and review.get("schema") == COLLECTION_REVIEW_SCHEMA
+        and all(review.get(key) == value for key, value in binding.items())
+    )
+
+
+def _review_binding(
+    route_identity: Mapping[str, str],
+    model_digest: str | None,
+    prompt_sha256: str,
+    review_input_sha256: str,
+    source_data_class: str,
+    source_sensitivity: str,
+) -> dict[str, Any]:
+    return {
+        "model": route_identity["model"],
+        "route_identity": dict(route_identity),
+        "model_digest": model_digest,
+        "prompt_sha256": prompt_sha256,
+        "review_input_sha256": review_input_sha256,
+        "source_data_class": source_data_class,
+        "source_sensitivity": source_sensitivity,
+    }
 
 
 def _apply_collection_review_result(
@@ -1360,21 +1412,18 @@ def _apply_collection_review_result(
     review: Mapping[str, Any],
     *,
     role: str,
-    model: str,
-    model_digest: str,
-    prompt_sha256: str,
+    binding: Mapping[str, Any],
     reviewed_at: str,
     resolved_at: str | None = None,
 ) -> dict[str, Any]:
     """Project one primary or challenger verdict into its durable queue row."""
 
     updated = dict(row)
+    updated.pop("stale_review_reason", None)
     review_field = "model_review" if role == "primary" else "challenger_review"
     updated[review_field] = {
         **review,
-        "model": model,
-        "model_digest": model_digest,
-        "prompt_sha256": prompt_sha256,
+        **binding,
         "reviewed_at": reviewed_at,
     }
     if role == "primary":
@@ -1400,6 +1449,193 @@ def _apply_collection_review_result(
     return updated
 
 
+def _candidate_review_input(row: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        key: row.get(key)
+        for key in (
+            "candidate_id",
+            "page_uid",
+            "current_collection_slug",
+            "proposed_collection_slug",
+            "reason",
+            "evidence",
+        )
+    }
+
+
+def _review_document(
+    root: Path,
+    page: Mapping[str, Any],
+) -> tuple[dict[str, str], str, str] | None:
+    from chronovisor.recall import classification
+
+    relative_path = str(page.get("path") or "")
+    path = root / relative_path
+    try:
+        text = path.read_text(encoding="utf-8")
+        meta, body = classification.frontmatter.parse(text)
+    except (OSError, UnicodeError):
+        return None
+    source_data_class = "system" if relative_path.startswith("system/") else "page"
+    source_sensitivity = (
+        "normal"
+        if page.get("sensitivity") == "normal" and meta.get("sensitivity") == "normal"
+        else "high"
+    )
+    return (
+        {
+            "title": str(meta.get("title") or path.stem),
+            "summary": str(meta.get("summary") or ""),
+            "evidence_excerpt": body.strip()[:2_400],
+        },
+        source_data_class,
+        source_sensitivity,
+    )
+
+
+def _current_review_input(
+    root: Path,
+    row: Mapping[str, Any],
+    page_state: Mapping[str, Any],
+    collections: Sequence[Mapping[str, Any]],
+) -> tuple[dict[str, Any], dict[str, str], str, str, str] | None:
+    from chronovisor.recall.collection_anomaly_worker import review_input_sha256
+
+    page = (page_state.get("pages") or {}).get(str(row.get("page_uid") or ""))
+    if not isinstance(page, Mapping):
+        return None
+    document_source = _review_document(root, page)
+    if document_source is None:
+        return None
+    document, source_data_class, source_sensitivity = document_source
+    candidate = _candidate_review_input(row)
+    return (
+        candidate,
+        document,
+        source_data_class,
+        source_sensitivity,
+        review_input_sha256(
+            candidate,
+            document,
+            collections,
+            source_data_class=source_data_class,
+            source_sensitivity=source_sensitivity,
+        ),
+    )
+
+
+def _resolved_review_routes(
+    *,
+    asserted_model: str | None = None,
+    asserted_role: str = "primary",
+) -> tuple[dict[str, dict[str, str]], dict[str, str | None]]:
+    from chronovisor.recall import classification
+    from chronovisor.recall.collection_anomaly_worker import route_identity
+
+    ollama = classification.ollama
+    routes = ollama.runtime_generation_routes(tuple(_ANOMALY_RUNTIME_ROLES.values()))
+    if len(routes) != len(_ANOMALY_RUNTIME_ROLES) or any(
+        not route.structured_output for route in routes
+    ):
+        raise CollectionAuthorityError(
+            "collection review routes require structured output"
+        )
+    by_role = {route.role: route for route in routes}
+    if set(by_role) != set(_ANOMALY_RUNTIME_ROLES.values()):
+        raise CollectionAuthorityError(
+            "collection review runtime routes are incomplete"
+        )
+    identities = {
+        role: route_identity(by_role[runtime_role])
+        for role, runtime_role in _ANOMALY_RUNTIME_ROLES.items()
+    }
+    independent = {
+        (identity["provider"], identity["model"], identity["location"])
+        for identity in identities.values()
+    }
+    if len(independent) != len(identities):
+        raise CollectionAuthorityError("collection review routes are not independent")
+    if asserted_role not in identities:
+        raise CollectionAuthorityError(
+            f"unsupported anomaly review role: {asserted_role}"
+        )
+    if (
+        asserted_model is not None
+        and asserted_model != identities[asserted_role]["model"]
+    ):
+        raise CollectionAuthorityError(
+            "review model assertion does not match the resolved runtime route"
+        )
+    local_ollama_models = [
+        identity["model"]
+        for identity in identities.values()
+        if identity["provider"] == "ollama" and identity["location"] == "local"
+    ]
+    observed = ollama.model_digests(local_ollama_models) if local_ollama_models else {}
+    digests: dict[str, str | None] = {}
+    for role, identity in identities.items():
+        if identity["provider"] == "ollama" and identity["location"] == "local":
+            digest = observed.get(identity["model"], "")
+            if not digest:
+                raise CollectionAuthorityError(
+                    "anomaly reviewer model digest is unavailable"
+                )
+            digests[role] = digest
+        else:
+            digests[role] = None
+    return identities, digests
+
+
+def _run_collection_review_worker(
+    payload: Mapping[str, Any],
+    route_identity: Mapping[str, str],
+    model_digest: str | None,
+) -> tuple[dict[str, Any] | None, str, str]:
+    from chronovisor.recall.collection_anomaly_worker import (
+        PROMPT_SHA256,
+        REVIEW_SCHEMA,
+        WORKER_SCHEMA,
+    )
+
+    page_uid = str((payload.get("candidate") or {}).get("page_uid") or "")
+    timeout_ms = int(payload["read_timeout_ms"])
+    with research_lane(
+        f"collection-review-{page_uid[:10]}-{uuid.uuid4().hex[:8]}",
+        enabled=True,
+        mode="on",
+        purpose="explicit",
+        needs_model=(
+            route_identity["provider"] == "ollama"
+            and route_identity["location"] == "local"
+        ),
+    ) as lease:
+        outcome = run_cancellable_command(
+            [sys.executable, "-m", "chronovisor.librarian.collection_anomaly_worker"],
+            json.dumps(payload, ensure_ascii=False, sort_keys=True),
+            lease,
+            timeout_seconds=max(60.0, timeout_ms / 1_000 + 30),
+        )
+    if outcome.status != "completed" or not isinstance(outcome.value, Mapping):
+        return None, outcome.error or outcome.status, outcome.status
+    worker = dict(outcome.value)
+    binding = _review_binding(
+        route_identity,
+        model_digest,
+        PROMPT_SHA256,
+        str(payload["review_input_sha256"]),
+        str(payload["source_data_class"]),
+        str(payload["source_sensitivity"]),
+    )
+    if not _collection_worker_contract_matches(
+        worker,
+        schema=WORKER_SCHEMA,
+        review_schema=REVIEW_SCHEMA,
+        binding=binding,
+    ):
+        return None, "worker_contract_mismatch", "invalid"
+    return dict(worker["result"]), "", "completed"
+
+
 def review_collection_queue(
     root: Path = CHRONOVISOR_ROOT,
     *,
@@ -1408,63 +1644,57 @@ def review_collection_queue(
     role: str = "primary",
     read_timeout_ms: int = 660_000,
 ) -> dict[str, Any]:
-    """Review queued anomalies locally without assignment mutation."""
+    """Review queued anomalies without assignment mutation."""
 
-    from chronovisor.core import frontmatter, ollama
     from chronovisor.recall.collection_anomaly_worker import (
         PROMPT_SHA256,
         WORKER_SCHEMA,
     )
 
-    contract = load_contract()
     if role not in {"primary", "challenger"}:
         raise CollectionAuthorityError(f"unsupported anomaly review role: {role}")
-    selected_model = model or (
-        str(contract["anomaly_reviewer"]["default_model"])
-        if role == "primary"
-        else DEFAULT_CHALLENGER_MODEL
+    if (
+        not isinstance(read_timeout_ms, int)
+        or isinstance(read_timeout_ms, bool)
+        or read_timeout_ms < 1
+    ):
+        raise CollectionAuthorityError("anomaly reviewer timeout is invalid")
+    load_contract()
+    route_identities, digests = _resolved_review_routes(
+        asserted_model=model,
+        asserted_role=role,
     )
-    digest = ollama.model_digests([selected_model]).get(selected_model, "")
-    if not digest:
-        raise CollectionAuthorityError(
-            f"anomaly reviewer model is unavailable: {selected_model}"
-        )
+    selected_route = route_identities[role]
+    digest = digests[role]
     queue_path = root / "runtime" / "librarian" / "collection-review-queue.json"
     queue = (
         read_sealed_json(queue_path)
         if queue_path.is_file()
         else refresh_review_queue(root)
     )
+    queue_schema = queue.get("schema")
+    if queue_schema not in {
+        None,
+        "chronovisor.collection-review-queue.v1",
+        COLLECTION_QUEUE_SCHEMA,
+    }:
+        raise CollectionAuthorityError("collection review queue schema mismatch")
+    _stale_legacy_open_reviews(queue.get("items") or {}, queue_schema)
+    queue["schema"] = COLLECTION_QUEUE_SCHEMA
     state = CollectionRegistry(root).load()
     page_state = PageRegistry(root).load()
-    collections = [
-        {
-            "slug": str(row.get("slug") or ""),
-            "label": str(row.get("label") or ""),
-        }
-        for row in state["collections"].values()
-        if isinstance(row, Mapping) and row.get("status") == "active"
-    ]
+    collections = sorted(
+        [
+            {
+                "slug": str(row.get("slug") or ""),
+                "label": str(row.get("label") or ""),
+            }
+            for row in state["collections"].values()
+            if isinstance(row, Mapping) and row.get("status") == "active"
+        ],
+        key=lambda row: (row["slug"], row["label"]),
+    )
     reconciled = []
-    if role == "primary":
-        for candidate_id, raw_row in sorted((queue.get("items") or {}).items()):
-            if not isinstance(raw_row, Mapping) or raw_row.get("status") != "queued":
-                continue
-            review = raw_row.get("model_review")
-            if (
-                not isinstance(review, Mapping)
-                or review.get("decision") != "no_issue"
-                or review.get("model") != selected_model
-                or review.get("model_digest") != digest
-                or review.get("prompt_sha256") != PROMPT_SHA256
-            ):
-                continue
-            row = dict(raw_row)
-            row["status"] = "dismissed"
-            row["resolved_at"] = _now()
-            row["resolution"] = "model_no_issue_preserve_original_order"
-            queue["items"][candidate_id] = row
-            reconciled.append(str(candidate_id))
     base_reviewer_calls = int(queue.get("reviewer_calls") or 0)
     _checkpoint_review_queue(
         queue_path,
@@ -1472,110 +1702,121 @@ def review_collection_queue(
         base_reviewer_calls=base_reviewer_calls,
         reviewed_count=0,
     )
-    pending = [
-        (str(candidate_id), dict(row))
-        for candidate_id, row in sorted((queue.get("items") or {}).items())
-        if isinstance(row, Mapping)
-        and (
-            (
-                role == "primary"
-                and row.get("status") in {"queued", "review_recommended"}
-                and not isinstance(row.get("model_review"), Mapping)
-            )
-            or (
-                role == "challenger"
-                and row.get("status") == "review_recommended"
-                and isinstance(row.get("model_review"), Mapping)
-                and not isinstance(row.get("challenger_review"), Mapping)
-            )
-        )
-    ][: max(0, limit)]
-    reviewed = []
+    pending: list[tuple[str, dict[str, Any], dict[str, str], str, str, str]] = []
     deferred = []
-    for candidate_id, candidate in pending:
-        page_uid = str(candidate.get("page_uid") or "")
-        page = (page_state.get("pages") or {}).get(page_uid)
-        if not isinstance(page, Mapping):
-            deferred.append({"candidate_id": candidate_id, "reason": "page_missing"})
+    for candidate_id, raw_row in sorted((queue.get("items") or {}).items()):
+        if not isinstance(raw_row, Mapping) or raw_row.get("status") not in {
+            "queued",
+            "review_recommended",
+        }:
             continue
-        path = root / str(page.get("path") or "")
-        try:
-            text = path.read_text(encoding="utf-8")
-            meta, body = frontmatter.parse(text)
-        except (OSError, UnicodeError) as exc:
+        candidate_id = str(candidate_id)
+        row = dict(raw_row)
+        current_input = _current_review_input(root, row, page_state, collections)
+        if current_input is None:
             deferred.append(
-                {
-                    "candidate_id": candidate_id,
-                    "reason": f"page_unreadable:{type(exc).__name__}",
-                }
+                {"candidate_id": candidate_id, "reason": "page_missing_or_unreadable"}
             )
             continue
+        (
+            candidate_input,
+            document,
+            source_data_class,
+            source_sensitivity,
+            input_sha256,
+        ) = current_input
+        primary_binding = _review_binding(
+            route_identities["primary"],
+            digests["primary"],
+            PROMPT_SHA256,
+            input_sha256,
+            source_data_class,
+            source_sensitivity,
+        )
+        primary_current = "stale_review_reason" not in row and _review_evidence_matches(
+            row.get("model_review"),
+            binding=primary_binding,
+        )
+        if role == "primary" and primary_current:
+            if row["model_review"].get("decision") == "no_issue":
+                row["status"] = "dismissed"
+                row["resolved_at"] = _now()
+                row["resolution"] = "model_no_issue_preserve_original_order"
+                queue["items"][candidate_id] = row
+                reconciled.append(candidate_id)
+            continue
+        if role == "primary" and isinstance(row.get("model_review"), Mapping):
+            row["status"] = "queued"
+            row["stale_review_reason"] = "primary_evidence_not_current"
+            queue["items"][candidate_id] = row
+        if role == "challenger":
+            if (
+                not primary_current
+                or row["model_review"].get("decision") != "review_recommended"
+            ):
+                row["status"] = "queued"
+                row["stale_review_reason"] = "primary_evidence_not_current"
+                queue["items"][candidate_id] = row
+                continue
+            challenger_current = _review_evidence_matches(
+                row.get("challenger_review"),
+                binding=_review_binding(
+                    selected_route,
+                    digest,
+                    PROMPT_SHA256,
+                    input_sha256,
+                    source_data_class,
+                    source_sensitivity,
+                ),
+            )
+            if challenger_current:
+                continue
+        if len(pending) >= max(0, limit):
+            break
+        pending.append((candidate_id, *current_input))
+    reviewed = []
+    for (
+        candidate_id,
+        candidate,
+        document,
+        source_data_class,
+        source_sensitivity,
+        input_sha256,
+    ) in pending:
         payload = {
             "schema": WORKER_SCHEMA,
-            "model": selected_model,
-            "model_digest": digest,
+            "review_role": role,
+            "source_data_class": source_data_class,
+            "source_sensitivity": source_sensitivity,
             "read_timeout_ms": read_timeout_ms,
             "candidate": candidate,
-            "document": {
-                "title": str(meta.get("title") or path.stem),
-                "summary": str(meta.get("summary") or ""),
-                "evidence_excerpt": body.strip()[:2_400],
-            },
+            "document": document,
             "collections": collections,
+            "review_input_sha256": input_sha256,
         }
-        with research_lane(
-            f"collection-review-{page_uid[:10]}-{uuid.uuid4().hex[:8]}",
-            enabled=True,
-            mode="on",
-            purpose="explicit",
-            needs_model=True,
-        ) as lease:
-            outcome = run_cancellable_command(
-                [
-                    sys.executable,
-                    "-m",
-                    "chronovisor.librarian.collection_anomaly_worker",
-                ],
-                json.dumps(payload, ensure_ascii=False, sort_keys=True),
-                lease,
-                timeout_seconds=max(60.0, read_timeout_ms / 1_000 + 30),
-            )
-        if outcome.status != "completed" or not isinstance(outcome.value, Mapping):
-            deferred.append(
-                {
-                    "candidate_id": candidate_id,
-                    "reason": outcome.error or outcome.status,
-                }
-            )
-            if outcome.status in {"deferred", "cancelled"}:
-                # Resource pressure and P0 preemption apply to the whole local
-                # model lane. Stop this batch instead of pointlessly marking
-                # every remaining item with the same transient condition.
+        review, error, worker_status = _run_collection_review_worker(
+            payload,
+            selected_route,
+            digest,
+        )
+        if review is None:
+            deferred.append({"candidate_id": candidate_id, "reason": error})
+            if worker_status in {"deferred", "cancelled"}:
                 break
             continue
-        worker = dict(outcome.value)
-        if not _collection_worker_contract_matches(
-            worker,
-            schema=WORKER_SCHEMA,
-            model=selected_model,
-            model_digest=digest,
-            prompt_sha256=PROMPT_SHA256,
-        ):
-            deferred.append(
-                {
-                    "candidate_id": candidate_id,
-                    "reason": "worker_contract_mismatch",
-                }
-            )
-            continue
-        review = dict(worker["result"])
+        binding = _review_binding(
+            selected_route,
+            digest,
+            PROMPT_SHA256,
+            input_sha256,
+            source_data_class,
+            source_sensitivity,
+        )
         row = _apply_collection_review_result(
             queue["items"][candidate_id],
             review,
             role=role,
-            model=selected_model,
-            model_digest=digest,
-            prompt_sha256=PROMPT_SHA256,
+            binding=binding,
             reviewed_at=_now(),
             resolved_at=_now() if review.get("decision") == "no_issue" else None,
         )
@@ -1601,7 +1842,8 @@ def review_collection_queue(
     return {
         "status": "ok" if not deferred else "partial",
         "role": role,
-        "model": selected_model,
+        "model": selected_route["model"],
+        "route_identity": selected_route,
         "model_digest": digest,
         "reconciled": reconciled,
         "reviewed": reviewed,
@@ -1614,9 +1856,9 @@ def review_collection_queue(
 
 
 def autonomously_finalize_collection_queue(root: Path) -> dict[str, Any]:
-    """Apply local-model consensus and terminal fail-closed non-decisions.
+    """Apply provider-neutral consensus and terminal fail-closed non-decisions.
 
-    A move requires two independently bound local-model reviews to recommend
+    A move requires two independently bound review routes to recommend
     the same active, audited target.  All other completed reviews preserve the
     existing archival order and become terminal queue evidence; unavailable or
     preempted workers remain queued for a later cycle.
@@ -1627,8 +1869,31 @@ def autonomously_finalize_collection_queue(root: Path) -> dict[str, Any]:
         queue = refresh_review_queue(root)
     else:
         queue = read_sealed_json(queue_path)
+    queue_schema = queue.get("schema")
+    if queue_schema not in {
+        None,
+        "chronovisor.collection-review-queue.v1",
+        COLLECTION_QUEUE_SCHEMA,
+    }:
+        raise CollectionAuthorityError("collection review queue schema mismatch")
+    queue["schema"] = COLLECTION_QUEUE_SCHEMA
     state = CollectionRegistry(root).load()
+    page_state = PageRegistry(root).load()
     crosswalk = load_crosswalk(root=root)
+    collections = sorted(
+        [
+            {
+                "slug": str(row.get("slug") or ""),
+                "label": str(row.get("label") or ""),
+            }
+            for row in state["collections"].values()
+            if isinstance(row, Mapping) and row.get("status") == "active"
+        ],
+        key=lambda row: (row["slug"], row["label"]),
+    )
+    from chronovisor.recall.collection_anomaly_worker import PROMPT_SHA256
+
+    route_identities, digests = _resolved_review_routes()
     active_slugs = {
         str(row.get("slug") or "")
         for row in state["collections"].values()
@@ -1656,15 +1921,60 @@ def autonomously_finalize_collection_queue(root: Path) -> dict[str, Any]:
             queue["items"][candidate_id] = row
             terminalized.append(str(candidate_id))
             continue
+        current_input = _current_review_input(root, row, page_state, collections)
+        if current_input is None or queue_schema != COLLECTION_QUEUE_SCHEMA:
+            row["status"] = "queued"
+            row["stale_review_reason"] = "legacy_or_unavailable_review_input"
+            queue["items"][candidate_id] = row
+            continue
+        (
+            _candidate,
+            _document,
+            source_data_class,
+            source_sensitivity,
+            input_sha256,
+        ) = current_input
         primary = row.get("model_review")
         challenger = row.get("challenger_review")
+        primary_binding = _review_binding(
+            route_identities["primary"],
+            digests["primary"],
+            PROMPT_SHA256,
+            input_sha256,
+            source_data_class,
+            source_sensitivity,
+        )
+        primary_current = "stale_review_reason" not in row and _review_evidence_matches(
+            primary,
+            binding=primary_binding,
+        )
+        if not primary_current or not isinstance(primary, Mapping):
+            row["status"] = "queued"
+            row["stale_review_reason"] = "primary_evidence_not_current"
+            queue["items"][candidate_id] = row
+            continue
+        challenger_current = _review_evidence_matches(
+            challenger,
+            binding=_review_binding(
+                route_identities["challenger"],
+                digests["challenger"],
+                PROMPT_SHA256,
+                input_sha256,
+                source_data_class,
+                source_sensitivity,
+            ),
+        )
+        if primary.get("decision") == "review_recommended" and not challenger_current:
+            row["status"] = "review_recommended"
+            row["stale_review_reason"] = "challenger_evidence_not_current"
+            queue["items"][candidate_id] = row
+            continue
+        challenger_row = challenger if isinstance(challenger, Mapping) else {}
         if (
-            isinstance(primary, Mapping)
-            and isinstance(challenger, Mapping)
-            and primary.get("decision") == "review_recommended"
-            and challenger.get("decision") == "review_recommended"
+            primary.get("decision") == "review_recommended"
+            and challenger_row.get("decision") == "review_recommended"
             and primary.get("suggested_collection_slug")
-            == challenger.get("suggested_collection_slug")
+            == challenger_row.get("suggested_collection_slug")
         ):
             target_slug = str(primary.get("suggested_collection_slug") or "")
             target_crosswalk = crosswalk["by_slug"].get(target_slug) or {}
@@ -1679,16 +1989,16 @@ def autonomously_finalize_collection_queue(root: Path) -> dict[str, Any]:
                         "action": "move",
                         "target_collection_slug": target_slug,
                         "rationale": (
-                            "Independent local reviewers agreed on the same "
+                            "Independent review routes agreed on the same "
                             f"audited collection: {target_slug}."
                         ),
                     }
                 )
                 continue
-        review_finished = isinstance(primary, Mapping) and (
-            primary.get("decision") in {"no_issue", "insufficient_evidence"}
-            or isinstance(challenger, Mapping)
-        )
+        review_finished = primary.get("decision") in {
+            "no_issue",
+            "insufficient_evidence",
+        } or (primary.get("decision") == "review_recommended" and challenger_current)
         if review_finished:
             row["status"] = "dismissed"
             row["resolved_at"] = _now()
@@ -1786,6 +2096,26 @@ def adjudicate_collection_review_queue(
         collection_uid: slug for slug, collection_uid in collection_by_slug.items()
     }
     crosswalk = load_crosswalk(root=root)
+    autonomous_routes: dict[str, dict[str, str]] | None = None
+    autonomous_digests: dict[str, str | None] | None = None
+    autonomous_collections: list[dict[str, str]] = []
+    autonomous_prompt_sha256 = ""
+    if manifest.get("decision_authority") == AUTONOMOUS_DECISION_AUTHORITY:
+        from chronovisor.recall.collection_anomaly_worker import PROMPT_SHA256
+
+        autonomous_routes, autonomous_digests = _resolved_review_routes()
+        autonomous_prompt_sha256 = PROMPT_SHA256
+        autonomous_collections = sorted(
+            [
+                {
+                    "slug": str(row.get("slug") or ""),
+                    "label": str(row.get("label") or ""),
+                }
+                for row in state["collections"].values()
+                if isinstance(row, Mapping) and row.get("status") == "active"
+            ],
+            key=lambda row: (row["slug"], row["label"]),
+        )
 
     explicit: dict[str, dict[str, Any]] = {}
     for raw_decision in raw_decisions:
@@ -1857,6 +2187,63 @@ def adjudicate_collection_review_queue(
                 f"candidate collection changed: {candidate_id}"
             )
         row = dict(candidate)
+        if decision["action"] == "move" and autonomous_routes is not None:
+            current_input = _current_review_input(
+                root,
+                row,
+                page_state,
+                autonomous_collections,
+            )
+            if current_input is None or autonomous_digests is None:
+                raise CollectionAuthorityError(
+                    f"autonomous review evidence is unavailable: {candidate_id}"
+                )
+            (
+                _candidate,
+                _document,
+                source_data_class,
+                source_sensitivity,
+                input_sha256,
+            ) = current_input
+            target_slug = str(decision.get("target_collection_slug") or "")
+            primary = row.get("model_review")
+            challenger = row.get("challenger_review")
+            primary_binding = _review_binding(
+                autonomous_routes["primary"],
+                autonomous_digests["primary"],
+                autonomous_prompt_sha256,
+                input_sha256,
+                source_data_class,
+                source_sensitivity,
+            )
+            challenger_binding = _review_binding(
+                autonomous_routes["challenger"],
+                autonomous_digests["challenger"],
+                autonomous_prompt_sha256,
+                input_sha256,
+                source_data_class,
+                source_sensitivity,
+            )
+            if not (
+                "stale_review_reason" not in row
+                and _review_evidence_matches(
+                    primary,
+                    binding=primary_binding,
+                )
+                and _review_evidence_matches(
+                    challenger,
+                    binding=challenger_binding,
+                )
+                and isinstance(primary, Mapping)
+                and isinstance(challenger, Mapping)
+                and primary.get("decision") == "review_recommended"
+                and challenger.get("decision") == "review_recommended"
+                and primary.get("suggested_collection_slug") == target_slug
+                and challenger.get("suggested_collection_slug") == target_slug
+            ):
+                raise CollectionAuthorityError(
+                    f"autonomous review evidence changed: {candidate_id}"
+                )
         row["host_decision"] = {
             "action": decision["action"],
             "rationale": str(decision["rationale"]).strip(),

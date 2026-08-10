@@ -651,7 +651,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--review-collection-queue",
         action="store_true",
-        help="run bounded local-only anomaly review without mutation",
+        help="run bounded provider-routed anomaly review without mutation",
     )
     parser.add_argument(
         "--adjudicate-collection-queue",
@@ -659,7 +659,10 @@ def main(argv: list[str] | None = None) -> int:
         help="apply a host-approved collection review decision manifest",
     )
     parser.add_argument("--collection-decision-manifest", type=Path)
-    parser.add_argument("--review-model")
+    parser.add_argument(
+        "--review-model",
+        help="assert the model resolved for --review-role",
+    )
     parser.add_argument(
         "--review-role",
         choices=("primary", "challenger"),

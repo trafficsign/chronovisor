@@ -505,6 +505,7 @@ def test_repository_example_has_representative_local_role_map() -> None:
         "search.semantic.incremental",
         "search.rerank",
         "librarian.review",
+        "librarian.review.challenger",
         "classification.primary",
         "classification.challenger",
         "classification.tie_break",
@@ -525,3 +526,6 @@ def test_repository_example_has_representative_local_role_map() -> None:
     classification_embedding = config.roles["classification.embedding"]
     assert classification_embedding.provider_id == "local"
     assert classification_embedding.model == "bge-m3"
+    librarian = config.roles["librarian.review"]
+    challenger = config.roles["librarian.review.challenger"]
+    assert librarian.model != challenger.model

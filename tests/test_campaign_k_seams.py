@@ -150,22 +150,41 @@ def test_review_artifact_projection_requires_exact_applied_postimages() -> None:
 
 
 def test_collection_review_projection_preserves_nonmutation_contract() -> None:
+    binding = {
+        "model": "model",
+        "route_identity": {
+            "role": "librarian.review",
+            "provider": "ollama",
+            "model": "model",
+            "location": "local",
+        },
+        "model_digest": "digest",
+        "prompt_sha256": "prompt",
+        "review_input_sha256": "input",
+        "source_data_class": "page",
+        "source_sensitivity": "normal",
+    }
     primary = collection_authority._apply_collection_review_result(
         {"status": "queued"},
         {"decision": "review_recommended", "suggested_collection_slug": "ai"},
         role="primary",
-        model="model",
-        model_digest="digest",
-        prompt_sha256="prompt",
+        binding=binding,
         reviewed_at="2026-07-29T12:00:00+00:00",
     )
     challenger = collection_authority._apply_collection_review_result(
         primary,
         {"decision": "review_recommended", "suggested_collection_slug": "ai"},
         role="challenger",
-        model="challenger",
-        model_digest="challenger-digest",
-        prompt_sha256="prompt",
+        binding={
+            **binding,
+            "model": "challenger",
+            "route_identity": {
+                **binding["route_identity"],
+                "role": "librarian.review.challenger",
+                "model": "challenger",
+            },
+            "model_digest": "challenger-digest",
+        },
         reviewed_at="2026-07-29T12:01:00+00:00",
     )
 
@@ -175,18 +194,15 @@ def test_collection_review_projection_preserves_nonmutation_contract() -> None:
     assert collection_authority._collection_worker_contract_matches(
         {
             "schema": "worker",
-            "model": "model",
-            "model_digest": "digest",
-            "prompt_sha256": "prompt",
+            **binding,
             "model_calls": 1,
             "page_mutations": 0,
             "assignment_mutations": 0,
-            "result": {},
+            "result": {"schema": collection_authority.COLLECTION_REVIEW_SCHEMA},
         },
         schema="worker",
-        model="model",
-        model_digest="digest",
-        prompt_sha256="prompt",
+        review_schema=collection_authority.COLLECTION_REVIEW_SCHEMA,
+        binding=binding,
     )
 
 
@@ -213,7 +229,9 @@ def test_classification_batch_identity_and_cache_projection_are_stable() -> None
         ).encode()
     ).hexdigest()
 
-    assert batch_input["pages"][0]["evidence_card_sha256"] == f"sha256:{expected_digest}"
+    assert (
+        batch_input["pages"][0]["evidence_card_sha256"] == f"sha256:{expected_digest}"
+    )
     assert classification_engine._cached_classification_decisions(
         {"status": "applied", "result": {"decisions": [{"uid": "page-1"}]}}
     ) == [{"uid": "page-1"}]
@@ -231,18 +249,14 @@ def test_selected_orchestrators_stay_below_campaign_k_size_caps() -> None:
         package / "ingest" / "ingest.py": {"run_ingest": 525},
         package / "ingest" / "orchestrator.py": {"run_pending_ingest": 750},
         package / "ingest" / "self_heal.py": {"_handle_packet_unlocked": 780},
-        package / "recall" / "content_correction.py": {
-            "_process_frontier_item": 860
-        },
+        package / "recall" / "content_correction.py": {"_process_frontier_item": 860},
         package / "ingest" / "ingest_review_apply.py": {
             "review_and_apply_ingest_operations": 700
         },
         package / "recall" / "collection_authority.py": {
             "review_collection_queue": 220
         },
-        package / "recall" / "classification_engine.py": {
-            "run_consensus_batches": 150
-        },
+        package / "recall" / "classification_engine.py": {"run_consensus_batches": 150},
     }
 
     for path, limits in targets.items():

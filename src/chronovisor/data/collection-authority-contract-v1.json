@@ -17,9 +17,9 @@
     "udc_and_cvo_are_collection_level_crosswalks_only",
     "crosswalk_is_versioned_many_to_many_and_fully_audited",
     "llm_review_may_create_queue_evidence_but_never_mutate_assignment",
-    "two_independent_local_reviews_may_authorize_one_cas_assignment_move",
+    "two_independent_review_routes_may_authorize_one_cas_assignment_move",
     "no_consensus_preserves_original_order_without_human_wait",
-    "new_collection_crosswalks_use_local_consensus_or_unresolved_fail_closed",
+    "new_collection_crosswalks_use_route_consensus_or_unresolved_fail_closed",
     "split_detection_proposes_only_and_never_auto_splits",
     "sealed_fixture_is_opened_only_after_contract_and_gold_lock"
   ],
@@ -39,18 +39,22 @@
   },
   "anomaly_reviewer": {
     "role": "review_only",
-    "default_model": "gemma4:26b",
+    "runtime_role": "librarian.review",
     "priority": "P3",
-    "frontier_calls": 0,
+    "runtime_bypass_calls": 0,
     "assignment_mutation_capability": false,
     "page_mutation_capability": false
   },
   "consensus_adjudicator": {
     "role": "bounded_assignment_authority",
-    "required_local_models": 2,
+    "required_routes": 2,
+    "runtime_roles": [
+      "librarian.review",
+      "librarian.review.challenger"
+    ],
     "agreement": "same_audited_target",
     "priority": "P3",
-    "frontier_calls": 0,
+    "runtime_bypass_calls": 0,
     "page_mutation_capability": false,
     "fallback": "preserve_original_order_terminal"
   },
