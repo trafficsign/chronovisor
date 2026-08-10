@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import posixpath
+import unicodedata
 from collections import defaultdict
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from pathlib import PurePosixPath
+from pathlib import PurePosixPath, PureWindowsPath
 from typing import Literal
 
 from chronovisor.core.canonical_document import (
@@ -23,6 +24,7 @@ from chronovisor.core.canonical_json import (
 from chronovisor.core.frontmatter import parse as parse_legacy_frontmatter
 from chronovisor.core.link_fix import (
     WIKI_LINK_RE,
+    normalize_link_target,
     position_in_spans,
     protected_spans,
 )
@@ -279,6 +281,16 @@ def prepare_okf_migration(
     )
 
 
+def require_resolved_links(plan: MigrationPlan) -> None:
+    """Reject a prepared plan that would leave prose wikilinks unresolved."""
+
+    if plan.manifest.unresolved_links:
+        details = ", ".join(
+            f"{item.uid}={item.target!r}" for item in plan.manifest.unresolved_links
+        )
+        raise ValueError(f"unresolved wikilinks: {details}")
+
+
 def _parse_source(data: bytes) -> CanonicalDocument:
     try:
         return parse_document(data)
@@ -369,21 +381,26 @@ def _convert_links(
     for match in WIKI_LINK_RE.finditer(text):
         if position_in_spans(match.start(), spans):
             continue
-        target = match.group(1).strip()
+        inside = match.group(1).strip()
+        target = normalize_link_target(inside)
         destination = catalog.get(target)
         if destination is None:
             unresolved.append(UnresolvedLink(source_path, uid, target))
             continue
+        target_part, separator, alias = inside.partition("|")
+        _, anchor_separator, anchor = target_part.partition("#")
+        label = alias.strip() if separator else target_part.strip()
         relative_destination = posixpath.relpath(
             destination, PurePosixPath(source_path).parent.as_posix()
         )
+        relative_destination += f"#{anchor.strip()}" if anchor_separator else ""
         rendered_destination = (
             f"<{relative_destination}>"
             if any(character.isspace() for character in relative_destination)
             else relative_destination
         )
         replacements.append(
-            (match.start(), match.end(), f"[{target}]({rendered_destination})")
+            (match.start(), match.end(), f"[{label}]({rendered_destination})")
         )
     for start, end, replacement in reversed(replacements):
         text = text[:start] + replacement + text[end:]
@@ -397,7 +414,15 @@ def _uid(metadata: Mapping[str, object], relative_path: str) -> str:
 
 def _relative_path(value: str) -> str:
     path = PurePosixPath(value)
-    if not value or path.is_absolute() or ".." in path.parts or path.as_posix() == ".":
+    if (
+        not value
+        or "\\" in value
+        or any(unicodedata.category(character) == "Cc" for character in value)
+        or path.is_absolute()
+        or PureWindowsPath(value).is_absolute()
+        or ".." in path.parts
+        or path.as_posix() == "."
+    ):
         raise ValueError(f"path must be bundle-relative: {value!r}")
     return path.as_posix()
 
