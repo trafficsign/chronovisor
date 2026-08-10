@@ -21,26 +21,24 @@ from chronovisor.ops import dashboard
 
 
 @pytest.fixture(autouse=True)
-def isolate_live_decision_router_resolution(
+def isolate_live_runtime_routes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Keep dashboard unit tests from validating policy against live Ollama."""
+    """Keep dashboard unit tests off the operator's live runtime config."""
 
-    from chronovisor.decision import decision_router
-
-    def use_configured_policy(config: object) -> SimpleNamespace:
-        return SimpleNamespace(
-            config=config,
-            artifact_sha256=None,
-            source="bootstrap",
-            error=None,
-        )
-
-    monkeypatch.setattr(dashboard, "resolve_router_policy", use_configured_policy)
     monkeypatch.setattr(
-        decision_router,
-        "resolve_router_policy",
-        use_configured_policy,
+        dashboard,
+        "runtime_generation_routes",
+        lambda roles: tuple(
+            ollama.RuntimeGenerationRoute(
+                role=role,
+                provider="ollama",
+                model=f"{role}:test",
+                location="local",
+                structured_output=True,
+            )
+            for role in roles
+        ),
     )
 
 
@@ -380,13 +378,8 @@ def test_local_consensus_snapshot_removes_dead_markers_and_exposes_redacted_metr
     monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", chronovisor_root)
     monkeypatch.setattr(
         dashboard,
-        "_resolved_decision_router_config",
-        lambda: SimpleNamespace(
-            primary_model="ornith:test",
-            challenger_model="challenger:test",
-            tie_break_model="tie-break:test",
-            num_ctx=32768,
-        ),
+        "load_decision_router_config",
+        lambda: SimpleNamespace(num_ctx=32768),
     )
     monkeypatch.setattr(
         runtime_status,
@@ -1611,13 +1604,8 @@ def test_build_snapshot_combines_runtime_and_queue(tmp_path: Path, monkeypatch) 
     monkeypatch.setattr(dashboard, "init_chronovisor", lambda: None)
     monkeypatch.setattr(
         dashboard,
-        "_resolved_decision_router_config",
-        lambda: SimpleNamespace(
-            primary_model="ornith:test",
-            challenger_model="challenger:test",
-            tie_break_model="tie-break:test",
-            num_ctx=32768,
-        ),
+        "load_decision_router_config",
+        lambda: SimpleNamespace(num_ctx=32768),
     )
     monkeypatch.setattr(dashboard, "LOG_FILE", chronovisor_root / "log.md")
     monkeypatch.setattr(runtime_status, "RUNTIME_DIR", runtime_dir)
@@ -3335,6 +3323,9 @@ def test_model_status_snapshot_combines_ollama_and_config(monkeypatch) -> None:
         dashboard.RECALL_QUERY_REWRITER_RUNTIME_ROLE: "qwen3.5:4b-mlx",
         dashboard.PROPOSER_RUNTIME_ROLES[0]: "qwen3.6:35b-a3b-mxfp8",
         dashboard.PROPOSER_RUNTIME_ROLES[1]: "gemma4:26b-mxfp8",
+        dashboard.DECISION_RUNTIME_ROLES[0]: "qwen3.6:35b-a3b-mxfp8",
+        dashboard.DECISION_RUNTIME_ROLES[1]: "gpt-oss:20b",
+        dashboard.DECISION_RUNTIME_ROLES[2]: "gemma4:26b-mxfp8",
     }
     monkeypatch.setattr(
         dashboard,
@@ -3357,19 +3348,6 @@ def test_model_status_snapshot_combines_ollama_and_config(monkeypatch) -> None:
             judge_mode="auto",
             rewrite_enabled=True,
         ),
-    )
-    decision_config = SimpleNamespace(
-        primary_model="qwen3.6:35b-a3b-mxfp8",
-        challenger_model="gpt-oss:20b",
-        tie_break_model="gemma4:26b-mxfp8",
-    )
-    monkeypatch.setattr(
-        dashboard, "load_decision_router_config", lambda: decision_config
-    )
-    monkeypatch.setattr(
-        dashboard,
-        "resolve_router_policy",
-        lambda config: SimpleNamespace(config=config),
     )
     monkeypatch.setattr(dashboard, "embedding_model", lambda: "bge-m3")
     monkeypatch.setattr(
@@ -3406,21 +3384,11 @@ def test_model_status_snapshot_combines_ollama_and_config(monkeypatch) -> None:
     assert by_name["qwen3.5:4b-mlx"]["roles"] == ["gate", "rewrite"]
 
 
-def test_configured_model_roles_use_adopted_router_triplet(monkeypatch) -> None:
+def test_configured_model_roles_use_runtime_router_triplet(monkeypatch) -> None:
     monkeypatch.setattr(
         dashboard,
         "load_search_embedding_config",
         lambda: SearchEmbeddingConfig(enabled=False),
-    )
-    bootstrap = SimpleNamespace(
-        primary_model="bootstrap-primary",
-        challenger_model="bootstrap-challenger",
-        tie_break_model="bootstrap-tie",
-    )
-    adopted = SimpleNamespace(
-        primary_model="adopted-primary",
-        challenger_model="adopted-challenger",
-        tie_break_model="adopted-tie",
     )
     monkeypatch.setattr(dashboard, "ingest_model", lambda: "")
     monkeypatch.setattr(
@@ -3432,19 +3400,24 @@ def test_configured_model_roles_use_adopted_router_triplet(monkeypatch) -> None:
         lambda: SimpleNamespace(judge_mode="off", rewrite_enabled=False),
     )
 
-    def unavailable_proposers(roles):
-        assert tuple(roles) == dashboard.PROPOSER_RUNTIME_ROLES
-        raise ollama.RuntimeBridgeError("capability_unavailable")
+    decision_models = ("route-primary", "route-challenger", "route-tie")
 
-    monkeypatch.setattr(
-        dashboard, "runtime_generation_routes", unavailable_proposers
-    )
-    monkeypatch.setattr(dashboard, "load_decision_router_config", lambda: bootstrap)
-    monkeypatch.setattr(
-        dashboard,
-        "resolve_router_policy",
-        lambda _config: SimpleNamespace(config=adopted),
-    )
+    def configured_routes(roles):
+        if tuple(roles) == dashboard.PROPOSER_RUNTIME_ROLES:
+            raise ollama.RuntimeBridgeError("capability_unavailable")
+        assert tuple(roles) == dashboard.DECISION_RUNTIME_ROLES
+        return tuple(
+            ollama.RuntimeGenerationRoute(
+                role=role,
+                provider="ollama",
+                model=model,
+                location="local",
+                structured_output=True,
+            )
+            for role, model in zip(roles, decision_models, strict=True)
+        )
+
+    monkeypatch.setattr(dashboard, "runtime_generation_routes", configured_routes)
     monkeypatch.setattr(dashboard, "embedding_model", lambda: "")
     monkeypatch.setattr(
         dashboard,
@@ -3455,11 +3428,10 @@ def test_configured_model_roles_use_adopted_router_triplet(monkeypatch) -> None:
     roles = dashboard._configured_model_roles()
 
     assert set(roles) == {
-        "adopted-primary",
-        "adopted-challenger",
-        "adopted-tie",
+        "route-primary",
+        "route-challenger",
+        "route-tie",
     }
-    assert not any(name.startswith("bootstrap-") for name in roles)
 
     resolved: list[str] = []
     monkeypatch.setattr(
@@ -3473,7 +3445,11 @@ def test_configured_model_roles_use_adopted_router_triplet(monkeypatch) -> None:
         lambda: SimpleNamespace(
             resolve_embedding=lambda role: (
                 resolved.append(role)
-                or SimpleNamespace(model="route-selected-embedding")
+                or SimpleNamespace(
+                    provider="ollama",
+                    model="route-selected-embedding",
+                    location=SimpleNamespace(value="local"),
+                )
             )
         ),
     )
@@ -3496,11 +3472,17 @@ def test_configured_model_roles_use_adopted_router_triplet(monkeypatch) -> None:
         "load_default_llm_runtime",
         lambda: SimpleNamespace(
             resolve_embedding=lambda _role: SimpleNamespace(
-                model="route-selected-embedding"
+                provider="ollama",
+                model="route-selected-embedding",
+                location=SimpleNamespace(value="local"),
             ),
             resolve_rerank=lambda role: (
                 resolved.append(role)
-                or SimpleNamespace(model="route-selected-reranker")
+                or SimpleNamespace(
+                    provider="ollama",
+                    model="route-selected-reranker",
+                    location=SimpleNamespace(value="local"),
+                )
             ),
         ),
     )
@@ -3512,7 +3494,7 @@ def test_configured_model_roles_use_adopted_router_triplet(monkeypatch) -> None:
     assert "legacy-selector" not in roles
 
 
-def test_dashboard_omits_remote_and_non_ollama_improvement_routes(
+def test_dashboard_omits_remote_and_non_ollama_generation_routes(
     monkeypatch,
 ) -> None:
     monkeypatch.setattr(dashboard, "ingest_model", lambda: "")
@@ -3538,81 +3520,67 @@ def test_dashboard_omits_remote_and_non_ollama_improvement_routes(
             for index, role in enumerate(roles)
         ),
     )
-    monkeypatch.setattr(
-        dashboard,
-        "load_decision_router_config",
-        lambda: (_ for _ in ()).throw(RuntimeError("disabled")),
-    )
     monkeypatch.setattr(dashboard, "embedding_model", lambda: "")
     monkeypatch.setattr(
         dashboard,
         "load_search_embedding_config",
-        lambda: SearchEmbeddingConfig(enabled=False),
+        lambda: SearchEmbeddingConfig(enabled=True),
+    )
+    remote_route = SimpleNamespace(
+        provider="openai",
+        model="hidden-remote",
+        location=SimpleNamespace(value="remote"),
     )
     monkeypatch.setattr(
-        dashboard, "load_reranker_config", lambda: SimpleNamespace(enabled=False)
+        dashboard.llm_config,
+        "load_default_llm_runtime",
+        lambda: SimpleNamespace(
+            resolve_embedding=lambda _role: remote_route,
+            resolve_rerank=lambda _role: remote_route,
+        ),
+    )
+    monkeypatch.setattr(
+        dashboard, "load_reranker_config", lambda: SimpleNamespace(enabled=True)
     )
 
     assert dashboard._configured_model_roles() == {}
 
 
-def test_decision_router_dashboard_resolution_is_cached(monkeypatch) -> None:
-    configured = SimpleNamespace(
-        adoption_artifact="",
-        primary_model="primary",
-        challenger_model="challenger",
-        tie_break_model="tie",
-    )
-    calls = 0
-    monkeypatch.setattr(dashboard, "load_decision_router_config", lambda: configured)
-    monkeypatch.setattr(
-        dashboard,
-        "_DECISION_ROUTER_CACHE",
-        {"key": None, "expires_at": 0.0, "config": None},
-    )
+def test_decision_trace_models_use_ordered_runtime_routes(monkeypatch) -> None:
+    calls: list[tuple[str, ...]] = []
 
-    def resolve(config):
-        nonlocal calls
-        calls += 1
-        return SimpleNamespace(config=config)
+    def routes(roles):
+        calls.append(tuple(roles))
+        return tuple(
+            ollama.RuntimeGenerationRoute(
+                role=role,
+                provider="openai",
+                model=f"remote-{index}",
+                location="remote",
+                structured_output=True,
+                protocol="openai-compatible",
+                endpoint_sha256="e" * 64,
+                revision="2026-08",
+            )
+            for index, role in enumerate(roles)
+        )
 
-    monkeypatch.setattr(dashboard, "resolve_router_policy", resolve)
+    monkeypatch.setattr(dashboard, "runtime_generation_routes", routes)
 
-    assert dashboard._resolved_decision_router_config() is configured
-    assert dashboard._resolved_decision_router_config() is configured
-    assert calls == 1
+    assert dashboard._decision_trace_models() == {
+        "primary": "remote-0",
+        "challenger": "remote-1",
+        "tie_break": "remote-2",
+    }
+    assert calls == [dashboard.DECISION_RUNTIME_ROLES]
 
 
-def test_decision_router_dashboard_cache_ttl_starts_after_resolution(
-    monkeypatch,
-) -> None:
-    configured = SimpleNamespace(
-        adoption_artifact="",
-        primary_model="primary",
-        challenger_model="challenger",
-        tie_break_model="tie",
-    )
-    calls = 0
-    clock = iter((100.0, 120.0, 134.9))
-    monkeypatch.setattr(dashboard, "load_decision_router_config", lambda: configured)
-    monkeypatch.setattr(dashboard.time, "monotonic", lambda: next(clock))
-    monkeypatch.setattr(
-        dashboard,
-        "_DECISION_ROUTER_CACHE",
-        {"key": None, "expires_at": 0.0, "config": None},
-    )
+def test_dashboard_has_no_legacy_decision_selector_path() -> None:
+    source = Path(dashboard.__file__).read_text(encoding="utf-8")
 
-    def resolve(config):
-        nonlocal calls
-        calls += 1
-        return SimpleNamespace(config=config)
-
-    monkeypatch.setattr(dashboard, "resolve_router_policy", resolve)
-
-    assert dashboard._resolved_decision_router_config() is configured
-    assert dashboard._resolved_decision_router_config() is configured
-    assert calls == 1
-    assert dashboard._DECISION_ROUTER_CACHE["expires_at"] == 135.0
+    assert "resolve_router_policy" not in source
+    assert "_resolved_decision_router_config" not in source
+    assert "adoption_artifact" not in source
 
 
 def test_self_heal_snapshot_surfaces_watch_status(tmp_path: Path, monkeypatch) -> None:

@@ -54,7 +54,20 @@ def _inventory(items: list[dict], *, absent: set[str] | None = None):
     )
 
 
-def _bootstrap_adoption_fingerprint() -> dict:
+def _remote_route(role: str, model: str) -> dict:
+    return {
+        "role": f"classification.{role}",
+        "provider": "openai",
+        "model": model,
+        "location": "remote",
+        "protocol": "openai-compatible",
+        "endpoint_sha256": "e" * 64,
+        "revision": "2026-08",
+        "ollama": None,
+    }
+
+
+def _bootstrap_decision_authority() -> dict:
     lanes = {
         name: {
             "kind": "validated_local"
@@ -66,41 +79,22 @@ def _bootstrap_adoption_fingerprint() -> dict:
         }
         for name in convergence_drain.DECISION_POLICY_LANES
     }
-    config = {
-        "primary_model": "primary:test",
-        "challenger_model": "challenger:test",
-        "tie_break_model": "tie:test",
-        "adoption_artifact": "",
-    }
-    audit = {
-        "source": "bootstrap_current_policy",
-        "artifact_sha256": None,
+    router = {
+        "source": "runtime_role_mapping",
         "error": None,
-        "models": ["primary:test", "challenger:test", "tie:test"],
+        "routes": [
+            _remote_route("primary", "primary:test"),
+            _remote_route("challenger", "challenger:test"),
+            _remote_route("tie_break", "tie:test"),
+        ],
     }
     return {
-        "path": None,
-        "status": "not_nominated",
-        "sha256": None,
-        "bytes": 0,
         "decision_policies": {
             "lanes": lanes,
             "sha256": convergence_drain._sha256_value(lanes),
         },
-        "configured_router": config,
-        "configured_router_sha256": convergence_drain._sha256_value(config),
-        "configured_router_error": None,
-        "resolved_router_policy": {
-            "status": "ok",
-            "source": "bootstrap_current_policy",
-            "artifact_path": None,
-            "artifact_sha256": None,
-            "error": None,
-            "config_error": None,
-            "config": config,
-            "config_sha256": convergence_drain._sha256_value(config),
-            "audit": audit,
-        },
+        "router": router,
+        "router_sha256": convergence_drain._sha256_value(router),
     }
 
 
@@ -110,8 +104,8 @@ def isolated_drain(tmp_path, monkeypatch):
     monkeypatch.setattr(convergence_drain, "_runtime_commit", lambda: "abc123")
     monkeypatch.setattr(
         convergence_drain,
-        "_adoption_artifact_fingerprint",
-        _bootstrap_adoption_fingerprint,
+        "_decision_authority_fingerprint",
+        _bootstrap_decision_authority,
     )
     return convergence_drain._frontier_fingerprint()
 
@@ -391,7 +385,7 @@ def test_lane_exception_is_durably_failed_after_postcondition_check(
     assert persisted["last_run"]["subscription_frontier_starts"] == 0
 
 
-def test_adoption_drift_during_lane_is_durably_sealed_after_effect(
+def test_route_drift_during_lane_is_durably_sealed_after_effect(
     tmp_path, monkeypatch, isolated_drain
 ) -> None:
     store = _store(tmp_path)
@@ -401,19 +395,17 @@ def test_adoption_drift_during_lane_is_durably_sealed_after_effect(
         "_build_inventory",
         lambda items: _inventory(list(items)),
     )
-    baseline = _bootstrap_adoption_fingerprint()
+    baseline = _bootstrap_decision_authority()
     live = {"value": baseline}
     monkeypatch.setattr(
         convergence_drain,
-        "_adoption_artifact_fingerprint",
+        "_decision_authority_fingerprint",
         lambda: live["value"],
     )
     started = convergence_drain.start(store=store, run_once=False)
-    changed = _bootstrap_adoption_fingerprint()
-    changed["decision_policies"]["lanes"]["orphan_link"]["mode"] = "off"
-    changed["decision_policies"]["sha256"] = convergence_drain._sha256_value(
-        changed["decision_policies"]["lanes"]
-    )
+    changed = _bootstrap_decision_authority()
+    changed["router"]["routes"][0]["revision"] = "2026-09"
+    changed["router_sha256"] = convergence_drain._sha256_value(changed["router"])
 
     def drift_after_effect(*, store, **_kwargs):
         store.complete_many([str(item["key"])], "applied", result={"effect": True})
@@ -424,12 +416,12 @@ def test_adoption_drift_during_lane_is_durably_sealed_after_effect(
     result = convergence_drain.resume(run_id=started["run_id"], store=store)
 
     assert result["status"] == "failed"
-    assert result["failure_reason"] == "runtime_or_adoption_changed_during_lane"
+    assert result["failure_reason"] == "runtime_or_authority_changed_during_lane"
     assert store.get(str(item["key"]))["status"] == "applied"
     persisted = convergence_drain._read_manifest(started["run_id"])
     assert persisted["status"] == "failed"
     assert (
-        persisted["last_run"]["runtime_adoption_postcondition"]["status"] == "changed"
+        persisted["last_run"]["runtime_authority_postcondition"]["status"] == "changed"
     )
     assert persisted["last_run"]["authority_sealed_effects"] is False
 
@@ -437,7 +429,7 @@ def test_adoption_drift_during_lane_is_durably_sealed_after_effect(
     restored = convergence_drain.status(run_id=started["run_id"], store=store)
 
     assert restored["status"] == "failed"
-    assert restored["failure_reason"] == "runtime_or_adoption_changed_during_lane"
+    assert restored["failure_reason"] == "runtime_or_authority_changed_during_lane"
 
 
 def test_elapsed_budget_is_recomputed_after_authority_lock(
@@ -479,7 +471,7 @@ def test_elapsed_budget_is_recomputed_after_authority_lock(
     assert persisted["last_run"]["elapsed_seconds"] == 2.0
 
 
-def test_runtime_or_adoption_drift_stops_before_claim(
+def test_runtime_or_authority_drift_stops_before_claim(
     tmp_path, monkeypatch, isolated_drain
 ) -> None:
     store = _store(tmp_path)
@@ -510,33 +502,61 @@ def test_policy_mode_only_drift_stops_before_claim(
         lambda items: _inventory(list(items)),
     )
     started = convergence_drain.start(store=store, run_once=False)
-    changed = _bootstrap_adoption_fingerprint()
+    changed = _bootstrap_decision_authority()
     changed["decision_policies"]["lanes"]["orphan_link"]["mode"] = "off"
     changed["decision_policies"]["sha256"] = convergence_drain._sha256_value(
         changed["decision_policies"]["lanes"]
     )
     monkeypatch.setattr(
         convergence_drain,
-        "_adoption_artifact_fingerprint",
+        "_decision_authority_fingerprint",
         lambda: changed,
     )
 
     result = convergence_drain.resume(run_id=started["run_id"], store=store)
 
     assert result["status"] == "failed"
-    assert result["failure_reason"] == "adoption_artifact_changed"
+    assert result["failure_reason"] == "decision_authority_changed"
     assert store.get(str(item["key"]))["local_attempts"] == 0
 
 
-def test_adoption_fingerprint_binds_resolved_policy_mode(monkeypatch) -> None:
-    from chronovisor.core import runtime_config
+def test_route_drift_stops_before_claim(tmp_path, monkeypatch, isolated_drain) -> None:
+    store = _store(tmp_path)
+    item = _add(store, source="one")
+    monkeypatch.setattr(
+        convergence_drain,
+        "_build_inventory",
+        lambda items: _inventory(list(items)),
+    )
+    started = convergence_drain.start(store=store, run_once=False)
+    changed = _bootstrap_decision_authority()
+    changed["router"]["routes"][2]["model"] = "new-tie:test"
+    changed["router_sha256"] = convergence_drain._sha256_value(changed["router"])
+    monkeypatch.setattr(
+        convergence_drain,
+        "_decision_authority_fingerprint",
+        lambda: changed,
+    )
+
+    result = convergence_drain.resume(run_id=started["run_id"], store=store)
+
+    assert result["failure_reason"] == "decision_authority_changed"
+    assert store.get(str(item["key"]))["local_attempts"] == 0
+
+
+def test_decision_authority_fingerprint_binds_policy_mode(monkeypatch) -> None:
     from chronovisor.decision import decision_policy
 
-    monkeypatch.setattr(
-        runtime_config,
-        "load_decision_router_config",
-        runtime_config.DecisionRouterConfig,
-    )
+    class Router:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        def authority_router(self) -> dict:
+            return _bootstrap_decision_authority()["router"]
+
+    from chronovisor.decision import decision_router
+
+    monkeypatch.setattr(decision_router, "DecisionRouter", Router)
     # This test verifies the registered default versus an environment override.
     # Do not let the operator's live Chronovisor config decide the baseline.
     monkeypatch.setattr(decision_policy, "load_toml_file", lambda *_args, **_kwargs: {})
@@ -544,17 +564,39 @@ def test_adoption_fingerprint_binds_resolved_policy_mode(monkeypatch) -> None:
         env_name = "CHRONOVISOR_DECISION_POLICY_" + name.upper()
         monkeypatch.delenv(env_name, raising=False)
 
-    before = convergence_drain._adoption_artifact_fingerprint()
+    before = convergence_drain._decision_authority_fingerprint()
     monkeypatch.setenv("CHRONOVISOR_DECISION_POLICY_ORPHAN_LINK", "enabled")
-    after = convergence_drain._adoption_artifact_fingerprint()
+    after = convergence_drain._decision_authority_fingerprint()
 
-    assert before["resolved_router_policy"]["status"] == "ok"
     assert before["decision_policies"]["lanes"]["orphan_link"]["mode"] == "shadow"
     assert after["decision_policies"]["lanes"]["orphan_link"]["mode"] == "enabled"
     assert after != before
 
 
-def test_start_rejects_unreadable_nominated_adoption_artifact(
+def test_decision_authority_fingerprint_uses_one_safe_router_snapshot(
+    monkeypatch,
+) -> None:
+    from chronovisor.decision import decision_router
+
+    calls: list[dict] = []
+
+    class Router:
+        def __init__(self, **kwargs) -> None:
+            calls.append(kwargs)
+
+        def authority_router(self) -> dict:
+            return _bootstrap_decision_authority()["router"]
+
+    monkeypatch.setattr(decision_router, "DecisionRouter", Router)
+
+    fingerprint = convergence_drain._decision_authority_fingerprint()
+
+    assert calls == [{"record_replay": False}]
+    assert convergence_drain._decision_authority_baseline_error(fingerprint) is None
+    assert "https://secret.example" not in json.dumps(fingerprint)
+
+
+def test_start_rejects_invalid_route_authority(
     tmp_path, monkeypatch, isolated_drain
 ) -> None:
     store = _store(tmp_path)
@@ -564,43 +606,29 @@ def test_start_rejects_unreadable_nominated_adoption_artifact(
         "_build_inventory",
         lambda items: _inventory(list(items)),
     )
-    invalid = _bootstrap_adoption_fingerprint()
-    invalid.update(
-        {
-            "path": str(tmp_path / "missing-adoption.json"),
-            "status": "absent",
-            "bytes": 0,
-        }
-    )
-    invalid["configured_router"] = {
-        **invalid["configured_router"],
-        "adoption_artifact": invalid["path"],
+    invalid = _bootstrap_decision_authority()
+    invalid["router"] = {
+        "source": "runtime_role_mapping",
+        "error": "route_unavailable",
+        "routes": [],
     }
-    invalid["configured_router_sha256"] = convergence_drain._sha256_value(
-        invalid["configured_router"]
-    )
-    invalid["resolved_router_policy"] = {
-        **invalid["resolved_router_policy"],
-        "status": "error",
-        "artifact_path": invalid["path"],
-        "error": "adoption_artifact_invalid:cannot read adoption artifact",
-    }
+    invalid["router_sha256"] = convergence_drain._sha256_value(invalid["router"])
     monkeypatch.setattr(
         convergence_drain,
-        "_adoption_artifact_fingerprint",
+        "_decision_authority_fingerprint",
         lambda: invalid,
     )
 
     with pytest.raises(
         convergence_drain.DrainError,
-        match="nominated_adoption_artifact_unreadable",
+        match="decision_router_authority_unavailable",
     ):
         convergence_drain.start(store=store, run_once=False)
 
     assert not convergence_drain._drain_dir().exists()
 
 
-def test_start_rejects_missing_resolved_router_audit(
+def test_start_rejects_route_authority_digest_mismatch(
     tmp_path, monkeypatch, isolated_drain
 ) -> None:
     store = _store(tmp_path)
@@ -610,20 +638,17 @@ def test_start_rejects_missing_resolved_router_audit(
         "_build_inventory",
         lambda items: _inventory(list(items)),
     )
-    invalid = _bootstrap_adoption_fingerprint()
-    invalid["resolved_router_policy"] = {
-        **invalid["resolved_router_policy"],
-        "audit": None,
-    }
+    invalid = _bootstrap_decision_authority()
+    invalid["router_sha256"] = "0" * 64
     monkeypatch.setattr(
         convergence_drain,
-        "_adoption_artifact_fingerprint",
+        "_decision_authority_fingerprint",
         lambda: invalid,
     )
 
     with pytest.raises(
         convergence_drain.DrainError,
-        match="resolved_router_policy_audit_missing",
+        match="decision_router_authority_digest_mismatch",
     ):
         convergence_drain.start(store=store, run_once=False)
 

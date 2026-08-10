@@ -37,7 +37,6 @@ from chronovisor.core.runtime_config import (
 )
 from chronovisor.core.sealed_artifact_decoder import schema_matches
 from chronovisor.core.store import CHRONOVISOR_ROOT, LOG_FILE, init_chronovisor
-from chronovisor.decision.decision_router import resolve_router_policy
 from chronovisor.ingest import orchestrator
 from chronovisor.ingest.convergence import is_human_required_result
 from chronovisor.ops.cortex import (
@@ -102,10 +101,14 @@ ACTIVE_BATCH_STAGES = {
     "frontier-regenerate",
     "apply",
 }
-DECISION_ROUTER_DASHBOARD_CACHE_SECONDS = 15.0
 AUDITOR_RUNTIME_ROLE = "recall.auditor"
 RECALL_GATE_RUNTIME_ROLE = "recall.gate"
 RECALL_QUERY_REWRITER_RUNTIME_ROLE = "recall.query_rewriter"
+DECISION_RUNTIME_ROLES = (
+    "classification.primary",
+    "classification.challenger",
+    "classification.tie_break",
+)
 # Live runtime status is overlaid at response time; expensive cold aggregates
 # only need this bounded active refresh cadence.
 SNAPSHOT_ACTIVE_CACHE_SECONDS = 30.0
@@ -124,12 +127,6 @@ PROCESSING_ACTIVITY_RECENT_AUDIT_SECONDS = PROCESSING_ACTIVITY_POLL_SECONDS
 _PROCESS_IDENTITY_MATCH = "match"
 _PROCESS_IDENTITY_MISMATCH = "mismatch"
 _PROCESS_IDENTITY_UNAVAILABLE = "unavailable"
-_DECISION_ROUTER_CACHE_LOCK = threading.Lock()
-_DECISION_ROUTER_CACHE: dict[str, Any] = {
-    "key": None,
-    "expires_at": 0.0,
-    "config": None,
-}
 _SNAPSHOT_CACHE_LOCK = threading.Lock()
 _SNAPSHOT_BUILD_LOCK = threading.Lock()
 _SNAPSHOT_CACHE: dict[str, Any] = {
@@ -424,42 +421,13 @@ def _add_model_role(roles: dict[str, set[str]], model: str | None, role: str) ->
     roles.setdefault(model, set()).add(role)
 
 
-def _decision_router_cache_key(config: Any) -> tuple[Any, ...]:
-    nominated = str(getattr(config, "adoption_artifact", "") or "").strip()
-    artifact_identity: tuple[Any, ...] = ()
-    if nominated:
-        path = Path(nominated).expanduser()
-        try:
-            stat = path.stat()
-            artifact_identity = (str(path), stat.st_ino, stat.st_size, stat.st_mtime_ns)
-        except OSError:
-            artifact_identity = (str(path), "missing")
-    return (repr(config), *artifact_identity)
-
-
-def _resolved_decision_router_config() -> Any:
-    """Resolve adopted model roles without revalidating the corpus every poll."""
-
-    configured = load_decision_router_config()
-    key = _decision_router_cache_key(configured)
-    now = time.monotonic()
-    with _DECISION_ROUTER_CACHE_LOCK:
-        if (
-            _DECISION_ROUTER_CACHE.get("key") == key
-            and float(_DECISION_ROUTER_CACHE.get("expires_at") or 0.0) > now
-            and _DECISION_ROUTER_CACHE.get("config") is not None
-        ):
-            return _DECISION_ROUTER_CACHE["config"]
-        resolved = resolve_router_policy(configured).config
-        resolved_at = time.monotonic()
-        _DECISION_ROUTER_CACHE.update(
-            {
-                "key": key,
-                "expires_at": (resolved_at + DECISION_ROUTER_DASHBOARD_CACHE_SECONDS),
-                "config": resolved,
-            }
-        )
-        return resolved
+def _decision_runtime_routes() -> tuple[Any, ...]:
+    routes = runtime_generation_routes(DECISION_RUNTIME_ROLES)
+    if tuple(route.role for route in routes) != DECISION_RUNTIME_ROLES or any(
+        not route.structured_output for route in routes
+    ):
+        raise RuntimeError("decision runtime routes are invalid")
+    return routes
 
 
 def _configured_model_roles() -> dict[str, set[str]]:
@@ -470,7 +438,12 @@ def _configured_model_roles() -> dict[str, set[str]]:
         audit_policy = load_audit_policy()
         if getattr(audit_policy, "enabled", True):
             route = runtime_generation_routes((AUDITOR_RUNTIME_ROLE,))[0]
-            if route.role == AUDITOR_RUNTIME_ROLE and route.structured_output:
+            if (
+                route.role == AUDITOR_RUNTIME_ROLE
+                and route.structured_output
+                and route.provider == "ollama"
+                and route.location == "local"
+            ):
                 _add_model_role(roles, route.model, "audit")
     except Exception:
         pass
@@ -491,7 +464,12 @@ def _configured_model_roles() -> dict[str, set[str]]:
             for (role, label), route in zip(
                 configured_recall_roles, resolved_recall_routes, strict=True
             ):
-                if route.role == role and route.structured_output:
+                if (
+                    route.role == role
+                    and route.structured_output
+                    and route.provider == "ollama"
+                    and route.location == "local"
+                ):
                     _add_model_role(roles, route.model, label)
     except Exception:
         pass
@@ -510,18 +488,14 @@ def _configured_model_roles() -> dict[str, set[str]]:
         pass
 
     try:
-        decision_router = _resolved_decision_router_config()
-        _add_model_role(roles, decision_router.primary_model, "decision-primary")
-        _add_model_role(
-            roles,
-            decision_router.challenger_model,
-            "decision-challenger",
-        )
-        _add_model_role(
-            roles,
-            decision_router.tie_break_model,
-            "decision-tie-break",
-        )
+        decision_routes = _decision_runtime_routes()
+        for label, route in zip(
+            ("decision-primary", "decision-challenger", "decision-tie-break"),
+            decision_routes,
+            strict=True,
+        ):
+            if route.provider == "ollama" and route.location == "local":
+                _add_model_role(roles, route.model, label)
     except Exception:
         pass
 
@@ -536,9 +510,9 @@ def _configured_model_roles() -> dict[str, set[str]]:
                 "search.semantic.foreground",
                 "search.semantic.incremental",
             ):
-                _add_model_role(
-                    roles, runtime.resolve_embedding(role).model, "search-embed"
-                )
+                route = runtime.resolve_embedding(role)
+                if route.provider == "ollama" and route.location.value == "local":
+                    _add_model_role(roles, route.model, "search-embed")
     except Exception:
         pass
 
@@ -548,7 +522,11 @@ def _configured_model_roles() -> dict[str, set[str]]:
             rerank_route = llm_config.load_default_llm_runtime().resolve_rerank(
                 "search.rerank"
             )
-            _add_model_role(roles, rerank_route.model, "rerank")
+            if (
+                rerank_route.provider == "ollama"
+                and rerank_route.location.value == "local"
+            ):
+                _add_model_role(roles, rerank_route.model, "rerank")
     except Exception:
         pass
 
@@ -2769,11 +2747,10 @@ def _decision_trace_role(value: object) -> tuple[str, str, bool]:
 
 def _decision_trace_models() -> dict[str, str]:
     try:
-        config = _resolved_decision_router_config()
+        routes = _decision_runtime_routes()
         return {
-            "primary": str(config.primary_model),
-            "challenger": str(config.challenger_model),
-            "tie_break": str(config.tie_break_model),
+            role: route.model
+            for role, route in zip(_DECISION_TRACE_ROLES, routes, strict=True)
         }
     except Exception:
         return {role: "not configured" for role in _DECISION_TRACE_ROLES}
@@ -2781,7 +2758,7 @@ def _decision_trace_models() -> dict[str, str]:
 
 def _decision_trace_context_tokens() -> int | None:
     try:
-        return int(_resolved_decision_router_config().num_ctx)
+        return int(load_decision_router_config().num_ctx)
     except Exception:
         return None
 

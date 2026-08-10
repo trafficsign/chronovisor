@@ -18,7 +18,7 @@ import uuid
 from collections import Counter, defaultdict
 from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager, suppress
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -39,7 +39,7 @@ from chronovisor.ingest.convergence import (
     stable_item_key,
 )
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 ACTIVE_STATUSES = LOCAL_STATUSES | FRONTIER_STATUSES
 PROCESSOR_LANES = (
     "content_correction",
@@ -97,8 +97,6 @@ class Inventory:
             "derived_items": self.derived_items,
             "non_actionable_keys": sorted(self.non_actionable_keys),
         }
-
-
 
 
 def _iso(value: datetime | None = None) -> str:
@@ -306,7 +304,7 @@ def _decision_policy_fingerprint() -> dict[str, Any]:
                 "kind": None,
                 "schema_name": None,
                 "mode": "off",
-                "error": f"{exc.__class__.__name__}: {exc}",
+                "error": exc.__class__.__name__,
             }
             continue
         lanes[name] = {
@@ -318,95 +316,39 @@ def _decision_policy_fingerprint() -> dict[str, Any]:
     return {"lanes": lanes, "sha256": _sha256_value(lanes)}
 
 
-def _adoption_artifact_fingerprint() -> dict[str, Any]:
-    """Bind config, lane policy, artifact bytes, and live router resolution."""
+def _decision_authority_fingerprint() -> dict[str, Any]:
+    """Bind lane policy and ordered configured runtime-route provenance."""
 
-    from chronovisor.core.runtime_config import load_decision_router_config
-    from chronovisor.decision.decision_router import (
-        config_error,
-        resolve_router_policy,
-    )
+    from chronovisor.decision.decision_router import DecisionRouter
 
     policies = _decision_policy_fingerprint()
     try:
-        configured = load_decision_router_config()
+        router = DecisionRouter(record_replay=False)
+        authority = router.authority_router()
     except Exception as exc:
-        return {
-            "path": None,
-            "status": "error",
-            "sha256": None,
-            "bytes": 0,
-            "decision_policies": policies,
-            "configured_router": None,
-            "configured_router_sha256": None,
-            "resolved_router_policy": {
-                "status": "error",
-                "error": f"{exc.__class__.__name__}: {exc}",
-            },
-        }
-
-    configured_projection = asdict(configured)
-    configured_error = config_error(configured)
-    nominated = configured.adoption_artifact.strip()
-    if nominated:
-        path = Path(nominated).expanduser()
-        artifact = {"path": str(path), **_file_fingerprint(path)}
-    else:
-        artifact = {
-            "path": None,
-            "status": "not_nominated",
-            "sha256": None,
-            "bytes": 0,
-        }
-
-    try:
-        resolution = resolve_router_policy(configured)
-        resolved_projection = asdict(resolution.config)
-        resolved_config_error = config_error(resolution.config)
-        resolved = {
-            "status": (
-                "ok"
-                if resolution.error is None and resolved_config_error is None
-                else "error"
-            ),
-            "source": resolution.source,
-            "artifact_path": resolution.artifact_path,
-            "artifact_sha256": resolution.artifact_sha256,
-            "error": resolution.error,
-            "config_error": resolved_config_error,
-            "config": resolved_projection,
-            "config_sha256": _sha256_value(resolved_projection),
-            "audit": resolution.audit_record(),
-        }
-    except Exception as exc:
-        resolved = {
-            "status": "error",
+        authority = {
             "source": None,
-            "artifact_path": str(Path(nominated).expanduser()) if nominated else None,
-            "artifact_sha256": None,
-            "error": f"{exc.__class__.__name__}: {exc}",
-            "config_error": None,
-            "config": None,
-            "config_sha256": None,
-            "audit": None,
+            "error": f"decision_authority_unavailable:{exc.__class__.__name__}",
+            "routes": [],
         }
     return {
-        **artifact,
         "decision_policies": policies,
-        "configured_router": configured_projection,
-        "configured_router_sha256": _sha256_value(configured_projection),
-        "configured_router_error": configured_error,
-        "resolved_router_policy": resolved,
+        "router": authority,
+        "router_sha256": _sha256_value(authority),
     }
 
 
-def _adoption_baseline_error(value: object) -> str | None:
-    """Reject indeterminate policy or a nominated artifact not truly adopted."""
+def _decision_authority_baseline_error(value: object) -> str | None:
+    """Reject an indeterminate policy or invalid runtime-route provenance."""
 
     if not isinstance(value, Mapping):
-        return "adoption_baseline_missing"
+        return "decision_authority_baseline_missing"
+    if set(value) != {"decision_policies", "router", "router_sha256"}:
+        return "decision_authority_fields_invalid"
     policies = value.get("decision_policies")
-    lanes = policies.get("lanes") if isinstance(policies, Mapping) else None
+    if not isinstance(policies, Mapping):
+        return "decision_policy_snapshot_missing"
+    lanes = policies.get("lanes")
     if not isinstance(lanes, Mapping):
         return "decision_policy_snapshot_missing"
     if policies.get("sha256") != _sha256_value(lanes):
@@ -422,67 +364,19 @@ def _adoption_baseline_error(value: object) -> str | None:
         if not isinstance(row.get("kind"), str) or not row.get("kind"):
             return f"decision_policy_kind_missing:{name}"
 
-    configured = value.get("configured_router")
-    if not isinstance(configured, Mapping):
-        return "configured_router_missing"
-    if value.get("configured_router_sha256") != _sha256_value(configured):
-        return "configured_router_digest_mismatch"
-    path = value.get("path")
-    if path is None:
-        if value.get("status") != "not_nominated":
-            return "adoption_artifact_state_invalid"
-        if value.get("configured_router_error") is not None:
-            return "configured_router_invalid"
-    elif not isinstance(path, str) or not path:
-        return "adoption_artifact_path_invalid"
-    elif value.get("status") != "present" or not isinstance(value.get("sha256"), str):
-        return "nominated_adoption_artifact_unreadable"
-    resolved = value.get("resolved_router_policy")
-    if not isinstance(resolved, Mapping) or resolved.get("status") != "ok":
-        return "resolved_router_policy_invalid"
-    if resolved.get("config_error") is not None:
-        return "resolved_router_policy_config_invalid"
-    audit = resolved.get("audit")
-    if not isinstance(audit, Mapping):
-        return "resolved_router_policy_audit_missing"
-    resolved_config = resolved.get("config")
-    if not isinstance(resolved_config, Mapping) or resolved.get(
-        "config_sha256"
-    ) != _sha256_value(resolved_config):
-        return "resolved_router_policy_config_invalid"
-    if dict(audit) != {
-        "source": resolved.get("source"),
-        "artifact_sha256": resolved.get("artifact_sha256"),
-        "error": resolved.get("error"),
-        "models": [
-            resolved_config.get("primary_model"),
-            resolved_config.get("challenger_model"),
-            resolved_config.get("tie_break_model"),
-        ],
-    }:
-        return "resolved_router_policy_audit_mismatch"
-
-    if path is None:
-        if resolved.get("source") != "bootstrap_current_policy":
-            return "resolved_router_policy_source_invalid"
-        enabled_model_lanes = sorted(
-            name
-            for name, row in lanes.items()
-            if isinstance(row, Mapping)
-            and row.get("kind") in {"consensus", "local_batch"}
-            and row.get("mode") == "enabled"
-        )
-        if enabled_model_lanes:
-            return "adoption_artifact_required:" + ",".join(enabled_model_lanes)
-        return None
+    router = value.get("router")
+    if not isinstance(router, Mapping) or set(router) != {"source", "error", "routes"}:
+        return "decision_router_authority_invalid"
+    if value.get("router_sha256") != _sha256_value(router):
+        return "decision_router_authority_digest_mismatch"
     if (
-        resolved.get("source") != "adopted_artifact"
-        or resolved.get("artifact_path") != path
-        or resolved.get("artifact_sha256") != value.get("sha256")
-        or resolved.get("error") is not None
+        router.get("source") != "runtime_role_mapping"
+        or router.get("error") is not None
     ):
-        return "nominated_adoption_artifact_not_adopted"
-    return None
+        return "decision_router_authority_unavailable"
+    from chronovisor.decision.decision_authority import route_provenance_error
+
+    return route_provenance_error(router.get("routes"))
 
 
 def _runtime_commit() -> str | None:
@@ -493,29 +387,29 @@ def _runtime_commit() -> str | None:
     return str(value) if value else None
 
 
-def _runtime_adoption_observation(manifest: Mapping[str, Any]) -> dict[str, Any]:
+def _runtime_authority_observation(manifest: Mapping[str, Any]) -> dict[str, Any]:
     """Compare live execution authority with the sealed manifest baseline."""
 
     try:
         runtime_commit = _runtime_commit()
-        adoption_artifact = _adoption_artifact_fingerprint()
+        decision_authority = _decision_authority_fingerprint()
     except Exception as exc:
         return {
             "status": "indeterminate",
             "runtime_commit": None,
             "runtime_changed": None,
-            "adoption_sha256": None,
-            "adoption_changed": None,
-            "error": f"{exc.__class__.__name__}: {exc}",
+            "authority_sha256": None,
+            "authority_changed": None,
+            "error": exc.__class__.__name__,
         }
     runtime_changed = runtime_commit != manifest.get("runtime_commit")
-    adoption_changed = adoption_artifact != manifest.get("adoption_artifact")
+    authority_changed = decision_authority != manifest.get("decision_authority")
     return {
-        "status": "changed" if runtime_changed or adoption_changed else "unchanged",
+        "status": "changed" if runtime_changed or authority_changed else "unchanged",
         "runtime_commit": runtime_commit,
         "runtime_changed": runtime_changed,
-        "adoption_sha256": _sha256_value(adoption_artifact),
-        "adoption_changed": adoption_changed,
+        "authority_sha256": _sha256_value(decision_authority),
+        "authority_changed": authority_changed,
         "error": None,
     }
 
@@ -1068,15 +962,17 @@ def plan(*, store: ConvergenceStore | None = None) -> dict[str, Any]:
         item for item in all_active if str(item.get("lane") or "") in SUPPORTED_LANES
     ]
     runtime_before = _runtime_commit()
-    adoption_before = _adoption_artifact_fingerprint()
+    authority_before = _decision_authority_fingerprint()
     frontier_before = _frontier_fingerprint()
     with _read_only_environment():
         inventory = _build_inventory(items)
     runtime_after = _runtime_commit()
-    adoption_after = _adoption_artifact_fingerprint()
+    authority_after = _decision_authority_fingerprint()
     frontier_after = _frontier_fingerprint()
-    if runtime_after != runtime_before or adoption_after != adoption_before:
-        raise DrainError("runtime or adoption changed while building drain inventory")
+    if runtime_after != runtime_before or authority_after != authority_before:
+        raise DrainError(
+            "runtime or decision authority changed while building drain inventory"
+        )
     if frontier_after != frontier_before:
         raise DrainError("frontier activity changed while building drain inventory")
     derived_items: list[dict[str, Any]] = []
@@ -1121,7 +1017,7 @@ def plan(*, store: ConvergenceStore | None = None) -> dict[str, Any]:
         "lanes": dict(sorted(lane_counts.items())),
         "inventory_sha256": _sha256_value(inventory_projection),
         "runtime_commit": runtime_after,
-        "adoption_artifact": adoption_after,
+        "decision_authority": authority_after,
         "frontier_repair": frontier_after,
         "items": planned,
         "derived_items": derived_items,
@@ -1180,19 +1076,21 @@ def _new_manifest(
     ):
         raise DrainError("max_elapsed_seconds must be a finite positive number")
     runtime_commit = _runtime_commit()
-    adoption_artifact = _adoption_artifact_fingerprint()
+    decision_authority = _decision_authority_fingerprint()
     if not runtime_commit or not planned.get("runtime_commit"):
         raise DrainError(
             "targeted convergence drain requires an installed runtime commit identity"
         )
     if runtime_commit != planned.get(
         "runtime_commit"
-    ) or adoption_artifact != planned.get("adoption_artifact"):
-        raise DrainError("runtime or adoption changed before manifest persistence")
-    adoption_error = _adoption_baseline_error(adoption_artifact)
-    if adoption_error is not None:
+    ) or decision_authority != planned.get("decision_authority"):
         raise DrainError(
-            f"targeted convergence drain adoption precondition: {adoption_error}"
+            "runtime or decision authority changed before manifest persistence"
+        )
+    authority_error = _decision_authority_baseline_error(decision_authority)
+    if authority_error is not None:
+        raise DrainError(
+            f"targeted convergence drain authority precondition: {authority_error}"
         )
     planned_frontier = planned.get("frontier_repair")
     frontier_error = _frontier_baseline_error(planned_frontier)
@@ -1210,7 +1108,7 @@ def _new_manifest(
         "created_at": now,
         "updated_at": now,
         "runtime_commit": runtime_commit,
-        "adoption_artifact": adoption_artifact,
+        "decision_authority": decision_authority,
         "frontier_repair_baseline": current_frontier,
         "frontier_repair_postcondition": "unchanged",
         "inventory_sha256": planned["inventory_sha256"],
@@ -1600,16 +1498,16 @@ def _status_payload(
     else:
         try:
             runtime_changed = _runtime_commit() != manifest.get("runtime_commit")
-            adoption_changed = _adoption_artifact_fingerprint() != manifest.get(
-                "adoption_artifact"
+            authority_changed = _decision_authority_fingerprint() != manifest.get(
+                "decision_authority"
             )
         except Exception:
             runtime_changed = True
-            adoption_changed = True
-            failure_reason = "runtime_or_adoption_unreadable"
-        if runtime_changed or adoption_changed:
+            authority_changed = True
+            failure_reason = "runtime_or_authority_unreadable"
+        if runtime_changed or authority_changed:
             run_status = "failed"
-            failure_reason = failure_reason or "runtime_or_adoption_drift"
+            failure_reason = failure_reason or "runtime_or_authority_drift"
         elif run_status in {"failed_frontier_activity", "failed"}:
             pass
         else:
@@ -1673,22 +1571,22 @@ def resume(
             return _status_payload(manifest, state)
         try:
             runtime_commit = _runtime_commit()
-            adoption_artifact = _adoption_artifact_fingerprint()
+            decision_authority = _decision_authority_fingerprint()
         except Exception as exc:
             manifest["status"] = "failed"
-            manifest["failure_reason"] = "runtime_or_adoption_unreadable"
-            manifest["runtime_guard_error"] = f"{exc.__class__.__name__}: {exc}"
+            manifest["failure_reason"] = "runtime_or_authority_unreadable"
+            manifest["runtime_guard_error"] = exc.__class__.__name__
             manifest["updated_at"] = _iso()
             _write_manifest(run_id, manifest)
             return _status_payload(manifest, state)
-        if runtime_commit != manifest.get("runtime_commit") or adoption_artifact != (
-            manifest.get("adoption_artifact")
+        if runtime_commit != manifest.get("runtime_commit") or decision_authority != (
+            manifest.get("decision_authority")
         ):
             manifest["status"] = "failed"
             manifest["failure_reason"] = (
                 "runtime_commit_changed"
                 if runtime_commit != manifest.get("runtime_commit")
-                else "adoption_artifact_changed"
+                else "decision_authority_changed"
             )
             manifest["updated_at"] = _iso()
             _write_manifest(run_id, manifest)
@@ -1850,15 +1748,15 @@ def resume(
         with decision_authority_lock(
             chronovisor_store.CHRONOVISOR_ROOT / "runtime" / "decision-authority.lock"
         ):
-            authority_before_lane = _runtime_adoption_observation(manifest)
+            authority_before_lane = _runtime_authority_observation(manifest)
             try:
                 if authority_before_lane["status"] != "unchanged":
                     lane_result = {
                         "status": "blocked",
-                        "error": "runtime_or_adoption_changed_before_lane",
+                        "error": "runtime_or_authority_changed_before_lane",
                     }
                 else:
-                    # Lock contention and live adoption validation consume the
+                    # Lock contention and live authority validation consume the
                     # same hard elapsed budget. Recompute only after both so a
                     # stale pre-lock allowance cannot start model work late.
                     lane_elapsed_budget = max(
@@ -1885,10 +1783,10 @@ def resume(
                     "error": f"{exc.__class__.__name__}: {exc}",
                 }
             finally:
-                # Cooperative adoption writers share this lock. Direct config
+                # Cooperative authority writers share this lock. Direct config
                 # edits and runtime replacement are still detected and sealed
                 # before the lock is released, even when a lane raises.
-                authority_after_lane = _runtime_adoption_observation(manifest)
+                authority_after_lane = _runtime_authority_observation(manifest)
                 frontier_after = _frontier_fingerprint()
         postcondition = "unchanged" if frontier_after == baseline else "changed"
         attempt = int(manifest.get("attempts") or 0) + 1
@@ -1906,8 +1804,8 @@ def resume(
             "target_active": current_status["target_active"],
             "next_retry_at": current_status["next_retry_at"],
             "frontier_repair_postcondition": postcondition,
-            "runtime_adoption_before_lane": authority_before_lane,
-            "runtime_adoption_postcondition": authority_after_lane,
+            "runtime_authority_before_lane": authority_before_lane,
+            "runtime_authority_postcondition": authority_after_lane,
             "authority_sealed_effects": (
                 authority_before_lane["status"] == "unchanged"
                 and authority_after_lane["status"] == "unchanged"
@@ -1948,9 +1846,9 @@ def resume(
             manifest["failure_reason"] = "frontier_activity_during_lane"
         elif authority_failed:
             manifest["failure_reason"] = (
-                "runtime_or_adoption_changed_before_lane"
+                "runtime_or_authority_changed_before_lane"
                 if authority_before_lane["status"] != "unchanged"
-                else "runtime_or_adoption_changed_during_lane"
+                else "runtime_or_authority_changed_during_lane"
             )
         elif lane_exception is not None:
             manifest["failure_reason"] = "lane_exception"
