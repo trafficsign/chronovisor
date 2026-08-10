@@ -172,6 +172,8 @@ def runtime_structured_chat(
     messages: Sequence[Mapping[str, str]],
     *,
     runtime_role: str,
+    expected_model: str | None = None,
+    expected_location: str | None = None,
     source_data_class: str,
     source_sensitivity: str,
     format: Mapping[str, Any],
@@ -203,7 +205,17 @@ def runtime_structured_chat(
     except ValueError:
         raise RuntimeBridgeError("source_classification_required") from None
     try:
-        result = load_default_llm_runtime().generate(
+        runtime = load_default_llm_runtime()
+        if expected_model is not None or expected_location is not None:
+            route = runtime.resolve_generation(runtime_role)
+            if expected_model is not None and route.model != expected_model:
+                raise RuntimeBridgeError("route_configuration_invalid")
+            if (
+                expected_location is not None
+                and route.location.value != expected_location
+            ):
+                raise RuntimeBridgeError("route_configuration_invalid")
+        result = runtime.generate(
             runtime_role,
             MessageGenerationRequest(
                 messages=tuple(dict(message) for message in messages),
@@ -219,6 +231,8 @@ def runtime_structured_chat(
                 think=think,
             ),
         )
+    except RuntimeBridgeError:
+        raise
     except (LLMConfigError, LLMRuntimeError) as exc:
         raise RuntimeBridgeError(_runtime_bridge_category(exc)) from None
     return ChatResponse(
@@ -453,7 +467,7 @@ def _generate_unlocked(
     *,
     format: dict[str, Any] | str | None = None,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
-    model: str | None = None,
+    model: str,
     num_ctx: int | None = None,
     num_predict: int | None = None,
     keep_alive: str | None = None,
@@ -507,7 +521,7 @@ def generate(
                 system,
                 format=format,
                 progress_callback=progress_callback,
-                model=model,
+                model=selected_model,
                 num_ctx=num_ctx,
                 num_predict=num_predict,
                 keep_alive=keep_alive,

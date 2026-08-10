@@ -540,6 +540,39 @@ def test_generate_forwards_per_request_runtime_overrides(monkeypatch) -> None:
     }
 
 
+@pytest.mark.parametrize("model", [None, "", "   "])
+def test_generate_transport_rejects_missing_model_before_config_or_post(
+    monkeypatch: pytest.MonkeyPatch, model: object
+) -> None:
+    monkeypatch.setattr(
+        ollama,
+        "load_ingest_config",
+        lambda: pytest.fail("missing model must fail before config loading"),
+    )
+    monkeypatch.setattr(
+        ollama,
+        "_client",
+        lambda: pytest.fail("missing model must fail before POST"),
+    )
+
+    with pytest.raises(ValueError, match="model is required"):
+        ollama._generate_unlocked("prompt", model=model)  # type: ignore[arg-type]
+
+
+def test_public_generate_resolves_default_role_model_once(monkeypatch) -> None:
+    selected: list[str] = []
+
+    monkeypatch.setattr(ollama, "ingest_model", lambda: "role-selected:model")
+    monkeypatch.setattr(
+        ollama,
+        "_generate_unlocked",
+        lambda *_args, **kwargs: selected.append(kwargs["model"]) or "ok",
+    )
+
+    assert ollama.generate("prompt") == "ok"
+    assert selected == ["role-selected:model"]
+
+
 def test_generate_publishes_redacted_model_activity(tmp_path, monkeypatch) -> None:
     chronovisor_root = tmp_path / "wiki"
     observed: dict = {}

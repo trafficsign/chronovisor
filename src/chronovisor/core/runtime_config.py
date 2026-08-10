@@ -191,7 +191,6 @@ class RerankerConfig:
 
 @dataclass(frozen=True)
 class IngestConfig:
-    model: str = DEFAULT_INGEST_MODEL
     keep_alive: str = DEFAULT_HEAVY_KEEP_ALIVE
     temperature: float = 0.3
     # Ingest selects the smallest safe 32K/64K/128K/256K bucket from the
@@ -571,7 +570,6 @@ def load_ingest_config(path: Path | str | None = None) -> IngestConfig:
     if not isinstance(section, dict):
         return IngestConfig()
 
-    model = section.get("model")
     keep_alive = section.get("keep_alive")
     max_num_ctx = _positive_int(
         section.get("max_num_ctx"), IngestConfig.max_num_ctx, minimum=2_048
@@ -581,7 +579,6 @@ def load_ingest_config(path: Path | str | None = None) -> IngestConfig:
         num_ctx = max_num_ctx
 
     return IngestConfig(
-        model=model if isinstance(model, str) and model.strip() else IngestConfig.model,
         keep_alive=keep_alive
         if isinstance(keep_alive, str) and keep_alive.strip()
         else IngestConfig.keep_alive,

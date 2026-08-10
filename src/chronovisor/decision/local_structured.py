@@ -534,9 +534,9 @@ def _default_transport_resource_request(
 ) -> _StructuredResourceRequest:
     """Size a standalone live session from its complete repair envelope."""
 
-    # Resolve every configured role for this exact tag.  The same Ornith tag
-    # currently serves both the 32K ingest lane and the 114688 decision lane,
-    # so the shared broker must see the union of their supported contexts.
+    # Resolve every configured role for this exact tag.  The same Ollama tag
+    # may serve both ingest and decision lanes, so the shared broker must see
+    # the union of their supported contexts.
     from chronovisor.core.runtime_config import (
         load_decision_router_config,
         load_ingest_config,
@@ -547,10 +547,22 @@ def _default_transport_resource_request(
     reserve_gib = [_DEFAULT_STRUCTURED_MEMORY_RESERVE_GIB]
     try:
         ingest_config = load_ingest_config()
-        if model == ingest_config.model:
+        ingest_route = ollama.runtime_generation_routes(
+            (ollama.INGEST_GENERATION_RUNTIME_ROLE,)
+        )[0]
+        if (
+            ingest_route.provider == "ollama"
+            and ingest_route.location == "local"
+            and model == ingest_route.model
+        ):
             minimums.append(ingest_config.num_ctx)
             maximums.append(ingest_config.max_num_ctx)
             reserve_gib.append(ingest_config.memory_reserve_gib)
+    except Exception:
+        # Ingest reuse is optional context only. Decision envelopes below must
+        # remain available when its role/config cannot be resolved.
+        pass
+    try:
         decision_config = load_decision_router_config()
         if model in {
             decision_config.primary_model,
@@ -1764,12 +1776,16 @@ def _default_transport(
     request: ChatRequest,
     *,
     runtime_role: str,
+    expected_model: str,
+    expected_location: str,
     source_data_class: str,
     source_sensitivity: str,
 ) -> ollama.ChatResponse:
     return ollama.runtime_structured_chat(
         request.messages,
         runtime_role=runtime_role,
+        expected_model=expected_model,
+        expected_location=expected_location,
         source_data_class=source_data_class,
         source_sensitivity=source_sensitivity,
         format=request.schema,
@@ -1834,10 +1850,10 @@ class LocalStructuredSession:
     def __init__(
         self,
         *,
-        model: str,
+        model: str | None = None,
         transport: ChatTransport | None = None,
         role: str = "structured",
-        runtime_role: str = _DEFAULT_RUNTIME_ROLE,
+        runtime_role: str | None = None,
         runtime_location: str | None = None,
         source_data_class: str = "system",
         source_sensitivity: str = "high",
@@ -1856,15 +1872,21 @@ class LocalStructuredSession:
         resource_memory_reserve_gib: int | None = None,
         resource_lease_timeout_ms: int | None = None,
     ) -> None:
-        if not isinstance(model, str) or not model.strip():
-            raise ValueError("model is required")
+        if model is None:
+            if transport is not None:
+                raise ValueError("injected transport requires an explicit model")
+            if runtime_role is None:
+                raise ValueError("model or runtime_role is required")
+        elif not isinstance(model, str) or not model.strip():
+            raise ValueError("model must be nonblank")
         if not isinstance(role, str) or not SAFE_ACTIVITY_ROLE_RE.fullmatch(role):
             raise ValueError("role must be a safe identifier of at most 128 chars")
-        if (
+        if runtime_role is not None and (
             not isinstance(runtime_role, str)
             or SAFE_RUNTIME_ROLE_RE.fullmatch(runtime_role) is None
         ):
             raise ValueError("runtime_role must be a safe lower-case identifier")
+        selected_runtime_role = runtime_role or _DEFAULT_RUNTIME_ROLE
         if runtime_location not in {None, "local", "remote"}:
             raise ValueError("runtime_location must be local or remote")
         if (
@@ -1922,12 +1944,14 @@ class LocalStructuredSession:
             raise ValueError(
                 "resource_min_num_ctx must not exceed resource_max_num_ctx"
             )
-        self.model = model.strip()
+        self.model = model.strip() if isinstance(model, str) else ""
         self.role = role.strip()
-        self.runtime_role = runtime_role
+        self.runtime_role = selected_runtime_role
+        self._runtime_role_explicit = runtime_role is not None
         self.runtime_location = runtime_location
         self.source_data_class = source_data_class
         self.source_sensitivity = source_sensitivity
+        self._runtime_location = ""
         self._uses_default_transport = transport is None
         self.transport = (
             transport
@@ -1935,6 +1959,8 @@ class LocalStructuredSession:
             else lambda request: _default_transport(
                 request,
                 runtime_role=self.runtime_role,
+                expected_model=self.model,
+                expected_location=self._runtime_location,
                 source_data_class=self.source_data_class,
                 source_sensitivity=self.source_sensitivity,
             )
@@ -1962,7 +1988,7 @@ class LocalStructuredSession:
     ) -> LocalStructuredResult:
         return LocalStructuredResult(
             ok=False,
-            model=self.model,
+            model=self.model or self.runtime_role,
             attempts=tuple(attempts),
             failure_class=failure_class,
             failure_reason=reason,
@@ -2377,10 +2403,39 @@ class LocalStructuredSession:
                 "transport_format_schema": format_schema,
             }
         request_sha256 = structured_request_sha256(prompt, request_schema, system)
+        preflight_failure: LocalStructuredResult | None = None
+        route_failure: LocalStructuredResult | None = None
+        route_provider = ""
+        if not format_schema_error and self._uses_default_transport:
+            preflight_failure, _schema_copy, _messages = self._prepare_initial_request(
+                prompt, schema, system=system
+            )
+            if preflight_failure is None:
+                try:
+                    route = ollama.runtime_generation_routes((self.runtime_role,))[0]
+                except ollama.RuntimeBridgeError as exc:
+                    route_failure = self._failure(exc.category, exc.category)
+                else:
+                    configured_model = self.model
+                    self.model = route.model
+                    self._runtime_location = route.location
+                    route_provider = route.provider
+                    if (
+                        self._runtime_role_explicit
+                        and configured_model
+                        and configured_model != route.model
+                    ) or (
+                        self.runtime_location is not None
+                        and self.runtime_location != route.location
+                    ):
+                        route_failure = self._failure(
+                            "route_configuration_invalid",
+                            "route_configuration_invalid",
+                        )
         with self.audit_store.activity(
             request_sha256=request_sha256,
             role=self.role,
-            model=self.model,
+            model=self.model or self.runtime_role,
         ) as activity_update:
             run_kwargs = {
                 "system": system,
@@ -2390,85 +2445,66 @@ class LocalStructuredSession:
             }
             if format_schema_error:
                 result = self._failure("schema_invalid", format_schema_error)
-            elif not self._uses_default_transport:
+            elif preflight_failure is not None:
+                result = preflight_failure
+            elif route_failure is not None:
+                result = route_failure
+            elif (
+                not self._uses_default_transport
+                or self._runtime_location == "remote"
+                or route_provider != "ollama"
+            ):
                 result = self._run_impl(prompt, schema, **run_kwargs)
+            elif self.resource_managed:
+                if ollama.model_resource_lease_mode() != "exclusive":
+                    result = self._failure(
+                        "capacity_unavailable",
+                        "resource-managed structured session requires "
+                        "an active exclusive model lease",
+                    )
+                else:
+                    result = self._run_impl(prompt, schema, **run_kwargs)
             else:
-                # Keep deterministic request failures side-effect free. This
-                # includes the fixed byte cap: an oversized request must not
-                # load config, plan residency, or evict a resident runner.
-                preflight_failure, _schema_copy, _messages = (
-                    self._prepare_initial_request(prompt, schema, system=system)
-                )
-                if preflight_failure is not None:
-                    result = preflight_failure
+                activity_update("load", 0)
+                try:
+                    resource_request = _default_transport_resource_request(
+                        model=self.model,
+                        configured_num_ctx=self.num_ctx,
+                        prompt=prompt,
+                        schema=schema,
+                        system=system,
+                        num_predict=self.num_predict,
+                        max_output_chars=self.max_output_chars,
+                        max_feedback_chars=self.max_feedback_chars,
+                        min_num_ctx_override=self.resource_min_num_ctx,
+                        max_num_ctx_override=self.resource_max_num_ctx,
+                        memory_reserve_gib_override=(
+                            self.resource_memory_reserve_gib
+                        ),
+                    )
+                except _StructuredResourceError as exc:
+                    result = self._failure(exc.failure_class, str(exc))
                 else:
                     try:
-                        location = self.runtime_location or (
-                            ollama.runtime_generation_location(self.runtime_role)
-                        )
-                    except ollama.RuntimeBridgeError as exc:
-                        result = self._failure(
-                            exc.category,
-                            exc.category,
-                        )
-                    else:
-                        if location == "remote":
-                            result = self._run_impl(prompt, schema, **run_kwargs)
-                        elif self.resource_managed:
-                            if ollama.model_resource_lease_mode() != "exclusive":
-                                result = self._failure(
-                                    "capacity_unavailable",
-                                    "resource-managed structured session requires "
-                                    "an active exclusive model lease",
-                                )
-                            else:
-                                result = self._run_impl(prompt, schema, **run_kwargs)
-                        else:
-                            activity_update("load", 0)
-                            try:
-                                resource_request = _default_transport_resource_request(
-                                    model=self.model,
-                                    configured_num_ctx=self.num_ctx,
-                                    prompt=prompt,
-                                    schema=schema,
-                                    system=system,
-                                    num_predict=self.num_predict,
-                                    max_output_chars=self.max_output_chars,
-                                    max_feedback_chars=self.max_feedback_chars,
-                                    min_num_ctx_override=self.resource_min_num_ctx,
-                                    max_num_ctx_override=self.resource_max_num_ctx,
-                                    memory_reserve_gib_override=(
-                                        self.resource_memory_reserve_gib
-                                    ),
-                                )
-                            except _StructuredResourceError as exc:
-                                result = self._failure(exc.failure_class, str(exc))
-                            else:
-                                try:
-                                    with _default_transport_resource_broker(
-                                        model=self.model,
-                                        request=resource_request,
-                                        lease_timeout_ms=(
-                                            self.resource_lease_timeout_ms
-                                        ),
-                                    ) as admitted_num_ctx:
-                                        result = self._run_impl(
-                                            prompt,
-                                            schema,
-                                            num_ctx=admitted_num_ctx,
-                                            **run_kwargs,
-                                        )
-                                except _StructuredResourceError as exc:
-                                    result = self._failure(
-                                        exc.failure_class,
-                                        str(exc),
-                                    )
+                        with _default_transport_resource_broker(
+                            model=self.model,
+                            request=resource_request,
+                            lease_timeout_ms=self.resource_lease_timeout_ms,
+                        ) as admitted_num_ctx:
+                            result = self._run_impl(
+                                prompt,
+                                schema,
+                                num_ctx=admitted_num_ctx,
+                                **run_kwargs,
+                            )
+                    except _StructuredResourceError as exc:
+                        result = self._failure(exc.failure_class, str(exc))
             activity_update("vote", max(0, len(result.attempts) - 1))
             try:
                 self.audit_store.record_session(
                     request_sha256=request_sha256,
                     role=self.role,
-                    model=self.model,
+                    model=self.model or self.runtime_role,
                     result=result,
                 )
             except Exception:

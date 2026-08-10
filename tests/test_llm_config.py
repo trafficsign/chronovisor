@@ -160,6 +160,26 @@ def test_local_only_config_composes_ollama_and_transformer_reranker() -> None:
     assert resolver.calls == []
 
 
+def test_legacy_ingest_model_cannot_override_generation_role() -> None:
+    config = parse_llm_config(
+        {
+            "ingest": {"model": "stale-selector"},
+            "llm": {
+                "providers": {"local": {"kind": "ollama"}},
+                "roles": {
+                    "ingest.generation": {
+                        "capability": "generation",
+                        "provider": "local",
+                        "model": "route-selected",
+                    }
+                },
+            },
+        }
+    )
+
+    assert config.roles["ingest.generation"].model == "route-selected"
+
+
 def test_local_nemotron_roles_compose_lazy_device_bound_backends() -> None:
     config = parse_llm_config(
         {
@@ -511,6 +531,8 @@ def test_repository_example_has_representative_local_role_map() -> None:
         "recall.certificate_judge.primary",
         "recall.certificate_judge.escalation",
         "ingest.generation",
+        "lint.tag_repair",
+        "recall.content_correction.proposer",
         "classification.primary",
         "classification.challenger",
         "classification.tie_break",
@@ -543,3 +565,8 @@ def test_repository_example_has_representative_local_role_map() -> None:
     ingest_generation = config.roles["ingest.generation"]
     assert ingest_generation.provider_id == "local"
     assert ingest_generation.model == "maxwell1500/ornith-35b:Q5_K_M"
+    assert config.roles["lint.tag_repair"].model == ingest_generation.model
+    assert (
+        config.roles["recall.content_correction.proposer"].model
+        == ingest_generation.model
+    )

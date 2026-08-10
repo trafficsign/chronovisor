@@ -199,26 +199,49 @@ def test_default_transport_routes_remote_without_ollama_control(
     runtime = LLMRuntime(
         generation={
             "review.remote": GenerationRoute(backend, "configured-remote-model")
-        }
+        },
+        remote_egress_opt_ins={("review.remote", SourceDataClass.PAGE)},
     )
     monkeypatch.setattr(llm_config, "load_default_llm_runtime", lambda: runtime)
     _reject_ollama_control(monkeypatch)
 
     result = LocalStructuredSession(
-        model="legacy-local-model",
         runtime_role="review.remote",
         source_data_class="page",
-        source_sensitivity="normal",
+        source_sensitivity="high",
         audit_root=tmp_path / "audit",
     ).run("decide", SCHEMA)
 
     assert result.ok is True
-    assert result.model == "legacy-local-model"
+    assert result.model == "configured-remote-model"
     assert len(backend.requests) == 1
     assert backend.requests[0].source == SourceDataClassification(
         SourceDataClass.PAGE,
-        SourceSensitivity.NORMAL,
+        SourceSensitivity.HIGH,
     )
+
+
+def test_default_transport_routes_non_ollama_local_without_ollama_control(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    backend = _RemoteGenerationBackend()
+    backend.location = RouteLocation.LOCAL
+    runtime = LLMRuntime(
+        generation={"review.local": GenerationRoute(backend, "native-local-model")}
+    )
+    monkeypatch.setattr(llm_config, "load_default_llm_runtime", lambda: runtime)
+    _reject_ollama_control(monkeypatch)
+
+    result = LocalStructuredSession(
+        runtime_role="review.local",
+        source_data_class="page",
+        source_sensitivity="high",
+        audit_root=tmp_path / "audit",
+    ).run("decide", SCHEMA)
+
+    assert result.ok is True
+    assert result.model == "native-local-model"
+    assert len(backend.requests) == 1
 
 
 def test_default_transport_egress_denial_is_safe_and_call_free(
@@ -232,13 +255,57 @@ def test_default_transport_egress_denial_is_safe_and_call_free(
     _reject_ollama_control(monkeypatch)
 
     result = LocalStructuredSession(
-        model="legacy-local-model",
         runtime_role="review.remote",
         audit_root=tmp_path / "audit",
     ).run("decide", SCHEMA)
 
     assert result.ok is False
     assert result.failure_class == "egress_denied"
+    assert backend.requests == []
+
+
+def test_explicit_runtime_location_mismatch_fails_before_backend_or_control(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    backend = _RemoteGenerationBackend()
+    runtime = LLMRuntime(
+        generation={"review.remote": GenerationRoute(backend, "remote-model")}
+    )
+    monkeypatch.setattr(llm_config, "load_default_llm_runtime", lambda: runtime)
+    _reject_ollama_control(monkeypatch)
+
+    result = LocalStructuredSession(
+        model="remote-model",
+        runtime_role="review.remote",
+        runtime_location="local",
+        audit_root=tmp_path / "audit",
+    ).run("decide", SCHEMA)
+
+    assert result.ok is False
+    assert result.failure_class == "route_configuration_invalid"
+    assert backend.requests == []
+
+
+def test_explicit_runtime_role_model_mismatch_fails_before_backend_or_control(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    backend = _RemoteGenerationBackend()
+    runtime = LLMRuntime(
+        generation={"review.remote": GenerationRoute(backend, "remote-model")}
+    )
+    monkeypatch.setattr(llm_config, "load_default_llm_runtime", lambda: runtime)
+    _reject_ollama_control(monkeypatch)
+
+    result = LocalStructuredSession(
+        model="wrong-model",
+        runtime_role="review.remote",
+        source_data_class="page",
+        source_sensitivity="normal",
+        audit_root=tmp_path / "audit",
+    ).run("decide", SCHEMA)
+
+    assert result.ok is False
+    assert result.failure_class == "route_configuration_invalid"
     assert backend.requests == []
 
 
@@ -256,6 +323,19 @@ def test_custom_transport_does_not_load_default_runtime(
 
     assert result.ok is True
     assert len(transport.requests) == 1
+
+
+def test_custom_transport_requires_explicit_synthetic_model() -> None:
+    with pytest.raises(ValueError, match="injected transport requires"):
+        LocalStructuredSession(
+            runtime_role="review.test",
+            transport=QueueTransport('{}'),
+        )
+
+
+def test_runtime_role_type_error_is_normalized_to_value_error() -> None:
+    with pytest.raises(ValueError, match="runtime_role"):
+        LocalStructuredSession(model="local:test", runtime_role=1)  # type: ignore[arg-type]
 
 
 def test_activity_marker_tracks_redacted_structured_phase(tmp_path: Path) -> None:

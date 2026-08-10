@@ -193,7 +193,7 @@ sync_recall = false
     assert search.query_timeout_ms == 300
 
 
-def test_ingest_config_reads_ollama_generation_knobs(
+def test_ingest_config_reads_generation_knobs_but_ignores_legacy_model(
     tmp_path: Path, monkeypatch
 ) -> None:
     config = tmp_path / "config.toml"
@@ -217,7 +217,7 @@ semantic_projection_max_child_bytes = 16384
 
     cfg = runtime_config.load_ingest_config()
 
-    assert cfg.model == "qwen3.6:35b-a3b-mxfp8"
+    assert not hasattr(cfg, "model")
     assert cfg.keep_alive == "10m"
     assert cfg.temperature == 0.1
     assert cfg.num_ctx == 32768

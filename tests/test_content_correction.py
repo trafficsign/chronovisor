@@ -71,6 +71,44 @@ def test_local_proposer_repairs_invalid_json_in_same_session(tmp_path: Path) -> 
     assert "Validator errors" in prompts[1]
 
 
+def test_local_proposer_uses_fixed_runtime_role_and_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    observed: dict[str, object] = {}
+
+    class Session:
+        def __init__(self, **kwargs: object) -> None:
+            observed.update(kwargs)
+
+        def run(self, *_args: object, **_kwargs: object):
+            return type(
+                "Result",
+                (),
+                {
+                    "ok": True,
+                    "value": {
+                        "decision": "ambiguous",
+                        "confidence": 0.5,
+                        "reason": "insufficient evidence",
+                        "proposals": [],
+                    },
+                },
+            )()
+
+    monkeypatch.setattr(content_correction, "LocalStructuredSession", Session)
+
+    content_correction.run_local_proposer(
+        {"correction_text": "それ違う"},
+        [],
+        audit_root=tmp_path / "audit",
+    )
+
+    assert observed["model"] is None
+    assert observed["runtime_role"] == "recall.content_correction.proposer"
+    assert observed["source_data_class"] == "raw"
+    assert observed["source_sensitivity"] == "high"
+
+
 def test_local_proposer_bounds_oversized_event_before_transport(
     tmp_path: Path,
 ) -> None:
@@ -2804,7 +2842,11 @@ def test_refresh_fails_closed_when_target_embedding_was_not_updated(
         index_store, "get_store", lambda: SimpleNamespace(refresh=lambda: None)
     )
     monkeypatch.setattr(search, "get_bm25", lambda: SimpleNamespace(build=lambda: None))
-    monkeypatch.setattr(ollama, "is_available", lambda: True)
+    monkeypatch.setattr(
+        ollama,
+        "is_available",
+        lambda: pytest.fail("embedding refresh owns backend availability"),
+    )
     strict_values: list[bool] = []
 
     def no_embedding(*, page_ids, strict=False):

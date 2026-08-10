@@ -261,7 +261,7 @@ def _generate_unlocked(
     load_ingest_config: Callable[[], IngestConfig],
     format: dict[str, Any] | str | None = None,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
-    model: str | None = None,
+    model: str,
     num_ctx: int | None = None,
     num_predict: int | None = None,
     keep_alive: str | None = None,
@@ -280,10 +280,10 @@ def _generate_unlocked(
     response and periodically emits lightweight progress dictionaries while
     still returning the final response string for existing callers.
     """
+    if not isinstance(model, str) or not model.strip():
+        raise ValueError("generate model is required")
+    selected_model = model.strip()
     config = load_ingest_config()
-    selected_model = (
-        model.strip() if isinstance(model, str) and model.strip() else config.model
-    )
     selected_num_ctx = (
         num_ctx
         if isinstance(num_ctx, int) and not isinstance(num_ctx, bool) and num_ctx > 0

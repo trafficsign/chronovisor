@@ -20,9 +20,8 @@ model = "bge-m3"
 enabled = false
 
 [ingest]
-# Legacy maintenance consumers still read this key. Ingest generation itself
-# is routed only by llm.roles."ingest.generation" below.
-model = "maxwell1500/ornith-35b:Q5_K_M"
+# Numeric generation limits live here; the model is selected only by the
+# fixed llm.roles."ingest.generation" route below.
 
 [decision_router]
 primary_model = "maxwell1500/ornith-35b:Q5_K_M"
@@ -118,6 +117,16 @@ provider = "local"
 model = "maxwell1500/ornith-35b:Q5_K_M"
 
 [llm.roles."ingest.generation"]
+capability = "generation"
+provider = "local"
+model = "maxwell1500/ornith-35b:Q5_K_M"
+
+[llm.roles."lint.tag_repair"]
+capability = "generation"
+provider = "local"
+model = "maxwell1500/ornith-35b:Q5_K_M"
+
+[llm.roles."recall.content_correction.proposer"]
 capability = "generation"
 provider = "local"
 model = "maxwell1500/ornith-35b:Q5_K_M"

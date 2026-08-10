@@ -71,6 +71,7 @@ from chronovisor.ingest.convergence import (
 
 REPAIR_RESOLVER_VERSION = "lint-repair-v1"
 TAG_REPAIR_DECISION_LANE = "lint_tag_repair"
+TAG_REPAIR_RUNTIME_ROLE = "lint.tag_repair"
 REPO_ROOT = runtime_repo_root()
 
 LOCAL_TAG_SYSTEM = """\
@@ -301,9 +302,12 @@ def _default_local_reviewer(
 
     config = load_ingest_config()
     result = LocalStructuredSession(
-        model=config.model,
+        model="injected:lint-tag-repair" if transport is not None else None,
         transport=transport,
         role="lint_tag_repair",
+        runtime_role=TAG_REPAIR_RUNTIME_ROLE,
+        source_data_class="page",
+        source_sensitivity="high",
         audit_root=audit_root,
         num_ctx=config.num_ctx,
         num_predict=min(config.num_predict, 2_048),

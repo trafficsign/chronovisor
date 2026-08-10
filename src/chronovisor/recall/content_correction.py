@@ -149,6 +149,7 @@ CONTENT_CLASSIFICATIONS = ("page_fact_wrong", "outdated")
 ALL_CLASSIFICATIONS = (*CONTENT_CLASSIFICATIONS, *NON_MUTATION_CLASSIFICATIONS)
 CLASSIFICATION_LANE = "content_correction_classification"
 REVIEW_LANE = "content_correction_review"
+CONTENT_CORRECTION_PROPOSER_RUNTIME_ROLE = "recall.content_correction.proposer"
 LOCAL_SEMANTIC_NO_QUORUM = "local_semantic_no_quorum"
 SEMANTIC_HOLD_KIND = "content_correction_semantic_no_quorum"
 
@@ -1203,9 +1204,16 @@ def run_local_proposer(
 
     def run_session(resolved_audit_root: Path | None):
         return LocalStructuredSession(
-            model=config.model,
+            model=(
+                "injected:content-correction-proposer"
+                if transport is not None
+                else None
+            ),
             transport=transport,
             role="content_correction_classification",
+            runtime_role=CONTENT_CORRECTION_PROPOSER_RUNTIME_ROLE,
+            source_data_class="raw",
+            source_sensitivity="high",
             audit_root=resolved_audit_root,
             num_ctx=config.num_ctx,
             num_predict=min(config.num_predict, 3_072),
@@ -2917,15 +2925,8 @@ def _refresh_after_apply(page_ids: list[str]) -> dict[str, Any]:
         result["bm25"] = f"error:{exc.__class__.__name__}"
         result["errors"].append(f"bm25:{exc}")
     try:
-        from chronovisor.core.runtime_config import load_search_embedding_config
         from chronovisor.core.search import update_embeddings
 
-        search_embedding = load_search_embedding_config()
-        if search_embedding.backend == "legacy_ollama":
-            from chronovisor.core.ollama import is_available
-
-            if not is_available():
-                raise RuntimeError("embedding runtime unavailable")
         expected_count = len(set(page_ids))
         updated_count = update_embeddings(page_ids=page_ids, strict=True)
         if updated_count != expected_count:

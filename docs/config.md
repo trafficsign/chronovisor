@@ -66,9 +66,8 @@ document_prefix = ""
 query_prefix = ""
 
 [ingest]
-# Ingest generation routing is fixed by llm.roles."ingest.generation". This
-# legacy model key remains for maintenance consumers outside the ingest flow.
-model = "maxwell1500/ornith-35b:Q5_K_M"
+# Ingest generation routing is fixed by llm.roles."ingest.generation". Legacy
+# `model` values are accepted but ignored and cannot select a runtime route.
 # Select the smallest safe bucket for each complete ingest request. A larger
 # resident runner is reused so a backlog grows monotonically rather than
 # shrinking and reloading between raws.
@@ -84,6 +83,21 @@ max_related_context_bytes = 8192
 # children. 24 KB is the hard safe ceiling for the downstream decision
 # envelope; lower values create more byte-exact children and never truncate.
 semantic_projection_max_child_bytes = 24000
+
+[llm.roles."ingest.generation"]
+capability = "generation"
+provider = "local"
+model = "maxwell1500/ornith-35b:Q5_K_M"
+
+[llm.roles."lint.tag_repair"]
+capability = "generation"
+provider = "local"
+model = "maxwell1500/ornith-35b:Q5_K_M"
+
+[llm.roles."recall.content_correction.proposer"]
+capability = "generation"
+provider = "local"
+model = "maxwell1500/ornith-35b:Q5_K_M"
 
 [decision_router]
 # Routine structured decisions require a two-vote local quorum. The complete

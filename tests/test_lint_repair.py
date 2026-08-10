@@ -155,6 +155,36 @@ def test_default_local_reviewer_repairs_schema_error_in_same_session(
     assert "Validator errors" in requests[1].messages[-1]["content"]
 
 
+def test_default_local_reviewer_uses_fixed_runtime_role_and_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    observed: dict[str, object] = {}
+
+    class Session:
+        def __init__(self, **kwargs: object) -> None:
+            observed.update(kwargs)
+
+        def run(self, *_args: object, **_kwargs: object):
+            return type(
+                "Result",
+                (),
+                {"ok": True, "value": {"decision": "approved", "tags": VALID_TAGS}},
+            )()
+
+    monkeypatch.setattr(lint_repair, "LocalStructuredSession", Session)
+
+    lint_repair._default_local_reviewer(
+        "repair these tags",
+        lint_repair.TAG_REPAIR_SCHEMA,
+        audit_root=tmp_path / "audit",
+    )
+
+    assert observed["model"] is None
+    assert observed["runtime_role"] == "lint.tag_repair"
+    assert observed["source_data_class"] == "page"
+    assert observed["source_sensitivity"] == "high"
+
+
 def test_default_local_reviewer_rejects_oversized_input_before_transport(
     tmp_path: Path,
 ) -> None:
