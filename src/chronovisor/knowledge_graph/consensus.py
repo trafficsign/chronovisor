@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -15,7 +15,6 @@ from chronovisor.core.knowledge_graph_schema import (
     sha256,
 )
 from chronovisor.core.knowledge_graph_store import KnowledgeGraphStore
-from chronovisor.core.runtime_config import load_decision_router_config
 from chronovisor.core.store import CHRONOVISOR_ROOT
 from chronovisor.decision.decision_router import DecisionRouter, DecisionRouterResult
 from chronovisor.decision.graph_decisions import (
@@ -27,32 +26,18 @@ RECEIPT_LEDGER = (
     CHRONOVISOR_ROOT / "runtime" / "typed-graph" / "consensus-receipts.jsonl"
 )
 RouterFactory = Callable[[str], DecisionRouter]
+_CANONICAL_PRODUCER_ROLES = frozenset(("primary", "challenger", "tie_break"))
 
 
 def _router_for_producer(
     producer_role: str, decision_lane: str = "relation_verification"
 ) -> DecisionRouter:
-    config = load_decision_router_config()
-    models = {
-        "primary": config.primary_model,
-        "challenger": config.challenger_model,
-        "tie_break": config.tie_break_model,
-    }
-    independent = [model for role, model in models.items() if role != producer_role]
-    if len(independent) < 2:
-        independent = [config.primary_model, config.challenger_model]
-    selected = replace(
-        config,
-        primary_model=independent[0],
-        challenger_model=independent[1],
-        tie_break_model=independent[2] if len(independent) >= 3 else independent[1],
-        quorum=2,
-        adoption_artifact="",
-    )
     return DecisionRouter(
-        config=selected,
         decision_lane=decision_lane,
         audit_role=f"typed_graph_{decision_lane}",
+        excluded_roles=(
+            (producer_role,) if producer_role in _CANONICAL_PRODUCER_ROLES else ()
+        ),
     )
 
 
@@ -99,7 +84,7 @@ def verify_pending_relations(
     pending = [row for row in graph_store.relations(statuses={"proposed"})][
         : max(0, limit)
     ]
-    verified = held = vetoed = 0
+    verified = held = vetoed = external_model_calls = 0
     for record in pending:
         digest_valid = all(
             _source_digest_valid(root, evidence.page_id, evidence.content_sha256)
@@ -147,14 +132,15 @@ def verify_pending_relations(
         receipt_id = "receipt_" + sha256([record.relation_id, outcome, reason])[:24]
         vote_rows = []
         consensus_votes: list[ConsensusVote] = []
+        record_external_model_calls = 0
         if result is not None:
-            configured = load_decision_router_config()
-            roles_by_model = {
-                configured.primary_model: "primary",
-                configured.challenger_model: "challenger",
-                configured.tie_break_model: "tie_break",
-            }
             for vote in result.votes:
+                route_provenance = getattr(vote, "route_provenance", None)
+                if (
+                    isinstance(route_provenance, Mapping)
+                    and route_provenance.get("location") == "remote"
+                ):
+                    record_external_model_calls += 1
                 value = vote.result.value if isinstance(vote.result.value, dict) else {}
                 raw_decision = str(value.get("decision") or "abstained")
                 decision = (
@@ -164,7 +150,7 @@ def verify_pending_relations(
                     if raw_decision == "rejected"
                     else "abstain"
                 )
-                role = roles_by_model.get(vote.model, vote.role)
+                role = vote.role
                 if role not in {row.role for row in consensus_votes}:
                     consensus_votes.append(
                         ConsensusVote(
@@ -185,6 +171,7 @@ def verify_pending_relations(
                         "valid": vote.result.ok,
                     }
                 )
+        external_model_calls += record_external_model_calls
         receipt = {
             "schema_version": 1,
             "receipt_id": receipt_id,
@@ -194,7 +181,7 @@ def verify_pending_relations(
             "vote_manifest_sha256": sha256(vote_rows),
             "quorum": 2,
             "reason_code": reason[:160],
-            "external_model_calls": 0,
+            "external_model_calls": record_external_model_calls,
         }
         if not dry_run:
             append_jsonl_durable(receipt_file, [receipt], sort_keys=True)
@@ -226,6 +213,6 @@ def verify_pending_relations(
         "verified": verified,
         "held": held,
         "deterministic_veto": vetoed,
-        "external_model_calls": 0,
+        "external_model_calls": external_model_calls,
         "dry_run": dry_run,
     }

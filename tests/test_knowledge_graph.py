@@ -43,6 +43,7 @@ from chronovisor.core.knowledge_graph_schema import (
 from chronovisor.core.knowledge_graph_store import KnowledgeGraphStore
 from chronovisor.knowledge_graph import builder as builder_module
 from chronovisor.knowledge_graph import communities as communities_module
+from chronovisor.knowledge_graph import consensus as consensus_module
 from chronovisor.knowledge_graph.builder import run_builder_cycle
 from chronovisor.knowledge_graph.communities import (
     build_communities,
@@ -157,6 +158,23 @@ def test_consensus_excludes_producer_vote_from_quorum() -> None:
 
     with pytest.raises(ValueError, match="producer-independent quorum"):
         receipt.validate()
+
+
+def test_router_excludes_only_canonical_producer_roles(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    kwargs: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        consensus_module,
+        "DecisionRouter",
+        lambda **values: kwargs.append(values) or SimpleNamespace(),
+    )
+
+    consensus_module._router_for_producer("primary")
+    consensus_module._router_for_producer("deterministic")
+
+    assert kwargs[0]["excluded_roles"] == ("primary",)
+    assert kwargs[1]["excluded_roles"] == ()
 
 
 def test_builder_is_incremental_evidence_bound_and_does_not_call_external_models(
@@ -965,6 +983,101 @@ def test_store_preserves_multiple_evidence_and_trace_breaks_cycles(
     assert set(paths) == {"b"}
 
 
+@pytest.mark.parametrize(
+    ("producer_role", "voter_roles"),
+    [
+        ("primary", ("challenger", "tie_break")),
+        ("tie_break", ("primary", "challenger")),
+    ],
+)
+def test_verified_relation_receipt_uses_producer_independent_vote_roles(
+    tmp_path: Path,
+    producer_role: str,
+    voter_roles: tuple[str, str],
+) -> None:
+    pages = tmp_path / "pages"
+    pages.mkdir()
+    source = pages / "a.md"
+    source.write_text("See [[b]].\n", encoding="utf-8")
+    (pages / "b.md").write_text("Target.\n", encoding="utf-8")
+    evidence = EvidenceRef(
+        page_id="a",
+        content_sha256=sha256(source.read_text(encoding="utf-8")),
+        span_sha256=sha256("[[b]]"),
+        source_line=1,
+    )
+    record = RelationRecord(
+        relation_id=relation_id(
+            source_page_id="a",
+            target_page_id="b",
+            predicate="references",
+            evidence_sha256=sha256([asdict(evidence)]),
+            model_sha256="c" * 64,
+            rubric_sha256="d" * 64,
+        ),
+        source_page_id="a",
+        target_page_id="b",
+        predicate="references",
+        direction="forward",
+        status="proposed",
+        evidence=(evidence,),
+        model_sha256="c" * 64,
+        rubric_sha256="d" * 64,
+        producer_role=producer_role,
+        confidence=0.9,
+    )
+    store = KnowledgeGraphStore(tmp_path / "knowledge-graph")
+    store.append(record, action="propose")
+    approved = {
+        "decision": "approved",
+        "confidence": 0.9,
+        "evidence_supported": True,
+        "contradiction_found": False,
+        "unknown_endpoint": False,
+        "digest_valid": True,
+    }
+    votes = tuple(
+        SimpleNamespace(
+            role=role,
+            model=f"model-for-{role}",
+            signature_sha256=f"signature-{role}",
+            route_provenance={"location": "remote"},
+            result=SimpleNamespace(
+                ok=True,
+                value=approved,
+                failure_class=None,
+            ),
+        )
+        for role in voter_roles
+    )
+    router = SimpleNamespace(
+        decide=lambda *_args, **_kwargs: SimpleNamespace(
+            ok=True,
+            value=approved,
+            agreement_sha256="agreement",
+            failure_class=None,
+            votes=votes,
+        )
+    )
+
+    result = verify_pending_relations(
+        root=tmp_path,
+        store=store,
+        receipt_file=tmp_path / "receipts.jsonl",
+        router_factory=lambda role: router if role == producer_role else None,
+    )
+
+    verified = store.relations()[0]
+    assert result["verified"] == 1
+    assert result["external_model_calls"] == 2
+    receipt_row = json.loads((tmp_path / "receipts.jsonl").read_text(encoding="utf-8"))
+    assert receipt_row["external_model_calls"] == 2
+    assert verified.consensus is not None
+    assert tuple(vote.role for vote in verified.consensus.votes) == voter_roles
+    assert producer_role not in {vote.role for vote in verified.consensus.votes}
+    verified.consensus.validate()
+
+
 def test_no_quorum_and_unknown_endpoint_are_held(tmp_path: Path) -> None:
     pages = tmp_path / "pages"
     pages.mkdir()
@@ -1016,6 +1129,7 @@ def test_no_quorum_and_unknown_endpoint_are_held(tmp_path: Path) -> None:
     )
 
     assert result["held"] == 1
+    assert result["external_model_calls"] == 0
     assert store.relations()[0].status == "held"
     assert store.relations()[0].reason_code == "no_quorum"
 

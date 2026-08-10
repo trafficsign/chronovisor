@@ -9,7 +9,7 @@ import json
 import re
 import time
 from collections import Counter
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from functools import lru_cache
 from pathlib import Path
@@ -1514,9 +1514,19 @@ class DecisionRouter:
         decision_lane: str | None = None,
         artifact_replay: bool | None = None,
         decision_artifact_root: Path | None = None,
+        excluded_roles: Iterable[str] = (),
     ) -> None:
         if not isinstance(audit_role, str) or not AUDIT_ROLE_RE.fullmatch(audit_role):
             raise ValueError("audit_role must be a safe identifier of at most 80 chars")
+        try:
+            self.excluded_roles = frozenset(excluded_roles)
+        except TypeError as exc:
+            raise ValueError("excluded_roles must contain canonical route roles") from exc
+        if len(self.excluded_roles) > 1 or not self.excluded_roles.issubset(_ROLE_NAMES):
+            raise ValueError("excluded_roles must contain at most one canonical route role")
+        self._active_roles = tuple(
+            role for role in _ROLE_NAMES if role not in self.excluded_roles
+        )
         baseline_config = config or load_decision_router_config()
         route_error: str | None = None
         if transport is None:
@@ -1628,21 +1638,28 @@ class DecisionRouter:
         self._model_metadata_provider = model_metadata_provider
         self._route_provenance_snapshot: dict[str, dict[str, Any]] | None = None
         self._all_local_roles = frozenset(
-            role for role, route in self.routes.items() if route.location == "local"
+            role
+            for role, route in self.routes.items()
+            if role in self._active_roles and route.location == "local"
         )
         self._local_roles = frozenset(
             role
             for role, route in self.routes.items()
-            if route.provider == "ollama" and route.location == "local"
+            if role in self._active_roles
+            and route.provider == "ollama"
+            and route.location == "local"
         )
         self._local_models = tuple(
             dict.fromkeys(
                 self.routes[role].model
-                for role in _ROLE_NAMES
+                for role in self._active_roles
                 if role in self._local_roles
             )
         )
-        self._defer_local_control_until_tie = self._local_roles == {"tie_break"}
+        self._defer_local_control_until_tie = bool(
+            len(self._active_roles) == 3
+            and self._local_roles == {self._active_roles[2]}
+        )
         self.record_replay = self.record_replay and len(self._all_local_roles) == 3
         self.live_resource_control = bool(
             self.config.adaptive_residency
@@ -1667,7 +1684,7 @@ class DecisionRouter:
             artifact_replay
             if artifact_replay is not None
             else transport is None and require_adopted
-        )
+        ) and not self.excluded_roles
         if decision_artifact_root is None:
             from chronovisor.core import store
 
@@ -3546,14 +3563,12 @@ class DecisionRouter:
         )
 
     def _required_pair_fits(self, plan: ollama.ModelResidencyPlan) -> bool:
-        if {"primary", "challenger"} & self._local_roles and plan.max_resident_models < 1:
+        pair_roles = self._active_roles[:2]
+        if set(pair_roles) & self._local_roles and plan.max_resident_models < 1:
             return False
         return all(
-            self._model_fits(role, model, plan)
-            for role, model in (
-                ("primary", self.config.primary_model),
-                ("challenger", self.config.challenger_model),
-            )
+            self._model_fits(role, self.routes[role].model, plan)
+            for role in pair_roles
         )
 
     def _request_plan(
@@ -3880,28 +3895,21 @@ class DecisionRouter:
 
         resident = set(residency_plan.resident_models)
         initial_eviction_set = set(residency_plan.initial_eviction_models)
+        active_models = tuple(
+            self.routes[role].model for role in self._active_roles
+        )
         if residency_plan.max_resident_models == 1:
             initial_eviction_set.update(
-                model
-                for model in (
-                    self.config.challenger_model,
-                    self.config.tie_break_model,
-                )
-                if model in resident
+                model for model in active_models[1:] if model in resident
             )
         elif (
-            residency_plan.max_resident_models == 2
-            and self.config.tie_break_model in resident
+            len(active_models) == 3
+            and residency_plan.max_resident_models == 2
+            and active_models[2] in resident
         ):
-            initial_eviction_set.add(self.config.tie_break_model)
+            initial_eviction_set.add(active_models[2])
         initial_evictions = [
-            model
-            for model in (
-                self.config.primary_model,
-                self.config.challenger_model,
-                self.config.tie_break_model,
-            )
-            if model in initial_eviction_set
+            model for model in active_models if model in initial_eviction_set
         ]
         for model in initial_evictions:
             if not self._evict_model(model, eviction_events):
@@ -3915,88 +3923,71 @@ class DecisionRouter:
 
         key = agreement_key if agreement_key is not None else self.agreement_key
         votes: list[DecisionVote] = []
-        if not self._model_fits("primary", self.config.primary_model, residency_plan):
-            return finalize(
-                self._quarantined(
-                    votes,
-                    "primary_runner_no_longer_fits_reserved_memory",
-                    failure_class="local_resource_quarantined",
+        keep_alives = {
+            "primary": self.config.primary_keep_alive,
+            "challenger": self.config.challenger_keep_alive,
+            "tie_break": self.config.tie_break_keep_alive,
+        }
+        pair_roles = self._active_roles[:2]
+        for role in pair_roles:
+            model = self.routes[role].model
+            if not self._model_fits(role, model, residency_plan):
+                return finalize(
+                    self._quarantined(
+                        votes,
+                        f"{role}_runner_no_longer_fits_reserved_memory",
+                        failure_class="local_resource_quarantined",
+                    )
+                )
+            votes.append(
+                self._observe_vote(
+                    self._vote(
+                        role=role,
+                        model=model,
+                        keep_alive=keep_alives[role],
+                        num_ctx=residency_plan.context_for(model),
+                        prompt=prompt,
+                        schema=schema,
+                        system=effective_system,
+                        agreement_key=key,
+                        decision_lane=decision_lane,
+                        ingest_repair_contract=ingest_repair_contract,
+                        source=source,
+                    )
                 )
             )
-        votes.append(
-            self._observe_vote(
-                self._vote(
-                    role="primary",
-                    model=self.config.primary_model,
-                    keep_alive=self.config.primary_keep_alive,
-                    num_ctx=residency_plan.context_for(self.config.primary_model),
-                    prompt=prompt,
-                    schema=schema,
-                    system=effective_system,
-                    agreement_key=key,
-                    decision_lane=decision_lane,
-                    ingest_repair_contract=ingest_repair_contract,
-                    source=source,
+            if (route_failure := self._authoritative_route_failure(votes)) is not None:
+                return finalize(route_failure)
+            if residency_plan.max_resident_models == 1 and not self._evict_model(
+                model, eviction_events
+            ):
+                return finalize(
+                    self._quarantined(
+                        votes,
+                        f"unable_to_verify_{role}_runner_eviction",
+                        failure_class="local_resource_quarantined",
+                    )
                 )
-            )
-        )
-        if (route_failure := self._authoritative_route_failure(votes)) is not None:
-            return finalize(route_failure)
-        if residency_plan.max_resident_models == 1 and not self._evict_model(
-            self.config.primary_model, eviction_events
-        ):
-            return finalize(
-                self._quarantined(
-                    votes,
-                    "unable_to_verify_primary_runner_eviction",
-                    failure_class="local_resource_quarantined",
-                )
-            )
-        if not self._model_fits(
-            "challenger", self.config.challenger_model, residency_plan
-        ):
-            return finalize(
-                self._quarantined(
-                    votes,
-                    "challenger_runner_no_longer_fits_reserved_memory",
-                    failure_class="local_resource_quarantined",
-                )
-            )
-        votes.append(
-            self._observe_vote(
-                self._vote(
-                    role="challenger",
-                    model=self.config.challenger_model,
-                    keep_alive=self.config.challenger_keep_alive,
-                    num_ctx=residency_plan.context_for(self.config.challenger_model),
-                    prompt=prompt,
-                    schema=schema,
-                    system=effective_system,
-                    agreement_key=key,
-                    decision_lane=decision_lane,
-                    ingest_repair_contract=ingest_repair_contract,
-                    source=source,
-                )
-            )
-        )
-        if (route_failure := self._authoritative_route_failure(votes)) is not None:
-            return finalize(route_failure)
-        if residency_plan.max_resident_models == 1 and not self._evict_model(
-            self.config.challenger_model, eviction_events
-        ):
-            return finalize(
-                self._quarantined(
-                    votes,
-                    "unable_to_verify_challenger_runner_eviction",
-                    failure_class="local_resource_quarantined",
-                )
-            )
 
         winner = self._winner(votes)
         if winner is not None:
             return finalize(self._agreed(votes, winner, schema))
         if not any(vote.valid for vote in votes):
-            return finalize(self._quarantined(votes, "primary_and_challenger_invalid"))
+            reason = (
+                "primary_and_challenger_invalid"
+                if pair_roles == ("primary", "challenger")
+                else "required_pair_invalid"
+            )
+            return finalize(self._quarantined(votes, reason))
+        if len(self._active_roles) == 2:
+            return finalize(
+                self._resolve_tie_break_votes(
+                    votes,
+                    schema,
+                    prompt=prompt,
+                    decision_lane=decision_lane,
+                )
+            )
 
         control = contextlib.nullcontext()
         if self._defer_local_control_until_tie:
@@ -4004,27 +3995,24 @@ class DecisionRouter:
         with control:
             if self._defer_local_control_until_tie:
                 residency_plan = self._residency_plan(selected_num_ctx)
-            if not self._model_fits(
-                "tie_break", self.config.tie_break_model, residency_plan
-            ):
+            tie_role = self._active_roles[2]
+            tie_model = self.routes[tie_role].model
+            if not self._model_fits(tie_role, tie_model, residency_plan):
                 return finalize(
                     self._quarantined(
                         votes,
-                        "tie_break_runner_no_longer_fits_reserved_memory",
+                        f"{tie_role}_runner_no_longer_fits_reserved_memory",
                         failure_class="local_resource_quarantined",
                     )
                 )
             if (
                 self.live_resource_control
-                and "tie_break" in self._local_roles
+                and tie_role in self._local_roles
                 and residency_plan.max_resident_models == 2
             ):
                 pair_models = tuple(
-                    model
-                    for role, model in (
-                        ("primary", self.config.primary_model),
-                        ("challenger", self.config.challenger_model),
-                    )
+                    self.routes[role].model
+                    for role in pair_roles
                     if role in self._local_roles
                 )
                 keep = (
@@ -4033,15 +4021,15 @@ class DecisionRouter:
                     else None
                 )
                 evict = [model for model in pair_models if model != keep]
-                tie_pair_bytes = residency_plan.estimate(
-                    self.config.tie_break_model
-                ) + (residency_plan.estimate(keep) if keep is not None else 0)
+                tie_pair_bytes = residency_plan.estimate(tie_model) + (
+                    residency_plan.estimate(keep) if keep is not None else 0
+                )
                 tie_upshift_margin = max(
                     ollama.RESIDENCY_UPSHIFT_MIN_HEADROOM_BYTES,
                     int(tie_pair_bytes * ollama.RESIDENCY_UPSHIFT_HEADROOM_RATIO),
                 )
                 if (
-                    self.config.tie_break_model not in residency_plan.calibrated_models
+                    tie_model not in residency_plan.calibrated_models
                     or tie_pair_bytes + tie_upshift_margin
                     > residency_plan.capacity_bytes
                 ):
@@ -4058,12 +4046,10 @@ class DecisionRouter:
             votes.append(
                 self._observe_vote(
                     self._vote(
-                        role="tie_break",
-                        model=self.config.tie_break_model,
-                        keep_alive=self.config.tie_break_keep_alive,
-                        num_ctx=residency_plan.context_for(
-                            self.config.tie_break_model
-                        ),
+                        role=tie_role,
+                        model=tie_model,
+                        keep_alive=keep_alives[tie_role],
+                        num_ctx=residency_plan.context_for(tie_model),
                         prompt=prompt,
                         schema=schema,
                         system=effective_system,
@@ -4077,12 +4063,12 @@ class DecisionRouter:
             if (route_failure := self._authoritative_route_failure(votes)) is not None:
                 return finalize(route_failure)
             if residency_plan.max_resident_models == 1 and not self._evict_model(
-                self.config.tie_break_model, eviction_events
+                tie_model, eviction_events
             ):
                 return finalize(
                     self._quarantined(
                         votes,
-                        "unable_to_verify_tie_break_runner_eviction",
+                        f"unable_to_verify_{tie_role}_runner_eviction",
                         failure_class="local_resource_quarantined",
                     )
                 )

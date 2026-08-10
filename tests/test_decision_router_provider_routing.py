@@ -7,6 +7,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from typing import Any
 
+import pytest
+
 from chronovisor.core import llm_config, ollama
 from chronovisor.core.llm_runtime import (
     BackendCapabilities,
@@ -220,6 +222,102 @@ def test_remote_only_uses_exact_routes_without_ollama_and_audits_identity(
     assert all(route["protocol"] == "test-protocol" for route in route_identity["routes"])
     assert all(route["endpoint_sha256"] == "e" * 64 for route in route_identity["routes"])
     assert all(route["ollama"] is None for route in route_identity["routes"])
+
+
+@pytest.mark.parametrize(
+    ("excluded_role", "expected_roles"),
+    [
+        ("primary", ("challenger", "tie_break")),
+        ("tie_break", ("primary", "challenger")),
+    ],
+)
+def test_excluded_route_is_not_called_and_original_roles_reach_quorum(
+    monkeypatch: Any,
+    excluded_role: str,
+    expected_roles: tuple[str, str],
+) -> None:
+    runtime, backends = _runtime(
+        {
+            f"classification.{role}": (
+                f"remote-{role}",
+                f"model-{role}",
+                RouteLocation.REMOTE,
+                [_payload("apply")],
+            )
+            for role in ("primary", "challenger", "tie_break")
+        }
+    )
+    _install_runtime(monkeypatch, runtime)
+    _forbid_ollama(monkeypatch)
+
+    router = DecisionRouter(
+        config=_config(),
+        excluded_roles=(excluded_role,),
+        artifact_replay=True,
+    )
+    result = router.decide("prompt", SCHEMA, source=NORMAL_PAGE)
+
+    assert result.ok is True
+    assert router.artifact_replay is False
+    assert tuple(vote.role for vote in result.votes) == expected_roles
+    assert tuple(vote.model for vote in result.votes) == tuple(
+        f"model-{role}" for role in expected_roles
+    )
+    assert tuple(vote.route_provenance["role"] for vote in result.votes) == tuple(
+        f"classification.{role}" for role in expected_roles
+    )
+    assert {
+        role: len(backend.calls) for role, backend in backends.items()
+    } == {
+        f"classification.{role}": int(role in expected_roles)
+        for role in ("primary", "challenger", "tie_break")
+    }
+
+
+@pytest.mark.parametrize(
+    "excluded_roles",
+    [("primary", "challenger"), ("unknown",), "primary"],
+)
+def test_excluded_roles_are_narrowly_validated(excluded_roles: Any) -> None:
+    with pytest.raises(ValueError, match="excluded_roles"):
+        DecisionRouter(config=_config(), excluded_roles=excluded_roles)
+
+
+def test_excluded_tie_break_is_not_reintroduced_after_pair_disagreement(
+    monkeypatch: Any,
+) -> None:
+    runtime, backends = _runtime(
+        {
+            "classification.primary": (
+                "remote-primary",
+                "model-primary",
+                RouteLocation.REMOTE,
+                [_payload("apply")],
+            ),
+            "classification.challenger": (
+                "remote-challenger",
+                "model-challenger",
+                RouteLocation.REMOTE,
+                [_payload("defer")],
+            ),
+            "classification.tie_break": (
+                "remote-tie",
+                "model-tie",
+                RouteLocation.REMOTE,
+                [_payload("apply")],
+            ),
+        }
+    )
+    _install_runtime(monkeypatch, runtime)
+    _forbid_ollama(monkeypatch)
+
+    result = DecisionRouter(
+        config=_config(), excluded_roles=("tie_break",)
+    ).decide("prompt", SCHEMA, source=NORMAL_PAGE)
+
+    assert result.ok is False
+    assert [vote.role for vote in result.votes] == ["primary", "challenger"]
+    assert [len(backends[role].calls) for role in backends] == [1, 1, 0]
 
 
 def test_remote_missing_revision_holds_before_any_backend_call(
@@ -784,6 +882,71 @@ def test_local_routes_keep_lease_observation_and_unload(monkeypatch: Any) -> Non
     assert [len(backends[role].calls) for role in backends] == [1, 1, 0]
     routes = router.authority_router()["routes"]
     assert all(route["ollama"]["digest"].startswith("digest-") for route in routes)
+
+
+def test_excluded_local_route_uses_no_generation_or_resource_control(
+    monkeypatch: Any,
+) -> None:
+    runtime, backends = _runtime(
+        {
+            f"classification.{role}": (
+                "ollama",
+                f"local-{role}",
+                RouteLocation.LOCAL,
+                [_payload("apply")],
+            )
+            for role in ("primary", "challenger", "tie_break")
+        }
+    )
+    _install_runtime(monkeypatch, runtime)
+    events: list[str] = []
+
+    @contextmanager
+    def lease(**_kwargs: object) -> Iterator[None]:
+        events.append("lease")
+        yield
+
+    def planner(models: tuple[str, ...], **kwargs: object) -> ollama.ModelResidencyPlan:
+        events.append(f"plan:{','.join(models)}")
+        num_ctx = int(kwargs["num_ctx"])
+        return ollama.ModelResidencyPlan(
+            num_ctx=num_ctx,
+            max_resident_models=3,
+            capacity_bytes=10_000,
+            reserve_bytes=0,
+            available_bytes=10_000,
+            total_bytes=10_000,
+            estimated_model_bytes=tuple((model, 100) for model in models),
+            role_contexts=tuple((model, num_ctx) for model in models),
+            resident_models=(),
+            calibrated_models=models,
+            source="test",
+        )
+
+    monkeypatch.setattr(ollama, "model_resource_lease", lease)
+    monkeypatch.setattr(ollama, "model_resource_lease_mode", lambda: "exclusive")
+    router = DecisionRouter(
+        config=_config(),
+        excluded_roles=("primary",),
+        residency_planner=planner,
+        model_observer=lambda model: events.append(f"observe:{model}")
+        or (100, 16_384),
+        model_unloader=lambda model: events.append(f"unload:{model}") or True,
+    )
+
+    result = router.decide("prompt", SCHEMA, source=SYSTEM_HIGH)
+
+    assert result.ok is True
+    assert [vote.role for vote in result.votes] == ["challenger", "tie_break"]
+    assert len(backends["classification.primary"].calls) == 0
+    assert events == [
+        "lease",
+        "plan:local-challenger,local-tie_break",
+        "observe:local-challenger",
+        "observe:local-tie_break",
+        "unload:local-challenger",
+        "unload:local-tie_break",
+    ]
 
 
 def test_non_ollama_local_routes_use_no_ollama_controls(monkeypatch: Any) -> None:

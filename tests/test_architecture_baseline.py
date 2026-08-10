@@ -1796,6 +1796,9 @@ W6S_RETIRED_DASHBOARD_CONVERGENCE_SITE_IDS = (
     "arch:b56756c15d1552016f66da541d31553f0e4bc68b9a303b3e69712c7b708543ce",
     "arch:e27a04133d0dd8bfd0876aac480793907b9b5586549b930c732867ff57764ec5",
 )
+W6T_RETIRED_KNOWLEDGE_CONSENSUS_SITE_IDS = (
+    "arch:9cac0856485543c71301bc61a225c856a5fe17a909c3c25fe48bcf519f782ba8",
+)
 X3_RETIRED_OKF_ENTRYPOINT_SITE_IDS = (
     "arch:4e6ad920fa6f8b1f04e30ba32d3c43fd862788b1c86a4e5ccc63d7f94425d12f",
     "arch:54e443f61185cdcda1bf8c079674fbed0539f07d6c11bcac1910539d0c1ee3c0",
@@ -1954,6 +1957,7 @@ RETIREMENT_HISTORY = {
                 *W6Q_RETIRED_DECISION_AUTHORITY_SITE_IDS,
                 *W6R_RETIRED_INGEST_REPAIR_SITE_IDS,
                 *W6S_RETIRED_DASHBOARD_CONVERGENCE_SITE_IDS,
+                *W6T_RETIRED_KNOWLEDGE_CONSENSUS_SITE_IDS,
             )
         )
     ),
@@ -2704,7 +2708,7 @@ def test_current_exception_ledger_seed_and_schema_inventory_are_exact(
     assert detected_ids == ledger_ids == set(seed["exception_semantic_ids"]["active"])
     _assert_exact_retirement_history(architecture, seed)
     assert len(edge_rows) == current["worktree_architecture"]["edge_count"] == 44
-    assert sum(len(row["sites"]) for row in edge_rows) == len(raw_cross_sites) == 1365
+    assert sum(len(row["sites"]) for row in edge_rows) == len(raw_cross_sites) == 1364
     assert {
         field: counts[field]
         for field in (
@@ -2717,7 +2721,7 @@ def test_current_exception_ledger_seed_and_schema_inventory_are_exact(
         )
     } == {
         "exceptions": 44,
-        "cross_domain_sites": 1365,
+        "cross_domain_sites": 1364,
         "production_to_lab_edges": 0,
         "production_to_lab_static_sites": 0,
         "production_to_lab_dynamic_sites": 0,
