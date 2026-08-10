@@ -33,6 +33,19 @@ from chronovisor.recall.librarian import (
 from chronovisor.recall.librarian_status import build_librarian_status
 
 
+def _runtime_route(
+    role: str = "classification.primary",
+    model: str = "test",
+) -> dict[str, object]:
+    return {
+        "role": role,
+        "provider": "remote",
+        "model": model,
+        "location": "remote",
+        "model_digest": None,
+    }
+
+
 def _write_page(path: Path, *, tags: str = "") -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tag_line = f"tags: [{tags}]\n" if tags else ""
@@ -215,6 +228,8 @@ def test_model_worker_splits_a_truncated_json_batch(monkeypatch) -> None:
     calls: list[int] = []
 
     def fake_chat(*args, **kwargs):
+        assert kwargs["source_data_class"] == "page"
+        assert kwargs["source_sensitivity"] == "high"
         count = kwargs["format"]["properties"]["decisions"]["minItems"]
         calls.append(count)
         if count == 2:
@@ -227,10 +242,14 @@ def test_model_worker_splits_a_truncated_json_batch(monkeypatch) -> None:
             '"confidence":0.9,"rationale":"ok"}]}'
         )
 
-    monkeypatch.setattr(classification_model_worker.ollama, "chat", fake_chat)
+    monkeypatch.setattr(
+        classification_model_worker.ollama,
+        "runtime_structured_chat",
+        lambda *args, **kwargs: SimpleNamespace(content=fake_chat(*args, **kwargs)),
+    )
 
     decisions, model_calls = classification_model_worker._call(
-        model="test",
+        route=_runtime_route(),
         keep_alive="0",
         pages=pages,
         role="primary-proposer",
@@ -246,17 +265,19 @@ def test_invalid_optional_secondary_does_not_discard_valid_primary(
 ) -> None:
     monkeypatch.setattr(
         classification_model_worker.ollama,
-        "chat",
-        lambda *args, **kwargs: (
-            '{"decisions":[{"uid":"uid-1",'
-            '"primary_notation":"004.8",'
-            '"secondary_notations":["999"],'
-            '"confidence":0.9,"rationale":"ok"}]}'
+        "runtime_structured_chat",
+        lambda *args, **kwargs: SimpleNamespace(
+            content=(
+                '{"decisions":[{"uid":"uid-1",'
+                '"primary_notation":"004.8",'
+                '"secondary_notations":["999"],'
+                '"confidence":0.9,"rationale":"ok"}]}'
+            )
         ),
     )
 
     decisions, _calls = classification_model_worker._call(
-        model="test",
+        route=_runtime_route(),
         keep_alive="0",
         pages=[
             {
@@ -299,6 +320,12 @@ def test_tie_break_candidates_are_limited_to_independent_proposals() -> None:
 
 
 def test_consensus_batch_retries_foreground_preemption(monkeypatch) -> None:
+    runtime_routes = [
+        _runtime_route("classification.primary", "primary"),
+        _runtime_route("classification.challenger", "challenger"),
+        _runtime_route("classification.tie_break", "tie"),
+    ]
+
     class FakeStore:
         def __init__(self) -> None:
             self.failures: list[dict] = []
@@ -335,6 +362,7 @@ def test_consensus_batch_retries_foreground_preemption(monkeypatch) -> None:
                         }
                     ],
                     "model_calls": 2,
+                    "runtime_routes": runtime_routes,
                 },
                 error="",
             ),
@@ -343,6 +371,7 @@ def test_consensus_batch_retries_foreground_preemption(monkeypatch) -> None:
 
     @contextmanager
     def fake_lane(*args, **kwargs):
+        assert kwargs["needs_model"] is True
         yield object()
 
     monkeypatch.setattr(
@@ -354,6 +383,11 @@ def test_consensus_batch_retries_foreground_preemption(monkeypatch) -> None:
         classification_engine,
         "load_udc_package",
         lambda _root: SimpleNamespace(checksum="sha256:test"),
+    )
+    monkeypatch.setattr(
+        classification_engine,
+        "resolve_consensus_runtime_routes",
+        lambda: tuple(runtime_routes),
     )
     monkeypatch.setattr(classification_engine, "research_lane", fake_lane)
     monkeypatch.setattr(
@@ -612,7 +646,7 @@ def test_model_stage_cache_resumes_from_last_complete_chunk(
             cache=cache,
             cache_path=cache_path,
             stage="primary",
-            model="test",
+            route=_runtime_route(),
             keep_alive="0",
             pages=pages,
             role="primary-proposer",
@@ -645,7 +679,7 @@ def test_model_stage_cache_resumes_from_last_complete_chunk(
         cache=resumed_cache,
         cache_path=cache_path,
         stage="primary",
-        model="test",
+        route=_runtime_route(),
         keep_alive="0",
         pages=pages,
         role="primary-proposer",
@@ -711,7 +745,7 @@ def test_model_stage_cache_resumes_after_safely_marked_invalid_output(
         cache=cache,
         cache_path=cache_path,
         stage="primary",
-        model="test",
+        route=_runtime_route(),
         keep_alive="0",
         pages=pages,
         role="primary-proposer",

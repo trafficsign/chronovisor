@@ -43,6 +43,7 @@ from chronovisor.recall.classification import (
     UDCPackage,
     classification_source_sha256,
     load_udc_package,
+    resolve_consensus_runtime_routes,
     validate_record,
 )
 
@@ -549,6 +550,8 @@ def _classification_batch_input(
     package_checksum: str,
     adjudication_mode: str,
     stage_cache_epoch: str,
+    runtime_routes: Sequence[Mapping[str, Any]] = (),
+    source_sensitivity: str = "high",
 ) -> dict[str, Any]:
     """Build the stable convergence identity for one classification batch."""
 
@@ -557,6 +560,8 @@ def _classification_batch_input(
         "adjudication_mode": adjudication_mode,
         "stage_cache_epoch": stage_cache_epoch,
         "package_checksum": package_checksum,
+        "runtime_routes": [dict(route) for route in runtime_routes],
+        "source_sensitivity": source_sensitivity,
         "pages": [
             {
                 "uid": row["uid"],
@@ -591,6 +596,46 @@ def _cached_classification_decisions(item: Mapping[str, Any]) -> list[dict] | No
     return None
 
 
+def _batch_source_sensitivity(batch: Sequence[Mapping[str, Any]]) -> str:
+    return "normal" if batch and all(row.get("sensitivity") == "normal" for row in batch) else "high"
+
+
+def _classification_worker_input(
+    root: Path,
+    batch: Sequence[Mapping[str, Any]],
+    *,
+    adjudication_mode: str,
+    stage_cache_epoch: str,
+    runtime_routes: Sequence[Mapping[str, Any]],
+    source_sensitivity: str,
+) -> str:
+    return json.dumps(
+        {
+            "schema": CONSENSUS_SCHEMA,
+            "root": str(root),
+            "adjudication_mode": adjudication_mode,
+            "stage_cache_epoch": stage_cache_epoch,
+            "runtime_routes": list(runtime_routes),
+            "source_sensitivity": source_sensitivity,
+            "pages": list(batch),
+        },
+        ensure_ascii=False,
+    )
+
+
+def _valid_classification_worker_result(
+    value: Mapping[str, Any],
+    batch: Sequence[Mapping[str, Any]],
+    runtime_routes: Sequence[Mapping[str, Any]],
+) -> bool:
+    decisions = value.get("decisions")
+    return (
+        isinstance(decisions, list)
+        and len(decisions) == len(batch)
+        and value.get("runtime_routes") == list(runtime_routes)
+    )
+
+
 def run_consensus_batches(
     rows: Sequence[Mapping[str, Any]],
     *,
@@ -602,23 +647,28 @@ def run_consensus_batches(
     adjudication_mode: str = "proposal-audit",
     stage_cache_epoch: str = "default",
 ) -> list[dict[str, Any]]:
-    """Run local-only classification in cancellable isolated workers."""
+    """Run provider-neutral classification in cancellable isolated workers."""
 
     if adjudication_mode not in {"proposal-audit", "dual-blind"}:
-        raise ClassificationError(
-            f"unsupported classification adjudication mode: {adjudication_mode}"
-        )
+        raise ClassificationError("unsupported classification adjudication mode")
     if not stage_cache_epoch.strip() or len(stage_cache_epoch) > 80:
         raise ClassificationError("classification stage cache epoch is invalid")
+    if not rows:
+        return []
+    runtime_routes = resolve_consensus_runtime_routes()
+    package_checksum = load_udc_package(root).checksum
     store = librarian_convergence_store(root)
     outputs: list[dict[str, Any]] = []
     for offset in range(0, len(rows), max(1, batch_size)):
         batch = [dict(row) for row in rows[offset : offset + batch_size]]
+        source_sensitivity = _batch_source_sensitivity(batch)
         input_data = _classification_batch_input(
             batch,
-            package_checksum=load_udc_package(root).checksum,
+            package_checksum=package_checksum,
             adjudication_mode=adjudication_mode,
             stage_cache_epoch=stage_cache_epoch,
+            runtime_routes=runtime_routes,
+            source_sensitivity=source_sensitivity,
         )
         namespace = run_namespace.strip() or "classification"
         source_id = (
@@ -658,15 +708,13 @@ def run_consensus_batches(
                     f"classification batch unavailable: {claim['reason']}"
                 )
             run_id = f"librarian-{key[:16]}-{uuid.uuid4().hex[:8]}"
-            worker_input = json.dumps(
-                {
-                    "schema": CONSENSUS_SCHEMA,
-                    "root": str(root),
-                    "adjudication_mode": adjudication_mode,
-                    "stage_cache_epoch": stage_cache_epoch,
-                    "pages": batch,
-                },
-                ensure_ascii=False,
+            worker_input = _classification_worker_input(
+                root,
+                batch,
+                adjudication_mode=adjudication_mode,
+                stage_cache_epoch=stage_cache_epoch,
+                runtime_routes=runtime_routes,
+                source_sensitivity=source_sensitivity,
             )
             with research_lane(
                 run_id,
@@ -711,17 +759,17 @@ def run_consensus_batches(
                     result.error or "classification worker failed"
                 )
             decisions = result.value.get("decisions")
-            if not isinstance(decisions, list) or len(decisions) != len(batch):
+            if not _valid_classification_worker_result(result.value, batch, runtime_routes):
                 store.fail_attempt(
                     key,
                     "local",
                     owner=owner,
-                    error="classification worker returned wrong decision count",
+                    error="classification worker returned invalid runtime result",
                     failure_class="local_schema_failure",
                     allow_frontier=False,
                 )
                 raise ClassificationError(
-                    "classification worker decision count mismatch"
+                    "classification worker runtime result mismatch"
                 )
             store.complete(
                 key,
@@ -731,6 +779,7 @@ def run_consensus_batches(
                     "decisions": decisions,
                     "model_calls": int(result.value.get("model_calls") or 0),
                     "consensus_schema": CONSENSUS_SCHEMA,
+                    "runtime_routes": list(runtime_routes),
                 },
             )
             outputs.extend(dict(value) for value in decisions)

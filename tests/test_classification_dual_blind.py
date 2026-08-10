@@ -10,6 +10,25 @@ def test_dual_blind_hides_primary_from_challenger_and_can_adjudicate_hold(
     tmp_path,
     monkeypatch,
 ) -> None:
+    runtime_routes = tuple(
+        {
+            "role": f"classification.{role}",
+            "provider": "remote",
+            "model": model,
+            "location": "remote",
+            "model_digest": None,
+        }
+        for role, model in (
+            ("primary", "ornith"),
+            ("challenger", "gpt-oss"),
+            ("tie_break", "gemma"),
+        )
+    )
+    monkeypatch.setattr(
+        classification_model_worker,
+        "resolve_consensus_runtime_routes",
+        lambda _supplied=None: runtime_routes,
+    )
     monkeypatch.setattr(
         classification_model_worker,
         "load_decision_router_config",
@@ -73,3 +92,4 @@ def test_dual_blind_hides_primary_from_challenger_and_can_adjudicate_hold(
     assert result["decisions"][0]["status"] == "held"
     assert result["decisions"][0]["expected_status"] == "held"
     assert result["decisions"][0]["quorum"] == 2
+    assert result["runtime_routes"] == list(runtime_routes)

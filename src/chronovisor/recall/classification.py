@@ -37,6 +37,18 @@ class ClassificationError(ValueError):
 
 
 _RUNTIME_SENSITIVITIES = frozenset({"normal", "high"})
+CONSENSUS_RUNTIME_ROLES = (
+    "classification.primary",
+    "classification.challenger",
+    "classification.tie_break",
+)
+_CONSENSUS_ROUTE_KEYS = {
+    "role",
+    "provider",
+    "model",
+    "location",
+    "model_digest",
+}
 
 
 def resolve_structured_route(
@@ -44,6 +56,8 @@ def resolve_structured_route(
     *,
     role: str,
     allowed_roles: Collection[str] | None = None,
+    resolved_route: ollama.RuntimeGenerationRoute | None = None,
+    local_model_digests: Mapping[str, str] | None = None,
 ) -> tuple[ollama.RuntimeGenerationRoute, str | None, str]:
     runtime_role = str(payload.get("runtime_role") or role)
     if runtime_role not in (allowed_roles if allowed_roles is not None else {role}):
@@ -51,12 +65,15 @@ def resolve_structured_route(
     sensitivity = payload.get("source_sensitivity", "high")
     if not isinstance(sensitivity, str) or sensitivity not in _RUNTIME_SENSITIVITIES:
         raise ClassificationError("classification source sensitivity is invalid")
-    try:
-        route = ollama.runtime_generation_routes((runtime_role,))[0]
-    except ollama.RuntimeBridgeError as exc:
-        raise ClassificationError(
-            f"classification runtime route is unavailable: {exc.category}"
-        ) from None
+    if resolved_route is None:
+        try:
+            route = ollama.runtime_generation_routes((runtime_role,))[0]
+        except ollama.RuntimeBridgeError as exc:
+            raise ClassificationError(
+                f"classification runtime route is unavailable: {exc.category}"
+            ) from None
+    else:
+        route = resolved_route
     if route.role != runtime_role:
         raise ClassificationError("classification runtime route identity mismatch")
     if not route.structured_output:
@@ -69,7 +86,11 @@ def resolve_structured_route(
         if requested_digest not in (None, ""):
             raise ClassificationError("remote route rejects local model digest")
         return route, None, sensitivity
-    digest = ollama.model_digests([route.model]).get(route.model, "")
+    digest = (
+        local_model_digests
+        if local_model_digests is not None
+        else ollama.model_digests([route.model])
+    ).get(route.model, "")
     if not digest:
         raise ClassificationError("classification model digest is unavailable")
     if requested_digest not in (None, "") and str(requested_digest) != digest:
@@ -84,6 +105,92 @@ def route_identity(route: ollama.RuntimeGenerationRoute) -> dict[str, str]:
         "model": route.model,
         "location": route.location,
     }
+
+
+def resolve_consensus_runtime_routes(
+    supplied: object = None,
+) -> tuple[dict[str, Any], ...]:
+    """Resolve and optionally exact-match the fixed three-role contract."""
+
+    supplied_rows: list[Mapping[str, Any]] | None = None
+    if supplied is not None:
+        if not isinstance(supplied, list) or len(supplied) != len(
+            CONSENSUS_RUNTIME_ROLES
+        ):
+            raise ClassificationError(
+                "classification runtime route contract is invalid"
+            )
+        supplied_rows = []
+        for expected_role, row in zip(
+            CONSENSUS_RUNTIME_ROLES, supplied, strict=True
+        ):
+            if (
+                not isinstance(row, Mapping)
+                or set(row) != _CONSENSUS_ROUTE_KEYS
+                or row.get("role") != expected_role
+                or not isinstance(row.get("provider"), str)
+                or not str(row["provider"]).strip()
+                or not isinstance(row.get("model"), str)
+                or not str(row["model"]).strip()
+                or row.get("location") not in {"local", "remote"}
+                or (
+                    row.get("location") == "local"
+                    and (
+                        not isinstance(row.get("model_digest"), str)
+                        or not str(row["model_digest"]).strip()
+                    )
+                )
+                or (
+                    row.get("location") == "remote"
+                    and row.get("model_digest") is not None
+                )
+            ):
+                raise ClassificationError(
+                    "classification runtime route contract is invalid"
+                )
+            supplied_rows.append(row)
+    try:
+        routes = ollama.runtime_generation_routes(CONSENSUS_RUNTIME_ROLES)
+    except ollama.RuntimeBridgeError as exc:
+        raise ClassificationError(
+            f"classification runtime routes are unavailable: {exc.category}"
+        ) from None
+    if tuple(route.role for route in routes) != CONSENSUS_RUNTIME_ROLES:
+        raise ClassificationError("classification runtime route identity mismatch")
+    if not all(route.structured_output for route in routes):
+        raise ClassificationError("classification route lacks structured output")
+    if len({route.model for route in routes}) != len(routes):
+        raise ClassificationError("classification runtime models must be distinct")
+    if supplied_rows is not None and [
+        {key: row[key] for key in ("role", "provider", "model", "location")}
+        for row in supplied_rows
+    ] != [route_identity(route) for route in routes]:
+        raise ClassificationError("classification runtime route contract changed")
+
+    local_routes = [route for route in routes if route.location == "local"]
+    local_digests = (
+        ollama.model_digests([route.model for route in local_routes])
+        if local_routes
+        else {}
+    )
+    resolved: list[dict[str, Any]] = []
+    for index, route in enumerate(routes):
+        requested = supplied_rows[index] if supplied_rows is not None else {}
+        validated, digest, _sensitivity = resolve_structured_route(
+            {
+                "runtime_role": requested.get("role", route.role),
+                "model": requested.get("model"),
+                "model_digest": requested.get("model_digest"),
+            },
+            role=route.role,
+            resolved_route=route,
+            local_model_digests=local_digests,
+        )
+        resolved.append({**route_identity(validated), "model_digest": digest})
+    contract = tuple(resolved)
+    if supplied is not None and supplied != list(contract):
+        raise ClassificationError("classification runtime route contract changed")
+    return contract
 
 
 @dataclass(frozen=True)

@@ -1,4 +1,4 @@
-"""Isolated local-model worker for Librarian classification batches."""
+"""Isolated provider-neutral worker for Librarian classification batches."""
 
 from __future__ import annotations
 
@@ -16,10 +16,14 @@ from chronovisor.core.durable_state import (
     write_sealed_json,
 )
 from chronovisor.core.runtime_config import load_decision_router_config
-from chronovisor.recall.classification import load_udc_package
+from chronovisor.recall.classification import (
+    ClassificationError,
+    load_udc_package,
+    resolve_consensus_runtime_routes,
+)
 from chronovisor.recall.classification_engine import CONSENSUS_SCHEMA
 
-STAGE_CACHE_SCHEMA = "chronovisor.classification-stage-cache.v3"
+STAGE_CACHE_SCHEMA = "chronovisor.classification-stage-cache.v4"
 # A page's classification must not depend on unrelated pages sharing its batch.
 STAGE_CHUNK_SIZE = 1
 
@@ -98,10 +102,11 @@ def _page_prompt(page: Mapping[str, Any]) -> dict[str, Any]:
 
 def _call(
     *,
-    model: str,
+    route: Mapping[str, Any],
     keep_alive: str,
     pages: Sequence[Mapping[str, Any]],
     role: str,
+    source_sensitivity: str = "high",
     prior: Sequence[Mapping[str, Any]] | None = None,
     dual_blind: bool = False,
 ) -> tuple[list[dict[str, Any]], int]:
@@ -139,7 +144,7 @@ def _call(
                 "Independently verify every proposal. Return your corrected "
                 "complete decision list; do not merely approve or comment."
             )
-    response = ollama.chat(
+    response = ollama.runtime_structured_chat(
         [
             {
                 "role": "system",
@@ -153,7 +158,9 @@ def _call(
                 "content": json.dumps(prompt, ensure_ascii=False, sort_keys=True),
             },
         ],
-        model=model,
+        runtime_role=str(route["role"]),
+        source_data_class="page",
+        source_sensitivity=source_sensitivity,
         format=_schema(len(pages), dual_blind=dual_blind),
         num_ctx=min(config.num_ctx, 65_536),
         num_predict=max(1_536, min(4_096, len(pages) * 110)),
@@ -165,25 +172,27 @@ def _call(
         think=False,
     )
     try:
-        payload = json.loads(str(response))
+        payload = json.loads(response.content)
     except json.JSONDecodeError:
         if len(pages) > 1:
             midpoint = len(pages) // 2
             prior_left = prior[:midpoint] if prior is not None else None
             prior_right = prior[midpoint:] if prior is not None else None
             left, left_calls = _call(
-                model=model,
+                route=route,
                 keep_alive=keep_alive,
                 pages=pages[:midpoint],
                 role=role,
+                source_sensitivity=source_sensitivity,
                 prior=prior_left,
                 dual_blind=dual_blind,
             )
             right, right_calls = _call(
-                model=model,
+                route=route,
                 keep_alive=keep_alive,
                 pages=pages[midpoint:],
                 role=role,
+                source_sensitivity=source_sensitivity,
                 prior=prior_right,
                 dual_blind=dual_blind,
             )
@@ -196,7 +205,7 @@ def _call(
                     "primary_notation": str(page["candidates"][0]["notation"]),
                     "secondary_notations": [],
                     "confidence": 0.0,
-                    "rationale": f"{model} returned truncated JSON.",
+                    "rationale": f"{route['model']} returned truncated JSON.",
                     **({"expected_status": "held"} if dual_blind else {}),
                     "_invalid_reason": "model_json_truncated",
                 }
@@ -205,7 +214,7 @@ def _call(
         )
     decisions = payload.get("decisions")
     if not isinstance(decisions, list):
-        raise TypeError(f"{model} returned no decision list")
+        raise TypeError(f"{route['model']} returned no decision list")
     by_uid = {str(row.get("uid") or ""): dict(row) for row in decisions}
     ordered: list[dict[str, Any]] = []
     for page in pages:
@@ -217,7 +226,7 @@ def _call(
                 "primary_notation": str(page["candidates"][0]["notation"]),
                 "secondary_notations": [],
                 "confidence": 0.0,
-                "rationale": f"{model} omitted this page.",
+                "rationale": f"{route['model']} omitted this page.",
                 **({"expected_status": "held"} if dual_blind else {}),
                 "_invalid_reason": "model_omitted_page",
             }
@@ -278,9 +287,7 @@ def _stage_cache_path(
     root: Path,
     pages: Sequence[Mapping[str, Any]],
     *,
-    primary_model: str,
-    challenger_model: str,
-    tie_break_model: str,
+    runtime_routes: Sequence[Mapping[str, Any]],
     adjudication_mode: str,
     stage_cache_epoch: str,
 ) -> tuple[str, Path]:
@@ -289,11 +296,7 @@ def _stage_cache_path(
         "consensus_schema": CONSENSUS_SCHEMA,
         "adjudication_mode": adjudication_mode,
         "stage_cache_epoch": stage_cache_epoch,
-        "models": {
-            "primary": primary_model,
-            "challenger": challenger_model,
-            "tie_break": tie_break_model,
-        },
+        "runtime_routes": [dict(route) for route in runtime_routes],
         "pages": [
             {
                 "uid": str(page["uid"]),
@@ -388,10 +391,11 @@ def _cached_stage_call(
     cache: dict[str, Any],
     cache_path: Path,
     stage: str,
-    model: str,
+    route: Mapping[str, Any],
     keep_alive: str,
     pages: Sequence[Mapping[str, Any]],
     role: str,
+    source_sensitivity: str = "high",
     prior: Sequence[Mapping[str, Any]] | None = None,
     dual_blind: bool = False,
 ) -> tuple[list[dict[str, Any]], int]:
@@ -415,10 +419,11 @@ def _cached_stage_call(
             prior[offset : offset + STAGE_CHUNK_SIZE] if prior is not None else None
         )
         chunk_decisions, chunk_calls = _call(
-            model=model,
+            route=route,
             keep_alive=keep_alive,
             pages=chunk,
             role=role,
+            source_sensitivity=source_sensitivity,
             prior=prior_chunk,
             dual_blind=dual_blind,
         )
@@ -459,18 +464,42 @@ def run(payload: Mapping[str, Any]) -> dict[str, Any]:
     pages = payload.get("pages")
     if not isinstance(pages, list) or not pages:
         raise ValueError("classification worker requires pages")
+    forbidden_overrides = {
+        "runtime_role",
+        "model",
+        "primary_model",
+        "challenger_model",
+        "tie_break_model",
+    }
+    if forbidden_overrides & payload.keys():
+        raise ClassificationError("classification runtime route override is forbidden")
+    adjudication_mode = payload.get("adjudication_mode", "proposal-audit")
+    if not isinstance(adjudication_mode, str) or adjudication_mode not in {
+        "proposal-audit",
+        "dual-blind",
+    }:
+        raise ClassificationError("unsupported classification adjudication mode")
+    stage_cache_epoch = payload.get("stage_cache_epoch", "default")
+    if (
+        not isinstance(stage_cache_epoch, str)
+        or not stage_cache_epoch.strip()
+        or len(stage_cache_epoch) > 80
+    ):
+        raise ClassificationError("classification stage cache epoch is invalid")
+    source_sensitivity = payload.get("source_sensitivity", "high")
+    if not isinstance(source_sensitivity, str) or source_sensitivity not in {
+        "normal",
+        "high",
+    }:
+        raise ClassificationError("classification source sensitivity is invalid")
+    runtime_routes = resolve_consensus_runtime_routes(payload.get("runtime_routes"))
+    primary_route, challenger_route, tie_break_route = runtime_routes
     config = load_decision_router_config()
-    adjudication_mode = str(payload.get("adjudication_mode") or "proposal-audit")
-    if adjudication_mode not in {"proposal-audit", "dual-blind"}:
-        raise ValueError("unsupported classification adjudication mode")
     dual_blind = adjudication_mode == "dual-blind"
-    stage_cache_epoch = str(payload.get("stage_cache_epoch") or "default")
     cache_key, cache_path = _stage_cache_path(
         root,
         pages,
-        primary_model=config.primary_model,
-        challenger_model=config.challenger_model,
-        tie_break_model=config.tie_break_model,
+        runtime_routes=runtime_routes,
         adjudication_mode=adjudication_mode,
         stage_cache_epoch=stage_cache_epoch,
     )
@@ -479,20 +508,22 @@ def run(payload: Mapping[str, Any]) -> dict[str, Any]:
         cache=cache,
         cache_path=cache_path,
         stage="primary",
-        model=config.primary_model,
+        route=primary_route,
         keep_alive=config.primary_keep_alive,
         pages=pages,
         role="primary-proposer",
+        source_sensitivity=source_sensitivity,
         dual_blind=dual_blind,
     )
     challenger, challenger_calls = _cached_stage_call(
         cache=cache,
         cache_path=cache_path,
         stage="challenger",
-        model=config.challenger_model,
+        route=challenger_route,
         keep_alive=config.challenger_keep_alive,
         pages=pages,
         role="independent-challenger",
+        source_sensitivity=source_sensitivity,
         prior=None if dual_blind else primary,
         dual_blind=dual_blind,
     )
@@ -534,10 +565,11 @@ def run(payload: Mapping[str, Any]) -> dict[str, Any]:
             cache=cache,
             cache_path=cache_path,
             stage="tie_break",
-            model=config.tie_break_model,
+            route=tie_break_route,
             keep_alive=config.tie_break_keep_alive,
             pages=tie_pages,
             role="tie-break-adjudicator",
+            source_sensitivity=source_sensitivity,
             prior=paired_prior,
             dual_blind=dual_blind,
         )
@@ -639,9 +671,9 @@ def run(payload: Mapping[str, Any]) -> dict[str, Any]:
                 "expected_status": (expected_status if votes >= 2 else "unresolved"),
                 "adjudication_mode": adjudication_mode,
                 "quorum": votes,
-                "primary_model": config.primary_model,
-                "challenger_model": config.challenger_model,
-                "tie_break_model": config.tie_break_model if tie is not None else None,
+                "primary_model": primary_route["model"],
+                "challenger_model": challenger_route["model"],
+                "tie_break_model": tie_break_route["model"] if tie is not None else None,
                 "consensus_sha256": _decision_digest(uid, left, right, tie),
             }
         )
@@ -649,6 +681,7 @@ def run(payload: Mapping[str, Any]) -> dict[str, Any]:
         "schema": CONSENSUS_SCHEMA,
         "package_checksum": package.checksum,
         "model_calls": model_calls,
+        "runtime_routes": list(runtime_routes),
         "decisions": decisions,
     }
 
