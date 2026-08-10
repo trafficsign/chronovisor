@@ -2,7 +2,7 @@
 <html lang="ja">
 <head>
 <meta charset="utf-8">
-<title>Chronovisor 次フェーズ計画（Campaign W〜 / OSS 準備 / 研究知見）</title>
+<title>Chronovisor 次フェーズ計画（Campaign W〜Y / OSS 準備 / 研究知見）</title>
 <style>
 :root{
   --fg:#1a1a1a; --muted:#666; --bg:#fafaf7; --accent:#2c5aa0;
@@ -62,7 +62,7 @@ pre{background:#eee;padding:0.8rem 1rem;border-radius:6px;overflow:auto;line-hei
 
 <section>
 <h2>概要</h2>
-<p>Campaign O–V（アーキテクチャ刷新）の完了を前提に、次フェーズとして取り組む事項をまとめる。Campaign W の共通 LLM Runtime、Campaign X の OKF v0.2 canonical migration、OSS 公開準備、研究知見の反映を含む。</p>
+<p>Campaign O–V（アーキテクチャ刷新）の完了を前提に、次フェーズとして取り組む事項をまとめる。Campaign W の共通 LLM Runtime、Campaign X の OKF v0.2 canonical migration、Campaign Y の Evidence Reconstruction Runtime、OSS 公開準備、研究知見の反映を含む。</p>
 <p>O–V 計画は <code>_handoff/2026-08-06_1221_chronovisor-architecture-renewal.html</code> を参照。</p>
 </section>
 
@@ -181,6 +181,54 @@ adapter families compose and register supported components
 </ol>
 
 <div class="exit"><strong>Exit Criteria:</strong> final live layout が direct な <code>~/.chronovisor/raw/</code>、<code>~/.chronovisor/pages/</code>、<code>~/.chronovisor/system/</code>、<code>~/.chronovisor/runtime/activity.jsonl</code> であり、<code>pages/</code> は変換なしで OKF-compatible portable bundle として validation を通り、<code>system/</code> document が1件も bundle や OKF conformance 対象に含まれないこと。canonical page status が <code>draft/stable/deprecated</code> だけで、<code>status</code> 欠落 <code>→ stable</code>、<code>active → stable</code>、<code>deprecated → deprecated</code>、<code>archived → deprecated</code> の入力区分ごとの件数と UID 集合が manifest / staging / receipt で一致し、invalid 旧 status は UID / 値つき report で preflight を失敗させること。<code>superseded_by</code> が保持され、deprecated page はその有無だけで replacement / retired を区別し、<code>chronovisor_status</code> 等の独自 status と archive reason / provenance / archive 専用 field が canonical page に存在しないこと。archive reason / provenance は stable event ID を保って <code>runtime/activity.jsonl</code> だけへ移り、canonical page metadata だけから再生成する derived <code>pages/log.md</code> には含まれないこと。new writer が status 欠落を拒否し、default search、recall、link-expanded <code>expanded_hits</code>、mutation、retention candidate selection は end-to-end で <code>stable</code> だけを対象にし、<code>draft</code> / <code>deprecated</code> は exact lookup または明示指定でだけ扱われること。retention の <code>stable → deprecated</code> と復帰の <code>deprecated → stable</code> が成立し、page lifecycle と registry state が別 namespace であること。production の parser / schema / prompt / index / search / recall / librarian / retention / UI と regression tests から <code>active</code> / <code>archived</code> / <code>chronovisor_status</code> / archive 専用 branch・label・expectation・fixture が撤去され、legacy 値は offline migration mapping fixture でだけ扱われ、production へ再導入しない regression test が green であること。<code>pages/index.md</code>、<code>pages/log.md</code> と採用した subdirectory reserved index / log が OKF reserved 形式で canonical pages から再現可能で、concept / page / UID / KG scan から除外されること。運用イベントの移行件数・順序・timestamp・stable ID または content hash の対応が一致し、cutover 後の append / read は <code>runtime/activity.jsonl</code> だけを使い、<code>pages/log.md</code> は運用 payload を含まない derived change history であること。reserved file を除く <code>pages/</code> は前後で page 数、UID 集合、解決済み edge 集合が一致し、全 concept の <code>type</code> が non-empty、<code>system/</code> は全 fixed filename / page ID が維持されること。両 namespace で許可された frontmatter の semantic content を維持しつつ canonical serialization を許容し、body bytes は standard Markdown link syntax への変換以外で不変であること。新規 broken link が 0、対象 frontmatter が full YAML parser で parse / semantic round-trip 可能で、共通 document stack、combined link / index behavior、repository 内で version 固定した OKF v0.2 spec §11 conformance validation が green であること。専用 import / export CLI と external bundle の merge / sync / update / overwrite workflow は初期リリースおよび Campaign X の完了条件に含めないこと。<code>pages/</code> / <code>system/</code> の migration 2回目の diff が 0 で、<code>raw/</code> の全相対 path / size / SHA-256 / bytes が preflight、cutover、rollback、re-cutover、cleanup の全時点で不変であること。production に旧形式の parser / reader、dual format、bridge symlink、<code>canonical/</code>、<code>generations/</code>、<code>current</code> symlink、legacy directory、migration rollback backup が残らず、live root の旧 <code>index.md</code> / <code>log.md</code> / <code>schema.md</code>、staging、recovery journal、sentinel も cleanup 後に存在しないこと。全 transaction phase の intent / rename / fsync 境界で fault injection し、crash recovery 後に production が serve するのは all-old または all-new だけで mixed state は常に fail-closed となること。同じ journaled coordinated transaction による all-old rollback と all-new re-cutover を演習し、最終 re-cutover 後の conformance、全 index 再構築、search / recall / ingest / lint / decision、<code>system/</code> の startup init loading と search / recall / link graph visibility、固定 identity / privileged access / semantics / default cloud-egress denial、必要な local production live smoke が green であること。最終的に migration workspace には hashes / IDs / versions / outcome だけを持ち legacy content を含まない compact immutable receipt だけが残り、Git history は production runtime / rollback source として参照されないこと。schema / version 境界を持ち、OKF 後続 version は明示 migration として扱い、v0.2 への無期限固定も暗黙追従もしないこと。</div>
+</section>
+
+<!-- ============================================================ -->
+<section>
+<h2>Campaign Y — Evidence Reconstruction Runtime</h2>
+
+<div class="callout">
+<strong>位置づけ:</strong> Campaign Y の本作業は Campaign W 完了後に開始する。read-only / offline prototype は W 完了時点から開始可能だが、persistent production schema と cutover は Campaign X の canonical migration 完了後に行う。Campaign Y は別途決定しない限り OSS v1 の暗黙の blocker にはしない。
+</div>
+
+<h3>アーキテクチャ転換</h3>
+<p><code>Wiki + 検索エンジン -> immutable event log + 再生成可能な view + 証拠再構成 runtime</code> へ転換する。retrieval の返却単位は <code>Page -> EvidencePacket</code> とし、lookup の <code>query -> results</code> は live な evidence coverage / gap に駆動される strict <code>RetrievalProgram</code> へ置き換える。</p>
+
+<h3>既存資産の再利用</h3>
+<p>lossless Raw と receipts を immutable event substrate、Pages を derived / compatibility view として使う。既存の <code>ResearchStore</code> / events、<code>EvidenceBundle</code>、<code>ActionType</code> executor、async Deep Recall、typed graph provenance、Page Certificate と fail-closed gate を組み合わせ、新しい graph database や orchestration framework は導入しない。</p>
+
+<pre>Raw
+  -&gt; rebuildable episode evidence view
+  -&gt; RetrievalProgram
+  -&gt; live EvidenceLedger
+  -&gt; EvidencePacket
+  -&gt; answer context</pre>
+
+<h3>非目標と不変条件</h3>
+<ul>
+<li>Raw は immutable とし、derived episode evidence は exact raw range / digest に bind され、いつでも rebuild 可能であること。</li>
+<li>新しい graph DB / framework と自動 mutation authority は追加しない。mutation は既存 authority 境界に従う。</li>
+<li>Page / BM25 / vector / rerank は retrieval tool および高速な compatibility path として残すが、canonical output にはしない。</li>
+<li><code>raw/</code> / <code>system/</code> の cloud egress は既定で拒否し、invalid な <code>RetrievalProgram</code> / projection は fail-closed とする。</li>
+<li>RL と always-on Deep Recall は延期し、測定済みの必要性が出るまで Campaign Y に含めない。</li>
+</ul>
+
+<h3>研究根拠</h3>
+<p>設計と評価は <a href="https://arxiv.org/abs/2606.06036">MRAgent</a>、<a href="https://arxiv.org/abs/2606.22844">RaMem</a>、<a href="https://arxiv.org/abs/2605.12493">LongMemEval-V2</a>、<a href="https://arxiv.org/abs/2602.22769">AMA-Bench</a> の一次研究を参照する。報告値では RAG 48.5 に対して trajectory file exploration は 72.5 だが、latency 増加との tradeoff があるため、品質だけでなく deadline と cost を同時に gate する。</p>
+
+<h3>ステップ</h3>
+<ol class="checklist">
+<li><input type="checkbox"><span><strong>Y1: evaluation contract の事前登録</strong> — 実装前に answer / evidence / temporal / obsolete-use / latency の指標、paired comparison、独立 lower bound、abstention 条件を固定し、<code>current</code> / <code>why</code> / <code>change</code> / <code>failure</code> / <code>workflow</code> / <code>contradiction</code> / <code>no-answer</code> slice を登録する。</span></li>
+<li><input type="checkbox"><span><strong>Y2: episode / evidence atom と EvidencePacket schema</strong> — exact raw range / digest、time interval、claim / entity、provenance、<code>supports</code> / <code>contradicts</code> / <code>supersedes</code> を型付きで表し、canonical recall output の <code>EvidencePacket</code> schema を定義する。</span></li>
+<li><input type="checkbox"><span><strong>Y3: deterministic projection / rebuild</strong> — committed Raw receipts だけから episode evidence view を background で生成し、同一入力から byte-identical または canonical-equivalent な projection を再構築する。Raw は変更しない。</span></li>
+<li><input type="checkbox"><span><strong>Y4: strict RetrievalProgram compiler</strong> — query を claim slots、<code>as_of</code>、required evidence、allowed actions、stop rules を持つ検証可能な program へ compile し、invalid / incomplete plan は実行前に fail-closed とする。</span></li>
+<li><input type="checkbox"><span><strong>Y5: gap-driven executor と live EvidenceLedger</strong> — coverage gap ごとに既存 research actions を再利用して実行し、ledger 上で evidence の <code>supports</code> / <code>contradicts</code> / <code>supersedes</code> を更新する。coverage-based stop と不足時の abstention を実装する。</span></li>
+<li><input type="checkbox"><span><strong>Y6: context compiler と L2 / L3 / L4 統合</strong> — <code>EvidencePacket</code> を bounded answer context へ compile し、L2 は 4 秒 deadline を維持、L3 は明示的探索、Raw を使う L4 は async Deep Recall として実行する。</span></li>
+<li><input type="checkbox"><span><strong>Y7: safety / telemetry / rollout</strong> — program、projection、evidence relation、stop reason、latency を content-safe に記録し、shadow → canary で page teacher と比較する。cloud Raw egress を拒否し、即時 rollback 経路を維持する。</span></li>
+<li><input type="checkbox"><span><strong>Y8: replay / determinism / live cutover</strong> — preregistered paired replay、fault injection、projection / rebuild determinism、local production live verification を完了し、Campaign X 後にだけ段階的 cutover を行う。</span></li>
+</ol>
+
+<div class="exit"><strong>Exit Criteria:</strong> Raw の全相対 path / size / digest / bytes が前後で一致し byte identity が不変で、committed receipts からの derived episode evidence view rebuild が deterministic であること。canonical recall result が <code>EvidencePacket</code> となり、exact evidence refs、temporal validity、<code>supports</code> / <code>contradicts</code> / <code>supersedes</code>、完全な <code>RetrievalProgram</code> trace を持つこと。live coverage に基づく stop と evidence 不足時の abstention が成立すること。事前登録した paired answer / evidence / temporal / obsolete-use / latency gate が、それぞれ独立に定めた lower bound を通過すること。L2 の 4 秒 deadline を維持し、cloud への Raw egress が 0 件であること。shadow / canary から page teacher へ即時 rollback でき、production activation は Campaign X 完了後にだけ行われること。</div>
 </section>
 
 <!-- ============================================================ -->
@@ -304,6 +352,7 @@ adapter families compose and register supported components
 <li><time datetime="2026-08-10T13:56:09+09:00">2026-08-10 13:56 JST</time> — <code>1cfb843</code> で child environment の credential 継承を遮断し、<code>6ffe0fd</code> で data root / Raw の permission と Cortex symlink boundary、<code>b0943c9</code> で outbound DNS / IP pinning、redirect、MIME / size / deadline / resume boundary を修正。課金・live network は使わず offline security tests と architecture gate を通過。</li>
 <li><time datetime="2026-08-10T13:56:09+09:00">2026-08-10 13:56 JST</time> — <code>55893bf</code> で classification consensus、<code>a8d3324</code> で knowledge embedding を共通 LLM runtime へ移行。focused 42 + 119 tests と architecture gate が green。直接推論経路が残るため W6 / W8 は未完了。</li>
 <li><time datetime="2026-08-10T13:56:09+09:00">2026-08-10 13:56 JST</time> — Campaign X readiness audit と隔離検証（OKF parser / preparation / workspace / cutover 130 tests、IndexStore / page writer / mutation 72 tests）を実施。migration は deterministic で LLM dependency / call がなく、enrichment を cutover 完了条件から分離済みのため X8 を完了。X1–X7 は conformance、production caller 移行、実行可能 migration、startup gate、rollback / rebuild、live cutover / cleanup の残件により未完了。</li>
+<li><time datetime="2026-08-10T16:24:00+09:00">2026-08-10 16:24 JST</time> — ユーザー判断により Campaign Y — Evidence Reconstruction Runtime を追加。planning only であり、実装は未開始。</li>
 </ul>
 </section>
 
