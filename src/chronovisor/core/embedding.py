@@ -1,14 +1,4 @@
-"""Shared embedding helpers via the configured Ollama embedding model.
-
-Thin layer over :func:`ollama.embed` adding a disk cache keyed by
-``sha256(model|text)`` plus cosine similarity. Used by the tag
-deduplication path (existing-tag preference at >= 0.80 similarity) and
-intended to be reused by related-page suggestion features.
-
-Single-process safe. The cache is content-addressed so repeated runs
-(ingest, lint, backfill dry-run, distribution report) don't re-pay
-Ollama latency for the same input.
-"""
+"""Shared provider-neutral embedding helpers with a route-bound disk cache."""
 
 from __future__ import annotations
 
@@ -17,21 +7,71 @@ import json
 import math
 from pathlib import Path
 
-from chronovisor.core.ollama import embed as _ollama_embed
-from chronovisor.core.runtime_config import load_embedding_config
+from chronovisor.core import ollama
+from chronovisor.core.llm_config import load_default_llm_runtime
+from chronovisor.core.llm_runtime import (
+    BackendContractError,
+    EmbeddingPurpose,
+    EmbeddingRequest,
+    LLMRuntime,
+    ResolvedEmbeddingRoute,
+    RouteLocation,
+    SourceDataClass,
+    SourceDataClassification,
+    SourceSensitivity,
+)
 from chronovisor.core.store import CHRONOVISOR_ROOT
 
+EMBEDDING_ROLE = "knowledge.embedding"
+_SOURCE = SourceDataClassification(
+    SourceDataClass.DERIVED_SNIPPET,
+    SourceSensitivity.HIGH,
+)
+
 # Cache layout: ~/.chronovisor/.index/embeddings/<first-2-hex>/<hash>.json
-# Sharding by the first byte keeps any single directory below ~few-hundred
-# files even after thousands of unique texts, which matters because some
-# filesystems (APFS, ext4) get noticeably slower on dirs with >10k entries.
 _CACHE_DIR = CHRONOVISOR_ROOT / ".index" / "embeddings"
 
 
-def _cache_path(text: str, model: str | None = None) -> Path:
-    model_id = model or load_embedding_config().model
-    h = hashlib.sha256(f"{model_id}|{text}".encode()).hexdigest()
-    return _CACHE_DIR / h[:2] / f"{h}.json"
+def _route_identity(route: ResolvedEmbeddingRoute) -> dict[str, str | None]:
+    digest: str | None = None
+    if route.provider == "ollama" and route.location is RouteLocation.LOCAL:
+        digest = ollama.model_digests([route.model]).get(route.model, "")
+        if not digest:
+            raise BackendContractError(
+                EMBEDDING_ROLE, "embedding", "model_digest_missing"
+            )
+    return {
+        "role": route.role,
+        "provider": route.provider,
+        "model": route.model,
+        "location": route.location.value,
+        "model_digest": digest,
+    }
+
+
+def _resolved_runtime() -> tuple[LLMRuntime, dict[str, str | None]]:
+    runtime = load_default_llm_runtime()
+    return runtime, _route_identity(runtime.resolve_embedding(EMBEDDING_ROLE))
+
+
+def _cache_path(
+    text: str,
+    route: dict[str, str | None],
+    purpose: EmbeddingPurpose = EmbeddingPurpose.DOCUMENT,
+) -> Path:
+    material = json.dumps(
+        {
+            "version": 2,
+            **route,
+            "purpose": purpose.value,
+            "text": text,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    digest = hashlib.sha256(material.encode()).hexdigest()
+    return _CACHE_DIR / digest[:2] / f"{digest}.json"
 
 
 def _read_cached(path: Path) -> list[float] | None:
@@ -51,61 +91,64 @@ def _write_cached(path: Path, vec: list[float]) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(vec))
     except OSError:
-        # Cache is best-effort — losing a write doesn't break correctness,
-        # and we don't want a disk-full event to abort a tag lookup.
+        # Cache is best-effort; an unwritable cache must not block inference.
         pass
 
 
-def embed_text(text: str) -> list[float]:
-    """Embed a single text via Ollama, caching to disk.
-
-    Raises whatever ``_ollama_embed`` raises when Ollama is unreachable;
-    callers that need a soft-fail (e.g. tag dedup falling back to literal
-    string match) should catch the exception themselves.
-    """
-    path = _cache_path(text)
-    cached = _read_cached(path)
-    if cached is not None:
-        return cached
-    vec = _ollama_embed([text])[0]
-    _write_cached(path, vec)
-    return vec
-
-
-def embed_texts(texts: list[str]) -> list[list[float]]:
-    """Batch embed. Only texts missing from the cache hit Ollama.
-
-    Order matches ``texts`` exactly (including duplicates — both copies
-    return the same vector via the cache).
-    """
-    if not texts:
-        return []
+def _embed_texts(
+    texts: list[str],
+    purpose: EmbeddingPurpose,
+    runtime: LLMRuntime,
+    route: dict[str, str | None],
+) -> tuple[list[list[float]], dict[str, str | None]]:
     cached: list[list[float] | None] = []
     pending: list[tuple[int, str]] = []
-    for i, t in enumerate(texts):
-        path = _cache_path(t)
-        hit = _read_cached(path)
-        if hit is not None:
-            cached.append(hit)
-        else:
-            cached.append(None)
-            pending.append((i, t))
+    for index, text in enumerate(texts):
+        hit = _read_cached(_cache_path(text, route, purpose))
+        cached.append(hit)
+        if hit is None:
+            pending.append((index, text))
 
     if pending:
-        # Keep the request stable (no dedup yet) so the index alignment is
-        # trivial. Ollama batches efficiently enough that a few duplicates
-        # in one call are cheaper than the bookkeeping to dedupe-then-fanout.
-        vecs = _ollama_embed([t for _, t in pending])
-        for (i, t), v in zip(pending, vecs, strict=False):
-            cached[i] = v
-            _write_cached(_cache_path(t), v)
+        result = runtime.embed(
+            EMBEDDING_ROLE,
+            EmbeddingRequest(
+                tuple(text for _, text in pending),
+                _SOURCE,
+                purpose=purpose,
+            ),
+        )
+        for (index, text), vector in zip(pending, result.vectors, strict=True):
+            value = list(vector)
+            cached[index] = value
+            _write_cached(_cache_path(text, route, purpose), value)
+    return [vector for vector in cached if vector is not None], route
 
-    # All slots filled by this point.
-    return [v for v in cached if v is not None]
+
+def embed_text(text: str) -> list[float]:
+    """Embed one document snippet through the fixed knowledge role."""
+
+    runtime, route = _resolved_runtime()
+    return _embed_texts([text], EmbeddingPurpose.DOCUMENT, runtime, route)[0][0]
+
+
+def embed_texts(
+    texts: list[str],
+    *,
+    return_route: bool = False,
+) -> list[list[float]] | tuple[list[list[float]], dict[str, str | None]]:
+    """Batch-embed document snippets, preserving input order and duplicates."""
+
+    if not texts and not return_route:
+        return []
+    runtime, route = _resolved_runtime()
+    result = _embed_texts(texts, EmbeddingPurpose.DOCUMENT, runtime, route)
+    return result if return_route else result[0]
 
 
 def cosine(a: list[float], b: list[float]) -> float:
     """Cosine similarity in [-1, 1]. Returns 0.0 for zero vectors."""
+
     if not a or not b:
         return 0.0
     dot = 0.0
@@ -125,23 +168,18 @@ def most_similar(
     candidates: list[str],
     threshold: float = 0.0,
 ) -> tuple[str, float] | None:
-    """Best-match candidate by cosine similarity, gated by ``threshold``.
+    """Return the best candidate when its cosine score meets ``threshold``."""
 
-    Returns ``(candidate, similarity)`` for the top candidate iff its
-    similarity is ``>= threshold``. Returns ``None`` if there are no
-    candidates, or if the best similarity is below the threshold —
-    callers can use the latter to mean "no existing tag is close enough,
-    treat the query as a new tag".
-    """
     if not candidates:
         return None
-    qv = embed_text(query)
-    cvs = embed_texts(candidates)
+    runtime, route = _resolved_runtime()
+    query_vector = _embed_texts([query], EmbeddingPurpose.QUERY, runtime, route)[0][0]
+    candidate_vectors = _embed_texts(
+        candidates, EmbeddingPurpose.DOCUMENT, runtime, route
+    )[0]
     best: tuple[str, float] | None = None
-    for cand, cv in zip(candidates, cvs, strict=False):
-        sim = cosine(qv, cv)
-        if best is None or sim > best[1]:
-            best = (cand, sim)
-    if best is None or best[1] < threshold:
-        return None
-    return best
+    for candidate, vector in zip(candidates, candidate_vectors, strict=True):
+        similarity = cosine(query_vector, vector)
+        if best is None or similarity > best[1]:
+            best = (candidate, similarity)
+    return None if best is None or best[1] < threshold else best

@@ -287,7 +287,16 @@ def test_entity_merge_snapshot_keeps_local_vote_receipts(
     )
     monkeypatch.setattr(
         "chronovisor.core.embedding.embed_texts",
-        lambda values: [[1.0, 0.0] for _ in values],
+        lambda values, **_kwargs: (
+            [[1.0, 0.0] for _ in values],
+            {
+                "role": "knowledge.embedding",
+                "provider": "ollama",
+                "model": "bge-m3",
+                "location": "local",
+                "model_digest": "digest-v1",
+            },
+        ),
     )
 
     consolidated = consolidate_entity_candidates(root=tmp_path, store=store)
@@ -303,6 +312,52 @@ def test_entity_merge_snapshot_keeps_local_vote_receipts(
         "challenger",
     ]
     assert all(len(row["model_sha256"]) == 64 for row in merge["consensus"]["votes"])
+    assert consolidated["embedding_backend"] == "bge-m3"
+    assert consolidated["embedding_route"] == entity_snapshot["embedding_route"]
+    assert entity_snapshot["embedding_route"] == {
+        "role": "knowledge.embedding",
+        "provider": "ollama",
+        "model": "bge-m3",
+        "location": "local",
+        "model_digest": "digest-v1",
+    }
+
+
+def test_entity_merge_embedding_failure_keeps_exact_fallback_route_null(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = KnowledgeGraphStore(tmp_path / "knowledge-graph")
+    store.write_derived_snapshot(
+        "entities",
+        {
+            "schema_version": 1,
+            "candidates": {
+                "one": {
+                    "candidate_id": "one",
+                    "mention": "Gemma 4",
+                    "entity_type": "model",
+                },
+                "two": {
+                    "candidate_id": "two",
+                    "mention": "Ｇｅｍｍａ ４",
+                    "entity_type": "model",
+                },
+            },
+            "merge_candidates": {},
+        },
+    )
+    monkeypatch.setattr(
+        "chronovisor.core.embedding.embed_texts",
+        lambda _values, **_kwargs: (_ for _ in ()).throw(RuntimeError("unavailable")),
+    )
+
+    result = consolidate_entity_candidates(root=tmp_path, store=store, limit=0)
+    snapshot = read_sealed_json(store.entity_snapshot_file)
+
+    assert result["merge_candidates"] == 1
+    assert result["embedding_backend"] == "fallback_exact:RuntimeError"
+    assert result["embedding_route"] is None
+    assert snapshot["embedding_route"] is None
 
 
 def test_entity_merge_path_requires_actual_use_before_authority(tmp_path: Path) -> None:

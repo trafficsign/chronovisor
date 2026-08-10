@@ -50,7 +50,6 @@ RUNTIME_BOUNDARIES = {
 
 # Existing direct production access is migration debt, not an allow-list.
 LEGACY_PRODUCTION_BYPASSES = {
-    "src/chronovisor/core/embedding.py": {"ollama.embed": 2},
     "src/chronovisor/ingest/ingest.py": {
         "ollama.chat": 1,
         "ollama.generate": 1,

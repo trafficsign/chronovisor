@@ -143,19 +143,26 @@ def consolidate_entity_candidates(
     )[:500]
     embeddings: dict[str, Sequence[float]] = {}
     embedding_status = "not_needed"
+    embedding_route: dict[str, str | None] | None = None
     if len(candidates) >= 2:
         try:
             from chronovisor.core.embedding import embed_texts
-            from chronovisor.core.runtime_config import load_embedding_config
 
-            vectors = embed_texts([str(row.get("mention") or "") for row in candidates])
+            embedding_result = embed_texts(
+                [str(row.get("mention") or "") for row in candidates],
+                return_route=True,
+            )
+            if not isinstance(embedding_result, tuple):
+                raise RuntimeError("embedding route identity is unavailable")
+            vectors, embedding_route = embedding_result
             embeddings = {
                 str(row["candidate_id"]): vector
                 for row, vector in zip(candidates, vectors, strict=True)
             }
-            embedding_status = load_embedding_config().model
+            embedding_status = str(embedding_route["model"])
         except Exception as exc:
             embedding_status = f"fallback_exact:{type(exc).__name__}"
+            embedding_route = None
     proposals = generate_merge_candidates(candidates, embeddings=embeddings)
     previous_merges = snapshot.get("merge_candidates")
     merges = (
@@ -295,6 +302,7 @@ def consolidate_entity_candidates(
                 else {},
                 "merge_candidates": dict(sorted(merges.items())),
                 "embedding_backend": embedding_status,
+                "embedding_route": embedding_route,
             },
         )
     return {
@@ -305,5 +313,6 @@ def consolidate_entity_candidates(
         "verified": approved,
         "held": held,
         "embedding_backend": embedding_status,
+        "embedding_route": embedding_route,
         "external_model_calls": 0,
     }

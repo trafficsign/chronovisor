@@ -499,6 +499,7 @@ def test_repository_example_has_representative_local_role_map() -> None:
     config = load_llm_config(Path(__file__).parents[1] / "config.toml.example")
 
     assert set(config.roles) >= {
+        "knowledge.embedding",
         "search.semantic",
         "search.semantic.foreground",
         "search.semantic.incremental",
@@ -517,3 +518,6 @@ def test_repository_example_has_representative_local_role_map() -> None:
         "classification.anchor.primary",
         "classification.anchor.challenger",
     }
+    knowledge_embedding = config.roles["knowledge.embedding"]
+    assert knowledge_embedding.provider_id == "local"
+    assert knowledge_embedding.model == "bge-m3"

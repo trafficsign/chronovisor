@@ -60,6 +60,11 @@ capability = "embedding"
 provider = "local"
 model = "bge-m3"
 
+[llm.roles."knowledge.embedding"]
+capability = "embedding"
+provider = "local"
+model = "bge-m3"
+
 [llm.roles."search.rerank"]
 capability = "rerank"
 provider = "local_reranker"
