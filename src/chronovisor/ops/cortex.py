@@ -15,6 +15,7 @@ from typing import Any
 
 from chronovisor.core.durable_state import DurableStateError, read_sealed_json
 from chronovisor.core.frontmatter import parse as parse_frontmatter
+from chronovisor.core.index_store import contained_file
 from chronovisor.core.knowledge_graph_store import KnowledgeGraphStore
 from chronovisor.core.link_fix import extract_targets
 from chronovisor.core.raw_segment import RawSegmentCommit, RawSegmentCorrupt
@@ -130,12 +131,21 @@ class _Page:
 
 def _page_sources(root: Path) -> list[tuple[Path, str]]:
     sources: list[tuple[Path, str]] = []
-    pages_dir = root / "pages"
-    system_dir = root / "system"
-    if pages_dir.exists():
-        sources.extend((path, "pages") for path in pages_dir.rglob("*.md"))
-    if system_dir.exists():
-        sources.extend((path, "system") for path in system_dir.glob("*.md"))
+    for directory, source_kind, recursive in (
+        (root / "pages", "pages", True),
+        (root / "system", "system", False),
+    ):
+        if not directory.is_dir():
+            continue
+        try:
+            candidates = (
+                directory.rglob("*.md") if recursive else directory.glob("*.md")
+            )
+            for path in candidates:
+                if (resolved := contained_file(path, directory)) is not None:
+                    sources.append((resolved, source_kind))
+        except (OSError, RuntimeError):
+            continue
     return sorted(sources, key=lambda item: str(item[0]))
 
 

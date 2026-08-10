@@ -1,12 +1,28 @@
 from __future__ import annotations
 
 import json
+import stat
 from pathlib import Path
 
 import pytest
 
 from chronovisor.core import store
 from chronovisor.hosts import server
+
+
+def test_init_chronovisor_corrects_private_directory_modes(tmp_path: Path) -> None:
+    root = tmp_path / "wiki"
+    context = store.RuntimeContext(root)
+    for directory in (root, context.raw_dir, context.pages_dir, context.system_dir):
+        directory.mkdir(parents=True, exist_ok=True)
+        directory.chmod(0o755)
+
+    store.init_chronovisor(context)
+
+    assert all(
+        stat.S_IMODE(directory.stat().st_mode) == 0o700
+        for directory in (root, context.raw_dir, context.pages_dir, context.system_dir)
+    )
 
 
 def test_find_page_rejects_paths_and_symlink_escape(

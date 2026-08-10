@@ -163,8 +163,11 @@ def allocate_raw_path(prefix: str = "", topic_slug: str = "") -> Path:
         suffix = secrets.token_hex(4)
         path = RAW_DIR / f".{ts}{readable}-{suffix}.tmp"
         try:
-            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
-            os.close(fd)
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            try:
+                os.fchmod(fd, 0o600)
+            finally:
+                os.close(fd)
             return path
         except FileExistsError as exc:
             last_err = exc
@@ -235,13 +238,14 @@ def publish_raw_idempotent(
             os.fsync(handle.fileno())
         try:
             link_raw_no_replace(staging, target)
-        except FileExistsError as exc:
+        except FileExistsError as publish_error:
             try:
+                target.chmod(0o600)
                 existing = target.read_text(encoding="utf-8")
-            except (OSError, UnicodeError) as exc:
+            except (OSError, UnicodeError) as read_error:
                 raise RuntimeError(
                     "idempotent raw target exists but cannot be verified"
-                ) from exc
+                ) from read_error
             if existing != content:
                 incoming_receipt = parse_save_transaction_receipt(content)
                 existing_receipt = parse_save_transaction_receipt(existing)
@@ -253,7 +257,7 @@ def publish_raw_idempotent(
                 ):
                     raise RuntimeError(
                         "idempotency key collision with different or corrupt raw content"
-                    ) from exc
+                    ) from publish_error
             return target, True
         fsync_directory(RAW_DIR)
         return target, False

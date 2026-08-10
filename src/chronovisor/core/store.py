@@ -171,8 +171,10 @@ def init_chronovisor(context: RuntimeContext | None = None) -> None:
     """Initialize the Chronovisor directory structure."""
     if context is None:
         raw_dir, pages_dir, system_dir = RAW_DIR, PAGES_DIR, SYSTEM_DIR
+        root = raw_dir.parent
         index_file, log_file, schema_file = INDEX_FILE, LOG_FILE, SCHEMA_FILE
     else:
+        root = context.root
         raw_dir, pages_dir, system_dir = (
             context.raw_dir,
             context.pages_dir,
@@ -184,9 +186,9 @@ def init_chronovisor(context: RuntimeContext | None = None) -> None:
             context.schema_file,
         )
 
-    raw_dir.mkdir(parents=True, exist_ok=True)
-    pages_dir.mkdir(parents=True, exist_ok=True)
-    system_dir.mkdir(parents=True, exist_ok=True)
+    for directory in (root, raw_dir, pages_dir, system_dir):
+        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        directory.chmod(0o700)
 
     if not index_file.exists():
         index_file.write_text(

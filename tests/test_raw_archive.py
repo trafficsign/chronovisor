@@ -118,6 +118,42 @@ def test_v2_manual_raw_is_published_directly_under_capture_date(
     assert path.read_bytes() == b"manual bytes\n"
     assert path.relative_to(raw_dir).parts[:3] == tuple(capture_date().split("/"))
     assert path.name.startswith("manual-")
+    assert path.stat().st_mode & 0o777 == 0o600
+
+
+def test_legacy_raw_staging_and_final_files_are_private(
+    tmp_path: Path, monkeypatch
+) -> None:
+    raw_dir = tmp_path / "raw"
+    monkeypatch.setenv("CHRONOVISOR_RAW_LAYOUT", "legacy")
+    monkeypatch.setattr(raw_record, "RAW_DIR", raw_dir)
+
+    staging = raw_record.allocate_raw_path()
+    published = raw_record.publish_raw("manual bytes\n", prefix="api")
+
+    assert staging.stat().st_mode & 0o777 == 0o600
+    assert published.stat().st_mode & 0o777 == 0o600
+
+
+def test_idempotent_raw_corrects_existing_target_mode(
+    tmp_path: Path, monkeypatch
+) -> None:
+    raw_dir = tmp_path / "raw"
+    raw_dir.mkdir()
+    target = raw_dir / "save-existing.md"
+    target.write_text("same bytes\n", encoding="utf-8")
+    target.chmod(0o644)
+    monkeypatch.setenv("CHRONOVISOR_RAW_LAYOUT", "legacy")
+    monkeypatch.setattr(raw_record, "RAW_DIR", raw_dir)
+
+    published, deduplicated = raw_record.publish_raw_idempotent(
+        "same bytes\n",
+        idempotency_key="existing",
+    )
+
+    assert published == target
+    assert deduplicated is True
+    assert target.stat().st_mode & 0o777 == 0o600
 
 
 def test_completed_projection_json_archives_with_processed_bundle(

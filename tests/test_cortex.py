@@ -125,6 +125,54 @@ def test_build_cortex_graph_uses_local_wiki_without_exposing_bodies(
     assert all("content" not in node and "body" not in node for node in graph["nodes"])
 
 
+def test_build_cortex_graph_skips_descendant_symlinks(tmp_path: Path) -> None:
+    root = tmp_path / "chronovisor"
+    _write_page(
+        root / "pages" / "safe.md",
+        title="Safe",
+        body="Safe body.",
+    )
+    outside = tmp_path / "outside.md"
+    _write_page(outside, title="Outside secret", body="Outside secret body.")
+    inside = root / "pages" / "inside.private"
+    _write_page(inside, title="Inside secret", body="Inside secret body.")
+    (root / "pages" / "outside-link.md").symlink_to(outside)
+    (root / "pages" / "inside-link.md").symlink_to(inside)
+
+    graph = cortex.build_cortex_graph(root, use_cache=False)
+    encoded = json.dumps(graph)
+
+    assert [node["id"] for node in graph["nodes"]] == ["safe"]
+    assert "Outside secret" not in encoded
+    assert "Inside secret" not in encoded
+
+
+def test_build_cortex_graph_skips_symlinked_namespace_roots(tmp_path: Path) -> None:
+    root = tmp_path / "chronovisor"
+    root.mkdir()
+    outside_pages = tmp_path / "outside-pages"
+    _write_page(
+        outside_pages / "outside.md",
+        title="Outside root secret",
+        body="Outside root body.",
+    )
+    inside_system = root / "private-system"
+    _write_page(
+        inside_system / "inside.md",
+        title="Inside root secret",
+        body="Inside root body.",
+    )
+    (root / "pages").symlink_to(outside_pages, target_is_directory=True)
+    (root / "system").symlink_to(inside_system, target_is_directory=True)
+
+    graph = cortex.build_cortex_graph(root, use_cache=False)
+    encoded = json.dumps(graph)
+
+    assert graph["nodes"] == []
+    assert "Outside root secret" not in encoded
+    assert "Inside root secret" not in encoded
+
+
 def test_build_cortex_graph_cache_invalidates_when_a_page_changes(
     tmp_path: Path,
 ) -> None:

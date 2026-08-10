@@ -88,7 +88,7 @@ def _normalize_sensitivity(value: object, *, path: Path | None = None) -> str:
     return "normal"
 
 
-def _contained_file(path: Path, root: Path) -> Path | None:
+def contained_file(path: Path, root: Path) -> Path | None:
     """Return a regular file only when its real path stays in its namespace."""
 
     if root.is_symlink():
@@ -116,7 +116,7 @@ def _read_bytes_stable(path: Path, root: Path, retries: int = 1) -> bytes | None
     """
     last: bytes | None = None
     for _ in range(retries + 1):
-        resolved = _contained_file(path, root)
+        resolved = contained_file(path, root)
         if resolved is None:
             return None
         try:
@@ -128,7 +128,7 @@ def _read_bytes_stable(path: Path, root: Path, retries: int = 1) -> bytes | None
         if (st_before.st_mtime_ns, st_before.st_size) == (
             st_after.st_mtime_ns,
             st_after.st_size,
-        ) and _contained_file(path, root) == resolved:
+        ) and contained_file(path, root) == resolved:
             return data
         last = data
     return last
@@ -355,7 +355,7 @@ class IndexStore:
                 )
                 if path.name in reserved:
                     continue
-                resolved = _contained_file(path, root)
+                resolved = contained_file(path, root)
                 if resolved is None:
                     continue
                 try:
@@ -482,7 +482,7 @@ class IndexStore:
         size: int,
     ) -> PageEntry | None:
         root = SYSTEM_DIR if is_system else PAGES_DIR
-        resolved = _contained_file(path, root)
+        resolved = contained_file(path, root)
         if resolved is None:
             return None
         data = _read_bytes_stable(resolved, root)

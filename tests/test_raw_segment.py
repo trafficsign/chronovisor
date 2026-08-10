@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import stat
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
@@ -74,6 +75,33 @@ def test_append_uses_date_only_layout_and_is_idempotent(tmp_path: Path) -> None:
     assert first.data_path.read_bytes() == raw
 
 
+def test_append_creates_and_corrects_private_segment_files(tmp_path: Path) -> None:
+    raw_dir = tmp_path / "raw"
+    source = tmp_path / "session.jsonl"
+    raw = _source(source)
+    first = _append(raw_dir, source, raw)
+    first.data_path.chmod(0o644)
+    first.commit_path.chmod(0o644)
+
+    append_capture(
+        raw_dir=raw_dir,
+        raw_id="save-tx-2.md",
+        idempotency_key="tx-2",
+        host="codex",
+        session_key=SESSION_KEY,
+        session_id="session-1",
+        source_file=source,
+        after_line=3,
+        until_line=4,
+        source_bytes=b'{"next":true}\n',
+        record_count=1,
+        now=NOW,
+    )
+
+    assert stat.S_IMODE(first.data_path.stat().st_mode) == 0o600
+    assert stat.S_IMODE(first.commit_path.stat().st_mode) == 0o600
+
+
 def test_append_repairs_data_without_a_durable_commit(tmp_path: Path) -> None:
     raw_dir = tmp_path / "raw"
     source = tmp_path / "session.jsonl"
@@ -124,6 +152,8 @@ def test_seal_verifies_full_restore_and_preserves_logical_receipts(
     assert located is not None
     assert located.sealed
     assert located.commit.sha256 == receipt.commit.sha256
+    assert stat.S_IMODE(sealed_path.stat().st_mode) == 0o600
+    assert stat.S_IMODE(manifest_path.stat().st_mode) == 0o600
 
 
 def test_sealed_receipt_rejects_changed_idempotent_payload(tmp_path: Path) -> None:

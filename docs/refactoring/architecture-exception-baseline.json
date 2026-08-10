@@ -993,6 +993,7 @@
       "arch:9a9fe965e007af23fd5986b45dba157f92ba82fee337f5d174281561b520cb58",
       "arch:9aa68193b39e1f5c4acb6a4b08b06697a82a9ab50f7f342fcae16a21f485c063",
       "arch:9aa912a9cc12047184df378180c071309d5b7768c7cb822a7be56aff19d27baa",
+      "arch:9ac0d7b49d5343bb0a6493e3f06e8949d08c36fc3d6c5873c4b123bc9a05527a",
       "arch:9b1a8b30c8baa86ab9cac33824a418984c1e20856647915d89819a2c3c4634da",
       "arch:9b5be3d4aba48b9f8998ddd50385f385c61b5fe189b64aa5797078d83a4e87b7",
       "arch:9b5e96b50ed8a75db90ffea722390e5cac4ecc17e4b4b690cc0cd08589591e05",
@@ -2989,7 +2990,7 @@
       "by_category": {
         "cross_domain_edge": 44
       },
-      "cross_domain_sites": 1378,
+      "cross_domain_sites": 1379,
       "production_to_lab_edges": 0,
       "production_to_lab_static_sites": 0,
       "production_to_lab_dynamic_sites": 0,

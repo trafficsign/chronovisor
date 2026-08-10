@@ -141,8 +141,19 @@ def _is_sha256(value: object) -> TypeGuard[str]:
     )
 
 
+def _open_private_fd(path: Path, flags: int) -> int:
+    descriptor = os.open(path, flags, 0o600)
+    try:
+        os.fchmod(descriptor, 0o600)
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return descriptor
 
 
+def _chmod_private(path: Path) -> None:
+    if path.exists():
+        path.chmod(0o600)
 
 
 def _fsync_directory(path: Path) -> None:
@@ -161,10 +172,9 @@ def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
         + "\n"
     ).encode("utf-8")
     try:
-        descriptor = os.open(
+        descriptor = _open_private_fd(
             temporary,
             os.O_CREAT | os.O_EXCL | os.O_WRONLY,
-            0o600,
         )
         with os.fdopen(descriptor, "wb") as handle:
             handle.write(encoded)
@@ -262,9 +272,10 @@ def repair_open_segment(
     """Discard only bytes that have no durable commit receipt."""
 
     commit_path.parent.mkdir(parents=True, exist_ok=True)
+    _chmod_private(commit_path)
     complete = _complete_journal_bytes(commit_path)
     if commit_path.exists() and commit_path.read_bytes() != complete:
-        with commit_path.open("r+b") as handle:
+        with os.fdopen(_open_private_fd(commit_path, os.O_RDWR), "r+b") as handle:
             handle.truncate(len(complete))
             handle.flush()
             os.fsync(handle.fileno())
@@ -275,11 +286,12 @@ def repair_open_segment(
         if committed_end:
             raise RawSegmentCorrupt("commit journal exists but segment data is missing")
         data_path.touch(mode=0o600)
+    _chmod_private(data_path)
     actual_size = data_path.stat().st_size
     if actual_size < committed_end:
         raise RawSegmentCorrupt("segment data is shorter than its committed range")
     if actual_size > committed_end:
-        with data_path.open("r+b") as handle:
+        with os.fdopen(_open_private_fd(data_path, os.O_RDWR), "r+b") as handle:
             handle.truncate(committed_end)
             handle.flush()
             os.fsync(handle.fileno())
@@ -412,7 +424,13 @@ def append_capture(
     identity_lock_path = (
         identity_lock_dir / f"idempotency-{_sha256(raw_id.encode())[:2]}.lock"
     )
-    with identity_lock_path.open("a+b") as identity_lock:
+    with os.fdopen(
+        _open_private_fd(
+            identity_lock_path,
+            os.O_CREAT | os.O_RDWR | os.O_APPEND,
+        ),
+        "a+b",
+    ) as identity_lock:
         fcntl.flock(identity_lock.fileno(), fcntl.LOCK_EX)
         try:
             return _append_capture_locked(
@@ -471,7 +489,10 @@ def _append_capture_locked(
     day_dir = raw_dir / capture_date(now)
     day_dir.mkdir(parents=True, exist_ok=True)
     lock_path = day_dir / f".{prefix}.lock"
-    with lock_path.open("a+b") as lock_handle:
+    with os.fdopen(
+        _open_private_fd(lock_path, os.O_CREAT | os.O_RDWR | os.O_APPEND),
+        "a+b",
+    ) as lock_handle:
         fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
         try:
             existing = find_commit(raw_dir, raw_id)
@@ -512,7 +533,13 @@ def _append_capture_locked(
                     commits[-1].offset + commits[-1].length if commits else 0
                 )
 
-            with data_path.open("ab") as data_handle:
+            with os.fdopen(
+                _open_private_fd(
+                    data_path,
+                    os.O_CREAT | os.O_WRONLY | os.O_APPEND,
+                ),
+                "ab",
+            ) as data_handle:
                 data_handle.write(source_bytes)
                 data_handle.flush()
                 os.fsync(data_handle.fileno())
@@ -544,7 +571,13 @@ def _append_capture_locked(
                 )
                 + "\n"
             ).encode("utf-8")
-            with commit_path.open("ab") as commit_handle:
+            with os.fdopen(
+                _open_private_fd(
+                    commit_path,
+                    os.O_CREAT | os.O_WRONLY | os.O_APPEND,
+                ),
+                "ab",
+            ) as commit_handle:
                 commit_handle.write(encoded)
                 commit_handle.flush()
                 os.fsync(commit_handle.fileno())
@@ -605,7 +638,10 @@ def seal_segment(
     base = data_path.name.removesuffix(".jsonl.open")
     prefix = re.sub(r"-part-\d{3}$", "", base)
     lock_path = data_path.parent / f".{prefix}.lock"
-    with lock_path.open("a+b") as lock_handle:
+    with os.fdopen(
+        _open_private_fd(lock_path, os.O_CREAT | os.O_RDWR | os.O_APPEND),
+        "a+b",
+    ) as lock_handle:
         fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
         temporary = compressed_path.with_name(
             f".{compressed_path.name}.{os.getpid()}.tmp"
@@ -619,7 +655,16 @@ def seal_segment(
                     raise RawSegmentError("cannot seal an empty segment")
                 logical_bytes = data_path.stat().st_size
                 logical_sha256 = _sha256_path(data_path)
-                with data_path.open("rb") as source, temporary.open("wb") as target:
+                with (
+                    data_path.open("rb") as source,
+                    os.fdopen(
+                        _open_private_fd(
+                            temporary,
+                            os.O_CREAT | os.O_WRONLY | os.O_TRUNC,
+                        ),
+                        "wb",
+                    ) as target,
+                ):
                     zstd.ZstdCompressor(level=compression_level).copy_stream(
                         source, target
                     )
