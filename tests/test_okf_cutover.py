@@ -100,7 +100,7 @@ def test_cutover_publishes_all_assets_and_keeps_rollback_backup(tmp_path: Path) 
 
     assert execute_okf_cutover(
         source, runtime, "run-001", is_quiescent=lambda: True
-    ) == "committed"
+    ) == "committed-needs-rebuild"
 
     assert _live(source, runtime) == new
     assert (
@@ -113,12 +113,20 @@ def test_cutover_publishes_all_assets_and_keeps_rollback_backup(tmp_path: Path) 
         },
     ) == old
     assert _static_source(source) == static
-    assert _state(workspace) == "committed"
+    assert _state(workspace) == "committed-needs-rebuild"
     assert json.loads((workspace / "journal.json").read_bytes())["old_activity"][
         "present"
     ] is True
-    assert not (workspace / RESTART_REFUSAL_FILENAME).exists()
-    assert okf_startup_allowed(source, runtime, "run-001")
+    sentinel = json.loads((workspace / RESTART_REFUSAL_FILENAME).read_bytes())
+    assert sentinel["state"] == "committed-needs-rebuild"
+    assert discover_okf_startup(source, runtime) == OKFStartupDecision(
+        False,
+        "blocked",
+        "committed-needs-rebuild",
+        "rebuild_required",
+        "run-001",
+    )
+    assert not okf_startup_allowed(source, runtime, "run-001")
 
 
 def test_system_identity_hashes_survive_interrupted_cutover_recovery(
@@ -182,7 +190,7 @@ def test_cutover_accepts_absent_old_activity_and_records_skipped_backup(
 
     assert execute_okf_cutover(
         source, runtime, "run-001", is_quiescent=lambda: True
-    ) == "committed"
+    ) == "committed-needs-rebuild"
 
     journal = json.loads((workspace / "journal.json").read_bytes())
     assert journal["old_activity"] == {"present": False}
@@ -190,7 +198,7 @@ def test_cutover_accepts_absent_old_activity_and_records_skipped_backup(
     assert not (workspace / "rollback-backup" / "activity.jsonl").exists()
     assert workspace / "rollback-backup" / "activity.jsonl" not in destinations
     assert (runtime / "activity.jsonl").read_bytes() == new_activity
-    assert okf_startup_allowed(source, runtime, "run-001")
+    assert not okf_startup_allowed(source, runtime, "run-001")
 
 
 def test_quiescence_failure_performs_no_rename(
@@ -274,18 +282,64 @@ def test_every_cutover_boundary_recovers_to_all_old_or_all_new(
         )
 
     assert _static_source(source) == static
-    if fault_point != "after-sentinel-remove":
-        assert not okf_startup_allowed(source, runtime, "run-001")
+    assert not okf_startup_allowed(source, runtime, "run-001")
     terminal = recover_okf_cutover(
         source, runtime, "run-001", is_quiescent=lambda: True
     )
     observed = _live(source, runtime)
     assert (terminal == "rollback-complete" and observed == old) or (
-        terminal == "committed" and observed == new
+        terminal == "committed-needs-rebuild" and observed == new
     )
     assert _static_source(source) == static
-    assert not (workspace / RESTART_REFUSAL_FILENAME).exists()
-    assert okf_startup_allowed(source, runtime, "run-001")
+    sentinel_exists = (workspace / RESTART_REFUSAL_FILENAME).exists()
+    assert sentinel_exists is (terminal == "committed-needs-rebuild")
+    assert okf_startup_allowed(source, runtime, "run-001") is (
+        terminal == "rollback-complete"
+    )
+    if terminal == "committed-needs-rebuild":
+        assert discover_okf_startup(source, runtime).category == "rebuild_required"
+
+
+@pytest.mark.parametrize(
+    ("fault_point", "sentinel_state"),
+    [
+        ("after-terminal-journal", "in-progress"),
+        ("after-terminal-sentinel", "committed-needs-rebuild"),
+    ],
+)
+def test_terminal_crash_recovery_converges_to_pending_rebuild(
+    tmp_path: Path, fault_point: str, sentinel_state: str
+) -> None:
+    source, runtime, workspace = _setup(tmp_path)
+
+    def crash(point: str) -> None:
+        if point == fault_point:
+            raise InjectedCrash(point)
+
+    with pytest.raises(InjectedCrash, match=fault_point):
+        execute_okf_cutover(
+            source,
+            runtime,
+            "run-001",
+            is_quiescent=lambda: True,
+            fault_inject=crash,
+        )
+
+    assert _state(workspace) == "committed-needs-rebuild"
+    sentinel_path = workspace / RESTART_REFUSAL_FILENAME
+    assert json.loads(sentinel_path.read_bytes())["state"] == sentinel_state
+    assert recover_okf_cutover(
+        source, runtime, "run-001", is_quiescent=lambda: True
+    ) == "committed-needs-rebuild"
+    assert json.loads(sentinel_path.read_bytes())["state"] == (
+        "committed-needs-rebuild"
+    )
+    converged = _tree(workspace)
+    assert recover_okf_cutover(
+        source, runtime, "run-001", is_quiescent=lambda: True
+    ) == "committed-needs-rebuild"
+    assert _tree(workspace) == converged
+    assert discover_okf_startup(source, runtime).category == "rebuild_required"
 
 
 def test_startup_gate_rejects_unknown_state_and_terminal_hash_mismatch(
@@ -294,7 +348,7 @@ def test_startup_gate_rejects_unknown_state_and_terminal_hash_mismatch(
     source, runtime, workspace = _setup(tmp_path)
     assert not okf_startup_allowed(source, runtime, "run-001")
     execute_okf_cutover(source, runtime, "run-001", is_quiescent=lambda: True)
-    assert okf_startup_allowed(source, runtime, "run-001")
+    assert not okf_startup_allowed(source, runtime, "run-001")
 
     journal_path = workspace / "journal.json"
     journal = json.loads(journal_path.read_bytes())
@@ -307,6 +361,33 @@ def test_startup_gate_rejects_unknown_state_and_terminal_hash_mismatch(
     activity = runtime / "activity.jsonl"
     activity.write_bytes(activity.read_bytes() + b"tamper")
     assert not okf_startup_allowed(source, runtime, "run-001")
+
+
+@pytest.mark.parametrize("mutation", ["asset", "sentinel"])
+def test_pending_rebuild_recovery_validates_assets_and_sentinel(
+    tmp_path: Path, mutation: str
+) -> None:
+    source, runtime, workspace = _setup(tmp_path)
+    execute_okf_cutover(source, runtime, "run-001", is_quiescent=lambda: True)
+    if mutation == "asset":
+        activity = runtime / "activity.jsonl"
+        activity.write_bytes(activity.read_bytes() + b"tamper")
+    else:
+        sentinel_path = workspace / RESTART_REFUSAL_FILENAME
+        sentinel = json.loads(sentinel_path.read_bytes())
+        sentinel["state"] = "prepared"
+        sentinel_path.write_bytes(canonical_json_line_bytes_strict(sentinel))
+    before = _tree(workspace)
+
+    with pytest.raises(ValueError):
+        recover_okf_cutover(
+            source, runtime, "run-001", is_quiescent=lambda: True
+        )
+
+    assert _tree(workspace) == before
+    assert discover_okf_startup(source, runtime).category == (
+        "migration_proof_invalid"
+    )
 
 
 def test_unsafe_run_id_and_symlinked_staging_are_rejected(
@@ -359,57 +440,21 @@ def test_recovery_rejects_tampered_backup_and_keeps_gate_closed(
     assert (workspace / RESTART_REFUSAL_FILENAME).exists()
 
 
-def test_committed_cleanup_publishes_content_free_receipt_and_allows_later_writes(
-    tmp_path: Path,
-) -> None:
+def test_pending_rebuild_cleanup_is_rejected_without_mutation(tmp_path: Path) -> None:
     source, runtime, workspace = _setup(tmp_path)
-    execute_okf_cutover(source, runtime, "run-001", is_quiescent=lambda: True)
-    live_before = _live(source, runtime)
-    raw_before = _tree(source / "raw")
-    unrelated = runtime / "status.json"
-    unrelated.write_text('{"private":"runtime-canary"}\n', encoding="utf-8")
-
-    assert cleanup_okf_cutover(
+    assert execute_okf_cutover(
         source, runtime, "run-001", is_quiescent=lambda: True
-    ) == "committed"
+    ) == "committed-needs-rebuild"
+    before = _tree(workspace)
 
-    assert [path.name for path in workspace.iterdir()] == [RECEIPT_FILENAME]
-    receipt_raw = (workspace / RECEIPT_FILENAME).read_bytes()
-    receipt = json.loads(receipt_raw)
-    assert set(receipt) == {
-        "schema",
-        "version",
-        "run_id",
-        "state",
-        "manifest_sha256",
-        "seal_sha256",
-    }
-    assert receipt["schema"] == RECEIPT_SCHEMA
-    assert receipt["state"] == "committed"
-    assert receipt_raw == canonical_json_line_bytes_strict(receipt)
-    assert len(receipt["manifest_sha256"]) == 64
-    assert not any(str(value).startswith("/") for value in receipt.values())
-    assert stat.S_IMODE((workspace / RECEIPT_FILENAME).stat().st_mode) == 0o600
-    assert "runtime-canary" not in receipt_raw.decode()
-    assert "Private state summary" not in receipt_raw.decode()
-    assert _live(source, runtime) == live_before
-    assert _tree(source / "raw") == raw_before
-    assert unrelated.read_text(encoding="utf-8") == '{"private":"runtime-canary"}\n'
+    with pytest.raises(ValueError, match="rebuild is required"):
+        cleanup_okf_cutover(
+            source, runtime, "run-001", is_quiescent=lambda: True
+        )
 
-    page = source / "pages" / "notes" / "source.md"
-    system = source / "system" / "current-state.md"
-    activity = runtime / "activity.jsonl"
-    for path in (page, system, activity):
-        path.write_bytes(path.read_bytes() + b"\n")
-    assert discover_okf_startup(source, runtime) == OKFStartupDecision(
-        True, "okf_v0_2", "committed", "ok", "run-001"
-    )
-    assert okf_startup_allowed(source, runtime, "run-001")
-    before_idempotent = _tree(workspace)
-    assert cleanup_okf_cutover(
-        source, runtime, "run-001", is_quiescent=lambda: False
-    ) == "committed"
-    assert _tree(workspace) == before_idempotent
+    assert _tree(workspace) == before
+    assert not (workspace / RECEIPT_FILENAME).exists()
+    assert discover_okf_startup(source, runtime).category == "rebuild_required"
 
 
 def test_rollback_cleanup_publishes_legacy_receipt(tmp_path: Path) -> None:
@@ -423,6 +468,21 @@ def test_rollback_cleanup_publishes_legacy_receipt(tmp_path: Path) -> None:
     ) == "rollback-complete"
 
     assert [path.name for path in workspace.iterdir()] == [RECEIPT_FILENAME]
+    receipt_path = workspace / RECEIPT_FILENAME
+    receipt_raw = receipt_path.read_bytes()
+    receipt = json.loads(receipt_raw)
+    assert set(receipt) == {
+        "schema",
+        "version",
+        "run_id",
+        "state",
+        "manifest_sha256",
+        "seal_sha256",
+    }
+    assert receipt["schema"] == RECEIPT_SCHEMA
+    assert receipt["state"] == "rollback-complete"
+    assert receipt_raw == canonical_json_line_bytes_strict(receipt)
+    assert stat.S_IMODE(receipt_path.stat().st_mode) == 0o600
     assert discover_okf_startup(source, runtime) == OKFStartupDecision(
         True, "legacy", "rollback-complete", "ok", "run-001"
     )
@@ -434,7 +494,7 @@ def test_every_cleanup_boundary_remains_blocked_or_safely_complete(
     tmp_path: Path, fault_point: str
 ) -> None:
     source, runtime, workspace = _setup(tmp_path)
-    execute_okf_cutover(source, runtime, "run-001", is_quiescent=lambda: True)
+    recover_okf_cutover(source, runtime, "run-001", is_quiescent=lambda: True)
 
     def crash(point: str) -> None:
         if point == fault_point:
@@ -469,50 +529,61 @@ def test_every_cleanup_boundary_remains_blocked_or_safely_complete(
         assert not decision.allowed
     assert cleanup_okf_cutover(
         source, runtime, "run-001", is_quiescent=lambda: True
-    ) == "committed"
+    ) == "rollback-complete"
     assert [path.name for path in workspace.iterdir()] == [RECEIPT_FILENAME]
     assert discover_okf_startup(source, runtime).allowed
 
 
-def test_committed_receipt_accepts_removed_legacy_root_documents(
+def test_legacy_committed_journal_fails_closed_without_migration(
     tmp_path: Path,
 ) -> None:
-    source, runtime, _workspace = _setup(tmp_path)
+    source, runtime, workspace = _setup(tmp_path)
     execute_okf_cutover(source, runtime, "run-001", is_quiescent=lambda: True)
-    cleanup_okf_cutover(source, runtime, "run-001", is_quiescent=lambda: True)
-    for name in ("index.md", "log.md", "schema.md"):
-        (source / name).unlink()
+    journal_path = workspace / "journal.json"
+    journal = json.loads(journal_path.read_bytes())
+    journal["state"] = "committed"
+    journal_path.write_bytes(canonical_json_line_bytes_strict(journal))
+    (workspace / RESTART_REFUSAL_FILENAME).unlink()
+    before = _tree(workspace)
 
     assert discover_okf_startup(source, runtime) == OKFStartupDecision(
-        True, "okf_v0_2", "committed", "ok", "run-001"
+        False, "blocked", "committed", "migration_proof_invalid", "run-001"
     )
-    assert okf_startup_allowed(source, runtime, "run-001")
+    with pytest.raises(ValueError, match="legacy committed"):
+        recover_okf_cutover(
+            source, runtime, "run-001", is_quiescent=lambda: True
+        )
+    with pytest.raises(ValueError, match="legacy committed"):
+        cleanup_okf_cutover(
+            source, runtime, "run-001", is_quiescent=lambda: True
+        )
+    assert _tree(workspace) == before
 
 
-@pytest.mark.parametrize(
-    "mutation",
-    ["partial-root", "missing-reserved", "pages-symlink", "activity-symlink"],
-)
-def test_committed_receipt_rejects_unsafe_or_incomplete_live_layout(
-    tmp_path: Path, mutation: str
+def test_legacy_committed_receipt_fails_closed_without_migration(
+    tmp_path: Path,
 ) -> None:
-    source, runtime, _workspace = _setup(tmp_path)
-    execute_okf_cutover(source, runtime, "run-001", is_quiescent=lambda: True)
+    source, runtime, workspace = _setup(tmp_path)
+    recover_okf_cutover(source, runtime, "run-001", is_quiescent=lambda: True)
     cleanup_okf_cutover(source, runtime, "run-001", is_quiescent=lambda: True)
+    receipt_path = workspace / RECEIPT_FILENAME
+    receipt = json.loads(receipt_path.read_bytes())
+    receipt.pop("seal_sha256")
+    receipt["state"] = "committed"
+    receipt_path.write_bytes(
+        canonical_json_line_bytes_strict(seal_object(receipt))
+    )
+    before = _tree(workspace)
 
-    if mutation == "partial-root":
-        (source / "index.md").unlink()
-    elif mutation == "missing-reserved":
-        (source / "pages" / "index.md").unlink()
-    elif mutation == "pages-symlink":
-        shutil.rmtree(source / "pages")
-        (source / "pages").symlink_to(source / "system")
-    else:
-        (runtime / "activity.jsonl").unlink()
-        (runtime / "activity.jsonl").symlink_to(source / "index.md")
-
-    assert not discover_okf_startup(source, runtime).allowed
+    assert discover_okf_startup(source, runtime).category == (
+        "migration_receipt_invalid"
+    )
     assert not okf_startup_allowed(source, runtime, "run-001")
+    with pytest.raises(ValueError, match="receipt state"):
+        cleanup_okf_cutover(
+            source, runtime, "run-001", is_quiescent=lambda: True
+        )
+    assert _tree(workspace) == before
 
 
 def test_rollback_receipt_requires_all_legacy_root_documents(tmp_path: Path) -> None:
@@ -520,6 +591,21 @@ def test_rollback_receipt_requires_all_legacy_root_documents(tmp_path: Path) -> 
     recover_okf_cutover(source, runtime, "run-001", is_quiescent=lambda: True)
     cleanup_okf_cutover(source, runtime, "run-001", is_quiescent=lambda: True)
     (source / "index.md").unlink()
+
+    assert not discover_okf_startup(source, runtime).allowed
+    assert not okf_startup_allowed(source, runtime, "run-001")
+
+
+@pytest.mark.parametrize("mutation", ["unknown", "multiple"])
+def test_startup_allowed_uses_full_workspace_discovery(
+    tmp_path: Path, mutation: str
+) -> None:
+    source, runtime, workspace = _setup(tmp_path)
+    recover_okf_cutover(source, runtime, "run-001", is_quiescent=lambda: True)
+    if mutation == "unknown":
+        (workspace / "unknown").write_text("canary", encoding="utf-8")
+    else:
+        (runtime / "migrations" / "run-002").mkdir()
 
     assert not discover_okf_startup(source, runtime).allowed
     assert not okf_startup_allowed(source, runtime, "run-001")
@@ -533,7 +619,7 @@ def test_receipt_only_startup_rejects_invalid_or_ambiguous_state(
     tmp_path: Path, mutation: str
 ) -> None:
     source, runtime, workspace = _setup(tmp_path)
-    execute_okf_cutover(source, runtime, "run-001", is_quiescent=lambda: True)
+    recover_okf_cutover(source, runtime, "run-001", is_quiescent=lambda: True)
     cleanup_okf_cutover(source, runtime, "run-001", is_quiescent=lambda: True)
     receipt_path = workspace / RECEIPT_FILENAME
     receipt = json.loads(receipt_path.read_bytes())
@@ -572,7 +658,7 @@ def test_cleanup_resume_rejects_receipt_hash_not_bound_to_terminal_journal(
     tmp_path: Path,
 ) -> None:
     source, runtime, workspace = _setup(tmp_path)
-    execute_okf_cutover(source, runtime, "run-001", is_quiescent=lambda: True)
+    recover_okf_cutover(source, runtime, "run-001", is_quiescent=lambda: True)
 
     def crash(point: str) -> None:
         if point == "after-receipt-write":
@@ -602,7 +688,7 @@ def test_cleanup_rejects_unknown_artifact_without_mutation_or_content_leak(
     tmp_path: Path,
 ) -> None:
     source, runtime, workspace = _setup(tmp_path)
-    execute_okf_cutover(source, runtime, "run-001", is_quiescent=lambda: True)
+    recover_okf_cutover(source, runtime, "run-001", is_quiescent=lambda: True)
     unknown = workspace / "private-name-canary"
     unknown.write_text("private-content-canary", encoding="utf-8")
     before = _tree(workspace)
@@ -620,7 +706,8 @@ def test_cleanup_rejects_unknown_artifact_without_mutation_or_content_leak(
 
 def test_cleanup_rejects_symlinked_artifact_without_mutation(tmp_path: Path) -> None:
     source, runtime, workspace = _setup(tmp_path)
-    execute_okf_cutover(source, runtime, "run-001", is_quiescent=lambda: True)
+    recover_okf_cutover(source, runtime, "run-001", is_quiescent=lambda: True)
+    (workspace / "rollback-backup").mkdir()
     link = workspace / "rollback-backup" / "private-link"
     link.symlink_to(source / "index.md")
     before = _tree(workspace)
@@ -637,7 +724,7 @@ def test_cleanup_rejects_symlinked_artifact_without_mutation(tmp_path: Path) -> 
 
 def test_cleanup_quiescence_failure_does_not_issue_receipt(tmp_path: Path) -> None:
     source, runtime, workspace = _setup(tmp_path)
-    execute_okf_cutover(source, runtime, "run-001", is_quiescent=lambda: True)
+    recover_okf_cutover(source, runtime, "run-001", is_quiescent=lambda: True)
     journal_before = (workspace / "journal.json").read_bytes()
 
     with pytest.raises(RuntimeError, match="quiescent"):

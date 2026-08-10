@@ -371,7 +371,7 @@ def test_cutover_fault_injection_runs_under_exclusive_writer_lease(
         "run-001",
         is_quiescent=lambda: True,
         fault_inject=fault,
-    ) == "committed"
+    ) == "committed-needs-rebuild"
     assert checked
 
 

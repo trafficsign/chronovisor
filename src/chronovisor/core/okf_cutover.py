@@ -30,7 +30,7 @@ from chronovisor.core.okf_workspace import (
     SENTINEL_SCHEMA,
 )
 
-CutoverState = Literal["committed", "rollback-complete"]
+CutoverState = Literal["committed-needs-rebuild", "rollback-complete"]
 FaultInjector = Callable[[str], None]
 _OldActivity = tuple[int, str] | None
 
@@ -62,9 +62,9 @@ CUTOVER_FAULT_POINTS = (
             f"{move}:after-completion-journal",
         )
     ),
-    "before-commit-journal",
-    "after-commit-journal",
-    "after-sentinel-remove",
+    "before-terminal-journal",
+    "after-terminal-journal",
+    "after-terminal-sentinel",
 )
 RECEIPT_SCHEMA = "chronovisor.okf-migration-receipt.v1"
 RECEIPT_FILENAME = "receipt.json"
@@ -227,21 +227,13 @@ def _discover_migration(
             _require_receipt_layout(source_root, runtime_root, receipt_state)
         except (OSError, TypeError, ValueError):
             return _blocked("migration_receipt_invalid", run_id=run_id)
-        return OKFStartupDecision(
-            True,
-            "okf_v0_2" if receipt_state == "committed" else "legacy",
-            receipt_state,
-            "ok",
-            run_id,
-        )
+        return OKFStartupDecision(True, "legacy", receipt_state, "ok", run_id)
     if RECEIPT_FILENAME in workspace_entries:
         return _blocked("cleanup_incomplete", run_id=run_id)
     if any(
         _WORKSPACE_ENTRIES.get(name) != kind for name, kind in workspace_entries.items()
     ):
         return _blocked("unsafe_migration_workspace", run_id=run_id)
-    if RESTART_REFUSAL_FILENAME in workspace_entries:
-        return _blocked("restart_refusal_active", run_id=run_id)
     if not {"dry-run-manifest.json", "journal.json"}.issubset(workspace_entries):
         return _blocked("migration_proof_invalid", run_id=run_id)
     try:
@@ -257,23 +249,36 @@ def _discover_migration(
         in {
             "prepared",
             "in-progress",
+            "committed-needs-rebuild",
             "committed",
             "rollback-complete",
         }
         else "unknown"
     )
-    if state not in {"committed", "rollback-complete"}:
+    if state in {"prepared", "in-progress"}:
+        if RESTART_REFUSAL_FILENAME in workspace_entries:
+            return _blocked("restart_refusal_active", state=state, run_id=run_id)
+        return _blocked("migration_nonterminal", state=state, run_id=run_id)
+    if state == "committed":
+        return _blocked("migration_proof_invalid", state=state, run_id=run_id)
+    if state == "unknown":
         return _blocked("migration_nonterminal", state=state, run_id=run_id)
     if journal.get("cleanup_in_progress") is True:
         return _blocked("cleanup_in_progress", state=state, run_id=run_id)
     if "cleanup_in_progress" in journal:
         return _blocked("migration_proof_invalid", state=state, run_id=run_id)
-    if not okf_startup_allowed(source_root, runtime_root, run_id):
+    try:
+        _context, _journal, terminal = _require_terminal_proof(
+            source_root, runtime_root, run_id
+        )
+    except (OSError, TypeError, ValueError):
         return _blocked("migration_proof_invalid", state=state, run_id=run_id)
+    if terminal == "committed-needs-rebuild":
+        return _blocked("rebuild_required", state=terminal, run_id=run_id)
     return OKFStartupDecision(
         True,
-        "okf_v0_2" if state == "committed" else "legacy",
-        state,
+        "legacy",
+        terminal,
         "ok",
         run_id,
     )
@@ -459,15 +464,15 @@ def _execute_okf_cutover_locked(
         if any(state != "new" for state in states.values()):
             raise RuntimeError("OKF cutover did not publish every coordinated asset")
         _validate_static_source(context)
-        _checkpoint(fault_inject, "before-commit-journal")
+        _checkpoint(fault_inject, "before-terminal-journal")
         _finish(
             context,
-            "committed",
+            "committed-needs-rebuild",
             old_activity,
             completed,
             fault_inject=fault_inject,
         )
-        return "committed"
+        return "committed-needs-rebuild"
 
 
 def recover_okf_cutover(
@@ -501,10 +506,12 @@ def _recover_okf_cutover_locked(
         journal = _read_canonical_object(context.journal, "migration journal")
         _require_gate_identity(journal, context, JOURNAL_SCHEMA)
         state = journal.get("state")
+        if state == "committed":
+            raise ValueError("legacy committed migration state is unsupported")
         if state not in {
             "prepared",
             "in-progress",
-            "committed",
+            "committed-needs-rebuild",
             "rollback-complete",
         }:
             raise ValueError("migration journal has an unknown state")
@@ -512,21 +519,29 @@ def _recover_okf_cutover_locked(
         old_activity = _old_activity(journal, context, prepared=state == "prepared")
         if state in {"prepared", "in-progress"}:
             _require_active_sentinel(context)
+        elif state == "committed-needs-rebuild":
+            _require_rebuild_sentinel(context, allow_in_progress=True)
         states = _asset_states(context, old_activity)
 
-        if state == "committed":
+        if state == "committed-needs-rebuild":
             if any(value != "new" for value in states.values()):
-                raise ValueError("committed migration assets do not match the manifest")
-            _remove_sentinel(context)
-            return "committed"
+                raise ValueError("pending-rebuild assets do not match the manifest")
+            _write_sentinel(context, state)
+            return "committed-needs-rebuild"
         if state == "rollback-complete":
             if any(value != "old" for value in states.values()):
                 raise ValueError("rolled-back migration assets do not match the manifest")
             _remove_sentinel(context)
             return "rollback-complete"
         if all(value == "new" for value in states.values()):
-            _finish(context, "committed", old_activity, [], fault_inject=None)
-            return "committed"
+            _finish(
+                context,
+                "committed-needs-rebuild",
+                old_activity,
+                [],
+                fault_inject=None,
+            )
+            return "committed-needs-rebuild"
 
         _write_sentinel(context, "in-progress")
         completed: list[str] = []
@@ -682,20 +697,8 @@ def _cleanup_okf_cutover_locked(
 def okf_startup_allowed(source_root: Path, runtime_root: Path, run_id: str) -> bool:
     """Fail closed unless a terminal journal or cleanup receipt proves startup."""
 
-    try:
-        source, runtime, workspace = _workspace_roots(
-            source_root, runtime_root, run_id
-        )
-        if _receipt_only(workspace):
-            state, _manifest_sha256 = _read_receipt(
-                workspace / RECEIPT_FILENAME, run_id
-            )
-            _require_receipt_layout(source, runtime, state)
-            return True
-        _require_terminal_proof(source_root, runtime_root, run_id)
-        return True
-    except (OSError, TypeError, ValueError):
-        return False
+    decision = discover_okf_startup(source_root, runtime_root)
+    return decision.allowed and decision.run_id == run_id
 
 
 def _require_terminal_proof(
@@ -706,21 +709,30 @@ def _require_terminal_proof(
     allow_cleanup: bool = False,
 ) -> tuple[_Context, dict[str, object], CutoverState]:
     context = _context(source_root, runtime_root, run_id)
-    if context.sentinel.exists() or context.sentinel.is_symlink():
-        raise ValueError("restart refusal sentinel is active")
     journal = _read_canonical_object(context.journal, "migration journal")
     _require_gate_identity(journal, context, JOURNAL_SCHEMA)
     state = journal.get("state")
-    if state not in {"committed", "rollback-complete"}:
+    if state == "committed":
+        raise ValueError("legacy committed migration state is unsupported")
+    if state not in {"committed-needs-rebuild", "rollback-complete"}:
         raise ValueError("migration journal is not terminal")
     cleanup = journal.get("cleanup_in_progress", _MISSING)
-    if cleanup is not _MISSING and cleanup is not True:
-        raise ValueError("migration cleanup marker is invalid")
-    if cleanup is True and not allow_cleanup:
-        raise ValueError("migration cleanup is in progress")
+    if state == "committed-needs-rebuild":
+        if cleanup is not _MISSING:
+            raise ValueError("pending-rebuild cleanup marker is invalid")
+        if allow_cleanup:
+            raise ValueError("migration rebuild is required before cleanup")
+        _require_rebuild_sentinel(context, allow_in_progress=False)
+    else:
+        if context.sentinel.exists() or context.sentinel.is_symlink():
+            raise ValueError("restart refusal sentinel is active")
+        if cleanup is not _MISSING and cleanup is not True:
+            raise ValueError("migration cleanup marker is invalid")
+        if cleanup is True and not allow_cleanup:
+            raise ValueError("migration cleanup is in progress")
     _validate_static_source(context)
     old_activity = _old_activity(journal, context, prepared=False)
-    expected = "new" if state == "committed" else "old"
+    expected = "new" if state == "committed-needs-rebuild" else "old"
     if any(
         value != expected for value in _asset_states(context, old_activity).values()
     ):
@@ -728,7 +740,9 @@ def _require_terminal_proof(
     return (
         context,
         journal,
-        "committed" if state == "committed" else "rollback-complete",
+        "committed-needs-rebuild"
+        if state == "committed-needs-rebuild"
+        else "rollback-complete",
     )
 
 
@@ -1035,15 +1049,18 @@ def _finish(
     _write_journal(
         context,
         state=state,
-        mode="cutover" if state == "committed" else "rollback",
+        mode="cutover" if state == "committed-needs-rebuild" else "rollback",
         phase="complete",
         step=None,
         completed=completed,
         old_activity=old_activity,
     )
-    _checkpoint(fault_inject, "after-commit-journal")
-    _remove_sentinel(context)
-    _checkpoint(fault_inject, "after-sentinel-remove")
+    _checkpoint(fault_inject, "after-terminal-journal")
+    if state == "committed-needs-rebuild":
+        _write_sentinel(context, state)
+    else:
+        _remove_sentinel(context)
+    _checkpoint(fault_inject, "after-terminal-sentinel")
 
 
 def _write_journal(
@@ -1140,12 +1157,9 @@ def _read_receipt(path: Path, run_id: str) -> tuple[CutoverState, str]:
     ):
         raise ValueError("migration receipt identity is invalid")
     state = receipt.get("state")
-    if state not in {"committed", "rollback-complete"}:
+    if state != "rollback-complete":
         raise ValueError("migration receipt state is invalid")
-    return (
-        "committed" if state == "committed" else "rollback-complete",
-        _sha(receipt.get("manifest_sha256")),
-    )
+    return "rollback-complete", _sha(receipt.get("manifest_sha256"))
 
 
 def _require_cleanup_journal(
@@ -1177,8 +1191,6 @@ def _require_cleanup_workspace(workspace: Path) -> None:
         _WORKSPACE_ENTRIES.get(name) != kind for name, kind in entries.items()
     ):
         raise ValueError("migration cleanup workspace has an unknown artifact")
-    if RESTART_REFUSAL_FILENAME in entries:
-        raise ValueError("migration cleanup is blocked by restart refusal")
     if entries.get("journal.json") != "file":
         raise ValueError("migration cleanup journal is missing")
     for name in ("staging", "rollback-backup"):
@@ -1217,19 +1229,8 @@ def _require_receipt_layout(
     if any(kind not in {"absent", "file"} for kind in reserved):
         raise ValueError("migration receipt root documents are unsafe")
     activity_kind = _path_kind(runtime / "activity.jsonl")
-    if state == "rollback-complete":
-        if present != len(_ROOT_RESERVED) or activity_kind not in {"absent", "file"}:
-            raise ValueError("rolled-back receipt layout is incomplete")
-        return
-    if present not in {0, len(_ROOT_RESERVED)} or activity_kind != "file":
-        raise ValueError("committed receipt layout is incomplete")
-    for path in (
-        source / "pages" / "index.md",
-        source / "pages" / "log.md",
-        source / "system" / "schema.md",
-    ):
-        if _path_kind(path) != "file":
-            raise ValueError("committed receipt reserved layout is incomplete")
+    if present != len(_ROOT_RESERVED) or activity_kind not in {"absent", "file"}:
+        raise ValueError("rolled-back receipt layout is incomplete")
 
 
 def _remove_file_exact(path: Path, *, required: bool = False) -> None:
@@ -1300,6 +1301,20 @@ def _require_active_sentinel(context: _Context) -> None:
     sentinel = _read_canonical_object(context.sentinel, "restart refusal sentinel")
     _require_gate_identity(sentinel, context, SENTINEL_SCHEMA)
     if sentinel.get("state") not in {"prepared", "in-progress"}:
+        raise ValueError("restart refusal sentinel state is invalid")
+
+
+def _require_rebuild_sentinel(
+    context: _Context, *, allow_in_progress: bool
+) -> None:
+    sentinel = _read_canonical_object(context.sentinel, "restart refusal sentinel")
+    _require_gate_identity(sentinel, context, SENTINEL_SCHEMA)
+    allowed = (
+        {"in-progress", "committed-needs-rebuild"}
+        if allow_in_progress
+        else {"committed-needs-rebuild"}
+    )
+    if sentinel.get("state") not in allowed:
         raise ValueError("restart refusal sentinel state is invalid")
 
 

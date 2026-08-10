@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from chronovisor.core import okf_cutover, store
+from chronovisor.core import store
 from chronovisor.core.okf_cutover import (
     OKFStartupBlocked,
     OKFStartupDecision,
@@ -128,7 +128,7 @@ def test_full_legacy_layout_is_allowed_with_existing_runtime_content(
     )
 
 
-def test_terminal_committed_and_rollback_proofs_select_exact_layout(
+def test_pending_rebuild_blocks_while_rollback_proof_allows_legacy(
     tmp_path: Path,
 ) -> None:
     committed_root, committed_runtime = _legacy(tmp_path / "committed")
@@ -138,7 +138,13 @@ def test_terminal_committed_and_rollback_proofs_select_exact_layout(
     )
 
     assert discover_okf_startup(committed_root, committed_runtime) == (
-        OKFStartupDecision(True, "okf_v0_2", "committed", "ok", "commit-run")
+        OKFStartupDecision(
+            False,
+            "blocked",
+            "committed-needs-rebuild",
+            "rebuild_required",
+            "commit-run",
+        )
     )
 
     rollback_root, rollback_runtime = _legacy(tmp_path / "rollback")
@@ -206,24 +212,19 @@ def test_migration_ambiguity_and_incomplete_proof_fail_closed(
     assert decision.category == category
 
 
-def test_committed_store_initialization_never_writes_legacy_documents(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_pending_rebuild_store_initialization_is_blocked_without_writes(
+    tmp_path: Path,
 ) -> None:
-    root = tmp_path / "wiki"
-    monkeypatch.setattr(
-        okf_cutover,
-        "require_okf_startup_allowed",
-        lambda *_args: OKFStartupDecision(
-            True, "okf_v0_2", "committed", "ok", "run-001"
-        ),
-    )
+    root, runtime = _legacy(tmp_path)
+    prepare_okf_workspace(root, runtime, "run-001")
+    execute_okf_cutover(root, runtime, "run-001", is_quiescent=lambda: True)
+    before = _snapshot(root)
 
-    store.init_chronovisor(store.RuntimeContext(root))
+    with pytest.raises(OKFStartupBlocked) as raised:
+        store.init_chronovisor(store.RuntimeContext(root))
 
-    assert all((root / name).is_dir() for name in ("raw", "pages", "system"))
-    assert not any(
-        (root / name).exists() for name in ("index.md", "log.md", "schema.md")
-    )
+    assert raised.value.decision.category == "rebuild_required"
+    assert _snapshot(root) == before
 
 
 def test_okf_status_cli_is_read_only_and_content_free(
@@ -246,6 +247,26 @@ def test_okf_status_cli_is_read_only_and_content_free(
     }
     assert "secret-canary" not in output
     assert str(root) not in output
+    assert _snapshot(root) == before
+
+
+def test_okf_status_cli_reports_rebuild_required_without_mutation(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root, runtime = _legacy(tmp_path)
+    prepare_okf_workspace(root, runtime, "run-001")
+    execute_okf_cutover(root, runtime, "run-001", is_quiescent=lambda: True)
+    before = _snapshot(root)
+
+    assert cli.main(["okf", "status", "--root", str(root), "--json"]) == 75
+
+    assert json.loads(capsys.readouterr().out) == {
+        "allowed": False,
+        "category": "rebuild_required",
+        "layout": "blocked",
+        "run_id": "run-001",
+        "state": "committed-needs-rebuild",
+    }
     assert _snapshot(root) == before
 
 
