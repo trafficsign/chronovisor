@@ -13,7 +13,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from chronovisor.core import runtime_status
+from chronovisor.core import ollama, runtime_status
 from chronovisor.core.durable_state import write_sealed_json
 from chronovisor.core.runtime_config import SearchEmbeddingConfig
 from chronovisor.ingest import orchestrator
@@ -1608,6 +1608,7 @@ def test_build_snapshot_combines_runtime_and_queue(tmp_path: Path, monkeypatch) 
     (raw_dir / "r1.md").write_text("raw")
 
     monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", chronovisor_root)
+    monkeypatch.setattr(dashboard, "init_chronovisor", lambda: None)
     monkeypatch.setattr(
         dashboard,
         "_resolved_decision_router_config",
@@ -2898,6 +2899,7 @@ def test_build_snapshot_surfaces_frontier_human_required(
     (chronovisor_root / "system").mkdir()
 
     monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", chronovisor_root)
+    monkeypatch.setattr(dashboard, "init_chronovisor", lambda: None)
     monkeypatch.setattr(dashboard, "LOG_FILE", chronovisor_root / "log.md")
     monkeypatch.setattr(runtime_status, "RUNTIME_DIR", runtime_dir)
     monkeypatch.setattr(runtime_status, "STATUS_FILE", runtime_dir / "status.json")
@@ -3080,7 +3082,20 @@ def test_model_status_snapshot_combines_ollama_and_config(monkeypatch) -> None:
     monkeypatch.setattr(
         dashboard,
         "load_audit_policy",
-        lambda: SimpleNamespace(enabled=True, model="qwen3.6:35b-a3b-mxfp8"),
+        lambda: SimpleNamespace(enabled=True),
+    )
+    monkeypatch.setattr(
+        dashboard,
+        "runtime_generation_routes",
+        lambda roles: (
+            ollama.RuntimeGenerationRoute(
+                role=roles[0],
+                provider="ollama",
+                model="qwen3.6:35b-a3b-mxfp8",
+                location="local",
+                structured_output=True,
+            ),
+        ),
     )
     monkeypatch.setattr(
         dashboard.recall_runtime,

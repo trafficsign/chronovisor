@@ -23,7 +23,12 @@ from urllib.parse import parse_qsl, urlparse
 import httpx
 
 from chronovisor.core import index_store, runtime_status
-from chronovisor.core.ollama import OLLAMA_URL, embedding_model, ingest_model
+from chronovisor.core.ollama import (
+    OLLAMA_URL,
+    embedding_model,
+    ingest_model,
+    runtime_generation_routes,
+)
 from chronovisor.core.runtime_config import (
     load_decision_router_config,
     load_reranker_config,
@@ -98,6 +103,7 @@ ACTIVE_BATCH_STAGES = {
     "apply",
 }
 DECISION_ROUTER_DASHBOARD_CACHE_SECONDS = 15.0
+AUDITOR_RUNTIME_ROLE = "recall.auditor"
 # Live runtime status is overlaid at response time; expensive cold aggregates
 # only need this bounded active refresh cadence.
 SNAPSHOT_ACTIVE_CACHE_SECONDS = 30.0
@@ -461,7 +467,9 @@ def _configured_model_roles() -> dict[str, set[str]]:
     try:
         audit_policy = load_audit_policy()
         if getattr(audit_policy, "enabled", True):
-            _add_model_role(roles, getattr(audit_policy, "model", ""), "audit")
+            route = runtime_generation_routes((AUDITOR_RUNTIME_ROLE,))[0]
+            if route.role == AUDITOR_RUNTIME_ROLE and route.structured_output:
+                _add_model_role(roles, route.model, "audit")
     except Exception:
         pass
 

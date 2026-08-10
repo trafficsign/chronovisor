@@ -104,6 +104,11 @@ capability = "generation"
 provider = "local"
 model = "maxwell1500/ornith-35b:Q5_K_M"
 
+[llm.roles."recall.auditor"]
+capability = "generation"
+provider = "local"
+model = "maxwell1500/ornith-35b:Q5_K_M"
+
 [decision_router]
 # Routine structured decisions require a two-vote local quorum. The complete
 # request-token budget, including both possible JSON-repair turns, selects the
@@ -444,8 +449,6 @@ fail_silent_on_judge_unavailable = true
 
 [audit]
 enabled = true
-model = "maxwell1500/ornith-35b:Q5_K_M"
-think = false
 timeout_ms = 120000
 num_ctx = 32768
 keep_alive = "20m"
@@ -468,6 +471,12 @@ enabled = true
 min_count = 1
 actions = ["alias", "query_hint", "page_tag"]
 ```
+
+Auditor model routing is fixed by `llm.roles."recall.auditor"`. Legacy
+`[audit].model`, `[audit].think`, `[heavy].model`, and `[heavy].think` values
+are accepted but ignored. Auditor inputs are classified as `raw/high`; remote
+providers require an explicit `recall.auditor` + `raw` egress opt-in and never
+fall back to another provider.
 
 ## Decision quorum safety
 

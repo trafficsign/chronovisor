@@ -2,7 +2,7 @@
 
 This module runs after the normal recall gate. It inspects the user prompt,
 assistant response, recall decision, and wiki top-k results, then records
-``missed_candidate`` feedback when a heavy model judges that the gate likely
+``missed_candidate`` feedback when the configured runtime judges that the gate likely
 missed useful memory. It never changes runtime recall decisions.
 """
 
@@ -23,12 +23,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from chronovisor.core.runtime_config import (
-    DEFAULT_HEAVY_KEEP_ALIVE,
-    DEFAULT_HEAVY_NUM_CTX,
-    active_config_file,
-    normalize_audit_config,
-)
+from chronovisor.core import ollama, runtime_config
 from chronovisor.core.search import search as run_search
 from chronovisor.decision.local_structured import ChatTransport, LocalStructuredSession
 from chronovisor.recall.recall_runtime import (
@@ -46,6 +41,7 @@ DEFAULT_STATE_FILE = RECALL_DIR / "audit-state.json"
 DEFAULT_LOCK_FILE = RECALL_DIR / "audit.lock"
 DEFAULT_PULL_CONSUMED_FILE = RECALL_DIR / "pull-consumed.jsonl"
 HOOK_ENABLE_ENV = "CHRONOVISOR_RECALL_AUDIT_ENABLED"
+AUDITOR_RUNTIME_ROLE = "recall.auditor"
 
 AUTO_ACTIONS = frozenset({"alias", "query_hint", "page_tag"})
 REVIEW_ACTIONS = frozenset({"few_shot", "threshold"})
@@ -100,11 +96,9 @@ AUDITOR_SCHEMA: dict[str, Any] = {
 @dataclass(frozen=True)
 class AuditPolicy:
     enabled: bool = True
-    model: str = "maxwell1500/ornith-35b:Q5_K_M"
-    think: bool = False
     timeout_ms: int = 120_000
-    num_ctx: int = DEFAULT_HEAVY_NUM_CTX
-    keep_alive: str = DEFAULT_HEAVY_KEEP_ALIVE
+    num_ctx: int = runtime_config.DEFAULT_HEAVY_NUM_CTX
+    keep_alive: str = runtime_config.DEFAULT_HEAVY_KEEP_ALIVE
     num_predict: int = 1024
     top_k: int = 5
     semantic: bool = False
@@ -160,10 +154,10 @@ class AuditDecision:
 
 def load_audit_policy(path: Path = RECALL_CONFIG_FILE) -> AuditPolicy:
     policy = AuditPolicy()
-    path = active_config_file(path)
+    path = runtime_config.active_config_file(path)
     if path.exists():
         try:
-            data = normalize_audit_config(tomllib.loads(path.read_text()))
+            data = runtime_config.normalize_audit_config(tomllib.loads(path.read_text()))
         except (OSError, tomllib.TOMLDecodeError):
             data = {}
         policy = _apply_config(policy, data)
@@ -177,13 +171,6 @@ def load_audit_policy(path: Path = RECALL_CONFIG_FILE) -> AuditPolicy:
 def _apply_config(policy: AuditPolicy, data: dict[str, Any]) -> AuditPolicy:
     values = dict(policy.__dict__)
 
-    heavy = data.get("heavy", {})
-    if isinstance(heavy, dict):
-        if isinstance(heavy.get("model"), str):
-            values["model"] = heavy["model"]
-        if isinstance(heavy.get("think"), bool):
-            values["think"] = heavy["think"]
-
     budgets = data.get("budgets", {})
     if isinstance(budgets, dict) and isinstance(budgets.get("auditor_timeout_ms"), int):
         values["timeout_ms"] = max(1000, budgets["auditor_timeout_ms"])
@@ -192,10 +179,6 @@ def _apply_config(policy: AuditPolicy, data: dict[str, Any]) -> AuditPolicy:
     if isinstance(auditor, dict):
         if isinstance(auditor.get("enabled"), bool):
             values["enabled"] = auditor["enabled"]
-        if isinstance(auditor.get("model"), str):
-            values["model"] = auditor["model"]
-        if isinstance(auditor.get("think"), bool):
-            values["think"] = auditor["think"]
         if isinstance(auditor.get("timeout_ms"), int):
             values["timeout_ms"] = max(1000, auditor["timeout_ms"])
         if isinstance(auditor.get("num_ctx"), int):
@@ -393,6 +376,28 @@ def build_auditor_prompt(
     )
 
 
+def _auditor_runtime_route(
+    route: ollama.RuntimeGenerationRoute | None = None,
+) -> ollama.RuntimeGenerationRoute:
+    route = route or ollama.runtime_generation_routes((AUDITOR_RUNTIME_ROLE,))[0]
+    if route.role != AUDITOR_RUNTIME_ROLE:
+        raise ollama.RuntimeBridgeError("route_configuration_invalid")
+    if not route.structured_output:
+        raise ollama.RuntimeBridgeError("capability_unavailable")
+    return route
+
+
+def _auditor_route_identity(
+    route: ollama.RuntimeGenerationRoute,
+) -> dict[str, str]:
+    return {
+        "role": route.role,
+        "provider": route.provider,
+        "model": route.model,
+        "location": route.location,
+    }
+
+
 def run_auditor_judge(
     turn: TurnContext,
     recall_snapshot: dict[str, Any] | None,
@@ -401,13 +406,24 @@ def run_auditor_judge(
     *,
     transport: ChatTransport | None = None,
     audit_root: Path | None = None,
+    resolved_route: ollama.RuntimeGenerationRoute | None = None,
 ) -> str:
     """Run the asynchronous auditor with bounded same-session JSON repair."""
 
+    if transport is None:
+        route = _auditor_runtime_route(resolved_route)
+        model = route.model
+    else:
+        route = None
+        model = "injected:recall-auditor"
     result = LocalStructuredSession(
-        model=policy.model,
+        model=model,
         transport=transport,
         role="recall_auditor",
+        runtime_role=AUDITOR_RUNTIME_ROLE,
+        runtime_location=None if route is None else route.location,
+        source_data_class="raw",
+        source_sensitivity="high",
         audit_root=audit_root,
         num_ctx=policy.num_ctx,
         num_predict=policy.num_predict,
@@ -687,12 +703,11 @@ def feedback_extra(
     turn: TurnContext,
     top_pages: list[dict[str, Any]],
     search_mode: str,
-    policy: AuditPolicy,
+    route_identity: dict[str, str] | None,
 ) -> dict[str, Any]:
-    return {
+    extra: dict[str, Any] = {
         "source": "auditor",
         "turn_ref": turn.turn_ref(),
-        "auditor_model": policy.model,
         "auditor_confidence": decision.confidence,
         "auditor_reason": decision.auditor_reason,
         "reason_code": decision.reason_code,
@@ -706,6 +721,10 @@ def feedback_extra(
         "search_mode": search_mode,
         "assistant_response_preview": trim_text(turn.assistant_response, 1000),
     }
+    if route_identity is not None:
+        extra["auditor_model"] = route_identity["model"]
+        extra["auditor_route_identity"] = route_identity
+    return extra
 
 
 def pull_event_key(record: dict[str, Any]) -> str:
@@ -1038,33 +1057,49 @@ def run(args: argparse.Namespace, *, stdin_text: str | None = None) -> dict[str,
         )
 
     started = time.monotonic()
+    auditor_route: ollama.RuntimeGenerationRoute | None = None
     if args.auditor_json:
         raw_output = args.auditor_json
     else:
         try:
-            raw_output = run_auditor_judge(turn, recall_snapshot, top_pages, policy)
+            auditor_route = _auditor_runtime_route()
+            raw_output = run_auditor_judge(
+                turn,
+                recall_snapshot,
+                top_pages,
+                policy,
+                resolved_route=auditor_route,
+            )
         finally:
             release_audit_lock(lock_handle)
             lock_handle = None
     decision = parse_auditor_output(raw_output, top_pages)
     latency_ms = int((time.monotonic() - started) * 1000)
+    route_identity = (
+        _auditor_route_identity(auditor_route)
+        if auditor_route is not None
+        else None
+    )
 
+    auditor: dict[str, Any] = {
+        "missed": decision.missed,
+        "confidence": decision.confidence,
+        "reason_code": decision.reason_code,
+        "action_type": decision.action_type,
+        "lane": decision.lane,
+        "auto_apply_eligible": decision.auto_apply_eligible,
+        "normalize_key": decision.normalize_key,
+        "action_payload": decision.action_payload,
+        "latency_ms": latency_ms,
+        "injection_usefulness": decision.injection_usefulness,
+        "injection_reason": decision.injection_reason,
+    }
+    if route_identity is not None:
+        auditor["route_identity"] = route_identity
     base = {
         "turn_ref": turn.turn_ref(),
         "ref": recall_snapshot.get("decision_id", "") if recall_snapshot else "",
-        "auditor": {
-            "missed": decision.missed,
-            "confidence": decision.confidence,
-            "reason_code": decision.reason_code,
-            "action_type": decision.action_type,
-            "lane": decision.lane,
-            "auto_apply_eligible": decision.auto_apply_eligible,
-            "normalize_key": decision.normalize_key,
-            "action_payload": decision.action_payload,
-            "latency_ms": latency_ms,
-            "injection_usefulness": decision.injection_usefulness,
-            "injection_reason": decision.injection_reason,
-        },
+        "auditor": auditor,
     }
     if pull_feedback:
         base["pull_feedback"] = pull_feedback
@@ -1088,9 +1123,16 @@ def run(args: argparse.Namespace, *, stdin_text: str | None = None) -> dict[str,
             extra={
                 "source": "auditor_precision",
                 "turn_ref": turn.turn_ref(),
-                "auditor_model": policy.model,
                 "auditor_confidence": decision.confidence,
                 "assistant_response_preview": trim_text(turn.assistant_response, 1000),
+                **(
+                    {
+                        "auditor_model": route_identity["model"],
+                        "auditor_route_identity": route_identity,
+                    }
+                    if route_identity is not None
+                    else {}
+                ),
             },
         )
         base["precision_feedback"] = precision_record
@@ -1124,7 +1166,7 @@ def run(args: argparse.Namespace, *, stdin_text: str | None = None) -> dict[str,
         turn=turn,
         top_pages=top_pages,
         search_mode=search_mode,
-        policy=policy,
+        route_identity=route_identity,
     )
     record = append_feedback(
         "missed_candidate",
@@ -1182,7 +1224,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--min-confidence", type=float)
     parser.add_argument(
         "--auditor-json",
-        help="Replay a precomputed auditor JSON object instead of calling the heavy model.",
+        help="Replay a precomputed auditor JSON object instead of calling the runtime.",
     )
     return parser
 

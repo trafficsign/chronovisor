@@ -7,6 +7,17 @@ from types import SimpleNamespace
 
 import pytest
 
+from chronovisor.core import llm_config, ollama
+from chronovisor.core.llm_runtime import (
+    BackendCapabilities,
+    GenerationResult,
+    GenerationRoute,
+    LLMRuntime,
+    MessageGenerationRequest,
+    RouteLocation,
+    SourceDataClass,
+    SourceSensitivity,
+)
 from chronovisor.recall import recall_auditor
 from chronovisor.recall.recall_runtime import stable_prompt_hash
 
@@ -23,7 +34,72 @@ def _valid_auditor_payload() -> dict[str, object]:
     }
 
 
-def test_auditor_judge_repairs_schema_error_in_same_session(tmp_path: Path) -> None:
+def _forbid_ollama_controls(monkeypatch: pytest.MonkeyPatch) -> None:
+    def forbidden(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("provider-neutral recall auditor touched an Ollama control")
+
+    for name in (
+        "chat",
+        "generate",
+        "is_available",
+        "model_digests",
+        "model_resource_lease",
+        "model_resource_lease_mode",
+        "plan_model_residency",
+        "resident_model_rows",
+        "unload_model",
+        "unload_named_model",
+    ):
+        monkeypatch.setattr(ollama, name, forbidden)
+
+
+class _RemoteAuditorBackend:
+    provider = "remote-test"
+    location = RouteLocation.REMOTE
+
+    def __init__(self, content: str) -> None:
+        self.content = content
+        self.requests: list[MessageGenerationRequest] = []
+
+    def generate(
+        self, request: MessageGenerationRequest, *, model: str
+    ) -> GenerationResult:
+        self.requests.append(request)
+        return GenerationResult(
+            content=self.content,
+            provider=self.provider,
+            model=model,
+            completed=True,
+            finish_reason="stop",
+        )
+
+
+def _install_remote_auditor_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+    backend: _RemoteAuditorBackend,
+    *,
+    allow_raw: bool,
+) -> None:
+    runtime = LLMRuntime(
+        generation={
+            recall_auditor.AUDITOR_RUNTIME_ROLE: GenerationRoute(
+                backend,
+                "remote-auditor",
+                BackendCapabilities(True, False, structured_output=True),
+            )
+        },
+        remote_egress_opt_ins=(
+            {(recall_auditor.AUDITOR_RUNTIME_ROLE, SourceDataClass.RAW)}
+            if allow_raw
+            else set()
+        ),
+    )
+    monkeypatch.setattr(llm_config, "load_default_llm_runtime", lambda: runtime)
+
+
+def test_auditor_judge_repairs_schema_error_in_same_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     requests = []
     invalid = _valid_auditor_payload()
     invalid["confidence"] = "high"
@@ -32,6 +108,13 @@ def test_auditor_judge_repairs_schema_error_in_same_session(tmp_path: Path) -> N
     def transport(request):
         requests.append(request)
         return next(responses)
+
+    monkeypatch.setattr(
+        ollama,
+        "runtime_generation_routes",
+        lambda _roles: pytest.fail("injected transport resolved runtime config"),
+    )
+    _forbid_ollama_controls(monkeypatch)
 
     output = recall_auditor.run_auditor_judge(
         recall_auditor.TurnContext(
@@ -48,6 +131,7 @@ def test_auditor_judge_repairs_schema_error_in_same_session(tmp_path: Path) -> N
 
     assert json.loads(output)["reason_code"] == "valid_skip"
     assert len(requests) == 2
+    assert requests[0].model == "injected:recall-auditor"
     assert requests[1].messages[-2]["role"] == "assistant"
     assert "Validator errors" in requests[1].messages[-1]["content"]
 
@@ -75,6 +159,158 @@ def test_auditor_judge_rejects_oversized_input_before_transport(tmp_path: Path) 
         )
 
     assert calls == 0
+
+
+def test_audit_policy_ignores_legacy_model_selectors(tmp_path: Path) -> None:
+    config = tmp_path / "config.toml"
+    config.write_text(
+        """
+[heavy]
+model = "legacy-heavy"
+think = true
+
+[audit]
+enabled = false
+model = "legacy-auditor"
+think = true
+timeout_ms = 2500
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    policy = recall_auditor.load_audit_policy(config)
+
+    assert policy.enabled is False
+    assert policy.timeout_ms == 2500
+    assert not hasattr(policy, "model")
+    assert not hasattr(policy, "think")
+
+
+def test_remote_auditor_records_actual_route_and_raw_high_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from chronovisor.core import store
+    from chronovisor.recall import recall_runtime
+
+    payload = _valid_auditor_payload()
+    payload.update(
+        {
+            "missed": True,
+            "confidence": 0.91,
+            "reason_code": "gate_missed",
+            "auditor_reason": "Useful memory was missed.",
+            "expected_pages": ["page-1"],
+            "missing_signal": "past_reference",
+            "action_type": "query_hint",
+        }
+    )
+    backend = _RemoteAuditorBackend(json.dumps(payload))
+    _install_remote_auditor_runtime(monkeypatch, backend, allow_raw=True)
+    _forbid_ollama_controls(monkeypatch)
+    feedback_file = tmp_path / "feedback.jsonl"
+    monkeypatch.setattr(store, "CHRONOVISOR_ROOT", tmp_path / "wiki")
+    monkeypatch.setattr(recall_runtime, "RECALL_FEEDBACK_FILE", feedback_file)
+    monkeypatch.setattr(recall_auditor, "RECALL_LOG_FILE", tmp_path / "recall.jsonl")
+    monkeypatch.setattr(
+        recall_auditor, "RECALL_PULL_LOG_FILE", tmp_path / "pull.jsonl"
+    )
+    monkeypatch.setattr(
+        recall_auditor,
+        "collect_top_pages",
+        lambda _prompt, _policy: ([{"page_id": "page-1"}], "bm25"),
+    )
+    args = recall_auditor.build_parser().parse_args(
+        [
+            "--host",
+            "codex",
+            "--session-id",
+            "route-test",
+            "--prompt",
+            "continue previous work",
+            "--assistant-response",
+            "continued",
+            "--state-file",
+            str(tmp_path / "state.json"),
+            "--lock-file",
+            str(tmp_path / "audit.lock"),
+            "--config",
+            str(tmp_path / "missing.toml"),
+            "--ignore-state",
+            "--no-auto-apply",
+        ]
+    )
+
+    result = recall_auditor.run(args)
+    record = json.loads(feedback_file.read_text(encoding="utf-8"))
+    identity = {
+        "role": recall_auditor.AUDITOR_RUNTIME_ROLE,
+        "provider": "remote-test",
+        "model": "remote-auditor",
+        "location": "remote",
+    }
+
+    assert result["status"] == "recorded"
+    assert result["auditor"]["route_identity"] == identity
+    assert record["auditor_model"] == "remote-auditor"
+    assert record["auditor_route_identity"] == identity
+    assert len(backend.requests) == 1
+    assert backend.requests[0].source.data_class is SourceDataClass.RAW
+    assert backend.requests[0].source.sensitivity is SourceSensitivity.HIGH
+
+
+def test_remote_high_auditor_egress_denial_has_no_backend_or_ollama_control(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    backend = _RemoteAuditorBackend(json.dumps(_valid_auditor_payload()))
+    _install_remote_auditor_runtime(monkeypatch, backend, allow_raw=False)
+    _forbid_ollama_controls(monkeypatch)
+
+    with pytest.raises(ValueError, match="egress_denied"):
+        recall_auditor.run_auditor_judge(
+            recall_auditor.TurnContext("codex", "prompt", "answer"),
+            None,
+            [],
+            recall_auditor.AuditPolicy(),
+            audit_root=tmp_path / "audit",
+        )
+
+    assert backend.requests == []
+
+
+def test_unstructured_auditor_route_fails_before_backend_or_control(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        ollama,
+        "runtime_generation_routes",
+        lambda _roles: (
+            ollama.RuntimeGenerationRoute(
+                recall_auditor.AUDITOR_RUNTIME_ROLE,
+                "remote-test",
+                "remote-auditor",
+                "remote",
+                False,
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        ollama,
+        "runtime_structured_chat",
+        lambda *_args, **_kwargs: pytest.fail("invalid route reached backend"),
+    )
+    _forbid_ollama_controls(monkeypatch)
+
+    with pytest.raises(ollama.RuntimeBridgeError) as invalid:
+        recall_auditor.run_auditor_judge(
+            recall_auditor.TurnContext("codex", "prompt", "answer"),
+            None,
+            [],
+            recall_auditor.AuditPolicy(),
+            audit_root=tmp_path / "audit",
+        )
+
+    assert invalid.value.category == "capability_unavailable"
 
 
 def test_threshold_action_is_review_only_even_if_auditor_is_confident() -> None:
@@ -302,6 +538,9 @@ def test_cli_records_missed_candidate_with_snapshot(tmp_path, monkeypatch, capsy
     assert record["lane"] == "auto"
     assert record["auto_apply_eligible"] is True
     assert record["turn_ref"]["session_id"] == "s1"
+    assert "auditor_model" not in record
+    assert "auditor_route_identity" not in record
+    assert "route_identity" not in output["auditor"]
 
 
 def test_run_skips_read_decisions_by_default(tmp_path, monkeypatch) -> None:
