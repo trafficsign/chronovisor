@@ -13,7 +13,6 @@
     <string>127.0.0.1</string>
     <string>--port</string>
     <string>8765</string>
-    <string>--lan</string>
   </array>
 
   <key>WorkingDirectory</key>

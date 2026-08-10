@@ -6681,15 +6681,14 @@
   "tracked_launchd_plists": [
     {
       "path": "launchd/com.trafficsign.chronovisor-dashboard.plist",
-      "sha256": "d3f7265f70437c4db229c53261c73d5d3cb6e133e84fe6986b4cb991cb3f644b",
+      "sha256": "11c4119e93e11f3743239d64345e9eed9122d86a1c7c89ea0da6b823903372c0",
       "label": "com.trafficsign.chronovisor-dashboard",
       "program_arguments": [
         "@@PROJECT_ROOT@@/scripts/chronovisor-dashboard",
         "--host",
         "127.0.0.1",
         "--port",
-        "8765",
-        "--lan"
+        "8765"
       ]
     },
     {

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import os
 import plistlib
+import re
 import stat
 import subprocess
 import sys
@@ -26,6 +28,7 @@ SERVICES = {
     "com.trafficsign.chronovisor-semantic.plist": "chronovisor-semantic-service",
 }
 UVX_SERVICES = set(SERVICES) - {"com.trafficsign.chronovisor-searxng.plist"}
+PERSONAL_HOME = re.compile(rb"/Users/trafficsign(?:/|$)")
 
 
 def _executable(path: Path) -> Path:
@@ -89,6 +92,14 @@ def test_launchd_template_renders_portable_absolute_paths(
     if plist_name == "com.trafficsign.chronovisor-library-evidence.plist":
         arguments = payload["ProgramArguments"]
         assert arguments[arguments.index("--repo-root") + 1] == str(project_root)
+    if plist_name == "com.trafficsign.chronovisor-dashboard.plist":
+        assert payload["ProgramArguments"] == [
+            str(project_root / "scripts" / wrapper),
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "8765",
+        ]
 
 
 def test_launchd_sources_and_installers_have_no_personal_checkout_path() -> None:
@@ -115,3 +126,41 @@ def test_generic_installer_allowlists_services_without_dedicated_setup() -> None
     assert '/bin/launchctl bootstrap "$DOMAIN" "$LAUNCH_AGENT"' in source
     assert '/bin/launchctl kickstart -k "$DOMAIN/$LABEL"' in source
     assert "/Users/trafficsign" not in source
+
+
+def test_contract_manifest_and_production_files_have_no_personal_home() -> None:
+    manifest = json.loads(
+        (ROOT / "chronovisor-contract-manifest.json").read_text(encoding="utf-8")
+    )
+    assert "~/projects/plan/**" in manifest["durable_history"]
+
+    tracked = subprocess.run(
+        [
+            "git",
+            "ls-files",
+            "-z",
+            "--",
+            ".github",
+            "deploy",
+            "docs",
+            "launchd",
+            "scripts",
+            "src",
+            "tools",
+            "README.md",
+            "chronovisor-contract-manifest.json",
+            "pyproject.toml",
+            "uv.lock",
+        ],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+    ).stdout.split(b"\0")
+    offenders = [
+        raw_path.decode()
+        for raw_path in tracked
+        if raw_path
+        if PERSONAL_HOME.search((ROOT / raw_path.decode()).read_bytes())
+    ]
+
+    assert offenders == []
