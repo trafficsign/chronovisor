@@ -32,7 +32,7 @@ from chronovisor.core.runtime_config import (
     load_reranker_config,
     runtime_identity,
 )
-from chronovisor.core.store import CHRONOVISOR_ROOT, find_page
+from chronovisor.core.store import CHRONOVISOR_ROOT, find_page, okf_startup_status
 from chronovisor.search.accelerator_lease import accelerator_lease
 
 SERVICE_STATUS_FILE = CHRONOVISOR_ROOT / "runtime" / "reranker-service-status.json"
@@ -253,6 +253,8 @@ class _Server(socketserver.ThreadingUnixStreamServer):
 
 
 def serve(config: RerankerConfig | None = None) -> None:
+    if not okf_startup_status(CHRONOVISOR_ROOT).allowed:
+        raise SystemExit(75)
     config = config or load_reranker_config()
     if not config.enabled:
         raise SystemExit("BGE reranker is disabled in config")
@@ -297,13 +299,20 @@ def main(argv: list[str] | None = None) -> int:
     """Run the resident reranker service command-line entry point."""
 
     args = build_parser().parse_args(argv)
+    if args.command not in {"status", "health"} and not okf_startup_status(
+        CHRONOVISOR_ROOT
+    ).allowed:
+        print(
+            json.dumps({"status": "blocked", "category": "okf_startup_blocked"})
+        )
+        return 75
     if args.command == "serve":
         serve()
         return 0
-    config = load_reranker_config()
     if args.command == "status":
         payload = _read_status()
     else:
+        config = load_reranker_config()
         from chronovisor.core import reranker_client
 
         try:

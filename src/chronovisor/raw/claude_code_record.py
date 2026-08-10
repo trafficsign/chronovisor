@@ -38,10 +38,12 @@ from chronovisor.core.save_transaction import (
     validate_published_save_receipt,
 )
 from chronovisor.core.store import (
+    CHRONOVISOR_ROOT,
     DEFAULT_CONTEXT,
     RAW_DIR,
     RuntimeContext,
     init_chronovisor,
+    okf_startup_status,
 )
 from chronovisor.decision.decision_policy import resolve_decision_policy
 from chronovisor.raw.agent_save_base import (
@@ -899,6 +901,11 @@ def main(argv: list[str] | None = None) -> int:
     """Run the ``chronovisor-claude-code-record`` command-line entry point."""
     parser = build_parser()
     args = parser.parse_args(argv)
+    if not okf_startup_status(CHRONOVISOR_ROOT).allowed:
+        print(
+            json.dumps({"status": "blocked", "category": "okf_startup_blocked"})
+        )
+        return 75
     stdin_text = sys.stdin.read() if args.hook else None
     try:
         result = run(args, stdin_text=stdin_text)

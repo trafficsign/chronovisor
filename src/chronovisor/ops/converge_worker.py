@@ -6,6 +6,8 @@ import argparse
 import json
 from typing import Any
 
+from chronovisor.ingest import convergence
+
 
 def run_maintenance_batch(
     *,
@@ -15,15 +17,14 @@ def run_maintenance_batch(
 ) -> dict[str, Any]:
     """Drain existing semantic maintenance without rebuilding sleep artifacts."""
 
-    from chronovisor.ingest.convergence import ConvergenceStore, CycleBudget
     from chronovisor.ops.autonomy import resolve_deferred_duplicates_with_frontier
     from chronovisor.ops.lint_repair import run_lint_repair
     from chronovisor.ops.orphan_link import run_autonomous
     from chronovisor.recall.content_correction import run_pending_corrections
     from chronovisor.recall.duplicate_review import build_duplicate_review_queue
 
-    state = ConvergenceStore()
-    budget = CycleBudget(
+    state = convergence.ConvergenceStore()
+    budget = convergence.CycleBudget(
         max_local_calls=48,
         max_frontier_calls=28,
         max_mutations=60,
@@ -221,6 +222,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.set_defaults(run_maintenance=True)
     args = parser.parse_args(argv)
+    if not convergence.okf_startup_status().allowed:
+        print(
+            json.dumps({"status": "blocked", "category": "okf_startup_blocked"})
+        )
+        return 75
     print(
         json.dumps(
             run_converge(

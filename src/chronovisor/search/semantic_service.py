@@ -69,7 +69,12 @@ from chronovisor.core.semantic_jobs import (
     job_status,
     prune_completed_jobs,
 )
-from chronovisor.core.store import CHRONOVISOR_ROOT, SYSTEM_DIR, find_page
+from chronovisor.core.store import (
+    CHRONOVISOR_ROOT,
+    SYSTEM_DIR,
+    find_page,
+    okf_startup_status,
+)
 from chronovisor.search.accelerator_lease import accelerator_lease
 from chronovisor.search.semantic_model import (
     SemanticModelError,
@@ -831,6 +836,8 @@ class _Server(socketserver.ThreadingUnixStreamServer):
 
 
 def serve(config: SearchEmbeddingConfig | None = None) -> None:
+    if not okf_startup_status(CHRONOVISOR_ROOT).allowed:
+        raise SystemExit(75)
     config = config or load_search_embedding_config()
     if not config.enabled or config.backend != "nemotron_service":
         raise SystemExit("Nemotron semantic service is disabled in config")
@@ -855,7 +862,7 @@ def serve(config: SearchEmbeddingConfig | None = None) -> None:
         socket_path.unlink(missing_ok=True)
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> int:
     """Run the ``chronovisor-semantic-service`` command-line entry point."""
     parser = argparse.ArgumentParser(prog="chronovisor-semantic-service")
     parser.add_argument(
@@ -871,11 +878,16 @@ def main() -> None:
         nargs="?",
         default="serve",
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
+    if args.command != "status" and not okf_startup_status(CHRONOVISOR_ROOT).allowed:
+        print(
+            json.dumps({"status": "blocked", "category": "okf_startup_blocked"})
+        )
+        return 75
     config = load_search_embedding_config()
     if args.command == "serve":
         serve(config)
-        return
+        return 0
     from chronovisor.core import semantic_client
 
     if args.command == "archive-legacy":
@@ -897,7 +909,8 @@ def main() -> None:
     else:
         result = semantic_client.request_rollback(config)
     print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

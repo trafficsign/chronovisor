@@ -68,6 +68,13 @@ FRONTIER_STATUSES = frozenset(
     {"pending_frontier", "frontier_retry", "frontier_running"}
 )
 
+
+def okf_startup_status() -> Any:
+    """Return the core startup decision through the existing ingest facade."""
+
+    return chronovisor_store.okf_startup_status(chronovisor_store.CHRONOVISOR_ROOT)
+
+
 class ConvergenceError(RuntimeError):
     """Base error for convergence state operations."""
 

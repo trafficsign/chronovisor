@@ -29,7 +29,7 @@ from chronovisor.core.jsonl_write import write_jsonl_atomic as _write_jsonl
 from chronovisor.core.runtime_config import (
     load_decision_router_config,
 )
-from chronovisor.core.store import CHRONOVISOR_ROOT
+from chronovisor.core.store import CHRONOVISOR_ROOT, okf_startup_status
 from chronovisor.lab.classification_artifact_runner import (
     run_artifact_only_sweep,
     storage_manifest,
@@ -2137,8 +2137,16 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main() -> None:
-    args = build_parser().parse_args()
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    if args.command != "status" and not okf_startup_status(args.root).allowed:
+        print(
+            json.dumps(
+                {"status": "blocked", "category": "okf_startup_blocked"},
+                sort_keys=True,
+            )
+        )
+        return 75
     if args.command == "status":
         result = load_state(args.root)
     elif args.command == "adopt":
@@ -2152,7 +2160,8 @@ def main() -> None:
     else:
         result = run_once(root=args.root, repo_root=args.repo_root)
     print(json.dumps(result, ensure_ascii=False, sort_keys=True, indent=2))
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

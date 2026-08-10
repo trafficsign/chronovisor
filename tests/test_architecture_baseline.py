@@ -1737,6 +1737,19 @@ W6G_RETIRED_STRUCTURED_RUNTIME_SITE_IDS = (
     "arch:2f9c334a7724c6f1ab68badd67d0d15704bff7eea50d22768659b9c2a18bbb00",
     "arch:90ffea0ac14037fba565da552011e3940f4ec51f7c96376617cd3ff3a2a8c154",
 )
+X3_RETIRED_OKF_ENTRYPOINT_SITE_IDS = (
+    "arch:4e6ad920fa6f8b1f04e30ba32d3c43fd862788b1c86a4e5ccc63d7f94425d12f",
+    "arch:54e443f61185cdcda1bf8c079674fbed0539f07d6c11bcac1910539d0c1ee3c0",
+    "arch:696339f09a5ff3924cdea5e94f42adbd85243f8d027acc9374e5b248b9e831fc",
+    "arch:7a29d8f99f927f2163ed73b82ffc796cfa07a80a9c52fc632839a86805d7a366",
+    "arch:8d9d132a306e29c2c4aee7a2cfb8a3ea96d622f4b96df2e6e8e2a73783f4c5ea",
+    "arch:a896fe3ae040ea63e7825e1027917560e30b97b098221793d5287d855532d461",
+    "arch:c0c304310a74dd2baa5eb924571d5e8d90218e8d4f32ca5972bfb7a11ed425c9",
+    "arch:c923f39e8ed11c148944e45da2a12ce9765bdb443a0d745ea316bef39e378fe0",
+    "arch:e00d4005283b819e780ed3a3691a99d49d4bc041f4833ee9ae8faca5fb1f3d6f",
+    "arch:eac69c25cece52f6b96afdbf760ca74ae1bc974566d0822eb4f009a43a5bc1e9",
+    "arch:fa73ac1392098e25c4ef3b8cdc97ff2403d51c978c93f9c3543f9353a1d0eaa6",
+)
 RETIREMENT_HISTORY = {
     "exception_semantic_ids": tuple(
         sorted(
@@ -1869,6 +1882,7 @@ RETIREMENT_HISTORY = {
                 *W6E_RETIRED_RECALL_PROCESSOR_SITE_IDS,
                 *W6F_RETIRED_INGEST_RUNTIME_SITE_IDS,
                 *W6G_RETIRED_STRUCTURED_RUNTIME_SITE_IDS,
+                *X3_RETIRED_OKF_ENTRYPOINT_SITE_IDS,
             )
         )
     ),

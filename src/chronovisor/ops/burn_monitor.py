@@ -29,7 +29,7 @@ from typing import Any
 from chronovisor.core.canonical_json import (
     canonical_json_bytes_stringifying as canonical_bytes,
 )
-from chronovisor.core.store import CHRONOVISOR_ROOT
+from chronovisor.core.store import CHRONOVISOR_ROOT, okf_startup_status
 
 RUNTIME_ROOT = CHRONOVISOR_ROOT / "runtime"
 AUTONOMY_ROOT = CHRONOVISOR_ROOT / "autonomy"
@@ -1856,6 +1856,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.self_test:
         self_test()
         return 0
+    if not okf_startup_status(CHRONOVISOR_ROOT).allowed:
+        print(
+            json.dumps({"status": "blocked", "category": "okf_startup_blocked"}),
+            file=sys.stderr,
+        )
+        return 75
     if not args.expected_commit:
         print(
             json.dumps(

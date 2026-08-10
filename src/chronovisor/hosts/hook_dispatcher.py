@@ -21,7 +21,11 @@ from chronovisor.core.runtime_config import (
     env_flag,
     load_hook_policy,
 )
-from chronovisor.core.store import CHRONOVISOR_ROOT, init_chronovisor
+from chronovisor.core.store import (
+    CHRONOVISOR_ROOT,
+    init_chronovisor,
+    okf_startup_status,
+)
 from chronovisor.recall import recall_runtime
 
 LOG_DIR = CHRONOVISOR_ROOT / "logs"
@@ -453,6 +457,16 @@ def main(argv: list[str] | None = None) -> int:
         event = normalize_event(args.event)
         args.host = host
         args.event = event
+        if not okf_startup_status(CHRONOVISOR_ROOT).allowed:
+            if event == "user-prompt-submit":
+                _print_host_noop(host)
+                return 0
+            print(
+                json.dumps(
+                    {"status": "blocked", "category": "okf_startup_blocked"}
+                )
+            )
+            return 75
         stdin_text = sys.stdin.read() if args.hook else ""
         try:
             init_chronovisor()

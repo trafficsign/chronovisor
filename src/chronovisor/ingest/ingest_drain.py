@@ -13,7 +13,11 @@ from typing import Any
 
 from chronovisor.core import ollama, runtime_status
 from chronovisor.core.link_fix import atomic_write
-from chronovisor.core.store import CHRONOVISOR_ROOT, init_chronovisor
+from chronovisor.core.store import (
+    CHRONOVISOR_ROOT,
+    init_chronovisor,
+    okf_startup_status,
+)
 from chronovisor.ingest import orchestrator
 
 DEFAULT_MAX_BATCHES = 24
@@ -438,6 +442,9 @@ def drain(
 ) -> dict[str, Any]:
     """Drain pending raws and release the ingest runner at cycle end."""
 
+    if not okf_startup_status(CHRONOVISOR_ROOT).allowed:
+        return {"status": "blocked", "category": "okf_startup_blocked"}
+
     result: dict[str, Any] | None = None
     try:
         result = _drain(
@@ -535,6 +542,11 @@ def main(argv: list[str] | None = None) -> int:
     """Run the ``chronovisor-ingest-drain`` command-line entry point."""
     parser = build_parser()
     args = parser.parse_args(argv)
+    if not okf_startup_status(CHRONOVISOR_ROOT).allowed:
+        print(
+            json.dumps({"status": "blocked", "category": "okf_startup_blocked"})
+        )
+        return 75
     if args.watch:
         watch(
             max_batches=args.max_batches,

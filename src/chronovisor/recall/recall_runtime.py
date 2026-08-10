@@ -40,6 +40,7 @@ from chronovisor.core.store import (
     SYSTEM_DIR,
     find_page,
     init_chronovisor,
+    okf_startup_status,
 )
 from chronovisor.decision.local_structured import LocalStructuredSession
 from chronovisor.decision.recall_policy_contract import RecallPolicy as RecallPolicy
@@ -3006,6 +3007,12 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
         return 0
+
+    if not okf_startup_status(CHRONOVISOR_ROOT).allowed:
+        print(
+            json.dumps({"status": "blocked", "category": "okf_startup_blocked"})
+        )
+        return 75
 
     if args.feedback:
         record = append_feedback(
