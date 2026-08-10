@@ -10,6 +10,15 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import Any
 
+from chronovisor.core.llm_runtime import (
+    RerankItem,
+    RerankRequest,
+    RerankResult,
+    RouteLocation,
+    SourceDataClass,
+    SourceDataClassification,
+    SourceSensitivity,
+)
 from chronovisor.core.runtime_config import RerankerConfig, load_reranker_config
 from chronovisor.core.search_types import ScoredPage
 from chronovisor.core.store import find_page
@@ -168,7 +177,7 @@ def _flagembedding_scores(
     return [float(score) for score in raw_scores]
 
 
-def score_fn(
+def _score_impl(
     config: RerankerConfig,
 ) -> Callable[[str, list[str], RerankerConfig], list[float]]:
     backend = config.backend.lower()
@@ -177,6 +186,75 @@ def score_fn(
     if backend == "flagembedding":
         return _flagembedding_scores
     raise RuntimeError(f"unsupported reranker backend: {config.backend}")
+
+
+class LocalRerankBackend:
+    """Local Transformers/FlagEmbedding implementation of RerankBackend."""
+
+    provider = "local-reranker"
+    location = RouteLocation.LOCAL
+
+    def __init__(self, config: RerankerConfig) -> None:
+        self.config = config
+
+    def rerank(self, request: RerankRequest, *, model: str) -> RerankResult:
+        config = (
+            self.config
+            if model == self.config.model
+            else replace(self.config, model=model)
+        )
+        scores = _score_impl(config)(request.query, list(request.candidates), config)
+        items = sorted(
+            (
+                RerankItem(index=index, score=float(score))
+                for index, score in enumerate(scores)
+            ),
+            key=lambda item: (-item.score, item.index),
+        )
+        return RerankResult(
+            items=tuple(items),
+            provider=self.provider,
+            model=model,
+            metadata={"backend": config.backend},
+        )
+
+
+# The compatibility path is local-only, so no source content can cross an egress
+# boundary before consumers migrate to passing their own classification.
+_LOCAL_RERANK_SOURCE = SourceDataClassification(
+    SourceDataClass.PAGE,
+    SourceSensitivity.NORMAL,
+)
+
+
+def score_fn(
+    config: RerankerConfig,
+) -> Callable[[str, list[str], RerankerConfig], list[float]]:
+    """Compatibility callable backed by the provider-neutral local component."""
+
+    backend = LocalRerankBackend(config)
+
+    def score(
+        query: str,
+        passages: list[str],
+        call_config: RerankerConfig,
+    ) -> list[float]:
+        active_backend = (
+            backend if call_config == config else LocalRerankBackend(call_config)
+        )
+        result = active_backend.rerank(
+            RerankRequest(
+                query=query,
+                candidates=tuple(passages),
+                source=_LOCAL_RERANK_SOURCE,
+            ),
+            model=call_config.model,
+        )
+        return [
+            item.score for item in sorted(result.items, key=lambda item: item.index)
+        ]
+
+    return score
 
 
 def warm_reranker(config: RerankerConfig | None = None) -> dict[str, Any]:

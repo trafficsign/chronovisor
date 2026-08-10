@@ -4,6 +4,16 @@ import json
 import threading
 
 from chronovisor.core import reranker
+from chronovisor.core.llm_runtime import (
+    LLMRuntime,
+    RerankItem,
+    RerankRequest,
+    RerankResult,
+    RerankRoute,
+    SourceDataClass,
+    SourceDataClassification,
+    SourceSensitivity,
+)
 from chronovisor.core.reranker import RerankOutcome, rerank_results
 from chronovisor.core.runtime_config import RerankerConfig
 from chronovisor.core.search import ScoredPage
@@ -87,6 +97,62 @@ def test_rerank_results_rejects_partial_score_vectors(monkeypatch) -> None:
     assert outcome.results == candidates
     assert outcome.metadata["status"] == "unavailable"
     assert outcome.metadata["score_count"] == 1
+
+
+def test_llm_runtime_routes_to_local_rerank_backend(
+    monkeypatch,
+) -> None:
+    config = RerankerConfig(enabled=True, backend="transformers", model="reranker")
+    seen: list[tuple[str, list[str], str]] = []
+
+    def fake_impl(_config):
+        def score(query, passages, call_config):
+            seen.append((query, passages, call_config.model))
+            return [0.1, 0.9]
+
+        return score
+
+    monkeypatch.setattr(reranker, "_score_impl", fake_impl)
+    backend = reranker.LocalRerankBackend(config)
+    runtime = LLMRuntime(rerank={"search": RerankRoute(backend, "reranker")})
+
+    result = runtime.rerank(
+        "search",
+        RerankRequest(
+            query="query",
+            candidates=("first", "second"),
+            source=SourceDataClassification(
+                SourceDataClass.PAGE, SourceSensitivity.NORMAL
+            ),
+        ),
+    )
+
+    assert seen == [("query", ["first", "second"], "reranker")]
+    assert result.items == (RerankItem(1, 0.9), RerankItem(0, 0.1))
+    assert result.provider == "local-reranker"
+    assert result.metadata == {"backend": "transformers"}
+
+
+def test_score_fn_compatibility_delegates_to_local_backend(monkeypatch) -> None:
+    config = RerankerConfig(enabled=True, model="reranker")
+    seen: list[RerankRequest] = []
+
+    def fake_rerank(self, request, *, model):
+        seen.append(request)
+        return RerankResult(
+            items=(RerankItem(1, 0.9), RerankItem(0, 0.1)),
+            provider=self.provider,
+            model=model,
+        )
+
+    monkeypatch.setattr(reranker.LocalRerankBackend, "rerank", fake_rerank)
+
+    scores = reranker.score_fn(config)("query", ["first", "second"], config)
+
+    assert scores == [0.1, 0.9]
+    assert len(seen) == 1
+    assert seen[0].query == "query"
+    assert seen[0].candidates == ("first", "second")
 
 
 def test_transformer_loader_prefers_complete_local_snapshot() -> None:
