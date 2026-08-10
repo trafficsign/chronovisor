@@ -377,6 +377,172 @@ def _changed_pages(
     return changed, changed_count
 
 
+def _extract_changed_page(
+    *,
+    root: Path,
+    config: KnowledgeGraphConfig,
+    store: KnowledgeGraphStore,
+    extractor: Extractor | None,
+    dry_run: bool,
+    page_id: str,
+    content: str,
+    content_digest: str,
+    source_data_class: str,
+    route_identity: Mapping[str, str],
+    route_resolved: bool,
+    extractor_sha256: str | None,
+    errors: list[str],
+) -> tuple[list[dict[str, Any]], int, int, float, bool]:
+    initial = deterministic_extract(page_id, content)
+    seed_mentions, _ = _normalize_extraction(page_id, content, initial)
+    selected_extractor = extractor
+    extraction_succeeded = selected_extractor is not None
+    if (
+        selected_extractor is None
+        and config.local_extraction_enabled
+        and route_resolved
+    ):
+
+        def configured_extractor(
+            pid: str,
+            text: str,
+            seeds: Sequence[ExtractedMention],
+            data_class: str = source_data_class,
+        ) -> Mapping[str, Any]:
+            return local_structured_extract(
+                pid,
+                text,
+                seeds,
+                expected_model=route_identity["model"],
+                expected_location=route_identity["location"],
+                source_data_class=data_class,
+                audit_root=root
+                / "runtime"
+                / "typed-graph"
+                / "structured-audit",
+            )
+
+        selected_extractor = configured_extractor
+    elif selected_extractor is None:
+        extraction_succeeded = not config.local_extraction_enabled
+    model_started = time.monotonic()
+    try:
+        value = (
+            selected_extractor(page_id, content, seed_mentions)
+            if selected_extractor is not None
+            else initial
+        )
+        if selected_extractor is not None:
+            extraction_succeeded = True
+    except Exception as exc:
+        errors.append(f"extractor:{type(exc).__name__}")
+        extraction_succeeded = False
+        value = initial
+    external_model_calls = 0
+    if (
+        extractor is None
+        and config.local_extraction_enabled
+        and route_resolved
+        and route_identity.get("location") == "remote"
+    ):
+        external_model_calls += 2
+    model_seconds = 0.0
+    if selected_extractor is not None:
+        model_seconds += max(0.0, time.monotonic() - model_started)
+    deterministic_mentions, deterministic_relations = _normalize_extraction(
+        page_id, content, initial
+    )
+    model_mentions, model_relations = _normalize_extraction(page_id, content, value)
+    mention_map = {
+        (row.mention.casefold(), row.source_line): row
+        for row in (*deterministic_mentions, *model_mentions)
+    }
+    relation_map = {
+        (
+            row.target_page_id,
+            row.predicate.casefold(),
+            row.direction,
+            row.source_line,
+            row.evidence_text,
+        ): row
+        for row in (*deterministic_relations, *model_relations)
+    }
+    mentions = list(mention_map.values())
+    relations = list(relation_map.values())
+    used_model_extraction = selected_extractor is not None and extraction_succeeded
+    if used_model_extraction:
+        record_model_sha256 = (
+            knowledge_generation_sha256(route_identity)
+            if extractor is not None
+            else str(extractor_sha256)
+        )
+    else:
+        record_model_sha256 = knowledge_generation_sha256(
+            DETERMINISTIC_EXTRACTOR_IDENTITY
+        )
+    entity_candidates: list[dict[str, Any]] = []
+    for mention in mentions:
+        entity_candidates.append(
+            asdict(
+                EntityCandidate(
+                    candidate_id=entity_candidate_id(
+                        mention=mention.mention,
+                        page_id=page_id,
+                        content_sha256=content_digest,
+                    ),
+                    mention=mention.mention,
+                    normalized=mention.mention.casefold(),
+                    page_id=page_id,
+                    content_sha256=content_digest,
+                    entity_type=mention.entity_type,
+                    alias_evidence_sha256=sha256(
+                        [mention.mention, page_id, mention.source_line]
+                    ),
+                )
+            )
+        )
+    for relation in relations:
+        evidence = EvidenceRef(
+            page_id=page_id,
+            content_sha256=content_digest,
+            span_sha256=sha256(relation.evidence_text),
+            source_line=relation.source_line,
+        )
+        evidence_digest = sha256([asdict(evidence)])
+        record = RelationRecord(
+            relation_id=relation_id(
+                source_page_id=page_id,
+                target_page_id=relation.target_page_id,
+                predicate=relation.predicate,
+                evidence_sha256=evidence_digest,
+                model_sha256=record_model_sha256,
+                rubric_sha256=GRAPH_BUILDER_RUBRIC_SHA256,
+            ),
+            source_page_id=page_id,
+            target_page_id=relation.target_page_id,
+            predicate=relation.predicate,
+            direction=relation.direction,
+            status="proposed",
+            evidence=(evidence,),
+            model_sha256=record_model_sha256,
+            rubric_sha256=GRAPH_BUILDER_RUBRIC_SHA256,
+            producer_role="primary" if used_model_extraction else "deterministic",
+            confidence=relation.confidence,
+            reason_code="explicit_wikilink"
+            if not used_model_extraction
+            else "runtime_extraction",
+        )
+        if not dry_run:
+            store.append(record, action="propose", reason_code=record.reason_code)
+    return (
+        entity_candidates,
+        len(relations),
+        external_model_calls,
+        model_seconds,
+        extraction_succeeded,
+    )
+
+
 def run_builder_cycle(
     *,
     root: Path = CHRONOVISOR_ROOT,
@@ -510,150 +676,34 @@ def run_builder_cycle(
                 ),
                 store=graph_store,
             )
-        initial = deterministic_extract(page_id, content)
-        seed_mentions, _ = _normalize_extraction(page_id, content, initial)
         source_data_class = (
             "system" if root / "system" in path.parents else "page"
         )
-        selected_extractor = extractor
-        extraction_succeeded = selected_extractor is not None
-        if (
-            selected_extractor is None
-            and cfg.local_extraction_enabled
-            and route_resolved
-        ):
-
-            def configured_extractor(
-                pid: str,
-                text: str,
-                seeds: Sequence[ExtractedMention],
-                data_class: str = source_data_class,
-            ) -> Mapping[str, Any]:
-                return local_structured_extract(
-                    pid,
-                    text,
-                    seeds,
-                    expected_model=route_identity["model"],
-                    expected_location=route_identity["location"],
-                    source_data_class=data_class,
-                    audit_root=root
-                    / "runtime"
-                    / "typed-graph"
-                    / "structured-audit",
-                )
-
-            selected_extractor = configured_extractor
-        elif selected_extractor is None:
-            extraction_succeeded = not cfg.local_extraction_enabled
-        model_started = time.monotonic()
-        try:
-            value = (
-                selected_extractor(page_id, content, seed_mentions)
-                if selected_extractor is not None
-                else initial
-            )
-            if selected_extractor is not None:
-                extraction_succeeded = True
-        except Exception as exc:
-            errors.append(f"extractor:{type(exc).__name__}")
-            extraction_succeeded = False
-            value = initial
-        if (
-            extractor is None
-            and cfg.local_extraction_enabled
-            and route_resolved
-            and route_identity.get("location") == "remote"
-        ):
-            external_model_calls += 2
-        if selected_extractor is not None:
-            model_seconds += max(0.0, time.monotonic() - model_started)
-        deterministic_mentions, deterministic_relations = _normalize_extraction(
-            page_id, content, initial
+        (
+            page_entities,
+            page_relations,
+            page_external_calls,
+            page_model_seconds,
+            extraction_succeeded,
+        ) = _extract_changed_page(
+            root=root,
+            config=cfg,
+            store=graph_store,
+            extractor=extractor,
+            dry_run=dry_run,
+            page_id=page_id,
+            content=content,
+            content_digest=content_digest,
+            source_data_class=source_data_class,
+            route_identity=route_identity,
+            route_resolved=route_resolved,
+            extractor_sha256=extractor_sha256,
+            errors=errors,
         )
-        model_mentions, model_relations = _normalize_extraction(page_id, content, value)
-        mention_map = {
-            (row.mention.casefold(), row.source_line): row
-            for row in (*deterministic_mentions, *model_mentions)
-        }
-        relation_map = {
-            (
-                row.target_page_id,
-                row.predicate.casefold(),
-                row.direction,
-                row.source_line,
-                row.evidence_text,
-            ): row
-            for row in (*deterministic_relations, *model_relations)
-        }
-        mentions = list(mention_map.values())
-        relations = list(relation_map.values())
-        used_model_extraction = selected_extractor is not None and extraction_succeeded
-        if used_model_extraction:
-            record_model_sha256 = (
-                knowledge_generation_sha256(route_identity)
-                if extractor is not None
-                else str(extractor_sha256)
-            )
-        else:
-            record_model_sha256 = knowledge_generation_sha256(
-                DETERMINISTIC_EXTRACTOR_IDENTITY
-            )
-        for mention in mentions:
-            entity_candidates.append(
-                asdict(
-                    EntityCandidate(
-                        candidate_id=entity_candidate_id(
-                            mention=mention.mention,
-                            page_id=page_id,
-                            content_sha256=content_digest,
-                        ),
-                        mention=mention.mention,
-                        normalized=mention.mention.casefold(),
-                        page_id=page_id,
-                        content_sha256=content_digest,
-                        entity_type=mention.entity_type,
-                        alias_evidence_sha256=sha256(
-                            [mention.mention, page_id, mention.source_line]
-                        ),
-                    )
-                )
-            )
-        for relation in relations:
-            evidence = EvidenceRef(
-                page_id=page_id,
-                content_sha256=content_digest,
-                span_sha256=sha256(relation.evidence_text),
-                source_line=relation.source_line,
-            )
-            evidence_digest = sha256([asdict(evidence)])
-            record = RelationRecord(
-                relation_id=relation_id(
-                    source_page_id=page_id,
-                    target_page_id=relation.target_page_id,
-                    predicate=relation.predicate,
-                    evidence_sha256=evidence_digest,
-                    model_sha256=record_model_sha256,
-                    rubric_sha256=GRAPH_BUILDER_RUBRIC_SHA256,
-                ),
-                source_page_id=page_id,
-                target_page_id=relation.target_page_id,
-                predicate=relation.predicate,
-                direction=relation.direction,
-                status="proposed",
-                evidence=(evidence,),
-                model_sha256=record_model_sha256,
-                rubric_sha256=GRAPH_BUILDER_RUBRIC_SHA256,
-                producer_role="primary" if used_model_extraction else "deterministic",
-                confidence=relation.confidence,
-                reason_code="explicit_wikilink"
-                if not used_model_extraction
-                else "runtime_extraction",
-            )
-            if not dry_run:
-                graph_store.append(
-                    record, action="propose", reason_code=record.reason_code
-                )
-            relation_count += 1
+        entity_candidates.extend(page_entities)
+        relation_count += page_relations
+        external_model_calls += page_external_calls
+        model_seconds += page_model_seconds
         page_digests[page_id] = content_digest
         if extractor is None and (
             not cfg.local_extraction_enabled
