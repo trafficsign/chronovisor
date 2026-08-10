@@ -1,0 +1,141 @@
+name: Security
+
+on:
+  pull_request:
+  push:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  secret-scan:
+    name: Secret scan (tree, history, release artifacts)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Check out full Git history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.24.11"
+          cache: false
+      - name: Install pinned Gitleaks
+        env:
+          GOBIN: ${{ runner.temp }}/gitleaks-bin
+        run: |
+          set -euo pipefail
+          mkdir -p "$GOBIN"
+          go install github.com/zricethezav/gitleaks/v8@83d9cd684c87d95d656c1458ef04895a7f1cbd8e
+          printf '%s\n' "$GOBIN" >> "$GITHUB_PATH"
+      - name: Scan full Git history
+        run: >-
+          gitleaks git .
+          --log-opts="--all"
+          --config=.gitleaks.toml
+          --redact
+          --no-banner
+          --no-color
+      - name: Scan current source, tests, docs, and examples
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -d src
+          test -d tests
+          test -d docs
+          for target in src scripts tests docs examples README.md SECURITY.md pyproject.toml config.toml.example; do
+            if [[ -e "$target" ]]; then
+              gitleaks dir "$target" --config=.gitleaks.toml --redact --no-banner --no-color
+            fi
+          done
+      - name: Set up uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.12.3"
+          enable-cache: false
+          python-version: "3.13"
+      - name: Build release artifacts
+        run: uv build --no-sources --out-dir "${{ runner.temp }}/chronovisor-dist"
+      - name: Scan release artifacts and nested archives
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          wheels=("${{ runner.temp }}/chronovisor-dist"/*.whl)
+          sdists=("${{ runner.temp }}/chronovisor-dist"/*.tar.gz)
+          ((${#wheels[@]} > 0 && ${#sdists[@]} > 0))
+          gitleaks dir "${{ runner.temp }}/chronovisor-dist" \
+            --max-archive-depth=2 \
+            --max-decode-depth=2 \
+            --config=.gitleaks.toml \
+            --redact \
+            --no-banner \
+            --no-color
+
+  dependency-audit:
+    name: Dependency audit (locked release gate)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.12.3"
+          enable-cache: false
+          python-version: "3.13"
+      - name: Export the frozen dependency graph
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv export \
+            --frozen \
+            --all-groups \
+            --all-extras \
+            --no-emit-project \
+            --format requirements-txt \
+            --quiet \
+            --output-file "${{ runner.temp }}/chronovisor-requirements.txt"
+          test -s "${{ runner.temp }}/chronovisor-requirements.txt"
+      - name: Audit every locked dependency
+        run: >-
+          uvx --from pip-audit==2.10.1 pip-audit
+          --require-hashes
+          --no-deps
+          --disable-pip
+          --progress-spinner=off
+          --desc=off
+          --requirement "${{ runner.temp }}/chronovisor-requirements.txt"
+
+  codeql:
+    name: CodeQL (Python)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@5595ccaf912efad79be6eef63a5619ff05969be3 # v4.37.6
+        with:
+          languages: python
+          build-mode: none
+          queries: security-extended
+      - name: Analyze Python
+        uses: github/codeql-action/analyze@5595ccaf912efad79be6eef63a5619ff05969be3 # v4.37.6
+        with:
+          category: /language:python

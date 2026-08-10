@@ -1,0 +1,18 @@
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "RFC 6455 WebSocket nonce fixture"
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "line"
+paths = ['''(^|/)tests/test_dashboard\.py$''']
+regexes = ['''Sec-WebSocket-Key:\s*dGhlIHNhbXBsZSBub25jZQ==''']
+
+[[allowlists]]
+description = "Fake session key fixture"
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "line"
+paths = ['''(^|/)tests/test_cortex\.py$''']
+regexes = ['''session_key\s*=\s*"0123456789abcdef01234567"''']
