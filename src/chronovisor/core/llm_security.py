@@ -18,6 +18,8 @@ import keyring
 import keyring.errors
 
 MAX_SECRET_FILE_BYTES = 16_384
+DEFAULT_REQUEST_TIMEOUT_MS = 60_000
+MAX_REQUEST_TIMEOUT_MS = 900_000
 _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 _KEYRING_TARGET = re.compile(
     r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z"
@@ -598,7 +600,11 @@ class CredentialBinding:
 
 class RequestSender(Protocol):
     def __call__(
-        self, request: Request, *, follow_redirects: Literal[False]
+        self,
+        request: Request,
+        *,
+        follow_redirects: Literal[False],
+        timeout_seconds: float,
     ) -> object: ...
 
 
@@ -643,6 +649,7 @@ class AuthenticatedTransport:
         data: bytes | None = None,
         headers: Mapping[str, str] | None = None,
         method: str = "POST",
+        timeout_ms: int = DEFAULT_REQUEST_TIMEOUT_MS,
     ) -> object:
         target = canonical_endpoint(url, cloud_secret=True)
         if target.origin != self._endpoint.origin:
@@ -650,6 +657,12 @@ class AuthenticatedTransport:
         if not isinstance(method, str) or _HTTP_TOKEN.fullmatch(method) is None:
             raise _error(CredentialFailureCategory.ENDPOINT_REJECTED, self._telemetry)
         if data is not None and not isinstance(data, bytes):
+            raise _error(CredentialFailureCategory.ENDPOINT_REJECTED, self._telemetry)
+        if (
+            isinstance(timeout_ms, bool)
+            or not isinstance(timeout_ms, int)
+            or not 0 < timeout_ms <= MAX_REQUEST_TIMEOUT_MS
+        ):
             raise _error(CredentialFailureCategory.ENDPOINT_REJECTED, self._telemetry)
         request_headers = _validated_headers(headers, self._telemetry)
         raw_secret = cast(
@@ -667,7 +680,13 @@ class AuthenticatedTransport:
                 headers=request_headers,
                 method=method.upper(),
             )
-            return self._sender(request, follow_redirects=False)
+            return self._sender(
+                request,
+                follow_redirects=False,
+                timeout_seconds=timeout_ms / 1000,
+            )
+        except CredentialSecurityError:
+            raise
         except Exception:
             pass
         raise _error(CredentialFailureCategory.TRANSPORT_ERROR, self._telemetry)

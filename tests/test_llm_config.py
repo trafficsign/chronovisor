@@ -50,10 +50,12 @@ class CountingResolver(CredentialResolver):
 class FakeSender:
     def __init__(self, *responses: httpx.Response) -> None:
         self.responses = list(responses)
-        self.calls: list[tuple[Request, bool]] = []
+        self.calls: list[tuple[Request, bool, float]] = []
 
-    def __call__(self, request: Request, *, follow_redirects: bool) -> object:
-        self.calls.append((request, follow_redirects))
+    def __call__(
+        self, request: Request, *, follow_redirects: bool, timeout_seconds: float
+    ) -> object:
+        self.calls.append((request, follow_redirects, timeout_seconds))
         return self.responses.pop(0)
 
 
@@ -173,7 +175,7 @@ def test_one_remote_profile_resolves_once_and_routes_generation_and_embedding() 
     assert len(resolver.calls) == 1
     assert len(profiles) == 1
     assert len(sender.calls) == 2
-    assert all(not follow_redirects for _, follow_redirects in sender.calls)
+    assert all(not follow_redirects for _, follow_redirects, _ in sender.calls)
     assert CANARY not in repr(sender.calls)
 
 

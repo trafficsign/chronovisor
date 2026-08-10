@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
@@ -14,8 +13,14 @@ from urllib.request import Request
 
 import httpx
 
-from chronovisor.core.llm_runtime import BackendCapabilities
+from chronovisor.core.llm_runtime import (
+    TRANSIENT_FAILURE_CATEGORIES,
+    BackendCapabilities,
+    SafeBackendError,
+    safe_metadata_identifier,
+)
 from chronovisor.core.llm_security import (
+    DEFAULT_REQUEST_TIMEOUT_MS,
     AuthenticatedTransport,
     AuthScheme,
     CredentialBinding,
@@ -25,8 +30,6 @@ from chronovisor.core.llm_security import (
     RequestSender,
     canonical_endpoint,
 )
-
-_SAFE_IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}\Z")
 
 
 class ProviderProtocol(StrEnum):
@@ -46,9 +49,17 @@ class ProviderFailureCategory(StrEnum):
     TIMEOUT = "timeout"
     TRANSPORT_ERROR = "transport_error"
     INVALID_RESPONSE = "invalid_response"
+    CREDENTIAL_REF_INVALID = "credential_ref_invalid"
+    CREDENTIAL_MISSING = "credential_missing"
+    BACKEND_REJECTED = "backend_rejected"
+    STORE_LOCKED = "store_locked"
+    STORE_UNAVAILABLE = "store_unavailable"
+    MOUNT_REJECTED = "mounted_file_rejected"
+    ENDPOINT_REJECTED = "endpoint_rejected"
+    ORIGIN_MISMATCH = "origin_mismatch"
 
 
-class ProviderAdapterError(RuntimeError):
+class ProviderAdapterError(SafeBackendError):
     """A body-, prompt-, and credential-free remote provider failure."""
 
     def __init__(
@@ -58,8 +69,11 @@ class ProviderAdapterError(RuntimeError):
         request_id: str | None = None,
     ) -> None:
         self.category = category
-        self.request_id = request_id
-        super().__init__(category.value)
+        super().__init__(
+            category.value,
+            request_id=request_id,
+            transient=category.value in TRANSIENT_FAILURE_CATEGORIES,
+        )
 
 
 @dataclass(frozen=True)
@@ -269,7 +283,13 @@ def generic_openai_profile(
 class HTTPXSender:
     """Real HTTPS sender with certificate verification on and redirects off."""
 
-    def __call__(self, request: Request, *, follow_redirects: Literal[False]) -> object:
+    def __call__(
+        self,
+        request: Request,
+        *,
+        follow_redirects: Literal[False],
+        timeout_seconds: float = DEFAULT_REQUEST_TIMEOUT_MS / 1000,
+    ) -> object:
         if follow_redirects is not False:
             raise RuntimeError("redirect policy violation")
         content = request.data
@@ -280,7 +300,7 @@ class HTTPXSender:
             request.full_url,
             content=content,
             headers=dict(request.header_items()),
-            timeout=60.0,
+            timeout=timeout_seconds,
             follow_redirects=False,
         )
 
@@ -294,9 +314,19 @@ class _TimeoutAwareSender:
     def __init__(self, sender: RequestSender) -> None:
         self._sender = sender
 
-    def __call__(self, request: Request, *, follow_redirects: Literal[False]) -> object:
+    def __call__(
+        self,
+        request: Request,
+        *,
+        follow_redirects: Literal[False],
+        timeout_seconds: float,
+    ) -> object:
         try:
-            return self._sender(request, follow_redirects=follow_redirects)
+            return self._sender(
+                request,
+                follow_redirects=follow_redirects,
+                timeout_seconds=timeout_seconds,
+            )
         except httpx.TimeoutException:
             return _TransportFailure(ProviderFailureCategory.TIMEOUT)
 
@@ -324,19 +354,11 @@ class ProviderJSONResponse:
     request_id: str | None = None
 
 
-def _safe_identifier(value: object) -> str | None:
-    return (
-        value
-        if isinstance(value, str) and _SAFE_IDENTIFIER.fullmatch(value) is not None
-        else None
-    )
-
-
 def response_metadata(
     payload: Mapping[str, object], request_id: str | None
 ) -> Mapping[str, str]:
     metadata: dict[str, str] = {}
-    returned_model = _safe_identifier(payload.get("model"))
+    returned_model = safe_metadata_identifier(payload.get("model"))
     if returned_model is not None:
         metadata["returned_model"] = returned_model
     if request_id is not None:
@@ -360,6 +382,7 @@ def post_json(
     payload: Mapping[str, object],
     *,
     headers: Mapping[str, str] | None = None,
+    timeout_ms: int | None = None,
 ) -> ProviderJSONResponse:
     try:
         encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode(
@@ -373,15 +396,18 @@ def post_json(
                 url,
                 data=encoded,
                 headers={"Content-Type": "application/json", **(headers or {})},
+                timeout_ms=(
+                    DEFAULT_REQUEST_TIMEOUT_MS if timeout_ms is None else timeout_ms
+                ),
             )
-        except CredentialSecurityError:
-            pass
+        except CredentialSecurityError as exc:
+            security_category = exc.category.value
         else:
             if isinstance(response, _TransportFailure):
                 raise ProviderAdapterError(response.category)
             if not isinstance(response, httpx.Response):
                 raise ProviderAdapterError(ProviderFailureCategory.INVALID_RESPONSE)
-            request_id = _safe_identifier(
+            request_id = safe_metadata_identifier(
                 response.headers.get("x-request-id")
                 or response.headers.get("request-id")
             )
@@ -420,5 +446,9 @@ def post_json(
             raise ProviderAdapterError(
                 ProviderFailureCategory.INVALID_RESPONSE, request_id=request_id
             )
-        raise ProviderAdapterError(ProviderFailureCategory.TRANSPORT_ERROR)
+        try:
+            category = ProviderFailureCategory(security_category)
+        except ValueError:
+            category = ProviderFailureCategory.TRANSPORT_ERROR
+        raise ProviderAdapterError(category)
     raise ProviderAdapterError(ProviderFailureCategory.INVALID_REQUEST)

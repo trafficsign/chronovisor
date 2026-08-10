@@ -164,6 +164,7 @@ class OpenAICompatibleAdapter:
             self._transport,
             self._profile.url("/chat/completions"),
             payload,
+            timeout_ms=request.timeout_ms,
         )
         return self._generation_result(response, model)
 
@@ -182,6 +183,7 @@ class OpenAICompatibleAdapter:
             self._transport,
             self._profile.url("/embeddings"),
             {"model": model, "input": list(request.texts)},
+            timeout_ms=request.timeout_ms,
         )
         return self._embedding_result(response, model, len(request.texts))
 

@@ -340,11 +340,13 @@ def test_endpoint_policy_canonicalizes_origin_and_limits_plain_http() -> None:
 
 class RecordingSender:
     def __init__(self, *, failure: Exception | None = None) -> None:
-        self.calls: list[tuple[Request, bool]] = []
+        self.calls: list[tuple[Request, bool, float]] = []
         self.failure = failure
 
-    def __call__(self, request: Request, *, follow_redirects: bool) -> object:
-        self.calls.append((request, follow_redirects))
+    def __call__(
+        self, request: Request, *, follow_redirects: bool, timeout_seconds: float
+    ) -> object:
+        self.calls.append((request, follow_redirects, timeout_seconds))
         if self.failure is not None:
             raise self.failure
         return "ok"
@@ -380,9 +382,10 @@ def test_transport_injects_auth_only_at_wire_and_never_follows_redirects() -> No
 
     assert transport.send("https://API.example.com:443/v1/chat", data=b"{}") == "ok"
 
-    request, follow_redirects = sender.calls[0]
+    request, follow_redirects, timeout_seconds = sender.calls[0]
     assert request.get_header("Authorization") == f"Bearer {CANARY}"
     assert follow_redirects is False
+    assert timeout_seconds == 60.0
     assert CANARY not in repr(request)
     with pytest.raises(TypeError):
         json.dumps(request)
@@ -495,6 +498,30 @@ def test_transport_rejects_cross_origin_and_caller_auth_before_sender_call() -> 
     assert origin.value.category is CredentialFailureCategory.ORIGIN_MISMATCH
     assert header.value.category is CredentialFailureCategory.ENDPOINT_REJECTED
     assert sender.calls == []
+
+
+def test_transport_rejects_invalid_timeout_before_sender_call() -> None:
+    sender = RecordingSender()
+    transport = _transport(sender)
+
+    with pytest.raises(CredentialSecurityError) as exc:
+        transport.send("https://api.example.com/v1/chat", timeout_ms=0)
+
+    assert exc.value.category is CredentialFailureCategory.ENDPOINT_REJECTED
+    assert sender.calls == []
+
+
+def test_transport_preserves_safe_credential_category_from_sender() -> None:
+    sender = RecordingSender(
+        failure=CredentialSecurityError(CredentialFailureCategory.ORIGIN_MISMATCH)
+    )
+    transport = _transport(sender)
+
+    with pytest.raises(CredentialSecurityError) as exc:
+        transport.send("https://api.example.com/v1/chat")
+
+    assert exc.value.category is CredentialFailureCategory.ORIGIN_MISMATCH
+    assert exc.value.__context__ is None
 
 
 def test_transport_sanitizes_sender_errors_and_telemetry() -> None:

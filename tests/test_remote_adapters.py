@@ -11,13 +11,26 @@ import pytest
 
 from chronovisor.core.anthropic_adapter import compose_anthropic_adapter
 from chronovisor.core.llm_runtime import (
+    MAX_OUTPUT_TOKENS,
+    BackendExecutionError,
     EmbeddingRequest,
+    EmbeddingRoute,
     GenerationRequest,
+    GenerationRoute,
+    LLMRuntime,
+    RequestValidationError,
+    RuntimeFailureTelemetry,
     SourceDataClass,
     SourceDataClassification,
     SourceSensitivity,
 )
-from chronovisor.core.llm_security import AuthScheme, CredentialRef, CredentialResolver
+from chronovisor.core.llm_security import (
+    AuthScheme,
+    CredentialFailureCategory,
+    CredentialRef,
+    CredentialResolver,
+    CredentialSecurityError,
+)
 from chronovisor.core.openai_compatible_adapter import (
     compose_openai_compatible_adapter,
 )
@@ -41,10 +54,12 @@ QWEN_ENDPOINT = "https://dashscope.example.test/compatible-mode/v1"
 class FakeSender:
     def __init__(self, *outcomes: object) -> None:
         self.outcomes = list(outcomes)
-        self.calls: list[tuple[Request, bool]] = []
+        self.calls: list[tuple[Request, bool, float]] = []
 
-    def __call__(self, request: Request, *, follow_redirects: bool) -> object:
-        self.calls.append((request, follow_redirects))
+    def __call__(
+        self, request: Request, *, follow_redirects: bool, timeout_seconds: float
+    ) -> object:
+        self.calls.append((request, follow_redirects, timeout_seconds))
         outcome = self.outcomes.pop(0)
         if isinstance(outcome, Exception):
             raise outcome
@@ -212,8 +227,9 @@ def test_all_openai_compatible_curated_profiles_share_generation_contract(
         "returned_model": "provider-returned-model",
         "request_id": "req_fixture_1",
     }
-    request, follow_redirects = sender.calls[0]
+    request, follow_redirects, timeout_seconds = sender.calls[0]
     assert follow_redirects is False
+    assert timeout_seconds == 60.0
     assert request.full_url.endswith("/chat/completions")
     assert CANARY not in repr(request)
 
@@ -404,6 +420,7 @@ def test_httpx_sender_pins_tls_defaults_and_redirect_policy(
     HTTPXSender()(request, follow_redirects=False)
 
     assert captured["follow_redirects"] is False
+    assert captured["timeout"] == 60.0
     assert "verify" not in captured
 
 
@@ -426,7 +443,13 @@ def test_anthropic_native_messages_shape_and_generation_only(tmp_path: Path) -> 
     )
 
     result = adapter.generate(
-        GenerationRequest("prompt", NORMAL_PAGE, system="system", max_output_tokens=32),
+        GenerationRequest(
+            "prompt",
+            NORMAL_PAGE,
+            system="system",
+            max_output_tokens=32,
+            timeout_ms=12_345,
+        ),
         model="claude-route",
     )
 
@@ -443,6 +466,7 @@ def test_anthropic_native_messages_shape_and_generation_only(tmp_path: Path) -> 
     }
     assert request.get_header("X-api-key") == CANARY
     assert request.get_header("Anthropic-version") == "2023-06-01"
+    assert sender.calls[0][2] == 12.345
     assert not hasattr(adapter, "embed")
     assert not hasattr(adapter, "rerank")
 
@@ -474,3 +498,209 @@ def test_anthropic_rejects_structured_and_non_text_shape_before_leak(
         adapter.generate(GenerationRequest(CANARY, NORMAL_PAGE), model="claude")
     assert malformed.value.category is ProviderFailureCategory.INVALID_RESPONSE
     assert CANARY not in repr(malformed.value)
+
+
+@pytest.mark.parametrize(
+    "failure,category,expected_calls,request_id",
+    [
+        ("401", "http_401", 1, "req_fixture_1"),
+        ("429", "http_429", 3, "req_fixture_1"),
+        ("503", "http_5xx", 3, "req_fixture_1"),
+        ("timeout", "timeout", 3, None),
+        ("transport", "transport_error", 3, None),
+    ],
+)
+def test_runtime_preserves_safe_provider_failure_and_retries_only_transient(
+    failure: str,
+    category: str,
+    expected_calls: int,
+    request_id: str | None,
+    tmp_path: Path,
+) -> None:
+    if failure == "timeout":
+        outcomes: list[object] = [httpx.ReadTimeout(CANARY)] * 3
+    elif failure == "transport":
+        outcomes = [OSError(CANARY)] * 3
+    else:
+        outcomes = [_response({"error": CANARY}, status=int(failure))] * 3
+    sender = FakeSender(*outcomes)
+    adapter = compose_openai_compatible_adapter(
+        _curated("openai"), _resolver(tmp_path), sender=sender
+    )
+    events: list[RuntimeFailureTelemetry] = []
+    runtime = LLMRuntime(
+        generation={"review": GenerationRoute(adapter, "route-model")},
+        max_retries=2,
+        telemetry=events.append,
+    )
+
+    with pytest.raises(BackendExecutionError) as exc:
+        runtime.generate(
+            "review", GenerationRequest(CANARY, NORMAL_PAGE, system=CANARY)
+        )
+
+    assert exc.value.category == category
+    assert exc.value.retry_count == expected_calls - 1
+    assert exc.value.request_id == request_id
+    assert exc.value.__cause__ is None
+    assert exc.value.__context__ is None
+    assert len(sender.calls) == expected_calls
+    assert events == [
+        RuntimeFailureTelemetry(
+            category,
+            "review",
+            "generation",
+            "openai",
+            "remote",
+            expected_calls - 1,
+            request_id,
+        )
+    ]
+    assert CANARY not in str(exc.value)
+    assert CANARY not in repr(exc.value)
+    assert CANARY not in repr(events)
+
+
+def test_runtime_retry_reuses_route_and_never_falls_back(tmp_path: Path) -> None:
+    primary_sender = FakeSender(
+        _response({"error": CANARY}, status=429),
+        _openai_success(content="retried"),
+    )
+    fallback_sender = FakeSender(_openai_success(content="fallback"))
+    profile = _curated("openai")
+    primary = compose_openai_compatible_adapter(
+        profile, _resolver(tmp_path), sender=primary_sender
+    )
+    fallback = compose_openai_compatible_adapter(
+        profile, _resolver(tmp_path), sender=fallback_sender
+    )
+    runtime = LLMRuntime(
+        generation={
+            "review": GenerationRoute(primary, "route-model"),
+            "other": GenerationRoute(fallback, "fallback-model"),
+        },
+        max_retries=1,
+    )
+
+    result = runtime.generate("review", GenerationRequest("prompt", NORMAL_PAGE))
+
+    assert result.content == "retried"
+    assert result.model == "route-model"
+    assert len(primary_sender.calls) == 2
+    assert fallback_sender.calls == []
+
+
+def test_runtime_preserves_transport_security_category_without_retry(
+    tmp_path: Path,
+) -> None:
+    sender = FakeSender(
+        CredentialSecurityError(CredentialFailureCategory.ORIGIN_MISMATCH)
+    )
+    adapter = compose_openai_compatible_adapter(
+        _curated("openai"), _resolver(tmp_path), sender=sender
+    )
+    events: list[RuntimeFailureTelemetry] = []
+    runtime = LLMRuntime(
+        generation={"review": GenerationRoute(adapter, "route-model")},
+        max_retries=2,
+        telemetry=events.append,
+    )
+
+    with pytest.raises(BackendExecutionError) as exc:
+        runtime.generate("review", GenerationRequest(CANARY, NORMAL_PAGE))
+
+    assert exc.value.category == "origin_mismatch"
+    assert exc.value.retry_count == 0
+    assert len(sender.calls) == 1
+    assert events[0].category == "origin_mismatch"
+    assert CANARY not in repr(exc.value)
+    assert CANARY not in repr(events)
+
+
+def test_runtime_drops_unsafe_request_id_metadata(tmp_path: Path) -> None:
+    sender = FakeSender(
+        _response(
+            {"error": CANARY},
+            status=401,
+            request_id=f"{CANARY} with spaces",
+        )
+    )
+    adapter = compose_openai_compatible_adapter(
+        _curated("openai"), _resolver(tmp_path), sender=sender
+    )
+    events: list[RuntimeFailureTelemetry] = []
+    runtime = LLMRuntime(
+        generation={"review": GenerationRoute(adapter, "route-model")},
+        telemetry=events.append,
+    )
+
+    with pytest.raises(BackendExecutionError) as exc:
+        runtime.generate("review", GenerationRequest(CANARY, NORMAL_PAGE))
+
+    assert exc.value.request_id is None
+    assert events[0].request_id is None
+    assert CANARY not in repr(exc.value)
+    assert CANARY not in repr(events)
+
+
+def test_runtime_default_has_no_retry(tmp_path: Path) -> None:
+    sender = FakeSender(
+        _response({"error": CANARY}, status=429),
+        _openai_success(),
+    )
+    adapter = compose_openai_compatible_adapter(
+        _curated("openai"), _resolver(tmp_path), sender=sender
+    )
+    runtime = LLMRuntime(generation={"review": GenerationRoute(adapter, "route-model")})
+
+    with pytest.raises(BackendExecutionError) as exc:
+        runtime.generate("review", GenerationRequest("prompt", NORMAL_PAGE))
+
+    assert exc.value.category == "http_429"
+    assert exc.value.retry_count == 0
+    assert len(sender.calls) == 1
+
+
+def test_openai_timeout_reaches_generation_and_embedding_sender(
+    tmp_path: Path,
+) -> None:
+    sender = FakeSender(
+        _openai_success(),
+        _response({"data": [{"index": 0, "embedding": [1.0]}]}),
+    )
+    adapter = compose_openai_compatible_adapter(
+        _curated("openai"), _resolver(tmp_path), sender=sender
+    )
+    runtime = LLMRuntime(
+        generation={"review": GenerationRoute(adapter, "route-model")},
+        embedding={"search": EmbeddingRoute(adapter, "route-embedder")},
+    )
+
+    runtime.generate(
+        "review", GenerationRequest("prompt", NORMAL_PAGE, timeout_ms=12_345)
+    )
+    runtime.embed("search", EmbeddingRequest(("text",), NORMAL_PAGE, timeout_ms=23_456))
+
+    assert [call[2] for call in sender.calls] == [12.345, 23.456]
+
+
+def test_runtime_budget_rejection_precedes_remote_serialization_and_network(
+    tmp_path: Path,
+) -> None:
+    sender = FakeSender(_openai_success())
+    adapter = compose_openai_compatible_adapter(
+        _curated("openai"), _resolver(tmp_path), sender=sender
+    )
+    runtime = LLMRuntime(generation={"review": GenerationRoute(adapter, "route-model")})
+
+    with pytest.raises(RequestValidationError):
+        runtime.generate(
+            "review",
+            GenerationRequest(
+                CANARY,
+                NORMAL_PAGE,
+                max_output_tokens=MAX_OUTPUT_TOKENS + 1,
+            ),
+        )
+
+    assert sender.calls == []

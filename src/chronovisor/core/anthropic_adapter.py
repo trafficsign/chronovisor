@@ -131,6 +131,7 @@ class AnthropicMessagesAdapter:
             self._profile.url("/messages"),
             payload,
             headers={"anthropic-version": "2023-06-01"},
+            timeout_ms=request.timeout_ms,
         )
         return self._generation_result(response, model)
 

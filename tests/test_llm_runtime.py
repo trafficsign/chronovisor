@@ -7,6 +7,10 @@ import pytest
 
 from chronovisor.core import ollama
 from chronovisor.core.llm_runtime import (
+    MAX_CONTEXT_TOKENS,
+    MAX_OUTPUT_CHARS,
+    MAX_OUTPUT_TOKENS,
+    MAX_RETRIES,
     BackendContractError,
     BackendExecutionError,
     CapabilityUnavailableError,
@@ -20,6 +24,7 @@ from chronovisor.core.llm_runtime import (
     GenerationRoute,
     LLMRuntime,
     MessageGenerationRequest,
+    RequestValidationError,
     RerankItem,
     RerankRequest,
     RerankResult,
@@ -32,6 +37,7 @@ from chronovisor.core.llm_runtime import (
     SourceDataClassification,
     SourceSensitivity,
 )
+from chronovisor.core.llm_security import MAX_REQUEST_TIMEOUT_MS
 from chronovisor.core.ollama_adapter import OllamaAdapter, compose_ollama_runtime
 
 NORMAL_PAGE = SourceDataClassification(SourceDataClass.PAGE, SourceSensitivity.NORMAL)
@@ -117,12 +123,20 @@ def test_runtime_rejects_invalid_embedding_contract(
         def embed(self, request: EmbeddingRequest, *, model: str) -> EmbeddingResult:
             return result
 
+    events: list[RuntimeFailureTelemetry] = []
     runtime = LLMRuntime(
-        embedding={"search": EmbeddingRoute(InvalidEmbedding(), "embedder")}
+        embedding={"search": EmbeddingRoute(InvalidEmbedding(), "embedder")},
+        telemetry=events.append,
     )
 
     with pytest.raises(BackendContractError, match=reason):
         runtime.embed("search", EmbeddingRequest(("a", "b"), NORMAL_PAGE))
+
+    assert events == [
+        RuntimeFailureTelemetry(
+            "backend_contract_error", "search", "embedding", "fake", "local"
+        )
+    ]
 
 
 def test_runtime_rejects_invalid_rerank_contract() -> None:
@@ -138,6 +152,37 @@ def test_runtime_rejects_invalid_rerank_contract() -> None:
 
     with pytest.raises(BackendContractError, match="invalid ranking indices"):
         runtime.rerank("search", RerankRequest("q", ("a", "b"), NORMAL_PAGE))
+
+
+def test_generation_contract_failure_emits_safe_request_id() -> None:
+    class InvalidGeneration(FakeBackend):
+        def generate(self, request: GenerationInput, *, model: str) -> GenerationResult:
+            return GenerationResult(
+                "content",
+                "wrong-provider",
+                model,
+                metadata={"request_id": "req_contract_1"},
+            )
+
+    events: list[RuntimeFailureTelemetry] = []
+    runtime = LLMRuntime(
+        generation={"review": GenerationRoute(InvalidGeneration(), "writer")},
+        telemetry=events.append,
+    )
+
+    with pytest.raises(BackendContractError, match="route identity mismatch"):
+        runtime.generate("review", GenerationRequest("prompt", NORMAL_PAGE))
+
+    assert events == [
+        RuntimeFailureTelemetry(
+            "backend_contract_error",
+            "review",
+            "generation",
+            "fake",
+            "local",
+            request_id="req_contract_1",
+        )
+    ]
 
 
 def test_runtime_normalizes_backend_errors_without_fallback() -> None:
@@ -280,6 +325,103 @@ def test_invalid_route_location_fails_closed() -> None:
         runtime.generate("review", GenerationRequest("content", NORMAL_PAGE))
 
     assert backend.calls == []
+
+
+@pytest.mark.parametrize(
+    "generation_input,field_name",
+    [
+        (
+            GenerationRequest(
+                "prompt", NORMAL_PAGE, max_output_tokens=MAX_OUTPUT_TOKENS + 1
+            ),
+            "max_output_tokens",
+        ),
+        (GenerationRequest("prompt", NORMAL_PAGE, num_ctx=0), "num_ctx"),
+        (
+            GenerationRequest(
+                "prompt", NORMAL_PAGE, timeout_ms=MAX_REQUEST_TIMEOUT_MS + 1
+            ),
+            "timeout_ms",
+        ),
+        (
+            MessageGenerationRequest(
+                messages=({"role": "user", "content": "prompt"},),
+                format={},
+                source=NORMAL_PAGE,
+                num_ctx=MAX_CONTEXT_TOKENS,
+                max_output_tokens=1,
+                keep_alive="0",
+                timeout_ms=1,
+                max_output_chars=MAX_OUTPUT_CHARS + 1,
+            ),
+            "max_output_chars",
+        ),
+    ],
+)
+def test_runtime_rejects_generation_budget_before_backend_call(
+    generation_input: GenerationInput,
+    field_name: str,
+) -> None:
+    backend = CountingRemoteBackend()
+    events: list[RuntimeFailureTelemetry] = []
+    runtime = LLMRuntime(
+        generation={"review": GenerationRoute(backend, "writer")},
+        telemetry=events.append,
+    )
+
+    with pytest.raises(RequestValidationError) as exc:
+        runtime.generate("review", generation_input)
+
+    assert exc.value.field_name == field_name
+    assert backend.calls == []
+    assert events == [
+        RuntimeFailureTelemetry(
+            "request_invalid", "review", "generation", "fake", "remote"
+        )
+    ]
+
+
+@pytest.mark.parametrize("capability", ["embedding", "rerank"])
+def test_runtime_rejects_timeout_budget_for_every_non_generation_route(
+    capability: str,
+) -> None:
+    backend = CountingRemoteBackend()
+    runtime = LLMRuntime(
+        embedding={"search": EmbeddingRoute(backend, "embedder")},
+        rerank={"search": RerankRoute(backend, "reranker")},
+    )
+
+    with pytest.raises(RequestValidationError) as exc:
+        if capability == "embedding":
+            runtime.embed(
+                "search", EmbeddingRequest(("text",), NORMAL_PAGE, timeout_ms=0)
+            )
+        else:
+            runtime.rerank(
+                "search",
+                RerankRequest("query", ("text",), NORMAL_PAGE, timeout_ms=0),
+            )
+
+    assert exc.value.field_name == "timeout_ms"
+    assert backend.calls == []
+
+
+@pytest.mark.parametrize("max_retries", [-1, MAX_RETRIES + 1, True])
+def test_runtime_retry_policy_is_explicit_and_bounded(max_retries: object) -> None:
+    with pytest.raises(ValueError, match="max_retries"):
+        LLMRuntime(max_retries=cast(int, max_retries))
+
+
+def test_runtime_failure_telemetry_rejects_non_allowlisted_fields() -> None:
+    with pytest.raises(ValueError, match="unsafe runtime failure telemetry"):
+        RuntimeFailureTelemetry(
+            "not-safe",
+            "review",
+            "generation",
+            "fake",
+            "remote",
+            request_id="request id with spaces",
+        )
 
 
 def test_request_and_result_repr_hide_content() -> None:
