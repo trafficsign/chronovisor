@@ -12,10 +12,13 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
-from chronovisor.core.frontmatter import parse as parse_frontmatter
-from chronovisor.core.frontmatter import patch as patch_frontmatter
+from chronovisor.core.canonical_document import (
+    Namespace,
+    patch_document_metadata,
+    validate_canonical_document,
+)
 from chronovisor.core.link_fix import atomic_write
 from chronovisor.core.page_mutation import (
     ACTIVE_CLAIM_FRONTMATTER_FIELDS,
@@ -33,6 +36,8 @@ class PreparedWikiWrite:
     page_id: str
     original: bytes | None
     updated: bytes
+    namespace: Namespace
+    source_path: str
 
 
 class WikiWriteError(RuntimeError):
@@ -51,20 +56,87 @@ def prepare_page_write(
     content: str,
     *,
     page_id: str | None = None,
+    namespace: Namespace | None = None,
+    source_path: str | None = None,
+    allowed_targets: set[tuple[Namespace, str]] | None = None,
 ) -> PreparedWikiWrite:
     """Capture the target's exact bytes before preparing a whole-file write."""
 
     original = _read_optional(path)
+    location = _lexical_canonical_location(path)
+    if (namespace is None) != (source_path is None):
+        raise WikiWriteError("namespace and source_path must be provided together")
+    if namespace is None or source_path is None:
+        if location is None:
+            raise WikiWriteError(
+                "namespace and source_path are required outside canonical roots"
+            )
+        namespace, source_path = location
+    _validate_write_target(path, namespace=namespace, source_path=source_path)
+    updated = content.encode("utf-8")
+    validate_canonical_document(
+        updated,
+        namespace=namespace,
+        path=source_path,
+        require_stable=True,
+        allowed_targets=allowed_targets,
+    )
     if original is not None:
-        # All callers write Markdown. Refuse to replace an unexpected binary or
-        # corrupt file, while still retaining exact bytes for owned rollback.
-        original.decode("utf-8")
+        validate_canonical_document(
+            original,
+            namespace=namespace,
+            path=source_path,
+            require_stable=True,
+        )
     return PreparedWikiWrite(
         path=path,
         page_id=page_id or path.stem,
         original=original,
-        updated=content.encode("utf-8"),
+        updated=updated,
+        namespace=namespace,
+        source_path=source_path,
     )
+
+
+def _lexical_canonical_location(path: Path) -> tuple[Namespace, str] | None:
+    target = path.expanduser().absolute()
+    for namespace, root in (("pages", PAGES_DIR), ("system", SYSTEM_DIR)):
+        lexical_root = root.expanduser().absolute()
+        try:
+            return cast(Namespace, namespace), target.relative_to(
+                lexical_root
+            ).as_posix()
+        except ValueError:
+            continue
+    return None
+
+
+def _validate_write_target(
+    path: Path, *, namespace: Namespace, source_path: str
+) -> None:
+    location = _lexical_canonical_location(path)
+    if location is None:
+        return
+    expected_namespace, expected_source_path = location
+    if (namespace, source_path) != (expected_namespace, expected_source_path):
+        raise WikiWriteError("canonical path does not match namespace/source_path")
+
+    root = PAGES_DIR if expected_namespace == "pages" else SYSTEM_DIR
+    lexical_root = root.expanduser().absolute()
+    target = path.expanduser().absolute()
+    resolved_root = lexical_root.resolve(strict=False)
+    try:
+        target.resolve(strict=False).relative_to(resolved_root)
+    except ValueError as exc:
+        raise WikiWriteError("canonical target escapes through a symlink") from exc
+
+    cursor = lexical_root
+    if cursor.is_symlink():
+        raise WikiWriteError("canonical root must not be a symlink")
+    for part in target.relative_to(lexical_root).parts:
+        cursor /= part
+        if cursor.is_symlink():
+            raise WikiWriteError("canonical target contains a symlink")
 
 
 def _correction_safe_updated(
@@ -83,8 +155,31 @@ def _correction_safe_updated(
         return item.updated, []
     current_text = current.decode("utf-8")
     candidate_text = item.updated.decode("utf-8")
-    current_meta, _current_body = parse_frontmatter(current_text)
-    candidate_meta, _candidate_body = parse_frontmatter(candidate_text)
+    current_meta = validate_canonical_document(
+        current,
+        namespace=item.namespace,
+        path=item.source_path,
+        require_stable=True,
+    ).metadata
+    candidate_meta = validate_canonical_document(
+        item.updated,
+        namespace=item.namespace,
+        path=item.source_path,
+        require_stable=True,
+    ).metadata
+    preserved_metadata = {
+        key: value for key, value in current_meta.items() if key not in candidate_meta
+    }
+    if preserved_metadata:
+        candidate_text = patch_document_metadata(
+            candidate_text.encode("utf-8"), preserved_metadata
+        ).decode("utf-8")
+        candidate_meta = validate_canonical_document(
+            candidate_text.encode("utf-8"),
+            namespace=item.namespace,
+            path=item.source_path,
+            require_stable=True,
+        ).metadata
     current_markers = current_meta.get("applied_corrections")
     if isinstance(current_markers, list) and current_markers:
         candidate_markers = candidate_meta.get("applied_corrections")
@@ -105,7 +200,9 @@ def _correction_safe_updated(
         for field in sorted(ACTIVE_CLAIM_FRONTMATTER_FIELDS):
             if field in current_meta:
                 updates[field] = current_meta[field]
-        candidate_text = patch_frontmatter(candidate_text, updates)
+        candidate_text = patch_document_metadata(
+            candidate_text.encode("utf-8"), updates
+        ).decode("utf-8")
 
     constrained, applied = enforce_correction_constraints(
         item.page_id,
@@ -119,6 +216,11 @@ def _rollback_owned_write_locked(item: PreparedWikiWrite) -> bool:
     """Restore/delete only when the path still contains our exact output."""
 
     try:
+        _validate_write_target(
+            item.path,
+            namespace=item.namespace,
+            source_path=item.source_path,
+        )
         if _read_optional(item.path) != item.updated:
             return False
         if item.original is None:
@@ -126,7 +228,7 @@ def _rollback_owned_write_locked(item: PreparedWikiWrite) -> bool:
             return _read_optional(item.path) is None
         atomic_write(item.path, item.original.decode("utf-8"))
         return _read_optional(item.path) == item.original
-    except (OSError, UnicodeDecodeError):
+    except (OSError, UnicodeDecodeError, WikiWriteError):
         return False
 
 
@@ -191,6 +293,11 @@ def apply_page_writes(items: Iterable[PreparedWikiWrite]) -> dict[str, Any]:
                     # The comparison sits inside the shared lock immediately
                     # beside the replace. A stale snapshot can never overwrite
                     # a correction, ingest, or another generated artifact.
+                    _validate_write_target(
+                        item.path,
+                        namespace=item.namespace,
+                        source_path=item.source_path,
+                    )
                     conflicts = _global_page_id_conflicts(item)
                     if conflicts:
                         locations = ", ".join(str(path) for path in conflicts)
@@ -198,17 +305,21 @@ def apply_page_writes(items: Iterable[PreparedWikiWrite]) -> dict[str, Any]:
                             f"page_id {item.page_id!r} already exists at {locations}"
                         )
                     current = _read_optional(item.path)
-                    effective_updated, applied = _correction_safe_updated(item, current)
-                    effective_item = replace(item, updated=effective_updated)
-                    if applied:
-                        enforced[item.page_id] = applied
-                    if current == effective_item.updated:
+                    if current == item.updated:
                         # A concurrent run may already have installed this
                         # exact deterministic artifact. Treat it as idempotent
                         # success, never as a reason to rewrite the file.
                         continue
                     if current != item.original:
-                        raise WikiWriteError(f"target changed before apply: {item.path}")
+                        raise WikiWriteError(
+                            f"target changed before apply: {item.path}"
+                        )
+                    effective_updated, applied = _correction_safe_updated(item, current)
+                    effective_item = replace(item, updated=effective_updated)
+                    if applied:
+                        enforced[item.page_id] = applied
+                    if current == effective_item.updated:
+                        continue
                     item.path.parent.mkdir(parents=True, exist_ok=True)
                     try:
                         atomic_write(item.path, effective_item.updated.decode("utf-8"))
@@ -221,7 +332,9 @@ def apply_page_writes(items: Iterable[PreparedWikiWrite]) -> dict[str, Any]:
                         raise
                     written.append(effective_item)
                     if _read_optional(item.path) != effective_item.updated:
-                        raise WikiWriteError(f"post-write verification failed: {item.path}")
+                        raise WikiWriteError(
+                            f"post-write verification failed: {item.path}"
+                        )
             except Exception as exc:
                 rolled_back = {
                     str(item.path): _rollback_owned_write_locked(item)

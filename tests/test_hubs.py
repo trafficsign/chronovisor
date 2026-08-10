@@ -11,8 +11,24 @@ class FakeStore:
 
     def all_pages_meta(self, include_system: bool = False):
         return [
-            {"page_id": "a", "title": "A", "updated": "2026-07-01", "path": "/tmp/wiki/pages/ai/a.md", "page_type": "knowledge", "entities": ["Codex"]},
-            {"page_id": "b", "title": "B", "updated": "2026-07-01", "path": "/tmp/wiki/pages/ai/b.md", "page_type": "knowledge", "entities": ["Codex"]},
+            {
+                "page_id": "a",
+                "title": "A",
+                "updated": "2026-07-01",
+                "path": "/tmp/wiki/pages/ai/a.md",
+                "relative_path": "ai/a.md",
+                "page_type": "knowledge",
+                "entities": ["Codex"],
+            },
+            {
+                "page_id": "b",
+                "title": "B",
+                "updated": "2026-07-01",
+                "path": "/tmp/wiki/pages/ai/b.md",
+                "relative_path": "ai/b.md",
+                "page_type": "knowledge",
+                "entities": ["Codex"],
+            },
         ]
 
 
@@ -34,6 +50,11 @@ def test_build_hub_pages_writes_folder_hub(tmp_path: Path, monkeypatch) -> None:
     assert payload["hubs"] >= 1
     assert payload["mutation"]["status"] == "applied"
     assert any(path.name.endswith("-hub.md") for path in tmp_path.iterdir())
+    written = next(path for path in tmp_path.iterdir() if path.name.endswith("-hub.md"))
+    assert "status: stable" in written.read_text(encoding="utf-8")
+    assert "description: Auto-maintained" in written.read_text(encoding="utf-8")
+    assert "summary:" not in written.read_text(encoding="utf-8")
+    assert "[A](<../ai/a.md>)" in written.read_text(encoding="utf-8")
 
 
 def test_build_hub_pages_updates_existing_page_id_without_relocation(
@@ -46,7 +67,10 @@ def test_build_hub_pages_updates_existing_page_id_without_relocation(
     legacy_dir.mkdir(parents=True)
     output_dir.mkdir()
     existing = legacy_dir / "folder-ai-hub.md"
-    existing.write_text("old hub", encoding="utf-8")
+    existing.write_text(
+        "---\ntitle: Old Hub\nstatus: stable\ntype: knowledge\n---\nold hub\n",
+        encoding="utf-8",
+    )
     monkeypatch.setattr(hubs, "PAGES_DIR", pages_dir)
     monkeypatch.setattr(hubs, "get_store", lambda: ExistingHubStore(existing))
 

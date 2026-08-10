@@ -11,6 +11,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
+from chronovisor.core.canonical_document import format_internal_markdown_link
 from chronovisor.core.index_store import get_store
 from chronovisor.core.store import PAGES_DIR
 from chronovisor.ingest.page_write import apply_page_writes, prepare_page_write
@@ -35,22 +36,40 @@ def _folder_for_meta(meta: dict[str, Any]) -> str:
     return ""
 
 
-def _hub_markdown(kind: str, name: str, pages: list[dict[str, Any]], *, today: date) -> str:
+def _hub_markdown(
+    kind: str,
+    name: str,
+    pages: list[dict[str, Any]],
+    *,
+    today: date,
+    source_path: str,
+) -> str:
     title = f"{name} Hub"
     links = []
     for meta in pages[:80]:
         page_id = str(meta.get("page_id") or "")
         page_title = str(meta.get("title") or page_id)
         updated = str(meta.get("updated") or "unknown")
-        links.append(f"- [[{page_id}]] - {page_title} ({updated})")
+        target_path = meta.get("relative_path")
+        if not isinstance(target_path, str) or not target_path:
+            raise RuntimeError(f"missing canonical path for hub target: {page_id}")
+        link = format_internal_markdown_link(
+            page_title,
+            source_namespace="pages",
+            source_path=source_path,
+            target_namespace="pages",
+            target_path=target_path,
+        )
+        links.append(f"- {link} - {page_title} ({updated})")
     return "\n".join(
         [
             "---",
             f"title: {title}",
             f"updated: {today.isoformat()}",
+            "status: stable",
             "type: semantic",
             "tags: [d/chronovisor, t/hub]",
-            f"summary: Auto-maintained {kind} map of content for {name}.",
+            f"description: Auto-maintained {kind} map of content for {name}.",
             "---",
             "",
             f"# {title}",
@@ -115,7 +134,9 @@ def build_hub_pages(
                 entity_counts[entity] += 1
 
     selected: list[tuple[str, str, list[dict[str, Any]]]] = []
-    for folder, pages in sorted(folders.items(), key=lambda item: len(item[1]), reverse=True):
+    for folder, pages in sorted(
+        folders.items(), key=lambda item: len(item[1]), reverse=True
+    ):
         if len(pages) >= min_pages:
             selected.append(("folder", folder, pages))
     for entity, _count in entity_counts.most_common(max_hubs):
@@ -130,11 +151,30 @@ def build_hub_pages(
     for kind, name, pages in selected:
         page_id = f"{kind}-{_slug(name)}-hub"
         path = _existing_hub_path(store, page_id) or output_dir / f"{page_id}.md"
+        try:
+            source_path = (
+                path.resolve(strict=False)
+                .relative_to(PAGES_DIR.resolve(strict=False))
+                .as_posix()
+            )
+        except ValueError:
+            source_path = f"hubs/{path.name}"
         if write:
             plans.append(
                 prepare_page_write(
                     path,
-                    _hub_markdown(kind, name, pages, today=today),
+                    _hub_markdown(
+                        kind,
+                        name,
+                        pages,
+                        today=today,
+                        source_path=source_path,
+                    ),
+                    namespace="pages",
+                    source_path=source_path,
+                    allowed_targets={
+                        ("pages", str(meta["relative_path"])) for meta in pages
+                    },
                 )
             )
         written.append(str(path))

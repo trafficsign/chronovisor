@@ -9,11 +9,13 @@ from chronovisor.core.canonical_document import (
     CanonicalDocumentError,
     ResolvedMarkdownLink,
     extract_markdown_links,
+    format_internal_markdown_link,
     parse_document,
     patch_document_metadata,
     resolve_internal_markdown_link,
     resolve_internal_markdown_links,
     serialize_document,
+    validate_canonical_document,
 )
 from chronovisor.core.okf_v02 import (
     scan_concept_paths,
@@ -119,9 +121,10 @@ def test_metadata_patch_adds_updates_and_deletes_without_touching_body() -> None
     assert patched.metadata["status"] == "deprecated"
     assert "description" not in patched.metadata
     assert patched.metadata["new_extension"] == {"nested": [True, None]}
-    assert patched.metadata["chronovisor_extension"] == original.metadata[
-        "chronovisor_extension"
-    ]
+    assert (
+        patched.metadata["chronovisor_extension"]
+        == original.metadata["chronovisor_extension"]
+    )
     assert patched.body == original.body
 
     with pytest.raises(CanonicalDocumentError, match="update and delete"):
@@ -147,16 +150,12 @@ def test_production_concept_requires_explicit_canonical_status() -> None:
     } == {"status_required"}
     assert {
         issue.code
-        for issue in validate_production_concept(
-            {"type": "", "status": "active"}
-        )
+        for issue in validate_production_concept({"type": "", "status": "active"})
         if issue.severity == "error"
     } == {"type_required", "status_invalid"}
     assert {
         issue.code
-        for issue in validate_production_concept(
-            {"type": "Concept", "status": None}
-        )
+        for issue in validate_production_concept({"type": "Concept", "status": None})
         if issue.severity == "error"
     } == {"status_invalid"}
 
@@ -227,4 +226,120 @@ def test_duplicate_yaml_keys_fail_closed() -> None:
     with pytest.raises(CanonicalDocumentError, match="duplicate key 'policy'"):
         parse_document(
             b"---\ntype: Concept\nextension:\n  policy: first\n  policy: second\n---\n"
+        )
+
+
+def test_canonical_writer_validation_rejects_legacy_and_missing_targets() -> None:
+    with pytest.raises(CanonicalDocumentError, match="wikilinks"):
+        validate_canonical_document(
+            b"---\ntitle: Source\nstatus: stable\ntype: knowledge\n---\nSee [[target]].\n",
+            namespace="pages",
+            path="notes/source.md",
+            require_stable=True,
+            allowed_targets={("pages", "notes/target.md")},
+        )
+
+    with pytest.raises(CanonicalDocumentError, match="missing Markdown link"):
+        validate_canonical_document(
+            b"---\ntitle: Source\nstatus: stable\ntype: knowledge\n---\n[Target](target.md)\n",
+            namespace="pages",
+            path="notes/source.md",
+            require_stable=True,
+            allowed_targets=set(),
+        )
+
+
+@pytest.mark.parametrize("page_type", [None, "", "   "])
+def test_pages_canonical_validation_requires_non_empty_type(
+    page_type: str | None,
+) -> None:
+    type_line = "" if page_type is None else f"type: {page_type!r}\n"
+    data = f"---\ntitle: Source\nstatus: stable\n{type_line}---\nbody\n".encode()
+
+    with pytest.raises(CanonicalDocumentError, match="non-empty type"):
+        validate_canonical_document(
+            data,
+            namespace="pages",
+            path="notes/source.md",
+        )
+
+
+def test_internal_link_formatter_is_relative_and_namespace_safe() -> None:
+    assert (
+        format_internal_markdown_link(
+            "Target",
+            source_namespace="pages",
+            source_path="hubs/source.md",
+            target_namespace="pages",
+            target_path="notes/target.md",
+        )
+        == "[Target](<../notes/target.md>)"
+    )
+    assert (
+        format_internal_markdown_link(
+            "Target",
+            source_namespace="system",
+            source_path="current-state.md",
+            target_namespace="pages",
+            target_path="notes/target.md",
+        )
+        == "[Target](</pages/notes/target.md>)"
+    )
+    with pytest.raises(CanonicalDocumentError, match="cannot cross"):
+        format_internal_markdown_link(
+            "Private",
+            source_namespace="pages",
+            source_path="source.md",
+            target_namespace="system",
+            target_path="private.md",
+        )
+
+
+@pytest.mark.parametrize("legacy_link", ["[[target]]", "![[target]]", "[[]]"])
+def test_canonical_document_rejects_legacy_links_and_embeds(
+    legacy_link: str,
+) -> None:
+    data = f"---\ntitle: Source\nstatus: stable\ntype: knowledge\n---\n{legacy_link}\n".encode()
+
+    with pytest.raises(CanonicalDocumentError, match="legacy wikilinks"):
+        validate_canonical_document(
+            data,
+            namespace="pages",
+            path="notes/source.md",
+        )
+
+    escaped = data.replace(b"[[", b"\\[[")
+    validate_canonical_document(
+        escaped,
+        namespace="pages",
+        path="notes/source.md",
+    )
+
+
+def test_internal_link_formatter_escapes_labels_and_rejects_newlines() -> None:
+    rendered = format_internal_markdown_link(
+        "A [label] \\",
+        source_namespace="pages",
+        source_path="notes/source.md",
+        target_namespace="pages",
+        target_path="notes/target.md",
+    )
+    assert rendered == r"[A \[label\] \\](<target.md>)"
+    with pytest.raises(CanonicalDocumentError, match="missing Markdown link"):
+        validate_canonical_document(
+            (
+                "---\ntitle: Source\nstatus: stable\ntype: knowledge\n---\n"
+                f"{rendered}\n"
+            ).encode(),
+            namespace="pages",
+            path="notes/source.md",
+            allowed_targets=set(),
+        )
+    with pytest.raises(CanonicalDocumentError, match="newlines"):
+        format_internal_markdown_link(
+            "unsafe\nlabel",
+            source_namespace="pages",
+            source_path="notes/source.md",
+            target_namespace="pages",
+            target_path="notes/target.md",
         )

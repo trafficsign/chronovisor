@@ -12,23 +12,28 @@ from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
-from chronovisor.core.frontmatter import parse as parse_frontmatter
-from chronovisor.core.frontmatter import patch as patch_frontmatter
+from chronovisor.core.canonical_document import (
+    CanonicalDocument,
+    CanonicalDocumentError,
+    Namespace,
+    parse_document,
+    serialize_document,
+    validate_canonical_document,
+)
 from chronovisor.core.hashutil import sha256_bytes as _sha256_bytes
 from chronovisor.core.jsonl_write import append_jsonl_durable
 from chronovisor.core.link_fix import atomic_write, protected_spans
 from chronovisor.core.store import CHRONOVISOR_ROOT, PAGES_DIR, SYSTEM_DIR, find_page
 
-CHRONOVISOR_MUTATION_LOCK = (
-    CHRONOVISOR_ROOT / "runtime" / "chronovisor-mutation.lock"
-)
+CHRONOVISOR_MUTATION_LOCK = CHRONOVISOR_ROOT / "runtime" / "chronovisor-mutation.lock"
 DECISION_AUTHORITY_LOCK = CHRONOVISOR_ROOT / "runtime" / "decision-authority.lock"
 CORRECTION_CONSTRAINT_SCHEMA_VERSION = 1
 ACTIVE_CLAIM_FRONTMATTER_FIELDS = frozenset(
     {
         "title",
+        "description",
         "summary",
         "recall_questions",
         "raw_keywords",
@@ -45,6 +50,27 @@ _LOCK_STATE = threading.local()
 
 class PageMutationError(RuntimeError):
     """Raised when an exact, bounded mutation cannot be prepared safely."""
+
+
+def _canonical_location(path: Path) -> tuple[Namespace, str]:
+    target = path.expanduser().resolve(strict=False)
+    for namespace, root in (("pages", PAGES_DIR), ("system", SYSTEM_DIR)):
+        try:
+            return cast(Namespace, namespace), target.relative_to(
+                root.expanduser().resolve(strict=False)
+            ).as_posix()
+        except ValueError:
+            continue
+    raise PageMutationError("target page escapes the canonical page boundary")
+
+
+def _parse_canonical_text(text: str) -> tuple[dict[str, Any], str]:
+    try:
+        document = parse_document(text.encode("utf-8"))
+        body = document.body.decode("utf-8")
+    except (CanonicalDocumentError, UnicodeDecodeError) as exc:
+        raise PageMutationError(f"page is not canonical Markdown: {exc}") from exc
+    return document.metadata, body
 
 
 @dataclass(frozen=True)
@@ -173,8 +199,6 @@ def decision_authority_lock(path: Path | None = None) -> Iterator[None]:
 
     with _reentrant_exclusive_lock(path or DECISION_AUTHORITY_LOCK):
         yield
-
-
 
 
 def _sha256_text(value: str) -> str:
@@ -324,7 +348,7 @@ def _audit_constraint_rows() -> list[dict[str, Any]]:
 
 
 def _correction_markers(page_text: str) -> set[str]:
-    meta, _body = parse_frontmatter(page_text)
+    meta, _body = _parse_canonical_text(page_text)
     raw_markers = meta.get("applied_corrections")
     if not isinstance(raw_markers, list):
         return set()
@@ -438,6 +462,7 @@ def enforce_correction_constraints(
 ) -> tuple[str, list[dict[str, Any]]]:
     """Canonicalize stale generated text without undoing applied corrections."""
 
+    _parse_canonical_text(candidate_text)
     constrained = candidate_text
     applied: list[dict[str, Any]] = []
     for row in active_global_correction_constraints(
@@ -465,7 +490,7 @@ def enforce_correction_constraints(
             }
         )
     if applied:
-        meta, _body = parse_frontmatter(constrained)
+        meta, body = _parse_canonical_text(constrained)
         existing_markers = meta.get("applied_corrections")
         markers = (
             [
@@ -479,7 +504,10 @@ def enforce_correction_constraints(
         markers = list(
             dict.fromkeys([*markers, *(str(row["correction_id"]) for row in applied)])
         )
-        constrained = patch_frontmatter(constrained, {"applied_corrections": markers})
+        meta["applied_corrections"] = markers
+        constrained = serialize_document(
+            CanonicalDocument(metadata=meta, body=body.encode("utf-8"))
+        ).decode("utf-8")
     return constrained, applied
 
 
@@ -537,7 +565,7 @@ def _replacement_review_contexts(
 ) -> list[dict[str, Any]]:
     """Describe every sequential replacement even when the page preview omits it."""
 
-    _meta, working = parse_frontmatter(text)
+    _meta, working = _parse_canonical_text(text)
     contexts: list[dict[str, Any]] = []
     for replacement in replacements:
         start = working.find(replacement.old_text)
@@ -623,14 +651,6 @@ def _validate_replacement_postconditions(
             raise PageMutationError("new claim is missing from page body")
 
 
-def _body_prefix(text: str, body: str) -> str:
-    if not body:
-        return text
-    if not text.endswith(body):
-        raise PageMutationError("frontmatter parser did not return a body suffix")
-    return text[: len(text) - len(body)]
-
-
 def _overlaps_protected_span(text: str, start: int, end: int) -> bool:
     return any(
         start < protected_end and end > protected_start
@@ -701,13 +721,20 @@ def prepare_page_mutation(
     if not normal_page and not allowed_system_page:
         raise PageMutationError("target page escapes the correctable page boundary")
     original = path.read_bytes()
+    namespace, source_path = _canonical_location(path)
     try:
-        original_text = original.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        raise PageMutationError(f"page is not UTF-8: {page_id}") from exc
-    meta, body = parse_frontmatter(original_text)
-    if meta.get("status") in {"deprecated", "archived"}:
-        raise PageMutationError(f"target page is not active: {page_id}")
+        document = validate_canonical_document(
+            original,
+            namespace=namespace,
+            path=source_path,
+            require_stable=True,
+        )
+        body = document.body.decode("utf-8")
+    except (CanonicalDocumentError, UnicodeDecodeError) as exc:
+        raise PageMutationError(
+            f"target page is not mutable: {page_id}: {exc}"
+        ) from exc
+    meta = document.metadata
 
     items = _normalize_replacements(replacements)
     applied = meta.get("applied_corrections")
@@ -747,7 +774,6 @@ def prepare_page_mutation(
             )
         updated_body = updated_body[:start] + item.new_text + updated_body[end:]
 
-    updated_text = _body_prefix(original_text, body) + updated_body
     metadata_updates: dict[str, Any] = {
         "updated": date.today().isoformat(),
         # These identifiers activate durable replay constraints. Dropping an
@@ -774,10 +800,24 @@ def prepare_page_mutation(
         ):
             raise PageMutationError("recall_questions contain an unsafe value")
         metadata_updates["recall_questions"] = clean_questions
-    updated_text = patch_frontmatter(updated_text, metadata_updates)
-    updated_meta, verified_body = parse_frontmatter(updated_text)
+    updated_meta = dict(meta)
+    updated_meta.update(metadata_updates)
+    updated = serialize_document(
+        CanonicalDocument(metadata=updated_meta, body=updated_body.encode("utf-8"))
+    )
+    try:
+        verified = validate_canonical_document(
+            updated,
+            namespace=namespace,
+            path=source_path,
+            require_stable=True,
+        )
+        verified_body = verified.body.decode("utf-8")
+    except (CanonicalDocumentError, UnicodeDecodeError) as exc:
+        raise PageMutationError(
+            f"updated page is not canonical: {page_id}: {exc}"
+        ) from exc
     _validate_replacement_postconditions(updated_meta, verified_body, items)
-    updated = updated_text.encode("utf-8")
     if updated == original:
         raise PageMutationError("prepared correction produced no change")
 
@@ -909,9 +949,15 @@ def apply_prepared_mutations(
                         raise PageMutationError(
                             f"post-write hash mismatch: {item.page_id}"
                         )
-                    written_meta, written_body = parse_frontmatter(
-                        written_bytes.decode("utf-8")
+                    namespace, source_path = _canonical_location(item.path)
+                    written_document = validate_canonical_document(
+                        written_bytes,
+                        namespace=namespace,
+                        path=source_path,
+                        require_stable=True,
                     )
+                    written_meta = written_document.metadata
+                    written_body = written_document.body.decode("utf-8")
                     try:
                         _validate_replacement_postconditions(
                             written_meta,
@@ -920,7 +966,12 @@ def apply_prepared_mutations(
                         )
                     except PageMutationError as exc:
                         raise PageMutationError(f"{exc}: {item.page_id}") from exc
-            except (OSError, UnicodeDecodeError, PageMutationError) as exc:
+            except (
+                OSError,
+                UnicodeDecodeError,
+                CanonicalDocumentError,
+                PageMutationError,
+            ) as exc:
                 rolled_back = {
                     item.page_id: _rollback_owned_write_locked(item)
                     for item in reversed(written)

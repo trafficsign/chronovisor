@@ -16,6 +16,15 @@ from typing import Any
 
 from chronovisor.core import ollama as ollama_runtime
 from chronovisor.core import runtime_status
+from chronovisor.core.canonical_document import (
+    CanonicalDocument,
+    CanonicalDocumentError,
+    Namespace,
+    parse_document,
+    resolve_internal_markdown_links,
+    serialize_document,
+    validate_canonical_document,
+)
 from chronovisor.core.jobs import JobStatus, job_store
 from chronovisor.core.ollama import (
     GENERATE_SYSTEM_PROMPT as GENERATE_SYSTEM_PROMPT,
@@ -41,7 +50,7 @@ from chronovisor.core.store import (
     page_id_from_path,
 )
 from chronovisor.decision import decision_authority
-from chronovisor.decision.entity_backfill_contract import patch_entities_frontmatter
+from chronovisor.decision.entity_backfill_contract import extract_entities
 from chronovisor.decision.local_structured import (
     ChatRequest as ChatRequest,
 )
@@ -1097,7 +1106,7 @@ def _existing_candidate_metas() -> list[dict]:
         for item in store.all_pages_meta(include_system=False):
             if item.get("page_type") == "reference":
                 continue
-            if item.get("status") not in (None, "active"):
+            if item.get("status") != "stable":
                 continue
             meta = store.meta(str(item.get("page_id", "")))
             if meta is not None:
@@ -1851,26 +1860,23 @@ def _search_related_pages(
     return [path for _, path in scored[:top_n]]
 
 
-_FRONTMATTER_BLOCK_RE = re.compile(r"^---\n.*?\n---(?:\n|$)", re.MULTILINE | re.DOTALL)
-
-
 def _has_frontmatter(text: str) -> bool:
-    """True if ``text`` starts with a ``---\\n...\\n---\\n`` block containing ``title:``."""
-    if not text.startswith("---\n"):
+    """Return whether text is a full-YAML document with a non-empty title."""
+
+    try:
+        title = parse_document(text.encode("utf-8")).metadata.get("title")
+    except CanonicalDocumentError:
         return False
-    m = _FRONTMATTER_BLOCK_RE.match(text)
-    if not m:
-        return False
-    return bool(re.search(r"^title:\s*\S", m.group(0), re.MULTILINE))
+    return isinstance(title, str) and bool(title.strip())
 
 
 def _strip_all_frontmatter(text: str) -> str:
-    """Remove every ``---\\n...\\n---\\n`` block from ``text``.
+    """Remove one leading canonical frontmatter block from generated text."""
 
-    Used as a defensive scrub on update bodies: even if the model ignored
-    UPDATE_SYSTEM_PROMPT and wrote frontmatter, we drop it before append.
-    """
-    return _FRONTMATTER_BLOCK_RE.sub("", text)
+    try:
+        return parse_document(text.encode("utf-8")).body.decode("utf-8")
+    except (CanonicalDocumentError, UnicodeDecodeError):
+        return text
 
 
 @dataclass(frozen=True)
@@ -1968,31 +1974,42 @@ def _validate_generated_page_output(
 
     # Op-type sanity: enforce frontmatter contract.
     if op_type == "create":
-        if not _has_frontmatter(body):
+        try:
+            document = parse_document(body.encode("utf-8"))
+        except CanonicalDocumentError as exc:
             return _PageBodyValidation(
                 None,
                 "missing_create_frontmatter",
-                "a CREATE body requires a closed frontmatter block with a non-empty title",
+                f"a CREATE body requires canonical frontmatter: {exc}",
+            )
+        title = document.metadata.get("title")
+        page_type = document.metadata.get("type")
+        if (
+            not isinstance(title, str)
+            or not title.strip()
+            or document.metadata.get("status") != "stable"
+            or not isinstance(page_type, str)
+            or not page_type.strip()
+        ):
+            return _PageBodyValidation(
+                None,
+                "missing_create_frontmatter",
+                "a CREATE body requires a non-empty title and type with status: stable",
             )
         return _PageBodyValidation(body)
 
-    # update: drop any stray FM blocks, reject if nothing meaningful is left.
-    cleaned = _strip_all_frontmatter(body).strip()
+    cleaned = body.strip()
     if not cleaned:
         return _PageBodyValidation(
             None,
             "empty_update_body",
-            "an UPDATE must contain new markdown after removing forbidden frontmatter",
+            "an UPDATE must contain new markdown",
         )
-    # A partial frontmatter (opening `---` with no closing) cannot be safely
-    # stripped; refuse rather than appending it raw.
-    has_open_fence = bool(re.match(r"^---\s*$", cleaned, re.MULTILINE))
-    has_closed_block = bool(_FRONTMATTER_BLOCK_RE.search(cleaned))
-    if has_open_fence and not has_closed_block:
+    if cleaned.startswith("---\n"):
         return _PageBodyValidation(
             None,
-            "partial_update_frontmatter",
-            "the UPDATE contains an unclosed frontmatter delimiter",
+            "update_frontmatter_forbidden",
+            "an UPDATE must not contain frontmatter",
         )
     return _PageBodyValidation(cleaned)
 
@@ -2199,73 +2216,44 @@ def _fenced_code_spans(text: str) -> list[tuple[int, int]]:
     return fenced_code_spans(text)
 
 
-def _reconcile_links(content: str, allowed_ids: set[str]) -> tuple[str, dict]:
-    """Repair or unwrap [[wiki-links]] in prose, leaving code & frontmatter alone.
+def _reconcile_links(
+    content: str,
+    allowed_targets: set[tuple[Namespace, str]],
+    *,
+    source_path: str,
+) -> tuple[str, dict[str, int]]:
+    """Validate canonical generated links without rewriting reviewed bytes."""
 
-    For each ``[[target|alias#anchor]]`` outside of frontmatter / fenced code /
-    inline code:
-
-      * target resolves → leave intact (anchor + alias preserved).
-      * target has ``folder/`` or ``.md`` clutter that strips to a known id
-        → rewrite to the canonical form.
-      * target unresolvable → unwrap to plain text (alias if given, else target),
-        so the body keeps the entity name without polluting the link graph.
-
-    Code / frontmatter regions are detected via ``link_fix`` (the existing
-    canonical implementation used by lint/server) so we never break
-    ``x = data[[1]]`` or fenced examples. Unclosed fences (truncated LLM
-    output) are also covered — we treat everything after the dangling
-    opener as code.
-
-    Returns ``(rewritten_content, stats)``.
-    """
-    from chronovisor.core.link_fix import (
-        WIKI_LINK_RE,
-        position_in_spans,
-        protected_spans,
-    )
-
-    stats = {"resolved": 0, "rewritten": 0, "unwrapped": 0}
-
-    # Pre-compute byte spans we must NOT touch.
-    skip_ranges = protected_spans(content)
-
-    def replace(m: re.Match) -> str:
-        if position_in_spans(m.start(), skip_ranges):
-            return m.group(0)  # inside code/frontmatter — never rewrite
-
-        inside = m.group(1)
-        target_part, _, alias_raw = inside.partition("|")
-        alias = alias_raw if "|" in inside else None
-        if "#" in target_part:
-            target, anchor_body = target_part.split("#", 1)
-            anchor = "#" + anchor_body
-        else:
-            target, anchor = target_part, ""
-        target = target.strip()
-
-        if target in allowed_ids:
-            stats["resolved"] += 1
-            return m.group(0)
-
-        # Try canonicalizing: strip a single leading folder and a trailing .md.
-        candidate = target
-        if "/" in candidate:
-            candidate = candidate.rsplit("/", 1)[-1]
-        if candidate.endswith(".md"):
-            candidate = candidate[:-3]
-        candidate = candidate.strip()
-        if candidate and candidate != target and candidate in allowed_ids:
-            stats["rewritten"] += 1
-            tail = anchor + (f"|{alias}" if alias is not None else "")
-            return f"[[{candidate}{tail}]]"
-
-        # Unresolvable → unwrap to plain text. Keep alias as display, else target.
-        stats["unwrapped"] += 1
-        return alias if alias is not None else target
-
-    new_content = WIKI_LINK_RE.sub(replace, content)
-    return new_content, stats
+    data = content.encode("utf-8")
+    try:
+        parse_document(data)
+    except CanonicalDocumentError as exc:
+        if content.startswith("---"):
+            raise IngestApplyError(
+                f"generated page frontmatter is invalid: {exc}"
+            ) from exc
+        data = serialize_document(
+            CanonicalDocument(
+                metadata={"status": "stable", "type": "knowledge"},
+                body=data,
+            )
+        )
+    try:
+        document = validate_canonical_document(
+            data,
+            namespace="pages",
+            path=source_path,
+            require_stable=True,
+            allowed_targets=allowed_targets,
+        )
+        resolved = resolve_internal_markdown_links(
+            document.body,
+            source_namespace="pages",
+            source_path=source_path,
+        )
+    except CanonicalDocumentError as exc:
+        raise IngestApplyError(f"generated page links are invalid: {exc}") from exc
+    return content, {"resolved": len(resolved), "rewritten": 0, "unwrapped": 0}
 
 
 class IngestApplyError(Exception):
@@ -2715,9 +2703,6 @@ def _ensure_page_metadata_frontmatter(
     allow_local_model: bool = True,
     force_deterministic_rebuild: bool = False,
 ) -> str:
-    from chronovisor.core.frontmatter import canonicalize, normalize_nested
-
-    text, _normalization = normalize_nested(text)
     text = _ensure_recall_metadata_frontmatter(
         text,
         page_id,
@@ -2726,7 +2711,21 @@ def _ensure_page_metadata_frontmatter(
         allow_local_model=allow_local_model,
         force_deterministic_rebuild=force_deterministic_rebuild,
     )
-    return canonicalize(patch_entities_frontmatter(text))
+    meta, body = parse(text)
+    title = meta.get("title")
+    current = meta.get("entities")
+    existing = (
+        [value for value in current if isinstance(value, str)]
+        if isinstance(current, list)
+        else []
+    )
+    extracted = extract_entities(
+        "\n".join([title if isinstance(title, str) else "", body])
+    )
+    merged = list(dict.fromkeys([*existing, *extracted]))
+    if merged == existing:
+        return text
+    return patch(text, {"entities": merged})
 
 
 def _prepare_operations(

@@ -178,7 +178,7 @@ def test_operational_hold_blocks_existing_queue_selection_until_release(
         lambda *_args, **_kwargs: dict(deferred),
     )
     monkeypatch.setattr(
-        'chronovisor.ingest.ingest.run_ingest',
+        "chronovisor.ingest.ingest.run_ingest",
         lambda *_args, **_kwargs: pytest.fail(
             "operational hold must not launch ingest"
         ),
@@ -277,7 +277,7 @@ def test_operational_hold_published_after_running_marker_cancels_launch_and_resu
         store.finish(job_id)
         on_complete()
 
-    monkeypatch.setattr('chronovisor.ingest.ingest.run_ingest', run_ingest)
+    monkeypatch.setattr("chronovisor.ingest.ingest.run_ingest", run_ingest)
 
     held = raw_replay.run_pending_queue(
         path=paths["queue"],
@@ -976,7 +976,7 @@ def test_ordinary_replay_claim_after_crash_does_not_suppress_retry(
     store = _FakeJobStore(result_status=JobStatus.COMPLETED)
     monkeypatch.setattr(raw_replay, "job_store", store)
     monkeypatch.setattr(
-        'chronovisor.ingest.ingest.run_ingest',
+        "chronovisor.ingest.ingest.run_ingest",
         lambda _content, job_id, on_complete=None, metadata=None: store.finish(job_id),
     )
 
@@ -1024,7 +1024,7 @@ def test_partial_replay_is_terminal_and_does_not_repeat_successful_operations(
                 ],
             )
 
-    monkeypatch.setattr('chronovisor.ingest.ingest.run_ingest', fake_ingest)
+    monkeypatch.setattr("chronovisor.ingest.ingest.run_ingest", fake_ingest)
     started = datetime(2026, 7, 10, 10, 0, tzinfo=UTC)
 
     partial = raw_replay.run_pending_queue(
@@ -1070,7 +1070,7 @@ def test_replay_persists_running_marker_before_ingest(
         assert len(running["raw_sha256"]) == 64
         store.finish(job_id)
 
-    monkeypatch.setattr('chronovisor.ingest.ingest.run_ingest', inspect_then_finish)
+    monkeypatch.setattr("chronovisor.ingest.ingest.run_ingest", inspect_then_finish)
 
     result = raw_replay.run_pending_queue(
         path=paths["queue"],
@@ -1101,7 +1101,7 @@ def test_completion_callback_recovers_crash_before_queue_finalize(
         on_complete()
         raise SystemExit("simulated process loss")
 
-    monkeypatch.setattr('chronovisor.ingest.ingest.run_ingest', crash_after_completion)
+    monkeypatch.setattr("chronovisor.ingest.ingest.run_ingest", crash_after_completion)
     with pytest.raises(SystemExit):
         raw_replay.run_pending_queue(
             path=paths["queue"],
@@ -1115,7 +1115,7 @@ def test_completion_callback_recovers_crash_before_queue_finalize(
     assert running["status"] == "running"
 
     monkeypatch.setattr(
-        'chronovisor.ingest.ingest.run_ingest',
+        "chronovisor.ingest.ingest.run_ingest",
         lambda *_args, **_kwargs: pytest.fail("completed replay must not launch again"),
     )
     recovered = raw_replay.run_pending_queue(
@@ -1144,7 +1144,7 @@ def test_unknown_crashed_replay_is_frontier_quarantined_not_blindly_retried(
     store = _FakeJobStore(result_status=JobStatus.COMPLETED)
     monkeypatch.setattr(raw_replay, "job_store", store)
     monkeypatch.setattr(
-        'chronovisor.ingest.ingest.run_ingest',
+        "chronovisor.ingest.ingest.run_ingest",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(
             SystemExit("crash before apply proof")
         ),
@@ -1263,7 +1263,7 @@ def test_safe_replay_preserves_local_audit_and_revalidates_at_launch(
     store = _FakeJobStore(result_status=JobStatus.COMPLETED)
     monkeypatch.setattr(raw_replay, "job_store", store)
     monkeypatch.setattr(
-        'chronovisor.ingest.ingest.run_ingest',
+        "chronovisor.ingest.ingest.run_ingest",
         lambda _content, job_id, on_complete=None, metadata=None: store.finish(job_id),
     )
 
@@ -1331,7 +1331,7 @@ def test_persisted_injected_safe_replay_cannot_run_without_explicit_boundary(
     store = _FakeJobStore(result_status=JobStatus.COMPLETED)
     monkeypatch.setattr(raw_replay, "job_store", store)
     monkeypatch.setattr(
-        'chronovisor.ingest.ingest.run_ingest',
+        "chronovisor.ingest.ingest.run_ingest",
         lambda *_args, **_kwargs: pytest.fail("stale approval must not launch ingest"),
     )
     monkeypatch.setattr(
@@ -1426,7 +1426,7 @@ def test_completed_ingest_with_broken_completion_journal_never_becomes_retryable
     store = _FakeJobStore(result_status=JobStatus.COMPLETED)
     monkeypatch.setattr(raw_replay, "job_store", store)
     monkeypatch.setattr(
-        'chronovisor.ingest.ingest.run_ingest',
+        "chronovisor.ingest.ingest.run_ingest",
         lambda _content, job_id, on_complete=None, metadata=None: store.finish(job_id),
     )
     monkeypatch.setattr(
@@ -1459,7 +1459,7 @@ def test_run_replay_limit_zero_keeps_legacy_all_raws_behavior(
     store = _FakeJobStore(result_status=JobStatus.COMPLETED)
     monkeypatch.setattr(raw_replay, "job_store", store)
     monkeypatch.setattr(
-        'chronovisor.ingest.ingest.run_ingest',
+        "chronovisor.ingest.ingest.run_ingest",
         lambda _content, job_id, on_complete=None, metadata=None: store.finish(job_id),
     )
 
@@ -1513,7 +1513,9 @@ def test_run_pending_queue_respects_priority_run_and_byte_bounds(
     paths = _isolate_paths(tmp_path, monkeypatch)
     rows = []
     sources = ("ingest_failure", "memory_integrity_miss", "explicit_migration")
-    for index, (priority, source) in enumerate(zip((300, 200, 100), sources, strict=False), start=1):
+    for index, (priority, source) in enumerate(
+        zip((300, 200, 100), sources, strict=False), start=1
+    ):
         raw = paths["raw"] / f"2026070{index}-{priority}.md"
         raw.write_text("xx", encoding="utf-8")
         rows.append(
@@ -1533,7 +1535,7 @@ def test_run_pending_queue_respects_priority_run_and_byte_bounds(
     store = _FakeJobStore(result_status=JobStatus.COMPLETED)
     monkeypatch.setattr(raw_replay, "job_store", store)
     monkeypatch.setattr(
-        'chronovisor.ingest.ingest.run_ingest',
+        "chronovisor.ingest.ingest.run_ingest",
         lambda _content, job_id, on_complete=None, metadata=None: store.finish(job_id),
     )
 
@@ -1570,7 +1572,8 @@ def test_replay_ingest_cannot_restore_claim_removed_by_applied_correction(
     page = pages / "display.md"
     page.write_text(
         "---\ntitle: Display\nsummary: Canonical display count\n"
-        "recall_questions: [How many displays?]\nupdated: 2026-07-10\n---\n"
+        'recall_questions: ["How many displays?"]\n'
+        "updated: 2026-07-10\nstatus: stable\ntype: knowledge\n---\n"
         "The setup has two G32P displays.\n",
         encoding="utf-8",
     )
@@ -1594,6 +1597,10 @@ def test_replay_ingest_cannot_restore_claim_removed_by_applied_correction(
 
         def all_page_ids(self, include_system=True):
             return {"display"}
+
+        def meta(self, page_id):
+            assert page_id == "display"
+            return {"namespace": "pages", "relative_path": "display.md"}
 
         def all_tags(self, include_system=False):
             return set()
@@ -1649,7 +1656,7 @@ def test_replay_ingest_cannot_restore_claim_removed_by_applied_correction(
         if on_complete is not None:
             on_complete()
 
-    monkeypatch.setattr('chronovisor.ingest.ingest.run_ingest', replay_via_ingest)
+    monkeypatch.setattr("chronovisor.ingest.ingest.run_ingest", replay_via_ingest)
 
     result = raw_replay.run_pending_queue(
         path=paths["queue"],
@@ -1663,7 +1670,11 @@ def test_replay_ingest_cannot_restore_claim_removed_by_applied_correction(
     assert result["runs"][0]["status"] == "completed"
     assert "two G32P displays" not in written
     assert written.count("one G32P display") >= 2
-    assert "applied_corrections: [corr-replay-display]" in written
+    from chronovisor.core.canonical_document import parse_document
+
+    assert parse_document(written.encode()).metadata["applied_corrections"] == [
+        "corr-replay-display"
+    ]
 
 
 def test_eligibility_union_drains_current_keys_and_prior_auto_lane(
@@ -1706,7 +1717,7 @@ def test_eligibility_union_drains_current_keys_and_prior_auto_lane(
     store = _FakeJobStore(result_status=JobStatus.COMPLETED)
     monkeypatch.setattr(raw_replay, "job_store", store)
     monkeypatch.setattr(
-        'chronovisor.ingest.ingest.run_ingest',
+        "chronovisor.ingest.ingest.run_ingest",
         lambda _content, job_id, on_complete=None, metadata=None: store.finish(job_id),
     )
 
@@ -1794,7 +1805,7 @@ def test_three_failed_attempts_end_in_quarantine(tmp_path: Path, monkeypatch) ->
     store = _FakeJobStore(result_status=JobStatus.FAILED, error="model output invalid")
     monkeypatch.setattr(raw_replay, "job_store", store)
     monkeypatch.setattr(
-        'chronovisor.ingest.ingest.run_ingest',
+        "chronovisor.ingest.ingest.run_ingest",
         lambda _content, job_id, on_complete=None, metadata=None: store.finish(job_id),
     )
     started = datetime(2026, 7, 10, 10, 0, tzinfo=UTC)

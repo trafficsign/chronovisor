@@ -95,7 +95,9 @@ class RuntimeGenerationRoute:
     structured_output: bool
 
 
-def runtime_generation_routes(roles: Sequence[str]) -> tuple[RuntimeGenerationRoute, ...]:
+def runtime_generation_routes(
+    roles: Sequence[str],
+) -> tuple[RuntimeGenerationRoute, ...]:
     """Resolve exact configured identities once without invoking a backend."""
 
     from chronovisor.core.llm_config import LLMConfigError, load_default_llm_runtime
@@ -618,11 +620,14 @@ GENERATE_SYSTEM_PROMPT = f"""\
 You are a knowledge wiki structuring engine. Generate content for a SINGLE NEW wiki page.
 
 Rules:
-- Frontmatter MUST include: title, updated, AND tags
+- Frontmatter MUST include: title, updated, status, type, AND tags
+- Set `status: stable` exactly for every new page
+- Set a non-empty OKF page `type` (use `knowledge` unless a more specific type fits)
 - Use the exact current date supplied in the user prompt for `updated`
 - Never invent or infer dates that are absent from the raw evidence
 - {PRESERVE_SOURCE_FACTS_RULE}
-- Cross-references: use [[wiki-link]] notation (page ID only, no folder path)
+- Cross-references: use standard relative Markdown links such as
+  `[Page title](../folder/page-id.md)`; never emit `[[wikilinks]]`
 - Write content in Japanese
 - Focus on facts, decisions, and technical knowledge
 - Use the provided context for cross-references but do not duplicate existing content
@@ -660,10 +665,12 @@ Output exactly one page block:
 ---
 title: Page Title
 updated: YYYY-MM-DD
+status: stable
+type: knowledge
 tags: [d/example-domain, t/analysis, s/evergreen]
 ---
 
-Page content here with [[wiki-links]] to related topics.
+Page content here with [standard Markdown links](../folder/related-page.md).
 
 === END PAGE ===
 
@@ -680,7 +687,8 @@ Rules:
 - {PRESERVE_SOURCE_FACTS_RULE}
 - DO NOT repeat content that already exists on the page (it is provided in context).
 - Output ONLY the new section(s) to add — Japanese prose, headings, lists, code, etc.
-- Cross-references: use [[wiki-link]] notation (page ID only, no folder path)
+- Cross-references: use standard relative Markdown links such as
+  `[Page title](../folder/page-id.md)`; never emit `[[wikilinks]]`
 - Focus on facts, decisions, and technical knowledge
 
 Output exactly one block:

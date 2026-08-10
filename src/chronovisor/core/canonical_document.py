@@ -9,20 +9,22 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import Any, Literal, cast
-from urllib.parse import unquote, urlsplit
+from urllib.parse import quote, unquote, urlsplit
 
 import yaml  # type: ignore[import-untyped]
 
 _MARKDOWN_LINK_RE = re.compile(
-    r"(?<![!\\])\[[^\]\n]*\]\(\s*"
+    r"(?<![!\\])\[(?:\\[^\n]|[^\]\\\n])*\]\(\s*"
     r"(?P<target><[^>\n]+>|(?:[^\s()\n]+|\([^()\n]*\))+)"
     r"(?:\s+(?:\"[^\"\n]*\"|'[^'\n]*'|\([^()\n]*\)))?\s*\)"
 )
 _FENCE_OPEN_RE = re.compile(r"(?m)^[ \t]{0,3}(?P<fence>`{3,}|~{3,})[^\n]*(?:\n|$)")
 _INLINE_CODE_RE = re.compile(r"`+[^`\n]*`+")
+_WIKILINK_RE = re.compile(r"(?<!\\)\[\[[^\]\n]*\]\]")
 
 Namespace = Literal["pages", "system"]
 _NAMESPACES = frozenset({"pages", "system"})
+PAGE_STATUSES = frozenset({"draft", "stable", "deprecated"})
 
 
 class CanonicalDocumentError(ValueError):
@@ -138,19 +140,108 @@ def patch_document_metadata(
     return serialize_document(CanonicalDocument(metadata=metadata, body=document.body))
 
 
+def validate_canonical_document(
+    data: bytes,
+    *,
+    namespace: Namespace,
+    path: str,
+    require_stable: bool = False,
+    allowed_targets: set[tuple[Namespace, str]] | None = None,
+) -> CanonicalDocument:
+    """Validate one production document and its internal Markdown links."""
+
+    document = parse_document(data)
+    status = document.metadata.get("status")
+    if status not in PAGE_STATUSES:
+        raise CanonicalDocumentError(
+            "status must be one of draft, stable, or deprecated"
+        )
+    if require_stable and status != "stable":
+        raise CanonicalDocumentError("writer target must have status: stable")
+    page_type = document.metadata.get("type")
+    if namespace == "pages" and (
+        not isinstance(page_type, str) or not page_type.strip()
+    ):
+        raise CanonicalDocumentError("pages documents require a non-empty type")
+    text = _decode_body(document.body)
+    spans = _protected_spans(text)
+    if any(
+        not _position_in_spans(match.start(), spans)
+        for match in _WIKILINK_RE.finditer(text)
+    ):
+        raise CanonicalDocumentError("legacy wikilinks are not canonical Markdown")
+    links = resolve_internal_markdown_links(
+        document.body,
+        source_namespace=namespace,
+        source_path=path,
+    )
+    if allowed_targets is not None:
+        missing = sorted(
+            {
+                (link.namespace, link.path)
+                for link in links
+                if (link.namespace, link.path) not in allowed_targets
+            }
+        )
+        if missing:
+            targets = ", ".join(f"{ns}/{target}" for ns, target in missing)
+            raise CanonicalDocumentError(f"missing Markdown link target: {targets}")
+    return document
+
+
+def format_internal_markdown_link(
+    label: str,
+    *,
+    source_namespace: Namespace,
+    source_path: str,
+    target_namespace: Namespace,
+    target_path: str,
+) -> str:
+    """Render one canonical internal link with a relative same-namespace target."""
+
+    source = _source_document_path(source_namespace, source_path)
+    target = _source_document_path(target_namespace, target_path)
+    if source.namespace == "pages" and target.namespace == "system":
+        raise CanonicalDocumentError("pages links cannot cross into system")
+    if source.namespace == target.namespace:
+        destination = posixpath.relpath(
+            target.path,
+            start=PurePosixPath(source.path).parent.as_posix(),
+        )
+    else:
+        destination = f"/{target.namespace}/{target.path}"
+    rendered_target = quote(destination, safe="/-._~")
+    if "\r" in label or "\n" in label:
+        raise CanonicalDocumentError("Markdown link label cannot contain newlines")
+    rendered_label = label.replace("\\", "\\\\").replace("[", "\\[").replace("]", "\\]")
+    rendered = f"[{rendered_label}](<{rendered_target}>)"
+    resolved = resolve_internal_markdown_link(
+        rendered_target,
+        source_namespace=source.namespace,
+        source_path=source.path,
+    )
+    if resolved != target:
+        raise CanonicalDocumentError("rendered Markdown link changed its target")
+    return rendered
+
+
 def extract_markdown_links(body: bytes | str) -> tuple[str, ...]:
     """Return inline-link destinations; reference-style links are out of scope."""
 
-    try:
-        text = body.decode("utf-8") if isinstance(body, bytes) else body
-    except UnicodeDecodeError as exc:
-        raise CanonicalDocumentError("Markdown body is not UTF-8") from exc
+    text = _decode_body(body) if isinstance(body, bytes) else body
     spans = _protected_spans(text)
     return tuple(
         match.group("target").removeprefix("<").removesuffix(">")
         for match in _MARKDOWN_LINK_RE.finditer(text)
         if not _position_in_spans(match.start(), spans)
     )
+
+
+def _decode_body(body: bytes) -> str:
+    try:
+        return body.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise CanonicalDocumentError("Markdown body is not UTF-8") from exc
 
 
 def resolve_internal_markdown_link(
@@ -166,7 +257,9 @@ def resolve_internal_markdown_link(
     try:
         parsed = urlsplit(target)
     except ValueError as exc:
-        raise CanonicalDocumentError(f"invalid Markdown link target: {target!r}") from exc
+        raise CanonicalDocumentError(
+            f"invalid Markdown link target: {target!r}"
+        ) from exc
     if parsed.scheme or parsed.netloc or parsed.query or not parsed.path:
         return None
     decoded_path = _decode_url_component(parsed.path, target)
@@ -189,9 +282,13 @@ def resolve_internal_markdown_link(
     normalized = posixpath.normpath(combined)
     parts = PurePosixPath(normalized).parts
     if normalized in {".", ".."} or normalized.startswith("../"):
-        raise CanonicalDocumentError(f"Markdown link escapes canonical roots: {target!r}")
+        raise CanonicalDocumentError(
+            f"Markdown link escapes canonical roots: {target!r}"
+        )
     if not parts or parts[0] not in _NAMESPACES or len(parts) == 1:
-        raise CanonicalDocumentError(f"Markdown link escapes canonical roots: {target!r}")
+        raise CanonicalDocumentError(
+            f"Markdown link escapes canonical roots: {target!r}"
+        )
     namespace = cast(Namespace, parts[0])
     if source.namespace == "pages" and namespace != "pages":
         raise CanonicalDocumentError(f"pages link crosses into system: {target!r}")
@@ -297,9 +394,7 @@ def _decode_url_component(value: str, target: str) -> str:
             break
         decoded = next_value
     else:
-        raise CanonicalDocumentError(
-            f"over-encoded Markdown link target: {target!r}"
-        )
+        raise CanonicalDocumentError(f"over-encoded Markdown link target: {target!r}")
     if "\\" in decoded or any(
         unicodedata.category(character) == "Cc" for character in decoded
     ):

@@ -11,7 +11,7 @@ from chronovisor.core import page_mutation
 
 def _page(path: Path, *, title: str, body: str) -> None:
     path.write_text(
-        f"---\ntitle: {title}\nupdated: 2026-07-01\n---\n{body}",
+        f"---\ntitle: {title}\nupdated: 2026-07-01\nstatus: stable\ntype: knowledge\n---\n{body}",
         encoding="utf-8",
     )
 
@@ -83,7 +83,7 @@ def test_prepare_and_apply_exact_replacement_adds_marker(
     written = path.read_text(encoding="utf-8")
     assert "Installed RAM is 16GB." not in written
     assert "Installed RAM is 32GB." in written
-    assert "applied_corrections: [corr-1]" in written
+    assert "applied_corrections:\n- corr-1" in written
     assert "summary: The machine has 32GB RAM." in written
 
     registry = page_mutation.correction_constraints_file()
@@ -184,6 +184,7 @@ def test_new_correction_never_evicts_older_constraint_markers(
     prior = ", ".join(f"corr-{index}" for index in range(60))
     path.write_text(
         "---\ntitle: Memory\nupdated: 2026-07-01\n"
+        "status: stable\ntype: knowledge\n"
         f"applied_corrections: [{prior}]\n---\nOld fact.\n",
         encoding="utf-8",
     )
@@ -451,8 +452,9 @@ def test_prepare_requires_old_claim_removed_from_active_frontmatter(
         "---\n"
         "title: Memory\n"
         "summary: Installed RAM is 16GB.\n"
-        "recall_questions: [Is installed RAM 16GB?]\n"
+        'recall_questions: ["Is installed RAM 16GB?"]\n'
         "updated: 2026-07-01\n"
+        "status: stable\ntype: knowledge\n"
         "---\n"
         "Installed RAM is 16GB.\n",
         encoding="utf-8",
@@ -484,6 +486,40 @@ def test_prepare_requires_old_claim_removed_from_active_frontmatter(
     written = path.read_text(encoding="utf-8")
     assert "Installed RAM is 16GB." not in written
     assert "Installed RAM is 32GB." in written
+
+
+def test_prepare_requires_old_claim_removed_from_description(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    pages = tmp_path / "pages"
+    pages.mkdir()
+    path = pages / "memory.md"
+    path.write_text(
+        "---\n"
+        "title: Memory\n"
+        "description: Installed RAM is 16GB.\n"
+        "updated: 2026-07-01\n"
+        "status: stable\ntype: knowledge\n"
+        "---\n"
+        "Installed RAM is 16GB.\n",
+        encoding="utf-8",
+    )
+    _patch_pages(monkeypatch, pages)
+
+    with pytest.raises(
+        page_mutation.PageMutationError, match="frontmatter fields: description"
+    ):
+        page_mutation.prepare_page_mutation(
+            "memory",
+            [
+                {
+                    "old_text": "Installed RAM is 16GB.",
+                    "new_text": "Installed RAM is 32GB.",
+                }
+            ],
+            correction_id="corr-active-description",
+        )
 
 
 def test_review_payload_includes_middle_claim_context_and_bound_diff(
@@ -575,3 +611,49 @@ def test_lock_failure_returns_retry_without_touching_page(
     assert result["status"] == "retry"
     assert "lock unavailable" in result["reason"]
     assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("status", ["draft", "deprecated"])
+def test_mutation_rejects_non_stable_lifecycle(
+    tmp_path: Path, monkeypatch, status: str
+) -> None:
+    pages = tmp_path / "pages"
+    pages.mkdir()
+    path = pages / "memory.md"
+    path.write_text(
+        f"---\ntitle: Memory\nstatus: {status}\n---\nOld fact.\n",
+        encoding="utf-8",
+    )
+    _patch_pages(monkeypatch, pages)
+
+    with pytest.raises(page_mutation.PageMutationError, match="not mutable"):
+        page_mutation.prepare_page_mutation(
+            "memory",
+            [{"old_text": "Old fact.", "new_text": "New fact."}],
+            correction_id="corr-lifecycle",
+        )
+
+
+def test_mutation_preserves_nested_unknown_yaml_and_unrelated_body_bytes(
+    tmp_path: Path, monkeypatch
+) -> None:
+    pages = tmp_path / "pages"
+    pages.mkdir()
+    path = pages / "memory.md"
+    path.write_bytes(
+        b"---\ntitle: Memory\nstatus: stable\ntype: knowledge\nextension:\n  nested:\n    keep: true\n"
+        b"---\nPrefix  bytes\r\nOld fact.\r\nSuffix  bytes\r\n"
+    )
+    _patch_pages(monkeypatch, pages)
+
+    prepared = page_mutation.prepare_page_mutation(
+        "memory",
+        [{"old_text": "Old fact.", "new_text": "New fact."}],
+        correction_id="corr-nested",
+    )
+    result = page_mutation.apply_prepared_mutations([prepared])
+
+    assert result["status"] == "applied"
+    written = path.read_bytes()
+    assert b"nested:\n    keep: true" in written
+    assert b"Prefix  bytes\r\nNew fact.\r\nSuffix  bytes\r\n" in written

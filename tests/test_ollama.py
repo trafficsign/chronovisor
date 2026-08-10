@@ -375,6 +375,14 @@ def test_create_and_update_prompts_preserve_source_grounded_facts() -> None:
     assert rule in ollama.UPDATE_SYSTEM_PROMPT
 
 
+def test_page_prompts_require_canonical_status_and_markdown_links() -> None:
+    assert "status: stable" in ollama.GENERATE_SYSTEM_PROMPT
+    assert "type: knowledge" in ollama.GENERATE_SYSTEM_PROMPT
+    assert "relative Markdown links" in ollama.GENERATE_SYSTEM_PROMPT
+    assert "relative Markdown links" in ollama.UPDATE_SYSTEM_PROMPT
+    assert "never emit `[[wikilinks]]`" in ollama.GENERATE_SYSTEM_PROMPT
+
+
 def test_generate_streams_progress_and_returns_text(monkeypatch) -> None:
     client = _StreamClient()
     monkeypatch.setattr(ollama, "_client", lambda: client)
@@ -448,9 +456,7 @@ def test_generate_publishes_redacted_model_activity(tmp_path, monkeypatch) -> No
     def fake_generate(*_args: object, **_kwargs: object) -> str:
         nonlocal marker_bytes, marker_mode
         markers = list(
-            (chronovisor_root / "runtime" / "model-activity" / "active").glob(
-                "*.json"
-            )
+            (chronovisor_root / "runtime" / "model-activity" / "active").glob("*.json")
         )
         assert len(markers) == 1
         marker_bytes = markers[0].read_bytes()
@@ -468,23 +474,18 @@ def test_generate_publishes_redacted_model_activity(tmp_path, monkeypatch) -> No
     assert observed["component"] == __name__
     assert observed["caller"] == "test_generate_publishes_redacted_model_activity"
     assert observed["pipeline"] == "audit"
-    assert marker_bytes == (
-        json.dumps(observed, ensure_ascii=False, sort_keys=True) + "\n"
-    ).encode()
+    assert (
+        marker_bytes
+        == (json.dumps(observed, ensure_ascii=False, sort_keys=True) + "\n").encode()
+    )
     assert marker_mode == 0o600
     assert "prompt" not in observed
     assert not list(
-        (chronovisor_root / "runtime" / "model-activity" / "active").glob(
-            "*.json"
-        )
+        (chronovisor_root / "runtime" / "model-activity" / "active").glob("*.json")
     )
     recent = json.loads(
         (
-            chronovisor_root
-            / "runtime"
-            / "model-activity"
-            / "recent"
-            / "audit.json"
+            chronovisor_root / "runtime" / "model-activity" / "recent" / "audit.json"
         ).read_text(encoding="utf-8")
     )
     assert recent["activity_id"] == observed["activity_id"]
@@ -499,14 +500,19 @@ def test_model_activity_uses_live_root_when_entered(tmp_path, monkeypatch) -> No
 
     monkeypatch.setattr(ollama, "CHRONOVISOR_ROOT", live_root)
     with activity:
-        assert len(
-            list(
-                (live_root / "runtime" / "model-activity" / "active").glob("*.json")
+        assert (
+            len(
+                list(
+                    (live_root / "runtime" / "model-activity" / "active").glob("*.json")
+                )
             )
-        ) == 1
+            == 1
+        )
 
     assert not (initial_root / "runtime" / "model-activity").exists()
-    assert (live_root / "runtime" / "model-activity" / "recent" / "audit.json").is_file()
+    assert (
+        live_root / "runtime" / "model-activity" / "recent" / "audit.json"
+    ).is_file()
 
 
 def test_generate_can_return_explicit_completion_metadata(monkeypatch) -> None:
@@ -768,7 +774,9 @@ def test_embed_uses_remaining_recall_timeout(monkeypatch) -> None:
 
 
 def test_resource_lease_blocks_exclusive_across_threads(tmp_path, monkeypatch) -> None:
-    monkeypatch.setenv("CHRONOVISOR_OLLAMA_RESOURCE_LOCK", str(tmp_path / "resource.lock"))
+    monkeypatch.setenv(
+        "CHRONOVISOR_OLLAMA_RESOURCE_LOCK", str(tmp_path / "resource.lock")
+    )
     shared_entered = threading.Event()
     release_shared = threading.Event()
     exclusive_attempted = threading.Event()
@@ -809,7 +817,9 @@ def test_resource_lease_blocks_exclusive_across_threads(tmp_path, monkeypatch) -
 
 
 def test_resource_lease_reentry_and_upgrade_policy(tmp_path, monkeypatch) -> None:
-    monkeypatch.setenv("CHRONOVISOR_OLLAMA_RESOURCE_LOCK", str(tmp_path / "resource.lock"))
+    monkeypatch.setenv(
+        "CHRONOVISOR_OLLAMA_RESOURCE_LOCK", str(tmp_path / "resource.lock")
+    )
 
     assert ollama.model_resource_lease_mode() is None
     with ollama.model_resource_lease(exclusive=True):

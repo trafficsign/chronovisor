@@ -6,16 +6,29 @@ import hashlib
 import re
 from datetime import date
 from pathlib import Path
-from typing import Any
+from types import ModuleType
+from typing import Any, cast
+
+from chronovisor.core.canonical_document import (
+    CanonicalDocumentError,
+    Namespace,
+    parse_document,
+    patch_document_metadata,
+    validate_canonical_document,
+)
+from chronovisor.core.index_store import (
+    PAGE_RESERVED_FILENAMES,
+    SYSTEM_RESERVED_FILENAMES,
+)
 
 
-def _runtime():
+def _runtime() -> ModuleType:
     from chronovisor.ingest import ingest
 
     return ingest
 
 
-def _runtime_call(name: str):
+def _runtime_call(name: str) -> Any:
     def call(*args: Any, **kwargs: Any) -> Any:
         return getattr(_runtime(), name)(*args, **kwargs)
 
@@ -28,7 +41,9 @@ _normalize_for_collision = _runtime_call("_normalize_for_collision")
 _process_tags_in_body = _runtime_call("_process_tags_in_body")
 _read_exact_utf8 = _runtime_call("_read_exact_utf8")
 _reconcile_links = _runtime_call("_reconcile_links")
-_reserved_system_page_collision_keys = _runtime_call("_reserved_system_page_collision_keys")
+_reserved_system_page_collision_keys = _runtime_call(
+    "_reserved_system_page_collision_keys"
+)
 _safe_log = _runtime_call("_safe_log")
 _safe_resolve_page_path = _runtime_call("_safe_resolve_page_path")
 _strip_all_frontmatter = _runtime_call("_strip_all_frontmatter")
@@ -39,11 +54,103 @@ from chronovisor.ingest.ingest import (  # noqa: E402
 )
 
 
+def _canonical_parse(text: str) -> tuple[dict[str, Any], str]:
+    document = parse_document(text.encode("utf-8"))
+    return document.metadata, document.body.decode("utf-8")
+
+
+def _canonical_patch(text: str, updates: dict[str, Any]) -> str:
+    return patch_document_metadata(text.encode("utf-8"), updates).decode("utf-8")
+
+
+def _page_relative_path(path: Path) -> str:
+    return (
+        path.resolve(strict=False)
+        .relative_to(_runtime().PAGES_DIR.resolve(strict=False))
+        .as_posix()
+    )
+
+
+def _prepare_context(
+    *, read_only: bool
+) -> tuple[set[tuple[Namespace, str]], set[str], list[str]]:
+    if read_only:
+        # ``IndexStore.refresh`` may persist derived cache files. A dry run must
+        # leave runtime/index artifacts untouched, so scan the corpus directly.
+        from chronovisor.core import store as _wiki
+
+        page_paths = [
+            path
+            for path in _runtime().PAGES_DIR.rglob("*.md")
+            if path.name not in PAGE_RESERVED_FILENAMES
+        ]
+        system_paths = [
+            path
+            for path in _wiki.SYSTEM_DIR.rglob("*.md")
+            if path.name not in SYSTEM_RESERVED_FILENAMES
+        ]
+        allowed_targets: set[tuple[Namespace, str]] = set()
+        for raw_namespace, root, paths in (
+            ("pages", _runtime().PAGES_DIR, page_paths),
+            ("system", _wiki.SYSTEM_DIR, system_paths),
+        ):
+            namespace = cast(Namespace, raw_namespace)
+            for path in paths:
+                relative_path = (
+                    path.resolve(strict=False)
+                    .relative_to(root.resolve(strict=False))
+                    .as_posix()
+                )
+                document = validate_canonical_document(
+                    path.read_bytes(),
+                    namespace=namespace,
+                    path=relative_path,
+                )
+                if document.metadata["status"] == "stable":
+                    allowed_targets.add((namespace, relative_path))
+        reserved_system_ids = {
+            _normalize_for_collision(path.stem) for path in system_paths
+        }
+        tag_values: set[str] = set()
+        for path in page_paths:
+            meta, _body = _canonical_parse(path.read_text(encoding="utf-8"))
+            tags = meta.get("tags")
+            if isinstance(tags, list):
+                tag_values.update(tag for tag in tags if isinstance(tag, str))
+        return allowed_targets, reserved_system_ids, sorted(tag_values)
+
+    from chronovisor.core.index_store import get_store
+
+    store = get_store()
+    store.refresh()
+    allowed_targets = set()
+    for page_id in store.all_page_ids(include_system=True):
+        indexed_meta = store.meta(page_id)
+        if not isinstance(indexed_meta, dict):
+            continue
+        indexed_namespace = indexed_meta.get("namespace")
+        relative_path = indexed_meta.get("relative_path")
+        if indexed_namespace in {"pages", "system"} and isinstance(relative_path, str):
+            allowed_targets.add((cast(Namespace, indexed_namespace), relative_path))
+    reserved_system_ids = {
+        _normalize_for_collision(page_id)
+        for page_id in (
+            store.all_page_ids(include_system=True)
+            - store.all_page_ids(include_system=False)
+        )
+    }
+    return (
+        allowed_targets,
+        reserved_system_ids,
+        store.all_tags(include_system=False),
+    )
+
+
 def _prepare_operation(
     source_operation_index: int,
     op: dict[str, Any],
     *,
-    allowed_ids: set[str],
+    allowed_targets: set[tuple[Namespace, str]],
     existing_tags_snapshot: list[str],
     read_only: bool,
     frontmatter_parse: Any,
@@ -56,7 +163,7 @@ def _prepare_operation(
     op_type = source_operation_type
     full_path = _safe_resolve_page_path(source_filename)
     page_id = full_path.stem
-    body, stats = _reconcile_links(op["content"], allowed_ids)
+    body = op["content"]
 
     op_raw_keywords = op.get("raw_keywords")
     propagate_raw_keywords = (
@@ -64,6 +171,7 @@ def _prepare_operation(
         and all(isinstance(value, str) for value in op_raw_keywords)
         and bool(op_raw_keywords)
     )
+    raw_keywords = cast(list[str], op_raw_keywords) if propagate_raw_keywords else []
 
     if op_type == "create":
         existing = _find_page_resilient(page_id, emit_logs=not read_only)
@@ -82,6 +190,12 @@ def _prepare_operation(
                     f"create collision for page_id {page_id!r} produced no update body"
                 )
 
+    body, stats = _reconcile_links(
+        body,
+        allowed_targets,
+        source_path=_page_relative_path(full_path),
+    )
+
     if op_type == "create":
         body = _process_tags_in_body(
             body,
@@ -91,8 +205,20 @@ def _prepare_operation(
             record_changes=False,
         )
         if propagate_raw_keywords:
-            body = frontmatter_patch(body, {"raw_keywords": op_raw_keywords})
+            body = frontmatter_patch(body, {"raw_keywords": raw_keywords})
         body = frontmatter_patch(body, {"updated": date.today().isoformat()})
+        try:
+            validate_canonical_document(
+                body.encode("utf-8"),
+                namespace="pages",
+                path=_page_relative_path(full_path),
+                require_stable=True,
+                allowed_targets=allowed_targets,
+            )
+        except CanonicalDocumentError as exc:
+            raise IngestApplyError(
+                f"create proposal is not canonical: {page_id}: {exc}"
+            ) from exc
         created_meta, _created_body = frontmatter_parse(body)
         created_tags = created_meta.get("tags")
         new_tags = tuple(
@@ -122,6 +248,17 @@ def _prepare_operation(
         raise IngestApplyError(f"update target not found for page_id {page_id!r}")
     page_id = existing_path.stem
     previous = _read_exact_utf8(existing_path)
+    try:
+        validate_canonical_document(
+            previous.encode("utf-8"),
+            namespace="pages",
+            path=_page_relative_path(existing_path),
+            require_stable=True,
+        )
+    except CanonicalDocumentError as exc:
+        raise IngestApplyError(
+            f"update target is not stable canonical: {page_id}: {exc}"
+        ) from exc
     compact_preimage_sha256 = op.get("_compact_update_preimage_sha256")
     if compact_preimage_sha256 is not None:
         if (
@@ -131,9 +268,7 @@ def _prepare_operation(
             raise IngestApplyError(
                 f"compact update preimage binding is malformed for {page_id}"
             )
-        observed_preimage_sha256 = hashlib.sha256(
-            previous.encode("utf-8")
-        ).hexdigest()
+        observed_preimage_sha256 = hashlib.sha256(previous.encode("utf-8")).hexdigest()
         if observed_preimage_sha256 != compact_preimage_sha256:
             raise IngestApplyError(
                 f"compact update preimage changed before prepare: {page_id}"
@@ -148,21 +283,35 @@ def _prepare_operation(
             and all(isinstance(value, str) for value in existing_kw_raw)
             else []
         )
-        union_kw = list(dict.fromkeys(existing_kw + op_raw_keywords))
+        union_kw = list(dict.fromkeys(existing_kw + raw_keywords))
         previous = frontmatter_patch(previous, {"raw_keywords": union_kw})
 
-    stamped = re.sub(
-        r"updated:\s*.+",
-        f"updated: {date.today().isoformat()}",
+    stamped = frontmatter_patch(
         previous,
-        count=1,
+        {"updated": date.today().isoformat()},
     )
+    separator = (
+        "" if stamped.endswith("\n\n") else ("\n" if stamped.endswith("\n") else "\n\n")
+    )
+    proposed = stamped + separator + body.rstrip() + "\n"
+    try:
+        validate_canonical_document(
+            proposed.encode("utf-8"),
+            namespace="pages",
+            path=_page_relative_path(existing_path),
+            require_stable=True,
+            allowed_targets=allowed_targets,
+        )
+    except CanonicalDocumentError as exc:
+        raise IngestApplyError(
+            f"update proposal is not canonical: {page_id}: {exc}"
+        ) from exc
     return (
         PreparedIngestOperation(
             op_type="update",
             path=existing_path,
             page_id=page_id,
-            new_body=stamped.rstrip() + "\n\n" + body + "\n",
+            new_body=proposed,
             previous_text=previous_text_for_rollback,
             source_operation_index=source_operation_index,
             source_operation_type=source_operation_type,
@@ -173,7 +322,7 @@ def _prepare_operation(
 
 
 def prepare_operations(
-    operations: list[dict],
+    operations: list[dict[str, Any]],
     *,
     read_only: bool = False,
 ) -> tuple[list[PreparedIngestOperation], dict[str, int]]:
@@ -198,55 +347,10 @@ def prepare_operations(
     ``tag-changelog.md``. ``update`` ops never touch ``tags`` because
     ``UPDATE_SYSTEM_PROMPT`` forbids the LLM from emitting frontmatter.
     """
-    from chronovisor.core.frontmatter import (
-        parse as _frontmatter_parse,
-    )
-    from chronovisor.core.frontmatter import (
-        patch as _frontmatter_patch,
-    )
-
-    # Build the universe of valid link targets: every existing page plus every
-    # page about to be created in this batch (so siblings can cross-reference).
-    # Fail closed — stale or missing index would silently unwrap every link.
     try:
-        if read_only:
-            # ``IndexStore.refresh`` may persist derived cache files.  A dry
-            # run must leave even runtime/index artifacts untouched, so scan
-            # and parse the small corpus directly instead.
-            from chronovisor.core import store as _wiki
-
-            page_paths = list(_runtime().PAGES_DIR.rglob("*.md"))
-            system_paths = list(_wiki.SYSTEM_DIR.rglob("*.md"))
-            allowed_ids = {path.stem for path in [*page_paths, *system_paths]}
-            reserved_system_ids = {
-                _normalize_for_collision(path.stem) for path in system_paths
-            }
-            tag_values: set[str] = set()
-            for path in page_paths:
-                meta, _body = _frontmatter_parse(path.read_text(encoding="utf-8"))
-                tags = meta.get("tags")
-                if isinstance(tags, list):
-                    tag_values.update(tag for tag in tags if isinstance(tag, str))
-            existing_tags_snapshot = sorted(tag_values)
-        else:
-            from chronovisor.core.index_store import get_store
-
-            store = get_store()
-            store.refresh()
-            allowed_ids = store.all_page_ids(include_system=True)
-            reserved_system_ids = {
-                _normalize_for_collision(page_id)
-                for page_id in (
-                    store.all_page_ids(include_system=True)
-                    - store.all_page_ids(include_system=False)
-                )
-            }
-            # Snapshot the tag pool once for the whole batch so dedupe doesn't
-            # re-walk the index on every op. Same-batch siblings can't see
-            # each other's newly-coined tags here, but that's fine: dedup is
-            # only meaningful against the *committed* corpus, and within-batch
-            # divergence will be reconciled the next time chronovisor_check runs.
-            existing_tags_snapshot = store.all_tags(include_system=False)
+        allowed_targets, reserved_system_ids, existing_tags_snapshot = _prepare_context(
+            read_only=read_only
+        )
     except Exception as e:
         raise IngestApplyError(f"index_store unavailable: {e}") from e
 
@@ -298,7 +402,12 @@ def prepare_operations(
         seen_norm_ids.add(norm_key)
         seen_paths.add(full_path)
 
-        allowed_ids.add(page_id)
+        target_path = full_path
+        if op_type == "create":
+            existing = _find_page_resilient(page_id, emit_logs=False)
+            if existing is not None:
+                target_path = existing
+        allowed_targets.add(("pages", _page_relative_path(target_path)))
 
     totals = {"resolved": 0, "rewritten": 0, "unwrapped": 0}
 
@@ -306,11 +415,11 @@ def prepare_operations(
         prepared, stats = _prepare_operation(
             source_operation_index,
             op,
-            allowed_ids=allowed_ids,
+            allowed_targets=allowed_targets,
             existing_tags_snapshot=existing_tags_snapshot,
             read_only=read_only,
-            frontmatter_parse=_frontmatter_parse,
-            frontmatter_patch=_frontmatter_patch,
+            frontmatter_parse=_canonical_parse,
+            frontmatter_patch=_canonical_patch,
         )
         planned.append(prepared)
         for key in totals:
@@ -340,8 +449,8 @@ def prepare_operations(
             constrained_body = _ensure_page_metadata_frontmatter(
                 constrained_body,
                 entry.page_id,
-                _frontmatter_parse,
-                _frontmatter_patch,
+                _canonical_parse,
+                _canonical_patch,
                 allow_local_model=not read_only and not enforced,
                 force_deterministic_rebuild=bool(enforced),
             )
@@ -350,7 +459,14 @@ def prepare_operations(
                 entry.previous_text or "",
                 constrained_body,
             )
-        except PageMutationError as exc:
+            validate_canonical_document(
+                constrained_body.encode("utf-8"),
+                namespace="pages",
+                path=_page_relative_path(entry.path),
+                require_stable=True,
+                allowed_targets=allowed_targets,
+            )
+        except (CanonicalDocumentError, PageMutationError) as exc:
             raise IngestApplyError(
                 f"content correction constraint failed for {entry.page_id}: {exc}"
             ) from exc

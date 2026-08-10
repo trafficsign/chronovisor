@@ -17,6 +17,10 @@ from pathlib import Path
 import pytest
 
 from chronovisor.core import ollama
+from chronovisor.core.canonical_document import (
+    parse_document,
+    patch_document_metadata,
+)
 from chronovisor.ingest.ingest import (
     IngestApplyError,
     _apply_operations,
@@ -126,17 +130,21 @@ class TestExtractJsonArray:
 
 class TestFrontmatter:
     def test_has_frontmatter_positive(self) -> None:
-        assert _has_frontmatter("---\ntitle: X\nupdated: 2026-04-28\n---\nbody")
+        assert _has_frontmatter(
+            "---\ntitle: X\nupdated: 2026-04-28\nstatus: stable\ntype: knowledge\n---\nbody"
+        )
 
     def test_has_frontmatter_negative_no_block(self) -> None:
         assert not _has_frontmatter("body without frontmatter")
 
     def test_has_frontmatter_negative_no_title(self) -> None:
-        assert not _has_frontmatter("---\nupdated: 2026-04-28\n---\nbody")
+        assert not _has_frontmatter(
+            "---\nupdated: 2026-04-28\nstatus: stable\ntype: knowledge\n---\nbody"
+        )
 
-    def test_strip_removes_all_blocks(self) -> None:
+    def test_strip_removes_only_leading_canonical_block(self) -> None:
         text = "---\ntitle: A\n---\nbody1\n---\ntitle: B\n---\nbody2\n"
-        assert "title:" not in _strip_all_frontmatter(text)
+        assert _strip_all_frontmatter(text) == "body1\n---\ntitle: B\n---\nbody2\n"
 
 
 # ---------------------------------------------------------------------------
@@ -148,7 +156,7 @@ class TestExtractPageBody:
     def test_create_strict_with_frontmatter(self) -> None:
         out = _extract_page_body(
             "=== NEW PAGE: foo.md ===\n"
-            "---\ntitle: Foo\nupdated: 2026-04-28\n---\n"
+            "---\ntitle: Foo\nupdated: 2026-04-28\nstatus: stable\ntype: knowledge\n---\n"
             "\nbody.\n"
             "=== END PAGE ===",
             op_type="create",
@@ -159,7 +167,7 @@ class TestExtractPageBody:
         # gemma-style: drops "NEW PAGE:" prefix
         out = _extract_page_body(
             "=== career/foo.md ===\n"
-            "---\ntitle: Foo\nupdated: 2026-04-28\n---\n"
+            "---\ntitle: Foo\nupdated: 2026-04-28\nstatus: stable\ntype: knowledge\n---\n"
             "\nbody.\n"
             "=== END PAGE ===",
             op_type="create",
@@ -184,24 +192,20 @@ class TestExtractPageBody:
             is None
         )
 
-    def test_update_strips_stray_frontmatter(self) -> None:
-        # The original Critical bug: model emits full-page output for an
-        # update, which used to be appended verbatim → multi-frontmatter.
+    def test_update_rejects_stray_frontmatter(self) -> None:
         out = _extract_page_body(
             "=== UPDATE PAGE: foo.md ===\n"
-            "---\ntitle: Foo\nupdated: 2026-04-28\n---\n"
+            "---\ntitle: Foo\nupdated: 2026-04-28\nstatus: stable\ntype: knowledge\n---\n"
             "\n## new section\n\nnotes.\n"
             "=== END PAGE ===",
             op_type="update",
         )
-        assert out is not None
-        assert "title:" not in out
-        assert "## new section" in out
+        assert out is None
 
     def test_update_rejects_frontmatter_only(self) -> None:
         out = _extract_page_body(
             "=== UPDATE PAGE: foo.md ===\n"
-            "---\ntitle: Foo\nupdated: 2026-04-28\n---\n"
+            "---\ntitle: Foo\nupdated: 2026-04-28\nstatus: stable\ntype: knowledge\n---\n"
             "=== END PAGE ===",
             op_type="update",
         )
@@ -210,7 +214,7 @@ class TestExtractPageBody:
     def test_create_truncated_no_close_rejected(self) -> None:
         out = _extract_page_body(
             "=== NEW PAGE: personal/smoking-habit-analysis.md ===\n"
-            "---\ntitle: Smoking Habit Analysis\nupdated: 2026-04-29\n---\n"
+            "---\ntitle: Smoking Habit Analysis\nupdated: 2026-04-29\nstatus: stable\ntype: knowledge\n---\n"
             "\n# 概要\n\nニコチンの半減期は短い",
             op_type="create",
         )
@@ -219,7 +223,7 @@ class TestExtractPageBody:
     def test_create_truncated_partial_close_fence_rejected(self) -> None:
         out = _extract_page_body(
             "=== NEW PAGE: foo.md ===\n"
-            "---\ntitle: Foo\nupdated: 2026-04-28\n---\n"
+            "---\ntitle: Foo\nupdated: 2026-04-28\nstatus: stable\ntype: knowledge\n---\n"
             "\nbody text.\n=== EN",
             op_type="create",
         )
@@ -228,7 +232,7 @@ class TestExtractPageBody:
     def test_create_generic_wrapper_without_close_rejected(self) -> None:
         out = _extract_page_body(
             "=== user-profile-background PAGE: user-profile-background ===\n"
-            "---\ntitle: User Profile\nupdated: 2026-04-29\n---\n"
+            "---\ntitle: User Profile\nupdated: 2026-04-29\nstatus: stable\ntype: knowledge\n---\n"
             "\nbody",
             op_type="create",
         )
@@ -258,7 +262,7 @@ class TestExtractPageBody:
     def test_terminal_marker_must_be_unique_and_final(self, suffix: str) -> None:
         out = _extract_page_body(
             "=== NEW PAGE: foo.md ===\n"
-            "---\ntitle: Foo\nupdated: 2026-04-28\n---\n"
+            "---\ntitle: Foo\nupdated: 2026-04-28\nstatus: stable\ntype: knowledge\n---\n"
             "body\n=== END PAGE ===" + suffix,
             op_type="create",
         )
@@ -297,7 +301,7 @@ def test_generate_one_supplies_current_date_and_forbids_date_inference(
             "=== NEW PAGE: memory/date-contract.md ===\n"
             "---\n"
             "title: Date contract\n"
-            f"updated: {today}\n"
+            f"updated: {today}\nstatus: stable\ntype: knowledge\n"
             "tags: [d/tools-config, t/reference, s/2026]\n"
             "---\n\n"
             "本文\n"
@@ -329,10 +333,10 @@ def test_generate_one_supplies_current_date_and_forbids_date_inference(
             "create",
             "memory/repaired-create.md",
             "=== NEW PAGE: memory/repaired-create.md ===\n"
-            "---\ntitle: Repaired create\nupdated: 2026-07-14\n"
+            "---\ntitle: Repaired create\nupdated: 2026-07-14\nstatus: stable\ntype: knowledge\n"
             "tags: [d/tools-config, t/reference, s/2026]\n---\n\n本文",
             "=== NEW PAGE: memory/repaired-create.md ===\n"
-            "---\ntitle: Repaired create\nupdated: 2026-07-14\n"
+            "---\ntitle: Repaired create\nupdated: 2026-07-14\nstatus: stable\ntype: knowledge\n"
             "tags: [d/tools-config, t/reference, s/2026]\n---\n\n本文\n"
             "=== END PAGE ===",
         ),
@@ -397,7 +401,7 @@ def test_generate_one_repairs_missing_end_marker_in_same_logical_session(
             "create",
             "memory/transport-complete-create.md",
             "=== NEW PAGE: memory/transport-complete-create.md ===\n"
-            "---\ntitle: Complete create\nupdated: 2026-07-14\n"
+            "---\ntitle: Complete create\nupdated: 2026-07-14\nstatus: stable\ntype: knowledge\n"
             "tags: [d/tools-config, t/reference, s/2026]\n---\n\n本文",
         ),
         (
@@ -498,7 +502,7 @@ def test_generate_one_stops_when_repair_repeats_same_invalid_output(
 
     invalid = (
         "=== NEW PAGE: memory/repeated.md ===\n"
-        "---\ntitle: Repeated\nupdated: 2026-07-14\n"
+        "---\ntitle: Repeated\nupdated: 2026-07-14\nstatus: stable\ntype: knowledge\n"
         "tags: [d/tools-config, t/reference, s/2026]\n---\n\n本文"
     )
     prompts: list[str] = []
@@ -638,7 +642,7 @@ def test_generate_one_holds_one_exclusive_lease_across_repair_session(
     )
     valid = (
         "=== NEW PAGE: memory/leased.md ===\n"
-        "---\ntitle: Leased\nupdated: 2026-07-14\n"
+        "---\ntitle: Leased\nupdated: 2026-07-14\nstatus: stable\ntype: knowledge\n"
         "tags: [d/tools-config, t/reference, s/2026]\n---\n\n本文\n"
         "=== END PAGE ==="
     )
@@ -724,7 +728,7 @@ def test_generate_one_rejects_context_accounting_at_admitted_boundary(
         return ingest.ollama_runtime.GenerateResponse(
             content=(
                 "=== NEW PAGE: memory/context-boundary.md ===\n"
-                "---\ntitle: Context boundary\nupdated: 2026-07-14\n"
+                "---\ntitle: Context boundary\nupdated: 2026-07-14\nstatus: stable\ntype: knowledge\n"
                 "tags: [d/tools-config, t/reference, s/2026]\n---\n\n本文\n"
                 "=== END PAGE ==="
             ),
@@ -819,55 +823,68 @@ def test_generate_one_oversized_full_repair_envelope_fails_before_resources(
 
 class TestReconcileLinks:
     def setup_method(self) -> None:
-        self.allowed = {"foo", "bar", "switchbot-hub-3-purchase-logic"}
+        self.allowed = {
+            ("pages", "memory/foo.md"),
+            ("pages", "memory/bar.md"),
+        }
 
     def test_resolve_intact(self) -> None:
         out, s = _reconcile_links(
-            "See [[foo]] and [[bar#section|alias]].", self.allowed
+            "See [Foo](foo.md) and [alias](bar.md#section).",
+            self.allowed,
+            source_path="memory/source.md",
         )
-        assert out == "See [[foo]] and [[bar#section|alias]]."
+        assert out == "See [Foo](foo.md) and [alias](bar.md#section)."
         assert s["resolved"] == 2
 
-    def test_folder_prefix_rewrite(self) -> None:
-        out, s = _reconcile_links("Check [[personal/foo]] now.", self.allowed)
-        assert out == "Check [[foo]] now."
-        assert s["rewritten"] == 1
+    def test_legacy_wikilink_is_rejected(self) -> None:
+        with pytest.raises(IngestApplyError, match="wikilinks"):
+            _reconcile_links(
+                "See [[foo]].",
+                self.allowed,
+                source_path="memory/source.md",
+            )
 
-    def test_md_suffix_rewrite_with_anchor_and_alias(self) -> None:
-        out, _s = _reconcile_links("[[bar.md#x|Bar]]", self.allowed)
-        assert out == "[[bar#x|Bar]]"
+    def test_missing_target_is_rejected(self) -> None:
+        with pytest.raises(IngestApplyError, match="missing Markdown link"):
+            _reconcile_links(
+                "See [Ghost](ghost.md).",
+                self.allowed,
+                source_path="memory/source.md",
+            )
 
-    def test_unwrap_no_alias(self) -> None:
-        out, s = _reconcile_links("Work at [[三菱重工]].", self.allowed)
-        assert out == "Work at 三菱重工."
-        assert s["unwrapped"] == 1
-
-    def test_unwrap_with_alias(self) -> None:
-        out, _s = _reconcile_links("[[ghost|display]]", self.allowed)
-        assert out == "display"
+    @pytest.mark.parametrize("target", ["../../escape.md", "/system/private.md"])
+    def test_escape_and_system_crosslink_are_rejected(self, target: str) -> None:
+        with pytest.raises(IngestApplyError, match="escapes|crosses"):
+            _reconcile_links(
+                f"See [Unsafe]({target}).",
+                self.allowed,
+                source_path="memory/source.md",
+            )
 
     def test_fenced_code_is_untouched(self) -> None:
         # Critical: subscript / list indexing must not be eaten.
-        text = "before\n```python\nx = data[[1]]\n```\nafter [[foo]] tail"
-        out, s = _reconcile_links(text, self.allowed)
+        text = "before\n```python\nx = data[[1]]\n```\nafter [Foo](foo.md) tail"
+        out, s = _reconcile_links(text, self.allowed, source_path="memory/source.md")
         assert "x = data[[1]]" in out
-        assert "[[foo]]" in out  # outside fence still resolves
+        assert "[Foo](foo.md)" in out
         assert s["resolved"] == 1
         assert s["unwrapped"] == 0
 
     def test_inline_code_is_untouched(self) -> None:
-        text = "the regex `[[ghost]]` is a sample, but [[ghost]] is unresolved"
-        out, _s = _reconcile_links(text, self.allowed)
-        assert "`[[ghost]]`" in out  # inline code intact
-        assert out.count("[[ghost]]") == 1  # only the inline one survived
-        assert "is unresolved" in out and "ghost is unresolved" in out
+        text = "the regex `[[ghost]]` is a sample, and [Foo](foo.md) resolves"
+        out, _s = _reconcile_links(text, self.allowed, source_path="memory/source.md")
+        assert "`[[ghost]]`" in out
 
     def test_frontmatter_is_untouched(self) -> None:
         # Frontmatter is data, not prose. We must not rewrite link-shaped values.
-        text = "---\ntitle: [[ghost]]\n---\nbody [[foo]]"
-        out, _s = _reconcile_links(text, self.allowed)
-        assert "title: [[ghost]]" in out
-        assert "[[foo]]" in out
+        text = (
+            "---\ntitle: '[[ghost]]'\nstatus: stable\ntype: knowledge\n---\n"
+            "body [Foo](foo.md)"
+        )
+        out, _s = _reconcile_links(text, self.allowed, source_path="memory/source.md")
+        assert "[[ghost]]" in out
+        assert "[Foo](foo.md)" in out
 
 
 # ---------------------------------------------------------------------------
@@ -1117,7 +1134,7 @@ class TestApplyOperations:
             {
                 "type": "create",
                 "filename": "misc/new-page.md",
-                "content": "---\ntitle: T\nupdated: 2026-04-28\n---\nhello",
+                "content": "---\ntitle: T\nupdated: 2026-04-28\nstatus: stable\ntype: knowledge\n---\nhello",
             }
         ]
         created, updated = _apply_operations(ops)
@@ -1125,7 +1142,10 @@ class TestApplyOperations:
         assert updated == []
         body = (isolated_wiki / "pages" / "misc" / "new-page.md").read_text()
         assert "title: T" in body and body.endswith("\n")
-        assert f"updated: {date.today().isoformat()}" in body
+        assert (
+            parse_document(body.encode()).metadata["updated"]
+            == date.today().isoformat()
+        )
 
     @pytest.mark.parametrize("filename", ["root-page.md", "a/b/nested-page.md"])
     def test_create_refuses_wrong_path_depth_even_if_triage_was_bypassed(
@@ -1135,7 +1155,7 @@ class TestApplyOperations:
             {
                 "type": "create",
                 "filename": filename,
-                "content": "---\ntitle: Root\nupdated: 2026-07-18\n---\nbody",
+                "content": "---\ntitle: Root\nupdated: 2026-07-18\nstatus: stable\ntype: knowledge\n---\nbody",
             }
         ]
 
@@ -1148,13 +1168,13 @@ class TestApplyOperations:
         path = _seed_page(
             isolated_wiki,
             "a/foo.md",
-            "---\ntitle: existing\nupdated: 2026-01-01\n---\nold",
+            "---\ntitle: existing\nupdated: 2026-01-01\nstatus: stable\ntype: knowledge\n---\nold",
         )
         ops = [
             {
                 "type": "create",
                 "filename": "b/foo.md",
-                "content": "---\ntitle: dup\nupdated: 2026-04-28\n---\nnew",
+                "content": "---\ntitle: dup\nupdated: 2026-04-28\nstatus: stable\ntype: knowledge\n---\nnew",
             }
         ]
         created, updated = _apply_operations(ops)
@@ -1182,7 +1202,7 @@ class TestApplyOperations:
         path = _seed_page(
             isolated_wiki,
             "ai/opus-4.7-evaluation-and-industry-geopolitics.md",
-            "---\ntitle: Opus\nupdated: 2026-01-01\n---\nold",
+            "---\ntitle: Opus\nupdated: 2026-01-01\nstatus: stable\ntype: knowledge\n---\nold",
         )
         ops = [
             {
@@ -1204,12 +1224,12 @@ class TestApplyOperations:
         _seed_page(
             isolated_wiki,
             "a/foo.bar.md",
-            "---\ntitle: A\nupdated: 2026-01-01\n---\nold",
+            "---\ntitle: A\nupdated: 2026-01-01\nstatus: stable\ntype: knowledge\n---\nold",
         )
         _seed_page(
             isolated_wiki,
             "b/foo-bar.md",
-            "---\ntitle: B\nupdated: 2026-01-01\n---\nold",
+            "---\ntitle: B\nupdated: 2026-01-01\nstatus: stable\ntype: knowledge\n---\nold",
         )
         ops = [
             {
@@ -1228,7 +1248,7 @@ class TestApplyOperations:
         path = _seed_page(
             isolated_wiki,
             "ai/canonical-target.md",
-            "---\ntitle: Canonical\nupdated: 2026-01-01\n---\nold",
+            "---\ntitle: Canonical\nupdated: 2026-01-01\nstatus: stable\ntype: knowledge\n---\nold",
         )
         add_alias("model-made-up-target", "ai/canonical-target")
         ops = [
@@ -1255,7 +1275,7 @@ class TestApplyOperations:
         path = _seed_page(
             isolated_wiki,
             "career/x.md",
-            "---\ntitle: X\nupdated: 2026-01-01\n---\noriginal\n",
+            "---\ntitle: X\nupdated: 2026-01-01\nstatus: stable\ntype: knowledge\n---\noriginal\n",
         )
         ops = [
             {
@@ -1280,7 +1300,7 @@ class TestApplyOperations:
         path = _seed_page(
             isolated_wiki,
             "hardware/display.md",
-            "---\ntitle: Display\nupdated: 2026-07-10\n---\n"
+            "---\ntitle: Display\nupdated: 2026-07-10\nstatus: stable\ntype: knowledge\n---\n"
             "The setup has two G32P 32-inch 6K displays.\n",
         )
         prepared = page_mutation.prepare_page_mutation(
@@ -1314,7 +1334,9 @@ class TestApplyOperations:
         assert "two G32P 32-inch 6K displays" not in written
         assert written.count("one G32P 32-inch 6K display") >= 2
         assert "The desk is 180 cm wide." in written
-        assert "applied_corrections: [corr-display-count]" in written
+        assert parse_document(written.encode()).metadata["applied_corrections"] == [
+            "corr-display-count"
+        ]
 
     def test_stale_ingest_cannot_resurrect_correction_under_new_slug(
         self, isolated_wiki: Path
@@ -1324,7 +1346,7 @@ class TestApplyOperations:
         _seed_page(
             isolated_wiki,
             "hardware/display.md",
-            "---\ntitle: Display\nupdated: 2026-07-10\n---\n"
+            "---\ntitle: Display\nupdated: 2026-07-10\nstatus: stable\ntype: knowledge\n---\n"
             "The setup has two G32P 32-inch 6K displays.\n",
         )
         prepared = page_mutation.prepare_page_mutation(
@@ -1345,7 +1367,7 @@ class TestApplyOperations:
                     "type": "create",
                     "filename": "hardware/alternate-display-memory.md",
                     "content": (
-                        "---\ntitle: Alternate display memory\nupdated: 2026-07-11\n---\n"
+                        "---\ntitle: Alternate display memory\nupdated: 2026-07-11\nstatus: stable\ntype: knowledge\n---\n"
                         "The setup has two G32P 32-inch 6K displays.\n"
                     ),
                 }
@@ -1354,9 +1376,7 @@ class TestApplyOperations:
 
         assert updated == []
         assert created == ["alternate-display-memory"]
-        alternate = (
-            page_mutation.PAGES_DIR / "hardware" / "alternate-display-memory.md"
-        )
+        alternate = page_mutation.PAGES_DIR / "hardware" / "alternate-display-memory.md"
         written = alternate.read_text(encoding="utf-8")
         assert "two G32P 32-inch 6K displays" not in written
         assert "one G32P 32-inch 6K display" in written
@@ -1377,7 +1397,7 @@ class TestApplyOperations:
             {
                 "type": "create",
                 "filename": "a/x.md",
-                "content": "---\ntitle: X\nupdated: 2026-04-28\n---\nbody",
+                "content": "---\ntitle: X\nupdated: 2026-04-28\nstatus: stable\ntype: knowledge\n---\nbody",
             }
         ]
         with pytest.raises(IngestApplyError, match="index_store unavailable"):
@@ -1391,7 +1411,7 @@ class TestIngestFrontierGate:
             "type": "create",
             "filename": "memory/frontier-only.md",
             "content": (
-                "---\ntitle: Frontier only\nupdated: 2026-07-11\n---\n"
+                "---\ntitle: Frontier only\nupdated: 2026-07-11\nstatus: stable\ntype: knowledge\n---\n"
                 "The exact proposed fact.\n"
             ),
         }
@@ -1407,7 +1427,7 @@ class TestIngestFrontierGate:
                 "content": (
                     "---\n"
                     f"title: Sharded {index}\n"
-                    "updated: 2026-07-14\n"
+                    "updated: 2026-07-14\nstatus: stable\ntype: knowledge\n"
                     "---\n"
                     f"Grounded fact {index}.\n"
                     + (chr(ord("a") + index) * body_bytes)
@@ -1591,10 +1611,7 @@ class TestIngestFrontierGate:
         }
         assert authority["router"] == router_audit
         assert authority["source"] == "adopted_local_consensus"
-        assert (
-            authority["quorum_safety_policy_version"]
-            == QUORUM_SAFETY_POLICY_VERSION
-        )
+        assert authority["quorum_safety_policy_version"] == QUORUM_SAFETY_POLICY_VERSION
         assert "tie_break_adjudication_policy_version" not in authority
         assert ingest._ingest_review_authority_shape_error(authority) is None
 
@@ -1663,7 +1680,7 @@ class TestIngestFrontierGate:
                 "type": "create",
                 "filename": op["filename"],
                 "content": (
-                    "---\ntitle: Bounded nonconvergence\nupdated: 2026-07-15\n"
+                    "---\ntitle: Bounded nonconvergence\nupdated: 2026-07-15\nstatus: stable\ntype: knowledge\n"
                     "---\nbody\n"
                 ),
             },
@@ -1783,7 +1800,7 @@ class TestIngestFrontierGate:
                 "type": "create",
                 "filename": op["filename"],
                 "content": (
-                    "---\ntitle: Publication CAS\nupdated: 2026-07-15\n---\nbody\n"
+                    "---\ntitle: Publication CAS\nupdated: 2026-07-15\nstatus: stable\ntype: knowledge\n---\nbody\n"
                 ),
             },
         )
@@ -3547,7 +3564,7 @@ class TestIngestFrontierGate:
     ) -> None:
         from chronovisor.ingest import ingest
 
-        original = "---\ntitle: Existing\nupdated: 2026-01-01\n---\nold fact\n"
+        original = "---\ntitle: Existing\nupdated: 2026-01-01\nstatus: stable\ntype: knowledge\n---\nold fact\n"
         path = _seed_page(isolated_wiki, "memory/existing.md", original)
         captured: list[dict] = []
 
@@ -3621,7 +3638,7 @@ class TestIngestFrontierGate:
         path = _seed_page(
             isolated_wiki,
             "memory/race.md",
-            "---\ntitle: Race\nupdated: 2026-01-01\n---\nold\n",
+            "---\ntitle: Race\nupdated: 2026-01-01\nstatus: stable\ntype: knowledge\n---\nold\n",
         )
         planned, totals = ingest._prepare_operations(
             [
@@ -3633,7 +3650,7 @@ class TestIngestFrontierGate:
             ]
         )
         path.write_text(
-            "---\ntitle: Race\nupdated: 2026-01-01\n---\nconcurrent correction\n",
+            "---\ntitle: Race\nupdated: 2026-01-01\nstatus: stable\ntype: knowledge\n---\nconcurrent correction\n",
             encoding="utf-8",
         )
 
@@ -3900,7 +3917,7 @@ class TestIngestProposalSchemaCompatibility:
                 (
                     "---\n"
                     f"title: Legacy incident {index}\n"
-                    "updated: 2026-07-11\n"
+                    "updated: 2026-07-11\nstatus: stable\ntype: knowledge\n"
                     "---\n"
                     f"preimage {index}\n"
                 ),
@@ -4072,7 +4089,7 @@ class TestIngestProposalSchemaCompatibility:
         target = _seed_page(
             isolated_wiki,
             "memory/legacy-review.md",
-            "---\ntitle: Legacy review\nupdated: 2026-07-11\n---\nold\n",
+            "---\ntitle: Legacy review\nupdated: 2026-07-11\nstatus: stable\ntype: knowledge\n---\nold\n",
         )
         operations = [
             {
@@ -4173,7 +4190,7 @@ class TestIngestProposalRollback:
         from chronovisor.ingest import ingest
 
         original = (
-            "---\r\ntitle: CRLF compact\r\nupdated: 2026-07-11\r\n"
+            "---\r\ntitle: CRLF compact\r\nupdated: 2026-07-11\r\nstatus: stable\r\ntype: knowledge\r\n"
             "tags: [d/tools-config, t/reference, s/2026]\r\n---\r\n"
             "# Existing\r\nold fact\r\n"
             "## Product value\r\nproduct value evidence\r\n"
@@ -4245,7 +4262,7 @@ class TestIngestProposalRollback:
         from chronovisor.ingest import ingest
 
         original = (
-            "---\r\ntitle: CRLF rollback\r\nupdated: 2026-07-11\r\n"
+            "---\r\ntitle: CRLF rollback\r\nupdated: 2026-07-11\r\nstatus: stable\r\ntype: knowledge\r\n"
             "tags: [d/tools-config, t/reference, s/2026]\r\n---\r\n"
             "# Existing\r\nold fact\r\n"
         )
@@ -4269,7 +4286,7 @@ class TestIngestProposalRollback:
                     "type": "create",
                     "filename": "memory/late-conflict.md",
                     "content": (
-                        "---\ntitle: Late conflict\nupdated: 2026-07-14\n"
+                        "---\ntitle: Late conflict\nupdated: 2026-07-14\nstatus: stable\ntype: knowledge\n"
                         "tags: [d/tools-config, t/reference, s/2026]\n---\nbody\n"
                     ),
                 },
@@ -4295,7 +4312,7 @@ class TestIngestProposalRollback:
         target = _seed_page(
             isolated_wiki,
             "memory/legacy-rollback.md",
-            "---\ntitle: Legacy rollback\nupdated: 2026-07-11\n---\nold fact\n",
+            "---\ntitle: Legacy rollback\nupdated: 2026-07-11\nstatus: stable\ntype: knowledge\n---\nold fact\n",
         )
         previous = target.read_text(encoding="utf-8")
         applied = ingest._review_and_apply_ingest_operations(
@@ -4336,14 +4353,14 @@ class TestIngestProposalRollback:
         existing = _seed_page(
             isolated_wiki,
             "memory/existing.md",
-            "---\ntitle: Existing\nupdated: 2026-07-11\n---\nold fact\n",
+            "---\ntitle: Existing\nupdated: 2026-07-11\nstatus: stable\ntype: knowledge\n---\nold fact\n",
         )
         previous = existing.read_text(encoding="utf-8")
         operations = [
             {
                 "type": "create",
                 "filename": "memory/new.md",
-                "content": "---\ntitle: New\nupdated: 2026-07-12\n---\nnew fact\n",
+                "content": "---\ntitle: New\nupdated: 2026-07-12\nstatus: stable\ntype: knowledge\n---\nnew fact\n",
             },
             {
                 "type": "update",
@@ -4429,13 +4446,16 @@ class TestApplyRawKeywordsPatch:
             {
                 "type": "create",
                 "filename": "misc/p.md",
-                "content": "---\ntitle: P\nupdated: 2026-04-28\n---\nbody",
+                "content": "---\ntitle: P\nupdated: 2026-04-28\nstatus: stable\ntype: knowledge\n---\nbody",
                 "raw_keywords": ["alpha", "beta"],
             }
         ]
         _apply_operations(ops)
         text = (isolated_wiki / "pages" / "misc" / "p.md").read_text()
-        assert "raw_keywords: [alpha, beta]" in text
+        assert parse_document(text.encode()).metadata["raw_keywords"] == [
+            "alpha",
+            "beta",
+        ]
         assert "title: P" in text
 
     def test_create_without_raw_keywords_leaves_field_absent(
@@ -4447,7 +4467,7 @@ class TestApplyRawKeywordsPatch:
             {
                 "type": "create",
                 "filename": "misc/q.md",
-                "content": "---\ntitle: Q\nupdated: 2026-04-28\n---\nbody",
+                "content": "---\ntitle: Q\nupdated: 2026-04-28\nstatus: stable\ntype: knowledge\n---\nbody",
             }
         ]
         _apply_operations(ops)
@@ -4460,7 +4480,7 @@ class TestApplyRawKeywordsPatch:
             {
                 "type": "create",
                 "filename": "misc/r.md",
-                "content": "---\ntitle: R\nupdated: 2026-04-28\n---\nbody",
+                "content": "---\ntitle: R\nupdated: 2026-04-28\nstatus: stable\ntype: knowledge\n---\nbody",
                 "raw_keywords": [],
             }
         ]
@@ -4474,7 +4494,7 @@ class TestApplyRawKeywordsPatch:
         _seed_page(
             isolated_wiki,
             "career/x.md",
-            "---\ntitle: X\nupdated: 2026-01-01\nraw_keywords: [a, b]\n---\noriginal\n",
+            "---\ntitle: X\nupdated: 2026-01-01\nstatus: stable\ntype: knowledge\nraw_keywords: [a, b]\n---\noriginal\n",
         )
         ops = [
             {
@@ -4487,9 +4507,10 @@ class TestApplyRawKeywordsPatch:
         _apply_operations(ops)
         text = (isolated_wiki / "pages" / "career" / "x.md").read_text()
         # Order-preserving dedupe: a, b come from existing; c, d are appended.
-        assert "raw_keywords: [a, b, c, d]" in text
+        metadata = parse_document(text.encode()).metadata
+        assert metadata["raw_keywords"] == ["a", "b", "c", "d"]
         # ``updated:`` was bumped to today as part of the existing contract.
-        assert f"updated: {date.today().isoformat()}" in text
+        assert metadata["updated"] == date.today().isoformat()
         # Body append still works.
         assert "## addendum" in text and "original" in text
 
@@ -4503,7 +4524,7 @@ class TestApplyRawKeywordsPatch:
             isolated_wiki,
             "misc/y.md",
             # Scalar instead of list — broken shape.
-            "---\ntitle: Y\nupdated: 2026-01-01\nraw_keywords: oops\n---\nbody\n",
+            "---\ntitle: Y\nupdated: 2026-01-01\nstatus: stable\ntype: knowledge\nraw_keywords: oops\n---\nbody\n",
         )
         ops = [
             {
@@ -4515,7 +4536,10 @@ class TestApplyRawKeywordsPatch:
         ]
         _apply_operations(ops)
         text = (isolated_wiki / "pages" / "misc" / "y.md").read_text()
-        assert "raw_keywords: [clean1, clean2]" in text
+        assert parse_document(text.encode()).metadata["raw_keywords"] == [
+            "clean1",
+            "clean2",
+        ]
 
     def test_update_without_raw_keywords_leaves_existing_intact(
         self, isolated_wiki: Path
@@ -4525,7 +4549,7 @@ class TestApplyRawKeywordsPatch:
         _seed_page(
             isolated_wiki,
             "misc/z.md",
-            "---\ntitle: Z\nupdated: 2026-01-01\nraw_keywords: [keep, me]\n---\nbody\n",
+            "---\ntitle: Z\nupdated: 2026-01-01\nstatus: stable\ntype: knowledge\nraw_keywords: [keep, me]\n---\nbody\n",
         )
         ops = [
             {
@@ -4536,7 +4560,7 @@ class TestApplyRawKeywordsPatch:
         ]
         _apply_operations(ops)
         text = (isolated_wiki / "pages" / "misc" / "z.md").read_text()
-        assert "raw_keywords: [keep, me]" in text
+        assert parse_document(text.encode()).metadata["raw_keywords"] == ["keep", "me"]
 
     def test_write_phase_rollback_restores_pre_batch_text(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
@@ -4545,9 +4569,7 @@ class TestApplyRawKeywordsPatch:
         rollback path restores the on-disk text as it was BEFORE the
         batch ran, not as it was after the in-memory raw_keywords patch.
         """
-        original = (
-            "---\ntitle: A\nupdated: 2026-01-01\nraw_keywords: [old]\n---\nbody\n"
-        )
+        original = "---\ntitle: A\nupdated: 2026-01-01\nstatus: stable\ntype: knowledge\nraw_keywords: [old]\n---\nbody\n"
         path_a = _seed_page(isolated_wiki, "misc/a.md", original)
 
         # Make atomic_write fail on the SECOND op so the first op's write
@@ -4575,7 +4597,7 @@ class TestApplyRawKeywordsPatch:
             {
                 "type": "create",
                 "filename": "misc/never.md",
-                "content": "---\ntitle: N\nupdated: 2026-04-28\n---\nbody",
+                "content": "---\ntitle: N\nupdated: 2026-04-28\nstatus: stable\ntype: knowledge\n---\nbody",
                 "raw_keywords": ["nope"],
             },
         ]
@@ -4633,12 +4655,12 @@ class TestSafeResolvePagePath:
         good = {
             "type": "create",
             "filename": "ok/safe.md",
-            "content": "---\ntitle: T\nupdated: 2026-04-28\n---\nbody",
+            "content": "---\ntitle: T\nupdated: 2026-04-28\nstatus: stable\ntype: knowledge\n---\nbody",
         }
         evil = {
             "type": "create",
             "filename": "../../tmp/escape.md",
-            "content": "---\ntitle: E\nupdated: 2026-04-28\n---\nx",
+            "content": "---\ntitle: E\nupdated: 2026-04-28\nstatus: stable\ntype: knowledge\n---\nx",
         }
         with pytest.raises(IngestApplyError, match="parent-traversal"):
             _apply_operations([good, evil])
@@ -4658,25 +4680,22 @@ class TestUpdatePartialFrontmatter:
         # remove it, so the contract demands we reject rather than append.
         out = _extract_page_body(
             "=== UPDATE PAGE: foo.md ===\n"
-            "---\ntitle: X\nupdated: 2026-04-28\n"
+            "---\ntitle: X\nupdated: 2026-04-28\nstatus: stable\ntype: knowledge\n"
             "extra body but no closing fence\n"
             "=== END PAGE ===",
             op_type="update",
         )
         assert out is None
 
-    def test_closed_frontmatter_then_body_in_update(self) -> None:
-        # Closed FM followed by real body → strip the FM, keep the body.
+    def test_closed_frontmatter_then_body_in_update_is_rejected(self) -> None:
         out = _extract_page_body(
             "=== UPDATE PAGE: foo.md ===\n"
-            "---\ntitle: X\nupdated: 2026-04-28\n---\n"
+            "---\ntitle: X\nupdated: 2026-04-28\nstatus: stable\ntype: knowledge\n---\n"
             "## section\nnotes\n"
             "=== END PAGE ===",
             op_type="update",
         )
-        assert out is not None
-        assert "title:" not in out
-        assert "## section" in out
+        assert out is None
 
 
 # ---------------------------------------------------------------------------
@@ -4690,13 +4709,17 @@ class TestUnclosedFence:
         # after the opener must be treated as code so we don't eat
         # `data[[1]]` -> `data1`.
         text = (
-            "intro [[foo]] mid\n```python\nx = data[[1]]\ny = also[[2]]\n"
+            "intro [Foo](foo.md) mid\n```python\nx = data[[1]]\ny = also[[2]]\n"
             # NOTE: no closing fence
         )
-        out, stats = _reconcile_links(text, {"foo"})
+        out, stats = _reconcile_links(
+            text,
+            {("pages", "memory/foo.md")},
+            source_path="memory/source.md",
+        )
         assert "x = data[[1]]" in out
         assert "y = also[[2]]" in out
-        assert "[[foo]]" in out
+        assert "[Foo](foo.md)" in out
         assert stats["resolved"] == 1
         assert stats["unwrapped"] == 0
 
@@ -4806,7 +4829,7 @@ class TestRunIngestPartialFailure:
                 "type": "create",
                 "filename": op["filename"],
                 "content": (
-                    "---\ntitle: Reviewer control failure\nupdated: 2026-07-14\n"
+                    "---\ntitle: Reviewer control failure\nupdated: 2026-07-14\nstatus: stable\ntype: knowledge\n"
                     "---\nbody\n"
                 ),
             }
@@ -4876,7 +4899,7 @@ class TestRunIngestPartialFailure:
                 "type": "create",
                 "filename": op["filename"],
                 "content": (
-                    "---\ntitle: Semantic no quorum\nupdated: 2026-07-14\n---\nbody\n"
+                    "---\ntitle: Semantic no quorum\nupdated: 2026-07-14\nstatus: stable\ntype: knowledge\n---\nbody\n"
                 ),
             }
 
@@ -4990,7 +5013,9 @@ class TestRunIngestPartialFailure:
             lambda op, _raw, **_kwargs: {
                 "type": "create",
                 "filename": op["filename"],
-                "content": ("---\ntitle: ACK Boundary\nupdated: 2026-07-14\n---\nbody"),
+                "content": (
+                    "---\ntitle: ACK Boundary\nupdated: 2026-07-14\nstatus: stable\ntype: knowledge\n---\nbody"
+                ),
             },
         )
         monkeypatch.setattr(ingest, "is_available", lambda: True)
@@ -5148,7 +5173,9 @@ class TestRunIngestPartialFailure:
             return {
                 "type": "create",
                 "filename": op["filename"],
-                "content": ("---\ntitle: X\nupdated: 2026-04-28\n---\nbody"),
+                "content": (
+                    "---\ntitle: X\nupdated: 2026-04-28\nstatus: stable\ntype: knowledge\n---\nbody"
+                ),
             }
 
         monkeypatch.setattr(ingest, "_generate_one", fake_generate)
@@ -5218,7 +5245,7 @@ class TestRunIngestPartialFailure:
             return {
                 "type": "create",
                 "filename": fname,
-                "content": "---\ntitle: X\nupdated: 2026-04-28\n---\nbody",
+                "content": "---\ntitle: X\nupdated: 2026-04-28\nstatus: stable\ntype: knowledge\n---\nbody",
             }
 
         monkeypatch.setattr(ingest, "_generate_one", flaky_generate)
@@ -5322,7 +5349,7 @@ class TestRunIngestPartialFailure:
                 "content": (
                     "---\n"
                     "title: Career Transition Strategy 2026\n"
-                    "updated: 2026-06-23\n"
+                    "updated: 2026-06-23\nstatus: stable\ntype: knowledge\n"
                     "tags: [d/personal-strategy, t/analysis, s/2026]\n"
                     "---\n"
                     "body"
@@ -5352,10 +5379,7 @@ class TestRunIngestPartialFailure:
         assert finished.pages_updated == []
         assert on_complete_called == [True]
         assert (
-            isolated_wiki
-            / "pages"
-            / "career"
-            / "career-transition-strategy-2026.md"
+            isolated_wiki / "pages" / "career" / "career-transition-strategy-2026.md"
         ).exists()
 
     def test_failure_packet_missing_update_target_becomes_create(
@@ -5382,7 +5406,7 @@ class TestRunIngestPartialFailure:
                 "content": (
                     "---\n"
                     "title: Claude Code Vs Claude Code Structural Analysis\n"
-                    "updated: 2026-06-28\n"
+                    "updated: 2026-06-28\nstatus: stable\ntype: knowledge\n"
                     "tags: [d/ai-tools, t/analysis, s/2026]\n"
                     "---\n"
                     "body"
@@ -5426,10 +5450,11 @@ class TestRunIngestPartialFailure:
             / "claude-code-vs-claude-code-structural-analysis.md"
         )
         assert page.exists()
-        assert (
-            'raw_keywords: ["Claude Code", Cursor, "Mac Studio"]'
-            in page.read_text()
-        )
+        assert parse_document(page.read_bytes()).metadata["raw_keywords"] == [
+            "Claude Code",
+            "Cursor",
+            "Mac Studio",
+        ]
 
 
 class TestRunIngestFrontierDisposition:
@@ -5461,7 +5486,7 @@ class TestRunIngestFrontierDisposition:
                 "type": "create",
                 "filename": op["filename"],
                 "content": (
-                    "---\ntitle: Observed tools\nupdated: 2026-07-11\n---\n"
+                    "---\ntitle: Observed tools\nupdated: 2026-07-11\nstatus: stable\ntype: knowledge\n---\n"
                     "Tool A was visible but failed and should not be used.\n"
                 ),
             },
@@ -5469,7 +5494,7 @@ class TestRunIngestFrontierDisposition:
         monkeypatch.setattr(ingest, "is_available", lambda: True)
         reviews: list[dict] = []
         replacement = (
-            "---\ntitle: Observed tools\nupdated: 2026-07-11\n---\n"
+            "---\ntitle: Observed tools\nupdated: 2026-07-11\nstatus: stable\ntype: knowledge\n---\n"
             "Tool A was visible. Tool B was confirmed responsive.\n"
         )
 
@@ -5538,7 +5563,7 @@ class TestRunIngestFrontierDisposition:
                 "type": "create",
                 "filename": op["filename"],
                 "content": (
-                    "---\ntitle: Workflow note\nupdated: 2026-07-11\n"
+                    "---\ntitle: Workflow note\nupdated: 2026-07-11\nstatus: stable\ntype: knowledge\n"
                     "tags: [d/ai-tools, d/finance, t/howto, s/2026]\n---\n"
                     "Grounded workflow fact.\n"
                 ),
@@ -5559,9 +5584,10 @@ class TestRunIngestFrontierDisposition:
                     "replacement_operations": [
                         {
                             "filename": "memory/workflow-note.md",
-                            "content": proposed.replace(
-                                "d/ai-tools, d/finance", "d/ai-tools"
-                            ),
+                            "content": patch_document_metadata(
+                                proposed.encode("utf-8"),
+                                {"tags": ["d/ai-tools", "t/howto", "s/2026"]},
+                            ).decode("utf-8"),
                         }
                     ],
                 }
@@ -5752,7 +5778,7 @@ class TestRunIngestFrontierDisposition:
                 "type": "create",
                 "filename": op["filename"],
                 "content": (
-                    "---\ntitle: Socialization scenario\nupdated: 2026-07-11\n"
+                    "---\ntitle: Socialization scenario\nupdated: 2026-07-11\nstatus: stable\ntype: knowledge\n"
                     "tags: [d/scenario, t/ai-socialization]\n---\n"
                     "Grounded fact plus unsupported claim.\n"
                 ),
@@ -5773,7 +5799,7 @@ class TestRunIngestFrontierDisposition:
                         {
                             "filename": "ai/socialization-scenario.md",
                             "content": (
-                                "---\ntitle: Socialization scenario\nupdated: 2026-07-11\n"
+                                "---\ntitle: Socialization scenario\nupdated: 2026-07-11\nstatus: stable\ntype: knowledge\n"
                                 "tags: [d/scenario, t/ai-socialization]\n---\n"
                                 "Grounded fact.\n"
                             ),
@@ -5839,7 +5865,10 @@ class TestRunIngestFrontierDisposition:
             return {
                 "type": op["type"],
                 "filename": op["filename"],
-                "content": ("---\ntitle: Converged\nupdated: 2026-07-11\n---\n" + fact),
+                "content": (
+                    "---\ntitle: Converged\nupdated: 2026-07-11\nstatus: stable\ntype: knowledge\n---\n"
+                    + fact
+                ),
             }
 
         reviews: list[dict] = []
@@ -6056,7 +6085,7 @@ class TestRunIngestFrontierDisposition:
             return {
                 "type": "create",
                 "filename": op["filename"],
-                "content": "---\ntitle: Ready\nupdated: 2026-07-11\n---\nready\n",
+                "content": "---\ntitle: Ready\nupdated: 2026-07-11\nstatus: stable\ntype: knowledge\n---\nready\n",
             }
 
         monkeypatch.setattr(ingest, "_generate_one", generate)
@@ -6096,7 +6125,7 @@ class TestRunIngestFrontierDisposition:
             lambda op, _raw, **_kwargs: {
                 "type": "create",
                 "filename": op["filename"],
-                "content": "---\ntitle: Ready\nupdated: 2026-07-11\n---\nready\n",
+                "content": "---\ntitle: Ready\nupdated: 2026-07-11\nstatus: stable\ntype: knowledge\n---\nready\n",
             },
         )
         monkeypatch.setattr(ingest, "is_available", lambda: True)
@@ -6139,7 +6168,7 @@ class TestRunIngestFrontierDisposition:
                 "type": "create",
                 "filename": op["filename"],
                 "content": (
-                    f"---\ntitle: {title}\nupdated: 2026-07-11\n---\n{title}\n"
+                    f"---\ntitle: {title}\nupdated: 2026-07-11\nstatus: stable\ntype: knowledge\n---\n{title}\n"
                 ),
             }
 
@@ -6215,7 +6244,7 @@ class TestRawKeywordsMetadataPropagation:
             return {
                 "type": "create",
                 "filename": op["filename"],
-                "content": "---\ntitle: X\nupdated: 2026-04-28\n---\nbody",
+                "content": "---\ntitle: X\nupdated: 2026-04-28\nstatus: stable\ntype: knowledge\n---\nbody",
             }
 
         monkeypatch.setattr(ingest, "_generate_one", stub_generate)
@@ -6247,7 +6276,7 @@ class TestRawKeywordsMetadataPropagation:
             "generate",
             lambda *_a, **_kw: (
                 "=== NEW PAGE: misc/p0.md ===\n"
-                "---\ntitle: P\nupdated: 2026-04-28\n---\nbody\n"
+                "---\ntitle: P\nupdated: 2026-04-28\nstatus: stable\ntype: knowledge\n---\nbody\n"
                 "=== END PAGE ==="
             ),
         )
@@ -6270,7 +6299,7 @@ class TestRawKeywordsMetadataPropagation:
             "generate",
             lambda *_a, **_kw: (
                 "=== NEW PAGE: misc/p0.md ===\n"
-                "---\ntitle: P\nupdated: 2026-04-28\n---\nbody\n"
+                "---\ntitle: P\nupdated: 2026-04-28\nstatus: stable\ntype: knowledge\n---\nbody\n"
                 "=== END PAGE ==="
             ),
         )
@@ -6299,7 +6328,7 @@ class TestRawKeywordsMetadataPropagation:
             return {
                 "type": "create",
                 "filename": op["filename"],
-                "content": "---\ntitle: X\nupdated: 2026-04-28\n---\nbody",
+                "content": "---\ntitle: X\nupdated: 2026-04-28\nstatus: stable\ntype: knowledge\n---\nbody",
             }
 
         monkeypatch.setattr(ingest, "_generate_one", stub_generate)
@@ -7042,7 +7071,9 @@ class TestOrchestrator:
             "project_reassembled_raws",
             fail_projection,
         )
-        monkeypatch.setattr(background_jobs, "start_self_heal_background", lambda _path: None)
+        monkeypatch.setattr(
+            background_jobs, "start_self_heal_background", lambda _path: None
+        )
 
         result = orchestrator.run_pending_ingest(force=True)
         second = orchestrator.run_pending_ingest(force=True)
@@ -7532,9 +7563,7 @@ class TestOrchestrator:
         assert [path.name for path in orchestrator.get_pending_raw_files()] == [
             raw_path.name
         ]
-        assert not (
-            isolated_wiki / "runtime" / "failures" / "state.json"
-        ).exists()
+        assert not (isolated_wiki / "runtime" / "failures" / "state.json").exists()
         status = runtime_status.read_status()
         assert status["state"] == "blocked"
         assert status["stage"] == "decision-authority"
@@ -7814,7 +7843,7 @@ class TestPerRawOrchestrator:
         page_body = (
             "---\n"
             f"title: {page_id}\n"
-            "updated: 2026-07-14\n"
+            "updated: 2026-07-14\nstatus: stable\ntype: knowledge\n"
             "---\n"
             "durable postimage before ACK\n"
         )
@@ -7945,7 +7974,7 @@ class TestPerRawOrchestrator:
         # processed-state mark is lost afterward, its ACK-only replay must not
         # restore the older postimage or run a model.
         later_body = (
-            "---\ntitle: pretriage-recovery\nupdated: 2026-07-15\n---\n"
+            "---\ntitle: pretriage-recovery\nupdated: 2026-07-15\nstatus: stable\ntype: knowledge\n---\n"
             "newer same-page update\n"
         )
         page_path.write_text(later_body, encoding="utf-8")
@@ -8138,7 +8167,9 @@ class TestPerRawOrchestrator:
         raw_path = isolated_wiki / "raw" / f"ack-{corruption}.md"
         raw_path.write_text("original source", encoding="utf-8")
         calls = self._install_single_page_ingest(monkeypatch, isolated_wiki)
-        monkeypatch.setattr(background_jobs, "start_self_heal_background", lambda _path: None)
+        monkeypatch.setattr(
+            background_jobs, "start_self_heal_background", lambda _path: None
+        )
         completed = orchestrator.run_pending_ingest(force=True)
         assert completed["files_processed"] == [raw_path.name]
 
@@ -8180,7 +8211,9 @@ class TestPerRawOrchestrator:
         raw_path = isolated_wiki / "raw" / "ack-publish-failure.md"
         raw_path.write_text("source survives", encoding="utf-8")
         calls = self._install_single_page_ingest(monkeypatch, isolated_wiki)
-        monkeypatch.setattr(background_jobs, "start_self_heal_background", lambda _path: None)
+        monkeypatch.setattr(
+            background_jobs, "start_self_heal_background", lambda _path: None
+        )
         monkeypatch.setattr(
             raw_completion_ack,
             "atomic_write",
@@ -8407,7 +8440,7 @@ class TestPerRawOrchestrator:
         _seed_page(
             isolated_wiki,
             "ai/opus-4.7-evaluation-and-industry-geopolitics.md",
-            "---\ntitle: Opus\nupdated: 2026-01-01\n---\nold",
+            "---\ntitle: Opus\nupdated: 2026-01-01\nstatus: stable\ntype: knowledge\n---\nold",
         )
 
         def fake_run_ingest(
@@ -8455,7 +8488,9 @@ class TestPerRawOrchestrator:
         raw_path = isolated_wiki / "raw" / "frontier-loop.md"
         raw_path.write_text("grounded source", encoding="utf-8")
         started: list[Path] = []
-        monkeypatch.setattr(background_jobs, "start_self_heal_background", started.append)
+        monkeypatch.setattr(
+            background_jobs, "start_self_heal_background", started.append
+        )
 
         result = failure_supervisor.record_raw_failure(
             raw_path=raw_path,
@@ -8484,7 +8519,9 @@ class TestPerRawOrchestrator:
         raw_path = isolated_wiki / "raw" / "local-consensus-loop.md"
         raw_path.write_text("grounded source", encoding="utf-8")
         started: list[Path] = []
-        monkeypatch.setattr(background_jobs, "start_self_heal_background", started.append)
+        monkeypatch.setattr(
+            background_jobs, "start_self_heal_background", started.append
+        )
 
         result = failure_supervisor.record_raw_failure(
             raw_path=raw_path,
@@ -8515,7 +8552,9 @@ class TestPerRawOrchestrator:
         first_raw.write_text("first grounded source", encoding="utf-8")
         second_raw.write_text("second grounded source", encoding="utf-8")
         started: list[Path] = []
-        monkeypatch.setattr(background_jobs, "start_self_heal_background", started.append)
+        monkeypatch.setattr(
+            background_jobs, "start_self_heal_background", started.append
+        )
         error = (
             "local consensus authority unavailable: "
             "adoption_artifact_invalid:evaluation evidence is inconsistent"
@@ -8576,7 +8615,9 @@ class TestPerRawOrchestrator:
 
         raw_path = isolated_wiki / "raw" / "authority-recovered.md"
         raw_path.write_text("grounded source", encoding="utf-8")
-        monkeypatch.setattr(background_jobs, "start_self_heal_background", lambda _path: None)
+        monkeypatch.setattr(
+            background_jobs, "start_self_heal_background", lambda _path: None
+        )
 
         result = failure_supervisor.record_raw_failure(
             raw_path=raw_path,
@@ -8649,7 +8690,9 @@ class TestPerRawOrchestrator:
         raw_path = isolated_wiki / "raw" / "generation-contract.md"
         raw_path.write_text("grounded source", encoding="utf-8")
         started: list[Path] = []
-        monkeypatch.setattr(background_jobs, "start_self_heal_background", started.append)
+        monkeypatch.setattr(
+            background_jobs, "start_self_heal_background", started.append
+        )
 
         result = failure_supervisor.record_raw_failure(
             raw_path=raw_path,
@@ -8678,7 +8721,9 @@ class TestPerRawOrchestrator:
         raw_path = isolated_wiki / "raw" / "generation-transport.md"
         raw_path.write_text("grounded source", encoding="utf-8")
         started: list[Path] = []
-        monkeypatch.setattr(background_jobs, "start_self_heal_background", started.append)
+        monkeypatch.setattr(
+            background_jobs, "start_self_heal_background", started.append
+        )
 
         result = failure_supervisor.record_raw_failure(
             raw_path=raw_path,
@@ -8886,7 +8931,9 @@ class TestPerRawOrchestrator:
         raw_path = isolated_wiki / "raw" / "large.md"
         raw_path.write_text("large source", encoding="utf-8")
         started: list[Path] = []
-        monkeypatch.setattr(background_jobs, "start_self_heal_background", started.append)
+        monkeypatch.setattr(
+            background_jobs, "start_self_heal_background", started.append
+        )
 
         first = failure_supervisor.record_raw_failure(
             raw_path=raw_path,
@@ -8940,7 +8987,9 @@ class TestPerRawOrchestrator:
         first_raw.write_text("first source", encoding="utf-8")
         second_raw.write_text("second source", encoding="utf-8")
         started: list[Path] = []
-        monkeypatch.setattr(background_jobs, "start_self_heal_background", started.append)
+        monkeypatch.setattr(
+            background_jobs, "start_self_heal_background", started.append
+        )
         error = "triage structured failure [schema_invalid]: malformed schema"
 
         first = failure_supervisor.record_raw_failure(
@@ -9054,7 +9103,9 @@ class TestPerRawOrchestrator:
 
         monkeypatch.setattr(ingest_mod, "run_ingest", run_ingest)
         monkeypatch.setattr(orchestrator, "is_available", lambda: True)
-        monkeypatch.setattr(background_jobs, "start_self_heal_background", lambda _path: None)
+        monkeypatch.setattr(
+            background_jobs, "start_self_heal_background", lambda _path: None
+        )
 
         first = orchestrator.run_pending_ingest(force=True)
         second = orchestrator.run_pending_ingest(force=True)
@@ -9107,7 +9158,9 @@ class TestPerRawOrchestrator:
         raw_path = isolated_wiki / "raw" / "still-broken.md"
         raw_path.write_text("valid source", encoding="utf-8")
         started: list[Path] = []
-        monkeypatch.setattr(background_jobs, "start_self_heal_background", started.append)
+        monkeypatch.setattr(
+            background_jobs, "start_self_heal_background", started.append
+        )
         error = "triage structured failure [schema_invalid]: malformed schema"
 
         first = failure_supervisor.record_raw_failure(
@@ -9155,7 +9208,9 @@ class TestPerRawOrchestrator:
         )
         child = projection.child_paths[0]
         orchestrator.mark_raw_processed([parent.name])
-        monkeypatch.setattr(background_jobs, "start_self_heal_background", lambda _path: None)
+        monkeypatch.setattr(
+            background_jobs, "start_self_heal_background", lambda _path: None
+        )
 
         recorded = failure_supervisor.record_raw_failure(
             raw_path=child,
@@ -9216,7 +9271,9 @@ class TestPerRawOrchestrator:
         child = projection.child_paths[0]
         orchestrator.mark_raw_processed([parent.name])
         child.write_text("tampered derived artifact", encoding="utf-8")
-        monkeypatch.setattr(background_jobs, "start_self_heal_background", lambda _path: None)
+        monkeypatch.setattr(
+            background_jobs, "start_self_heal_background", lambda _path: None
+        )
         monkeypatch.setattr(orchestrator, "is_available", lambda: True)
         monkeypatch.setattr(
             ingest_mod,
@@ -9257,7 +9314,9 @@ class TestPerRawOrchestrator:
             output_dir=isolated_wiki / "raw",
             max_child_bytes=24_000,
         )
-        monkeypatch.setattr(background_jobs, "start_self_heal_background", lambda _path: None)
+        monkeypatch.setattr(
+            background_jobs, "start_self_heal_background", lambda _path: None
+        )
         recorded = failure_supervisor.record_raw_failure(
             raw_path=parent,
             error=(
@@ -9304,7 +9363,9 @@ class TestPerRawOrchestrator:
                 output_dir=isolated_wiki / "raw",
                 max_child_bytes=1_400,
             )
-        monkeypatch.setattr(background_jobs, "start_self_heal_background", lambda _path: None)
+        monkeypatch.setattr(
+            background_jobs, "start_self_heal_background", lambda _path: None
+        )
         failure_supervisor.record_raw_failure(
             raw_path=parent,
             error=(
@@ -9388,7 +9449,9 @@ class TestPerRawOrchestrator:
 
         parent = isolated_wiki / "raw" / "no-manifest-parent.md"
         parent.write_text("valid source with no projection intent", encoding="utf-8")
-        monkeypatch.setattr(background_jobs, "start_self_heal_background", lambda _path: None)
+        monkeypatch.setattr(
+            background_jobs, "start_self_heal_background", lambda _path: None
+        )
         failure_supervisor.record_raw_failure(
             raw_path=parent,
             error=(
@@ -9493,7 +9556,9 @@ class TestPerRawOrchestrator:
 
         raw_path = isolated_wiki / "raw" / "deferred.md"
         raw_path.write_text("valid source", encoding="utf-8")
-        monkeypatch.setattr(background_jobs, "start_self_heal_background", lambda _path: None)
+        monkeypatch.setattr(
+            background_jobs, "start_self_heal_background", lambda _path: None
+        )
         result = failure_supervisor.record_raw_failure(
             raw_path=raw_path,
             error="triage structured failure [schema_invalid]: malformed schema",
@@ -9580,7 +9645,7 @@ class TestPhase6Compatibility:
             lambda _op, _raw, **_kw: {
                 "type": "create",
                 "filename": "misc/p.md",
-                "content": "---\ntitle: P\nupdated: 2026-04-28\n---\nbody",
+                "content": "---\ntitle: P\nupdated: 2026-04-28\nstatus: stable\ntype: knowledge\n---\nbody",
             },
         )
         monkeypatch.setattr(ingest, "is_available", lambda: True)
@@ -9639,7 +9704,7 @@ class TestPhase6Compatibility:
             return {
                 "type": "create",
                 "filename": op["filename"],
-                "content": "---\ntitle: P\nupdated: 2026-04-28\n---\nbody",
+                "content": "---\ntitle: P\nupdated: 2026-04-28\nstatus: stable\ntype: knowledge\n---\nbody",
             }
 
         monkeypatch.setattr(ingest, "_generate_one", stub_generate)
@@ -9672,7 +9737,7 @@ class TestSearchBeforeCreate:
             "work/workplace-stress-and-mentoring.md",
             "---\n"
             "title: Workplace Stress and Mentoring\n"
-            "updated: 2026-07-01\n"
+            "updated: 2026-07-01\nstatus: stable\ntype: knowledge\n"
             "tags: [d/career, t/analysis, s/2026]\n"
             "---\n"
             "Existing body.\n",
@@ -9845,8 +9910,12 @@ class TestReadBackVerification:
 
         monkeypatch.setattr(ingest, "_rebuild_index", lambda: fail("index"))
         monkeypatch.setattr(index_store, "get_store", lambda: Store())
-        monkeypatch.setattr(search, "update_embeddings", lambda **_kwargs: fail("semantic"))
-        monkeypatch.setattr(claims, "append_page_claims", lambda *_a, **_k: fail("claims"))
+        monkeypatch.setattr(
+            search, "update_embeddings", lambda **_kwargs: fail("semantic")
+        )
+        monkeypatch.setattr(
+            claims, "append_page_claims", lambda *_a, **_k: fail("claims")
+        )
         monkeypatch.setattr(
             state_register,
             "refresh_state_register",
@@ -9963,7 +10032,7 @@ class TestTriagePlanSchema:
         _seed_page(
             isolated_wiki,
             "ai/existing.md",
-            "---\ntitle: Existing\nupdated: 2026-07-18\n---\nbody\n",
+            "---\ntitle: Existing\nupdated: 2026-07-18\nstatus: stable\ntype: knowledge\n---\nbody\n",
         )
         invalid = {
             "type": "create",
@@ -10377,7 +10446,7 @@ class TestTriagePlanSchema:
         _seed_page(
             isolated_wiki,
             "bounded.md",
-            "---\ntitle: Bounded\nupdated: 2026-01-01\n---\nExisting body.",
+            "---\ntitle: Bounded\nupdated: 2026-01-01\nstatus: stable\ntype: knowledge\n---\nExisting body.",
         )
 
         invalid = [
@@ -10436,7 +10505,7 @@ class TestTriagePlanSchema:
         _seed_page(
             isolated_wiki,
             "career-transition-strategy-2026.md",
-            "---\ntitle: Career\nupdated: 2026-01-01\n---\nold",
+            "---\ntitle: Career\nupdated: 2026-01-01\nstatus: stable\ntype: knowledge\n---\nold",
         )
         plan = [
             {
@@ -11043,7 +11112,7 @@ class TestPageGenerationBudget:
         invalid_two = "=== NEW PAGE: memory/adaptive.md ===\nstill invalid"
         valid = (
             "=== NEW PAGE: memory/adaptive.md ===\n"
-            "---\ntitle: Adaptive\nupdated: 2026-07-14\n---\nbody\n"
+            "---\ntitle: Adaptive\nupdated: 2026-07-14\nstatus: stable\ntype: knowledge\n---\nbody\n"
             "=== END PAGE ==="
         )
         responses = iter([invalid_one, invalid_two, valid])
@@ -11101,7 +11170,7 @@ class TestOversizedAppendOnlyUpdateContext:
         from chronovisor.ingest import ingest
 
         page = (
-            "---\ntitle: Existing\nupdated: 2026-01-01\n---\n"
+            "---\ntitle: Existing\nupdated: 2026-01-01\nstatus: stable\ntype: knowledge\n---\n"
             "# Alpha\nalpha start\n"
             "```python\n## not-a-heading\nprint('still alpha')\n"
             "``` trailing text\n## still-inside-fence\n```\n"
@@ -11134,7 +11203,7 @@ class TestOversizedAppendOnlyUpdateContext:
         from chronovisor.ingest import ingest
 
         page_text = (
-            "---\ntitle: Existing\nupdated: 2026-01-01\n---\n"
+            "---\ntitle: Existing\nupdated: 2026-01-01\nstatus: stable\ntype: knowledge\n---\n"
             "# Unrelated\nother material\n"
             "```text\n## fenced heading\n```\n"
             "## Product value\nproduct value structure evidence\ncomplete tail\n"
@@ -11199,7 +11268,7 @@ class TestOversizedAppendOnlyUpdateContext:
             isolated_wiki,
             "memory/oversized-relevant.md",
             (
-                "---\ntitle: Existing\nupdated: 2026-01-01\n---\n"
+                "---\ntitle: Existing\nupdated: 2026-01-01\nstatus: stable\ntype: knowledge\n---\n"
                 "# Unrelated\nsmall unrelated filler\n"
                 "## Needle evidence\nneedle evidence " + "x" * 256 + "\n"
             ),
@@ -11230,7 +11299,7 @@ class TestOversizedAppendOnlyUpdateContext:
             isolated_wiki,
             "memory/no-relevance.md",
             (
-                "---\ntitle: Existing\nupdated: 2026-01-01\n---\n"
+                "---\ntitle: Existing\nupdated: 2026-01-01\nstatus: stable\ntype: knowledge\n---\n"
                 "# Completely unrelated\nsmall filler\n"
             ),
         )
@@ -11256,7 +11325,7 @@ class TestOversizedAppendOnlyUpdateContext:
         from chronovisor.ingest import ingest
 
         page_text = (
-            "---\ntitle: Large outline\nupdated: 2026-01-01\n---\n"
+            "---\ntitle: Large outline\nupdated: 2026-01-01\nstatus: stable\ntype: knowledge\n---\n"
             "# Complete title section\n"
             + "".join(
                 f"## {index}. 完全な日本語見出し product value evidence {index}\n"
@@ -11297,7 +11366,7 @@ class TestOversizedAppendOnlyUpdateContext:
         from chronovisor.ingest import ingest
 
         page_text = (
-            "---\r\ntitle: Existing\r\nupdated: 2026-01-01\r\n"
+            "---\r\ntitle: Existing\r\nupdated: 2026-01-01\r\nstatus: stable\r\ntype: knowledge\r\n"
             "tags: [d/tools-config, t/reference, s/2026]\r\n---\r\n"
             "# Existing\r\nbody\r\n## Product value\r\nexact evidence\r\n"
         )
@@ -11350,17 +11419,14 @@ class TestOversizedAppendOnlyUpdateContext:
         from chronovisor.core.runtime_config import IngestConfig
         from chronovisor.ingest import ingest
 
-        section_prefix = (
-            "# Product value\nproduct value and performance evidence\n"
-        )
+        section_prefix = "# Product value\nproduct value and performance evidence\n"
         strongest_section = section_prefix + "x" * (
             12 * 1_024 - len(section_prefix.encode("utf-8"))
         )
         assert len(strongest_section.encode("utf-8")) == 12 * 1_024
         page_text = (
-            "---\ntitle: Interview Narrative\nupdated: 2026-01-01\n---\n"
-            "# Historical background\nOMITTED-FULL-PAGE-BODY\n"
-            + strongest_section
+            "---\ntitle: Interview Narrative\nupdated: 2026-01-01\nstatus: stable\ntype: knowledge\n---\n"
+            "# Historical background\nOMITTED-FULL-PAGE-BODY\n" + strongest_section
         )
         page_path = _seed_page(
             isolated_wiki,
@@ -11549,7 +11615,7 @@ class TestOversizedAppendOnlyUpdateContext:
         from chronovisor.ingest import ingest
 
         original = (
-            "---\r\ntitle: Existing\r\nupdated: 2026-01-01\r\n"
+            "---\r\ntitle: Existing\r\nupdated: 2026-01-01\r\nstatus: stable\r\ntype: knowledge\r\n"
             "tags: [d/tools-config, t/reference, s/2026]\r\n---\r\n"
             "# Existing\r\nbody\r\n"
         )
@@ -11584,7 +11650,7 @@ class TestOversizedAppendOnlyUpdateContext:
         from chronovisor.ingest import ingest
 
         original = (
-            "---\ntitle: Existing\nupdated: 2026-01-01\n"
+            "---\ntitle: Existing\nupdated: 2026-01-01\nstatus: stable\ntype: knowledge\n"
             "tags: [d/tools-config, t/reference, s/2026]\n---\n# Existing\nbody\n"
         )
         page_path = _seed_page(
@@ -11607,6 +11673,38 @@ class TestOversizedAppendOnlyUpdateContext:
         assert planned[0].previous_text == original
         assert "## Grounded append\nnew body" in planned[0].new_body
         assert page_path.read_text(encoding="utf-8") == original
+
+    def test_read_only_prepare_skips_namespace_reserved_markdown(
+        self,
+        isolated_wiki: Path,
+    ) -> None:
+        from chronovisor.ingest import ingest
+
+        original = "---\ntitle: Existing\nupdated: 2026-01-01\nstatus: stable\ntype: knowledge\n---\nbody\n"
+        _seed_page(isolated_wiki, "memory/existing.md", original)
+        for path in (
+            isolated_wiki / "pages" / "index.md",
+            isolated_wiki / "pages" / "log.md",
+            isolated_wiki / "pages" / "schema.md",
+            isolated_wiki / "system" / "index.md",
+            isolated_wiki / "system" / "log.md",
+        ):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("derived artifact without frontmatter\n", encoding="utf-8")
+
+        planned, _totals = ingest._prepare_operations(
+            [
+                {
+                    "type": "update",
+                    "filename": "memory/existing.md",
+                    "content": "## Grounded append\nnew body",
+                }
+            ],
+            read_only=True,
+        )
+
+        assert len(planned) == 1
+        assert planned[0].page_id == "existing"
 
     def test_compact_context_that_still_cannot_fit_defers(
         self,
@@ -11792,7 +11890,8 @@ class TestIngestContextAdmission:
         related = _seed_page(
             isolated_wiki,
             "memory/large-related.md",
-            "---\ntitle: Related\nupdated: 2026-01-01\n---\n" + "z" * 20000,
+            "---\ntitle: Related\nupdated: 2026-01-01\nstatus: stable\ntype: knowledge\n---\n"
+            + "z" * 20000,
         )
         captured: dict = {}
         monkeypatch.setattr(
@@ -11816,7 +11915,7 @@ class TestIngestContextAdmission:
             captured.update(kwargs)
             return (
                 "=== NEW PAGE: memory/new.md ===\n"
-                "---\ntitle: New\nupdated: 2026-01-01\n---\nbody\n"
+                "---\ntitle: New\nupdated: 2026-01-01\nstatus: stable\ntype: knowledge\n---\nbody\n"
                 "=== END PAGE ==="
             )
 
@@ -11846,7 +11945,7 @@ class TestIngestContextAdmission:
                 ollama.GenerateResponse(
                     content=(
                         "=== NEW PAGE: memory/new.md ===\n"
-                        "---\ntitle: New\nupdated: 2026-01-01\n---\nbody\n"
+                        "---\ntitle: New\nupdated: 2026-01-01\nstatus: stable\ntype: knowledge\n---\nbody\n"
                         "=== END PAGE ==="
                     ),
                     done=False,
@@ -11857,7 +11956,7 @@ class TestIngestContextAdmission:
                 ollama.GenerateResponse(
                     content=(
                         "=== NEW PAGE: memory/new.md ===\n"
-                        "---\ntitle: New\nupdated: 2026-01-01\n---\nbody\n"
+                        "---\ntitle: New\nupdated: 2026-01-01\nstatus: stable\ntype: knowledge\n---\nbody\n"
                         "=== END PAGE ==="
                     ),
                     done=False,
@@ -11912,7 +12011,7 @@ class TestIngestContextAdmission:
         target = _seed_page(
             isolated_wiki,
             "memory/new.md",
-            "---\ntitle: Existing\nupdated: 2026-01-01\n---\nexisting\n",
+            "---\ntitle: Existing\nupdated: 2026-01-01\nstatus: stable\ntype: knowledge\n---\nexisting\n",
         )
         preimage = target.read_bytes()
         valid = "=== UPDATE PAGE: memory/new.md ===\n## Added\n\nbody\n=== END PAGE ==="
@@ -11984,7 +12083,7 @@ class TestIngestContextAdmission:
         target = _seed_page(
             isolated_wiki,
             "memory/new.md",
-            "---\ntitle: Existing\nupdated: 2026-01-01\n---\nexisting\n",
+            "---\ntitle: Existing\nupdated: 2026-01-01\nstatus: stable\ntype: knowledge\n---\nexisting\n",
         )
         preimage = target.read_bytes()
         invalid = (
@@ -12138,12 +12237,14 @@ class TestIngestContextAdmission:
         target = _seed_page(
             isolated_wiki,
             "memory/target.md",
-            "---\ntitle: Target\nupdated: 2026-01-01\n---\n" + target_body,
+            "---\ntitle: Target\nupdated: 2026-01-01\nstatus: stable\ntype: knowledge\n---\n"
+            + target_body,
         )
         related = _seed_page(
             isolated_wiki,
             "memory/related.md",
-            "---\ntitle: Related\nupdated: 2026-01-01\n---\n" + "R" * 2_000,
+            "---\ntitle: Related\nupdated: 2026-01-01\nstatus: stable\ntype: knowledge\n---\n"
+            + "R" * 2_000,
         )
         monkeypatch.setattr(
             ingest,
@@ -12175,12 +12276,13 @@ class TestIngestContextAdmission:
         too_large = _seed_page(
             isolated_wiki,
             "memory/too-large.md",
-            "---\ntitle: Too large\nupdated: 2026-01-01\n---\n" + "L" * 1_000,
+            "---\ntitle: Too large\nupdated: 2026-01-01\nstatus: stable\ntype: knowledge\n---\n"
+            + "L" * 1_000,
         )
         complete = _seed_page(
             isolated_wiki,
             "memory/complete.md",
-            "---\ntitle: Complete\nupdated: 2026-01-01\n---\nsmall-body",
+            "---\ntitle: Complete\nupdated: 2026-01-01\nstatus: stable\ntype: knowledge\n---\nsmall-body",
         )
         monkeypatch.setattr(
             ingest,
@@ -12234,6 +12336,58 @@ class TestIngestContextAdmission:
 
 
 class TestRecallMetadataStructuredSession:
+    def test_page_metadata_preserves_nested_unknown_yaml_and_body_bytes(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from chronovisor.core.canonical_document import (
+            parse_document,
+            patch_document_metadata,
+        )
+        from chronovisor.ingest import ingest
+
+        original = (
+            "---\n"
+            "title: Chronovisor notes\n"
+            "updated: 2026-08-10\n"
+            "status: stable\n"
+            "type: knowledge\n"
+            "summary: Existing summary\n"
+            'recall_questions: ["What matters?"]\n'
+            "entities: [chronovisor]\n"
+            "unknown:\n"
+            "  nested:\n"
+            "  - key: value\n"
+            "    flags: [one, two]\n"
+            "---\n"
+            "Body\r\nCodex\r\n"
+        )
+
+        def canonical_parse(text: str):
+            document = parse_document(text.encode("utf-8"))
+            return document.metadata, document.body.decode("utf-8")
+
+        def canonical_patch(text: str, updates: dict[str, object]) -> str:
+            return patch_document_metadata(text.encode("utf-8"), updates).decode(
+                "utf-8"
+            )
+
+        monkeypatch.setattr(ingest, "extract_entities", lambda _text: ["codex"])
+
+        result = ingest._ensure_page_metadata_frontmatter(
+            original,
+            "chronovisor-notes",
+            canonical_parse,
+            canonical_patch,
+            allow_local_model=False,
+        )
+
+        document = parse_document(result.encode("utf-8"))
+        assert document.metadata["unknown"] == {
+            "nested": [{"key": "value", "flags": ["one", "two"]}]
+        }
+        assert document.metadata["entities"] == ["chronovisor", "codex"]
+        assert document.body == b"Body\r\nCodex\r\n"
+
     def test_live_metadata_reuses_larger_resident_context(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -12394,19 +12548,19 @@ class TestApplyPreparePhase:
         existing = isolated_wiki / "pages" / "a" / "blocking.md"
         existing.parent.mkdir(parents=True, exist_ok=True)
         existing.write_text(
-            "---\ntitle: existing\nupdated: 2026-01-01\n---\noriginal\n"
+            "---\ntitle: existing\nupdated: 2026-01-01\nstatus: stable\ntype: knowledge\n---\noriginal\n"
         )
 
         ops = [
             {
                 "type": "create",
                 "filename": "fresh/safe-page.md",
-                "content": "---\ntitle: Fresh\nupdated: 2026-04-28\n---\nbody",
+                "content": "---\ntitle: Fresh\nupdated: 2026-04-28\nstatus: stable\ntype: knowledge\n---\nbody",
             },
             {
                 "type": "create",
                 "filename": "other/blocking.md",  # different folder, same stem
-                "content": "---\ntitle: Dup\nupdated: 2026-04-28\n---\nx",
+                "content": "---\ntitle: Dup\nupdated: 2026-04-28\nstatus: stable\ntype: knowledge\n---\nx",
             },
         ]
         created, updated = _apply_operations(ops)
@@ -12424,12 +12578,12 @@ class TestApplyPreparePhase:
             {
                 "type": "create",
                 "filename": "a/dup.md",
-                "content": "---\ntitle: A\nupdated: 2026-04-28\n---\nbody1",
+                "content": "---\ntitle: A\nupdated: 2026-04-28\nstatus: stable\ntype: knowledge\n---\nbody1",
             },
             {
                 "type": "create",
                 "filename": "b/dup.md",
-                "content": "---\ntitle: B\nupdated: 2026-04-28\n---\nbody2",
+                "content": "---\ntitle: B\nupdated: 2026-04-28\nstatus: stable\ntype: knowledge\n---\nbody2",
             },
         ]
         with pytest.raises(IngestApplyError, match="duplicate page_id"):
@@ -12444,12 +12598,12 @@ class TestApplyPreparePhase:
     ) -> None:
         system_page = isolated_wiki / "system" / "lessons-learned.md"
         system_page.write_text(
-            "---\ntitle: System Lessons\nupdated: 2026-07-11\n---\ncanonical\n"
+            "---\ntitle: System Lessons\nupdated: 2026-07-11\nstatus: stable\ntype: knowledge\n---\ncanonical\n"
         )
         op = {
             "type": op_type,
             "filename": "generated/lessons-learned.md",
-            "content": "---\ntitle: Generated\nupdated: 2026-07-11\n---\nbody",
+            "content": "---\ntitle: Generated\nupdated: 2026-07-11\nstatus: stable\ntype: knowledge\n---\nbody",
         }
 
         with pytest.raises(IngestApplyError, match="reserved system page_id"):
@@ -12470,7 +12624,7 @@ class TestApplyPreparePhase:
         from chronovisor.ingest import ingest
 
         system_page = isolated_wiki / "system" / "lessons-learned.md"
-        canonical = "---\ntitle: System Lessons\nupdated: 2026-07-11\n---\ncanonical\n"
+        canonical = "---\ntitle: System Lessons\nupdated: 2026-07-11\nstatus: stable\ntype: knowledge\n---\ncanonical\n"
         system_page.write_text(canonical, encoding="utf-8")
         target = (
             isolated_wiki / "pages" / "generated" / "lessons-learned.md"
@@ -12480,7 +12634,9 @@ class TestApplyPreparePhase:
                 op_type="create",
                 path=target,
                 page_id="lessons-learned",
-                new_body=("---\ntitle: Generated\nupdated: 2026-07-11\n---\nunsafe\n"),
+                new_body=(
+                    "---\ntitle: Generated\nupdated: 2026-07-11\nstatus: stable\ntype: knowledge\n---\nunsafe\n"
+                ),
                 previous_text=None,
                 source_operation_index=0,
                 source_operation_type="create",
@@ -12542,7 +12698,9 @@ class TestApplyPreparePhase:
         # Seed a page so op[0] is a real update we can roll back.
         target = isolated_wiki / "pages" / "x" / "page.md"
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text("---\ntitle: X\nupdated: 2026-01-01\n---\noriginal body\n")
+        target.write_text(
+            "---\ntitle: X\nupdated: 2026-01-01\nstatus: stable\ntype: knowledge\n---\noriginal body\n"
+        )
         original = target.read_text()
 
         # First call: real write (the update succeeds). Second call: explode
@@ -12570,7 +12728,7 @@ class TestApplyPreparePhase:
             {
                 "type": "create",
                 "filename": "y/new.md",
-                "content": "---\ntitle: Y\nupdated: 2026-04-28\n---\nbody",
+                "content": "---\ntitle: Y\nupdated: 2026-04-28\nstatus: stable\ntype: knowledge\n---\nbody",
             },
         ]
         with pytest.raises(IngestApplyError, match="apply write failed"):
@@ -12587,12 +12745,14 @@ class TestApplyPreparePhase:
         existing page rather than writing a second logical duplicate."""
         existing = isolated_wiki / "pages" / "a" / "Foo.md"
         existing.parent.mkdir(parents=True, exist_ok=True)
-        existing.write_text("---\ntitle: cased\nupdated: 2026-01-01\n---\nbody\n")
+        existing.write_text(
+            "---\ntitle: cased\nupdated: 2026-01-01\nstatus: stable\ntype: knowledge\n---\nbody\n"
+        )
         ops = [
             {
                 "type": "create",
                 "filename": "b/foo.md",  # lowercase variant
-                "content": "---\ntitle: dup\nupdated: 2026-04-28\n---\nx",
+                "content": "---\ntitle: dup\nupdated: 2026-04-28\nstatus: stable\ntype: knowledge\n---\nx",
             }
         ]
         created, updated = _apply_operations(ops)
@@ -12907,8 +13067,10 @@ class TestLogFailuresDontBreakRollback:
 
         target = isolated_wiki / "pages" / "x" / "page.md"
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text("---\ntitle: X\nupdated: 2026-01-01\n---\noriginal\n")
-        correction = "---\ntitle: X\nupdated: 2026-07-11\n---\nfrontier correction\n"
+        target.write_text(
+            "---\ntitle: X\nupdated: 2026-01-01\nstatus: stable\ntype: knowledge\n---\noriginal\n"
+        )
+        correction = "---\ntitle: X\nupdated: 2026-07-11\nstatus: stable\ntype: knowledge\n---\nfrontier correction\n"
 
         @contextmanager
         def correction_wins_before_ingest_commit():
@@ -12940,7 +13102,9 @@ class TestLogFailuresDontBreakRollback:
         # Seed an existing page so op[0] becomes a real update we can roll back.
         target = isolated_wiki / "pages" / "x" / "page.md"
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text("---\ntitle: X\nupdated: 2026-01-01\n---\noriginal\n")
+        target.write_text(
+            "---\ntitle: X\nupdated: 2026-01-01\nstatus: stable\ntype: knowledge\n---\noriginal\n"
+        )
         original = target.read_text()
 
         # Make _append_log raise on every call: that used to mask the
@@ -12969,7 +13133,7 @@ class TestLogFailuresDontBreakRollback:
             {
                 "type": "create",
                 "filename": "y/new.md",
-                "content": "---\ntitle: Y\nupdated: 2026-04-28\n---\nbody",
+                "content": "---\ntitle: Y\nupdated: 2026-04-28\nstatus: stable\ntype: knowledge\n---\nbody",
             },
         ]
         with pytest.raises(IngestApplyError, match="apply write failed"):
@@ -12988,7 +13152,9 @@ class TestLogFailuresDontBreakRollback:
 
         target = isolated_wiki / "pages" / "x" / "page.md"
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text("---\ntitle: X\nupdated: 2026-01-01\n---\noriginal\n")
+        target.write_text(
+            "---\ntitle: X\nupdated: 2026-01-01\nstatus: stable\ntype: knowledge\n---\noriginal\n"
+        )
 
         real_write = link_fix.atomic_write
         n = {"calls": 0}
@@ -13001,7 +13167,7 @@ class TestLogFailuresDontBreakRollback:
                 real_write(path, content)
                 # Simulate a concurrent writer changing the file.
                 path.write_text(
-                    "---\ntitle: rogue\nupdated: 2026-04-28\n---\nrogue body\n"
+                    "---\ntitle: rogue\nupdated: 2026-04-28\nstatus: stable\ntype: knowledge\n---\nrogue body\n"
                 )
                 return
             if n["calls"] == 2:
@@ -13015,7 +13181,7 @@ class TestLogFailuresDontBreakRollback:
             {
                 "type": "create",
                 "filename": "y/new.md",
-                "content": "---\ntitle: Y\nupdated: 2026-04-28\n---\nbody",
+                "content": "---\ntitle: Y\nupdated: 2026-04-28\nstatus: stable\ntype: knowledge\n---\nbody",
             },
         ]
         with pytest.raises(IngestApplyError, match="apply write failed"):
@@ -13203,7 +13369,9 @@ class TestRebuildIndexNonFatal:
             lambda _op, _raw, **_kw: {
                 "type": "create",
                 "filename": "ai/foo.md",
-                "content": ("---\ntitle: Foo\nupdated: 2026-04-28\n---\nbody"),
+                "content": (
+                    "---\ntitle: Foo\nupdated: 2026-04-28\nstatus: stable\ntype: knowledge\n---\nbody"
+                ),
             },
         )
 
@@ -13256,7 +13424,9 @@ class TestRebuildIndexNonFatal:
             lambda _op, _raw, **_kw: {
                 "type": "create",
                 "filename": "ai/bar.md",
-                "content": ("---\ntitle: Bar\nupdated: 2026-04-28\n---\nbody"),
+                "content": (
+                    "---\ntitle: Bar\nupdated: 2026-04-28\nstatus: stable\ntype: knowledge\n---\nbody"
+                ),
             },
         )
 
@@ -13344,7 +13514,6 @@ class TestRawAllocationParallel:
         import threading
         from concurrent.futures import ThreadPoolExecutor
 
-
         monkeypatch.setattr(raw_record, "RAW_DIR", isolated_wiki / "raw")
 
         N = 50
@@ -13426,7 +13595,9 @@ class TestPostApplyLogSafety:
             lambda _op, _raw, **_kw: {
                 "type": "create",
                 "filename": "ai/baz.md",
-                "content": ("---\ntitle: Baz\nupdated: 2026-04-28\n---\nbody"),
+                "content": (
+                    "---\ntitle: Baz\nupdated: 2026-04-28\nstatus: stable\ntype: knowledge\n---\nbody"
+                ),
             },
         )
 
@@ -13513,7 +13684,7 @@ class TestWikiInit:
 
         for page_id in ("user-profile", "current-state", "lessons-learned"):
             (isolated_wiki / "system" / f"{page_id}.md").write_text(
-                f"---\ntitle: {page_id}\nupdated: 2026-04-28\n---\n"
+                f"---\ntitle: {page_id}\nupdated: 2026-04-28\nstatus: stable\ntype: knowledge\n---\n"
                 f"body for [[{page_id}]]\n"
             )
         (isolated_wiki / "raw" / "pending.md").write_text("raw")

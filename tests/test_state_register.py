@@ -45,7 +45,7 @@ def test_state_register_context_is_injected_for_codex(monkeypatch) -> None:
 def test_format_state_context_marks_stale_state(tmp_path: Path) -> None:
     path = tmp_path / "current-state.md"
     path.write_text(
-        "---\ntitle: Current State\nupdated: 2026-04-17\n---\n# Current State\n\nold body",
+        "---\ntitle: Current State\nupdated: 2026-04-17\nstatus: stable\n---\n# Current State\n\nold body",
         encoding="utf-8",
     )
 
@@ -66,7 +66,8 @@ def test_format_state_context_includes_only_allowlisted_core_memory(
         ("arbitrary-page", "must not be injected"),
     ):
         (tmp_path / f"{page_id}.md").write_text(
-            f"---\ntitle: {page_id}\nupdated: 2026-07-17\n---\n# {page_id}\n\n{body}",
+            f"---\ntitle: {page_id}\nupdated: 2026-07-17\nstatus: stable\n"
+            f"type: knowledge\n---\n# {page_id}\n\n{body}",
             encoding="utf-8",
         )
 
@@ -99,6 +100,9 @@ def test_refresh_state_register_writes_recent_pages(
                 "summary": "Summary",
                 "updated": "2026-07-06",
                 "page_type": "knowledge",
+                "status": "stable",
+                "namespace": "pages",
+                "relative_path": "memory/recent-page.md",
             }
 
         def all_pages_meta(self, include_system: bool = False):
@@ -110,7 +114,10 @@ def test_refresh_state_register_writes_recent_pages(
 
     assert payload["pages"] == ["recent-page"]
     assert payload["mutation"]["status"] == "applied"
-    assert "[[recent-page]]" in path.read_text(encoding="utf-8")
+    written = path.read_text(encoding="utf-8")
+    assert "[recent-page](</pages/memory/recent-page.md>)" in written
+    assert "description: Auto-maintained" in written
+    assert "summary:" not in written.split("---", 2)[1]
 
 
 def test_refresh_preserves_approved_current_state_correction(
@@ -124,8 +131,9 @@ def test_refresh_preserves_approved_current_state_correction(
     path = system / "current-state.md"
     path.write_text(
         "---\ntitle: Current State\nupdated: 2026-07-10\ntype: state\n"
-        "summary: Working memory.\n---\n# Current State\n\n"
-        "- [[machine]] — Machine (2026-07-10) — Installed RAM is 16GB.\n",
+        "status: stable\n"
+        "description: Working memory.\n---\n# Current State\n\n"
+        "- [machine](</pages/memory/machine.md>) — Machine (2026-07-10) — Installed RAM is 16GB.\n",
         encoding="utf-8",
     )
     monkeypatch.setattr(page_mutation, "PAGES_DIR", pages)
@@ -161,6 +169,9 @@ def test_refresh_preserves_approved_current_state_correction(
                 "summary": "Installed RAM is 16GB.",
                 "updated": "2026-07-10",
                 "page_type": "knowledge",
+                "status": "stable",
+                "namespace": "pages",
+                "relative_path": "memory/machine.md",
             }
 
         def all_pages_meta(self, include_system: bool = False):
@@ -174,7 +185,7 @@ def test_refresh_preserves_approved_current_state_correction(
     assert payload["mutation"]["status"] == "applied"
     assert "Installed RAM is 16GB." not in written
     assert "Installed RAM is 32GB." in written
-    assert "applied_corrections: [corr-current-state-ram]" in written
+    assert "applied_corrections:\n- corr-current-state-ram" in written
     assert (
         payload["mutation"]["correction_constraints"]["current-state"][0][
             "correction_id"
@@ -189,7 +200,8 @@ def test_refresh_state_register_skips_placeholder_pages(
     path = tmp_path / "current-state.md"
     real = tmp_path / "real.md"
     real.write_text(
-        "---\ntitle: Real\nupdated: 2026-07-06\nsummary: Useful\n---\nBody\n",
+        "---\ntitle: Real\nupdated: 2026-07-06\nstatus: stable\n"
+        "type: knowledge\nsummary: Useful\n---\nBody\n",
         encoding="utf-8",
     )
 
@@ -205,6 +217,9 @@ def test_refresh_state_register_skips_placeholder_pages(
                     "summary": "body",
                     "updated": "2026-04-28",
                     "page_type": "knowledge",
+                    "status": "stable",
+                    "namespace": "pages",
+                    "relative_path": "memory/baz.md",
                 }
             return {
                 "page_id": page_id,
@@ -213,6 +228,9 @@ def test_refresh_state_register_skips_placeholder_pages(
                 "updated": "2026-07-06",
                 "page_type": "knowledge",
                 "path": str(real),
+                "status": "stable",
+                "namespace": "pages",
+                "relative_path": "memory/real.md",
             }
 
         def all_pages_meta(self, include_system: bool = False):
@@ -223,7 +241,7 @@ def test_refresh_state_register_skips_placeholder_pages(
     payload = state_register.refresh_state_register(path=path)
 
     assert payload["pages"] == ["real"]
-    assert "[[baz]]" not in path.read_text(encoding="utf-8")
+    assert "memory/baz.md" not in path.read_text(encoding="utf-8")
 
 
 def test_refresh_state_register_skips_deprecated_pages(
@@ -233,10 +251,13 @@ def test_refresh_state_register_skips_deprecated_pages(
     deprecated = tmp_path / "old.md"
     active = tmp_path / "active.md"
     deprecated.write_text(
-        "---\ntitle: Old\nupdated: 2026-07-06\n---\nOld\n", encoding="utf-8"
+        "---\ntitle: Old\nupdated: 2026-07-06\nstatus: deprecated\n---\nOld\n",
+        encoding="utf-8",
     )
     active.write_text(
-        "---\ntitle: Active\nupdated: 2026-07-06\n---\nActive\n", encoding="utf-8"
+        "---\ntitle: Active\nupdated: 2026-07-06\nstatus: stable\n"
+        "type: knowledge\n---\nActive\n",
+        encoding="utf-8",
     )
 
     class FakeStore:
@@ -253,15 +274,19 @@ def test_refresh_state_register_skips_deprecated_pages(
                     "status": "deprecated",
                     "page_type": "knowledge",
                     "path": str(deprecated),
+                    "namespace": "pages",
+                    "relative_path": "memory/old.md",
                 }
             return {
                 "page_id": "active",
                 "title": "Active",
                 "summary": "Current",
                 "updated": "2026-07-06",
-                "status": "active",
+                "status": "stable",
                 "page_type": "knowledge",
                 "path": str(active),
+                "namespace": "pages",
+                "relative_path": "memory/active.md",
             }
 
         def all_pages_meta(self, include_system: bool = False):
@@ -272,4 +297,4 @@ def test_refresh_state_register_skips_deprecated_pages(
     payload = state_register.refresh_state_register(path=path)
 
     assert payload["pages"] == ["active"]
-    assert "[[old]]" not in path.read_text(encoding="utf-8")
+    assert "memory/old.md" not in path.read_text(encoding="utf-8")

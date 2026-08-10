@@ -23,21 +23,38 @@ def _fmt(value: object) -> str:
     return str(value)
 
 
-def build_reflection_markdown(snapshot: dict[str, Any], *, today: date | None = None) -> str:
+def build_reflection_markdown(
+    snapshot: dict[str, Any], *, today: date | None = None
+) -> str:
     today = today or date.today()
-    coverage = snapshot.get("coverage", {}) if isinstance(snapshot.get("coverage"), dict) else {}
-    memory = snapshot.get("memory_integrity", {}) if isinstance(snapshot.get("memory_integrity"), dict) else {}
-    queues = snapshot.get("queues", {}) if isinstance(snapshot.get("queues"), dict) else {}
-    feedback = snapshot.get("recall_feedback", {}) if isinstance(snapshot.get("recall_feedback"), dict) else {}
+    coverage = (
+        snapshot.get("coverage", {})
+        if isinstance(snapshot.get("coverage"), dict)
+        else {}
+    )
+    memory = (
+        snapshot.get("memory_integrity", {})
+        if isinstance(snapshot.get("memory_integrity"), dict)
+        else {}
+    )
+    queues = (
+        snapshot.get("queues", {}) if isinstance(snapshot.get("queues"), dict) else {}
+    )
+    feedback = (
+        snapshot.get("recall_feedback", {})
+        if isinstance(snapshot.get("recall_feedback"), dict)
+        else {}
+    )
     title = f"Memory Reflection {today.isoformat()}"
     return "\n".join(
         [
             "---",
             f"title: {title}",
             f"updated: {today.isoformat()}",
+            "status: stable",
             "type: semantic",
             "tags: [d/chronovisor, t/reflection]",
-            f"summary: Sleep-cycle reflection generated from dashboard health metrics on {today.isoformat()}.",
+            f"description: Sleep-cycle reflection generated from dashboard health metrics on {today.isoformat()}.",
             "---",
             "",
             f"# {title}",
@@ -82,7 +99,24 @@ def write_reflection_page(
     markdown = build_reflection_markdown(snapshot, today=today)
     mutation: dict[str, Any] | None = None
     if write:
-        mutation = apply_page_writes([prepare_page_write(path, markdown)])
+        try:
+            source_path = (
+                path.resolve(strict=False)
+                .relative_to(PAGES_DIR.resolve(strict=False))
+                .as_posix()
+            )
+        except ValueError:
+            source_path = f"insights/{path.name}"
+        mutation = apply_page_writes(
+            [
+                prepare_page_write(
+                    path,
+                    markdown,
+                    namespace="pages",
+                    source_path=source_path,
+                )
+            ]
+        )
     return {
         "status": (
             "ok"

@@ -8,7 +8,11 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
-from chronovisor.core.frontmatter import parse
+from chronovisor.core.canonical_document import (
+    CanonicalDocumentError,
+    format_internal_markdown_link,
+    validate_canonical_document,
+)
 from chronovisor.core.store import SYSTEM_DIR
 from chronovisor.ingest.page_write import apply_page_writes, prepare_page_write
 
@@ -58,8 +62,8 @@ def _is_state_candidate(meta: dict[str, Any]) -> bool:
     page_id = str(meta.get("page_id") or "")
     if not page_id or page_id == STATE_PAGE_ID:
         return False
-    status = str(meta.get("status") or "active")
-    if status != "active":
+    status = meta.get("status")
+    if status != "stable":
         return False
     page_type = str(meta.get("page_type") or "knowledge")
     if page_type == "reference":
@@ -78,13 +82,24 @@ def _state_payload(path: Path = STATE_PAGE, *, max_chars: int = 1600) -> dict[st
         text = path.read_text(encoding="utf-8")
     except OSError:
         return {"body": "", "updated": "", "age_days": None, "stale": False}
-    meta, body = parse(text)
+    try:
+        document = validate_canonical_document(
+            text.encode("utf-8"),
+            namespace="system",
+            path=path.name,
+            require_stable=True,
+        )
+    except CanonicalDocumentError:
+        return {"body": "", "updated": "", "age_days": None, "stale": False}
+    meta = document.metadata
+    body = document.body.decode("utf-8")
     body = _strip_heading_noise(body)
     if not body:
         return {"body": "", "updated": "", "age_days": None, "stale": False}
     if len(body) > max_chars:
         body = body[:max_chars].rstrip() + "..."
-    updated = meta.get("updated") if isinstance(meta.get("updated"), str) else ""
+    raw_updated = meta.get("updated")
+    updated = str(raw_updated) if raw_updated is not None else ""
     parsed = _parse_date(updated)
     age_days = (date.today() - parsed).days if parsed is not None else None
     stale = age_days is None or age_days > STALE_AFTER_DAYS
@@ -249,6 +264,8 @@ def refresh_state_register(
                 "summary": summary,
                 "updated": str(meta.get("updated") or "unknown"),
                 "page_type": page_type,
+                "namespace": str(meta.get("namespace") or "pages"),
+                "relative_path": str(meta.get("relative_path") or ""),
             }
         )
         if len(selected) >= max(1, limit):
@@ -259,9 +276,10 @@ def refresh_state_register(
         "---",
         "title: Current State",
         f"updated: {today}",
+        "status: stable",
         "type: state",
         "tags: [d/chronovisor, t/state, s/current]",
-        "summary: Auto-maintained working-memory snapshot from recent Chronovisor updates.",
+        "description: Auto-maintained working-memory snapshot from recent Chronovisor updates.",
         "---",
         "",
         "# Current State",
@@ -272,10 +290,19 @@ def refresh_state_register(
     ]
     if selected:
         for row in selected:
+            if row["namespace"] != "pages" or not row["relative_path"]:
+                raise RuntimeError(
+                    f"missing canonical page path for state target: {row['page_id']}"
+                )
             suffix = f" — {row['summary']}" if row["summary"] else ""
-            lines.append(
-                f"- [[{row['page_id']}]] — {row['title']} ({row['updated']}){suffix}"
+            link = format_internal_markdown_link(
+                row["page_id"],
+                source_namespace="system",
+                source_path=path.name,
+                target_namespace="pages",
+                target_path=row["relative_path"],
             )
+            lines.append(f"- {link} — {row['title']} ({row['updated']}){suffix}")
     else:
         lines.append("- No recent non-reference updates found.")
     if source_raw:
@@ -283,7 +310,19 @@ def refresh_state_register(
     text = "\n".join(lines).rstrip() + "\n"
     mutation: dict[str, Any] | None = None
     if write:
-        mutation = apply_page_writes([prepare_page_write(path, text)])
+        mutation = apply_page_writes(
+            [
+                prepare_page_write(
+                    path,
+                    text,
+                    namespace="system",
+                    source_path=path.name,
+                    allowed_targets={
+                        ("pages", row["relative_path"]) for row in selected
+                    },
+                )
+            ]
+        )
     return {
         "status": (
             "ok"

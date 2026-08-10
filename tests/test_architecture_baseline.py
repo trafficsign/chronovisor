@@ -1678,6 +1678,18 @@ FINAL_RETIRED_PROJECTION_REPLACEMENT_SITE_IDS = (
 X2_RETIRED_SERVER_WIKI_LINK_SITE_ID = (
     "arch:a1aa1878698b017c7a4e3a9df78e63c8b6a56861bd442c653057fc85534c21c1"
 )
+X2_RETIRED_CANONICAL_WRITER_SITE_IDS = (
+    "arch:0e6b056851bb04770b3242d678f1b8522c34500751bfe99100844540d2723e75",
+    "arch:1dc63dfd03da25647f40fdd1bc446166fdee3f3d08d6318c0b692ff398a62f4d",
+    "arch:258e6b3e6f539f676bcf77d7e66fe3950a1a680ccc679108a01028cf64ddfa47",
+    "arch:3291c1117e7d099fb595b708825c4f44e6df0d16212c91e37c90de7fe62c2f28",
+    "arch:518941aec4155c98da35de4594e889fed262767893572be3be68cf32cccffe43",
+    "arch:7d4384d88506a38bbed0ebb09cdeab04a60bd5748cdef0480bad80e960e383b0",
+    "arch:9c093a64c15b7fa0b02508efe118ace523b1c8b78b0e9252a60f93f42e83196b",
+    "arch:a719d0e5c026983515de9245f6e9afef68ba09feb92b0247f6f0805d710971d9",
+    "arch:e8493b726f1e80a2bf99b0113e333272c0428cb4796fbb0b934f47cb9496509e",
+    "arch:f31361d0fcc2bec1383df68e81ade34fa1e9ad64b7587f7a70f8c00cf7e2a274",
+)
 W6A_RETIRED_CLASSIFICATION_RUNTIME_SITE_IDS = (
     "arch:1769e98a4961cd3b1838967625ea3c4b6e9f19430c5b7fff63d8a0fdb31f9713",
     "arch:31d2e2d705ac18c3c042ddaa704735d895a784f7f5233c8af9824a3c84058aed",
@@ -1813,6 +1825,7 @@ RETIREMENT_HISTORY = {
                 *V_RETIRED_DURABLE_MODULE_MAPPING_SITE_IDS,
                 *FINAL_RETIRED_PROJECTION_REPLACEMENT_SITE_IDS,
                 X2_RETIRED_SERVER_WIKI_LINK_SITE_ID,
+                *X2_RETIRED_CANONICAL_WRITER_SITE_IDS,
                 *W6A_RETIRED_CLASSIFICATION_RUNTIME_SITE_IDS,
                 *W6B_RETIRED_NEMOTRON_RUNTIME_SITE_IDS,
             )
@@ -1897,10 +1910,7 @@ def _assert_diagnostic_line_contract(recorded: Any, built: Any) -> None:
     built_entries = _diagnostic_line_entries(built)
     assert recorded_entries
     assert built_entries
-    assert all(
-        type(line) is int
-        for _path, line in (*recorded_entries, *built_entries)
-    )
+    assert all(type(line) is int for _path, line in (*recorded_entries, *built_entries))
     recorded_paths = [path for path, _line in recorded_entries]
     built_paths = [path for path, _line in built_entries]
     assert len(recorded_paths) == len(built_paths)
@@ -2078,16 +2088,13 @@ def _assert_exact_retirement_history(
     architecture: ModuleType,
     seed: dict[str, Any],
 ) -> None:
-    assert set(RETIREMENT_HISTORY) == set(
-        architecture.EXCEPTION_BASELINE_ID_FIELDS
-    )
+    assert set(RETIREMENT_HISTORY) == set(architecture.EXCEPTION_BASELINE_ID_FIELDS)
     assert {
         field: tuple(seed[field]["retired"])
         for field in architecture.EXCEPTION_BASELINE_ID_FIELDS
     } == RETIREMENT_HISTORY
     assert seed["counts"]["retired"] == {
-        field: len(retired_ids)
-        for field, retired_ids in RETIREMENT_HISTORY.items()
+        field: len(retired_ids) for field, retired_ids in RETIREMENT_HISTORY.items()
     }
     assert all(
         set(seed[field]["active"]).isdisjoint(seed[field]["retired"])
@@ -2106,9 +2113,7 @@ def _without_persisted_retirement_history(
             (*normalized[field]["active"], *retired_ids)
         )
         normalized[field]["retired"] = []
-    normalized["counts"]["retired"] = {
-        field: 0 for field in RETIREMENT_HISTORY
-    }
+    normalized["counts"]["retired"] = {field: 0 for field in RETIREMENT_HISTORY}
     active_counts = normalized["counts"]["active"]
     active_counts["exceptions"] += len(RETIREMENT_HISTORY["exception_semantic_ids"])
     active_counts["by_category"]["cross_domain_edge"] += (
@@ -2172,10 +2177,10 @@ def _without_persisted_retirement_history(
     active_counts["compatibility_contracts"] += len(
         RETIREMENT_HISTORY["compatibility_semantic_ids"]
     )
-    active_counts["compatibility_by_kind"]["module_string"] = len(
-        V_RETIRED_RECALL_SHIM_COMPATIBILITY_IDS
-    ) + len(V_RETIRED_DURABLE_MODULE_MAPPING_COMPATIBILITY_IDS) + len(
-        V_RETIRED_LEGACY_LAB_MAPPING_COMPATIBILITY_IDS
+    active_counts["compatibility_by_kind"]["module_string"] = (
+        len(V_RETIRED_RECALL_SHIM_COMPATIBILITY_IDS)
+        + len(V_RETIRED_DURABLE_MODULE_MAPPING_COMPATIBILITY_IDS)
+        + len(V_RETIRED_LEGACY_LAB_MAPPING_COMPATIBILITY_IDS)
     )
     active_counts["compatibility_by_kind"]["lab_dispatch"] = len(
         V_RETIRED_LAB_DISPATCH_COMPATIBILITY_IDS
@@ -2573,7 +2578,7 @@ def test_current_exception_ledger_seed_and_schema_inventory_are_exact(
     assert detected_ids == ledger_ids == set(seed["exception_semantic_ids"]["active"])
     _assert_exact_retirement_history(architecture, seed)
     assert len(edge_rows) == current["worktree_architecture"]["edge_count"] == 44
-    assert sum(len(row["sites"]) for row in edge_rows) == len(raw_cross_sites) == 1378
+    assert sum(len(row["sites"]) for row in edge_rows) == len(raw_cross_sites) == 1377
     assert {
         field: counts[field]
         for field in (
@@ -2586,7 +2591,7 @@ def test_current_exception_ledger_seed_and_schema_inventory_are_exact(
         )
     } == {
         "exceptions": 44,
-        "cross_domain_sites": 1378,
+        "cross_domain_sites": 1377,
         "production_to_lab_edges": 0,
         "production_to_lab_static_sites": 0,
         "production_to_lab_dynamic_sites": 0,
@@ -2650,7 +2655,9 @@ def test_new_sensitive_exception_cannot_self_authorize_in_ledger_and_seed(
     source, ledger, compatibility, seed, frozen, previous = _exception_inputs(current)
     previous = copy.deepcopy(seed)
     template = next(
-        row for row in source["import_sites"] if row["category"] == "cross_domain_import"
+        row
+        for row in source["import_sites"]
+        if row["category"] == "cross_domain_import"
     )
     import_site = _synthetic_dynamic_import_site(
         architecture,
@@ -2814,7 +2821,9 @@ def test_exception_rows_reject_unrecorded_stale_duplicate_content_and_metadata(
 ) -> None:
     source, ledger, compatibility, seed, frozen, previous = _exception_inputs(current)
     template = next(
-        row for row in source["import_sites"] if row["category"] == "cross_domain_import"
+        row
+        for row in source["import_sites"]
+        if row["category"] == "cross_domain_import"
     )
     dynamic = _synthetic_dynamic_import_site(
         architecture,
@@ -3027,15 +3036,13 @@ def test_exception_metadata_routes_to_real_owner_and_removal_campaign(
     assert ("private_symbol_import", "decision", "lab") not in by_key
     assert ("cross_domain_edge", "ops", "lab") not in by_key
     assert ("cross_domain_edge", "librarian", "lab") not in by_key
-    assert P2_RETIRED_PRIVATE_EXCEPTION_ID not in {
-        row["semantic_id"] for row in rows
-    }
+    assert P2_RETIRED_PRIVATE_EXCEPTION_ID not in {row["semantic_id"] for row in rows}
     assert current["architecture_exception_baseline"]["exception_semantic_ids"][
         "retired"
     ] == list(RETIREMENT_HISTORY["exception_semantic_ids"])
-    assert current["architecture_exception_baseline"][
-        "cross_domain_site_semantic_ids"
-    ]["retired"] == list(RETIREMENT_HISTORY["cross_domain_site_semantic_ids"])
+    assert current["architecture_exception_baseline"]["cross_domain_site_semantic_ids"][
+        "retired"
+    ] == list(RETIREMENT_HISTORY["cross_domain_site_semantic_ids"])
     assert current["architecture_exception_baseline"][
         "production_to_lab_edge_semantic_ids"
     ]["retired"] == list(RETIREMENT_HISTORY["production_to_lab_edge_semantic_ids"])
@@ -3047,15 +3054,24 @@ def test_exception_metadata_routes_to_real_owner_and_removal_campaign(
     assert current["architecture_exception_baseline"][
         "production_to_lab_dynamic_site_semantic_ids"
     ]["retired"] == [P4A_RETIRED_OPS_LAB_DYNAMIC_SITE_ID]
-    assert P2_RETIRED_PRIVATE_EXCEPTION_ID not in current[
-        "architecture_exception_baseline"
-    ]["exception_semantic_ids"]["active"]
-    assert P3_RETIRED_CLASSIFICATION_LAB_EDGE_ID not in current[
-        "architecture_exception_baseline"
-    ]["exception_semantic_ids"]["active"]
-    assert P3_RETIRED_PROVIDER_SITE_ID not in current[
-        "architecture_exception_baseline"
-    ]["cross_domain_site_semantic_ids"]["active"]
+    assert (
+        P2_RETIRED_PRIVATE_EXCEPTION_ID
+        not in current["architecture_exception_baseline"]["exception_semantic_ids"][
+            "active"
+        ]
+    )
+    assert (
+        P3_RETIRED_CLASSIFICATION_LAB_EDGE_ID
+        not in current["architecture_exception_baseline"]["exception_semantic_ids"][
+            "active"
+        ]
+    )
+    assert (
+        P3_RETIRED_PROVIDER_SITE_ID
+        not in current["architecture_exception_baseline"][
+            "cross_domain_site_semantic_ids"
+        ]["active"]
+    )
     assert {
         row["removal_campaign"]
         for row in rows
