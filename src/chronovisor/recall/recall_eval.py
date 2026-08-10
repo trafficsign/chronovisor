@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from chronovisor.core.feedback_ledger import active_feedback_rows
-from chronovisor.core.store import CHRONOVISOR_ROOT
+from chronovisor.core.store import CHRONOVISOR_ROOT, okf_runtime_operation
 from chronovisor.recall.recall_runtime import (
     RECALL_FEEDBACK_FILE,
     RECALL_LOG_FILE,
@@ -420,6 +420,19 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     """Run the ``chronovisor-recall-eval`` command-line entry point."""
     args = build_parser().parse_args(argv)
+    if not args.save_baseline:
+        return _main_locked(args)
+    from chronovisor.core.okf_cutover import OKFStartupBlocked
+
+    try:
+        with okf_runtime_operation(CHRONOVISOR_ROOT):
+            return _main_locked(args)
+    except OKFStartupBlocked:
+        print(json.dumps({"status": "blocked", "category": "okf_startup_blocked"}))
+        return 75
+
+
+def _main_locked(args: argparse.Namespace) -> int:
     payload = run_eval(
         config_file=Path(args.config).expanduser() if args.config else None,
         log_file=Path(args.log_file).expanduser(),

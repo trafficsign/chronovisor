@@ -9,7 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from chronovisor.core.store import CHRONOVISOR_ROOT
+from chronovisor.core.store import CHRONOVISOR_ROOT, okf_runtime_operation
 
 
 def _git(args: list[str], *, cwd: Path = CHRONOVISOR_ROOT, check: bool = False) -> subprocess.CompletedProcess[str]:
@@ -49,6 +49,15 @@ def snapshot_chronovisor(
     allow_empty: bool = False,
 ) -> dict[str, Any]:
     """Commit current wiki state if there are changes."""
+    with okf_runtime_operation(path):
+        return _snapshot_chronovisor_locked(
+            reason, path=path, allow_empty=allow_empty
+        )
+
+
+def _snapshot_chronovisor_locked(
+    reason: str, *, path: Path, allow_empty: bool
+) -> dict[str, Any]:
     init = ensure_git_repo(path)
     if init.get("error"):
         return {"status": "error", "stage": "init", **init}
@@ -86,7 +95,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--allow-empty", action="store_true")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
-    payload = snapshot_chronovisor(args.reason, allow_empty=args.allow_empty)
+    from chronovisor.core.okf_cutover import OKFStartupBlocked
+
+    try:
+        payload = snapshot_chronovisor(args.reason, allow_empty=args.allow_empty)
+    except OKFStartupBlocked:
+        print(json.dumps({"status": "blocked", "category": "okf_startup_blocked"}))
+        return 75
     if args.json:
         print(json.dumps(payload, ensure_ascii=False))
     else:

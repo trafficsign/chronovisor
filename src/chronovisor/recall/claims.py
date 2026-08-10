@@ -16,6 +16,7 @@ from chronovisor.core.claims import (
     search_claims,
 )
 from chronovisor.core.jsonl import read_jsonl
+from chronovisor.core.store import CHRONOVISOR_ROOT, okf_runtime_operation
 from chronovisor.decision.decision_policy import resolve_decision_policy
 
 CLAIM_CONFLICT_SCHEMA: dict[str, Any] = {
@@ -160,6 +161,21 @@ def main(argv: list[str] | None = None) -> int:
     query.add_argument("--limit", type=int, default=10)
     query.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
+    if args.command == "search" or (
+        args.command == "sanitize" and args.no_write
+    ):
+        return _main_locked(args)
+    from chronovisor.core.okf_cutover import OKFStartupBlocked
+
+    try:
+        with okf_runtime_operation(CHRONOVISOR_ROOT):
+            return _main_locked(args)
+    except OKFStartupBlocked:
+        print(json.dumps({"status": "blocked", "category": "okf_startup_blocked"}))
+        return 75
+
+
+def _main_locked(args: argparse.Namespace) -> int:
 
     if args.command == "rebuild":
         data = rebuild_claim_index(limit=max(0, args.limit))

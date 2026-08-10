@@ -13,7 +13,7 @@ from typing import Any
 
 from chronovisor.core.canonical_document import format_internal_markdown_link
 from chronovisor.core.index_store import get_store
-from chronovisor.core.store import PAGES_DIR
+from chronovisor.core.store import PAGES_DIR, okf_runtime_operation
 from chronovisor.ingest.page_write import apply_page_writes, prepare_page_write
 
 HUBS_DIR = PAGES_DIR / "hubs"
@@ -110,6 +110,25 @@ def build_hub_pages(
     max_hubs: int = 20,
     write: bool = True,
 ) -> dict[str, Any]:
+    if write:
+        with okf_runtime_operation(PAGES_DIR.parent):
+            return _build_hub_pages_locked(
+                output_dir=output_dir,
+                min_pages=min_pages,
+                max_hubs=max_hubs,
+                write=True,
+            )
+    return _build_hub_pages_locked(
+        output_dir=output_dir,
+        min_pages=min_pages,
+        max_hubs=max_hubs,
+        write=False,
+    )
+
+
+def _build_hub_pages_locked(
+    *, output_dir: Path, min_pages: int, max_hubs: int, write: bool
+) -> dict[str, Any]:
     store = get_store()
     store.refresh()
     metas = [
@@ -201,11 +220,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-write", action="store_true")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
-    data = build_hub_pages(
-        min_pages=max(1, args.min_pages),
-        max_hubs=max(1, args.max_hubs),
-        write=not args.no_write,
-    )
+    from chronovisor.core.okf_cutover import OKFStartupBlocked
+
+    try:
+        data = build_hub_pages(
+            min_pages=max(1, args.min_pages),
+            max_hubs=max(1, args.max_hubs),
+            write=not args.no_write,
+        )
+    except OKFStartupBlocked:
+        print(json.dumps({"status": "blocked", "category": "okf_startup_blocked"}))
+        return 75
     if args.json:
         print(json.dumps(data, ensure_ascii=False, indent=2))
     else:

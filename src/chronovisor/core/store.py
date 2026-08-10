@@ -1,6 +1,8 @@
 """Chronovisor directory management."""
 
 import os
+from collections.abc import Iterator
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -178,6 +180,42 @@ def okf_startup_status(root: Path) -> "OKFStartupDecision":
     return discover_okf_startup(root, root / "runtime")
 
 
+@contextmanager
+def okf_runtime_operation(
+    root: Path, *, blocking: bool = True
+) -> Iterator["OKFStartupDecision"]:
+    """Gate one runtime operation while holding the shared writer lease."""
+
+    from chronovisor.core.durable_state import okf_writer_lock
+    from chronovisor.core.okf_cutover import (
+        OKFStartupBlocked,
+        OKFStartupDecision,
+        discover_okf_startup,
+        require_okf_startup_allowed,
+    )
+
+    if not (root / "runtime" / "okf-writer.lock").exists():
+        preflight = discover_okf_startup(root, root / "runtime")
+        if not preflight.allowed:
+            raise OKFStartupBlocked(preflight)
+    with ExitStack() as stack:
+        try:
+            stack.enter_context(okf_writer_lock(root, blocking=blocking))
+            decision = require_okf_startup_allowed(root, root / "runtime")
+        except OKFStartupBlocked:
+            raise
+        except (OSError, RuntimeError, ValueError):
+            raise OKFStartupBlocked(
+                OKFStartupDecision(
+                    False,
+                    "blocked",
+                    "blocked",
+                    "writer_lease_unavailable",
+                )
+            ) from None
+        yield decision
+
+
 def prepare_okf_startup(root: Path, run_id: str) -> Path:
     """Prepare one offline OKF workspace below the root's runtime directory."""
     from chronovisor.core.okf_workspace import prepare_okf_workspace
@@ -204,32 +242,29 @@ def init_chronovisor(context: RuntimeContext | None = None) -> None:
             context.schema_file,
         )
 
-    from chronovisor.core.okf_cutover import require_okf_startup_allowed
+    with okf_runtime_operation(root) as startup:
+        for directory in (root, raw_dir, pages_dir, system_dir):
+            directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+            directory.chmod(0o700)
 
-    startup = require_okf_startup_allowed(root, root / "runtime")
+        if startup.layout == "okf_v0_2":
+            return
 
-    for directory in (root, raw_dir, pages_dir, system_dir):
-        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-        directory.chmod(0o700)
+        # Transitional legacy/bootstrap writer; removed after the OKF live cutover.
+        if not index_file.exists():
+            index_file.write_text(
+                "---\ntitle: Index\nupdated: 1970-01-01\n---\n\n"
+                "# Wiki Index\n\nNo pages yet.\n"
+            )
 
-    if startup.layout == "okf_v0_2":
-        return
+        if not log_file.exists():
+            log_file.write_text(
+                "---\ntitle: Log\nupdated: 1970-01-01\n---\n\n"
+                "# Change Log\n"
+            )
 
-    # Transitional legacy/bootstrap writer; removed after the OKF live cutover.
-    if not index_file.exists():
-        index_file.write_text(
-            "---\ntitle: Index\nupdated: 1970-01-01\n---\n\n"
-            "# Wiki Index\n\nNo pages yet.\n"
-        )
-
-    if not log_file.exists():
-        log_file.write_text(
-            "---\ntitle: Log\nupdated: 1970-01-01\n---\n\n"
-            "# Change Log\n"
-        )
-
-    if not schema_file.exists():
-        schema_file.write_text(SCHEMA_CONTENT)
+        if not schema_file.exists():
+            schema_file.write_text(SCHEMA_CONTENT)
 
 
 SCHEMA_CONTENT = """\

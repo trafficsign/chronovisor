@@ -14,6 +14,19 @@ from tests.semantic_hold_support import _vote as _authority_vote
 from tests.semantic_hold_support import semantic_authority, semantic_review
 
 
+@pytest.fixture(autouse=True)
+def _valid_cli_okf_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "okf-root"
+    root.mkdir()
+    for name in ("index.md", "log.md", "schema.md"):
+        (root / name).write_text("legacy\n", encoding="utf-8")
+    from chronovisor.core import store
+
+    monkeypatch.setattr(store, "CHRONOVISOR_ROOT", root)
+
+
 @pytest.fixture()
 def ingest_ollama_unavailable(
     monkeypatch: pytest.MonkeyPatch,
@@ -46,6 +59,8 @@ def isolated_wiki(
     runtime = chronovisor_root / "runtime"
     for d in (pages, raw, system, runtime):
         d.mkdir(parents=True, exist_ok=True)
+    for name in ("index.md", "log.md", "schema.md"):
+        (chronovisor_root / name).write_text("legacy\n", encoding="utf-8")
 
     from chronovisor.core import (
         claims,

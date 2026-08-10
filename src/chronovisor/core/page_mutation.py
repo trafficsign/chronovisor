@@ -25,7 +25,13 @@ from chronovisor.core.canonical_document import (
 from chronovisor.core.hashutil import sha256_bytes as _sha256_bytes
 from chronovisor.core.jsonl_write import append_jsonl_durable
 from chronovisor.core.link_fix import atomic_write, protected_spans
-from chronovisor.core.store import CHRONOVISOR_ROOT, PAGES_DIR, SYSTEM_DIR, find_page
+from chronovisor.core.store import (
+    CHRONOVISOR_ROOT,
+    PAGES_DIR,
+    SYSTEM_DIR,
+    find_page,
+    okf_runtime_operation,
+)
 
 CHRONOVISOR_MUTATION_LOCK = CHRONOVISOR_ROOT / "runtime" / "chronovisor-mutation.lock"
 DECISION_AUTHORITY_LOCK = CHRONOVISOR_ROOT / "runtime" / "decision-authority.lock"
@@ -183,8 +189,9 @@ def _reentrant_exclusive_lock(lock_path: Path) -> Iterator[None]:
 def chronovisor_mutation_lock(path: Path | None = None) -> Iterator[None]:
     """Serialize writers; nested same-thread mutations share the outer lease."""
 
-    with _reentrant_exclusive_lock(path or CHRONOVISOR_MUTATION_LOCK):
-        yield
+    with okf_runtime_operation(CHRONOVISOR_ROOT):
+        with _reentrant_exclusive_lock(path or CHRONOVISOR_MUTATION_LOCK):
+            yield
 
 
 @contextmanager

@@ -4128,6 +4128,21 @@ def _background_exit_code(result: dict[str, Any]) -> int:
 def main(argv: list[str] | None = None) -> int:
     """Run the ``chronovisor-self-heal`` command-line entry point."""
     args = build_parser().parse_args(argv)
+    if args.dry_run:
+        return _main_locked(args)
+    from chronovisor.core.okf_cutover import OKFStartupBlocked
+
+    try:
+        with chronovisor_store.okf_runtime_operation(
+            chronovisor_store.CHRONOVISOR_ROOT
+        ):
+            return _main_locked(args)
+    except OKFStartupBlocked:
+        print(json.dumps({"status": "blocked", "category": "okf_startup_blocked"}))
+        return 75
+
+
+def _main_locked(args: argparse.Namespace) -> int:
     frontier_enabled = args.enable_frontier_repair and not args.no_frontier
     release_evidence = (
         args.expected_status,

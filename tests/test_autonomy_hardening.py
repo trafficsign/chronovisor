@@ -16,8 +16,41 @@ from chronovisor.ingest import recall_hints
 from chronovisor.ops import background_jobs, session_sweeper
 
 
+@pytest.fixture(autouse=True)
+def _valid_background_job_okf_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "wiki"
+    root.mkdir()
+    for name in ("index.md", "log.md", "schema.md"):
+        (root / name).write_text("legacy\n", encoding="utf-8")
+    monkeypatch.setattr(core_background_jobs, "CHRONOVISOR_ROOT", root)
+    monkeypatch.setattr(session_sweeper, "CHRONOVISOR_ROOT", root)
+
+
 def test_ops_background_jobs_is_core_module_alias() -> None:
     assert background_jobs is core_background_jobs
+
+
+def test_session_sweeper_write_false_still_requires_writer_lease(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from chronovisor.core.okf_cutover import OKFStartupBlocked
+
+    root = tmp_path / "blocked"
+    root.mkdir()
+    (root / "private.txt").write_text("canary", encoding="utf-8")
+    monkeypatch.setattr(session_sweeper, "CHRONOVISOR_ROOT", root)
+    monkeypatch.setattr(
+        session_sweeper,
+        "discover_pending",
+        lambda *_args, **_kwargs: pytest.fail("sweeper ran before startup gate"),
+    )
+
+    with pytest.raises(OKFStartupBlocked):
+        session_sweeper.run_sweeper(write=False)
+
+    assert [path.name for path in root.iterdir()] == ["private.txt"]
 
 
 def test_jsonl_reader_preserves_unicode_line_separator(tmp_path: Path) -> None:

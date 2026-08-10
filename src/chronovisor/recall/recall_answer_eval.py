@@ -61,6 +61,7 @@ from chronovisor.core.store import (
     PAGES_DIR,
     find_page,
     init_chronovisor,
+    okf_runtime_operation,
 )
 from chronovisor.decision.graph_decisions import (
     RECALL_ANSWER_ADJUDICATION_SCHEMA,
@@ -8866,6 +8867,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
+    if args.status or args.dry_run:
+        return _main_locked(args)
+    from chronovisor.core.okf_cutover import OKFStartupBlocked
+
+    try:
+        with okf_runtime_operation(CHRONOVISOR_ROOT):
+            return _main_locked(args)
+    except OKFStartupBlocked:
+        print(json.dumps({"status": "blocked", "category": "okf_startup_blocked"}))
+        return 75
+
+
+def _main_locked(args: argparse.Namespace) -> int:
     if not args.dry_run:
         init_chronovisor()
     if args.build_split_manifest:

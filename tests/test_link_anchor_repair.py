@@ -1,9 +1,21 @@
 from pathlib import Path
 
+import pytest
+
+from chronovisor.core import page_mutation
 from chronovisor.librarian.link_anchor_repair import (
     DEFAULT_REPAIRS,
     repair_known_anchors,
 )
+
+
+@pytest.fixture(autouse=True)
+def _valid_okf_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for name in ("index.md", "log.md", "schema.md"):
+        (tmp_path / name).write_text("legacy\n", encoding="utf-8")
+    monkeypatch.setattr(page_mutation, "CHRONOVISOR_ROOT", tmp_path)
 
 
 def _page(path: Path, title: str, body: str) -> None:

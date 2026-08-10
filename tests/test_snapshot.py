@@ -11,6 +11,8 @@ from chronovisor.ingest.snapshot import snapshot_chronovisor
 
 @pytest.mark.skipif(shutil.which("git") is None, reason="git is required")
 def test_snapshot_chronovisor_commits_changes_in_target_path(tmp_path: Path) -> None:
+    for name in ("index.md", "log.md", "schema.md"):
+        (tmp_path / name).write_text("legacy\n", encoding="utf-8")
     (tmp_path / "pages").mkdir()
     (tmp_path / "pages" / "alpha.md").write_text("# Alpha\n", encoding="utf-8")
 

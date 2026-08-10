@@ -77,6 +77,7 @@ from chronovisor.core.store import (
     CHRONOVISOR_ROOT,
     SYSTEM_DIR,
     find_page,
+    okf_runtime_operation,
     okf_startup_status,
 )
 from chronovisor.search.accelerator_lease import accelerator_lease
@@ -948,6 +949,11 @@ class _Server(socketserver.ThreadingUnixStreamServer):
 
 
 def serve(config: SearchEmbeddingConfig | None = None) -> None:
+    with okf_runtime_operation(CHRONOVISOR_ROOT):
+        _serve_locked(config)
+
+
+def _serve_locked(config: SearchEmbeddingConfig | None) -> None:
     if not okf_startup_status(CHRONOVISOR_ROOT).allowed:
         raise SystemExit(75)
     config = config or load_search_embedding_config()
@@ -991,6 +997,18 @@ def main(argv: list[str] | None = None) -> int:
         default="serve",
     )
     args = parser.parse_args(argv)
+    if args.command == "status":
+        return _main_locked(args)
+    from chronovisor.core.okf_cutover import OKFStartupBlocked
+    try:
+        with okf_runtime_operation(CHRONOVISOR_ROOT):
+            return _main_locked(args)
+    except OKFStartupBlocked:
+        print(json.dumps({"status": "blocked", "category": "okf_startup_blocked"}))
+        return 75
+
+
+def _main_locked(args: argparse.Namespace) -> int:
     if args.command != "status" and not okf_startup_status(CHRONOVISOR_ROOT).allowed:
         print(
             json.dumps({"status": "blocked", "category": "okf_startup_blocked"})

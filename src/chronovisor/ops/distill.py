@@ -10,7 +10,7 @@ from typing import Any
 
 from chronovisor.core.frontmatter import parse
 from chronovisor.core.index_store import get_store
-from chronovisor.core.store import CHRONOVISOR_ROOT, find_page
+from chronovisor.core.store import CHRONOVISOR_ROOT, find_page, okf_runtime_operation
 
 DISTILL_DIR = CHRONOVISOR_ROOT / "distill"
 DISTILL_FILE = DISTILL_DIR / "wiki-qa.jsonl"
@@ -92,6 +92,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-write", action="store_true")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
+    if args.no_write:
+        return _main_locked(args)
+    from chronovisor.core.okf_cutover import OKFStartupBlocked
+
+    try:
+        with okf_runtime_operation(CHRONOVISOR_ROOT):
+            return _main_locked(args)
+    except OKFStartupBlocked:
+        print(json.dumps({"status": "blocked", "category": "okf_startup_blocked"}))
+        return 75
+
+
+def _main_locked(args: argparse.Namespace) -> int:
     data = export_distill_dataset(
         limit=max(0, args.limit),
         include_reference=args.include_reference,

@@ -6,6 +6,7 @@ import argparse
 import json
 
 from chronovisor.core.prefetch import build_prefetch_cache
+from chronovisor.core.store import CHRONOVISOR_ROOT, okf_runtime_operation
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -17,6 +18,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-write", action="store_true")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
+    if args.no_write:
+        return _main_locked(args)
+    from chronovisor.core.okf_cutover import OKFStartupBlocked
+
+    try:
+        with okf_runtime_operation(CHRONOVISOR_ROOT):
+            return _main_locked(args)
+    except OKFStartupBlocked:
+        print(json.dumps({"status": "blocked", "category": "okf_startup_blocked"}))
+        return 75
+
+
+def _main_locked(args: argparse.Namespace) -> int:
     payload = build_prefetch_cache(limit=max(1, args.limit), write=not args.no_write)
     public = {
         key: value

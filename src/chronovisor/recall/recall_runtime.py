@@ -40,6 +40,7 @@ from chronovisor.core.store import (
     SYSTEM_DIR,
     find_page,
     init_chronovisor,
+    okf_runtime_operation,
     okf_startup_status,
 )
 from chronovisor.decision.local_structured import LocalStructuredSession
@@ -3014,6 +3015,17 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
         return 0
+    from chronovisor.core.okf_cutover import OKFStartupBlocked
+
+    try:
+        with okf_runtime_operation(CHRONOVISOR_ROOT):
+            return _main_locked(args)
+    except OKFStartupBlocked:
+        print(json.dumps({"status": "blocked", "category": "okf_startup_blocked"}))
+        return 75
+
+
+def _main_locked(args: argparse.Namespace) -> int:
 
     if not okf_startup_status(CHRONOVISOR_ROOT).allowed:
         print(

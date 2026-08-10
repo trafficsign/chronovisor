@@ -13,7 +13,7 @@ from typing import Any
 from chronovisor.core.durable_state import fsync_directory
 from chronovisor.core.frontmatter import patch as patch_frontmatter
 from chronovisor.core.save_transaction import parse_save_transaction_receipt
-from chronovisor.core.store import RAW_DIR
+from chronovisor.core.store import RAW_DIR, okf_runtime_operation
 
 RAW_PREFIX_RE = re.compile(r"[^a-zA-Z0-9_-]+")
 RAW_SLUG_TOKEN_RE = re.compile(r"[a-zA-Z0-9]+")
@@ -186,6 +186,12 @@ def link_raw_no_replace(staging: Path, target: Path) -> None:
 def publish_raw(content: str, *, prefix: str = "", topic_slug: str = "") -> Path:
     """Write a complete raw entry, then atomically expose its final name."""
 
+    with okf_runtime_operation(RAW_DIR.parent):
+        return _publish_raw_locked(content, prefix=prefix, topic_slug=topic_slug)
+
+
+def _publish_raw_locked(content: str, *, prefix: str, topic_slug: str) -> Path:
+
     staging = allocate_raw_path(prefix=prefix, topic_slug=topic_slug)
     published: Path | None = None
     try:
@@ -223,6 +229,23 @@ def publish_raw_idempotent(
     topic_slug: str = "",
 ) -> tuple[Path, bool]:
     """Atomically publish one complete raw per idempotency key."""
+
+    with okf_runtime_operation(RAW_DIR.parent):
+        return _publish_raw_idempotent_locked(
+            content,
+            idempotency_key=idempotency_key,
+            prefix=prefix,
+            topic_slug=topic_slug,
+        )
+
+
+def _publish_raw_idempotent_locked(
+    content: str,
+    *,
+    idempotency_key: str,
+    prefix: str,
+    topic_slug: str,
+) -> tuple[Path, bool]:
 
     if not RAW_IDEMPOTENCY_RE.fullmatch(idempotency_key):
         raise ValueError(

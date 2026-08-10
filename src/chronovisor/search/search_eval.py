@@ -60,7 +60,7 @@ from chronovisor.core.search import (
 from chronovisor.core.search import (
     DEFAULT_FUSION_WEIGHTS as DEFAULT_FUSION_WEIGHTS,
 )
-from chronovisor.core.store import find_page
+from chronovisor.core.store import CHRONOVISOR_ROOT, find_page, okf_runtime_operation
 from chronovisor.decision import decision_authority
 from chronovisor.decision import decision_lane_prompts as _decision_lane_prompts
 from chronovisor.decision.decision_schema_manifest import FRONTIER_LABEL_SCHEMA
@@ -3727,6 +3727,32 @@ def _search_label_queue_lock(path: Path):
 def main(argv: list[str] | None = None) -> int:
     """Run the ``chronovisor-eval`` command-line entry point."""
     args = build_parser().parse_args(argv)
+    mutating = any(
+        (
+            args.build_golden,
+            args.build_label_queue,
+            args.frontier_review_labels,
+            args.self_tune,
+            args.save_baseline,
+            args.debug_dump,
+            args.failure_index,
+            args.sealed_manifest,
+            args.locked_e2e_artifact,
+        )
+    )
+    if not mutating:
+        return _main_locked(args)
+    from chronovisor.core.okf_cutover import OKFStartupBlocked
+
+    try:
+        with okf_runtime_operation(CHRONOVISOR_ROOT):
+            return _main_locked(args)
+    except OKFStartupBlocked:
+        print(json.dumps({"status": "blocked", "category": "okf_startup_blocked"}))
+        return 75
+
+
+def _main_locked(args: argparse.Namespace) -> int:
     if args.build_golden:
         payload = build_golden(
             feedback_file=Path(args.feedback_file).expanduser(),

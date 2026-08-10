@@ -36,7 +36,7 @@ from chronovisor.core.runtime_config import (
     runtime_repo_root,
     uvx_runtime_command,
 )
-from chronovisor.core.store import CHRONOVISOR_ROOT, find_page
+from chronovisor.core.store import CHRONOVISOR_ROOT, find_page, okf_runtime_operation
 from chronovisor.decision.decision_authority import (
     compare_semantic_authority,
     current_semantic_authority,
@@ -4287,6 +4287,23 @@ def main(argv: list[str] | None = None) -> int:
     uninstall_parser.add_argument("--unload", action="store_true")
     uninstall_parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
+    mutates = args.command in {"watchdog", "digest"} or (
+        args.command in {"install-launchd", "uninstall-launchd"}
+        and not args.dry_run
+    )
+    if not mutates:
+        return _main_locked(args)
+    from chronovisor.core.okf_cutover import OKFStartupBlocked
+
+    try:
+        with okf_runtime_operation(CHRONOVISOR_ROOT):
+            return _main_locked(args)
+    except OKFStartupBlocked:
+        print(json.dumps({"status": "blocked", "category": "okf_startup_blocked"}))
+        return 75
+
+
+def _main_locked(args: argparse.Namespace) -> int:
     if args.command == "status":
         payload = status()
     elif args.command == "watchdog":

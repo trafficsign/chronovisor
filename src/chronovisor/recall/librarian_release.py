@@ -19,7 +19,7 @@ from chronovisor.core.migration_snapshot import (
     cleanup_expired_restore_points,
     restore_drill,
 )
-from chronovisor.core.store import CHRONOVISOR_ROOT
+from chronovisor.core.store import CHRONOVISOR_ROOT, okf_runtime_operation
 from chronovisor.core.timeutil import iso_seconds as _iso
 from chronovisor.ingest.page_registry import PageRegistry
 from chronovisor.ingest.uid_link_index import build_uid_link_index
@@ -679,6 +679,14 @@ def finalize_if_ready(
 ) -> dict[str, Any]:
     """Close migration observation once every evidence gate is satisfied."""
 
+    with okf_runtime_operation(root):
+        return _finalize_if_ready_locked(root, now=now)
+
+
+def _finalize_if_ready_locked(
+    root: Path, *, now: datetime | None
+) -> dict[str, Any]:
+
     release_path = root / "runtime" / "librarian" / "phase12-release.json"
     if release_path.is_file():
         return {
@@ -732,6 +740,17 @@ def main(argv: list[str] | None = None) -> int:
         help="Deprecated compatibility option; release is evidence-gated.",
     )
     args = parser.parse_args(argv)
+    from chronovisor.core.okf_cutover import OKFStartupBlocked
+
+    try:
+        with okf_runtime_operation(args.root):
+            return _main_locked(args)
+    except OKFStartupBlocked:
+        print(json.dumps({"status": "blocked", "category": "okf_startup_blocked"}))
+        return 75
+
+
+def _main_locked(args: argparse.Namespace) -> int:
     if args.command == "phase0":
         result = capture_phase0_artifacts(args.root, repo_root=_git_root())
     elif args.command == "phase1":

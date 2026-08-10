@@ -18,7 +18,7 @@ from typing import Any
 from chronovisor.core.frontmatter import parse as parse_frontmatter
 from chronovisor.core.raw_store import RawStore
 from chronovisor.core.search import search as run_search
-from chronovisor.core.store import CHRONOVISOR_ROOT
+from chronovisor.core.store import CHRONOVISOR_ROOT, okf_runtime_operation
 from chronovisor.ingest.raw_replay import raw_date, select_raws
 
 EVAL_DIR = CHRONOVISOR_ROOT / "eval"
@@ -211,6 +211,15 @@ def run_eval(
     limit: int = 100,
     write: bool = True,
 ) -> dict[str, Any]:
+    if write:
+        with okf_runtime_operation(CHRONOVISOR_ROOT):
+            return _run_eval_locked(since=since, limit=limit, write=True)
+    return _run_eval_locked(since=since, limit=limit, write=False)
+
+
+def _run_eval_locked(
+    *, since: str, limit: int, write: bool
+) -> dict[str, Any]:
     raw_store = RawStore(CHRONOVISOR_ROOT / "raw")
     raws = select_raws(
         since=since,
@@ -259,7 +268,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-write", action="store_true")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
-    payload = run_eval(since=args.since, limit=max(0, args.limit), write=not args.no_write)
+    from chronovisor.core.okf_cutover import OKFStartupBlocked
+
+    try:
+        payload = run_eval(
+            since=args.since, limit=max(0, args.limit), write=not args.no_write
+        )
+    except OKFStartupBlocked:
+        print(json.dumps({"status": "blocked", "category": "okf_startup_blocked"}))
+        return 75
     if args.json:
         print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
     else:

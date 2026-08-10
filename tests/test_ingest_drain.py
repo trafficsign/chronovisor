@@ -18,6 +18,8 @@ def _disable_runtime_status_reset(
 ) -> None:
     runtime_root = tmp_path / "wiki"
     (runtime_root / "runtime").mkdir(parents=True)
+    for name in ("index.md", "log.md", "schema.md"):
+        (runtime_root / name).write_text("legacy\n", encoding="utf-8")
     monkeypatch.setattr(
         ingest_drain.runtime_status,
         "reset_stale_runtime_status",

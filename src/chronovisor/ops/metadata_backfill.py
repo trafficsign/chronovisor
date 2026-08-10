@@ -13,7 +13,12 @@ from chronovisor.core.frontmatter import parse, patch
 from chronovisor.core.link_fix import atomic_write
 from chronovisor.core.page_mutation import chronovisor_mutation_lock
 from chronovisor.core.runtime_config import runtime_repo_root
-from chronovisor.core.store import CHRONOVISOR_ROOT, all_pages, page_id_from_path
+from chronovisor.core.store import (
+    CHRONOVISOR_ROOT,
+    all_pages,
+    okf_runtime_operation,
+    page_id_from_path,
+)
 from chronovisor.ingest.ingest import ensure_recall_metadata_frontmatter
 from chronovisor.ingest.lint import (
     build_semantic_mutation_proposal,
@@ -94,6 +99,25 @@ def backfill_metadata(
     max_frontier_calls: int = 3,
     dry_run: bool = False,
     reviewer=None,
+) -> dict[str, Any]:
+    if not dry_run:
+        with okf_runtime_operation(CHRONOVISOR_ROOT):
+            return _backfill_metadata_locked(
+                limit=limit,
+                max_frontier_calls=max_frontier_calls,
+                dry_run=False,
+                reviewer=reviewer,
+            )
+    return _backfill_metadata_locked(
+        limit=limit,
+        max_frontier_calls=max_frontier_calls,
+        dry_run=True,
+        reviewer=reviewer,
+    )
+
+
+def _backfill_metadata_locked(
+    *, limit: int, max_frontier_calls: int, dry_run: bool, reviewer=None
 ) -> dict[str, Any]:
     candidates = updated_count = rejected = retry = calls = 0
     pages: list[str] = []
@@ -214,16 +238,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-frontier-calls", type=int, default=3)
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
-    print(
-        json.dumps(
-            backfill_metadata(
-                limit=max(0, args.limit),
-                max_frontier_calls=max(0, args.max_frontier_calls),
-                dry_run=args.dry_run,
-            ),
-            ensure_ascii=False,
+    from chronovisor.core.okf_cutover import OKFStartupBlocked
+
+    try:
+        payload = backfill_metadata(
+            limit=max(0, args.limit),
+            max_frontier_calls=max(0, args.max_frontier_calls),
+            dry_run=args.dry_run,
         )
-    )
+    except OKFStartupBlocked:
+        print(json.dumps({"status": "blocked", "category": "okf_startup_blocked"}))
+        return 75
+    print(json.dumps(payload, ensure_ascii=False))
     return 0
 
 

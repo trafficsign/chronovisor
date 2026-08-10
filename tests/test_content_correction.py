@@ -45,6 +45,19 @@ CLASSIFICATION_CHECKS = {
 }
 
 
+@pytest.fixture(autouse=True)
+def _valid_okf_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for name in ("index.md", "log.md", "schema.md"):
+        (tmp_path / name).write_text("legacy\n", encoding="utf-8")
+    from chronovisor.core import store
+
+    monkeypatch.setattr(store, "CHRONOVISOR_ROOT", tmp_path)
+    monkeypatch.setattr(page_mutation, "CHRONOVISOR_ROOT", tmp_path)
+    monkeypatch.setattr(content_correction, "CHRONOVISOR_ROOT", tmp_path)
+
+
 def test_local_proposer_repairs_invalid_json_in_same_session(tmp_path: Path) -> None:
     prompts: list[str] = []
     responses = iter(

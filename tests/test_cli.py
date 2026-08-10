@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from chronovisor.core import runtime_config, runtime_status, store
+from chronovisor.core import index_store, runtime_config, runtime_status, store
 from chronovisor.core.durable_state import canonical_sha256, write_sealed_json
 from chronovisor.hosts import cli
 from chronovisor.recall import recall_runtime
@@ -83,11 +83,22 @@ def patch_wiki(tmp_path: Path, monkeypatch) -> None:
     )
     config = root / "config.toml"
     config.write_text("[hooks.stop]\nsave = true\naudit = true\n", encoding="utf-8")
+    for name in ("index.md", "log.md", "schema.md"):
+        (root / name).write_text("legacy\n", encoding="utf-8")
 
     monkeypatch.setattr(store, "CHRONOVISOR_ROOT", root)
     monkeypatch.setattr(store, "RAW_DIR", raw)
     monkeypatch.setattr(store, "PAGES_DIR", pages)
     monkeypatch.setattr(store, "SYSTEM_DIR", system)
+    monkeypatch.setattr(index_store, "CHRONOVISOR_ROOT", root)
+    monkeypatch.setattr(index_store, "PAGES_DIR", pages)
+    monkeypatch.setattr(index_store, "SYSTEM_DIR", system)
+    monkeypatch.setattr(index_store, "INDEX_DIR", root / ".index")
+    monkeypatch.setattr(index_store, "PAGES_INDEX_FILE", root / ".index/pages.json")
+    monkeypatch.setattr(
+        index_store, "BACKLINKS_INDEX_FILE", root / ".index/backlinks.json"
+    )
+    monkeypatch.setattr(index_store, "_store", None)
     monkeypatch.setattr(runtime_config, "CONFIG_FILE", config)
     monkeypatch.setattr(recall_runtime, "RECALL_DIR", recall)
     monkeypatch.setattr(recall_runtime, "RECALL_LOG_FILE", recall / "recall-log.jsonl")
@@ -192,6 +203,8 @@ def test_hold_report_cli_aggregates_both_read_only_stores_as_json_and_text(
     managed_before = managed_state.read_bytes()
     managed_lock = managed_state.with_name(f"{managed_state.name}.lock")
     assert not managed_lock.exists()
+    with store.okf_runtime_operation(root):
+        pass
 
     def filesystem_snapshot() -> dict[str, tuple[str, int, bytes | None]]:
         snapshot: dict[str, tuple[str, int, bytes | None]] = {}
@@ -337,8 +350,10 @@ def test_recall_improve_cli_rejects_retired_models_flag() -> None:
         )
 
 
-def test_sleep_cli_non_json_handles_partial_cycle(monkeypatch, capsys) -> None:
+def test_sleep_cli_non_json_handles_partial_cycle(tmp_path, monkeypatch, capsys) -> None:
     from chronovisor.ops import sleep_cycle
+
+    patch_wiki(tmp_path, monkeypatch)
 
     monkeypatch.setattr(
         sleep_cycle,
@@ -358,8 +373,10 @@ def test_sleep_cli_non_json_handles_partial_cycle(monkeypatch, capsys) -> None:
     assert "lane_errors\tcofire" in output
 
 
-def test_sleep_cli_non_json_handles_locked_cycle(monkeypatch, capsys) -> None:
+def test_sleep_cli_non_json_handles_locked_cycle(tmp_path, monkeypatch, capsys) -> None:
     from chronovisor.ops import sleep_cycle
+
+    patch_wiki(tmp_path, monkeypatch)
 
     monkeypatch.setattr(
         sleep_cycle,

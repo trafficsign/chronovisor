@@ -2,11 +2,24 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from chronovisor.research import research_service
 from chronovisor.research.research_orchestrator import PlannerResponse
 from chronovisor.research.research_service import run_evidence_research
 from chronovisor.search.research_config import ResearchConfig
 from chronovisor.search.research_store import ResearchStore
+
+
+@pytest.fixture(autouse=True)
+def _valid_okf_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "okf-root"
+    root.mkdir()
+    for name in ("index.md", "log.md", "schema.md"):
+        (root / name).write_text("legacy\n", encoding="utf-8")
+    monkeypatch.setattr(research_service, "CHRONOVISOR_ROOT", root)
 
 
 def test_service_writes_bundle_audit_and_receipt(tmp_path: Path, monkeypatch) -> None:

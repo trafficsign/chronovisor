@@ -16,6 +16,7 @@ from chronovisor.core.link_fix import atomic_write
 from chronovisor.core.store import (
     CHRONOVISOR_ROOT,
     init_chronovisor,
+    okf_runtime_operation,
     okf_startup_status,
 )
 from chronovisor.ingest import orchestrator
@@ -442,6 +443,23 @@ def drain(
 ) -> dict[str, Any]:
     """Drain pending raws and release the ingest runner at cycle end."""
 
+    with okf_runtime_operation(CHRONOVISOR_ROOT):
+        return _drain_locked(
+            max_batches=max_batches,
+            max_units=max_units,
+            sleep_seconds=sleep_seconds,
+            log_file=log_file,
+        )
+
+
+def _drain_locked(
+    *,
+    max_batches: int,
+    max_units: int,
+    sleep_seconds: float,
+    log_file: Path | None,
+) -> dict[str, Any]:
+
     if not okf_startup_status(CHRONOVISOR_ROOT).allowed:
         return {"status": "blocked", "category": "okf_startup_blocked"}
 
@@ -540,6 +558,16 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     """Run the ``chronovisor-ingest-drain`` command-line entry point."""
+    from chronovisor.core.okf_cutover import OKFStartupBlocked
+    try:
+        with okf_runtime_operation(CHRONOVISOR_ROOT):
+            return _main_locked(argv)
+    except OKFStartupBlocked:
+        print(json.dumps({"status": "blocked", "category": "okf_startup_blocked"}))
+        return 75
+
+
+def _main_locked(argv: list[str] | None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     if not okf_startup_status(CHRONOVISOR_ROOT).allowed:

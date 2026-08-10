@@ -45,6 +45,8 @@ def test_workspace_stages_validated_namespaces_without_touching_source(
     tmp_path: Path,
 ) -> None:
     source, runtime = _roots(tmp_path)
+    with durable_state.okf_writer_lock(source):
+        pass
     before = _snapshot(source)
 
     workspace = prepare_okf_workspace(source, runtime, "run-001")

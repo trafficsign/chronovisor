@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import io
 import json
+import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+from chronovisor.core.durable_state import okf_writer_lock
 from chronovisor.hosts import hook_dispatcher
 from chronovisor.ops import background_jobs
 from chronovisor.recall import recall_breaker, recall_runtime
@@ -20,7 +23,12 @@ def test_recall_deadline_api_is_reexported_from_recall_runtime() -> None:
 
 @pytest.fixture(autouse=True)
 def isolate_recall_breaker(monkeypatch, tmp_path: Path) -> None:
+    root = tmp_path / "wiki"
+    root.mkdir()
+    for name in ("index.md", "log.md", "schema.md"):
+        (root / name).write_text("legacy\n", encoding="utf-8")
     monkeypatch.setattr(recall_breaker, "BREAKER_FILE", tmp_path / "breaker.json")
+    monkeypatch.setattr(hook_dispatcher, "CHRONOVISOR_ROOT", root)
     monkeypatch.setattr(
         hook_dispatcher,
         "okf_startup_status",
@@ -34,6 +42,82 @@ def _isolate_background_jobs(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(background_jobs, "STATE_FILE", tmp_path / "jobs" / "state.json")
     monkeypatch.setattr(background_jobs, "LOCK_FILE", tmp_path / "jobs" / "state.lock")
     monkeypatch.setattr(hook_dispatcher, "init_chronovisor", lambda: None)
+
+
+def test_user_prompt_fails_open_without_reading_stdin_when_writer_is_exclusive(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "wiki"
+    root.mkdir(exist_ok=True)
+    for name in ("index.md", "log.md", "schema.md"):
+        (root / name).write_text("legacy\n", encoding="utf-8")
+    script = """
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+from chronovisor.hosts import hook_dispatcher
+hook_dispatcher.CHRONOVISOR_ROOT = Path(sys.argv[1])
+hook_dispatcher.recall_enabled = lambda: True
+hook_dispatcher.load_hook_policy = lambda _path: SimpleNamespace(user_prompt_recall=True)
+hook_dispatcher.run_user_prompt = lambda *_args: (_ for _ in ()).throw(RuntimeError("called"))
+class NoRead:
+    def read(self):
+        raise RuntimeError("stdin read")
+hook_dispatcher.sys.stdin = NoRead()
+raise SystemExit(hook_dispatcher.main(["--host", "codex", "--event", "UserPromptSubmit", "--hook"]))
+"""
+
+    with okf_writer_lock(root, exclusive=True):
+        result = subprocess.run(
+            [sys.executable, "-c", script, str(root)],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+
+    assert result.returncode == 0
+    assert result.stdout == "{}\n"
+    assert result.stderr == ""
+
+
+def test_user_prompt_fails_open_for_unsafe_runtime_lease(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    root = tmp_path / "unsafe-wiki"
+    root.mkdir()
+    for name in ("index.md", "log.md", "schema.md"):
+        (root / name).write_text("legacy\n", encoding="utf-8")
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    (root / "runtime").symlink_to(victim, target_is_directory=True)
+    monkeypatch.setattr(hook_dispatcher, "CHRONOVISOR_ROOT", root)
+    monkeypatch.setattr(hook_dispatcher, "recall_enabled", lambda: True)
+    monkeypatch.setattr(
+        hook_dispatcher,
+        "load_hook_policy",
+        lambda _path: SimpleNamespace(user_prompt_recall=True),
+    )
+    monkeypatch.setattr(
+        hook_dispatcher,
+        "run_user_prompt",
+        lambda *_args: pytest.fail("unsafe lease must fail open before recall"),
+    )
+    monkeypatch.setattr(
+        "sys.stdin",
+        SimpleNamespace(read=lambda: pytest.fail("unsafe lease must not read stdin")),
+    )
+
+    assert (
+        hook_dispatcher.main(
+            ["--host", "codex", "--event", "UserPromptSubmit", "--hook"]
+        )
+        == 0
+    )
+    assert capsys.readouterr().out == "{}\n"
+    assert not (victim / "okf-writer.lock").exists()
 
 
 def test_user_prompt_dispatches_to_recall_runtime(monkeypatch, capsys) -> None:

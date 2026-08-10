@@ -14,6 +14,7 @@ import fcntl
 import hashlib
 import json
 import os
+import stat
 import subprocess
 import tempfile
 import time
@@ -29,6 +30,102 @@ THRESHOLD_POLICY = {
     "cooldown_seconds": 3600,
     "incident_budget_per_day": 4,
 }
+
+
+class WriterGateBlocked(RuntimeError):
+    pass
+
+
+def _reject_symlink_ancestors(path: Path) -> None:
+    absolute = path.absolute()
+    current = Path(absolute.anchor)
+    for part in absolute.parts[1:]:
+        current /= part
+        if stat.S_ISLNK(os.lstat(current).st_mode):
+            raise WriterGateBlocked
+
+
+def _entries(directory_fd: int) -> dict[str, int]:
+    with os.scandir(directory_fd) as iterator:
+        return {
+            entry.name: entry.stat(follow_symlinks=False).st_mode
+            for entry in iterator
+        }
+
+
+def _require_safe_tree(directory_fd: int, flags: int) -> None:
+    for name, mode in _entries(directory_fd).items():
+        if stat.S_ISREG(mode):
+            continue
+        if not stat.S_ISDIR(mode):
+            raise WriterGateBlocked
+        child_fd = os.open(name, flags, dir_fd=directory_fd)
+        try:
+            _require_safe_tree(child_fd, flags)
+        finally:
+            os.close(child_fd)
+
+
+@contextlib.contextmanager
+def writer_gate(chronovisor_root: Path):
+    """Pin the root parent shared while rejecting non-legacy/migrating roots."""
+
+    entered = False
+    try:
+        root = chronovisor_root.absolute()
+        if root.parent == root:
+            raise WriterGateBlocked
+        _reject_symlink_ancestors(root)
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        flags |= getattr(os, "O_CLOEXEC", 0)
+        parent_fd = os.open(root.parent, flags)
+        root_fd = runtime_fd = -1
+        try:
+            fcntl.flock(parent_fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            root_fd = os.open(root.name, flags, dir_fd=parent_fd)
+            entries = _entries(root_fd)
+            if any(
+                not (stat.S_ISREG(mode) or stat.S_ISDIR(mode))
+                for mode in entries.values()
+            ):
+                raise WriterGateBlocked
+            for name in ("index.md", "log.md", "schema.md"):
+                if not stat.S_ISREG(entries.get(name, 0)):
+                    raise WriterGateBlocked
+            if "config.toml" in entries and not stat.S_ISREG(entries["config.toml"]):
+                raise WriterGateBlocked
+            for name in ("logs", "runtime"):
+                if name in entries and not stat.S_ISDIR(entries[name]):
+                    raise WriterGateBlocked
+            for name in ("raw", "pages", "system"):
+                if name not in entries:
+                    continue
+                if not stat.S_ISDIR(entries[name]):
+                    raise WriterGateBlocked
+                child_fd = os.open(name, flags, dir_fd=root_fd)
+                try:
+                    _require_safe_tree(child_fd, flags)
+                finally:
+                    os.close(child_fd)
+            runtime_fd = os.open("runtime", flags, dir_fd=root_fd)
+            if "migrations" in _entries(runtime_fd):
+                raise WriterGateBlocked
+            entered = True
+            yield
+        finally:
+            if runtime_fd >= 0:
+                os.close(runtime_fd)
+            if root_fd >= 0:
+                os.close(root_fd)
+            with contextlib.suppress(OSError):
+                fcntl.flock(parent_fd, fcntl.LOCK_UN)
+            os.close(parent_fd)
+    except WriterGateBlocked:
+        raise
+    except OSError as exc:
+        if entered:
+            raise
+        raise WriterGateBlocked from exc
 
 
 def canonical_bytes(value: Any) -> bytes:
@@ -348,10 +445,16 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--max-main-age-seconds", type=int, default=1_200)
     args = parser.parse_args(argv)
-    result = run_once(
-        args.chronovisor_root.expanduser().resolve(strict=False),
-        max_main_age_seconds=max(1, args.max_main_age_seconds),
-    )
+    root = args.chronovisor_root.expanduser().absolute()
+    try:
+        with writer_gate(root):
+            result = run_once(
+                root,
+                max_main_age_seconds=max(1, args.max_main_age_seconds),
+            )
+    except WriterGateBlocked:
+        print(json.dumps({"status": "blocked", "category": "okf_startup_blocked"}))
+        return 75
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))
     return 0 if result["status"] == "ok" else 1
 

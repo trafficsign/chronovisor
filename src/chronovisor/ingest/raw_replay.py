@@ -28,7 +28,7 @@ from chronovisor.core.hashutil import sha256_file as _sha256_path
 from chronovisor.core.jobs import JobStatus, job_store
 from chronovisor.core.page_mutation import decision_authority_lock
 from chronovisor.core.raw_store import RawStore
-from chronovisor.core.store import CHRONOVISOR_ROOT, RAW_DIR
+from chronovisor.core.store import CHRONOVISOR_ROOT, RAW_DIR, okf_runtime_operation
 from chronovisor.core.timeutil import iso_seconds as _iso
 from chronovisor.decision.decision_authority import (
     compare_semantic_authority,
@@ -3982,6 +3982,19 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
+    if args.dry_run:
+        return _main_locked(args)
+    from chronovisor.core.okf_cutover import OKFStartupBlocked
+
+    try:
+        with okf_runtime_operation(CHRONOVISOR_ROOT):
+            return _main_locked(args)
+    except OKFStartupBlocked:
+        print(json.dumps({"status": "blocked", "category": "okf_startup_blocked"}))
+        return 75
+
+
+def _main_locked(args: argparse.Namespace) -> int:
     if args.run:
         if args.dry_run:
             payload = build_queue(

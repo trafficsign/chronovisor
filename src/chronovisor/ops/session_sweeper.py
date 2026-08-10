@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from chronovisor.core.link_fix import atomic_write
-from chronovisor.core.store import CHRONOVISOR_ROOT
+from chronovisor.core.store import CHRONOVISOR_ROOT, okf_runtime_operation
 
 STATUS_FILE = CHRONOVISOR_ROOT / "runtime" / "session-sweeper-latest.json"
 STATE_FILE = CHRONOVISOR_ROOT / "runtime" / "session-sweeper-state.json"
@@ -105,7 +105,18 @@ def _run_one(host: str, path: Path) -> dict[str, Any]:
     return saver.run(args)
 
 
-def run_sweeper(*, limit: int = 4, idle_seconds: int = 300, write: bool = True) -> dict[str, Any]:
+def run_sweeper(
+    *, limit: int = 4, idle_seconds: int = 300, write: bool = True
+) -> dict[str, Any]:
+    with okf_runtime_operation(CHRONOVISOR_ROOT):
+        return _run_sweeper_locked(
+            limit=limit, idle_seconds=idle_seconds, write=write
+        )
+
+
+def _run_sweeper_locked(
+    *, limit: int, idle_seconds: int, write: bool
+) -> dict[str, Any]:
     pending = discover_pending(idle_seconds=idle_seconds)
     try:
         state = json.loads(STATE_FILE.read_text(encoding="utf-8"))
@@ -167,7 +178,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--limit", type=int, default=4)
     parser.add_argument("--idle-seconds", type=int, default=300)
     args = parser.parse_args(argv)
-    print(json.dumps(run_sweeper(limit=max(0, args.limit), idle_seconds=max(0, args.idle_seconds)), ensure_ascii=False))
+    from chronovisor.core.okf_cutover import OKFStartupBlocked
+
+    try:
+        payload = run_sweeper(
+            limit=max(0, args.limit), idle_seconds=max(0, args.idle_seconds)
+        )
+    except OKFStartupBlocked:
+        print(json.dumps({"status": "blocked", "category": "okf_startup_blocked"}))
+        return 75
+    print(json.dumps(payload, ensure_ascii=False))
     return 0
 
 

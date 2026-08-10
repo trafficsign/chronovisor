@@ -8,7 +8,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
-from chronovisor.core.store import PAGES_DIR, find_page
+from chronovisor.core.store import PAGES_DIR, find_page, okf_runtime_operation
 from chronovisor.ingest.page_write import apply_page_writes, prepare_page_write
 from chronovisor.ops.health import health_snapshot
 
@@ -85,6 +85,15 @@ def write_reflection_page(
     output_dir: Path | None = None,
     write: bool = True,
 ) -> dict[str, Any]:
+    if write:
+        with okf_runtime_operation(PAGES_DIR.parent):
+            return _write_reflection_page_locked(output_dir=output_dir, write=True)
+    return _write_reflection_page_locked(output_dir=output_dir, write=False)
+
+
+def _write_reflection_page_locked(
+    *, output_dir: Path | None, write: bool
+) -> dict[str, Any]:
     snapshot = health_snapshot()
     today = date.today()
     page_id = f"memory-reflection-{today.isoformat()}"
@@ -136,7 +145,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-write", action="store_true")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
-    data = write_reflection_page(write=not args.no_write)
+    from chronovisor.core.okf_cutover import OKFStartupBlocked
+
+    try:
+        data = write_reflection_page(write=not args.no_write)
+    except OKFStartupBlocked:
+        print(json.dumps({"status": "blocked", "category": "okf_startup_blocked"}))
+        return 75
     if args.json:
         print(json.dumps(data, ensure_ascii=False, indent=2))
     else:

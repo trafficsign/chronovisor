@@ -23,6 +23,7 @@ from chronovisor.core.store import (
     SYSTEM_DIR,
     find_page,
     init_chronovisor,
+    okf_runtime_operation,
 )
 from chronovisor.ingest.page_registry import PageRegistry, PageRegistryError
 from chronovisor.raw.record_raw import ingest_raw, record_raw
@@ -1615,6 +1616,11 @@ def chronovisor_tick() -> str:
 
 def main():
     """Run the ``chronovisor-mcp`` command-line entry point."""
+    with okf_runtime_operation(CHRONOVISOR_ROOT):
+        return _main_locked()
+
+
+def _main_locked():
     init_chronovisor()
     # Warm the fixed rerank route in parallel with existing index startup work.
     reranker_warmup = None

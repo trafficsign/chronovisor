@@ -43,6 +43,7 @@ from chronovisor.core.store import (
     RAW_DIR,
     RuntimeContext,
     init_chronovisor,
+    okf_runtime_operation,
     okf_startup_status,
 )
 from chronovisor.decision.decision_policy import resolve_decision_policy
@@ -899,6 +900,16 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     """Run the ``chronovisor-claude-code-record`` command-line entry point."""
+    from chronovisor.core.okf_cutover import OKFStartupBlocked
+    try:
+        with okf_runtime_operation(CHRONOVISOR_ROOT):
+            return _main_locked(argv)
+    except OKFStartupBlocked:
+        print(json.dumps({"status": "blocked", "category": "okf_startup_blocked"}))
+        return 75
+
+
+def _main_locked(argv: list[str] | None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     if not okf_startup_status(CHRONOVISOR_ROOT).allowed:

@@ -4,8 +4,26 @@ import json
 from contextlib import contextmanager
 from pathlib import Path
 
+import pytest
+
+from chronovisor.core import page_mutation
 from chronovisor.ops import entities
 from chronovisor.ops.entities import extract_entities, patch_entities_frontmatter
+
+
+@pytest.fixture(autouse=True)
+def _valid_okf_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "okf-root"
+    root.mkdir()
+    for name in ("index.md", "log.md", "schema.md"):
+        (root / name).write_text("legacy\n", encoding="utf-8")
+    from chronovisor.core import store
+
+    monkeypatch.setattr(entities, "CHRONOVISOR_ROOT", root)
+    monkeypatch.setattr(page_mutation, "CHRONOVISOR_ROOT", root)
+    monkeypatch.setattr(store, "CHRONOVISOR_ROOT", root)
 
 
 def _frontier_decision(

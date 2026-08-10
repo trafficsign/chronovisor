@@ -9,6 +9,15 @@ import pytest
 from chronovisor.core import page_mutation
 
 
+@pytest.fixture(autouse=True)
+def _valid_okf_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = tmp_path / "wiki-root"
+    root.mkdir()
+    for name in ("index.md", "log.md", "schema.md"):
+        (root / name).write_text("legacy\n", encoding="utf-8")
+    monkeypatch.setattr(page_mutation, "CHRONOVISOR_ROOT", root)
+
+
 def _page(path: Path, *, title: str, body: str) -> None:
     path.write_text(
         f"---\ntitle: {title}\nupdated: 2026-07-01\nstatus: stable\ntype: knowledge\n---\n{body}",
@@ -46,6 +55,8 @@ def test_file_locks_reuse_same_thread_outer_lease(
     path_name: str,
 ) -> None:
     calls: list[int] = []
+    with page_mutation.okf_runtime_operation(page_mutation.CHRONOVISOR_ROOT):
+        pass
     monkeypatch.setattr(
         page_mutation.fcntl,
         "flock",
@@ -56,7 +67,19 @@ def test_file_locks_reuse_same_thread_outer_lease(
     with lock(tmp_path / path_name), lock(tmp_path / path_name):
         pass
 
-    assert calls == [page_mutation.fcntl.LOCK_EX, page_mutation.fcntl.LOCK_UN]
+    expected = [page_mutation.fcntl.LOCK_EX, page_mutation.fcntl.LOCK_UN]
+    if lock_name == "chronovisor_mutation_lock":
+        expected = [
+            page_mutation.fcntl.LOCK_SH,
+            page_mutation.fcntl.LOCK_SH,
+            page_mutation.fcntl.LOCK_SH,
+            page_mutation.fcntl.LOCK_EX,
+            page_mutation.fcntl.LOCK_UN,
+            page_mutation.fcntl.LOCK_UN,
+            page_mutation.fcntl.LOCK_UN,
+            page_mutation.fcntl.LOCK_UN,
+        ]
+    assert calls == expected
 
 
 def test_prepare_and_apply_exact_replacement_adds_marker(

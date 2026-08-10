@@ -1,12 +1,68 @@
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 from pathlib import Path
 
 import pytest
 
+from chronovisor.core.okf_cutover import OKFStartupBlocked, OKFStartupDecision
 from chronovisor.ops import sleep_cycle
+
+
+@pytest.fixture(autouse=True)
+def _valid_okf_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = tmp_path / "wiki"
+    root.mkdir()
+    for name in ("index.md", "log.md", "schema.md"):
+        (root / name).write_text("legacy\n", encoding="utf-8")
+    monkeypatch.setattr(sleep_cycle, "CHRONOVISOR_ROOT", root)
+
+
+def test_direct_sleep_entrypoint_holds_shared_writer_lease(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    checked = False
+
+    def run(**_kwargs):
+        nonlocal checked
+        descriptor = os.open(sleep_cycle.CHRONOVISOR_ROOT, os.O_RDONLY)
+        try:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        finally:
+            os.close(descriptor)
+        checked = True
+        return {"status": "ok"}
+
+    monkeypatch.setattr(sleep_cycle, "_run_sleep_cycle_operation", run)
+
+    assert sleep_cycle.main(["--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == {"status": "ok"}
+    assert checked
+
+
+def test_direct_sleep_entrypoint_reports_content_free_startup_block(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(
+        sleep_cycle,
+        "run_sleep_cycle",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            OKFStartupBlocked(
+                OKFStartupDecision(False, "blocked", "blocked", "unsafe_detail")
+            )
+        ),
+    )
+
+    assert sleep_cycle.main(["--json"]) == 75
+    assert json.loads(capsys.readouterr().out) == {
+        "status": "blocked",
+        "category": "okf_startup_blocked",
+    }
 
 
 def test_sleep_lock_is_single_flight(tmp_path: Path, monkeypatch) -> None:

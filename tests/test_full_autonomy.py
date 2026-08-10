@@ -382,6 +382,122 @@ def test_independent_observer_has_no_package_import_and_cross_checks_main(
     assert observed["sequence"] == 1
 
 
+def test_independent_observer_main_blocks_without_mutation_when_parent_busy(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    observer_path = (
+        Path(__file__).parents[1] / "src" / "chronovisor" / "deadman_observer.py"
+    )
+    spec = importlib.util.spec_from_file_location("deadman_observer_busy", observer_path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    root = tmp_path / "wiki"
+    (root / "runtime").mkdir(parents=True)
+    for name in ("index.md", "log.md", "schema.md"):
+        (root / name).write_text("legacy\n", encoding="utf-8")
+    from chronovisor.core.durable_state import okf_writer_lock
+
+    with okf_writer_lock(root, exclusive=True):
+        assert module.main(["--chronovisor-root", str(root)]) == 75
+    assert json.loads(capsys.readouterr().out) == {
+        "status": "blocked",
+        "category": "okf_startup_blocked",
+    }
+    assert not (root / "autonomy").exists()
+
+
+def test_independent_observer_main_rejects_symlink_root_without_mutation(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    observer_path = (
+        Path(__file__).parents[1] / "src" / "chronovisor" / "deadman_observer.py"
+    )
+    spec = importlib.util.spec_from_file_location("deadman_observer_symlink", observer_path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    victim = tmp_path / "victim"
+    (victim / "runtime").mkdir(parents=True)
+    for name in ("index.md", "log.md", "schema.md"):
+        (victim / name).write_text("legacy\n", encoding="utf-8")
+    link = tmp_path / "wiki"
+    link.symlink_to(victim, target_is_directory=True)
+
+    assert module.main(["--chronovisor-root", str(link)]) == 75
+
+    assert json.loads(capsys.readouterr().out) == {
+        "status": "blocked",
+        "category": "okf_startup_blocked",
+    }
+    assert not (victim / "autonomy").exists()
+
+
+@pytest.mark.parametrize(
+    "unsafe_case",
+    ("top_symlink", "nested_symlink", "config_directory", "migrations"),
+)
+def test_independent_observer_main_rejects_unsafe_legacy_tree_without_mutation(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    unsafe_case: str,
+) -> None:
+    observer_path = (
+        Path(__file__).parents[1] / "src" / "chronovisor" / "deadman_observer.py"
+    )
+    spec = importlib.util.spec_from_file_location(
+        f"deadman_observer_{unsafe_case}", observer_path
+    )
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    root = tmp_path / "wiki"
+    (root / "runtime").mkdir(parents=True)
+    (root / "pages").mkdir()
+    for name in ("index.md", "log.md", "schema.md"):
+        (root / name).write_text("legacy\n", encoding="utf-8")
+    if unsafe_case == "top_symlink":
+        (root / "unexpected").symlink_to(root / "index.md")
+    elif unsafe_case == "nested_symlink":
+        (root / "pages" / "unexpected").symlink_to(root / "index.md")
+    elif unsafe_case == "config_directory":
+        (root / "config.toml").mkdir()
+    else:
+        (root / "runtime" / "migrations").mkdir()
+
+    assert module.main(["--chronovisor-root", str(root)]) == 75
+
+    assert json.loads(capsys.readouterr().out) == {
+        "status": "blocked",
+        "category": "okf_startup_blocked",
+    }
+    assert not (root / "autonomy").exists()
+
+
+def test_independent_observer_body_error_is_not_startup_blocked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    observer_path = (
+        Path(__file__).parents[1] / "src" / "chronovisor" / "deadman_observer.py"
+    )
+    spec = importlib.util.spec_from_file_location("deadman_observer_body_error", observer_path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    root = tmp_path / "wiki"
+    (root / "runtime").mkdir(parents=True)
+    for name in ("index.md", "log.md", "schema.md"):
+        (root / name).write_text("legacy\n", encoding="utf-8")
+    monkeypatch.setattr(
+        module,
+        "run_once",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("body failed")),
+    )
+
+    with pytest.raises(OSError, match="body failed"):
+        module.main(["--chronovisor-root", str(root)])
+
+
 def test_observer_threshold_debounces_dedupes_and_honors_cooldown(
     tmp_path: Path,
 ) -> None:

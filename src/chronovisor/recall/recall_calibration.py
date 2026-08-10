@@ -24,6 +24,7 @@ from chronovisor.core.page_mutation import (
     decision_authority_lock,
 )
 from chronovisor.core.recall_runtime_paths import RECALL_DIR
+from chronovisor.core.store import CHRONOVISOR_ROOT, okf_runtime_operation
 from chronovisor.decision import decision_authority
 from chronovisor.decision.frontier_guard import is_human_required_result
 from chronovisor.decision.semantic_hold import (
@@ -1211,6 +1212,17 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     """Run the ``chronovisor-recall-calibrate`` command-line entry point."""
     args = build_parser().parse_args(argv)
+    from chronovisor.core.okf_cutover import OKFStartupBlocked
+
+    try:
+        with okf_runtime_operation(CHRONOVISOR_ROOT):
+            return _main_locked(args)
+    except OKFStartupBlocked:
+        print(json.dumps({"status": "blocked", "category": "okf_startup_blocked"}))
+        return 75
+
+
+def _main_locked(args: argparse.Namespace) -> int:
     if args.rollback:
         payload = rollback_last()
     else:

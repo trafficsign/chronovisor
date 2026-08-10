@@ -3,9 +3,17 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from chronovisor.core.durable_state import read_sealed_json, write_sealed_json
 from chronovisor.librarian import librarian_rollout
 from chronovisor.recall import collection_authority
+
+
+@pytest.fixture(autouse=True)
+def _valid_okf_root(tmp_path: Path) -> None:
+    for name in ("index.md", "log.md", "schema.md"):
+        (tmp_path / name).write_text("legacy\n", encoding="utf-8")
 
 
 def _write(path: Path, payload: dict) -> None:

@@ -11,6 +11,7 @@ from dataclasses import replace
 from typing import Any
 
 from chronovisor.core.background_jobs import enqueue_job
+from chronovisor.core.store import CHRONOVISOR_ROOT, okf_runtime_operation
 from chronovisor.research.evidence_bundle import (
     ClaimAssessment,
     build_bundle,
@@ -267,6 +268,17 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     """Run the ``chronovisor-research`` command-line entry point."""
     args = build_parser().parse_args(argv)
+    from chronovisor.core.okf_cutover import OKFStartupBlocked
+
+    try:
+        with okf_runtime_operation(CHRONOVISOR_ROOT):
+            return _main_locked(args)
+    except OKFStartupBlocked:
+        print(json.dumps({"status": "blocked", "category": "okf_startup_blocked"}))
+        return 75
+
+
+def _main_locked(args: argparse.Namespace) -> int:
     if args.sync:
         payload = run_evidence_research(
             args.query,

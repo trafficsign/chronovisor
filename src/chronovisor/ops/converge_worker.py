@@ -222,6 +222,17 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.set_defaults(run_maintenance=True)
     args = parser.parse_args(argv)
+    from chronovisor.core.okf_cutover import OKFStartupBlocked
+
+    try:
+        with convergence.okf_runtime_operation():
+            return _main_locked(args)
+    except OKFStartupBlocked:
+        print(json.dumps({"status": "blocked", "category": "okf_startup_blocked"}))
+        return 75
+
+
+def _main_locked(args: argparse.Namespace) -> int:
     if not convergence.okf_startup_status().allowed:
         print(
             json.dumps({"status": "blocked", "category": "okf_startup_blocked"})

@@ -18,6 +18,7 @@ from chronovisor.core.durable_state import (
     atomic_write_bytes,
     file_lock,
     fsync_directory,
+    okf_writer_lock,
     seal_object,
     verify_sealed_object,
 )
@@ -157,6 +158,7 @@ _BOOTSTRAP_ENTRIES = {
     "runtime": "directory",
     "system": "directory",
 }
+_BOOTSTRAP_RUNTIME_ENTRIES = {"okf-writer.lock": "file"}
 _ROOT_RESERVED = ("index.md", "log.md", "schema.md")
 
 
@@ -293,7 +295,12 @@ def _discover_unmigrated(source_root: Path) -> OKFStartupDecision:
     if any(_BOOTSTRAP_ENTRIES.get(name) != kind for name, kind in entries.items()):
         return _blocked("unsafe_bootstrap_layout")
     for name, kind in entries.items():
-        if kind == "directory" and _directory_entries(source_root / name):
+        if kind != "directory":
+            continue
+        children = _directory_entries(source_root / name)
+        if name == "runtime" and children == _BOOTSTRAP_RUNTIME_ENTRIES:
+            continue
+        if children:
             return _blocked("content_without_migration")
     return OKFStartupDecision(True, "bootstrap", "uninitialized", "ok")
 
@@ -378,6 +385,25 @@ def execute_okf_cutover(
 ) -> CutoverState:
     """Atomically coordinate the three direct-live OKF assets while offline."""
 
+    with okf_writer_lock(source_root, exclusive=True, allow_create=False):
+        return _execute_okf_cutover_locked(
+            source_root,
+            runtime_root,
+            run_id,
+            is_quiescent=is_quiescent,
+            fault_inject=fault_inject,
+        )
+
+
+def _execute_okf_cutover_locked(
+    source_root: Path,
+    runtime_root: Path,
+    run_id: str,
+    *,
+    is_quiescent: Callable[[], bool],
+    fault_inject: FaultInjector | None,
+) -> CutoverState:
+
     context = _context(source_root, runtime_root, run_id)
     _reject_symlink(context.workspace / "cutover.lock", "cutover lock")
     with file_lock(context.workspace / "cutover.lock"):
@@ -452,6 +478,20 @@ def recover_okf_cutover(
     is_quiescent: Callable[[], bool],
 ) -> CutoverState:
     """Resolve an interrupted cutover to all-new or all-old from disk truth."""
+
+    with okf_writer_lock(source_root, exclusive=True, allow_create=False):
+        return _recover_okf_cutover_locked(
+            source_root, runtime_root, run_id, is_quiescent=is_quiescent
+        )
+
+
+def _recover_okf_cutover_locked(
+    source_root: Path,
+    runtime_root: Path,
+    run_id: str,
+    *,
+    is_quiescent: Callable[[], bool],
+) -> CutoverState:
 
     context = _context(source_root, runtime_root, run_id)
     _reject_symlink(context.workspace / "cutover.lock", "cutover lock")
@@ -549,6 +589,25 @@ def cleanup_okf_cutover(
     fault_inject: FaultInjector | None = None,
 ) -> CutoverState:
     """Replace one exact terminal proof workspace with a compact receipt."""
+
+    with okf_writer_lock(source_root, exclusive=True, allow_create=False):
+        return _cleanup_okf_cutover_locked(
+            source_root,
+            runtime_root,
+            run_id,
+            is_quiescent=is_quiescent,
+            fault_inject=fault_inject,
+        )
+
+
+def _cleanup_okf_cutover_locked(
+    source_root: Path,
+    runtime_root: Path,
+    run_id: str,
+    *,
+    is_quiescent: Callable[[], bool],
+    fault_inject: FaultInjector | None,
+) -> CutoverState:
 
     source, runtime, workspace = _workspace_roots(
         source_root, runtime_root, run_id

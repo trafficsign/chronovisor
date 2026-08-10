@@ -18,7 +18,11 @@ from chronovisor.core.canonical_json import (
     canonical_json_line_bytes_strict,
     canonical_json_sha256_strict,
 )
-from chronovisor.core.durable_state import atomic_write_bytes, fsync_directory
+from chronovisor.core.durable_state import (
+    atomic_write_bytes,
+    fsync_directory,
+    okf_writer_lock,
+)
 from chronovisor.core.okf_prepare import (
     MigrationPlan,
     Namespace,
@@ -70,6 +74,20 @@ def prepare_okf_workspace(
     run_id: str,
 ) -> Path:
     """Build and validate an offline staging workspace without changing live roots."""
+
+    with okf_writer_lock(
+        source_root,
+        exclusive=True,
+        allow_create=not (runtime_root / "migrations").exists(),
+    ):
+        return _prepare_okf_workspace_locked(source_root, runtime_root, run_id)
+
+
+def _prepare_okf_workspace_locked(
+    source_root: Path,
+    runtime_root: Path,
+    run_id: str,
+) -> Path:
 
     if not _RUN_ID_RE.fullmatch(run_id):
         raise ValueError("run_id must be a safe single path component")

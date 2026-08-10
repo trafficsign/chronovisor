@@ -2,7 +2,21 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from chronovisor.ops import metadata_backfill
+
+
+@pytest.fixture(autouse=True)
+def _valid_okf_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for name in ("index.md", "log.md", "schema.md"):
+        (tmp_path / name).write_text("legacy\n", encoding="utf-8")
+    from chronovisor.core import page_mutation
+
+    monkeypatch.setattr(page_mutation, "CHRONOVISOR_ROOT", tmp_path)
+    monkeypatch.setattr(metadata_backfill, "CHRONOVISOR_ROOT", tmp_path)
 
 
 def _decision(value: str) -> dict:

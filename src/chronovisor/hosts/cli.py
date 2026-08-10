@@ -1499,9 +1499,39 @@ def _dispatch_okf(args: argparse.Namespace) -> int:
     return 0
 
 
+def _okf_lease_bypass(args: argparse.Namespace) -> bool:
+    """Keep only read-only diagnostics and dedicated OKF commands outside SH."""
+
+    command = args.command
+    if command in {
+        "okf",
+        "credentials",
+        "runtime-identity",
+    }:
+        return True
+    return bool(command == "hooks" and args.hooks_command == "inspect")
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run the ``chronovisor`` command-line entry point."""
-    return dispatch(build_parser().parse_args(argv))
+    args = build_parser().parse_args(argv)
+    if _okf_lease_bypass(args):
+        return dispatch(args)
+    from chronovisor.core.okf_cutover import OKFStartupBlocked
+
+    try:
+        with chronovisor_store.okf_runtime_operation(
+            chronovisor_store.CHRONOVISOR_ROOT
+        ):
+            return dispatch(args)
+    except OKFStartupBlocked:
+        payload = {"status": "blocked", "category": "okf_startup_blocked"}
+        if args.json:
+            print(json.dumps(payload, sort_keys=True))
+        else:
+            print("status\tblocked")
+            print("category\tokf_startup_blocked")
+        return 75
 
 
 if __name__ == "__main__":

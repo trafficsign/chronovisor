@@ -6,6 +6,8 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import pytest
+
 from chronovisor.core.raw_segment import append_capture, capture_date
 from chronovisor.core.raw_store import RawStore
 from chronovisor.core.save_transaction import (
@@ -22,6 +24,12 @@ from chronovisor.raw.raw_archive import (
     seal_eligible,
     verify_archive,
 )
+
+
+@pytest.fixture(autouse=True)
+def _legacy_root(tmp_path: Path) -> None:
+    for name in ("index.md", "log.md", "schema.md"):
+        (tmp_path / name).write_text("legacy\n", encoding="utf-8")
 
 
 def _open_segment(raw_dir: Path, source: Path, payload: bytes):

@@ -24,7 +24,27 @@ from tests.semantic_hold_support import semantic_authority
 
 
 @pytest.fixture(autouse=True)
-def _frontier_approves_existing_auto_apply_tests(monkeypatch) -> None:
+def _frontier_approves_existing_auto_apply_tests(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "okf-root"
+    root.mkdir()
+    for name in ("index.md", "log.md", "schema.md"):
+        (root / name).write_text("legacy\n", encoding="utf-8")
+    from chronovisor.core import index_store
+    from chronovisor.recall import recall_auditor
+
+    monkeypatch.setattr(store, "CHRONOVISOR_ROOT", root)
+    monkeypatch.setattr(page_mutation, "CHRONOVISOR_ROOT", root)
+    monkeypatch.setattr(index_store, "CHRONOVISOR_ROOT", root)
+    monkeypatch.setattr(index_store, "INDEX_DIR", root / ".index")
+    monkeypatch.setattr(index_store, "PAGES_INDEX_FILE", root / ".index" / "pages.json")
+    monkeypatch.setattr(
+        index_store, "BACKLINKS_INDEX_FILE", root / ".index" / "backlinks.json"
+    )
+    monkeypatch.setattr(index_store, "_store", None)
+    monkeypatch.setattr(recall_auto_apply.chronovisor_store, "CHRONOVISOR_ROOT", root)
+    monkeypatch.setattr(recall_auditor.chronovisor_store, "CHRONOVISOR_ROOT", root)
     monkeypatch.setattr(
         recall_auto_apply.decision_authority,
         "current_semantic_authority",
@@ -101,6 +121,9 @@ def _review(decision: str, authority: dict[str, object]) -> dict[str, object]:
 
 
 def _page(root: Path, page_id: str, body: str = "Recall hook body") -> Path:
+    root.mkdir(parents=True, exist_ok=True)
+    for name in ("index.md", "log.md", "schema.md"):
+        (root / name).write_text("legacy\n", encoding="utf-8")
     path = root / "pages" / "ai" / f"{page_id}.md"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
@@ -1308,6 +1331,7 @@ def test_auditor_recording_invokes_auto_apply(tmp_path, monkeypatch, capsys) -> 
     )
     monkeypatch.setattr(store, "CHRONOVISOR_ROOT", pages_root)
     monkeypatch.setattr(store, "PAGES_DIR", pages_root / "pages")
+    monkeypatch.setattr(page_mutation, "CHRONOVISOR_ROOT", pages_root)
     monkeypatch.setattr(recall_runtime, "RECALL_FEEDBACK_FILE", feedback_file)
     monkeypatch.setattr(recall_runtime, "RECALL_LOG_FILE", log_file)
     monkeypatch.setattr(recall_auditor, "RECALL_LOG_FILE", log_file)

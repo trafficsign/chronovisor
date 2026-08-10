@@ -58,7 +58,14 @@ from chronovisor.recall.recall_runtime import (
 
 
 @pytest.fixture(autouse=True)
-def disable_live_recall_policy(monkeypatch: pytest.MonkeyPatch) -> None:
+def disable_live_recall_policy(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    root = tmp_path / "wiki"
+    root.mkdir()
+    for name in ("index.md", "log.md", "schema.md"):
+        (root / name).write_text("legacy\n", encoding="utf-8")
+    monkeypatch.setattr(recall_runtime, "CHRONOVISOR_ROOT", root)
     monkeypatch.setenv("CHRONOVISOR_RECALL_IMPROVEMENT_POLICY", "0")
 
 

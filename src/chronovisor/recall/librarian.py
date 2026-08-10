@@ -17,7 +17,11 @@ from typing import Any
 
 from chronovisor.core import frontmatter
 from chronovisor.core.durable_state import write_sealed_json
-from chronovisor.core.store import CHRONOVISOR_ROOT, okf_startup_status
+from chronovisor.core.store import (
+    CHRONOVISOR_ROOT,
+    okf_runtime_operation,
+    okf_startup_status,
+)
 from chronovisor.ingest.page_registry import PageRegistry
 from chronovisor.ingest.uid_link_index import build_uid_link_index
 from chronovisor.recall.classification import (
@@ -681,6 +685,24 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--repo-root", type=Path)
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
+    if args.status:
+        return _main_locked(parser, args)
+    from chronovisor.core.okf_cutover import OKFStartupBlocked
+
+    try:
+        with okf_runtime_operation(args.root):
+            return _main_locked(parser, args)
+    except OKFStartupBlocked:
+        payload = {"status": "blocked", "category": "okf_startup_blocked"}
+        print(
+            json.dumps(payload, sort_keys=True)
+            if args.json
+            else "status: blocked\ncategory: okf_startup_blocked"
+        )
+        return 75
+
+
+def _main_locked(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     if not okf_startup_status(args.root).allowed:
         payload = {"status": "blocked", "category": "okf_startup_blocked"}
         print(

@@ -35,7 +35,12 @@ from chronovisor.core.runtime_config import (
     runtime_identity,
 )
 from chronovisor.core.sealed_artifact_decoder import schema_matches
-from chronovisor.core.store import CHRONOVISOR_ROOT, LOG_FILE, init_chronovisor
+from chronovisor.core.store import (
+    CHRONOVISOR_ROOT,
+    LOG_FILE,
+    init_chronovisor,
+    okf_runtime_operation,
+)
 from chronovisor.ingest import orchestrator
 from chronovisor.ingest.convergence import is_human_required_result
 from chronovisor.ops.cortex import (
@@ -5547,6 +5552,15 @@ def serve(
     *,
     lan: bool = False,
 ) -> None:
+    if lan:
+        raise ValueError("LAN dashboard access is disabled; use loopback only")
+    if not _dashboard_bind_host_is_loopback(host):
+        raise ValueError("dashboard host must be localhost or 127.0.0.1")
+    with okf_runtime_operation(CHRONOVISOR_ROOT):
+        _serve_locked(host, port, lan=lan)
+
+
+def _serve_locked(host: str, port: int, *, lan: bool) -> None:
     if lan:
         raise ValueError("LAN dashboard access is disabled; use loopback only")
     if not _dashboard_bind_host_is_loopback(host):

@@ -20,6 +20,8 @@ def isolated_index(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     index_dir = chronovisor_root / ".index"
     for d in (pages, system, index_dir):
         d.mkdir(parents=True, exist_ok=True)
+    for name in ("index.md", "log.md", "schema.md"):
+        (chronovisor_root / name).write_text("legacy\n", encoding="utf-8")
 
     monkeypatch.setattr(index_store_mod, "CHRONOVISOR_ROOT", chronovisor_root)
     monkeypatch.setattr(index_store_mod, "PAGES_DIR", pages)
@@ -565,7 +567,7 @@ registry_state: internal
         (isolated_index / "pages" / "symlink.md").symlink_to(outside)
 
         store = IndexStore()
-        store.refresh()
+        store._refresh_locked()
 
         assert store.all_page_ids() == set()
         assert store.meta("index") is None
@@ -595,7 +597,7 @@ registry_state: internal
         pages.symlink_to(real_pages, target_is_directory=True)
 
         store = IndexStore()
-        store.refresh()
+        store._refresh_locked()
 
         assert store.all_page_ids() == set()
 

@@ -22,7 +22,7 @@ from chronovisor.core.migration_snapshot import (
     restore_drill,
 )
 from chronovisor.core.page_mutation import chronovisor_mutation_lock
-from chronovisor.core.store import CHRONOVISOR_ROOT
+from chronovisor.core.store import CHRONOVISOR_ROOT, okf_runtime_operation
 from chronovisor.ingest.page_registry import PageRegistry
 from chronovisor.ingest.uid_link_index import build_uid_link_index
 
@@ -256,7 +256,14 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", type=Path, default=CHRONOVISOR_ROOT)
     args = parser.parse_args(argv)
-    result = repair_known_anchors(args.root)
+    from chronovisor.core.okf_cutover import OKFStartupBlocked
+
+    try:
+        with okf_runtime_operation(args.root):
+            result = repair_known_anchors(args.root)
+    except OKFStartupBlocked:
+        print(json.dumps({"status": "blocked", "category": "okf_startup_blocked"}))
+        return 75
     print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
     return 0 if result["after_unresolved"] == 0 else 1
 

@@ -2173,12 +2173,21 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     """Run the ``chronovisor-recall-auto-apply`` command-line entry point."""
     args = build_parser().parse_args(argv)
-    result = apply_feedback_file(
-        feedback_file=Path(args.feedback_file).expanduser(),
-        config_file=Path(args.config).expanduser(),
-        min_count=args.min_count,
-        dry_run=args.dry_run,
-    )
+    from chronovisor.core.okf_cutover import OKFStartupBlocked
+
+    try:
+        with chronovisor_store.okf_runtime_operation(
+            chronovisor_store.CHRONOVISOR_ROOT
+        ):
+            result = apply_feedback_file(
+                feedback_file=Path(args.feedback_file).expanduser(),
+                config_file=Path(args.config).expanduser(),
+                min_count=args.min_count,
+                dry_run=args.dry_run,
+            )
+    except OKFStartupBlocked:
+        print(json.dumps({"status": "blocked", "category": "okf_startup_blocked"}))
+        return 75
     print(json.dumps(result, ensure_ascii=False))
     return 0
 

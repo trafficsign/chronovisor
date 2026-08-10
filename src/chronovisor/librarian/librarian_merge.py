@@ -26,7 +26,7 @@ from chronovisor.core.migration_snapshot import (
     restore_drill,
 )
 from chronovisor.core.raw_store import RawStore
-from chronovisor.core.store import CHRONOVISOR_ROOT
+from chronovisor.core.store import CHRONOVISOR_ROOT, okf_runtime_operation
 from chronovisor.ingest.page_registry import PageRegistry, PageRegistryError
 from chronovisor.ingest.uid_link_index import build_uid_link_index
 from chronovisor.recall.classification import strongest_sensitivity
@@ -473,6 +473,13 @@ def run_merge_migration(
     *,
     pilot_limit: int | None = None,
 ) -> dict[str, Any]:
+    with okf_runtime_operation(root):
+        return _run_merge_migration_locked(root, pilot_limit=pilot_limit)
+
+
+def _run_merge_migration_locked(
+    root: Path, *, pilot_limit: int | None
+) -> dict[str, Any]:
     started = time.monotonic()
     registry = PageRegistry(root)
     registry.ensure_manifest(write=True)
@@ -659,6 +666,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--root", type=Path, default=CHRONOVISOR_ROOT)
     parser.add_argument("--limit", type=int, default=3)
     args = parser.parse_args(argv)
+    from chronovisor.core.okf_cutover import OKFStartupBlocked
+
+    try:
+        with okf_runtime_operation(args.root):
+            return _main_locked(args)
+    except OKFStartupBlocked:
+        print(json.dumps({"status": "blocked", "category": "okf_startup_blocked"}))
+        return 75
+
+
+def _main_locked(args: argparse.Namespace) -> int:
     if args.command == "discover":
         result = discover_clusters(args.root)
     elif args.command == "pilot":

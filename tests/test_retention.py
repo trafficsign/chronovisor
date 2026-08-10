@@ -5,7 +5,18 @@ import json
 from datetime import date
 from pathlib import Path
 
+import pytest
+
 from chronovisor.core import retention
+
+
+@pytest.fixture(autouse=True)
+def _valid_okf_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for name in ("index.md", "log.md", "schema.md"):
+        (tmp_path / name).write_text("legacy\n", encoding="utf-8")
+    monkeypatch.setattr(retention, "CHRONOVISOR_ROOT", tmp_path)
 
 
 def test_ops_module_delegates_to_core_retention_cli() -> None:

@@ -2,9 +2,32 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
+
 from chronovisor.recall import librarian_release
 
 NOW = datetime(2026, 7, 25, 9, 0, tzinfo=UTC)
+
+
+@pytest.fixture(autouse=True)
+def _valid_okf_root(tmp_path: Path) -> None:
+    for name in ("index.md", "log.md", "schema.md"):
+        (tmp_path / name).write_text("legacy\n", encoding="utf-8")
+
+
+def test_phase0_main_blocks_before_mutation_on_unsafe_root(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = tmp_path / "blocked"
+    root.mkdir()
+    (root / "private.txt").write_text("canary", encoding="utf-8")
+
+    assert librarian_release.main(["phase0", "--root", str(root)]) == 75
+    assert json.loads(capsys.readouterr().out) == {
+        "status": "blocked",
+        "category": "okf_startup_blocked",
+    }
+    assert [path.name for path in root.iterdir()] == ["private.txt"]
 
 
 def _write_json(path: Path, payload: dict) -> None:

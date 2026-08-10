@@ -75,6 +75,12 @@ def okf_startup_status() -> Any:
     return chronovisor_store.okf_startup_status(chronovisor_store.CHRONOVISOR_ROOT)
 
 
+def okf_runtime_operation() -> Any:
+    """Hold the configured root's shared OKF runtime lease."""
+
+    return chronovisor_store.okf_runtime_operation(chronovisor_store.CHRONOVISOR_ROOT)
+
+
 class ConvergenceError(RuntimeError):
     """Base error for convergence state operations."""
 

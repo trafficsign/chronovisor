@@ -24,6 +24,7 @@ from chronovisor.core.runtime_config import (
 from chronovisor.core.store import (
     CHRONOVISOR_ROOT,
     init_chronovisor,
+    okf_runtime_operation,
     okf_startup_status,
 )
 from chronovisor.recall import recall_runtime
@@ -450,6 +451,33 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     """Run the ``chronovisor-hook`` command-line entry point."""
+    preliminary = build_parser().parse_args(argv)
+    is_user_prompt = normalize_event(preliminary.event) == "user-prompt-submit"
+    if is_user_prompt:
+        try:
+            is_noop = (
+                env_flag("CHRONOVISOR_INTERNAL_FRONTIER") is True
+                or not recall_enabled()
+                or not load_hook_policy(preliminary.config).user_prompt_recall
+            )
+        except Exception:
+            is_noop = True
+        if is_noop:
+            _print_host_noop(normalize_host(preliminary.host))
+            return 0
+    from chronovisor.core.okf_cutover import OKFStartupBlocked
+    try:
+        with okf_runtime_operation(CHRONOVISOR_ROOT, blocking=not is_user_prompt):
+            return _main_locked(argv)
+    except OKFStartupBlocked:
+        if is_user_prompt:
+            _print_host_noop(normalize_host(preliminary.host))
+            return 0
+        print(json.dumps({"status": "blocked", "category": "okf_startup_blocked"}))
+        return 75
+
+
+def _main_locked(argv: list[str] | None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:

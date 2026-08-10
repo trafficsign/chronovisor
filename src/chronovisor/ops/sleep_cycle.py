@@ -21,7 +21,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from chronovisor.core.store import CHRONOVISOR_ROOT
+from chronovisor.core.store import CHRONOVISOR_ROOT, okf_runtime_operation
 from chronovisor.ops.graph_maintenance import run_graph_maintenance
 from chronovisor.ops.model_lab import run_due as run_model_lab_due
 from chronovisor.recall.recall_growth import run_growth_cycle
@@ -446,6 +446,22 @@ def run_sleep_cycle(
     eval_limit: int = 100,
     duplicate_limit: int = 200,
     dry_run: bool = False,
+) -> dict[str, Any]:
+    with okf_runtime_operation(CHRONOVISOR_ROOT):
+        return _run_sleep_cycle_operation(
+            raw_limit=raw_limit,
+            eval_limit=eval_limit,
+            duplicate_limit=duplicate_limit,
+            dry_run=dry_run,
+        )
+
+
+def _run_sleep_cycle_operation(
+    *,
+    raw_limit: int,
+    eval_limit: int,
+    duplicate_limit: int,
+    dry_run: bool,
 ) -> dict[str, Any]:
     """Run one cycle, enforcing process-wide read-only cache behavior in previews."""
     lock_handle = None
@@ -1113,12 +1129,23 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
-    payload = run_sleep_cycle(
-        raw_limit=max(0, args.raw_limit),
-        eval_limit=max(0, args.eval_limit),
-        duplicate_limit=max(0, args.duplicate_limit),
-        dry_run=args.dry_run,
-    )
+    from chronovisor.core.okf_cutover import OKFStartupBlocked
+
+    try:
+        payload = run_sleep_cycle(
+            raw_limit=max(0, args.raw_limit),
+            eval_limit=max(0, args.eval_limit),
+            duplicate_limit=max(0, args.duplicate_limit),
+            dry_run=args.dry_run,
+        )
+    except OKFStartupBlocked:
+        payload = {"status": "blocked", "category": "okf_startup_blocked"}
+        if args.json:
+            print(json.dumps(payload, sort_keys=True))
+        else:
+            print("status\tblocked")
+            print("category\tokf_startup_blocked")
+        return 75
     if args.json:
         print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
     else:

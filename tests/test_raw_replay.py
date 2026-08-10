@@ -28,6 +28,8 @@ def _read_jsonl(path: Path) -> list[dict]:
 def _isolate_paths(tmp_path: Path, monkeypatch) -> dict[str, Path]:
     from chronovisor.ingest import failure_supervisor
 
+    for name in ("index.md", "log.md", "schema.md"):
+        (tmp_path / name).write_text("legacy\n", encoding="utf-8")
     paths = {
         "raw": tmp_path / "raw",
         "queue": tmp_path / "review" / "raw-replay-queue.jsonl",
@@ -1582,6 +1584,7 @@ def test_replay_ingest_cannot_restore_claim_removed_by_applied_correction(
     monkeypatch.setattr(ingest, "INDEX_FILE", tmp_path / "index.md")
     monkeypatch.setattr(ingest, "LOG_FILE", tmp_path / "log.md")
     monkeypatch.setattr(page_mutation, "PAGES_DIR", pages)
+    monkeypatch.setattr(page_mutation, "CHRONOVISOR_ROOT", tmp_path)
     monkeypatch.setattr(
         page_mutation,
         "CHRONOVISOR_MUTATION_LOCK",

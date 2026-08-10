@@ -19,7 +19,7 @@ from typing import Any
 
 from chronovisor.core.durable_state import exclusive_text_file_lock
 from chronovisor.core.llm_security import build_child_process_env
-from chronovisor.core.store import CHRONOVISOR_ROOT
+from chronovisor.core.store import CHRONOVISOR_ROOT, okf_runtime_operation
 from chronovisor.core.timeutil import utc_now as _now
 
 SECRET_PATTERNS = [
@@ -680,6 +680,11 @@ def _finish(job_id: str, *, exit_code: int, output: str) -> dict[str, Any]:
 
 
 def run_job(job_id: str) -> dict[str, Any]:
+    with okf_runtime_operation(CHRONOVISOR_ROOT):
+        return _run_job_locked(job_id)
+
+
+def _run_job_locked(job_id: str) -> dict[str, Any]:
     job = _claim(job_id)
     if job is None:
         return {"status": "not_due", "job_id": job_id}
@@ -809,6 +814,17 @@ def main(argv: list[str] | None = None) -> int:
     repair_p = sub.add_parser("repair")
     repair_p.add_argument("--quarantine-pending", action="store_true")
     args = parser.parse_args(argv)
+    from chronovisor.core.okf_cutover import OKFStartupBlocked
+
+    try:
+        with okf_runtime_operation(CHRONOVISOR_ROOT):
+            return _main_locked(args)
+    except OKFStartupBlocked:
+        print(json.dumps({"status": "blocked", "category": "okf_startup_blocked"}))
+        return 75
+
+
+def _main_locked(args: argparse.Namespace) -> int:
     if args.command == "run":
         result = run_job(args.job_id)
     elif args.command == "retry":

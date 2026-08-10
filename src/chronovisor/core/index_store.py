@@ -27,7 +27,12 @@ from chronovisor.core.canonical_document import (
     resolve_internal_markdown_links,
 )
 from chronovisor.core.link_fix import atomic_write
-from chronovisor.core.store import CHRONOVISOR_ROOT, PAGES_DIR, SYSTEM_DIR
+from chronovisor.core.store import (
+    CHRONOVISOR_ROOT,
+    PAGES_DIR,
+    SYSTEM_DIR,
+    okf_runtime_operation,
+)
 
 SCHEMA_VERSION = 11  # canonical YAML, paths, links, and lifecycle eligibility
 INDEX_DIR = CHRONOVISOR_ROOT / ".index"
@@ -373,6 +378,10 @@ class IndexStore:
         Cheap when nothing changed (one stat per page, no parsing).
         Persists only when entries or backlinks actually changed.
         """
+        with okf_runtime_operation(CHRONOVISOR_ROOT):
+            self._refresh_locked()
+
+    def _refresh_locked(self) -> None:
         with self._lock:
             if not self._loaded:
                 self._load_from_disk()

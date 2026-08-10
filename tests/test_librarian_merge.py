@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from chronovisor.core.legacy_archive import migrate_processed_legacy
 from chronovisor.ingest.page_registry import PageRegistry
 from chronovisor.librarian.librarian_merge import prepare_cluster_plan
@@ -10,6 +12,32 @@ from chronovisor.recall.merge_transaction import (
     apply_merge_plan,
     cleanup_expired_preimages,
 )
+
+
+@pytest.fixture(autouse=True)
+def _valid_okf_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in ("index.md", "log.md", "schema.md"):
+        (tmp_path / name).write_text("legacy\n", encoding="utf-8")
+    from chronovisor.core import page_mutation
+
+    monkeypatch.setattr(page_mutation, "CHRONOVISOR_ROOT", tmp_path)
+
+
+def test_discover_main_blocks_before_mutation_on_unsafe_root(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = tmp_path / "blocked"
+    root.mkdir()
+    (root / "private.txt").write_text("canary", encoding="utf-8")
+
+    from chronovisor.librarian import librarian_merge
+
+    assert librarian_merge.main(["discover", "--root", str(root)]) == 75
+    assert json.loads(capsys.readouterr().out) == {
+        "status": "blocked",
+        "category": "okf_startup_blocked",
+    }
+    assert [path.name for path in root.iterdir()] == ["private.txt"]
 
 
 def _page(

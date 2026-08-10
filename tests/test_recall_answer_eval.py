@@ -17,6 +17,18 @@ from chronovisor.recall import recall_answer_eval
 from chronovisor.recall.recall_runtime import stable_prompt_hash
 
 
+@pytest.fixture(autouse=True)
+def _valid_okf_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "okf-root"
+    root.mkdir()
+    for name in ("index.md", "log.md", "schema.md"):
+        (tmp_path / name).write_text("legacy\n", encoding="utf-8")
+        (root / name).write_text("legacy\n", encoding="utf-8")
+    monkeypatch.setattr(recall_answer_eval, "CHRONOVISOR_ROOT", root)
+
+
 def test_answer_evaluation_gate_projection_preserves_sealed_bytes() -> None:
     names = [
         "sealed_split_manifest",

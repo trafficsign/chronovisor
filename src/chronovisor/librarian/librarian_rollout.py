@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from chronovisor.core.durable_state import file_lock, write_sealed_json
-from chronovisor.core.store import CHRONOVISOR_ROOT
+from chronovisor.core.store import CHRONOVISOR_ROOT, okf_runtime_operation
 from chronovisor.core.timeutil import utc_iso_milliseconds as _now
 from chronovisor.librarian.classification_migration import (
     migrate_active_metadata,
@@ -256,6 +256,23 @@ def run_rollout(
 ) -> dict[str, Any]:
     """Resume every rollout phase through evidence-gated release."""
 
+    with okf_runtime_operation(root):
+        return _run_rollout_locked(
+            root,
+            batch_size=batch_size,
+            pilot_limit=pilot_limit,
+            foreground_admissions=foreground_admissions,
+        )
+
+
+def _run_rollout_locked(
+    root: Path,
+    *,
+    batch_size: int,
+    pilot_limit: int,
+    foreground_admissions: int,
+) -> dict[str, Any]:
+
     lock_path = root / "runtime" / "librarian" / "rollout.lock"
     with file_lock(lock_path):
         release = _read_json(
@@ -453,12 +470,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--pilot-limit", type=int, default=3)
     parser.add_argument("--foreground-admissions", type=int, default=200)
     args = parser.parse_args(argv)
-    result = run_rollout(
-        args.root,
-        batch_size=max(1, args.batch_size),
-        pilot_limit=max(0, args.pilot_limit),
-        foreground_admissions=max(3, args.foreground_admissions),
-    )
+    from chronovisor.core.okf_cutover import OKFStartupBlocked
+
+    try:
+        result = run_rollout(
+            args.root,
+            batch_size=max(1, args.batch_size),
+            pilot_limit=max(0, args.pilot_limit),
+            foreground_admissions=max(3, args.foreground_admissions),
+        )
+    except OKFStartupBlocked:
+        print(json.dumps({"status": "blocked", "category": "okf_startup_blocked"}))
+        return 75
     print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
     return 0 if result["status"] in {"released", "observing", "blocked"} else 1
 

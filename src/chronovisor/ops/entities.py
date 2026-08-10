@@ -11,7 +11,12 @@ from typing import Any
 from chronovisor.core.frontmatter import parse
 from chronovisor.core.link_fix import atomic_write
 from chronovisor.core.page_mutation import chronovisor_mutation_lock
-from chronovisor.core.store import all_pages, page_id_from_path
+from chronovisor.core.store import (
+    CHRONOVISOR_ROOT,
+    all_pages,
+    okf_runtime_operation,
+    page_id_from_path,
+)
 from chronovisor.decision.entity_backfill_contract import (
     DEFAULT_ALIASES as DEFAULT_ALIASES,
 )
@@ -311,6 +316,17 @@ def main(argv: list[str] | None = None) -> int:
     backfill.add_argument("--include-reference", action="store_true")
     backfill.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
+    from chronovisor.core.okf_cutover import OKFStartupBlocked
+
+    try:
+        with okf_runtime_operation(CHRONOVISOR_ROOT):
+            return _main_locked(args)
+    except OKFStartupBlocked:
+        print(json.dumps({"status": "blocked", "category": "okf_startup_blocked"}))
+        return 75
+
+
+def _main_locked(args: argparse.Namespace) -> int:
 
     if args.command == "init":
         path = write_default_registry()

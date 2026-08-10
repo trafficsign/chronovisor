@@ -16,7 +16,7 @@ import numpy as np
 
 from chronovisor.core.index_store import get_store
 from chronovisor.core.semantic_index import SemanticIndexError, load_active_generation
-from chronovisor.core.store import CHRONOVISOR_ROOT
+from chronovisor.core.store import CHRONOVISOR_ROOT, okf_runtime_operation
 
 REVIEW_QUEUE = CHRONOVISOR_ROOT / "review" / "duplicate-candidates.jsonl"
 
@@ -324,6 +324,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-embeddings", action="store_true")
     parser.add_argument("--write", action="store_true")
     args = parser.parse_args(argv)
+    if not args.write:
+        return _main_locked(args)
+    from chronovisor.core.okf_cutover import OKFStartupBlocked
+
+    try:
+        with okf_runtime_operation(CHRONOVISOR_ROOT):
+            return _main_locked(args)
+    except OKFStartupBlocked:
+        print(json.dumps({"status": "blocked", "category": "okf_startup_blocked"}))
+        return 75
+
+
+def _main_locked(args: argparse.Namespace) -> int:
 
     records = build_duplicate_review_queue(
         title_threshold=args.title_threshold,

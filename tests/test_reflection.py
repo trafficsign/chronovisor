@@ -3,7 +3,23 @@ from __future__ import annotations
 from datetime import date
 from pathlib import Path
 
+import pytest
+
 from chronovisor.ops import reflection
+
+
+@pytest.fixture(autouse=True)
+def _valid_okf_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pages = tmp_path / "pages"
+    for name in ("index.md", "log.md", "schema.md"):
+        (tmp_path / name).write_text("legacy\n", encoding="utf-8")
+    from chronovisor.core import page_mutation
+
+    monkeypatch.setattr(page_mutation, "CHRONOVISOR_ROOT", tmp_path)
+    monkeypatch.setattr(reflection, "PAGES_DIR", pages)
+    monkeypatch.setattr(reflection, "INSIGHTS_DIR", pages / "insights")
 
 
 def test_build_reflection_markdown_includes_health_signals() -> None:

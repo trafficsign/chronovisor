@@ -18,6 +18,7 @@ from chronovisor.core.claims import (
     search_claims,
 )
 from chronovisor.core.search import search
+from chronovisor.core.store import CHRONOVISOR_ROOT, okf_runtime_operation
 
 
 def oracle_bundle(
@@ -75,6 +76,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-index-build", action="store_true")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
+    if args.no_index_build:
+        return _main_locked(args)
+    from chronovisor.core.okf_cutover import OKFStartupBlocked
+
+    try:
+        with okf_runtime_operation(CHRONOVISOR_ROOT):
+            return _main_locked(args)
+    except OKFStartupBlocked:
+        print(json.dumps({"status": "blocked", "category": "okf_startup_blocked"}))
+        return 75
+
+
+def _main_locked(args: argparse.Namespace) -> int:
     data = oracle_bundle(
         args.query,
         top_n=max(1, args.top_n),

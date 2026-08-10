@@ -26,13 +26,19 @@ def isolate_decision_authority_lock(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor.core import page_mutation
+    from chronovisor.core import page_mutation, retention
+
+    for name in ("index.md", "log.md", "schema.md"):
+        (tmp_path / name).write_text("legacy\n", encoding="utf-8")
 
     monkeypatch.setattr(
         page_mutation,
         "DECISION_AUTHORITY_LOCK",
         tmp_path / "runtime" / "decision-authority.lock",
     )
+    monkeypatch.setattr(retention, "CHRONOVISOR_ROOT", tmp_path)
+    monkeypatch.setattr(autonomy, "CHRONOVISOR_ROOT", tmp_path)
+    monkeypatch.setattr(page_mutation, "CHRONOVISOR_ROOT", tmp_path)
 
 
 def _write_page(path: Path, title: str, body: str) -> None:

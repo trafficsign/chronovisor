@@ -25,6 +25,26 @@ from tests.semantic_hold_support import semantic_authority
 from tests.test_decision_authority import _vote_audit
 
 
+@pytest.fixture(autouse=True)
+def _valid_okf_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "okf-root"
+    root.mkdir()
+    for name in ("index.md", "log.md", "schema.md"):
+        (root / name).write_text("legacy\n", encoding="utf-8")
+    from chronovisor.core import index_store
+
+    monkeypatch.setattr(search_eval, "CHRONOVISOR_ROOT", root)
+    monkeypatch.setattr(index_store, "CHRONOVISOR_ROOT", root)
+    monkeypatch.setattr(index_store, "INDEX_DIR", root / ".index")
+    monkeypatch.setattr(index_store, "PAGES_INDEX_FILE", root / ".index" / "pages.json")
+    monkeypatch.setattr(
+        index_store, "BACKLINKS_INDEX_FILE", root / ".index" / "backlinks.json"
+    )
+    monkeypatch.setattr(index_store, "_store", None)
+
+
 def test_frontier_label_prompt_reexports_decision_implementation() -> None:
     assert (
         search_eval.build_frontier_label_prompt

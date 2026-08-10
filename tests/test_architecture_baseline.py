@@ -1821,6 +1821,54 @@ X3_RETIRED_OKF_ENTRYPOINT_SITE_IDS = (
     "arch:eac69c25cece52f6b96afdbf760ca74ae1bc974566d0822eb4f009a43a5bc1e9",
     "arch:fa73ac1392098e25c4ef3b8cdc97ff2403d51c978c93f9c3543f9353a1d0eaa6",
 )
+X4_RETIRED_WRITER_LEASE_SITE_IDS = (
+    "arch:056ff91e5b58e228866ae78eba36b1fcaedc56543a08667f96462a782ef3c243",
+    "arch:0c68eb2557c4979a43d31bc55e1e9fb94ccb8e525cce3776c8b6c317b37460a1",
+    "arch:1002a43d410809a1f688730aeea1c5b39f87a200d63a688e14f6dda03731772b",
+    "arch:15d2838609ecae72415b8ef6c3171d08affc0eaeb32fe7babe3153b40cc68014",
+    "arch:194c584213c7a7e9b86ebcb701be51fd18f1f6c730307fe44361cc9d75db0a73",
+    "arch:2008694d2da3dcd9e88e55e53a96c703301fb02393a45bba7a94efb15172c6a2",
+    "arch:287f28e6c0802d03c4f6c3d28d7b5dbc667b7ffe073f193f42398647ca8d8fbf",
+    "arch:2b97515c34b045a32dab4c28cb88a9dbb4e4bbdadaf4327fc556e14eb5a6c60f",
+    "arch:2e411d6ea86005e0544acd5fb470357fad6236b2ef604b12e0f76fe859564658",
+    "arch:2ebe401366c971a6626616b6af49d1f9472a14913c374905bf690accb4eaca8c",
+    "arch:303bc750f35669f78bc1431b42a0c0bfb7b7b5ae14120468fb834405a00a49e7",
+    "arch:36fbf41d659cd2be825d04ce40ba930eaf5d325f1b025cbc9299fc7a9cc77d02",
+    "arch:43c49153bcb039f4e49f9930567ed6084caa69e229156b6b41c8d6bde1fcd00a",
+    "arch:5913423691ab903242d08e02a9efb429046b6314416f221b58996faf43923ff1",
+    "arch:5be9780d234a713116a652985cd0376da18f76b22057d3463c884f2a15d826dc",
+    "arch:6209eecc8ed2c2b1e2cacd702db6cfdc9a2e5368152b548a335dde0bde7ced6d",
+    "arch:67ed804cefcc665877694da839fd89b99f85b8cc055093c32682e3a82f1e8483",
+    "arch:6c36f79b121fdf5d21f3de36072009ad3821c429f2c0fac5882170cf9aa2f21e",
+    "arch:7907a1745716f1d6f9408a3946ff2eed397b7257858d4fe5699787fb1c6e9d7d",
+    "arch:81fedbea2ae81a09216de3bb009e77fc7136ed809bff536b3b446c1da9d972fe",
+    "arch:84f20b6225e4605d41dc2a46a629887eb323373a44617f783b9fb00b4d9552c6",
+    "arch:85f2fc678dbac9df568d1a56d0e2f5dc0161cb842f451f349c6131d8b89f6cef",
+    "arch:876a8d21e0a9788cda693f89aa09cf089054f78211b960da86535509ed0e1b55",
+    "arch:8bfcb3c60d3899cff5b3066349a7cb46df26625175694d35bf5dfa44772ed66a",
+    "arch:8c180f4b9ff460240743aa300c4bb0f48a719466e3642d59ece11df69573beb2",
+    "arch:8c6d5a2987b9db6ae9f3acff063a540a091c7bc55010571b2b5d90d56f69a75a",
+    "arch:979ab7e5b5fa4ffaea60df119e3d8a06b586a0139365fe990472fa173544db73",
+    "arch:a734d34e46c6d374d55e8bacf7c89bbff95ad55481505d3629ea5e0130d79719",
+    "arch:ab52db066e5d69b0fa35560b4fca5fe1298c99acdb5da8ca8f481af2ed03570c",
+    "arch:c0213796a446a3fce25bcc5a043a790e8289965f567bbc1c8c96a4a05fa05ca9",
+    "arch:ca0434f3e87f7d4f890601fb82ffb6b7e963ee35ec7907708bd086685f705da2",
+    "arch:cb5c741a27b93403b17f575578bb77af5c4a9560610b96a79e4b4f58fad95042",
+    "arch:cb878acab6595c56fc242bccd09427dc6f91554b454b8f777ee34c3c08688db7",
+    "arch:cd81d6930025ca999e8e09c2cba768e969729e4805989c115407448083eb5419",
+    "arch:cffbdc5df9dd8c08e6b59b11dabc9e349bceb2c76759c505d2cbe7062b0a4c6a",
+    "arch:d2501a802be1506e999480f298fea7315555e5ea5e53c4aaa7c9f3674ba356e6",
+    "arch:d65ef8368658ab9239dd29d53cb5a5b6332f0b3f612108d91b3df1af7b3a7e0b",
+    "arch:d98dcd94f41546740e1e963a893dacf56ec4884659680aef999ac7f23e5416e7",
+    "arch:d9e8ab68a13c04ce3ad1ad9cf3441ce24e28c50d97ca155efad2c9924136c69c",
+    "arch:db7068fc803a0fcb47584473040ee832eb9c1246eb66a3143263af6ca590dedb",
+    "arch:df1d4ffc6f2df362b2416bd009c7703f928696a75b2034efc332ddd508e74308",
+    "arch:e7ab3ea85354e99db4aecedb8a38da85bf2800d2bf3e06ba9cfb6b3f8cd0bea4",
+    "arch:e87e535e798e321e811ad28ec82470102d92a585a03da05103e846df022c93ff",
+    "arch:ee6ffdd26f989c8ba584c2d7b024d8343134b4458ca85c13be5d6b9427fa6be0",
+    "arch:ef26344ca1d1485c7eb7d1946e090924df7bbb992466a2cdb28b577cc9cabd5c",
+    "arch:fefa3b3c01350ef7639520fe5e2ae7cef60c7a566a1f508220b99d22b869a2eb",
+)
 RETIREMENT_HISTORY = {
     "exception_semantic_ids": tuple(
         sorted(
@@ -1963,6 +2011,7 @@ RETIREMENT_HISTORY = {
                 *W6O_RETIRED_RECALL_PROPOSER_SITE_IDS,
                 *W6P_RETIRED_RECALL_RUBRIC_SITE_IDS,
                 *X3_RETIRED_OKF_ENTRYPOINT_SITE_IDS,
+                *X4_RETIRED_WRITER_LEASE_SITE_IDS,
                 *W6Q_RETIRED_DECISION_AUTHORITY_SITE_IDS,
                 *W6R_RETIRED_INGEST_REPAIR_SITE_IDS,
                 *W6S_RETIRED_DASHBOARD_CONVERGENCE_SITE_IDS,
@@ -2720,7 +2769,7 @@ def test_current_exception_ledger_seed_and_schema_inventory_are_exact(
     assert detected_ids == ledger_ids == set(seed["exception_semantic_ids"]["active"])
     _assert_exact_retirement_history(architecture, seed)
     assert len(edge_rows) == current["worktree_architecture"]["edge_count"] == 44
-    assert sum(len(row["sites"]) for row in edge_rows) == len(raw_cross_sites) == 1363
+    assert sum(len(row["sites"]) for row in edge_rows) == len(raw_cross_sites) == 1418
     assert {
         field: counts[field]
         for field in (
@@ -2733,7 +2782,7 @@ def test_current_exception_ledger_seed_and_schema_inventory_are_exact(
         )
     } == {
         "exceptions": 44,
-        "cross_domain_sites": 1363,
+            "cross_domain_sites": 1418,
         "production_to_lab_edges": 0,
         "production_to_lab_static_sites": 0,
         "production_to_lab_dynamic_sites": 0,

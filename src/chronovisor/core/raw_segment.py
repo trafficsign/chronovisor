@@ -408,6 +408,43 @@ def append_capture(
 ) -> RawSegmentReceipt:
     """Append one exact source interval and publish its durable commit receipt."""
 
+    from chronovisor.core.store import okf_runtime_operation
+
+    with okf_runtime_operation(raw_dir.parent):
+        return _append_capture_operation(
+            raw_dir=raw_dir,
+            raw_id=raw_id,
+            idempotency_key=idempotency_key,
+            host=host,
+            session_key=session_key,
+            session_id=session_id,
+            source_file=source_file,
+            after_line=after_line,
+            until_line=until_line,
+            source_bytes=source_bytes,
+            record_count=record_count,
+            now=now,
+            max_part_bytes=max_part_bytes,
+        )
+
+
+def _append_capture_operation(
+    *,
+    raw_dir: Path,
+    raw_id: str,
+    idempotency_key: str,
+    host: str,
+    session_key: str,
+    session_id: str | None,
+    source_file: Path,
+    after_line: int,
+    until_line: int,
+    source_bytes: bytes,
+    record_count: int,
+    now: datetime | None,
+    max_part_bytes: int,
+) -> RawSegmentReceipt:
+
     if raw_id != f"save-{idempotency_key}.md":
         raise ValueError("raw_id must preserve the legacy save transaction identity")
     if not source_bytes or not source_bytes.endswith(b"\n"):
@@ -624,6 +661,33 @@ def seal_segment(
     remove_open: bool = False,
 ) -> dict[str, Any]:
     """Seal one open segment without changing any logical Raw identity."""
+
+    from chronovisor.core.store import okf_runtime_operation
+
+    if len(data_path.parents) < 5:
+        raise ValueError("segment path must be below raw/YYYY/MM/DD")
+    raw_dir = data_path.parents[3]
+    if raw_dir.name != "raw":
+        raise ValueError("segment path must be below raw/YYYY/MM/DD")
+    relative = data_path.relative_to(raw_dir)
+    if len(relative.parts) != 4 or any(
+        not part.isdigit() for part in relative.parts[:3]
+    ):
+        raise ValueError("segment path must be below raw/YYYY/MM/DD")
+    with okf_runtime_operation(raw_dir.parent):
+        return _seal_segment_locked(
+            data_path,
+            compression_level=compression_level,
+            remove_open=remove_open,
+        )
+
+
+def _seal_segment_locked(
+    data_path: Path,
+    *,
+    compression_level: int,
+    remove_open: bool,
+) -> dict[str, Any]:
 
     commit_path = journal_path_for(data_path)
     compressed_path, manifest_path = sealed_paths(data_path)

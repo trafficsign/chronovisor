@@ -19,7 +19,7 @@ from chronovisor.core.recall_log_schema import (
     page_ids_from_record,
 )
 from chronovisor.core.recall_runtime_paths import RECALL_DIR
-from chronovisor.core.store import CHRONOVISOR_ROOT
+from chronovisor.core.store import CHRONOVISOR_ROOT, okf_runtime_operation
 
 RETENTION_FILE = RECALL_DIR / "retention.json"
 RETENTION_SCORE_CACHE_FILE = (
@@ -85,6 +85,35 @@ def build_retention_scores(
     limit: int = 5000,
     write: bool = True,
     today: date | None = None,
+) -> dict[str, Any]:
+    if write:
+        with okf_runtime_operation(CHRONOVISOR_ROOT):
+            return _build_retention_scores_locked(
+                feedback_file=feedback_file,
+                recall_log_file=recall_log_file,
+                output_file=output_file,
+                limit=limit,
+                write=True,
+                today=today,
+            )
+    return _build_retention_scores_locked(
+        feedback_file=feedback_file,
+        recall_log_file=recall_log_file,
+        output_file=output_file,
+        limit=limit,
+        write=False,
+        today=today,
+    )
+
+
+def _build_retention_scores_locked(
+    *,
+    feedback_file: Path,
+    recall_log_file: Path,
+    output_file: Path,
+    limit: int,
+    write: bool,
+    today: date | None,
 ) -> dict[str, Any]:
     today = today or date.today()
     success: Counter[str] = Counter()
@@ -297,7 +326,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-write", action="store_true")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
-    data = build_retention_scores(limit=max(1, args.limit), write=not args.no_write)
+    from chronovisor.core.okf_cutover import OKFStartupBlocked
+
+    try:
+        data = build_retention_scores(
+            limit=max(1, args.limit), write=not args.no_write
+        )
+    except OKFStartupBlocked:
+        print(json.dumps({"status": "blocked", "category": "okf_startup_blocked"}))
+        return 75
     public = {key: value for key, value in data.items() if key != "pages"}
     if args.json:
         print(json.dumps(public, ensure_ascii=False, indent=2))

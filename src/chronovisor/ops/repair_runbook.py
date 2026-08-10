@@ -16,7 +16,7 @@ from chronovisor.core.durable_state import (
     read_sealed_json,
 )
 from chronovisor.core.runtime_config import runtime_repo_root
-from chronovisor.core.store import CHRONOVISOR_ROOT
+from chronovisor.core.store import CHRONOVISOR_ROOT, okf_runtime_operation
 
 RUNBOOK_VERSION = 1
 SERVICE_LABELS = {
@@ -29,6 +29,15 @@ SERVICE_LABELS = {
     "soak": "com.trafficsign.chronovisor-soak",
 }
 KEEPALIVE_SERVICES = frozenset({"dashboard", "ingest"})
+ROOT_MUTATING_ACTIONS = frozenset(
+    {
+        "recover-hold-leases",
+        "rebuild-read-back-view",
+        "sync-provisional-recall",
+        "resend-due-queues",
+        "restore-durable-state",
+    }
+)
 
 
 def _service_plist(service: str) -> Path:
@@ -282,6 +291,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--limit", type=int, default=8)
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
+    if args.action not in ROOT_MUTATING_ACTIONS:
+        return _main_locked(args)
+    from chronovisor.core.okf_cutover import OKFStartupBlocked
+
+    try:
+        with okf_runtime_operation(CHRONOVISOR_ROOT):
+            return _main_locked(args)
+    except OKFStartupBlocked:
+        print(json.dumps({"status": "blocked", "category": "okf_startup_blocked"}))
+        return 75
+
+
+def _main_locked(args: argparse.Namespace) -> int:
     payload = (
         snapshot()
         if args.action == "status"

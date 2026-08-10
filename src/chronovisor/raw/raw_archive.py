@@ -275,6 +275,26 @@ def seal_eligible(
     compression_level: int = 9,
     max_segments: int = 0,
 ) -> dict[str, Any]:
+    from chronovisor.core.store import okf_runtime_operation
+
+    with okf_runtime_operation(raw_dir.parent):
+        return _seal_eligible_locked(
+            raw_dir,
+            before=before,
+            dry_run=dry_run,
+            compression_level=compression_level,
+            max_segments=max_segments,
+        )
+
+
+def _seal_eligible_locked(
+    raw_dir: Path,
+    *,
+    before: str | None,
+    dry_run: bool,
+    compression_level: int,
+    max_segments: int,
+) -> dict[str, Any]:
     raw_dir = raw_dir.expanduser().resolve(strict=False)
     cutoff = before or datetime.now(CAPTURE_TIMEZONE).strftime("%Y/%m/%d")
     try:
@@ -467,6 +487,28 @@ def migrate_legacy(
     remove_source: bool = False,
     max_archive_bytes: int = 128 * 1024 * 1024,
     compression_level: int = 9,
+) -> dict[str, Any]:
+    from chronovisor.core.store import okf_runtime_operation
+
+    with okf_runtime_operation(raw_dir.parent):
+        return _migrate_legacy_locked(
+            raw_dir,
+            before=before,
+            dry_run=dry_run,
+            remove_source=remove_source,
+            max_archive_bytes=max_archive_bytes,
+            compression_level=compression_level,
+        )
+
+
+def _migrate_legacy_locked(
+    raw_dir: Path,
+    *,
+    before: str | None,
+    dry_run: bool,
+    remove_source: bool,
+    max_archive_bytes: int,
+    compression_level: int,
 ) -> dict[str, Any]:
     state_path = (
         raw_dir.expanduser().resolve(strict=False).parent / ".orchestrator_state.json"

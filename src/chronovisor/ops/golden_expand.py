@@ -11,7 +11,7 @@ from typing import Any
 
 from chronovisor.core.index_store import get_store
 from chronovisor.core.recall_runtime_paths import RECALL_DIR
-from chronovisor.core.store import find_page
+from chronovisor.core.store import CHRONOVISOR_ROOT, find_page, okf_runtime_operation
 from chronovisor.recall.recall_answer_eval import (
     BOUNDED_EVIDENCE_PROJECTION_POLICY_SHA256,
 )
@@ -217,6 +217,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-write", action="store_true")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
+    if args.no_write:
+        return _main_locked(args)
+    from chronovisor.core.okf_cutover import OKFStartupBlocked
+
+    try:
+        with okf_runtime_operation(CHRONOVISOR_ROOT):
+            return _main_locked(args)
+    except OKFStartupBlocked:
+        print(json.dumps({"status": "blocked", "category": "okf_startup_blocked"}))
+        return 75
+
+
+def _main_locked(args: argparse.Namespace) -> int:
     data = expand_golden_from_recall_questions(
         limit=max(0, args.limit),
         include_reference=args.include_reference,

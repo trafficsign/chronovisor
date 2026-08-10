@@ -28,6 +28,7 @@ from chronovisor.core.canonical_json import (
 from chronovisor.core.feedback_ledger import active_feedback_rows
 from chronovisor.core.page_mutation import decision_authority_lock
 from chronovisor.core.runtime_status import safe_append_event, safe_append_metric
+from chronovisor.core.store import CHRONOVISOR_ROOT, okf_runtime_operation
 from chronovisor.decision import decision_authority
 from chronovisor.decision.local_structured import (
     LocalStructuredSession,
@@ -2387,6 +2388,17 @@ def _print_run(payload: dict[str, Any]) -> None:
 def main(argv: list[str] | None = None) -> int:
     """Run the ``chronovisor-recall-improve`` command-line entry point."""
     args = build_parser().parse_args(argv)
+    from chronovisor.core.okf_cutover import OKFStartupBlocked
+
+    try:
+        with okf_runtime_operation(CHRONOVISOR_ROOT):
+            return _main_locked(args)
+    except OKFStartupBlocked:
+        print(json.dumps({"status": "blocked", "category": "okf_startup_blocked"}))
+        return 75
+
+
+def _main_locked(args: argparse.Namespace) -> int:
     if args.command == "run":
         payload = run_improvement(
             config_file=Path(args.config).expanduser() if args.config else None,

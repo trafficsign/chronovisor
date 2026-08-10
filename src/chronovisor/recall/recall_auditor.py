@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from chronovisor.core import ollama, runtime_config
+from chronovisor.core import store as chronovisor_store
 from chronovisor.core.search import search as run_search
 from chronovisor.decision.local_structured import ChatTransport, LocalStructuredSession
 from chronovisor.recall.recall_runtime import (
@@ -1233,9 +1234,17 @@ def main(argv: list[str] | None = None) -> int:
     """Run the ``chronovisor-recall-audit`` command-line entry point."""
     parser = build_parser()
     args = parser.parse_args(argv)
-    stdin_text = sys.stdin.read() if args.hook else None
+    from chronovisor.core.okf_cutover import OKFStartupBlocked
+
     try:
-        result = run(args, stdin_text=stdin_text)
+        with chronovisor_store.okf_runtime_operation(
+            chronovisor_store.CHRONOVISOR_ROOT
+        ):
+            stdin_text = sys.stdin.read() if args.hook else None
+            result = run(args, stdin_text=stdin_text)
+    except OKFStartupBlocked:
+        print(json.dumps({"status": "blocked", "category": "okf_startup_blocked"}))
+        return 75
     except Exception as exc:
         result = {"status": "error", "error": f"{exc.__class__.__name__}: {exc}"}
         print(json.dumps(result, ensure_ascii=False))

@@ -4,7 +4,17 @@ from pathlib import Path
 
 import pytest
 
+from chronovisor.core import page_mutation
 from chronovisor.ingest import page_write
+
+
+@pytest.fixture(autouse=True)
+def _valid_okf_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = tmp_path / "wiki-root"
+    root.mkdir()
+    for name in ("index.md", "log.md", "schema.md"):
+        (root / name).write_text("legacy\n", encoding="utf-8")
+    monkeypatch.setattr(page_mutation, "CHRONOVISOR_ROOT", root)
 
 
 def _doc(body: str, *, status: str = "stable") -> str:

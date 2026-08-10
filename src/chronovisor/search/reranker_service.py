@@ -37,7 +37,11 @@ from chronovisor.core.runtime_config import (
     load_reranker_config,
     runtime_identity,
 )
-from chronovisor.core.store import CHRONOVISOR_ROOT, okf_startup_status
+from chronovisor.core.store import (
+    CHRONOVISOR_ROOT,
+    okf_runtime_operation,
+    okf_startup_status,
+)
 from chronovisor.search.accelerator_lease import accelerator_lease
 
 SERVICE_STATUS_FILE = CHRONOVISOR_ROOT / "runtime" / "reranker-service-status.json"
@@ -329,6 +333,11 @@ class _Server(socketserver.ThreadingUnixStreamServer):
 
 
 def serve(config: RerankerConfig | None = None) -> None:
+    with okf_runtime_operation(CHRONOVISOR_ROOT):
+        _serve_locked(config)
+
+
+def _serve_locked(config: RerankerConfig | None) -> None:
     if not okf_startup_status(CHRONOVISOR_ROOT).allowed:
         raise SystemExit(75)
     config = config or load_reranker_config()
@@ -375,6 +384,18 @@ def main(argv: list[str] | None = None) -> int:
     """Run the resident reranker service command-line entry point."""
 
     args = build_parser().parse_args(argv)
+    if args.command in {"status", "health"}:
+        return _main_locked(args)
+    from chronovisor.core.okf_cutover import OKFStartupBlocked
+    try:
+        with okf_runtime_operation(CHRONOVISOR_ROOT):
+            return _main_locked(args)
+    except OKFStartupBlocked:
+        print(json.dumps({"status": "blocked", "category": "okf_startup_blocked"}))
+        return 75
+
+
+def _main_locked(args: argparse.Namespace) -> int:
     if args.command not in {"status", "health"} and not okf_startup_status(
         CHRONOVISOR_ROOT
     ).allowed:

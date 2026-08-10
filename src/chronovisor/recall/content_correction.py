@@ -54,7 +54,12 @@ from chronovisor.core.page_mutation import (
     rollback_prepared_mutations,
 )
 from chronovisor.core.runtime_config import load_ingest_config, runtime_repo_root
-from chronovisor.core.store import CHRONOVISOR_ROOT, find_page, init_chronovisor
+from chronovisor.core.store import (
+    CHRONOVISOR_ROOT,
+    find_page,
+    init_chronovisor,
+    okf_runtime_operation,
+)
 from chronovisor.decision.content_correction_contract import (
     CLASSIFICATION_MUTATION_DETAIL_TOTAL_BYTES as CLASSIFICATION_MUTATION_DETAIL_TOTAL_BYTES,
 )
@@ -5446,6 +5451,19 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     """Run the ``chronovisor-content-correction`` command-line entry point."""
     args = build_parser().parse_args(argv)
+    if args.dry_run:
+        return _main_locked(args)
+    from chronovisor.core.okf_cutover import OKFStartupBlocked
+
+    try:
+        with okf_runtime_operation(CHRONOVISOR_ROOT):
+            return _main_locked(args)
+    except OKFStartupBlocked:
+        print(json.dumps({"status": "blocked", "category": "okf_startup_blocked"}))
+        return 75
+
+
+def _main_locked(args: argparse.Namespace) -> int:
     if not args.dry_run:
         init_chronovisor()
     if args.hook and os.environ.get(HOOK_ENABLE_ENV) not in {"1", "true", "True"}:

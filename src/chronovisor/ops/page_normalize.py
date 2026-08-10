@@ -15,7 +15,12 @@ from chronovisor.core.frontmatter import (
 )
 from chronovisor.core.link_fix import atomic_write
 from chronovisor.core.page_mutation import chronovisor_mutation_lock
-from chronovisor.core.store import CHRONOVISOR_ROOT, PAGES_DIR, page_id_from_path
+from chronovisor.core.store import (
+    CHRONOVISOR_ROOT,
+    PAGES_DIR,
+    okf_runtime_operation,
+    page_id_from_path,
+)
 
 
 def _sha256_identity(value: str) -> str:
@@ -75,6 +80,32 @@ def normalize_pages(
     write: bool = False,
     limit: int = 0,
     max_frontier_calls: int = 3,
+    reviewer=None,
+) -> dict[str, Any]:
+    if write:
+        with okf_runtime_operation(CHRONOVISOR_ROOT):
+            return _normalize_pages_locked(
+                root=root,
+                write=True,
+                limit=limit,
+                max_frontier_calls=max_frontier_calls,
+                reviewer=reviewer,
+            )
+    return _normalize_pages_locked(
+        root=root,
+        write=False,
+        limit=limit,
+        max_frontier_calls=max_frontier_calls,
+        reviewer=reviewer,
+    )
+
+
+def _normalize_pages_locked(
+    *,
+    root: Path,
+    write: bool,
+    limit: int,
+    max_frontier_calls: int,
     reviewer=None,
 ) -> dict[str, Any]:
     changed: list[str] = []
@@ -205,16 +236,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--max-frontier-calls", type=int, default=3)
     args = parser.parse_args(argv)
-    print(
-        json.dumps(
-            normalize_pages(
-                write=args.write,
-                limit=max(0, args.limit),
-                max_frontier_calls=max(0, args.max_frontier_calls),
-            ),
-            ensure_ascii=False,
+    from chronovisor.core.okf_cutover import OKFStartupBlocked
+
+    try:
+        payload = normalize_pages(
+            write=args.write,
+            limit=max(0, args.limit),
+            max_frontier_calls=max(0, args.max_frontier_calls),
         )
-    )
+    except OKFStartupBlocked:
+        print(json.dumps({"status": "blocked", "category": "okf_startup_blocked"}))
+        return 75
+    print(json.dumps(payload, ensure_ascii=False))
     return 0
 
 

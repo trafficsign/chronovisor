@@ -14,7 +14,9 @@ import hashlib
 import json
 import os
 import shutil
+import stat
 import tempfile
+import threading
 from collections.abc import Iterator, Mapping
 from contextlib import AbstractContextManager, contextmanager, suppress
 from pathlib import Path
@@ -24,6 +26,8 @@ from chronovisor.core.canonical_json import canonical_json_line_bytes_strict
 
 SEAL_FIELD = "seal_sha256"
 DEFAULT_MIN_FREE_BYTES = 16 * 1024 * 1024
+OKF_WRITER_LOCK_FILENAME = "okf-writer.lock"
+_OKF_LOCK_STATE = threading.local()
 
 
 class DurableStateError(RuntimeError):
@@ -66,15 +70,261 @@ def verify_sealed_object(payload: object) -> dict[str, Any]:
 
 
 @contextmanager
-def file_lock(path: Path, *, exclusive: bool = True) -> Iterator[None]:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+def file_lock(
+    path: Path,
+    *,
+    exclusive: bool = True,
+    blocking: bool = True,
+    fsync_on_open: bool = False,
+    dir_fd: int | None = None,
+) -> Iterator[int]:
+    if dir_fd is None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor = os.open(
+        path,
+        os.O_RDWR
+        | os.O_CREAT
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0),
+        0o600,
+        dir_fd=dir_fd,
+    )
+    owner_pid = os.getpid()
     try:
-        fcntl.flock(descriptor, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
-        yield
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise OSError("lock path is not a regular file")
+        os.fchmod(descriptor, 0o600)
+        if fsync_on_open:
+            os.fsync(descriptor)
+        operation = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
+        if not blocking:
+            operation |= fcntl.LOCK_NB
+        fcntl.flock(descriptor, operation)
+        yield descriptor
     finally:
-        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        if os.getpid() == owner_pid:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
         os.close(descriptor)
+
+
+def _reject_symlink_components(path: Path) -> None:
+    current = path.absolute()
+    while True:
+        try:
+            mode = current.lstat().st_mode
+        except FileNotFoundError:
+            pass
+        else:
+            if stat.S_ISLNK(mode):
+                raise ValueError("OKF writer lock root contains a symlink")
+        if current == current.parent:
+            return
+        current = current.parent
+
+
+def _runtime_entry_kind(directory_fd: int, name: str) -> str | None:
+    try:
+        mode = os.stat(name, dir_fd=directory_fd, follow_symlinks=False).st_mode
+    except FileNotFoundError:
+        return None
+    return "file" if stat.S_ISREG(mode) else "unsafe"
+
+
+@contextmanager
+def okf_writer_lock(
+    root: Path,
+    *,
+    exclusive: bool = False,
+    allow_create: bool = True,
+    blocking: bool = True,
+) -> Iterator[None]:
+    """Hold the root-scoped OKF writer lease in shared or exclusive mode."""
+
+    root = root.expanduser()
+    if not root.is_absolute():
+        raise ValueError("OKF writer lock root must be absolute")
+    root = root.absolute()
+    if root == root.parent:
+        raise ValueError("OKF writer lock root must not be the filesystem root")
+    _reject_symlink_components(root.parent)
+    if exclusive and not root.parent.is_dir():
+        raise ValueError("exclusive OKF writer lock root must exist")
+    bootstrap = not (root / "runtime" / OKF_WRITER_LOCK_FILENAME).exists()
+
+    process_id = os.getpid()
+    if getattr(_OKF_LOCK_STATE, "process_id", None) != process_id:
+        _OKF_LOCK_STATE.process_id = process_id
+        _OKF_LOCK_STATE.leases = {}
+    leases: dict[str, tuple[bool, int]] = _OKF_LOCK_STATE.leases
+    identity = os.fspath(root)
+    active = leases.get(identity)
+    if active is not None:
+        active_exclusive, depth = active
+        if exclusive and not active_exclusive:
+            raise RuntimeError("cannot upgrade a shared OKF writer lease")
+        leases[identity] = (active_exclusive, depth + 1)
+        try:
+            yield
+        finally:
+            remaining = leases[identity][1] - 1
+            if remaining:
+                leases[identity] = (active_exclusive, remaining)
+            else:
+                leases.pop(identity, None)
+        return
+
+    if not exclusive:
+        root.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    parent_fd = os.open(
+        root.parent,
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0),
+    )
+    owner_pid = os.getpid()
+    parent_locked = False
+    root_fd: int | None = None
+    root_locked = False
+    runtime_fd: int | None = None
+    try:
+        hierarchy_exclusive = exclusive or bootstrap
+        while True:
+            parent_operation = (
+                fcntl.LOCK_EX if hierarchy_exclusive else fcntl.LOCK_SH
+            )
+            if exclusive or not blocking:
+                parent_operation |= fcntl.LOCK_NB
+            fcntl.flock(parent_fd, parent_operation)
+            parent_locked = True
+            root_created = False
+            try:
+                root_fd = os.open(
+                    root.name,
+                    os.O_RDONLY
+                    | getattr(os, "O_CLOEXEC", 0)
+                    | getattr(os, "O_DIRECTORY", 0)
+                    | getattr(os, "O_NOFOLLOW", 0),
+                    dir_fd=parent_fd,
+                )
+            except FileNotFoundError as exc:
+                if not hierarchy_exclusive:
+                    fcntl.flock(parent_fd, fcntl.LOCK_UN)
+                    parent_locked = False
+                    hierarchy_exclusive = True
+                    continue
+                if exclusive:
+                    raise ValueError(
+                        "exclusive OKF writer lock root must exist"
+                    ) from exc
+                os.mkdir(root.name, mode=0o700, dir_fd=parent_fd)
+                root_created = True
+                root_fd = os.open(
+                    root.name,
+                    os.O_RDONLY
+                    | getattr(os, "O_CLOEXEC", 0)
+                    | getattr(os, "O_DIRECTORY", 0)
+                    | getattr(os, "O_NOFOLLOW", 0),
+                    dir_fd=parent_fd,
+                )
+            root_operation = (
+                fcntl.LOCK_EX if hierarchy_exclusive else fcntl.LOCK_SH
+            )
+            if exclusive or not blocking:
+                root_operation |= fcntl.LOCK_NB
+            fcntl.flock(root_fd, root_operation)
+            root_locked = True
+            runtime_created = False
+            try:
+                runtime_fd = os.open(
+                    "runtime",
+                    os.O_RDONLY
+                    | getattr(os, "O_CLOEXEC", 0)
+                    | getattr(os, "O_DIRECTORY", 0)
+                    | getattr(os, "O_NOFOLLOW", 0),
+                    dir_fd=root_fd,
+                )
+            except FileNotFoundError as exc:
+                if not hierarchy_exclusive:
+                    fcntl.flock(root_fd, fcntl.LOCK_UN)
+                    root_locked = False
+                    os.close(root_fd)
+                    root_fd = None
+                    fcntl.flock(parent_fd, fcntl.LOCK_UN)
+                    parent_locked = False
+                    hierarchy_exclusive = True
+                    continue
+                if not allow_create:
+                    raise RuntimeError(
+                        "OKF writer lock is missing from migration runtime"
+                    ) from exc
+                try:
+                    os.mkdir("runtime", mode=0o700, dir_fd=root_fd)
+                    runtime_created = True
+                except FileExistsError:
+                    pass
+                runtime_fd = os.open(
+                    "runtime",
+                    os.O_RDONLY
+                    | getattr(os, "O_CLOEXEC", 0)
+                    | getattr(os, "O_DIRECTORY", 0)
+                    | getattr(os, "O_NOFOLLOW", 0),
+                    dir_fd=root_fd,
+                )
+            lock_kind = _runtime_entry_kind(runtime_fd, OKF_WRITER_LOCK_FILENAME)
+            if lock_kind is None and not hierarchy_exclusive:
+                os.close(runtime_fd)
+                runtime_fd = None
+                fcntl.flock(root_fd, fcntl.LOCK_UN)
+                root_locked = False
+                os.close(root_fd)
+                root_fd = None
+                fcntl.flock(parent_fd, fcntl.LOCK_UN)
+                parent_locked = False
+                hierarchy_exclusive = True
+                continue
+            break
+        try:
+            if lock_kind == "unsafe":
+                raise RuntimeError("OKF writer lock entry is unsafe")
+            created = lock_kind is None
+            migrations_kind = _runtime_entry_kind(runtime_fd, "migrations")
+            if created and (not allow_create or migrations_kind is not None):
+                raise RuntimeError("OKF writer lock is missing from migration runtime")
+            with file_lock(
+                Path(OKF_WRITER_LOCK_FILENAME),
+                exclusive=exclusive,
+                blocking=blocking and not exclusive,
+                fsync_on_open=created,
+                dir_fd=runtime_fd,
+            ):
+                if created:
+                    os.fsync(runtime_fd)
+                    if runtime_created:
+                        os.fsync(root_fd)
+                    if root_created:
+                        os.fsync(parent_fd)
+                if hierarchy_exclusive and not exclusive:
+                    fcntl.flock(root_fd, fcntl.LOCK_SH)
+                    fcntl.flock(parent_fd, fcntl.LOCK_SH)
+                leases[identity] = (exclusive, 1)
+                try:
+                    yield
+                finally:
+                    leases.pop(identity, None)
+        finally:
+            os.close(runtime_fd)
+            runtime_fd = None
+    except BlockingIOError as exc:
+        raise RuntimeError("OKF writer lease is busy") from exc
+    finally:
+        if root_fd is not None:
+            if root_locked and os.getpid() == owner_pid:
+                fcntl.flock(root_fd, fcntl.LOCK_UN)
+            os.close(root_fd)
+        if parent_locked and os.getpid() == owner_pid:
+            fcntl.flock(parent_fd, fcntl.LOCK_UN)
+        os.close(parent_fd)
 
 
 @contextmanager

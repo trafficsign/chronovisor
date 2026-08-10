@@ -21,6 +21,15 @@ from chronovisor.ingest.raw_semantic_projection import project_parent_raw
 from chronovisor.raw import codex_capture_delta
 
 
+@pytest.fixture(autouse=True)
+def _valid_okf_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = tmp_path / "wiki"
+    root.mkdir()
+    for name in ("index.md", "log.md", "schema.md"):
+        (root / name).write_text("legacy\n", encoding="utf-8")
+    monkeypatch.setattr(codex_record, "CHRONOVISOR_ROOT", root)
+
+
 def test_transcript_api_is_reexported_from_raw_modules() -> None:
     assert codex_record.TranscriptRecord is codex_transcript.TranscriptRecord
     assert codex_record.TranscriptSlice is codex_transcript.TranscriptSlice
@@ -117,6 +126,13 @@ def args_for(session_file: Path, state_file: Path, *, ignore_state: bool = False
 def _allow_runtime_context_startup(monkeypatch: pytest.MonkeyPatch) -> None:
     from chronovisor.core import okf_cutover
 
+    monkeypatch.setattr(
+        okf_cutover,
+        "discover_okf_startup",
+        lambda _source, _runtime: okf_cutover.OKFStartupDecision(
+            True, "bootstrap", "uninitialized", "ok"
+        ),
+    )
     monkeypatch.setattr(
         okf_cutover,
         "require_okf_startup_allowed",
@@ -502,7 +518,7 @@ def test_v2_save_preserves_source_lines_without_legacy_markdown(
 ) -> None:
     session = tmp_path / "session.jsonl"
     state = tmp_path / "state.json"
-    raw_dir = tmp_path / "raw"
+    raw_dir = tmp_path / "wiki" / "raw"
     sample_session(session)
     source_bytes = session.read_bytes()
     monkeypatch.setenv("CHRONOVISOR_RAW_LAYOUT", "v2")
@@ -539,7 +555,7 @@ def test_v2_save_accepts_oversized_native_record_after_metadata(
 ) -> None:
     session = tmp_path / "oversized.jsonl"
     state = tmp_path / "state.json"
-    raw_dir = tmp_path / "raw"
+    raw_dir = tmp_path / "wiki" / "raw"
     write_jsonl(
         session,
         [
@@ -669,7 +685,7 @@ def test_shadow_save_compares_legacy_records_with_native_source(
 ) -> None:
     session = tmp_path / "session.jsonl"
     state = tmp_path / "state.json"
-    raw_dir = tmp_path / "raw"
+    raw_dir = tmp_path / "wiki" / "raw"
     sample_session(session)
     monkeypatch.setenv("CHRONOVISOR_RAW_LAYOUT", "shadow")
     monkeypatch.setattr(codex_record, "RAW_DIR", raw_dir)
@@ -858,7 +874,7 @@ def test_retry_recovers_raw_published_before_state_commit(
 ) -> None:
     session = tmp_path / "session.jsonl"
     state = tmp_path / "state.json"
-    raw_dir = tmp_path / "raw"
+    raw_dir = tmp_path / "wiki" / "raw"
     raw_dir.mkdir()
     sample_session(session)
     with session.open("a", encoding="utf-8") as handle:
@@ -935,7 +951,7 @@ def test_corrupt_publisher_receipt_does_not_advance_cursor(
 ) -> None:
     session = tmp_path / "session.jsonl"
     state = tmp_path / "state.json"
-    raw_dir = tmp_path / "raw"
+    raw_dir = tmp_path / "wiki" / "raw"
     raw_dir.mkdir()
     sample_session(session)
     monkeypatch.setattr(codex_record, "init_chronovisor", lambda: None)

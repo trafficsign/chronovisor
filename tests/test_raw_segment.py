@@ -24,6 +24,12 @@ NOW = datetime(2026, 7, 18, 9, 30, tzinfo=ZoneInfo("Asia/Tokyo"))
 SESSION_KEY = "a" * 24
 
 
+@pytest.fixture(autouse=True)
+def _legacy_root(tmp_path: Path) -> None:
+    for name in ("index.md", "log.md", "schema.md"):
+        (tmp_path / name).write_text("legacy\n", encoding="utf-8")
+
+
 def _source(path: Path) -> bytes:
     rows = [
         {"type": "session_meta", "payload": {"id": "session-1"}},
