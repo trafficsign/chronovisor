@@ -8,6 +8,17 @@ from types import SimpleNamespace
 
 import pytest
 
+from chronovisor.core import llm_config, ollama, runtime_config, store
+from chronovisor.core.llm_runtime import (
+    BackendCapabilities,
+    GenerationResult,
+    GenerationRoute,
+    LLMRuntime,
+    MessageGenerationRequest,
+    RouteLocation,
+    SourceDataClass,
+    SourceSensitivity,
+)
 from chronovisor.decision.decision_router import canonical_agreement_signature
 from chronovisor.decision.decision_schema_manifest import production_decision_schemas
 from chronovisor.decision.recall_improvement_contract import PolicyProposal
@@ -121,14 +132,53 @@ def _durable_schedule_result(
     }
 
 
-def test_default_improvement_models_use_ornith_and_gemma_pair(monkeypatch) -> None:
-    monkeypatch.delenv("CHRONOVISOR_RECALL_IMPROVEMENT_MODELS", raising=False)
-    monkeypatch.setattr(recall_improvement, "load_toml_file", lambda: {})
-
-    assert recall_improvement.configured_models() == (
-        "maxwell1500/ornith-35b:Q5_K_M",
-        "gemma4:26b",
+def _proposer_routes(
+    *, provider: str = "ollama", location: str = "local"
+) -> tuple[ollama.RuntimeGenerationRoute, ...]:
+    return tuple(
+        ollama.RuntimeGenerationRoute(role, provider, model, location, True)
+        for role, model in zip(
+            recall_improvement.PROPOSER_RUNTIME_ROLES,
+            ("ornith:test", "gemma:test"),
+            strict=True,
+        )
     )
+
+
+def _install_test_proposer_routes(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        ollama, "runtime_generation_routes", lambda _roles: _proposer_routes()
+    )
+
+
+def test_proposer_routes_are_fixed_ordered_structured_and_diverse(monkeypatch) -> None:
+    seen: list[tuple[str, ...]] = []
+    monkeypatch.setattr(
+        ollama,
+        "runtime_generation_routes",
+        lambda roles: seen.append(tuple(roles)) or _proposer_routes(),
+    )
+
+    routes = recall_improvement._proposer_runtime_routes()
+
+    assert seen == [recall_improvement.PROPOSER_RUNTIME_ROLES]
+    assert [route.model for route in routes] == ["ornith:test", "gemma:test"]
+    assert all(route.structured_output for route in routes)
+
+
+def test_proposer_routes_reject_duplicate_model_before_backend(monkeypatch) -> None:
+    duplicate = tuple(
+        ollama.RuntimeGenerationRoute(role, "ollama", "same:model", "local", True)
+        for role in recall_improvement.PROPOSER_RUNTIME_ROLES
+    )
+    monkeypatch.setattr(
+        ollama, "runtime_generation_routes", lambda _roles: duplicate
+    )
+
+    with pytest.raises(ollama.RuntimeBridgeError) as rejected:
+        recall_improvement._proposer_runtime_routes()
+
+    assert rejected.value.category == "route_configuration_invalid"
 
 
 def test_ollama_proposer_accepts_direct_override_response(monkeypatch) -> None:
@@ -156,8 +206,14 @@ def test_ollama_proposer_accepts_direct_override_response(monkeypatch) -> None:
 
     monkeypatch.setattr(recall_improvement, "LocalStructuredSession", FakeSession)
 
-    proposal = recall_improvement._call_ollama_proposer(
-        model="gemma4:26b-mxfp8",
+    proposal = recall_improvement._call_runtime_proposer(
+        route=ollama.RuntimeGenerationRoute(
+            recall_improvement.PROPOSER_RUNTIME_ROLES[1],
+            "ollama",
+            "gemma4:26b-mxfp8",
+            "local",
+            True,
+        ),
         baseline_policy=RecallPolicy(log_decisions=False),
         baseline_eval={"score": 0.0, "metrics": {}},
         failure_samples=[],
@@ -171,6 +227,10 @@ def test_ollama_proposer_accepts_direct_override_response(monkeypatch) -> None:
     session = captured["session"]
     assert isinstance(session, dict)
     assert session["role"] == "recall_policy_proposer"
+    assert session["runtime_role"] == "recall.policy_proposer.challenger"
+    assert session["runtime_location"] == "local"
+    assert session["source_data_class"] == "raw"
+    assert session["source_sensitivity"] == "high"
     assert session["num_ctx"] == 32768
     assert "transport" not in session
     schema = captured["schema"]
@@ -179,6 +239,237 @@ def test_ollama_proposer_accepts_direct_override_response(monkeypatch) -> None:
     run = captured["run"]
     assert isinstance(run, dict)
     assert run["value_validator"] is recall_improvement._proposal_value_issues
+    assert run["system"] == recall_improvement.PROPOSER_SYSTEM
+
+
+class _RemoteProposerBackend:
+    provider = "remote-test"
+
+    def __init__(
+        self, *, fail: bool = False, location: RouteLocation = RouteLocation.REMOTE
+    ) -> None:
+        self.fail = fail
+        self.location = location
+        self.requests: list[tuple[MessageGenerationRequest, str]] = []
+
+    def generate(
+        self, request: MessageGenerationRequest, *, model: str
+    ) -> GenerationResult:
+        self.requests.append((request, model))
+        if self.fail:
+            raise RuntimeError("SECRET-PROVIDER-DETAIL")
+        return GenerationResult(
+            content=json.dumps({"max_pages": 4}),
+            provider=self.provider,
+            model=model,
+            finish_reason="stop",
+        )
+
+
+def _remote_proposer_runtime(
+    backend: _RemoteProposerBackend, *, allow_raw: bool, structured: bool = True
+) -> LLMRuntime:
+    generation = {
+        role: GenerationRoute(
+            backend,
+            f"remote-proposer-{index}",
+            BackendCapabilities(True, False, structured_output=structured),
+        )
+        for index, role in enumerate(
+            recall_improvement.PROPOSER_RUNTIME_ROLES, start=1
+        )
+    }
+    opt_ins = (
+        {
+            (role, SourceDataClass.RAW)
+            for role in recall_improvement.PROPOSER_RUNTIME_ROLES
+        }
+        if allow_raw
+        else set()
+    )
+    return LLMRuntime(generation=generation, remote_egress_opt_ins=opt_ins)
+
+
+def _forbid_ollama_controls(monkeypatch: pytest.MonkeyPatch) -> None:
+    def forbidden(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("remote recall proposer touched an Ollama control")
+
+    for name in (
+        "chat",
+        "generate",
+        "is_available",
+        "model_digests",
+        "model_resource_lease",
+        "model_resource_lease_mode",
+        "plan_model_residency",
+        "resident_model_rows",
+        "unload_model",
+        "unload_named_model",
+    ):
+        monkeypatch.setattr(ollama, name, forbidden)
+
+
+def _runtime_proposals(
+    routes: tuple[ollama.RuntimeGenerationRoute, ...],
+) -> list[PolicyProposal]:
+    return recall_improvement.propose_with_runtime_roles(
+        routes=routes,
+        baseline_policy=RecallPolicy(log_decisions=False),
+        baseline_eval={"score": 0.0, "metrics": {}},
+        baseline_holdout={"score": 0.0, "metrics": {}},
+        failure_samples=[],
+        live_summary={},
+        min_improvement=0.05,
+        recent_rejection_blockers={},
+        include_heuristic=False,
+    )
+
+
+@pytest.mark.parametrize("location", [RouteLocation.REMOTE, RouteLocation.LOCAL])
+def test_provider_neutral_proposers_use_raw_high_without_ollama_controls(
+    location: RouteLocation, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    backend = _RemoteProposerBackend(location=location)
+    runtime = _remote_proposer_runtime(backend, allow_raw=True)
+    monkeypatch.setattr(llm_config, "load_default_llm_runtime", lambda: runtime)
+    monkeypatch.setattr(store, "CHRONOVISOR_ROOT", tmp_path)
+    _forbid_ollama_controls(monkeypatch)
+
+    proposals = _runtime_proposals(recall_improvement._proposer_runtime_routes())
+
+    assert [proposal.model for proposal in proposals] == [
+        "remote-proposer-1",
+        "remote-proposer-2",
+    ]
+    assert all(proposal.overrides == {"max_pages": 4} for proposal in proposals)
+    assert [model for _request, model in backend.requests] == [
+        "remote-proposer-1",
+        "remote-proposer-2",
+    ]
+    assert all(
+        request.source.data_class is SourceDataClass.RAW
+        and request.source.sensitivity is SourceSensitivity.HIGH
+        for request, _model in backend.requests
+    )
+
+
+def test_remote_proposer_egress_denial_is_safe_and_call_free(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    backend = _RemoteProposerBackend()
+    runtime = _remote_proposer_runtime(backend, allow_raw=False)
+    monkeypatch.setattr(llm_config, "load_default_llm_runtime", lambda: runtime)
+    monkeypatch.setattr(store, "CHRONOVISOR_ROOT", tmp_path)
+    _forbid_ollama_controls(monkeypatch)
+
+    proposals = _runtime_proposals(recall_improvement._proposer_runtime_routes())
+
+    assert [proposal.error for proposal in proposals] == [
+        "egress_denied",
+        "egress_denied",
+    ]
+    assert all(
+        "proposal generation failed" in proposal.rationale for proposal in proposals
+    )
+    assert backend.requests == []
+
+
+def test_remote_proposer_failure_has_no_fallback_or_raw_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    backend = _RemoteProposerBackend(fail=True)
+    runtime = _remote_proposer_runtime(backend, allow_raw=True)
+    monkeypatch.setattr(llm_config, "load_default_llm_runtime", lambda: runtime)
+    monkeypatch.setattr(store, "CHRONOVISOR_ROOT", tmp_path)
+    _forbid_ollama_controls(monkeypatch)
+
+    proposals = _runtime_proposals(recall_improvement._proposer_runtime_routes())
+
+    assert [proposal.error for proposal in proposals] == [
+        "backend_error",
+        "backend_error",
+    ]
+    assert len(backend.requests) == len(recall_improvement.PROPOSER_RUNTIME_ROLES)
+    assert all("SECRET-PROVIDER-DETAIL" not in proposal.rationale for proposal in proposals)
+
+
+def test_unstructured_proposer_route_fails_before_backend(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = _RemoteProposerBackend()
+    runtime = _remote_proposer_runtime(backend, allow_raw=True, structured=False)
+    monkeypatch.setattr(llm_config, "load_default_llm_runtime", lambda: runtime)
+
+    with pytest.raises(ollama.RuntimeBridgeError) as rejected:
+        recall_improvement._proposer_runtime_routes()
+
+    assert rejected.value.category == "capability_unavailable"
+    assert backend.requests == []
+
+
+def test_legacy_model_selectors_cannot_override_runtime_routes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    routes = _proposer_routes()
+    route_calls: list[tuple[str, ...]] = []
+    toml_reads = 0
+
+    def legacy_toml() -> dict[str, object]:
+        nonlocal toml_reads
+        toml_reads += 1
+        return {"recall_improvement": {"models": ["toml:attacker"]}}
+
+    def fake_propose(**kwargs: object) -> list[PolicyProposal]:
+        assert kwargs["routes"] == routes
+        return []
+
+    monkeypatch.setenv("CHRONOVISOR_RECALL_IMPROVEMENT_MODELS", "env:attacker")
+    monkeypatch.setattr(runtime_config, "load_toml_file", legacy_toml)
+    monkeypatch.setattr(
+        ollama,
+        "runtime_generation_routes",
+        lambda roles: route_calls.append(tuple(roles)) or routes,
+    )
+    monkeypatch.setattr(
+        recall_improvement,
+        "build_dataset",
+        lambda **_kwargs: [
+            recall_improvement.RecallExample(
+                prompt="remember", expected_pages=("page",), kind="missed_candidate"
+            )
+        ],
+    )
+    monkeypatch.setattr(
+        recall_improvement,
+        "load_policy",
+        lambda *_args, **_kwargs: RecallPolicy(log_decisions=False),
+    )
+    monkeypatch.setattr(
+        recall_improvement,
+        "_evaluate_cached",
+        lambda *_args, **_kwargs: {"score": 0.0, "metrics": {}, "rows": []},
+    )
+    monkeypatch.setattr(
+        recall_improvement, "propose_with_runtime_roles", fake_propose
+    )
+
+    result = recall_improvement.run_improvement(
+        models=("kwarg:attacker",),
+        include_heuristic=False,
+        runs_dir=tmp_path / "runs",
+        registry_file=tmp_path / "registry.jsonl",
+        episodes_file=tmp_path / "episodes.jsonl",
+        live_episodes_file=tmp_path / "live.jsonl",
+    )
+
+    assert result["models"] == ["ornith:test", "gemma:test"]
+    assert route_calls == [recall_improvement.PROPOSER_RUNTIME_ROLES]
+    assert toml_reads == 0
+
+
+def test_module_cli_rejects_retired_models_flag() -> None:
+    with pytest.raises(SystemExit):
+        recall_improvement.build_parser().parse_args(["run", "--models", "x"])
 
 
 def test_proposal_prompt_includes_adoption_gate_and_rejection_blockers() -> None:
@@ -626,7 +917,10 @@ def test_run_improvement_adopts_candidate_policy(tmp_path, monkeypatch) -> None:
             ],
         }
 
-    monkeypatch.setattr(recall_improvement, "propose_with_models", fake_propose)
+    monkeypatch.setattr(
+        recall_improvement, "propose_with_runtime_roles", fake_propose
+    )
+    _install_test_proposer_routes(monkeypatch)
     monkeypatch.setattr(recall_improvement, "evaluate_examples", fake_evaluate)
     monkeypatch.setattr(
         recall_improvement, "safe_append_event", lambda *_args, **_kwargs: None
@@ -760,7 +1054,10 @@ def test_run_improvement_frontier_rejection_blocks_active_policy(
             ],
         }
 
-    monkeypatch.setattr(recall_improvement, "propose_with_models", fake_propose)
+    monkeypatch.setattr(
+        recall_improvement, "propose_with_runtime_roles", fake_propose
+    )
+    _install_test_proposer_routes(monkeypatch)
     monkeypatch.setattr(recall_improvement, "evaluate_examples", fake_evaluate)
     monkeypatch.setattr(
         recall_improvement,
@@ -1004,7 +1301,10 @@ def test_run_improvement_frontier_human_required_failure_maps_to_review_retry(
             ],
         }
 
-    monkeypatch.setattr(recall_improvement, "propose_with_models", fake_propose)
+    monkeypatch.setattr(
+        recall_improvement, "propose_with_runtime_roles", fake_propose
+    )
+    _install_test_proposer_routes(monkeypatch)
     monkeypatch.setattr(recall_improvement, "evaluate_examples", fake_evaluate)
     monkeypatch.setattr(
         recall_improvement,
@@ -1140,7 +1440,7 @@ def test_run_due_executes_and_updates_schedule_when_due(tmp_path, monkeypatch) -
     assert payload["result"]["run_id"] == "r1"
     assert state["last_run_id"] == "r1"
     assert state["last_feedback_count"] == 3
-    assert seen["models"] == ("qwen", "gemma")
+    assert "models" not in seen
 
 
 def test_run_due_respects_interval_even_with_new_feedback(

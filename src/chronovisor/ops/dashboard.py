@@ -58,7 +58,7 @@ from chronovisor.ops.health import health_snapshot
 from chronovisor.ops.model_lab import snapshot as model_lab_snapshot
 from chronovisor.recall import recall_runtime
 from chronovisor.recall.recall_auditor import load_audit_policy
-from chronovisor.recall.recall_improvement import configured_models
+from chronovisor.recall.recall_improvement import PROPOSER_RUNTIME_ROLES
 
 LOG_LINE_RE = re.compile(r"^- \[(?P<time>[^\]]+)\] (?P<message>.*)$")
 RAW_DATE_RE = re.compile(r"(?:^|[^0-9])(?P<stamp>20\d{6})(?:[^0-9]|$)")
@@ -497,8 +497,15 @@ def _configured_model_roles() -> dict[str, set[str]]:
         pass
 
     try:
-        for model in configured_models(None):
-            _add_model_role(roles, model, "improve")
+        proposer_routes = runtime_generation_routes(PROPOSER_RUNTIME_ROLES)
+        for role, route in zip(PROPOSER_RUNTIME_ROLES, proposer_routes, strict=True):
+            if (
+                route.role == role
+                and route.structured_output
+                and route.provider == "ollama"
+                and route.location == "local"
+            ):
+                _add_model_role(roles, route.model, "improve")
     except Exception:
         pass
 

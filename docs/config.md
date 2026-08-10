@@ -119,6 +119,18 @@ capability = "generation"
 provider = "local"
 model = "ornith:9b-q4_K_M"
 
+[llm.roles."recall.policy_proposer.primary"]
+capability = "generation"
+provider = "local"
+model = "maxwell1500/ornith-35b:Q5_K_M"
+required_capabilities = ["structured_output"]
+
+[llm.roles."recall.policy_proposer.challenger"]
+capability = "generation"
+provider = "local"
+model = "gemma4:26b"
+required_capabilities = ["structured_output"]
+
 [llm.roles."research.planner"]
 capability = "generation"
 provider = "local"
@@ -156,6 +168,12 @@ required_capabilities = ["structured_output"]
 # data_class = "raw"
 # [[llm.egress_opt_in]]
 # role = "research.deep_retrieval_requery"
+# data_class = "raw"
+# [[llm.egress_opt_in]]
+# role = "recall.policy_proposer.primary"
+# data_class = "raw"
+# [[llm.egress_opt_in]]
+# role = "recall.policy_proposer.challenger"
 # data_class = "raw"
 
 [decision_router]
@@ -501,12 +519,6 @@ max_prompt_chars = 4000
 max_response_chars = 6000
 recent_log_limit = 500
 
-[recall_improvement]
-models = [
-  "maxwell1500/ornith-35b:Q5_K_M",
-  "gemma4:26b",
-]
-
 [auto_apply]
 enabled = true
 min_count = 1
@@ -524,6 +536,14 @@ Synchronous recall routing is fixed by `llm.roles."recall.gate"` and
 `[recall].model`, `[recall.gate].model`, and `[recall.rewrite].model` values
 are accepted but ignored. Both inputs are `raw/high`; remote providers require
 an explicit role + `raw` egress opt-in and never fall back to another provider.
+
+Recall policy proposals use the fixed, ordered roles
+`llm.roles."recall.policy_proposer.primary"` and
+`llm.roles."recall.policy_proposer.challenger"`. Both require structured
+output and classify inputs as `raw/high`; remote providers require each exact
+role + `raw` opt-in and never fall back to another provider. Legacy
+`[recall_improvement].models` and `CHRONOVISOR_RECALL_IMPROVEMENT_MODELS`
+cannot select runtime models, and CLI `--models` is unavailable.
 
 Deep Retrieval v1 requery generation is fixed by
 `llm.roles."research.deep_retrieval_requery"`; Decision Router model fields do

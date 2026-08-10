@@ -327,6 +327,14 @@ def test_recall_improve_run_due_cli_forwards_scheduler_args(tmp_path, monkeypatc
     assert output == {"status": "due", "dry_run": True}
     assert seen["dry_run"] is True
     assert str(seen["log_file"]).endswith("recall-log.jsonl")
+    assert "models" not in seen
+
+
+def test_recall_improve_cli_rejects_retired_models_flag() -> None:
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args(
+            ["recall-improve", "run", "--models", "attacker"]
+        )
 
 
 def test_sleep_cli_non_json_handles_partial_cycle(monkeypatch, capsys) -> None:

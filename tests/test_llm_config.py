@@ -562,6 +562,8 @@ def test_repository_example_has_representative_local_role_map() -> None:
         "recall.auditor",
         "recall.gate",
         "recall.query_rewriter",
+        "recall.policy_proposer.primary",
+        "recall.policy_proposer.challenger",
         "research.planner",
         "research.challenge",
         "research.tie_break",
@@ -616,6 +618,21 @@ def test_repository_example_has_representative_local_role_map() -> None:
     recall_rewriter = config.roles["recall.query_rewriter"]
     assert recall_gate.provider_id == recall_rewriter.provider_id == "local"
     assert recall_gate.model == recall_rewriter.model == "ornith:9b-q4_K_M"
+    proposer_roles = (
+        "recall.policy_proposer.primary",
+        "recall.policy_proposer.challenger",
+    )
+    proposer_routes = [config.roles[role] for role in proposer_roles]
+    assert [route.model for route in proposer_routes] == [
+        "maxwell1500/ornith-35b:Q5_K_M",
+        "gemma4:26b",
+    ]
+    assert all(
+        route.required_capabilities == ("structured_output",)
+        for route in proposer_routes
+    )
+    for role in proposer_roles:
+        assert f'# role = "{role}"\n# data_class = "raw"' in text
     assert [
         config.roles[role].model
         for role in (

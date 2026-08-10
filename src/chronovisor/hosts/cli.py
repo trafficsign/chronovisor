@@ -844,9 +844,6 @@ def build_parser() -> argparse.ArgumentParser:
         "--feedback-file", default=str(RECALL_FEEDBACK_FILE)
     )
     recall_improve_run.add_argument(
-        "--models", help="Comma-separated Ollama proposer models."
-    )
-    recall_improve_run.add_argument(
         "--no-apply", dest="apply", action="store_false", default=True
     )
     recall_improve_run.add_argument(
@@ -866,9 +863,6 @@ def build_parser() -> argparse.ArgumentParser:
     recall_improve_due.add_argument("--log-file", default=str(RECALL_LOG_FILE))
     recall_improve_due.add_argument(
         "--feedback-file", default=str(RECALL_FEEDBACK_FILE)
-    )
-    recall_improve_due.add_argument(
-        "--models", help="Comma-separated Ollama proposer models."
     )
     recall_improve_due.add_argument(
         "--no-apply", dest="apply", action="store_false", default=True
@@ -1390,7 +1384,6 @@ def dispatch(args: argparse.Namespace) -> int:
                 config_file=Path(args.config).expanduser() if args.config else None,
                 log_file=Path(args.log_file).expanduser(),
                 feedback_file=Path(args.feedback_file).expanduser(),
-                models=args.models,
                 apply=args.apply,
                 include_heuristic=args.include_heuristic,
                 min_improvement=max(0.0, args.min_improvement),
@@ -1411,7 +1404,6 @@ def dispatch(args: argparse.Namespace) -> int:
                 config_file=Path(args.config).expanduser() if args.config else None,
                 log_file=Path(args.log_file).expanduser(),
                 feedback_file=Path(args.feedback_file).expanduser(),
-                models=args.models,
                 apply=args.apply,
                 include_heuristic=args.include_heuristic,
                 min_improvement=max(0.0, args.min_improvement),

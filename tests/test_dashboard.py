@@ -3088,6 +3088,8 @@ def test_model_status_snapshot_combines_ollama_and_config(monkeypatch) -> None:
         dashboard.AUDITOR_RUNTIME_ROLE: "qwen3.6:35b-a3b-mxfp8",
         dashboard.RECALL_GATE_RUNTIME_ROLE: "qwen3.5:4b-mlx",
         dashboard.RECALL_QUERY_REWRITER_RUNTIME_ROLE: "qwen3.5:4b-mlx",
+        dashboard.PROPOSER_RUNTIME_ROLES[0]: "qwen3.6:35b-a3b-mxfp8",
+        dashboard.PROPOSER_RUNTIME_ROLES[1]: "gemma4:26b-mxfp8",
     }
     monkeypatch.setattr(
         dashboard,
@@ -3110,11 +3112,6 @@ def test_model_status_snapshot_combines_ollama_and_config(monkeypatch) -> None:
             judge_mode="auto",
             rewrite_enabled=True,
         ),
-    )
-    monkeypatch.setattr(
-        dashboard,
-        "configured_models",
-        lambda models=None: ("qwen3.6:35b-a3b-mxfp8", "gemma4:26b-mxfp8"),
     )
     decision_config = SimpleNamespace(
         primary_model="qwen3.6:35b-a3b-mxfp8",
@@ -3189,12 +3186,14 @@ def test_configured_model_roles_use_adopted_router_triplet(monkeypatch) -> None:
         "load_policy",
         lambda: SimpleNamespace(judge_mode="off", rewrite_enabled=False),
     )
+
+    def unavailable_proposers(roles):
+        assert tuple(roles) == dashboard.PROPOSER_RUNTIME_ROLES
+        raise ollama.RuntimeBridgeError("capability_unavailable")
+
     monkeypatch.setattr(
-        dashboard,
-        "runtime_generation_routes",
-        lambda _roles: pytest.fail("disabled recall roles resolved runtime config"),
+        dashboard, "runtime_generation_routes", unavailable_proposers
     )
-    monkeypatch.setattr(dashboard, "configured_models", lambda _models=None: ())
     monkeypatch.setattr(dashboard, "load_decision_router_config", lambda: bootstrap)
     monkeypatch.setattr(
         dashboard,
@@ -3266,6 +3265,50 @@ def test_configured_model_roles_use_adopted_router_triplet(monkeypatch) -> None:
     assert resolved[-1] == "search.rerank"
     assert roles["route-selected-reranker"] == {"rerank"}
     assert "legacy-selector" not in roles
+
+
+def test_dashboard_omits_remote_and_non_ollama_improvement_routes(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(dashboard, "ingest_model", lambda: "")
+    monkeypatch.setattr(
+        dashboard, "load_audit_policy", lambda: SimpleNamespace(enabled=False)
+    )
+    monkeypatch.setattr(
+        dashboard.recall_runtime,
+        "load_policy",
+        lambda: SimpleNamespace(judge_mode="off", rewrite_enabled=False),
+    )
+    monkeypatch.setattr(
+        dashboard,
+        "runtime_generation_routes",
+        lambda roles: tuple(
+            ollama.RuntimeGenerationRoute(
+                role,
+                "openai" if index == 0 else "native-local",
+                f"hidden-{index}",
+                "remote" if index == 0 else "local",
+                True,
+            )
+            for index, role in enumerate(roles)
+        ),
+    )
+    monkeypatch.setattr(
+        dashboard,
+        "load_decision_router_config",
+        lambda: (_ for _ in ()).throw(RuntimeError("disabled")),
+    )
+    monkeypatch.setattr(dashboard, "embedding_model", lambda: "")
+    monkeypatch.setattr(
+        dashboard,
+        "load_search_embedding_config",
+        lambda: SearchEmbeddingConfig(enabled=False),
+    )
+    monkeypatch.setattr(
+        dashboard, "load_reranker_config", lambda: SimpleNamespace(enabled=False)
+    )
+
+    assert dashboard._configured_model_roles() == {}
 
 
 def test_decision_router_dashboard_resolution_is_cached(monkeypatch) -> None:
