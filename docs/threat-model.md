@@ -82,11 +82,20 @@ and an explicit egress switch. The common model runtime denies cloud egress for
 `raw`, `system`, and high-sensitivity data by default and performs the decision
 before calling a backend.
 
-Generic model-provider endpoints are not yet a supported path. Before enabling
-them, endpoint validation must cover DNS resolution/rebinding, private and
-link-local address ranges, redirects, proxy behavior, origin binding, and
-request size/time budgets. Provider failure must not silently reroute data.
-Cloud eligibility is not consent to send credentials or an entire private
+Generic model-provider endpoints are locally owned configuration. Before any
+request is built, a credentialed endpoint must be HTTPS and rejects URL
+userinfo, `localhost` names, and unspecified, loopback, private, link-local,
+multicast, or reserved IP literals. The authenticated transport binds the
+credential to the configured canonical origin, never follows redirects, and
+rejects caller-supplied authentication, `Host`, and HTTP framing headers.
+
+This is not a DNS-rebinding claim. The runtime deliberately performs no DNS
+preflight: a lookup before connection would not bind the eventual socket to
+that answer. Operators must therefore treat generic endpoint configuration and
+their DNS/proxy path as trusted local administration. A hostile DNS or proxy
+after configuration remains a release-review threat, not a condition silently
+made safe by endpoint validation. Provider failure must not silently reroute
+data. Cloud eligibility is not consent to send credentials or an entire private
 record; only the minimum policy-approved payload may leave the host.
 
 ### Subprocess and command execution
