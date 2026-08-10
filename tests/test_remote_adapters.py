@@ -136,6 +136,17 @@ def test_curated_profiles_are_immutable_conservative_capability_truth() -> None:
         with pytest.raises(FrozenInstanceError):
             profile.endpoint = "https://other.example.com"  # type: ignore[misc]
 
+    assert all(
+        _curated("openai").capabilities_for(model).structured_output
+        for model in ("gpt-5-mini", "gpt-5")
+    )
+    assert all(
+        not _curated(profile_id).capabilities_for(model).structured_output
+        for profile_id in CURATED_PROFILE_IDS
+        if profile_id != "openai"
+        for model in ("gpt-5-mini", "gpt-5")
+    )
+
 
 def test_curated_endpoint_and_auth_matrix_is_fixed() -> None:
     expected = {
@@ -180,6 +191,15 @@ def test_generic_profile_uses_same_data_contract_and_model_scoped_structured() -
     assert profile.protocol is ProviderProtocol.OPENAI_COMPATIBLE
     assert profile.capabilities_for("json-model").structured_output
     assert not profile.capabilities_for("other-model").structured_output
+    generic = generic_openai_profile(
+        "unverified-gateway",
+        "https://gateway.example.com/openai/v1",
+        CREDENTIAL_REF,
+    )
+    assert all(
+        not generic.capabilities_for(model).structured_output
+        for model in ("gpt-5-mini", "gpt-5")
+    )
     assert profile.capabilities.embedding
     with pytest.raises(ProviderAdapterError):
         cast(Any, ProviderProfile)(

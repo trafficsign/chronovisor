@@ -229,6 +229,9 @@ _CURATED_SPECS = MappingProxyType(
         ),
     }
 )
+_CURATED_STRUCTURED_OUTPUT_MODELS = MappingProxyType(
+    {"openai": frozenset({"gpt-5-mini", "gpt-5"})}
+)
 CURATED_PROFILE_IDS = tuple(_CURATED_SPECS)
 
 
@@ -237,7 +240,6 @@ def curated_profile(
     credential_ref: CredentialRef,
     *,
     endpoint_override: str | None = None,
-    structured_output_models: Iterable[str] = (),
 ) -> ProviderProfile:
     spec = _CURATED_SPECS.get(profile_id)
     if spec is None:
@@ -246,9 +248,6 @@ def curated_profile(
     endpoint = endpoint_override or default_endpoint
     if endpoint is None:
         raise ProviderAdapterError(ProviderFailureCategory.PROFILE_INVALID)
-    structured_models = frozenset(structured_output_models)
-    if protocol is ProviderProtocol.ANTHROPIC_MESSAGES and structured_models:
-        raise ProviderAdapterError(ProviderFailureCategory.PROFILE_INVALID)
     return ProviderProfile(
         profile_id=profile_id,
         protocol=protocol,
@@ -256,7 +255,9 @@ def curated_profile(
         credential_ref=credential_ref,
         auth_scheme=auth_scheme,
         capabilities=BackendCapabilities(generation=True, embedding=embedding),
-        structured_output_models=structured_models,
+        structured_output_models=_CURATED_STRUCTURED_OUTPUT_MODELS.get(
+            profile_id, frozenset()
+        ),
     )
 
 

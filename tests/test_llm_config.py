@@ -375,6 +375,49 @@ def test_every_curated_provider_parses_with_conservative_generation(kind: str) -
     assert not provider.profile.capabilities.tools
 
 
+@pytest.mark.parametrize("model", ["gpt-5-mini", "gpt-5"])
+def test_verified_curated_openai_models_resolve_structured_output(model: str) -> None:
+    payload = _remote_payload(kind="openai")
+    role = payload["llm"]["roles"]["answer"]  # type: ignore[index]
+    role["model"] = model  # type: ignore[index]
+    role["required_capabilities"] = ["structured_output"]  # type: ignore[index]
+
+    config = parse_llm_config(payload)
+    runtime = build_llm_runtime(
+        config,
+        resolver=CountingResolver(),
+        sender_factory=lambda _profile: FakeSender(),
+    )
+
+    assert config.providers["remote"].capabilities_for(model).structured_output
+    assert runtime.resolve_generation("answer").model == model
+
+
+@pytest.mark.parametrize(
+    ("kind", "model"),
+    [
+        ("openai", "unverified-openai-model"),
+        ("openai-compatible", "gpt-5-mini"),
+        ("openai-compatible", "gpt-5"),
+    ],
+)
+def test_unverified_remote_structured_output_fails_closed(
+    kind: str, model: str
+) -> None:
+    payload = _remote_payload(kind=kind)
+    provider = payload["llm"]["providers"]["remote"]  # type: ignore[index]
+    if kind == "openai-compatible":
+        provider["endpoint"] = "https://gateway.example.test/v1"  # type: ignore[index]
+    role = payload["llm"]["roles"]["answer"]  # type: ignore[index]
+    role["model"] = model  # type: ignore[index]
+    role["required_capabilities"] = ["structured_output"]  # type: ignore[index]
+
+    with pytest.raises(LLMConfigError) as exc:
+        parse_llm_config(payload)
+
+    assert exc.value.category is LLMConfigFailureCategory.CAPABILITY_UNAVAILABLE
+
+
 def test_generic_openai_compatible_uses_shared_profile_constructor() -> None:
     payload = _remote_payload(kind="openai-compatible")
     provider = payload["llm"]["providers"]["remote"]  # type: ignore[index]
