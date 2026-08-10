@@ -75,6 +75,43 @@ def _truncation_retry_system_prompt(
     )
 
 
+def _record_generation_budget_diagnostics(
+    diagnostics: dict[str, Any] | None,
+    budget: _PageGenerationBudget,
+    original_required_num_ctx: int,
+    compact_context: _CompactUpdateContext | None,
+) -> None:
+    if diagnostics is None:
+        return
+    diagnostics.update(
+        {
+            "num_ctx": budget.num_ctx,
+            "num_predict": budget.num_predict,
+            "required_num_ctx": budget.required_num_ctx,
+            "original_required_num_ctx": original_required_num_ctx,
+        }
+    )
+    if compact_context is not None:
+        diagnostics.update(
+            {
+                "context_strategy": "append_only_outline_sections",
+                "context_page_id": compact_context.page_id,
+                "context_page_sha256": compact_context.page_sha256,
+                "context_page_bytes": compact_context.page_bytes,
+                "context_section_count": compact_context.section_count,
+                "context_selected_sections": [
+                    {
+                        "start_line": section.start_line,
+                        "end_line": section.end_line,
+                        "sha256": section.sha256,
+                        "bytes": len(section.content.encode("utf-8")),
+                    }
+                    for section in compact_context.selected_sections
+                ],
+            }
+        )
+
+
 def generate_one(
     op: dict,
     raw_content: str,
@@ -235,34 +272,12 @@ not explicit in the raw evidence.
 
     selected_num_ctx = generation_budget.num_ctx
     selected_num_predict = generation_budget.num_predict
-    if diagnostics is not None:
-        diagnostics.update(
-            {
-                "num_ctx": selected_num_ctx,
-                "num_predict": selected_num_predict,
-                "required_num_ctx": generation_budget.required_num_ctx,
-                "original_required_num_ctx": original_required_num_ctx,
-            }
-        )
-        if compact_context is not None:
-            diagnostics.update(
-                {
-                    "context_strategy": "append_only_outline_sections",
-                    "context_page_id": compact_context.page_id,
-                    "context_page_sha256": compact_context.page_sha256,
-                    "context_page_bytes": compact_context.page_bytes,
-                    "context_section_count": compact_context.section_count,
-                    "context_selected_sections": [
-                        {
-                            "start_line": section.start_line,
-                            "end_line": section.end_line,
-                            "sha256": section.sha256,
-                            "bytes": len(section.content.encode("utf-8")),
-                        }
-                        for section in compact_context.selected_sections
-                    ],
-                }
-            )
+    _record_generation_budget_diagnostics(
+        diagnostics,
+        generation_budget,
+        original_required_num_ctx,
+        compact_context,
+    )
 
     try:
         live_transport = (
