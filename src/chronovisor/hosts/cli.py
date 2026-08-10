@@ -576,8 +576,19 @@ def _configure_credentials_parser(subparsers: Any) -> None:
         command_parser.add_argument("--json", action="store_true")
 
 
+def _configure_okf_parser(subparsers: Any) -> None:
+    parser = subparsers.add_parser("okf", help="Inspect or prepare the OKF migration.")
+    commands = parser.add_subparsers(dest="okf_command", required=True)
+    status = commands.add_parser("status", help="Inspect the OKF startup gate.")
+    status.add_argument("--root", type=Path)
+    status.add_argument("--json", action="store_true")
+    prepare = commands.add_parser("prepare", help="Prepare one offline workspace.")
+    prepare.add_argument("--run-id", required=True)
+    prepare.add_argument("--root", type=Path)
+    prepare.add_argument("--json", action="store_true")
+
+
 def build_parser() -> argparse.ArgumentParser:
-    """Build the complete stable CLI command tree without executing a handler."""
     parser = SafeArgumentParser(description="Operate and inspect Chronovisor.")
     sub = parser.add_subparsers(dest="command", required=True)
     status_parser = sub.add_parser(
@@ -589,15 +600,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Show the installed package revision without reading Wiki content.",
     )
     runtime_identity_parser.add_argument("--json", action="store_true")
-    okf_parser = sub.add_parser("okf", help="Inspect or prepare the OKF migration.")
-    okf_sub = okf_parser.add_subparsers(dest="okf_command", required=True)
-    okf_status = okf_sub.add_parser("status", help="Inspect the OKF startup gate.")
-    okf_status.add_argument("--root", type=Path)
-    okf_status.add_argument("--json", action="store_true")
-    okf_prepare = okf_sub.add_parser("prepare", help="Prepare one offline workspace.")
-    okf_prepare.add_argument("--run-id", required=True)
-    okf_prepare.add_argument("--root", type=Path)
-    okf_prepare.add_argument("--json", action="store_true")
+    _configure_okf_parser(sub)
     doctor_parser = sub.add_parser("doctor", help="Run operational checks.")
     doctor_parser.add_argument("--json", action="store_true")
     _configure_credentials_parser(sub)
