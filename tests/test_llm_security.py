@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 from urllib.request import Request
 
+import keyring.errors
 import pytest
 
 from chronovisor.core.llm_security import (
@@ -21,11 +22,49 @@ from chronovisor.core.llm_security import (
     CredentialRef,
     CredentialResolver,
     CredentialSecurityError,
+    OSKeyringCredentialStore,
     SecretValue,
     canonical_endpoint,
 )
 
 CANARY = "sk-CANARY-DO-NOT-LEAK"
+
+
+class MemoryKeyring:
+    def __init__(self) -> None:
+        self.values: dict[tuple[str, str], str] = {}
+        self.get_calls: list[tuple[str, str]] = []
+        self.set_calls: list[tuple[str, str]] = []
+        self.delete_calls: list[tuple[str, str]] = []
+        self.failure: Exception | None = None
+
+    def get_password(self, service: str, username: str) -> str | None:
+        self.get_calls.append((service, username))
+        if self.failure is not None:
+            raise self.failure
+        return self.values.get((service, username))
+
+    def set_password(self, service: str, username: str, password: str) -> None:
+        self.set_calls.append((service, username))
+        if self.failure is not None:
+            raise self.failure
+        self.values[(service, username)] = password
+
+    def delete_password(self, service: str, username: str) -> None:
+        self.delete_calls.append((service, username))
+        if self.failure is not None:
+            raise self.failure
+        try:
+            del self.values[(service, username)]
+        except KeyError:
+            raise keyring.errors.PasswordDeleteError("missing") from None
+
+
+def _keyring_backend(
+    module: str = "keyring.backends.macOS", class_name: str = "Keyring"
+) -> MemoryKeyring:
+    backend_type = type(class_name, (MemoryKeyring,), {"__module__": module})
+    return backend_type()
 
 
 @pytest.mark.parametrize(
@@ -101,6 +140,7 @@ def test_resolver_has_no_backend_fallback_and_emits_safe_categories(
         environ={"FALLBACK": CANARY},
         repo_root=tmp_path / "repo",
         home_root=tmp_path / "home",
+        keyring_backend=MemoryKeyring(),
         telemetry=events.append,
     )
 
@@ -117,6 +157,102 @@ def test_resolver_has_no_backend_fallback_and_emits_safe_categories(
     ]
     assert CANARY not in repr(events)
     assert CANARY not in repr(missing.value)
+
+
+@pytest.mark.parametrize(
+    "module,class_name",
+    [
+        ("keyring.backends.macOS", "Keyring"),
+        ("keyring.backends.Windows", "WinVaultKeyring"),
+        ("keyring.backends.SecretService", "Keyring"),
+        ("keyring.backends.kwallet", "DBusKeyring"),
+        ("keyring.backends.kwallet", "DBusKeyringKWallet4"),
+    ],
+)
+def test_os_keyring_resolver_accepts_only_known_native_backend_identities(
+    module: str,
+    class_name: str,
+) -> None:
+    backend = _keyring_backend(module, class_name)
+    backend.values[("chronovisor/openai", "default")] = CANARY
+    resolver = CredentialResolver(keyring_backend=backend)
+
+    secret = resolver.resolve(CredentialRef.parse("oskeyring:openai/default"))
+
+    assert repr(secret) == "<redacted>"
+    assert backend.get_calls == [("chronovisor/openai", "default")]
+
+
+@pytest.mark.parametrize(
+    "module,class_name",
+    [
+        ("keyring.backends.null", "Keyring"),
+        ("keyring.backends.chainer", "ChainerBackend"),
+        ("keyrings.alt.file", "PlaintextKeyring"),
+        ("project.keyring", "CustomKeyring"),
+    ],
+)
+def test_os_keyring_resolver_rejects_null_chainer_alt_and_unknown_backends(
+    module: str,
+    class_name: str,
+) -> None:
+    resolver = CredentialResolver(keyring_backend=_keyring_backend(module, class_name))
+
+    with pytest.raises(CredentialSecurityError) as exc:
+        resolver.resolve(CredentialRef.parse("oskeyring:openai/default"))
+
+    assert exc.value.category is CredentialFailureCategory.BACKEND_REJECTED
+    assert CANARY not in repr(exc.value)
+
+
+def test_os_keyring_store_namespaces_status_and_delete_without_preread() -> None:
+    backend = _keyring_backend()
+    store = OSKeyringCredentialStore(backend=backend)
+    ref = CredentialRef.parse("oskeyring:openai/default")
+
+    assert store.status(ref).category == "missing"
+    assert store.set(ref, CANARY).category == "present"
+    status = store.status(ref)
+    assert status.present and status.category == "present"
+    assert store.delete(ref).category == "deleted"
+    assert store.delete(ref).category == "missing"
+
+    assert backend.set_calls == [("chronovisor/openai", "default")]
+    assert backend.delete_calls == [
+        ("chronovisor/openai", "default"),
+        ("chronovisor/openai", "default"),
+    ]
+    assert backend.get_calls == [
+        ("chronovisor/openai", "default"),
+        ("chronovisor/openai", "default"),
+    ]
+    assert CANARY not in repr(status)
+
+
+@pytest.mark.parametrize(
+    "failure,category",
+    [
+        (
+            keyring.errors.KeyringLocked("locked"),
+            CredentialFailureCategory.STORE_LOCKED,
+        ),
+        (OSError(CANARY), CredentialFailureCategory.STORE_UNAVAILABLE),
+    ],
+)
+def test_os_keyring_failures_are_safe(
+    failure: Exception,
+    category: CredentialFailureCategory,
+) -> None:
+    backend = _keyring_backend()
+    backend.failure = failure
+    resolver = CredentialResolver(keyring_backend=backend)
+
+    with pytest.raises(CredentialSecurityError) as exc:
+        resolver.resolve(CredentialRef.parse("oskeyring:openai/default"))
+
+    assert exc.value.category is category
+    assert exc.value.__cause__ is None
+    assert CANARY not in repr(exc.value)
 
 
 def _mounted_resolver(tmp_path: Path) -> CredentialResolver:

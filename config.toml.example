@@ -38,10 +38,72 @@ mode = "explicit"
 adapter_enabled = false
 live_egress_enabled = false
 
-# Campaign W remote-provider configuration is not implemented yet. These are
-# fake CredentialRef syntax examples only; this file enables no remote profile.
-# Desktop default:
+[llm.providers.local]
+kind = "ollama"
+
+[llm.providers.local_reranker]
+kind = "local-transformers"
+backend = "transformers"
+batch_size = 10
+max_length = 384
+
+[llm.roles."search.semantic"]
+capability = "embedding"
+provider = "local"
+model = "bge-m3"
+
+[llm.roles."search.rerank"]
+capability = "rerank"
+provider = "local_reranker"
+model = "BAAI/bge-reranker-v2-m3"
+
+[llm.roles."librarian.review"]
+capability = "generation"
+provider = "local"
+model = "maxwell1500/ornith-35b:Q5_K_M"
+
+# Each classification vote remains an independently replaceable single route.
+[llm.roles."classification.primary"]
+capability = "generation"
+provider = "local"
+model = "maxwell1500/ornith-35b:Q5_K_M"
+
+[llm.roles."classification.challenger"]
+capability = "generation"
+provider = "local"
+model = "gpt-oss:20b"
+
+[llm.roles."classification.tie_break"]
+capability = "generation"
+provider = "local"
+model = "gemma4:26b"
+
+# Cloud-only alternative: one OpenAI credential/profile can serve both roles.
+# Store it with `chronovisor credentials set openai/default`; never put its
+# value here. Replace the corresponding local role tables above when enabling.
+# [llm.providers.openai]
+# kind = "openai"
 # credential_ref = "oskeyring:openai/default"
-# Explicit headless or CI alternatives (no automatic fallback):
+#
+# [llm.roles."librarian.review"]
+# capability = "generation"
+# provider = "openai"
+# model = "gpt-5-mini"
+#
+# [llm.roles."search.semantic"]
+# capability = "embedding"
+# provider = "openai"
+# model = "text-embedding-3-large"
+#
+# High-sensitivity/system/raw egress additionally requires a role/data-class pair:
+# [[llm.egress_opt_in]]
+# role = "librarian.review"
+# data_class = "system"
+#
+# Hybrid note: Anthropic/Claude, DeepSeek, Kimi, and Z.AI/GLM profiles currently
+# advertise generation only. Route `search.semantic` to local Ollama or a
+# separately credentialed OpenAI/Qwen/Gemini/Mistral/OpenRouter profile.
+#
+# Explicit headless alternatives have no automatic fallback:
 # credential_ref = "env:CHRONOVISOR_PROVIDER_SECRET"
 # credential_ref = "mounted-file:/run/secrets/chronovisor_provider"

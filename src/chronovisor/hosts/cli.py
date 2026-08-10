@@ -3,16 +3,23 @@
 from __future__ import annotations
 
 import argparse
+import getpass
 import hashlib
 import json
 import re
 import shlex
+import sys
 from collections import Counter
 from pathlib import Path
-from typing import Any
+from typing import Any, Never
 
 from chronovisor.core import runtime_status
 from chronovisor.core import store as chronovisor_store
+from chronovisor.core.llm_security import (
+    CredentialRef,
+    CredentialSecurityError,
+    OSKeyringCredentialStore,
+)
 from chronovisor.core.runtime_config import (
     config_summary,
     load_hook_policy,
@@ -30,6 +37,14 @@ CODEX_CONFIG_FILE = Path.home() / ".config/codex/config.toml"
 CLAUDE_SETTINGS_FILE = Path.home() / "dotfiles/claude/settings.json"
 USER_PROMPT_HOOK_TIMEOUT_MS = 7000
 STOP_HOOK_TIMEOUT_MS = 5000
+
+
+class SafeArgumentParser(argparse.ArgumentParser):
+    """Keep rejected command-line values out of parser diagnostics."""
+
+    def error(self, _message: str) -> Never:
+        self.print_usage(sys.stderr)
+        self.exit(2, "chronovisor: error: invalid arguments\n")
 
 
 def read_json(path: Path) -> dict[str, Any]:
@@ -548,7 +563,7 @@ def _configure_hold_report_parser(subparsers: Any) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     """Build the complete stable CLI command tree without executing a handler."""
-    parser = argparse.ArgumentParser(description="Operate and inspect Chronovisor.")
+    parser = SafeArgumentParser(description="Operate and inspect Chronovisor.")
     sub = parser.add_subparsers(dest="command", required=True)
     status_parser = sub.add_parser(
         "status", help="Show content, recall, and runtime status."
@@ -561,6 +576,16 @@ def build_parser() -> argparse.ArgumentParser:
     runtime_identity_parser.add_argument("--json", action="store_true")
     doctor_parser = sub.add_parser("doctor", help="Run operational checks.")
     doctor_parser.add_argument("--json", action="store_true")
+    credentials_parser = sub.add_parser(
+        "credentials", help="Manage OS-native LLM credentials."
+    )
+    credentials_sub = credentials_parser.add_subparsers(
+        dest="credentials_command", required=True
+    )
+    for command in ("set", "status", "delete"):
+        credential_parser = credentials_sub.add_parser(command)
+        credential_parser.add_argument("profile_account")
+        credential_parser.add_argument("--json", action="store_true")
     hooks_parser = sub.add_parser("hooks", help="Inspect host hook configuration.")
     hooks_sub = hooks_parser.add_subparsers(dest="hooks_command", required=True)
     hooks_inspect = hooks_sub.add_parser("inspect", help="List configured host hooks.")
@@ -867,8 +892,51 @@ def _dispatch_hold_report(as_json: bool) -> int:
     return 0
 
 
+def _credential_store() -> OSKeyringCredentialStore:
+    return OSKeyringCredentialStore()
+
+
+def _credential_result(present: bool, category: str, *, as_json: bool) -> None:
+    result = {"present": present, "category": category}
+    if as_json:
+        print(json.dumps(result, sort_keys=True))
+    else:
+        print(f"present\t{str(present).lower()}")
+        print(f"category\t{category}")
+
+
+def _dispatch_credentials(args: argparse.Namespace) -> int:
+    try:
+        ref = CredentialRef.parse(f"oskeyring:{args.profile_account}")
+        store = _credential_store()
+        if args.credentials_command == "set":
+            if not sys.stdin.isatty():
+                _credential_result(False, "tty_required", as_json=args.json)
+                return 1
+            try:
+                secret = getpass.getpass("Credential: ")
+            except (EOFError, KeyboardInterrupt):
+                _credential_result(False, "input_unavailable", as_json=args.json)
+                return 1
+            try:
+                result = store.set(ref, secret)
+            finally:
+                del secret
+        elif args.credentials_command == "status":
+            result = store.status(ref)
+        else:
+            result = store.delete(ref)
+    except CredentialSecurityError as exc:
+        _credential_result(False, exc.category.value, as_json=args.json)
+        return 1
+    _credential_result(result.present, result.category, as_json=args.json)
+    return 0
+
+
 def dispatch(args: argparse.Namespace) -> int:
     """Dispatch one already-parsed command while preserving its exit contract."""
+    if args.command == "credentials":
+        return _dispatch_credentials(args)
     if args.command == "status":
         data = build_status()
         if args.json:

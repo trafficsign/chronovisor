@@ -14,6 +14,9 @@ from typing import Literal, Never, Protocol, SupportsIndex, cast
 from urllib.parse import parse_qsl, urlsplit, urlunsplit
 from urllib.request import Request
 
+import keyring
+import keyring.errors
+
 MAX_SECRET_FILE_BYTES = 16_384
 _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 _KEYRING_TARGET = re.compile(
@@ -52,12 +55,23 @@ _CALLER_FORBIDDEN_HEADERS = frozenset(
         "x-goog-api-key",
     }
 )
+_SECURE_KEYRING_BACKENDS = frozenset(
+    {
+        ("keyring.backends.macOS", "Keyring"),
+        ("keyring.backends.Windows", "WinVaultKeyring"),
+        ("keyring.backends.SecretService", "Keyring"),
+        ("keyring.backends.kwallet", "DBusKeyring"),
+        ("keyring.backends.kwallet", "DBusKeyringKWallet4"),
+    }
+)
 
 
 class CredentialFailureCategory(StrEnum):
     INVALID_REF = "credential_ref_invalid"
     MISSING = "credential_missing"
     BACKEND_REJECTED = "backend_rejected"
+    STORE_LOCKED = "store_locked"
+    STORE_UNAVAILABLE = "store_unavailable"
     MOUNT_REJECTED = "mounted_file_rejected"
     ENDPOINT_REJECTED = "endpoint_rejected"
     ORIGIN_MISMATCH = "origin_mismatch"
@@ -164,6 +178,129 @@ class SecretValue:
         raise TypeError("SecretValue is not serializable")
 
 
+class KeyringBackend(Protocol):
+    def get_password(self, service: str, username: str) -> str | None: ...
+
+    def set_password(self, service: str, username: str, password: str) -> None: ...
+
+    def delete_password(self, service: str, username: str) -> None: ...
+
+
+def _secure_keyring_backend(
+    backend: KeyringBackend | None,
+    telemetry: FailureSink | None,
+) -> KeyringBackend:
+    if backend is None:
+        try:
+            loaded = keyring.get_keyring()
+        except Exception:
+            loaded = None
+        if loaded is None:
+            raise _error(CredentialFailureCategory.STORE_UNAVAILABLE, telemetry)
+        backend = cast(KeyringBackend, loaded)
+    identity = (type(backend).__module__, type(backend).__qualname__)
+    if identity not in _SECURE_KEYRING_BACKENDS:
+        raise _error(CredentialFailureCategory.BACKEND_REJECTED, telemetry)
+    return backend
+
+
+def _keyring_target(ref: CredentialRef) -> tuple[str, str]:
+    if (
+        not isinstance(ref, CredentialRef)
+        or ref.backend is not CredentialBackend.OS_KEYRING
+    ):
+        raise _error(CredentialFailureCategory.INVALID_REF)
+    profile, account = ref.target.split("/", 1)
+    return f"chronovisor/{profile}", account
+
+
+def _keyring_read(
+    backend: KeyringBackend,
+    service: str,
+    account: str,
+    telemetry: FailureSink | None,
+) -> str | None:
+    try:
+        value = backend.get_password(service, account)
+    except keyring.errors.KeyringLocked:
+        locked = True
+    except Exception:
+        locked = False
+    else:
+        if value is None or isinstance(value, str):
+            return value
+        locked = False
+    raise _error(
+        CredentialFailureCategory.STORE_LOCKED
+        if locked
+        else CredentialFailureCategory.STORE_UNAVAILABLE,
+        telemetry,
+    )
+
+
+@dataclass(frozen=True)
+class CredentialStoreStatus:
+    present: bool
+    category: str
+
+
+class OSKeyringCredentialStore:
+    """Value-free CLI boundary for an allowlisted OS-native credential store."""
+
+    def __init__(
+        self,
+        *,
+        backend: KeyringBackend | None = None,
+        telemetry: FailureSink | None = None,
+    ) -> None:
+        self._backend = _secure_keyring_backend(backend, telemetry)
+        self._telemetry = telemetry
+
+    def set(self, ref: CredentialRef, secret: str) -> CredentialStoreStatus:
+        service, account = _keyring_target(ref)
+        SecretValue(secret)
+        try:
+            self._backend.set_password(service, account, secret)
+        except keyring.errors.KeyringLocked:
+            locked = True
+        except Exception:
+            locked = False
+        else:
+            return CredentialStoreStatus(True, "present")
+        raise _error(
+            CredentialFailureCategory.STORE_LOCKED
+            if locked
+            else CredentialFailureCategory.STORE_UNAVAILABLE,
+            self._telemetry,
+        )
+
+    def status(self, ref: CredentialRef) -> CredentialStoreStatus:
+        service, account = _keyring_target(ref)
+        value = _keyring_read(self._backend, service, account, self._telemetry)
+        present = value is not None
+        del value
+        return CredentialStoreStatus(present, "present" if present else "missing")
+
+    def delete(self, ref: CredentialRef) -> CredentialStoreStatus:
+        service, account = _keyring_target(ref)
+        try:
+            self._backend.delete_password(service, account)
+        except keyring.errors.PasswordDeleteError:
+            return CredentialStoreStatus(False, "missing")
+        except keyring.errors.KeyringLocked:
+            locked = True
+        except Exception:
+            locked = False
+        else:
+            return CredentialStoreStatus(False, "deleted")
+        raise _error(
+            CredentialFailureCategory.STORE_LOCKED
+            if locked
+            else CredentialFailureCategory.STORE_UNAVAILABLE,
+            self._telemetry,
+        )
+
+
 def _default_repo_root() -> Path | None:
     for candidate in Path(__file__).resolve().parents:
         if (candidate / ".git").exists():
@@ -191,6 +328,7 @@ class CredentialResolver:
         repo_root: Path | None = None,
         home_root: Path | None = None,
         max_file_bytes: int = MAX_SECRET_FILE_BYTES,
+        keyring_backend: KeyringBackend | None = None,
         telemetry: FailureSink | None = None,
     ) -> None:
         if (
@@ -208,13 +346,23 @@ class CredentialResolver:
             home_root.resolve() if home_root is not None else Path.home().resolve()
         )
         self._max_file_bytes = max_file_bytes
+        self._keyring_backend = keyring_backend
         self._telemetry = telemetry
 
     def resolve(self, ref: CredentialRef) -> SecretValue:
         if not isinstance(ref, CredentialRef):
             raise _error(CredentialFailureCategory.INVALID_REF, self._telemetry)
         if ref.backend is CredentialBackend.OS_KEYRING:
-            raise _error(CredentialFailureCategory.BACKEND_REJECTED, self._telemetry)
+            service, account = _keyring_target(ref)
+            backend = _secure_keyring_backend(self._keyring_backend, self._telemetry)
+            value = _keyring_read(backend, service, account, self._telemetry)
+            if value is None:
+                raise _error(CredentialFailureCategory.MISSING, self._telemetry)
+            try:
+                return SecretValue(value)
+            except CredentialSecurityError:
+                pass
+            raise _error(CredentialFailureCategory.MISSING, self._telemetry)
         if ref.backend is CredentialBackend.ENV:
             value = (
                 os.environ.pop(ref.target, None)
