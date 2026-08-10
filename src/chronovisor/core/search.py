@@ -15,8 +15,18 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, cast
 
-from chronovisor.core.frontmatter import parse as parse_frontmatter
+from chronovisor.core.canonical_document import (
+    CanonicalDocumentError,
+    parse_document,
+)
 from chronovisor.core.lexical_index import LexicalIndex
+from chronovisor.core.llm_config import load_default_llm_runtime, load_llm_config
+from chronovisor.core.llm_runtime import (
+    EmbeddingRequest,
+    SourceDataClass,
+    SourceDataClassification,
+    SourceSensitivity,
+)
 from chronovisor.core.negative_feedback import apply_penalties, penalties_for_query
 from chronovisor.core.pipeline import (
     PipelineDependencies,
@@ -29,19 +39,27 @@ from chronovisor.core.runtime_config import (
     load_negative_feedback_config,
     load_search_embedding_config,
 )
-from chronovisor.core.search_types import FRONTMATTER_RE, ScoredPage
+from chronovisor.core.search_types import ScoredPage
 from chronovisor.core.store import (
     CHRONOVISOR_ROOT,
     PAGES_DIR,
-    SYSTEM_DIR,
-    all_pages,
-    page_id_from_path,
 )
 
 
 def searchable_pages() -> list[Path]:
-    """Return normal pages plus system pages that are useful recall targets."""
-    return all_pages() + sorted(SYSTEM_DIR.glob("*.md"))
+    """Return stable canonical pages from the shared metadata snapshot."""
+
+    from chronovisor.core.index_store import get_store
+
+    store = get_store()
+    _refresh_store_for_search(store)
+    paths = []
+    for page_id in store.all_page_ids(include_system=True):
+        meta = store.meta(page_id)
+        path = meta.get("path") if meta is not None else None
+        if isinstance(path, str):
+            paths.append(Path(path))
+    return sorted(paths)
 
 
 # ---------------------------------------------------------------------------
@@ -50,8 +68,8 @@ def searchable_pages() -> list[Path]:
 
 _BM25_CACHE_FILE = CHRONOVISOR_ROOT / ".index" / "lexical.sqlite"
 _LEGACY_BM25_CACHE_FILE = CHRONOVISOR_ROOT / ".index" / "bm25.json"
-_ACTIVE_STATUS = "active"
-_VALID_LIFECYCLE_STATUSES = {"active", "deprecated", "archived"}
+_STABLE_STATUS = "stable"
+_VALID_LIFECYCLE_STATUSES = {"draft", _STABLE_STATUS, "deprecated"}
 _REFERENCE_PAGE_TYPE = "reference"
 _VALID_PAGE_TYPES = {
     "knowledge",
@@ -67,12 +85,12 @@ _VALID_SENSITIVITY_TIERS = {"normal", "high"}
 
 
 def _normalize_lifecycle_status(value: object) -> str:
-    if not isinstance(value, str):
-        return _ACTIVE_STATUS
-    normalized = value.strip().lower()
+    normalized = value.strip().lower() if isinstance(value, str) else ""
     if normalized in _VALID_LIFECYCLE_STATUSES:
         return normalized
-    return _ACTIVE_STATUS
+    # LexicalIndex still projects the former active label; keep that internal
+    # compatibility seam while every search result exposes canonical status.
+    return _STABLE_STATUS if normalized in {"", "active"} else "draft"
 
 
 def _normalize_page_type(value: object, *, folder: str = "") -> str:
@@ -95,8 +113,8 @@ def _normalize_sensitivity(value: object, *, folder: str = "") -> str:
     return "normal"
 
 
-def _is_active_result(result: ScoredPage) -> bool:
-    return _normalize_lifecycle_status(result.status) == _ACTIVE_STATUS
+def _is_stable_result(result: ScoredPage) -> bool:
+    return _normalize_lifecycle_status(result.status) == _STABLE_STATUS
 
 
 def _is_reference_result(result: ScoredPage) -> bool:
@@ -183,7 +201,7 @@ def get_bm25() -> BM25Index:
 
 
 # ---------------------------------------------------------------------------
-# Semantic search (Ollama embeddings) — SQLite-backed, incremental writes
+# Semantic search — runtime-routed embeddings with SQLite-backed incremental writes
 # ---------------------------------------------------------------------------
 #
 # Storage model:
@@ -209,11 +227,48 @@ MAX_CHUNK_CHARS = 900
 CHUNK_SCORE_WEIGHT = 0.92
 CHUNK_SEARCH_MIN_TOP_SCORE = 0.45
 CHUNK_SEARCH_MIN_MARGIN = 0.002
+_SEARCH_EMBEDDING_ROLE = "search.semantic"
+_QUERY_EMBEDDING_SOURCE = SourceDataClassification(
+    SourceDataClass.RAW,
+    SourceSensitivity.HIGH,
+)
 
 
 def _embedding_profile() -> tuple[str, str, str]:
     cfg = load_embedding_config()
     return cfg.model, cfg.document_prefix, cfg.query_prefix
+
+
+def _search_embedding_profile() -> tuple[str, str, str]:
+    """Return provider-neutral index identity plus domain text prefixes."""
+
+    role = load_llm_config().roles[_SEARCH_EMBEDDING_ROLE]
+    _utility_model, document_prefix, query_prefix = _embedding_profile()
+    return role.model, document_prefix, query_prefix
+
+
+def _page_embedding_source(meta: dict[str, Any]) -> SourceDataClassification:
+    return SourceDataClassification(
+        SourceDataClass.SYSTEM if meta.get("is_system") else SourceDataClass.PAGE,
+        (
+            SourceSensitivity.HIGH
+            if _meta_sensitivity(meta, folder=_folder_from_meta(meta)) == "high"
+            else SourceSensitivity.NORMAL
+        ),
+    )
+
+
+def _embed_search_texts(
+    texts: list[str],
+    *,
+    source: SourceDataClassification,
+    timeout_ms: int | None = None,
+) -> tuple[list[list[float]], str]:
+    result = load_default_llm_runtime().embed(
+        _SEARCH_EMBEDDING_ROLE,
+        EmbeddingRequest(tuple(texts), source, timeout_ms),
+    )
+    return [list(vector) for vector in result.vectors], result.model
 
 
 def _apply_prefix(prefix: str, text: str) -> str:
@@ -401,107 +456,6 @@ def _load_embedding(pid: str) -> tuple[list[float], float, float] | None:
     return _unpack_vector(blob, int(dim)), float(mtime), float(norm)
 
 
-def _store_embeddings_batch(
-    rows: list[tuple[str, list[float], float]],
-    *,
-    model: str,
-    text_prefix: str,
-) -> None:
-    """Insert/replace a batch of (page_id, vector, mtime) rows."""
-    if not rows:
-        return
-    packed = [
-        (
-            pid,
-            _pack_vector(vec),
-            float(mtime),
-            _vec_norm(vec),
-            len(vec),
-            model,
-            text_prefix,
-        )
-        for pid, vec, mtime in rows
-    ]
-    with _EMBED_DB_LOCK:
-        conn = _connect_embeddings_raw()
-        try:
-            conn.executemany(
-                """
-                INSERT OR REPLACE INTO embeddings
-                (page_id, vector, mtime, norm, dim, model, text_prefix)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                packed,
-            )
-            conn.commit()
-        finally:
-            conn.close()
-
-
-def _store_question_embeddings_batch(
-    rows: list[tuple[str, int, str, list[float], float]],
-    *,
-    model: str,
-    text_prefix: str,
-) -> None:
-    """Insert/replace recall-question embedding rows."""
-    if not rows:
-        return
-    packed = [
-        (
-            f"{pid}#q{idx}",
-            pid,
-            idx,
-            question,
-            _pack_vector(vec),
-            float(mtime),
-            _vec_norm(vec),
-            len(vec),
-            model,
-            text_prefix,
-        )
-        for pid, idx, question, vec, mtime in rows
-    ]
-    with _EMBED_DB_LOCK:
-        conn = _connect_embeddings_raw()
-        try:
-            conn.executemany(
-                """
-                INSERT OR REPLACE INTO question_embeddings
-                (key, page_id, question_idx, question, vector, mtime, norm, dim, model, text_prefix)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                packed,
-            )
-            conn.commit()
-        finally:
-            conn.close()
-
-
-def _delete_chunk_embeddings(
-    page_ids: set[str],
-    *,
-    model: str,
-    text_prefix: str,
-) -> None:
-    if not page_ids:
-        return
-    with _EMBED_DB_LOCK:
-        conn = _connect_embeddings_raw()
-        try:
-            for pid in page_ids:
-                conn.execute(
-                    """
-                    DELETE FROM chunk_embeddings
-                    WHERE page_id = ? AND model = ? AND text_prefix = ?
-                    """,
-                    (pid, model, text_prefix),
-                )
-            conn.commit()
-        finally:
-            conn.close()
-
-
 def _delete_stale_embedding_pages(current_page_ids: set[str]) -> int:
     """Remove every derived embedding row whose source page no longer exists."""
 
@@ -530,49 +484,98 @@ def _delete_stale_embedding_pages(current_page_ids: set[str]) -> int:
     return len(deleted_page_ids)
 
 
-def _store_chunk_embeddings_batch(
-    rows: list[tuple[str, int, str, list[float], float]],
+def _replace_search_embeddings(
+    page_rows: list[tuple[str, list[float], float]],
+    question_rows: list[tuple[str, int, str, list[float], float]],
+    chunk_rows: list[tuple[str, int, str, list[float], float]],
     *,
+    page_ids: set[str],
     model: str,
     text_prefix: str,
 ) -> None:
-    """Insert/replace chunk embedding rows."""
-    if not rows:
-        return
-    packed = [
+    """Atomically replace one route's complete page projection."""
+
+    packed_pages = [
+        (pid, _pack_vector(vec), mtime, _vec_norm(vec), len(vec), model, text_prefix)
+        for pid, vec, mtime in page_rows
+    ]
+    packed_questions = [
+        (
+            f"{pid}#q{idx}",
+            pid,
+            idx,
+            question,
+            _pack_vector(vec),
+            mtime,
+            _vec_norm(vec),
+            len(vec),
+            model,
+            text_prefix,
+        )
+        for pid, idx, question, vec, mtime in question_rows
+    ]
+    packed_chunks = [
         (
             f"{pid}#c{idx}",
             pid,
             idx,
             text,
             _pack_vector(vec),
-            float(mtime),
+            mtime,
             _vec_norm(vec),
             len(vec),
             model,
             text_prefix,
         )
-        for pid, idx, text, vec, mtime in rows
+        for pid, idx, text, vec, mtime in chunk_rows
     ]
     with _EMBED_DB_LOCK:
         conn = _connect_embeddings_raw()
         try:
-            conn.executemany(
-                """
-                INSERT OR REPLACE INTO chunk_embeddings
-                (key, page_id, chunk_idx, text, vector, mtime, norm, dim, model, text_prefix)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                packed,
-            )
-            conn.commit()
+            with conn:
+                for table in ("embeddings", "question_embeddings", "chunk_embeddings"):
+                    conn.executemany(
+                        f"DELETE FROM {table} WHERE page_id = ?",
+                        ((page_id,) for page_id in sorted(page_ids)),
+                    )
+                conn.executemany(
+                    """
+                    INSERT INTO embeddings
+                    (page_id, vector, mtime, norm, dim, model, text_prefix)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    packed_pages,
+                )
+                conn.executemany(
+                    """
+                    INSERT INTO question_embeddings
+                    (key, page_id, question_idx, question, vector, mtime, norm, dim,
+                     model, text_prefix)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    packed_questions,
+                )
+                conn.executemany(
+                    """
+                    INSERT INTO chunk_embeddings
+                    (key, page_id, chunk_idx, text, vector, mtime, norm, dim, model,
+                     text_prefix)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    packed_chunks,
+                )
         finally:
             conn.close()
 
 
-def _iter_all_embeddings() -> "list[tuple[str, list[float], float, float]]":
+def _iter_all_embeddings(
+    *, model: str | None = None, text_prefix: str | None = None
+) -> "list[tuple[str, list[float], float, float]]":
     """Snapshot all rows as (page_id, vector, mtime, norm)."""
-    model, document_prefix, _query_prefix = _embedding_profile()
+    if model is None or text_prefix is None:
+        configured_model, configured_prefix, _query_prefix = _embedding_profile()
+        model = model or configured_model
+        text_prefix = configured_prefix if text_prefix is None else text_prefix
     conn = _connect_embeddings()
     try:
         rows = conn.execute(
@@ -580,7 +583,7 @@ def _iter_all_embeddings() -> "list[tuple[str, list[float], float, float]]":
             SELECT page_id, vector, mtime, norm, dim FROM embeddings
             WHERE model = ? AND text_prefix = ?
             """,
-            (model, document_prefix),
+            (model, text_prefix),
         ).fetchall()
     finally:
         conn.close()
@@ -593,11 +596,14 @@ def _iter_all_embeddings() -> "list[tuple[str, list[float], float, float]]":
 iter_all_embeddings = _iter_all_embeddings
 
 
-def _iter_all_chunk_embeddings() -> (
-    "list[tuple[str, str, int, str, list[float], float, float]]"
-):
+def _iter_all_chunk_embeddings(
+    *, model: str | None = None, text_prefix: str | None = None
+) -> "list[tuple[str, str, int, str, list[float], float, float]]":
     """Snapshot chunk rows as (key, page_id, idx, text, vector, mtime, norm)."""
-    model, document_prefix, _query_prefix = _embedding_profile()
+    if model is None or text_prefix is None:
+        configured_model, configured_prefix, _query_prefix = _embedding_profile()
+        model = model or configured_model
+        text_prefix = configured_prefix if text_prefix is None else text_prefix
     conn = _connect_embeddings()
     try:
         rows = conn.execute(
@@ -606,7 +612,7 @@ def _iter_all_chunk_embeddings() -> (
             FROM chunk_embeddings
             WHERE model = ? AND text_prefix = ?
             """,
-            (model, document_prefix),
+            (model, text_prefix),
         ).fetchall()
     finally:
         conn.close()
@@ -626,11 +632,14 @@ def _iter_all_chunk_embeddings() -> (
     return out
 
 
-def _iter_all_question_embeddings() -> (
-    "list[tuple[str, str, int, list[float], float, float]]"
-):
+def _iter_all_question_embeddings(
+    *, model: str | None = None, text_prefix: str | None = None
+) -> "list[tuple[str, str, int, list[float], float, float]]":
     """Snapshot all recall-question rows as (key, page_id, idx, vector, mtime, norm)."""
-    model, document_prefix, _query_prefix = _embedding_profile()
+    if model is None or text_prefix is None:
+        configured_model, configured_prefix, _query_prefix = _embedding_profile()
+        model = model or configured_model
+        text_prefix = configured_prefix if text_prefix is None else text_prefix
     conn = _connect_embeddings()
     try:
         rows = conn.execute(
@@ -639,7 +648,7 @@ def _iter_all_question_embeddings() -> (
             FROM question_embeddings
             WHERE model = ? AND text_prefix = ?
             """,
-            (model, document_prefix),
+            (model, text_prefix),
         ).fetchall()
     finally:
         conn.close()
@@ -658,8 +667,13 @@ def _iter_all_question_embeddings() -> (
     return out
 
 
-def _embedding_count() -> int:
-    model, document_prefix, _query_prefix = _embedding_profile()
+def _embedding_count(
+    *, model: str | None = None, text_prefix: str | None = None
+) -> int:
+    if model is None or text_prefix is None:
+        configured_model, configured_prefix, _query_prefix = _embedding_profile()
+        model = model or configured_model
+        text_prefix = configured_prefix if text_prefix is None else text_prefix
     try:
         conn = _connect_embeddings()
     except sqlite3.OperationalError:
@@ -667,15 +681,20 @@ def _embedding_count() -> int:
     try:
         row = conn.execute(
             "SELECT COUNT(*) FROM embeddings WHERE model = ? AND text_prefix = ?",
-            (model, document_prefix),
+            (model, text_prefix),
         ).fetchone()
         return int(row[0]) if row else 0
     finally:
         conn.close()
 
 
-def _chunked_page_ids() -> set[str]:
-    model, document_prefix, _query_prefix = _embedding_profile()
+def _chunked_page_ids(
+    *, model: str | None = None, text_prefix: str | None = None
+) -> set[str]:
+    if model is None or text_prefix is None:
+        configured_model, configured_prefix, _query_prefix = _embedding_profile()
+        model = model or configured_model
+        text_prefix = configured_prefix if text_prefix is None else text_prefix
     conn = _connect_embeddings()
     try:
         return {
@@ -685,36 +704,29 @@ def _chunked_page_ids() -> set[str]:
                 SELECT DISTINCT page_id FROM chunk_embeddings
                 WHERE model = ? AND text_prefix = ?
                 """,
-                (model, document_prefix),
+                (model, text_prefix),
             ).fetchall()
         }
     finally:
         conn.close()
 
 
-def _recall_questions_from_content(content: str) -> list[str]:
-    try:
-        from chronovisor.core.frontmatter import parse as parse_frontmatter
-
-        meta, _body = parse_frontmatter(content)
-    except Exception:
-        return []
+def _recall_questions(meta: dict[str, Any]) -> list[str]:
     questions = meta.get("recall_questions")
     if not isinstance(questions, list):
         return []
     return [q for q in questions if isinstance(q, str) and q.strip()][:8]
 
 
-def _markdown_chunks(content: str, title: str) -> list[str]:
-    meta, body = parse_frontmatter(content)
+def _markdown_chunks(body: str, title: str, meta: dict[str, Any]) -> list[str]:
     chunks: list[str] = []
     heading = title
     buffer: list[str] = []
 
-    summary_value = meta.get("summary")
+    summary_value = meta.get("description") or meta.get("summary")
     summary = summary_value if isinstance(summary_value, str) else ""
     entities = meta.get("entities") if isinstance(meta.get("entities"), list) else []
-    page_type = meta.get("type") if isinstance(meta.get("type"), str) else ""
+    page_type = meta.get("page_type") if isinstance(meta.get("page_type"), str) else ""
     updated = meta.get("updated") if isinstance(meta.get("updated"), str) else ""
     context_lines = [f"Page: {title}"]
     if summary.strip():
@@ -798,26 +810,20 @@ def _should_scan_chunks(page_scores: list[float]) -> bool:
     return top1 < CHUNK_SEARCH_MIN_TOP_SCORE or (top1 - top2) < CHUNK_SEARCH_MIN_MARGIN
 
 
-def _legacy_update_embeddings(
-    page_ids: list[str] | None = None, *, strict: bool = False
-) -> int:
+def _legacy_update_embeddings(page_ids: list[str] | None = None) -> int:
     """Update embeddings for pages. Returns count of updated pages.
 
     Writes are scoped to the rows that actually changed (or the rows
     explicitly requested via `page_ids`). Unchanged pages are not
-    re-encoded and the SQLite table is not rewritten in full. ``strict``
-    propagates embedding failures and rejects truncated vector batches; it is
-    intended for correctness-critical post-mutation readback paths.
+    re-encoded and the SQLite table is not rewritten in full. Runtime,
+    residency-policy, and egress failures always propagate before any write.
     """
-    from chronovisor.core.ollama import embed, is_available
+    from chronovisor.core.index_store import get_store
 
-    if not is_available():
-        return 0
-
-    model, document_prefix, _query_prefix = _embedding_profile()
-
-    page_paths = list(searchable_pages())
-    current_page_ids = {page_id_from_path(path) for path in page_paths}
+    model, document_prefix, _query_prefix = _search_embedding_profile()
+    store = get_store()
+    cast(Any, store).refresh()
+    current_page_ids = store.all_page_ids(include_system=True)
 
     # Pull existing mtimes for the candidate page set in one query so
     # we don't pay per-row SELECTs inside the loop.
@@ -837,17 +843,24 @@ def _legacy_update_embeddings(
         conn.close()
     _delete_stale_embedding_pages(current_page_ids)
 
-    existing_chunk_pages = _chunked_page_ids()
-    pages_to_process: list[tuple[str, str, int, str, float]] = []
-    for path in page_paths:
-        pid = page_id_from_path(path)
+    existing_chunk_pages = _chunked_page_ids(model=model, text_prefix=document_prefix)
+    pages_to_process: dict[
+        SourceDataClassification, list[tuple[str, str, int, str, float]]
+    ] = {}
+    for pid in sorted(current_page_ids):
         if page_ids and pid not in page_ids:
             continue
 
-        try:
-            mtime = path.stat().st_mtime
-        except OSError:
+        meta = store.meta(pid)
+        path_value = meta.get("path") if meta is not None else None
+        if meta is None or not isinstance(path_value, str):
             continue
+        path = Path(path_value)
+
+        mtime_ns = meta.get("mtime_ns")
+        if not isinstance(mtime_ns, int):
+            continue
+        mtime = mtime_ns / 1_000_000_000
 
         existing_mtime = existing_mtimes.get(pid)
         if (
@@ -859,70 +872,65 @@ def _legacy_update_embeddings(
             continue
 
         try:
-            content = path.read_text()
-        except (OSError, UnicodeDecodeError):
+            document = parse_document(path.read_bytes())
+            body = document.body.decode("utf-8")
+        except (CanonicalDocumentError, OSError, UnicodeDecodeError):
             continue
 
-        fm_match = re.search(r"title:\s*(.+)", content)
-        title = fm_match.group(1).strip() if fm_match else pid
-        questions = _recall_questions_from_content(content)
+        title = str(meta.get("title") or pid)
+        questions = _recall_questions(meta)
         recall_text = "\n".join(f"Q: {q}" for q in questions)
-        embed_text = (
-            f"{title}\n\n{recall_text}\n\n{FRONTMATTER_RE.sub('', content)[:2000]}"
-        )
-        pages_to_process.append(("page", pid, -1, embed_text, mtime))
+        embed_text = f"{title}\n\n{recall_text}\n\n{body[:2000]}"
+        source_rows = pages_to_process.setdefault(_page_embedding_source(meta), [])
+        source_rows.append(("page", pid, -1, embed_text, mtime))
         for idx, question in enumerate(questions):
-            pages_to_process.append(("question", pid, idx, question, mtime))
-        for idx, chunk in enumerate(_markdown_chunks(content, title)):
-            pages_to_process.append(("chunk", pid, idx, chunk, mtime))
+            source_rows.append(("question", pid, idx, question, mtime))
+        for idx, chunk in enumerate(_markdown_chunks(body, title, meta)):
+            source_rows.append(("chunk", pid, idx, chunk, mtime))
 
     updated_count = 0
     if pages_to_process:
-        _delete_chunk_embeddings(
-            {
-                pid
-                for kind, pid, _idx, _text, _mtime in pages_to_process
-                if kind == "page"
-            },
+        target_page_ids = {
+            pid
+            for rows in pages_to_process.values()
+            for kind, pid, _idx, _text, _mtime in rows
+            if kind == "page"
+        }
+        page_rows: list[tuple[str, list[float], float]] = []
+        question_rows: list[tuple[str, int, str, list[float], float]] = []
+        chunk_rows: list[tuple[str, int, str, list[float], float]] = []
+        # ponytail: stage vectors in memory for one atomic swap; use SQLite
+        # staging tables only if full-rebuild memory becomes measurable.
+        batch_size = 32
+        for source, source_rows in pages_to_process.items():
+            for i in range(0, len(source_rows), batch_size):
+                batch = source_rows[i : i + batch_size]
+                texts = [_apply_prefix(document_prefix, row[3]) for row in batch]
+                vectors, result_model = _embed_search_texts(texts, source=source)
+                if len(vectors) != len(batch):
+                    raise RuntimeError(
+                        f"embedding batch was truncated: {len(vectors)} != {len(batch)}"
+                    )
+                if result_model != model:
+                    raise RuntimeError("embedding route identity changed")
+                for (kind, pid, idx, text, mtime), vec in zip(
+                    batch, vectors, strict=True
+                ):
+                    if kind == "question":
+                        question_rows.append((pid, idx, text, vec, mtime))
+                    elif kind == "chunk":
+                        chunk_rows.append((pid, idx, text, vec, mtime))
+                    else:
+                        page_rows.append((pid, vec, mtime))
+        _replace_search_embeddings(
+            page_rows,
+            question_rows,
+            chunk_rows,
+            page_ids=target_page_ids,
             model=model,
             text_prefix=document_prefix,
         )
-        batch_size = 32
-        for i in range(0, len(pages_to_process), batch_size):
-            batch = pages_to_process[i : i + batch_size]
-            texts = [_apply_prefix(document_prefix, t[3]) for t in batch]
-            try:
-                vectors = embed(texts, model=model)
-            except Exception as exc:
-                if strict:
-                    raise RuntimeError("embedding batch failed") from exc
-                continue
-            if len(vectors) != len(batch) and strict:
-                raise RuntimeError(
-                    f"embedding batch was truncated: {len(vectors)} != {len(batch)}"
-                )
-            rows: list[tuple[str, list[float], float]] = []
-            question_rows: list[tuple[str, int, str, list[float], float]] = []
-            chunk_rows: list[tuple[str, int, str, list[float], float]] = []
-            for (kind, pid, idx, text, mtime), vec in zip(batch, vectors, strict=False):
-                if kind == "question":
-                    question_rows.append((pid, idx, text, vec, mtime))
-                elif kind == "chunk":
-                    chunk_rows.append((pid, idx, text, vec, mtime))
-                else:
-                    rows.append((pid, vec, mtime))
-            _store_embeddings_batch(rows, model=model, text_prefix=document_prefix)
-            _store_question_embeddings_batch(
-                question_rows,
-                model=model,
-                text_prefix=document_prefix,
-            )
-            _store_chunk_embeddings_batch(
-                chunk_rows,
-                model=model,
-                text_prefix=document_prefix,
-            )
-            updated_count += len(rows)
+        updated_count = len(page_rows)
 
     return updated_count
 
@@ -942,34 +950,23 @@ def _legacy_semantic_search(
     is computed once. Inner loop is therefore one dot product per page.
     """
     from chronovisor.core.index_store import get_store
-    from chronovisor.core.ollama import embed, is_available
 
-    if not is_available():
-        if strict:
-            raise RuntimeError("semantic search backend is unavailable")
-        return []
-
-    if _embedding_count() == 0:
+    configured_model, document_prefix, query_prefix = _search_embedding_profile()
+    if _embedding_count(model=configured_model, text_prefix=document_prefix) == 0:
         if strict:
             raise RuntimeError("semantic search index has no embeddings")
         return []
 
-    model, _document_prefix, query_prefix = _embedding_profile()
-    try:
-        try:
-            q_vec = embed(
-                [_apply_prefix(query_prefix, query)],
-                model=model,
-                read_timeout_ms=timeout_ms,
-            )[0]
-        except TypeError:
-            # Preserve injected/legacy embedding callables that predate the
-            # bounded timeout keyword.
-            q_vec = embed([_apply_prefix(query_prefix, query)], model=model)[0]
-    except Exception as exc:
-        if strict:
-            raise RuntimeError("semantic search query embedding failed") from exc
-        return []
+    vectors, model = _embed_search_texts(
+        [_apply_prefix(query_prefix, query)],
+        source=_QUERY_EMBEDDING_SOURCE,
+        timeout_ms=timeout_ms,
+    )
+    if not vectors:
+        raise RuntimeError("semantic search query embedding was truncated")
+    if model != configured_model:
+        raise RuntimeError("embedding route identity changed")
+    q_vec = vectors[0]
 
     q_norm = _vec_norm(q_vec)
     if q_norm == 0:
@@ -981,11 +978,13 @@ def _legacy_semantic_search(
     _refresh_store_for_search(store)
 
     by_page: dict[str, ScoredPage] = {}
-    for pid, vec, _mtime, norm in _iter_all_embeddings():
+    for pid, vec, _mtime, norm in _iter_all_embeddings(
+        model=model, text_prefix=document_prefix
+    ):
         if norm == 0:
             continue
         meta = store.meta(pid)
-        if meta is None:
+        if meta is None or _normalize_lifecycle_status(meta.get("status")) != "stable":
             continue
         folder = _folder_from_meta(meta)
         page_type = _meta_page_type(meta, folder=folder)
@@ -1011,11 +1010,13 @@ def _legacy_semantic_search(
             sensitivity=sensitivity,
         )
 
-    for _key, pid, _idx, vec, _mtime, norm in _iter_all_question_embeddings():
+    for _key, pid, _idx, vec, _mtime, norm in _iter_all_question_embeddings(
+        model=model, text_prefix=document_prefix
+    ):
         if norm == 0:
             continue
         meta = store.meta(pid)
-        if meta is None:
+        if meta is None or _normalize_lifecycle_status(meta.get("status")) != "stable":
             continue
         folder = _folder_from_meta(meta)
         page_type = _meta_page_type(meta, folder=folder)
@@ -1043,11 +1044,22 @@ def _legacy_semantic_search(
             )
 
     if _should_scan_chunks([page.score for page in by_page.values()]):
-        for _key, pid, _idx, text, vec, _mtime, norm in _iter_all_chunk_embeddings():
+        for (
+            _key,
+            pid,
+            _idx,
+            text,
+            vec,
+            _mtime,
+            norm,
+        ) in _iter_all_chunk_embeddings(model=model, text_prefix=document_prefix):
             if norm == 0:
                 continue
             meta = store.meta(pid)
-            if meta is None:
+            if (
+                meta is None
+                or _normalize_lifecycle_status(meta.get("status")) != "stable"
+            ):
                 continue
             folder = _folder_from_meta(meta)
             page_type = _meta_page_type(meta, folder=folder)
@@ -1090,8 +1102,10 @@ def update_embeddings(
     """
 
     config = load_search_embedding_config()
-    if not config.enabled or config.backend == "legacy_ollama":
-        return _legacy_update_embeddings(page_ids=page_ids, strict=strict)
+    if not config.enabled:
+        return 0
+    if config.backend == "legacy_ollama":
+        return _legacy_update_embeddings(page_ids=page_ids)
 
     from chronovisor.core.semantic_jobs import enqueue_pages, enqueue_rebuild
 
@@ -1128,10 +1142,12 @@ def semantic_search(
     strict: bool = False,
     timeout_ms: int | None = None,
 ) -> list[ScoredPage]:
-    """Search through the selected backend and fail open to lexical search."""
+    """Search through the selected execution topology."""
 
     config = load_search_embedding_config()
-    if not config.enabled or config.backend == "legacy_ollama":
+    if not config.enabled:
+        return []
+    if config.backend == "legacy_ollama":
         return _legacy_semantic_search(
             query,
             top_n,
@@ -1167,19 +1183,13 @@ def semantic_search(
             strict=strict,
             timeout_ms=timeout_ms,
         )
-    try:
-        return semantic_client.search(
-            query,
-            top_n,
-            include_reference=include_reference,
-            config=config,
-            timeout_ms=timeout_ms,
-        )
-    except Exception as exc:
-        if strict:
-            raise RuntimeError("Nemotron semantic search unavailable") from exc
-        # Empty semantic results make the shared pipeline continue on BM25.
-        return []
+    return semantic_client.search(
+        query,
+        top_n,
+        include_reference=include_reference,
+        config=config,
+        timeout_ms=timeout_ms,
+    )
 
 
 def semantic_verify(
@@ -1188,7 +1198,7 @@ def semantic_verify(
     *,
     timeout_ms: int | None = None,
 ) -> list[ScoredPage]:
-    """Fail-open full-dimensional verification of graph-generated candidates."""
+    """Run full-dimensional verification for graph-generated candidates."""
 
     config = load_search_embedding_config()
     if not page_ids or not config.enabled or config.backend != "nemotron_service":
@@ -1197,15 +1207,12 @@ def semantic_verify(
 
     if not semantic_client.selected_for_rollout(query, config):
         return []
-    try:
-        rows = semantic_client.verify(
-            query,
-            page_ids,
-            config=config,
-            timeout_ms=timeout_ms,
-        )
-    except Exception:
-        return []
+    rows = semantic_client.verify(
+        query,
+        page_ids,
+        config=config,
+        timeout_ms=timeout_ms,
+    )
     return [page for page in rows if float(page.score) >= float(config.min_top_score)]
 
 
@@ -1234,7 +1241,7 @@ def context_seed_results(query: str, *, limit: int = 4) -> list[ScoredPage]:
     out: list[ScoredPage] = []
     for rank, page_id in enumerate(page_ids):
         meta = store.meta(page_id)
-        if meta is None:
+        if meta is None or _normalize_lifecycle_status(meta.get("status")) != "stable":
             continue
         folder = _folder_from_meta(meta)
         out.append(
@@ -1507,7 +1514,10 @@ def graph_expand_results(
             if candidate.page_id in seed_ids or len(expanded) >= output_limit:
                 continue
             meta = store.meta(candidate.page_id)
-            if meta is None:
+            if (
+                meta is None
+                or _normalize_lifecycle_status(meta.get("status")) != "stable"
+            ):
                 continue
             folder = _folder_from_meta(meta)
             expanded[candidate.page_id] = ScoredPage(
@@ -1581,7 +1591,10 @@ def graph_expand_results(
             ):
                 continue
             meta = store.meta(target)
-            if meta is None:
+            if (
+                meta is None
+                or _normalize_lifecycle_status(meta.get("status")) != "stable"
+            ):
                 continue
             best_activation[target] = next_activation
             next_path = (*path, target)
@@ -1708,7 +1721,7 @@ def usage_prior_results(
     ranked = sorted(scores.items(), key=lambda item: item[1], reverse=True)[:limit]
     for page_id, score in ranked:
         meta = store.meta(page_id)
-        if meta is None:
+        if meta is None or _normalize_lifecycle_status(meta.get("status")) != "stable":
             continue
         folder = _folder_from_meta(meta)
         out.append(
@@ -1736,7 +1749,9 @@ def apply_filters(
     updated_before: str | None = None,
 ) -> list[ScoredPage]:
     """Filter results by folder and date range."""
-    filtered = [r for r in results if _is_active_result(r)]
+    for result in results:
+        result.status = _normalize_lifecycle_status(result.status)
+    filtered = [r for r in results if _is_stable_result(r)]
     if not folder:
         filtered = [r for r in filtered if not _is_reference_result(r)]
     if folder:

@@ -6,7 +6,7 @@ import sqlite3
 import pytest
 
 from chronovisor.core import index_store as index_store_mod
-from chronovisor.core import ollama, search
+from chronovisor.core import search
 from chronovisor.core.knowledge_graph_retrieval import CommunityCandidate
 from chronovisor.core.runtime_config import EmbeddingConfig, SearchEmbeddingConfig
 from chronovisor.core.search import (
@@ -20,32 +20,32 @@ from chronovisor.core.search import (
 def test_semantic_search_strict_mode_surfaces_backend_unavailability(
     monkeypatch,
 ) -> None:
-    monkeypatch.setattr(ollama, "is_available", lambda: False)
+    monkeypatch.setattr(search, "_embedding_count", lambda **_kwargs: 0)
+    monkeypatch.setattr(search, "_search_embedding_profile", lambda: ("test", "", ""))
 
     assert search.semantic_search("test") == []
-    with pytest.raises(RuntimeError, match="backend is unavailable"):
+    with pytest.raises(RuntimeError, match="index has no embeddings"):
         search.semantic_search("test", strict=True)
 
 
 def test_semantic_search_strict_mode_surfaces_embedding_failure(
     monkeypatch,
 ) -> None:
-    monkeypatch.setattr(ollama, "is_available", lambda: True)
-    monkeypatch.setattr(
-        ollama,
-        "embed",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("offline")),
-    )
-    monkeypatch.setattr(search, "_ensure_json_embedding_import", lambda: None)
-    monkeypatch.setattr(search, "_embedding_count", lambda: 1)
+    monkeypatch.setattr(search, "_embedding_count", lambda **_kwargs: 1)
     monkeypatch.setattr(
         search,
-        "load_embedding_config",
-        lambda: EmbeddingConfig(model="test"),
+        "_search_embedding_profile",
+        lambda: ("test", "", ""),
+    )
+    monkeypatch.setattr(
+        search,
+        "_embed_search_texts",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("offline")),
     )
 
-    assert search.semantic_search("test") == []
-    with pytest.raises(RuntimeError, match="query embedding failed"):
+    with pytest.raises(RuntimeError, match="offline"):
+        search.semantic_search("test")
+    with pytest.raises(RuntimeError, match="offline"):
         search.semantic_search("test", strict=True)
 
 
@@ -141,7 +141,10 @@ def test_associative_graph_reaches_two_hops_with_path_trace(monkeypatch) -> None
             return None
 
         def outlinks(self, page_id):
-            return {"seed": ["middle"], "middle": ["target"]}.get(page_id, [])
+            return {
+                "seed": ["middle", "draft-target"],
+                "middle": ["target"],
+            }.get(page_id, [])
 
         def backlinks(self, _page_id):
             return []
@@ -156,14 +159,14 @@ def test_associative_graph_reaches_two_hops_with_path_trace(monkeypatch) -> None
             return []
 
         def meta(self, page_id):
-            if page_id not in {"seed", "middle", "target"}:
+            if page_id not in {"seed", "middle", "target", "draft-target"}:
                 return None
             return {
                 "page_id": page_id,
                 "title": page_id,
                 "updated": "2026-07-24",
                 "path": f"/tmp/pages/topic/{page_id}.md",
-                "status": "active",
+                "status": "draft" if page_id == "draft-target" else "stable",
                 "entities": [],
             }
 
@@ -183,6 +186,7 @@ def test_associative_graph_reaches_two_hops_with_path_trace(monkeypatch) -> None
     paths = search.graph_expansion_trace()
 
     assert [result.page_id for result in expanded] == ["middle", "target"]
+    assert "draft-target" not in paths
     assert paths["target"]["path"] == ["seed", "middle", "target"]
     assert paths["target"]["hops"] == 2
 
@@ -299,22 +303,36 @@ def test_searchable_pages_includes_system_pages(tmp_path, monkeypatch) -> None:
     system = system_dir / "claude-code.md"
     page.write_text("# Normal\n", encoding="utf-8")
     system.write_text("# System\n", encoding="utf-8")
-    monkeypatch.setattr(search, "SYSTEM_DIR", system_dir)
-    monkeypatch.setattr(search, "all_pages", lambda: [page])
+
+    class FakeStore:
+        def refresh(self) -> None:
+            pass
+
+        def all_page_ids(self, *, include_system: bool = False):
+            assert include_system is True
+            return {"normal", "claude-code"}
+
+        def meta(self, page_id: str):
+            return {"path": str(page if page_id == "normal" else system)}
+
+    monkeypatch.setattr(index_store_mod, "get_store", lambda: FakeStore())
 
     assert search.searchable_pages() == [page, system]
 
 
-def test_apply_filters_excludes_deprecated_and_archived_pages() -> None:
+def test_apply_filters_exposes_only_canonical_stable_pages() -> None:
     results = apply_filters(
         [
-            page("active", 1.0),
+            page("stable", 1.0, status="stable"),
+            page("draft", 2.0, status="draft"),
             page("old", 2.0, status="deprecated"),
             page("gone", 3.0, status="archived"),
         ]
     )
 
-    assert [result.page_id for result in results] == ["active"]
+    assert [(result.page_id, result.status) for result in results] == [
+        ("stable", "stable")
+    ]
 
 
 def test_apply_filters_excludes_reference_pages_by_default() -> None:
@@ -351,6 +369,33 @@ def test_fusion_preserves_lifecycle_status_for_filtering() -> None:
     assert apply_filters(results) == []
 
 
+class _CanonicalPageStore:
+    def __init__(self, *paths) -> None:
+        self.paths = {path.stem: path for path in paths}
+
+    def refresh(self) -> None:
+        pass
+
+    def all_page_ids(self, *, include_system: bool = False):
+        assert include_system is True
+        return set(self.paths)
+
+    def meta(self, page_id: str):
+        path = self.paths[page_id]
+        return {
+            "title": page_id.title(),
+            "updated": "2026-06-11",
+            "path": str(path),
+            "mtime_ns": path.stat().st_mtime_ns,
+            "is_system": path.parent.name == "system",
+            "status": "stable",
+            "recall_questions": [],
+            "entities": [],
+            "page_type": "knowledge",
+            "sensitivity": "normal",
+        }
+
+
 def test_update_embeddings_rebuilds_when_model_profile_changes(
     tmp_path, monkeypatch
 ) -> None:
@@ -363,51 +408,48 @@ def test_update_embeddings_rebuilds_when_model_profile_changes(
     index_dir.mkdir(parents=True)
     page_path = pages_dir / "p.md"
     page_path.write_text(
-        "---\ntitle: P\nupdated: 2026-06-11\n---\nbody\n",
+        "---\ntitle: P\nupdated: 2026-06-11\nstatus: stable\n---\nbody\n",
         encoding="utf-8",
     )
     db_path = index_dir / "embeddings.sqlite"
 
-    monkeypatch.setattr(search, "PAGES_DIR", pages_dir)
-    monkeypatch.setattr(search, "SYSTEM_DIR", system_dir)
     monkeypatch.setattr(search, "EMBEDDINGS_DB", db_path)
     monkeypatch.setattr(
         search, "JSON_EMBEDDINGS_FILE", chronovisor_root / ".embeddings.json"
     )
-    monkeypatch.setattr(search, "all_pages", lambda: [page_path])
+    monkeypatch.setattr(
+        index_store_mod, "get_store", lambda: _CanonicalPageStore(page_path)
+    )
     monkeypatch.setattr(search, "_json_import_done", True)
-    monkeypatch.setattr(ollama, "is_available", lambda: True)
     monkeypatch.setattr(
         search,
         "load_search_embedding_config",
         lambda: SearchEmbeddingConfig(backend="legacy_ollama"),
     )
 
-    profile = {
-        "value": EmbeddingConfig(model="m1", document_prefix="D1:", query_prefix="Q1:")
-    }
+    profile = {"value": ("m1", "D1:", "Q1:")}
     calls: list[tuple[str | None, list[str]]] = []
 
-    def fake_embed(texts, *, model=None):
+    def fake_embed(texts, *, source, timeout_ms=None):
+        del source, timeout_ms
+        model = profile["value"][0]
         calls.append((model, list(texts)))
-        return [[float(len(text)), 1.0] for text in texts]
+        return [[float(len(text)), 1.0] for text in texts], model
 
-    monkeypatch.setattr(search, "load_embedding_config", lambda: profile["value"])
-    monkeypatch.setattr(ollama, "embed", fake_embed)
+    monkeypatch.setattr(search, "_search_embedding_profile", lambda: profile["value"])
+    monkeypatch.setattr(search, "_embed_search_texts", fake_embed)
 
     assert search.update_embeddings() == 1
     assert calls[-1][0] == "m1"
     assert calls[-1][1][0].startswith("D1:")
-    assert search._embedding_count() == 1
+    assert search._embedding_count(model="m1", text_prefix="D1:") == 1
 
-    profile["value"] = EmbeddingConfig(
-        model="m2", document_prefix="D2:", query_prefix="Q2:"
-    )
-    assert search._embedding_count() == 0
+    profile["value"] = ("m2", "D2:", "Q2:")
+    assert search._embedding_count(model="m2", text_prefix="D2:") == 0
     assert search.update_embeddings() == 1
     assert calls[-1][0] == "m2"
     assert calls[-1][1][0].startswith("D2:")
-    assert search._embedding_count() == 1
+    assert search._embedding_count(model="m2", text_prefix="D2:") == 1
 
     conn = sqlite3.connect(db_path)
     try:
@@ -420,6 +462,58 @@ def test_update_embeddings_rebuilds_when_model_profile_changes(
     assert rows == [("m2", "D2:", 1)]
 
 
+def test_update_embeddings_preserves_old_rows_on_runtime_failure(
+    tmp_path, monkeypatch
+) -> None:
+    page_path = tmp_path / "pages" / "p.md"
+    page_path.parent.mkdir()
+    page_path.write_text("---\ntitle: P\nstatus: stable\n---\nbody\n", encoding="utf-8")
+    database = tmp_path / ".index" / "embeddings.sqlite"
+    monkeypatch.setattr(search, "EMBEDDINGS_DB", database)
+    monkeypatch.setattr(search, "JSON_EMBEDDINGS_FILE", tmp_path / "missing.json")
+    monkeypatch.setattr(search, "_json_import_done", True)
+    monkeypatch.setattr(
+        index_store_mod, "get_store", lambda: _CanonicalPageStore(page_path)
+    )
+    monkeypatch.setattr(
+        search,
+        "load_search_embedding_config",
+        lambda: SearchEmbeddingConfig(backend="legacy_ollama"),
+    )
+    monkeypatch.setattr(search, "_search_embedding_profile", lambda: ("new", "", ""))
+    monkeypatch.setattr(
+        search,
+        "_embed_search_texts",
+        lambda texts, **_kwargs: ([[1.0, 0.0] for _ in texts], "wrong"),
+    )
+    search._replace_search_embeddings(
+        [("p", [0.0, 1.0], 1.0)],
+        [],
+        [],
+        page_ids={"p"},
+        model="old",
+        text_prefix="",
+    )
+
+    with pytest.raises(RuntimeError, match="route identity"):
+        search.update_embeddings()
+
+    monkeypatch.setattr(
+        search,
+        "_embed_search_texts",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("offline")),
+    )
+    for strict in (False, True):
+        with pytest.raises(OSError, match="offline"):
+            search.update_embeddings(strict=strict)
+
+    conn = sqlite3.connect(database)
+    try:
+        assert conn.execute("SELECT model FROM embeddings").fetchall() == [("old",)]
+    finally:
+        conn.close()
+
+
 def test_update_embeddings_stores_markdown_chunks(tmp_path, monkeypatch) -> None:
     chronovisor_root = tmp_path / "wiki"
     pages_dir = chronovisor_root / "pages"
@@ -430,7 +524,7 @@ def test_update_embeddings_stores_markdown_chunks(tmp_path, monkeypatch) -> None
     index_dir.mkdir(parents=True)
     page_path = pages_dir / "chunky.md"
     page_path.write_text(
-        "---\ntitle: Chunky\nupdated: 2026-06-11\n---\n"
+        "---\ntitle: Chunky\nupdated: 2026-06-11\nstatus: stable\n---\n"
         "# First Heading\n"
         "This is a paragraph about early context.\n\n"
         "## Late Heading\n"
@@ -439,32 +533,34 @@ def test_update_embeddings_stores_markdown_chunks(tmp_path, monkeypatch) -> None
     )
     db_path = index_dir / "embeddings.sqlite"
 
-    monkeypatch.setattr(search, "PAGES_DIR", pages_dir)
-    monkeypatch.setattr(search, "SYSTEM_DIR", system_dir)
     monkeypatch.setattr(search, "EMBEDDINGS_DB", db_path)
     monkeypatch.setattr(
         search, "JSON_EMBEDDINGS_FILE", chronovisor_root / ".embeddings.json"
     )
-    monkeypatch.setattr(search, "all_pages", lambda: [page_path])
+    monkeypatch.setattr(
+        index_store_mod, "get_store", lambda: _CanonicalPageStore(page_path)
+    )
     monkeypatch.setattr(search, "_json_import_done", True)
-    monkeypatch.setattr(ollama, "is_available", lambda: True)
     monkeypatch.setattr(
         search,
         "load_search_embedding_config",
         lambda: SearchEmbeddingConfig(backend="legacy_ollama"),
     )
-    monkeypatch.setattr(
-        search,
-        "load_embedding_config",
-        lambda: EmbeddingConfig(model="m", document_prefix="", query_prefix=""),
-    )
-    monkeypatch.setattr(
-        ollama,
-        "embed",
-        lambda texts, *, model=None: [[float(i + 1), 1.0] for i, _ in enumerate(texts)],
-    )
+    monkeypatch.setattr(search, "_search_embedding_profile", lambda: ("m", "", ""))
+    sources = []
+
+    def fake_embed(texts, *, source, timeout_ms=None):
+        del timeout_ms
+        sources.append(source)
+        return [[float(i + 1), 1.0] for i, _ in enumerate(texts)], "m"
+
+    monkeypatch.setattr(search, "_embed_search_texts", fake_embed)
 
     assert search.update_embeddings() == 1
+    assert {source.data_class for source in sources} == {search.SourceDataClass.PAGE}
+    assert {source.sensitivity for source in sources} == {
+        search.SourceSensitivity.NORMAL
+    }
 
     conn = sqlite3.connect(db_path)
     try:
@@ -487,32 +583,29 @@ def test_update_embeddings_prunes_rows_for_deleted_pages(tmp_path, monkeypatch) 
     system_dir.mkdir(parents=True)
     index_dir.mkdir(parents=True)
     page_path = pages_dir / "current.md"
-    page_path.write_text("---\ntitle: Current\n---\nbody\n", encoding="utf-8")
+    page_path.write_text(
+        "---\ntitle: Current\nstatus: stable\n---\nbody\n", encoding="utf-8"
+    )
     db_path = index_dir / "embeddings.sqlite"
 
-    monkeypatch.setattr(search, "PAGES_DIR", pages_dir)
-    monkeypatch.setattr(search, "SYSTEM_DIR", system_dir)
     monkeypatch.setattr(search, "EMBEDDINGS_DB", db_path)
     monkeypatch.setattr(
         search, "JSON_EMBEDDINGS_FILE", chronovisor_root / ".embeddings.json"
     )
-    monkeypatch.setattr(search, "all_pages", lambda: [page_path])
+    monkeypatch.setattr(
+        index_store_mod, "get_store", lambda: _CanonicalPageStore(page_path)
+    )
     monkeypatch.setattr(search, "_json_import_done", True)
-    monkeypatch.setattr(ollama, "is_available", lambda: True)
     monkeypatch.setattr(
         search,
         "load_search_embedding_config",
         lambda: SearchEmbeddingConfig(backend="legacy_ollama"),
     )
+    monkeypatch.setattr(search, "_search_embedding_profile", lambda: ("m", "", ""))
     monkeypatch.setattr(
         search,
-        "load_embedding_config",
-        lambda: EmbeddingConfig(model="m", document_prefix="", query_prefix=""),
-    )
-    monkeypatch.setattr(
-        ollama,
-        "embed",
-        lambda texts, *, model=None: [[1.0, 2.0] for _ in texts],
+        "_embed_search_texts",
+        lambda texts, **_kwargs: ([[1.0, 2.0] for _ in texts], "m"),
     )
 
     assert search.update_embeddings() == 1
@@ -588,9 +681,9 @@ def test_update_embeddings_prunes_rows_for_deleted_pages(tmp_path, monkeypatch) 
 def test_semantic_search_applies_query_prefix(tmp_path, monkeypatch) -> None:
     captured: list[tuple[str | None, list[str]]] = []
 
-    def fake_embed(texts, *, model=None):
-        captured.append((model, list(texts)))
-        return [[1.0, 0.0] for _ in texts]
+    def fake_embed(texts, **_kwargs):
+        captured.append(("ruri", list(texts)))
+        return [[1.0, 0.0] for _ in texts], "ruri"
 
     class FakeStore:
         def refresh(self) -> None:
@@ -601,24 +694,23 @@ def test_semantic_search_applies_query_prefix(tmp_path, monkeypatch) -> None:
                 "title": page_id,
                 "updated": "2026-06-11",
                 "path": str(tmp_path / f"{page_id}.md"),
-                "status": "active",
+                "status": "stable",
                 "superseded_by": "",
             }
 
-    monkeypatch.setattr(ollama, "is_available", lambda: True)
-    monkeypatch.setattr(ollama, "embed", fake_embed)
     monkeypatch.setattr(
         search,
-        "load_embedding_config",
-        lambda: EmbeddingConfig(
-            model="ruri", document_prefix="検索文書: ", query_prefix="検索クエリ: "
-        ),
+        "_search_embedding_profile",
+        lambda: ("ruri", "検索文書: ", "検索クエリ: "),
     )
-    monkeypatch.setattr(search, "_embedding_count", lambda: 1)
+    monkeypatch.setattr(search, "_embed_search_texts", fake_embed)
+    monkeypatch.setattr(search, "_embedding_count", lambda **_kwargs: 1)
     monkeypatch.setattr(
-        search, "_iter_all_embeddings", lambda: [("p", [1.0, 0.0], 0.0, 1.0)]
+        search,
+        "_iter_all_embeddings",
+        lambda **_kwargs: [("p", [1.0, 0.0], 0.0, 1.0)],
     )
-    monkeypatch.setattr(search, "_iter_all_question_embeddings", lambda: [])
+    monkeypatch.setattr(search, "_iter_all_question_embeddings", lambda **_kwargs: [])
     monkeypatch.setattr(index_store_mod, "get_store", lambda: FakeStore())
 
     results = search.semantic_search("テスト", top_n=1)
@@ -630,9 +722,9 @@ def test_semantic_search_applies_query_prefix(tmp_path, monkeypatch) -> None:
 def test_semantic_search_aggregates_chunk_hits(tmp_path, monkeypatch) -> None:
     captured: list[tuple[str | None, list[str]]] = []
 
-    def fake_embed(texts, *, model=None):
-        captured.append((model, list(texts)))
-        return [[1.0, 0.0] for _ in texts]
+    def fake_embed(texts, **_kwargs):
+        captured.append(("m", list(texts)))
+        return [[1.0, 0.0] for _ in texts], "m"
 
     class FakeStore:
         def refresh(self) -> None:
@@ -643,24 +735,19 @@ def test_semantic_search_aggregates_chunk_hits(tmp_path, monkeypatch) -> None:
                 "title": page_id,
                 "updated": "2026-06-11",
                 "path": str(tmp_path / f"{page_id}.md"),
-                "status": "active",
+                "status": "stable",
                 "superseded_by": "",
             }
 
-    monkeypatch.setattr(ollama, "is_available", lambda: True)
-    monkeypatch.setattr(ollama, "embed", fake_embed)
-    monkeypatch.setattr(
-        search,
-        "load_embedding_config",
-        lambda: EmbeddingConfig(model="m", document_prefix="", query_prefix=""),
-    )
-    monkeypatch.setattr(search, "_embedding_count", lambda: 1)
-    monkeypatch.setattr(search, "_iter_all_embeddings", lambda: [])
-    monkeypatch.setattr(search, "_iter_all_question_embeddings", lambda: [])
+    monkeypatch.setattr(search, "_search_embedding_profile", lambda: ("m", "", ""))
+    monkeypatch.setattr(search, "_embed_search_texts", fake_embed)
+    monkeypatch.setattr(search, "_embedding_count", lambda **_kwargs: 1)
+    monkeypatch.setattr(search, "_iter_all_embeddings", lambda **_kwargs: [])
+    monkeypatch.setattr(search, "_iter_all_question_embeddings", lambda **_kwargs: [])
     monkeypatch.setattr(
         search,
         "_iter_all_chunk_embeddings",
-        lambda: [("p#c0", "p", 0, "late chunk text", [1.0, 0.0], 0.0, 1.0)],
+        lambda **_kwargs: [("p#c0", "p", 0, "late chunk text", [1.0, 0.0], 0.0, 1.0)],
     )
     monkeypatch.setattr(index_store_mod, "get_store", lambda: FakeStore())
 
@@ -673,8 +760,8 @@ def test_semantic_search_aggregates_chunk_hits(tmp_path, monkeypatch) -> None:
 def test_semantic_search_skips_chunks_for_confident_page_hits(
     tmp_path, monkeypatch
 ) -> None:
-    def fake_embed(texts, *, model=None):
-        return [[1.0, 0.0] for _ in texts]
+    def fake_embed(texts, **_kwargs):
+        return [[1.0, 0.0] for _ in texts], "m"
 
     class FakeStore:
         def refresh(self) -> None:
@@ -685,32 +772,27 @@ def test_semantic_search_skips_chunks_for_confident_page_hits(
                 "title": page_id,
                 "updated": "2026-06-11",
                 "path": str(tmp_path / f"{page_id}.md"),
-                "status": "active",
+                "status": "stable",
                 "superseded_by": "",
             }
 
-    def fail_if_scanned():
+    def fail_if_scanned(**_kwargs):
         raise AssertionError(
             "chunk embeddings should not be scanned for confident page hits"
         )
 
-    monkeypatch.setattr(ollama, "is_available", lambda: True)
-    monkeypatch.setattr(ollama, "embed", fake_embed)
-    monkeypatch.setattr(
-        search,
-        "load_embedding_config",
-        lambda: EmbeddingConfig(model="m", document_prefix="", query_prefix=""),
-    )
-    monkeypatch.setattr(search, "_embedding_count", lambda: 2)
+    monkeypatch.setattr(search, "_search_embedding_profile", lambda: ("m", "", ""))
+    monkeypatch.setattr(search, "_embed_search_texts", fake_embed)
+    monkeypatch.setattr(search, "_embedding_count", lambda **_kwargs: 2)
     monkeypatch.setattr(
         search,
         "_iter_all_embeddings",
-        lambda: [
+        lambda **_kwargs: [
             ("p", [1.0, 0.0], 0.0, 1.0),
             ("other", [0.0, 1.0], 0.0, 1.0),
         ],
     )
-    monkeypatch.setattr(search, "_iter_all_question_embeddings", lambda: [])
+    monkeypatch.setattr(search, "_iter_all_question_embeddings", lambda **_kwargs: [])
     monkeypatch.setattr(search, "_iter_all_chunk_embeddings", fail_if_scanned)
     monkeypatch.setattr(index_store_mod, "get_store", lambda: FakeStore())
 
