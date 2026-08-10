@@ -1,14 +1,14 @@
 {
   "schema_version": 2,
   "source_baseline_head": "d404a6b20d00e3bcd1d4cdb89edfa5a718c51833",
-  "baseline_sha256": "6d8c83922a64077510f51714a86693e091bc4e81fab84dee79e7890b4961dbc1",
+  "baseline_sha256": "373764ace80c008466c8f9d1a484601aba36c515b1892af21878078390bc49a2",
   "semantic_identity": "cross-domain edges use category+source_package+target_package; statement exceptions use category+source_package+source_module+scope_kind+scope+statement_kind+target_package+target_module+symbols+occurrence; source line is diagnostic and normalized statement content is verified independently",
   "counts": {
     "exceptions": 44,
     "by_category": {
       "cross_domain_edge": 44
     },
-    "cross_domain_sites": 1377,
+    "cross_domain_sites": 1378,
     "production_to_lab_edges": 0,
     "production_to_lab_static_sites": 0,
     "production_to_lab_dynamic_sites": 0,
@@ -18077,6 +18077,20 @@
           "line": 30
         },
         {
+          "semantic_id": "arch:7c424f8b2b15b553a3c1aeff6af6bc44b9dba87678b7788e3a0b3b34af2e9467",
+          "source_module": "chronovisor.decision.frontier_review",
+          "scope_kind": "module",
+          "scope": "<module>",
+          "statement_kind": "from",
+          "target_module": "chronovisor.core.llm_security",
+          "symbols": [
+            "build_child_process_env"
+          ],
+          "content_sha256": "52f9c82fdc0ac3cf49ca1f1242eef438e8484202c32fcabe8cef5c491b571260",
+          "occurrence": 1,
+          "line": 26
+        },
+        {
           "semantic_id": "arch:7d25aef22f12958d580cc0c576db9b396935ae1c5432b99262b0513675d27d59",
           "source_module": "chronovisor.decision.decision_lane_prompts",
           "scope_kind": "module",
@@ -18289,7 +18303,7 @@
           ],
           "content_sha256": "23af258fa9a7936b5ca592c62f163eefca7f648e9f84381e9d1c5fc70a3a5f80",
           "occurrence": 1,
-          "line": 27
+          "line": 28
         },
         {
           "semantic_id": "arch:b80c1b9e19ef8f8aac78ee8a3b7268b114bcedc89b0c9448b96387cbf8d15628",
@@ -18479,7 +18493,7 @@
           ],
           "content_sha256": "c22880d63a5715a791386e2f22187d3c566742906d7fbb38df3f36b6e9afde8f",
           "occurrence": 1,
-          "line": 26
+          "line": 27
         },
         {
           "semantic_id": "arch:dbcf50907d89adb75c598f0784fcb239e2b0647c292e9997a6a61a164124ad81",

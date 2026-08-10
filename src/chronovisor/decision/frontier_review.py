@@ -23,6 +23,7 @@ from urllib.parse import urlparse
 
 from chronovisor.core import background_jobs as _background_jobs
 from chronovisor.core import runtime_status
+from chronovisor.core.llm_security import build_child_process_env
 from chronovisor.core.runtime_config import uvx_runtime_command
 from chronovisor.core.store import CHRONOVISOR_ROOT
 from chronovisor.decision import frontier_guard as _frontier_guard
@@ -453,7 +454,7 @@ def run_frontier_preflight() -> dict[str, Any]:
     if not metadata.get("ok"):
         return metadata
     auth_path = _codex_home() / "auth.json"
-    if not auth_path.exists() and not os.environ.get("OPENAI_API_KEY"):
+    if not auth_path.exists():
         failure = _frontier_failure(
             "auth_required",
             "human_required",
@@ -513,7 +514,7 @@ def _run_small_command(cmd: list[str]) -> dict[str, Any]:
             env=_frontier_env(),
         )
     except Exception as exc:
-        return {"ok": False, "error": str(exc), "command": cmd}
+        return {"ok": False, "error": exc.__class__.__name__, "command": cmd}
     output = redact_sensitive_text(
         (completed.stdout or "") + "\n" + (completed.stderr or "")
     )
@@ -790,7 +791,7 @@ def _codex_home() -> Path:
 
 
 def _frontier_env(*, codex_home: Path | None = None) -> dict[str, str]:
-    env = os.environ.copy()
+    env = build_child_process_env()
     env["CODEX_HOME"] = str(codex_home or _codex_home())
     env.setdefault("NO_COLOR", "1")
     env["CHRONOVISOR_INTERNAL_FRONTIER"] = "1"

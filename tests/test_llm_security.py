@@ -24,10 +24,58 @@ from chronovisor.core.llm_security import (
     CredentialSecurityError,
     OSKeyringCredentialStore,
     SecretValue,
+    build_child_process_env,
     canonical_endpoint,
 )
 
 CANARY = "sk-CANARY-DO-NOT-LEAK"
+
+
+def test_child_process_env_is_allowlisted_and_drops_arbitrary_canaries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dropped = {
+        "OPENAI_API_KEY": CANARY,
+        "AWS_SESSION_TOKEN": "not-pattern-shaped-secret",
+        "CHRONOVISOR_ARBITRARY_CANARY": "plain-canary-value",
+    }
+    kept = {
+        "DBUS_SESSION_BUS_ADDRESS": "unix:path=/tmp/chronovisor-dbus",
+        "HOME": "/tmp/chronovisor-home",
+        "LANG": "C",
+        "LC_CTYPE": "C",
+        "PATH": os.environ.get("PATH", ""),
+        "PYTHONIOENCODING": "utf-8",
+        "REQUESTS_CA_BUNDLE": "/tmp/chronovisor-ca.pem",
+        "SSL_CERT_FILE": "/tmp/chronovisor-cert.pem",
+        "TMPDIR": "/tmp",
+        "TZ": "UTC",
+        "VIRTUAL_ENV": "/tmp/chronovisor-venv",
+        "XDG_RUNTIME_DIR": "/tmp/chronovisor-runtime",
+    }
+    for name, value in {**kept, **dropped}.items():
+        monkeypatch.setenv(name, value)
+
+    env = build_child_process_env()
+    child = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import json, os; "
+                f"print(json.dumps({{name: os.getenv(name) for name in {list(dropped)!r}}}))"
+            ),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert {name: env[name] for name in kept} == kept
+    assert json.loads(child.stdout) == {name: None for name in dropped}
+    assert not set(dropped) & env.keys()
+    assert not any(value in repr(env) for value in dropped.values())
 
 
 class MemoryKeyring:

@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from chronovisor.core.durable_state import exclusive_text_file_lock
+from chronovisor.core.llm_security import build_child_process_env
 from chronovisor.core.store import CHRONOVISOR_ROOT
 from chronovisor.core.timeutil import utc_now as _now
 
@@ -59,6 +60,19 @@ _SESSION_ID_KEYS = frozenset(
 _SESSION_PATH_KEYS = frozenset(
     {"session_file", "sessionFile", "transcript_path", "transcriptPath"}
 )
+_JOB_ENV_NAMES = frozenset(
+    {
+        "CHRONOVISOR_CONTENT_CORRECTION_ENABLED",
+        "CHRONOVISOR_RECALL_ANSWER_CAPTURE_ENABLED",
+        "CHRONOVISOR_RESEARCH_RUN_ID",
+        "CLAUDE_CODE_CHRONOVISOR_RECORD_ENABLED",
+        "CODEX_CHRONOVISOR_RECORD_ENABLED",
+        "OLLAMA_CALIBRATION_FILE",
+        "OLLAMA_HOST",
+        "OLLAMA_RESOURCE_LOCK",
+        "OLLAMA_URL",
+    }
+)
 
 
 def _is_capture_job(name: str) -> bool:
@@ -67,6 +81,12 @@ def _is_capture_job(name: str) -> bool:
     return name.endswith("-save") or name.endswith("-capture")
 
 
+def _fixed_job_env(env: Any) -> dict[str, str]:
+    if not isinstance(env, dict):
+        return {}
+    return {
+        str(name): str(value) for name, value in env.items() if name in _JOB_ENV_NAMES
+    }
 
 
 def _iso(value: datetime | None = None) -> str:
@@ -265,7 +285,7 @@ def enqueue_job(
             if existing.get("dedupe_key") != dedupe or existing.get("status") not in ACTIVE_STATUSES:
                 continue
             existing["stdin"] = stdin_text
-            existing["env"] = dict(env)
+            existing["env"] = _fixed_job_env(env)
             if on_success is not None:
                 existing["on_success"] = list(on_success)
             existing["updated_at"] = _iso()
@@ -285,7 +305,7 @@ def enqueue_job(
             "name": name,
             "module": module,
             "args": list(args),
-            "env": dict(env),
+            "env": _fixed_job_env(env),
             "stdin": stdin_text,
             "dedupe_key": dedupe,
             "lane_key": name,
@@ -491,7 +511,7 @@ def _enqueue_followups_locked(
         module = str(spec.get("module") or "").strip()
         args = [str(value) for value in spec.get("args", [])]
         env_value = spec.get("env")
-        env = (
+        env = _fixed_job_env(
             {str(key): str(value) for key, value in env_value.items()}
             if isinstance(env_value, dict)
             else {}
@@ -663,8 +683,8 @@ def run_job(job_id: str) -> dict[str, Any]:
     job = _claim(job_id)
     if job is None:
         return {"status": "not_due", "job_id": job_id}
-    env = os.environ.copy()
-    env.update({str(k): str(v) for k, v in job.get("env", {}).items()})
+    env = build_child_process_env()
+    env.update(_fixed_job_env(job.get("env", {})))
     cmd = [
         sys.executable,
         "-m",
@@ -683,7 +703,7 @@ def run_job(job_id: str) -> dict[str, Any]:
         output = (completed.stdout or "") + "\n" + (completed.stderr or "")
         result = _finish(job_id, exit_code=completed.returncode, output=output)
     except Exception as exc:
-        result = _finish(job_id, exit_code=1, output=f"{exc.__class__.__name__}: {exc}")
+        result = _finish(job_id, exit_code=1, output=exc.__class__.__name__)
     print(json.dumps({"job_id": job_id, "status": result["status"], "exit_code": result.get("exit_code")}, ensure_ascii=False))
     if result.get("output_tail"):
         print(result["output_tail"])

@@ -278,11 +278,19 @@ def test_frontier_env_marks_internal_children_and_disables_stop_work(
     monkeypatch,
 ) -> None:
     monkeypatch.delenv("CHRONOVISOR_INTERNAL_FRONTIER", raising=False)
+    monkeypatch.setenv("HOME", "/tmp/chronovisor-frontier-home")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-frontier-secret-canary")
+    monkeypatch.setenv("ARBITRARY_FRONTIER_CANARY", "plain-frontier-canary")
     env = frontier_review._frontier_env()
 
+    assert env["HOME"] == "/tmp/chronovisor-frontier-home"
     assert env["CHRONOVISOR_INTERNAL_FRONTIER"] == "1"
     assert env["CODEX_CHRONOVISOR_RECORD_ENABLED"] == "0"
     assert env["CHRONOVISOR_CONTENT_CORRECTION_ENABLED"] == "0"
+    assert "OPENAI_API_KEY" not in env
+    assert "ARBITRARY_FRONTIER_CANARY" not in env
+    assert "sk-frontier-secret-canary" not in repr(env)
+    assert "plain-frontier-canary" not in repr(env)
 
 
 def _preflight_response(cmd: list[str]) -> SimpleNamespace | None:
@@ -438,7 +446,7 @@ def test_run_codex_missing_auth_stops_before_subprocess(
         raise AssertionError("codex exec should not run without auth")
 
     monkeypatch.delenv("CODEX_HOME", raising=False)
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-env-auth-must-not-cross")
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setattr(frontier_review.shutil, "which", lambda _name: "/bin/codex")
     monkeypatch.setattr(frontier_review.subprocess, "run", fake_run)
@@ -455,6 +463,22 @@ def test_run_codex_missing_auth_stops_before_subprocess(
     assert result.human_required is True
     assert result.rescue_status == "human_required"
     assert result.frontier_failure["failure_class"] == "auth_required"
+
+
+def test_frontier_small_command_error_is_class_only_and_secret_safe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    canary = "sk-frontier-error-canary"
+
+    def fail(*_args, **_kwargs):
+        raise OSError(canary)
+
+    monkeypatch.setattr(frontier_review.subprocess, "run", fail)
+
+    result = frontier_review._run_small_command(["codex", "--version"])
+
+    assert result["error"] == "OSError"
+    assert canary not in repr(result)
 
 
 def test_run_codex_schema_failure_does_not_spawn_an_unguarded_rescue_session(

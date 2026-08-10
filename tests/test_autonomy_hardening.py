@@ -201,6 +201,97 @@ def test_background_job_failure_is_durable_and_retryable(tmp_path: Path, monkeyp
     assert "temporary failure" in stored["output_tail"]
 
 
+def test_background_job_child_env_keeps_only_runtime_and_fixed_job_flags(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(background_jobs, "JOB_DIR", tmp_path)
+    monkeypatch.setattr(background_jobs, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(background_jobs, "LOCK_FILE", tmp_path / "state.lock")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("LANG", "C")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-parent-secret-canary")
+    monkeypatch.setenv("ARBITRARY_PARENT_CANARY", "plain-parent-canary")
+    seen: dict[str, str] = {}
+
+    def succeed(_command: list[str], **kwargs) -> SimpleNamespace:
+        seen.update(kwargs["env"])
+        return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(background_jobs.subprocess, "run", succeed)
+    job = background_jobs.enqueue_job(
+        name="content-correction-capture",
+        module="example",
+        args=[],
+        env={
+            "CHRONOVISOR_CONTENT_CORRECTION_ENABLED": "1",
+            "ARBITRARY_JOB_CANARY": "plain-job-canary",
+            "OPENAI_API_KEY": "sk-job-secret-canary",
+        },
+        stdin_text="{}",
+    )
+
+    result = background_jobs.run_job(job["job_id"])
+
+    assert result["status"] == "completed"
+    assert seen["HOME"] == str(tmp_path / "home")
+    assert seen["LANG"] == "C"
+    assert seen["CHRONOVISOR_CONTENT_CORRECTION_ENABLED"] == "1"
+    assert (
+        not {
+            "ARBITRARY_JOB_CANARY",
+            "ARBITRARY_PARENT_CANARY",
+            "OPENAI_API_KEY",
+        }
+        & seen.keys()
+    )
+    assert job["env"] == {"CHRONOVISOR_CONTENT_CORRECTION_ENABLED": "1"}
+
+
+def test_background_job_fixed_env_allowlist_matches_current_callers() -> None:
+    assert frozenset(
+        {
+            "CHRONOVISOR_CONTENT_CORRECTION_ENABLED",
+            "CHRONOVISOR_RECALL_ANSWER_CAPTURE_ENABLED",
+            "CHRONOVISOR_RESEARCH_RUN_ID",
+            "CLAUDE_CODE_CHRONOVISOR_RECORD_ENABLED",
+            "CODEX_CHRONOVISOR_RECORD_ENABLED",
+            "OLLAMA_CALIBRATION_FILE",
+            "OLLAMA_HOST",
+            "OLLAMA_RESOURCE_LOCK",
+            "OLLAMA_URL",
+        }
+    ) == background_jobs._JOB_ENV_NAMES
+
+
+def test_background_job_subprocess_error_does_not_leak_detail(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    canary = "sk-subprocess-error-canary"
+    monkeypatch.setattr(background_jobs, "JOB_DIR", tmp_path)
+    monkeypatch.setattr(background_jobs, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(background_jobs, "LOCK_FILE", tmp_path / "state.lock")
+
+    def fail(*_args, **_kwargs):
+        raise OSError(canary)
+
+    monkeypatch.setattr(background_jobs.subprocess, "run", fail)
+    job = background_jobs.enqueue_job(
+        name="save", module="example", args=[], env={}, stdin_text="{}"
+    )
+
+    result = background_jobs.run_job(job["job_id"])
+    output = capsys.readouterr().out
+    stored = (tmp_path / "state.json").read_text(encoding="utf-8")
+
+    assert result["output_tail"] == "OSError"
+    assert canary not in output
+    assert canary not in stored
+    assert canary not in repr(result)
+
+
 def test_background_job_load_preserves_durable_module_fields(
     tmp_path: Path, monkeypatch
 ) -> None:
