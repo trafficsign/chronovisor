@@ -18,6 +18,11 @@ from chronovisor.core.canonical_document import (
     validate_canonical_document,
 )
 from chronovisor.core.okf_v02 import (
+    OKF_SPEC_PATH,
+    OKF_SPEC_REVISION,
+    OKF_SPEC_SHA256,
+    OKF_SPEC_URL,
+    main,
     scan_concept_paths,
     validate_concept,
     validate_pages_bundle,
@@ -25,6 +30,15 @@ from chronovisor.core.okf_v02 import (
 )
 
 FIXTURE_ROOT = Path(__file__).parent / "fixtures" / "okf_v02"
+
+
+def test_validator_pins_the_reviewed_upstream_spec() -> None:
+    assert OKF_SPEC_REVISION == "374e0bc4c644310ff56cdf9c0fe81eccdec862b0"
+    assert OKF_SPEC_PATH == "okf/SPEC.md"
+    assert OKF_SPEC_SHA256 == (
+        "5a3311d270bebb16d558010e75064f5b75323f284992641732b1c8097511f948"
+    )
+    assert OKF_SPEC_REVISION in OKF_SPEC_URL
 
 
 def test_full_yaml_semantic_round_trip_preserves_body_bytes() -> None:
@@ -58,7 +72,9 @@ def test_concept_contract_distinguishes_errors_from_warnings() -> None:
     invalid = validate_concept({"type": ["Concept"], "status": ["stable"]})
     assert {issue.code for issue in invalid if issue.severity == "error"} == {
         "type_required",
-        "status_invalid",
+    }
+    assert {issue.code for issue in invalid if issue.severity == "warning"} >= {
+        "status_invalid"
     }
 
 
@@ -74,15 +90,132 @@ def test_pages_bundle_conformance_excludes_reserved_and_system_documents() -> No
     assert not [issue for issue in issues if issue.severity == "error"]
 
 
-def test_root_index_is_versioned_but_is_not_a_concept(tmp_path: Path) -> None:
+def test_root_index_is_optional_and_unknown_version_is_soft(tmp_path: Path) -> None:
     pages_root = tmp_path / "pages"
     pages_root.mkdir()
-    (pages_root / "index.md").write_bytes(b"---\nokf_version: 0.1\n---\n")
+    assert not [
+        issue
+        for issue in validate_pages_bundle(pages_root)
+        if issue.severity == "error"
+    ]
+
+    (pages_root / "index.md").write_bytes(
+        b"---\nokf_version: 0.1\nextension: kept\n---\n"
+        b"# Bundle\n\n* [Concept](concept.md) - description\n"
+    )
 
     issues = validate_pages_bundle(pages_root)
-    assert [(issue.code, issue.path) for issue in issues] == [
-        ("okf_version_invalid", "index.md")
+    assert not [issue for issue in issues if issue.severity == "error"]
+    assert {(issue.code, issue.field) for issue in issues} == {
+        ("okf_version_unknown", "okf_version"),
+        ("index_frontmatter_key_unknown", "extension"),
+    }
+
+
+def test_portable_conformance_rejects_only_required_concept_failures(
+    tmp_path: Path,
+) -> None:
+    pages_root = tmp_path / "pages"
+    pages_root.mkdir()
+    (pages_root / "unknown.md").write_bytes(
+        b"---\ntype: Producer Defined\nextra: preserved\n---\n[Broken](missing.md)\n"
+    )
+    (pages_root / "missing-type.md").write_bytes(b"---\ntitle: Missing\n---\n")
+    (pages_root / "invalid.md").write_bytes(b"not frontmatter\n")
+
+    errors = {
+        (issue.code, issue.path)
+        for issue in validate_pages_bundle(pages_root)
+        if issue.severity == "error"
+    }
+    assert errors == {
+        ("type_required", "missing-type.md"),
+        ("document_invalid", "invalid.md"),
+    }
+
+
+def test_reserved_documents_are_validated_at_every_level(tmp_path: Path) -> None:
+    pages_root = tmp_path / "pages"
+    nested = pages_root / "nested"
+    nested.mkdir(parents=True)
+    (pages_root / "index.md").write_text(
+        "* [Before section](premature.md) - ignored\n# Missing grouped link\n"
+    )
+    (nested / "index.md").write_text(
+        "---\ntitle: forbidden\n---\n# Nested\n\n* [Page](page.md)\n"
+    )
+    (pages_root / "log.md").write_text(
+        "# Updates\n\n## 2026-02-30\n* Invalid date\n## 2026-08-10\n* Out of order\n"
+    )
+    (nested / "log.md").write_text(
+        "---\ngenerated: true\n---\n# Updates\n\n* Ungrouped prose\n"
+    )
+
+    issues = validate_pages_bundle(pages_root)
+    assert {issue.code for issue in issues if issue.severity == "error"} == {
+        "index_frontmatter_forbidden",
+        "index_link_missing",
+        "log_date_invalid",
+        "log_frontmatter_forbidden",
+        "log_entry_ungrouped",
+    }
+    assert {issue.code for issue in issues if issue.severity == "warning"} == {
+        "index_description_missing"
+    }
+
+
+def test_log_dates_must_be_newest_first_but_action_labels_are_optional(
+    tmp_path: Path,
+) -> None:
+    pages_root = tmp_path / "pages"
+    pages_root.mkdir()
+    log = pages_root / "log.md"
+    log.write_text(
+        "# Updates\n\n## 2026-08-08\n* Plain prose is enough.\n"
+        "## 2026-08-09\n* Another entry.\n"
+    )
+    assert {issue.code for issue in validate_pages_bundle(pages_root)} == {
+        "log_dates_not_newest_first"
+    }
+
+
+def test_cli_output_is_stable_and_never_changes_bundle_bytes(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    pages_root = tmp_path / "pages"
+    pages_root.mkdir()
+    (pages_root / "index.md").write_text("# Bundle\n\n* [Page](page.md)\n")
+    (pages_root / "page.md").write_text("---\ntype: Example\n---\n")
+    before = {
+        path.relative_to(pages_root).as_posix(): path.read_bytes()
+        for path in sorted(pages_root.rglob("*"))
+        if path.is_file()
+    }
+
+    assert main([str(pages_root)]) == 0
+    assert capsys.readouterr().out.splitlines() == [
+        "warning\tindex_description_missing\tindex.md\tdescription",
+        "warning\trecommended_field_missing\tpage.md\tdescription",
+        "warning\trecommended_field_missing\tpage.md\tresource",
+        "warning\trecommended_field_missing\tpage.md\ttags",
+        "warning\trecommended_field_missing\tpage.md\ttitle",
     ]
+    assert before == {
+        path.relative_to(pages_root).as_posix(): path.read_bytes()
+        for path in sorted(pages_root.rglob("*"))
+        if path.is_file()
+    }
+
+
+def test_cli_returns_one_when_conformance_has_errors(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    pages_root = tmp_path / "pages"
+    pages_root.mkdir()
+    (pages_root / "invalid.md").write_text("missing frontmatter\n")
+
+    assert main([str(pages_root)]) == 1
+    assert capsys.readouterr().out.startswith("error\tdocument_invalid\tinvalid.md\t")
 
 
 def test_standard_markdown_links_are_extracted_without_resolution() -> None:

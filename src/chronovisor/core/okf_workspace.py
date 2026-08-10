@@ -258,39 +258,33 @@ def _reserved_outputs(plan: MigrationPlan) -> dict[str, bytes]:
     for converted in plan.converted_documents:
         metadata = parse_document(converted.data).metadata
         title = metadata.get("title")
-        label = title.strip() if isinstance(title, str) and title.strip() else converted.uid
+        label = (
+            title.strip() if isinstance(title, str) and title.strip() else converted.uid
+        )
         destination = converted.relative_path
         if any(character.isspace() for character in destination):
             destination = f"<{destination}>"
-        index_rows.append(f"- [{_markdown_label(label)}]({destination})")
+        description = metadata.get("description")
+        suffix = (
+            f" - {description.strip()}"
+            if isinstance(description, str) and description.strip()
+            else ""
+        )
+        index_rows.append(f"- [{_markdown_label(label)}]({destination}){suffix}")
     index_body = "# Chronovisor pages\n"
     if index_rows:
         index_body += "\n" + "\n".join(index_rows) + "\n"
 
-    log_rows = [
-        f"- `{item.uid}`: `{item.input_status}` -> `{item.output_status}` "
-        f"(`{item.relative_path}`)"
-        for item in plan.manifest.documents
-    ]
+    # Detailed migration history already lives in activity.jsonl and the manifest.
     log_body = "# Derived change history\n"
-    if log_rows:
-        log_body += "\n" + "\n".join(log_rows) + "\n"
     return {
         "index.md": serialize_document(
             CanonicalDocument(
-                metadata={
-                    "okf_version": OKF_VERSION,
-                    "title": "Chronovisor pages",
-                },
+                metadata={"okf_version": OKF_VERSION},
                 body=index_body.encode(),
             )
         ),
-        "log.md": serialize_document(
-            CanonicalDocument(
-                metadata={"generated": True, "source": "canonical-pages"},
-                body=log_body.encode(),
-            )
-        ),
+        "log.md": log_body.encode(),
     }
 
 
@@ -432,6 +426,8 @@ def _require_inputs_unchanged(
 def _require_semantic_roundtrip(pages_root: Path, system_root: Path) -> None:
     for root in (pages_root, system_root):
         for path in _regular_files(root):
+            if root == pages_root and path.name in {"index.md", "log.md"}:
+                continue
             try:
                 document = parse_document(path.read_bytes())
                 reparsed = parse_document(serialize_document(document))

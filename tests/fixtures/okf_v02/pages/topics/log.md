@@ -1,1 +1,4 @@
-not canonical frontmatter because reserved files are not concepts
+# Topic update log
+
+## 2026-08-09
+* Updated the nested YAML example.

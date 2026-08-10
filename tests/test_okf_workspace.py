@@ -60,8 +60,11 @@ def test_workspace_stages_validated_namespaces_without_touching_source(
     index = (pages / "index.md").read_text()
     log = (pages / "log.md").read_text()
     assert "okf_version: '0.2'" in index
+    assert parse_document(index.encode()).metadata == {"okf_version": "0.2"}
     assert "[Target](deep/target.md)" in index
     assert "legacy root index" not in index
+    assert not log.startswith("---")
+    assert log == "# Derived change history\n"
     assert "legacy operational payload" not in log
     assert "archive_reason" not in log
     assert "archive_provenance" not in log

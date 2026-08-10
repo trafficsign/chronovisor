@@ -28,6 +28,32 @@ chronovisor doctor --json
 Runs lightweight operational checks for wiki directories, config, and detected
 host hooks.
 
+## Portable OKF bundle validation and copy
+
+Validate a `pages/` bundle before and after a filesystem-native copy. Copy only
+the portable `pages/` tree; `system/` and runtime state are outside the OKF
+bundle. The destination must not exist, so this procedure cannot merge or
+overwrite another bundle.
+
+```sh
+source_pages=/path/to/source/pages
+destination_root=/path/to/existing-destination
+destination_pages="$destination_root/pages"
+python -m chronovisor.core.okf_v02 "$source_pages"
+test -d "$destination_root"
+test ! -e "$destination_pages"
+cp -Rp "$source_pages" "$destination_pages"
+python -m chronovisor.core.okf_v02 "$destination_pages"
+diff -qr "$source_pages" "$destination_pages"
+```
+
+The validator and copy are read-only with respect to the source. Chronovisor
+does not provide merge, overwrite, sync, import, or export commands for this
+portable bundle transfer. The validator constants pin the reviewed upstream
+OKF v0.2 specification revision and source SHA-256. Use the same sequence for
+backup or restore, reversing source and destination only when the destination
+`pages/` does not exist.
+
 ## Dashboard
 
 ```sh
