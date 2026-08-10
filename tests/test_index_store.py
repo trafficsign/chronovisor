@@ -1,9 +1,4 @@
-"""Tests for IndexStore — Phase 5 raw_keywords schema extension.
-
-Focus: PageEntry round-trip, _build_entry frontmatter extraction with
-defensive type coercion, schema migration (v1 cache → invalidate +
-rebuild), and the public ``raw_keywords(page_id)`` accessor.
-"""
+"""Tests for the persistent canonical-document index."""
 
 from __future__ import annotations
 
@@ -34,12 +29,22 @@ def isolated_index(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(
         index_store_mod, "BACKLINKS_INDEX_FILE", index_dir / "backlinks.json"
     )
-    monkeypatch.setattr(index_store_mod, "_canonical_aliases", lambda: {})
     return chronovisor_root
 
 
 def _seed(chronovisor_root: Path, rel: str, body: str) -> Path:
+    if body.startswith("---\n"):
+        closing = body.find("\n---\n", 4)
+        if closing >= 0 and "\nstatus:" not in body[:closing]:
+            body = body.replace("---\n", "---\nstatus: stable\n", 1)
     path = chronovisor_root / "pages" / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(body)
+    return path
+
+
+def _seed_system(chronovisor_root: Path, rel: str, body: str) -> Path:
+    path = chronovisor_root / "system" / rel
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(body)
     return path
@@ -78,6 +83,7 @@ class TestPageEntryRoundTrip:
             "title": "P",
             "updated": "2026-01-01",
             "outlinks": [],
+            "status": "stable",
         }
         e = PageEntry.from_dict(d)
         assert e.raw_keywords == []
@@ -97,6 +103,7 @@ class TestPageEntryRoundTrip:
             "updated": "2026-01-01",
             "outlinks": [],
             "raw_keywords": bad,
+            "status": "stable",
         }
         e = PageEntry.from_dict(d)
         assert e.raw_keywords == []
@@ -179,7 +186,7 @@ class TestBuildEntryRawKeywords:
         assert entry.status == "deprecated"
         assert entry.superseded_by == "new-page"
 
-    def test_invalid_lifecycle_status_defaults_to_active(self, isolated_index: Path) -> None:
+    def test_invalid_lifecycle_status_is_not_indexed(self, isolated_index: Path) -> None:
         path = _seed(
             isolated_index,
             "bad.md",
@@ -187,8 +194,7 @@ class TestBuildEntryRawKeywords:
         )
         st = path.stat()
         entry = IndexStore._build_entry("bad", path, False, st.st_mtime_ns, st.st_size)
-        assert entry is not None
-        assert entry.status == "active"
+        assert entry is None
 
     def test_car_spec_infers_reference_page_type(self, isolated_index: Path) -> None:
         path = _seed(
@@ -252,32 +258,22 @@ class TestBuildEntryRawKeywords:
 
 
 class TestRawKeywordsAccessor:
-    def test_alias_targets_are_canonicalized_and_alias_changes_rebuild_cache(
-        self,
-        isolated_index: Path,
-        monkeypatch: pytest.MonkeyPatch,
+    def test_standard_markdown_targets_build_outlinks_and_backlinks(
+        self, isolated_index: Path
     ) -> None:
         _seed(
             isolated_index,
             "source.md",
-            "---\ntitle: Source\n---\n[[old-page]]\n",
+            "---\ntitle: Source\n---\n[Current](current-page.md)\n[[legacy]]\n",
         )
-        aliases = {"old-page": "current-page"}
-        monkeypatch.setattr(index_store_mod, "_canonical_aliases", lambda: aliases)
+        _seed(isolated_index, "current-page.md", "---\ntitle: Current\n---\nbody\n")
         store = IndexStore()
 
         store.refresh()
 
         assert store.outlinks("source") == ["current-page"]
         assert store.backlinks("current-page") == ["source"]
-        assert store.backlinks("old-page") == []
-
-        aliases = {"old-page": "new-page"}
-        store.refresh()
-
-        assert store.outlinks("source") == ["new-page"]
-        assert store.backlinks("new-page") == ["source"]
-        assert store.backlinks("current-page") == []
+        assert store.backlinks("legacy") == []
 
     def test_read_only_refresh_rebuilds_memory_without_persisting(
         self, isolated_index: Path, monkeypatch: pytest.MonkeyPatch
@@ -335,7 +331,7 @@ class TestRawKeywordsAccessor:
                 "---\n"
                 "title: Old\n"
                 "updated: 2026-01-01\n"
-                "status: archived\n"
+                "status: deprecated\n"
                 "superseded_by: new-page\n"
                 "---\n"
                 "body\n"
@@ -345,7 +341,7 @@ class TestRawKeywordsAccessor:
         store.refresh()
         meta = store.meta("old")
         assert meta is not None
-        assert meta["status"] == "archived"
+        assert meta["status"] == "deprecated"
         assert meta["superseded_by"] == "new-page"
 
     def test_meta_exposes_page_type(self, isolated_index: Path) -> None:
@@ -390,7 +386,7 @@ class TestRefreshWindow:
         store.refresh()
 
         path.write_text(
-            "---\ntitle: After\nupdated: 2026-01-02\n---\nlonger body\n"
+            "---\ntitle: After\nupdated: 2026-01-02\nstatus: stable\n---\nlonger body\n"
         )
         store.refresh_if_stale(max_age_seconds=60)
         assert store.meta("p")["title"] == "Before"
@@ -480,3 +476,164 @@ class TestSchemaMigration:
         assert second.raw_keywords("p") == ["hello"]
         # Sanity: didn't double-touch disk for the original path.
         assert path.exists()
+
+
+class TestCanonicalIndex:
+    def test_full_yaml_and_namespace_aware_standard_links(
+        self, isolated_index: Path
+    ) -> None:
+        _seed(
+            isolated_index,
+            "target.md",
+            "---\ntitle: Target\nstatus: stable\n---\nbody\n",
+        )
+        _seed(
+            isolated_index,
+            "root.md",
+            "---\ntitle: Root\nstatus: stable\n---\nbody\n",
+        )
+        _seed(
+            isolated_index,
+            "notes/source.md",
+            """---
+title: Source
+updated: 2026-08-10
+status: stable
+description: Canonical description
+classification_status: active
+extension:
+  nested:
+    enabled: true
+    weights: [1, 2, 3]
+---
+[Relative](../target.md) and [Root](/root.md).
+""",
+        )
+        _seed_system(
+            isolated_index,
+            "current-state.md",
+            """---
+identity: current-state
+status: stable
+registry_state: internal
+---
+[Portable](../pages/target.md) and [Schema](schema.md)
+""",
+        )
+        _seed_system(
+            isolated_index,
+            "schema.md",
+            "---\nidentity: canonical-schema\nstatus: stable\n---\nSchema\n",
+        )
+
+        store = IndexStore()
+        store.refresh()
+
+        assert store.outlinks("source") == ["target", "root"]
+        assert store.backlinks("target") == ["source", "current-state"]
+        assert store.outlinks("current-state") == ["target", "schema"]
+        assert store.backlinks("schema") == ["current-state"]
+        source = store.meta("source")
+        assert source is not None
+        assert source["description"] == "Canonical description"
+        assert source["classification_status"] == "active"
+        assert source["updated"] == "2026-08-10"
+        assert source["relative_path"] == "notes/source.md"
+        system_schema = store.meta("schema")
+        assert system_schema is not None
+        assert system_schema["namespace"] == "system"
+        assert system_schema["relative_path"] == "schema.md"
+
+    def test_boundary_violations_and_reserved_pages_are_excluded(
+        self, isolated_index: Path, tmp_path: Path
+    ) -> None:
+        canonical = "---\ntitle: Reserved\nstatus: stable\n---\nbody\n"
+        for relative in ("index.md", "log.md", "schema.md", "nested/index.md"):
+            _seed(isolated_index, relative, canonical)
+        _seed(
+            isolated_index,
+            "pages-to-system.md",
+            "---\ntitle: Denied\nstatus: stable\n---\n[Private](/system/private.md)\n",
+        )
+        _seed(
+            isolated_index,
+            "traversal.md",
+            "---\ntitle: Escape\nstatus: stable\n---\n[Escape](../outside.md)\n",
+        )
+        outside = tmp_path / "outside.md"
+        outside.write_text("---\ntitle: Outside\nstatus: stable\n---\nbody\n")
+        (isolated_index / "pages" / "symlink.md").symlink_to(outside)
+
+        store = IndexStore()
+        store.refresh()
+
+        assert store.all_page_ids() == set()
+        assert store.meta("index") is None
+        assert store.meta("log") is None
+        assert store.meta("schema") is None
+        assert store.meta("pages-to-system") is None
+        assert store.meta("traversal") is None
+        assert store.meta("symlink") is None
+        stat = outside.stat()
+        assert (
+            IndexStore._build_entry(
+                "outside", outside, False, stat.st_mtime_ns, stat.st_size
+            )
+            is None
+        )
+
+    def test_symlinked_namespace_root_is_rejected(
+        self, isolated_index: Path
+    ) -> None:
+        pages = isolated_index / "pages"
+        real_pages = isolated_index / "real-pages"
+        pages.rmdir()
+        real_pages.mkdir()
+        (real_pages / "page.md").write_text(
+            "---\ntitle: Page\nstatus: stable\n---\nbody\n"
+        )
+        pages.symlink_to(real_pages, target_is_directory=True)
+
+        store = IndexStore()
+        store.refresh()
+
+        assert store.all_page_ids() == set()
+
+    def test_default_collections_are_stable_only_but_exact_lookup_is_not(
+        self, isolated_index: Path
+    ) -> None:
+        for page_id, status in (
+            ("stable-target", "stable"),
+            ("draft-target", "draft"),
+            ("deprecated-target", "deprecated"),
+        ):
+            _seed(
+                isolated_index,
+                f"{page_id}.md",
+                f"---\ntitle: {page_id}\nstatus: {status}\n---\nbody\n",
+            )
+        _seed(
+            isolated_index,
+            "source.md",
+            """---
+title: Source
+status: stable
+---
+[Stable](stable-target.md)
+[Draft](draft-target.md)
+[Deprecated](deprecated-target.md)
+""",
+        )
+
+        store = IndexStore()
+        store.refresh()
+
+        assert store.all_page_ids() == {"source", "stable-target"}
+        assert {item["page_id"] for item in store.all_pages_meta()} == {
+            "source",
+            "stable-target",
+        }
+        assert store.page_count() == 2
+        assert store.outlinks("source") == ["stable-target"]
+        assert store.meta("draft-target")["status"] == "draft"
+        assert store.meta("deprecated-target")["status"] == "deprecated"

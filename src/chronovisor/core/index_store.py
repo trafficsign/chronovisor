@@ -1,9 +1,7 @@
-"""Persistent page metadata + backlinks index.
+"""Persistent canonical-page metadata and link index.
 
-Mirrors the semantics of `server._find_backlinks`, `server._page_metadata`,
-`server._extract_wiki_links` and `lint._collect_all_page_ids` exactly, but
-keeps everything in `~/.chronovisor/.index/` and refreshes incrementally based on
-`(mtime_ns, size, path, is_system)` per file.
+Keeps derived state in ``~/.chronovisor/.index/`` and refreshes incrementally
+based on ``(mtime_ns, size, path, is_system)`` per file.
 
 Backlinks are rebuilt in full on every refresh from the canonical
 `pages.outlinks` data, both to keep them consistent with the source of
@@ -14,24 +12,30 @@ The store is a process-wide singleton accessed via :func:`get_store`.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import threading
 import time
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
-from chronovisor.core.frontmatter import parse as _frontmatter_parse
-from chronovisor.core.link_fix import atomic_write, extract_targets
+from chronovisor.core.canonical_document import (
+    CanonicalDocumentError,
+    Namespace,
+    parse_document,
+    resolve_internal_markdown_links,
+)
+from chronovisor.core.link_fix import atomic_write
 from chronovisor.core.store import CHRONOVISOR_ROOT, PAGES_DIR, SYSTEM_DIR
 
-SCHEMA_VERSION = 10  # bumped for stable UID and classification projections
+SCHEMA_VERSION = 11  # canonical YAML, paths, links, and lifecycle eligibility
 INDEX_DIR = CHRONOVISOR_ROOT / ".index"
 PAGES_INDEX_FILE = INDEX_DIR / "pages.json"
 BACKLINKS_INDEX_FILE = INDEX_DIR / "backlinks.json"
-VALID_LIFECYCLE_STATUSES = {"active", "deprecated", "archived"}
+VALID_LIFECYCLE_STATUSES = frozenset({"draft", "stable", "deprecated"})
+PAGE_RESERVED_FILENAMES = frozenset({"index.md", "log.md", "schema.md"})
+SYSTEM_RESERVED_FILENAMES = frozenset({"index.md", "log.md"})
 VALID_PAGE_TYPES = {
     "knowledge",
     "reference",
@@ -45,38 +49,10 @@ VALID_PAGE_TYPES = {
 VALID_SENSITIVITY_TIERS = {"normal", "high"}
 
 
-def _canonical_aliases() -> dict[str, str]:
-    """Return page-id aliases normalized to the stem-based index contract."""
-
-    from chronovisor.core.alias_store import load_aliases
-
-    canonical: dict[str, str] = {}
-    for alias, target in load_aliases().items():
-        alias_id = Path(str(alias).removesuffix(".md")).name
-        target_id = Path(str(target).removesuffix(".md")).name
-        if alias_id and target_id and alias_id != target_id:
-            canonical[alias_id] = target_id
-    return canonical
-
-
-def _alias_sha256(aliases: dict[str, str]) -> str:
-    encoded = json.dumps(
-        aliases, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-    ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
-
-
-def _canonical_page_id(page_id: str, aliases: dict[str, str]) -> str:
-    return aliases.get(page_id, page_id)
-
-
 def _normalize_lifecycle_status(value: object) -> str:
-    if not isinstance(value, str):
-        return "active"
-    normalized = value.strip().lower()
-    if normalized in VALID_LIFECYCLE_STATUSES:
-        return normalized
-    return "active"
+    if not isinstance(value, str) or value not in VALID_LIFECYCLE_STATUSES:
+        raise ValueError("invalid canonical lifecycle status")
+    return value
 
 
 def _normalize_page_type(value: object, *, path: Path | None = None) -> str:
@@ -112,35 +88,49 @@ def _normalize_sensitivity(value: object, *, path: Path | None = None) -> str:
     return "normal"
 
 
-def _parse_frontmatter(text: str) -> dict[str, Any]:
-    """Thin wrapper around :func:`frontmatter.parse` returning only the
-    metadata dict. Kept as a local function so existing call sites in
-    this module don't need to change."""
-    meta, _ = _frontmatter_parse(text)
-    return meta
+def _contained_file(path: Path, root: Path) -> Path | None:
+    """Return a regular file only when its real path stays in its namespace."""
+
+    if root.is_symlink():
+        return None
+    try:
+        relative = path.relative_to(root)
+        root_resolved = root.resolve(strict=True)
+        resolved = path.resolve(strict=True)
+        resolved.relative_to(root_resolved)
+    except (OSError, RuntimeError, ValueError):
+        return None
+    # The final layout is direct: reject leaf and descendant symlinks, including
+    # links that currently happen to resolve back inside the namespace.
+    if resolved != root_resolved / relative or not resolved.is_file():
+        return None
+    return resolved
 
 
-def _read_text_stable(path: Path, retries: int = 1) -> str | None:
+def _read_bytes_stable(path: Path, root: Path, retries: int = 1) -> bytes | None:
     """Read a file and verify (mtime_ns, size) didn't change mid-read.
 
     Guards against picking up a half-written page (ingest doesn't use
     atomic_write today). On retry exhaustion, returns the last best-effort
     read; callers should treat None as "skip this file".
     """
-    last: str | None = None
+    last: bytes | None = None
     for _ in range(retries + 1):
+        resolved = _contained_file(path, root)
+        if resolved is None:
+            return None
         try:
-            st_before = path.stat()
-            text = path.read_text()
-            st_after = path.stat()
-        except (OSError, UnicodeDecodeError):
+            st_before = resolved.stat()
+            data = resolved.read_bytes()
+            st_after = resolved.stat()
+        except OSError:
             return None
         if (st_before.st_mtime_ns, st_before.st_size) == (
             st_after.st_mtime_ns,
             st_after.st_size,
-        ):
-            return text
-        last = text
+        ) and _contained_file(path, root) == resolved:
+            return data
+        last = data
     return last
 
 
@@ -153,6 +143,7 @@ class PageEntry:
     size: int
     title: str
     updated: str
+    relative_path: str = ""
     uid: str = ""
     classification_primary: str = ""
     classification_notation: str = ""
@@ -172,9 +163,9 @@ class PageEntry:
     via ``all_tags()`` for the dedup candidate pool. Stored as the raw
     list from frontmatter; per-tag form validation is the responsibility
     of ``chronovisor_check`` lint, not the index."""
-    summary: str = ""
+    description: str = ""
     recall_questions: list[str] = field(default_factory=list)
-    status: str = "active"
+    status: str = "stable"
     superseded_by: str = ""
     page_type: str = "knowledge"
     entities: list[str] = field(default_factory=list)
@@ -189,6 +180,7 @@ class PageEntry:
             "size": self.size,
             "title": self.title,
             "updated": self.updated,
+            "relative_path": self.relative_path,
             "uid": self.uid,
             "classification_primary": self.classification_primary,
             "classification_notation": self.classification_notation,
@@ -196,7 +188,7 @@ class PageEntry:
             "outlinks": list(self.outlinks),
             "raw_keywords": list(self.raw_keywords),
             "tags": list(self.tags),
-            "summary": self.summary,
+            "description": self.description,
             "recall_questions": list(self.recall_questions),
             "status": self.status,
             "superseded_by": self.superseded_by,
@@ -223,6 +215,7 @@ class PageEntry:
             size=int(d["size"]),
             title=d.get("title", d["page_id"]),
             updated=d.get("updated", "unknown"),
+            relative_path=d.get("relative_path", ""),
             uid=d.get("uid", "") if isinstance(d.get("uid", ""), str) else "",
             classification_primary=(
                 d.get("classification_primary", "")
@@ -244,8 +237,8 @@ class PageEntry:
             outlinks=list(d.get("outlinks", [])),
             raw_keywords=_coerce_str_list(d.get("raw_keywords")),
             tags=_coerce_str_list(d.get("tags")),
-            summary=d.get("summary", "")
-            if isinstance(d.get("summary", ""), str)
+            description=d.get("description", "")
+            if isinstance(d.get("description", ""), str)
             else "",
             recall_questions=_coerce_str_list(d.get("recall_questions")),
             status=_normalize_lifecycle_status(d.get("status")),
@@ -283,7 +276,6 @@ class IndexStore:
         self._entity_pages: dict[str, list[str]] = {}
         self._loaded = False
         self._persistence_dirty = False
-        self._alias_sha256 = ""
         self._last_refresh_monotonic = 0.0
 
     # -- persistence ------------------------------------------------------
@@ -304,8 +296,6 @@ class IndexStore:
         # Mismatch => one file is stale; rebuild from scratch on next refresh.
         if pages_doc.get("generation") != backlinks_doc.get("generation"):
             return
-        if pages_doc.get("alias_sha256") != backlinks_doc.get("alias_sha256"):
-            return
         try:
             entries = {
                 pid: PageEntry.from_dict(d)
@@ -321,21 +311,18 @@ class IndexStore:
         self._page_order = [pid for pid in order if pid in entries]
         self._backlinks = backlinks
         self._rebuild_associations()
-        self._alias_sha256 = str(pages_doc.get("alias_sha256") or "")
 
     def _persist(self, generation: int) -> None:
         INDEX_DIR.mkdir(parents=True, exist_ok=True)
         pages_doc = {
             "schema_version": SCHEMA_VERSION,
             "generation": generation,
-            "alias_sha256": self._alias_sha256,
             "page_order": list(self._page_order),
             "entries": {pid: e.to_dict() for pid, e in self._entries.items()},
         }
         backlinks_doc = {
             "schema_version": SCHEMA_VERSION,
             "generation": generation,
-            "alias_sha256": self._alias_sha256,
             "edges": {pid: list(refs) for pid, refs in self._backlinks.items()},
         }
         # atomic_write each file. Cross-file consistency is guarded by the
@@ -357,19 +344,27 @@ class IndexStore:
         `_find_backlinks` (pages/ then system/).
         """
         out: list[tuple[str, Path, bool, int, int]] = []
-        for path in PAGES_DIR.rglob("*.md"):
-            try:
-                st = path.stat()
-            except OSError:
+        for root, is_system in ((PAGES_DIR, False), (SYSTEM_DIR, True)):
+            if not root.is_dir():
                 continue
-            out.append((path.stem, path, False, st.st_mtime_ns, st.st_size))
-        if SYSTEM_DIR.exists():
-            for path in SYSTEM_DIR.rglob("*.md"):
+            for path in sorted(root.rglob("*.md")):
+                reserved = (
+                    SYSTEM_RESERVED_FILENAMES
+                    if is_system
+                    else PAGE_RESERVED_FILENAMES
+                )
+                if path.name in reserved:
+                    continue
+                resolved = _contained_file(path, root)
+                if resolved is None:
+                    continue
                 try:
-                    st = path.stat()
+                    st = resolved.stat()
                 except OSError:
                     continue
-                out.append((path.stem, path, True, st.st_mtime_ns, st.st_size))
+                out.append(
+                    (resolved.stem, resolved, is_system, st.st_mtime_ns, st.st_size)
+                )
         return out
 
     def refresh(self) -> None:
@@ -382,10 +377,6 @@ class IndexStore:
             if not self._loaded:
                 self._load_from_disk()
                 self._loaded = True
-
-            aliases = _canonical_aliases()
-            alias_sha256 = _alias_sha256(aliases)
-            aliases_changed = alias_sha256 != self._alias_sha256
 
             current = self._scan_disk()
             seen_ids: dict[str, tuple[Path, bool, int, int]] = {}
@@ -404,13 +395,10 @@ class IndexStore:
                     f"Duplicate page_id stems detected: {sorted(set(duplicates))}"
                 )
 
-            new_order = [pid for pid, *_ in current if pid in seen_ids]
-
             # Diff entries.
             old_ids = set(self._entries.keys())
             new_ids = set(seen_ids.keys())
             removed = old_ids - new_ids
-            new_ids - old_ids
 
             changed = False
             for pid in removed:
@@ -421,9 +409,7 @@ class IndexStore:
                 existing = self._entries.get(pid)
                 path_str = str(path)
                 if existing is None:
-                    entry = self._build_entry(
-                        pid, path, is_system, mtime_ns, size, aliases=aliases
-                    )
+                    entry = self._build_entry(pid, path, is_system, mtime_ns, size)
                     if entry is not None:
                         self._entries[pid] = entry
                         changed = True
@@ -434,21 +420,18 @@ class IndexStore:
                     or existing.size != size
                     or existing.path != path_str
                     or existing.is_system != is_system
-                    or aliases_changed
                 ):
-                    entry = self._build_entry(
-                        pid, path, is_system, mtime_ns, size, aliases=aliases
-                    )
+                    entry = self._build_entry(pid, path, is_system, mtime_ns, size)
                     if entry is not None:
                         self._entries[pid] = entry
                         changed = True
+                    else:
+                        del self._entries[pid]
+                        changed = True
 
+            new_order = [pid for pid, *_ in current if pid in self._entries]
             if self._page_order != new_order:
                 self._page_order = new_order
-                changed = True
-
-            if aliases_changed:
-                self._alias_sha256 = alias_sha256
                 changed = True
 
             if changed:
@@ -497,19 +480,39 @@ class IndexStore:
         is_system: bool,
         mtime_ns: int,
         size: int,
-        *,
-        aliases: dict[str, str] | None = None,
     ) -> PageEntry | None:
-        text = _read_text_stable(path)
-        if text is None:
+        root = SYSTEM_DIR if is_system else PAGES_DIR
+        resolved = _contained_file(path, root)
+        if resolved is None:
             return None
-        fm = _parse_frontmatter(text)
-        title = fm.get("title", path.stem)
-        updated = fm.get("updated", "unknown")
-        canonical_aliases = aliases or {}
+        data = _read_bytes_stable(resolved, root)
+        if data is None:
+            return None
+        try:
+            document = parse_document(data)
+            status = _normalize_lifecycle_status(document.metadata.get("status"))
+            namespace: Namespace = "system" if is_system else "pages"
+            relative_path = resolved.relative_to(root.resolve(strict=True)).as_posix()
+            resolved_links = resolve_internal_markdown_links(
+                document.body,
+                source_namespace=namespace,
+                source_path=relative_path,
+            )
+        except (CanonicalDocumentError, OSError, RuntimeError, ValueError):
+            return None
+        fm = document.metadata
+        title_value = fm.get("title")
+        title = title_value if isinstance(title_value, str) else resolved.stem
+        updated = str(fm.get("updated") or "unknown")
         outlinks = [
-            _canonical_page_id(target, canonical_aliases)
-            for target in extract_targets(text, strip=True)
+            PurePosixPath(link.path).stem
+            for link in resolved_links
+            if PurePosixPath(link.path).name
+            not in (
+                SYSTEM_RESERVED_FILENAMES
+                if link.namespace == "system"
+                else PAGE_RESERVED_FILENAMES
+            )
         ]
 
         # raw_keywords / tags: trust the frontmatter only when it's an
@@ -524,12 +527,13 @@ class IndexStore:
 
         return PageEntry(
             page_id=pid,
-            path=str(path),
+            path=str(resolved),
             is_system=is_system,
             mtime_ns=mtime_ns,
             size=size,
             title=title,
             updated=updated,
+            relative_path=relative_path,
             uid=fm.get("uid", "") if isinstance(fm.get("uid", ""), str) else "",
             classification_primary=(
                 fm.get("classification_primary", "")
@@ -551,14 +555,12 @@ class IndexStore:
             outlinks=outlinks,
             raw_keywords=_coerce_str_list(fm.get("raw_keywords")),
             tags=_coerce_str_list(fm.get("tags")),
-            summary=fm.get("summary", "")
-            if isinstance(fm.get("summary", ""), str)
+            description=fm.get("description", "")
+            if isinstance(fm.get("description", ""), str)
             else "",
             recall_questions=_coerce_str_list(fm.get("recall_questions")),
-            status=_normalize_lifecycle_status(fm.get("status")),
-            superseded_by=_canonical_page_id(
-                fm.get("superseded_by", ""), canonical_aliases
-            )
+            status=status,
+            superseded_by=fm.get("superseded_by", "")
             if isinstance(fm.get("superseded_by", ""), str)
             else "",
             page_type=_normalize_page_type(fm.get("type"), path=path),
@@ -584,10 +586,13 @@ class IndexStore:
         seen: dict[str, set[str]] = {}
         for source_pid in self._page_order:
             entry = self._entries.get(source_pid)
-            if entry is None:
+            if entry is None or entry.status != "stable":
                 continue
             for target in entry.outlinks:
                 if target == source_pid:
+                    continue
+                target_entry = self._entries.get(target)
+                if target_entry is not None and target_entry.status != "stable":
                     continue
                 src_set = seen.setdefault(target, set())
                 if source_pid in src_set:
@@ -601,7 +606,7 @@ class IndexStore:
         entity_pages: dict[str, list[str]] = {}
         for page_id in self._page_order:
             entry = self._entries.get(page_id)
-            if entry is None:
+            if entry is None or entry.status != "stable":
                 continue
             for tag in dict.fromkeys(entry.tags):
                 tag_pages.setdefault(tag, []).append(page_id)
@@ -634,9 +639,14 @@ class IndexStore:
                 "classification_notation": entry.classification_notation,
                 "classification_status": entry.classification_status,
                 "path": entry.path,
+                "relative_path": entry.relative_path,
                 "mtime_ns": entry.mtime_ns,
                 "is_system": entry.is_system,
-                "summary": entry.summary,
+                "namespace": "system" if entry.is_system else "pages",
+                "description": entry.description,
+                # Compatibility projection while downstream consumers move to OKF
+                # ``description``; canonical input never reads legacy ``summary``.
+                "summary": entry.description,
                 "recall_questions": list(entry.recall_questions),
                 "status": entry.status,
                 "superseded_by": entry.superseded_by,
@@ -646,10 +656,17 @@ class IndexStore:
             }
 
     def outlinks(self, page_id: str) -> list[str]:
-        """Return raw outlinks list (preserves duplicates + order)."""
+        """Return exact-source links to stable or not-yet-indexed targets."""
         with self._lock:
             entry = self._entries.get(page_id)
-            return list(entry.outlinks) if entry else []
+            if entry is None:
+                return []
+            return [
+                target
+                for target in entry.outlinks
+                if (target_entry := self._entries.get(target)) is None
+                or target_entry.status == "stable"
+            ]
 
     def raw_keywords(self, page_id: str) -> list[str]:
         """Return the page's frontmatter ``raw_keywords`` list.
@@ -684,7 +701,9 @@ class IndexStore:
         with self._lock:
             seen: set[str] = set()
             for entry in self._entries.values():
-                if not include_system and entry.is_system:
+                if entry.status != "stable" or (
+                    not include_system and entry.is_system
+                ):
                     continue
                 seen.update(entry.tags)
             return sorted(seen)
@@ -702,11 +721,13 @@ class IndexStore:
         with self._lock:
             return list(self._entity_pages.get(entity.casefold(), []))
 
-    def all_page_ids(self, include_system: bool = True) -> set[str]:
+    def all_page_ids(self, include_system: bool = False) -> set[str]:
         with self._lock:
-            if include_system:
-                return set(self._entries.keys())
-            return {pid for pid, e in self._entries.items() if not e.is_system}
+            return {
+                pid
+                for pid, entry in self._entries.items()
+                if entry.status == "stable" and (include_system or not entry.is_system)
+            }
 
     def all_pages_meta(self, include_system: bool = False) -> list[dict[str, Any]]:
         """Return meta dicts for every page, in mtime-descending order.
@@ -718,7 +739,10 @@ class IndexStore:
         """
         with self._lock:
             items = [
-                e for e in self._entries.values() if include_system or not e.is_system
+                entry
+                for entry in self._entries.values()
+                if entry.status == "stable"
+                and (include_system or not entry.is_system)
             ]
             items.sort(key=lambda e: e.mtime_ns, reverse=True)
             return [
@@ -730,6 +754,7 @@ class IndexStore:
                     "classification_primary": e.classification_primary,
                     "classification_notation": e.classification_notation,
                     "classification_status": e.classification_status,
+                    "description": e.description,
                     "status": e.status,
                     "superseded_by": e.superseded_by,
                     "page_type": e.page_type,
@@ -755,7 +780,7 @@ class IndexStore:
             out: list[str] = []
             for pid in self._page_order:
                 entry = self._entries.get(pid)
-                if entry is None:
+                if entry is None or entry.status != "stable":
                     continue
                 if entry.is_system and not include_system:
                     continue
@@ -766,8 +791,14 @@ class IndexStore:
     def page_count(self, include_system: bool = False) -> int:
         with self._lock:
             if include_system:
-                return len(self._entries)
-            return sum(1 for e in self._entries.values() if not e.is_system)
+                return sum(
+                    1 for entry in self._entries.values() if entry.status == "stable"
+                )
+            return sum(
+                1
+                for entry in self._entries.values()
+                if entry.status == "stable" and not entry.is_system
+            )
 
     def corpus_version(self) -> str:
         """Stable fingerprint of the current corpus state.

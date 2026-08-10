@@ -16,7 +16,6 @@ except ModuleNotFoundError:
     from mcp.server.mcpserver import MCPServer as FastMCP
 from chronovisor.core.frontmatter import parse as _frontmatter_parse
 from chronovisor.core.index_store import get_store
-from chronovisor.core.link_fix import extract_targets as _extract_targets
 from chronovisor.core.store import (
     CHRONOVISOR_ROOT,
     LOG_FILE,
@@ -99,15 +98,6 @@ def _parse_frontmatter(text: str) -> dict:
     """
     meta, _ = _frontmatter_parse(text)
     return meta
-
-
-def _extract_wiki_links(text: str) -> list[str]:
-    """Extract [[wiki-link]] references from text, normalized to page_id.
-
-    Code fence / frontmatter / inline code 内のリンクは除外される。
-    ``[[foo|label]]`` / ``[[foo#sec]]`` は ``foo`` に normalize される。
-    """
-    return _extract_targets(text, strip=True)
 
 
 def _find_backlinks(page_id: str) -> list[str]:
@@ -218,7 +208,7 @@ def chronovisor_read(
         else ""
     )
     content = path.read_text()
-    outlinks = store.outlinks(canonical_page_id) or _extract_wiki_links(content)
+    outlinks = store.outlinks(canonical_page_id)
     backlinks = store.backlinks(canonical_page_id)
     field_activity = _record_mcp_field_activity(
         ctx=ctx,
@@ -629,7 +619,7 @@ def chronovisor_init() -> str:
         system_pages[page_id] = {
             "page_id": page_id,
             "content": content,
-            "outlinks": store.outlinks(page_id) or _extract_wiki_links(content),
+            "outlinks": store.outlinks(page_id),
             "backlinks": store.backlinks(page_id),
         }
 
