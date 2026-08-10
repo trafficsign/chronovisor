@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -111,6 +112,90 @@ class _FakeStoreWithPaths:
 
     def refresh(self) -> None:
         pass
+
+
+def test_default_session_uses_fixed_librarian_runtime_role(
+    isolated_pages: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _seed(isolated_pages, "page")
+    captured: dict[str, object] = {}
+
+    class Session:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+        def run(self, *_args: object, **_kwargs: object) -> SimpleNamespace:
+            return SimpleNamespace(
+                ok=True,
+                value={
+                    "main_topic": "topic",
+                    "assigned_tags": [],
+                    "tag_evidence": {},
+                    "rejected_assigned_tags": [],
+                    "suggested_missing_categories": [],
+                    "confidence": 0.5,
+                },
+            )
+
+    monkeypatch.setattr(td, "LocalStructuredSession", Session)
+    monkeypatch.setattr(
+        td,
+        "load_decision_router_config",
+        lambda: SimpleNamespace(
+            num_ctx=65_536,
+            num_predict=8_192,
+            primary_keep_alive="20m",
+            read_timeout_ms=660_000,
+            max_input_chars=64_000,
+            max_output_chars=8_000,
+            max_feedback_chars=2_000,
+        ),
+    )
+
+    assert analyze_page("page", []).main_topic == "topic"
+    assert captured["model"] is None
+    assert captured["runtime_role"] == "librarian.review"
+    assert captured["source_data_class"] == "page"
+    assert captured["source_sensitivity"] == "high"
+    assert captured["num_predict"] == 1_536
+
+
+def test_injected_generator_uses_no_runtime_config(
+    isolated_pages: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _seed(isolated_pages, "page")
+    captured: dict[str, object] = {}
+
+    class Session:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+        def run(self, *_args: object, **_kwargs: object) -> SimpleNamespace:
+            return SimpleNamespace(
+                ok=True,
+                value={
+                    "main_topic": "topic",
+                    "assigned_tags": [],
+                    "tag_evidence": {},
+                    "rejected_assigned_tags": [],
+                    "suggested_missing_categories": [],
+                    "confidence": 0.5,
+                },
+            )
+
+    monkeypatch.setattr(td, "LocalStructuredSession", Session)
+    monkeypatch.setattr(
+        td,
+        "load_decision_router_config",
+        lambda: pytest.fail("injected generator resolved runtime config"),
+    )
+
+    analyze_page("page", [], generate_fn=lambda *_args, **_kwargs: "{}")
+
+    assert captured["model"] == "injected:tag-distribution"
+    assert "runtime_role" not in captured
 
 
 # ---------------------------------------------------------------------------

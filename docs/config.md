@@ -94,6 +94,11 @@ capability = "generation"
 provider = "local"
 model = "maxwell1500/ornith-35b:Q5_K_M"
 
+[llm.roles."lint.orphan_link"]
+capability = "generation"
+provider = "local"
+model = "maxwell1500/ornith-35b:Q5_K_M"
+
 [llm.roles."recall.content_correction.proposer"]
 capability = "generation"
 provider = "local"

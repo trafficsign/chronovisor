@@ -11,6 +11,7 @@ import hashlib
 import json
 from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -90,6 +91,94 @@ class _FakeStore:
 
     def refresh(self) -> None:
         pass
+
+
+def test_default_session_uses_fixed_orphan_runtime_role(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class Session:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+        def run(self, *_args: object, **_kwargs: object) -> SimpleNamespace:
+            return SimpleNamespace(
+                ok=True,
+                value={
+                    "confidence": 0.9,
+                    "reason": "related",
+                    "suggested_anchor": "anchor",
+                    "suggested_section": "Related",
+                },
+            )
+
+    monkeypatch.setattr(ol_mod, "_build_prompt", lambda *_args: "prompt")
+    monkeypatch.setattr(ol_mod, "LocalStructuredSession", Session)
+    monkeypatch.setattr(
+        ol_mod,
+        "load_decision_router_config",
+        lambda: SimpleNamespace(
+            num_ctx=65_536,
+            num_predict=8_192,
+            primary_keep_alive="20m",
+            read_timeout_ms=660_000,
+            max_input_chars=64_000,
+            max_output_chars=8_000,
+            max_feedback_chars=2_000,
+        ),
+    )
+
+    assert score_candidate("source", "orphan", object()) == {
+        "confidence": 0.9,
+        "reason": "related",
+        "suggested_anchor": "anchor",
+        "suggested_section": "Related",
+    }
+    assert captured["model"] is None
+    assert captured["runtime_role"] == "lint.orphan_link"
+    assert captured["source_data_class"] == "page"
+    assert captured["source_sensitivity"] == "high"
+    assert captured["num_predict"] == 1_024
+
+
+def test_injected_generator_uses_no_runtime_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class Session:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+        def run(self, *_args: object, **_kwargs: object) -> SimpleNamespace:
+            return SimpleNamespace(
+                ok=True,
+                value={
+                    "confidence": 0.9,
+                    "reason": "related",
+                    "suggested_anchor": "anchor",
+                    "suggested_section": "Related",
+                },
+            )
+
+    monkeypatch.setattr(ol_mod, "_build_prompt", lambda *_args: "prompt")
+    monkeypatch.setattr(ol_mod, "LocalStructuredSession", Session)
+    monkeypatch.setattr(
+        ol_mod,
+        "load_decision_router_config",
+        lambda: pytest.fail("injected generator resolved runtime config"),
+    )
+
+    score_candidate(
+        "source",
+        "orphan",
+        object(),
+        generate_fn=lambda *_args, **_kwargs: "{}",
+    )
+
+    assert captured["model"] == "injected:orphan-link"
+    assert "runtime_role" not in captured
 
 
 def test_apply_suggestion_inserts_frontier_approved_link(isolated_pages: Path) -> None:

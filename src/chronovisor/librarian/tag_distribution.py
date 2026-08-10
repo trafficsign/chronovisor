@@ -35,6 +35,8 @@ from chronovisor.core.tag_rules import (
 )
 from chronovisor.decision.local_structured import ChatRequest, LocalStructuredSession
 
+TAG_DISTRIBUTION_RUNTIME_ROLE = "librarian.review"
+
 # ---------------------------------------------------------------------------
 # Types
 # ---------------------------------------------------------------------------
@@ -512,9 +514,7 @@ def analyze_page(
     so the report can show "no result" cells with the raw text recorded
     for audit."""
     prompt = _build_prompt(page_id, master)
-    config = load_decision_router_config()
     last_output: list[str] = []
-    transport = None
     if generate_fn is not None:
         def transport(request: ChatRequest) -> str:
             system = request.messages[0]["content"] if request.messages else ""
@@ -525,19 +525,31 @@ def analyze_page(
             output = generate_fn(transcript, system=system)
             last_output[:] = [output]
             return output
-
-    session_kwargs = {
-        "model": config.primary_model,
-        "transport": transport,
-        "role": "tag_distribution",
-        "num_ctx": config.num_ctx,
-        "num_predict": min(config.num_predict, 1_536),
-        "keep_alive": config.primary_keep_alive,
-        "read_timeout_ms": config.read_timeout_ms,
-        "max_input_chars": min(config.max_input_chars, 32_000),
-        "max_output_chars": min(config.max_output_chars, 4_000),
-        "max_feedback_chars": min(config.max_feedback_chars, 1_500),
-    }
+        session_kwargs = {
+            "model": "injected:tag-distribution",
+            "transport": transport,
+            "role": "tag_distribution",
+            "num_predict": 1_536,
+            "max_input_chars": 32_000,
+            "max_output_chars": 4_000,
+            "max_feedback_chars": 1_500,
+        }
+    else:
+        config = load_decision_router_config()
+        session_kwargs = {
+            "model": None,
+            "runtime_role": TAG_DISTRIBUTION_RUNTIME_ROLE,
+            "source_data_class": "page",
+            "source_sensitivity": "high",
+            "role": "tag_distribution",
+            "num_ctx": config.num_ctx,
+            "num_predict": min(config.num_predict, 1_536),
+            "keep_alive": config.primary_keep_alive,
+            "read_timeout_ms": config.read_timeout_ms,
+            "max_input_chars": min(config.max_input_chars, 32_000),
+            "max_output_chars": min(config.max_output_chars, 4_000),
+            "max_feedback_chars": min(config.max_feedback_chars, 1_500),
+        }
     if generate_fn is None:
         result = LocalStructuredSession(**session_kwargs).run(
             prompt,

@@ -67,6 +67,7 @@ DECISIONS_FILE = CHRONOVISOR_ROOT / "autonomy" / "orphan-link-decisions.jsonl"
 PROJECT_ROOT = runtime_repo_root()
 RESOLVER_VERSION = "orphan-link-v1"
 DECISION_LANE = "orphan_link"
+ORPHAN_LINK_RUNTIME_ROLE = "lint.orphan_link"
 
 ORPHAN_SUGGESTION_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -315,9 +316,7 @@ def _score_candidate_outcome(
 ) -> dict[str, Any]:
     """Keep transient model failures distinct from a valid low score."""
     prompt = _build_prompt(source_id, orphan_id, store)
-    config = load_decision_router_config()
     last_output: list[str] = []
-    transport = None
     if generate_fn is not None:
 
         def transport(request: ChatRequest) -> str:
@@ -329,19 +328,30 @@ def _score_candidate_outcome(
             output = generate_fn(transcript, system=system)
             last_output[:] = [output]
             return output
-
-    session_kwargs = {
-        "model": config.primary_model,
-        "transport": transport,
-        "role": "orphan_candidate",
-        "num_ctx": config.num_ctx,
-        "num_predict": min(config.num_predict, 1_024),
-        "keep_alive": config.primary_keep_alive,
-        "read_timeout_ms": config.read_timeout_ms,
-        "max_input_chars": min(config.max_input_chars, 16_000),
-        "max_output_chars": min(config.max_output_chars, 4_000),
-        "max_feedback_chars": config.max_feedback_chars,
-    }
+        session_kwargs = {
+            "model": "injected:orphan-link",
+            "transport": transport,
+            "role": "orphan_candidate",
+            "num_predict": 1_024,
+            "max_input_chars": 16_000,
+            "max_output_chars": 4_000,
+        }
+    else:
+        config = load_decision_router_config()
+        session_kwargs = {
+            "model": None,
+            "runtime_role": ORPHAN_LINK_RUNTIME_ROLE,
+            "source_data_class": "page",
+            "source_sensitivity": "high",
+            "role": "orphan_candidate",
+            "num_ctx": config.num_ctx,
+            "num_predict": min(config.num_predict, 1_024),
+            "keep_alive": config.primary_keep_alive,
+            "read_timeout_ms": config.read_timeout_ms,
+            "max_input_chars": min(config.max_input_chars, 16_000),
+            "max_output_chars": min(config.max_output_chars, 4_000),
+            "max_feedback_chars": config.max_feedback_chars,
+        }
     if generate_fn is None:
         result = LocalStructuredSession(**session_kwargs).run(
             prompt,
