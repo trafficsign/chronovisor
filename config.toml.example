@@ -53,11 +53,6 @@ device = "mps"
 kind = "nemotron"
 device = "cpu"
 
-[llm.roles."search.semantic"]
-capability = "embedding"
-provider = "local"
-model = "bge-m3"
-
 [llm.roles."knowledge.embedding"]
 capability = "embedding"
 provider = "local"
@@ -276,7 +271,12 @@ model = "gpt-oss:20b"
 # provider = "openai"
 # model = "gpt-5-mini"
 #
-# [llm.roles."search.semantic"]
+# [llm.roles."search.semantic.foreground"]
+# capability = "embedding"
+# provider = "openai"
+# model = "text-embedding-3-large"
+#
+# [llm.roles."search.semantic.incremental"]
 # capability = "embedding"
 # provider = "openai"
 # model = "text-embedding-3-large"
@@ -322,8 +322,25 @@ model = "gpt-oss:20b"
 # role = "ingest.generation"
 # data_class = "derived_snippet"
 #
+# Remote semantic query and sensitive-document routes require these exact pairs:
+# [[llm.egress_opt_in]]
+# role = "search.semantic.foreground"
+# data_class = "raw"
+#
+# [[llm.egress_opt_in]]
+# role = "search.semantic.foreground"
+# data_class = "system"
+#
+# [[llm.egress_opt_in]]
+# role = "search.semantic.incremental"
+# data_class = "page"
+#
+# [[llm.egress_opt_in]]
+# role = "search.semantic.incremental"
+# data_class = "system"
+#
 # Hybrid note: Anthropic/Claude, DeepSeek, Kimi, and Z.AI/GLM profiles currently
-# advertise generation only. Route `search.semantic` to local Ollama or a
+# advertise generation only. Route both `search.semantic.*` roles to a
 # separately credentialed OpenAI/Qwen/Gemini/Mistral/OpenRouter profile.
 #
 # Explicit headless alternatives have no automatic fallback:

@@ -616,21 +616,22 @@ disables rewrite, semantic search, and judge while keeping BM25 available.
 ## Search embeddings
 
 The search encoder is independent from the utility `[embedding]` model used
-for duplicate and tag workflows. Nemotron runs in a dedicated local service;
-query failure returns an empty semantic lane so the shared pipeline continues
-with BM25.
+for duplicate and tag workflows. Set `enabled = false` for explicit BM25-only
+execution. When enabled, both semantic runtime roles must resolve to the same
+provider, model, location, and vector dimensions. Service or egress failure is
+reported as a semantic failure and never selects another provider or the old
+SQLite embedding path. Legacy `[search.embedding]` `backend`, `model`, and
+`fallback` keys are accepted but ignored; the two fixed roles are the only
+provider/model selectors.
 
 ```toml
 [search.embedding]
 enabled = true
-backend = "nemotron_service"
-model = "nvidia/Nemotron-3-Embed-1B-BF16"
 revision = "a5e0f804b9e90a1ca6784ecbf6e41595774fc834"
 dimensions = 2048
 storage_dtype = "float32"
 query_prefix = "query: "
 document_prefix = "passage: "
-fallback = "bm25"
 fusion_weight = 0.6
 min_top_score = 0.20
 min_margin = 0.001
@@ -657,6 +658,16 @@ interactive_timeout_ms = 1000
 mode = "on"
 canary_percent = 0
 sync_recall = true
+
+[llm.roles."search.semantic.foreground"]
+capability = "embedding"
+provider = "semantic_foreground"
+model = "nvidia/Nemotron-3-Embed-1B-BF16"
+
+[llm.roles."search.semantic.incremental"]
+capability = "embedding"
+provider = "semantic_incremental"
+model = "nvidia/Nemotron-3-Embed-1B-BF16"
 ```
 
 The service stores immutable generations below
@@ -672,8 +683,13 @@ model inference.
 `chronovisor-semantic-service upgrade-ann` clones a complete flat generation
 into a sealed HNSW generation without re-embedding.
 `chronovisor-semantic-service rollback` atomically returns to the previous
-complete generation. Keep the last two generations; do not use the old BGE
-SQLite file as a runtime fallback after migration. New installations should
+complete generation. The generation and query cache are sealed to the
+foreground role/provider/model/location identity; identity drift requires a
+rebuild. Local Nemotron keeps the MPS foreground and CPU incremental devices.
+Remote providers require explicit `raw/normal`, `page/high`, and `system/high`
+egress opt-ins as applicable; denied data sends no request and has no fallback.
+Keep the last two generations; the old BGE SQLite file is not a runtime path.
+New installations should
 keep `sync_recall = false` until the same idle, CPU-indexing, and 35B-load
 paired latency gate passes on their hardware.
 

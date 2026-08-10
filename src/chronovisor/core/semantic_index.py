@@ -34,7 +34,7 @@ from chronovisor.core.canonical_document import (
 from chronovisor.core.hashutil import sha256_bytes as _sha256_bytes
 from chronovisor.core.hashutil import sha256_file as _sha256_file
 from chronovisor.core.page_identity import normalize_page_uid
-from chronovisor.core.store import CHRONOVISOR_ROOT, page_id_from_path
+from chronovisor.core.store import CHRONOVISOR_ROOT, SYSTEM_DIR, page_id_from_path
 
 SEMANTIC_ROOT = CHRONOVISOR_ROOT / ".index" / "semantic"
 GENERATIONS_DIR = SEMANTIC_ROOT / "generations"
@@ -42,8 +42,8 @@ DELTAS_DIR = SEMANTIC_ROOT / "deltas"
 ACTIVE_FILE = SEMANTIC_ROOT / "active.json"
 ACTIVATION_LOCK = SEMANTIC_ROOT / "activation.lock"
 EXTRACTOR_SCHEMA_VERSION = 2
-INDEX_SCHEMA_VERSION = 3
-SUPPORTED_INDEX_SCHEMA_VERSIONS = {1, 2, INDEX_SCHEMA_VERSION}
+INDEX_SCHEMA_VERSION = 4
+SUPPORTED_INDEX_SCHEMA_VERSIONS = {INDEX_SCHEMA_VERSION}
 DEFAULT_COARSE_DIMENSIONS = 512
 ANN_FILENAME = "coarse.usearch"
 LEGACY_EMBEDDINGS_DB = CHRONOVISOR_ROOT / ".index" / "embeddings.sqlite"
@@ -65,6 +65,8 @@ class SemanticDocument:
     source_sha256: str
     source_mtime_ns: int
     page_uid: str = ""
+    source_data_class: str = "page"
+    source_sensitivity: str = "high"
 
 
 @dataclass(frozen=True)
@@ -72,7 +74,10 @@ class GenerationManifest:
     schema_version: int
     generation_id: str
     created_at: str
+    role: str
+    provider: str
     model: str
+    location: str
     revision: str
     dimensions: int
     dtype: str
@@ -156,6 +161,13 @@ def extract_page_documents(path: Path) -> list[SemanticDocument]:
     except ValueError:
         page_uid = ""
     identity = page_uid or page_id
+    is_system = metadata.get("is_system") is True or path.is_relative_to(SYSTEM_DIR)
+    source_data_class = "system" if is_system else "page"
+    source_sensitivity = (
+        "normal"
+        if not is_system and metadata.get("sensitivity") == "normal"
+        else "high"
+    )
     source_sha256 = _sha256_bytes(source)
     title_value = metadata.get("title")
     title = title_value.strip() or page_id if isinstance(title_value, str) else page_id
@@ -181,6 +193,8 @@ def extract_page_documents(path: Path) -> list[SemanticDocument]:
             source_sha256=source_sha256,
             source_mtime_ns=mtime_ns,
             page_uid=page_uid,
+            source_data_class=source_data_class,
+            source_sensitivity=source_sensitivity,
         )
     ]
     documents.extend(
@@ -194,6 +208,8 @@ def extract_page_documents(path: Path) -> list[SemanticDocument]:
             source_sha256=source_sha256,
             source_mtime_ns=mtime_ns,
             page_uid=page_uid,
+            source_data_class=source_data_class,
+            source_sensitivity=source_sensitivity,
         )
         for index, question in enumerate(questions)
     )
@@ -208,6 +224,8 @@ def extract_page_documents(path: Path) -> list[SemanticDocument]:
             source_sha256=source_sha256,
             source_mtime_ns=mtime_ns,
             page_uid=page_uid,
+            source_data_class=source_data_class,
+            source_sensitivity=source_sensitivity,
         )
         for index, chunk in enumerate(
             search_core._markdown_chunks(body, title, metadata)
@@ -353,8 +371,11 @@ def _build_ann_index(path: Path, vectors: np.ndarray) -> tuple[str, int, str]:
 def build_generation(
     documents: Sequence[SemanticDocument],
     *,
-    encode_documents: Callable[[list[str], int], np.ndarray],
+    encode_documents: Callable[[Sequence[SemanticDocument], int], np.ndarray],
+    role: str,
+    provider: str,
     model: str,
+    location: str,
     revision: str,
     dimensions: int,
     query_prefix: str,
@@ -371,9 +392,8 @@ def build_generation(
     if len(set(doc_ids)) != len(doc_ids):
         raise SemanticIndexError("semantic generation contains duplicate doc ids")
     page_ids = {document.page_id for document in documents}
-    texts = [document.text for document in documents]
     vectors = _normalized_float32(
-        encode_documents(texts, batch_size), dimensions=dimensions
+        encode_documents(documents, batch_size), dimensions=dimensions
     )
     if len(vectors) != len(documents):
         raise SemanticIndexError(
@@ -382,7 +402,10 @@ def build_generation(
 
     profile_seed = json.dumps(
         {
+            "role": role,
+            "provider": provider,
             "model": model,
+            "location": location,
             "revision": revision,
             "dimensions": dimensions,
             "dtype": "float32",
@@ -427,7 +450,10 @@ def build_generation(
             schema_version=INDEX_SCHEMA_VERSION,
             generation_id=generation_id,
             created_at=_utc_now(),
+            role=role,
+            provider=provider,
             model=model,
+            location=location,
             revision=revision,
             dimensions=dimensions,
             dtype="float32",
@@ -562,11 +588,20 @@ def validate_generation(
     *,
     root: Path = SEMANTIC_ROOT,
     verify_checksums: bool = True,
+    expected_route: dict[str, str] | None = None,
 ) -> GenerationManifest:
     directory = generation_dir(generation_id, root=root)
     if not (directory / "COMPLETE").is_file():
         raise SemanticIndexError(f"generation is incomplete: {generation_id}")
     manifest = read_manifest(generation_id, root=root)
+    route = {
+        "role": manifest.role,
+        "provider": manifest.provider,
+        "model": manifest.model,
+        "location": manifest.location,
+    }
+    if expected_route is not None and route != expected_route:
+        raise SemanticIndexError("semantic generation route identity mismatch")
     metadata = directory / "metadata.sqlite"
     vectors = directory / "vectors.npy"
     ann = directory / ANN_FILENAME
@@ -638,14 +673,17 @@ def activate_generation(
                 f"active generation CAS failed: {current_id!r} != {expected_current!r}"
             )
         payload = {
-            "schema_version": 1,
+            "schema_version": 2,
             "generation_id": generation_id,
             "previous_generation_id": current_id,
             "manifest_sha256": _sha256_file(
                 generation_dir(generation_id, root=root) / "manifest.json"
             ),
             "activated_at": _utc_now(),
+            "role": manifest.role,
+            "provider": manifest.provider,
             "model": manifest.model,
+            "location": manifest.location,
             "revision": manifest.revision,
         }
         _atomic_json(root / "active.json", payload)
@@ -991,7 +1029,10 @@ def load_generation(
 
 
 def load_active_generation(
-    *, root: Path = SEMANTIC_ROOT, verify_checksums: bool = True
+    *,
+    root: Path = SEMANTIC_ROOT,
+    verify_checksums: bool = True,
+    expected_route: dict[str, str] | None = None,
 ) -> LoadedGeneration:
     active = read_active(root=root)
     generation_id = str(active.get("generation_id") or "")
@@ -1001,10 +1042,26 @@ def load_active_generation(
     path = generation_dir(generation_id, root=root) / "manifest.json"
     if manifest_sha != _sha256_file(path):
         raise SemanticIndexError("active semantic manifest pointer mismatch")
-    return load_generation(generation_id, root=root, verify_checksums=verify_checksums)
+    loaded = load_generation(
+        generation_id, root=root, verify_checksums=verify_checksums
+    )
+    route = {
+        "role": loaded.manifest.role,
+        "provider": loaded.manifest.provider,
+        "model": loaded.manifest.model,
+        "location": loaded.manifest.location,
+    }
+    pointer_route = {key: active.get(key) for key in route}
+    if pointer_route != route:
+        raise SemanticIndexError("active semantic route pointer mismatch")
+    if expected_route is not None and route != expected_route:
+        raise SemanticIndexError("semantic generation route identity mismatch")
+    return loaded
 
 
-def semantic_index_status(*, root: Path = SEMANTIC_ROOT) -> dict[str, Any]:
+def semantic_index_status(
+    *, root: Path = SEMANTIC_ROOT, expected_route: dict[str, str] | None = None
+) -> dict[str, Any]:
     active = read_active(root=root)
     generation_id = str(active.get("generation_id") or "")
     if not generation_id:
@@ -1015,7 +1072,20 @@ def semantic_index_status(*, root: Path = SEMANTIC_ROOT) -> dict[str, Any]:
             "coverage": 0.0,
         }
     try:
-        manifest = validate_generation(generation_id, root=root, verify_checksums=False)
+        manifest = validate_generation(
+            generation_id,
+            root=root,
+            verify_checksums=False,
+            expected_route=expected_route,
+        )
+        route = {
+            "role": manifest.role,
+            "provider": manifest.provider,
+            "model": manifest.model,
+            "location": manifest.location,
+        }
+        if {key: active.get(key) for key in route} != route:
+            raise SemanticIndexError("active semantic route pointer mismatch")
         delta_path = root / "deltas" / f"{generation_id}.sqlite"
         delta_pages = 0
         indexed_mtimes: dict[str, int] = {}
@@ -1069,7 +1139,10 @@ def semantic_index_status(*, root: Path = SEMANTIC_ROOT) -> dict[str, Any]:
             "root": str(root),
             "generation_id": generation_id,
             "previous_generation_id": active.get("previous_generation_id", ""),
+            "role": manifest.role,
+            "provider": manifest.provider,
             "model": manifest.model,
+            "location": manifest.location,
             "revision": manifest.revision,
             "dimensions": manifest.dimensions,
             "ann_kind": manifest.ann_kind or "flat",
@@ -1090,12 +1163,12 @@ def semantic_index_status(*, root: Path = SEMANTIC_ROOT) -> dict[str, Any]:
             "corpus_fingerprint": manifest.corpus_fingerprint,
             "activated_at": active.get("activated_at"),
         }
-    except Exception as exc:
+    except Exception:
         return {
             "status": "invalid",
             "root": str(root),
             "generation_id": generation_id,
-            "error": f"{type(exc).__name__}: {exc}",
+            "error": "generation_invalid",
             "coverage": 0.0,
         }
 

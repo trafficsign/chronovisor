@@ -125,23 +125,14 @@ class EmbeddingConfig:
 
 @dataclass(frozen=True)
 class SearchEmbeddingConfig:
-    """Search-only semantic retrieval profile.
+    """Search-only semantic retrieval service profile."""
 
-    The legacy Ollama backend remains the default for configurations that
-    predate the dedicated semantic service.  This keeps tag/duplicate utility
-    embeddings independent from the asymmetric query/document encoder used by
-    Nemotron.
-    """
-
-    enabled: bool = True
-    backend: str = "legacy_ollama"
-    model: str = "nvidia/Nemotron-3-Embed-1B-BF16"
+    enabled: bool = False
     revision: str = "a5e0f804b9e90a1ca6784ecbf6e41595774fc834"
     dimensions: int = 2_048
     storage_dtype: str = "float32"
     query_prefix: str = "query: "
     document_prefix: str = "passage: "
-    fallback: str = "bm25"
     fusion_weight: float = 0.6
     min_top_score: float = 0.20
     min_margin: float = 0.001
@@ -360,13 +351,6 @@ def load_search_embedding_config(
             if isinstance(section.get("enabled"), bool)
             else SearchEmbeddingConfig.enabled
         ),
-        backend=text(
-            section,
-            "backend",
-            SearchEmbeddingConfig.backend,
-            choices={"legacy_ollama", "nemotron_service"},
-        ),
-        model=text(section, "model", SearchEmbeddingConfig.model),
         revision=text(section, "revision", SearchEmbeddingConfig.revision),
         dimensions=_bounded_int(
             section.get("dimensions"),
@@ -389,12 +373,6 @@ def load_search_embedding_config(
             section["document_prefix"]
             if isinstance(section.get("document_prefix"), str)
             else SearchEmbeddingConfig.document_prefix
-        ),
-        fallback=text(
-            section,
-            "fallback",
-            SearchEmbeddingConfig.fallback,
-            choices={"bm25"},
         ),
         fusion_weight=_bounded_float(
             section.get("fusion_weight"),

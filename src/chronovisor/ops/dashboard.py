@@ -22,7 +22,7 @@ from urllib.parse import parse_qsl, urlparse
 
 import httpx
 
-from chronovisor.core import index_store, runtime_status
+from chronovisor.core import index_store, llm_config, runtime_status
 from chronovisor.core.ollama import (
     OLLAMA_URL,
     embedding_model,
@@ -523,8 +523,15 @@ def _configured_model_roles() -> dict[str, set[str]]:
 
     try:
         search_embedding = load_search_embedding_config()
-        if search_embedding.enabled and search_embedding.backend == "nemotron_service":
-            _add_model_role(roles, search_embedding.model, "search-embed")
+        if search_embedding.enabled:
+            runtime = llm_config.load_default_llm_runtime()
+            for role in (
+                "search.semantic.foreground",
+                "search.semantic.incremental",
+            ):
+                _add_model_role(
+                    roles, runtime.resolve_embedding(role).model, "search-embed"
+                )
     except Exception:
         pass
 

@@ -29,15 +29,15 @@ class _NemotronModel(Protocol):
     encode_document: Callable[..., object]
 
 
-def _local_snapshot(config: SearchEmbeddingConfig) -> Path | str:
+def _local_snapshot(config: SearchEmbeddingConfig, model: str) -> Path | str:
     if not config.offline:
-        return config.model
+        return model
     model_dir = (
         Path.home()
         / ".cache"
         / "huggingface"
         / "hub"
-        / f"models--{config.model.replace('/', '--')}"
+        / f"models--{model.replace('/', '--')}"
         / "snapshots"
         / config.revision
     )
@@ -72,10 +72,12 @@ class NemotronEmbeddingBackend:
         self,
         config: SearchEmbeddingConfig,
         *,
+        model: str,
         device: str,
         incremental: bool = False,
     ) -> None:
         self.config = config
+        self.model = model
         self.device = device
         self.incremental = incremental
         self._model: _NemotronModel | None = None
@@ -109,7 +111,9 @@ class NemotronEmbeddingBackend:
             try:
                 self._model = cast(
                     _NemotronModel,
-                    SentenceTransformer(str(_local_snapshot(self.config)), **kwargs),
+                    SentenceTransformer(
+                        str(_local_snapshot(self.config, self.model)), **kwargs
+                    ),
                 )
             except TypeError:
                 kwargs["model_kwargs"] = {
@@ -118,12 +122,14 @@ class NemotronEmbeddingBackend:
                 }
                 self._model = cast(
                     _NemotronModel,
-                    SentenceTransformer(str(_local_snapshot(self.config)), **kwargs),
+                    SentenceTransformer(
+                        str(_local_snapshot(self.config, self.model)), **kwargs
+                    ),
                 )
         return self._model
 
     def embed(self, request: EmbeddingRequest, *, model: str) -> EmbeddingResult:
-        if model != self.config.model:
+        if model != self.model:
             raise SafeBackendError("route_configuration_invalid")
         if not request.texts:
             return EmbeddingResult((), self.provider, model)

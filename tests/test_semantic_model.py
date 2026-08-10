@@ -4,6 +4,7 @@ import pytest
 from chronovisor.core.llm_runtime import (
     EmbeddingPurpose,
     EmbeddingRequest,
+    SafeBackendError,
     SourceDataClass,
     SourceDataClassification,
     SourceSensitivity,
@@ -39,8 +40,8 @@ def test_nemotron_backend_selects_query_or_document_without_eager_loading() -> N
             calls.append("document")
             return [[0.0, 2.0]]
 
-    config = SearchEmbeddingConfig(model="test-model", dimensions=2)
-    backend = NemotronEmbeddingBackend(config, device="mps")
+    config = SearchEmbeddingConfig(dimensions=2)
+    backend = NemotronEmbeddingBackend(config, model="test-model", device="mps")
     assert backend._model is None
     backend._model = Model()
     source = SourceDataClassification(SourceDataClass.PAGE, SourceSensitivity.NORMAL)
@@ -54,3 +55,6 @@ def test_nemotron_backend_selects_query_or_document_without_eager_loading() -> N
     assert calls == ["query", "document"]
     np.testing.assert_allclose(query.vectors[0], [0.6, 0.8])
     np.testing.assert_allclose(document.vectors[0], [0.0, 1.0])
+
+    with pytest.raises(SafeBackendError, match="route_configuration_invalid"):
+        backend.embed(EmbeddingRequest(("d",), source), model="other-model")

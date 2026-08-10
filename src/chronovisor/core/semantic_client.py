@@ -1,4 +1,4 @@
-"""Core fail-open client for the local Nemotron semantic service."""
+"""Core client for the configured semantic retrieval service."""
 
 from __future__ import annotations
 
@@ -96,7 +96,7 @@ def request(
 
 
 def selected_for_rollout(query: str, config: SearchEmbeddingConfig) -> bool:
-    if not config.enabled or config.backend != "nemotron_service":
+    if not config.enabled:
         return False
     if config.rollout_mode == "on":
         return True

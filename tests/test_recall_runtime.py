@@ -2360,6 +2360,11 @@ def test_missed_feedback_ref_embeds_snapshot(tmp_path, monkeypatch, capsys) -> N
     feedback_file = tmp_path / "feedback.jsonl"
     monkeypatch.setattr(recall_runtime, "RECALL_LOG_FILE", log_file)
     monkeypatch.setattr(recall_runtime, "RECALL_FEEDBACK_FILE", feedback_file)
+    monkeypatch.setattr(
+        recall_runtime,
+        "okf_startup_status",
+        lambda _root: SimpleNamespace(allowed=True),
+    )
     log_file.write_text(
         json.dumps(
             {

@@ -523,8 +523,17 @@ def build_llm_runtime(
                 raise _fail()
             if search_embedding_config is None:
                 raise _fail()
+            provider_models = {
+                role.model
+                for role in config.roles.values()
+                if role.provider_id == provider_id
+                and role.capability is RoleCapability.EMBEDDING
+            }
+            if len(provider_models) != 1:
+                raise _fail()
             backends[provider_id] = NemotronEmbeddingBackend(
                 search_embedding_config,
+                model=next(iter(provider_models)),
                 device=provider.embedding_device,
                 incremental=provider_id == incremental_provider_id,
             )

@@ -338,8 +338,6 @@ def _apply_search_embedding_boundary(policy: RecallPolicy, path: Path) -> None:
     except Exception:
         policy.semantic = False
         return
-    if search_embedding.backend != "nemotron_service":
-        return
     if not search_embedding.enabled or not search_embedding.sync_recall:
         policy.semantic = False
         return

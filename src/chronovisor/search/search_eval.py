@@ -658,7 +658,6 @@ def _variant_pipeline_config(
     search_embedding = load_search_embedding_config()
     if (
         search_embedding.enabled
-        and search_embedding.backend == "nemotron_service"
         and search_embedding.rollout_mode in {"canary", "on"}
     ):
         weights.update(

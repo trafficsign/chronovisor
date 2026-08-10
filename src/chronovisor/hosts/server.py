@@ -1140,11 +1140,11 @@ def chronovisor_reindex() -> str:
 
     config = load_search_embedding_config()
     count = update_embeddings()
-    if config.enabled and config.backend == "nemotron_service":
+    if config.enabled:
         return json.dumps(
             {
                 "status": "queued",
-                "backend": config.backend,
+                "execution_mode": "service",
                 "message": "immutable semantic generation rebuild queued",
             }
         )
@@ -1152,7 +1152,7 @@ def chronovisor_reindex() -> str:
         return json.dumps(
             {
                 "status": "skipped",
-                "message": "Ollama not available or no pages to update",
+                "message": "semantic indexing is disabled or no pages were updated",
             }
         )
     return json.dumps({"status": "ok", "pages_updated": count})

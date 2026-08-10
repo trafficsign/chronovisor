@@ -203,7 +203,7 @@ def test_local_nemotron_roles_compose_lazy_device_bound_backends() -> None:
             }
         }
     )
-    search_config = SearchEmbeddingConfig(model="nemotron-test", dimensions=2)
+    search_config = SearchEmbeddingConfig(dimensions=2)
 
     runtime = build_llm_runtime(config, search_embedding_config=search_config)
 
@@ -213,6 +213,8 @@ def test_local_nemotron_roles_compose_lazy_device_bound_backends() -> None:
     assert isinstance(incremental, NemotronEmbeddingBackend)
     assert foreground.device == "mps"
     assert incremental.device == "cpu"
+    assert foreground.model == "nemotron-test"
+    assert incremental.model == "nemotron-test"
     assert foreground.incremental is False
     assert incremental.incremental is True
     assert foreground._model is None
@@ -238,8 +240,33 @@ def test_local_nemotron_role_device_mismatch_fails_before_model_loading() -> Non
     with pytest.raises(LLMConfigError):
         build_llm_runtime(
             config,
-            search_embedding_config=SearchEmbeddingConfig(model="nemotron-test"),
+            search_embedding_config=SearchEmbeddingConfig(),
         )
+
+
+def test_local_nemotron_provider_rejects_multiple_route_models() -> None:
+    config = parse_llm_config(
+        {
+            "llm": {
+                "providers": {"foreground": {"kind": "nemotron", "device": "mps"}},
+                "roles": {
+                    "search.semantic.foreground": {
+                        "capability": "embedding",
+                        "provider": "foreground",
+                        "model": "model-a",
+                    },
+                    "other.embedding": {
+                        "capability": "embedding",
+                        "provider": "foreground",
+                        "model": "model-b",
+                    },
+                },
+            }
+        }
+    )
+
+    with pytest.raises(LLMConfigError):
+        build_llm_runtime(config, search_embedding_config=SearchEmbeddingConfig())
 
 
 def test_one_remote_profile_resolves_once_and_routes_generation_and_embedding() -> None:
@@ -516,11 +543,11 @@ def test_file_loader_reports_missing_parse_and_unsafe_mode_safely(
 
 
 def test_repository_example_has_representative_local_role_map() -> None:
-    config = load_llm_config(Path(__file__).parents[1] / "config.toml.example")
+    example = Path(__file__).parents[1] / "config.toml.example"
+    config = load_llm_config(example)
 
     assert set(config.roles) >= {
         "knowledge.embedding",
-        "search.semantic",
         "search.semantic.foreground",
         "search.semantic.incremental",
         "search.rerank",
@@ -559,6 +586,14 @@ def test_repository_example_has_representative_local_role_map() -> None:
     classification_embedding = config.roles["classification.embedding"]
     assert classification_embedding.provider_id == "local"
     assert classification_embedding.model == "bge-m3"
+    text = example.read_text(encoding="utf-8")
+    for role, data_class in (
+        ("search.semantic.foreground", "raw"),
+        ("search.semantic.foreground", "system"),
+        ("search.semantic.incremental", "page"),
+        ("search.semantic.incremental", "system"),
+    ):
+        assert f'# role = "{role}"\n# data_class = "{data_class}"' in text
     librarian = config.roles["librarian.review"]
     challenger = config.roles["librarian.review.challenger"]
     assert librarian.model != challenger.model

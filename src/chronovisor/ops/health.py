@@ -68,23 +68,17 @@ def semantic_index_kpi() -> dict[str, Any]:
     from chronovisor.core.runtime_config import load_search_embedding_config
 
     config = load_search_embedding_config()
-    if (
-        not config.enabled
-        or config.backend != "nemotron_service"
-        or config.rollout_mode == "off"
-    ):
+    if not config.enabled or config.rollout_mode == "off":
         return {
             "status": "inactive",
-            "backend": config.backend,
+            "execution_mode": "disabled" if not config.enabled else "service",
             "rollout_mode": config.rollout_mode,
             "enabled": config.enabled,
         }
     from chronovisor.core.semantic_index import semantic_index_status
     from chronovisor.core.semantic_jobs import job_status
 
-    index = semantic_index_status()
     jobs = job_status()
-    coverage = float(index.get("coverage") or 0.0)
     dead = int((jobs.get("counts") or {}).get("dead") or 0)
     socket_ready = Path(config.socket).expanduser().is_socket()
     service_file = CHRONOVISOR_ROOT / "runtime" / "semantic-service-status.json"
@@ -94,6 +88,29 @@ def semantic_index_kpi() -> dict[str, Any]:
             service = {}
     except (OSError, json.JSONDecodeError):
         service = {}
+    routes = service.get("routes")
+    route_identity = (
+        routes.get("search.semantic.foreground")
+        if isinstance(routes, dict)
+        else None
+    )
+    if not (
+        isinstance(route_identity, dict)
+        and set(route_identity) == {"role", "provider", "model", "location"}
+        and all(isinstance(value, str) and value for value in route_identity.values())
+    ):
+        route_identity = None
+    index = (
+        semantic_index_status(expected_route=route_identity)
+        if route_identity is not None
+        else {
+            "status": "invalid",
+            "generation_id": "",
+            "coverage": 0.0,
+            "error": "semantic_failure",
+        }
+    )
+    coverage = float(index.get("coverage") or 0.0)
     service_age = max(
         0.0, datetime.now(UTC).timestamp()
         - float(service.get("observed_at_epoch") or 0.0)
@@ -124,9 +141,10 @@ def semantic_index_kpi() -> dict[str, Any]:
     return {
         "status": "ok" if ready else "alert",
         "enabled": True,
-        "backend": config.backend,
+        "execution_mode": "service",
         "rollout_mode": config.rollout_mode,
-        "model": config.model,
+        "route": route_identity or {},
+        "model": str((route_identity or {}).get("model") or ""),
         "revision": config.revision,
         "socket_ready": socket_ready,
         "service_fresh": service_fresh,

@@ -24,6 +24,13 @@ from chronovisor.core.semantic_index import (
     write_page_delta,
 )
 
+ROUTE = {
+    "role": "search.semantic.foreground",
+    "provider": "test",
+    "model": "test-model",
+    "location": "local",
+}
+
 
 def test_extract_page_documents_uses_full_canonical_yaml_and_body(
     tmp_path: Path,
@@ -51,6 +58,8 @@ Body text only.
     page = documents[0]
     assert page.kind == "page"
     assert page.source_sha256 == hashlib.sha256(source).hexdigest()
+    assert page.source_data_class == "page"
+    assert page.source_sensitivity == "high"
     assert "Nested YAML title" in page.text
     assert "Canonical summary" in page.text
     assert "Q: Where is the answer?" in page.text
@@ -62,6 +71,32 @@ Body text only.
     chunks = [document.text for document in documents if document.kind == "chunk"]
     assert chunks and "Summary: Canonical summary" in chunks[0]
     assert "Body text only." in "\n".join(chunks)
+
+
+@pytest.mark.parametrize(
+    ("metadata", "data_class", "sensitivity"),
+    [
+        ("sensitivity: normal", "page", "normal"),
+        ("sensitivity: high", "page", "high"),
+        ("is_system: true\nsensitivity: normal", "system", "high"),
+    ],
+)
+def test_extract_page_documents_classifies_egress_conservatively(
+    tmp_path: Path,
+    metadata: str,
+    data_class: str,
+    sensitivity: str,
+) -> None:
+    path = tmp_path / "page.md"
+    path.write_text(
+        f"---\nstatus: stable\ntype: knowledge\n{metadata}\n---\nBody\n",
+        encoding="utf-8",
+    )
+
+    document = extract_page_documents(path)[0]
+
+    assert document.source_data_class == data_class
+    assert document.source_sensitivity == sensitivity
 
 
 @pytest.mark.parametrize("status", ["draft", "deprecated"])
@@ -112,10 +147,10 @@ def _documents(version: str = "a") -> list[SemanticDocument]:
     ]
 
 
-def _encoder(texts: list[str], _batch_size: int) -> np.ndarray:
+def _encoder(documents: list[SemanticDocument], _batch_size: int) -> np.ndarray:
     rows = []
-    for text in texts:
-        if "alpha" in text:
+    for document in documents:
+        if "alpha" in document.text:
             rows.append([1.0, 0.0, 0.0])
         else:
             rows.append([0.0, 1.0, 0.0])
@@ -126,7 +161,7 @@ def _build(root: Path, version: str = "a"):
     return build_generation(
         _documents(version),
         encode_documents=_encoder,
-        model="test-model",
+        **ROUTE,
         revision="test-revision",
         dimensions=3,
         query_prefix="query: ",
@@ -145,6 +180,7 @@ def test_build_validate_activate_and_search_generation(tmp_path: Path) -> None:
     loaded = load_active_generation(root=tmp_path)
 
     assert pointer["generation_id"] == manifest.generation_id
+    assert {key: pointer[key] for key in ROUTE} == ROUTE
     assert loaded.search([1.0, 0.0, 0.0], top_n=2)[0][0] == "alpha"
     assert loaded.score_pages([1.0, 0.0, 0.0], ["alpha"]) == [
         ("alpha", pytest.approx(1.0))
@@ -158,6 +194,53 @@ def test_build_validate_activate_and_search_generation(tmp_path: Path) -> None:
     assert status["status"] == "ok"
     assert status["page_count"] == 2
     assert status["document_count"] == 3
+    assert {key: status[key] for key in ROUTE} == ROUTE
+
+
+@pytest.mark.parametrize("field", ["role", "provider", "model", "location"])
+def test_active_generation_rejects_route_identity_drift(
+    tmp_path: Path, field: str
+) -> None:
+    manifest = _build(tmp_path)
+    activate_generation(manifest.generation_id, root=tmp_path)
+    expected = dict(ROUTE)
+    expected[field] = "changed"
+
+    with pytest.raises(SemanticIndexError, match="route identity mismatch"):
+        load_active_generation(root=tmp_path, expected_route=expected)
+
+
+def test_active_pointer_rejects_route_identity_drift(tmp_path: Path) -> None:
+    manifest = _build(tmp_path)
+    activate_generation(manifest.generation_id, root=tmp_path)
+    active_path = tmp_path / "active.json"
+    active = json.loads(active_path.read_text(encoding="utf-8"))
+    active["role"] = "changed"
+    active_path.write_text(json.dumps(active), encoding="utf-8")
+
+    with pytest.raises(SemanticIndexError, match="route pointer mismatch"):
+        load_active_generation(root=tmp_path)
+
+
+def test_schema_three_active_generation_fails_closed_until_rebuild(
+    tmp_path: Path,
+) -> None:
+    manifest = _build(tmp_path)
+    activate_generation(manifest.generation_id, root=tmp_path)
+    manifest_path = (
+        tmp_path / "generations" / manifest.generation_id / "manifest.json"
+    )
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    payload["schema_version"] = 3
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+    active_path = tmp_path / "active.json"
+    active = json.loads(active_path.read_text(encoding="utf-8"))
+    active["manifest_sha256"] = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+    active_path.write_text(json.dumps(active), encoding="utf-8")
+
+    assert semantic_index_status(root=tmp_path)["error"] == "generation_invalid"
+    with pytest.raises(SemanticIndexError, match="unsupported generation schema"):
+        load_active_generation(root=tmp_path)
 
 
 def test_hnsw_generation_proposes_then_full_vector_rescores(tmp_path: Path) -> None:
@@ -180,8 +263,11 @@ def test_hnsw_generation_proposes_then_full_vector_rescores(tmp_path: Path) -> N
 
     manifest = build_generation(
         documents,
-        encode_documents=lambda _texts, _batch_size: vectors,
+        encode_documents=lambda _documents, _batch_size: vectors,
+        role="search.semantic.foreground",
+        provider="test",
         model="test-model",
+        location="local",
         revision="test-revision",
         dimensions=32,
         query_prefix="query: ",

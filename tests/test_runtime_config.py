@@ -177,7 +177,9 @@ sync_recall = false
 
     assert utility.model == "bge-m3"
     assert utility.query_prefix == ""
-    assert search.backend == "nemotron_service"
+    assert not hasattr(search, "backend")
+    assert not hasattr(search, "model")
+    assert not hasattr(search, "fallback")
     assert search.revision == "abc123"
     assert search.dimensions == 2048
     assert search.query_prefix == "query: "
@@ -191,6 +193,15 @@ sync_recall = false
     assert search.canary_percent == 25
     assert search.sync_recall is False
     assert search.query_timeout_ms == 300
+
+
+def test_search_embedding_is_disabled_when_config_is_absent(
+    tmp_path: Path, monkeypatch
+) -> None:
+    missing = tmp_path / "missing.toml"
+    monkeypatch.setattr(runtime_config, "CONFIG_FILE", missing)
+
+    assert runtime_config.load_search_embedding_config().enabled is False
 
 
 def test_ingest_config_reads_generation_knobs_but_ignores_legacy_model(

@@ -3,16 +3,16 @@ from chronovisor.core.semantic_client import selected_for_rollout
 
 
 def test_rollout_selection_is_stable_and_respects_modes() -> None:
-    base = SearchEmbeddingConfig(backend="nemotron_service")
+    base = SearchEmbeddingConfig()
     assert not selected_for_rollout("query", base)
     assert selected_for_rollout(
         "query",
-        SearchEmbeddingConfig(backend="nemotron_service", rollout_mode="on"),
+        SearchEmbeddingConfig(enabled=True, rollout_mode="on"),
     )
     assert not selected_for_rollout(
         "query",
         SearchEmbeddingConfig(
-            backend="nemotron_service",
+            enabled=True,
             rollout_mode="canary",
             canary_percent=0,
         ),
@@ -20,7 +20,7 @@ def test_rollout_selection_is_stable_and_respects_modes() -> None:
     assert selected_for_rollout(
         "query",
         SearchEmbeddingConfig(
-            backend="nemotron_service",
+            enabled=True,
             rollout_mode="canary",
             canary_percent=100,
         ),

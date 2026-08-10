@@ -421,5 +421,5 @@ def isolate_operator_search_rollout(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         search,
         "load_search_embedding_config",
-        lambda: SearchEmbeddingConfig(backend="legacy_ollama"),
+        lambda: SearchEmbeddingConfig(enabled=False),
     )

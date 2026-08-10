@@ -3217,6 +3217,31 @@ def test_configured_model_roles_use_adopted_router_triplet(monkeypatch) -> None:
     }
     assert not any(name.startswith("bootstrap-") for name in roles)
 
+    resolved: list[str] = []
+    monkeypatch.setattr(
+        dashboard,
+        "load_search_embedding_config",
+        lambda: SearchEmbeddingConfig(enabled=True),
+    )
+    monkeypatch.setattr(
+        dashboard.llm_config,
+        "load_default_llm_runtime",
+        lambda: SimpleNamespace(
+            resolve_embedding=lambda role: (
+                resolved.append(role)
+                or SimpleNamespace(model="route-selected-embedding")
+            )
+        ),
+    )
+
+    roles = dashboard._configured_model_roles()
+
+    assert resolved == [
+        "search.semantic.foreground",
+        "search.semantic.incremental",
+    ]
+    assert roles["route-selected-embedding"] == {"search-embed"}
+
 
 def test_decision_router_dashboard_resolution_is_cached(monkeypatch) -> None:
     configured = SimpleNamespace(

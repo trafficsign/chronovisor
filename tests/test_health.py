@@ -16,10 +16,7 @@ def test_semantic_index_kpi_is_inactive_when_rollout_is_off(
 ) -> None:
     monkeypatch.setattr(
         "chronovisor.core.runtime_config.load_search_embedding_config",
-        lambda: SearchEmbeddingConfig(
-            backend="nemotron_service",
-            rollout_mode="off",
-        ),
+        lambda: SearchEmbeddingConfig(rollout_mode="off"),
     )
 
     assert health.semantic_index_kpi()["status"] == "inactive"
@@ -37,8 +34,16 @@ def test_semantic_index_kpi_requires_matching_live_service(
             {
                 "ready": True,
                 "pid": os.getpid(),
-                "generation_id": "generation-a",
-                "observed_at_epoch": time.time(),
+                    "generation_id": "generation-a",
+                    "observed_at_epoch": time.time(),
+                    "routes": {
+                        "search.semantic.foreground": {
+                            "role": "search.semantic.foreground",
+                            "provider": "remote",
+                            "model": "embed-model",
+                            "location": "remote",
+                        }
+                    },
             }
         ),
         encoding="utf-8",
@@ -52,14 +57,14 @@ def test_semantic_index_kpi_requires_matching_live_service(
     monkeypatch.setattr(
         "chronovisor.core.runtime_config.load_search_embedding_config",
         lambda: SearchEmbeddingConfig(
-            backend="nemotron_service",
+            enabled=True,
             rollout_mode="on",
             socket=str(socket_path),
         ),
     )
     monkeypatch.setattr(
         "chronovisor.core.semantic_index.semantic_index_status",
-        lambda: {
+        lambda **_kwargs: {
             "status": "ok",
             "coverage": 1.0,
             "generation_id": "generation-a",

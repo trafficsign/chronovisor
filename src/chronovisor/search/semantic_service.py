@@ -29,9 +29,12 @@ import numpy as np
 from chronovisor.core.link_fix import atomic_write
 from chronovisor.core.llm_config import load_default_llm_runtime
 from chronovisor.core.llm_runtime import (
+    SAFE_FAILURE_CATEGORIES,
     EmbeddingPurpose,
     EmbeddingRequest,
     LLMRuntime,
+    LLMRuntimeError,
+    ResolvedEmbeddingRoute,
     RouteLocation,
     SourceDataClass,
     SourceDataClassification,
@@ -45,6 +48,7 @@ from chronovisor.core.runtime_config import (
 from chronovisor.core.semantic_index import (
     SEMANTIC_ROOT,
     LoadedGeneration,
+    SemanticDocument,
     SemanticIndexError,
     activate_generation,
     archive_legacy_search_index,
@@ -93,6 +97,17 @@ DOCUMENT_SOURCE = SourceDataClassification(
 
 class ServiceBusy(RuntimeError):
     pass
+
+
+def _safe_service_error(exc: BaseException) -> str:
+    if isinstance(exc, LLMRuntimeError):
+        category = getattr(exc, "category", "")
+        return category if category in SAFE_FAILURE_CATEGORIES else "semantic_failure"
+    if isinstance(exc, SemanticIndexError):
+        return "generation_invalid"
+    if isinstance(exc, SemanticModelError):
+        return "model_unavailable"
+    return "semantic_failure"
 
 
 def _drifted_page_ids(status: dict[str, Any]) -> list[str]:
@@ -221,7 +236,7 @@ class SemanticServiceState:
         self._generation_lock = threading.RLock()
         self._maintenance = threading.Event()
         self._stopped = threading.Event()
-        self._self_test = self._self_test_role(FOREGROUND_ROLE)
+        self._self_test = self._self_test_foreground()
         self._parity_text = "Chronovisorの意味検索インデックス整合性テスト"
         self._parity_reference = self._embed_foreground_documents([self._parity_text])[
             0
@@ -262,24 +277,44 @@ class SemanticServiceState:
         self._stopped.set()
         self._batcher.close()
         self._worker.join(timeout=2)
-        if self._cpu_ready:
+        if self._cpu_ready and self._uses_local_controls(self._incremental_route):
             self._runtime.release_embedding(INCREMENTAL_ROLE)
-        self._runtime.release_embedding(FOREGROUND_ROLE)
+        if self._uses_local_controls(self._foreground_route):
+            self._runtime.release_embedding(FOREGROUND_ROLE)
+
+    @staticmethod
+    def _route_identity(route: ResolvedEmbeddingRoute) -> dict[str, str]:
+        return {
+            "role": route.role,
+            "provider": route.provider,
+            "model": route.model,
+            "location": route.location.value,
+        }
+
+    @staticmethod
+    def _uses_local_controls(route: ResolvedEmbeddingRoute) -> bool:
+        return route.provider == "nemotron" and route.location is RouteLocation.LOCAL
 
     def _validate_runtime_routes(self) -> None:
-        routes = (
-            self._runtime.resolve_embedding(FOREGROUND_ROLE),
-            self._runtime.resolve_embedding(INCREMENTAL_ROLE),
-        )
-        if any(
-            route.location is not RouteLocation.LOCAL
-            or route.provider != "nemotron"
-            or route.model != self.config.model
-            for route in routes
+        foreground = self._runtime.resolve_embedding(FOREGROUND_ROLE)
+        incremental = self._runtime.resolve_embedding(INCREMENTAL_ROLE)
+        if (
+            foreground.provider != incremental.provider
+            or foreground.model != incremental.model
+            or foreground.location is not incremental.location
         ):
             raise SemanticModelError(
-                "semantic roles require the configured local Nemotron model"
+                "semantic roles require the same provider, model, and location"
             )
+        self._foreground_route = foreground
+        self._incremental_route = incremental
+        seal = json.dumps(self._route_identity(foreground), sort_keys=True)
+        if getattr(self, "_query_cache_seal", seal) != seal and hasattr(
+            self, "_query_vector_cache"
+        ):
+            with self._query_cache_lock:
+                self._query_vector_cache.clear()
+        self._query_cache_seal = seal
 
     def _runtime_vectors(
         self,
@@ -287,13 +322,14 @@ class SemanticServiceState:
         texts: list[str],
         purpose: EmbeddingPurpose,
         *,
+        source: SourceDataClassification,
         timeout_ms: int | None = None,
     ) -> np.ndarray:
         result = self._runtime.embed(
             role,
             EmbeddingRequest(
                 tuple(texts),
-                QUERY_SOURCE if purpose is EmbeddingPurpose.QUERY else DOCUMENT_SOURCE,
+                source,
                 timeout_ms,
                 purpose,
             ),
@@ -306,58 +342,106 @@ class SemanticServiceState:
         return np.ascontiguousarray(matrix, dtype=np.float32)
 
     def _embed_foreground(
-        self, texts: list[str], purpose: EmbeddingPurpose
+        self,
+        texts: list[str],
+        purpose: EmbeddingPurpose,
+        *,
+        source: SourceDataClassification,
     ) -> np.ndarray:
         with self._model_lock:
-            with accelerator_lease(timeout_ms=self.config.query_timeout_ms):
-                with model_activity(
-                    model=self.config.model,
+            resources = (
+                accelerator_lease(timeout_ms=self.config.query_timeout_ms)
+                if self._uses_local_controls(self._foreground_route)
+                else contextlib.nullcontext()
+            )
+            activity = (
+                model_activity(
+                    model=self._foreground_route.model,
                     operation="search",
                     pipeline="recall",
-                ):
-                    return self._runtime_vectors(
-                        FOREGROUND_ROLE,
-                        texts,
-                        purpose,
-                        timeout_ms=self.config.query_timeout_ms,
-                    )
+                )
+                if self._uses_local_controls(self._foreground_route)
+                else contextlib.nullcontext()
+            )
+            with resources, activity:
+                return self._runtime_vectors(
+                    FOREGROUND_ROLE,
+                    texts,
+                    purpose,
+                    source=source,
+                    timeout_ms=self.config.query_timeout_ms,
+                )
 
-    def _embed_foreground_documents(self, texts: list[str]) -> np.ndarray:
-        return self._embed_foreground(texts, EmbeddingPurpose.DOCUMENT)
+    def _embed_foreground_documents(
+        self,
+        texts: list[str],
+        *,
+        source: SourceDataClassification = DOCUMENT_SOURCE,
+    ) -> np.ndarray:
+        return self._embed_foreground(
+            texts, EmbeddingPurpose.DOCUMENT, source=source
+        )
 
-    def _embed_incremental_documents(self, texts: list[str]) -> np.ndarray:
-        with model_activity(
-            model=self.config.model,
-            operation="generate",
-            pipeline="improve",
-        ):
+    def _embed_incremental_documents(
+        self,
+        texts: list[str],
+        *,
+        source: SourceDataClassification = DOCUMENT_SOURCE,
+    ) -> np.ndarray:
+        activity = (
+            model_activity(
+                model=self._incremental_route.model,
+                operation="generate",
+                pipeline="improve",
+            )
+            if self._uses_local_controls(self._incremental_route)
+            else contextlib.nullcontext()
+        )
+        with activity:
             return self._runtime_vectors(
-                INCREMENTAL_ROLE, texts, EmbeddingPurpose.DOCUMENT
+                INCREMENTAL_ROLE,
+                texts,
+                EmbeddingPurpose.DOCUMENT,
+                source=source,
             )
 
-    def _self_test_role(self, role: str) -> dict[str, object]:
-        embed = (
-            self._embed_foreground
-            if role == FOREGROUND_ROLE
-            else lambda texts, purpose: self._runtime_vectors(role, texts, purpose)
+    @staticmethod
+    def _document_source(
+        documents: Sequence[SemanticDocument],
+    ) -> SourceDataClassification:
+        if any(document.source_data_class == "system" for document in documents):
+            return SourceDataClassification(
+                SourceDataClass.SYSTEM, SourceSensitivity.HIGH
+            )
+        sensitivity = (
+            SourceSensitivity.NORMAL
+            if documents
+            and all(
+                document.source_sensitivity == "normal" for document in documents
+            )
+            else SourceSensitivity.HIGH
         )
-        query = embed(["Chronovisorの検索インデックス"], EmbeddingPurpose.QUERY)[0]
-        documents = embed(
+        return SourceDataClassification(SourceDataClass.PAGE, sensitivity)
+
+    def _self_test_foreground(self) -> dict[str, object]:
+        query = self._embed_foreground(
+            ["Chronovisorの検索インデックス"],
+            EmbeddingPurpose.QUERY,
+            source=QUERY_SOURCE,
+        )[0]
+        documents = self._embed_foreground(
             [
                 "ChronovisorはローカルAI向けの記憶検索システムです。",
                 "夕食のレシピと材料についてのメモです。",
             ],
             EmbeddingPurpose.DOCUMENT,
+            source=DOCUMENT_SOURCE,
         )
         scores = documents @ query
         if not float(scores[0]) > float(scores[1]):
             raise SemanticModelError("known-vector ranking self-test failed")
         return {
-            "device": (
-                self.config.query_device
-                if role == FOREGROUND_ROLE
-                else self.config.incremental_device
-            ),
+            "device": self.config.query_device,
             "dimensions": int(query.shape[0]),
             "positive_score": float(scores[0]),
             "negative_score": float(scores[1]),
@@ -387,13 +471,15 @@ class SemanticServiceState:
 
     def reload(self, *, verify_checksums: bool = True) -> dict[str, Any]:
         try:
+            self._validate_runtime_routes()
             generation = load_active_generation(
-                root=self.root, verify_checksums=verify_checksums
+                root=self.root,
+                verify_checksums=verify_checksums,
+                expected_route=self._route_identity(self._foreground_route),
             )
             manifest = generation.manifest
             if (
-                manifest.model != self.config.model
-                or manifest.revision != self.config.revision
+                manifest.revision != self.config.revision
                 or manifest.dimensions != self.config.dimensions
             ):
                 raise SemanticIndexError(
@@ -402,10 +488,10 @@ class SemanticServiceState:
             with self._generation_lock:
                 self._generation = generation
             self._last_error = ""
-        except SemanticIndexError as exc:
+        except (SemanticIndexError, SemanticModelError, LLMRuntimeError) as exc:
             with self._generation_lock:
                 self._generation = None
-            self._last_error = str(exc)
+            self._last_error = _safe_service_error(exc)
         active_path = self.root / "active.json"
         try:
             stat = active_path.stat()
@@ -439,13 +525,20 @@ class SemanticServiceState:
             "generation_id": (
                 generation.manifest.generation_id if generation is not None else ""
             ),
-            "model": self.config.model,
+            "model": self._foreground_route.model,
+            "routes": {
+                FOREGROUND_ROLE: self._route_identity(self._foreground_route),
+                INCREMENTAL_ROLE: self._route_identity(self._incremental_route),
+            },
             "revision": self.config.revision,
             "device": self.config.query_device,
             "self_test": self._self_test,
             "query_path_self_test": self._query_path_self_test,
             "runtime_versions": semantic_runtime_versions(),
-            "index": semantic_index_status(root=self.root),
+            "index": semantic_index_status(
+                root=self.root,
+                expected_route=self._route_identity(self._foreground_route),
+            ),
             "jobs": job_status(),
             "last_error": self._last_error,
             "queries": {
@@ -481,29 +574,36 @@ class SemanticServiceState:
             self._query_errors += 1
 
     def _encode_queries(self, queries: list[str], _batch_size: int) -> np.ndarray:
-        vectors = self._embed_foreground(queries, EmbeddingPurpose.QUERY)
+        vectors = self._embed_foreground(
+            queries, EmbeddingPurpose.QUERY, source=QUERY_SOURCE
+        )
         now = time.monotonic()
         with self._query_cache_lock:
             for query, vector in zip(queries, vectors, strict=False):
-                self._query_vector_cache[query] = (
+                key = self._query_cache_key(query)
+                self._query_vector_cache[key] = (
                     now,
                     np.ascontiguousarray(vector, dtype=np.float32),
                 )
-                self._query_vector_cache.move_to_end(query)
+                self._query_vector_cache.move_to_end(key)
             while len(self._query_vector_cache) > 64:
                 self._query_vector_cache.popitem(last=False)
         return vectors
 
     def _query_vector_from_cache(self, query: str) -> np.ndarray | None:
         now = time.monotonic()
+        key = self._query_cache_key(query)
         with self._query_cache_lock:
-            cached = self._query_vector_cache.get(query)
+            cached = self._query_vector_cache.get(key)
             if cached is not None and now - cached[0] <= QUERY_CACHE_TTL_SECONDS:
-                self._query_vector_cache.move_to_end(query)
+                self._query_vector_cache.move_to_end(key)
                 return cached[1]
             if cached is not None:
-                self._query_vector_cache.pop(query, None)
+                self._query_vector_cache.pop(key, None)
         return None
+
+    def _query_cache_key(self, query: str) -> str:
+        return f"{self._query_cache_seal}\0{query}"
 
     def _cached_query_vector(self, query: str) -> tuple[np.ndarray, bool]:
         cached = self._query_vector_from_cache(query)
@@ -612,7 +712,6 @@ class SemanticServiceState:
     def _ensure_cpu(self) -> None:
         if not self._cpu_ready:
             try:
-                self._self_test_role(INCREMENTAL_ROLE)
                 cpu_vector = self._embed_incremental_documents([self._parity_text])[0]
                 parity = float(cpu_vector @ self._parity_reference)
                 if parity < 0.999:
@@ -620,7 +719,8 @@ class SemanticServiceState:
                         f"CPU/MPS semantic vector parity failed: cosine={parity:.6f}"
                     )
             except Exception:
-                self._runtime.release_embedding(INCREMENTAL_ROLE)
+                if self._uses_local_controls(self._incremental_route):
+                    self._runtime.release_embedding(INCREMENTAL_ROLE)
                 self._cpu_ready = False
                 raise
             self._cpu_ready = True
@@ -632,7 +732,8 @@ class SemanticServiceState:
             and time.monotonic() - self._cpu_last_used
             >= self.config.incremental_idle_unload_seconds
         ):
-            self._runtime.release_embedding(INCREMENTAL_ROLE)
+            if self._uses_local_controls(self._incremental_route):
+                self._runtime.release_embedding(INCREMENTAL_ROLE)
             self._cpu_ready = False
 
     def _index_page(self, page_id: str, *, expected_hash: str) -> None:
@@ -651,7 +752,8 @@ class SemanticServiceState:
         if documents:
             self._ensure_cpu()
             vectors = self._embed_incremental_documents(
-                [document.text for document in documents]
+                [document.text for document in documents],
+                source=self._document_source(documents),
             )
             refreshed = extract_page_documents(path) if path is not None else []
             refreshed_hash = refreshed[0].source_sha256 if refreshed else ""
@@ -673,26 +775,33 @@ class SemanticServiceState:
     def _rebuild(self) -> None:
         self._maintenance.set()
         try:
+            self._validate_runtime_routes()
             documents = extract_all_documents()
             built_hashes = {
                 document.page_id: document.source_sha256 for document in documents
             }
             with self._model_lock:
-                with model_activity(
-                    model=self.config.model,
-                    operation="generate",
-                    pipeline="improve",
-                ):
+                activity = (
+                    model_activity(
+                        model=self._foreground_route.model,
+                        operation="generate",
+                        pipeline="improve",
+                    )
+                    if self._uses_local_controls(self._foreground_route)
+                    else contextlib.nullcontext()
+                )
+                with activity:
                     manifest = build_generation(
                         documents,
-                        encode_documents=lambda texts, _batch_size: (
+                        encode_documents=lambda rows, _batch_size: (
                             self._runtime_vectors(
                                 FOREGROUND_ROLE,
-                                list(texts),
+                                [document.text for document in rows],
                                 EmbeddingPurpose.DOCUMENT,
+                                source=self._document_source(rows),
                             )
                         ),
-                        model=self.config.model,
+                        **self._route_identity(self._foreground_route),
                         revision=self.config.revision,
                         dimensions=self.config.dimensions,
                         query_prefix=self.config.query_prefix,
@@ -741,7 +850,10 @@ class SemanticServiceState:
                 self.config.incremental_enabled
                 and time.monotonic() - self._last_drift_scan >= 60
             ):
-                status = semantic_index_status(root=self.root)
+                status = semantic_index_status(
+                    root=self.root,
+                    expected_route=self._route_identity(self._foreground_route),
+                )
                 drifted = _drifted_page_ids(status)
                 if drifted:
                     enqueue_pages(drifted)
@@ -766,7 +878,7 @@ class SemanticServiceState:
                 complete(job.job_id)
                 self._last_error = ""
             except Exception as exc:
-                self._last_error = f"{type(exc).__name__}: {exc}"
+                self._last_error = _safe_service_error(exc)
                 fail(job.job_id, self._last_error)
 
     def handle(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -821,7 +933,7 @@ class _Handler(socketserver.StreamRequestHandler):
             self.server.state.note_error()  # type: ignore[attr-defined]
             response = {
                 "status": "error",
-                "error": f"{type(exc).__name__}: {exc}",
+                "error": _safe_service_error(exc),
             }
         with contextlib.suppress(OSError):
             self.wfile.write(
@@ -839,8 +951,8 @@ def serve(config: SearchEmbeddingConfig | None = None) -> None:
     if not okf_startup_status(CHRONOVISOR_ROOT).allowed:
         raise SystemExit(75)
     config = config or load_search_embedding_config()
-    if not config.enabled or config.backend != "nemotron_service":
-        raise SystemExit("Nemotron semantic service is disabled in config")
+    if not config.enabled:
+        raise SystemExit("semantic service is disabled in config")
     socket_path = Path(config.socket).expanduser()
     socket_path.parent.mkdir(parents=True, exist_ok=True)
     socket_path.unlink(missing_ok=True)
