@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from chronovisor.core import runtime_config, runtime_status, store
-from chronovisor.core.durable_state import write_sealed_json
+from chronovisor.core.durable_state import canonical_sha256, write_sealed_json
 from chronovisor.hosts import cli
 from chronovisor.recall import recall_runtime
 
@@ -227,7 +227,7 @@ def test_hold_report_cli_aggregates_both_read_only_stores_as_json_and_text(
         (
             "recall_auto_apply",
             "local_models_did_not_reach_two_vote_quorum",
-            "dddddddd",
+            canonical_sha256(authority["router"])[:8],
         )
     ]
     assert semantic_group["active"] == 1

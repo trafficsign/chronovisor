@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "source_baseline_head": "d404a6b20d00e3bcd1d4cdb89edfa5a718c51833",
-  "baseline_sha256": "f8939ef5f65f27e6e1ae877843270f2d31e506b19f7de00a2dbeb4e8e216ae43",
+  "baseline_sha256": "353de47b111990624cda2d36bb68ca582e46c24fba0bc4692168388b5994a490",
   "semantic_identity": "cross-domain edges use category+source_package+target_package; statement exceptions use category+source_package+source_module+scope_kind+scope+statement_kind+target_package+target_module+symbols+occurrence; source line is diagnostic and normalized statement content is verified independently",
   "counts": {
     "exceptions": 44,
@@ -15030,21 +15030,6 @@
           "line": 135
         },
         {
-          "semantic_id": "arch:134ab2e0e246b184cba1e0394294f41525a5e84c8f4447fa7401cd059b65636e",
-          "source_module": "chronovisor.ops.hold_report",
-          "scope_kind": "module",
-          "scope": "<module>",
-          "statement_kind": "from",
-          "target_module": "chronovisor.core.durable_state",
-          "symbols": [
-            "DurableStateError",
-            "read_sealed_json"
-          ],
-          "content_sha256": "ff8045555f457caf4f8950a5fcad33dae8c3464a2eb0f5e10da116bfd91292cf",
-          "occurrence": 1,
-          "line": 15
-        },
-        {
           "semantic_id": "arch:1598562f61dbed91f730ebb72b218287c5933d2c79ffe6b5cad6cb0c0007a01e",
           "source_module": "chronovisor.ops.graph_maintenance",
           "scope_kind": "module",
@@ -15145,6 +15130,22 @@
           "content_sha256": "871405b324bd8e716976839dda7e05bb403a06f02e269d9594769730f1c21961",
           "occurrence": 1,
           "line": 25
+        },
+        {
+          "semantic_id": "arch:2084c6b948d0f52230c62415dc2dd3439ec8155034a9739c4a05dadb5676372c",
+          "source_module": "chronovisor.ops.hold_report",
+          "scope_kind": "module",
+          "scope": "<module>",
+          "statement_kind": "from",
+          "target_module": "chronovisor.core.durable_state",
+          "symbols": [
+            "DurableStateError",
+            "canonical_sha256",
+            "read_sealed_json"
+          ],
+          "content_sha256": "111919da0ec2904971a90ad301e1fed794578448cb5bf2d322f7a30cdaa15923",
+          "occurrence": 1,
+          "line": 15
         },
         {
           "semantic_id": "arch:24dde2ce60ef9344c7f76bd5b3c35aeea3810ca5c8e004e41acf4b2d61ea1645",
@@ -17556,7 +17557,7 @@
           ],
           "content_sha256": "e714bdd49a14c549e1b3de22ea8a58d243922ef6bc9542d291306b2aa2fcaa69",
           "occurrence": 1,
-          "line": 3787
+          "line": 3792
         },
         {
           "semantic_id": "arch:1f171af94c38125a1f221b247dca12ecab9a326f0ff2a10d6b229225fa197e9f",
@@ -17771,7 +17772,7 @@
           ],
           "content_sha256": "e714bdd49a14c549e1b3de22ea8a58d243922ef6bc9542d291306b2aa2fcaa69",
           "occurrence": 1,
-          "line": 1689
+          "line": 1694
         },
         {
           "semantic_id": "arch:5cc9259b30e9c352b85838bbf42182fb48121392cff1745987996f63ca974a0c",
@@ -17871,7 +17872,7 @@
           ],
           "content_sha256": "e714bdd49a14c549e1b3de22ea8a58d243922ef6bc9542d291306b2aa2fcaa69",
           "occurrence": 1,
-          "line": 3430
+          "line": 3435
         },
         {
           "semantic_id": "arch:76239ec211cf598345c738cfc1c6f1b861e6c0850a6013fdfd35c15b07fd86bd",
@@ -18600,7 +18601,7 @@
           ],
           "content_sha256": "0bf3061e56931f48ca57ef1cd49169d6360b8dc0af1108ce6926be231a5feaf9",
           "occurrence": 1,
-          "line": 19
+          "line": 20
         },
         {
           "semantic_id": "arch:3c208e49146bf828081dda546aa52674443261a8df5598abd717817b7faaf10c",
@@ -18958,7 +18959,7 @@
           ],
           "content_sha256": "1142516b9ca48d91123534e272a9c8035e686f38dec1d608a601348c8647213f",
           "occurrence": 1,
-          "line": 20
+          "line": 21
         },
         {
           "semantic_id": "arch:c1ed6e08f7744402abfe57e8d069c47a5d4cd94c3fb196438f78a5dd43736cdf",

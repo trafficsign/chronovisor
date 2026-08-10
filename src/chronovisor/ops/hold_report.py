@@ -14,6 +14,7 @@ from typing import Any
 
 from chronovisor.core.durable_state import (
     DurableStateError,
+    canonical_sha256,
     read_sealed_json,
 )
 from chronovisor.decision.decision_router import QUORUM_SAFETY_POLICY_VERSION
@@ -130,7 +131,7 @@ def _semantic_rows(root: Path) -> tuple[list[dict[str, Any]], list[str]]:
                     consensus.get("quarantine_reason") or "unknown"
                 ),
                 "artifact_sha256_prefix": _artifact_prefix(
-                    router.get("artifact_sha256")
+                    canonical_sha256(router) if router else None
                 ),
                 "created_at": _mtime(path),
                 # Cache entries are immutable.  A quorum-policy epoch mismatch
