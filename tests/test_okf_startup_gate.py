@@ -163,7 +163,7 @@ def test_terminal_committed_and_rollback_proofs_select_exact_layout(
         ("tamper", "migration_proof_invalid"),
         ("multiple", "multiple_migrations"),
         ("sentinel", "restart_refusal_active"),
-        ("receipt", "receipt_validation_unsupported"),
+        ("receipt", "migration_receipt_invalid"),
         ("unknown", "unsafe_migration_workspace"),
         ("nonterminal", "migration_nonterminal"),
         ("malformed", "migration_proof_invalid"),

@@ -14,9 +14,12 @@ from typing import Literal, TypeVar
 
 from chronovisor.core.canonical_json import canonical_json_line_bytes_strict
 from chronovisor.core.durable_state import (
+    StateSealError,
     atomic_write_bytes,
     file_lock,
     fsync_directory,
+    seal_object,
+    verify_sealed_object,
 )
 from chronovisor.core.okf_workspace import (
     JOURNAL_SCHEMA,
@@ -32,6 +35,7 @@ _OldActivity = tuple[int, str] | None
 
 _RUN_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}")
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
+_MISSING = object()
 _Value = TypeVar("_Value")
 _MOVE_NAMES = (
     "backup-pages",
@@ -60,6 +64,25 @@ CUTOVER_FAULT_POINTS = (
     "before-commit-journal",
     "after-commit-journal",
     "after-sentinel-remove",
+)
+RECEIPT_SCHEMA = "chronovisor.okf-migration-receipt.v1"
+RECEIPT_FILENAME = "receipt.json"
+CLEANUP_FAULT_POINTS = (
+    "after-cleanup-journal",
+    "before-receipt-write",
+    "after-receipt-write",
+    *(
+        point
+        for name in (
+            "staging",
+            "rollback-backup",
+            "dry-run-manifest",
+            "cutover-lock",
+        )
+        for point in (f"before-remove-{name}", f"after-remove-{name}")
+    ),
+    "before-journal-remove",
+    "after-journal-remove",
 )
 
 
@@ -121,7 +144,7 @@ _WORKSPACE_ENTRIES = {
     "cutover.lock": "file",
     "dry-run-manifest.json": "file",
     "journal.json": "file",
-    "receipt.json": "file",
+    RECEIPT_FILENAME: "file",
     RESTART_REFUSAL_FILENAME: "file",
     "rollback-backup": "directory",
     "staging": "directory",
@@ -194,8 +217,23 @@ def _discover_migration(
     if unsafe:
         return _blocked("unsafe_migration_workspace", run_id=run_id)
     workspace_entries = _directory_entries(workspace)
-    if workspace_entries == {"receipt.json": "file"}:
-        return _blocked("receipt_validation_unsupported", run_id=run_id)
+    if workspace_entries == {RECEIPT_FILENAME: "file"}:
+        try:
+            receipt_state, _manifest_sha256 = _read_receipt(
+                workspace / RECEIPT_FILENAME, run_id
+            )
+            _require_receipt_layout(source_root, runtime_root, receipt_state)
+        except (OSError, TypeError, ValueError):
+            return _blocked("migration_receipt_invalid", run_id=run_id)
+        return OKFStartupDecision(
+            True,
+            "okf_v0_2" if receipt_state == "committed" else "legacy",
+            receipt_state,
+            "ok",
+            run_id,
+        )
+    if RECEIPT_FILENAME in workspace_entries:
+        return _blocked("cleanup_incomplete", run_id=run_id)
     if any(
         _WORKSPACE_ENTRIES.get(name) != kind for name, kind in workspace_entries.items()
     ):
@@ -224,6 +262,10 @@ def _discover_migration(
     )
     if state not in {"committed", "rollback-complete"}:
         return _blocked("migration_nonterminal", state=state, run_id=run_id)
+    if journal.get("cleanup_in_progress") is True:
+        return _blocked("cleanup_in_progress", state=state, run_id=run_id)
+    if "cleanup_in_progress" in journal:
+        return _blocked("migration_proof_invalid", state=state, run_id=run_id)
     if not okf_startup_allowed(source_root, runtime_root, run_id):
         return _blocked("migration_proof_invalid", state=state, run_id=run_id)
     return OKFStartupDecision(
@@ -498,42 +540,143 @@ def recover_okf_cutover(
         return "rollback-complete"
 
 
+def cleanup_okf_cutover(
+    source_root: Path,
+    runtime_root: Path,
+    run_id: str,
+    *,
+    is_quiescent: Callable[[], bool],
+    fault_inject: FaultInjector | None = None,
+) -> CutoverState:
+    """Replace one exact terminal proof workspace with a compact receipt."""
+
+    source, runtime, workspace = _workspace_roots(
+        source_root, runtime_root, run_id
+    )
+    if _receipt_only(workspace):
+        state, _manifest_sha256 = _read_receipt(
+            workspace / RECEIPT_FILENAME, run_id
+        )
+        _require_receipt_layout(source, runtime, state)
+        return state
+    _require_cleanup_workspace(workspace)
+    lock_path = workspace / "cutover.lock"
+    _reject_symlink(lock_path, "cutover lock")
+    with file_lock(lock_path):
+        _require_cleanup_workspace(workspace)
+        receipt_path = workspace / RECEIPT_FILENAME
+        if not is_quiescent():
+            raise RuntimeError("OKF cleanup requires a quiescent runtime")
+
+        if _path_kind(receipt_path) == "file":
+            state, manifest_sha256 = _read_receipt(receipt_path, run_id)
+            journal = _read_canonical_object(
+                workspace / "journal.json", "migration journal"
+            )
+            _require_cleanup_journal(journal, run_id, state, manifest_sha256)
+            _require_receipt_layout(source, runtime, state)
+        else:
+            context, journal, state = _require_terminal_proof(
+                source,
+                runtime,
+                run_id,
+                allow_cleanup=True,
+            )
+            if journal.get("cleanup_in_progress") is not True:
+                journal = {**journal, "cleanup_in_progress": True}
+                _write_object(context.journal, journal)
+                _checkpoint(fault_inject, "after-cleanup-journal")
+            context, journal, state = _require_terminal_proof(
+                source,
+                runtime,
+                run_id,
+                allow_cleanup=True,
+            )
+            manifest_sha256 = context.manifest_sha256
+            _checkpoint(fault_inject, "before-receipt-write")
+            _write_object(
+                receipt_path,
+                _receipt_payload(run_id, state, manifest_sha256),
+            )
+            _checkpoint(fault_inject, "after-receipt-write")
+
+        _require_cleanup_journal(journal, run_id, state, manifest_sha256)
+        for name, path, directory in (
+            ("staging", workspace / "staging", True),
+            ("rollback-backup", workspace / "rollback-backup", True),
+            ("dry-run-manifest", workspace / "dry-run-manifest.json", False),
+            ("cutover-lock", lock_path, False),
+        ):
+            _checkpoint(fault_inject, f"before-remove-{name}")
+            if directory:
+                _remove_tree_exact(path)
+            else:
+                _remove_file_exact(path)
+            _checkpoint(fault_inject, f"after-remove-{name}")
+
+        _checkpoint(fault_inject, "before-journal-remove")
+        _remove_file_exact(workspace / "journal.json", required=True)
+        _checkpoint(fault_inject, "after-journal-remove")
+        return state
+
+
 def okf_startup_allowed(source_root: Path, runtime_root: Path, run_id: str) -> bool:
-    """Fail closed unless a terminal journal agrees with paths and hashes."""
+    """Fail closed unless a terminal journal or cleanup receipt proves startup."""
 
     try:
-        context = _context(source_root, runtime_root, run_id)
-        if context.sentinel.exists() or context.sentinel.is_symlink():
-            return False
-        journal = _read_canonical_object(context.journal, "migration journal")
-        _require_gate_identity(journal, context, JOURNAL_SCHEMA)
-        state = journal.get("state")
-        if state not in {"committed", "rollback-complete"}:
-            return False
-        _validate_static_source(context)
-        old_activity = _old_activity(journal, context, prepared=False)
-        expected = "new" if state == "committed" else "old"
-        return all(
-            value == expected
-            for value in _asset_states(context, old_activity).values()
+        source, runtime, workspace = _workspace_roots(
+            source_root, runtime_root, run_id
         )
+        if _receipt_only(workspace):
+            state, _manifest_sha256 = _read_receipt(
+                workspace / RECEIPT_FILENAME, run_id
+            )
+            _require_receipt_layout(source, runtime, state)
+            return True
+        _require_terminal_proof(source_root, runtime_root, run_id)
+        return True
     except (OSError, TypeError, ValueError):
         return False
 
 
+def _require_terminal_proof(
+    source_root: Path,
+    runtime_root: Path,
+    run_id: str,
+    *,
+    allow_cleanup: bool = False,
+) -> tuple[_Context, dict[str, object], CutoverState]:
+    context = _context(source_root, runtime_root, run_id)
+    if context.sentinel.exists() or context.sentinel.is_symlink():
+        raise ValueError("restart refusal sentinel is active")
+    journal = _read_canonical_object(context.journal, "migration journal")
+    _require_gate_identity(journal, context, JOURNAL_SCHEMA)
+    state = journal.get("state")
+    if state not in {"committed", "rollback-complete"}:
+        raise ValueError("migration journal is not terminal")
+    cleanup = journal.get("cleanup_in_progress", _MISSING)
+    if cleanup is not _MISSING and cleanup is not True:
+        raise ValueError("migration cleanup marker is invalid")
+    if cleanup is True and not allow_cleanup:
+        raise ValueError("migration cleanup is in progress")
+    _validate_static_source(context)
+    old_activity = _old_activity(journal, context, prepared=False)
+    expected = "new" if state == "committed" else "old"
+    if any(
+        value != expected for value in _asset_states(context, old_activity).values()
+    ):
+        raise ValueError("terminal migration assets do not match the manifest")
+    return (
+        context,
+        journal,
+        "committed" if state == "committed" else "rollback-complete",
+    )
+
+
 def _context(source_root: Path, runtime_root: Path, run_id: str) -> _Context:
-    if not _RUN_ID_RE.fullmatch(run_id):
-        raise ValueError("run_id must be a safe single path component")
-    source = _safe_root(source_root, "source root")
-    runtime = _safe_root(runtime_root, "runtime root")
-    workspace = runtime / "migrations" / run_id
-    if (runtime / "migrations").is_symlink():
-        raise ValueError("migration directory must not be a symlink")
-    if workspace.is_symlink():
-        raise ValueError("migration workspace must not be a symlink")
-    workspace = workspace.resolve(strict=True)
-    if not workspace.is_dir() or not workspace.is_relative_to(runtime):
-        raise ValueError("migration workspace is outside runtime root")
+    source, runtime, workspace = _workspace_roots(
+        source_root, runtime_root, run_id
+    )
     staging = workspace / "staging"
     manifest_path = workspace / "dry-run-manifest.json"
     _reject_symlink(manifest_path, "migration manifest")
@@ -546,9 +689,6 @@ def _context(source_root: Path, runtime_root: Path, run_id: str) -> _Context:
         or manifest.get("state") != "validated"
     ):
         raise ValueError("migration manifest identity is invalid")
-    devices = {source.stat().st_dev, runtime.stat().st_dev, workspace.stat().st_dev}
-    if len(devices) != 1:
-        raise ValueError("source, runtime, and workspace must be on the same volume")
     return _Context(
         source=source,
         runtime=runtime,
@@ -560,6 +700,29 @@ def _context(source_root: Path, runtime_root: Path, run_id: str) -> _Context:
         manifest_sha256=hashlib.sha256(manifest_raw).hexdigest(),
         expected=_expected(manifest),
     )
+
+
+def _workspace_roots(
+    source_root: Path, runtime_root: Path, run_id: str
+) -> tuple[Path, Path, Path]:
+    if not _RUN_ID_RE.fullmatch(run_id):
+        raise ValueError("run_id must be a safe single path component")
+    if _has_symlink_component(source_root) or _has_symlink_component(runtime_root):
+        raise ValueError("migration roots contain a symlink")
+    source = _safe_root(source_root, "source root")
+    runtime = _safe_root(runtime_root, "runtime root")
+    workspace = runtime / "migrations" / run_id
+    if (runtime / "migrations").is_symlink():
+        raise ValueError("migration directory must not be a symlink")
+    if workspace.is_symlink():
+        raise ValueError("migration workspace must not be a symlink")
+    workspace = workspace.resolve(strict=True)
+    if not workspace.is_dir() or not workspace.is_relative_to(runtime):
+        raise ValueError("migration workspace is outside runtime root")
+    devices = {source.stat().st_dev, runtime.stat().st_dev, workspace.stat().st_dev}
+    if len(devices) != 1:
+        raise ValueError("source, runtime, and workspace must be on the same volume")
+    return source, runtime, workspace
 
 
 def _expected(manifest: Mapping[str, object]) -> _Expected:
@@ -879,6 +1042,173 @@ def _write_object(path: Path, payload: Mapping[str, object]) -> None:
         backup=False,
         min_free_bytes=0,
     )
+
+
+def _receipt_payload(
+    run_id: str, state: CutoverState, manifest_sha256: str
+) -> dict[str, object]:
+    return seal_object(
+        {
+            "schema": RECEIPT_SCHEMA,
+            "version": SCHEMA_VERSION,
+            "run_id": run_id,
+            "state": state,
+            "manifest_sha256": manifest_sha256,
+        }
+    )
+
+
+def _read_receipt(path: Path, run_id: str) -> tuple[CutoverState, str]:
+    try:
+        receipt = verify_sealed_object(
+            _read_canonical_object(path, "migration receipt")
+        )
+    except StateSealError as exc:
+        raise ValueError("migration receipt seal is invalid") from exc
+    if set(receipt) != {
+        "schema",
+        "version",
+        "run_id",
+        "state",
+        "manifest_sha256",
+        "seal_sha256",
+    }:
+        raise ValueError("migration receipt fields are invalid")
+    if (
+        receipt.get("schema") != RECEIPT_SCHEMA
+        or receipt.get("version") != SCHEMA_VERSION
+        or receipt.get("run_id") != run_id
+    ):
+        raise ValueError("migration receipt identity is invalid")
+    state = receipt.get("state")
+    if state not in {"committed", "rollback-complete"}:
+        raise ValueError("migration receipt state is invalid")
+    return (
+        "committed" if state == "committed" else "rollback-complete",
+        _sha(receipt.get("manifest_sha256")),
+    )
+
+
+def _require_cleanup_journal(
+    journal: Mapping[str, object],
+    run_id: str,
+    state: CutoverState,
+    manifest_sha256: str,
+) -> None:
+    if (
+        journal.get("schema") != JOURNAL_SCHEMA
+        or journal.get("version") != SCHEMA_VERSION
+        or journal.get("run_id") != run_id
+        or journal.get("state") != state
+        or journal.get("manifest_sha256") != manifest_sha256
+        or journal.get("cleanup_in_progress") is not True
+    ):
+        raise ValueError("migration cleanup journal is invalid")
+
+
+def _receipt_only(workspace: Path) -> bool:
+    return _directory_entries(workspace) == {RECEIPT_FILENAME: "file"}
+
+
+def _require_cleanup_workspace(workspace: Path) -> None:
+    if _tree_has_unsafe_entry(workspace):
+        raise ValueError("migration cleanup workspace is unsafe")
+    entries = _directory_entries(workspace)
+    if any(
+        _WORKSPACE_ENTRIES.get(name) != kind for name, kind in entries.items()
+    ):
+        raise ValueError("migration cleanup workspace has an unknown artifact")
+    if RESTART_REFUSAL_FILENAME in entries:
+        raise ValueError("migration cleanup is blocked by restart refusal")
+    if entries.get("journal.json") != "file":
+        raise ValueError("migration cleanup journal is missing")
+    for name in ("staging", "rollback-backup"):
+        _require_known_cleanup_tree(workspace / name)
+
+
+def _require_known_cleanup_tree(path: Path) -> None:
+    kind = _path_kind(path)
+    if kind == "absent":
+        return
+    if kind != "directory":
+        raise ValueError("migration cleanup tree is unsafe")
+    entries = _directory_entries(path)
+    allowed = {
+        "activity.jsonl": "file",
+        "pages": "directory",
+        "system": "directory",
+    }
+    if any(allowed.get(name) != kind for name, kind in entries.items()):
+        raise ValueError("migration cleanup tree has an unknown artifact")
+
+
+def _require_receipt_layout(
+    source_root: Path, runtime_root: Path, state: CutoverState
+) -> None:
+    source = _safe_root(source_root, "source root")
+    runtime = _safe_root(runtime_root, "runtime root")
+    if _unsafe_legacy_root(source):
+        raise ValueError("migration receipt layout is unsafe")
+    for name in ("raw", "pages", "system"):
+        if _path_kind(source / name) != "directory":
+            raise ValueError("migration receipt layout is incomplete")
+
+    reserved = tuple(_path_kind(source / name) for name in _ROOT_RESERVED)
+    present = sum(kind == "file" for kind in reserved)
+    if any(kind not in {"absent", "file"} for kind in reserved):
+        raise ValueError("migration receipt root documents are unsafe")
+    activity_kind = _path_kind(runtime / "activity.jsonl")
+    if state == "rollback-complete":
+        if present != len(_ROOT_RESERVED) or activity_kind not in {"absent", "file"}:
+            raise ValueError("rolled-back receipt layout is incomplete")
+        return
+    if present not in {0, len(_ROOT_RESERVED)} or activity_kind != "file":
+        raise ValueError("committed receipt layout is incomplete")
+    for path in (
+        source / "pages" / "index.md",
+        source / "pages" / "log.md",
+        source / "system" / "schema.md",
+    ):
+        if _path_kind(path) != "file":
+            raise ValueError("committed receipt reserved layout is incomplete")
+
+
+def _remove_file_exact(path: Path, *, required: bool = False) -> None:
+    kind = _path_kind(path)
+    if kind == "absent":
+        if required:
+            raise ValueError("required cleanup artifact is missing")
+        return
+    if kind != "file":
+        raise ValueError("cleanup artifact is not a regular file")
+    path.unlink()
+    fsync_directory(path.parent)
+
+
+def _remove_tree_exact(path: Path) -> None:
+    kind = _path_kind(path)
+    if kind == "absent":
+        return
+    if kind != "directory":
+        raise ValueError("cleanup artifact is not a directory")
+    with os.scandir(path) as iterator:
+        entries = sorted(
+            (
+                entry.name,
+                _mode_kind(entry.stat(follow_symlinks=False).st_mode),
+            )
+            for entry in iterator
+        )
+    for name, child_kind in entries:
+        child = path / name
+        if child_kind == "directory":
+            _remove_tree_exact(child)
+        elif child_kind == "file":
+            _remove_file_exact(child, required=True)
+        else:
+            raise ValueError("cleanup tree contains an unsafe artifact")
+    path.rmdir()
+    fsync_directory(path.parent)
 
 
 def _read_canonical_object(path: Path, label: str) -> dict[str, object]:
