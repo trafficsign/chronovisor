@@ -1,0 +1,143 @@
+# Threat Model
+
+## Scope and status
+
+This model covers the Chronovisor process, local data root, host hooks, MCP
+server, Dashboard, local model services, research network access, and the
+provider-neutral runtime foundation. It is a pre-release review baseline, not a
+claim that the whole product has completed security review.
+
+Local-only is the only production-supported topology. Cloud-only and hybrid
+topologies are experimental. Campaign W provider/configuration integration and
+Campaign X canonical data migration are incomplete.
+
+## Assets
+
+- private transcripts in `raw/` and long-term knowledge in `pages/` and
+  `system/`;
+- credentials and credential references;
+- configuration, authority/adoption artifacts, audit evidence, and mutation
+  receipts;
+- integrity of indexes, decisions, recalls, and stored pages;
+- availability of local services and bounded compute budgets.
+
+## Trust boundaries
+
+| Boundary | Trusted side | Untrusted or less-trusted input |
+| --- | --- | --- |
+| Host/MCP | Chronovisor tool contracts | prompts, transcripts, tool arguments, host metadata |
+| Filesystem | contained data-root paths and validated artifacts | filenames, links, imported Markdown, permissions, symlinks |
+| Dashboard | loopback server and same-origin browser requests | request paths/headers and stored content rendered in the UI |
+| Model runtime | normalized contracts and local policy | model output and remote provider responses |
+| Network egress | explicit policy and allowlisted action | URLs, DNS answers, redirects, fetched content, generic endpoints |
+| Subprocess | fixed executable/argument contracts | incident evidence, paths, environment, generated repair input |
+| Supply chain | reviewed source and lockfile | packages, build actions, release artifacts, model files |
+
+External content and model output are data, never instructions or authority.
+Mutations require their normal deterministic and semantic authorization; a
+model response alone is not permission to write.
+
+## Threats, current controls, and open work
+
+### Credentials
+
+The runtime foundation parses explicit `CredentialRef` values, keeps resolved
+values opaque, validates mounted-file ownership/mode/type/size, binds outbound
+credentials to profile ID, HTTPS origin, and authentication scheme, rejects
+caller-supplied authority/authentication headers, and disables redirects at the
+authenticated transport boundary. Safe errors expose categories, not secret
+values.
+
+OS keyring resolution, the credential CLI, provider configuration validation,
+and remote adapter wiring are not complete. Until Campaign W finishes, no
+remote provider configuration is supported. Plaintext secrets must not be
+stored in repository files, `config.toml`, command arguments, logs, Dashboard
+payloads, artifacts, or child-process environments.
+
+### Dashboard and XSS
+
+The Dashboard binds only to `localhost` or `127.0.0.1`, rejects non-loopback
+clients, and validates Host and Origin. LAN mode is disabled. It has no separate
+user authentication boundary, so loopback is not permission to expose it
+through a proxy, tunnel, container port, or browser-sharing service.
+
+Stored page names, snippets, errors, and model-derived values are untrusted.
+They must reach the DOM through text-safe rendering or explicit escaping. The
+current UI contains escaped dynamic HTML paths, but the complete Markdown/DOM
+XSS review is still a release gate.
+
+### Filesystem
+
+Page lookup and static asset serving perform path containment checks, and
+mounted credentials reject symlinks and unsafe locations. The full write,
+import, archive, migration, and recovery surface has not completed traversal
+review. `raw/`, `system/`, configuration, locks, and receipts must be protected
+from other OS users; permission enforcement across every creation path remains
+part of the pre-release review.
+
+### Generic endpoints, SSRF, and cloud egress
+
+Research Web fetch has a separate SSRF-resistant URL guard, bounded fetches,
+and an explicit egress switch. The common model runtime denies cloud egress for
+`raw`, `system`, and high-sensitivity data by default and performs the decision
+before calling a backend.
+
+Generic model-provider endpoints are not yet a supported path. Before enabling
+them, endpoint validation must cover DNS resolution/rebinding, private and
+link-local address ranges, redirects, proxy behavior, origin binding, and
+request size/time budgets. Provider failure must not silently reroute data.
+Cloud eligibility is not consent to send credentials or an entire private
+record; only the minimum policy-approved payload may leave the host.
+
+### Subprocess and command execution
+
+Chronovisor launches local workers and contains a guarded exceptional
+system-code repair path. Every subprocess boundary must use fixed executables,
+argument arrays, bounded input/output/time, a minimal environment, and
+contained paths. Shell interpolation, untrusted working directories, inherited
+credentials, and repair input becoming executable instructions are in scope for
+the pre-release review.
+
+### Supply chain
+
+Python dependencies are locked and CI runs static, architecture, and test
+checks. Secret scanning, dependency auditing, provenance review, model-file
+integrity, release-artifact scanning, and Git-history scanning are not complete
+release gates yet. A lockfile limits drift; it does not establish that a
+dependency or model is trustworthy.
+
+## Honest exclusions
+
+Chronovisor does not claim to protect data or credentials after any of the
+following:
+
+- arbitrary code execution as the same OS user;
+- root/administrator, kernel, hypervisor, or physical-host compromise;
+- reading or instrumenting live Python or model-process memory;
+- compromise of the OS credential store, provider account, browser profile, or
+  host agent before data reaches Chronovisor;
+- deliberate operator configuration that exports the data root, loopback
+  Dashboard, or sensitive content outside the documented boundary.
+
+Python secret memory is not guaranteed to be zeroized. Local-only means no
+intended provider egress for model work; it does not turn a compromised host
+into a trusted one.
+
+## OSS v1 release blockers
+
+Do not publish OSS v1 while any of these remain:
+
+- a known secret in source, tests, docs, examples, Git history, CI logs, or
+  release artifacts;
+- an unresolved high-severity finding;
+- a Dashboard authentication/access-control bypass or remote exposure;
+- arbitrary file read/write or path traversal outside the intended data root;
+- exploitable SSRF, credential forwarding, cross-origin redirect, or cloud
+  egress policy bypass;
+- command execution or subprocess injection from untrusted input;
+- an exploitable stored/reflected XSS path;
+- incomplete full-history secret scan, dependency audit, static review, or
+  targeted tests for the boundaries above.
+
+Credential cleanup follows the
+[credential leak response runbook](runbooks/credential-leak-response.md).

@@ -1,0 +1,47 @@
+# Minimal production-supported local-only configuration.
+# Copy to ~/.chronovisor/config.toml and keep the destination mode 0600.
+
+[raw]
+layout = "v2"
+
+[hooks.user_prompt]
+recall = true
+
+[hooks.stop]
+save = true
+audit = false
+content_correction = true
+recall_improve = false
+
+[embedding]
+model = "bge-m3"
+
+[search.embedding]
+enabled = false
+
+[ingest]
+model = "maxwell1500/ornith-35b:Q5_K_M"
+
+[decision_router]
+primary_model = "maxwell1500/ornith-35b:Q5_K_M"
+challenger_model = "gpt-oss:20b"
+tie_break_model = "gemma4:26b"
+
+[recall.gate]
+model = "ornith:9b-q4_K_M"
+
+[research]
+enabled = false
+mode = "explicit"
+
+[research.web]
+adapter_enabled = false
+live_egress_enabled = false
+
+# Campaign W remote-provider configuration is not implemented yet. These are
+# fake CredentialRef syntax examples only; this file enables no remote profile.
+# Desktop default:
+# credential_ref = "oskeyring:openai/default"
+# Explicit headless or CI alternatives (no automatic fallback):
+# credential_ref = "env:CHRONOVISOR_PROVIDER_SECRET"
+# credential_ref = "mounted-file:/run/secrets/chronovisor_provider"

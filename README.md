@@ -1,102 +1,136 @@
-# Chronovisor MCP
+# Chronovisor
 
-Chronovisor MCP is a local-first memory runtime for LLM agents. It stores durable
-conversation knowledge under `~/.chronovisor`, serves it through an MCP server, and can
-wire host hooks for automatic recall and lossless transcript capture. Routine
-semantic decisions stay on local Ollama models; a frontier model is reserved for
-exceptional, repeatedly reproduced system-code repair incidents.
+Chronovisor is a local-first memory runtime for LLM agents. It stores durable
+conversation knowledge on the user's filesystem, exposes it through MCP, and
+can connect host hooks for automatic recall and lossless transcript capture.
 
-## Core Pieces
+## Release status
 
-- `chronovisor-mcp`: MCP server.
-- `chronovisor-hook`: single hook dispatcher for Codex, Claude Code, and future hosts.
-- `chronovisor`: operational CLI (`status`, `doctor`, `hooks inspect`, `hooks install`).
-- `chronovisor-recall`: synchronous recall gate.
-- `chronovisor-recall-audit`: asynchronous missed-recall auditor.
-- `chronovisor-recall-auto-apply`: applies safe auto-lane recall improvements.
-- `chronovisor-content-correction`: compatibility CLI for binding explicit user
-  corrections to exact-turn recall provenance. Structured decisions use local
-  consensus and fail closed when the local quorum cannot be reached.
-- `chronovisor-codex-record` / `chronovisor-claude-code-record`: deterministic, lossless
-  host transcript-delta capture. The save path does not call an LLM.
-- `chronovisor-lab local-model-eval`: read-only, full-corpus replay gate for measuring
-  the local decision fleet before an artifact-backed atomic policy adoption.
-- `chronovisor_research` / `chronovisor-research`: asynchronous-by-default, bounded
-  evidence research through MCP or CLI. It
-  follows Wiki -> verified claims -> Raw -> Web, persists source-backed
-  Evidence Bundles, and challenges accepted evidence locally.
-- `chronovisor-research-verify`: temp-only adversarial verification with explicit
-  PASS/FAIL commands.
+Chronovisor is pre-release software. The only production-supported deployment
+is local-only. Cloud-only and hybrid routing are experimental and are not
+feature-complete.
 
-The routine decision fleet is:
+Two public-release campaigns remain open:
 
-- primary: `maxwell1500/ornith-35b:Q5_K_M`
-- challenger: `gpt-oss:20b`
-- tie-break, only when needed: `gemma4:26b`
+- Campaign W: finish provider-neutral runtime routing, OS keyring integration,
+  remote adapters, and migration of every production model consumer.
+- Campaign X: finish the one-shot OKF v0.2 canonical data migration and remove
+  the legacy layout.
 
-The primary and challenger must agree. If they do not, the tie-break model is
-called and any two matching votes form the quorum. Invalid JSON gets at most two
-targeted repair turns in the same local chat session. Exhausted repair and
-ordinary lane disagreement fail closed; neither is escalated to a frontier
-model. In ingest, an exact three-way split of three valid, pairwise-distinct
-decisions under the currently validated adopted-artifact SHA becomes a terminal
-semantic defer. The immutable source stays in `raw/`, receives no self-heal,
-frontier, or cooldown replay, and re-enters the ingest queue only when the router
-fully validates a different adopted-artifact SHA. A merely changed, partial, or
-invalid nominated file never releases it. Operational runtime failures remain in
-their separate repair queue.
+Do not treat the current `main` branch as an OSS v1 release.
 
-## Storage Layout
+## Clean local install
+
+Prerequisites are Python 3.11 or newer, [uv](https://docs.astral.sh/uv/), and a
+running [Ollama](https://ollama.com/) service.
+
+```sh
+git clone https://github.com/trafficsign/chronovisor.git
+cd chronovisor
+uv sync --frozen
+install -d -m 700 ~/.chronovisor
+test ! -e ~/.chronovisor/config.toml
+install -m 600 config.toml.example ~/.chronovisor/config.toml
+```
+
+The example is the smallest supported local-only configuration. It disables
+optional Web egress. Existing `~/.chronovisor/config.toml` files should be
+merged manually rather than overwritten.
+
+Install the local models named by the example:
+
+```sh
+ollama pull maxwell1500/ornith-35b:Q5_K_M
+ollama pull gpt-oss:20b
+ollama pull gemma4:26b
+ollama pull bge-m3
+ollama pull ornith:9b-q4_K_M
+```
+
+Start the MCP server from the checkout:
+
+```sh
+uv run chronovisor-mcp
+```
+
+The MCP server and host hook create the initial data directories on first use.
+In another terminal, check the installation or start the loopback-only
+Dashboard:
+
+```sh
+uv run chronovisor doctor
+uv run chronovisor-dashboard --host 127.0.0.1 --port 8765
+```
+
+Host hook installation is optional. Review [the hook guide](docs/hooks.md)
+before allowing the installer to update Codex or Claude Code settings.
+
+## Architecture and runtime roles
 
 ```text
-~/.chronovisor/
-  raw/       # durable raw session captures
-  pages/     # structured wiki pages
-  system/    # privileged user/profile/state pages
-  recall/    # recall log, retrieval/content feedback, query hints, auto-apply log
-  runtime/   # observable status, correction cursors/reviews, convergence state
-  research/  # durable evidence CAS manifests and Evidence Bundles
+Host transcript -> deterministic capture -> raw/
+                                      |-> ingest -> pages/ + system/
+Host prompt     -> search + recall -----------------------> recalled context
+                                      |-> local model runtime
+Dashboard       <- redacted operational state in runtime/
 ```
 
-## Hook Entry Point
+- `chronovisor-mcp` serves the public memory tools.
+- `chronovisor-hook` dispatches host events. Capture is deterministic and does
+  not call an LLM.
+- Ingest turns immutable raw captures into reviewed pages.
+- Search combines lexical retrieval with optional local embedding and rerank
+  services. Recall decides what context is safe and useful to inject.
+- Structured mutation decisions use a local primary/challenger quorum and a
+  tie-break model only when needed; invalid or unresolved decisions fail
+  closed.
+- The Dashboard is an operations view. It accepts only loopback clients and
+  validates browser Host and Origin boundaries; it is not a remote admin UI.
 
-Host-specific scripts are compatibility wrappers. New integrations should call:
+The common `LLMRuntime` foundation normalizes generation, embedding, reranking,
+source classification, and egress decisions. Campaign W has not yet moved all
+production callers through it, and no supported remote-provider configuration
+is shipped yet.
+
+See [architecture](docs/architecture.md),
+[configuration](docs/config.md), [operations](docs/operations.md), and the
+[threat model](docs/threat-model.md) for details.
+
+## Data and security boundary
+
+The default data root is `~/.chronovisor`; `CHRONOVISOR_ROOT` selects a different
+root for an isolated process. Important locations are:
+
+- `config.toml`: runtime policy and model selection; keep it mode `0600`.
+- `raw/`: immutable transcript captures.
+- `pages/`: ordinary long-term knowledge.
+- `system/`: privileged profile and state documents.
+- `recall/`: recall decisions, feedback, and field state.
+- `runtime/`: locks, queues, receipts, health, and redacted traces.
+- `research/`, `review/`, and `claims/`: evidence, review artifacts, and derived
+  claim indexes when those features are used.
+
+Campaign X is still migrating legacy root metadata into the final canonical
+layout. Back up the complete data root before testing migration work.
+
+Chronovisor's security boundary is the local OS user, the data root, loopback
+services, configured model endpoints, and explicitly enabled network egress.
+It does not defend secrets or memory content from arbitrary code running as the
+same user, root, or a process-memory compromise. Keep the Dashboard on
+loopback, do not store plaintext credentials in the repository or config, and
+leave Web/cloud egress disabled unless its data policy is understood.
+
+Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
+
+## Contributing and tests
 
 ```sh
-chronovisor-hook --host codex --event UserPromptSubmit --hook
-chronovisor-hook --host codex --event Stop --hook
-chronovisor-hook --host claude-code --event UserPromptSubmit --hook
-chronovisor-hook --host claude-code --event Stop --hook
-```
-
-`UserPromptSubmit` runs synchronous recall. `Stop` durably enqueues the
-deterministic transcript-save lane and, when configured, a capture-only content
-correction job. The hook starts no subprocess, model, ingest, or semantic
-review. Only deterministic explicit-correction signals enter that queue;
-ordinary turns advance the capture cursor and queued corrections are resolved
-later by local convergence.
-
-To update local Codex and Claude Code settings in one pass:
-
-```sh
-chronovisor hooks install --host all
-```
-
-See `docs/architecture.md`, `docs/config.md`, `docs/hooks.md`,
-`docs/librarian.md`, `docs/research-orchestration.md`, and
-`docs/operations.md` for the operational model.
-
-## Development checks
-
-Run the staged static-quality baseline before the repository tests:
-
-```sh
-uv run ruff check src scripts tests
+uv sync --frozen
+uv run ruff check --no-cache src scripts tests
 uv run mypy
-uv run lint-imports
-uv run python -m compileall -q src scripts
+uv run lint-imports --no-cache
+CHRONOVISOR_ROOT="$(mktemp -d)" uv run pytest -q
 ```
 
-Ruff currently enforces fatal syntax/name checks across source, scripts, and
-tests. Mypy is strict for `chronovisor/core` and will expand outward
-incrementally rather than hiding existing outer-layer debt with broad ignores.
+Keep tests isolated from a live `~/.chronovisor` tree. Small changes may start
+with focused tests, but the full checks above are the contribution baseline.
