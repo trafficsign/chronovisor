@@ -238,8 +238,20 @@ def _veto_schema() -> dict[str, Any]:
 class MultiPathCandidateIndex(AuthoritativeCandidateIndex):
     """Union independent semantic, hierarchy, model, and legacy paths."""
 
-    def _semantic(self, query: str, limit: int) -> list[tuple[str, float]]:
-        vector = self._embed_batched([query])[0]
+    def _semantic(
+        self,
+        query: str,
+        limit: int,
+        *,
+        source_data_class: str,
+        source_sensitivity: str,
+    ) -> list[tuple[str, float]]:
+        vector = self._embed_batched(
+            [query],
+            source_data_class=source_data_class,
+            source_sensitivity=source_sensitivity,
+            embedding_purpose="query",
+        )[0]
         scores = [
             (notation, self._cosine(vector, candidate_vector))
             for notation, candidate_vector in zip(
@@ -261,14 +273,19 @@ class MultiPathCandidateIndex(AuthoritativeCandidateIndex):
         *,
         total_limit: int = MAX_CANDIDATES,
     ) -> list[dict[str, Any]]:
-        query_paths: list[tuple[str, str, int]] = [
-            ("page_semantic", self.page_query(page), 10)
+        sensitivity = (
+            "normal" if page.get("sensitivity") == "normal" else "high"
+        )
+        query_paths: list[tuple[str, str, int, str]] = [
+            ("page_semantic", self.page_query(page), 10, "page")
         ]
         model_notations: list[str] = []
         for normalized in normalizations:
             central = str(normalized.get("central_subject") or "").strip()
             if central:
-                query_paths.append(("central_subject", central, 5))
+                query_paths.append(
+                    ("central_subject", central, 5, "derived_snippet")
+                )
             paths = normalized.get("query_paths") or {}
             quotas = {
                 "content_domain": 7,
@@ -279,18 +296,18 @@ class MultiPathCandidateIndex(AuthoritativeCandidateIndex):
             for name, quota in quotas.items():
                 value = str(paths.get(name) or "").strip()
                 if value:
-                    query_paths.append((name, value, quota))
+                    query_paths.append((name, value, quota, "derived_snippet"))
             model_notations.extend(
                 str(value).strip()
                 for value in normalized.get("proposed_notations") or []
                 if str(value).strip() in self.by_notation
             )
-        deduped_paths: list[tuple[str, str, int]] = []
+        deduped_paths: list[tuple[str, str, int, str]] = []
         seen_queries: set[str] = set()
-        for source, query, quota in query_paths:
+        for source, query, quota, source_data_class in query_paths:
             if query not in seen_queries:
                 seen_queries.add(query)
-                deduped_paths.append((source, query, quota))
+                deduped_paths.append((source, query, quota, source_data_class))
         path_priority = {
             "document_purpose": 0,
             "page_semantic": 1,
@@ -308,8 +325,13 @@ class MultiPathCandidateIndex(AuthoritativeCandidateIndex):
         semantic_value: dict[str, float] = {}
         reserved: list[str] = []
         per_query = 20
-        for source, query, quota in deduped_paths:
-            path = self._semantic(query, per_query)
+        for source, query, quota, source_data_class in deduped_paths:
+            path = self._semantic(
+                query,
+                per_query,
+                source_data_class=source_data_class,
+                source_sensitivity=sensitivity,
+            )
             for rank, (notation, similarity) in enumerate(path, start=1):
                 score[notation] += 1.0 / (RRF_K + rank)
                 sources[notation].add(f"semantic_{source}")

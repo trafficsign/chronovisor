@@ -195,7 +195,11 @@ def run_artifact_only_sweep(
     if provider.evidence_index is not None:
         provider.evidence_index.prefetch_dense_queries(
             [provider._page_text(page) for page in pages],
-            purpose="explicit",
+            source_sensitivities=[
+                "normal" if page.get("sensitivity") == "normal" else "high"
+                for page in pages
+            ],
+            scheduler_purpose="explicit",
         )
     rows = [
         provider.candidates(page, arms=arms, limit=candidate_limit) for page in pages
@@ -205,7 +209,10 @@ def run_artifact_only_sweep(
         restarted_index = LibraryEvidenceIndex(evidence_index_manifest)
         restarted_index.prefetch_dense_queries(
             [LibraryEvidenceProvider._page_text(pages[0])],
-            purpose="explicit",
+            source_sensitivities=[
+                "normal" if pages[0].get("sensitivity") == "normal" else "high"
+            ],
+            scheduler_purpose="explicit",
         )
         restarted_provider = LibraryEvidenceProvider(
             package=load_udc_package(root),
@@ -262,6 +269,7 @@ def run_artifact_only_sweep(
         "page_count": len(rows),
         "arms": list(arms),
         "candidate_limit": candidate_limit,
+        "embedding_route": index_manifest.get("dense_route_identity"),
         "overlay_path": str(overlay_path),
         "overlay_sha256": sha256_file(overlay_path),
         "protected_manifest_sha256": sha256_bytes(

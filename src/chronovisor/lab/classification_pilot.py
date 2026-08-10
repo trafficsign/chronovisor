@@ -17,14 +17,15 @@ from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from chronovisor.core import embedding, ollama
-from chronovisor.core.hashutil import sha256_prefixed_bytes as _sha256_bytes
-from chronovisor.core.runtime_config import load_decision_router_config
+from chronovisor.core import embedding, hashutil, ollama, runtime_config
 from chronovisor.recall.classification import (
     UDCPackage,
     load_udc_package,
 )
 from chronovisor.recall.classification_engine import CandidateIndex
+from chronovisor.recall.classification_library_evidence import (
+    embed_texts_cancellable,
+)
 
 DIAGNOSTIC_SCHEMA = "chronovisor.classification-diagnostic.v1"
 PILOT_SCHEMA = "chronovisor.classification-method-pilot.v1"
@@ -33,6 +34,8 @@ HOLD = "__HOLD__"
 NONE = "__NONE__"
 DEFAULT_SEMANTIC_LIMIT = 20
 DEFAULT_TOTAL_LIMIT = 36
+_sha256_bytes = hashutil.sha256_prefixed_bytes
+load_decision_router_config = runtime_config.load_decision_router_config
 
 
 def _now() -> str:
@@ -183,7 +186,7 @@ class AuthoritativeCandidateIndex:
                 str(row.get("label_en") or row.get("label") or ""),
             )
         }
-        self._embed_many = embed_many or embedding.embed_texts
+        self._embed_many = embed_many
         self._embedding_batch_size = max(1, embedding_batch_size)
         self._notations = sorted(self.by_notation)
         self._card_texts = [
@@ -251,11 +254,26 @@ class AuthoritativeCandidateIndex:
             ],
         }
 
-    def _embed_batched(self, texts: list[str]) -> list[list[float]]:
+    def _embed_batched(
+        self,
+        texts: list[str],
+        *,
+        source_data_class: str,
+        source_sensitivity: str,
+        embedding_purpose: str,
+    ) -> list[list[float]]:
         output: list[list[float]] = []
         for offset in range(0, len(texts), self._embedding_batch_size):
+            batch = texts[offset : offset + self._embedding_batch_size]
             output.extend(
-                self._embed_many(texts[offset : offset + self._embedding_batch_size])
+                self._embed_many(batch)
+                if self._embed_many is not None
+                else embed_texts_cancellable(
+                    batch,
+                    source_data_class=source_data_class,
+                    source_sensitivity=source_sensitivity,
+                    embedding_purpose=embedding_purpose,
+                )[1]
             )
         if len(output) != len(texts):
             raise ValueError("embedding backend returned the wrong vector count")
@@ -263,7 +281,12 @@ class AuthoritativeCandidateIndex:
 
     def _ensure_vectors(self) -> list[list[float]]:
         if self._vectors is None:
-            self._vectors = self._embed_batched(self._card_texts)
+            self._vectors = self._embed_batched(
+                self._card_texts,
+                source_data_class="derived_snippet",
+                source_sensitivity="normal",
+                embedding_purpose="document",
+            )
         return self._vectors
 
     @staticmethod
@@ -287,7 +310,14 @@ class AuthoritativeCandidateIndex:
         semantic_limit: int = DEFAULT_SEMANTIC_LIMIT,
         total_limit: int = DEFAULT_TOTAL_LIMIT,
     ) -> list[dict[str, Any]]:
-        query_vector = self._embed_batched([self.page_query(page)])[0]
+        query_vector = self._embed_batched(
+            [self.page_query(page)],
+            source_data_class="page",
+            source_sensitivity=(
+                "normal" if page.get("sensitivity") == "normal" else "high"
+            ),
+            embedding_purpose="query",
+        )[0]
         semantic_scores = [
             (notation, embedding.cosine(query_vector, vector))
             for notation, vector in zip(

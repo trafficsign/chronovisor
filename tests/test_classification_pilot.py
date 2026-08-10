@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from chronovisor.lab import classification_pilot
 from chronovisor.lab.classification_pilot import (
     AuthoritativeCandidateIndex,
     PilotRunner,
@@ -190,6 +191,49 @@ def test_semantic_candidates_union_official_path_and_legacy_candidates() -> None
     assert "004.42" in by_notation
     assert "legacy_lexical" in by_notation["004.42"]["retrieval_sources"]
     assert index.notation_path("575") == ["575", "57", "5"]
+
+
+def test_default_embedding_separates_page_query_and_official_documents(
+    monkeypatch,
+) -> None:
+    calls = []
+
+    def embed(texts, **kwargs):
+        calls.append((list(texts), kwargs))
+        return (
+            {
+                "role": "classification.embedding",
+                "provider": "remote-test",
+                "model": "embedding-model",
+                "location": "remote",
+                "model_digest": None,
+            },
+            [[1.0, 0.0] for _text in texts],
+        )
+
+    monkeypatch.setattr(classification_pilot, "embed_texts_cancellable", embed)
+    index = AuthoritativeCandidateIndex(_package())
+
+    index.candidates(
+        {"title": "Genome", "candidates": []},
+        semantic_limit=1,
+        total_limit=1,
+    )
+
+    assert calls[0][1] == {
+        "source_data_class": "page",
+        "source_sensitivity": "high",
+        "embedding_purpose": "query",
+    }
+    assert all(
+        kwargs
+        == {
+            "source_data_class": "derived_snippet",
+            "source_sensitivity": "normal",
+            "embedding_purpose": "document",
+        }
+        for _texts, kwargs in calls[1:]
+    )
 
 
 def test_reference_scoring_separates_acceptable_ancestor_and_catastrophe() -> None:

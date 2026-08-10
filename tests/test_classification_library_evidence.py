@@ -204,6 +204,13 @@ def test_dense_index_is_resumable_and_uses_the_frozen_embedding_model(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
+    route = {
+        "role": "classification.embedding",
+        "provider": "ollama",
+        "model": "bge-m3",
+        "location": "local",
+        "model_digest": "sha256:bge-m3",
+    }
     rows = [
         _external_row(
             f"dense-{index}",
@@ -226,7 +233,7 @@ def test_dense_index_is_resumable_and_uses_the_frozen_embedding_model(
 
     def embed(texts, **_kwargs):
         return (
-            "bge-m3",
+            route,
             [
                 [
                     float("AI" in text),
@@ -242,12 +249,21 @@ def test_dense_index_is_resumable_and_uses_the_frozen_embedding_model(
         "embed_texts_cancellable",
         embed,
     )
+    monkeypatch.setattr(
+        classification_library_evidence,
+        "resolved_route_identity",
+        lambda: route,
+    )
     manifest_path = index_path.with_suffix(".manifest.json")
     built = build_dense_index(manifest_path, batch_size=3)
     resumed = build_dense_index(manifest_path, batch_size=3)
 
     assert built["dense_index_built"] is True
     assert built["dense_model"] == "bge-m3"
+    assert built["dense_route_identity"] == route
+    assert built["dense_source_data_class"] == "derived_snippet"
+    assert built["dense_source_sensitivity"] == "normal"
+    assert built["dense_embedding_purpose"] == "document"
     assert built["dense_model_license"]
     assert built["dense_training_corpus_license"]
     assert built["dense_count"] <= 10
@@ -260,6 +276,68 @@ def test_dense_index_is_resumable_and_uses_the_frozen_embedding_model(
     )
     assert matches
     assert all("dense_score" in row for row in matches)
+
+
+def test_dense_artifact_reuse_requires_exact_route_identity(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    rows = [
+        _external_row(
+            f"route-{index}",
+            role="bibliographic_assignment",
+            source_field="080",
+            notation="004.8",
+            title="AI memory systems",
+            rights_ref="czech-national-bibliography",
+        )
+        for index in range(20)
+    ]
+    source_manifest = _package(tmp_path, name="bib", rows=rows)
+    index_path = tmp_path / "index" / "evidence.sqlite3"
+    build_source_index(
+        package_manifest_paths=[source_manifest],
+        output_path=index_path,
+        root=tmp_path,
+        dense_limit=3,
+    )
+    route = {
+        "role": "classification.embedding",
+        "provider": "ollama",
+        "model": "bge-m3",
+        "location": "local",
+        "model_digest": "sha256:first",
+    }
+    current = {"route": route}
+    calls = 0
+
+    def embed(texts, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return current["route"], [[1.0, 0.0] for _text in texts]
+
+    monkeypatch.setattr(
+        classification_library_evidence,
+        "resolved_route_identity",
+        lambda: current["route"],
+    )
+    monkeypatch.setattr(
+        classification_library_evidence,
+        "embed_texts_cancellable",
+        embed,
+    )
+    manifest_path = index_path.with_suffix(".manifest.json")
+
+    first = build_dense_index(manifest_path)
+    first_calls = calls
+    reused = build_dense_index(manifest_path)
+    current["route"] = {**route, "model_digest": "sha256:second"}
+    rebuilt = build_dense_index(manifest_path)
+
+    assert first_calls > 0
+    assert calls > first_calls
+    assert reused["dense_vectors_sha256"] == first["dense_vectors_sha256"]
+    assert rebuilt["dense_route_identity"] == current["route"]
 
 
 def test_external_test_cases_are_group_held_out_and_gold_isolated(

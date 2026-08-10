@@ -28,7 +28,6 @@ from chronovisor.core.durable_state import (
 from chronovisor.core.jsonl_write import write_jsonl_atomic as _write_jsonl
 from chronovisor.core.runtime_config import (
     load_decision_router_config,
-    load_embedding_config,
 )
 from chronovisor.core.store import CHRONOVISOR_ROOT
 from chronovisor.lab.classification_artifact_runner import (
@@ -84,8 +83,8 @@ from chronovisor.recall.classification_library_evidence import (
     LibraryEvidenceProvider,
     build_dense_index,
     build_source_index,
-    embed_texts_cancellable,
     external_test_cases,
+    resolved_route_identity,
 )
 from chronovisor.recall.classification_library_sources import (
     atomic_write,
@@ -244,7 +243,12 @@ def _git_snapshot(repo_root: Path) -> dict[str, Any]:
 def _model_policy() -> dict[str, Any]:
     return {
         "decision_router": load_decision_router_config().__dict__,
-        "embedding": load_embedding_config().__dict__,
+        "embedding_route": resolved_route_identity(),
+        "embedding_contract": {
+            "source_data_class": "derived_snippet",
+            "source_sensitivity": "normal",
+            "embedding_purpose": "document",
+        },
         "engine_version": ENGINE_VERSION,
         "worker_code_sha256": sha256_file(
             Path(__file__).resolve().parents[1]
@@ -329,7 +333,7 @@ def _phase_e0_baseline(
         "a1_config": {
             "implementation": "committed AuthoritativeCandidateIndex",
             "candidate_limit": 20,
-            "embedding_model": load_embedding_config().model,
+            "embedding_route": resolved_route_identity(),
             "mandatory_secondary_comparator": True,
         },
         "a2_config": {
@@ -638,7 +642,7 @@ def _phase_e2_index(root: Path, state: dict[str, Any]) -> dict[str, Any]:
         )
     manifest = build_dense_index(
         index_manifest,
-        purpose="explicit",
+        scheduler_purpose="explicit",
     )
     _receipt(
         root,
@@ -651,6 +655,10 @@ def _phase_e2_index(root: Path, state: dict[str, Any]) -> dict[str, Any]:
             "vocabulary_count": manifest["vocabulary_count"],
             "dense_count": manifest["dense_count"],
             "dense_model": manifest["dense_model"],
+            "dense_route_identity": manifest["dense_route_identity"],
+            "dense_source_data_class": manifest["dense_source_data_class"],
+            "dense_source_sensitivity": manifest["dense_source_sensitivity"],
+            "dense_embedding_purpose": manifest["dense_embedding_purpose"],
             "working_set_bytes": manifest["working_set_bytes"],
             "build_peak_bound_bytes": manifest["build_peak_bound_bytes"],
             "build_peak_gate": manifest["build_peak_gate"],
@@ -665,10 +673,7 @@ def _provider(root: Path) -> LibraryEvidenceProvider:
     return LibraryEvidenceProvider(
         package=package,
         evidence_index=LibraryEvidenceIndex(manifest),
-        semantic_index=AuthoritativeCandidateIndex(
-            package,
-            embed_many=lambda texts: embed_texts_cancellable(texts)[1],
-        ),
+        semantic_index=AuthoritativeCandidateIndex(package),
     )
 
 
@@ -685,7 +690,11 @@ def _provider_results(
     if provider.evidence_index is not None:
         provider.evidence_index.prefetch_dense_queries(
             [provider._page_text(row) for row in inference],
-            purpose="explicit",
+            source_sensitivities=[
+                "normal" if row.get("sensitivity") == "normal" else "high"
+                for row in inference
+            ],
+            scheduler_purpose="explicit",
         )
     return [
         provider.candidates(row, arms=provider_arms, limit=limit) for row in inference
@@ -1759,6 +1768,7 @@ def _phase_e7a_sweep(root: Path, state: dict[str, Any]) -> dict[str, Any]:
         run_config={
             "selected_provider_arm": selected,
             "selected_judgment_arm": state.get("selected_judgment_arm"),
+            "embedding_route": index_manifest.get("dense_route_identity"),
         },
         input_sha256=str(sweep["overlay_sha256"]),
         fixture_set_sha256=sha256_file(paths.manifest),
@@ -1801,6 +1811,14 @@ def _phase_e7a_sweep(root: Path, state: dict[str, Any]) -> dict[str, Any]:
             "provider_arms": list(PROVIDER_ARMS[selected]),
             "judgment_arm": state.get("selected_judgment_arm"),
             "dense_model": index_manifest.get("dense_model"),
+            "embedding_route": index_manifest.get("dense_route_identity"),
+            "embedding_source_data_class": index_manifest.get(
+                "dense_source_data_class"
+            ),
+            "embedding_source_sensitivity": index_manifest.get(
+                "dense_source_sensitivity"
+            ),
+            "embedding_purpose": index_manifest.get("dense_embedding_purpose"),
             "dense_model_license": index_manifest.get("dense_model_license"),
             "dense_training_corpus_license": index_manifest.get(
                 "dense_training_corpus_license"

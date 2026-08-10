@@ -517,7 +517,11 @@ def test_repository_example_has_representative_local_role_map() -> None:
         "classification.anchor",
         "classification.anchor.primary",
         "classification.anchor.challenger",
+        "classification.embedding",
     }
     knowledge_embedding = config.roles["knowledge.embedding"]
     assert knowledge_embedding.provider_id == "local"
     assert knowledge_embedding.model == "bge-m3"
+    classification_embedding = config.roles["classification.embedding"]
+    assert classification_embedding.provider_id == "local"
+    assert classification_embedding.model == "bge-m3"

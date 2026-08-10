@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from chronovisor.core.runtime_config import EmbeddingConfig
 from chronovisor.lab import classification_profile_pilot
 from chronovisor.lab.classification_profile_pilot import (
     build_profile_index,
@@ -101,10 +100,17 @@ def test_build_and_query_persistent_dense_profile_index(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
+    route = {
+        "role": "classification.embedding",
+        "provider": "ollama",
+        "model": "bge-m3",
+        "location": "local",
+        "model_digest": "sha256:bge-m3",
+    }
     monkeypatch.setattr(
         classification_profile_pilot,
-        "load_embedding_config",
-        lambda: EmbeddingConfig(model="bge-m3"),
+        "resolved_route_identity",
+        lambda: route,
     )
 
     manifest = build_profile_index(
@@ -121,6 +127,11 @@ def test_build_and_query_persistent_dense_profile_index(
     )
 
     assert manifest["profile_count"] == 4
+    assert manifest["embedding_route_identity"] == route
+    assert manifest["embedding_model"] == "bge-m3"
+    assert manifest["embedding_source_data_class"] == "derived_snippet"
+    assert manifest["embedding_source_sensitivity"] == "normal"
+    assert manifest["embedding_purpose"] == "document"
     assert manifest["external_library_records_used"] == 0
     assert manifest["local_page_label_associations_used"] == 0
     assert manifest["llm_calls"] == 0

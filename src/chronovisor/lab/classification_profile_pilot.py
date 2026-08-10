@@ -21,7 +21,6 @@ import numpy as np
 
 from chronovisor.core.durable_state import read_sealed_json, write_sealed_json
 from chronovisor.core.jsonl_write import write_jsonl_atomic as _write_jsonl
-from chronovisor.core.runtime_config import load_embedding_config
 from chronovisor.core.store import CHRONOVISOR_ROOT
 from chronovisor.core.timeutil import utc_iso_milliseconds as _now
 from chronovisor.recall.classification import (
@@ -37,6 +36,7 @@ from chronovisor.recall.classification_library_evidence import (
     DENSE_MODEL_LICENSE,
     DENSE_TRAINING_CORPUS_LICENSE,
     embed_texts_cancellable,
+    resolved_route_identity,
 )
 
 PROFILE_SCHEMA = "chronovisor.classification-profile-index.v1"
@@ -45,6 +45,9 @@ STATE_SCHEMA = "chronovisor.classification-profile-pilot-state.v1"
 DEFAULT_LIMIT = 12
 PASS_HITS = 8
 FIXTURE_EPOCH = "epoch-3-library-evidence-v1"
+_PROFILE_SOURCE_DATA_CLASS = "derived_snippet"
+_PROFILE_SOURCE_SENSITIVITY = "normal"
+_PROFILE_EMBEDDING_PURPOSE = "document"
 
 
 
@@ -204,9 +207,36 @@ def build_profile_rows(package: UDCPackage) -> list[dict[str, Any]]:
     return profiles
 
 
-def _default_embed_many(texts: list[str]) -> list[list[float]]:
-    _model, vectors = embed_texts_cancellable(texts, purpose="explicit")
-    return vectors
+def _embedding_license(
+    route: Mapping[str, str | None],
+) -> tuple[str | None, str | None]:
+    if (
+        route.get("provider") == "ollama"
+        and route.get("location") == "local"
+        and route.get("model") == "bge-m3"
+    ):
+        return DENSE_MODEL_LICENSE, DENSE_TRAINING_CORPUS_LICENSE
+    return None, None
+
+
+def _profile_contract(route: Mapping[str, str | None]) -> dict[str, Any]:
+    return {
+        "embedding_route_identity": dict(route),
+        "embedding_source_data_class": _PROFILE_SOURCE_DATA_CLASS,
+        "embedding_source_sensitivity": _PROFILE_SOURCE_SENSITIVITY,
+        "embedding_purpose": _PROFILE_EMBEDDING_PURPOSE,
+        "embedding_model": str(route.get("model") or ""),
+    }
+
+
+def _profile_contract_matches(
+    value: Mapping[str, Any],
+    route: Mapping[str, str | None],
+) -> bool:
+    return all(
+        value.get(key) == expected
+        for key, expected in _profile_contract(route).items()
+    )
 
 
 def _normalized_matrix(vectors: Sequence[Sequence[float]]) -> np.ndarray:
@@ -232,7 +262,6 @@ def build_profile_index(
     """Build or reuse a sealed profile/vector pair."""
 
     package = package or default_udc_package()
-    embed_many = embed_many or _default_embed_many
     output_root = profile_pilot_root(root)
     profiles_path = output_root / "profiles.jsonl"
     vectors_path = output_root / "vectors.npy"
@@ -248,11 +277,7 @@ def build_profile_index(
     )
     _write_jsonl(profiles_path, profiles)
     profiles_sha256 = sha256_file(profiles_path)
-    model = load_embedding_config().model
-    if "bge-m3" not in model.casefold():
-        raise ClassificationError(
-            f"profile pilot requires bge-m3, configured embedding model is {model!r}"
-        )
+    route = resolved_route_identity()
 
     if manifest_path.is_file():
         existing = read_sealed_json(manifest_path)
@@ -260,7 +285,7 @@ def build_profile_index(
             existing.get("schema") == PROFILE_SCHEMA
             and existing.get("package_checksum") == package.checksum
             and existing.get("profiles_sha256") == profiles_sha256
-            and existing.get("embedding_model") == model
+            and _profile_contract_matches(existing, route)
             and int(existing.get("profile_count") or 0) == len(profiles)
             and vectors_path.is_file()
             and existing.get("vectors_sha256") == sha256_file(vectors_path)
@@ -280,7 +305,19 @@ def build_profile_index(
     embedded: list[list[float]] = []
     for offset in range(0, len(profiles), max(1, batch_size)):
         batch = profiles[offset : offset + max(1, batch_size)]
-        embedded.extend(embed_many([str(row["profile_text"]) for row in batch]))
+        texts = [str(row["profile_text"]) for row in batch]
+        if embed_many is None:
+            batch_route, vectors = embed_texts_cancellable(
+                texts,
+                source_data_class=_PROFILE_SOURCE_DATA_CLASS,
+                source_sensitivity=_PROFILE_SOURCE_SENSITIVITY,
+                embedding_purpose=_PROFILE_EMBEDDING_PURPOSE,
+            )
+            if batch_route != route:
+                raise ClassificationError("profile embedding route changed")
+        else:
+            vectors = embed_many(texts)
+        embedded.extend(vectors)
         _write_state(
             root,
             status="running",
@@ -293,6 +330,7 @@ def build_profile_index(
         raise ClassificationError("profile embedding backend returned wrong count")
     matrix = _normalized_matrix(embedded)
     _atomic_save_numpy(vectors_path, matrix)
+    model_license, corpus_license = _embedding_license(route)
     manifest = {
         "schema": PROFILE_SCHEMA,
         "created_at": _now(),
@@ -304,9 +342,9 @@ def build_profile_index(
         "profile_count": len(profiles),
         "profiles_path": str(profiles_path),
         "profiles_sha256": profiles_sha256,
-        "embedding_model": model,
-        "embedding_model_license": DENSE_MODEL_LICENSE,
-        "embedding_training_corpus_license": DENSE_TRAINING_CORPUS_LICENSE,
+        **_profile_contract(route),
+        "embedding_model_license": model_license,
+        "embedding_training_corpus_license": corpus_license,
         "dimensions": int(matrix.shape[1]),
         "vectors_path": str(vectors_path),
         "vectors_sha256": sha256_file(vectors_path),
@@ -350,12 +388,27 @@ def query_profile_index(
         or sha256_file(vectors_path) != manifest.get("vectors_sha256")
     ):
         raise ClassificationError("profile index manifest is missing or corrupt")
+    route = resolved_route_identity()
+    if not _profile_contract_matches(manifest, route):
+        raise ClassificationError("profile embedding route contract mismatch")
     profiles = read_jsonl(profiles_path)
     matrix = np.load(vectors_path, allow_pickle=False, mmap_mode="r")
     if matrix.ndim != 2 or matrix.shape[0] != len(profiles):
         raise ClassificationError("profile vector matrix shape is invalid")
-    embed_many = embed_many or _default_embed_many
-    query = _normalized_matrix(embed_many([_page_query(page)]))[0]
+    if embed_many is None:
+        query_route, vectors = embed_texts_cancellable(
+            [_page_query(page)],
+            source_data_class="page",
+            source_sensitivity=(
+                "normal" if page.get("sensitivity") == "normal" else "high"
+            ),
+            embedding_purpose="query",
+        )
+        if query_route != route:
+            raise ClassificationError("profile query embedding route changed")
+    else:
+        vectors = embed_many([_page_query(page)])
+    query = _normalized_matrix(vectors)[0]
     scores = np.asarray(matrix @ query, dtype=np.float32)
     order = sorted(
         range(len(profiles)),

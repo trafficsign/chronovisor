@@ -18,12 +18,12 @@ from typing import Any, Protocol
 import numpy as np
 
 from chronovisor.core.durable_state import read_sealed_json, write_sealed_json
+from chronovisor.core.llm_runtime import RouteLocation
 from chronovisor.core.research_scheduler import (
     research_lane,
     run_cancellable_command,
     sync_pending,
 )
-from chronovisor.core.runtime_config import load_embedding_config
 from chronovisor.core.timeutil import utc_iso_milliseconds as _now
 from chronovisor.recall.classification import (
     ClassificationError,
@@ -31,7 +31,13 @@ from chronovisor.recall.classification import (
     load_udc_package,
 )
 from chronovisor.recall.classification_embedding_worker import (
+    RUNTIME_ROLE as EMBEDDING_RUNTIME_ROLE,
+)
+from chronovisor.recall.classification_embedding_worker import (
     SCHEMA as EMBEDDING_WORKER_SCHEMA,
+)
+from chronovisor.recall.classification_embedding_worker import (
+    resolved_route_identity,
 )
 from chronovisor.recall.classification_engine import (
     DEFAULT_CANDIDATE_LIMIT,
@@ -62,6 +68,71 @@ DENSE_TRAINING_CORPUS_LICENSE = (
     "model-card-described heterogeneous corpus; constituent licenses not "
     "fully enumerated by the installed Ollama artifact"
 )
+_ROUTE_KEYS = ("role", "provider", "model", "location", "model_digest")
+_DENSE_SOURCE_DATA_CLASS = "derived_snippet"
+_DENSE_SOURCE_SENSITIVITY = "normal"
+_DENSE_EMBEDDING_PURPOSE = "document"
+
+
+def _exact_route(value: object) -> dict[str, str | None] | None:
+    if not isinstance(value, Mapping) or set(value) != set(_ROUTE_KEYS):
+        return None
+    route = {key: value.get(key) for key in _ROUTE_KEYS}
+    return route if route["role"] == EMBEDDING_RUNTIME_ROLE else None
+
+
+def _dense_contract(route: Mapping[str, str | None]) -> dict[str, Any]:
+    return {
+        "dense_route_identity": dict(route),
+        "dense_source_data_class": _DENSE_SOURCE_DATA_CLASS,
+        "dense_source_sensitivity": _DENSE_SOURCE_SENSITIVITY,
+        "dense_embedding_purpose": _DENSE_EMBEDDING_PURPOSE,
+        "dense_model": str(route["model"] or ""),
+    }
+
+
+def _dense_contract_matches(
+    value: Mapping[str, Any],
+    route: Mapping[str, str | None],
+) -> bool:
+    expected = _dense_contract(route)
+    return all(value.get(key) == expected_value for key, expected_value in expected.items())
+
+
+def _dense_license(route: Mapping[str, str | None]) -> tuple[str | None, str | None]:
+    if (
+        route.get("provider") == "ollama"
+        and route.get("location") == "local"
+        and route.get("model") == "bge-m3"
+    ):
+        return DENSE_MODEL_LICENSE, DENSE_TRAINING_CORPUS_LICENSE
+    return None, None
+
+
+def _fold_sensitivity(value: object) -> str:
+    return "normal" if value == "normal" else "high"
+
+
+def _query_cache_key(
+    text: str,
+    route: Mapping[str, str | None],
+    source_sensitivity: str,
+) -> str:
+    return sha256_bytes(
+        json.dumps(
+            {
+                "version": 2,
+                "route_identity": dict(route),
+                "source_data_class": "page",
+                "source_sensitivity": source_sensitivity,
+                "embedding_purpose": "query",
+                "text": text,
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    )
 
 
 
@@ -111,9 +182,12 @@ def resource_preflight(
 def embed_texts_cancellable(
     texts: Sequence[str],
     *,
-    purpose: str = "explicit",
+    source_data_class: str,
+    source_sensitivity: str,
+    embedding_purpose: str,
+    scheduler_purpose: str = "explicit",
     timeout_seconds: float = 600,
-) -> tuple[str, list[list[float]]]:
+) -> tuple[dict[str, str | None], list[list[float]]]:
     """Embed in an isolated research worker and retry foreground preemption.
 
     Cancellation is a scheduler event, not a failed classification attempt.
@@ -123,10 +197,13 @@ def embed_texts_cancellable(
 
     payload = {
         "schema": EMBEDDING_WORKER_SCHEMA,
-        "model": load_embedding_config().model,
         "texts": list(texts),
+        "source_data_class": source_data_class,
+        "source_sensitivity": source_sensitivity,
+        "embedding_purpose": embedding_purpose,
         "read_timeout_ms": round(timeout_seconds * 1_000),
     }
+    expected_route = resolved_route_identity()
     deadline = time.monotonic() + timeout_seconds
     while True:
         remaining = deadline - time.monotonic()
@@ -138,9 +215,12 @@ def embed_texts_cancellable(
         with research_lane(
             run_id,
             enabled=True,
-            mode="on" if purpose == "explicit" else "shadow",
-            purpose=purpose,
-            needs_model=True,
+            mode="on" if scheduler_purpose == "explicit" else "shadow",
+            purpose=scheduler_purpose,
+            needs_model=(
+                expected_route["provider"] == "ollama"
+                and expected_route["location"] == RouteLocation.LOCAL.value
+            ),
         ) as lease:
             result = run_cancellable_command(
                 [
@@ -175,7 +255,17 @@ def embed_texts_cancellable(
         ]
         if len(normalized) != len(texts):
             raise ClassificationError("classification embedding vector is invalid")
-        return str(result.value.get("model") or payload["model"]), normalized
+        route = result.value.get("route_identity")
+        if (
+            not isinstance(route, Mapping)
+            or set(route) != set(_ROUTE_KEYS)
+            or route.get("role") != EMBEDDING_RUNTIME_ROLE
+        ):
+            raise ClassificationError("classification embedding route is invalid")
+        normalized_route = {key: route.get(key) for key in _ROUTE_KEYS}
+        if normalized_route != expected_route:
+            raise ClassificationError("classification embedding route changed")
+        return normalized_route, normalized
 
 
 def _safe_udc_notation(value: str, package: UDCPackage) -> str | None:
@@ -604,9 +694,9 @@ def build_dense_index(
     manifest_path: Path,
     *,
     batch_size: int = 64,
-    purpose: str = "explicit",
+    scheduler_purpose: str = "explicit",
 ) -> dict[str, Any]:
-    """Build or resume the bounded train-only bge-m3 vector matrix."""
+    """Build or resume the bounded train-only vector matrix."""
 
     manifest = read_sealed_json(manifest_path)
     if manifest.get("schema") != INDEX_SCHEMA:
@@ -616,17 +706,19 @@ def build_dense_index(
         "index_sha256"
     ):
         raise ClassificationError("library evidence index checksum mismatch")
+    route = resolved_route_identity()
     if manifest.get("dense_index_built") is True:
         vectors_path = Path(str(manifest.get("dense_vectors_path") or ""))
         row_ids_path = Path(str(manifest.get("dense_row_ids_path") or ""))
         if (
-            vectors_path.is_file()
+            _dense_contract_matches(manifest, route)
+            and vectors_path.is_file()
             and row_ids_path.is_file()
             and sha256_file(vectors_path) == manifest.get("dense_vectors_sha256")
             and sha256_file(row_ids_path) == manifest.get("dense_row_ids_sha256")
         ):
             return manifest
-        raise ClassificationError("dense index manifest is corrupt")
+        manifest["dense_index_built"] = False
 
     connection = sqlite3.connect(f"file:{index_path}?mode=ro", uri=True)
     try:
@@ -667,7 +759,7 @@ def build_dense_index(
             "target_count": len(texts),
             "completed_count": 0,
             "dimensions": 0,
-            "model": "",
+            **_dense_contract(route),
             "cancelled_batches_requeued": 0,
             "attempts_consumed_by_preemption": 0,
         }
@@ -676,8 +768,19 @@ def build_dense_index(
         progress.get("schema") != DENSE_BUILD_SCHEMA
         or progress.get("selection_sha256") != selection_sha256
         or int(progress.get("target_count") or 0) != len(texts)
+        or not _dense_contract_matches(progress, route)
     ):
-        raise ClassificationError("dense build checkpoint does not match source rows")
+        progress = {
+            "schema": DENSE_BUILD_SCHEMA,
+            "status": "building",
+            "selection_sha256": selection_sha256,
+            "target_count": len(texts),
+            "completed_count": 0,
+            "dimensions": 0,
+            **_dense_contract(route),
+            "cancelled_batches_requeued": 0,
+            "attempts_consumed_by_preemption": 0,
+        }
     completed = int(progress.get("completed_count") or 0)
     dimensions = int(progress.get("dimensions") or 0)
     if not 0 <= completed <= len(texts):
@@ -685,12 +788,13 @@ def build_dense_index(
 
     if not texts:
         np.save(row_ids_path, row_ids, allow_pickle=False)
+        model_license, corpus_license = _dense_license(route)
         manifest.update(
             {
                 "dense_index_built": True,
-                "dense_model": load_embedding_config().model,
-                "dense_model_license": DENSE_MODEL_LICENSE,
-                "dense_training_corpus_license": DENSE_TRAINING_CORPUS_LICENSE,
+                **_dense_contract(route),
+                "dense_model_license": model_license,
+                "dense_training_corpus_license": corpus_license,
                 "dense_count": 0,
                 "dense_dimensions": 0,
                 "dense_selection_sha256": selection_sha256,
@@ -725,10 +829,15 @@ def build_dense_index(
             raise ClassificationError("dense build vector shape changed")
     while completed < len(texts):
         end = min(len(texts), completed + max(1, batch_size))
-        model, vectors = embed_texts_cancellable(
+        batch_route, vectors = embed_texts_cancellable(
             texts[completed:end],
-            purpose=purpose,
+            source_data_class=_DENSE_SOURCE_DATA_CLASS,
+            source_sensitivity=_DENSE_SOURCE_SENSITIVITY,
+            embedding_purpose=_DENSE_EMBEDDING_PURPOSE,
+            scheduler_purpose=scheduler_purpose,
         )
+        if batch_route != route:
+            raise ClassificationError("dense embedding route changed")
         batch = np.asarray(vectors, dtype=np.float32)
         if batch.ndim != 2 or batch.shape[0] != end - completed:
             raise ClassificationError("dense embedding batch has invalid shape")
@@ -760,7 +869,7 @@ def build_dense_index(
                 "status": "building" if completed < len(texts) else "complete",
                 "completed_count": completed,
                 "dimensions": dimensions,
-                "model": model,
+                **_dense_contract(route),
                 "vectors_path": str(vectors_path),
                 "row_ids_path": str(row_ids_path),
             }
@@ -768,12 +877,13 @@ def build_dense_index(
         write_sealed_json(progress_path, progress, backup=True)
     del matrix
 
+    model_license, corpus_license = _dense_license(route)
     manifest.update(
         {
             "dense_index_built": True,
-            "dense_model": str(progress.get("model") or ""),
-            "dense_model_license": DENSE_MODEL_LICENSE,
-            "dense_training_corpus_license": DENSE_TRAINING_CORPUS_LICENSE,
+            **_dense_contract(route),
+            "dense_model_license": model_license,
+            "dense_training_corpus_license": corpus_license,
             "dense_count": len(texts),
             "dense_dimensions": dimensions,
             "dense_selection_sha256": selection_sha256,
@@ -821,9 +931,18 @@ class LibraryEvidenceIndex:
         self._query_vector_cache: dict[str, np.ndarray] = {}
         self._dense_vectors: np.memmap | None = None
         self._dense_row_ids: np.ndarray | None = None
-        if self.manifest.get("dense_index_built") is True and int(
-            self.manifest.get("dense_count") or 0
-        ):
+        self._dense_route: dict[str, str | None] | None = None
+        if self.manifest.get("dense_index_built") is True:
+            self._dense_route = _exact_route(
+                self.manifest.get("dense_route_identity")
+            )
+            if (
+                self._dense_route is None
+                or not _dense_contract_matches(self.manifest, self._dense_route)
+                or self._dense_route != resolved_route_identity()
+            ):
+                raise ClassificationError("dense evidence route contract mismatch")
+        if self._dense_route is not None and int(self.manifest.get("dense_count") or 0):
             vectors_path = Path(str(self.manifest.get("dense_vectors_path") or ""))
             row_ids_path = Path(str(self.manifest.get("dense_row_ids_path") or ""))
             if (
@@ -844,8 +963,9 @@ class LibraryEvidenceIndex:
         self,
         texts: Sequence[str],
         *,
+        source_sensitivities: Sequence[str] | None = None,
         batch_size: int = 64,
-        purpose: str = "explicit",
+        scheduler_purpose: str = "explicit",
     ) -> dict[str, Any]:
         """Embed unique query texts in bounded batches before retrieval."""
 
@@ -856,42 +976,62 @@ class LibraryEvidenceIndex:
                 "embedded": 0,
                 "cached": 0,
             }
-        unique = []
+        sensitivities = (
+            list(source_sensitivities)
+            if source_sensitivities is not None
+            else ["high"] * len(texts)
+        )
+        if len(sensitivities) != len(texts):
+            raise ClassificationError("dense query sensitivity count mismatch")
+        unique: list[tuple[str, str]] = []
         seen = set()
-        for text in texts:
-            key = sha256_bytes(str(text).encode("utf-8"))
+        route = self._dense_route
+        if route is None:
+            raise ClassificationError("dense query route is unavailable")
+        for text, sensitivity in zip(texts, sensitivities, strict=True):
+            folded = _fold_sensitivity(sensitivity)
+            key = _query_cache_key(str(text), route, folded)
             if key in seen or key in self._query_vector_cache:
                 continue
             seen.add(key)
-            unique.append(str(text))
+            unique.append((str(text), folded))
         embedded = 0
-        for start in range(0, len(unique), max(1, batch_size)):
-            batch_texts = unique[start : start + max(1, batch_size)]
-            model, vectors = embed_texts_cancellable(
-                batch_texts,
-                purpose=purpose,
-            )
-            if model != self.manifest.get("dense_model"):
-                raise ClassificationError("dense query embedding model changed")
-            matrix = np.asarray(vectors, dtype=np.float32)
-            if (
-                matrix.ndim != 2
-                or matrix.shape[0] != len(batch_texts)
-                or matrix.shape[1] != self._dense_vectors.shape[1]
-            ):
-                raise ClassificationError("dense query dimensions changed")
-            norms = np.linalg.norm(matrix, axis=1, keepdims=True)
-            matrix = np.divide(
-                matrix,
-                norms,
-                out=np.zeros_like(matrix),
-                where=norms != 0,
-            )
-            for text, vector in zip(batch_texts, matrix, strict=True):
-                self._query_vector_cache[sha256_bytes(text.encode("utf-8"))] = vector
-            embedded += len(batch_texts)
+        for sensitivity in ("normal", "high"):
+            values = [item for item in unique if item[1] == sensitivity]
+            for start in range(0, len(values), max(1, batch_size)):
+                batch = values[start : start + max(1, batch_size)]
+                batch_texts = [text for text, _sensitivity in batch]
+                batch_route, vectors = embed_texts_cancellable(
+                    batch_texts,
+                    source_data_class="page",
+                    source_sensitivity=sensitivity,
+                    embedding_purpose="query",
+                    scheduler_purpose=scheduler_purpose,
+                )
+                if batch_route != route:
+                    raise ClassificationError("dense query embedding route changed")
+                matrix = np.asarray(vectors, dtype=np.float32)
+                if (
+                    matrix.ndim != 2
+                    or matrix.shape[0] != len(batch_texts)
+                    or matrix.shape[1] != self._dense_vectors.shape[1]
+                ):
+                    raise ClassificationError("dense query dimensions changed")
+                norms = np.linalg.norm(matrix, axis=1, keepdims=True)
+                matrix = np.divide(
+                    matrix,
+                    norms,
+                    out=np.zeros_like(matrix),
+                    where=norms != 0,
+                )
+                for (text, folded), vector in zip(batch, matrix, strict=True):
+                    self._query_vector_cache[
+                        _query_cache_key(text, route, folded)
+                    ] = vector
+                embedded += len(batch_texts)
         return {
             "model": str(self.manifest.get("dense_model") or ""),
+            "route_identity": dict(route),
             "requested": len(texts),
             "embedded": embedded,
             "cached": len(texts) - embedded,
@@ -932,15 +1072,25 @@ class LibraryEvidenceIndex:
         *,
         arms: Sequence[str],
         limit: int,
+        source_sensitivity: str = "high",
     ) -> list[dict[str, Any]]:
         if self._dense_vectors is None or self._dense_row_ids is None:
             return []
-        cache_key = sha256_bytes(text.encode("utf-8"))
+        route = self._dense_route
+        if route is None:
+            raise ClassificationError("dense query route is unavailable")
+        folded = _fold_sensitivity(source_sensitivity)
+        cache_key = _query_cache_key(text, route, folded)
         query = self._query_vector_cache.get(cache_key)
         if query is None:
-            model, vectors = embed_texts_cancellable([text])
-            if model != self.manifest.get("dense_model"):
-                raise ClassificationError("dense query embedding model changed")
+            query_route, vectors = embed_texts_cancellable(
+                [text],
+                source_data_class="page",
+                source_sensitivity=folded,
+                embedding_purpose="query",
+            )
+            if query_route != route:
+                raise ClassificationError("dense query embedding route changed")
             query = np.asarray(vectors[0], dtype=np.float32)
             if query.ndim != 1 or query.shape[0] != self._dense_vectors.shape[1]:
                 raise ClassificationError("dense query dimensions changed")
@@ -1124,7 +1274,10 @@ class LibraryEvidenceProvider:
                 expanded_text, arms=support_arms, limit=max(64, limit * 4)
             )
             dense = self.evidence_index.query_support_dense(
-                expanded_text, arms=support_arms, limit=max(64, limit * 4)
+                expanded_text,
+                arms=support_arms,
+                limit=max(64, limit * 4),
+                source_sensitivity=_fold_sensitivity(page.get("sensitivity")),
             )
             rows_by_id = {int(row["row_id"]): dict(row) for row in (*lexical, *dense)}
             for row in lexical:

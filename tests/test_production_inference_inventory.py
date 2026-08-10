@@ -54,7 +54,6 @@ LEGACY_PRODUCTION_BYPASSES = {
         "ollama.chat": 1,
         "ollama.generate": 1,
     },
-    "src/chronovisor/recall/classification_embedding_worker.py": {"ollama.embed": 1},
     "src/chronovisor/recall/collection_anomaly_worker.py": {"ollama.chat": 1},
     "src/chronovisor/recall/recall_answer_adapters.py": {"ollama.chat": 1},
     "src/chronovisor/recall/recall_processor.py": {"ollama.chat": 1},

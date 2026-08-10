@@ -22,11 +22,13 @@ from chronovisor.core.research_scheduler import (
 )
 from chronovisor.core.runtime_config import (
     load_decision_router_config,
-    load_embedding_config,
 )
 from chronovisor.core.store import CHRONOVISOR_ROOT
 from chronovisor.ingest.convergence import ConvergenceStore, RetryPolicy
 from chronovisor.recall.classification import ClassificationError
+from chronovisor.recall.classification_embedding_worker import (
+    resolved_route_identity,
+)
 from chronovisor.recall.recall_runtime import RecallPolicy, RecallRequest, run_recall
 
 SCHEMA = "chronovisor.classification-resource-overlap-burn.v1"
@@ -310,7 +312,8 @@ def run_resource_burn(
             "resource burn requires at least 50 samples per stage"
         )
     config = load_decision_router_config()
-    embedding_model = load_embedding_config().model
+    embedding_route = resolved_route_identity()
+    embedding_model = str(embedding_route["model"] or "")
     protected_model = config.primary_model
     ollama.generate(
         "Reply with OK.",
@@ -326,12 +329,16 @@ def run_resource_burn(
     baseline = [row for row, _fingerprint in baseline_rows]
     baseline_fingerprints = {fingerprint for _row, fingerprint in baseline_rows}
     queue_store, queue_key = _isolated_requeue_store(root)
-    stages = (
+    stages = [
         ("proposal", "llm", config.primary_model),
         ("audit", "llm", config.challenger_model),
         ("tie_break", "llm", config.tie_break_model),
-        ("dense_embedding", "embed", embedding_model),
-    )
+    ]
+    if (
+        embedding_route["provider"] == "ollama"
+        and embedding_route["location"] == "local"
+    ):
+        stages.append(("dense_embedding", "embed", embedding_model))
     stage_rows: dict[str, list[dict[str, Any]]] = {}
     for stage, kind, model in stages:
         stage_rows[stage] = [
@@ -347,11 +354,20 @@ def run_resource_burn(
             )
             for index in range(samples_per_stage)
         ]
+    if len(stages) == 3:
+        stage_rows["dense_embedding"] = []
     baseline_latency = [int(row["latency_ms"]) for row in baseline]
     baseline_metrics = _metrics(baseline_latency)
     summaries: dict[str, Any] = {}
     all_rows = []
     for stage, rows in stage_rows.items():
+        if not rows:
+            summaries[stage] = {
+                "status": "not_applicable",
+                "sample_count": 0,
+                "embedding_route": embedding_route,
+            }
+            continue
         all_rows.extend(rows)
         latency = [int(row["recall"]["latency_ms"]) for row in rows]
         metrics = _metrics(latency)
@@ -379,17 +395,27 @@ def run_resource_burn(
     gates = {
         "baseline_stable": len(baseline_fingerprints) == 1,
         "sample_size_each_stage": all(
-            summary["sample_count"] >= 50 for summary in summaries.values()
+            summary.get("status") == "not_applicable"
+            or summary["sample_count"] >= 50
+            for summary in summaries.values()
         ),
         "foreground_admission": all(
             row["foreground_wait_ms"] <= 50 for row in all_rows
         ),
         "overlap_p95": all(
-            summary["p95_delta_ms"] <= 50 and summary["p95_delta_ratio"] <= 0.10
+            summary.get("status") == "not_applicable"
+            or (
+                summary["p95_delta_ms"] <= 50
+                and summary["p95_delta_ratio"] <= 0.10
+            )
             for summary in summaries.values()
         ),
         "overlap_p99": all(
-            summary["p99_delta_ms"] <= 100 and summary["p99_delta_ratio"] <= 0.15
+            summary.get("status") == "not_applicable"
+            or (
+                summary["p99_delta_ms"] <= 100
+                and summary["p99_delta_ratio"] <= 0.15
+            )
             for summary in summaries.values()
         ),
         "recall_deadline": all(
@@ -427,6 +453,7 @@ def run_resource_burn(
             "fingerprint": canonical,
         },
         "stages": summaries,
+        "embedding_route": embedding_route,
         "samples": stage_rows,
         "models": {
             "proposal": config.primary_model,
