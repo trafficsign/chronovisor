@@ -5,7 +5,6 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -80,39 +79,13 @@ def test_authority_observation_detects_a_b_a_file_generation(
     from chronovisor.core import runtime_config
 
     config_path = tmp_path / "config.toml"
-    artifact_path = tmp_path / "adoption.json"
     config_path.write_text("authority = 'a'\n", encoding="utf-8")
-    artifact_path.write_text('{"authority":"a"}\n', encoding="utf-8")
     monkeypatch.setattr(runtime_config, "CONFIG_FILE", config_path)
-    monkeypatch.setattr(
-        runtime_config,
-        "load_decision_router_config",
-        lambda: SimpleNamespace(adoption_artifact=str(artifact_path)),
-    )
-    monkeypatch.setattr(
-        semantic_hold,
-        "_fetch_local_model_metadata",
-        lambda models: {
-            "engine": {"name": "ollama", "version": "test"},
-            "models": {
-                model: {
-                    "name": model,
-                    "digest": str(index + 1) * 64,
-                    "size": 1,
-                    "modified_at": "stable",
-                    "details": {"quantization_level": "Q5"},
-                }
-                for index, model in enumerate(models)
-            },
-        },
-    )
     authority = _authority()
     before = semantic_hold.structured_review_authority_observation_sha256(authority)
 
     config_path.write_text("authority = 'b'\n", encoding="utf-8")
-    artifact_path.write_text('{"authority":"b"}\n', encoding="utf-8")
     config_path.write_text("authority = 'a'\n", encoding="utf-8")
-    artifact_path.write_text('{"authority":"a"}\n', encoding="utf-8")
     after = semantic_hold.structured_review_authority_observation_sha256(authority)
 
     assert before != after

@@ -14,8 +14,8 @@ def semantic_defer_wiki(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> tuple[Path, Path]:
-    from chronovisor.core import runtime_config, runtime_status, store
-    from chronovisor.decision import decision_router
+    from chronovisor.core import runtime_status, store
+    from chronovisor.ingest import failure_supervisor
 
     chronovisor_root = tmp_path / "wiki"
     raw_dir = chronovisor_root / "raw"
@@ -31,33 +31,17 @@ def semantic_defer_wiki(
     monkeypatch.setattr(runtime_status, "STATUS_FILE", runtime_dir / "status.json")
     monkeypatch.setattr(runtime_status, "EVENTS_FILE", runtime_dir / "events.jsonl")
     monkeypatch.setattr(runtime_status, "METRICS_FILE", runtime_dir / "metrics.jsonl")
-    monkeypatch.setattr(
-        runtime_config,
-        "load_decision_router_config",
-        lambda: SimpleNamespace(adoption_artifact=str(artifact)),
-    )
 
-    def resolve_test_artifact(config: SimpleNamespace) -> SimpleNamespace:
+    def current_test_authority() -> str | None:
         try:
-            artifact_sha256 = hashlib.sha256(
-                Path(config.adoption_artifact).read_bytes()
-            ).hexdigest()
+            return hashlib.sha256(artifact.read_bytes()).hexdigest()
         except OSError:
-            return SimpleNamespace(
-                source="bootstrap_current_policy",
-                error="adoption_artifact_invalid:unreadable",
-                artifact_sha256=None,
-            )
-        return SimpleNamespace(
-            source="adopted_artifact",
-            error=None,
-            artifact_sha256=artifact_sha256,
-        )
+            return None
 
     monkeypatch.setattr(
-        decision_router,
-        "resolve_router_policy",
-        resolve_test_artifact,
+        failure_supervisor,
+        "_current_adopted_authority_sha256",
+        current_test_authority,
     )
     return chronovisor_root, artifact
 
@@ -98,6 +82,64 @@ def test_classifies_only_explicit_authority_bound_semantic_no_quorum() -> None:
         "ingest.runtime_local_consensus_authority_unavailable"
     )
     assert legacy.failure_class == "ingest.local_consensus_nonconvergent"
+
+
+@pytest.mark.parametrize("location", ["remote", "local"])
+def test_current_semantic_defer_authority_uses_route_seal_without_ollama_controls(
+    monkeypatch: pytest.MonkeyPatch,
+    location: str,
+) -> None:
+    from chronovisor.core import ollama
+    from chronovisor.core.durable_state import canonical_sha256
+    from chronovisor.decision import decision_authority, decision_router
+    from chronovisor.ingest import failure_supervisor
+    from tests.semantic_hold_support import semantic_authority
+
+    authority = semantic_authority(
+        "ingest_reconciliation",
+        schema_name="ingest_reconciliation",
+    )
+    for index, route in enumerate(authority["router"]["routes"]):
+        assert isinstance(route, dict)
+        route.update(
+            provider=f"provider-{index}",
+            location=location,
+            protocol="openai-compatible" if location == "remote" else "local-native",
+            endpoint_sha256=str(index + 1) * 64 if location == "remote" else None,
+            revision=f"deployment-{index}" if location == "remote" else None,
+            ollama=None,
+        )
+
+    class FakeRouter:
+        pass
+
+    router = FakeRouter()
+    monkeypatch.setattr(decision_router, "DecisionRouter", lambda **_kwargs: router)
+    monkeypatch.setattr(
+        decision_authority,
+        "current_semantic_authority",
+        lambda lane, **kwargs: (
+            (authority, None)
+            if lane == "ingest_reconciliation" and kwargs.get("router") is router
+            else (None, "wrong_router")
+        ),
+    )
+
+    def forbidden(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("provider-neutral defer authority touched Ollama")
+
+    for name in (
+        "model_digests",
+        "model_resource_lease",
+        "observe_model_runtime",
+        "plan_model_residency",
+        "unload_named_model",
+    ):
+        monkeypatch.setattr(ollama, name, forbidden)
+
+    assert failure_supervisor._current_adopted_authority_sha256() == canonical_sha256(
+        authority
+    )
 
 
 def test_terminal_semantic_defer_preserves_raw_and_never_starts_self_heal(
@@ -361,7 +403,6 @@ def test_authority_change_releases_only_a_valid_adopted_artifact(
     error: str | None,
     artifact_sha256: str | None,
 ) -> None:
-    from chronovisor.decision import decision_router
     from chronovisor.ingest import failure_supervisor
 
     chronovisor_root, artifact = semantic_defer_wiki
@@ -376,16 +417,17 @@ def test_authority_change_releases_only_a_valid_adopted_artifact(
     new_sha256 = _sha256(artifact)
     assert new_sha256 != original_sha256
 
+    observed = (
+        new_sha256
+        if source == "adopted_artifact"
+        and error is None
+        and artifact_sha256 == "b" * 64
+        else None
+    )
     monkeypatch.setattr(
-        decision_router,
-        "resolve_router_policy",
-        lambda _config: SimpleNamespace(
-            source=source,
-            error=error,
-            artifact_sha256=(
-                new_sha256 if artifact_sha256 == "b" * 64 else artifact_sha256
-            ),
-        ),
+        failure_supervisor,
+        "_current_adopted_authority_sha256",
+        lambda: observed,
     )
 
     assert failure_supervisor.operational_deferred_raw_files([raw_path]) == {
@@ -393,13 +435,9 @@ def test_authority_change_releases_only_a_valid_adopted_artifact(
     }
 
     monkeypatch.setattr(
-        decision_router,
-        "resolve_router_policy",
-        lambda _config: SimpleNamespace(
-            source="adopted_artifact",
-            error=None,
-            artifact_sha256=new_sha256,
-        ),
+        failure_supervisor,
+        "_current_adopted_authority_sha256",
+        lambda: new_sha256,
     )
     assert failure_supervisor.operational_deferred_raw_files([raw_path]) == {}
 

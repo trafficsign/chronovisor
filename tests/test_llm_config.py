@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -388,6 +389,45 @@ def test_generic_openai_compatible_uses_shared_profile_constructor() -> None:
 
     assert isinstance(runtime._generation["answer"].backend, OpenAICompatibleAdapter)
     assert len(resolver.calls) == 1
+
+
+def test_role_revision_is_safe_and_propagates_to_runtime_route() -> None:
+    payload = _remote_payload(kind="openai-compatible")
+    provider = payload["llm"]["providers"]["remote"]  # type: ignore[index]
+    provider["endpoint"] = "https://gateway.example.test/v1"  # type: ignore[index]
+    role = payload["llm"]["roles"]["answer"]  # type: ignore[index]
+    role["revision"] = "deployment-2026.08.10"  # type: ignore[index]
+
+    config = parse_llm_config(payload)
+    runtime = build_llm_runtime(
+        config,
+        resolver=CountingResolver(),
+        sender_factory=lambda _profile: FakeSender(),
+    )
+    route = runtime.resolve_generation("answer")
+
+    assert config.roles["answer"].revision == "deployment-2026.08.10"
+    assert route.revision == "deployment-2026.08.10"
+    assert route.protocol == "openai-compatible"
+    assert route.endpoint_sha256 == hashlib.sha256(
+        b"https://gateway.example.test/v1"
+    ).hexdigest()
+
+
+@pytest.mark.parametrize(
+    "revision",
+    ["line\nbreak", "/private/model/path", "x" * 129, "unsafe@revision"],
+)
+def test_role_revision_rejects_unsafe_identity(revision: str) -> None:
+    payload = _remote_payload()
+    role = payload["llm"]["roles"]["answer"]  # type: ignore[index]
+    role["revision"] = revision  # type: ignore[index]
+
+    with pytest.raises(LLMConfigError) as exc:
+        parse_llm_config(payload)
+
+    assert exc.value.category is LLMConfigFailureCategory.SCHEMA_INVALID
+    assert revision not in repr(exc.value)
 
 
 @pytest.mark.parametrize(

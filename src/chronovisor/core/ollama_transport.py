@@ -43,6 +43,7 @@ class ChatResponse:
     # Ollama ``done`` flag as incomplete.
     done: bool = True
     done_reason: str | None = None
+    returned_model: str | None = None
 
 
 @dataclass(frozen=True)

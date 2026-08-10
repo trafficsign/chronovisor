@@ -1,4 +1,4 @@
-"""Canonical, subject-bound receipts for adopted local model consensus.
+"""Canonical, subject-bound receipts for configured route consensus.
 
 Persisted vote dictionaries are diagnostic only.  Authority comes from joining
 the receipt to the exact sealed DecisionArtifactStore object published by the
@@ -27,6 +27,7 @@ from chronovisor.decision.decision_artifact import (
 from chronovisor.decision.decision_authority import (
     compare_semantic_authority,
     current_semantic_authority,
+    returned_model_evidence_is_safe,
     semantic_authority_shape_error,
 )
 from chronovisor.decision.decision_lane_contracts import bind_lane_contract_request
@@ -40,9 +41,28 @@ from chronovisor.decision.local_structured import (
     structured_request_sha256,
 )
 
-MACHINE_CONSENSUS_RECEIPT_VERSION = 1
+MACHINE_CONSENSUS_RECEIPT_VERSION = 2
 DETERMINISTIC_PRODUCER_KIND = "deterministic_evidence_projection"
 _SHA256_ZERO = "0" * 64
+_RECEIPT_FIELDS = {
+    "schema_version",
+    "kind",
+    "lane",
+    "subject",
+    "subject_sha256",
+    "producer",
+    "authority",
+    "authority_sha256",
+    "request_sha256",
+    "schema_sha256",
+    "system_sha256",
+    "execution_fingerprint",
+    "decision_artifact_seal_sha256",
+    "agreement_sha256",
+    "created_at",
+    "previous_receipt_sha256",
+    "receipt_sha256",
+}
 _KIND_TO_SUBJECT_KIND = {
     "gold_entry_review": "gold_entry",
     "scorer_calibration_case_review": "scorer_calibration_case",
@@ -74,6 +94,14 @@ _KIND_PRODUCER_POLICY_SHA256 = {
 
 RouterFactory = Callable[[str], DecisionRouter]
 AuthorityProvider = Callable[[str], tuple[dict[str, Any] | None, str | None]]
+
+
+def _authority_models(authority: Mapping[str, Any]) -> list[object]:
+    router = authority.get("router")
+    routes = router.get("routes") if isinstance(router, Mapping) else None
+    if not isinstance(routes, list):
+        return []
+    return [route.get("model") for route in routes if isinstance(route, Mapping)]
 
 
 def _read_jsonl(path: Path) -> tuple[list[dict[str, Any]], str]:
@@ -369,12 +397,11 @@ def _vote_manifest_error(
     artifact_proof: object,
 ) -> str:
     router = authority.get("router")
-    models = router.get("models") if isinstance(router, Mapping) else None
+    routes = router.get("routes") if isinstance(router, Mapping) else None
     if (
         not isinstance(value, list)
-        or not isinstance(models, list)
-        or len(models) != 3
-        or len(set(models)) != 3
+        or not isinstance(routes, list)
+        or len(routes) != 3
         or len(value) not in {2, 3}
     ):
         return "machine_consensus_vote_manifest_invalid"
@@ -392,42 +419,61 @@ def _vote_manifest_error(
         if not isinstance(raw, Mapping):
             return "machine_consensus_vote_invalid"
         role = expected_roles[index]
-        model = models[index]
-        expected_identity = canonical_sha256(
-            {
-                "role": role,
-                "model": model,
-                "adoption_artifact_sha256": router.get("artifact_sha256"),
-            }
-        )
+        route = routes[index]
+        if not isinstance(route, Mapping):
+            return "machine_consensus_vote_authority_invalid"
+        model = route.get("model")
+        expected_identity = canonical_sha256(route)
         valid = raw.get("valid")
         signature = raw.get("signature_sha256")
+        returned_model = raw.get("returned_model")
         if (
             set(raw)
             != {
                 "role",
+                "provider",
                 "model",
+                "route_provenance",
+                "returned_model",
                 "model_identity_sha256",
                 "valid",
                 "signature_sha256",
                 "invalid_reason",
             }
             or raw.get("role") != role
+            or raw.get("provider") != route.get("provider")
             or raw.get("model") != model
+            or raw.get("route_provenance") != route
+            or not returned_model_evidence_is_safe(returned_model)
             or raw.get("model_identity_sha256") != expected_identity
             or not isinstance(valid, bool)
         ):
             return "machine_consensus_vote_authority_invalid"
         if valid:
-            if not isinstance(signature, str) or len(signature) != 64:
+            if (
+                (route.get("location") == "remote" and returned_model != model)
+                or not isinstance(signature, str)
+                or len(signature) != 64
+            ):
                 return "machine_consensus_vote_invalid"
             if raw.get("invalid_reason") is not None:
                 return "machine_consensus_vote_invalid"
             if signature == agreement_sha256:
                 agreeing.append(
-                    {"role": role, "model": model, "signature_sha256": signature}
+                    {
+                        "role": role,
+                        "provider": route.get("provider"),
+                        "model": model,
+                        "route_provenance": dict(route),
+                        "returned_model": returned_model,
+                        "signature_sha256": signature,
+                    }
                 )
-        elif signature is not None or not isinstance(raw.get("invalid_reason"), str):
+        elif (
+            signature is not None
+            or not isinstance(raw.get("invalid_reason"), str)
+            or not raw["invalid_reason"]
+        ):
             return "machine_consensus_vote_invalid"
         if index < 2:
             first_signatures.append(signature if valid else None)
@@ -495,7 +541,8 @@ def _ledger_chain_error(path: Path) -> tuple[list[dict[str, Any]], str]:
         receipt_sha = row.get("receipt_sha256")
         unsigned = {key: value for key, value in row.items() if key != "receipt_sha256"}
         if (
-            row.get("schema_version") != MACHINE_CONSENSUS_RECEIPT_VERSION
+            set(row) != _RECEIPT_FIELDS
+            or row.get("schema_version") != MACHINE_CONSENSUS_RECEIPT_VERSION
             or row.get("previous_receipt_sha256") != previous
             or receipt_sha != canonical_sha256(unsigned)
             or not isinstance(receipt_sha, str)
@@ -552,6 +599,8 @@ def validate_machine_consensus_receipt(
     if loaded.get("passed") is not True:
         return loaded
     row = loaded["receipt"]
+    if not isinstance(row, Mapping) or set(row) != _RECEIPT_FIELDS:
+        return {"passed": False, "reason": "machine_consensus_receipt_fields_invalid"}
     authority = row.get("authority")
     if not isinstance(authority, Mapping):
         return {"passed": False, "reason": "machine_consensus_authority_invalid"}
@@ -595,10 +644,10 @@ def validate_machine_consensus_receipt(
         request_sha = structured_request_sha256(
             bound_prompt, schema, effective_system
         )
-    except (TypeError, ValueError) as exc:
-        return {"passed": False, "reason": f"machine_consensus_request_invalid:{exc}"}
+    except (TypeError, ValueError):
+        return {"passed": False, "reason": "machine_consensus_request_invalid"}
     producer_error = _producer_error(
-        row.get("producer"), authority.get("router", {}).get("models"), kind=expected_kind
+        row.get("producer"), _authority_models(authority), kind=expected_kind
     )
     producer = row.get("producer")
     if (
@@ -633,7 +682,7 @@ def validate_machine_consensus_receipt(
     except Exception as exc:
         return {
             "passed": False,
-            "reason": f"machine_consensus_artifact_invalid:{exc}",
+            "reason": f"machine_consensus_artifact_invalid:{type(exc).__name__}",
         }
     if artifact is None:
         return {"passed": False, "reason": "machine_consensus_artifact_missing"}
@@ -711,7 +760,27 @@ def append_machine_consensus_receipt(
         > datetime.now(UTC) + timedelta(minutes=5)
     ):
         return {"status": "held", "reason": "machine_consensus_created_at_invalid"}
-    authority, authority_error = authority_provider(lane)
+    router = (
+        router_factory(lane)
+        if router_factory is not None
+        else DecisionRouter(
+            decision_lane=lane,
+            audit_role="recall_machine_consensus",
+            require_adopted=True,
+        )
+    )
+
+    def resolve_authority(*, refresh: bool = False) -> tuple[dict[str, Any] | None, str | None]:
+        if authority_provider is current_semantic_authority:
+            if refresh:
+                return current_semantic_authority(lane)
+            return current_semantic_authority(
+                lane,
+                router=router,
+            )
+        return authority_provider(lane)
+
+    authority, authority_error = resolve_authority()
     if authority_error is not None or authority is None:
         return {
             "status": "waiting",
@@ -724,7 +793,7 @@ def append_machine_consensus_receipt(
         "policy_sha256": producer_policy_sha256,
     }
     producer_error = _producer_error(
-        producer, authority.get("router", {}).get("models"), kind=kind
+        producer, _authority_models(authority), kind=kind
     )
     subject_shape_error = _subject_shape_error(
         subject,
@@ -745,15 +814,6 @@ def append_machine_consensus_receipt(
     )
     if trusted_request_error:
         return {"status": "held", "reason": trusted_request_error}
-    router = (
-        router_factory(lane)
-        if router_factory is not None
-        else DecisionRouter(
-            decision_lane=lane,
-            audit_role="recall_machine_consensus",
-            require_adopted=True,
-        )
-    )
     result = router.decide(prompt, schema, system=system, decision_lane=lane)
     if not result.ok:
         waiting_failures = {
@@ -773,7 +833,7 @@ def append_machine_consensus_receipt(
     )
     if decision_error:
         return {"status": "held", "reason": decision_error}
-    current, current_error = authority_provider(lane)
+    current, current_error = resolve_authority(refresh=True)
     drift_error = current_error or compare_semantic_authority(
         authority, current, lane=lane
     )

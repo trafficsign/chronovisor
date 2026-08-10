@@ -27,8 +27,8 @@ from chronovisor.core.durable_state import (
 )
 from chronovisor.core.sealed_artifact_decoder import schema_matches
 
-EXECUTION_FINGERPRINT_VERSION = 1
-DECISION_ARTIFACT_SCHEMA = "chronovisor.canonical-decision-artifact.v1"
+EXECUTION_FINGERPRINT_VERSION = 2
+DECISION_ARTIFACT_SCHEMA = "chronovisor.canonical-decision-artifact.v2"
 
 
 class DecisionArtifactError(RuntimeError):
@@ -101,24 +101,45 @@ class DecisionArtifactStore:
             raise DecisionArtifactError("decision artifact has no two-vote proof")
         agreement = payload.get("agreement_sha256")
         roles: set[str] = set()
-        models: set[str] = set()
+        voters: set[str] = set()
         for row in proof:
             if not isinstance(row, dict):
                 raise DecisionArtifactError("decision artifact quorum proof is malformed")
             role = row.get("role")
             model = row.get("model")
+            provider = row.get("provider")
+            route_provenance = row.get("route_provenance")
+            returned_model = row.get("returned_model")
             signature = row.get("signature_sha256")
             if (
-                not isinstance(role, str)
+                set(row)
+                != {
+                    "role",
+                    "provider",
+                    "model",
+                    "route_provenance",
+                    "returned_model",
+                    "signature_sha256",
+                }
+                or not isinstance(role, str)
                 or not role
+                or not isinstance(provider, str)
+                or not provider
                 or not isinstance(model, str)
                 or not model
+                or not isinstance(route_provenance, dict)
+                or route_provenance.get("provider") != provider
+                or route_provenance.get("model") != model
+                or (
+                    route_provenance.get("location") == "remote"
+                    and returned_model != model
+                )
                 or signature != agreement
             ):
                 raise DecisionArtifactError("decision artifact quorum proof is invalid")
             roles.add(role)
-            models.add(model)
-        if len(roles) < 2 or len(models) < 2:
+            voters.add(canonical_sha256(route_provenance))
+        if len(roles) < 2 or len(voters) < 2:
             raise DecisionArtifactError(
                 "decision artifact quorum proof lacks independent voters"
             )
@@ -146,7 +167,7 @@ class DecisionArtifactStore:
                 "agreement_sha256": agreement_sha256,
                 "quorum_proof": quorum_proof,
                 "provenance": dict(provenance),
-                "mutation_authority": "local_quorum_only",
+                "mutation_authority": "configured_route_quorum",
                 "frontier_calls": 0,
             }
         )

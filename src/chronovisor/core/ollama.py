@@ -11,6 +11,9 @@ from chronovisor.core import ollama_calibration as _ollama_calibration
 from chronovisor.core import ollama_lease as _ollama_lease
 from chronovisor.core import ollama_telemetry as _ollama_telemetry
 from chronovisor.core import ollama_transport as _ollama_transport
+from chronovisor.core.llm_runtime import (
+    safe_metadata_identifier as safe_metadata_identifier,
+)
 from chronovisor.core.runtime_config import (
     DEFAULT_EMBEDDING_MODEL,
     DEFAULT_INGEST_MODEL,
@@ -94,6 +97,9 @@ class RuntimeGenerationRoute:
     model: str
     location: str
     structured_output: bool
+    protocol: str = "unknown"
+    endpoint_sha256: str | None = None
+    revision: str | None = None
 
 
 def runtime_generation_routes(
@@ -113,6 +119,9 @@ def runtime_generation_routes(
                 model=route.model,
                 location=route.location.value,
                 structured_output=route.capabilities.structured_output,
+                protocol=route.protocol,
+                endpoint_sha256=route.endpoint_sha256,
+                revision=route.revision,
             )
             for route in (runtime.resolve_generation(role) for role in roles)
         )
@@ -241,6 +250,11 @@ def runtime_structured_chat(
         eval_count=result.usage.output_tokens,
         done=result.completed,
         done_reason=result.finish_reason,
+        returned_model=(
+            str(result.metadata["returned_model"])
+            if isinstance(result.metadata.get("returned_model"), str)
+            else None
+        ),
     )
 
 

@@ -150,7 +150,7 @@ def _structured_route_result(
         result["decision_policy"] = policy_audit
         result["decision_execution"] = decision_execution
         return result
-    if router_policy_source != "adopted_artifact":
+    if router_policy_source != "runtime_role_mapping":
         reason = f"decision_lane_unadopted:{decision_lane}"
         failure = _routine_failure(
             "local_decision_artifact_required",
@@ -299,6 +299,8 @@ def _structured_semantic_cache_result_error(
 
 def _structured_authority_observation(
     authority: dict[str, Any],
+    *,
+    router: Any | None = None,
 ) -> str | None:
     """Return an opaque mutable-source generation for the in-flight guard."""
 
@@ -306,15 +308,19 @@ def _structured_authority_observation(
         return semantic_hold.structured_review_authority_observation_sha256(
             authority,
             router_config=_STRUCTURED_REVIEW_ROUTER_CONFIG.get(),
+            router=router,
         )
     except Exception:
-        # Enabled adopted lanes fail closed before inference when the mutable
+        # Enabled route-authorized lanes fail closed before inference when mutable
         # authority generation cannot be observed.
         return None
 
 
 def _current_structured_authority(
     lane: str,
+    *,
+    router: Any | None = None,
+    refresh_router: bool = False,
 ) -> tuple[dict[str, Any] | None, str | None]:
     """Resolve lane authority behind a narrow, test-isolated seam."""
 
@@ -323,6 +329,8 @@ def _current_structured_authority(
     return current_semantic_authority(
         lane,
         router_config=_STRUCTURED_REVIEW_ROUTER_CONFIG.get(),
+        router=router,
+        refresh_router=refresh_router,
     )
 
 
@@ -516,7 +524,7 @@ def run_structured_review(
     record_replay: bool = True,
     system: str | None = None,
 ) -> dict[str, Any]:
-    """Resolve a routine structured decision using local models only."""
+    """Resolve a routine structured decision using fixed configured routes."""
     del (
         repo_root,
         timeout,
@@ -598,6 +606,15 @@ def run_structured_review(
         return result
 
     review_router_config = load_decision_router_config()
+    router = DecisionRouter(
+        config=review_router_config,
+        audit_root=audit_root,
+        audit_role=decision_lane or model_role,
+        record_replay=record_replay,
+        require_adopted=lane_mode == "enabled",
+        decision_lane=decision_lane,
+    )
+    policy_audit["router_policy"] = router.authority_router()
 
     authority: dict[str, Any] | None = None
     authority_observation_sha256: str | None = None
@@ -606,7 +623,8 @@ def run_structured_review(
         config_token = _STRUCTURED_REVIEW_ROUTER_CONFIG.set(review_router_config)
         try:
             candidate_authority, authority_error = _current_structured_authority(
-                decision_lane
+                decision_lane,
+                router=router,
             )
             if authority_error is None and isinstance(candidate_authority, dict):
                 expected_policy_authority = {
@@ -617,7 +635,8 @@ def run_structured_review(
                 }
                 if candidate_authority.get("policy") == expected_policy_authority:
                     candidate_observation_sha256 = _structured_authority_observation(
-                        candidate_authority
+                        candidate_authority,
+                        router=router,
                     )
                     try:
                         if candidate_observation_sha256 is None:
@@ -644,20 +663,11 @@ def run_structured_review(
         finally:
             _STRUCTURED_REVIEW_ROUTER_CONFIG.reset(config_token)
 
-    router = DecisionRouter(
-        config=review_router_config,
-        audit_root=audit_root,
-        audit_role=decision_lane or model_role,
-        record_replay=record_replay,
-        require_adopted=lane_mode == "enabled",
-        decision_lane=decision_lane,
-    )
-    policy_audit["router_policy"] = router.policy.audit_record()
     cache_eligible = bool(
         authority is not None
         and cache_epoch is not None
-        and router.policy.source == "adopted_artifact"
-        and router.policy.audit_record() == authority.get("router")
+        and router.policy.source == "runtime_role_mapping"
+        and router.authority_router() == authority.get("router")
     )
 
     def authority_guard_error(stage: str) -> str | None:
@@ -667,9 +677,13 @@ def run_structured_review(
             or not isinstance(decision_lane, str)
         ):
             return f"decision authority observation unavailable {stage} local review"
-        current_authority, current_error = _current_structured_authority(decision_lane)
+        current_authority, current_error = _current_structured_authority(
+            decision_lane,
+            router=router,
+            refresh_router=True,
+        )
         current_observation = (
-            _structured_authority_observation(current_authority)
+            _structured_authority_observation(current_authority, router=router)
             if isinstance(current_authority, dict)
             else None
         )
@@ -712,7 +726,7 @@ def run_structured_review(
             policy_audit=policy_audit,
         )
 
-    if lane_mode == "enabled" and router.policy.source == "adopted_artifact":
+    if lane_mode == "enabled" and router.policy.source == "runtime_role_mapping":
         if not cache_eligible:
             return authority_failure(
                 "decision authority observation unavailable before local review"

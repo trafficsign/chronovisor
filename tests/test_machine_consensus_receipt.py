@@ -80,8 +80,27 @@ def _config(**overrides: object) -> DecisionRouterConfig:
 
 
 def _authority(config: DecisionRouterConfig, *, artifact: str = "a" * 64) -> dict:
+    routes = [
+        {
+            "role": f"classification.{role}",
+            "provider": "custom_transport",
+            "model": model,
+            "location": "local",
+            "protocol": "custom-transport",
+            "endpoint_sha256": None,
+            "revision": None,
+            "ollama": None,
+        }
+        for role, model in zip(
+            ("primary", "challenger", "tie_break"),
+            (config.primary_model, config.challenger_model, config.tie_break_model),
+            strict=True,
+        )
+    ]
+    if artifact != "a" * 64:
+        routes[0]["revision"] = artifact
     return {
-        "source": "adopted_local_consensus",
+        "source": "configured_runtime_consensus",
         "authority_version": AUTHORITY_VERSION,
         "lane": LANE,
         "lane_contract_sha256": lane_contract_sha256(LANE),
@@ -90,7 +109,6 @@ def _authority(config: DecisionRouterConfig, *, artifact: str = "a" * 64) -> dic
             decision_lane_contract_case_manifest_sha256()
         ),
         "quorum_safety_policy_version": QUORUM_SAFETY_POLICY_VERSION,
-        "capability_sha256": "8" * 64,
         "policy": {
             "kind": "consensus",
             "schema_name": LANE,
@@ -98,14 +116,9 @@ def _authority(config: DecisionRouterConfig, *, artifact: str = "a" * 64) -> dic
             "error": None,
         },
         "router": {
-            "source": "adopted_artifact",
-            "artifact_sha256": artifact,
+            "source": "runtime_role_mapping",
             "error": None,
-            "models": [
-                config.primary_model,
-                config.challenger_model,
-                config.tie_break_model,
-            ],
+            "routes": routes,
         },
     }
 
@@ -239,8 +252,7 @@ def _router(
     )
     router.policy = RouterPolicyResolution(
         config=config,
-        source="adopted_artifact",
-        artifact_sha256="a" * 64,
+        source="runtime_role_mapping",
     )
     router.config = config
     router._adoption_artifact_nominated = True
@@ -260,7 +272,9 @@ def installed_authority(
     monkeypatch.setattr(
         decision_authority,
         "current_semantic_authority",
-        lambda lane: (authority, None) if lane == LANE else (None, "wrong_lane"),
+        lambda lane, **_kwargs: (
+            (authority, None) if lane == LANE else (None, "wrong_lane")
+        ),
     )
     return config, authority
 
@@ -461,6 +475,107 @@ def test_no_quorum_and_duplicate_models_never_publish_receipt(
     assert not ledger.exists()
     assert duplicate_result["status"] == "held"
     assert not duplicate_ledger.exists()
+
+
+def test_invalid_vote_is_excluded_from_receipt_quorum(
+    tmp_path: Path, installed_authority: tuple[DecisionRouterConfig, dict]
+) -> None:
+    config, authority = installed_authority
+    subject = _subject()
+    approved = json.dumps(_decision(subject))
+
+    accepted, transport, ledger, _prompt = _append(
+        tmp_path,
+        config,
+        authority,
+        subject,
+        {
+            config.primary_model: [TimeoutError("not durable")],
+            config.challenger_model: [approved],
+            config.tie_break_model: [approved],
+        },
+    )
+
+    assert accepted["status"] == "accepted"
+    assert len(transport.requests) == 3
+    assert ledger.exists()
+
+    held_subject = {**subject, "episode_id": "episode-no-quorum"}
+    held_approved = json.dumps(_decision(held_subject))
+    held, held_transport, held_ledger, _ = _append(
+        tmp_path / "no-quorum",
+        config,
+        authority,
+        held_subject,
+        {
+            config.primary_model: [TimeoutError("not durable")],
+            config.challenger_model: [held_approved],
+            config.tie_break_model: [TimeoutError("not durable")],
+        },
+    )
+
+    assert held["status"] == "held"
+    assert len(held_transport.requests) == 3
+    assert not held_ledger.exists()
+
+
+def test_receipt_rechecks_fresh_runtime_authority_after_inference(
+    tmp_path: Path,
+    installed_authority: tuple[DecisionRouterConfig, dict],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from chronovisor.decision import machine_consensus_receipt
+
+    config, authority = installed_authority
+    changed_authority = _authority(config, artifact="9" * 64)
+    subject = _subject()
+    approved = json.dumps(_decision(subject))
+    transport = ModelTransport(
+        {
+            config.primary_model: [approved],
+            config.challenger_model: [approved],
+        }
+    )
+    router = _router(tmp_path, config, transport)
+    observed_routers: list[object | None] = []
+
+    def dynamic_authority(lane: str, **kwargs: object) -> tuple[dict, None]:
+        assert lane == LANE
+        observed_router = kwargs.get("router")
+        observed_routers.append(observed_router)
+        return (authority if observed_router is router else changed_authority), None
+
+    monkeypatch.setattr(
+        machine_consensus_receipt,
+        "current_semantic_authority",
+        dynamic_authority,
+    )
+    prompt = build_recall_answer_adjudication_prompt(
+        {"subject": subject, "subject_sha256": canonical_sha256(subject)}
+    )
+    ledger = tmp_path / "recall" / "drifted-authority-receipts.jsonl"
+
+    result = append_machine_consensus_receipt(
+        kind="gold_entry_review",
+        subject=subject,
+        producer_policy_sha256=GOLD_ENTRY_PRODUCER_POLICY_SHA256,
+        prompt=prompt,
+        schema=RECALL_ANSWER_ADJUDICATION_SCHEMA,
+        system=None,
+        lane=LANE,
+        ledger_file=ledger,
+        chronovisor_root=tmp_path,
+        router_factory=lambda _lane: router,
+        authority_provider=dynamic_authority,
+    )
+
+    assert result == {
+        "status": "waiting",
+        "reason": "decision authority changed before effect",
+    }
+    assert observed_routers == [router, None]
+    assert len(transport.requests) == 2
+    assert not ledger.exists()
 
 
 def test_search_candidate_receipt_builds_offline_exact_source_ledger(
@@ -809,6 +924,52 @@ def test_receipt_ledger_rejects_bad_tail_future_time_and_wrong_policy(
     assert wrong["status"] == "held"
     assert wrong["reason"] == "machine_consensus_producer_invalid"
     assert wrong_transport.requests == []
+
+
+def test_receipt_ledger_rejects_rehashed_extra_canary_field(
+    tmp_path: Path, installed_authority: tuple[DecisionRouterConfig, dict]
+) -> None:
+    config, authority = installed_authority
+    subject = _subject()
+    approved = json.dumps(_decision(subject))
+    result, _transport, ledger, prompt = _append(
+        tmp_path,
+        config,
+        authority,
+        subject,
+        {
+            config.primary_model: [approved],
+            config.challenger_model: [approved],
+        },
+    )
+    row = json.loads(ledger.read_text(encoding="utf-8"))
+    canary = "CANARY private prompt must not be durable"
+    row["prompt"] = canary
+    row["receipt_sha256"] = canonical_sha256(
+        {key: value for key, value in row.items() if key != "receipt_sha256"}
+    )
+    ledger.write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+    checked = validate_machine_consensus_receipt(
+        row["receipt_sha256"],
+        expected_kind="gold_entry_review",
+        expected_subject=subject,
+        expected_producer_policy_sha256=GOLD_ENTRY_PRODUCER_POLICY_SHA256,
+        prompt=prompt,
+        schema=RECALL_ANSWER_ADJUDICATION_SCHEMA,
+        system=None,
+        lane=LANE,
+        ledger_file=ledger,
+        chronovisor_root=tmp_path,
+        current_authority=authority,
+    )
+
+    assert checked == {
+        "passed": False,
+        "reason": "machine_consensus_ledger_chain_invalid",
+    }
+    assert canary not in repr(checked)
+    assert result["status"] == "accepted"
 
 
 def test_newer_packet_supersedes_same_logical_candidate_without_live_read(

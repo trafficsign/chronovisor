@@ -1238,6 +1238,7 @@ class DecisionVote:
     provider: str
     result: LocalStructuredResult
     requested_num_ctx: int
+    route_provenance: Mapping[str, Any]
     signature: str | None = None
     signature_sha256: str | None = None
     invalid_reason: str | None = None
@@ -1262,6 +1263,8 @@ class DecisionVote:
             "role": self.role,
             "provider": self.provider,
             "model": self.model,
+            "route_provenance": dict(self.route_provenance),
+            "returned_model": self.result.returned_model,
             "requested_num_ctx": self.requested_num_ctx,
             "valid": self.valid,
             "signature_sha256": self.signature_sha256,
@@ -1339,7 +1342,7 @@ class DecisionRouterResult:
 def _config_error(
     config: DecisionRouterConfig,
     *,
-    model_identities: Sequence[tuple[str, str]] | None = None,
+    model_identities: Sequence[tuple[str, ...]] | None = None,
 ) -> str | None:
     models = (
         config.primary_model.strip(),
@@ -1558,6 +1561,7 @@ class DecisionRouter:
                     model=model,
                     location="local",
                     structured_output=True,
+                    protocol="custom-transport",
                 )
                 for role, model in zip(
                     _ROLE_NAMES,
@@ -1606,7 +1610,14 @@ class DecisionRouter:
         self.replay_path = replay_path
         self.audit_store = LocalConsensusAuditStore(audit_root)
         route_identities = (
-            tuple((route.provider, route.model) for route in self.routes.values())
+            tuple(
+                (
+                    route.protocol,
+                    route.endpoint_sha256 or route.provider,
+                    route.model,
+                )
+                for route in self.routes.values()
+            )
             if transport is None and self.routes
             else None
         )
@@ -1614,8 +1625,15 @@ class DecisionRouter:
             self.config,
             model_identities=route_identities,
         )
-        self._local_roles = frozenset(
+        self._model_metadata_provider = model_metadata_provider
+        self._route_provenance_snapshot: dict[str, dict[str, Any]] | None = None
+        self._all_local_roles = frozenset(
             role for role, route in self.routes.items() if route.location == "local"
+        )
+        self._local_roles = frozenset(
+            role
+            for role, route in self.routes.items()
+            if route.provider == "ollama" and route.location == "local"
         )
         self._local_models = tuple(
             dict.fromkeys(
@@ -1625,7 +1643,7 @@ class DecisionRouter:
             )
         )
         self._defer_local_control_until_tie = self._local_roles == {"tie_break"}
-        self.record_replay = self.record_replay and len(self._local_roles) == 3
+        self.record_replay = self.record_replay and len(self._all_local_roles) == 3
         self.live_resource_control = bool(
             self.config.adaptive_residency
             and self._local_roles
@@ -1677,6 +1695,104 @@ class DecisionRouter:
             decision_artifact_root
         )
 
+    def authority_router(
+        self, *, refresh: bool = False
+    ) -> dict[str, Any]:
+        """Return ordered safe route provenance for one authority epoch."""
+
+        if self._route_provenance_snapshot is not None and not refresh:
+            routes = [
+                dict(self._route_provenance_snapshot[role]) for role in _ROLE_NAMES
+            ]
+            return {"source": self.policy.source, "error": None, "routes": routes}
+
+        error = self.config_error
+        route_rows: dict[str, dict[str, Any]] = {}
+        local_ollama_models = tuple(
+            dict.fromkeys(
+                route.model
+                for route in self.routes.values()
+                if route.provider == "ollama" and route.location == "local"
+            )
+        )
+        metadata: Mapping[str, Any] = {}
+        if not error and local_ollama_models:
+            try:
+                from chronovisor.decision.local_model_eval import (
+                    _safe_model_metadata,
+                    fetch_local_model_metadata,
+                    validate_model_metadata_identity,
+                )
+
+                provider = self._model_metadata_provider or fetch_local_model_metadata
+                observed = provider(local_ollama_models)
+                if not isinstance(observed, Mapping):
+                    raise ValueError("local model metadata is unavailable")
+                metadata = _safe_model_metadata(observed, local_ollama_models)
+                validate_model_metadata_identity(metadata, local_ollama_models)
+            except Exception as exc:
+                error = f"local_route_provenance_invalid:{type(exc).__name__}"
+
+        engine = metadata.get("engine") if isinstance(metadata, Mapping) else None
+        model_metadata = (
+            metadata.get("models") if isinstance(metadata, Mapping) else None
+        )
+        model_metadata = model_metadata if isinstance(model_metadata, Mapping) else {}
+        for role in _ROLE_NAMES:
+            route = self.routes.get(role)
+            if route is None:
+                error = error or "runtime_route_missing"
+                continue
+            ollama_identity: dict[str, Any] | None = None
+            if route.provider == "ollama" and route.location == "local":
+                record = model_metadata.get(route.model)
+                record = record if isinstance(record, Mapping) else {}
+                details = record.get("details")
+                details = details if isinstance(details, Mapping) else {}
+                ollama_identity = {
+                    "engine": dict(engine) if isinstance(engine, Mapping) else None,
+                    "digest": record.get("digest"),
+                    "quantization_level": details.get("quantization_level"),
+                }
+            if route.location == "remote" and not route.revision:
+                error = error or f"remote_route_revision_required:{route.role}"
+            route_rows[role] = {
+                "role": route.role,
+                "provider": route.provider,
+                "model": route.model,
+                "location": route.location,
+                "protocol": route.protocol,
+                "endpoint_sha256": route.endpoint_sha256,
+                "revision": route.revision,
+                "ollama": ollama_identity,
+            }
+        if error is None and len(route_rows) == 3:
+            self._route_provenance_snapshot = {
+                role: dict(route_rows[role]) for role in _ROLE_NAMES
+            }
+        return {
+            "source": self.policy.source,
+            "error": error,
+            "routes": [dict(route_rows[role]) for role in _ROLE_NAMES if role in route_rows],
+        }
+
+    def _vote_route_provenance(self, role: str) -> dict[str, Any]:
+        if self._route_provenance_snapshot is None:
+            self.authority_router()
+        if self._route_provenance_snapshot is not None:
+            return dict(self._route_provenance_snapshot[role])
+        route = self.routes[role]
+        return {
+            "role": route.role,
+            "provider": route.provider,
+            "model": route.model,
+            "location": route.location,
+            "protocol": route.protocol,
+            "endpoint_sha256": route.endpoint_sha256,
+            "revision": route.revision,
+            "ollama": None,
+        }
+
     def _artifact_identity(
         self,
         *,
@@ -1701,7 +1817,10 @@ class DecisionRouter:
             return None
         from chronovisor.decision.decision_authority import current_semantic_authority
 
-        authority, authority_error = current_semantic_authority(decision_lane)
+        authority, authority_error = current_semantic_authority(
+            decision_lane,
+            **({"router": self} if self.policy.source == "runtime_role_mapping" else {}),
+        )
         if authority_error is not None or authority is None:
             raise DecisionArtifactError(
                 authority_error or "canonical decision authority is unavailable"
@@ -1712,7 +1831,11 @@ class DecisionRouter:
             schema,
             effective_system,
         )
-        router_policy = self.policy.audit_record()
+        router_policy = (
+            self.authority_router()
+            if self.policy.source == "runtime_role_mapping"
+            else self.policy.audit_record()
+        )
         model_runtime = {
             "primary_model": self.config.primary_model,
             "challenger_model": self.config.challenger_model,
@@ -1729,6 +1852,9 @@ class DecisionRouter:
                     "provider": route.provider,
                     "model": route.model,
                     "location": route.location,
+                    "protocol": route.protocol,
+                    "endpoint_sha256": route.endpoint_sha256,
+                    "revision": route.revision,
                 }
                 for route in self.routes.values()
             ],
@@ -1772,6 +1898,15 @@ class DecisionRouter:
             "challenger": self.config.challenger_model,
             "tie_break": self.config.tie_break_model,
         }
+        current_provenance = self.authority_router().get("routes")
+        current_provenance = (
+            current_provenance if isinstance(current_provenance, list) else []
+        )
+        provenance_by_role = {
+            str(row.get("role") or "").removeprefix("classification."): row
+            for row in current_provenance
+            if isinstance(row, Mapping)
+        }
         votes: list[DecisionVote] = []
         for row in proof_rows:
             if not isinstance(row, Mapping):
@@ -1781,6 +1916,8 @@ class DecisionRouter:
             model = row.get("model")
             provider = row.get("provider")
             role = row.get("role")
+            route_provenance = row.get("route_provenance")
+            returned_model = row.get("returned_model")
             if (
                 not isinstance(model, str)
                 or not isinstance(role, str)
@@ -1790,6 +1927,11 @@ class DecisionRouter:
             if (
                 expected_models.get(role) != model
                 or route is None
+                or route_provenance != provenance_by_role.get(role)
+                or (
+                    route.location == "remote"
+                    and returned_model != route.model
+                )
                 or (
                     self.policy.source == "runtime_role_mapping"
                     and route.provider != provider
@@ -1803,8 +1945,16 @@ class DecisionRouter:
                     role=role,
                     model=model,
                     provider=route.provider,
-                    result=LocalStructuredResult(ok=True, model=model, value=value),
+                    result=LocalStructuredResult(
+                        ok=True,
+                        model=model,
+                        value=value,
+                        returned_model=(
+                            returned_model if isinstance(returned_model, str) else None
+                        ),
+                    ),
                     requested_num_ctx=context_tier,
+                    route_provenance=dict(route_provenance or {}),
                     signature=signature,
                     signature_sha256=signature_sha256,
                     runtime_observation_status="artifact_replay",
@@ -1846,24 +1996,11 @@ class DecisionRouter:
         vote_manifest = [
             {
                 "role": vote.role,
-                **(
-                    {"provider": vote.provider}
-                    if self.policy.source == "runtime_role_mapping"
-                    else {}
-                ),
+                "provider": vote.provider,
                 "model": vote.model,
-                "model_identity_sha256": canonical_sha256(
-                    {
-                        "role": vote.role,
-                        **(
-                            {"provider": vote.provider}
-                            if self.policy.source == "runtime_role_mapping"
-                            else {}
-                        ),
-                        "model": vote.model,
-                        "adoption_artifact_sha256": self.policy.artifact_sha256,
-                    }
-                ),
+                "route_provenance": dict(vote.route_provenance),
+                "returned_model": vote.result.returned_model,
+                "model_identity_sha256": canonical_sha256(vote.route_provenance),
                 "valid": vote.valid,
                 "signature_sha256": vote.signature_sha256,
                 "invalid_reason": vote.invalid_reason,
@@ -1873,12 +2010,10 @@ class DecisionRouter:
         proof = [
             {
                 "role": vote.role,
-                **(
-                    {"provider": vote.provider}
-                    if self.policy.source == "runtime_role_mapping"
-                    else {}
-                ),
+                "provider": vote.provider,
                 "model": vote.model,
+                "route_provenance": dict(vote.route_provenance),
+                "returned_model": vote.result.returned_model,
                 "signature_sha256": vote.signature_sha256,
             }
             for vote in result.votes
@@ -1897,7 +2032,11 @@ class DecisionRouter:
             provenance={
                 "decision_lane": decision_lane,
                 "context_tier": context_tier,
-                "router_policy": self.policy.audit_record(),
+                "router_policy": (
+                    self.authority_router()
+                    if self.policy.source == "runtime_role_mapping"
+                    else self.policy.audit_record()
+                ),
                 "structured_generation_policy": structured_generation_policy(),
                 "vote_manifest": vote_manifest,
                 "vote_manifest_sha256": canonical_sha256(vote_manifest),
@@ -1943,6 +2082,7 @@ class DecisionRouter:
             max_output_chars=self.config.max_output_chars,
             max_feedback_chars=self.config.max_feedback_chars,
             resource_managed=self.live_resource_control,
+            require_returned_model=self.routes[role].location == "remote",
         )
 
     def _vote(
@@ -1960,6 +2100,25 @@ class DecisionRouter:
         ingest_repair_contract: _IngestRepairContract | None,
         source: object | None,
     ) -> DecisionVote:
+        route_provenance = self._vote_route_provenance(role)
+        if (
+            route_provenance.get("location") == "remote"
+            and not route_provenance.get("revision")
+        ):
+            return DecisionVote(
+                role=role,
+                model=model,
+                provider=self.routes[role].provider,
+                result=LocalStructuredResult(
+                    ok=False,
+                    model=model,
+                    failure_class="remote_route_revision_required",
+                    failure_reason="remote_route_revision_required",
+                ),
+                requested_num_ctx=num_ctx,
+                route_provenance=route_provenance,
+                invalid_reason="remote_route_revision_required",
+            )
         result = self._session(model, keep_alive, role, num_ctx, source).run(
             prompt,
             schema,
@@ -2004,6 +2163,7 @@ class DecisionRouter:
                 provider=self.routes[role].provider,
                 result=result,
                 requested_num_ctx=num_ctx,
+                route_provenance=route_provenance,
                 invalid_reason=result.failure_class or "structured_session_failed",
             )
         try:
@@ -2019,6 +2179,7 @@ class DecisionRouter:
                 provider=self.routes[role].provider,
                 result=result,
                 requested_num_ctx=num_ctx,
+                route_provenance=route_provenance,
                 invalid_reason=f"agreement_key_error:{type(exc).__name__}",
             )
         digest = hashlib.sha256(signature.encode("utf-8")).hexdigest()
@@ -2033,6 +2194,7 @@ class DecisionRouter:
             provider=self.routes[role].provider,
             result=result,
             requested_num_ctx=num_ctx,
+            route_provenance=route_provenance,
             signature=signature,
             signature_sha256=digest,
             decision_label=decision_label,
@@ -3296,10 +3458,10 @@ class DecisionRouter:
                             }
                         )
                     return replayed
-        except DecisionArtifactError as exc:
+        except DecisionArtifactError:
             return self._quarantined(
                 (),
-                f"canonical_decision_artifact_invalid:{exc}",
+                "canonical_decision_artifact_invalid",
                 failure_class="decision_artifact_invalid",
             )
 
@@ -3349,10 +3511,10 @@ class DecisionRouter:
                         "decision_artifact_seal_sha256": published.get("seal_sha256"),
                     },
                 )
-            except DecisionArtifactError as exc:
+            except DecisionArtifactError:
                 return self._quarantined(
                     result.votes,
-                    f"canonical_decision_artifact_publish_failed:{exc}",
+                    "canonical_decision_artifact_publish_failed",
                     failure_class="decision_artifact_invalid",
                 )
         return result
@@ -3370,6 +3532,28 @@ class DecisionRouter:
             plan.capacity_bytes > 0
             and estimate > 0
             and estimate <= plan.capacity_bytes
+        )
+
+    def _authoritative_route_failure(
+        self, votes: Sequence[DecisionVote]
+    ) -> DecisionRouterResult | None:
+        if votes[-1].invalid_reason != "remote_route_revision_required":
+            return None
+        return self._quarantined(
+            votes,
+            "authoritative_route_provenance_invalid",
+            failure_class="route_configuration_invalid",
+        )
+
+    def _required_pair_fits(self, plan: ollama.ModelResidencyPlan) -> bool:
+        if {"primary", "challenger"} & self._local_roles and plan.max_resident_models < 1:
+            return False
+        return all(
+            self._model_fits(role, model, plan)
+            for role, model in (
+                ("primary", self.config.primary_model),
+                ("challenger", self.config.challenger_model),
+            )
         )
 
     def _request_plan(
@@ -3685,18 +3869,7 @@ class DecisionRouter:
         # generated. The optional tie-break is checked only after a real pair
         # disagreement; a large third model must not block a valid two-vote
         # quorum that never needs it.
-        non_fitting_models = [
-            model
-            for role, model in (
-                ("primary", self.config.primary_model),
-                ("challenger", self.config.challenger_model),
-            )
-            if not self._model_fits(role, model, residency_plan)
-        ]
-        required_pair_has_local_role = bool({"primary", "challenger"} & self._local_roles)
-        if (
-            required_pair_has_local_role and residency_plan.max_resident_models < 1
-        ) or non_fitting_models:
+        if not self._required_pair_fits(residency_plan):
             return finalize(
                 self._quarantined(
                     (),
@@ -3767,6 +3940,8 @@ class DecisionRouter:
                 )
             )
         )
+        if (route_failure := self._authoritative_route_failure(votes)) is not None:
+            return finalize(route_failure)
         if residency_plan.max_resident_models == 1 and not self._evict_model(
             self.config.primary_model, eviction_events
         ):
@@ -3804,6 +3979,8 @@ class DecisionRouter:
                 )
             )
         )
+        if (route_failure := self._authoritative_route_failure(votes)) is not None:
+            return finalize(route_failure)
         if residency_plan.max_resident_models == 1 and not self._evict_model(
             self.config.challenger_model, eviction_events
         ):
@@ -3897,6 +4074,8 @@ class DecisionRouter:
                     )
                 )
             )
+            if (route_failure := self._authoritative_route_failure(votes)) is not None:
+                return finalize(route_failure)
             if residency_plan.max_resident_models == 1 and not self._evict_model(
                 self.config.tie_break_model, eviction_events
             ):

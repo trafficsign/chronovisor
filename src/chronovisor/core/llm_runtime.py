@@ -366,6 +366,9 @@ class GenerationRoute:
             structured_output=False,
         )
     )
+    protocol: str = "unknown"
+    endpoint_sha256: str | None = None
+    revision: str | None = None
 
 
 @dataclass(frozen=True)
@@ -375,6 +378,9 @@ class ResolvedGenerationRoute:
     model: str
     location: RouteLocation
     capabilities: BackendCapabilities
+    protocol: str
+    endpoint_sha256: str | None
+    revision: str | None
 
 
 @dataclass(frozen=True)
@@ -510,6 +516,9 @@ class LLMRuntime:
             model=route.model,
             location=route.backend.location,
             capabilities=route.capabilities,
+            protocol=route.protocol,
+            endpoint_sha256=route.endpoint_sha256,
+            revision=route.revision,
         )
 
     def embed(self, role: str, request: EmbeddingRequest) -> EmbeddingResult:

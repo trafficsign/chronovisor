@@ -39,6 +39,8 @@ queue_size = 8
 # fixed llm.roles."ingest.generation" route below.
 
 [decision_router]
+# Production voters are selected only by the fixed classification roles below.
+# These model fields remain compatibility defaults for injected/offline routers.
 primary_model = "maxwell1500/ornith-35b:Q5_K_M"
 challenger_model = "gpt-oss:20b"
 tie_break_model = "gemma4:26b"
@@ -329,6 +331,17 @@ model = "gpt-oss:20b"
 # model = "gpt-5-mini"
 # required_capabilities = ["structured_output"]
 #
+# One mixed remote decision role is shown below. All three decision roles must
+# resolve to distinct provider/model identities with structured capability.
+# Remote voters additionally require an operator-owned immutable revision;
+# provider-returned revision/fingerprint fields never replace it.
+# [llm.roles."classification.primary"]
+# capability = "generation"
+# provider = "openai"
+# model = "gpt-5-mini"
+# revision = "deployment-2026.08.10-primary"
+# required_capabilities = ["structured_output"]
+#
 # [llm.roles."ingest.generation"]
 # capability = "generation"
 # provider = "openai"
@@ -390,6 +403,9 @@ model = "gpt-oss:20b"
 # data_class = "raw"
 #
 # [[llm.egress_opt_in]]
+# role = "classification.primary"
+# data_class = "system"
+#
 # role = "research.planner"
 # data_class = "raw"
 #

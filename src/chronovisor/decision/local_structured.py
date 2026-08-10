@@ -321,6 +321,7 @@ class LocalStructuredResult:
     attempts: tuple[StructuredAttempt, ...] = ()
     failure_class: str | None = None
     failure_reason: str | None = None
+    returned_model: str | None = None
 
     @property
     def first_pass_valid(self) -> bool:
@@ -337,6 +338,7 @@ class LocalStructuredResult:
             "ok": self.ok,
             "model": self.model,
             "failure_class": self.failure_class,
+            "returned_model": self.returned_model,
             "first_pass_valid": self.first_pass_valid,
             "repair_turns": self.repair_turns,
             "attempts": [attempt.audit_record() for attempt in self.attempts],
@@ -564,11 +566,19 @@ def _default_transport_resource_request(
         pass
     try:
         decision_config = load_decision_router_config()
-        if model in {
-            decision_config.primary_model,
-            decision_config.challenger_model,
-            decision_config.tie_break_model,
-        }:
+        decision_routes = ollama.runtime_generation_routes(
+            (
+                "classification.primary",
+                "classification.challenger",
+                "classification.tie_break",
+            )
+        )
+        if any(
+            route.provider == "ollama"
+            and route.location == "local"
+            and route.model == model
+            for route in decision_routes
+        ):
             minimums.append(decision_config.min_num_ctx)
             maximums.append(decision_config.num_ctx)
             reserve_gib.append(decision_config.memory_reserve_gib)
@@ -1871,6 +1881,7 @@ class LocalStructuredSession:
         resource_max_num_ctx: int | None = None,
         resource_memory_reserve_gib: int | None = None,
         resource_lease_timeout_ms: int | None = None,
+        require_returned_model: bool = False,
     ) -> None:
         if model is None:
             if transport is not None:
@@ -1915,6 +1926,8 @@ class LocalStructuredSession:
             raise ValueError("structured session limits must be positive integers")
         if not isinstance(resource_managed, bool):
             raise ValueError("resource_managed must be a boolean")
+        if not isinstance(require_returned_model, bool):
+            raise ValueError("require_returned_model must be a boolean")
         if resource_lease_timeout_ms is not None and (
             isinstance(resource_lease_timeout_ms, bool)
             or not isinstance(resource_lease_timeout_ms, int)
@@ -1979,12 +1992,15 @@ class LocalStructuredSession:
         self.resource_max_num_ctx = resource_max_num_ctx
         self.resource_memory_reserve_gib = resource_memory_reserve_gib
         self.resource_lease_timeout_ms = resource_lease_timeout_ms
+        self.require_returned_model = require_returned_model
 
     def _failure(
         self,
         failure_class: str,
         reason: str,
         attempts: Sequence[StructuredAttempt] = (),
+        *,
+        returned_model: str | None = None,
     ) -> LocalStructuredResult:
         return LocalStructuredResult(
             ok=False,
@@ -1992,6 +2008,7 @@ class LocalStructuredSession:
             attempts=tuple(attempts),
             failure_class=failure_class,
             failure_reason=reason,
+            returned_model=returned_model,
         )
 
     def _prepare_initial_request(
@@ -2090,6 +2107,31 @@ class LocalStructuredSession:
             )
         return "", failure
 
+    def _returned_model_observation(
+        self,
+        response: ollama.ChatResponse | ollama.GenerateResponse,
+        attempts: Sequence[StructuredAttempt],
+    ) -> tuple[str | None, LocalStructuredResult | None]:
+        observed = ollama.safe_metadata_identifier(
+            getattr(response, "returned_model", None)
+        )
+        observed_model = observed if isinstance(observed, str) else None
+        if observed_model == self.model:
+            return observed_model, None
+        if not self.require_returned_model:
+            return None, None
+        failure_class = (
+            "returned_model_mismatch"
+            if observed_model is not None
+            else "returned_model_missing"
+        )
+        return None, self._failure(
+            failure_class,
+            failure_class,
+            attempts,
+            returned_model=None,
+        )
+
     def _run_impl(
         self,
         prompt: str,
@@ -2125,6 +2167,7 @@ class LocalStructuredSession:
 
         attempts: list[StructuredAttempt] = []
         seen_outputs: set[str] = set()
+        returned_model: str | None = None
 
         for index in range(self.max_responses):
             estimated_input_tokens = _estimated_message_tokens(messages)
@@ -2164,6 +2207,13 @@ class LocalStructuredSession:
             if isinstance(
                 transport_output, (ollama.ChatResponse, ollama.GenerateResponse)
             ):
+                observed_model, model_failure = self._returned_model_observation(
+                    transport_output, attempts
+                )
+                if model_failure is not None:
+                    return model_failure
+                if observed_model is not None:
+                    returned_model = observed_model
                 completion_failure = _completion_failure(transport_output)
                 if completion_failure is not None:
                     failure_class, failure_reason = completion_failure
@@ -2340,6 +2390,7 @@ class LocalStructuredSession:
                     model=self.model,
                     value=parsed,
                     attempts=tuple(attempts),
+                    returned_model=returned_model,
                 )
 
             if output_sha256 in seen_outputs:

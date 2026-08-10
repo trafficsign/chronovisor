@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from chronovisor.decision import semantic_hold
+from chronovisor.decision.decision_authority import AUTHORITY_VERSION
 from chronovisor.decision.decision_router import QUORUM_SAFETY_POLICY_VERSION
 
 
@@ -14,9 +15,30 @@ def semantic_authority(
     schema_name: str = "generic_decision",
     quorum_safety_policy_version: int = QUORUM_SAFETY_POLICY_VERSION,
 ) -> dict[str, object]:
+    models = ("ornith:test", "gpt-oss:test", "gemma:test")
+    routes = [
+        {
+            "role": f"classification.{role}",
+            "provider": "ollama",
+            "model": model,
+            "location": "local",
+            "protocol": "ollama-native",
+            "endpoint_sha256": "f" * 64,
+            "revision": None,
+            "ollama": {
+                "engine": {"name": "ollama", "version": "test"},
+                "digest": artifact_sha256 if index == 1 else str(index) * 64,
+                "quantization_level": "Q4_K_M",
+            },
+        }
+        for index, (role, model) in enumerate(
+            zip(("primary", "challenger", "tie_break"), models, strict=True),
+            start=1,
+        )
+    ]
     return {
-        "source": "adopted_local_consensus",
-        "authority_version": 1,
+        "source": "configured_runtime_consensus",
+        "authority_version": AUTHORITY_VERSION,
         "lane": lane,
         "lane_contract_sha256": "b" * 64,
         "lane_contract_manifest_sha256": "c" * 64,
@@ -29,22 +51,27 @@ def semantic_authority(
             "error": None,
         },
         "router": {
-            "source": "adopted_artifact",
-            "artifact_sha256": artifact_sha256,
+            "source": "runtime_role_mapping",
             "error": None,
-            "models": ["ornith:test", "gpt-oss:test", "gemma:test"],
+            "routes": routes,
         },
     }
 
 
-def _vote(role: str, model: str, signature: str) -> dict[str, object]:
+def _vote(role: str, route: dict[str, object], signature: str) -> dict[str, object]:
+    model = str(route["model"])
     return {
         "role": role,
+        "provider": route["provider"],
         "model": model,
+        "route_provenance": route,
+        "returned_model": None,
         "requested_num_ctx": 32_768,
         "valid": True,
         "signature_sha256": signature,
         "invalid_reason": None,
+        "decision_label": "needs_retry",
+        "effect_class": "conservative",
         "runtime_observation": {
             "status": "unavailable",
             "model_size_bytes": None,
@@ -54,6 +81,7 @@ def _vote(role: str, model: str, signature: str) -> dict[str, object]:
             "ok": True,
             "model": model,
             "failure_class": None,
+            "returned_model": None,
             "first_pass_valid": True,
             "repair_turns": 0,
             "attempts": [
@@ -80,8 +108,8 @@ def semantic_review(
     authority = authority or semantic_authority(lane)
     router = authority["router"]
     assert isinstance(router, dict)
-    models = router["models"]
-    assert isinstance(models, list)
+    routes = router["routes"]
+    assert isinstance(routes, list)
     reason = "local_models_did_not_reach_two_vote_quorum"
     policy = authority["policy"]
     assert isinstance(policy, dict)
@@ -106,6 +134,9 @@ def semantic_review(
         "local_consensus": {
             "status": "quarantined",
             "ok": False,
+            "conservative_veto_fired": False,
+            "conservative_veto_bypassed_by_lane_policy": False,
+            "dissent_effect_class": None,
             "quorum_safety_policy_version": QUORUM_SAFETY_POLICY_VERSION,
             "agreement_sha256": None,
             "failure_class": "local_consensus_failed",
@@ -113,9 +144,9 @@ def semantic_review(
             "num_ctx": 32_768,
             "residency": {},
             "votes": [
-                _vote("primary", str(models[0]), signatures[0]),
-                _vote("challenger", str(models[1]), signatures[1]),
-                _vote("tie_break", str(models[2]), signatures[2]),
+                _vote("primary", routes[0], signatures[0]),
+                _vote("challenger", routes[1], signatures[1]),
+                _vote("tie_break", routes[2], signatures[2]),
             ],
         },
         "decision_policy": {

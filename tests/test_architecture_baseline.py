@@ -1777,6 +1777,15 @@ W6O_RETIRED_RECALL_PROPOSER_SITE_IDS = (
 W6P_RETIRED_RECALL_RUBRIC_SITE_IDS = (
     "arch:381d4903c6f1a6ba31ad87d139a8f700cf430c8aa1f9d9206fd99941bb3d3915",
 )
+W6Q_RETIRED_DECISION_AUTHORITY_SITE_IDS = (
+    "arch:325c36ac99898061673506e472d6a92e50c308352e97fc70ced08e716cea1850",
+    "arch:4921db6601a9cc76eb3dc092a9b07af36614c3d8c89d7483e1e16effcbbf22c5",
+    "arch:59bdee220d4aa72219d35893fb0e2ca865ade850e449ad61e75cc20f9022561f",
+    "arch:611ab3e26145ebcf77478a6c8a5ca096332a4676754c2615ec26efa6feac331e",
+    "arch:6eaac76abab8ef085c85c92a9811519c05d344db533faae01b9ac115969698ff",
+    "arch:c302f8416cf7873ca019d9f541a614d76b4b8b54851083581de8b903b9ed120e",
+    "arch:f34cc356a94b3ce9d3ddd70697c9680db8c39230f9d9270283dfeae29240c33e",
+)
 X3_RETIRED_OKF_ENTRYPOINT_SITE_IDS = (
     "arch:4e6ad920fa6f8b1f04e30ba32d3c43fd862788b1c86a4e5ccc63d7f94425d12f",
     "arch:54e443f61185cdcda1bf8c079674fbed0539f07d6c11bcac1910539d0c1ee3c0",
@@ -1932,6 +1941,7 @@ RETIREMENT_HISTORY = {
                 *W6O_RETIRED_RECALL_PROPOSER_SITE_IDS,
                 *W6P_RETIRED_RECALL_RUBRIC_SITE_IDS,
                 *X3_RETIRED_OKF_ENTRYPOINT_SITE_IDS,
+                *W6Q_RETIRED_DECISION_AUTHORITY_SITE_IDS,
             )
         )
     ),
@@ -2682,7 +2692,7 @@ def test_current_exception_ledger_seed_and_schema_inventory_are_exact(
     assert detected_ids == ledger_ids == set(seed["exception_semantic_ids"]["active"])
     _assert_exact_retirement_history(architecture, seed)
     assert len(edge_rows) == current["worktree_architecture"]["edge_count"] == 44
-    assert sum(len(row["sites"]) for row in edge_rows) == len(raw_cross_sites) == 1370
+    assert sum(len(row["sites"]) for row in edge_rows) == len(raw_cross_sites) == 1367
     assert {
         field: counts[field]
         for field in (
@@ -2695,7 +2705,7 @@ def test_current_exception_ledger_seed_and_schema_inventory_are_exact(
         )
     } == {
         "exceptions": 44,
-        "cross_domain_sites": 1370,
+        "cross_domain_sites": 1367,
         "production_to_lab_edges": 0,
         "production_to_lab_static_sites": 0,
         "production_to_lab_dynamic_sites": 0,

@@ -53,6 +53,11 @@ def _isolate_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str,
     monkeypatch.setattr(raw_replay, "FAILURE_PACKETS_DIR", paths["packets"])
     monkeypatch.setattr(raw_replay, "QUARANTINED_RAW_DIR", paths["quarantine"])
     monkeypatch.setattr(failure_supervisor, "reset_raw_failure", lambda _raw: None)
+    monkeypatch.setattr(
+        failure_supervisor,
+        "_current_adopted_authority_sha256",
+        lambda: None,
+    )
     return paths
 
 
@@ -60,8 +65,7 @@ def test_auto_signals_skip_semantic_defer_until_authority_artifact_changes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from chronovisor.core import runtime_config, runtime_status, store
-    from chronovisor.decision import decision_router
+    from chronovisor.core import runtime_status, store
     from chronovisor.ingest import failure_supervisor
 
     paths = _isolate_paths(tmp_path, monkeypatch)
@@ -118,20 +122,9 @@ def test_auto_signals_skip_semantic_defer_until_authority_artifact_changes(
     authority_artifact = tmp_path / "adopted-router.json"
     authority_artifact.write_bytes(b"authority epoch one")
     monkeypatch.setattr(
-        runtime_config,
-        "load_decision_router_config",
-        lambda: SimpleNamespace(adoption_artifact=str(authority_artifact)),
-    )
-    monkeypatch.setattr(
-        decision_router,
-        "resolve_router_policy",
-        lambda config: SimpleNamespace(
-            source="adopted_artifact",
-            error=None,
-            artifact_sha256=hashlib.sha256(
-                Path(config.adoption_artifact).read_bytes()
-            ).hexdigest(),
-        ),
+        failure_supervisor,
+        "_current_adopted_authority_sha256",
+        lambda: hashlib.sha256(authority_artifact.read_bytes()).hexdigest(),
     )
     deferred_authority_sha256 = hashlib.sha256(
         authority_artifact.read_bytes()

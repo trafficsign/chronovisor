@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import stat
@@ -41,6 +42,7 @@ from chronovisor.core.llm_security import (
 )
 from chronovisor.core.nemotron_adapter import NemotronEmbeddingBackend
 from chronovisor.core.ollama_adapter import OllamaAdapter
+from chronovisor.core.ollama_transport import OLLAMA_URL
 from chronovisor.core.openai_compatible_adapter import compose_openai_compatible_adapter
 from chronovisor.core.provider_profiles import (
     CURATED_PROFILE_IDS,
@@ -133,6 +135,7 @@ class RoleDefinition:
     provider_id: str
     model: str
     required_capabilities: tuple[str, ...] = ()
+    revision: str | None = None
 
 
 @dataclass(frozen=True)
@@ -346,7 +349,7 @@ def _role(
     table = dict(value)
     _exact_keys(
         table,
-        {"capability", "provider", "model", "required_capabilities"},
+        {"capability", "provider", "model", "required_capabilities", "revision"},
     )
     try:
         capability = RoleCapability(_string(table.get("capability")))
@@ -358,6 +361,9 @@ def _role(
         raise _fail()
     model = _string(table.get("model"))
     required = _string_list(table.get("required_capabilities"))
+    revision = _string(table["revision"]) if "revision" in table else None
+    if revision is not None and safe_metadata_identifier(revision) is None:
+        raise _fail()
     if any(item not in _CAPABILITY_FIELDS for item in required):
         raise _fail()
     capabilities = provider.capabilities_for(model)
@@ -365,7 +371,7 @@ def _role(
         not getattr(capabilities, item) for item in required
     ):
         raise _fail(LLMConfigFailureCategory.CAPABILITY_UNAVAILABLE)
-    return RoleDefinition(role_name, capability, provider_id, model, required)
+    return RoleDefinition(role_name, capability, provider_id, model, required, revision)
 
 
 def _egress_opt_ins(
@@ -563,10 +569,27 @@ def build_llm_runtime(
     for role_name, role in config.roles.items():
         backend = backends[role.provider_id]
         if role.capability is RoleCapability.GENERATION:
+            provider = config.providers[role.provider_id]
+            if provider.profile is not None:
+                protocol = provider.profile.protocol.value
+                endpoint_sha256 = hashlib.sha256(
+                    provider.profile.endpoint.encode("utf-8")
+                ).hexdigest()
+            elif provider.kind == "ollama":
+                protocol = "ollama-native"
+                endpoint_sha256 = hashlib.sha256(
+                    OLLAMA_URL.encode("utf-8")
+                ).hexdigest()
+            else:
+                protocol = provider.kind
+                endpoint_sha256 = None
             generation[role_name] = GenerationRoute(
                 cast(GenerationBackend, backend),
                 role.model,
-                config.providers[role.provider_id].capabilities_for(role.model),
+                provider.capabilities_for(role.model),
+                protocol,
+                endpoint_sha256,
+                role.revision,
             )
         elif role.capability is RoleCapability.EMBEDDING:
             embedding[role_name] = EmbeddingRoute(

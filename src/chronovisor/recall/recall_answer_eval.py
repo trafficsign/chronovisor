@@ -3220,7 +3220,7 @@ def _legacy_machine_source_ledger_entry_error(entry: object) -> str:
     if (
         error is not None
         or not isinstance(authority, Mapping)
-        or authority.get("source") != "adopted_local_consensus"
+        or authority.get("source") != "configured_runtime_consensus"
         or not isinstance(execution_artifact, Mapping)
         or execution_artifact.get("seal_sha256") != artifact_seal
         or not isinstance(execution_identity, Mapping)
@@ -3505,8 +3505,7 @@ def _validated_search_label_candidate_receipt(
     authority = receipt.get("authority") if isinstance(receipt, Mapping) else None
     if (
         not isinstance(authority, Mapping)
-        or authority.get("source") != "adopted_local_consensus"
-        or not _valid_sha(authority.get("capability_sha256"))
+        or authority.get("source") != "configured_runtime_consensus"
     ):
         return {"passed": False, "reason": "machine_source_authority_invalid"}
     subject = _search_label_candidate_subject(packet)

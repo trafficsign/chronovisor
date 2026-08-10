@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Mapping
 from contextlib import AbstractContextManager
 from typing import Any
@@ -155,6 +156,8 @@ def compose_ollama_runtime(
                     embedding=True,
                     structured_output=True,
                 ),
+                "ollama-native",
+                hashlib.sha256(ollama.OLLAMA_URL.encode("utf-8")).hexdigest(),
             )
             for role, model in generation_roles.items()
         },

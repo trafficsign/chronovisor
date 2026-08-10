@@ -186,7 +186,7 @@ required_capabilities = ["structured_output"]
 # data_class = "raw"
 
 [decision_router]
-# Routine structured decisions require a two-vote local quorum. The complete
+# Routine structured decisions require a two-vote configured-route quorum. The complete
 # request-token budget, including both possible JSON-repair turns, selects the
 # smallest executable configured context bucket. Buckets below the lightest
 # full production-lane envelope are omitted; with the 2000-byte feedback budget
@@ -194,8 +194,9 @@ required_capabilities = ["structured_output"]
 # footprints at that exact size determine whether one, two, or three decision
 # runners may remain resident. A larger measured runner is reused within the
 # cap to avoid shrink/reload flap, but its actual context is recorded and never
-# counted as smaller-bucket adoption evidence. The offline adoption evaluator
-# uses a separate exact-bucket mode.
+# counted as smaller-bucket evaluation evidence. The offline adoption evaluator
+# uses a separate exact-bucket mode. Production model selection comes only from
+# llm.roles.classification.primary/challenger/tie_break below.
 primary_model = "maxwell1500/ornith-35b:Q5_K_M"
 challenger_model = "gpt-oss:20b"
 tie_break_model = "gemma4:26b"
@@ -227,10 +228,8 @@ max_resident_models = 3
 # identity. Repair option
 # policy 2 exposes no heuristic semantic receipts; both models judge the exact
 # raw and page bytes independently.
-# Invalid, partial, stale, or
-# engine/model-drifted artifacts make enabled semantic lanes quarantine before
-# inference. Set this to "" and keep the 19 model-backed lanes in shadow only
-# while compiling and evaluating a replacement candidate.
+# This artifact remains offline evaluation and rollout evidence. It does not
+# select production routes or gate use of a configured route authority.
 adoption_artifact = "~/.chronovisor/runtime/model-lab/local-eval/adoption-quorum2-lane27-evaluator21-YYYYMMDD.json"
 
 [decision_policies]
@@ -243,11 +242,10 @@ derived_index_rebuild = "enabled"
 claims_conflict = "enabled"
 system_code_repair = "enabled"
 
-# Post-adoption production has all 24 policy lanes enabled and zero in shadow:
-# the five deterministic/guarded lanes above plus these 19 model-backed
-# semantic lanes. Each semantic lane still fails closed unless the nominated
-# artifact validates as adopted for the exact models, engine, corpus, config,
-# context buckets, and policy versions.
+# Production has all 24 policy lanes enabled and zero in shadow: the five
+# deterministic/guarded lanes above plus these 19 model-backed semantic lanes.
+# Each semantic effect is bound to the exact configured route authority;
+# offline adoption/re-certification is not a utilization condition.
 autonomy_duplicate_resolution = "enabled"
 autonomy_retention = "enabled"
 content_correction_classification = "enabled"
@@ -571,6 +569,30 @@ query fallback, never another provider or a local model.
 
 ## Decision quorum safety
 
+Decision effects are bound to the exact ordered runtime routes
+`classification.primary`, `classification.challenger`, and
+`classification.tie_break`. Durable authority and receipts record only safe
+route identity: role, provider, model, local/remote location, protocol, a hash
+of the configured endpoint, and the optional role `revision`; the raw endpoint
+is never persisted. Local Ollama routes additionally bind the installed engine,
+model digest, and quantization. Other local providers do not call Ollama
+metadata or residency controls.
+
+A remote classification voter must set an operator-owned immutable `revision`
+on its existing `[llm.roles.<role>]` table. The provider response must also
+report the exact configured model. A missing revision, missing/mismatched
+returned model, schema/egress failure, or provider failure invalidates that
+route without retrying or selecting another route. Provider-returned revision
+or system-fingerprint metadata is invocation telemetry only and never supplies
+authority. Other remote roles may omit `revision`. The three classification
+roles must resolve to distinct provider/model identities and each selected
+profile/model must advertise structured-output capability; the example shows
+only one remote role in a mixed route set.
+
+Authority, execution-fingerprint, canonical-decision-artifact, semantic-hold,
+and machine-consensus receipt versions are fail-closed: older adopted-artifact
+or model-triplet seals are not reinterpreted as current runtime-route authority.
+
 The quorum-v2 lane exception is code-owned, not configurable through TOML. It
 contains exactly `lint_tag_repair`, `recall_auto_apply`, `orphan_link`,
 `metadata_backfill`, and `search_label`, whose reviewed effect contracts are
@@ -580,8 +602,8 @@ missing, empty, or unknown lane retain the conservative veto. An unclassifiable
 (`None`) dissent also remains fail-closed outside the five named lanes.
 
 Changing the set requires a source change, a quorum-safety policy-version bump,
-updated v27-or-later lane-contract evidence, and a newly validated adoption
-identity. A local config override cannot silently broaden it.
+updated v27-or-later lane-contract evidence, and newly generated route-bound
+authority/receipt artifacts. A local config override cannot silently broaden it.
 
 ## Environment Overrides
 

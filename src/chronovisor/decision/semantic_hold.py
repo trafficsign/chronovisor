@@ -1,10 +1,10 @@
-"""Strict durable holds for exact-epoch local semantic disagreement.
+"""Strict durable holds for exact-epoch semantic disagreement.
 
-The local decision router can return three individually valid votes without a
-safe quorum.  Re-sampling the same request under the same adopted authority is
-not recovery; it is nondeterministic mutation gambling.  This module defines a
-small, deterministic, self-hashed envelope that callers can persist and reuse
-until the request epoch or adopted authority actually changes.
+The decision router can return three individually valid votes without a safe
+quorum. Re-sampling the same request under the same configured route authority
+is not recovery; it is nondeterministic mutation gambling. This module defines
+a small, deterministic, self-hashed envelope that callers can persist and reuse
+until the request epoch or route authority actually changes.
 
 Only redacted router audit records and canonical digests are stored.  Prompts,
 model responses, and decision payloads are deliberately excluded from holds.
@@ -20,12 +20,10 @@ import os
 import re
 import tempfile
 from collections import Counter
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import Any
-
-import httpx
 
 from chronovisor.core.canonical_json import (
     canonical_json_sha256_strict as canonical_sha256,
@@ -52,12 +50,11 @@ from chronovisor.decision.semantic_epoch import (
 
 LOCAL_SEMANTIC_NO_QUORUM = "local_semantic_no_quorum"
 SEMANTIC_NO_QUORUM_HOLD_KIND = "local_semantic_no_quorum_hold"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
-STRUCTURED_REVIEW_HOLD_CACHE_SCHEMA_VERSION = 1
+STRUCTURED_REVIEW_HOLD_CACHE_SCHEMA_VERSION = 2
 STRUCTURED_REVIEW_HOLD_CACHE_KIND = "structured_review_semantic_no_quorum_cache"
-STRUCTURED_REVIEW_HOLD_RESOLVER_VERSION = 1
-_OLLAMA_URL = "http://localhost:11434"
+STRUCTURED_REVIEW_HOLD_RESOLVER_VERSION = 2
 
 _SEMANTIC_REASONS = frozenset(
     {
@@ -90,7 +87,7 @@ STRUCTURED_REVIEW_HOLD_RESOLVER_SHA256 = canonical_sha256(
         "semantic_reasons": sorted(_SEMANTIC_REASONS),
         "quorum": 2,
         "vote_count": 3,
-        "requires_adopted_lane_router_provenance": True,
+        "requires_configured_route_provenance": True,
     }
 )
 
@@ -144,98 +141,17 @@ def _file_observation(path: Path) -> dict[str, Any]:
     return observation
 
 
-def _fetch_local_model_metadata(models: Sequence[str]) -> Mapping[str, Any]:
-    """Read Ollama engine/tag metadata without loading or running a model."""
-
-    timeout = httpx.Timeout(connect=3.0, read=10.0, write=3.0, pool=3.0)
-    with httpx.Client(base_url=_OLLAMA_URL, timeout=timeout) as client:
-        version_response = client.get("/api/version")
-        version_response.raise_for_status()
-        tags_response = client.get("/api/tags")
-        tags_response.raise_for_status()
-    version_body = version_response.json()
-    tags_body = tags_response.json()
-    available = tags_body.get("models") if isinstance(tags_body, dict) else []
-    available = available if isinstance(available, list) else []
-    records: dict[str, Any] = {}
-    for requested in models:
-        match = next(
-            (
-                row
-                for row in available
-                if isinstance(row, dict)
-                and requested
-                in {str(row.get("name") or ""), str(row.get("model") or "")}
-            ),
-            None,
-        )
-        records[requested] = match or {"name": requested, "status": "missing"}
-    return {
-        "engine": {
-            "name": "ollama",
-            "version": version_body.get("version")
-            if isinstance(version_body, dict)
-            else None,
-        },
-        "models": records,
-    }
-
-
-def _safe_model_metadata(
-    payload: Mapping[str, Any], models: Sequence[str]
-) -> dict[str, Any]:
-    engine = payload.get("engine")
-    safe_engine = {
-        "name": str(engine.get("name") or "") if isinstance(engine, Mapping) else "",
-        "version": str(engine.get("version") or "")
-        if isinstance(engine, Mapping)
-        else "",
-    }
-    source_models = payload.get("models")
-    source_models = source_models if isinstance(source_models, Mapping) else {}
-    safe_models: dict[str, Any] = {}
-    detail_keys = (
-        "families",
-        "family",
-        "format",
-        "parameter_size",
-        "parent_model",
-        "quantization_level",
-    )
-    for model in models:
-        source = source_models.get(model)
-        source = source if isinstance(source, Mapping) else {}
-        details = source.get("details")
-        details = details if isinstance(details, Mapping) else {}
-        safe_models[model] = {
-            "name": str(source.get("name") or source.get("model") or model),
-            "digest": str(source.get("digest") or ""),
-            "size": source.get("size") if isinstance(source.get("size"), int) else None,
-            "modified_at": str(source.get("modified_at") or ""),
-            "status": str(
-                source.get("status") or ("available" if source else "missing")
-            ),
-            "details": {key: details.get(key) for key in detail_keys if key in details},
-            "metadata_sha256": canonical_sha256(source),
-        }
-    return {"engine": safe_engine, "models": safe_models}
-
-
 def structured_review_authority_observation_sha256(
     authority: Mapping[str, Any],
     *,
     router_config: DecisionRouterConfig | None = None,
+    router: Any | None = None,
 ) -> str:
     """Observe mutable authority sources for one in-flight boundary guard.
 
-    The semantic authority seal identifies the adopted content.  This
-    additional opaque token watches the filesystem generations that selected
-    it and the live Ollama engine/model metadata before and after a cache read
-    or model call.  A temporary switch away from an authority and back during
-    that operation therefore fails closed even when the final semantic seal
-    again equals the starting seal.  It is deliberately not part of the
-    durable cache identity: a stable later A generation may reuse A's exact
-    semantic no-quorum hold after the in-flight guard succeeds.
+    The semantic authority seal already carries the configured routes and any
+    local Ollama identities. This token additionally watches the config and
+    lane-mode generations before and after a cache read or model call.
     """
 
     lane = authority.get("lane") if isinstance(authority, Mapping) else None
@@ -244,30 +160,19 @@ def structured_review_authority_observation_sha256(
     authority_error = semantic_authority_shape_error(authority, lane=lane)
     if authority_error is not None:
         raise ValueError(authority_error)
-    router = authority.get("router")
-    assert isinstance(router, Mapping)
-    models = router.get("models")
-    assert isinstance(models, list)
+    router_identity = authority.get("router")
+    assert isinstance(router_identity, Mapping)
+    from chronovisor.core.runtime_config import CONFIG_FILE
 
-    from chronovisor.core.runtime_config import CONFIG_FILE, load_decision_router_config
-
-    live_metadata = _safe_model_metadata(_fetch_local_model_metadata(models), models)
-    config = router_config or load_decision_router_config()
-    adoption_path = (
-        Path(config.adoption_artifact).expanduser()
-        if config.adoption_artifact.strip()
-        else None
-    )
+    if router is not None and router.authority_router() != router_identity:
+        raise ValueError("structured review router authority changed")
+    del router_config
     normalized_lane = re.sub(r"[^A-Za-z0-9]+", "_", lane).strip("_").upper()
     lane_env = os.environ.get(f"CHRONOVISOR_DECISION_POLICY_{normalized_lane}")
     payload = {
         "authority_sha256": canonical_sha256(authority),
         "config_file": _file_observation(CONFIG_FILE),
-        "adoption_artifact": (
-            _file_observation(adoption_path) if adoption_path is not None else None
-        ),
         "lane_mode_env_sha256": _opaque_text_sha256(lane_env),
-        "live_model_metadata_sha256": canonical_sha256(live_metadata),
     }
     return canonical_sha256(payload)
 
@@ -313,17 +218,14 @@ def _router_policy_error(policy: object, *, lane: str) -> str | None:
     if not _is_sha256(expected_schema) or actual_schema != expected_schema:
         return "decision policy schema provenance is invalid"
     router = policy.get("router_policy")
-    models = router.get("models") if isinstance(router, Mapping) else None
+    routes = router.get("routes") if isinstance(router, Mapping) else None
     if (
         not isinstance(router, Mapping)
-        or set(router) != {"source", "artifact_sha256", "error", "models"}
-        or router.get("source") != "adopted_artifact"
-        or not _is_sha256(router.get("artifact_sha256"))
+        or set(router) != {"source", "error", "routes"}
+        or router.get("source") != "runtime_role_mapping"
         or router.get("error") is not None
-        or not isinstance(models, list)
-        or len(models) != 3
-        or len(set(models)) != 3
-        or not all(isinstance(model, str) and model for model in models)
+        or not isinstance(routes, list)
+        or len(routes) != 3
     ):
         return "decision policy router provenance is invalid"
     return None
@@ -411,11 +313,14 @@ def _vote_error(
     vote: object,
     *,
     role: str,
-    model: str,
+    route: Mapping[str, Any],
 ) -> str | None:
     required_fields = {
         "role",
+        "provider",
         "model",
+        "route_provenance",
+        "returned_model",
         "requested_num_ctx",
         "valid",
         "signature_sha256",
@@ -427,13 +332,17 @@ def _vote_error(
     if not isinstance(vote, Mapping):
         return "local consensus vote audit is invalid"
     vote_fields = set(vote)
-    if not required_fields.issubset(vote_fields) or not vote_fields.issubset(
-        required_fields | optional_fields
-    ):
+    if vote_fields != required_fields | optional_fields:
         return "local consensus vote audit fields are invalid"
     if (
         vote.get("role") != role
-        or vote.get("model") != model
+        or vote.get("provider") != route.get("provider")
+        or vote.get("model") != route.get("model")
+        or vote.get("route_provenance") != route
+        or (
+            route.get("location") == "remote"
+            and vote.get("returned_model") != route.get("model")
+        )
         or vote.get("valid") is not True
         or not _is_sha256(vote.get("signature_sha256"))
         or vote.get("invalid_reason") is not None
@@ -477,12 +386,14 @@ def _vote_error(
             "ok",
             "model",
             "failure_class",
+            "returned_model",
             "first_pass_valid",
             "repair_turns",
             "attempts",
         }
         or session.get("ok") is not True
-        or session.get("model") != model
+        or session.get("model") != route.get("model")
+        or session.get("returned_model") != vote.get("returned_model")
         or session.get("failure_class") is not None
         or not isinstance(session.get("first_pass_valid"), bool)
         or isinstance(session.get("repair_turns"), bool)
@@ -527,9 +438,7 @@ def _local_consensus_error(
     if not isinstance(consensus, Mapping):
         return "local consensus audit is missing"
     consensus_fields = set(consensus)
-    if not required_fields.issubset(consensus_fields) or not consensus_fields.issubset(
-        required_fields | optional_fields
-    ):
+    if consensus_fields != required_fields | optional_fields:
         return "local consensus audit fields are invalid"
     reason = consensus.get("quarantine_reason")
     if "conservative_veto_fired" in consensus and not isinstance(
@@ -573,16 +482,18 @@ def _local_consensus_error(
 
     router = policy.get("router_policy")
     assert isinstance(router, Mapping)
-    models = router.get("models")
-    assert isinstance(models, list)
+    routes = router.get("routes")
+    assert isinstance(routes, list)
     signatures: list[str] = []
-    for vote, role, model in zip(
+    for vote, role, route in zip(
         consensus["votes"],
         ("primary", "challenger", "tie_break"),
-        models,
+        routes,
         strict=True,
     ):
-        error = _vote_error(vote, role=role, model=model)
+        if not isinstance(route, Mapping):
+            return "decision policy router route is invalid"
+        error = _vote_error(vote, role=role, route=route)
         if error is not None:
             return error
         assert isinstance(vote, Mapping)
@@ -930,7 +841,7 @@ def _forbidden_plaintext_key(value: object) -> str | None:
 
 
 class StructuredReviewHoldLease:
-    """One process-exclusive cache-key lease held across local model calls."""
+    """One process-exclusive cache-key lease held across configured route calls."""
 
     def __init__(
         self,

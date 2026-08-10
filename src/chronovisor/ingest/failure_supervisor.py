@@ -787,67 +787,44 @@ def _quarantine_raw(raw_path: Path, packet_path: Path) -> Path | None:
 
 
 def _current_adopted_authority_sha256() -> str | None:
-    """Return only the artifact hash of a currently valid adopted authority.
-
-    A byte-different nominated file is not sufficient evidence for reopening a
-    semantic hold.  The artifact may be partial, corrupt, unevaluated, or bound
-    to model metadata that is no longer installed.  Reuse the router's full
-    adoption resolver and fail closed whenever it cannot prove that the new
-    artifact is the live authority.
-    """
+    """Return the complete current ingest route-authority hash."""
 
     try:
-        from chronovisor.core import runtime_config
-        from chronovisor.decision.decision_router import resolve_router_policy
+        from chronovisor.core import durable_state
+        from chronovisor.decision import decision_authority, decision_router
 
-        loader = runtime_config.load_decision_router_config
-        config = (
-            loader(chronovisor_store.CHRONOVISOR_ROOT / "config.toml")
-            if getattr(loader, "__module__", "") == runtime_config.__name__
-            else loader()
+        lane = "ingest_reconciliation"
+        router = decision_router.DecisionRouter(
+            decision_lane=lane,
+            audit_role="ingest_semantic_defer",
+            require_adopted=True,
         )
-        resolution = resolve_router_policy(config)
+        authority, error = decision_authority.current_semantic_authority(
+            lane,
+            router=router,
+        )
     except Exception:
         return None
-    artifact_sha256 = resolution.artifact_sha256
     if (
-        resolution.source != "adopted_artifact"
-        or resolution.error is not None
-        or not isinstance(artifact_sha256, str)
-        or re.fullmatch(r"[0-9a-f]{64}", artifact_sha256) is None
+        error is not None
+        or authority is None
+        or decision_authority.semantic_authority_shape_error(authority, lane=lane)
+        is not None
     ):
         return None
-    return artifact_sha256
+    return durable_state.canonical_sha256(authority)
 
 
 def _current_adopted_authority_epoch() -> str | None:
-    """Fingerprint the adopted artifact together with executable policy code.
-
-    The artifact identifies the evaluated model triplet, but a safe router
-    contract can improve without changing those model weights. Semantic holds
-    must be retried after such a contract change instead of remaining bound to
-    the artifact digest forever.
-    """
+    """Version the complete route authority for semantic-defer reuse."""
 
     artifact_sha256 = _current_adopted_authority_sha256()
     if artifact_sha256 is None:
         return None
     try:
-        from chronovisor.decision.decision_lane_contracts import (
-            LANE_CONTRACT_POLICY_VERSION,
-            lane_contract_manifest_sha256,
-        )
-        from chronovisor.decision.decision_router import (
-            DECISION_SEMANTICS_POLICY_VERSION,
-            QUORUM_SAFETY_POLICY_VERSION,
-        )
-
         payload = {
-            "artifact_sha256": artifact_sha256,
-            "decision_semantics_policy_version": DECISION_SEMANTICS_POLICY_VERSION,
-            "lane_contract_policy_version": LANE_CONTRACT_POLICY_VERSION,
-            "lane_contract_manifest_sha256": lane_contract_manifest_sha256(),
-            "quorum_safety_policy_version": QUORUM_SAFETY_POLICY_VERSION,
+            "semantic_defer_authority_version": 2,
+            "authority_sha256": artifact_sha256,
         }
         encoded = json.dumps(
             payload,
@@ -1406,10 +1383,10 @@ def record_current_semantic_no_quorum_defer(
     raw_text: str | None = None,
     related_raw_paths: Sequence[Path] = (),
 ) -> SupervisionResult | None:
-    """Publish a semantic defer only while its adopted artifact is current.
+    """Publish a semantic defer only while its route authority is current.
 
-    Adoption writers use the same authority lease.  The current-artifact CAS
-    and failure-state publication therefore form one transaction, with a
+    Authority writers use the same lease. The current-authority CAS and
+    failure-state publication therefore form one transaction, with a
     single lock order of authority then failure state.  A stale or invalid
     marker leaves the immutable raw pending for the next authority epoch and
     must not cancel an existing operational repair packet.

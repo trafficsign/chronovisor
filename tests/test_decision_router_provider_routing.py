@@ -4,7 +4,7 @@ import json
 from collections import deque
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from chronovisor.core import llm_config, ollama
@@ -21,6 +21,7 @@ from chronovisor.core.llm_runtime import (
     SourceSensitivity,
 )
 from chronovisor.core.runtime_config import DecisionRouterConfig
+from chronovisor.decision.decision_artifact import DecisionArtifactError
 from chronovisor.decision.decision_router import DecisionRouter
 from chronovisor.decision.decision_schema_manifest import FRONTIER_DECISION_SCHEMA
 
@@ -52,6 +53,7 @@ class FakeGeneration:
     location: RouteLocation
     replies: deque[str | Exception]
     calls: list[tuple[str, GenerationInput]] = field(default_factory=list)
+    returned_model: str | None = "configured"
 
     def generate(self, request: GenerationInput, *, model: str) -> GenerationResult:
         self.calls.append((model, request))
@@ -62,6 +64,13 @@ class FakeGeneration:
             content=reply,
             provider=self.provider,
             model=model,
+            metadata={
+                "returned_model": (
+                    model if self.returned_model == "configured" else self.returned_model
+                )
+            }
+            if self.returned_model is not None
+            else {},
         )
 
 
@@ -103,12 +112,43 @@ def _runtime(
     for role, (provider, model, location, replies) in routes.items():
         backend = FakeGeneration(provider, location, deque(replies))
         backends[role] = backend
-        generation[role] = GenerationRoute(backend, model, STRUCTURED)
+        generation[role] = GenerationRoute(
+            backend,
+            model,
+            STRUCTURED,
+            "test-protocol",
+            "e" * 64,
+            f"revision-{role}" if location is RouteLocation.REMOTE else None,
+        )
     return LLMRuntime(generation=generation), backends
 
 
 def _install_runtime(monkeypatch: Any, runtime: LLMRuntime) -> None:
     monkeypatch.setattr(llm_config, "load_default_llm_runtime", lambda: runtime)
+    from chronovisor.decision import local_model_eval
+
+    models = [
+        route.model
+        for route in runtime._generation.values()
+        if route.backend.provider == "ollama"
+        and route.backend.location is RouteLocation.LOCAL
+    ]
+    monkeypatch.setattr(
+        local_model_eval,
+        "fetch_local_model_metadata",
+        lambda requested: {
+            "engine": {"name": "ollama", "version": "test"},
+            "models": {
+                model: {
+                    "name": model,
+                    "digest": f"digest-{model}",
+                    "details": {"quantization_level": "Q4_K_M"},
+                }
+                for model in requested
+                if model in models
+            },
+        },
+    )
 
 
 def _forbid_ollama(monkeypatch: Any) -> None:
@@ -171,6 +211,135 @@ def test_remote_only_uses_exact_routes_without_ollama_and_audits_identity(
     assert [len(backends[role].calls) for role in backends] == [1, 1, 0]
     assert backends["classification.primary"].calls[0][1].source == NORMAL_PAGE
     assert backends["classification.challenger"].calls[0][1].source == NORMAL_PAGE
+    route_identity = DecisionRouter(config=_config()).authority_router()
+    assert [route["revision"] for route in route_identity["routes"]] == [
+        "revision-classification.primary",
+        "revision-classification.challenger",
+        "revision-classification.tie_break",
+    ]
+    assert all(route["protocol"] == "test-protocol" for route in route_identity["routes"])
+    assert all(route["endpoint_sha256"] == "e" * 64 for route in route_identity["routes"])
+    assert all(route["ollama"] is None for route in route_identity["routes"])
+
+
+def test_remote_missing_revision_holds_before_any_backend_call(
+    monkeypatch: Any,
+) -> None:
+    runtime, backends = _runtime(
+        {
+            f"classification.{role}": (
+                f"remote-{role}",
+                f"model-{role}",
+                RouteLocation.REMOTE,
+                [_payload("apply")],
+            )
+            for role in ("primary", "challenger", "tie_break")
+        }
+    )
+    runtime._generation["classification.primary"] = replace(
+        runtime._generation["classification.primary"], revision=None
+    )
+    _install_runtime(monkeypatch, runtime)
+    _forbid_ollama(monkeypatch)
+
+    result = DecisionRouter(config=_config()).decide(
+        "prompt", SCHEMA, source=NORMAL_PAGE
+    )
+
+    assert result.ok is False
+    assert result.failure_class == "route_configuration_invalid"
+    assert result.votes[0].invalid_reason == "remote_route_revision_required"
+    assert all(not backend.calls for backend in backends.values())
+
+
+def test_remote_returned_model_mismatch_is_excluded_when_other_routes_reach_quorum(
+    monkeypatch: Any,
+) -> None:
+    runtime, backends = _runtime(
+        {
+            f"classification.{role}": (
+                f"remote-{role}",
+                f"model-{role}",
+                RouteLocation.REMOTE,
+                [_payload("apply")],
+            )
+            for role in ("primary", "challenger", "tie_break")
+        }
+    )
+    canary = "CANARY.private/model-metadata-123"
+    backends["classification.primary"].returned_model = canary
+    _install_runtime(monkeypatch, runtime)
+    _forbid_ollama(monkeypatch)
+
+    result = DecisionRouter(config=_config()).decide(
+        "prompt", SCHEMA, source=NORMAL_PAGE
+    )
+
+    assert result.ok is True
+    assert result.votes[0].invalid_reason == "returned_model_mismatch"
+    assert result.votes[0].result.returned_model is None
+    assert result.votes[0].audit_record()["returned_model"] is None
+    assert canary not in repr(result)
+    assert [vote.valid for vote in result.votes] == [False, True, True]
+    assert [len(backends[role].calls) for role in backends] == [1, 1, 1]
+
+
+def test_remote_returned_model_failures_hold_without_reroute_when_no_quorum(
+    monkeypatch: Any,
+) -> None:
+    runtime, backends = _runtime(
+        {
+            f"classification.{role}": (
+                f"remote-{role}",
+                f"model-{role}",
+                RouteLocation.REMOTE,
+                [_payload("apply")],
+            )
+            for role in ("primary", "challenger", "tie_break")
+        }
+    )
+    backends["classification.primary"].returned_model = "different-primary"
+    backends["classification.tie_break"].returned_model = "different-tie"
+    _install_runtime(monkeypatch, runtime)
+    _forbid_ollama(monkeypatch)
+
+    result = DecisionRouter(config=_config()).decide(
+        "prompt", SCHEMA, source=NORMAL_PAGE
+    )
+
+    assert result.ok is False
+    assert [vote.valid for vote in result.votes] == [False, True, False]
+    assert [len(backends[role].calls) for role in backends] == [1, 1, 1]
+
+
+def test_unsafe_returned_model_is_absent_from_result_audit(
+    monkeypatch: Any,
+) -> None:
+    canary = "CANARY returned model\nprivate"
+    runtime, backends = _runtime(
+        {
+            f"classification.{role}": (
+                f"remote-{role}",
+                f"model-{role}",
+                RouteLocation.REMOTE,
+                [_payload("apply")],
+            )
+            for role in ("primary", "challenger", "tie_break")
+        }
+    )
+    backends["classification.primary"].returned_model = canary
+    _install_runtime(monkeypatch, runtime)
+    _forbid_ollama(monkeypatch)
+
+    result = DecisionRouter(config=_config()).decide(
+        "prompt", SCHEMA, source=NORMAL_PAGE
+    )
+    audit = result.audit_record()
+
+    assert result.ok is True
+    assert result.votes[0].invalid_reason == "returned_model_missing"
+    assert result.votes[0].result.returned_model is None
+    assert canary not in repr(audit)
 
 
 def test_remote_egress_denial_excludes_votes_without_backend_calls(
@@ -226,6 +395,11 @@ def test_distinct_providers_may_use_same_model_name(monkeypatch: Any) -> None:
             ),
         }
     )
+    for index, role in enumerate(runtime._generation):
+        runtime._generation[role] = replace(
+            runtime._generation[role],
+            endpoint_sha256=str(index + 1) * 64,
+        )
     _install_runtime(monkeypatch, runtime)
 
     result = DecisionRouter(config=_config()).decide(
@@ -234,6 +408,33 @@ def test_distinct_providers_may_use_same_model_name(monkeypatch: Any) -> None:
 
     assert result.ok is True
     assert [len(backend.calls) for backend in backends.values()] == [1, 1, 0]
+
+
+def test_provider_aliases_cannot_duplicate_endpoint_and_model(
+    monkeypatch: Any,
+) -> None:
+    runtime, backends = _runtime(
+        {
+            f"classification.{role}": (
+                f"alias-{role}",
+                "shared",
+                RouteLocation.REMOTE,
+                [_payload("apply")],
+            )
+            for role in ("primary", "challenger", "tie_break")
+        }
+    )
+    _install_runtime(monkeypatch, runtime)
+
+    result = DecisionRouter(config=_config()).decide(
+        "prompt", SCHEMA, source=NORMAL_PAGE
+    )
+
+    assert result.quarantine_reason == (
+        "router_config_invalid:decision roles must resolve to distinct "
+        "provider/model identities"
+    )
+    assert all(not backend.calls for backend in backends.values())
 
 
 def test_duplicate_provider_model_identity_fails_before_backend_call(
@@ -581,3 +782,66 @@ def test_local_routes_keep_lease_observation_and_unload(monkeypatch: Any) -> Non
         "unload:local-b",
     ]
     assert [len(backends[role].calls) for role in backends] == [1, 1, 0]
+    routes = router.authority_router()["routes"]
+    assert all(route["ollama"]["digest"].startswith("digest-") for route in routes)
+
+
+def test_non_ollama_local_routes_use_no_ollama_controls(monkeypatch: Any) -> None:
+    runtime, backends = _runtime(
+        {
+            f"classification.{role}": (
+                f"local-{role}",
+                f"model-{role}",
+                RouteLocation.LOCAL,
+                [_payload("apply")],
+            )
+            for role in ("primary", "challenger", "tie_break")
+        }
+    )
+    _install_runtime(monkeypatch, runtime)
+    _forbid_ollama(monkeypatch)
+
+    router = DecisionRouter(config=_config())
+    result = router.decide("prompt", SCHEMA, source=NORMAL_PAGE)
+
+    assert result.ok is True
+    assert [len(backends[role].calls) for role in backends] == [1, 1, 0]
+    assert all(route["ollama"] is None for route in router.authority_router()["routes"])
+
+
+def test_artifact_store_error_text_is_not_exposed(monkeypatch: Any) -> None:
+    runtime, _backends = _runtime(
+        {
+            f"classification.{role}": (
+                f"remote-{role}",
+                f"model-{role}",
+                RouteLocation.REMOTE,
+                [_payload("apply")],
+            )
+            for role in ("primary", "challenger", "tie_break")
+        }
+    )
+    _install_runtime(monkeypatch, runtime)
+    canary = "CANARY_PRIVATE_ARTIFACT_EXCEPTION"
+    router = DecisionRouter(config=_config(), artifact_replay=True)
+    monkeypatch.setattr(
+        router,
+        "_artifact_identity",
+        lambda **_kwargs: ("a" * 64, {}, 16_384),
+    )
+
+    class FailingStore:
+        def load(self, _fingerprint: str) -> None:
+            raise DecisionArtifactError(canary)
+
+    router.decision_artifact_store = FailingStore()  # type: ignore[assignment]
+
+    result = router.decide(
+        "prompt",
+        SCHEMA,
+        source=NORMAL_PAGE,
+    )
+
+    assert result.ok is False
+    assert result.quarantine_reason == "canonical_decision_artifact_invalid"
+    assert canary not in repr(result)
