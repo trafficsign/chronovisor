@@ -187,6 +187,8 @@ def test_durable_write_rejects_disk_pressure_before_publication(
 
 
 def test_decision_artifact_is_content_addressed(tmp_path: Path) -> None:
+    from tests.semantic_hold_support import semantic_authority
+
     fingerprint, identity = execution_fingerprint(
         request_sha256="a" * 64,
         lane="lane",
@@ -197,14 +199,24 @@ def test_decision_artifact_is_content_addressed(tmp_path: Path) -> None:
         model_runtime={"models": ["a", "b"]},
     )
     store = DecisionArtifactStore(tmp_path)
+    routes = semantic_authority()["router"]["routes"]
     published = store.publish(
         fingerprint=fingerprint,
         identity=identity,
         decision={"decision": "approved"},
         agreement_sha256="d" * 64,
         quorum_proof=[
-            {"role": "primary", "model": "a", "signature_sha256": "d" * 64},
-            {"role": "challenger", "model": "b", "signature_sha256": "d" * 64},
+            {
+                "role": role,
+                "provider": route["provider"],
+                "model": route["model"],
+                "route_provenance": route,
+                "returned_model": None,
+                "signature_sha256": "d" * 64,
+            }
+            for role, route in zip(
+                ("primary", "challenger"), routes[:2], strict=True
+            )
         ],
         provenance={"frontier_calls": 0},
     )
@@ -992,6 +1004,123 @@ def test_l1_runbook_restores_only_allowlisted_sealed_state(tmp_path: Path) -> No
             chronovisor_root=tmp_path,
             target="arbitrary-path",
         )
+
+
+def test_l1_unloads_only_local_ollama_runtime_routes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from chronovisor.core import ollama, runtime_config
+
+    roles_seen: list[tuple[str, ...]] = []
+    unloaded: list[str] = []
+
+    def route(
+        role: str, provider: str, model: str, location: str = "local"
+    ) -> ollama.RuntimeGenerationRoute:
+        return ollama.RuntimeGenerationRoute(role, provider, model, location, True)
+
+    route_sets = iter(
+        (
+            (
+                route("classification.primary", "ollama", "ollama-model"),
+                route("classification.challenger", "ollama", "ollama-model"),
+                route(
+                    "classification.tie_break", "remote-test", "remote-model", "remote"
+                ),
+            ),
+            (
+                route(
+                    "classification.primary",
+                    "remote-test",
+                    "remote-model",
+                    "remote",
+                ),
+                route(
+                    "classification.challenger",
+                    "local-engine",
+                    "local-model-a",
+                ),
+                route(
+                    "classification.tie_break",
+                    "local-engine",
+                    "local-model-b",
+                ),
+            ),
+        ),
+    )
+
+    def resolve(roles):
+        roles_seen.append(tuple(roles))
+        return next(route_sets)
+
+    monkeypatch.setattr(ollama, "runtime_generation_routes", resolve)
+    monkeypatch.setattr(
+        runtime_config,
+        "load_decision_router_config",
+        lambda: pytest.fail("repair selected models from legacy router config"),
+    )
+    monkeypatch.setattr(
+        ollama,
+        "unload_named_model",
+        lambda model: unloaded.append(model) or True,
+    )
+
+    local_result = repair_runbook.run_l1("unload-models")
+    non_ollama_result = repair_runbook.run_l1("unload-models")
+
+    assert roles_seen == [
+        (
+            "classification.primary",
+            "classification.challenger",
+            "classification.tie_break",
+        )
+    ] * 2
+    assert unloaded == ["ollama-model"]
+    assert local_result == {
+        "status": "ok",
+        "action": "unload-models",
+        "models": {"ollama-model": True},
+    }
+    assert non_ollama_result["models"] == {}
+
+
+@pytest.mark.parametrize(
+    ("error_factory", "category"),
+    (
+        (
+            lambda ollama: ollama.RuntimeBridgeError("route_configuration_invalid"),
+            "route_configuration_invalid",
+        ),
+        (lambda _ollama: RuntimeError("SECRET-ROUTE-CANARY"), "backend_error"),
+    ),
+)
+def test_l1_unload_route_failure_is_safe_and_controls_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+    error_factory,
+    category: str,
+) -> None:
+    from chronovisor.core import ollama
+
+    error = error_factory(ollama)
+    monkeypatch.setattr(
+        ollama,
+        "runtime_generation_routes",
+        lambda _roles: (_ for _ in ()).throw(error),
+    )
+    monkeypatch.setattr(
+        ollama,
+        "unload_named_model",
+        lambda _model: pytest.fail("unresolved routes controlled Ollama"),
+    )
+
+    result = repair_runbook.run_l1("unload-models")
+
+    assert result == {
+        "status": "error",
+        "action": "unload-models",
+        "failure_category": category,
+    }
+    assert "SECRET-ROUTE-CANARY" not in json.dumps(result)
 
 
 def test_l0_dashboard_plist_requires_keepalive(

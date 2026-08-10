@@ -25,6 +25,7 @@ from chronovisor.core.canonical_document import (
     serialize_document,
     validate_canonical_document,
 )
+from chronovisor.core.durable_state import canonical_sha256 as durable_canonical_sha256
 from chronovisor.core.jobs import JobStatus, job_store
 from chronovisor.core.ollama import (
     GENERATE_SYSTEM_PROMPT as GENERATE_SYSTEM_PROMPT,
@@ -2819,21 +2820,11 @@ class _IngestReviewShardContinuation:
 
 
 def _ingest_review_router_config() -> Any:
-    """Resolve the same adopted router configuration used by live review."""
+    """Load the numeric envelope used to size ingest review shards."""
 
     from chronovisor.core.runtime_config import load_decision_router_config
-    from chronovisor.decision.decision_router import resolve_router_policy
 
-    config = load_decision_router_config()
-    if not config.adoption_artifact.strip():
-        return config
-    resolution = resolve_router_policy(config)
-    if resolution.error is not None:
-        raise IngestReviewShardCapacityError(
-            "local_decision_artifact_invalid",
-            f"review router policy is unavailable: {resolution.error}",
-        )
-    return resolution.config
+    return load_decision_router_config()
 
 
 def _measure_ingest_review_request(
@@ -4213,23 +4204,24 @@ def _structured_frontier_failure_class(result: dict[str, Any]) -> str | None:
 
 
 def _structured_frontier_authority_sha256(result: dict[str, Any]) -> str | None:
-    """Return the adopted router artifact identity carried by a review."""
+    """Return the current full authority identity carried by a review."""
 
     review = result.get("review")
+    current, error = _current_ingest_review_authority(reviewer=None)
+    if error is not None or current is None:
+        return None
     for candidate in (result, review):
         if not isinstance(candidate, dict):
             continue
-        decision_policy = candidate.get("decision_policy")
-        if not isinstance(decision_policy, dict):
-            continue
-        router_policy = decision_policy.get("router_policy")
-        if not isinstance(router_policy, dict):
-            continue
-        artifact_sha256 = router_policy.get("artifact_sha256")
-        if isinstance(artifact_sha256, str) and re.fullmatch(
-            r"[0-9a-f]{64}", artifact_sha256
+        if (
+            decision_authority.semantic_verdict_authority_provenance_error(
+                candidate,
+                current,
+                lane="ingest_reconciliation",
+            )
+            is None
         ):
-            return artifact_sha256
+            return durable_canonical_sha256(current)
     return None
 
 
@@ -4281,18 +4273,7 @@ def _raise_bounded_local_consensus_nonconvergence(
         )
 
     assert current_authority is not None
-    router = current_authority.get("router")
-    authority_sha256 = (
-        router.get("artifact_sha256") if isinstance(router, dict) else None
-    )
-    if (
-        not isinstance(authority_sha256, str)
-        or re.fullmatch(r"[0-9a-f]{64}", authority_sha256) is None
-    ):
-        raise IngestApplyError(
-            "local consensus authority unavailable: "
-            "decision_authority_invalid: adopted artifact hash is invalid"
-        )
+    authority_sha256 = durable_canonical_sha256(current_authority)
     raise IngestApplyError(
         "local consensus semantic no quorum "
         f"[authority_sha256={authority_sha256}]: {semantic_detail}"

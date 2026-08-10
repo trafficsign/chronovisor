@@ -132,16 +132,34 @@ def run_l1(
             "entries": len(result.get("entries", [])),
         }
     if action == "unload-models":
-        from chronovisor.core.runtime_config import load_decision_router_config
+        from chronovisor.core import ollama
 
-        config = load_decision_router_config()
-        models = sorted(
-            {
-                config.primary_model,
-                config.challenger_model,
-                config.tie_break_model,
+        try:
+            routes = ollama.runtime_generation_routes(
+                (
+                    "classification.primary",
+                    "classification.challenger",
+                    "classification.tie_break",
+                )
+            )
+            models = sorted(
+                {
+                    route.model
+                    for route in routes
+                    if route.provider == "ollama" and route.location == "local"
+                }
+            )
+        except Exception as exc:
+            category = (
+                exc.category
+                if isinstance(exc, ollama.RuntimeBridgeError)
+                else "backend_error"
+            )
+            return {
+                "status": "error",
+                "action": action,
+                "failure_category": category,
             }
-        )
         if dry_run:
             return {
                 "status": "ok",
@@ -149,9 +167,7 @@ def run_l1(
                 "models": models,
                 "dry_run": True,
             }
-        from chronovisor.core.ollama import unload_named_model
-
-        results = {model: unload_named_model(model) for model in models}
+        results = {model: ollama.unload_named_model(model) for model in models}
         return {
             "status": "ok" if all(results.values()) else "error",
             "action": action,
@@ -175,7 +191,7 @@ def run_l1(
             raise ValueError("restore-durable-state requires an allowlisted target")
         destination = targets[target]
         backup = destination.with_name(f"{destination.name}.bak")
-        recovered = read_sealed_json(backup)
+        recovered_state = read_sealed_json(backup)
         if dry_run:
             return {
                 "status": "ok",
@@ -186,7 +202,7 @@ def run_l1(
             }
         atomic_write_bytes(
             destination,
-            canonical_bytes(recovered),
+            canonical_bytes(recovered_state),
             backup=False,
         )
         verified = read_sealed_json(destination)

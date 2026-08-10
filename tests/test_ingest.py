@@ -1644,26 +1644,13 @@ class TestIngestFrontierGate:
 
     @staticmethod
     def _production_authority(marker: str) -> dict:
-        return {
-            "source": "adopted_local_consensus",
-            "authority_version": 1,
-            "lane": "ingest_reconciliation",
-            "lane_contract_sha256": "1" * 64,
-            "lane_contract_manifest_sha256": "2" * 64,
-            "lane_contract_case_manifest_sha256": "3" * 64,
-            "policy": {
-                "kind": "consensus",
-                "schema_name": "ingest_reconciliation",
-                "mode": "enabled",
-                "error": None,
-            },
-            "router": {
-                "source": "adopted_artifact",
-                "artifact_sha256": marker * 64,
-                "error": None,
-                "models": ["primary:model", "challenger:model", "tie:model"],
-            },
-        }
+        from tests.semantic_hold_support import semantic_authority
+
+        return semantic_authority(
+            "ingest_reconciliation",
+            artifact_sha256=marker * 64,
+            schema_name="ingest_reconciliation",
+        )
 
     @staticmethod
     def _authority_review(
@@ -1676,6 +1663,7 @@ class TestIngestFrontierGate:
         from chronovisor.decision.decision_schema_manifest import (
             production_decision_schemas,
         )
+        from tests.test_decision_authority import _vote_audit
 
         review = {
             "decision": decision,
@@ -1694,38 +1682,83 @@ class TestIngestFrontierGate:
             schema=production_decision_schemas()["ingest_reconciliation"],
         )
         agreement = hashlib.sha256(signature.encode("utf-8")).hexdigest()
+        routes = authority["router"]["routes"]
         review["local_consensus"] = {
             "status": "agreed",
             "ok": True,
+            "conservative_veto_fired": False,
+            "conservative_veto_bypassed_by_lane_policy": False,
+            "dissent_effect_class": None,
+            "quorum_safety_policy_version": authority[
+                "quorum_safety_policy_version"
+            ],
             "agreement_sha256": agreement,
             "failure_class": None,
             "quarantine_reason": None,
+            "num_ctx": 16_384,
+            "residency": {},
             "votes": [
-                {
-                    "role": "primary",
-                    "model": "primary:model",
-                    "valid": True,
-                    "signature_sha256": agreement,
-                    "invalid_reason": None,
-                },
-                {
-                    "role": "challenger",
-                    "model": "challenger:model",
-                    "valid": True,
-                    "signature_sha256": agreement,
-                    "invalid_reason": None,
-                },
+                _vote_audit("primary", routes[0], agreement),
+                _vote_audit("challenger", routes[1], agreement),
             ],
         }
         return review
 
-    def test_production_authority_binds_lane_manifests_and_adopted_models(
+    def test_review_sizing_ignores_adoption_and_ollama_state(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from chronovisor.core import runtime_config
+        from chronovisor.core.runtime_config import DecisionRouterConfig
+        from chronovisor.decision import decision_router
+        from chronovisor.ingest import ingest
+
+        configs = iter(
+            (
+                DecisionRouterConfig(adoption_artifact=""),
+                DecisionRouterConfig(adoption_artifact="/runtime/adopted.json"),
+            )
+        )
+        monkeypatch.setattr(
+            runtime_config, "load_decision_router_config", lambda: next(configs)
+        )
+
+        def forbidden(*_args, **_kwargs):
+            pytest.fail("review sizing touched authority or Ollama state")
+
+        monkeypatch.setattr(decision_router, "resolve_router_policy", forbidden)
+        for name in (
+            "model_digests",
+            "model_resource_lease",
+            "runtime_generation_routes",
+            "unload_named_model",
+        ):
+            monkeypatch.setattr(ollama, name, forbidden)
+
+        bootstrap = ingest._ingest_review_router_config()
+        adopted = ingest._ingest_review_router_config()
+
+        numeric_fields = (
+            "num_ctx",
+            "min_num_ctx",
+            "num_predict",
+            "read_timeout_ms",
+            "max_input_chars",
+            "max_output_chars",
+            "max_feedback_chars",
+        )
+        assert tuple(getattr(bootstrap, name) for name in numeric_fields) == tuple(
+            getattr(adopted, name) for name in numeric_fields
+        )
+        assert bootstrap.adoption_artifact == ""
+        assert adopted.adoption_artifact == "/runtime/adopted.json"
+
+    def test_production_authority_binds_lane_manifests_and_runtime_routes(
         self,
         isolated_wiki: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         del isolated_wiki
-        from chronovisor.core import runtime_config
         from chronovisor.decision import decision_policy, decision_router
         from chronovisor.decision.decision_lane_contract_cases import (
             decision_lane_contract_case_manifest_sha256,
@@ -1751,20 +1784,15 @@ class TestIngestFrontierGate:
             kind = "consensus"
             schema_name = "ingest_reconciliation"
 
-        router_audit = {
-            "source": "adopted_artifact",
-            "artifact_sha256": "a" * 64,
-            "error": None,
-            "models": ["primary:model", "challenger:model", "tie:model"],
-        }
+        router_audit = self._production_authority("a")["router"]
 
-        class Resolution:
-            source = "adopted_artifact"
-            error = None
-            artifact_sha256 = "a" * 64
+        class Router:
+            def __init__(self, **_kwargs):
+                pass
 
             @staticmethod
-            def audit_record() -> dict[str, object]:
+            def authority_router(*, refresh: bool = False) -> dict[str, object]:
+                assert refresh is False
                 return router_audit
 
         monkeypatch.setattr(
@@ -1772,16 +1800,7 @@ class TestIngestFrontierGate:
             "resolve_decision_policy",
             lambda _lane: (Policy(), "enabled", None),
         )
-        monkeypatch.setattr(
-            runtime_config,
-            "load_decision_router_config",
-            lambda: object(),
-        )
-        monkeypatch.setattr(
-            decision_router,
-            "resolve_router_policy",
-            lambda _config: Resolution(),
-        )
+        monkeypatch.setattr(decision_router, "DecisionRouter", Router)
 
         authority, error = ingest._current_ingest_review_authority(reviewer=None)
 
@@ -1805,7 +1824,7 @@ class TestIngestFrontierGate:
             "error": None,
         }
         assert authority["router"] == router_audit
-        assert authority["source"] == "adopted_local_consensus"
+        assert authority["source"] == "configured_runtime_consensus"
         assert authority["quorum_safety_policy_version"] == QUORUM_SAFETY_POLICY_VERSION
         assert "tie_break_adjudication_policy_version" not in authority
         assert ingest._ingest_review_authority_shape_error(authority) is None
@@ -1817,11 +1836,12 @@ class TestIngestFrontierGate:
         monkeypatch: pytest.MonkeyPatch,
         authority_state: str,
     ) -> None:
-        from chronovisor.core import jobs
+        from chronovisor.core import durable_state, jobs
         from chronovisor.ingest import failure_supervisor, ingest
 
         authority_a = self._production_authority("a")
         authority_b = self._production_authority("b")
+        authority_sha256 = durable_state.canonical_sha256(authority_a)
         authority_checks = 0
 
         def current_authority(**_kwargs):
@@ -1855,7 +1875,7 @@ class TestIngestFrontierGate:
         monkeypatch.setattr(
             failure_supervisor,
             "_current_adopted_authority_sha256",
-            lambda: "a" * 64,
+            lambda: authority_sha256,
         )
         monkeypatch.setattr(
             ingest,
@@ -1934,7 +1954,7 @@ class TestIngestFrontierGate:
         else:
             assert str(finished.error) == (
                 "local consensus semantic no quorum "
-                f"[authority_sha256={'a' * 64}]: "
+                f"[authority_sha256={authority_sha256}]: "
                 "three valid local semantic votes remained different"
             )
             assert supervision.failure_class == "ingest.semantic_no_quorum"
@@ -1949,11 +1969,12 @@ class TestIngestFrontierGate:
         monkeypatch: pytest.MonkeyPatch,
         publication_authority: str | None,
     ) -> None:
-        from chronovisor.core import jobs
+        from chronovisor.core import durable_state, jobs
         from chronovisor.ingest import failure_supervisor, ingest
 
         authority_a = self._production_authority("a")
-        authority_sha256: list[str | None] = ["a" * 64]
+        authority_sha256 = durable_state.canonical_sha256(authority_a)
+        published_authority_sha256: list[str | None] = [authority_sha256]
 
         def bounded_nonconvergence(*_args, **kwargs):
             budget = kwargs["frontier_budget"]
@@ -1975,7 +1996,7 @@ class TestIngestFrontierGate:
         monkeypatch.setattr(
             failure_supervisor,
             "_current_adopted_authority_sha256",
-            lambda: authority_sha256[0],
+            lambda: published_authority_sha256[0],
         )
         monkeypatch.setattr(
             ingest,
@@ -2028,12 +2049,13 @@ class TestIngestFrontierGate:
         finished = jobs.job_store.get(job.job_id)
         assert finished.status == jobs.JobStatus.FAILED
         assert str(finished.error).startswith(
-            "local consensus semantic no quorum [authority_sha256=" + "a" * 64
+            "local consensus semantic no quorum [authority_sha256="
+            + authority_sha256
         )
 
         # Simulate a valid A -> B adoption after run_ingest's final check but
         # before the orchestrator publishes the failure-supervisor outcome.
-        authority_sha256[0] = publication_authority
+        published_authority_sha256[0] = publication_authority
         supervision = failure_supervisor.record_raw_failure(
             raw_path=raw_path,
             error=finished.error,
@@ -2070,26 +2092,7 @@ class TestIngestFrontierGate:
         del isolated_wiki
         from chronovisor.ingest import ingest
 
-        authority = {
-            "source": "adopted_local_consensus",
-            "authority_version": 1,
-            "lane": "ingest_reconciliation",
-            "lane_contract_sha256": "b" * 64,
-            "lane_contract_manifest_sha256": "c" * 64,
-            "lane_contract_case_manifest_sha256": "d" * 64,
-            "policy": {
-                "kind": "consensus",
-                "schema_name": "ingest_reconciliation",
-                "mode": "enabled",
-                "error": None,
-            },
-            "router": {
-                "source": "adopted_artifact",
-                "artifact_sha256": "a" * 64,
-                "error": None,
-                "models": ["primary:model", "challenger:model", "tie:model"],
-            },
-        }
+        authority = self._production_authority("a")
         review = {
             "decision": "apply_available",
             "summary": "grounded",
@@ -2103,39 +2106,7 @@ class TestIngestFrontierGate:
         assert ingest._ingest_review_authority_error(review, authority) == (
             "decision verdict local consensus proof is missing"
         )
-        from chronovisor.decision.decision_router import canonical_agreement_signature
-        from chronovisor.decision.decision_schema_manifest import (
-            production_decision_schemas,
-        )
-
-        signature = canonical_agreement_signature(
-            review,
-            schema=production_decision_schemas()["ingest_reconciliation"],
-        )
-        agreement = hashlib.sha256(signature.encode("utf-8")).hexdigest()
-        review["local_consensus"] = {
-            "status": "agreed",
-            "ok": True,
-            "agreement_sha256": agreement,
-            "failure_class": None,
-            "quarantine_reason": None,
-            "votes": [
-                {
-                    "role": "primary",
-                    "model": "primary:model",
-                    "valid": True,
-                    "signature_sha256": agreement,
-                    "invalid_reason": None,
-                },
-                {
-                    "role": "challenger",
-                    "model": "challenger:model",
-                    "valid": True,
-                    "signature_sha256": agreement,
-                    "invalid_reason": None,
-                },
-            ],
-        }
+        review = self._authority_review(authority)
 
         normalized = ingest._normalize_ingest_frontier_review(
             review,
@@ -3693,7 +3664,7 @@ class TestIngestFrontierGate:
             == ingest.INGEST_FRONTIER_REVIEW_ARTIFACT_SCHEMA_VERSION
         )
         assert review["authority"] == {
-            "authority_version": 1,
+            "authority_version": 2,
             "lane": "ingest_reconciliation",
             "source": "injected_reviewer_boundary",
         }
