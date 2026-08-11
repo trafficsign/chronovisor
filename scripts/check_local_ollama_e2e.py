@@ -55,8 +55,8 @@ def _write_config(path: Path, args: argparse.Namespace) -> None:
     payload = f"""\
 [ingest]
 keep_alive = "0"
-num_ctx = 16384
-max_num_ctx = 16384
+num_ctx = 32768
+max_num_ctx = 32768
 num_predict = 512
 read_timeout_ms = 120000
 
@@ -340,7 +340,9 @@ def _main(argv: Sequence[str] | None = None) -> dict[str, object]:
     from chronovisor.core.llm_config import load_default_llm_runtime
     from chronovisor.core.llm_security import canonical_endpoint
     from chronovisor.core.ollama_transport import OLLAMA_URL
+    from chronovisor.core.store import RuntimeContext, init_chronovisor
 
+    init_chronovisor(RuntimeContext(root))
     runtime = load_default_llm_runtime()
     routes = _local_routes(runtime)
     endpoint = canonical_endpoint(OLLAMA_URL, cloud_secret=False)

@@ -7,6 +7,7 @@ from types import ModuleType
 import pytest
 
 from chronovisor.core.llm_config import load_llm_config
+from chronovisor.core.runtime_config import load_ingest_config
 
 
 def _script() -> ModuleType:
@@ -39,6 +40,7 @@ def test_config_covers_required_local_workflow_roles(tmp_path: Path) -> None:
     path = tmp_path / "config.toml"
     module._write_config(path, args)
     roles = load_llm_config(path).roles
+    ingest = load_ingest_config(path)
 
     assert path.stat().st_mode & 0o777 == 0o600
     assert set(roles) == set(module.GENERATION_ROLES) | set(module.EMBEDDING_ROLES) | {
@@ -47,6 +49,7 @@ def test_config_covers_required_local_workflow_roles(tmp_path: Path) -> None:
     assert roles["classification.primary"].model == "primary:test"
     assert roles["classification.challenger"].model == "challenger:test"
     assert roles["classification.tie_break"].model == "tie:test"
+    assert ingest.num_ctx == ingest.max_num_ctx == 32_768
 
 
 def test_isolated_root_requires_empty_temporary_directory(
