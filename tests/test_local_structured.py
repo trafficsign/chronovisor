@@ -69,9 +69,9 @@ class QueueTransport:
 
 
 def test_structured_generation_policy_seals_the_fixed_sampler() -> None:
-    assert STRUCTURED_GENERATION_POLICY_VERSION == 5
+    assert STRUCTURED_GENERATION_POLICY_VERSION == 6
     assert structured_generation_policy() == {
-        "version": 5,
+        "version": 6,
         "temperature": 0,
         "seed": 0,
         "think": {"default": "medium"},
@@ -1410,6 +1410,25 @@ def test_reasoning_protocol_prefix_is_normalized_for_any_model() -> None:
     assert transport.requests[0].think == "medium"
 
 
+def test_fixed_reasoning_protocol_prefix_is_normalized_for_any_model() -> None:
+    normalized = '{"decision":"apply","summary":"reasoned"}'
+    transport = QueueTransport(f" to=user<|message|>{normalized}")
+    result = LocalStructuredSession(
+        model="muse-glimmer:30b-mxfp8-dflash",
+        transport=transport,
+        num_ctx=65_536,
+        num_predict=256,
+    ).run("decide", SCHEMA)
+
+    assert result.ok is True
+    assert result.value == {"decision": "apply", "summary": "reasoned"}
+    assert result.attempts[0].normalized is True
+    assert result.attempts[0].output_sha256 == hashlib.sha256(
+        normalized.encode("utf-8")
+    ).hexdigest()
+    assert transport.requests[0].think == "medium"
+
+
 @pytest.mark.parametrize(
     ("raw", "keyword"),
     [
@@ -1431,6 +1450,19 @@ def test_reasoning_protocol_prefix_is_normalized_for_any_model() -> None:
         ),
         (
             "status to=user<|message|>status to=user<|message|>"
+            '{"decision":"apply","summary":"unsafe"}',
+            "parse",
+        ),
+        (
+            'answer: to=user<|message|>{"decision":"apply","summary":"unsafe"}',
+            "parse",
+        ),
+        (
+            'to=user<|message|x>{"decision":"apply","summary":"unsafe"}',
+            "parse",
+        ),
+        (
+            "to=user<|message|>to=user<|message|>"
             '{"decision":"apply","summary":"unsafe"}',
             "parse",
         ),
