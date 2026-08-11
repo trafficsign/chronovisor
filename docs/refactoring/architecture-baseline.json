@@ -6681,20 +6681,16 @@
   "tracked_launchd_plists": [
     {
       "path": "launchd/com.trafficsign.chronovisor-dashboard.plist",
-      "sha256": "11c4119e93e11f3743239d64345e9eed9122d86a1c7c89ea0da6b823903372c0",
-      "label": "com.trafficsign.chronovisor-dashboard",
+      "sha256": "633e616368f7aff16df44d81861464920feb46f185f3c76bea0e2c8894a70f81",
+      "label": "@@LAUNCHD_LABEL_PREFIX@@dashboard",
       "program_arguments": [
-        "@@PROJECT_ROOT@@/scripts/chronovisor-dashboard",
-        "--host",
-        "127.0.0.1",
-        "--port",
-        "8765"
+        "@@PROJECT_ROOT@@/scripts/chronovisor-dashboard"
       ]
     },
     {
       "path": "launchd/com.trafficsign.chronovisor-ingest-drain.plist",
-      "sha256": "e3954d5de21079a0e5af73985dc4cca6d8bc5dc03fdccb56f6248db363933849",
-      "label": "com.trafficsign.chronovisor-ingest-drain",
+      "sha256": "2b9fe6add866bff5aa8812be741747084c930ed603915453942798856f4a138e",
+      "label": "@@LAUNCHD_LABEL_PREFIX@@ingest-drain",
       "program_arguments": [
         "@@PROJECT_ROOT@@/scripts/chronovisor-ingest-drain",
         "--watch",
@@ -6708,16 +6704,16 @@
     },
     {
       "path": "launchd/com.trafficsign.chronovisor-librarian-review.plist",
-      "sha256": "7f60a9ced276d663425765ef8f502676077063b61131afa7a9294028230ff370",
-      "label": "com.trafficsign.chronovisor-librarian-review",
+      "sha256": "d8a81830dd79ce2da190a23c482aa7440dd3494bfae08b3c9e10c49df33b0fd2",
+      "label": "@@LAUNCHD_LABEL_PREFIX@@librarian-review",
       "program_arguments": [
         "@@PROJECT_ROOT@@/scripts/chronovisor-librarian-review"
       ]
     },
     {
       "path": "launchd/com.trafficsign.chronovisor-library-evidence.plist",
-      "sha256": "4c40b5b192a6594fe71f49d71aa3de132ca5e978bf3fc4eb7cc4ae17aa04c622",
-      "label": "com.trafficsign.chronovisor-library-evidence",
+      "sha256": "2619d6cb8b7bf4d5e6226830662f6a277a8173d5881f6f359eedb577de8b94cd",
+      "label": "@@LAUNCHD_LABEL_PREFIX@@library-evidence",
       "program_arguments": [
         "@@PROJECT_ROOT@@/scripts/chronovisor-library-evidence",
         "run-once",
@@ -6727,8 +6723,8 @@
     },
     {
       "path": "launchd/com.trafficsign.chronovisor-reranker.plist",
-      "sha256": "b88e6ee50f4852001f31b70fd17a11c5ea0f9024f3541a396306419807e76b84",
-      "label": "com.trafficsign.chronovisor-reranker",
+      "sha256": "713963c3302949cb92bab566cddb31d64afe14ab585fa97dd84bc85ebe34f6e1",
+      "label": "@@LAUNCHD_LABEL_PREFIX@@reranker",
       "program_arguments": [
         "@@PROJECT_ROOT@@/scripts/chronovisor-reranker-service",
         "serve"
@@ -6736,16 +6732,16 @@
     },
     {
       "path": "launchd/com.trafficsign.chronovisor-searxng.plist",
-      "sha256": "d7672d66bfce18af6e5db3a24ce05d2484d2c93341191ec68f4c634fdd009276",
-      "label": "com.trafficsign.chronovisor-searxng",
+      "sha256": "0977b3e8cf171ca83a560cf9f165348c35edf0c6db2a8a46acbb4ce0062cdaa0",
+      "label": "@@LAUNCHD_LABEL_PREFIX@@searxng",
       "program_arguments": [
         "@@PROJECT_ROOT@@/scripts/chronovisor-searxng"
       ]
     },
     {
       "path": "launchd/com.trafficsign.chronovisor-semantic.plist",
-      "sha256": "442493c085dd4a10cc962b5a719c544500809f40fff19d0bb1830ce90ae445e6",
-      "label": "com.trafficsign.chronovisor-semantic",
+      "sha256": "58fb25cf00e081c6ae9acf28c3d9665163c26a9e49d78b8d2597b0d2499c8321",
+      "label": "@@LAUNCHD_LABEL_PREFIX@@semantic",
       "program_arguments": [
         "@@PROJECT_ROOT@@/scripts/chronovisor-semantic-service",
         "serve"
