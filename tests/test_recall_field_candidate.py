@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 
 from chronovisor.core.search_types import ScoredPage
 from chronovisor.recall import recall_field_candidate
@@ -45,6 +46,49 @@ def test_candidate_and_teacher_run_but_teacher_keeps_authority(monkeypatch) -> N
     assert metadata["quality_eligible"] is True
     assert metadata["field_attempted"] is True
     assert metadata["field_verified"] is True
+
+
+def test_budget_exhaustion_skips_slow_verifier_without_executor_tail(
+    monkeypatch,
+) -> None:
+    cfg = RecallFieldConfig(mode="candidate", canary_percent=100)
+    ticks = iter((0.0, 0.08))
+    monkeypatch.setattr(
+        recall_field_candidate.time,
+        "perf_counter",
+        lambda: next(ticks),
+    )
+    verify_calls = 0
+
+    def slow_verify(*_args, **_kwargs):
+        nonlocal verify_calls
+        verify_calls += 1
+        time.sleep(0.5)
+        return [page("field")]
+
+    monkeypatch.setattr(recall_field_candidate.semantic_client, "verify", slow_verify)
+    started = time.monotonic()
+    results, mode, metadata = recall_field_candidate.run_candidate_teacher_pair(
+        query="stateful recall",
+        field_turn={
+            "session_hash": "0123456789abcdef",
+            "candidate_page_ids": ["field"],
+            "full_search_fallback": False,
+        },
+        teacher_search=lambda: ([page("teacher")], "hybrid"),
+        timeout_ms=100,
+        config=cfg,
+    )
+
+    assert time.monotonic() - started < 0.1
+    assert verify_calls == 0
+    assert [row.page_id for row in results] == ["teacher"]
+    assert mode == "hybrid"
+    assert metadata["reason"] == "budget_exhausted"
+    assert metadata["authority"] == "teacher"
+    assert metadata["field_attempted"] is False
+    assert metadata["field_verified"] is False
+    assert metadata["field_latency_ms"] is None
 
 
 def test_topic_reset_skips_field_verify_but_never_full_search(monkeypatch) -> None:

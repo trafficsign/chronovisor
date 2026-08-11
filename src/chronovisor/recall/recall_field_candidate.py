@@ -8,7 +8,6 @@ import math
 import os
 import time
 from collections.abc import Callable, Mapping
-from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -548,7 +547,7 @@ def run_candidate_teacher_pair(
     config: RecallFieldConfig | None = None,
     certificate_boundary_enabled: bool = True,
 ) -> tuple[list[Any], str, dict[str, Any]]:
-    """Run Field verification and the full teacher concurrently.
+    """Run the authoritative teacher, then verify Field within the remaining budget.
 
     The returned ranking remains teacher-owned unless a sealed promotion
     artifact exists. Candidate mode therefore cannot bypass certificates.
@@ -601,28 +600,26 @@ def run_candidate_teacher_pair(
             },
         )
 
-    def timed_teacher() -> tuple[list[Any], str, int]:
-        started = time.perf_counter()
-        teacher_results, teacher_mode = teacher_search()
-        return (
-            teacher_results,
-            teacher_mode,
-            int(round((time.perf_counter() - started) * 1_000)),
-        )
-
-    with ThreadPoolExecutor(
-        max_workers=2,
-        thread_name_prefix="recall-field-candidate",
-    ) as executor:
-        teacher_future = executor.submit(timed_teacher)
-        field_future = executor.submit(
-            _verify,
+    pair_started = time.perf_counter()
+    teacher_results, teacher_mode = teacher_search()
+    teacher_elapsed_ms = (time.perf_counter() - pair_started) * 1_000
+    teacher_latency_ms = int(round(teacher_elapsed_ms))
+    remaining_ms = max(0, int(timeout_ms - teacher_elapsed_ms))
+    field_attempted = remaining_ms >= 25
+    if field_attempted:
+        verified, verify_meta = _verify(
             query,
             page_ids,
-            timeout_ms=max(25, timeout_ms),
+            timeout_ms=remaining_ms,
         )
-        teacher_results, teacher_mode, teacher_latency_ms = teacher_future.result()
-        verified, verify_meta = field_future.result()
+    else:
+        verified, verify_meta = (
+            [],
+            {
+                "status": "fallback",
+                "reason": "budget_exhausted",
+            },
+        )
 
     teacher_ids = [str(row.page_id) for row in teacher_results[:30]]
     field_ids = [str(row.page_id) for row in verified[:30]]
@@ -656,10 +653,12 @@ def run_candidate_teacher_pair(
                     else "field_verification_failed"
                 ),
                 "full_search_required": True,
-                "quality_eligible": True,
-                "field_attempted": True,
+                "quality_eligible": field_attempted,
+                "field_attempted": field_attempted,
                 "field_verified": verify_completed,
-                "field_latency_ms": int(verify_meta.get("latency_ms") or 0),
+                "field_latency_ms": (
+                    int(verify_meta.get("latency_ms") or 0) if field_attempted else None
+                ),
                 "teacher_latency_ms": teacher_latency_ms,
                 "effective_mode": "shadow",
             },

@@ -360,6 +360,7 @@ def test_default_feedback_uses_process_shared_derived_cache(
     monkeypatch,
 ) -> None:
     feedback = tmp_path / "feedback.jsonl"
+    recall_log = tmp_path / "recall-log.jsonl"
     cache = tmp_path / "negative-feedback-cache.json"
     row = {
         "ts": "2026-06-11T10:23:35",
@@ -372,26 +373,36 @@ def test_default_feedback_uses_process_shared_derived_cache(
     monkeypatch.setattr(negative_feedback, "FEEDBACK_FILE_OVERRIDE", None)
     monkeypatch.setattr(negative_feedback, "PERSISTENT_CACHE_FILE", cache)
     monkeypatch.setattr(negative_feedback, "_feedback_file", lambda: feedback)
+    monkeypatch.setattr(negative_feedback, "_recall_log_file", lambda: recall_log)
     monkeypatch.setattr(negative_feedback, "_CACHE", negative_feedback._Cache())
+    scanned_logs = []
+
+    def load_rows(candidate, *, recall_log_file):
+        scanned_logs.append(recall_log_file)
+        return active_feedback_rows(candidate)
+
     monkeypatch.setattr(
         negative_feedback,
         "trusted_negative_feedback_rows",
-        lambda candidate, **_kwargs: active_feedback_rows(candidate),
+        load_rows,
     )
 
     expected = negative_feedback._load_entries(CONFIG)
     assert len(expected) == 1
     assert cache.exists()
+    assert scanned_logs == [recall_log]
 
-    monkeypatch.setattr(negative_feedback, "_CACHE", negative_feedback._Cache())
+    recall_log.write_text('{"unrelated":true}\n', encoding="utf-8")
     monkeypatch.setattr(
         negative_feedback,
         "trusted_negative_feedback_rows",
         lambda *_args, **_kwargs: pytest.fail(
-            "persistent cache should avoid ledger scan"
+            "recall-log append must not invalidate feedback cache"
         ),
     )
+    assert negative_feedback._load_entries(CONFIG) == expected
 
+    monkeypatch.setattr(negative_feedback, "_CACHE", negative_feedback._Cache())
     assert negative_feedback._load_entries(CONFIG) == expected
 
 

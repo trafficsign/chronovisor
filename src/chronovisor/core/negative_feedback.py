@@ -115,21 +115,11 @@ def _persistent_key(
     mtime_ns: int,
     size: int,
     config: NegativeFeedbackConfig,
-    recall_log_file: Path,
 ) -> dict[str, object]:
-    try:
-        recall_stat = recall_log_file.stat()
-    except OSError:
-        recall_mtime_ns, recall_size = 0, 0
-    else:
-        recall_mtime_ns, recall_size = recall_stat.st_mtime_ns, recall_stat.st_size
     return {
         "path": str(path),
         "mtime_ns": mtime_ns,
         "size": size,
-        "recall_log_path": str(recall_log_file),
-        "recall_log_mtime_ns": recall_mtime_ns,
-        "recall_log_size": recall_size,
         "kinds": list(config.kinds),
         "max_age_days": config.max_age_days,
         "max_entries": config.max_entries,
@@ -244,12 +234,6 @@ def _load_entries(config: NegativeFeedbackConfig) -> list[_FeedbackEntry]:
         (datetime.now(UTC).date().isoformat() if config.max_age_days > 0 else ""),
     )
     recall_log_file = _recall_log_file()
-    try:
-        recall_stat = recall_log_file.stat()
-        recall_identity = (recall_stat.st_mtime_ns, recall_stat.st_size)
-    except OSError:
-        recall_identity = (0, 0)
-    cache_key = (*cache_key, str(recall_log_file), *recall_identity)
     with _CACHE_LOCK:
         if _CACHE.key == cache_key:
             return _CACHE.entries
@@ -258,7 +242,6 @@ def _load_entries(config: NegativeFeedbackConfig) -> list[_FeedbackEntry]:
         mtime_ns=stat.st_mtime_ns,
         size=stat.st_size,
         config=config,
-        recall_log_file=recall_log_file,
     )
     persisted = _read_persistent_entries(persistent_key)
     if persisted is not None:
