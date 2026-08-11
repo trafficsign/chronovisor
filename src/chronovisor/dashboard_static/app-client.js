@@ -102,6 +102,7 @@ function renderLiveConsensus(consensus) {
       ...(liveConsensus.summary || {}),
     },
   };
+  latestLiveConsensus = mergedConsensus;
   renderDecisionTrace(mergedConsensus);
   if (!latestRenderedStatus) return;
   latestRenderedStatus = {

@@ -367,6 +367,7 @@ const decisionTracePlayback = {
   current: null,
   focus: null,
 };
+let latestLiveConsensus = null;
 
 const decisionReducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
 
@@ -2874,9 +2875,10 @@ function renderLocalConsensusSummary(status) {
 
 function render(snapshot) {
   const snapshotStatus = snapshot.status || {};
+  const snapshotConsensus = snapshot.local_consensus || snapshotStatus.local_consensus || {};
   const status = {
     ...snapshotStatus,
-    local_consensus: snapshot.local_consensus || snapshotStatus.local_consensus || {},
+    local_consensus: latestLiveConsensus || snapshotConsensus,
     frontier_repair: snapshot.frontier_repair || snapshotStatus.frontier_repair || {},
   };
   latestRenderedStatus = status;

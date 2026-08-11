@@ -1877,6 +1877,117 @@ process.stdout.write(JSON.stringify(sandbox.__test.seen));
     ]
 
 
+def test_live_consensus_survives_later_stale_full_render() -> None:
+    renderer = (dashboard.STATIC_DIR / "app-renderer.js").read_text(encoding="utf-8")
+    client = (dashboard.STATIC_DIR / "app-client.js").read_text(encoding="utf-8")
+    live_helper = "function renderLiveConsensus(consensus)" + client.split(
+        "function renderLiveConsensus(consensus)", 1
+    )[1].split("async function refreshLiveModelStatus", 1)[0]
+    hooks = """
+const seen = [];
+const noop = () => {};
+setState = noop;
+renderWorkStatus = noop;
+renderLlm = noop;
+renderLocalConsensusSummary = noop;
+renderSelfHeal = noop;
+renderRecall = noop;
+renderRecallImprovement = noop;
+renderSaveHistory = noop;
+renderKnowledgeMix = noop;
+renderLibrarian = noop;
+renderHealth = noop;
+renderModelStatus = noop;
+renderModelLab = noop;
+renderEvents = noop;
+drawLineChart = noop;
+drawBatchChart = noop;
+renderDecisionTrace = (consensus) => {
+  const trace = consensus.decision_trace || {};
+  const steps = decisionTimelineSteps(trace).map((step) => step.label);
+  decisionTracePlayback.request = String(trace.request_sha256 || "");
+  decisionTracePlayback.current = { request_sha256: trace.request_sha256, steps };
+  seen.push({ request: trace.request_sha256, steps });
+};
+"""
+    scenario = f"""
+const vm = require("node:vm");
+const element = () => ({{ textContent: "", title: "" }});
+const els = new Proxy({{}}, {{
+  get(target, key) {{
+    if (!(key in target)) target[key] = element();
+    return target[key];
+  }},
+}});
+const sandbox = {{
+  window: {{ matchMedia: () => ({{ matches: false }}) }},
+  document: {{ visibilityState: "visible" }},
+  els,
+  latestRenderedStatus: {{ state: "running", local_consensus: {{}} }},
+  STAGE_METRIC_LABELS: {{}},
+}};
+vm.createContext(sandbox);
+vm.runInContext(
+  {json.dumps(renderer + hooks + live_helper)}
+    + "\\nthis.__test = {{ render, renderLiveConsensus, seen, playback: () => decisionTracePlayback }};",
+  sandbox,
+);
+const live = {{
+  active: true,
+  decision_trace: {{
+    request_sha256: "f749",
+    active: true,
+    events: [{{
+      event_id: "live-generate",
+      kind: "phase",
+      lane: "challenger",
+      phase: "generate",
+      status: "active",
+    }}],
+  }},
+}};
+const stale = {{
+  active: true,
+  decision_trace: {{
+    request_sha256: "8103",
+    active: true,
+    events: [{{
+      event_id: "stale-validate",
+      kind: "phase",
+      lane: "primary",
+      phase: "validate",
+      status: "active",
+    }}],
+  }},
+}};
+sandbox.__test.renderLiveConsensus(live);
+sandbox.__test.render({{
+  status: {{ state: "running", local_consensus: stale }},
+  local_consensus: stale,
+}});
+process.stdout.write(JSON.stringify({{
+  seen: sandbox.__test.seen,
+  playback: sandbox.__test.playback(),
+}}));
+"""
+
+    completed = subprocess.run(
+        ["node", "-e", scenario],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    result = json.loads(completed.stdout)
+
+    assert [row["request"] for row in result["seen"]] == ["f749", "f749"]
+    assert result["seen"][-1]["steps"] == ["Packet", "Challenger Generate #1"]
+    assert result["playback"]["request"] == "f749"
+    assert result["playback"]["current"]["steps"] == [
+        "Packet",
+        "Challenger Generate #1",
+    ]
+
+
 def test_dashboard_static_layout_aligns_peer_panels_and_contains_event_badges() -> None:
     style = (dashboard.STATIC_DIR / "style.css").read_text(encoding="utf-8")
 
