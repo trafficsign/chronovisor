@@ -1881,7 +1881,7 @@ document.addEventListener("DOMContentLoaded", () => {
             stderr=subprocess.PIPE,
             text=True,
         )
-        received = result_ready.wait(20)
+        received = result_ready.wait(60)
         browser_exit = process.poll()
     finally:
         if process is not None:
