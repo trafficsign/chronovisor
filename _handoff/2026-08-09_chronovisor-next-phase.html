@@ -242,10 +242,10 @@ adapter families compose and register supported components
 <ul class="checklist">
 <li><input type="checkbox" checked><span>Campaign W の完了（Ollama 必須を解消）</span></li>
 <li><input type="checkbox"><span>Campaign X の完了（<code>pages/</code> の OKF v0.2 canonical migration）</span></li>
-<li><input type="checkbox"><span><code>.env</code> / API キー / ローカルパスのハードコード除去</span></li>
-<li><input type="checkbox"><span>ユーザー固有識別子の除去 — <code>runtime_config.py</code> の <code>git+ssh://git@github.com/trafficsign/chronovisor</code>、User-Agent の <code>github.com/trafficsign/chronovisor</code>、<code>self_heal.py</code> の <code>_EXPECTED_GITHUB_REPOSITORY</code>、LaunchAgent ラベル <code>com.trafficsign.*</code>（約20箇所）を config 注入またはデフォルト値に変更</span></li>
-<li><input type="checkbox"><span>Dashboard / バックエンドのネットワーク設定外部化 — bind アドレス・ポートを <code>config.toml</code> から取得可能にし、フロントエンドの API エンドポイントも設定で変更可能にする（<code>ollama_transport.py</code>、<code>burn_monitor.py</code>、<code>semantic_hold.py</code> の <code>localhost:11434</code> 直書き含む）</span></li>
-<li><input type="checkbox"><span>システム全体図の作成 — データフロー（Raw → Ingest → Pages → Search/Recall）、コンポーネント関係（MCP Server / Dashboard / Cortex / LaunchAgent）、Campaign W 後のプロバイダ構成を Mermaid で README に埋め込む</span></li>
+<li><input type="checkbox" checked><span><code>.env</code> / API キー / ローカルパスのハードコード除去</span></li>
+<li><input type="checkbox" checked><span>ユーザー固有識別子の除去 — <code>runtime_config.py</code> の <code>git+ssh://git@github.com/trafficsign/chronovisor</code>、User-Agent の <code>github.com/trafficsign/chronovisor</code>、<code>self_heal.py</code> の <code>_EXPECTED_GITHUB_REPOSITORY</code>、LaunchAgent ラベル <code>com.trafficsign.*</code>（約20箇所）を config 注入またはデフォルト値に変更</span></li>
+<li><input type="checkbox" checked><span>Dashboard / バックエンドのネットワーク設定外部化 — bind アドレス・ポートを <code>config.toml</code> から取得可能にし、フロントエンドの API エンドポイントも設定で変更可能にする（<code>ollama_transport.py</code>、<code>burn_monitor.py</code>、<code>semantic_hold.py</code> の <code>localhost:11434</code> 直書き含む）</span></li>
+<li><input type="checkbox" checked><span>システム全体図の作成 — データフロー（Raw → Ingest → Pages → Search/Recall）、コンポーネント関係（MCP Server / Dashboard / Cortex / LaunchAgent）、Campaign W 後のプロバイダ構成を Mermaid で README に埋め込む</span></li>
 <li><input type="checkbox"><span>LICENSE ファイルの追加</span></li>
 <li><input type="checkbox" checked><span>README（セットアップ手順、最小構成、アーキテクチャ概要）</span></li>
 <li><input type="checkbox" checked><span>実在 secret を含まず fake <code>CredentialRef</code> だけを使う <code>config.toml.example</code> の同梱</span></li>
@@ -358,6 +358,7 @@ adapter families compose and register supported components
 <li><time datetime="2026-08-10T16:24:00+09:00">2026-08-10 16:24 JST</time> — ユーザー判断により Campaign Y — Evidence Reconstruction Runtime を追加。planning only であり、実装は未開始。</li>
 <li><time datetime="2026-08-11T10:01:23+09:00">2026-08-11 10:01 JST</time> — <code>07f0b05</code> で production provider execution boundary の静的 gate を完成。全 production consumer の共通 runtime 移行、safe failure telemetry / Dashboard、offline local / cloud / hybrid contracts を再検証し、W suite 244 tests と追加の関連 suite 532 tests が green。isolated local Ollama E2E は generation と 1,024 次元 embedding を実機で完了したため W6–W8 と Campaign W を完了。</li>
 <li><time datetime="2026-08-11T11:23:30+09:00">2026-08-11 11:23 JST</time> — Campaign Y の事前登録 contract、typed EvidenceAtom / EvidencePacket、strict RetrievalProgram compiler を実装。committed Raw receipt の logical byte range、Raw payload digest、canonical receipt digest、temporal validity と3種の evidence relation を固定し、present-invalid timestamp を fail-closed 化。open / sealed Raw からの byte-identical projection、26件の関連 tests、ruff、mypyを確認したため Y1、Y2、Y4 を完了。background projection と executor / rollout は継続中。</li>
+<li><time datetime="2026-08-11T11:37:55+09:00">2026-08-11 11:37 JST</time> — <code>c0f4804</code> / <code>d76a86c</code> / <code>a23d6ad</code> で runtime identity、repository source、LaunchAgent label / executable、Dashboard / backend endpoint を config / portable renderer境界へ移し、個人checkout pathとsecret直書きをproduction surfaceから除去。<code>2cb3929</code> で Raw→Ingest→Pages→Search / Recall、MCP / Dashboard / Cortex / LaunchAgent、provider-neutral runtimeのMermaid全体図をREADMEへ追加。focused 541 tests、smoke 250 tests、architecture gate、ruff、mypyを確認したためOSS portability 4項目を完了。</li>
 </ul>
 </section>
 
