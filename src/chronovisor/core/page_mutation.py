@@ -196,14 +196,14 @@ def chronovisor_mutation_lock(
     target_pages = pages_dir or CHRONOVISOR_ROOT / "pages"
     operation_root = target_pages.parent
     lock_path = path or operation_root / "runtime" / "chronovisor-mutation.lock"
-    with okf_runtime_operation(operation_root):
+    with okf_runtime_operation(operation_root) as startup:
         with _reentrant_exclusive_lock(lock_path) as outermost:
             completed = False
             try:
                 yield
                 completed = True
             finally:
-                if outermost:
+                if outermost and startup.layout == "okf_v0_2":
                     try:
                         from chronovisor.core.reserved_documents import (
                             rebuild_pages_index,

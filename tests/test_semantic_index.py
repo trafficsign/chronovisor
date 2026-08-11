@@ -172,7 +172,10 @@ def _build(root: Path, version: str = "a"):
     )
 
 
-def test_build_validate_activate_and_search_generation(tmp_path: Path) -> None:
+def test_build_validate_activate_and_search_generation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("chronovisor.core.search.searchable_pages", lambda: [])
     manifest = _build(tmp_path)
 
     assert validate_generation(manifest.generation_id, root=tmp_path) == manifest

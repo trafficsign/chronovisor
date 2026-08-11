@@ -1862,8 +1862,15 @@ def test_lane_dispatch_passes_exact_per_lane_allowlists(tmp_path, monkeypatch) -
     assert calls["autonomy_retention"]["limit"] == 3
 
 
-def test_cli_exposes_plan_start_resume_and_status(monkeypatch, capsys) -> None:
+def test_cli_exposes_plan_start_resume_and_status(tmp_path, monkeypatch, capsys) -> None:
+    from chronovisor.core import store as chronovisor_store
     from chronovisor.hosts import cli
+
+    root = tmp_path / "wiki"
+    root.mkdir()
+    for name in ("index.md", "log.md", "schema.md"):
+        (root / name).write_text(f"# {name}\n", encoding="utf-8")
+    monkeypatch.setattr(chronovisor_store, "CHRONOVISOR_ROOT", root)
 
     calls: list[tuple[str, dict]] = []
 

@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from chronovisor.core import page_mutation
 from chronovisor.ingest import tag_lifecycle as tags_mod
 from chronovisor.ingest.tag_lifecycle import (
     AXIS_LIMITS,
@@ -24,7 +25,13 @@ from chronovisor.ingest.tag_lifecycle import (
 def isolated_changelog(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     system = tmp_path / "system"
     system.mkdir()
+    (tmp_path / "pages").mkdir()
+    for name in ("index.md", "log.md", "schema.md"):
+        (tmp_path / name).write_text(f"# {name}\n", encoding="utf-8")
     monkeypatch.setattr(tags_mod, "SYSTEM_DIR", system)
+    monkeypatch.setattr(page_mutation, "CHRONOVISOR_ROOT", tmp_path)
+    monkeypatch.setattr(page_mutation, "PAGES_DIR", tmp_path / "pages")
+    monkeypatch.setattr(page_mutation, "SYSTEM_DIR", system)
     return system
 
 

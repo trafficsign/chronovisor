@@ -41,6 +41,13 @@ def disabled_negative_feedback() -> NegativeFeedbackConfig:
     return NegativeFeedbackConfig(enabled=False)
 
 
+@pytest.fixture()
+def isolated_selection_index(monkeypatch) -> None:
+    from chronovisor.recall import contextual_suppression
+
+    monkeypatch.setattr(contextual_suppression, "ranking_components", lambda *_args: {})
+
+
 def test_pipeline_module_does_not_import_upper_layers() -> None:
     source = Path(pipeline_mod.__file__).read_text(encoding="utf-8")
 
@@ -157,6 +164,7 @@ def test_production_search_builds_usage_prior_only_when_weight_is_positive(
 
 def test_eval_hybrid_current_uses_production_graph_call_and_usage_gate(
     monkeypatch,
+    isolated_selection_index,
 ) -> None:
     bm25 = FakeBM25([page("bm25-a", 10.0), page("bm25-b", 9.0)])
     graph_calls: list[dict[str, object]] = []
@@ -202,9 +210,10 @@ def test_eval_hybrid_current_uses_production_graph_call_and_usage_gate(
 
 def test_hybrid_current_tracks_production_when_default_graph_weight_changes(
     monkeypatch,
+    isolated_selection_index,
 ) -> None:
     def fake_graph(results: list[ScoredPage], *, decay: float = 0.5, limit: int = 50):
-        assert decay == 0.3
+        assert decay == 0.5
         return [page("graph-a", 5.0)]
 
     for module in (search, search_eval):
@@ -231,7 +240,10 @@ def test_hybrid_current_tracks_production_when_default_graph_weight_changes(
     assert eval_payload["channels"]["graph"] == ["graph-a"]
 
 
-def test_eval_hybrid_rerank_applies_negative_feedback_after_rerank(monkeypatch) -> None:
+def test_eval_hybrid_rerank_applies_negative_feedback_after_rerank(
+    monkeypatch,
+    isolated_selection_index,
+) -> None:
     bm25 = FakeBM25([page("a", 3.0), page("b", 2.0)])
     penalty_inputs: list[list[str]] = []
 
@@ -249,6 +261,9 @@ def test_eval_hybrid_rerank_applies_negative_feedback_after_rerank(monkeypatch) 
 
     monkeypatch.setattr(search_eval, "get_bm25", lambda: bm25)
     monkeypatch.setattr(search_eval, "semantic_search", lambda query, top_n=20: [])
+    monkeypatch.setattr(
+        search_eval, "graph_expand_results", lambda *_args, **_kwargs: []
+    )
     monkeypatch.setattr(
         search_eval, "load_reranker_config", lambda: RerankerConfig(enabled=True)
     )

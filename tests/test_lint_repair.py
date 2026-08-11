@@ -28,11 +28,16 @@ def isolate_decision_authority_lock(
 ) -> None:
     from chronovisor.core import page_mutation
 
+    for name in ("index.md", "log.md", "schema.md"):
+        (tmp_path / name).write_text("legacy\n", encoding="utf-8")
     monkeypatch.setattr(
         page_mutation,
         "DECISION_AUTHORITY_LOCK",
         tmp_path / "runtime" / "decision-authority.lock",
     )
+    monkeypatch.setattr(page_mutation, "CHRONOVISOR_ROOT", tmp_path)
+    monkeypatch.setattr(page_mutation, "PAGES_DIR", tmp_path / "pages")
+    monkeypatch.setattr(page_mutation, "SYSTEM_DIR", tmp_path / "system")
 
 
 def _semantic_authority(digest: str) -> dict:
@@ -210,7 +215,10 @@ def _page(
     body: str = "# Page\n\nUseful content.\n",
 ) -> str:
     tag_line = "" if tags is None else f"tags: [{', '.join(tags)}]\n"
-    text = f"---\ntitle: Test Page\nupdated: 2026-01-01\n{tag_line}---\n\n{body}"
+    text = (
+        "---\ntitle: Test Page\nupdated: 2026-01-01\n"
+        f"status: stable\ntype: knowledge\n{tag_line}---\n\n{body}"
+    )
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
     return text

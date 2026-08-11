@@ -24,6 +24,11 @@ NOW = datetime(2026, 7, 10, 12, 0, tzinfo=UTC)
 def _isolate_operational_self_heal(monkeypatch, tmp_path: Path) -> None:
     """Never let a unit test enqueue a packet in the live Wiki runtime."""
 
+    for name in ("index.md", "log.md", "schema.md"):
+        (tmp_path / name).write_text("legacy\n", encoding="utf-8")
+    monkeypatch.setattr(page_mutation, "CHRONOVISOR_ROOT", tmp_path)
+    monkeypatch.setattr(page_mutation, "PAGES_DIR", tmp_path / "pages")
+    monkeypatch.setattr(page_mutation, "SYSTEM_DIR", tmp_path / "system")
     monkeypatch.setattr(
         "chronovisor.ingest.failure_supervisor.queue_operational_failure",
         lambda **_kwargs: tmp_path / "operational-self-heal-packet.json",
@@ -296,11 +301,10 @@ def test_page_mutation_cannot_enter_between_hash_check_and_hint_write(
     changed_page = "---\ntitle: Target\n---\nChanged by another process.\n"
     page_path.write_text(original_page, encoding="utf-8")
     hints_file = tmp_path / "query-hints.json"
-    lock_path = tmp_path / "runtime" / "wiki-mutation.lock"
+    lock_path = tmp_path / "runtime" / "chronovisor-mutation.lock"
     child_started = tmp_path / "child-started"
     monkeypatch.setattr(recall_hints.chronovisor_store, "find_page", lambda _page_id: page_path)
     monkeypatch.setattr(recall_hints.chronovisor_store, "SYSTEM_DIR", tmp_path / "system")
-    monkeypatch.setattr(page_mutation, "CHRONOVISOR_MUTATION_LOCK", lock_path)
     expected_hash = hashlib.sha256(original_page.encode("utf-8")).hexdigest()
     entry = {
         "failure_key": "read-back-test",

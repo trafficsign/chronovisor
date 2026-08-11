@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -42,10 +43,20 @@ def _assert_blocked(capsys: pytest.CaptureFixture[str]) -> None:
     assert json.loads(output) == BLOCKED_PAYLOAD
 
 
+def _legacy_root(root: Path) -> None:
+    root.mkdir()
+    for name in ("index.md", "log.md", "schema.md"):
+        (root / name).write_text(f"# {name}\n", encoding="utf-8")
+
+
 def test_ingest_drain_blocks_watch_and_direct_release(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    root = tmp_path / "wiki"
+    _legacy_root(root)
+    monkeypatch.setattr(ingest_drain, "CHRONOVISOR_ROOT", root)
     monkeypatch.setattr(ingest_drain, "okf_startup_status", _deny)
     monkeypatch.setattr(ingest_drain, "watch", _boom)
     monkeypatch.setattr(ingest_drain, "_release_ingest_runner", _boom)
@@ -225,8 +236,13 @@ def test_diagnostic_commands_bypass_the_gate(
 
 
 def test_existing_server_gates_precede_bind(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    root = tmp_path / "wiki"
+    _legacy_root(root)
+    monkeypatch.setattr(server, "CHRONOVISOR_ROOT", root)
+    monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", root)
     runs = 0
 
     def run_server(*_args: object, **_kwargs: object) -> None:

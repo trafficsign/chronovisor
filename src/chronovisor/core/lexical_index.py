@@ -150,6 +150,17 @@ class LexicalIndex:
         self._last_scan = 0.0
         return connection
 
+    def close(self) -> None:
+        """Checkpoint and close the disposable projection deterministically."""
+
+        with self._lock:
+            if self._connection is None:
+                return
+            if self._persistent:
+                self._connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            self._connection.close()
+            self._connection = None
+
     @staticmethod
     def _initialize(connection: sqlite3.Connection) -> None:
         current = int(connection.execute("PRAGMA user_version").fetchone()[0])

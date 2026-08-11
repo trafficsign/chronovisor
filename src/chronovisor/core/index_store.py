@@ -19,13 +19,17 @@ import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from chronovisor.core.canonical_document import (
     CanonicalDocumentError,
     Namespace,
     resolve_internal_markdown_links,
     validate_canonical_document,
+)
+from chronovisor.core.durable_state import (
+    okf_writer_lease_is_exclusive,
+    open_directory_nofollow,
 )
 from chronovisor.core.link_fix import atomic_write
 from chronovisor.core.store import (
@@ -34,6 +38,9 @@ from chronovisor.core.store import (
     SYSTEM_DIR,
     okf_runtime_operation,
 )
+
+if TYPE_CHECKING:
+    from chronovisor.core.okf_cutover import OKFRebuildGate
 
 SCHEMA_VERSION = 12  # canonical YAML, exact link identities, and lifecycle eligibility
 INDEX_DIR = CHRONOVISOR_ROOT / ".index"
@@ -438,7 +445,28 @@ class IndexStore:
     need to hold a lock externally.
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        root: Path | None = None,
+        *,
+        _index_dir: Path | None = None,
+    ) -> None:
+        if root is None:
+            if _index_dir is not None:
+                raise ValueError("custom index directory requires an explicit root")
+            self._root = CHRONOVISOR_ROOT
+            self._pages_dir = PAGES_DIR
+            self._system_dir = SYSTEM_DIR
+            self._index_dir = INDEX_DIR
+            self._pages_index_file = PAGES_INDEX_FILE
+            self._backlinks_index_file = BACKLINKS_INDEX_FILE
+        else:
+            self._root = Path(root)
+            self._pages_dir = self._root / "pages"
+            self._system_dir = self._root / "system"
+            self._index_dir = Path(_index_dir) if _index_dir else self._root / ".index"
+            self._pages_index_file = self._index_dir / "pages.json"
+            self._backlinks_index_file = self._index_dir / "backlinks.json"
         self._lock = threading.RLock()
         self._entries: dict[str, PageEntry] = {}
         self._canonical_entries: dict[str, PageEntry] = {}
@@ -453,11 +481,14 @@ class IndexStore:
     # -- persistence ------------------------------------------------------
 
     def _load_from_disk(self) -> None:
-        if not PAGES_INDEX_FILE.exists() or not BACKLINKS_INDEX_FILE.exists():
+        if (
+            not self._pages_index_file.exists()
+            or not self._backlinks_index_file.exists()
+        ):
             return
         try:
-            pages_doc = json.loads(PAGES_INDEX_FILE.read_text())
-            backlinks_doc = json.loads(BACKLINKS_INDEX_FILE.read_text())
+            pages_doc = json.loads(self._pages_index_file.read_text())
+            backlinks_doc = json.loads(self._backlinks_index_file.read_text())
         except (OSError, json.JSONDecodeError):
             return
         if pages_doc.get("schema_version") != SCHEMA_VERSION:
@@ -486,7 +517,7 @@ class IndexStore:
         self._rebuild_associations()
 
     def _persist(self, generation: int) -> None:
-        INDEX_DIR.mkdir(parents=True, exist_ok=True)
+        self._index_dir.mkdir(parents=True, exist_ok=True)
         pages_doc = {
             "schema_version": SCHEMA_VERSION,
             "generation": generation,
@@ -501,15 +532,18 @@ class IndexStore:
         # atomic_write each file. Cross-file consistency is guarded by the
         # shared `generation` field — readers that see mismatched generations
         # discard both and rebuild.
-        atomic_write(PAGES_INDEX_FILE, json.dumps(pages_doc, ensure_ascii=False))
         atomic_write(
-            BACKLINKS_INDEX_FILE, json.dumps(backlinks_doc, ensure_ascii=False)
+            self._pages_index_file,
+            json.dumps(pages_doc, ensure_ascii=False),
+        )
+        atomic_write(
+            self._backlinks_index_file,
+            json.dumps(backlinks_doc, ensure_ascii=False),
         )
 
     # -- refresh ----------------------------------------------------------
 
-    @staticmethod
-    def _scan_disk() -> list[tuple[str, Path, bool, int, int]]:
+    def _scan_disk(self) -> list[tuple[str, Path, bool, int, int]]:
         """Walk pages/ and system/ in deterministic order.
 
         Returns list of (page_id, path, is_system, mtime_ns, size).
@@ -517,7 +551,10 @@ class IndexStore:
         `_find_backlinks` (pages/ then system/).
         """
         out: list[tuple[str, Path, bool, int, int]] = []
-        for root, is_system in ((PAGES_DIR, False), (SYSTEM_DIR, True)):
+        for root, is_system in (
+            (self._pages_dir, False),
+            (self._system_dir, True),
+        ):
             if not root.is_dir():
                 continue
             for path in sorted(root.rglob("*.md")):
@@ -546,8 +583,26 @@ class IndexStore:
         Cheap when nothing changed (one stat per page, no parsing).
         Persists only when entries or backlinks actually changed.
         """
-        with okf_runtime_operation(CHRONOVISOR_ROOT):
+        with okf_runtime_operation(self._root):
             self._refresh_locked()
+
+    def _refresh_under_external_gate(self, gate: OKFRebuildGate) -> None:
+        """Refresh while an offline coordinator holds the exclusive root gate."""
+
+        source_root = gate.source_root.expanduser().absolute()
+        if self._root.expanduser().absolute() != source_root:
+            raise RuntimeError("OKF rebuild gate root does not match IndexStore")
+        allowed_index_dirs = {
+            source_root / ".index",
+            gate.workspace.expanduser().absolute() / "derived-rebuild" / "index",
+        }
+        if self._index_dir.expanduser().absolute() not in allowed_index_dirs:
+            raise RuntimeError("IndexStore projection is outside the OKF rebuild gate")
+        if not okf_writer_lease_is_exclusive(source_root):
+            raise RuntimeError("OKF rebuild gate is not active")
+        with open_directory_nofollow(self._index_dir):
+            pass
+        self._refresh_locked()
 
     def _refresh_locked(self) -> None:
         with self._lock:
@@ -586,7 +641,15 @@ class IndexStore:
                 existing = self._entries.get(pid)
                 path_str = str(path)
                 if existing is None:
-                    entry = self._build_entry(pid, path, is_system, mtime_ns, size)
+                    entry = self._build_entry(
+                        pid,
+                        path,
+                        is_system,
+                        mtime_ns,
+                        size,
+                        pages_dir=self._pages_dir,
+                        system_dir=self._system_dir,
+                    )
                     if entry is not None:
                         self._entries[pid] = entry
                         changed = True
@@ -598,7 +661,15 @@ class IndexStore:
                     or existing.path != path_str
                     or existing.is_system != is_system
                 ):
-                    entry = self._build_entry(pid, path, is_system, mtime_ns, size)
+                    entry = self._build_entry(
+                        pid,
+                        path,
+                        is_system,
+                        mtime_ns,
+                        size,
+                        pages_dir=self._pages_dir,
+                        system_dir=self._system_dir,
+                    )
                     if entry is not None:
                         self._entries[pid] = entry
                         changed = True
@@ -658,8 +729,11 @@ class IndexStore:
         is_system: bool,
         mtime_ns: int,
         size: int,
+        *,
+        pages_dir: Path | None = None,
+        system_dir: Path | None = None,
     ) -> PageEntry | None:
-        root = SYSTEM_DIR if is_system else PAGES_DIR
+        root = (system_dir or SYSTEM_DIR) if is_system else (pages_dir or PAGES_DIR)
         resolved = contained_file(path, root)
         if resolved is None:
             return None

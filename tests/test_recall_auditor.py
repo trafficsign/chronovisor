@@ -438,6 +438,11 @@ def test_matching_recall_log_prefers_prompt_hash_and_session(tmp_path, monkeypat
 def test_cli_records_missed_candidate_with_snapshot(tmp_path, monkeypatch, capsys) -> None:
     from chronovisor.recall import recall_runtime
 
+    root = tmp_path / "wiki"
+    root.mkdir()
+    for name in ("index.md", "log.md", "schema.md"):
+        (root / name).write_text(f"# {name}\n", encoding="utf-8")
+    monkeypatch.setattr(recall_auditor.chronovisor_store, "CHRONOVISOR_ROOT", root)
     prompt = "昨日の recall hook の続き"
     decision_id = "20260602T210000-auditme"
     feedback_file = tmp_path / "feedback.jsonl"

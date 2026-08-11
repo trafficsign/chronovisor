@@ -43,29 +43,40 @@ class StateSealError(DurableStateError):
 
 
 @contextmanager
-def open_regular_nofollow(path: Path) -> Iterator[IO[bytes]]:
-    """Open one regular file while refusing symlinks in every path component."""
+def open_directory_nofollow(path: Path) -> Iterator[int]:
+    """Pin one directory while refusing symlinks in every path component."""
 
     absolute = path.absolute()
     directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
     directory_flags |= getattr(os, "O_CLOEXEC", 0)
     directory_fd = os.open(absolute.anchor, directory_flags)
-    file_fd = -1
     try:
-        for part in absolute.parent.parts[1:]:
+        for part in absolute.parts[1:]:
             next_fd = os.open(part, directory_flags, dir_fd=directory_fd)
             os.close(directory_fd)
             directory_fd = next_fd
-        flags = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
-        file_fd = os.open(absolute.name, flags, dir_fd=directory_fd)
-        if not stat.S_ISREG(os.fstat(file_fd).st_mode):
-            raise ValueError("path is not a regular file")
-        with os.fdopen(file_fd, "rb", closefd=False) as handle:
-            yield handle
+        yield directory_fd
     finally:
-        if file_fd >= 0:
-            os.close(file_fd)
         os.close(directory_fd)
+
+
+@contextmanager
+def open_regular_nofollow(path: Path) -> Iterator[IO[bytes]]:
+    """Open one regular file while refusing symlinks in every path component."""
+
+    absolute = path.absolute()
+    file_fd = -1
+    with open_directory_nofollow(absolute.parent) as directory_fd:
+        try:
+            flags = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+            file_fd = os.open(absolute.name, flags, dir_fd=directory_fd)
+            if not stat.S_ISREG(os.fstat(file_fd).st_mode):
+                raise ValueError("path is not a regular file")
+            with os.fdopen(file_fd, "rb", closefd=False) as handle:
+                yield handle
+        finally:
+            if file_fd >= 0:
+                os.close(file_fd)
 
 
 def atomic_write_bytes_at(directory_fd: int, name: str, raw: bytes) -> None:
@@ -216,6 +227,21 @@ def _runtime_entry_kind(directory_fd: int, name: str) -> str | None:
     except FileNotFoundError:
         return None
     return "file" if stat.S_ISREG(mode) else "unsafe"
+
+
+def okf_writer_lease_is_exclusive(root: Path) -> bool:
+    """Return whether this thread currently holds the root's exclusive lease."""
+
+    if getattr(_OKF_LOCK_STATE, "process_id", None) != os.getpid():
+        return False
+    expanded = root.expanduser()
+    if not expanded.is_absolute():
+        return False
+    leases = getattr(_OKF_LOCK_STATE, "leases", None)
+    if not isinstance(leases, dict):
+        return False
+    active = leases.get(os.fspath(expanded.absolute()))
+    return bool(active is not None and active[0])
 
 
 @contextmanager

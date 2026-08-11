@@ -12,7 +12,10 @@ from pathlib import Path
 import pytest
 
 from chronovisor.core import okf_cutover, store
-from chronovisor.core.durable_state import okf_writer_lock
+from chronovisor.core.durable_state import (
+    okf_writer_lease_is_exclusive,
+    okf_writer_lock,
+)
 from chronovisor.core.okf_cutover import (
     OKFStartupBlocked,
     OKFStartupDecision,
@@ -44,6 +47,17 @@ def _exclusive_is_blocked(lock_path: Path) -> bool:
         return False
     finally:
         os.close(descriptor)
+
+
+def test_exclusive_lease_probe_is_process_local_and_exact(tmp_path: Path) -> None:
+    root, _runtime = _legacy(tmp_path)
+
+    assert okf_writer_lease_is_exclusive(root) is False
+    with okf_writer_lock(root):
+        assert okf_writer_lease_is_exclusive(root) is False
+    with okf_writer_lock(root, exclusive=True, allow_create=False):
+        assert okf_writer_lease_is_exclusive(root) is True
+    assert okf_writer_lease_is_exclusive(root) is False
 
 
 def test_shared_operation_evaluates_gate_while_lock_is_held(

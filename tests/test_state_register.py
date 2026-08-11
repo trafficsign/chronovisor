@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from chronovisor.core import page_mutation
 from chronovisor.ingest import state_register
 from chronovisor.recall import recall_runtime
@@ -12,6 +14,15 @@ from chronovisor.recall.recall_runtime import (
     render_output,
     run_recall,
 )
+
+
+@pytest.fixture(autouse=True)
+def isolate_wiki_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in ("index.md", "log.md", "schema.md"):
+        (tmp_path / name).write_text("legacy\n", encoding="utf-8")
+    monkeypatch.setattr(page_mutation, "CHRONOVISOR_ROOT", tmp_path)
+    monkeypatch.setattr(page_mutation, "PAGES_DIR", tmp_path / "pages")
+    monkeypatch.setattr(page_mutation, "SYSTEM_DIR", tmp_path / "system")
 
 
 def test_state_register_context_is_injected_for_codex(monkeypatch) -> None:

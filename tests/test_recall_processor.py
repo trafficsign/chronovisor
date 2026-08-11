@@ -22,6 +22,13 @@ from chronovisor.recall import recall_processor
 from chronovisor.recall.evidence_certificate import EvidenceCertificate
 
 
+@pytest.fixture()
+def isolated_selection_index(monkeypatch: pytest.MonkeyPatch) -> None:
+    from chronovisor.recall import contextual_suppression
+
+    monkeypatch.setattr(contextual_suppression, "ranking_components", lambda *_args: {})
+
+
 def page(page_id: str) -> ScoredPage:
     return ScoredPage(
         page_id=page_id,
@@ -225,7 +232,9 @@ def distinct_judge_routes() -> tuple[ollama.RuntimeGenerationRoute, ...]:
     )
 
 
-def test_selection_is_dynamic_and_caps_rich_and_pointer_counts(monkeypatch) -> None:
+def test_selection_is_dynamic_and_caps_rich_and_pointer_counts(
+    monkeypatch, isolated_selection_index
+) -> None:
     candidates = [page(f"page-{index}") for index in range(8)]
     monkeypatch.setattr(
         recall_processor,
@@ -256,7 +265,9 @@ def test_selection_is_dynamic_and_caps_rich_and_pointer_counts(monkeypatch) -> N
     assert metadata["ledger_written"] == 8
 
 
-def test_selection_uses_resolved_rerank_route_model(monkeypatch) -> None:
+def test_selection_uses_resolved_rerank_route_model(
+    monkeypatch, isolated_selection_index
+) -> None:
     seen: list[dict[str, Any] | None] = []
 
     def certify(_query, value, **kwargs):
@@ -290,7 +301,9 @@ def test_selection_uses_resolved_rerank_route_model(monkeypatch) -> None:
     assert seen[0]["model_revision"] == "route-model"
 
 
-def test_selection_abstains_when_every_certificate_rejects(monkeypatch) -> None:
+def test_selection_abstains_when_every_certificate_rejects(
+    monkeypatch, isolated_selection_index
+) -> None:
     candidates = [page("noise-a"), page("noise-b")]
     monkeypatch.setattr(
         recall_processor,
@@ -1005,6 +1018,7 @@ def test_escalation_failure_and_subthreshold_pass_reject(
 def test_certificate_receipt_and_metadata_bind_judge_route(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    isolated_selection_index,
 ) -> None:
     from chronovisor.recall.evidence_certificate import append_certificates
 

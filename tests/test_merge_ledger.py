@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from chronovisor.core.store import RuntimeContext, init_chronovisor
 from chronovisor.ingest.page_registry import PageRegistry
 from chronovisor.recall.merge_ledger import (
     MergeCoverageError,
@@ -114,8 +115,8 @@ def test_merge_ledger_is_append_only(tmp_path: Path) -> None:
 def test_merge_transaction_requires_activation_and_redirects_old_uid(
     tmp_path: Path,
 ) -> None:
+    init_chronovisor(RuntimeContext(tmp_path))
     pages = tmp_path / "pages"
-    pages.mkdir()
     alpha_text = (
         "---\ntitle: Alpha\nstatus: stable\ntype: knowledge\n---\n\n"
         "Alpha uses 42GB.\n"

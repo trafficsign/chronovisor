@@ -14,7 +14,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any, Never
 
-from chronovisor.core import runtime_status
+from chronovisor.core import durable_state, runtime_status
 from chronovisor.core import store as chronovisor_store
 from chronovisor.core.runtime_config import (
     config_summary,
@@ -577,7 +577,7 @@ def _configure_credentials_parser(subparsers: Any) -> None:
 
 
 def _configure_okf_parser(subparsers: Any) -> None:
-    parser = subparsers.add_parser("okf", help="Inspect or prepare the OKF migration.")
+    parser = subparsers.add_parser("okf", help="Operate the offline OKF migration.")
     commands = parser.add_subparsers(dest="okf_command", required=True)
     status = commands.add_parser("status", help="Inspect the OKF startup gate.")
     status.add_argument("--root", type=Path)
@@ -586,6 +586,17 @@ def _configure_okf_parser(subparsers: Any) -> None:
     prepare.add_argument("--run-id", required=True)
     prepare.add_argument("--root", type=Path)
     prepare.add_argument("--json", action="store_true")
+    for command, help_text in (
+        ("execute", "Publish the prepared OKF layout."),
+        ("recover", "Recover an interrupted OKF lifecycle step."),
+        ("rollback", "Run the mandatory all-old rollback drill."),
+        ("recutover", "Republish the sealed all-new layout."),
+        ("rebuild-seal", "Rebuild and seal all derived state offline."),
+        ("finalize-cleanup", "Publish the final receipt and remove drill state."),
+    ):
+        command_parser = commands.add_parser(command, help=help_text)
+        command_parser.add_argument("--run-id", required=True)
+        command_parser.add_argument("--json", action="store_true")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1456,7 +1467,7 @@ def dispatch(args: argparse.Namespace) -> int:
 def _dispatch_okf(args: argparse.Namespace) -> int:
     from dataclasses import asdict
 
-    root = args.root or chronovisor_store.CHRONOVISOR_ROOT
+    root = getattr(args, "root", None) or chronovisor_store.CHRONOVISOR_ROOT
     decision = chronovisor_store.okf_startup_status(root)
     if args.okf_command == "status":
         data = asdict(decision)
@@ -1466,6 +1477,86 @@ def _dispatch_okf(args: argparse.Namespace) -> int:
             for key in ("allowed", "layout", "state", "category", "run_id"):
                 print(f"{key}\t{data[key] if data[key] is not None else '--'}")
         return 0 if decision.allowed else 75
+
+    if args.okf_command != "prepare":
+        from chronovisor.core.okf_cutover import (
+            execute_okf_cutover,
+            finalize_okf_rebuild,
+            recover_okf_cutover,
+            recutover_okf_rebuild,
+            rollback_okf_rebuild,
+        )
+        def lease_is_exclusive() -> bool:
+            return durable_state.okf_writer_lease_is_exclusive(root)
+
+        try:
+            if args.okf_command == "execute":
+                state = execute_okf_cutover(
+                    root,
+                    root / "runtime",
+                    args.run_id,
+                    is_quiescent=lease_is_exclusive,
+                )
+                result: dict[str, Any] = {"state": state}
+            elif args.okf_command == "recover":
+                state = recover_okf_cutover(
+                    root,
+                    root / "runtime",
+                    args.run_id,
+                    is_quiescent=lease_is_exclusive,
+                )
+                result = {"state": state}
+            elif args.okf_command == "rollback":
+                state = rollback_okf_rebuild(
+                    root,
+                    root / "runtime",
+                    args.run_id,
+                    is_quiescent=lease_is_exclusive,
+                )
+                result = {"state": state}
+            elif args.okf_command == "recutover":
+                state = recutover_okf_rebuild(
+                    root,
+                    root / "runtime",
+                    args.run_id,
+                    is_quiescent=lease_is_exclusive,
+                )
+                result = {"state": state}
+            elif args.okf_command == "rebuild-seal":
+                from chronovisor.ops.okf_rebuild import rebuild_okf_derived
+
+                result = rebuild_okf_derived(
+                    root,
+                    args.run_id,
+                    is_quiescent=lease_is_exclusive,
+                )
+            else:
+                state = finalize_okf_rebuild(
+                    root,
+                    root / "runtime",
+                    args.run_id,
+                    is_quiescent=lease_is_exclusive,
+                )
+                result = {"state": state}
+        except (OSError, RuntimeError, TypeError, ValueError):
+            result = {
+                "ok": False,
+                "category": args.okf_command.replace("-", "_") + "_failed",
+            }
+            if args.json:
+                print(json.dumps(result, sort_keys=True))
+            else:
+                print("ok\tfalse")
+                print(f"category\t{result['category']}")
+            return 75
+        result = {"ok": True, "category": "ok", "run_id": args.run_id, **result}
+        if args.json:
+            print(json.dumps(result, sort_keys=True))
+        else:
+            for key in ("ok", "category", "run_id", "state"):
+                if key in result:
+                    print(f"{key}\t{result[key]}")
+        return 0
 
     if not decision.allowed or decision.state not in {"uninitialized", "unmigrated"}:
         data = {

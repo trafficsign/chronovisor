@@ -78,6 +78,23 @@ def test_outer_mutation_refreshes_once_and_custom_root_only(
     assert (untouched / "pages" / "index.md").read_bytes() == untouched_index
 
 
+def test_legacy_mutation_does_not_create_or_validate_final_index(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "legacy"
+    pages = root / "pages"
+    pages.mkdir(parents=True)
+    for name in ("index.md", "log.md", "schema.md"):
+        (root / name).write_text("legacy\n", encoding="utf-8")
+    (pages / "legacy.md").write_text("legacy page without canonical metadata\n")
+
+    with page_mutation.chronovisor_mutation_lock(pages_dir=pages):
+        (pages / "mutation-canary").write_text("committed\n", encoding="utf-8")
+
+    assert not (pages / "index.md").exists()
+    assert (pages / "mutation-canary").read_text(encoding="utf-8") == "committed\n"
+
+
 def test_mutation_projection_tracks_update_deprecate_restore_and_delete(
     tmp_path: Path,
 ) -> None:

@@ -478,11 +478,16 @@ def isolated_pages(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
     from chronovisor.core import page_mutation
 
+    for name in ("index.md", "log.md", "schema.md"):
+        (tmp_path / name).write_text("legacy\n", encoding="utf-8")
     monkeypatch.setattr(
         page_mutation,
         "DECISION_AUTHORITY_LOCK",
         tmp_path / "runtime" / "decision-authority.lock",
     )
+    monkeypatch.setattr(page_mutation, "CHRONOVISOR_ROOT", tmp_path)
+    monkeypatch.setattr(page_mutation, "PAGES_DIR", pages_dir)
+    monkeypatch.setattr(page_mutation, "SYSTEM_DIR", tmp_path / "system")
     monkeypatch.setattr(ol_mod, "PAGES_DIR", pages_dir)
     monkeypatch.setattr(ol_mod, "SYSTEM_DIR", tmp_path / "system")
     return pages_dir

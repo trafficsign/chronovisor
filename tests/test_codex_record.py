@@ -14,7 +14,7 @@ import pytest
 
 from chronovisor.core import codex_transcript
 from chronovisor.core.save_transaction import make_save_transaction
-from chronovisor.core.store import RuntimeContext
+from chronovisor.core.store import RuntimeContext, init_chronovisor
 from chronovisor.core.transcript import CodexSaveError
 from chronovisor.hosts import codex_record
 from chronovisor.ingest.raw_semantic_projection import project_parent_raw
@@ -120,25 +120,6 @@ def args_for(session_file: Path, state_file: Path, *, ignore_state: bool = False
         ignore_state=ignore_state,
         hook=False,
         trigger_ingest=False,
-    )
-
-
-def _allow_runtime_context_startup(monkeypatch: pytest.MonkeyPatch) -> None:
-    from chronovisor.core import okf_cutover
-
-    monkeypatch.setattr(
-        okf_cutover,
-        "discover_okf_startup",
-        lambda _source, _runtime: okf_cutover.OKFStartupDecision(
-            True, "bootstrap", "uninitialized", "ok"
-        ),
-    )
-    monkeypatch.setattr(
-        okf_cutover,
-        "require_okf_startup_allowed",
-        lambda _source, _runtime: okf_cutover.OKFStartupDecision(
-            True, "bootstrap", "uninitialized", "ok"
-        ),
     )
 
 
@@ -593,9 +574,9 @@ def test_v2_save_accepts_oversized_native_record_after_metadata(
 def test_runtime_context_keeps_v2_stop_capture_under_supplied_root(
     tmp_path: Path, monkeypatch, max_chars: int
 ) -> None:
-    _allow_runtime_context_startup(monkeypatch)
     session = tmp_path / "session.jsonl"
     runtime = RuntimeContext(tmp_path / "runtime-context")
+    init_chronovisor(runtime)
     forbidden_default = tmp_path / "global-default"
     sample_session(session)
     monkeypatch.setenv("CHRONOVISOR_RAW_LAYOUT", "v2")
@@ -646,7 +627,6 @@ def test_explicit_default_state_file_remains_an_override(tmp_path: Path) -> None
 def test_runtime_context_rejects_legacy_layout_before_global_publish(
     tmp_path: Path, monkeypatch
 ) -> None:
-    _allow_runtime_context_startup(monkeypatch)
     session = tmp_path / "session.jsonl"
     runtime = RuntimeContext(tmp_path / "runtime-context")
     forbidden_default = tmp_path / "global-default"
@@ -654,6 +634,11 @@ def test_runtime_context_rejects_legacy_layout_before_global_publish(
     runtime.root.mkdir()
     runtime.config_file.write_text(
         '[decision_policies]\nraw_capture = "enabled"\n[raw]\nlayout = "legacy"\n'
+    )
+    monkeypatch.setattr(
+        codex_record,
+        "init_chronovisor",
+        lambda *, context=None: None,
     )
     monkeypatch.delenv("CHRONOVISOR_RAW_LAYOUT", raising=False)
     monkeypatch.delenv("CHRONOVISOR_DECISION_POLICY_RAW_CAPTURE", raising=False)
@@ -677,6 +662,7 @@ def test_runtime_context_rejects_legacy_layout_before_global_publish(
         codex_record.run(args, context=runtime)
 
     assert calls == []
+    assert not runtime.raw_dir.exists()
     assert not forbidden_default.exists()
 
 
