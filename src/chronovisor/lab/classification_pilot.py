@@ -529,7 +529,7 @@ class PilotRunner:
         attempts = 0
         for attempts in range(1, 4):
             think: bool | str = (
-                "low" if model.strip().lower().startswith("gpt-oss") else False
+                "low" if model.strip().lower().startswith("gpt-oss") else "medium"
             )
             response = ollama.chat(
                 [

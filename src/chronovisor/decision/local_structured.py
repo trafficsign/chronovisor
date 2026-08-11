@@ -99,10 +99,11 @@ def structured_generation_policy() -> dict[str, Any]:
         "temperature": STRUCTURED_GENERATION_TEMPERATURE,
         "seed": STRUCTURED_GENERATION_SEED,
         "think": {
-            "default": False,
+            "default": "medium",
             "model_family_overrides": {
-                "muse-glimmer": {
-                    "default": False,
+                "gpt-oss": {
+                    "default": "low",
+                    "num_ctx_at_least": {"65536": "low"},
                 }
             },
         },
@@ -116,8 +117,8 @@ def structured_think_mode(model: str, *, num_ctx: int) -> bool | str:
 
     family = model.strip().casefold().rsplit("/", 1)[-1].split(":", 1)[0]
     if family == "gpt-oss":
-        return "low" if num_ctx >= 65_536 else "medium"
-    return False
+        return "low" if num_ctx >= 65_536 else "low"
+    return "medium"
 
 
 def structured_generation_policy_sha256() -> str:
