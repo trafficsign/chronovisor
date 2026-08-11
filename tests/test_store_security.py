@@ -97,6 +97,11 @@ def test_chronovisor_read_confines_pages_and_system(
         "---\ntitle: Normal\nstatus: stable\ntype: knowledge\n---\n# Normal\n"
     )
     normal.write_text(normal_content, encoding="utf-8")
+    draft = pages / "draft.md"
+    draft.write_text(
+        "---\ntitle: Draft\nstatus: draft\ntype: knowledge\n---\n# Draft\n",
+        encoding="utf-8",
+    )
     system_normal = system / "system-normal.md"
     system_content = "---\ntitle: System normal\nstatus: stable\n---\n# System normal\n"
     system_normal.write_text(system_content, encoding="utf-8")
@@ -141,6 +146,7 @@ def test_chronovisor_read_confines_pages_and_system(
         "norm*",
         "norm?l",
         "[n]ormal",
+        "draft",
         "page-link",
         "system-link",
     ):

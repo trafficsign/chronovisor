@@ -70,6 +70,31 @@ def test_registry_refreshes_stable_page_to_deprecated(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
+    ("registered_status", "document_status"),
+    [("draft", "stable"), ("stable", "draft")],
+)
+def test_path_for_rejects_registry_document_status_drift(
+    tmp_path: Path,
+    registered_status: str,
+    document_status: str,
+) -> None:
+    page = tmp_path / "pages" / "page.md"
+    page.parent.mkdir(parents=True)
+    page.write_text(
+        f"---\ntitle: page\nstatus: {registered_status}\ntype: knowledge\n---\n",
+        encoding="utf-8",
+    )
+    registry = PageRegistry(tmp_path)
+    registry.ensure_manifest()
+    page.write_text(
+        f"---\ntitle: page\nstatus: {document_status}\ntype: knowledge\n---\n",
+        encoding="utf-8",
+    )
+
+    assert registry.path_for("page", require_stable=False) is None
+
+
+@pytest.mark.parametrize(
     "invalid",
     [
         "---\ntitle: page\nstatus: stable\n---\n",
@@ -116,6 +141,7 @@ def test_registry_stale_stable_symlink_is_never_adopted(tmp_path: Path) -> None:
     assert loaded["pages"][uid]["status"] == "stable"
     assert registry.stable_pages(loaded) == {}
     assert registry.path_for(uid) is None
+    assert registry.path_for(uid, require_stable=False) is None
 
 
 def test_v1_active_current_row_refreshes_from_frontmatter(tmp_path: Path) -> None:

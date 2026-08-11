@@ -128,13 +128,17 @@ def _page_metadata(path: Path) -> dict:
     }
 
 
-def _find_page_with_alias(page_id: str) -> Path | None:
+def _find_page_with_alias(
+    page_id: str,
+    *,
+    require_stable: bool = True,
+) -> Path | None:
     """Resolve a canonical page or a durable legacy page-id alias."""
 
     registry = PageRegistry(CHRONOVISOR_ROOT)
     if registry.path.exists():
         try:
-            return registry.path_for(page_id)
+            return registry.path_for(page_id, require_stable=require_stable)
         except PageRegistryError:
             return None
     path = canonical_document_path_for_id(
@@ -182,7 +186,7 @@ def chronovisor_read(
     store = get_store()
     store.refresh()
 
-    path = _find_page_with_alias(page)
+    path = _find_page_with_alias(page, require_stable=False)
     if path is None:
         return json.dumps({"error": f"Page '{page}' not found"})
 

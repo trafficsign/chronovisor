@@ -203,6 +203,13 @@ def test_server_read_path_resolves_durable_page_alias(
     monkeypatch.setattr(alias_store, "resolve_alias_path", lambda _page_id: target)
 
     assert server._find_page_with_alias("previous-page-id") == target
+    target.write_text(
+        "---\ntitle: Chronovisor\nstatus: draft\ntype: knowledge\n---\n# Chronovisor\n",
+        encoding="utf-8",
+    )
+    assert (
+        server._find_page_with_alias("previous-page-id", require_stable=False) is None
+    )
 
 
 def test_provenance_stringifies_typed_yaml_and_guards_non_string_title(
@@ -317,11 +324,15 @@ def test_server_read_uses_existing_registry_as_fail_closed_authority(
         ("draft", "draft"),
         ("deprecated", "deprecated"),
         ("old", "stable"),
+        ("redirect-draft", "stable"),
     ):
         write_page(pages / f"{page_id}.md", status, page_id)
     registry = PageRegistry(root)
     registry.ensure_manifest()
     registry.add_redirect(registry.resolve("old")["uid"], registry.resolve("stable")["uid"])
+    registry.add_redirect(
+        registry.resolve("redirect-draft")["uid"], registry.resolve("draft")["uid"]
+    )
     write_page(pages / "unregistered.md", "stable", "unregistered")
     write_page(system / "unregistered-system.md", "stable", "system")
 
@@ -346,7 +357,22 @@ def test_server_read_uses_existing_registry_as_fail_closed_authority(
     redirected = json.loads(read("old"))
     assert redirected["page_id"] == "stable"
     assert "stable" in redirected["content"]
-    for page_id in ("draft", "deprecated", "unregistered", "unregistered-system"):
+    for page_id in ("draft", "deprecated"):
+        uid = registry.resolve(page_id)["uid"]
+        assert registry.path_for(page_id) is None
+        expected = (pages / f"{page_id}.md").resolve()
+        assert registry.path_for(page_id, require_stable=False) == expected
+        assert server._find_page_with_alias(page_id) is None
+        assert server._find_page_with_alias(page_id, require_stable=False) == expected
+        for exact_key in (page_id, uid):
+            payload = json.loads(read(exact_key))
+            assert payload["page_id"] == page_id
+            assert page_id in payload["content"]
+        for nonexact_key in (f"{page_id}.md", f"pages/{page_id}"):
+            assert json.loads(read(nonexact_key)) == {
+                "error": f"Page '{nonexact_key}' not found"
+            }
+    for page_id in ("redirect-draft", "unregistered", "unregistered-system"):
         assert json.loads(read(page_id)) == {
             "error": f"Page '{page_id}' not found"
         }

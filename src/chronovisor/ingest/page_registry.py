@@ -177,10 +177,15 @@ class PageRegistry:
             and row.get("status") == "stable"
             and not row.get("canonical_uid")
             and uid not in redirect_uids
-            and self._canonical_stable_path(row) is not None
+            and self._canonical_path(row, require_stable=True) is not None
         }
 
-    def _canonical_stable_path(self, row: Mapping[str, Any]) -> Path | None:
+    def _canonical_path(
+        self,
+        row: Mapping[str, Any],
+        *,
+        require_stable: bool,
+    ) -> Path | None:
         raw_path = str(row.get("path") or "")
         if raw_path.startswith("pages/"):
             directory = self.root / "pages"
@@ -192,13 +197,25 @@ class PageRegistry:
             reserved = index_store.SYSTEM_RESERVED_FILENAMES
         else:
             return None
-        return index_store.canonical_document_path(
+        path = index_store.canonical_document_path(
             self.root / raw_path,
             directory,
             namespace=namespace,
             reserved_filenames=reserved,
-            require_stable=True,
+            require_stable=require_stable,
         )
+        if path is None:
+            return None
+        data = index_store.canonical_document_bytes(path, directory)
+        if data is None:
+            return None
+        try:
+            document_status = canonical_document.parse_document(data).metadata.get(
+                "status"
+            )
+        except canonical_document.CanonicalDocumentError:
+            return None
+        return path if document_status == row.get("status") else None
 
     def _append_event(self, event: Mapping[str, Any]) -> None:
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
@@ -561,15 +578,23 @@ class PageRegistry:
 
         return self.resolve_from_state(self.load(), key, max_hops=max_hops)
 
-    def path_for(self, key: object) -> Path | None:
+    def path_for(self, key: object, *, require_stable: bool = True) -> Path | None:
         resolved = self.resolve(key)
+        status = resolved.get("status") if resolved is not None else None
         if (
             resolved is None
-            or resolved.get("status") != "stable"
+            or status not in canonical_document.PAGE_STATUSES
+            or (require_stable and status != "stable")
+            or (resolved.get("redirect_chain") and status != "stable")
             or resolved.get("canonical_uid")
         ):
             return None
-        return self._canonical_stable_path(resolved)
+        if not require_stable and status != "stable" and str(key) not in {
+            str(resolved.get("uid") or ""),
+            str(resolved.get("page_id") or ""),
+        }:
+            return None
+        return self._canonical_path(resolved, require_stable=require_stable)
 
     def update_page(
         self,
