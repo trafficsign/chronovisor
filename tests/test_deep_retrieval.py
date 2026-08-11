@@ -261,14 +261,10 @@ def test_chronovisor_evidence_dive_sync_is_explicit(monkeypatch) -> None:
 
 
 def test_evidence_dive_activation_waits_for_campaign_x(monkeypatch) -> None:
+    from chronovisor.research import evidence_runtime
+
     monkeypatch.setattr(
-        deep_retrieval,
-        "okf_startup_status",
-        lambda _root: SimpleNamespace(
-            allowed=True,
-            layout="legacy",
-            state="unmigrated",
-        ),
+        evidence_runtime, "_okf_finalized", lambda _root: False
     )
 
     result = deep_retrieval.run_evidence_dive("q")
@@ -291,13 +287,7 @@ def test_evidence_dive_executes_bounded_raw_gap_actions(monkeypatch) -> None:
         claim_slots=(SimpleNamespace(slot_id="answer", claim="outage cause"),)
     )
     monkeypatch.setattr(
-        deep_retrieval,
-        "okf_startup_status",
-        lambda _root: SimpleNamespace(
-            allowed=True,
-            layout="okf_v0_2",
-            state="finalized-v2",
-        ),
+        evidence_runtime, "_okf_finalized", lambda _root: True
     )
     monkeypatch.setattr(
         evidence_runtime, "run_projection_cycle", lambda **_kwargs: object()
@@ -333,7 +323,7 @@ def test_evidence_dive_executes_bounded_raw_gap_actions(monkeypatch) -> None:
     }
     assert observed["tool_context"].config is config
     assert observed["tool_context"].store is store
-    assert observed["raw_dir"] == deep_retrieval.RAW_DIR
+    assert observed["raw_dir"] == deep_retrieval.PAGES_DIR.parent / "raw"
     assert result["telemetry"] == {
         "cloud_call_count": 0,
         "external_model_call_count": 0,
@@ -345,13 +335,7 @@ def test_evidence_dive_sync_is_projection_only(monkeypatch) -> None:
 
     observed: dict[str, object] = {}
     monkeypatch.setattr(
-        deep_retrieval,
-        "okf_startup_status",
-        lambda _root: SimpleNamespace(
-            allowed=True,
-            layout="okf_v0_2",
-            state="finalized-v2",
-        ),
+        evidence_runtime, "_okf_finalized", lambda _root: True
     )
     monkeypatch.setattr(
         evidence_reconstruction,

@@ -27,13 +27,9 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
-if TYPE_CHECKING:
-    from chronovisor.research.evidence_reconstruction import EvidencePacket
-
-from chronovisor.core import ollama, runtime_config
-from chronovisor.core.canonical_json import canonical_json_sha256_strict
+from chronovisor.core import ollama, recall_context, runtime_config
 from chronovisor.core.index_store import (
     canonical_document_path_for_id,
     get_store,
@@ -52,6 +48,7 @@ from chronovisor.decision.local_structured import LocalStructuredSession
 from chronovisor.decision.recall_policy_contract import RecallPolicy as RecallPolicy
 from chronovisor.ingest.page_registry import PageRegistry, PageRegistryError
 from chronovisor.ingest.state_register import format_state_context, should_inject_state
+from chronovisor.recall import evidence_provider as _evidence_provider
 from chronovisor.recall import recall_publication as _recall_publication
 from chronovisor.recall.recall_prompt import (
     CODEX_INTERNAL_SUGGESTION_RE,
@@ -68,12 +65,11 @@ from chronovisor.recall.recall_publication import (
     render_output,
 )
 from chronovisor.recall.recall_publication import (
-    _render_recall_payload as _render_recall_payload,
-)
-from chronovisor.recall.recall_publication import (
     context_item_annotations as context_item_annotations,
 )
 from chronovisor.recall.recall_publication import result_to_dict as result_to_dict
+
+_render_recall_payload = recall_context.render_recall_payload
 
 RECALL_LOG_FILE = RECALL_DIR / "recall-log.jsonl"
 RECALL_FEEDBACK_FILE = RECALL_DIR / "feedback.jsonl"
@@ -277,7 +273,7 @@ class RecallResult:
     judge_confidence: float | None = None
     judge_reason: str = ""
     evidence_features: dict[str, Any] = field(default_factory=dict)
-    evidence_packet: EvidencePacket | None = None
+    evidence_packet: Any | None = None
     search_mode: str = ""
     context_style: str = ""
     latency_ms: int = 0
@@ -1942,56 +1938,21 @@ def observe_evidence_reconstruction(
     try:
         with recall_wall_clock_deadline(evidence_budget_ms):
             from chronovisor.recall.recall_field_schema import session_hash
-            from chronovisor.research.evidence_reconstruction import (
-                load_episode_projection,
-            )
-            from chronovisor.research.evidence_runtime import (
-                compile_projection_program,
-                evidence_projection_path,
-                evidence_selected,
-                load_evidence_rollout,
-                run_evidence_retrieval,
-            )
 
-            rollout = load_evidence_rollout(CHRONOVISOR_ROOT)
-            metadata.update(
-                mode=str(rollout.get("mode") or "shadow"),
-                canary_percent=int(rollout.get("canary_percent") or 0),
-            )
-            projection = load_episode_projection(
-                evidence_projection_path(CHRONOVISOR_ROOT)
-            )
-            program = compile_projection_program(
-                request.prompt,
-                datetime.now(UTC).isoformat(timespec="seconds"),
-            )
-            run = run_evidence_retrieval(
-                program,
-                projection,
-                actions=(),
-                raw_dir=None,
+            observed = _evidence_provider.observe(
+                root=CHRONOVISOR_ROOT,
+                prompt=request.prompt,
+                session_key=session_hash(request.host, request.session_id),
                 deadline_ms=evidence_budget_ms,
             )
-            metadata.update(dict(run.telemetry))
-            trace = dict(run.trace)
-            metadata.update(
-                trace=trace,
-                trace_sha256=canonical_json_sha256_strict(trace),
-            )
-            if run.packet.abstained:
-                metadata.update(status="fallback", reason=run.stop_reason)
+            if observed is None:
+                metadata["reason"] = "provider_unavailable"
                 return metadata
-            selected = evidence_selected(
-                CHRONOVISOR_ROOT,
-                session_hash(request.host, request.session_id),
-                projection.projection_id,
-            )
-            if not selected:
-                metadata["status"] = "observed"
-                return metadata
-            result.evidence_packet = run.packet
-            result.evidence_features["evidence_reconstruction"] = metadata
-            metadata.update(status="active", authority="evidence_reconstruction")
+            packet, provider_metadata = observed
+            metadata.update(provider_metadata)
+            if packet is not None:
+                result.evidence_packet = packet
+                result.evidence_features["evidence_reconstruction"] = metadata
             return metadata
     except RecallWallClockTimeout:
         result.evidence_packet = None
@@ -2001,6 +1962,13 @@ def observe_evidence_reconstruction(
         result.evidence_packet = None
         metadata.update(status="fallback", reason=type(exc).__name__)
         return metadata
+
+
+def bind_evidence_provider(
+    observer: _evidence_provider.Observer,
+    payload_builder: _evidence_provider.PayloadBuilder,
+) -> None:
+    _evidence_provider.bind(observer, payload_builder)
 
 
 def _finalize_recall_result(

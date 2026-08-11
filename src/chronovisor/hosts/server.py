@@ -29,8 +29,11 @@ from chronovisor.core.store import (
     init_chronovisor,
     okf_runtime_operation,
 )
+from chronovisor.hosts import evidence_composition
 from chronovisor.ingest.page_registry import PageRegistry, PageRegistryError
 from chronovisor.raw.record_raw import ingest_raw, record_raw
+
+evidence_composition.bind_recall_provider()
 
 mcp = FastMCP(
     "chronovisor",
@@ -1412,7 +1415,6 @@ def chronovisor_deep_dive(
     from chronovisor.research.deep_retrieval import (
         run_deep_dive,
         run_deep_dive_v2,
-        run_evidence_dive,
         start_deep_dive,
     )
 
@@ -1437,15 +1439,16 @@ def chronovisor_deep_dive(
             ensure_ascii=False,
         )
 
-    if engine == "evidence":
-        return json.dumps(run_evidence_dive(query), ensure_ascii=False)
     runner = run_deep_dive_v2 if engine == "v2" else run_deep_dive
+    if engine == "evidence":
+        runner = run_deep_dive_v2
     result = runner(
         query,
         max_iterations=max_iterations,
         fanout=fanout,
         semantic=semantic,
         use_llm=use_llm,
+        **({"engine": engine} if runner is run_deep_dive_v2 else {}),
     )
     return json.dumps(result, ensure_ascii=False)
 

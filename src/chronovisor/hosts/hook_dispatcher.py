@@ -27,6 +27,7 @@ from chronovisor.core.store import (
     okf_runtime_operation,
     okf_startup_status,
 )
+from chronovisor.hosts import evidence_composition
 from chronovisor.recall import recall_runtime
 
 LOG_DIR = CHRONOVISOR_ROOT / "logs"
@@ -150,6 +151,7 @@ def recall_improve_enabled(explicit_config: Path | None = None) -> bool:
 
 
 def run_user_prompt(args: argparse.Namespace, stdin_text: str) -> int:
+    evidence_composition.bind_recall_provider()
     host = normalize_host(args.host)
     if env_flag("CHRONOVISOR_INTERNAL_FRONTIER") is True:
         _print_host_noop(host)

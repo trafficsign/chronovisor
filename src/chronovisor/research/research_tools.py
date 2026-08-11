@@ -8,20 +8,24 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from chronovisor.core.canonical_document import (
-    CanonicalDocumentError,
-    validate_canonical_document,
-)
-from chronovisor.core.index_store import (
-    get_store,
-    stable_indexed_document_path,
-)
-from chronovisor.core.raw_store import RawStore
-from chronovisor.core.search import search as run_search
-from chronovisor.core.store import CHRONOVISOR_ROOT, PAGES_DIR, RAW_DIR, SYSTEM_DIR
-from chronovisor.search.research_config import ResearchConfig
-from chronovisor.search.research_store import ResearchStore
-from chronovisor.search.research_types import Action, ActionType
+from chronovisor.core import canonical_document, index_store, raw_store, search, store
+from chronovisor.search import research_config, research_store, research_types
+
+CanonicalDocumentError = canonical_document.CanonicalDocumentError
+validate_canonical_document = canonical_document.validate_canonical_document
+get_store = index_store.get_store
+stable_indexed_document_path = index_store.stable_indexed_document_path
+RawStore = raw_store.RawStore
+run_search = search.search
+CHRONOVISOR_ROOT = store.CHRONOVISOR_ROOT
+PAGES_DIR = store.PAGES_DIR
+RAW_DIR = store.RAW_DIR
+SYSTEM_DIR = store.SYSTEM_DIR
+ResearchConfig = research_config.ResearchConfig
+load_research_config = research_config.load_research_config
+ResearchStore = research_store.ResearchStore
+Action = research_types.Action
+ActionType = research_types.ActionType
 
 
 @dataclass
@@ -29,6 +33,13 @@ class ToolContext:
     config: ResearchConfig
     store: ResearchStore
     web_provider: Any = None
+
+
+def default_tool_context() -> ToolContext:
+    return ToolContext(
+        config=research_config.load_research_config(),
+        store=research_store.ResearchStore(),
+    )
 
 
 def _bounded_int(value: Any, *, default: int, minimum: int, maximum: int) -> int:

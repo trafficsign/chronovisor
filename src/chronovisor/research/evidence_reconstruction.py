@@ -16,13 +16,19 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
-from chronovisor.core.canonical_json import (
-    canonical_json_line_bytes_strict,
-    canonical_json_sha256_strict,
+from chronovisor.core import (
+    canonical_json,
+    claude_code_transcript,
+    codex_transcript,
+    durable_state,
+    raw_store,
 )
-from chronovisor.core.durable_state import open_regular_nofollow
-from chronovisor.core.raw_store import RawStore
-from chronovisor.search.research_types import ActionType
+from chronovisor.research.research_tools import ActionType
+
+canonical_json_line_bytes_strict = canonical_json.canonical_json_line_bytes_strict
+canonical_json_sha256_strict = canonical_json.canonical_json_sha256_strict
+open_regular_nofollow = durable_state.open_regular_nofollow
+RawStore = raw_store.RawStore
 
 EVALUATION_CONTRACT_SCHEMA = "chronovisor.evidence-evaluation-contract.v1"
 EVIDENCE_PACKET_SCHEMA = "chronovisor.evidence-packet.v1"
@@ -420,15 +426,11 @@ def build_evidence_packet(
 def _event_semantics(host: str, event: Mapping[str, Any]) -> tuple[str, str]:
     event_type = event.get("type")
     if host == "codex":
-        from chronovisor.core.codex_transcript import codex_semantic_view
-
-        return codex_semantic_view(event_type, event.get("payload"))
+        return codex_transcript.codex_semantic_view(event_type, event.get("payload"))
     if host == "claude-code":
-        from chronovisor.core.claude_code_transcript import claude_semantic_view
-
         message = event.get("message")
         content = message.get("content") if isinstance(message, dict) else None
-        return claude_semantic_view(event_type, content)
+        return claude_code_transcript.claude_semantic_view(event_type, content)
     raise EvidenceReconstructionError(f"unsupported committed Raw host: {host}")
 
 

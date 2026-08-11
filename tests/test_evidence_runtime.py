@@ -16,6 +16,8 @@ import pytest
 from chronovisor.core.canonical_json import canonical_json_sha256_strict
 from chronovisor.core.raw_segment import append_capture
 from chronovisor.decision.recall_policy_contract import RecallPolicy
+from chronovisor.hosts import evidence_composition
+from chronovisor.hosts.evidence_composition import run_evidence_acceptance
 from chronovisor.recall.recall_runtime import (
     ContextItem,
     RecallRequest,
@@ -28,7 +30,6 @@ from chronovisor.research.evidence_eval import (
     evaluate_paired_replay,
     paired_evaluation_bytes,
     register_evidence_cases,
-    run_evidence_acceptance,
     seal_paired_case,
 )
 from chronovisor.research.evidence_reconstruction import (
@@ -61,6 +62,21 @@ from chronovisor.research.research_tools import ToolContext
 from chronovisor.search.research_types import Action, ActionType
 
 NOW = datetime(2026, 8, 11, 9, 30, tzinfo=ZoneInfo("Asia/Tokyo"))
+
+
+@pytest.fixture(autouse=True)
+def bind_evidence_provider() -> None:
+    evidence_composition.bind_recall_provider()
+
+
+def test_acceptance_callbacks_are_not_public(tmp_path: Path) -> None:
+    assert not hasattr(evidence_eval, "run_evidence_acceptance")
+    with pytest.raises(TypeError):
+        run_evidence_acceptance(  # type: ignore[call-arg]
+            tmp_path,
+            page_teacher=lambda _query: object(),
+            candidate_renderer=lambda _baseline, _run: b"forged",
+        )
 
 
 def _projection(tmp_path: Path) -> tuple[Path, EpisodeProjection, str]:

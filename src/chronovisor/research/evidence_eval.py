@@ -6,22 +6,14 @@ import hashlib
 import json
 import re
 import time
-from collections.abc import Mapping, Sequence
-from dataclasses import replace
+from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
 from fractions import Fraction
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
-from chronovisor.core.canonical_json import (
-    canonical_json_line_bytes_strict,
-    canonical_json_sha256_strict,
-)
-from chronovisor.core.durable_state import (
-    atomic_write_bytes_at,
-)
-from chronovisor.core.store import okf_runtime_operation, okf_startup_status
+from chronovisor.core import canonical_json, durable_state, store
 from chronovisor.research.evidence_reconstruction import (
     EVALUATION_CONTRACT,
     EVALUATION_CONTRACT_SHA256,
@@ -34,6 +26,12 @@ from chronovisor.research.evidence_reconstruction import (
     load_episode_projection,
     physical_raw_inventory,
 )
+
+canonical_json_line_bytes_strict = canonical_json.canonical_json_line_bytes_strict
+canonical_json_sha256_strict = canonical_json.canonical_json_sha256_strict
+atomic_write_bytes_at = durable_state.atomic_write_bytes_at
+okf_runtime_operation = store.okf_runtime_operation
+okf_startup_status = store.okf_startup_status
 
 PAIRED_EVALUATION_SCHEMA = "chronovisor.evidence-paired-evaluation.v1"
 EVIDENCE_CASES_SCHEMA = "chronovisor.evidence-cases.v1"
@@ -51,6 +49,17 @@ _CASE_FIELDS = {
     "forbidden_obsolete_atom_ids",
     "relation_expectation",
 }
+
+
+def bind_recall_provider(bind: Callable[..., None]) -> None:
+    """Compose the research implementation through the recall-owned port."""
+
+    from chronovisor.research.evidence_runtime import (
+        evidence_publication_payload,
+        observe_projection_evidence,
+    )
+
+    bind(observe_projection_evidence, evidence_publication_payload)
 
 
 def seal_paired_case(case: Mapping[str, Any]) -> dict[str, Any]:
@@ -231,9 +240,10 @@ def _answer_score(case: Mapping[str, Any], output: bytes, abstained: bool) -> fl
 def _baseline_scores(
     case: Mapping[str, Any], result: Any, output: bytes
 ) -> dict[str, float]:
-    from chronovisor.recall.recall_runtime import RecallResult
-
-    if not isinstance(result, RecallResult):
+    if any(
+        not hasattr(result, field)
+        for field in ("queries", "context", "context_items", "latency_ms")
+    ):
         raise EvidenceReconstructionError("paired baseline result is invalid")
     if (
         case["query"] not in result.queries
@@ -559,18 +569,16 @@ def _atomic_publication_fault_proof(directory_fd: int, before: bytes) -> str:
     )
 
 
-def run_evidence_acceptance(
+def _run_evidence_acceptance(
     *,
     root: Path,
+    page_teacher: Callable[[str], Any],
+    candidate_renderer: Callable[[Any, Any], bytes],
 ) -> dict[str, Any]:
-    """Replay registered cases with live page-teacher and projection arms."""
+    """Run with trusted host adapters, never caller-controlled external input.
 
-    from chronovisor.recall.recall_runtime import (
-        RecallRequest,
-        format_recall_context,
-        load_policy,
-        run_recall,
-    )
+    Same-process hostile imports are outside this internal underscore boundary.
+    """
     from chronovisor.research.evidence_runtime import (
         EVIDENCE_ACCEPTANCE_SCHEMA,
         advance_evidence_rollout_at,
@@ -644,33 +652,14 @@ def run_evidence_acceptance(
             candidate_runs: dict[str, Any] = {}
             candidate_outputs: dict[str, bytes] = {}
             candidate_latency_ms: dict[str, int] = {}
-            policy = replace(
-                load_policy(),
-                semantic=False,
-                judge_mode="off",
-                rewrite_enabled=False,
-                log_decisions=False,
-                processor_enabled=False,
-                processor_shadow_enabled=False,
-                processor_auto_enable=False,
-                processor_judge_enabled=False,
-            )
             for case in cases:
                 case_id = str(case["case_id"])
                 if not set(case["expected_atom_ids"]).issubset(projection_atom_ids):
                     raise EvidenceReconstructionError(
                         "paired case atom is not in current projection"
                     )
-                baseline = run_recall(
-                    RecallRequest(
-                        host="codex",
-                        event="UserPromptSubmit",
-                        prompt=str(case["query"]),
-                        session_id="",
-                    ),
-                    policy,
-                )
-                if baseline.evidence_packet is not None:
+                baseline = page_teacher(str(case["query"]))
+                if getattr(baseline, "evidence_packet", None) is not None:
                     raise EvidenceReconstructionError(
                         "paired baseline is not page teacher"
                     )
@@ -716,23 +705,7 @@ def run_evidence_acceptance(
                 baseline_results[case_id] = baseline
                 baseline_outputs[case_id] = baseline.context.encode("utf-8")
                 candidate_runs[case_id] = run
-                candidate_result = replace(
-                    baseline,
-                    decision="read",
-                    queries=[str(case["query"])],
-                    context_items=[],
-                    context="",
-                    evidence_packet=run.packet,
-                    evidence_features={
-                        "evidence_reconstruction": {
-                            "trace": dict(run.trace),
-                            "trace_sha256": canonical_json_sha256_strict(run.trace),
-                        }
-                    },
-                )
-                candidate_outputs[case_id] = format_recall_context(
-                    candidate_result, policy
-                ).encode("utf-8")
+                candidate_outputs[case_id] = candidate_renderer(baseline, run)
                 elapsed_ms = max(
                     0, (time.monotonic_ns() - started) // 1_000_000
                 )

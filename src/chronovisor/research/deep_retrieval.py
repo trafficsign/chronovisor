@@ -11,24 +11,17 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from chronovisor.core.canonical_document import (
-    CanonicalDocumentError,
-    validate_canonical_document,
-)
-from chronovisor.core.index_store import (
-    get_store,
-    stable_indexed_document_path,
-)
-from chronovisor.core.search import ScoredPage
-from chronovisor.core.search import search as run_search
-from chronovisor.core.store import (
-    CHRONOVISOR_ROOT,
-    PAGES_DIR,
-    RAW_DIR,
-    SYSTEM_DIR,
-    okf_startup_status,
-)
+from chronovisor.core import canonical_document, index_store, search, store
 from chronovisor.decision.local_structured import ChatTransport, LocalStructuredSession
+
+CanonicalDocumentError = canonical_document.CanonicalDocumentError
+validate_canonical_document = canonical_document.validate_canonical_document
+get_store = index_store.get_store
+stable_indexed_document_path = index_store.stable_indexed_document_path
+ScoredPage = search.ScoredPage
+run_search = search.search
+PAGES_DIR = store.PAGES_DIR
+SYSTEM_DIR = store.SYSTEM_DIR
 
 REQUERY_RUNTIME_ROLE = "research.deep_retrieval_requery"
 
@@ -268,6 +261,7 @@ def run_deep_dive_v2(
     semantic: bool = True,
     use_llm: bool = True,
     config: Any = None,
+    engine: str = "v2",
 ) -> dict[str, Any]:
     """Run the shared research kernel with Wiki-only authority."""
 
@@ -276,9 +270,16 @@ def run_deep_dive_v2(
         LocalPlanner,
         run_research,
     )
-    from chronovisor.search.research_config import load_research_config
-    from chronovisor.search.research_store import ResearchStore
-    from chronovisor.search.research_types import ActionType
+    from chronovisor.search import research_config, research_store, research_types
+
+    load_research_config = research_config.load_research_config
+    ResearchStore = research_store.ResearchStore
+    ActionType = research_types.ActionType
+
+    if engine == "evidence":
+        return run_evidence_dive(query)
+    if engine != "v2":
+        raise ValueError("engine must be v2 or evidence")
 
     selected = config or load_research_config()
     selected = replace(
@@ -368,12 +369,11 @@ def run_evidence_dive(
 ) -> dict[str, Any]:
     """Run explicit projection-first evidence retrieval after Campaign X."""
 
-    decision = okf_startup_status(CHRONOVISOR_ROOT)
-    if not (
-        decision.allowed
-        and decision.layout == "okf_v0_2"
-        and decision.state == "finalized-v2"
-    ):
+    root = PAGES_DIR.parent
+    raw_dir = root / "raw"
+    from chronovisor.research.evidence_runtime import okf_finalized
+
+    if not okf_finalized(root):
         return {
             "status": "blocked",
             "engine": "evidence",
@@ -383,13 +383,14 @@ def run_evidence_dive(
     from chronovisor.research.evidence_runtime import (
         compile_projection_program,
         evidence_projection_path,
+        raw_gap_actions,
         run_evidence_retrieval,
         run_projection_cycle,
     )
 
-    projection_path = evidence_projection_path(CHRONOVISOR_ROOT)
+    projection_path = evidence_projection_path(root)
     projection = (
-        run_projection_cycle(raw_dir=RAW_DIR, output_path=projection_path)
+        run_projection_cycle(raw_dir=raw_dir, output_path=projection_path)
         if rebuild_projection
         else load_episode_projection(projection_path)
     )
@@ -398,31 +399,14 @@ def run_evidence_dive(
         datetime.now().astimezone().isoformat(timespec="seconds"),
     )
     if rebuild_projection:
-        from chronovisor.research.research_tools import ToolContext
-        from chronovisor.search.research_config import load_research_config
-        from chronovisor.search.research_store import ResearchStore
-        from chronovisor.search.research_types import Action, ActionType
+        from chronovisor.research.research_tools import default_tool_context
 
-        actions = tuple(
-            (
-                slot.slot_id,
-                Action(
-                    ActionType.RAW_SEARCH,
-                    {"query": slot.claim, "limit": 5, "scan_limit": 1_000},
-                    rationale="fill unresolved evidence gap from committed Raw",
-                ),
-            )
-            for slot in program.claim_slots
-        )
         run = run_evidence_retrieval(
             program,
             projection,
-            tool_context=ToolContext(
-                config=load_research_config(),
-                store=ResearchStore(),
-            ),
-            actions=actions,
-            raw_dir=RAW_DIR,
+            tool_context=default_tool_context(),
+            actions=raw_gap_actions(program),
+            raw_dir=raw_dir,
             deadline_ms=90_000,
         )
     else:

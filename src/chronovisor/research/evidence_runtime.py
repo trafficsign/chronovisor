@@ -15,26 +15,14 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from chronovisor.core.canonical_json import (
-    canonical_json_line_bytes_strict,
-    canonical_json_sha256_strict,
+from chronovisor.core import (
+    canonical_json,
+    durable_state,
+    knowledge_graph_rollout,
+    raw_store,
+    recall_context,
+    store,
 )
-from chronovisor.core.durable_state import (
-    atomic_write_bytes_at,
-    canonical_bytes,
-    file_lock,
-    open_directory_nofollow,
-    open_regular_nofollow,
-    seal_object,
-    verify_sealed_object,
-)
-from chronovisor.core.knowledge_graph_rollout import (
-    CANARY_SAMPLE_UNIT,
-    CANARY_STEPS,
-    selected_for_canary,
-)
-from chronovisor.core.raw_store import RawStore
-from chronovisor.core.store import okf_runtime_operation, okf_startup_status
 from chronovisor.research.evidence_reconstruction import (
     EVALUATION_CONTRACT,
     EVALUATION_CONTRACT_SHA256,
@@ -60,8 +48,30 @@ from chronovisor.research.evidence_reconstruction import (
     physical_raw_inventory,
     verify_projection_atom,
 )
-from chronovisor.research.research_tools import ToolContext, execute_tool
-from chronovisor.search.research_types import Action, ActionType
+from chronovisor.research.research_tools import (
+    Action,
+    ActionType,
+    ToolContext,
+    execute_tool,
+)
+
+canonical_json_line_bytes_strict = canonical_json.canonical_json_line_bytes_strict
+canonical_json_sha256_strict = canonical_json.canonical_json_sha256_strict
+canonical_json_strict = canonical_json.canonical_json_strict
+atomic_write_bytes_at = durable_state.atomic_write_bytes_at
+canonical_bytes = durable_state.canonical_bytes
+file_lock = durable_state.file_lock
+open_directory_nofollow = durable_state.open_directory_nofollow
+open_regular_nofollow = durable_state.open_regular_nofollow
+seal_object = durable_state.seal_object
+verify_sealed_object = durable_state.verify_sealed_object
+CANARY_SAMPLE_UNIT = knowledge_graph_rollout.CANARY_SAMPLE_UNIT
+CANARY_STEPS = knowledge_graph_rollout.CANARY_STEPS
+selected_for_canary = knowledge_graph_rollout.selected_for_canary
+RawStore = raw_store.RawStore
+parse_recall_payload = recall_context.parse_recall_payload
+okf_runtime_operation = store.okf_runtime_operation
+okf_startup_status = store.okf_startup_status
 
 _TOKEN_RE = re.compile(r"[a-z0-9]{3,}|[\u3040-\u30ff\u3400-\u9fff]{2,}")
 _LOCAL_ACTIONS = frozenset({ActionType.RAW_SEARCH})
@@ -802,6 +812,20 @@ def run_evidence_retrieval(
     return EvidenceRun(packet, stop_reason, trace, telemetry)
 
 
+def raw_gap_actions(program: RetrievalProgram) -> tuple[tuple[str, Action], ...]:
+    return tuple(
+        (
+            slot.slot_id,
+            Action(
+                ActionType.RAW_SEARCH,
+                {"query": slot.claim, "limit": 5, "scan_limit": 1_000},
+                rationale="fill unresolved evidence gap from committed Raw",
+            ),
+        )
+        for slot in program.claim_slots
+    )
+
+
 def compile_bounded_evidence_context(
     packet: EvidencePacket, *, max_chars: int
 ) -> str | None:
@@ -813,6 +837,163 @@ def compile_bounded_evidence_context(
     return None if packet.abstained or len(context) > max_chars else context
 
 
+def observe_projection_evidence(
+    *, root: Path, prompt: str, session_key: str, deadline_ms: int
+) -> tuple[EvidencePacket | None, dict[str, Any]]:
+    """Provide projection-only evidence without depending on recall types."""
+
+    rollout = load_evidence_rollout(root)
+    metadata: dict[str, Any] = {
+        "status": "skipped",
+        "authority": "teacher",
+        "mode": str(rollout.get("mode") or "shadow"),
+        "canary_percent": int(rollout.get("canary_percent") or 0),
+    }
+    projection = load_episode_projection(evidence_projection_path(root))
+    program = compile_projection_program(
+        prompt,
+        datetime.now(UTC).isoformat(timespec="seconds"),
+    )
+    run = run_evidence_retrieval(
+        program,
+        projection,
+        actions=(),
+        raw_dir=None,
+        deadline_ms=deadline_ms,
+    )
+    metadata.update(dict(run.telemetry))
+    trace = dict(run.trace)
+    metadata.update(
+        trace=trace,
+        trace_sha256=canonical_json_sha256_strict(trace),
+    )
+    if run.packet.abstained:
+        metadata.update(status="fallback", reason=run.stop_reason)
+        return None, metadata
+    if not evidence_selected(root, session_key, projection.projection_id):
+        metadata["status"] = "observed"
+        return None, metadata
+    metadata.update(status="active", authority="evidence_reconstruction")
+    return run.packet, metadata
+
+
+def evidence_publication_payload(
+    packet_value: Any,
+    metadata: Mapping[str, Any],
+    max_chars: int,
+) -> dict[str, Any]:
+    """Validate and return the canonical packet/trace publication payload."""
+
+    if not isinstance(packet_value, EvidencePacket):
+        return {}
+    encoded = compile_bounded_evidence_context(packet_value, max_chars=max_chars)
+    if encoded is None:
+        return {}
+    packet = json.loads(encoded)
+    evidence_trace = metadata.get("trace")
+    trace_sha256 = metadata.get("trace_sha256")
+    if not isinstance(evidence_trace, dict) or not isinstance(trace_sha256, str):
+        return {}
+    try:
+        canonical_trace = json.loads(canonical_json_strict(evidence_trace))
+    except (TypeError, ValueError):
+        return {}
+    if (
+        canonical_json_sha256_strict(canonical_trace) != trace_sha256
+        or set(canonical_trace)
+        != {
+            "program",
+            "projection_sha256",
+            "actions",
+            "ledger",
+            "packet_sha256",
+            "stop_reason",
+        }
+    ):
+        return {}
+    program = canonical_trace.get("program")
+    ledger = canonical_trace.get("ledger")
+    hashes = (
+        canonical_trace.get("projection_sha256"),
+        canonical_trace.get("packet_sha256"),
+        ledger.get("ledger_sha256") if isinstance(ledger, dict) else None,
+    )
+    if (
+        not isinstance(program, dict)
+        or set(program)
+        != {
+            "schema",
+            "program_id",
+            "query",
+            "as_of",
+            "claim_slots",
+            "required_evidence",
+            "allowed_actions",
+            "stop_rules",
+        }
+        or not isinstance(ledger, dict)
+        or set(ledger) != {"ledger_sha256", "slots"}
+        or not isinstance(ledger.get("slots"), dict)
+        or any(
+            not isinstance(value, str)
+            or re.fullmatch(r"[0-9a-f]{64}", value) is None
+            for value in hashes
+        )
+        or not isinstance(canonical_trace.get("actions"), list)
+        or not isinstance(canonical_trace.get("stop_reason"), str)
+    ):
+        return {}
+    try:
+        rebuilt_program = compile_retrieval_program(
+            program["query"],
+            {
+                "as_of": program["as_of"],
+                "claim_slots": program["claim_slots"],
+                "required_evidence": program["required_evidence"],
+                "allowed_actions": program["allowed_actions"],
+                "stop_rules": program["stop_rules"],
+            },
+        )
+        rebuilt_packet = build_evidence_packet(
+            query=packet_value.query,
+            as_of=packet_value.as_of,
+            retrieval_program_id=packet_value.retrieval_program_id,
+            atoms=packet_value.atoms,
+            abstention_reason=packet_value.abstention_reason,
+        )
+    except (TypeError, ValueError):
+        return {}
+    packet_id = packet.get("packet_id") if isinstance(packet, dict) else None
+    if (
+        rebuilt_program.to_dict() != program
+        or rebuilt_packet != packet_value
+        or rebuilt_packet.to_dict() != packet
+        or not isinstance(packet_id, str)
+        or not packet_id.startswith("packet:")
+        or canonical_trace.get("packet_sha256") != packet_id.removeprefix("packet:")
+        or program.get("program_id") != packet.get("retrieval_program_id")
+        or program.get("query") != packet.get("query")
+        or program.get("as_of") != packet.get("as_of")
+    ):
+        return {}
+    rebuilt_ledger = EvidenceLedger(rebuilt_program)
+    for slot in rebuilt_program.claim_slots:
+        for atom in rebuilt_packet.atoms:
+            rebuilt_ledger.add(slot.slot_id, atom)
+    if (
+        rebuilt_ledger.atoms() != rebuilt_packet.atoms
+        or rebuilt_ledger.safe_snapshot() != ledger
+        or not rebuilt_ledger.covered()
+        or canonical_trace.get("stop_reason") != "coverage"
+    ):
+        return {}
+    return {
+        "evidence_packet": packet,
+        "evidence_trace": canonical_trace,
+        "evidence_trace_sha256": trace_sha256,
+    }
+
+
 def _okf_finalized(root: Path) -> bool:
     decision = okf_startup_status(root)
     return bool(
@@ -820,6 +1001,10 @@ def _okf_finalized(root: Path) -> bool:
         and decision.layout == "okf_v0_2"
         and decision.state == "finalized-v2"
     )
+
+
+def okf_finalized(root: Path) -> bool:
+    return _okf_finalized(root)
 
 
 def load_evidence_acceptance(root: Path) -> dict[str, Any]:
@@ -857,26 +1042,8 @@ def load_evidence_acceptance(root: Path) -> dict[str, Any]:
 
 
 def _published_evidence_payload(rendered: str) -> dict[str, Any] | None:
-    from chronovisor.recall.recall_publication import _render_recall_payload
-
-    opening = "[RECALL_CONTEXT]"
-    closing = "[/RECALL_CONTEXT]"
-    if rendered.count(opening) != 1 or rendered.count(closing) != 1:
-        return None
-    start = rendered.index(opening)
-    end = rendered.index(closing, start) + len(closing)
-    block = rendered[start:end]
-    marker = "payload_json=\n"
-    try:
-        encoded = block.split(marker, 1)[1].rsplit(f"\n{closing}", 1)[0]
-        payload = json.loads(encoded)
-    except (IndexError, TypeError, json.JSONDecodeError):
-        return None
-    if (
-        not isinstance(payload, dict)
-        or payload.get("authority") != "evidence_reconstruction"
-        or _render_recall_payload(dict(payload), len(block)) != block
-    ):
+    payload = parse_recall_payload(rendered)
+    if payload is None or payload.get("authority") != "evidence_reconstruction":
         return None
     return payload
 

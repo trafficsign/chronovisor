@@ -1932,6 +1932,27 @@ X5_RETIRED_FINAL_LAYOUT_SITE_IDS = (
 X6_RETIRED_OKF_REBUILD_SITE_IDS = (
     "arch:0f17c4488bcb64731edfbd78e7224a27410c4373a7ccbcaa4eaf6f5ed3cd818a",
 )
+Y_RETIRED_CAMPAIGN_SITE_IDS = (
+    "arch:1ab4c09c63bb86363e230544308b31c25500e61c7bb5543894a259bc6957a93a",
+    "arch:1fe749045d9b852eb9871fe9885de4de399d5e4c76ec92c954d3b1130372f526",
+    "arch:213d4fa3c78da05f2c5a3aedca37fc9641ea7c2c6167cbb39789fea037bbca08",
+    "arch:31eafaa61229b06ee131e9ac996d0381434df53632e9651467a4b4cc30568793",
+    "arch:3429f61a51484dcc506ab9308091b30fe64b61fbbfc399d4d33561ff0caf938b",
+    "arch:36ed31b74863bb9b578f9bdd6b7e9fc59c7eca89dd2ad743bebfad676c8aaa26",
+    "arch:39c3f7e1a5c32db8e334aa7304609e7df3d2d8b20b6946f61d06993438f72727",
+    "arch:652302eddaf4ae00de8a306b8684cb68fb85247f6e3656d375fbd9d869cdc468",
+    "arch:7dd9d4681467c27c6c865aa9c3623616fed2d5e0267b55a4a23ed9cb8989234f",
+    "arch:8028b2662eabd8fa710ef0f72b9db2d692ffacec6ae75e70c7b51b2a281883d2",
+    "arch:abd3f42bfa14cb541e23bf417c0cd41a686bffebe23117066ab1971d7ff5d9a6",
+    "arch:b7a69586e1944ccb635b7132c512d01259c95914ce42b6c71313e6c71392916f",
+    "arch:ccf3e1c6cc2aa93b8f402634e86a9501a97c5791393865a5d18988dee1d91428",
+    "arch:d00f55d96d6237a8cc01dd2ca5b11b13e831211325dce0a3fd082febd4109a91",
+    "arch:d9b3f935048faaea656b3bd76af4399fabc111bf7ca8bef449aece26c6d47e8d",
+    "arch:e4c5a010a1810c8e41b30ef5290aad46801abb97b4fc58faa7e253e5d48e75d3",
+    "arch:e814a90cf34a911b8a01e0ccb8ac68e152601469b50cbade43b4e368ad31f4c5",
+    "arch:e906f5696a16c9449d809988af7bfc8781814dbc9dc10cf754c8ef1a61d14093",
+    "arch:f3f5580fe6b56f80da7d83b5fb5c3595894e4f966fd27bb0bc76f6d83e8881c0",
+)
 RETIREMENT_HISTORY = {
     "exception_semantic_ids": tuple(
         sorted(
@@ -2078,6 +2099,7 @@ RETIREMENT_HISTORY = {
                 *X4_RETIRED_WRITER_LEASE_SITE_IDS,
                 *X5_RETIRED_FINAL_LAYOUT_SITE_IDS,
                 *X6_RETIRED_OKF_REBUILD_SITE_IDS,
+                *Y_RETIRED_CAMPAIGN_SITE_IDS,
                 *W6Q_RETIRED_DECISION_AUTHORITY_SITE_IDS,
                 *W6R_RETIRED_INGEST_REPAIR_SITE_IDS,
                 *W6S_RETIRED_DASHBOARD_CONVERGENCE_SITE_IDS,
@@ -2835,7 +2857,7 @@ def test_current_exception_ledger_seed_and_schema_inventory_are_exact(
     assert detected_ids == ledger_ids == set(seed["exception_semantic_ids"]["active"])
     _assert_exact_retirement_history(architecture, seed)
     assert len(edge_rows) == current["worktree_architecture"]["edge_count"] == 44
-    assert sum(len(row["sites"]) for row in edge_rows) == len(raw_cross_sites) == 1419
+    assert sum(len(row["sites"]) for row in edge_rows) == len(raw_cross_sites) == 1416
     assert {
         field: counts[field]
         for field in (
@@ -2848,7 +2870,7 @@ def test_current_exception_ledger_seed_and_schema_inventory_are_exact(
         )
         } == {
             "exceptions": 44,
-            "cross_domain_sites": 1419,
+            "cross_domain_sites": 1416,
         "production_to_lab_edges": 0,
         "production_to_lab_static_sites": 0,
         "production_to_lab_dynamic_sites": 0,
