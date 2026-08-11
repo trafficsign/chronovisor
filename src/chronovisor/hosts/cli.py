@@ -778,12 +778,10 @@ def build_parser() -> argparse.ArgumentParser:
     golden_parser.add_argument("--include-reference", action="store_true")
     golden_parser.add_argument("--no-write", action="store_true")
     golden_parser.add_argument("--json", action="store_true")
-    retention_parser = sub.add_parser(
-        "retention", help="Build retention/time-prior scores."
-    )
-    retention_parser.add_argument("--limit", type=int, default=5000)
-    retention_parser.add_argument("--no-write", action="store_true")
-    retention_parser.add_argument("--json", action="store_true")
+    retention = sub.add_parser("retention", help="Build retention/time-prior scores.")
+    retention.add_argument("--limit", type=int, default=5000)
+    retention.add_argument("--no-write", action="store_true")
+    retention.add_argument("--json", action="store_true")
     lifecycle_restore_parser = sub.add_parser(
         "lifecycle-restore", help="Restore one exact deprecated page to stable."
     )
@@ -929,6 +927,21 @@ def _dispatch_status(as_json: bool) -> int:
     else:
         print_plain_status(data)
     return 0
+
+
+def _dispatch_lifecycle_restore(args: argparse.Namespace) -> int:
+    from chronovisor.ops.autonomy import restore_deprecated_page
+
+    data = restore_deprecated_page(
+        args.page_id,
+        args.expected_sha256,
+        args.reason,
+    )
+    if args.json:
+        print(json.dumps(data, ensure_ascii=False, indent=2, default=str))
+    else:
+        print("\t".join(f"{key}={value}" for key, value in data.items()))
+    return 0 if data.get("status") in {"applied", "recovered"} else 1
 
 
 def _credential_store() -> runtime_status.OSKeyringCredentialStore:
@@ -1134,9 +1147,7 @@ def dispatch(args: argparse.Namespace) -> int:
                 chronovisor_store.RAW_DIR, args.raw_id, Path(args.output)
             )
         elif args.raw_command == "restore":
-            data = raw_archive.restore_segment(
-                Path(args.manifest), Path(args.output)
-            )
+            data = raw_archive.restore_segment(Path(args.manifest), Path(args.output))
         else:
             if args.dry_run and (args.apply or args.shadow):
                 raise ValueError("--dry-run cannot be combined with --apply/--shadow")
@@ -1302,18 +1313,7 @@ def dispatch(args: argparse.Namespace) -> int:
             )
         return 0
     if args.command == "lifecycle-restore":
-        from chronovisor.ops.autonomy import restore_deprecated_page
-
-        data = restore_deprecated_page(
-            args.page_id,
-            args.expected_sha256,
-            args.reason,
-        )
-        if args.json:
-            print(json.dumps(data, ensure_ascii=False, indent=2, default=str))
-        else:
-            print("\t".join(f"{key}={value}" for key, value in data.items()))
-        return 0 if data.get("status") in {"applied", "recovered"} else 1
+        return _dispatch_lifecycle_restore(args)
     if args.command == "reflect":
         from chronovisor.ops.reflection import write_reflection_page
 
