@@ -70,6 +70,7 @@ _SEMANTIC_SOURCE = SourceDataClassification(
     SourceSensitivity.HIGH,
 )
 _DERIVED_GENERATION_SCHEMA = 1
+_MIGRATION_MANIFEST_MAX_BYTES = 64 * 1024 * 1024
 
 SemanticEncoder = Callable[
     [Sequence[semantic_index.SemanticDocument], int], np.ndarray
@@ -84,15 +85,21 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _canonical_object(path: Path) -> dict[str, Any]:
+def _canonical_object(
+    path: Path, *, max_bytes: int = 16 * 1024 * 1024
+) -> dict[str, Any]:
     with open_regular_nofollow(path) as handle:
-        raw = handle.read(16 * 1024 * 1024 + 1)
-    if len(raw) > 16 * 1024 * 1024:
+        raw = handle.read(max_bytes + 1)
+    if len(raw) > max_bytes:
         raise ValueError("migration object exceeds the offline rebuild bound")
     value = json.loads(raw)
     if not isinstance(value, dict) or canonical_json_line_bytes_strict(value) != raw:
         raise ValueError("migration object is not canonical JSON")
     return value
+
+
+def _migration_manifest(path: Path) -> dict[str, Any]:
+    return _canonical_object(path, max_bytes=_MIGRATION_MANIFEST_MAX_BYTES)
 
 
 def _stable_sources(root: Path) -> tuple[list[Path], list[dict[str, str]]]:
@@ -135,7 +142,7 @@ def _stable_sources(root: Path) -> tuple[list[Path], list[dict[str, str]]]:
 
 
 def _manifest_invalidation(gate: OKFRebuildGate) -> dict[str, int | str]:
-    manifest = _canonical_object(gate.workspace / "dry-run-manifest.json")
+    manifest = _migration_manifest(gate.workspace / "dry-run-manifest.json")
     documents = manifest.get("documents")
     system_documents = manifest.get("system_documents")
     if not isinstance(documents, list) or not isinstance(system_documents, list):
@@ -192,7 +199,7 @@ def _rebuild_registry_and_links(
         if not isinstance(path, str) or not path or path in current_by_path:
             raise ValueError("page registry path identity is invalid")
         current_by_path[path] = (uid, row)
-    migration = _canonical_object(gate.workspace / "dry-run-manifest.json")
+    migration = _migration_manifest(gate.workspace / "dry-run-manifest.json")
     for scope, field in (("pages", "documents"), ("system", "system_documents")):
         rows = migration.get(field)
         if not isinstance(rows, list):

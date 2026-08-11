@@ -164,6 +164,23 @@ def _seal(root: Path) -> dict[str, Any]:
     )
 
 
+def test_migration_manifest_reader_uses_dedicated_bounded_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest_path = tmp_path / "dry-run-manifest.json"
+    payload = {"inventory": "x" * 128}
+    raw = canonical_json_line_bytes_strict(payload)
+    manifest_path.write_bytes(raw)
+
+    assert okf_rebuild._MIGRATION_MANIFEST_MAX_BYTES == 64 * 1024 * 1024
+    monkeypatch.setattr(okf_rebuild, "_MIGRATION_MANIFEST_MAX_BYTES", len(raw))
+    assert okf_rebuild._migration_manifest(manifest_path) == payload
+
+    monkeypatch.setattr(okf_rebuild, "_MIGRATION_MANIFEST_MAX_BYTES", len(raw) - 1)
+    with pytest.raises(ValueError, match="exceeds the offline rebuild bound"):
+        okf_rebuild._migration_manifest(manifest_path)
+
+
 def test_offline_rebuild_seals_exact_stable_corpus_without_authority(
     tmp_path: Path,
 ) -> None:
