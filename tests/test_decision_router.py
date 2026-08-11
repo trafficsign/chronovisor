@@ -318,6 +318,11 @@ def test_ingest_repair_option_id_materializes_exact_host_bytes_before_quorum() -
     assert all(vote.result.value == expected for vote in result.votes)
     assert all(vote.result.first_pass_valid for vote in result.votes)
     assert all("repair_option_id" not in vote.result.value for vote in result.votes)
+    for request in transport.requests:
+        properties = request.schema["properties"]
+        assert selection["repair_option_id"] in properties["repair_option_id"]["enum"]
+        assert "invalid_tags" not in properties
+        assert "replacement_operations" not in properties
 
 
 def test_ingest_repair_host_sidecar_is_never_sent_to_models() -> None:
@@ -424,6 +429,12 @@ def test_ingest_deterministic_repair_option_id_materializes_base_action() -> Non
 
     assert result.ok is True
     assert result.decision == expected
+    properties = transport.requests[0].schema["properties"]
+    assert properties["decision"]["enum"] == ["retry"]
+    assert properties["failed_operations_disposition"]["enum"] == [
+        "retry_required"
+    ]
+    assert "repair_option_id" in transport.requests[0].schema["required"]
 
 
 @pytest.mark.parametrize(

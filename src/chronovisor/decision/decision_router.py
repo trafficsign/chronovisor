@@ -1058,6 +1058,46 @@ def _ingest_reconciliation_repair_contract(prompt: str) -> _IngestRepairContract
     )
 
 
+def _ingest_reconciliation_format_schema(
+    schema: Mapping[str, Any],
+    contract: _IngestRepairContract,
+) -> dict[str, Any]:
+    """Constrain model output to the trusted preflight selector contract."""
+
+    formatted = json.loads(_canonical_json(schema))
+    properties = formatted.get("properties")
+    required = formatted.get("required")
+    if not isinstance(properties, dict) or not isinstance(required, list):
+        raise ValueError("ingest reconciliation schema is malformed")
+
+    # These arrays are materialized by the host only after local quorum.
+    properties.pop("invalid_tags", None)
+    properties.pop("replacement_operations", None)
+
+    option_ids = sorted(option.option_id for option in contract.options)
+    selector = properties.get("repair_option_id")
+    if option_ids:
+        if not isinstance(selector, dict):
+            raise ValueError("ingest repair selector schema is missing")
+        selector["enum"] = option_ids
+    else:
+        properties.pop("repair_option_id", None)
+
+    if contract.repair_required:
+        if not option_ids:
+            raise ValueError("required ingest repair has no bounded option")
+        decision = properties.get("decision")
+        disposition = properties.get("failed_operations_disposition")
+        if not isinstance(decision, dict) or not isinstance(disposition, dict):
+            raise ValueError("ingest repair decision schema is missing")
+        decision["enum"] = ["retry"]
+        disposition["enum"] = ["retry_required"]
+        if "repair_option_id" not in required:
+            required.append("repair_option_id")
+
+    return formatted
+
+
 def _ingest_reconciliation_value_validator(
     prompt: str,
     *,
@@ -2141,16 +2181,35 @@ class DecisionRouter:
                 route_provenance=route_provenance,
                 invalid_reason="remote_route_revision_required",
             )
-        result = self._session(model, keep_alive, role, num_ctx, source).run(
-            prompt,
-            schema,
-            system=system,
-            value_validator=_decision_value_validator(
-                decision_lane,
+        format_schema = None
+        try:
+            if (
+                decision_lane == "ingest_reconciliation"
+                and ingest_repair_contract is not None
+            ):
+                format_schema = _ingest_reconciliation_format_schema(
+                    schema,
+                    ingest_repair_contract,
+                )
+        except (TypeError, ValueError) as exc:
+            result = LocalStructuredResult(
+                ok=False,
+                model=model,
+                failure_class="schema_invalid",
+                failure_reason=f"{type(exc).__name__}: {str(exc)[:500]}",
+            )
+        else:
+            result = self._session(model, keep_alive, role, num_ctx, source).run(
                 prompt,
-                ingest_repair_contract=ingest_repair_contract,
-            ),
-        )
+                schema,
+                system=system,
+                format_schema=format_schema,
+                value_validator=_decision_value_validator(
+                    decision_lane,
+                    prompt,
+                    ingest_repair_contract=ingest_repair_contract,
+                ),
+            )
         if result.ok and decision_lane == "ingest_reconciliation":
             try:
                 materialized = _materialize_ingest_repair_option(
