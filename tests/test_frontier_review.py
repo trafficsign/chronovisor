@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
-from chronovisor.core import ollama
+from chronovisor.core import ollama, runtime_config
 from chronovisor.core.runtime_config import DecisionRouterConfig
 from chronovisor.decision import (
     decision_router,
@@ -946,6 +946,11 @@ def test_frontier_repair_success_requires_independent_postconditions(
         return {"ok": True, "returncode": 0, "stdout": ""}
 
     monkeypatch.setattr(frontier_review, "_git_probe", fake_git)
+    monkeypatch.setattr(
+        runtime_config,
+        "resolve_runtime_python",
+        lambda _executable=None: "/opt/homebrew/bin/python3.14",
+    )
     monkeypatch.setattr(frontier_review, "_verification_command", fake_verify)
     monkeypatch.setattr(
         frontier_review,

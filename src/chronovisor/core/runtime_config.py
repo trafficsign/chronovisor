@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 import tomllib
 from dataclasses import dataclass, field
@@ -183,6 +184,38 @@ def runtime_repo_root() -> Path:
     return Path(__file__).resolve().parents[3]
 
 
+def resolve_runtime_python(executable: str | None = None) -> str:
+    """Return an absolute standard-GIL Python 3.14 executable."""
+
+    requested = (
+        executable
+        or os.environ.get("CHRONOVISOR_PYTHON", "").strip()
+        or "python3.14"
+    )
+    found = shutil.which(requested)
+    if found is None:
+        raise RuntimeError("standard Python 3.14 executable not found")
+    try:
+        resolved = Path(found).resolve(strict=True)
+    except OSError:
+        raise RuntimeError("standard Python 3.14 executable not found") from None
+    if not resolved.is_absolute() or "archive-v0" in resolved.parts:
+        raise RuntimeError("standard Python 3.14 executable not found")
+    probe = subprocess.run(
+        [
+            str(resolved),
+            "-c",
+            "import sys; raise SystemExit(not (sys.version_info[:2] == (3, 14) "
+            "and getattr(sys, '_is_gil_enabled', lambda: False)()))",
+        ],
+        text=True,
+        capture_output=True,
+    )
+    if probe.returncode != 0:
+        raise RuntimeError("standard GIL Python 3.14 executable required")
+    return str(resolved)
+
+
 def uvx_runtime_command(
     entrypoint: str,
     *,
@@ -192,9 +225,7 @@ def uvx_runtime_command(
 ) -> list[str]:
     """Build a production command that cannot import an unpushed worktree."""
 
-    command = [executable]
-    if python:
-        command.extend(["--python", python])
+    command = [executable, "--python", resolve_runtime_python(python)]
     if refresh:
         command.extend(["--refresh-package", RUNTIME_PACKAGE])
     command.extend(["--from", runtime_source(), entrypoint])

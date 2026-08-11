@@ -646,9 +646,14 @@ def test_hooks_install_cli_dry_run_json(tmp_path, monkeypatch, capsys) -> None:
 
 def test_default_hook_prefix_uses_pushed_github_runtime(monkeypatch) -> None:
     monkeypatch.delenv("CHRONOVISOR_RUNTIME_SOURCE", raising=False)
+    monkeypatch.setattr(
+        runtime_config,
+        "resolve_runtime_python",
+        lambda _executable=None: "/opt/homebrew/bin/python3.14",
+    )
 
     prefix = cli.default_hook_command_prefix()
 
-    assert prefix.startswith("uvx --from ")
+    assert prefix.startswith("uvx --python /opt/homebrew/bin/python3.14 --from ")
     assert "git+ssh://git@github.com/trafficsign/chronovisor" in prefix
     assert "uv run --project" not in prefix

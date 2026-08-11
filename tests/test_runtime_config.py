@@ -39,7 +39,13 @@ def test_toml_loader_uses_one_old_or_new_snapshot_during_atomic_replace(
     assert config.read_text(encoding="utf-8") == new
 
 
-def test_uvx_runtime_command_uses_pushed_github_source(monkeypatch) -> None:
+def test_uvx_runtime_command_uses_pushed_github_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    python = tmp_path / "python3.14"
+    python.write_text("#!/bin/sh\n", encoding="utf-8")
+    python.chmod(0o755)
+    monkeypatch.setenv("CHRONOVISOR_PYTHON", str(python))
     monkeypatch.delenv("CHRONOVISOR_RUNTIME_SOURCE", raising=False)
 
     command = runtime_config.uvx_runtime_command(
@@ -50,12 +56,38 @@ def test_uvx_runtime_command_uses_pushed_github_source(monkeypatch) -> None:
 
     assert command == [
         "/opt/homebrew/bin/uvx",
+        "--python",
+        str(python),
         "--refresh-package",
         "chronovisor",
         "--from",
         "git+ssh://git@github.com/trafficsign/chronovisor",
         "chronovisor-sleep",
     ]
+
+
+def test_runtime_python_rejects_archive_and_failed_probe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    archived = tmp_path / "archive-v0" / "runtime" / "bin" / "python3.14"
+    archived.parent.mkdir(parents=True)
+    archived.write_text("#!/bin/sh\n", encoding="utf-8")
+    archived.chmod(0o755)
+    stable_link = tmp_path / "stable" / "python3.14"
+    stable_link.parent.mkdir()
+    stable_link.symlink_to(archived)
+    monkeypatch.setenv("CHRONOVISOR_PYTHON", str(stable_link))
+
+    with pytest.raises(RuntimeError, match="executable not found"):
+        runtime_config.resolve_runtime_python()
+
+    failed = tmp_path / "python3.14"
+    failed.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    failed.chmod(0o755)
+    monkeypatch.setenv("CHRONOVISOR_PYTHON", str(failed))
+
+    with pytest.raises(RuntimeError, match="standard GIL Python 3.14"):
+        runtime_config.resolve_runtime_python()
 
 
 def test_runtime_source_override_is_explicit(monkeypatch) -> None:
