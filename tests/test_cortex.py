@@ -3,9 +3,11 @@ from __future__ import annotations
 import json
 import math
 import os
+import shutil
 import subprocess
 import threading
 from contextlib import nullcontext
+from http.server import ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch
 
@@ -1671,6 +1673,212 @@ def test_cortex_projection_center_tracks_mode_bar_safe_area() -> None:
     assert "target.dataset.projectionCenterX" in script
     assert "target.dataset.projectionCenterY" in script
     assert "target.dataset.projectionTopInset" in script
+
+
+def test_cortex_hostile_graph_strings_are_escaped_before_html_sinks(
+    tmp_path: Path,
+) -> None:
+    hostile = {
+        "title": (
+            '\"><img src=/missing '
+            'onerror="globalThis.__chronovisorSecurityCanary=true">'
+        ),
+        "tag": (
+            "</span><script>"
+            "globalThis.__chronovisorSecurityCanary=true"
+            "</script>"
+        ),
+        "packageName": (
+            "</span><svg "
+            'onload="globalThis.__chronovisorSecurityCanary=true">'
+        ),
+    }
+    graph = {
+        "meta": {
+            "generated": "2026-08-11T00:00:00Z",
+            "commit": "security",
+            "totalLines": 2,
+            "static": 1,
+            "deferred": 0,
+            "spawn": 0,
+            "entrypoints": 0,
+        },
+        "categories": [{"id": hostile["packageName"], "count": 1}],
+        "nodes": [
+            {
+                "id": "hostile",
+                "pkg": hostile["packageName"],
+                "l": 1,
+                "b": 1,
+                "fi": 0,
+                "fo": 1,
+                "title": hostile["title"],
+                "tags": [hostile["tag"]],
+            },
+            {
+                "id": "linked",
+                "pkg": "safe",
+                "l": 1,
+                "b": 1,
+                "fi": 1,
+                "fo": 0,
+                "title": hostile["title"],
+                "tags": [],
+            },
+        ],
+        "links": [[0, 1, 0]],
+    }
+    harness = """
+globalThis.__chronovisorSecurityCanary = false;
+document.addEventListener("DOMContentLoaded", () => {
+  let attempts = 0;
+  function probe() {
+    const packageRow = document.querySelector(".pkgRow");
+    if (!packageRow) {
+      if ((attempts += 1) < 200) setTimeout(probe, 10);
+      return;
+    }
+    packageRow.click();
+    const moduleRow = document.querySelector('.modRow[data-index="0"]');
+    if (!moduleRow) return;
+    moduleRow.click();
+    setTimeout(() => {
+      const panel = document.getElementById("panelBody");
+      const result = {
+        canary: globalThis.__chronovisorSecurityCanary,
+        dangerousNodes: panel.querySelectorAll("script,img,svg").length,
+        inlineHandlers: [...panel.querySelectorAll("*")].filter((node) =>
+          [...node.attributes].some((attribute) => attribute.name.startsWith("on"))
+        ).length,
+        title: panel.querySelector(".title")?.textContent,
+        packageName: panel.querySelector(".pk")?.textContent,
+        tag: panel.querySelector(".tagChips span")?.textContent,
+        linkedTitle: panel.querySelector(".depChips span")?.getAttribute("title"),
+      };
+      fetch("/security-result", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(result),
+      });
+    }, 50);
+  }
+  probe();
+});
+"""
+    page = (dashboard.STATIC_DIR / "cortex.html").read_text(encoding="utf-8")
+    page = page.replace(
+        '<script src="/static/cortex.js" defer></script>',
+        '<script src="/static/cortex.js" defer></script>\n'
+        '<script src="/security-harness.js" defer></script>',
+    )
+    page_path = tmp_path / "cortex.html"
+    harness_path = tmp_path / "security-harness.js"
+    page_path.write_text(page, encoding="utf-8")
+    harness_path.write_text(harness, encoding="utf-8")
+    result_ready = threading.Event()
+    browser_results: list[dict[str, object]] = []
+
+    class Handler(dashboard.DashboardHandler):
+        def do_GET(self) -> None:
+            target = {
+                "/cortex": page_path,
+                "/security-harness.js": harness_path,
+            }.get(self.path)
+            if target is not None:
+                if self._browser_boundary_allows():
+                    dashboard._file_response(self, target)
+                return
+            super().do_GET()
+
+        def do_POST(self) -> None:
+            if self.path != "/security-result":
+                self.send_error(404)
+                return
+            if not self._browser_boundary_allows():
+                return
+            length = int(self.headers.get("Content-Length", "0"))
+            if not 0 < length <= 4096:
+                self.send_error(400)
+                return
+            browser_results.append(json.loads(self.rfile.read(length)))
+            result_ready.set()
+            self.send_response(204)
+            self.end_headers()
+
+        def _cortex_graph_response(self) -> None:
+            dashboard._json_response(self, graph)
+
+        def _cortex_field_response(self, _query: str) -> None:
+            self.send_error(404)
+
+        def _cortex_events_response(self, _query: str) -> None:
+            self.send_error(404)
+
+        def _processing_activity_stream_response(self) -> None:
+            self.send_response(404)
+            self.end_headers()
+
+    chrome = next(
+        (
+            candidate
+            for candidate in (
+                shutil.which("google-chrome"),
+                shutil.which("chromium"),
+                shutil.which("chromium-browser"),
+                "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            )
+            if candidate and Path(candidate).is_file()
+        ),
+        None,
+    )
+    assert chrome is not None, "headless Chrome is required for Cortex DOM tests"
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+    process: subprocess.Popen[str] | None = None
+    try:
+        command = [
+            chrome,
+            "--headless=new",
+            "--no-sandbox",
+            "--disable-gpu",
+            "--disable-background-networking",
+            "--disable-component-update",
+            "--no-first-run",
+            f"--user-data-dir={tmp_path / 'chrome-profile'}",
+            f"http://127.0.0.1:{server.server_port}/cortex",
+        ]
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        received = result_ready.wait(8)
+    finally:
+        if process is not None:
+            process.terminate()
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=2)
+        server.shutdown()
+        server.server_close()
+        server_thread.join(timeout=2)
+
+    stderr = process.stderr.read() if process and process.stderr else ""
+    assert received, stderr
+    assert browser_results == [{
+        "canary": False,
+        "dangerousNodes": 0,
+        "inlineHandlers": 0,
+        "title": hostile["title"],
+        "packageName": hostile["packageName"],
+        "tag": hostile["tag"],
+        "linkedTitle": hostile["title"],
+    }]
 
 
 def test_cortex_sphere_mode_dom_persistence_simulation_and_renderer_contract() -> None:

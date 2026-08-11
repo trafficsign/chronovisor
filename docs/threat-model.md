@@ -4,12 +4,12 @@
 
 This model covers the Chronovisor process, local data root, host hooks, MCP
 server, Dashboard, local model services, research network access, and the
-provider-neutral runtime foundation. It is a pre-release review baseline, not a
-claim that the whole product has completed security review.
+provider-neutral runtime foundation. The OSS v1 review is recorded in
+[security-review-v1.md](security-review-v1.md); this model remains the boundary
+contract for future changes.
 
 Local-only is the only production-supported topology. Cloud-only and hybrid
-topologies are experimental. Campaign W provider/configuration integration and
-Campaign X canonical data migration are incomplete.
+topologies are experimental and require explicit egress configuration.
 
 ## Assets
 
@@ -49,10 +49,10 @@ authenticated transport boundary. Safe errors expose categories, not secret
 values.
 
 OS keyring resolution, the credential CLI, provider configuration validation,
-and remote adapter wiring are not complete. Until Campaign W finishes, no
-remote provider configuration is supported. Plaintext secrets must not be
-stored in repository files, `config.toml`, command arguments, logs, Dashboard
-payloads, artifacts, or child-process environments.
+and remote adapter wiring are covered by the OSS v1 review. Remote profiles
+remain opt-in and fail closed. Plaintext secrets must not be stored in
+repository files, `config.toml`, command arguments, logs, Dashboard payloads,
+artifacts, or child-process environments.
 
 ### Dashboard and XSS
 
@@ -63,17 +63,17 @@ through a proxy, tunnel, container port, or browser-sharing service.
 
 Stored page names, snippets, errors, and model-derived values are untrusted.
 They must reach the DOM through text-safe rendering or explicit escaping. The
-current UI contains escaped dynamic HTML paths, but the complete Markdown/DOM
-XSS review is still a release gate.
+current Cortex HTML sinks use explicit escaping; the browser-DOM regression
+covers hostile graph API titles, tags, and package names through the production
+render path. Any new HTML sink or Markdown renderer reopens the XSS release gate.
 
 ### Filesystem
 
 Page lookup and static asset serving perform path containment checks, and
-mounted credentials reject symlinks and unsafe locations. The full write,
-import, archive, migration, and recovery surface has not completed traversal
-review. `raw/`, `system/`, configuration, locks, and receipts must be protected
-from other OS users; permission enforcement across every creation path remains
-part of the pre-release review.
+mounted credentials reject symlinks and unsafe locations. The OSS v1 review
+covers read, write, import, archive, migration, recovery, and private-file mode
+controls. `raw/`, `system/`, configuration, locks, and receipts must remain
+protected from other OS users; any new creation or write path reopens review.
 
 ### Generic endpoints, SSRF, and cloud egress
 
@@ -109,11 +109,12 @@ the pre-release review.
 
 ### Supply chain
 
-Python dependencies are locked and CI runs static, architecture, and test
-checks. Secret scanning, dependency auditing, provenance review, model-file
-integrity, release-artifact scanning, and Git-history scanning are not complete
-release gates yet. A lockfile limits drift; it does not establish that a
-dependency or model is trustworthy.
+Python dependencies are locked and CI runs static, architecture, test,
+full-history/tree/release-artifact secret scans, and dependency audits. Public
+repositories also run CodeQL; private releases require the recorded manual
+static review because GitHub code scanning is unavailable to this workflow.
+Model-file integrity remains an operator responsibility. A lockfile limits
+drift; it does not establish that a dependency or model is trustworthy.
 
 ## Honest exclusions
 
@@ -145,8 +146,8 @@ Do not publish OSS v1 while any of these remain:
   egress policy bypass;
 - command execution or subprocess injection from untrusted input;
 - an exploitable stored/reflected XSS path;
-- incomplete full-history secret scan, dependency audit, static review, or
-  targeted tests for the boundaries above.
+- a failed or missing full-history secret scan, dependency audit, static review,
+  or targeted test for the boundaries above.
 
 Credential cleanup follows the
 [credential leak response runbook](runbooks/credential-leak-response.md).
