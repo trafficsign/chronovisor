@@ -1210,14 +1210,17 @@ canvas {
 
 .decision-overall-steps {
   flex: 0 0 76px;
-  display: grid;
-  grid-template-columns: repeat(7, minmax(0, 1fr));
+  display: flex;
   min-height: 0;
   margin: 10px 0 14px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
 }
 
 .decision-step {
   position: relative;
+  flex: 1 0 142px;
   display: grid;
   grid-template-rows: 28px 24px;
   place-items: center;

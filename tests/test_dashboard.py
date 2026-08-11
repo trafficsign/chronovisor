@@ -1038,7 +1038,40 @@ def test_decision_trace_projects_live_phase_and_completed_vote(monkeypatch) -> N
     ]
     assert trace["overall"][2]["status"] == "done"
     assert trace["overall"][3]["status"] == "active"
+    repair_steps = dashboard._decision_trace_steps("active", phase="repair")
+    assert repair_steps[3]["status"] == "done"
+    assert repair_steps[4]["status"] == "active"
     assert trace["overall"][4]["status"] == "pending"
+
+
+def test_decision_trace_active_validation_marks_generation_done(monkeypatch) -> None:
+    monkeypatch.setattr(
+        dashboard,
+        "_decision_trace_models",
+        lambda: {
+            "primary": "primary:model",
+            "challenger": "challenger:model",
+            "tie_break": "tie:model",
+        },
+    )
+    request = "9" * 64
+
+    trace = dashboard._decision_trace_snapshot(
+        [
+            {
+                "request_sha256": request,
+                "role": "wiki_generation",
+                "model": "primary:model",
+                "phase": "validate",
+                "attempt": 0,
+            }
+        ],
+        [],
+        None,
+    )
+
+    assert trace["overall"][2]["status"] == "done"
+    assert trace["overall"][3]["status"] == "active"
 
 
 def test_decision_trace_exposes_only_ordered_events_for_current_request(
@@ -1081,6 +1114,17 @@ def test_decision_trace_exposes_only_ordered_events_for_current_request(
             "raw_output": "must not escape",
         },
         {
+            "event_id": "event-repair",
+            "kind": "phase",
+            "timestamp": "2026-07-15T12:00:00.5Z",
+            "request_sha256": request,
+            "role": "ingest_review:primary",
+            "model": "primary:model",
+            "phase": "repair",
+            "attempt": 1,
+            "status": "active",
+        },
+        {
             "event_id": "event-2",
             "kind": "session",
             "timestamp": "2026-07-15T12:00:01Z",
@@ -1109,12 +1153,14 @@ def test_decision_trace_exposes_only_ordered_events_for_current_request(
 
     assert [event["event_id"] for event in trace["events"]] == [
         "event-1",
+        "event-repair",
         "event-2",
     ]
-    assert trace["event_count"] == 2
+    assert trace["event_count"] == 3
     assert trace["events"][0]["lane"] == "primary"
     assert trace["events"][0]["overall_key"] == "generate"
-    assert trace["events"][1]["label"] == "Vote accepted"
+    assert trace["events"][1]["overall_key"] == "validate"
+    assert trace["events"][2]["label"] == "Vote accepted"
     assert "prompt" not in trace["events"][0]
     assert "raw_output" not in trace["events"][0]
 
@@ -1668,7 +1714,9 @@ def test_dashboard_static_labels_routine_review_as_local_consensus() -> None:
     assert "<span>Page changes</span>" in page
     assert "${pageChanges} changes" in app
     assert "${pages} pages" not in app
-    assert "grid-template-columns: repeat(7, minmax(0, 1fr));" in style
+    assert ".decision-overall-steps {\n  flex: 0 0 76px;\n  display: flex;" in style
+    assert "overflow-x: auto;" in style
+    assert ".decision-step {\n  position: relative;\n  flex: 1 0 142px;" in style
     assert "grid-template-columns: repeat(6, minmax(50px, 1fr));" in style
     assert "height: var(--panel-height);" in style
     assert "#model-lab-panel" in style
@@ -1924,6 +1972,122 @@ process.stdout.write(JSON.stringify({{
     assert result["observed"] == ["medium", "medium", "medium", "medium"]
     assert result["session"]["think"] == "medium"
     assert result["session"]["state"] == "done"
+
+
+def test_decision_trace_timeline_is_granular_forward_only_and_bounded() -> None:
+    renderer = (dashboard.STATIC_DIR / "app-renderer.js").read_text(encoding="utf-8")
+    scenario = f"""
+const vm = require("node:vm");
+const sandbox = {{ window: {{ matchMedia: () => ({{ matches: false }}) }} }};
+vm.createContext(sandbox);
+vm.runInContext(
+  {json.dumps(renderer)}
+    + "\\nthis.__test = {{ decisionTimelineSteps, decisionTimelineCurrent, decisionTraceBlank, applyDecisionTransition }};",
+  sandbox,
+);
+const phases = ["generate", "validate", "repair", "validate"];
+const events = phases.map((phase, index) => ({{
+  event_id: `event-${{index + 1}}`,
+  kind: "phase",
+  lane: "primary",
+  phase,
+  status: "active",
+  attempt: index < 2 ? 0 : 1,
+  label: phase,
+}}));
+const target = {{
+  request_sha256: "request",
+  active: true,
+  events,
+  overall: [],
+  lanes: [{{
+    key: "primary",
+    label: "Primary",
+    model: "primary:model",
+    think: "medium",
+    steps: ["trigger", "load", "context", "generate", "validate", "vote"].map(
+      (key) => ({{ key, status: "pending" }}),
+    ),
+  }}],
+}};
+let frame = sandbox.__test.decisionTraceBlank(target);
+const frames = events.map((event) => {{
+  frame = sandbox.__test.applyDecisionTransition(frame, target, event);
+  return {{
+    eventIds: frame.events.map((item) => item.event_id),
+    labels: sandbox.__test.decisionTimelineSteps(frame).map((step) => step.label),
+    statuses: sandbox.__test.decisionTimelineSteps(frame).map((step) => step.status),
+    laneStatuses: frame.lanes[0].steps.map((step) => step.status),
+  }};
+}});
+const errorTimeline = sandbox.__test.decisionTimelineSteps({{
+  request_sha256: "error-request",
+  active: false,
+  events: [
+    {{ event_id: "vote", kind: "phase", lane: "primary", phase: "vote", status: "active" }},
+    {{ event_id: "error", kind: "session", lane: "primary", phase: "vote", status: "error", label: "Vote rejected" }},
+  ],
+}});
+const fallback = sandbox.__test.decisionTimelineSteps({{
+  events: [],
+  overall: [
+    {{ key: "packet", label: "Packet", status: "done" }},
+    {{ key: "generate", label: "Generate", status: "active" }},
+  ],
+}});
+process.stdout.write(JSON.stringify({{
+  frames,
+  errorTimeline,
+  errorCurrent: sandbox.__test.decisionTimelineCurrent(errorTimeline),
+  fallback,
+}}));
+"""
+
+    completed = subprocess.run(
+        ["node", "-e", scenario],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    result = json.loads(completed.stdout)
+    frames = result["frames"]
+
+    assert frames[1]["eventIds"] == ["event-1", "event-2"]
+    assert frames[1]["labels"] == [
+        "Packet",
+        "Primary Generate #1",
+        "Primary Validate #1",
+    ]
+    assert frames[-1]["labels"] == [
+        "Packet",
+        "Primary Generate #1",
+        "Primary Validate #1",
+        "Primary Repair #1",
+        "Primary Validate #2",
+    ]
+    assert frames[-1]["statuses"] == ["done", "done", "done", "done", "active"]
+    assert frames[2]["laneStatuses"] == [
+        "done",
+        "done",
+        "done",
+        "done",
+        "active",
+        "pending",
+    ]
+    assert [step["label"] for step in result["errorTimeline"]] == [
+        "Packet",
+        "Primary Vote #1",
+        "Primary Vote rejected",
+    ]
+    assert result["errorTimeline"][-1]["status"] == "error"
+    assert result["errorCurrent"] == {
+        "position": 3,
+        "label": "Primary Vote rejected",
+    }
+    assert [step["label"] for step in result["fallback"]] == [
+        "Packet",
+        "Generate",
+    ]
 
 
 def test_build_snapshot_combines_runtime_and_queue(tmp_path: Path, monkeypatch) -> None:

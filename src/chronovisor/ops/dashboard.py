@@ -2836,7 +2836,7 @@ def _decision_trace_steps(
     *,
     phase: str | None = None,
 ) -> list[dict[str, str]]:
-    phase = "generate" if phase == "repair" else str(phase or "trigger")
+    phase = "validate" if phase == "repair" else str(phase or "trigger")
     current_index = (
         _DECISION_TRACE_PHASES.index(phase) if phase in _DECISION_TRACE_PHASES else 0
     )
@@ -2892,7 +2892,7 @@ def _decision_trace_events(
         "load": "dispatch",
         "context": "generate",
         "generate": "generate",
-        "repair": "generate",
+        "repair": "validate",
         "validate": "validate",
         "vote": "quorum",
         "decision": "decision",
@@ -3342,14 +3342,13 @@ def _decision_trace_snapshot(
         trace_state = "idle"
         summary = "No local decision yet"
 
-    active_phases = {
-        "generate"
-        if row.get("phase") == "repair"
-        else str(row.get("phase") or "trigger")
-        for row in active_rows
-    }
+    active_phases = {str(row.get("phase") or "trigger") for row in active_rows}
     generating = bool(active_phases & {"trigger", "load", "context", "generate"})
-    validating = bool(active_phases) and not generating and "validate" in active_phases
+    validating = (
+        bool(active_phases)
+        and not generating
+        and bool(active_phases & {"repair", "validate"})
+    )
     voting = bool(active_phases) and not generating and not validating
     completed = decision_status in {"agreed", "quarantined"} or (
         not quorum_flow and bool(session_rows)
@@ -3380,7 +3379,7 @@ def _decision_trace_snapshot(
             "status": "active"
             if generating
             else "done"
-            if session_rows or completed
+            if validating or voting or session_rows or completed
             else "pending",
         },
         {

@@ -375,6 +375,10 @@ function cloneDecisionTrace(trace) {
 }
 
 function reconcileDecisionSteps(container, steps, className, focusKey = "") {
+  const latestKey = fmt(steps?.[steps.length - 1]?.key, "");
+  const followLatest =
+    className === "decision-step"
+    && (Boolean(focusKey) || container.dataset.latestTraceKey !== latestKey);
   const existing = new Map(
     [...container.querySelectorAll(`.${className}`)].map((node) => [
       node.dataset.traceKey,
@@ -399,6 +403,8 @@ function reconcileDecisionSteps(container, steps, className, focusKey = "") {
     existing.delete(key);
   });
   existing.forEach((node) => node.remove());
+  if (className === "decision-step") container.dataset.latestTraceKey = latestKey;
+  if (followLatest) container.scrollLeft = container.scrollWidth;
 }
 
 function decisionEventText(event) {
@@ -410,6 +416,70 @@ function decisionEventText(event) {
   const attempt = Number(event?.attempt || 0);
   const suffix = event?.phase === "repair" ? ` · retry ${attempt}` : "";
   return `${lane} · ${fmt(event?.label, event?.phase || "transition")}${suffix}`;
+}
+
+function decisionTimelineSteps(trace) {
+  const events = Array.isArray(trace?.events) ? trace.events : [];
+  if (!events.length && Array.isArray(trace?.overall) && trace.overall.length) {
+    return trace.overall.map((step) => ({ ...step }));
+  }
+  const steps = [];
+  if (trace?.request_sha256) {
+    steps.push({ key: "packet", label: "Packet", status: "done" });
+  }
+  const counts = new Map();
+  events.forEach((event) => {
+    const phase = fmt(event?.phase, "transition");
+    const lane = fmt(event?.lane, "system");
+    if (event?.kind === "session") {
+      const vote = [...steps].reverse().find(
+        (step) => step.lane === lane && step.phase === "vote"
+      );
+      if (vote && event.status !== "error") {
+        vote.status = "done";
+        return;
+      }
+    }
+    const countKey = `${lane}:${phase}`;
+    const count = Number(counts.get(countKey) || 0) + 1;
+    counts.set(countKey, count);
+    const laneLabel = lane === "tie_break"
+      ? "Tie-break"
+      : lane === "system"
+        ? "System"
+        : `${lane.charAt(0).toUpperCase()}${lane.slice(1)}`;
+    const terminalSession = event?.kind === "session";
+    const phaseLabel = phase === "decision"
+      ? fmt(event?.label, "Decision")
+      : terminalSession
+        ? fmt(event?.label, "Vote result")
+        : `${phase.charAt(0).toUpperCase()}${phase.slice(1)}`;
+    steps.push({
+      key: fmt(event?.event_id, `${lane}:${phase}:${count}`),
+      label: phase === "decision"
+        ? phaseLabel
+        : terminalSession
+          ? `${laneLabel} ${phaseLabel}`
+          : `${laneLabel} ${phaseLabel} #${count}`,
+      status: event?.status === "error" ? "error" : "done",
+      lane,
+      phase,
+    });
+  });
+  const latestEvent = events[events.length - 1];
+  if (latestEvent?.kind === "phase" && trace?.active) {
+    const latest = steps.find((step) => step.key === latestEvent.event_id);
+    if (latest && latest.status !== "error") latest.status = "active";
+  }
+  return steps;
+}
+
+function decisionTimelineCurrent(steps) {
+  const index = steps.reduce(
+    (latest, step, candidate) => step.status === "pending" ? latest : candidate,
+    -1
+  );
+  return { position: index + 1, label: steps[index]?.label || "Waiting" };
 }
 
 function renderDecisionTransitionFeed(events, focusEvent = null) {
@@ -440,6 +510,7 @@ function decisionTraceBlank(target) {
   trace.state = "active";
   trace.active = true;
   trace.summary = "Observed transition replay";
+  trace.events = [];
   trace.overall = (trace.overall || []).map((step) => ({
     ...step,
     status: "pending",
@@ -457,7 +528,19 @@ function decisionTraceBlank(target) {
 }
 
 function applyDecisionTransition(current, target, event) {
-  if (!event || event.phase === "decision") return cloneDecisionTrace(target);
+  if (!event) return cloneDecisionTrace(target);
+  const targetEvents = Array.isArray(target?.events) ? target.events : [];
+  const eventIndex = targetEvents.findIndex(
+    (item) => item.event_id === event.event_id
+  );
+  const visibleEvents = eventIndex >= 0
+    ? targetEvents.slice(0, eventIndex + 1)
+    : [...(current?.events || []), event];
+  if (event.phase === "decision") {
+    const completed = cloneDecisionTrace(target);
+    completed.events = visibleEvents;
+    return completed;
+  }
   const frame = cloneDecisionTrace(current || decisionTraceBlank(target));
   frame.state = "active";
   frame.active = true;
@@ -468,6 +551,7 @@ function applyDecisionTransition(current, target, event) {
   frame.context_tokens = target.context_tokens;
   frame.quorum_flow = target.quorum_flow;
   frame.artifact_replay = target.artifact_replay;
+  frame.events = visibleEvents;
   frame.outcome = {
     kind: "active",
     reason: "Replaying observed local transition",
@@ -506,7 +590,7 @@ function applyDecisionTransition(current, target, event) {
             : "done",
     }));
   } else {
-    const phase = event.phase === "repair" ? "generate" : event.phase;
+    const phase = event.phase === "repair" ? "validate" : event.phase;
     const index = Math.max(0, DECISION_LANE_PHASES.indexOf(phase));
     lane.state = "active";
     lane.result = fmt(event.label, phase);
@@ -553,21 +637,17 @@ function renderDecisionTraceFrame(trace, focusEvent = null) {
     ? `Context ${Math.round(contextTokens / 1024)}K`
     : "Context --";
 
-  const overall = Array.isArray(trace.overall) ? trace.overall : [];
+  const overall = decisionTimelineSteps(trace);
   reconcileDecisionSteps(
     els.decisionOverallSteps,
     overall,
     "decision-step",
-    fmt(focusEvent?.overall_key, "")
+    fmt(focusEvent?.event_id, "")
   );
 
-  const activeOverallIndex = overall.findIndex((step) => step.status === "active");
-  const doneOverallCount = overall.filter((step) => step.status === "done").length;
-  const overallPosition = activeOverallIndex >= 0 ? activeOverallIndex + 1 : doneOverallCount;
-  const overallStage =
-    (activeOverallIndex >= 0 ? overall[activeOverallIndex]?.label : null) ||
-    [...overall].reverse().find((step) => step.status === "done")?.label ||
-    "Waiting";
+  const timelineCurrent = decisionTimelineCurrent(overall);
+  const overallPosition = timelineCurrent.position;
+  const overallStage = timelineCurrent.label;
 
   const lanes = new Map(
     (Array.isArray(trace.lanes) ? trace.lanes : []).map((lane) => [lane.key, lane])
@@ -599,7 +679,7 @@ function renderDecisionTraceFrame(trace, focusEvent = null) {
       "decision-lane-step",
       focusEvent?.lane === element.dataset.decisionLane
         ? focusEvent.phase === "repair"
-          ? "generate"
+          ? "validate"
           : fmt(focusEvent.phase, "")
         : ""
     );
@@ -649,7 +729,9 @@ function renderDecisionTraceFrame(trace, focusEvent = null) {
                 ? "RESOLVING"
                 : "WAITING"
               : "READY";
-    els.workSummary.textContent = `${overallStage} · ${Math.min(overallPosition, 7)} / 7`;
+    els.workSummary.textContent = active
+      ? `${overallStage} · step ${overallPosition}`
+      : `${overallStage} · ${overall.length} observed steps`;
     els.workDetail.textContent = fmt(trace.summary, "Local decision");
     els.workUpdated.textContent = `${fmt(trace.task_role, "routine")} · request ${request.slice(0, 16)}`;
     els.workOverview.dataset.outcomeKind = fmt(outcome.kind, "idle");
@@ -725,7 +807,7 @@ function playNextDecisionTransition() {
     event
   );
   renderDecisionTraceFrame(decisionTracePlayback.current, event);
-  renderDecisionTransitionFeed(decisionTracePlayback.target?.events, event);
+  renderDecisionTransitionFeed(decisionTracePlayback.current?.events, event);
   setDecisionTransitionState(decisionTracePlayback.target, "catching-up");
   const backlog = decisionTracePlayback.queue.length;
   const delay = backlog > 8 ? 90 : backlog > 4 ? 160 : 420;
@@ -770,7 +852,7 @@ function renderDecisionTrace(consensus) {
       && document.visibilityState !== "hidden"
     ) {
       renderDecisionTraceFrame(decisionTracePlayback.current);
-      renderDecisionTransitionFeed(events);
+      renderDecisionTransitionFeed(decisionTracePlayback.current.events);
       playNextDecisionTransition();
     } else {
       finishDecisionTracePlayback();
