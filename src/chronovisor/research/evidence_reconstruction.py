@@ -529,6 +529,46 @@ def _source_receipt(unit: Any) -> dict[str, Any]:
     }
 
 
+def _committed_event_spans(
+    raw: bytes, record_count: int
+) -> tuple[tuple[int, bytes], ...]:
+    if not raw.endswith(b"\n"):
+        raise EvidenceReconstructionError("committed Raw record count is invalid")
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise EvidenceReconstructionError(
+            "committed Raw event stream is invalid UTF-8"
+        ) from exc
+    decoder = json.JSONDecoder()
+    spans: list[tuple[int, bytes]] = []
+    cursor = 0
+    byte_cursor = 0
+    while cursor < len(text):
+        try:
+            event, end = decoder.raw_decode(text, cursor)
+        except json.JSONDecodeError as exc:
+            raise EvidenceReconstructionError(
+                "committed Raw event stream is invalid JSON"
+            ) from exc
+        if not isinstance(event, dict):
+            raise EvidenceReconstructionError("committed Raw event must be an object")
+        next_cursor = end
+        while next_cursor < len(text) and text[next_cursor] in " \t\r\n":
+            next_cursor += 1
+        if "\n" not in text[end:next_cursor]:
+            raise EvidenceReconstructionError(
+                "committed Raw event stream has no record separator"
+            )
+        encoded = text[cursor:next_cursor].encode("utf-8")
+        spans.append((byte_cursor, encoded))
+        byte_cursor += len(encoded)
+        cursor = next_cursor
+    if len(spans) != record_count or byte_cursor != len(raw):
+        raise EvidenceReconstructionError("committed Raw record count is invalid")
+    return tuple(spans)
+
+
 def committed_raw_watermark(raw_dir: Path) -> str:
     """Return the current committed-receipt inventory identity without Raw content."""
 
@@ -588,14 +628,14 @@ def build_episode_projection(raw_dir: Path) -> bytes:
         if commit is None or unit.sha256 is None or unit.captured_at is None:
             raise EvidenceReconstructionError("Raw unit has no committed receipt")
         raw = store.read_bytes(unit)
-        lines = raw.splitlines(keepends=True)
-        if not raw.endswith(b"\n") or len(lines) != commit.record_count:
-            raise EvidenceReconstructionError("committed Raw record count is invalid")
         receipt = _source_receipt(unit)
         receipt_sha256 = receipt["receipt_sha256"]
         receipts.append(receipt)
-        cursor = 0
-        for index, line in enumerate(lines):
+        if store.is_archived_legacy_markdown(unit, raw):
+            continue
+        for index, (start, encoded_event) in enumerate(
+            _committed_event_spans(raw, commit.record_count)
+        ):
             atom = _projection_atom(
                 raw_id=unit.raw_id,
                 raw_sha256=unit.sha256,
@@ -603,13 +643,12 @@ def build_episode_projection(raw_dir: Path) -> bytes:
                 host=commit.host,
                 session_key=commit.session_key,
                 captured_at=commit.captured_at,
-                line=line,
+                line=encoded_event,
                 index=index,
-                start=cursor,
+                start=start,
             )
             if atom is not None:
                 atoms.append(atom)
-            cursor += len(line)
     unsigned = {
         "schema": EPISODE_PROJECTION_SCHEMA,
         "evidence_authority_roles": list(EVIDENCE_AUTHORITY_ROLES),
@@ -940,13 +979,12 @@ def verify_projection_atom(raw_dir: Path, atom: EvidenceAtom) -> None:
         raise EvidenceReconstructionError("projection atom Raw receipt is missing")
     commit = unit.commit
     raw = store.read_bytes(unit)
-    lines = raw.splitlines(keepends=True)
+    spans = _committed_event_spans(raw, commit.record_count)
     index = atom.provenance.event_index
-    if index >= len(lines) or len(lines) != commit.record_count:
+    if index >= len(spans):
         raise EvidenceReconstructionError("projection atom event index is invalid")
-    start = sum(len(line) for line in lines[:index])
-    line = lines[index]
-    if (start, start + len(line)) != (
+    start, encoded_event = spans[index]
+    if (start, start + len(encoded_event)) != (
         atom.evidence.byte_start,
         atom.evidence.byte_end,
     ):
@@ -958,7 +996,7 @@ def verify_projection_atom(raw_dir: Path, atom: EvidenceAtom) -> None:
         host=commit.host,
         session_key=commit.session_key,
         captured_at=commit.captured_at,
-        line=line,
+        line=encoded_event,
         index=index,
         start=start,
     )

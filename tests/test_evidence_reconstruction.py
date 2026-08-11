@@ -10,7 +10,9 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from chronovisor.core.canonical_json import canonical_json_sha256_strict
+from chronovisor.core.legacy_archive import write_legacy_archive
 from chronovisor.core.raw_segment import append_capture, seal_segment
+from chronovisor.core.raw_store import RawStore
 from chronovisor.research.evidence_reconstruction import (
     EVALUATION_CONTRACT,
     EvidenceReconstructionError,
@@ -25,6 +27,7 @@ from chronovisor.research.evidence_reconstruction import (
     compile_retrieval_program,
     evaluation_contract_bytes,
     load_episode_projection,
+    verify_projection_atom,
 )
 
 NOW = datetime(2026, 8, 11, 9, 30, tzinfo=ZoneInfo("Asia/Tokyo"))
@@ -103,6 +106,7 @@ def _committed_raw(
     *,
     first_timestamp: object = "2026-08-11T09:00:00+09:00",
     first_text: str = "Why did it fail?",
+    pretty: bool = False,
 ) -> tuple[Path, bytes, dict[str, object]]:
     raw_dir.parent.mkdir(parents=True, exist_ok=True)
     for name in ("index.md", "log.md", "schema.md"):
@@ -131,7 +135,13 @@ def _committed_raw(
     if first_timestamp is not MISSING:
         rows[0]["timestamp"] = first_timestamp
     raw = b"".join(
-        json.dumps(row, ensure_ascii=False, separators=(",", ":")).encode() + b"\n"
+        json.dumps(
+            row,
+            ensure_ascii=False,
+            indent=2 if pretty else None,
+            separators=None if pretty else (",", ":"),
+        ).encode()
+        + b"\n"
         for row in rows
     )
     source.write_bytes(raw)
@@ -153,6 +163,22 @@ def _committed_raw(
         receipt.data_path.read_bytes() + b'{"uncommitted":true}\n'
     )
     return receipt.data_path, raw, receipt.commit.to_dict()
+
+
+def _legacy_source_archive(raw_dir: Path, source_root: Path) -> Path:
+    raw_dir.parent.mkdir(parents=True, exist_ok=True)
+    for name in ("index.md", "log.md", "schema.md"):
+        (raw_dir.parent / name).write_text("legacy\n", encoding="utf-8")
+    source_root.mkdir()
+    source = source_root / "semantic-child.md"
+    source.write_text("archived semantic child\n", encoding="utf-8")
+    day_dir = raw_dir / "2026" / "08" / "11"
+    manifest = write_legacy_archive(
+        [source],
+        archive_path=day_dir / "legacy-part-001.tar.zst",
+        captured_date="2026/08/11",
+    )
+    return day_dir / str(manifest["archive"])
 
 
 def test_y3_projection_uses_committed_receipts_and_rebuilds_identically(
@@ -221,6 +247,117 @@ def test_y3_projection_uses_committed_receipts_and_rebuilds_identically(
             ).encode()
             + b"\n"
         )
+
+
+def test_y3_projection_binds_legacy_markdown_without_fabricating_atoms(
+    tmp_path: Path,
+) -> None:
+    raw_dir = tmp_path / "raw"
+    native_path, native_raw, _commit = _committed_raw(raw_dir, pretty=True)
+    archive_path = _legacy_source_archive(raw_dir, tmp_path / "archive-source")
+    legacy_raw = b"---\nraw_keywords: [historical]\n---\nLegacy transcript envelope.\n"
+    legacy_id = "save-codex-bbbbbbbbbbbbbbbbbbbbbbbb-from10-to11.md"
+    legacy_receipt = append_capture(
+        raw_dir=raw_dir,
+        raw_id=legacy_id,
+        idempotency_key=legacy_id.removeprefix("save-").removesuffix(".md"),
+        host="codex",
+        session_key="b" * 24,
+        session_id=None,
+        source_file=archive_path,
+        after_line=10,
+        until_line=28,
+        source_bytes=legacy_raw,
+        record_count=1,
+        now=NOW,
+    )
+
+    first = build_episode_projection(raw_dir)
+    payload = json.loads(first)
+
+    assert first == build_episode_projection(raw_dir)
+    assert {row["raw_id"] for row in payload["source_receipts"]} == {
+        legacy_id,
+        "save-codex-reconstruction.md",
+    }
+    assert {atom["claim"] for atom in payload["atoms"]} == {
+        "Why did it fail?",
+        "The lease expired.",
+    }
+    assert all(atom["evidence"]["raw_id"] != legacy_id for atom in payload["atoms"])
+    projection = load_episode_projection(first)
+    for atom in projection.atoms:
+        start, end = atom.evidence.byte_start, atom.evidence.byte_end
+        assert isinstance(json.loads(native_raw[start:end]), dict)
+        verify_projection_atom(raw_dir, atom)
+
+    seal_segment(native_path, remove_open=True)
+    seal_segment(legacy_receipt.data_path, remove_open=True)
+    assert build_episode_projection(raw_dir) == first
+    archive_path.unlink()
+    archive_path.with_name("legacy-part-001.manifest.json").unlink()
+    assert build_episode_projection(raw_dir) == first
+
+
+def test_y3_projection_rejects_ambiguous_legacy_shaped_native_input(
+    tmp_path: Path,
+) -> None:
+    raw_dir = tmp_path / "raw"
+    archive_path = _legacy_source_archive(raw_dir, tmp_path / "archive-source")
+    raw = b"---\nraw_keywords: [historical]\ntitle: ambiguous\n---\nNot native JSON.\n"
+    append_capture(
+        raw_dir=raw_dir,
+        raw_id="save-codex-ambiguous.md",
+        idempotency_key="codex-ambiguous",
+        host="codex",
+        session_key="c" * 24,
+        session_id=None,
+        source_file=archive_path,
+        after_line=20,
+        until_line=21,
+        source_bytes=raw,
+        record_count=1,
+        now=NOW,
+    )
+
+    with pytest.raises(EvidenceReconstructionError, match="invalid JSON"):
+        build_episode_projection(raw_dir)
+
+
+def test_y3_legacy_classifier_uses_production_frontmatter_semantics(
+    tmp_path: Path,
+) -> None:
+    raw_dir = tmp_path / "raw"
+    archive_path = _legacy_source_archive(raw_dir, tmp_path / "archive-source")
+    cases = (
+        (b"---\nraw_keywords: [historical, 2026, true, 2026-08-11]\n---\nbody\n", True),
+        (b"---\nraw_keywords: []\n---\nbody\n", True),
+        (b'---\nraw_keywords: [historical, ""]\n---\nbody\n', False),
+        (b"---\nraw_keywords: [historical, [nested]]\n---\nbody\n", False),
+        (b"---\nraw_keywords: [historical\n---\nbody\n", False),
+    )
+    for index, (raw, _expected) in enumerate(cases):
+        key = f"codex-legacy-classifier-{index}"
+        append_capture(
+            raw_dir=raw_dir,
+            raw_id=f"save-{key}.md",
+            idempotency_key=key,
+            host="codex",
+            session_key="d" * 24,
+            session_id=None,
+            source_file=archive_path,
+            after_line=index,
+            until_line=index + 1,
+            source_bytes=raw,
+            record_count=1,
+            now=NOW,
+        )
+
+    store = RawStore(raw_dir, mode="v2")
+    for index, (raw, expected) in enumerate(cases):
+        unit = store.resolve_segment(f"save-codex-legacy-classifier-{index}.md")
+        assert unit is not None
+        assert store.is_archived_legacy_markdown(unit, raw) is expected
 
 
 def test_y3_event_timestamp_falls_back_only_when_missing(tmp_path: Path) -> None:

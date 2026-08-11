@@ -11,6 +11,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
+import stat
 import tomllib
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -32,6 +34,7 @@ RawStorageKind = Literal[
     "legacy_file", "legacy_archive", "segment_open", "segment_sealed"
 ]
 RAW_REFERENCE_SCHEMA = "chronovisor.raw-reference.v1"
+_LEGACY_ARCHIVE_BASENAME_RE = re.compile(r"^legacy-part-[0-9]{3}\.tar\.zst$")
 
 
 def raw_layout_mode(
@@ -94,6 +97,7 @@ class RawStore:
         self._units_cache: tuple[RawUnit, ...] | None = None
         self._units_by_id: dict[str, RawUnit] | None = None
         self._segment_units_cache: tuple[RawUnit, ...] | None = None
+        self._verified_legacy_manifests: dict[Path, tuple[int, int, int, int]] = {}
 
     def _legacy_units(self) -> Iterator[RawUnit]:
         candidates = list(self.raw_dir.glob("*.md"))
@@ -332,6 +336,91 @@ class RawStore:
 
     def read_text(self, raw: str | RawUnit, *, encoding: str = "utf-8") -> str:
         return self.read_bytes(raw).decode(encoding)
+
+    def is_archived_legacy_markdown(self, unit: RawUnit, value: bytes) -> bool:
+        """Recognize one historical Markdown unit copied into a v2 segment."""
+
+        commit = unit.commit
+        if (
+            commit is None
+            or not unit.is_segment
+            or unit.sha256 is None
+            or commit.sha256 != unit.sha256
+            or len(value) != unit.length
+            or hashlib.sha256(value).hexdigest() != unit.sha256
+        ):
+            return False
+        archive_name = Path(commit.source_file).name
+        if (
+            _LEGACY_ARCHIVE_BASENAME_RE.fullmatch(archive_name) is None
+            or commit.record_count != 1
+        ):
+            return False
+        manifest_path = unit.path.with_name(
+            archive_name.removesuffix(".tar.zst") + ".manifest.json"
+        )
+        from chronovisor.core.canonical_document import (
+            CanonicalDocumentError,
+            parse_document,
+        )
+        from chronovisor.core.frontmatter import parse as parse_frontmatter
+        from chronovisor.core.legacy_archive import verify_legacy_manifest
+
+        try:
+            commit.validate()
+            text = value.decode("utf-8")
+            document = parse_document(value)
+        except (UnicodeDecodeError, CanonicalDocumentError, RawSegmentCorrupt):
+            return False
+        try:
+            manifest_stat = manifest_path.lstat()
+        except FileNotFoundError:
+            manifest_stat = None
+        except OSError:
+            return False
+        if manifest_stat is not None:
+            if not stat.S_ISREG(manifest_stat.st_mode):
+                return False
+            manifest_identity = (
+                manifest_stat.st_dev,
+                manifest_stat.st_ino,
+                manifest_stat.st_mtime_ns,
+                manifest_stat.st_size,
+            )
+            if self._verified_legacy_manifests.get(manifest_path) != manifest_identity:
+                try:
+                    manifest = verify_legacy_manifest(manifest_path, full=False)
+                    after = manifest_path.lstat()
+                except (OSError, RawSegmentCorrupt):
+                    return False
+                after_identity = (
+                    after.st_dev,
+                    after.st_ino,
+                    after.st_mtime_ns,
+                    after.st_size,
+                )
+                if (
+                    not stat.S_ISREG(after.st_mode)
+                    or after_identity != manifest_identity
+                    or manifest["archive"] != archive_name
+                ):
+                    return False
+                self._verified_legacy_manifests[manifest_path] = manifest_identity
+        keywords = document.metadata.get("raw_keywords")
+        legacy_metadata, _body = parse_frontmatter(text)
+        legacy_keywords = legacy_metadata.get("raw_keywords")
+        return (
+            set(document.metadata) == {"raw_keywords"}
+            and isinstance(keywords, list)
+            and not any(isinstance(keyword, (dict, list, set)) for keyword in keywords)
+            and set(legacy_metadata) == {"raw_keywords"}
+            and isinstance(legacy_keywords, list)
+            and len(legacy_keywords) == len(keywords)
+            and all(
+                isinstance(keyword, str) and keyword.strip()
+                for keyword in legacy_keywords
+            )
+        )
 
     def reference_payload(self, unit: RawUnit) -> dict[str, object]:
         if unit.storage == "legacy_file":
