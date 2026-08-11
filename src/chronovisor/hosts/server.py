@@ -1406,13 +1406,18 @@ def chronovisor_deep_dive(
             When unavailable, the tool falls back to deterministic requery.
         background: When True, return a job_id immediately and inspect with
             chronovisor_jobs(job_id). When False, run synchronously and return result.
+        engine: Keep v2 (default), use v1 for compatibility, or evidence for
+            Campaign Y projection-first retrieval.
     """
     from chronovisor.research.deep_retrieval import (
         run_deep_dive,
         run_deep_dive_v2,
+        run_evidence_dive,
         start_deep_dive,
     )
 
+    if engine not in {"v1", "v2", "evidence"}:
+        raise ValueError("engine must be v1, v2, or evidence")
     if background:
         job_id = start_deep_dive(
             query,
@@ -1432,6 +1437,8 @@ def chronovisor_deep_dive(
             ensure_ascii=False,
         )
 
+    if engine == "evidence":
+        return json.dumps(run_evidence_dive(query), ensure_ascii=False)
     runner = run_deep_dive_v2 if engine == "v2" else run_deep_dive
     result = runner(
         query,

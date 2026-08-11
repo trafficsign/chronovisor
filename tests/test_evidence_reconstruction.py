@@ -24,7 +24,7 @@ from chronovisor.research.evidence_reconstruction import (
     build_evidence_packet,
     compile_retrieval_program,
     evaluation_contract_bytes,
-    rebuild_episode_projection,
+    load_episode_projection,
 )
 
 NOW = datetime(2026, 8, 11, 9, 30, tzinfo=ZoneInfo("Asia/Tokyo"))
@@ -99,7 +99,10 @@ def test_y2_packet_has_strict_exact_typed_evidence() -> None:
 
 
 def _committed_raw(
-    raw_dir: Path, *, first_timestamp: object = "2026-08-11T09:00:00+09:00"
+    raw_dir: Path,
+    *,
+    first_timestamp: object = "2026-08-11T09:00:00+09:00",
+    first_text: str = "Why did it fail?",
 ) -> tuple[Path, bytes, dict[str, object]]:
     raw_dir.parent.mkdir(parents=True, exist_ok=True)
     for name in ("index.md", "log.md", "schema.md"):
@@ -111,7 +114,7 @@ def _committed_raw(
             "payload": {
                 "type": "message",
                 "role": "user",
-                "content": [{"type": "input_text", "text": "Why did it fail?"}],
+                "content": [{"type": "input_text", "text": first_text}],
             },
         },
         {
@@ -159,15 +162,16 @@ def test_y3_projection_uses_committed_receipts_and_rebuilds_identically(
     data_path, committed_raw, commit = _committed_raw(raw_dir)
     before = {path: path.read_bytes() for path in raw_dir.rglob("*") if path.is_file()}
 
-    first = rebuild_episode_projection(raw_dir, tmp_path / "runtime" / "first.json")
-    second = rebuild_episode_projection(raw_dir, tmp_path / "runtime" / "second.json")
+    first = build_episode_projection(raw_dir)
+    second = build_episode_projection(raw_dir)
     payload = json.loads(first)
 
-    assert first == second == build_episode_projection(raw_dir)
+    assert first == second
     assert {atom["claim"] for atom in payload["atoms"]} == {
         "Why did it fail?",
         "The lease expired.",
     }
+    assert payload["evidence_authority_roles"] == ["assistant"]
     expected_raw_sha256 = hashlib.sha256(committed_raw).hexdigest()
     expected_receipt_sha256 = canonical_json_sha256_strict(commit)
     assert {atom["evidence"]["raw_sha256"] for atom in payload["atoms"]} == {
@@ -182,23 +186,65 @@ def test_y3_projection_uses_committed_receipts_and_rebuilds_identically(
         path: path.read_bytes() for path in raw_dir.rglob("*") if path.is_file()
     } == before
     assert hashlib.sha256(first).hexdigest() == hashlib.sha256(second).hexdigest()
+    assert load_episode_projection(first).canonical_bytes() == first
     seal_segment(data_path, remove_open=True)
     assert build_episode_projection(raw_dir) == first
-    with pytest.raises(EvidenceReconstructionError, match="outside raw"):
-        rebuild_episode_projection(raw_dir, raw_dir / "derived.json")
+    projection_dir = tmp_path / "projection"
+    projection_dir.mkdir()
+    projection_path = projection_dir / "episode.json"
+    projection_path.write_bytes(first)
+    assert load_episode_projection(projection_path).canonical_bytes() == first
+    linked_dir = tmp_path / "linked-projection"
+    linked_dir.symlink_to(projection_dir)
+    with pytest.raises(EvidenceReconstructionError, match="cannot be read"):
+        load_episode_projection(linked_dir / "episode.json")
+
+    tampered = json.loads(first)
+    tampered["atoms"][0]["claim"] = "tampered"
+    with pytest.raises(EvidenceReconstructionError, match="atom identity mismatch"):
+        load_episode_projection(
+            json.dumps(
+                tampered, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+            ).encode()
+            + b"\n"
+        )
+
+    authority_tampered = json.loads(first)
+    authority_tampered["evidence_authority_roles"] = ["user"]
+    with pytest.raises(EvidenceReconstructionError, match="evidence authority"):
+        load_episode_projection(
+            json.dumps(
+                authority_tampered,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+            + b"\n"
+        )
 
 
 def test_y3_event_timestamp_falls_back_only_when_missing(tmp_path: Path) -> None:
     missing_raw = tmp_path / "missing" / "raw"
     _committed_raw(missing_raw, first_timestamp=MISSING)
     payload = json.loads(build_episode_projection(missing_raw))
-    first = next(atom for atom in payload["atoms"] if atom["claim"] == "Why did it fail?")
+    first = next(
+        atom for atom in payload["atoms"] if atom["claim"] == "Why did it fail?"
+    )
     assert first["validity"] == {"start": NOW.isoformat(), "end": NOW.isoformat()}
 
     invalid_raw = tmp_path / "invalid" / "raw"
     _committed_raw(invalid_raw, first_timestamp="not-a-timestamp")
     with pytest.raises(EvidenceReconstructionError, match="event timestamp"):
         build_episode_projection(invalid_raw)
+
+    empty_raw = tmp_path / "invalid-empty" / "raw"
+    _committed_raw(
+        empty_raw,
+        first_timestamp="not-a-timestamp",
+        first_text="",
+    )
+    with pytest.raises(EvidenceReconstructionError, match="event timestamp"):
+        build_episode_projection(empty_raw)
 
 
 def _valid_plan() -> dict[str, object]:
@@ -213,7 +259,7 @@ def _valid_plan() -> dict[str, object]:
                 "must_match_as_of": True,
             }
         ],
-        "allowed_actions": ["chronovisor_search", "chronovisor_read", "raw_search"],
+        "allowed_actions": ["raw_search"],
         "stop_rules": [
             "coverage",
             "contradiction_resolved",
@@ -235,8 +281,18 @@ def test_y4_compiler_is_strict_complete_and_fail_closed() -> None:
 
     invalid = _valid_plan()
     invalid["allowed_actions"] = ["finish"]
-    with pytest.raises(EvidenceReconstructionError, match="retrieval actions"):
+    with pytest.raises(EvidenceReconstructionError, match="local evidence actions"):
         compile_retrieval_program("Why did it fail?", invalid)
+
+    cloud = _valid_plan()
+    cloud["allowed_actions"] = ["web_search"]
+    with pytest.raises(EvidenceReconstructionError, match="local evidence actions"):
+        compile_retrieval_program("Why did it fail?", cloud)
+
+    hint_only = _valid_plan()
+    hint_only["allowed_actions"] = ["chronovisor_search"]
+    with pytest.raises(EvidenceReconstructionError, match="local evidence actions"):
+        compile_retrieval_program("Why did it fail?", hint_only)
 
     unknown = _valid_plan()
     unknown["unexpected"] = True

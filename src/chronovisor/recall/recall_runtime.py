@@ -27,9 +27,13 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from chronovisor.research.evidence_reconstruction import EvidencePacket
 
 from chronovisor.core import ollama, runtime_config
+from chronovisor.core.canonical_json import canonical_json_sha256_strict
 from chronovisor.core.index_store import (
     canonical_document_path_for_id,
     get_store,
@@ -273,6 +277,7 @@ class RecallResult:
     judge_confidence: float | None = None
     judge_reason: str = ""
     evidence_features: dict[str, Any] = field(default_factory=dict)
+    evidence_packet: EvidencePacket | None = None
     search_mode: str = ""
     context_style: str = ""
     latency_ms: int = 0
@@ -1900,6 +1905,104 @@ def _fail_open_recall_budget(
     return result
 
 
+def observe_evidence_reconstruction(
+    result: RecallResult,
+    *,
+    request: RecallRequest,
+    policy: RecallPolicy,
+    deadline_at: float | None,
+) -> dict[str, Any]:
+    """Observe projection-only evidence and keep the page teacher on any gap."""
+
+    metadata: dict[str, Any] = {
+        "status": "skipped",
+        "authority": "teacher",
+        "mode": "shadow",
+        "canary_percent": 0,
+    }
+    if not result.context_items or not request.session_id:
+        metadata["reason"] = "cold_candidate"
+        return metadata
+    if threading.current_thread() is not threading.main_thread():
+        metadata["reason"] = "non_main_thread"
+        return metadata
+    if should_filter_sensitive_result(
+        replace(result.context_items[0], sensitivity="high"),
+        request,
+    ):
+        metadata["reason"] = "sensitive_context"
+        return metadata
+    remaining_ms = _remaining_budget_ms(deadline_at)
+    evidence_budget_ms = (
+        remaining_ms if remaining_ms is not None else policy.total_timeout_ms
+    ) - 25
+    if evidence_budget_ms <= 0:
+        metadata["reason"] = "insufficient_budget"
+        return metadata
+    try:
+        with recall_wall_clock_deadline(evidence_budget_ms):
+            from chronovisor.recall.recall_field_schema import session_hash
+            from chronovisor.research.evidence_reconstruction import (
+                load_episode_projection,
+            )
+            from chronovisor.research.evidence_runtime import (
+                compile_projection_program,
+                evidence_projection_path,
+                evidence_selected,
+                load_evidence_rollout,
+                run_evidence_retrieval,
+            )
+
+            rollout = load_evidence_rollout(CHRONOVISOR_ROOT)
+            metadata.update(
+                mode=str(rollout.get("mode") or "shadow"),
+                canary_percent=int(rollout.get("canary_percent") or 0),
+            )
+            projection = load_episode_projection(
+                evidence_projection_path(CHRONOVISOR_ROOT)
+            )
+            program = compile_projection_program(
+                request.prompt,
+                datetime.now(UTC).isoformat(timespec="seconds"),
+            )
+            run = run_evidence_retrieval(
+                program,
+                projection,
+                actions=(),
+                raw_dir=None,
+                deadline_ms=evidence_budget_ms,
+            )
+            metadata.update(dict(run.telemetry))
+            trace = dict(run.trace)
+            metadata.update(
+                trace=trace,
+                trace_sha256=canonical_json_sha256_strict(trace),
+            )
+            if run.packet.abstained:
+                metadata.update(status="fallback", reason=run.stop_reason)
+                return metadata
+            selected = evidence_selected(
+                CHRONOVISOR_ROOT,
+                session_hash(request.host, request.session_id),
+                projection.projection_id,
+            )
+            if not selected:
+                metadata["status"] = "observed"
+                return metadata
+            result.evidence_packet = run.packet
+            result.evidence_features["evidence_reconstruction"] = metadata
+            metadata.update(status="active", authority="evidence_reconstruction")
+            return metadata
+    except RecallWallClockTimeout:
+        result.evidence_packet = None
+        metadata.update(status="fallback", reason="deadline_exceeded")
+        return metadata
+    except Exception as exc:
+        result.evidence_packet = None
+        metadata.update(status="fallback", reason=type(exc).__name__)
+        return metadata
+
+
 def _finalize_recall_result(
     result: RecallResult,
     *,
@@ -1914,6 +2017,14 @@ def _finalize_recall_result(
     if request.decision_id:
         result.decision_id = request.decision_id
     recall_context = format_recall_context(result, policy)
+    if result.evidence_packet is not None and not recall_context:
+        result.evidence_packet = None
+        evidence = result.evidence_features.get("evidence_reconstruction")
+        if isinstance(evidence, dict):
+            evidence.update(
+                status="fallback", authority="teacher", reason="context_budget"
+            )
+        recall_context = format_recall_context(result, policy)
     result.state_context = state_context_for_request(active_request, policy)
     result.context = merge_context_blocks(
         result.state_context,
@@ -1921,7 +2032,9 @@ def _finalize_recall_result(
         max_chars=policy.max_total_context_chars,
     )
     retained_page_ids = (
-        _retained_context_page_ids(recall_context)
+        []
+        if result.evidence_packet is not None
+        else _retained_context_page_ids(recall_context)
         if recall_context and recall_context in result.context
         else []
     )
@@ -2588,6 +2701,13 @@ def _run_recall_impl(
             )
         except Exception:
             pass
+    evidence_features["evidence_reconstruction"] = observe_evidence_reconstruction(
+        result,
+        request=active_request,
+        policy=policy,
+        deadline_at=deadline_at,
+    )
+    result.latency_ms = _elapsed_ms(started)
     return _finalize_recall_result(
         result,
         request=request,
@@ -2709,7 +2829,9 @@ def append_recall_log(request: RecallRequest, result: RecallResult) -> None:
         "schema_version": 2,
         "ts": datetime.now(UTC).isoformat(timespec="seconds"),
         "decision_id": result.decision_id,
-        "stage": "injected" if result.context_items else "decision",
+        "stage": "injected"
+        if result.context_items or result.evidence_packet is not None
+        else "decision",
         "host": request.host,
         "event": request.event,
         "cwd": request.cwd,

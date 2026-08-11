@@ -6,13 +6,17 @@ import argparse
 import json
 import sys
 
-from chronovisor.research.deep_retrieval import run_deep_dive, run_deep_dive_v2
+from chronovisor.research.deep_retrieval import (
+    run_deep_dive,
+    run_deep_dive_v2,
+    run_evidence_dive,
+)
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--run-id", required=True)
-    parser.add_argument("--engine", choices=("v1", "v2"), default="v2")
+    parser.add_argument("--engine", choices=("v1", "v2", "evidence"), default="v2")
     args = parser.parse_args(argv)
     try:
         payload = json.loads(sys.stdin.read() or "{}")
@@ -28,7 +32,9 @@ def main(argv: list[str] | None = None) -> int:
         "semantic": payload.get("semantic") is not False,
         "use_llm": payload.get("use_llm") is not False,
     }
-    if args.engine == "v2":
+    if args.engine == "evidence":
+        result = run_evidence_dive(query, rebuild_projection=True)
+    elif args.engine == "v2":
         from chronovisor.search.research_config import load_research_config
 
         config = load_research_config()

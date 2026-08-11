@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -205,6 +206,25 @@ def test_start_deep_dive_enqueues_durable_worker(monkeypatch) -> None:
     assert json.loads(recorded[0]["stdin_text"])["query"] == "q"
 
 
+def test_start_evidence_dive_reuses_durable_worker(monkeypatch) -> None:
+    from chronovisor.ops import background_jobs
+
+    recorded = []
+
+    def enqueue(**kwargs):
+        recorded.append(kwargs)
+        return {"job_id": "evidence-job"}
+
+    monkeypatch.setattr(background_jobs, "enqueue_job", enqueue)
+
+    job_id = deep_retrieval.start_deep_dive("q", engine="evidence")
+
+    assert job_id == "evidence-job"
+    assert recorded[0]["module"] == "chronovisor.research.deep_retrieval_worker"
+    assert recorded[0]["args"][-1] == "evidence"
+    assert json.loads(recorded[0]["stdin_text"])["query"] == "q"
+
+
 def test_chronovisor_deep_dive_sync_returns_payload(monkeypatch) -> None:
     from chronovisor.research import deep_retrieval as deep_retrieval_mod
 
@@ -218,6 +238,169 @@ def test_chronovisor_deep_dive_sync_returns_payload(monkeypatch) -> None:
     payload = json.loads(tool_fn("q", background=False, engine="v1"))
 
     assert payload == {"status": "completed", "query": "q", "iterations": []}
+
+
+def test_chronovisor_evidence_dive_sync_is_explicit(monkeypatch) -> None:
+    monkeypatch.setattr(
+        deep_retrieval,
+        "run_evidence_dive",
+        lambda query: {
+            "status": "completed",
+            "engine": "evidence",
+            "query": query,
+            "packet": {"packet_id": "packet:test"},
+        },
+    )
+
+    payload = json.loads(
+        _tool(server.chronovisor_deep_dive)("q", background=False, engine="evidence")
+    )
+
+    assert payload["engine"] == "evidence"
+    assert payload["packet"]["packet_id"] == "packet:test"
+
+
+def test_evidence_dive_activation_waits_for_campaign_x(monkeypatch) -> None:
+    monkeypatch.setattr(
+        deep_retrieval,
+        "okf_startup_status",
+        lambda _root: SimpleNamespace(
+            allowed=True,
+            layout="legacy",
+            state="unmigrated",
+        ),
+    )
+
+    result = deep_retrieval.run_evidence_dive("q")
+
+    assert result == {
+        "status": "blocked",
+        "engine": "evidence",
+        "reason": "campaign_x_not_finalized",
+    }
+
+
+def test_evidence_dive_executes_bounded_raw_gap_actions(monkeypatch) -> None:
+    from chronovisor.research import evidence_runtime
+    from chronovisor.search import research_config, research_store
+
+    config = object()
+    store = object()
+    observed: dict[str, object] = {}
+    program = SimpleNamespace(
+        claim_slots=(SimpleNamespace(slot_id="answer", claim="outage cause"),)
+    )
+    monkeypatch.setattr(
+        deep_retrieval,
+        "okf_startup_status",
+        lambda _root: SimpleNamespace(
+            allowed=True,
+            layout="okf_v0_2",
+            state="finalized-v2",
+        ),
+    )
+    monkeypatch.setattr(
+        evidence_runtime, "run_projection_cycle", lambda **_kwargs: object()
+    )
+    monkeypatch.setattr(
+        evidence_runtime,
+        "compile_projection_program",
+        lambda _query, _as_of: program,
+    )
+    monkeypatch.setattr(research_config, "load_research_config", lambda: config)
+    monkeypatch.setattr(research_store, "ResearchStore", lambda: store)
+
+    def retrieve(_program, _projection, **kwargs):
+        observed.update(kwargs)
+        return SimpleNamespace(
+            stop_reason="missing_required_evidence",
+            packet=SimpleNamespace(to_dict=lambda: {"abstained": True}),
+            trace={},
+            telemetry={"cloud_call_count": 0, "external_model_call_count": 0},
+        )
+
+    monkeypatch.setattr(evidence_runtime, "run_evidence_retrieval", retrieve)
+
+    result = deep_retrieval.run_evidence_dive("outage cause", rebuild_projection=True)
+
+    [(slot_id, action)] = observed["actions"]
+    assert slot_id == "answer"
+    assert action.type.value == "raw_search"
+    assert action.arguments == {
+        "query": "outage cause",
+        "limit": 5,
+        "scan_limit": 1_000,
+    }
+    assert observed["tool_context"].config is config
+    assert observed["tool_context"].store is store
+    assert observed["raw_dir"] == deep_retrieval.RAW_DIR
+    assert result["telemetry"] == {
+        "cloud_call_count": 0,
+        "external_model_call_count": 0,
+    }
+
+
+def test_evidence_dive_sync_is_projection_only(monkeypatch) -> None:
+    from chronovisor.research import evidence_reconstruction, evidence_runtime
+
+    observed: dict[str, object] = {}
+    monkeypatch.setattr(
+        deep_retrieval,
+        "okf_startup_status",
+        lambda _root: SimpleNamespace(
+            allowed=True,
+            layout="okf_v0_2",
+            state="finalized-v2",
+        ),
+    )
+    monkeypatch.setattr(
+        evidence_reconstruction,
+        "load_episode_projection",
+        lambda _path: object(),
+    )
+    monkeypatch.setattr(
+        evidence_runtime,
+        "compile_projection_program",
+        lambda _query, _as_of: object(),
+    )
+
+    def retrieve(_program, _projection, **kwargs):
+        observed.update(kwargs)
+        return SimpleNamespace(
+            stop_reason="coverage",
+            packet=SimpleNamespace(to_dict=lambda: {"abstained": False}),
+            trace={},
+            telemetry={"raw_search_calls": 0},
+        )
+
+    monkeypatch.setattr(evidence_runtime, "run_evidence_retrieval", retrieve)
+
+    result = deep_retrieval.run_evidence_dive("outage cause")
+
+    assert observed["actions"] == ()
+    assert observed["raw_dir"] is None
+    assert "tool_context" not in observed
+    assert result["telemetry"] == {"raw_search_calls": 0}
+
+
+def test_evidence_worker_rebuilds_projection_in_background(monkeypatch) -> None:
+    from chronovisor.research import deep_retrieval_worker
+
+    observed: dict[str, object] = {}
+
+    def run(query: str, *, rebuild_projection: bool = False):
+        observed.update(query=query, rebuild_projection=rebuild_projection)
+        return {"status": "completed", "engine": "evidence"}
+
+    monkeypatch.setattr(deep_retrieval_worker, "run_evidence_dive", run)
+    monkeypatch.setattr(
+        deep_retrieval_worker.sys,
+        "stdin",
+        StringIO('{"query":"q"}'),
+    )
+
+    assert deep_retrieval_worker.main(["--run-id", "run", "--engine", "evidence"]) == 0
+    assert observed == {"query": "q", "rebuild_projection": True}
 
 
 def test_chronovisor_jobs_reads_durable_deep_retrieval_job(monkeypatch) -> None:

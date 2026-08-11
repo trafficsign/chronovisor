@@ -21,7 +21,13 @@ from chronovisor.core.index_store import (
 )
 from chronovisor.core.search import ScoredPage
 from chronovisor.core.search import search as run_search
-from chronovisor.core.store import PAGES_DIR, SYSTEM_DIR
+from chronovisor.core.store import (
+    CHRONOVISOR_ROOT,
+    PAGES_DIR,
+    RAW_DIR,
+    SYSTEM_DIR,
+    okf_startup_status,
+)
 from chronovisor.decision.local_structured import ChatTransport, LocalStructuredSession
 
 REQUERY_RUNTIME_ROLE = "research.deep_retrieval_requery"
@@ -355,6 +361,89 @@ def run_deep_dive_v2(
     }
 
 
+def run_evidence_dive(
+    query: str,
+    *,
+    rebuild_projection: bool = False,
+) -> dict[str, Any]:
+    """Run explicit projection-first evidence retrieval after Campaign X."""
+
+    decision = okf_startup_status(CHRONOVISOR_ROOT)
+    if not (
+        decision.allowed
+        and decision.layout == "okf_v0_2"
+        and decision.state == "finalized-v2"
+    ):
+        return {
+            "status": "blocked",
+            "engine": "evidence",
+            "reason": "campaign_x_not_finalized",
+        }
+    from chronovisor.research.evidence_reconstruction import load_episode_projection
+    from chronovisor.research.evidence_runtime import (
+        compile_projection_program,
+        evidence_projection_path,
+        run_evidence_retrieval,
+        run_projection_cycle,
+    )
+
+    projection_path = evidence_projection_path(CHRONOVISOR_ROOT)
+    projection = (
+        run_projection_cycle(raw_dir=RAW_DIR, output_path=projection_path)
+        if rebuild_projection
+        else load_episode_projection(projection_path)
+    )
+    program = compile_projection_program(
+        query,
+        datetime.now().astimezone().isoformat(timespec="seconds"),
+    )
+    if rebuild_projection:
+        from chronovisor.research.research_tools import ToolContext
+        from chronovisor.search.research_config import load_research_config
+        from chronovisor.search.research_store import ResearchStore
+        from chronovisor.search.research_types import Action, ActionType
+
+        actions = tuple(
+            (
+                slot.slot_id,
+                Action(
+                    ActionType.RAW_SEARCH,
+                    {"query": slot.claim, "limit": 5, "scan_limit": 1_000},
+                    rationale="fill unresolved evidence gap from committed Raw",
+                ),
+            )
+            for slot in program.claim_slots
+        )
+        run = run_evidence_retrieval(
+            program,
+            projection,
+            tool_context=ToolContext(
+                config=load_research_config(),
+                store=ResearchStore(),
+            ),
+            actions=actions,
+            raw_dir=RAW_DIR,
+            deadline_ms=90_000,
+        )
+    else:
+        run = run_evidence_retrieval(
+            program,
+            projection,
+            actions=(),
+            raw_dir=None,
+            deadline_ms=90_000,
+        )
+    return {
+        "status": "completed",
+        "engine": "evidence",
+        "query": query,
+        "stop_reason": run.stop_reason,
+        "packet": run.packet.to_dict(),
+        "trace": dict(run.trace),
+        "telemetry": dict(run.telemetry),
+    }
+
+
 def start_deep_dive(
     query: str,
     *,
@@ -368,11 +457,13 @@ def start_deep_dive(
 
     from chronovisor.core.background_jobs import enqueue_job
 
+    if engine not in {"v1", "v2", "evidence"}:
+        raise ValueError("engine must be v1, v2, or evidence")
     run_id = uuid.uuid4().hex
     job = enqueue_job(
         name="deep-retrieval",
         module="chronovisor.research.deep_retrieval_worker",
-        args=["--run-id", run_id, "--engine", "v2" if engine == "v2" else "v1"],
+        args=["--run-id", run_id, "--engine", engine],
         env={},
         stdin_text=json.dumps(
             {
