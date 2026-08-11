@@ -17,7 +17,7 @@ import pytest
 
 from chronovisor.core import okf_cutover, semantic_index
 from chronovisor.core import store as chronovisor_store
-from chronovisor.core.activity_log import activity_record
+from chronovisor.core.activity_log import activity_record, append_activity
 from chronovisor.core.canonical_json import canonical_json_line_bytes_strict
 from chronovisor.core.durable_state import write_sealed_json
 from chronovisor.core.index_store import IndexStore, canonical_document_paths
@@ -862,6 +862,14 @@ def test_rollback_recutover_and_final_receipt_preserve_activity_suffix(
     assert live_decision.allowed is True
     assert live_decision.layout == "okf_v0_2"
     assert live_decision.state == "finalized-v2"
+    append_activity(
+        "post-finalized append",
+        source="test",
+        root=root,
+        timestamp="2026-08-11T02:01:00+09:00",
+    )
+    pre_cleanup_activity = (runtime / "activity.jsonl").read_bytes()
+    assert discover_okf_startup(root, runtime).allowed is True
     manifest = json.loads((workspace / "dry-run-manifest.json").read_bytes())
     assert all("uid" not in row for row in manifest["system_documents"])
     expected_cohorts = []
@@ -900,7 +908,12 @@ def test_rollback_recutover_and_final_receipt_preserve_activity_suffix(
         "recutover": "complete",
     }
     assert receipt["status_mapping_cohorts"] == expected_cohorts
-    assert receipt["activity_suffix"]["length"] == len(suffix_row)
+    prefix_length = receipt["activity_prefix"]["length"]
+    expected_suffix = pre_cleanup_activity[prefix_length:]
+    assert receipt["activity_suffix"] == {
+        "length": len(expected_suffix),
+        "sha256": hashlib.sha256(expected_suffix).hexdigest(),
+    }
     assert not any(
         (root / name).exists() for name in ("index.md", "log.md", "schema.md")
     )
@@ -908,18 +921,71 @@ def test_rollback_recutover_and_final_receipt_preserve_activity_suffix(
     assert decision.allowed is True
     assert decision.layout == "okf_v0_2"
     assert decision.state == "finalized-v2"
-    with (runtime / "activity.jsonl").open("ab") as handle:
-        handle.write(
-            canonical_json_line_bytes_strict(
-                activity_record(
-                    "valid mutable suffix",
-                    source="test",
-                    timestamp="2026-08-11T02:01:00+09:00",
-                    event_id="activity-" + "a" * 64,
-                )
-            )
-        )
+    append_activity(
+        "valid mutable suffix",
+        source="test",
+        root=root,
+        timestamp="2026-08-11T02:02:00+09:00",
+    )
     assert discover_okf_startup(root, runtime).allowed is True
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    ("prefix-mutate", "prefix-truncate", "suffix-mutate", "suffix-truncate"),
+)
+def test_finalized_precleanup_rejects_bound_activity_tamper(
+    tmp_path: Path,
+    tamper: str,
+) -> None:
+    root, runtime, _workspace = _setup_committed(tmp_path)
+    bound_row = canonical_json_line_bytes_strict(
+        activity_record(
+            "journal-bound suffix",
+            source="test",
+            timestamp="2026-08-11T02:03:00+09:00",
+            event_id="activity-" + "b" * 64,
+        )
+    )
+    with (runtime / "activity.jsonl").open("ab") as handle:
+        handle.write(bound_row)
+    _seal(root)
+    rollback_okf_rebuild(root, runtime, "run-001", is_quiescent=lambda: True)
+    recutover_okf_rebuild(root, runtime, "run-001", is_quiescent=lambda: True)
+
+    path = runtime / "activity.jsonl"
+    raw = path.read_bytes()
+    prefix_length = len(raw) - len(bound_row)
+    if tamper == "prefix-mutate":
+        raw = raw.replace(b"pre-migration activity", b"qre-migration activity", 1)
+    elif tamper == "prefix-truncate":
+        raw = raw[: prefix_length - 1] + raw[prefix_length:]
+    elif tamper == "suffix-mutate":
+        raw = raw.replace(b"journal-bound suffix", b"kournal-bound suffix", 1)
+    else:
+        raw = raw[:-1]
+    path.write_bytes(raw)
+
+    decision = discover_okf_startup(root, runtime)
+    assert decision.allowed is False
+    assert decision.category == "migration_proof_invalid"
+
+
+@pytest.mark.parametrize("invalid_tail", (b"not-json\n", b"{"))
+def test_finalized_precleanup_rejects_invalid_activity_extension(
+    tmp_path: Path,
+    invalid_tail: bytes,
+) -> None:
+    root, runtime, _workspace = _setup_committed(tmp_path)
+    _seal(root)
+    rollback_okf_rebuild(root, runtime, "run-001", is_quiescent=lambda: True)
+    recutover_okf_rebuild(root, runtime, "run-001", is_quiescent=lambda: True)
+    with (runtime / "activity.jsonl").open("ab") as handle:
+        handle.write(invalid_tail)
+
+    decision = discover_okf_startup(root, runtime)
+    assert decision.allowed is False
+    assert decision.category == "migration_proof_invalid"
 
 
 @pytest.mark.parametrize("fault_point", ROLLBACK_DRILL_FAULT_POINTS)
@@ -1045,7 +1111,17 @@ def test_recutover_rejects_tampered_staged_activity_suffix(tmp_path: Path) -> No
     assert discover_okf_startup(root, runtime).category == "recutover_required"
 
 
-@pytest.mark.parametrize("asset", ("pages-log", "system-schema", "activity-prefix"))
+@pytest.mark.parametrize(
+    "asset",
+    (
+        "pages-log",
+        "system-schema",
+        "activity-prefix",
+        "activity-prefix-truncate",
+        "activity-suffix",
+        "activity-suffix-truncate",
+    ),
+)
 def test_final_receipt_startup_rejects_tampered_immutable_asset(
     tmp_path: Path,
     asset: str,
@@ -1054,6 +1130,12 @@ def test_final_receipt_startup_rejects_tampered_immutable_asset(
     _seal(root)
     rollback_okf_rebuild(root, runtime, "run-001", is_quiescent=lambda: True)
     recutover_okf_rebuild(root, runtime, "run-001", is_quiescent=lambda: True)
+    append_activity(
+        "receipt-bound suffix",
+        source="test",
+        root=root,
+        timestamp="2026-08-11T02:04:00+09:00",
+    )
     finalize_okf_rebuild(root, runtime, "run-001", is_quiescent=lambda: True)
     if asset == "pages-log":
         path = root / "pages" / "log.md"
@@ -1063,11 +1145,24 @@ def test_final_receipt_startup_rejects_tampered_immutable_asset(
         path.write_bytes(path.read_bytes() + b"migration canary\n")
     else:
         path = runtime / "activity.jsonl"
-        rows = path.read_bytes().splitlines()
-        payload = json.loads(rows[0])
-        payload["source"] = "tampered-source"
-        rows[0] = canonical_json_line_bytes_strict(payload).rstrip(b"\n")
-        path.write_bytes(b"\n".join(rows) + b"\n")
+        raw = path.read_bytes()
+        receipt = json.loads(
+            (runtime / "migrations" / "run-001" / "receipt.json").read_bytes()
+        )
+        prefix_length = receipt["activity_prefix"]["length"]
+        if asset == "activity-prefix":
+            raw = raw.replace(
+                b"pre-migration activity", b"qre-migration activity", 1
+            )
+        elif asset == "activity-prefix-truncate":
+            raw = raw[: prefix_length - 1] + raw[prefix_length:]
+        elif asset == "activity-suffix":
+            raw = raw.replace(
+                b"receipt-bound suffix", b"seceipt-bound suffix", 1
+            )
+        else:
+            raw = raw[:-1]
+        path.write_bytes(raw)
 
     decision = discover_okf_startup(root, runtime)
     assert decision.allowed is False

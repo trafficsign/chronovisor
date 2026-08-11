@@ -1884,6 +1884,8 @@ def _require_final_cleanup_journal(
     rebuild = receipt.get("rebuild_proof")
     if not isinstance(rebuild, Mapping):
         raise ValueError("final receipt rebuild proof is invalid")
+    journal_suffix = _activity_suffix_from_journal(journal)
+    receipt_suffix = _activity_suffix_from_journal(receipt)
     if (
         journal.get("schema") != JOURNAL_SCHEMA
         or journal.get("version") != SCHEMA_VERSION
@@ -1894,7 +1896,8 @@ def _require_final_cleanup_journal(
         or journal.get("rebuild_proof_sha256") != rebuild.get("sha256")
         or journal.get("rollback_outcome") != "complete"
         or journal.get("recutover_outcome") != "complete"
-        or journal.get("activity_suffix") != receipt.get("activity_suffix")
+        or receipt_suffix[0] < journal_suffix[0]
+        or (receipt_suffix[0] == journal_suffix[0] and receipt_suffix != journal_suffix)
     ):
         raise ValueError("final cleanup journal is invalid")
 
@@ -2450,6 +2453,7 @@ def _require_activity_prefix_suffix(
     path: Path,
     *,
     expected_suffix: tuple[int, str] | None = None,
+    allow_suffix_extension: bool = False,
 ) -> tuple[int, str]:
     """Validate the migrated immutable prefix and every mutable suffix row."""
 
@@ -2464,8 +2468,17 @@ def _require_activity_prefix_suffix(
         raise ValueError("live activity immutable migration prefix changed")
     suffix = raw[prefix_length:]
     identity = len(suffix), hashlib.sha256(suffix).hexdigest()
-    if expected_suffix is not None and identity != expected_suffix:
-        raise ValueError("migration activity suffix identity changed")
+    if expected_suffix is not None:
+        expected_length, expected_sha256 = expected_suffix
+        if allow_suffix_extension:
+            if (
+                len(suffix) < expected_length
+                or hashlib.sha256(suffix[:expected_length]).hexdigest()
+                != expected_sha256
+            ):
+                raise ValueError("migration activity suffix identity changed")
+        elif identity != expected_suffix:
+            raise ValueError("migration activity suffix identity changed")
     return identity
 
 
@@ -3333,7 +3346,6 @@ def _require_finalized_journal(
             context,
             old_activity,
             allow_activity_suffix=True,
-            expected_activity_suffix=suffix,
         ).values()
     ):
         raise ValueError("finalized migration assets do not match the new layout")
@@ -3341,7 +3353,13 @@ def _require_finalized_journal(
         _require_rebuild_sentinel_states(
             context, {"rebuild-in-progress", "sealed-rebuild"}
         )
-    return old_activity, suffix, extras
+    current_suffix = _require_activity_prefix_suffix(
+        context,
+        context.runtime / "activity.jsonl",
+        expected_suffix=suffix,
+        allow_suffix_extension=True,
+    )
+    return old_activity, current_suffix, extras
 
 
 def _validate_rebuild_restricted_object(
