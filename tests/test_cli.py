@@ -61,6 +61,49 @@ def test_raw_status_cli_reports_archive_inventory(
     assert output["open_segments"] == 0
 
 
+def test_lifecycle_restore_cli_forwards_exact_request_as_json(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from chronovisor.ops import autonomy
+
+    patch_wiki(tmp_path, monkeypatch)
+    expected_sha256 = "a" * 64
+    seen: dict[str, str] = {}
+
+    def restore(page_id: str, sha256: str, reason: str) -> dict[str, str]:
+        seen.update(page_id=page_id, sha256=sha256, reason=reason)
+        return {"status": "applied", "page_id": page_id, "sha256": "b" * 64}
+
+    monkeypatch.setattr(autonomy, "restore_deprecated_page", restore)
+
+    assert (
+        cli.main(
+            [
+                "lifecycle-restore",
+                "old-page",
+                "--expected-sha256",
+                expected_sha256,
+                "--reason",
+                "approved restore",
+                "--json",
+            ]
+        )
+        == 0
+    )
+    assert json.loads(capsys.readouterr().out) == {
+        "status": "applied",
+        "page_id": "old-page",
+        "sha256": "b" * 64,
+    }
+    assert seen == {
+        "page_id": "old-page",
+        "sha256": expected_sha256,
+        "reason": "approved restore",
+    }
+
+
 def patch_wiki(tmp_path: Path, monkeypatch) -> None:
     root = tmp_path / "wiki"
     raw = root / "raw"

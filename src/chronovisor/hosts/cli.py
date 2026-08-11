@@ -784,6 +784,13 @@ def build_parser() -> argparse.ArgumentParser:
     retention_parser.add_argument("--limit", type=int, default=5000)
     retention_parser.add_argument("--no-write", action="store_true")
     retention_parser.add_argument("--json", action="store_true")
+    lifecycle_restore_parser = sub.add_parser(
+        "lifecycle-restore", help="Restore one exact deprecated page to stable."
+    )
+    lifecycle_restore_parser.add_argument("page_id", metavar="PAGE")
+    lifecycle_restore_parser.add_argument("--expected-sha256", required=True)
+    lifecycle_restore_parser.add_argument("--reason", required=True)
+    lifecycle_restore_parser.add_argument("--json", action="store_true")
     reflect_parser = sub.add_parser(
         "reflect", help="Generate a memory reflection page."
     )
@@ -1294,6 +1301,19 @@ def dispatch(args: argparse.Namespace) -> int:
                 f"{public['counts']['deprecation_candidates']}"
             )
         return 0
+    if args.command == "lifecycle-restore":
+        from chronovisor.ops.autonomy import restore_deprecated_page
+
+        data = restore_deprecated_page(
+            args.page_id,
+            args.expected_sha256,
+            args.reason,
+        )
+        if args.json:
+            print(json.dumps(data, ensure_ascii=False, indent=2, default=str))
+        else:
+            print("\t".join(f"{key}={value}" for key, value in data.items()))
+        return 0 if data.get("status") in {"applied", "recovered"} else 1
     if args.command == "reflect":
         from chronovisor.ops.reflection import write_reflection_page
 

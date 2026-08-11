@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from chronovisor.core import canonical_document, index_store
 from chronovisor.core.frontmatter import parse as parse_frontmatter
 from chronovisor.decision.decision_router import canonical_agreement_signature
 from chronovisor.decision.decision_schema_manifest import production_decision_schemas
@@ -50,6 +51,44 @@ def _write_page(path: Path, title: str, body: str) -> None:
         f"updated: 2026-07-10\n---\n{body}\n",
         encoding="utf-8",
     )
+
+
+def _restore_page_fixture(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    page_id: str = "old",
+) -> tuple[Path, index_store.IndexStore]:
+    pages = tmp_path / "pages"
+    system = tmp_path / "system"
+    pages.mkdir(exist_ok=True)
+    system.mkdir(exist_ok=True)
+    page = pages / f"{page_id}.md"
+    page.write_bytes(
+        b"---\n"
+        b"title: Old\n"
+        b"status: deprecated\n"
+        b"type: knowledge\n"
+        b"updated: 2026-07-01\n"
+        b"superseded_by: winner\n"
+        b"autonomy_decision: duplicate_frontier_supersede\n"
+        b"autonomy_decision_at: 2026-07-01T12:00:00\n"
+        b"frontier_approval_key: approval\n"
+        b"---\n"
+        b"Body with exact trailing spaces  \r\n"
+    )
+    store = index_store.IndexStore(tmp_path)
+    store.refresh()
+    monkeypatch.setattr(autonomy, "PAGES_DIR", pages)
+    monkeypatch.setattr(autonomy, "SYSTEM_DIR", system)
+    monkeypatch.setattr(
+        autonomy,
+        "DECISIONS_FILE",
+        tmp_path / "autonomy" / "decisions.jsonl",
+    )
+    monkeypatch.setattr(autonomy, "_now", lambda: "2026-08-11T12:00:00")
+    monkeypatch.setattr(index_store, "get_store", lambda: store)
+    return page, store
 
 
 def _convergence_store(
@@ -421,6 +460,166 @@ def test_lifecycle_writers_defer_pages_with_pending_content_correction(
     assert old_meta["status"] == "stable"
     assert deprecate["applied"] == 0
     assert deprecate["decisions"][0]["reason"] == "pending_content_correction"
+
+
+def test_restore_deprecated_page_preserves_body_refreshes_index_and_audits(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    page, store = _restore_page_fixture(tmp_path, monkeypatch)
+    original = page.read_bytes()
+    original_document = canonical_document.parse_document(original)
+    expected_sha256 = hashlib.sha256(original).hexdigest()
+
+    result = autonomy.restore_deprecated_page(
+        "old",
+        expected_sha256,
+        "approved mistaken deprecation",
+    )
+
+    restored = canonical_document.parse_document(page.read_bytes())
+    assert result["status"] == "applied"
+    assert result["sha256"] == hashlib.sha256(page.read_bytes()).hexdigest()
+    assert restored.body == original_document.body
+    assert restored.metadata["status"] == "stable"
+    assert restored.metadata["updated"] == "2026-08-11"
+    assert not {
+        "superseded_by",
+        "autonomy_decision",
+        "autonomy_decision_at",
+        "frontier_approval_key",
+    }.intersection(restored.metadata)
+    assert store.meta("old")["status"] == "stable"
+    rows = [
+        json.loads(line)
+        for line in autonomy.DECISIONS_FILE.read_text(encoding="utf-8").splitlines()
+    ]
+    assert [row["phase"] for row in rows] == ["intent", "applied"]
+    assert rows[0]["expected_sha256"] == expected_sha256
+    assert rows[0]["post_sha256"] == result["sha256"]
+    assert rows[0]["reason"] == "approved mistaken deprecation"
+
+
+def test_restore_deprecated_page_rejects_stale_system_reserved_and_stable(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    page, _store = _restore_page_fixture(tmp_path, monkeypatch)
+    before = page.read_bytes()
+
+    stale = autonomy.restore_deprecated_page(
+        "old",
+        "0" * 64,
+        "stale request",
+    )
+    assert stale["reason"] == "expected_sha256_mismatch"
+    assert page.read_bytes() == before
+
+    system_page = tmp_path / "system" / "system-only.md"
+    system_page.write_bytes(before)
+    system_result = autonomy.restore_deprecated_page(
+        "system-only",
+        hashlib.sha256(before).hexdigest(),
+        "must stay system",
+    )
+    assert system_result["reason"] == "page_not_found_or_not_pages"
+    assert system_page.read_bytes() == before
+
+    reserved = tmp_path / "pages" / "index.md"
+    reserved.write_bytes(before)
+    reserved_result = autonomy.restore_deprecated_page(
+        "index",
+        hashlib.sha256(before).hexdigest(),
+        "must stay reserved",
+    )
+    assert reserved_result["reason"] == "page_not_found_or_not_pages"
+    assert reserved.read_bytes() == before
+
+    stable = tmp_path / "pages" / "stable.md"
+    stable.write_bytes(before.replace(b"status: deprecated", b"status: stable"))
+    stable_before = stable.read_bytes()
+    stable_result = autonomy.restore_deprecated_page(
+        "stable",
+        hashlib.sha256(stable_before).hexdigest(),
+        "already stable",
+    )
+    assert stable_result["reason"] == "page_is_not_deprecated"
+    assert stable.read_bytes() == stable_before
+    assert not autonomy.DECISIONS_FILE.exists()
+
+
+def test_restore_deprecated_page_rejects_pending_content_correction(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    page, _store = _restore_page_fixture(tmp_path, monkeypatch)
+    before = page.read_bytes()
+    correction_store = autonomy._content_correction_store_for_page(page)
+    correction_store.merge_item(
+        lane=autonomy.CONTENT_CORRECTION_LANE,
+        source_id="correction",
+        input_data={"claim": "pending"},
+        metadata={"candidate_pages": ["old"]},
+    )
+
+    result = autonomy.restore_deprecated_page(
+        "old",
+        hashlib.sha256(before).hexdigest(),
+        "restore after correction",
+    )
+
+    assert result["reason"] == "pending_content_correction"
+    assert page.read_bytes() == before
+    assert not autonomy.DECISIONS_FILE.exists()
+
+
+def test_restore_deprecated_page_recovers_intent_only_postimage(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    page, store = _restore_page_fixture(tmp_path, monkeypatch)
+    expected_sha256 = hashlib.sha256(page.read_bytes()).hexdigest()
+    real_append = autonomy.append_jsonl_durable
+    calls = 0
+
+    def crash_before_terminal(path, rows, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise RuntimeError("simulated terminal audit crash")
+        real_append(path, rows, **kwargs)
+
+    monkeypatch.setattr(autonomy, "append_jsonl_durable", crash_before_terminal)
+    with pytest.raises(RuntimeError, match="simulated terminal audit crash"):
+        autonomy.restore_deprecated_page(
+            "old",
+            expected_sha256,
+            "recover exact postimage",
+        )
+
+    assert canonical_document.parse_document(page.read_bytes()).metadata["status"] == (
+        "stable"
+    )
+    monkeypatch.setattr(autonomy, "append_jsonl_durable", real_append)
+    recovered = autonomy.restore_deprecated_page(
+        "old",
+        expected_sha256,
+        "recover exact postimage",
+    )
+    repeated = autonomy.restore_deprecated_page(
+        "old",
+        expected_sha256,
+        "recover exact postimage",
+    )
+
+    assert recovered["status"] == "recovered"
+    assert repeated["status"] == "recovered"
+    assert store.meta("old")["status"] == "stable"
+    rows = [
+        json.loads(line)
+        for line in autonomy.DECISIONS_FILE.read_text(encoding="utf-8").splitlines()
+    ]
+    assert [row["phase"] for row in rows] == ["intent", "recovered"]
 
 
 def test_lifecycle_guard_keeps_auto_resumable_quarantine_protected(

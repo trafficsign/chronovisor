@@ -25,9 +25,10 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from chronovisor.core import index_store
+from chronovisor.core import canonical_document, index_store
 from chronovisor.core.frontmatter import parse as parse_frontmatter
 from chronovisor.core.frontmatter import patch as patch_frontmatter
+from chronovisor.core.jsonl_write import append_jsonl_durable
 from chronovisor.core.page_mutation import (
     chronovisor_mutation_lock,
     decision_authority_lock,
@@ -332,6 +333,245 @@ def _write_unique_temp(path: Path, payload: bytes, *, token: str) -> Path:
         handle.flush()
         os.fsync(handle.fileno())
         return Path(handle.name)
+
+
+def _matching_restore_audit(
+    *,
+    page_id: str,
+    expected_sha256: str,
+    post_sha256: str,
+    reason: str,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    try:
+        lines = DECISIONS_FILE.open("rb")
+    except OSError:
+        return None, None
+    intents: list[dict[str, Any]] = []
+    terminal: dict[str, dict[str, Any]] = {}
+    with lines:
+        for line in lines:
+            try:
+                row = json.loads(line)
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                continue
+            if not isinstance(row, dict) or row.get("type") != "lifecycle_restore":
+                continue
+            intent_id = row.get("intent_id")
+            if not isinstance(intent_id, str):
+                continue
+            if row.get("phase") == "intent":
+                intents.append(row)
+            elif row.get("phase") in {"applied", "recovered"}:
+                terminal[intent_id] = row
+    for intent in reversed(intents):
+        if (
+            intent.get("page_id") == page_id
+            and intent.get("expected_sha256") == expected_sha256
+            and intent.get("post_sha256") == post_sha256
+            and intent.get("reason") == reason
+        ):
+            return intent, terminal.get(str(intent["intent_id"]))
+    return None, None
+
+
+def restore_deprecated_page(
+    page_id: str,
+    expected_sha256: str,
+    reason: str,
+) -> dict[str, Any]:
+    """Restore one exact deprecated pages document to stable."""
+
+    if re.fullmatch(r"[0-9a-f]{64}", expected_sha256) is None:
+        return {"status": "rejected", "reason": "invalid_expected_sha256"}
+    reason = reason.strip()
+    if not reason:
+        return {"status": "rejected", "reason": "reason_required"}
+    path = _canonical_lifecycle_page(page_id, require_stable=False)
+    if path is None:
+        return {
+            "status": "rejected",
+            "reason": "page_not_found_or_not_pages",
+            "page_id": page_id,
+        }
+    try:
+        relative_path = path.relative_to(PAGES_DIR.resolve(strict=True)).as_posix()
+    except (OSError, RuntimeError, ValueError):
+        return {
+            "status": "rejected",
+            "reason": "page_not_found_or_not_pages",
+            "page_id": page_id,
+        }
+
+    result: dict[str, Any]
+    try:
+        with _lifecycle_mutation_guard([page_id], page_path=path) as guard:
+            if not guard["allowed"]:
+                return {
+                    "status": "rejected",
+                    "reason": guard["reason"],
+                    "page_id": page_id,
+                    "correction_keys": guard["correction_keys"],
+                }
+            try:
+                original = path.read_bytes()
+            except OSError as exc:
+                return {
+                    "status": "rejected",
+                    "reason": f"read_error:{exc}",
+                    "page_id": page_id,
+                }
+            observed_sha256 = hashlib.sha256(original).hexdigest()
+            if observed_sha256 != expected_sha256:
+                intent, terminal = _matching_restore_audit(
+                    page_id=page_id,
+                    expected_sha256=expected_sha256,
+                    post_sha256=observed_sha256,
+                    reason=reason,
+                )
+                if intent is None:
+                    return {
+                        "status": "rejected",
+                        "reason": "expected_sha256_mismatch",
+                        "page_id": page_id,
+                        "observed_sha256": observed_sha256,
+                    }
+                try:
+                    canonical_document.validate_canonical_document(
+                        original,
+                        namespace="pages",
+                        path=relative_path,
+                        require_stable=True,
+                    )
+                except canonical_document.CanonicalDocumentError:
+                    return {
+                        "status": "rejected",
+                        "reason": "recovery_postimage_invalid",
+                        "page_id": page_id,
+                    }
+                if terminal is None:
+                    terminal = {
+                        **intent,
+                        "phase": "recovered",
+                        "ts": _now(),
+                    }
+                    append_jsonl_durable(DECISIONS_FILE, [terminal])
+                result = {
+                    "status": str(terminal["phase"]),
+                    "page_id": page_id,
+                    "path": str(path),
+                    "expected_sha256": expected_sha256,
+                    "sha256": observed_sha256,
+                    "reason": reason,
+                }
+            else:
+                try:
+                    document = canonical_document.parse_document(original)
+                except canonical_document.CanonicalDocumentError as exc:
+                    return {
+                        "status": "rejected",
+                        "reason": f"page_parse_error:{exc}",
+                        "page_id": page_id,
+                    }
+                if document.metadata.get("status") != "deprecated":
+                    return {
+                        "status": "rejected",
+                        "reason": "page_is_not_deprecated",
+                        "page_id": page_id,
+                    }
+                timestamp = _now()
+                updated = timestamp[:10]
+                try:
+                    written = canonical_document.patch_document_metadata(
+                        original,
+                        {"status": "stable", "updated": updated},
+                        delete=(
+                            "superseded_by",
+                            "autonomy_decision",
+                            "autonomy_decision_at",
+                            "frontier_approval_key",
+                        ),
+                    )
+                    verified = canonical_document.validate_canonical_document(
+                        written,
+                        namespace="pages",
+                        path=relative_path,
+                        require_stable=True,
+                    )
+                except canonical_document.CanonicalDocumentError as exc:
+                    return {
+                        "status": "rejected",
+                        "reason": f"stable_postimage_invalid:{exc}",
+                        "page_id": page_id,
+                    }
+                if verified.body != document.body:
+                    return {
+                        "status": "rejected",
+                        "reason": "body_change_refused",
+                        "page_id": page_id,
+                    }
+                post_sha256 = hashlib.sha256(written).hexdigest()
+                intent_id = hashlib.sha256(
+                    json.dumps(
+                        [page_id, expected_sha256, post_sha256, reason],
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest()
+                intent = {
+                    "type": "lifecycle_restore",
+                    "phase": "intent",
+                    "ts": timestamp,
+                    "intent_id": intent_id,
+                    "page_id": page_id,
+                    "expected_sha256": expected_sha256,
+                    "post_sha256": post_sha256,
+                    "reason": reason,
+                }
+                append_jsonl_durable(DECISIONS_FILE, [intent])
+                temporary: Path | None = None
+                try:
+                    temporary = _write_unique_temp(
+                        path,
+                        written,
+                        token=expected_sha256[:12],
+                    )
+                    if path.read_bytes() != original:
+                        return {
+                            "status": "rejected",
+                            "reason": "page_changed_before_replace",
+                            "page_id": page_id,
+                        }
+                    os.replace(temporary, path)
+                    directory_fd = os.open(path.parent, os.O_RDONLY)
+                    try:
+                        os.fsync(directory_fd)
+                    finally:
+                        os.close(directory_fd)
+                    observed = path.read_bytes()
+                    if hashlib.sha256(observed).hexdigest() != post_sha256:
+                        raise RuntimeError("lifecycle restore posthash mismatch")
+                finally:
+                    if temporary is not None:
+                        temporary.unlink(missing_ok=True)
+                applied = {**intent, "phase": "applied", "ts": _now()}
+                append_jsonl_durable(DECISIONS_FILE, [applied])
+                result = {
+                    "status": "applied",
+                    "page_id": page_id,
+                    "path": str(path),
+                    "expected_sha256": expected_sha256,
+                    "sha256": post_sha256,
+                    "reason": reason,
+                }
+            index_store.get_store().refresh()
+    except ConvergenceStateError as exc:
+        return {
+            "status": "rejected",
+            "reason": f"lifecycle_guard_error:{exc}",
+            "page_id": page_id,
+        }
+
+    return result
 
 
 def _bytes_receipt(payload: bytes) -> dict[str, Any]:
