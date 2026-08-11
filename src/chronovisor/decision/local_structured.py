@@ -39,7 +39,7 @@ SAFE_RUNTIME_ROLE_RE = re.compile(r"^[a-z][a-z0-9._-]{0,127}$")
 LOCAL_ACTIVITY_PHASES = frozenset(
     {"trigger", "load", "context", "generate", "repair", "validate", "vote"}
 )
-STRUCTURED_GENERATION_POLICY_VERSION = 4
+STRUCTURED_GENERATION_POLICY_VERSION = 5
 STRUCTURED_GENERATION_TEMPERATURE = 0
 STRUCTURED_GENERATION_SEED = 0
 _DEFAULT_STRUCTURED_MEMORY_RESERVE_GIB = 16
@@ -1681,6 +1681,7 @@ _FENCED_JSON = re.compile(
 _CHANNEL_PREFIXES = (
     "<|start|>assistant<|channel|>final<|message|>",
     "<|channel|>final<|message|>",
+    "status to=user<|message|>",
 )
 _CHANNEL_SUFFIXES = ("<|end|>", "<|return|>")
 

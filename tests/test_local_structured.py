@@ -69,9 +69,9 @@ class QueueTransport:
 
 
 def test_structured_generation_policy_seals_the_fixed_sampler() -> None:
-    assert STRUCTURED_GENERATION_POLICY_VERSION == 4
+    assert STRUCTURED_GENERATION_POLICY_VERSION == 5
     assert structured_generation_policy() == {
-        "version": 4,
+        "version": 5,
         "temperature": 0,
         "seed": 0,
         "think": {"default": "medium"},
@@ -1388,6 +1388,72 @@ def test_only_whole_document_known_wrappers_are_normalized() -> None:
     assert (fenced, fenced_changed) == ('{"ok":true}', True)
     assert (channel, channel_changed) == ('{"ok":true}', True)
     assert (prose, prose_changed) == ('answer: {"ok":true}', False)
+
+
+def test_reasoning_protocol_prefix_is_normalized_for_any_model() -> None:
+    normalized = '{"decision":"apply","summary":"reasoned"}'
+    raw = f"status to=user<|message|>{normalized}"
+    transport = QueueTransport(raw)
+    result = LocalStructuredSession(
+        model="local:test",
+        transport=transport,
+        num_ctx=65_536,
+        num_predict=256,
+    ).run("decide", SCHEMA)
+
+    assert result.ok is True
+    assert result.value == {"decision": "apply", "summary": "reasoned"}
+    assert result.attempts[0].normalized is True
+    assert result.attempts[0].output_sha256 == hashlib.sha256(
+        normalized.encode("utf-8")
+    ).hexdigest()
+    assert transport.requests[0].think == "medium"
+
+
+@pytest.mark.parametrize(
+    ("raw", "keyword"),
+    [
+        (
+            'answer: status to=user<|message|>{"decision":"apply","summary":"unsafe"}',
+            "parse",
+        ),
+        (
+            '<|start|>status to=user<|message|>{"decision":"apply","summary":"unsafe"}',
+            "parse",
+        ),
+        (
+            'status to=user<|message|x>{"decision":"apply","summary":"unsafe"}',
+            "parse",
+        ),
+        (
+            'status to=user<|message|>answer: {"decision":"apply","summary":"unsafe"}',
+            "parse",
+        ),
+        (
+            "status to=user<|message|>status to=user<|message|>"
+            '{"decision":"apply","summary":"unsafe"}',
+            "parse",
+        ),
+        (
+            'status to=user<|message|>{"decision":"unsafe","summary":"unsafe"}',
+            "enum",
+        ),
+    ],
+)
+def test_reasoning_protocol_normalization_remains_fail_closed(
+    raw: str, keyword: str
+) -> None:
+    result = LocalStructuredSession(
+        model="local:test",
+        transport=QueueTransport(raw),
+        max_responses=1,
+        num_ctx=65_536,
+        num_predict=256,
+    ).run("decide", SCHEMA)
+
+    assert result.ok is False
+    assert result.failure_class == "repair_exhausted"
+    assert result.attempts[0].issues[0].keyword == keyword
 
 
 def test_audit_record_never_contains_raw_model_output_or_payload() -> None:
