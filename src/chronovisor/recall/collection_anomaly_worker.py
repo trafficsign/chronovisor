@@ -98,8 +98,6 @@ def _generation_profile(model: str) -> tuple[int, bool | str]:
     """Return a bounded profile that leaves room for model-family reasoning."""
 
     if model.partition(":")[0] == "gpt-oss":
-        # gpt-oss needs a small explicit reasoning budget to reliably reach
-        # the schema-constrained answer within this bounded review call.
         return 1_800, "low"
     return 700, False
 

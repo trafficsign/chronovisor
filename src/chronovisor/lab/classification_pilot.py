@@ -44,8 +44,6 @@ def _now() -> str:
     return datetime.now(UTC).isoformat()
 
 
-
-
 def _jsonl(path: Path) -> list[dict[str, Any]]:
     return [
         json.loads(line)
@@ -70,8 +68,7 @@ def _write_json(path: Path, payload: Mapping[str, Any]) -> None:
 
 def _write_jsonl(path: Path, rows: Sequence[Mapping[str, Any]]) -> None:
     content = "".join(
-        json.dumps(dict(row), ensure_ascii=False, sort_keys=True) + "\n"
-        for row in rows
+        json.dumps(dict(row), ensure_ascii=False, sort_keys=True) + "\n" for row in rows
     )
     _atomic_write(path, content)
 
@@ -120,14 +117,10 @@ def prepare_diagnostic_set(
                 "reference": dict(reference),
                 "baseline": {
                     "status": str(decision.get("status") or "held"),
-                    "primary_notation": str(
-                        decision.get("primary_notation") or ""
-                    ),
+                    "primary_notation": str(decision.get("primary_notation") or ""),
                     "quorum": int(decision.get("quorum") or 0),
                     "rationale": str(decision.get("rationale") or ""),
-                    "consensus_sha256": str(
-                        decision.get("consensus_sha256") or ""
-                    ),
+                    "consensus_sha256": str(decision.get("consensus_sha256") or ""),
                 },
             }
         )
@@ -139,9 +132,7 @@ def prepare_diagnostic_set(
         "fixture_path": str(fixture_path),
         "fixture_sha256": _sha256_bytes(fixture_path.read_bytes()),
         "baseline_results_path": str(baseline_results_path),
-        "baseline_results_sha256": _sha256_bytes(
-            baseline_results_path.read_bytes()
-        ),
+        "baseline_results_sha256": _sha256_bytes(baseline_results_path.read_bytes()),
         "spec_path": str(spec_path),
         "spec_sha256": _sha256_bytes(spec_path.read_bytes()),
         "output_path": str(output_path),
@@ -246,9 +237,7 @@ class AuthoritativeCandidateIndex:
             "official_lineage": [
                 {
                     "notation": str(value.get("notation") or ""),
-                    "label_en": str(
-                        value.get("label_en") or value.get("label") or ""
-                    ),
+                    "label_en": str(value.get("label_en") or value.get("label") or ""),
                 }
                 for value in reversed(path)
             ],
@@ -503,9 +492,7 @@ class PilotRunner:
         self.package = package
         self.cache_dir = cache_dir
         self.config = load_decision_router_config()
-        self.candidate_index = candidate_index or AuthoritativeCandidateIndex(
-            package
-        )
+        self.candidate_index = candidate_index or AuthoritativeCandidateIndex(package)
         self.call_model = call_model or self._cached_model_call
 
     def _cached_model_call(
@@ -731,16 +718,9 @@ class PilotRunner:
         if left_notation and left_notation == right_notation:
             return self._path_vote(left, right), None
         common = self._common_ancestor(left_notation, right_notation)
-        choices = [
-            value
-            for value in (left_notation, right_notation, common)
-            if value
-        ]
+        choices = [value for value in (left_notation, right_notation, common) if value]
         choices = list(dict.fromkeys(choices))
-        cards = [
-            self.candidate_index.card(notation)
-            for notation in choices
-        ]
+        cards = [self.candidate_index.card(notation) for notation in choices]
         result = self.call_model(
             model=self.config.tie_break_model,
             keep_alive=self.config.tie_break_keep_alive,
@@ -798,9 +778,7 @@ class PilotRunner:
             card
             for card in (
                 self.candidate_index.card(winner),
-                self.candidate_index.card(rival_notation)
-                if rival_notation
-                else None,
+                self.candidate_index.card(rival_notation) if rival_notation else None,
             )
             if card is not None
         ]
@@ -844,15 +822,18 @@ class PilotRunner:
             stage="gemma-binary-verifier",
         )
         verification = dict(result["payload"]["verification"])
-        core_pass = all(
-            int(verification.get(axis) or 0) == 1
-            for axis in (
-                "central_subject_fit",
-                "official_definition_fit",
-                "non_incidental_match",
-                "rival_not_better",
+        core_pass = (
+            all(
+                int(verification.get(axis) or 0) == 1
+                for axis in (
+                    "central_subject_fit",
+                    "official_definition_fit",
+                    "non_incidental_match",
+                    "rival_not_better",
+                )
             )
-        ) and int(verification.get("fatal_contradiction") or 0) == 0
+            and int(verification.get("fatal_contradiction") or 0) == 0
+        )
         if core_pass and int(verification.get("specificity_supported") or 0) == 1:
             revised = dict(prediction)
         elif core_pass:
@@ -862,8 +843,7 @@ class PilotRunner:
                 "status": "provisional" if parent else "held",
                 "primary_notation": parent,
                 "rationale": (
-                    "Binary verifier accepted the subject but not leaf "
-                    "specificity."
+                    "Binary verifier accepted the subject but not leaf specificity."
                 ),
             }
         else:
@@ -904,9 +884,7 @@ class PilotRunner:
             if notation and notation != str(gemma.get("primary_notation") or ""):
                 rival = notation
                 break
-        binary, verification = self._binary_verify(
-            page, gemma, rival_notation=rival
-        )
+        binary, verification = self._binary_verify(page, gemma, rival_notation=rival)
         baseline = dict(page.get("baseline") or {})
         return {
             "uid": str(page["uid"]),
@@ -928,9 +906,7 @@ class PilotRunner:
             "variants": {
                 "baseline_current": {
                     "status": str(baseline.get("status") or "held"),
-                    "primary_notation": str(
-                        baseline.get("primary_notation") or ""
-                    ),
+                    "primary_notation": str(baseline.get("primary_notation") or ""),
                     "rationale": str(baseline.get("rationale") or ""),
                 },
                 "semantic_ornith": single,
@@ -953,15 +929,11 @@ def score_prediction(
     primary = str(reference.get("primary_notation") or "")
     acceptable = {
         primary,
-        *[
-            str(value)
-            for value in reference.get("acceptable_notations") or []
-        ],
+        *[str(value) for value in reference.get("acceptable_notations") or []],
     }
     acceptable.discard("")
     ancestors = {
-        str(value)
-        for value in reference.get("acceptable_ancestor_notations") or []
+        str(value) for value in reference.get("acceptable_ancestor_notations") or []
     }
     status = str(prediction.get("status") or "held")
     notation = str(prediction.get("primary_notation") or "")
@@ -974,9 +946,8 @@ def score_prediction(
     else:
         accepted = assigned and (notation in acceptable or notation in ancestors)
         exact = assigned and notation == primary
-        status_match = (
-            (expected == "leaf" and status == "proposed")
-            or (expected == "ancestor" and status == "provisional")
+        status_match = (expected == "leaf" and status == "proposed") or (
+            expected == "ancestor" and status == "provisional"
         )
     catastrophic = bool(
         expected != "hold"
@@ -1037,10 +1008,7 @@ def summarize_cases(cases: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     )
     candidate_primary_recall = sum(
         str(case["reference"].get("primary_notation") or "")
-        in {
-            str(value)
-            for value in case["candidate_retrieval"].get("notations") or []
-        }
+        in {str(value) for value in case["candidate_retrieval"].get("notations") or []}
         for case in cases
     )
     return {
@@ -1078,9 +1046,7 @@ def run_pilot(
     existing: dict[str, Any] = {}
     if output_path.exists():
         previous = json.loads(output_path.read_text(encoding="utf-8"))
-        existing = {
-            str(row["uid"]): row for row in previous.get("cases") or []
-        }
+        existing = {str(row["uid"]): row for row in previous.get("cases") or []}
     cases: list[dict[str, Any]] = []
     for index, row in enumerate(rows, start=1):
         uid = str(row["uid"])
@@ -1143,16 +1109,10 @@ def main() -> None:
         )
     if args.command == "run":
         concise_summary = {
-            key: value
-            for key, value in result["summary"].items()
-            if key != "variants"
+            key: value for key, value in result["summary"].items() if key != "variants"
         }
         concise_summary["variants"] = {
-            name: {
-                key: value
-                for key, value in metrics.items()
-                if key != "case_scores"
-            }
+            name: {key: value for key, value in metrics.items() if key != "case_scores"}
             for name, metrics in result["summary"]["variants"].items()
         }
         result = {

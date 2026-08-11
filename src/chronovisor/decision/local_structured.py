@@ -101,9 +101,8 @@ def structured_generation_policy() -> dict[str, Any]:
         "think": {
             "default": False,
             "model_family_overrides": {
-                "gpt-oss": {
-                    "default": "medium",
-                    "num_ctx_at_least": {"65536": "low"},
+                "muse-glimmer": {
+                    "default": False,
                 }
             },
         },
@@ -116,9 +115,9 @@ def structured_think_mode(model: str, *, num_ctx: int) -> bool | str:
     """Select the explicit Ollama reasoning mode sealed by the policy."""
 
     family = model.strip().casefold().rsplit("/", 1)[-1].split(":", 1)[0]
-    if family != "gpt-oss":
-        return False
-    return "low" if num_ctx >= 65_536 else "medium"
+    if family == "gpt-oss":
+        return "low" if num_ctx >= 65_536 else "medium"
+    return False
 
 
 def structured_generation_policy_sha256() -> str:
@@ -346,11 +345,7 @@ class LocalStructuredResult:
 
 
 def _utc_timestamp() -> str:
-    return (
-        datetime.now(UTC)
-        .isoformat(timespec="microseconds")
-        .replace("+00:00", "Z")
-    )
+    return datetime.now(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
 def structured_request_sha256(
@@ -770,9 +765,7 @@ def _decision_summary(decisions: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
             )
             counts["valid_votes"] = int(counts["valid_votes"]) + 1
             if effect_class == "conservative":
-                counts["conservative_votes"] = (
-                    int(counts["conservative_votes"]) + 1
-                )
+                counts["conservative_votes"] = int(counts["conservative_votes"]) + 1
     model_conservative_vote_rates: dict[str, dict[str, int | float]] = {}
     for model, counts in sorted(model_votes.items()):
         valid_votes = int(counts["valid_votes"])
@@ -954,7 +947,12 @@ class LocalConsensusAuditStore:
         if kind not in {"session", "decision", "decision_artifact_replay"}:
             return None
         status = "done"
-        if kind == "session" and not bool(row.get("ok")) or kind == "decision" and row.get("status") != "agreed":
+        if (
+            kind == "session"
+            and not bool(row.get("ok"))
+            or kind == "decision"
+            and row.get("status") != "agreed"
+        ):
             status = "error"
         repair_turns = row.get("repair_turns")
         return {
@@ -968,8 +966,7 @@ class LocalConsensusAuditStore:
             "phase": "vote" if kind == "session" else "decision",
             "attempt": (
                 int(repair_turns)
-                if isinstance(repair_turns, int)
-                and not isinstance(repair_turns, bool)
+                if isinstance(repair_turns, int) and not isinstance(repair_turns, bool)
                 else 0
             ),
             "status": status,
@@ -2529,9 +2526,7 @@ class LocalStructuredSession:
                         max_feedback_chars=self.max_feedback_chars,
                         min_num_ctx_override=self.resource_min_num_ctx,
                         max_num_ctx_override=self.resource_max_num_ctx,
-                        memory_reserve_gib_override=(
-                            self.resource_memory_reserve_gib
-                        ),
+                        memory_reserve_gib_override=(self.resource_memory_reserve_gib),
                     )
                 except _StructuredResourceError as exc:
                     result = self._failure(exc.failure_class, str(exc))
