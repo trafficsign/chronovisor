@@ -3072,29 +3072,15 @@ def _decision_trace_outcome(
     }
 
 
-def _decision_trace_snapshot(
+def _decision_trace_execution_window(
     activities: list[dict[str, Any]],
     history: list[dict[str, Any]],
-    latest_decision: dict[str, Any] | None,
-    trace_events: list[dict[str, Any]] | None = None,
-) -> dict[str, Any]:
-    """Project redacted consensus telemetry into a stable three-lane trace."""
+    trace_events: list[dict[str, Any]],
+    *,
+    request_sha256: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    """Isolate one sequential execution when a request hash is reused."""
 
-    active_request = str(
-        (activities[-1] if activities else {}).get("request_sha256") or ""
-    )
-    decision_request = str((latest_decision or {}).get("request_sha256") or "")
-    latest_session = next(
-        (row for row in reversed(history) if row.get("kind") == "session"),
-        None,
-    )
-    latest_event = (trace_events or [])[-1] if trace_events else None
-    request_sha256 = (
-        active_request
-        or decision_request
-        or str((latest_session or {}).get("request_sha256") or "")
-        or str((latest_event or {}).get("request_sha256") or "")
-    )
     same_request = [
         (index, row)
         for index, row in enumerate(history)
@@ -3129,7 +3115,7 @@ def _decision_trace_snapshot(
             else:
                 trace_boundaries = [
                     epoch
-                    for row in trace_events or []
+                    for row in trace_events
                     if row.get("request_sha256") == request_sha256
                     and row.get("phase") == "decision"
                     and row.get("kind") in {"decision", "decision_artifact_replay"}
@@ -3153,6 +3139,49 @@ def _decision_trace_snapshot(
                 and epoch > boundary_epoch
             )
         ]
+    bounded_trace_events = trace_events
+    if boundary_epoch is not None:
+        bounded_trace_events = [
+            row
+            for row in trace_events
+            if row.get("request_sha256") != request_sha256
+            or (
+                (epoch := _failure_timestamp(row.get("timestamp"))[0]) is not None
+                and epoch > boundary_epoch
+            )
+        ]
+    return active_rows, related, bounded_trace_events
+
+
+def _decision_trace_snapshot(
+    activities: list[dict[str, Any]],
+    history: list[dict[str, Any]],
+    latest_decision: dict[str, Any] | None,
+    trace_events: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Project redacted consensus telemetry into a stable three-lane trace."""
+
+    active_request = str(
+        (activities[-1] if activities else {}).get("request_sha256") or ""
+    )
+    decision_request = str((latest_decision or {}).get("request_sha256") or "")
+    latest_session = next(
+        (row for row in reversed(history) if row.get("kind") == "session"),
+        None,
+    )
+    latest_event = (trace_events or [])[-1] if trace_events else None
+    request_sha256 = (
+        active_request
+        or decision_request
+        or str((latest_session or {}).get("request_sha256") or "")
+        or str((latest_event or {}).get("request_sha256") or "")
+    )
+    active_rows, related, bounded_trace_events = _decision_trace_execution_window(
+        activities,
+        history,
+        trace_events or [],
+        request_sha256=request_sha256,
+    )
     decision = next(
         (
             row
@@ -3398,17 +3427,6 @@ def _decision_trace_snapshot(
         trace_state=trace_state,
         task_role=task_role,
     )
-    bounded_trace_events = trace_events or []
-    if boundary_epoch is not None:
-        bounded_trace_events = [
-            row
-            for row in bounded_trace_events
-            if row.get("request_sha256") != request_sha256
-            or (
-                (epoch := _failure_timestamp(row.get("timestamp"))[0]) is not None
-                and epoch > boundary_epoch
-            )
-        ]
     events = _decision_trace_events(
         bounded_trace_events,
         request_sha256=request_sha256,
