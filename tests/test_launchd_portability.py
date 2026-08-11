@@ -27,6 +27,12 @@ SERVICES = {
     "com.trafficsign.chronovisor-searxng.plist": "chronovisor-searxng",
     "com.trafficsign.chronovisor-semantic.plist": "chronovisor-semantic-service",
 }
+GENERIC_SERVICES = {
+    "dashboard": "chronovisor-dashboard",
+    "ingest-drain": "chronovisor-ingest-drain",
+    "librarian-review": "chronovisor-librarian-review",
+    "library-evidence": "chronovisor-library-evidence",
+}
 UVX_SERVICES = set(SERVICES) - {"com.trafficsign.chronovisor-searxng.plist"}
 PERSONAL_HOME = re.compile(rb"/Users/trafficsign(?:/|$)")
 
@@ -150,14 +156,56 @@ def test_launchd_sources_and_installers_have_no_personal_checkout_path() -> None
         assert "/Users/trafficsign" not in source
 
 
-def test_generic_installer_allowlists_services_without_dedicated_setup() -> None:
-    source = (ROOT / "scripts" / "install-launchd-service").read_text(encoding="utf-8")
+@pytest.mark.parametrize(("service", "wrapper"), GENERIC_SERVICES.items())
+def test_generic_installer_renders_every_supported_service_without_launchctl(
+    tmp_path: Path,
+    service: str,
+    wrapper: str,
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    uvx = _executable(tmp_path / "tools" / "uvx")
+    python = _executable(tmp_path / "tools" / "python3.14")
+    launchctl_log = tmp_path / "launchctl.log"
+    launchctl = tmp_path / "tools" / "launchctl"
+    launchctl.write_text(
+        '#!/bin/sh\nprintf "%s\\n" "$*" >> "$CHRONOVISOR_TEST_LAUNCHCTL_LOG"\n',
+        encoding="utf-8",
+    )
+    launchctl.chmod(0o755)
+    env = os.environ | {
+        "HOME": str(home),
+        "CHRONOVISOR_UVX": str(uvx),
+        "CHRONOVISOR_PYTHON": str(python),
+        "CHRONOVISOR_LAUNCHCTL": str(launchctl),
+        "CHRONOVISOR_LAUNCHD_LABEL_PREFIX": "org.example.chronovisor-",
+        "CHRONOVISOR_TEST_LAUNCHCTL_LOG": str(launchctl_log),
+    }
 
-    assert "dashboard | ingest-drain | librarian-review | library-evidence" in source
-    assert '"$PROJECT_ROOT/scripts/chronovisor-render-launchd"' in source
-    assert '/bin/launchctl bootstrap "$DOMAIN" "$LAUNCH_AGENT"' in source
-    assert '/bin/launchctl kickstart -k "$DOMAIN/$LABEL"' in source
-    assert "/Users/trafficsign" not in source
+    subprocess.run(
+        [str(ROOT / "scripts" / "install-launchd-service"), service],
+        check=True,
+        env=env,
+    )
+
+    output = (
+        home
+        / "Library"
+        / "LaunchAgents"
+        / f"com.trafficsign.chronovisor-{service}.plist"
+    )
+    payload = plistlib.loads(output.read_bytes())
+    label = f"org.example.chronovisor-{service}"
+    domain = f"gui/{os.getuid()}"
+
+    assert payload["Label"] == label
+    assert payload["ProgramArguments"][0] == str(ROOT / "scripts" / wrapper)
+    assert "@@" not in output.read_text(encoding="utf-8")
+    assert launchctl_log.read_text(encoding="utf-8").splitlines() == [
+        f"bootout {domain}/{label}",
+        f"bootstrap {domain} {output}",
+        f"kickstart -k {domain}/{label}",
+    ]
 
 
 def test_contract_manifest_and_production_files_have_no_personal_home() -> None:

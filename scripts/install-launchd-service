@@ -14,18 +14,19 @@ readonly SCRIPT_DIR="${0:A:h}"
 readonly PROJECT_ROOT="${SCRIPT_DIR:h}"
 readonly LAUNCH_AGENT="$HOME/Library/LaunchAgents/com.trafficsign.chronovisor-$SERVICE.plist"
 readonly DOMAIN="gui/$(/usr/bin/id -u)"
+readonly LAUNCHCTL="${CHRONOVISOR_LAUNCHCTL:-/bin/launchctl}"
 
 mkdir -p \
   "$HOME/.chronovisor/logs" \
   "$HOME/.chronovisor/runtime/librarian" \
   "${LAUNCH_AGENT:h}"
 "$PROJECT_ROOT/scripts/chronovisor-render-launchd" \
-  "$PROJECT_ROOT/launchd/$LABEL.plist" \
+  "$PROJECT_ROOT/launchd/com.trafficsign.chronovisor-$SERVICE.plist" \
   "$LAUNCH_AGENT" \
   --project-root "$PROJECT_ROOT" \
   --home "$HOME"
 readonly LABEL="$(/usr/libexec/PlistBuddy -c 'Print :Label' "$LAUNCH_AGENT")"
 
-/bin/launchctl bootout "$DOMAIN/$LABEL" >/dev/null 2>&1 || true
-/bin/launchctl bootstrap "$DOMAIN" "$LAUNCH_AGENT"
-/bin/launchctl kickstart -k "$DOMAIN/$LABEL"
+"$LAUNCHCTL" bootout "$DOMAIN/$LABEL" >/dev/null 2>&1 || true
+"$LAUNCHCTL" bootstrap "$DOMAIN" "$LAUNCH_AGENT"
+"$LAUNCHCTL" kickstart -k "$DOMAIN/$LABEL"
