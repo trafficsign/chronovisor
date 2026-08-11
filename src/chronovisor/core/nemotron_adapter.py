@@ -90,7 +90,7 @@ class NemotronEmbeddingBackend:
             if self._model is not None:
                 return self._model
             try:
-                import torch
+                import torch  # type: ignore[import-not-found, unused-ignore]
                 from sentence_transformers import (  # type: ignore[import-not-found]
                     SentenceTransformer,
                 )
@@ -169,7 +169,7 @@ class NemotronEmbeddingBackend:
             self._model = None
         gc.collect()
         try:
-            import torch
+            import torch  # type: ignore[import-not-found, unused-ignore]
 
             if self.device == "mps" and torch.backends.mps.is_available():
                 torch.mps.empty_cache()
