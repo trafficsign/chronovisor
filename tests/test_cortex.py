@@ -1730,6 +1730,19 @@ def test_cortex_hostile_graph_strings_are_escaped_before_html_sinks(
     }
     harness = """
 globalThis.__chronovisorSecurityCanary = false;
+function reportBrowserError(detail) {
+  fetch("/security-error", {
+    method: "POST",
+    headers: { "Content-Type": "text/plain" },
+    body: String(detail).slice(0, 1000),
+  }).catch(() => {});
+}
+globalThis.addEventListener("error", (event) =>
+  reportBrowserError(event.error?.stack || event.message || event.target?.src)
+);
+globalThis.addEventListener("unhandledrejection", (event) =>
+  reportBrowserError(event.reason?.stack || event.reason)
+);
 document.addEventListener("DOMContentLoaded", () => {
   let attempts = 0;
   function probe() {
@@ -1777,9 +1790,13 @@ document.addEventListener("DOMContentLoaded", () => {
     harness_path.write_text(harness, encoding="utf-8")
     result_ready = threading.Event()
     browser_results: list[dict[str, object]] = []
+    browser_errors: list[str] = []
+    request_paths: list[str] = []
 
     class Handler(dashboard.DashboardHandler):
         def do_GET(self) -> None:
+            if len(request_paths) < 50:
+                request_paths.append(f"GET {self.path}")
             target = {
                 "/cortex": page_path,
                 "/security-harness.js": harness_path,
@@ -1791,7 +1808,9 @@ document.addEventListener("DOMContentLoaded", () => {
             super().do_GET()
 
         def do_POST(self) -> None:
-            if self.path != "/security-result":
+            if len(request_paths) < 50:
+                request_paths.append(f"POST {self.path}")
+            if self.path not in {"/security-error", "/security-result"}:
                 self.send_error(404)
                 return
             if not self._browser_boundary_allows():
@@ -1800,8 +1819,13 @@ document.addEventListener("DOMContentLoaded", () => {
             if not 0 < length <= 4096:
                 self.send_error(400)
                 return
-            browser_results.append(json.loads(self.rfile.read(length)))
-            result_ready.set()
+            body = self.rfile.read(length)
+            if self.path == "/security-error":
+                if len(browser_errors) < 5:
+                    browser_errors.append(body.decode(errors="replace"))
+            else:
+                browser_results.append(json.loads(body))
+                result_ready.set()
             self.send_response(204)
             self.end_headers()
 
@@ -1837,11 +1861,13 @@ document.addEventListener("DOMContentLoaded", () => {
     server_thread = threading.Thread(target=server.serve_forever, daemon=True)
     server_thread.start()
     process: subprocess.Popen[str] | None = None
+    browser_exit: int | None = None
     try:
         command = [
             chrome,
             "--headless=new",
             "--no-sandbox",
+            "--disable-dev-shm-usage",
             "--disable-gpu",
             "--disable-background-networking",
             "--disable-component-update",
@@ -1855,7 +1881,8 @@ document.addEventListener("DOMContentLoaded", () => {
             stderr=subprocess.PIPE,
             text=True,
         )
-        received = result_ready.wait(8)
+        received = result_ready.wait(20)
+        browser_exit = process.poll()
     finally:
         if process is not None:
             process.terminate()
@@ -1868,8 +1895,17 @@ document.addEventListener("DOMContentLoaded", () => {
         server.server_close()
         server_thread.join(timeout=2)
 
-    stderr = process.stderr.read() if process and process.stderr else ""
-    assert received, stderr
+    stderr = process.stderr.read()[-4000:] if process and process.stderr else ""
+    diagnostics = json.dumps(
+        {
+            "browserExitBeforeCleanup": browser_exit,
+            "browserStderrTail": stderr,
+            "harnessErrors": browser_errors,
+            "requestPaths": request_paths,
+        },
+        indent=2,
+    )
+    assert received, diagnostics
     assert browser_results == [{
         "canary": False,
         "dangerousNodes": 0,

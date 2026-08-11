@@ -1,31 +1,34 @@
-#!/bin/zsh
-set -euo pipefail
+#!/bin/sh
+set -eu
 
-readonly SERVICE="${1:-}"
+SERVICE="${1:-}"
 case "$SERVICE" in
-  dashboard | ingest-drain | librarian-review | library-evidence) ;;
+  dashboard|ingest-drain|librarian-review|library-evidence) ;;
   *)
-    print -u2 "usage: $0 {dashboard|ingest-drain|librarian-review|library-evidence}"
+    printf 'usage: %s {dashboard|ingest-drain|librarian-review|library-evidence}\n' "$0" >&2
     exit 64
     ;;
 esac
 
-readonly SCRIPT_DIR="${0:A:h}"
-readonly PROJECT_ROOT="${SCRIPT_DIR:h}"
-readonly LAUNCH_AGENT="$HOME/Library/LaunchAgents/com.trafficsign.chronovisor-$SERVICE.plist"
-readonly DOMAIN="gui/$(/usr/bin/id -u)"
-readonly LAUNCHCTL="${CHRONOVISOR_LAUNCHCTL:-/bin/launchctl}"
+SCRIPT_DIR="$(CDPATH= cd "$(dirname "$0")" && pwd -P)"
+PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+LAUNCH_AGENT="$HOME/Library/LaunchAgents/com.trafficsign.chronovisor-$SERVICE.plist"
+DOMAIN="gui/$(id -u)"
+LAUNCHCTL="${CHRONOVISOR_LAUNCHCTL:-/bin/launchctl}"
+PYTHON="${CHRONOVISOR_PYTHON:-python3}"
+readonly SERVICE SCRIPT_DIR PROJECT_ROOT LAUNCH_AGENT DOMAIN LAUNCHCTL PYTHON
 
 mkdir -p \
   "$HOME/.chronovisor/logs" \
   "$HOME/.chronovisor/runtime/librarian" \
-  "${LAUNCH_AGENT:h}"
-"$PROJECT_ROOT/scripts/chronovisor-render-launchd" \
+  "${LAUNCH_AGENT%/*}"
+"$PYTHON" "$PROJECT_ROOT/scripts/chronovisor-render-launchd" \
   "$PROJECT_ROOT/launchd/com.trafficsign.chronovisor-$SERVICE.plist" \
   "$LAUNCH_AGENT" \
   --project-root "$PROJECT_ROOT" \
   --home "$HOME"
-readonly LABEL="$(/usr/libexec/PlistBuddy -c 'Print :Label' "$LAUNCH_AGENT")"
+LABEL="$("$PYTHON" -c 'import plistlib, sys; print(plistlib.load(open(sys.argv[1], "rb"))["Label"])' "$LAUNCH_AGENT")"
+readonly LABEL
 
 "$LAUNCHCTL" bootout "$DOMAIN/$LABEL" >/dev/null 2>&1 || true
 "$LAUNCHCTL" bootstrap "$DOMAIN" "$LAUNCH_AGENT"

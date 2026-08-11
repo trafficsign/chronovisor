@@ -165,7 +165,6 @@ def test_generic_installer_renders_every_supported_service_without_launchctl(
     home = tmp_path / "home"
     home.mkdir()
     uvx = _executable(tmp_path / "tools" / "uvx")
-    python = _executable(tmp_path / "tools" / "python3.14")
     launchctl_log = tmp_path / "launchctl.log"
     launchctl = tmp_path / "tools" / "launchctl"
     launchctl.write_text(
@@ -176,7 +175,7 @@ def test_generic_installer_renders_every_supported_service_without_launchctl(
     env = os.environ | {
         "HOME": str(home),
         "CHRONOVISOR_UVX": str(uvx),
-        "CHRONOVISOR_PYTHON": str(python),
+        "CHRONOVISOR_PYTHON": sys.executable,
         "CHRONOVISOR_LAUNCHCTL": str(launchctl),
         "CHRONOVISOR_LAUNCHD_LABEL_PREFIX": "org.example.chronovisor-",
         "CHRONOVISOR_TEST_LAUNCHCTL_LOG": str(launchctl_log),
