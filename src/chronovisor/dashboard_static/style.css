@@ -1475,13 +1475,13 @@ canvas {
 }
 
 .decision-role .decision-model {
-  flex: 0 1 auto;
+  flex: 0 0 100%;
   min-width: 0;
 }
 
 .decision-role .decision-think {
   flex: 0 0 auto;
-  margin-left: 6px;
+  margin-left: 0;
   padding: 1px 5px;
   border-radius: 3px;
   font-family: var(--font-mono);

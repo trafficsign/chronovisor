@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import socket
+import subprocess
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta
@@ -1599,7 +1600,7 @@ def test_dashboard_static_labels_routine_review_as_local_consensus() -> None:
     assert "${semanticDeferred} semantic · ${operationalDeferred} operational" in app
     assert "grid-template-columns: repeat(5, minmax(0, 1fr));" in style
     assert "No synthetic progress" in app
-    assert "think: targetLane.think" in app
+    assert "lane.think = targetLane.think;" in app
     assert ".decision-trace-panel" in style
     assert ".processing-lane.active" in style
     assert "processing-electric-pulse" in style
@@ -1678,7 +1679,81 @@ def test_dashboard_static_layout_aligns_peer_panels_and_contains_event_badges() 
         ".decision-role .decision-think {\n"
         "  display: inline-flex;"
     ) in style
-    assert ".decision-role .decision-think {\n  flex: 0 0 auto;" in style
+    assert (
+        ".decision-role .decision-model {\n"
+        "  flex: 0 0 100%;\n"
+        "  min-width: 0;"
+    ) in style
+    assert (
+        ".decision-role .decision-think {\n"
+        "  flex: 0 0 auto;\n"
+        "  margin-left: 0;"
+    ) in style
+
+
+def test_decision_trace_replay_reveals_think_only_after_generation() -> None:
+    renderer = (dashboard.STATIC_DIR / "app-renderer.js").read_text(encoding="utf-8")
+    scenario = f"""
+const vm = require("node:vm");
+const sandbox = {{ window: {{ matchMedia: () => ({{ matches: false }}) }} }};
+vm.createContext(sandbox);
+vm.runInContext(
+  {json.dumps(renderer)}
+    + "\\nthis.__test = {{ decisionTraceBlank, applyDecisionTransition }};",
+  sandbox,
+);
+const target = {{
+  request_sha256: "request",
+  task_role: "ingest_review",
+  overall: [
+    {{ key: "dispatch", status: "done" }},
+    {{ key: "generate", status: "done" }},
+    {{ key: "validate", status: "done" }},
+    {{ key: "quorum", status: "done" }},
+  ],
+  lanes: [
+    {{
+      key: "primary",
+      label: "Primary",
+      model: "primary:model",
+      think: "medium",
+      steps: ["trigger", "load", "context", "generate", "validate", "vote"].map(
+        (key) => ({{ key, status: "done" }}),
+      ),
+    }},
+    {{ key: "challenger", think: "low", steps: [] }},
+    {{ key: "tie_break", think: "off", steps: [] }},
+  ],
+}};
+const blank = sandbox.__test.decisionTraceBlank(target);
+const transition = (phase, kind = "phase") => sandbox.__test.applyDecisionTransition(
+  blank,
+  target,
+  {{ lane: "primary", phase, kind, status: "done", overall_key: "generate" }},
+);
+process.stdout.write(JSON.stringify({{
+  blank: blank.lanes.map((lane) => lane.think),
+  early: ["trigger", "load", "context"].map((phase) => transition(phase).lanes[0].think),
+  observed: ["generate", "repair", "validate", "vote"].map(
+    (phase) => transition(phase).lanes[0].think,
+  ),
+  session: transition("vote", "session").lanes[0],
+}}));
+"""
+
+    completed = subprocess.run(
+        ["node", "-e", scenario],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    result = json.loads(completed.stdout)
+
+    assert result["blank"] == ["—", "—", "—"]
+    assert result["early"] == ["—", "—", "—"]
+    assert result["observed"] == ["medium", "medium", "medium", "medium"]
+    assert result["session"]["think"] == "medium"
+    assert result["session"]["state"] == "done"
 
 
 def test_build_snapshot_combines_runtime_and_queue(tmp_path: Path, monkeypatch) -> None:

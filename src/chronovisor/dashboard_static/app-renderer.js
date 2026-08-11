@@ -450,6 +450,7 @@ function decisionTraceBlank(target) {
     result: "Waiting",
     detail: "Not started",
     phase: null,
+    think: "—",
     steps: (lane.steps || []).map((step) => ({ ...step, status: "pending" })),
   }));
   return trace;
@@ -481,9 +482,14 @@ function applyDecisionTransition(current, target, event) {
   Object.assign(lane, {
     label: targetLane.label,
     model: targetLane.model,
-    think: targetLane.think,
     phase: event.phase,
   });
+  if (
+    event.kind === "session"
+    || ["generate", "repair", "validate", "vote"].includes(event.phase)
+  ) {
+    lane.think = targetLane.think;
+  }
 
   if (event.kind === "session") {
     const failed = event.status === "error";
