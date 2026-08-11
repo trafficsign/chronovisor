@@ -447,6 +447,130 @@ def test_independent_observer_allows_only_sealed_final_layout(
             pass
 
 
+def test_independent_observer_allows_finalized_receipt_only_migration(
+    tmp_path: Path,
+) -> None:
+    observer_path = (
+        Path(__file__).parents[1] / "src" / "chronovisor" / "deadman_observer.py"
+    )
+    spec = importlib.util.spec_from_file_location(
+        "deadman_observer_final_receipt", observer_path
+    )
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    from chronovisor.core.store import RuntimeContext, init_chronovisor
+
+    root = tmp_path / "wiki"
+    init_chronovisor(RuntimeContext(root))
+    (root / "runtime" / "bootstrap-layout.json").unlink()
+    workspace = root / "runtime" / "migrations" / "run-001"
+    workspace.mkdir(parents=True)
+    activity_path = root / "runtime" / "activity.jsonl"
+    activity_prefix = activity_path.read_bytes()
+    activity_suffix = b"receipt-bound suffix\n"
+    activity_path.write_bytes(activity_prefix + activity_suffix)
+    status_mapping = {
+        "missing": "stable",
+        "active": "stable",
+        "draft": "draft",
+        "stable": "stable",
+        "deprecated": "deprecated",
+        "archived": "deprecated",
+    }
+    receipt = module.seal(
+        {
+            "schema": "chronovisor.okf-migration-receipt.v2",
+            "version": 2,
+            "run_id": "run-001",
+            "state": "finalized-v2",
+            "manifest_sha256": "0" * 64,
+            "before_manifest_sha256": "1" * 64,
+            "after_manifest_sha256": "2" * 64,
+            "transaction_version": 1,
+            "manifest_schema": "chronovisor.okf-migration-manifest.v1",
+            "okf_version": "0.2",
+            "status_mapping_cohorts": [
+                {
+                    "scope": scope,
+                    "input_status": input_status,
+                    "output_status": output_status,
+                    "count": 0,
+                    "identity_set_sha256": "5" * 64,
+                }
+                for scope in ("pages", "system")
+                for input_status, output_status in status_mapping.items()
+            ],
+            "rollback_recutover": {
+                "rollback": "complete",
+                "recutover": "complete",
+            },
+            "rebuild_proof": {
+                "derived_generation": "generation-1",
+                "sha256": "6" * 64,
+                "stable_page_count": 0,
+            },
+            "activity_prefix": {
+                "length": len(activity_prefix),
+                "sha256": hashlib.sha256(activity_prefix).hexdigest(),
+                "event_ids_sha256": "8" * 64,
+            },
+            "activity_suffix": {
+                "length": len(activity_suffix),
+                "sha256": hashlib.sha256(activity_suffix).hexdigest(),
+            },
+            "pages_log_sha256": hashlib.sha256(
+                (root / "pages" / "log.md").read_bytes()
+            ).hexdigest(),
+            "system_schema_sha256": hashlib.sha256(
+                (root / "system" / "schema.md").read_bytes()
+            ).hexdigest(),
+        }
+    )
+    receipt_path = workspace / "receipt.json"
+    receipt_path.write_bytes(module.canonical_bytes(receipt))
+
+    with module.writer_gate(root):
+        pass
+
+    for name in ("index.md", "log.md", "schema.md"):
+        (root / name).write_text("legacy\n", encoding="utf-8")
+    with pytest.raises(module.WriterGateBlocked):
+        with module.writer_gate(root):
+            pass
+    for name in ("index.md", "log.md", "schema.md"):
+        (root / name).unlink()
+
+    with activity_path.open("ab") as stream:
+        stream.write(b"ordinary post-receipt activity\n")
+    with module.writer_gate(root):
+        pass
+    activity_path.write_bytes(activity_prefix + activity_suffix)
+
+    (workspace / "journal.json").write_text("{}\n", encoding="utf-8")
+    with pytest.raises(module.WriterGateBlocked):
+        with module.writer_gate(root):
+            pass
+    (workspace / "journal.json").unlink()
+
+    activity_path.write_bytes(activity_prefix + b"tampered suffix\n")
+    with pytest.raises(module.WriterGateBlocked):
+        with module.writer_gate(root):
+            pass
+
+    activity_path.write_bytes(activity_prefix + activity_suffix)
+    receipt["state"] = "recutover-in-progress"
+    receipt_path.write_bytes(module.canonical_bytes(receipt))
+    with pytest.raises(module.WriterGateBlocked):
+        with module.writer_gate(root):
+            pass
+
+    receipt_path.write_bytes(module.canonical_bytes(module.seal(receipt)))
+    with pytest.raises(module.WriterGateBlocked):
+        with module.writer_gate(root):
+            pass
+
+
 def test_independent_observer_main_rejects_symlink_root_without_mutation(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

@@ -14,6 +14,7 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 import stat
 import subprocess
 import tempfile
@@ -34,6 +35,26 @@ _LIVE_LAYOUT_LOG_SHA256 = "479d37f9f41843b9847e18adee9dcce1fc26cb8862341f94b996c
 _LIVE_LAYOUT_SCHEMA_SHA256 = "0cc24c0be93ed3eef4ab534ccb95e77fc5e377529255ed07a52c4c509abf6a7b"
 _EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
 _INDEX_PREFIX = b"---\nokf_version: '0.2'\n---\n# Chronovisor pages\n"
+_FINAL_RECEIPT_FIELDS = {
+    "schema",
+    "version",
+    "run_id",
+    "state",
+    "manifest_sha256",
+    "before_manifest_sha256",
+    "after_manifest_sha256",
+    "transaction_version",
+    "manifest_schema",
+    "okf_version",
+    "status_mapping_cohorts",
+    "rollback_recutover",
+    "rebuild_proof",
+    "activity_prefix",
+    "activity_suffix",
+    "pages_log_sha256",
+    "system_schema_sha256",
+    "seal_sha256",
+}
 
 
 class WriterGateBlocked(RuntimeError):
@@ -91,6 +112,35 @@ def _require_regular(directory_fd: int, name: str, *, limit: int) -> None:
     try:
         snapshot = os.fstat(descriptor)
         if not stat.S_ISREG(snapshot.st_mode) or snapshot.st_size > limit:
+            raise WriterGateBlocked
+    finally:
+        os.close(descriptor)
+
+
+def _require_segment(
+    directory_fd: int, name: str, *, offset: int, length: int, sha256: str
+) -> None:
+    flags = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    descriptor = os.open(name, flags, dir_fd=directory_fd)
+    try:
+        snapshot = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(snapshot.st_mode)
+            or snapshot.st_size < offset + length
+            or offset < 0
+            or length < 0
+        ):
+            raise WriterGateBlocked
+        os.lseek(descriptor, offset, os.SEEK_SET)
+        digest = hashlib.sha256()
+        remaining = length
+        while remaining:
+            chunk = os.read(descriptor, min(64 * 1024, remaining))
+            if not chunk:
+                raise WriterGateBlocked
+            digest.update(chunk)
+            remaining -= len(chunk)
+        if digest.hexdigest() != sha256:
             raise WriterGateBlocked
     finally:
         os.close(descriptor)
@@ -159,6 +209,194 @@ def _require_live_layout_proof(
         raise WriterGateBlocked
 
 
+def _require_finalized_migration_receipt(
+    runtime_fd: int, directory_flags: int
+) -> dict[str, Any]:
+    migrations_fd = workspace_fd = -1
+    try:
+        migrations_fd = os.open("migrations", directory_flags, dir_fd=runtime_fd)
+        entries = _entries(migrations_fd)
+        if len(entries) != 1:
+            raise WriterGateBlocked
+        run_id, mode = next(iter(entries.items()))
+        if (
+            not stat.S_ISDIR(mode)
+            or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", run_id) is None
+        ):
+            raise WriterGateBlocked
+        workspace_fd = os.open(run_id, directory_flags, dir_fd=migrations_fd)
+        workspace_entries = _entries(workspace_fd)
+        if set(workspace_entries) != {"receipt.json"} or not stat.S_ISREG(
+            workspace_entries["receipt.json"]
+        ):
+            raise WriterGateBlocked
+        raw = _read_regular(workspace_fd, "receipt.json", limit=64 * 1024)
+        receipt = verify(json.loads(raw))
+        if raw != canonical_bytes(receipt):
+            raise WriterGateBlocked
+        status_mapping = {
+            "missing": "stable",
+            "active": "stable",
+            "draft": "draft",
+            "stable": "stable",
+            "deprecated": "deprecated",
+            "archived": "deprecated",
+        }
+        expected_cohorts = [
+            (scope, input_status, output_status)
+            for scope in ("pages", "system")
+            for input_status, output_status in status_mapping.items()
+        ]
+        cohorts = receipt.get("status_mapping_cohorts")
+        rebuild = receipt.get("rebuild_proof")
+        if (
+            set(receipt) != _FINAL_RECEIPT_FIELDS
+            or receipt.get("schema") != "chronovisor.okf-migration-receipt.v2"
+            or receipt.get("version") != 2
+            or receipt.get("run_id") != run_id
+            or receipt.get("state") != "finalized-v2"
+            or receipt.get("transaction_version") != 1
+            or receipt.get("manifest_schema")
+            != "chronovisor.okf-migration-manifest.v1"
+            or receipt.get("okf_version") != "0.2"
+            or receipt.get("rollback_recutover")
+            != {"rollback": "complete", "recutover": "complete"}
+            or not isinstance(cohorts, list)
+            or len(cohorts) != len(expected_cohorts)
+            or not isinstance(rebuild, dict)
+            or set(rebuild) != {"derived_generation", "sha256", "stable_page_count"}
+        ):
+            raise WriterGateBlocked
+        sha_fields = (
+            "manifest_sha256",
+            "before_manifest_sha256",
+            "after_manifest_sha256",
+            "pages_log_sha256",
+            "system_schema_sha256",
+        )
+        if any(
+            not isinstance(receipt.get(field), str)
+            or re.fullmatch(r"[0-9a-f]{64}", receipt[field]) is None
+            for field in sha_fields
+        ):
+            raise WriterGateBlocked
+        for index, cohort in enumerate(cohorts):
+            expected = expected_cohorts[index]
+            if (
+                not isinstance(cohort, dict)
+                or set(cohort)
+                != {
+                    "scope",
+                    "input_status",
+                    "output_status",
+                    "count",
+                    "identity_set_sha256",
+                }
+                or (
+                    cohort.get("scope"),
+                    cohort.get("input_status"),
+                    cohort.get("output_status"),
+                )
+                != expected
+                or not isinstance(cohort.get("count"), int)
+                or isinstance(cohort.get("count"), bool)
+                or cohort["count"] < 0
+                or not isinstance(cohort.get("identity_set_sha256"), str)
+                or re.fullmatch(r"[0-9a-f]{64}", cohort["identity_set_sha256"])
+                is None
+            ):
+                raise WriterGateBlocked
+        generation = rebuild.get("derived_generation")
+        stable_page_count = rebuild.get("stable_page_count")
+        if (
+            not isinstance(generation, str)
+            or re.fullmatch(r"[a-z0-9-]{1,128}", generation) is None
+            or not isinstance(rebuild.get("sha256"), str)
+            or re.fullmatch(r"[0-9a-f]{64}", rebuild["sha256"]) is None
+            or not isinstance(stable_page_count, int)
+            or isinstance(stable_page_count, bool)
+            or stable_page_count < 0
+        ):
+            raise WriterGateBlocked
+        for field, with_events in (
+            ("activity_prefix", True),
+            ("activity_suffix", False),
+        ):
+            identity = receipt.get(field)
+            expected_fields = {"length", "sha256"}
+            if with_events:
+                expected_fields.add("event_ids_sha256")
+            if (
+                not isinstance(identity, dict)
+                or set(identity) != expected_fields
+                or not isinstance(identity.get("length"), int)
+                or isinstance(identity.get("length"), bool)
+                or identity["length"] < 0
+                or not isinstance(identity.get("sha256"), str)
+                or re.fullmatch(r"[0-9a-f]{64}", identity["sha256"]) is None
+                or (
+                    with_events
+                    and (
+                        not isinstance(identity.get("event_ids_sha256"), str)
+                        or re.fullmatch(
+                            r"[0-9a-f]{64}", identity["event_ids_sha256"]
+                        )
+                        is None
+                    )
+                )
+            ):
+                raise WriterGateBlocked
+        return receipt
+    except (TypeError, UnicodeError, ValueError):
+        raise WriterGateBlocked from None
+    finally:
+        if workspace_fd >= 0:
+            os.close(workspace_fd)
+        if migrations_fd >= 0:
+            os.close(migrations_fd)
+
+
+def _require_final_receipt_layout(
+    root_fd: int,
+    runtime_fd: int,
+    directory_flags: int,
+    receipt: dict[str, Any],
+) -> None:
+    pages_fd = os.open("pages", directory_flags, dir_fd=root_fd)
+    system_fd = os.open("system", directory_flags, dir_fd=root_fd)
+    try:
+        _read_regular_prefix(
+            pages_fd, "index.md", _INDEX_PREFIX, limit=16 * 1024 * 1024
+        )
+        log = _read_regular(pages_fd, "log.md", limit=4096)
+        schema = _read_regular(system_fd, "schema.md", limit=64 * 1024)
+        if (
+            hashlib.sha256(log).hexdigest() != receipt["pages_log_sha256"]
+            or hashlib.sha256(schema).hexdigest()
+            != receipt["system_schema_sha256"]
+        ):
+            raise WriterGateBlocked
+    finally:
+        os.close(system_fd)
+        os.close(pages_fd)
+    prefix = receipt["activity_prefix"]
+    suffix = receipt["activity_suffix"]
+    _require_segment(
+        runtime_fd,
+        "activity.jsonl",
+        offset=0,
+        length=prefix["length"],
+        sha256=prefix["sha256"],
+    )
+    _require_segment(
+        runtime_fd,
+        "activity.jsonl",
+        offset=prefix["length"],
+        length=suffix["length"],
+        sha256=suffix["sha256"],
+    )
+
+
 @contextlib.contextmanager
 def writer_gate(chronovisor_root: Path):
     """Pin the root parent shared while rejecting non-legacy/migrating roots."""
@@ -205,10 +443,17 @@ def writer_gate(chronovisor_root: Path):
                     os.close(child_fd)
             runtime_fd = os.open("runtime", flags, dir_fd=root_fd)
             runtime_entries = _entries(runtime_fd)
+            final_receipt = None
             if "migrations" in runtime_entries:
-                raise WriterGateBlocked
-            if not all(legacy_reserved):
-                if any(legacy_reserved):
+                final_receipt = _require_finalized_migration_receipt(
+                    runtime_fd, flags
+                )
+            if final_receipt is not None or not all(legacy_reserved):
+                if final_receipt is None and any(legacy_reserved):
+                    raise WriterGateBlocked
+                if final_receipt is not None and any(
+                    name in entries for name in ("index.md", "log.md", "schema.md")
+                ):
                     raise WriterGateBlocked
                 if not stat.S_ISREG(runtime_entries.get("activity.jsonl", 0)):
                     raise WriterGateBlocked
@@ -228,7 +473,14 @@ def writer_gate(chronovisor_root: Path):
                             raise WriterGateBlocked
                     finally:
                         os.close(directory_fd)
-                _require_live_layout_proof(root_fd, runtime_fd, flags)
+                if final_receipt is None:
+                    _require_live_layout_proof(root_fd, runtime_fd, flags)
+                else:
+                    if not stat.S_ISDIR(entries.get("raw", 0)):
+                        raise WriterGateBlocked
+                    _require_final_receipt_layout(
+                        root_fd, runtime_fd, flags, final_receipt
+                    )
             entered = True
             yield
         finally:
