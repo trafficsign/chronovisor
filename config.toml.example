@@ -42,7 +42,7 @@ queue_size = 8
 # Production voters are selected only by the fixed classification roles below.
 # These model fields remain compatibility defaults for injected/offline routers.
 primary_model = "maxwell1500/ornith-35b:Q5_K_M"
-challenger_model = "gpt-oss:20b"
+challenger_model = "muse-glimmer:30b-mxfp8-dflash"
 tie_break_model = "gemma4:26b"
 
 [research]
@@ -221,7 +221,7 @@ model = "maxwell1500/ornith-35b:Q5_K_M"
 [llm.roles."classification.challenger"]
 capability = "generation"
 provider = "local"
-model = "gpt-oss:20b"
+model = "muse-glimmer:30b-mxfp8-dflash"
 
 [llm.roles."classification.tie_break"]
 capability = "generation"

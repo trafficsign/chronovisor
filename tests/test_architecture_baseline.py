@@ -1862,6 +1862,7 @@ W6R_RETIRED_INGEST_REPAIR_SITE_IDS = (
 )
 W6S_RETIRED_DASHBOARD_CONVERGENCE_SITE_IDS = (
     "arch:91ce77dd9be4b259a02781d7a805a921af3387e9964b4bcf8dde122ad4719865",
+    "arch:9cf6b001743dc3ac1af756cb251f2060513fb37c2c2ae054bd4a1e39bde4f744",
     "arch:b56756c15d1552016f66da541d31553f0e4bc68b9a303b3e69712c7b708543ce",
     "arch:e27a04133d0dd8bfd0876aac480793907b9b5586549b930c732867ff57764ec5",
 )
@@ -2559,7 +2560,7 @@ def test_baseline_labels_repository_contract_hash_semantics(
     schema = hashes["production_schema_manifest"]
     signature = hashes["production_signature_manifest"]
     assert authority["lane_contract_case_manifest_sha256"] == (
-        "fb2c30aae39ea9fd100edd0610e1439af3ee6bc5d9cafac06ee961151660cae3"
+        "ddf8593939a8b4920c193d0c5cda97bd7e296bb89978bdf78dd1c1dc8bd9b168"
     )
     assert schema["canonical_mapping_sha256"]["sha256"] == (
         "938aceee8b448a3d1cee0403d15a2de847eedb19a99d1a94663ef23b0f37f91b"
@@ -2888,7 +2889,7 @@ def test_current_exception_ledger_seed_and_schema_inventory_are_exact(
     assert detected_ids == ledger_ids == set(seed["exception_semantic_ids"]["active"])
     _assert_exact_retirement_history(architecture, seed)
     assert len(edge_rows) == current["worktree_architecture"]["edge_count"] == 44
-    assert sum(len(row["sites"]) for row in edge_rows) == len(raw_cross_sites) == 1416
+    assert sum(len(row["sites"]) for row in edge_rows) == len(raw_cross_sites) == 1415
     assert {
         field: counts[field]
         for field in (
@@ -2901,7 +2902,7 @@ def test_current_exception_ledger_seed_and_schema_inventory_are_exact(
         )
         } == {
             "exceptions": 44,
-            "cross_domain_sites": 1416,
+            "cross_domain_sites": 1415,
         "production_to_lab_edges": 0,
         "production_to_lab_static_sites": 0,
         "production_to_lab_dynamic_sites": 0,

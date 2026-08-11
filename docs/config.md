@@ -204,7 +204,7 @@ required_capabilities = ["structured_output"]
 # uses a separate exact-bucket mode. Production model selection comes only from
 # llm.roles.classification.primary/challenger/tie_break below.
 primary_model = "maxwell1500/ornith-35b:Q5_K_M"
-challenger_model = "gpt-oss:20b"
+challenger_model = "muse-glimmer:30b-mxfp8-dflash"
 tie_break_model = "gemma4:26b"
 primary_keep_alive = "20m"
 challenger_keep_alive = "20m"

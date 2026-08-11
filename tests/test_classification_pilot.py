@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
 from chronovisor.lab import classification_pilot
 from chronovisor.lab.classification_pilot import (
+    PILOT_ENGINE_VERSION,
     AuthoritativeCandidateIndex,
     PilotRunner,
     prepare_diagnostic_set,
+    run_pilot,
     score_prediction,
     summarize_cases,
 )
@@ -282,7 +285,7 @@ def test_model_stage_retries_transient_empty_json(
     assert result["payload"] == {"decision": {"ok": True}}
 
 
-def test_gpt_oss_model_stage_uses_low_reasoning(
+def test_all_model_stages_use_medium_reasoning(
     tmp_path: Path, monkeypatch
 ) -> None:
     calls: list[dict[str, object]] = []
@@ -297,15 +300,113 @@ def test_gpt_oss_model_stage_uses_low_reasoning(
     )
     runner = PilotRunner(package=_package(), cache_dir=tmp_path)
 
-    runner._cached_model_call(
-        model="gpt-oss:20b",
-        keep_alive="0",
-        prompt={"page": "test"},
-        schema={"type": "object"},
-        stage="test-stage",
+    for model in ("ornith:35b", "muse-glimmer:30b", "gemma4:26b"):
+        runner._cached_model_call(
+            model=model,
+            keep_alive="0",
+            prompt={"page": "test"},
+            schema={"type": "object"},
+            stage="test-stage",
+        )
+
+    assert [call["think"] for call in calls] == ["medium", "medium", "medium"]
+
+
+def test_old_stage_cache_is_not_reused(tmp_path: Path, monkeypatch) -> None:
+    calls = 0
+    model = "muse-glimmer:30b"
+    prompt = {"page": "test"}
+    schema = {"type": "object"}
+    stage = "test-stage"
+    old_digest = hashlib.sha256(
+        json.dumps(
+            {
+                "engine_version": 1,
+                "model": model,
+                "prompt": prompt,
+                "schema": schema,
+                "stage": stage,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
+    (tmp_path / f"{old_digest}.json").write_text(
+        json.dumps({"cached": False, "payload": {"stale": True}}),
+        encoding="utf-8",
     )
 
-    assert calls[0]["think"] == "low"
+    def fake_chat(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return '{"decision":{"ok":true}}'
+
+    monkeypatch.setattr(classification_pilot.ollama, "chat", fake_chat)
+    runner = PilotRunner(package=_package(), cache_dir=tmp_path)
+
+    result = runner._cached_model_call(
+        model=model,
+        keep_alive="0",
+        prompt=prompt,
+        schema=schema,
+        stage=stage,
+    )
+
+    assert calls == 1
+    assert result["cached"] is False
+    assert len(list(tmp_path.glob("*.json"))) == 2
+
+
+def test_old_pilot_output_does_not_reuse_cases(tmp_path: Path, monkeypatch) -> None:
+    input_path = tmp_path / "diagnostic.jsonl"
+    output_path = tmp_path / "pilot.json"
+    input_path.write_text(
+        json.dumps(
+            {
+                "diagnostic_schema": classification_pilot.DIAGNOSTIC_SCHEMA,
+                "uid": "uid-1",
+                "page_id": "page-1",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    output_path.write_text(
+        json.dumps(
+            {
+                "engine_version": PILOT_ENGINE_VERSION - 1,
+                "cases": [{"uid": "uid-1", "stale": True}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    calls = 0
+
+    class FakeRunner:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        def run_case(self, row):
+            nonlocal calls
+            calls += 1
+            return {
+                "uid": row["uid"],
+                "reference": {"expected_disposition": "hold"},
+                "candidate_retrieval": {"notations": []},
+                "variants": {
+                    "fresh": {"status": "held", "primary_notation": ""}
+                },
+            }
+
+    monkeypatch.setattr(classification_pilot, "load_udc_package", lambda _root: _package())
+    monkeypatch.setattr(classification_pilot, "PilotRunner", FakeRunner)
+
+    result = run_pilot(input_path=input_path, output_path=output_path, root=tmp_path)
+
+    assert calls == 1
+    assert result["engine_version"] == PILOT_ENGINE_VERSION
+    assert result["cases"][0]["variants"]["fresh"]["status"] == "held"
+    assert "stale" not in result["cases"][0]
 
 
 def test_diagnostic_leader_is_not_declared_winner_below_quality_floor() -> None:

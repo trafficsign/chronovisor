@@ -913,7 +913,8 @@ line so retries do not replay already-enqueued correction turns.
 
 The local router classifies page error, outdated claim, wrong retrieval,
 assistant misquote, ambiguity, unattributed, or no correction. Ornith 35B and
-GPT-OSS 20B must agree, or Gemma 4 26B supplies a tie-break vote. A locally
+Muse Glimmer 30B (`muse-glimmer:30b-mxfp8-dflash`) must agree, or Gemma 4 26B
+supplies a tie-break vote. A locally
 confirmed wrong retrieval writes `kind =
 "page_ignored"` with only its explicit `negative_pages` subset; the remaining
 pages from the recall decision are not demoted. Non-page classifications do not

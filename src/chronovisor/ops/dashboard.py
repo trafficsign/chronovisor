@@ -13,6 +13,7 @@ import re
 import subprocess
 import threading
 import time
+from collections.abc import Mapping
 from datetime import date, datetime, timedelta
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -1994,6 +1995,7 @@ def _local_consensus_activities() -> list[dict[str, Any]]:
                     "model": row.get("model"),
                     "phase": row.get("phase"),
                     "attempt": row.get("attempt"),
+                    "think": row.get("think"),
                     "started_at": row.get("started_at"),
                     "updated_at": row.get("updated_at"),
                     "pid": pid,
@@ -2818,18 +2820,15 @@ def _decision_trace_context_tokens() -> int | None:
         return None
 
 
-def _decision_trace_think_label(model: str, num_ctx: int | None) -> str:
-    if not model or model == "not configured":
+def _decision_trace_think_label(row: Mapping[str, Any] | None) -> str:
+    if row is None or "think" not in row:
         return "—"
-    try:
-        from chronovisor.decision.local_structured import structured_think_mode
-
-        mode = structured_think_mode(model, num_ctx=num_ctx or 8_192)
-        if mode is False:
-            return "off"
-        return str(mode)
-    except Exception:
+    mode = row.get("think")
+    if mode is False:
+        return "off"
+    if not isinstance(mode, str) or not mode:
         return "—"
+    return mode
 
 
 def _decision_trace_steps(
@@ -3149,7 +3148,6 @@ def _decision_trace_snapshot(
         decision and decision.get("kind") == "decision_artifact_replay"
     )
     lanes: list[dict[str, Any]] = []
-    trace_num_ctx = _decision_trace_context_tokens()
     lane_labels = {
         "primary": "Primary",
         "challenger": "Challenger",
@@ -3209,12 +3207,18 @@ def _decision_trace_snapshot(
                 "Valid vote",
                 "Recovered from decision audit",
             )
+        observed = active if active is not None else session
+        think = (
+            "—"
+            if artifact_replay or state in {"pending", "skipped"}
+            else _decision_trace_think_label(observed)
+        )
         lanes.append(
             {
                 "key": lane,
                 "label": lane_labels[lane],
                 "model": models[lane],
-                "think": _decision_trace_think_label(models[lane], trace_num_ctx),
+                "think": think,
                 "state": state,
                 "result": result,
                 "detail": detail,
@@ -3382,6 +3386,7 @@ def _local_consensus_snapshot(limit: int = 40) -> dict[str, Any]:
                         "request_sha256",
                         "role",
                         "model",
+                        "think",
                         "ok",
                         "first_pass_valid",
                         "repaired",

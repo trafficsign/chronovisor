@@ -1427,6 +1427,16 @@ canvas {
   min-width: 0;
 }
 
+.decision-role {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.decision-role strong {
+  flex: 0 0 100%;
+}
+
 .decision-role strong,
 .decision-role span,
 .decision-lane-result strong,
@@ -1458,9 +1468,20 @@ canvas {
   font-size: 10.5px;
 }
 
-.decision-think {
-  display: inline-block;
-  margin-top: 2px;
+.decision-role .decision-model,
+.decision-role .decision-think {
+  display: inline-flex;
+  margin-top: 3px;
+}
+
+.decision-role .decision-model {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+.decision-role .decision-think {
+  flex: 0 0 auto;
+  margin-left: 6px;
   padding: 1px 5px;
   border-radius: 3px;
   font-family: var(--font-mono);

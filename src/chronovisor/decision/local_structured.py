@@ -39,7 +39,7 @@ SAFE_RUNTIME_ROLE_RE = re.compile(r"^[a-z][a-z0-9._-]{0,127}$")
 LOCAL_ACTIVITY_PHASES = frozenset(
     {"trigger", "load", "context", "generate", "repair", "validate", "vote"}
 )
-STRUCTURED_GENERATION_POLICY_VERSION = 3
+STRUCTURED_GENERATION_POLICY_VERSION = 4
 STRUCTURED_GENERATION_TEMPERATURE = 0
 STRUCTURED_GENERATION_SEED = 0
 _DEFAULT_STRUCTURED_MEMORY_RESERVE_GIB = 16
@@ -98,15 +98,7 @@ def structured_generation_policy() -> dict[str, Any]:
         "version": STRUCTURED_GENERATION_POLICY_VERSION,
         "temperature": STRUCTURED_GENERATION_TEMPERATURE,
         "seed": STRUCTURED_GENERATION_SEED,
-        "think": {
-            "default": "medium",
-            "model_family_overrides": {
-                "gpt-oss": {
-                    "default": "low",
-                    "num_ctx_at_least": {"65536": "low"},
-                }
-            },
-        },
+        "think": {"default": "medium"},
         "stream": False,
         "format": "json_schema",
     }
@@ -115,9 +107,7 @@ def structured_generation_policy() -> dict[str, Any]:
 def structured_think_mode(model: str, *, num_ctx: int) -> bool | str:
     """Select the explicit Ollama reasoning mode sealed by the policy."""
 
-    family = model.strip().casefold().rsplit("/", 1)[-1].split(":", 1)[0]
-    if family == "gpt-oss":
-        return "low" if num_ctx >= 65_536 else "low"
+    del model, num_ctx
     return "medium"
 
 
@@ -1110,14 +1100,20 @@ class LocalConsensusAuditStore:
         request_sha256: str,
         role: str,
         model: str,
-    ) -> Iterator[Callable[[str, int | None], None]]:
+    ) -> Iterator[
+        Callable[[str, int | None, bool | str | None], None]
+    ]:
         """Publish a redacted, phase-aware marker while a session executes."""
 
         path: Path | None = None
         record: dict[str, Any] = {}
         last_transition: tuple[str, int] | None = None
 
-        def update(phase: str, attempt: int | None = None) -> None:
+        def update(
+            phase: str,
+            attempt: int | None = None,
+            think: bool | str | None = None,
+        ) -> None:
             nonlocal last_transition
             if path is None or phase not in LOCAL_ACTIVITY_PHASES:
                 return
@@ -1137,6 +1133,8 @@ class LocalConsensusAuditStore:
                 record["phase"] = phase
                 record["updated_at"] = _utc_timestamp()
                 record["attempt"] = normalized_attempt
+                if think is not None:
+                    record["think"] = think
                 self._atomic_write(
                     path,
                     json.dumps(
@@ -1192,20 +1190,22 @@ class LocalConsensusAuditStore:
         role: str,
         model: str,
         result: LocalStructuredResult,
+        think: bool | str | None = None,
     ) -> None:
-        self.append(
-            {
-                "kind": "session",
-                "request_sha256": request_sha256,
-                "role": role,
-                "model": model,
-                "ok": result.ok,
-                "first_pass_valid": result.first_pass_valid,
-                "repaired": bool(result.ok and result.repair_turns > 0),
-                "repair_turns": result.repair_turns,
-                "failure_class": result.failure_class,
-            }
-        )
+        record = {
+            "kind": "session",
+            "request_sha256": request_sha256,
+            "role": role,
+            "model": model,
+            "ok": result.ok,
+            "first_pass_valid": result.first_pass_valid,
+            "repaired": bool(result.ok and result.repair_turns > 0),
+            "repair_turns": result.repair_turns,
+            "failure_class": result.failure_class,
+        }
+        if think is not None:
+            record["think"] = think
+        self.append(record)
 
 
 def _pointer_join(pointer: str, token: str | int) -> str:
@@ -2076,7 +2076,14 @@ class LocalStructuredSession:
         self,
         request: ChatRequest,
         attempts: Sequence[StructuredAttempt],
+        request_observer: Callable[[ChatRequest, str, int], None] | None = None,
+        *,
+        phase: str,
+        attempt: int,
     ) -> tuple[ChatTransportOutput, LocalStructuredResult | None]:
+        if request_observer is not None:
+            with suppress(Exception):
+                request_observer(request, phase, attempt)
         try:
             return self.transport(request), None
         except ollama.OutputTooLargeError as exc:
@@ -2139,7 +2146,11 @@ class LocalStructuredSession:
         format_schema: Mapping[str, Any] | None = None,
         value_validator: Callable[[Any], Sequence[ValidationIssue]] | None = None,
         num_ctx: int | None = None,
-        activity_update: Callable[[str, int | None], None] | None = None,
+        activity_update: Callable[
+            [str, int | None, bool | str | None], None
+        ]
+        | None = None,
+        request_observer: Callable[[ChatRequest, str, int], None] | None = None,
     ) -> LocalStructuredResult:
         if activity_update is not None:
             activity_update("context", 0)
@@ -2193,10 +2204,12 @@ class LocalStructuredSession:
                 seed=STRUCTURED_GENERATION_SEED,
                 think=structured_think_mode(self.model, num_ctx=effective_num_ctx),
             )
-            if activity_update is not None:
-                activity_update("generate" if index == 0 else "repair", index)
             transport_output, transport_failure = self._call_transport(
-                request, attempts
+                request,
+                attempts,
+                request_observer,
+                phase="generate" if index == 0 else "repair",
+                attempt=index,
             )
             if transport_failure is not None:
                 return transport_failure
@@ -2486,11 +2499,26 @@ class LocalStructuredSession:
             role=self.role,
             model=self.model or self.runtime_role,
         ) as activity_update:
+            observed_request: dict[str, Any] = {}
+
+            def _observe_request(
+                request: ChatRequest,
+                phase: str,
+                attempt: int,
+            ) -> None:
+                observed_request["think"] = request.think
+                activity_update(
+                    phase,
+                    attempt,
+                    request.think,
+                )
+
             run_kwargs = {
                 "system": system,
                 "format_schema": format_schema_copy,
                 "value_validator": value_validator,
                 "activity_update": activity_update,
+                "request_observer": _observe_request,
             }
             if format_schema_error:
                 result = self._failure("schema_invalid", format_schema_error)
@@ -2553,6 +2581,7 @@ class LocalStructuredSession:
                     role=self.role,
                     model=self.model or self.runtime_role,
                     result=result,
+                    think=observed_request.get("think"),
                 )
             except Exception:
                 # Observability must never turn a valid local decision into a failure.

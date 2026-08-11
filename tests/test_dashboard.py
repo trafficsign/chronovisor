@@ -328,6 +328,7 @@ def test_local_consensus_snapshot_removes_dead_markers_and_exposes_redacted_metr
         "request_sha256": "a" * 64,
         "role": "primary",
         "model": "ornith:test",
+        "think": "medium",
         "started_at": datetime.now().isoformat(timespec="seconds"),
         "pid": alive_pid,
     }
@@ -369,6 +370,18 @@ def test_local_consensus_snapshot_removes_dead_markers_and_exposes_redacted_metr
     (root / "audit.jsonl").write_text(
         json.dumps(
             {
+                "kind": "session",
+                "timestamp": "2026-07-11T11:59:00Z",
+                "request_sha256": "a" * 64,
+                "role": "primary",
+                "model": "ornith:test",
+                "think": "medium",
+                "ok": True,
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {
                 "kind": "decision",
                 "timestamp": "2026-07-11T12:00:00Z",
                 "request_sha256": "a" * 64,
@@ -403,6 +416,7 @@ def test_local_consensus_snapshot_removes_dead_markers_and_exposes_redacted_metr
     assert snapshot["active"] is True
     assert snapshot["count"] == 1
     assert snapshot["activities"][0]["model"] == "ornith:test"
+    assert snapshot["activities"][0]["think"] == "medium"
     assert snapshot["summary"]["sessions"]["first_pass_valid"] == 7
     assert snapshot["summary"]["sessions"]["repaired"] == 2
     assert snapshot["summary"]["sessions"]["repair_turns"] == 3
@@ -427,13 +441,16 @@ def test_local_consensus_snapshot_removes_dead_markers_and_exposes_redacted_metr
             "conservative_rate": 0.25,
         }
     }
-    assert snapshot["history"][0]["conservative_veto_fired"] is True
+    session = next(row for row in snapshot["history"] if row["kind"] == "session")
+    decision = next(row for row in snapshot["history"] if row["kind"] == "decision")
+    assert session["think"] == "medium"
+    assert decision["conservative_veto_fired"] is True
     assert (
-        snapshot["history"][0]["conservative_veto_bypassed_by_lane_policy"] is True
+        decision["conservative_veto_bypassed_by_lane_policy"] is True
     )
-    assert snapshot["history"][0]["dissent_effect_class"] == "conservative"
-    assert "prompt" not in snapshot["history"][0]
-    assert "raw_output" not in snapshot["history"][0]
+    assert decision["dissent_effect_class"] == "conservative"
+    assert all("prompt" not in row for row in snapshot["history"])
+    assert all("raw_output" not in row for row in snapshot["history"])
     assert not (active_dir / "dead.json").exists()
     assert not (active_dir / "stale.json").exists()
 
@@ -979,6 +996,7 @@ def test_decision_trace_projects_live_phase_and_completed_vote(monkeypatch) -> N
                 "model": "challenger:model",
                 "phase": "validate",
                 "attempt": 1,
+                "think": "medium",
                 "elapsed_seconds": 42,
                 "updated_at": "2026-07-15T12:00:00Z",
             }
@@ -993,6 +1011,7 @@ def test_decision_trace_projects_live_phase_and_completed_vote(monkeypatch) -> N
                 "ok": True,
                 "first_pass_valid": True,
                 "repair_turns": 0,
+                "think": False,
             }
         ],
         None,
@@ -1001,9 +1020,12 @@ def test_decision_trace_projects_live_phase_and_completed_vote(monkeypatch) -> N
     assert trace["state"] == "active"
     assert trace["task_role"] == "ingest_review"
     assert trace["lanes"][0]["state"] == "done"
+    assert trace["lanes"][0]["think"] == "off"
     assert trace["lanes"][1]["state"] == "active"
+    assert trace["lanes"][1]["think"] == "medium"
     assert trace["lanes"][1]["steps"][4]["status"] == "active"
     assert trace["lanes"][2]["state"] == "pending"
+    assert trace["lanes"][2]["think"] == "—"
     assert [step["label"] for step in trace["overall"]] == [
         "Packet",
         "Dispatch",
@@ -1128,6 +1150,7 @@ def test_decision_trace_marks_pair_quorum_and_unused_tie_break(monkeypatch) -> N
             "ok": True,
             "first_pass_valid": True,
             "repair_turns": 0,
+            "think": "medium",
         }
         for index, role in enumerate(("primary", "challenger"))
     ]
@@ -1138,8 +1161,55 @@ def test_decision_trace_marks_pair_quorum_and_unused_tie_break(monkeypatch) -> N
     assert trace["lanes"][0]["state"] == "done"
     assert trace["lanes"][1]["state"] == "done"
     assert trace["lanes"][2]["state"] == "skipped"
+    assert [lane["think"] for lane in trace["lanes"]] == [
+        "medium",
+        "medium",
+        "—",
+    ]
     assert trace["overall"][4]["status"] == "done"
     assert trace["overall"][5]["status"] == "done"
+
+
+def test_decision_trace_hides_legacy_and_artifact_replay_reasoning(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        dashboard,
+        "_decision_trace_models",
+        lambda: {
+            "primary": "primary:model",
+            "challenger": "challenger:model",
+            "tie_break": "tie:model",
+        },
+    )
+    request = "f" * 64
+    legacy_session = {
+        "kind": "session",
+        "request_sha256": request,
+        "role": "primary",
+        "model": "primary:model",
+        "ok": True,
+    }
+    legacy = dashboard._decision_trace_snapshot([], [legacy_session], None)
+
+    assert [lane["think"] for lane in legacy["lanes"]] == ["—", "—", "—"]
+
+    observed_session = {
+        **legacy_session,
+        "think": "medium",
+    }
+    replay = {
+        "kind": "decision_artifact_replay",
+        "request_sha256": request,
+        "role": "routine",
+        "status": "agreed",
+        "models": ["primary:model", "challenger:model"],
+    }
+    artifact = dashboard._decision_trace_snapshot(
+        [], [observed_session, replay], replay
+    )
+
+    assert [lane["think"] for lane in artifact["lanes"]] == ["—", "—", "—"]
 
 
 def test_decision_trace_explains_semantic_quality_and_resource_holds() -> None:
@@ -1529,6 +1599,7 @@ def test_dashboard_static_labels_routine_review_as_local_consensus() -> None:
     assert "${semanticDeferred} semantic · ${operationalDeferred} operational" in app
     assert "grid-template-columns: repeat(5, minmax(0, 1fr));" in style
     assert "No synthetic progress" in app
+    assert "think: targetLane.think" in app
     assert ".decision-trace-panel" in style
     assert ".processing-lane.active" in style
     assert "processing-electric-pulse" in style
@@ -1600,6 +1671,14 @@ def test_dashboard_static_layout_aligns_peer_panels_and_contains_event_badges() 
         "  overflow: hidden;"
     ) in style
     assert "text-overflow: ellipsis;\n  text-transform: uppercase;\n  white-space: nowrap;" in style
+    assert ".decision-role {\n  display: flex;\n  flex-wrap: wrap;" in style
+    assert ".decision-role strong {\n  flex: 0 0 100%;\n}" in style
+    assert (
+        ".decision-role .decision-model,\n"
+        ".decision-role .decision-think {\n"
+        "  display: inline-flex;"
+    ) in style
+    assert ".decision-role .decision-think {\n  flex: 0 0 auto;" in style
 
 
 def test_build_snapshot_combines_runtime_and_queue(tmp_path: Path, monkeypatch) -> None:
@@ -3568,8 +3647,8 @@ def test_model_status_snapshot_combines_ollama_and_config(monkeypatch) -> None:
                     "capabilities": ["embedding"],
                 },
                 {
-                    "name": "gpt-oss:20b",
-                    "model": "gpt-oss:20b",
+                    "name": "muse-glimmer:30b-mxfp8-dflash",
+                    "model": "muse-glimmer:30b-mxfp8-dflash",
                     "size": 13_000,
                     "details": {"format": "gguf", "quantization_level": "MXFP4"},
                     "capabilities": ["completion"],
@@ -3589,7 +3668,7 @@ def test_model_status_snapshot_combines_ollama_and_config(monkeypatch) -> None:
         dashboard.PROPOSER_RUNTIME_ROLES[0]: "qwen3.6:35b-a3b-mxfp8",
         dashboard.PROPOSER_RUNTIME_ROLES[1]: "gemma4:26b-mxfp8",
         dashboard.DECISION_RUNTIME_ROLES[0]: "qwen3.6:35b-a3b-mxfp8",
-        dashboard.DECISION_RUNTIME_ROLES[1]: "gpt-oss:20b",
+        dashboard.DECISION_RUNTIME_ROLES[1]: "muse-glimmer:30b-mxfp8-dflash",
         dashboard.DECISION_RUNTIME_ROLES[2]: "gemma4:26b-mxfp8",
     }
     monkeypatch.setattr(
@@ -3654,8 +3733,10 @@ def test_model_status_snapshot_combines_ollama_and_config(monkeypatch) -> None:
     ]
     assert by_name["bge-m3:latest"]["roles"] == ["embed"]
     assert "bge-m3" not in by_name
-    assert by_name["gpt-oss:20b"]["status"] == "ready"
-    assert by_name["gpt-oss:20b"]["roles"] == ["decision-challenger"]
+    assert by_name["muse-glimmer:30b-mxfp8-dflash"]["status"] == "ready"
+    assert by_name["muse-glimmer:30b-mxfp8-dflash"]["roles"] == [
+        "decision-challenger"
+    ]
     assert by_name["qwen3.5:4b-mlx"]["status"] == "missing"
     assert by_name["qwen3.5:4b-mlx"]["roles"] == ["gate", "rewrite"]
 

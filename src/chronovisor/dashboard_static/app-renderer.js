@@ -481,6 +481,7 @@ function applyDecisionTransition(current, target, event) {
   Object.assign(lane, {
     label: targetLane.label,
     model: targetLane.model,
+    think: targetLane.think,
     phase: event.phase,
   });
 

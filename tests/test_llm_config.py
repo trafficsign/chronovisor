@@ -893,6 +893,18 @@ def test_repository_example_has_representative_local_role_map() -> None:
     classification_embedding = config.roles["classification.embedding"]
     assert classification_embedding.provider_id == "local"
     assert classification_embedding.model == "bge-m3"
+    assert [
+        config.roles[role].model
+        for role in (
+            "classification.primary",
+            "classification.challenger",
+            "classification.tie_break",
+        )
+    ] == [
+        "maxwell1500/ornith-35b:Q5_K_M",
+        "muse-glimmer:30b-mxfp8-dflash",
+        "gemma4:26b",
+    ]
     text = example.read_text(encoding="utf-8")
     for role, data_class in (
         ("search.semantic.foreground", "raw"),

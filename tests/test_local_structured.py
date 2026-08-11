@@ -69,29 +69,18 @@ class QueueTransport:
 
 
 def test_structured_generation_policy_seals_the_fixed_sampler() -> None:
-    assert STRUCTURED_GENERATION_POLICY_VERSION == 3
+    assert STRUCTURED_GENERATION_POLICY_VERSION == 4
     assert structured_generation_policy() == {
-        "version": 3,
+        "version": 4,
         "temperature": 0,
         "seed": 0,
-        "think": {
-            "default": False,
-            "model_family_overrides": {
-                "gpt-oss": {
-                    "default": "medium",
-                    "num_ctx_at_least": {"65536": "low"},
-                }
-            },
-        },
+        "think": {"default": "medium"},
         "stream": False,
         "format": "json_schema",
     }
     assert structured_think_mode("gpt-oss:20b", num_ctx=32_768) == "medium"
-    assert (
-        structured_think_mode("registry/local/gpt-oss:20b", num_ctx=65_536)
-        == "low"
-    )
-    assert structured_think_mode("ornith:35b", num_ctx=114_688) is False
+    assert structured_think_mode("muse-glimmer:30b", num_ctx=65_536) == "medium"
+    assert structured_think_mode("ornith:35b", num_ctx=114_688) == "medium"
     assert len(structured_generation_policy_sha256()) == 64
 
 
@@ -362,7 +351,7 @@ def test_activity_marker_tracks_redacted_structured_phase(tmp_path: Path) -> Non
     assert list(store.active_dir.glob("*.json")) == []
 
 
-def test_first_pass_valid_uses_fixed_non_thinking_request() -> None:
+def test_first_pass_valid_uses_fixed_medium_thinking_request() -> None:
     transport = QueueTransport('{"decision":"apply","summary":"ok"}')
 
     result = _session(transport).run(
@@ -379,7 +368,7 @@ def test_first_pass_valid_uses_fixed_non_thinking_request() -> None:
     assert request.num_predict == 256
     assert request.temperature == 0
     assert request.seed == 0
-    assert request.think is False
+    assert request.think == "medium"
     assert request.schema == SCHEMA
     assert request.messages[0]["role"] == "system"
     assert "untrusted data" in request.messages[0]["content"]
@@ -439,12 +428,14 @@ def test_active_marker_is_atomic_redacted_and_removed_after_session(
             "phase",
             "attempt",
             "started_at",
-                "updated_at",
-                "pid",
-                "thread_id",
-            }
+            "updated_at",
+            "pid",
+            "thread_id",
+            "think",
+        }
         assert marker["phase"] == "generate"
         assert marker["attempt"] == 0
+        assert marker["think"] == "medium"
         return '{"decision":"apply","summary":"ok"}'
 
     result = LocalStructuredSession(
@@ -463,6 +454,8 @@ def test_active_marker_is_atomic_redacted_and_removed_after_session(
     assert list((audit_root / "active").glob("*.json")) == []
     audit_text = (audit_root / "audit.jsonl").read_text(encoding="utf-8")
     assert secret not in audit_text
+    audit = json.loads(audit_text)
+    assert audit["think"] == "medium"
     summary = json.loads((audit_root / "summary.json").read_text(encoding="utf-8"))
     assert summary["sessions"]["first_pass_valid"] == 1
     assert summary["sessions"]["repaired"] == 0
@@ -480,6 +473,8 @@ def test_transport_failure_clears_activity_and_records_failure(tmp_path: Path) -
 
     assert result.failure_class == "transport_error"
     assert list((audit_root / "active").glob("*.json")) == []
+    audit = json.loads((audit_root / "audit.jsonl").read_text(encoding="utf-8"))
+    assert audit["think"] == "medium"
     summary = json.loads((audit_root / "summary.json").read_text(encoding="utf-8"))
     assert summary["sessions"]["failures"] == {"transport_error": 1}
 
@@ -918,11 +913,13 @@ def test_output_cap_fails_closed_after_two_oversize_repairs() -> None:
     )
 
 
-def test_initial_input_byte_cap_fails_before_call() -> None:
+def test_initial_input_byte_cap_fails_before_call(tmp_path: Path) -> None:
     transport = QueueTransport('{"decision":"apply","summary":"unused"}')
+    audit_root = tmp_path / "local-consensus"
 
     result = _session(
         transport,
+        audit_root=audit_root,
         max_input_chars=500,
         max_output_chars=500,
         max_feedback_chars=500,
@@ -931,6 +928,8 @@ def test_initial_input_byte_cap_fails_before_call() -> None:
     assert result.ok is False
     assert result.failure_class == "input_too_large"
     assert transport.requests == []
+    audit = json.loads((audit_root / "audit.jsonl").read_text(encoding="utf-8"))
+    assert "think" not in audit
 
 
 def test_context_preflight_reserves_two_maximum_repair_histories() -> None:

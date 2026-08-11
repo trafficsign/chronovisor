@@ -114,7 +114,8 @@ chronovisor-content-correction-eval
 
 Semantic work is handled later by bounded convergence workers. When a routine
 lane needs a structured decision it uses local consensus: Ornith 35B primary,
-GPT-OSS 20B challenger, and Gemma 4 26B only as a tie-breaker. Invalid JSON gets
+Muse Glimmer 30B (`muse-glimmer:30b-mxfp8-dflash`) challenger, and Gemma 4 26B
+only as a tie-breaker. Invalid JSON gets
 at most two targeted repair turns in the same local session. Failure or
 disagreement is never escalated to a frontier model. For ingest specifically,
 three valid, pairwise-distinct decisions bound to the currently validated

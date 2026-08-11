@@ -29,7 +29,7 @@ from chronovisor.recall.classification_library_evidence import (
 
 DIAGNOSTIC_SCHEMA = "chronovisor.classification-diagnostic.v1"
 PILOT_SCHEMA = "chronovisor.classification-method-pilot.v1"
-PILOT_ENGINE_VERSION = 1
+PILOT_ENGINE_VERSION = 2
 HOLD = "__HOLD__"
 NONE = "__NONE__"
 DEFAULT_SEMANTIC_LIMIT = 20
@@ -504,14 +504,18 @@ class PilotRunner:
         schema: Mapping[str, Any],
         stage: str,
     ) -> dict[str, Any]:
+        effective_num_ctx = min(32_768, self.config.num_ctx)
+        think = "medium"
         digest = hashlib.sha256(
             json.dumps(
                 {
                     "engine_version": PILOT_ENGINE_VERSION,
                     "model": model,
+                    "num_ctx": effective_num_ctx,
                     "prompt": prompt,
                     "schema": schema,
                     "stage": stage,
+                    "think": think,
                 },
                 ensure_ascii=False,
                 sort_keys=True,
@@ -528,9 +532,6 @@ class PilotRunner:
         last_response = ""
         attempts = 0
         for attempts in range(1, 4):
-            think: bool | str = (
-                "low" if model.strip().lower().startswith("gpt-oss") else "medium"
-            )
             response = ollama.chat(
                 [
                     {
@@ -550,7 +551,7 @@ class PilotRunner:
                 ],
                 model=model,
                 format=dict(schema),
-                num_ctx=min(32_768, self.config.num_ctx),
+                num_ctx=effective_num_ctx,
                 num_predict=1_536,
                 keep_alive=keep_alive,
                 read_timeout_ms=self.config.read_timeout_ms,
@@ -1046,7 +1047,8 @@ def run_pilot(
     existing: dict[str, Any] = {}
     if output_path.exists():
         previous = json.loads(output_path.read_text(encoding="utf-8"))
-        existing = {str(row["uid"]): row for row in previous.get("cases") or []}
+        if previous.get("engine_version") == PILOT_ENGINE_VERSION:
+            existing = {str(row["uid"]): row for row in previous.get("cases") or []}
     cases: list[dict[str, Any]] = []
     for index, row in enumerate(rows, start=1):
         uid = str(row["uid"])
