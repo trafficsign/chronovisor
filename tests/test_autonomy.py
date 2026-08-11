@@ -1421,6 +1421,81 @@ def test_frontier_duplicate_key_is_pair_order_stable_and_content_sensitive(
     assert len(store.list_items(lane=autonomy.DUPLICATE_FRONTIER_LANE)) == 2
 
 
+def test_typed_yaml_snapshot_review_boundaries_build_both_prompts(
+    tmp_path: Path,
+) -> None:
+    from chronovisor.decision.decision_lane_prompts import (
+        build_autonomy_duplicate_review_prompt,
+        build_autonomy_retention_review_prompt,
+    )
+
+    def write_typed(page_id: str, title: str, body: str) -> None:
+        (tmp_path / f"{page_id}.md").write_text(
+            "---\n"
+            f"title: {title}\n"
+            "status: stable\n"
+            "type: knowledge\n"
+            "updated: 2026-08-11\n"
+            "features: !!set\n"
+            "  ? gamma\n"
+            "  ? alpha\n"
+            "  ? beta\n"
+            "---\n"
+            f"{body}\n",
+            encoding="utf-8",
+        )
+
+    write_typed("a", "Alpha", "Alpha evidence")
+    write_typed("b", "Beta", "Beta evidence")
+    write_typed("retained", "Retained", "Distinct current fact")
+    prompt_hashes: dict[str, str] = {}
+
+    def duplicate_reviewer(candidate: dict) -> dict:
+        assert candidate["left_meta"]["kind"] == "canonical_yaml"
+        assert candidate["right_meta"]["kind"] == "canonical_yaml"
+        prompt = build_autonomy_duplicate_review_prompt(candidate)
+        prompt_hashes["duplicate"] = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+        return {
+            "decision": "keep_both",
+            "confidence": 0.99,
+            "summary": "Distinct typed pages",
+        }
+
+    duplicate = autonomy.resolve_deferred_duplicates_with_frontier(
+        [_deferred_record("a", "b")],
+        convergence_store=_convergence_store(tmp_path / "duplicate-store"),
+        budget=_frontier_budget(calls=1),
+        reviewer=duplicate_reviewer,
+        now=NOW,
+    )
+
+    def retention_reviewer(candidate: dict) -> dict:
+        assert candidate["meta"]["kind"] == "canonical_yaml"
+        prompt = build_autonomy_retention_review_prompt(candidate)
+        prompt_hashes["retention"] = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+        return {
+            "decision": "keep_stable",
+            "confidence": 0.99,
+            "summary": "Distinct current fact",
+        }
+
+    retention = autonomy.apply_retention_archives(
+        {
+            "deprecation_candidates": ["retained"],
+            "pages": {"retained": {"score": 0.05, "distinct_event": True}},
+        },
+        write=False,
+        convergence_store=_convergence_store(tmp_path / "retention-store"),
+        reviewer=retention_reviewer,
+        now=NOW,
+    )
+
+    assert duplicate["status_counts"] == {"rejected": 1}
+    assert retention["status_counts"] == {"rejected": 1}
+    assert set(prompt_hashes) == {"duplicate", "retention"}
+    assert all(len(value) == 64 for value in prompt_hashes.values())
+
+
 def test_frontier_duplicate_content_cas_refuses_concurrent_page_change(
     monkeypatch,
     tmp_path: Path,

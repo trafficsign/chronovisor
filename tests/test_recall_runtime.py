@@ -2724,6 +2724,33 @@ def test_nonstable_page_never_enters_recall_body_or_log_hash(
     assert logged["context_items"][0]["content_sha256"] == ""
 
 
+def test_context_item_preserves_typed_yaml_updated_as_freshness_string(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    page = tmp_path / "dated.md"
+    page.write_text(
+        "---\n"
+        "title: Dated\n"
+        "updated: 2026-08-11\n"
+        "status: stable\n"
+        "---\n"
+        "Body.\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(recall_runtime, "find_readable_page", lambda _page_id: page)
+
+    item = recall_runtime.context_item_from_page_id(
+        "dated",
+        ["dated"],
+        "search",
+        score=1.0,
+    )
+
+    assert item is not None
+    assert item.updated == "2026-08-11"
+
+
 def test_find_readable_page_is_root_bound_and_rejects_duplicate_nested_stems(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -363,8 +363,8 @@ class RawStore:
             CanonicalDocumentError,
             parse_document,
         )
-        from chronovisor.core.frontmatter import parse as parse_frontmatter
         from chronovisor.core.legacy_archive import verify_legacy_manifest
+        from chronovisor.core.legacy_frontmatter import parse as parse_frontmatter
 
         try:
             commit.validate()

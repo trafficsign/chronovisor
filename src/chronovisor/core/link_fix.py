@@ -10,12 +10,12 @@ import re
 import tempfile
 from pathlib import Path
 
+from chronovisor.core.frontmatter import parse as parse_frontmatter
+
 # [[target]] / [[target|label]] / [[target#section]] にマッチ。
 # 改行・ネスト・空リンクは除外。
 WIKI_LINK_RE = re.compile(r"\[\[([^\[\]\n]+?)\]\]")
 
-# frontmatter delimiter
-_FRONTMATTER_RE = re.compile(r"^---\n.*?\n---\n", re.DOTALL)
 # fenced code block (``` ... ```), closed blocks only. Use
 # fenced_code_spans() when unclosed/truncated fences must be protected too.
 _FENCED_CODE_RE = re.compile(r"```.*?```", re.DOTALL)
@@ -40,7 +40,7 @@ def strip_fences_and_frontmatter(text: str) -> str:
 
     auto-fix で code 内のリンクを誤って書き換えないために必須。
     """
-    text = _FRONTMATTER_RE.sub("", text, count=1)
+    _meta, text = parse_frontmatter(text)
     for start, end in reversed(fenced_code_spans(text)):
         text = text[:start] + text[end:]
     text = _INLINE_CODE_RE.sub("", text)
@@ -75,7 +75,9 @@ def fenced_code_spans(text: str) -> list[tuple[int, int]]:
 def protected_spans(text: str) -> list[tuple[int, int]]:
     """Return frontmatter / fenced-code / inline-code spans to leave untouched."""
     spans: list[tuple[int, int]] = []
-    spans.extend(m.span() for m in _FRONTMATTER_RE.finditer(text))
+    _meta, body = parse_frontmatter(text)
+    if body != text:
+        spans.append((0, len(text) - len(body)))
     spans.extend(fenced_code_spans(text))
     spans.extend(m.span() for m in _INLINE_CODE_RE.finditer(text))
     spans.sort()

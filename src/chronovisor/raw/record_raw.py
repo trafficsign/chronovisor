@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from chronovisor.core.durable_state import fsync_directory
-from chronovisor.core.frontmatter import patch as patch_frontmatter
+from chronovisor.core.legacy_frontmatter import patch as patch_frontmatter
 from chronovisor.core.save_transaction import parse_save_transaction_receipt
 from chronovisor.core.store import RAW_DIR, okf_runtime_operation
 

@@ -15,7 +15,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from chronovisor.core.frontmatter import parse as parse_frontmatter
+from chronovisor.core.legacy_frontmatter import parse as parse_frontmatter
 from chronovisor.core.raw_store import RawStore
 from chronovisor.core.search import search as run_search
 from chronovisor.core.store import CHRONOVISOR_ROOT, okf_runtime_operation

@@ -12,6 +12,7 @@ from datetime import date
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from chronovisor.core import frontmatter
 from chronovisor.core.canonical_document import (
     Namespace,
     ResolvedMarkdownLink,
@@ -1393,7 +1394,7 @@ def _build_tag_validation_receipt(
     kept: list[str],
     dropped_values: list[Any],
 ) -> dict[str, Any]:
-    invalid: list[dict[str, str]] = []
+    invalid: list[dict[str, Any]] = []
     for value in dropped_values:
         if isinstance(value, str):
             valid, reason = validate_tag(value)
@@ -1403,7 +1404,9 @@ def _build_tag_validation_receipt(
                 )
         else:
             reason = "tag is not a string"
-        invalid.append({"value_repr": repr(value), "reason": reason})
+        invalid.append(
+            {"value_repr": frontmatter.review_value(value), "reason": reason}
+        )
     core = {
         "schema_version": 1,
         "kind": "invalid_tag_validation_receipt",
@@ -1659,33 +1662,27 @@ def apply_safe_fixes(
             except (OSError, UnicodeDecodeError):
                 continue
 
-            from chronovisor.core.frontmatter import (
-                parse as _frontmatter_parse,
-            )
-            from chronovisor.core.frontmatter import (
-                patch as _frontmatter_patch,
-            )
-
-            meta, _ = _frontmatter_parse(content)
+            meta, _ = frontmatter.parse(content)
             tags_raw = meta.get("tags")
             if not isinstance(tags_raw, list):
                 continue
 
             kept: list[str] = []
-            dropped: list[str] = []
+            dropped: list[Any] = []
             dropped_values: list[Any] = []
             for t in tags_raw:
                 if isinstance(t, str) and validate_tag(t)[0]:
                     kept.append(t)
                 else:
-                    dropped.append(repr(t))
+                    dropped.append(frontmatter.review_value(t))
                     dropped_values.append(t)
             if not dropped:
                 continue
-            new_content = _frontmatter_patch(content, {"tags": kept})
+            new_content = frontmatter.patch(content, {"tags": kept})
             label = (
                 f"[{page_id}] dropped {len(dropped)} invalid tag(s): "
-                f"{', '.join(dropped[:3])}" + ("..." if len(dropped) > 3 else "")
+                f"{', '.join(str(value) for value in dropped[:3])}"
+                + ("..." if len(dropped) > 3 else "")
             )
             if dry_run:
                 actions.append(f"[dry-run] {label}")

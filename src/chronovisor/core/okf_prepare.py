@@ -24,7 +24,7 @@ from chronovisor.core.canonical_json import (
     canonical_json_sha256_stringifying_strict,
     canonical_json_stringifying_strict,
 )
-from chronovisor.core.frontmatter import parse as parse_legacy_frontmatter
+from chronovisor.core.legacy_frontmatter import parse as parse_legacy_frontmatter
 from chronovisor.core.link_fix import (
     WIKI_LINK_RE,
     normalize_link_target,

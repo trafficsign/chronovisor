@@ -298,17 +298,26 @@ def validate_entity_backfill_proposal(
             != proposal.get("full_unified_diff_sha256")
         ):
             return False
-        changed = []
-        for line in exact_diff.splitlines():
-            if line.startswith(("---", "+++", "@@")):
-                continue
-            if line.startswith(("-", "+")):
-                changed.append(line[1:].strip())
-        if not changed or any(not line.startswith("entities:") for line in changed):
-            return False
         before_meta, before_body = parse(expected_text)
         after_meta, after_body = parse(updated_text)
         if before_body != after_body:
+            return False
+        before_entities = before_meta.get("entities")
+        if "entities" not in before_meta:
+            if existing:
+                return False
+        elif (
+            not isinstance(before_entities, list)
+            or not all(isinstance(item, str) for item in before_entities)
+            or before_entities != existing
+        ):
+            return False
+        after_entities = after_meta.get("entities")
+        if (
+            not isinstance(after_entities, list)
+            or not all(isinstance(item, str) for item in after_entities)
+            or after_entities != proposed
+        ):
             return False
         before_without = {
             key: value for key, value in before_meta.items() if key != "entities"

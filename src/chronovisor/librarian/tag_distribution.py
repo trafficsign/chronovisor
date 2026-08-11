@@ -25,6 +25,10 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
+from chronovisor.core.canonical_document import (
+    CanonicalDocumentError,
+    parse_document,
+)
 from chronovisor.core.index_store import get_store, stable_indexed_document_path
 from chronovisor.core.runtime_config import load_decision_router_config
 from chronovisor.core.store import PAGES_DIR, SYSTEM_DIR
@@ -486,12 +490,12 @@ def _page_head_for_prompt(page_id: str, max_chars: int = 2000) -> tuple[str, str
     if path is None:
         return "", ""
     try:
-        text = path.read_text()
-    except OSError:
+        document = parse_document(path.read_bytes())
+        body = document.body.decode("utf-8").lstrip()
+    except (OSError, UnicodeDecodeError, CanonicalDocumentError):
         return "", ""
-    title_match = re.search(r"^title:\s*(.+)$", text, re.MULTILINE)
-    title = title_match.group(1).strip() if title_match else page_id
-    body = re.sub(r"^---\n.*?\n---\n?", "", text, count=1, flags=re.DOTALL).lstrip()
+    title_value = document.metadata.get("title")
+    title = title_value.strip() if isinstance(title_value, str) else page_id
     return title, body[:max_chars]
 
 

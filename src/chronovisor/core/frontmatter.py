@@ -1,156 +1,53 @@
-"""Frontmatter parsing and patching utilities.
-
-Patch-centric YAML-flavored frontmatter parser/serializer for wiki pages
-and raw entries. `parse(text)` extracts metadata + body, `patch(text, updates)`
-updates the frontmatter region while preserving the body verbatim.
-
-Design tradeoffs:
-- Bit-exact round-trip is NOT a goal. Body is preserved verbatim, unknown
-  keys are preserved, but key order may shift (updates are applied in
-  insertion order over the existing dict).
-- Supported value forms: scalar `key: value`, inline list `key: [a, b, c]`,
-  block list `key:\n  - a\n  - b`. Complex YAML features (anchors,
-  multi-line scalars, nested maps, flow maps) are NOT supported.
-- No external YAML parser dependency. Minimal hand-rolled parser intended
-  for the limited shapes used by this codebase.
-- Behaves as a strict superset of the legacy scalar-only parsers in
-  `server._parse_frontmatter` and `index_store._parse_frontmatter`: any
-  document that worked before continues to work, and the returned dict
-  has scalar values as `str` (consumers depending on `.get("title", ...)`
-  remain correct).
-"""
+"""Full-YAML frontmatter helpers with byte-stable Markdown bodies."""
 
 from __future__ import annotations
 
 import hashlib
 import json
-import re
 from typing import Any
 
-_FM_DELIM = "---"
-_FM_RE = re.compile(r"^---\n(.*?)\n---\n?", re.DOTALL)
+from chronovisor.core.canonical_document import (
+    CanonicalDocument,
+    parse_document,
+    patch_document_metadata,
+    serialize_document,
+)
+from chronovisor.core.canonical_json import canonical_json_stringifying_strict
 
 
 def parse(text: str) -> tuple[dict[str, Any], str]:
-    """Extract frontmatter and body from a markdown document.
+    """Parse canonical full-YAML frontmatter and preserve the body exactly."""
 
-    Returns ``(meta, body)``. If no frontmatter is present, returns
-    ``({}, text)``.
-
-    Supported value forms:
-      - scalar: ``key: value`` → ``str``
-      - inline list: ``key: [a, b, c]`` → ``list[str]``
-      - block list::
-
-          key:
-            - a
-            - b
-
-        → ``list[str]``
-
-    Quoted scalars (double or single) are supported; matching outer quotes
-    are stripped. Trailing whitespace in scalar values is stripped.
-    """
-    if not text.startswith(_FM_DELIM):
+    if not _has_frontmatter(text):
         return {}, text
-
-    m = _FM_RE.match(text)
-    if not m:
-        return {}, text
-
-    fm_text = m.group(1)
-    body = text[m.end():]
-
-    meta: dict[str, Any] = {}
-    lines = fm_text.splitlines()
-    i = 0
-    n = len(lines)
-    while i < n:
-        line = lines[i]
-        if not line.strip():
-            i += 1
-            continue
-        if ":" not in line:
-            i += 1
-            continue
-        key, _, value = line.partition(":")
-        key = key.strip()
-        value = value.strip()
-
-        if value == "":
-            # Possibly a block list (next lines indented with "- ").
-            block_items: list[str] = []
-            j = i + 1
-            while j < n:
-                next_line = lines[j]
-                stripped = next_line.lstrip()
-                if not stripped.startswith("- "):
-                    break
-                item = stripped[2:].strip()
-                block_items.append(_unquote(item))
-                j += 1
-            if block_items:
-                meta[key] = block_items
-                i = j
-                continue
-            # Empty value, no block — treat as empty string for legacy parity.
-            meta[key] = ""
-            i += 1
-            continue
-
-        # Inline list: [a, b, c]
-        if value.startswith("[") and value.endswith("]"):
-            try:
-                decoded = json.loads(value)
-            except (json.JSONDecodeError, TypeError):
-                decoded = None
-            if isinstance(decoded, list):
-                meta[key] = [str(item) for item in decoded]
-                i += 1
-                continue
-            inner = value[1:-1].strip()
-            if inner == "":
-                meta[key] = []
-            else:
-                items = [_unquote(item) for item in _split_inline_list(inner)]
-                meta[key] = items
-            i += 1
-            continue
-
-        # Plain scalar.
-        meta[key] = _unquote(value)
-        i += 1
-
-    return meta, body
+    document = parse_document(text.encode("utf-8"))
+    return document.metadata, document.body.decode("utf-8")
 
 
 def patch(text: str, updates: dict[str, Any], deletes: list[str] | None = None) -> str:
-    """Update frontmatter and return the new document text.
+    """Patch top-level full-YAML metadata without changing the body."""
 
-    - ``updates``: keys to add or replace.
-    - ``deletes``: keys to remove.
-    - Body is preserved verbatim.
-    - If no frontmatter exists, a new one is prepended.
-    - Existing keys keep their position; new keys are appended in
-      ``updates`` insertion order.
-    """
-    deletes = deletes or []
-    meta, body = parse(text)
+    if not _has_frontmatter(text):
+        if not updates:
+            return text
+        data = serialize_document(
+            CanonicalDocument(metadata={}, body=text.encode("utf-8"))
+        )
+    else:
+        data = text.encode("utf-8")
+    return patch_document_metadata(data, updates, delete=deletes or ()).decode("utf-8")
 
-    for k in deletes:
-        meta.pop(k, None)
 
-    for k, v in updates.items():
-        meta[k] = v
+def canonicalize(text: str) -> str:
+    """Canonicalize full-YAML frontmatter without touching the body."""
 
-    if not meta:
-        return body
+    if not _has_frontmatter(text):
+        return text
+    return serialize_document(parse_document(text.encode("utf-8"))).decode("utf-8")
 
-    out = [_FM_DELIM]
-    for k, v in meta.items():
-        out.append(_serialize_kv(k, v))
-    out.append(_FM_DELIM)
-    return "\n".join(out) + "\n" + body
+
+def _has_frontmatter(text: str) -> bool:
+    return text.startswith("---\n") or text.startswith("---\r\n")
 
 
 def normalize_nested(text: str) -> tuple[str, dict[str, Any]]:
@@ -168,7 +65,10 @@ def normalize_nested(text: str) -> tuple[str, dict[str, Any]]:
     if not inner or not str(inner.get("title") or "").strip():
         return text, {"changed": False, "reason": "no_nested_frontmatter"}
     conflicts = {
-        key: {"outer": outer[key], "inner": value}
+        key: {
+            "outer": review_value(outer[key]),
+            "inner": review_value(value),
+        }
         for key, value in inner.items()
         if key in outer and outer[key] != value
     }
@@ -201,7 +101,7 @@ def propose_nested_resolution(text: str) -> tuple[str, dict[str, Any]]:
     merged = dict(inner)
     for key, value in outer.items():
         if isinstance(value, list) and isinstance(merged.get(key), list):
-            merged[key] = list(dict.fromkeys([*value, *merged[key]]))
+            merged[key] = _equality_stable_union(value, merged[key])
         else:
             merged[key] = value
     proposed = patch(inner_body, merged)
@@ -215,114 +115,70 @@ def propose_nested_resolution(text: str) -> tuple[str, dict[str, Any]]:
         "merged_keys": sorted(merged),
         "conflicts": {
             key: {
-                "outer": _review_value(outer[key]),
-                "inner": _review_value(inner[key]),
-                "merged": _review_value(merged[key]),
+                "outer": review_value(outer[key]),
+                "inner": review_value(inner[key]),
+                "merged": review_value(merged[key]),
             }
             for key in conflict_keys
         },
     }
 
 
-def _review_value(value: Any) -> Any:
-    """Bound large metadata lists without weakening exact diff/hash review."""
+def _equality_stable_union(outer: list[Any], inner: list[Any]) -> list[Any]:
+    """Preserve outer-first order for both hashable and unhashable YAML values."""
+
+    merged: list[Any] = []
+    for candidate in (*outer, *inner):
+        if not any(candidate == existing for existing in merged):
+            merged.append(candidate)
+    return merged
+
+
+def _json_safe_review_value(value: Any) -> Any:
+    """Return deterministic strict-JSON content or a canonical-YAML hash receipt."""
+
+    if not _contains_yaml_set(value):
+        try:
+            return json.loads(canonical_json_stringifying_strict(value))
+        except (TypeError, ValueError):
+            pass
+    rendered = serialize_document(CanonicalDocument(metadata={"value": value}, body=b""))
+    return {
+        "kind": "canonical_yaml",
+        "utf8_bytes": len(rendered),
+        "sha256": hashlib.sha256(rendered).hexdigest(),
+    }
+
+
+def _contains_yaml_set(value: Any, seen: set[int] | None = None) -> bool:
+    """Detect nested SafeLoader sets before JSON's ``default=str`` can see them."""
+
+    if isinstance(value, set):
+        return True
+    if not isinstance(value, (dict, list, tuple)):
+        return False
+    seen = set() if seen is None else seen
+    marker = id(value)
+    if marker in seen:
+        return False
+    seen.add(marker)
+    if isinstance(value, dict):
+        return any(
+            _contains_yaml_set(key, seen) or _contains_yaml_set(item, seen)
+            for key, item in value.items()
+        )
+    return any(_contains_yaml_set(item, seen) for item in value)
+
+
+def review_value(value: Any) -> Any:
+    """Return bounded deterministic JSON-safe review content for YAML values."""
     if not isinstance(value, list):
-        return value
-    encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+        return _json_safe_review_value(value)
+    safe_items = [_json_safe_review_value(item) for item in value]
+    encoded = canonical_json_stringifying_strict(safe_items)
     return {
         "kind": "list",
         "count": len(value),
         "sha256": hashlib.sha256(encoded.encode("utf-8")).hexdigest(),
-        "sample": value[:8],
+        "sample": safe_items[:8],
     }
-
-
-def _unquote(value: str) -> str:
-    """Strip a matching pair of outer quotes (double or single) from a scalar."""
-    value = value.strip()
-    if len(value) >= 2 and value[0] == value[-1] == '"':
-        try:
-            decoded = json.loads(value)
-        except json.JSONDecodeError:
-            return value[1:-1]
-        return decoded if isinstance(decoded, str) else str(decoded)
-    if len(value) >= 2 and value[0] == value[-1] == "'":
-        return value[1:-1]
-    return value
-
-
-def _split_inline_list(inner: str) -> list[str]:
-    """Split inline-list content on top-level commas, respecting quoted strings.
-
-    Quoted strings preserve commas inside them. Supports both double and
-    single quotes; quote characters are kept on the items (stripped later
-    by ``_unquote``).
-    """
-    items: list[str] = []
-    current: list[str] = []
-    quote: str | None = None
-    for ch in inner:
-        if quote is not None:
-            current.append(ch)
-            if ch == quote:
-                quote = None
-        elif ch in ('"', "'"):
-            quote = ch
-            current.append(ch)
-        elif ch == ",":
-            items.append("".join(current))
-            current = []
-        else:
-            current.append(ch)
-    tail = "".join(current).strip()
-    if tail or items:
-        items.append("".join(current))
-    return items
-
-
-def _serialize_kv(key: str, value: Any) -> str:
-    """Serialize a single key-value pair for the frontmatter region.
-
-    Lists are emitted in inline form. Scalars that are unsafe as YAML plain
-    values are JSON-quoted (JSON strings are valid YAML double-quoted
-    scalars), while ordinary values retain the compact legacy representation.
-    """
-    if isinstance(value, list):
-        if not value:
-            return f"{key}: []"
-        items = ", ".join(_serialize_scalar(v, flow=True) for v in value)
-        return f"{key}: [{items}]"
-    return f"{key}: {_serialize_scalar(value)}"
-
-
-def _serialize_scalar(value: Any, *, flow: bool = False) -> str:
-    text = str(value)
-    yaml_indicator = "-?:,[]{}#&*!|>'\"%@`"
-    unsafe = (
-        not text
-        or text != text.strip()
-        or any(char in text for char in "\n\r\t")
-        or text[0] in yaml_indicator
-        or ":" in text
-        or " #" in text
-        or (
-            flow
-            and (
-                any(char.isspace() for char in text)
-                or any(char in text for char in ",[]{}#?")
-            )
-        )
-    )
-    return json.dumps(text, ensure_ascii=False) if unsafe else text
-
-
-def canonicalize(text: str) -> str:
-    """Serialize supported frontmatter as strict YAML without touching the body."""
-
-    meta, body = parse(text)
-    if not meta:
-        return text
-    rendered = [_FM_DELIM]
-    rendered.extend(_serialize_kv(key, value) for key, value in meta.items())
-    rendered.append(_FM_DELIM)
-    return "\n".join(rendered) + "\n" + body

@@ -60,7 +60,7 @@ def test_patch_entities_frontmatter_merges_existing() -> None:
 
     out = patch_entities_frontmatter(text, registry=registry)
 
-    assert "entities: [qwen, ollama]" in out
+    assert entities.parse(out)[0]["entities"] == ["qwen", "ollama"]
 
 
 def test_entity_proposal_validator_proves_alias_backed_frontmatter_only_edit() -> None:
@@ -120,6 +120,74 @@ def test_entity_proposal_validator_rejects_replacement_disguised_as_backfill() -
             proposal,
             expected_text=original,
             updated_text=tampered,
+            registry=registry,
+        )
+        is False
+    )
+
+
+def test_entity_proposal_validator_rejects_non_string_postimage_entities() -> None:
+    registry = {"qwen": ["Qwen"]}
+    original = _entity_page()
+    updated = (
+        "---\n"
+        "title: Qwen Notes\n"
+        "entities:\n"
+        "- qwen\n"
+        "- injected: mapping\n"
+        "---\n"
+        "notes\n"
+    )
+    proposal = entities.build_semantic_mutation_proposal(
+        page_id="memory",
+        operation="backfill_entities_frontmatter",
+        expected_text=original,
+        updated_text=updated,
+        details=entities._review_evidence(original, updated, registry=registry),
+    )
+
+    assert (
+        entities.validate_entity_backfill_proposal(
+            proposal,
+            expected_text=original,
+            updated_text=updated,
+            registry=registry,
+        )
+        is False
+    )
+
+
+def test_entity_proposal_validator_rejects_non_string_preimage_entities() -> None:
+    registry = {"qwen": ["Qwen"]}
+    original = (
+        "---\n"
+        "title: Qwen Notes\n"
+        "entities:\n"
+        "- existing\n"
+        "- injected: mapping\n"
+        "---\n"
+        "notes\n"
+    )
+    updated = (
+        "---\n"
+        "title: Qwen Notes\n"
+        "entities: [existing, qwen]\n"
+        "---\n"
+        "notes\n"
+    )
+    proposal = entities.build_semantic_mutation_proposal(
+        page_id="memory",
+        operation="backfill_entities_frontmatter",
+        expected_text=original,
+        updated_text=updated,
+        details=entities._review_evidence(original, updated, registry=registry),
+    )
+
+    assert (
+        entities.validate_entity_backfill_proposal(
+            proposal,
+            expected_text=original,
+            updated_text=updated,
             registry=registry,
         )
         is False
@@ -203,7 +271,7 @@ def test_backfill_applies_only_after_frontier_approval(
 
     assert result["updated"] == 1
     assert result["frontier_calls"] == 1
-    assert "entities: [qwen]" in page.read_text(encoding="utf-8")
+    assert entities.parse(page.read_text(encoding="utf-8"))[0]["entities"] == ["qwen"]
 
 
 def test_large_entity_backfill_uses_exact_changed_spans_packet(
@@ -237,7 +305,7 @@ def test_large_entity_backfill_uses_exact_changed_spans_packet(
     assert '"kind": "entity_alias_semantic_evidence"' in prompts[0]
     assert result["invalid_proposals"] == 0
     assert result["updated"] == 1
-    assert "entities: [qwen]" in page.read_text(encoding="utf-8")
+    assert entities.parse(page.read_text(encoding="utf-8"))[0]["entities"] == ["qwen"]
 
 
 def test_local_substring_proposal_cannot_mutate_on_frontier_retry(
@@ -323,7 +391,7 @@ def test_durable_approval_is_reused_after_pre_apply_failure(
 
     assert second["updated"] == 1
     assert second["frontier_calls"] == 0
-    assert "entities: [qwen]" in page.read_text(encoding="utf-8")
+    assert entities.parse(page.read_text(encoding="utf-8"))[0]["entities"] == ["qwen"]
 
 
 def test_dry_run_is_fully_read_only(
@@ -382,7 +450,9 @@ def test_budget_defer_persists_proposal_and_resumes_next_run(
 
     assert second["updated"] == 1
     assert second["frontier_calls"] == 1
-    assert "entities: [qwen]" in second_page.read_text(encoding="utf-8")
+    assert entities.parse(second_page.read_text(encoding="utf-8"))[0]["entities"] == [
+        "qwen"
+    ]
 
 
 def test_both_cli_entrypoints_forward_frontier_budget(monkeypatch, capsys) -> None:

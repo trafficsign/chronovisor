@@ -97,13 +97,7 @@ def _record_mcp_field_activity(
 
 
 def _parse_frontmatter(text: str) -> dict:
-    """Extract frontmatter from markdown.
-
-    Thin wrapper around :func:`frontmatter.parse` that returns just the
-    metadata dict (no body). Behaves as a strict superset of the legacy
-    scalar-only parser: scalar values still come back as ``str``, while
-    inline/block lists are decoded as ``list[str]``.
-    """
+    """Return full-YAML metadata from a canonical Markdown document."""
     meta, _ = _frontmatter_parse(text)
     return meta
 
@@ -1173,12 +1167,8 @@ def chronovisor_reindex() -> str:
 
 def _extract_snippet(content: str, terms: list[str], max_len: int = 150) -> str | None:
     """Extract a relevant snippet from content."""
-    # Skip frontmatter
-    body = content
-    if content.startswith("---"):
-        end = content.find("---", 3)
-        if end != -1:
-            body = content[end + 3 :].strip()
+    _meta, body = _frontmatter_parse(content)
+    body = body.strip()
 
     body_lower = body.lower()
     for term in terms:
@@ -1513,7 +1503,8 @@ def chronovisor_provenance(page: str) -> str:
     # Read target page metadata once (was reread inside loop and again at return)
     page_content = page_path.read_text()
     page_fm = _parse_frontmatter(page_content)
-    page_title_lower = page_fm.get("title", page).lower()
+    page_title = page_fm.get("title")
+    page_title_lower = page_title.lower() if isinstance(page_title, str) else page.lower()
     page_dehyphen = page.replace("-", " ")
     page_updated = page_fm.get("updated", "unknown")
     threshold = page_mtime + timedelta(minutes=30)
@@ -1566,6 +1557,7 @@ def chronovisor_provenance(page: str) -> str:
             "log_entries": log_entries,
         },
         ensure_ascii=False,
+        default=str,
     )
 
 

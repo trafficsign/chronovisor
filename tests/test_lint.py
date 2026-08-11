@@ -9,6 +9,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import subprocess
+import sys
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -455,6 +458,130 @@ class TestTagInvalid:
         assert len(flagged) == 1
         assert flagged[0]["auto_fixable"] is True
         assert "no-prefix" in flagged[0]["detail"]
+
+    def test_typed_yaml_tag_receipts_are_used_at_apply_boundary(
+        self,
+        isolated_wiki: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from chronovisor.ingest import lint as lint_mod
+
+        path = _seed(
+            isolated_wiki,
+            "typed.md",
+            "---\n"
+            "title: Typed tags\n"
+            "tags:\n"
+            "- d/ai\n"
+            "- t/analysis\n"
+            "- s/2026\n"
+            "- !!set\n"
+            "  ? gamma\n"
+            "  ? alpha\n"
+            "  ? beta\n"
+            "---\n"
+            "Body.\n",
+        )
+        original = path.read_text(encoding="utf-8")
+        captured: dict[str, object] = {}
+
+        def review(proposal, **_kwargs):
+            captured["proposal"] = proposal
+            return {"decision": "needs_retry", "summary": "captured", "valid": True}
+
+        monkeypatch.setattr(lint_mod, "_review_safe_fix", review)
+
+        actions = lint_mod.apply_safe_fixes(
+            [{"type": "tag_invalid", "page": "typed", "auto_fixable": True}],
+            reviewer=lambda *_args: _frontier_decision("approved"),
+        )
+
+        proposal = captured["proposal"]
+        assert isinstance(proposal, dict)
+        receipt = {
+            "kind": "canonical_yaml",
+            "utf8_bytes": 62,
+            "sha256": "e6190c20b69f1fc88b14270f6667fa5c89344e05f01a746e81d1bdc06688a357",
+        }
+        assert proposal["details"]["dropped_tags"] == [receipt]
+        assert proposal["details"]["tag_validation_receipt"]["invalid_tags"] == [
+            {"value_repr": receipt, "reason": "tag is not a string"}
+        ]
+        json.dumps(proposal, ensure_ascii=False, allow_nan=False)
+        assert actions[0].startswith("[frontier-retry]")
+        assert path.read_text(encoding="utf-8") == original
+
+    def test_typed_yaml_tag_proposal_hash_ignores_hash_seed(self) -> None:
+        source = (
+            "---\n"
+            "title: Typed tags\n"
+            "status: stable\n"
+            "type: knowledge\n"
+            "tags:\n"
+            "- d/ai\n"
+            "- t/analysis\n"
+            "- s/2026\n"
+            "- !!set\n"
+            "  ? gamma\n"
+            "  ? alpha\n"
+            "  ? beta\n"
+            "---\n"
+            "Body.\n"
+        )
+        script = (
+            "import hashlib, json\n"
+            "from chronovisor.core import frontmatter\n"
+            "from chronovisor.ingest import lint\n"
+            f"source = {source!r}\n"
+            "metadata, _body = frontmatter.parse(source)\n"
+            "raw = metadata['tags'][-1]\n"
+            "kept = ['d/ai', 't/analysis', 's/2026']\n"
+            "updated = frontmatter.patch(source, {'tags': kept})\n"
+            "dropped = frontmatter.review_value(raw)\n"
+            "receipt = lint._build_tag_validation_receipt("
+            "expected_text=source, updated_text=updated, kept=kept, "
+            "dropped_values=[raw])\n"
+            "proposal = lint.build_semantic_mutation_proposal("
+            "page_id='typed-tags', operation='drop_invalid_tags', "
+            "expected_text=source, updated_text=updated, details={"
+            "'kept_tags': kept, 'dropped_tags': [dropped], "
+            "'tag_validation_receipt': receipt})\n"
+            "prompt = lint.build_safe_fix_prompt(proposal, expected_text=source)\n"
+            "print(json.dumps({"
+            "'dropped': dropped, "
+            "'receipt_sha256': receipt['receipt_sha256'], "
+            "'proposal_sha256': lint._canonical_hash(proposal), "
+            "'prompt_sha256': hashlib.sha256(prompt.encode()).hexdigest()"
+            "}, sort_keys=True))\n"
+        )
+        outputs = []
+        for seed in ("1", "2", "3"):
+            completed = subprocess.run(
+                [sys.executable, "-c", script],
+                check=True,
+                capture_output=True,
+                text=True,
+                env={**os.environ, "PYTHONHASHSEED": seed},
+            )
+            outputs.append(completed.stdout.strip())
+
+        assert len(set(outputs)) == 1
+        assert json.loads(outputs[0]) == {
+            "dropped": {
+                "kind": "canonical_yaml",
+                "utf8_bytes": 62,
+                "sha256": "e6190c20b69f1fc88b14270f6667fa5c89344e05f01a746e81d1bdc06688a357",
+            },
+            "receipt_sha256": (
+                "24b87991b80493ae5b412fbfdb6bf3677634ba0d46972b71b318218949e10980"
+            ),
+            "proposal_sha256": (
+                "59306e8196fd40a94ec2ef3ffafbf6f954391fa534910a0ee3ba8b3b7f695d9e"
+            ),
+            "prompt_sha256": (
+                "4594042a63f72ab8268694eb8fb089931bc69d3ada40d3c231f6a2e43d30438c"
+            ),
+        }
 
     def test_apply_safe_fixes_drops_invalid(self, isolated_wiki: Path) -> None:
         from chronovisor.ingest.lint import apply_safe_fixes, check
@@ -1216,11 +1343,54 @@ class TestSafeFixReviewPackets:
 
 
 class TestPageNormalizeIdentityReceipt:
-    def test_normalize_pages_repairs_yaml_without_changing_body(
+    def test_dry_run_conflicts_are_json_safe_for_typed_dates_and_sets(
         self,
         isolated_wiki: Path,
     ) -> None:
-        from chronovisor.core.frontmatter import parse
+        from chronovisor.ops import page_normalize
+
+        _seed(
+            isolated_wiki,
+            "typed-conflict.md",
+            "---\n"
+            "title: Typed conflict\n"
+            "updated: 2026-08-11\n"
+            "features: !!set\n"
+            "  ? gamma\n"
+            "  ? alpha\n"
+            "  ? beta\n"
+            "---\n"
+            "---\n"
+            "title: Typed conflict\n"
+            "updated: 2026-08-10\n"
+            "features: !!set\n"
+            "  ? old\n"
+            "---\n"
+            "Body.\n",
+        )
+
+        payload = page_normalize.normalize_pages(
+            root=isolated_wiki / "pages",
+            write=False,
+        )
+        [conflict] = payload["conflicts"]
+
+        assert conflict["conflicts"]["updated"] == {
+            "outer": "2026-08-11",
+            "inner": "2026-08-10",
+        }
+        assert conflict["conflicts"]["features"]["outer"] == {
+            "kind": "canonical_yaml",
+            "utf8_bytes": 62,
+            "sha256": "e6190c20b69f1fc88b14270f6667fa5c89344e05f01a746e81d1bdc06688a357",
+        }
+        json.dumps(payload, ensure_ascii=False, allow_nan=False)
+
+    def test_normalize_pages_rejects_malformed_yaml_without_changing_page(
+        self,
+        isolated_wiki: Path,
+    ) -> None:
+        from chronovisor.core.canonical_document import CanonicalDocumentError
         from chronovisor.ops import page_normalize
 
         page = _seed(
@@ -1230,23 +1400,20 @@ class TestPageNormalizeIdentityReceipt:
             "recall_questions: [What changed?, Why now?]\n---\n"
             "# Body\n\nKeep this exact.\n",
         )
-        original_body = parse(page.read_text(encoding="utf-8"))[1]
+        original = page.read_text(encoding="utf-8")
 
-        preview = page_normalize.normalize_pages(
-            root=isolated_wiki / "pages",
-            write=False,
-        )
-        written = page_normalize.normalize_pages(
-            root=isolated_wiki / "pages",
-            write=True,
-        )
+        with pytest.raises(CanonicalDocumentError, match="not valid YAML"):
+            page_normalize.normalize_pages(
+                root=isolated_wiki / "pages",
+                write=False,
+            )
+        with pytest.raises(CanonicalDocumentError, match="not valid YAML"):
+            page_normalize.normalize_pages(
+                root=isolated_wiki / "pages",
+                write=True,
+            )
 
-        normalized = page.read_text(encoding="utf-8")
-        assert preview["changed"] == 1
-        assert written["changed"] == 1
-        assert 'title: "Agents-A1: Model Analysis"' in normalized
-        assert 'recall_questions: ["What changed?", "Why now?"]' in normalized
-        assert parse(normalized)[1] == original_body
+        assert page.read_text(encoding="utf-8") == original
 
     def test_permalink_conflict_builds_durable_identity_quarantine(
         self,

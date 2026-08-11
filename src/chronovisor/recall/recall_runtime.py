@@ -1637,8 +1637,8 @@ def context_item_from_page_id(
         meta, _body = parse_frontmatter(path.read_text(encoding="utf-8"))
         if isinstance(meta.get("title"), str):
             title = meta["title"]
-        if isinstance(meta.get("updated"), str):
-            updated = meta["updated"]
+        if meta.get("updated") is not None:
+            updated = str(meta["updated"])
         if isinstance(meta.get("sensitivity"), str):
             sensitivity = meta["sensitivity"].strip().lower() or "normal"
         if isinstance(meta.get("uid"), str):
@@ -1799,11 +1799,10 @@ def find_readable_page(page_id: str, *, root: Path | None = None) -> Path | None
 
 
 def strip_frontmatter(content: str) -> str:
-    if content.startswith("---"):
-        end = content.find("\n---", 3)
-        if end != -1:
-            return content[end + 4 :].strip()
-    return content.strip()
+    from chronovisor.core.frontmatter import parse as parse_frontmatter
+
+    _meta, body = parse_frontmatter(content)
+    return body.strip()
 
 
 def _trim_text(text: str, max_chars: int) -> str:

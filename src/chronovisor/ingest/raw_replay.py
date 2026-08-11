@@ -23,9 +23,9 @@ from pathlib import Path
 from typing import Any
 
 from chronovisor.core.durable_state import sidecar_exclusive_lock as _queue_lock
-from chronovisor.core.frontmatter import parse as parse_frontmatter
 from chronovisor.core.hashutil import sha256_file as _sha256_path
 from chronovisor.core.jobs import JobStatus, job_store
+from chronovisor.core.legacy_frontmatter import parse as parse_frontmatter
 from chronovisor.core.page_mutation import decision_authority_lock
 from chronovisor.core.raw_store import RawStore
 from chronovisor.core.store import CHRONOVISOR_ROOT, RAW_DIR, okf_runtime_operation

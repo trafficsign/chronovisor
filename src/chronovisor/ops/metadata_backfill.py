@@ -9,7 +9,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from chronovisor.core.frontmatter import parse, patch
+from chronovisor.core import frontmatter
 from chronovisor.core.link_fix import atomic_write
 from chronovisor.core.page_mutation import chronovisor_mutation_lock
 from chronovisor.core.runtime_config import runtime_repo_root
@@ -77,7 +77,12 @@ def _stable_local_proposal(original: str, page_id: str) -> str:
             == hashlib.sha256(proposed.encode("utf-8")).hexdigest()
         ):
             return proposed
-    proposed = ensure_recall_metadata_frontmatter(original, page_id, parse, patch)
+    proposed = ensure_recall_metadata_frontmatter(
+        original,
+        page_id,
+        frontmatter.parse,
+        frontmatter.patch,
+    )
     envelope = {
         "version": PROPOSAL_VERSION,
         "page_id": page_id,
@@ -147,7 +152,7 @@ def _backfill_metadata_locked(
             original = path.read_text(encoding="utf-8")
         except OSError:
             continue
-        meta, _body = parse(original)
+        meta, _body = frontmatter.parse(original)
         if meta.get("type") == "reference":
             continue
         summary_missing = (
@@ -179,7 +184,9 @@ def _backfill_metadata_locked(
                 "proposal_generator_version": PROPOSAL_VERSION,
                 "summary_missing": summary_missing,
                 "questions_missing": questions_missing,
-                "generated_frontmatter": parse(proposed)[0],
+                "generated_frontmatter": frontmatter.review_value(
+                    frontmatter.parse(proposed)[0]
+                ),
             },
         )
         review = review_semantic_mutation(

@@ -25,9 +25,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from chronovisor.core import canonical_document, index_store
-from chronovisor.core.frontmatter import parse as parse_frontmatter
-from chronovisor.core.frontmatter import patch as patch_frontmatter
+from chronovisor.core import canonical_document, frontmatter, index_store
 from chronovisor.core.jsonl_write import append_jsonl_durable
 from chronovisor.core.page_mutation import (
     chronovisor_mutation_lock,
@@ -70,6 +68,9 @@ from chronovisor.ingest.convergence import (
     is_human_required_result,
     stable_item_key,
 )
+
+parse_frontmatter = frontmatter.parse
+patch_frontmatter = frontmatter.patch
 
 AUTONOMY_DIR = CHRONOVISOR_ROOT / "autonomy"
 DECISIONS_FILE = AUTONOMY_DIR / "decisions.jsonl"
@@ -2394,8 +2395,8 @@ def resolve_deferred_duplicates_with_frontier(
                 **candidate,
                 "left_content_hash": left_snapshot["content_hash"],
                 "right_content_hash": right_snapshot["content_hash"],
-                "left_meta": left_snapshot["meta"],
-                "right_meta": right_snapshot["meta"],
+                "left_meta": frontmatter.review_value(left_snapshot["meta"]),
+                "right_meta": frontmatter.review_value(right_snapshot["meta"]),
                 "left_excerpt": left_snapshot["excerpt"],
                 "right_excerpt": right_snapshot["excerpt"],
                 "local_reason": local_decision.get("reason"),
@@ -3150,7 +3151,7 @@ def apply_retention_archives(
             review_candidate = {
                 "page_id": page_id,
                 "content_hash": snapshot["content_hash"],
-                "meta": snapshot["meta"],
+                "meta": frontmatter.review_value(snapshot["meta"]),
                 "excerpt": snapshot["excerpt"],
                 "retention": row,
                 "local_recommendation": "deprecate",

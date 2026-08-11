@@ -35,6 +35,36 @@ class _UniqueKeyLoader(yaml.SafeLoader):  # type: ignore[misc]
     pass
 
 
+class _CanonicalDumper(yaml.SafeDumper):  # type: ignore[misc]
+    pass
+
+
+def _represent_deterministic_set(dumper: Any, value: set[Any]) -> Any:
+    """Order SafeLoader-compatible scalar set keys without sorting mappings."""
+
+    nodes = []
+    for item in value:
+        key_node = dumper.represent_data(item)
+        if not isinstance(key_node, yaml.nodes.ScalarNode):
+            raise yaml.representer.RepresenterError(
+                "canonical YAML sets require scalar keys"
+            )
+        nodes.append(
+            (
+                key_node,
+                yaml.nodes.ScalarNode(
+                    tag="tag:yaml.org,2002:null",
+                    value="null",
+                ),
+            )
+        )
+    nodes.sort(key=lambda row: (row[0].tag, row[0].value, row[0].style or ""))
+    return yaml.nodes.MappingNode(tag="tag:yaml.org,2002:set", value=nodes)
+
+
+_CanonicalDumper.add_representer(set, _represent_deterministic_set)
+
+
 def _construct_unique_mapping(
     loader: Any, node: Any, *, deep: bool = False
 ) -> dict[Any, Any]:
@@ -100,8 +130,9 @@ def serialize_document(document: CanonicalDocument) -> bytes:
     try:
         rendered = cast(
             str,
-            yaml.safe_dump(
+            yaml.dump(
                 document.metadata,
+                Dumper=_CanonicalDumper,
                 allow_unicode=True,
                 default_flow_style=False,
                 sort_keys=False,
@@ -519,7 +550,7 @@ def _opening_end(data: bytes) -> int:
 def _load_metadata(data: bytes) -> dict[str, Any]:
     try:
         loaded = yaml.load(data.decode("utf-8"), Loader=_UniqueKeyLoader)
-    except (UnicodeDecodeError, yaml.YAMLError) as exc:
+    except (TypeError, UnicodeDecodeError, yaml.YAMLError) as exc:
         raise CanonicalDocumentError(f"frontmatter is not valid YAML: {exc}") from exc
     if loaded is None:
         return {}

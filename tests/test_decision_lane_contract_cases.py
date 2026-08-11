@@ -4,6 +4,9 @@ import hashlib
 import importlib
 import inspect
 import json
+import os
+import subprocess
+import sys
 from collections import Counter
 
 import pytest
@@ -37,11 +40,14 @@ from chronovisor.decision.decision_lane_prompts import (
     INGEST_REPAIR_OPTION_POLICY_VERSION,
     INGEST_REVIEW_MODEL_BLOCK,
     _exact_text_change_projection,
+    _frontmatter_field_keys,
     _frontmatter_identity_fields,
+    _page_identity_projection,
     build_ingest_reconciliation_prompt,
     build_ingest_review_projection,
     build_raw_replay_reconciliation_prompt,
     canonical_json_sha256,
+    tag_repair_page_excerpt,
     validate_ingest_review_projection,
 )
 from chronovisor.decision.decision_policy import DECISION_POLICIES
@@ -563,6 +569,40 @@ def test_shared_page_mutation_contracts_use_reachable_evidence_states() -> None:
 
     assert cases[("lint_safe_semantic_mutation", 3)].expected["decision"] == (
         "rejected"
+    )
+
+
+def test_metadata_backfill_contract_uses_typed_yaml_review_receipts() -> None:
+    cases = {
+        case.ordinal: case
+        for case in decision_lane_contract_case_specs()
+        if case.lane == "metadata_backfill"
+    }
+    dated = _safe_mutation_proposal(cases[1])
+    with_set = _safe_mutation_proposal(cases[2])
+
+    assert dated["details"]["generated_frontmatter"] == {
+        "recall_questions": ["How does the scheduler admit runners?"],
+        "summary": "The scheduler admits runners based on memory and context.",
+        "title": "Model residency",
+        "updated": "2026-08-11",
+    }
+    assert with_set["details"]["generated_frontmatter"] == {
+        "kind": "canonical_yaml",
+        "utf8_bytes": 237,
+        "sha256": "7203d0b05ed17a962ef17ea8574b60c201edf4e2135123fd8176f792d80c8744",
+    }
+    assert dated["proposal_sha256"] == (
+        "6914709d88c3cb170fdd98d5b4dd4687600d9c00e57c13ff7bd58315b6b70d39"
+    )
+    assert with_set["proposal_sha256"] == (
+        "9b74e58b87a9190e3b39ea60abd280cb1ffb3ca45665b7a0e0ffd727cf8aa967"
+    )
+    assert hashlib.sha256(cases[1].prompt.encode("utf-8")).hexdigest() == (
+        "4da846a1ba61e6c524efb7b1f7e154eb0bb3c663349243eedb40a35ecd8511b7"
+    )
+    assert hashlib.sha256(cases[2].prompt.encode("utf-8")).hexdigest() == (
+        "e74e225d5ccfdf138f5855ca575e5190afdcae0319208aefb57ed1e0064cc52c"
     )
 
 
@@ -1102,6 +1142,12 @@ def test_ingest_review_projection_keeps_full_page_identity_for_distant_hunk() ->
 
     projection = build_ingest_review_projection(proposal)
     [prepared] = projection["prepared_operations"]
+    identity_fields = json.dumps(
+        {"title": "Alice account state"},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
 
     assert prepared["page_identity"] == {
         "mode": "shared",
@@ -1113,10 +1159,10 @@ def test_ingest_review_projection_keeps_full_page_identity_for_distant_hunk() ->
         "proposed_frontmatter_sha256": hashlib.sha256(
             frontmatter.encode("utf-8")
         ).hexdigest(),
-        "identity_fields": "title: Alice account state\n",
-        "identity_fields_utf8_bytes": len(b"title: Alice account state\n"),
+        "identity_fields": identity_fields,
+        "identity_fields_utf8_bytes": len(identity_fields.encode("utf-8")),
         "identity_fields_sha256": hashlib.sha256(
-            b"title: Alice account state\n"
+            identity_fields.encode("utf-8")
         ).hexdigest(),
     }
     assert "Alice account state" not in json.dumps(
@@ -1140,13 +1186,142 @@ def test_frontmatter_identity_fields_require_exact_top_level_keys() -> None:
         "---\n"
     )
 
-    assert _frontmatter_identity_fields(frontmatter) == (
-        "title: Exact title\n"
-        "canonical: canonical-page\n"
-        "slug: exact-slug\n"
-        "page_id: exact-page\n"
-        "aliases:\n  - exact-alias\n"
+    assert _frontmatter_identity_fields(frontmatter) == json.dumps(
+        {
+            "aliases": ["exact-alias"],
+            "canonical": "canonical-page",
+            "page_id": "exact-page",
+            "slug": "exact-slug",
+            "title": "Exact title",
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
     )
+
+
+def test_quoted_top_level_key_change_is_an_identity_mutation() -> None:
+    previous = '---\n"title": Stable identity\n---\nBody.\n'
+    proposed = '---\n"summary": Stable identity\n---\nBody.\n'
+
+    identity = _page_identity_projection(previous, proposed, op_type="update")
+
+    assert identity["mode"] == "distinct"
+    assert identity["previous_identity_fields"] == '{"title":"Stable identity"}'
+    assert identity["proposed_identity_fields"] == ""
+    assert identity["previous_frontmatter_sha256"] == hashlib.sha256(
+        b'---\n"title": Stable identity\n---\n'
+    ).hexdigest()
+    assert _frontmatter_field_keys(
+        previous,
+        span_start=len("---\n"),
+        span_end=len('---\n"title": Stable identity\n'),
+    ) == ["title"]
+
+
+def test_typed_identity_and_tag_prompt_ignore_hash_seed() -> None:
+    previous = (
+        "---\n"
+        "title: Typed identity\n"
+        "aliases:\n"
+        "  1: numeric\n"
+        '  "1": string\n'
+        "  choices: !!set\n"
+        "    ? gamma\n"
+        "    ? alpha\n"
+        "    ? beta\n"
+        "---\n"
+        "Body.\n"
+    )
+    changed = previous.replace("    ? gamma\n", "    ? delta\n")
+    tag_source = (
+        "---\n"
+        "title: Typed tags\n"
+        "updated: 2026-08-11\n"
+        "tags: !!set\n"
+        "  ? d/ai\n"
+        "  ? t/architecture\n"
+        "---\n"
+        "Body.\n"
+    )
+    script = (
+        "import hashlib, json\n"
+        "from chronovisor.decision.decision_lane_prompts import "
+        "_frontmatter_identity_fields, _page_identity_projection, "
+        "build_frontier_tag_repair_prompt, tag_repair_page_excerpt\n"
+        f"previous = {previous!r}\n"
+        f"changed = {changed!r}\n"
+        f"tag_source = {tag_source!r}\n"
+        "tag_prompt = build_frontier_tag_repair_prompt("
+        "{'page_id': 'typed-tags', 'issues': ['invalid tag']}, tag_source, "
+        "local_proposal={'decision': 'approved', 'tags': ['d/ai']})\n"
+        "print(json.dumps({"
+        "'previous_identity': _frontmatter_identity_fields(previous), "
+        "'changed_identity': _frontmatter_identity_fields(changed), "
+        "'identity_mode': _page_identity_projection("
+        "previous, changed, op_type='update')['mode'], "
+        "'tag_excerpt': tag_repair_page_excerpt(tag_source), "
+        "'tag_prompt_sha256': hashlib.sha256(tag_prompt.encode()).hexdigest()"
+        "}, sort_keys=True))\n"
+    )
+    outputs = []
+    for seed in ("1", "2", "3"):
+        completed = subprocess.run(
+            [sys.executable, "-c", script],
+            check=True,
+            capture_output=True,
+            text=True,
+            env={**os.environ, "PYTHONHASHSEED": seed},
+        )
+        outputs.append(completed.stdout.strip())
+
+    assert len(set(outputs)) == 1
+    assert json.loads(outputs[0]) == {
+        "previous_identity": (
+            '{"kind":"canonical_yaml","sha256":'
+            '"de5fedbbe1520fffe6541a8d51d5e56d1840ab3cc3cbf809c84202c8ce01ccd1",'
+            '"utf8_bytes":153}'
+        ),
+        "changed_identity": (
+            '{"kind":"canonical_yaml","sha256":'
+            '"51e14a6931ff91d6f410480c42e3ae0cfe9eb2864d150468b35c18615cd6765d",'
+            '"utf8_bytes":153}'
+        ),
+        "identity_mode": "distinct",
+        "tag_excerpt": (
+            "{\n"
+            '  "kind": "canonical_yaml",\n'
+            '  "utf8_bytes": 111,\n'
+            '  "sha256": "f44cef33edb7ba5daf4c9031862e0fa274e1cef113d22d15eaceedc36796a670"\n'
+            "}\n\n"
+            "Body.\n"
+        ),
+        "tag_prompt_sha256": (
+            "aa9e7ffddc2a2c4395ca7becbf20e0301581d15985264a05a06c48f5c85b45fb"
+        ),
+    }
+    dated_excerpt = tag_repair_page_excerpt(
+        "---\ntitle: Dated\nupdated: 2026-08-11\n---\nBody.\n"
+    )
+    assert '"updated": "2026-08-11"' in dated_excerpt
+
+
+def test_mixed_eol_eof_frontmatter_uses_formal_identity_boundary() -> None:
+    previous = '---\r\n"title": Previous\n---'
+    proposed = '---\r\n"title": Proposed\r\n---'
+
+    identity = _page_identity_projection(previous, proposed, op_type="update")
+
+    assert identity["mode"] == "distinct"
+    assert identity["previous_identity_fields"] == '{"title":"Previous"}'
+    assert identity["proposed_identity_fields"] == '{"title":"Proposed"}'
+    assert identity["previous_frontmatter_utf8_bytes"] == len(previous.encode("utf-8"))
+    assert identity["proposed_frontmatter_utf8_bytes"] == len(proposed.encode("utf-8"))
+    assert _frontmatter_field_keys(
+        previous,
+        span_start=len("---\r\n"),
+        span_end=len(previous),
+    ) == ["title"]
 
 
 def test_frontmatter_only_hunks_do_not_duplicate_large_metadata_context() -> None:
@@ -1256,8 +1431,8 @@ def test_large_frontmatter_field_keeps_key_and_local_change_context() -> None:
     [hunk] = projection["prepared_operations"][0]["exact_change_hunks"]
     field_context = hunk["frontmatter_field_context"]
 
-    assert field_context["previous_fields"] == ["raw_keywords"]
-    assert field_context["proposed_fields"] == ["raw_keywords"]
+    assert field_context["previous_fields"] == ["raw_keywords", "title"]
+    assert field_context["proposed_fields"] == ["raw_keywords", "title"]
     assert "keyword-149" in field_context["previous_before"]
     assert field_context["previous_before"] == field_context["proposed_before"]
     assert field_context["previous_after"].startswith("-150, keyword-151")
@@ -1876,6 +2051,43 @@ def test_ingest_preflight_never_lets_negative_triage_authorize_tag_deletion(
         option["invalid_tags"] == ["d/finance"]
         for option in preflight["semantic_tag_options"]
     )
+
+
+def test_ingest_preflight_builds_tag_options_from_block_list_metadata() -> None:
+    from chronovisor.core.frontmatter import parse
+
+    raw = "The runtime uses a local model."
+    filename = "memory/runtime.md"
+    content = (
+        "---\n"
+        "title: Runtime\n"
+        "tags:\n"
+        "- d/configuration\n"
+        "- d/finance\n"
+        "- t/reference\n"
+        "- s/evergreen\n"
+        "---\n"
+        f"{raw}\n"
+    )
+    prompt = build_ingest_reconciliation_prompt(
+        _complete_create_ingest_proposal(
+            raw=raw,
+            triage_plan=[],
+            operations=[{"type": "create", "filename": filename, "content": content}],
+        )
+    )
+    preflight = _host_repair_preflight(prompt)
+    option = next(
+        item
+        for item in preflight["semantic_tag_options"]
+        if item["invalid_tags"] == ["d/finance"]
+    )
+    [replacement] = option["replacement_operations"]
+    metadata, body = parse(replacement["content"])
+
+    assert replacement["filename"] == filename
+    assert metadata["tags"] == ["d/configuration", "t/reference", "s/evergreen"]
+    assert body == f"{raw}\n"
 
 
 def test_ingest_preflight_scopes_a_shared_tag_option_to_one_filename() -> None:

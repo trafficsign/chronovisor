@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from pathlib import Path
 
 import pytest
@@ -74,3 +76,75 @@ def test_local_metadata_proposal_is_stable_for_exact_preimage(tmp_path: Path, mo
     second = metadata_backfill._stable_local_proposal("original", "page")
 
     assert first == second == "proposal one"
+
+
+def test_typed_yaml_generated_frontmatter_has_stable_proposal_and_prompt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from chronovisor.decision.lint_mutation_contract import (
+        build_safe_fix_prompt,
+        canonical_hash,
+    )
+
+    page = tmp_path / "typed.md"
+    original = (
+        "---\n"
+        "title: Typed metadata\n"
+        "updated: 2026-08-11\n"
+        "features: !!set\n"
+        "  ? gamma\n"
+        "  ? alpha\n"
+        "  ? beta\n"
+        "---\n"
+        "Body.\n"
+    )
+    page.write_text(original, encoding="utf-8")
+    monkeypatch.setattr(metadata_backfill, "all_pages", lambda: [page])
+    monkeypatch.setattr(metadata_backfill, "REVIEW_DIR", tmp_path / "reviews")
+
+    def propose(text, _page_id, _parse, patch):
+        return patch(
+            text,
+            {
+                "summary": "Typed metadata summary.",
+                "recall_questions": ["What is typed metadata?"],
+            },
+        )
+
+    monkeypatch.setattr(
+        metadata_backfill,
+        "ensure_recall_metadata_frontmatter",
+        propose,
+    )
+    captured: dict[str, object] = {}
+
+    def review(proposal, **kwargs):
+        captured["proposal"] = proposal
+        captured["updated_text"] = kwargs["updated_text"]
+        return {"decision": "needs_retry", "summary": "captured", "valid": True}
+
+    monkeypatch.setattr(metadata_backfill, "review_semantic_mutation", review)
+
+    result = metadata_backfill.backfill_metadata(
+        limit=1,
+        max_frontier_calls=1,
+        reviewer=lambda *_args: _decision("approved"),
+    )
+
+    proposal = captured["proposal"]
+    assert isinstance(proposal, dict)
+    assert proposal["details"]["generated_frontmatter"] == {
+        "kind": "canonical_yaml",
+        "utf8_bytes": 209,
+        "sha256": "abfc0893cec8e4ad01233b2a8658773835e8ebe9ed392b66722ff436edda0890",
+    }
+    prompt = build_safe_fix_prompt(proposal, expected_text=original)
+    assert canonical_hash(proposal) == (
+        "e5c88cc907e086f2f5184afe640485b8305cf8483e27680151f047b59b7a64cb"
+    )
+    assert hashlib.sha256(prompt.encode("utf-8")).hexdigest() == (
+        "68e9c7622bad4f9f6b993e7e78cd35f776404983728da475cc07b09186807f86"
+    )
+    json.dumps(proposal, ensure_ascii=False, allow_nan=False)
+    assert result["retry"] == 1

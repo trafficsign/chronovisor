@@ -5,6 +5,9 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from chronovisor.core.canonical_document import CanonicalDocumentError
+from chronovisor.core.frontmatter import parse as parse_frontmatter
+
 
 @dataclass
 class ScoredPage:
@@ -28,16 +31,18 @@ _CJK_RANGES = (
     ("\uff66", "\uff9f"),  # Halfwidth Katakana
 )
 
-FRONTMATTER_RE = re.compile(r"^---\n.*?\n---\n", re.DOTALL)
-
-
 def _is_cjk(ch: str) -> bool:
     return any(lo <= ch <= hi for lo, hi in _CJK_RANGES)
 
 
 def tokenize(text: str) -> list[str]:
     """Tokenize text: ASCII words + CJK character bigrams."""
-    text = FRONTMATTER_RE.sub("", text)
+    try:
+        _meta, text = parse_frontmatter(text)
+    except (CanonicalDocumentError, UnicodeError):
+        # Search queries are untrusted text, not canonical page documents.
+        # A query that happens to start with ``---`` must remain searchable.
+        pass
     text_lower = text.lower()
 
     tokens: list[str] = []

@@ -1698,6 +1698,29 @@ X2_RETIRED_RESERVED_SCAN_SITE_IDS = (
     "arch:9173bd8b2fc7f59a7afd7e9959fb2ff9c8e98115fb8c4d807e4a475189cfd64e",
     "arch:9ac0d7b49d5343bb0a6493e3f06e8949d08c36fc3d6c5873c4b123bc9a05527a",
 )
+X2_RETIRED_LEGACY_FRONTMATTER_SITE_IDS = (
+    "arch:0ecdeb9e9895013d791c96d927f72edb25392363a03bfa3896d2ed7a6a47f1aa",
+    "arch:ce7837577113b86fa6238840982f944cebe2f89b6e681efa2b2f1975c6ad4a57",
+    "arch:d0cd7ded129b1508b47a663fec1c980a93e86aa2fd9f3169f03f837a5e0c2681",
+    "arch:dec43943da27a54efc121c3069a5d6270a237f1e87e6d71da5dd71827d232467",
+)
+X2_RETIRED_FACADE_REVIEW_SITE_IDS = (
+    "arch:0a25edb8ac06242d9456699c6c4dbac5d15298dbedda03f8374e2453a4e440d0",
+    "arch:855f2c0a9627998b4eaa097bbf08d74b16048e6886ad8974113ea71ecc43e8b9",
+    "arch:cb9afd61c0783cb6927f7c8ab37a4dd4a1ec7c4fa9940e89b38153b8b7bd4a53",
+)
+X2_RETIRED_REVIEW_BOUNDARY_SITE_IDS = (
+    "arch:34bca37a40f2e5e70a026d525105f2db4e76dc09c697dce3f6cc85e5e34fd998",
+    "arch:3a13e44c7457c034fae2c56d1c654f77b34c71d565bd719ae48455c5f7cbb5ad",
+    "arch:4e37fc7e41732771f3855c0bed7b60490fcad07aa6f8386567ab292460857587",
+    "arch:73d3076af8db4aa333312edba6125c04c84737915ae71300c632e5f484cc7f1e",
+    "arch:dbdc730fa4c6a5b8f450d26d8baa3308826a7d8905a6a8263cd38cb014293d11",
+    "arch:f2d7d9c21d39c59fd85104c67925129154ccda9359fd50b545399f1b5251a5b8",
+)
+X2_RETIRED_TAG_REVIEW_SITE_IDS = (
+    "arch:83a6093f904de1f5dffe43b2f27b63c438bc0cc9dbb31eec5327ac501e5598ef",
+    "arch:e093dee0c477a5bc47b4d8589f34ccce11558d8e73375cedf399b91b858f7d84",
+)
 X_RETIRED_STABLE_RUNTIME_SITE_IDS = (
     "arch:06466922ae000e9d3f89146eb70643b09c760b36bb23f65338966577e8a99768",
     "arch:0aaccc45241a6e959255c24846e15059102566d05dc4fd1b908a6cbf23692ce2",
@@ -2081,6 +2104,10 @@ RETIREMENT_HISTORY = {
                 X2_RETIRED_SERVER_WIKI_LINK_SITE_ID,
                 *X2_RETIRED_CANONICAL_WRITER_SITE_IDS,
                 *X2_RETIRED_RESERVED_SCAN_SITE_IDS,
+                *X2_RETIRED_LEGACY_FRONTMATTER_SITE_IDS,
+                *X2_RETIRED_FACADE_REVIEW_SITE_IDS,
+                *X2_RETIRED_REVIEW_BOUNDARY_SITE_IDS,
+                *X2_RETIRED_TAG_REVIEW_SITE_IDS,
                 *X_RETIRED_STABLE_RUNTIME_SITE_IDS,
                 *W6A_RETIRED_CLASSIFICATION_RUNTIME_SITE_IDS,
                 *W6B_RETIRED_NEMOTRON_RUNTIME_SITE_IDS,
@@ -2532,7 +2559,7 @@ def test_baseline_labels_repository_contract_hash_semantics(
     schema = hashes["production_schema_manifest"]
     signature = hashes["production_signature_manifest"]
     assert authority["lane_contract_case_manifest_sha256"] == (
-        "69576c347c6989c7bd22fee5f8b8a8a0b360d6033ceff66f2693784085eecd94"
+        "fb2c30aae39ea9fd100edd0610e1439af3ee6bc5d9cafac06ee961151660cae3"
     )
     assert schema["canonical_mapping_sha256"]["sha256"] == (
         "938aceee8b448a3d1cee0403d15a2de847eedb19a99d1a94663ef23b0f37f91b"

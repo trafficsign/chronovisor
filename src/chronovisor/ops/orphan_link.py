@@ -203,11 +203,10 @@ def _page_head(page_id: str, max_chars: int = 500) -> str:
     if path is None:
         return ""
     try:
-        text = path.read_text()
-    except OSError:
+        document = canonical_document.parse_document(path.read_bytes())
+        body = document.body.decode("utf-8").lstrip()
+    except (OSError, UnicodeDecodeError, canonical_document.CanonicalDocumentError):
         return ""
-    # Strip frontmatter.
-    body = re.sub(r"^---\n.*?\n---\n?", "", text, count=1, flags=re.DOTALL).lstrip()
     return body[:max_chars]
 
 

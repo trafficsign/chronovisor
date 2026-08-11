@@ -871,7 +871,7 @@ def _raw_unit_keywords(
 
     if raw_keywords is not None:
         return list(raw_keywords)
-    from chronovisor.core.frontmatter import parse as _frontmatter_parse
+    from chronovisor.core.legacy_frontmatter import parse as _frontmatter_parse
 
     meta, _body = _frontmatter_parse(raw_text)
     current = _coerce_str_list(meta.get("raw_keywords"))

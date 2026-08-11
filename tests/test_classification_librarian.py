@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import subprocess
+import sys
 from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
@@ -172,6 +175,69 @@ def test_classification_source_hash_ignores_adopted_metadata() -> None:
     )
 
     assert classification_source_sha256(before) == classification_source_sha256(after)
+
+
+def test_classification_source_hash_is_stable_for_typed_yaml_across_hash_seeds() -> None:
+    source = (
+        "---\n"
+        "title: Typed classification\n"
+        "summary: 2026-08-11\n"
+        "tags: !!set\n"
+        "  ? gamma\n"
+        "  ? alpha\n"
+        "  ? beta\n"
+        "type: knowledge\n"
+        "status: stable\n"
+        "---\n\n"
+        "# Typed classification\n"
+    )
+    script = (
+        "from chronovisor.recall.classification import "
+        "classification_source_sha256\n"
+        f"source = {source!r}\n"
+        "print(classification_source_sha256(source))\n"
+    )
+    outputs = []
+    for seed in ("1", "2", "3"):
+        completed = subprocess.run(
+            [sys.executable, "-c", script],
+            check=True,
+            capture_output=True,
+            text=True,
+            env={**os.environ, "PYTHONHASHSEED": seed},
+        )
+        outputs.append(completed.stdout.strip())
+
+    assert outputs == [
+        "198da5dc222ed579ae7b9e0f1aa2df909078eb757f98f91b921943e6606ed7aa"
+    ] * 3
+
+
+def test_librarian_shadow_continues_typed_yaml_sweep(tmp_path: Path) -> None:
+    page = tmp_path / "pages" / "typed-classification.md"
+    page.parent.mkdir(parents=True)
+    page.write_text(
+        "---\n"
+        "title: Typed classification\n"
+        "summary: 2026-08-11\n"
+        "tags: !!set\n"
+        "  ? gamma\n"
+        "  ? alpha\n"
+        "  ? beta\n"
+        "type: knowledge\n"
+        "status: stable\n"
+        "---\n\n"
+        "# Typed classification\n",
+        encoding="utf-8",
+    )
+
+    first = run_legacy_udc_shadow(root=tmp_path, full_sweep=True)
+    repeated = run_legacy_udc_shadow(root=tmp_path, full_sweep=True)
+
+    assert first["status"] == "ok"
+    assert first["selected"] == 1
+    assert repeated["selected"] == 0
+    assert repeated["registry"]["updated"] == 0
 
 
 def test_librarian_shadow_progress_is_visible_but_not_false_green(

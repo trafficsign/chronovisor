@@ -15,14 +15,14 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from chronovisor.core import index_store, store
+from chronovisor.core import frontmatter, index_store, store
+from chronovisor.core.canonical_document import CanonicalDocumentError
 from chronovisor.core.canonical_json import (
     canonical_json_sha256_stringifying_strict as canonical_json_sha256,
 )
 from chronovisor.core.canonical_json import (
     canonical_json_stringifying_strict as _canonical_json,
 )
-from chronovisor.core.frontmatter import parse as parse_frontmatter
 from chronovisor.core.hashutil import sha256_text as _sha256_text
 from chronovisor.core.tag_rules import (
     SEED_TAGS,
@@ -34,6 +34,9 @@ from chronovisor.decision.decision_schema_manifest import (
     FRONTIER_LABEL_SCHEMA,
     TAG_REPAIR_SCHEMA,
 )
+
+parse_frontmatter = frontmatter.parse
+patch_frontmatter = frontmatter.patch
 
 INGEST_REPAIR_OPTION_POLICY_VERSION = 2
 INGEST_REPAIR_OPTION_ID_RE = re.compile(r"^rp_[0-9a-f]{32}$")
@@ -204,7 +207,11 @@ def tag_repair_page_excerpt(text: str, *, limit: int = 6000) -> str:
         for key in ("title", "summary", "updated", "page_type", "sensitivity", "tags")
         if key in meta
     }
-    return json.dumps(header, ensure_ascii=False, indent=2) + "\n\n" + body[:limit]
+    return (
+        json.dumps(frontmatter.review_value(header), ensure_ascii=False, indent=2)
+        + "\n\n"
+        + body[:limit]
+    )
 
 
 def build_frontier_tag_repair_prompt(
@@ -562,35 +569,27 @@ def _deterministic_ingest_repair_preflight(
     replacements: list[dict[str, str]] = []
     generated_tags: dict[str, list[str]] = {}
     generated_contents: dict[str, str] = {}
-    generated_tag_lines: dict[str, str] = {}
     for operation in proposal.get("local_generated_operations", []):
         if not isinstance(operation, dict) or operation.get("type") != "create":
             continue
         filename = str(operation.get("filename") or "")
         content = str(operation.get("content") or "")
-        if (
-            not filename
-            or not content.startswith("---\n")
-            or "\n---\n" not in content[4:]
-        ):
+        if not filename or not content.startswith(("---\n", "---\r\n")):
             continue
-        frontmatter, body = content[4:].split("\n---\n", 1)
-        lines = frontmatter.splitlines()
-        tag_index = next(
-            (index for index, line in enumerate(lines) if line.startswith("tags:")),
-            None,
+        try:
+            metadata, body = parse_frontmatter(content)
+        except (CanonicalDocumentError, UnicodeError):
+            continue
+        tag_value = metadata.get("tags")
+        tags = (
+            list(tag_value)
+            if isinstance(tag_value, list)
+            and all(isinstance(item, str) for item in tag_value)
+            else []
         )
-        tags: list[str] = []
-        if tag_index is not None:
-            match = re.fullmatch(r"tags:\s*\[(.*)\]\s*", lines[tag_index])
-            if match is not None:
-                tags = [
-                    item.strip() for item in match.group(1).split(",") if item.strip()
-                ]
-        if tags and tag_index is not None:
+        if tags:
             generated_tags[filename] = tags
             generated_contents[filename] = content
-            generated_tag_lines[filename] = lines[tag_index]
         canonical_body = raw if raw.endswith(("\n", "\r")) else raw + "\n"
         allowed_bodies = {raw, canonical_body}
         has_unsupported_extra = bool(
@@ -598,11 +597,11 @@ def _deterministic_ingest_repair_preflight(
         )
         if not has_unsupported_extra:
             continue
-        corrected_frontmatter = "\n".join(lines)
+        frontmatter = content[: -len(body)] if body else content
         replacements.append(
             {
                 "filename": filename,
-                "content": f"---\n{corrected_frontmatter}\n---\n{canonical_body}",
+                "content": frontmatter + canonical_body,
             }
         )
 
@@ -622,24 +621,22 @@ def _deterministic_ingest_repair_preflight(
                 continue
             option_replacements = [dict(replacement) for replacement in replacements]
             target_found = False
-            before = generated_tag_lines[filename]
-            after = f"tags: [{', '.join(kept)}]"
             for replacement in replacements:
                 if replacement["filename"] != filename:
                     continue
                 target_found = True
                 for option_replacement in option_replacements:
                     if option_replacement["filename"] == filename:
-                        option_replacement["content"] = option_replacement[
-                            "content"
-                        ].replace(before, after, 1)
+                        option_replacement["content"] = patch_frontmatter(
+                            option_replacement["content"], {"tags": kept}
+                        )
                         break
             if not target_found:
                 option_replacements.append(
                     {
                         "filename": filename,
-                        "content": generated_contents[filename].replace(
-                            before, after, 1
+                        "content": patch_frontmatter(
+                            generated_contents[filename], {"tags": kept}
                         ),
                     }
                 )
@@ -1020,13 +1017,10 @@ def _minimal_changed_span(
 def _frontmatter_identity_text(document: str) -> str:
     """Return the full leading YAML frontmatter without truncation."""
 
-    for opening, closing in (("---\n", "\n---\n"), ("---\r\n", "\r\n---\r\n")):
-        if not document.startswith(opening):
-            continue
-        end = document.find(closing, len(opening))
-        if end >= 0:
-            return document[: end + len(closing)]
-    return ""
+    if not document.startswith(("---\n", "---\r\n")):
+        return ""
+    _metadata, body = parse_frontmatter(document)
+    return document[: -len(body)] if body else document
 
 
 def _frontmatter_field_keys(
@@ -1035,30 +1029,18 @@ def _frontmatter_field_keys(
     span_start: int,
     span_end: int,
 ) -> list[str]:
-    """Return every complete top-level YAML field intersecting one hunk."""
+    """Return formal top-level YAML keys when one hunk intersects frontmatter."""
 
     frontmatter = _frontmatter_identity_text(document)
-    if not frontmatter or span_start > len(frontmatter) or span_end < 0:
+    intersects = (
+        0 <= span_start < len(frontmatter)
+        if span_start == span_end
+        else span_end > 0 and span_start < len(frontmatter)
+    )
+    if not frontmatter or not intersects:
         return []
-    keys: list[str] = []
-    active_key: str | None = None
-    offset = 0
-    for line in frontmatter.splitlines(keepends=True):
-        line_end = offset + len(line)
-        match = re.match(r"^([A-Za-z_][A-Za-z0-9_-]*):", line)
-        if match is not None:
-            active_key = match.group(1)
-        elif line.startswith("---"):
-            active_key = None
-        intersects = (
-            offset <= span_start < line_end
-            if span_start == span_end
-            else line_end > span_start and offset < span_end
-        )
-        if active_key is not None and intersects and active_key not in keys:
-            keys.append(active_key)
-        offset = line_end
-    return keys
+    metadata, _body = parse_frontmatter(frontmatter)
+    return sorted(metadata)
 
 
 _PAGE_IDENTITY_FRONTMATTER_KEYS = frozenset(
@@ -1075,20 +1057,16 @@ _PAGE_IDENTITY_FRONTMATTER_KEYS = frozenset(
 )
 
 
-def _frontmatter_identity_fields(frontmatter: str) -> str:
-    """Select complete, exact YAML nodes that establish page identity."""
+def _frontmatter_identity_fields(frontmatter_text: str) -> str:
+    """Return the formal YAML semantic projection of page identity fields."""
 
-    selected: list[str] = []
-    keep = False
-    for line in frontmatter.splitlines(keepends=True):
-        match = re.match(r"^([A-Za-z_][A-Za-z0-9_-]*):", line)
-        if match is not None:
-            keep = match.group(1) in _PAGE_IDENTITY_FRONTMATTER_KEYS
-        elif line.startswith("---"):
-            keep = False
-        if keep:
-            selected.append(line)
-    return "".join(selected)
+    metadata, _body = parse_frontmatter(frontmatter_text)
+    identity = {
+        key: value
+        for key, value in metadata.items()
+        if key in _PAGE_IDENTITY_FRONTMATTER_KEYS
+    }
+    return _canonical_json(frontmatter.review_value(identity)) if identity else ""
 
 
 def _page_identity_projection(

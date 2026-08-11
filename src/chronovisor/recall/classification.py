@@ -9,7 +9,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-from chronovisor.core import frontmatter, ollama
+from chronovisor.core import canonical_document, frontmatter, ollama
 
 CLASSIFICATION_SCHEMA = 'chronovisor.classification.classification.v1'
 PACKAGE_SCHEMA = "chronovisor.udcs-package.v1"
@@ -334,7 +334,7 @@ def classification_source_sha256(text: str) -> str:
     """
 
     meta, body = frontmatter.parse(text)
-    payload = {
+    metadata = {
         "title": meta.get("title"),
         "summary": meta.get("summary"),
         "tags": meta.get("tags"),
@@ -342,14 +342,13 @@ def classification_source_sha256(text: str) -> str:
         "type": meta.get("type"),
         "status": meta.get("status"),
         "sensitivity": meta.get("sensitivity"),
-        "body": body,
     }
-    encoded = json.dumps(
-        payload,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
+    encoded = canonical_document.serialize_document(
+        canonical_document.CanonicalDocument(
+            metadata=metadata,
+            body=body.encode("utf-8"),
+        )
+    )
     return hashlib.sha256(encoded).hexdigest()
 
 

@@ -1002,7 +1002,7 @@ def _ingest_cases() -> list[tuple[str, str | None, dict[str, Any]]]:
     )
     repair_corrected = (
         "---\ntitle: Ollama runtime\nupdated: 2026-07-10\n"
-        "tags: [d/configuration, t/reference, s/evergreen]\n---\n"
+        "tags:\n- d/configuration\n- t/reference\n- s/evergreen\n---\n"
         f"{repair_raw}\n"
     )
     repair_operation = {
@@ -1426,7 +1426,10 @@ def _tag_repair_cases() -> list[tuple[str, str | None, dict[str, Any]]]:
             if proposal_tags is not None
             else None
         )
-        page_text = f"---\ntitle: Tag contract {index}\nsummary: {body}\n---\n{body}\n"
+        page_text = (
+            f"---\ntitle: Tag contract {index}\nsummary: {_canonical_json(body)}\n"
+            f"---\n{body}\n"
+        )
         requests.append(
             (
                 build_frontier_tag_repair_prompt(
@@ -1520,7 +1523,7 @@ def _local_repair_cases() -> list[tuple[str, str | None, dict[str, Any]]]:
 
 
 def _metadata_backfill_cases() -> list[tuple[str, str | None, dict[str, Any]]]:
-    from chronovisor.core.frontmatter import parse, patch
+    from chronovisor.core import frontmatter
 
     definitions = [
         (
@@ -1589,10 +1592,23 @@ def _metadata_backfill_cases() -> list[tuple[str, str | None, dict[str, Any]]]:
             },
         ),
     ]
+    typed_metadata = {
+        "Model residency": "updated: 2026-08-11\n",
+        "JSON repair": (
+            "features: !!set\n"
+            "  ? gamma\n"
+            "  ? alpha\n"
+            "  ? beta\n"
+        ),
+    }
     rows = []
     for title, body, summary, question, decision, extra_details in definitions:
-        before = f"---\ntitle: {title}\n---\n{body}\n"
-        after = patch(
+        before = (
+            f"---\ntitle: {title}\n"
+            f"{typed_metadata.get(title, '')}"
+            f"---\n{body}\n"
+        )
+        after = frontmatter.patch(
             before,
             {
                 "summary": summary,
@@ -1603,7 +1619,9 @@ def _metadata_backfill_cases() -> list[tuple[str, str | None, dict[str, Any]]]:
             "proposal_generator_version": 2,
             "summary_missing": True,
             "questions_missing": True,
-            "generated_frontmatter": parse(after)[0],
+            "generated_frontmatter": frontmatter.review_value(
+                frontmatter.parse(after)[0]
+            ),
             **extra_details,
         }
         rows.append((before, after, details, decision))

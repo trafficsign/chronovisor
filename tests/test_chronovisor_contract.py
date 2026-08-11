@@ -205,6 +205,30 @@ def test_server_read_path_resolves_durable_page_alias(
     assert server._find_page_with_alias("previous-page-id") == target
 
 
+def test_provenance_stringifies_typed_yaml_and_guards_non_string_title(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from chronovisor.hosts import server
+
+    page = tmp_path / "pages" / "typed.md"
+    page.parent.mkdir(parents=True)
+    page.write_text(
+        "---\ntitle:\n  nested: value\nupdated: 2026-08-11\n---\nBody.\n",
+        encoding="utf-8",
+    )
+    raw_dir = tmp_path / "raw"
+    raw_dir.mkdir()
+    monkeypatch.setattr(server, "RAW_DIR", raw_dir)
+    monkeypatch.setattr(server, "_find_page_with_alias", lambda _page: page)
+    monkeypatch.setattr(server.activity_log, "iter_activity", lambda _path: [])
+    provenance = getattr(server.chronovisor_provenance, "fn", server.chronovisor_provenance)
+
+    payload = json.loads(provenance("typed"))
+
+    assert payload["page_updated"] == "2026-08-11"
+    assert payload["raw_sources"] == []
+
+
 def test_server_alias_read_returns_and_traces_only_canonical_page_id(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
