@@ -1170,10 +1170,17 @@ def test_public_acceptance_seals_raw_fault_and_live_sample_receipts(
     assert evidence_applied_session_count(
         tmp_path, result["projection"]["projection_sha256"]
     ) == 2
+    valid_log = recall_log.read_text()
+    line_separator_row = json.loads(valid_log.splitlines()[0])
+    line_separator_row["note"] = "valid\u2028json"
+    recall_log.write_text(json.dumps(line_separator_row, ensure_ascii=False) + "\n")
+    assert evidence_applied_session_count(
+        tmp_path, result["projection"]["projection_sha256"]
+    ) == 1
+    recall_log.write_text(valid_log)
     advanced = advance_evidence_rollout(root=tmp_path, minimum_step_samples=1)
     assert advanced["canary_percent"] == 25
     assert advanced["sample_count"] == 2
-    valid_log = recall_log.read_text()
     corrupt_rows = [json.loads(line) for line in valid_log.splitlines()]
     corrupt_rows[0]["context_receipt"]["rendered_context_sha256"] = "0" * 64
     recall_log.write_text("".join(json.dumps(row) + "\n" for row in corrupt_rows))

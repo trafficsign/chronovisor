@@ -1253,7 +1253,8 @@ def evidence_applied_session_count(root: Path, projection_sha256: str) -> int:
         if projection.projection_id.removeprefix("projection:") != projection_sha256:
             return 0
         with open_regular_nofollow(root / "recall" / "recall-log.jsonl") as stream:
-            lines = stream.read().decode("utf-8").splitlines()
+            content = stream.read().decode("utf-8")
+            lines = content.removesuffix("\n").split("\n") if content else []
     except Exception:
         return 0
     sessions: set[str] = set()
