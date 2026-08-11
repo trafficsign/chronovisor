@@ -29,12 +29,12 @@ from typing import Any
 from chronovisor.core.canonical_json import (
     canonical_json_bytes_stringifying as canonical_bytes,
 )
-from chronovisor.core.runtime_config import dashboard_url, launchd_label, ollama_url
 from chronovisor.core.store import (
     CHRONOVISOR_ROOT,
     okf_runtime_operation,
     okf_startup_status,
 )
+from chronovisor.ops.autonomy import runtime_service_config, runtime_service_label
 
 RUNTIME_ROOT = CHRONOVISOR_ROOT / "runtime"
 AUTONOMY_ROOT = CHRONOVISOR_ROOT / "autonomy"
@@ -46,18 +46,19 @@ DEFAULT_SAMPLE_SECONDS = 60
 DEFAULT_PROBE_SECONDS = 5
 DEFAULT_PREFLIGHT_WAIT_SECONDS = 180
 DEFAULT_FINAL_IDLE_WAIT_SECONDS = 180
-DEFAULT_DASHBOARD_URL = dashboard_url()
-DEFAULT_OLLAMA_URL = ollama_url()
+_SERVICE_CONFIG = runtime_service_config()
+DEFAULT_DASHBOARD_URL = str(_SERVICE_CONFIG["dashboard"]["url"])
+DEFAULT_OLLAMA_URL = str(_SERVICE_CONFIG["ollama_url"])
 EXPECTED_COMMIT = os.environ.get("CHRONOVISOR_EXPECTED_COMMIT", "").strip()
 MAX_RELATED_RSS_BYTES = 80 * 1024**3
 
 SERVICE_LABELS = {
-    "dashboard": launchd_label("dashboard"),
-    "sleep": launchd_label("sleep"),
-    "watchdog": launchd_label("watchdog"),
-    "converge": launchd_label("converge"),
-    "ingest": launchd_label("ingest-drain"),
-    "observer": launchd_label("deadman-observer"),
+    "dashboard": runtime_service_label("dashboard"),
+    "sleep": runtime_service_label("sleep"),
+    "watchdog": runtime_service_label("watchdog"),
+    "converge": runtime_service_label("converge"),
+    "ingest": runtime_service_label("ingest-drain"),
+    "observer": runtime_service_label("deadman-observer"),
 }
 
 TRACKED_FILES = {

@@ -88,3 +88,14 @@ provider_timeout_seconds = 99
     assert config.max_provider_calls == 4
     assert config.per_provider_limit == 5
     assert config.provider_timeout_seconds == 15.0
+
+
+def test_web_user_agent_uses_portable_runtime_identity(tmp_path, monkeypatch) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(
+        '[runtime]\nuser_agent = "ExampleChronovisor/1.0"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("CHRONOVISOR_USER_AGENT", raising=False)
+
+    assert load_research_config(path).web.user_agent == "ExampleChronovisor/1.0"

@@ -583,13 +583,17 @@ def _packet_lock(packet_path: Path):
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
-def _verified_runtime_github_source(value: object) -> str:
+def _verified_runtime_github_source(
+    value: object,
+    *,
+    expected_repository: object,
+) -> str:
     """Return one canonical GitHub SSH repository or fail closed."""
-
-    from chronovisor.core.runtime_config import github_repository
 
     if not isinstance(value, str) or not value.strip():
         raise ValueError("repair_runtime_source_unavailable")
+    if not isinstance(expected_repository, str) or not expected_repository.strip():
+        raise ValueError("repair_runtime_repository_unavailable")
     source = value.strip()
     if source.startswith("git+"):
         source = source[4:]
@@ -605,7 +609,7 @@ def _verified_runtime_github_source(value: object) -> str:
         or parsed.port is not None
         or parsed.query
         or parsed.fragment
-        or repository != github_repository()
+        or repository != expected_repository.strip()
     ):
         raise ValueError("repair_runtime_source_not_exact_github_vcs")
     return f"ssh://git@github.com/{repository}"
@@ -701,11 +705,18 @@ def _verified_local_repair_git_state(expected_commit: str) -> dict[str, Any]:
     if not resolved_module_path.is_relative_to(archive_root):
         raise ValueError("repair_runtime_module_outside_archive")
 
-    runtime_source = _verified_runtime_github_source(identity.get("runtime_source"))
+    expected_repository = identity.get("github_repository")
+    runtime_source = _verified_runtime_github_source(
+        identity.get("runtime_source"),
+        expected_repository=expected_repository,
+    )
     direct_url = identity.get("direct_url")
     if not isinstance(direct_url, dict):
         raise ValueError("repair_runtime_direct_url_invalid")
-    direct_source = _verified_runtime_github_source(direct_url.get("url"))
+    direct_source = _verified_runtime_github_source(
+        direct_url.get("url"),
+        expected_repository=expected_repository,
+    )
     vcs_info = direct_url.get("vcs_info")
     if not isinstance(vcs_info, dict) or vcs_info.get("vcs") != "git":
         raise ValueError("repair_runtime_direct_url_not_git")

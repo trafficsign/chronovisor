@@ -23,13 +23,13 @@ from urllib.parse import urlparse
 from chronovisor.core import background_jobs as _background_jobs
 from chronovisor.core import runtime_status
 from chronovisor.core.llm_security import build_child_process_env
-from chronovisor.core.runtime_config import (
-    github_repository,
-    launchd_label,
-    uvx_runtime_command,
-)
+from chronovisor.core.runtime_config import uvx_runtime_command
 from chronovisor.core.store import CHRONOVISOR_ROOT
 from chronovisor.decision import frontier_guard as _frontier_guard
+from chronovisor.decision.decision_authority import (
+    runtime_github_repository,
+    runtime_launchd_label,
+)
 from chronovisor.decision.decision_schema_manifest import FRONTIER_DECISION_SCHEMA
 from chronovisor.decision.frontier_guard import is_human_required_failure
 
@@ -63,7 +63,7 @@ OFFICIAL_GITHUB_PREFIXES = {
     "/openai/",
     "/anthropics/",
     "/anthropic-ai/",
-    f"/{github_repository()}",
+    f"/{runtime_github_repository()}",
 }
 
 OFFICIAL_FRONTIER_REFERENCE_URLS = (
@@ -1261,8 +1261,8 @@ def _verification_command(
 
 
 PERSISTENT_RUNTIME_LABELS = (
-    launchd_label("dashboard"),
-    launchd_label("ingest-drain"),
+    runtime_launchd_label("dashboard"),
+    runtime_launchd_label("ingest-drain"),
 )
 
 

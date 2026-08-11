@@ -100,6 +100,24 @@ port = 9876
     )
     assert runtime_config.ollama_url() == "http://127.0.0.1:22434"
     assert runtime_config.dashboard_url() == "http://localhost:9876"
+    assert runtime_config.runtime_identity(config_only=True) == {
+        "github_repository": "example/chronovisor",
+        "user_agent": "ExampleChronovisor/1.0",
+        "launchd_label_prefix": "org.example.chronovisor-",
+        "ollama_url": "http://127.0.0.1:22434",
+        "dashboard": {
+            "host": "localhost",
+            "port": 9876,
+            "url": "http://localhost:9876",
+        },
+    }
+    assert runtime_config.load_toml_file(config, runtime_defaults=True)["runtime"] == {
+        "source": "git+ssh://git@github.com/example/chronovisor",
+        "github_repository": "example/chronovisor",
+        "user_agent": "ExampleChronovisor/1.0",
+        "launchd_label_prefix": "org.example.chronovisor-",
+        "ollama_url": "http://127.0.0.1:22434",
+    }
 
 
 def test_non_loopback_runtime_endpoints_fall_back_to_safe_defaults(

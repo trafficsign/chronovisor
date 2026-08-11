@@ -19,6 +19,7 @@ def test_fetch_extracts_text_and_uses_ttl_cache(tmp_path) -> None:
 
     def handler(request: httpx.Request) -> httpx.Response:
         calls.append(str(request.url))
+        assert request.headers["User-Agent"] == "ExampleChronovisor/1.0"
         return httpx.Response(
             200,
             headers={"content-type": "text/html"},
@@ -28,7 +29,11 @@ def test_fetch_extracts_text_and_uses_ttl_cache(tmp_path) -> None:
     client = httpx.Client(
         transport=httpx.MockTransport(handler), follow_redirects=False
     )
-    config = WebConfig(adapter_enabled=True, live_egress_enabled=True)
+    config = WebConfig(
+        adapter_enabled=True,
+        live_egress_enabled=True,
+        user_agent="ExampleChronovisor/1.0",
+    )
     first = fetch_web(
         "https://example.com/page",
         config=config,

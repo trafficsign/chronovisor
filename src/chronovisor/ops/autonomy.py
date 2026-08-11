@@ -33,7 +33,6 @@ from chronovisor.core.page_mutation import (
     decision_authority_lock,
 )
 from chronovisor.core.runtime_config import (
-    launchd_label,
     runtime_identity,
     runtime_repo_root,
     uvx_runtime_command,
@@ -82,12 +81,25 @@ WATCHDOG_NOTIFICATION_REMINDER_HOURS = 6.0
 DIGEST_FILE = AUTONOMY_DIR / "digest-latest.md"
 QUARANTINE_FILE = AUTONOMY_DIR / "quarantine.json"
 PROJECT_ROOT = runtime_repo_root()
+_RUNTIME_SERVICE_CONFIG = runtime_identity(config_only=True)
 
-SLEEP_LABEL = launchd_label("sleep")
-CONVERGE_LABEL = launchd_label("converge")
-WATCHDOG_LABEL = launchd_label("watchdog")
-DEADMAN_LABEL = launchd_label("deadman-observer")
-SOAK_LABEL = launchd_label("soak")
+
+def runtime_service_config() -> dict[str, Any]:
+    """Return validated portable service settings for the ops domain."""
+
+    return _RUNTIME_SERVICE_CONFIG
+
+
+def runtime_service_label(service: str) -> str:
+    prefix = str(runtime_service_config()["launchd_label_prefix"])
+    return f"{prefix}{service}"
+
+
+SLEEP_LABEL = runtime_service_label("sleep")
+CONVERGE_LABEL = runtime_service_label("converge")
+WATCHDOG_LABEL = runtime_service_label("watchdog")
+DEADMAN_LABEL = runtime_service_label("deadman-observer")
+SOAK_LABEL = runtime_service_label("soak")
 LAUNCH_AGENT_DIR = Path.home() / "Library" / "LaunchAgents"
 WRAPPER_DIR = CHRONOVISOR_ROOT / "bin"
 DUPLICATE_FRONTIER_LANE = "autonomy_duplicate_resolution"

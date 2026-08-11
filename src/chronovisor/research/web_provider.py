@@ -18,13 +18,11 @@ from urllib.parse import quote, urlsplit, urlunsplit
 import httpx
 
 from chronovisor.core.jsonl_write import append_jsonl_durable
-from chronovisor.core.runtime_config import user_agent
 from chronovisor.core.store import CHRONOVISOR_ROOT
 from chronovisor.research.research_security import guard_egress_query, guard_url
 from chronovisor.search.research_config import WebConfig
 
 WEB_TRACE = CHRONOVISOR_ROOT / "runtime" / "research" / "web-egress.jsonl"
-USER_AGENT = user_agent()
 ADOPTED_SOURCE_PACKS = frozenset({"general", "code", "academic", "encyclopedia"})
 _CODE_STRONG_TERMS = (
     "github",
@@ -143,18 +141,20 @@ class HttpSearchProvider:
         name: str,
         endpoint: str,
         api_key: str = "",
+        user_agent: str = "Chronovisor/0.1",
         timeout_seconds: float = 8.0,
         client: httpx.Client | None = None,
     ) -> None:
         self.name = name
         self.endpoint = endpoint
         self.api_key = api_key
+        self.user_agent = user_agent
         self.timeout_seconds = timeout_seconds
         self.last_statuses: dict[str, str] = {}
         self.client = client or httpx.Client(
             timeout=timeout_seconds,
             follow_redirects=False,
-            headers={"User-Agent": USER_AGENT},
+            headers={"User-Agent": self.user_agent},
         )
 
     def search(self, query: str, *, limit: int) -> list[SearchResult]:
@@ -171,7 +171,10 @@ class HttpSearchProvider:
                     "format": "json",
                     "formatversion": 2,
                 },
-                headers={"Accept": "application/json", "User-Agent": USER_AGENT},
+                headers={
+                    "Accept": "application/json",
+                    "User-Agent": self.user_agent,
+                },
             )
             response.raise_for_status()
             payload = response.json()
@@ -202,7 +205,7 @@ class HttpSearchProvider:
         if self.name == "github":
             headers = {
                 "Accept": "application/vnd.github+json",
-                "User-Agent": USER_AGENT,
+                "User-Agent": self.user_agent,
                 "X-GitHub-Api-Version": "2022-11-28",
             }
             if self.api_key:
@@ -252,7 +255,10 @@ class HttpSearchProvider:
                     "sortBy": "relevance",
                     "sortOrder": "descending",
                 },
-                headers={"Accept": "application/atom+xml", "User-Agent": USER_AGENT},
+                headers={
+                    "Accept": "application/atom+xml",
+                    "User-Agent": self.user_agent,
+                },
             )
             response.raise_for_status()
             root = ET.fromstring(response.content)
@@ -301,7 +307,10 @@ class HttpSearchProvider:
                     "rows": limit,
                     "select": "DOI,URL,title,abstract,author,published,type",
                 },
-                headers={"Accept": "application/json", "User-Agent": USER_AGENT},
+                headers={
+                    "Accept": "application/json",
+                    "User-Agent": self.user_agent,
+                },
             )
             response.raise_for_status()
             payload = response.json()
@@ -721,6 +730,7 @@ def provider_from_config(config: WebConfig) -> SearchProvider | None:
                 name=provider_name,
                 endpoint=endpoint,
                 api_key=api_key,
+                user_agent=config.user_agent,
                 timeout_seconds=timeout,
             )
         if not providers:
@@ -760,6 +770,7 @@ def provider_from_config(config: WebConfig) -> SearchProvider | None:
         name=name,
         endpoint=endpoint,
         api_key=key,
+        user_agent=config.user_agent,
         timeout_seconds=config.provider_timeout_seconds,
     )
 

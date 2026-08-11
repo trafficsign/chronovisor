@@ -78,6 +78,7 @@ class WebConfig:
     cache_ttl_seconds: int = 900
     allow_private_network: bool = False
     max_fetch_bytes: int = 2_000_000
+    user_agent: str = "Chronovisor/0.1"
 
 
 @dataclass(frozen=True)
@@ -108,7 +109,8 @@ class ResearchConfig:
 
 
 def load_research_config(path: Path | str | None = None) -> ResearchConfig:
-    root = load_toml_file(path).get("research")
+    config_data = load_toml_file(path, runtime_defaults=True)
+    root = config_data.get("research")
     data = root if isinstance(root, dict) else {}
     budget_data = data.get("budgets") if isinstance(data.get("budgets"), dict) else {}
     resource_data = (
@@ -122,6 +124,8 @@ def load_research_config(path: Path | str | None = None) -> ResearchConfig:
         data.get("consolidation") if isinstance(data.get("consolidation"), dict) else {}
     )
     security = data.get("security") if isinstance(data.get("security"), dict) else {}
+    runtime_data = config_data.get("runtime")
+    runtime_data = runtime_data if isinstance(runtime_data, dict) else {}
 
     mode = str(os.getenv("CHRONOVISOR_RESEARCH_MODE") or data.get("mode") or "off")
     if mode not in {"off", "trace", "explicit", "idle", "sleep", "shadow", "auto"}:
@@ -211,6 +215,9 @@ def load_research_config(path: Path | str | None = None) -> ResearchConfig:
         cache_ttl_seconds=_int(web_data, "cache_ttl_seconds", 900),
         allow_private_network=_bool(web_data, "allow_private_network", False),
         max_fetch_bytes=_int(web_data, "max_fetch_bytes", 2_000_000, 1),
+        user_agent=str(
+            runtime_data.get("user_agent") or WebConfig.user_agent
+        ),
     )
     compaction = CompactionConfig(
         enabled=_bool(compaction_data, "enabled", False),

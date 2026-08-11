@@ -85,10 +85,7 @@ def _loopback_ollama_url(value: object) -> str:
     return endpoint.origin
 
 
-def load_runtime_settings(path: Path | str | None = None) -> RuntimeSettings:
-    """Load portable process identity and local endpoint defaults."""
-
-    data = load_toml_file(path)
+def _runtime_settings_from_data(data: dict[str, Any]) -> RuntimeSettings:
     section = data.get("runtime")
     section = section if isinstance(section, dict) else {}
     repository = _clean_text(
@@ -112,6 +109,12 @@ def load_runtime_settings(path: Path | str | None = None) -> RuntimeSettings:
         launchd_label_prefix=label_prefix,
         ollama_url=_loopback_ollama_url(section.get("ollama_url")),
     )
+
+
+def load_runtime_settings(path: Path | str | None = None) -> RuntimeSettings:
+    """Load portable process identity and local endpoint defaults."""
+
+    return _runtime_settings_from_data(load_toml_file(path))
 
 
 def github_repository(path: Path | str | None = None) -> str:
@@ -195,8 +198,22 @@ def uvx_runtime_command(
     return command
 
 
-def runtime_identity() -> dict[str, Any]:
+def runtime_identity(*, config_only: bool = False) -> dict[str, Any]:
     """Expose the installed Git revision and compare it with pushed main."""
+    dashboard = load_dashboard_config()
+    portability = {
+        "github_repository": github_repository(),
+        "user_agent": user_agent(),
+        "launchd_label_prefix": launchd_label("dashboard").removesuffix("dashboard"),
+        "ollama_url": ollama_url(),
+        "dashboard": {
+            "host": dashboard.host,
+            "port": dashboard.port,
+            "url": f"http://{dashboard.host}:{dashboard.port}",
+        },
+    }
+    if config_only:
+        return portability
     commit_id = None
     direct_url: dict[str, Any] = {}
     package_version = None
@@ -226,6 +243,7 @@ def runtime_identity() -> dict[str, Any]:
         pass
     module_path = Path(__file__).resolve()
     return {
+        **portability,
         "runtime_source": runtime_source(),
         "commit_id": commit_id,
         "expected_commit": expected_commit,
@@ -382,7 +400,11 @@ def active_config_file(path: Path | str | None = None) -> Path:
     return CONFIG_FILE
 
 
-def load_toml_file(path: Path | str | None = None) -> dict[str, Any]:
+def load_toml_file(
+    path: Path | str | None = None,
+    *,
+    runtime_defaults: bool = False,
+) -> dict[str, Any]:
     resolved = active_config_file(path)
     try:
         # Read one immutable byte snapshot.  Checking existence separately or
@@ -390,7 +412,23 @@ def load_toml_file(path: Path | str | None = None) -> dict[str, Any]:
         # external operator atomically replaces the runtime configuration.
         snapshot = resolved.read_bytes()
         data = tomllib.loads(snapshot.decode("utf-8"))
-        return data if isinstance(data, dict) else {}
+        if not isinstance(data, dict):
+            return {}
+        if not runtime_defaults:
+            return data
+        normalized = dict(data)
+        settings = _runtime_settings_from_data(data)
+        normalized["runtime"] = {
+            "source": settings.source,
+            "github_repository": settings.github_repository,
+            "user_agent": _clean_text(
+                os.environ.get("CHRONOVISOR_USER_AGENT", ""),
+                settings.user_agent,
+            ),
+            "launchd_label_prefix": settings.launchd_label_prefix,
+            "ollama_url": settings.ollama_url,
+        }
+        return normalized
     except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
         return {}
 

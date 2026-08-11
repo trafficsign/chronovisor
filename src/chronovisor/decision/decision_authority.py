@@ -62,6 +62,20 @@ _SESSION_AUDIT_FIELDS = {
     "repair_turns",
     "attempts",
 }
+
+
+def runtime_github_repository() -> str:
+    """Return the configured repository through the decision domain seam."""
+
+    return runtime_config.github_repository()
+
+
+def runtime_launchd_label(service: str) -> str:
+    """Return one configured launchd label through the decision domain seam."""
+
+    return runtime_config.launchd_label(service)
+
+
 _ATTEMPT_AUDIT_FIELDS = {
     "index",
     "valid",

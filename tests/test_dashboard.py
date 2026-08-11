@@ -2004,12 +2004,10 @@ def test_dashboard_cli_rejects_lan_and_non_loopback_host() -> None:
 
 
 def test_dashboard_parser_uses_configured_loopback_bind(monkeypatch) -> None:
-    from chronovisor.core.runtime_config import DashboardConfig
-
     monkeypatch.setattr(
         dashboard,
-        "load_dashboard_config",
-        lambda: DashboardConfig(host="localhost", port=9876),
+        "runtime_identity",
+        lambda **_kwargs: {"dashboard": {"host": "localhost", "port": 9876}},
     )
 
     args = dashboard.build_parser().parse_args([])

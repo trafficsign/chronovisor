@@ -18,7 +18,6 @@ from urllib.parse import urljoin, urlsplit
 import httpx
 import zstandard
 
-from chronovisor.core.runtime_config import user_agent
 from chronovisor.core.store import CHRONOVISOR_ROOT
 from chronovisor.research.research_security import (
     EgressPolicyError,
@@ -38,9 +37,6 @@ ALLOWED_MIME = (
     "application/xml",
     "application/xhtml+xml",
 )
-USER_AGENT = user_agent()
-
-
 class _TextExtractor(HTMLParser):
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
@@ -266,7 +262,7 @@ def fetch_web(
                     current,
                     headers={
                         "Accept": "text/html,text/plain,application/json,application/xml",
-                        "User-Agent": USER_AGENT,
+                        "User-Agent": config.user_agent,
                     },
                     follow_redirects=False,
                     timeout=remaining,
