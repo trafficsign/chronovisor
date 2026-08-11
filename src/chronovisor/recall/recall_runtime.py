@@ -1398,7 +1398,9 @@ def collect_context(
     if decision == "none" or not queries:
         return []
 
-    init_chronovisor()
+    startup = okf_startup_status(CHRONOVISOR_ROOT)
+    if not (startup.allowed and startup.layout == "okf_v0_2"):
+        init_chronovisor()
     store = get_store()
     store.refresh_if_stale()
 

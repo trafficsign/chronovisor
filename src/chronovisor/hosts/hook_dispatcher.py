@@ -487,7 +487,8 @@ def _main_locked(argv: list[str] | None) -> int:
         event = normalize_event(args.event)
         args.host = host
         args.event = event
-        if not okf_startup_status(CHRONOVISOR_ROOT).allowed:
+        startup = okf_startup_status(CHRONOVISOR_ROOT)
+        if not startup.allowed:
             if event == "user-prompt-submit":
                 _print_host_noop(host)
                 return 0
@@ -498,13 +499,14 @@ def _main_locked(argv: list[str] | None) -> int:
             )
             return 75
         stdin_text = sys.stdin.read() if args.hook else ""
-        try:
-            init_chronovisor()
-        except Exception:
-            if event == "user-prompt-submit":
-                _print_host_noop(host)
-                return 0
-            raise
+        if event != "user-prompt-submit" or startup.layout != "okf_v0_2":
+            try:
+                init_chronovisor()
+            except Exception:
+                if event == "user-prompt-submit":
+                    _print_host_noop(host)
+                    return 0
+                raise
         if event == "user-prompt-submit":
             try:
                 return run_user_prompt(args, stdin_text)

@@ -293,6 +293,30 @@ def test_collect_context_does_not_let_prefetch_displace_direct_search(
     assert [item.page_id for item in items] == ["plan-d-race-to-asi"]
 
 
+def test_collect_context_skips_init_only_for_allowed_okf_v0_2(monkeypatch) -> None:
+    from chronovisor.recall import recall_runtime
+
+    startup = SimpleNamespace(allowed=True, layout="okf_v0_2")
+    init_calls: list[None] = []
+    monkeypatch.setattr(recall_runtime, "okf_startup_status", lambda _root: startup)
+    monkeypatch.setattr(
+        recall_runtime, "init_chronovisor", lambda: init_calls.append(None)
+    )
+    monkeypatch.setattr(
+        recall_runtime,
+        "get_store",
+        lambda: SimpleNamespace(refresh_if_stale=lambda: None),
+    )
+    monkeypatch.setattr(recall_runtime, "query_hint_page_ids", lambda *_a, **_k: [])
+
+    collect_context(["query"], "search", RecallPolicy(), pre_results=[])
+    assert init_calls == []
+
+    startup.layout = "legacy"
+    collect_context(["query"], "search", RecallPolicy(), pre_results=[])
+    assert init_calls == [None]
+
+
 def test_certified_context_selects_before_session_suppression(monkeypatch) -> None:
     from chronovisor.recall import recall_processor
     from chronovisor.recall.evidence_certificate import EvidenceCertificate

@@ -32,7 +32,7 @@ def isolate_recall_breaker(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(
         hook_dispatcher,
         "okf_startup_status",
-        lambda _root: SimpleNamespace(allowed=True),
+        lambda _root: SimpleNamespace(allowed=True, layout="legacy"),
     )
     monkeypatch.setattr(hook_dispatcher, "init_chronovisor", lambda: None)
 
@@ -367,6 +367,26 @@ def test_user_prompt_init_failure_is_still_exit_zero_fail_open(
         == 0
     )
     assert capsys.readouterr().out.strip() == "{}"
+
+
+def test_user_prompt_skips_init_only_for_allowed_okf_v0_2(
+    monkeypatch,
+) -> None:
+    startup = SimpleNamespace(allowed=True, layout="okf_v0_2")
+    init_calls: list[None] = []
+    monkeypatch.setattr(hook_dispatcher, "okf_startup_status", lambda _root: startup)
+    monkeypatch.setattr(
+        hook_dispatcher, "init_chronovisor", lambda: init_calls.append(None)
+    )
+    monkeypatch.setattr(hook_dispatcher, "run_user_prompt", lambda *_args: 0)
+
+    argv = ["--host", "codex", "--event", "UserPromptSubmit"]
+    assert hook_dispatcher._main_locked(argv) == 0
+    assert init_calls == []
+
+    startup.layout = "legacy"
+    assert hook_dispatcher._main_locked(argv) == 0
+    assert init_calls == [None]
 
 
 def test_stop_dispatch_enqueues_save_and_receipt_audit(
