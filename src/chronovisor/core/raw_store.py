@@ -97,7 +97,7 @@ class RawStore:
         self._units_cache: tuple[RawUnit, ...] | None = None
         self._units_by_id: dict[str, RawUnit] | None = None
         self._segment_units_cache: tuple[RawUnit, ...] | None = None
-        self._verified_legacy_manifests: dict[Path, tuple[int, int, int, int]] = {}
+        self._verified_legacy_manifests: dict[Path, tuple[int, ...]] = {}
 
     def _legacy_units(self) -> Iterator[RawUnit]:
         candidates = list(self.raw_dir.glob("*.md"))
@@ -381,31 +381,48 @@ class RawStore:
         if manifest_stat is not None:
             if not stat.S_ISREG(manifest_stat.st_mode):
                 return False
-            manifest_identity = (
+            archive_path = unit.path.with_name(archive_name)
+            try:
+                archive_stat = archive_path.lstat()
+            except OSError:
+                return False
+            if not stat.S_ISREG(archive_stat.st_mode):
+                return False
+            artifact_identity = (
                 manifest_stat.st_dev,
                 manifest_stat.st_ino,
                 manifest_stat.st_mtime_ns,
                 manifest_stat.st_size,
+                archive_stat.st_dev,
+                archive_stat.st_ino,
+                archive_stat.st_mtime_ns,
+                archive_stat.st_size,
             )
-            if self._verified_legacy_manifests.get(manifest_path) != manifest_identity:
+            if self._verified_legacy_manifests.get(manifest_path) != artifact_identity:
                 try:
                     manifest = verify_legacy_manifest(manifest_path, full=False)
-                    after = manifest_path.lstat()
+                    manifest_after = manifest_path.lstat()
+                    archive_after = archive_path.lstat()
                 except (OSError, RawSegmentCorrupt):
                     return False
                 after_identity = (
-                    after.st_dev,
-                    after.st_ino,
-                    after.st_mtime_ns,
-                    after.st_size,
+                    manifest_after.st_dev,
+                    manifest_after.st_ino,
+                    manifest_after.st_mtime_ns,
+                    manifest_after.st_size,
+                    archive_after.st_dev,
+                    archive_after.st_ino,
+                    archive_after.st_mtime_ns,
+                    archive_after.st_size,
                 )
                 if (
-                    not stat.S_ISREG(after.st_mode)
-                    or after_identity != manifest_identity
+                    not stat.S_ISREG(manifest_after.st_mode)
+                    or not stat.S_ISREG(archive_after.st_mode)
+                    or after_identity != artifact_identity
                     or manifest["archive"] != archive_name
                 ):
                     return False
-                self._verified_legacy_manifests[manifest_path] = manifest_identity
+                self._verified_legacy_manifests[manifest_path] = artifact_identity
         keywords = document.metadata.get("raw_keywords")
         legacy_metadata, _body = parse_frontmatter(text)
         legacy_keywords = legacy_metadata.get("raw_keywords")

@@ -359,6 +359,11 @@ def test_y3_legacy_classifier_uses_production_frontmatter_semantics(
         assert unit is not None
         assert store.is_archived_legacy_markdown(unit, raw) is expected
 
+    cached_unit = store.resolve_segment("save-codex-legacy-classifier-0.md")
+    assert cached_unit is not None
+    archive_path.unlink()
+    assert not store.is_archived_legacy_markdown(cached_unit, cases[0][0])
+
 
 def test_y3_event_timestamp_falls_back_only_when_missing(tmp_path: Path) -> None:
     missing_raw = tmp_path / "missing" / "raw"
