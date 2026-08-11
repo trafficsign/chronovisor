@@ -6,11 +6,13 @@ const ACTIVE_REFRESH_DELAY_MS = 5000;
 const IDLE_REFRESH_DELAY_MS = 10000;
 const ERROR_REFRESH_DELAY_MS = 5000;
 const DECISION_REFRESH_TIMEOUT_MS = 2500;
+const MODEL_STATUS_REFRESH_TIMEOUT_MS = 3500;
 const ACTIVE_DECISION_REFRESH_DELAY_MS = 800;
 const IDLE_DECISION_REFRESH_DELAY_MS = 2500;
 const PROCESSING_FALLBACK_DELAY_MS = 1000;
 let nextRefreshDelayMs = IDLE_REFRESH_DELAY_MS;
 let decisionRefreshInFlight = false;
+let modelStatusRefreshInFlight = false;
 let nextDecisionRefreshDelayMs = IDLE_DECISION_REFRESH_DELAY_MS;
 let processingRefreshInFlight = false;
 let processingEventSource = null;
@@ -115,6 +117,29 @@ function renderLiveConsensus(consensus) {
   renderWorkStatus(latestRenderedStatus);
 }
 
+async function refreshLiveModelStatus(activities) {
+  if (modelStatusRefreshInFlight) return;
+  modelStatusRefreshInFlight = true;
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(
+    () => controller.abort(),
+    MODEL_STATUS_REFRESH_TIMEOUT_MS,
+  );
+  try {
+    const response = await fetch("/api/model-status", {
+      cache: "no-store",
+      signal: controller.signal,
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    renderLiveModelStatus(await response.json(), activities);
+  } catch {
+    // Keep the last truthful model snapshot visible during a transient failure.
+  } finally {
+    window.clearTimeout(timeoutId);
+    modelStatusRefreshInFlight = false;
+  }
+}
+
 async function refreshDecisionTrace() {
   if (decisionRefreshInFlight) return;
   decisionRefreshInFlight = true;
@@ -131,6 +156,7 @@ async function refreshDecisionTrace() {
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const consensus = (await response.json()).local_consensus || {};
     renderLiveConsensus(consensus);
+    void refreshLiveModelStatus(consensus.activities || []);
     nextDecisionRefreshDelayMs = consensus.active
       ? ACTIVE_DECISION_REFRESH_DELAY_MS
       : IDLE_DECISION_REFRESH_DELAY_MS;

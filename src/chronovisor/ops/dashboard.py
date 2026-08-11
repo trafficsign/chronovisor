@@ -3095,7 +3095,64 @@ def _decision_trace_snapshot(
         or str((latest_session or {}).get("request_sha256") or "")
         or str((latest_event or {}).get("request_sha256") or "")
     )
-    related = [row for row in history if row.get("request_sha256") == request_sha256]
+    same_request = [
+        (index, row)
+        for index, row in enumerate(history)
+        if row.get("request_sha256") == request_sha256
+    ]
+    active_rows = [
+        row for row in activities if row.get("request_sha256") == request_sha256
+    ]
+    boundary_index = -1
+    boundary_epoch: float | None = None
+    decision_rows = [
+        (index, row)
+        for index, row in same_request
+        if row.get("kind") in {"decision", "decision_artifact_replay"}
+    ]
+    if active_rows:
+        active_epochs = [
+            epoch
+            for row in active_rows
+            if (epoch := _failure_timestamp(row.get("started_at"))[0]) is not None
+        ]
+        if active_epochs:
+            active_started = min(active_epochs)
+            previous = [
+                (index, epoch)
+                for index, row in decision_rows
+                if (epoch := _failure_timestamp(row.get("timestamp"))[0]) is not None
+                and epoch < active_started
+            ]
+            if previous:
+                boundary_index, boundary_epoch = previous[-1]
+            else:
+                trace_boundaries = [
+                    epoch
+                    for row in trace_events or []
+                    if row.get("request_sha256") == request_sha256
+                    and row.get("phase") == "decision"
+                    and row.get("kind") in {"decision", "decision_artifact_replay"}
+                    and (epoch := _failure_timestamp(row.get("timestamp"))[0])
+                    is not None
+                    and epoch < active_started
+                ]
+                if trace_boundaries:
+                    boundary_epoch = trace_boundaries[-1]
+    elif len(decision_rows) > 1:
+        boundary_index, boundary_row = decision_rows[-2]
+        boundary_epoch = _failure_timestamp(boundary_row.get("timestamp"))[0]
+    if boundary_index >= 0 or boundary_epoch is None:
+        related = [row for index, row in same_request if index > boundary_index]
+    else:
+        related = [
+            row
+            for _index, row in same_request
+            if (
+                (epoch := _failure_timestamp(row.get("timestamp"))[0]) is not None
+                and epoch > boundary_epoch
+            )
+        ]
     decision = next(
         (
             row
@@ -3104,10 +3161,8 @@ def _decision_trace_snapshot(
         ),
         None,
     )
-    active_rows = [
-        row for row in activities if row.get("request_sha256") == request_sha256
-    ]
     session_rows = [row for row in related if row.get("kind") == "session"]
+    latest_related_session = session_rows[-1] if session_rows else None
 
     task_role = "idle"
     if active_rows:
@@ -3116,8 +3171,8 @@ def _decision_trace_snapshot(
         task_role = str(
             decision.get("role") or decision.get("decision_lane") or "routine"
         )
-    elif latest_session:
-        task_role = _decision_trace_role(latest_session.get("role"))[0]
+    elif latest_related_session:
+        task_role = _decision_trace_role(latest_related_session.get("role"))[0]
 
     quorum_flow = bool(
         decision
@@ -3343,8 +3398,19 @@ def _decision_trace_snapshot(
         trace_state=trace_state,
         task_role=task_role,
     )
+    bounded_trace_events = trace_events or []
+    if boundary_epoch is not None:
+        bounded_trace_events = [
+            row
+            for row in bounded_trace_events
+            if row.get("request_sha256") != request_sha256
+            or (
+                (epoch := _failure_timestamp(row.get("timestamp"))[0]) is not None
+                and epoch > boundary_epoch
+            )
+        ]
     events = _decision_trace_events(
-        trace_events or [],
+        bounded_trace_events,
         request_sha256=request_sha256,
     )
     return {
@@ -5492,16 +5558,16 @@ class DashboardHandler(BaseHTTPRequestHandler):
             elif path == "/api/cortex/events":
                 self._cortex_events_response(parsed.query)
             elif path == "/api/model-status":
-                snapshot = _snapshot_with_live_status(
-                    _cached_snapshot(allow_stale=True)
+                ollama = _ollama_snapshot()
+                failures = _runtime_failure_snapshot(
+                    runtime_status.read_events(limit=runtime_status.MAX_EVENTS)
                 )
                 _json_response(
                     self,
                     {
-                        "model_status": snapshot["model_status"],
-                        "ollama": snapshot["ollama"],
-                        "runtime_failures": snapshot["runtime_failures"],
-                        "last_failure": snapshot["last_failure"],
+                        "model_status": _model_status_snapshot(ollama),
+                        "ollama": ollama,
+                        **failures,
                     },
                 )
             elif path.startswith("/static/"):

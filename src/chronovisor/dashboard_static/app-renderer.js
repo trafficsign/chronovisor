@@ -2322,6 +2322,16 @@ const MODEL_ROLE_LABELS = {
   installed: "Installed",
   configured: "Configured",
 };
+const MODEL_ACTIVITY_LABELS = {
+  trigger: "Starting",
+  load: "Loading",
+  context: "Context",
+  generate: "Generating",
+  repair: "Repairing",
+  validate: "Validating",
+  vote: "Voting",
+};
+let latestLiveModelSnapshot = null;
 
 function modelStatusRank(row) {
   const order = { loaded: 0, missing: 1, ready: 2, external: 3, unknown: 4 };
@@ -2359,10 +2369,15 @@ function renderRuntimeFailures(failures) {
   });
 }
 
-function renderModelStatus(modelStatus, runtimeFailures) {
+function renderModelStatus(modelStatus, runtimeFailures, activities = []) {
   const data = modelStatus || {};
   const summary = data.summary || {};
   const models = Array.isArray(data.models) ? [...data.models] : [];
+  const activityByModel = new Map();
+  (Array.isArray(activities) ? activities : []).forEach((activity) => {
+    const model = String(activity?.model || "").replace(/:latest$/, "");
+    if (model) activityByModel.set(model, activity);
+  });
   const installed = intValue(summary.installed);
   const loaded = intValue(summary.loaded);
   const configured = intValue(summary.configured);
@@ -2392,8 +2407,9 @@ function renderModelStatus(modelStatus, runtimeFailures) {
     .forEach((row) => {
       const details = row.details || {};
       const roles = Array.isArray(row.roles) ? row.roles : [];
+      const activity = activityByModel.get(String(row.name || "").replace(/:latest$/, ""));
       const item = document.createElement("div");
-      item.className = `model-row ${fmt(row.status, "unknown")}`;
+      item.className = `model-row ${fmt(row.status, "unknown")}${activity ? " processing" : ""}`;
 
       const main = document.createElement("div");
       main.className = "model-main";
@@ -2409,6 +2425,13 @@ function renderModelStatus(modelStatus, runtimeFailures) {
 
       const roleWrap = document.createElement("div");
       roleWrap.className = "model-roles";
+      if (activity) {
+        const chip = document.createElement("span");
+        chip.className = "model-role model-activity";
+        chip.textContent = MODEL_ACTIVITY_LABELS[activity.phase] || fmt(activity.phase, "Active");
+        chip.title = [activity.role, activity.phase].filter(Boolean).join(" · ");
+        roleWrap.appendChild(chip);
+      }
       const roleList = roles.length ? roles : row.installed ? ["installed"] : ["configured"];
       roleList.forEach((role) => {
         const chip = document.createElement("span");
@@ -2435,6 +2458,19 @@ function renderModelStatus(modelStatus, runtimeFailures) {
       item.append(main, roleWrap, meta);
       els.modelGrid.appendChild(item);
     });
+}
+
+function renderLiveModelStatus(snapshot, activities) {
+  latestLiveModelSnapshot = {
+    model_status: snapshot?.model_status || {},
+    runtime_failures: snapshot?.runtime_failures || [],
+    activities: Array.isArray(activities) ? activities : [],
+  };
+  renderModelStatus(
+    latestLiveModelSnapshot.model_status,
+    latestLiveModelSnapshot.runtime_failures,
+    latestLiveModelSnapshot.activities,
+  );
 }
 
 function renderModelLab(lab) {
@@ -2765,7 +2801,7 @@ function render(snapshot) {
   const metrics = snapshot.metrics || [];
   const batch = status.batch || {};
   const ollama = snapshot.ollama || {};
-  const modelStatus = snapshot.model_status || {};
+  const modelStatus = latestLiveModelSnapshot?.model_status || snapshot.model_status || {};
   const modelSummary = modelStatus.summary || {};
   const models = ollama.models || [];
   const model = models.find((item) => !String(item.name || item.model || "").includes("embed")) || models[0] || {};
@@ -2814,7 +2850,11 @@ function render(snapshot) {
   renderKnowledgeMix(snapshot.knowledge_mix || {});
   renderLibrarian(snapshot.librarian || {});
   renderHealth(snapshot.health || {});
-  renderModelStatus(modelStatus, snapshot.runtime_failures || []);
+  renderModelStatus(
+    modelStatus,
+    latestLiveModelSnapshot?.runtime_failures || snapshot.runtime_failures || [],
+    latestLiveModelSnapshot?.activities || status.local_consensus?.activities || [],
+  );
   renderModelLab(snapshot.model_lab || {});
   renderEvents(snapshot.events || []);
   drawLineChart(els.pendingChart, snapshot.save_history || {}, status);

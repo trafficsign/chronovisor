@@ -1119,6 +1119,103 @@ def test_decision_trace_exposes_only_ordered_events_for_current_request(
     assert "raw_output" not in trace["events"][0]
 
 
+def test_decision_trace_excludes_previous_execution_with_same_request_hash(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        dashboard,
+        "_decision_trace_models",
+        lambda: {
+            "primary": "primary:model",
+            "challenger": "challenger:model",
+            "tie_break": "tie:model",
+        },
+    )
+    request = "e" * 64
+    trace = dashboard._decision_trace_snapshot(
+        [
+            {
+                "request_sha256": request,
+                "role": "ingest_review:challenger",
+                "model": "challenger:model",
+                "phase": "generate",
+                "attempt": 0,
+                "started_at": "2026-07-15T12:10:02Z",
+            }
+        ],
+        [
+            {
+                "kind": "session",
+                "timestamp": "2026-07-15T12:00:02Z",
+                "request_sha256": request,
+                "role": "ingest_review:tie_break",
+                "model": "tie:model",
+                "ok": True,
+            },
+            {
+                "kind": "session",
+                "timestamp": "2026-07-15T12:10:01Z",
+                "request_sha256": request,
+                "role": "ingest_review:primary",
+                "model": "primary:model",
+                "ok": True,
+                "first_pass_valid": True,
+                "repair_turns": 0,
+            },
+        ],
+        None,
+        [
+            {
+                "event_id": "old-tie",
+                "kind": "session",
+                "timestamp": "2026-07-15T12:00:02Z",
+                "request_sha256": request,
+                "role": "ingest_review:tie_break",
+                "phase": "vote",
+                "status": "done",
+            },
+            {
+                "event_id": "old-decision",
+                "kind": "decision",
+                "timestamp": "2026-07-15T12:00:03Z",
+                "request_sha256": request,
+                "role": "ingest_review",
+                "phase": "decision",
+                "status": "done",
+            },
+            {
+                "event_id": "new-primary",
+                "kind": "session",
+                "timestamp": "2026-07-15T12:10:01Z",
+                "request_sha256": request,
+                "role": "ingest_review:primary",
+                "phase": "vote",
+                "status": "done",
+            },
+            {
+                "event_id": "new-challenger",
+                "kind": "phase",
+                "timestamp": "2026-07-15T12:10:02Z",
+                "request_sha256": request,
+                "role": "ingest_review:challenger",
+                "phase": "generate",
+                "status": "active",
+            },
+        ],
+    )
+
+    assert trace["state"] == "active"
+    assert [lane["state"] for lane in trace["lanes"]] == [
+        "done",
+        "active",
+        "pending",
+    ]
+    assert [event["event_id"] for event in trace["events"]] == [
+        "new-primary",
+        "new-challenger",
+    ]
+
+
 def test_decision_trace_marks_pair_quorum_and_unused_tie_break(monkeypatch) -> None:
     monkeypatch.setattr(
         dashboard,
@@ -1656,7 +1753,80 @@ def test_dashboard_reuses_decision_trace_poll_for_live_consensus_status() -> Non
     assert "renderWorkStatus(latestRenderedStatus);" in live_helper
     assert 'fetch("/api/local-consensus"' in refresh_block
     assert "renderLiveConsensus(consensus);" in refresh_block
+    assert "void refreshLiveModelStatus(consensus.activities || []);" in refresh_block
     assert refresh_block.count("fetch(") == 1
+    assert 'fetch("/api/model-status"' in app
+    assert "renderLiveModelStatus(await response.json(), activities);" in app
+    assert "MODEL_ACTIVITY_LABELS[activity.phase]" in app
+
+
+def test_live_model_status_survives_later_stale_full_render() -> None:
+    renderer = (dashboard.STATIC_DIR / "app-renderer.js").read_text(encoding="utf-8")
+    hooks = """
+const seen = [];
+const noop = () => {};
+setState = noop;
+renderWorkStatus = noop;
+renderDecisionTrace = noop;
+renderLlm = noop;
+renderLocalConsensusSummary = noop;
+renderSelfHeal = noop;
+renderRecall = noop;
+renderRecallImprovement = noop;
+renderSaveHistory = noop;
+renderKnowledgeMix = noop;
+renderLibrarian = noop;
+renderHealth = noop;
+renderModelLab = noop;
+renderEvents = noop;
+drawLineChart = noop;
+drawBatchChart = noop;
+renderModelStatus = (status, _failures, activities) => seen.push({
+  status: status.models[0].status,
+  activity: activities[0]?.phase || null,
+});
+this.__test = { renderLiveModelStatus, render, seen };
+"""
+    scenario = f"""
+const vm = require("node:vm");
+const element = () => ({{ textContent: "", title: "" }});
+const els = new Proxy({{}}, {{
+  get(target, key) {{
+    if (!(key in target)) target[key] = element();
+    return target[key];
+  }},
+}});
+const sandbox = {{
+  window: {{ matchMedia: () => ({{ matches: false }}) }},
+  document: {{ visibilityState: "visible" }},
+  els,
+  latestRenderedStatus: null,
+  STAGE_METRIC_LABELS: {{}},
+}};
+vm.createContext(sandbox);
+vm.runInContext({json.dumps(renderer + hooks)}, sandbox);
+sandbox.__test.renderLiveModelStatus(
+  {{ model_status: {{ models: [{{ status: "loaded" }}], summary: {{}} }} }},
+  [{{ phase: "generate" }}],
+);
+sandbox.__test.render({{
+  status: {{}},
+  model_status: {{ models: [{{ status: "ready" }}], summary: {{}} }},
+}});
+process.stdout.write(JSON.stringify(sandbox.__test.seen));
+"""
+
+    completed = subprocess.run(
+        ["node", "-e", scenario],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert json.loads(completed.stdout) == [
+        {"status": "loaded", "activity": "generate"},
+        {"status": "loaded", "activity": "generate"},
+    ]
 
 
 def test_dashboard_static_layout_aligns_peer_panels_and_contains_event_badges() -> None:
@@ -1953,6 +2123,57 @@ def test_snapshot_handler_returns_non_disclosing_json_error(
         "error": "Dashboard request failed.",
     }
     assert canary not in response.text
+
+
+def test_model_status_handler_reads_live_ollama_without_snapshot_cache(
+    monkeypatch,
+) -> None:
+    model = "muse-glimmer:30b-mxfp8-dflash"
+    monkeypatch.setattr(
+        dashboard,
+        "_cached_snapshot",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("cache used")),
+    )
+    monkeypatch.setattr(
+        dashboard,
+        "_ollama_snapshot",
+        lambda: {
+            "available": True,
+            "models": [{"name": model, "size_vram": 35_000}],
+        },
+    )
+    monkeypatch.setattr(
+        dashboard,
+        "_ollama_tags_snapshot",
+        lambda: {
+            "available": True,
+            "models": [{"name": model, "size": 35_000}],
+        },
+    )
+    monkeypatch.setattr(
+        dashboard,
+        "_configured_model_roles",
+        lambda: {model: {"decision-challenger"}},
+    )
+    monkeypatch.setattr(runtime_status, "read_events", lambda **_kwargs: [])
+    server = dashboard.ThreadingHTTPServer(("127.0.0.1", 0), dashboard.DashboardHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    host, port = server.server_address
+    try:
+        response = dashboard.httpx.get(
+            f"http://{host}:{port}/api/model-status", timeout=2
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+    payload = response.json()
+    muse = next(row for row in payload["model_status"]["models"] if row["name"] == model)
+    assert response.status_code == 200
+    assert muse["status"] == "loaded"
+    assert muse["running"] is True
 
 
 def test_dashboard_private_client_scope_rejects_public_addresses() -> None:
@@ -3654,9 +3875,11 @@ def test_model_fleet_runtime_failure_renderer_uses_text_only() -> None:
     assert "configured_model" in block
     assert "request_id" in block
     assert "snapshot.runtime_failures" in renderer
-    assert '"runtime_failures": snapshot["runtime_failures"]' in route
-    assert '"last_failure": snapshot["last_failure"]' in route
-    assert "_snapshot_with_live_status(" in route
+    assert "failures = _runtime_failure_snapshot(" in route
+    assert "**failures" in route
+    assert "ollama = _ollama_snapshot()" in route
+    assert '"model_status": _model_status_snapshot(ollama)' in route
+    assert "_cached_snapshot" not in route
     assert "W7 CANARY" not in page + app + renderer
 
 
