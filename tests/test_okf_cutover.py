@@ -75,6 +75,23 @@ def test_directory_snapshot_restarts_once_when_an_entry_vanishes(
     assert calls == 2
 
 
+def test_manifest_reader_uses_dedicated_bounded_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest_path = tmp_path / "manifest.json"
+    payload = {"inventory": "x" * 128}
+    raw = canonical_json_line_bytes_strict(payload)
+    manifest_path.write_bytes(raw)
+
+    assert okf_cutover._MANIFEST_MAX_BYTES == 64 * 1024 * 1024
+    monkeypatch.setattr(okf_cutover, "_MANIFEST_MAX_BYTES", len(raw))
+    assert okf_cutover._read_manifest(manifest_path) == payload
+
+    monkeypatch.setattr(okf_cutover, "_MANIFEST_MAX_BYTES", len(raw) - 1)
+    with pytest.raises(ValueError, match="migration manifest is oversized or unsafe"):
+        okf_cutover._read_manifest(manifest_path)
+
+
 def _setup(
     tmp_path: Path, *, old_activity_present: bool = True
 ) -> tuple[Path, Path, Path]:

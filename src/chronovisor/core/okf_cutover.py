@@ -48,6 +48,7 @@ _OldActivity = tuple[int, str] | None
 
 _RUN_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}")
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
+_MANIFEST_MAX_BYTES = 64 * 1024 * 1024
 _MISSING = object()
 _Value = TypeVar("_Value")
 _MOVE_NAMES = (
@@ -1774,8 +1775,8 @@ def _context(source_root: Path, runtime_root: Path, run_id: str) -> _Context:
     staging = workspace / "staging"
     manifest_path = workspace / "dry-run-manifest.json"
     _reject_symlink(manifest_path, "migration manifest")
-    manifest_raw = manifest_path.read_bytes()
-    manifest = _read_canonical_object(manifest_path, "migration manifest")
+    manifest = _read_manifest(manifest_path)
+    manifest_raw = canonical_json_line_bytes_strict(manifest)
     if (
         manifest.get("schema") != MANIFEST_SCHEMA
         or manifest.get("version") != SCHEMA_VERSION
@@ -2288,9 +2289,7 @@ def _final_receipt_payload(
     journal: Mapping[str, object],
 ) -> dict[str, object]:
     old_activity, suffix, extras = _require_finalized_journal(context, journal)
-    manifest = _read_canonical_object(
-        context.workspace / "dry-run-manifest.json", "migration manifest"
-    )
+    manifest = _read_manifest(context.workspace / "dry-run-manifest.json")
     status_cohorts: list[dict[str, object]] = []
     for scope, field in (("pages", "status_cohorts"), ("system", "system_status_cohorts")):
         rows = _object_list(manifest, field)
@@ -2798,6 +2797,12 @@ def _read_canonical_object(
     if canonical_json_line_bytes_strict(payload) != raw:
         raise ValueError(f"{label} is not canonical JSON")
     return payload
+
+
+def _read_manifest(path: Path) -> dict[str, object]:
+    return _read_canonical_object(
+        path, "migration manifest", max_bytes=_MANIFEST_MAX_BYTES
+    )
 
 
 def _require_gate_identity(
