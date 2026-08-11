@@ -91,7 +91,7 @@ class NemotronEmbeddingBackend:
                 return self._model
             try:
                 import torch  # type: ignore[import-not-found, unused-ignore]
-                from sentence_transformers import (  # type: ignore[import-not-found]
+                from sentence_transformers import (  # type: ignore[import-not-found, unused-ignore]
                     SentenceTransformer,
                 )
             except ImportError as exc:

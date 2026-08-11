@@ -341,7 +341,7 @@ def _build_ann_index(path: Path, vectors: np.ndarray) -> tuple[str, int, str]:
     if len(vectors) < 64:
         return "", 0, ""
     try:
-        from usearch.index import Index  # type: ignore[import-not-found]
+        from usearch.index import Index  # type: ignore[import-not-found, unused-ignore]
     except ImportError:
         return "", 0, ""
     dimensions = min(DEFAULT_COARSE_DIMENSIONS, int(vectors.shape[1]))
