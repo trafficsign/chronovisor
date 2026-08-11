@@ -1458,6 +1458,34 @@ canvas {
   font-size: 10.5px;
 }
 
+.decision-think {
+  display: inline-block;
+  margin-top: 2px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  font-weight: 500;
+  letter-spacing: 0.03em;
+  background: var(--surface);
+  color: var(--dim);
+}
+
+.decision-think[data-think-mode="medium"] {
+  background: hsla(210, 60%, 50%, 0.15);
+  color: hsl(210, 70%, 55%);
+}
+
+.decision-think[data-think-mode="low"] {
+  background: hsla(40, 60%, 50%, 0.15);
+  color: hsl(40, 70%, 45%);
+}
+
+.decision-think[data-think-mode="off"] {
+  background: hsla(0, 0%, 50%, 0.1);
+  color: var(--dim);
+}
+
 .decision-lane-steps {
   display: grid;
   grid-template-columns: repeat(6, minmax(50px, 1fr));

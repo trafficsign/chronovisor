@@ -67,9 +67,7 @@ RAW_DATE_RE = re.compile(r"(?:^|[^0-9])(?P<stamp>20\d{6})(?:[^0-9]|$)")
 SEMANTIC_PROJECTION_CHILD_RE = re.compile(
     r"^semantic-(?P<projection>[0-9a-f]{64})-child-[0-9]{8}-[0-9a-f]{64}\.md$"
 )
-LOG_PAGE_CHANGE_RE = re.compile(
-    r"^ingest \| (?P<kind>created|updated) (?P<page>.+)$"
-)
+LOG_PAGE_CHANGE_RE = re.compile(r"^ingest \| (?P<kind>created|updated) (?P<page>.+)$")
 SELF_HEAL_PENDING_STATUSES = {
     "pending_local_repair",
     "local_repairing",
@@ -1655,7 +1653,9 @@ def _save_history_snapshot(
     # already-processed raw appear as pending in the Save Load chart. Reconcile
     # with the orchestrator state after reading the logs. Canonical processed
     # state wins over an older failed attempt for the same immutable raw.
-    orchestrator_state = _read_json_file(CHRONOVISOR_ROOT / ".orchestrator_state.json") or {}
+    orchestrator_state = (
+        _read_json_file(CHRONOVISOR_ROOT / ".orchestrator_state.json") or {}
+    )
     processed_raw_files = orchestrator_state.get("processed_raw_files")
     processed_raw_names = (
         {filename for filename in processed_raw_files if isinstance(filename, str)}
@@ -2457,9 +2457,7 @@ def _processing_activity_cache_metrics_locked() -> dict[str, Any]:
         "coalesced": int(_PROCESSING_ACTIVITY_CACHE.get("coalesced") or 0),
         "error_count": int(_PROCESSING_ACTIVITY_CACHE.get("error_count") or 0),
         "last_build_duration_ms": round(
-            float(
-                _PROCESSING_ACTIVITY_CACHE.get("last_build_duration_ms") or 0.0
-            ),
+            float(_PROCESSING_ACTIVITY_CACHE.get("last_build_duration_ms") or 0.0),
             3,
         ),
         "last_error": _PROCESSING_ACTIVITY_CACHE.get("last_error"),
@@ -2566,9 +2564,7 @@ def _refresh_processing_activity_cache(
                 "source": None,
                 "audited_at": 0.0,
                 "refreshing": False,
-                "error_count": int(
-                    _PROCESSING_ACTIVITY_CACHE.get("error_count") or 0
-                )
+                "error_count": int(_PROCESSING_ACTIVITY_CACHE.get("error_count") or 0)
                 + 1,
                 "last_build_duration_ms": max(
                     0.0, (time.monotonic() - started_at) * 1000
@@ -2594,13 +2590,10 @@ def _processing_activity_snapshot() -> dict[str, Any]:
             now = time.monotonic()
             cached = _PROCESSING_ACTIVITY_CACHE.get("snapshot")
             source_matches = _PROCESSING_ACTIVITY_CACHE.get("source") == source
-            audited_at = float(
-                _PROCESSING_ACTIVITY_CACHE.get("audited_at") or 0.0
-            )
+            audited_at = float(_PROCESSING_ACTIVITY_CACHE.get("audited_at") or 0.0)
             lanes = cached.get("lanes") if isinstance(cached, dict) else []
             has_recent_lane = isinstance(lanes, list) and any(
-                isinstance(lane, dict) and lane.get("recent") is True
-                for lane in lanes
+                isinstance(lane, dict) and lane.get("recent") is True for lane in lanes
             )
             audit_seconds = (
                 PROCESSING_ACTIVITY_RECENT_AUDIT_SECONDS
@@ -2612,19 +2605,19 @@ def _processing_activity_snapshot() -> dict[str, Any]:
                 and source_matches
                 and now - audited_at < audit_seconds
             ):
-                _PROCESSING_ACTIVITY_CACHE["cache_hits"] = int(
-                    _PROCESSING_ACTIVITY_CACHE.get("cache_hits") or 0
-                ) + 1
+                _PROCESSING_ACTIVITY_CACHE["cache_hits"] = (
+                    int(_PROCESSING_ACTIVITY_CACHE.get("cache_hits") or 0) + 1
+                )
                 snapshot = cached
                 continue
             if _PROCESSING_ACTIVITY_CACHE.get("refreshing"):
-                _PROCESSING_ACTIVITY_CACHE["coalesced"] = int(
-                    _PROCESSING_ACTIVITY_CACHE.get("coalesced") or 0
-                ) + 1
+                _PROCESSING_ACTIVITY_CACHE["coalesced"] = (
+                    int(_PROCESSING_ACTIVITY_CACHE.get("coalesced") or 0) + 1
+                )
                 if isinstance(cached, dict):
-                    _PROCESSING_ACTIVITY_CACHE["cache_hits"] = int(
-                        _PROCESSING_ACTIVITY_CACHE.get("cache_hits") or 0
-                    ) + 1
+                    _PROCESSING_ACTIVITY_CACHE["cache_hits"] = (
+                        int(_PROCESSING_ACTIVITY_CACHE.get("cache_hits") or 0) + 1
+                    )
                     snapshot = cached
                     continue
                 _PROCESSING_ACTIVITY_CACHE_CONDITION.wait()
@@ -2632,9 +2625,9 @@ def _processing_activity_snapshot() -> dict[str, Any]:
                 continue
             _PROCESSING_ACTIVITY_CACHE["refreshing"] = True
             if isinstance(cached, dict) and source_matches:
-                _PROCESSING_ACTIVITY_CACHE["cache_hits"] = int(
-                    _PROCESSING_ACTIVITY_CACHE.get("cache_hits") or 0
-                ) + 1
+                _PROCESSING_ACTIVITY_CACHE["cache_hits"] = (
+                    int(_PROCESSING_ACTIVITY_CACHE.get("cache_hits") or 0) + 1
+                )
                 snapshot = cached
                 start_async = True
             else:
@@ -2823,6 +2816,20 @@ def _decision_trace_context_tokens() -> int | None:
         return int(load_decision_router_config().num_ctx)
     except Exception:
         return None
+
+
+def _decision_trace_think_label(model: str, num_ctx: int | None) -> str:
+    if not model or model == "not configured":
+        return "—"
+    try:
+        from chronovisor.decision.local_structured import structured_think_mode
+
+        mode = structured_think_mode(model, num_ctx=num_ctx or 8_192)
+        if mode is False:
+            return "off"
+        return str(mode)
+    except Exception:
+        return "—"
 
 
 def _decision_trace_steps(
@@ -3142,6 +3149,7 @@ def _decision_trace_snapshot(
         decision and decision.get("kind") == "decision_artifact_replay"
     )
     lanes: list[dict[str, Any]] = []
+    trace_num_ctx = _decision_trace_context_tokens()
     lane_labels = {
         "primary": "Primary",
         "challenger": "Challenger",
@@ -3206,6 +3214,7 @@ def _decision_trace_snapshot(
                 "key": lane,
                 "label": lane_labels[lane],
                 "model": models[lane],
+                "think": _decision_trace_think_label(models[lane], trace_num_ctx),
                 "state": state,
                 "result": result,
                 "detail": detail,
@@ -4884,19 +4893,17 @@ def _snapshot_source_fingerprint() -> tuple[Any, ...]:
             if (
                 isinstance(cached, tuple)
                 and _SNAPSHOT_FINGERPRINT_CACHE.get("source") == source
-                and now - float(
-                    _SNAPSHOT_FINGERPRINT_CACHE.get("audited_at") or 0.0
-                )
+                and now - float(_SNAPSHOT_FINGERPRINT_CACHE.get("audited_at") or 0.0)
                 < SNAPSHOT_FINGERPRINT_AUDIT_SECONDS
             ):
-                _SNAPSHOT_FINGERPRINT_CACHE["cache_hits"] = int(
-                    _SNAPSHOT_FINGERPRINT_CACHE.get("cache_hits") or 0
-                ) + 1
+                _SNAPSHOT_FINGERPRINT_CACHE["cache_hits"] = (
+                    int(_SNAPSHOT_FINGERPRINT_CACHE.get("cache_hits") or 0) + 1
+                )
                 return cached
             if _SNAPSHOT_FINGERPRINT_CACHE.get("probing"):
-                _SNAPSHOT_FINGERPRINT_CACHE["coalesced"] = int(
-                    _SNAPSHOT_FINGERPRINT_CACHE.get("coalesced") or 0
-                ) + 1
+                _SNAPSHOT_FINGERPRINT_CACHE["coalesced"] = (
+                    int(_SNAPSHOT_FINGERPRINT_CACHE.get("coalesced") or 0) + 1
+                )
                 _SNAPSHOT_FINGERPRINT_CONDITION.wait()
                 source = _snapshot_source_probe_identity()
                 continue
@@ -4909,9 +4916,9 @@ def _snapshot_source_fingerprint() -> tuple[Any, ...]:
     except Exception:
         with _SNAPSHOT_FINGERPRINT_CONDITION:
             _SNAPSHOT_FINGERPRINT_CACHE["probing"] = False
-            _SNAPSHOT_FINGERPRINT_CACHE["error_count"] = int(
-                _SNAPSHOT_FINGERPRINT_CACHE.get("error_count") or 0
-            ) + 1
+            _SNAPSHOT_FINGERPRINT_CACHE["error_count"] = (
+                int(_SNAPSHOT_FINGERPRINT_CACHE.get("error_count") or 0) + 1
+            )
             _SNAPSHOT_FINGERPRINT_CONDITION.notify_all()
         raise
     with _SNAPSHOT_FINGERPRINT_CONDITION:
@@ -4921,13 +4928,9 @@ def _snapshot_source_fingerprint() -> tuple[Any, ...]:
                 "fingerprint": fingerprint,
                 "audited_at": time.monotonic(),
                 "probing": False,
-                "generation": int(
-                    _SNAPSHOT_FINGERPRINT_CACHE.get("generation") or 0
-                )
+                "generation": int(_SNAPSHOT_FINGERPRINT_CACHE.get("generation") or 0)
                 + 1,
-                "probe_count": int(
-                    _SNAPSHOT_FINGERPRINT_CACHE.get("probe_count") or 0
-                )
+                "probe_count": int(_SNAPSHOT_FINGERPRINT_CACHE.get("probe_count") or 0)
                 + 1,
             }
         )
@@ -5378,9 +5381,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             elif path == "/api/snapshot":
                 _json_response(
                     self,
-                    _snapshot_with_live_status(
-                        _cached_snapshot(allow_stale=True)
-                    ),
+                    _snapshot_with_live_status(_cached_snapshot(allow_stale=True)),
                 )
             elif path == "/api/status":
                 snapshot = _snapshot_with_live_status(

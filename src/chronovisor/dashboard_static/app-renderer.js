@@ -572,6 +572,7 @@ function renderDecisionTraceFrame(trace, focusEvent = null) {
     element.classList.add(laneState);
     const role = element.querySelector(".decision-role strong");
     const model = element.querySelector(".decision-model");
+    const think = element.querySelector(".decision-think");
     const steps = element.querySelector(".decision-lane-steps");
     const result = element.querySelector(".decision-lane-result");
     element.classList.toggle(
@@ -580,6 +581,11 @@ function renderDecisionTraceFrame(trace, focusEvent = null) {
     );
     role.textContent = fmt(lane.label, element.dataset.decisionLane);
     model.textContent = fmt(lane.model, "not configured");
+    if (think) {
+      const mode = fmt(lane.think, "—");
+      think.textContent = mode === "—" ? "—" : "think:" + mode;
+      think.dataset.thinkMode = mode;
+    }
     reconcileDecisionSteps(
       steps,
       lane.steps,
