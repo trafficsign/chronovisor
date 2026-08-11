@@ -2581,6 +2581,34 @@ def test_recall_budget_exhaustion_uses_deterministic_fallback(monkeypatch) -> No
     assert "core" in result.context
 
 
+def test_final_evidence_observer_can_use_fallback_reserve(monkeypatch) -> None:
+    captured: dict[str, float] = {}
+    monkeypatch.setattr(recall_runtime.time, "monotonic", lambda: 100.0)
+    monkeypatch.setattr(
+        recall_runtime,
+        "collect_context",
+        lambda *_args, **_kwargs: [ContextItem("page", "Page", "", 1.0)],
+    )
+
+    def observe(*_args, deadline_at: float, **_kwargs):
+        captured["deadline_at"] = deadline_at
+        return {"status": "observed", "authority": "teacher"}
+
+    monkeypatch.setattr(recall_runtime, "observe_evidence_reconstruction", observe)
+
+    recall_runtime._run_recall_impl(
+        RecallRequest(
+            host="codex",
+            event="UserPromptSubmit",
+            prompt="昨日のChronovisorの続き",
+            session_id="session",
+        ),
+        RecallPolicy(gate_mode="legacy", judge_mode="off", log_decisions=False),
+    )
+
+    assert captured["deadline_at"] == pytest.approx(103.9)
+
+
 def test_deterministic_fallback_disables_model_dependent_stages(monkeypatch) -> None:
     from chronovisor.recall import recall_runtime
 

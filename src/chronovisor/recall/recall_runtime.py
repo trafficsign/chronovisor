@@ -2674,7 +2674,8 @@ def _run_recall_impl(
         result,
         request=active_request,
         policy=policy,
-        deadline_at=deadline_at,
+        # The teacher is complete, so only keep finalization headroom now.
+        deadline_at=max(deadline_at, final_deadline_at - 0.1),
     )
     result.latency_ms = _elapsed_ms(started)
     return _finalize_recall_result(
