@@ -221,12 +221,13 @@ def _rebuild_registry_and_links(
                 raise ValueError("page registry does not cover migration output")
             manifest_uid = item.get("uid")
             if manifest_uid is not None:
-                try:
-                    expected_uid = normalize_page_uid(manifest_uid)
-                except ValueError as exc:
-                    raise ValueError("migration page UID is invalid") from exc
-                if current[0] != expected_uid:
-                    raise ValueError("page registry changed a migration page UID")
+                if manifest_uid != relative:
+                    try:
+                        expected_uid = normalize_page_uid(manifest_uid)
+                    except ValueError as exc:
+                        raise ValueError("migration page UID is invalid") from exc
+                    if current[0] != expected_uid:
+                        raise ValueError("page registry changed a migration page UID")
             else:
                 identity_sha256 = item.get("identity_sha256")
                 if (

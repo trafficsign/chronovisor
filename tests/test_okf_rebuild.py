@@ -27,6 +27,7 @@ from chronovisor.core.okf_cutover import (
     FINALIZE_FAULT_POINTS,
     RECUTOVER_FAULT_POINTS,
     ROLLBACK_DRILL_FAULT_POINTS,
+    OKFRebuildGate,
     cleanup_okf_cutover,
     discover_okf_startup,
     execute_okf_cutover,
@@ -98,10 +99,24 @@ def _replace_fixture_uids(root: Path) -> None:
         )
 
 
-def _setup_committed(tmp_path: Path) -> tuple[Path, Path, Path]:
+def _setup_committed(
+    tmp_path: Path, *, uidless_relative_path: str | None = None
+) -> tuple[Path, Path, Path]:
     root = (tmp_path / "source").resolve()
     shutil.copytree(FIXTURE, root)
     _replace_fixture_uids(root)
+    if uidless_relative_path is not None:
+        path = root / "pages" / uidless_relative_path
+        path.write_text(
+            "".join(
+                line
+                for line in path.read_text(encoding="utf-8").splitlines(
+                    keepends=True
+                )
+                if not line.startswith("uid: ")
+            ),
+            encoding="utf-8",
+        )
     (root / "pages" / "draft.md").write_text(
         "---\n"
         f"uid: {new_page_uid(timestamp_ms=1_700_000_000_010, random_bits=10)}\n"
@@ -179,6 +194,67 @@ def test_migration_manifest_reader_uses_dedicated_bounded_limit(
     monkeypatch.setattr(okf_rebuild, "_MIGRATION_MANIFEST_MAX_BYTES", len(raw) - 1)
     with pytest.raises(ValueError, match="exceeds the offline rebuild bound"):
         okf_rebuild._migration_manifest(manifest_path)
+
+
+def test_registry_rebuild_accepts_exact_uidless_path_identity(tmp_path: Path) -> None:
+    root, _runtime, workspace = _setup_committed(
+        tmp_path, uidless_relative_path="deep/target.md"
+    )
+    manifest = json.loads((workspace / "dry-run-manifest.json").read_bytes())
+    target = next(
+        item
+        for item in manifest["documents"]
+        if item["relative_path"] == "deep/target.md"
+    )
+    cohort = next(
+        item for item in manifest["status_cohorts"] if item["input_status"] == "stable"
+    )
+    assert target["uid"] == "deep/target.md"
+    assert "uid:" not in (root / "pages" / "deep" / "target.md").read_text()
+    assert "deep/target.md" in cohort["uids"]
+
+    _stable_paths, source_rows = okf_rebuild._stable_sources(root)
+    okf_rebuild._rebuild_registry_and_links(
+        root, OKFRebuildGate(root, workspace, "", 0, "", ""), source_rows
+    )
+
+    target_uid = next(
+        uid
+        for uid, item in PageRegistry(root).load()["pages"].items()
+        if item["path"] == "pages/deep/target.md"
+    )
+    assert target_uid != target["uid"]
+
+
+@pytest.mark.parametrize(
+    ("manifest_uid", "error"),
+    (
+        (
+            new_page_uid(timestamp_ms=1_700_000_000_099, random_bits=99),
+            "page registry changed a migration page UID",
+        ),
+        ("arbitrary-legacy-identity", "migration page UID is invalid"),
+    ),
+)
+def test_registry_rebuild_rejects_non_path_migration_uid(
+    tmp_path: Path, manifest_uid: str, error: str
+) -> None:
+    root, _runtime, workspace = _setup_committed(tmp_path)
+    manifest_path = workspace / "dry-run-manifest.json"
+    manifest = json.loads(manifest_path.read_bytes())
+    target = next(
+        item
+        for item in manifest["documents"]
+        if item["relative_path"] == "deep/target.md"
+    )
+    target["uid"] = manifest_uid
+    manifest_path.write_bytes(canonical_json_line_bytes_strict(manifest))
+    _stable_paths, source_rows = okf_rebuild._stable_sources(root)
+
+    with pytest.raises(ValueError, match=error):
+        okf_rebuild._rebuild_registry_and_links(
+            root, OKFRebuildGate(root, workspace, "", 0, "", ""), source_rows
+        )
 
 
 def test_offline_rebuild_seals_exact_stable_corpus_without_authority(
