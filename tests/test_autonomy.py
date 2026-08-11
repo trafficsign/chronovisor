@@ -2894,7 +2894,18 @@ def test_regression_guard_quarantines_cycle_without_global_git_reset(
     assert quarantine_file.read_bytes() == before
 
 
-def test_install_launchd_dry_run_builds_sleep_and_watchdog_plists(monkeypatch) -> None:
+def test_install_launchd_dry_run_builds_sleep_and_watchdog_plists(
+    tmp_path: Path, monkeypatch
+) -> None:
+    python = tmp_path / "python3.14"
+    probe_log = tmp_path / "python-probe.log"
+    python.write_text(
+        '#!/bin/sh\nprintf "%s\\n" "$*" > "$CHRONOVISOR_TEST_PROBE_LOG"\n',
+        encoding="utf-8",
+    )
+    python.chmod(0o755)
+    monkeypatch.setenv("CHRONOVISOR_PYTHON", str(python))
+    monkeypatch.setenv("CHRONOVISOR_TEST_PROBE_LOG", str(probe_log))
     monkeypatch.setattr(autonomy, "_uvx_path", lambda: "/opt/homebrew/bin/uvx")
 
     payload = autonomy.install_launchd(dry_run=True, load=False)
@@ -2925,6 +2936,14 @@ def test_install_launchd_dry_run_builds_sleep_and_watchdog_plists(monkeypatch) -
     assert watchdog_plist["stdout"] == os.devnull
     command = payload["wrappers"][0]["command"]
     assert command[0] == "/opt/homebrew/bin/uvx"
+    for wrapper in payload["wrappers"]:
+        command = wrapper["command"]
+        assert command[1:3] == ["--python", str(python)]
+        assert command.index("--python") < command.index("--refresh-package")
+        assert command.index("--refresh-package") < command.index("--from")
+    probe_command = probe_log.read_text(encoding="utf-8")
+    assert "sys.version_info[:2] == (3, 14)" in probe_command
+    assert "_is_gil_enabled" in probe_command
     assert "--refresh-package" in command
     assert "git+ssh://git@github.com/trafficsign/chronovisor" in command
     assert "--json" not in payload["wrappers"][0]["command"]
@@ -2969,6 +2988,10 @@ def test_install_then_uninstall_launchd_round_trip_in_fixture(
     monkeypatch.setattr(autonomy, "LAUNCH_AGENT_DIR", launch_agents)
     monkeypatch.setattr(autonomy, "WRAPPER_DIR", wrappers)
     monkeypatch.setattr(autonomy, "_uvx_path", lambda: "/opt/homebrew/bin/uvx")
+    python = tmp_path / "python3.14"
+    python.write_text("#!/bin/sh\n", encoding="utf-8")
+    python.chmod(0o755)
+    monkeypatch.setenv("CHRONOVISOR_PYTHON", str(python))
     monkeypatch.setattr(
         autonomy,
         "runtime_identity",

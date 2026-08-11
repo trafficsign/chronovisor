@@ -187,11 +187,14 @@ def uvx_runtime_command(
     entrypoint: str,
     *,
     executable: str = "uvx",
+    python: str | None = None,
     refresh: bool = False,
 ) -> list[str]:
     """Build a production command that cannot import an unpushed worktree."""
 
     command = [executable]
+    if python:
+        command.extend(["--python", python])
     if refresh:
         command.extend(["--refresh-package", RUNTIME_PACKAGE])
     command.extend(["--from", runtime_source(), entrypoint])

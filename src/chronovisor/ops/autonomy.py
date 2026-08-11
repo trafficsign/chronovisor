@@ -4314,6 +4314,27 @@ def _write_wrapper(path: Path, command: list[str]) -> None:
 def install_launchd(*, dry_run: bool = False, load: bool = False) -> dict[str, Any]:
     logs = CHRONOVISOR_ROOT / "logs"
     uvx = _uvx_path()
+    runtime_python = shutil.which(
+        os.environ.get("CHRONOVISOR_PYTHON", "").strip() or "python3.14"
+    )
+    if (
+        runtime_python is None
+        or not Path(runtime_python).is_absolute()
+        or "archive-v0" in Path(runtime_python).parts
+    ):
+        raise RuntimeError("standard Python 3.14 executable not found")
+    probe = subprocess.run(
+        [
+            runtime_python,
+            "-c",
+            "import sys; raise SystemExit(not (sys.version_info[:2] == (3, 14) "
+            "and getattr(sys, '_is_gil_enabled', lambda: False)()))",
+        ],
+        text=True,
+        capture_output=True,
+    )
+    if probe.returncode != 0:
+        raise RuntimeError("standard GIL Python 3.14 executable required")
     sleep_path = LAUNCH_AGENT_DIR / f"{SLEEP_LABEL}.plist"
     converge_path = LAUNCH_AGENT_DIR / f"{CONVERGE_LABEL}.plist"
     watchdog_path = LAUNCH_AGENT_DIR / f"{WATCHDOG_LABEL}.plist"
@@ -4326,7 +4347,12 @@ def install_launchd(*, dry_run: bool = False, load: bool = False) -> dict[str, A
     soak_wrapper = WRAPPER_DIR / "chronovisor-soak"
     legacy_deadman_script = WRAPPER_DIR / "chronovisor-deadman-observer.py"
     sleep_command = [
-        *uvx_runtime_command("chronovisor", executable=uvx, refresh=True),
+        *uvx_runtime_command(
+            "chronovisor",
+            executable=uvx,
+            python=runtime_python,
+            refresh=True,
+        ),
         "sleep",
         "--raw-limit",
         "200",
@@ -4336,14 +4362,24 @@ def install_launchd(*, dry_run: bool = False, load: bool = False) -> dict[str, A
         "300",
     ]
     watchdog_command = [
-        *uvx_runtime_command("chronovisor", executable=uvx, refresh=True),
+        *uvx_runtime_command(
+            "chronovisor",
+            executable=uvx,
+            python=runtime_python,
+            refresh=True,
+        ),
         "autonomy",
         "watchdog",
         "--notify",
         "--json",
     ]
     converge_command = [
-        *uvx_runtime_command("chronovisor-converge", executable=uvx, refresh=True),
+        *uvx_runtime_command(
+            "chronovisor-converge",
+            executable=uvx,
+            python=runtime_python,
+            refresh=True,
+        ),
         "--session-limit",
         "8",
         "--job-limit",
@@ -4365,7 +4401,12 @@ def install_launchd(*, dry_run: bool = False, load: bool = False) -> dict[str, A
     ]
     expected_commit = str(runtime_identity().get("expected_commit") or "")
     soak_command = [
-        *uvx_runtime_command("chronovisor-burn-monitor", executable=uvx, refresh=True),
+        *uvx_runtime_command(
+            "chronovisor-burn-monitor",
+            executable=uvx,
+            python=runtime_python,
+            refresh=True,
+        ),
         "--duration-seconds",
         "604800",
         "--sample-seconds",
