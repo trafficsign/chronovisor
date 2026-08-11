@@ -6,6 +6,7 @@ from collections import defaultdict, deque
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
 
+import httpx
 import pytest
 
 from chronovisor.core import ollama
@@ -479,6 +480,112 @@ def _metadata(models: list[str] | tuple[str, ...]) -> dict[str, object]:
             for index, model in enumerate(models)
         },
     }
+
+
+def test_fetch_local_model_metadata_fills_blank_quantization_from_show(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = "muse-glimmer:30b-mxfp8-dflash"
+    requests: list[tuple[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append((request.method, request.url.path))
+        if request.url.path == "/api/version":
+            return httpx.Response(200, json={"version": "test"})
+        if request.url.path == "/api/tags":
+            return httpx.Response(
+                200,
+                json={
+                    "models": [
+                        {
+                            "name": model,
+                            "model": model,
+                            "digest": "tag-digest",
+                            "details": {"quantization_level": ""},
+                        }
+                    ]
+                },
+            )
+        assert json.loads(request.content) == {"model": model}
+        return httpx.Response(
+            200,
+            json={
+                "name": model,
+                "digest": "show-digest-must-not-replace-tag",
+                "details": {
+                    "format": "safetensors",
+                    "quantization_level": "mxfp8",
+                },
+            },
+        )
+
+    client_type = httpx.Client
+    monkeypatch.setattr(
+        local_model_eval.httpx,
+        "Client",
+        lambda **kwargs: client_type(
+            transport=httpx.MockTransport(handler),
+            **kwargs,
+        ),
+    )
+
+    metadata = local_model_eval.fetch_local_model_metadata([model])
+
+    assert requests == [
+        ("GET", "/api/version"),
+        ("GET", "/api/tags"),
+        ("POST", "/api/show"),
+    ]
+    assert metadata["models"][model] == {
+        "name": model,
+        "model": model,
+        "digest": "tag-digest",
+        "details": {
+            "format": "safetensors",
+            "quantization_level": "mxfp8",
+        },
+    }
+
+
+def test_fetch_local_model_metadata_skips_show_for_complete_tag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = "ornith:v1"
+    requests: list[tuple[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append((request.method, request.url.path))
+        if request.url.path == "/api/version":
+            return httpx.Response(200, json={"version": "test"})
+        if request.url.path == "/api/tags":
+            return httpx.Response(
+                200,
+                json={
+                    "models": [
+                        {
+                            "name": model,
+                            "digest": "tag-digest",
+                            "details": {"quantization_level": "Q5_K_M"},
+                        }
+                    ]
+                },
+            )
+        pytest.fail("complete tag metadata must not call /api/show")
+
+    client_type = httpx.Client
+    monkeypatch.setattr(
+        local_model_eval.httpx,
+        "Client",
+        lambda **kwargs: client_type(
+            transport=httpx.MockTransport(handler),
+            **kwargs,
+        ),
+    )
+
+    metadata = local_model_eval.fetch_local_model_metadata([model])
+
+    assert requests == [("GET", "/api/version"), ("GET", "/api/tags")]
+    assert metadata["models"][model]["details"]["quantization_level"] == "Q5_K_M"
 
 
 @pytest.mark.parametrize(

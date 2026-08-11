@@ -1309,23 +1309,53 @@ def fetch_local_model_metadata(models: Sequence[str]) -> Mapping[str, Any]:
         version_response.raise_for_status()
         tags_response = client.get("/api/tags")
         tags_response.raise_for_status()
-    version_body = version_response.json()
-    tags_body = tags_response.json()
-    available = tags_body.get("models") if isinstance(tags_body, dict) else []
-    available = available if isinstance(available, list) else []
-    records: dict[str, Any] = {}
-    for requested in models:
-        match = next(
-            (
-                row
-                for row in available
-                if isinstance(row, dict)
-                and requested
-                in {str(row.get("name") or ""), str(row.get("model") or "")}
-            ),
-            None,
-        )
-        records[requested] = match or {"name": requested, "status": "missing"}
+        version_body = version_response.json()
+        tags_body = tags_response.json()
+        available = tags_body.get("models") if isinstance(tags_body, dict) else []
+        available = available if isinstance(available, list) else []
+        records: dict[str, Any] = {}
+        for requested in models:
+            match = next(
+                (
+                    row
+                    for row in available
+                    if isinstance(row, dict)
+                    and requested
+                    in {str(row.get("name") or ""), str(row.get("model") or "")}
+                ),
+                None,
+            )
+            details = match.get("details") if isinstance(match, Mapping) else None
+            quantization = (
+                details.get("quantization_level")
+                if isinstance(details, Mapping)
+                else None
+            )
+            if match is not None and (
+                not isinstance(quantization, str) or not quantization.strip()
+            ):
+                show_response = client.post("/api/show", json={"model": requested})
+                show_response.raise_for_status()
+                show_body = show_response.json()
+                show_details = (
+                    show_body.get("details")
+                    if isinstance(show_body, Mapping)
+                    else None
+                )
+                show_quantization = (
+                    show_details.get("quantization_level")
+                    if isinstance(show_details, Mapping)
+                    else None
+                )
+                if (
+                    not isinstance(show_quantization, str)
+                    or not show_quantization.strip()
+                ):
+                    raise ValueError(
+                        f"model {requested!r} show metadata has no quantization identity"
+                    )
+                match = {**match, "details": dict(show_details)}
+            records[requested] = match or {"name": requested, "status": "missing"}
     return {
         "engine": {
             "name": "ollama",
