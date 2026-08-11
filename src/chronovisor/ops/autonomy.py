@@ -33,6 +33,7 @@ from chronovisor.core.page_mutation import (
     decision_authority_lock,
 )
 from chronovisor.core.runtime_config import (
+    launchd_label,
     runtime_identity,
     runtime_repo_root,
     uvx_runtime_command,
@@ -82,11 +83,11 @@ DIGEST_FILE = AUTONOMY_DIR / "digest-latest.md"
 QUARANTINE_FILE = AUTONOMY_DIR / "quarantine.json"
 PROJECT_ROOT = runtime_repo_root()
 
-SLEEP_LABEL = "com.trafficsign.chronovisor-sleep"
-CONVERGE_LABEL = "com.trafficsign.chronovisor-converge"
-WATCHDOG_LABEL = "com.trafficsign.chronovisor-watchdog"
-DEADMAN_LABEL = "com.trafficsign.chronovisor-deadman-observer"
-SOAK_LABEL = "com.trafficsign.chronovisor-soak"
+SLEEP_LABEL = launchd_label("sleep")
+CONVERGE_LABEL = launchd_label("converge")
+WATCHDOG_LABEL = launchd_label("watchdog")
+DEADMAN_LABEL = launchd_label("deadman-observer")
+SOAK_LABEL = launchd_label("soak")
 LAUNCH_AGENT_DIR = Path.home() / "Library" / "LaunchAgents"
 WRAPPER_DIR = CHRONOVISOR_ROOT / "bin"
 DUPLICATE_FRONTIER_LANE = "autonomy_duplicate_resolution"

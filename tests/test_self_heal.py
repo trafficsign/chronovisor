@@ -4334,6 +4334,29 @@ def test_verified_local_repair_git_state_binds_clean_pushed_runtime(
         self_heal._verified_local_repair_git_state(commit)
 
 
+def test_verified_runtime_source_uses_configured_github_repository(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from chronovisor.core import runtime_config
+    from chronovisor.ingest import self_heal
+
+    config = tmp_path / "config.toml"
+    config.write_text(
+        '[runtime]\ngithub_repository = "example/chronovisor"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(runtime_config, "CONFIG_FILE", config)
+    monkeypatch.delenv("CHRONOVISOR_GITHUB_REPOSITORY", raising=False)
+
+    assert self_heal._verified_runtime_github_source(
+        "git+ssh://git@github.com/example/chronovisor.git"
+    ) == "ssh://git@github.com/example/chronovisor"
+    with pytest.raises(ValueError, match="repair_runtime_source_not_exact_github_vcs"):
+        self_heal._verified_runtime_github_source(
+            "git+ssh://git@github.com/trafficsign/chronovisor"
+        )
+
+
 def test_release_operational_repair_cli_routes_all_evidence(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

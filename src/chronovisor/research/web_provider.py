@@ -18,12 +18,13 @@ from urllib.parse import quote, urlsplit, urlunsplit
 import httpx
 
 from chronovisor.core.jsonl_write import append_jsonl_durable
+from chronovisor.core.runtime_config import user_agent
 from chronovisor.core.store import CHRONOVISOR_ROOT
 from chronovisor.research.research_security import guard_egress_query, guard_url
 from chronovisor.search.research_config import WebConfig
 
 WEB_TRACE = CHRONOVISOR_ROOT / "runtime" / "research" / "web-egress.jsonl"
-USER_AGENT = "Chronovisor/0.1 (+https://github.com/trafficsign/chronovisor)"
+USER_AGENT = user_agent()
 ADOPTED_SOURCE_PACKS = frozenset({"general", "code", "academic", "encyclopedia"})
 _CODE_STRONG_TERMS = (
     "github",

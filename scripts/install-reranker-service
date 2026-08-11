@@ -4,7 +4,6 @@ set -euo pipefail
 readonly SCRIPT_DIR="${0:A:h}"
 readonly PROJECT_ROOT="${SCRIPT_DIR:h}"
 readonly LAUNCH_AGENT="$HOME/Library/LaunchAgents/com.trafficsign.chronovisor-reranker.plist"
-readonly LABEL="com.trafficsign.chronovisor-reranker"
 readonly DOMAIN="gui/$(/usr/bin/id -u)"
 
 mkdir -p "$HOME/.chronovisor/logs" "${LAUNCH_AGENT:h}"
@@ -13,6 +12,7 @@ mkdir -p "$HOME/.chronovisor/logs" "${LAUNCH_AGENT:h}"
   "$LAUNCH_AGENT" \
   --project-root "$PROJECT_ROOT" \
   --home "$HOME"
+readonly LABEL="$(/usr/libexec/PlistBuddy -c 'Print :Label' "$LAUNCH_AGENT")"
 
 /bin/launchctl bootout "$DOMAIN/$LABEL" >/dev/null 2>&1 || true
 for _attempt in {1..20}; do

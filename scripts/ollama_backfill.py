@@ -25,7 +25,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 import backfill_links
 from backfill_links import atomic_write, merge_related_section
 
-from chronovisor.core.ollama import generate, is_available
+from chronovisor.core.ollama import OLLAMA_URL, generate, is_available
 from chronovisor.raw.legacy_semantic_write import (
     block_legacy_semantic_mutation,
 )
@@ -110,7 +110,7 @@ def main() -> None:
         sys.exit(1)
 
     if not is_available():
-        print("Error: Ollama is not running on localhost:11434", file=sys.stderr)
+        print(f"Error: Ollama is not running on {OLLAMA_URL}", file=sys.stderr)
         sys.exit(1)
 
     with open(batch_file, encoding="utf-8") as f:

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import stat
+import subprocess
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -58,9 +60,44 @@ def test_shared_runtime_resolver_uses_safe_portable_defaults() -> None:
         in resolver
     )
     assert "CHRONOVISOR_ROOT=${CHRONOVISOR_ROOT:-$HOME/.chronovisor}" in resolver
-    assert "git+https://github.com/trafficsign/chronovisor.git" in resolver
+    assert "chronovisor-contract-manifest.json" in resolver
+    assert 'runtime.get("source")' in resolver
+    assert "github.com/trafficsign/chronovisor" not in resolver
     assert "git+ssh://" not in resolver
     assert "/Users/" not in resolver
+
+
+def test_shared_runtime_resolver_reads_configured_source(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    root = home / ".chronovisor"
+    root.mkdir(parents=True)
+    (root / "config.toml").write_text(
+        '[runtime]\nsource = "git+https://github.com/example/fork.git"\n',
+        encoding="utf-8",
+    )
+    uvx = tmp_path / "uvx"
+    uvx.write_text(
+        f"#!{sys.executable}\nimport sys\nprint(' '.join(sys.argv[1:]))\n",
+        encoding="utf-8",
+    )
+    uvx.chmod(0o755)
+
+    completed = subprocess.run(
+        [str(SCRIPTS / "chronovisor-dashboard")],
+        check=True,
+        capture_output=True,
+        text=True,
+        env={
+            "HOME": str(home),
+            "PATH": "/usr/bin:/bin",
+            "CHRONOVISOR_REPO_ROOT": str(ROOT),
+            "CHRONOVISOR_ROOT": str(root),
+            "CHRONOVISOR_UVX": str(uvx),
+            "CHRONOVISOR_PYTHON": sys.executable,
+        },
+    )
+
+    assert "--from git+https://github.com/example/fork.git" in completed.stdout
 
 
 def test_library_evidence_invokes_canonical_module_directly() -> None:

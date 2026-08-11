@@ -7,10 +7,13 @@ import plistlib
 import re
 import shutil
 import tempfile
+import tomllib
 from pathlib import Path
 from typing import Any
 
 PLACEHOLDER = re.compile(r"@@[A-Z_]+@@")
+LABEL_PREFIX = re.compile(r"(?:[A-Za-z0-9][A-Za-z0-9-]*\.)+[A-Za-z0-9][A-Za-z0-9-]*-\Z")
+DEFAULT_LABEL_PREFIX = "com.trafficsign.chronovisor-"
 SYSTEM_PATHS = (
     "/opt/homebrew/bin",
     "/usr/local/bin",
@@ -39,6 +42,27 @@ def _executable(value: str | None, env_name: str, command: str) -> Path:
             f"{env_name} must reference an absolute executable: {selected}"
         )
     return path.resolve()
+
+
+def _label_prefix(home: Path, override: str | None) -> str:
+    configured = override or os.environ.get("CHRONOVISOR_LAUNCHD_LABEL_PREFIX")
+    if configured is None:
+        try:
+            data = tomllib.loads(
+                (home / ".chronovisor" / "config.toml").read_text(encoding="utf-8")
+            )
+        except (OSError, UnicodeError, tomllib.TOMLDecodeError):
+            data = {}
+        runtime = data.get("runtime") if isinstance(data, dict) else None
+        configured = (
+            runtime.get("launchd_label_prefix") if isinstance(runtime, dict) else None
+        )
+    prefix = configured if isinstance(configured, str) else DEFAULT_LABEL_PREFIX
+    if LABEL_PREFIX.fullmatch(prefix) is None:
+        raise SystemExit(
+            "launchd label prefix must be a reverse-DNS prefix ending in '-'"
+        )
+    return prefix
 
 
 def _strings(value: Any):
@@ -72,6 +96,7 @@ def main() -> int:
     parser.add_argument("--home", required=True)
     parser.add_argument("--uvx")
     parser.add_argument("--python")
+    parser.add_argument("--label-prefix")
     args = parser.parse_args()
 
     project_root = _absolute_directory(args.project_root, "project root")
@@ -82,7 +107,14 @@ def main() -> int:
         for text in _strings(payload)
         for match in PLACEHOLDER.finditer(text)
     }
-    known = {"@@PROJECT_ROOT@@", "@@HOME@@", "@@PATH@@", "@@UVX@@", "@@PYTHON@@"}
+    known = {
+        "@@PROJECT_ROOT@@",
+        "@@HOME@@",
+        "@@PATH@@",
+        "@@UVX@@",
+        "@@PYTHON@@",
+        "@@LAUNCHD_LABEL_PREFIX@@",
+    }
     if unknown := required - known:
         raise SystemExit(f"unknown launchd placeholders: {', '.join(sorted(unknown))}")
 
@@ -104,6 +136,7 @@ def main() -> int:
         "@@PATH@@": ":".join(dict.fromkeys(path_parts)),
         "@@UVX@@": str(uvx or ""),
         "@@PYTHON@@": str(python or ""),
+        "@@LAUNCHD_LABEL_PREFIX@@": _label_prefix(home, args.label_prefix),
     }
     rendered = _replace(payload, replacements)
     remaining = {

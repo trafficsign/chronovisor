@@ -29,6 +29,7 @@ from chronovisor.core.ollama import (
     runtime_generation_routes,
 )
 from chronovisor.core.runtime_config import (
+    load_dashboard_config,
     load_decision_router_config,
     load_reranker_config,
     load_search_embedding_config,
@@ -5550,9 +5551,10 @@ def _serve_locked(host: str, port: int, *, lan: bool) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    config = load_dashboard_config()
     parser = argparse.ArgumentParser(description="Run the Chronovisor local dashboard.")
-    parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument("--host", default=config.host)
+    parser.add_argument("--port", type=int, default=config.port)
     parser.add_argument(
         "--lan",
         action="store_true",

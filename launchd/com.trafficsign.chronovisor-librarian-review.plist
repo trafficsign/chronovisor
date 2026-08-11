@@ -4,7 +4,7 @@
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>com.trafficsign.chronovisor-librarian-review</string>
+  <string>@@LAUNCHD_LABEL_PREFIX@@librarian-review</string>
   <key>ProgramArguments</key>
   <array>
     <string>@@PROJECT_ROOT@@/scripts/chronovisor-librarian-review</string>

@@ -14,12 +14,14 @@ from typing import TYPE_CHECKING, Any, cast
 
 import httpx
 
+from chronovisor.core.runtime_config import ollama_url
+
 if TYPE_CHECKING:
     from chronovisor.core.runtime_config import IngestConfig
 
 log = logging.getLogger("chronovisor.core.ollama")
 
-OLLAMA_URL = "http://localhost:11434"
+OLLAMA_URL = ollama_url()
 HEALTH_CACHE_TTL = 900
 _health_cache: dict[str, Any] = {"status": None, "checked_at": 0.0}
 _CLIENT_LOCK = threading.Lock()

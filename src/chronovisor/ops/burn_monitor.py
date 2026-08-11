@@ -29,6 +29,7 @@ from typing import Any
 from chronovisor.core.canonical_json import (
     canonical_json_bytes_stringifying as canonical_bytes,
 )
+from chronovisor.core.runtime_config import dashboard_url, launchd_label, ollama_url
 from chronovisor.core.store import (
     CHRONOVISOR_ROOT,
     okf_runtime_operation,
@@ -45,18 +46,18 @@ DEFAULT_SAMPLE_SECONDS = 60
 DEFAULT_PROBE_SECONDS = 5
 DEFAULT_PREFLIGHT_WAIT_SECONDS = 180
 DEFAULT_FINAL_IDLE_WAIT_SECONDS = 180
-DEFAULT_DASHBOARD_URL = "http://127.0.0.1:8765"
-DEFAULT_OLLAMA_URL = "http://127.0.0.1:11434"
+DEFAULT_DASHBOARD_URL = dashboard_url()
+DEFAULT_OLLAMA_URL = ollama_url()
 EXPECTED_COMMIT = os.environ.get("CHRONOVISOR_EXPECTED_COMMIT", "").strip()
 MAX_RELATED_RSS_BYTES = 80 * 1024**3
 
 SERVICE_LABELS = {
-    "dashboard": "com.trafficsign.chronovisor-dashboard",
-    "sleep": "com.trafficsign.chronovisor-sleep",
-    "watchdog": "com.trafficsign.chronovisor-watchdog",
-    "converge": "com.trafficsign.chronovisor-converge",
-    "ingest": "com.trafficsign.chronovisor-ingest-drain",
-    "observer": "com.trafficsign.chronovisor-deadman-observer",
+    "dashboard": launchd_label("dashboard"),
+    "sleep": launchd_label("sleep"),
+    "watchdog": launchd_label("watchdog"),
+    "converge": launchd_label("converge"),
+    "ingest": launchd_label("ingest-drain"),
+    "observer": launchd_label("deadman-observer"),
 }
 
 TRACKED_FILES = {

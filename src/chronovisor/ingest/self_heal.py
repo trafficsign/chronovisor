@@ -119,7 +119,6 @@ _SYSTEM_INCIDENT_PRESTART_STATUSES = frozenset(
 )
 _FULL_GIT_SHA_RE = re.compile(r"[0-9a-f]{40}")
 _RAW_SHA256_RE = re.compile(r"[0-9a-f]{64}")
-_EXPECTED_GITHUB_REPOSITORY = "trafficsign/chronovisor"
 
 DEFAULT_RUNNING_LEASE_SECONDS = 2 * 60 * 60
 DEFAULT_QUARANTINE_RETRY_SECONDS = 6 * 60 * 60
@@ -587,6 +586,8 @@ def _packet_lock(packet_path: Path):
 def _verified_runtime_github_source(value: object) -> str:
     """Return one canonical GitHub SSH repository or fail closed."""
 
+    from chronovisor.core.runtime_config import github_repository
+
     if not isinstance(value, str) or not value.strip():
         raise ValueError("repair_runtime_source_unavailable")
     source = value.strip()
@@ -604,7 +605,7 @@ def _verified_runtime_github_source(value: object) -> str:
         or parsed.port is not None
         or parsed.query
         or parsed.fragment
-        or repository != _EXPECTED_GITHUB_REPOSITORY
+        or repository != github_repository()
     ):
         raise ValueError("repair_runtime_source_not_exact_github_vcs")
     return f"ssh://git@github.com/{repository}"

@@ -4,15 +4,11 @@
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>com.trafficsign.chronovisor-dashboard</string>
+  <string>@@LAUNCHD_LABEL_PREFIX@@dashboard</string>
 
   <key>ProgramArguments</key>
   <array>
     <string>@@PROJECT_ROOT@@/scripts/chronovisor-dashboard</string>
-    <string>--host</string>
-    <string>127.0.0.1</string>
-    <string>--port</string>
-    <string>8765</string>
   </array>
 
   <key>WorkingDirectory</key>

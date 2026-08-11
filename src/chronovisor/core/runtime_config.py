@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import tomllib
 from dataclasses import dataclass, field
@@ -25,15 +26,146 @@ DEFAULT_DECISION_TIE_BREAK_MODEL = "gemma4:26b"
 DEFAULT_HEAVY_NUM_CTX = 32_768
 DEFAULT_HEAVY_KEEP_ALIVE = "20m"
 MAX_SEMANTIC_PROJECTION_CHILD_BYTES = 24_000
-DEFAULT_RUNTIME_SOURCE = "git+ssh://git@github.com/trafficsign/chronovisor"
+DEFAULT_GITHUB_REPOSITORY = "trafficsign/chronovisor"
+DEFAULT_RUNTIME_SOURCE = f"git+ssh://git@github.com/{DEFAULT_GITHUB_REPOSITORY}"
+DEFAULT_USER_AGENT = (
+    f"Chronovisor/0.1 (+https://github.com/{DEFAULT_GITHUB_REPOSITORY})"
+)
+DEFAULT_LAUNCHD_LABEL_PREFIX = "com.trafficsign.chronovisor-"
+DEFAULT_OLLAMA_URL = "http://localhost:11434"
+DEFAULT_DASHBOARD_HOST = "127.0.0.1"
+DEFAULT_DASHBOARD_PORT = 8765
 RUNTIME_PACKAGE = "chronovisor"
+_GITHUB_REPOSITORY_RE = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\Z")
+_LAUNCHD_PREFIX_RE = re.compile(
+    r"(?:[A-Za-z0-9][A-Za-z0-9-]*\.)+[A-Za-z0-9][A-Za-z0-9-]*-\Z"
+)
+_LAUNCHD_SERVICE_RE = re.compile(r"[a-z0-9][a-z0-9-]*\Z")
+
+
+@dataclass(frozen=True)
+class RuntimeSettings:
+    source: str = DEFAULT_RUNTIME_SOURCE
+    github_repository: str = DEFAULT_GITHUB_REPOSITORY
+    user_agent: str = DEFAULT_USER_AGENT
+    launchd_label_prefix: str = DEFAULT_LAUNCHD_LABEL_PREFIX
+    ollama_url: str = DEFAULT_OLLAMA_URL
+
+
+@dataclass(frozen=True)
+class DashboardConfig:
+    host: str = DEFAULT_DASHBOARD_HOST
+    port: int = DEFAULT_DASHBOARD_PORT
+
+
+def _clean_text(value: object, default: str) -> str:
+    if (
+        isinstance(value, str)
+        and value
+        and value == value.strip()
+        and not any(ord(character) < 32 or ord(character) == 127 for character in value)
+    ):
+        return value
+    return default
+
+
+def _loopback_ollama_url(value: object) -> str:
+    from chronovisor.core.llm_security import (
+        CredentialSecurityError,
+        canonical_endpoint,
+    )
+
+    candidate = _clean_text(value, DEFAULT_OLLAMA_URL)
+    try:
+        endpoint = canonical_endpoint(candidate, cloud_secret=False)
+    except CredentialSecurityError:
+        return DEFAULT_OLLAMA_URL
+    if not endpoint.is_loopback or endpoint.url != endpoint.origin:
+        return DEFAULT_OLLAMA_URL
+    return endpoint.origin
+
+
+def load_runtime_settings(path: Path | str | None = None) -> RuntimeSettings:
+    """Load portable process identity and local endpoint defaults."""
+
+    data = load_toml_file(path)
+    section = data.get("runtime")
+    section = section if isinstance(section, dict) else {}
+    repository = _clean_text(
+        section.get("github_repository"), DEFAULT_GITHUB_REPOSITORY
+    )
+    if _GITHUB_REPOSITORY_RE.fullmatch(repository) is None:
+        repository = DEFAULT_GITHUB_REPOSITORY
+    default_source = f"git+ssh://git@github.com/{repository}"
+    source = _clean_text(section.get("source"), default_source)
+    default_user_agent = f"Chronovisor/0.1 (+https://github.com/{repository})"
+    user_agent = _clean_text(section.get("user_agent"), default_user_agent)
+    label_prefix = _clean_text(
+        section.get("launchd_label_prefix"), DEFAULT_LAUNCHD_LABEL_PREFIX
+    )
+    if _LAUNCHD_PREFIX_RE.fullmatch(label_prefix) is None:
+        label_prefix = DEFAULT_LAUNCHD_LABEL_PREFIX
+    return RuntimeSettings(
+        source=source,
+        github_repository=repository,
+        user_agent=user_agent,
+        launchd_label_prefix=label_prefix,
+        ollama_url=_loopback_ollama_url(section.get("ollama_url")),
+    )
+
+
+def github_repository(path: Path | str | None = None) -> str:
+    configured = os.environ.get("CHRONOVISOR_GITHUB_REPOSITORY", "").strip()
+    if _GITHUB_REPOSITORY_RE.fullmatch(configured):
+        return configured
+    return load_runtime_settings(path).github_repository
+
+
+def user_agent(path: Path | str | None = None) -> str:
+    configured = os.environ.get("CHRONOVISOR_USER_AGENT", "")
+    return _clean_text(configured, load_runtime_settings(path).user_agent)
+
+
+def launchd_label(service: str, path: Path | str | None = None) -> str:
+    if _LAUNCHD_SERVICE_RE.fullmatch(service) is None:
+        raise ValueError("invalid launchd service name")
+    configured = os.environ.get("CHRONOVISOR_LAUNCHD_LABEL_PREFIX", "").strip()
+    prefix = (
+        configured
+        if _LAUNCHD_PREFIX_RE.fullmatch(configured)
+        else load_runtime_settings(path).launchd_label_prefix
+    )
+    return f"{prefix}{service}"
+
+
+def ollama_url(path: Path | str | None = None) -> str:
+    configured = os.environ.get("OLLAMA_URL", "").strip()
+    return _loopback_ollama_url(configured or load_runtime_settings(path).ollama_url)
+
+
+def load_dashboard_config(path: Path | str | None = None) -> DashboardConfig:
+    data = load_toml_file(path)
+    section = data.get("dashboard")
+    section = section if isinstance(section, dict) else {}
+    host = _clean_text(section.get("host"), DEFAULT_DASHBOARD_HOST).casefold()
+    if host not in {"localhost", "127.0.0.1"}:
+        host = DEFAULT_DASHBOARD_HOST
+    port = section.get("port")
+    if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
+        port = DEFAULT_DASHBOARD_PORT
+    return DashboardConfig(host=host, port=port)
+
+
+def dashboard_url(path: Path | str | None = None) -> str:
+    config = load_dashboard_config(path)
+    return f"http://{config.host}:{config.port}"
 
 
 def runtime_source() -> str:
     """Return the pushed package source used by production entry points."""
 
     configured = os.environ.get("CHRONOVISOR_RUNTIME_SOURCE", "").strip()
-    return configured or DEFAULT_RUNTIME_SOURCE
+    return configured or load_runtime_settings().source
 
 
 def runtime_repo_root() -> Path:

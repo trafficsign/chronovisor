@@ -20,6 +20,32 @@ chronovisor_resolve_executable() {
   printf '%s\n' "$chronovisor_value"
 }
 
+chronovisor_runtime_source() {
+  "$CHRONOVISOR_PYTHON" - "$CHRONOVISOR_ROOT/config.toml" \
+    "$CHRONOVISOR_REPO_ROOT/chronovisor-contract-manifest.json" <<'PY'
+import json
+import sys
+import tomllib
+from pathlib import Path
+
+config_path, manifest_path = map(Path, sys.argv[1:])
+try:
+    runtime = tomllib.loads(config_path.read_text(encoding="utf-8")).get("runtime", {})
+except (OSError, UnicodeError, tomllib.TOMLDecodeError):
+    runtime = {}
+source = runtime.get("source") if isinstance(runtime, dict) else None
+if (
+    not isinstance(source, str)
+    or not source
+    or source != source.strip()
+    or any(ord(character) < 32 or ord(character) == 127 for character in source)
+):
+    repository = json.loads(manifest_path.read_text(encoding="utf-8"))["canonical"]["github"]
+    source = f"git+https://github.com/{repository}.git"
+print(source)
+PY
+}
+
 : "${HOME:?HOME is required}"
 CHRONOVISOR_WRAPPER_DIR=${CHRONOVISOR_WRAPPER_DIR:-$(CDPATH= cd "$(dirname "$0")" && pwd -P)}
 CHRONOVISOR_REPO_ROOT=${CHRONOVISOR_REPO_ROOT:-$(dirname "$CHRONOVISOR_WRAPPER_DIR")}
@@ -35,5 +61,5 @@ esac
 CHRONOVISOR_UVX=$(chronovisor_resolve_executable "${CHRONOVISOR_UVX:-}" uvx)
 CHRONOVISOR_PYTHON=$(chronovisor_resolve_executable "${CHRONOVISOR_PYTHON:-}" python3.14)
 CHRONOVISOR_ROOT=${CHRONOVISOR_ROOT:-$HOME/.chronovisor}
-RUNTIME_SOURCE=${CHRONOVISOR_RUNTIME_SOURCE:-git+https://github.com/trafficsign/chronovisor.git}
+RUNTIME_SOURCE=${CHRONOVISOR_RUNTIME_SOURCE:-$(chronovisor_runtime_source)}
 export CHRONOVISOR_REPO_ROOT CHRONOVISOR_ROOT CHRONOVISOR_UVX CHRONOVISOR_PYTHON

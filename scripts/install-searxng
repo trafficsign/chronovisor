@@ -8,7 +8,6 @@ readonly SOURCE_ROOT="$RUNTIME_ROOT/source"
 readonly VENV="$RUNTIME_ROOT/.venv"
 readonly CONFIG_ROOT="$HOME/.chronovisor/runtime/searxng"
 readonly LAUNCH_AGENT="$HOME/Library/LaunchAgents/com.trafficsign.chronovisor-searxng.plist"
-readonly LABEL="com.trafficsign.chronovisor-searxng"
 readonly REVISION="ef8f6470e0473a1548f175217aaa7b9346ce6973"
 readonly DOMAIN="gui/$(/usr/bin/id -u)"
 readonly UV="${CHRONOVISOR_UV:-$(command -v uv 2>/dev/null || true)}"
@@ -46,6 +45,7 @@ fi
   "$LAUNCH_AGENT" \
   --project-root "$PROJECT_ROOT" \
   --home "$HOME"
+readonly LABEL="$(/usr/libexec/PlistBuddy -c 'Print :Label' "$LAUNCH_AGENT")"
 
 /bin/launchctl bootout "$DOMAIN/$LABEL" >/dev/null 2>&1 || true
 /bin/launchctl bootstrap "$DOMAIN" "$LAUNCH_AGENT"

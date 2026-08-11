@@ -18,6 +18,7 @@ from urllib.parse import urljoin, urlsplit
 import httpx
 import zstandard
 
+from chronovisor.core.runtime_config import user_agent
 from chronovisor.core.store import CHRONOVISOR_ROOT
 from chronovisor.research.research_security import (
     EgressPolicyError,
@@ -37,7 +38,7 @@ ALLOWED_MIME = (
     "application/xml",
     "application/xhtml+xml",
 )
-USER_AGENT = "Chronovisor/0.1 (+https://github.com/trafficsign/chronovisor)"
+USER_AGENT = user_agent()
 
 
 class _TextExtractor(HTMLParser):

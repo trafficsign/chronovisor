@@ -64,6 +64,67 @@ def test_runtime_source_override_is_explicit(monkeypatch) -> None:
     assert runtime_config.runtime_source() == "git+ssh://example.invalid/fork"
 
 
+def test_runtime_identity_and_local_endpoints_are_configurable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = tmp_path / "config.toml"
+    config.write_text(
+        """
+[runtime]
+source = "git+ssh://git@github.com/example/chronovisor"
+github_repository = "example/chronovisor"
+user_agent = "ExampleChronovisor/1.0"
+launchd_label_prefix = "org.example.chronovisor-"
+ollama_url = "http://127.0.0.1:22434"
+
+[dashboard]
+host = "localhost"
+port = 9876
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(runtime_config, "CONFIG_FILE", config)
+    monkeypatch.delenv("CHRONOVISOR_RUNTIME_SOURCE", raising=False)
+    monkeypatch.delenv("CHRONOVISOR_GITHUB_REPOSITORY", raising=False)
+    monkeypatch.delenv("CHRONOVISOR_USER_AGENT", raising=False)
+    monkeypatch.delenv("CHRONOVISOR_LAUNCHD_LABEL_PREFIX", raising=False)
+    monkeypatch.delenv("OLLAMA_URL", raising=False)
+
+    assert runtime_config.runtime_source() == (
+        "git+ssh://git@github.com/example/chronovisor"
+    )
+    assert runtime_config.github_repository() == "example/chronovisor"
+    assert runtime_config.user_agent() == "ExampleChronovisor/1.0"
+    assert runtime_config.launchd_label("dashboard") == (
+        "org.example.chronovisor-dashboard"
+    )
+    assert runtime_config.ollama_url() == "http://127.0.0.1:22434"
+    assert runtime_config.dashboard_url() == "http://localhost:9876"
+
+
+def test_non_loopback_runtime_endpoints_fall_back_to_safe_defaults(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = tmp_path / "config.toml"
+    config.write_text(
+        """
+[runtime]
+ollama_url = "https://example.com"
+
+[dashboard]
+host = "0.0.0.0"
+port = 70000
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("OLLAMA_URL", raising=False)
+
+    assert runtime_config.ollama_url(config) == runtime_config.DEFAULT_OLLAMA_URL
+    assert (
+        runtime_config.load_dashboard_config(config) == runtime_config.DashboardConfig()
+    )
+
+
 def test_runtime_repo_root_honors_explicit_checkout(tmp_path, monkeypatch) -> None:
     checkout = tmp_path / "chronovisor"
     monkeypatch.setenv("CHRONOVISOR_REPO_ROOT", str(checkout))

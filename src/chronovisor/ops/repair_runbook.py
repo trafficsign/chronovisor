@@ -15,19 +15,24 @@ from chronovisor.core.durable_state import (
     canonical_bytes,
     read_sealed_json,
 )
-from chronovisor.core.runtime_config import runtime_repo_root
+from chronovisor.core.runtime_config import (
+    DEFAULT_LAUNCHD_LABEL_PREFIX,
+    launchd_label,
+    runtime_repo_root,
+)
 from chronovisor.core.store import CHRONOVISOR_ROOT, okf_runtime_operation
 
 RUNBOOK_VERSION = 1
 SERVICE_LABELS = {
-    "dashboard": "com.trafficsign.chronovisor-dashboard",
-    "ingest": "com.trafficsign.chronovisor-ingest-drain",
-    "sleep": "com.trafficsign.chronovisor-sleep",
-    "watchdog": "com.trafficsign.chronovisor-watchdog",
-    "observer": "com.trafficsign.chronovisor-deadman-observer",
-    "converge": "com.trafficsign.chronovisor-converge",
-    "soak": "com.trafficsign.chronovisor-soak",
+    "dashboard": launchd_label("dashboard"),
+    "ingest": launchd_label("ingest-drain"),
+    "sleep": launchd_label("sleep"),
+    "watchdog": launchd_label("watchdog"),
+    "observer": launchd_label("deadman-observer"),
+    "converge": launchd_label("converge"),
+    "soak": launchd_label("soak"),
 }
+SERVICE_SUFFIXES = {"dashboard": "dashboard", "ingest": "ingest-drain"}
 KEEPALIVE_SERVICES = frozenset({"dashboard", "ingest"})
 ROOT_MUTATING_ACTIONS = frozenset(
     {
@@ -43,7 +48,9 @@ ROOT_MUTATING_ACTIONS = frozenset(
 def _service_plist(service: str) -> Path:
     label = SERVICE_LABELS[service]
     if service in KEEPALIVE_SERVICES:
-        return runtime_repo_root() / "launchd" / f"{label}.plist"
+        suffix = SERVICE_SUFFIXES[service]
+        template = f"{DEFAULT_LAUNCHD_LABEL_PREFIX}{suffix}.plist"
+        return runtime_repo_root() / "launchd" / template
     return Path.home() / "Library" / "LaunchAgents" / f"{label}.plist"
 
 

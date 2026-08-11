@@ -12,8 +12,7 @@ esac
 
 readonly SCRIPT_DIR="${0:A:h}"
 readonly PROJECT_ROOT="${SCRIPT_DIR:h}"
-readonly LABEL="com.trafficsign.chronovisor-$SERVICE"
-readonly LAUNCH_AGENT="$HOME/Library/LaunchAgents/$LABEL.plist"
+readonly LAUNCH_AGENT="$HOME/Library/LaunchAgents/com.trafficsign.chronovisor-$SERVICE.plist"
 readonly DOMAIN="gui/$(/usr/bin/id -u)"
 
 mkdir -p \
@@ -25,6 +24,7 @@ mkdir -p \
   "$LAUNCH_AGENT" \
   --project-root "$PROJECT_ROOT" \
   --home "$HOME"
+readonly LABEL="$(/usr/libexec/PlistBuddy -c 'Print :Label' "$LAUNCH_AGENT")"
 
 /bin/launchctl bootout "$DOMAIN/$LABEL" >/dev/null 2>&1 || true
 /bin/launchctl bootstrap "$DOMAIN" "$LAUNCH_AGENT"

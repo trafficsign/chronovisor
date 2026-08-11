@@ -95,11 +95,43 @@ def test_launchd_template_renders_portable_absolute_paths(
     if plist_name == "com.trafficsign.chronovisor-dashboard.plist":
         assert payload["ProgramArguments"] == [
             str(project_root / "scripts" / wrapper),
-            "--host",
-            "127.0.0.1",
-            "--port",
-            "8765",
         ]
+
+
+def test_launchd_label_prefix_reads_runtime_config(tmp_path: Path) -> None:
+    project_root = tmp_path / "portable-project"
+    home = tmp_path / "portable-home"
+    output = tmp_path / "rendered.plist"
+    project_root.mkdir()
+    (home / ".chronovisor").mkdir(parents=True)
+    (home / ".chronovisor" / "config.toml").write_text(
+        '[runtime]\nlaunchd_label_prefix = "org.example.chronovisor-"\n',
+        encoding="utf-8",
+    )
+    uvx = _executable(tmp_path / "tools" / "uvx")
+    python = _executable(tmp_path / "tools" / "python3.14")
+
+    subprocess.run(
+        [
+            sys.executable,
+            str(RENDERER),
+            str(LAUNCHD / "com.trafficsign.chronovisor-dashboard.plist"),
+            str(output),
+            "--project-root",
+            str(project_root),
+            "--home",
+            str(home),
+            "--uvx",
+            str(uvx),
+            "--python",
+            str(python),
+        ],
+        check=True,
+    )
+
+    assert plistlib.loads(output.read_bytes())["Label"] == (
+        "org.example.chronovisor-dashboard"
+    )
 
 
 def test_launchd_sources_and_installers_have_no_personal_checkout_path() -> None:
