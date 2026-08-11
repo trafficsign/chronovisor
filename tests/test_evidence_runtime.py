@@ -79,6 +79,48 @@ def test_acceptance_callbacks_are_not_public(tmp_path: Path) -> None:
         )
 
 
+def test_host_acceptance_normalizes_only_no_page_teacher_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from chronovisor.recall import recall_runtime
+
+    no_page = RecallResult(
+        status="timeout",
+        decision="none",
+        confidence=0.0,
+        queries=[],
+        reasons=[],
+        matched_terms={},
+        context="shared working memory",
+    )
+    answerable = replace(
+        no_page,
+        status="ok",
+        decision="read",
+        queries=["found"],
+        context_items=[ContextItem("page", "title", "2026-08-11", 1.0)],
+        context="page answer",
+    )
+    by_query = {"missing": no_page, "found": answerable}
+    monkeypatch.setattr(
+        recall_runtime,
+        "run_recall",
+        lambda request, _policy: by_query[request.prompt],
+    )
+    monkeypatch.setattr(
+        evidence_eval,
+        "_run_evidence_acceptance",
+        lambda **callbacks: {
+            query: callbacks["page_teacher"](query) for query in by_query
+        },
+    )
+
+    accepted = run_evidence_acceptance(tmp_path)
+
+    assert accepted["missing"] == replace(no_page, context="", queries=["missing"])
+    assert accepted["found"] is answerable
+
+
 def _projection(tmp_path: Path) -> tuple[Path, EpisodeProjection, str]:
     for name in ("index.md", "log.md", "schema.md"):
         (tmp_path / name).write_text("legacy\n", encoding="utf-8")

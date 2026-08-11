@@ -32,7 +32,7 @@ def run_evidence_acceptance(root: Path) -> dict[str, Any]:
     )
 
     def page_teacher(query: str) -> Any:
-        return recall_runtime.run_recall(
+        result = recall_runtime.run_recall(
             recall_runtime.RecallRequest(
                 host="codex",
                 event="UserPromptSubmit",
@@ -40,6 +40,11 @@ def run_evidence_acceptance(root: Path) -> dict[str, Any]:
                 session_id="",
             ),
             policy,
+        )
+        return (
+            replace(result, context="", queries=[query])
+            if not result.context_items
+            else result
         )
 
     def candidate_renderer(baseline: Any, run: Any) -> bytes:
