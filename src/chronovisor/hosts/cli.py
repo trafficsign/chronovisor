@@ -589,6 +589,7 @@ def _configure_okf_parser(subparsers: Any) -> None:
     for command, help_text in (
         ("execute", "Publish the prepared OKF layout."),
         ("recover", "Recover an interrupted OKF lifecycle step."),
+        ("abort", "Abandon an unsealed rebuild and restore the legacy layout."),
         ("rollback", "Run the mandatory all-old rollback drill."),
         ("recutover", "Republish the sealed all-new layout."),
         ("rebuild-seal", "Rebuild and seal all derived state offline."),
@@ -1480,6 +1481,7 @@ def _dispatch_okf(args: argparse.Namespace) -> int:
 
     if args.okf_command != "prepare":
         from chronovisor.core.okf_cutover import (
+            abort_okf_cutover,
             execute_okf_cutover,
             finalize_okf_rebuild,
             recover_okf_cutover,
@@ -1500,6 +1502,14 @@ def _dispatch_okf(args: argparse.Namespace) -> int:
                 result: dict[str, Any] = {"state": state}
             elif args.okf_command == "recover":
                 state = recover_okf_cutover(
+                    root,
+                    root / "runtime",
+                    args.run_id,
+                    is_quiescent=lease_is_exclusive,
+                )
+                result = {"state": state}
+            elif args.okf_command == "abort":
+                state = abort_okf_cutover(
                     root,
                     root / "runtime",
                     args.run_id,

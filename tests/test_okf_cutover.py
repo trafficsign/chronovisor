@@ -17,11 +17,13 @@ from chronovisor.core.canonical_json import (
 )
 from chronovisor.core.durable_state import seal_object
 from chronovisor.core.okf_cutover import (
+    ABORT_FAULT_POINTS,
     CLEANUP_FAULT_POINTS,
     CUTOVER_FAULT_POINTS,
     RECEIPT_FILENAME,
     RECEIPT_SCHEMA,
     OKFStartupDecision,
+    abort_okf_cutover,
     cleanup_okf_cutover,
     discover_okf_startup,
     execute_okf_cutover,
@@ -190,6 +192,161 @@ def test_cutover_publishes_all_assets_and_keeps_rollback_backup(tmp_path: Path) 
         "run-001",
     )
     assert not okf_startup_allowed(source, runtime, "run-001")
+
+
+def test_abort_restores_all_old_and_allows_a_new_prepare(tmp_path: Path) -> None:
+    source, runtime, workspace = _setup(tmp_path)
+    old = _live(source, runtime)
+    static = _static_source(source)
+    execute_okf_cutover(source, runtime, "run-001", is_quiescent=lambda: True)
+
+    assert abort_okf_cutover(
+        source, runtime, "run-001", is_quiescent=lambda: True
+    ) == "aborted"
+    assert _live(source, runtime) == old
+    assert _static_source(source) == static
+    assert not workspace.exists()
+    assert not (runtime / "migrations").exists()
+    assert discover_okf_startup(source, runtime) == OKFStartupDecision(
+        True, "legacy", "unmigrated", "ok"
+    )
+    assert prepare_okf_workspace(source, runtime, "run-002").is_dir()
+
+
+@pytest.mark.parametrize("fault_point", ABORT_FAULT_POINTS)
+def test_every_abort_asset_and_cleanup_boundary_resumes(
+    tmp_path: Path, fault_point: str
+) -> None:
+    source, runtime, workspace = _setup(tmp_path)
+    old = _live(source, runtime)
+    static = _static_source(source)
+    execute_okf_cutover(source, runtime, "run-001", is_quiescent=lambda: True)
+
+    def crash(point: str) -> None:
+        if point == fault_point:
+            raise InjectedCrash(point)
+
+    with pytest.raises(InjectedCrash, match=fault_point):
+        abort_okf_cutover(
+            source,
+            runtime,
+            "run-001",
+            is_quiescent=lambda: True,
+            fault_inject=crash,
+        )
+
+    assert abort_okf_cutover(
+        source, runtime, "run-001", is_quiescent=lambda: True
+    ) == "aborted"
+    assert _live(source, runtime) == old
+    assert _static_source(source) == static
+    assert not workspace.exists()
+    assert discover_okf_startup(source, runtime).state == "unmigrated"
+
+
+def test_recover_resumes_an_abort_from_a_mixed_asset_state(tmp_path: Path) -> None:
+    source, runtime, _workspace = _setup(tmp_path)
+    old = _live(source, runtime)
+    execute_okf_cutover(source, runtime, "run-001", is_quiescent=lambda: True)
+
+    def crash(point: str) -> None:
+        if point == "abort-stage-system:after-rename":
+            raise InjectedCrash(point)
+
+    with pytest.raises(InjectedCrash, match="abort-stage-system:after-rename"):
+        abort_okf_cutover(
+            source,
+            runtime,
+            "run-001",
+            is_quiescent=lambda: True,
+            fault_inject=crash,
+        )
+    assert recover_okf_cutover(
+        source, runtime, "run-001", is_quiescent=lambda: True
+    ) == "aborted"
+    assert _live(source, runtime) == old
+
+
+def test_abort_resumes_after_partial_tombstone_removal(tmp_path: Path) -> None:
+    source, runtime, _workspace = _setup(tmp_path)
+    execute_okf_cutover(source, runtime, "run-001", is_quiescent=lambda: True)
+
+    def crash(point: str) -> None:
+        if point == "after-abort-workspace-rename":
+            raise InjectedCrash(point)
+
+    with pytest.raises(InjectedCrash, match="after-abort-workspace-rename"):
+        abort_okf_cutover(
+            source,
+            runtime,
+            "run-001",
+            is_quiescent=lambda: True,
+            fault_inject=crash,
+        )
+    tombstone = runtime / ".okf-abort-run-001"
+    okf_cutover._remove_tree_exact(tombstone / "run-001")
+
+    assert abort_okf_cutover(
+        source, runtime, "run-001", is_quiescent=lambda: True
+    ) == "aborted"
+    assert not tombstone.exists()
+    assert discover_okf_startup(source, runtime).state == "unmigrated"
+
+
+def test_recover_removes_a_marker_left_after_tombstone_cleanup(tmp_path: Path) -> None:
+    source, runtime, _workspace = _setup(tmp_path)
+    execute_okf_cutover(source, runtime, "run-001", is_quiescent=lambda: True)
+
+    def crash(point: str) -> None:
+        if point == "after-abort-workspace-remove":
+            raise InjectedCrash(point)
+
+    with pytest.raises(InjectedCrash, match="after-abort-workspace-remove"):
+        abort_okf_cutover(
+            source,
+            runtime,
+            "run-001",
+            is_quiescent=lambda: True,
+            fault_inject=crash,
+        )
+    assert not (runtime / ".okf-abort-run-001").exists()
+    assert (runtime / ".okf-abort-run-001.json").is_file()
+    assert recover_okf_cutover(
+        source, runtime, "run-001", is_quiescent=lambda: True
+    ) == "aborted"
+    assert not (runtime / ".okf-abort-run-001.json").exists()
+
+
+@pytest.mark.parametrize(
+    "unsafe_state",
+    ["prepared", "sealed-rebuild", "rollback-drill-complete", "finalized-v2"],
+)
+def test_abort_refuses_non_abortable_states(
+    tmp_path: Path, unsafe_state: str
+) -> None:
+    source, runtime, workspace = _setup(tmp_path)
+    if unsafe_state != "prepared":
+        execute_okf_cutover(source, runtime, "run-001", is_quiescent=lambda: True)
+        journal_path = workspace / "journal.json"
+        journal = json.loads(journal_path.read_bytes())
+        journal["state"] = unsafe_state
+        journal_path.write_bytes(canonical_json_line_bytes_strict(journal))
+    before = _tree(workspace)
+
+    with pytest.raises(ValueError, match="not abortable"):
+        abort_okf_cutover(source, runtime, "run-001", is_quiescent=lambda: True)
+    assert _tree(workspace) == before
+
+
+def test_abort_refuses_a_published_rebuild_proof(tmp_path: Path) -> None:
+    source, runtime, workspace = _setup(tmp_path)
+    execute_okf_cutover(source, runtime, "run-001", is_quiescent=lambda: True)
+    (workspace / "rebuild-proof.json").write_text("sealed", encoding="utf-8")
+    before = _tree(workspace)
+
+    with pytest.raises(ValueError, match="proof is already published"):
+        abort_okf_cutover(source, runtime, "run-001", is_quiescent=lambda: True)
+    assert _tree(workspace) == before
 
 
 @pytest.mark.parametrize(

@@ -35,6 +35,8 @@ from chronovisor.core.okf_workspace import (
 )
 
 CutoverState = Literal[
+    "aborted",
+    "abort-in-progress",
     "committed-needs-rebuild",
     "rebuild-in-progress",
     "sealed-rebuild",
@@ -145,6 +147,35 @@ RECUTOVER_FAULT_POINTS = (
     ),
     "after-finalized-journal",
     "after-finalized-sentinel-remove",
+)
+ABORT_FAULT_POINTS = (
+    "before-abort-journal",
+    "after-abort-journal-before-sentinel",
+    "after-abort-journal",
+    *(
+        point
+        for name in (
+            "abort-stage-pages",
+            "abort-stage-system",
+            "abort-stage-activity",
+            "abort-restore-pages",
+            "abort-restore-system",
+            "abort-restore-activity",
+        )
+        for point in (
+            f"{name}:before-intent-journal",
+            f"{name}:after-intent-journal",
+            f"{name}:after-rename",
+            f"{name}:after-fsync",
+            f"{name}:after-completion-journal",
+        )
+    ),
+    "before-abort-workspace-rename",
+    "after-abort-workspace-rename",
+    "before-abort-workspace-remove",
+    "after-abort-workspace-remove",
+    "before-abort-marker-remove",
+    "after-abort-marker-remove",
 )
 FINALIZE_FAULT_POINTS = (
     "before-final-receipt-write",
@@ -452,6 +483,7 @@ def _discover_migration(
             "in-progress",
             "committed-needs-rebuild",
             "rebuild-in-progress",
+            "abort-in-progress",
             "sealed-rebuild",
             "rollback-drill-complete",
             "recutover-in-progress",
@@ -471,6 +503,8 @@ def _discover_migration(
         return _blocked("migration_nonterminal", state=state, run_id=run_id)
     if state == "rebuild-in-progress":
         return _blocked("rebuild_in_progress", state=state, run_id=run_id)
+    if state == "abort-in-progress":
+        return _blocked("abort_in_progress", state=state, run_id=run_id)
     if state == "sealed-rebuild":
         return _blocked("rollback_drill_required", state=state, run_id=run_id)
     if state == "rollback-drill-complete":
@@ -845,6 +879,14 @@ def recover_okf_cutover(
     """Resolve an interrupted cutover to all-new or all-old from disk truth."""
 
     with okf_writer_lock(source_root, exclusive=True, allow_create=False):
+        if _abort_cleanup_pending(runtime_root, run_id):
+            return _resume_abort_cleanup(
+                source_root,
+                runtime_root,
+                run_id,
+                is_quiescent=is_quiescent,
+                fault_inject=None,
+            )
         return _recover_okf_cutover_locked(
             source_root, runtime_root, run_id, is_quiescent=is_quiescent
         )
@@ -873,6 +915,12 @@ def _recover_okf_cutover_locked(
         _require_gate_identity(journal, context, JOURNAL_SCHEMA)
         state = journal.get("state")
         mode = journal.get("mode")
+        if state == "abort-in-progress":
+            return _abort_okf_cutover_locked(
+                context,
+                journal,
+                fault_inject=None,
+            )
         if state == "rebuild-in-progress":
             old_activity = _old_activity(journal, context, prepared=False)
             suffix = _activity_suffix_from_journal(journal)
@@ -1014,6 +1062,337 @@ def _recover_okf_cutover_locked(
             fault_inject=None,
         )
         return "rollback-complete"
+
+
+def abort_okf_cutover(
+    source_root: Path,
+    runtime_root: Path,
+    run_id: str,
+    *,
+    is_quiescent: Callable[[], bool],
+    fault_inject: FaultInjector | None = None,
+) -> CutoverState:
+    """Abandon an unsealed rebuild and durably restore the legacy layout."""
+
+    with okf_writer_lock(source_root, exclusive=True, allow_create=False):
+        migrations_kind = _path_kind(runtime_root / "migrations")
+        if _abort_cleanup_pending(runtime_root, run_id):
+            return _resume_abort_cleanup(
+                source_root,
+                runtime_root,
+                run_id,
+                is_quiescent=is_quiescent,
+                fault_inject=fault_inject,
+            )
+        if migrations_kind == "absent":
+            decision = discover_okf_startup(source_root, runtime_root)
+            if decision.allowed and decision.layout == "legacy":
+                return "aborted"
+            raise ValueError("migration abort has no resumable workspace")
+
+        context = _context(source_root, runtime_root, run_id)
+        preflight_journal = _read_canonical_object(
+            context.journal, "migration journal"
+        )
+        _require_gate_identity(preflight_journal, context, JOURNAL_SCHEMA)
+        if preflight_journal.get("state") not in {
+            "committed-needs-rebuild",
+            "rebuild-in-progress",
+            "abort-in-progress",
+        }:
+            raise ValueError("migration is not abortable")
+        if _path_kind(context.workspace / REBUILD_PROOF_FILENAME) != "absent":
+            raise ValueError("migration rebuild proof is already published")
+        if _path_kind(context.workspace / "derived-rebuild") != "absent":
+            raise ValueError("migration derived rebuild already started")
+        lock_path = context.workspace / "cutover.lock"
+        _reject_symlink(lock_path, "cutover lock")
+        with file_lock(lock_path):
+            if not is_quiescent():
+                raise RuntimeError("OKF abort requires a quiescent runtime")
+            journal = _read_canonical_object(context.journal, "migration journal")
+            _require_gate_identity(journal, context, JOURNAL_SCHEMA)
+            return _abort_okf_cutover_locked(
+                context,
+                journal,
+                fault_inject=fault_inject,
+            )
+
+
+def _abort_okf_cutover_locked(
+    context: _Context,
+    journal: Mapping[str, object],
+    *,
+    fault_inject: FaultInjector | None,
+) -> CutoverState:
+    state = journal.get("state")
+    if state not in {
+        "committed-needs-rebuild",
+        "rebuild-in-progress",
+        "abort-in-progress",
+    }:
+        raise ValueError("migration is not abortable")
+    if _path_kind(context.workspace / REBUILD_PROOF_FILENAME) != "absent":
+        raise ValueError("migration rebuild proof is already published")
+    if _path_kind(context.workspace / "derived-rebuild") != "absent":
+        raise ValueError("migration derived rebuild already started")
+
+    old_activity = _old_activity(journal, context, prepared=False)
+    if state == "abort-in-progress":
+        origin = journal.get("abort_from_state")
+        if origin not in {"committed-needs-rebuild", "rebuild-in-progress"}:
+            raise ValueError("migration abort origin is invalid")
+        suffix = (
+            _activity_suffix_from_journal(journal)
+            if origin == "rebuild-in-progress"
+            else None
+        )
+        allowed_sentinels = {"abort-in-progress", "committed-needs-rebuild"}
+        allowed_sentinels.add(
+            "rebuild-in-progress" if origin == "rebuild-in-progress" else "in-progress"
+        )
+        _require_rebuild_sentinel_states(context, allowed_sentinels)
+    else:
+        origin = state
+        suffix = (
+            _activity_suffix_from_journal(journal)
+            if state == "rebuild-in-progress"
+            else None
+        )
+        _require_rebuild_sentinel_states(
+            context,
+            (
+                {"committed-needs-rebuild", "rebuild-in-progress"}
+                if state == "rebuild-in-progress"
+                else {"in-progress", "committed-needs-rebuild"}
+            ),
+        )
+        states = _asset_states(
+            context,
+            old_activity,
+            allow_activity_suffix=suffix is not None,
+            expected_activity_suffix=suffix,
+        )
+        if any(value != "new" for value in states.values()):
+            raise ValueError("abortable migration assets do not match the new layout")
+
+    extras: dict[str, object] = {"abort_from_state": origin}
+    if suffix is not None:
+        extras["activity_suffix"] = {
+            "length": suffix[0],
+            "sha256": suffix[1],
+        }
+    completed: list[str] = []
+
+    def abort_move(name: str, source: Path, destination: Path) -> None:
+        _move(
+            context,
+            name,
+            source,
+            destination,
+            mode="abort",
+            completed=completed,
+            old_activity=old_activity,
+            fault_inject=fault_inject,
+            source_may_be_absent=False,
+            journal_extras=extras,
+            journal_state="abort-in-progress",
+        )
+
+    _checkpoint(fault_inject, "before-abort-journal")
+    _write_journal(
+        context,
+        state="abort-in-progress",
+        mode="abort",
+        phase="ready",
+        step=None,
+        completed=[],
+        old_activity=old_activity,
+        extras=extras,
+    )
+    _checkpoint(fault_inject, "after-abort-journal-before-sentinel")
+    _write_sentinel(context, "abort-in-progress")
+    _checkpoint(fault_inject, "after-abort-journal")
+
+    states = _asset_states(
+        context,
+        old_activity,
+        allow_activity_suffix=suffix is not None,
+        expected_activity_suffix=suffix,
+    )
+    for asset in _assets(context, old_activity):
+        if states[asset.name] == "new":
+            abort_move(
+                f"abort-stage-{asset.name.removeprefix('backup-')}",
+                asset.live,
+                asset.staged,
+            )
+    states = _asset_states(
+        context,
+        old_activity,
+        allow_activity_suffix=suffix is not None,
+        expected_activity_suffix=suffix,
+    )
+    for asset in _assets(context, old_activity):
+        if states[asset.name] == "missing-live":
+            abort_move(
+                f"abort-restore-{asset.name.removeprefix('backup-')}",
+                asset.backup,
+                asset.live,
+            )
+
+    if any(
+        value != "old"
+        for value in _asset_states(
+            context,
+            old_activity,
+            allow_activity_suffix=suffix is not None,
+            expected_activity_suffix=suffix,
+        ).values()
+    ):
+        raise RuntimeError("OKF abort did not restore every old asset")
+    _validate_static_source(context)
+
+    _write_journal(
+        context,
+        state="abort-in-progress",
+        mode="abort",
+        phase="cleanup",
+        step=None,
+        completed=completed,
+        old_activity=old_activity,
+        extras=extras,
+    )
+    migrations = context.runtime / "migrations"
+    if _directory_entries(migrations) != {context.workspace.name: "directory"}:
+        raise ValueError("migration abort workspace set changed")
+    marker_path = _abort_marker(context.runtime, context.workspace.name)
+    if _path_kind(marker_path) == "absent":
+        _write_object(
+            marker_path,
+            {
+                "schema": JOURNAL_SCHEMA,
+                "version": SCHEMA_VERSION,
+                "run_id": context.workspace.name,
+                "state": "abort-cleanup",
+                "manifest_sha256": context.manifest_sha256,
+            },
+        )
+    elif _path_kind(marker_path) != "file":
+        raise ValueError("migration abort marker is unsafe")
+    _require_abort_cleanup_marker(
+        marker_path,
+        run_id=context.workspace.name,
+        manifest_sha256=context.manifest_sha256,
+    )
+    tombstone = _abort_tombstone(context.runtime, context.workspace.name)
+    if _path_kind(tombstone) != "absent":
+        raise ValueError("migration abort tombstone already exists")
+    _checkpoint(fault_inject, "before-abort-workspace-rename")
+    os.rename(migrations, tombstone)
+    fsync_directory(context.runtime)
+    _checkpoint(fault_inject, "after-abort-workspace-rename")
+    _checkpoint(fault_inject, "before-abort-workspace-remove")
+    _remove_tree_exact(tombstone)
+    _checkpoint(fault_inject, "after-abort-workspace-remove")
+    _checkpoint(fault_inject, "before-abort-marker-remove")
+    _remove_file_exact(marker_path, required=True)
+    _checkpoint(fault_inject, "after-abort-marker-remove")
+    decision = discover_okf_startup(context.source, context.runtime)
+    if not decision.allowed or decision.layout != "legacy":
+        raise RuntimeError("OKF abort did not restore legacy startup")
+    return "aborted"
+
+
+def _abort_tombstone(runtime_root: Path, run_id: str) -> Path:
+    if not _RUN_ID_RE.fullmatch(run_id):
+        raise ValueError("run_id must be a safe single path component")
+    return runtime_root / f".okf-abort-{run_id}"
+
+
+def _abort_marker(runtime_root: Path, run_id: str) -> Path:
+    if not _RUN_ID_RE.fullmatch(run_id):
+        raise ValueError("run_id must be a safe single path component")
+    return runtime_root / f".okf-abort-{run_id}.json"
+
+
+def _abort_cleanup_pending(runtime_root: Path, run_id: str) -> bool:
+    return _path_kind(_abort_tombstone(runtime_root, run_id)) != "absent" or (
+        _path_kind(_abort_marker(runtime_root, run_id)) != "absent"
+        and _path_kind(runtime_root / "migrations") == "absent"
+    )
+
+
+def _resume_abort_cleanup(
+    source_root: Path,
+    runtime_root: Path,
+    run_id: str,
+    *,
+    is_quiescent: Callable[[], bool],
+    fault_inject: FaultInjector | None,
+) -> CutoverState:
+    source = _safe_root(source_root, "source root")
+    runtime = _safe_root(runtime_root, "runtime root")
+    tombstone = _abort_tombstone(runtime, run_id)
+    marker_path = _abort_marker(runtime, run_id)
+    if _path_kind(runtime / "migrations") != "absent":
+        raise ValueError("migration abort cleanup overlaps a new workspace")
+    marker = _read_canonical_object(marker_path, "migration abort marker")
+    manifest_sha256 = _sha(marker.get("manifest_sha256"))
+    _require_abort_cleanup_marker(
+        marker_path,
+        run_id=run_id,
+        manifest_sha256=manifest_sha256,
+    )
+    tombstone_kind = _path_kind(tombstone)
+    if tombstone_kind not in {"absent", "directory"} or (
+        tombstone_kind == "directory" and _tree_has_unsafe_entry(tombstone)
+    ):
+        raise ValueError("migration abort tombstone is unsafe")
+    if tombstone_kind == "directory":
+        entries = _directory_entries(tombstone)
+        if entries and entries != {run_id: "directory"}:
+            raise ValueError("migration abort tombstone identity changed")
+    lock_path = tombstone / run_id / "cutover.lock"
+
+    def remove() -> None:
+        if not is_quiescent():
+            raise RuntimeError("OKF abort requires a quiescent runtime")
+        _checkpoint(fault_inject, "before-abort-workspace-remove")
+        _remove_tree_exact(tombstone)
+        _checkpoint(fault_inject, "after-abort-workspace-remove")
+        _checkpoint(fault_inject, "before-abort-marker-remove")
+        _remove_file_exact(marker_path, required=True)
+        _checkpoint(fault_inject, "after-abort-marker-remove")
+
+    if _path_kind(lock_path) == "file":
+        with file_lock(lock_path):
+            remove()
+    elif _path_kind(lock_path) == "absent":
+        remove()
+    else:
+        raise ValueError("migration abort lock is unsafe")
+    decision = discover_okf_startup(source, runtime)
+    if not decision.allowed or decision.layout != "legacy":
+        raise RuntimeError("OKF abort did not restore legacy startup")
+    return "aborted"
+
+
+def _require_abort_cleanup_marker(
+    path: Path,
+    *,
+    run_id: str,
+    manifest_sha256: str,
+) -> None:
+    marker = _read_canonical_object(path, "migration abort marker")
+    if marker != {
+        "schema": JOURNAL_SCHEMA,
+        "version": SCHEMA_VERSION,
+        "run_id": run_id,
+        "state": "abort-cleanup",
+        "manifest_sha256": manifest_sha256,
+    }:
+        raise ValueError("migration abort marker identity changed")
 
 
 def rollback_okf_rebuild(

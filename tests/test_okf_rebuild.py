@@ -28,6 +28,7 @@ from chronovisor.core.okf_cutover import (
     RECUTOVER_FAULT_POINTS,
     ROLLBACK_DRILL_FAULT_POINTS,
     OKFRebuildGate,
+    abort_okf_cutover,
     cleanup_okf_cutover,
     discover_okf_startup,
     execute_okf_cutover,
@@ -401,6 +402,27 @@ def test_rebuild_session_expires_and_keeps_startup_blocked(tmp_path: Path) -> No
 
     with pytest.raises(RuntimeError, match="no longer active"):
         leaked.publish_proof({})
+    assert discover_okf_startup(root, runtime).category == "rebuild_in_progress"
+
+
+def test_abort_refuses_after_derived_rebuild_starts(
+    tmp_path: Path,
+) -> None:
+    root, runtime, workspace = _setup_committed(tmp_path)
+    with okf_rebuild_session(
+        root, runtime, "run-001", is_quiescent=lambda: True
+    ):
+        (workspace / "derived-rebuild").mkdir()
+
+    before = _tree(workspace)
+    with pytest.raises(ValueError, match="derived rebuild already started"):
+        abort_okf_cutover(
+            root,
+            runtime,
+            "run-001",
+            is_quiescent=lambda: True,
+        )
+    assert _tree(workspace) == before
     assert discover_okf_startup(root, runtime).category == "rebuild_in_progress"
 
 
@@ -1121,6 +1143,11 @@ def test_okf_lifecycle_cli_delegates_to_offline_coordinators(
     )
     monkeypatch.setattr(
         okf_cutover,
+        "abort_okf_cutover",
+        state_call("abort", "aborted"),
+    )
+    monkeypatch.setattr(
+        okf_cutover,
         "rollback_okf_rebuild",
         state_call("rollback", "rollback-drill-complete"),
     )
@@ -1144,6 +1171,7 @@ def test_okf_lifecycle_cli_delegates_to_offline_coordinators(
     for command in (
         "execute",
         "recover",
+        "abort",
         "rollback",
         "recutover",
         "rebuild-seal",
@@ -1162,6 +1190,7 @@ def test_okf_lifecycle_cli_delegates_to_offline_coordinators(
     assert calls == [
         "execute",
         "recover",
+        "abort",
         "rollback",
         "recutover",
         "rebuild-seal",
