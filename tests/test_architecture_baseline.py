@@ -2560,7 +2560,7 @@ def test_baseline_labels_repository_contract_hash_semantics(
     schema = hashes["production_schema_manifest"]
     signature = hashes["production_signature_manifest"]
     assert authority["lane_contract_case_manifest_sha256"] == (
-        "ddf8593939a8b4920c193d0c5cda97bd7e296bb89978bdf78dd1c1dc8bd9b168"
+        "e3a225bc60e9f151c0b81709b912579e5347ee9a0228d37b3cfa58547776f8ff"
     )
     assert schema["canonical_mapping_sha256"]["sha256"] == (
         "938aceee8b448a3d1cee0403d15a2de847eedb19a99d1a94663ef23b0f37f91b"
