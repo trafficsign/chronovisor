@@ -168,6 +168,36 @@ def test_prepare_converts_wikilink_labels_and_anchors_outside_code() -> None:
     ]
 
 
+def test_prepare_delinks_known_plain_text_targets_and_keeps_unknown_unresolved() -> None:
+    source = SourceDocument(
+        "notes/source.md",
+        b"---\nuid: uid-source\ntype: Concept\nstatus: stable\n---\n"
+        b"[[claude-code]] [[lessons-learned|Lessons archive]] [[unknown]]\n",
+    )
+
+    first = prepare_okf_migration(
+        [source],
+        catalog={},
+        plain_text_targets=("claude-code", "lessons-learned"),
+    )
+    repeated = prepare_okf_migration(
+        [source],
+        catalog={},
+        plain_text_targets=("lessons-learned", "claude-code"),
+    )
+    converted = parse_document(first.converted_documents[0].data)
+
+    assert converted.body == b"claude-code Lessons archive [[unknown]]\n"
+    assert extract_markdown_links(converted.body) == ()
+    assert first.manifest.documents[0].resolved_link_count == 2
+    assert [(item.uid, item.target) for item in first.manifest.unresolved_links] == [
+        ("uid-source", "unknown")
+    ]
+    assert repeated == first
+    with pytest.raises(ValueError, match=r"uid-source='unknown'"):
+        require_resolved_links(first)
+
+
 def test_resolved_link_gate_fails_closed_with_manifest_report() -> None:
     _, plan = _prepare()
 

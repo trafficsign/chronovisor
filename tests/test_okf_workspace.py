@@ -9,7 +9,7 @@ import pytest
 
 from chronovisor.core import durable_state, okf_workspace
 from chronovisor.core.activity_log import activity_record, valid_activity_file
-from chronovisor.core.canonical_document import parse_document
+from chronovisor.core.canonical_document import extract_markdown_links, parse_document
 from chronovisor.core.canonical_json import (
     canonical_json_line_bytes_strict,
     canonical_json_sha256_strict,
@@ -49,6 +49,12 @@ def test_workspace_stages_validated_namespaces_without_touching_source(
     tmp_path: Path,
 ) -> None:
     source, runtime = _roots(tmp_path)
+    source_page = source / "pages" / "notes" / "source.md"
+    source_page.write_bytes(
+        source_page.read_bytes()
+        + b"System refs: [[claude-code]] and "
+        b"[[lessons-learned|Lessons archive]].\n"
+    )
     with durable_state.okf_writer_lock(source):
         pass
     before = _snapshot(source)
@@ -79,7 +85,13 @@ def test_workspace_stages_validated_namespaces_without_touching_source(
 
     page = parse_document((pages / "notes" / "source.md").read_bytes())
     assert page.metadata["status"] == "stable"
-    assert page.body == b"Read [the target](<../deep/target.md#Section heading>).\n"
+    assert page.body == (
+        b"Read [the target](<../deep/target.md#Section heading>).\n"
+        b"System refs: claude-code and Lessons archive.\n"
+    )
+    assert extract_markdown_links(page.body) == (
+        "../deep/target.md#Section heading",
+    )
     system_state = parse_document((system / "current-state.md").read_bytes())
     source_state = parse_document((source / "system" / "current-state.md").read_bytes())
     expected_state_metadata = dict(source_state.metadata)
@@ -196,6 +208,12 @@ def test_workspace_stages_validated_namespaces_without_touching_source(
     }
     assert len(manifest["system_status_cohorts"]) == 6
     assert manifest["unresolved_links"] == []
+    source_manifest = next(
+        item
+        for item in manifest["documents"]
+        if item["relative_path"] == "notes/source.md"
+    )
+    assert source_manifest["resolved_link_count"] == 3
     assert manifest["raw_files"][0]["relative_path"] == "sessions/session.jsonl"
     assert b"merged" not in manifest_raw
     assert b"workspace-fixture" not in manifest_raw
@@ -446,7 +464,7 @@ def test_workspace_rejects_cross_volume_before_writing(
 @pytest.mark.parametrize(
     ("mutation", "message"),
     [
-        ("page-to-system", "unresolved wikilinks"),
+        ("unknown-page-target", "unresolved wikilinks"),
         ("invalid-system-status", "invalid system lifecycle"),
         ("unsafe-path", "bundle-relative"),
     ],
@@ -455,9 +473,9 @@ def test_workspace_preflight_rejects_unsafe_inputs(
     tmp_path: Path, mutation: str, message: str
 ) -> None:
     source, runtime = _roots(tmp_path)
-    if mutation == "page-to-system":
+    if mutation == "unknown-page-target":
         path = source / "pages" / "notes" / "source.md"
-        path.write_bytes(path.read_bytes() + b"[[current-state]]\n")
+        path.write_bytes(path.read_bytes() + b"[[unknown-page-target]]\n")
     elif mutation == "invalid-system-status":
         path = source / "system" / "current-state.md"
         path.write_text(

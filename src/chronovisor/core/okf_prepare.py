@@ -144,6 +144,7 @@ def prepare_okf_migration(
     documents: Iterable[SourceDocument],
     *,
     catalog: Mapping[str, str],
+    plain_text_targets: Iterable[str] = (),
     raw_files: Iterable[RawSource] = (),
 ) -> MigrationPlan:
     """Return a deterministic write plan without reading or writing the filesystem."""
@@ -151,6 +152,7 @@ def prepare_okf_migration(
     normalized_catalog = {
         page_id: _relative_path(path) for page_id, path in sorted(catalog.items())
     }
+    normalized_plain_text_targets = frozenset(plain_text_targets)
     sources = tuple(
         sorted(
             (
@@ -218,7 +220,11 @@ def prepare_okf_migration(
             events.append(event)
 
         body, resolved_count, missing = convert_wikilinks(
-            document.body, relative_path, uid, normalized_catalog
+            document.body,
+            relative_path,
+            uid,
+            normalized_catalog,
+            plain_text_targets=normalized_plain_text_targets,
         )
         unresolved.extend(missing)
         output = serialize_document(CanonicalDocument(metadata=metadata, body=body))
@@ -384,6 +390,8 @@ def convert_wikilinks(
     source_path: str,
     uid: str,
     catalog: Mapping[str, str],
+    *,
+    plain_text_targets: frozenset[str] = frozenset(),
 ) -> tuple[bytes, int, tuple[UnresolvedLink, ...]]:
     """Convert prose wikilinks using a caller-supplied destination catalog."""
 
@@ -399,13 +407,16 @@ def convert_wikilinks(
             continue
         inside = match.group(1).strip()
         target = normalize_link_target(inside)
+        target_part, separator, alias = inside.partition("|")
+        label = alias.strip() if separator else target_part.strip()
+        if target in plain_text_targets:
+            replacements.append((match.start(), match.end(), label))
+            continue
         destination = catalog.get(target)
         if destination is None:
             unresolved.append(UnresolvedLink(source_path, uid, target))
             continue
-        target_part, separator, alias = inside.partition("|")
         _, anchor_separator, anchor = target_part.partition("#")
-        label = alias.strip() if separator else target_part.strip()
         relative_destination = posixpath.relpath(
             destination, PurePosixPath(source_path).parent.as_posix()
         )

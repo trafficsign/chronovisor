@@ -131,9 +131,11 @@ def _prepare_okf_workspace_locked(
     system_sources = _document_sources(system_root, namespace="system")
     raw_sources = _raw_sources(raw_root)
     page_catalog = _catalog(page_sources)
+    system_catalog = _catalog(system_sources)
     plan = prepare_okf_migration(
         (*reserved_sources, *page_sources, *system_sources),
         catalog=page_catalog,
+        plain_text_targets=(*system_catalog, "schema"),
         raw_files=raw_sources,
     )
     require_resolved_links(plan)
