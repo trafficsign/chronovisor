@@ -291,9 +291,17 @@ def _deterministic_ingest_repair_case() -> tuple[
     )
 
 
-def test_ingest_repair_option_id_materializes_exact_host_bytes_before_quorum() -> None:
+def test_ingest_repair_option_id_materializes_exact_host_bytes_before_quorum(
+    tmp_path: Path,
+) -> None:
     row, selection, _option_id = _ingest_repair_case()
     expected = dict(row["expected"])
+    selection = dict(
+        selection,
+        decision="apply_available",
+        failed_operations_disposition="none",
+    )
+    audit_root = tmp_path / "local-consensus"
     transport = ModelTransport(
         {
             "ornith:test": [json.dumps(selection)],
@@ -309,6 +317,7 @@ def test_ingest_repair_option_id_materializes_exact_host_bytes_before_quorum() -
             num_ctx=32_768,
         ),
         transport=transport,
+        audit_root=audit_root,
         decision_lane="ingest_reconciliation",
     ).decide(str(row["prompt"]), dict(row["schema"]))
 
@@ -323,6 +332,15 @@ def test_ingest_repair_option_id_materializes_exact_host_bytes_before_quorum() -
         assert selection["repair_option_id"] in properties["repair_option_id"]["enum"]
         assert "invalid_tags" not in properties
         assert "replacement_operations" not in properties
+        assert '"invalid_tags"' not in request.messages[0]["content"]
+        assert '"replacement_operations"' not in request.messages[0]["content"]
+    audit_rows = [
+        json.loads(line)
+        for line in (audit_root / "audit.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert len({row["request_sha256"] for row in audit_rows}) == 1
 
 
 def test_ingest_repair_host_sidecar_is_never_sent_to_models() -> None:
@@ -489,9 +507,7 @@ def test_ingest_repair_option_contract_rejects_legacy_semantic_receipts(
     assert transport.requests == []
 
 
-def test_ingest_repair_option_validator_rejects_invented_mixed_and_terminal_ids() -> (
-    None
-):
+def test_ingest_repair_option_validator_rejects_invented_and_mixed_ids() -> None:
     row, selection, _option_id = _ingest_repair_case()
     validator = _decision_value_validator("ingest_reconciliation", str(row["prompt"]))
     assert validator is not None
@@ -527,13 +543,10 @@ def test_ingest_repair_option_validator_rejects_invented_mixed_and_terminal_ids(
         "/replacement_operations"
     ]
 
-    terminal = dict(selection)
-    terminal["decision"] = "apply_available"
-    terminal["failed_operations_disposition"] = "none"
-    assert [issue.pointer for issue in validator(terminal)] == [
-        "/decision",
-        "/failed_operations_disposition",
-    ]
+    host_derived = dict(selection)
+    host_derived["decision"] = "apply_available"
+    host_derived["failed_operations_disposition"] = "none"
+    assert validator(host_derived) == ()
 
 
 def test_ingest_repair_option_feedback_is_small_and_repairs_only_the_selector() -> None:
@@ -563,7 +576,7 @@ def test_ingest_repair_option_feedback_is_small_and_repairs_only_the_selector() 
     feedback = transport.requests[1].messages[-1]["content"]
     feedback_bytes = len(feedback.encode("utf-8"))
     assert feedback_bytes < 1_000
-    assert '"keyword":"repairOptionSelector"' in feedback
+    assert '"keyword":"enum"' in feedback
     feedback_payload = json.loads(
         feedback.split("Validator errors (RFC 6901 pointers):\n", 1)[1]
     )

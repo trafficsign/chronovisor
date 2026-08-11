@@ -1148,28 +1148,28 @@ def _ingest_reconciliation_value_validator(
             return ()
 
         issues: list[ValidationIssue] = []
-        if value.get("decision") != "retry":
-            issues.append(
-                ValidationIssue(
-                    pointer="/decision",
-                    keyword="deterministicPreflight",
-                    expected="retry",
-                    received=value.get("decision"),
-                    message="a repair selection is non-terminal and requires retry",
-                )
-            )
-        if value.get("failed_operations_disposition") != "retry_required":
-            issues.append(
-                ValidationIssue(
-                    pointer="/failed_operations_disposition",
-                    keyword="deterministicPreflight",
-                    expected="retry_required",
-                    received=value.get("failed_operations_disposition"),
-                    message="a repair selection requires another reviewed attempt",
-                )
-            )
 
         if materialized:
+            if value.get("decision") != "retry":
+                issues.append(
+                    ValidationIssue(
+                        pointer="/decision",
+                        keyword="deterministicPreflight",
+                        expected="retry",
+                        received=value.get("decision"),
+                        message="a repair selection is non-terminal and requires retry",
+                    )
+                )
+            if value.get("failed_operations_disposition") != "retry_required":
+                issues.append(
+                    ValidationIssue(
+                        pointer="/failed_operations_disposition",
+                        keyword="deterministicPreflight",
+                        expected="retry_required",
+                        received=value.get("failed_operations_disposition"),
+                        message="a repair selection requires another reviewed attempt",
+                    )
+                )
             if option_id is not None:
                 issues.append(
                     ValidationIssue(
@@ -1240,6 +1240,8 @@ def _materialize_ingest_repair_option(
         raise ValueError("ingest repair selector is mixed with model-authored arrays")
     materialized_value = dict(value)
     materialized_value.pop("repair_option_id", None)
+    materialized_value["decision"] = "retry"
+    materialized_value["failed_operations_disposition"] = "retry_required"
     if option.invalid_tags:
         materialized_value["invalid_tags"] = json.loads(
             _canonical_json(option.invalid_tags)
@@ -2201,9 +2203,8 @@ class DecisionRouter:
         else:
             result = self._session(model, keep_alive, role, num_ctx, source).run(
                 prompt,
-                schema,
+                format_schema or schema,
                 system=system,
-                format_schema=format_schema,
                 value_validator=_decision_value_validator(
                     decision_lane,
                     prompt,
@@ -3686,9 +3687,16 @@ class DecisionRouter:
     ) -> DecisionRouterResult:
         started = time.monotonic()
         effective_system = decision_system_with_policy(schema, system)
+        request_schema = schema
+        if decision_lane == "ingest_reconciliation" and ingest_repair_contract:
+            with contextlib.suppress(TypeError, ValueError):
+                request_schema = _ingest_reconciliation_format_schema(
+                    schema,
+                    ingest_repair_contract,
+                )
         request_sha256 = structured_request_sha256(
             prompt,
-            schema,
+            request_schema,
             effective_system,
         )
         eviction_events: list[dict[str, Any]] = []
