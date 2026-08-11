@@ -2369,9 +2369,7 @@ class LocalStructuredSession:
                 continue
 
             normalized_output, normalized = normalize_json_output(raw_output)
-            output_sha256 = hashlib.sha256(
-                normalized_output.encode("utf-8")
-            ).hexdigest()
+            output_sha256 = hashlib.sha256(normalized_output.encode("utf-8")).hexdigest()
             parsed, issues = _parse_json(normalized_output)
             if not issues:
                 issues = validate_json(parsed, schema_copy)
@@ -2437,9 +2435,7 @@ class LocalStructuredSession:
             messages.append({"role": "assistant", "content": raw_output})
             messages.append({"role": "user", "content": repair_prompt})
 
-        return self._failure(
-            "repair_exhausted", "structured session exhausted", attempts
-        )
+        return self._failure("repair_exhausted", "structured session exhausted", attempts)
 
     def run(
         self,

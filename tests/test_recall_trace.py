@@ -266,6 +266,7 @@ def test_chronovisor_read_forwards_turn_trace_without_marking_page_used(
     page = tmp_path / "page-a.md"
     page.write_text("# Page A\n\nEvidence only.", encoding="utf-8")
     recorded: list[dict] = []
+    require_stable_values: list[bool] = []
 
     class FakeStore:
         def refresh(self) -> None:
@@ -278,7 +279,12 @@ def test_chronovisor_read_forwards_turn_trace_without_marking_page_used(
             return []
 
     monkeypatch.setattr(server, "get_store", FakeStore)
-    monkeypatch.setattr(server, "_find_page_with_alias", lambda _page: page)
+    monkeypatch.setattr(
+        server,
+        "_find_page_with_alias",
+        lambda _page, *, require_stable: require_stable_values.append(require_stable)
+        or page,
+    )
     monkeypatch.setattr(server, "_append_pull_log", recorded.append)
 
     result = json.loads(
@@ -288,6 +294,7 @@ def test_chronovisor_read_forwards_turn_trace_without_marking_page_used(
     )
 
     assert result["page_id"] == "page-a"
+    assert require_stable_values == [False]
     assert recorded == [
         {
             "type": "read",
@@ -306,6 +313,7 @@ def test_mcp_client_host_and_read_field_attribution(
     page = tmp_path / "page-a.md"
     page.write_text("# Page A\n\nEvidence only.", encoding="utf-8")
     recorded: list[dict] = []
+    require_stable_values: list[bool] = []
 
     class FakeStore:
         def refresh(self) -> None:
@@ -331,7 +339,12 @@ def test_mcp_client_host_and_read_field_attribution(
         session = Session()
 
     monkeypatch.setattr(server, "get_store", FakeStore)
-    monkeypatch.setattr(server, "_find_page_with_alias", lambda _page: page)
+    monkeypatch.setattr(
+        server,
+        "_find_page_with_alias",
+        lambda _page, *, require_stable: require_stable_values.append(require_stable)
+        or page,
+    )
     monkeypatch.setattr(server, "_append_pull_log", recorded.append)
     monkeypatch.setattr(
         server,
@@ -346,6 +359,7 @@ def test_mcp_client_host_and_read_field_attribution(
     result = json.loads(_tool(server.chronovisor_read)("page-a", ctx=Context()))
 
     assert result["page_id"] == "page-a"
+    assert require_stable_values == [False]
     assert server._mcp_client_host(Context()) == "claude-code"
     assert recorded[0]["host"] == "claude-code"
     assert recorded[0]["field_session_hash"] == "0123456789abcdef"
