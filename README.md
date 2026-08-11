@@ -10,19 +10,16 @@ Chronovisor is pre-release software. The only production-supported deployment
 is local-only. Cloud-only and hybrid routing are experimental and are not
 feature-complete.
 
-Two public-release campaigns remain open:
-
-- Campaign W: finish provider-neutral runtime routing, OS keyring integration,
-  remote adapters, and migration of every production model consumer.
-- Campaign X: finish the one-shot OKF v0.2 canonical data migration and remove
-  the legacy layout.
+Campaign W is complete. Campaign X, the one-shot OKF v0.2 canonical data
+migration, remains open until the live migration and rollback drill finish.
 
 Do not treat the current `main` branch as an OSS v1 release.
 
 ## Clean local install
 
-Prerequisites are Python 3.11 or newer, [uv](https://docs.astral.sh/uv/), and a
-running [Ollama](https://ollama.com/) service.
+Prerequisites are Python 3.11 or newer and [uv](https://docs.astral.sh/uv/).
+Ollama is needed only when the local model roles in the example configuration
+are enabled.
 
 ```sh
 git clone https://github.com/trafficsign/chronovisor.git
@@ -67,12 +64,29 @@ before allowing the installer to update Codex or Claude Code settings.
 
 ## Architecture and runtime roles
 
-```text
-Host transcript -> deterministic capture -> raw/
-                                      |-> ingest -> pages/ + system/
-Host prompt     -> search + recall -----------------------> recalled context
-                                      |-> local model runtime
-Dashboard       <- redacted operational state in runtime/
+```mermaid
+flowchart LR
+    Host["Host: Codex / Claude Code"] -->|transcript| Capture["Deterministic capture"]
+    Capture --> Raw["raw/ (immutable)"]
+    Raw --> Ingest["Ingest"]
+    Ingest --> Pages["pages/ + system/"]
+    Pages --> Search["Search: lexical + embedding + rerank"]
+    Search --> Recall["Recall"]
+    Recall -->|bounded context| Host
+
+    MCP["MCP server"] --> Search
+    MCP --> Pages
+    Dashboard["Dashboard"] --> Runtime["runtime/ redacted state"]
+    Cortex["Cortex"] --> Pages
+    Cortex --> Runtime
+    Launch["LaunchAgents"] --> MCP
+    Launch --> Dashboard
+    Launch --> Ingest
+
+    Search --> LLMRuntime["LLMRuntime provider policy"]
+    Ingest --> LLMRuntime
+    LLMRuntime --> Local["Local providers (default)"]
+    LLMRuntime -. explicit policy .-> Remote["Remote providers (optional)"]
 ```
 
 - `chronovisor-mcp` serves the public memory tools.
@@ -88,9 +102,9 @@ Dashboard       <- redacted operational state in runtime/
   validates browser Host and Origin boundaries; it is not a remote admin UI.
 
 The common `LLMRuntime` foundation normalizes generation, embedding, reranking,
-source classification, and egress decisions. Campaign W has not yet moved all
-production callers through it, and no supported remote-provider configuration
-is shipped yet.
+source classification, and egress decisions. Production model callers use this
+policy boundary; local providers are the default and remote egress remains
+explicitly configured and policy-gated.
 
 See [architecture](docs/architecture.md),
 [configuration](docs/config.md), [operations](docs/operations.md), and the
