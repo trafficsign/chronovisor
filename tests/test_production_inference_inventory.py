@@ -83,6 +83,57 @@ NON_PRODUCTION_EXCEPTIONS = {
     ),
 }
 
+_PROVIDER_EXECUTION_MODULES = frozenset(
+    {
+        "chronovisor.core.anthropic_adapter",
+        "chronovisor.core.nemotron_adapter",
+        "chronovisor.core.ollama_adapter",
+        "chronovisor.core.ollama_transport",
+        "chronovisor.core.openai_compatible_adapter",
+    }
+)
+_PROVIDER_EXECUTION_IMPORTS = frozenset(
+    {
+        "chronovisor.core.llm_security.AuthenticatedTransport",
+        "chronovisor.core.provider_profiles.authenticated_transport",
+        "chronovisor.core.provider_profiles.post_json",
+    }
+)
+_PROVIDER_EXECUTION_CALLABLES = frozenset(
+    {
+        "AnthropicMessagesAdapter",
+        "AuthenticatedTransport",
+        "NemotronEmbeddingBackend",
+        "OllamaAdapter",
+        "OpenAICompatibleAdapter",
+        "authenticated_transport",
+        "compose_anthropic_adapter",
+        "compose_ollama_runtime",
+        "compose_openai_compatible_adapter",
+        "post_json",
+    }
+)
+_PROVIDER_EXECUTION_BOUNDARIES = frozenset(
+    {
+        "src/chronovisor/core/anthropic_adapter.py",
+        "src/chronovisor/core/llm_config.py",
+        "src/chronovisor/core/nemotron_adapter.py",
+        "src/chronovisor/core/ollama.py",
+        "src/chronovisor/core/ollama_adapter.py",
+        "src/chronovisor/core/ollama_transport.py",
+        "src/chronovisor/core/openai_compatible_adapter.py",
+        "src/chronovisor/core/provider_profiles.py",
+    }
+)
+_DIAGNOSTIC_PROVIDER_IMPORTS = {
+    "src/chronovisor/search/semantic_model.py": frozenset(
+        {
+            "chronovisor.core.nemotron_adapter.SemanticModelError",
+            "chronovisor.core.nemotron_adapter.normalize_embeddings",
+        }
+    )
+}
+
 
 class _InferenceVisitor(ast.NodeVisitor):
     def __init__(self) -> None:
@@ -147,6 +198,14 @@ def _qualified_name(node: ast.expr) -> str | None:
     return None
 
 
+def _import_from_module(path: Path, node: ast.ImportFrom) -> str:
+    if not node.level:
+        return node.module or ""
+    package = ["chronovisor", *path.relative_to(SOURCE_ROOT).parts[:-1]]
+    anchor = package[: len(package) - node.level + 1]
+    return ".".join((*anchor, *(node.module or "").split("."))).rstrip(".")
+
+
 def _scan_inference_sites() -> dict[str, dict[str, int]]:
     found: dict[str, dict[str, int]] = {}
     for path in SOURCE_ROOT.rglob("*.py"):
@@ -183,3 +242,47 @@ def test_inventory_categories_are_explicit_and_disjoint() -> None:
     assert not boundaries & exceptions
     assert not bypasses & exceptions
     assert all(reason.strip() for _sites, reason in NON_PRODUCTION_EXCEPTIONS.values())
+
+
+def test_production_domains_do_not_reach_provider_execution_boundaries() -> None:
+    violations: list[str] = []
+    for path in sorted(SOURCE_ROOT.rglob("*.py")):
+        relative = path.relative_to(PROJECT_ROOT).as_posix()
+        if relative in _PROVIDER_EXECUTION_BOUNDARIES:
+            continue
+        nodes = tuple(
+            ast.walk(ast.parse(path.read_text(encoding="utf-8"), filename=str(path)))
+        )
+        execution_aliases: set[str] = set()
+        for node in nodes:
+            imported: list[str] = []
+            if isinstance(node, ast.Import):
+                imported = [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                module = _import_from_module(path, node)
+                imported = [f"{module}.{alias.name}" for alias in node.names]
+                execution_aliases.update(
+                    alias.asname or alias.name
+                    for alias in node.names
+                    if alias.name in _PROVIDER_EXECUTION_CALLABLES
+                )
+            allowed = _DIAGNOSTIC_PROVIDER_IMPORTS.get(relative, frozenset())
+            for name in imported:
+                if name in allowed:
+                    continue
+                if name in _PROVIDER_EXECUTION_IMPORTS or any(
+                    name == module or name.startswith(f"{module}.")
+                    for module in _PROVIDER_EXECUTION_MODULES
+                ):
+                    violations.append(f"{relative}:{node.lineno}:import:{name}")
+        for node in nodes:
+            if not isinstance(node, ast.Call):
+                continue
+            name = _qualified_name(node.func)
+            if name is not None and (
+                name in execution_aliases
+                or name.rsplit(".", 1)[-1] in _PROVIDER_EXECUTION_CALLABLES
+            ):
+                violations.append(f"{relative}:{node.lineno}:instantiate:{name}")
+
+    assert violations == []
