@@ -1029,13 +1029,17 @@ def load_evidence_acceptance(root: Path) -> dict[str, Any]:
                 "seal_sha256",
             )
         )
-        or payload.get("raw_before_sha256") != payload.get("raw_after_sha256")
         or payload.get("relation_semantics_sha256")
         != evidence_relation_semantics_sha256()
         or payload.get("case_count") != len(EVALUATION_CONTRACT.paired_slices)
         or not isinstance(payload.get("gates"), Mapping)
         or set(payload["gates"]) != evidence_rollout_gate_keys()
         or any(not isinstance(value, bool) for value in payload["gates"].values())
+        or (
+            payload.get("raw_before_sha256")
+            == payload.get("raw_after_sha256")
+        )
+        != payload["gates"]["raw_unchanged"]
     ):
         raise EvidenceReconstructionError("evidence acceptance receipt is invalid")
     return payload

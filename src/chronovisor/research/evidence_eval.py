@@ -639,7 +639,8 @@ def _run_evidence_acceptance(
                     "case_manifest_sha256": registered["case_manifest_sha256"],
                     "case_count": len(cases),
                     "gates": {
-                        key: False for key in sorted(evidence_rollout_gate_keys())
+                        key: key == "raw_unchanged"
+                        for key in sorted(evidence_rollout_gate_keys())
                     },
                     "atomic_publication_fault_sha256": fault_sha,
                     "relation_semantics_sha256": relation_sha,

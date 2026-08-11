@@ -1269,6 +1269,82 @@ def test_public_acceptance_seals_raw_fault_and_live_sample_receipts(
     json.dumps(result)
 
 
+def test_rollout_rejects_stale_raw_without_changing_promotion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from chronovisor.recall import recall_runtime
+
+    cases, baselines, *_ = _evaluation_fixture(tmp_path)
+    decision = SimpleNamespace(allowed=True, layout="okf_v0_2", state="finalized-v2")
+
+    @contextmanager
+    def operation(_root: Path):
+        yield decision
+
+    monkeypatch.setattr(evidence_eval, "okf_startup_status", lambda _root: decision)
+    monkeypatch.setattr(evidence_eval, "okf_runtime_operation", operation)
+    monkeypatch.setattr(runtime, "_okf_finalized", lambda _root: True)
+    monkeypatch.setattr(runtime, "okf_runtime_operation", operation)
+    monkeypatch.setattr(
+        recall_runtime,
+        "load_policy",
+        lambda: RecallPolicy(max_context_chars=100_000),
+    )
+    baseline_by_query = {result.queries[0]: result for result in baselines.values()}
+    monkeypatch.setattr(
+        recall_runtime,
+        "run_recall",
+        lambda request, _policy: baseline_by_query[request.prompt],
+    )
+    register_evidence_cases(root=tmp_path, cases=cases)
+    accepted = run_evidence_acceptance(root=tmp_path)
+    assert accepted["status"] == "passed"
+    assert all(accepted["acceptance_receipt"]["gates"].values())
+
+    promotion_path = (
+        tmp_path / "runtime" / "evidence-reconstruction" / "promotion.json"
+    )
+    promotion_before = promotion_path.read_bytes()
+    source = tmp_path / "stale-session.jsonl"
+    raw = (
+        json.dumps(
+            {
+                "type": "response_item",
+                "timestamp": "2026-08-11T09:10:00+09:00",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "Raw advanced."}],
+                },
+            },
+            separators=(",", ":"),
+        ).encode()
+        + b"\n"
+    )
+    source.write_bytes(raw)
+    append_capture(
+        raw_dir=tmp_path / "raw",
+        raw_id="save-codex-stale.md",
+        idempotency_key="codex-stale",
+        host="codex",
+        session_key="c" * 24,
+        session_id="stale-session",
+        source_file=source,
+        after_line=0,
+        until_line=1,
+        source_bytes=raw,
+        record_count=1,
+        now=NOW,
+    )
+    assert runtime.committed_raw_watermark(tmp_path / "raw") != accepted[
+        "acceptance_receipt"
+    ]["raw_watermark_sha256"]
+
+    with pytest.raises(EvidenceReconstructionError, match="acceptance receipt is stale"):
+        advance_evidence_rollout(root=tmp_path)
+    assert promotion_path.read_bytes() == promotion_before
+
+
 def test_held_acceptance_can_refresh_after_cold_latency_and_context_fallback(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1286,6 +1362,7 @@ def test_held_acceptance_can_refresh_after_cold_latency_and_context_fallback(
     monkeypatch.setattr(evidence_eval, "okf_startup_status", lambda _root: decision)
     monkeypatch.setattr(evidence_eval, "okf_runtime_operation", operation)
     monkeypatch.setattr(runtime, "_okf_finalized", lambda _root: True)
+    monkeypatch.setattr(runtime, "okf_runtime_operation", operation)
     baseline_by_query = {result.queries[0]: result for result in baselines.values()}
     monkeypatch.setattr(
         recall_runtime,
@@ -1326,6 +1403,43 @@ def test_held_acceptance_can_refresh_after_cold_latency_and_context_fallback(
     assert oversized["status"] == "held"
     assert oversized["evaluation"]["bounded_context"]["passed"] is False
     assert oversized["rollout"]["mode"] == "shadow"
+
+    held_receipt = dict(oversized["acceptance_receipt"])
+    held_receipt["raw_before_sha256"] = "f" * 64
+    held_receipt["gates"] = {
+        **held_receipt["gates"],
+        "projection_deterministic": False,
+        "raw_unchanged": False,
+    }
+    for raw_before, raw_unchanged in (
+        (held_receipt["raw_after_sha256"], False),
+        (held_receipt["raw_before_sha256"], True),
+    ):
+        conflicting = {
+            **held_receipt,
+            "raw_before_sha256": raw_before,
+            "gates": {
+                **held_receipt["gates"],
+                "raw_unchanged": raw_unchanged,
+            },
+        }
+        with runtime.evidence_authority_operation(tmp_path) as directory_fd:
+            runtime.write_evidence_authority_at(
+                directory_fd, "acceptance.json", conflicting
+            )
+        with pytest.raises(EvidenceReconstructionError, match="receipt is invalid"):
+            runtime.load_evidence_acceptance(tmp_path)
+    with runtime.evidence_authority_operation(tmp_path) as directory_fd:
+        runtime.write_evidence_authority_at(
+            directory_fd, "acceptance.json", held_receipt
+        )
+    loaded_held = runtime.load_evidence_acceptance(tmp_path)
+    assert loaded_held["raw_before_sha256"] != loaded_held["raw_after_sha256"]
+    held_rollout = advance_evidence_rollout(root=tmp_path)
+    assert held_rollout["mode"] == "shadow"
+    assert held_rollout["reason"] == "gate_failed"
+    projection_id = "projection:" + oversized["projection"]["projection_sha256"]
+    assert evidence_selected(tmp_path, "held-session", projection_id) is False
 
     monkeypatch.setattr(
         recall_runtime,
