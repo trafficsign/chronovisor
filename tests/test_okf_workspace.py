@@ -9,7 +9,11 @@ import pytest
 
 from chronovisor.core import durable_state, okf_workspace
 from chronovisor.core.activity_log import activity_record, valid_activity_file
-from chronovisor.core.canonical_document import extract_markdown_links, parse_document
+from chronovisor.core.canonical_document import (
+    extract_markdown_links,
+    parse_document,
+    resolve_internal_markdown_links,
+)
 from chronovisor.core.canonical_json import (
     canonical_json_line_bytes_strict,
     canonical_json_sha256_strict,
@@ -291,6 +295,67 @@ def test_workspace_preserves_legacy_multiline_and_existing_activity_order(
     assert "first message" not in (
         workspace / "staging" / "pages" / "log.md"
     ).read_text()
+
+
+def test_workspace_stages_only_resolved_stable_canonical_links(tmp_path: Path) -> None:
+    source, runtime = _roots(tmp_path)
+    pages = source / "pages"
+    (pages / "deep" / "replacement.md").write_text(
+        "---\nuid: uid-replacement\ntype: Concept\nstatus: stable\n---\nReplacement.\n"
+    )
+    (pages / "deep" / "deprecated.md").write_text(
+        "---\nuid: uid-deprecated\ntype: Concept\nstatus: deprecated\n"
+        "superseded_by: replacement\n---\nDeprecated.\n"
+    )
+    (pages / "deep" / "invalid.md").write_text(
+        "---\nuid: uid-invalid\ntype: Concept\nstatus: deprecated\n"
+        "superseded_by: missing\n---\nInvalid replacement.\n"
+    )
+    source_page = pages / "notes" / "source.md"
+    source_page.write_bytes(
+        source_page.read_bytes() + b"[Stable](../deep/target.md#Section heading) "
+        b"[Deprecated](<../deep/deprecated.md#Old heading>) "
+        b"[Invalid replacement](../deep/invalid.md) "
+        b"[Missing](../deep/missing.md) "
+        b"[Local](/Users/person/private.md).\n"
+    )
+
+    workspace = prepare_okf_workspace(source, runtime, "canonical-links")
+    staged_pages = workspace / "staging" / "pages"
+    staged_source = parse_document((staged_pages / "notes" / "source.md").read_bytes())
+
+    assert staged_source.body == (
+        b"Read [the target](<../deep/target.md#Section heading>).\n"
+        b"[Stable](../deep/target.md#Section heading) "
+        b"[Deprecated](<../deep/replacement.md>) "
+        b"Invalid replacement Missing Local.\n"
+    )
+    manifest = json.loads((workspace / "dry-run-manifest.json").read_bytes())
+    source_manifest = next(
+        item
+        for item in manifest["documents"]
+        if item["relative_path"] == "notes/source.md"
+    )
+    assert source_manifest["resolved_link_count"] == 5
+
+    documents = {
+        path.relative_to(staged_pages).as_posix(): parse_document(path.read_bytes())
+        for path in staged_pages.rglob("*.md")
+        if path.name not in {"index.md", "log.md"}
+    }
+    unresolved = [
+        (source_path, link.path)
+        for source_path, document in documents.items()
+        if document.metadata.get("status") == "stable"
+        for link in resolve_internal_markdown_links(
+            document.body,
+            source_namespace="pages",
+            source_path=source_path,
+        )
+        if documents.get(link.path) is None
+        or documents[link.path].metadata.get("status") != "stable"
+    ]
+    assert unresolved == []
 
 
 @pytest.mark.parametrize(

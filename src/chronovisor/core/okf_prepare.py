@@ -14,7 +14,10 @@ from typing import Literal
 from chronovisor.core.canonical_document import (
     CanonicalDocument,
     CanonicalDocumentError,
+    ResolvedMarkdownLink,
     parse_document,
+    resolve_internal_markdown_links,
+    rewrite_internal_markdown_links,
     serialize_document,
 )
 from chronovisor.core.canonical_json import (
@@ -179,6 +182,8 @@ def prepare_okf_migration(
         for item in sources
         if item.namespace == "pages" and item.relative_path not in _RESERVED_ROOTS
     )
+    parsed_concepts = tuple((item, _parse_source(item.data)) for item in concepts)
+    canonical_catalog = _canonical_link_catalog(parsed_concepts, normalized_catalog)
 
     invalid_statuses: list[InvalidStatus] = []
     converted: list[ConvertedDocument] = []
@@ -188,9 +193,8 @@ def prepare_okf_migration(
     cohorts: defaultdict[str, list[str]] = defaultdict(list)
     seen_uids: set[str] = set()
 
-    for source in concepts:
+    for source, document in parsed_concepts:
         relative_path = source.relative_path
-        document = _parse_source(source.data)
         metadata = dict(document.metadata)
         uid = _uid(metadata, relative_path)
         if uid in seen_uids:
@@ -226,6 +230,25 @@ def prepare_okf_migration(
             normalized_catalog,
             plain_text_targets=normalized_plain_text_targets,
         )
+        body_text, canonical_count = rewrite_internal_markdown_links(
+            body,
+            source_namespace="pages",
+            source_path=relative_path,
+            rewrite=lambda link, label: _rewrite_canonical_link(
+                link, label, canonical_catalog
+            ),
+        )
+        body = body_text.encode("utf-8")
+        resolved_count += canonical_count
+        if any(
+            canonical_catalog.get(link.path, ("missing", None))[0] != "stable"
+            for link in resolve_internal_markdown_links(
+                body,
+                source_namespace="pages",
+                source_path=relative_path,
+            )
+        ):
+            raise ValueError(f"canonical link rewrite incomplete: {uid}")
         unresolved.extend(missing)
         output = serialize_document(CanonicalDocument(metadata=metadata, body=body))
         reparsed = parse_document(output)
@@ -432,6 +455,56 @@ def convert_wikilinks(
     for start, end, replacement in reversed(replacements):
         text = text[:start] + replacement + text[end:]
     return text.encode("utf-8"), len(replacements), tuple(unresolved)
+
+
+def _canonical_link_catalog(
+    concepts: Iterable[tuple[SourceDocument, CanonicalDocument]],
+    page_catalog: Mapping[str, str],
+) -> dict[str, tuple[str, str | None]]:
+    """Map exact page paths to final lifecycle status and replacement path."""
+
+    _require_unique(page_catalog.values())
+    exact: dict[str, tuple[str, str | None]] = {
+        path: ("stable", None) for path in page_catalog.values()
+    }
+    for source, document in concepts:
+        raw_status = document.metadata.get("status", _MISSING)
+        status = (
+            _STATUS_MAPPING["missing"]
+            if raw_status is _MISSING
+            else _STATUS_MAPPING.get(raw_status)
+            if isinstance(raw_status, str)
+            else None
+        )
+        if status is None:
+            continue
+        superseded_by = document.metadata.get("superseded_by")
+        replacement = (
+            page_catalog.get(superseded_by.strip())
+            if isinstance(superseded_by, str) and superseded_by.strip()
+            else None
+        )
+        exact[source.relative_path] = (status, replacement)
+    return exact
+
+
+def _rewrite_canonical_link(
+    link: ResolvedMarkdownLink,
+    label: str,
+    catalog: Mapping[str, tuple[str, str | None]],
+) -> ResolvedMarkdownLink | str | None:
+    target = catalog.get(link.path)
+    if target is None:
+        return label
+    status, replacement = target
+    if status == "stable":
+        return None
+    if (
+        replacement is None
+        or catalog.get(replacement, ("missing", None))[0] != "stable"
+    ):
+        return label
+    return ResolvedMarkdownLink("pages", replacement)
 
 
 def _uid(metadata: Mapping[str, object], relative_path: str) -> str:

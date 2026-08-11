@@ -7,7 +7,11 @@ from typing import Any
 
 import pytest
 
-from chronovisor.core.canonical_document import extract_markdown_links, parse_document
+from chronovisor.core.canonical_document import (
+    extract_markdown_links,
+    parse_document,
+    resolve_internal_markdown_links,
+)
 from chronovisor.core.okf_prepare import (
     InvalidStatusError,
     RawSource,
@@ -196,6 +200,71 @@ def test_prepare_delinks_known_plain_text_targets_and_keeps_unknown_unresolved()
     assert repeated == first
     with pytest.raises(ValueError, match=r"uid-source='unknown'"):
         require_resolved_links(first)
+
+
+def test_prepare_rewrites_canonical_links_to_stable_only() -> None:
+    def page(
+        path: str, status: str, *, superseded_by: str | None = None
+    ) -> SourceDocument:
+        replacement = f"superseded_by: {superseded_by}\n" if superseded_by else ""
+        return SourceDocument(
+            path,
+            (
+                "---\n"
+                f"uid: uid-{Path(path).stem}\n"
+                "type: Concept\n"
+                f"status: {status}\n"
+                f"{replacement}"
+                "---\n"
+            ).encode(),
+        )
+
+    source = SourceDocument(
+        "notes/source.md",
+        b"---\nuid: uid-source\ntype: Concept\nstatus: stable\n---\n"
+        b"[Stable](../stable.md#Kept) "
+        b"[Deprecated](../deprecated.md#Old) "
+        b"[Draft](../draft.md#Old) "
+        b"[Invalid replacement](../invalid.md) "
+        b"[No replacement](../orphan.md) "
+        b"[Missing](../missing.md) "
+        b"[Local](/Users/person/private.md).\n",
+    )
+    documents = (
+        source,
+        page("stable.md", "stable"),
+        page("replacement.md", "stable"),
+        page("deprecated.md", "deprecated", superseded_by="replacement"),
+        page("draft.md", "draft", superseded_by="replacement"),
+        page("invalid.md", "deprecated", superseded_by="orphan"),
+        page("orphan.md", "deprecated"),
+    )
+    catalog = {Path(item.relative_path).stem: item.relative_path for item in documents}
+
+    plan = prepare_okf_migration(documents, catalog=catalog)
+    converted_source = next(
+        item for item in plan.converted_documents if item.uid == "uid-source"
+    )
+    converted = parse_document(converted_source.data)
+
+    assert converted.body == (
+        b"[Stable](../stable.md#Kept) "
+        b"[Deprecated](<../replacement.md>) "
+        b"[Draft](<../replacement.md>) "
+        b"Invalid replacement No replacement Missing Local.\n"
+    )
+    source_manifest = next(
+        item for item in plan.manifest.documents if item.uid == "uid-source"
+    )
+    assert source_manifest.resolved_link_count == 6
+    links = resolve_internal_markdown_links(
+        converted.body, source_namespace="pages", source_path="notes/source.md"
+    )
+    assert [(link.path, link.fragment) for link in links] == [
+        ("stable.md", "Kept"),
+        ("replacement.md", None),
+        ("replacement.md", None),
+    ]
 
 
 def test_resolved_link_gate_fails_closed_with_manifest_report() -> None:
