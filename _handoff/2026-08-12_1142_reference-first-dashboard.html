@@ -54,13 +54,13 @@ ol.log time{color:var(--muted);flex-shrink:0;min-width:10rem}
 </head>
 <body>
 <script type="application/json" id="plan-meta">
-{"task_id":"plan_2868fe2d6f324487a9ce819da3303b20","created_at":"2026-08-12T11:42:08+09:00","状態":"running","slug":"reference-first-dashboard"}
+{"task_id":"plan_2868fe2d6f324487a9ce819da3303b20","created_at":"2026-08-12T11:42:08+09:00","状態":"done","slug":"reference-first-dashboard"}
 </script>
 
 <header>
 <h1>Plan: Reference-first Chronovisor Dashboard</h1>
 <div class="meta-bar">
-<span class="badge" data-bind="状態" data-state="running">running</span>
+<span class="badge" data-bind="状態" data-state="done">done</span>
 <span><code data-bind="task_id">plan_2868fe2d6f324487a9ce819da3303b20</code></span>
 <span data-bind="created_at">2026-08-12T11:42:08+09:00</span>
 <span>source task <code>019ff054-97a2-7302-96be-b9fb4d859667</code></span>
@@ -180,8 +180,8 @@ source task 019ff054-97a2-7302-96be-b9fb4d859667 · generated image exec-4f8b1b2
 <li><input type="checkbox" checked><span><strong>Phase 8 — A–H と geometry を自動検証。</strong> Python payload tests、Node VM replay、DOM/SVG の個数・座標・交差・ellipsis、keyboard / reduced-motion を最小の既存 test harness へ追加する。pixel diff だけに依存しない。</span></li>
 <li><input type="checkbox" checked><span><strong>Phase 9 — 1586×992 visual calibration。</strong> Chromium、DPR 1、zoom 100%、font ready、motion off で親子領域を撮影し、reference overlay / diff と DOM 実測を同時に残す。A–H 全状態と狭幅 980×1000、680×1200、375×900 を確認する。</span></li>
 <li><input type="checkbox" checked><span><strong>Phase 10 — 変更範囲を検証・commit。</strong> targeted tests、<code>git diff --check</code>、本番 lock から隔離した全体 test を通す。policy / payload / UI の意味ある単位ごとに意図した file だけ commit し、他者変更を含めない。</span></li>
-<li><input type="checkbox"><span><strong>Phase 11 — 明示許可後に GitHub-backed runtime へ反映。</strong> push 許可がなければここを blocker にして止める。許可後は <code>push → Dashboard（必要な場合だけ関連 decision service）restart → runtime archive direct_url.json SHA → health</code> の順を守る。</span></li>
-<li><input type="checkbox"><span><strong>Phase 12 — live acceptance と Plan close。</strong> live API / event audit / actual Ollama request と発光経路を照合し、指定 viewport の screenshot・DOM geometry・console・overflow を確認する。archive SHA が pushed SHA、health が <code>drift=false</code> の時だけ Plan を <code>done</code> にする。</span></li>
+<li><input type="checkbox" checked><span><strong>Phase 11 — 明示許可後に GitHub-backed runtime へ反映。</strong> push 許可がなければここを blocker にして止める。許可後は <code>push → Dashboard（必要な場合だけ関連 decision service）restart → runtime archive direct_url.json SHA → health</code> の順を守る。</span></li>
+<li><input type="checkbox" checked><span><strong>Phase 12 — live acceptance と Plan close。</strong> live API / event audit / actual Ollama request と発光経路を照合し、指定 viewport の screenshot・DOM geometry・console・overflow を確認する。archive SHA が pushed SHA、health が <code>drift=false</code> の時だけ Plan を <code>done</code> にする。</span></li>
 </ol>
 </section>
 
@@ -296,6 +296,8 @@ launchctl kickstart -k gui/$(id -u)/com.trafficsign.chronovisor-dashboard
 <li><time>2026-08-12 13:06</time><span>Phase 10 完了。adaptive request template と trace overall steps を抽出し、large-function gate を 297 / 255行で維持。policy v7 の正規 contract hash 2値だけを baseline へ reseal。隔離 root で targeted <code>300 passed</code>、全体 <code>4649 passed / 1 skipped / 0 failed</code>、architecture fitness、Node syntax、Ruff、<code>git diff --check</code> 合格。JUnit を evidence に固定し、修正 <code>6e47869</code> と証跡 <code>ffb7776</code> を commit。</span></li>
 <li><time>2026-08-12 13:23</time><span>Phase 9 の完了判定を取り消し。ユーザーの実画面確認で、Processing / Trace が一体の外枠に見えること、非選択5 lane が展開されたままなこと、reference の Artifact / Decision / context候補 / repair / branch / event bar と座標が一致しないことを確認。overflow 0 だけでは visual acceptance を満たさないため、reference PNG の構造と実座標を再び受入契約にした。</span></li>
 <li><time>2026-08-12 14:17</time><span>Phase 9 / 10 を修正後の証跡で再完了。1586×992 / DPR 1 で Processing x77 y236 w1480 h218、Trace x77 y464 w1480 h746、非選択5 lane折畳み、単一SVG、Artifact / Decision各1、待機topology 8、body overflow 0、connector有、console 0を実測。reference の7 milestones、4 context候補、3 voter、repair / Agree / Hold、3列event barを固定し、<code>_handoff/evidence/2026-08-12_reference-first-dashboard-group-fixed.png</code> を保存。no-safe-quorum は Artifact=<code>skipped</code> / Decision=<code>error</code> と再監査。隔離rootで targeted <code>301 passed</code>、architecture <code>126 passed</code>、全体 <code>4650 passed / 1 skipped / 0 failed</code>、Node syntax、Ruff、<code>git diff --check</code>合格。修正 <code>18dae5c</code> をcommit。</span></li>
+<li><time>2026-08-12 14:30</time><span>Phase 11 完了。ユーザーのpush許可に基づき <code>58c0b36c8f459f54d2c3aaf12831eb3d9b1815c1</code> を <code>origin/main</code> へpushし、Dashboardだけをrestart。実行中archive <code>01s2np2rPmmyT1QmUL96-</code> の <code>direct_url.json</code> commitが同SHA、HTTP <code>/</code> / <code>/api/local-consensus</code> / <code>/api/activity</code> / <code>/api/health</code> が200、healthは <code>status=ok</code> / <code>drift=false</code> / expected commit一致。GitHub Actions Security <code>31566100329</code>、Python 3.14 <code>31566100315</code>、quality <code>31566100334</code> は全てsuccess。</span></li>
+<li><time>2026-08-12 14:30</time><span>Phase 12 完了。live runtimeを1586×992 / DPR 1で再実測し、Processing x77 y236 w1480 h218、Trace x77 y464 w1480 h746、5 lane折畳み / 1 lane展開、単一SVG、Artifact / Decision各1、body overflow 0、connector有、console 0を確認。980 / 680 / 375pxもbody overflow 0でSVG内部scrollのみ。直近の実 decision は13 events、Primary / Challenger actual think=<code>medium</code>、context=<code>131072 / 65536</code>、Tie-break未使用はnull、実Ollama context 65536、<code>hold-report errors=[]</code>。live証跡を <code>_handoff/evidence/2026-08-12_reference-first-dashboard-live-fixed.png</code> に保存し、Planを <code>done</code> に閉じた。</span></li>
 </ol>
 </section>
 
