@@ -3180,7 +3180,7 @@ canvas {
 }
 
 .decision-trace-harness .trace-node .trace-artifact-label {
-  text-anchor: start;
+  text-anchor: end;
 }
 
 .decision-trace-harness .trace-check {
@@ -3321,7 +3321,6 @@ canvas {
 }
 
 .decision-trace-harness .done.trace-path,
-.decision-trace-harness .done .trace-path,
 .decision-trace-harness .trace-path.done {
   stroke: #8e91ff;
   stroke-dasharray: none;
@@ -3403,6 +3402,10 @@ canvas {
   filter: none;
 }
 
+.decision-trace-harness .trace-reasoning.selected [data-reasoning-label] {
+  fill: #ffb340;
+}
+
 .decision-trace-harness .active.trace-node text,
 .decision-trace-harness .active.decision-lane-step text,
 .decision-trace-harness .active.trace-reasoning text,
@@ -3462,15 +3465,25 @@ canvas {
   opacity: 0;
 }
 
-.decision-trace-harness .trace-repair-loop.active,
-.decision-trace-harness .trace-repair-loop.done {
+.decision-trace-harness .trace-repair-loop.active {
   stroke: #ff8a00;
+  stroke-dasharray: none;
   opacity: 1;
   filter: url(#trace-glow-orange);
 }
 
+.decision-trace-harness .trace-repair-loop.done {
+  stroke: #8e91ff;
+  stroke-dasharray: none;
+  opacity: 1;
+  filter: drop-shadow(0 0 3px rgba(142, 145, 255, 0.42));
+}
+
 .decision-trace-harness .trace-repair-loop.pending {
+  stroke: #7d8992;
+  stroke-dasharray: 4 5;
   opacity: 0.66;
+  filter: none;
 }
 
 .decision-trace-harness .decision-lane:has(.trace-repair-loop.active) .trace-repair-count,
@@ -3527,6 +3540,10 @@ canvas {
 
 .decision-trace-harness .trace-seal-label.error {
   opacity: 1;
+}
+
+.decision-trace-harness .trace-seal-branch.pending {
+  opacity: 0.18;
 }
 
 .decision-trace-harness .trace-yes-path.done {

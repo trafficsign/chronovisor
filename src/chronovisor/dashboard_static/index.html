@@ -128,8 +128,8 @@
             </defs>
 
             <g class="trace-overall" id="decision-overall-steps" aria-label="Decision milestones">
-              <path class="trace-path" data-path-key="packet-preflight" d="M105 10 H289" marker-end="url(#trace-arrow)"></path>
-              <path class="trace-path" data-path-key="preflight-execution_plan" d="M307 10 H501" marker-end="url(#trace-arrow)"></path>
+              <path class="trace-path" data-path-key="packet-preflight" d="M96 10 H289" marker-end="url(#trace-arrow)"></path>
+              <path class="trace-path" data-path-key="preflight-execution_plan" d="M298 10 H501" marker-end="url(#trace-arrow)"></path>
               <g class="trace-node" data-overall-key="packet" transform="translate(96 10)"><circle r="10"></circle><path class="trace-check" d="M-4 0 -1 3 5 -4"></path><text y="32">Packet</text></g>
               <g class="trace-node" data-overall-key="preflight" transform="translate(298 10)"><circle r="10"></circle><path class="trace-check" d="M-4 0 -1 3 5 -4"></path><text y="32">Preflight</text></g>
               <g class="trace-node" data-overall-key="execution_plan" data-trace-entry="true" transform="translate(510 10)"><circle r="10"></circle><path class="trace-check" d="M-4 0 -1 3 5 -4"></path><text class="trace-branch-node-label" x="16" y="34">Execution Plan</text></g>
@@ -143,18 +143,15 @@
               <g class="trace-model-route" data-model-key="challenger" transform="translate(68 171)"><circle r="5"></circle><text x="14" y="4">Challenger · <tspan data-model-value="challenger">--</tspan></text></g>
               <g class="trace-model-route" data-model-key="tie_break" transform="translate(68 201)"><circle r="5"></circle><text x="14" y="4">Tie-break · <tspan data-model-value="tie_break">--</tspan></text></g>
 
-              <path class="trace-context-guide" data-context-guide="32768" d="M510 19 V76 Q510 86 500 86 H352 Q342 86 342 96 V155 M342 174 V204 Q342 214 352 214 H724 Q734 214 734 204 V174 Q734 164 744 164 H766"></path>
-              <path class="trace-context-guide" data-context-guide="65536" d="M510 19 V76 Q510 86 500 86 H480 Q470 86 470 96 V155 M470 174 V204 Q470 214 480 214 H724 Q734 214 734 204 V174 Q734 164 744 164 H766"></path>
-              <path class="trace-context-guide" data-context-guide="98304" d="M510 19 V76 Q510 86 520 86 H545 Q555 86 555 96 V155 M555 174 V204 Q555 214 565 214 H724 Q734 214 734 204 V174 Q734 164 744 164 H766"></path>
-              <path class="trace-context-guide" data-context-guide="131072" d="M510 19 V76 Q510 86 520 86 H632 Q642 86 642 96 V155 M642 174 V204 Q642 214 652 214 H724 Q734 214 734 204 V174 Q734 164 744 164 H766"></path>
-              <path class="trace-path" data-path-key="execution-plan-context" d="M510 19 V76 Q510 86 500 86 H480 Q470 86 470 96 V155" marker-end="url(#trace-arrow)"></path>
-              <path class="trace-path" data-path-key="plan-context" d="M470 174 V204 Q470 214 480 214 H724 Q734 214 734 204 V174"></path>
-              <path class="trace-path" data-path-key="plan-headroom" d="M734 174 Q734 164 744 164 H766" marker-end="url(#trace-arrow)"></path>
-              <rect class="trace-label-backdrop trace-context-kicker-backdrop" x="304" y="98" width="88" height="19" rx="3"></rect>
-              <text class="trace-kicker" x="312" y="112">CONTEXT WINDOW</text>
+              <path class="trace-context-guide" data-context-guide="all" d="M510 19 V86 M342 86 H642 M342 86 V164 M442 86 V164 M542 86 V164 M642 86 V164 M342 164 V214 M442 164 V214 M542 164 V214 M642 164 V214 M342 214 H734 M734 214 V164 H766"></path>
+              <path class="trace-path" data-path-key="execution-plan-context" d="M510 19 V76 Q510 86 500 86 H452 Q442 86 442 96 V155" marker-end="url(#trace-arrow)"></path>
+              <path class="trace-path" data-path-key="plan-context" d="M442 164 V204 Q442 214 452 214 H724 Q734 214 734 204 V164"></path>
+              <path class="trace-path" data-path-key="plan-headroom" d="M734 164 H766" marker-end="url(#trace-arrow)"></path>
+              <rect class="trace-label-backdrop trace-context-kicker-backdrop" x="304" y="60" width="88" height="19" rx="3"></rect>
+              <text class="trace-kicker" x="312" y="74">CONTEXT WINDOW</text>
               <g class="trace-node trace-context-option" data-context-option="true" data-context-tokens="32768" transform="translate(342 164)"><circle r="9"></circle><text data-context-label="true" x="15" y="27">32K</text></g>
-              <g class="trace-node trace-context-option" data-context-option="true" data-plan-key="context" data-context-tokens="65536" transform="translate(470 164)"><circle r="10"></circle><text data-context-label="true" x="15" y="27">65K</text></g>
-              <g class="trace-node trace-context-option" data-context-option="true" data-context-tokens="98304" transform="translate(555 164)"><circle r="9"></circle><text data-context-label="true" x="15" y="27">98K</text></g>
+              <g class="trace-node trace-context-option" data-context-option="true" data-plan-key="context" data-context-tokens="65536" transform="translate(442 164)"><circle r="10"></circle><text data-context-label="true" x="15" y="27">65K</text></g>
+              <g class="trace-node trace-context-option" data-context-option="true" data-context-tokens="98304" transform="translate(542 164)"><circle r="9"></circle><text data-context-label="true" x="15" y="27">98K</text></g>
               <g class="trace-node trace-context-option" data-context-option="true" data-context-tokens="131072" transform="translate(642 164)"><circle r="9"></circle><text data-context-label="true" x="15" y="27">131K</text></g>
               <rect class="trace-label-backdrop" x="382" y="226" width="332" height="20" rx="3"></rect>
               <text class="trace-value" data-plan-value="context-selection" x="548" y="239" text-anchor="middle">required — → selected —</text>
@@ -162,18 +159,16 @@
               <g class="trace-diamond" data-plan-key="headroom"><path d="M812 118 858 164 812 210 766 164Z"></path><text x="812" y="160">Task +</text><text x="812" y="174">headroom</text></g>
 
               <text class="trace-kicker" x="856" y="90">REASONING BUDGET</text>
-              <path class="trace-reasoning-guide" d="M858 164 H882 Q892 164 892 154 V116 Q892 106 902 106 H1245 Q1255 106 1255 116 V154 Q1255 164 1265 164 H1270"></path>
-              <path class="trace-reasoning-guide" d="M858 164 H1270"></path>
-              <path class="trace-reasoning-guide" d="M858 164 H882 Q892 164 892 174 V212 Q892 222 902 222 H1245 Q1255 222 1255 212 V174 Q1255 164 1265 164 H1270"></path>
+              <path class="trace-reasoning-guide" d="M858 164 H1270 M892 164 V106 H1255 V164 M892 222 V164 M892 222 H1255 M1255 222 V164"></path>
               <path class="trace-path trace-reasoning-path" data-path-key="reasoning-low" d="M858 164 H882 Q892 164 892 154 V116 Q892 106 902 106 H903" marker-end="url(#trace-arrow)"></path>
-              <path class="trace-path trace-reasoning-path" data-reasoning-output="low" d="M921 106 H1245 Q1255 106 1255 116 V154 Q1255 164 1265 164 H1270"></path>
+              <path class="trace-path trace-reasoning-path" data-reasoning-output="low" d="M912 106 H1245 Q1255 106 1255 116 V154 Q1255 164 1265 164 H1270"></path>
               <path class="trace-path trace-reasoning-path" data-path-key="reasoning-medium" d="M858 164 H903" marker-end="url(#trace-arrow)"></path>
-              <path class="trace-path trace-reasoning-path" data-reasoning-output="medium" d="M921 164 H1270"></path>
+              <path class="trace-path trace-reasoning-path" data-reasoning-output="medium" d="M912 164 H1270"></path>
               <path class="trace-path trace-reasoning-path" data-path-key="reasoning-high" d="M858 164 H882 Q892 164 892 174 V212 Q892 222 902 222 H903" marker-end="url(#trace-arrow)"></path>
-              <path class="trace-path trace-reasoning-path" data-reasoning-output="high" d="M921 222 H1245 Q1255 222 1255 212 V174 Q1255 164 1265 164 H1270"></path>
-              <g class="trace-reasoning" data-reasoning-key="low" transform="translate(912 106)"><circle r="9"></circle><circle class="trace-selected-core" r="3"></circle><text x="18" y="16">LOW</text><text class="trace-reasoning-detail" x="18" y="34">simple · repair · tight</text></g>
-              <g class="trace-reasoning" data-reasoning-key="medium" transform="translate(912 164)"><circle r="9"></circle><circle class="trace-selected-core" r="3"></circle><text x="18" y="16">MEDIUM</text><text class="trace-reasoning-detail" x="18" y="34">normal semantic · default</text></g>
-              <g class="trace-reasoning" data-reasoning-key="high" transform="translate(912 222)"><circle r="9"></circle><circle class="trace-selected-core" r="3"></circle><text x="18" y="16">HIGH</text><text class="trace-reasoning-detail" x="18" y="34">tie-break · high impact · ample</text></g>
+              <path class="trace-path trace-reasoning-path" data-reasoning-output="high" d="M912 222 H1245 Q1255 222 1255 212 V174 Q1255 164 1265 164 H1270"></path>
+              <g class="trace-reasoning" data-reasoning-key="low" transform="translate(912 106)"><circle r="9"></circle><circle class="trace-selected-core" r="3"></circle><text data-reasoning-label="true" x="18" y="16">LOW</text><text class="trace-reasoning-detail" x="18" y="34">simple · repair · tight</text></g>
+              <g class="trace-reasoning" data-reasoning-key="medium" transform="translate(912 164)"><circle r="9"></circle><circle class="trace-selected-core" r="3"></circle><text data-reasoning-label="true" x="18" y="16">MEDIUM</text><text class="trace-reasoning-detail" x="18" y="34">normal semantic · default</text></g>
+              <g class="trace-reasoning" data-reasoning-key="high" transform="translate(912 222)"><circle r="9"></circle><circle class="trace-selected-core" r="3"></circle><text data-reasoning-label="true" x="18" y="16">HIGH</text><text class="trace-reasoning-detail" x="18" y="34">tie-break · high impact · ample</text></g>
 
               <path class="trace-path" data-path-key="plan-fit" d="M1270 164 H1280" marker-end="url(#trace-arrow)"></path>
               <g class="trace-diamond" data-plan-key="fit"><path d="M1330 118 1380 164 1330 210 1280 164Z"></path><text x="1330" y="146">FIT GATE</text><text data-plan-value="fit" x="1330" y="174">WAITING</text><text class="trace-pass" data-plan-fit-pass="true" x="1330" y="190">PASS</text></g>
@@ -182,25 +177,33 @@
             </g>
 
             <g class="trace-lanes" id="decision-lanes" aria-label="Local model lanes" aria-live="polite">
-              <path class="trace-path trace-next-voter" data-path-key="primary-challenger" d="M1096 335 V377 Q1096 387 1086 387 H190 Q180 387 180 397 V440 Q180 450 190 450 H220" marker-end="url(#trace-arrow)"></path>
+              <path class="trace-path trace-next-voter" data-path-key="primary-challenger" d="M1096 325 V377 Q1096 387 1086 387 H190 Q180 387 180 397 V440 Q180 450 190 450 H220" marker-end="url(#trace-arrow)"></path>
               <text class="trace-path-label" x="490" y="381">NEXT VOTER</text>
-              <path class="trace-path trace-single-path" data-path-key="single-artifact" d="M1106 325 H1332 Q1342 325 1342 335 V393" marker-end="url(#trace-arrow)"></path>
-              <path class="trace-path trace-next-voter" data-path-key="challenger-agree" d="M1106 450 H1168" marker-end="url(#trace-arrow)"></path>
+              <path class="trace-path trace-single-path" data-path-key="single-artifact" d="M1096 325 H1332 Q1342 325 1342 335 V393" marker-end="url(#trace-arrow)"></path>
+              <path class="trace-path trace-next-voter" data-path-key="challenger-agree" d="M1096 450 H1168" marker-end="url(#trace-arrow)"></path>
               <path class="trace-path trace-yes-path" data-path-key="pair-artifact" d="M1248 450 H1266 Q1276 450 1276 440 V414 Q1276 404 1286 404 H1331" marker-end="url(#trace-arrow)"></path>
               <text class="trace-branch-label trace-yes-label" x="1286" y="431">YES</text>
-              <path class="trace-path trace-no-path" data-path-key="pair-tie_break" d="M1208 490 V520 Q1208 530 1198 530 H190 Q180 530 180 540 V565 Q180 575 190 575 H220" marker-end="url(#trace-arrow)"></path>
-              <text class="trace-branch-label trace-no-label" x="1180" y="514">NO</text>
-              <path class="trace-path trace-tie-path" data-path-key="tie_break-artifact" d="M1106 575 H1332 Q1342 575 1342 565 V415" marker-end="url(#trace-arrow)"></path>
+              <path class="trace-path trace-no-path" data-path-key="pair-tie_break" d="M1208 490 V502 Q1208 512 1198 512 H190 Q180 512 180 522 V565 Q180 575 190 575 H220" marker-end="url(#trace-arrow)"></path>
+              <text class="trace-branch-label trace-no-label" x="1180" y="506">NO</text>
+              <path class="trace-path trace-tie-path" data-path-key="tie_break-artifact" d="M1096 575 H1332 Q1342 575 1342 565 V415" marker-end="url(#trace-arrow)"></path>
               <path class="trace-path trace-hold-path" data-path-key="pair-hold" d="M1208 490 V494 Q1208 504 1218 504 H1448" marker-end="url(#trace-arrow)"></path>
-              <path class="trace-path trace-hold-path" data-path-key="tie_break-hold" d="M1106 575 H1408 Q1418 575 1418 565 V514 Q1418 504 1428 504 H1448" marker-end="url(#trace-arrow)"></path>
-              <path class="trace-path" data-path-key="artifact-decision" d="M1353 404 H1449" marker-end="url(#trace-arrow)"></path>
-              <path class="trace-path trace-hold-path" data-path-key="artifact-hold" d="M1460 415 V492" marker-end="url(#trace-arrow)"></path>
-              <text class="trace-branch-label trace-seal-label" data-seal-label="true" x="1448" y="462">SEAL FAILED</text>
+              <path class="trace-path trace-hold-path" data-path-key="tie_break-hold" d="M1096 575 H1408 Q1418 575 1418 565 V514 Q1418 504 1428 504 H1448" marker-end="url(#trace-arrow)"></path>
+              <path class="trace-path" data-path-key="artifact-seal" d="M1342 404 H1369" marker-end="url(#trace-arrow)"></path>
+              <path class="trace-path trace-yes-path" data-path-key="seal-decision" d="M1433 404 H1449" marker-end="url(#trace-arrow)"></path>
+              <text class="trace-branch-label trace-yes-label trace-seal-branch" data-seal-yes-label="true" x="1438" y="425">YES</text>
+              <path class="trace-path trace-no-path trace-hold-path" data-path-key="seal-hold" d="M1401 434 V482 Q1401 492 1411 492 H1460" marker-end="url(#trace-arrow)"></path>
+              <text class="trace-branch-label trace-no-label trace-seal-branch" data-seal-no-label="true" x="1412" y="474">NO</text>
 
               <g class="decision-lane" data-decision-lane="primary" transform="translate(0 325)">
                 <text class="decision-role" data-lane-label="primary" x="36" y="-6">Primary</text>
                 <text class="decision-sublabel" x="36" y="12">LOCAL DECISION</text>
                 <text class="decision-think" data-lane-think="primary" x="36" y="28">—</text>
+                <path class="trace-path trace-lane-rail" data-lane-path="trigger-load" d="M230 0 H374" marker-end="url(#trace-arrow)"></path>
+                <path class="trace-path trace-lane-rail" data-lane-path="load-context" d="M384 0 H555" marker-end="url(#trace-arrow)"></path>
+                <path class="trace-path trace-lane-rail" data-lane-path="context-generate" d="M565 0 H733" marker-end="url(#trace-arrow)"></path>
+                <path class="trace-path trace-lane-rail" data-lane-path="generate-validate" d="M743 0 H900" marker-end="url(#trace-arrow)"></path>
+                <path class="trace-path trace-lane-rail" data-lane-path="validate-vote" d="M910 0 H1086" marker-end="url(#trace-arrow)"></path>
+                <path class="trace-path trace-repair-loop" data-repair-lane="primary" d="M743 10 V30 Q743 40 753 40 H900 Q910 40 910 30 V10" marker-start="url(#trace-arrow)" marker-end="url(#trace-arrow)"></path>
                 <g class="decision-lane-steps" aria-label="Primary milestones">
                   <g class="decision-lane-step" data-decision-lane-step="trigger" transform="translate(230)"><circle r="10"></circle><text y="-17">Trigger</text></g>
                   <g class="decision-lane-step" data-decision-lane-step="load" transform="translate(384)"><circle r="10"></circle><text y="-17">Load</text></g>
@@ -209,12 +212,6 @@
                   <g class="decision-lane-step" data-decision-lane-step="validate" transform="translate(910)"><circle r="10"></circle><text y="-17">Validate</text></g>
                   <g class="decision-lane-step" data-decision-lane-step="vote" transform="translate(1096)"><circle r="10"></circle><text y="-17">Vote</text></g>
                 </g>
-                <path class="trace-path trace-lane-rail" data-lane-path="trigger-load" d="M240 0 H374" marker-end="url(#trace-arrow)"></path>
-                <path class="trace-path trace-lane-rail" data-lane-path="load-context" d="M394 0 H555" marker-end="url(#trace-arrow)"></path>
-                <path class="trace-path trace-lane-rail" data-lane-path="context-generate" d="M575 0 H733" marker-end="url(#trace-arrow)"></path>
-                <path class="trace-path trace-lane-rail" data-lane-path="generate-validate" d="M753 0 H900" marker-end="url(#trace-arrow)"></path>
-                <path class="trace-path trace-lane-rail" data-lane-path="validate-vote" d="M920 0 H1086" marker-end="url(#trace-arrow)"></path>
-                <path class="trace-path trace-repair-loop" data-repair-lane="primary" d="M743 12 V30 Q743 40 753 40 H900 Q910 40 910 30 V12" marker-start="url(#trace-arrow)" marker-end="url(#trace-arrow)"></path>
                 <circle class="trace-repair-badge" data-repair-badge="primary" cx="826" cy="28" r="9"></circle>
                 <text class="trace-repair-number" data-repair-number="primary" x="826" y="32">1</text>
                 <text class="trace-repair-count" data-repair-count="primary" x="826" y="56">REPAIR JSON</text>
@@ -225,6 +222,12 @@
                 <text class="decision-role" data-lane-label="challenger" x="36" y="-6">Challenger</text>
                 <text class="decision-sublabel" x="36" y="12">CHALLENGE PATH</text>
                 <text class="decision-think" data-lane-think="challenger" x="36" y="28">—</text>
+                <path class="trace-path trace-lane-rail" data-lane-path="trigger-load" d="M230 0 H374" marker-end="url(#trace-arrow)"></path>
+                <path class="trace-path trace-lane-rail" data-lane-path="load-context" d="M384 0 H555" marker-end="url(#trace-arrow)"></path>
+                <path class="trace-path trace-lane-rail" data-lane-path="context-generate" d="M565 0 H733" marker-end="url(#trace-arrow)"></path>
+                <path class="trace-path trace-lane-rail" data-lane-path="generate-validate" d="M743 0 H900" marker-end="url(#trace-arrow)"></path>
+                <path class="trace-path trace-lane-rail" data-lane-path="validate-vote" d="M910 0 H1086" marker-end="url(#trace-arrow)"></path>
+                <path class="trace-path trace-repair-loop" data-repair-lane="challenger" d="M743 10 V30 Q743 40 753 40 H900 Q910 40 910 30 V10" marker-start="url(#trace-arrow)" marker-end="url(#trace-arrow)"></path>
                 <g class="decision-lane-steps" aria-label="Challenger milestones">
                   <g class="decision-lane-step" data-decision-lane-step="trigger" transform="translate(230)"><circle r="10"></circle><text y="-17">Trigger</text></g>
                   <g class="decision-lane-step" data-decision-lane-step="load" transform="translate(384)"><circle r="10"></circle><text y="-17">Load</text></g>
@@ -233,12 +236,6 @@
                   <g class="decision-lane-step" data-decision-lane-step="validate" transform="translate(910)"><circle r="10"></circle><text y="-17">Validate</text></g>
                   <g class="decision-lane-step" data-decision-lane-step="vote" transform="translate(1096)"><circle r="10"></circle><text y="-17">Vote</text></g>
                 </g>
-                <path class="trace-path trace-lane-rail" data-lane-path="trigger-load" d="M240 0 H374" marker-end="url(#trace-arrow)"></path>
-                <path class="trace-path trace-lane-rail" data-lane-path="load-context" d="M394 0 H555" marker-end="url(#trace-arrow)"></path>
-                <path class="trace-path trace-lane-rail" data-lane-path="context-generate" d="M575 0 H733" marker-end="url(#trace-arrow)"></path>
-                <path class="trace-path trace-lane-rail" data-lane-path="generate-validate" d="M753 0 H900" marker-end="url(#trace-arrow)"></path>
-                <path class="trace-path trace-lane-rail" data-lane-path="validate-vote" d="M920 0 H1086" marker-end="url(#trace-arrow)"></path>
-                <path class="trace-path trace-repair-loop" data-repair-lane="challenger" d="M743 12 V30 Q743 40 753 40 H900 Q910 40 910 30 V12" marker-start="url(#trace-arrow)" marker-end="url(#trace-arrow)"></path>
                 <circle class="trace-repair-badge" data-repair-badge="challenger" cx="826" cy="28" r="9"></circle>
                 <text class="trace-repair-number" data-repair-number="challenger" x="826" y="32">1</text>
                 <text class="trace-repair-count" data-repair-count="challenger" x="826" y="56">REPAIR JSON</text>
@@ -249,6 +246,12 @@
                 <text class="decision-role" data-lane-label="tie_break" x="36" y="-6">Tie-break</text>
                 <text class="decision-sublabel" x="36" y="12">STANDBY</text>
                 <text class="decision-think" data-lane-think="tie_break" x="36" y="28">—</text>
+                <path class="trace-path trace-lane-rail" data-lane-path="trigger-load" d="M230 0 H374" marker-end="url(#trace-arrow)"></path>
+                <path class="trace-path trace-lane-rail" data-lane-path="load-context" d="M384 0 H555" marker-end="url(#trace-arrow)"></path>
+                <path class="trace-path trace-lane-rail" data-lane-path="context-generate" d="M565 0 H733" marker-end="url(#trace-arrow)"></path>
+                <path class="trace-path trace-lane-rail" data-lane-path="generate-validate" d="M743 0 H900" marker-end="url(#trace-arrow)"></path>
+                <path class="trace-path trace-lane-rail" data-lane-path="validate-vote" d="M910 0 H1086" marker-end="url(#trace-arrow)"></path>
+                <path class="trace-path trace-repair-loop" data-repair-lane="tie_break" d="M743 10 V30 Q743 40 753 40 H900 Q910 40 910 30 V10" marker-start="url(#trace-arrow)" marker-end="url(#trace-arrow)"></path>
                 <g class="decision-lane-steps" aria-label="Tie-break milestones">
                   <g class="decision-lane-step" data-decision-lane-step="trigger" transform="translate(230)"><circle r="10"></circle><text y="-17">Trigger</text></g>
                   <g class="decision-lane-step" data-decision-lane-step="load" transform="translate(384)"><circle r="10"></circle><text y="-17">Load</text></g>
@@ -257,12 +260,6 @@
                   <g class="decision-lane-step" data-decision-lane-step="validate" transform="translate(910)"><circle r="10"></circle><text y="-17">Validate</text></g>
                   <g class="decision-lane-step" data-decision-lane-step="vote" transform="translate(1096)"><circle r="10"></circle><text y="-17">Vote</text></g>
                 </g>
-                <path class="trace-path trace-lane-rail" data-lane-path="trigger-load" d="M240 0 H374" marker-end="url(#trace-arrow)"></path>
-                <path class="trace-path trace-lane-rail" data-lane-path="load-context" d="M394 0 H555" marker-end="url(#trace-arrow)"></path>
-                <path class="trace-path trace-lane-rail" data-lane-path="context-generate" d="M575 0 H733" marker-end="url(#trace-arrow)"></path>
-                <path class="trace-path trace-lane-rail" data-lane-path="generate-validate" d="M753 0 H900" marker-end="url(#trace-arrow)"></path>
-                <path class="trace-path trace-lane-rail" data-lane-path="validate-vote" d="M920 0 H1086" marker-end="url(#trace-arrow)"></path>
-                <path class="trace-path trace-repair-loop" data-repair-lane="tie_break" d="M743 12 V30 Q743 40 753 40 H900 Q910 40 910 30 V12" marker-start="url(#trace-arrow)" marker-end="url(#trace-arrow)"></path>
                 <circle class="trace-repair-badge" data-repair-badge="tie_break" cx="826" cy="28" r="9"></circle>
                 <text class="trace-repair-number" data-repair-number="tie_break" x="826" y="32">1</text>
                 <text class="trace-repair-count" data-repair-count="tie_break" x="826" y="56">REPAIR JSON</text>
@@ -270,7 +267,8 @@
               </g>
 
               <g class="trace-diamond trace-agree" data-trace-key="agree"><path d="M1208 410 1248 450 1208 490 1168 450Z"></path><text x="1208" y="454">Agree?</text></g>
-              <g class="trace-node trace-shared-node" data-trace-key="artifact" transform="translate(1342 404)"><circle r="11"></circle><text class="trace-artifact-label" x="16" y="-18" text-anchor="start">Artifact</text></g>
+              <g class="trace-node trace-shared-node" data-trace-key="artifact" transform="translate(1342 404)"><circle r="11"></circle><text class="trace-artifact-label" x="-16" y="-18" text-anchor="end">Artifact</text></g>
+              <g class="trace-diamond trace-seal-gate" data-trace-key="seal"><path d="M1401 374 1433 404 1401 434 1369 404Z"></path><text x="1401" y="407">SEAL OK?</text></g>
               <g class="trace-node trace-shared-node" data-trace-key="decision" transform="translate(1460 404)"><circle r="11"></circle><text y="-22">Decision</text></g>
               <g class="trace-node trace-hold-node" data-trace-key="hold" transform="translate(1460 504)"><circle r="12"></circle><text class="trace-hold-title" y="32">Hold</text><text class="trace-hold-reason" data-hold-reason="true" y="50">No safe quorum</text></g>
             </g>

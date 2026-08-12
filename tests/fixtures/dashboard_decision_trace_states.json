@@ -25,9 +25,10 @@
       "pair-artifact",
       "pair-tie-break",
       "tie-break-artifact",
-      "artifact-decision",
+      "artifact-seal",
+      "seal-decision",
       "no-safe-quorum-hold",
-      "seal-failed-hold"
+      "seal-hold"
     ]
   },
   "cases": [

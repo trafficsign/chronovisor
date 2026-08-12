@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import struct
+import subprocess
 from html.parser import HTMLParser
 from pathlib import Path
 
@@ -39,6 +40,13 @@ def test_dashboard_reference_contract_and_state_matrix() -> None:
     assert contract["topology"]["artifact_nodes"] == 1
     assert contract["topology"]["decision_nodes"] == 1
     assert contract["topology"]["dynamic_paths"] == ["processing-entry"]
+    assert contract["topology"]["fixed_paths"][-5:] == [
+        "tie-break-artifact",
+        "artifact-seal",
+        "seal-decision",
+        "no-safe-quorum-hold",
+        "seal-hold",
+    ]
 
     assert cases["A"]["active_lane"] == "primary"
     assert cases["B"]["active_lane"] == "challenger"
@@ -81,6 +89,7 @@ def test_dashboard_reference_svg_has_one_fixed_safe_topology() -> None:
     assert matching("id", "decision-trace-harness")[0]["height"] == "607"
 
     assert len(matching("data-trace-key", "artifact")) == 1
+    assert len(matching("data-trace-key", "seal")) == 1
     assert len(matching("data-trace-key", "decision")) == 1
     assert len(matching("data-trace-key", "hold")) == 1
     assert [
@@ -106,7 +115,8 @@ def test_dashboard_reference_svg_has_one_fixed_safe_topology() -> None:
         "challenger": "translate(0 450)",
         "tie_break": "translate(0 575)",
     }
-    assert len(matching("data-seal-label", "true")) == 1
+    assert len(matching("data-seal-yes-label", "true")) == 1
+    assert len(matching("data-seal-no-label", "true")) == 1
 
     paths = {
         attrs["data-path-key"]: attrs.get("d")
@@ -120,15 +130,16 @@ def test_dashboard_reference_svg_has_one_fixed_safe_topology() -> None:
         "tie_break-artifact",
         "pair-hold",
         "tie_break-hold",
-        "artifact-decision",
-        "artifact-hold",
+        "artifact-seal",
+        "seal-decision",
+        "seal-hold",
     }.issubset(paths)
     assert all(paths[key] for key in paths)
     assert paths["pair-artifact"] != paths["tie_break-artifact"]
-    assert paths["artifact-hold"] == "M1460 415 V492"
+    assert paths["seal-hold"] == "M1401 434 V482 Q1401 492 1411 492 H1460"
     assert paths["pair-hold"] == "M1208 490 V494 Q1208 504 1218 504 H1448"
     assert paths["tie_break-hold"] == (
-        "M1106 575 H1408 Q1418 575 1418 565 "
+        "M1096 575 H1408 Q1418 575 1418 565 "
         "V514 Q1418 504 1428 504 H1448"
     )
     assert any(
@@ -138,33 +149,35 @@ def test_dashboard_reference_svg_has_one_fixed_safe_topology() -> None:
     context_generate_rails = matching("data-lane-path", "context-generate")
     assert len(context_generate_rails) == 3
     assert all(
-        attrs.get("d") == "M575 0 H733"
+        attrs.get("d") == "M565 0 H733"
         and attrs.get("marker-end") == "url(#trace-arrow)"
         for attrs in context_generate_rails
     )
 
     expected_boundary_paths = {
-        "packet-preflight": "M105 10 H289",
-        "preflight-execution_plan": "M307 10 H501",
+        "packet-preflight": "M96 10 H289",
+        "preflight-execution_plan": "M298 10 H501",
         "plan-dispatch": (
             "M1380 164 H1466 Q1476 164 1476 174 V265 Q1476 275 1466 275 "
             "H190 Q180 275 180 285 V315 Q180 325 190 325 H220"
         ),
         "primary-challenger": (
-            "M1096 335 V377 Q1096 387 1086 387 H190 Q180 387 180 397 "
+            "M1096 325 V377 Q1096 387 1086 387 H190 Q180 387 180 397 "
             "V440 Q180 450 190 450 H220"
         ),
-        "single-artifact": "M1106 325 H1332 Q1342 325 1342 335 V393",
-        "challenger-agree": "M1106 450 H1168",
+        "single-artifact": "M1096 325 H1332 Q1342 325 1342 335 V393",
+        "challenger-agree": "M1096 450 H1168",
         "pair-artifact": (
             "M1248 450 H1266 Q1276 450 1276 440 V414 Q1276 404 1286 404 H1331"
         ),
         "pair-tie_break": (
-            "M1208 490 V520 Q1208 530 1198 530 "
-            "H190 Q180 530 180 540 V565 Q180 575 190 575 H220"
+            "M1208 490 V502 Q1208 512 1198 512 "
+            "H190 Q180 512 180 522 V565 Q180 575 190 575 H220"
         ),
-        "tie_break-artifact": "M1106 575 H1332 Q1342 575 1342 565 V415",
-        "artifact-decision": "M1353 404 H1449",
+        "tie_break-artifact": "M1096 575 H1332 Q1342 575 1342 565 V415",
+        "artifact-seal": "M1342 404 H1369",
+        "seal-decision": "M1433 404 H1449",
+        "seal-hold": "M1401 434 V482 Q1401 492 1411 492 H1460",
     }
     assert {key: paths[key] for key in expected_boundary_paths} == (
         expected_boundary_paths
@@ -177,7 +190,7 @@ def test_dashboard_reference_svg_has_one_fixed_safe_topology() -> None:
     ]
     assert len(repair_paths) == 3
     assert all(
-        attrs.get("d") == "M743 12 V30 Q743 40 753 40 H900 Q910 40 910 30 V12"
+        attrs.get("d") == "M743 10 V30 Q743 40 753 40 H900 Q910 40 910 30 V10"
         and attrs.get("marker-start") == "url(#trace-arrow)"
         and attrs.get("marker-end") == "url(#trace-arrow)"
         for attrs in repair_paths
@@ -188,13 +201,10 @@ def test_dashboard_reference_svg_has_one_fixed_safe_topology() -> None:
         for tag, attrs in elements
         if tag == "path" and attrs.get("class") == "trace-reasoning-guide"
     ]
-    assert len(reasoning_guides) == 3
+    assert len(reasoning_guides) == 1
     assert [attrs.get("d") for attrs in reasoning_guides] == [
-        "M858 164 H882 Q892 164 892 154 V116 Q892 106 902 106 "
-        "H1245 Q1255 106 1255 116 V154 Q1255 164 1265 164 H1270",
-        "M858 164 H1270",
-        "M858 164 H882 Q892 164 892 174 V212 Q892 222 902 222 "
-        "H1245 Q1255 222 1255 212 V174 Q1255 164 1265 164 H1270",
+        "M858 164 H1270 M892 164 V106 H1255 V164 M892 222 V164 "
+        "M892 222 H1255 M1255 222 V164",
     ]
     assert [
         (attrs.get("data-reasoning-output"), attrs.get("marker-end"))
@@ -232,53 +242,47 @@ def test_dashboard_reference_svg_has_one_fixed_safe_topology() -> None:
     assert matching("data-plan-value", "fit")[0]["y"] == "174"
     assert matching("data-plan-fit-pass", "true")[0]["y"] == "190"
     assert matching("class", "trace-branch-node-label")[0]["x"] == "16"
-    assert matching("class", "trace-artifact-label")[0]["x"] == "16"
-    assert matching("class", "trace-artifact-label")[0]["text-anchor"] == "start"
+    assert matching("class", "trace-artifact-label")[0]["x"] == "-16"
+    assert matching("class", "trace-artifact-label")[0]["text-anchor"] == "end"
     assert [
         attrs.get("y")
         for _tag, attrs in elements
         if attrs.get("class") == "trace-path-label"
     ] == ["271", "381"]
     assert matching("class", "trace-branch-label trace-yes-label")[0]["y"] == "431"
-    assert matching("class", "trace-branch-label trace-no-label")[0]["y"] == "514"
-    assert matching("data-seal-label", "true")[0]["x"] == "1448"
+    assert matching("class", "trace-branch-label trace-no-label")[0]["y"] == "506"
+    assert matching("data-seal-yes-label", "true")[0]["x"] == "1438"
+    assert matching("data-seal-no-label", "true")[0]["x"] == "1412"
     assert paths["plan-context"] == (
-        "M470 174 V204 Q470 214 480 214 H724 Q734 214 734 204 V174"
+        "M442 164 V204 Q442 214 452 214 H724 Q734 214 734 204 V164"
     )
-    context_guides = {
-        attrs["data-context-guide"]: attrs
+    context_guides = [
+        attrs
         for tag, attrs in elements
         if tag == "path" and attrs.get("data-context-guide")
-    }
-    assert {key: attrs.get("d") for key, attrs in context_guides.items()} == {
-        "32768": (
-            "M510 19 V76 Q510 86 500 86 H352 Q342 86 342 96 V155 "
-            "M342 174 V204 Q342 214 352 214 H724 Q734 214 734 204 V174 "
-            "Q734 164 744 164 H766"
-        ),
-        "65536": (
-            "M510 19 V76 Q510 86 500 86 H480 Q470 86 470 96 V155 "
-            "M470 174 V204 Q470 214 480 214 H724 Q734 214 734 204 V174 "
-            "Q734 164 744 164 H766"
-        ),
-        "98304": (
-            "M510 19 V76 Q510 86 520 86 H545 Q555 86 555 96 V155 "
-            "M555 174 V204 Q555 214 565 214 H724 Q734 214 734 204 V174 "
-            "Q734 164 744 164 H766"
-        ),
-        "131072": (
-            "M510 19 V76 Q510 86 520 86 H632 Q642 86 642 96 V155 "
-            "M642 174 V204 Q642 214 652 214 H724 Q734 214 734 204 V174 "
-            "Q734 164 744 164 H766"
-        ),
-    }
-    assert all(attrs.get("marker-end") is None for attrs in context_guides.values())
+    ]
+    assert len(context_guides) == 1
+    assert context_guides[0]["data-context-guide"] == "all"
+    assert context_guides[0]["d"] == (
+        "M510 19 V86 M342 86 H642 M342 86 V164 M442 86 V164 "
+        "M542 86 V164 M642 86 V164 M342 164 V214 M442 164 V214 "
+        "M542 164 V214 M642 164 V214 M342 214 H734 M734 214 V164 H766"
+    )
+    assert context_guides[0].get("marker-end") is None
     assert not matching("class", "trace-context-rail")
     assert len(matching("class", "trace-label-backdrop trace-context-kicker-backdrop")) == 1
     assert all(
         attrs.get("x") == "15" and attrs.get("y") == "27"
         for attrs in matching("data-context-label", "true")
     )
+    assert [
+        attrs.get("transform") for attrs in matching("data-context-option", "true")
+    ] == [
+        "translate(342 164)",
+        "translate(442 164)",
+        "translate(542 164)",
+        "translate(642 164)",
+    ]
     assert matching("data-plan-value", "context-selection")[0]["y"] == "239"
 
 
@@ -295,13 +299,13 @@ def test_dashboard_reference_keeps_selection_and_bucket_truth() -> None:
     ] == ["32768", "65536", "98304", "131072"]
     assert '<p id="work-summary">Waiting · 0 / 3</p>' in page
     assert (
-        page.index('data-context-guide="131072"')
+        page.index('data-context-guide="all"')
         < page.index('data-path-key="execution-plan-context"')
         < page.index("trace-context-kicker-backdrop")
         < page.index(">CONTEXT WINDOW<")
     )
     assert (
-        page.index('data-context-guide="131072"')
+        page.index('data-context-guide="all"')
         < page.index('data-path-key="plan-context"')
         < page.index('data-plan-value="context-selection"')
     )
@@ -309,10 +313,12 @@ def test_dashboard_reference_keeps_selection_and_bucket_truth() -> None:
         '.processing-lane[aria-expanded="false"] .processing-track {\n'
         "  visibility: hidden;"
     ) in style
-    assert (
-        ".decision-trace-harness .trace-repair-loop.pending {\n"
-        "  opacity: 0.66;"
-    ) in style
+    pending_repair_style = style.split(
+        ".decision-trace-harness .trace-repair-loop.pending {", 1
+    )[1].split("}", 1)[0]
+    assert "stroke-dasharray: 4 5;" in pending_repair_style
+    assert "opacity: 0.66;" in pending_repair_style
+    assert "filter: none;" in pending_repair_style
     assert style.count("height: 1030px;") == 3
     assert style.count("height: 802px;") == 3
     assert style.count("height: 607px;") == 2
@@ -332,6 +338,7 @@ def test_dashboard_reference_keeps_selection_and_bucket_truth() -> None:
     assert ".decision-trace-harness .trace-hold-path.pending" not in style
     assert ".decision-trace-harness .skipped.trace-path" not in style
     assert ".decision-trace-harness .trace-tie-path.pending" not in style
+    assert ".decision-trace-harness .done .trace-path" not in style
     assert (
         ".decision-trace-harness .trace-context-guide,\n"
         ".decision-trace-harness .trace-reasoning-guide {\n"
@@ -388,6 +395,13 @@ def test_dashboard_reference_keeps_selection_and_bucket_truth() -> None:
         "  fill: #ffb340;"
     ) in style
     assert (
+        ".decision-trace-harness .trace-reasoning.selected [data-reasoning-label] {\n"
+        "  fill: #ffb340;"
+    ) in style
+    assert "filter: url(#trace-glow-violet);" in style.split(
+        ".decision-trace-harness .active.trace-node circle,", 1
+    )[1].split("}", 1)[0]
+    assert (
         ".decision-transition-bar:has(.decision-events[open]) {\n"
         "  flex-basis: auto;\n"
         "  align-items: start;\n"
@@ -421,10 +435,13 @@ def test_dashboard_reference_keeps_selection_and_bucket_truth() -> None:
     )[0]
     assert 'decision: decisionOverallState(overall, "decision")' in harness
     assert 'decision: noSafeQuorum ? "skipped"' not in harness
-    assert 'harness.querySelector("[data-seal-label]")' in harness
-    assert 'sealFailure ? "error" : "pending"' in harness
+    assert "decisionSealStates(" in harness
+    assert 'harness.querySelector("[data-seal-yes-label]")' in harness
+    assert 'harness.querySelector("[data-seal-no-label]")' in harness
     assert 'const artifactReached = traceState === "agreed" || sealFailure;' in harness
-    assert '["artifact-decision", traceState === "agreed" ? "done" : "pending"]' in harness
+    assert '["artifact-seal", sealStates.input]' in harness
+    assert '["seal-decision", sealStates.yes]' in harness
+    assert '["seal-hold", sealStates.no]' in harness
     assert '["challenger-agree", completedStepState("challenger", "vote")]' in harness
     assert 'const fitState = reasoningSelected ? planState : "pending";' in harness
     assert '["context-generate", "generate"]' in harness
@@ -433,5 +450,93 @@ def test_dashboard_reference_keeps_selection_and_bucket_truth() -> None:
     assert 'getComputedStyle(source, "::before")' in renderer
     assert "const y2 = targetBox.top - panelBox.top;" in renderer
     assert "Math.floor(tokens / 1000)" in renderer
+    assert '`M${contextX} 164 V204 Q${contextX} 214 ${contextX + 10} 214 `' in harness
+    assert '+ "H724 Q734 214 734 204 V164"' in harness
     assert 'data-reasoning-output="${mode}"' in harness
     assert 'node.classList.toggle("selected", value === selectedContextValue);' in harness
+    assert 'node.classList.toggle("selected", node.dataset.reasoningKey === actualThink);' in harness
+    assert "decisionRepairState(traceState, lane, repairs, focusEvent)" in harness
+
+
+def test_dashboard_reference_repair_state_is_event_backed_for_every_lane() -> None:
+    renderer = (ROOT / "src/chronovisor/dashboard_static/app-renderer.js").read_text(
+        encoding="utf-8"
+    )
+    helper = "function decisionRepairState" + renderer.split(
+        "function decisionRepairState", 1
+    )[1].split("function updateDecisionSvgHarness", 1)[0]
+    scenario = f"""
+const vm = require("node:vm");
+const sandbox = {{}};
+vm.createContext(sandbox);
+vm.runInContext({json.dumps(helper)} + "\\nthis.repairState = decisionRepairState;", sandbox);
+const states = Object.fromEntries(["primary", "challenger", "tie_break"].map((key) => [key, [
+  sandbox.repairState("active", {{ key, phase: "validate" }}, [], null),
+  sandbox.repairState("active", {{ key, phase: "repair" }}, [{{ phase: "repair" }}], null),
+  sandbox.repairState("agreed", {{ key, phase: "vote" }}, [{{ phase: "repair" }}], null),
+]]));
+process.stdout.write(JSON.stringify(states));
+"""
+    completed = subprocess.run(
+        ["node", "-"],
+        input=scenario,
+        check=True,
+        capture_output=True,
+        encoding="utf-8",
+    )
+
+    assert json.loads(completed.stdout) == {
+        lane: ["pending", "active", "done"]
+        for lane in ("primary", "challenger", "tie_break")
+    }
+
+
+def test_dashboard_reference_seal_paths_follow_success_failure_and_no_quorum() -> None:
+    renderer = (ROOT / "src/chronovisor/dashboard_static/app-renderer.js").read_text(
+        encoding="utf-8"
+    )
+    helper = "function decisionSealStates" + renderer.split(
+        "function decisionSealStates", 1
+    )[1].split("function updateDecisionSvgHarness", 1)[0]
+    scenario = f"""
+const vm = require("node:vm");
+const sandbox = {{}};
+vm.createContext(sandbox);
+vm.runInContext({json.dumps(helper)} + "\\nthis.sealStates = decisionSealStates;", sandbox);
+process.stdout.write(JSON.stringify({{
+  success: sandbox.sealStates("agreed", "done", false, false),
+  failure: sandbox.sealStates("quarantined", "error", true, false),
+  noQuorum: sandbox.sealStates("quarantined", "skipped", false, true),
+}}));
+"""
+    completed = subprocess.run(
+        ["node", "-"],
+        input=scenario,
+        check=True,
+        capture_output=True,
+        encoding="utf-8",
+    )
+
+    assert json.loads(completed.stdout) == {
+        "success": {
+            "gate": "done",
+            "input": "done",
+            "yes": "done",
+            "no": "pending",
+            "artifact": "done",
+        },
+        "failure": {
+            "gate": "error",
+            "input": "error",
+            "yes": "pending",
+            "no": "error",
+            "artifact": "error",
+        },
+        "noQuorum": {
+            "gate": "pending",
+            "input": "pending",
+            "yes": "pending",
+            "no": "pending",
+            "artifact": "skipped",
+        },
+    }

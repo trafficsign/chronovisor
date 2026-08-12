@@ -486,6 +486,25 @@ function decisionOverallState(overall, key, fallback = "pending") {
   return fmt(overall.get(key)?.status, fallback);
 }
 
+function decisionRepairState(traceState, lane, repairs, focusEvent) {
+  if (!repairs.length) return "pending";
+  return (focusEvent?.lane === lane.key && focusEvent.phase === "repair")
+      || (traceState === "active" && lane.phase === "repair")
+    ? "active"
+    : "done";
+}
+
+function decisionSealStates(traceState, artifactPayloadState, sealFailure, noSafeQuorum) {
+  const reached = traceState === "agreed" || sealFailure;
+  return {
+    gate: sealFailure ? "error" : reached ? "done" : "pending",
+    input: reached ? artifactPayloadState : "pending",
+    yes: traceState === "agreed" ? "done" : "pending",
+    no: sealFailure ? "error" : "pending",
+    artifact: sealFailure ? "error" : noSafeQuorum ? "skipped" : artifactPayloadState,
+  };
+}
+
 function updateDecisionSvgHarness(trace, focusEvent = null) {
   const harness = els.decisionTraceHarness;
   if (!harness) return;
@@ -503,6 +522,9 @@ function updateDecisionSvgHarness(trace, focusEvent = null) {
     || /seal/i.test(`${fmt(outcome.code, "")} ${fmt(outcome.reason, "")}`)
   );
   const noSafeQuorum = traceState === "quarantined" && !sealFailure;
+  const sealStates = decisionSealStates(
+    traceState, artifactPayloadState, sealFailure, noSafeQuorum
+  );
   const tieLane = lanes.get("tie_break") || {};
   const tieUsed = ["active", "done", "error"].includes(fmt(tieLane.state, "pending"));
   const artifactReached = traceState === "agreed" || sealFailure;
@@ -538,8 +560,9 @@ function updateDecisionSvgHarness(trace, focusEvent = null) {
     execution_plan: activePlanState,
     dispatch: traceState === "active" ? "pending" : planState,
     local_decision: decisionOverallState(overall, "quorum"),
-    artifact: sealFailure ? "error" : noSafeQuorum ? "skipped" : artifactPayloadState,
+    artifact: sealStates.artifact,
     decision: decisionOverallState(overall, "decision"),
+    seal: sealStates.gate,
     hold: traceState === "quarantined" ? "error" : "pending",
     agree: agreementState,
   };
@@ -573,14 +596,19 @@ function updateDecisionSvgHarness(trace, focusEvent = null) {
     ["tie_break-artifact", tieAgreement ? "done" : "pending"],
     ["pair-hold", noSafeQuorum && !tieUsed ? "error" : "pending"],
     ["tie_break-hold", noSafeQuorum && tieUsed ? "error" : "pending"],
-    ["artifact-decision", traceState === "agreed" ? "done" : "pending"],
-    ["artifact-hold", sealFailure ? "error" : "pending"],
+    ["artifact-seal", sealStates.input],
+    ["seal-decision", sealStates.yes],
+    ["seal-hold", sealStates.no],
   ].forEach(([key, state]) => setDecisionSvgState(
     harness.querySelector(`[data-path-key="${key}"]`),
     fmt(state, "pending")
   ));
   setDecisionSvgState(
-    harness.querySelector("[data-seal-label]"),
+    harness.querySelector("[data-seal-yes-label]"),
+    traceState === "agreed" ? "done" : "pending"
+  );
+  setDecisionSvgState(
+    harness.querySelector("[data-seal-no-label]"),
     sealFailure ? "error" : "pending"
   );
 
@@ -630,7 +658,7 @@ function updateDecisionSvgHarness(trace, focusEvent = null) {
   const selectedContextNode = contextOptions.find(
     (node) => Number(node.dataset.contextTokens) === selectedContextValue
   );
-  const contextX = selectedContextNode?.transform?.baseVal?.getItem(0)?.matrix?.e || 470;
+  const contextX = selectedContextNode?.transform?.baseVal?.getItem(0)?.matrix?.e || 442;
   const contextDirection = Math.sign(contextX - 510) || -1;
   const contextRadius = Math.min(10, Math.abs(contextX - 510) / 2);
   harness.querySelector("[data-path-key=\"execution-plan-context\"]")?.setAttribute(
@@ -640,8 +668,8 @@ function updateDecisionSvgHarness(trace, focusEvent = null) {
   );
   harness.querySelector("[data-path-key=\"plan-context\"]")?.setAttribute(
     "d",
-    `M${contextX} 174 V204 Q${contextX} 214 ${contextX + 10} 214 `
-      + "H724 Q734 214 734 204 V174"
+    `M${contextX} 164 V204 Q${contextX} 214 ${contextX + 10} 214 `
+      + "H724 Q734 214 734 204 V164"
   );
   setDecisionSvgState(harness.querySelector("[data-plan-key=\"headroom\"]"), milestoneStates.execution_plan);
   setDecisionSvgState(harness.querySelector("[data-plan-key=\"fit\"]"), fitState);
@@ -659,6 +687,7 @@ function updateDecisionSvgHarness(trace, focusEvent = null) {
       node,
       node.dataset.reasoningKey === actualThink ? fmt(activeLane?.state, "active") : "pending"
     );
+    node.classList.toggle("selected", node.dataset.reasoningKey === actualThink);
   });
   ["reasoning-low", "reasoning-medium", "reasoning-high"].forEach((key) => {
     const mode = key.slice("reasoning-".length);
@@ -705,9 +734,7 @@ function updateDecisionSvgHarness(trace, focusEvent = null) {
     const repairAttempt = repairs.length
       ? Math.max(1, ...repairs.map((event) => Number(event.attempt || 0)))
       : 0;
-    const repairState = repairs.length
-      ? focusEvent?.lane === key && focusEvent.phase === "repair" ? "active" : "done"
-      : "pending";
+    const repairState = decisionRepairState(traceState, lane, repairs, focusEvent);
     setDecisionSvgState(laneElement.querySelector(`[data-repair-lane="${key}"]`), repairState);
     setDecisionSvgText(`[data-repair-count="${key}"]`, "REPAIR JSON");
     setDecisionSvgText(`[data-repair-number="${key}"]`, String(repairAttempt));
