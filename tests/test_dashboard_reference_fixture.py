@@ -153,6 +153,13 @@ def test_dashboard_reference_svg_has_one_fixed_safe_topology() -> None:
         "challenger": "translate(0 450)",
         "tie_break": "translate(0 575)",
     }
+    primary_lane_markup = markup.split('data-decision-lane="primary"', 1)[1].split(
+        'data-decision-lane="challenger"', 1
+    )[0]
+    assert (
+        'data-decision-lane-step="vote" transform="translate(1096 35)"'
+        in primary_lane_markup
+    )
     assert len(matching("data-seal-yes-label", "true")) == 1
     assert len(matching("data-seal-no-label", "true")) == 1
     assert len(matching("data-pair-no-label", "true")) == 1
@@ -205,13 +212,10 @@ def test_dashboard_reference_svg_has_one_fixed_safe_topology() -> None:
             "H190 Q180 275 180 285 V315 Q180 325 190 325 H220"
         ),
         "primary-challenger": (
-            "M1096 335 V377 Q1096 387 1086 387 H190 Q180 387 180 397 "
+            "M1096 370 V377 Q1096 387 1086 387 H190 Q180 387 180 397 "
             "V440 Q180 450 190 450 H220"
         ),
-        "single-artifact": (
-            "M1096 335 C1096 345 1106 350 1106 360 Q1106 370 1116 370 "
-            "H1300 Q1310 370 1310 380 V393"
-        ),
+        "single-artifact": "M1106 360 H1300 Q1310 360 1310 370 V393",
         "challenger-agree": "M1106 450 H1168",
         "pair-tie_break": (
             "M1208 490 V502 Q1208 512 1198 512 "

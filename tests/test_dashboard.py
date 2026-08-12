@@ -2506,21 +2506,36 @@ def test_decision_trace_lane_rails_start_at_source_node_edges() -> None:
     ):
         assert f'data-path-key="{key}"' not in page
     assert 'data-trace-key="quorum"' in page
-    rails = {
+    common_rails = {
         "trigger-load": "M240 0 H374",
         "load-context": "M394 0 H555",
         "context-generate": "M575 0 H733",
         "generate-validate": "M753 0 H900",
-        "validate-vote": "M920 0 H1086",
     }
 
     for lane in ("primary", "challenger", "tie_break"):
+        rails = {
+            **common_rails,
+            "validate-vote": (
+                "M920 0 H1066 Q1076 0 1076 10 V25 Q1076 35 1086 35"
+                if lane == "primary"
+                else "M920 0 H1086"
+            ),
+        }
         lane_markup = page.split(f'data-decision-lane="{lane}"', 1)[1].split(
             '<g class="decision-lane-steps"', 1
         )[0]
         assert lane_markup.count("trace-lane-rail") == len(rails)
         for key, geometry in rails.items():
             assert f'data-lane-path="{key}" d="{geometry}"' in lane_markup
+
+    primary_markup = page.split('data-decision-lane="primary"', 1)[1].split(
+        'data-decision-lane="challenger"', 1
+    )[0]
+    assert (
+        'data-decision-lane-step="vote" transform="translate(1096 35)"'
+        in primary_markup
+    )
 
 
 def test_dashboard_reuses_decision_trace_poll_for_live_consensus_status() -> None:
