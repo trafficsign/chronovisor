@@ -123,6 +123,7 @@
               <filter id="trace-glow-violet" x="-100%" y="-100%" width="300%" height="300%"><feGaussianBlur stdDeviation="4" result="blur"></feGaussianBlur><feMerge><feMergeNode in="blur"></feMergeNode><feMergeNode in="SourceGraphic"></feMergeNode></feMerge></filter>
               <filter id="trace-glow-orange" x="-100%" y="-100%" width="300%" height="300%"><feGaussianBlur stdDeviation="3" result="blur"></feGaussianBlur><feMerge><feMergeNode in="blur"></feMergeNode><feMergeNode in="SourceGraphic"></feMergeNode></feMerge></filter>
               <radialGradient id="trace-active-core"><stop offset="0" stop-color="#8e91ff"></stop><stop offset="38%" stop-color="#8e91ff"></stop><stop offset="42%" stop-color="#061724"></stop><stop offset="100%" stop-color="#061724"></stop></radialGradient>
+              <radialGradient id="trace-processing-core"><stop offset="0" stop-color="#ff9d00"></stop><stop offset="38%" stop-color="#ff9d00"></stop><stop offset="42%" stop-color="#061724"></stop><stop offset="100%" stop-color="#061724"></stop></radialGradient>
               <marker id="trace-arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M1 1 7 4 1 7" fill="none" stroke="context-stroke" stroke-linecap="round" stroke-linejoin="round"></path></marker>
             </defs>
 
@@ -135,7 +136,6 @@
             </g>
 
             <g class="trace-plan" aria-label="Execution plan">
-              <rect class="trace-plan-frame" x="12" y="56" width="1476" height="209" rx="10"></rect>
               <text class="trace-section-title" x="38" y="84">EXECUTION PLAN</text>
               <text class="trace-kicker" x="62" y="112">MODEL ROUTES</text>
               <path class="trace-divider" d="M250 96 V214"></path>
@@ -143,21 +143,21 @@
               <g class="trace-model-route" data-model-key="challenger" transform="translate(68 171)"><circle r="5"></circle><text x="14" y="4">Challenger · <tspan data-model-value="challenger">--</tspan></text></g>
               <g class="trace-model-route" data-model-key="tie_break" transform="translate(68 201)"><circle r="5"></circle><text x="14" y="4">Tie-break · <tspan data-model-value="tie_break">--</tspan></text></g>
 
-              <path class="trace-context-guide" data-context-guide="32768" d="M510 19 V76 Q510 86 500 86 H352 Q342 86 342 96 V155 M342 174 V178 Q342 182 346 182 H362 Q370 182 370 190 V226 Q370 236 380 236 H724 Q734 236 734 226 V174 Q734 164 744 164 H766"></path>
-              <path class="trace-context-guide" data-context-guide="65536" d="M510 19 V76 Q510 86 500 86 H480 Q470 86 470 96 V155 M470 174 V178 Q470 182 474 182 H490 Q498 182 498 190 V226 Q498 236 508 236 H724 Q734 236 734 226 V174 Q734 164 744 164 H766"></path>
-              <path class="trace-context-guide" data-context-guide="98304" d="M510 19 V76 Q510 86 520 86 H545 Q555 86 555 96 V155 M555 174 V178 Q555 182 559 182 H575 Q583 182 583 190 V226 Q583 236 593 236 H724 Q734 236 734 226 V174 Q734 164 744 164 H766"></path>
-              <path class="trace-context-guide" data-context-guide="131072" d="M510 19 V76 Q510 86 520 86 H632 Q642 86 642 96 V155 M642 174 V178 Q642 182 646 182 H662 Q670 182 670 190 V226 Q670 236 680 236 H724 Q734 236 734 226 V174 Q734 164 744 164 H766"></path>
+              <path class="trace-context-guide" data-context-guide="32768" d="M510 19 V76 Q510 86 500 86 H352 Q342 86 342 96 V155 M342 174 V204 Q342 214 352 214 H724 Q734 214 734 204 V174 Q734 164 744 164 H766"></path>
+              <path class="trace-context-guide" data-context-guide="65536" d="M510 19 V76 Q510 86 500 86 H480 Q470 86 470 96 V155 M470 174 V204 Q470 214 480 214 H724 Q734 214 734 204 V174 Q734 164 744 164 H766"></path>
+              <path class="trace-context-guide" data-context-guide="98304" d="M510 19 V76 Q510 86 520 86 H545 Q555 86 555 96 V155 M555 174 V204 Q555 214 565 214 H724 Q734 214 734 204 V174 Q734 164 744 164 H766"></path>
+              <path class="trace-context-guide" data-context-guide="131072" d="M510 19 V76 Q510 86 520 86 H632 Q642 86 642 96 V155 M642 174 V204 Q642 214 652 214 H724 Q734 214 734 204 V174 Q734 164 744 164 H766"></path>
               <path class="trace-path" data-path-key="execution-plan-context" d="M510 19 V76 Q510 86 500 86 H480 Q470 86 470 96 V155" marker-end="url(#trace-arrow)"></path>
-              <path class="trace-path" data-path-key="plan-context" d="M470 174 V178 Q470 182 474 182 H490 Q498 182 498 190 V226 Q498 236 508 236 H724 Q734 236 734 226 V174"></path>
+              <path class="trace-path" data-path-key="plan-context" d="M470 174 V204 Q470 214 480 214 H724 Q734 214 734 204 V174"></path>
               <path class="trace-path" data-path-key="plan-headroom" d="M734 174 Q734 164 744 164 H766" marker-end="url(#trace-arrow)"></path>
               <rect class="trace-label-backdrop trace-context-kicker-backdrop" x="304" y="98" width="88" height="19" rx="3"></rect>
               <text class="trace-kicker" x="312" y="112">CONTEXT WINDOW</text>
-              <g class="trace-node trace-context-option" data-context-option="true" data-context-tokens="32768" transform="translate(342 164)"><circle r="9"></circle><text data-context-label="true" y="30">32K</text></g>
-              <g class="trace-node trace-context-option" data-context-option="true" data-plan-key="context" data-context-tokens="65536" transform="translate(470 164)"><circle r="10"></circle><text data-context-label="true" y="30">65K</text></g>
-              <g class="trace-node trace-context-option" data-context-option="true" data-context-tokens="98304" transform="translate(555 164)"><circle r="9"></circle><text data-context-label="true" y="30">98K</text></g>
-              <g class="trace-node trace-context-option" data-context-option="true" data-context-tokens="131072" transform="translate(642 164)"><circle r="9"></circle><text data-context-label="true" y="30">131K</text></g>
-              <rect class="trace-label-backdrop" x="382" y="207" width="332" height="20" rx="3"></rect>
-              <text class="trace-value" data-plan-value="context-selection" x="548" y="220" text-anchor="middle">required — → selected —</text>
+              <g class="trace-node trace-context-option" data-context-option="true" data-context-tokens="32768" transform="translate(342 164)"><circle r="9"></circle><text data-context-label="true" x="15" y="27">32K</text></g>
+              <g class="trace-node trace-context-option" data-context-option="true" data-plan-key="context" data-context-tokens="65536" transform="translate(470 164)"><circle r="10"></circle><text data-context-label="true" x="15" y="27">65K</text></g>
+              <g class="trace-node trace-context-option" data-context-option="true" data-context-tokens="98304" transform="translate(555 164)"><circle r="9"></circle><text data-context-label="true" x="15" y="27">98K</text></g>
+              <g class="trace-node trace-context-option" data-context-option="true" data-context-tokens="131072" transform="translate(642 164)"><circle r="9"></circle><text data-context-label="true" x="15" y="27">131K</text></g>
+              <rect class="trace-label-backdrop" x="382" y="226" width="332" height="20" rx="3"></rect>
+              <text class="trace-value" data-plan-value="context-selection" x="548" y="239" text-anchor="middle">required — → selected —</text>
 
               <g class="trace-diamond" data-plan-key="headroom"><path d="M812 118 858 164 812 210 766 164Z"></path><text x="812" y="160">Task +</text><text x="812" y="174">headroom</text></g>
 
@@ -176,7 +176,7 @@
               <g class="trace-reasoning" data-reasoning-key="high" transform="translate(912 222)"><circle r="9"></circle><circle class="trace-selected-core" r="3"></circle><text x="18" y="16">HIGH</text><text class="trace-reasoning-detail" x="18" y="34">tie-break · high impact · ample</text></g>
 
               <path class="trace-path" data-path-key="plan-fit" d="M1270 164 H1280" marker-end="url(#trace-arrow)"></path>
-              <g class="trace-diamond" data-plan-key="fit"><path d="M1330 118 1380 164 1330 210 1280 164Z"></path><text x="1330" y="151">FIT GATE</text><text data-plan-value="fit" x="1328" y="181">WAITING</text><text class="trace-pass" data-plan-fit-pass="true" x="1334" y="181">PASS</text></g>
+              <g class="trace-diamond" data-plan-key="fit"><path d="M1330 118 1380 164 1330 210 1280 164Z"></path><text x="1330" y="146">FIT GATE</text><text data-plan-value="fit" x="1330" y="174">WAITING</text><text class="trace-pass" data-plan-fit-pass="true" x="1330" y="190">PASS</text></g>
               <path class="trace-path" data-path-key="plan-dispatch" d="M1380 164 H1466 Q1476 164 1476 174 V265 Q1476 275 1466 275 H190 Q180 275 180 285 V315 Q180 325 190 325 H220" marker-end="url(#trace-arrow)"></path>
               <text class="trace-path-label" x="700" y="271" text-anchor="middle">DISPATCH → PRIMARY</text>
             </g>

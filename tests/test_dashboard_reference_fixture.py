@@ -96,6 +96,7 @@ def test_dashboard_reference_svg_has_one_fixed_safe_topology() -> None:
     assert len(matching("data-context-tokens", "65536")) == 1
     assert len(matching("data-context-tokens", "98304")) == 1
     assert len(matching("data-context-tokens", "131072")) == 1
+    assert not matching("class", "trace-plan-frame")
     assert {
         attrs["data-decision-lane"]: attrs.get("transform")
         for _tag, attrs in elements
@@ -133,6 +134,13 @@ def test_dashboard_reference_svg_has_one_fixed_safe_topology() -> None:
     assert any(
         tag == "path" and attrs.get("d") == "M1208 410 1248 450 1208 490 1168 450Z"
         for tag, attrs in elements
+    )
+    context_generate_rails = matching("data-lane-path", "context-generate")
+    assert len(context_generate_rails) == 3
+    assert all(
+        attrs.get("d") == "M575 0 H733"
+        and attrs.get("marker-end") == "url(#trace-arrow)"
+        for attrs in context_generate_rails
     )
 
     expected_boundary_paths = {
@@ -221,8 +229,8 @@ def test_dashboard_reference_svg_has_one_fixed_safe_topology() -> None:
         for tag, attrs in elements
         if tag == "text" and attrs.get("class") == "trace-reasoning-detail"
     )
-    assert matching("data-plan-value", "fit")[0]["y"] == "181"
-    assert matching("data-plan-fit-pass", "true")[0]["y"] == "181"
+    assert matching("data-plan-value", "fit")[0]["y"] == "174"
+    assert matching("data-plan-fit-pass", "true")[0]["y"] == "190"
     assert matching("class", "trace-branch-node-label")[0]["x"] == "16"
     assert matching("class", "trace-artifact-label")[0]["x"] == "16"
     assert matching("class", "trace-artifact-label")[0]["text-anchor"] == "start"
@@ -235,8 +243,7 @@ def test_dashboard_reference_svg_has_one_fixed_safe_topology() -> None:
     assert matching("class", "trace-branch-label trace-no-label")[0]["y"] == "514"
     assert matching("data-seal-label", "true")[0]["x"] == "1448"
     assert paths["plan-context"] == (
-        "M470 174 V178 Q470 182 474 182 H490 Q498 182 498 190 "
-        "V226 Q498 236 508 236 H724 Q734 236 734 226 V174"
+        "M470 174 V204 Q470 214 480 214 H724 Q734 214 734 204 V174"
     )
     context_guides = {
         attrs["data-context-guide"]: attrs
@@ -246,32 +253,33 @@ def test_dashboard_reference_svg_has_one_fixed_safe_topology() -> None:
     assert {key: attrs.get("d") for key, attrs in context_guides.items()} == {
         "32768": (
             "M510 19 V76 Q510 86 500 86 H352 Q342 86 342 96 V155 "
-            "M342 174 V178 Q342 182 346 182 H362 Q370 182 370 190 "
-            "V226 Q370 236 380 236 H724 Q734 236 734 226 V174 "
+            "M342 174 V204 Q342 214 352 214 H724 Q734 214 734 204 V174 "
             "Q734 164 744 164 H766"
         ),
         "65536": (
             "M510 19 V76 Q510 86 500 86 H480 Q470 86 470 96 V155 "
-            "M470 174 V178 Q470 182 474 182 H490 Q498 182 498 190 "
-            "V226 Q498 236 508 236 H724 Q734 236 734 226 V174 "
+            "M470 174 V204 Q470 214 480 214 H724 Q734 214 734 204 V174 "
             "Q734 164 744 164 H766"
         ),
         "98304": (
             "M510 19 V76 Q510 86 520 86 H545 Q555 86 555 96 V155 "
-            "M555 174 V178 Q555 182 559 182 H575 Q583 182 583 190 "
-            "V226 Q583 236 593 236 H724 Q734 236 734 226 V174 "
+            "M555 174 V204 Q555 214 565 214 H724 Q734 214 734 204 V174 "
             "Q734 164 744 164 H766"
         ),
         "131072": (
             "M510 19 V76 Q510 86 520 86 H632 Q642 86 642 96 V155 "
-            "M642 174 V178 Q642 182 646 182 H662 Q670 182 670 190 "
-            "V226 Q670 236 680 236 H724 Q734 236 734 226 V174 "
+            "M642 174 V204 Q642 214 652 214 H724 Q734 214 734 204 V174 "
             "Q734 164 744 164 H766"
         ),
     }
     assert all(attrs.get("marker-end") is None for attrs in context_guides.values())
     assert not matching("class", "trace-context-rail")
     assert len(matching("class", "trace-label-backdrop trace-context-kicker-backdrop")) == 1
+    assert all(
+        attrs.get("x") == "15" and attrs.get("y") == "27"
+        for attrs in matching("data-context-label", "true")
+    )
+    assert matching("data-plan-value", "context-selection")[0]["y"] == "239"
 
 
 def test_dashboard_reference_keeps_selection_and_bucket_truth() -> None:
@@ -303,8 +311,7 @@ def test_dashboard_reference_keeps_selection_and_bucket_truth() -> None:
     ) in style
     assert (
         ".decision-trace-harness .trace-repair-loop.pending {\n"
-        "  stroke-dasharray: 4 4;\n"
-        "  opacity: 0.18;"
+        "  opacity: 0.66;"
     ) in style
     assert style.count("height: 1030px;") == 3
     assert style.count("height: 802px;") == 3
@@ -315,23 +322,28 @@ def test_dashboard_reference_keeps_selection_and_bucket_truth() -> None:
         "  fill: url(#trace-active-core);\n"
         "  stroke: #9296ff;"
     ) in style
-    assert ".trace-shared-node.done circle" not in style
     assert (
-        ".decision-trace-harness .trace-single-path.pending,\n"
-        ".decision-trace-harness .trace-hold-path.pending,\n"
-        ".decision-trace-harness .trace-hold-node.pending {\n"
-        "  opacity: 0.18;"
+        ".decision-trace-harness .done.trace-shared-node circle,\n"
+        ".decision-trace-harness .trace-shared-node.done circle {\n"
+        "  fill: url(#trace-active-core);\n"
+        "  stroke: #9296ff;"
     ) in style
+    assert ".decision-trace-harness .trace-single-path.pending" not in style
+    assert ".decision-trace-harness .trace-hold-path.pending" not in style
+    assert ".decision-trace-harness .skipped.trace-path" not in style
+    assert ".decision-trace-harness .trace-tie-path.pending" not in style
     assert (
         ".decision-trace-harness .trace-context-guide,\n"
         ".decision-trace-harness .trace-reasoning-guide {\n"
         "  fill: none;\n"
-        "  stroke: #566470;"
+        "  stroke: #7d8992;"
     ) in style
     assert (
         '.decision-trace-harness .trace-diamond [data-plan-value="fit"] {'
-        "\n  text-anchor: end;"
-    ) in style
+        not in style
+    )
+    assert "headroom OK ·" not in renderer
+    assert '? "headroom OK"' in renderer
     active_path_style = style.split(
         ".decision-trace-harness .active.trace-path,", 1
     )[1].split("}", 1)[0]
@@ -345,10 +357,61 @@ def test_dashboard_reference_keeps_selection_and_bucket_truth() -> None:
         assert "stroke-dasharray: none;" in reached_path_style
     assert (
         ".decision-trace-harness .trace-path {\n"
+        "  stroke: #7d8992;\n"
         "  stroke-dasharray: 4 5;\n"
+        "  opacity: 0.66;\n"
         "}"
     ) in style
-    assert ".decision-trace-harness .trace-tie-path {" not in style
+    assert (
+        ".decision-trace-harness .decision-lane-step.active circle {\n"
+        "  fill: url(#trace-processing-core);\n"
+        "  stroke: #ff9d00;\n"
+        "  filter: url(#trace-glow-orange);"
+    ) in style
+    assert (
+        ".decision-trace-harness .trace-lane-rail.active {\n"
+        "  stroke: #ff8a00;\n"
+        "  filter: drop-shadow(0 0 3px rgba(255, 138, 0, 0.68));"
+    ) in style
+    active_rail_style = style.split(
+        ".decision-trace-harness .trace-lane-rail.active {", 1
+    )[1].split("}", 1)[0]
+    assert "filter: url(" not in active_rail_style
+    assert (
+        ".decision-trace-harness .decision-lane-step.active circle,\n"
+        "  .decision-trace-harness .trace-lane-rail.active {\n"
+        "    animation: none;"
+    ) in style
+    assert '<radialGradient id="trace-processing-core">' in page
+    assert (
+        ".decision-trace-harness .trace-context-option.selected [data-context-label] {\n"
+        "  fill: #ffb340;"
+    ) in style
+    assert (
+        ".decision-transition-bar:has(.decision-events[open]) {\n"
+        "  flex-basis: auto;\n"
+        "  align-items: start;\n"
+        "  min-height: 240px;\n"
+        "  padding-block: 15px;"
+    ) in style
+    assert (
+        ".decision-trace-panel:has(.decision-events[open]) {\n"
+        "  height: 930px;"
+    ) in style
+    event_feed_style = style.split(
+        ".decision-events .decision-transition-feed {", 1
+    )[1].split("}", 1)[0]
+    assert "position: absolute;" not in event_feed_style
+    assert "bottom:" not in event_feed_style
+    assert "margin-top: 8px;" in event_feed_style
+    assert (
+        ".decision-transition-bar:has(.decision-events[open]) {\n"
+        "    grid-template-columns: 1fr;"
+    ) in style
+    assert (
+        ".decision-events .decision-transition-feed {\n"
+        "    width: auto;"
+    ) in style
     frame = renderer.split("function renderDecisionTraceFrame", 1)[1].split(
         "function setDecisionTransitionState", 1
     )[0]
@@ -364,8 +427,11 @@ def test_dashboard_reference_keeps_selection_and_bucket_truth() -> None:
     assert '["artifact-decision", traceState === "agreed" ? "done" : "pending"]' in harness
     assert '["challenger-agree", completedStepState("challenger", "vote")]' in harness
     assert 'const fitState = reasoningSelected ? planState : "pending";' in harness
+    assert '["context-generate", "generate"]' in harness
+    assert "fmt(laneSteps.get(phase)?.status, \"pending\")" in harness
     assert 'querySelector("[data-trace-entry] circle")' in renderer
     assert 'getComputedStyle(source, "::before")' in renderer
     assert "const y2 = targetBox.top - panelBox.top;" in renderer
     assert "Math.floor(tokens / 1000)" in renderer
     assert 'data-reasoning-output="${mode}"' in harness
+    assert 'node.classList.toggle("selected", value === selectedContextValue);' in harness

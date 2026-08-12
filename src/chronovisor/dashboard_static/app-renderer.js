@@ -625,6 +625,7 @@ function updateDecisionSvgHarness(trace, focusEvent = null) {
       node,
       value === selectedContextValue ? milestoneStates.execution_plan : "pending"
     );
+    node.classList.toggle("selected", value === selectedContextValue);
   });
   const selectedContextNode = contextOptions.find(
     (node) => Number(node.dataset.contextTokens) === selectedContextValue
@@ -639,9 +640,8 @@ function updateDecisionSvgHarness(trace, focusEvent = null) {
   );
   harness.querySelector("[data-path-key=\"plan-context\"]")?.setAttribute(
     "d",
-    `M${contextX} 174 V178 Q${contextX} 182 ${contextX + 4} 182 `
-      + `H${contextX + 20} Q${contextX + 28} 182 ${contextX + 28} 190 `
-      + `V226 Q${contextX + 28} 236 ${contextX + 38} 236 H724 Q734 236 734 226 V174`
+    `M${contextX} 174 V204 Q${contextX} 214 ${contextX + 10} 214 `
+      + "H724 Q734 214 734 204 V174"
   );
   setDecisionSvgState(harness.querySelector("[data-plan-key=\"headroom\"]"), milestoneStates.execution_plan);
   setDecisionSvgState(harness.querySelector("[data-plan-key=\"fit\"]"), fitState);
@@ -649,7 +649,7 @@ function updateDecisionSvgHarness(trace, focusEvent = null) {
   setDecisionSvgText(
     "[data-plan-value=\"fit\"]",
     fitPassed
-      ? "headroom OK ·"
+      ? "headroom OK"
       : fitState === "active" ? "CHECKING" : "WAITING"
   );
   harness.querySelector("[data-plan-fit-pass]")?.classList.toggle("visible", fitPassed);
