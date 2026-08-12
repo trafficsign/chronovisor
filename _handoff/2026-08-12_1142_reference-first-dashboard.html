@@ -54,13 +54,13 @@ ol.log time{color:var(--muted);flex-shrink:0;min-width:10rem}
 </head>
 <body>
 <script type="application/json" id="plan-meta">
-{"task_id":"plan_2868fe2d6f324487a9ce819da3303b20","created_at":"2026-08-12T11:42:08+09:00","状態":"ready","slug":"reference-first-dashboard"}
+{"task_id":"plan_2868fe2d6f324487a9ce819da3303b20","created_at":"2026-08-12T11:42:08+09:00","状態":"running","slug":"reference-first-dashboard"}
 </script>
 
 <header>
 <h1>Plan: Reference-first Chronovisor Dashboard</h1>
 <div class="meta-bar">
-<span class="badge" data-bind="状態" data-state="ready">ready</span>
+<span class="badge" data-bind="状態" data-state="running">running</span>
 <span><code data-bind="task_id">plan_2868fe2d6f324487a9ce819da3303b20</code></span>
 <span data-bind="created_at">2026-08-12T11:42:08+09:00</span>
 <span>source task <code>019ff054-97a2-7302-96be-b9fb4d859667</code></span>
@@ -169,7 +169,7 @@ source task 019ff054-97a2-7302-96be-b9fb4d859667 · generated image exec-4f8b1b2
 <section data-section="実行手順">
 <h2>実行手順</h2>
 <ol class="checklist">
-<li><input type="checkbox"><span><strong>Phase 0 — 最新 GitHub 正本と保護範囲を固定。</strong> <code>git fetch origin</code> 後の exact <code>origin/main</code> から clean branch / worktree を作り、Dashboard / decision / tests の現責務を再監査する。dirty checkout の未追跡資産は一切移動しない。基準 SHA と対象ファイルを実行ログへ記録する。</span></li>
+<li><input type="checkbox" checked><span><strong>Phase 0 — 最新 GitHub 正本と保護範囲を固定。</strong> <code>git fetch origin</code> 後の exact <code>origin/main</code> から clean branch / worktree を作り、Dashboard / decision / tests の現責務を再監査する。dirty checkout の未追跡資産は一切移動しない。基準 SHA と対象ファイルを実行ログへ記録する。</span></li>
 <li><input type="checkbox"><span><strong>Phase 1 — Reference contract を test asset 化。</strong> この Plan の PNG と SHA / 寸法を照合し、A–H の固定 JSON fixture を既存 test 配置規約に置く。dynamic text を固定し、比較する親子 panel group の capture bounds を定義する。</span></li>
 <li><input type="checkbox"><span><strong>Phase 2 — Adaptive reasoning を証拠付きで導入。</strong> 既存 model-eval / adoption evidence から role ごとの supported reasoning level を確定し、共有 selector、medium fallback、policy hash、audit reason を実装する。unit / transport / fail-closed test と shadow paired replay を通し、production 選択は canary gate まで閉じる。</span></li>
 <li><input type="checkbox"><span><strong>Phase 3 — 実効 plan 値を既存 payload へ最小投影。</strong> active marker / session / decision audit の既存値から <code>lanes[].context_tokens</code> と actual <code>think</code> を組み立てる。redaction と過去 record 互換を守り、不明値は捏造せず <code>—</code> とする。</span></li>
@@ -282,6 +282,7 @@ launchctl kickstart -k gui/$(id -u)/com.trafficsign.chronovisor-dashboard
 <li><time>2026-08-12 11:46</time><span>最終 PNG を project asset へ固定。元画像との byte equality、1586×992、SHA-256 を確認。</span></li>
 <li><time>2026-08-12 11:49</time><span>remote <code>origin/main=e2c8a50</code> と local main の455-commit driftを確認し、latest-GitHub 起点を Phase 0 に固定。</span></li>
 <li><time>2026-08-12 11:53</time><span>Dashboard surface と reasoning/context truth を origin/main で再監査。adaptive policy と role-context projection を必須依存へ追加。</span></li>
+<li><time>2026-08-12 12:04</time><span>Phase 0 完了。exact <code>origin/main=e2c8a500412af1e53e018b180250893df298ad2c</code> から隔離 worktree <code>chronovisor_reference_dashboard</code> と branch <code>codex/reference-first-dashboard</code> を作成。元 checkout の未追跡資産は不変。</span></li>
 </ol>
 </section>
 
