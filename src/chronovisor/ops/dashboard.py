@@ -1996,6 +1996,8 @@ def _local_consensus_activities() -> list[dict[str, Any]]:
                     "phase": row.get("phase"),
                     "attempt": row.get("attempt"),
                     "think": row.get("think"),
+                    "required_context_tokens": row.get("required_num_ctx"),
+                    "requested_context_tokens": row.get("requested_num_ctx"),
                     "context_tokens": row.get("context_tokens"),
                     "started_at": row.get("started_at"),
                     "updated_at": row.get("updated_at"),
@@ -3309,23 +3311,31 @@ def _decision_trace_snapshot(
             if artifact_replay or state in {"pending", "skipped"}
             else _decision_trace_think_label(observed)
         )
-        observed_context = (observed or {}).get("context_tokens")
-        context_tokens = (
-            observed_context
-            if isinstance(observed_context, int)
-            and not isinstance(observed_context, bool)
-            and observed_context > 0
-            and not artifact_replay
-            and state not in {"pending", "skipped"}
-            else None
-        )
+
+        token_values: dict[str, int | None] = {}
+        for key in (
+            "required_context_tokens",
+            "requested_context_tokens",
+            "context_tokens",
+        ):
+            value = (observed or {}).get(key)
+            token_values[key] = (
+                value
+                if isinstance(value, int)
+                and not isinstance(value, bool)
+                and value > 0
+                and not artifact_replay
+                and state not in {"pending", "skipped"}
+                else None
+            )
+
         lanes.append(
             {
                 "key": lane,
                 "label": lane_labels[lane],
                 "model": models[lane],
                 "think": think,
-                "context_tokens": context_tokens,
+                **token_values,
                 "state": state,
                 "result": result,
                 "detail": detail,
@@ -3495,21 +3505,25 @@ def _local_consensus_snapshot(limit: int = 40) -> dict[str, Any]:
         if kind == "session":
             history.append(
                 {
-                    key: row.get(key)
-                    for key in (
-                        "kind",
-                        "timestamp",
-                        "request_sha256",
-                        "role",
-                        "model",
-                        "think",
-                        "context_tokens",
-                        "ok",
-                        "first_pass_valid",
-                        "repaired",
-                        "repair_turns",
-                        "failure_class",
-                    )
+                    **{
+                        key: row.get(key)
+                        for key in (
+                            "kind",
+                            "timestamp",
+                            "request_sha256",
+                            "role",
+                            "model",
+                            "think",
+                            "context_tokens",
+                            "ok",
+                            "first_pass_valid",
+                            "repaired",
+                            "repair_turns",
+                            "failure_class",
+                        )
+                    },
+                    "required_context_tokens": row.get("required_num_ctx"),
+                    "requested_context_tokens": row.get("requested_num_ctx"),
                 }
             )
         elif kind == "decision":

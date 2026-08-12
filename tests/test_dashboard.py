@@ -330,6 +330,8 @@ def test_local_consensus_snapshot_removes_dead_markers_and_exposes_redacted_metr
         "role": "primary",
         "model": "ornith:test",
         "think": "medium",
+        "required_num_ctx": 12_000,
+        "requested_num_ctx": 16_384,
         "context_tokens": 16_384,
         "started_at": datetime.now().isoformat(timespec="seconds"),
         "pid": alive_pid,
@@ -378,6 +380,8 @@ def test_local_consensus_snapshot_removes_dead_markers_and_exposes_redacted_metr
                 "role": "primary",
                 "model": "ornith:test",
                 "think": "medium",
+                "required_num_ctx": 12_000,
+                "requested_num_ctx": 16_384,
                 "context_tokens": 16_384,
                 "ok": True,
             }
@@ -420,6 +424,8 @@ def test_local_consensus_snapshot_removes_dead_markers_and_exposes_redacted_metr
     assert snapshot["count"] == 1
     assert snapshot["activities"][0]["model"] == "ornith:test"
     assert snapshot["activities"][0]["think"] == "medium"
+    assert snapshot["activities"][0]["required_context_tokens"] == 12_000
+    assert snapshot["activities"][0]["requested_context_tokens"] == 16_384
     assert snapshot["activities"][0]["context_tokens"] == 16_384
     assert snapshot["summary"]["sessions"]["first_pass_valid"] == 7
     assert snapshot["summary"]["sessions"]["repaired"] == 2
@@ -448,6 +454,8 @@ def test_local_consensus_snapshot_removes_dead_markers_and_exposes_redacted_metr
     session = next(row for row in snapshot["history"] if row["kind"] == "session")
     decision = next(row for row in snapshot["history"] if row["kind"] == "decision")
     assert session["think"] == "medium"
+    assert session["required_context_tokens"] == 12_000
+    assert session["requested_context_tokens"] == 16_384
     assert session["context_tokens"] == 16_384
     assert decision["conservative_veto_fired"] is True
     assert (
@@ -1002,6 +1010,8 @@ def test_decision_trace_projects_live_phase_and_completed_vote(monkeypatch) -> N
                 "phase": "validate",
                 "attempt": 1,
                 "think": "high",
+                "required_context_tokens": 24_000,
+                "requested_context_tokens": 32_768,
                 "context_tokens": 32_768,
                 "elapsed_seconds": 42,
                 "updated_at": "2026-07-15T12:00:00Z",
@@ -1018,6 +1028,8 @@ def test_decision_trace_projects_live_phase_and_completed_vote(monkeypatch) -> N
                 "first_pass_valid": True,
                 "repair_turns": 0,
                 "think": False,
+                "required_context_tokens": 12_000,
+                "requested_context_tokens": 16_384,
                 "context_tokens": 16_384,
             }
         ],
@@ -1028,13 +1040,19 @@ def test_decision_trace_projects_live_phase_and_completed_vote(monkeypatch) -> N
     assert trace["task_role"] == "ingest_review"
     assert trace["lanes"][0]["state"] == "done"
     assert trace["lanes"][0]["think"] == "off"
+    assert trace["lanes"][0]["required_context_tokens"] == 12_000
+    assert trace["lanes"][0]["requested_context_tokens"] == 16_384
     assert trace["lanes"][0]["context_tokens"] == 16_384
     assert trace["lanes"][1]["state"] == "active"
     assert trace["lanes"][1]["think"] == "high"
+    assert trace["lanes"][1]["required_context_tokens"] == 24_000
+    assert trace["lanes"][1]["requested_context_tokens"] == 32_768
     assert trace["lanes"][1]["context_tokens"] == 32_768
     assert trace["lanes"][1]["steps"][4]["status"] == "active"
     assert trace["lanes"][2]["state"] == "pending"
     assert trace["lanes"][2]["think"] == "—"
+    assert trace["lanes"][2]["required_context_tokens"] is None
+    assert trace["lanes"][2]["requested_context_tokens"] is None
     assert trace["lanes"][2]["context_tokens"] is None
     assert [step["label"] for step in trace["overall"]] == [
         "Packet",
