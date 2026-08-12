@@ -75,6 +75,7 @@ def test_dashboard_reference_svg_has_one_fixed_safe_topology() -> None:
         return [attrs for _tag, attrs in elements if attrs.get(key) == value]
 
     assert len(matching("id", "processing-panel")) == 1
+    assert len(matching("class", "processing-lanes-card")) == 1
     assert len(matching("id", "decision-trace-panel")) == 1
     assert len(matching("id", "processing-trace-connector-path")) == 1
     assert len(matching("id", "decision-trace-harness")) == 1
@@ -85,6 +86,33 @@ def test_dashboard_reference_svg_has_one_fixed_safe_topology() -> None:
     assert len(matching("data-trace-key", "artifact")) == 1
     assert len(matching("data-trace-key", "decision")) == 1
     assert len(matching("data-trace-key", "hold")) == 1
+    assert [
+        attrs.get("data-overall-key")
+        for _tag, attrs in elements
+        if attrs.get("data-overall-key")
+    ] == [
+        "packet",
+        "preflight",
+        "execution_plan",
+        "dispatch",
+        "local_decision",
+        "artifact",
+        "decision",
+    ]
+    assert len(matching("data-context-tokens", "32768")) == 1
+    assert len(matching("data-context-tokens", "65536")) == 1
+    assert len(matching("data-context-tokens", "98304")) == 1
+    assert len(matching("data-context-tokens", "131072")) == 1
+    assert {
+        attrs["data-decision-lane"]: attrs.get("transform")
+        for _tag, attrs in elements
+        if attrs.get("data-decision-lane")
+    } == {
+        "primary": "translate(0 329)",
+        "challenger": "translate(0 436)",
+        "tie_break": "translate(0 556)",
+    }
+    assert len(matching("data-seal-label", "true")) == 1
 
     paths = {
         attrs["data-path-key"]: attrs.get("d")
@@ -103,6 +131,45 @@ def test_dashboard_reference_svg_has_one_fixed_safe_topology() -> None:
     }.issubset(paths)
     assert all(paths[key] for key in paths)
     assert paths["pair-artifact"] != paths["tie_break-artifact"]
-    assert paths["artifact-hold"].startswith("M1340 390")
-    assert paths["pair-hold"].startswith("M1168 430")
-    assert paths["tie_break-hold"].startswith("M1040 486")
+    assert paths["artifact-hold"].startswith("M1342 416")
+    assert paths["pair-hold"].startswith("M1208 476")
+    assert paths["tie_break-hold"].startswith("M1096 556")
+
+
+def test_dashboard_reference_keeps_selection_and_bucket_truth() -> None:
+    static = ROOT / "src/chronovisor/dashboard_static"
+    page = (static / "index.html").read_text(encoding="utf-8")
+    style = (static / "style.css").read_text(encoding="utf-8")
+    renderer = (static / "app-renderer.js").read_text(encoding="utf-8")
+
+    assert [
+        token
+        for token in ("32768", "65536", "98304", "131072")
+        if f'data-context-tokens="{token}"' in page
+    ] == ["32768", "65536", "98304", "131072"]
+    assert (
+        '.processing-lane[aria-expanded="false"] .processing-track {\n'
+        "  visibility: hidden;"
+    ) in style
+    assert (
+        ".decision-trace-harness .trace-repair-loop.pending {\n"
+        "  stroke-dasharray: 4 4;\n"
+        "  opacity: 0.18;"
+    ) in style
+    assert (
+        ".decision-trace-harness .trace-single-path.pending,\n"
+        ".decision-trace-harness .trace-hold-path.pending,\n"
+        ".decision-trace-harness .trace-hold-node.pending {\n"
+        "  opacity: 0.18;"
+    ) in style
+    frame = renderer.split("function renderDecisionTraceFrame", 1)[1].split(
+        "function setDecisionTransitionState", 1
+    )[0]
+    assert "updateProcessingTraceSelection(trace);" in frame
+    harness = renderer.split("function updateDecisionSvgHarness", 1)[1].split(
+        "function decisionEventText", 1
+    )[0]
+    assert 'decision: decisionOverallState(overall, "decision")' in harness
+    assert 'decision: noSafeQuorum ? "skipped"' not in harness
+    assert 'harness.querySelector("[data-seal-label]")' in harness
+    assert 'sealFailure ? "error" : "pending"' in harness

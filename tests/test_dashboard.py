@@ -82,6 +82,16 @@ def _reset_snapshot_fingerprint_cache() -> None:
         dashboard._SNAPSHOT_FINGERPRINT_CONDITION.notify_all()
 
 
+def _run_node_scenario(source: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["node", "-"],
+        input=source,
+        check=True,
+        capture_output=True,
+        encoding="utf-8",
+    )
+
+
 def _activity_bytes(*rows: tuple[str, str]) -> bytes:
     return b"".join(
         canonical_json_line_bytes_strict(
@@ -1922,12 +1932,7 @@ sandbox.__test.render({{
 process.stdout.write(JSON.stringify(sandbox.__test.seen));
 """
 
-    completed = subprocess.run(
-        ["node", "-e", scenario],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
+    completed = _run_node_scenario(scenario)
 
     assert json.loads(completed.stdout) == [
         {"status": "loaded", "activity": "generate"},
@@ -2029,12 +2034,7 @@ process.stdout.write(JSON.stringify({{
 }}));
 """
 
-    completed = subprocess.run(
-        ["node", "-e", scenario],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
+    completed = _run_node_scenario(scenario)
     result = json.loads(completed.stdout)
 
     assert [row["request"] for row in result["seen"]] == ["f749", "f749"]
@@ -2116,12 +2116,7 @@ process.stdout.write(JSON.stringify({{
 }}));
 """
 
-    completed = subprocess.run(
-        ["node", "-e", scenario],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
+    completed = _run_node_scenario(scenario)
     result = json.loads(completed.stdout)
 
     assert result["blank"] == ["—", "—", "—"]
@@ -2200,12 +2195,7 @@ process.stdout.write(JSON.stringify({{
 }}));
 """
 
-    completed = subprocess.run(
-        ["node", "-e", scenario],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
+    completed = _run_node_scenario(scenario)
     result = json.loads(completed.stdout)
     frames = result["frames"]
 

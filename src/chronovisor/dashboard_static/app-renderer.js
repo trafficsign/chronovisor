@@ -9,6 +9,12 @@ function shortName(value) {
   return `${text.slice(0, 30)}...${text.slice(-28)}`;
 }
 
+function decisionTraceModelLabel(value) {
+  const base = fmt(value, "not configured").split("/").at(-1).split(":")[0];
+  const family = base.split(/[-_]/)[0].replace(/\d+$/u, "");
+  return family ? `${family[0].toUpperCase()}${family.slice(1)}` : "Not configured";
+}
+
 function stageMetricLabel(value) {
   const raw = fmt(value, "idle").trim();
   const normalized = raw.toLowerCase();
@@ -504,7 +510,7 @@ function updateDecisionSvgHarness(trace, focusEvent = null) {
     dispatch: decisionOverallState(overall, "dispatch"),
     local_decision: decisionOverallState(overall, "quorum"),
     artifact: sealFailure ? "error" : noSafeQuorum ? "skipped" : artifactPayloadState,
-    decision: noSafeQuorum ? "skipped" : decisionOverallState(overall, "decision"),
+    decision: decisionOverallState(overall, "decision"),
     hold: traceState === "quarantined" ? "error" : "pending",
     agree: agreementState,
   };
@@ -515,11 +521,16 @@ function updateDecisionSvgHarness(trace, focusEvent = null) {
   harness.querySelectorAll("[data-trace-key]").forEach((node) => {
     setDecisionSvgState(node, milestoneStates[node.dataset.traceKey]);
   });
+  harness.querySelectorAll("[data-overall-key]").forEach((node) => {
+    setDecisionSvgState(node, milestoneStates[node.dataset.overallKey]);
+  });
   [
     ["packet-preflight", milestoneStates.preflight],
     ["preflight-execution_plan", milestoneStates.execution_plan],
     ["execution_plan-dispatch", milestoneStates.dispatch],
     ["dispatch-local_decision", milestoneStates.local_decision],
+    ["local_decision-artifact", milestoneStates.artifact],
+    ["overall-artifact-decision", milestoneStates.decision],
     ["execution-plan-context", milestoneStates.execution_plan],
     ["plan-context", milestoneStates.execution_plan],
     ["plan-headroom", milestoneStates.execution_plan],
@@ -539,6 +550,10 @@ function updateDecisionSvgHarness(trace, focusEvent = null) {
     harness.querySelector(`[data-path-key="${key}"]`),
     fmt(state, "pending")
   ));
+  setDecisionSvgState(
+    harness.querySelector("[data-seal-label]"),
+    sealFailure ? "error" : "pending"
+  );
 
   const activeLane = [...lanes.values()].find((lane) => lane.state === "active")
     || [...lanes.values()].reverse().find((lane) => lane.state === "done");
@@ -553,16 +568,44 @@ function updateDecisionSvgHarness(trace, focusEvent = null) {
     "[data-plan-value=\"context-selection\"]",
     `required ${contextLabel(requiredContext)} → selected ${contextLabel(selectedContext)}`
   );
-  setDecisionSvgText(
-    "[data-plan-value=\"context-effective\"]",
-    `effective ${contextLabel(effectiveContext)}`
-  );
   setDecisionSvgState(harness.querySelector("[data-plan-key=\"context\"]"), milestoneStates.execution_plan);
+  const selectedContextValue = Number(selectedContext || effectiveContext || 0);
+  const contextOptions = [...harness.querySelectorAll("[data-context-option]")];
+  const defaultContexts = [32_768, 65_536, 98_304, 131_072];
+  const defaultContextLabels = ["32K", "65K", "98K", "131K"];
+  const displayedContexts = defaultContexts.slice(0, contextOptions.length);
+  if (selectedContextValue > 0 && !displayedContexts.includes(selectedContextValue)) {
+    const nearestIndex = displayedContexts.reduce(
+      (best, value, index) => (
+        Math.abs(value - selectedContextValue) < Math.abs(displayedContexts[best] - selectedContextValue)
+          ? index
+          : best
+      ),
+      0
+    );
+    displayedContexts[nearestIndex] = selectedContextValue;
+  }
+  contextOptions.forEach((node, index) => {
+    const value = displayedContexts[index];
+    node.dataset.contextTokens = String(value);
+    const label = node.querySelector("[data-context-label]");
+    if (label) {
+      label.textContent = value === defaultContexts[index]
+        ? defaultContextLabels[index]
+        : contextLabel(value);
+    }
+    setDecisionSvgState(
+      node,
+      value === selectedContextValue ? milestoneStates.execution_plan : "pending"
+    );
+  });
   setDecisionSvgState(harness.querySelector("[data-plan-key=\"headroom\"]"), milestoneStates.execution_plan);
   setDecisionSvgState(harness.querySelector("[data-plan-key=\"fit\"]"), milestoneStates.dispatch);
   setDecisionSvgText(
     "[data-plan-value=\"fit\"]",
-    milestoneStates.dispatch === "done" ? "PASS" : milestoneStates.dispatch === "active" ? "CHECK" : "WAITING"
+    milestoneStates.dispatch === "done"
+      ? "headroom OK · PASS"
+      : milestoneStates.dispatch === "active" ? "CHECKING" : "WAITING"
   );
 
   const actualThink = String(activeLane?.think || "—").toLowerCase();
@@ -585,9 +628,8 @@ function updateDecisionSvgHarness(trace, focusEvent = null) {
     if (!laneElement) return;
     setDecisionSvgState(laneElement, fmt(lane.state, "pending"));
     laneElement.classList.toggle("event-focus", focusEvent?.lane === key);
-    setDecisionSvgText(`[data-model-value="${key}"]`, fmt(lane.model, "not configured"));
+    setDecisionSvgText(`[data-model-value="${key}"]`, decisionTraceModelLabel(lane.model));
     setDecisionSvgText(`[data-lane-label="${key}"]`, fmt(lane.label, key));
-    setDecisionSvgText(`[data-lane-model="${key}"]`, fmt(lane.model, "not configured"));
     const think = fmt(lane.think, "—");
     setDecisionSvgText(`[data-lane-think="${key}"]`, think === "—" ? "—" : `think:${think}`);
     const laneSteps = new Map(
@@ -621,7 +663,8 @@ function updateDecisionSvgHarness(trace, focusEvent = null) {
       ? focusEvent?.lane === key && focusEvent.phase === "repair" ? "active" : "done"
       : "pending";
     setDecisionSvgState(laneElement.querySelector(`[data-repair-lane="${key}"]`), repairState);
-    setDecisionSvgText(`[data-repair-count="${key}"]`, `REPAIR ${repairAttempt}`);
+    setDecisionSvgText(`[data-repair-count="${key}"]`, "REPAIR JSON");
+    setDecisionSvgText(`[data-repair-number="${key}"]`, String(repairAttempt));
     const laneState = fmt(lane.state, "pending");
     const resultLabel = laneState === "pending"
       ? "WAITING"
@@ -727,6 +770,11 @@ function renderDecisionTransitionFeed(events, focusEvent = null) {
     visible.unshift(focusEvent);
   }
   els.decisionTransitionFeed.textContent = "";
+  els.decisionEventCount.textContent = String(rows.length);
+  const latest = focusEvent || rows.at(-1);
+  els.decisionTransitionDetail.textContent = latest
+    ? decisionEventText(latest)
+    : "Waiting for observed work";
   visible.slice(-6).forEach((event) => {
     const item = document.createElement("li");
     item.className = "decision-transition-event";
