@@ -3276,11 +3276,9 @@ def _decision_trace_overall_steps(
             "key": "decision",
             "label": "Decision",
             "status": "skipped"
-            if seal_failed
+            if decision_status == "quarantined"
             else "done"
             if decision_status == "agreed" or structured_completed
-            else "error"
-            if decision_status == "quarantined"
             else "active"
             if voting and not quorum_flow
             else "pending",

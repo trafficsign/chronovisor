@@ -1358,6 +1358,8 @@ def test_decision_trace_successful_standalone_session_completes_validation() -> 
     assert trace["context_tokens"] == 16_384
     assert trace["overall"][2]["status"] == "done"
     assert trace["overall"][3]["status"] == "done"
+    assert trace["overall"][-2]["status"] == "done"
+    assert trace["overall"][-1]["status"] == "done"
 
 
 def test_decision_trace_excludes_previous_execution_with_same_request_hash(
@@ -1813,6 +1815,7 @@ def test_decision_trace_marks_pair_quorum_and_unused_tie_break(monkeypatch) -> N
     ]
     assert trace["overall"][4]["status"] == "done"
     assert trace["overall"][5]["status"] == "done"
+    assert trace["overall"][6]["status"] == "done"
 
     held = {
         **decision,
@@ -1919,7 +1922,7 @@ def test_decision_trace_keeps_early_terminal_failures_before_quorum(
         "pending",
         "pending",
         "skipped",
-        "error",
+        "skipped",
     ]
     assert trace["context_tokens"] is None
 
@@ -1990,8 +1993,13 @@ def test_decision_trace_marks_only_artifact_publish_failure_after_artifact() -> 
     no_quorum = dashboard._decision_trace_snapshot(
         [], [no_quorum_decision], no_quorum_decision
     )
+    assert no_quorum["state"] == "quarantined"
+    assert no_quorum["outcome"]["kind"] == "semantic_hold"
+    assert no_quorum["outcome"]["code"] == (
+        "local_models_did_not_reach_two_vote_quorum"
+    )
     assert no_quorum["overall"][-2]["status"] == "skipped"
-    assert no_quorum["overall"][-1]["status"] == "error"
+    assert no_quorum["overall"][-1]["status"] == "skipped"
 
 
 def test_decision_trace_explains_lane_policy_veto_bypass() -> None:

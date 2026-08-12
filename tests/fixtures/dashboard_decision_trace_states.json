@@ -132,7 +132,7 @@
       "branch": "no-safe-quorum",
       "artifact_join_states": ["pending", "pending", "error", "error", "pending", "error"],
       "artifact": "skipped",
-      "decision": "error",
+      "decision": "skipped",
       "hold": "before-artifact",
       "job": "fixture-f1b2c3d4",
       "elapsed_seconds": 119

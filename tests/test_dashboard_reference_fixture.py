@@ -68,6 +68,7 @@ def test_dashboard_reference_contract_and_state_matrix() -> None:
     assert cases["E"]["branch"] == "tie-break-agreement"
     assert cases["F"]["hold"] == "before-artifact"
     assert cases["F"]["artifact"] == "skipped"
+    assert cases["F"]["decision"] == "skipped"
     assert cases["G"]["hold"] == "seal-failed"
     assert cases["G"]["artifact"] == "error"
     assert cases["G"]["decision"] == "skipped"
@@ -646,7 +647,7 @@ def test_dashboard_reference_keeps_selection_and_bucket_truth() -> None:
         "function decisionEventText", 1
     )[0]
     assert 'decision: decisionOverallState(overall, "decision")' in harness
-    assert 'decision: noSafeQuorum ? "skipped"' not in harness
+    assert 'decision: safeNoQuorum ? "skipped"' not in harness
     assert "decisionSealStates(" in harness
     assert 'harness.querySelector("[data-seal-yes-label]")' in harness
     assert 'harness.querySelector("[data-seal-no-label]")' in harness
@@ -774,4 +775,63 @@ process.stdout.write(JSON.stringify({{
             "no": "pending",
             "artifact": "skipped",
         },
+    }
+
+
+def test_dashboard_reference_no_quorum_leaves_decision_unreached() -> None:
+    renderer = (ROOT / "src/chronovisor/dashboard_static/app-renderer.js").read_text(
+        encoding="utf-8"
+    )
+    scenario = f"""
+const vm = require("node:vm");
+const node = (traceKey = null) => ({{
+  dataset: traceKey ? {{ traceKey }} : {{}},
+  classList: {{ remove() {{}}, add() {{}}, toggle() {{}} }},
+  querySelector: () => node(),
+  querySelectorAll: () => [],
+  setAttribute() {{}},
+  textContent: "",
+}});
+const traceNodes = Object.fromEntries(
+  ["artifact", "decision", "hold", "agree", "quorum"].map((key) => [key, node(key)])
+);
+const harness = node();
+harness.querySelectorAll = (selector) => selector === "[data-trace-key]"
+  ? Object.values(traceNodes)
+  : [];
+harness.querySelector = () => node();
+const sandbox = {{
+  window: {{ matchMedia: () => ({{ matches: true }}) }},
+  els: {{ decisionTraceHarness: harness }},
+}};
+vm.createContext(sandbox);
+vm.runInContext({json.dumps(renderer)}, sandbox);
+sandbox.updateDecisionSvgHarness({{
+  state: "quarantined",
+  quorum_attempted: true,
+  quorum_flow: true,
+  outcome: {{ kind: "error", code: "no_safe_quorum" }},
+  overall: [
+    {{ key: "artifact", status: "skipped" }},
+    {{ key: "decision", status: "skipped" }},
+  ],
+}});
+process.stdout.write(JSON.stringify(Object.fromEntries(
+  Object.entries(traceNodes).map(([key, value]) => [key, value.dataset.state])
+)));
+"""
+    completed = subprocess.run(
+        ["node", "-"],
+        input=scenario,
+        check=True,
+        capture_output=True,
+        encoding="utf-8",
+    )
+
+    assert json.loads(completed.stdout) == {
+        "artifact": "skipped",
+        "decision": "skipped",
+        "hold": "error",
+        "agree": "error",
+        "quorum": "error",
     }
