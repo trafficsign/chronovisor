@@ -419,11 +419,6 @@ def test_local_consensus_snapshot_removes_dead_markers_and_exposes_redacted_metr
     )
     monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", chronovisor_root)
     monkeypatch.setattr(
-        dashboard,
-        "load_decision_router_config",
-        lambda: SimpleNamespace(num_ctx=32768),
-    )
-    monkeypatch.setattr(
         runtime_status,
         "_pid_is_alive",
         lambda pid: pid == alive_pid,
@@ -2933,6 +2928,75 @@ process.stdout.write(JSON.stringify({{
     assert result["repeatedHash"]["clearedTimers"] == [99]
 
 
+def test_decision_trace_keeps_an_observed_load_across_partial_polls() -> None:
+    renderer = (dashboard.STATIC_DIR / "app-renderer.js").read_text(encoding="utf-8")
+    scenario = f"""
+const vm = require("node:vm");
+const sandbox = {{
+  window: {{ matchMedia: () => ({{ matches: true }}) }},
+  document: {{ visibilityState: "visible" }},
+}};
+vm.createContext(sandbox);
+vm.runInContext(
+  {json.dumps(renderer)}
+    + `
+renderDecisionTraceFrame = () => {{}};
+renderDecisionTransitionFeed = () => {{}};
+setDecisionTransitionState = () => {{}};
+this.__test = {{ renderDecisionTrace, playback: decisionTracePlayback }};`,
+  sandbox,
+);
+const stepKeys = ["trigger", "load", "context", "generate", "validate", "vote"];
+const event = (event_id, phase) => ({{
+  event_id,
+  lane: "primary",
+  phase,
+  kind: "phase",
+  status: "active",
+  overall_key: ["trigger", "load"].includes(phase) ? "dispatch" : "generate",
+}});
+const trace = (phase, events) => ({{
+  request_sha256: "partial-poll-request",
+  state: "active",
+  active: true,
+  events,
+  overall: ["packet", "dispatch", "generate", "validate", "quorum"]
+    .map((key) => ({{ key, status: "pending" }})),
+  lanes: [{{
+    key: "primary",
+    label: "Primary",
+    model: "primary:model",
+    state: "active",
+    phase,
+    steps: stepKeys.map((key) => ({{
+      key,
+      status: key === phase ? "active"
+        : stepKeys.indexOf(key) < stepKeys.indexOf(phase) ? "done" : "pending",
+    }})),
+  }}],
+}});
+const render = (value) => sandbox.__test.renderDecisionTrace({{ decision_trace: value }});
+const steps = () => sandbox.__test.playback.current.lanes[0].steps.map((step) => step.status);
+
+render(trace("load", [event("trigger", "trigger")]));
+const duringLoad = steps();
+render(trace("generate", [
+  event("trigger", "trigger"),
+  event("context", "context"),
+  event("generate", "generate"),
+]));
+const duringGenerate = steps();
+process.stdout.write(JSON.stringify({{ duringLoad, duringGenerate }}));
+"""
+
+    completed = _run_node_scenario(scenario)
+
+    assert json.loads(completed.stdout) == {
+        "duringLoad": ["done", "active", "pending", "pending", "pending", "pending"],
+        "duringGenerate": ["done", "done", "done", "active", "pending", "pending"],
+    }
+
+
 def test_decision_trace_same_hash_reset_uses_terminal_and_execution_boundaries() -> None:
     renderer = (dashboard.STATIC_DIR / "app-renderer.js").read_text(encoding="utf-8")
     scenario = f"""
@@ -3583,11 +3647,6 @@ def test_build_snapshot_combines_runtime_and_queue(tmp_path: Path, monkeypatch) 
 
     monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", chronovisor_root)
     monkeypatch.setattr(dashboard, "init_chronovisor", lambda: None)
-    monkeypatch.setattr(
-        dashboard,
-        "load_decision_router_config",
-        lambda: SimpleNamespace(num_ctx=32768),
-    )
     monkeypatch.setattr(
         dashboard,
         "ACTIVITY_FILE",

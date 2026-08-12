@@ -267,8 +267,8 @@ def test_dashboard_reference_svg_has_one_fixed_safe_topology() -> None:
     ]
     assert len(reasoning_guides) == 1
     assert [attrs.get("d") for attrs in reasoning_guides] == [
-        "M858 164 H872 Q882 164 882 154 V72 Q882 62 892 62 H903 "
-        "M921 62 H1235 Q1245 62 1245 72 V144 Q1245 154 1255 154 "
+        "M858 164 H872 Q882 164 882 154 V58 Q882 48 892 48 H903 "
+        "M921 48 H1235 Q1245 48 1245 58 V144 Q1245 154 1255 154 "
         "H1260 Q1270 154 1270 164 "
         "M858 164 H882 Q892 164 892 154 V116 Q892 106 902 106 H903 "
         "M921 106 H1245 Q1255 106 1255 116 V154 Q1255 164 1265 164 H1270 "
@@ -287,7 +287,7 @@ def test_dashboard_reference_svg_has_one_fixed_safe_topology() -> None:
     ] == [
         (
             "off",
-            "M921 62 H1235 Q1245 62 1245 72 V144 Q1245 154 1255 154 "
+            "M921 48 H1235 Q1245 48 1245 58 V144 Q1245 154 1255 154 "
             "H1260 Q1270 154 1270 164",
             None,
         ),
@@ -328,7 +328,7 @@ def test_dashboard_reference_svg_has_one_fixed_safe_topology() -> None:
         for _tag, attrs in elements
         if attrs.get("data-reasoning-key")
     } == {
-        "off": "translate(912 62)",
+        "off": "translate(912 48)",
         "low": "translate(912 106)",
         "medium": "translate(912 164)",
         "high": "translate(912 222)",

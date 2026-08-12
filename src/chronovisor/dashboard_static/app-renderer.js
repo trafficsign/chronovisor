@@ -491,6 +491,18 @@ function mergeDecisionTraceEvents(previous, incoming) {
   });
 }
 
+function decisionTraceObservedPhases(trace, lane) {
+  const phases = new Set(Array.isArray(lane?.observed_phases) ? lane.observed_phases : []);
+  (trace?.events || []).forEach((event) => {
+    if (event?.lane !== lane?.key) return;
+    phases.add(event.phase === "repair" ? "validate" : event.phase);
+  });
+  if (["active", "done", "error"].includes(lane?.state)) {
+    phases.add(lane.phase === "repair" ? "validate" : lane.phase);
+  }
+  return [...phases].filter((phase) => DECISION_LANE_PHASES.includes(phase));
+}
+
 function mergeDecisionTraceRows(previous, incoming) {
   const priorRows = new Map((previous || []).map((row) => [row.key, row]));
   const incomingRows = new Map((incoming || []).map((row) => [row.key, row]));
@@ -529,6 +541,10 @@ function mergeDecisionTraceSnapshot(previous, incoming) {
       ...next,
       state: decisionTraceProgressState(prior.state, next.state),
       steps: mergeDecisionTraceRows(prior.steps, next.steps),
+      observed_phases: [...new Set([
+        ...(prior.observed_phases || []),
+        ...(next.observed_phases || []),
+      ])],
     };
     for (const field of [
       "think",
@@ -1131,6 +1147,11 @@ function applyDecisionTransition(current, target, event) {
       .filter((item) => item.lane === event.lane)
       .map((item) => item.phase === "repair" ? "validate" : item.phase)
   );
+  const phaseIndex = DECISION_LANE_PHASES.indexOf(phase);
+  (targetLane.observed_phases || []).forEach((observedPhase) => {
+    const observedIndex = DECISION_LANE_PHASES.indexOf(observedPhase);
+    if (observedIndex >= 0 && observedIndex < phaseIndex) observedPhases.add(observedPhase);
+  });
   const terminal = event.kind === "session";
   const failed = event.status === "error";
   lane.state = decisionTraceProgressState(
@@ -1236,6 +1257,20 @@ function decisionTraceObservedFrame(target) {
     }
     if (Number(targetLane.context_tokens || 0) > 0) {
       observed.context_tokens = Number(targetLane.context_tokens);
+    }
+    const activePhase = targetLane.phase === "repair" ? "validate" : targetLane.phase;
+    const activeIndex = DECISION_LANE_PHASES.indexOf(activePhase);
+    const observedPhases = new Set(targetLane.observed_phases || []);
+    if (targetLane.state === "active" && activeIndex >= 0) {
+      observedLane.phase = targetLane.phase;
+      observedLane.state = "active";
+      observedLane.steps = observedLane.steps.map((step) => {
+        const stepIndex = DECISION_LANE_PHASES.indexOf(step.key);
+        const status = step.key === activePhase
+          ? "active"
+          : observedPhases.has(step.key) && stepIndex < activeIndex ? "done" : "pending";
+        return { ...step, status: decisionTraceProgressState(step.status, status) };
+      });
     }
   }
   return observed;
@@ -1400,6 +1435,10 @@ function renderDecisionTrace(consensus) {
     (event) => event && event.event_id
   );
   target.events = events;
+  target.lanes = (target.lanes || []).map((lane) => ({
+    ...lane,
+    observed_phases: decisionTraceObservedPhases(target, lane),
+  }));
   let cachedTarget = request ? decisionTracePlayback.targets.get(request) : null;
   const startsNewExecution = Boolean(
     cachedTarget && decisionTraceStartsNewExecution(cachedTarget, target)
