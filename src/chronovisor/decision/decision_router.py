@@ -2123,6 +2123,7 @@ class DecisionRouter:
         keep_alive: str,
         role: str,
         num_ctx: int,
+        decision_lane: str | None = None,
         source: object | None = None,
     ) -> LocalStructuredSession:
         source = source or ollama.source_data_classification("system", "high")
@@ -2147,6 +2148,8 @@ class DecisionRouter:
             max_feedback_chars=self.config.max_feedback_chars,
             resource_managed=self.live_resource_control,
             require_returned_model=self.routes[role].location == "remote",
+            decision_lane=decision_lane,
+            task_impact="high" if role == "tie_break" else "normal",
         )
 
     def _vote(
@@ -2201,7 +2204,14 @@ class DecisionRouter:
                 failure_reason=f"{type(exc).__name__}: {str(exc)[:500]}",
             )
         else:
-            result = self._session(model, keep_alive, role, num_ctx, source).run(
+            result = self._session(
+                model=model,
+                keep_alive=keep_alive,
+                role=role,
+                num_ctx=num_ctx,
+                decision_lane=decision_lane,
+                source=source,
+            ).run(
                 prompt,
                 format_schema or schema,
                 system=system,

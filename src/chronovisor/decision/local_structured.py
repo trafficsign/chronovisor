@@ -18,7 +18,7 @@ import tempfile
 import threading
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import ExitStack, contextmanager, suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
@@ -39,11 +39,14 @@ SAFE_RUNTIME_ROLE_RE = re.compile(r"^[a-z][a-z0-9._-]{0,127}$")
 LOCAL_ACTIVITY_PHASES = frozenset(
     {"trigger", "load", "context", "generate", "repair", "validate", "vote"}
 )
-STRUCTURED_GENERATION_POLICY_VERSION = 6
+STRUCTURED_GENERATION_POLICY_VERSION = 7
 STRUCTURED_GENERATION_TEMPERATURE = 0
 STRUCTURED_GENERATION_SEED = 0
 _DEFAULT_STRUCTURED_MEMORY_RESERVE_GIB = 16
 _DEFAULT_RUNTIME_ROLE = "librarian.review"
+_ADAPTIVE_REASONING_CANARY_ADOPTED = False
+_BOUNDED_LOW_REASONING_LANES = frozenset({"local_repair", "read_back_repair"})
+_REASONING_LEVELS = frozenset({"low", "medium", "high"})
 _SOURCE_DATA_CLASSES = frozenset({"page", "derived_snippet", "raw", "system"})
 _SOURCE_SENSITIVITIES = frozenset({"normal", "high"})
 _DEFAULT_STRUCTURED_CONTEXT_BUCKETS = (
@@ -92,23 +95,110 @@ _KNOWN_SCHEMA_KEYWORDS = _ANNOTATION_KEYWORDS | _VALIDATION_KEYWORDS
 
 
 def structured_generation_policy() -> dict[str, Any]:
-    """Return the fixed sampler contract shared by production and replay."""
+    """Return the sampler and adaptive-reasoning contract."""
 
     return {
         "version": STRUCTURED_GENERATION_POLICY_VERSION,
         "temperature": STRUCTURED_GENERATION_TEMPERATURE,
         "seed": STRUCTURED_GENERATION_SEED,
-        "think": {"default": "medium"},
+        "think": {
+            "default": "medium",
+            "fallback": "medium",
+            "levels": ["low", "medium", "high"],
+            "bounded_low_lanes": sorted(_BOUNDED_LOW_REASONING_LANES),
+            "adaptive_canary_adopted": _ADAPTIVE_REASONING_CANARY_ADOPTED,
+        },
         "stream": False,
         "format": "json_schema",
     }
 
 
-def structured_think_mode(model: str, *, num_ctx: int) -> bool | str:
-    """Select the explicit Ollama reasoning mode sealed by the policy."""
+def _structured_think_selection(
+    model: str,
+    *,
+    num_ctx: int,
+    required_num_ctx: int | None = None,
+    num_predict: int | None = None,
+    runtime_role: str | None = None,
+    decision_lane: str | None = None,
+    task_impact: str | None = None,
+    supported_reasoning_levels: Sequence[str] | None = None,
+    adaptive_reasoning_adopted: bool = False,
+) -> tuple[str, str]:
+    """Select one verified reasoning level, otherwise preserve medium."""
 
-    del model, num_ctx
-    return "medium"
+    valid_ints = (num_ctx, required_num_ctx, num_predict)
+    if (
+        not isinstance(model, str)
+        or not model.strip()
+        or any(
+            value is None
+            or isinstance(value, bool)
+            or not isinstance(value, int)
+            or value < 1
+            for value in valid_ints
+        )
+        or runtime_role is not None
+        and not isinstance(runtime_role, str)
+        or decision_lane is not None
+        and not isinstance(decision_lane, str)
+        or task_impact not in {"normal", "high"}
+        or not isinstance(adaptive_reasoning_adopted, bool)
+    ):
+        return "medium", "invalid_selection_input"
+    if not adaptive_reasoning_adopted:
+        return "medium", "adaptive_canary_not_adopted"
+    if supported_reasoning_levels is None:
+        return "medium", "capability_unknown"
+    if isinstance(supported_reasoning_levels, (str, bytes)) or not isinstance(
+        supported_reasoning_levels, Sequence
+    ):
+        return "medium", "capability_invalid"
+    if not supported_reasoning_levels or not all(
+        isinstance(level, str) for level in supported_reasoning_levels
+    ):
+        return "medium", "capability_invalid"
+    supported = frozenset(supported_reasoning_levels)
+    if not supported.issubset(_REASONING_LEVELS):
+        return "medium", "capability_invalid"
+    if (runtime_role or "").endswith(".tie_break") or task_impact == "high":
+        if "high" not in supported:
+            return "medium", "high_not_supported"
+        if num_ctx < required_num_ctx + num_predict:
+            return "medium", "high_headroom_insufficient"
+        return "high", "tie_break_or_high_impact"
+    if decision_lane in _BOUNDED_LOW_REASONING_LANES:
+        if "low" in supported:
+            return "low", "bounded_repair_low"
+        return "medium", "low_not_supported"
+    return "medium", "medium_default"
+
+
+def structured_think_mode(
+    model: str,
+    *,
+    num_ctx: int,
+    required_num_ctx: int | None = None,
+    num_predict: int | None = None,
+    runtime_role: str | None = None,
+    decision_lane: str | None = None,
+    task_impact: str | None = None,
+    supported_reasoning_levels: Sequence[str] | None = None,
+    adaptive_reasoning_adopted: bool = False,
+) -> str:
+    """Return the explicit Ollama reasoning mode sealed by the policy."""
+
+    return _structured_think_selection(
+        model,
+        num_ctx=num_ctx,
+        required_num_ctx=required_num_ctx,
+        num_predict=num_predict,
+        runtime_role=runtime_role,
+        decision_lane=decision_lane,
+        task_impact=task_impact,
+        supported_reasoning_levels=supported_reasoning_levels,
+        adaptive_reasoning_adopted=adaptive_reasoning_adopted,
+    )[0]
 
 
 def structured_generation_policy_sha256() -> str:
@@ -218,6 +308,9 @@ class ChatRequest:
     temperature: int = STRUCTURED_GENERATION_TEMPERATURE
     seed: int = STRUCTURED_GENERATION_SEED
     think: bool | str = False
+    think_selection_reason: str | None = None
+    required_num_ctx: int | None = None
+    requested_num_ctx: int | None = None
 
 
 @dataclass(frozen=True)
@@ -312,6 +405,11 @@ class LocalStructuredResult:
     failure_class: str | None = None
     failure_reason: str | None = None
     returned_model: str | None = None
+    think: bool | str | None = None
+    think_selection_reason: str | None = None
+    required_num_ctx: int | None = None
+    requested_num_ctx: int | None = None
+    effective_num_ctx: int | None = None
 
     @property
     def first_pass_valid(self) -> bool:
@@ -329,6 +427,18 @@ class LocalStructuredResult:
             "model": self.model,
             "failure_class": self.failure_class,
             "returned_model": self.returned_model,
+            "structured_generation_policy_version": (
+                STRUCTURED_GENERATION_POLICY_VERSION
+            ),
+            "structured_generation_policy_sha256": (
+                structured_generation_policy_sha256()
+            ),
+            "think": self.think,
+            "think_selection_reason": self.think_selection_reason,
+            "required_num_ctx": self.required_num_ctx,
+            "requested_num_ctx": self.requested_num_ctx,
+            "effective_num_ctx": self.effective_num_ctx,
+            "context_tokens": self.effective_num_ctx,
             "first_pass_valid": self.first_pass_valid,
             "repair_turns": self.repair_turns,
             "attempts": [attempt.audit_record() for attempt in self.attempts],
@@ -1100,8 +1210,12 @@ class LocalConsensusAuditStore:
         request_sha256: str,
         role: str,
         model: str,
+        required_num_ctx: int | None = None,
+        requested_num_ctx: int | None = None,
     ) -> Iterator[
-        Callable[[str, int | None, bool | str | None], None]
+        Callable[
+            [str, int | None, bool | str | None, str | None, int | None], None
+        ]
     ]:
         """Publish a redacted, phase-aware marker while a session executes."""
 
@@ -1113,6 +1227,8 @@ class LocalConsensusAuditStore:
             phase: str,
             attempt: int | None = None,
             think: bool | str | None = None,
+            think_selection_reason: str | None = None,
+            effective_num_ctx: int | None = None,
         ) -> None:
             nonlocal last_transition
             if path is None or phase not in LOCAL_ACTIVITY_PHASES:
@@ -1135,6 +1251,10 @@ class LocalConsensusAuditStore:
                 record["attempt"] = normalized_attempt
                 if think is not None:
                     record["think"] = think
+                if think_selection_reason is not None:
+                    record["think_selection_reason"] = think_selection_reason
+                if effective_num_ctx is not None:
+                    record["context_tokens"] = effective_num_ctx
                 self._atomic_write(
                     path,
                     json.dumps(
@@ -1172,6 +1292,14 @@ class LocalConsensusAuditStore:
                 "updated_at": started_at,
                 "pid": os.getpid(),
                 "thread_id": threading.get_ident(),
+                "structured_generation_policy_version": (
+                    STRUCTURED_GENERATION_POLICY_VERSION
+                ),
+                "structured_generation_policy_sha256": (
+                    structured_generation_policy_sha256()
+                ),
+                "required_num_ctx": required_num_ctx,
+                "requested_num_ctx": requested_num_ctx,
             }
             update("trigger", 0)
         except Exception:
@@ -1191,6 +1319,10 @@ class LocalConsensusAuditStore:
         model: str,
         result: LocalStructuredResult,
         think: bool | str | None = None,
+        think_selection_reason: str | None = None,
+        required_num_ctx: int | None = None,
+        requested_num_ctx: int | None = None,
+        effective_num_ctx: int | None = None,
     ) -> None:
         record = {
             "kind": "session",
@@ -1202,9 +1334,20 @@ class LocalConsensusAuditStore:
             "repaired": bool(result.ok and result.repair_turns > 0),
             "repair_turns": result.repair_turns,
             "failure_class": result.failure_class,
+            "structured_generation_policy_version": (
+                STRUCTURED_GENERATION_POLICY_VERSION
+            ),
+            "structured_generation_policy_sha256": (
+                structured_generation_policy_sha256()
+            ),
+            "required_num_ctx": required_num_ctx,
+            "requested_num_ctx": requested_num_ctx,
+            "context_tokens": effective_num_ctx,
         }
         if think is not None:
             record["think"] = think
+        if think_selection_reason is not None:
+            record["think_selection_reason"] = think_selection_reason
         self.append(record)
 
 
@@ -1882,6 +2025,8 @@ class LocalStructuredSession:
         resource_memory_reserve_gib: int | None = None,
         resource_lease_timeout_ms: int | None = None,
         require_returned_model: bool = False,
+        decision_lane: str | None = None,
+        task_impact: str = "normal",
     ) -> None:
         if model is None:
             if transport is not None:
@@ -1993,6 +2138,8 @@ class LocalStructuredSession:
         self.resource_memory_reserve_gib = resource_memory_reserve_gib
         self.resource_lease_timeout_ms = resource_lease_timeout_ms
         self.require_returned_model = require_returned_model
+        self.decision_lane = decision_lane
+        self.task_impact = task_impact
 
     def _failure(
         self,
@@ -2148,14 +2295,13 @@ class LocalStructuredSession:
         format_schema: Mapping[str, Any] | None = None,
         value_validator: Callable[[Any], Sequence[ValidationIssue]] | None = None,
         num_ctx: int | None = None,
+        required_num_ctx: int | None = None,
         activity_update: Callable[
-            [str, int | None, bool | str | None], None
+            [str, int | None, bool | str | None, str | None, int | None], None
         ]
         | None = None,
         request_observer: Callable[[ChatRequest, str, int], None] | None = None,
     ) -> LocalStructuredResult:
-        if activity_update is not None:
-            activity_update("context", 0)
         effective_num_ctx = self.num_ctx if num_ctx is None else num_ctx
         preflight_failure, schema_copy, messages = self._prepare_initial_request(
             prompt,
@@ -2175,6 +2321,26 @@ class LocalStructuredSession:
         )
         if context_failure is not None:
             return context_failure
+
+        selected_think, think_selection_reason = _structured_think_selection(
+            self.model,
+            num_ctx=effective_num_ctx,
+            required_num_ctx=required_num_ctx,
+            num_predict=self.num_predict,
+            runtime_role=self.runtime_role,
+            decision_lane=self.decision_lane,
+            task_impact=self.task_impact,
+            supported_reasoning_levels=None,
+            adaptive_reasoning_adopted=_ADAPTIVE_REASONING_CANARY_ADOPTED,
+        )
+        if activity_update is not None:
+            activity_update(
+                "context",
+                0,
+                selected_think,
+                think_selection_reason,
+                effective_num_ctx,
+            )
 
         attempts: list[StructuredAttempt] = []
         seen_outputs: set[str] = set()
@@ -2204,7 +2370,10 @@ class LocalStructuredSession:
                 max_output_chars=self.max_output_chars,
                 temperature=STRUCTURED_GENERATION_TEMPERATURE,
                 seed=STRUCTURED_GENERATION_SEED,
-                think=structured_think_mode(self.model, num_ctx=effective_num_ctx),
+                think=selected_think,
+                think_selection_reason=think_selection_reason,
+                required_num_ctx=required_num_ctx,
+                requested_num_ctx=self.num_ctx,
             )
             transport_output, transport_failure = self._call_transport(
                 request,
@@ -2463,6 +2632,17 @@ class LocalStructuredSession:
                 "transport_format_schema": format_schema,
             }
         request_sha256 = structured_request_sha256(prompt, request_schema, system)
+        try:
+            required_num_ctx = required_structured_context_tokens(
+                prompt,
+                schema,
+                system=system,
+                num_predict=self.num_predict,
+                max_output_chars=self.max_output_chars,
+                max_feedback_chars=self.max_feedback_chars,
+            )
+        except (TypeError, ValueError):
+            required_num_ctx = None
         preflight_failure: LocalStructuredResult | None = None
         route_failure: LocalStructuredResult | None = None
         route_provider = ""
@@ -2496,6 +2676,8 @@ class LocalStructuredSession:
             request_sha256=request_sha256,
             role=self.role,
             model=self.model or self.runtime_role,
+            required_num_ctx=required_num_ctx,
+            requested_num_ctx=self.num_ctx,
         ) as activity_update:
             observed_request: dict[str, Any] = {}
 
@@ -2505,16 +2687,25 @@ class LocalStructuredSession:
                 attempt: int,
             ) -> None:
                 observed_request["think"] = request.think
+                observed_request["think_selection_reason"] = (
+                    request.think_selection_reason
+                )
+                observed_request["required_num_ctx"] = request.required_num_ctx
+                observed_request["requested_num_ctx"] = request.requested_num_ctx
+                observed_request["effective_num_ctx"] = request.num_ctx
                 activity_update(
                     phase,
                     attempt,
                     request.think,
+                    request.think_selection_reason,
+                    request.num_ctx,
                 )
 
             run_kwargs = {
                 "system": system,
                 "format_schema": format_schema_copy,
                 "value_validator": value_validator,
+                "required_num_ctx": required_num_ctx,
                 "activity_update": activity_update,
                 "request_observer": _observe_request,
             }
@@ -2572,6 +2763,16 @@ class LocalStructuredSession:
                             )
                     except _StructuredResourceError as exc:
                         result = self._failure(exc.failure_class, str(exc))
+            result = replace(
+                result,
+                think=observed_request.get("think"),
+                think_selection_reason=observed_request.get(
+                    "think_selection_reason"
+                ),
+                required_num_ctx=required_num_ctx,
+                requested_num_ctx=self.num_ctx,
+                effective_num_ctx=observed_request.get("effective_num_ctx"),
+            )
             activity_update("vote", max(0, len(result.attempts) - 1))
             try:
                 self.audit_store.record_session(
@@ -2580,6 +2781,12 @@ class LocalStructuredSession:
                     model=self.model or self.runtime_role,
                     result=result,
                     think=observed_request.get("think"),
+                    think_selection_reason=observed_request.get(
+                        "think_selection_reason"
+                    ),
+                    required_num_ctx=required_num_ctx,
+                    requested_num_ctx=self.num_ctx,
+                    effective_num_ctx=observed_request.get("effective_num_ctx"),
                 )
             except Exception:
                 # Observability must never turn a valid local decision into a failure.

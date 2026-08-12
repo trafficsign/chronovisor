@@ -1392,7 +1392,10 @@ def test_successful_routine_decision_records_replay_without_extra_model_calls(
     assert rows[0]["models"] == ["ornith:test", "gpt-oss:test"]
 
 
-def test_disagreement_runs_tie_break_and_selects_matching_existing_vote() -> None:
+def test_disagreement_runs_tie_break_and_selects_matching_existing_vote(
+    tmp_path: Path,
+) -> None:
+    audit_root = tmp_path / "adaptive-reasoning-audit"
     transport = ModelTransport(
         {
             "ornith:test": [_payload("apply", summary="primary")],
@@ -1401,9 +1404,9 @@ def test_disagreement_runs_tie_break_and_selects_matching_existing_vote() -> Non
         }
     )
 
-    result = DecisionRouter(config=_config(), transport=transport).decide(
-        "prompt", SCHEMA
-    )
+    result = DecisionRouter(
+        config=_config(), transport=transport, audit_root=audit_root
+    ).decide("prompt", SCHEMA)
 
     assert result.ok is True
     assert result.decision["decision"] == "defer"
@@ -1413,6 +1416,32 @@ def test_disagreement_runs_tie_break_and_selects_matching_existing_vote() -> Non
         "gpt-oss:test",
         "gemma:test",
     ]
+    assert [request.think for request in transport.requests] == [
+        "medium",
+        "medium",
+        "medium",
+    ]
+    assert [
+        request.think_selection_reason for request in transport.requests
+    ] == ["adaptive_canary_not_adopted"] * 3
+    audits = [vote.audit_record()["session"] for vote in result.votes]
+    assert [audit["think"] for audit in audits] == ["medium"] * 3
+    assert [audit["think_selection_reason"] for audit in audits] == [
+        "adaptive_canary_not_adopted"
+    ] * 3
+    assert all(audit["context_tokens"] == 16_384 for audit in audits)
+    assert all(audit["requested_num_ctx"] == 16_384 for audit in audits)
+    assert all(isinstance(audit["required_num_ctx"], int) for audit in audits)
+    assert all(
+        audit["structured_generation_policy_version"]
+        == STRUCTURED_GENERATION_POLICY_VERSION
+        for audit in audits
+    )
+    assert all(
+        audit["structured_generation_policy_sha256"]
+        == structured_generation_policy_sha256()
+        for audit in audits
+    )
 
 
 def test_finalize_rejects_agreement_digest_not_bound_to_actual_result(

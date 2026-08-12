@@ -68,13 +68,19 @@ class QueueTransport:
         return response
 
 
-def test_structured_generation_policy_seals_the_fixed_sampler() -> None:
-    assert STRUCTURED_GENERATION_POLICY_VERSION == 6
+def test_structured_generation_policy_seals_adaptive_reasoning_fallback() -> None:
+    assert STRUCTURED_GENERATION_POLICY_VERSION == 7
     assert structured_generation_policy() == {
-        "version": 6,
+        "version": 7,
         "temperature": 0,
         "seed": 0,
-        "think": {"default": "medium"},
+        "think": {
+            "default": "medium",
+            "fallback": "medium",
+            "levels": ["low", "medium", "high"],
+            "bounded_low_lanes": ["local_repair", "read_back_repair"],
+            "adaptive_canary_adopted": False,
+        },
         "stream": False,
         "format": "json_schema",
     }
@@ -82,6 +88,59 @@ def test_structured_generation_policy_seals_the_fixed_sampler() -> None:
     assert structured_think_mode("muse-glimmer:30b", num_ctx=65_536) == "medium"
     assert structured_think_mode("ornith:35b", num_ctx=114_688) == "medium"
     assert len(structured_generation_policy_sha256()) == 64
+
+
+@pytest.mark.parametrize(
+    ("overrides", "expected"),
+    [
+        (
+            {"decision_lane": "local_repair", "runtime_role": "classification.primary"},
+            "low",
+        ),
+        ({"runtime_role": "classification.primary"}, "medium"),
+        ({"runtime_role": "classification.tie_break"}, "high"),
+        (
+            {"runtime_role": "classification.primary", "task_impact": "high"},
+            "high",
+        ),
+    ],
+)
+def test_structured_think_mode_selects_verified_candidate_levels(
+    overrides: dict[str, object], expected: str
+) -> None:
+    assert structured_think_mode(
+        "local:test",
+        num_ctx=16_384,
+        required_num_ctx=8_000,
+        num_predict=2_048,
+        supported_reasoning_levels=("low", "medium", "high"),
+        adaptive_reasoning_adopted=True,
+        **{"task_impact": "normal", **overrides},
+    ) == expected
+
+
+def test_structured_think_mode_falls_back_for_capability_and_headroom() -> None:
+    common = {
+        "model": "local:test",
+        "num_ctx": 16_384,
+        "required_num_ctx": 8_000,
+        "num_predict": 2_048,
+        "runtime_role": "classification.tie_break",
+        "task_impact": "normal",
+        "adaptive_reasoning_adopted": True,
+    }
+    assert structured_think_mode(**common) == "medium"
+    assert structured_think_mode(
+        **common, supported_reasoning_levels=("low", "medium")
+    ) == "medium"
+    assert structured_think_mode(
+        **{**common, "num_ctx": 9_000},
+        supported_reasoning_levels=("medium", "high"),
+    ) == "medium"
+    assert structured_think_mode(
+        **{**common, "adaptive_reasoning_adopted": False},
+        supported_reasoning_levels=("low", "medium", "high"),
+    ) == "medium"
 
 
 def test_transport_format_schema_does_not_weaken_client_validation() -> None:
@@ -432,10 +491,18 @@ def test_active_marker_is_atomic_redacted_and_removed_after_session(
             "pid",
             "thread_id",
             "think",
+            "think_selection_reason",
+            "structured_generation_policy_version",
+            "structured_generation_policy_sha256",
+            "required_num_ctx",
+            "requested_num_ctx",
+            "context_tokens",
         }
         assert marker["phase"] == "generate"
         assert marker["attempt"] == 0
         assert marker["think"] == "medium"
+        assert marker["think_selection_reason"] == "adaptive_canary_not_adopted"
+        assert marker["context_tokens"] == 32_768
         return '{"decision":"apply","summary":"ok"}'
 
     result = LocalStructuredSession(
@@ -456,6 +523,14 @@ def test_active_marker_is_atomic_redacted_and_removed_after_session(
     assert secret not in audit_text
     audit = json.loads(audit_text)
     assert audit["think"] == "medium"
+    assert audit["think_selection_reason"] == "adaptive_canary_not_adopted"
+    assert audit["context_tokens"] == 32_768
+    assert audit["requested_num_ctx"] == 32_768
+    assert isinstance(audit["required_num_ctx"], int)
+    assert audit["structured_generation_policy_version"] == 7
+    assert audit["structured_generation_policy_sha256"] == (
+        structured_generation_policy_sha256()
+    )
     summary = json.loads((audit_root / "summary.json").read_text(encoding="utf-8"))
     assert summary["sessions"]["first_pass_valid"] == 1
     assert summary["sessions"]["repaired"] == 0
@@ -477,6 +552,28 @@ def test_transport_failure_clears_activity_and_records_failure(tmp_path: Path) -
     assert audit["think"] == "medium"
     summary = json.loads((audit_root / "summary.json").read_text(encoding="utf-8"))
     assert summary["sessions"]["failures"] == {"transport_error": 1}
+
+
+def test_repair_turns_keep_one_sealed_production_reasoning_selection() -> None:
+    transport = QueueTransport(
+        '{"decision":"apply"}',
+        '{"decision":"apply","summary":"ok"}',
+    )
+
+    result = _session(
+        transport,
+        runtime_role="classification.primary",
+        decision_lane="local_repair",
+    ).run("repair", SCHEMA)
+
+    assert result.ok is True
+    assert [request.think for request in transport.requests] == ["medium", "medium"]
+    assert [request.think_selection_reason for request in transport.requests] == [
+        "adaptive_canary_not_adopted",
+        "adaptive_canary_not_adopted",
+    ]
+    assert result.think == "medium"
+    assert result.think_selection_reason == "adaptive_canary_not_adopted"
 
 
 def test_observability_write_failure_does_not_change_valid_result(
