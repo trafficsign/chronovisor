@@ -2483,8 +2483,6 @@ def test_decision_trace_lane_rails_start_at_source_node_edges() -> None:
         "pair-artifact-join",
         "tie_break-quorum",
         "quorum-artifact-join",
-        "quorum-artifact-trunk",
-        "artifact-input",
         "quorum-hold",
     ):
         assert f'data-path-key="{key}"' in page
@@ -2495,6 +2493,8 @@ def test_decision_trace_lane_rails_start_at_source_node_edges() -> None:
         "tie_break-hold",
         "pair-quorum",
         "quorum-artifact",
+        "quorum-artifact-trunk",
+        "artifact-input",
     ):
         assert f'data-path-key="{key}"' not in page
     assert 'data-trace-key="quorum"' in page

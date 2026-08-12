@@ -758,8 +758,6 @@ function updateDecisionSvgHarness(trace, focusEvent = null) {
     ["pair-tie_break", pairNoState],
     ["tie_break-quorum", safeNoQuorum && tieUsed ? "error" : tieAgreement ? "done" : "pending"],
     ["quorum-artifact-join", quorumYesState],
-    ["quorum-artifact-trunk", quorumYesState],
-    ["artifact-input", safeQuorumReached ? "done" : "pending"],
     ["quorum-hold", quorumNoState],
     ["artifact-seal", sealStates.input],
     ["seal-decision", sealYesState],

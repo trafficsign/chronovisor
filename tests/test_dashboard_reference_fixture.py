@@ -41,20 +41,19 @@ def test_dashboard_reference_contract_and_state_matrix() -> None:
     assert contract["topology"]["decision_nodes"] == 1
     assert contract["topology"]["dynamic_paths"] == []
     assert contract["topology"]["artifact_join_state_order"] == [
+        "single",
         "pair_yes",
         "tie_input",
         "gate",
         "gate_yes",
-        "quorum_trunk",
-        "artifact_input",
         "no",
     ]
     assert contract["topology"]["fixed_paths"][-9:] == [
+        "single-artifact",
+        "pair-tie-break",
         "pair-artifact-join",
         "tie_break-quorum",
         "quorum-artifact-join",
-        "quorum-artifact-trunk",
-        "artifact-input",
         "artifact-seal",
         "seal-decision",
         "quorum-hold",
@@ -75,14 +74,14 @@ def test_dashboard_reference_contract_and_state_matrix() -> None:
     assert cases["H"]["state"] == "idle"
     assert cases["H"]["active_lane"] is None
     assert [cases[key]["artifact_join_states"] for key in cases] == [
-        ["pending", "pending", "pending", "pending", "pending", "pending", "pending"],
-        ["pending", "pending", "pending", "pending", "pending", "pending", "pending"],
-        ["done", "pending", "pending", "pending", "pending", "done", "pending"],
-        ["pending", "pending", "pending", "pending", "pending", "pending", "pending"],
-        ["pending", "done", "done", "done", "done", "done", "pending"],
-        ["pending", "error", "error", "pending", "pending", "pending", "error"],
-        ["done", "pending", "pending", "pending", "pending", "done", "pending"],
-        ["pending", "pending", "pending", "pending", "pending", "pending", "pending"],
+        ["pending", "pending", "pending", "pending", "pending", "pending"],
+        ["pending", "pending", "pending", "pending", "pending", "pending"],
+        ["pending", "done", "pending", "pending", "pending", "pending"],
+        ["pending", "pending", "pending", "pending", "pending", "pending"],
+        ["pending", "pending", "done", "done", "done", "pending"],
+        ["pending", "pending", "error", "error", "pending", "error"],
+        ["pending", "done", "pending", "pending", "pending", "pending"],
+        ["pending", "pending", "pending", "pending", "pending", "pending"],
     ]
 
     for row in cases.values():
@@ -168,8 +167,6 @@ def test_dashboard_reference_svg_has_one_fixed_safe_topology() -> None:
         "pair-artifact-join",
         "tie_break-quorum",
         "quorum-artifact-join",
-        "quorum-artifact-trunk",
-        "artifact-input",
         "quorum-hold",
         "artifact-seal",
         "seal-decision",
@@ -210,19 +207,24 @@ def test_dashboard_reference_svg_has_one_fixed_safe_topology() -> None:
             "M1096 335 V377 Q1096 387 1086 387 H190 Q180 387 180 397 "
             "V440 Q180 450 190 450 H220"
         ),
-        "single-artifact": "M1106 325 H1300 Q1310 325 1310 335 V393",
+        "single-artifact": (
+            "M1096 335 C1096 345 1106 350 1106 360 Q1106 370 1116 370 "
+            "H1300 Q1310 370 1310 380 V393"
+        ),
         "challenger-agree": "M1106 450 H1168",
         "pair-tie_break": (
             "M1208 490 V502 Q1208 512 1198 512 "
             "H190 Q180 512 180 522 V565 Q180 575 190 575 H220"
         ),
-        "pair-artifact-join": "M1248 450 H1300 Q1310 450 1310 440",
+        "pair-artifact-join": (
+            "M1248 450 H1278 Q1288 450 1288 440 "
+            "V414 Q1288 404 1298 404 H1299"
+        ),
         "tie_break-quorum": "M1106 575 H1217",
         "quorum-artifact-join": (
-            "M1248 545 V524 Q1248 514 1258 514 H1300 Q1310 514 1310 504"
+            "M1248 545 V524 Q1248 514 1258 514 "
+            "H1300 Q1310 514 1310 504 V415"
         ),
-        "quorum-artifact-trunk": "M1310 504 V440",
-        "artifact-input": "M1310 440 V415",
         "quorum-hold": (
             "M1278 575 H1408 Q1418 575 1418 585 V590 Q1418 600 1428 600 H1448"
         ),
@@ -236,16 +238,14 @@ def test_dashboard_reference_svg_has_one_fixed_safe_topology() -> None:
         expected_boundary_paths
     )
     assert all(
-        matching("data-path-key", key)[0].get("marker-end") is None
+        matching("data-path-key", key)[0].get("marker-end") == "url(#trace-arrow)"
         for key in (
+            "single-artifact",
             "pair-artifact-join",
             "quorum-artifact-join",
-            "quorum-artifact-trunk",
         )
     )
-    assert matching("data-path-key", "artifact-input")[0]["marker-end"] == (
-        "url(#trace-arrow)"
-    )
+    assert not {"quorum-artifact-trunk", "artifact-input"} & paths.keys()
 
     repair_paths = [
         attrs
@@ -352,9 +352,10 @@ def test_dashboard_reference_svg_has_one_fixed_safe_topology() -> None:
         for _tag, attrs in elements
         if attrs.get("class") == "trace-path-label"
     ] == ["271", "381"]
-    assert matching("class", "trace-branch-label trace-yes-label")[0]["y"] == "443"
+    assert matching("class", "trace-branch-label trace-yes-label")[0]["y"] == "438"
     assert matching("class", "trace-branch-label trace-no-label")[0]["y"] == "506"
-    assert matching("data-pair-yes-label", "true")[0]["x"] == "1272"
+    pair_yes_label = matching("data-pair-yes-label", "true")[0]
+    assert (pair_yes_label["x"], pair_yes_label["y"]) == ("1258", "438")
     assert matching("data-pair-no-label", "true")[0]["x"] == "1180"
     assert matching("data-quorum-yes-label", "true")[0]["x"] == "1268"
     assert matching("data-quorum-no-label", "true")[0]["x"] == "1336"
@@ -658,8 +659,8 @@ def test_dashboard_reference_keeps_selection_and_bucket_truth() -> None:
     assert '["pair-artifact-join", pairAgreement ? "done" : "pending"]' in harness
     assert '["tie_break-quorum", safeNoQuorum && tieUsed ? "error"' in harness
     assert '["quorum-artifact-join", quorumYesState]' in harness
-    assert '["quorum-artifact-trunk", quorumYesState]' in harness
-    assert '["artifact-input", safeQuorumReached ? "done" : "pending"]' in harness
+    assert "quorum-artifact-trunk" not in harness
+    assert "artifact-input" not in harness
     assert '["quorum-hold", quorumNoState]' in harness
     assert '["artifact-seal", sealStates.input]' in harness
     assert '["seal-decision", sealYesState]' in harness
