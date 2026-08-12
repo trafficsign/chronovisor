@@ -65,9 +65,11 @@ from chronovisor.decision.local_structured import (
     LocalStructuredSession,
     ValidationIssue,
     preflight_structured_request,
+    production_reasoning_authority_matches,
     required_structured_context_tokens,
     structured_generation_policy,
     structured_generation_policy_sha256,
+    structured_reasoning_output_reservation,
     structured_request_sha256,
     validate_json,
 )
@@ -2152,8 +2154,7 @@ class DecisionRouter:
             decision_lane=decision_lane,
             task_impact=(
                 "high"
-                if role == "tie_break"
-                or decision_lane in TIE_BREAK_MUTATING_MAJORITY_LANES
+                if decision_lane in TIE_BREAK_MUTATING_MAJORITY_LANES
                 else "normal"
             ),
             reasoning_authority=reasoning_authority,
@@ -2312,7 +2313,43 @@ class DecisionRouter:
         schema: Mapping[str, Any],
         system: str | None,
     ) -> tuple[int, int]:
-        return decision_request_context(self.config, prompt, schema, system)
+        required, selected = decision_request_context(
+            self.config, prompt, schema, system
+        )
+        if self.policy.source != "runtime_role_mapping":
+            return required, selected
+        authority = self.authority_router()
+        routes = authority.get("routes")
+        if authority.get("error") or not isinstance(routes, list) or not any(
+            isinstance(route, Mapping)
+            and isinstance(route.get("model"), str)
+            and isinstance(route.get("role"), str)
+            and route["role"].removeprefix("classification.") in self._active_roles
+            and production_reasoning_authority_matches(
+                route["model"],
+                route["role"],
+                route,
+            )
+            for route in routes
+        ):
+            return required, selected
+        try:
+            reservation = structured_reasoning_output_reservation(
+                self.config.num_predict
+            )
+        except ValueError as exc:
+            self.config_error = str(exc)
+            return required, selected
+        reserved_required = required + (reservation - self.config.num_predict)
+        selected = next(
+            (
+                value
+                for value in decision_context_buckets(self.config)
+                if value >= reserved_required
+            ),
+            self.config.num_ctx,
+        )
+        return reserved_required, selected
 
     def _no_probe_residency_plan(
         self,

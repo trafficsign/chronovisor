@@ -15,6 +15,7 @@ import pytest
 
 from chronovisor.core import llm_config, ollama
 from chronovisor.core.llm_runtime import (
+    MAX_OUTPUT_TOKENS,
     GenerationResult,
     GenerationRoute,
     LLMRuntime,
@@ -26,6 +27,7 @@ from chronovisor.core.llm_runtime import (
     TokenUsage,
 )
 from chronovisor.core.ollama_adapter import OllamaAdapter
+from chronovisor.decision import local_structured
 from chronovisor.decision.local_structured import (
     STRUCTURED_GENERATION_POLICY_VERSION,
     ChatRequest,
@@ -33,8 +35,11 @@ from chronovisor.decision.local_structured import (
     LocalStructuredSession,
     ValidationIssue,
     normalize_json_output,
+    production_reasoning_authority_matches,
+    required_structured_context_tokens,
     structured_generation_policy,
     structured_generation_policy_sha256,
+    structured_reasoning_output_reservation,
     structured_think_mode,
     validate_json,
 )
@@ -48,6 +53,35 @@ SCHEMA = {
         "summary": {"type": "string", "minLength": 1},
     },
 }
+
+REASONING_ROUTES = {
+    "classification.primary": (
+        "maxwell1500/ornith-35b:Q5_K_M",
+        "062d753f197f4b1d9b5e82c4c2fa19e6f39293628e8638ceac287ca517c6fca8",
+    ),
+    "classification.challenger": (
+        "muse-glimmer:30b-mxfp8-dflash",
+        "14bd0cb8d43fddcf8f637f3efe14b4888e97cc47ca4558dbb78ce56ce0448a37",
+    ),
+    "classification.tie_break": (
+        "gemma4:26b",
+        "5571076f3d70050487b26b341705799e0ab29b808164f90d20d4cf84f699d251",
+    ),
+}
+
+
+def _reasoning_authority(runtime_role: str) -> dict[str, Any]:
+    model, digest = REASONING_ROUTES[runtime_role]
+    return {
+        "role": runtime_role,
+        "provider": "ollama",
+        "model": model,
+        "location": "local",
+        "ollama": {
+            "engine": {"name": "ollama", "version": "0.32.8"},
+            "digest": digest,
+        },
+    }
 
 
 class QueueTransport:
@@ -69,9 +103,9 @@ class QueueTransport:
 
 
 def test_structured_generation_policy_seals_adaptive_reasoning_authority() -> None:
-    assert STRUCTURED_GENERATION_POLICY_VERSION == 8
+    assert STRUCTURED_GENERATION_POLICY_VERSION == 9
     assert structured_generation_policy() == {
-        "version": 8,
+        "version": 9,
         "temperature": 0,
         "seed": 0,
         "think": {
@@ -80,20 +114,52 @@ def test_structured_generation_policy_seals_adaptive_reasoning_authority() -> No
             "levels": ["low", "medium", "high"],
             "bounded_low_lanes": ["local_repair", "read_back_repair"],
             "adaptive_canary_adopted": True,
-            "adaptive_authority": {
-                "runtime_role": "classification.challenger",
-                "model": "muse-glimmer:30b-mxfp8-dflash",
-                "levels": ["low", "medium", "high"],
-                "provider": "ollama",
-                "location": "local",
-                "engine": {"name": "ollama", "version": "0.32.8"},
-                "model_digest": (
-                    "14bd0cb8d43fddcf8f637f3efe14b4888e97cc47ca4558dbb78ce56ce0448a37"
-                ),
-                "renderer": "glimmer",
-                "renderer_source_commit": (
-                    "4f066a6fb0c05d7dcf68e02858a5ddd399af716a"
-                ),
+            "adaptive_authority": [
+                {
+                    "runtime_role": "classification.primary",
+                    "model": "maxwell1500/ornith-35b:Q5_K_M",
+                    "model_digest": (
+                        "062d753f197f4b1d9b5e82c4c2fa19e6f39293628e8638ceac287ca517c6fca8"
+                    ),
+                    "renderer": "boolean",
+                    "levels": ["low", "medium", "high"],
+                    "provider": "ollama",
+                    "location": "local",
+                    "engine": {"name": "ollama", "version": "0.32.8"},
+                },
+                {
+                    "runtime_role": "classification.challenger",
+                    "model": "muse-glimmer:30b-mxfp8-dflash",
+                    "model_digest": (
+                        "14bd0cb8d43fddcf8f637f3efe14b4888e97cc47ca4558dbb78ce56ce0448a37"
+                    ),
+                    "renderer": "native_levels",
+                    "levels": ["low", "medium", "high"],
+                    "provider": "ollama",
+                    "location": "local",
+                    "engine": {"name": "ollama", "version": "0.32.8"},
+                },
+                {
+                    "runtime_role": "classification.tie_break",
+                    "model": "gemma4:26b",
+                    "model_digest": (
+                        "5571076f3d70050487b26b341705799e0ab29b808164f90d20d4cf84f699d251"
+                    ),
+                    "renderer": "boolean",
+                    "levels": ["low", "medium", "high"],
+                    "provider": "ollama",
+                    "location": "local",
+                    "engine": {"name": "ollama", "version": "0.32.8"},
+                },
+            ],
+            "output_budget": {
+                "basis": "configured_num_predict",
+                "reservation": "high",
+                "multipliers": {
+                    "low": {"numerator": 2, "denominator": 3},
+                    "medium": {"numerator": 1, "denominator": 1},
+                    "high": {"numerator": 4, "denominator": 3},
+                },
             },
         },
         "stream": False,
@@ -102,6 +168,9 @@ def test_structured_generation_policy_seals_adaptive_reasoning_authority() -> No
     assert structured_think_mode("gpt-oss:20b", num_ctx=32_768) == "medium"
     assert structured_think_mode("muse-glimmer:30b", num_ctx=65_536) == "medium"
     assert structured_think_mode("ornith:35b", num_ctx=114_688) == "medium"
+    assert structured_reasoning_output_reservation(3_072) == 4_096
+    with pytest.raises(ValueError, match="exceeds runtime limit"):
+        structured_reasoning_output_reservation(98_305)
     assert len(structured_generation_policy_sha256()) == 64
 
 
@@ -113,7 +182,7 @@ def test_structured_generation_policy_seals_adaptive_reasoning_authority() -> No
             "low",
         ),
         ({"runtime_role": "classification.primary"}, "medium"),
-        ({"runtime_role": "classification.tie_break"}, "high"),
+        ({"runtime_role": "classification.tie_break"}, "medium"),
         (
             {"runtime_role": "classification.primary", "task_impact": "high"},
             "high",
@@ -583,14 +652,20 @@ def test_active_marker_is_atomic_redacted_and_removed_after_session(
     assert secret not in audit_text
     audit = json.loads(audit_text)
     assert audit["think"] == "medium"
+    assert audit["ollama_think"] == "medium"
+    assert audit["num_predict"] == 2_048
     assert audit["think_selection_reason"] == "capability_not_adopted"
     assert audit["context_tokens"] == 32_768
     assert audit["requested_num_ctx"] == 32_768
     assert isinstance(audit["required_num_ctx"], int)
-    assert audit["structured_generation_policy_version"] == 8
+    assert audit["structured_generation_policy_version"] == 9
     assert audit["structured_generation_policy_sha256"] == (
         structured_generation_policy_sha256()
     )
+    assert result.ollama_think == "medium"
+    assert result.num_predict == 2_048
+    assert result.audit_record()["ollama_think"] == "medium"
+    assert result.audit_record()["num_predict"] == 2_048
     summary = json.loads((audit_root / "summary.json").read_text(encoding="utf-8"))
     assert summary["sessions"]["first_pass_valid"] == 1
     assert summary["sessions"]["repaired"] == 0
@@ -649,32 +724,139 @@ def test_direct_session_without_route_authority_stays_medium_for_all_repairs() -
     ]
     assert result.think == "medium"
     assert result.think_selection_reason == "capability_not_adopted"
+    assert result.required_num_ctx == required_structured_context_tokens(
+        "repair",
+        SCHEMA,
+        system=None,
+        num_predict=256,
+        max_output_chars=1_000,
+        max_feedback_chars=2_000,
+    )
 
 
 @pytest.mark.parametrize(
-    ("engine_version", "model_digest"),
+    ("runtime_role", "decision_lane", "task_impact", "expected", "budget"),
     [
-        (
-            "0.32.9",
-            "14bd0cb8d43fddcf8f637f3efe14b4888e97cc47ca4558dbb78ce56ce0448a37",
-        ),
-        ("0.32.8", "0" * 64),
+        (runtime_role, decision_lane, task_impact, expected, budget)
+        for runtime_role in REASONING_ROUTES
+        for decision_lane, task_impact, expected, budget in (
+            ("local_repair", "normal", "low", 2_048),
+            (None, "normal", "medium", 3_072),
+            (None, "high", "high", 4_096),
+        )
     ],
 )
-def test_muse_reasoning_authority_fails_closed_on_runtime_identity_drift(
+def test_production_roles_apply_selected_reasoning_budget_to_every_turn(
+    tmp_path: Path,
+    runtime_role: str,
+    decision_lane: str | None,
+    task_impact: str,
+    expected: str,
+    budget: int,
+) -> None:
+    model, _digest = REASONING_ROUTES[runtime_role]
+    transport = QueueTransport(
+        '{"decision":"apply"}',
+        '{"decision":"apply","summary":"ok"}',
+    )
+
+    result = _session(
+        transport,
+        model=model,
+        runtime_role=runtime_role,
+        decision_lane=decision_lane,
+        task_impact=task_impact,
+        reasoning_authority=_reasoning_authority(runtime_role),
+        audit_root=tmp_path / "audit",
+        num_ctx=32_768,
+        num_predict=3_072,
+    ).run("decide", SCHEMA)
+
+    assert result.ok is True
+    assert [request.think for request in transport.requests] == [expected] * 2
+    assert [request.num_predict for request in transport.requests] == [budget] * 2
+    assert [request.ollama_think for request in transport.requests] == [
+        expected if runtime_role == "classification.challenger" else True
+    ] * 2
+    assert result.ollama_think == (
+        expected if runtime_role == "classification.challenger" else True
+    )
+    assert result.num_predict == budget
+    audit = json.loads(
+        (tmp_path / "audit" / "audit.jsonl").read_text(encoding="utf-8")
+    )
+    assert audit["ollama_think"] == result.ollama_think
+    assert audit["num_predict"] == budget
+
+
+@pytest.mark.parametrize(("ollama_think", "expected"), [(None, "medium"), (True, True)])
+def test_default_transport_forwards_effective_reasoning_to_ollama(
+    monkeypatch: pytest.MonkeyPatch,
+    ollama_think: bool | None,
+    expected: bool | str,
+) -> None:
+    observed: dict[str, Any] = {}
+
+    def chat(_messages: object, **kwargs: Any) -> ollama.ChatResponse:
+        observed.update(kwargs)
+        return ollama.ChatResponse(content='{"decision":"apply","summary":"ok"}')
+
+    monkeypatch.setattr(ollama, "runtime_structured_chat", chat)
+    request = ChatRequest(
+        model="local:test",
+        messages=(),
+        schema=SCHEMA,
+        num_ctx=16_384,
+        num_predict=2_048,
+        keep_alive="0",
+        read_timeout_ms=1_000,
+        max_output_chars=1_000,
+        think="medium",
+        ollama_think=ollama_think,
+    )
+
+    local_structured._default_transport(
+        request,
+        runtime_role="classification.primary",
+        expected_model="local:test",
+        expected_location="local",
+        source_data_class="system",
+        source_sensitivity="high",
+    )
+
+    assert observed["think"] == expected
+    assert observed["num_predict"] == 2_048
+
+
+@pytest.mark.parametrize(
+    ("runtime_role", "engine_version", "model_digest"),
+    [
+        (
+            "classification.primary",
+            "0.32.9",
+            "062d753f197f4b1d9b5e82c4c2fa19e6f39293628e8638ceac287ca517c6fca8",
+        ),
+        ("classification.primary", "0.32.8", "0" * 64),
+        ("classification.challenger", "0.32.8", "0" * 64),
+        ("classification.tie_break", "0.32.8", "0" * 64),
+    ],
+)
+def test_reasoning_authority_fails_closed_on_runtime_identity_drift(
+    runtime_role: str,
     engine_version: str,
     model_digest: str,
 ) -> None:
     transport = QueueTransport('{"decision":"apply","summary":"ok"}')
+    model, _digest = REASONING_ROUTES[runtime_role]
     result = _session(
         transport,
-        model="muse-glimmer:30b-mxfp8-dflash",
-        runtime_role="classification.challenger",
+        model=model,
+        runtime_role=runtime_role,
         decision_lane="local_repair",
         reasoning_authority={
-            "role": "classification.challenger",
+            "role": runtime_role,
             "provider": "ollama",
-            "model": "muse-glimmer:30b-mxfp8-dflash",
+            "model": model,
             "location": "local",
             "ollama": {
                 "engine": {"name": "ollama", "version": engine_version},
@@ -688,17 +870,71 @@ def test_muse_reasoning_authority_fails_closed_on_runtime_identity_drift(
     assert result.think_selection_reason == "capability_not_adopted"
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("role", "classification.challenger"),
+        ("model", "wrong:model"),
+        ("provider", "remote"),
+        ("location", "remote"),
+    ],
+)
+def test_reasoning_authority_fails_closed_on_route_identity_drift(
+    field: str,
+    value: str,
+) -> None:
+    runtime_role = "classification.primary"
+    authority = _reasoning_authority(runtime_role)
+    authority[field] = value
+    transport = QueueTransport('{"decision":"apply","summary":"ok"}')
+    assert not production_reasoning_authority_matches(
+        REASONING_ROUTES[runtime_role][0], runtime_role, authority
+    )
+
+    result = _session(
+        transport,
+        model=REASONING_ROUTES[runtime_role][0],
+        runtime_role=runtime_role,
+        decision_lane="local_repair",
+        reasoning_authority=authority,
+    ).run("repair", SCHEMA)
+
+    assert result.ok is True
+    assert transport.requests[0].think == "medium"
+    assert transport.requests[0].num_predict == 256
+    assert result.think_selection_reason == "capability_not_adopted"
+
+
+def test_exact_reasoning_authority_rejects_oversize_high_budget_at_construction() -> (
+    None
+):
+    runtime_role = "classification.primary"
+    num_predict = MAX_OUTPUT_TOKENS * 3 // 4 + 1
+    authority = _reasoning_authority(runtime_role)
+    assert production_reasoning_authority_matches(
+        REASONING_ROUTES[runtime_role][0], runtime_role, authority
+    )
+
+    with pytest.raises(ValueError, match="exceeds runtime limit"):
+        _session(
+            QueueTransport(),
+            model=REASONING_ROUTES[runtime_role][0],
+            runtime_role=runtime_role,
+            reasoning_authority=authority,
+            num_predict=num_predict,
+        )
+
+    session = _session(
+        QueueTransport(),
+        model=REASONING_ROUTES[runtime_role][0],
+        runtime_role=runtime_role,
+        num_predict=num_predict,
+    )
+    assert session.num_predict == num_predict
+
+
 def test_reasoning_authority_is_detached_from_external_mutation() -> None:
-    authority: dict[str, Any] = {
-        "role": "classification.challenger",
-        "provider": "ollama",
-        "model": "muse-glimmer:30b-mxfp8-dflash",
-        "location": "local",
-        "ollama": {
-            "engine": {"name": "ollama", "version": "0.32.8"},
-            "digest": "14bd0cb8d43fddcf8f637f3efe14b4888e97cc47ca4558dbb78ce56ce0448a37",
-        },
-    }
+    authority = _reasoning_authority("classification.challenger")
     transport = QueueTransport('{"decision":"apply","summary":"ok"}')
     session = _session(
         transport,
@@ -1190,6 +1426,12 @@ def test_initial_input_byte_cap_fails_before_call(tmp_path: Path) -> None:
     assert "load" not in _trace_phases(audit_root)
     audit = json.loads((audit_root / "audit.jsonl").read_text(encoding="utf-8"))
     assert "think" not in audit
+    assert "ollama_think" not in audit
+    assert "num_predict" not in audit
+    assert result.ollama_think is None
+    assert result.num_predict is None
+    assert result.audit_record()["ollama_think"] is None
+    assert result.audit_record()["num_predict"] is None
 
 
 def test_context_preflight_reserves_two_maximum_repair_histories() -> None:

@@ -29,6 +29,7 @@ import httpx
 
 from chronovisor.core import ollama
 from chronovisor.core.canonical_json import canonical_json_strict as _canonical_json
+from chronovisor.core.llm_runtime import MAX_OUTPUT_TOKENS
 
 MAX_REPAIR_TURNS = 2
 MAX_RESPONSES = 1 + MAX_REPAIR_TURNS
@@ -40,7 +41,7 @@ SAFE_RUNTIME_ROLE_RE = re.compile(r"^[a-z][a-z0-9._-]{0,127}$")
 LOCAL_ACTIVITY_PHASES = frozenset(
     {"trigger", "load", "context", "generate", "repair", "validate", "vote"}
 )
-STRUCTURED_GENERATION_POLICY_VERSION = 8
+STRUCTURED_GENERATION_POLICY_VERSION = 9
 STRUCTURED_GENERATION_TEMPERATURE = 0
 STRUCTURED_GENERATION_SEED = 0
 _DEFAULT_STRUCTURED_MEMORY_RESERVE_GIB = 16
@@ -49,20 +50,37 @@ _ADAPTIVE_REASONING_CANARY_ADOPTED = True
 _BOUNDED_LOW_REASONING_LANES = frozenset({"local_repair", "read_back_repair"})
 _REASONING_LEVELS = frozenset({"low", "medium", "high"})
 _ADAPTIVE_REASONING_LEVELS = ("low", "medium", "high")
-_ADAPTIVE_REASONING_MODEL = "muse-glimmer:30b-mxfp8-dflash"
-_ADAPTIVE_REASONING_RUNTIME_ROLE = "classification.challenger"
-# ponytail: exact role/tag is the runtime-checkable upper bound; add a sealed
-# renderer metadata probe if adaptive authority expands beyond this one model.
-_ADAPTIVE_REASONING_AUTHORITY = {
-    "runtime_role": _ADAPTIVE_REASONING_RUNTIME_ROLE,
-    "model": _ADAPTIVE_REASONING_MODEL,
-    "levels": _ADAPTIVE_REASONING_LEVELS,
-    "provider": "ollama",
-    "location": "local",
-    "engine": {"name": "ollama", "version": "0.32.8"},
-    "model_digest": "14bd0cb8d43fddcf8f637f3efe14b4888e97cc47ca4558dbb78ce56ce0448a37",
-    "renderer": "glimmer",
-    "renderer_source_commit": "4f066a6fb0c05d7dcf68e02858a5ddd399af716a",
+_ADAPTIVE_REASONING_AUTHORITIES = (
+    {
+        "runtime_role": "classification.primary",
+        "model": "maxwell1500/ornith-35b:Q5_K_M",
+        "model_digest": (
+            "062d753f197f4b1d9b5e82c4c2fa19e6f39293628e8638ceac287ca517c6fca8"
+        ),
+        "renderer": "boolean",
+    },
+    {
+        "runtime_role": "classification.challenger",
+        "model": "muse-glimmer:30b-mxfp8-dflash",
+        "model_digest": (
+            "14bd0cb8d43fddcf8f637f3efe14b4888e97cc47ca4558dbb78ce56ce0448a37"
+        ),
+        "renderer": "native_levels",
+    },
+    {
+        "runtime_role": "classification.tie_break",
+        "model": "gemma4:26b",
+        "model_digest": (
+            "5571076f3d70050487b26b341705799e0ab29b808164f90d20d4cf84f699d251"
+        ),
+        "renderer": "boolean",
+    },
+)
+_ADAPTIVE_REASONING_ENGINE = {"name": "ollama", "version": "0.32.8"}
+_REASONING_OUTPUT_BUDGET_PROFILE = {
+    "low": (2, 3),
+    "medium": (1, 1),
+    "high": (4, 3),
 }
 _SOURCE_DATA_CLASSES = frozenset({"page", "derived_snippet", "raw", "system"})
 _SOURCE_SENSITIVITIES = frozenset({"normal", "high"})
@@ -127,10 +145,23 @@ def structured_generation_policy() -> dict[str, Any]:
             "levels": ["low", "medium", "high"],
             "bounded_low_lanes": sorted(_BOUNDED_LOW_REASONING_LANES),
             "adaptive_canary_adopted": _ADAPTIVE_REASONING_CANARY_ADOPTED,
-            "adaptive_authority": {
-                **_ADAPTIVE_REASONING_AUTHORITY,
-                "levels": list(_ADAPTIVE_REASONING_LEVELS),
-                "engine": dict(_ADAPTIVE_REASONING_AUTHORITY["engine"]),
+            "adaptive_authority": [
+                {
+                    **authority,
+                    "levels": list(_ADAPTIVE_REASONING_LEVELS),
+                    "provider": "ollama",
+                    "location": "local",
+                    "engine": dict(_ADAPTIVE_REASONING_ENGINE),
+                }
+                for authority in _ADAPTIVE_REASONING_AUTHORITIES
+            ],
+            "output_budget": {
+                "basis": "configured_num_predict",
+                "reservation": "high",
+                "multipliers": {
+                    level: {"numerator": ratio[0], "denominator": ratio[1]}
+                    for level, ratio in _REASONING_OUTPUT_BUDGET_PROFILE.items()
+                },
             },
         },
         "stream": False,
@@ -186,12 +217,12 @@ def _structured_think_selection(
     supported = frozenset(supported_reasoning_levels)
     if not supported.issubset(_REASONING_LEVELS):
         return "medium", "capability_invalid"
-    if (runtime_role or "").endswith(".tie_break") or task_impact == "high":
+    if task_impact == "high":
         if "high" not in supported:
             return "medium", "high_not_supported"
         if num_ctx < required_num_ctx + num_predict:
             return "medium", "high_headroom_insufficient"
-        return "high", "tie_break_or_high_impact"
+        return "high", "high_impact"
     if decision_lane in _BOUNDED_LOW_REASONING_LANES:
         if "low" in supported:
             return "low", "bounded_repair_low"
@@ -199,31 +230,74 @@ def _structured_think_selection(
     return "medium", "medium_default"
 
 
-def _production_reasoning_levels(
+def _reasoning_authority_profile(
+    model: str,
+    runtime_role: str,
+) -> Mapping[str, Any] | None:
+    return next(
+        (
+            profile
+            for profile in _ADAPTIVE_REASONING_AUTHORITIES
+            if profile["model"] == model and profile["runtime_role"] == runtime_role
+        ),
+        None,
+    )
+
+
+def _production_reasoning_profile(
     model: str,
     runtime_role: str,
     authority: Mapping[str, Any] | None,
-) -> tuple[str, ...]:
-    ollama_identity = authority.get("ollama") if isinstance(authority, Mapping) else None
+) -> Mapping[str, Any] | None:
+    profile = _reasoning_authority_profile(model, runtime_role)
+    ollama_identity = (
+        authority.get("ollama") if isinstance(authority, Mapping) else None
+    )
     engine = (
-        ollama_identity.get("engine")
-        if isinstance(ollama_identity, Mapping)
-        else None
+        ollama_identity.get("engine") if isinstance(ollama_identity, Mapping) else None
     )
     if (
-        model == _ADAPTIVE_REASONING_MODEL
-        and runtime_role == _ADAPTIVE_REASONING_RUNTIME_ROLE
+        profile is not None
         and isinstance(authority, Mapping)
         and authority.get("role") == runtime_role
         and authority.get("model") == model
-        and authority.get("provider") == _ADAPTIVE_REASONING_AUTHORITY["provider"]
-        and authority.get("location") == _ADAPTIVE_REASONING_AUTHORITY["location"]
-        and engine == _ADAPTIVE_REASONING_AUTHORITY["engine"]
-        and ollama_identity.get("digest")
-        == _ADAPTIVE_REASONING_AUTHORITY["model_digest"]
+        and authority.get("provider") == "ollama"
+        and authority.get("location") == "local"
+        and engine == _ADAPTIVE_REASONING_ENGINE
+        and ollama_identity.get("digest") == profile["model_digest"]
     ):
-        return _ADAPTIVE_REASONING_LEVELS
-    return ()
+        return profile
+    return None
+
+
+def production_reasoning_authority_matches(
+    model: str,
+    runtime_role: str,
+    authority: Mapping[str, Any] | None,
+) -> bool:
+    """Return whether identity matches a sealed production reasoning route."""
+
+    return _production_reasoning_profile(model, runtime_role, authority) is not None
+
+
+def _reasoning_num_predict(level: str, configured_num_predict: int) -> int:
+    numerator, denominator = _REASONING_OUTPUT_BUDGET_PROFILE[level]
+    return max(1, configured_num_predict * numerator // denominator)
+
+
+def structured_reasoning_output_reservation(configured_num_predict: int) -> int:
+    """Return the policy-sealed maximum output reservation."""
+
+    if (
+        isinstance(configured_num_predict, bool)
+        or not isinstance(configured_num_predict, int)
+        or configured_num_predict < 1
+    ):
+        raise ValueError("configured_num_predict must be a positive integer")
+    reservation = _reasoning_num_predict("high", configured_num_predict)
+    if reservation > MAX_OUTPUT_TOKENS:
+        raise ValueError("high reasoning output reservation exceeds runtime limit")
+    return reservation
 
 
 def structured_think_mode(
@@ -360,6 +434,7 @@ class ChatRequest:
     temperature: int = STRUCTURED_GENERATION_TEMPERATURE
     seed: int = STRUCTURED_GENERATION_SEED
     think: bool | str = False
+    ollama_think: bool | str | None = None
     think_selection_reason: str | None = None
     required_num_ctx: int | None = None
     requested_num_ctx: int | None = None
@@ -458,6 +533,8 @@ class LocalStructuredResult:
     failure_reason: str | None = None
     returned_model: str | None = None
     think: bool | str | None = None
+    ollama_think: bool | str | None = None
+    num_predict: int | None = None
     think_selection_reason: str | None = None
     required_num_ctx: int | None = None
     requested_num_ctx: int | None = None
@@ -486,6 +563,8 @@ class LocalStructuredResult:
                 structured_generation_policy_sha256()
             ),
             "think": self.think,
+            "ollama_think": self.ollama_think,
+            "num_predict": self.num_predict,
             "think_selection_reason": self.think_selection_reason,
             "required_num_ctx": self.required_num_ctx,
             "requested_num_ctx": self.requested_num_ctx,
@@ -1428,6 +1507,10 @@ class LocalConsensusAuditStore:
             record["think"] = think
         if think_selection_reason is not None:
             record["think_selection_reason"] = think_selection_reason
+        if result.ollama_think is not None:
+            record["ollama_think"] = result.ollama_think
+        if result.num_predict is not None:
+            record["num_predict"] = result.num_predict
         self.append(record)
 
 
@@ -2029,7 +2112,7 @@ def _default_transport(
         max_output_chars=request.max_output_chars,
         temperature=request.temperature,
         seed=request.seed,
-        think=request.think,
+        think=request.think if request.ollama_think is None else request.ollama_think,
     )
 
 
@@ -2158,6 +2241,14 @@ class LocalStructuredSession:
             reasoning_authority, Mapping
         ):
             raise ValueError("reasoning_authority must be a mapping")
+        normalized_model = model.strip() if isinstance(model, str) else ""
+        if (
+            _production_reasoning_profile(
+                normalized_model, selected_runtime_role, reasoning_authority
+            )
+            is not None
+        ):
+            structured_reasoning_output_reservation(num_predict)
         if resource_lease_timeout_ms is not None and (
             isinstance(resource_lease_timeout_ms, bool)
             or not isinstance(resource_lease_timeout_ms, int)
@@ -2298,8 +2389,9 @@ class LocalStructuredSession:
         worst_case_history_tokens = base_input_tokens + MAX_REPAIR_TURNS * (
             64 + self.max_output_chars + self.max_feedback_chars
         )
+        reserved_num_predict = self._output_reservation()
         if (
-            worst_case_history_tokens + self.num_predict + CONTEXT_SAFETY_TOKENS
+            worst_case_history_tokens + reserved_num_predict + CONTEXT_SAFETY_TOKENS
             <= effective_num_ctx
         ):
             return None
@@ -2307,9 +2399,19 @@ class LocalStructuredSession:
             "context_window_exceeded",
             "initial input plus two fixed UTF-8 byte-bounded repair histories "
             "and output reservation exceed num_ctx "
-            f"({worst_case_history_tokens}+{self.num_predict}+"
+            f"({worst_case_history_tokens}+{reserved_num_predict}+"
             f"{CONTEXT_SAFETY_TOKENS}>{effective_num_ctx})",
         )
+
+    def _output_reservation(self) -> int:
+        if (
+            _production_reasoning_profile(
+                self.model, self.runtime_role, self.reasoning_authority
+            )
+            is None
+        ):
+            return self.num_predict
+        return structured_reasoning_output_reservation(self.num_predict)
 
     def _reasoning_request_template(
         self,
@@ -2321,16 +2423,21 @@ class LocalStructuredSession:
         activity_update: _ActivityUpdate | None,
     ) -> ChatRequest:
         observed_num_ctx = self.num_ctx if requested_num_ctx is None else requested_num_ctx
+        profile = _production_reasoning_profile(
+            self.model, self.runtime_role, self.reasoning_authority
+        )
+        authority_profile = _reasoning_authority_profile(self.model, self.runtime_role)
+        reserved_num_predict = self._output_reservation()
         selection = _structured_think_selection(
             self.model,
             num_ctx=effective_num_ctx,
             required_num_ctx=required_num_ctx,
-            num_predict=self.num_predict,
+            num_predict=reserved_num_predict,
             runtime_role=self.runtime_role,
             decision_lane=self.decision_lane,
             task_impact=self.task_impact,
-            supported_reasoning_levels=_production_reasoning_levels(
-                self.model, self.runtime_role, self.reasoning_authority
+            supported_reasoning_levels=(
+                _ADAPTIVE_REASONING_LEVELS if profile is not None else ()
             ),
             adaptive_reasoning_adopted=_ADAPTIVE_REASONING_CANARY_ADOPTED,
         )
@@ -2346,13 +2453,19 @@ class LocalStructuredSession:
             messages=(),
             schema=schema,
             num_ctx=effective_num_ctx,
-            num_predict=self.num_predict,
+            num_predict=_reasoning_num_predict(selection[0], self.num_predict),
             keep_alive=self.keep_alive,
             read_timeout_ms=self.read_timeout_ms,
             max_output_chars=self.max_output_chars,
             temperature=STRUCTURED_GENERATION_TEMPERATURE,
             seed=STRUCTURED_GENERATION_SEED,
             think=selection[0],
+            ollama_think=(
+                selection[0]
+                if authority_profile is None
+                or authority_profile["renderer"] == "native_levels"
+                else True
+            ),
             think_selection_reason=selection[1],
             required_num_ctx=required_num_ctx,
             requested_num_ctx=observed_num_ctx,
@@ -2471,14 +2584,15 @@ class LocalStructuredSession:
 
         for index in range(self.max_responses):
             estimated_input_tokens = _estimated_message_tokens(messages)
+            reserved_num_predict = self._output_reservation()
             if (
-                estimated_input_tokens + self.num_predict + CONTEXT_SAFETY_TOKENS
+                estimated_input_tokens + reserved_num_predict + CONTEXT_SAFETY_TOKENS
                 > effective_num_ctx
             ):
                 return self._failure(
                     "context_window_exceeded",
                     "conservative prompt estimate plus output reservation exceeds "
-                    f"num_ctx ({estimated_input_tokens}+{self.num_predict}+"
+                    f"num_ctx ({estimated_input_tokens}+{reserved_num_predict}+"
                     f"{CONTEXT_SAFETY_TOKENS}>{effective_num_ctx})",
                     attempts,
                 )
@@ -2752,7 +2866,7 @@ class LocalStructuredSession:
                 prompt,
                 schema,
                 system=system,
-                num_predict=self.num_predict,
+                num_predict=self._output_reservation(),
                 max_output_chars=self.max_output_chars,
                 max_feedback_chars=self.max_feedback_chars,
             )
@@ -2802,6 +2916,12 @@ class LocalStructuredSession:
                 attempt: int,
             ) -> None:
                 observed_request["think"] = request.think
+                observed_request["ollama_think"] = (
+                    request.think
+                    if request.ollama_think is None
+                    else request.ollama_think
+                )
+                observed_request["num_predict"] = request.num_predict
                 observed_request["think_selection_reason"] = (
                     request.think_selection_reason
                 )
@@ -2854,7 +2974,7 @@ class LocalStructuredSession:
                         prompt=prompt,
                         schema=schema,
                         system=system,
-                        num_predict=self.num_predict,
+                        num_predict=self._output_reservation(),
                         max_output_chars=self.max_output_chars,
                         max_feedback_chars=self.max_feedback_chars,
                         min_num_ctx_override=self.resource_min_num_ctx,
@@ -2882,6 +3002,8 @@ class LocalStructuredSession:
             result = replace(
                 result,
                 think=observed_request.get("think"),
+                ollama_think=observed_request.get("ollama_think"),
+                num_predict=observed_request.get("num_predict"),
                 think_selection_reason=observed_request.get("think_selection_reason"),
                 required_num_ctx=required_num_ctx,
                 requested_num_ctx=observed_request.get("requested_num_ctx"),
@@ -2926,9 +3048,11 @@ __all__ = [
     "ValidationIssue",
     "normalize_json_output",
     "preflight_structured_request",
+    "production_reasoning_authority_matches",
     "required_structured_context_tokens",
     "structured_generation_policy",
     "structured_generation_policy_sha256",
+    "structured_reasoning_output_reservation",
     "structured_think_mode",
     "structured_request_sha256",
     "validate_json",

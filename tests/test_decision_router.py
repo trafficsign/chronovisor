@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from chronovisor.core.llm_runtime import MAX_OUTPUT_TOKENS
 from chronovisor.core.runtime_config import DecisionRouterConfig
 from chronovisor.decision.decision_lane_contract_cases import (
     decision_lane_contract_case_manifest_sha256,
@@ -1445,25 +1446,49 @@ def test_disagreement_runs_tie_break_and_selects_matching_existing_vote(
 
 
 @pytest.mark.parametrize(
-    ("role", "decision_lane", "expected_think", "expected_reason"),
+    (
+        "role",
+        "decision_lane",
+        "digest",
+        "expected_think",
+        "expected_reason",
+        "expected_num_predict",
+        "expected_ollama_think",
+    ),
     [
-        ("primary", "local_repair", "medium", "capability_not_adopted"),
-        ("challenger", "local_repair", "low", "bounded_repair_low"),
-        ("challenger", None, "medium", "medium_default"),
-        (
-            "challenger",
-            "recall_auto_apply",
-            "high",
-            "tie_break_or_high_impact",
-        ),
-        ("tie_break", "recall_auto_apply", "medium", "capability_not_adopted"),
+        (role, decision_lane, digest, think, reason, budget, ollama_think)
+        for role, digest, ollama_think in (
+            (
+                "primary",
+                "062d753f197f4b1d9b5e82c4c2fa19e6f39293628e8638ceac287ca517c6fca8",
+                True,
+            ),
+            (
+                "challenger",
+                "14bd0cb8d43fddcf8f637f3efe14b4888e97cc47ca4558dbb78ce56ce0448a37",
+                None,
+            ),
+            (
+                "tie_break",
+                "5571076f3d70050487b26b341705799e0ab29b808164f90d20d4cf84f699d251",
+                True,
+            ),
+        )
+        for decision_lane, think, reason, budget in (
+            ("local_repair", "low", "bounded_repair_low", 170),
+            (None, "medium", "medium_default", 256),
+            ("recall_auto_apply", "high", "high_impact", 341),
+        )
     ],
 )
-def test_production_reasoning_authority_selects_only_verified_muse_levels(
+def test_production_reasoning_authority_selects_verified_levels_for_every_role(
     role: str,
     decision_lane: str | None,
+    digest: str,
     expected_think: str,
     expected_reason: str,
+    expected_num_predict: int,
+    expected_ollama_think: bool | str,
 ) -> None:
     models = {
         "primary": "maxwell1500/ornith-35b:Q5_K_M",
@@ -1491,11 +1516,7 @@ def test_production_reasoning_authority_selects_only_verified_muse_levels(
             "revision": None,
             "ollama": {
                 "engine": {"name": "ollama", "version": "0.32.8"},
-                "digest": (
-                    "14bd0cb8d43fddcf8f637f3efe14b4888e97cc47ca4558dbb78ce56ce0448a37"
-                    if role == "challenger"
-                    else "0" * 64
-                ),
+                "digest": digest,
                 "quantization_level": "test",
             },
         }
@@ -1517,9 +1538,198 @@ def test_production_reasoning_authority_selects_only_verified_muse_levels(
 
     assert vote.valid is True
     assert transport.requests[0].think == expected_think
+    assert transport.requests[0].num_predict == expected_num_predict
+    assert transport.requests[0].ollama_think == (
+        expected_think if expected_ollama_think is None else expected_ollama_think
+    )
     assert transport.requests[0].think_selection_reason == expected_reason
     assert vote.result.audit_record()["think"] == expected_think
     assert vote.result.audit_record()["think_selection_reason"] == expected_reason
+
+
+@pytest.mark.parametrize(
+    "role",
+    ["primary", "challenger", "tie_break"],
+)
+def test_production_reasoning_authority_fails_closed_on_digest_mismatch(
+    role: str,
+) -> None:
+    models = {
+        "primary": "maxwell1500/ornith-35b:Q5_K_M",
+        "challenger": "muse-glimmer:30b-mxfp8-dflash",
+        "tie_break": "gemma4:26b",
+    }
+    model = models[role]
+    transport = ModelTransport({model: [_payload("apply")]})
+    router = DecisionRouter(
+        config=_config(
+            primary_model=models["primary"],
+            challenger_model=models["challenger"],
+            tie_break_model=models["tie_break"],
+        ),
+        transport=transport,
+    )
+    router._route_provenance_snapshot = {
+        role: {
+            "role": f"classification.{role}",
+            "provider": "ollama",
+            "model": model,
+            "location": "local",
+            "protocol": "ollama-native",
+            "endpoint_sha256": "e" * 64,
+            "revision": None,
+            "ollama": {
+                "engine": {"name": "ollama", "version": "0.32.8"},
+                "digest": "0" * 64,
+                "quantization_level": "test",
+            },
+        }
+    }
+
+    vote = router._vote(
+        role=role,
+        model=model,
+        keep_alive="0",
+        num_ctx=16_384,
+        prompt="prompt",
+        schema=SCHEMA,
+        system=None,
+        agreement_key=None,
+        decision_lane="local_repair",
+        ingest_repair_contract=None,
+        source=None,
+    )
+
+    assert vote.valid is True
+    assert transport.requests[0].think == "medium"
+    assert transport.requests[0].num_predict == 256
+    assert transport.requests[0].ollama_think == (
+        "medium" if role == "challenger" else True
+    )
+    assert transport.requests[0].think_selection_reason == "capability_not_adopted"
+
+
+def _request_context_authority_router(
+    *,
+    source: str = "runtime_role_mapping",
+    primary_overrides: dict[str, object] | None = None,
+    num_predict: int = 256,
+) -> DecisionRouter:
+    models = {
+        "primary": "maxwell1500/ornith-35b:Q5_K_M",
+        "challenger": "muse-glimmer:30b-mxfp8-dflash",
+        "tie_break": "gemma4:26b",
+    }
+    router = DecisionRouter(
+        config=_config(
+            **{f"{role}_model": model for role, model in models.items()},
+            num_ctx=262_144,
+            num_predict=num_predict,
+        ),
+        transport=ModelTransport({}),
+    )
+    router.policy = replace(router.policy, source=source)
+    primary = {
+        "role": "classification.primary",
+        "provider": "ollama",
+        "model": models["primary"],
+        "location": "local",
+        "protocol": "ollama-native",
+        "endpoint_sha256": "e" * 64,
+        "revision": None,
+        "ollama": {
+            "engine": {"name": "ollama", "version": "0.32.8"},
+            "digest": "062d753f197f4b1d9b5e82c4c2fa19e6f39293628e8638ceac287ca517c6fca8",
+            "quantization_level": "test",
+        },
+    }
+    primary.update(primary_overrides or {})
+    router._route_provenance_snapshot = {
+        "primary": primary,
+        **{
+            role: {
+                "role": f"classification.{role}",
+                "provider": "custom_transport",
+                "model": models[role],
+                "location": "local",
+                "protocol": "custom-transport",
+                "endpoint_sha256": None,
+                "revision": None,
+                "ollama": None,
+            }
+            for role in ("challenger", "tie_break")
+        },
+    }
+    return router
+
+
+@pytest.mark.parametrize(
+    ("source", "overrides"),
+    [
+        ("evaluation_candidate", {}),
+        ("runtime_role_mapping", {"model": "not-authorized:test"}),
+        ("runtime_role_mapping", {"provider": "custom_transport"}),
+        (
+            "runtime_role_mapping",
+            {
+                "ollama": {
+                    "engine": {"name": "ollama", "version": "0.32.8"},
+                    "digest": "0" * 64,
+                }
+            },
+        ),
+        (
+            "runtime_role_mapping",
+            {
+                "ollama": {
+                    "engine": {"name": "ollama", "version": "0.32.9"},
+                    "digest": "062d753f197f4b1d9b5e82c4c2fa19e6f39293628e8638ceac287ca517c6fca8",
+                }
+            },
+        ),
+    ],
+)
+def test_request_context_reserves_high_output_only_for_exact_authority(
+    monkeypatch: pytest.MonkeyPatch,
+    source: str,
+    overrides: dict[str, object],
+) -> None:
+    from chronovisor.decision import decision_router
+
+    monkeypatch.setattr(
+        decision_router, "decision_request_context", lambda *_args: (16_300, 16_384)
+    )
+    monkeypatch.setattr(
+        decision_router, "decision_context_buckets", lambda _config: (16_384, 32_768)
+    )
+
+    exact = _request_context_authority_router()
+    unmatched = _request_context_authority_router(
+        source=source,
+        primary_overrides=overrides,
+    )
+
+    assert exact._request_context("prompt", SCHEMA, None) == (16_385, 32_768)
+    assert unmatched._request_context("prompt", SCHEMA, None) == (16_300, 16_384)
+
+
+def test_request_context_reports_oversized_high_reservation_as_config_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from chronovisor.decision import decision_router
+
+    monkeypatch.setattr(
+        decision_router, "decision_request_context", lambda *_args: (16_300, 16_384)
+    )
+    router = _request_context_authority_router(
+        num_predict=MAX_OUTPUT_TOKENS * 3 // 4 + 1
+    )
+
+    result = router.decide("prompt", SCHEMA)
+
+    assert result.quarantine_reason == (
+        "router_config_invalid:high reasoning output reservation exceeds runtime limit"
+    )
 
 
 def test_finalize_rejects_agreement_digest_not_bound_to_actual_result(
