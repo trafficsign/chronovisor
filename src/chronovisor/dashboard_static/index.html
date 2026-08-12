@@ -92,6 +92,210 @@
         </span>
       </div>
       <div class="processing-lanes" id="processing-lanes" aria-live="polite"></div>
+
+      <svg class="processing-trace-connector" id="processing-trace-connector" aria-hidden="true">
+        <path id="processing-trace-connector-path"></path>
+      </svg>
+
+      <article class="decision-trace-panel" id="decision-trace-panel">
+        <div class="decision-trace-toolbar">
+          <div class="decision-trace-heading">
+            <span class="work-dot" aria-hidden="true"></span>
+            <div>
+              <h2>Decision Trace</h2>
+              <p id="work-summary">Waiting · 0 / 7</p>
+            </div>
+          </div>
+          <div class="decision-trace-meta" aria-label="Current decision metadata">
+            <span id="decision-elapsed">Elapsed --</span>
+            <span id="decision-context">Context --</span>
+            <span id="decision-trace-caption">Job --</span>
+          </div>
+        </div>
+
+        <div class="decision-trace-scroll" id="decision-trace-scroll" tabindex="0" aria-label="Decision trace harness; scroll horizontally for the complete trace">
+          <svg class="decision-trace-harness" id="decision-trace-harness" viewBox="0 0 1500 590" width="1400" height="551" role="img" aria-labelledby="decision-trace-svg-title decision-trace-svg-description">
+            <title id="decision-trace-svg-title">Local decision execution trace</title>
+            <desc id="decision-trace-svg-description">Packet, execution planning, fixed primary, challenger and tie-break lanes, then one shared artifact and decision. Unsafe quorum branches to hold before the artifact; only a seal failure branches from the artifact.</desc>
+            <defs>
+              <filter id="trace-glow-violet" x="-100%" y="-100%" width="300%" height="300%"><feGaussianBlur stdDeviation="4" result="blur"></feGaussianBlur><feMerge><feMergeNode in="blur"></feMergeNode><feMergeNode in="SourceGraphic"></feMergeNode></feMerge></filter>
+              <filter id="trace-glow-orange" x="-100%" y="-100%" width="300%" height="300%"><feGaussianBlur stdDeviation="3" result="blur"></feGaussianBlur><feMerge><feMergeNode in="blur"></feMergeNode><feMergeNode in="SourceGraphic"></feMergeNode></feMerge></filter>
+              <marker id="trace-arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M1 1 7 4 1 7" fill="none" stroke="context-stroke" stroke-linecap="round" stroke-linejoin="round"></path></marker>
+            </defs>
+
+            <g class="trace-overall" id="decision-overall-steps" aria-label="Decision milestones">
+              <path class="trace-path" data-path-key="packet-preflight" d="M116 10 H278" marker-end="url(#trace-arrow)"></path>
+              <path class="trace-path" data-path-key="preflight-execution_plan" d="M318 10 H478" marker-end="url(#trace-arrow)"></path>
+              <path class="trace-path" data-path-key="execution_plan-dispatch" d="M518 10 H698" marker-end="url(#trace-arrow)"></path>
+              <path class="trace-path" data-path-key="dispatch-local_decision" d="M738 10 H918" marker-end="url(#trace-arrow)"></path>
+              <path class="trace-path" data-path-key="execution-plan-context" d="M498 22 V44 H458 V154" marker-end="url(#trace-arrow)"></path>
+              <g class="trace-node" data-trace-key="packet" transform="translate(96 10)"><circle r="10"></circle><text y="32">Packet</text></g>
+              <g class="trace-node" data-trace-key="preflight" transform="translate(298 10)"><circle r="10"></circle><text y="32">Preflight</text></g>
+              <g class="trace-node" data-trace-key="execution_plan" data-trace-entry="true" transform="translate(498 10)"><circle r="10"></circle><text y="32">Execution Plan</text></g>
+              <g class="trace-node" data-trace-key="dispatch" transform="translate(718 10)"><circle r="10"></circle><text y="32">Dispatch</text></g>
+              <g class="trace-node" data-trace-key="local_decision" transform="translate(938 10)"><circle r="10"></circle><text y="32">Local Decision</text></g>
+            </g>
+
+            <g class="trace-plan" aria-label="Execution plan">
+              <rect class="trace-plan-frame" x="12" y="52" width="1476" height="190" rx="10"></rect>
+              <text class="trace-section-title" x="38" y="80">EXECUTION PLAN</text>
+              <text class="trace-kicker" x="62" y="112">MODEL ROUTES</text>
+              <path class="trace-divider" d="M250 96 V214"></path>
+              <g class="trace-model-route" data-model-key="primary" transform="translate(68 141)"><circle r="5"></circle><text x="14" y="4">Primary · <tspan data-model-value="primary">--</tspan></text></g>
+              <g class="trace-model-route" data-model-key="challenger" transform="translate(68 171)"><circle r="5"></circle><text x="14" y="4">Challenger · <tspan data-model-value="challenger">--</tspan></text></g>
+              <g class="trace-model-route" data-model-key="tie_break" transform="translate(68 201)"><circle r="5"></circle><text x="14" y="4">Tie-break · <tspan data-model-value="tie_break">--</tspan></text></g>
+
+              <text class="trace-kicker" x="312" y="112">CONTEXT WINDOW</text>
+              <path class="trace-path" data-path-key="plan-context" d="M328 164 H588" marker-end="url(#trace-arrow)"></path>
+              <g class="trace-node trace-plan-node" data-plan-key="context" transform="translate(458 164)"><circle r="10"></circle></g>
+              <text class="trace-value" data-plan-value="context-selection" x="458" y="197" text-anchor="middle">required — → selected —</text>
+              <text class="trace-value" data-plan-value="context-effective" x="458" y="212" text-anchor="middle">effective —</text>
+
+              <path class="trace-path" data-path-key="plan-headroom" d="M598 164 H676" marker-end="url(#trace-arrow)"></path>
+              <g class="trace-diamond" data-plan-key="headroom"><path d="M722 118 766 164 722 210 678 164Z"></path><text x="722" y="160">Task +</text><text x="722" y="174">headroom</text></g>
+
+              <text class="trace-kicker" x="800" y="90">REASONING BUDGET</text>
+              <path class="trace-path" data-path-key="reasoning-low" d="M768 164 H810 V114 H1008 V156"></path>
+              <path class="trace-path" data-path-key="reasoning-medium" d="M768 164 H1008"></path>
+              <path class="trace-path" data-path-key="reasoning-high" d="M768 164 H810 V210 H1008 V172"></path>
+              <g class="trace-reasoning" data-reasoning-key="low" transform="translate(822 114)"><circle r="9"></circle><text x="18" y="4">LOW</text></g>
+              <g class="trace-reasoning" data-reasoning-key="medium" transform="translate(822 164)"><circle r="9"></circle><text x="18" y="4">MEDIUM</text></g>
+              <g class="trace-reasoning" data-reasoning-key="high" transform="translate(822 210)"><circle r="9"></circle><text x="18" y="4">HIGH</text></g>
+
+              <path class="trace-path" data-path-key="plan-fit" d="M1008 164 H1140" marker-end="url(#trace-arrow)"></path>
+              <g class="trace-diamond" data-plan-key="fit"><path d="M1190 118 1240 164 1190 210 1140 164Z"></path><text x="1190" y="159">FIT GATE</text><text data-plan-value="fit" x="1190" y="175">WAITING</text></g>
+              <path class="trace-path" data-path-key="plan-dispatch" d="M1240 164 H1452 V270 H214" marker-end="url(#trace-arrow)"></path>
+            </g>
+
+            <g class="trace-lanes" id="decision-lanes" aria-label="Local model lanes" aria-live="polite">
+              <path class="trace-path trace-next-voter" data-path-key="primary-challenger" d="M1040 294 V326 H214 V366" marker-end="url(#trace-arrow)"></path>
+              <path class="trace-path trace-single-path" data-path-key="single-artifact" d="M1040 294 H1340 V348" marker-end="url(#trace-arrow)"></path>
+              <path class="trace-path trace-next-voter" data-path-key="challenger-agree" d="M1040 390 H1128" marker-end="url(#trace-arrow)"></path>
+              <path class="trace-path trace-yes-path" data-path-key="pair-artifact" d="M1208 390 H1268 V360 H1320" marker-end="url(#trace-arrow)"></path>
+              <path class="trace-path trace-no-path" data-path-key="pair-tie_break" d="M1168 430 V466 H214" marker-end="url(#trace-arrow)"></path>
+              <path class="trace-path" data-path-key="tie_break-artifact" d="M1040 486 H1320 V380" marker-end="url(#trace-arrow)"></path>
+              <path class="trace-path trace-hold-path" data-path-key="pair-hold" d="M1168 430 V470 H1398" marker-end="url(#trace-arrow)"></path>
+              <path class="trace-path trace-hold-path" data-path-key="tie_break-hold" d="M1040 486 V470 H1398" marker-end="url(#trace-arrow)"></path>
+              <path class="trace-path" data-path-key="artifact-decision" d="M1360 370 H1420" marker-end="url(#trace-arrow)"></path>
+              <path class="trace-path trace-hold-path" data-path-key="artifact-hold" d="M1340 390 V442 H1418" marker-end="url(#trace-arrow)"></path>
+
+              <g class="decision-lane" data-decision-lane="primary" transform="translate(0 294)">
+                <text class="decision-role" data-lane-label="primary" x="36" y="-6">Primary</text>
+                <text class="decision-model" data-lane-model="primary" x="36" y="12">--</text>
+                <text class="decision-think" data-lane-think="primary" x="36" y="28">—</text>
+                <g class="decision-lane-steps" aria-label="Primary milestones">
+                  <g class="decision-lane-step" data-decision-lane-step="trigger" transform="translate(214)"><circle r="10"></circle><text y="-17">Trigger</text></g>
+                  <g class="decision-lane-step" data-decision-lane-step="load" transform="translate(378)"><circle r="10"></circle><text y="-17">Load</text></g>
+                  <g class="decision-lane-step" data-decision-lane-step="context" transform="translate(542)"><circle r="10"></circle><text y="-17">Build Context</text></g>
+                  <g class="decision-lane-step" data-decision-lane-step="generate" transform="translate(706)"><circle r="10"></circle><text y="-17">Generate</text></g>
+                  <g class="decision-lane-step" data-decision-lane-step="validate" transform="translate(870)"><circle r="10"></circle><text y="-17">Validate</text></g>
+                  <g class="decision-lane-step" data-decision-lane-step="vote" transform="translate(1040)"><circle r="10"></circle><text y="-17">Vote</text></g>
+                </g>
+                <path class="trace-path trace-lane-rail" data-lane-path="trigger-load" d="M224 0 H368" marker-end="url(#trace-arrow)"></path>
+                <path class="trace-path trace-lane-rail" data-lane-path="load-context" d="M388 0 H532" marker-end="url(#trace-arrow)"></path>
+                <path class="trace-path trace-lane-rail" data-lane-path="context-generate" d="M552 0 H696" marker-end="url(#trace-arrow)"></path>
+                <path class="trace-path trace-lane-rail" data-lane-path="generate-validate" d="M716 0 H860" marker-end="url(#trace-arrow)"></path>
+                <path class="trace-path trace-lane-rail" data-lane-path="validate-vote" d="M880 0 H1030" marker-end="url(#trace-arrow)"></path>
+                <path class="trace-path trace-repair-loop" data-repair-lane="primary" d="M870 12 V40 H706 V12" marker-end="url(#trace-arrow)"></path>
+                <text class="trace-repair-count" data-repair-count="primary" x="788" y="56">REPAIR 0</text>
+                <text class="decision-lane-result" data-lane-result="primary" x="1082" y="5">WAITING</text>
+              </g>
+
+              <g class="decision-lane" data-decision-lane="challenger" transform="translate(0 390)">
+                <text class="decision-role" data-lane-label="challenger" x="36" y="-6">Challenger</text>
+                <text class="decision-model" data-lane-model="challenger" x="36" y="12">--</text>
+                <text class="decision-think" data-lane-think="challenger" x="36" y="28">—</text>
+                <g class="decision-lane-steps" aria-label="Challenger milestones">
+                  <g class="decision-lane-step" data-decision-lane-step="trigger" transform="translate(214)"><circle r="10"></circle><text y="-17">Trigger</text></g>
+                  <g class="decision-lane-step" data-decision-lane-step="load" transform="translate(378)"><circle r="10"></circle><text y="-17">Load</text></g>
+                  <g class="decision-lane-step" data-decision-lane-step="context" transform="translate(542)"><circle r="10"></circle><text y="-17">Build Context</text></g>
+                  <g class="decision-lane-step" data-decision-lane-step="generate" transform="translate(706)"><circle r="10"></circle><text y="-17">Generate</text></g>
+                  <g class="decision-lane-step" data-decision-lane-step="validate" transform="translate(870)"><circle r="10"></circle><text y="-17">Validate</text></g>
+                  <g class="decision-lane-step" data-decision-lane-step="vote" transform="translate(1040)"><circle r="10"></circle><text y="-17">Vote</text></g>
+                </g>
+                <path class="trace-path trace-lane-rail" data-lane-path="trigger-load" d="M224 0 H368" marker-end="url(#trace-arrow)"></path>
+                <path class="trace-path trace-lane-rail" data-lane-path="load-context" d="M388 0 H532" marker-end="url(#trace-arrow)"></path>
+                <path class="trace-path trace-lane-rail" data-lane-path="context-generate" d="M552 0 H696" marker-end="url(#trace-arrow)"></path>
+                <path class="trace-path trace-lane-rail" data-lane-path="generate-validate" d="M716 0 H860" marker-end="url(#trace-arrow)"></path>
+                <path class="trace-path trace-lane-rail" data-lane-path="validate-vote" d="M880 0 H1030" marker-end="url(#trace-arrow)"></path>
+                <path class="trace-path trace-repair-loop" data-repair-lane="challenger" d="M870 12 V40 H706 V12" marker-end="url(#trace-arrow)"></path>
+                <text class="trace-repair-count" data-repair-count="challenger" x="788" y="56">REPAIR 0</text>
+                <text class="decision-lane-result" data-lane-result="challenger" x="1082" y="5">WAITING</text>
+              </g>
+
+              <g class="decision-lane" data-decision-lane="tie_break" transform="translate(0 486)">
+                <text class="decision-role" data-lane-label="tie_break" x="36" y="-6">Tie-break</text>
+                <text class="decision-model" data-lane-model="tie_break" x="36" y="12">--</text>
+                <text class="decision-think" data-lane-think="tie_break" x="36" y="28">—</text>
+                <g class="decision-lane-steps" aria-label="Tie-break milestones">
+                  <g class="decision-lane-step" data-decision-lane-step="trigger" transform="translate(214)"><circle r="10"></circle><text y="-17">Trigger</text></g>
+                  <g class="decision-lane-step" data-decision-lane-step="load" transform="translate(378)"><circle r="10"></circle><text y="-17">Load</text></g>
+                  <g class="decision-lane-step" data-decision-lane-step="context" transform="translate(542)"><circle r="10"></circle><text y="-17">Build Context</text></g>
+                  <g class="decision-lane-step" data-decision-lane-step="generate" transform="translate(706)"><circle r="10"></circle><text y="-17">Generate</text></g>
+                  <g class="decision-lane-step" data-decision-lane-step="validate" transform="translate(870)"><circle r="10"></circle><text y="-17">Validate</text></g>
+                  <g class="decision-lane-step" data-decision-lane-step="vote" transform="translate(1040)"><circle r="10"></circle><text y="-17">Vote</text></g>
+                </g>
+                <path class="trace-path trace-lane-rail" data-lane-path="trigger-load" d="M224 0 H368" marker-end="url(#trace-arrow)"></path>
+                <path class="trace-path trace-lane-rail" data-lane-path="load-context" d="M388 0 H532" marker-end="url(#trace-arrow)"></path>
+                <path class="trace-path trace-lane-rail" data-lane-path="context-generate" d="M552 0 H696" marker-end="url(#trace-arrow)"></path>
+                <path class="trace-path trace-lane-rail" data-lane-path="generate-validate" d="M716 0 H860" marker-end="url(#trace-arrow)"></path>
+                <path class="trace-path trace-lane-rail" data-lane-path="validate-vote" d="M880 0 H1030" marker-end="url(#trace-arrow)"></path>
+                <path class="trace-path trace-repair-loop" data-repair-lane="tie_break" d="M870 12 V40 H706 V12" marker-end="url(#trace-arrow)"></path>
+                <text class="trace-repair-count" data-repair-count="tie_break" x="788" y="56">REPAIR 0</text>
+                <text class="decision-lane-result" data-lane-result="tie_break" x="1082" y="5">STANDBY</text>
+              </g>
+
+              <g class="trace-diamond trace-agree" data-trace-key="agree"><path d="M1168 350 1208 390 1168 430 1128 390Z"></path><text x="1168" y="394">Agree?</text></g>
+              <g class="trace-node trace-shared-node" data-trace-key="artifact" transform="translate(1340 370)"><circle r="11"></circle><text y="-22">Artifact</text></g>
+              <g class="trace-node trace-shared-node" data-trace-key="decision" transform="translate(1440 370)"><circle r="11"></circle><text y="-22">Decision</text></g>
+              <g class="trace-node trace-hold-node" data-trace-key="hold" transform="translate(1418 470)"><circle r="12"></circle><text class="trace-hold-title" y="32">Hold</text><text class="trace-hold-reason" data-hold-reason="true" y="50">No safe quorum</text></g>
+            </g>
+          </svg>
+        </div>
+
+        <div class="decision-transition-bar" aria-label="Observed decision transitions">
+          <span class="decision-transition-state" id="decision-transition-state">LIVE · waiting</span>
+          <ol class="decision-transition-feed" id="decision-transition-feed"></ol>
+        </div>
+
+        <div class="decision-summary work-overview" id="work-overview" aria-live="polite">
+          <div class="decision-summary-copy">
+            <span class="decision-badge" id="decision-badge">WAITING</span>
+            <strong id="work-detail">Waiting for a local decision.</strong>
+            <span id="work-updated">Mutation stays locked until validation and quorum complete.</span>
+            <div class="decision-outcome-facts" aria-label="Decision explanation">
+              <div><span>WHY</span><strong id="decision-outcome-reason">Waiting for local work</strong></div>
+              <div><span>DATA</span><strong id="decision-outcome-data">No active decision</strong></div>
+              <div><span>NEXT</span><strong id="decision-outcome-next">Starts automatically</strong></div>
+            </div>
+          </div>
+          <div class="decision-facts">
+            <div><span>MODEL CALLS</span><strong id="decision-model-calls">0</strong></div>
+            <div><span>QUORUM</span><strong id="decision-quorum">0 / 2</strong></div>
+            <div><span>MUTATION</span><strong id="decision-mutation">Locked</strong></div>
+          </div>
+        </div>
+
+        <div class="trace-legacy-data" aria-hidden="true">
+          <div class="llm-signal trace-runtime-signal" id="llm-signal">
+            <div class="llm-signal-top">
+              <span class="signal-badge" id="llm-badge"><span class="signal-dot"></span><strong id="llm-state">idle</strong></span>
+              <span class="signal-age" id="llm-age">--</span>
+            </div>
+            <div class="signal-target" id="llm-target">No active ingest call</div>
+            <div class="signal-stats" id="llm-stats">Waiting for ingest work</div>
+            <div class="signal-sparkline" id="llm-sparkline" aria-hidden="true"></div>
+          </div>
+          <dl class="trace-meta-grid">
+            <div><dt>Raw</dt><dd id="current-raw">--</dd></div>
+            <div><dt>Operation</dt><dd id="current-op">--</dd></div>
+            <div><dt>Local Consensus</dt><dd id="local-consensus">idle</dd></div>
+            <div><dt>Frontier Repair</dt><dd id="frontier-repair">idle</dd></div>
+            <div><dt>Job</dt><dd id="current-job">--</dd></div>
+            <div><dt>Last Success</dt><dd id="last-success">--</dd></div>
+          </dl>
+        </div>
+      </article>
     </section>
 
     <section class="dashboard-grid">
@@ -446,108 +650,6 @@
           <div class="chart-stat"><span>Canaries</span><strong id="model-lab-canaries">--</strong></div>
         </div>
         <div class="model-grid" id="model-lab-grid"></div>
-      </article>
-
-      <article class="panel panel-wide decision-trace-panel" id="decision-trace-panel">
-        <div class="decision-trace-toolbar">
-          <div class="decision-trace-heading">
-            <span class="work-dot" aria-hidden="true"></span>
-            <div>
-              <h2>Decision Trace</h2>
-              <p id="work-summary">Waiting · 0 / 7</p>
-            </div>
-          </div>
-          <div class="decision-trace-meta" aria-label="Current decision metadata">
-            <span id="decision-elapsed">Elapsed --</span>
-            <span id="decision-context">Context --</span>
-            <span id="decision-trace-caption">Job --</span>
-          </div>
-        </div>
-
-        <div class="decision-overall-steps" id="decision-overall-steps" aria-label="Decision milestones"></div>
-
-        <div class="decision-transition-bar" aria-label="Observed decision transitions">
-          <span class="decision-transition-state" id="decision-transition-state">LIVE · waiting</span>
-          <ol class="decision-transition-feed" id="decision-transition-feed"></ol>
-        </div>
-
-        <div class="decision-table-head" aria-hidden="true">
-          <span>MODEL</span>
-          <span>Trigger</span>
-          <span>Load</span>
-          <span>Context</span>
-          <span>Generate</span>
-          <span>Validate</span>
-          <span>Vote</span>
-          <span>RESULT</span>
-        </div>
-        <div class="decision-lanes" id="decision-lanes" aria-label="Local model lanes" aria-live="polite">
-          <section class="decision-lane" data-decision-lane="primary">
-            <div class="decision-role"><strong>Primary</strong><span class="decision-model">--</span><span class="decision-think">—</span></div>
-            <div class="decision-lane-steps" aria-label="Primary milestones"></div>
-            <div class="decision-lane-result"><strong>WAITING</strong><span>Not started</span></div>
-          </section>
-          <section class="decision-lane" data-decision-lane="challenger">
-            <div class="decision-role"><strong>Challenger</strong><span class="decision-model">--</span><span class="decision-think">—</span></div>
-            <div class="decision-lane-steps" aria-label="Challenger milestones"></div>
-            <div class="decision-lane-result"><strong>WAITING</strong><span>Not started</span></div>
-          </section>
-          <section class="decision-lane" data-decision-lane="tie_break">
-            <div class="decision-role"><strong>Tie-break</strong><span class="decision-model">--</span><span class="decision-think">—</span></div>
-            <div class="decision-lane-steps" aria-label="Tie-break milestones"></div>
-            <div class="decision-lane-result"><strong>STANDBY</strong><span>Triggered only on disagreement</span></div>
-          </section>
-        </div>
-
-        <div class="decision-summary work-overview" id="work-overview" aria-live="polite">
-          <div class="decision-summary-copy">
-            <span class="decision-badge" id="decision-badge">WAITING</span>
-            <strong id="work-detail">Waiting for a local decision.</strong>
-            <span id="work-updated">Mutation stays locked until validation and quorum complete.</span>
-            <div class="decision-outcome-facts" aria-label="Decision explanation">
-              <div>
-                <span>WHY</span>
-                <strong id="decision-outcome-reason">Waiting for local work</strong>
-              </div>
-              <div>
-                <span>DATA</span>
-                <strong id="decision-outcome-data">No active decision</strong>
-              </div>
-              <div>
-                <span>NEXT</span>
-                <strong id="decision-outcome-next">Starts automatically</strong>
-              </div>
-            </div>
-          </div>
-          <div class="decision-facts">
-            <div><span>MODEL CALLS</span><strong id="decision-model-calls">0</strong></div>
-            <div><span>QUORUM</span><strong id="decision-quorum">0 / 2</strong></div>
-            <div><span>MUTATION</span><strong id="decision-mutation">Locked</strong></div>
-          </div>
-        </div>
-
-        <div class="trace-legacy-data" aria-hidden="true">
-          <div class="llm-signal trace-runtime-signal" id="llm-signal">
-            <div class="llm-signal-top">
-              <span class="signal-badge" id="llm-badge">
-                <span class="signal-dot"></span>
-                <strong id="llm-state">idle</strong>
-              </span>
-              <span class="signal-age" id="llm-age">--</span>
-            </div>
-            <div class="signal-target" id="llm-target">No active ingest call</div>
-            <div class="signal-stats" id="llm-stats">Waiting for ingest work</div>
-            <div class="signal-sparkline" id="llm-sparkline" aria-hidden="true"></div>
-          </div>
-          <dl class="trace-meta-grid">
-            <div><dt>Raw</dt><dd id="current-raw">--</dd></div>
-            <div><dt>Operation</dt><dd id="current-op">--</dd></div>
-            <div><dt>Local Consensus</dt><dd id="local-consensus">idle</dd></div>
-            <div><dt>Frontier Repair</dt><dd id="frontier-repair">idle</dd></div>
-            <div><dt>Job</dt><dd id="current-job">--</dd></div>
-            <div><dt>Last Success</dt><dd id="last-success">--</dd></div>
-          </dl>
-        </div>
       </article>
 
       <article class="panel">

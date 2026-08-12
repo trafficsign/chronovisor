@@ -143,6 +143,9 @@ function setState(state) {
 }
 
 const latestProcessingLanes = new Map();
+let latestDecisionTrace = {};
+let selectedProcessingLaneKey = "";
+let processingTraceResizeObserver = null;
 
 function setProcessingConnection(state, label) {
   els.processingConnection.dataset.state = state;
@@ -190,6 +193,61 @@ function processingLaneDetail(lane, now = Date.now()) {
   return details.join(" · ");
 }
 
+function processingLaneForTrace(trace) {
+  const role = String(trace?.task_role || "").toLowerCase().replaceAll("-", "_");
+  const named = ["typed_graph", "ingest", "recall", "audit", "improve", "repair"]
+    .find((key) => role.includes(key));
+  if (named && latestProcessingLanes.get(named)?.state === "active") return named;
+  return [...latestProcessingLanes.entries()].find(([, lane]) =>
+    lane.state === "active" && lane.current_step === "consensus"
+  )?.[0] || [...latestProcessingLanes.entries()].find(([, lane]) => lane.state === "active")?.[0] || "";
+}
+
+function updateProcessingTraceConnector() {
+  if (!els.processingTraceConnector || !els.processingTraceConnectorPath) return;
+  const source = els.processingLanes.querySelector(
+    `.processing-lane[data-processing-lane="${selectedProcessingLaneKey}"] .processing-step.active`
+  );
+  const target = els.decisionTraceHarness?.querySelector("[data-trace-entry]");
+  const panelBox = els.processingPanel.getBoundingClientRect();
+  if (!source || !target || !latestDecisionTrace?.request_sha256 || panelBox.width <= 0) {
+    els.processingTraceConnector.classList.remove("active");
+    els.processingTraceConnectorPath.removeAttribute("d");
+    return;
+  }
+  const sourceBox = source.getBoundingClientRect();
+  const targetBox = target.getBoundingClientRect();
+  const x1 = sourceBox.left + sourceBox.width / 2 - panelBox.left;
+  const y1 = sourceBox.bottom - panelBox.top - 3;
+  const x2 = targetBox.left + targetBox.width / 2 - panelBox.left;
+  const y2 = targetBox.top + targetBox.height / 2 - panelBox.top;
+  const bend = Math.max(y1 + 18, y2 - 22);
+  els.processingTraceConnector.setAttribute("viewBox", `0 0 ${panelBox.width} ${panelBox.height}`);
+  els.processingTraceConnectorPath.setAttribute(
+    "d",
+    `M${x1} ${y1} V${bend - 10} Q${x1} ${bend} ${x1 - 10} ${bend} H${x2 + 12} Q${x2} ${bend} ${x2} ${bend + 12} V${y2}`
+  );
+  els.processingTraceConnector.classList.add("active");
+}
+
+function updateProcessingTraceSelection(trace = latestDecisionTrace) {
+  latestDecisionTrace = trace || {};
+  selectedProcessingLaneKey = processingLaneForTrace(latestDecisionTrace);
+  els.processingLanes.querySelectorAll(".processing-lane").forEach((row) => {
+    const expanded = Boolean(
+      latestDecisionTrace.request_sha256
+      && row.dataset.processingLane === selectedProcessingLaneKey
+    );
+    row.setAttribute("aria-expanded", String(expanded));
+    row.tabIndex = expanded ? 0 : -1;
+  });
+  updateProcessingTraceConnector();
+  if (!processingTraceResizeObserver && typeof ResizeObserver !== "undefined") {
+    processingTraceResizeObserver = new ResizeObserver(updateProcessingTraceConnector);
+    processingTraceResizeObserver.observe(els.processingPanel);
+  }
+}
+
 function renderProcessingActivity(activity) {
   const lanes = Array.isArray(activity?.lanes) ? activity.lanes : [];
   const existing = new Map(
@@ -204,6 +262,8 @@ function renderProcessingActivity(activity) {
     const row = existing.get(key) || document.createElement("section");
     row.dataset.processingLane = key;
     row.className = `processing-lane ${lane.state === "active" ? "active" : "idle"}`;
+    row.setAttribute("role", "button");
+    row.setAttribute("aria-controls", "decision-trace-panel");
 
     let label = row.querySelector(".processing-lane-label");
     let track = row.querySelector(".processing-track");
@@ -224,6 +284,20 @@ function renderProcessingActivity(activity) {
       meta.append(document.createElement("strong"), document.createElement("span"));
       row.appendChild(meta);
     }
+    if (!row.dataset.traceKeyboardBound) {
+      const expand = () => {
+        if (row.dataset.processingLane !== selectedProcessingLaneKey) return;
+        row.setAttribute("aria-expanded", "true");
+        updateProcessingTraceConnector();
+      };
+      row.addEventListener("click", expand);
+      row.addEventListener("keydown", (event) => {
+        if (event.key !== "Enter" && event.key !== " ") return;
+        event.preventDefault();
+        expand();
+      });
+      row.dataset.traceKeyboardBound = "true";
+    }
 
     label.textContent = fmt(lane.label, key);
     reconcileProcessingLaneSteps(track, lane.steps);
@@ -241,6 +315,7 @@ function renderProcessingActivity(activity) {
   });
   els.processingPanel.dataset.activeCount = String(intValue(activity?.active_count));
   document.body.dataset.processingRevision = fmt(activity?.revision, "");
+  updateProcessingTraceSelection();
 }
 
 function updateProcessingElapsed() {
@@ -375,37 +450,196 @@ function cloneDecisionTrace(trace) {
   return JSON.parse(JSON.stringify(trace || {}));
 }
 
-function reconcileDecisionSteps(container, steps, className, focusKey = "") {
-  const latestKey = fmt(steps?.[steps.length - 1]?.key, "");
-  const followLatest =
-    className === "decision-step"
-    && (Boolean(focusKey) || container.dataset.latestTraceKey !== latestKey);
-  const existing = new Map(
-    [...container.querySelectorAll(`.${className}`)].map((node) => [
-      node.dataset.traceKey,
-      node,
-    ])
+const DECISION_TRACE_STATES = ["pending", "active", "done", "skipped", "error"];
+
+function setDecisionSvgState(node, state = "pending") {
+  if (!node) return;
+  node.classList.remove(...DECISION_TRACE_STATES);
+  node.classList.add(DECISION_TRACE_STATES.includes(state) ? state : "pending");
+  node.dataset.state = DECISION_TRACE_STATES.includes(state) ? state : "pending";
+}
+
+function setDecisionSvgText(selector, value) {
+  const node = els.decisionTraceHarness.querySelector(selector);
+  if (node) node.textContent = value;
+}
+
+function decisionOverallState(overall, key, fallback = "pending") {
+  return fmt(overall.get(key)?.status, fallback);
+}
+
+function updateDecisionSvgHarness(trace, focusEvent = null) {
+  const harness = els.decisionTraceHarness;
+  if (!harness) return;
+  const lanes = new Map(
+    (Array.isArray(trace.lanes) ? trace.lanes : []).map((lane) => [lane.key, lane])
   );
-  (Array.isArray(steps) ? steps : []).forEach((step) => {
-    const key = fmt(step.key, "step");
-    const item = existing.get(key) || document.createElement("span");
-    item.dataset.traceKey = key;
-    if (className === "decision-step") item.dataset.decisionOverallStep = key;
-    if (className === "decision-lane-step") item.dataset.decisionLaneStep = key;
-    item.className = `${className} ${fmt(step.status, "pending")}`;
-    item.classList.toggle("trace-focus", key === focusKey);
-    let label = item.querySelector("span");
-    if (!label) {
-      label = document.createElement("span");
-      item.appendChild(label);
-    }
-    label.textContent = fmt(step.label, "Step");
-    container.appendChild(item);
-    existing.delete(key);
+  const overall = new Map(
+    (Array.isArray(trace.overall) ? trace.overall : []).map((step) => [step.key, step])
+  );
+  const traceState = fmt(trace.state, "idle");
+  const outcome = trace.outcome || {};
+  const artifactPayloadState = decisionOverallState(overall, "artifact");
+  const sealFailure = traceState === "quarantined" && (
+    artifactPayloadState === "error"
+    || /seal/i.test(`${fmt(outcome.code, "")} ${fmt(outcome.reason, "")}`)
+  );
+  const noSafeQuorum = traceState === "quarantined" && !sealFailure;
+  const tieLane = lanes.get("tie_break") || {};
+  const tieUsed = ["active", "done", "error"].includes(fmt(tieLane.state, "pending"));
+  const pairAgreement = traceState === "agreed" && !tieUsed;
+  const tieAgreement = traceState === "agreed" && tieUsed;
+  const singleModel = trace.quorum_flow === false;
+  const agreementState = traceState === "agreed"
+    ? "done"
+    : traceState === "quarantined"
+      ? "error"
+      : tieUsed || lanes.get("challenger")?.state === "done"
+        ? "active"
+        : "pending";
+  const milestoneStates = {
+    packet: decisionOverallState(overall, "packet"),
+    preflight: decisionOverallState(overall, "packet"),
+    execution_plan: decisionOverallState(overall, "dispatch"),
+    dispatch: decisionOverallState(overall, "dispatch"),
+    local_decision: decisionOverallState(overall, "quorum"),
+    artifact: sealFailure ? "error" : noSafeQuorum ? "skipped" : artifactPayloadState,
+    decision: noSafeQuorum ? "skipped" : decisionOverallState(overall, "decision"),
+    hold: traceState === "quarantined" ? "error" : "pending",
+    agree: agreementState,
+  };
+
+  harness.dataset.traceState = traceState;
+  harness.dataset.outcomeKind = fmt(outcome.kind, "idle");
+  harness.dataset.taskRole = fmt(trace.task_role, "idle");
+  harness.querySelectorAll("[data-trace-key]").forEach((node) => {
+    setDecisionSvgState(node, milestoneStates[node.dataset.traceKey]);
   });
-  existing.forEach((node) => node.remove());
-  if (className === "decision-step") container.dataset.latestTraceKey = latestKey;
-  if (followLatest) container.scrollLeft = container.scrollWidth;
+  [
+    ["packet-preflight", milestoneStates.preflight],
+    ["preflight-execution_plan", milestoneStates.execution_plan],
+    ["execution_plan-dispatch", milestoneStates.dispatch],
+    ["dispatch-local_decision", milestoneStates.local_decision],
+    ["execution-plan-context", milestoneStates.execution_plan],
+    ["plan-context", milestoneStates.execution_plan],
+    ["plan-headroom", milestoneStates.execution_plan],
+    ["plan-fit", milestoneStates.dispatch],
+    ["plan-dispatch", lanes.get("primary")?.state],
+    ["primary-challenger", lanes.get("challenger")?.state],
+    ["single-artifact", singleModel ? milestoneStates.artifact : "pending"],
+    ["challenger-agree", lanes.get("challenger")?.state],
+    ["pair-artifact", pairAgreement ? "done" : "pending"],
+    ["pair-tie_break", tieUsed ? fmt(tieLane.state, "active") : "pending"],
+    ["tie_break-artifact", tieAgreement ? "done" : "pending"],
+    ["pair-hold", noSafeQuorum && !tieUsed ? "error" : "pending"],
+    ["tie_break-hold", noSafeQuorum && tieUsed ? "error" : "pending"],
+    ["artifact-decision", traceState === "agreed" ? "done" : milestoneStates.decision],
+    ["artifact-hold", sealFailure ? "error" : "pending"],
+  ].forEach(([key, state]) => setDecisionSvgState(
+    harness.querySelector(`[data-path-key="${key}"]`),
+    fmt(state, "pending")
+  ));
+
+  const activeLane = [...lanes.values()].find((lane) => lane.state === "active")
+    || [...lanes.values()].reverse().find((lane) => lane.state === "done");
+  const contextLabel = (value) => {
+    const tokens = Number(value || 0);
+    return tokens > 0 ? `${Math.round(tokens / 1024)}K` : "—";
+  };
+  const requiredContext = activeLane?.required_context_tokens;
+  const selectedContext = activeLane?.requested_context_tokens;
+  const effectiveContext = activeLane?.context_tokens ?? trace.context_tokens;
+  setDecisionSvgText(
+    "[data-plan-value=\"context-selection\"]",
+    `required ${contextLabel(requiredContext)} → selected ${contextLabel(selectedContext)}`
+  );
+  setDecisionSvgText(
+    "[data-plan-value=\"context-effective\"]",
+    `effective ${contextLabel(effectiveContext)}`
+  );
+  setDecisionSvgState(harness.querySelector("[data-plan-key=\"context\"]"), milestoneStates.execution_plan);
+  setDecisionSvgState(harness.querySelector("[data-plan-key=\"headroom\"]"), milestoneStates.execution_plan);
+  setDecisionSvgState(harness.querySelector("[data-plan-key=\"fit\"]"), milestoneStates.dispatch);
+  setDecisionSvgText(
+    "[data-plan-value=\"fit\"]",
+    milestoneStates.dispatch === "done" ? "PASS" : milestoneStates.dispatch === "active" ? "CHECK" : "WAITING"
+  );
+
+  const actualThink = String(activeLane?.think || "—").toLowerCase();
+  harness.querySelectorAll("[data-reasoning-key]").forEach((node) => {
+    setDecisionSvgState(
+      node,
+      node.dataset.reasoningKey === actualThink ? fmt(activeLane?.state, "active") : "pending"
+    );
+  });
+  ["reasoning-low", "reasoning-medium", "reasoning-high"].forEach((key) => {
+    const mode = key.slice("reasoning-".length);
+    setDecisionSvgState(
+      harness.querySelector(`[data-path-key="${key}"]`),
+      mode === actualThink ? fmt(activeLane?.state, "active") : "pending"
+    );
+  });
+
+  lanes.forEach((lane, key) => {
+    const laneElement = harness.querySelector(`[data-decision-lane="${key}"]`);
+    if (!laneElement) return;
+    setDecisionSvgState(laneElement, fmt(lane.state, "pending"));
+    laneElement.classList.toggle("event-focus", focusEvent?.lane === key);
+    setDecisionSvgText(`[data-model-value="${key}"]`, fmt(lane.model, "not configured"));
+    setDecisionSvgText(`[data-lane-label="${key}"]`, fmt(lane.label, key));
+    setDecisionSvgText(`[data-lane-model="${key}"]`, fmt(lane.model, "not configured"));
+    const think = fmt(lane.think, "—");
+    setDecisionSvgText(`[data-lane-think="${key}"]`, think === "—" ? "—" : `think:${think}`);
+    const laneSteps = new Map(
+      (Array.isArray(lane.steps) ? lane.steps : []).map((step) => [step.key, step])
+    );
+    laneElement.querySelectorAll("[data-decision-lane-step]").forEach((node) => {
+      const phase = node.dataset.decisionLaneStep;
+      setDecisionSvgState(node, fmt(laneSteps.get(phase)?.status, "pending"));
+      node.classList.toggle(
+        "trace-focus",
+        focusEvent?.lane === key
+        && (focusEvent.phase === "repair" ? phase === "validate" : focusEvent.phase === phase)
+      );
+    });
+    const rails = [
+      ["trigger-load", "load"],
+      ["load-context", "context"],
+      ["context-generate", "generate"],
+      ["generate-validate", "validate"],
+      ["validate-vote", "vote"],
+    ];
+    rails.forEach(([pathKey, phase]) => setDecisionSvgState(
+      laneElement.querySelector(`[data-lane-path="${pathKey}"]`),
+      fmt(laneSteps.get(phase)?.status, "pending")
+    ));
+    const repairs = (Array.isArray(trace.events) ? trace.events : []).filter(
+      (event) => event.lane === key && event.phase === "repair"
+    );
+    const repairAttempt = Math.max(0, ...repairs.map((event) => Number(event.attempt || 0)));
+    const repairState = repairs.length
+      ? focusEvent?.lane === key && focusEvent.phase === "repair" ? "active" : "done"
+      : "pending";
+    setDecisionSvgState(laneElement.querySelector(`[data-repair-lane="${key}"]`), repairState);
+    setDecisionSvgText(`[data-repair-count="${key}"]`, `REPAIR ${repairAttempt}`);
+    const laneState = fmt(lane.state, "pending");
+    const resultLabel = laneState === "pending"
+      ? "WAITING"
+      : laneState === "skipped"
+        ? key === "tie_break" ? "STANDBY" : "NOT NEEDED"
+        : laneState === "error"
+          ? "INVALID"
+          : laneState === "done"
+            ? "VALID"
+            : fmt(lane.result, laneState).toUpperCase();
+    setDecisionSvgText(`[data-lane-result="${key}"]`, resultLabel);
+    setDecisionSvgState(harness.querySelector(`[data-model-key="${key}"]`), laneState);
+  });
+
+  const holdReason = sealFailure
+    ? "Seal failed"
+    : fmt(trace.summary, "No safe quorum").split("·")[0].trim();
+  setDecisionSvgText("[data-hold-reason=\"true\"]", holdReason);
 }
 
 function decisionEventText(event) {
@@ -633,72 +867,21 @@ function renderDecisionTraceFrame(trace, focusEvent = null) {
   els.decisionElapsed.textContent = trace.started_at
     ? `Elapsed ${compactDuration(Math.max(0, (Date.now() - parseMs(trace.started_at)) / 1000))}`
     : "Elapsed --";
-  const contextTokens = Number(trace.context_tokens || 0);
+  const traceLanes = Array.isArray(trace.lanes) ? trace.lanes : [];
+  const contextLane = traceLanes.find((lane) => lane.state === "active")
+    || [...traceLanes].reverse().find((lane) => lane.state === "done");
+  const contextTokens = Number(contextLane?.context_tokens ?? trace.context_tokens ?? 0);
   els.decisionContext.textContent = contextTokens
     ? `Context ${Math.round(contextTokens / 1024)}K`
     : "Context --";
 
   const overall = decisionTimelineSteps(trace);
-  reconcileDecisionSteps(
-    els.decisionOverallSteps,
-    overall,
-    "decision-step",
-    fmt(focusEvent?.event_id, "")
-  );
+  updateDecisionSvgHarness(trace, focusEvent);
+  updateProcessingTraceSelection(trace);
 
   const timelineCurrent = decisionTimelineCurrent(overall);
   const overallPosition = timelineCurrent.position;
   const overallStage = timelineCurrent.label;
-
-  const lanes = new Map(
-    (Array.isArray(trace.lanes) ? trace.lanes : []).map((lane) => [lane.key, lane])
-  );
-  els.decisionLanes.forEach((element) => {
-    const lane = lanes.get(element.dataset.decisionLane) || {};
-    const laneState = fmt(lane.state, "pending");
-    element.classList.remove("active", "done", "error", "skipped", "pending");
-    element.classList.add(laneState);
-    const role = element.querySelector(".decision-role strong");
-    const model = element.querySelector(".decision-model");
-    const think = element.querySelector(".decision-think");
-    const steps = element.querySelector(".decision-lane-steps");
-    const result = element.querySelector(".decision-lane-result");
-    element.classList.toggle(
-      "event-focus",
-      Boolean(focusEvent && focusEvent.lane === element.dataset.decisionLane)
-    );
-    role.textContent = fmt(lane.label, element.dataset.decisionLane);
-    model.textContent = fmt(lane.model, "not configured");
-    if (think) {
-      const mode = fmt(lane.think, "—");
-      think.textContent = mode === "—" ? "—" : "think:" + mode;
-      think.dataset.thinkMode = mode;
-    }
-    reconcileDecisionSteps(
-      steps,
-      lane.steps,
-      "decision-lane-step",
-      focusEvent?.lane === element.dataset.decisionLane
-        ? focusEvent.phase === "repair"
-          ? "validate"
-          : fmt(focusEvent.phase, "")
-        : ""
-    );
-    const resultLabel =
-      laneState === "pending"
-        ? "WAITING"
-        : laneState === "skipped"
-          ? element.dataset.decisionLane === "tie_break"
-            ? "STANDBY"
-            : "NOT NEEDED"
-          : laneState === "error"
-            ? "INVALID"
-            : laneState === "done"
-              ? "VALID"
-              : fmt(lane.result, laneState).toUpperCase();
-    result.querySelector("strong").textContent = resultLabel;
-    result.querySelector("span").textContent = fmt(lane.detail, "Not started");
-  });
 
   if (request) {
     const stateKind = active
@@ -876,6 +1059,14 @@ function renderDecisionTrace(consensus) {
     setDecisionTransitionState(target);
   }
 }
+
+window.__chronovisorDashboardTest = Object.assign(window.__chronovisorDashboardTest || {}, {
+  applyDecisionTransition,
+  decisionTimelineSteps,
+  decisionTraceBlank,
+  renderDecisionTraceFrame,
+  renderProcessingActivity,
+});
 
 function llmSignalKey(llm) {
   return [llm.job_id || "", llm.phase || "", llm.target || ""].join("|");

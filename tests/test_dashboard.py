@@ -1772,10 +1772,10 @@ def test_dashboard_static_labels_routine_review_as_local_consensus() -> None:
     assert "<span>Page changes</span>" in page
     assert "${pageChanges} changes" in app
     assert "${pages} pages" not in app
-    assert ".decision-overall-steps {\n  flex: 0 0 76px;\n  display: flex;" in style
-    assert "overflow-x: auto;" in style
-    assert ".decision-step {\n  position: relative;\n  flex: 1 0 142px;" in style
-    assert "grid-template-columns: repeat(6, minmax(50px, 1fr));" in style
+    assert 'class="decision-trace-scroll" id="decision-trace-scroll"' in page
+    assert 'id="decision-trace-harness" viewBox="0 0 1500 590"' in page
+    assert ".decision-trace-scroll {\n  width: 100%;\n  overflow-x: auto;" in style
+    assert ".decision-trace-harness {\n  display: block;\n  width: 1400px;" in style
     assert "height: var(--panel-height);" in style
     assert "#model-lab-panel" in style
     assert "#model-panel {\n  height: auto;\n  min-height: 500px;" in style
@@ -1791,7 +1791,7 @@ def test_dashboard_static_labels_routine_review_as_local_consensus() -> None:
     assert "white-space: nowrap;" in style
     assert ".decision-outcome-facts" in style
     assert ".decision-transition-event.current" in style
-    assert "function reconcileDecisionSteps" in app
+    assert "function updateDecisionSvgHarness" in app
     assert "const decisionTracePlayback" in app
     assert "const ACTIVE_DECISION_REFRESH_DELAY_MS = 800" in app
     assert 'fetch("/api/local-consensus"' in app
@@ -2059,23 +2059,11 @@ def test_dashboard_static_layout_aligns_peer_panels_and_contains_event_badges() 
         "  overflow: hidden;"
     ) in style
     assert "text-overflow: ellipsis;\n  text-transform: uppercase;\n  white-space: nowrap;" in style
-    assert ".decision-role {\n  display: flex;\n  flex-wrap: wrap;" in style
-    assert ".decision-role strong {\n  flex: 0 0 100%;\n}" in style
-    assert (
-        ".decision-role .decision-model,\n"
-        ".decision-role .decision-think {\n"
-        "  display: inline-flex;"
-    ) in style
-    assert (
-        ".decision-role .decision-model {\n"
-        "  flex: 0 0 100%;\n"
-        "  min-width: 0;"
-    ) in style
-    assert (
-        ".decision-role .decision-think {\n"
-        "  flex: 0 0 auto;\n"
-        "  margin-left: 0;"
-    ) in style
+    assert ".decision-trace-harness .decision-role {" in style
+    assert "fill: #e0e5e9;\n  font-size: 12px;" in style
+    assert ".decision-trace-harness .decision-model," in style
+    assert ".decision-trace-harness .decision-think," in style
+    assert "fill: #687784;\n  font-size: 8px;" in style
 
 
 def test_decision_trace_replay_reveals_think_only_after_generation() -> None:
