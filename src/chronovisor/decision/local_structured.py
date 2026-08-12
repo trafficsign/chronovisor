@@ -7,6 +7,7 @@ deliberately independent from the frontier review path.
 
 from __future__ import annotations
 
+import copy
 import fcntl
 import hashlib
 import hmac
@@ -39,14 +40,30 @@ SAFE_RUNTIME_ROLE_RE = re.compile(r"^[a-z][a-z0-9._-]{0,127}$")
 LOCAL_ACTIVITY_PHASES = frozenset(
     {"trigger", "load", "context", "generate", "repair", "validate", "vote"}
 )
-STRUCTURED_GENERATION_POLICY_VERSION = 7
+STRUCTURED_GENERATION_POLICY_VERSION = 8
 STRUCTURED_GENERATION_TEMPERATURE = 0
 STRUCTURED_GENERATION_SEED = 0
 _DEFAULT_STRUCTURED_MEMORY_RESERVE_GIB = 16
 _DEFAULT_RUNTIME_ROLE = "librarian.review"
-_ADAPTIVE_REASONING_CANARY_ADOPTED = False
+_ADAPTIVE_REASONING_CANARY_ADOPTED = True
 _BOUNDED_LOW_REASONING_LANES = frozenset({"local_repair", "read_back_repair"})
 _REASONING_LEVELS = frozenset({"low", "medium", "high"})
+_ADAPTIVE_REASONING_LEVELS = ("low", "medium", "high")
+_ADAPTIVE_REASONING_MODEL = "muse-glimmer:30b-mxfp8-dflash"
+_ADAPTIVE_REASONING_RUNTIME_ROLE = "classification.challenger"
+# ponytail: exact role/tag is the runtime-checkable upper bound; add a sealed
+# renderer metadata probe if adaptive authority expands beyond this one model.
+_ADAPTIVE_REASONING_AUTHORITY = {
+    "runtime_role": _ADAPTIVE_REASONING_RUNTIME_ROLE,
+    "model": _ADAPTIVE_REASONING_MODEL,
+    "levels": _ADAPTIVE_REASONING_LEVELS,
+    "provider": "ollama",
+    "location": "local",
+    "engine": {"name": "ollama", "version": "0.32.8"},
+    "model_digest": "14bd0cb8d43fddcf8f637f3efe14b4888e97cc47ca4558dbb78ce56ce0448a37",
+    "renderer": "glimmer",
+    "renderer_source_commit": "4f066a6fb0c05d7dcf68e02858a5ddd399af716a",
+}
 _SOURCE_DATA_CLASSES = frozenset({"page", "derived_snippet", "raw", "system"})
 _SOURCE_SENSITIVITIES = frozenset({"normal", "high"})
 _DEFAULT_STRUCTURED_CONTEXT_BUCKETS = (
@@ -110,6 +127,11 @@ def structured_generation_policy() -> dict[str, Any]:
             "levels": ["low", "medium", "high"],
             "bounded_low_lanes": sorted(_BOUNDED_LOW_REASONING_LANES),
             "adaptive_canary_adopted": _ADAPTIVE_REASONING_CANARY_ADOPTED,
+            "adaptive_authority": {
+                **_ADAPTIVE_REASONING_AUTHORITY,
+                "levels": list(_ADAPTIVE_REASONING_LEVELS),
+                "engine": dict(_ADAPTIVE_REASONING_AUTHORITY["engine"]),
+            },
         },
         "stream": False,
         "format": "json_schema",
@@ -157,10 +179,10 @@ def _structured_think_selection(
         supported_reasoning_levels, Sequence
     ):
         return "medium", "capability_invalid"
-    if not supported_reasoning_levels or not all(
-        isinstance(level, str) for level in supported_reasoning_levels
-    ):
+    if not all(isinstance(level, str) for level in supported_reasoning_levels):
         return "medium", "capability_invalid"
+    if not supported_reasoning_levels:
+        return "medium", "capability_not_adopted"
     supported = frozenset(supported_reasoning_levels)
     if not supported.issubset(_REASONING_LEVELS):
         return "medium", "capability_invalid"
@@ -175,6 +197,33 @@ def _structured_think_selection(
             return "low", "bounded_repair_low"
         return "medium", "low_not_supported"
     return "medium", "medium_default"
+
+
+def _production_reasoning_levels(
+    model: str,
+    runtime_role: str,
+    authority: Mapping[str, Any] | None,
+) -> tuple[str, ...]:
+    ollama_identity = authority.get("ollama") if isinstance(authority, Mapping) else None
+    engine = (
+        ollama_identity.get("engine")
+        if isinstance(ollama_identity, Mapping)
+        else None
+    )
+    if (
+        model == _ADAPTIVE_REASONING_MODEL
+        and runtime_role == _ADAPTIVE_REASONING_RUNTIME_ROLE
+        and isinstance(authority, Mapping)
+        and authority.get("role") == runtime_role
+        and authority.get("model") == model
+        and authority.get("provider") == _ADAPTIVE_REASONING_AUTHORITY["provider"]
+        and authority.get("location") == _ADAPTIVE_REASONING_AUTHORITY["location"]
+        and engine == _ADAPTIVE_REASONING_AUTHORITY["engine"]
+        and ollama_identity.get("digest")
+        == _ADAPTIVE_REASONING_AUTHORITY["model_digest"]
+    ):
+        return _ADAPTIVE_REASONING_LEVELS
+    return ()
 
 
 def structured_think_mode(
@@ -2058,6 +2107,7 @@ class LocalStructuredSession:
         require_returned_model: bool = False,
         decision_lane: str | None = None,
         task_impact: str = "normal",
+        reasoning_authority: Mapping[str, Any] | None = None,
     ) -> None:
         if model is None:
             if transport is not None:
@@ -2104,6 +2154,10 @@ class LocalStructuredSession:
             raise ValueError("resource_managed must be a boolean")
         if not isinstance(require_returned_model, bool):
             raise ValueError("require_returned_model must be a boolean")
+        if reasoning_authority is not None and not isinstance(
+            reasoning_authority, Mapping
+        ):
+            raise ValueError("reasoning_authority must be a mapping")
         if resource_lease_timeout_ms is not None and (
             isinstance(resource_lease_timeout_ms, bool)
             or not isinstance(resource_lease_timeout_ms, int)
@@ -2171,6 +2225,11 @@ class LocalStructuredSession:
         self.require_returned_model = require_returned_model
         self.decision_lane = decision_lane
         self.task_impact = task_impact
+        self.reasoning_authority = (
+            copy.deepcopy(dict(reasoning_authority))
+            if reasoning_authority is not None
+            else None
+        )
 
     def _failure(
         self,
@@ -2270,7 +2329,9 @@ class LocalStructuredSession:
             runtime_role=self.runtime_role,
             decision_lane=self.decision_lane,
             task_impact=self.task_impact,
-            supported_reasoning_levels=None,
+            supported_reasoning_levels=_production_reasoning_levels(
+                self.model, self.runtime_role, self.reasoning_authority
+            ),
             adaptive_reasoning_adopted=_ADAPTIVE_REASONING_CANARY_ADOPTED,
         )
         if activity_update is not None:

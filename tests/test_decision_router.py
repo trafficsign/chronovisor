@@ -1423,11 +1423,11 @@ def test_disagreement_runs_tie_break_and_selects_matching_existing_vote(
     ]
     assert [
         request.think_selection_reason for request in transport.requests
-    ] == ["adaptive_canary_not_adopted"] * 3
+    ] == ["capability_not_adopted"] * 3
     audits = [vote.audit_record()["session"] for vote in result.votes]
     assert [audit["think"] for audit in audits] == ["medium"] * 3
     assert [audit["think_selection_reason"] for audit in audits] == [
-        "adaptive_canary_not_adopted"
+        "capability_not_adopted"
     ] * 3
     assert all(audit["context_tokens"] == 16_384 for audit in audits)
     assert all(audit["requested_num_ctx"] == 16_384 for audit in audits)
@@ -1442,6 +1442,84 @@ def test_disagreement_runs_tie_break_and_selects_matching_existing_vote(
         == structured_generation_policy_sha256()
         for audit in audits
     )
+
+
+@pytest.mark.parametrize(
+    ("role", "decision_lane", "expected_think", "expected_reason"),
+    [
+        ("primary", "local_repair", "medium", "capability_not_adopted"),
+        ("challenger", "local_repair", "low", "bounded_repair_low"),
+        ("challenger", None, "medium", "medium_default"),
+        (
+            "challenger",
+            "recall_auto_apply",
+            "high",
+            "tie_break_or_high_impact",
+        ),
+        ("tie_break", "recall_auto_apply", "medium", "capability_not_adopted"),
+    ],
+)
+def test_production_reasoning_authority_selects_only_verified_muse_levels(
+    role: str,
+    decision_lane: str | None,
+    expected_think: str,
+    expected_reason: str,
+) -> None:
+    models = {
+        "primary": "maxwell1500/ornith-35b:Q5_K_M",
+        "challenger": "muse-glimmer:30b-mxfp8-dflash",
+        "tie_break": "gemma4:26b",
+    }
+    model = models[role]
+    transport = ModelTransport({model: [_payload("apply")]})
+    router = DecisionRouter(
+        config=_config(
+            primary_model=models["primary"],
+            challenger_model=models["challenger"],
+            tie_break_model=models["tie_break"],
+        ),
+        transport=transport,
+    )
+    router._route_provenance_snapshot = {
+        role: {
+            "role": f"classification.{role}",
+            "provider": "ollama",
+            "model": model,
+            "location": "local",
+            "protocol": "ollama-native",
+            "endpoint_sha256": "e" * 64,
+            "revision": None,
+            "ollama": {
+                "engine": {"name": "ollama", "version": "0.32.8"},
+                "digest": (
+                    "14bd0cb8d43fddcf8f637f3efe14b4888e97cc47ca4558dbb78ce56ce0448a37"
+                    if role == "challenger"
+                    else "0" * 64
+                ),
+                "quantization_level": "test",
+            },
+        }
+    }
+
+    vote = router._vote(
+        role=role,
+        model=model,
+        keep_alive="0",
+        num_ctx=16_384,
+        prompt="prompt",
+        schema=SCHEMA,
+        system=None,
+        agreement_key=None,
+        decision_lane=decision_lane,
+        ingest_repair_contract=None,
+        source=None,
+    )
+
+    assert vote.valid is True
+    assert transport.requests[0].think == expected_think
+    assert transport.requests[0].think_selection_reason == expected_reason
+    assert vote.result.audit_record()["think"] == expected_think
+    assert vote.result.audit_record()["think_selection_reason"] == expected_reason
 
 
 def test_finalize_rejects_agreement_digest_not_bound_to_actual_result(

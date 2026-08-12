@@ -2125,6 +2125,7 @@ class DecisionRouter:
         num_ctx: int,
         decision_lane: str | None = None,
         source: object | None = None,
+        reasoning_authority: Mapping[str, Any] | None = None,
     ) -> LocalStructuredSession:
         source = source or ollama.source_data_classification("system", "high")
         source_data_class, source_sensitivity = (
@@ -2149,7 +2150,13 @@ class DecisionRouter:
             resource_managed=self.live_resource_control,
             require_returned_model=self.routes[role].location == "remote",
             decision_lane=decision_lane,
-            task_impact="high" if role == "tie_break" else "normal",
+            task_impact=(
+                "high"
+                if role == "tie_break"
+                or decision_lane in TIE_BREAK_MUTATING_MAJORITY_LANES
+                else "normal"
+            ),
+            reasoning_authority=reasoning_authority,
         )
 
     def _vote(
@@ -2211,6 +2218,7 @@ class DecisionRouter:
                 num_ctx=num_ctx,
                 decision_lane=decision_lane,
                 source=source,
+                reasoning_authority=route_provenance,
             ).run(
                 prompt,
                 format_schema or schema,

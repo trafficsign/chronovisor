@@ -68,10 +68,10 @@ class QueueTransport:
         return response
 
 
-def test_structured_generation_policy_seals_adaptive_reasoning_fallback() -> None:
-    assert STRUCTURED_GENERATION_POLICY_VERSION == 7
+def test_structured_generation_policy_seals_adaptive_reasoning_authority() -> None:
+    assert STRUCTURED_GENERATION_POLICY_VERSION == 8
     assert structured_generation_policy() == {
-        "version": 7,
+        "version": 8,
         "temperature": 0,
         "seed": 0,
         "think": {
@@ -79,7 +79,22 @@ def test_structured_generation_policy_seals_adaptive_reasoning_fallback() -> Non
             "fallback": "medium",
             "levels": ["low", "medium", "high"],
             "bounded_low_lanes": ["local_repair", "read_back_repair"],
-            "adaptive_canary_adopted": False,
+            "adaptive_canary_adopted": True,
+            "adaptive_authority": {
+                "runtime_role": "classification.challenger",
+                "model": "muse-glimmer:30b-mxfp8-dflash",
+                "levels": ["low", "medium", "high"],
+                "provider": "ollama",
+                "location": "local",
+                "engine": {"name": "ollama", "version": "0.32.8"},
+                "model_digest": (
+                    "14bd0cb8d43fddcf8f637f3efe14b4888e97cc47ca4558dbb78ce56ce0448a37"
+                ),
+                "renderer": "glimmer",
+                "renderer_source_commit": (
+                    "4f066a6fb0c05d7dcf68e02858a5ddd399af716a"
+                ),
+            },
         },
         "stream": False,
         "format": "json_schema",
@@ -189,7 +204,8 @@ def _session(transport: QueueTransport, **overrides: Any) -> LocalStructuredSess
         "max_feedback_chars": 2_000,
     }
     options.update(overrides)
-    return LocalStructuredSession(model="local:test", transport=transport, **options)
+    model = options.pop("model", "local:test")
+    return LocalStructuredSession(model=model, transport=transport, **options)
 
 
 def _install_default_local_runtime(
@@ -545,7 +561,7 @@ def test_active_marker_is_atomic_redacted_and_removed_after_session(
         assert marker["phase"] == "generate"
         assert marker["attempt"] == 0
         assert marker["think"] == "medium"
-        assert marker["think_selection_reason"] == "adaptive_canary_not_adopted"
+        assert marker["think_selection_reason"] == "capability_not_adopted"
         assert marker["context_tokens"] == 32_768
         return '{"decision":"apply","summary":"ok"}'
 
@@ -567,11 +583,11 @@ def test_active_marker_is_atomic_redacted_and_removed_after_session(
     assert secret not in audit_text
     audit = json.loads(audit_text)
     assert audit["think"] == "medium"
-    assert audit["think_selection_reason"] == "adaptive_canary_not_adopted"
+    assert audit["think_selection_reason"] == "capability_not_adopted"
     assert audit["context_tokens"] == 32_768
     assert audit["requested_num_ctx"] == 32_768
     assert isinstance(audit["required_num_ctx"], int)
-    assert audit["structured_generation_policy_version"] == 7
+    assert audit["structured_generation_policy_version"] == 8
     assert audit["structured_generation_policy_sha256"] == (
         structured_generation_policy_sha256()
     )
@@ -612,7 +628,7 @@ def test_transport_failure_clears_activity_and_records_failure(tmp_path: Path) -
     assert trace[-1]["status"] == "error"
 
 
-def test_repair_turns_keep_one_sealed_production_reasoning_selection() -> None:
+def test_direct_session_without_route_authority_stays_medium_for_all_repairs() -> None:
     transport = QueueTransport(
         '{"decision":"apply"}',
         '{"decision":"apply","summary":"ok"}',
@@ -620,18 +636,84 @@ def test_repair_turns_keep_one_sealed_production_reasoning_selection() -> None:
 
     result = _session(
         transport,
-        runtime_role="classification.primary",
+        model="muse-glimmer:30b-mxfp8-dflash",
+        runtime_role="classification.challenger",
         decision_lane="local_repair",
     ).run("repair", SCHEMA)
 
     assert result.ok is True
     assert [request.think for request in transport.requests] == ["medium", "medium"]
     assert [request.think_selection_reason for request in transport.requests] == [
-        "adaptive_canary_not_adopted",
-        "adaptive_canary_not_adopted",
+        "capability_not_adopted",
+        "capability_not_adopted",
     ]
     assert result.think == "medium"
-    assert result.think_selection_reason == "adaptive_canary_not_adopted"
+    assert result.think_selection_reason == "capability_not_adopted"
+
+
+@pytest.mark.parametrize(
+    ("engine_version", "model_digest"),
+    [
+        (
+            "0.32.9",
+            "14bd0cb8d43fddcf8f637f3efe14b4888e97cc47ca4558dbb78ce56ce0448a37",
+        ),
+        ("0.32.8", "0" * 64),
+    ],
+)
+def test_muse_reasoning_authority_fails_closed_on_runtime_identity_drift(
+    engine_version: str,
+    model_digest: str,
+) -> None:
+    transport = QueueTransport('{"decision":"apply","summary":"ok"}')
+    result = _session(
+        transport,
+        model="muse-glimmer:30b-mxfp8-dflash",
+        runtime_role="classification.challenger",
+        decision_lane="local_repair",
+        reasoning_authority={
+            "role": "classification.challenger",
+            "provider": "ollama",
+            "model": "muse-glimmer:30b-mxfp8-dflash",
+            "location": "local",
+            "ollama": {
+                "engine": {"name": "ollama", "version": engine_version},
+                "digest": model_digest,
+            },
+        },
+    ).run("repair", SCHEMA)
+
+    assert result.ok is True
+    assert transport.requests[0].think == "medium"
+    assert result.think_selection_reason == "capability_not_adopted"
+
+
+def test_reasoning_authority_is_detached_from_external_mutation() -> None:
+    authority: dict[str, Any] = {
+        "role": "classification.challenger",
+        "provider": "ollama",
+        "model": "muse-glimmer:30b-mxfp8-dflash",
+        "location": "local",
+        "ollama": {
+            "engine": {"name": "ollama", "version": "0.32.8"},
+            "digest": "14bd0cb8d43fddcf8f637f3efe14b4888e97cc47ca4558dbb78ce56ce0448a37",
+        },
+    }
+    transport = QueueTransport('{"decision":"apply","summary":"ok"}')
+    session = _session(
+        transport,
+        model="muse-glimmer:30b-mxfp8-dflash",
+        runtime_role="classification.challenger",
+        decision_lane="local_repair",
+        reasoning_authority=authority,
+    )
+
+    authority["ollama"]["engine"]["version"] = "0.32.9"
+    result = session.run("repair", SCHEMA)
+
+    assert result.ok is True
+    assert transport.requests[0].think == "low"
+    assert result.think_selection_reason == "bounded_repair_low"
 
 
 def test_observability_write_failure_does_not_change_valid_result(
