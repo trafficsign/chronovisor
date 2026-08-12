@@ -179,7 +179,7 @@ source task 019ff054-97a2-7302-96be-b9fb4d859667 · generated image exec-4f8b1b2
 <li><input type="checkbox" checked><span><strong>Phase 7 — 正本 style と accessibility を仕上げ。</strong> 背景、枠、monospace、1–1.5px rounded harness、glow、focus、色以外の state signifier、screen-reader summary を実装する。狭幅は単一 SVG を処理領域内で横スクロールし、ページ全体 overflow と別 SVG を作らない。</span></li>
 <li><input type="checkbox" checked><span><strong>Phase 8 — A–H と geometry を自動検証。</strong> Python payload tests、Node VM replay、DOM/SVG の個数・座標・交差・ellipsis、keyboard / reduced-motion を最小の既存 test harness へ追加する。pixel diff だけに依存しない。</span></li>
 <li><input type="checkbox" checked><span><strong>Phase 9 — 1586×992 visual calibration。</strong> Chromium、DPR 1、zoom 100%、font ready、motion off で親子領域を撮影し、reference overlay / diff と DOM 実測を同時に残す。A–H 全状態と狭幅 980×1000、680×1200、375×900 を確認する。</span></li>
-<li><input type="checkbox"><span><strong>Phase 10 — 変更範囲を検証・commit。</strong> targeted tests、<code>git diff --check</code>、本番 lock から隔離した全体 test を通す。policy / payload / UI の意味ある単位ごとに意図した file だけ commit し、他者変更を含めない。</span></li>
+<li><input type="checkbox" checked><span><strong>Phase 10 — 変更範囲を検証・commit。</strong> targeted tests、<code>git diff --check</code>、本番 lock から隔離した全体 test を通す。policy / payload / UI の意味ある単位ごとに意図した file だけ commit し、他者変更を含めない。</span></li>
 <li><input type="checkbox"><span><strong>Phase 11 — 明示許可後に GitHub-backed runtime へ反映。</strong> push 許可がなければここを blocker にして止める。許可後は <code>push → Dashboard（必要な場合だけ関連 decision service）restart → runtime archive direct_url.json SHA → health</code> の順を守る。</span></li>
 <li><input type="checkbox"><span><strong>Phase 12 — live acceptance と Plan close。</strong> live API / event audit / actual Ollama request と発光経路を照合し、指定 viewport の screenshot・DOM geometry・console・overflow を確認する。archive SHA が pushed SHA、health が <code>drift=false</code> の時だけ Plan を <code>done</code> にする。</span></li>
 </ol>
@@ -293,6 +293,7 @@ launchctl kickstart -k gui/$(id -u)/com.trafficsign.chronovisor-dashboard
 <li><time>2026-08-12 12:34</time><span>Phase 8 完了。A–H matrix、reference SHA/寸法、固定 SVG node/path、actual think/context、replay、seal/no-quorum対照を Python / Node 既存 harness へ追加。関連 <code>27 passed</code>、Node syntax、Ruff、diff check 合格。</span></li>
 <li><time>2026-08-12 12:34</time><span>Phase 9 完了。Chromium 1586×992 / DPR 1 / motion off で親子 group を実測: panel x77 y236 w1480、Trace x94 y466 w1446、Artifact / Decision各1、body overflow 0、connector有、console 0。A–H state probeと 680px内部scrollを確認。980 / 375 は同じCSS境界・単一SVGで自動判定。</span></li>
 <li><time>2026-08-12 12:39</time><span>Phase 9 証跡を再取得。1586×992 / DPR 1 で active Ingest→Challenger、required 41K → selected / effective 64K、actual MEDIUM、Artifact / Decision各1を確認し、<code>_handoff/evidence/2026-08-12_reference-first-dashboard-live.png</code> と親子cropを保存。980×1000 / 680×1200 / 375×900 は body overflow 0、単一SVG、内部 overflow 576 / 836 / 1141px、console error / warn 0。</span></li>
+<li><time>2026-08-12 13:06</time><span>Phase 10 完了。adaptive request template と trace overall steps を抽出し、large-function gate を 297 / 255行で維持。policy v7 の正規 contract hash 2値だけを baseline へ reseal。隔離 root で targeted <code>300 passed</code>、全体 <code>4649 passed / 1 skipped / 0 failed</code>、architecture fitness、Node syntax、Ruff、<code>git diff --check</code> 合格。JUnit を evidence に固定し、修正 <code>6e47869</code> と証跡 <code>ffb7776</code> を commit。</span></li>
 </ol>
 </section>
 
