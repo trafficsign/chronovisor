@@ -14,6 +14,7 @@ let nextRefreshDelayMs = IDLE_REFRESH_DELAY_MS;
 let decisionRefreshInFlight = false;
 let modelStatusRefreshInFlight = false;
 let nextDecisionRefreshDelayMs = IDLE_DECISION_REFRESH_DELAY_MS;
+let decisionTracePinnedRequest = "";
 let processingRefreshInFlight = false;
 let processingEventSource = null;
 
@@ -150,12 +151,19 @@ async function refreshDecisionTrace() {
     DECISION_REFRESH_TIMEOUT_MS
   );
   try {
-    const response = await fetch("/api/local-consensus", {
+    const query = decisionTracePinnedRequest
+      ? `?next=active&request_sha256=${encodeURIComponent(decisionTracePinnedRequest)}`
+      : "?next=active";
+    const response = await fetch("/api/local-consensus" + query, {
       cache: "no-store",
       signal: controller.signal,
     });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const consensus = (await response.json()).local_consensus || {};
+    const trace = consensus.decision_trace || {};
+    if (trace.request_sha256) {
+      decisionTracePinnedRequest = String(trace.request_sha256);
+    }
     renderLiveConsensus(consensus);
     void refreshLiveModelStatus(consensus.activities || []);
     nextDecisionRefreshDelayMs = consensus.active

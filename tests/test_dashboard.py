@@ -1518,6 +1518,124 @@ def test_decision_trace_keeps_newer_terminal_request_until_active_updates() -> N
     assert newer_active["active"] is True
 
 
+def test_decision_trace_handoff_skips_completed_requests(
+    tmp_path: Path, monkeypatch
+) -> None:
+    pinned_request = "1" * 64
+    completed_request = "2" * 64
+    next_request = "3" * 64
+    activities = [
+        {
+            "request_sha256": pinned_request,
+            "role": "ingest_review:primary",
+            "phase": "generate",
+            "started_at": "2026-08-12T00:00:01Z",
+            "updated_at": "2026-08-12T00:00:02Z",
+        }
+    ]
+    history = [
+        {
+            "kind": "decision",
+            "timestamp": "2026-08-12T00:00:03Z",
+            "request_sha256": completed_request,
+            "status": "agreed",
+            "pair_agreement": True,
+        }
+    ]
+    monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", tmp_path)
+    monkeypatch.setattr(dashboard, "_local_consensus_activities", lambda: activities)
+    monkeypatch.setattr(dashboard, "_read_json_file", lambda _path: {})
+    monkeypatch.setattr(
+        dashboard,
+        "_read_jsonl_file",
+        lambda path, *, limit: history if path.name == "audit.jsonl" else [],
+    )
+
+    initial = dashboard._local_consensus_snapshot(next_active=True)
+    pinned = dashboard._local_consensus_snapshot(
+        preferred_request_sha256=pinned_request,
+        next_active=True,
+    )
+
+    assert initial["decision_trace"]["request_sha256"] == pinned_request
+    assert pinned["decision_trace"]["request_sha256"] == pinned_request
+
+    activities.clear()
+    history.append(
+        {
+            "kind": "decision",
+            "timestamp": "2026-08-12T00:00:04Z",
+            "request_sha256": pinned_request,
+            "status": "agreed",
+            "pair_agreement": True,
+        }
+    )
+    terminal = dashboard._local_consensus_snapshot(
+        preferred_request_sha256=pinned_request,
+        next_active=True,
+    )
+
+    assert terminal["decision_trace"]["request_sha256"] == pinned_request
+    assert terminal["decision_trace"]["state"] == "agreed"
+
+    history.clear()
+    missing = dashboard._local_consensus_snapshot(
+        preferred_request_sha256=pinned_request,
+        next_active=True,
+    )
+    assert "decision_trace" not in missing
+
+    activities.append(
+        {
+            "request_sha256": next_request,
+            "role": "model_eval:primary",
+            "phase": "generate",
+            "started_at": "2026-08-12T00:00:05Z",
+            "updated_at": "2026-08-12T00:00:06Z",
+        }
+    )
+    handoff = dashboard._local_consensus_snapshot(
+        preferred_request_sha256=pinned_request,
+        next_active=True,
+    )
+
+    assert handoff["decision_trace"]["request_sha256"] == next_request
+    assert handoff["decision_trace"]["active"] is True
+
+
+def test_decision_trace_pin_survives_the_gap_between_lane_markers() -> None:
+    pinned_request = "4" * 64
+    other_request = "5" * 64
+    phase_event = {
+        "event_id": "primary-vote",
+        "kind": "phase",
+        "timestamp": "2026-08-12T00:00:01Z",
+        "request_sha256": pinned_request,
+        "role": "ingest_review:primary",
+        "phase": "vote",
+        "status": "done",
+    }
+    other_activity = {
+        "request_sha256": other_request,
+        "role": "model_eval:primary",
+        "phase": "generate",
+        "started_at": "2026-08-12T00:00:02Z",
+        "updated_at": "2026-08-12T00:00:03Z",
+    }
+
+    trace = dashboard._decision_trace_snapshot(
+        [other_activity],
+        [],
+        None,
+        [phase_event],
+        preferred_request_sha256=pinned_request,
+    )
+
+    assert trace["request_sha256"] == pinned_request
+    assert trace["active"] is False
+    assert [event["event_id"] for event in trace["events"]] == ["primary-vote"]
+
+
 def test_decision_trace_latest_execution_preserves_reused_hash_boundary() -> None:
     request = "3" * 64
     decision = {
@@ -2442,6 +2560,73 @@ def test_dashboard_reuses_decision_trace_poll_for_live_consensus_status() -> Non
     assert 'fetch("/api/model-status"' in app
     assert "renderLiveModelStatus(await response.json(), activities);" in app
     assert "MODEL_ACTIVITY_LABELS[activity.phase]" in app
+
+
+def test_decision_trace_poll_pins_until_terminal_render() -> None:
+    client = (dashboard.STATIC_DIR / "app-client.js").read_text(encoding="utf-8")
+    refresh = "async function refreshDecisionTrace()" + client.split(
+        "async function refreshDecisionTrace()", 1
+    )[1].split("async function decisionTraceRefreshLoop", 1)[0]
+    pinned_request = "1" * 64
+    newer_request = "2" * 64
+    scenario = f"""
+const vm = require("node:vm");
+const urls = [];
+const rendered = [];
+const responses = [
+  {{ decision_trace: {{ request_sha256: "{pinned_request}", state: "active" }} }},
+  {{ decision_trace: {{ request_sha256: "{pinned_request}", state: "agreed" }} }},
+  {{ decision_trace: {{ request_sha256: "{newer_request}", state: "active" }} }},
+];
+const sandbox = {{
+  AbortController,
+  encodeURIComponent,
+  rendered,
+  window: {{ setTimeout: () => 1, clearTimeout: () => {{}} }},
+  fetch: async (url) => {{
+    urls.push(url);
+    return {{ ok: true, json: async () => ({{ local_consensus: responses.shift() }}) }};
+  }},
+}};
+vm.createContext(sandbox);
+vm.runInContext(
+  `let decisionRefreshInFlight = false;
+let decisionTracePinnedRequest = "";
+let nextDecisionRefreshDelayMs = 0;
+const DECISION_REFRESH_TIMEOUT_MS = 2500;
+const ACTIVE_DECISION_REFRESH_DELAY_MS = 800;
+const IDLE_DECISION_REFRESH_DELAY_MS = 2500;
+const renderLiveConsensus = (consensus) => rendered.push(consensus.decision_trace.state);
+const refreshLiveModelStatus = () => Promise.resolve();\n`
+  + {json.dumps(refresh)}
+  + `\nthis.__test = {{ refreshDecisionTrace, pin: () => decisionTracePinnedRequest }};`,
+  sandbox,
+);
+(async () => {{
+  await sandbox.__test.refreshDecisionTrace();
+  const activePin = sandbox.__test.pin();
+  await sandbox.__test.refreshDecisionTrace();
+  const terminalPin = sandbox.__test.pin();
+  await sandbox.__test.refreshDecisionTrace();
+  process.stdout.write(JSON.stringify({{
+    urls,
+    rendered,
+    pins: [activePin, terminalPin, sandbox.__test.pin()],
+  }}));
+}})();
+"""
+
+    result = json.loads(_run_node_scenario(scenario).stdout)
+
+    assert result == {
+        "urls": [
+            "/api/local-consensus?next=active",
+            f"/api/local-consensus?next=active&request_sha256={pinned_request}",
+            f"/api/local-consensus?next=active&request_sha256={pinned_request}",
+        ],
+        "rendered": ["active", "agreed", "active"],
+        "pins": [pinned_request, pinned_request, newer_request],
+    }
 
 
 def test_live_model_status_survives_later_stale_full_render() -> None:
@@ -4646,7 +4831,9 @@ def test_local_consensus_route_stays_on_direct_live_path() -> None:
         "def _processing_activity_source_fingerprint", 1
     )[1].split("def _processing_activity_cache_metrics_locked", 1)[0]
 
-    assert "_local_consensus_snapshot()" in local_consensus_route
+    assert "_local_consensus_snapshot(" in local_consensus_route
+    assert "preferred_request_sha256=preferred_request_sha256" in local_consensus_route
+    assert 'next_active=next_trace == "active"' in local_consensus_route
     assert "_cached_snapshot" not in local_consensus_route
     assert (
         'CHRONOVISOR_ROOT / "runtime" / "local-consensus" / "active"'

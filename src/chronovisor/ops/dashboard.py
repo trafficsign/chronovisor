@@ -3451,6 +3451,7 @@ def _decision_trace_snapshot(
     history: list[dict[str, Any]],
     latest_decision: dict[str, Any] | None,
     trace_events: list[dict[str, Any]] | None = None,
+    preferred_request_sha256: str | None = None,
 ) -> dict[str, Any]:
     """Project redacted consensus telemetry into a stable three-lane trace."""
 
@@ -3496,7 +3497,24 @@ def _decision_trace_snapshot(
             observe(row, ("timestamp",), 2 if kind != "session" else 1)
     observe(latest_decision, ("timestamp",), 2)
 
-    if candidates:
+    preferred_candidates = [
+        candidate
+        for candidate in candidates
+        if candidate[3] == preferred_request_sha256
+    ]
+    preferred_known = bool(
+        preferred_request_sha256
+        and any(
+            str((row or {}).get("request_sha256") or "")
+            == preferred_request_sha256
+            for row in [*activities, *history, *(trace_events or []), latest_decision]
+        )
+    )
+    if preferred_known:
+        request_sha256 = preferred_request_sha256
+        terminal_rank = max(preferred_candidates)[1] if preferred_candidates else 0
+        execution_activities = [] if terminal_rank else activities
+    elif candidates:
         _epoch, terminal_rank, _order, request_sha256 = max(candidates)
         execution_activities = [] if terminal_rank else activities
     else:
@@ -3680,7 +3698,12 @@ def _decision_trace_snapshot(
     }
 
 
-def _local_consensus_snapshot(limit: int = 40) -> dict[str, Any]:
+def _local_consensus_snapshot(
+    limit: int = 40,
+    *,
+    preferred_request_sha256: str | None = None,
+    next_active: bool = False,
+) -> dict[str, Any]:
     """Return live local review truth plus a redacted bounded audit tail."""
 
     root = CHRONOVISOR_ROOT / "runtime" / "local-consensus"
@@ -3772,22 +3795,58 @@ def _local_consensus_snapshot(limit: int = 40) -> dict[str, Any]:
         ),
         None,
     )
-    decision_trace = _decision_trace_snapshot(
-        activities,
-        history,
-        latest_decision,
-        trace_events,
+    def build_trace(preferred: str | None = None) -> dict[str, Any]:
+        return _decision_trace_snapshot(
+            activities,
+            history,
+            latest_decision,
+            trace_events,
+            preferred,
+        )
+
+    decision_trace: dict[str, Any] | None
+    preferred_present = bool(
+        preferred_request_sha256
+        and any(
+            row.get("request_sha256") == preferred_request_sha256
+            for row in [*activities, *history, *trace_events]
+        )
     )
-    return {
+    decision_trace = build_trace(preferred_request_sha256)
+    if next_active and (
+        preferred_request_sha256 is None
+        or not preferred_present
+        or decision_trace["state"] in {"agreed", "quarantined", "ready"}
+    ):
+        active_requests = dict.fromkeys(
+            str(row.get("request_sha256") or "") for row in activities
+        )
+        handoff = next(
+            (
+                trace
+                for request in active_requests
+                if request and request != preferred_request_sha256
+                and (trace := build_trace(request))["active"]
+            ),
+            None,
+        )
+        if handoff is not None:
+            decision_trace = handoff
+        elif preferred_request_sha256 and not preferred_present:
+            decision_trace = None
+
+    snapshot = {
         "active": bool(activities),
         "count": len(activities),
         "activities": activities,
         "latest": activities[-1] if activities else None,
         "summary": summary,
         "latest_decision": latest_decision,
-        "decision_trace": decision_trace,
         "history": history,
     }
+    if decision_trace is not None:
+        snapshot["decision_trace"] = decision_trace
+    return snapshot
 
 
 def _frontier_repair_snapshot(limit: int = 40) -> dict[str, Any]:
@@ -5719,12 +5778,30 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     },
                 )
             elif path == "/api/local-consensus":
+                params = dict(
+                    parse_qsl(parsed.query, keep_blank_values=False)
+                )
+                preferred_request_sha256 = params.get("request_sha256")
+                next_trace = params.get("next")
+                if (
+                    preferred_request_sha256 is not None
+                    and re.fullmatch(r"[0-9a-f]{64}", preferred_request_sha256)
+                    is None
+                ):
+                    self.send_error(HTTPStatus.BAD_REQUEST, "Invalid request_sha256")
+                    return
+                if next_trace not in {None, "active"}:
+                    self.send_error(HTTPStatus.BAD_REQUEST, "Invalid next")
+                    return
                 _json_response(
                     self,
                     {
                         # Decision Trace is latency-sensitive and cheap to build.
                         # Never make it wait for the full dashboard materialization.
-                        "local_consensus": _local_consensus_snapshot()
+                        "local_consensus": _local_consensus_snapshot(
+                            preferred_request_sha256=preferred_request_sha256,
+                            next_active=next_trace == "active",
+                        )
                     },
                 )
             elif path == "/api/activity":
