@@ -2517,7 +2517,7 @@ def test_decision_trace_lane_rails_start_at_source_node_edges() -> None:
         rails = {
             **common_rails,
             "validate-vote": (
-                "M920 0 H1066 Q1076 0 1076 10 V25 Q1076 35 1086 35"
+                "M920 0 H1086 Q1096 0 1096 10 V25"
                 if lane == "primary"
                 else "M920 0 H1086"
             ),
@@ -2533,7 +2533,7 @@ def test_decision_trace_lane_rails_start_at_source_node_edges() -> None:
         'data-decision-lane="challenger"', 1
     )[0]
     assert (
-        'data-decision-lane-step="vote" transform="translate(1096 35)"'
+        'data-decision-lane-step="vote" transform="translate(1096 35)"><circle r="10"></circle><text x="-25" y="-17">Vote</text>'
         in primary_markup
     )
 

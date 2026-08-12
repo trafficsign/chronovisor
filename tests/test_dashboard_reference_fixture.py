@@ -157,7 +157,7 @@ def test_dashboard_reference_svg_has_one_fixed_safe_topology() -> None:
         'data-decision-lane="challenger"', 1
     )[0]
     assert (
-        'data-decision-lane-step="vote" transform="translate(1096 35)"'
+        'data-decision-lane-step="vote" transform="translate(1096 35)"><circle r="10"></circle><text x="-25" y="-17">Vote</text>'
         in primary_lane_markup
     )
     assert len(matching("data-seal-yes-label", "true")) == 1
@@ -199,6 +199,15 @@ def test_dashboard_reference_svg_has_one_fixed_safe_topology() -> None:
         attrs.get("d") == "M575 0 H733"
         and attrs.get("marker-end") == "url(#trace-arrow)"
         for attrs in context_generate_rails
+    )
+    primary_validate_vote = markup.split(
+        'data-decision-lane="primary"', 1
+    )[1].split('data-decision-lane="challenger"', 1)[0]
+    assert (
+        'data-lane-path="validate-vote" '
+        'd="M920 0 H1086 Q1096 0 1096 10 V25" '
+        'marker-end="url(#trace-arrow)"'
+        in primary_validate_vote
     )
 
     expected_boundary_paths = {
