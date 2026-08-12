@@ -208,8 +208,8 @@ def test_dashboard_reference_svg_has_one_fixed_safe_topology() -> None:
             "M492 56 V76 Q492 86 482 86 H452 Q442 86 442 96 V140"
         ),
         "plan-dispatch": (
-            "M1380 164 H1466 Q1476 164 1476 174 V265 Q1476 275 1466 275 "
-            "H190 Q180 275 180 285 V315 Q180 325 190 325 H220"
+            "M1380 164 H1466 Q1476 164 1476 174 V252 Q1476 262 1466 262 "
+            "H190 Q180 262 180 272 V315 Q180 325 190 325 H220"
         ),
         "primary-challenger": (
             "M1096 370 V377 Q1096 387 1086 387 H190 Q180 387 180 397 "
@@ -358,7 +358,8 @@ def test_dashboard_reference_svg_has_one_fixed_safe_topology() -> None:
         attrs.get("y")
         for _tag, attrs in elements
         if attrs.get("class") == "trace-path-label"
-    ] == ["271", "381"]
+    ] == ["258", "381"]
+    assert 325 - 262 == 450 - 387 == 575 - 512 == 63
     assert matching("class", "trace-branch-label trace-yes-label")[0]["y"] == "438"
     assert matching("class", "trace-branch-label trace-no-label")[0]["y"] == "506"
     pair_yes_label = matching("data-pair-yes-label", "true")[0]
