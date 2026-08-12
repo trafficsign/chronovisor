@@ -3821,6 +3821,92 @@ process.stdout.write(JSON.stringify({{
     assert result["current"] == result["lane"]
 
 
+def test_decision_trace_batches_new_events_into_300ms_frames() -> None:
+    renderer = (dashboard.STATIC_DIR / "app-renderer.js").read_text(encoding="utf-8")
+    scenario = f"""
+const vm = require("node:vm");
+const timers = [];
+const window = {{
+  matchMedia: () => ({{ matches: false }}),
+  setTimeout: (callback, delay) => (timers.push({{ callback, delay }}), timers.length),
+  clearTimeout: () => {{}},
+}};
+const sandbox = {{ window, document: {{ visibilityState: "visible" }} }};
+vm.createContext(sandbox);
+vm.runInContext(
+  {json.dumps(renderer)}
+    + `
+const capturedFrames = [];
+renderDecisionTraceFrame = (trace) => capturedFrames.push(
+  JSON.parse(JSON.stringify(trace)),
+);
+renderDecisionTransitionFeed = () => {{}};
+setDecisionTransitionState = () => {{}};
+this.__test = {{ renderDecisionTrace, capturedFrames, decisionTracePlayback }};`,
+  sandbox,
+);
+const steps = ["trigger", "load", "context", "generate", "validate", "vote"];
+const lanes = ["primary", "challenger", "tie_break"].map((key) => ({{
+  key,
+  label: key,
+  model: `${{key}}:model`,
+  state: "active",
+  steps: steps.map((step) => ({{ key: step, status: "pending" }})),
+}}));
+const initial = {{
+  request_sha256: "request",
+  active: true,
+  state: "active",
+  events: [
+    {{ event_id: "primary-trigger", lane: "primary", phase: "trigger", kind: "phase", status: "active", overall_key: "dispatch" }},
+  ],
+  overall: ["packet", "dispatch", "generate", "validate", "quorum"]
+    .map((key) => ({{ key, status: "pending" }})),
+  lanes,
+}};
+const updated = JSON.parse(JSON.stringify(initial));
+updated.events.push(
+  {{ event_id: "challenger-context", lane: "challenger", phase: "context", kind: "phase", status: "active", overall_key: "generate" }},
+  {{ event_id: "tie-validate", lane: "tie_break", phase: "validate", kind: "phase", status: "active", overall_key: "validate" }},
+);
+sandbox.__test.renderDecisionTrace({{ decision_trace: initial }});
+sandbox.__test.renderDecisionTrace({{ decision_trace: updated }});
+const afterUpdate = {{
+  target: sandbox.__test.decisionTracePlayback.target.events.map((event) => event.event_id),
+  current: sandbox.__test.decisionTracePlayback.current.events.map((event) => event.event_id),
+  queue: sandbox.__test.decisionTracePlayback.queue.map((event) => event.event_id),
+  delays: timers.map((timer) => timer.delay),
+}};
+timers[0].callback();
+const afterTimer = {{
+  current: sandbox.__test.decisionTracePlayback.current.events.map((event) => event.event_id),
+  queue: sandbox.__test.decisionTracePlayback.queue.map((event) => event.event_id),
+  delays: timers.map((timer) => timer.delay),
+  frames: sandbox.__test.capturedFrames.map((trace) => trace.events.map((event) => event.event_id)),
+}};
+process.stdout.write(JSON.stringify({{ afterUpdate, afterTimer }}));
+"""
+
+    result = json.loads(_run_node_scenario(scenario).stdout)
+
+    assert result["afterUpdate"] == {
+        "target": ["primary-trigger", "challenger-context", "tie-validate"],
+        "current": ["primary-trigger", "challenger-context"],
+        "queue": ["tie-validate"],
+        "delays": [300],
+    }
+    assert result["afterTimer"] == {
+        "current": ["primary-trigger", "challenger-context", "tie-validate"],
+        "queue": [],
+        "delays": [300, 300],
+        "frames": [
+            ["primary-trigger"],
+            ["primary-trigger", "challenger-context"],
+            ["primary-trigger", "challenger-context", "tie-validate"],
+        ],
+    }
+
+
 def test_build_snapshot_combines_runtime_and_queue(tmp_path: Path, monkeypatch) -> None:
     chronovisor_root = tmp_path / "wiki"
     raw_dir = chronovisor_root / "raw"

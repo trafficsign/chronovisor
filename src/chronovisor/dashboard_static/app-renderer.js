@@ -1423,9 +1423,7 @@ function playNextDecisionTransition() {
   renderDecisionTraceFrame(decisionTracePlayback.current, event);
   renderDecisionTransitionFeed(decisionTracePlayback.current?.events, event);
   setDecisionTransitionState(decisionTracePlayback.target, "catching-up");
-  const backlog = decisionTracePlayback.queue.length;
-  const delay = backlog > 8 ? 90 : backlog > 4 ? 160 : 420;
-  decisionTracePlayback.timer = window.setTimeout(playNextDecisionTransition, delay);
+  decisionTracePlayback.timer = window.setTimeout(playNextDecisionTransition, 300);
 }
 
 function renderDecisionTrace(consensus) {
