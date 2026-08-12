@@ -604,6 +604,11 @@ def test_dashboard_reference_keeps_selection_and_bucket_truth() -> None:
         "  fill: #ff3948;\n"
         "  opacity: 1;"
     ) in style
+    assert ".decision-trace-harness .trace-hold-node.pending" not in style
+    assert (
+        ".decision-trace-harness .trace-hold-node.error text {\n"
+        "  fill: #ff3948;"
+    ) in style
     assert "filter: url(#trace-glow-violet);" in style.split(
         ".decision-trace-harness .active.trace-node circle,", 1
     )[1].split("}", 1)[0]

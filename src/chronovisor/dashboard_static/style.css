@@ -3549,10 +3549,6 @@ canvas {
   opacity: 1;
 }
 
-.decision-trace-harness .trace-hold-node.pending {
-  opacity: 0.18;
-}
-
 .decision-trace-harness .trace-hold-node.error text {
   fill: #ff3948;
 }
