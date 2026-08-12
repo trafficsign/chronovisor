@@ -272,9 +272,8 @@ def test_dashboard_reference_svg_has_one_fixed_safe_topology() -> None:
     ]
     assert len(reasoning_guides) == 1
     assert [attrs.get("d") for attrs in reasoning_guides] == [
-        "M858 164 H872 Q882 164 882 154 V58 Q882 48 892 48 H903 "
-        "M921 48 H1235 Q1245 48 1245 58 V144 Q1245 154 1255 154 "
-        "H1260 Q1270 154 1270 164 "
+        "M812 118 V58 Q812 48 822 48 H903 "
+        "M921 48 H1320 Q1330 48 1330 58 V118 "
         "M858 164 H882 Q892 164 892 154 V116 Q892 106 902 106 H903 "
         "M921 106 H1245 Q1255 106 1255 116 V154 Q1255 164 1265 164 H1270 "
         "M858 164 H903 M921 164 H1270 "
@@ -292,9 +291,8 @@ def test_dashboard_reference_svg_has_one_fixed_safe_topology() -> None:
     ] == [
         (
             "off",
-            "M921 48 H1235 Q1245 48 1245 58 V144 Q1245 154 1255 154 "
-            "H1260 Q1270 154 1270 164",
-            None,
+            "M921 48 H1320 Q1330 48 1330 58 V118",
+            "url(#trace-arrow)",
         ),
         (
             "low",
@@ -308,6 +306,10 @@ def test_dashboard_reference_svg_has_one_fixed_safe_topology() -> None:
             None,
         ),
     ]
+    assert paths["reasoning-off"] == "M812 118 V58 Q812 48 822 48 H903"
+    assert matching("data-path-key", "plan-fit")[0].get("class") == (
+        "trace-path trace-reasoning-path"
+    )
     assert all(
         attrs.get("marker-end") == "url(#trace-arrow)"
         for tag, attrs in elements
@@ -673,6 +675,7 @@ def test_dashboard_reference_keeps_selection_and_bucket_truth() -> None:
     assert '["challenger-agree", completedStepState("challenger", "vote")]' in harness
     assert "const reasoning = decisionReasoningPlanState(activeLane, planState);" in harness
     assert "const fitState = reasoning.fit;" in harness
+    assert '["plan-fit", actualThink === "off" ? "pending" : fitState]' in harness
     assert '["context-generate", "generate"]' in harness
     assert "fmt(laneSteps.get(phase)?.status, \"pending\")" in harness
     assert "Math.floor(tokens / 1000)" in renderer
@@ -780,6 +783,52 @@ process.stdout.write(JSON.stringify({{
             "artifact": "skipped",
         },
     }
+
+
+def test_dashboard_reference_bypass_skips_the_central_fit_input() -> None:
+    renderer = (ROOT / "src/chronovisor/dashboard_static/app-renderer.js").read_text(
+        encoding="utf-8"
+    )
+    scenario = f"""
+const vm = require("node:vm");
+const node = () => ({{
+  dataset: {{}},
+  classList: {{ remove() {{}}, add() {{}}, toggle() {{}} }},
+  querySelector: () => node(),
+  querySelectorAll: () => [],
+  setAttribute() {{}},
+  textContent: "",
+}});
+const planFit = node();
+const harness = node();
+harness.querySelector = (selector) => selector === '[data-path-key="plan-fit"]'
+  ? planFit
+  : node();
+const sandbox = {{
+  window: {{ matchMedia: () => ({{ matches: true }}) }},
+  els: {{ decisionTraceHarness: harness }},
+}};
+vm.createContext(sandbox);
+vm.runInContext({json.dumps(renderer)}, sandbox);
+const render = (think) => {{
+  sandbox.updateDecisionSvgHarness({{
+    state: "agreed",
+    lanes: [{{ key: "primary", state: "done", think, steps: [] }}],
+    overall: [{{ key: "dispatch", status: "done" }}],
+  }});
+  return planFit.dataset.state;
+}};
+process.stdout.write(JSON.stringify({{ off: render("off"), medium: render("medium") }}));
+"""
+    completed = subprocess.run(
+        ["node", "-"],
+        input=scenario,
+        check=True,
+        capture_output=True,
+        encoding="utf-8",
+    )
+
+    assert json.loads(completed.stdout) == {"off": "pending", "medium": "done"}
 
 
 def test_dashboard_reference_no_quorum_leaves_decision_unreached() -> None:
