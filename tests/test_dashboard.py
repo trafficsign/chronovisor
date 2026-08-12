@@ -1783,7 +1783,7 @@ def test_dashboard_static_labels_routine_review_as_local_consensus() -> None:
     assert "${pageChanges} changes" in app
     assert "${pages} pages" not in app
     assert 'class="decision-trace-scroll" id="decision-trace-scroll"' in page
-    assert 'id="decision-trace-harness" viewBox="0 0 1500 590"' in page
+    assert 'id="decision-trace-harness" viewBox="0 0 1500 650"' in page
     assert ".decision-trace-scroll {\n  width: 100%;\n  overflow-x: auto;" in style
     assert ".decision-trace-harness {\n  display: block;\n  width: 1400px;" in style
     assert "height: var(--panel-height);" in style

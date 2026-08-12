@@ -2876,7 +2876,7 @@ canvas {
 
 .processing-panel {
   position: relative;
-  height: 974px;
+  height: 1030px;
   min-height: 0;
   padding: 0;
   overflow: visible;
@@ -3027,10 +3027,17 @@ canvas {
   background: #898dff;
 }
 
+.processing-step.done::before {
+  background: #061724;
+}
+
 .processing-step.active::before {
   border-color: #ff9d00;
   background: #ff9d00;
-  box-shadow: 0 0 0 4px rgba(255, 157, 0, 0.12), 0 0 12px rgba(255, 157, 0, 0.72);
+  box-shadow:
+    0 0 0 2px #061724,
+    0 0 0 3px #ff9d00,
+    0 0 12px rgba(255, 157, 0, 0.72);
 }
 
 .processing-step.active:not(:last-child)::after {
@@ -3069,7 +3076,7 @@ canvas {
   position: relative;
   z-index: 2;
   box-sizing: border-box;
-  height: 746px;
+  height: 802px;
   min-height: 0;
   margin-top: 10px;
   padding: 12px 16px;
@@ -3108,7 +3115,7 @@ canvas {
 .decision-trace-scroll {
   width: 100%;
   overflow-x: auto;
-  height: 551px;
+  height: 607px;
   overflow-y: hidden;
   outline: none;
   scrollbar-gutter: stable;
@@ -3122,7 +3129,7 @@ canvas {
   display: block;
   width: 1400px;
   max-width: none;
-  height: 551px;
+  height: 607px;
   color: #62717d;
   font-family: var(--font-mono);
   font-size: 10px;
@@ -3143,6 +3150,10 @@ canvas {
   transition: opacity 160ms var(--ease), stroke 160ms var(--ease);
 }
 
+.decision-trace-harness .trace-path {
+  stroke-dasharray: 4 5;
+}
+
 .decision-trace-harness .trace-divider {
   opacity: 0.56;
 }
@@ -3160,6 +3171,28 @@ canvas {
 .decision-trace-harness .trace-node text,
 .decision-trace-harness .decision-lane-step text {
   text-anchor: middle;
+}
+
+.decision-trace-harness .trace-overall .trace-branch-node-label {
+  text-anchor: start;
+}
+
+.decision-trace-harness .trace-node .trace-artifact-label {
+  text-anchor: start;
+}
+
+.decision-trace-harness .trace-check {
+  fill: none;
+  stroke: #061724;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.decision-trace-harness .trace-node.done .trace-check {
+  opacity: 1;
 }
 
 .decision-trace-harness .trace-overall .trace-node circle {
@@ -3194,6 +3227,12 @@ canvas {
   font-size: 9px;
 }
 
+.decision-trace-harness .trace-label-backdrop {
+  fill: #031522;
+  stroke: none;
+  pointer-events: none;
+}
+
 .decision-trace-harness .trace-diamond path {
   fill: #061724;
   stroke: #687681;
@@ -3203,6 +3242,32 @@ canvas {
 .decision-trace-harness .trace-diamond text {
   font-size: 8px;
   text-anchor: middle;
+}
+
+.decision-trace-harness .trace-diamond.done path,
+.decision-trace-harness .trace-diamond.active path {
+  stroke: #9296ff;
+  filter: drop-shadow(0 0 3px rgba(142, 145, 255, 0.28));
+}
+
+.decision-trace-harness .trace-diamond.error path {
+  stroke: #ff3948;
+}
+
+.decision-trace-harness .trace-reasoning-path.pending {
+  stroke-dasharray: 4 5;
+  opacity: 0;
+}
+
+.decision-trace-harness .trace-context-guide,
+.decision-trace-harness .trace-reasoning-guide {
+  fill: none;
+  stroke: #566470;
+  stroke-width: 1.05;
+  stroke-dasharray: 4 5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  opacity: 0.34;
 }
 
 .decision-trace-harness .decision-lane {
@@ -3255,6 +3320,7 @@ canvas {
 .decision-trace-harness .done .trace-path,
 .decision-trace-harness .trace-path.done {
   stroke: #8e91ff;
+  stroke-dasharray: none;
 }
 
 .decision-trace-harness .done.trace-node circle,
@@ -3268,10 +3334,25 @@ canvas {
   filter: url(#trace-glow-violet);
 }
 
+.decision-trace-harness .done.decision-lane-step circle,
+.decision-trace-harness .decision-lane-step.done circle {
+  fill: url(#trace-active-core);
+  stroke: #9296ff;
+  stroke-width: 2.1;
+}
+
+.decision-trace-harness .trace-context-option.done circle,
+.decision-trace-harness .trace-reasoning.done circle {
+  fill: #061724;
+  stroke: #9296ff;
+  stroke-width: 2.1;
+}
+
 .decision-trace-harness .active.trace-path,
 .decision-trace-harness .trace-path.active {
   stroke: #9396ff;
-  filter: url(#trace-glow-violet);
+  stroke-dasharray: none;
+  filter: drop-shadow(0 0 3px rgba(147, 150, 255, 0.42));
 }
 
 .decision-trace-harness .active.trace-node circle,
@@ -3280,9 +3361,32 @@ canvas {
 .decision-trace-harness .active.trace-reasoning circle,
 .decision-trace-harness .trace-node.active circle,
 .decision-trace-harness .decision-lane-step.active circle {
-  fill: #7883ff;
-  stroke: #b4b7ff;
+  fill: url(#trace-active-core);
+  stroke: #9296ff;
+  stroke-width: 2.2;
   filter: url(#trace-glow-violet);
+}
+
+.decision-trace-harness .active.trace-node circle,
+.decision-trace-harness .active.decision-lane-step circle,
+.decision-trace-harness .active.trace-reasoning circle {
+  paint-order: stroke fill;
+}
+
+.decision-trace-harness .trace-reasoning .trace-selected-core {
+  fill: #8e91ff;
+  stroke: none;
+  opacity: 0;
+  filter: none;
+  pointer-events: none;
+}
+
+.decision-trace-harness .trace-reasoning.active .trace-selected-core,
+.decision-trace-harness .trace-reasoning.done .trace-selected-core {
+  fill: #8e91ff;
+  stroke: none;
+  opacity: 1;
+  filter: none;
 }
 
 .decision-trace-harness .active.trace-node text,
@@ -3295,6 +3399,7 @@ canvas {
 .decision-trace-harness .error.trace-path,
 .decision-trace-harness .trace-path.error {
   stroke: #ff3948;
+  stroke-dasharray: none;
   filter: drop-shadow(0 0 3px rgba(255, 57, 72, 0.42));
 }
 
@@ -3335,11 +3440,14 @@ canvas {
 
 .decision-trace-harness .decision-lane:has(.trace-repair-loop.active) .trace-repair-count,
 .decision-trace-harness .decision-lane:has(.trace-repair-loop.done) .trace-repair-count,
-.decision-trace-harness .decision-lane:has(.trace-repair-loop.active) .trace-repair-badge,
-.decision-trace-harness .decision-lane:has(.trace-repair-loop.done) .trace-repair-badge,
 .decision-trace-harness .decision-lane:has(.trace-repair-loop.active) .trace-repair-number,
 .decision-trace-harness .decision-lane:has(.trace-repair-loop.done) .trace-repair-number {
   fill: #ff9d00;
+  opacity: 1;
+}
+
+.decision-trace-harness .decision-lane:has(.trace-repair-loop.active) .trace-repair-badge,
+.decision-trace-harness .decision-lane:has(.trace-repair-loop.done) .trace-repair-badge {
   opacity: 1;
 }
 
@@ -3378,6 +3486,10 @@ canvas {
   opacity: 0.18;
 }
 
+.decision-trace-harness .trace-seal-label {
+  text-anchor: end;
+}
+
 .decision-trace-harness .trace-seal-label.error {
   opacity: 1;
 }
@@ -3388,8 +3500,34 @@ canvas {
 }
 
 .decision-trace-harness .trace-no-path.active,
-.decision-trace-harness .trace-no-path.done {
-  stroke: #ff8a00;
+.decision-trace-harness .trace-no-path.done,
+.decision-trace-harness .trace-no-path.error {
+  stroke: #ff3948;
+  filter: drop-shadow(0 0 3px rgba(255, 57, 72, 0.34));
+}
+
+.decision-trace-harness .trace-tie-path.pending,
+.decision-trace-harness .trace-tie-path.skipped {
+  stroke-dasharray: 4 5;
+}
+
+.decision-trace-harness .trace-diamond .trace-pass {
+  fill: #74d84f;
+  text-anchor: start;
+  opacity: 0;
+}
+
+.decision-trace-harness .trace-diamond [data-plan-value="fit"] {
+  text-anchor: end;
+}
+
+.decision-trace-harness .trace-diamond [data-plan-value="fit"],
+.decision-trace-harness .trace-diamond .trace-pass {
+  font-size: 6.5px;
+}
+
+.decision-trace-harness .trace-diamond .trace-pass.visible {
+  opacity: 1;
 }
 
 .decision-trace-harness .trace-single-path.pending,
@@ -3513,11 +3651,11 @@ canvas {
   }
 
   .processing-panel {
-    height: 974px;
+    height: 1030px;
   }
 
   .decision-trace-panel {
-    height: 746px;
+    height: 802px;
   }
 
   .processing-lane,
@@ -3532,7 +3670,7 @@ canvas {
 
 @media (max-width: 680px) {
   .processing-panel {
-    height: 974px;
+    height: 1030px;
     min-height: 0;
     padding: 0;
     overflow: visible;
@@ -3550,7 +3688,7 @@ canvas {
   }
 
   .decision-trace-panel {
-    height: 746px;
+    height: 802px;
     padding: 12px;
   }
 
