@@ -1829,6 +1829,44 @@ def test_dashboard_static_labels_routine_review_as_local_consensus() -> None:
     )
 
 
+def test_decision_trace_lane_rails_start_at_source_node_edges() -> None:
+    page = (dashboard.STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    for key in (
+        "pair-artifact-join",
+        "tie_break-quorum",
+        "quorum-artifact-join",
+        "quorum-artifact-trunk",
+        "artifact-input",
+        "quorum-hold",
+    ):
+        assert f'data-path-key="{key}"' in page
+    for key in (
+        "pair-artifact",
+        "tie_break-artifact",
+        "pair-hold",
+        "tie_break-hold",
+        "pair-quorum",
+        "quorum-artifact",
+    ):
+        assert f'data-path-key="{key}"' not in page
+    assert 'data-trace-key="quorum"' in page
+    rails = {
+        "trigger-load": "M240 0 H374",
+        "load-context": "M394 0 H555",
+        "context-generate": "M575 0 H733",
+        "generate-validate": "M753 0 H900",
+        "validate-vote": "M920 0 H1086",
+    }
+
+    for lane in ("primary", "challenger", "tie_break"):
+        lane_markup = page.split(f'data-decision-lane="{lane}"', 1)[1].split(
+            '<g class="decision-lane-steps"', 1
+        )[0]
+        assert lane_markup.count("trace-lane-rail") == len(rails)
+        for key, geometry in rails.items():
+            assert f'data-lane-path="{key}" d="{geometry}"' in lane_markup
+
+
 def test_dashboard_reuses_decision_trace_poll_for_live_consensus_status() -> None:
     app = "".join(
         (dashboard.STATIC_DIR / name).read_text(encoding="utf-8")

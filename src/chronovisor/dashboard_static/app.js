@@ -14,8 +14,6 @@ const els = {
   processingPanel: document.getElementById("processing-panel"),
   processingConnection: document.getElementById("processing-connection"),
   processingLanes: document.getElementById("processing-lanes"),
-  processingTraceConnector: document.getElementById("processing-trace-connector"),
-  processingTraceConnectorPath: document.getElementById("processing-trace-connector-path"),
   lanShareButton: document.getElementById("lan-share-button"),
   decisionTracePanel: document.getElementById("decision-trace-panel"),
   decisionTraceHarness: document.getElementById("decision-trace-harness"),

@@ -3048,30 +3048,6 @@ canvas {
   display: none;
 }
 
-.processing-trace-connector {
-  position: absolute;
-  z-index: 4;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  overflow: visible;
-  pointer-events: none;
-}
-
-.processing-trace-connector path {
-  fill: none;
-  stroke: #ff8a00;
-  stroke-width: 1.25;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-  opacity: 0;
-  filter: drop-shadow(0 0 4px rgba(255, 138, 0, 0.42));
-}
-
-.processing-trace-connector.active path {
-  opacity: 1;
-}
-
 .decision-trace-panel {
   position: relative;
   z-index: 2;
@@ -3181,10 +3157,6 @@ canvas {
 
 .decision-trace-harness .trace-node .trace-artifact-label {
   text-anchor: end;
-}
-
-.decision-trace-harness .trace-overall .trace-node circle {
-  r: 9px;
 }
 
 .decision-trace-harness .trace-section-title {
@@ -3574,6 +3546,7 @@ canvas {
 
 .decision-trace-harness .trace-hold-reason {
   font-size: 9px;
+  text-anchor: end;
 }
 
 .decision-trace-harness .trace-focus circle {
@@ -3774,8 +3747,7 @@ canvas {
     animation: none;
   }
 
-  .decision-trace-harness *,
-  .processing-trace-connector path {
+  .decision-trace-harness * {
     transition: none;
   }
 }

@@ -151,7 +151,6 @@ function setState(state) {
 const latestProcessingLanes = new Map();
 let latestDecisionTrace = {};
 let selectedProcessingLaneKey = "";
-let processingTraceResizeObserver = null;
 
 function setProcessingConnection(state, label) {
   els.processingConnection.dataset.state = state;
@@ -209,45 +208,6 @@ function processingLaneForTrace(trace) {
   )?.[0] || [...latestProcessingLanes.entries()].find(([, lane]) => lane.state === "active")?.[0] || "";
 }
 
-function updateProcessingTraceConnector() {
-  if (!els.processingTraceConnector || !els.processingTraceConnectorPath) return;
-  const source = els.processingLanes.querySelector(
-    `.processing-lane[data-processing-lane="${selectedProcessingLaneKey}"] .processing-step.active`
-  );
-  const target = els.decisionTraceHarness?.querySelector("[data-trace-entry] circle");
-  const panelBox = els.processingPanel.getBoundingClientRect();
-  if (!source || !target || !latestDecisionTrace?.request_sha256 || panelBox.width <= 0) {
-    els.processingTraceConnector.classList.remove("active");
-    els.processingTraceConnectorPath.removeAttribute("d");
-    return;
-  }
-  const sourceBox = source.getBoundingClientRect();
-  const targetBox = target.getBoundingClientRect();
-  const sourceStyle = getComputedStyle(source);
-  const sourceDotStyle = getComputedStyle(source, "::before");
-  const firstRowHeight = parseFloat(sourceStyle.gridTemplateRows) || 12;
-  const dotWidth = parseFloat(sourceDotStyle.width)
-    + 2 * (parseFloat(sourceDotStyle.borderLeftWidth) || 0);
-  const dotHeight = parseFloat(sourceDotStyle.height)
-    + 2 * (parseFloat(sourceDotStyle.borderTopWidth) || 0);
-  const x1 = sourceBox.left + dotWidth / 2 - panelBox.left;
-  const y1 = sourceBox.top + firstRowHeight + dotHeight - panelBox.top;
-  const x2 = targetBox.left + targetBox.width / 2 - panelBox.left;
-  const y2 = targetBox.top - panelBox.top;
-  const traceBox = els.decisionTracePanel.getBoundingClientRect();
-  const lowerY = traceBox.top - panelBox.top + 10;
-  const direction = Math.sign(x2 - x1) || 1;
-  const radius = Math.min(10, Math.abs(x2 - x1) / 2);
-  els.processingTraceConnector.setAttribute("viewBox", `0 0 ${panelBox.width} ${panelBox.height}`);
-  els.processingTraceConnectorPath.setAttribute(
-    "d",
-    `M${x1} ${y1} V${lowerY - radius} `
-      + `Q${x1} ${lowerY} ${x1 + direction * radius} ${lowerY} `
-      + `H${x2 - direction * radius} Q${x2} ${lowerY} ${x2} ${lowerY + radius} V${y2}`
-  );
-  els.processingTraceConnector.classList.add("active");
-}
-
 function updateProcessingTraceSelection(trace = latestDecisionTrace) {
   latestDecisionTrace = trace || {};
   selectedProcessingLaneKey = processingLaneForTrace(latestDecisionTrace);
@@ -259,11 +219,6 @@ function updateProcessingTraceSelection(trace = latestDecisionTrace) {
     row.setAttribute("aria-expanded", String(expanded));
     row.tabIndex = expanded ? 0 : -1;
   });
-  updateProcessingTraceConnector();
-  if (!processingTraceResizeObserver && typeof ResizeObserver !== "undefined") {
-    processingTraceResizeObserver = new ResizeObserver(updateProcessingTraceConnector);
-    processingTraceResizeObserver.observe(els.processingPanel);
-  }
 }
 
 function renderProcessingActivity(activity) {
@@ -306,7 +261,6 @@ function renderProcessingActivity(activity) {
       const expand = () => {
         if (row.dataset.processingLane !== selectedProcessingLaneKey) return;
         row.setAttribute("aria-expanded", "true");
-        updateProcessingTraceConnector();
       };
       row.addEventListener("click", expand);
       row.addEventListener("keydown", (event) => {
@@ -528,9 +482,11 @@ function updateDecisionSvgHarness(trace, focusEvent = null) {
   const tieLane = lanes.get("tie_break") || {};
   const tieUsed = ["active", "done", "error"].includes(fmt(tieLane.state, "pending"));
   const artifactReached = traceState === "agreed" || sealFailure;
-  const pairAgreement = artifactReached && !tieUsed;
-  const tieAgreement = artifactReached && tieUsed;
   const singleModel = trace.quorum_flow === false;
+  const safeNoQuorum = noSafeQuorum && !singleModel;
+  const safeQuorumReached = artifactReached && !singleModel;
+  const pairAgreement = safeQuorumReached && !tieUsed;
+  const tieAgreement = safeQuorumReached && tieUsed;
   const activeLane = [...lanes.values()].find((lane) => lane.state === "active")
     || [...lanes.values()].reverse().find((lane) => lane.state === "done");
   const actualThink = String(activeLane?.think || "—").toLowerCase();
@@ -565,6 +521,7 @@ function updateDecisionSvgHarness(trace, focusEvent = null) {
     seal: sealStates.gate,
     hold: traceState === "quarantined" ? "error" : "pending",
     agree: agreementState,
+    quorum: safeNoQuorum ? "error" : tieAgreement ? "done" : "pending",
   };
 
   harness.dataset.traceState = traceState;
@@ -585,17 +542,18 @@ function updateDecisionSvgHarness(trace, focusEvent = null) {
     ["overall-artifact-decision", milestoneStates.decision],
     ["execution-plan-context", milestoneStates.execution_plan],
     ["plan-context", milestoneStates.execution_plan],
-    ["plan-headroom", milestoneStates.execution_plan],
     ["plan-fit", fitState],
     ["plan-dispatch", fitState],
     ["primary-challenger", laneStepState("challenger", "trigger")],
     ["single-artifact", singleModel ? milestoneStates.artifact : "pending"],
     ["challenger-agree", completedStepState("challenger", "vote")],
-    ["pair-artifact", pairAgreement ? "done" : "pending"],
+    ["pair-artifact-join", pairAgreement ? "done" : "pending"],
     ["pair-tie_break", tieUsed ? fmt(tieLane.state, "active") : "pending"],
-    ["tie_break-artifact", tieAgreement ? "done" : "pending"],
-    ["pair-hold", noSafeQuorum && !tieUsed ? "error" : "pending"],
-    ["tie_break-hold", noSafeQuorum && tieUsed ? "error" : "pending"],
+    ["tie_break-quorum", safeNoQuorum && tieUsed ? "error" : tieAgreement ? "done" : "pending"],
+    ["quorum-artifact-join", tieAgreement ? "done" : "pending"],
+    ["quorum-artifact-trunk", tieAgreement ? "done" : "pending"],
+    ["artifact-input", safeQuorumReached ? "done" : "pending"],
+    ["quorum-hold", safeNoQuorum ? milestoneStates.hold : "pending"],
     ["artifact-seal", sealStates.input],
     ["seal-decision", sealStates.yes],
     ["seal-hold", sealStates.no],
@@ -603,6 +561,18 @@ function updateDecisionSvgHarness(trace, focusEvent = null) {
     harness.querySelector(`[data-path-key="${key}"]`),
     fmt(state, "pending")
   ));
+  setDecisionSvgState(
+    harness.querySelector("[data-pair-yes-label]"),
+    pairAgreement ? "done" : "pending"
+  );
+  setDecisionSvgState(
+    harness.querySelector("[data-quorum-yes-label]"),
+    tieAgreement ? "done" : "pending"
+  );
+  setDecisionSvgState(
+    harness.querySelector("[data-quorum-no-label]"),
+    safeNoQuorum ? milestoneStates.hold : "pending"
+  );
   setDecisionSvgState(
     harness.querySelector("[data-seal-yes-label]"),
     traceState === "agreed" ? "done" : "pending"
@@ -663,13 +633,13 @@ function updateDecisionSvgHarness(trace, focusEvent = null) {
   const contextRadius = Math.min(10, Math.abs(contextX - 510) / 2);
   harness.querySelector("[data-path-key=\"execution-plan-context\"]")?.setAttribute(
     "d",
-    `M510 19 V${86 - contextRadius} Q510 86 ${510 + contextDirection * contextRadius} 86 `
-      + `H${contextX - contextDirection * contextRadius} Q${contextX} 86 ${contextX} ${86 + contextRadius} V155`
+    `M510 56 V${86 - contextRadius} Q510 86 ${510 + contextDirection * contextRadius} 86 `
+      + `H${contextX - contextDirection * contextRadius} Q${contextX} 86 ${contextX} ${86 + contextRadius} V154`
   );
   harness.querySelector("[data-path-key=\"plan-context\"]")?.setAttribute(
     "d",
-    `M${contextX} 164 V204 Q${contextX} 214 ${contextX + 10} 214 `
-      + "H724 Q734 214 734 204 V164"
+    `M${contextX} 174 V204 Q${contextX} 214 ${contextX + 10} 214 `
+      + "H724 Q734 214 734 204 V174 Q734 164 744 164 H766"
   );
   setDecisionSvgState(harness.querySelector("[data-plan-key=\"headroom\"]"), milestoneStates.execution_plan);
   setDecisionSvgState(harness.querySelector("[data-plan-key=\"fit\"]"), fitState);
