@@ -1,0 +1,289 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Plan: Reference-first Chronovisor Dashboard</title>
+<style>
+:root{
+  --fg:#18202a;--muted:#607080;--bg:#f7f7f2;--panel:#fff;--accent:#365acb;
+  --done:#75808c;--warn:#b42318;--ok:#18794e;--rule:#dce1e6;--code-bg:#eef1f4;
+}
+*{box-sizing:border-box}
+body{
+  font-family:-apple-system,BlinkMacSystemFont,'Hiragino Kaku Gothic ProN','Yu Gothic',sans-serif;
+  color:var(--fg);background:var(--bg);max-width:1120px;margin:2rem auto;padding:0 1.5rem;
+  line-height:1.7;font-size:15px;
+}
+header{border-bottom:2px solid var(--rule);padding-bottom:1rem;margin-bottom:1.5rem;background:var(--bg)}
+h1{font-size:1.65rem;margin:0 0 .5rem}
+h2{font-size:1.2rem;margin:2rem 0 .6rem;padding-bottom:.3rem;border-bottom:1px solid var(--rule)}
+h3{font-size:1rem;margin:1.25rem 0 .35rem}
+p{margin:.45rem 0}
+.meta-bar{display:flex;gap:1rem;font-size:.85rem;color:var(--muted);flex-wrap:wrap;align-items:center}
+.meta-bar code{background:transparent;color:var(--muted)}
+.badge{display:inline-block;padding:.15rem .7rem;border-radius:1rem;background:var(--accent);color:#fff;font-weight:700;font-size:.8rem}
+.badge[data-state="ready"]{background:#16836b}.badge[data-state="running"]{background:#d97706}
+.badge[data-state="done"]{background:var(--ok)}.badge[data-state="blocked"]{background:var(--warn)}
+section{margin:0 0 .5rem}
+ul,ol{padding-left:1.5rem;margin:.5rem 0}li{margin:.3rem 0}
+ol.checklist{list-style:none;padding-left:0}
+ol.checklist li{display:flex;align-items:flex-start;gap:.65rem;padding:.3rem 0;border-bottom:1px dashed var(--rule)}
+ol.checklist input[type=checkbox]{margin-top:.42rem;flex-shrink:0}
+ol.checklist input[type=checkbox]:checked+span{color:var(--done);text-decoration:line-through}
+section.rules{background:#f0f2ee;padding:.7rem 1rem;border-radius:7px;border-left:4px solid var(--accent)}
+section.rules h2{border:none;margin-top:.4rem}
+section.blockers ul{color:var(--warn)}
+code{background:var(--code-bg);padding:.1rem .35rem;border-radius:3px;font-size:.9em;font-family:'SF Mono',Menlo,monospace}
+pre{background:#111827;color:#e5e7eb;padding:1rem;border-radius:7px;overflow:auto;line-height:1.45}
+pre code{background:transparent;padding:0;color:inherit}
+table{width:100%;border-collapse:collapse;margin:.75rem 0 1.25rem;font-size:.91rem;background:var(--panel)}
+th,td{border:1px solid var(--rule);padding:.55rem .65rem;text-align:left;vertical-align:top}
+th{background:#eef1f4}
+figure{margin:1rem 0 1.5rem;padding:.65rem;background:#061724;border:1px solid #17374a;border-radius:9px}
+figure img{display:block;width:100%;height:auto;border-radius:5px}
+figcaption{color:#bed1df;font:12px/1.55 'SF Mono',Menlo,monospace;padding:.65rem .25rem .1rem;overflow-wrap:anywhere}
+.callout{background:#fff8e7;border-left:4px solid #d97706;padding:.75rem 1rem;border-radius:6px}
+.accept{background:#edf8f3;border-left:4px solid var(--ok);padding:.75rem 1rem;border-radius:6px}
+ol.log{list-style:none;padding-left:0;font-family:'SF Mono',Menlo,monospace;font-size:.84rem}
+ol.log li{padding:.35rem 0;border-bottom:1px dashed var(--rule);display:flex;gap:.75rem}
+ol.log time{color:var(--muted);flex-shrink:0;min-width:10rem}
+@media(max-width:760px){body{padding:0 .8rem}table{display:block;overflow-x:auto;white-space:normal}.meta-bar{gap:.5rem}}
+@media print{body{font-size:10.5pt;max-width:none;margin:0;padding:1rem}figure{break-inside:avoid}a{color:inherit}}
+</style>
+</head>
+<body>
+<script type="application/json" id="plan-meta">
+{"task_id":"plan_2868fe2d6f324487a9ce819da3303b20","created_at":"2026-08-12T11:42:08+09:00","状態":"ready","slug":"reference-first-dashboard"}
+</script>
+
+<header>
+<h1>Plan: Reference-first Chronovisor Dashboard</h1>
+<div class="meta-bar">
+<span class="badge" data-bind="状態" data-state="ready">ready</span>
+<span><code data-bind="task_id">plan_2868fe2d6f324487a9ce819da3303b20</code></span>
+<span data-bind="created_at">2026-08-12T11:42:08+09:00</span>
+<span>source task <code>019ff054-97a2-7302-96be-b9fb4d859667</code></span>
+</div>
+</header>
+
+<section data-section="目的">
+<h2>目的</h2>
+<ul>
+<li>下の完成画像を単なる参考ではなく、Chronovisor Dashboard の <strong>展開中 Processing Lanes + Decision Trace 親子領域</strong>に対する視覚正本・受入基準にする。</li>
+<li>Processing Lanes の active stage から、Execution Plan、Context、実際の Reasoning、Primary、Challenger、必要時の Tie-break、Artifact、Decision / Hold までを一本の読み取れるハーネスとして live 表示する。</li>
+<li>見た目だけを似せず、既存の実測 event replay、safe quorum、context admission、model activity と一致する状態だけを発光させる。</li>
+</ul>
+<p class="accept"><strong>完了の意味:</strong> 固定 fixture で「ぱっと見が完成画像とほぼ同一」、live では表示経路が実行証跡と一致し、GitHub-backed runtime の SHA・health・指定 viewport の DOM 実測まで合格していること。</p>
+</section>
+
+<section data-section="視覚正本">
+<h2>視覚正本</h2>
+<figure id="visual-master">
+<img src="assets/2026-08-12_reference-first-dashboard.png" width="1586" height="992" alt="Chronovisor Processing Lanes と Decision Trace の最終完成図">
+<figcaption>
+VISUAL MASTER · 1586×992 px · SHA-256 e0ffaa2be6a33584fcabeb2f70923da9c09b6213b4117cd19d51a870fc9b5c2e<br>
+source task 019ff054-97a2-7302-96be-b9fb4d859667 · generated image exec-4f8b1b24-9c7d-4d6f-add0-d45fde7bc991
+</figcaption>
+</figure>
+<ul>
+<li>正本に固定するもの: 濃紺の航空管制盤風背景、二つの細い外枠、monospace の情報密度、細い角丸ハーネス、紫・橙・緑・赤の restrained glow、ノード間余白、上段から下段へ流れ込む連続性。</li>
+<li>fixture で変えるもの: workflow、active stage、elapsed、job id、required / selected / effective context、actual think、active lane、repair attempt、quorum result、event count。</li>
+<li>画像の <code>HIGH</code> や <code>112K</code> を hardcode しない。実際の選択が <code>medium</code> なら MEDIUM、役別 context が異なるなら各 role binding の実値を光らせる。</li>
+</ul>
+</section>
+
+<section data-section="やってはいけないこと">
+<h2>やってはいけないこと（必須）</h2>
+<ul>
+<li>画像を背景に貼り、その上へ不可視の操作要素を重ねて「再現」としない。</li>
+<li>汎用 DAG auto-router、任意 graph DSL、幅ごとの別 SVG、1実装しかない抽象層、新しい data API を作らない。</li>
+<li>内部ハーネスを毎 frame 自動配線しない。固定 path を state class で更新し、動的に再計算するのは選択中 Processing stage から Trace 入口への一本だけにする。</li>
+<li>既存の <code>/api/activity-stream</code>、poll fallback、<code>/api/local-consensus</code>、observed-event replay を置き換えたり、存在しない synthetic progress を生成したりしない。</li>
+<li>未検証の model に <code>high</code> を送らない。能力・入力・capacity が不明なら現行互換の <code>medium</code> に戻す。</li>
+<li><code>Artifact / Decision → Hold</code> を通常の no-safe-quorum 経路として描かない。quorum failure は Artifact 前から Hold、Artifact 後は seal failure だけ。</li>
+<li>local の古い checkout、未追跡の <code>.env</code>、<code>_handoff/2026-06-11_0042_recall-redesign.md</code>、<code>logs/</code>、他タスクの実験を変更・stage・commit しない。</li>
+<li>push の明示許可前に push / runtime restart しない。許可後は push 前の restart も禁止する。</li>
+</ul>
+</section>
+
+<section data-section="前提・確認済み現状">
+<h2>前提・確認済み現状</h2>
+<ul>
+<li>計画時の GitHub 正本は <code>origin/main=e2c8a500412af1e53e018b180250893df298ad2c</code>。現在の local <code>main=c60f773</code> は 455 commits 古い。実行開始時は再度 fetch し、その時点の最新 <code>origin/main</code> から clean branch / worktree を作る。</li>
+<li>Processing Lanes は既存 HTML + renderer を再利用でき、SSE <code>/api/activity-stream</code> と 1秒 poll fallback がある。</li>
+<li>Decision Trace は現状 HTML lane + CSS pseudo connector。API は <code>decision_trace.overall / lanes / events / outcome</code> を持ち、renderer は event id を使って observed transition だけを replay する。</li>
+<li>context の required / selected bucket と <code>ModelResidencyPlan.role_contexts</code> は既に存在し、各 vote は <code>context_for(model)</code> を使う。ただし Dashboard は共通 <code>context_tokens</code> だけを表示し、役別 effective context を投影していない。</li>
+<li><code>structured_think_mode(model, num_ctx)</code> は現状すべて <code>medium</code>。transport は <code>low / medium / high</code> を受理するが、configured model ごとの実効能力と安全な選択 policy は未導入。</li>
+<li>Planning baseline の行番号は参考に留める。最新 GitHub 構造を再監査し、同じ責務の最小ファイルへ合わせる。</li>
+</ul>
+</section>
+
+<section data-section="固定する機能・視覚契約">
+<h2>固定する機能・視覚契約</h2>
+<h3>親子構造</h3>
+<pre><code>Processing Lanes (existing HTML)
+  active workflow / active stage
+            │  only dynamic connector
+            ▼
+  Decision Trace (fixed-coordinate SVG harness)
+    Execution Plan → Context → Actual Think → Fit Gate
+      → Primary → Challenger → Agree?
+        ├─ YES → shared Artifact → shared Decision
+        ├─ NO  → Tie-break → shared Artifact → shared Decision
+        └─ no safe quorum → Hold (before Artifact)
+             seal failed → Hold (only post-Artifact exception)</code></pre>
+<ul>
+<li>Processing Lanes を親とし、active Local Decision の Trace を直下へ展開する。現在ページ下部にある単独 Decision Trace を重複表示しない。</li>
+<li>idle / 完了時は既存の意味要約へ折り畳めるが、参照画像との主比較は展開 fixture で行う。</li>
+<li>Primary / Challenger / Tie-break の内部 path、Repair loop、Agree、Artifact、Decision、Hold は固定座標。state は <code>pending / active / done / skipped / error</code> class と実ラベルで表す。</li>
+<li>Artifact と Decision は各1個。Pair 合意と Tie-break 合意は同じ Artifact に合流し、Single-model bypass も同じ Artifact へ入る。</li>
+</ul>
+
+<h3>Adaptive reasoning と役別 context の真実性</h3>
+<ul>
+<li>UI phase の前に、既存の共有境界 <code>structured_think_mode</code> を最小の純粋 selector として拡張する。task / lane / role、required / effective context、検証済み model capability 以外の推測値は使わない。</li>
+<li>通常は <code>medium</code>、simple / bounded repair は評価合格時だけ <code>low</code>、Tie-break / high-impact は品質・JSON-valid率・latency・headroom・model capability の全 gate 合格時だけ <code>high</code> 候補とする。未知値は <code>medium</code>。</li>
+<li>policy version / hash、selected think、selection reason、required / selected / role-effective context を audit へ残す。Dashboard は既存 <code>lanes[]</code> へ最小投影し、別 endpoint を作らない。</li>
+<li>shadow / paired replay と限定 canary を通るまで production で low / high を選ばない。表示は transport に渡した実値だけを使う。</li>
+</ul>
+</section>
+
+<section data-section="状態fixture">
+<h2>必須 fixture matrix</h2>
+<table>
+<thead><tr><th>ID</th><th>workflow / state</th><th>必須表示</th></tr></thead>
+<tbody>
+<tr><td>A</td><td>INGEST / Primary generate・validate</td><td>INGEST の active CONSENSUS から入口へ橙線1本。Primary active、後続は待機。</td></tr>
+<tr><td>B</td><td>RECALL / Challenger validate</td><td>RECALL だけ展開。Primary done、Challenger active、Tie-break standby。</td></tr>
+<tr><td>C</td><td>AUDIT / pair safe agreement</td><td>Agree YES → 共通 Artifact → Decision。Tie-break skipped、不要な赤線なし。</td></tr>
+<tr><td>D</td><td>IMPROVE / disagreement・Tie-break active</td><td>Agree NO → Tie-break Trigger。Artifact / Decision は pending。</td></tr>
+<tr><td>E</td><td>REPAIR / Tie-break 2-of-3 agreement</td><td>Tie-break Vote → 共通 Artifact → Decision。重複 node / 縦点線 bus なし。</td></tr>
+<tr><td>F</td><td>TYPED GRAPH / no safe quorum</td><td>Artifact 前から Hold。Artifact / Decision は未通過、理由は No safe quorum。</td></tr>
+<tr><td>G</td><td>Artifact seal failed</td><td>合意後の共通 Artifact からだけ Hold。ラベルは SEAL FAILED。</td></tr>
+<tr><td>H</td><td>idle / no work</td><td>誤った active path、pulse、Hold なし。意味要約へ安全に折畳み。</td></tr>
+</tbody>
+</table>
+</section>
+
+<section data-section="実行手順">
+<h2>実行手順</h2>
+<ol class="checklist">
+<li><input type="checkbox"><span><strong>Phase 0 — 最新 GitHub 正本と保護範囲を固定。</strong> <code>git fetch origin</code> 後の exact <code>origin/main</code> から clean branch / worktree を作り、Dashboard / decision / tests の現責務を再監査する。dirty checkout の未追跡資産は一切移動しない。基準 SHA と対象ファイルを実行ログへ記録する。</span></li>
+<li><input type="checkbox"><span><strong>Phase 1 — Reference contract を test asset 化。</strong> この Plan の PNG と SHA / 寸法を照合し、A–H の固定 JSON fixture を既存 test 配置規約に置く。dynamic text を固定し、比較する親子 panel group の capture bounds を定義する。</span></li>
+<li><input type="checkbox"><span><strong>Phase 2 — Adaptive reasoning を証拠付きで導入。</strong> 既存 model-eval / adoption evidence から role ごとの supported reasoning level を確定し、共有 selector、medium fallback、policy hash、audit reason を実装する。unit / transport / fail-closed test と shadow paired replay を通し、production 選択は canary gate まで閉じる。</span></li>
+<li><input type="checkbox"><span><strong>Phase 3 — 実効 plan 値を既存 payload へ最小投影。</strong> active marker / session / decision audit の既存値から <code>lanes[].context_tokens</code> と actual <code>think</code> を組み立てる。redaction と過去 record 互換を守り、不明値は捏造せず <code>—</code> とする。</span></li>
+<li><input type="checkbox"><span><strong>Phase 4 — Processing / Trace を親子化。</strong> Processing Lanes の既存 HTML・SSE・poll を維持し、active Local Decision の直下へ Trace mount を移す。旧 standalone Trace は削除し、ARIA live summary と折畳み keyboard 操作を保持する。</span></li>
+<li><input type="checkbox"><span><strong>Phase 5 — 固定 SVG harness を実装。</strong> 正本座標から内部 node / path を一度だけ定義し、Artifact / Decision 各1個、repair loop、pair / tie合流、Hold topology を固定する。generic routing code は作らない。</span></li>
+<li><input type="checkbox"><span><strong>Phase 6 — 既存 observed replay を SVG state へ接続。</strong> renderer の event queue / reduced-motion / no-synthetic-progress 契約を残し、既存要素を再生成せず class・text・必要な <code>data-*</code> を更新する。<code>ResizeObserver</code> は上段から入口への1 path の <code>d</code> だけを更新する。</span></li>
+<li><input type="checkbox"><span><strong>Phase 7 — 正本 style と accessibility を仕上げ。</strong> 背景、枠、monospace、1–1.5px rounded harness、glow、focus、色以外の state signifier、screen-reader summary を実装する。狭幅は単一 SVG を処理領域内で横スクロールし、ページ全体 overflow と別 SVG を作らない。</span></li>
+<li><input type="checkbox"><span><strong>Phase 8 — A–H と geometry を自動検証。</strong> Python payload tests、Node VM replay、DOM/SVG の個数・座標・交差・ellipsis、keyboard / reduced-motion を最小の既存 test harness へ追加する。pixel diff だけに依存しない。</span></li>
+<li><input type="checkbox"><span><strong>Phase 9 — 1586×992 visual calibration。</strong> Chromium、DPR 1、zoom 100%、font ready、motion off で親子領域を撮影し、reference overlay / diff と DOM 実測を同時に残す。A–H 全状態と狭幅 980×1000、680×1200、375×900 を確認する。</span></li>
+<li><input type="checkbox"><span><strong>Phase 10 — 変更範囲を検証・commit。</strong> targeted tests、<code>git diff --check</code>、本番 lock から隔離した全体 test を通す。policy / payload / UI の意味ある単位ごとに意図した file だけ commit し、他者変更を含めない。</span></li>
+<li><input type="checkbox"><span><strong>Phase 11 — 明示許可後に GitHub-backed runtime へ反映。</strong> push 許可がなければここを blocker にして止める。許可後は <code>push → Dashboard（必要な場合だけ関連 decision service）restart → runtime archive direct_url.json SHA → health</code> の順を守る。</span></li>
+<li><input type="checkbox"><span><strong>Phase 12 — live acceptance と Plan close。</strong> live API / event audit / actual Ollama request と発光経路を照合し、指定 viewport の screenshot・DOM geometry・console・overflow を確認する。archive SHA が pushed SHA、health が <code>drift=false</code> の時だけ Plan を <code>done</code> にする。</span></li>
+</ol>
+</section>
+
+<section class="rules" data-section="実行中更新ルール">
+<h2>実行中更新ルール</h2>
+<ul>
+<li>各 Phase 完了直後に checkbox と実行ログを同時更新する。まとめて完了扱いしない。</li>
+<li><code>script#plan-meta</code> と <code>.badge[data-state]</code> は常に同じ状態にする。</li>
+<li>実行開始で <code>running</code>、真の blocker でのみ <code>blocked</code>、すべての Exit Criteria 合格後だけ <code>done</code>。</li>
+<li>新しい upstream commit で責務が変わっていたら、目的を狭めず touchpoint と検証を更新する。</li>
+</ul>
+</section>
+
+<section data-section="変更面">
+<h2>予想される最小変更面</h2>
+<table>
+<thead><tr><th>責務</th><th>主な候補</th><th>方針</th></tr></thead>
+<tbody>
+<tr><td>Reasoning policy</td><td><code>decision/local_structured.py</code>、関連 unit tests</td><td>共有 selector 1か所。transport は再利用。</td></tr>
+<tr><td>Role / context input</td><td><code>decision/decision_router.py</code>、既存 audit / marker tests</td><td>selector に必要な実値だけ渡す。</td></tr>
+<tr><td>Dashboard projection</td><td><code>ops/dashboard.py</code>、<code>tests/test_dashboard.py</code></td><td>既存 <code>lanes[]</code> に role-effective context を追加。</td></tr>
+<tr><td>Parent / SVG / renderer</td><td><code>dashboard_static/index.html</code>、<code>app-renderer.js</code>、<code>style.css</code></td><td>既存 client / endpoint / replay を維持。</td></tr>
+<tr><td>不要な変更</td><td><code>app-client.js</code>、新 API、generic graph package</td><td>最新再監査で必須と判明しない限り触らない。</td></tr>
+</tbody>
+</table>
+</section>
+
+<section data-section="完了条件">
+<h2>Exit Criteria</h2>
+<ul>
+<li>Plan asset が 1586×992、上記 SHA-256 で、HTML の相対参照が解決する。</li>
+<li>主 capture: Chromium 1586×992 CSS px、DPR 1、zoom 100%、font ready、animation / replay motion off。比較範囲は親子 panel group だけ。</li>
+<li>正本に対し外枠 ±4px、主要 node 中心 ±5px、動的 connector 両端 ±5px。静的 mask の changed pixels は warning 5% 以下、panel / node / path の構造ズレは0件。</li>
+<li>可視 label と node / path の交差0、意図しない ellipsis 0、同名 Artifact / Decision 各1、ページ全体の横 overflow 0、console error 0。</li>
+<li>A–H 全 fixture で path semantics が表と一致し、API / audit に存在しない経路を描かない。</li>
+<li>actual think と role-effective context が transport / audit / Dashboard で一致。unsupported / unknown は medium / <code>—</code> へ保守的に戻り、hardcoded HIGH は0。</li>
+<li>既存 observed event replay、poll fallback、reduced-motion、keyboard、ARIA summary、safe quorum、seal fail-closed が回帰しない。</li>
+<li>targeted test と隔離 full suite が合格し、意図した commit だけが branch にある。</li>
+<li>push 許可後は GitHub CI 成功、runtime archive SHA = pushed <code>origin/main</code>、Dashboard HTTP / API 200、health <code>drift=false</code>、live screenshot / DOM 実測がすべて合格。</li>
+</ul>
+</section>
+
+<section data-section="検証手順">
+<h2>検証手順</h2>
+<pre><code># Phase 0: execution-time truth
+git fetch origin
+git rev-parse origin/main
+git status --short --branch
+
+# Focused policy / routing / dashboard checks (latest namesを再確認)
+uv run pytest -q tests/test_local_structured.py tests/test_ollama.py
+uv run pytest -q tests/test_decision_router.py -k 'context or think or residency or tie'
+uv run pytest -q tests/test_dashboard.py -k 'decision_trace or dashboard_static_labels or local_consensus_route'
+git diff --check
+
+# Full suite isolated from production locks
+CHRONOVISOR_ROOT="$(mktemp -d -t chronovisor-test)" uv run pytest -q
+
+# Deployment only after explicit push approval
+git push origin &lt;approved-branch-or-main&gt;
+launchctl kickstart -k gui/$(id -u)/com.trafficsign.chronovisor-dashboard
+# Then: archive direct_url.json SHA → HTTP/API 200 → health → live DOM/screenshot</code></pre>
+<p>長い test の成否は terminal の推測ではなく JUnit 等の持続 artifact で確認する。UI 合否は screenshot だけでなく <code>getBoundingClientRect()</code> / SVG geometry と実 event audit を残す。</p>
+</section>
+
+<section data-section="rollback">
+<h2>Rollback / release guard</h2>
+<ul>
+<li>Adaptive policy は既存 <code>medium</code> 固定へ即時戻せる独立 commit / flagless code path とし、invalid plan / missing capability は自動で medium。</li>
+<li>Dashboard は既存 API 契約を保つため、UI commit の revert だけで旧 HTML Trace へ戻せる単位にする。</li>
+<li>canary で JSON-valid率、safe resolution、latency、context ceiling、memory admission のいずれかが frozen baseline を下回れば low / high promotion を止める。</li>
+<li>restart は影響サービスだけ。UI-only 最終差分なら Dashboard のみ、policy runtime が変わる場合だけ実行経路を所有する必要最小サービスを追加する。</li>
+</ul>
+</section>
+
+<section class="blockers" data-section="ブロッカー">
+<h2>ブロッカー（発生時のみ）</h2>
+<ul>
+<li>現在なし。実行時に push 許可が未取得なら Phase 11 でのみ blocked とし、local 実装・検証・commit は先に完了させる。</li>
+</ul>
+</section>
+
+<section data-section="受け渡しメモ">
+<h2>受け渡しメモ（次担当へ）</h2>
+<ul>
+<li>画像の美しさと live truth は同格の受入条件。片方だけで完了にしない。</li>
+<li>planning baseline は <code>e2c8a50</code> だが、実行は必ず最新 GitHub SHA から始める。stale local main の line number を正本にしない。</li>
+<li>最小実装は「既存 API / replay + 固定 SVG + 動的 connector 1本 + 既存 audit の狭い投影」。新しい graph engine は不要。</li>
+<li>参照 PNG の active state は fixture の一例であり、live 値を上書きする仕様ではない。</li>
+</ul>
+</section>
+
+<section data-section="実行ログ">
+<h2>実行ログ</h2>
+<ol class="log">
+<li><time>2026-08-12 11:40</time><span>source task の失敗地点、最終生成画像、二つの read-only 実装監査結果を復元。</span></li>
+<li><time>2026-08-12 11:42</time><span>canonical generator で project <code>_handoff</code> に HTML Plan を作成。</span></li>
+<li><time>2026-08-12 11:46</time><span>最終 PNG を project asset へ固定。元画像との byte equality、1586×992、SHA-256 を確認。</span></li>
+<li><time>2026-08-12 11:49</time><span>remote <code>origin/main=e2c8a50</code> と local main の455-commit driftを確認し、latest-GitHub 起点を Phase 0 に固定。</span></li>
+<li><time>2026-08-12 11:53</time><span>Dashboard surface と reasoning/context truth を origin/main で再監査。adaptive policy と role-context projection を必須依存へ追加。</span></li>
+</ol>
+</section>
+
+</body>
+</html>
