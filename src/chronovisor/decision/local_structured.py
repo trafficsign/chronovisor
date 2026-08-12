@@ -93,7 +93,7 @@ _VALIDATION_KEYWORDS = {
 }
 _KNOWN_SCHEMA_KEYWORDS = _ANNOTATION_KEYWORDS | _VALIDATION_KEYWORDS
 _ActivityUpdate = Callable[
-    [str, int | None, bool | str | None, str | None, int | None], None
+    [str, int | None, bool | str | None, str | None, int | None, int | None], None
 ]
 
 
@@ -1059,7 +1059,7 @@ class LocalConsensusAuditStore:
         ):
             status = "error"
         repair_turns = row.get("repair_turns")
-        return {
+        event = {
             "schema_version": 1,
             "event_id": uuid4().hex,
             "kind": kind,
@@ -1075,6 +1075,16 @@ class LocalConsensusAuditStore:
             ),
             "status": status,
         }
+        for key in (
+            "think",
+            "think_selection_reason",
+            "required_num_ctx",
+            "requested_num_ctx",
+            "context_tokens",
+        ):
+            if row.get(key) is not None:
+                event[key] = row[key]
+        return event
 
     def append(self, record: Mapping[str, Any]) -> None:
         """Append one redacted record and atomically refresh the bounded summary."""
@@ -1130,6 +1140,11 @@ class LocalConsensusAuditStore:
         model: str,
         phase: str,
         attempt: int,
+        think: bool | str | None = None,
+        think_selection_reason: str | None = None,
+        required_num_ctx: int | None = None,
+        requested_num_ctx: int | None = None,
+        effective_num_ctx: int | None = None,
     ) -> None:
         """Persist one redacted real phase transition for dashboard replay."""
 
@@ -1147,6 +1162,15 @@ class LocalConsensusAuditStore:
             "attempt": attempt,
             "status": "active",
         }
+        for key, value in (
+            ("think", think),
+            ("think_selection_reason", think_selection_reason),
+            ("required_num_ctx", required_num_ctx),
+            ("requested_num_ctx", requested_num_ctx),
+            ("context_tokens", effective_num_ctx),
+        ):
+            if value is not None:
+                row[key] = value
         with self._lock():
             rows = [*self._read_trace_rows(), row][-self.max_trace_records :]
             self._write_trace_rows_locked(rows)
@@ -1228,6 +1252,7 @@ class LocalConsensusAuditStore:
             think: bool | str | None = None,
             think_selection_reason: str | None = None,
             effective_num_ctx: int | None = None,
+            selected_num_ctx: int | None = None,
         ) -> None:
             nonlocal last_transition
             if path is None or phase not in LOCAL_ACTIVITY_PHASES:
@@ -1254,6 +1279,8 @@ class LocalConsensusAuditStore:
                     record["think_selection_reason"] = think_selection_reason
                 if effective_num_ctx is not None:
                     record["context_tokens"] = effective_num_ctx
+                if selected_num_ctx is not None:
+                    record["requested_num_ctx"] = selected_num_ctx
                 self._atomic_write(
                     path,
                     json.dumps(
@@ -1270,6 +1297,11 @@ class LocalConsensusAuditStore:
                     model=model,
                     phase=phase,
                     attempt=normalized_attempt,
+                    think=record.get("think"),
+                    think_selection_reason=record.get("think_selection_reason"),
+                    required_num_ctx=record.get("required_num_ctx"),
+                    requested_num_ctx=record.get("requested_num_ctx"),
+                    effective_num_ctx=record.get("context_tokens"),
                 )
                 last_transition = current
             except Exception:
@@ -2225,9 +2257,11 @@ class LocalStructuredSession:
         *,
         schema: dict[str, Any],
         effective_num_ctx: int,
+        requested_num_ctx: int | None,
         required_num_ctx: int | None,
         activity_update: _ActivityUpdate | None,
     ) -> ChatRequest:
+        observed_num_ctx = self.num_ctx if requested_num_ctx is None else requested_num_ctx
         selection = _structured_think_selection(
             self.model,
             num_ctx=effective_num_ctx,
@@ -2240,7 +2274,12 @@ class LocalStructuredSession:
             adaptive_reasoning_adopted=_ADAPTIVE_REASONING_CANARY_ADOPTED,
         )
         if activity_update is not None:
-            activity_update("context", 0, *selection, effective_num_ctx)
+            activity_update(
+                "load", 0, *selection, effective_num_ctx, observed_num_ctx
+            )
+            activity_update(
+                "context", 0, *selection, effective_num_ctx, observed_num_ctx
+            )
         return ChatRequest(
             model=self.model,
             messages=(),
@@ -2255,7 +2294,7 @@ class LocalStructuredSession:
             think=selection[0],
             think_selection_reason=selection[1],
             required_num_ctx=required_num_ctx,
-            requested_num_ctx=self.num_ctx,
+            requested_num_ctx=observed_num_ctx,
         )
 
     def _call_transport(
@@ -2332,6 +2371,7 @@ class LocalStructuredSession:
         format_schema: Mapping[str, Any] | None = None,
         value_validator: Callable[[Any], Sequence[ValidationIssue]] | None = None,
         num_ctx: int | None = None,
+        requested_num_ctx: int | None = None,
         required_num_ctx: int | None = None,
         activity_update: _ActivityUpdate | None = None,
         request_observer: Callable[[ChatRequest, str, int], None] | None = None,
@@ -2359,6 +2399,7 @@ class LocalStructuredSession:
         request_template = self._reasoning_request_template(
             schema=transport_schema,
             effective_num_ctx=effective_num_ctx,
+            requested_num_ctx=requested_num_ctx,
             required_num_ctx=required_num_ctx,
             activity_update=activity_update,
         )
@@ -2690,7 +2731,7 @@ class LocalStructuredSession:
             role=self.role,
             model=self.model or self.runtime_role,
             required_num_ctx=required_num_ctx,
-            requested_num_ctx=self.num_ctx,
+            requested_num_ctx=None,
         ) as activity_update:
             observed_request: dict[str, Any] = {}
 
@@ -2712,6 +2753,7 @@ class LocalStructuredSession:
                     request.think,
                     request.think_selection_reason,
                     request.num_ctx,
+                    request.requested_num_ctx,
                 )
 
             run_kwargs = {
@@ -2744,7 +2786,6 @@ class LocalStructuredSession:
                 else:
                     result = self._run_impl(prompt, schema, **run_kwargs)
             else:
-                activity_update("load", 0)
                 try:
                     resource_request = _default_transport_resource_request(
                         model=self.model,
@@ -2772,6 +2813,7 @@ class LocalStructuredSession:
                                 prompt,
                                 schema,
                                 num_ctx=admitted_num_ctx,
+                                requested_num_ctx=resource_request.requested_num_ctx,
                                 **run_kwargs,
                             )
                     except _StructuredResourceError as exc:
@@ -2781,10 +2823,11 @@ class LocalStructuredSession:
                 think=observed_request.get("think"),
                 think_selection_reason=observed_request.get("think_selection_reason"),
                 required_num_ctx=required_num_ctx,
-                requested_num_ctx=self.num_ctx,
+                requested_num_ctx=observed_request.get("requested_num_ctx"),
                 effective_num_ctx=observed_request.get("effective_num_ctx"),
             )
-            activity_update("vote", max(0, len(result.attempts) - 1))
+            if result.ok:
+                activity_update("vote", result.repair_turns)
             try:
                 self.audit_store.record_session(
                     request_sha256=request_sha256,
@@ -2796,7 +2839,7 @@ class LocalStructuredSession:
                         "think_selection_reason"
                     ),
                     required_num_ctx=required_num_ctx,
-                    requested_num_ctx=self.num_ctx,
+                    requested_num_ctx=observed_request.get("requested_num_ctx"),
                     effective_num_ctx=observed_request.get("effective_num_ctx"),
                 )
             except Exception:

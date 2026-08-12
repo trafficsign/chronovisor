@@ -30,7 +30,6 @@ from chronovisor.core.ollama import (
     runtime_generation_routes,
 )
 from chronovisor.core.runtime_config import (
-    load_decision_router_config,
     load_reranker_config,
     load_search_embedding_config,
     runtime_identity,
@@ -2816,13 +2815,6 @@ def _decision_trace_models() -> dict[str, str]:
         return {role: "not configured" for role in _DECISION_TRACE_ROLES}
 
 
-def _decision_trace_context_tokens() -> int | None:
-    try:
-        return int(load_decision_router_config().num_ctx)
-    except Exception:
-        return None
-
-
 def _decision_trace_think_label(row: Mapping[str, Any] | None) -> str:
     if row is None or "think" not in row:
         return "—"
@@ -2856,7 +2848,13 @@ def _decision_trace_steps(
         if state == "done":
             status = "done"
         elif state == "error":
-            status = "done" if index < 4 else "error" if index == 4 else "skipped"
+            status = (
+                "done"
+                if index < current_index
+                else "error"
+                if index == current_index
+                else "skipped"
+            )
         elif state == "skipped":
             status = "skipped"
         elif state == "active":
@@ -2902,6 +2900,7 @@ def _decision_trace_events(
     }
     events: list[dict[str, Any]] = []
     seen: set[str] = set()
+    last_phase_by_lane: dict[str, str] = {}
     for row in rows:
         if str(row.get("request_sha256") or "") != request_sha256:
             continue
@@ -2925,32 +2924,48 @@ def _decision_trace_events(
             lane_value: str | None = None
         else:
             lane_value = lane
+        if kind == "session" and status == "error":
+            phase = last_phase_by_lane.get(lane, "trigger")
         label = phase_labels[phase]
         if kind == "session":
-            label = "Vote accepted" if status == "done" else "Vote rejected"
+            label = "Vote accepted" if status == "done" else "Session failed"
         elif kind == "decision_artifact_replay":
             label = "Artifact replayed"
         elif kind == "decision":
             label = "Decision approved" if status == "done" else "Decision held"
         attempt = row.get("attempt")
-        events.append(
-            {
-                "event_id": event_id[:80],
-                "timestamp": timestamp[:64],
-                "kind": kind,
-                "lane": lane_value,
-                "model": str(row.get("model") or "")[:160],
-                "phase": phase,
-                "status": status,
-                "attempt": (
-                    int(attempt)
-                    if isinstance(attempt, int) and not isinstance(attempt, bool)
-                    else 0
-                ),
-                "label": label,
-                "overall_key": overall_keys[phase],
-            }
-        )
+        event: dict[str, Any] = {
+            "event_id": event_id[:80],
+            "timestamp": timestamp[:64],
+            "kind": kind,
+            "lane": lane_value,
+            "model": str(row.get("model") or "")[:160],
+            "phase": phase,
+            "status": status,
+            "attempt": (
+                int(attempt)
+                if isinstance(attempt, int) and not isinstance(attempt, bool)
+                else 0
+            ),
+            "label": label,
+            "overall_key": overall_keys[phase],
+        }
+        if kind == "phase" and phase != "vote":
+            last_phase_by_lane[lane] = phase
+        if "think" in row:
+            event["think"] = _decision_trace_think_label(row)
+        reason = row.get("think_selection_reason")
+        if isinstance(reason, str) and reason:
+            event["think_selection_reason"] = reason[:160]
+        for source, target in (
+            ("required_num_ctx", "required_context_tokens"),
+            ("requested_num_ctx", "requested_context_tokens"),
+            ("context_tokens", "context_tokens"),
+        ):
+            value = row.get(source)
+            if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+                event[target] = value
+        events.append(event)
     return events[-_DECISION_TRACE_EVENT_LIMIT:]
 
 
@@ -3110,6 +3125,13 @@ def _decision_trace_execution_window(
         for index, row in same_request
         if row.get("kind") in {"decision", "decision_artifact_replay"}
     ]
+    standalone_rows = [
+        (index, row)
+        for index, row in same_request
+        if row.get("kind") == "session"
+        and not _decision_trace_role(row.get("role"))[2]
+    ]
+    boundary_rows = sorted([*decision_rows, *standalone_rows])
     if active_rows:
         active_epochs = [
             epoch
@@ -3120,7 +3142,7 @@ def _decision_trace_execution_window(
             active_started = min(active_epochs)
             previous = [
                 (index, epoch)
-                for index, row in decision_rows
+                for index, row in boundary_rows
                 if (epoch := _failure_timestamp(row.get("timestamp"))[0]) is not None
                 and epoch < active_started
             ]
@@ -3139,8 +3161,8 @@ def _decision_trace_execution_window(
                 ]
                 if trace_boundaries:
                     boundary_epoch = trace_boundaries[-1]
-    elif len(decision_rows) > 1:
-        boundary_index, boundary_row = decision_rows[-2]
+    elif len(boundary_rows) > 1:
+        boundary_index, boundary_row = boundary_rows[-2]
         boundary_epoch = _failure_timestamp(boundary_row.get("timestamp"))[0]
     if boundary_index >= 0 or boundary_epoch is None:
         related = [row for index, row in same_request if index > boundary_index]
@@ -3176,6 +3198,8 @@ def _decision_trace_overall_steps(
     decision_status: str,
     quorum_flow: bool,
     seal_failed: bool,
+    quorum_attempted: bool,
+    validation_completed: bool,
 ) -> list[dict[str, str]]:
     active_phases = {str(row.get("phase") or "trigger") for row in active_rows}
     generating = bool(active_phases & {"trigger", "load", "context", "generate"})
@@ -3185,16 +3209,24 @@ def _decision_trace_overall_steps(
         and bool(active_phases & {"repair", "validate"})
     )
     voting = bool(active_phases) and not generating and not validating
-    completed = decision_status in {"agreed", "quarantined"} or (
-        not quorum_flow and bool(session_rows)
+    structured_completed = not quorum_flow and any(
+        row.get("ok") is True for row in session_rows
     )
     quorum_status = (
         "done"
-        if decision_status == "agreed" or (not quorum_flow and bool(session_rows))
+        if decision_status == "agreed"
+        or seal_failed
+        or structured_completed
         else "error"
-        if decision_status == "quarantined"
+        if decision_status == "quarantined" and quorum_attempted
         else "active"
-        if voting or (bool(session_rows) and not active_rows)
+        if voting
+        or (
+            quorum_flow
+            and bool(session_rows)
+            and not active_rows
+            and decision_status not in {"agreed", "quarantined"}
+        )
         else "pending"
     )
     return [
@@ -3214,7 +3246,7 @@ def _decision_trace_overall_steps(
             "status": "active"
             if generating
             else "done"
-            if validating or voting or session_rows or completed
+            if validating or voting or validation_completed
             else "pending",
         },
         {
@@ -3223,7 +3255,7 @@ def _decision_trace_overall_steps(
             "status": "active"
             if validating
             else "done"
-            if not generating and (session_rows or completed)
+            if not generating and (voting or validation_completed)
             else "pending",
         },
         {"key": "quorum", "label": "Quorum", "status": quorum_status},
@@ -3235,7 +3267,7 @@ def _decision_trace_overall_steps(
             else "done"
             if decision_status == "agreed"
             or bool(decision and decision.get("kind") == "decision_artifact_replay")
-            or (not quorum_flow and session_rows)
+            or structured_completed
             else "skipped"
             if decision_status == "quarantined"
             else "pending",
@@ -3246,7 +3278,7 @@ def _decision_trace_overall_steps(
             "status": "skipped"
             if seal_failed
             else "done"
-            if decision_status == "agreed" or (not quorum_flow and session_rows)
+            if decision_status == "agreed" or structured_completed
             else "error"
             if decision_status == "quarantined"
             else "active"
@@ -3256,61 +3288,19 @@ def _decision_trace_overall_steps(
     ]
 
 
-def _decision_trace_snapshot(
-    activities: list[dict[str, Any]],
-    history: list[dict[str, Any]],
-    latest_decision: dict[str, Any] | None,
-    trace_events: list[dict[str, Any]] | None = None,
-) -> dict[str, Any]:
-    """Project redacted consensus telemetry into a stable three-lane trace."""
-
-    active_request = str(
-        (activities[-1] if activities else {}).get("request_sha256") or ""
-    )
-    decision_request = str((latest_decision or {}).get("request_sha256") or "")
-    latest_session = next(
-        (row for row in reversed(history) if row.get("kind") == "session"),
-        None,
-    )
-    latest_event = (trace_events or [])[-1] if trace_events else None
-    request_sha256 = (
-        active_request
-        or decision_request
-        or str((latest_session or {}).get("request_sha256") or "")
-        or str((latest_event or {}).get("request_sha256") or "")
-    )
-    active_rows, related, bounded_trace_events = _decision_trace_execution_window(
-        activities,
-        history,
-        trace_events or [],
-        request_sha256=request_sha256,
-    )
-    decision = next(
-        (
-            row
-            for row in reversed(related)
-            if row.get("kind") in {"decision", "decision_artifact_replay"}
-        ),
-        None,
-    )
-    session_rows = [row for row in related if row.get("kind") == "session"]
-    latest_related_session = session_rows[-1] if session_rows else None
-
-    task_role = "idle"
-    if active_rows:
-        task_role = _decision_trace_role(active_rows[-1].get("role"))[0]
-    elif decision:
-        task_role = str(
-            decision.get("role") or decision.get("decision_lane") or "routine"
-        )
-    elif latest_related_session:
-        task_role = _decision_trace_role(latest_related_session.get("role"))[0]
-
-    quorum_flow = bool(
-        decision
-        or any(_decision_trace_role(row.get("role"))[2] for row in active_rows)
-        or any(_decision_trace_role(row.get("role"))[2] for row in session_rows)
-    )
+def _decision_trace_lanes(
+    *,
+    active_rows: list[dict[str, Any]],
+    session_rows: list[dict[str, Any]],
+    decision: dict[str, Any] | None,
+    trace_events: list[dict[str, Any]],
+    request_sha256: str,
+    quorum_flow: bool,
+    tie_break_used: bool,
+    quorum_attempted: bool,
+    decision_status: str,
+    pair_agreement: bool | None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], bool]:
     models = _decision_trace_models()
     decision_models = decision.get("models") if isinstance(decision, dict) else None
     if isinstance(decision_models, list):
@@ -3334,13 +3324,22 @@ def _decision_trace_snapshot(
     artifact_replay = bool(
         decision and decision.get("kind") == "decision_artifact_replay"
     )
+    events = _decision_trace_events(
+        trace_events,
+        request_sha256=request_sha256,
+    )
+    terminal_phase_by_lane = {
+        str(event["lane"]): str(event["phase"])
+        for event in events
+        if event.get("kind") == "session" and event.get("lane") is not None
+    }
     lanes: list[dict[str, Any]] = []
     lane_labels = {
         "primary": "Primary",
         "challenger": "Challenger",
         "tie_break": "Tie-break",
     }
-    for index, lane in enumerate(_DECISION_TRACE_ROLES):
+    for lane in _DECISION_TRACE_ROLES:
         active = active_by_lane.get(lane)
         session = session_by_lane.get(lane)
         state = "pending"
@@ -3370,6 +3369,7 @@ def _decision_trace_snapshot(
                 detail = f"{repairs} repair turn{'s' if repairs != 1 else ''}"
             else:
                 state = "error"
+                phase = terminal_phase_by_lane.get(lane, "trigger")
                 result = "Invalid vote"
                 detail = str(session.get("failure_class") or "validation failed")
         elif not quorum_flow and lane != "primary":
@@ -3381,20 +3381,30 @@ def _decision_trace_snapshot(
         elif (
             decision is not None
             and lane == "tie_break"
-            and not decision.get("tie_break_used")
+            and not tie_break_used
+            and quorum_attempted
         ):
             state, result, detail = (
                 "skipped",
                 "Not required",
-                "Primary pair resolved quorum",
-            )
-        elif decision is not None and index < int(decision.get("valid_votes") or 0):
-            state, result, detail = (
-                "done",
-                "Valid vote",
-                "Recovered from decision audit",
+                (
+                    "Primary pair agreed"
+                    if decision_status == "agreed" and pair_agreement is True
+                    else "Decision held without tie-break"
+                ),
             )
         observed = active if active is not None else session
+        repair_turns = (
+            session.get("repair_turns")
+            if session is not None and active is None and not artifact_replay
+            else 0
+        )
+        if (
+            not isinstance(repair_turns, int)
+            or isinstance(repair_turns, bool)
+            or repair_turns < 0
+        ):
+            repair_turns = 0
         think = (
             "—"
             if artifact_replay or state in {"pending", "skipped"}
@@ -3428,18 +3438,155 @@ def _decision_trace_snapshot(
                 "state": state,
                 "result": result,
                 "detail": detail,
+                "repair_turns": repair_turns,
                 "phase": phase,
                 "steps": _decision_trace_steps(state, phase=phase),
             }
         )
+    return lanes, events, artifact_replay
 
-    decision_status = str((decision or {}).get("status") or "")
+
+def _decision_trace_snapshot(
+    activities: list[dict[str, Any]],
+    history: list[dict[str, Any]],
+    latest_decision: dict[str, Any] | None,
+    trace_events: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Project redacted consensus telemetry into a stable three-lane trace."""
+
+    active_request = str(
+        (activities[-1] if activities else {}).get("request_sha256") or ""
+    )
+    decision_request = str((latest_decision or {}).get("request_sha256") or "")
+    latest_session = next(
+        (row for row in reversed(history) if row.get("kind") == "session"),
+        None,
+    )
+    latest_event = (trace_events or [])[-1] if trace_events else None
+    candidates: list[tuple[float, int, int, str]] = []
+
+    def observe(
+        row: Mapping[str, Any] | None,
+        timestamp_keys: tuple[str, ...],
+        terminal_rank: int,
+    ) -> None:
+        request = str((row or {}).get("request_sha256") or "")
+        if not request:
+            return
+        epoch = next(
+            (
+                parsed
+                for key in timestamp_keys
+                if (parsed := _failure_timestamp((row or {}).get(key))[0]) is not None
+            ),
+            None,
+        )
+        if epoch is not None:
+            candidates.append((epoch, terminal_rank, len(candidates), request))
+
+    for row in activities:
+        observe(row, ("updated_at", "started_at"), 0)
+    for row in history:
+        kind = row.get("kind")
+        if kind in {"session", "decision", "decision_artifact_replay"}:
+            observe(row, ("timestamp",), 2 if kind != "session" else 1)
+    for row in trace_events or []:
+        kind = row.get("kind")
+        if kind in {"session", "decision", "decision_artifact_replay"}:
+            observe(row, ("timestamp",), 2 if kind != "session" else 1)
+    observe(latest_decision, ("timestamp",), 2)
+
+    if candidates:
+        _epoch, terminal_rank, _order, request_sha256 = max(candidates)
+        execution_activities = [] if terminal_rank else activities
+    else:
+        request_sha256 = (
+            active_request
+            or decision_request
+            or str((latest_session or {}).get("request_sha256") or "")
+            or str((latest_event or {}).get("request_sha256") or "")
+        )
+        execution_activities = activities
+    active_rows, related, bounded_trace_events = _decision_trace_execution_window(
+        execution_activities,
+        history,
+        trace_events or [],
+        request_sha256=request_sha256,
+    )
+    decision = next(
+        (
+            row
+            for row in reversed(related)
+            if row.get("kind") in {"decision", "decision_artifact_replay"}
+        ),
+        None,
+    )
+    session_rows = [row for row in related if row.get("kind") == "session"]
+    latest_related_session = session_rows[-1] if session_rows else None
+    quorum_flow = bool(
+        decision
+        or any(_decision_trace_role(row.get("role"))[2] for row in active_rows)
+        or any(_decision_trace_role(row.get("role"))[2] for row in session_rows)
+    )
+
+    decision_facts = decision or {}
+    counts: dict[str, int | None] = {}
+    for key in ("vote_count", "valid_votes"):
+        value = decision_facts.get(key)
+        counts[key] = (
+            value
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0
+            else None
+        )
+    vote_count = counts["vote_count"]
+    valid_votes = counts["valid_votes"]
+    pair_agreement = decision_facts.get("pair_agreement")
+    if not isinstance(pair_agreement, bool):
+        pair_agreement = None
+    tie_break_used = decision_facts.get("tie_break_used") is True
+    decision_status = str(decision_facts.get("status") or "")
     seal_failed = bool(
         decision_status == "quarantined"
-        and (decision or {}).get("quarantine_reason")
+        and decision_facts.get("quarantine_reason")
         == "canonical_decision_artifact_publish_failed"
-        and (decision or {}).get("failure_class") == "decision_artifact_invalid"
+        and decision_facts.get("failure_class") == "decision_artifact_invalid"
     )
+    quorum_attempted = bool(
+        decision_status == "agreed"
+        or seal_failed
+        or pair_agreement is True
+        or tie_break_used
+        or (vote_count is not None and vote_count >= 2)
+        or (valid_votes is not None and valid_votes >= 2)
+    )
+    successful_session = any(row.get("ok") is True for row in session_rows)
+    validation_completed = bool(
+        quorum_attempted or (not quorum_flow and successful_session)
+    )
+
+    task_role = "idle"
+    if active_rows:
+        task_role = _decision_trace_role(active_rows[-1].get("role"))[0]
+    elif decision:
+        task_role = str(
+            decision.get("role") or decision.get("decision_lane") or "routine"
+        )
+    elif latest_related_session:
+        task_role = _decision_trace_role(latest_related_session.get("role"))[0]
+
+    lanes, events, artifact_replay = _decision_trace_lanes(
+        active_rows=active_rows,
+        session_rows=session_rows,
+        decision=decision,
+        trace_events=bounded_trace_events,
+        request_sha256=request_sha256,
+        quorum_flow=quorum_flow,
+        tie_break_used=tie_break_used,
+        quorum_attempted=quorum_attempted,
+        decision_status=decision_status,
+        pair_agreement=pair_agreement,
+    )
+
     if active_rows:
         trace_state = "active"
         active_lane = next(
@@ -3450,9 +3597,9 @@ def _decision_trace_snapshot(
         trace_state = "agreed"
         if artifact_replay:
             summary = "Canonical artifact replay · 0 model calls"
-        elif decision and decision.get("pair_agreement"):
+        elif pair_agreement is True:
             summary = "2/2 pair agreement"
-        elif decision and decision.get("tie_break_used"):
+        elif tie_break_used:
             summary = (
                 "2/3 quorum · conservative veto bypassed by lane policy"
                 if decision.get("conservative_veto_bypassed_by_lane_policy")
@@ -3463,9 +3610,15 @@ def _decision_trace_snapshot(
     elif decision_status == "quarantined":
         trace_state = "quarantined"
         summary = "No safe quorum · quarantined"
-    elif session_rows:
+    elif not quorum_flow and successful_session:
         trace_state = "ready"
         summary = "Structured result ready"
+    elif not quorum_flow and session_rows:
+        trace_state = "quarantined"
+        summary = "Structured result invalid"
+    elif session_rows:
+        trace_state = "idle"
+        summary = "Local quorum incomplete"
     else:
         trace_state = "idle"
         summary = "No local decision yet"
@@ -3478,6 +3631,8 @@ def _decision_trace_snapshot(
         decision_status=decision_status,
         quorum_flow=quorum_flow,
         seal_failed=seal_failed,
+        quorum_attempted=quorum_attempted,
+        validation_completed=validation_completed,
     )
     updated_at = (
         (active_rows[-1] if active_rows else {}).get("updated_at")
@@ -3490,9 +3645,16 @@ def _decision_trace_snapshot(
         trace_state=trace_state,
         task_role=task_role,
     )
-    events = _decision_trace_events(
-        bounded_trace_events,
-        request_sha256=request_sha256,
+    observed_context = next(
+        (
+            lane["context_tokens"]
+            for lane in [
+                *(item for item in lanes if item["state"] == "active"),
+                *reversed(lanes),
+            ]
+            if lane["context_tokens"] is not None
+        ),
+        None,
     )
     return {
         "state": trace_state,
@@ -3502,8 +3664,13 @@ def _decision_trace_snapshot(
         "summary": summary,
         "started_at": (active_rows[0] if active_rows else {}).get("started_at"),
         "updated_at": updated_at,
-        "context_tokens": _decision_trace_context_tokens(),
+        "context_tokens": observed_context,
         "quorum_flow": quorum_flow,
+        "quorum_attempted": quorum_attempted,
+        "vote_count": vote_count,
+        "valid_votes": valid_votes,
+        "pair_agreement": pair_agreement,
+        "tie_break_used": tie_break_used,
         "artifact_replay": artifact_replay,
         "outcome": outcome,
         "overall": overall,
@@ -3518,6 +3685,10 @@ def _local_consensus_snapshot(limit: int = 40) -> dict[str, Any]:
 
     root = CHRONOVISOR_ROOT / "runtime" / "local-consensus"
     activities = _local_consensus_activities()
+    trace_events = _read_jsonl_file(
+        root / "trace-events.jsonl",
+        limit=max(_DECISION_TRACE_EVENT_LIMIT * 4, limit * 4),
+    )
 
     summary = _read_json_file(root / "summary.json") or _empty_local_consensus_summary()
     history: list[dict[str, Any]] = []
@@ -3593,10 +3764,6 @@ def _local_consensus_snapshot(limit: int = 40) -> dict[str, Any]:
                     )
                 }
             )
-    trace_events = _read_jsonl_file(
-        root / "trace-events.jsonl",
-        limit=max(_DECISION_TRACE_EVENT_LIMIT * 4, limit * 4),
-    )
     latest_decision = next(
         (
             row

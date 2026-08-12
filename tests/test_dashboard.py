@@ -11,6 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -476,6 +477,30 @@ def test_local_consensus_snapshot_removes_dead_markers_and_exposes_redacted_metr
     assert all("raw_output" not in row for row in snapshot["history"])
     assert not (active_dir / "dead.json").exists()
     assert not (active_dir / "stale.json").exists()
+
+
+def test_local_consensus_reads_trace_before_audit_history(
+    tmp_path: Path, monkeypatch
+) -> None:
+    reads: list[str] = []
+
+    def read_jsonl(path: Path, *, limit: int) -> list[dict[str, Any]]:
+        reads.append(path.name)
+        return []
+
+    monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", tmp_path)
+    monkeypatch.setattr(dashboard, "_local_consensus_activities", lambda: [])
+    monkeypatch.setattr(dashboard, "_read_json_file", lambda _path: {})
+    monkeypatch.setattr(dashboard, "_read_jsonl_file", read_jsonl)
+    monkeypatch.setattr(
+        dashboard,
+        "_decision_trace_models",
+        lambda: {role: "not configured" for role in dashboard._DECISION_TRACE_ROLES},
+    )
+
+    dashboard._local_consensus_snapshot()
+
+    assert reads == ["trace-events.jsonl", "audit.jsonl"]
 
 
 def test_processing_activity_projects_simultaneous_llm_workflows(monkeypatch) -> None:
@@ -1036,7 +1061,7 @@ def test_decision_trace_projects_live_phase_and_completed_vote(monkeypatch) -> N
                 "model": "primary:model",
                 "ok": True,
                 "first_pass_valid": True,
-                "repair_turns": 0,
+                "repair_turns": 2,
                 "think": False,
                 "required_context_tokens": 12_000,
                 "requested_context_tokens": 16_384,
@@ -1053,17 +1078,21 @@ def test_decision_trace_projects_live_phase_and_completed_vote(monkeypatch) -> N
     assert trace["lanes"][0]["required_context_tokens"] == 12_000
     assert trace["lanes"][0]["requested_context_tokens"] == 16_384
     assert trace["lanes"][0]["context_tokens"] == 16_384
+    assert trace["lanes"][0]["repair_turns"] == 2
     assert trace["lanes"][1]["state"] == "active"
     assert trace["lanes"][1]["think"] == "high"
     assert trace["lanes"][1]["required_context_tokens"] == 24_000
     assert trace["lanes"][1]["requested_context_tokens"] == 32_768
     assert trace["lanes"][1]["context_tokens"] == 32_768
+    assert trace["context_tokens"] == 32_768
+    assert trace["lanes"][1]["repair_turns"] == 0
     assert trace["lanes"][1]["steps"][4]["status"] == "active"
     assert trace["lanes"][2]["state"] == "pending"
     assert trace["lanes"][2]["think"] == "—"
     assert trace["lanes"][2]["required_context_tokens"] is None
     assert trace["lanes"][2]["requested_context_tokens"] is None
     assert trace["lanes"][2]["context_tokens"] is None
+    assert trace["lanes"][2]["repair_turns"] == 0
     assert [step["label"] for step in trace["overall"]] == [
         "Packet",
         "Dispatch",
@@ -1148,6 +1177,11 @@ def test_decision_trace_exposes_only_ordered_events_for_current_request(
             "phase": "generate",
             "attempt": 0,
             "status": "active",
+            "think": False,
+            "think_selection_reason": "bounded_lane",
+            "required_num_ctx": 24_000,
+            "requested_num_ctx": 32_768,
+            "context_tokens": 32_768,
             "raw_output": "must not escape",
         },
         {
@@ -1196,10 +1230,139 @@ def test_decision_trace_exposes_only_ordered_events_for_current_request(
     assert trace["event_count"] == 3
     assert trace["events"][0]["lane"] == "primary"
     assert trace["events"][0]["overall_key"] == "generate"
+    assert trace["events"][0]["think"] == "off"
+    assert trace["events"][0]["think_selection_reason"] == "bounded_lane"
+    assert trace["events"][0]["required_context_tokens"] == 24_000
+    assert trace["events"][0]["requested_context_tokens"] == 32_768
+    assert trace["events"][0]["context_tokens"] == 32_768
     assert trace["events"][1]["overall_key"] == "validate"
     assert trace["events"][2]["label"] == "Vote accepted"
     assert "prompt" not in trace["events"][0]
     assert "raw_output" not in trace["events"][0]
+
+
+@pytest.mark.parametrize(
+    "prior_phases,expected_phase,expected_overall",
+    (
+        ((), "trigger", "dispatch"),
+        (("trigger",), "trigger", "dispatch"),
+        (("load",), "load", "dispatch"),
+        (("generate",), "generate", "generate"),
+        (("generate", "vote"), "generate", "generate"),
+    ),
+)
+def test_decision_trace_failed_session_stays_at_last_observed_phase(
+    prior_phases: tuple[str, ...],
+    expected_phase: str,
+    expected_overall: str,
+) -> None:
+    request = "8" * 64
+    rows = []
+    for index, phase in enumerate(prior_phases):
+        rows.append(
+            {
+                "event_id": f"phase-{index}-{phase}",
+                "kind": "phase",
+                "timestamp": "2026-07-15T12:00:00Z",
+                "request_sha256": request,
+                "role": "ingest_review:primary",
+                "phase": phase,
+                "status": "active",
+            }
+        )
+    rows.append(
+        {
+            "event_id": "failed-session",
+            "kind": "session",
+            "timestamp": "2026-07-15T12:00:01Z",
+            "request_sha256": request,
+            "role": "ingest_review:primary",
+            "phase": "vote",
+            "status": "error",
+        }
+    )
+
+    failed = dashboard._decision_trace_events(rows, request_sha256=request)[-1]
+
+    assert failed["phase"] == expected_phase
+    assert failed["overall_key"] == expected_overall
+    assert failed["label"] == "Session failed"
+
+
+def test_decision_trace_failed_standalone_session_is_phase_aware_not_ready() -> None:
+    request = "4" * 64
+    session = {
+        "kind": "session",
+        "timestamp": "2026-07-15T12:00:01Z",
+        "request_sha256": request,
+        "role": "wiki_generation",
+        "model": "primary:model",
+        "ok": False,
+        "failure_class": "repair_exhausted",
+        "context_tokens": 32_768,
+    }
+    events = [
+        {
+            "event_id": phase,
+            "kind": "phase",
+            "timestamp": "2026-07-15T12:00:00Z",
+            "request_sha256": request,
+            "role": "wiki_generation",
+            "phase": phase,
+            "status": "active",
+        }
+        for phase in ("trigger", "load", "context", "generate")
+    ]
+    events.append(
+        {
+            "event_id": "failed",
+            "kind": "session",
+            "timestamp": session["timestamp"],
+            "request_sha256": request,
+            "role": "wiki_generation",
+            "phase": "vote",
+            "status": "error",
+        }
+    )
+
+    trace = dashboard._decision_trace_snapshot([], [session], None, events)
+
+    assert trace["state"] == "quarantined"
+    assert trace["summary"] == "Structured result invalid"
+    assert trace["context_tokens"] == 32_768
+    assert trace["lanes"][0]["state"] == "error"
+    assert trace["lanes"][0]["phase"] == "generate"
+    assert [step["status"] for step in trace["lanes"][0]["steps"]] == [
+        "done",
+        "done",
+        "done",
+        "error",
+        "skipped",
+        "skipped",
+    ]
+
+
+def test_decision_trace_successful_standalone_session_completes_validation() -> None:
+    trace = dashboard._decision_trace_snapshot(
+        [],
+        [
+            {
+                "kind": "session",
+                "timestamp": "2026-07-15T12:00:01Z",
+                "request_sha256": "5" * 64,
+                "role": "wiki_generation",
+                "model": "primary:model",
+                "ok": True,
+                "context_tokens": 16_384,
+            }
+        ],
+        None,
+    )
+
+    assert trace["state"] == "ready"
+    assert trace["context_tokens"] == 16_384
+    assert trace["overall"][2]["status"] == "done"
+    assert trace["overall"][3]["status"] == "done"
 
 
 def test_decision_trace_excludes_previous_execution_with_same_request_hash(
@@ -1299,6 +1462,187 @@ def test_decision_trace_excludes_previous_execution_with_same_request_hash(
     ]
 
 
+def test_decision_trace_keeps_newer_terminal_request_until_active_updates() -> None:
+    active_request = "1" * 64
+    completed_request = "2" * 64
+    activities = [
+        {
+            "request_sha256": active_request,
+            "role": "ingest_review:primary",
+            "model": "primary:model",
+            "phase": "generate",
+            "started_at": "2026-07-15T12:00:00Z",
+            "updated_at": "2026-07-15T12:00:05Z",
+        }
+    ]
+    session = {
+        "kind": "session",
+        "timestamp": "2026-07-15T12:00:09Z",
+        "request_sha256": completed_request,
+        "role": "ingest_review:primary",
+        "model": "primary:model",
+        "ok": True,
+        "repair_turns": 0,
+    }
+    decision = {
+        "kind": "decision",
+        "timestamp": "2026-07-15T12:00:10Z",
+        "request_sha256": completed_request,
+        "role": "ingest_review",
+        "status": "agreed",
+        "pair_agreement": True,
+        "vote_count": 2,
+        "valid_votes": 2,
+    }
+
+    completed_session = dashboard._decision_trace_snapshot(
+        activities, [session], None
+    )
+    activities[0]["updated_at"] = "2026-07-15T12:00:10Z"
+    completed_decision = dashboard._decision_trace_snapshot(
+        activities, [session, decision], decision
+    )
+
+    assert completed_session["request_sha256"] == completed_request
+    assert completed_session["state"] == "idle"
+    assert completed_session["summary"] == "Local quorum incomplete"
+    assert completed_session["overall"][2]["status"] == "pending"
+    assert completed_session["overall"][3]["status"] == "pending"
+    assert completed_session["active"] is False
+    assert completed_decision["request_sha256"] == completed_request
+    assert completed_decision["state"] == "agreed"
+    assert completed_decision["active"] is False
+
+    activities[0]["updated_at"] = "2026-07-15T12:00:11Z"
+    newer_active = dashboard._decision_trace_snapshot(
+        activities, [session, decision], decision
+    )
+
+    assert newer_active["request_sha256"] == active_request
+    assert newer_active["state"] == "active"
+    assert newer_active["active"] is True
+
+
+def test_decision_trace_latest_execution_preserves_reused_hash_boundary() -> None:
+    request = "3" * 64
+    decision = {
+        "kind": "decision",
+        "timestamp": "2026-07-15T12:00:10Z",
+        "request_sha256": request,
+        "role": "ingest_review",
+        "status": "agreed",
+        "pair_agreement": True,
+        "vote_count": 2,
+        "valid_votes": 2,
+    }
+    activity = {
+        "request_sha256": request,
+        "role": "ingest_review:primary",
+        "model": "primary:model",
+        "phase": "generate",
+        "started_at": "2026-07-15T12:00:00Z",
+        "updated_at": "2026-07-15T12:00:05Z",
+    }
+    old_decision_event = {
+        "event_id": "old-decision",
+        "kind": "decision",
+        "timestamp": "2026-07-15T12:00:10Z",
+        "request_sha256": request,
+        "role": "ingest_review",
+        "phase": "decision",
+        "status": "done",
+    }
+
+    completed = dashboard._decision_trace_snapshot(
+        [activity], [decision], decision, [old_decision_event]
+    )
+
+    assert completed["state"] == "agreed"
+    assert completed["active"] is False
+
+    activity["started_at"] = "2026-07-15T12:00:11Z"
+    activity["updated_at"] = "2026-07-15T12:00:12Z"
+    new_phase_event = {
+        "event_id": "new-generate",
+        "kind": "phase",
+        "timestamp": "2026-07-15T12:00:12Z",
+        "request_sha256": request,
+        "role": "ingest_review:primary",
+        "phase": "generate",
+        "status": "active",
+    }
+    restarted = dashboard._decision_trace_snapshot(
+        [activity],
+        [decision],
+        decision,
+        [old_decision_event, new_phase_event],
+    )
+
+    assert restarted["state"] == "active"
+    assert restarted["active"] is True
+    assert [event["event_id"] for event in restarted["events"]] == [
+        "new-generate"
+    ]
+
+
+def test_decision_trace_bounds_repeated_standalone_sessions_with_same_hash() -> None:
+    request = "6" * 64
+    old = {
+        "kind": "session",
+        "timestamp": "2026-07-15T12:00:01Z",
+        "request_sha256": request,
+        "role": "wiki_generation",
+        "model": "old:model",
+        "ok": True,
+    }
+    new = {
+        **old,
+        "timestamp": "2026-07-15T12:01:01Z",
+        "model": "new:model",
+        "ok": False,
+        "failure_class": "transport_error",
+    }
+    events = [
+        {
+            "event_id": "old-session",
+            "kind": "session",
+            "timestamp": old["timestamp"],
+            "request_sha256": request,
+            "role": "wiki_generation",
+            "phase": "vote",
+            "status": "done",
+        },
+        {
+            "event_id": "new-generate",
+            "kind": "phase",
+            "timestamp": "2026-07-15T12:01:00Z",
+            "request_sha256": request,
+            "role": "wiki_generation",
+            "phase": "generate",
+            "status": "active",
+        },
+        {
+            "event_id": "new-session",
+            "kind": "session",
+            "timestamp": new["timestamp"],
+            "request_sha256": request,
+            "role": "wiki_generation",
+            "phase": "vote",
+            "status": "error",
+        },
+    ]
+
+    trace = dashboard._decision_trace_snapshot([], [old, new], None, events)
+
+    assert trace["state"] == "quarantined"
+    assert trace["lanes"][0]["model"] == "new:model"
+    assert trace["lanes"][0]["detail"] == "transport_error"
+    assert [event["event_id"] for event in trace["events"]] == [
+        "new-generate",
+        "new-session",
+    ]
+
+
 def test_decision_trace_marks_pair_quorum_and_unused_tie_break(monkeypatch) -> None:
     monkeypatch.setattr(
         dashboard,
@@ -1318,6 +1662,7 @@ def test_decision_trace_marks_pair_quorum_and_unused_tie_break(monkeypatch) -> N
         "status": "agreed",
         "pair_agreement": True,
         "tie_break_used": False,
+        "vote_count": 2,
         "valid_votes": 2,
         "models": ["primary:model", "challenger:model"],
     }
@@ -1339,9 +1684,15 @@ def test_decision_trace_marks_pair_quorum_and_unused_tie_break(monkeypatch) -> N
 
     assert trace["state"] == "agreed"
     assert trace["summary"] == "2/2 pair agreement"
+    assert trace["quorum_attempted"] is True
+    assert trace["vote_count"] == 2
+    assert trace["valid_votes"] == 2
+    assert trace["pair_agreement"] is True
+    assert trace["tie_break_used"] is False
     assert trace["lanes"][0]["state"] == "done"
     assert trace["lanes"][1]["state"] == "done"
     assert trace["lanes"][2]["state"] == "skipped"
+    assert trace["lanes"][2]["detail"] == "Primary pair agreed"
     assert [lane["think"] for lane in trace["lanes"]] == [
         "medium",
         "medium",
@@ -1349,6 +1700,18 @@ def test_decision_trace_marks_pair_quorum_and_unused_tie_break(monkeypatch) -> N
     ]
     assert trace["overall"][4]["status"] == "done"
     assert trace["overall"][5]["status"] == "done"
+
+    held = {
+        **decision,
+        "status": "quarantined",
+        "pair_agreement": False,
+        "vote_count": 2,
+        "valid_votes": 1,
+        "quarantine_reason": "fewer_than_two_valid_local_votes",
+    }
+    held_trace = dashboard._decision_trace_snapshot([], [held], held)
+    assert held_trace["lanes"][2]["state"] == "skipped"
+    assert held_trace["lanes"][2]["detail"] == "Decision held without tie-break"
 
 
 def test_decision_trace_hides_legacy_and_artifact_replay_reasoning(
@@ -1391,6 +1754,61 @@ def test_decision_trace_hides_legacy_and_artifact_replay_reasoning(
     )
 
     assert [lane["think"] for lane in artifact["lanes"]] == ["—", "—", "—"]
+    assert artifact["quorum_attempted"] is True
+    assert artifact["vote_count"] is None
+    assert artifact["valid_votes"] is None
+    assert artifact["pair_agreement"] is None
+
+
+@pytest.mark.parametrize(
+    "failure_class,quarantine_reason",
+    (
+        ("input_invalid", "structured_request_preflight_failed:input_invalid"),
+        ("route_configuration_invalid", "router_config_invalid:route"),
+        ("schema_invalid", "structured_request_preflight_failed:schema_invalid"),
+        ("local_resource_quarantined", "decision_runner_does_not_fit_reserved_memory"),
+        ("transport_error", "structured_transport_failed"),
+    ),
+)
+def test_decision_trace_keeps_early_terminal_failures_before_quorum(
+    failure_class: str,
+    quarantine_reason: str,
+) -> None:
+    decision = {
+        "kind": "decision",
+        "request_sha256": "6" * 64,
+        "role": "ingest_reconciliation",
+        "status": "quarantined",
+        "failure_class": failure_class,
+        "quarantine_reason": quarantine_reason,
+        "vote_count": 0,
+        "valid_votes": 0,
+        "pair_agreement": False,
+        "tie_break_used": False,
+    }
+
+    trace = dashboard._decision_trace_snapshot([], [decision], decision)
+
+    assert trace["quorum_attempted"] is False
+    assert trace["vote_count"] == 0
+    assert trace["valid_votes"] == 0
+    assert trace["pair_agreement"] is False
+    assert trace["tie_break_used"] is False
+    assert [lane["state"] for lane in trace["lanes"]] == [
+        "pending",
+        "pending",
+        "pending",
+    ]
+    assert [step["status"] for step in trace["overall"]] == [
+        "done",
+        "done",
+        "pending",
+        "pending",
+        "pending",
+        "skipped",
+        "error",
+    ]
+    assert trace["context_tokens"] is None
 
 
 def test_decision_trace_explains_semantic_quality_and_resource_holds() -> None:
@@ -1444,6 +1862,7 @@ def test_decision_trace_marks_only_artifact_publish_failure_after_artifact() -> 
 
     trace = dashboard._decision_trace_snapshot([], [decision], decision)
 
+    assert trace["overall"][4]["status"] == "done"
     assert trace["overall"][-2]["status"] == "error"
     assert trace["overall"][-1]["status"] == "skipped"
     assert trace["outcome"]["reason"] == "Decision artifact seal failed"
@@ -1491,6 +1910,12 @@ def test_decision_trace_explains_lane_policy_veto_bypass() -> None:
     assert trace["summary"] == (
         "2/3 quorum · conservative veto bypassed by lane policy"
     )
+    assert trace["tie_break_used"] is True
+    assert [lane["state"] for lane in trace["lanes"]] == [
+        "pending",
+        "pending",
+        "pending",
+    ]
 
 
 def test_local_consensus_snapshot_removes_reused_pid_marker(
@@ -1813,7 +2238,7 @@ def test_dashboard_static_labels_routine_review_as_local_consensus() -> None:
     assert "${semanticDeferred} semantic · ${operationalDeferred} operational" in app
     assert "grid-template-columns: repeat(5, minmax(0, 1fr));" in style
     assert "No synthetic progress" in app
-    assert "lane.think = targetLane.think;" in app
+    assert "lane.think = fmt(event.think, \"—\").toLowerCase();" in app
     assert ".decision-trace-panel" in style
     assert ".processing-lane.active" in style
     assert "processing-electric-pulse" in style
@@ -1827,6 +2252,116 @@ def test_dashboard_static_labels_routine_review_as_local_consensus() -> None:
         < page.index('/static/app-renderer.js')
         < page.index('/static/app-client.js')
     )
+
+
+def test_processing_activity_rejects_out_of_order_poll_after_newer_stream() -> None:
+    renderer = (dashboard.STATIC_DIR / "app-renderer.js").read_text(encoding="utf-8")
+    scenario = f"""
+const vm = require("node:vm");
+class FakeNode {{
+  constructor(tag = "div") {{
+    this.tag = tag;
+    this.dataset = {{}};
+    this.children = [];
+    this.className = "";
+    this.attributes = {{}};
+    this.textContent = "";
+    this.title = "";
+    this.tabIndex = -1;
+    this.parent = null;
+  }}
+  appendChild(child) {{
+    if (child.parent) child.parent.children = child.parent.children.filter((item) => item !== child);
+    child.parent = this;
+    this.children.push(child);
+    return child;
+  }}
+  append(...children) {{ children.forEach((child) => this.appendChild(child)); }}
+  addEventListener() {{}}
+  setAttribute(key, value) {{ this.attributes[key] = String(value); }}
+  remove() {{
+    if (this.parent) this.parent.children = this.parent.children.filter((item) => item !== this);
+    this.parent = null;
+  }}
+  matches(selector) {{
+    if (selector.startsWith(".")) return this.className.split(/\\s+/).includes(selector.slice(1));
+    return this.tag === selector;
+  }}
+  querySelectorAll(selector) {{
+    const matches = [];
+    const visit = (node) => node.children.forEach((child) => {{
+      if (child.matches(selector)) matches.push(child);
+      visit(child);
+    }});
+    visit(this);
+    return matches;
+  }}
+  querySelector(selector) {{ return this.querySelectorAll(selector)[0] || null; }}
+}}
+const processingLanes = new FakeNode("main");
+const document = {{
+  body: {{ dataset: {{}} }},
+  createElement: (tag) => new FakeNode(tag),
+  visibilityState: "visible",
+}};
+const els = {{ processingLanes, processingPanel: {{ dataset: {{}} }} }};
+const window = {{ matchMedia: () => ({{ matches: false }}) }};
+const sandbox = {{ window, document, els, STAGE_METRIC_LABELS: {{}} }};
+vm.createContext(sandbox);
+vm.runInContext({json.dumps(renderer)}, sandbox);
+const renderProcessingActivity = window.__chronovisorDashboardTest.renderProcessingActivity;
+const keys = ["ingest", "recall", "audit", "improve", "repair", "typed_graph"];
+const payload = (generatedAt, revision, state) => ({{
+  generated_at: generatedAt,
+  revision,
+  active_count: state === "active" ? keys.length : 0,
+  lanes: keys.map((key) => ({{
+    key,
+    label: key,
+    state,
+    current_step: "work",
+    steps: [{{ key: "work", label: "Work", status: state }}],
+  }})),
+}});
+const acceptedStream = renderProcessingActivity(
+  payload("2026-08-12T12:00:10.000Z", "stream-new", "active")
+);
+const acceptedOldPoll = renderProcessingActivity(
+  payload("2026-08-12T12:00:09.000Z", "poll-old", "idle")
+);
+const acceptedDuplicate = renderProcessingActivity(
+  payload("2026-08-12T12:00:11.000Z", "stream-new", "idle")
+);
+const acceptedBetween = renderProcessingActivity(
+  payload("2026-08-12T12:00:10.500Z", "poll-between", "idle")
+);
+process.stdout.write(JSON.stringify({{
+  acceptedStream,
+  acceptedOldPoll,
+  acceptedDuplicate,
+  acceptedBetween,
+  revision: document.body.dataset.processingRevision,
+  lanes: processingLanes.querySelectorAll(".processing-lane").map((row) => ({{
+    key: row.dataset.processingLane,
+    state: row.className,
+  }})),
+}}));
+"""
+
+    completed = _run_node_scenario(scenario)
+    result = json.loads(completed.stdout)
+
+    assert result == {
+        "acceptedStream": True,
+        "acceptedOldPoll": False,
+        "acceptedDuplicate": False,
+        "acceptedBetween": False,
+        "revision": "stream-new",
+        "lanes": [
+            {"key": key, "state": "processing-lane active"}
+            for key in ("ingest", "recall", "audit", "improve", "repair", "typed_graph")
+        ],
+    }
 
 
 def test_decision_trace_lane_rails_start_at_source_node_edges() -> None:
@@ -2084,6 +2619,535 @@ process.stdout.write(JSON.stringify({{
     ]
 
 
+def test_processing_lane_trace_selection_maps_all_workflows_and_fallbacks() -> None:
+    renderer = (dashboard.STATIC_DIR / "app-renderer.js").read_text(encoding="utf-8")
+    scenario = f"""
+const vm = require("node:vm");
+const sandbox = {{ window: {{ matchMedia: () => ({{ matches: false }}) }} }};
+vm.createContext(sandbox);
+vm.runInContext(
+  {json.dumps(renderer)}
+    + "\\nthis.__test = {{ processingLaneForTrace, lanes: latestProcessingLanes }};",
+  sandbox,
+);
+const laneKeys = ["ingest", "recall", "audit", "improve", "repair", "typed_graph"];
+laneKeys.forEach((key) => sandbox.__test.lanes.set(key, {{ state: "idle" }}));
+const roles = {{
+  ingest: "ingest_review",
+  recall: "recall_auto_apply",
+  audit: "content_correction_classification",
+  improve: "model_eval",
+  repair: "local_repair",
+  typed_graph: "relation_extract",
+}};
+const mapped = Object.fromEntries(Object.entries(roles).map(([key, task_role]) => [
+  key,
+  sandbox.__test.processingLaneForTrace({{ request_sha256: "request", task_role }}),
+]));
+sandbox.__test.lanes.get("recall").state = "active";
+sandbox.__test.lanes.get("recall").current_step = "consensus";
+const consensusFallback = sandbox.__test.processingLaneForTrace({{}});
+sandbox.__test.lanes.get("recall").current_step = "search";
+sandbox.__test.lanes.get("ingest").state = "active";
+const activeFallback = sandbox.__test.processingLaneForTrace({{}});
+laneKeys.forEach((key) => sandbox.__test.lanes.set(key, {{ state: "idle" }}));
+const idleFallback = sandbox.__test.processingLaneForTrace({{}});
+process.stdout.write(JSON.stringify({{
+  mapped,
+  consensusFallback,
+  activeFallback,
+  idleFallback,
+}}));
+"""
+
+    completed = _run_node_scenario(scenario)
+    result = json.loads(completed.stdout)
+
+    assert result["mapped"] == {
+        "ingest": "ingest",
+        "recall": "recall",
+        "audit": "audit",
+        "improve": "improve",
+        "repair": "repair",
+        "typed_graph": "typed_graph",
+    }
+    assert result["consensusFallback"] == "recall"
+    assert result["activeFallback"] == "ingest"
+    assert result["idleFallback"] == ""
+
+
+def test_decision_trace_same_request_polls_merge_monotonically() -> None:
+    renderer = (dashboard.STATIC_DIR / "app-renderer.js").read_text(encoding="utf-8")
+    scenario = f"""
+const vm = require("node:vm");
+const clearedTimers = [];
+const sandbox = {{
+  window: {{
+    matchMedia: () => ({{ matches: true }}),
+    clearTimeout: (timer) => clearedTimers.push(timer),
+  }},
+  document: {{ visibilityState: "visible" }},
+}};
+vm.createContext(sandbox);
+vm.runInContext(
+  {json.dumps(renderer)}
+    + `
+renderDecisionTraceFrame = () => {{}};
+renderDecisionTransitionFeed = () => {{}};
+setDecisionTransitionState = () => {{}};
+this.__test = {{ renderDecisionTrace, playback: decisionTracePlayback }};`,
+  sandbox,
+);
+const stepKeys = ["trigger", "load", "context", "generate", "validate", "vote"];
+const lane = (key, state = "active") => ({{
+  key,
+  label: key,
+  model: `${{key}}:model`,
+  state,
+  steps: stepKeys.map((step) => ({{ key: step, status: "pending" }})),
+}});
+const event = (id, laneKey, phase, milliseconds, extra = {{}}) => ({{
+  event_id: id,
+  lane: laneKey,
+  phase,
+  kind: "phase",
+  status: "active",
+  overall_key: ["trigger", "load"].includes(phase) ? "dispatch" : "generate",
+  timestamp: `2026-08-12T00:00:0${{milliseconds}}.000Z`,
+  ...extra,
+}});
+const overall = () => ["packet", "dispatch", "generate", "validate", "quorum"]
+  .map((key) => ({{ key, status: "pending" }}));
+const request = "shared-request";
+const render = (decision_trace) => sandbox.__test.renderDecisionTrace({{ decision_trace }});
+const snapshot = () => ({{
+  request: sandbox.__test.playback.request,
+  state: sandbox.__test.playback.current.state,
+  startedAt: sandbox.__test.playback.current.started_at || null,
+  seen: [...sandbox.__test.playback.seen].sort(),
+  queued: sandbox.__test.playback.queue.map((item) => item.event_id),
+  timer: sandbox.__test.playback.timer,
+  clearedTimers: [...clearedTimers],
+  eventIds: sandbox.__test.playback.target.events.map((item) => item.event_id),
+  eventStatuses: Object.fromEntries(sandbox.__test.playback.target.events.map((item) => [
+    item.event_id,
+    item.status,
+  ])),
+  eventThink: Object.fromEntries(sandbox.__test.playback.target.events.map((item) => [
+    item.event_id,
+    item.think || null,
+  ])),
+  lanes: Object.fromEntries(sandbox.__test.playback.current.lanes.map((item) => [
+    item.key,
+    item.steps.map((step) => step.status),
+  ])),
+}});
+
+render({{
+  request_sha256: request,
+  state: "active",
+  active: true,
+  overall: overall(),
+  lanes: [lane("primary")],
+  events: [
+    event("p-trigger", "primary", "trigger", 1),
+    event("p-load", "primary", "load", 2),
+    event("p-context", "primary", "context", 3),
+    event("p-generate", "primary", "generate", 4),
+  ],
+}});
+const primary = snapshot();
+
+render({{
+  request_sha256: request,
+  state: "active",
+  active: true,
+  overall: overall(),
+  lanes: [lane("challenger")],
+  events: [
+    event("c-trigger", "challenger", "trigger", 1),
+    event("c-load", "challenger", "load", 2),
+    event("c-context", "challenger", "context", 3),
+    event("c-generate", "challenger", "generate", 5),
+  ],
+}});
+const interleaved = snapshot();
+
+render({{
+  request_sha256: request,
+  state: "active",
+  active: true,
+  overall: overall(),
+  lanes: [lane("tie_break")],
+  events: [
+    event("t-trigger", "tie_break", "trigger", 6),
+    event("t-load", "tie_break", "load", 7),
+  ],
+}});
+const allLanes = snapshot();
+
+render({{
+  request_sha256: request,
+  state: "active",
+  active: true,
+  overall: overall(),
+  lanes: [lane("primary", "pending")],
+  events: [event(
+    "p-trigger",
+    "primary",
+    "trigger",
+    1,
+    {{ think: "medium", context_tokens: 65536 }},
+  )],
+}});
+const stale = snapshot();
+
+render({{
+  request_sha256: request,
+  state: "agreed",
+  active: false,
+  summary: "sealed",
+  started_at: "2026-08-12T00:00:00.000Z",
+  updated_at: "2026-08-12T00:00:09.000Z",
+  overall: overall(),
+  lanes: [lane("primary", "done"), lane("challenger", "done")],
+  events: [{{
+    event_id: "decision",
+    lane: null,
+    phase: "decision",
+    kind: "decision",
+    status: "done",
+    overall_key: "decision",
+    timestamp: "2026-08-12T00:00:09.000Z",
+  }}],
+}});
+const terminal = snapshot();
+
+render({{
+  request_sha256: request,
+  state: "active",
+  active: true,
+  overall: overall(),
+  lanes: [lane("primary", "pending")],
+  events: [
+    event("p-trigger", "primary", "trigger", 1),
+    {{
+      event_id: "decision",
+      lane: null,
+      phase: "decision",
+      kind: "decision",
+      status: "active",
+      overall_key: "decision",
+      timestamp: "2026-08-12T00:00:09.000Z",
+    }},
+  ],
+}});
+const lateActive = snapshot();
+
+render({{
+  request_sha256: "other-request",
+  state: "active",
+  active: true,
+  overall: overall(),
+  lanes: [lane("primary")],
+  events: [event("other-trigger", "primary", "trigger", 1)],
+}});
+const other = snapshot();
+render({{
+  request_sha256: request,
+  state: "active",
+  active: true,
+  overall: overall(),
+  lanes: [lane("primary", "pending")],
+  events: [event("p-trigger", "primary", "trigger", 1)],
+}});
+const returned = snapshot();
+sandbox.__test.playback.timer = 99;
+render({{
+  request_sha256: request,
+  state: "active",
+  active: true,
+  started_at: "2026-08-12T00:00:10.000Z",
+  updated_at: "2026-08-12T00:00:10.000Z",
+  overall: overall(),
+  lanes: [lane("primary")],
+  events: [event(
+    "next-trigger",
+    "primary",
+    "trigger",
+    9,
+    {{ timestamp: "2026-08-12T00:00:11.000Z" }},
+  )],
+}});
+const repeatedHash = snapshot();
+process.stdout.write(JSON.stringify({{
+  primary,
+  interleaved,
+  allLanes,
+  stale,
+  terminal,
+  lateActive,
+  other,
+  returned,
+  repeatedHash,
+}}));
+"""
+
+    completed = _run_node_scenario(scenario)
+    result = json.loads(completed.stdout)
+
+    assert result["primary"]["lanes"]["primary"] == [
+        "done", "done", "done", "active", "pending", "pending"
+    ]
+    assert result["interleaved"]["lanes"]["primary"] == result["primary"]["lanes"]["primary"]
+    assert result["interleaved"]["lanes"]["challenger"] == [
+        "done", "done", "done", "active", "pending", "pending"
+    ]
+    assert set(result["allLanes"]["lanes"]) == {"primary", "challenger", "tie_break"}
+    assert result["allLanes"]["lanes"]["tie_break"] == [
+        "done", "active", "pending", "pending", "pending", "pending"
+    ]
+    assert result["stale"]["lanes"] == result["allLanes"]["lanes"]
+    assert result["stale"]["eventThink"]["p-trigger"] == "medium"
+    assert set(result["stale"]["eventIds"]) == {
+        "p-trigger", "p-load", "p-context", "p-generate",
+        "c-trigger", "c-load", "c-context", "c-generate",
+        "t-trigger", "t-load",
+    }
+    assert result["terminal"]["state"] == "agreed"
+    assert result["lateActive"]["state"] == "agreed"
+    assert result["lateActive"]["eventIds"] == result["terminal"]["eventIds"]
+    assert result["lateActive"]["eventStatuses"]["decision"] == "done"
+    assert result["other"]["request"] == "other-request"
+    assert result["other"]["eventIds"] == ["other-trigger"]
+    assert set(result["other"]["lanes"]) == {"primary"}
+    assert result["returned"]["request"] == "shared-request"
+    assert result["returned"]["state"] == "agreed"
+    assert result["returned"]["eventIds"] == result["terminal"]["eventIds"]
+    assert result["repeatedHash"]["state"] == "active"
+    assert result["repeatedHash"]["eventIds"] == ["next-trigger"]
+    assert result["repeatedHash"]["startedAt"] == "2026-08-12T00:00:10.000Z"
+    assert result["repeatedHash"]["seen"] == ["next-trigger"]
+    assert result["repeatedHash"]["queued"] == []
+    assert result["repeatedHash"]["timer"] is None
+    assert result["repeatedHash"]["clearedTimers"] == [99]
+
+
+def test_decision_trace_same_hash_reset_uses_terminal_and_execution_boundaries() -> None:
+    renderer = (dashboard.STATIC_DIR / "app-renderer.js").read_text(encoding="utf-8")
+    scenario = f"""
+const vm = require("node:vm");
+const sandbox = {{ window: {{ matchMedia: () => ({{ matches: true }}) }} }};
+vm.createContext(sandbox);
+vm.runInContext(
+  {json.dumps(renderer)}
+    + "\\nthis.__test = {{ decisionTraceIsTerminal, decisionTraceStartsNewExecution }};",
+  sandbox,
+);
+const event = (event_id, timestamp) => ({{ event_id, timestamp }});
+const terminal = {{
+  state: "agreed",
+  active: false,
+  started_at: "2026-08-12T00:00:00.000Z",
+  updated_at: "2026-08-12T00:00:09.000Z",
+  events: [event("decision", "2026-08-12T00:00:09.000Z")],
+}};
+process.stdout.write(JSON.stringify({{
+  terminalStates: {{
+    agreed: sandbox.__test.decisionTraceIsTerminal({{ state: "agreed" }}),
+    quarantined: sandbox.__test.decisionTraceIsTerminal({{ state: "quarantined" }}),
+    readySingle: sandbox.__test.decisionTraceIsTerminal({{
+      state: "ready", quorum_flow: false,
+    }}),
+    readyQuorum: sandbox.__test.decisionTraceIsTerminal({{
+      state: "ready", quorum_flow: true,
+    }}),
+    idle: sandbox.__test.decisionTraceIsTerminal({{ state: "idle", active: false }}),
+  }},
+  newerStart: sandbox.__test.decisionTraceStartsNewExecution(terminal, {{
+    state: "active",
+    active: true,
+    started_at: "2026-08-12T00:00:10.000Z",
+    events: [event("decision", "2026-08-12T00:00:09.000Z")],
+  }}),
+  newerEvent: sandbox.__test.decisionTraceStartsNewExecution(terminal, {{
+    state: "active",
+    active: true,
+    started_at: terminal.started_at,
+    events: [event("next-trigger", "2026-08-12T00:00:10.000Z")],
+  }}),
+  staleEvent: sandbox.__test.decisionTraceStartsNewExecution(terminal, {{
+    state: "active",
+    active: true,
+    started_at: terminal.started_at,
+    events: [event("late-old-poll", "2026-08-12T00:00:08.000Z")],
+  }}),
+}}));
+"""
+
+    completed = _run_node_scenario(scenario)
+
+    assert json.loads(completed.stdout) == {
+        "terminalStates": {
+            "agreed": True,
+            "quarantined": True,
+            "readySingle": True,
+            "readyQuorum": False,
+            "idle": False,
+        },
+        "newerStart": True,
+        "newerEvent": True,
+        "staleEvent": False,
+    }
+
+
+def test_decision_trace_frame_prefers_terminal_vote_facts() -> None:
+    renderer = (dashboard.STATIC_DIR / "app-renderer.js").read_text(encoding="utf-8")
+    scenario = f"""
+const vm = require("node:vm");
+const element = () => ({{ textContent: "", dataset: {{}}, title: "" }});
+const els = new Proxy({{}}, {{
+  get(target, key) {{
+    if (!(key in target)) target[key] = element();
+    return target[key];
+  }},
+}});
+const sandbox = {{
+  window: {{ matchMedia: () => ({{ matches: false }}) }},
+  document: {{ visibilityState: "visible" }},
+  els,
+}};
+vm.createContext(sandbox);
+vm.runInContext(
+  {json.dumps(renderer)}
+    + `
+updateDecisionSvgHarness = () => {{}};
+updateProcessingTraceSelection = () => {{}};
+setWorkState = () => {{}};
+this.__test = {{ renderDecisionTraceFrame, els }};`,
+  sandbox,
+);
+const capture = (trace) => {{
+  sandbox.__test.renderDecisionTraceFrame({{
+    request_sha256: "terminal-request",
+    overall: [{{ key: "decision", label: "Decision", status: "done" }}],
+    outcome: {{}},
+    ...trace,
+  }});
+  return {{
+    badge: sandbox.__test.els.decisionBadge.textContent,
+    modelCalls: sandbox.__test.els.decisionModelCalls.textContent,
+    quorum: sandbox.__test.els.decisionQuorum.textContent,
+  }};
+}};
+process.stdout.write(JSON.stringify({{
+  terminal: capture({{
+    state: "agreed",
+    active: false,
+    vote_count: 3,
+    valid_votes: 2,
+    tie_break_used: true,
+    lanes: [],
+  }}),
+  activeTie: capture({{
+    state: "active",
+    active: true,
+    vote_count: 3,
+    valid_votes: 2,
+    tie_break_used: false,
+    lanes: [{{ key: "tie_break", state: "active" }}],
+  }}),
+  singleModel: capture({{
+    state: "active",
+    active: true,
+    quorum_flow: false,
+    vote_count: 1,
+    valid_votes: 1,
+    lanes: [{{ key: "primary", state: "done" }}],
+  }}),
+}}));
+"""
+
+    completed = _run_node_scenario(scenario)
+
+    assert json.loads(completed.stdout) == {
+        "terminal": {"badge": "APPROVED", "modelCalls": "3", "quorum": "2 / 3"},
+        "activeTie": {"badge": "RESOLVING", "modelCalls": "3", "quorum": "2 / 3"},
+        "singleModel": {"badge": "WAITING", "modelCalls": "1", "quorum": "1 / 1"},
+    }
+    assert 'hold: safeNoQuorum || sealFailure ? "error" : "pending"' in renderer
+
+
+def test_decision_trace_reasoning_high_resolves_and_unknown_fails_closed() -> None:
+    renderer = (dashboard.STATIC_DIR / "app-renderer.js").read_text(encoding="utf-8")
+    helper = "function decisionReasoningPlanState" + renderer.split(
+        "function decisionReasoningPlanState", 1
+    )[1].split("function updateDecisionSvgHarness", 1)[0]
+    scenario = f"""
+const vm = require("node:vm");
+const sandbox = {{}};
+vm.createContext(sandbox);
+vm.runInContext(
+  {json.dumps(helper)} + "\\nthis.reasoningState = decisionReasoningPlanState;",
+  sandbox,
+);
+process.stdout.write(JSON.stringify({{
+  high: sandbox.reasoningState({{ think: "HIGH" }}, "done"),
+  unknown: sandbox.reasoningState({{ think: "adaptive" }}, "done"),
+  absent: sandbox.reasoningState(null, "active"),
+}}));
+"""
+
+    completed = _run_node_scenario(scenario)
+
+    assert json.loads(completed.stdout) == {
+        "high": {"mode": "high", "fit": "done"},
+        "unknown": {"mode": "adaptive", "fit": "pending"},
+        "absent": {"mode": "—", "fit": "pending"},
+    }
+
+
+def test_decision_trace_pair_branches_require_observed_vote_truth() -> None:
+    renderer = (dashboard.STATIC_DIR / "app-renderer.js").read_text(encoding="utf-8")
+    helper = (
+        "function fmt"
+        + renderer.split("function fmt", 1)[1].split("function shortName", 1)[0]
+        + "function decisionPairBranchStates"
+        + renderer.split("function decisionPairBranchStates", 1)[1].split(
+            "function updateDecisionSvgHarness", 1
+        )[0]
+    )
+    scenario = f"""
+const vm = require("node:vm");
+const sandbox = {{}};
+vm.createContext(sandbox);
+vm.runInContext(
+  {json.dumps(helper)} + "\\nthis.pairStates = decisionPairBranchStates;",
+  sandbox,
+);
+const pair = (trace, state = "pending") => sandbox.pairStates(trace, {{ state }});
+process.stdout.write(JSON.stringify({{
+  artifactOnly: pair({{ pair_agreement: null, quorum_attempted: true }}),
+  explicitYes: pair({{ pair_agreement: true, quorum_attempted: true }}),
+  explicitNo: pair({{ pair_agreement: false, quorum_attempted: true }}),
+  unattemptedNo: pair({{ pair_agreement: false, quorum_attempted: false }}),
+  activeTie: pair({{ pair_agreement: null, tie_break_used: false }}, "active"),
+  finishedTie: pair({{ pair_agreement: null, tie_break_used: true }}, "done"),
+}}));
+"""
+
+    completed = _run_node_scenario(scenario)
+
+    assert json.loads(completed.stdout) == {
+        "artifactOnly": {"tieObserved": False, "yes": "pending", "no": "pending"},
+        "explicitYes": {"tieObserved": False, "yes": "done", "no": "pending"},
+        "explicitNo": {"tieObserved": False, "yes": "pending", "no": "done"},
+        "unattemptedNo": {"tieObserved": False, "yes": "pending", "no": "pending"},
+        "activeTie": {"tieObserved": True, "yes": "pending", "no": "active"},
+        "finishedTie": {"tieObserved": True, "yes": "pending", "no": "done"},
+    }
+
+
 def test_dashboard_static_layout_aligns_peer_panels_and_contains_event_badges() -> None:
     style = (dashboard.STATIC_DIR / "style.css").read_text(encoding="utf-8")
 
@@ -2104,7 +3168,7 @@ def test_dashboard_static_layout_aligns_peer_panels_and_contains_event_badges() 
     assert "fill: #687784;\n  font-size: 8px;" in style
 
 
-def test_decision_trace_replay_reveals_think_only_after_generation() -> None:
+def test_decision_trace_replay_uses_only_observed_context_metadata() -> None:
     renderer = (dashboard.STATIC_DIR / "app-renderer.js").read_text(encoding="utf-8")
     scenario = f"""
 const vm = require("node:vm");
@@ -2124,12 +3188,22 @@ const target = {{
     {{ key: "validate", status: "done" }},
     {{ key: "quorum", status: "done" }},
   ],
+  context_tokens: 131072,
+  events: [
+    {{ event_id: "trigger", lane: "primary", phase: "trigger", kind: "phase", status: "active", overall_key: "dispatch" }},
+    {{ event_id: "load", lane: "primary", phase: "load", kind: "phase", status: "active", overall_key: "dispatch" }},
+    {{ event_id: "context", lane: "primary", phase: "context", kind: "phase", status: "active", overall_key: "generate", think: "medium", required_context_tokens: 12000, requested_context_tokens: 32768, context_tokens: 32768 }},
+    {{ event_id: "generate", lane: "primary", phase: "generate", kind: "phase", status: "active", overall_key: "generate", think: "medium", required_context_tokens: 12000, requested_context_tokens: 32768, context_tokens: 32768 }},
+  ],
   lanes: [
     {{
       key: "primary",
       label: "Primary",
       model: "primary:model",
-      think: "medium",
+      think: "high",
+      required_context_tokens: 64000,
+      requested_context_tokens: 131072,
+      context_tokens: 131072,
       steps: ["trigger", "load", "context", "generate", "validate", "vote"].map(
         (key) => ({{ key, status: "done" }}),
       ),
@@ -2139,18 +3213,30 @@ const target = {{
   ],
 }};
 const blank = sandbox.__test.decisionTraceBlank(target);
-const transition = (phase, kind = "phase") => sandbox.__test.applyDecisionTransition(
-  blank,
-  target,
-  {{ lane: "primary", phase, kind, status: "done", overall_key: "generate" }},
-);
+let frame = blank;
+const observed = {{}};
+for (const event of target.events) {{
+  frame = sandbox.__test.applyDecisionTransition(frame, target, event);
+  observed[event.phase] = {{
+    think: frame.lanes[0].think,
+    required: frame.lanes[0].required_context_tokens,
+    requested: frame.lanes[0].requested_context_tokens,
+    effective: frame.lanes[0].context_tokens,
+    traceContext: frame.context_tokens,
+  }};
+}}
+const laneModes = [["primary", "medium"], ["challenger", "low"], ["tie_break", "off"]]
+  .map(([lane, think]) => sandbox.__test.applyDecisionTransition(
+    blank,
+    target,
+    {{ lane, phase: "context", kind: "phase", status: "active", overall_key: "generate", think, context_tokens: 32768 }},
+  ).lanes.find((item) => item.key === lane).think);
 process.stdout.write(JSON.stringify({{
   blank: blank.lanes.map((lane) => lane.think),
-  early: ["trigger", "load", "context"].map((phase) => transition(phase).lanes[0].think),
-  observed: ["generate", "repair", "validate", "vote"].map(
-    (phase) => transition(phase).lanes[0].think,
-  ),
-  session: transition("vote", "session").lanes[0],
+  blankContext: blank.context_tokens,
+  blankLaneContext: blank.lanes[0].context_tokens,
+  observed,
+  laneModes,
 }}));
 """
 
@@ -2158,10 +3244,25 @@ process.stdout.write(JSON.stringify({{
     result = json.loads(completed.stdout)
 
     assert result["blank"] == ["—", "—", "—"]
-    assert result["early"] == ["—", "—", "—"]
-    assert result["observed"] == ["medium", "medium", "medium", "medium"]
-    assert result["session"]["think"] == "medium"
-    assert result["session"]["state"] == "done"
+    assert result["blankContext"] is None
+    assert result["blankLaneContext"] is None
+    assert result["observed"]["trigger"] == {
+        "think": "—",
+        "required": None,
+        "requested": None,
+        "effective": None,
+        "traceContext": None,
+    }
+    assert result["observed"]["load"] == result["observed"]["trigger"]
+    assert result["observed"]["context"] == {
+        "think": "medium",
+        "required": 12_000,
+        "requested": 32_768,
+        "effective": 32_768,
+        "traceContext": 32_768,
+    }
+    assert result["observed"]["generate"] == result["observed"]["context"]
+    assert result["laneModes"] == ["medium", "low", "off"]
 
 
 def test_decision_trace_timeline_is_granular_forward_only_and_bounded() -> None:
@@ -2252,9 +3353,9 @@ process.stdout.write(JSON.stringify({{
     ]
     assert frames[-1]["statuses"] == ["done", "done", "done", "done", "active"]
     assert frames[2]["laneStatuses"] == [
-        "done",
-        "done",
-        "done",
+        "pending",
+        "pending",
+        "pending",
         "done",
         "active",
         "pending",
@@ -2273,6 +3374,202 @@ process.stdout.write(JSON.stringify({{
         "Packet",
         "Generate",
     ]
+
+
+def test_decision_trace_replay_colors_only_observed_phases_for_every_lane() -> None:
+    renderer = (dashboard.STATIC_DIR / "app-renderer.js").read_text(encoding="utf-8")
+    scenario = f"""
+const vm = require("node:vm");
+const sandbox = {{ window: {{ matchMedia: () => ({{ matches: false }}) }} }};
+vm.createContext(sandbox);
+vm.runInContext(
+  {json.dumps(renderer)}
+    + "\\nthis.__test = {{ decisionTraceBlank, applyDecisionTransition }};",
+  sandbox,
+);
+const laneKeys = ["primary", "challenger", "tie_break"];
+const stepKeys = ["trigger", "load", "context", "generate", "validate", "vote"];
+const overallKey = (phase) =>
+  ["trigger", "load"].includes(phase) ? "dispatch"
+    : ["context", "generate"].includes(phase) ? "generate"
+      : ["repair", "validate"].includes(phase) ? "validate" : "quorum";
+const replay = (lane, phases, terminalStatus) => {{
+  const phaseEvents = phases.map((phase, index) => ({{
+    event_id: `${{lane}}-${{index}}-${{phase}}`,
+    lane,
+    phase,
+    kind: "phase",
+    status: "active",
+    overall_key: overallKey(phase),
+  }}));
+  const events = [
+    ...phaseEvents,
+    {{
+      event_id: `${{lane}}-session`,
+      lane,
+      phase: "vote",
+      kind: "session",
+      status: terminalStatus,
+      overall_key: "quorum",
+    }},
+  ];
+  const target = {{
+    request_sha256: `${{lane}}-request`,
+    active: terminalStatus !== "done",
+    events,
+    overall: ["packet", "dispatch", "generate", "validate", "quorum"]
+      .map((key) => ({{ key, status: "done" }})),
+    lanes: laneKeys.map((key) => ({{
+      key,
+      label: key,
+      model: `${{key}}:model`,
+      think: "medium",
+      steps: stepKeys.map((step) => ({{ key: step, status: "done" }})),
+    }})),
+  }};
+  let frame = sandbox.__test.decisionTraceBlank(target);
+  const snapshots = [];
+  const overallSnapshots = [];
+  for (const event of events) {{
+    frame = sandbox.__test.applyDecisionTransition(frame, target, event);
+    snapshots.push(frame.lanes.find((item) => item.key === lane).steps.map(
+      (step) => step.status,
+    ));
+    overallSnapshots.push(Object.fromEntries(
+      frame.overall.map((step) => [step.key, step.status]),
+    ));
+  }}
+  return {{ snapshots, overallSnapshots, final: snapshots.at(-1) }};
+}};
+process.stdout.write(JSON.stringify({{
+  normal: Object.fromEntries(laneKeys.map((lane) => [lane, replay(
+    lane,
+    ["trigger", "load", "context", "generate", "validate", "vote"],
+    "done",
+  )])),
+  noLoad: replay("primary", ["trigger", "context", "generate", "validate", "vote"], "done"),
+  preflightFailure: replay("primary", ["trigger", "vote"], "error"),
+  capacityFailure: replay("primary", ["trigger", "load", "vote"], "error"),
+  transportFailure: replay(
+    "primary",
+    ["trigger", "load", "context", "generate", "vote"],
+    "error",
+  ),
+  repair: replay(
+    "primary",
+    ["trigger", "load", "context", "generate", "validate", "repair", "validate", "vote"],
+    "done",
+  ),
+}}));
+"""
+
+    completed = _run_node_scenario(scenario)
+    result = json.loads(completed.stdout)
+
+    expected_done = ["done"] * 6
+    for lane in ("primary", "challenger", "tie_break"):
+        assert result["normal"][lane]["snapshots"][:3] == [
+            ["active", "pending", "pending", "pending", "pending", "pending"],
+            ["done", "active", "pending", "pending", "pending", "pending"],
+            ["done", "done", "active", "pending", "pending", "pending"],
+        ]
+        assert result["normal"][lane]["final"] == expected_done
+        assert result["normal"][lane]["overallSnapshots"][0] == {
+            "packet": "done",
+            "dispatch": "active",
+            "generate": "pending",
+            "validate": "pending",
+            "quorum": "pending",
+        }
+        assert result["normal"][lane]["overallSnapshots"][2] == {
+            "packet": "done",
+            "dispatch": "done",
+            "generate": "active",
+            "validate": "pending",
+            "quorum": "pending",
+        }
+        assert result["normal"][lane]["overallSnapshots"][-1]["quorum"] == "active"
+    assert result["noLoad"]["final"] == [
+        "done", "pending", "done", "done", "done", "done"
+    ]
+    assert result["preflightFailure"]["final"] == [
+        "done", "pending", "pending", "pending", "pending", "error"
+    ]
+    assert result["capacityFailure"]["final"] == [
+        "done", "done", "pending", "pending", "pending", "error"
+    ]
+    assert result["transportFailure"]["final"] == [
+        "done", "done", "done", "done", "pending", "error"
+    ]
+    assert result["repair"]["snapshots"][5] == [
+        "done", "done", "done", "done", "active", "pending"
+    ]
+    assert result["repair"]["final"] == expected_done
+
+
+def test_decision_trace_initial_active_render_uses_only_observed_events() -> None:
+    renderer = (dashboard.STATIC_DIR / "app-renderer.js").read_text(encoding="utf-8")
+    scenario = f"""
+const vm = require("node:vm");
+const sandbox = {{ window: {{ matchMedia: () => ({{ matches: false }}) }} }};
+vm.createContext(sandbox);
+vm.runInContext(
+  {json.dumps(renderer)}
+    + `
+const capturedFrames = [];
+renderDecisionTraceFrame = (trace) => capturedFrames.push(
+  JSON.parse(JSON.stringify(trace)),
+);
+renderDecisionTransitionFeed = () => {{}};
+setDecisionTransitionState = () => {{}};
+this.__test = {{ renderDecisionTrace, capturedFrames, decisionTracePlayback }};`,
+  sandbox,
+);
+const stepKeys = ["trigger", "load", "context", "generate", "validate", "vote"];
+const target = {{
+  request_sha256: "initial-active-request",
+  active: true,
+  events: [
+    {{ event_id: "trigger", lane: "primary", phase: "trigger", kind: "phase", status: "active", overall_key: "dispatch" }},
+    {{ event_id: "context", lane: "primary", phase: "context", kind: "phase", status: "active", overall_key: "generate" }},
+    {{ event_id: "generate", lane: "primary", phase: "generate", kind: "phase", status: "active", overall_key: "generate" }},
+  ],
+  overall: ["packet", "dispatch", "generate", "validate", "quorum"]
+    .map((key) => ({{ key, status: "done" }})),
+  lanes: [{{
+    key: "primary",
+    label: "Primary",
+    model: "primary:model",
+    steps: stepKeys.map((key) => ({{ key, status: "done" }})),
+  }}],
+}};
+sandbox.__test.renderDecisionTrace({{ decision_trace: target }});
+const frame = sandbox.__test.capturedFrames[0];
+process.stdout.write(JSON.stringify({{
+  lane: frame.lanes[0].steps.map((step) => step.status),
+  overall: Object.fromEntries(frame.overall.map((step) => [step.key, step.status])),
+  events: frame.events.map((event) => event.event_id),
+  current: sandbox.__test.decisionTracePlayback.current.lanes[0].steps.map(
+    (step) => step.status,
+  ),
+}}));
+"""
+
+    completed = _run_node_scenario(scenario)
+    result = json.loads(completed.stdout)
+
+    assert result["lane"] == [
+        "done", "pending", "done", "active", "pending", "pending"
+    ]
+    assert result["overall"] == {
+        "packet": "done",
+        "dispatch": "done",
+        "generate": "active",
+        "validate": "pending",
+        "quorum": "pending",
+    }
+    assert result["events"] == ["trigger", "context", "generate"]
+    assert result["current"] == result["lane"]
 
 
 def test_build_snapshot_combines_runtime_and_queue(tmp_path: Path, monkeypatch) -> None:

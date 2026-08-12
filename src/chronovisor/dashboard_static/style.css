@@ -3345,6 +3345,7 @@ canvas {
   paint-order: stroke fill;
 }
 
+.decision-trace-harness .trace-context-option .trace-selected-core,
 .decision-trace-harness .trace-reasoning .trace-selected-core {
   fill: #8e91ff;
   stroke: none;
@@ -3353,6 +3354,8 @@ canvas {
   pointer-events: none;
 }
 
+.decision-trace-harness .trace-context-option.active .trace-selected-core,
+.decision-trace-harness .trace-context-option.done .trace-selected-core,
 .decision-trace-harness .trace-reasoning.active .trace-selected-core,
 .decision-trace-harness .trace-reasoning.done .trace-selected-core {
   fill: #8e91ff;
@@ -3480,11 +3483,25 @@ canvas {
   fill: #999bff;
 }
 
-.decision-trace-harness .trace-yes-label {
-  fill: #74d84f;
+.decision-trace-harness .trace-yes-label,
+.decision-trace-harness .trace-no-label {
+  fill: #7d8992;
+  opacity: 0.18;
 }
 
-.decision-trace-harness .trace-no-label,
+.decision-trace-harness .trace-yes-label.active,
+.decision-trace-harness .trace-yes-label.done {
+  fill: #74d84f;
+  opacity: 1;
+}
+
+.decision-trace-harness .trace-no-label.active,
+.decision-trace-harness .trace-no-label.done,
+.decision-trace-harness .trace-no-label.error {
+  fill: #ff3948;
+  opacity: 1;
+}
+
 .decision-trace-harness .trace-seal-label {
   fill: #ff3948;
 }

@@ -139,28 +139,31 @@
               <g class="trace-model-route" data-model-key="challenger" transform="translate(68 171)"><circle r="5"></circle><text x="14" y="4">Challenger · <tspan data-model-value="challenger">--</tspan></text></g>
               <g class="trace-model-route" data-model-key="tie_break" transform="translate(68 201)"><circle r="5"></circle><text x="14" y="4">Tie-break · <tspan data-model-value="tie_break">--</tspan></text></g>
 
-              <path class="trace-context-guide" data-context-guide="all" d="M510 56 V76 Q510 86 500 86 H352 Q342 86 342 96 V154 M510 56 V76 Q510 86 500 86 H452 Q442 86 442 96 V154 M510 56 V76 Q510 86 520 86 H532 Q542 86 542 96 V154 M510 56 V76 Q510 86 520 86 H632 Q642 86 642 96 V154 M442 174 V204 Q442 214 452 214 M542 174 V204 Q542 214 552 214 M642 174 V204 Q642 214 652 214 M342 174 V204 Q342 214 352 214 H724 Q734 214 734 204 V174 Q734 164 744 164 H766"></path>
-              <path class="trace-path" data-path-key="execution-plan-context" d="M510 56 V76 Q510 86 500 86 H452 Q442 86 442 96 V154" marker-end="url(#trace-arrow)"></path>
-              <path class="trace-path" data-path-key="plan-context" d="M442 174 V204 Q442 214 452 214 H724 Q734 214 734 204 V174 Q734 164 744 164 H766" marker-end="url(#trace-arrow)"></path>
+              <path class="trace-context-guide" data-context-guide="all" d="M510 56 V76 Q510 86 500 86 H352 Q342 86 342 96 V140 M510 56 V76 Q510 86 500 86 H452 Q442 86 442 96 V140 M510 56 V76 Q510 86 520 86 H532 Q542 86 542 96 V140 M510 56 V76 Q510 86 520 86 H632 Q642 86 642 96 V140 M442 160 V204 Q442 214 452 214 M542 160 V204 Q542 214 552 214 M642 160 V204 Q642 214 652 214 M342 160 V204 Q342 214 352 214 H724 Q734 214 734 204 V174 Q734 164 744 164 H766"></path>
+              <path class="trace-path" data-path-key="execution-plan-context" d="M510 56 V76 Q510 86 500 86 H452 Q442 86 442 96 V140" marker-end="url(#trace-arrow)"></path>
+              <path class="trace-path" data-path-key="plan-context" d="M442 160 V204 Q442 214 452 214 H724 Q734 214 734 204 V174 Q734 164 744 164 H766" marker-end="url(#trace-arrow)"></path>
               <rect class="trace-label-backdrop trace-context-kicker-backdrop" x="304" y="60" width="88" height="19" rx="3"></rect>
               <text class="trace-kicker" x="312" y="74">CONTEXT WINDOW</text>
-              <g class="trace-node trace-context-option" data-context-option="true" data-context-tokens="32768" transform="translate(342 164)"><circle r="10"></circle><text data-context-label="true" x="15" y="27">32K</text></g>
-              <g class="trace-node trace-context-option" data-context-option="true" data-plan-key="context" data-context-tokens="65536" transform="translate(442 164)"><circle r="10"></circle><text data-context-label="true" x="15" y="27">65K</text></g>
-              <g class="trace-node trace-context-option" data-context-option="true" data-context-tokens="98304" transform="translate(542 164)"><circle r="10"></circle><text data-context-label="true" x="15" y="27">98K</text></g>
-              <g class="trace-node trace-context-option" data-context-option="true" data-context-tokens="131072" transform="translate(642 164)"><circle r="10"></circle><text data-context-label="true" x="15" y="27">131K</text></g>
+              <g class="trace-node trace-context-option" data-context-option="true" data-context-tokens="32768" transform="translate(342 150)"><circle r="10"></circle><circle class="trace-selected-core" r="3"></circle><text data-context-label="true" x="15" y="27">32K</text></g>
+              <g class="trace-node trace-context-option" data-context-option="true" data-plan-key="context" data-context-tokens="65536" transform="translate(442 150)"><circle r="10"></circle><circle class="trace-selected-core" r="3"></circle><text data-context-label="true" x="15" y="27">65K</text></g>
+              <g class="trace-node trace-context-option" data-context-option="true" data-context-tokens="98304" transform="translate(542 150)"><circle r="10"></circle><circle class="trace-selected-core" r="3"></circle><text data-context-label="true" x="15" y="27">98K</text></g>
+              <g class="trace-node trace-context-option" data-context-option="true" data-context-tokens="131072" transform="translate(642 150)"><circle r="10"></circle><circle class="trace-selected-core" r="3"></circle><text data-context-label="true" x="15" y="27">131K</text></g>
               <rect class="trace-label-backdrop" x="382" y="226" width="332" height="20" rx="3"></rect>
               <text class="trace-value" data-plan-value="context-selection" x="548" y="239" text-anchor="middle">required — → selected —</text>
 
               <g class="trace-diamond" data-plan-key="headroom"><path d="M812 118 858 164 812 210 766 164Z"></path><text x="812" y="160">Task +</text><text x="812" y="174">headroom</text></g>
 
               <text class="trace-kicker" x="856" y="90">REASONING BUDGET</text>
-              <path class="trace-reasoning-guide" d="M858 164 H882 Q892 164 892 154 V116 Q892 106 902 106 H903 M921 106 H1245 Q1255 106 1255 116 V154 Q1255 164 1265 164 H1270 M858 164 H903 M921 164 H1270 M858 164 H882 Q892 164 892 174 V212 Q892 222 902 222 H903 M921 222 H1245 Q1255 222 1255 212 V174 Q1255 164 1265 164 H1270"></path>
+              <path class="trace-reasoning-guide" d="M858 164 H872 Q882 164 882 154 V72 Q882 62 892 62 H903 M921 62 H1235 Q1245 62 1245 72 V144 Q1245 154 1255 154 H1260 Q1270 154 1270 164 M858 164 H882 Q892 164 892 154 V116 Q892 106 902 106 H903 M921 106 H1245 Q1255 106 1255 116 V154 Q1255 164 1265 164 H1270 M858 164 H903 M921 164 H1270 M858 164 H882 Q892 164 892 174 V212 Q892 222 902 222 H903 M921 222 H1245 Q1255 222 1255 212 V174 Q1255 164 1265 164 H1270"></path>
+              <path class="trace-path trace-reasoning-path" data-path-key="reasoning-off" d="M858 164 H872 Q882 164 882 154 V72 Q882 62 892 62 H903" marker-end="url(#trace-arrow)"></path>
+              <path class="trace-path trace-reasoning-path" data-reasoning-output="off" d="M921 62 H1235 Q1245 62 1245 72 V144 Q1245 154 1255 154 H1260 Q1270 154 1270 164"></path>
               <path class="trace-path trace-reasoning-path" data-path-key="reasoning-low" d="M858 164 H882 Q892 164 892 154 V116 Q892 106 902 106 H903" marker-end="url(#trace-arrow)"></path>
               <path class="trace-path trace-reasoning-path" data-reasoning-output="low" d="M921 106 H1245 Q1255 106 1255 116 V154 Q1255 164 1265 164 H1270"></path>
               <path class="trace-path trace-reasoning-path" data-path-key="reasoning-medium" d="M858 164 H903" marker-end="url(#trace-arrow)"></path>
               <path class="trace-path trace-reasoning-path" data-reasoning-output="medium" d="M921 164 H1270"></path>
               <path class="trace-path trace-reasoning-path" data-path-key="reasoning-high" d="M858 164 H882 Q892 164 892 174 V212 Q892 222 902 222 H903" marker-end="url(#trace-arrow)"></path>
               <path class="trace-path trace-reasoning-path" data-reasoning-output="high" d="M921 222 H1245 Q1255 222 1255 212 V174 Q1255 164 1265 164 H1270"></path>
+              <g class="trace-reasoning" data-reasoning-key="off" transform="translate(912 62)"><circle r="9"></circle><circle class="trace-selected-core" r="3"></circle><text data-reasoning-label="true" x="18" y="16">OFF · BYPASS</text></g>
               <g class="trace-reasoning" data-reasoning-key="low" transform="translate(912 106)"><circle r="9"></circle><circle class="trace-selected-core" r="3"></circle><text data-reasoning-label="true" x="18" y="16">LOW</text><text class="trace-reasoning-detail" x="18" y="34">simple · repair · tight</text></g>
               <g class="trace-reasoning" data-reasoning-key="medium" transform="translate(912 164)"><circle r="9"></circle><circle class="trace-selected-core" r="3"></circle><text data-reasoning-label="true" x="18" y="16">MEDIUM</text><text class="trace-reasoning-detail" x="18" y="34">normal semantic · default</text></g>
               <g class="trace-reasoning" data-reasoning-key="high" transform="translate(912 222)"><circle r="9"></circle><circle class="trace-selected-core" r="3"></circle><text data-reasoning-label="true" x="18" y="16">HIGH</text><text class="trace-reasoning-detail" x="18" y="34">tie-break · high impact · ample</text></g>
@@ -172,14 +175,14 @@
             </g>
 
             <g class="trace-lanes" id="decision-lanes" aria-label="Local model lanes" aria-live="polite">
-              <path class="trace-path trace-next-voter" data-path-key="primary-challenger" d="M1106 325 V377 Q1106 387 1096 387 H190 Q180 387 180 397 V440 Q180 450 190 450 H220" marker-end="url(#trace-arrow)"></path>
+              <path class="trace-path trace-next-voter" data-path-key="primary-challenger" d="M1096 335 V377 Q1096 387 1086 387 H190 Q180 387 180 397 V440 Q180 450 190 450 H220" marker-end="url(#trace-arrow)"></path>
               <text class="trace-path-label" x="490" y="381">NEXT VOTER</text>
               <path class="trace-path trace-single-path" data-path-key="single-artifact" d="M1106 325 H1300 Q1310 325 1310 335 V393" marker-end="url(#trace-arrow)"></path>
               <path class="trace-path trace-next-voter" data-path-key="challenger-agree" d="M1106 450 H1168" marker-end="url(#trace-arrow)"></path>
               <path class="trace-path trace-yes-path" data-path-key="pair-artifact-join" d="M1248 450 H1300 Q1310 450 1310 440"></path>
               <text class="trace-branch-label trace-yes-label" data-pair-yes-label="true" x="1272" y="443">YES</text>
               <path class="trace-path trace-no-path" data-path-key="pair-tie_break" d="M1208 490 V502 Q1208 512 1198 512 H190 Q180 512 180 522 V565 Q180 575 190 575 H220" marker-end="url(#trace-arrow)"></path>
-              <text class="trace-branch-label trace-no-label" x="1180" y="506">NO</text>
+              <text class="trace-branch-label trace-no-label" data-pair-no-label="true" x="1180" y="506">NO</text>
               <path class="trace-path trace-tie-path" data-path-key="tie_break-quorum" d="M1106 575 H1217" marker-end="url(#trace-arrow)"></path>
               <path class="trace-path trace-yes-path" data-path-key="quorum-artifact-join" d="M1248 545 V524 Q1248 514 1258 514 H1300 Q1310 514 1310 504"></path>
               <text class="trace-branch-label trace-yes-label" data-quorum-yes-label="true" x="1268" y="506">YES</text>
@@ -187,7 +190,7 @@
               <path class="trace-path trace-yes-path" data-path-key="artifact-input" d="M1310 440 V415" marker-end="url(#trace-arrow)"></path>
               <path class="trace-path trace-no-path trace-hold-path" data-path-key="quorum-hold" d="M1278 575 H1408 Q1418 575 1418 585 V590 Q1418 600 1428 600 H1448" marker-end="url(#trace-arrow)"></path>
               <text class="trace-branch-label trace-no-label" data-quorum-no-label="true" x="1336" y="568">NO</text>
-              <path class="trace-path" data-path-key="artifact-seal" d="M1321 404 H1330 Q1340 404 1340 414 V450 Q1340 460 1350 460 H1360 Q1370 460 1370 470" marker-end="url(#trace-arrow)"></path>
+              <path class="trace-path" data-path-key="artifact-seal" d="M1321 404 H1360 Q1370 404 1370 414 V470" marker-end="url(#trace-arrow)"></path>
               <path class="trace-path trace-yes-path" data-path-key="seal-decision" d="M1404 500 H1449" marker-end="url(#trace-arrow)"></path>
               <text class="trace-branch-label trace-yes-label trace-seal-branch" data-seal-yes-label="true" x="1422" y="492">YES</text>
               <path class="trace-path trace-no-path trace-hold-path" data-path-key="seal-hold" d="M1370 530 V540 Q1370 550 1380 550 H1450 Q1460 550 1460 560 V588" marker-end="url(#trace-arrow)"></path>

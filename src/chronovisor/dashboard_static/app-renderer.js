@@ -151,6 +151,8 @@ function setState(state) {
 const latestProcessingLanes = new Map();
 let latestDecisionTrace = {};
 let selectedProcessingLaneKey = "";
+let latestProcessingGeneratedAtMs = null;
+let latestProcessingRevision = "";
 
 function setProcessingConnection(state, label) {
   els.processingConnection.dataset.state = state;
@@ -200,9 +202,24 @@ function processingLaneDetail(lane, now = Date.now()) {
 
 function processingLaneForTrace(trace) {
   const role = String(trace?.task_role || "").toLowerCase().replaceAll("-", "_");
-  const named = ["typed_graph", "ingest", "recall", "audit", "improve", "repair"]
-    .find((key) => role.includes(key));
-  if (named && latestProcessingLanes.get(named)?.state === "active") return named;
+  const named = role.includes("typed_graph")
+      || role.startsWith("relation_")
+      || role.startsWith("entity_merge")
+      || role.startsWith("recall_rubric")
+    ? "typed_graph"
+    : role.startsWith("recall")
+      ? "recall"
+      : role.startsWith("ingest")
+        ? "ingest"
+        : role.startsWith("improve")
+            || role.startsWith("model_eval")
+            || role.startsWith("autonomy")
+            || role.startsWith("orphan_link")
+          ? "improve"
+          : role.includes("repair")
+            ? "repair"
+            : trace?.request_sha256 ? "audit" : "";
+  if (named && latestProcessingLanes.has(named)) return named;
   return [...latestProcessingLanes.entries()].find(([, lane]) =>
     lane.state === "active" && lane.current_step === "consensus"
   )?.[0] || [...latestProcessingLanes.entries()].find(([, lane]) => lane.state === "active")?.[0] || "";
@@ -222,6 +239,17 @@ function updateProcessingTraceSelection(trace = latestDecisionTrace) {
 }
 
 function renderProcessingActivity(activity) {
+  const generatedAtMs = parseMs(activity?.generated_at);
+  const revision = fmt(activity?.revision, "");
+  if (
+    generatedAtMs !== null
+    && latestProcessingGeneratedAtMs !== null
+    && generatedAtMs < latestProcessingGeneratedAtMs
+  ) return false;
+  if (generatedAtMs !== null) latestProcessingGeneratedAtMs = generatedAtMs;
+  if (revision && revision === latestProcessingRevision) return false;
+  latestProcessingRevision = revision;
+
   const lanes = Array.isArray(activity?.lanes) ? activity.lanes : [];
   const existing = new Map(
     [...els.processingLanes.querySelectorAll(".processing-lane")].map((node) => [
@@ -286,8 +314,9 @@ function renderProcessingActivity(activity) {
     node.remove();
   });
   els.processingPanel.dataset.activeCount = String(intValue(activity?.active_count));
-  document.body.dataset.processingRevision = fmt(activity?.revision, "");
+  document.body.dataset.processingRevision = revision;
   updateProcessingTraceSelection();
+  return true;
 }
 
 function updateProcessingElapsed() {
@@ -413,6 +442,7 @@ const decisionTracePlayback = {
   target: null,
   current: null,
   focus: null,
+  targets: new Map(),
 };
 let latestLiveConsensus = null;
 
@@ -423,6 +453,134 @@ function cloneDecisionTrace(trace) {
 }
 
 const DECISION_TRACE_STATES = ["pending", "active", "done", "skipped", "error"];
+
+function decisionTraceProgressState(current, incoming) {
+  if (["done", "skipped", "error"].includes(current)) return current;
+  if (current === "active" && incoming === "pending") return current;
+  return DECISION_TRACE_STATES.includes(incoming) ? incoming : current || "pending";
+}
+
+function mergeDecisionTraceEvents(previous, incoming) {
+  const merged = new Map();
+  [...(previous || []), ...(incoming || [])].forEach((event) => {
+    if (!event?.event_id) return;
+    const prior = merged.get(event.event_id);
+    const next = prior ? {
+      ...prior,
+      ...event,
+      status: decisionTraceProgressState(prior.status, event.status),
+    } : cloneDecisionTrace(event);
+    if (prior) {
+      for (const field of [
+        "think",
+        "required_context_tokens",
+        "requested_context_tokens",
+        "context_tokens",
+      ]) {
+        if (event[field] === undefined || event[field] === null || event[field] === "—") {
+          next[field] = prior[field];
+        }
+      }
+    }
+    merged.set(event.event_id, next);
+  });
+  return [...merged.values()].sort((left, right) => {
+    const leftTime = parseMs(left.timestamp);
+    const rightTime = parseMs(right.timestamp);
+    return leftTime !== null && rightTime !== null ? leftTime - rightTime : 0;
+  });
+}
+
+function mergeDecisionTraceRows(previous, incoming) {
+  const priorRows = new Map((previous || []).map((row) => [row.key, row]));
+  const incomingRows = new Map((incoming || []).map((row) => [row.key, row]));
+  return [...new Set([...priorRows.keys(), ...incomingRows.keys()])].map((key) => {
+    const prior = priorRows.get(key);
+    const next = incomingRows.get(key);
+    if (!prior) return cloneDecisionTrace(next);
+    if (!next) return cloneDecisionTrace(prior);
+    return {
+      ...prior,
+      ...next,
+      status: decisionTraceProgressState(prior.status, next.status),
+    };
+  });
+}
+
+function mergeDecisionTraceSnapshot(previous, incoming) {
+  const priorRequest = String(previous?.request_sha256 || "");
+  const nextRequest = String(incoming?.request_sha256 || "");
+  if (!priorRequest || priorRequest !== nextRequest) return cloneDecisionTrace(incoming);
+
+  const priorTerminal = decisionTraceIsTerminal(previous);
+  const nextTerminal = decisionTraceIsTerminal(incoming);
+  const merged = { ...cloneDecisionTrace(previous), ...cloneDecisionTrace(incoming) };
+  merged.events = mergeDecisionTraceEvents(previous.events, incoming.events);
+  merged.overall = mergeDecisionTraceRows(previous.overall, incoming.overall);
+  const priorLanes = new Map((previous.lanes || []).map((lane) => [lane.key, lane]));
+  const nextLanes = new Map((incoming.lanes || []).map((lane) => [lane.key, lane]));
+  merged.lanes = [...new Set([...priorLanes.keys(), ...nextLanes.keys()])].map((key) => {
+    const prior = priorLanes.get(key);
+    const next = nextLanes.get(key);
+    if (!prior) return cloneDecisionTrace(next);
+    if (!next || (priorTerminal && !nextTerminal)) return cloneDecisionTrace(prior);
+    const lane = {
+      ...prior,
+      ...next,
+      state: decisionTraceProgressState(prior.state, next.state),
+      steps: mergeDecisionTraceRows(prior.steps, next.steps),
+    };
+    for (const field of [
+      "think",
+      "required_context_tokens",
+      "requested_context_tokens",
+      "context_tokens",
+    ]) {
+      if (next[field] === undefined || next[field] === null || next[field] === "—") {
+        lane[field] = prior[field];
+      }
+    }
+    const latestLaneEvent = merged.events.filter((event) => event.lane === key).at(-1);
+    if (latestLaneEvent) lane.phase = latestLaneEvent.phase;
+    return lane;
+  });
+  if (priorTerminal && !nextTerminal) {
+    merged.active = previous.active;
+    merged.state = previous.state;
+    merged.summary = previous.summary;
+    merged.outcome = cloneDecisionTrace(previous.outcome);
+    merged.updated_at = previous.updated_at;
+  }
+  return merged;
+}
+
+function decisionTraceIsTerminal(trace) {
+  const state = String(trace?.state || "");
+  return state === "agreed"
+    || state === "quarantined"
+    || (state === "ready" && trace?.quorum_flow === false);
+}
+
+function decisionTraceStartsNewExecution(previous, incoming) {
+  if (!decisionTraceIsTerminal(previous) || incoming?.active !== true) return false;
+  const priorStarted = parseMs(previous.started_at);
+  const nextStarted = parseMs(incoming.started_at);
+  if (nextStarted !== null && (priorStarted === null || nextStarted > priorStarted)) {
+    return true;
+  }
+  const priorIds = new Set((previous.events || []).map((event) => event.event_id));
+  const priorBoundary = [
+    parseMs(previous.started_at),
+    parseMs(previous.updated_at),
+    ...(previous.events || []).map((event) => parseMs(event.timestamp)),
+  ].filter((value) => value !== null).reduce((latest, value) => Math.max(latest, value), -Infinity);
+  return (incoming.events || []).some((event) => {
+    const timestamp = parseMs(event.timestamp);
+    return !priorIds.has(event.event_id)
+      && timestamp !== null
+      && timestamp > priorBoundary;
+  });
+}
 
 function setDecisionSvgState(node, state = "pending") {
   if (!node) return;
@@ -441,7 +599,7 @@ function decisionOverallState(overall, key, fallback = "pending") {
 }
 
 function decisionRepairState(traceState, lane, repairs, focusEvent) {
-  if (!repairs.length) return "pending";
+  if (!repairs.length && Number(lane.repair_turns || 0) <= 0) return "pending";
   return (focusEvent?.lane === lane.key && focusEvent.phase === "repair")
       || (traceState === "active" && lane.phase === "repair")
     ? "active"
@@ -449,13 +607,38 @@ function decisionRepairState(traceState, lane, repairs, focusEvent) {
 }
 
 function decisionSealStates(traceState, artifactPayloadState, sealFailure, noSafeQuorum) {
-  const reached = traceState === "agreed" || sealFailure;
+  const reached = ["done", "error"].includes(artifactPayloadState)
+    || traceState === "agreed"
+    || sealFailure;
+  const failed = sealFailure || artifactPayloadState === "error";
   return {
-    gate: sealFailure ? "error" : reached ? "done" : "pending",
+    gate: failed ? "error" : reached ? "done" : "pending",
     input: reached ? artifactPayloadState : "pending",
-    yes: traceState === "agreed" ? "done" : "pending",
-    no: sealFailure ? "error" : "pending",
-    artifact: sealFailure ? "error" : noSafeQuorum ? "skipped" : artifactPayloadState,
+    yes: reached && !failed ? "done" : "pending",
+    no: failed ? "error" : "pending",
+    artifact: failed ? "error" : noSafeQuorum ? "skipped" : artifactPayloadState,
+  };
+}
+
+function decisionReasoningPlanState(lane, planState) {
+  const mode = String(lane?.think || "—").toLowerCase();
+  return {
+    mode,
+    fit: ["off", "low", "medium", "high"].includes(mode) ? planState : "pending",
+  };
+}
+
+function decisionPairBranchStates(trace, tieLane) {
+  const tieObserved = trace.tie_break_used === true
+    || ["active", "done", "error"].includes(fmt(tieLane.state, "pending"));
+  return {
+    tieObserved,
+    yes: trace.pair_agreement === true ? "done" : "pending",
+    no: tieObserved
+      ? tieLane.state === "active" ? "active" : "done"
+      : trace.pair_agreement === false && trace.quorum_attempted === true
+        ? "done"
+        : "pending",
   };
 }
 
@@ -475,22 +658,31 @@ function updateDecisionSvgHarness(trace, focusEvent = null) {
     artifactPayloadState === "error"
     || /seal/i.test(`${fmt(outcome.code, "")} ${fmt(outcome.reason, "")}`)
   );
-  const noSafeQuorum = traceState === "quarantined" && !sealFailure;
+  const noSafeQuorum = traceState === "quarantined"
+    && !sealFailure
+    && trace.quorum_attempted !== false;
   const sealStates = decisionSealStates(
     traceState, artifactPayloadState, sealFailure, noSafeQuorum
   );
   const tieLane = lanes.get("tie_break") || {};
-  const tieUsed = ["active", "done", "error"].includes(fmt(tieLane.state, "pending"));
-  const artifactReached = traceState === "agreed" || sealFailure;
+  const pairBranches = decisionPairBranchStates(trace, tieLane);
+  const tieUsed = pairBranches.tieObserved;
+  const artifactReached = ["done", "error"].includes(artifactPayloadState);
   const singleModel = trace.quorum_flow === false;
   const safeNoQuorum = noSafeQuorum && !singleModel;
   const safeQuorumReached = artifactReached && !singleModel;
-  const pairAgreement = safeQuorumReached && !tieUsed;
+  const pairAgreement = pairBranches.yes === "done";
   const tieAgreement = safeQuorumReached && tieUsed;
+  const pairNoState = pairBranches.no;
+  const quorumYesState = tieAgreement ? "done" : "pending";
+  const quorumNoState = safeNoQuorum ? "error" : "pending";
+  const sealYesState = sealStates.yes;
+  const sealNoState = sealStates.no;
   const activeLane = [...lanes.values()].find((lane) => lane.state === "active")
     || [...lanes.values()].reverse().find((lane) => lane.state === "done");
-  const actualThink = String(activeLane?.think || "—").toLowerCase();
-  const reasoningSelected = ["low", "medium", "high"].includes(actualThink);
+  const planState = decisionOverallState(overall, "dispatch");
+  const reasoning = decisionReasoningPlanState(activeLane, planState);
+  const actualThink = reasoning.mode;
   const laneStepState = (laneKey, phase) => fmt(
     (Array.isArray(lanes.get(laneKey)?.steps) ? lanes.get(laneKey).steps : [])
       .find((step) => step.key === phase)?.status,
@@ -500,12 +692,11 @@ function updateDecisionSvgHarness(trace, focusEvent = null) {
     const state = laneStepState(laneKey, phase);
     return state === "done" || state === "error" ? state : "pending";
   };
-  const planState = decisionOverallState(overall, "dispatch");
   const activePlanState = traceState === "active" ? "active" : planState;
-  const fitState = reasoningSelected ? planState : "pending";
-  const agreementState = traceState === "agreed"
+  const fitState = reasoning.fit;
+  const agreementState = traceState === "agreed" || sealFailure
     ? "done"
-    : traceState === "quarantined"
+    : traceState === "quarantined" && trace.quorum_attempted !== false
       ? "error"
       : tieUsed || lanes.get("challenger")?.state === "done"
         ? "active"
@@ -514,12 +705,12 @@ function updateDecisionSvgHarness(trace, focusEvent = null) {
     packet: decisionOverallState(overall, "packet"),
     preflight: decisionOverallState(overall, "packet"),
     execution_plan: activePlanState,
-    dispatch: traceState === "active" ? "pending" : planState,
-    local_decision: decisionOverallState(overall, "quorum"),
+    dispatch: planState,
+    local_decision: sealFailure ? "done" : decisionOverallState(overall, "quorum"),
     artifact: sealStates.artifact,
     decision: decisionOverallState(overall, "decision"),
     seal: sealStates.gate,
-    hold: traceState === "quarantined" ? "error" : "pending",
+    hold: safeNoQuorum || sealFailure ? "error" : "pending",
     agree: agreementState,
     quorum: safeNoQuorum ? "error" : tieAgreement ? "done" : "pending",
   };
@@ -543,20 +734,20 @@ function updateDecisionSvgHarness(trace, focusEvent = null) {
     ["execution-plan-context", milestoneStates.execution_plan],
     ["plan-context", milestoneStates.execution_plan],
     ["plan-fit", fitState],
-    ["plan-dispatch", fitState],
+    ["plan-dispatch", milestoneStates.dispatch],
     ["primary-challenger", laneStepState("challenger", "trigger")],
     ["single-artifact", singleModel ? milestoneStates.artifact : "pending"],
     ["challenger-agree", completedStepState("challenger", "vote")],
     ["pair-artifact-join", pairAgreement ? "done" : "pending"],
-    ["pair-tie_break", tieUsed ? fmt(tieLane.state, "active") : "pending"],
+    ["pair-tie_break", pairNoState],
     ["tie_break-quorum", safeNoQuorum && tieUsed ? "error" : tieAgreement ? "done" : "pending"],
-    ["quorum-artifact-join", tieAgreement ? "done" : "pending"],
-    ["quorum-artifact-trunk", tieAgreement ? "done" : "pending"],
+    ["quorum-artifact-join", quorumYesState],
+    ["quorum-artifact-trunk", quorumYesState],
     ["artifact-input", safeQuorumReached ? "done" : "pending"],
-    ["quorum-hold", safeNoQuorum ? milestoneStates.hold : "pending"],
+    ["quorum-hold", quorumNoState],
     ["artifact-seal", sealStates.input],
-    ["seal-decision", sealStates.yes],
-    ["seal-hold", sealStates.no],
+    ["seal-decision", sealYesState],
+    ["seal-hold", sealNoState],
   ].forEach(([key, state]) => setDecisionSvgState(
     harness.querySelector(`[data-path-key="${key}"]`),
     fmt(state, "pending")
@@ -566,20 +757,24 @@ function updateDecisionSvgHarness(trace, focusEvent = null) {
     pairAgreement ? "done" : "pending"
   );
   setDecisionSvgState(
+    harness.querySelector("[data-pair-no-label]"),
+    pairNoState
+  );
+  setDecisionSvgState(
     harness.querySelector("[data-quorum-yes-label]"),
-    tieAgreement ? "done" : "pending"
+    quorumYesState
   );
   setDecisionSvgState(
     harness.querySelector("[data-quorum-no-label]"),
-    safeNoQuorum ? milestoneStates.hold : "pending"
+    quorumNoState
   );
   setDecisionSvgState(
     harness.querySelector("[data-seal-yes-label]"),
-    traceState === "agreed" ? "done" : "pending"
+    sealYesState
   );
   setDecisionSvgState(
     harness.querySelector("[data-seal-no-label]"),
-    sealFailure ? "error" : "pending"
+    sealNoState
   );
 
   const contextLabel = (value) => {
@@ -634,11 +829,11 @@ function updateDecisionSvgHarness(trace, focusEvent = null) {
   harness.querySelector("[data-path-key=\"execution-plan-context\"]")?.setAttribute(
     "d",
     `M510 56 V${86 - contextRadius} Q510 86 ${510 + contextDirection * contextRadius} 86 `
-      + `H${contextX - contextDirection * contextRadius} Q${contextX} 86 ${contextX} ${86 + contextRadius} V154`
+      + `H${contextX - contextDirection * contextRadius} Q${contextX} 86 ${contextX} ${86 + contextRadius} V140`
   );
   harness.querySelector("[data-path-key=\"plan-context\"]")?.setAttribute(
     "d",
-    `M${contextX} 174 V204 Q${contextX} 214 ${contextX + 10} 214 `
+    `M${contextX} 160 V204 Q${contextX} 214 ${contextX + 10} 214 `
       + "H724 Q734 214 734 204 V174 Q734 164 744 164 H766"
   );
   setDecisionSvgState(harness.querySelector("[data-plan-key=\"headroom\"]"), milestoneStates.execution_plan);
@@ -646,11 +841,16 @@ function updateDecisionSvgHarness(trace, focusEvent = null) {
   const fitPassed = fitState === "done";
   setDecisionSvgText(
     "[data-plan-value=\"fit\"]",
-    fitPassed
+    actualThink === "off" && fitState !== "pending"
+      ? "BYPASS"
+      : fitPassed
       ? "headroom OK"
       : fitState === "active" ? "CHECKING" : "WAITING"
   );
-  harness.querySelector("[data-plan-fit-pass]")?.classList.toggle("visible", fitPassed);
+  harness.querySelector("[data-plan-fit-pass]")?.classList.toggle(
+    "visible",
+    fitPassed && actualThink !== "off"
+  );
 
   harness.querySelectorAll("[data-reasoning-key]").forEach((node) => {
     setDecisionSvgState(
@@ -659,7 +859,7 @@ function updateDecisionSvgHarness(trace, focusEvent = null) {
     );
     node.classList.toggle("selected", node.dataset.reasoningKey === actualThink);
   });
-  ["reasoning-low", "reasoning-medium", "reasoning-high"].forEach((key) => {
+  ["reasoning-off", "reasoning-low", "reasoning-medium", "reasoning-high"].forEach((key) => {
     const mode = key.slice("reasoning-".length);
     const state = mode === actualThink ? fmt(activeLane?.state, "active") : "pending";
     setDecisionSvgState(harness.querySelector(`[data-path-key="${key}"]`), state);
@@ -701,9 +901,10 @@ function updateDecisionSvgHarness(trace, focusEvent = null) {
     const repairs = (Array.isArray(trace.events) ? trace.events : []).filter(
       (event) => event.lane === key && event.phase === "repair"
     );
-    const repairAttempt = repairs.length
-      ? Math.max(1, ...repairs.map((event) => Number(event.attempt || 0)))
-      : 0;
+    const repairAttempt = Math.max(
+      Number(lane.repair_turns || 0),
+      repairs.length ? Math.max(1, ...repairs.map((event) => Number(event.attempt || 0))) : 0
+    );
     const repairState = decisionRepairState(traceState, lane, repairs, focusEvent);
     setDecisionSvgState(laneElement.querySelector(`[data-repair-lane="${key}"]`), repairState);
     setDecisionSvgText(`[data-repair-count="${key}"]`, "REPAIR JSON");
@@ -837,6 +1038,20 @@ function decisionTraceBlank(target) {
   trace.active = true;
   trace.summary = "Observed transition replay";
   trace.events = [];
+  trace.context_tokens = null;
+  trace.tie_break_used = false;
+  trace.quorum_attempted = false;
+  trace.vote_count = null;
+  trace.valid_votes = null;
+  trace.pair_agreement = null;
+  trace.artifact_replay = false;
+  trace.outcome = {
+    kind: "active",
+    reason: "Waiting for observed work",
+    data: "No synthetic progress",
+    next: "Mutation stays locked",
+    code: "observed_transition_waiting",
+  };
   trace.overall = (trace.overall || []).map((step) => ({
     ...step,
     status: "pending",
@@ -848,6 +1063,10 @@ function decisionTraceBlank(target) {
     detail: "Not started",
     phase: null,
     think: "—",
+    repair_turns: 0,
+    required_context_tokens: null,
+    requested_context_tokens: null,
+    context_tokens: null,
     steps: (lane.steps || []).map((step) => ({ ...step, status: "pending" })),
   }));
   return trace;
@@ -863,9 +1082,10 @@ function applyDecisionTransition(current, target, event) {
     ? targetEvents.slice(0, eventIndex + 1)
     : [...(current?.events || []), event];
   if (event.phase === "decision") {
-    const completed = cloneDecisionTrace(target);
-    completed.events = visibleEvents;
-    return completed;
+    return decisionTraceTerminalFrame(current, target, visibleEvents);
+  }
+  if (current?.active === false && target?.active === false) {
+    return decisionTraceTerminalFrame(current, target, targetEvents);
   }
   const frame = cloneDecisionTrace(current || decisionTraceBlank(target));
   frame.state = "active";
@@ -874,9 +1094,11 @@ function applyDecisionTransition(current, target, event) {
   frame.task_role = target.task_role;
   frame.started_at = target.started_at || frame.started_at;
   frame.updated_at = event.timestamp || target.updated_at;
-  frame.context_tokens = target.context_tokens;
+  if (Number(event.context_tokens || 0) > 0) {
+    frame.context_tokens = Number(event.context_tokens);
+  }
   frame.quorum_flow = target.quorum_flow;
-  frame.artifact_replay = target.artifact_replay;
+  frame.artifact_replay = event.kind === "decision_artifact_replay";
   frame.events = visibleEvents;
   frame.outcome = {
     kind: "active",
@@ -894,58 +1116,129 @@ function applyDecisionTransition(current, target, event) {
     model: targetLane.model,
     phase: event.phase,
   });
-  if (
-    event.kind === "session"
-    || ["generate", "repair", "validate", "vote"].includes(event.phase)
-  ) {
-    lane.think = targetLane.think;
+  if (event.think !== undefined) {
+    lane.think = fmt(event.think, "—").toLowerCase();
   }
+  ["required_context_tokens", "requested_context_tokens", "context_tokens"]
+    .forEach((key) => {
+      if (Number(event[key] || 0) > 0) lane[key] = Number(event[key]);
+    });
 
-  if (event.kind === "session") {
-    const failed = event.status === "error";
-    lane.state = failed ? "error" : "done";
-    lane.result = failed ? "Invalid vote" : "Valid vote";
-    lane.detail = failed ? "Validation failed" : "Observed session complete";
-    lane.steps = (targetLane.steps || []).map((step) => ({
-      ...step,
-      status:
-        failed && step.key === "validate"
-          ? "error"
-          : failed && step.key === "vote"
-            ? "skipped"
-            : "done",
-    }));
-  } else {
-    const phase = event.phase === "repair" ? "validate" : event.phase;
-    const index = Math.max(0, DECISION_LANE_PHASES.indexOf(phase));
-    lane.state = "active";
-    lane.result = fmt(event.label, phase);
-    lane.detail = event.phase === "repair"
+  const phase = event.phase === "repair" ? "validate" : event.phase;
+  const observedPhases = new Set(
+    visibleEvents
+      .slice(0, -1)
+      .filter((item) => item.lane === event.lane)
+      .map((item) => item.phase === "repair" ? "validate" : item.phase)
+  );
+  const terminal = event.kind === "session";
+  const failed = event.status === "error";
+  lane.state = decisionTraceProgressState(
+    lane.state,
+    terminal || failed ? failed ? "error" : "done" : "active"
+  );
+  lane.result = terminal
+    ? failed ? "Invalid vote" : "Valid vote"
+    : fmt(event.label, phase);
+  lane.detail = terminal
+    ? failed ? "Validation failed" : "Observed session complete"
+    : event.phase === "repair"
       ? `JSON repair · attempt ${Number(event.attempt || 0) + 1}`
       : "Observed live transition";
-    lane.steps = (targetLane.steps || []).map((step, stepIndex) => ({
+  const currentLaneSteps = new Map(
+    (lane.steps || []).map((step) => [step.key, step.status])
+  );
+  lane.steps = (targetLane.steps || []).map((step) => {
+    const nextStatus = step.key === phase
+      ? terminal || failed ? failed ? "error" : "done" : "active"
+      : observedPhases.has(step.key) ? "done" : "pending";
+    return {
       ...step,
-      status: stepIndex < index ? "done" : stepIndex === index ? "active" : "pending",
-    }));
-  }
+      status: decisionTraceProgressState(currentLaneSteps.get(step.key), nextStatus),
+    };
+  });
 
   const overallKey = fmt(event.overall_key, "");
-  const overallIndex = (target.overall || []).findIndex(
-    (step) => step.key === overallKey
+  const observedOverall = new Set(
+    visibleEvents
+      .slice(0, -1)
+      .map((item) => fmt(item.overall_key, ""))
+      .filter(Boolean)
   );
-  frame.overall = (target.overall || []).map((step, index) => ({
+  const currentOverall = new Map(
+    (frame.overall || []).map((step) => [step.key, step.status])
+  );
+  frame.overall = (target.overall || []).map((step) => ({
     ...step,
-    status:
-      event.kind === "session" && step.key === "quorum"
+    status: step.key === "packet" && visibleEvents.length
+      ? "done"
+      : step.key === "quorum" && observedOverall.has("quorum")
         ? "active"
-        : index < overallIndex
+      : step.key === overallKey
+        ? ["done", "error"].includes(currentOverall.get(step.key))
+          ? currentOverall.get(step.key)
+          : "active"
+        : observedOverall.has(step.key)
           ? "done"
-          : index === overallIndex
-            ? "active"
-            : "pending",
+          : currentOverall.get(step.key) || "pending",
   }));
   frame.summary = decisionEventText(event);
   return frame;
+}
+
+function decisionTraceTerminalFrame(current, target, visibleEvents) {
+  const observed = cloneDecisionTrace(current || decisionTraceBlank(target));
+  const terminal = cloneDecisionTrace(target);
+  const observedLaneKeys = new Set(
+    visibleEvents.map((event) => event.lane).filter(Boolean)
+  );
+  terminal.events = visibleEvents;
+  terminal.context_tokens = observed.context_tokens;
+  terminal.lanes = (terminal.lanes || []).map((targetLane) => {
+    const lane = (observed.lanes || []).find((item) => item.key === targetLane.key);
+    if (!lane || !observedLaneKeys.has(targetLane.key)) return targetLane;
+    return { ...targetLane, steps: targetLane.state === "skipped" ? targetLane.steps : lane.steps };
+  });
+  const observedOverall = new Map(
+    (observed.overall || []).map((step) => [step.key, step.status])
+  );
+  terminal.overall = (terminal.overall || []).map((step) => {
+    if (["quorum", "artifact", "decision"].includes(step.key)) return step;
+    const status = observedOverall.get(step.key) || "pending";
+    return { ...step, status: status === "active" ? "done" : status };
+  });
+  return terminal;
+}
+
+function decisionTraceObservedFrame(target) {
+  const events = Array.isArray(target?.events) ? target.events : [];
+  const observed = events.reduce(
+    (frame, event) => applyDecisionTransition(frame, target, event),
+    decisionTraceBlank(target)
+  );
+  if (!target.active && events.length) {
+    return decisionTraceTerminalFrame(observed, target, events);
+  }
+  const targetLane = (target.lanes || []).find((lane) => lane.state === "active");
+  const observedLane = (observed.lanes || []).find(
+    (lane) => lane.key === targetLane?.key
+  );
+  if (targetLane && observedLane) {
+    for (const key of [
+      "think",
+      "required_context_tokens",
+      "requested_context_tokens",
+      "context_tokens",
+    ]) {
+      if (targetLane[key] !== undefined && targetLane[key] !== null) {
+        observedLane[key] = targetLane[key];
+      }
+    }
+    if (Number(targetLane.context_tokens || 0) > 0) {
+      observed.context_tokens = Number(targetLane.context_tokens);
+    }
+  }
+  return observed;
 }
 
 function renderDecisionTraceFrame(trace, focusEvent = null) {
@@ -982,16 +1275,23 @@ function renderDecisionTraceFrame(trace, focusEvent = null) {
         : traceState === "quarantined"
           ? "warning"
           : "idle";
-    const modelCalls = (Array.isArray(trace.lanes) ? trace.lanes : []).filter((lane) =>
+    const observedModelCalls = (Array.isArray(trace.lanes) ? trace.lanes : []).filter((lane) =>
       ["active", "done", "error"].includes(lane.state)
     ).length;
-    const validVotes = (Array.isArray(trace.lanes) ? trace.lanes : []).filter(
+    const observedValidVotes = (Array.isArray(trace.lanes) ? trace.lanes : []).filter(
       (lane) => lane.state === "done"
     ).length;
-    const tieBreakUsed = (Array.isArray(trace.lanes) ? trace.lanes : []).some(
-      (lane) => lane.key === "tie_break" && ["active", "done", "error"].includes(lane.state)
-    );
-    const quorumTarget = tieBreakUsed ? 3 : 2;
+    const modelCalls = Number.isInteger(trace.vote_count)
+      ? trace.vote_count
+      : observedModelCalls;
+    const validVotes = Number.isInteger(trace.valid_votes)
+      ? trace.valid_votes
+      : observedValidVotes;
+    const tieBreakUsed = trace.tie_break_used === true
+      || (Array.isArray(trace.lanes) ? trace.lanes : []).some((lane) =>
+        lane.key === "tie_break" && ["active", "done", "error"].includes(lane.state)
+      );
+    const quorumTarget = trace.quorum_flow === false ? 1 : tieBreakUsed ? 3 : 2;
     const badge =
       traceState === "agreed"
         ? "APPROVED"
@@ -1056,7 +1356,11 @@ function setDecisionTransitionState(trace, mode = "steady") {
 function finishDecisionTracePlayback() {
   decisionTracePlayback.playing = false;
   decisionTracePlayback.focus = null;
-  decisionTracePlayback.current = cloneDecisionTrace(decisionTracePlayback.target);
+  decisionTracePlayback.queue = [];
+  const events = decisionTracePlayback.target?.events || [];
+  decisionTracePlayback.current = events.length
+    ? decisionTraceObservedFrame(decisionTracePlayback.target)
+    : cloneDecisionTrace(decisionTracePlayback.target);
   renderDecisionTraceFrame(decisionTracePlayback.current);
   renderDecisionTransitionFeed(decisionTracePlayback.target?.events);
   setDecisionTransitionState(decisionTracePlayback.target);
@@ -1090,26 +1394,47 @@ function playNextDecisionTransition() {
 }
 
 function renderDecisionTrace(consensus) {
-  const target = cloneDecisionTrace(consensus?.decision_trace || {});
+  let target = cloneDecisionTrace(consensus?.decision_trace || {});
   const request = String(target.request_sha256 || "");
-  const events = (Array.isArray(target.events) ? target.events : []).filter(
+  let events = (Array.isArray(target.events) ? target.events : []).filter(
     (event) => event && event.event_id
   );
   target.events = events;
+  let cachedTarget = request ? decisionTracePlayback.targets.get(request) : null;
+  const startsNewExecution = Boolean(
+    cachedTarget && decisionTraceStartsNewExecution(cachedTarget, target)
+  );
+  if (startsNewExecution) {
+    cachedTarget = null;
+  }
+  if (cachedTarget) {
+    target = mergeDecisionTraceSnapshot(cachedTarget, target);
+    events = target.events;
+  }
+  if (request) {
+    decisionTracePlayback.targets.delete(request);
+    decisionTracePlayback.targets.set(request, target);
+    // ponytail: 12 recent requests cover the six live workflows; raise only if fan-out grows.
+    while (decisionTracePlayback.targets.size > 12) {
+      decisionTracePlayback.targets.delete(decisionTracePlayback.targets.keys().next().value);
+    }
+  }
 
   if (!decisionTracePlayback.initialized) {
     decisionTracePlayback.initialized = true;
     decisionTracePlayback.request = request;
     decisionTracePlayback.target = target;
-    decisionTracePlayback.current = cloneDecisionTrace(target);
+    decisionTracePlayback.current = events.length
+      ? decisionTraceObservedFrame(target)
+      : cloneDecisionTrace(target);
     events.forEach((event) => decisionTracePlayback.seen.add(event.event_id));
-    renderDecisionTraceFrame(target);
+    renderDecisionTraceFrame(decisionTracePlayback.current);
     renderDecisionTransitionFeed(events);
     setDecisionTransitionState(target);
     return;
   }
 
-  if (request !== decisionTracePlayback.request) {
+  if (request !== decisionTracePlayback.request || startsNewExecution) {
     if (decisionTracePlayback.timer !== null) {
       window.clearTimeout(decisionTracePlayback.timer);
       decisionTracePlayback.timer = null;
@@ -1117,9 +1442,16 @@ function renderDecisionTrace(consensus) {
     decisionTracePlayback.request = request;
     decisionTracePlayback.target = target;
     decisionTracePlayback.seen = new Set(events.map((event) => event.event_id));
-    decisionTracePlayback.queue = [...events];
+    const cachedEvents = new Set(
+      (cachedTarget?.events || []).map((event) => event.event_id)
+    );
+    decisionTracePlayback.queue = cachedTarget
+      ? events.filter((event) => !cachedEvents.has(event.event_id))
+      : [...events];
     decisionTracePlayback.playing = false;
-    decisionTracePlayback.current = decisionTraceBlank(target);
+    decisionTracePlayback.current = cachedTarget
+      ? decisionTraceObservedFrame(cachedTarget)
+      : decisionTraceBlank(target);
     if (
       request
       && events.length
@@ -1144,8 +1476,10 @@ function renderDecisionTrace(consensus) {
   if (decisionTracePlayback.queue.length && !decisionTracePlayback.playing) {
     playNextDecisionTransition();
   } else if (!decisionTracePlayback.playing) {
-    decisionTracePlayback.current = cloneDecisionTrace(target);
-    renderDecisionTraceFrame(target);
+    decisionTracePlayback.current = events.length
+      ? decisionTraceObservedFrame(target)
+      : cloneDecisionTrace(target);
+    renderDecisionTraceFrame(decisionTracePlayback.current);
     renderDecisionTransitionFeed(events);
     setDecisionTransitionState(target);
   }
@@ -1153,8 +1487,11 @@ function renderDecisionTrace(consensus) {
 
 window.__chronovisorDashboardTest = Object.assign(window.__chronovisorDashboardTest || {}, {
   applyDecisionTransition,
+  decisionTraceObservedFrame,
   decisionTimelineSteps,
   decisionTraceBlank,
+  mergeDecisionTraceSnapshot,
+  processingLaneForTrace,
   renderDecisionTraceFrame,
   renderProcessingActivity,
 });

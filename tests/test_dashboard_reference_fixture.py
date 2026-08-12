@@ -155,6 +155,7 @@ def test_dashboard_reference_svg_has_one_fixed_safe_topology() -> None:
     }
     assert len(matching("data-seal-yes-label", "true")) == 1
     assert len(matching("data-seal-no-label", "true")) == 1
+    assert len(matching("data-pair-no-label", "true")) == 1
 
     paths = {
         attrs["data-path-key"]: attrs.get("d")
@@ -199,14 +200,14 @@ def test_dashboard_reference_svg_has_one_fixed_safe_topology() -> None:
         "packet-preflight": "M106 10 H288",
         "preflight-execution_plan": "M308 10 H500 Q510 10 510 20 V36",
         "execution-plan-context": (
-            "M510 56 V76 Q510 86 500 86 H452 Q442 86 442 96 V154"
+            "M510 56 V76 Q510 86 500 86 H452 Q442 86 442 96 V140"
         ),
         "plan-dispatch": (
             "M1380 164 H1466 Q1476 164 1476 174 V265 Q1476 275 1466 275 "
             "H190 Q180 275 180 285 V315 Q180 325 190 325 H220"
         ),
         "primary-challenger": (
-            "M1106 325 V377 Q1106 387 1096 387 H190 Q180 387 180 397 "
+            "M1096 335 V377 Q1096 387 1086 387 H190 Q180 387 180 397 "
             "V440 Q180 450 190 450 H220"
         ),
         "single-artifact": "M1106 325 H1300 Q1310 325 1310 335 V393",
@@ -226,8 +227,7 @@ def test_dashboard_reference_svg_has_one_fixed_safe_topology() -> None:
             "M1278 575 H1408 Q1418 575 1418 585 V590 Q1418 600 1428 600 H1448"
         ),
         "artifact-seal": (
-            "M1321 404 H1330 Q1340 404 1340 414 V450 "
-            "Q1340 460 1350 460 H1360 Q1370 460 1370 470"
+            "M1321 404 H1360 Q1370 404 1370 414 V470"
         ),
         "seal-decision": "M1404 500 H1449",
         "seal-hold": "M1370 530 V540 Q1370 550 1380 550 H1450 Q1460 550 1460 560 V588",
@@ -267,6 +267,9 @@ def test_dashboard_reference_svg_has_one_fixed_safe_topology() -> None:
     ]
     assert len(reasoning_guides) == 1
     assert [attrs.get("d") for attrs in reasoning_guides] == [
+        "M858 164 H872 Q882 164 882 154 V72 Q882 62 892 62 H903 "
+        "M921 62 H1235 Q1245 62 1245 72 V144 Q1245 154 1255 154 "
+        "H1260 Q1270 154 1270 164 "
         "M858 164 H882 Q892 164 892 154 V116 Q892 106 902 106 H903 "
         "M921 106 H1245 Q1255 106 1255 116 V154 Q1255 164 1265 164 H1270 "
         "M858 164 H903 M921 164 H1270 "
@@ -282,6 +285,12 @@ def test_dashboard_reference_svg_has_one_fixed_safe_topology() -> None:
         for tag, attrs in elements
         if tag == "path" and attrs.get("data-reasoning-output")
     ] == [
+        (
+            "off",
+            "M921 62 H1235 Q1245 62 1245 72 V144 Q1245 154 1255 154 "
+            "H1260 Q1270 154 1270 164",
+            None,
+        ),
         (
             "low",
             "M921 106 H1245 Q1255 106 1255 116 V154 Q1255 164 1265 164 H1270",
@@ -299,7 +308,13 @@ def test_dashboard_reference_svg_has_one_fixed_safe_topology() -> None:
         for tag, attrs in elements
         if tag == "path"
         and attrs.get("data-path-key")
-        in {"reasoning-low", "reasoning-medium", "reasoning-high", "plan-fit"}
+        in {
+            "reasoning-off",
+            "reasoning-low",
+            "reasoning-medium",
+            "reasoning-high",
+            "plan-fit",
+        }
     )
     assert all(
         attrs.get("y") == "28"
@@ -307,12 +322,13 @@ def test_dashboard_reference_svg_has_one_fixed_safe_topology() -> None:
         if tag == "text" and attrs.get("data-lane-result")
     )
     assert len(matching("class", "trace-label-backdrop")) == 1
-    assert len(matching("class", "trace-selected-core")) == 3
+    assert len(matching("class", "trace-selected-core")) == 8
     assert {
         attrs["data-reasoning-key"]: attrs.get("transform")
         for _tag, attrs in elements
         if attrs.get("data-reasoning-key")
     } == {
+        "off": "translate(912 62)",
         "low": "translate(912 106)",
         "medium": "translate(912 164)",
         "high": "translate(912 222)",
@@ -339,12 +355,13 @@ def test_dashboard_reference_svg_has_one_fixed_safe_topology() -> None:
     assert matching("class", "trace-branch-label trace-yes-label")[0]["y"] == "443"
     assert matching("class", "trace-branch-label trace-no-label")[0]["y"] == "506"
     assert matching("data-pair-yes-label", "true")[0]["x"] == "1272"
+    assert matching("data-pair-no-label", "true")[0]["x"] == "1180"
     assert matching("data-quorum-yes-label", "true")[0]["x"] == "1268"
     assert matching("data-quorum-no-label", "true")[0]["x"] == "1336"
     assert matching("data-seal-yes-label", "true")[0]["x"] == "1422"
     assert matching("data-seal-no-label", "true")[0]["x"] == "1382"
     assert paths["plan-context"] == (
-        "M442 174 V204 Q442 214 452 214 H724 Q734 214 734 204 "
+        "M442 160 V204 Q442 214 452 214 H724 Q734 214 734 204 "
         "V174 Q734 164 744 164 H766"
     )
     assert "plan-headroom" not in paths
@@ -361,14 +378,14 @@ def test_dashboard_reference_svg_has_one_fixed_safe_topology() -> None:
     assert len(context_guides) == 1
     assert context_guides[0]["data-context-guide"] == "all"
     assert context_guides[0]["d"] == (
-        "M510 56 V76 Q510 86 500 86 H352 Q342 86 342 96 V154 "
-        "M510 56 V76 Q510 86 500 86 H452 Q442 86 442 96 V154 "
-        "M510 56 V76 Q510 86 520 86 H532 Q542 86 542 96 V154 "
-        "M510 56 V76 Q510 86 520 86 H632 Q642 86 642 96 V154 "
-        "M442 174 V204 Q442 214 452 214 "
-        "M542 174 V204 Q542 214 552 214 "
-        "M642 174 V204 Q642 214 652 214 "
-        "M342 174 V204 Q342 214 352 214 H724 Q734 214 734 204 "
+        "M510 56 V76 Q510 86 500 86 H352 Q342 86 342 96 V140 "
+        "M510 56 V76 Q510 86 500 86 H452 Q442 86 442 96 V140 "
+        "M510 56 V76 Q510 86 520 86 H532 Q542 86 542 96 V140 "
+        "M510 56 V76 Q510 86 520 86 H632 Q642 86 642 96 V140 "
+        "M442 160 V204 Q442 214 452 214 "
+        "M542 160 V204 Q542 214 552 214 "
+        "M642 160 V204 Q642 214 652 214 "
+        "M342 160 V204 Q342 214 352 214 H724 Q734 214 734 204 "
         "V174 Q734 164 744 164 H766"
     )
     assert context_guides[0].get("marker-end") is None
@@ -381,10 +398,10 @@ def test_dashboard_reference_svg_has_one_fixed_safe_topology() -> None:
     assert [
         attrs.get("transform") for attrs in matching("data-context-option", "true")
     ] == [
-        "translate(342 164)",
-        "translate(442 164)",
-        "translate(542 164)",
-        "translate(642 164)",
+        "translate(342 150)",
+        "translate(442 150)",
+        "translate(542 150)",
+        "translate(642 150)",
     ]
     assert matching("data-plan-value", "context-selection")[0]["y"] == "239"
 
@@ -568,6 +585,25 @@ def test_dashboard_reference_keeps_selection_and_bucket_truth() -> None:
         ".decision-trace-harness .trace-reasoning.selected [data-reasoning-label] {\n"
         "  fill: #ffb340;"
     ) in style
+    assert (
+        ".decision-trace-harness .trace-yes-label,\n"
+        ".decision-trace-harness .trace-no-label {\n"
+        "  fill: #7d8992;\n"
+        "  opacity: 0.18;"
+    ) in style
+    assert (
+        ".decision-trace-harness .trace-yes-label.active,\n"
+        ".decision-trace-harness .trace-yes-label.done {\n"
+        "  fill: #74d84f;\n"
+        "  opacity: 1;"
+    ) in style
+    assert (
+        ".decision-trace-harness .trace-no-label.active,\n"
+        ".decision-trace-harness .trace-no-label.done,\n"
+        ".decision-trace-harness .trace-no-label.error {\n"
+        "  fill: #ff3948;\n"
+        "  opacity: 1;"
+    ) in style
     assert "filter: url(#trace-glow-violet);" in style.split(
         ".decision-trace-harness .active.trace-node circle,", 1
     )[1].split("}", 1)[0]
@@ -608,30 +644,37 @@ def test_dashboard_reference_keeps_selection_and_bucket_truth() -> None:
     assert "decisionSealStates(" in harness
     assert 'harness.querySelector("[data-seal-yes-label]")' in harness
     assert 'harness.querySelector("[data-seal-no-label]")' in harness
+    assert "const pairBranches = decisionPairBranchStates(trace, tieLane);" in harness
+    assert 'const pairAgreement = pairBranches.yes === "done";' in harness
+    assert "const pairNoState = pairBranches.no;" in harness
+    assert 'harness.querySelector("[data-pair-no-label]"),\n    pairNoState' in harness
     assert 'const safeQuorumReached = artifactReached && !singleModel;' in harness
     assert 'quorum: safeNoQuorum ? "error" : tieAgreement ? "done" : "pending"' in harness
     assert '["pair-artifact-join", pairAgreement ? "done" : "pending"]' in harness
     assert '["tie_break-quorum", safeNoQuorum && tieUsed ? "error"' in harness
-    assert '["quorum-artifact-join", tieAgreement ? "done" : "pending"]' in harness
-    assert '["quorum-artifact-trunk", tieAgreement ? "done" : "pending"]' in harness
+    assert '["quorum-artifact-join", quorumYesState]' in harness
+    assert '["quorum-artifact-trunk", quorumYesState]' in harness
     assert '["artifact-input", safeQuorumReached ? "done" : "pending"]' in harness
-    assert '["quorum-hold", safeNoQuorum ? milestoneStates.hold : "pending"]' in harness
+    assert '["quorum-hold", quorumNoState]' in harness
     assert '["artifact-seal", sealStates.input]' in harness
-    assert '["seal-decision", sealStates.yes]' in harness
-    assert '["seal-hold", sealStates.no]' in harness
+    assert '["seal-decision", sealYesState]' in harness
+    assert '["seal-hold", sealNoState]' in harness
     assert '["challenger-agree", completedStepState("challenger", "vote")]' in harness
-    assert 'const fitState = reasoningSelected ? planState : "pending";' in harness
+    assert "const reasoning = decisionReasoningPlanState(activeLane, planState);" in harness
+    assert "const fitState = reasoning.fit;" in harness
     assert '["context-generate", "generate"]' in harness
     assert "fmt(laneSteps.get(phase)?.status, \"pending\")" in harness
     assert "Math.floor(tokens / 1000)" in renderer
     assert '`M510 56 V${86 - contextRadius}' in harness
-    assert '${86 + contextRadius} V154`' in harness
-    assert '`M${contextX} 174 V204 Q${contextX} 214 ${contextX + 10} 214 `' in harness
+    assert '${86 + contextRadius} V140`' in harness
+    assert '`M${contextX} 160 V204 Q${contextX} 214 ${contextX + 10} 214 `' in harness
     assert '+ "H724 Q734 214 734 204 V174 Q734 164 744 164 H766"' in harness
     assert 'data-reasoning-output="${mode}"' in harness
+    assert '["reasoning-off", "reasoning-low", "reasoning-medium", "reasoning-high"]' in harness
     assert 'node.classList.toggle("selected", value === selectedContextValue);' in harness
     assert 'node.classList.toggle("selected", node.dataset.reasoningKey === actualThink);' in harness
     assert "decisionRepairState(traceState, lane, repairs, focusEvent)" in harness
+    assert 'observedPhases.add("load")' not in renderer
 
 
 def test_dashboard_reference_repair_state_is_event_backed_for_every_lane() -> None:
@@ -681,6 +724,7 @@ vm.createContext(sandbox);
 vm.runInContext({json.dumps(helper)} + "\\nthis.sealStates = decisionSealStates;", sandbox);
 process.stdout.write(JSON.stringify({{
   success: sandbox.sealStates("agreed", "done", false, false),
+  ready: sandbox.sealStates("ready", "done", false, false),
   failure: sandbox.sealStates("quarantined", "error", true, false),
   noQuorum: sandbox.sealStates("quarantined", "skipped", false, true),
 }}));
@@ -695,6 +739,13 @@ process.stdout.write(JSON.stringify({{
 
     assert json.loads(completed.stdout) == {
         "success": {
+            "gate": "done",
+            "input": "done",
+            "yes": "done",
+            "no": "pending",
+            "artifact": "done",
+        },
+        "ready": {
             "gate": "done",
             "input": "done",
             "yes": "done",

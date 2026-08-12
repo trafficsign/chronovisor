@@ -206,6 +206,21 @@ def _install_default_local_runtime(
     return runtime
 
 
+def _trace_phases(audit_root: Path) -> list[str]:
+    return [
+        json.loads(line)["phase"]
+        for line in (audit_root / "trace-events.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+
+
+def _assert_single_load_before_context(audit_root: Path) -> None:
+    phases = _trace_phases(audit_root)
+    assert phases.count("load") == 1
+    assert phases.index("load") < phases.index("context")
+
+
 class _RemoteGenerationBackend:
     provider = "remote-test"
     location = RouteLocation.REMOTE
@@ -243,6 +258,7 @@ def _reject_ollama_control(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_default_transport_routes_remote_without_ollama_control(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    audit_root = tmp_path / "audit"
     backend = _RemoteGenerationBackend()
     runtime = LLMRuntime(
         generation={
@@ -257,7 +273,7 @@ def test_default_transport_routes_remote_without_ollama_control(
         runtime_role="review.remote",
         source_data_class="page",
         source_sensitivity="high",
-        audit_root=tmp_path / "audit",
+        audit_root=audit_root,
     ).run("decide", SCHEMA)
 
     assert result.ok is True
@@ -267,11 +283,13 @@ def test_default_transport_routes_remote_without_ollama_control(
         SourceDataClass.PAGE,
         SourceSensitivity.HIGH,
     )
+    _assert_single_load_before_context(audit_root)
 
 
 def test_default_transport_routes_non_ollama_local_without_ollama_control(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    audit_root = tmp_path / "audit"
     backend = _RemoteGenerationBackend()
     backend.location = RouteLocation.LOCAL
     runtime = LLMRuntime(
@@ -284,12 +302,37 @@ def test_default_transport_routes_non_ollama_local_without_ollama_control(
         runtime_role="review.local",
         source_data_class="page",
         source_sensitivity="high",
-        audit_root=tmp_path / "audit",
+        audit_root=audit_root,
     ).run("decide", SCHEMA)
 
     assert result.ok is True
     assert result.model == "native-local-model"
     assert len(backend.requests) == 1
+    _assert_single_load_before_context(audit_root)
+
+
+def test_resource_managed_default_local_emits_one_load_before_context(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    audit_root = tmp_path / "audit"
+    _install_default_local_runtime(monkeypatch)
+    monkeypatch.setattr(ollama, "model_resource_lease_mode", lambda: "exclusive")
+    monkeypatch.setattr(
+        ollama,
+        "chat",
+        lambda *_args, **_kwargs: ollama.ChatResponse(
+            content='{"decision":"apply","summary":"managed"}'
+        ),
+    )
+
+    result = LocalStructuredSession(
+        model="local:test",
+        audit_root=audit_root,
+        resource_managed=True,
+    ).run("decide", SCHEMA)
+
+    assert result.ok is True
+    _assert_single_load_before_context(audit_root)
 
 
 def test_default_transport_egress_denial_is_safe_and_call_free(
@@ -332,6 +375,7 @@ def test_explicit_runtime_location_mismatch_fails_before_backend_or_control(
     assert result.ok is False
     assert result.failure_class == "route_configuration_invalid"
     assert backend.requests == []
+    assert "load" not in _trace_phases(tmp_path / "audit")
 
 
 def test_explicit_runtime_role_model_mismatch_fails_before_backend_or_control(
@@ -552,6 +596,20 @@ def test_transport_failure_clears_activity_and_records_failure(tmp_path: Path) -
     assert audit["think"] == "medium"
     summary = json.loads((audit_root / "summary.json").read_text(encoding="utf-8"))
     assert summary["sessions"]["failures"] == {"transport_error": 1}
+    trace = [
+        json.loads(line)
+        for line in (audit_root / "trace-events.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert [row["phase"] for row in trace if row["kind"] == "phase"][-1] == (
+        "generate"
+    )
+    assert not any(
+        row["kind"] == "phase" and row["phase"] == "vote" for row in trace
+    )
+    assert trace[-1]["kind"] == "session"
+    assert trace[-1]["status"] == "error"
 
 
 def test_repair_turns_keep_one_sealed_production_reasoning_selection() -> None:
@@ -758,12 +816,19 @@ def test_session_trace_records_real_phases_and_terminal_result(tmp_path: Path) -
     assert result.ok is True
     assert [row["phase"] for row in rows] == [
         "trigger",
+        "load",
         "context",
         "generate",
         "validate",
         "vote",
         "vote",
     ]
+    assert "think" not in rows[0]
+    assert "context_tokens" not in rows[0]
+    assert all(row["think"] == "medium" for row in rows[1:])
+    assert all(row["context_tokens"] == 16_384 for row in rows[1:])
+    assert "requested_num_ctx" not in rows[0]
+    assert all(row["requested_num_ctx"] == 16_384 for row in rows[1:])
     assert rows[-1]["kind"] == "session"
     assert rows[-1]["status"] == "done"
     assert "private prompt" not in json.dumps(rows)
@@ -996,10 +1061,13 @@ def test_output_cap_repairs_without_putting_oversize_text_in_history() -> None:
     assert "exceeded the fixed output limit" in repair_messages[-1]["content"]
 
 
-def test_output_cap_fails_closed_after_two_oversize_repairs() -> None:
+def test_output_cap_fails_closed_after_two_oversize_repairs(tmp_path: Path) -> None:
     transport = QueueTransport("x" * 101, "y" * 101, "z" * 101)
+    audit_root = tmp_path / "audit"
 
-    result = _session(transport, max_output_chars=100).run("decide", SCHEMA)
+    result = _session(
+        transport, audit_root=audit_root, max_output_chars=100
+    ).run("decide", SCHEMA)
 
     assert result.ok is False
     assert result.failure_class == "repair_exhausted"
@@ -1007,6 +1075,18 @@ def test_output_cap_fails_closed_after_two_oversize_repairs() -> None:
     assert len(result.attempts) == 3
     assert all(
         attempt.issues[0].keyword == "maxOutputBytes" for attempt in result.attempts
+    )
+    trace = [
+        json.loads(line)
+        for line in (audit_root / "trace-events.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert [row["phase"] for row in trace if row["kind"] == "phase"][-1] == (
+        "validate"
+    )
+    assert not any(
+        row["kind"] == "phase" and row["phase"] == "vote" for row in trace
     )
 
 
@@ -1025,6 +1105,7 @@ def test_initial_input_byte_cap_fails_before_call(tmp_path: Path) -> None:
     assert result.ok is False
     assert result.failure_class == "input_too_large"
     assert transport.requests == []
+    assert "load" not in _trace_phases(audit_root)
     audit = json.loads((audit_root / "audit.jsonl").read_text(encoding="utf-8"))
     assert "think" not in audit
 
@@ -1217,6 +1298,7 @@ def test_output_limit_on_every_turn_fails_operationally_after_bounded_repairs() 
 def test_default_transport_reuses_larger_resident_context_without_eviction(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    audit_root = tmp_path / "audit"
     _install_default_local_runtime(monkeypatch, model="configured:test")
     monkeypatch.setenv("CHRONOVISOR_OLLAMA_RESOURCE_LOCK", str(tmp_path / "resource.lock"))
     planner_calls: list[dict[str, Any]] = []
@@ -1249,8 +1331,8 @@ def test_default_transport_reuses_larger_resident_context_without_eviction(
 
     result = LocalStructuredSession(
         model="legacy:test",
-        audit_root=tmp_path / "audit",
-        num_ctx=32_768,
+        audit_root=audit_root,
+        num_ctx=114_688,
         num_predict=256,
         max_input_chars=20_000,
         max_output_chars=1_000,
@@ -1261,6 +1343,8 @@ def test_default_transport_reuses_larger_resident_context_without_eviction(
     ).run("decide", SCHEMA)
 
     assert result.ok is True
+    assert result.requested_num_ctx == 32_768
+    assert result.effective_num_ctx == 114_688
     assert chat_contexts == [114_688]
     assert planner_calls == [
         {
@@ -1271,6 +1355,10 @@ def test_default_transport_reuses_larger_resident_context_without_eviction(
             "reuse_larger_context": True,
         }
     ]
+    audit = json.loads((audit_root / "audit.jsonl").read_text(encoding="utf-8"))
+    assert audit["requested_num_ctx"] == 32_768
+    assert audit["context_tokens"] == 114_688
+    _assert_single_load_before_context(audit_root)
 
 
 def test_default_transport_oversize_input_has_no_runner_side_effects(
@@ -1320,6 +1408,7 @@ def test_default_transport_oversize_input_has_no_runner_side_effects(
     assert unload_calls == []
     assert chat_calls == []
     assert ollama.model_resource_lease_mode() is None
+    assert "load" not in _trace_phases(tmp_path / "audit")
 
 
 def test_default_transport_maps_resource_lease_timeout_to_capacity_unavailable(
@@ -1355,6 +1444,7 @@ def test_default_transport_maps_resource_lease_timeout_to_capacity_unavailable(
     assert result.ok is False
     assert result.failure_class == "capacity_unavailable"
     assert result.failure_reason == "structured model resource is busy"
+    assert "load" not in _trace_phases(tmp_path / "audit")
 
 
 def test_default_transport_holds_exclusive_lease_across_all_repair_turns(
@@ -1431,14 +1521,18 @@ def test_default_transport_holds_exclusive_lease_across_all_repair_turns(
     assert call_order == [114_688, 114_688, 32_768]
 
 
-def test_unsupported_schema_keyword_fails_before_transport() -> None:
+def test_unsupported_schema_keyword_fails_before_transport(tmp_path: Path) -> None:
     transport = QueueTransport('{"decision":"apply","summary":"unused"}')
+    audit_root = tmp_path / "audit"
 
-    result = _session(transport).run("decide", {"type": "string", "oneOf": []})
+    result = _session(transport, audit_root=audit_root).run(
+        "decide", {"type": "string", "oneOf": []}
+    )
 
     assert result.ok is False
     assert result.failure_class == "schema_invalid"
     assert transport.requests == []
+    assert "load" not in _trace_phases(audit_root)
 
 
 def test_feedback_cap_fails_closed_instead_of_truncating_errors() -> None:
