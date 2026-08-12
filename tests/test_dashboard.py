@@ -330,6 +330,7 @@ def test_local_consensus_snapshot_removes_dead_markers_and_exposes_redacted_metr
         "role": "primary",
         "model": "ornith:test",
         "think": "medium",
+        "context_tokens": 16_384,
         "started_at": datetime.now().isoformat(timespec="seconds"),
         "pid": alive_pid,
     }
@@ -377,6 +378,7 @@ def test_local_consensus_snapshot_removes_dead_markers_and_exposes_redacted_metr
                 "role": "primary",
                 "model": "ornith:test",
                 "think": "medium",
+                "context_tokens": 16_384,
                 "ok": True,
             }
         )
@@ -418,6 +420,7 @@ def test_local_consensus_snapshot_removes_dead_markers_and_exposes_redacted_metr
     assert snapshot["count"] == 1
     assert snapshot["activities"][0]["model"] == "ornith:test"
     assert snapshot["activities"][0]["think"] == "medium"
+    assert snapshot["activities"][0]["context_tokens"] == 16_384
     assert snapshot["summary"]["sessions"]["first_pass_valid"] == 7
     assert snapshot["summary"]["sessions"]["repaired"] == 2
     assert snapshot["summary"]["sessions"]["repair_turns"] == 3
@@ -445,6 +448,7 @@ def test_local_consensus_snapshot_removes_dead_markers_and_exposes_redacted_metr
     session = next(row for row in snapshot["history"] if row["kind"] == "session")
     decision = next(row for row in snapshot["history"] if row["kind"] == "decision")
     assert session["think"] == "medium"
+    assert session["context_tokens"] == 16_384
     assert decision["conservative_veto_fired"] is True
     assert (
         decision["conservative_veto_bypassed_by_lane_policy"] is True
@@ -997,7 +1001,8 @@ def test_decision_trace_projects_live_phase_and_completed_vote(monkeypatch) -> N
                 "model": "challenger:model",
                 "phase": "validate",
                 "attempt": 1,
-                "think": "medium",
+                "think": "high",
+                "context_tokens": 32_768,
                 "elapsed_seconds": 42,
                 "updated_at": "2026-07-15T12:00:00Z",
             }
@@ -1013,6 +1018,7 @@ def test_decision_trace_projects_live_phase_and_completed_vote(monkeypatch) -> N
                 "first_pass_valid": True,
                 "repair_turns": 0,
                 "think": False,
+                "context_tokens": 16_384,
             }
         ],
         None,
@@ -1022,11 +1028,14 @@ def test_decision_trace_projects_live_phase_and_completed_vote(monkeypatch) -> N
     assert trace["task_role"] == "ingest_review"
     assert trace["lanes"][0]["state"] == "done"
     assert trace["lanes"][0]["think"] == "off"
+    assert trace["lanes"][0]["context_tokens"] == 16_384
     assert trace["lanes"][1]["state"] == "active"
-    assert trace["lanes"][1]["think"] == "medium"
+    assert trace["lanes"][1]["think"] == "high"
+    assert trace["lanes"][1]["context_tokens"] == 32_768
     assert trace["lanes"][1]["steps"][4]["status"] == "active"
     assert trace["lanes"][2]["state"] == "pending"
     assert trace["lanes"][2]["think"] == "—"
+    assert trace["lanes"][2]["context_tokens"] is None
     assert [step["label"] for step in trace["overall"]] == [
         "Packet",
         "Dispatch",
@@ -1392,6 +1401,37 @@ def test_decision_trace_explains_semantic_quality_and_resource_holds() -> None:
     assert resource["kind"] == "operational_hold"
     assert resource["reason"] == "Model memory could not be verified"
     assert resource["next"] == "Retry when capacity recovers"
+
+
+def test_decision_trace_marks_only_artifact_publish_failure_after_artifact() -> None:
+    decision = {
+        "kind": "decision",
+        "request_sha256": "7" * 64,
+        "role": "ingest_reconciliation",
+        "status": "quarantined",
+        "quarantine_reason": "canonical_decision_artifact_publish_failed",
+        "failure_class": "decision_artifact_invalid",
+        "valid_votes": 2,
+    }
+
+    trace = dashboard._decision_trace_snapshot([], [decision], decision)
+
+    assert trace["overall"][-2]["status"] == "error"
+    assert trace["overall"][-1]["status"] == "skipped"
+    assert trace["outcome"]["reason"] == "Decision artifact seal failed"
+    assert trace["outcome"]["code"] == "canonical_decision_artifact_publish_failed"
+    assert all(lane["context_tokens"] is None for lane in trace["lanes"])
+
+    no_quorum_decision = {
+        **decision,
+        "quarantine_reason": "local_models_did_not_reach_two_vote_quorum",
+        "failure_class": "local_consensus_failed",
+    }
+    no_quorum = dashboard._decision_trace_snapshot(
+        [], [no_quorum_decision], no_quorum_decision
+    )
+    assert no_quorum["overall"][-2]["status"] == "skipped"
+    assert no_quorum["overall"][-1]["status"] == "error"
 
 
 def test_decision_trace_explains_lane_policy_veto_bypass() -> None:

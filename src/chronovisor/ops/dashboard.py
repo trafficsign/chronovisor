@@ -1996,6 +1996,7 @@ def _local_consensus_activities() -> list[dict[str, Any]]:
                     "phase": row.get("phase"),
                     "attempt": row.get("attempt"),
                     "think": row.get("think"),
+                    "context_tokens": row.get("context_tokens"),
                     "started_at": row.get("started_at"),
                     "updated_at": row.get("updated_at"),
                     "pid": pid,
@@ -3018,6 +3019,17 @@ def _decision_trace_outcome(
         "fewer_than_two_valid_local_votes": "Too few valid model votes",
         "primary_and_challenger_invalid": "Primary pair returned invalid votes",
     }
+    if (
+        reason == "canonical_decision_artifact_publish_failed"
+        and failure_class == "decision_artifact_invalid"
+    ):
+        return {
+            "kind": "operational_hold",
+            "reason": "Decision artifact seal failed",
+            "data": source_state,
+            "next": "Retry after artifact storage recovers",
+            "code": reason,
+        }
     if reason in semantic_reasons:
         return {
             "kind": "semantic_hold",
@@ -3297,12 +3309,23 @@ def _decision_trace_snapshot(
             if artifact_replay or state in {"pending", "skipped"}
             else _decision_trace_think_label(observed)
         )
+        observed_context = (observed or {}).get("context_tokens")
+        context_tokens = (
+            observed_context
+            if isinstance(observed_context, int)
+            and not isinstance(observed_context, bool)
+            and observed_context > 0
+            and not artifact_replay
+            and state not in {"pending", "skipped"}
+            else None
+        )
         lanes.append(
             {
                 "key": lane,
                 "label": lane_labels[lane],
                 "model": models[lane],
                 "think": think,
+                "context_tokens": context_tokens,
                 "state": state,
                 "result": result,
                 "detail": detail,
@@ -3312,6 +3335,12 @@ def _decision_trace_snapshot(
         )
 
     decision_status = str((decision or {}).get("status") or "")
+    seal_failed = bool(
+        decision_status == "quarantined"
+        and (decision or {}).get("quarantine_reason")
+        == "canonical_decision_artifact_publish_failed"
+        and (decision or {}).get("failure_class") == "decision_artifact_invalid"
+    )
     if active_rows:
         trace_state = "active"
         active_lane = next(
@@ -3395,7 +3424,9 @@ def _decision_trace_snapshot(
         {
             "key": "artifact",
             "label": "Artifact",
-            "status": "done"
+            "status": "error"
+            if seal_failed
+            else "done"
             if decision_status == "agreed"
             or artifact_replay
             or (not quorum_flow and session_rows)
@@ -3406,7 +3437,9 @@ def _decision_trace_snapshot(
         {
             "key": "decision",
             "label": "Decision",
-            "status": "done"
+            "status": "skipped"
+            if seal_failed
+            else "done"
             if decision_status == "agreed" or (not quorum_flow and session_rows)
             else "error"
             if decision_status == "quarantined"
@@ -3470,6 +3503,7 @@ def _local_consensus_snapshot(limit: int = 40) -> dict[str, Any]:
                         "role",
                         "model",
                         "think",
+                        "context_tokens",
                         "ok",
                         "first_pass_valid",
                         "repaired",
