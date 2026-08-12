@@ -840,11 +840,11 @@ function updateDecisionSvgHarness(trace, focusEvent = null) {
     (node) => Number(node.dataset.contextTokens) === selectedContextValue
   );
   const contextX = selectedContextNode?.transform?.baseVal?.getItem(0)?.matrix?.e || 442;
-  const contextDirection = Math.sign(contextX - 510) || -1;
-  const contextRadius = Math.min(10, Math.abs(contextX - 510) / 2);
+  const contextDirection = Math.sign(contextX - 492) || -1;
+  const contextRadius = Math.min(10, Math.abs(contextX - 492) / 2);
   harness.querySelector("[data-path-key=\"execution-plan-context\"]")?.setAttribute(
     "d",
-    `M510 56 V${86 - contextRadius} Q510 86 ${510 + contextDirection * contextRadius} 86 `
+    `M492 56 V${86 - contextRadius} Q492 86 ${492 + contextDirection * contextRadius} 86 `
       + `H${contextX - contextDirection * contextRadius} Q${contextX} 86 ${contextX} ${86 + contextRadius} V140`
   );
   harness.querySelector("[data-path-key=\"plan-context\"]")?.setAttribute(

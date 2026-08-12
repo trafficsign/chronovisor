@@ -198,9 +198,9 @@ def test_dashboard_reference_svg_has_one_fixed_safe_topology() -> None:
 
     expected_boundary_paths = {
         "packet-preflight": "M106 10 H288",
-        "preflight-execution_plan": "M308 10 H500 Q510 10 510 20 V36",
+        "preflight-execution_plan": "M308 10 H482 Q492 10 492 20 V36",
         "execution-plan-context": (
-            "M510 56 V76 Q510 86 500 86 H452 Q442 86 442 96 V140"
+            "M492 56 V76 Q492 86 482 86 H452 Q442 86 442 96 V140"
         ),
         "plan-dispatch": (
             "M1380 164 H1466 Q1476 164 1476 174 V265 Q1476 275 1466 275 "
@@ -343,7 +343,7 @@ def test_dashboard_reference_svg_has_one_fixed_safe_topology() -> None:
     assert matching("class", "trace-branch-node-label")[0]["x"] == "16"
     assert matching("class", "trace-branch-node-label")[0]["y"] == "4"
     assert matching("data-overall-key", "execution_plan")[0]["transform"] == (
-        "translate(510 46)"
+        "translate(492 46)"
     )
     assert matching("class", "trace-artifact-label")[0]["x"] == "-16"
     assert matching("class", "trace-artifact-label")[0]["text-anchor"] == "end"
@@ -378,10 +378,10 @@ def test_dashboard_reference_svg_has_one_fixed_safe_topology() -> None:
     assert len(context_guides) == 1
     assert context_guides[0]["data-context-guide"] == "all"
     assert context_guides[0]["d"] == (
-        "M510 56 V76 Q510 86 500 86 H352 Q342 86 342 96 V140 "
-        "M510 56 V76 Q510 86 500 86 H452 Q442 86 442 96 V140 "
-        "M510 56 V76 Q510 86 520 86 H532 Q542 86 542 96 V140 "
-        "M510 56 V76 Q510 86 520 86 H632 Q642 86 642 96 V140 "
+        "M492 56 V76 Q492 86 482 86 H352 Q342 86 342 96 V140 "
+        "M492 56 V76 Q492 86 482 86 H452 Q442 86 442 96 V140 "
+        "M492 56 V76 Q492 86 502 86 H532 Q542 86 542 96 V140 "
+        "M492 56 V76 Q492 86 502 86 H632 Q642 86 642 96 V140 "
         "M442 160 V204 Q442 214 452 214 "
         "M542 160 V204 Q542 214 552 214 "
         "M642 160 V204 Q642 214 652 214 "
@@ -665,7 +665,9 @@ def test_dashboard_reference_keeps_selection_and_bucket_truth() -> None:
     assert '["context-generate", "generate"]' in harness
     assert "fmt(laneSteps.get(phase)?.status, \"pending\")" in harness
     assert "Math.floor(tokens / 1000)" in renderer
-    assert '`M510 56 V${86 - contextRadius}' in harness
+    assert "Math.sign(contextX - 492)" in harness
+    assert "Math.abs(contextX - 492) / 2" in harness
+    assert '`M492 56 V${86 - contextRadius} Q492 86 ${492 +' in harness
     assert '${86 + contextRadius} V140`' in harness
     assert '`M${contextX} 160 V204 Q${contextX} 214 ${contextX + 10} 214 `' in harness
     assert '+ "H724 Q734 214 734 204 V174 Q734 164 744 164 H766"' in harness
