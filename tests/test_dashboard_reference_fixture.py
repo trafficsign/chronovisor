@@ -322,11 +322,15 @@ def test_dashboard_reference_keeps_selection_and_bucket_truth() -> None:
     assert style.count("height: 1030px;") == 3
     assert style.count("height: 802px;") == 3
     assert style.count("height: 607px;") == 2
+    assert "trace-check" not in page
+    assert ".trace-check" not in style
     assert (
+        ".decision-trace-harness .trace-overall .trace-node.done circle,\n"
         ".decision-trace-harness .done.decision-lane-step circle,\n"
         ".decision-trace-harness .decision-lane-step.done circle {\n"
         "  fill: url(#trace-active-core);\n"
-        "  stroke: #9296ff;"
+        "  stroke: #9296ff;\n"
+        "  stroke-width: 2.1;"
     ) in style
     assert (
         ".decision-trace-harness .done.trace-shared-node circle,\n"
@@ -334,6 +338,10 @@ def test_dashboard_reference_keeps_selection_and_bucket_truth() -> None:
         "  fill: url(#trace-active-core);\n"
         "  stroke: #9296ff;"
     ) in style
+    done_node_style = style.split(
+        ".decision-trace-harness .done.trace-node circle,", 1
+    )[1].split("}", 1)[0]
+    assert "filter: url(#trace-glow-violet);" in done_node_style
     assert ".decision-trace-harness .trace-single-path.pending" not in style
     assert ".decision-trace-harness .trace-hold-path.pending" not in style
     assert ".decision-trace-harness .skipped.trace-path" not in style
@@ -369,6 +377,7 @@ def test_dashboard_reference_keeps_selection_and_bucket_truth() -> None:
         "  opacity: 0.66;\n"
         "}"
     ) in style
+    assert ".decision-trace-harness .trace-lane-rail.pending" not in style
     assert (
         ".decision-trace-harness .decision-lane-step.active circle {\n"
         "  fill: url(#trace-processing-core);\n"

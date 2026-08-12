@@ -3183,20 +3183,6 @@ canvas {
   text-anchor: end;
 }
 
-.decision-trace-harness .trace-check {
-  fill: none;
-  stroke: #061724;
-  stroke-width: 1.8;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-  opacity: 0;
-  pointer-events: none;
-}
-
-.decision-trace-harness .trace-node.done .trace-check {
-  opacity: 1;
-}
-
 .decision-trace-harness .trace-overall .trace-node circle {
   r: 9px;
 }
@@ -3338,6 +3324,7 @@ canvas {
   filter: url(#trace-glow-violet);
 }
 
+.decision-trace-harness .trace-overall .trace-node.done circle,
 .decision-trace-harness .done.decision-lane-step circle,
 .decision-trace-harness .decision-lane-step.done circle {
   fill: url(#trace-active-core);
