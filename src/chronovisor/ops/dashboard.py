@@ -3167,6 +3167,95 @@ def _decision_trace_execution_window(
     return active_rows, related, bounded_trace_events
 
 
+def _decision_trace_overall_steps(
+    *,
+    active_rows: list[dict[str, Any]],
+    session_rows: list[dict[str, Any]],
+    decision: dict[str, Any] | None,
+    request_sha256: str,
+    decision_status: str,
+    quorum_flow: bool,
+    seal_failed: bool,
+) -> list[dict[str, str]]:
+    active_phases = {str(row.get("phase") or "trigger") for row in active_rows}
+    generating = bool(active_phases & {"trigger", "load", "context", "generate"})
+    validating = (
+        bool(active_phases)
+        and not generating
+        and bool(active_phases & {"repair", "validate"})
+    )
+    voting = bool(active_phases) and not generating and not validating
+    completed = decision_status in {"agreed", "quarantined"} or (
+        not quorum_flow and bool(session_rows)
+    )
+    quorum_status = (
+        "done"
+        if decision_status == "agreed" or (not quorum_flow and bool(session_rows))
+        else "error"
+        if decision_status == "quarantined"
+        else "active"
+        if voting or (bool(session_rows) and not active_rows)
+        else "pending"
+    )
+    return [
+        {
+            "key": "packet",
+            "label": "Packet",
+            "status": "done" if request_sha256 else "pending",
+        },
+        {
+            "key": "dispatch",
+            "label": "Dispatch",
+            "status": "done" if active_rows or session_rows or decision else "pending",
+        },
+        {
+            "key": "generate",
+            "label": "Generate",
+            "status": "active"
+            if generating
+            else "done"
+            if validating or voting or session_rows or completed
+            else "pending",
+        },
+        {
+            "key": "validate",
+            "label": "Validate",
+            "status": "active"
+            if validating
+            else "done"
+            if not generating and (session_rows or completed)
+            else "pending",
+        },
+        {"key": "quorum", "label": "Quorum", "status": quorum_status},
+        {
+            "key": "artifact",
+            "label": "Artifact",
+            "status": "error"
+            if seal_failed
+            else "done"
+            if decision_status == "agreed"
+            or bool(decision and decision.get("kind") == "decision_artifact_replay")
+            or (not quorum_flow and session_rows)
+            else "skipped"
+            if decision_status == "quarantined"
+            else "pending",
+        },
+        {
+            "key": "decision",
+            "label": "Decision",
+            "status": "skipped"
+            if seal_failed
+            else "done"
+            if decision_status == "agreed" or (not quorum_flow and session_rows)
+            else "error"
+            if decision_status == "quarantined"
+            else "active"
+            if voting and not quorum_flow
+            else "pending",
+        },
+    ]
+
+
 def _decision_trace_snapshot(
     activities: list[dict[str, Any]],
     history: list[dict[str, Any]],
@@ -3381,83 +3470,15 @@ def _decision_trace_snapshot(
         trace_state = "idle"
         summary = "No local decision yet"
 
-    active_phases = {str(row.get("phase") or "trigger") for row in active_rows}
-    generating = bool(active_phases & {"trigger", "load", "context", "generate"})
-    validating = (
-        bool(active_phases)
-        and not generating
-        and bool(active_phases & {"repair", "validate"})
+    overall = _decision_trace_overall_steps(
+        active_rows=active_rows,
+        session_rows=session_rows,
+        decision=decision,
+        request_sha256=request_sha256,
+        decision_status=decision_status,
+        quorum_flow=quorum_flow,
+        seal_failed=seal_failed,
     )
-    voting = bool(active_phases) and not generating and not validating
-    completed = decision_status in {"agreed", "quarantined"} or (
-        not quorum_flow and bool(session_rows)
-    )
-    quorum_status = (
-        "done"
-        if decision_status == "agreed" or (not quorum_flow and bool(session_rows))
-        else "error"
-        if decision_status == "quarantined"
-        else "active"
-        if voting or (bool(session_rows) and not active_rows)
-        else "pending"
-    )
-    overall = [
-        {
-            "key": "packet",
-            "label": "Packet",
-            "status": "done" if request_sha256 else "pending",
-        },
-        {
-            "key": "dispatch",
-            "label": "Dispatch",
-            "status": "done" if active_rows or session_rows or decision else "pending",
-        },
-        {
-            "key": "generate",
-            "label": "Generate",
-            "status": "active"
-            if generating
-            else "done"
-            if validating or voting or session_rows or completed
-            else "pending",
-        },
-        {
-            "key": "validate",
-            "label": "Validate",
-            "status": "active"
-            if validating
-            else "done"
-            if not generating and (session_rows or completed)
-            else "pending",
-        },
-        {"key": "quorum", "label": "Quorum", "status": quorum_status},
-        {
-            "key": "artifact",
-            "label": "Artifact",
-            "status": "error"
-            if seal_failed
-            else "done"
-            if decision_status == "agreed"
-            or artifact_replay
-            or (not quorum_flow and session_rows)
-            else "skipped"
-            if decision_status == "quarantined"
-            else "pending",
-        },
-        {
-            "key": "decision",
-            "label": "Decision",
-            "status": "skipped"
-            if seal_failed
-            else "done"
-            if decision_status == "agreed" or (not quorum_flow and session_rows)
-            else "error"
-            if decision_status == "quarantined"
-            else "active"
-            if voting and not quorum_flow
-            else "pending",
-        },
-    ]
     updated_at = (
         (active_rows[-1] if active_rows else {}).get("updated_at")
         or (active_rows[-1] if active_rows else {}).get("started_at")

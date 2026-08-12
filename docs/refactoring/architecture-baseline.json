@@ -6751,8 +6751,8 @@
   "contract_hashes": {
     "decision_authority": {
       "lane_contract_manifest_sha256": "c95785b77e4c565150a2dbaecfe522f13e528d412e6f8305286731ebd83cd343",
-      "lane_contract_case_manifest_sha256": "1b152f0d12b53dc4c1edf3f64f94ef362b3ee5aeb23314bad091726d71091aa6",
-      "structured_generation_policy_sha256": "8e99d435cb1102c6f069c896d1fb7fdc17be2cd0dd0b3ceb885404e9671e2a21"
+      "lane_contract_case_manifest_sha256": "9f2dec1803ba65f9c294feeaa1e9247f8389a0d0db8ecf6bd2d21918dcb24cb5",
+      "structured_generation_policy_sha256": "e11f743bdd140870eaff6ed39a0bc5ac4cc51eb9898e120c81f9edee8512b074"
     },
     "production_schema_manifest": {
       "entries": {

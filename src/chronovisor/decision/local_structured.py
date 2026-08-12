@@ -92,6 +92,9 @@ _VALIDATION_KEYWORDS = {
     "uniqueItems",
 }
 _KNOWN_SCHEMA_KEYWORDS = _ANNOTATION_KEYWORDS | _VALIDATION_KEYWORDS
+_ActivityUpdate = Callable[
+    [str, int | None, bool | str | None, str | None, int | None], None
+]
 
 
 def structured_generation_policy() -> dict[str, Any]:
@@ -1212,11 +1215,7 @@ class LocalConsensusAuditStore:
         model: str,
         required_num_ctx: int | None = None,
         requested_num_ctx: int | None = None,
-    ) -> Iterator[
-        Callable[
-            [str, int | None, bool | str | None, str | None, int | None], None
-        ]
-    ]:
+    ) -> Iterator[_ActivityUpdate]:
         """Publish a redacted, phase-aware marker while a session executes."""
 
         path: Path | None = None
@@ -2221,6 +2220,44 @@ class LocalStructuredSession:
             f"{CONTEXT_SAFETY_TOKENS}>{effective_num_ctx})",
         )
 
+    def _reasoning_request_template(
+        self,
+        *,
+        schema: dict[str, Any],
+        effective_num_ctx: int,
+        required_num_ctx: int | None,
+        activity_update: _ActivityUpdate | None,
+    ) -> ChatRequest:
+        selection = _structured_think_selection(
+            self.model,
+            num_ctx=effective_num_ctx,
+            required_num_ctx=required_num_ctx,
+            num_predict=self.num_predict,
+            runtime_role=self.runtime_role,
+            decision_lane=self.decision_lane,
+            task_impact=self.task_impact,
+            supported_reasoning_levels=None,
+            adaptive_reasoning_adopted=_ADAPTIVE_REASONING_CANARY_ADOPTED,
+        )
+        if activity_update is not None:
+            activity_update("context", 0, *selection, effective_num_ctx)
+        return ChatRequest(
+            model=self.model,
+            messages=(),
+            schema=schema,
+            num_ctx=effective_num_ctx,
+            num_predict=self.num_predict,
+            keep_alive=self.keep_alive,
+            read_timeout_ms=self.read_timeout_ms,
+            max_output_chars=self.max_output_chars,
+            temperature=STRUCTURED_GENERATION_TEMPERATURE,
+            seed=STRUCTURED_GENERATION_SEED,
+            think=selection[0],
+            think_selection_reason=selection[1],
+            required_num_ctx=required_num_ctx,
+            requested_num_ctx=self.num_ctx,
+        )
+
     def _call_transport(
         self,
         request: ChatRequest,
@@ -2296,10 +2333,7 @@ class LocalStructuredSession:
         value_validator: Callable[[Any], Sequence[ValidationIssue]] | None = None,
         num_ctx: int | None = None,
         required_num_ctx: int | None = None,
-        activity_update: Callable[
-            [str, int | None, bool | str | None, str | None, int | None], None
-        ]
-        | None = None,
+        activity_update: _ActivityUpdate | None = None,
         request_observer: Callable[[ChatRequest, str, int], None] | None = None,
     ) -> LocalStructuredResult:
         effective_num_ctx = self.num_ctx if num_ctx is None else num_ctx
@@ -2322,25 +2356,12 @@ class LocalStructuredSession:
         if context_failure is not None:
             return context_failure
 
-        selected_think, think_selection_reason = _structured_think_selection(
-            self.model,
-            num_ctx=effective_num_ctx,
+        request_template = self._reasoning_request_template(
+            schema=transport_schema,
+            effective_num_ctx=effective_num_ctx,
             required_num_ctx=required_num_ctx,
-            num_predict=self.num_predict,
-            runtime_role=self.runtime_role,
-            decision_lane=self.decision_lane,
-            task_impact=self.task_impact,
-            supported_reasoning_levels=None,
-            adaptive_reasoning_adopted=_ADAPTIVE_REASONING_CANARY_ADOPTED,
+            activity_update=activity_update,
         )
-        if activity_update is not None:
-            activity_update(
-                "context",
-                0,
-                selected_think,
-                think_selection_reason,
-                effective_num_ctx,
-            )
 
         attempts: list[StructuredAttempt] = []
         seen_outputs: set[str] = set()
@@ -2359,21 +2380,9 @@ class LocalStructuredSession:
                     f"{CONTEXT_SAFETY_TOKENS}>{effective_num_ctx})",
                     attempts,
                 )
-            request = ChatRequest(
-                model=self.model,
+            request = replace(
+                request_template,
                 messages=tuple(dict(message) for message in messages),
-                schema=transport_schema,
-                num_ctx=effective_num_ctx,
-                num_predict=self.num_predict,
-                keep_alive=self.keep_alive,
-                read_timeout_ms=self.read_timeout_ms,
-                max_output_chars=self.max_output_chars,
-                temperature=STRUCTURED_GENERATION_TEMPERATURE,
-                seed=STRUCTURED_GENERATION_SEED,
-                think=selected_think,
-                think_selection_reason=think_selection_reason,
-                required_num_ctx=required_num_ctx,
-                requested_num_ctx=self.num_ctx,
             )
             transport_output, transport_failure = self._call_transport(
                 request,
@@ -2540,7 +2549,9 @@ class LocalStructuredSession:
                 continue
 
             normalized_output, normalized = normalize_json_output(raw_output)
-            output_sha256 = hashlib.sha256(normalized_output.encode("utf-8")).hexdigest()
+            output_sha256 = hashlib.sha256(
+                normalized_output.encode("utf-8")
+            ).hexdigest()
             parsed, issues = _parse_json(normalized_output)
             if not issues:
                 issues = validate_json(parsed, schema_copy)
@@ -2606,7 +2617,9 @@ class LocalStructuredSession:
             messages.append({"role": "assistant", "content": raw_output})
             messages.append({"role": "user", "content": repair_prompt})
 
-        return self._failure("repair_exhausted", "structured session exhausted", attempts)
+        return self._failure(
+            "repair_exhausted", "structured session exhausted", attempts
+        )
 
     def run(
         self,
@@ -2766,9 +2779,7 @@ class LocalStructuredSession:
             result = replace(
                 result,
                 think=observed_request.get("think"),
-                think_selection_reason=observed_request.get(
-                    "think_selection_reason"
-                ),
+                think_selection_reason=observed_request.get("think_selection_reason"),
                 required_num_ctx=required_num_ctx,
                 requested_num_ctx=self.num_ctx,
                 effective_num_ctx=observed_request.get("effective_num_ctx"),
