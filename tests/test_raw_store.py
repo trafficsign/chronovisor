@@ -18,12 +18,12 @@ def _legacy_root(tmp_path: Path) -> None:
         (tmp_path / name).write_text("legacy\n", encoding="utf-8")
 
 
-def _append(raw_dir: Path, source: Path, payload: bytes):
+def _append(raw_dir: Path, source: Path, payload: bytes, *, host: str = "claude-code"):
     return append_capture(
         raw_dir=raw_dir,
         raw_id="save-shared.md",
         idempotency_key="shared",
-        host="claude-code",
+        host=host,
         session_key="b" * 24,
         session_id="session",
         source_file=source,
@@ -204,6 +204,33 @@ def test_materialized_reference_projects_native_transcript_without_copying_it(
     child = json.loads(projection.child_paths[0].read_text())
     assert child["records"][0]["text"] == "remember me"
     assert receipt.commit.sha256 == unit.sha256
+
+
+def test_materialized_reference_projects_pi_transcript(tmp_path: Path) -> None:
+    raw_dir = tmp_path / "raw"
+    source = tmp_path / "session.jsonl"
+    payload = (
+        b'{"type":"message","timestamp":"2026-08-13T00:00:00Z",'
+        b'"message":{"role":"user","content":"remember from pi"}}\n'
+    )
+    source.write_bytes(payload)
+    _append(raw_dir, source, payload, host="pi")
+    store = RawStore(raw_dir, mode="v2")
+    unit = store.resolve_segment("save-shared.md")
+    assert unit is not None and unit.commit is not None
+
+    reference = store.materialize_ingest(unit, tmp_path / "runtime" / "parents")
+    projection = project_native_transcript(
+        reference,
+        store.read_bytes(unit),
+        unit.commit,
+        output_dir=tmp_path / "runtime" / "artifacts",
+        max_child_bytes=32_000,
+    )
+
+    child = json.loads(projection.child_paths[0].read_text())
+    assert child["records"][0]["role"] == "user"
+    assert child["records"][0]["text"] == "remember from pi"
 
 
 def test_v2_parent_and_semantic_child_use_separate_physical_stores(

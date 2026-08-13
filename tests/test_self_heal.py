@@ -3202,6 +3202,138 @@ def test_verified_local_repair_releases_exact_operational_packet(
     )
 
 
+def test_supported_pi_projector_releases_legacy_unsupported_host_hold(
+    isolated_wiki: Path,
+) -> None:
+    from chronovisor.ingest import failure_supervisor, self_heal
+
+    raw_path = isolated_wiki / "raw" / "save-pi.md"
+    raw_path.write_text("logical raw reference", encoding="utf-8")
+    state_path = isolated_wiki / "runtime" / "failures" / "state.json"
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    packet_path = state_path.parent / "packets" / "legacy-pi.json"
+    packet_path.parent.mkdir(parents=True, exist_ok=True)
+    packet_path.write_text(
+        json.dumps(
+            {
+                "status": "pending_local_repair",
+                "failure_class": "raw.semantic_projection_source_invalid",
+                "error": (
+                    "raw semantic projection failed [source_invalid]: "
+                    "RawSemanticProjectionError: unsupported native "
+                    "transcript host: pi"
+                ),
+            }
+        ),
+        encoding="utf-8",
+    )
+    state_path.write_text(
+        json.dumps(
+            {
+                "failures": {
+                    raw_path.name: {
+                        "failure_class": "raw.semantic_projection_source_invalid",
+                        "last_error": (
+                            "raw semantic projection failed [source_invalid]: "
+                            "RawSemanticProjectionError: unsupported native "
+                            "transcript host: pi"
+                        ),
+                        "packet_path": str(packet_path),
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert failure_supervisor.operational_deferred_raw_files([raw_path]) == {}
+    assert packet_path not in self_heal.pending_packets()
+
+
+def test_supported_pi_projector_releases_capability_unavailable_hold(
+    isolated_wiki: Path,
+) -> None:
+    from chronovisor.ingest import failure_supervisor, self_heal
+
+    raw_path = isolated_wiki / "raw" / "save-pi.md"
+    raw_path.write_text("logical raw reference", encoding="utf-8")
+    failures_dir = isolated_wiki / "runtime" / "failures"
+    packet_path = failures_dir / "packets" / "pi-capability.json"
+    packet_path.parent.mkdir(parents=True, exist_ok=True)
+    error = (
+        "raw semantic projection failed [capability_unavailable]: "
+        "UnsupportedNativeTranscriptHostError: unsupported native "
+        "transcript host: pi"
+    )
+    packet_path.write_text(
+        json.dumps(
+            {
+                "status": "pending_local_repair",
+                "failure_class": (
+                    "ingest.runtime_semantic_projection_capability_unavailable"
+                ),
+                "error": error,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (failures_dir / "state.json").write_text(
+        json.dumps(
+            {
+                "failures": {
+                    raw_path.name: {
+                        "failure_class": (
+                            "ingest.runtime_semantic_projection_capability_unavailable"
+                        ),
+                        "last_error": error,
+                        "packet_path": str(packet_path),
+                        "self_heal_queued": True,
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert failure_supervisor.operational_deferred_raw_files([raw_path]) == {}
+    assert packet_path not in self_heal.pending_packets()
+
+
+def test_source_invalid_v2_logical_raw_stays_deferred_after_rematerialization(
+    isolated_wiki: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from chronovisor.ingest import failure_supervisor
+
+    monkeypatch.setattr(failure_supervisor, "_launch_self_heal", lambda _path: None)
+    first = isolated_wiki / "runtime" / "raw-projections" / "parents" / "save-bad.md"
+    first.parent.mkdir(parents=True, exist_ok=True)
+    first.write_text("first materialization", encoding="utf-8")
+    error = (
+        "raw semantic projection failed [source_invalid]: "
+        "RawSemanticProjectionError: malformed source"
+    )
+    result = failure_supervisor.record_raw_failure(
+        raw_path=first, error=error, threshold=1
+    )
+    rematerialized = first
+    rematerialized.write_text("second materialization", encoding="utf-8")
+
+    assert failure_supervisor.operational_deferred_raw_files([rematerialized]) == {
+        rematerialized.name: "raw.semantic_projection_source_invalid"
+    }
+    state = json.loads(
+        (isolated_wiki / "runtime" / "failures" / "state.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    entry = state["failures"][rematerialized.name]
+    assert result.terminal_deferred is True
+    assert entry["terminal_deferred"] is True
+    assert entry["packet_path"] == result.packet_path
+    assert entry["quarantine_path"] == result.quarantine_path
+
+
 def test_verified_local_repair_releases_operational_local_quarantine(
     isolated_wiki: Path,
     operational_release_case: tuple[Path, dict[str, str]],

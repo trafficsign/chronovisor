@@ -78,6 +78,9 @@ from chronovisor.ingest.convergence import (
     is_human_required_failure,
     is_human_required_result,
 )
+from chronovisor.ingest.failure_supervisor import (
+    source_host_capability_is_now_available,
+)
 
 start_background = start_self_heal_background
 _packet_cancellation_dir = packet_cancellation_dir
@@ -1691,6 +1694,8 @@ def pending_packets(
             next_attempt, comparable_now = _comparable_datetimes(next_attempt, current)
             due = next_attempt <= comparable_now
         status = packet.get("status")
+        if source_host_capability_is_now_available(packet):
+            continue
         if status in SELF_HEAL_STATUSES and due:
             out.append(path)
         elif status == "local_quarantined":

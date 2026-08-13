@@ -1178,6 +1178,7 @@ def run_pending_ingest(
             ProjectionCapacityError,
             ProjectionConflictError,
             RawSemanticProjectionError,
+            UnsupportedNativeTranscriptHostError,
             project_native_transcript,
             project_parent_raw,
             project_reassembled_raws,
@@ -1496,6 +1497,8 @@ def run_pending_ingest(
                         projection_failure_cause = "artifact_conflict"
                     elif isinstance(e, ProjectionCapacityError):
                         projection_failure_cause = "capacity"
+                    elif isinstance(e, UnsupportedNativeTranscriptHostError):
+                        projection_failure_cause = "capability_unavailable"
                     elif isinstance(e, RawSemanticProjectionError):
                         projection_failure_cause = "source_invalid"
                     elif isinstance(e, OSError):

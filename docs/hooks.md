@@ -7,6 +7,7 @@
 ```sh
 chronovisor-hook --host codex --event UserPromptSubmit --hook
 chronovisor-hook --host claude-code --event UserPromptSubmit --hook
+chronovisor-hook --host pi --event UserPromptSubmit --hook
 ```
 
 This runs the recall gate synchronously and prints host-native hook output. The

@@ -69,6 +69,7 @@ TRANSIENT_FAILURE_CLASSES = {
 }
 
 SEMANTIC_PROJECTION_OPERATIONAL_FAILURE_CLASSES = {
+    "ingest.runtime_semantic_projection_capability_unavailable",
     "ingest.runtime_semantic_projection_artifact_conflict",
     "ingest.runtime_semantic_projection_capacity",
     "ingest.runtime_semantic_projection_failure",
@@ -485,6 +486,9 @@ def classify_failure(message: str | None) -> FailureRecord:
                 "ingest.runtime_semantic_projection_artifact_conflict"
             ),
             "capacity": "ingest.runtime_semantic_projection_capacity",
+            "capability_unavailable": (
+                "ingest.runtime_semantic_projection_capability_unavailable"
+            ),
             "internal_error": "ingest.runtime_semantic_projection_internal_error",
             "interrupted": "ingest.runtime_semantic_projection_interrupted",
             "legacy": "ingest.runtime_semantic_projection_failure",
@@ -1796,6 +1800,25 @@ def _operational_entry_is_released(raw_path: Path, entry: dict[str, Any]) -> boo
     )
 
 
+def source_host_capability_is_now_available(entry: dict[str, Any]) -> bool:
+    if entry.get("failure_class") not in {
+        "raw.semantic_projection_source_invalid",
+        "ingest.runtime_semantic_projection_capability_unavailable",
+    }:
+        return False
+    message = entry.get("last_error", entry.get("error"))
+    if not isinstance(message, str):
+        return False
+    match = re.search(r"unsupported native transcript host:\s*([^\s]+)", message)
+    if match is None:
+        return False
+    from chronovisor.ingest.raw_semantic_projection import (
+        SUPPORTED_NATIVE_TRANSCRIPT_HOSTS,
+    )
+
+    return match.group(1) in SUPPORTED_NATIVE_TRANSCRIPT_HOSTS
+
+
 def operational_deferred_raw_files(
     raw_paths: Iterable[Path] | None = None,
 ) -> dict[str, str]:
@@ -1866,6 +1889,13 @@ def _operational_deferred_raw_files_unlocked(
                 deferred[raw_file] = SEMANTIC_NO_QUORUM_DEFER_REASON
             # A different fully validated executable authority epoch releases
             # the immutable raw for automatic re-evaluation.
+            continue
+        if source_host_capability_is_now_available(value):
+            continue
+        if value.get("terminal_deferred") is True:
+            deferred[raw_file] = str(
+                value.get("defer_reason") or value.get("failure_class") or "quarantined"
+            )
             continue
         if (
             value.get("failure_class") not in OPERATIONAL_SELF_HEAL_FAILURE_CLASSES
@@ -2065,6 +2095,18 @@ def record_raw_failure(
             raw_text=raw_text,
         )
         quarantine_path = _quarantine_raw(raw_path, packet_path)
+        current.update(
+            {
+                "terminal_deferred": True,
+                "defer_reason": record.failure_class,
+                "packet_path": str(packet_path),
+                "quarantine_path": (
+                    str(quarantine_path) if quarantine_path is not None else None
+                ),
+            }
+        )
+        failures[raw_file] = current
+        _save_state(state)
 
         runtime_status.safe_append_event(
             "warn",
@@ -2087,6 +2129,7 @@ def record_raw_failure(
             quarantined=True,
             packet_path=str(packet_path),
             quarantine_path=str(quarantine_path) if quarantine_path else None,
+            terminal_deferred=True,
         )
 
     _launch_self_heal(packet_path)

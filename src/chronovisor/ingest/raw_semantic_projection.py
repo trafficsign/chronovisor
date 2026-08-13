@@ -74,6 +74,13 @@ class ProjectionCapacityError(RawSemanticProjectionError):
     """Even one UTF-8 code point cannot fit the configured child envelope."""
 
 
+class UnsupportedNativeTranscriptHostError(RawSemanticProjectionError):
+    """The runtime lacks a deterministic projector for the source host."""
+
+
+SUPPORTED_NATIVE_TRANSCRIPT_HOSTS = frozenset({"codex", "claude-code", "pi"})
+
+
 @dataclass(frozen=True)
 class ProjectionChildArtifact:
     """One verified child artifact returned to the ingest orchestrator."""
@@ -1019,8 +1026,23 @@ def project_native_transcript(
                 "text": text,
                 "timestamp": timestamp,
             }
+        elif commit.host == "pi":
+            from chronovisor.core.pi_transcript import (
+                _pi_message_view,
+                claude_semantic_view,
+            )
+
+            item_type, content = _pi_message_view(event)
+            role, text = claude_semantic_view(item_type, content)
+            event_type = item_type
+            semantic_row = {
+                "line": source_line,
+                "role": role,
+                "text": text,
+                "timestamp": timestamp,
+            }
         else:
-            raise RawSemanticProjectionError(
+            raise UnsupportedNativeTranscriptHostError(
                 f"unsupported native transcript host: {commit.host}"
             )
         if event_type is not None:
@@ -1721,6 +1743,8 @@ __all__ = [
     "ProjectionChildArtifact",
     "ProjectionConflictError",
     "RawSemanticProjectionError",
+    "SUPPORTED_NATIVE_TRANSCRIPT_HOSTS",
+    "UnsupportedNativeTranscriptHostError",
     "project_parent_raw",
     "project_reassembled_raws",
     "projection_bundle_state_for_parent",
