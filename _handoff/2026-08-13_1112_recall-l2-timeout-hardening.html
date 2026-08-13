@@ -55,13 +55,13 @@ code{background:var(--code-bg);padding:0.1rem 0.35rem;border-radius:3px;font-siz
 </head>
 <body>
 <script type="application/json" id="plan-meta">
-{"task_id":"plan_39f5e0ed0bf5494a823b82bc219c0002","created_at":"2026-08-13T11:12:22+09:00","状態":"ready","slug":"recall-l2-timeout-hardening"}
+{"task_id":"plan_39f5e0ed0bf5494a823b82bc219c0002","created_at":"2026-08-13T11:12:22+09:00","状態":"running","slug":"recall-l2-timeout-hardening"}
 </script>
 
 <header>
 <h1>Plan: <span id="plan-title">Chronovisor Recall L2 Timeout Hardening</span></h1>
 <div class="meta-bar">
-<span class="badge" data-bind="状態" data-state="ready">ready</span>
+<span class="badge" data-bind="状態" data-state="running">running</span>
 <span><code data-bind="task_id">plan_39f5e0ed0bf5494a823b82bc219c0002</code></span>
 <span data-bind="created_at">2026-08-13T11:12:22+09:00</span>
 </div>
@@ -217,6 +217,7 @@ code{background:var(--code-bg);padding:0.1rem 0.35rem;border-radius:3px;font-siz
 <li><time>2026-08-13 11:12</time><span>canonical generatorでPlanを作成。</span></li>
 <li><time>2026-08-13 11:19</time><span>コード、live Recallログ、active config、host wrapper、rollout境界を3担当で独立監査し、4秒契約を維持するP0/P1へ整理。</span></li>
 <li><time>2026-08-13 11:28</time><span>最終read-only reviewを反映し、absolute deadline伝播、fallback残予算、canary分母、host別標本、即時rollback条件を固定。</span></li>
+<li><time>2026-08-13 11:38</time><span>Plan承認を受け、最新origin/mainのclean worktreeでP0実装を開始。</span></li>
 </ol>
 </section>
 
