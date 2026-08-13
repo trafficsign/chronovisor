@@ -317,6 +317,58 @@ def test_collect_context_skips_init_only_for_allowed_okf_v0_2(monkeypatch) -> No
     assert init_calls == [None]
 
 
+def test_collect_context_stops_before_startup_after_deadline(monkeypatch) -> None:
+    monkeypatch.setattr(
+        recall_runtime,
+        "okf_startup_status",
+        lambda _root: pytest.fail("startup ran after the context deadline"),
+    )
+
+    with pytest.raises(RecallBudgetExhausted, match="context startup"):
+        collect_context(
+            ["query"],
+            "search",
+            RecallPolicy(),
+            pre_results=[],
+            deadline_at=0.0,
+        )
+
+
+def test_collect_context_stops_before_summary_after_deadline(monkeypatch) -> None:
+    monkeypatch.setattr(
+        recall_runtime,
+        "okf_startup_status",
+        lambda _root: SimpleNamespace(allowed=True, layout="okf_v0_2"),
+    )
+    monkeypatch.setattr(
+        recall_runtime,
+        "get_store",
+        lambda: SimpleNamespace(refresh_if_stale=lambda: None),
+    )
+    monkeypatch.setattr(recall_runtime, "query_hint_page_ids", lambda *_a, **_k: [])
+    monkeypatch.setattr(
+        recall_runtime,
+        "page_summary",
+        lambda _page_id: pytest.fail("summary ran after the context deadline"),
+    )
+    real_require = recall_runtime._require_remaining_budget
+
+    def require(deadline_at, stage):
+        if stage == "context summary":
+            raise RecallBudgetExhausted("recall context summary budget exhausted")
+        return real_require(deadline_at, stage)
+
+    monkeypatch.setattr(recall_runtime, "_require_remaining_budget", require)
+
+    with pytest.raises(RecallBudgetExhausted, match="context summary"):
+        collect_context(
+            ["query"],
+            "search",
+            RecallPolicy(context_style="cards"),
+            pre_results=[ScoredPage("page", "Page", "", "", 1.0)],
+        )
+
+
 def test_certified_context_selects_before_session_suppression(monkeypatch) -> None:
     from chronovisor.recall import recall_processor
     from chronovisor.recall.evidence_certificate import EvidenceCertificate
@@ -383,6 +435,104 @@ def test_certified_context_selects_before_session_suppression(monkeypatch) -> No
     assert items == []
     assert metadata["session_suppressed_page_ids"] == ["best-page"]
     assert metadata["committed_count"] == 0
+
+
+def test_certified_context_stops_before_selection_after_deadline(monkeypatch) -> None:
+    from chronovisor.recall import recall_processor
+
+    monkeypatch.setattr(
+        recall_processor,
+        "select_certified_candidates",
+        lambda *_args, **_kwargs: pytest.fail(
+            "certified selection ran after the context deadline"
+        ),
+    )
+
+    with pytest.raises(RecallBudgetExhausted, match="certified context"):
+        collect_certified_context(
+            "query",
+            RecallPolicy(processor_enabled=True),
+            request=RecallRequest(
+                host="codex", event="UserPromptSubmit", prompt="query"
+            ),
+            session_state=None,
+            candidates=[],
+            reranker_metadata={},
+            deadline_at=0.0,
+        )
+
+
+def test_evidence_search_skips_field_shadows_after_deadline_but_runs_teacher(
+    monkeypatch,
+) -> None:
+    from chronovisor.recall import recall_compiler, recall_field, recall_field_candidate
+
+    budget_calls = 0
+
+    def remaining(_deadline):
+        nonlocal budget_calls
+        budget_calls += 1
+        return 100 if budget_calls <= 2 else 0
+
+    monkeypatch.setattr(
+        recall_runtime,
+        "_remaining_budget_ms",
+        remaining,
+    )
+    monkeypatch.setattr(
+        recall_field,
+        "run_field_turn",
+        lambda **_kwargs: pytest.fail("Field shadow ran after the deadline"),
+    )
+    monkeypatch.setattr(
+        recall_compiler,
+        "compile_query",
+        lambda _prompt: pytest.fail("compiler shadow ran after the deadline"),
+    )
+    teacher_calls: list[bool] = []
+    monkeypatch.setattr(
+        recall_runtime,
+        "search_candidates",
+        lambda *_args, **_kwargs: (teacher_calls.append(True) or [], "bm25"),
+    )
+
+    def pair(*, field_turn, teacher_search, **_kwargs):
+        assert field_turn["status"] == "skipped"
+        assert field_turn["reason"] == "insufficient_budget"
+        assert field_turn["recall_compiler"] == {
+            "status": "skipped",
+            "reason": "insufficient_budget",
+            "page_ids": [],
+        }
+        results, mode = teacher_search()
+        return results, mode, {"status": "fallback", "authority": "teacher"}
+
+    monkeypatch.setattr(recall_field_candidate, "run_candidate_teacher_pair", pair)
+    monkeypatch.setattr(
+        "chronovisor.recall.recall_session.cleanup_sessions", lambda _ttl: None
+    )
+    monkeypatch.setattr(
+        "chronovisor.recall.recall_session.load_session_state",
+        lambda _session_id: None,
+    )
+
+    outcome = recall_runtime._run_evidence_search(
+        active_request=RecallRequest(
+            host="codex",
+            event="UserPromptSubmit",
+            prompt="query",
+            session_id="session",
+        ),
+        policy=RecallPolicy(rewrite_enabled=False),
+        matched={},
+        heuristic_score=0.0,
+        reasons=[],
+        deadline_at=0.0,
+        processor_authority=False,
+    )
+
+    assert teacher_calls == [True]
+    assert outcome.field_shadow_metadata["status"] == "skipped"
 
 
 def test_search_candidates_filters_sensitive_pages_in_work_context(monkeypatch) -> None:
@@ -2459,6 +2609,59 @@ def test_evidence_context_budget_falls_back_during_final_render(monkeypatch) -> 
     assert metadata["reason"] == "context_budget"
 
 
+def test_finalizer_skips_candidate_trace_but_keeps_teacher_queue_after_deadline(
+    monkeypatch,
+) -> None:
+    from chronovisor.recall import recall_field, recall_field_candidate
+
+    queued: list[list[str]] = []
+    monkeypatch.setattr(
+        recall_runtime, "state_context_for_request", lambda *_args, **_kwargs: ""
+    )
+    monkeypatch.setattr(
+        recall_field,
+        "queue_teacher_commits",
+        lambda **kwargs: queued.append(kwargs["page_ids"]) or {"status": "queued"},
+    )
+    monkeypatch.setattr(
+        recall_field_candidate,
+        "append_candidate_trace",
+        lambda **_kwargs: pytest.fail("candidate trace ran after the deadline"),
+    )
+    request = RecallRequest(
+        host="codex", event="UserPromptSubmit", prompt="query", session_id="session"
+    )
+    result = RecallResult(
+        status="ok",
+        decision="read",
+        confidence=0.8,
+        queries=["query"],
+        reasons=[],
+        matched_terms={},
+        context_items=[
+            ContextItem("page", "Page", "2026-08-13", 1.0, snippets=["evidence"])
+        ],
+        evidence_features={
+            "field_shadow": {
+                "session_hash": "session-hash",
+                "candidate_observer": {"status": "observed"},
+            }
+        },
+    )
+
+    recall_runtime._finalize_recall_result(
+        result,
+        request=request,
+        active_request=request,
+        policy=RecallPolicy(log_decisions=False),
+        session_state=None,
+        queries=["query"],
+        deadline_at=0.0,
+    )
+
+    assert queued == [["page"]]
+
+
 def test_certified_pointer_omits_internal_score_and_rich_span_is_bounded() -> None:
     result = RecallResult(
         status="ok",
@@ -2581,7 +2784,7 @@ def test_recall_budget_exhaustion_uses_deterministic_fallback(monkeypatch) -> No
     assert "core" in result.context
 
 
-def test_final_evidence_observer_can_use_fallback_reserve(monkeypatch) -> None:
+def test_final_evidence_observer_uses_internal_deadline(monkeypatch) -> None:
     captured: dict[str, float] = {}
     monkeypatch.setattr(recall_runtime.time, "monotonic", lambda: 100.0)
     monkeypatch.setattr(
@@ -2606,7 +2809,7 @@ def test_final_evidence_observer_can_use_fallback_reserve(monkeypatch) -> None:
         RecallPolicy(gate_mode="legacy", judge_mode="off", log_decisions=False),
     )
 
-    assert captured["deadline_at"] == pytest.approx(103.9)
+    assert captured["deadline_at"] == pytest.approx(103.4)
 
 
 def test_deterministic_fallback_disables_model_dependent_stages(monkeypatch) -> None:

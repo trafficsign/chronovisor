@@ -1214,9 +1214,7 @@ def search_candidates(
 ) -> tuple[list[Any], str]:
     if not queries:
         return [], ""
-    remaining_ms = _remaining_budget_ms(deadline_at)
-    if remaining_ms is not None and remaining_ms <= 0:
-        raise RecallBudgetExhausted("recall search budget exhausted")
+    _require_remaining_budget(deadline_at, "search")
     trace_decision_id = (
         request.decision_id if request is not None and request.decision_id else new_decision_id()
     )
@@ -1290,6 +1288,7 @@ def search_candidates(
         return output
 
     def search_one(query: str) -> tuple[list[Any], str, list[dict[str, Any]]]:
+        remaining_ms = _require_remaining_budget(deadline_at, "search")
         search_kwargs: dict[str, Any] = {
             "query": query,
             "top_n": max(policy.max_pages * 3, 8),
@@ -1326,15 +1325,19 @@ def search_candidates(
             shadow=False,
             query_plan=str(actual_trace.get("query_plan") or ""),
         )
-        try:
-            from chronovisor.core.knowledge_graph_retrieval import (
-                shadow_candidate_paths,
-            )
+        diagnostic_remaining_ms = _remaining_budget_ms(deadline_at)
+        if diagnostic_remaining_ms is None or diagnostic_remaining_ms > 0:
+            try:
+                from chronovisor.core.knowledge_graph_retrieval import (
+                    shadow_candidate_paths,
+                )
 
-            shadow_paths = shadow_candidate_paths(
-                [str(result.page_id) for result in results[:20]], query=query
-            )
-        except Exception:
+                shadow_paths = shadow_candidate_paths(
+                    [str(result.page_id) for result in results[:20]], query=query
+                )
+            except Exception:
+                shadow_paths = {}
+        else:
             shadow_paths = {}
         rows.extend(trace_rows(query, shadow_paths, shadow=True))
         return results, mode, rows
@@ -1351,6 +1354,7 @@ def search_candidates(
         ) as executor:
             searched = list(executor.map(search_one, queries))
 
+    _require_remaining_budget(deadline_at, "search merge")
     merged: dict[str, Any] = {}
     mode = "bm25"
     typed_trace_rows: list[dict[str, Any]] = []
@@ -1371,7 +1375,10 @@ def search_candidates(
             existing = merged.get(result.page_id)
             if existing is None or adjusted.score > existing.score:
                 merged[result.page_id] = adjusted
-    if typed_trace_rows:
+    diagnostic_remaining_ms = _remaining_budget_ms(deadline_at)
+    if typed_trace_rows and (
+        diagnostic_remaining_ms is None or diagnostic_remaining_ms > 0
+    ):
         # Candidate-path telemetry is supervision input, never part of the
         # synchronous recall authority path. A read-only filesystem or a
         # damaged diagnostics ledger must therefore fail open.
@@ -1398,15 +1405,21 @@ def collect_context(
     if decision == "none" or not queries:
         return []
 
+    _require_remaining_budget(deadline_at, "context startup")
     startup = okf_startup_status(CHRONOVISOR_ROOT)
     if not (startup.allowed and startup.layout == "okf_v0_2"):
+        _require_remaining_budget(deadline_at, "context startup")
         init_chronovisor()
+    _require_remaining_budget(deadline_at, "context store")
     store = get_store()
+    _require_remaining_budget(deadline_at, "context store refresh")
     store.refresh_if_stale()
 
     items: list[ContextItem] = []
     seen: set[str] = set()
+    _require_remaining_budget(deadline_at, "context hints")
     for page_id in query_hint_page_ids(queries, limit=policy.max_pages):
+        _require_remaining_budget(deadline_at, "context hint")
         if page_id in seen:
             continue
         hinted = context_item_from_page_id(page_id, queries, decision, score=1.0)
@@ -1428,6 +1441,7 @@ def collect_context(
             deadline_at=deadline_at,
         )
     for result in results:
+        _require_remaining_budget(deadline_at, "context page")
         if result.page_id in seen:
             continue
         if should_skip_session_page(session_state, result.page_id, result.updated):
@@ -1439,13 +1453,16 @@ def collect_context(
         seen.add(result.page_id)
         snippets = [result.snippet] if result.snippet else []
         if not snippets and policy.context_style == "cards":
+            _require_remaining_budget(deadline_at, "context summary")
             summary = page_summary(result.page_id)
             if summary:
                 snippets = [summary]
         if decision == "read":
+            _require_remaining_budget(deadline_at, "context excerpt")
             snippet = excerpt_page(result.page_id, queries, max_chars=650)
             if snippet:
                 snippets = [snippet]
+        _require_remaining_budget(deadline_at, "context page metadata")
         items.append(
             ContextItem(
                 page_id=result.page_id,
@@ -1463,9 +1480,11 @@ def collect_context(
     # Prefetch is speculative exposure/usage history.  It may fill an empty
     # result set, but it must never displace direct evidence from the current
     # normalized query.
+    _require_remaining_budget(deadline_at, "context prefetch")
     for page_id in prefetch_page_ids_for_request(
         request, queries, limit=policy.max_pages
     ):
+        _require_remaining_budget(deadline_at, "context prefetch page")
         if page_id in seen:
             continue
         prefetched = context_item_from_page_id(page_id, queries, decision, score=0.95)
@@ -1494,7 +1513,7 @@ def collect_certified_context(
 
     from chronovisor.recall.recall_processor import select_certified_candidates
 
-    remaining_ms = _remaining_budget_ms(deadline_at)
+    remaining_ms = _require_remaining_budget(deadline_at, "certified context")
     judge_timeout_ms = (
         max(0, min(1_800, remaining_ms - 100)) if remaining_ms is not None else 1_800
     )
@@ -2010,6 +2029,7 @@ def _finalize_recall_result(
     policy: RecallPolicy,
     session_state: Any,
     queries: list[str],
+    deadline_at: float | None = None,
 ) -> RecallResult:
     """Attach bounded context, advance session state, and append one decision log."""
 
@@ -2094,6 +2114,10 @@ def _finalize_recall_result(
         and isinstance(observer, dict)
         and observer.get("status") in {"fallback", "observed", "active"}
         and active_request.session_id
+        and (
+            (remaining_ms := _remaining_budget_ms(deadline_at)) is None
+            or remaining_ms > 0
+        )
     ):
         try:
             from chronovisor.recall.recall_field_candidate import (
@@ -2178,29 +2202,46 @@ def _run_evidence_search(
         session_summary,
     )
 
+    _require_remaining_budget(deadline_at, "evidence search")
     cleanup_sessions(policy.session_ttl_seconds)
+    _require_remaining_budget(deadline_at, "session load")
     session_state = load_session_state(active_request.session_id)
-    try:
-        from chronovisor.recall.recall_field import run_field_turn
+    shadow_remaining_ms = _remaining_budget_ms(deadline_at)
+    if shadow_remaining_ms is None or shadow_remaining_ms > 0:
+        try:
+            from chronovisor.recall.recall_field import run_field_turn
 
-        field_metadata = run_field_turn(
-            host=active_request.host,
-            session_id=active_request.session_id,
-            prompt=active_request.prompt,
-        )
-    except Exception as exc:
+            field_metadata = run_field_turn(
+                host=active_request.host,
+                session_id=active_request.session_id,
+                prompt=active_request.prompt,
+            )
+        except Exception as exc:
+            field_metadata = {
+                "status": "error",
+                "reason": type(exc).__name__,
+            }
+    else:
         field_metadata = {
-            "status": "error",
-            "reason": type(exc).__name__,
+            "status": "skipped",
+            "reason": "insufficient_budget",
         }
-    try:
-        from chronovisor.recall.recall_compiler import compile_query
+    shadow_remaining_ms = _remaining_budget_ms(deadline_at)
+    if shadow_remaining_ms is None or shadow_remaining_ms > 0:
+        try:
+            from chronovisor.recall.recall_compiler import compile_query
 
-        field_metadata["recall_compiler"] = compile_query(active_request.prompt)
-    except Exception as exc:
+            field_metadata["recall_compiler"] = compile_query(active_request.prompt)
+        except Exception as exc:
+            field_metadata["recall_compiler"] = {
+                "status": "error",
+                "reason": type(exc).__name__,
+                "page_ids": [],
+            }
+    else:
         field_metadata["recall_compiler"] = {
-            "status": "error",
-            "reason": type(exc).__name__,
+            "status": "skipped",
+            "reason": "insufficient_budget",
             "page_ids": [],
         }
 
@@ -2609,6 +2650,7 @@ def _run_recall_impl(
                     policy=policy,
                     session_state=session_state,
                     queries=[],
+                    deadline_at=deadline_at,
                 )
 
     decision = decision_from_score(score, policy)
@@ -2710,26 +2752,27 @@ def _run_recall_impl(
             "commit_overlap": len(compiler_ids & set(committed_ids)),
             "authority": "teacher",
         }
-        try:
-            from chronovisor.recall.recall_compiler import append_shadow_trace
+        diagnostic_remaining_ms = _remaining_budget_ms(deadline_at)
+        if diagnostic_remaining_ms is None or diagnostic_remaining_ms > 0:
+            try:
+                from chronovisor.recall.recall_compiler import append_shadow_trace
 
-            append_shadow_trace(
-                prompt=active_request.prompt,
-                compiler=compiler_metadata,
-                teacher_page_ids=teacher_ids,
-                committed_page_ids=committed_ids,
-            )
-        except Exception:
-            pass
-    _stage_started(_telemetry, "evidence_reconstruction", final_deadline_at)
+                append_shadow_trace(
+                    prompt=active_request.prompt,
+                    compiler=compiler_metadata,
+                    teacher_page_ids=teacher_ids,
+                    committed_page_ids=committed_ids,
+                )
+            except Exception:
+                pass
+    _stage_started(_telemetry, "evidence_reconstruction", deadline_at)
     evidence_features["evidence_reconstruction"] = observe_evidence_reconstruction(
         result,
         request=active_request,
         policy=policy,
-        # The teacher is complete, so only keep finalization headroom now.
-        deadline_at=max(deadline_at, final_deadline_at - 0.1),
+        deadline_at=deadline_at,
     )
-    _stage_completed(_telemetry, "evidence_reconstruction", final_deadline_at)
+    _stage_completed(_telemetry, "evidence_reconstruction", deadline_at)
     result.latency_ms = _elapsed_ms(started)
     _stage_started(_telemetry, "finalize", final_deadline_at)
     result = _finalize_recall_result(
@@ -2739,6 +2782,7 @@ def _run_recall_impl(
         policy=policy,
         session_state=session_state,
         queries=queries,
+        deadline_at=deadline_at,
     )
     _stage_completed(_telemetry, "finalize", final_deadline_at)
     return result

@@ -130,8 +130,8 @@ code{background:var(--code-bg);padding:0.1rem 0.35rem;border-radius:3px;font-siz
 <li><input type="checkbox" checked><span><strong>P0-E — 診断I/Oを非blocking化:</strong> schedulerの <code>sync_enter</code>/<code>sync_exit</code> だけをbest-effort appendへ変え、marker visibilityと権威decision logのdurabilityは維持する。</span></li>
 <li><input type="checkbox" checked><span><strong>P0-F — timeout観測を残す:</strong> outer fail-openにもhost、scheduler wait、<code>last_stage_started</code>、<code>last_stage_completed</code>、残予算、fallback有無だけをin-memory状態から既存Recallログへ記録する。prompt/page本文は記録しない。</span></li>
 <li><input type="checkbox" checked><span><strong>P0-G — focused検証:</strong> fake clockで250ms待機、slow/failed scheduler log、nested fallback、outer 4000/engine 3750、host no-op/exit 0を検証し、P0を独立commitにする。</span></li>
-<li><input type="checkbox"><span><strong>P1-A — context I/O境界:</strong> 既存 <code>_require_remaining_budget</code> をstore refresh、各page summary/excerpt/prefetch、query worker開始/merge前で再利用し、期限切れでは次I/Oへ進まず既存fallbackへ渡す。</span></li>
-<li><input type="checkbox"><span><strong>P1-B — 非権威shadowを予算従属に:</strong> typed/compiler/evidence/processor/field shadowと診断traceはfinalize reserveを割る場合skipする。teacher候補・注入結果は変更しない。</span></li>
+<li><input type="checkbox" checked><span><strong>P1-A — context I/O境界:</strong> 既存 <code>_require_remaining_budget</code> をstore refresh、各page summary/excerpt/prefetch、query worker開始/merge前で再利用し、期限切れでは次I/Oへ進まず既存fallbackへ渡す。</span></li>
+<li><input type="checkbox" checked><span><strong>P1-B — 非権威shadowを予算従属に:</strong> typed/compiler/evidence/processor/field shadowと診断traceはfinalize reserveを割る場合skipする。teacher候補・注入結果は変更しない。</span></li>
 <li><input type="checkbox"><span><strong>Canary:</strong> push後、実hookと7000ms wrapperを確認済みのCodexで先に24時間かつ100 eligible prompts以上を観測する。Claude Codeはactive hook設定・timeout・実行commitを確認できた場合だけ別途canaryし、未確認なら検証済みと記載しない。</span></li>
 <li><input type="checkbox"><span><strong>収束:</strong> Exit Criteriaを満たしたcommitを正本化し、Planのcheckbox・実行ログ・状態を更新する。未達ならP0/P1を個別revertする。</span></li>
 </ol>
@@ -219,6 +219,7 @@ code{background:var(--code-bg);padding:0.1rem 0.35rem;border-radius:3px;font-siz
 <li><time>2026-08-13 11:28</time><span>最終read-only reviewを反映し、absolute deadline伝播、fallback残予算、canary分母、host別標本、即時rollback条件を固定。</span></li>
 <li><time>2026-08-13 11:38</time><span>Plan承認を受け、最新origin/mainのclean worktreeでP0実装を開始。</span></li>
 <li><time>2026-08-13 11:53</time><span>P0-A〜Gを完了。outer 4000ms / engine 3750ms、単一absolute deadline、fallback非再入場、非blocking scheduler診断、匿名timeout telemetryを実装し、隔離環境のfocused 151 tests、Ruff、py_compile、diff-checkに合格。</span></li>
+<li><time>2026-08-13 12:03</time><span>P1-A/Bを完了。context/search/certified I/Oへ既存deadline guardを適用し、非権威shadow・診断traceだけを期限後skip、evidence reconstructionによるreserve再開放を除去。隔離環境の統合157 tests、周辺caller 81 tests、Ruff、py_compile、diff-checkに合格。Canaryと収束はpush未承認のため未完了。</span></li>
 </ol>
 </section>
 
