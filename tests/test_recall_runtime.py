@@ -243,6 +243,34 @@ def test_search_candidates_runs_query_entrances_concurrently(monkeypatch) -> Non
     assert mode == "hybrid"
 
 
+def test_deadline_bound_search_stays_interruptible_on_main_thread(
+    monkeypatch, tmp_path: Path
+) -> None:
+    from chronovisor.recall import recall_runtime
+
+    calls: list[str] = []
+
+    def slow_search(**kwargs):
+        assert threading.current_thread() is threading.main_thread()
+        calls.append(kwargs["query"])
+        time.sleep(0.5)
+        return [], "bm25"
+
+    monkeypatch.setattr(recall_runtime, "run_search", slow_search)
+    monkeypatch.setattr(recall_runtime, "TYPED_GRAPH_TRACE_FILE", tmp_path / "trace.jsonl")
+    started = time.monotonic()
+
+    with pytest.raises(RecallBudgetExhausted, match="search budget"):
+        search_candidates(
+            ["first", "second"],
+            RecallPolicy(),
+            deadline_at=time.monotonic() + 0.05,
+        )
+
+    assert calls == ["first"]
+    assert time.monotonic() - started < 0.3
+
+
 def test_collect_context_does_not_let_prefetch_displace_direct_search(
     monkeypatch,
 ) -> None:

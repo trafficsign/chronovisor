@@ -1342,10 +1342,20 @@ def search_candidates(
         rows.extend(trace_rows(query, shadow_paths, shadow=True))
         return results, mode, rows
 
-    # Recall rewrites produce up to three independent entrances. Run them
-    # together so the semantic service can embed them as one micro-batch while
-    # preserving query-order weights when the results are merged below.
-    if len(queries) == 1:
+    # Recall rewrites produce up to three independent entrances. Offline
+    # callers may run them together so the semantic service can micro-batch;
+    # deadline-bound hooks keep them on the main thread for hard interruption.
+    if deadline_at is not None:
+        # Keep deadline-bound work on the main thread: executor shutdown would
+        # otherwise wait for a timed-out worker and defeat the absolute budget.
+        try:
+            with recall_wall_clock_deadline(
+                _require_remaining_budget(deadline_at, "search") or 0
+            ):
+                searched = [search_one(query) for query in queries]
+        except RecallWallClockTimeout as exc:
+            raise RecallBudgetExhausted("recall search budget exhausted") from exc
+    elif len(queries) == 1:
         searched = [search_one(queries[0])]
     else:
         with ThreadPoolExecutor(
