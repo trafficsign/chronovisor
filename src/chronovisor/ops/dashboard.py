@@ -3326,6 +3326,30 @@ def _decision_trace_lanes(
         trace_events,
         request_sha256=request_sha256,
     )
+    decision_vote_lanes = {
+        str(role)
+        for role in (
+            (decision or {}).get("vote_roles")
+            or [
+                vote.get("role")
+                for vote in ((decision or {}).get("votes") or [])
+                if isinstance(vote, Mapping)
+            ]
+        )
+        if str(role) in _DECISION_TRACE_ROLES
+    }
+    events = [
+        {
+            **event,
+            "phase": "vote",
+            "overall_key": "quorum",
+        }
+        if event.get("kind") == "session"
+        and event.get("status") == "error"
+        and event.get("lane") in decision_vote_lanes
+        else event
+        for event in events
+    ]
     terminal_phase_by_lane = {
         str(event["lane"]): str(event["phase"])
         for event in events
@@ -3740,6 +3764,15 @@ def _local_consensus_snapshot(
                 }
             )
         elif kind == "decision":
+            row = {
+                **row,
+                "vote_roles": [
+                    str(vote.get("role"))
+                    for vote in (row.get("votes") or [])
+                    if isinstance(vote, Mapping)
+                    and str(vote.get("role")) in _DECISION_TRACE_ROLES
+                ],
+            }
             history.append(
                 {
                     key: row.get(key)
@@ -3767,6 +3800,7 @@ def _local_consensus_snapshot(
                         "conservative_veto_fired",
                         "conservative_veto_bypassed_by_lane_policy",
                         "dissent_effect_class",
+                        "vote_roles",
                     )
                 }
             )

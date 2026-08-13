@@ -1284,6 +1284,84 @@ def test_decision_trace_failed_session_stays_at_last_observed_phase(
     assert failed["label"] == "Session failed"
 
 
+def test_local_consensus_snapshot_keeps_redacted_failed_vote_role(
+    tmp_path: Path, monkeypatch
+) -> None:
+    request = "9" * 64
+    audit_rows = [
+        {
+            "kind": "session",
+            "timestamp": "2026-07-15T12:00:03Z",
+            "request_sha256": request,
+            "role": "local_repair:tie_break",
+            "ok": False,
+            "failure_class": "output_truncated",
+        },
+        {
+            "kind": "decision",
+            "timestamp": "2026-07-15T12:00:04Z",
+            "request_sha256": request,
+            "role": "local_repair",
+            "status": "quarantined",
+            "quarantine_reason": "local_models_did_not_reach_two_vote_quorum",
+            "failure_class": "local_consensus_failed",
+            "vote_count": 3,
+            "valid_votes": 2,
+            "pair_agreement": False,
+            "tie_break_used": True,
+            "votes": [
+                {"role": "primary", "raw_output": "secret"},
+                {"role": "challenger"},
+                {"role": "tie_break"},
+            ],
+        },
+    ]
+    trace_rows = [
+        {
+            "event_id": "tie-validate",
+            "kind": "phase",
+            "timestamp": "2026-07-15T12:00:02Z",
+            "request_sha256": request,
+            "role": "local_repair:tie_break",
+            "phase": "validate",
+            "status": "active",
+        },
+        {
+            "event_id": "tie-failed",
+            "kind": "session",
+            "timestamp": "2026-07-15T12:00:03Z",
+            "request_sha256": request,
+            "role": "local_repair:tie_break",
+            "phase": "vote",
+            "status": "error",
+        },
+    ]
+    monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", tmp_path)
+    monkeypatch.setattr(dashboard, "_local_consensus_activities", lambda: [])
+    monkeypatch.setattr(dashboard, "_read_json_file", lambda _path: {})
+    monkeypatch.setattr(
+        dashboard,
+        "_read_jsonl_file",
+        lambda path, *, limit: audit_rows if path.name == "audit.jsonl" else trace_rows,
+    )
+
+    snapshot = dashboard._local_consensus_snapshot()
+    decision = snapshot["latest_decision"]
+    tie_break = snapshot["decision_trace"]["lanes"][2]
+
+    assert decision["vote_roles"] == ["primary", "challenger", "tie_break"]
+    assert "votes" not in decision
+    assert tie_break["phase"] == "vote"
+    assert [step["status"] for step in tie_break["steps"]] == [
+        "done",
+        "done",
+        "done",
+        "done",
+        "done",
+        "error",
+    ]
+
+
 def test_decision_trace_failed_standalone_session_is_phase_aware_not_ready() -> None:
     request = "4" * 64
     session = {
