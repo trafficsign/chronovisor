@@ -127,15 +127,15 @@ code{background:var(--code-bg);padding:0.1rem 0.35rem;border-radius:3px;font-siz
 <section data-section="実行手順">
 <h2>実行手順</h2>
 <ol class="checklist">
-<li><input type="checkbox"><span><strong>P0-A — baseline固定:</strong> 固定cohortで正常成功、timeout、Field、teacher search、reranker、context renderの件数・p50/p95/p99・top-k・注入pageを保存し、正常系とdegraded系を分けて比較可能にする。</span></li>
-<li><input type="checkbox"><span><strong>P0-B — stage timingの穴を埋める:</strong> 既存Recallログへcleanup、session load、Field、compiler、BM25 build/query、semantic、graph、verify、reranker、context、finalizeの匿名所要時間を追加し、本文・query本文・page本文は記録しない。</span></li>
-<li><input type="checkbox"><span><strong>P1-A — fallbackを直接経路化:</strong> <code>run_deterministic_fallback()</code> から通常の <code>_run_recall_impl()</code> 再実行を外し、既存L1とbuild済みSQLite BM25の直接queryだけでdegraded contextを組み立てる。</span></li>
-<li><input type="checkbox"><span><strong>P1-B — filter/render再利用:</strong> fallback候補にも正常系と同じsensitive/lifecycle filtering、dedupe、whole-block rendererを適用し、authorityと <code>search_mode=bm25-fallback</code> を明示する。</span></li>
-<li><input type="checkbox"><span><strong>P1-C — fallback副作用ゼロ:</strong> fallbackでField、compiler、semantic、graph、reranker、processor、evidence observer、teacher queue、index refresh、diagnostic/durable writeが一度も呼ばれない回帰テストを追加する。</span></li>
-<li><input type="checkbox"><span><strong>P2-A — 重複refresh削除:</strong> teacherの <code>pre_results</code> が既にあるcontext生成では二度目のstore refresh/searchを省き、ContextItem、filter結果、renderer出力が修正前と一致することを固定する。</span></li>
-<li><input type="checkbox"><span><strong>P2-B — authority-firstへ並べ替え:</strong> fused teacherとauthoritative reranker、filter、context確定を先に行い、candidate/shadow Field、compiler、processor、evidence、診断処理は残予算内のpost-authorityへ移す。</span></li>
-<li><input type="checkbox"><span><strong>P2-C — authority保護:</strong> sealed active Field/rerankerでは既存fail-closed semanticsを維持し、candidate/shadowのみskip可能であることをmode別testで固定する。</span></li>
-<li><input type="checkbox"><span><strong>P3 — 精度parity:</strong> baseline cohortを修正前後でpaired replayし、正常完了ケースのcandidate set、teacher top-k、authoritative reranked order、注入contextを100%一致させる。差があれば性能値にかかわらず採用しない。</span></li>
+<li><input type="checkbox" checked><span><strong>P0-A — baseline固定:</strong> 固定cohortで正常成功、timeout、Field、teacher search、reranker、context renderの件数・p50/p95/p99・top-k・注入pageを保存し、正常系とdegraded系を分けて比較可能にする。</span></li>
+<li><input type="checkbox" checked><span><strong>P0-B — stage timingの穴を埋める:</strong> 既存Recallログへcleanup、session load、Field、compiler、BM25 build/query、semantic、graph、verify、reranker、context、finalizeの匿名所要時間を追加し、本文・query本文・page本文は記録しない。</span></li>
+<li><input type="checkbox" checked><span><strong>P1-A — fallbackを直接経路化:</strong> <code>run_deterministic_fallback()</code> から通常の <code>_run_recall_impl()</code> 再実行を外し、既存L1とbuild済みSQLite BM25の直接queryだけでdegraded contextを組み立てる。</span></li>
+<li><input type="checkbox" checked><span><strong>P1-B — filter/render再利用:</strong> fallback候補にも正常系と同じsensitive/lifecycle filtering、dedupe、whole-block rendererを適用し、authorityと <code>search_mode=bm25-fallback</code> を明示する。</span></li>
+<li><input type="checkbox" checked><span><strong>P1-C — fallback副作用ゼロ:</strong> fallbackでField、compiler、semantic、graph、reranker、processor、evidence observer、teacher queue、index refresh、diagnostic/durable writeが一度も呼ばれない回帰テストを追加する。</span></li>
+<li><input type="checkbox" checked><span><strong>P2-A — 重複refresh削除:</strong> teacherの <code>pre_results</code> が既にあるcontext生成では二度目のstore refresh/searchを省き、ContextItem、filter結果、renderer出力が修正前と一致することを固定する。</span></li>
+<li><input type="checkbox" checked><span><strong>P2-B — authority-firstへ並べ替え:</strong> fused teacherとauthoritative reranker、filter、context確定を先に行い、candidate/shadow Field、compiler、processor、evidence、診断処理は残予算内のpost-authorityへ移す。</span></li>
+<li><input type="checkbox" checked><span><strong>P2-C — authority保護:</strong> sealed active Field/rerankerでは既存fail-closed semanticsを維持し、candidate/shadowのみskip可能であることをmode別testで固定する。</span></li>
+<li><input type="checkbox" checked><span><strong>P3 — 精度parity:</strong> baseline cohortを修正前後でpaired replayし、正常完了ケースのcandidate set、teacher top-k、authoritative reranked order、注入contextを100%一致させる。差があれば性能値にかかわらず採用しない。</span></li>
 <li><input type="checkbox"><span><strong>P4 — live canary:</strong> push後、Codexを先行canaryし、最低24時間かつ100 eligible promptsでok/degraded率、outer timeout、p95/p99、注入率、page/context coverage、normal/degraded比率を観測する。</span></li>
 <li><input type="checkbox"><span><strong>P5 — 収束:</strong> Exit Criteriaを満たしたcommitだけをmainへ正本化し、Planのcheckbox、実行ログ、状態、runtime archive commitを同期する。未達の段階だけ独立revertする。</span></li>
 </ol>
@@ -210,6 +210,16 @@ code{background:var(--code-bg);padding:0.1rem 0.35rem;border-radius:3px;font-siz
 <li><time>2026-08-13 15:01</time><span>P0-A完了: 匿名baselineを <code>_handoff/2026-08-13_1446_recall-baseline.json</code> に固定（schema v1、本文/query/page本文は非保存）。tests/test_recall_baseline.pyで再現条件と匿名性を固定。</span></li>
 <li><time>2026-08-13 15:01</time><span>P0-B完了: recall_runtime.pyに stage_timings_ms 計測を追加（prepare/cleanup/session_load/field/compiler/teacher/rewrite/reranker/context/evidence_reconstruction/finalize/scheduler）。pipeline.pyでbm25_build/bm25_query/semantic/graph/verify等の検索stageを計測し、search.pyのlast_search_trace経由でrecallログへ統合。recall-log recordとrecall_log_snapshotにstage_timings_msを追加。authority/候補/順位/filter/context出力は不変更。</span></li>
 <li><time>2026-08-13 18:20</time><span>再監査でP0-A/Bを未完へ戻した。P0-Aはpaired replay用のcase key・candidate/top-k/rerank/context証跡が不足。P0-Bはouter telemetryの浅いmergeが検索stage timingを上書きし、複数queryも最終traceしか保持しないため、本番hook経路の証明になっていなかった。チェックは修正と回帰証拠が揃うまで付けない。</span></li>
+<li><time>2026-08-13 19:59</time><span>P0-A再完了: 修正前 <code>b0484f37bfdb45f543071452d097448dab2385b4</code> の正常成功100件を、入力・retrieval snapshot、source tree、候補集合、teacher top-30、authoritative rerank、sensitive判定、全公開ContextItem field、render receipt付きで匿名固定。baseline SHA-256は <code>e8adaf099246832af68497ca7c2557942c16e7e6ebad21e03f87d468664d0f3a</code>。</span></li>
+<li><time>2026-08-13 19:59</time><span>P0-B再完了: nested telemetry merge、複数query集約、pipeline retry加算、例外途中stageとfinalize完了後の記録を本番hook境界まで固定。本文・query・page本文を保存せず、dispatcherが出力flush後に全statusをexactly once記録する回帰を追加。</span></li>
+<li><time>2026-08-13 19:59</time><span>P1-A完了: fallbackから通常Recall再入場を除去し、main threadだけで既存L1とread-only SQLite BM25を直接参照。予算はrequested/reserve/absolute deadlineと600msの最小値へhard capし、non-main threadは即時no-opへ収束。</span></li>
+<li><time>2026-08-13 19:59</time><span>P1-B完了: 正常系と共有するsensitive/lifecycle filter、dedupe、whole-block rendererを適用し、degraded authorityと <code>search_mode=bm25-fallback</code> を明示。cache欠落・破損・schema不一致はbuildせずL1-onlyへfail-open。</span></li>
+<li><time>2026-08-13 19:59</time><span>P1-C完了: Field/compiler/semantic/graph/reranker/processor/evidence/teacher queue/index refresh/durable writeを一括trapし、fallback本体の副作用ゼロを回帰固定。hook logだけは出力flush後にcallerが1回記録する。</span></li>
+<li><time>2026-08-13 19:59</time><span>P2-A完了: <code>pre_results</code> があるcontext生成ではstartup、store取得、refresh、searchを再実行せず、ContextItem全公開fieldとrender出力の一致を回帰固定。</span></li>
+<li><time>2026-08-13 19:59</time><span>P2-B完了: teacher、authoritative reranker、filter、evidence再構成、context確定を先行し、非権威Field/compiler/processor/typed graph/診断をpost-authorityの残予算内へ移動。timeoutでも確定contextを保持する。</span></li>
+<li><time>2026-08-13 19:59</time><span>P2-C完了: Field off/shadow/candidate/active × reranker off/shadow/canary/on の16 mode matrixを固定。active Fieldとcanary/on rerankerのunavailable/error/fail-openは正常teacher順を返さずfail-closedからdegraded fallbackへ送る。</span></li>
+<li><time>2026-08-13 19:59</time><span>P3完了: 修正前100件と新実装 <code>129a981c6bef77eaa12c0a823cf3f684116e361b</code> 100件を同一input snapshot <code>302710882f7e66d3de7ec998b76701598af0cd8ef2956edce51d600c8b6ad369</code> でpaired replay。全receiptが完全一致しcompare終了コード0（candidate artifact SHA-256 <code>3bdc4e5c458a3e38cdb8a753187bab8a0efb866b2ca512dddf95b03593d21b5a</code>）。candidate total latencyはp50 741ms / p95 1103ms / p99 1278ms。</span></li>
+<li><time>2026-08-13 19:59</time><span>独立reviewでproduction blocker 0。主担当再検証は対象223 passed、隔離Recall全体454 passed（既存Pydantic warning 1件のみ）、Ruff、py_compile、git diff --check合格。P4/P5はpush後24時間かつ100 eligible promptsの実測条件があるため未チェックのまま継続する。</span></li>
 </ol>
 </section>
 
