@@ -1027,13 +1027,40 @@ class TestReconcileLinks:
                 source_path="memory/source.md",
             )
 
-    def test_missing_target_is_rejected(self) -> None:
-        with pytest.raises(IngestApplyError, match="missing Markdown link"):
-            _reconcile_links(
-                "See [Ghost](ghost.md).",
-                self.allowed,
-                source_path="memory/source.md",
-            )
+    def test_missing_target_is_unwrapped(self) -> None:
+        out, stats = _reconcile_links(
+            "See [Ghost](ghost.md).",
+            self.allowed,
+            source_path="memory/source.md",
+        )
+        assert out == "See Ghost."
+        assert stats == {"resolved": 0, "rewritten": 0, "unwrapped": 1}
+
+    def test_valid_external_and_missing_targets_are_reconciled_independently(
+        self,
+    ) -> None:
+        text = (
+            "See [Foo](foo.md), [Ghost](ghost.md), and "
+            "[external](https://example.com)."
+        )
+        out, stats = _reconcile_links(
+            text,
+            self.allowed,
+            source_path="memory/source.md",
+        )
+        assert out == (
+            "See [Foo](foo.md), Ghost, and [external](https://example.com)."
+        )
+        assert stats == {"resolved": 1, "rewritten": 0, "unwrapped": 1}
+
+    def test_missing_target_uses_stem_for_empty_label(self) -> None:
+        out, stats = _reconcile_links(
+            "See [](nested/ghost.md).",
+            self.allowed,
+            source_path="memory/source.md",
+        )
+        assert out == "See ghost."
+        assert stats["unwrapped"] == 1
 
     @pytest.mark.parametrize("target", ["../../escape.md", "/system/private.md"])
     def test_escape_and_system_crosslink_are_rejected(self, target: str) -> None:
@@ -1067,6 +1094,30 @@ class TestReconcileLinks:
         out, _s = _reconcile_links(text, self.allowed, source_path="memory/source.md")
         assert "[[ghost]]" in out
         assert "[Foo](foo.md)" in out
+
+    def test_missing_links_in_frontmatter_and_code_are_untouched(self) -> None:
+        text = (
+            "---\ntitle: '[Ghost](ghost.md)'\nstatus: stable\ntype: knowledge\n---\n"
+            "```markdown\n[Ghost](ghost.md)\n```\n"
+            "Plain [Ghost](ghost.md)."
+        )
+        out, stats = _reconcile_links(
+            text,
+            self.allowed,
+            source_path="memory/source.md",
+        )
+        assert "title: '[Ghost](ghost.md)'" in out
+        assert "```markdown\n[Ghost](ghost.md)\n```" in out
+        assert "Plain Ghost." in out
+        assert stats["unwrapped"] == 1
+
+    def test_invalid_frontmatter_still_fails_closed(self) -> None:
+        with pytest.raises(IngestApplyError, match="frontmatter is invalid"):
+            _reconcile_links(
+                "---\ntitle: broken\n[Ghost](ghost.md)",
+                self.allowed,
+                source_path="memory/source.md",
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -5097,6 +5148,58 @@ class TestRunIngestPartialFailure:
         )
         assert review_calls == []
 
+    def test_missing_link_is_unwrapped_before_single_review_and_write(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from chronovisor.core import jobs
+        from chronovisor.ingest import ingest
+
+        plan = [
+            {
+                "type": "create",
+                "filename": "memory/link-unwrapped.md",
+                "title": "Link unwrapped",
+            }
+        ]
+        generation_calls = 0
+        review_calls = 0
+
+        def generate(op: dict, _raw: str, **_kwargs):
+            nonlocal generation_calls
+            generation_calls += 1
+            return {
+                "type": "create",
+                "filename": op["filename"],
+                "content": (
+                    "---\ntitle: Link unwrapped\nupdated: 2026-08-13\n"
+                    "status: stable\ntype: knowledge\n---\n"
+                    "See [Missing page](missing.md)."
+                ),
+            }
+
+        def reviewer(_proposal: dict) -> dict:
+            nonlocal review_calls
+            review_calls += 1
+            return {
+                "decision": "apply_available",
+                "summary": "The reconciled page is canonical.",
+                "failed_operations_disposition": "none",
+            }
+
+        monkeypatch.setattr(ingest, "_triage", lambda *_args, **_kwargs: plan)
+        monkeypatch.setattr(ingest, "_generate_one", generate)
+        job = jobs.job_store.create(processor="ollama")
+
+        ingest.run_ingest("grounded raw", job.job_id, frontier_reviewer=reviewer)
+
+        target = isolated_wiki / "pages" / "memory" / "link-unwrapped.md"
+        assert jobs.job_store.get(job.job_id).status == jobs.JobStatus.COMPLETED
+        assert generation_calls == 1
+        assert review_calls == 1
+        written = target.read_text(encoding="utf-8")
+        assert "See Missing page." in written
+        assert "missing.md" not in written
+
     def test_missing_link_regenerates_before_review_and_write(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -5146,8 +5249,18 @@ class TestRunIngestPartialFailure:
                 "failed_operations_disposition": "none",
             }
 
+        reconcile = ingest._reconcile_links
+
+        def require_regeneration(content: str, *args, **kwargs):
+            if "missing.md" in content:
+                raise ingest.IngestApplyError(
+                    "generated page links are invalid: missing Markdown link target"
+                )
+            return reconcile(content, *args, **kwargs)
+
         monkeypatch.setattr(ingest, "_triage", triage)
         monkeypatch.setattr(ingest, "_generate_one", generate)
+        monkeypatch.setattr(ingest, "_reconcile_links", require_regeneration)
         job = jobs.job_store.create(processor="ollama")
 
         ingest.run_ingest("grounded raw", job.job_id, frontier_reviewer=reviewer)
@@ -5192,8 +5305,14 @@ class TestRunIngestPartialFailure:
                 ),
             }
 
+        def reject_missing_link(*_args, **_kwargs):
+            raise ingest.IngestApplyError(
+                "generated page links are invalid: missing Markdown link target"
+            )
+
         monkeypatch.setattr(ingest, "_triage", lambda *_args, **_kwargs: plan)
         monkeypatch.setattr(ingest, "_generate_one", generate)
+        monkeypatch.setattr(ingest, "_reconcile_links", reject_missing_link)
         job = jobs.job_store.create(processor="ollama")
 
         ingest.run_ingest(
@@ -5256,8 +5375,18 @@ class TestRunIngestPartialFailure:
                 "failed_operations_disposition": "none",
             }
 
+        reconcile = ingest._reconcile_links
+
+        def require_regeneration(content: str, *args, **kwargs):
+            if "missing.md" in content:
+                raise ingest.IngestApplyError(
+                    "generated page links are invalid: missing Markdown link target"
+                )
+            return reconcile(content, *args, **kwargs)
+
         monkeypatch.setattr(ingest, "_triage", lambda *_args, **_kwargs: plan)
         monkeypatch.setattr(ingest, "_generate_one", generate)
+        monkeypatch.setattr(ingest, "_reconcile_links", require_regeneration)
         job = jobs.job_store.create(processor="ollama")
 
         ingest.run_ingest("grounded raw", job.job_id, frontier_reviewer=reviewer)

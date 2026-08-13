@@ -20,8 +20,10 @@ from chronovisor.core.canonical_document import (
     CanonicalDocument,
     CanonicalDocumentError,
     Namespace,
+    ResolvedMarkdownLink,
     parse_document,
     resolve_internal_markdown_links,
+    rewrite_internal_markdown_links,
     serialize_document,
     validate_canonical_document,
 )
@@ -2282,9 +2284,10 @@ def _reconcile_links(
     *,
     source_path: str,
 ) -> tuple[str, dict[str, int]]:
-    """Validate canonical generated links without rewriting reviewed bytes."""
+    """Validate links and unwrap only ordinary missing page targets."""
 
     data = content.encode("utf-8")
+    wrapped = False
     try:
         parse_document(data)
     except CanonicalDocumentError as exc:
@@ -2292,6 +2295,7 @@ def _reconcile_links(
             raise IngestApplyError(
                 f"generated page frontmatter is invalid: {exc}"
             ) from exc
+        wrapped = True
         data = serialize_document(
             CanonicalDocument(
                 metadata={"status": "stable", "type": "knowledge"},
@@ -2299,6 +2303,30 @@ def _reconcile_links(
             )
         )
     try:
+        def unwrap_missing(
+            link: ResolvedMarkdownLink,
+            label: str,
+        ) -> str | None:
+            if (link.namespace, link.path) in allowed_targets:
+                return None
+            visible = label.replace(r"\[", "[").replace(r"\]", "]")
+            return visible or Path(link.path).stem
+
+        reconciled, unwrapped = rewrite_internal_markdown_links(
+            content,
+            source_namespace="pages",
+            source_path=source_path,
+            rewrite=unwrap_missing,
+        )
+        if wrapped:
+            data = serialize_document(
+                CanonicalDocument(
+                    metadata={"status": "stable", "type": "knowledge"},
+                    body=reconciled.encode("utf-8"),
+                )
+            )
+        else:
+            data = reconciled.encode("utf-8")
         document = validate_canonical_document(
             data,
             namespace="pages",
@@ -2313,7 +2341,11 @@ def _reconcile_links(
         )
     except CanonicalDocumentError as exc:
         raise IngestApplyError(f"generated page links are invalid: {exc}") from exc
-    return content, {"resolved": len(resolved), "rewritten": 0, "unwrapped": 0}
+    return reconciled, {
+        "resolved": len(resolved),
+        "rewritten": 0,
+        "unwrapped": unwrapped,
+    }
 
 
 class IngestApplyError(Exception):
