@@ -4818,8 +4818,6 @@ def _model_status_materialization_fingerprint(ollama: dict[str, Any]) -> str:
 def build_fast_snapshot() -> dict[str, Any]:
     """Return the live status shell without scanning Raw or audit history."""
 
-    from chronovisor.recall.librarian_status import build_librarian_status
-
     status = runtime_status.read_status()
     if not isinstance(status, dict):
         status = {}
@@ -4841,18 +4839,7 @@ def build_fast_snapshot() -> dict[str, Any]:
         "typed_graph": _typed_graph_dashboard_snapshot(),
         "save_history": {},
         "knowledge_mix": {},
-        "librarian": _safe_snapshot_component(
-            "librarian",
-            lambda: build_librarian_status(CHRONOVISOR_ROOT),
-            {
-                "state": "BLOCKED",
-                "detail": "librarian status unavailable",
-                "progress": {},
-                "queue": {},
-                "flow": {},
-                "recent_receipts": [],
-            },
-        ),
+        "librarian": {},
         "health": {},
         "_dashboard": {"detail_state": "loading"},
     }

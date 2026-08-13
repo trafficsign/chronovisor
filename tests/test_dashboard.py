@@ -5076,6 +5076,8 @@ def test_cached_snapshot_serves_stale_while_refreshing_in_background(
 def test_fast_snapshot_reads_status_without_building_archive_components(
     monkeypatch,
 ) -> None:
+    from chronovisor.recall import librarian_status
+
     monkeypatch.setattr(
         dashboard,
         "init_chronovisor",
@@ -5099,6 +5101,13 @@ def test_fast_snapshot_reads_status_without_building_archive_components(
             AssertionError("fast snapshot must not scan save history")
         ),
     )
+    monkeypatch.setattr(
+        librarian_status,
+        "build_librarian_status",
+        lambda *_args, **_kwargs: pytest.fail(
+            "fast snapshot must not scan librarian state"
+        ),
+    )
 
     snapshot = dashboard.build_fast_snapshot()
 
@@ -5106,6 +5115,7 @@ def test_fast_snapshot_reads_status_without_building_archive_components(
     assert snapshot["events"] == [{"kind": "event"}]
     assert snapshot["metrics"] == [{"kind": "metric"}]
     assert snapshot["save_history"] == {}
+    assert snapshot["librarian"] == {}
     assert snapshot["_dashboard"] == {"detail_state": "loading"}
 
 
