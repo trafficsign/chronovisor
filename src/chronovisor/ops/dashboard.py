@@ -4818,7 +4818,6 @@ def _model_status_materialization_fingerprint(ollama: dict[str, Any]) -> str:
 def build_fast_snapshot() -> dict[str, Any]:
     """Return the live status shell without scanning Raw or audit history."""
 
-    init_chronovisor()
     from chronovisor.recall.librarian_status import build_librarian_status
 
     status = runtime_status.read_status()

@@ -5076,7 +5076,11 @@ def test_cached_snapshot_serves_stale_while_refreshing_in_background(
 def test_fast_snapshot_reads_status_without_building_archive_components(
     monkeypatch,
 ) -> None:
-    monkeypatch.setattr(dashboard, "init_chronovisor", lambda: None)
+    monkeypatch.setattr(
+        dashboard,
+        "init_chronovisor",
+        lambda: pytest.fail("fast snapshot must not initialize the store"),
+    )
     monkeypatch.setattr(
         runtime_status,
         "read_status",

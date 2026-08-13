@@ -22,7 +22,11 @@ from chronovisor.core.canonical_document import (
     parse_document,
     resolve_internal_markdown_links,
 )
-from chronovisor.core.durable_state import DurableStateError, read_sealed_json
+from chronovisor.core.durable_state import (
+    DurableStateError,
+    read_sealed_json,
+    write_sealed_json,
+)
 from chronovisor.core.index_store import (
     canonical_document_paths,
 )
@@ -37,6 +41,7 @@ from chronovisor.ops.cortex_stream import (
 
 _GRAPH_CACHE_LOCK = threading.Lock()
 _GRAPH_CACHE: dict[str, dict[str, Any]] = {}
+_GRAPH_CACHE_SCHEMA = "chronovisor.cortex.graph-cache.v1"
 _CORTEX_EVENT_SCHEMA = "chronovisor.cortex.event.v2"
 _CORTEX_PAGE_ID_MAX_LENGTH = 240  # Keep aligned with CortexTransportPolicy.
 _CORTEX_EVENT_BATCH_LIMIT = 32
@@ -775,31 +780,158 @@ def build_cortex_graph(
     """Build the browser-safe Wiki graph without exposing page bodies."""
 
     resolved_root = root.expanduser().resolve()
-    sources = _page_sources(resolved_root)
-    fingerprint = _source_fingerprint(resolved_root, sources, commit=commit)
     cache_key = str(resolved_root)
     if use_cache:
         with _GRAPH_CACHE_LOCK:
             cached = _GRAPH_CACHE.get(cache_key)
-            if cached and cached.get("fingerprint") == fingerprint:
-                cached_graph = cached.get("graph")
-                if isinstance(cached_graph, dict):
-                    return cached_graph
-
-    graph = _build_graph(
-        resolved_root,
-        sources,
-        commit=commit,
-        generated=generated
-        or datetime.now().astimezone().isoformat(timespec="seconds"),
-    )
-    if use_cache:
+        if cached is None:
+            durable = _read_graph_cache(resolved_root)
+            if durable is not None:
+                with _GRAPH_CACHE_LOCK:
+                    cached = _GRAPH_CACHE.setdefault(cache_key, durable)
         with _GRAPH_CACHE_LOCK:
-            _GRAPH_CACHE[cache_key] = {
+            cached = _GRAPH_CACHE.get(cache_key)
+            cached_graph = cached.get("graph") if cached else None
+            if isinstance(cached_graph, dict):
+                refresh = not cached.get("refreshing", False)
+                cached["refreshing"] = True
+            else:
+                refresh = False
+        if isinstance(cached_graph, dict):
+            if refresh:
+                try:
+                    threading.Thread(
+                        target=_refresh_cortex_graph,
+                        args=(resolved_root, cache_key, cached, commit, generated),
+                        daemon=True,
+                    ).start()
+                except RuntimeError:
+                    with _GRAPH_CACHE_LOCK:
+                        if _GRAPH_CACHE.get(cache_key) is cached:
+                            cached["refreshing"] = False
+            return cached_graph
+
+    generated_at = generated or datetime.now().astimezone().isoformat(
+        timespec="seconds"
+    )
+    if not use_cache:
+        return _build_graph(
+            resolved_root,
+            _page_sources(resolved_root),
+            commit=commit,
+            generated=generated_at,
+        )
+
+    for _attempt in range(2):
+        sources = _page_sources(resolved_root)
+        fingerprint = _source_fingerprint(resolved_root, sources, commit=commit)
+        graph = _build_graph(
+            resolved_root,
+            sources,
+            commit=commit,
+            generated=generated_at,
+        )
+        post_sources = _page_sources(resolved_root)
+        post_fingerprint = _source_fingerprint(
+            resolved_root, post_sources, commit=commit
+        )
+        if post_fingerprint == fingerprint:
+            break
+    else:
+        return graph
+
+    with _GRAPH_CACHE_LOCK:
+        _GRAPH_CACHE[cache_key] = {
+            "fingerprint": fingerprint,
+            "graph": graph,
+            "refreshing": False,
+        }
+    _write_graph_cache(resolved_root, fingerprint, graph)
+    return graph
+
+
+def _graph_cache_path(root: Path) -> Path:
+    return root / "runtime" / "dashboard-materialized" / "cortex-graph.json"
+
+
+def _read_graph_cache(root: Path) -> dict[str, Any] | None:
+    payload = _safe_sealed(_graph_cache_path(root))
+    fingerprint = payload.get("fingerprint")
+    graph = payload.get("graph")
+    if (
+        payload.get("schema") != _GRAPH_CACHE_SCHEMA
+        or not isinstance(fingerprint, str)
+        or re.fullmatch(r"[0-9a-f]{64}", fingerprint) is None
+        or not isinstance(graph, dict)
+    ):
+        return None
+    return {"fingerprint": fingerprint, "graph": graph, "refreshing": False}
+
+
+def _write_graph_cache(
+    root: Path, fingerprint: str, graph: dict[str, Any]
+) -> None:
+    try:
+        write_sealed_json(
+            _graph_cache_path(root),
+            {
+                "schema": _GRAPH_CACHE_SCHEMA,
                 "fingerprint": fingerprint,
                 "graph": graph,
-            }
-    return graph
+            },
+            backup=False,
+        )
+    except (DurableStateError, OSError, TypeError, ValueError):
+        pass
+
+
+def _refresh_cortex_graph(
+    resolved_root: Path,
+    cache_key: str,
+    cached: dict[str, Any],
+    commit: str,
+    generated: str | None,
+) -> None:
+    try:
+        generated_at = generated or datetime.now().astimezone().isoformat(
+            timespec="seconds"
+        )
+        for _attempt in range(2):
+            sources = _page_sources(resolved_root)
+            fingerprint = _source_fingerprint(
+                resolved_root, sources, commit=commit
+            )
+            with _GRAPH_CACHE_LOCK:
+                if (
+                    _GRAPH_CACHE.get(cache_key) is not cached
+                    or cached.get("fingerprint") == fingerprint
+                ):
+                    return
+            graph = _build_graph(
+                resolved_root,
+                sources,
+                commit=commit,
+                generated=generated_at,
+            )
+            post_sources = _page_sources(resolved_root)
+            post_fingerprint = _source_fingerprint(
+                resolved_root, post_sources, commit=commit
+            )
+            if post_fingerprint == fingerprint:
+                break
+        else:
+            return
+        with _GRAPH_CACHE_LOCK:
+            if _GRAPH_CACHE.get(cache_key) is cached:
+                cached["fingerprint"] = fingerprint
+                cached["graph"] = graph
+        _write_graph_cache(resolved_root, fingerprint, graph)
+    except Exception:
+        pass
+    finally:
+        with _GRAPH_CACHE_LOCK:
+            if _GRAPH_CACHE.get(cache_key) is cached:
+                cached["refreshing"] = False
 
 
 def _read_sealed_field_snapshot(path: Path) -> dict[str, Any]:

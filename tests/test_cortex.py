@@ -231,8 +231,9 @@ def test_build_cortex_graph_skips_symlinked_namespace_roots(tmp_path: Path) -> N
     assert "Inside root secret" not in encoded
 
 
-def test_build_cortex_graph_cache_invalidates_when_a_page_changes(
+def test_build_cortex_graph_cache_revalidates_stale_graph_single_flight(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root = tmp_path / "chronovisor"
     page = root / "pages" / "page-a.md"
@@ -240,12 +241,174 @@ def test_build_cortex_graph_cache_invalidates_when_a_page_changes(
 
     first = cortex.build_cortex_graph(root, use_cache=True)
     _write_page(page, title="Alpha", body="First.\nSecond.")
-    stat = page.stat()
-    os.utime(page, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1))
-    second = cortex.build_cortex_graph(root, use_cache=True)
 
-    assert first is not second
-    assert second["nodes"][0]["l"] > first["nodes"][0]["l"]
+    source_scans: list[Path] = []
+    page_sources = cortex._page_sources
+
+    def tracked_page_sources(value: Path) -> list[tuple[Path, str]]:
+        source_scans.append(value)
+        return page_sources(value)
+
+    pending: list[tuple[object, tuple[object, ...]]] = []
+
+    class DeferredThread:
+        def __init__(
+            self,
+            *,
+            target: object,
+            args: tuple[object, ...],
+            daemon: bool,
+        ) -> None:
+            assert daemon is True
+            self.target = target
+            self.args = args
+
+        def start(self) -> None:
+            pending.append((self.target, self.args))
+
+    class DeferredThreading:
+        Thread = DeferredThread
+
+    monkeypatch.setattr(cortex, "_page_sources", tracked_page_sources)
+    monkeypatch.setattr(cortex, "threading", DeferredThreading)
+
+    second = cortex.build_cortex_graph(root, use_cache=True)
+    third = cortex.build_cortex_graph(root, use_cache=True)
+
+    assert second is first
+    assert third is first
+    assert source_scans == []
+    assert len(pending) == 1
+
+    refresh, args = pending.pop()
+    assert callable(refresh)
+    refresh(*args)
+
+    cache_key = str(root.resolve())
+    with cortex._GRAPH_CACHE_LOCK:
+        refreshed = cortex._GRAPH_CACHE[cache_key]["graph"]
+        assert cortex._GRAPH_CACHE[cache_key]["refreshing"] is False
+
+    assert refreshed is not first
+    assert refreshed["nodes"][0]["l"] > first["nodes"][0]["l"]
+    assert source_scans == [root.resolve(), root.resolve()]
+
+    _write_page(page, title="Alpha", body="First.\nSecond.\nThird.")
+    assert cortex.build_cortex_graph(root, use_cache=True) is refreshed
+    assert len(pending) == 1
+
+    build_graph = cortex._build_graph
+    source_changed = False
+
+    def unstable_build(*args, **kwargs):
+        nonlocal source_changed
+        graph = build_graph(*args, **kwargs)
+        if not source_changed:
+            source_changed = True
+            _write_page(
+                page,
+                title="Alpha",
+                body="First.\nSecond.\nThird.\nFourth.",
+            )
+        return graph
+
+    monkeypatch.setattr(cortex, "_build_graph", unstable_build)
+    refresh, args = pending.pop()
+    assert callable(refresh)
+    refresh(*args)
+
+    with cortex._GRAPH_CACHE_LOCK:
+        rebuilt = cortex._GRAPH_CACHE[cache_key]["graph"]
+        assert cortex._GRAPH_CACHE[cache_key]["refreshing"] is False
+
+    assert rebuilt is not refreshed
+    assert rebuilt["nodes"][0]["l"] > refreshed["nodes"][0]["l"]
+
+    _write_page(
+        page,
+        title="Alpha",
+        body="First.\nSecond.\nThird.\nFourth.\nFifth.",
+    )
+    assert cortex.build_cortex_graph(root, use_cache=True) is rebuilt
+    assert len(pending) == 1
+
+    def fail_build(*_args: object, **_kwargs: object) -> dict[str, object]:
+        raise RuntimeError("refresh failed")
+
+    monkeypatch.setattr(cortex, "_build_graph", fail_build)
+    refresh, args = pending.pop()
+    assert callable(refresh)
+    refresh(*args)
+
+    with cortex._GRAPH_CACHE_LOCK:
+        assert cortex._GRAPH_CACHE[cache_key]["graph"] is rebuilt
+        assert cortex._GRAPH_CACHE[cache_key]["refreshing"] is False
+
+
+def test_build_cortex_graph_loads_sealed_cache_and_rejects_tamper(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "chronovisor"
+    page = root / "pages" / "page-a.md"
+    _write_page(page, title="Alpha", body="First.")
+
+    first = cortex.build_cortex_graph(root, use_cache=True)
+    cache_key = str(root.resolve())
+    cache_path = cortex._graph_cache_path(root.resolve())
+    assert cache_path.is_file()
+
+    with cortex._GRAPH_CACHE_LOCK:
+        cortex._GRAPH_CACHE.pop(cache_key)
+    _write_page(page, title="Alpha", body="First.\nSecond.")
+
+    pending: list[tuple[object, tuple[object, ...]]] = []
+
+    class DeferredThread:
+        def __init__(
+            self,
+            *,
+            target: object,
+            args: tuple[object, ...],
+            daemon: bool,
+        ) -> None:
+            assert daemon is True
+            self.target = target
+            self.args = args
+
+        def start(self) -> None:
+            pending.append((self.target, self.args))
+
+    class DeferredThreading:
+        Thread = DeferredThread
+
+    page_sources = cortex._page_sources
+
+    def unexpected_source_scan(_root: Path) -> list[tuple[Path, str]]:
+        pytest.fail("durable cache load performed a synchronous source scan")
+
+    monkeypatch.setattr(cortex, "threading", DeferredThreading)
+    monkeypatch.setattr(cortex, "_page_sources", unexpected_source_scan)
+
+    durable = cortex.build_cortex_graph(root, use_cache=True)
+    assert durable == first
+    assert durable is not first
+    assert len(pending) == 1
+
+    pending.clear()
+    with cortex._GRAPH_CACHE_LOCK:
+        cortex._GRAPH_CACHE.pop(cache_key)
+    payload = json.loads(cache_path.read_text(encoding="utf-8"))
+    payload["graph"]["nodes"][0]["title"] = "Tampered"
+    cache_path.write_text(json.dumps(payload), encoding="utf-8")
+    assert cortex._read_graph_cache(root.resolve()) is None
+
+    monkeypatch.setattr(cortex, "_page_sources", page_sources)
+    rebuilt = cortex.build_cortex_graph(root, use_cache=True)
+
+    assert rebuilt["nodes"][0]["title"] == "Alpha"
+    assert rebuilt["nodes"][0]["l"] > first["nodes"][0]["l"]
+    assert pending == []
 
 
 def test_cortex_projects_entity_consensus_votes_without_mentions(
