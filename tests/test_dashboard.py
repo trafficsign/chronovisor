@@ -4872,7 +4872,7 @@ def test_dashboard_cli_reports_short_lan_password_without_traceback_or_secret(
 ) -> None:
     credentials_file = tmp_path / "dashboard-lan-credentials.json"
     prompts: list[str] = []
-    secret = "too-short"
+    secret = "short7"
     monkeypatch.setattr(
         dashboard,
         "load_dashboard_lan_config",
@@ -4889,8 +4889,8 @@ def test_dashboard_cli_reports_short_lan_password_without_traceback_or_secret(
 
     captured = capsys.readouterr()
     assert result.value.code == 2
-    assert "minimum 16 characters" in prompts[0]
-    assert "at least 16 characters" in captured.err
+    assert "minimum 8 characters" in prompts[0]
+    assert "at least 8 characters" in captured.err
     assert "Traceback" not in captured.err
     assert secret not in captured.err
     assert not credentials_file.exists()
