@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>Chronovisor Recall L2 Timeout Hardening Plan</title>
+<style>
+:root{
+  --fg:#1a1a1a; --muted:#666; --bg:#fafaf7; --accent:#2c5aa0;
+  --done:#888; --warn:#c0392b; --ok:#2e7d32; --rule:#e0e0d8;
+  --code-bg:#eee;
+}
+*{box-sizing:border-box}
+body{
+  font-family:-apple-system,'Hiragino Kaku Gothic ProN','Yu Gothic',sans-serif;
+  color:var(--fg); background:var(--bg);
+  max-width:880px; margin:2rem auto; padding:0 1.5rem;
+  line-height:1.7; font-size:15px;
+}
+header{
+  border-bottom:2px solid var(--rule); padding-bottom:1rem; margin-bottom:1.5rem;
+  position:sticky; top:0; background:var(--bg); z-index:10;
+}
+h1{font-size:1.6rem;margin:0 0 0.5rem 0}
+h2{font-size:1.15rem;margin:1.75rem 0 0.5rem 0;padding-bottom:0.25rem;border-bottom:1px solid var(--rule)}
+.meta-bar{display:flex;gap:1rem;font-size:0.85rem;color:var(--muted);flex-wrap:wrap;align-items:center}
+.meta-bar code{background:transparent;color:var(--muted)}
+.badge{
+  display:inline-block;padding:0.15rem 0.7rem;border-radius:1rem;
+  background:var(--accent);color:#fff;font-weight:600;font-size:0.8rem;
+  letter-spacing:0.02em;
+}
+.badge[data-state="ready"]{background:#16a085}
+.badge[data-state="running"]{background:#e67e22}
+.badge[data-state="done"]{background:var(--ok)}
+.badge[data-state="blocked"]{background:var(--warn)}
+section{margin:0 0 0.5rem 0}
+ul,ol{padding-left:1.5rem;margin:0.5rem 0}
+li{margin:0.25rem 0}
+ol.checklist{list-style:none;padding-left:0}
+ol.checklist li{display:flex;align-items:flex-start;gap:0.6rem;padding:0.15rem 0}
+ol.checklist input[type=checkbox]{margin-top:0.4rem;flex-shrink:0}
+ol.checklist input[type=checkbox]:checked + span{color:var(--done);text-decoration:line-through}
+section.rules{background:#f3f1eb;padding:0.5rem 1rem;border-radius:6px;font-size:0.9rem;border-left:3px solid var(--accent)}
+section.rules h2{border:none;margin-top:0.5rem}
+section.blockers ul{color:var(--warn)}
+ol.log{list-style:none;padding-left:0;font-family:'SF Mono',Menlo,monospace;font-size:0.85rem}
+ol.log li{padding:0.3rem 0;border-bottom:1px dashed var(--rule);display:flex;gap:0.75rem}
+ol.log time{color:var(--muted);flex-shrink:0;min-width:9.5rem}
+code{background:var(--code-bg);padding:0.1rem 0.35rem;border-radius:3px;font-size:0.9em;font-family:'SF Mono',Menlo,monospace}
+@media print{
+  body{font-size:11pt;max-width:none;margin:0;padding:1rem}
+  header{position:static}
+}
+</style>
+</head>
+<body>
+<script type="application/json" id="plan-meta">
+{"task_id":"plan_39f5e0ed0bf5494a823b82bc219c0002","created_at":"2026-08-13T11:12:22+09:00","状態":"ready","slug":"recall-l2-timeout-hardening"}
+</script>
+
+<header>
+<h1>Plan: <span id="plan-title">Chronovisor Recall L2 Timeout Hardening</span></h1>
+<div class="meta-bar">
+<span class="badge" data-bind="状態" data-state="ready">ready</span>
+<span><code data-bind="task_id">plan_39f5e0ed0bf5494a823b82bc219c0002</code></span>
+<span data-bind="created_at">2026-08-13T11:12:22+09:00</span>
+</div>
+</header>
+
+<section data-section="目的">
+<h2>目的</h2>
+<ul>
+<li>L2 Automatic Recall の <strong>4秒契約を維持</strong>したまま、外側SIGALRMによる全結果破棄を止め、期限前に取得済み候補または決定的fallbackを返す。</li>
+<li>同じ絶対deadlineをscheduler待機、検索、context構築、shadow、finalizeまで伝播し、どの段階が予算を消費したか既存Recallログで判定可能にする。</li>
+<li>最小の共有経路修正と回帰テストでhost共通コードを一度に直す。live acceptanceは実hookを確認できたhostだけを検証済みとする。</li>
+</ul>
+</section>
+
+<section data-section="調査結果">
+<h2>調査結果（2026-08-13）</h2>
+<ul>
+<li>設定は <code>total_timeout_ms=4000</code>、dispatcher headroomは250ms、engine実効予算は3750ms。ところが外側hard timerにも誤って3750msを渡しており、文書契約の「outer 4000 / engine 3750 / cleanup等250」と不一致。</li>
+<li><code>run_recall()</code> は <code>foreground_lane</code> 待機後に内部時計を開始するため、最大250msのpreemption待機と同期I/Oをengine予算に含めない。fallbackも同じlaneへ再入場し、診断I/Oを重複させる。</li>
+<li>schedulerの <code>sync_enter</code>/<code>sync_exit</code> は診断ログなのにfile fsyncとdirectory fsyncを同期実行する。終了ログ中のhard timeoutで完成済みresultまで破棄し得る。</li>
+<li><code>collect_context</code> は入口でしか残予算を確認せず、store refresh、page summary/excerpt、prefetchの各I/O境界では確認しない。複数queryも <code>ThreadPoolExecutor.map</code> の全完了を待つ。</li>
+<li>非権威のprocessor/field/compiler/evidence shadowと診断traceが同期経路に残り、finalize用headroomを侵食し得る。</li>
+<li>Recallログ13,434件中timeout 964件（7.18%）。直近7日は580/1,067（54.36%）、直近24時間は35/52（67.31%）。直近7日の成功p50/p95/p99/maxは1537/3014/3287/3321ms。</li>
+<li>timeoutの大半は <code>stage=decision</code> / <code>synchronous recall failed open</code> だけで、scheduler・stage別時間を失っている。データ増加、CPU、I/O、lockのどれが支配的かは現時点で断定しない。</li>
+</ul>
+</section>
+
+<section data-section="やってはいけないこと">
+<h2>やってはいけないこと（必須）</h2>
+<ul>
+<li><code>total_timeout_ms</code> を恒久的に5000msへ上げて根治扱いしない。hostの7000msはstartup/cache解決用であり、L2のSLOではない。</li>
+<li>新しいdeadline framework、cache、queue、telemetry storeを作らない。既存 <code>_require_remaining_budget</code>、Recallログ、scheduler receipt、deterministic fallbackを再利用する。</li>
+<li>deadlineを守るために権威teacher結果、fail-open、ログの秘匿化、decision logのdurabilityを黙って弱めない。非権威の診断・shadowだけをskip対象にする。</li>
+<li>全件待ちの原因を計測する前にexecutorを大規模改修しない。まずdeadline checkとcancel可能な境界を最小追加し、残存問題が実測された場合だけ広げる。</li>
+<li>古いcheckoutで実装しない。開始時点の <code>origin/main</code> からclean worktreeを作り、既存のuntracked <code>.env</code>、<code>logs/</code>、他のhandoffを変更・commitしない。</li>
+</ul>
+</section>
+
+<section data-section="前提・仮定">
+<h2>前提・仮定</h2>
+<ul>
+<li>調査時の正本は <code>/Users/trafficsign/projects/personal/chronovisor_reference_dashboard</code>、<code>origin/main=fa1b447</code>。実装時は最新の <code>origin/main</code> を再確認する。</li>
+<li>Codex hook外枠は7000ms、Chronovisor hook契約は4000ms、engine予算は3750ms、deterministic fallback reserveは600msを維持する。</li>
+<li>設定は毎UserPromptSubmitで読み直されるため、緊急設定変更だけなら再起動不要。ただし設定はhost共通で、Codex限定canaryを設定1行だけでは行えない。</li>
+<li>4秒SLOの受入正本は <code>l2_4000ms_deadline_pass_rate &gt;= 0.99</code>。重い探索はL3明示探索またはL4 asyncへ退避する。</li>
+</ul>
+</section>
+
+<section data-section="担当">
+<h2>チーム担当</h2>
+<ul>
+<li><strong>Terra read-only:</strong> baseline、host別timeout、p95/p99、scheduler/resource wait、canary集計を再現可能なコマンドで固定する。</li>
+<li><strong>sol_implementer:</strong> P0のdeadline分離・時計統一・fallback再入場解消と最小回帰テストを単独所有する。</li>
+<li><strong>sol_implementer（第2差分）:</strong> P1のcontext境界・非権威shadow skipを、P0計測で必要性を確認した項目だけ実装する。</li>
+<li><strong>Root/Sol review:</strong> 全caller、fail-open、秘匿、dirty worktree、commit scope、runtime canary、rollback証拠を最終確認する。</li>
+</ul>
+</section>
+
+<section data-section="実行手順">
+<h2>実行手順</h2>
+<ol class="checklist">
+<li><input type="checkbox"><span><strong>P0-A — 回帰を先に固定:</strong> <code>recall_wall_clock_deadline</code> をspyし、同一dispatchでouter captured値=4000、<code>run_recall</code> のengine policy=3750を同時assertして、現行の取り違えで失敗することを確認する。</span></li>
+<li><input type="checkbox"><span><strong>P0-B — 外/内deadlineを分離:</strong> dispatcherのouter timerへ元policy（4000）、<code>run_recall</code>へeffective policy（3750）を渡す。設定値とhost 7000は変えない。</span></li>
+<li><input type="checkbox"><span><strong>P0-C — 単一の絶対時計:</strong> <code>foreground_lane</code>へ入る前にengineのabsolute deadlineを作り、引数で <code>run_recall -&gt; _run_recall_impl -&gt; fallback</code> へ明示伝播する。latencyも同じ起点を使い、scheduler待機とI/Oを予算に含める。</span></li>
+<li><input type="checkbox"><span><strong>P0-D — fallback再入場を削除:</strong> 既にforeground lane内のbudget fallbackが再度 <code>run_recall</code> を呼ばないよう、開始可能な残予算を確認して既存内部実装を同じdeadlineで直接使う。残予算がない場合は即host no-opへfail-openする。</span></li>
+<li><input type="checkbox"><span><strong>P0-E — 診断I/Oを非blocking化:</strong> schedulerの <code>sync_enter</code>/<code>sync_exit</code> だけをbest-effort appendへ変え、marker visibilityと権威decision logのdurabilityは維持する。</span></li>
+<li><input type="checkbox"><span><strong>P0-F — timeout観測を残す:</strong> outer fail-openにもhost、scheduler wait、<code>last_stage_started</code>、<code>last_stage_completed</code>、残予算、fallback有無だけをin-memory状態から既存Recallログへ記録する。prompt/page本文は記録しない。</span></li>
+<li><input type="checkbox"><span><strong>P0-G — focused検証:</strong> fake clockで250ms待機、slow/failed scheduler log、nested fallback、outer 4000/engine 3750、host no-op/exit 0を検証し、P0を独立commitにする。</span></li>
+<li><input type="checkbox"><span><strong>P1-A — context I/O境界:</strong> 既存 <code>_require_remaining_budget</code> をstore refresh、各page summary/excerpt/prefetch、query worker開始/merge前で再利用し、期限切れでは次I/Oへ進まず既存fallbackへ渡す。</span></li>
+<li><input type="checkbox"><span><strong>P1-B — 非権威shadowを予算従属に:</strong> typed/compiler/evidence/processor/field shadowと診断traceはfinalize reserveを割る場合skipする。teacher候補・注入結果は変更しない。</span></li>
+<li><input type="checkbox"><span><strong>Canary:</strong> push後、実hookと7000ms wrapperを確認済みのCodexで先に24時間かつ100 eligible prompts以上を観測する。Claude Codeはactive hook設定・timeout・実行commitを確認できた場合だけ別途canaryし、未確認なら検証済みと記載しない。</span></li>
+<li><input type="checkbox"><span><strong>収束:</strong> Exit Criteriaを満たしたcommitを正本化し、Planのcheckbox・実行ログ・状態を更新する。未達ならP0/P1を個別revertする。</span></li>
+</ol>
+</section>
+
+<section data-section="条件付きフォローアップ">
+<h2>条件付きフォローアップ（完了条件外）</h2>
+<ul>
+<li>P0/P1-A/B後のstage telemetryでexecutor全件待ちが残存原因と確認された場合だけ、pending futureをabsolute deadlineでcancelし、完了済み候補を既存の決定的順序でmergeする。確認できなければ実装しない。</li>
+</ul>
+</section>
+
+<section class="rules" data-section="実行中更新ルール">
+<h2>実行中更新ルール</h2>
+<ul>
+<li>実行手順のチェックは、各手順の完了直後に更新する（まとめて更新しない）。</li>
+<li>チェックを更新したら、同時に <code>実行ログ</code> へ時刻付きで追記する。</li>
+<li>中断時は <code>状態</code>（<code>plan-meta</code> の JSON および <code>.badge</code> の <code>data-state</code>）を <code>blocked</code> にし、理由を <code>ブロッカー</code> に記入する。</li>
+</ul>
+</section>
+
+<section data-section="完了条件">
+<h2>完了条件</h2>
+<ul>
+<li>設定4000msのまま、outer=4000ms / engine=3750ms / fallback reserve=600ms / host wrapper=7000msがコード・テスト・文書で一致する。</li>
+<li>baselineはP0 deploy直前の連続7日を固定する。eligible promptはUserPromptSubmitのうち、空prompt・policy disabled・意図的skipを除いてRecallを開始したrecordとする。</li>
+<li><code>deadline_pass_rate</code> はeligibleのうち4000ms未満で <code>ok</code> または決定的 <code>degraded</code> を返した割合。最低24時間かつhost別100 eligible prompts以上で <code>&gt;= 0.99</code>、outer SIGALRM timeout率 &lt; 1%、host-wrapper timeout=0。</li>
+<li>成功runのp95 &lt;= 3000ms、p99 &lt;= 3400ms。timeout/fail-open時にもstageとscheduler waitを特定できる。</li>
+<li>baseline比で <code>decision=read/injected</code> 率、page/context coverage、teacher結果が5 percentage pointsを超えて悪化しない。</li>
+<li>research overlap、slow filesystem、stuck page/search、breaker openの各ケースで4秒以内に部分結果またはhost no-opを返し、promptをblockしない。</li>
+<li>無関係なdirty filesをcommitせず、targeted tests、isolated Recall tests、<code>ruff</code>、<code>git diff --check</code>、live実行commit確認がすべて成功する。</li>
+</ul>
+</section>
+
+<section data-section="即時ロールバック条件">
+<h2>即時ロールバック条件</h2>
+<ul>
+<li>host-wrapper timeoutが1件でも発生、または30 eligible prompts到達後のrolling outer timeout率が1%以上ならP0をrevertする。</li>
+<li>50 eligible prompts到達後の成功p99が3400msを超える、または新しいerror/data lossが1件でも発生した場合は原因commitを即revertする。</li>
+<li>100 eligible prompts到達後、baseline比で <code>decision=read/injected</code>、page/context coverage、teacher結果のいずれかが5 percentage points超悪化した場合、P0がgreenならP1だけをrevertする。</li>
+<li>rollback後は設定4000ms / host 7000msを維持し、同じ集計で回復を確認する。</li>
+</ul>
+</section>
+
+<section data-section="検証手順">
+<h2>検証手順</h2>
+<ul>
+<li><code>tests/test_hook_dispatcher.py</code>: 一回のdispatchでouter 4000とengine 3750を同時確認し、timeout時もhost-native no-op/exit 0。</li>
+<li><code>tests/test_recall_runtime.py</code>: fake monotonicでscheduler wait込みdeadline、collect_context途中停止、fallback一回、shadow skip、teacher context不変を確認。</li>
+<li><code>tests/test_research_scheduler.py</code>: 診断appendのslow/例外がforeground enter/exitをblockせず、coordination markerは維持されることを確認。</li>
+<li>隔離rootでRecall/host関連testsを実行し、必要な場合だけ全体suiteへ拡張する: <code>CHRONOVISOR_ROOT="$(mktemp -d -t chronovisor-test)" uv run pytest -q ...</code>。</li>
+<li>liveでhost別にtotal、ok、degraded、timeout、fail-open、p50/p95/p99、resource_wait、last_stage、injected/page coverageをbaselineと比較する。</li>
+</ul>
+</section>
+
+<section data-section="緊急緩和">
+<h2>緊急緩和（root fixとは別）</h2>
+<ul>
+<li>実装前もtimeout率が50%以上で業務を阻害し続ける場合だけ、所有者の明示承認を得て <code>total_timeout_ms=5000</code> を最長24時間適用する。再起動は不要。</li>
+<li>これは全host共通のL2 SLO変更でありcanary分離できない。outer host 7000msは変えず、timeout・体感待ち・注入率を観測する。</li>
+<li>root fix canary開始時、または悪化時に <code>5000 -&gt; 4000</code> の1行を即時ロールバックする。Planの完了条件には数えない。</li>
+</ul>
+</section>
+
+<section class="blockers" data-section="ブロッカー">
+<h2>ブロッカー（発生時のみ）</h2>
+<ul><li>なし</li></ul>
+</section>
+
+<section data-section="受け渡しメモ">
+<h2>受け渡しメモ（次担当へ）</h2>
+<ul>
+<li>第一差分はdispatcher 1箇所、<code>run_recall</code> clock/fallback、scheduler診断append、対応testsに限定する。P1を同commitへ混ぜない。</li>
+<li>調査時の主対象: <code>src/chronovisor/hosts/hook_dispatcher.py</code>、<code>src/chronovisor/recall/recall_runtime.py</code>、<code>src/chronovisor/core/research_scheduler.py</code>、<code>tests/test_hook_dispatcher.py</code>、<code>tests/test_recall_runtime.py</code>、<code>tests/test_research_scheduler.py</code>。</li>
+<li>直近ログの負荷相関は未立証。データ量・CPU・Dashboard RSSを理由にcacheや保存削減へ逸れない。</li>
+<li>rollback単位を守るため、P0、P1、緊急configはそれぞれ独立させる。</li>
+</ul>
+</section>
+
+<section data-section="実行ログ">
+<h2>実行ログ</h2>
+<ol class="log">
+<li><time>2026-08-13 11:12</time><span>canonical generatorでPlanを作成。</span></li>
+<li><time>2026-08-13 11:19</time><span>コード、live Recallログ、active config、host wrapper、rollout境界を3担当で独立監査し、4秒契約を維持するP0/P1へ整理。</span></li>
+<li><time>2026-08-13 11:28</time><span>最終read-only reviewを反映し、absolute deadline伝播、fallback残予算、canary分母、host別標本、即時rollback条件を固定。</span></li>
+</ol>
+</section>
+
+</body>
+</html>
