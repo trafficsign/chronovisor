@@ -2083,7 +2083,11 @@ class TestIngestFrontierGate:
                 "ingest.runtime_local_consensus_authority_unavailable"
             )
             assert supervision.terminal_deferred is False
-            assert starts == [Path(str(supervision.packet_path))]
+            assert supervision.attempts == 0
+            assert supervision.tracked is False
+            assert supervision.transient is True
+            assert supervision.packet_path is None
+            assert starts == []
         elif authority_state == "missing":
             assert str(finished.error) == (
                 "local consensus authority unavailable: "

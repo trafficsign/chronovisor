@@ -126,6 +126,10 @@ LOCAL_CONSENSUS_AUTHORITY_FAILURE_CLASS = (
 ADOPTION_ARTIFACT_INVALID_FINGERPRINT = (
     f"{LOCAL_CONSENSUS_AUTHORITY_FAILURE_CLASS}:adoption_artifact_invalid"
 )
+# The guarded review is already discarded; a stable next generation can retry.
+DECISION_AUTHORITY_CHANGED_FINGERPRINT = (
+    f"{LOCAL_CONSENSUS_AUTHORITY_FAILURE_CLASS}:decision_authority_changed"
+)
 
 # These failures already exhausted a bounded convergence loop inside one
 # ingest job. Replaying the raw through three more jobs only burns local and
@@ -2014,7 +2018,9 @@ def record_raw_failure(
             tracked=False,
             transient=True,
         )
-    if record.failure_class in TRANSIENT_FAILURE_CLASSES:
+    if record.failure_class in TRANSIENT_FAILURE_CLASSES or (
+        record.fingerprint == DECISION_AUTHORITY_CHANGED_FINGERPRINT
+    ):
         runtime_status.safe_append_event(
             "warn",
             (
