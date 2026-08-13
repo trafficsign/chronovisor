@@ -826,10 +826,10 @@ def review_and_apply_ingest_operations(
         except IngestReviewShardCapacityError as exc:
             review = _ingest_review_shard_failure(exc.failure_class, exc.reason)
         except Exception as exc:
-            review = {
-                "decision": "needs_retry",
-                "summary": f"local consensus reviewer failed: {exc.__class__.__name__}: {exc}",
-            }
+            review = _ingest_review_shard_failure(
+                "ingest_review_control_plane_retry",
+                f"local consensus reviewer failed: {exc.__class__.__name__}: {exc}",
+            )
 
     review = _normalize_ingest_frontier_review(review, proposal=proposal)
     decision = str(review.get("decision") or "retry")

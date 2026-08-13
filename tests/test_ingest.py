@@ -3848,6 +3848,81 @@ class TestIngestFrontierGate:
         ]
         assert "fresh review" in normalized["summary"]
 
+    @pytest.mark.parametrize(
+        ("review", "summary"),
+        [
+            ("not an object", "non-object payload"),
+            (
+                {"decision": "unknown", "summary": "present"},
+                "invalid decision",
+            ),
+            ({"decision": "retry"}, "omitted its decision summary"),
+            (
+                {
+                    "decision": "retry",
+                    "summary": "present",
+                    "failed_operations_disposition": "invalid",
+                },
+                "invalid failed-operation disposition",
+            ),
+            (
+                {
+                    "decision": "apply_available",
+                    "summary": "present",
+                    "failed_operations_disposition": "none",
+                },
+                "no prepared operation",
+            ),
+        ],
+    )
+    def test_review_contract_fallbacks_are_structured_control_plane_failures(
+        self,
+        review: object,
+        summary: str,
+    ) -> None:
+        from chronovisor.ingest import ingest
+
+        normalized = ingest._normalize_ingest_frontier_review(
+            review,
+            proposal={"prepared_operations": [], "failed_operation_specs": []},
+        )
+        result = ingest._normalize_frontier_retry_result(
+            {"status": "needs_retry", "review": normalized}
+        )
+
+        assert summary in normalized["summary"]
+        assert result["frontier_failure"]["failure_class"] == (
+            "ingest_review_control_plane_retry"
+        )
+        assert ingest._frontier_retry_is_actionable(result) is False
+
+    def test_generic_reviewer_exception_is_typed_without_regeneration_or_write(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from chronovisor.ingest import ingest
+
+        reviews = 0
+
+        def reviewer(_proposal: dict) -> dict:
+            nonlocal reviews
+            reviews += 1
+            raise TimeoutError("review transport timed out")
+
+        result = ingest._review_and_apply_ingest_operations(
+            [self._create_op()],
+            raw_content="grounded raw",
+            reviewer=reviewer,
+        )
+
+        assert result["frontier_failure"]["failure_class"] == (
+            "ingest_review_control_plane_retry"
+        )
+        assert ingest._frontier_retry_is_actionable(result) is False
+        assert reviews == 1
+        assert not (
+            isolated_wiki / "pages" / "memory" / "frontier-only.md"
+        ).exists()
+
     def test_frontier_retry_keeps_proposal_but_writes_no_verdict_or_page(
         self, isolated_wiki: Path
     ) -> None:
@@ -4115,6 +4190,10 @@ class TestIngestFrontierGate:
 
         assert result["status"] == "needs_retry"
         assert result["summary"] == "decision authority changed before effect"
+        assert result["frontier_failure"] == {
+            "failure_class": "ingest_review_control_plane_retry",
+            "summary": "decision authority changed before effect",
+        }
         assert result["created"] == []
         assert not (isolated_wiki / "pages" / "memory" / "frontier-only.md").exists()
 
@@ -5681,24 +5760,148 @@ class TestRunIngestPartialFailure:
             isolated_wiki / "pages" / "memory" / "semantic-no-quorum.md"
         ).exists()
 
-    def test_structured_frontier_failure_is_not_actionable_page_feedback(
-        self,
-    ) -> None:
+    def test_semantic_retry_prose_keywords_do_not_control_actionability(self) -> None:
         from chronovisor.ingest import ingest
 
-        assert (
-            ingest._frontier_retry_is_actionable(
-                {
-                    "status": "needs_retry",
-                    "review": {
-                        "decision": "retry",
-                        "summary": "repair the response",
-                        "frontier_failure": {"failure_class": "schema_invalid"},
-                    },
-                }
-            )
-            is False
+        result = ingest._normalize_frontier_retry_result(
+            {
+                "status": "needs_retry",
+                "summary": "Revise the unsupported sentence.",
+                "review": {
+                    "decision": "retry",
+                    "summary": "The prior timeout is described accurately.",
+                    "risk": "low",
+                },
+            }
         )
+
+        assert ingest._frontier_retry_is_actionable(result) is True
+        assert ingest._frontier_feedback_text(result) == (
+            "Revise the unsupported sentence."
+        )
+
+    def test_top_level_authority_failure_is_nonactionable(self) -> None:
+        from chronovisor.ingest import ingest
+
+        result = ingest._normalize_frontier_retry_result(
+            {
+                "status": "needs_retry",
+                "summary": "decision authority changed before effect",
+                "review": {
+                    "decision": "apply_available",
+                    "summary": "Two votes agreed that timeout handling is correct.",
+                    "risk": "low",
+                },
+            }
+        )
+
+        assert ingest._frontier_retry_is_actionable(result) is False
+        assert ingest._structured_frontier_failure_class(result) == (
+            "ingest_review_control_plane_retry"
+        )
+        assert ingest._frontier_feedback_text(result) == (
+            "decision authority changed before effect"
+        )
+
+    @pytest.mark.parametrize(
+        ("status", "expected_error"),
+        [
+            ("needs_retry", "local consensus authority unavailable: "),
+            (
+                "frontier_budget_exhausted",
+                "local consensus ingest shard continuation did not converge: ",
+            ),
+        ],
+    )
+    def test_shard_continuation_retry_preserves_typed_and_budget_contracts(
+        self,
+        isolated_wiki: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        status: str,
+        expected_error: str,
+    ) -> None:
+        from chronovisor.core import jobs
+        from chronovisor.ingest import failure_supervisor, ingest
+
+        continuation = SimpleNamespace(
+            proposal={
+                "local_generated_operations": [
+                    {
+                        "type": "create",
+                        "filename": "memory/continuation-authority.md",
+                        "content": "body",
+                    }
+                ],
+                "triage_plan": [],
+                "failed_operation_specs": [],
+                "local_disposition": "operations_available",
+            }
+        )
+        result = ingest._normalize_frontier_retry_result(
+            {
+                "status": status,
+                "summary": "decision authority changed before effect",
+                "review": {
+                    "decision": "apply_available",
+                    "summary": "Two votes agreed the timeout account is correct.",
+                    "risk": "low",
+                },
+                "created": [],
+                "updated": [],
+            }
+        )
+        monkeypatch.setattr(
+            ingest,
+            "_load_pretriage_ingest_shard_continuation",
+            lambda *_args, **_kwargs: continuation,
+        )
+        monkeypatch.setattr(
+            ingest,
+            "_review_and_apply_ingest_operations",
+            lambda *_args, **_kwargs: result,
+        )
+        monkeypatch.setattr(
+            ingest,
+            "_review_exact_ingest_repair_once",
+            lambda operations, review_result, **_kwargs: (operations, review_result),
+        )
+        tombstones = 0
+
+        def tombstone(*_args, **_kwargs):
+            nonlocal tombstones
+            tombstones += 1
+            return None
+
+        monkeypatch.setattr(ingest, "_tombstone_current_ingest_review_plan", tombstone)
+        monkeypatch.setattr(
+            ingest,
+            "_triage_with_progress",
+            lambda *_args, **_kwargs: pytest.fail("continuation must not triage"),
+        )
+        monkeypatch.setattr(
+            ingest,
+            "_generate_local_operations",
+            lambda *_args, **_kwargs: pytest.fail("continuation must not generate"),
+        )
+        target = isolated_wiki / "pages" / "memory" / "continuation-authority.md"
+        job = jobs.job_store.create(processor="ollama")
+
+        ingest.run_ingest(
+            "continuation raw",
+            job.job_id,
+            frontier_reviewer=lambda _proposal: {},
+        )
+
+        finished = jobs.job_store.get(job.job_id)
+        assert finished.status == jobs.JobStatus.FAILED
+        assert str(finished.error).startswith(expected_error)
+        if status == "needs_retry":
+            classified = failure_supervisor.classify_failure(finished.error)
+            assert classified.fingerprint.endswith(
+                ":ingest_review_control_plane_retry"
+            )
+        assert tombstones == 1
+        assert not target.exists()
 
     def test_completion_callback_failure_overrides_completed_job(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch

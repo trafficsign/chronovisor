@@ -7,6 +7,24 @@ from pathlib import Path
 from typing import Any
 
 
+def _control_plane_retry(
+    summary: str,
+    *,
+    value: dict[str, Any] | None = None,
+    failed_operations_disposition: str = "retry_required",
+) -> dict[str, Any]:
+    return {
+        **(value or {}),
+        "decision": "retry",
+        "summary": summary,
+        "failed_operations_disposition": failed_operations_disposition,
+        "frontier_failure": {
+            "failure_class": "ingest_review_control_plane_retry",
+            "summary": summary,
+        },
+    }
+
+
 def normalize_ingest_frontier_review(
     value: object,
     *,
@@ -15,11 +33,9 @@ def normalize_ingest_frontier_review(
     """Normalize the final disposition and fail closed on silent data loss."""
 
     if not isinstance(value, dict):
-        return {
-            "decision": "retry",
-            "summary": "local consensus reviewer returned a non-object payload",
-            "failed_operations_disposition": "retry_required",
-        }
+        return _control_plane_retry(
+            "local consensus reviewer returned a non-object payload"
+        )
     from chronovisor.decision.decision_schema_manifest import (
         canonical_ingest_repair_arrays,
     )
@@ -38,19 +54,13 @@ def normalize_ingest_frontier_review(
         "retry",
         "quarantined",
     }:
-        return {
-            **value,
-            "decision": "retry",
-            "summary": "local consensus reviewer returned an invalid decision",
-            "failed_operations_disposition": "retry_required",
-        }
+        return _control_plane_retry(
+            "local consensus reviewer returned an invalid decision", value=value
+        )
     if not isinstance(summary, str) or not summary.strip():
-        return {
-            **value,
-            "decision": "retry",
-            "summary": "local consensus reviewer omitted its decision summary",
-            "failed_operations_disposition": "retry_required",
-        }
+        return _control_plane_retry(
+            "local consensus reviewer omitted its decision summary", value=value
+        )
     repair_requested = any(
         isinstance(value.get(field), list) and bool(value.get(field))
         for field in ("invalid_tags", "replacement_operations")
@@ -80,16 +90,14 @@ def normalize_ingest_frontier_review(
         disposition = "none"
 
     if disposition not in {"none", "confirmed_unnecessary", "retry_required"}:
-        return {
-            **value,
-            "decision": "retry",
-            "summary": (
+        return _control_plane_retry(
+            (
                 "local consensus must explicitly disposition locally failed operations"
                 if has_failed_operations
                 else "local consensus returned an invalid failed-operation disposition"
             ),
-            "failed_operations_disposition": "retry_required",
-        }
+            value=value,
+        )
     if (
         has_failed_operations
         and decision in {"apply_available", "confirmed_noop"}
@@ -107,14 +115,13 @@ def normalize_ingest_frontier_review(
     if not has_failed_operations and not repair_requested:
         disposition = "none"
     if decision == "apply_available" and not has_available_operations:
-        return {
-            **value,
-            "decision": "retry",
-            "summary": "local consensus requested apply_available with no prepared operation",
-            "failed_operations_disposition": (
+        return _control_plane_retry(
+            "local consensus requested apply_available with no prepared operation",
+            value=value,
+            failed_operations_disposition=(
                 "retry_required" if has_failed_operations else "none"
             ),
-        }
+        )
     return {
         **value,
         "decision": decision,

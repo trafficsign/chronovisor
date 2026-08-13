@@ -4091,6 +4091,33 @@ def _invalid_sharded_review_result(
     }
 
 
+def _normalize_frontier_retry_result(result: dict[str, Any]) -> dict[str, Any]:
+    if str(result.get("status") or "") not in {"needs_retry", "quarantined"}:
+        return result
+    if isinstance(result.get("frontier_failure"), dict) and result.get(
+        "frontier_failure"
+    ):
+        return result
+    review = result.get("review")
+    review = review if isinstance(review, dict) else {}
+    summary = str(result.get("summary") or review.get("summary") or "").strip()
+    summary = summary or "frontier retry did not provide a summary"
+    nested_failure = review.get("frontier_failure")
+    if isinstance(nested_failure, dict) and nested_failure:
+        frontier_failure = dict(nested_failure)
+    else:
+        decision = str(review.get("decision") or "").casefold()
+        frontier_failure = {
+            "failure_class": (
+                "semantic_revision_required"
+                if decision in {"retry", "rejected"}
+                else "ingest_review_control_plane_retry"
+            ),
+            "summary": summary,
+        }
+    return {**result, "summary": summary, "frontier_failure": frontier_failure}
+
+
 def _review_and_apply_ingest_operations(
     operations: list[dict],
     *,
@@ -4112,21 +4139,23 @@ def _review_and_apply_ingest_operations(
         review_and_apply_ingest_operations,
     )
 
-    return review_and_apply_ingest_operations(
-        operations,
-        raw_content=raw_content,
-        raw_keywords=raw_keywords,
-        source_raw=source_raw,
-        triage_plan=triage_plan,
-        failed_operation_specs=failed_operation_specs,
-        local_disposition=local_disposition,
-        reviewer=reviewer,
-        force_frontier_review=force_frontier_review,
-        frontier_budget=frontier_budget,
-        shard_continuation=shard_continuation,
-        allow_empty_shard_continuation=allow_empty_shard_continuation,
-        continuation_reseed_from_sha256=continuation_reseed_from_sha256,
-        dry_run=dry_run,
+    return _normalize_frontier_retry_result(
+        review_and_apply_ingest_operations(
+            operations,
+            raw_content=raw_content,
+            raw_keywords=raw_keywords,
+            source_raw=source_raw,
+            triage_plan=triage_plan,
+            failed_operation_specs=failed_operation_specs,
+            local_disposition=local_disposition,
+            reviewer=reviewer,
+            force_frontier_review=force_frontier_review,
+            frontier_budget=frontier_budget,
+            shard_continuation=shard_continuation,
+            allow_empty_shard_continuation=allow_empty_shard_continuation,
+            continuation_reseed_from_sha256=continuation_reseed_from_sha256,
+            dry_run=dry_run,
+        )
     )
 
 
@@ -4304,6 +4333,9 @@ def _record_ingest_shard_continuation(
 def _frontier_feedback_text(result: dict[str, Any]) -> str:
     """Return compact authoritative feedback for the next local proposal."""
 
+    summary = result.get("summary")
+    if isinstance(summary, str) and summary.strip():
+        return summary.strip()
     review = result.get("review")
     if isinstance(review, dict):
         parts = [
@@ -4313,25 +4345,20 @@ def _frontier_feedback_text(result: dict[str, Any]) -> str:
         ]
         if parts:
             return "\n".join(dict.fromkeys(parts))
-    summary = result.get("summary")
-    if isinstance(summary, str) and summary.strip():
-        return summary.strip()
     return "The previous proposal was not safe or complete enough to apply."
 
 
 def _structured_frontier_failure_class(result: dict[str, Any]) -> str | None:
     """Return a stable control-plane reason from a structured review failure."""
 
-    review = result.get("review")
-    for candidate in (result, review):
-        if not isinstance(candidate, dict):
-            continue
-        frontier_failure = candidate.get("frontier_failure")
-        if isinstance(frontier_failure, dict) and frontier_failure:
-            failure_class = str(frontier_failure.get("failure_class") or "").strip()
-            if re.fullmatch(r"[A-Za-z][A-Za-z0-9_.-]{0,127}", failure_class):
-                return failure_class.casefold()
-            return "structured_review_failure"
+    frontier_failure = result.get("frontier_failure")
+    if isinstance(frontier_failure, dict) and frontier_failure:
+        failure_class = str(frontier_failure.get("failure_class") or "").strip()
+        if re.fullmatch(r"[A-Za-z][A-Za-z0-9_.-]{0,127}", failure_class):
+            return failure_class.casefold()
+        return "ingest_review_control_plane_retry"
+    if str(result.get("status") or "") in {"needs_retry", "quarantined"}:
+        return "ingest_review_control_plane_retry"
     return None
 
 
@@ -4417,33 +4444,29 @@ def _frontier_retry_is_actionable(result: dict[str, Any]) -> bool:
 
     if str(result.get("status") or "") == "quarantined":
         return False
-    if _structured_frontier_failure_class(result) is not None:
-        # A structured reviewer failure is control-plane evidence, not
-        # semantic feedback about the generated page.  Regenerating the same
-        # page cannot repair schema, quorum, transport, authority, or policy
-        # failures and only burns the second review call before the raw is
-        # mislabeled as non-convergent.
-        return False
-    feedback = _frontier_feedback_text(result).casefold()
-    infrastructure_markers = (
-        "adoption artifact",
-        "adoption_artifact",
-        "artifact write failed",
-        "authority changed",
-        "authority is missing",
-        "frontier reviewer failed",
-        "local consensus reviewer failed",
-        "transport",
-        "timeout",
-        "timed out",
-        "budget exhausted",
-        "budget deferred",
-        "authentication",
-        "billing",
-        "quota",
-        "secret-store",
+    return _structured_frontier_failure_class(result) == "semantic_revision_required"
+
+
+def _raise_nonactionable_frontier_failure(result: dict[str, Any]) -> None:
+    feedback = _frontier_feedback_text(result)
+    failure_class = _structured_frontier_failure_class(result)
+    if failure_class == "local_semantic_no_quorum":
+        authority_sha256 = _structured_frontier_authority_sha256(result)
+        if authority_sha256 is not None:
+            raise IngestApplyError(
+                "local consensus semantic no quorum "
+                f"[authority_sha256={authority_sha256}]: {feedback}"
+            )
+    if failure_class in {"input_too_large", "context_window_exceeded"}:
+        raise IngestApplyError(
+            f"local consensus structured failure [{failure_class}]: {feedback}"
+        )
+    typed_feedback = (
+        f"{failure_class}: {feedback}" if failure_class is not None else feedback
     )
-    return not any(marker in feedback for marker in infrastructure_markers)
+    raise IngestApplyError(
+        "local consensus authority unavailable: " + typed_feedback
+    )
 
 
 def _apply_frontier_replacement_operations(
@@ -4597,7 +4620,7 @@ def _review_exact_ingest_repair_once(
             "created": [],
             "updated": [],
         }
-        return operations, blocked
+        return operations, _normalize_frontier_retry_result(blocked)
     repaired_result = _review_and_apply_ingest_operations(
         repaired_operations,
         raw_content=raw_content,
@@ -5181,6 +5204,10 @@ def run_ingest(
                         "local consensus ingest shard continuation stall could not "
                         "be sealed: " + stall_error
                     )
+                if continuation_status in {"needs_retry", "quarantined"} and not (
+                    _frontier_retry_is_actionable(continuation_result)
+                ):
+                    _raise_nonactionable_frontier_failure(continuation_result)
                 raise IngestApplyError(
                     "local consensus ingest shard continuation did not converge: "
                     + _frontier_feedback_text(continuation_result)
@@ -5395,33 +5422,7 @@ def run_ingest(
                 )
             frontier_feedback = _frontier_feedback_text(frontier_result)
             if not _frontier_retry_is_actionable(frontier_result):
-                structured_failure = _structured_frontier_failure_class(frontier_result)
-                if structured_failure == "local_semantic_no_quorum":
-                    authority_sha256 = _structured_frontier_authority_sha256(
-                        frontier_result
-                    )
-                    if authority_sha256 is not None:
-                        raise IngestApplyError(
-                            "local consensus semantic no quorum "
-                            f"[authority_sha256={authority_sha256}]: "
-                            + frontier_feedback
-                        )
-                if structured_failure in {
-                    "input_too_large",
-                    "context_window_exceeded",
-                }:
-                    raise IngestApplyError(
-                        "local consensus structured failure "
-                        f"[{structured_failure}]: {frontier_feedback}"
-                    )
-                typed_feedback = (
-                    f"{structured_failure}: {frontier_feedback}"
-                    if structured_failure is not None
-                    else frontier_feedback
-                )
-                raise IngestApplyError(
-                    "local consensus authority unavailable: " + typed_feedback
-                )
+                _raise_nonactionable_frontier_failure(frontier_result)
             if frontier_budget.used >= frontier_budget.limit:
                 detail = (
                     "structured review budget exhausted "
