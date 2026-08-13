@@ -10374,6 +10374,107 @@ class TestTriagePlanSchema:
         feedback = transport.requests[1].messages[-1]["content"]
         assert '"keyword":"createPathDepth"' in feedback
 
+    def test_triage_catalog_semantic_failure_uses_bounded_lexical_fallback(
+        self,
+        isolated_wiki: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        del isolated_wiki
+        from chronovisor.core import search
+        from chronovisor.ingest import ingest
+
+        calls: list[str] = []
+        results = [
+            SimpleNamespace(page_id=f"catalog/page-{index}", title=f"Page {index}")
+            for index in range(ingest._TRIAGE_CATALOG_TOP_N + 2)
+        ]
+
+        def catalog_search(_query: str, *, top_n: int, semantic: bool):
+            assert top_n == ingest._TRIAGE_CATALOG_TOP_N
+            assert semantic is True
+            calls.append("hybrid")
+            raise RuntimeError("semantic unavailable")
+
+        def existing_bm25(_query: str, *, top_n: int):
+            assert top_n == ingest._TRIAGE_CATALOG_TOP_N
+            calls.append("existing_bm25")
+            return results
+
+        monkeypatch.setattr(search, "search", catalog_search)
+        monkeypatch.setattr(search, "search_existing_bm25", existing_bm25)
+        transport = _QueueStructuredTransport("[]")
+
+        assert ingest._triage("bounded catalog", transport=transport) == []
+        assert calls == ["hybrid", "existing_bm25"]
+        prompt = transport.requests[0].messages[-1]["content"]
+        assert prompt.count("[[catalog/page-") == ingest._TRIAGE_CATALOG_TOP_N
+        assert f"[[catalog/page-{ingest._TRIAGE_CATALOG_TOP_N}]]" not in prompt
+
+    def test_triage_catalog_dual_failure_is_typed_transient_without_page_dump(
+        self,
+        isolated_wiki: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from chronovisor.core import search
+        from chronovisor.ingest import failure_supervisor, ingest
+
+        class CatalogPage:
+            parent = ingest.PAGES_DIR / "catalog"
+            stem = "must-not-be-read"
+
+            def read_text(self) -> str:
+                pytest.fail("triage enumerated the full page catalog")
+
+        calls: list[str] = []
+        page_scans = 0
+
+        def pages():
+            nonlocal page_scans
+            page_scans += 1
+            return [CatalogPage() for _ in range(4_241)]
+
+        def unavailable(_query: str, *, top_n: int, semantic: bool):
+            assert top_n == ingest._TRIAGE_CATALOG_TOP_N
+            assert semantic is True
+            calls.append("hybrid")
+            raise RuntimeError("catalog unavailable")
+
+        def unavailable_bm25(_query: str, *, top_n: int):
+            assert top_n == ingest._TRIAGE_CATALOG_TOP_N
+            calls.append("existing_bm25")
+            raise RuntimeError("catalog unavailable")
+
+        monkeypatch.setattr(ingest, "all_pages", pages)
+        monkeypatch.setattr(search, "search", unavailable)
+        monkeypatch.setattr(search, "search_existing_bm25", unavailable_bm25)
+        events: list[dict] = []
+
+        with pytest.raises(ingest.IngestTriageFailure) as raised:
+            ingest._triage(
+                "raw input",
+                transport=_QueueStructuredTransport("[]"),
+                progress_callback=events.append,
+                raise_on_failure=True,
+            )
+
+        assert calls == ["hybrid", "existing_bm25"]
+        assert page_scans == 1
+        assert raised.value.failure_class == "transport_error"
+        assert raised.value.reason == (
+            "triage catalog search unavailable after bounded lexical fallback"
+        )
+        classified = failure_supervisor.classify_failure(str(raised.value))
+        assert classified.failure_class == "ingest.runtime_transport_error"
+        assert classified.failure_class in failure_supervisor.TRANSIENT_FAILURE_CLASSES
+        assert events == [
+            {
+                "event": "error",
+                "active": False,
+                "failure_class": "transport_error",
+                "error": raised.value.reason,
+            }
+        ]
+
     @pytest.mark.parametrize(
         ("feedback_bytes", "expect_repair"),
         [(4_025, True), (4_097, False)],

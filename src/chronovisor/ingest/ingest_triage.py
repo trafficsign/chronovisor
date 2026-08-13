@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 from collections.abc import Callable
 from contextlib import nullcontext
 from typing import Any
@@ -35,7 +34,6 @@ _triage_plan_validation_issues = _runtime_call("_triage_plan_validation_issues")
 _validate_triage_plan = _runtime_call("_validate_triage_plan")
 all_pages = _runtime_call("all_pages")
 load_ingest_config = _runtime_call("load_ingest_config")
-page_id_from_path = _runtime_call("page_id_from_path")
 required_structured_context_tokens = _runtime_call("required_structured_context_tokens")
 LocalStructuredSession = _runtime_call("LocalStructuredSession")
 
@@ -86,20 +84,35 @@ def triage(
     catalog_lines.append("Existing wiki pages (page_id — title):")
     try:
         from chronovisor.core.search import search as chronovisor_search
+        from chronovisor.core.search import search_existing_bm25
 
         query_text = content[:2000]
-        results, _ = chronovisor_search(query_text, top_n=_TRIAGE_CATALOG_TOP_N, semantic=True)
-        for r in results:
-            catalog_lines.append(f"  [[{r.page_id}]] — {r.title}")
-        _safe_log(
-            f"ingest | triage catalog filtered to {len(results)} pages (of {len(list(all_pages()))} total)"
+        try:
+            results, _ = chronovisor_search(
+                query_text,
+                top_n=_TRIAGE_CATALOG_TOP_N,
+                semantic=True,
+            )
+        except Exception:
+            results = search_existing_bm25(
+                query_text,
+                top_n=_TRIAGE_CATALOG_TOP_N,
+            )
+    except Exception as exc:
+        failure = IngestTriageFailure(
+            "transport_error",
+            "triage catalog search unavailable after bounded lexical fallback",
         )
-    except Exception:
-        for path in all_pages():
-            content_text = path.read_text()
-            fm_match = re.search(r"title:\s*(.+)", content_text)
-            title = fm_match.group(1).strip() if fm_match else path.stem
-            catalog_lines.append(f"  [[{page_id_from_path(path)}]] — {title}")
+        _emit_triage_failure(progress_callback, failure)
+        if raise_on_failure:
+            raise failure from exc
+        return None
+    results = results[:_TRIAGE_CATALOG_TOP_N]
+    for r in results:
+        catalog_lines.append(f"  [[{r.page_id}]] — {r.title}")
+    _safe_log(
+        f"ingest | triage catalog filtered to {len(results)} pages (of {len(list(all_pages()))} total)"
+    )
 
     catalog = "\n".join(catalog_lines)
 
