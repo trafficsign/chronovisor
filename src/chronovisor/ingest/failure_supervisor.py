@@ -522,6 +522,13 @@ def classify_failure(message: str | None) -> FailureRecord:
             message=msg,
         )
 
+    if msg.casefold().startswith("generated page links are invalid:"):
+        return FailureRecord(
+            failure_class="ingest.generation_validation_failed",
+            fingerprint="ingest.generation_validation_failed",
+            message=msg,
+        )
+
     generation_failure = re.search(
         r"ingest generation (capacity_unavailable|context_window_exceeded|"
         r"context_truncation_suspected|feedback_too_large|stream_incomplete|"

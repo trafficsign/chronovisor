@@ -5097,6 +5097,176 @@ class TestRunIngestPartialFailure:
         )
         assert review_calls == []
 
+    def test_missing_link_regenerates_before_review_and_write(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from chronovisor.core import jobs
+        from chronovisor.ingest import ingest
+
+        plan = [
+            {
+                "type": "create",
+                "filename": "memory/link-repair.md",
+                "title": "Link repair",
+            }
+        ]
+        triage_calls = 0
+        generation_feedback: list[str | None] = []
+        target = isolated_wiki / "pages" / "memory" / "link-repair.md"
+
+        def triage(_content: str, **_kwargs):
+            nonlocal triage_calls
+            triage_calls += 1
+            return plan
+
+        def generate(op: dict, _raw: str, *, frontier_feedback=None, **_kwargs):
+            generation_feedback.append(frontier_feedback)
+            body = (
+                "See [missing](missing.md)."
+                if frontier_feedback is None
+                else "Grounded text without an unresolved link."
+            )
+            return {
+                "type": "create",
+                "filename": op["filename"],
+                "content": (
+                    "---\ntitle: Link repair\nupdated: 2026-08-13\n"
+                    "status: stable\ntype: knowledge\n---\n" + body
+                ),
+            }
+
+        reviews: list[dict] = []
+
+        def reviewer(proposal: dict) -> dict:
+            assert not target.exists()
+            reviews.append(proposal)
+            return {
+                "decision": "apply_available",
+                "summary": "The replacement is canonical.",
+                "failed_operations_disposition": "none",
+            }
+
+        monkeypatch.setattr(ingest, "_triage", triage)
+        monkeypatch.setattr(ingest, "_generate_one", generate)
+        job = jobs.job_store.create(processor="ollama")
+
+        ingest.run_ingest("grounded raw", job.job_id, frontier_reviewer=reviewer)
+
+        finished = jobs.job_store.get(job.job_id)
+        assert finished.status == jobs.JobStatus.COMPLETED
+        assert triage_calls == 1
+        assert len(generation_feedback) == 2
+        assert generation_feedback[0] is None
+        assert "generated page links are invalid" in str(generation_feedback[1])
+        assert len(reviews) == 1
+        assert target.exists()
+        written = target.read_text(encoding="utf-8")
+        assert "Grounded text" in written
+        assert "missing.md" not in written
+
+    def test_missing_link_repair_exhaustion_is_typed_before_review_or_write(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from chronovisor.core import jobs
+        from chronovisor.ingest import failure_supervisor, ingest
+
+        plan = [
+            {
+                "type": "create",
+                "filename": "memory/link-exhausted.md",
+                "title": "Link exhausted",
+            }
+        ]
+        generation_calls = 0
+
+        def generate(op: dict, _raw: str, **_kwargs):
+            nonlocal generation_calls
+            generation_calls += 1
+            return {
+                "type": "create",
+                "filename": op["filename"],
+                "content": (
+                    "---\ntitle: Link exhausted\nupdated: 2026-08-13\n"
+                    "status: stable\ntype: knowledge\n---\n"
+                    "See [missing](missing.md)."
+                ),
+            }
+
+        monkeypatch.setattr(ingest, "_triage", lambda *_args, **_kwargs: plan)
+        monkeypatch.setattr(ingest, "_generate_one", generate)
+        job = jobs.job_store.create(processor="ollama")
+
+        ingest.run_ingest(
+            "grounded raw",
+            job.job_id,
+            frontier_reviewer=lambda _proposal: pytest.fail("review must not run"),
+        )
+
+        finished = jobs.job_store.get(job.job_id)
+        assert finished.status == jobs.JobStatus.FAILED
+        assert generation_calls == ingest._MAX_FRONTIER_CONVERGENCE_ATTEMPTS
+        assert str(finished.error).startswith("ingest generation validation_failed:")
+        assert (
+            failure_supervisor.classify_failure(finished.error).failure_class
+            == "ingest.generation_validation_failed"
+        )
+        assert not (
+            isolated_wiki / "pages" / "memory" / "link-exhausted.md"
+        ).exists()
+
+    def test_missing_link_regeneration_preserves_multi_operation_atomicity(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from chronovisor.core import jobs
+        from chronovisor.ingest import ingest
+
+        plan = [
+            {"type": "create", "filename": "memory/atomic-a.md", "title": "A"},
+            {"type": "create", "filename": "memory/atomic-b.md", "title": "B"},
+        ]
+        attempts: dict[str, int] = {}
+        targets = [
+            isolated_wiki / "pages" / "memory" / "atomic-a.md",
+            isolated_wiki / "pages" / "memory" / "atomic-b.md",
+        ]
+
+        def generate(op: dict, _raw: str, **_kwargs):
+            filename = str(op["filename"])
+            attempts[filename] = attempts.get(filename, 0) + 1
+            invalid = filename.endswith("atomic-b.md") and attempts[filename] == 1
+            return {
+                "type": "create",
+                "filename": filename,
+                "content": (
+                    f"---\ntitle: {op['title']}\nupdated: 2026-08-13\n"
+                    "status: stable\ntype: knowledge\n---\n"
+                    + ("See [missing](missing.md)." if invalid else "Grounded body.")
+                ),
+            }
+
+        reviews = 0
+
+        def reviewer(_proposal: dict) -> dict:
+            nonlocal reviews
+            reviews += 1
+            assert not any(path.exists() for path in targets)
+            return {
+                "decision": "apply_available",
+                "summary": "Both operations are canonical.",
+                "failed_operations_disposition": "none",
+            }
+
+        monkeypatch.setattr(ingest, "_triage", lambda *_args, **_kwargs: plan)
+        monkeypatch.setattr(ingest, "_generate_one", generate)
+        job = jobs.job_store.create(processor="ollama")
+
+        ingest.run_ingest("grounded raw", job.job_id, frontier_reviewer=reviewer)
+
+        assert jobs.job_store.get(job.job_id).status == jobs.JobStatus.COMPLETED
+        assert attempts == {"memory/atomic-a.md": 2, "memory/atomic-b.md": 2}
+        assert reviews == 1
+        assert all(path.exists() for path in targets)
+
     def test_structured_review_failure_does_not_regenerate_or_exhaust_budget(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -9028,6 +9198,37 @@ class TestPerRawOrchestrator:
             raw_path.name: "pending_local_repair"
         }
 
+    def test_legacy_missing_link_error_is_generation_validation_failure(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from chronovisor.core import background_jobs
+        from chronovisor.ingest import failure_supervisor
+
+        raw_path = isolated_wiki / "raw" / "link-validation.md"
+        raw_path.write_text("grounded source", encoding="utf-8")
+        started: list[Path] = []
+        monkeypatch.setattr(
+            background_jobs, "start_self_heal_background", started.append
+        )
+
+        result = failure_supervisor.record_raw_failure(
+            raw_path=raw_path,
+            error=(
+                "generated page links are invalid: missing Markdown link target: "
+                "pages/missing.md"
+            ),
+            raw_text="grounded source",
+        )
+
+        assert result.failure_class == "ingest.generation_validation_failed"
+        assert result.quarantined is False
+        assert result.packet_path is not None
+        assert raw_path.exists()
+        assert started == [Path(result.packet_path)]
+        assert failure_supervisor.operational_deferred_raw_files([raw_path]) == {
+            raw_path.name: "pending_local_repair"
+        }
+
     def test_generation_transport_error_is_transient_daemon_outage(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -11882,6 +12083,86 @@ class TestOversizedAppendOnlyUpdateContext:
                 )
                 in outline
             )
+
+    def test_64k_outline_compacts_large_multi_section_update_within_hard_ceiling(
+        self,
+        isolated_wiki: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from chronovisor.core.runtime_config import IngestConfig
+        from chronovisor.ingest import ingest
+
+        sentinel = "FULL-PAGE-SENTINEL-MUST-NOT-REACH-GENERATION"
+        page_text = (
+            "---\ntitle: Large archive\nupdated: 2026-01-01\nstatus: stable\n"
+            "type: knowledge\n---\n# Archive\n"
+            + sentinel
+            + "\n"
+            + "".join(
+                f"## Archived section {index:04d} with a deliberately descriptive bounded heading\n"
+                + "z" * 900
+                + "\n"
+                for index in range(300)
+            )
+            + "## Needle evidence\nneedle evidence body\n"
+        )
+        _seed_page(isolated_wiki, "memory/large-outline.md", page_text)
+        sections = ingest._markdown_sections(page_text)
+        outline = ingest._render_compact_update_context(
+            page_id="large-outline",
+            page_text=page_text,
+            sections=sections,
+            selected=(),
+        )
+        outline_bytes = len(outline.encode("utf-8"))
+        assert 32 * 1_024 < outline_bytes <= ingest._MAX_COMPACT_UPDATE_OUTLINE_BYTES
+
+        op = {
+            "type": "update",
+            "filename": "memory/large-outline.md",
+            "title": "Needle evidence",
+            "keywords": ["needle"],
+            "summary": "Add needle evidence",
+        }
+        monkeypatch.setattr(
+            ingest,
+            "load_ingest_config",
+            lambda: IngestConfig(
+                num_ctx=32_768,
+                max_num_ctx=262_144,
+                num_predict=8_192,
+            ),
+        )
+        monkeypatch.setattr(
+            ingest,
+            "_build_focused_context",
+            lambda *_args, **_kwargs: page_text,
+        )
+        calls: list[tuple[str, dict]] = []
+
+        def generate(prompt: str, **kwargs) -> str:
+            calls.append((prompt, kwargs))
+            return (
+                "=== UPDATE PAGE: memory/large-outline.md ===\n"
+                "## Added evidence\ngrounded append\n=== END PAGE ==="
+            )
+
+        monkeypatch.setattr(ingest, "_generate_with_progress", generate)
+        diagnostics: dict = {}
+
+        result = ingest._generate_one(op, "needle evidence", diagnostics=diagnostics)
+
+        assert result is not None
+        assert len(calls) == 1
+        prompt, kwargs = calls[0]
+        assert sentinel not in prompt
+        assert "## Needle evidence\nneedle evidence body" in prompt
+        assert kwargs["num_ctx"] <= 262_144
+        assert diagnostics["required_num_ctx"] <= 262_144
+        assert diagnostics["context_strategy"] == "append_only_outline_sections"
+        assert sum(
+            section["bytes"] for section in diagnostics["context_selected_sections"]
+        ) <= ingest._MAX_COMPACT_UPDATE_SELECTED_BYTES
 
     def test_compact_binding_uses_exact_crlf_disk_bytes(
         self,

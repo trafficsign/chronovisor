@@ -1410,7 +1410,7 @@ _MAX_PAGE_GENERATION_RESPONSES = 1 + _MAX_PAGE_GENERATION_REPAIR_TURNS
 _MAX_PAGE_REPAIR_FEEDBACK_BYTES = 2_400
 _PAGE_GENERATION_CONTEXT_SAFETY_TOKENS = 256
 _MIN_ADAPTIVE_PAGE_NUM_PREDICT = 2_048
-_MAX_COMPACT_UPDATE_OUTLINE_BYTES = 32 * 1_024
+_MAX_COMPACT_UPDATE_OUTLINE_BYTES = 64 * 1_024
 _MAX_COMPACT_UPDATE_SELECTED_BYTES = 32 * 1_024
 
 
@@ -4859,6 +4859,59 @@ def _complete_ingest_run(
         on_complete()
 
 
+def _review_generated_operations(
+    operations: list[dict],
+    *,
+    raw_content: str,
+    raw_keywords: list[str] | None,
+    source_raw: str | None,
+    triage_plan: list[dict],
+    failed_operation_specs: list[dict],
+    reviewer: Callable[[dict[str, Any]], dict[str, Any]] | None,
+    frontier_feedback: str | None,
+    frontier_budget: "_FrontierCallBudget",
+    convergence_attempt: int,
+) -> tuple[dict[str, Any] | None, str, str | None]:
+    local_disposition = (
+        "triage_no_operations"
+        if not triage_plan
+        else "all_generation_failed"
+        if failed_operation_specs and not operations
+        else "partial_generation_failed"
+        if failed_operation_specs
+        else "operations_available"
+    )
+    try:
+        result = _review_and_apply_ingest_operations(
+            operations,
+            raw_content=raw_content,
+            raw_keywords=raw_keywords,
+            source_raw=source_raw,
+            triage_plan=triage_plan,
+            failed_operation_specs=failed_operation_specs,
+            local_disposition=local_disposition,
+            reviewer=reviewer,
+            force_frontier_review=frontier_feedback is not None,
+            frontier_budget=frontier_budget,
+        )
+    except IngestApplyError as exc:
+        detail = str(exc)
+        if not detail.startswith("generated page links are invalid:"):
+            raise
+        if convergence_attempt >= _MAX_FRONTIER_CONVERGENCE_ATTEMPTS:
+            raise IngestApplyError(
+                "ingest generation validation_failed: " + detail
+            ) from exc
+        feedback = (
+            detail
+            + ". Return only links to existing Markdown targets; use plain "
+            "text when no target exists."
+        )
+        _safe_log("ingest | deterministic link validation requested regeneration")
+        return None, local_disposition, feedback
+    return result, local_disposition, frontier_feedback
+
+
 def run_ingest(
     content: str,
     job_id: str,
@@ -5223,27 +5276,22 @@ def run_ingest(
                 op_progress={"index": len(plan), "total": len(plan)},
                 llm=None,
             )
-            local_disposition = (
-                "triage_no_operations"
-                if not plan
-                else "all_generation_failed"
-                if failed_ops and not all_operations
-                else "partial_generation_failed"
-                if failed_ops
-                else "operations_available"
+            frontier_result, local_disposition, frontier_feedback = (
+                _review_generated_operations(
+                    all_operations,
+                    raw_content=content,
+                    raw_keywords=raw_keywords_for_ops,
+                    source_raw=source_raw,
+                    triage_plan=plan,
+                    failed_operation_specs=failed_op_specs,
+                    reviewer=frontier_reviewer,
+                    frontier_feedback=frontier_feedback,
+                    frontier_budget=frontier_budget,
+                    convergence_attempt=convergence_attempt,
+                )
             )
-            frontier_result = _review_and_apply_ingest_operations(
-                all_operations,
-                raw_content=content,
-                raw_keywords=raw_keywords_for_ops,
-                source_raw=source_raw,
-                triage_plan=plan,
-                failed_operation_specs=failed_op_specs,
-                local_disposition=local_disposition,
-                reviewer=frontier_reviewer,
-                force_frontier_review=frontier_feedback is not None,
-                frontier_budget=frontier_budget,
-            )
+            if frontier_result is None:
+                continue
             all_operations, frontier_result = _review_exact_ingest_repair_once(
                 all_operations,
                 frontier_result,
