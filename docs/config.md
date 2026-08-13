@@ -2,6 +2,22 @@
 
 The runtime config is `~/.chronovisor/config.toml`.
 
+The default `[dashboard]` section remains loopback-only. Secure LAN access uses
+a separate section so it cannot change the existing service boundary:
+
+```toml
+[dashboard_lan]
+host = "192.168.50.20" # exact private IPv4 assigned to this Mac; no wildcard
+port = 8766
+tls_cert_file = "/Users/me/.chronovisor/runtime/dashboard-lan.crt"
+tls_key_file = "/Users/me/.chronovisor/runtime/dashboard-lan.key"
+credentials_file = "/Users/me/.chronovisor/runtime/dashboard-lan-credentials.json"
+```
+
+All paths must be absolute. The private key and hashed credential file must be
+regular, owner-owned `0600` files and must not be symlinks. Passwords never
+belong in TOML.
+
 The reader opens that path once and parses one immutable byte snapshot. When an
 operator atomically replaces the file, a load therefore observes either the old
 generation or the new generation, never an existence check from one generation

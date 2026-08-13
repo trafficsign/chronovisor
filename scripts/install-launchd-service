@@ -3,9 +3,9 @@ set -eu
 
 SERVICE="${1:-}"
 case "$SERVICE" in
-  dashboard|ingest-drain|librarian-review|library-evidence) ;;
+  dashboard|lan-dashboard|ingest-drain|librarian-review|library-evidence) ;;
   *)
-    printf 'usage: %s {dashboard|ingest-drain|librarian-review|library-evidence}\n' "$0" >&2
+    printf 'usage: %s {dashboard|lan-dashboard|ingest-drain|librarian-review|library-evidence}\n' "$0" >&2
     exit 64
     ;;
 esac

@@ -3,19 +3,27 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import contextlib
+import getpass
 import hashlib
 import hmac
 import ipaddress
 import json
 import math
+import os
 import re
+import secrets
+import ssl
+import stat
 import subprocess
 import threading
 import time
 from collections.abc import Mapping
 from datetime import date, datetime, timedelta
 from http import HTTPStatus
+from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -30,6 +38,8 @@ from chronovisor.core.ollama import (
     runtime_generation_routes,
 )
 from chronovisor.core.runtime_config import (
+    load_dashboard_config,
+    load_dashboard_lan_config,
     load_reranker_config,
     load_search_embedding_config,
     runtime_identity,
@@ -125,6 +135,24 @@ PROCESSING_ACTIVITY_POLL_SECONDS = 0.25
 PROCESSING_ACTIVITY_HEARTBEAT_SECONDS = 10.0
 PROCESSING_ACTIVITY_AUDIT_SECONDS = 1.0
 PROCESSING_ACTIVITY_RECENT_AUDIT_SECONDS = PROCESSING_ACTIVITY_POLL_SECONDS
+DASHBOARD_CREDENTIAL_VERSION = 2
+DASHBOARD_SESSION_COOKIE = "__Host-chronovisor_dashboard_session"
+DASHBOARD_SESSION_MAX_AGE_SECONDS = 12 * 60 * 60
+DASHBOARD_SESSION_LIMIT = 64
+DASHBOARD_PASSWORD_ALGORITHM = "scrypt"
+DASHBOARD_PASSWORD_MIN_LENGTH = 16
+DASHBOARD_PASSWORD_SCRYPT_N = 2**14
+DASHBOARD_PASSWORD_SCRYPT_R = 8
+DASHBOARD_PASSWORD_SCRYPT_P = 1
+DASHBOARD_PASSWORD_DKLEN = 32
+DASHBOARD_LOGIN_ATTEMPT_LIMIT = 5
+DASHBOARD_LOGIN_ATTEMPT_WINDOW_SECONDS = 5 * 60
+DASHBOARD_TLS_HANDSHAKE_TIMEOUT_SECONDS = 5.0
+DASHBOARD_IO_TIMEOUT_SECONDS = 30.0
+DASHBOARD_HANDLER_LIMIT = 32
+DASHBOARD_AUTH_CONCURRENCY_LIMIT = 2
+DASHBOARD_STREAM_LIMIT = 8
+_LOCK_TYPE = type(threading.Lock())
 _PROCESS_IDENTITY_MATCH = "match"
 _PROCESS_IDENTITY_MISMATCH = "mismatch"
 _PROCESS_IDENTITY_UNAVAILABLE = "unavailable"
@@ -3128,8 +3156,7 @@ def _decision_trace_execution_window(
     standalone_rows = [
         (index, row)
         for index, row in same_request
-        if row.get("kind") == "session"
-        and not _decision_trace_role(row.get("role"))[2]
+        if row.get("kind") == "session" and not _decision_trace_role(row.get("role"))[2]
     ]
     boundary_rows = sorted([*decision_rows, *standalone_rows])
     if active_rows:
@@ -3214,9 +3241,7 @@ def _decision_trace_overall_steps(
     )
     quorum_status = (
         "done"
-        if decision_status == "agreed"
-        or seal_failed
-        or structured_completed
+        if decision_status == "agreed" or seal_failed or structured_completed
         else "error"
         if decision_status == "quarantined" and quorum_attempted
         else "active"
@@ -3527,8 +3552,7 @@ def _decision_trace_snapshot(
     preferred_known = bool(
         preferred_request_sha256
         and any(
-            str((row or {}).get("request_sha256") or "")
-            == preferred_request_sha256
+            str((row or {}).get("request_sha256") or "") == preferred_request_sha256
             for row in [*activities, *history, *(trace_events or []), latest_decision]
         )
     )
@@ -3827,6 +3851,7 @@ def _local_consensus_snapshot(
         ),
         None,
     )
+
     def build_trace(preferred: str | None = None) -> dict[str, Any]:
         return _decision_trace_snapshot(
             activities,
@@ -3857,7 +3882,8 @@ def _local_consensus_snapshot(
             (
                 trace
                 for request in active_requests
-                if request and request != preferred_request_sha256
+                if request
+                and request != preferred_request_sha256
                 and (trace := build_trace(request))["active"]
             ),
             None,
@@ -5536,6 +5562,202 @@ def _snapshot_with_live_status(snapshot: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _write_private_file(path: Path, payload: bytes) -> None:
+    if not path.is_absolute():
+        raise ValueError("dashboard secret paths must be absolute")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        os.chmod(path, 0o600)
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            temporary.unlink()
+
+
+def _read_private_file(path: Path, label: str) -> bytes:
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError as exc:
+        raise RuntimeError(f"{label} is unavailable: {path}") from exc
+    try:
+        metadata = os.fstat(fd)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+        ):
+            raise RuntimeError(f"{label} must be a regular 0600 file: {path}")
+        if hasattr(os, "getuid") and metadata.st_uid != os.getuid():
+            raise RuntimeError(f"{label} must be owned by the dashboard user: {path}")
+        with os.fdopen(fd, "rb") as handle:
+            fd = -1
+            return handle.read()
+    finally:
+        if fd >= 0:
+            os.close(fd)
+
+
+def _password_digest(password: str, salt: bytes) -> bytes:
+    return hashlib.scrypt(
+        password.encode("utf-8"),
+        salt=salt,
+        n=DASHBOARD_PASSWORD_SCRYPT_N,
+        r=DASHBOARD_PASSWORD_SCRYPT_R,
+        p=DASHBOARD_PASSWORD_SCRYPT_P,
+        dklen=DASHBOARD_PASSWORD_DKLEN,
+        maxmem=64 * 1024 * 1024,
+    )
+
+
+def _write_dashboard_credentials(path: Path, username: str, password: str) -> None:
+    username = username.strip()
+    if re.fullmatch(r"[A-Za-z0-9._-]{1,64}", username) is None:
+        raise ValueError(
+            "dashboard username must contain 1 to 64 safe ASCII characters"
+        )
+    if len(password) < DASHBOARD_PASSWORD_MIN_LENGTH:
+        raise ValueError(
+            f"dashboard password must contain at least {DASHBOARD_PASSWORD_MIN_LENGTH} characters"
+        )
+    salt = secrets.token_bytes(16)
+    payload = {
+        "version": DASHBOARD_CREDENTIAL_VERSION,
+        "username": username,
+        "password": {
+            "algorithm": DASHBOARD_PASSWORD_ALGORITHM,
+            "salt": base64.b64encode(salt).decode("ascii"),
+            "digest": base64.b64encode(_password_digest(password, salt)).decode(
+                "ascii"
+            ),
+            "n": DASHBOARD_PASSWORD_SCRYPT_N,
+            "r": DASHBOARD_PASSWORD_SCRYPT_R,
+            "p": DASHBOARD_PASSWORD_SCRYPT_P,
+            "dklen": DASHBOARD_PASSWORD_DKLEN,
+        },
+        "created_at": datetime.now().astimezone().isoformat(),
+    }
+    _write_private_file(
+        path,
+        (json.dumps(payload, ensure_ascii=False, indent=2) + "\n").encode(),
+    )
+
+
+def _load_dashboard_credentials(path: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(_read_private_file(path, "dashboard credentials"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"dashboard credentials are malformed: {path}") from exc
+    password = payload.get("password") if isinstance(payload, dict) else None
+    if (
+        not isinstance(payload, dict)
+        or payload.get("version") != DASHBOARD_CREDENTIAL_VERSION
+        or not isinstance(payload.get("username"), str)
+        or re.fullmatch(r"[A-Za-z0-9._-]{1,64}", payload["username"]) is None
+        or not isinstance(password, dict)
+        or password.get("algorithm") != DASHBOARD_PASSWORD_ALGORITHM
+    ):
+        raise RuntimeError(f"dashboard credentials are malformed: {path}")
+    try:
+        salt = base64.b64decode(str(password["salt"]), validate=True)
+        digest = base64.b64decode(str(password["digest"]), validate=True)
+    except (KeyError, ValueError, binascii.Error) as exc:
+        raise RuntimeError(f"dashboard credentials are malformed: {path}") from exc
+    expected = {
+        "n": DASHBOARD_PASSWORD_SCRYPT_N,
+        "r": DASHBOARD_PASSWORD_SCRYPT_R,
+        "p": DASHBOARD_PASSWORD_SCRYPT_P,
+        "dklen": DASHBOARD_PASSWORD_DKLEN,
+    }
+    if (
+        len(salt) != 16
+        or len(digest) != DASHBOARD_PASSWORD_DKLEN
+        or any(password.get(key) != value for key, value in expected.items())
+    ):
+        raise RuntimeError(f"dashboard credentials are malformed: {path}")
+    return payload
+
+
+def _dashboard_credentials_match(
+    credentials: dict[str, Any], username: str, password: str
+) -> bool:
+    if re.fullmatch(r"[A-Za-z0-9._-]{1,64}", username) is None:
+        return False
+    stored_password = credentials.get("password")
+    if not isinstance(stored_password, dict):
+        return False
+    try:
+        salt = base64.b64decode(str(stored_password["salt"]), validate=True)
+        expected = base64.b64decode(str(stored_password["digest"]), validate=True)
+        actual = _password_digest(password, salt)
+    except (KeyError, ValueError, binascii.Error):
+        return False
+    return hmac.compare_digest(
+        username, str(credentials.get("username") or "")
+    ) and hmac.compare_digest(actual, expected)
+
+
+_PRIVATE_LAN_NETWORKS = tuple(
+    ipaddress.ip_network(value)
+    for value in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7")
+)
+_LINK_LOCAL_NETWORKS = tuple(
+    ipaddress.ip_network(value) for value in ("169.254.0.0/16", "fe80::/10")
+)
+
+
+class _ThreadingHTTPSServer(ThreadingHTTPServer):
+    def __init__(
+        self,
+        server_address: tuple[str, int],
+        handler: type[BaseHTTPRequestHandler],
+        *,
+        certfile: Path,
+        keyfile: Path,
+        handshake_timeout: float = DASHBOARD_TLS_HANDSHAKE_TIMEOUT_SECONDS,
+        io_timeout: float = DASHBOARD_IO_TIMEOUT_SECONDS,
+        handler_limit: int = DASHBOARD_HANDLER_LIMIT,
+    ) -> None:
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
+        context.set_alpn_protocols(["http/1.1"])
+        context.load_cert_chain(certfile, keyfile)
+        super().__init__(server_address, handler)
+        self.dashboard_tls_context = context
+        self.dashboard_tls_handshake_timeout = handshake_timeout
+        self.dashboard_io_timeout = io_timeout
+        self.dashboard_handler_slots = threading.BoundedSemaphore(handler_limit)
+
+    def process_request(self, request: Any, client_address: Any) -> None:
+        if not self.dashboard_handler_slots.acquire(blocking=False):
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except Exception:
+            self.dashboard_handler_slots.release()
+            raise
+
+    def process_request_thread(self, request: Any, client_address: Any) -> None:
+        secure_request = None
+        try:
+            request.settimeout(self.dashboard_tls_handshake_timeout)
+            secure_request = self.dashboard_tls_context.wrap_socket(
+                request, server_side=True
+            )
+            secure_request.settimeout(self.dashboard_io_timeout)
+            super().process_request_thread(secure_request, client_address)
+        except Exception:
+            self.shutdown_request(secure_request or request)
+        finally:
+            self.dashboard_handler_slots.release()
+
+
 def _normalized_client_ip(
     value: object,
 ) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
@@ -5554,7 +5776,10 @@ def _private_client_scope(value: object) -> str:
         return "invalid"
     if address.is_loopback:
         return "loopback"
-    if address.is_private or address.is_link_local:
+    if any(
+        address.version == network.version and address in network
+        for network in (*_PRIVATE_LAN_NETWORKS, *_LINK_LOCAL_NETWORKS)
+    ):
         return "private"
     return "public"
 
@@ -5563,11 +5788,22 @@ def _dashboard_bind_host_is_loopback(host: str) -> bool:
     return host.casefold() in {"localhost", "127.0.0.1"}
 
 
+def _dashboard_bind_host_is_private(host: str) -> bool:
+    address = _normalized_client_ip(host)
+    return (
+        isinstance(address, ipaddress.IPv4Address)
+        and _private_client_scope(host) == "private"
+    )
+
+
 class DashboardHandler(BaseHTTPRequestHandler):
     server_version = "LLMWikiDashboard/0.1"
 
     def _is_loopback(self) -> bool:
         return _private_client_scope(self.client_address[0]) == "loopback"
+
+    def _lan_enabled(self) -> bool:
+        return bool(getattr(self.server, "lan_access_enabled", False))
 
     def _deny_remote(self, status: HTTPStatus, message: str) -> None:
         body = message.encode("utf-8")
@@ -5579,16 +5815,171 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _browser_boundary_allows(self) -> bool:
-        if not self._is_loopback():
-            self._deny_remote(HTTPStatus.FORBIDDEN, "Loopback access only.")
+    def _deny_basic_auth(self, status: HTTPStatus = HTTPStatus.UNAUTHORIZED) -> None:
+        body = b"Authentication required."
+        self.send_response(status)
+        if status == HTTPStatus.UNAUTHORIZED:
+            self.send_header(
+                "WWW-Authenticate",
+                'Basic realm="Chronovisor Dashboard", charset="UTF-8"',
+            )
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        _send_security_headers(self)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _login_state(
+        self,
+    ) -> tuple[threading.Lock, dict[str, list[float]], dict[str, float]]:
+        lock = getattr(self.server, "dashboard_auth_lock", None)
+        attempts = getattr(self.server, "dashboard_login_attempts", None)
+        sessions = getattr(self.server, "dashboard_sessions", None)
+        if (
+            not isinstance(lock, _LOCK_TYPE)
+            or not isinstance(attempts, dict)
+            or not isinstance(sessions, dict)
+        ):
+            raise RuntimeError("dashboard LAN authentication is not initialized")
+        return lock, attempts, sessions
+
+    def _login_rate_limited(self) -> bool:
+        lock, attempts, _sessions = self._login_state()
+        client = str(self.client_address[0])
+        cutoff = time.monotonic() - DASHBOARD_LOGIN_ATTEMPT_WINDOW_SECONDS
+        with lock:
+            recent = [stamp for stamp in attempts.get(client, []) if stamp >= cutoff]
+            attempts[client] = recent
+            return len(recent) >= DASHBOARD_LOGIN_ATTEMPT_LIMIT
+
+    def _record_login_failure(self) -> None:
+        lock, attempts, _sessions = self._login_state()
+        client = str(self.client_address[0])
+        cutoff = time.monotonic() - DASHBOARD_LOGIN_ATTEMPT_WINDOW_SECONDS
+        with lock:
+            recent = [stamp for stamp in attempts.get(client, []) if stamp >= cutoff]
+            recent.append(time.monotonic())
+            attempts[client] = recent
+
+    def _basic_authorized(self) -> bool | None:
+        headers = self.headers.get_all("Authorization", [])
+        if len(headers) != 1 or len(headers[0]) > 2048:
             return False
-        port = int(self.server.server_address[1])
-        allowed_hosts = {
-            f"localhost:{port}",
-            f"127.0.0.1:{port}",
-            f"[::1]:{port}",
-        }
+        scheme, separator, encoded = headers[0].partition(" ")
+        if not separator or scheme.casefold() != "basic" or not encoded:
+            return False
+        try:
+            decoded = base64.b64decode(encoded, validate=True).decode("utf-8")
+        except (UnicodeError, ValueError, binascii.Error):
+            return False
+        username, separator, password = decoded.partition(":")
+        credentials = getattr(self.server, "dashboard_credentials", None)
+        slots = getattr(self.server, "dashboard_auth_slots", None)
+        if not separator or not isinstance(credentials, dict):
+            return False
+        if not isinstance(slots, threading.BoundedSemaphore):
+            raise RuntimeError("dashboard LAN authentication is not initialized")
+        if not slots.acquire(blocking=False):
+            return None
+        try:
+            return _dashboard_credentials_match(credentials, username, password)
+        finally:
+            slots.release()
+
+    def _session_authorized(self) -> bool:
+        try:
+            cookie_headers = self.headers.get_all("Cookie", [])
+            if len(cookie_headers) != 1:
+                return False
+            cookies = SimpleCookie()
+            cookies.load(cookie_headers[0])
+            supplied = cookies.get(DASHBOARD_SESSION_COOKIE)
+        except Exception:
+            return False
+        if supplied is None or len(supplied.value) > 128:
+            return False
+        lock, _attempts, sessions = self._login_state()
+        now = time.monotonic()
+        with lock:
+            expired = [token for token, expiry in sessions.items() if expiry <= now]
+            for token in expired:
+                sessions.pop(token, None)
+            return sessions.get(supplied.value, 0) > now
+
+    def _establish_session(self) -> None:
+        lock, attempts, sessions = self._login_state()
+        token = secrets.token_urlsafe(32)
+        now = time.monotonic()
+        with lock:
+            attempts.pop(str(self.client_address[0]), None)
+            if len(sessions) >= DASHBOARD_SESSION_LIMIT:
+                sessions.pop(min(sessions, key=lambda token: sessions[token]))
+            sessions[token] = now + DASHBOARD_SESSION_MAX_AGE_SECONDS
+        self.send_response(HTTPStatus.SEE_OTHER)
+        self.send_header("Location", "/")
+        self.send_header(
+            "Set-Cookie",
+            f"{DASHBOARD_SESSION_COOKIE}={token}; Path=/; "
+            f"Max-Age={DASHBOARD_SESSION_MAX_AGE_SECONDS}; Secure; HttpOnly; SameSite=Strict",
+        )
+        self.send_header("Cache-Control", "no-store")
+        _send_security_headers(self)
+        self.end_headers()
+
+    def _lan_authorized(self) -> bool:
+        if self._session_authorized():
+            return True
+        if self._login_rate_limited():
+            self._deny_basic_auth(HTTPStatus.TOO_MANY_REQUESTS)
+            return False
+        authorized = self._basic_authorized()
+        if authorized is None:
+            self._deny_basic_auth(HTTPStatus.TOO_MANY_REQUESTS)
+            return False
+        if not authorized:
+            if self.headers.get("Authorization"):
+                self._record_login_failure()
+            self._deny_basic_auth(
+                HTTPStatus.TOO_MANY_REQUESTS
+                if self._login_rate_limited()
+                else HTTPStatus.UNAUTHORIZED
+            )
+            return False
+        if self.headers.get("Upgrade", "").casefold() == "websocket":
+            return True
+        self._establish_session()
+        return False
+
+    def _acquire_stream_slot(self) -> bool:
+        if not self._lan_enabled():
+            return True
+        slots = getattr(self.server, "dashboard_stream_slots", None)
+        if not isinstance(slots, threading.BoundedSemaphore):
+            raise RuntimeError("dashboard LAN streams are not initialized")
+        return slots.acquire(blocking=False)
+
+    def _release_stream_slot(self) -> None:
+        if not self._lan_enabled():
+            return
+        slots = getattr(self.server, "dashboard_stream_slots", None)
+        if isinstance(slots, threading.BoundedSemaphore):
+            slots.release()
+
+    def _browser_boundary_allows(self) -> bool:
+        lan_enabled = self._lan_enabled()
+        scope = _private_client_scope(self.client_address[0])
+        if (lan_enabled and scope != "private") or (
+            not lan_enabled and scope != "loopback"
+        ):
+            self._deny_remote(HTTPStatus.FORBIDDEN, "Client network is not allowed.")
+            return False
+        port = int(self.server.server_address[1])  # type: ignore[index]
+        allowed_hosts = (
+            {f"{getattr(self.server, 'dashboard_public_host', '')}:{port}"}
+            if lan_enabled
+            else {f"localhost:{port}", f"127.0.0.1:{port}", f"[::1]:{port}"}
+        )
         hosts = self.headers.get_all("Host", [])
         host = hosts[0].strip().casefold() if len(hosts) == 1 else ""
         if host not in allowed_hosts:
@@ -5597,21 +5988,24 @@ class DashboardHandler(BaseHTTPRequestHandler):
         origins = self.headers.get_all("Origin", [])
         origin = origins[0].strip().casefold() if len(origins) == 1 else ""
         websocket = self.headers.get("Upgrade", "").casefold() == "websocket"
-        if len(origins) > 1 or (origin and origin != f"http://{host}"):
+        scheme = "https" if lan_enabled else "http"
+        if len(origins) > 1 or (origin and origin != f"{scheme}://{host}"):
             self._deny_remote(HTTPStatus.FORBIDDEN, "Request rejected.")
             return False
         if websocket and not origin:
             self._deny_remote(HTTPStatus.FORBIDDEN, "Request rejected.")
             return False
-        return True
+        return self._lan_authorized() if lan_enabled else True
 
     def _lan_access_response(self) -> None:
+        port = int(self.server.server_address[1])  # type: ignore[index]
+        host = str(getattr(self.server, "dashboard_public_host", ""))
         _json_response(
             self,
             {
-                "enabled": False,
-                "urls": [],
-                "trusted_lan_only": False,
+                "enabled": self._lan_enabled(),
+                "urls": [f"https://{host}:{port}/"] if self._lan_enabled() else [],
+                "trusted_lan_only": self._lan_enabled(),
             },
         )
 
@@ -5669,6 +6063,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
         )
 
     def _cortex_events_response(self, query: str) -> None:
+        if not self._acquire_stream_slot():
+            self._deny_remote(HTTPStatus.TOO_MANY_REQUESTS, "Stream limit reached.")
+            return
+        try:
+            self._cortex_events_response_with_slot(query)
+        finally:
+            self._release_stream_slot()
+
+    def _cortex_events_response_with_slot(self, query: str) -> None:
         upgrade = self.headers.get("Upgrade", "").casefold()
         connection = {
             item.strip().casefold()
@@ -5727,6 +6130,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return
 
     def _processing_activity_stream_response(self) -> None:
+        if not self._acquire_stream_slot():
+            self._deny_remote(HTTPStatus.TOO_MANY_REQUESTS, "Stream limit reached.")
+            return
+        try:
+            self._processing_activity_stream_response_with_slot()
+        finally:
+            self._release_stream_slot()
+
+    def _processing_activity_stream_response_with_slot(self) -> None:
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
         self.send_header("Cache-Control", "no-cache, no-transform")
@@ -5796,15 +6208,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     },
                 )
             elif path == "/api/local-consensus":
-                params = dict(
-                    parse_qsl(parsed.query, keep_blank_values=False)
-                )
+                params = dict(parse_qsl(parsed.query, keep_blank_values=False))
                 preferred_request_sha256 = params.get("request_sha256")
                 next_trace = params.get("next")
                 if (
                     preferred_request_sha256 is not None
-                    and re.fullmatch(r"[0-9a-f]{64}", preferred_request_sha256)
-                    is None
+                    and re.fullmatch(r"[0-9a-f]{64}", preferred_request_sha256) is None
                 ):
                     self.send_error(HTTPStatus.BAD_REQUEST, "Invalid request_sha256")
                     return
@@ -5949,36 +6358,95 @@ def serve(
     port: int,
     *,
     lan: bool = False,
+    tls_cert_file: Path | None = None,
+    tls_key_file: Path | None = None,
+    credentials_file: Path | None = None,
 ) -> None:
-    if lan:
-        raise ValueError("LAN dashboard access is disabled; use loopback only")
-    if not _dashboard_bind_host_is_loopback(host):
+    if lan and not _dashboard_bind_host_is_private(host):
+        raise ValueError("LAN dashboard host must be an explicit private IPv4 address")
+    if not lan and not _dashboard_bind_host_is_loopback(host):
         raise ValueError("dashboard host must be localhost or 127.0.0.1")
     with okf_runtime_operation(CHRONOVISOR_ROOT):
-        _serve_locked(host, port, lan=lan)
+        _serve_locked(
+            host,
+            port,
+            lan=lan,
+            tls_cert_file=tls_cert_file,
+            tls_key_file=tls_key_file,
+            credentials_file=credentials_file,
+        )
 
 
-def _serve_locked(host: str, port: int, *, lan: bool) -> None:
-    if lan:
-        raise ValueError("LAN dashboard access is disabled; use loopback only")
-    if not _dashboard_bind_host_is_loopback(host):
+def _serve_locked(
+    host: str,
+    port: int,
+    *,
+    lan: bool,
+    tls_cert_file: Path | None,
+    tls_key_file: Path | None,
+    credentials_file: Path | None,
+) -> None:
+    if lan and not _dashboard_bind_host_is_private(host):
+        raise ValueError("LAN dashboard host must be an explicit private IPv4 address")
+    if not lan and not _dashboard_bind_host_is_loopback(host):
         raise ValueError("dashboard host must be localhost or 127.0.0.1")
     init_chronovisor()
-    server = ThreadingHTTPServer((host, port), DashboardHandler)
-    print(f"Chronovisor dashboard: http://{host}:{port}")
+    server: ThreadingHTTPServer
+    if lan:
+        if tls_cert_file is None or tls_key_file is None or credentials_file is None:
+            raise ValueError(
+                "LAN dashboard requires TLS certificate, key, and credentials"
+            )
+        _read_private_file(tls_key_file, "dashboard TLS private key")
+        credentials = _load_dashboard_credentials(credentials_file)
+        try:
+            cert_stat = tls_cert_file.stat(follow_symlinks=False)
+        except OSError as exc:
+            raise RuntimeError(
+                f"dashboard TLS certificate is unavailable: {tls_cert_file}"
+            ) from exc
+        if tls_cert_file.is_symlink() or not stat.S_ISREG(cert_stat.st_mode):
+            raise RuntimeError("dashboard TLS certificate must be a regular file")
+        server = _ThreadingHTTPSServer(
+            (host, port),
+            DashboardHandler,
+            certfile=tls_cert_file,
+            keyfile=tls_key_file,
+        )
+        server.dashboard_credentials = credentials  # type: ignore[attr-defined]
+        server.dashboard_auth_lock = threading.Lock()  # type: ignore[attr-defined]
+        server.dashboard_auth_slots = threading.BoundedSemaphore(  # type: ignore[attr-defined]
+            DASHBOARD_AUTH_CONCURRENCY_LIMIT
+        )
+        server.dashboard_stream_slots = threading.BoundedSemaphore(  # type: ignore[attr-defined]
+            DASHBOARD_STREAM_LIMIT
+        )
+        server.dashboard_login_attempts = {}  # type: ignore[attr-defined]
+        server.dashboard_sessions = {}  # type: ignore[attr-defined]
+    else:
+        server = ThreadingHTTPServer((host, port), DashboardHandler)
+    server.lan_access_enabled = lan  # type: ignore[attr-defined]
+    server.dashboard_public_host = host  # type: ignore[attr-defined]
+    print(f"Chronovisor dashboard: {'https' if lan else 'http'}://{host}:{port}")
     server.serve_forever()
 
 
 def build_parser() -> argparse.ArgumentParser:
-    config = runtime_identity(config_only=True)["dashboard"]
+    config = load_dashboard_config()
     parser = argparse.ArgumentParser(description="Run the Chronovisor local dashboard.")
-    parser.add_argument("--host", default=config["host"])
-    parser.add_argument("--port", type=int, default=config["port"])
+    parser.add_argument("--host", default=config.host)
+    parser.add_argument("--port", type=int, default=config.port)
     parser.add_argument(
         "--lan",
         action="store_true",
-        help="Disabled: the dashboard supports loopback access only.",
+        help="Use the separately configured TLS-authenticated private-LAN endpoint.",
     )
+    parser.add_argument(
+        "--set-lan-credentials",
+        action="store_true",
+        help="Prompt for and store the configured LAN password, then exit.",
+    )
+    parser.add_argument("--username", default="admin")
     return parser
 
 
@@ -5986,11 +6454,45 @@ def main(argv: list[str] | None = None) -> int:
     """Run the ``chronovisor-dashboard`` command-line entry point."""
     parser = build_parser()
     args = parser.parse_args(argv)
+    lan_config = (
+        load_dashboard_lan_config() if args.lan or args.set_lan_credentials else None
+    )
+    if args.set_lan_credentials:
+        if lan_config is None or lan_config.credentials_file is None:
+            parser.error("[dashboard_lan].credentials_file must be an absolute path")
+        password = getpass.getpass("Dashboard LAN password: ")
+        confirmation = getpass.getpass("Confirm dashboard LAN password: ")
+        if password != confirmation:
+            parser.error("dashboard passwords do not match")
+        _write_dashboard_credentials(
+            lan_config.credentials_file, args.username, password
+        )
+        print(f"Dashboard LAN credentials stored: {lan_config.credentials_file}")
+        return 0
     if args.lan:
-        parser.error("--lan is disabled; the dashboard supports loopback access only")
+        if lan_config is None or not all(
+            (
+                lan_config.host,
+                lan_config.tls_cert_file,
+                lan_config.tls_key_file,
+                lan_config.credentials_file,
+            )
+        ):
+            parser.error(
+                "[dashboard_lan] requires host, tls_cert_file, tls_key_file, and credentials_file"
+            )
+        serve(
+            str(lan_config.host),
+            lan_config.port,
+            lan=True,
+            tls_cert_file=lan_config.tls_cert_file,
+            tls_key_file=lan_config.tls_key_file,
+            credentials_file=lan_config.credentials_file,
+        )
+        return 0
     if not _dashboard_bind_host_is_loopback(args.host):
         parser.error("--host must be localhost or 127.0.0.1")
-    serve(args.host, args.port, lan=args.lan)
+    serve(args.host, args.port)
     return 0
 
 

@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import socket
+import ssl
 import subprocess
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -19,7 +22,11 @@ from chronovisor.core import ollama, runtime_status
 from chronovisor.core.activity_log import activity_record
 from chronovisor.core.canonical_json import canonical_json_line_bytes_strict
 from chronovisor.core.durable_state import write_sealed_json
-from chronovisor.core.runtime_config import SearchEmbeddingConfig
+from chronovisor.core.runtime_config import (
+    DashboardConfig,
+    DashboardLanConfig,
+    SearchEmbeddingConfig,
+)
 from chronovisor.ingest import orchestrator
 from chronovisor.ops import dashboard
 
@@ -4257,6 +4264,9 @@ def test_dashboard_private_client_scope_rejects_public_addresses() -> None:
     assert dashboard._private_client_scope("127.0.0.1") == "loopback"
     assert dashboard._private_client_scope("192.168.1.22") == "private"
     assert dashboard._private_client_scope("10.1.2.3") == "private"
+    assert dashboard._private_client_scope("169.254.1.2") == "private"
+    assert dashboard._private_client_scope("192.0.0.1") == "public"
+    assert dashboard._private_client_scope("100.64.0.1") == "public"
     assert dashboard._private_client_scope("8.8.8.8") == "public"
     assert dashboard._private_client_scope("not-an-ip") == "invalid"
 
@@ -4413,36 +4423,438 @@ def test_dashboard_disables_lan_share_cookie_and_non_loopback_bind() -> None:
         "trusted_lan_only": False,
     }
     assert "set-cookie" not in response.headers
-    with pytest.raises(ValueError, match="LAN dashboard access is disabled"):
+    with pytest.raises(ValueError, match="explicit private IPv4"):
         dashboard.serve("127.0.0.1", 0, lan=True)
+    with pytest.raises(ValueError, match="explicit private IPv4"):
+        dashboard.serve("0.0.0.0", 0, lan=True)
     with pytest.raises(ValueError, match="dashboard host must be"):
         dashboard.serve("0.0.0.0", 0)
     with pytest.raises(ValueError, match="dashboard host must be"):
         dashboard.serve("::1", 0)
 
 
-def test_dashboard_handler_cannot_reenable_lan_access(monkeypatch) -> None:
+def test_dashboard_lan_requires_basic_then_uses_secure_bounded_session(
+    tmp_path: Path, monkeypatch
+) -> None:
+    credentials_path = tmp_path / "dashboard-credentials.json"
+    dashboard._write_dashboard_credentials(
+        credentials_path, "admin", "correct horse battery staple"
+    )
+    with pytest.raises(ValueError, match="safe ASCII"):
+        dashboard._write_dashboard_credentials(
+            credentials_path, "管理者", "correct horse battery staple"
+        )
+    credentials = dashboard._load_dashboard_credentials(credentials_path)
+    assert not dashboard._dashboard_credentials_match(
+        credentials, "管理者", "correct horse battery staple"
+    )
     monkeypatch.setattr(dashboard, "_private_client_scope", lambda _value: "private")
     server = dashboard.ThreadingHTTPServer(("127.0.0.1", 0), dashboard.DashboardHandler)
     server.lan_access_enabled = True
-    server.lan_access_token = "a" * 43
+    server.dashboard_public_host = "192.168.50.20"
+    server.dashboard_credentials = credentials
+    server.dashboard_auth_lock = threading.Lock()
+    server.dashboard_auth_slots = threading.BoundedSemaphore(1)
+    server.dashboard_stream_slots = threading.BoundedSemaphore(
+        dashboard.DASHBOARD_STREAM_LIMIT
+    )
+    server.dashboard_login_attempts = {}
+    server.dashboard_sessions = {}
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    host, port = server.server_address
+    headers = {
+        "Host": f"192.168.50.20:{port}",
+        "Origin": f"https://192.168.50.20:{port}",
+    }
+    try:
+        with dashboard.httpx.Client(follow_redirects=False, timeout=2) as client:
+            challenge = client.get(f"http://{host}:{port}/", headers=headers)
+            rejected = client.get(
+                f"http://{host}:{port}/", headers=headers, auth=("admin", "wrong")
+            )
+            assert server.dashboard_auth_slots.acquire(blocking=False)
+            saturated = client.get(
+                f"http://{host}:{port}/",
+                headers=headers,
+                auth=("admin", "correct horse battery staple"),
+            )
+            server.dashboard_auth_slots.release()
+            accepted = client.get(
+                f"http://{host}:{port}/",
+                headers=headers,
+                auth=("admin", "correct horse battery staple"),
+            )
+            session_cookie = accepted.headers["set-cookie"].split(";", 1)[0]
+            page = client.get(
+                f"http://{host}:{port}/",
+                headers={**headers, "Cookie": session_cookie},
+            )
+            duplicate_cookie = client.get(
+                f"http://{host}:{port}/",
+                headers=[
+                    *headers.items(),
+                    ("Cookie", session_cookie),
+                    ("Cookie", session_cookie),
+                ],
+            )
+            server.dashboard_sessions.clear()
+            server.dashboard_login_attempts[host] = [
+                time.monotonic()
+            ] * dashboard.DASHBOARD_LOGIN_ATTEMPT_LIMIT
+            rate_limited = client.get(
+                f"http://{host}:{port}/",
+                headers=headers,
+                auth=("admin", "correct horse battery staple"),
+            )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+    assert challenge.status_code == 401
+    assert rejected.status_code == 401
+    assert saturated.status_code == 429
+    assert accepted.status_code == 303
+    assert accepted.headers["location"] == "/"
+    assert "Secure" in accepted.headers["set-cookie"]
+    assert "HttpOnly" in accepted.headers["set-cookie"]
+    assert "SameSite=Strict" in accepted.headers["set-cookie"]
+    assert page.status_code == 200
+    assert duplicate_cookie.status_code == 401
+    assert rate_limited.status_code == 429
+    assert len(server.dashboard_sessions) == 0
+    assert credentials_path.stat().st_mode & 0o777 == 0o600
+    assert "correct horse battery staple" not in credentials_path.read_text()
+
+
+def test_dashboard_lan_tls_server_and_private_key_permissions(
+    tmp_path: Path, monkeypatch
+) -> None:
+    key = tmp_path / "dashboard.key"
+    cert = tmp_path / "dashboard.crt"
+    credentials_path = tmp_path / "dashboard-credentials.json"
+    subprocess.run(
+        [
+            "openssl",
+            "req",
+            "-x509",
+            "-newkey",
+            "rsa:2048",
+            "-nodes",
+            "-days",
+            "1",
+            "-keyout",
+            str(key),
+            "-out",
+            str(cert),
+            "-subj",
+            "/CN=192.168.50.20",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    key.chmod(0o600)
+    dashboard._write_dashboard_credentials(
+        credentials_path, "admin", "correct horse battery staple"
+    )
+    monkeypatch.setattr(dashboard, "_private_client_scope", lambda _value: "private")
+    server = dashboard._ThreadingHTTPSServer(
+        ("127.0.0.1", 0), dashboard.DashboardHandler, certfile=cert, keyfile=key
+    )
+    server.lan_access_enabled = True
+    server.dashboard_public_host = "192.168.50.20"
+    server.dashboard_credentials = dashboard._load_dashboard_credentials(
+        credentials_path
+    )
+    server.dashboard_auth_lock = threading.Lock()
+    server.dashboard_auth_slots = threading.BoundedSemaphore(
+        dashboard.DASHBOARD_AUTH_CONCURRENCY_LIMIT
+    )
+    server.dashboard_stream_slots = threading.BoundedSemaphore(
+        dashboard.DASHBOARD_STREAM_LIMIT
+    )
+    server.dashboard_login_attempts = {}
+    server.dashboard_sessions = {}
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     host, port = server.server_address
     try:
         response = dashboard.httpx.get(
-            f"http://{host}:{port}/?access_token={'a' * 43}", timeout=2
+            f"https://{host}:{port}/",
+            headers={
+                "Host": f"192.168.50.20:{port}",
+                "Origin": f"https://192.168.50.20:{port}",
+            },
+            auth=("admin", "correct horse battery staple"),
+            verify=False,
+            follow_redirects=False,
+            timeout=2,
         )
     finally:
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
 
-    assert response.status_code == 403
-    assert "set-cookie" not in response.headers
+    assert response.status_code == 303
+
+    key.chmod(0o644)
+    with pytest.raises(RuntimeError, match="0600"):
+        dashboard._read_private_file(key, "dashboard TLS private key")
+    link = tmp_path / "linked.key"
+    link.symlink_to(key)
+    with pytest.raises(RuntimeError, match="unavailable"):
+        dashboard._read_private_file(link, "dashboard TLS private key")
 
 
-def test_dashboard_cli_rejects_lan_and_non_loopback_host() -> None:
+def test_dashboard_tls_slow_handshake_does_not_block_and_handler_slots_recover(
+    tmp_path: Path, monkeypatch
+) -> None:
+    key = tmp_path / "dashboard.key"
+    cert = tmp_path / "dashboard.crt"
+    credentials_path = tmp_path / "dashboard-credentials.json"
+    subprocess.run(
+        [
+            "openssl",
+            "req",
+            "-x509",
+            "-newkey",
+            "rsa:2048",
+            "-nodes",
+            "-days",
+            "1",
+            "-keyout",
+            str(key),
+            "-out",
+            str(cert),
+            "-subj",
+            "/CN=192.168.50.20",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    key.chmod(0o600)
+    dashboard._write_dashboard_credentials(
+        credentials_path, "admin", "correct horse battery staple"
+    )
+    monkeypatch.setattr(dashboard, "_private_client_scope", lambda _value: "private")
+    server = dashboard._ThreadingHTTPSServer(
+        ("127.0.0.1", 0),
+        dashboard.DashboardHandler,
+        certfile=cert,
+        keyfile=key,
+        handshake_timeout=2,
+        io_timeout=0.2,
+        handler_limit=2,
+    )
+    server.lan_access_enabled = True
+    server.dashboard_public_host = "192.168.50.20"
+    server.dashboard_credentials = dashboard._load_dashboard_credentials(
+        credentials_path
+    )
+    server.dashboard_auth_lock = threading.Lock()
+    server.dashboard_auth_slots = threading.BoundedSemaphore(1)
+    server.dashboard_stream_slots = threading.BoundedSemaphore(2)
+    server.dashboard_login_attempts = {}
+    server.dashboard_sessions = {}
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    host, port = server.server_address
+    slow = socket.create_connection((host, port), timeout=2)
+    try:
+        response = dashboard.httpx.get(
+            f"https://{host}:{port}/",
+            headers={
+                "Host": f"192.168.50.20:{port}",
+                "Origin": f"https://192.168.50.20:{port}",
+            },
+            auth=("admin", "correct horse battery staple"),
+            verify=False,
+            follow_redirects=False,
+            timeout=1,
+        )
+        assert response.status_code == 303
+        assert server.dashboard_handler_slots.acquire(blocking=False)
+        assert not server.dashboard_handler_slots.acquire(blocking=False)
+        rejected = socket.create_connection((host, port), timeout=2)
+        rejected.settimeout(2)
+        assert rejected.recv(1) == b""
+        rejected.close()
+        server.dashboard_handler_slots.release()
+    finally:
+        slow.close()
+
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        acquired = [
+            server.dashboard_handler_slots.acquire(blocking=False) for _ in range(2)
+        ]
+        for value in acquired:
+            if value:
+                server.dashboard_handler_slots.release()
+        if all(acquired):
+            break
+        time.sleep(0.01)
+    client_context = ssl._create_unverified_context()
+    idle = client_context.wrap_socket(
+        socket.create_connection((host, port), timeout=2),
+        server_hostname="192.168.50.20",
+    )
+    time.sleep(0.3)
+    idle.close()
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        post_handshake = [
+            server.dashboard_handler_slots.acquire(blocking=False) for _ in range(2)
+        ]
+        for value in post_handshake:
+            if value:
+                server.dashboard_handler_slots.release()
+        if all(post_handshake):
+            break
+        time.sleep(0.01)
+    server.shutdown()
+    server.server_close()
+    thread.join(timeout=2)
+    assert all(acquired)
+    assert all(post_handshake)
+
+
+def test_dashboard_lan_websocket_accepts_basic_only_on_exact_https_origin(
+    tmp_path: Path, monkeypatch
+) -> None:
+    class ClosingCursor:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def poll_payload(self) -> dict[str, object]:
+            raise BrokenPipeError
+
+    credentials_path = tmp_path / "dashboard-credentials.json"
+    dashboard._write_dashboard_credentials(
+        credentials_path, "admin", "correct horse battery staple"
+    )
+    monkeypatch.setattr(dashboard, "_private_client_scope", lambda _value: "private")
+    monkeypatch.setattr(dashboard, "CortexEventCursor", ClosingCursor)
+    server = dashboard.ThreadingHTTPServer(("127.0.0.1", 0), dashboard.DashboardHandler)
+    server.lan_access_enabled = True
+    server.dashboard_public_host = "192.168.50.20"
+    server.dashboard_credentials = dashboard._load_dashboard_credentials(
+        credentials_path
+    )
+    server.dashboard_auth_lock = threading.Lock()
+    server.dashboard_auth_slots = threading.BoundedSemaphore(
+        dashboard.DASHBOARD_AUTH_CONCURRENCY_LIMIT
+    )
+    server.dashboard_stream_slots = threading.BoundedSemaphore(2)
+    server.dashboard_login_attempts = {}
+    server.dashboard_sessions = {}
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    host, port = server.server_address
+    authorization = base64.b64encode(b"admin:correct horse battery staple").decode(
+        "ascii"
+    )
+    session_token = "browser-session-token"
+    server.dashboard_sessions[session_token] = time.monotonic() + 60
+
+    def websocket_status(
+        *,
+        origin: str,
+        auth: str | None,
+        cookie: str | None = None,
+        key: str = "dGhlIHNhbXBsZSBub25jZQ==",
+    ) -> int:
+        auth_header = f"Authorization: Basic {auth}\r\n" if auth else ""
+        cookie_header = f"Cookie: {cookie}\r\n" if cookie else ""
+        request = (
+            "GET /api/cortex/events HTTP/1.1\r\n"
+            f"Host: 192.168.50.20:{port}\r\n"
+            f"Origin: {origin}\r\n"
+            "Upgrade: websocket\r\n"
+            "Connection: Upgrade\r\n"
+            "Sec-WebSocket-Version: 13\r\n"
+            f"Sec-WebSocket-Key: {key}\r\n"
+            f"{auth_header}{cookie_header}\r\n"
+        ).encode("ascii")
+        with socket.create_connection((host, port), timeout=2) as connection:
+            connection.sendall(request)
+            return int(connection.recv(4096).split(b"\r\n", 1)[0].split()[1])
+
+    try:
+        missing = websocket_status(origin=f"https://192.168.50.20:{port}", auth=None)
+        wrong_origin = websocket_status(
+            origin="https://attacker.example", auth=authorization
+        )
+        invalid_key = websocket_status(
+            origin=f"https://192.168.50.20:{port}",
+            auth=authorization,
+            key="invalid",
+        )
+        assert server.dashboard_stream_slots.acquire(blocking=False)
+        assert server.dashboard_stream_slots.acquire(blocking=False)
+        server.dashboard_stream_slots.release()
+        server.dashboard_stream_slots.release()
+        accepted = websocket_status(
+            origin=f"https://192.168.50.20:{port}", auth=authorization
+        )
+        assert server.dashboard_stream_slots.acquire(blocking=False)
+        assert server.dashboard_stream_slots.acquire(blocking=False)
+        stream_saturated = websocket_status(
+            origin=f"https://192.168.50.20:{port}", auth=authorization
+        )
+        sse_saturated = dashboard.httpx.get(
+            f"http://{host}:{port}/api/activity-stream",
+            headers={
+                "Host": f"192.168.50.20:{port}",
+                "Origin": f"https://192.168.50.20:{port}",
+                "Cookie": (f"{dashboard.DASHBOARD_SESSION_COOKIE}={session_token}"),
+            },
+            timeout=2,
+        )
+        server.dashboard_stream_slots.release()
+        server.dashboard_stream_slots.release()
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            acquired = [
+                server.dashboard_stream_slots.acquire(blocking=False)
+                for _ in range(2)
+            ]
+            for value in acquired:
+                if value:
+                    server.dashboard_stream_slots.release()
+            if all(acquired):
+                break
+            time.sleep(0.01)
+        else:
+            pytest.fail("stream slots were not released")
+        session_accepted = websocket_status(
+            origin=f"https://192.168.50.20:{port}",
+            auth=None,
+            cookie=f"{dashboard.DASHBOARD_SESSION_COOKIE}={session_token}",
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+    assert missing == 401
+    assert wrong_origin == 403
+    assert invalid_key == 400
+    assert accepted == 101
+    assert stream_saturated == 429
+    assert sse_saturated.status_code == 429
+    assert session_accepted == 101
+
+
+def test_dashboard_cli_rejects_unconfigured_lan_and_non_loopback_host(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        dashboard,
+        "load_dashboard_lan_config",
+        lambda: DashboardLanConfig(),
+    )
     with pytest.raises(SystemExit) as lan:
         dashboard.main(["--lan"])
     with pytest.raises(SystemExit) as public_host:
@@ -4458,8 +4870,8 @@ def test_dashboard_cli_rejects_lan_and_non_loopback_host() -> None:
 def test_dashboard_parser_uses_configured_loopback_bind(monkeypatch) -> None:
     monkeypatch.setattr(
         dashboard,
-        "runtime_identity",
-        lambda **_kwargs: {"dashboard": {"host": "localhost", "port": 9876}},
+        "load_dashboard_config",
+        lambda: DashboardConfig(host="localhost", port=9876),
     )
 
     args = dashboard.build_parser().parse_args([])

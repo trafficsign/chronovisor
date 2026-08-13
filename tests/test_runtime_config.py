@@ -175,6 +175,40 @@ port = 70000
     )
 
 
+def test_dashboard_lan_config_is_separate_and_requires_absolute_secret_paths(
+    tmp_path: Path,
+) -> None:
+    config = tmp_path / "config.toml"
+    config.write_text(
+        f"""
+[dashboard]
+host = "localhost"
+port = 9876
+
+[dashboard_lan]
+host = "192.168.50.20"
+port = 9877
+tls_cert_file = "{tmp_path / "dashboard.crt"}"
+tls_key_file = "relative.key"
+credentials_file = "{tmp_path / "credentials.json"}"
+""",
+        encoding="utf-8",
+    )
+
+    assert runtime_config.load_dashboard_config(
+        config
+    ) == runtime_config.DashboardConfig(host="localhost", port=9876)
+    assert runtime_config.load_dashboard_lan_config(
+        config
+    ) == runtime_config.DashboardLanConfig(
+        host="192.168.50.20",
+        port=9877,
+        tls_cert_file=tmp_path / "dashboard.crt",
+        tls_key_file=None,
+        credentials_file=tmp_path / "credentials.json",
+    )
+
+
 def test_runtime_repo_root_honors_explicit_checkout(tmp_path, monkeypatch) -> None:
     checkout = tmp_path / "chronovisor"
     monkeypatch.setenv("CHRONOVISOR_REPO_ROOT", str(checkout))

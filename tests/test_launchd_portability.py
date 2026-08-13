@@ -16,6 +16,7 @@ LAUNCHD = ROOT / "launchd"
 RENDERER = ROOT / "scripts" / "chronovisor-render-launchd"
 SERVICES = {
     "com.trafficsign.chronovisor-dashboard.plist": "chronovisor-dashboard",
+    "com.trafficsign.chronovisor-lan-dashboard.plist": "chronovisor-dashboard",
     "com.trafficsign.chronovisor-ingest-drain.plist": "chronovisor-ingest-drain",
     "com.trafficsign.chronovisor-librarian-review.plist": (
         "chronovisor-librarian-review"
@@ -29,6 +30,7 @@ SERVICES = {
 }
 GENERIC_SERVICES = {
     "dashboard": "chronovisor-dashboard",
+    "lan-dashboard": "chronovisor-dashboard",
     "ingest-drain": "chronovisor-ingest-drain",
     "librarian-review": "chronovisor-librarian-review",
     "library-evidence": "chronovisor-library-evidence",
@@ -101,6 +103,11 @@ def test_launchd_template_renders_portable_absolute_paths(
     if plist_name == "com.trafficsign.chronovisor-dashboard.plist":
         assert payload["ProgramArguments"] == [
             str(project_root / "scripts" / wrapper),
+        ]
+    if plist_name == "com.trafficsign.chronovisor-lan-dashboard.plist":
+        assert payload["ProgramArguments"] == [
+            str(project_root / "scripts" / wrapper),
+            "--lan",
         ]
 
 

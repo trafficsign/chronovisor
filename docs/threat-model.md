@@ -56,10 +56,19 @@ artifacts, or child-process environments.
 
 ### Dashboard and XSS
 
-The Dashboard binds only to `localhost` or `127.0.0.1`, rejects non-loopback
-clients, and validates Host and Origin. LAN mode is disabled. It has no separate
-user authentication boundary, so loopback is not permission to expose it
-through a proxy, tunnel, container port, or browser-sharing service.
+The default Dashboard binds only to `localhost` or `127.0.0.1`, rejects
+non-loopback clients, and validates Host and Origin. It has no separate user
+authentication boundary, so loopback is not permission to expose it through a
+proxy, tunnel, container port, or browser-sharing service.
+
+The optional LAN Dashboard is a separate process and launchd label. It binds
+only to one explicit RFC1918/link-local IPv4 address and requires TLS plus a
+scrypt-verified password. Host and Origin must exactly match that HTTPS origin;
+WebSockets require Origin and either the bounded in-memory session or Basic
+authentication. Public clients, wildcard binds, URL credentials, insecure key
+permissions, and missing credentials fail closed. This protects against
+accidental exposure and untrusted LAN clients, not a compromised same-user
+process, stolen client session, malicious trusted root, or host compromise.
 
 Stored page names, snippets, errors, and model-derived values are untrusted.
 They must reach the DOM through text-safe rendering or explicit escaping. The

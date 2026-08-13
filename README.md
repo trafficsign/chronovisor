@@ -98,8 +98,9 @@ flowchart LR
 - Structured mutation decisions use a local primary/challenger quorum and a
   tie-break model only when needed; invalid or unresolved decisions fail
   closed.
-- The Dashboard is an operations view. It accepts only loopback clients and
-  validates browser Host and Origin boundaries; it is not a remote admin UI.
+- The Dashboard is an operations view. Its default service accepts only
+  loopback clients. A separate, explicit LAN service is available only with a
+  private-IP bind, TLS, authentication, and strict browser origin checks.
 
 The common `LLMRuntime` foundation normalizes generation, embedding, reranking,
 source classification, and egress decisions. Production model callers use this
@@ -130,9 +131,10 @@ layout. Back up the complete data root before testing migration work.
 Chronovisor's security boundary is the local OS user, the data root, loopback
 services, configured model endpoints, and explicitly enabled network egress.
 It does not defend secrets or memory content from arbitrary code running as the
-same user, root, or a process-memory compromise. Keep the Dashboard on
-loopback, do not store plaintext credentials in the repository or config, and
-leave Web/cloud egress disabled unless its data policy is understood.
+same user, root, or a process-memory compromise. Keep the default Dashboard on
+loopback. Enable the separate LAN service only as documented in
+[operations](docs/operations.md); never store plaintext credentials in the
+repository, config, arguments, or logs.
 
 Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
 

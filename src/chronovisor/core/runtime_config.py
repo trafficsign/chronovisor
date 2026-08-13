@@ -36,6 +36,7 @@ DEFAULT_LAUNCHD_LABEL_PREFIX = "com.trafficsign.chronovisor-"
 DEFAULT_OLLAMA_URL = "http://localhost:11434"
 DEFAULT_DASHBOARD_HOST = "127.0.0.1"
 DEFAULT_DASHBOARD_PORT = 8765
+DEFAULT_DASHBOARD_LAN_PORT = 8766
 RUNTIME_PACKAGE = "chronovisor"
 _GITHUB_REPOSITORY_RE = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\Z")
 _LAUNCHD_PREFIX_RE = re.compile(
@@ -57,6 +58,15 @@ class RuntimeSettings:
 class DashboardConfig:
     host: str = DEFAULT_DASHBOARD_HOST
     port: int = DEFAULT_DASHBOARD_PORT
+
+
+@dataclass(frozen=True)
+class DashboardLanConfig:
+    host: str | None = None
+    port: int = DEFAULT_DASHBOARD_LAN_PORT
+    tls_cert_file: Path | None = None
+    tls_key_file: Path | None = None
+    credentials_file: Path | None = None
 
 
 def _clean_text(value: object, default: str) -> str:
@@ -152,7 +162,7 @@ def load_dashboard_config(path: Path | str | None = None) -> DashboardConfig:
     section = data.get("dashboard")
     section = section if isinstance(section, dict) else {}
     host = _clean_text(section.get("host"), DEFAULT_DASHBOARD_HOST).casefold()
-    if host not in {"localhost", "127.0.0.1"}:
+    if host not in {"localhost", DEFAULT_DASHBOARD_HOST}:
         host = DEFAULT_DASHBOARD_HOST
     port = section.get("port")
     if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
@@ -163,6 +173,31 @@ def load_dashboard_config(path: Path | str | None = None) -> DashboardConfig:
 def dashboard_url(path: Path | str | None = None) -> str:
     config = load_dashboard_config(path)
     return f"http://{config.host}:{config.port}"
+
+
+def load_dashboard_lan_config(path: Path | str | None = None) -> DashboardLanConfig:
+    data = load_toml_file(path)
+    section = data.get("dashboard_lan")
+    section = section if isinstance(section, dict) else {}
+    host = _clean_text(section.get("host"), "") or None
+    port = section.get("port")
+    if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
+        port = DEFAULT_DASHBOARD_LAN_PORT
+
+    def absolute_path(key: str) -> Path | None:
+        value = section.get(key)
+        candidate = (
+            Path(value).expanduser() if isinstance(value, str) and value else None
+        )
+        return candidate if candidate is not None and candidate.is_absolute() else None
+
+    return DashboardLanConfig(
+        host=host,
+        port=port,
+        tls_cert_file=absolute_path("tls_cert_file"),
+        tls_key_file=absolute_path("tls_key_file"),
+        credentials_file=absolute_path("credentials_file"),
+    )
 
 
 def runtime_source() -> str:

@@ -75,6 +75,45 @@ before loading the rendered plist. The semantic, reranker, and SearXNG services
 retain their dedicated installers below because those commands also perform
 service-specific setup and readiness checks.
 
+### Opt-in private-LAN Dashboard
+
+The normal Dashboard and its launchd label stay loopback-only. To add a second
+LAN endpoint, first configure `[dashboard_lan]` as shown in
+[configuration](config.md), using one exact private IPv4 address. Wildcard,
+loopback, public, and hostname binds fail closed.
+
+Create a local certificate with an IP subjectAltName and a private key, then
+store the password as a scrypt digest through the prompt (the password is never
+placed in argv, TOML, or logs):
+
+```sh
+install -d -m 700 ~/.chronovisor/runtime
+LAN_IP=192.168.50.20
+openssl req -x509 -newkey rsa:3072 -sha256 -nodes -days 397 \
+  -keyout ~/.chronovisor/runtime/dashboard-lan.key \
+  -out ~/.chronovisor/runtime/dashboard-lan.crt \
+  -subj "/CN=$LAN_IP" \
+  -addext "subjectAltName=IP:$LAN_IP" \
+  -addext "basicConstraints=critical,CA:FALSE" \
+  -addext "keyUsage=critical,digitalSignature,keyEncipherment" \
+  -addext "extendedKeyUsage=serverAuth"
+chmod 600 ~/.chronovisor/runtime/dashboard-lan.key
+chronovisor-dashboard --set-lan-credentials --username admin
+scripts/install-lan-dashboard-service
+```
+
+Verify and trust that exact certificate fingerprint on each intended client
+before browsing to `https://<private-ip>:8766/`; never click through a
+certificate warning. The
+LAN handler accepts only private/link-local clients, requires exact `Host` and
+same-origin HTTPS/WebSocket requests, rate-limits failed logins, and promotes a
+successful Basic login to a bounded 12-hour in-memory Secure/HttpOnly session.
+TLS handshakes run in bounded worker threads with a five-second deadline;
+concurrent handlers, scrypt checks, and the shared SSE/WebSocket pool are also
+bounded. Saturated authentication or stream pools return `429`, and abandoned
+connections release their slots. Restarting the LAN service revokes every
+session. URL tokens are unsupported.
+
 ### Semantic retrieval service
 
 Install the pinned Nemotron service after its model snapshot is present in the
