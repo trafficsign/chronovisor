@@ -30,7 +30,7 @@ from chronovisor.store import CHRONOVISOR_ROOT, init_chronovisor
 LOG_DIR = CHRONOVISOR_ROOT / "logs"
 RECALL_HOST_HEADROOM_MS = 250
 
-HOSTS = {"codex", "claude-code", "generic"}
+HOSTS = {"codex", "claude-code", "pi", "generic"}
 USER_PROMPT_EVENTS = {"user-prompt-submit", "userpromptsubmit", "prompt-submit"}
 STOP_EVENTS = {"stop"}
 
@@ -149,6 +149,8 @@ def save_enabled(host: str, explicit_config: Path | None = None) -> bool:
     env_name = (
         "CODEX_CHRONOVISOR_RECORD_ENABLED"
         if host == "codex"
+        else "PI_CHRONOVISOR_RECORD_ENABLED"
+        if host == "pi"
         else "CLAUDE_CODE_CHRONOVISOR_RECORD_ENABLED"
     )
     flag = env_flag(env_name)
@@ -364,19 +366,19 @@ def stop_tasks(host: str, args: argparse.Namespace) -> list[BackgroundTask]:
                     ],
                 )
             )
-        elif host == "claude-code":
+        elif host == "pi":
             tasks.append(
                 BackgroundTask(
-                    name="claude-code-save",
-                    module="chronovisor.claude_code_record",
+                    name="pi-save",
+                    module="chronovisor.pi_record",
                     args=["--hook", "--save"],
-                    env={"CLAUDE_CODE_CHRONOVISOR_RECORD_ENABLED": "1"},
-                    log_prefix="claude-code-save",
+                    env={"PI_CHRONOVISOR_RECORD_ENABLED": "1"},
+                    log_prefix="pi-save",
                     on_success=[
                         {
                             "name": "recall-audit-candidate",
                             "module": "chronovisor.recall_auditor",
-                            "args": ["--host", "claude-code", "--hook"],
+                            "args": ["--host", "pi", "--hook"],
                             "env": {},
                             "when_output_status": "saved",
                         }
@@ -384,7 +386,7 @@ def stop_tasks(host: str, args: argparse.Namespace) -> list[BackgroundTask]:
                 )
             )
     if (
-        host in {"codex", "claude-code"}
+        host in {"codex", "claude-code", "pi"}
         and content_correction_enabled(config)
     ):
         tasks.append(
