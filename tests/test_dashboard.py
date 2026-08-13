@@ -4867,6 +4867,35 @@ def test_dashboard_cli_rejects_unconfigured_lan_and_non_loopback_host(
     assert ipv6_host.value.code == 2
 
 
+def test_dashboard_cli_reports_short_lan_password_without_traceback_or_secret(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    credentials_file = tmp_path / "dashboard-lan-credentials.json"
+    prompts: list[str] = []
+    secret = "too-short"
+    monkeypatch.setattr(
+        dashboard,
+        "load_dashboard_lan_config",
+        lambda: DashboardLanConfig(credentials_file=credentials_file),
+    )
+    monkeypatch.setattr(
+        dashboard.getpass,
+        "getpass",
+        lambda prompt: prompts.append(prompt) or secret,
+    )
+
+    with pytest.raises(SystemExit) as result:
+        dashboard.main(["--set-lan-credentials"])
+
+    captured = capsys.readouterr()
+    assert result.value.code == 2
+    assert "minimum 16 characters" in prompts[0]
+    assert "at least 16 characters" in captured.err
+    assert "Traceback" not in captured.err
+    assert secret not in captured.err
+    assert not credentials_file.exists()
+
+
 def test_dashboard_parser_uses_configured_loopback_bind(monkeypatch) -> None:
     monkeypatch.setattr(
         dashboard,

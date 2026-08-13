@@ -6460,13 +6460,18 @@ def main(argv: list[str] | None = None) -> int:
     if args.set_lan_credentials:
         if lan_config is None or lan_config.credentials_file is None:
             parser.error("[dashboard_lan].credentials_file must be an absolute path")
-        password = getpass.getpass("Dashboard LAN password: ")
+        password = getpass.getpass(
+            f"Dashboard LAN password (minimum {DASHBOARD_PASSWORD_MIN_LENGTH} characters): "
+        )
         confirmation = getpass.getpass("Confirm dashboard LAN password: ")
         if password != confirmation:
             parser.error("dashboard passwords do not match")
-        _write_dashboard_credentials(
-            lan_config.credentials_file, args.username, password
-        )
+        try:
+            _write_dashboard_credentials(
+                lan_config.credentials_file, args.username, password
+            )
+        except ValueError as exc:
+            parser.error(str(exc))
         print(f"Dashboard LAN credentials stored: {lan_config.credentials_file}")
         return 0
     if args.lan:
