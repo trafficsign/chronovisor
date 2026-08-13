@@ -508,60 +508,104 @@ class LexicalIndex:
     ) -> list[ScoredPage]:
         with self._lock:
             connection = self._open()
-            query_counts = Counter(tokenize(query_text))
-            if not query_counts:
-                return []
-            terms = list(query_counts)
-            placeholders = ",".join("?" for _ in terms)
-            reference_clause = (
-                "" if include_reference else "AND p.page_type != 'reference'"
+            return self._query_connection(
+                connection,
+                query_text,
+                top_n=top_n,
+                include_reference=include_reference,
             )
-            try:
-                corpus = connection.execute(
-                    "SELECT COUNT(*), COALESCE(AVG(doc_len), 1.0) FROM pages"
-                ).fetchone()
-                n = int(corpus[0])
-                avgdl = float(corpus[1])
-                rows = connection.execute(
-                    f"""
-                    SELECT s.term, p.page_id, p.title, p.folder, p.updated,
-                           p.status, p.superseded_by, p.page_type, p.sensitivity,
-                           x.tf, p.doc_len, s.df, p.ordinal
-                    FROM postings x
-                    JOIN terms s ON s.term_id = x.term_id
-                    JOIN pages p ON p.ordinal = x.page_ordinal
-                    WHERE s.term IN ({placeholders}) {reference_clause}
-                    """,
-                    terms,
-                ).fetchall()
-            except sqlite3.OperationalError:
-                return []
-            scores: dict[str, float] = {}
-            page_rows: dict[str, tuple[object, ...]] = {}
-            page_ordinals: dict[str, int] = {}
-            k1 = 1.5
-            b = 0.75
-            for row in rows:
-                term = str(row[0])
-                page_id = str(row[1])
-                tf = int(row[9])
-                doc_len = int(row[10])
-                df = int(row[11])
-                idf = math.log((n - df + 0.5) / (df + 0.5) + 1)
-                tf_norm = (tf * (k1 + 1)) / (tf + k1 * (1 - b + b * doc_len / avgdl))
-                scores[page_id] = scores.get(page_id, 0.0) + (
-                    query_counts[term] * idf * tf_norm
+
+    def query_existing(
+        self,
+        query_text: str,
+        top_n: int = 20,
+        *,
+        include_reference: bool = False,
+    ) -> list[ScoredPage]:
+        """Query only an already-built valid projection without mutating it."""
+
+        if not self.path.is_file():
+            return []
+        try:
+            with sqlite3.connect(
+                f"file:{self.path}?mode=ro",
+                uri=True,
+                check_same_thread=False,
+                timeout=0.05,
+            ) as connection:
+                if int(connection.execute("PRAGMA user_version").fetchone()[0]) != SCHEMA_VERSION:
+                    return []
+                return self._query_connection(
+                    connection,
+                    query_text,
+                    top_n=top_n,
+                    include_reference=include_reference,
                 )
-                page_rows[page_id] = row[1:9]
-                page_ordinals[page_id] = int(row[12])
-            ranked = sorted(
-                scores.items(),
-                key=lambda item: (-item[1], page_ordinals[item[0]]),
+        except (OSError, sqlite3.DatabaseError):
+            return []
+
+    @staticmethod
+    def _query_connection(
+        connection: sqlite3.Connection,
+        query_text: str,
+        *,
+        top_n: int,
+        include_reference: bool,
+    ) -> list[ScoredPage]:
+        query_counts = Counter(tokenize(query_text))
+        if not query_counts:
+            return []
+        terms = list(query_counts)
+        placeholders = ",".join("?" for _ in terms)
+        reference_clause = (
+            "" if include_reference else "AND p.page_type != 'reference'"
+        )
+        try:
+            corpus = connection.execute(
+                "SELECT COUNT(*), COALESCE(AVG(doc_len), 1.0) FROM pages"
+            ).fetchone()
+            n = int(corpus[0])
+            avgdl = float(corpus[1])
+            rows = connection.execute(
+                f"""
+                SELECT s.term, p.page_id, p.title, p.folder, p.updated,
+                       p.status, p.superseded_by, p.page_type, p.sensitivity,
+                       x.tf, p.doc_len, s.df, p.ordinal
+                FROM postings x
+                JOIN terms s ON s.term_id = x.term_id
+                JOIN pages p ON p.ordinal = x.page_ordinal
+                WHERE s.term IN ({placeholders}) {reference_clause}
+                """,
+                terms,
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return []
+        scores: dict[str, float] = {}
+        page_rows: dict[str, tuple[object, ...]] = {}
+        page_ordinals: dict[str, int] = {}
+        k1 = 1.5
+        b = 0.75
+        for row in rows:
+            term = str(row[0])
+            page_id = str(row[1])
+            tf = int(row[9])
+            doc_len = int(row[10])
+            df = int(row[11])
+            idf = math.log((n - df + 0.5) / (df + 0.5) + 1)
+            tf_norm = (tf * (k1 + 1)) / (tf + k1 * (1 - b + b * doc_len / avgdl))
+            scores[page_id] = scores.get(page_id, 0.0) + (
+                query_counts[term] * idf * tf_norm
             )
-            return [
-                self._row_to_page(page_rows[page_id], score)
-                for page_id, score in ranked[: max(1, top_n)]
-            ]
+            page_rows[page_id] = row[1:9]
+            page_ordinals[page_id] = int(row[12])
+        ranked = sorted(
+            scores.items(),
+            key=lambda item: (-item[1], page_ordinals[item[0]]),
+        )
+        return [
+            LexicalIndex._row_to_page(page_rows[page_id], score)
+            for page_id, score in ranked[: max(1, top_n)]
+        ]
 
     def anchor_query(
         self,

@@ -55,13 +55,13 @@ code{background:var(--code-bg);padding:0.1rem 0.35rem;border-radius:3px;font-siz
 </head>
 <body>
 <script type="application/json" id="plan-meta">
-{"task_id":"plan_cef89aa67e5b4ef99e4b51890b402a60","created_at":"2026-08-13T14:31:31+09:00","状態":"ready","slug":"recall-precision-preserving-latency"}
+{"task_id":"plan_cef89aa67e5b4ef99e4b51890b402a60","created_at":"2026-08-13T14:31:31+09:00","状態":"running","slug":"recall-precision-preserving-latency"}
 </script>
 
 <header>
 <h1>Plan: <span id="plan-title">Chronovisor Recall 精度維持型レイテンシ最適化</span></h1>
 <div class="meta-bar">
-<span class="badge" data-bind="状態" data-state="ready">ready</span>
+<span class="badge" data-bind="状態" data-state="running">running</span>
 <span><code data-bind="task_id">plan_cef89aa67e5b4ef99e4b51890b402a60</code></span>
 <span data-bind="created_at">2026-08-13T14:31:31+09:00</span>
 </div>
@@ -207,6 +207,9 @@ code{background:var(--code-bg);padding:0.1rem 0.35rem;border-radius:3px;font-siz
 <ol class="log">
 <li><time>2026-08-13 14:31</time><span>canonical generatorで新規Planを作成。</span></li>
 <li><time>2026-08-13 14:36</time><span>live Recallログと実装経路を照合し、正常系の精度経路を維持したまま、fallback再入場・重複refresh・非権威shadow順序だけを最適化する独立計画として確定。</span></li>
+<li><time>2026-08-13 15:01</time><span>P0-A完了: 匿名baselineを <code>_handoff/2026-08-13_1446_recall-baseline.json</code> に固定（schema v1、本文/query/page本文は非保存）。tests/test_recall_baseline.pyで再現条件と匿名性を固定。</span></li>
+<li><time>2026-08-13 15:01</time><span>P0-B完了: recall_runtime.pyに stage_timings_ms 計測を追加（prepare/cleanup/session_load/field/compiler/teacher/rewrite/reranker/context/evidence_reconstruction/finalize/scheduler）。pipeline.pyでbm25_build/bm25_query/semantic/graph/verify等の検索stageを計測し、search.pyのlast_search_trace経由でrecallログへ統合。recall-log recordとrecall_log_snapshotにstage_timings_msを追加。authority/候補/順位/filter/context出力は不変更。</span></li>
+<li><time>2026-08-13 18:20</time><span>再監査でP0-A/Bを未完へ戻した。P0-Aはpaired replay用のcase key・candidate/top-k/rerank/context証跡が不足。P0-Bはouter telemetryの浅いmergeが検索stage timingを上書きし、複数queryも最終traceしか保持しないため、本番hook経路の証明になっていなかった。チェックは修正と回帰証拠が揃うまで付けない。</span></li>
 </ol>
 </section>
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -63,6 +64,7 @@ class PipelineResult:
     context_results: list[ScoredPage]
     usage_results: list[ScoredPage]
     negative_feedback: dict[str, Any]
+    stage_timings_ms: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -305,72 +307,109 @@ def run_search_pipeline(
     *,
     config: PipelineConfig,
     deps: PipelineDependencies,
+    stage_timings_ms: dict[str, int] | None = None,
 ) -> PipelineResult:
     """Run the current production search pipeline with explicit dependencies."""
     fetch_n = max(config.top_n * 5, 100)
+    timings = stage_timings_ms if stage_timings_ms is not None else {}
 
-    bm25 = deps.get_bm25()
-    bm25.build()
+    def timed(name: str, fn: Callable[[], Any]) -> Any:
+        t0 = time.monotonic()
+        try:
+            return fn()
+        finally:
+            elapsed_ms = int((time.monotonic() - t0) * 1000)
+            timings[name] = timings.get(name, 0) + elapsed_ms
+
+    bm25 = timed("bm25_load", deps.get_bm25)
+    timed("bm25_build", bm25.build)
     anchor_results: list[ScoredPage] = []
     if config.anchor_seed:
         anchor_query = getattr(bm25, "anchor_query", None)
         if callable(anchor_query):
             try:
-                anchor_results = anchor_query(
-                    query,
-                    top_n=min(fetch_n, 20),
-                    include_reference=config.include_reference,
+                anchor_results = timed(
+                    "bm25_anchor",
+                    lambda: anchor_query(
+                        query,
+                        top_n=min(fetch_n, 20),
+                        include_reference=config.include_reference,
+                    ),
                 )
             except TypeError:
-                anchor_results = anchor_query(query, top_n=min(fetch_n, 20))
+                anchor_results = timed(
+                    "bm25_anchor",
+                    lambda: anchor_query(query, top_n=min(fetch_n, 20)),
+                )
     try:
-        bm25_results = bm25.query(
-            query,
-            top_n=fetch_n,
-            include_reference=config.include_reference,
+        bm25_results = timed(
+            "bm25_query",
+            lambda: bm25.query(
+                query,
+                top_n=fetch_n,
+                include_reference=config.include_reference,
+            ),
         )
     except TypeError:
-        bm25_results = bm25.query(query, top_n=fetch_n)
+        bm25_results = timed(
+            "bm25_query", lambda: bm25.query(query, top_n=fetch_n)
+        )
 
     context_results: list[ScoredPage] = []
     if config.context_seed:
-        context_results = deps.context_seed_results(query, limit=4)
+        context_results = timed(
+            "context_seed", lambda: deps.context_seed_results(query, limit=4)
+        )
 
     search_mode = "bm25"
     sem_results: list[ScoredPage] = []
     if config.semantic:
         try:
-            sem_results = deps.semantic_search(
-                query,
-                top_n=fetch_n,
-                include_reference=config.include_reference,
-                timeout_ms=config.semantic_timeout_ms,
+            sem_results = timed(
+                "semantic",
+                lambda: deps.semantic_search(
+                    query,
+                    top_n=fetch_n,
+                    include_reference=config.include_reference,
+                    timeout_ms=config.semantic_timeout_ms,
+                ),
             )
         except TypeError:
-            sem_results = deps.semantic_search(query, top_n=fetch_n)
+            sem_results = timed(
+                "semantic",
+                lambda: deps.semantic_search(query, top_n=fetch_n),
+            )
         if sem_results:
             search_mode = "hybrid"
 
-    graph_results = _graph_results(
-        anchor_results,
-        bm25_results,
-        sem_results,
-        context_results,
-        config=config,
-        deps=deps,
-        fetch_n=fetch_n,
+    graph_results = timed(
+        "graph",
+        lambda: _graph_results(
+            anchor_results,
+            bm25_results,
+            sem_results,
+            context_results,
+            config=config,
+            deps=deps,
+            fetch_n=fetch_n,
+        ),
     )
     if config.verify_graph and sem_results and graph_results:
         try:
-            verified = deps.semantic_verify(
-                query,
-                [page.page_id for page in graph_results],
-                timeout_ms=config.semantic_timeout_ms,
+            verified = timed(
+                "verify",
+                lambda: deps.semantic_verify(
+                    query,
+                    [page.page_id for page in graph_results],
+                    timeout_ms=config.semantic_timeout_ms,
+                ),
             )
         except TypeError:
-            verified = deps.semantic_verify(
-                query,
-                [page.page_id for page in graph_results],
+            verified = timed(
+                "verify",
+                lambda: deps.semantic_verify(
+                    query, [page.page_id for page in graph_results]
+                ),
             )
         semantic_by_page = {page.page_id: page for page in sem_results}
         for page in verified:
@@ -382,15 +421,18 @@ def run_search_pipeline(
             key=lambda page: page.score,
             reverse=True,
         )[:fetch_n]
-    usage_results = _usage_results(
-        anchor_results,
-        bm25_results,
-        sem_results,
-        graph_results,
-        context_results,
-        config=config,
-        deps=deps,
-        fetch_n=fetch_n,
+    usage_results = timed(
+        "usage",
+        lambda: _usage_results(
+            anchor_results,
+            bm25_results,
+            sem_results,
+            graph_results,
+            context_results,
+            config=config,
+            deps=deps,
+            fetch_n=fetch_n,
+        ),
     )
     if graph_results and search_mode == "bm25":
         search_mode = "bm25+graph"
@@ -407,16 +449,20 @@ def run_search_pipeline(
 
     negative_meta: dict[str, Any] = {"status": "disabled"}
     if config.apply_negative_feedback:
-        results, negative_meta = apply_negative_feedback_stage(
-            query, results, deps=deps
+        results, negative_meta = timed(
+            "negative_feedback",
+            lambda: apply_negative_feedback_stage(query, results, deps=deps),
         )
 
     if config.filter_results:
-        results = deps.apply_filters(
-            results,
-            config.folder,
-            config.updated_after,
-            config.updated_before,
+        results = timed(
+            "filter",
+            lambda: deps.apply_filters(
+                results,
+                config.folder,
+                config.updated_after,
+                config.updated_before,
+            ),
         )
     if config.sort_results:
         results = deps.apply_sort(results, config.sort_by)
@@ -432,4 +478,5 @@ def run_search_pipeline(
         context_results=context_results,
         usage_results=usage_results,
         negative_feedback=negative_meta,
+        stage_timings_ms=timings,
     )

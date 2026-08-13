@@ -183,6 +183,12 @@ def get_bm25() -> BM25Index:
     return _BM25_SINGLETON
 
 
+def search_existing_bm25(query: str, *, top_n: int = 20) -> list[ScoredPage]:
+    """Read the existing lexical projection without refresh, build, or writes."""
+
+    return apply_filters(get_bm25().query_existing(query, top_n=top_n))
+
+
 # Semantic document projection shared by the immutable service index.
 MAX_CHUNKS_PER_PAGE = 8
 MAX_CHUNK_CHARS = 900
@@ -996,6 +1002,8 @@ def search(
             )
     _GRAPH_QUERY.value = query
     _GRAPH_ROLLOUT.value = rollout_key
+    stage_timings_ms: dict[str, int] = {}
+    _SEARCH_TRACE.value = {"stage_timings_ms": stage_timings_ms}
     try:
         result = run_search_pipeline(
             query,
@@ -1011,7 +1019,11 @@ def search(
                 semantic_timeout_ms=semantic_timeout_ms,
             ),
             deps=_pipeline_dependencies(),
+            stage_timings_ms=stage_timings_ms,
         )
+    except BaseException:
+        _SEARCH_TRACE.value = {"stage_timings_ms": dict(stage_timings_ms)}
+        raise
     finally:
         _GRAPH_QUERY.value = ""
         _GRAPH_ROLLOUT.value = ""
@@ -1037,5 +1049,6 @@ def search(
         "verified_graph": sorted(graph_ids & semantic_ids),
         "paths": graph_expansion_trace(),
         "query_plan": getattr(_GRAPH_TRACE, "query_plan", "direct"),
+        "stage_timings_ms": dict(result.stage_timings_ms or {}),
     }
     return result.results, result.search_mode

@@ -4,12 +4,14 @@ import io
 import json
 import subprocess
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from chronovisor.core.durable_state import okf_writer_lock
+from chronovisor.core.search import ScoredPage
 from chronovisor.hosts import hook_dispatcher
 from chronovisor.ops import background_jobs
 from chronovisor.recall import recall_breaker, recall_runtime
@@ -163,6 +165,172 @@ def test_user_prompt_dispatches_to_recall_runtime(monkeypatch, capsys) -> None:
     assert seen["perform_search"] is True
 
 
+def test_user_prompt_logs_degraded_result_after_render(monkeypatch, capsys) -> None:
+    events: list[str] = []
+    monkeypatch.setattr(
+        recall_runtime,
+        "load_policy",
+        lambda _path: recall_runtime.RecallPolicy(log_decisions=True),
+    )
+    monkeypatch.setattr(
+        recall_runtime,
+        "run_recall",
+        lambda *_a, **_k: recall_runtime.RecallResult(
+            status="degraded",
+            decision="none",
+            confidence=0.0,
+            queries=[],
+            reasons=[],
+            matched_terms={},
+            search_mode="bm25-fallback",
+            evidence_features={"authority": "teacher"},
+        ),
+    )
+    monkeypatch.setattr(
+        recall_runtime,
+        "render_output",
+        lambda *_a, **_k: (events.append("render") or "{}"),
+    )
+    monkeypatch.setattr(
+        recall_runtime,
+        "append_recall_log",
+        lambda _request, result: events.append(f"log:{result.status}"),
+    )
+    monkeypatch.setattr("sys.stdin", io.StringIO('{"prompt":"remember"}'))
+
+    assert hook_dispatcher.main(
+        ["--host", "codex", "--event", "UserPromptSubmit", "--hook"]
+    ) == 0
+    assert capsys.readouterr().out == "{}\n"
+    assert events == ["render", "log:degraded"]
+
+
+@pytest.mark.parametrize("status", ["ok", "degraded"])
+def test_user_prompt_owns_exactly_once_log_even_when_append_raises(
+    monkeypatch,
+    capsys,
+    status: str,
+) -> None:
+    events: list[str] = []
+    monkeypatch.setattr(
+        recall_runtime,
+        "load_policy",
+        lambda _path: recall_runtime.RecallPolicy(log_decisions=True),
+    )
+
+    def run(_request, policy, **_kwargs):
+        assert policy.log_decisions is False
+        return recall_runtime.RecallResult(
+            status=status,
+            decision="none",
+            confidence=0.0,
+            queries=[],
+            reasons=[],
+            matched_terms={},
+        )
+
+    def append(_request, _result):
+        events.append("append")
+        raise RuntimeError("append completed then raised")
+
+    monkeypatch.setattr(recall_runtime, "run_recall", run)
+    monkeypatch.setattr(
+        recall_runtime,
+        "render_output",
+        lambda *_a, **_k: (events.append("render") or "{}"),
+    )
+    monkeypatch.setattr(recall_runtime, "append_recall_log", append)
+    monkeypatch.setattr("sys.stdin", io.StringIO('{"prompt":"remember"}'))
+
+    assert hook_dispatcher.main(
+        ["--host", "codex", "--event", "UserPromptSubmit", "--hook"]
+    ) == 0
+    assert capsys.readouterr().out == "{}\n"
+    assert events == ["render", "append"]
+
+
+def test_user_prompt_log_merges_conditional_pipeline_and_finalize_timings(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    log_file = tmp_path / "recall-log.jsonl"
+    policy = recall_runtime.RecallPolicy(
+        judge_mode="off",
+        rewrite_enabled=False,
+        processor_shadow_enabled=False,
+        log_decisions=True,
+    )
+    monkeypatch.setattr(recall_runtime, "RECALL_LOG_FILE", log_file)
+    monkeypatch.setattr(recall_runtime, "load_policy", lambda _path: policy)
+
+    def evidence_search(*, deadline_at, _telemetry, **_kwargs):
+        for stage in ("cleanup", "session_load", "teacher", "reranker"):
+            recall_runtime._stage_started(_telemetry, stage, deadline_at)
+            recall_runtime._stage_completed(_telemetry, stage, deadline_at)
+        return recall_runtime._EvidenceSearchOutcome(
+            score=1.0,
+            session_state=None,
+            pre_results=[ScoredPage("page", "Page", "", "", 1.0)],
+            search_mode="hybrid",
+            evidence_features={
+                "stage_timings_ms": {
+                    "bm25_query": 4,
+                    "semantic": 5,
+                    "graph": 6,
+                }
+            },
+            rewrite_queries=[],
+            reranker_metadata={"status": "disabled", "mode": "off"},
+            field_shadow_metadata={},
+            post_authority={},
+        )
+
+    monkeypatch.setattr(recall_runtime, "_run_evidence_search", evidence_search)
+    monkeypatch.setattr(
+        recall_runtime,
+        "collect_context",
+        lambda *_a, **_k: [
+            recall_runtime.ContextItem("page", "Page", "", 1.0)
+        ],
+    )
+    monkeypatch.setattr(recall_runtime, "state_context_for_request", lambda *_a: "")
+    monkeypatch.setattr(
+        recall_runtime,
+        "observe_evidence_reconstruction",
+        lambda *_a, **_k: {"status": "skipped"},
+    )
+    monkeypatch.setattr(
+        "chronovisor.recall.recall_policy_store.append_live_episode",
+        lambda *_a, **_k: None,
+    )
+    monkeypatch.setattr("sys.stdin", io.StringIO('{"prompt":"前回の続き"}'))
+
+    assert hook_dispatcher.main(
+        ["--host", "codex", "--event", "UserPromptSubmit", "--hook"]
+    ) == 0
+    assert capsys.readouterr().out
+    record = json.loads(log_file.read_text(encoding="utf-8").splitlines()[-1])
+    timings = record["stage_timings_ms"]
+    assert {
+        "scheduler",
+        "prepare",
+        "evidence_search",
+        "cleanup",
+        "session_load",
+        "teacher",
+        "reranker",
+        "context",
+        "evidence_reconstruction",
+        "finalize",
+        "bm25_query",
+        "semantic",
+        "graph",
+    } <= set(timings)
+    assert all(isinstance(value, int) and value >= 0 for value in timings.values())
+    assert "finalize" in record["evidence_features"]["stage_timings_ms"]
+
+
 def test_user_prompt_unexpected_failure_is_exit_zero_fail_open(
     monkeypatch,
     capsys,
@@ -274,6 +442,40 @@ def test_user_prompt_outer_timeout_logs_anonymous_stage_telemetry(
     }
     assert recorded[0].latency_ms == 4_000
     assert "private prompt" not in json.dumps(recorded[0].evidence_features)
+
+
+def test_outer_mid_context_timeout_logs_partial_stage_exactly_once(
+    monkeypatch,
+    capsys,
+) -> None:
+    recorded: list[recall_runtime.RecallResult] = []
+    monkeypatch.setattr(
+        recall_runtime,
+        "load_policy",
+        lambda _path: recall_runtime.RecallPolicy(log_decisions=True),
+    )
+
+    def interrupt(*_args, _telemetry, _final_deadline_at, **_kwargs):
+        recall_runtime._stage_started(_telemetry, "context", _final_deadline_at)
+        time.sleep(0.002)
+        raise hook_dispatcher.RecallWallClockTimeout("outer timeout")
+
+    monkeypatch.setattr(recall_runtime, "_run_recall_impl", interrupt)
+    monkeypatch.setattr(
+        recall_runtime,
+        "append_recall_log",
+        lambda _request, result: recorded.append(result),
+    )
+    monkeypatch.setattr("sys.stdin", io.StringIO('{"prompt":"private"}'))
+
+    assert hook_dispatcher.main(
+        ["--host", "codex", "--event", "UserPromptSubmit", "--hook"]
+    ) == 0
+    assert capsys.readouterr().out == "{}\n"
+    assert len(recorded) == 1
+    assert recorded[0].status == "timeout"
+    timings = recorded[0].evidence_features["stage_timings_ms"]
+    assert timings["context"] >= 1
 
 
 def test_outer_recall_deadline_is_the_total_budget() -> None:

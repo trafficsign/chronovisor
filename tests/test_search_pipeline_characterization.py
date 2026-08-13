@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -112,6 +113,106 @@ def test_production_search_calls_bounded_graph_and_skips_usage_prior(
             0.01,
         ]
     )
+
+
+def test_production_search_reports_anonymous_stage_timings(monkeypatch) -> None:
+    from chronovisor.core import retention
+
+    bm25 = FakeBM25([page("bm25-a", 10.0)])
+
+    monkeypatch.setattr(search, "get_bm25", lambda: bm25)
+    monkeypatch.setattr(
+        search, "semantic_search", lambda query, top_n=20: [page("sem-a", 0.8)]
+    )
+    monkeypatch.setattr(search, "graph_expand_results", lambda results, **kwargs: [])
+    monkeypatch.setattr(
+        search, "load_negative_feedback_config", disabled_negative_feedback
+    )
+    monkeypatch.setattr(
+        search,
+        "load_active_fusion_weights",
+        lambda: dict(search.DEFAULT_FUSION_WEIGHTS),
+    )
+    monkeypatch.setattr(retention, "retention_score", lambda _page_id: 0.0)
+
+    search.search("query", top_n=3, semantic=True)
+    trace = search.last_search_trace()
+    timings = trace.get("stage_timings_ms")
+    assert isinstance(timings, dict)
+    assert "bm25_build" in timings
+    assert "bm25_query" in timings
+    assert "semantic" in timings
+    assert all(isinstance(ms, int) and ms >= 0 for ms in timings.values())
+
+
+def test_pipeline_stage_timing_accumulates_compatibility_retry(monkeypatch) -> None:
+    class RetryingBM25(FakeBM25):
+        def query(self, query: str, top_n: int = 20, **kwargs) -> list[ScoredPage]:
+            if "include_reference" in kwargs:
+                self.queries.append((query, top_n))
+                raise TypeError("legacy query signature")
+            return super().query(query, top_n)
+
+    bm25 = RetryingBM25([page("bm25-a", 10.0)])
+    ticks = iter(range(100))
+    monkeypatch.setattr(
+        pipeline_mod,
+        "time",
+        SimpleNamespace(monotonic=lambda: next(ticks)),
+    )
+    monkeypatch.setattr(search, "get_bm25", lambda: bm25)
+    monkeypatch.setattr(search, "context_seed_results", lambda *_a, **_k: [])
+    monkeypatch.setattr(search, "graph_expand_results", lambda *_a, **_k: [])
+    monkeypatch.setattr(
+        search, "load_negative_feedback_config", disabled_negative_feedback
+    )
+    monkeypatch.setattr(
+        search,
+        "load_active_fusion_weights",
+        lambda: dict(search.DEFAULT_FUSION_WEIGHTS),
+    )
+
+    search.search("query", top_n=1, semantic=False)
+
+    assert bm25.queries == [("query", 100), ("query", 100)]
+    assert search.last_search_trace()["stage_timings_ms"]["bm25_query"] == 2000
+
+
+def test_production_search_preserves_partial_timings_on_base_exception(
+    monkeypatch,
+) -> None:
+    class PipelineInterrupted(BaseException):
+        pass
+
+    ticks = iter(range(100))
+    monkeypatch.setattr(
+        pipeline_mod,
+        "time",
+        SimpleNamespace(monotonic=lambda: next(ticks)),
+    )
+    monkeypatch.setattr(search, "get_bm25", lambda: FakeBM25([page("page", 1.0)]))
+    monkeypatch.setattr(
+        search,
+        "semantic_search",
+        lambda *_a, **_k: (_ for _ in ()).throw(PipelineInterrupted()),
+    )
+    monkeypatch.setattr(
+        search,
+        "load_active_fusion_weights",
+        lambda: dict(search.DEFAULT_FUSION_WEIGHTS),
+    )
+
+    with pytest.raises(PipelineInterrupted):
+        search.search("query", top_n=1, semantic=True)
+
+    timings = search.last_search_trace()["stage_timings_ms"]
+    assert timings == {
+        "bm25_load": 1000,
+        "bm25_build": 1000,
+        "bm25_query": 2000,
+        "context_seed": 1000,
+        "semantic": 1000,
+    }
 
 
 def test_production_search_builds_usage_prior_only_when_weight_is_positive(
@@ -227,6 +328,16 @@ def test_hybrid_current_tracks_production_when_default_graph_weight_changes(
             module, "load_negative_feedback_config", disabled_negative_feedback
         )
         monkeypatch.setitem(module.DEFAULT_FUSION_WEIGHTS, "graph", 0.5)
+    monkeypatch.setattr(
+        search,
+        "load_active_fusion_weights",
+        lambda: dict(search.DEFAULT_FUSION_WEIGHTS),
+    )
+    monkeypatch.setattr(
+        search_eval,
+        "load_active_fusion_weights",
+        lambda: dict(search_eval.DEFAULT_FUSION_WEIGHTS),
+    )
 
     production_results, production_mode = search.search("query", top_n=2)
     eval_payload = search_eval.run_variant("query", "hybrid-current", top_n=2)

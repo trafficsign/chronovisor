@@ -36,7 +36,7 @@ from chronovisor.core.index_store import (
 )
 from chronovisor.core.jsonl_write import append_jsonl_durable
 from chronovisor.core.recall_runtime_paths import RECALL_DIR
-from chronovisor.core.search import last_search_trace
+from chronovisor.core.search import last_search_trace, search_existing_bm25
 from chronovisor.core.search import search as run_search
 from chronovisor.core.store import (
     CHRONOVISOR_ROOT,
@@ -1211,6 +1211,8 @@ def search_candidates(
     *,
     request: RecallRequest | None = None,
     deadline_at: float | None = None,
+    stage_timings_ms: dict[str, int] | None = None,
+    diagnostic_rows: list[dict[str, Any]] | None = None,
 ) -> tuple[list[Any], str]:
     if not queries:
         return [], ""
@@ -1287,7 +1289,9 @@ def search_candidates(
             )
         return output
 
-    def search_one(query: str) -> tuple[list[Any], str, list[dict[str, Any]]]:
+    def search_one(
+        query: str,
+    ) -> tuple[list[Any], str, list[dict[str, Any]], dict[str, int]]:
         remaining_ms = _require_remaining_budget(deadline_at, "search")
         search_kwargs: dict[str, Any] = {
             "query": query,
@@ -1316,7 +1320,18 @@ def search_candidates(
             search_kwargs["semantic_timeout_ms"] = remaining_ms
         if request is not None and request.session_id:
             search_kwargs["rollout_key"] = request.session_id
-        results, mode = run_search(**search_kwargs)
+        try:
+            results, mode = run_search(**search_kwargs)
+        except BaseException:
+            failed_trace = last_search_trace()
+            failed_timings = failed_trace.get("stage_timings_ms")
+            if stage_timings_ms is not None and isinstance(failed_timings, dict):
+                for name, elapsed_ms in failed_timings.items():
+                    if isinstance(name, str) and isinstance(elapsed_ms, int):
+                        stage_timings_ms[name] = (
+                            stage_timings_ms.get(name, 0) + elapsed_ms
+                        )
+            raise
         actual_trace = last_search_trace()
         actual_paths = actual_trace.get("paths")
         rows = trace_rows(
@@ -1340,7 +1355,8 @@ def search_candidates(
         else:
             shadow_paths = {}
         rows.extend(trace_rows(query, shadow_paths, shadow=True))
-        return results, mode, rows
+        timings = actual_trace.get("stage_timings_ms")
+        return results, mode, rows, timings if isinstance(timings, dict) else {}
 
     # Recall rewrites produce up to three independent entrances. Offline
     # callers may run them together so the semantic service can micro-batch;
@@ -1368,8 +1384,14 @@ def search_candidates(
     merged: dict[str, Any] = {}
     mode = "bm25"
     typed_trace_rows: list[dict[str, Any]] = []
-    for query_index, (results, search_mode, trace_values) in enumerate(searched):
+    for query_index, (results, search_mode, trace_values, timings) in enumerate(searched):
         typed_trace_rows.extend(trace_values)
+        if stage_timings_ms is not None:
+            for name, elapsed_ms in timings.items():
+                if isinstance(name, str) and isinstance(elapsed_ms, int):
+                    stage_timings_ms[name] = (
+                        stage_timings_ms.get(name, 0) + elapsed_ms
+                    )
         if search_mode != "bm25":
             mode = search_mode
         query_weight = max(0.50, 1.0 - (0.25 * query_index))
@@ -1386,7 +1408,9 @@ def search_candidates(
             if existing is None or adjusted.score > existing.score:
                 merged[result.page_id] = adjusted
     diagnostic_remaining_ms = _remaining_budget_ms(deadline_at)
-    if typed_trace_rows and (
+    if diagnostic_rows is not None:
+        diagnostic_rows.extend(typed_trace_rows)
+    elif typed_trace_rows and (
         diagnostic_remaining_ms is None or diagnostic_remaining_ms > 0
     ):
         # Candidate-path telemetry is supervision input, never part of the
@@ -1415,15 +1439,16 @@ def collect_context(
     if decision == "none" or not queries:
         return []
 
-    _require_remaining_budget(deadline_at, "context startup")
-    startup = okf_startup_status(CHRONOVISOR_ROOT)
-    if not (startup.allowed and startup.layout == "okf_v0_2"):
+    if pre_results is None:
         _require_remaining_budget(deadline_at, "context startup")
-        init_chronovisor()
-    _require_remaining_budget(deadline_at, "context store")
-    store = get_store()
-    _require_remaining_budget(deadline_at, "context store refresh")
-    store.refresh_if_stale()
+        startup = okf_startup_status(CHRONOVISOR_ROOT)
+        if not (startup.allowed and startup.layout == "okf_v0_2"):
+            _require_remaining_budget(deadline_at, "context startup")
+            init_chronovisor()
+        _require_remaining_budget(deadline_at, "context store")
+        store = get_store()
+        _require_remaining_budget(deadline_at, "context store refresh")
+        store.refresh_if_stale()
 
     items: list[ContextItem] = []
     seen: set[str] = set()
@@ -1893,6 +1918,7 @@ def _stage_started(
     if telemetry is not None:
         telemetry["last_stage_started"] = stage
         telemetry["remaining_ms"] = _remaining_budget_ms(deadline_at)
+        telemetry.setdefault("_stage_timers", {})[stage] = time.monotonic()
 
 
 def _stage_completed(
@@ -1903,6 +1929,29 @@ def _stage_completed(
     if telemetry is not None:
         telemetry["last_stage_completed"] = stage
         telemetry["remaining_ms"] = _remaining_budget_ms(deadline_at)
+        started_at = telemetry.get("_stage_timers", {}).pop(stage, None)
+        if started_at is not None:
+            stage_timings = telemetry.setdefault("stage_timings_ms", {})
+            elapsed_ms = int((time.monotonic() - started_at) * 1000)
+            stage_timings[stage] = stage_timings.get(stage, 0) + elapsed_ms
+        if not telemetry.get("_stage_timers"):
+            telemetry.pop("_stage_timers", None)
+
+
+def _stage_interrupted(telemetry: dict[str, Any] | None) -> None:
+    """Preserve elapsed time for stages interrupted by timeout or error."""
+
+    if telemetry is None:
+        return
+    timers = telemetry.pop("_stage_timers", {})
+    now = time.monotonic()
+    if isinstance(timers, dict):
+        timings = telemetry.setdefault("stage_timings_ms", {})
+        for stage, started_at in timers.items():
+            if isinstance(stage, str) and isinstance(started_at, int | float):
+                timings[stage] = timings.get(stage, 0) + max(
+                    0, int((now - float(started_at)) * 1000)
+                )
 
 
 def _fail_open_recall_budget(
@@ -1918,6 +1967,7 @@ def _fail_open_recall_budget(
 ) -> RecallResult:
     """Return deterministic fallback context or an explicit fail-open timeout."""
 
+    _stage_interrupted(telemetry)
     if allow_timeout_fallback and perform_search:
         remaining_ms = _remaining_budget_ms(final_deadline_at)
         if remaining_ms is not None and remaining_ms >= 100:
@@ -1935,10 +1985,8 @@ def _fail_open_recall_budget(
             )
             if telemetry is not None:
                 telemetry["fallback_completed"] = True
-                fallback.evidence_features.update(telemetry)
+                _merge_telemetry(fallback.evidence_features, telemetry)
             fallback.latency_ms = _elapsed_ms(started)
-            if policy.log_decisions:
-                append_recall_log(request, fallback)
             return fallback
     result = RecallResult(
         status="timeout",
@@ -1951,11 +1999,7 @@ def _fail_open_recall_budget(
         error=reason,
         decision_id=request.decision_id or new_decision_id(),
     )
-    result.evidence_features.update(telemetry or {})
-    result.state_context = state_context_for_request(request, policy)
-    result.context = result.state_context
-    if result.state_context:
-        result.reasons.extend(["core memory injected", "state register injected"])
+    _merge_telemetry(result.evidence_features, telemetry)
     if policy.log_decisions:
         append_recall_log(request, result)
     return result
@@ -2040,9 +2084,11 @@ def _finalize_recall_result(
     session_state: Any,
     queries: list[str],
     deadline_at: float | None = None,
+    telemetry: dict[str, Any] | None = None,
 ) -> RecallResult:
     """Attach bounded context, advance session state, and append one decision log."""
 
+    _stage_started(telemetry, "finalize", deadline_at)
     if request.decision_id:
         result.decision_id = request.decision_id
     recall_context = format_recall_context(result, policy)
@@ -2143,6 +2189,8 @@ def _finalize_recall_result(
             )
         except Exception:
             pass
+    _stage_completed(telemetry, "finalize", deadline_at)
+    _merge_telemetry(result.evidence_features, telemetry)
     if policy.log_decisions:
         append_recall_log(request, result)
     return result
@@ -2189,6 +2237,58 @@ class _EvidenceSearchOutcome:
     rewrite_queries: list[str]
     reranker_metadata: dict[str, Any]
     field_shadow_metadata: dict[str, Any]
+    post_authority: dict[str, Any]
+
+
+def _merge_search_stage_timings(
+    evidence_features: dict[str, Any],
+    trace: dict[str, Any] | None,
+) -> None:
+    """Merge anonymous per-query pipeline stage timings into evidence features."""
+    if not isinstance(trace, dict):
+        return
+    search_timings = trace.get("stage_timings_ms")
+    if not isinstance(search_timings, dict):
+        return
+    merged = evidence_features.setdefault("stage_timings_ms", {})
+    for name, ms in search_timings.items():
+        if isinstance(ms, int):
+            merged[name] = merged.get(name, 0) + ms
+
+
+def _merge_telemetry(
+    evidence_features: dict[str, Any], telemetry: dict[str, Any] | None
+) -> None:
+    if telemetry is None:
+        return
+    timings = telemetry.get("stage_timings_ms")
+    evidence_features.update(
+        {
+            key: value
+            for key, value in telemetry.items()
+            if key != "stage_timings_ms" and not key.startswith("_")
+        }
+    )
+    if isinstance(timings, dict):
+        previously_merged = telemetry.get("_merged_stage_timings_ms")
+        if not isinstance(previously_merged, dict):
+            previously_merged = {}
+        _merge_search_stage_timings(
+            evidence_features,
+            {
+                "stage_timings_ms": {
+                    name: elapsed_ms - int(previously_merged.get(name, 0) or 0)
+                    for name, elapsed_ms in timings.items()
+                    if isinstance(name, str)
+                    and isinstance(elapsed_ms, int)
+                    and (
+                        name not in previously_merged
+                        or elapsed_ms > int(previously_merged.get(name, 0) or 0)
+                    )
+                }
+            },
+        )
+        telemetry["_merged_stage_timings_ms"] = dict(timings)
 
 
 def _run_evidence_search(
@@ -2200,12 +2300,15 @@ def _run_evidence_search(
     reasons: list[str],
     deadline_at: float,
     processor_authority: bool,
+    _telemetry: dict[str, Any] | None = None,
 ) -> _EvidenceSearchOutcome:
     """Run Field observation, teacher search, rewrite, rerank, and evidence score."""
 
     from chronovisor.recall.recall_field_candidate import (
+        effective_rollout,
         run_candidate_teacher_pair,
     )
+    from chronovisor.recall.recall_field_schema import load_recall_field_config
     from chronovisor.recall.recall_session import (
         cleanup_sessions,
         load_session_state,
@@ -2213,11 +2316,18 @@ def _run_evidence_search(
     )
 
     _require_remaining_budget(deadline_at, "evidence search")
+    _stage_started(_telemetry, "cleanup", deadline_at)
     cleanup_sessions(policy.session_ttl_seconds)
+    _stage_completed(_telemetry, "cleanup", deadline_at)
     _require_remaining_budget(deadline_at, "session load")
+    _stage_started(_telemetry, "session_load", deadline_at)
     session_state = load_session_state(active_request.session_id)
-    shadow_remaining_ms = _remaining_budget_ms(deadline_at)
-    if shadow_remaining_ms is None or shadow_remaining_ms > 0:
+    _stage_completed(_telemetry, "session_load", deadline_at)
+    field_config = effective_rollout(load_recall_field_config())
+    field_authority_path = field_config.mode == "active"
+    field_metadata: dict[str, Any]
+    if field_authority_path:
+        _stage_started(_telemetry, "field", deadline_at)
         try:
             from chronovisor.recall.recall_field import run_field_turn
 
@@ -2231,29 +2341,18 @@ def _run_evidence_search(
                 "status": "error",
                 "reason": type(exc).__name__,
             }
+        _stage_completed(_telemetry, "field", deadline_at)
     else:
         field_metadata = {
-            "status": "skipped",
-            "reason": "insufficient_budget",
+            "status": "deferred",
+            "mode": field_config.mode,
+            "reason": "post_authority",
         }
-    shadow_remaining_ms = _remaining_budget_ms(deadline_at)
-    if shadow_remaining_ms is None or shadow_remaining_ms > 0:
-        try:
-            from chronovisor.recall.recall_compiler import compile_query
-
-            field_metadata["recall_compiler"] = compile_query(active_request.prompt)
-        except Exception as exc:
-            field_metadata["recall_compiler"] = {
-                "status": "error",
-                "reason": type(exc).__name__,
-                "page_ids": [],
-            }
-    else:
-        field_metadata["recall_compiler"] = {
-            "status": "skipped",
-            "reason": "insufficient_budget",
-            "page_ids": [],
-        }
+    field_metadata["recall_compiler"] = {
+        "status": "deferred",
+        "reason": "post_authority",
+        "page_ids": [],
+    }
 
     initial_queries = build_queries(
         active_request,
@@ -2262,21 +2361,49 @@ def _run_evidence_search(
         policy,
         session_state=session_state,
     )
-    pre_results, search_mode, candidate_metadata = run_candidate_teacher_pair(
-        query=active_request.prompt,
-        field_turn=field_metadata,
-        teacher_search=lambda: search_candidates(
-            initial_queries,
-            policy,
-            request=active_request,
-            deadline_at=deadline_at,
-        ),
-        timeout_ms=max(
-            25,
-            min(650, _remaining_budget_ms(deadline_at) or 650),
-        ),
-        certificate_boundary_enabled=processor_authority,
-    )
+    search_stage_timings: dict[str, int] = {}
+    deferred_diagnostic_rows: list[dict[str, Any]] = []
+    _stage_started(_telemetry, "teacher", deadline_at)
+
+    def teacher_search() -> tuple[list[Any], str]:
+        try:
+            return search_candidates(
+                initial_queries,
+                policy,
+                request=active_request,
+                deadline_at=deadline_at,
+                stage_timings_ms=search_stage_timings,
+                diagnostic_rows=deferred_diagnostic_rows,
+            )
+        except BaseException:
+            if _telemetry is not None:
+                partial = _telemetry.setdefault("stage_timings_ms", {})
+                for name, elapsed_ms in search_stage_timings.items():
+                    partial[name] = partial.get(name, 0) + elapsed_ms
+            raise
+
+    if field_authority_path:
+        pre_results, search_mode, candidate_metadata = run_candidate_teacher_pair(
+            query=active_request.prompt,
+            field_turn=field_metadata,
+            teacher_search=teacher_search,
+            timeout_ms=max(
+                25,
+                min(650, _remaining_budget_ms(deadline_at) or 650),
+            ),
+            config=field_config,
+            certificate_boundary_enabled=processor_authority,
+        )
+    else:
+        pre_results, search_mode = teacher_search()
+        candidate_metadata = {
+            "status": "deferred",
+            "authority": "teacher",
+            "reason": "post_authority",
+        }
+    teacher_results = list(pre_results)
+    teacher_search_mode = search_mode
+    _stage_completed(_telemetry, "teacher", deadline_at)
     field_metadata["candidate_observer"] = candidate_metadata
     evidence_features = build_evidence_features(
         request=active_request,
@@ -2285,6 +2412,7 @@ def _run_evidence_search(
         results=pre_results,
         search_mode=search_mode,
     )
+    _merge_search_stage_timings(evidence_features, {"stage_timings_ms": search_stage_timings})
     evidence_features["field_shadow"] = field_metadata
     preliminary_score = evidence_score(evidence_features, policy)
     evidence_features["evidence_score"] = preliminary_score
@@ -2297,6 +2425,7 @@ def _run_evidence_search(
         policy=policy,
         preliminary_features=evidence_features,
     ):
+        _stage_started(_telemetry, "rewrite", deadline_at)
         rewrite_started = time.monotonic()
         rewrite_timeout_ms = _require_remaining_budget(deadline_at, "rewrite")
         rewrite_queries, rewrite_confidence, rewrite_reason = run_query_rewriter(
@@ -2306,6 +2435,7 @@ def _run_evidence_search(
             session_summary(session_state),
             timeout_ms=rewrite_timeout_ms,
         )
+        _stage_completed(_telemetry, "rewrite", deadline_at)
         rewrite_metrics = {
             "rewrite_attempted": True,
             "rewrite_latency_ms": _elapsed_ms(rewrite_started),
@@ -2331,21 +2461,42 @@ def _run_evidence_search(
                 session_state=session_state,
                 rewrite_queries=rewrite_queries,
             )
-            pre_results, search_mode, candidate_metadata = run_candidate_teacher_pair(
-                query=" ".join(queries_for_search),
-                field_turn=field_metadata,
-                teacher_search=lambda: search_candidates(
-                    queries_for_search,
-                    policy,
-                    request=active_request,
-                    deadline_at=deadline_at,
-                ),
-                timeout_ms=max(
-                    25,
-                    min(650, _remaining_budget_ms(deadline_at) or 650),
-                ),
-                certificate_boundary_enabled=processor_authority,
-            )
+            _stage_started(_telemetry, "teacher", deadline_at)
+
+            def rewritten_teacher_search() -> tuple[list[Any], str]:
+                try:
+                    return search_candidates(
+                        queries_for_search,
+                        policy,
+                        request=active_request,
+                        deadline_at=deadline_at,
+                        stage_timings_ms=search_stage_timings,
+                        diagnostic_rows=deferred_diagnostic_rows,
+                    )
+                except BaseException:
+                    if _telemetry is not None:
+                        partial = _telemetry.setdefault("stage_timings_ms", {})
+                        for name, elapsed_ms in search_stage_timings.items():
+                            partial[name] = partial.get(name, 0) + elapsed_ms
+                    raise
+
+            if field_authority_path:
+                pre_results, search_mode, candidate_metadata = run_candidate_teacher_pair(
+                    query=" ".join(queries_for_search),
+                    field_turn=field_metadata,
+                    teacher_search=rewritten_teacher_search,
+                    timeout_ms=max(
+                        25,
+                        min(650, _remaining_budget_ms(deadline_at) or 650),
+                    ),
+                    config=field_config,
+                    certificate_boundary_enabled=processor_authority,
+                )
+            else:
+                pre_results, search_mode = rewritten_teacher_search()
+            teacher_results = list(pre_results)
+            teacher_search_mode = search_mode
+            _stage_completed(_telemetry, "teacher", deadline_at)
             field_metadata["candidate_observer"] = candidate_metadata
             evidence_features = build_evidence_features(
                 request=active_request,
@@ -2355,19 +2506,42 @@ def _run_evidence_search(
                 search_mode=search_mode,
                 rewrite_confidence=rewrite_confidence,
             )
+            _merge_search_stage_timings(
+                evidence_features, {"stage_timings_ms": search_stage_timings}
+            )
             evidence_features["field_shadow"] = field_metadata
             evidence_features.update(rewrite_metrics)
 
     reranker_metadata: dict[str, Any] = {}
+    from chronovisor.core.runtime_config import load_reranker_config
+
+    reranker_mode = load_reranker_config().service.mode
     remaining_for_reranker = _remaining_budget_ms(deadline_at)
-    if remaining_for_reranker is not None and remaining_for_reranker >= 100:
+    _stage_started(_telemetry, "reranker", deadline_at)
+    if reranker_mode in {"canary", "on"}:
+        if remaining_for_reranker is not None and remaining_for_reranker < 100:
+            raise RecallBudgetExhausted(
+                "recall authoritative reranker budget exhausted"
+            )
         from chronovisor.recall.recall_processor import rank_recall_candidates
 
         pre_results, reranker_metadata = rank_recall_candidates(
             active_request.prompt,
             pre_results,
-            timeout_ms=min(1_500, remaining_for_reranker - 50),
+            timeout_ms=max(
+                25,
+                min(1_500, (remaining_for_reranker or 1_500) - 50),
+            ),
         )
+        reranker_status = str(reranker_metadata.get("status") or "")
+        if (
+            reranker_status in {"unavailable", "error", "failed", "fallback"}
+            or reranker_metadata.get("fail_open") is True
+            or reranker_metadata.get("degraded") is True
+        ):
+            raise RecallBudgetExhausted(
+                "recall authoritative reranker unavailable"
+            )
         evidence_features = build_evidence_features(
             request=active_request,
             matched=matched,
@@ -2376,9 +2550,21 @@ def _run_evidence_search(
             search_mode=search_mode,
             rewrite_confidence=rewrite_confidence,
         )
+        _merge_search_stage_timings(
+            evidence_features, {"stage_timings_ms": search_stage_timings}
+        )
         evidence_features.update(rewrite_metrics)
         evidence_features["reranker"] = reranker_metadata
         evidence_features["field_shadow"] = field_metadata
+    elif reranker_mode == "shadow":
+        reranker_metadata = {
+            "status": "deferred",
+            "mode": "shadow",
+            "reason": "post_authority",
+        }
+    else:
+        reranker_metadata = {"status": "disabled", "mode": reranker_mode}
+    _stage_completed(_telemetry, "reranker", deadline_at)
     score = evidence_score(evidence_features, policy)
     evidence_features["evidence_score"] = score
     evidence_features["decision_pre_judge"] = decision_from_score(score, policy)
@@ -2391,6 +2577,14 @@ def _run_evidence_search(
         rewrite_queries=rewrite_queries,
         reranker_metadata=reranker_metadata,
         field_shadow_metadata=field_metadata,
+        post_authority={
+            "field_deferred": not field_authority_path,
+            "field_config": field_config,
+            "teacher_results": teacher_results,
+            "teacher_search_mode": teacher_search_mode,
+            "reranker_shadow_deferred": reranker_mode == "shadow",
+            "diagnostic_rows": deferred_diagnostic_rows,
+        },
     )
 
 
@@ -2433,6 +2627,107 @@ def processor_authority_for_request(
         )
     except Exception:
         return False
+
+
+def _run_post_authority_shadows(
+    *,
+    request: RecallRequest,
+    policy: RecallPolicy,
+    session_state: Any,
+    candidates: list[Any],
+    evidence_features: dict[str, Any],
+    reranker_metadata: dict[str, Any],
+    field_metadata: dict[str, Any],
+    post_authority: dict[str, Any],
+    processor_authority: bool,
+    deadline_at: float,
+    telemetry: dict[str, Any] | None,
+) -> None:
+    """Observe non-authoritative lanes after the injected ranking is fixed."""
+
+    remaining_ms = _remaining_budget_ms(deadline_at)
+    if remaining_ms is not None and remaining_ms < 100:
+        return
+    diagnostic_rows = post_authority.get("diagnostic_rows")
+    if isinstance(diagnostic_rows, list) and diagnostic_rows:
+        try:
+            append_jsonl_durable(
+                TYPED_GRAPH_TRACE_FILE,
+                [row for row in diagnostic_rows if isinstance(row, dict)],
+                sort_keys=True,
+            )
+        except OSError:
+            pass
+    if post_authority.get("field_deferred"):
+        _stage_started(telemetry, "field", deadline_at)
+        try:
+            from chronovisor.recall.recall_field import run_field_turn
+            from chronovisor.recall.recall_field_candidate import (
+                run_candidate_teacher_pair,
+            )
+
+            observed = run_field_turn(
+                host=request.host,
+                session_id=request.session_id,
+                prompt=request.prompt,
+                config=post_authority.get("field_config"),
+            )
+            _unused, _mode, observer = run_candidate_teacher_pair(
+                query=request.prompt,
+                field_turn=observed,
+                teacher_search=lambda: (
+                    list(post_authority.get("teacher_results") or []),
+                    str(post_authority.get("teacher_search_mode") or "bm25"),
+                ),
+                timeout_ms=max(25, min(650, _remaining_budget_ms(deadline_at) or 650)),
+                config=post_authority.get("field_config"),
+                certificate_boundary_enabled=False,
+            )
+            observed["candidate_observer"] = observer
+            field_metadata.clear()
+            field_metadata.update(observed)
+        except Exception as exc:
+            field_metadata.update(status="error", reason=type(exc).__name__)
+        _stage_completed(telemetry, "field", deadline_at)
+    _stage_started(telemetry, "compiler", deadline_at)
+    try:
+        from chronovisor.recall.recall_compiler import compile_query
+
+        field_metadata["recall_compiler"] = compile_query(request.prompt)
+    except Exception as exc:
+        field_metadata["recall_compiler"] = {
+            "status": "error",
+            "reason": type(exc).__name__,
+            "page_ids": [],
+        }
+    _stage_completed(telemetry, "compiler", deadline_at)
+    if post_authority.get("reranker_shadow_deferred"):
+        _stage_started(telemetry, "reranker_shadow", deadline_at)
+        try:
+            from chronovisor.recall.recall_processor import rank_recall_candidates
+
+            _unused, observed_reranker = rank_recall_candidates(
+                request.prompt,
+                candidates,
+                timeout_ms=max(25, min(1_500, _remaining_budget_ms(deadline_at) or 25)),
+            )
+            reranker_metadata.clear()
+            reranker_metadata.update(observed_reranker)
+        except Exception as exc:
+            reranker_metadata.update(status="error", reason=type(exc).__name__)
+        _stage_completed(telemetry, "reranker_shadow", deadline_at)
+    if policy.processor_shadow_enabled and not processor_authority:
+        _stage_started(telemetry, "processor_shadow", deadline_at)
+        evidence_features["processor_shadow"] = observe_processor_shadow(
+            request.prompt,
+            policy,
+            request=request,
+            session_state=session_state,
+            candidates=candidates,
+            reranker_metadata=reranker_metadata,
+            deadline_at=deadline_at,
+        )
+        _stage_completed(telemetry, "processor_shadow", deadline_at)
 
 
 def _prepare_recall_request(
@@ -2549,6 +2844,7 @@ def _run_recall_impl(
     pre_results: list[Any] = []
     reranker_metadata: dict[str, Any] = {}
     field_shadow_metadata: dict[str, Any] = {}
+    post_authority: dict[str, Any] = {}
 
     if policy.gate_mode == "evidence" and perform_search:
         try:
@@ -2561,6 +2857,7 @@ def _run_recall_impl(
                 reasons=reasons,
                 deadline_at=deadline_at,
                 processor_authority=processor_authority,
+                _telemetry=_telemetry,
             )
             score = evidence_outcome.score
             session_state = evidence_outcome.session_state
@@ -2570,6 +2867,7 @@ def _run_recall_impl(
             rewrite_queries = evidence_outcome.rewrite_queries
             reranker_metadata = evidence_outcome.reranker_metadata
             field_shadow_metadata = evidence_outcome.field_shadow_metadata
+            post_authority = evidence_outcome.post_authority
             _stage_completed(_telemetry, "evidence_search", deadline_at)
         except RecallBudgetExhausted as exc:
             return _fail_open_recall_budget(
@@ -2584,22 +2882,10 @@ def _run_recall_impl(
                 _telemetry,
             )
         except Exception as exc:
+            _stage_interrupted(_telemetry)
             reasons.append(f"evidence gate failed: {exc.__class__.__name__}")
             pre_results = []
             search_mode = "error"
-
-    if policy.processor_shadow_enabled and not processor_authority:
-        _stage_started(_telemetry, "processor_shadow", deadline_at)
-        evidence_features["processor_shadow"] = observe_processor_shadow(
-            active_request.prompt,
-            policy,
-            request=active_request,
-            session_state=session_state,
-            candidates=pre_results,
-            reranker_metadata=reranker_metadata,
-            deadline_at=deadline_at,
-        )
-        _stage_completed(_telemetry, "processor_shadow", deadline_at)
 
     if not processor_authority and should_run_judge(score, policy, evidence_features):
         try:
@@ -2661,6 +2947,7 @@ def _run_recall_impl(
                     session_state=session_state,
                     queries=[],
                     deadline_at=deadline_at,
+                    telemetry=_telemetry,
                 )
 
     decision = decision_from_score(score, policy)
@@ -2701,7 +2988,9 @@ def _run_recall_impl(
                     policy,
                     request=active_request,
                     session_state=session_state,
-                    pre_results=pre_results or None,
+                    pre_results=(
+                        pre_results if policy.gate_mode == "evidence" else None
+                    ),
                     deadline_at=deadline_at,
                 )
             if not context_items:
@@ -2720,6 +3009,7 @@ def _run_recall_impl(
                 _telemetry,
             )
         except Exception as exc:
+            _stage_interrupted(_telemetry)
             error = f"{exc.__class__.__name__}: {exc}"
             reasons.append("search failed")
 
@@ -2746,6 +3036,37 @@ def _run_recall_impl(
         error=error,
         decision_id=active_request.decision_id,
     )
+    _stage_started(_telemetry, "evidence_reconstruction", deadline_at)
+    evidence_features["evidence_reconstruction"] = observe_evidence_reconstruction(
+        result,
+        request=active_request,
+        policy=policy,
+        deadline_at=deadline_at,
+    )
+    _stage_completed(_telemetry, "evidence_reconstruction", deadline_at)
+    if post_authority:
+        remaining_ms = _remaining_budget_ms(deadline_at)
+        if remaining_ms is None or remaining_ms >= 100:
+            try:
+                with recall_wall_clock_deadline(
+                    max(25, (remaining_ms or policy.total_timeout_ms) - 25)
+                ):
+                    _run_post_authority_shadows(
+                        request=active_request,
+                        policy=policy,
+                        session_state=session_state,
+                        candidates=pre_results,
+                        evidence_features=evidence_features,
+                        reranker_metadata=reranker_metadata,
+                        field_metadata=field_shadow_metadata,
+                        post_authority=post_authority,
+                        processor_authority=processor_authority,
+                        deadline_at=deadline_at,
+                        telemetry=_telemetry,
+                    )
+            except (RecallBudgetExhausted, RecallWallClockTimeout):
+                _stage_interrupted(_telemetry)
+                pass
     compiler_metadata = field_shadow_metadata.get("recall_compiler")
     if isinstance(compiler_metadata, dict):
         compiler_ids = {
@@ -2775,16 +3096,8 @@ def _run_recall_impl(
                 )
             except Exception:
                 pass
-    _stage_started(_telemetry, "evidence_reconstruction", deadline_at)
-    evidence_features["evidence_reconstruction"] = observe_evidence_reconstruction(
-        result,
-        request=active_request,
-        policy=policy,
-        deadline_at=deadline_at,
-    )
-    _stage_completed(_telemetry, "evidence_reconstruction", deadline_at)
     result.latency_ms = _elapsed_ms(started)
-    _stage_started(_telemetry, "finalize", final_deadline_at)
+    _merge_telemetry(result.evidence_features, _telemetry)
     result = _finalize_recall_result(
         result,
         request=request,
@@ -2792,9 +3105,12 @@ def _run_recall_impl(
         policy=policy,
         session_state=session_state,
         queries=queries,
-        deadline_at=deadline_at,
+        deadline_at=final_deadline_at,
+        telemetry=_telemetry,
     )
-    _stage_completed(_telemetry, "finalize", final_deadline_at)
+    if _telemetry is not None:
+        _telemetry.pop("_stage_timers", None)
+        _merge_telemetry(result.evidence_features, _telemetry)
     return result
 
 
@@ -2813,34 +3129,38 @@ def run_recall(
     started = time.monotonic()
     policy = policy or load_policy()
     final_deadline_at = started + (policy.total_timeout_ms / 1000.0)
-    _stage_started(_telemetry, "scheduler", final_deadline_at)
-    with foreground_lane(preempt_grace_ms=250) as receipt:
-        if _telemetry is not None:
-            _telemetry["scheduler_wait_ms"] = receipt.resource_wait_ms
-        _stage_completed(_telemetry, "scheduler", final_deadline_at)
-        try:
-            _require_remaining_budget(final_deadline_at, "scheduler")
-        except RecallBudgetExhausted as exc:
-            return _fail_open_recall_budget(
-                str(exc),
-                {},
+    try:
+        _stage_started(_telemetry, "scheduler", final_deadline_at)
+        with foreground_lane(preempt_grace_ms=250) as receipt:
+            if _telemetry is not None:
+                _telemetry["scheduler_wait_ms"] = receipt.resource_wait_ms
+            _stage_completed(_telemetry, "scheduler", final_deadline_at)
+            try:
+                _require_remaining_budget(final_deadline_at, "scheduler")
+            except RecallBudgetExhausted as exc:
+                return _fail_open_recall_budget(
+                    str(exc),
+                    {},
+                    request,
+                    policy,
+                    started,
+                    final_deadline_at,
+                    False,
+                    perform_search,
+                    _telemetry,
+                )
+            result = _run_recall_impl(
                 request,
                 policy,
-                started,
-                final_deadline_at,
-                False,
-                perform_search,
-                _telemetry,
+                perform_search=perform_search,
+                _allow_timeout_fallback=_allow_timeout_fallback,
+                _started_at=started,
+                _final_deadline_at=final_deadline_at,
+                _telemetry=_telemetry,
             )
-        result = _run_recall_impl(
-            request,
-            policy,
-            perform_search=perform_search,
-            _allow_timeout_fallback=_allow_timeout_fallback,
-            _started_at=started,
-            _final_deadline_at=final_deadline_at,
-            _telemetry=_telemetry,
-        )
+    except BaseException:
+        _stage_interrupted(_telemetry)
+        raise
     result.evidence_features.setdefault(
         "scheduler",
         {
@@ -2849,6 +3169,9 @@ def run_recall(
             "research_preempted": receipt.preempted,
         },
     )
+    if _telemetry is not None:
+        _telemetry.pop("_stage_timers", None)
+        _merge_telemetry(result.evidence_features, _telemetry)
     return result
 
 
@@ -2863,45 +3186,117 @@ def run_deterministic_fallback(
     _final_deadline_at: float | None = None,
     _telemetry: dict[str, Any] | None = None,
 ) -> RecallResult:
-    """Run the cheap L1 + BM25 path without any local-model dependency."""
+    """Return L1 plus the existing BM25 projection without normal-path work."""
 
-    budget_ms = max(
-        100,
+    requested_ms = (
         int(timeout_ms)
         if isinstance(timeout_ms, int)
-        else policy.deterministic_fallback_reserve_ms,
+        else policy.deterministic_fallback_reserve_ms
     )
-    fallback_policy = replace(
-        policy,
-        semantic=False,
-        judge_mode="off",
-        rewrite_enabled=False,
-        total_timeout_ms=budget_ms,
-        deterministic_fallback_reserve_ms=0,
-        log_decisions=False,
+    budget_ms = max(
+        1,
+        min(600, policy.deterministic_fallback_reserve_ms, requested_ms),
     )
+    entered_at = time.monotonic()
     started = _started_at if _started_at is not None else time.monotonic()
-    final_deadline_at = (
+    final_deadline_at = min(
         _final_deadline_at
         if _final_deadline_at is not None
-        else started + (budget_ms / 1000.0)
+        else entered_at + (budget_ms / 1000.0),
+        entered_at + (budget_ms / 1000.0),
     )
-    result = _run_recall_impl(
-        request,
-        fallback_policy,
-        perform_search=perform_search,
-        _allow_timeout_fallback=False,
-        _started_at=started,
-        _final_deadline_at=final_deadline_at,
-        _telemetry=_telemetry,
+    cleaned_prompt, stripped_reasons = strip_non_user_blocks(request.prompt)
+    active_request = replace(request, prompt=cleaned_prompt or request.prompt)
+    score, heuristic_reasons, matched = evaluate_heuristic(active_request, policy)
+    decision = decision_from_score(score, policy)
+    queries = [active_request.prompt] if active_request.prompt.strip() else []
+    context_items: list[ContextItem] = []
+    seen_page_ids: set[str] = set()
+    is_main_thread = threading.current_thread() is threading.main_thread()
+    try:
+        remaining_ms = _require_remaining_budget(final_deadline_at, "fallback")
+        with recall_wall_clock_deadline(remaining_ms or budget_ms):
+            results = (
+                search_existing_bm25(
+                    active_request.prompt,
+                    top_n=max(policy.max_pages * 3, 8),
+                )
+                if perform_search
+                and queries
+                and is_main_thread
+                else []
+            )
+            for candidate in results:
+                if len(context_items) >= policy.max_pages:
+                    break
+                if candidate.page_id in seen_page_ids:
+                    continue
+                seen_page_ids.add(str(candidate.page_id))
+                if should_filter_sensitive_result(candidate, active_request):
+                    continue
+                item = context_item_from_page_id(
+                    str(candidate.page_id),
+                    queries,
+                    decision if decision != "none" else "search",
+                    score=round(float(candidate.score), 4),
+                )
+                if item is not None and not should_filter_sensitive_result(
+                    item, active_request
+                ):
+                    context_items.append(item)
+    except (RecallBudgetExhausted, RecallWallClockTimeout):
+        context_items = []
+    effective_decision = decision if decision != "none" else "search"
+    result = RecallResult(
+        status="degraded",
+        decision=(effective_decision if context_items else "none"),
+        confidence=round(score, 3),
+        queries=queries,
+        reasons=[
+            f"deterministic BM25 fallback: {reason}",
+            *stripped_reasons,
+            *heuristic_reasons,
+        ],
+        matched_terms=matched,
+        session_id=active_request.session_id,
+        context_items=context_items,
+        evidence_features={"authority": "teacher", "degraded": True},
+        search_mode="bm25-fallback",
+        context_style=policy.context_style,
+        error=reason,
+        decision_id=active_request.decision_id or new_decision_id(),
     )
-    result.reasons.insert(0, f"deterministic BM25 fallback: {reason}")
-    result.search_mode = (
-        f"{result.search_mode}+fallback" if result.search_mode else "bm25-fallback"
+    if not is_main_thread:
+        result.latency_ms = _elapsed_ms(started)
+        _merge_telemetry(result.evidence_features, _telemetry)
+        return result
+    try:
+        remaining_ms = _require_remaining_budget(final_deadline_at, "fallback render")
+        with recall_wall_clock_deadline(remaining_ms or budget_ms):
+            result.state_context = state_context_for_request(active_request, policy)
+            recall_block = format_recall_context(result, policy)
+            result.context = merge_context_blocks(
+                result.state_context,
+                recall_block,
+                max_chars=policy.max_total_context_chars,
+            )
+    except (RecallBudgetExhausted, RecallWallClockTimeout):
+        result.context_items = []
+        result.state_context = ""
+        result.context = ""
+        recall_block = ""
+    retained = (
+        set(_retained_context_page_ids(recall_block))
+        if recall_block and recall_block in result.context
+        else set()
     )
-    result.error = reason
-    if result.status == "ok":
-        result.status = "degraded"
+    result.context_items = [
+        item for item in result.context_items if item.page_id in retained
+    ]
+    if result.state_context:
+        result.reasons.extend(["core memory injected", "state register injected"])
+    result.latency_ms = _elapsed_ms(started)
+    _merge_telemetry(result.evidence_features, _telemetry)
     return result
 
 
@@ -2968,6 +3363,9 @@ def append_recall_log(request: RecallRequest, result: RecallResult) -> None:
         "judge_confidence": result.judge_confidence,
         "judge_reason": result.judge_reason,
         "evidence_features": result.evidence_features,
+        "stage_timings_ms": (
+            result.evidence_features.get("stage_timings_ms") or {}
+        ),
         "search_mode": result.search_mode,
         "context_style": result.context_style,
         "latency_ms": result.latency_ms,
@@ -3012,6 +3410,7 @@ def recall_log_snapshot(record: dict[str, Any]) -> dict[str, Any]:
         "judge_confidence": record.get("judge_confidence"),
         "judge_reason": record.get("judge_reason", ""),
         "evidence_features": record.get("evidence_features", {}),
+        "stage_timings_ms": record.get("stage_timings_ms", {}),
         "search_mode": record.get("search_mode", ""),
         "context_style": record.get("context_style", ""),
         "latency_ms": record.get("latency_ms", 0),

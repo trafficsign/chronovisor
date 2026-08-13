@@ -7,6 +7,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import asdict, replace
 from pathlib import Path
@@ -276,13 +277,20 @@ def test_collect_context_does_not_let_prefetch_displace_direct_search(
 ) -> None:
     from chronovisor.recall import recall_runtime
 
-    monkeypatch.setattr(recall_runtime, "init_chronovisor", lambda: None)
+    monkeypatch.setattr(
+        recall_runtime,
+        "okf_startup_status",
+        lambda *_a: pytest.fail("pre_results path repeated startup/refresh"),
+    )
     monkeypatch.setattr(
         recall_runtime,
         "get_store",
-        lambda: SimpleNamespace(refresh_if_stale=lambda: None),
+        lambda: pytest.fail("pre_results path repeated store refresh"),
     )
     monkeypatch.setattr(recall_runtime, "query_hint_page_ids", lambda *_a, **_k: [])
+    monkeypatch.setattr(
+        recall_runtime, "search_candidates", lambda *_a, **_k: ([], "bm25")
+    )
     monkeypatch.setattr(
         recall_runtime,
         "prefetch_page_ids_for_request",
@@ -321,6 +329,86 @@ def test_collect_context_does_not_let_prefetch_displace_direct_search(
     assert [item.page_id for item in items] == ["plan-d-race-to-asi"]
 
 
+def test_collect_context_pre_results_skips_refresh_with_identical_output(
+    monkeypatch,
+) -> None:
+    result = ScoredPage("page", "Page", "snippet", "2026-08-13", 1.0)
+    refreshes: list[None] = []
+    monkeypatch.setattr(
+        recall_runtime,
+        "okf_startup_status",
+        lambda _root: SimpleNamespace(allowed=True, layout="okf_v0_2"),
+    )
+    monkeypatch.setattr(
+        recall_runtime,
+        "get_store",
+        lambda: SimpleNamespace(refresh_if_stale=lambda: refreshes.append(None)),
+    )
+    monkeypatch.setattr(
+        recall_runtime, "search_candidates", lambda *_a, **_k: ([result], "bm25")
+    )
+    monkeypatch.setattr(recall_runtime, "query_hint_page_ids", lambda *_a, **_k: [])
+    monkeypatch.setattr(
+        recall_runtime, "prefetch_page_ids_for_request", lambda *_a, **_k: []
+    )
+    monkeypatch.setattr(recall_runtime, "page_uid_for_id", lambda _page_id: "uid")
+
+    searched = collect_context(["query"], "search", RecallPolicy(), pre_results=None)
+    prefetched = collect_context(
+        ["query"], "search", RecallPolicy(), pre_results=[result]
+    )
+
+    assert [asdict(item) for item in prefetched] == [asdict(item) for item in searched]
+    assert refreshes == [None]
+
+
+def test_normal_pre_results_preserve_context_items_and_render(monkeypatch) -> None:
+    results = [
+        ScoredPage("first", "First", "one", "2026-08-13", 2.0),
+        ScoredPage("second", "Second", "two", "2026-08-12", 1.0),
+    ]
+    monkeypatch.setattr(
+        recall_runtime,
+        "okf_startup_status",
+        lambda _root: SimpleNamespace(allowed=True, layout="okf_v0_2"),
+    )
+    monkeypatch.setattr(
+        recall_runtime,
+        "get_store",
+        lambda: SimpleNamespace(refresh_if_stale=lambda: None),
+    )
+    monkeypatch.setattr(
+        recall_runtime, "search_candidates", lambda *_a, **_k: (results, "bm25")
+    )
+    monkeypatch.setattr(recall_runtime, "query_hint_page_ids", lambda *_a, **_k: [])
+    monkeypatch.setattr(
+        recall_runtime, "prefetch_page_ids_for_request", lambda *_a, **_k: []
+    )
+    monkeypatch.setattr(recall_runtime, "page_uid_for_id", lambda page_id: page_id)
+    policy = RecallPolicy(max_context_chars=2000)
+    before = collect_context(["query"], "search", policy, pre_results=None)
+    after = collect_context(["query"], "search", policy, pre_results=results)
+
+    def rendered(items):
+        return format_recall_context(
+            RecallResult(
+                status="ok",
+                decision="search",
+                confidence=0.8,
+                queries=["query"],
+                reasons=[],
+                matched_terms={},
+                decision_id="fixed",
+                context_items=items,
+            ),
+            policy,
+        )
+
+    assert [asdict(item) for item in after] == [asdict(item) for item in before]
+    assert [item.page_id for item in after] == ["first", "second"]
+    assert rendered(after) == rendered(before)
+
+
 def test_collect_context_skips_init_only_for_allowed_okf_v0_2(monkeypatch) -> None:
     from chronovisor.recall import recall_runtime
 
@@ -336,12 +424,15 @@ def test_collect_context_skips_init_only_for_allowed_okf_v0_2(monkeypatch) -> No
         lambda: SimpleNamespace(refresh_if_stale=lambda: None),
     )
     monkeypatch.setattr(recall_runtime, "query_hint_page_ids", lambda *_a, **_k: [])
+    monkeypatch.setattr(
+        recall_runtime, "search_candidates", lambda *_a, **_k: ([], "bm25")
+    )
 
-    collect_context(["query"], "search", RecallPolicy(), pre_results=[])
+    collect_context(["query"], "search", RecallPolicy())
     assert init_calls == []
 
     startup.layout = "legacy"
-    collect_context(["query"], "search", RecallPolicy(), pre_results=[])
+    collect_context(["query"], "search", RecallPolicy())
     assert init_calls == [None]
 
 
@@ -357,7 +448,7 @@ def test_collect_context_stops_before_startup_after_deadline(monkeypatch) -> Non
             ["query"],
             "search",
             RecallPolicy(),
-            pre_results=[],
+            pre_results=None,
             deadline_at=0.0,
         )
 
@@ -560,7 +651,543 @@ def test_evidence_search_skips_field_shadows_after_deadline_but_runs_teacher(
     )
 
     assert teacher_calls == [True]
-    assert outcome.field_shadow_metadata["status"] == "skipped"
+    assert outcome.field_shadow_metadata["status"] == "deferred"
+
+
+def test_active_field_stays_on_authority_path(monkeypatch) -> None:
+    from chronovisor.recall import recall_field, recall_field_candidate
+    from chronovisor.recall.recall_field_schema import RecallFieldConfig
+
+    monkeypatch.setattr(
+        recall_field_candidate,
+        "effective_rollout",
+        lambda _config: RecallFieldConfig(mode="active", canary_percent=100),
+    )
+    monkeypatch.setattr(
+        recall_field,
+        "run_field_turn",
+        lambda **_kwargs: {"status": "ok", "session_hash": "a" * 16},
+    )
+    monkeypatch.setattr(
+        recall_field_candidate,
+        "run_candidate_teacher_pair",
+        lambda **_kwargs: (
+            [ScoredPage("field", "Field", "", "", 2.0)],
+            "field-active",
+            {"status": "active", "authority": "field"},
+        ),
+    )
+    monkeypatch.setattr(
+        "chronovisor.recall.recall_session.cleanup_sessions", lambda _ttl: None
+    )
+    monkeypatch.setattr(
+        "chronovisor.recall.recall_session.load_session_state", lambda _session: None
+    )
+
+    outcome = recall_runtime._run_evidence_search(
+        active_request=RecallRequest(
+            host="codex", event="UserPromptSubmit", prompt="query", session_id="s"
+        ),
+        policy=RecallPolicy(rewrite_enabled=False),
+        matched={},
+        heuristic_score=0.5,
+        reasons=[],
+        deadline_at=time.monotonic() + 1,
+        processor_authority=True,
+    )
+
+    assert [row.page_id for row in outcome.pre_results] == ["field"]
+    assert outcome.search_mode == "field-active"
+    assert outcome.field_shadow_metadata["candidate_observer"]["authority"] == "field"
+    assert outcome.post_authority["field_deferred"] is False
+
+
+@pytest.mark.parametrize("mode", ["canary", "on"])
+def test_authoritative_reranker_budget_exhaustion_is_not_silent(
+    monkeypatch, mode: str
+) -> None:
+    from chronovisor.core import runtime_config
+    from chronovisor.recall import recall_field_candidate
+    from chronovisor.recall.recall_field_schema import RecallFieldConfig
+
+    monkeypatch.setattr(
+        recall_field_candidate,
+        "effective_rollout",
+        lambda _config: RecallFieldConfig(mode="shadow"),
+    )
+    monkeypatch.setattr(
+        runtime_config,
+        "load_reranker_config",
+        lambda: SimpleNamespace(service=SimpleNamespace(mode=mode)),
+    )
+    monkeypatch.setattr(
+        "chronovisor.recall.recall_session.cleanup_sessions", lambda _ttl: None
+    )
+    monkeypatch.setattr(
+        "chronovisor.recall.recall_session.load_session_state", lambda _session: None
+    )
+    monkeypatch.setattr(
+        recall_runtime,
+        "search_candidates",
+        lambda *_a, **_k: ([ScoredPage("page", "Page", "", "", 1.0)], "bm25"),
+    )
+    monkeypatch.setattr(recall_runtime, "_remaining_budget_ms", lambda _deadline: 50)
+
+    with pytest.raises(RecallBudgetExhausted, match="authoritative reranker"):
+        recall_runtime._run_evidence_search(
+            active_request=RecallRequest(
+                host="codex", event="UserPromptSubmit", prompt="query"
+            ),
+            policy=RecallPolicy(rewrite_enabled=False),
+            matched={},
+            heuristic_score=0.5,
+            reasons=[],
+            deadline_at=time.monotonic() + 1,
+            processor_authority=False,
+        )
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {"status": "unavailable", "mode": "on"},
+        {"status": "error", "mode": "canary"},
+        {"status": "fallback", "mode": "on", "fail_open": True},
+    ],
+)
+def test_authoritative_reranker_service_failure_requires_degraded_fallback(
+    monkeypatch,
+    metadata: dict[str, object],
+) -> None:
+    from chronovisor.core import runtime_config
+    from chronovisor.recall import recall_field_candidate, recall_processor
+    from chronovisor.recall.recall_field_schema import RecallFieldConfig
+
+    monkeypatch.setattr(
+        recall_field_candidate,
+        "effective_rollout",
+        lambda _config: RecallFieldConfig(mode="shadow"),
+    )
+    monkeypatch.setattr(
+        runtime_config,
+        "load_reranker_config",
+        lambda: SimpleNamespace(
+            service=SimpleNamespace(mode=str(metadata["mode"]))
+        ),
+    )
+    monkeypatch.setattr(
+        "chronovisor.recall.recall_session.cleanup_sessions", lambda _ttl: None
+    )
+    monkeypatch.setattr(
+        "chronovisor.recall.recall_session.load_session_state", lambda _session: None
+    )
+    teacher = ScoredPage("teacher", "Teacher", "", "", 1.0)
+    monkeypatch.setattr(
+        recall_runtime,
+        "search_candidates",
+        lambda *_a, **_k: ([teacher], "bm25"),
+    )
+    monkeypatch.setattr(
+        recall_processor,
+        "rank_recall_candidates",
+        lambda *_a, **_k: ([teacher], metadata),
+    )
+
+    with pytest.raises(RecallBudgetExhausted, match="reranker unavailable"):
+        recall_runtime._run_evidence_search(
+            active_request=RecallRequest(
+                host="codex", event="UserPromptSubmit", prompt="query"
+            ),
+            policy=RecallPolicy(rewrite_enabled=False),
+            matched={},
+            heuristic_score=0.5,
+            reasons=[],
+            deadline_at=time.monotonic() + 1,
+            processor_authority=False,
+        )
+
+
+def test_authoritative_reranker_failure_enters_direct_degraded_path(
+    monkeypatch,
+) -> None:
+    from chronovisor.core import runtime_config
+    from chronovisor.recall import recall_field_candidate, recall_processor
+    from chronovisor.recall.recall_field_schema import RecallFieldConfig
+
+    monkeypatch.setattr(
+        recall_field_candidate,
+        "effective_rollout",
+        lambda _config: RecallFieldConfig(mode="shadow"),
+    )
+    monkeypatch.setattr(
+        runtime_config,
+        "load_reranker_config",
+        lambda: SimpleNamespace(service=SimpleNamespace(mode="on")),
+    )
+    monkeypatch.setattr(
+        "chronovisor.recall.recall_session.cleanup_sessions", lambda _ttl: None
+    )
+    monkeypatch.setattr(
+        "chronovisor.recall.recall_session.load_session_state", lambda _session: None
+    )
+    teacher = ScoredPage("teacher", "Teacher", "", "", 1.0)
+    monkeypatch.setattr(
+        recall_runtime,
+        "search_candidates",
+        lambda *_a, **_k: ([teacher], "bm25"),
+    )
+    monkeypatch.setattr(
+        recall_processor,
+        "rank_recall_candidates",
+        lambda *_a, **_k: (
+            [teacher],
+            {"status": "unavailable", "mode": "on", "fail_open": True},
+        ),
+    )
+    fallback_reasons: list[str] = []
+
+    def fallback(*_args, reason: str, **_kwargs):
+        fallback_reasons.append(reason)
+        return RecallResult(
+            status="degraded",
+            decision="none",
+            confidence=0.0,
+            queries=[],
+            reasons=[reason],
+            matched_terms={},
+            search_mode="bm25-fallback",
+        )
+
+    monkeypatch.setattr(recall_runtime, "run_deterministic_fallback", fallback)
+
+    result = recall_runtime._run_recall_impl(
+        RecallRequest(host="codex", event="UserPromptSubmit", prompt="query"),
+        RecallPolicy(rewrite_enabled=False, log_decisions=False),
+    )
+
+    assert result.status == "degraded"
+    assert result.search_mode == "bm25-fallback"
+    assert fallback_reasons == ["recall authoritative reranker unavailable"]
+
+
+@pytest.mark.parametrize("field_mode", ["off", "shadow", "candidate", "active"])
+@pytest.mark.parametrize("reranker_mode", ["off", "shadow", "canary", "on"])
+def test_field_and_reranker_authority_mode_matrix(
+    monkeypatch,
+    field_mode: str,
+    reranker_mode: str,
+) -> None:
+    from chronovisor.core import runtime_config
+    from chronovisor.recall import (
+        recall_field,
+        recall_field_candidate,
+        recall_processor,
+    )
+    from chronovisor.recall.recall_field_schema import RecallFieldConfig
+
+    pair_calls: list[bool] = []
+    rerank_calls: list[bool] = []
+    teacher = ScoredPage("teacher", "Teacher", "", "", 1.0)
+    field = ScoredPage("field", "Field", "", "", 2.0)
+    reranked = ScoredPage("reranked", "Reranked", "", "", 3.0)
+    monkeypatch.setattr(
+        recall_field_candidate,
+        "effective_rollout",
+        lambda _config: RecallFieldConfig(mode=field_mode, canary_percent=100),
+    )
+    monkeypatch.setattr(
+        runtime_config,
+        "load_reranker_config",
+        lambda: SimpleNamespace(service=SimpleNamespace(mode=reranker_mode)),
+    )
+    monkeypatch.setattr(
+        recall_runtime,
+        "search_candidates",
+        lambda *_a, **_k: ([teacher], "teacher"),
+    )
+    monkeypatch.setattr(
+        recall_field,
+        "run_field_turn",
+        lambda **_kwargs: {"status": "ok", "session_hash": "a" * 16},
+    )
+
+    def pair(**_kwargs):
+        pair_calls.append(True)
+        return [field], "field-active", {"status": "active", "authority": "field"}
+
+    monkeypatch.setattr(recall_field_candidate, "run_candidate_teacher_pair", pair)
+
+    def rank(*_args, **_kwargs):
+        rerank_calls.append(True)
+        return [reranked], {"status": "applied", "mode": reranker_mode}
+
+    monkeypatch.setattr(recall_processor, "rank_recall_candidates", rank)
+    monkeypatch.setattr(
+        "chronovisor.recall.recall_session.cleanup_sessions", lambda _ttl: None
+    )
+    monkeypatch.setattr(
+        "chronovisor.recall.recall_session.load_session_state", lambda _session: None
+    )
+
+    outcome = recall_runtime._run_evidence_search(
+        active_request=RecallRequest(
+            host="codex", event="UserPromptSubmit", prompt="query", session_id="s"
+        ),
+        policy=RecallPolicy(rewrite_enabled=False),
+        matched={},
+        heuristic_score=0.5,
+        reasons=[],
+        deadline_at=time.monotonic() + 2,
+        processor_authority=False,
+    )
+
+    assert len(pair_calls) == (1 if field_mode == "active" else 0)
+    assert outcome.post_authority["field_deferred"] is (field_mode != "active")
+    assert len(rerank_calls) == (1 if reranker_mode in {"canary", "on"} else 0)
+    expected = (
+        "reranked"
+        if reranker_mode in {"canary", "on"}
+        else "field"
+        if field_mode == "active"
+        else "teacher"
+    )
+    assert [row.page_id for row in outcome.pre_results] == [expected]
+    if reranker_mode == "shadow":
+        assert outcome.post_authority["reranker_shadow_deferred"] is True
+        assert outcome.reranker_metadata["status"] == "deferred"
+    elif reranker_mode == "off":
+        assert outcome.reranker_metadata == {"status": "disabled", "mode": "off"}
+    else:
+        assert outcome.reranker_metadata["status"] == "applied"
+
+
+def test_post_authority_shadows_run_after_context_is_fixed(monkeypatch) -> None:
+    events: list[str] = []
+    candidate = ScoredPage("page", "Page", "", "", 1.0)
+    outcome = recall_runtime._EvidenceSearchOutcome(
+        score=0.8,
+        session_state=None,
+        pre_results=[candidate],
+        search_mode="bm25",
+        evidence_features={},
+        rewrite_queries=[],
+        reranker_metadata={},
+        field_shadow_metadata={},
+        post_authority={"field_deferred": True},
+    )
+    monkeypatch.setattr(
+        recall_runtime, "_run_evidence_search", lambda **_kwargs: outcome
+    )
+    monkeypatch.setattr(
+        recall_runtime,
+        "collect_context",
+        lambda *_a, **_k: (
+            events.append("context") or [ContextItem("page", "Page", "", 1.0)]
+        ),
+    )
+    monkeypatch.setattr(
+        recall_runtime,
+        "_run_post_authority_shadows",
+        lambda **_kwargs: events.append("shadow"),
+    )
+    monkeypatch.setattr(
+        recall_runtime,
+        "observe_evidence_reconstruction",
+        lambda *_a, **_k: (
+            events.append("evidence") or {"status": "skipped"}
+        ),
+    )
+
+    recall_runtime._run_recall_impl(
+        RecallRequest(host="codex", event="UserPromptSubmit", prompt="query"),
+        RecallPolicy(rewrite_enabled=False, judge_mode="off", log_decisions=False),
+    )
+
+    assert events == ["context", "evidence", "shadow"]
+
+
+def test_active_evidence_precedes_typed_graph_durable_write(monkeypatch) -> None:
+    events: list[str] = []
+    candidate = ScoredPage("page", "Page", "", "", 1.0)
+    monkeypatch.setattr(
+        recall_runtime,
+        "_run_evidence_search",
+        lambda **_kwargs: recall_runtime._EvidenceSearchOutcome(
+            score=0.8,
+            session_state=None,
+            pre_results=[candidate],
+            search_mode="bm25",
+            evidence_features={},
+            rewrite_queries=[],
+            reranker_metadata={},
+            field_shadow_metadata={},
+            post_authority={"diagnostic_rows": [{"trace_id": "anonymous"}]},
+        ),
+    )
+    monkeypatch.setattr(
+        recall_runtime,
+        "collect_context",
+        lambda *_a, **_k: [ContextItem("page", "Page", "", 1.0)],
+    )
+    monkeypatch.setattr(
+        recall_runtime,
+        "observe_evidence_reconstruction",
+        lambda *_a, **_k: (
+            events.append("active-evidence")
+            or {"status": "active", "authority": "evidence"}
+        ),
+    )
+    monkeypatch.setattr(
+        recall_runtime,
+        "append_jsonl_durable",
+        lambda *_a, **_k: events.append("typed-graph-write"),
+    )
+    monkeypatch.setattr(recall_runtime, "state_context_for_request", lambda *_a: "")
+
+    recall_runtime._run_recall_impl(
+        RecallRequest(host="codex", event="UserPromptSubmit", prompt="query"),
+        RecallPolicy(rewrite_enabled=False, judge_mode="off", log_decisions=False),
+    )
+
+    assert events == ["active-evidence", "typed-graph-write"]
+
+
+def test_evidence_timeout_occurs_before_any_post_authority_shadow(
+    monkeypatch,
+) -> None:
+    events: list[str] = []
+    candidate = ScoredPage("page", "Page", "", "", 1.0)
+    monkeypatch.setattr(
+        recall_runtime,
+        "_run_evidence_search",
+        lambda **_kwargs: recall_runtime._EvidenceSearchOutcome(
+            score=0.8,
+            session_state=None,
+            pre_results=[candidate],
+            search_mode="bm25",
+            evidence_features={},
+            rewrite_queries=[],
+            reranker_metadata={},
+            field_shadow_metadata={},
+            post_authority={"field_deferred": True},
+        ),
+    )
+    monkeypatch.setattr(
+        recall_runtime,
+        "collect_context",
+        lambda *_a, **_k: [ContextItem("page", "Page", "", 1.0)],
+    )
+
+    def timeout(*_args, **_kwargs):
+        events.append("evidence-timeout")
+        raise recall_runtime.RecallWallClockTimeout("evidence timeout")
+
+    monkeypatch.setattr(recall_runtime, "observe_evidence_reconstruction", timeout)
+    monkeypatch.setattr(
+        recall_runtime,
+        "_run_post_authority_shadows",
+        lambda **_kwargs: events.append("shadow"),
+    )
+
+    with pytest.raises(recall_runtime.RecallWallClockTimeout):
+        recall_runtime._run_recall_impl(
+            RecallRequest(host="codex", event="UserPromptSubmit", prompt="query"),
+            RecallPolicy(
+                rewrite_enabled=False,
+                judge_mode="off",
+                log_decisions=False,
+            ),
+        )
+
+    assert events == ["evidence-timeout"]
+
+
+def test_post_authority_timeout_preserves_fixed_context(monkeypatch) -> None:
+    candidate = ScoredPage("page", "Page", "", "", 1.0)
+    monkeypatch.setattr(
+        recall_runtime,
+        "_run_evidence_search",
+        lambda **_kwargs: recall_runtime._EvidenceSearchOutcome(
+            score=0.8,
+            session_state=None,
+            pre_results=[candidate],
+            search_mode="bm25",
+            evidence_features={},
+            rewrite_queries=[],
+            reranker_metadata={},
+            field_shadow_metadata={},
+            post_authority={"field_deferred": True},
+        ),
+    )
+    monkeypatch.setattr(
+        recall_runtime,
+        "collect_context",
+        lambda *_a, **_k: [ContextItem("page", "Page", "", 1.0)],
+    )
+    monkeypatch.setattr(
+        recall_runtime,
+        "_run_post_authority_shadows",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            recall_runtime.RecallWallClockTimeout("shadow timeout")
+        ),
+    )
+    monkeypatch.setattr(
+        recall_runtime,
+        "observe_evidence_reconstruction",
+        lambda *_a, **_k: {"status": "skipped"},
+    )
+
+    result = recall_runtime._run_recall_impl(
+        RecallRequest(host="codex", event="UserPromptSubmit", prompt="query"),
+        RecallPolicy(rewrite_enabled=False, judge_mode="off", log_decisions=False),
+    )
+
+    assert result.status == "ok"
+    assert [item.page_id for item in result.context_items] == ["page"]
+
+
+def test_shadow_evidence_reconstruction_never_changes_page_teacher(
+    monkeypatch,
+) -> None:
+    candidate = ScoredPage("page", "Page", "", "", 1.0)
+    monkeypatch.setattr(
+        recall_runtime,
+        "_run_evidence_search",
+        lambda **_kwargs: recall_runtime._EvidenceSearchOutcome(
+            score=0.8,
+            session_state=None,
+            pre_results=[candidate],
+            search_mode="bm25",
+            evidence_features={},
+            rewrite_queries=[],
+            reranker_metadata={},
+            field_shadow_metadata={},
+            post_authority={},
+        ),
+    )
+    monkeypatch.setattr(
+        recall_runtime,
+        "collect_context",
+        lambda *_a, **_k: [ContextItem("page", "Page", "", 1.0)],
+    )
+    monkeypatch.setattr(
+        recall_runtime,
+        "observe_evidence_reconstruction",
+        lambda *_a, **_k: {"status": "observed", "mode": "shadow"},
+    )
+    monkeypatch.setattr(recall_runtime, "state_context_for_request", lambda *_a: "")
+
+    result = recall_runtime._run_recall_impl(
+        RecallRequest(host="codex", event="UserPromptSubmit", prompt="query"),
+        RecallPolicy(rewrite_enabled=False, judge_mode="off", log_decisions=False),
+    )
+
+    assert [item.page_id for item in result.context_items] == ["page"]
+    assert result.evidence_packet is None
+    assert result.evidence_features["evidence_reconstruction"] == {
+        "status": "observed",
+        "mode": "shadow",
+    }
 
 
 def test_search_candidates_filters_sensitive_pages_in_work_context(monkeypatch) -> None:
@@ -2840,29 +3467,25 @@ def test_final_evidence_observer_uses_internal_deadline(monkeypatch) -> None:
     assert captured["deadline_at"] == pytest.approx(103.4)
 
 
-def test_deterministic_fallback_disables_model_dependent_stages(monkeypatch) -> None:
+def test_deterministic_fallback_uses_direct_read_only_path(monkeypatch) -> None:
     from chronovisor.recall import recall_runtime
 
-    seen: dict[str, object] = {}
-
-    def fake_run(request, policy, *, perform_search, _allow_timeout_fallback, **_kwargs):
-        seen.update(
-            semantic=policy.semantic,
-            judge_mode=policy.judge_mode,
-            rewrite_enabled=policy.rewrite_enabled,
-            perform_search=perform_search,
-            allow_fallback=_allow_timeout_fallback,
-        )
-        return RecallResult(
-            status="ok",
-            decision="none",
-            confidence=0.0,
-            queries=[],
-            reasons=[],
-            matched_terms={},
-        )
-
-    monkeypatch.setattr(recall_runtime, "_run_recall_impl", fake_run)
+    monkeypatch.setattr(
+        recall_runtime,
+        "_run_recall_impl",
+        lambda *_a, **_k: pytest.fail("fallback re-entered normal recall"),
+    )
+    monkeypatch.setattr(
+        recall_runtime,
+        "search_existing_bm25",
+        lambda *_a, **_k: [ScoredPage("page", "Page", "", "", 1.0)],
+    )
+    monkeypatch.setattr(
+        recall_runtime,
+        "context_item_from_page_id",
+        lambda page_id, *_a, **_k: ContextItem(page_id, "Page", "", 1.0),
+    )
+    monkeypatch.setattr(recall_runtime, "state_context_for_request", lambda *_a: "")
     monkeypatch.setattr(
         "chronovisor.core.research_scheduler.foreground_lane",
         lambda **_kwargs: pytest.fail("fallback must reuse the active foreground lane"),
@@ -2874,13 +3497,228 @@ def test_deterministic_fallback_disables_model_dependent_stages(monkeypatch) -> 
     )
 
     assert result.status == "degraded"
-    assert seen == {
-        "semantic": False,
-        "judge_mode": "off",
-        "rewrite_enabled": False,
-        "perform_search": True,
-        "allow_fallback": False,
-    }
+    assert result.search_mode == "bm25-fallback"
+    assert [item.page_id for item in result.context_items] == ["page"]
+    assert result.evidence_features["authority"] == "teacher"
+
+
+def test_cache_hit_fallback_reuses_filters_dedupe_and_whole_block_renderer(
+    monkeypatch,
+) -> None:
+    from chronovisor.core import search as core_search
+
+    candidates = [
+        ScoredPage("stable", "Stable", "", "", 2.0),
+        ScoredPage("stable", "Stable duplicate", "", "", 1.9),
+        ScoredPage("draft", "Draft", "", "", 1.8, status="draft"),
+        ScoredPage("sensitive", "Sensitive", "", "", 1.7, sensitivity="high"),
+    ]
+    monkeypatch.setattr(
+        core_search,
+        "get_bm25",
+        lambda: SimpleNamespace(query_existing=lambda *_a, **_k: candidates),
+    )
+    monkeypatch.setattr(
+        recall_runtime,
+        "context_item_from_page_id",
+        lambda page_id, *_a, **_k: ContextItem(
+            page_id,
+            page_id.title(),
+            "",
+            2.0,
+            sensitivity="high" if page_id == "sensitive" else "normal",
+        ),
+    )
+    monkeypatch.setattr(
+        recall_runtime,
+        "state_context_for_request",
+        lambda *_a: "[WORKING_MEMORY]\ncore\n[/WORKING_MEMORY]",
+    )
+    rendered_blocks: list[str] = []
+    real_renderer = recall_runtime.format_recall_context
+
+    def render(result, policy):
+        block = real_renderer(result, policy)
+        rendered_blocks.append(block)
+        return block
+
+    monkeypatch.setattr(recall_runtime, "format_recall_context", render)
+    request = RecallRequest(
+        host="codex",
+        event="UserPromptSubmit",
+        prompt="前回の続き",
+        cwd="/projects/work/private",
+        decision_id="fixed",
+    )
+    policy = RecallPolicy(max_pages=4)
+
+    result = recall_runtime.run_deterministic_fallback(request, policy)
+
+    assert [item.page_id for item in result.context_items] == ["stable"]
+    assert len(rendered_blocks) == 1
+    assert result.context == merge_context_blocks(
+        result.state_context,
+        rendered_blocks[0],
+        max_chars=policy.max_total_context_chars,
+    )
+    assert rendered_blocks[0].startswith("[RECALL_CONTEXT]")
+    assert rendered_blocks[0].endswith("[/RECALL_CONTEXT]")
+
+
+def test_cache_hit_fallback_starts_no_heavy_or_write_lane(monkeypatch) -> None:
+    from chronovisor.core import search as core_search
+    from chronovisor.recall import recall_compiler, recall_field, recall_processor
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("fallback started a heavy or write lane")
+
+    monkeypatch.setattr(
+        recall_runtime,
+        "search_existing_bm25",
+        lambda *_a, **_k: [ScoredPage("page", "Page", "", "", 1.0)],
+    )
+    monkeypatch.setattr(
+        recall_runtime,
+        "context_item_from_page_id",
+        lambda page_id, *_a, **_k: ContextItem(page_id, "Page", "", 1.0),
+    )
+    monkeypatch.setattr(recall_runtime, "state_context_for_request", lambda *_a: "")
+    for owner, name in (
+        (recall_runtime, "_run_recall_impl"),
+        (recall_runtime, "run_search"),
+        (recall_runtime, "collect_context"),
+        (recall_runtime, "observe_evidence_reconstruction"),
+        (recall_runtime, "observe_processor_shadow"),
+        (recall_runtime, "append_recall_log"),
+        (recall_runtime, "append_jsonl_durable"),
+        (recall_runtime, "get_store"),
+        (recall_field, "run_field_turn"),
+        (recall_field, "queue_teacher_commits"),
+        (recall_compiler, "compile_query"),
+        (recall_processor, "rank_recall_candidates"),
+        (core_search, "semantic_search"),
+        (core_search, "graph_expand_results"),
+    ):
+        monkeypatch.setattr(owner, name, forbidden)
+
+    result = recall_runtime.run_deterministic_fallback(
+        RecallRequest(host="codex", event="UserPromptSubmit", prompt="前回の続き"),
+        RecallPolicy(),
+    )
+
+    assert [item.page_id for item in result.context_items] == ["page"]
+
+
+def test_deterministic_fallback_is_l1_only_when_projection_unavailable(
+    monkeypatch,
+) -> None:
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("fallback started a heavy/write stage")
+
+    for name in (
+        "_run_recall_impl",
+        "run_search",
+        "append_recall_log",
+        "collect_context",
+        "observe_evidence_reconstruction",
+        "observe_processor_shadow",
+    ):
+        monkeypatch.setattr(recall_runtime, name, forbidden)
+    monkeypatch.setattr(recall_runtime, "search_existing_bm25", lambda *_a, **_k: [])
+    monkeypatch.setattr(
+        recall_runtime,
+        "state_context_for_request",
+        lambda *_a: "[WORKING_MEMORY]\ncore\n[/WORKING_MEMORY]",
+    )
+
+    result = recall_runtime.run_deterministic_fallback(
+        RecallRequest(host="codex", event="UserPromptSubmit", prompt="前回の続き"),
+        RecallPolicy(),
+        timeout_ms=500,
+    )
+
+    assert result.status == "degraded"
+    assert result.decision == "none"
+    assert result.context_items == []
+    assert "core" in result.context
+    assert result.search_mode == "bm25-fallback"
+
+
+def test_deterministic_fallback_caps_requested_budget_at_reserve(monkeypatch) -> None:
+    monkeypatch.setattr(
+        recall_runtime,
+        "search_existing_bm25",
+        lambda *_a, **_k: time.sleep(2),
+    )
+    monkeypatch.setattr(recall_runtime, "state_context_for_request", lambda *_a: "")
+    started = time.monotonic()
+
+    result = recall_runtime.run_deterministic_fallback(
+        RecallRequest(host="codex", event="UserPromptSubmit", prompt="前回の続き"),
+        RecallPolicy(deterministic_fallback_reserve_ms=600),
+        timeout_ms=900,
+    )
+
+    assert time.monotonic() - started < 0.75
+    assert result.status == "degraded"
+
+
+def test_deterministic_fallback_hard_caps_policy_reserve_at_600ms(monkeypatch) -> None:
+    monkeypatch.setattr(
+        recall_runtime,
+        "search_existing_bm25",
+        lambda *_a, **_k: time.sleep(2),
+    )
+    monkeypatch.setattr(recall_runtime, "state_context_for_request", lambda *_a: "")
+    started = time.monotonic()
+
+    result = recall_runtime.run_deterministic_fallback(
+        RecallRequest(host="codex", event="UserPromptSubmit", prompt="前回の続き"),
+        RecallPolicy(deterministic_fallback_reserve_ms=900),
+        timeout_ms=900,
+    )
+
+    assert time.monotonic() - started < 0.75
+    assert result.status == "degraded"
+
+
+def test_non_main_fallback_never_starts_bm25(monkeypatch) -> None:
+    monkeypatch.setattr(
+        recall_runtime,
+        "search_existing_bm25",
+        lambda *_a, **_k: pytest.fail("non-main fallback started BM25"),
+    )
+    monkeypatch.setattr(
+        recall_runtime,
+        "state_context_for_request",
+        lambda *_a: pytest.fail("non-main fallback loaded L1 state"),
+    )
+    monkeypatch.setattr(
+        recall_runtime,
+        "format_recall_context",
+        lambda *_a: pytest.fail("non-main fallback rendered context"),
+    )
+    outcome: list[RecallResult] = []
+    thread = threading.Thread(
+        target=lambda: outcome.append(
+            recall_runtime.run_deterministic_fallback(
+                RecallRequest(
+                    host="codex", event="UserPromptSubmit", prompt="前回の続き"
+                ),
+                RecallPolicy(deterministic_fallback_reserve_ms=600),
+                timeout_ms=900,
+            )
+        )
+    )
+    started = time.monotonic()
+    thread.start()
+    thread.join(timeout=0.7)
+
+    assert not thread.is_alive()
+    assert time.monotonic() - started < 0.7
+    assert outcome[0].status == "degraded"
+    assert outcome[0].state_context == ""
+    assert outcome[0].context == ""
 
 
 def test_fallback_reuses_active_foreground_lane(monkeypatch) -> None:
@@ -2932,11 +3770,37 @@ def test_fallback_reuses_active_foreground_lane(monkeypatch) -> None:
     assert len(calls) == 1
 
 
+def _mock_monotonic_clock(*values: float) -> Callable[[], float]:
+    """Return a monotonic mock that stays at the last value when exhausted.
+
+    The recall runtime reads ``time.monotonic()`` for stage timing in
+    addition to deadline checks, so a fixed-size clock would raise
+    StopIteration whenever the call count changes.  Repeating the final
+    value keeps the deadline semantics while absorbing extra timing reads.
+    """
+
+    it = iter(values)
+    last = values[-1]
+
+    def _clock() -> float:
+        nonlocal last
+        try:
+            last = next(it)
+        except StopIteration:
+            pass
+        return last
+
+    return _clock
+
+
 def test_scheduler_wait_counts_against_single_deadline(monkeypatch) -> None:
     from chronovisor.recall import recall_runtime
 
-    clock = iter([100.0, 100.0, 100.3, 100.3])
-    monkeypatch.setattr(recall_runtime.time, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(
+        recall_runtime.time,
+        "monotonic",
+        _mock_monotonic_clock(100.0, 100.0, 100.3, 100.3, 100.3),
+    )
 
     class Lane:
         def __enter__(self):
@@ -2983,8 +3847,11 @@ def test_scheduler_wait_counts_against_single_deadline(monkeypatch) -> None:
 def test_scheduler_budget_exhaustion_preserves_deadline_telemetry(monkeypatch) -> None:
     from chronovisor.recall import recall_runtime
 
-    clock = iter([100.0, 100.0, 100.3, 100.3, 100.3])
-    monkeypatch.setattr(recall_runtime.time, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(
+        recall_runtime.time,
+        "monotonic",
+        _mock_monotonic_clock(100.0, 100.0, 100.3, 100.3, 100.3),
+    )
 
     class Lane:
         def __enter__(self):
@@ -3017,7 +3884,31 @@ def test_scheduler_budget_exhaustion_preserves_deadline_telemetry(monkeypatch) -
         "last_stage_started": "scheduler",
         "last_stage_completed": "scheduler",
         "remaining_ms": 0,
+        "stage_timings_ms": {"scheduler": 0},
     }
+
+
+def test_run_recall_base_exception_preserves_current_partial_stage(
+    monkeypatch,
+) -> None:
+    def interrupt(*_args, _telemetry, _final_deadline_at, **_kwargs):
+        recall_runtime._stage_started(_telemetry, "context", _final_deadline_at)
+        time.sleep(0.002)
+        raise recall_runtime.RecallWallClockTimeout("outer deadline")
+
+    monkeypatch.setattr(recall_runtime, "_run_recall_impl", interrupt)
+    telemetry: dict[str, object] = {}
+
+    with pytest.raises(recall_runtime.RecallWallClockTimeout):
+        recall_runtime.run_recall(
+            RecallRequest(host="codex", event="UserPromptSubmit", prompt="private"),
+            RecallPolicy(log_decisions=False),
+            _telemetry=telemetry,
+        )
+
+    assert telemetry["last_stage_started"] == "context"
+    assert telemetry["stage_timings_ms"]["context"] >= 1
+    assert "_stage_timers" not in telemetry
 
 
 def test_run_recall_log_records_decision_snapshot(tmp_path, monkeypatch) -> None:
@@ -3045,6 +3936,211 @@ def test_run_recall_log_records_decision_snapshot(tmp_path, monkeypatch) -> None
     assert record["prompt_hash"]
     assert record["judge_confidence"] is None
     assert "past reference term" in record["reasons"]
+
+
+def test_stage_timing_telemetry_accumulates_and_cleans_timers() -> None:
+    telemetry: dict[str, object] = {}
+    deadline = time.monotonic() + 1.0
+    recall_runtime._stage_started(telemetry, "cleanup", deadline)
+    recall_runtime._stage_completed(telemetry, "cleanup", deadline)
+    assert telemetry["stage_timings_ms"]["cleanup"] >= 0
+    assert "_stage_timers" not in telemetry
+    # repeated stage names accumulate
+    recall_runtime._stage_started(telemetry, "teacher", deadline)
+    recall_runtime._stage_completed(telemetry, "teacher", deadline)
+    recall_runtime._stage_started(telemetry, "teacher", deadline)
+    recall_runtime._stage_completed(telemetry, "teacher", deadline)
+    assert telemetry["stage_timings_ms"]["teacher"] >= 0
+
+
+def test_interrupted_stage_preserves_elapsed_telemetry() -> None:
+    telemetry: dict[str, object] = {}
+    recall_runtime._stage_started(telemetry, "semantic", time.monotonic() + 1)
+    time.sleep(0.002)
+    recall_runtime._stage_interrupted(telemetry)
+
+    assert telemetry["stage_timings_ms"]["semantic"] >= 1
+    assert "_stage_timers" not in telemetry
+
+
+def test_evidence_search_error_preserves_failed_stage_timing(monkeypatch) -> None:
+    monkeypatch.setattr(
+        recall_runtime,
+        "_run_evidence_search",
+        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("search failed")),
+    )
+    monkeypatch.setattr(recall_runtime, "collect_context", lambda *_a, **_k: [])
+    monkeypatch.setattr(recall_runtime, "state_context_for_request", lambda *_a: "")
+    telemetry: dict[str, object] = {}
+
+    result = recall_runtime._run_recall_impl(
+        RecallRequest(host="codex", event="UserPromptSubmit", prompt="private"),
+        RecallPolicy(judge_mode="off", rewrite_enabled=False, log_decisions=False),
+        _telemetry=telemetry,
+    )
+
+    assert result.search_mode == "error"
+    assert "evidence_search" in result.evidence_features["stage_timings_ms"]
+
+
+def test_merge_search_stage_timings_accumulates() -> None:
+    evidence: dict[str, object] = {}
+    recall_runtime._merge_search_stage_timings(
+        evidence, {"stage_timings_ms": {"bm25_query": 100, "semantic": 50}}
+    )
+    assert evidence["stage_timings_ms"] == {"bm25_query": 100, "semantic": 50}
+    recall_runtime._merge_search_stage_timings(
+        evidence, {"stage_timings_ms": {"bm25_query": 25}}
+    )
+    assert evidence["stage_timings_ms"] == {"bm25_query": 125, "semantic": 50}
+
+
+def test_search_candidates_accumulates_pipeline_timings_for_every_query(
+    monkeypatch,
+) -> None:
+    traces = iter(
+        [
+            {"stage_timings_ms": {"bm25_query": 2, "semantic": 3}},
+            {"stage_timings_ms": {"bm25_query": 5, "graph": 7}},
+        ]
+    )
+    monkeypatch.setattr(
+        recall_runtime,
+        "run_search",
+        lambda **kwargs: ([ScoredPage(kwargs["query"], "Page", "", "", 1.0)], "hybrid"),
+    )
+    monkeypatch.setattr(recall_runtime, "last_search_trace", lambda: next(traces))
+    timings: dict[str, int] = {}
+
+    results, _mode = search_candidates(
+        ["first", "second"], RecallPolicy(), stage_timings_ms=timings
+    )
+
+    assert [row.page_id for row in results] == ["first", "second"]
+    assert timings == {"bm25_query": 7, "semantic": 3, "graph": 7}
+
+
+def test_search_candidates_preserves_partial_pipeline_timings_on_interrupt(
+    monkeypatch,
+) -> None:
+    class SearchInterrupted(BaseException):
+        pass
+
+    monkeypatch.setattr(
+        recall_runtime,
+        "run_search",
+        lambda **_kwargs: (_ for _ in ()).throw(SearchInterrupted()),
+    )
+    monkeypatch.setattr(
+        recall_runtime,
+        "last_search_trace",
+        lambda: {"stage_timings_ms": {"bm25_query": 25, "semantic": 50}},
+    )
+    timings: dict[str, int] = {}
+
+    with pytest.raises(SearchInterrupted):
+        recall_runtime.search_candidates(
+            ["query"], RecallPolicy(), stage_timings_ms=timings
+        )
+
+    assert timings == {"bm25_query": 25, "semantic": 50}
+
+
+def test_recall_graph_diagnostics_write_only_post_authority(monkeypatch) -> None:
+    from chronovisor.recall import recall_compiler
+
+    writes: list[list[dict[str, object]]] = []
+    deferred: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        recall_runtime,
+        "run_search",
+        lambda **_kwargs: ([ScoredPage("page", "Page", "", "", 1.0)], "bm25"),
+    )
+    monkeypatch.setattr(
+        recall_runtime,
+        "last_search_trace",
+        lambda: {
+            "paths": {
+                "page": {
+                    "path_id": "path-1",
+                    "relation_ids": ["rel_1"],
+                    "pages": ["page"],
+                }
+            }
+        },
+    )
+    monkeypatch.setattr(
+        recall_runtime,
+        "append_jsonl_durable",
+        lambda _path, rows, **_kwargs: writes.append(list(rows)),
+    )
+    monkeypatch.setattr(recall_compiler, "compile_query", lambda _prompt: {})
+    request = RecallRequest(
+        host="codex", event="UserPromptSubmit", prompt="query", session_id="s"
+    )
+
+    search_candidates(
+        ["query"],
+        RecallPolicy(),
+        request=request,
+        diagnostic_rows=deferred,
+    )
+
+    assert writes == []
+    assert deferred
+    recall_runtime._run_post_authority_shadows(
+        request=request,
+        policy=RecallPolicy(processor_shadow_enabled=False),
+        session_state=None,
+        candidates=[],
+        evidence_features={},
+        reranker_metadata={},
+        field_metadata={},
+        post_authority={"diagnostic_rows": deferred},
+        processor_authority=False,
+        deadline_at=time.monotonic() + 1,
+        telemetry=None,
+    )
+    assert writes == [deferred]
+
+
+def test_telemetry_merge_preserves_pipeline_and_runtime_stage_timings() -> None:
+    evidence = {"stage_timings_ms": {"bm25_query": 11, "semantic": 13}}
+    telemetry = {"stage_timings_ms": {"prepare": 2, "teacher": 17}}
+
+    recall_runtime._merge_telemetry(evidence, telemetry)
+    recall_runtime._merge_telemetry(evidence, telemetry)
+
+    assert evidence["stage_timings_ms"] == {
+        "bm25_query": 11,
+        "semantic": 13,
+        "prepare": 2,
+        "teacher": 17,
+    }
+
+
+def test_run_recall_log_records_stage_timings(tmp_path, monkeypatch) -> None:
+    log_file = tmp_path / "recall-log.jsonl"
+    monkeypatch.setattr(recall_runtime, "RECALL_LOG_FILE", log_file)
+    result = run_recall(
+        RecallRequest(
+            host="test",
+            event="UserPromptSubmit",
+            prompt="Chronovisor recall stage timing probe",
+            cwd="/repo",
+        ),
+        RecallPolicy(judge_mode="off", log_decisions=True),
+        perform_search=False,
+        _telemetry={},
+    )
+    record = json.loads(log_file.read_text().splitlines()[-1])
+    timings = record["stage_timings_ms"]
+    assert isinstance(timings, dict)
+    assert "prepare" in timings
+    assert "scheduler" in timings
+    assert "finalize" in timings
+    assert all(isinstance(ms, int) for ms in timings.values())
+    assert "finalize" in result.evidence_features["stage_timings_ms"]
 
 
 def test_recall_log_also_writes_live_episode_snapshot(tmp_path, monkeypatch) -> None:

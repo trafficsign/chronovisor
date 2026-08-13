@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 from chronovisor.core.lexical_index import LexicalIndex
@@ -71,6 +72,47 @@ def test_inverted_bm25_refresh_removes_deleted_pages(tmp_path: Path) -> None:
     index.build(force=True)
 
     assert index.query("retired") == []
+
+
+def test_query_existing_reads_only_valid_built_projection(tmp_path: Path) -> None:
+    page = tmp_path / "page.md"
+    page.write_text(
+        "---\ntitle: Page\nstatus: stable\ntype: knowledge\n---\nexistingtoken\n",
+        encoding="utf-8",
+    )
+    path = tmp_path / "lexical.sqlite"
+    index = LexicalIndex(path=path, pages=lambda: [page], refresh_interval_seconds=0)
+
+    assert index.query_existing("existingtoken") == []
+    assert not path.exists()
+    index.build()
+    before = path.stat().st_mtime_ns
+    assert [row.page_id for row in index.query_existing("existingtoken")] == ["page"]
+    assert path.stat().st_mtime_ns == before
+
+
+def test_query_existing_fails_empty_for_invalid_projection(tmp_path: Path) -> None:
+    path = tmp_path / "lexical.sqlite"
+    path.write_text("not sqlite", encoding="utf-8")
+    index = LexicalIndex(path=path, pages=lambda: [])
+
+    assert index.query_existing("query") == []
+    assert path.read_text(encoding="utf-8") == "not sqlite"
+
+
+def test_query_existing_fails_empty_for_schema_mismatch(tmp_path: Path) -> None:
+    page = tmp_path / "page.md"
+    page.write_text(
+        "---\ntitle: Page\nstatus: stable\ntype: knowledge\n---\nexistingtoken\n",
+        encoding="utf-8",
+    )
+    path = tmp_path / "lexical.sqlite"
+    index = LexicalIndex(path=path, pages=lambda: [page])
+    index.build()
+    with sqlite3.connect(path) as connection:
+        connection.execute("PRAGMA user_version = 999")
+
+    assert index.query_existing("existingtoken") == []
 
 
 def test_lexical_index_includes_only_canonical_stable_pages_and_system(

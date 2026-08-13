@@ -190,6 +190,7 @@ def run_user_prompt(args: argparse.Namespace, stdin_text: str) -> int:
     effective_policy = replace(
         policy,
         total_timeout_ms=recall_inner_budget_ms(policy),
+        log_decisions=False,
     )
     if breaker_was_open:
         effective_policy = replace(
@@ -257,7 +258,10 @@ def run_user_prompt(args: argparse.Namespace, stdin_text: str) -> int:
         result, args.format or host_output_format(host)
     )
     if output:
-        print(output)
+        print(output, flush=True)
+    if policy.log_decisions:
+        with suppress(Exception):
+            recall_runtime.append_recall_log(request, result)
     return 0
 
 
@@ -272,7 +276,11 @@ def _record_recall_fail_open(
     if not policy.log_decisions:
         return
     with suppress(Exception):
-        evidence_features = dict(telemetry or {})
+        evidence_features = {
+            key: value
+            for key, value in (telemetry or {}).items()
+            if not key.startswith("_")
+        }
         evidence_features.setdefault("fallback_started", False)
         recall_runtime.append_recall_log(
             request,
