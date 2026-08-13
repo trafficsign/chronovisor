@@ -1856,6 +1856,26 @@ def _require_remaining_budget(deadline_at: float | None, stage: str) -> int | No
     return remaining_ms
 
 
+def _stage_started(
+    telemetry: dict[str, Any] | None,
+    stage: str,
+    deadline_at: float | None,
+) -> None:
+    if telemetry is not None:
+        telemetry["last_stage_started"] = stage
+        telemetry["remaining_ms"] = _remaining_budget_ms(deadline_at)
+
+
+def _stage_completed(
+    telemetry: dict[str, Any] | None,
+    stage: str,
+    deadline_at: float | None,
+) -> None:
+    if telemetry is not None:
+        telemetry["last_stage_completed"] = stage
+        telemetry["remaining_ms"] = _remaining_budget_ms(deadline_at)
+
+
 def _fail_open_recall_budget(
     reason: str,
     matched: dict[str, list[str]] | None,
@@ -1865,19 +1885,28 @@ def _fail_open_recall_budget(
     final_deadline_at: float,
     allow_timeout_fallback: bool,
     perform_search: bool,
+    telemetry: dict[str, Any] | None = None,
 ) -> RecallResult:
     """Return deterministic fallback context or an explicit fail-open timeout."""
 
     if allow_timeout_fallback and perform_search:
         remaining_ms = _remaining_budget_ms(final_deadline_at)
         if remaining_ms is not None and remaining_ms >= 100:
+            if telemetry is not None:
+                telemetry["fallback_started"] = True
             fallback = run_deterministic_fallback(
                 request,
                 policy,
                 perform_search=True,
                 timeout_ms=remaining_ms,
                 reason=reason,
+                _started_at=started,
+                _final_deadline_at=final_deadline_at,
+                _telemetry=telemetry,
             )
+            if telemetry is not None:
+                telemetry["fallback_completed"] = True
+                fallback.evidence_features.update(telemetry)
             fallback.latency_ms = _elapsed_ms(started)
             if policy.log_decisions:
                 append_recall_log(request, fallback)
@@ -1893,6 +1922,7 @@ def _fail_open_recall_budget(
         error=reason,
         decision_id=request.decision_id or new_decision_id(),
     )
+    result.evidence_features.update(telemetry or {})
     result.state_context = state_context_for_request(request, policy)
     result.context = result.state_context
     if result.state_context:
@@ -2409,8 +2439,11 @@ def _run_recall_impl(
     *,
     perform_search: bool = True,
     _allow_timeout_fallback: bool = True,
+    _started_at: float | None = None,
+    _final_deadline_at: float | None = None,
+    _telemetry: dict[str, Any] | None = None,
 ) -> RecallResult:
-    started = time.monotonic()
+    started = _started_at if _started_at is not None else time.monotonic()
     if not request.decision_id:
         request = replace(request, decision_id=new_decision_id())
     policy = policy or load_policy()
@@ -2418,7 +2451,11 @@ def _run_recall_impl(
         policy.max_total_context_chars,
         policy.max_state_context_chars + policy.max_context_chars + 2,
     )
-    final_deadline_at = started + (policy.total_timeout_ms / 1000.0)
+    final_deadline_at = (
+        _final_deadline_at
+        if _final_deadline_at is not None
+        else started + (policy.total_timeout_ms / 1000.0)
+    )
     reserve_ms = (
         max(
             0,
@@ -2431,14 +2468,17 @@ def _run_recall_impl(
     )
     deadline_at = final_deadline_at - (reserve_ms / 1000.0)
 
+    _stage_started(_telemetry, "prepare", deadline_at)
     active_request, stripped_reasons, early_result = _prepare_recall_request(
         request,
         policy,
         started=started,
     )
     if early_result is not None:
+        _stage_completed(_telemetry, "prepare", deadline_at)
         return early_result
     assert active_request is not None
+    _stage_completed(_telemetry, "prepare", deadline_at)
 
     processor_authority = processor_authority_for_request(
         policy,
@@ -2461,6 +2501,7 @@ def _run_recall_impl(
 
     if policy.gate_mode == "evidence" and perform_search:
         try:
+            _stage_started(_telemetry, "evidence_search", deadline_at)
             evidence_outcome = _run_evidence_search(
                 active_request=active_request,
                 policy=policy,
@@ -2478,6 +2519,7 @@ def _run_recall_impl(
             rewrite_queries = evidence_outcome.rewrite_queries
             reranker_metadata = evidence_outcome.reranker_metadata
             field_shadow_metadata = evidence_outcome.field_shadow_metadata
+            _stage_completed(_telemetry, "evidence_search", deadline_at)
         except RecallBudgetExhausted as exc:
             return _fail_open_recall_budget(
                 str(exc),
@@ -2488,6 +2530,7 @@ def _run_recall_impl(
                 final_deadline_at,
                 _allow_timeout_fallback,
                 perform_search,
+                _telemetry,
             )
         except Exception as exc:
             reasons.append(f"evidence gate failed: {exc.__class__.__name__}")
@@ -2495,6 +2538,7 @@ def _run_recall_impl(
             search_mode = "error"
 
     if policy.processor_shadow_enabled and not processor_authority:
+        _stage_started(_telemetry, "processor_shadow", deadline_at)
         evidence_features["processor_shadow"] = observe_processor_shadow(
             active_request.prompt,
             policy,
@@ -2504,9 +2548,11 @@ def _run_recall_impl(
             reranker_metadata=reranker_metadata,
             deadline_at=deadline_at,
         )
+        _stage_completed(_telemetry, "processor_shadow", deadline_at)
 
     if not processor_authority and should_run_judge(score, policy, evidence_features):
         try:
+            _stage_started(_telemetry, "judge", deadline_at)
             judge_timeout_ms = _require_remaining_budget(deadline_at, "judge")
         except RecallBudgetExhausted as exc:
             return _fail_open_recall_budget(
@@ -2518,6 +2564,7 @@ def _run_recall_impl(
                 final_deadline_at,
                 _allow_timeout_fallback,
                 perform_search,
+                _telemetry,
             )
         judge_score, judge_queries, judge_reason = run_local_judge(
             active_request,
@@ -2525,6 +2572,7 @@ def _run_recall_impl(
             policy,
             timeout_ms=judge_timeout_ms,
         )
+        _stage_completed(_telemetry, "judge", deadline_at)
         used_judge = judge_score is not None
         if judge_score is not None:
             score = judge_score
@@ -2581,6 +2629,7 @@ def _run_recall_impl(
     error = ""
     if perform_search and decision != "none":
         try:
+            _stage_started(_telemetry, "context", deadline_at)
             _require_remaining_budget(deadline_at, "context")
             if processor_authority:
                 context_items, processor_metadata = collect_certified_context(
@@ -2605,6 +2654,7 @@ def _run_recall_impl(
                 )
             if not context_items:
                 reasons.append("no matching pages")
+            _stage_completed(_telemetry, "context", deadline_at)
         except RecallBudgetExhausted as exc:
             return _fail_open_recall_budget(
                 str(exc),
@@ -2615,6 +2665,7 @@ def _run_recall_impl(
                 final_deadline_at,
                 _allow_timeout_fallback,
                 perform_search,
+                _telemetry,
             )
         except Exception as exc:
             error = f"{exc.__class__.__name__}: {exc}"
@@ -2670,6 +2721,7 @@ def _run_recall_impl(
             )
         except Exception:
             pass
+    _stage_started(_telemetry, "evidence_reconstruction", final_deadline_at)
     evidence_features["evidence_reconstruction"] = observe_evidence_reconstruction(
         result,
         request=active_request,
@@ -2677,8 +2729,10 @@ def _run_recall_impl(
         # The teacher is complete, so only keep finalization headroom now.
         deadline_at=max(deadline_at, final_deadline_at - 0.1),
     )
+    _stage_completed(_telemetry, "evidence_reconstruction", final_deadline_at)
     result.latency_ms = _elapsed_ms(started)
-    return _finalize_recall_result(
+    _stage_started(_telemetry, "finalize", final_deadline_at)
+    result = _finalize_recall_result(
         result,
         request=request,
         active_request=active_request,
@@ -2686,6 +2740,8 @@ def _run_recall_impl(
         session_state=session_state,
         queries=queries,
     )
+    _stage_completed(_telemetry, "finalize", final_deadline_at)
+    return result
 
 
 def run_recall(
@@ -2694,17 +2750,42 @@ def run_recall(
     *,
     perform_search: bool = True,
     _allow_timeout_fallback: bool = True,
+    _telemetry: dict[str, Any] | None = None,
 ) -> RecallResult:
     """Run synchronous recall while preempting low-priority research work."""
 
     from chronovisor.core.research_scheduler import foreground_lane
 
+    started = time.monotonic()
+    policy = policy or load_policy()
+    final_deadline_at = started + (policy.total_timeout_ms / 1000.0)
+    _stage_started(_telemetry, "scheduler", final_deadline_at)
     with foreground_lane(preempt_grace_ms=250) as receipt:
+        if _telemetry is not None:
+            _telemetry["scheduler_wait_ms"] = receipt.resource_wait_ms
+        _stage_completed(_telemetry, "scheduler", final_deadline_at)
+        try:
+            _require_remaining_budget(final_deadline_at, "scheduler")
+        except RecallBudgetExhausted as exc:
+            return _fail_open_recall_budget(
+                str(exc),
+                {},
+                request,
+                policy,
+                started,
+                final_deadline_at,
+                False,
+                perform_search,
+                _telemetry,
+            )
         result = _run_recall_impl(
             request,
             policy,
             perform_search=perform_search,
             _allow_timeout_fallback=_allow_timeout_fallback,
+            _started_at=started,
+            _final_deadline_at=final_deadline_at,
+            _telemetry=_telemetry,
         )
     result.evidence_features.setdefault(
         "scheduler",
@@ -2724,6 +2805,9 @@ def run_deterministic_fallback(
     perform_search: bool = True,
     timeout_ms: int | None = None,
     reason: str = "primary recall unavailable",
+    _started_at: float | None = None,
+    _final_deadline_at: float | None = None,
+    _telemetry: dict[str, Any] | None = None,
 ) -> RecallResult:
     """Run the cheap L1 + BM25 path without any local-model dependency."""
 
@@ -2742,11 +2826,20 @@ def run_deterministic_fallback(
         deterministic_fallback_reserve_ms=0,
         log_decisions=False,
     )
-    result = run_recall(
+    started = _started_at if _started_at is not None else time.monotonic()
+    final_deadline_at = (
+        _final_deadline_at
+        if _final_deadline_at is not None
+        else started + (budget_ms / 1000.0)
+    )
+    result = _run_recall_impl(
         request,
         fallback_policy,
         perform_search=perform_search,
         _allow_timeout_fallback=False,
+        _started_at=started,
+        _final_deadline_at=final_deadline_at,
+        _telemetry=_telemetry,
     )
     result.reasons.insert(0, f"deterministic BM25 fallback: {reason}")
     result.search_mode = (

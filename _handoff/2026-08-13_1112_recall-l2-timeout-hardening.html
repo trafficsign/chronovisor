@@ -123,13 +123,13 @@ code{background:var(--code-bg);padding:0.1rem 0.35rem;border-radius:3px;font-siz
 <section data-section="実行手順">
 <h2>実行手順</h2>
 <ol class="checklist">
-<li><input type="checkbox"><span><strong>P0-A — 回帰を先に固定:</strong> <code>recall_wall_clock_deadline</code> をspyし、同一dispatchでouter captured値=4000、<code>run_recall</code> のengine policy=3750を同時assertして、現行の取り違えで失敗することを確認する。</span></li>
-<li><input type="checkbox"><span><strong>P0-B — 外/内deadlineを分離:</strong> dispatcherのouter timerへ元policy（4000）、<code>run_recall</code>へeffective policy（3750）を渡す。設定値とhost 7000は変えない。</span></li>
-<li><input type="checkbox"><span><strong>P0-C — 単一の絶対時計:</strong> <code>foreground_lane</code>へ入る前にengineのabsolute deadlineを作り、引数で <code>run_recall -&gt; _run_recall_impl -&gt; fallback</code> へ明示伝播する。latencyも同じ起点を使い、scheduler待機とI/Oを予算に含める。</span></li>
-<li><input type="checkbox"><span><strong>P0-D — fallback再入場を削除:</strong> 既にforeground lane内のbudget fallbackが再度 <code>run_recall</code> を呼ばないよう、開始可能な残予算を確認して既存内部実装を同じdeadlineで直接使う。残予算がない場合は即host no-opへfail-openする。</span></li>
-<li><input type="checkbox"><span><strong>P0-E — 診断I/Oを非blocking化:</strong> schedulerの <code>sync_enter</code>/<code>sync_exit</code> だけをbest-effort appendへ変え、marker visibilityと権威decision logのdurabilityは維持する。</span></li>
-<li><input type="checkbox"><span><strong>P0-F — timeout観測を残す:</strong> outer fail-openにもhost、scheduler wait、<code>last_stage_started</code>、<code>last_stage_completed</code>、残予算、fallback有無だけをin-memory状態から既存Recallログへ記録する。prompt/page本文は記録しない。</span></li>
-<li><input type="checkbox"><span><strong>P0-G — focused検証:</strong> fake clockで250ms待機、slow/failed scheduler log、nested fallback、outer 4000/engine 3750、host no-op/exit 0を検証し、P0を独立commitにする。</span></li>
+<li><input type="checkbox" checked><span><strong>P0-A — 回帰を先に固定:</strong> <code>recall_wall_clock_deadline</code> をspyし、同一dispatchでouter captured値=4000、<code>run_recall</code> のengine policy=3750を同時assertして、現行の取り違えで失敗することを確認する。</span></li>
+<li><input type="checkbox" checked><span><strong>P0-B — 外/内deadlineを分離:</strong> dispatcherのouter timerへ元policy（4000）、<code>run_recall</code>へeffective policy（3750）を渡す。設定値とhost 7000は変えない。</span></li>
+<li><input type="checkbox" checked><span><strong>P0-C — 単一の絶対時計:</strong> <code>foreground_lane</code>へ入る前にengineのabsolute deadlineを作り、引数で <code>run_recall -&gt; _run_recall_impl -&gt; fallback</code> へ明示伝播する。latencyも同じ起点を使い、scheduler待機とI/Oを予算に含める。</span></li>
+<li><input type="checkbox" checked><span><strong>P0-D — fallback再入場を削除:</strong> 既にforeground lane内のbudget fallbackが再度 <code>run_recall</code> を呼ばないよう、開始可能な残予算を確認して既存内部実装を同じdeadlineで直接使う。残予算がない場合は即host no-opへfail-openする。</span></li>
+<li><input type="checkbox" checked><span><strong>P0-E — 診断I/Oを非blocking化:</strong> schedulerの <code>sync_enter</code>/<code>sync_exit</code> だけをbest-effort appendへ変え、marker visibilityと権威decision logのdurabilityは維持する。</span></li>
+<li><input type="checkbox" checked><span><strong>P0-F — timeout観測を残す:</strong> outer fail-openにもhost、scheduler wait、<code>last_stage_started</code>、<code>last_stage_completed</code>、残予算、fallback有無だけをin-memory状態から既存Recallログへ記録する。prompt/page本文は記録しない。</span></li>
+<li><input type="checkbox" checked><span><strong>P0-G — focused検証:</strong> fake clockで250ms待機、slow/failed scheduler log、nested fallback、outer 4000/engine 3750、host no-op/exit 0を検証し、P0を独立commitにする。</span></li>
 <li><input type="checkbox"><span><strong>P1-A — context I/O境界:</strong> 既存 <code>_require_remaining_budget</code> をstore refresh、各page summary/excerpt/prefetch、query worker開始/merge前で再利用し、期限切れでは次I/Oへ進まず既存fallbackへ渡す。</span></li>
 <li><input type="checkbox"><span><strong>P1-B — 非権威shadowを予算従属に:</strong> typed/compiler/evidence/processor/field shadowと診断traceはfinalize reserveを割る場合skipする。teacher候補・注入結果は変更しない。</span></li>
 <li><input type="checkbox"><span><strong>Canary:</strong> push後、実hookと7000ms wrapperを確認済みのCodexで先に24時間かつ100 eligible prompts以上を観測する。Claude Codeはactive hook設定・timeout・実行commitを確認できた場合だけ別途canaryし、未確認なら検証済みと記載しない。</span></li>
@@ -218,6 +218,7 @@ code{background:var(--code-bg);padding:0.1rem 0.35rem;border-radius:3px;font-siz
 <li><time>2026-08-13 11:19</time><span>コード、live Recallログ、active config、host wrapper、rollout境界を3担当で独立監査し、4秒契約を維持するP0/P1へ整理。</span></li>
 <li><time>2026-08-13 11:28</time><span>最終read-only reviewを反映し、absolute deadline伝播、fallback残予算、canary分母、host別標本、即時rollback条件を固定。</span></li>
 <li><time>2026-08-13 11:38</time><span>Plan承認を受け、最新origin/mainのclean worktreeでP0実装を開始。</span></li>
+<li><time>2026-08-13 11:53</time><span>P0-A〜Gを完了。outer 4000ms / engine 3750ms、単一absolute deadline、fallback非再入場、非blocking scheduler診断、匿名timeout telemetryを実装し、隔離環境のfocused 151 tests、Ruff、py_compile、diff-checkに合格。</span></li>
 </ol>
 </section>
 

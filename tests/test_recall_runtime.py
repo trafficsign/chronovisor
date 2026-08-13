@@ -2614,7 +2614,7 @@ def test_deterministic_fallback_disables_model_dependent_stages(monkeypatch) -> 
 
     seen: dict[str, object] = {}
 
-    def fake_run(request, policy, *, perform_search, _allow_timeout_fallback):
+    def fake_run(request, policy, *, perform_search, _allow_timeout_fallback, **_kwargs):
         seen.update(
             semantic=policy.semantic,
             judge_mode=policy.judge_mode,
@@ -2631,7 +2631,11 @@ def test_deterministic_fallback_disables_model_dependent_stages(monkeypatch) -> 
             matched_terms={},
         )
 
-    monkeypatch.setattr(recall_runtime, "run_recall", fake_run)
+    monkeypatch.setattr(recall_runtime, "_run_recall_impl", fake_run)
+    monkeypatch.setattr(
+        "chronovisor.core.research_scheduler.foreground_lane",
+        lambda **_kwargs: pytest.fail("fallback must reuse the active foreground lane"),
+    )
     result = recall_runtime.run_deterministic_fallback(
         RecallRequest(host="codex", event="UserPromptSubmit", prompt="前回の続き"),
         RecallPolicy(),
@@ -2645,6 +2649,143 @@ def test_deterministic_fallback_disables_model_dependent_stages(monkeypatch) -> 
         "rewrite_enabled": False,
         "perform_search": True,
         "allow_fallback": False,
+    }
+
+
+def test_fallback_reuses_active_foreground_lane(monkeypatch) -> None:
+    from chronovisor.recall import recall_runtime
+
+    lane_entries = 0
+
+    class Lane:
+        def __enter__(self):
+            nonlocal lane_entries
+            lane_entries += 1
+            return SimpleNamespace(
+                resource_wait_ms=0,
+                research_overlap=False,
+                preempted=False,
+            )
+
+        def __exit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(
+        "chronovisor.core.research_scheduler.foreground_lane",
+        lambda **_kwargs: Lane(),
+    )
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        recall_runtime,
+        "_run_recall_impl",
+        lambda *_args, **kwargs: (
+            calls.append(kwargs)
+            or RecallResult(
+                status="ok",
+                decision="none",
+                confidence=0.0,
+                queries=[],
+                reasons=[],
+                matched_terms={},
+            )
+        ),
+    )
+
+    result = recall_runtime.run_recall(
+        RecallRequest(host="codex", event="UserPromptSubmit", prompt="前回の続き"),
+        RecallPolicy(total_timeout_ms=500),
+    )
+
+    assert result.status == "ok"
+    assert lane_entries == 1
+    assert len(calls) == 1
+
+
+def test_scheduler_wait_counts_against_single_deadline(monkeypatch) -> None:
+    from chronovisor.recall import recall_runtime
+
+    clock = iter([100.0, 100.0, 100.3, 100.3])
+    monkeypatch.setattr(recall_runtime.time, "monotonic", lambda: next(clock))
+
+    class Lane:
+        def __enter__(self):
+            return SimpleNamespace(
+                resource_wait_ms=300,
+                research_overlap=True,
+                preempted=True,
+            )
+
+        def __exit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(
+        "chronovisor.core.research_scheduler.foreground_lane",
+        lambda **_kwargs: Lane(),
+    )
+    seen: dict[str, float] = {}
+
+    def fake_run(*_args, _started_at: float, _final_deadline_at: float, **_kwargs):
+        seen.update(started=_started_at, deadline=_final_deadline_at)
+        return RecallResult(
+            status="ok",
+            decision="none",
+            confidence=0.0,
+            queries=[],
+            reasons=[],
+            matched_terms={},
+        )
+
+    monkeypatch.setattr(recall_runtime, "_run_recall_impl", fake_run)
+    telemetry: dict[str, object] = {}
+
+    recall_runtime.run_recall(
+        RecallRequest(host="codex", event="UserPromptSubmit", prompt="前回の続き"),
+        RecallPolicy(total_timeout_ms=3_750),
+        _telemetry=telemetry,
+    )
+
+    assert seen == {"started": 100.0, "deadline": 103.75}
+    assert telemetry["scheduler_wait_ms"] == 300
+    assert telemetry["last_stage_completed"] == "scheduler"
+
+
+def test_scheduler_budget_exhaustion_preserves_deadline_telemetry(monkeypatch) -> None:
+    from chronovisor.recall import recall_runtime
+
+    clock = iter([100.0, 100.0, 100.3, 100.3, 100.3])
+    monkeypatch.setattr(recall_runtime.time, "monotonic", lambda: next(clock))
+
+    class Lane:
+        def __enter__(self):
+            return SimpleNamespace(
+                resource_wait_ms=300,
+                research_overlap=True,
+                preempted=True,
+            )
+
+        def __exit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(
+        "chronovisor.core.research_scheduler.foreground_lane",
+        lambda **_kwargs: Lane(),
+    )
+    telemetry: dict[str, object] = {"host": "codex"}
+
+    result = recall_runtime.run_recall(
+        RecallRequest(host="codex", event="UserPromptSubmit", prompt="private"),
+        RecallPolicy(total_timeout_ms=250, log_decisions=False),
+        _telemetry=telemetry,
+    )
+
+    assert result.status == "timeout"
+    assert result.context == ""
+    assert result.evidence_features == {
+        "host": "codex",
+        "scheduler_wait_ms": 300,
+        "last_stage_started": "scheduler",
+        "last_stage_completed": "scheduler",
+        "remaining_ms": 0,
     }
 
 

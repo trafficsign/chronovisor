@@ -40,6 +40,32 @@ def _event(kind: str, **payload: Any) -> None:
         )
 
 
+def _diagnostic_event(kind: str, **payload: Any) -> None:
+    """Append prompt-path diagnostics without waiting for filesystem durability."""
+
+    row = json.dumps(
+        {"ts": _iso(), "kind": kind, "pid": os.getpid(), **payload},
+        ensure_ascii=False,
+        default=str,
+    ).encode("utf-8") + b"\n"
+
+    def append() -> None:
+        with suppress(OSError):
+            SCHEDULER_LOG.parent.mkdir(parents=True, exist_ok=True)
+            descriptor = os.open(
+                SCHEDULER_LOG,
+                os.O_WRONLY | os.O_CREAT | os.O_APPEND,
+                0o600,
+            )
+            try:
+                os.write(descriptor, row)
+            finally:
+                os.close(descriptor)
+
+    with suppress(RuntimeError):
+        threading.Thread(target=append, daemon=True).start()
+
+
 def _atomic_ephemeral_json(path: Path, payload: dict[str, Any]) -> None:
     """Publish runtime coordination state without putting fsync on sync latency."""
 
@@ -207,13 +233,13 @@ def foreground_lane(*, preempt_grace_ms: int = 250) -> Iterator[ForegroundReceip
         research_overlap=overlap,
         preempted=preempted,
     )
-    _event("sync_enter", **asdict(receipt))
+    _diagnostic_event("sync_enter", **asdict(receipt))
     try:
         yield receipt
     finally:
         with suppress(OSError):
             marker.unlink()
-        _event("sync_exit", marker_id=marker_id)
+        _diagnostic_event("sync_exit", marker_id=marker_id)
 
 
 @dataclass(frozen=True)

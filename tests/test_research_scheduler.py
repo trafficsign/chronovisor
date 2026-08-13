@@ -50,6 +50,76 @@ def test_200_foreground_admissions_stay_under_wait_limit_when_research_is_denied
     assert p95 <= 50
 
 
+def test_foreground_diagnostics_do_not_use_durable_append(tmp_path, monkeypatch) -> None:
+    _paths(tmp_path, monkeypatch)
+    durable_calls: list[bool] = []
+    monkeypatch.setattr(
+        research_scheduler,
+        "append_jsonl_durable",
+        lambda *_args, **_kwargs: durable_calls.append(True),
+    )
+
+    with research_scheduler.foreground_lane(preempt_grace_ms=0):
+        pass
+
+    assert durable_calls == []
+    deadline = time.monotonic() + 1
+    while not research_scheduler.SCHEDULER_LOG.exists() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    rows = [json.loads(line) for line in research_scheduler.SCHEDULER_LOG.read_text().splitlines()]
+    while len(rows) < 2 and time.monotonic() < deadline:
+        time.sleep(0.01)
+        rows = [json.loads(line) for line in research_scheduler.SCHEDULER_LOG.read_text().splitlines()]
+    assert [row["kind"] for row in rows] == ["sync_enter", "sync_exit"]
+
+
+def test_foreground_diagnostic_failure_is_best_effort(tmp_path, monkeypatch) -> None:
+    _paths(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        research_scheduler.os,
+        "open",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("offline")),
+    )
+
+    with research_scheduler.foreground_lane(preempt_grace_ms=0) as receipt:
+        assert receipt.resource_wait_ms <= 50
+
+
+def test_foreground_diagnostic_thread_start_failure_is_best_effort(
+    tmp_path, monkeypatch
+) -> None:
+    _paths(tmp_path, monkeypatch)
+
+    class UnavailableThread:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        def start(self) -> None:
+            raise RuntimeError("thread resources exhausted")
+
+    monkeypatch.setattr(research_scheduler.threading, "Thread", UnavailableThread)
+
+    with research_scheduler.foreground_lane(preempt_grace_ms=0) as receipt:
+        assert receipt.resource_wait_ms <= 50
+
+
+def test_foreground_slow_diagnostic_append_does_not_block(tmp_path, monkeypatch) -> None:
+    _paths(tmp_path, monkeypatch)
+    original_open = research_scheduler.os.open
+
+    def slow_open(*args, **kwargs):
+        time.sleep(0.2)
+        return original_open(*args, **kwargs)
+
+    monkeypatch.setattr(research_scheduler.os, "open", slow_open)
+    started = time.monotonic()
+
+    with research_scheduler.foreground_lane(preempt_grace_ms=0):
+        pass
+
+    assert time.monotonic() - started < 0.1
+
+
 def test_foreground_marker_cancels_running_research_child(tmp_path, monkeypatch) -> None:
     _paths(tmp_path, monkeypatch)
     with research_scheduler.research_lane(

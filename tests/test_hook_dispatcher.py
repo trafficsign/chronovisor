@@ -123,7 +123,7 @@ def test_user_prompt_fails_open_for_unsafe_runtime_lease(
 def test_user_prompt_dispatches_to_recall_runtime(monkeypatch, capsys) -> None:
     seen: dict[str, object] = {}
 
-    def fake_run_recall(request, policy, *, perform_search: bool):
+    def fake_run_recall(request, policy, *, perform_search: bool, _telemetry):
         seen["request"] = request
         seen["perform_search"] = perform_search
         return recall_runtime.RecallResult(
@@ -228,6 +228,54 @@ def test_user_prompt_outer_timeout_does_not_start_second_fallback(
     assert recall_breaker.snapshot()["failures"] == 1
 
 
+def test_user_prompt_outer_timeout_logs_anonymous_stage_telemetry(
+    monkeypatch,
+    capsys,
+) -> None:
+    recorded: list[recall_runtime.RecallResult] = []
+    monkeypatch.setattr(
+        recall_runtime,
+        "load_policy",
+        lambda _path: recall_runtime.RecallPolicy(log_decisions=True),
+    )
+
+    def timeout(*_args, _telemetry, **_kwargs):
+        _telemetry.update(
+            scheduler_wait_ms=240,
+            last_stage_started="context",
+            last_stage_completed="judge",
+            remaining_ms=75,
+            fallback_started=False,
+        )
+        raise hook_dispatcher.RecallWallClockTimeout("primary timeout")
+
+    monkeypatch.setattr(recall_runtime, "run_recall", timeout)
+    monkeypatch.setattr(
+        recall_runtime,
+        "append_recall_log",
+        lambda _request, result: recorded.append(result),
+    )
+    monkeypatch.setattr("sys.stdin", io.StringIO('{"prompt":"private prompt"}'))
+
+    assert (
+        hook_dispatcher.main(
+            ["--host", "codex", "--event", "UserPromptSubmit", "--hook"]
+        )
+        == 0
+    )
+    assert capsys.readouterr().out.strip() == "{}"
+    assert recorded[0].evidence_features == {
+        "host": "codex",
+        "scheduler_wait_ms": 240,
+        "last_stage_started": "context",
+        "last_stage_completed": "judge",
+        "remaining_ms": 75,
+        "fallback_started": False,
+    }
+    assert recorded[0].latency_ms == 4_000
+    assert "private prompt" not in json.dumps(recorded[0].evidence_features)
+
+
 def test_outer_recall_deadline_is_the_total_budget() -> None:
     policy = recall_runtime.RecallPolicy(
         total_timeout_ms=4_000,
@@ -256,7 +304,17 @@ def test_user_prompt_reserves_host_headroom_inside_total_deadline(
     )
     monkeypatch.setattr(recall_breaker, "is_open", lambda: False)
 
-    def fake_run(_request, policy, *, perform_search: bool):
+    def fake_deadline(timeout_ms: int):
+        class Deadline:
+            def __enter__(self):
+                seen["outer_timeout_ms"] = timeout_ms
+
+            def __exit__(self, *_args):
+                return False
+
+        return Deadline()
+
+    def fake_run(_request, policy, *, perform_search: bool, _telemetry):
         seen["total_timeout_ms"] = policy.total_timeout_ms
         seen["fallback_reserve_ms"] = policy.deterministic_fallback_reserve_ms
         return recall_runtime.RecallResult(
@@ -268,6 +326,7 @@ def test_user_prompt_reserves_host_headroom_inside_total_deadline(
             matched_terms={},
         )
 
+    monkeypatch.setattr(hook_dispatcher, "recall_wall_clock_deadline", fake_deadline)
     monkeypatch.setattr(recall_runtime, "run_recall", fake_run)
     monkeypatch.setattr("sys.stdin", io.StringIO('{"prompt":"remember"}'))
 
@@ -279,6 +338,7 @@ def test_user_prompt_reserves_host_headroom_inside_total_deadline(
     )
     assert capsys.readouterr().out.strip() == "{}"
     assert seen == {
+        "outer_timeout_ms": 4_000,
         "total_timeout_ms": 3_750,
         "fallback_reserve_ms": 600,
     }
@@ -287,7 +347,7 @@ def test_user_prompt_reserves_host_headroom_inside_total_deadline(
 def test_user_prompt_open_breaker_uses_bm25_only_policy(monkeypatch, capsys) -> None:
     seen: dict[str, object] = {}
 
-    def fake_run(_request, policy, *, perform_search: bool):
+    def fake_run(_request, policy, *, perform_search: bool, _telemetry):
         seen.update(
             semantic=policy.semantic,
             judge_mode=policy.judge_mode,

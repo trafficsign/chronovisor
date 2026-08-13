@@ -196,14 +196,14 @@ def run_user_prompt(args: argparse.Namespace, stdin_text: str) -> int:
             judge_mode="off",
             rewrite_enabled=False,
         )
+    telemetry: dict[str, Any] = {"host": host}
     try:
-        with recall_wall_clock_deadline(
-            recall_outer_deadline_ms(effective_policy)
-        ):
+        with recall_wall_clock_deadline(recall_outer_deadline_ms(policy)):
             result = recall_runtime.run_recall(
                 request,
                 effective_policy,
                 perform_search=not args.no_search,
+                _telemetry=telemetry,
             )
     except RecallWallClockTimeout as exc:
         recall_breaker.record_failure(
@@ -217,9 +217,10 @@ def run_user_prompt(args: argparse.Namespace, stdin_text: str) -> int:
         # violate the host's four-second contract.
         _record_recall_fail_open(
             request,
-            effective_policy,
+            policy,
             status="timeout",
             error=str(exc),
+            telemetry=telemetry,
         )
         _print_host_noop(host)
         return 0
@@ -230,7 +231,13 @@ def run_user_prompt(args: argparse.Namespace, stdin_text: str) -> int:
             threshold=policy.circuit_breaker_failures,
             cooldown_seconds=policy.circuit_breaker_cooldown_seconds,
         )
-        _record_recall_fail_open(request, policy, status="error", error=error)
+        _record_recall_fail_open(
+            request,
+            policy,
+            status="error",
+            error=error,
+            telemetry=telemetry,
+        )
         _print_host_noop(host)
         return 0
 
@@ -258,10 +265,13 @@ def _record_recall_fail_open(
     *,
     status: str,
     error: str,
+    telemetry: dict[str, Any] | None = None,
 ) -> None:
     if not policy.log_decisions:
         return
     with suppress(Exception):
+        evidence_features = dict(telemetry or {})
+        evidence_features.setdefault("fallback_started", False)
         recall_runtime.append_recall_log(
             request,
             recall_runtime.RecallResult(
@@ -271,6 +281,7 @@ def _record_recall_fail_open(
                 queries=[],
                 reasons=["synchronous recall failed open"],
                 matched_terms={},
+                evidence_features=evidence_features,
                 latency_ms=policy.total_timeout_ms if status == "timeout" else 0,
                 error=error,
             ),
