@@ -1062,13 +1062,41 @@ class TestReconcileLinks:
         assert out == "See ghost."
         assert stats["unwrapped"] == 1
 
-    @pytest.mark.parametrize("target", ["../../escape.md", "/system/private.md"])
-    def test_escape_and_system_crosslink_are_rejected(self, target: str) -> None:
-        with pytest.raises(IngestApplyError, match="escapes|crosses"):
+    def test_plain_pages_namespace_escape_is_unwrapped(self) -> None:
+        out, stats = _reconcile_links(
+            "See [AI note](../../ai/target.md).",
+            self.allowed,
+            source_path="memory/source.md",
+        )
+        assert out == "See AI note."
+        assert stats["unwrapped"] == 1
+
+    def test_plain_pages_namespace_escape_uses_safe_stem_for_empty_label(self) -> None:
+        out, stats = _reconcile_links(
+            "See [](../ai/target.md).",
+            self.allowed,
+            source_path="source.md",
+        )
+        assert out == "See target."
+        assert stats["unwrapped"] == 1
+
+    @pytest.mark.parametrize(
+        "target",
+        [
+            "/system/private.md",
+            "../system/private.md",
+            "%2e%2e/ai/private.md",
+            "%252e%252e/ai/private.md",
+            "..\\ai\\private.md",
+            "..%00/ai/private.md",
+        ],
+    )
+    def test_cross_namespace_and_unsafe_escapes_are_rejected(self, target: str) -> None:
+        with pytest.raises(IngestApplyError, match="escapes|crosses|unsafe"):
             _reconcile_links(
                 f"See [Unsafe]({target}).",
                 self.allowed,
-                source_path="memory/source.md",
+                source_path="source.md",
             )
 
     def test_fenced_code_is_untouched(self) -> None:
@@ -1109,6 +1137,23 @@ class TestReconcileLinks:
         assert "title: '[Ghost](ghost.md)'" in out
         assert "```markdown\n[Ghost](ghost.md)\n```" in out
         assert "Plain Ghost." in out
+        assert stats["unwrapped"] == 1
+
+    def test_invalid_escape_in_frontmatter_and_code_is_untouched(self) -> None:
+        text = (
+            "---\ntitle: '[Escape](../ai/target.md)'\nstatus: stable\n"
+            "type: knowledge\n---\n"
+            "```markdown\n[Escape](../ai/target.md)\n```\n"
+            "Plain [Escape](../ai/target.md)."
+        )
+        out, stats = _reconcile_links(
+            text,
+            self.allowed,
+            source_path="source.md",
+        )
+        assert "title: '[Escape](../ai/target.md)'" in out
+        assert "```markdown\n[Escape](../ai/target.md)\n```" in out
+        assert "Plain Escape." in out
         assert stats["unwrapped"] == 1
 
     def test_invalid_frontmatter_still_fails_closed(self) -> None:
@@ -5199,6 +5244,58 @@ class TestRunIngestPartialFailure:
         written = target.read_text(encoding="utf-8")
         assert "See Missing page." in written
         assert "missing.md" not in written
+
+    def test_root_namespace_escape_is_unwrapped_before_review_and_write(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from chronovisor.core import jobs
+        from chronovisor.ingest import ingest
+
+        plan = [
+            {
+                "type": "create",
+                "filename": "memory/source.md",
+                "title": "Source",
+            }
+        ]
+        generation_calls = 0
+        review_calls = 0
+
+        def generate(op: dict, _raw: str, **_kwargs):
+            nonlocal generation_calls
+            generation_calls += 1
+            return {
+                "type": "create",
+                "filename": op["filename"],
+                "content": (
+                    "---\ntitle: Source\nupdated: 2026-08-13\n"
+                    "status: stable\ntype: knowledge\n---\n"
+                    "See [AI target](../../ai/target.md)."
+                ),
+            }
+
+        def reviewer(_proposal: dict) -> dict:
+            nonlocal review_calls
+            review_calls += 1
+            return {
+                "decision": "apply_available",
+                "summary": "The invalid local link was safely unwrapped.",
+                "failed_operations_disposition": "none",
+            }
+
+        monkeypatch.setattr(ingest, "_triage", lambda *_args, **_kwargs: plan)
+        monkeypatch.setattr(ingest, "_generate_one", generate)
+        job = jobs.job_store.create(processor="ollama")
+
+        ingest.run_ingest("grounded raw", job.job_id, frontier_reviewer=reviewer)
+
+        target = isolated_wiki / "pages" / "memory" / "source.md"
+        assert jobs.job_store.get(job.job_id).status == jobs.JobStatus.COMPLETED
+        assert generation_calls == 1
+        assert review_calls == 1
+        written = target.read_text(encoding="utf-8")
+        assert "See AI target." in written
+        assert "../../ai/target.md" not in written
 
     def test_missing_link_regenerates_before_review_and_write(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch

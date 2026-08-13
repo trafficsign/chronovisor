@@ -368,6 +368,7 @@ def resolve_internal_markdown_links(
 InternalLinkRewrite = Callable[
     [ResolvedMarkdownLink, str], ResolvedMarkdownLink | str | None
 ]
+InvalidInternalLinkRewrite = Callable[[str, str, CanonicalDocumentError], str | None]
 
 
 def rewrite_internal_markdown_links(
@@ -376,10 +377,11 @@ def rewrite_internal_markdown_links(
     source_namespace: Namespace,
     source_path: str,
     rewrite: InternalLinkRewrite,
+    on_invalid: InvalidInternalLinkRewrite | None = None,
     output_namespace: Namespace | None = None,
     output_path: str | None = None,
 ) -> tuple[str, int]:
-    """Rewrite resolved internal links while preserving unrelated Markdown."""
+    """Rewrite internal links, preserving protected Markdown and invalid defaults."""
 
     text = _decode_body(body) if isinstance(body, bytes) else body
     spans = _protected_spans(text)
@@ -392,11 +394,21 @@ def rewrite_internal_markdown_links(
         if _position_in_spans(match.start(), spans):
             return match.group(0)
         raw_target = match.group("target").removeprefix("<").removesuffix(">")
-        resolved = resolve_internal_markdown_link(
-            raw_target,
-            source_namespace=source_namespace,
-            source_path=source_path,
-        )
+        try:
+            resolved = resolve_internal_markdown_link(
+                raw_target,
+                source_namespace=source_namespace,
+                source_path=source_path,
+            )
+        except CanonicalDocumentError as exc:
+            if on_invalid is None:
+                raise
+            rendered = on_invalid(raw_target, match.group("label"), exc)
+            if rendered is None:
+                raise
+            if rendered != match.group(0):
+                changed += 1
+            return rendered
         if resolved is None:
             return match.group(0)
         replacement = rewrite(resolved, match.group("label"))

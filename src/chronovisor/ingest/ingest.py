@@ -7,11 +7,12 @@ import json
 import os
 import re
 import threading
+import unicodedata
 from collections.abc import Callable
 from contextlib import nullcontext, suppress
 from dataclasses import dataclass
 from difflib import SequenceMatcher
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from chronovisor.core import activity_log, page_mutation, runtime_status
@@ -2303,6 +2304,7 @@ def _reconcile_links(
             )
         )
     try:
+
         def unwrap_missing(
             link: ResolvedMarkdownLink,
             label: str,
@@ -2312,11 +2314,44 @@ def _reconcile_links(
             visible = label.replace(r"\[", "[").replace(r"\]", "]")
             return visible or Path(link.path).stem
 
+        def unwrap_plain_namespace_escape(
+            raw_target: str,
+            label: str,
+            error: CanonicalDocumentError,
+        ) -> str | None:
+            if not str(error).startswith("Markdown link escapes pages namespace:"):
+                return None
+            if (
+                "%" in raw_target
+                or "\\" in raw_target
+                or any(
+                    unicodedata.category(character) == "Cc"
+                    for character in raw_target
+                )
+            ):
+                return None
+            visible = label.replace(r"\[", "[").replace(r"\]", "]")
+            target_path = PurePosixPath(raw_target.partition("#")[0])
+            destination_root = next(
+                (part for part in target_path.parts if part not in {".", ".."}),
+                None,
+            )
+            if destination_root == "system":
+                return None
+            basename = target_path.name
+            fallback = (
+                PurePosixPath(basename).stem
+                if basename not in {"", ".", ".."}
+                else "link"
+            )
+            return visible or fallback
+
         reconciled, unwrapped = rewrite_internal_markdown_links(
             content,
             source_namespace="pages",
             source_path=source_path,
             rewrite=unwrap_missing,
+            on_invalid=unwrap_plain_namespace_escape,
         )
         if wrapped:
             data = serialize_document(

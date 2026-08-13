@@ -14,6 +14,7 @@ from chronovisor.core.canonical_document import (
     patch_document_metadata,
     resolve_internal_markdown_link,
     resolve_internal_markdown_links,
+    rewrite_internal_markdown_links,
     serialize_document,
     validate_canonical_document,
 )
@@ -393,6 +394,42 @@ def test_pages_link_resolution_fails_closed_at_boundaries(target: str) -> None:
             source_namespace="pages",
             source_path="source.md",
         )
+
+
+def test_internal_link_rewrite_can_explicitly_handle_invalid_target() -> None:
+    body = "[Escape](../ai/target.md) `[Code](../ai/code.md)`"
+
+    with pytest.raises(CanonicalDocumentError, match="escapes pages namespace"):
+        rewrite_internal_markdown_links(
+            body,
+            source_namespace="pages",
+            source_path="source.md",
+            rewrite=lambda _link, _label: None,
+        )
+
+    seen: list[tuple[str, str, str]] = []
+
+    def unwrap(target: str, label: str, error: CanonicalDocumentError) -> str:
+        seen.append((target, label, str(error)))
+        return label
+
+    rewritten, count = rewrite_internal_markdown_links(
+        body,
+        source_namespace="pages",
+        source_path="source.md",
+        rewrite=lambda _link, _label: None,
+        on_invalid=unwrap,
+    )
+
+    assert rewritten == "Escape `[Code](../ai/code.md)`"
+    assert count == 1
+    assert seen == [
+        (
+            "../ai/target.md",
+            "Escape",
+            "Markdown link escapes pages namespace: '../ai/target.md'",
+        )
+    ]
 
 
 def test_duplicate_yaml_keys_fail_closed() -> None:
