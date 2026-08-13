@@ -1066,6 +1066,102 @@ except TimeoutError:
     assert timed_out_path.exists()
 
 
+def test_resource_lease_prioritizes_foreground_and_resumes_background(
+    tmp_path, monkeypatch
+) -> None:
+    from chronovisor.core import research_scheduler
+
+    lock_path = tmp_path / "resource.lock"
+    scheduler_root = tmp_path / "scheduler"
+    monkeypatch.setenv("CHRONOVISOR_OLLAMA_RESOURCE_LOCK", str(lock_path))
+    monkeypatch.setattr(research_scheduler, "SYNC_DIR", scheduler_root / "sync")
+    monkeypatch.setattr(research_scheduler, "ACTIVE_FILE", scheduler_root / "active.json")
+    monkeypatch.setattr(research_scheduler, "SCHEDULER_LOG", scheduler_root / "log.jsonl")
+    first_entered = threading.Event()
+    release_first = threading.Event()
+    second_waiting = threading.Event()
+    second_entered = threading.Event()
+    foreground_waiting = threading.Event()
+    release_foreground = threading.Event()
+    order: list[str] = []
+    failures: list[BaseException] = []
+
+    def first_background() -> None:
+        try:
+            with ollama.model_resource_lease(exclusive=False):
+                order.append("background-1")
+                first_entered.set()
+                assert release_first.wait(timeout=5)
+        except BaseException as exc:
+            failures.append(exc)
+
+    def foreground() -> None:
+        try:
+            with research_scheduler.foreground_lane(preempt_grace_ms=0):
+                foreground_waiting.set()
+                with ollama.model_resource_lease(exclusive=True):
+                    order.append("foreground")
+                    assert release_foreground.wait(timeout=5)
+        except BaseException as exc:
+            failures.append(exc)
+
+    def second_background() -> None:
+        try:
+            second_waiting.set()
+            with ollama.model_resource_lease(exclusive=False):
+                order.append("background-2")
+                second_entered.set()
+        except BaseException as exc:
+            failures.append(exc)
+
+    first = threading.Thread(target=first_background)
+    priority = threading.Thread(target=foreground)
+    second = threading.Thread(target=second_background)
+    first.start()
+    assert first_entered.wait(timeout=5)
+    second.start()
+    assert second_waiting.wait(timeout=5)
+    assert not second_entered.wait(timeout=0.05)
+    priority.start()
+    assert foreground_waiting.wait(timeout=5)
+    release_first.set()
+    deadline = time.monotonic() + 5
+    while "foreground" not in order and time.monotonic() < deadline:
+        time.sleep(0.005)
+    assert order == ["background-1", "foreground"]
+    release_foreground.set()
+    for thread in (first, priority, second):
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+    assert order == ["background-1", "foreground", "background-2"]
+    assert failures == []
+
+
+def test_background_rechecks_foreground_after_admission(tmp_path, monkeypatch) -> None:
+    from chronovisor.core import research_scheduler
+
+    checks = 0
+
+    def foreground_arrives_during_admission() -> bool:
+        nonlocal checks
+        checks += 1
+        return checks == 2
+
+    monkeypatch.setenv(
+        "CHRONOVISOR_OLLAMA_RESOURCE_LOCK", str(tmp_path / "resource.lock")
+    )
+    monkeypatch.setattr(
+        research_scheduler,
+        "sync_pending",
+        foreground_arrives_during_admission,
+    )
+
+    with ollama.model_resource_lease(exclusive=False):
+        pass
+
+    assert checks >= 4
+
+
 def test_public_heavy_operations_take_expected_resource_lease(monkeypatch) -> None:
     modes: list[bool] = []
 

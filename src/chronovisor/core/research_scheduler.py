@@ -13,6 +13,7 @@ import time
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager, suppress
+from contextvars import ContextVar
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -26,6 +27,10 @@ SYNC_DIR = RUNTIME_DIR / "sync-pending"
 RESEARCH_LOCK = RUNTIME_DIR / "research-generation.lock"
 ACTIVE_FILE = RUNTIME_DIR / "active-research.json"
 SCHEDULER_LOG = RUNTIME_DIR / "scheduler.jsonl"
+_FOREGROUND_ACTIVE: ContextVar[bool] = ContextVar(
+    "chronovisor_foreground_active",
+    default=False,
+)
 
 
 def _iso() -> str:
@@ -169,6 +174,12 @@ def sync_pending() -> bool:
     return False
 
 
+def foreground_active() -> bool:
+    """Return whether this execution context owns a foreground lane."""
+
+    return _FOREGROUND_ACTIVE.get()
+
+
 @dataclass(frozen=True)
 class ForegroundReceipt:
     marker_id: str
@@ -234,9 +245,11 @@ def foreground_lane(*, preempt_grace_ms: int = 250) -> Iterator[ForegroundReceip
         preempted=preempted,
     )
     _diagnostic_event("sync_enter", **asdict(receipt))
+    foreground_token = _FOREGROUND_ACTIVE.set(True)
     try:
         yield receipt
     finally:
+        _FOREGROUND_ACTIVE.reset(foreground_token)
         with suppress(OSError):
             marker.unlink()
         _diagnostic_event("sync_exit", marker_id=marker_id)

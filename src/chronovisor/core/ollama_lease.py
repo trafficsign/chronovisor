@@ -90,6 +90,48 @@ def _acquire_file_lease(
         time.sleep(min(0.005, remaining_s))
 
 
+def _timed_out(deadline_at: float | None) -> bool:
+    return deadline_at is not None and time.monotonic() >= deadline_at
+
+
+@contextmanager
+def _model_admission(
+    lock_path: Path,
+    *,
+    deadline_at: float | None,
+) -> Iterator[None]:
+    """Serialize background inference while giving queued foreground work priority."""
+
+    from chronovisor.core.research_scheduler import foreground_active, sync_pending
+
+    foreground = foreground_active()
+    admission_path = lock_path.with_name(f"{lock_path.name}.admission")
+    with admission_path.open("a+") as handle:
+        operation = fcntl.LOCK_SH if foreground else fcntl.LOCK_EX
+        while True:
+            if not foreground and sync_pending():
+                if _timed_out(deadline_at):
+                    raise TimeoutError("Ollama resource lease acquisition timed out")
+                time.sleep(0.005)
+                continue
+            try:
+                fcntl.flock(handle.fileno(), operation | fcntl.LOCK_NB)
+            except OSError as exc:
+                if exc.errno not in {errno.EACCES, errno.EAGAIN}:
+                    raise
+            else:
+                if foreground or not sync_pending():
+                    break
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            if _timed_out(deadline_at):
+                raise TimeoutError("Ollama resource lease acquisition timed out")
+            time.sleep(0.005)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
 @contextmanager
 def model_resource_lease(
     *,
@@ -131,31 +173,34 @@ def model_resource_lease(
     )
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     deadline_at = None if timeout_ms is None else time.monotonic() + (timeout_ms / 1000)
-    acquired_process_lease = _PROCESS_RESOURCE_LOCK.acquire(
-        exclusive=exclusive,
-        timeout_s=(
-            None if deadline_at is None else max(0.0, deadline_at - time.monotonic())
-        ),
-    )
-    if not acquired_process_lease:
-        raise TimeoutError("Ollama resource lease acquisition timed out")
-    try:
-        with lock_path.open("a+") as handle:
-            _acquire_file_lease(
-                handle,
-                exclusive=exclusive,
-                deadline_at=deadline_at,
-            )
-            _RESOURCE_LEASE_STATE.depth = 1
-            _RESOURCE_LEASE_STATE.exclusive = exclusive
-            try:
-                yield
-            finally:
-                _RESOURCE_LEASE_STATE.depth = 0
-                _RESOURCE_LEASE_STATE.exclusive = False
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-    finally:
-        _PROCESS_RESOURCE_LOCK.release(exclusive=exclusive)
+    with _model_admission(lock_path, deadline_at=deadline_at):
+        acquired_process_lease = _PROCESS_RESOURCE_LOCK.acquire(
+            exclusive=exclusive,
+            timeout_s=(
+                None
+                if deadline_at is None
+                else max(0.0, deadline_at - time.monotonic())
+            ),
+        )
+        if not acquired_process_lease:
+            raise TimeoutError("Ollama resource lease acquisition timed out")
+        try:
+            with lock_path.open("a+") as handle:
+                _acquire_file_lease(
+                    handle,
+                    exclusive=exclusive,
+                    deadline_at=deadline_at,
+                )
+                _RESOURCE_LEASE_STATE.depth = 1
+                _RESOURCE_LEASE_STATE.exclusive = exclusive
+                try:
+                    yield
+                finally:
+                    _RESOURCE_LEASE_STATE.depth = 0
+                    _RESOURCE_LEASE_STATE.exclusive = False
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            _PROCESS_RESOURCE_LOCK.release(exclusive=exclusive)
 
 
 def model_resource_lease_mode() -> str | None:
