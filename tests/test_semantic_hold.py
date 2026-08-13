@@ -10,6 +10,10 @@ import pytest
 
 from chronovisor.decision import semantic_hold
 from chronovisor.decision.decision_router import QUORUM_SAFETY_POLICY_VERSION
+from chronovisor.decision.local_structured import (
+    LocalStructuredResult,
+    StructuredAttempt,
+)
 from tests.semantic_hold_support import (
     semantic_authority as _authority,
 )
@@ -70,6 +74,49 @@ def test_semantic_no_quorum_hold_is_strict_self_hashed_and_extractable() -> None
         )
         is None
     )
+
+
+def test_semantic_hold_accepts_current_producer_session_audit() -> None:
+    authority = _authority()
+    epoch = _epoch(authority)
+    review = _semantic_review(authority)
+    for vote in review["local_consensus"]["votes"]:
+        signature = vote["signature_sha256"]
+        vote["session"] = LocalStructuredResult(
+            ok=True,
+            model=vote["model"],
+            attempts=(StructuredAttempt(0, True, signature, 120, False, None, ()),),
+            think="medium",
+            ollama_think="medium",
+            num_predict=256,
+            think_selection_reason="medium_default",
+            required_num_ctx=8_000,
+            requested_num_ctx=32_768,
+            effective_num_ctx=32_768,
+        ).audit_record()
+
+    hold = semantic_hold.build_semantic_no_quorum_hold(
+        "recall_auto_apply", epoch, authority, review
+    )
+
+    assert (
+        semantic_hold.semantic_no_quorum_hold_error(
+            hold, "recall_auto_apply", epoch, authority
+        )
+        is None
+    )
+    assert (
+        semantic_hold.persisted_semantic_no_quorum_hold(
+            {"semantic_hold": hold}, "recall_auto_apply", epoch, authority
+        )
+        == hold
+    )
+
+    review["local_consensus"]["votes"][0]["session"]["context_tokens"] *= 2
+    with pytest.raises(ValueError, match="session audit is invalid"):
+        semantic_hold.build_semantic_no_quorum_hold(
+            "recall_auto_apply", epoch, authority, review
+        )
 
 
 def test_authority_observation_detects_a_b_a_file_generation(

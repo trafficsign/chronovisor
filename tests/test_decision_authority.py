@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 
+import pytest
+
 from chronovisor.decision.decision_authority import (
     AUTHORITY_VERSION,
     compare_semantic_authority,
@@ -9,7 +11,14 @@ from chronovisor.decision.decision_authority import (
     semantic_authority_shape_error,
     semantic_verdict_authority_error,
 )
-from chronovisor.decision.decision_router import QUORUM_SAFETY_POLICY_VERSION
+from chronovisor.decision.decision_router import (
+    QUORUM_SAFETY_POLICY_VERSION,
+    DecisionVote,
+)
+from chronovisor.decision.local_structured import (
+    LocalStructuredResult,
+    StructuredAttempt,
+)
 
 
 def _production_authority(*, artifact_sha256: str = "a" * 64) -> dict:
@@ -58,43 +67,31 @@ def _production_authority(*, artifact_sha256: str = "a" * 64) -> dict:
 def _vote_audit(role: str, route: dict, agreement: str) -> dict:
     model = route["model"]
     returned_model = model if route["location"] == "remote" else None
-    return {
-        "role": role,
-        "provider": route["provider"],
-        "model": model,
-        "route_provenance": route,
-        "returned_model": returned_model,
-        "requested_num_ctx": 16_384,
-        "valid": True,
-        "signature_sha256": agreement,
-        "invalid_reason": None,
-        "decision_label": "approved",
-        "effect_class": "mutating",
-        "runtime_observation": {
-            "status": "unavailable",
-            "model_size_bytes": None,
-            "num_ctx": None,
-        },
-        "session": {
-            "ok": True,
-            "model": model,
-            "failure_class": None,
-            "returned_model": returned_model,
-            "first_pass_valid": True,
-            "repair_turns": 0,
-            "attempts": [
-                {
-                    "index": 0,
-                    "valid": True,
-                    "output_sha256": agreement,
-                    "output_chars": 80,
-                    "normalized": False,
-                    "error_fingerprint": None,
-                    "issues": [],
-                }
-            ],
-        },
-    }
+    result = LocalStructuredResult(
+        ok=True,
+        model=model,
+        attempts=(StructuredAttempt(0, True, agreement, 80, False, None, ()),),
+        returned_model=returned_model,
+        think="medium",
+        ollama_think="medium",
+        num_predict=256,
+        think_selection_reason="medium_default",
+        required_num_ctx=8_000,
+        requested_num_ctx=16_384,
+        effective_num_ctx=16_384,
+    )
+    return DecisionVote(
+        role=role,
+        model=model,
+        provider=route["provider"],
+        result=result,
+        requested_num_ctx=16_384,
+        route_provenance=route,
+        signature="canonical action",
+        signature_sha256=agreement,
+        decision_label="approved",
+        effect_class="mutating",
+    ).audit_record()
 
 
 def _review(authority: dict) -> dict:
@@ -334,6 +331,80 @@ def test_semantic_authority_binds_vote_roles_and_models_to_router_triplet() -> N
             authority,
             lane="example_lane",
         )
+        == "decision verdict local consensus vote authority is invalid"
+    )
+
+
+def test_semantic_authority_accepts_current_producer_and_legacy_session_audits() -> (
+    None
+):
+    authority = _production_authority()
+    review = _review(authority)
+
+    assert (
+        semantic_verdict_authority_error(review, authority, lane="example_lane") is None
+    )
+
+    for vote in review["local_consensus"]["votes"]:
+        vote["session"] = LocalStructuredResult(
+            ok=True,
+            model=vote["model"],
+            returned_model=vote["returned_model"],
+        ).audit_record()
+    assert (
+        semantic_verdict_authority_error(review, authority, lane="example_lane") is None
+    )
+
+    legacy_fields = {
+        "ok",
+        "model",
+        "failure_class",
+        "returned_model",
+        "first_pass_valid",
+        "repair_turns",
+        "attempts",
+    }
+    for vote in review["local_consensus"]["votes"]:
+        vote["session"] = {
+            key: value for key, value in vote["session"].items() if key in legacy_fields
+        }
+    assert (
+        semantic_verdict_authority_error(review, authority, lane="example_lane") is None
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "invalid", "remove"),
+    [
+        ("structured_generation_policy_version", True, False),
+        ("structured_generation_policy_sha256", "A" * 64, False),
+        ("think", "private reasoning", False),
+        ("ollama_think", 1, False),
+        ("num_predict", 0, False),
+        ("think_selection_reason", "private reason", False),
+        ("required_num_ctx", True, False),
+        ("requested_num_ctx", 0, False),
+        ("effective_num_ctx", -1, False),
+        ("context_tokens", 32_768, False),
+        ("private_payload", "must not persist", False),
+        ("think", None, True),
+    ],
+)
+def test_semantic_authority_rejects_invalid_current_session_audit(
+    field: str,
+    invalid: object,
+    remove: bool,
+) -> None:
+    authority = _production_authority()
+    review = _review(authority)
+    session = review["local_consensus"]["votes"][0]["session"]
+    if remove:
+        session.pop(field)
+    else:
+        session[field] = invalid
+
+    assert (
+        semantic_verdict_authority_error(review, authority, lane="example_lane")
         == "decision verdict local consensus vote authority is invalid"
     )
 

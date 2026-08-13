@@ -35,6 +35,7 @@ from chronovisor.core.runtime_config import DecisionRouterConfig
 from chronovisor.decision.decision_authority import (
     semantic_authority_shape_error,
     semantic_verdict_authority_provenance_error,
+    session_audit_is_safe,
 )
 from chronovisor.decision.semantic_epoch import (
     STRUCTURED_REVIEW_HOLD_EPOCH_VERSION,
@@ -380,26 +381,14 @@ def _vote_error(
             return "local consensus runtime measurement is invalid"
     session = vote.get("session")
     if (
-        not isinstance(session, Mapping)
-        or set(session)
-        != {
-            "ok",
-            "model",
-            "failure_class",
-            "returned_model",
-            "first_pass_valid",
-            "repair_turns",
-            "attempts",
-        }
+        not session_audit_is_safe(
+            session,
+            model=route.get("model"),
+            returned_model=vote.get("returned_model"),
+        )
+        or not isinstance(session, Mapping)
         or session.get("ok") is not True
-        or session.get("model") != route.get("model")
-        or session.get("returned_model") != vote.get("returned_model")
         or session.get("failure_class") is not None
-        or not isinstance(session.get("first_pass_valid"), bool)
-        or isinstance(session.get("repair_turns"), bool)
-        or not isinstance(session.get("repair_turns"), int)
-        or session["repair_turns"] < 0
-        or not isinstance(session.get("attempts"), list)
         or not session["attempts"]
     ):
         return "local consensus session audit is invalid"

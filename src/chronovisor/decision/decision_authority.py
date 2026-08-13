@@ -53,7 +53,7 @@ _VOTE_AUDIT_FIELDS = {
     "runtime_observation",
     "session",
 }
-_SESSION_AUDIT_FIELDS = {
+_LEGACY_SESSION_AUDIT_FIELDS = {
     "ok",
     "model",
     "failure_class",
@@ -61,6 +61,18 @@ _SESSION_AUDIT_FIELDS = {
     "first_pass_valid",
     "repair_turns",
     "attempts",
+}
+_SESSION_AUDIT_FIELDS = _LEGACY_SESSION_AUDIT_FIELDS | {
+    "structured_generation_policy_version",
+    "structured_generation_policy_sha256",
+    "think",
+    "ollama_think",
+    "num_predict",
+    "think_selection_reason",
+    "required_num_ctx",
+    "requested_num_ctx",
+    "effective_num_ctx",
+    "context_tokens",
 }
 
 
@@ -231,17 +243,20 @@ def _runtime_audit_is_safe(runtime: object) -> bool:
     )
 
 
-def _session_audit_is_safe(
+def session_audit_is_safe(
     session: object,
     *,
     model: object,
     returned_model: object,
 ) -> bool:
-    if not isinstance(session, Mapping) or set(session) != _SESSION_AUDIT_FIELDS:
+    if not isinstance(session, Mapping) or frozenset(session) not in {
+        frozenset(_LEGACY_SESSION_AUDIT_FIELDS),
+        frozenset(_SESSION_AUDIT_FIELDS),
+    }:
         return False
     attempts = session.get("attempts")
     failure_class = session.get("failure_class")
-    return bool(
+    base_is_safe = bool(
         isinstance(session.get("ok"), bool)
         and session.get("model") == model
         and session.get("returned_model") == returned_model
@@ -255,6 +270,48 @@ def _session_audit_is_safe(
         and session["repair_turns"] >= 0
         and isinstance(attempts, list)
         and all(_audit_attempt_is_safe(attempt) for attempt in attempts)
+    )
+    if not base_is_safe or set(session) == _LEGACY_SESSION_AUDIT_FIELDS:
+        return base_is_safe
+    think_values = {"low", "medium", "high"}
+    context_fields = (
+        "num_predict",
+        "required_num_ctx",
+        "requested_num_ctx",
+        "effective_num_ctx",
+        "context_tokens",
+    )
+    return bool(
+        not isinstance(session.get("structured_generation_policy_version"), bool)
+        and isinstance(session.get("structured_generation_policy_version"), int)
+        and session["structured_generation_policy_version"] >= 1
+        and isinstance(session.get("structured_generation_policy_sha256"), str)
+        and _SHA256_RE.fullmatch(session["structured_generation_policy_sha256"])
+        is not None
+        and all(
+            value is None
+            or isinstance(value, bool)
+            or isinstance(value, str)
+            and value in think_values
+            for value in (session.get("think"), session.get("ollama_think"))
+        )
+        and (
+            session.get("think_selection_reason") is None
+            or llm_runtime.safe_metadata_identifier(
+                session.get("think_selection_reason")
+            )
+            == session.get("think_selection_reason")
+        )
+        and all(
+            session.get(name) is None
+            or (
+                not isinstance(session.get(name), bool)
+                and isinstance(session.get(name), int)
+                and session[name] >= 1
+            )
+            for name in context_fields
+        )
+        and session.get("context_tokens") == session.get("effective_num_ctx")
     )
 
 
@@ -626,7 +683,7 @@ def _local_consensus_proof_error(
             or vote.get("effect_class")
             not in {None, "mutating", "conservative", "unclassifiable"}
             or not _runtime_audit_is_safe(runtime_observation)
-            or not _session_audit_is_safe(
+            or not session_audit_is_safe(
                 session,
                 model=model,
                 returned_model=returned_model,
