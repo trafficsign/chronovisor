@@ -38,8 +38,6 @@ from chronovisor.core.ollama import (
     runtime_generation_routes,
 )
 from chronovisor.core.runtime_config import (
-    load_dashboard_config,
-    load_dashboard_lan_config,
     load_reranker_config,
     load_search_embedding_config,
     runtime_identity,
@@ -6432,10 +6430,10 @@ def _serve_locked(
 
 
 def build_parser() -> argparse.ArgumentParser:
-    config = load_dashboard_config()
+    config = runtime_identity(config_only=True)["dashboard"]
     parser = argparse.ArgumentParser(description="Run the Chronovisor local dashboard.")
-    parser.add_argument("--host", default=config.host)
-    parser.add_argument("--port", type=int, default=config.port)
+    parser.add_argument("--host", default=config["host"])
+    parser.add_argument("--port", type=int, default=config["port"])
     parser.add_argument(
         "--lan",
         action="store_true",
@@ -6455,11 +6453,15 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     lan_config = (
-        load_dashboard_lan_config() if args.lan or args.set_lan_credentials else None
+        runtime_identity(config_only=True)["dashboard_lan"]
+        if args.lan or args.set_lan_credentials
+        else None
     )
     if args.set_lan_credentials:
-        if lan_config is None or lan_config.credentials_file is None:
+        credentials_path = lan_config.get("credentials_file") if lan_config else None
+        if credentials_path is None:
             parser.error("[dashboard_lan].credentials_file must be an absolute path")
+        credentials_file = Path(str(credentials_path))
         password = getpass.getpass(
             f"Dashboard LAN password (minimum {DASHBOARD_PASSWORD_MIN_LENGTH} characters): "
         )
@@ -6467,32 +6469,30 @@ def main(argv: list[str] | None = None) -> int:
         if password != confirmation:
             parser.error("dashboard passwords do not match")
         try:
-            _write_dashboard_credentials(
-                lan_config.credentials_file, args.username, password
-            )
+            _write_dashboard_credentials(credentials_file, args.username, password)
         except ValueError as exc:
             parser.error(str(exc))
-        print(f"Dashboard LAN credentials stored: {lan_config.credentials_file}")
+        print(f"Dashboard LAN credentials stored: {credentials_file}")
         return 0
     if args.lan:
         if lan_config is None or not all(
             (
-                lan_config.host,
-                lan_config.tls_cert_file,
-                lan_config.tls_key_file,
-                lan_config.credentials_file,
+                lan_config.get("host"),
+                lan_config.get("tls_cert_file"),
+                lan_config.get("tls_key_file"),
+                lan_config.get("credentials_file"),
             )
         ):
             parser.error(
                 "[dashboard_lan] requires host, tls_cert_file, tls_key_file, and credentials_file"
             )
         serve(
-            str(lan_config.host),
-            lan_config.port,
+            str(lan_config["host"]),
+            int(lan_config["port"]),
             lan=True,
-            tls_cert_file=lan_config.tls_cert_file,
-            tls_key_file=lan_config.tls_key_file,
-            credentials_file=lan_config.credentials_file,
+            tls_cert_file=Path(str(lan_config["tls_cert_file"])),
+            tls_key_file=Path(str(lan_config["tls_key_file"])),
+            credentials_file=Path(str(lan_config["credentials_file"])),
         )
         return 0
     if not _dashboard_bind_host_is_loopback(args.host):

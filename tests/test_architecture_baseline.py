@@ -2535,7 +2535,7 @@ def test_baseline_records_complete_pre_campaign_inventory(
     assert len(baseline["architecture"]["strongly_connected_components"][0]) == 12
     assert baseline["architecture"]["strongly_connected_components"][1] == ["core"]
     assert len(baseline["console_entrypoints"]) == 51
-    assert len(baseline["tracked_launchd_plists"]) == 7
+    assert len(baseline["tracked_launchd_plists"]) == 8
     assets = baseline["source"]["tracked_non_python_assets"]
     assert assets["file_count"] > 0
     assert assets["total_bytes"] > 0

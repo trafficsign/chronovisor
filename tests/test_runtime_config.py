@@ -142,6 +142,13 @@ port = 9876
             "port": 9876,
             "url": "http://localhost:9876",
         },
+        "dashboard_lan": {
+            "host": None,
+            "port": 8766,
+            "tls_cert_file": None,
+            "tls_key_file": None,
+            "credentials_file": None,
+        },
     }
     assert runtime_config.load_toml_file(config, runtime_defaults=True)["runtime"] == {
         "source": "git+ssh://git@github.com/example/chronovisor",
@@ -176,7 +183,7 @@ port = 70000
 
 
 def test_dashboard_lan_config_is_separate_and_requires_absolute_secret_paths(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     config = tmp_path / "config.toml"
     config.write_text(
@@ -207,6 +214,14 @@ credentials_file = "{tmp_path / "credentials.json"}"
         tls_key_file=None,
         credentials_file=tmp_path / "credentials.json",
     )
+    monkeypatch.setattr(runtime_config, "CONFIG_FILE", config)
+    assert runtime_config.runtime_identity(config_only=True)["dashboard_lan"] == {
+        "host": "192.168.50.20",
+        "port": 9877,
+        "tls_cert_file": str(tmp_path / "dashboard.crt"),
+        "tls_key_file": None,
+        "credentials_file": str(tmp_path / "credentials.json"),
+    }
 
 
 def test_runtime_repo_root_honors_explicit_checkout(tmp_path, monkeypatch) -> None:

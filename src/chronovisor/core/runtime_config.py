@@ -282,7 +282,29 @@ def runtime_identity(*, config_only: bool = False) -> dict[str, Any]:
         },
     }
     if config_only:
-        return portability
+        dashboard_lan = load_dashboard_lan_config()
+        return {
+            **portability,
+            "dashboard_lan": {
+                "host": dashboard_lan.host,
+                "port": dashboard_lan.port,
+                "tls_cert_file": (
+                    str(dashboard_lan.tls_cert_file)
+                    if dashboard_lan.tls_cert_file is not None
+                    else None
+                ),
+                "tls_key_file": (
+                    str(dashboard_lan.tls_key_file)
+                    if dashboard_lan.tls_key_file is not None
+                    else None
+                ),
+                "credentials_file": (
+                    str(dashboard_lan.credentials_file)
+                    if dashboard_lan.credentials_file is not None
+                    else None
+                ),
+            },
+        }
     commit_id = None
     direct_url: dict[str, Any] = {}
     package_version = None

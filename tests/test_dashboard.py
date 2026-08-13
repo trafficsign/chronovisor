@@ -22,11 +22,7 @@ from chronovisor.core import ollama, runtime_status
 from chronovisor.core.activity_log import activity_record
 from chronovisor.core.canonical_json import canonical_json_line_bytes_strict
 from chronovisor.core.durable_state import write_sealed_json
-from chronovisor.core.runtime_config import (
-    DashboardConfig,
-    DashboardLanConfig,
-    SearchEmbeddingConfig,
-)
+from chronovisor.core.runtime_config import SearchEmbeddingConfig
 from chronovisor.ingest import orchestrator
 from chronovisor.ops import dashboard
 
@@ -4852,8 +4848,17 @@ def test_dashboard_cli_rejects_unconfigured_lan_and_non_loopback_host(
 ) -> None:
     monkeypatch.setattr(
         dashboard,
-        "load_dashboard_lan_config",
-        lambda: DashboardLanConfig(),
+        "runtime_identity",
+        lambda *, config_only=False: {
+            "dashboard": {"host": "127.0.0.1", "port": 8765},
+            "dashboard_lan": {
+                "host": None,
+                "port": 8766,
+                "tls_cert_file": None,
+                "tls_key_file": None,
+                "credentials_file": None,
+            },
+        },
     )
     with pytest.raises(SystemExit) as lan:
         dashboard.main(["--lan"])
@@ -4875,8 +4880,17 @@ def test_dashboard_cli_reports_short_lan_password_without_traceback_or_secret(
     secret = "short7"
     monkeypatch.setattr(
         dashboard,
-        "load_dashboard_lan_config",
-        lambda: DashboardLanConfig(credentials_file=credentials_file),
+        "runtime_identity",
+        lambda *, config_only=False: {
+            "dashboard": {"host": "127.0.0.1", "port": 8765},
+            "dashboard_lan": {
+                "host": None,
+                "port": 8766,
+                "tls_cert_file": None,
+                "tls_key_file": None,
+                "credentials_file": str(credentials_file),
+            },
+        },
     )
     monkeypatch.setattr(
         dashboard.getpass,
@@ -4899,8 +4913,10 @@ def test_dashboard_cli_reports_short_lan_password_without_traceback_or_secret(
 def test_dashboard_parser_uses_configured_loopback_bind(monkeypatch) -> None:
     monkeypatch.setattr(
         dashboard,
-        "load_dashboard_config",
-        lambda: DashboardConfig(host="localhost", port=9876),
+        "runtime_identity",
+        lambda *, config_only=False: {
+            "dashboard": {"host": "localhost", "port": 9876}
+        },
     )
 
     args = dashboard.build_parser().parse_args([])

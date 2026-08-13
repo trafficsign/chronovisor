@@ -6703,6 +6703,15 @@
       ]
     },
     {
+      "path": "launchd/com.trafficsign.chronovisor-lan-dashboard.plist",
+      "sha256": "4afee5486daaa69cefb0f0519757b3684caa8b4253f16d38faa8614ccdcd57b1",
+      "label": "@@LAUNCHD_LABEL_PREFIX@@lan-dashboard",
+      "program_arguments": [
+        "@@PROJECT_ROOT@@/scripts/chronovisor-dashboard",
+        "--lan"
+      ]
+    },
+    {
       "path": "launchd/com.trafficsign.chronovisor-librarian-review.plist",
       "sha256": "d8a81830dd79ce2da190a23c482aa7440dd3494bfae08b3c9e10c49df33b0fd2",
       "label": "@@LAUNCHD_LABEL_PREFIX@@librarian-review",
