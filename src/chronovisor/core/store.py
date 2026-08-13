@@ -83,6 +83,10 @@ class RuntimeContext:
     def claude_code_state_file(self) -> Path:
         return self.root / "claude-code-save-state.json"
 
+    @property
+    def pi_state_file(self) -> Path:
+        return self.root / "pi-save-state.json"
+
 
 DEFAULT_CONTEXT = RuntimeContext(resolve_root())
 CHRONOVISOR_ROOT = DEFAULT_CONTEXT.root

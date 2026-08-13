@@ -33,7 +33,7 @@ from chronovisor.recall import recall_runtime
 LOG_DIR = CHRONOVISOR_ROOT / "logs"
 RECALL_HOST_HEADROOM_MS = 250
 
-HOSTS = {"codex", "claude-code", "generic"}
+HOSTS = {"codex", "claude-code", "pi", "generic"}
 USER_PROMPT_EVENTS = {"user-prompt-submit", "userpromptsubmit", "prompt-submit"}
 STOP_EVENTS = {"stop"}
 
@@ -112,6 +112,8 @@ def save_enabled(host: str, explicit_config: Path | None = None) -> bool:
     env_name = (
         "CODEX_CHRONOVISOR_RECORD_ENABLED"
         if host == "codex"
+        else "PI_CHRONOVISOR_RECORD_ENABLED"
+        if host == "pi"
         else "CLAUDE_CODE_CHRONOVISOR_RECORD_ENABLED"
     )
     flag = env_flag(env_name)
@@ -384,8 +386,42 @@ def stop_tasks(host: str, args: argparse.Namespace) -> list[BackgroundTask]:
                     ],
                 )
             )
+        elif host == "pi":
+            tasks.append(
+                BackgroundTask(
+                    name="pi-save",
+                    module="chronovisor.hosts.pi_record",
+                    args=["--hook", "--save"],
+                    env={"PI_CHRONOVISOR_RECORD_ENABLED": "1"},
+                    log_prefix="pi-save",
+                    on_success=[
+                        {
+                            "name": "recall-audit-candidate",
+                            "module": "chronovisor.recall.recall_auditor",
+                            "args": ["--host", "pi", "--hook"],
+                            "env": {},
+                            "when_output_status": "saved",
+                        },
+                        {
+                            "name": "recall-answer-capture",
+                            "module": "chronovisor.recall.recall_answer_eval",
+                            "args": [
+                                "--host",
+                                "pi",
+                                "--hook",
+                                "--capture-only",
+                            ],
+                            "env": {
+                                "CHRONOVISOR_RECALL_ANSWER_CAPTURE_ENABLED": "1"
+                            },
+                            "when_output_statuses": ["saved", "recovered"],
+                            "stdin_from_output": True,
+                        }
+                    ],
+                )
+            )
     if (
-        host in {"codex", "claude-code"}
+        host in {"codex", "claude-code", "pi"}
         and content_correction_enabled(config)
     ):
         tasks.append(
