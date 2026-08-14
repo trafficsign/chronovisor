@@ -488,8 +488,10 @@ max_candidates = 200
 hard_floor_rallies = 1000
 hard_floor_days = 30
 hard_floor_windows = 3
-hard_floor_verified_labels = 500
-hard_floor_per_class = 100
+hard_floor_teacher_labels = 500
+hard_floor_teacher_per_class = 100
+hard_floor_probe_pairs = 100
+hard_floor_counterfactual_pairs = 100
 rollout_stages = [5, 25, 100]
 canary_min_days = 7
 
@@ -639,6 +641,11 @@ must resolve to local providers. Their inputs are `raw/high`; remote routing
 and raw egress are forbidden rather than opt-in capable. The answer generator
 and utility judge use distinct local model identities so matched answer pairs
 and their blind utility verdict do not share one route.
+
+All model labels and counterfactual outcomes are teacher-only. Probe pairs are
+excluded from training and are used only for route stability and locked replay.
+Authentic negative outcomes are veto-only; no human review is used. Each shadow
+and canary rollout stage runs for at least seven days.
 
 Deep Retrieval v1 requery generation is fixed by
 `llm.roles."research.deep_retrieval_requery"`; Decision Router model fields do

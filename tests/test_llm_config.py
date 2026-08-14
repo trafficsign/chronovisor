@@ -984,8 +984,10 @@ def test_repository_example_has_representative_local_role_map() -> None:
         "hard_floor_rallies": 1000,
         "hard_floor_days": 30,
         "hard_floor_windows": 3,
-        "hard_floor_verified_labels": 500,
-        "hard_floor_per_class": 100,
+        "hard_floor_teacher_labels": 500,
+        "hard_floor_teacher_per_class": 100,
+        "hard_floor_probe_pairs": 100,
+        "hard_floor_counterfactual_pairs": 100,
         "rollout_stages": [5, 25, 100],
         "canary_min_days": 7,
     }
