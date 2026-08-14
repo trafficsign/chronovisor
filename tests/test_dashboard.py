@@ -5677,6 +5677,51 @@ def test_health_materialization_fingerprint_tracks_ingest_liveness(
     assert before != after
 
 
+def test_health_materialization_fingerprint_tracks_distillation_status_and_pointers(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    chronovisor_root = tmp_path / "wiki"
+    distillation = chronovisor_root / "runtime" / "recall-distillation"
+    distillation.mkdir(parents=True)
+    monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", chronovisor_root)
+    monkeypatch.setattr(
+        dashboard,
+        "runtime_identity",
+        lambda: {
+            "commit_id": "a" * 40,
+            "module_path": "/archive/a/chronovisor/runtime_config.py",
+            "package_version": "0.1.1",
+        },
+    )
+
+    before = dashboard._health_materialization_fingerprint([])
+    for name in (
+        "state.json",
+        "active-policy.json",
+        "candidate-policy.json",
+        "lkg-policy.json",
+    ):
+        (distillation / name).write_text(json.dumps({"name": name}), encoding="utf-8")
+    after = dashboard._health_materialization_fingerprint([])
+
+    assert before != after
+
+
+def test_dashboard_static_renders_compact_distillation_health_status() -> None:
+    page = (dashboard.STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    app = (dashboard.STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    renderer = (dashboard.STATIC_DIR / "app-renderer.js").read_text(encoding="utf-8")
+
+    assert 'id="health-recall-distillation"' in page
+    assert "healthRecallDistillation" in app
+    assert "recall_distillation" in renderer
+    assert "rollout_status" in renderer
+    assert "active_policy_id" in renderer
+    assert "candidate_policy_id" in renderer
+    assert "lkg_policy_id" in renderer
+
+
 def test_materialized_component_returns_stale_while_audit_refreshes(
     tmp_path: Path, monkeypatch
 ) -> None:

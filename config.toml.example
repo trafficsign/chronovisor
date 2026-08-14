@@ -58,7 +58,7 @@ live_egress_enabled = false
 # changes the live Recall policy by itself.
 enabled = false
 chunk_size = 25
-max_input_bytes = 24000
+max_input_bytes = 12000
 max_candidates = 200
 hard_floor_rallies = 1000
 hard_floor_days = 30

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import select
 import stat
@@ -10,8 +11,10 @@ import time
 from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import asdict, replace
+from datetime import datetime
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -26,9 +29,11 @@ from chronovisor.core.llm_runtime import (
     SourceDataClass,
     SourceSensitivity,
 )
+from chronovisor.core.raw_segment import append_capture
 from chronovisor.core.search import ScoredPage
+from chronovisor.core.store import RuntimeContext, init_chronovisor
 from chronovisor.hosts import evidence_composition
-from chronovisor.recall import recall_runtime
+from chronovisor.recall import recall_distillation, recall_runtime
 from chronovisor.recall.recall_runtime import (
     ContextItem,
     RecallBudgetExhausted,
@@ -4773,3 +4778,922 @@ def test_feedback_extra_cannot_overwrite_reserved_provenance(
             host="codex",
             extra={"host": "spoofed", "snapshot": {"decision_id": "fake"}},
         )
+
+
+def test_distilled_fast_path_bypasses_mutable_recall_lanes(monkeypatch, tmp_path) -> None:
+    fast_policy = SimpleNamespace(
+        policy_id="fast-v1",
+        feature_schema="fast-features-v1",
+        threshold=0.6,
+        margin=0.0,
+        max_cards=2,
+    )
+    module = ModuleType("chronovisor.recall.recall_distillation")
+    module.build_fast_features = lambda **kwargs: kwargs
+    module.score_fast_features = lambda _features, _policy: 0.9
+    exposures: list[dict[str, object]] = []
+    module.record_exact_exposure = lambda **kwargs: exposures.append(kwargs)
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    import chronovisor.recall as recall_package
+
+    monkeypatch.setattr(recall_package, "recall_distillation", module, raising=False)
+    monkeypatch.setattr(
+        recall_runtime, "_load_active_distillation_policy", lambda _request: fast_policy
+    )
+    logged: list[RecallResult] = []
+    monkeypatch.setattr(
+        recall_runtime,
+        "append_recall_log",
+        lambda _request, result: logged.append(result),
+    )
+    anchor = ScoredPage("anchor", "Anchor", "chronovisor", "2026-08-14", 3.0)
+    bm25 = ScoredPage("bm25", "BM25", "chronovisor", "2026-08-14", 2.0)
+    third = ScoredPage("third", "Third", "chronovisor", "2026-08-14", 1.0)
+    for candidate in (anchor, bm25, third):
+        candidate.content_sha256 = hashlib.sha256(
+            candidate.page_id.encode()
+        ).hexdigest()
+    monkeypatch.setattr(
+        recall_runtime,
+        "search_existing_lexical",
+        lambda *_args, **_kwargs: ([anchor], [bm25, third]),
+    )
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("mutable Recall lane was called")
+
+    for name in (
+        "_run_evidence_search",
+        "run_local_judge",
+        "collect_context",
+        "observe_evidence_reconstruction",
+        "_run_post_authority_shadows",
+        "state_context_for_request",
+        "recent_false_positive_feedback",
+    ):
+        monkeypatch.setattr(recall_runtime, name, forbidden)
+    monkeypatch.setattr(recall_runtime, "page_summary", lambda _page_id: "bounded summary")
+    pages = {}
+    for page_id in ("anchor", "bm25", "third"):
+        path = tmp_path / f"{page_id}.md"
+        path.write_text(page_id, encoding="utf-8")
+        pages[page_id] = path
+    for candidate in (anchor, bm25, third):
+        candidate.content_sha256 = hashlib.sha256(
+            pages[candidate.page_id].read_bytes()
+        ).hexdigest()
+    monkeypatch.setattr(recall_runtime, "find_readable_page", pages.get)
+
+    result = recall_runtime._run_recall_impl(
+        RecallRequest(
+            host="codex",
+            event="UserPromptSubmit",
+            prompt="Chronovisor recall fast path",
+            cwd="/Users/trafficsign/projects/personal/chronovisor",
+            session_id="session-1",
+        ),
+        RecallPolicy(log_decisions=True, max_context_chars=2_000),
+    )
+
+    assert [item.page_id for item in result.context_items] == ["anchor", "bm25"]
+    assert result.search_mode == "readonly_anchor_bm25"
+    assert result.evidence_features["distilled_fast_path"] == {
+        "status": "active",
+        "policy_id": "fast-v1",
+        "feature_schema": "fast-features-v1",
+        "path": "readonly_anchor_bm25",
+        "fallback": "none",
+        "candidate_count": 3,
+        "selected_count": 2,
+        "exposure_receipt": "exact_recorded",
+    }
+    assert "RECALL_CONTEXT" in result.context
+    assert logged == [result]
+    assert [ref["candidate_id"] for ref in exposures[0]["candidate_refs"]] == [
+        "anchor",
+        "bm25",
+    ]
+    assert exposures[0]["decision_latency_ms"] == pytest.approx(result.latency_ms)
+    assert exposures[0]["timed_out"] is False
+    assert (
+        exposures[0]["candidate_refs"][0]["rendered_context"]
+        != exposures[0]["candidate_refs"][1]["rendered_context"]
+    )
+    assert all(
+        ref["rendered_context"] != result.context
+        for ref in exposures[0]["candidate_refs"]
+    )
+    assert all(
+        hashlib.sha256(ref["rendered_context"].encode()).hexdigest()
+        == ref["rendered_context_sha256"]
+        for ref in exposures[0]["candidate_refs"]
+    )
+    assert [ref["page_content_sha256"] for ref in exposures[0]["candidate_refs"]] == [
+        hashlib.sha256(pages[page_id].read_bytes()).hexdigest()
+        for page_id in ("anchor", "bm25")
+    ]
+    assert all(
+        set(ref) == {
+            "candidate_id",
+            "page_id",
+            "rendered_context",
+            "page_content_sha256",
+            "rendered_context_sha256",
+        }
+        for ref in exposures[0]["candidate_refs"]
+    )
+    assert [row["candidate_id"] for row in exposures[0]["candidate_feature_snapshot"]] == [
+        "anchor",
+        "bm25",
+        "third",
+    ]
+    assert [row["candidate_id"] for row in exposures[0]["candidate_pool_refs"]] == [
+        "anchor",
+        "bm25",
+        "third",
+    ]
+    assert [row["selected"] for row in exposures[0]["candidate_pool_refs"]] == [
+        True,
+        True,
+        False,
+    ]
+    assert all(
+        set(row["features"])
+        == {
+            "exact_anchor",
+            "entity_overlap",
+            "same_session",
+            "same_task",
+            "same_cwd",
+            "temporal_decay",
+            "superseded",
+            "graph_path",
+            "top1_score_norm",
+            "margin_norm",
+        }
+        for row in exposures[0]["candidate_feature_snapshot"]
+    )
+    assert "candidate_ids" not in result.evidence_features["distilled_fast_path"]
+
+
+def test_invalid_distilled_policy_falls_back_to_evidence_path(monkeypatch) -> None:
+    called: list[bool] = []
+    candidate = ScoredPage("page", "Page", "", "2026-08-14", 1.0)
+    module = ModuleType("chronovisor.recall.recall_distillation")
+    module.load_active_policy = lambda **_kwargs: SimpleNamespace(
+        policy_id="broken",
+        feature_schema="fast-features-v1",
+        threshold=2.0,
+        margin=0.0,
+        max_cards=3,
+    )
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    monkeypatch.setattr(
+        recall_runtime,
+        "_run_evidence_search",
+        lambda **_kwargs: (
+            called.append(True)
+            or recall_runtime._EvidenceSearchOutcome(
+                score=0.8,
+                session_state=None,
+                pre_results=[candidate],
+                search_mode="bm25",
+                evidence_features={},
+                rewrite_queries=[],
+                reranker_metadata={},
+                field_shadow_metadata={},
+                post_authority={},
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        recall_runtime,
+        "collect_context",
+        lambda *_args, **_kwargs: [ContextItem("page", "Page", "", 1.0, snippets=["Page"])],
+    )
+    monkeypatch.setattr(
+        recall_runtime,
+        "observe_evidence_reconstruction",
+        lambda *_args, **_kwargs: {"status": "skipped"},
+    )
+    monkeypatch.setattr(recall_runtime, "state_context_for_request", lambda *_args: "")
+
+    result = recall_runtime._run_recall_impl(
+        RecallRequest(
+            host="codex",
+            event="UserPromptSubmit",
+            prompt="query",
+            session_id="session-1",
+        ),
+        RecallPolicy(rewrite_enabled=False, judge_mode="off", log_decisions=False),
+    )
+
+    assert called == [True]
+    assert result.search_mode == "bm25"
+
+
+def test_distilled_policy_selection_is_session_scoped(monkeypatch, tmp_path) -> None:
+    selected: list[tuple[Path, str]] = []
+    policy = {
+        "artifact_id": "policy-v1",
+        "feature_revision": "recall-distill-fast-v1",
+        "threshold": 0.6,
+        "abstain_margin": 0.1,
+        "max_cards": 3,
+    }
+    module = ModuleType("chronovisor.recall.recall_distillation")
+    module.load_policy_for_session = lambda *, root, session_id: (
+        selected.append((root, session_id)) or policy
+    )
+    module.build_fast_features = lambda _values: {}
+    module.score_fast_features = lambda _features, _policy: 0.5
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    import chronovisor.recall as recall_package
+
+    monkeypatch.setattr(recall_package, "recall_distillation", module, raising=False)
+    monkeypatch.setattr(recall_runtime, "CHRONOVISOR_ROOT", tmp_path)
+
+    assert recall_runtime._load_active_distillation_policy(
+        RecallRequest(host="codex", event="UserPromptSubmit", prompt="q", session_id="s1")
+    ) == policy
+    assert selected == [(tmp_path, "s1")]
+
+
+def test_distilled_exposure_query_hash_matches_extracted_rally(monkeypatch, tmp_path) -> None:
+    for name in ("index.md", "log.md", "schema.md"):
+        (tmp_path / name).write_text("legacy\n", encoding="utf-8")
+    init_chronovisor(RuntimeContext(tmp_path))
+    prompt = "raw semantic text  keeps whitespace"
+    event = {
+        "type": "response_item",
+        "timestamp": "2026-08-14T00:00:00Z",
+        "payload": {
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": prompt}],
+        },
+    }
+    source = tmp_path / "source.jsonl"
+    encoded = json.dumps(event, separators=(",", ":")).encode() + b"\n"
+    source.write_bytes(encoded)
+    append_capture(
+        raw_dir=tmp_path / "raw",
+        raw_id="save-query.md",
+        idempotency_key="query",
+        host="codex",
+        session_key="a" * 24,
+        session_id="session-1",
+        source_file=source,
+        after_line=0,
+        until_line=1,
+        source_bytes=encoded,
+        record_count=1,
+        now=datetime.now(ZoneInfo("Asia/Tokyo")),
+    )
+    captured: list[dict[str, object]] = []
+    module = ModuleType("chronovisor.recall.recall_distillation")
+    module.build_fast_features = lambda **kwargs: kwargs
+    module.score_fast_features = lambda _features, _policy: 0.9
+    module.record_exact_exposure = lambda **kwargs: captured.append(kwargs)
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    import chronovisor.recall as recall_package
+
+    monkeypatch.setattr(recall_package, "recall_distillation", module, raising=False)
+    monkeypatch.setattr(recall_runtime, "CHRONOVISOR_ROOT", tmp_path)
+    monkeypatch.setattr(
+        recall_runtime,
+        "_load_active_distillation_policy",
+        lambda _request: SimpleNamespace(
+            policy_id="fast-v1",
+            feature_schema="fast-features-v1",
+            threshold=0.6,
+            margin=0.0,
+            max_cards=3,
+        ),
+    )
+    monkeypatch.setattr(recall_runtime, "search_existing_lexical", lambda *_a, **_k: ([], []))
+
+    recall_runtime._run_recall_impl(
+        RecallRequest(
+            host="codex",
+            event="UserPromptSubmit",
+            prompt=prompt,
+            session_id="session-1",
+        ),
+        RecallPolicy(log_decisions=False),
+    )
+
+    rally = recall_distillation.extract_rallies(tmp_path / "raw", root=tmp_path)[0]
+    assert captured[0]["query_semantic_sha256"] == rally["query_sha256"]
+    assert captured[0]["query_semantic_sha256"] == hashlib.sha256(
+        prompt.encode("utf-8")
+    ).hexdigest()
+
+
+@pytest.mark.parametrize(
+    ("search", "score", "fallback"),
+    [
+        (([], []), lambda _features, _policy: 0.9, "abstain"),
+        (
+            ([ScoredPage("page", "Page", "", "2026-08-14", 1.0)], []),
+            lambda _features, _policy: (_ for _ in ()).throw(RuntimeError("bad score")),
+            "fast_path_error",
+        ),
+    ],
+)
+def test_distilled_fast_path_records_one_exact_receipt_when_abstaining(
+    monkeypatch, tmp_path, search, score, fallback
+) -> None:
+    fast_policy = SimpleNamespace(
+        policy_id="fast-v1",
+        feature_schema="fast-features-v1",
+        threshold=0.6,
+        margin=0.0,
+        max_cards=3,
+    )
+    module = ModuleType("chronovisor.recall.recall_distillation")
+    module.build_fast_features = lambda **kwargs: kwargs
+    module.score_fast_features = score
+    receipts: list[dict[str, object]] = []
+    module.record_exact_exposure = lambda **kwargs: receipts.append(kwargs)
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    import chronovisor.recall as recall_package
+
+    monkeypatch.setattr(recall_package, "recall_distillation", module, raising=False)
+    monkeypatch.setattr(
+        recall_runtime, "_load_active_distillation_policy", lambda _request: fast_policy
+    )
+    monkeypatch.setattr(recall_runtime, "search_existing_lexical", lambda *_a, **_k: search)
+    for candidate in [*search[0], *search[1]]:
+        candidate.content_sha256 = hashlib.sha256(
+            candidate.page_id.encode()
+        ).hexdigest()
+    page = tmp_path / "page.md"
+    page.write_text("stable page", encoding="utf-8")
+    monkeypatch.setattr(
+        recall_runtime,
+        "find_readable_page",
+        lambda page_id: page if page_id == "page" else None,
+    )
+
+    result = recall_runtime._run_recall_impl(
+        RecallRequest(
+            host="codex",
+            event="UserPromptSubmit",
+            prompt="query",
+            session_id="session-1",
+        ),
+        RecallPolicy(log_decisions=False),
+    )
+
+    assert result.decision == "none"
+    assert result.evidence_features["distilled_fast_path"]["fallback"] == fallback
+    assert result.evidence_features["distilled_fast_path"]["exposure_receipt"] == "exact_recorded"
+    assert len(receipts) == 1
+    assert receipts[0]["candidate_refs"] == []
+    if search == ([], []):
+        assert receipts[0]["candidate_feature_snapshot"] == []
+
+
+def test_distilled_fast_path_abstains_at_hard_deadline(monkeypatch) -> None:
+    fast_policy = SimpleNamespace(
+        policy_id="fast-v1",
+        feature_schema="fast-features-v1",
+        threshold=0.6,
+        margin=0.0,
+        max_cards=3,
+    )
+    module = ModuleType("chronovisor.recall.recall_distillation")
+    module.build_fast_features = lambda **kwargs: kwargs
+    module.score_fast_features = lambda _features, _policy: 0.9
+    receipts: list[dict[str, object]] = []
+    module.record_exact_exposure = lambda **kwargs: receipts.append(kwargs)
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    import chronovisor.recall as recall_package
+
+    monkeypatch.setattr(recall_package, "recall_distillation", module, raising=False)
+    monkeypatch.setattr(
+        recall_runtime, "_load_active_distillation_policy", lambda _request: fast_policy
+    )
+    monkeypatch.setattr(
+        recall_runtime,
+        "search_existing_lexical",
+        lambda *_args, **_kwargs: (time.sleep(0.3), ([], []))[1],
+    )
+    monkeypatch.setattr(
+        recall_runtime,
+        "_run_evidence_search",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("fallback searched")),
+    )
+
+    result = recall_runtime._run_recall_impl(
+        RecallRequest(
+            host="codex",
+            event="UserPromptSubmit",
+            prompt="query",
+            session_id="session-1",
+        ),
+        RecallPolicy(log_decisions=False, total_timeout_ms=1000),
+    )
+
+    trace = result.evidence_features["distilled_fast_path"]
+    assert result.decision == "none"
+    assert trace["fallback"] == "deadline"
+    assert trace["exposure_receipt"] == "exact_recorded"
+    assert len(receipts) == 1
+    assert receipts[0]["candidate_refs"] == []
+    assert result.latency_ms < 280
+
+
+@pytest.mark.parametrize("shadow_enabled", [True, False], ids=["candidate", "absent"])
+def test_shadow_policy_observation_never_mutates_fast_result(
+    monkeypatch, tmp_path, shadow_enabled: bool
+) -> None:
+    lkg_policy = SimpleNamespace(
+        policy_id="l" * 64,
+        feature_schema="fast-features-v1",
+        threshold=0.6,
+        margin=0.0,
+        max_cards=2,
+    )
+    shadow_policy = {
+        "artifact_id": "c" * 64,
+        "feature_revision": "fast-features-v1",
+        "threshold": 0.6,
+        "abstain_margin": 0.0,
+        "max_cards": 2,
+    }
+    module = ModuleType("chronovisor.recall.recall_distillation")
+    module.build_fast_features = lambda **kwargs: kwargs
+    module.score_fast_features = lambda _features, _policy: 0.9
+    module.load_shadow_policy = lambda **_kwargs: shadow_policy if shadow_enabled else {}
+    module.record_exact_exposure = lambda **_kwargs: {}
+    shadow_records: list[dict[str, object]] = []
+    module.record_shadow_observation = lambda **kwargs: shadow_records.append(kwargs)
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    import chronovisor.recall as recall_package
+
+    monkeypatch.setattr(recall_package, "recall_distillation", module, raising=False)
+    monkeypatch.setattr(
+        recall_runtime, "_load_active_distillation_policy", lambda _request: lkg_policy
+    )
+    one = ScoredPage("one", "One", "", "2026-08-14", 2.0)
+    two = ScoredPage("two", "Two", "", "2026-08-14", 1.0)
+    pages = {}
+    for candidate in (one, two):
+        page = tmp_path / f"{candidate.page_id}.md"
+        page.write_text(candidate.page_id, encoding="utf-8")
+        candidate.content_sha256 = hashlib.sha256(page.read_bytes()).hexdigest()
+        pages[candidate.page_id] = page
+    monkeypatch.setattr(
+        recall_runtime, "search_existing_lexical", lambda *_args, **_kwargs: ([one], [two])
+    )
+    monkeypatch.setattr(recall_runtime, "find_readable_page", pages.get)
+    request = RecallRequest(
+        host="codex",
+        event="UserPromptSubmit",
+        prompt="shadow query",
+        session_id="session-1",
+        decision_id="shadow-observation",
+    )
+
+    result = recall_runtime._run_recall_impl(
+        request, RecallPolicy(log_decisions=False, max_context_chars=2_000)
+    )
+
+    assert result.evidence_features["distilled_fast_path"]["policy_id"] == "l" * 64
+    assert result.decision == "search"
+    if shadow_enabled:
+        assert len(shadow_records) == 1
+        assert shadow_records[0]["policy_id"] == "c" * 64
+        assert shadow_records[0]["selected_candidate_ids"] == ["one", "two"]
+        assert [row["candidate_id"] for row in shadow_records[0]["candidate_pool_refs"]] == [
+            "one",
+            "two",
+        ]
+        assert all(not key.startswith("shadow") for key in result.evidence_features)
+    else:
+        assert shadow_records == []
+
+
+def test_shadow_observation_records_empty_failure_without_mutating_result(monkeypatch) -> None:
+    module = ModuleType("chronovisor.recall.recall_distillation")
+    module.load_shadow_policy = lambda **_kwargs: {
+        "artifact_id": "c" * 64,
+        "feature_revision": "fast-features-v1",
+        "threshold": 0.6,
+        "abstain_margin": 0.0,
+        "max_cards": 3,
+    }
+    module.score_fast_features = lambda *_args: (_ for _ in ()).throw(RuntimeError("bad"))
+    records: list[dict[str, object]] = []
+    module.record_shadow_observation = lambda **kwargs: records.append(kwargs)
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    import chronovisor.recall as recall_package
+
+    monkeypatch.setattr(recall_package, "recall_distillation", module, raising=False)
+    request = RecallRequest(
+        host="codex",
+        event="UserPromptSubmit",
+        prompt="shadow query",
+        session_id="session-1",
+        decision_id="shadow-failure",
+    )
+    result = RecallResult(
+        status="ok",
+        decision="none",
+        confidence=0.0,
+        queries=[],
+        reasons=["unchanged"],
+        matched_terms={},
+        decision_id=request.decision_id,
+    )
+    before = asdict(result)
+    recall_runtime._observe_shadow_distillation_policy(
+        result=result,
+        request=request,
+        candidate_feature_snapshot=[
+            {
+                "candidate_id": "page",
+                "features": {
+                    "exact_anchor": 0.0,
+                    "entity_overlap": 0.0,
+                    "same_session": 0.0,
+                    "same_task": 0.0,
+                    "same_cwd": 0.0,
+                    "temporal_decay": 0.0,
+                    "superseded": 0.0,
+                    "graph_path": 0.0,
+                    "top1_score_norm": 0.0,
+                    "margin_norm": 0.0,
+                },
+            }
+        ],
+        candidate_pool_sources={
+            "page": {
+                "title": "Page",
+                "updated": "2026-08-14",
+                "snippet": "Page",
+                "content_sha256": "a" * 64,
+            }
+        },
+        deadline_at=time.monotonic() + 1.0,
+    )
+
+    assert asdict(result) == before
+    assert records[0]["candidate_feature_snapshot"] == []
+    assert records[0]["candidate_pool_refs"] == []
+    assert records[0]["error_code"] == "score_error"
+
+
+@pytest.mark.parametrize(
+    ("feature_rows", "error_code", "timed_out"),
+    [
+        (
+            lambda *_args, **_kwargs: time.sleep(0.3),
+            "deadline",
+            True,
+        ),
+        (
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("bad")),
+            "capture_error",
+            False,
+        ),
+    ],
+    ids=["timeout", "error"],
+)
+def test_legacy_capture_failure_still_records_one_empty_shadow_observation(
+    monkeypatch, feature_rows, error_code: str, timed_out: bool
+) -> None:
+    module = ModuleType("chronovisor.recall.recall_distillation")
+    module.load_capture_policy_identity = lambda **_kwargs: ""
+    module.load_shadow_policy = lambda **_kwargs: {
+        "artifact_id": "c" * 64,
+        "feature_revision": "fast-features-v1",
+        "threshold": 0.6,
+        "abstain_margin": 0.0,
+        "max_cards": 3,
+    }
+    records: list[dict[str, object]] = []
+    module.record_shadow_observation = lambda **kwargs: records.append(kwargs)
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    import chronovisor.recall as recall_package
+
+    monkeypatch.setattr(recall_package, "recall_distillation", module, raising=False)
+    monkeypatch.setattr(recall_runtime, "_readonly_fast_feature_rows", feature_rows)
+    monkeypatch.setattr(recall_runtime, "state_context_for_request", lambda *_args: "")
+    request = RecallRequest(
+        host="codex",
+        event="UserPromptSubmit",
+        prompt="legacy shadow",
+        session_id="session-1",
+        decision_id=f"legacy-shadow-{error_code}",
+    )
+    result = recall_runtime._finalize_recall_result(
+        RecallResult(
+            status="ok",
+            decision="none",
+            confidence=0.0,
+            queries=[],
+            reasons=["legacy"],
+            matched_terms={},
+            session_id=request.session_id,
+            decision_id=request.decision_id,
+        ),
+        request=request,
+        active_request=request,
+        policy=RecallPolicy(log_decisions=False),
+        session_state=None,
+        queries=[],
+        deadline_at=time.monotonic() + 0.05,
+    )
+
+    assert result.decision == "none"
+    assert "shadow" not in result.evidence_features
+    assert len(records) == 1
+    assert records[0]["candidate_feature_snapshot"] == []
+    assert records[0]["candidate_pool_refs"] == []
+    assert records[0]["error_code"] == error_code
+    assert records[0]["timed_out"] is timed_out
+
+
+def test_capture_error_selected_card_uses_observed_page_receipt(monkeypatch) -> None:
+    page_receipts: list[dict[str, object]] = []
+    module = ModuleType("chronovisor.recall.recall_distillation")
+    module.load_capture_policy_identity = lambda **_kwargs: "a" * 64
+    module.record_exposure = lambda **kwargs: page_receipts.append(kwargs)
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    import chronovisor.recall as recall_package
+    from chronovisor.recall import recall_field
+
+    monkeypatch.setattr(recall_package, "recall_distillation", module, raising=False)
+    monkeypatch.setattr(recall_field, "queue_teacher_commits", lambda **_kwargs: {})
+    monkeypatch.setattr(recall_runtime, "state_context_for_request", lambda *_args: "")
+    monkeypatch.setattr(
+        recall_runtime,
+        "_readonly_fast_feature_rows",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("capture")),
+    )
+    request = RecallRequest(
+        host="codex",
+        event="UserPromptSubmit",
+        prompt="legacy selected",
+        session_id="session-1",
+        decision_id="capture-page-fallback",
+    )
+    result = recall_runtime._finalize_recall_result(
+        RecallResult(
+            status="ok",
+            decision="search",
+            confidence=0.8,
+            queries=["legacy selected"],
+            reasons=["legacy"],
+            matched_terms={},
+            session_id=request.session_id,
+            context_items=[ContextItem("page", "Page", "2026-08-14", 0.8, snippets=["x"])],
+            decision_id=request.decision_id,
+        ),
+        request=request,
+        active_request=request,
+        policy=RecallPolicy(log_decisions=False),
+        session_state=None,
+        queries=["legacy selected"],
+        deadline_at=time.monotonic() + 1.0,
+    )
+
+    assert [item.page_id for item in result.context_items] == ["page"]
+    assert len(page_receipts) == 1
+    assert page_receipts[0]["candidate_ids"] == ["page"]
+    assert page_receipts[0]["timed_out"] is False
+    assert page_receipts[0]["error_code"] == "exact_capture_error"
+    assert isinstance(page_receipts[0]["decision_latency_ms"], float)
+
+
+def test_distilled_fast_early_disposition_records_empty_receipt(monkeypatch) -> None:
+    policy = SimpleNamespace(
+        policy_id="fast-v1",
+        feature_schema="fast-features-v1",
+        threshold=0.6,
+        margin=0.0,
+        max_cards=3,
+    )
+    receipts: list[dict[str, object]] = []
+    module = ModuleType("chronovisor.recall.recall_distillation")
+    module.record_exact_exposure = lambda **kwargs: receipts.append(kwargs)
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    import chronovisor.recall as recall_package
+
+    monkeypatch.setattr(recall_package, "recall_distillation", module, raising=False)
+    monkeypatch.setattr(
+        recall_runtime, "_load_active_distillation_policy", lambda _request: policy
+    )
+
+    result = recall_runtime._run_recall_impl(
+        RecallRequest(
+            host="codex",
+            event="UserPromptSubmit",
+            prompt="",
+            session_id="session-1",
+        ),
+        RecallPolicy(log_decisions=False),
+    )
+
+    assert result.decision == "none"
+    assert result.decision_id
+    assert len(receipts) == 1
+    assert receipts[0]["candidate_refs"] == []
+    assert receipts[0]["candidate_feature_snapshot"] == []
+
+
+def test_distilled_receipt_never_reads_slow_candidate_artifacts(monkeypatch, tmp_path) -> None:
+    policy = SimpleNamespace(
+        policy_id="fast-v1",
+        feature_schema="fast-features-v1",
+        threshold=0.6,
+        margin=0.0,
+        max_cards=3,
+    )
+    candidate = ScoredPage("page", "Page", "", "2026-08-14", 1.0)
+    candidate.content_sha256 = hashlib.sha256(b"page-v1").hexdigest()
+    module = ModuleType("chronovisor.recall.recall_distillation")
+    module.build_fast_features = lambda **kwargs: kwargs
+    module.score_fast_features = lambda _features, _policy: (_ for _ in ()).throw(
+        RuntimeError("score")
+    )
+    receipts: list[dict[str, object]] = []
+    module.record_exact_exposure = lambda **kwargs: receipts.append(kwargs)
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    import chronovisor.recall as recall_package
+
+    monkeypatch.setattr(recall_package, "recall_distillation", module, raising=False)
+    monkeypatch.setattr(
+        recall_runtime, "_load_active_distillation_policy", lambda _request: policy
+    )
+    monkeypatch.setattr(
+        recall_runtime, "search_existing_lexical", lambda *_args, **_kwargs: ([candidate], [])
+    )
+    large_page = tmp_path / "large.md"
+    large_page.write_bytes(b"x" * 2_000_000)
+    reads: list[str] = []
+
+    def slow_page_lookup(page_id: str) -> Path:
+        reads.append(page_id)
+        time.sleep(0.4)
+        return large_page
+
+    monkeypatch.setattr(recall_runtime, "find_readable_page", slow_page_lookup)
+    started = time.monotonic()
+    result = recall_runtime._run_recall_impl(
+        RecallRequest(
+            host="codex",
+            event="UserPromptSubmit",
+            prompt="query",
+            session_id="session-1",
+        ),
+        RecallPolicy(log_decisions=False, total_timeout_ms=1_000),
+    )
+
+    assert result.decision == "none"
+    assert reads == []
+    assert len(receipts) == 1
+    assert time.monotonic() - started < 0.25
+
+
+def test_capture_only_records_timeout_and_degraded_fallback(monkeypatch) -> None:
+    receipts: list[dict[str, object]] = []
+    module = ModuleType("chronovisor.recall.recall_distillation")
+    module.load_capture_policy_identity = lambda *, root: "a" * 64
+    module.build_fast_features = lambda **kwargs: kwargs
+    module.record_exact_exposure = lambda **kwargs: receipts.append(kwargs)
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    import chronovisor.recall as recall_package
+
+    monkeypatch.setattr(recall_package, "recall_distillation", module, raising=False)
+    monkeypatch.setattr(recall_runtime, "search_existing_lexical", lambda *_args, **_kwargs: ([], []))
+    monkeypatch.setattr(recall_runtime, "search_existing_bm25", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(recall_runtime, "state_context_for_request", lambda *_args: "")
+    request = RecallRequest(
+        host="codex",
+        event="UserPromptSubmit",
+        prompt="query",
+        session_id="session-1",
+        decision_id="timeout-capture",
+    )
+    policy = RecallPolicy(log_decisions=False)
+    timeout = recall_runtime._fail_open_recall_budget(
+        "late",
+        {},
+        request,
+        policy,
+        time.monotonic(),
+        time.monotonic() - 0.01,
+        False,
+        True,
+        None,
+    )
+    degraded = recall_runtime.run_deterministic_fallback(
+        replace(request, decision_id="degraded-capture"),
+        policy,
+        timeout_ms=1,
+    )
+
+    assert timeout.status == "timeout"
+    assert degraded.status == "degraded"
+    assert len(receipts) == 2
+    assert all(receipt["candidate_refs"] == [] for receipt in receipts)
+    assert all(receipt["timed_out"] is True for receipt in receipts)
+
+
+@pytest.mark.parametrize("with_item", [True, False], ids=["read", "none"])
+def test_capture_only_distillation_observes_legacy_result_without_changing_it(
+    monkeypatch, tmp_path, with_item: bool
+) -> None:
+    """A sealed baseline can observe the legacy E_t without taking authority."""
+
+    capture_enabled = False
+    receipts: list[dict[str, object]] = []
+    module = ModuleType("chronovisor.recall.recall_distillation")
+    module.load_capture_policy_identity = lambda *, root: (
+        "a" * 64 if capture_enabled else ""
+    )
+    module.build_fast_features = lambda **kwargs: kwargs
+    module.record_exact_exposure = lambda **kwargs: receipts.append(kwargs)
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    import chronovisor.recall as recall_package
+    from chronovisor.recall import recall_field
+
+    monkeypatch.setattr(recall_package, "recall_distillation", module, raising=False)
+    monkeypatch.setattr(recall_field, "queue_teacher_commits", lambda **_kwargs: {})
+    monkeypatch.setattr(recall_runtime, "state_context_for_request", lambda *_args: "")
+    candidate = ScoredPage("page", "Page", "chronovisor", "2026-08-14", 2.0)
+    candidate.content_sha256 = hashlib.sha256(b"page").hexdigest()
+    monkeypatch.setattr(
+        recall_runtime,
+        "search_existing_lexical",
+        lambda *_args, **_kwargs: (
+            [candidate] if with_item else [],
+            [],
+        ),
+    )
+    page = tmp_path / "page.md"
+    page.write_text("stable page", encoding="utf-8")
+    monkeypatch.setattr(
+        recall_runtime,
+        "find_readable_page",
+        lambda page_id: page if page_id == "page" else None,
+    )
+    request = RecallRequest(
+        host="codex",
+        event="UserPromptSubmit",
+        prompt="legacy prompt",
+        cwd="/Users/trafficsign/projects/personal/chronovisor",
+        session_id="session-1",
+        decision_id="legacy-capture-test",
+    )
+    policy = RecallPolicy(log_decisions=False, max_context_chars=2_000)
+
+    def finalize() -> RecallResult:
+        return recall_runtime._finalize_recall_result(
+            RecallResult(
+                status="ok",
+                decision="search" if with_item else "none",
+                confidence=0.8 if with_item else 0.0,
+                queries=["legacy prompt"] if with_item else [],
+                reasons=["legacy result"],
+                matched_terms={"keyword": ["legacy"]},
+                session_id=request.session_id,
+                context_items=(
+                    [ContextItem("page", "Page", "2026-08-14", 0.8, snippets=["stable"])]
+                    if with_item
+                    else []
+                ),
+                context_style=policy.context_style,
+                decision_id=request.decision_id,
+            ),
+            request=request,
+            active_request=request,
+            policy=policy,
+            session_state=None,
+            queries=["legacy prompt"] if with_item else [],
+            deadline_at=time.monotonic() + 1.0,
+        )
+
+    without_capture = finalize()
+    capture_enabled = True
+    with_capture = finalize()
+
+    assert asdict(with_capture) == asdict(without_capture)
+    assert len(receipts) == 1
+    assert receipts[0]["policy_id"] == "a" * 64
+    assert [ref["candidate_id"] for ref in receipts[0]["candidate_refs"]] == (
+        ["page"] if with_item else []
+    )
+    assert [row["candidate_id"] for row in receipts[0]["candidate_feature_snapshot"]] == (
+        ["page"] if with_item else []
+    )
+    assert [row["candidate_id"] for row in receipts[0]["candidate_pool_refs"]] == (
+        ["page"] if with_item else []
+    )
+    assert [row["selected"] for row in receipts[0]["candidate_pool_refs"]] == (
+        [True] if with_item else []
+    )

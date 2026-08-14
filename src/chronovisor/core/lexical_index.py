@@ -8,6 +8,7 @@ string duplication.
 
 from __future__ import annotations
 
+import hashlib
 import math
 import os
 import sqlite3
@@ -26,7 +27,7 @@ from chronovisor.core.canonical_document import (
 from chronovisor.core.search_types import ScoredPage, tokenize
 from chronovisor.core.store import PAGES_DIR, SYSTEM_DIR, page_id_from_path
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 VALID_PAGE_TYPES = {
     "knowledge",
     "reference",
@@ -196,6 +197,7 @@ class LexicalIndex:
                 page_id TEXT PRIMARY KEY,
                 mtime_ns INTEGER NOT NULL,
                 size INTEGER NOT NULL,
+                content_sha256 TEXT NOT NULL,
                 title TEXT NOT NULL,
                 folder TEXT NOT NULL,
                 updated TEXT NOT NULL,
@@ -276,7 +278,7 @@ class LexicalIndex:
             changed = [
                 (page_id, row)
                 for page_id, row in current.items()
-                if indexed.get(page_id) != (row[1], row[2])
+                if force or indexed.get(page_id) != (row[1], row[2])
             ]
             if not removed and not changed:
                 return
@@ -337,6 +339,7 @@ class LexicalIndex:
                         page_id,
                         mtime_ns,
                         size,
+                        hashlib.sha256(data).hexdigest(),
                         title,
                         folder,
                         updated,
@@ -410,11 +413,11 @@ class LexicalIndex:
                 connection.executemany(
                     """
                     INSERT INTO pages
-                    (page_id, mtime_ns, size, title, folder, updated, status,
+                    (page_id, mtime_ns, size, content_sha256, title, folder, updated, status,
                      superseded_by, page_type, sensitivity, doc_len, ordinal,
                      page_uid, classification_primary, classification_notation,
                      classification_status)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     prepared_pages,
                 )
@@ -487,7 +490,7 @@ class LexicalIndex:
 
     @staticmethod
     def _row_to_page(row: tuple[object, ...], score: float) -> ScoredPage:
-        return ScoredPage(
+        page = ScoredPage(
             page_id=str(row[0]),
             title=str(row[1]),
             folder=str(row[2]),
@@ -498,6 +501,11 @@ class LexicalIndex:
             page_type=str(row[6]),
             sensitivity=str(row[7]),
         )
+        if len(row) >= 9:
+            # Computed while the projection refresh already has the canonical
+            # page bytes in memory; readonly Recall never re-reads the page.
+            page.content_sha256 = str(row[8])
+        return page
 
     def query(
         self,
@@ -570,7 +578,7 @@ class LexicalIndex:
                 f"""
                 SELECT s.term, p.page_id, p.title, p.folder, p.updated,
                        p.status, p.superseded_by, p.page_type, p.sensitivity,
-                       x.tf, p.doc_len, s.df, p.ordinal
+                       p.content_sha256, x.tf, p.doc_len, s.df, p.ordinal
                 FROM postings x
                 JOIN terms s ON s.term_id = x.term_id
                 JOIN pages p ON p.ordinal = x.page_ordinal
@@ -588,16 +596,16 @@ class LexicalIndex:
         for row in rows:
             term = str(row[0])
             page_id = str(row[1])
-            tf = int(row[9])
-            doc_len = int(row[10])
-            df = int(row[11])
+            tf = int(row[10])
+            doc_len = int(row[11])
+            df = int(row[12])
             idf = math.log((n - df + 0.5) / (df + 0.5) + 1)
             tf_norm = (tf * (k1 + 1)) / (tf + k1 * (1 - b + b * doc_len / avgdl))
             scores[page_id] = scores.get(page_id, 0.0) + (
                 query_counts[term] * idf * tf_norm
             )
-            page_rows[page_id] = row[1:9]
-            page_ordinals[page_id] = int(row[12])
+            page_rows[page_id] = row[1:10]
+            page_ordinals[page_id] = int(row[13])
         ranked = sorted(
             scores.items(),
             key=lambda item: (-item[1], page_ordinals[item[0]]),
@@ -629,7 +637,7 @@ class LexicalIndex:
                 f"""
                 SELECT p.page_id, p.title, p.folder, p.updated, p.status,
                        p.superseded_by, p.page_type, p.sensitivity,
-                       SUM(a.weight) AS score
+                       p.content_sha256, SUM(a.weight) AS score
                 FROM anchors a
                 JOIN pages p ON p.page_id = a.page_id
                 WHERE a.term IN ({placeholders}) {reference_clause}
@@ -639,7 +647,60 @@ class LexicalIndex:
                 """,
                 (*terms, max(1, top_n)),
             ).fetchall()
-        return [self._row_to_page(row, float(row[8])) for row in rows]
+        return [self._row_to_page(row, float(row[9])) for row in rows]
+
+    def anchor_query_existing(
+        self,
+        query_text: str,
+        top_n: int = 20,
+        *,
+        include_reference: bool = False,
+    ) -> list[ScoredPage]:
+        """Read anchor matches from an already-built projection only.
+
+        This deliberately opens a short-lived SQLite ``mode=ro`` connection
+        instead of using :meth:`anchor_query`: the latter may initialize the
+        projection and is therefore not safe on Recall's latency-critical
+        read-only path.
+        """
+
+        if not self.path.is_file():
+            return []
+        terms = list(dict.fromkeys(tokenize(query_text)))
+        normalized = query_text.strip().lower()
+        if normalized and " " not in normalized and len(normalized) >= 2:
+            terms.append(normalized)
+        terms = list(dict.fromkeys(terms))
+        if not terms:
+            return []
+        placeholders = ",".join("?" for _ in terms)
+        reference_clause = "" if include_reference else "AND p.page_type != 'reference'"
+        try:
+            with sqlite3.connect(
+                f"file:{self.path}?mode=ro",
+                uri=True,
+                check_same_thread=False,
+                timeout=0.05,
+            ) as connection:
+                if int(connection.execute("PRAGMA user_version").fetchone()[0]) != SCHEMA_VERSION:
+                    return []
+                rows = connection.execute(
+                    f"""
+                    SELECT p.page_id, p.title, p.folder, p.updated, p.status,
+                           p.superseded_by, p.page_type, p.sensitivity,
+                           p.content_sha256, SUM(a.weight) AS score
+                    FROM anchors a
+                    JOIN pages p ON p.page_id = a.page_id
+                    WHERE a.term IN ({placeholders}) {reference_clause}
+                    GROUP BY p.page_id
+                    ORDER BY score DESC, p.updated DESC
+                    LIMIT ?
+                    """,
+                    (*terms, max(1, top_n)),
+                ).fetchall()
+        except (OSError, sqlite3.DatabaseError):
+            return []
+        return [self._row_to_page(row, float(row[9])) for row in rows]
 
     def stats(self) -> dict[str, object]:
         with self._lock:

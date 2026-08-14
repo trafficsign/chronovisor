@@ -135,6 +135,20 @@ FRONTIER_POLICY_DECISIONS = {
 }
 
 
+def _distillation_single_writer_active() -> bool:
+    """Keep the retired policy writer off once distillation owns Recall updates."""
+
+    try:
+        from chronovisor.recall.recall_distillation import distillation_enabled
+    except ImportError:
+        return False
+    try:
+        return bool(distillation_enabled())
+    except Exception:
+        # A broken cutover config must not reopen the retired writer.
+        return True
+
+
 def _quarantine_retry_seconds() -> int:
     try:
         return max(
@@ -1200,6 +1214,71 @@ def _persist_proposer_route_block(
     return record
 
 
+def _improvement_inputs(
+    *,
+    log_file: Path,
+    feedback_file: Path,
+    max_examples: int,
+    max_elapsed_seconds: float,
+    episodes_file: Path,
+    live_episodes_file: Path,
+    frontier_mode: str,
+) -> tuple[str, str, float | None, list[RecallExample], dict[str, Any], str]:
+    """Build the bounded evaluation input for one improvement run."""
+
+    run_id, started = _run_id(), _now_iso()
+    deadline = (
+        time.monotonic() + max(0.0, float(max_elapsed_seconds))
+        if max_elapsed_seconds > 0
+        else None
+    )
+    examples = [
+        example
+        for example in build_dataset(log_file=log_file, feedback_file=feedback_file)
+        if example.kind != "page_ignored"
+    ]
+    if max_examples > 0:
+        examples = examples[-max_examples:]
+    write_episode_snapshot(examples, path=episodes_file)
+    return (
+        run_id,
+        started,
+        deadline,
+        examples,
+        live_episode_summary(live_episodes_file),
+        frontier_mode if frontier_mode in FRONTIER_AUDIT_MODES else "auto",
+    )
+
+
+def _no_improvement_examples(
+    *,
+    run_id: str,
+    started: str,
+    log_file: Path,
+    feedback_file: Path,
+    live_telemetry: dict[str, Any],
+    runs_dir: Path,
+    registry_file: Path,
+) -> dict[str, Any]:
+    record = {
+        "schema_version": 1,
+        "run_id": run_id,
+        "ts": started,
+        "status": "blocked",
+        "applied": False,
+        "reason": "no recall feedback examples available",
+        "dataset": {
+            "examples": 0,
+            "log_file": str(log_file),
+            "feedback_file": str(feedback_file),
+        },
+        "live_telemetry": live_telemetry,
+        "models": [],
+    }
+    _persist_run(record, runs_dir=runs_dir, registry_file=registry_file)
+    return record
+
+
 def run_improvement(
     *,
     config_file: Path | None = None,
@@ -1222,40 +1301,39 @@ def run_improvement(
     frontier_audit_dir: Path = FRONTIER_AUDIT_DIR,
     frontier_reviewer: Any | None = None,
 ) -> dict[str, Any]:
-    run_id, started = _run_id(), _now_iso()
-    deadline = (
-        time.monotonic() + max(0.0, float(max_elapsed_seconds))
-        if max_elapsed_seconds > 0
-        else None
-    )
-    examples = [
-        example
-        for example in build_dataset(log_file=log_file, feedback_file=feedback_file)
-        if example.kind != "page_ignored"
-    ]
-    if max_examples > 0:
-        examples = examples[-max_examples:]
-    write_episode_snapshot(examples, path=episodes_file)
-    live_telemetry = live_episode_summary(live_episodes_file)
-    frontier_mode = frontier_mode if frontier_mode in FRONTIER_AUDIT_MODES else "auto"
-    if not examples:
-        record = {
+    if apply and _distillation_single_writer_active():
+        return {
             "schema_version": 1,
-            "run_id": run_id,
-            "ts": started,
-            "status": "blocked",
+            "status": "hard_off",
             "applied": False,
-            "reason": "no recall feedback examples available",
-            "dataset": {
-                "examples": 0,
-                "log_file": str(log_file),
-                "feedback_file": str(feedback_file),
-            },
-            "live_telemetry": live_telemetry,
-            "models": [],
+            "reason": "distillation_single_writer",
         }
-        _persist_run(record, runs_dir=runs_dir, registry_file=registry_file)
-        return record
+    (
+        run_id,
+        started,
+        deadline,
+        examples,
+        live_telemetry,
+        frontier_mode,
+    ) = _improvement_inputs(
+        log_file=log_file,
+        feedback_file=feedback_file,
+        max_examples=max_examples,
+        max_elapsed_seconds=max_elapsed_seconds,
+        episodes_file=episodes_file,
+        live_episodes_file=live_episodes_file,
+        frontier_mode=frontier_mode,
+    )
+    if not examples:
+        return _no_improvement_examples(
+            run_id=run_id,
+            started=started,
+            log_file=log_file,
+            feedback_file=feedback_file,
+            live_telemetry=live_telemetry,
+            runs_dir=runs_dir,
+            registry_file=registry_file,
+        )
     dev_examples, holdout_examples = split_examples(examples)
     baseline_policy = load_policy(config_file) if config_file else load_policy()
     eval_cache: dict[tuple[str, str], dict[str, Any]] = {}
@@ -1708,6 +1786,13 @@ def rollback_policy(
     active_file: Path = ACTIVE_POLICY_FILE,
     registry_file: Path = REGISTRY_FILE,
 ) -> dict[str, Any]:
+    if _distillation_single_writer_active():
+        return {
+            "schema_version": 1,
+            "status": "hard_off",
+            "applied": False,
+            "reason": "distillation_single_writer",
+        }
     # Serialize every active-policy writer with evaluated authority readers.
     # Rollback is explicit operational authority, not reuse of an old model
     # verdict, so it does not require a semantic authority seal of its own.
@@ -1864,6 +1949,14 @@ def run_due(
     frontier_budget: Any | None = None,
 ) -> dict[str, Any]:
     del models
+    if not dry_run and _distillation_single_writer_active():
+        return {
+            "schema_version": 1,
+            "checked_at": _now_iso(),
+            "status": "hard_off",
+            "reason": "distillation_single_writer",
+            "dry_run": False,
+        }
     lock_handle = None
     if not dry_run:
         lock_handle = _try_acquire_run_due_lock(lock_file)

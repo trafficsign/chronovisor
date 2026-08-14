@@ -29,6 +29,7 @@ canonical_json_line_bytes_strict = canonical_json.canonical_json_line_bytes_stri
 canonical_json_sha256_strict = canonical_json.canonical_json_sha256_strict
 open_regular_nofollow = durable_state.open_regular_nofollow
 RawStore = raw_store.RawStore
+committed_raw_watermark = raw_store.committed_raw_watermark
 
 EVALUATION_CONTRACT_SCHEMA = "chronovisor.evidence-evaluation-contract.v1"
 EVIDENCE_PACKET_SCHEMA = "chronovisor.evidence-packet.v1"
@@ -529,56 +530,6 @@ def _source_receipt(unit: Any) -> dict[str, Any]:
     }
 
 
-def _committed_event_spans(
-    raw: bytes, record_count: int
-) -> tuple[tuple[int, bytes], ...]:
-    if not raw.endswith(b"\n"):
-        raise EvidenceReconstructionError("committed Raw record count is invalid")
-    try:
-        text = raw.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        raise EvidenceReconstructionError(
-            "committed Raw event stream is invalid UTF-8"
-        ) from exc
-    decoder = json.JSONDecoder()
-    spans: list[tuple[int, bytes]] = []
-    cursor = 0
-    byte_cursor = 0
-    while cursor < len(text):
-        try:
-            event, end = decoder.raw_decode(text, cursor)
-        except json.JSONDecodeError as exc:
-            raise EvidenceReconstructionError(
-                "committed Raw event stream is invalid JSON"
-            ) from exc
-        if not isinstance(event, dict):
-            raise EvidenceReconstructionError("committed Raw event must be an object")
-        next_cursor = end
-        while next_cursor < len(text) and text[next_cursor] in " \t\r\n":
-            next_cursor += 1
-        if "\n" not in text[end:next_cursor]:
-            raise EvidenceReconstructionError(
-                "committed Raw event stream has no record separator"
-            )
-        encoded = text[cursor:next_cursor].encode("utf-8")
-        spans.append((byte_cursor, encoded))
-        byte_cursor += len(encoded)
-        cursor = next_cursor
-    if len(spans) != record_count or byte_cursor != len(raw):
-        raise EvidenceReconstructionError("committed Raw record count is invalid")
-    return tuple(spans)
-
-
-def committed_raw_watermark(raw_dir: Path) -> str:
-    """Return the current committed-receipt inventory identity without Raw content."""
-
-    rows = [
-        _source_receipt(unit)
-        for unit in RawStore(raw_dir, mode="v2").iter_segment_units()
-    ]
-    return canonical_json_sha256_strict(rows)
-
-
 def physical_raw_inventory(raw_dir: Path) -> dict[str, Any]:
     """Hash every regular Raw file and reject every unsafe entry."""
 
@@ -633,9 +584,11 @@ def build_episode_projection(raw_dir: Path) -> bytes:
         receipts.append(receipt)
         if store.is_archived_legacy_markdown(unit, raw):
             continue
-        for index, (start, encoded_event) in enumerate(
-            _committed_event_spans(raw, commit.record_count)
-        ):
+        try:
+            spans = raw_store.committed_event_spans(raw, commit.record_count)
+        except raw_store.RawSegmentCorrupt as exc:
+            raise EvidenceReconstructionError(str(exc)) from exc
+        for index, (start, encoded_event) in enumerate(spans):
             atom = _projection_atom(
                 raw_id=unit.raw_id,
                 raw_sha256=unit.sha256,
@@ -979,7 +932,10 @@ def verify_projection_atom(raw_dir: Path, atom: EvidenceAtom) -> None:
         raise EvidenceReconstructionError("projection atom Raw receipt is missing")
     commit = unit.commit
     raw = store.read_bytes(unit)
-    spans = _committed_event_spans(raw, commit.record_count)
+    try:
+        spans = raw_store.committed_event_spans(raw, commit.record_count)
+    except raw_store.RawSegmentCorrupt as exc:
+        raise EvidenceReconstructionError(str(exc)) from exc
     index = atom.provenance.event_index
     if index >= len(spans):
         raise EvidenceReconstructionError("projection atom event index is invalid")

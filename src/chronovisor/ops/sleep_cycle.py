@@ -399,6 +399,68 @@ def _graph_artifact_lanes(
     }
 
 
+def _recall_growth_and_distillation_lanes(
+    artifact_lane: Callable[..., dict[str, Any]],
+    recall_distillation: Any,
+    *,
+    dry_run: bool,
+) -> tuple[bool, dict[str, Any], dict[str, Any]]:
+    """Keep the legacy Recall writers mutually exclusive with distillation."""
+    distillation_active = recall_distillation.distillation_enabled()
+    if distillation_active:
+        return (
+            True,
+            {
+                "status": "hard_off",
+                "reason": "distillation_single_writer",
+                "dry_run": dry_run,
+            },
+            artifact_lane(
+                "recall_distillation",
+                lambda: recall_distillation.run_distillation_chunk(dry_run=dry_run),
+            ),
+        )
+    return (
+        False,
+        artifact_lane("recall_growth", lambda: run_growth_cycle(dry_run=dry_run)),
+        {
+            "status": "skipped",
+            "reason": "distillation_disabled",
+            "dry_run": dry_run,
+        },
+    )
+
+
+def _recall_improvement_lane(
+    recall_improvement: Any,
+    lane_budgets: dict[str, Any],
+    *,
+    distillation_active: bool,
+    dry_run: bool,
+) -> dict[str, Any]:
+    if distillation_active:
+        return {
+            "status": "hard_off",
+            "reason": "distillation_single_writer",
+            "dry_run": dry_run,
+        }
+    return _run_lane(
+        "recall_improve",
+        lambda: recall_improvement.run_due(
+            apply=not dry_run,
+            min_interval_hours=24.0,
+            min_new_feedback=5,
+            min_total_feedback=3,
+            max_examples=40,
+            max_elapsed_seconds=15 * 60,
+            frontier_mode="auto",
+            frontier_budget=lane_budgets["recall_improve"],
+            dry_run=dry_run,
+        ),
+        max_elapsed_seconds=15 * 60,
+    )
+
+
 def render_summary(payload: dict[str, Any]) -> str:
     """Render a compact status report that tolerates partial/skipped cycles."""
 
@@ -532,7 +594,7 @@ def _run_sleep_cycle(
     from chronovisor.ops.hubs import build_hub_pages
     from chronovisor.ops.memory_integrity import run_eval
     from chronovisor.ops.reflection import write_reflection_page
-    from chronovisor.recall import recall_improvement
+    from chronovisor.recall import recall_distillation, recall_improvement
     from chronovisor.recall.cofire import build_cofire_graph
     from chronovisor.recall.duplicate_review import (
         build_duplicate_review_queue,
@@ -634,8 +696,12 @@ def _run_sleep_cycle(
         ),
     )
     graph_artifacts = _graph_artifact_lanes(artifact_lane, build_cofire_graph, dry_run=dry_run)
-    recall_growth = artifact_lane(
-        "recall_growth", lambda: run_growth_cycle(dry_run=dry_run)
+    (
+        distillation_active,
+        recall_growth,
+        recall_distillation_result,
+    ) = _recall_growth_and_distillation_lanes(
+        artifact_lane, recall_distillation, dry_run=dry_run
     )
     prefetch = artifact_lane(
         "prefetch", lambda: build_prefetch_cache(write=not dry_run)
@@ -934,20 +1000,11 @@ def _run_sleep_cycle(
         duplicate_status = str(duplicate_write.get("status") or "ok")
         duplicate_path = str(duplicate_write.get("path") or "")
         duplicate_error = duplicate_write.get("error")
-    recall_improve = _run_lane(
-        "recall_improve",
-        lambda: recall_improvement.run_due(
-            apply=not dry_run,
-            min_interval_hours=24.0,
-            min_new_feedback=5,
-            min_total_feedback=3,
-            max_examples=40,
-            max_elapsed_seconds=15 * 60,
-            frontier_mode="auto",
-            frontier_budget=lane_budgets["recall_improve"],
-            dry_run=dry_run,
-        ),
-        max_elapsed_seconds=15 * 60,
+    recall_improve = _recall_improvement_lane(
+        recall_improvement,
+        lane_budgets,
+        distillation_active=distillation_active,
+        dry_run=dry_run,
     )
     model_lab = _run_lane(
         "model_lab",
@@ -958,16 +1015,24 @@ def _run_sleep_cycle(
     )
     import chronovisor.recall.recall_calibration as recall_calibration
 
-    calibration = _run_lane(
-        "recall_calibration",
-        lambda: recall_calibration.run_due(
-            min_interval_hours=7 * 24,
-            max_samples=2000,
-            max_recomputed_features=50,
-            dry_run=dry_run,
-            frontier_mode="auto",
-            budget=lane_budgets["calibration"],
-        ),
+    calibration = (
+        {
+            "status": "hard_off",
+            "reason": "distillation_single_writer",
+            "dry_run": dry_run,
+        }
+        if distillation_active
+        else _run_lane(
+            "recall_calibration",
+            lambda: recall_calibration.run_due(
+                min_interval_hours=7 * 24,
+                max_samples=2000,
+                max_recomputed_features=50,
+                dry_run=dry_run,
+                frontier_mode="auto",
+                budget=lane_budgets["calibration"],
+            ),
+        )
     )
     import chronovisor.search.search_eval as search_eval
 
@@ -1005,6 +1070,7 @@ def _run_sleep_cycle(
         "health_before": before_health_result,
         **graph_artifacts,
         "recall_growth": recall_growth,
+        "recall_distillation": recall_distillation_result,
         "prefetch": {
             "status": prefetch.get("status"),
             "episodes": prefetch.get("episodes", 0),

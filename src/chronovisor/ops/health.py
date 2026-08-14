@@ -29,6 +29,67 @@ def _read_jsonl(path: Path, *, limit: int = 500) -> list[dict[str, Any]]:
     return read_jsonl(path, limit=limit)
 
 
+def recall_distillation_kpi() -> dict[str, Any]:
+    """Expose the distillation worker's public, privacy-safe status.
+
+    Distillation is an optional background path.  Its absence (including the
+    capture-only cold start) must never turn the foreground Recall health red.
+    The distillation snapshot owns pointer validation, so this layer does not
+    read private ledgers or policy artifacts itself.
+    """
+
+    try:
+        from chronovisor.recall.recall_distillation_store import snapshot
+    except ImportError:
+        return {
+            "status": "unavailable",
+            "worker_status": "unavailable",
+            "rollout_percent": 0.0,
+            "active_policy_id": None,
+            "candidate_policy_id": None,
+            "lkg_policy_id": None,
+            "alert": False,
+        }
+    try:
+        value = snapshot(CHRONOVISOR_ROOT)
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return {
+            "status": "unavailable",
+            "worker_status": "unavailable",
+            "rollout_percent": 0.0,
+            "active_policy_id": None,
+            "candidate_policy_id": None,
+            "lkg_policy_id": None,
+            "alert": False,
+        }
+    if not isinstance(value, dict):
+        return {
+            "status": "invalid",
+            "worker_status": "invalid",
+            "rollout_percent": 0.0,
+            "active_policy_id": None,
+            "candidate_policy_id": None,
+            "lkg_policy_id": None,
+            "alert": True,
+            "error": "invalid_snapshot",
+        }
+    status = str(value.get("status") or "invalid")
+    state = value.get("worker_status", value.get("state"))
+    worker_status = str(
+        state.get("status") if isinstance(state, dict) else state or status
+    )
+    rollout_status = str(value.get("rollout_status") or "")
+    rollout = value.get("rollout")
+    rollout_percent = float(rollout) if isinstance(rollout, (int, float)) else 0.0
+    return {
+        **value,
+        "worker_status": worker_status,
+        "rollout_status": rollout_status,
+        "rollout_percent": rollout_percent,
+        "alert": status in {"stale", "tampered", "invalid", "error"},
+    }
+
+
 def summary_coverage() -> dict[str, Any]:
     store = get_store()
     store.refresh()
@@ -943,6 +1004,7 @@ def health_snapshot() -> dict[str, Any]:
         "read_back": read_back_kpi(),
         "autonomy_hardening": autonomy_hardening_kpi(),
         "recall_feedback": recall_feedback_kpi(),
+        "recall_distillation": recall_distillation_kpi(),
         "convergence": convergence_kpi(),
         "capture_pipeline": capture_pipeline_kpi(),
         "ingest_liveness": ingest_liveness,

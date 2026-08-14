@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+from chronovisor.core.canonical_json import canonical_json_sha256_strict
 from chronovisor.core.raw_segment import (
     RawSegmentCommit,
     RawSegmentCorrupt,
@@ -37,6 +38,46 @@ RAW_REFERENCE_SCHEMA = "chronovisor.raw-reference.v1"
 _LEGACY_ARCHIVE_BASENAME_RE = re.compile(r"^legacy-part-[0-9]{3}\.tar\.zst$")
 
 
+def committed_event_spans(
+    raw: bytes, record_count: int
+) -> tuple[tuple[int, bytes], ...]:
+    """Return byte-exact JSON event spans from one committed Raw v2 unit."""
+
+    if not raw.endswith(b"\n"):
+        raise RawSegmentCorrupt("committed Raw record count is invalid")
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise RawSegmentCorrupt("committed Raw event stream is invalid UTF-8") from exc
+    decoder = json.JSONDecoder()
+    spans: list[tuple[int, bytes]] = []
+    cursor = 0
+    byte_cursor = 0
+    while cursor < len(text):
+        try:
+            event, end = decoder.raw_decode(text, cursor)
+        except json.JSONDecodeError as exc:
+            raise RawSegmentCorrupt(
+                "committed Raw event stream is invalid JSON"
+            ) from exc
+        if not isinstance(event, dict):
+            raise RawSegmentCorrupt("committed Raw event must be an object")
+        next_cursor = end
+        while next_cursor < len(text) and text[next_cursor] in " \t\r\n":
+            next_cursor += 1
+        if "\n" not in text[end:next_cursor]:
+            raise RawSegmentCorrupt(
+                "committed Raw event stream has no record separator"
+            )
+        encoded = text[cursor:next_cursor].encode("utf-8")
+        spans.append((byte_cursor, encoded))
+        byte_cursor += len(encoded)
+        cursor = next_cursor
+    if len(spans) != record_count or byte_cursor != len(raw):
+        raise RawSegmentCorrupt("committed Raw record count is invalid")
+    return tuple(spans)
+
+
 def raw_layout_mode(
     value: str | None = None, *, chronovisor_root: Path | None = None
 ) -> RawLayoutMode:
@@ -50,7 +91,11 @@ def raw_layout_mode(
     """
 
     configured: object = None
-    if value is None and os.environ.get("CHRONOVISOR_RAW_LAYOUT") is None and chronovisor_root:
+    if (
+        value is None
+        and os.environ.get("CHRONOVISOR_RAW_LAYOUT") is None
+        and chronovisor_root
+    ):
         config_path = chronovisor_root.expanduser() / "config.toml"
         try:
             payload = tomllib.loads(config_path.read_text(encoding="utf-8"))
@@ -202,9 +247,7 @@ class RawStore:
                     and previous.storage == unit.storage
                     and previous.path != unit.path
                 ):
-                    raise RawSegmentCorrupt(
-                        f"duplicate physical Raw ID: {unit.raw_id}"
-                    )
+                    raise RawSegmentCorrupt(f"duplicate physical Raw ID: {unit.raw_id}")
                 selected[unit.raw_id] = unit
             self._units_by_id = selected
             self._units_cache = tuple(selected[raw_id] for raw_id in sorted(selected))
@@ -221,6 +264,35 @@ class RawStore:
                 selected[raw_id] for raw_id in sorted(selected)
             )
         yield from self._segment_units_cache
+
+    def iter_segment_bytes(self) -> Iterator[tuple[RawUnit, bytes]]:
+        """Read each physical v2 segment once and verify every logical unit."""
+
+        groups: dict[tuple[RawStorageKind, Path], list[RawUnit]] = {}
+        for unit in self.iter_segment_units():
+            groups.setdefault((unit.storage, unit.path), []).append(unit)
+        for (storage, path), units in sorted(
+            groups.items(), key=lambda item: (str(item[0][1]), item[0][0])
+        ):
+            logical_end = max(unit.offset + unit.length for unit in units)
+            segment = (
+                read_open_range(path, 0, logical_end)
+                if storage == "segment_open"
+                else read_sealed_range(path, 0, logical_end)
+            )
+            for unit in sorted(units, key=lambda item: item.raw_id):
+                value = segment[unit.offset : unit.offset + unit.length]
+                if len(value) != unit.length:
+                    raise RawSegmentCorrupt(
+                        f"segment Raw range is truncated: {unit.raw_id}"
+                    )
+                if unit.sha256 is None:
+                    raise RawSegmentCorrupt(f"segment Raw has no digest: {unit.raw_id}")
+                if hashlib.sha256(value).hexdigest() != unit.sha256:
+                    raise RawSegmentCorrupt(
+                        f"segment Raw digest mismatch: {unit.raw_id}"
+                    )
+                yield unit, value
 
     def resolve(self, raw_id: str) -> RawUnit | None:
         if Path(raw_id).name != raw_id or not raw_id:
@@ -485,10 +557,9 @@ class RawStore:
             if path.read_bytes() == encoded:
                 return path
             existing = self.resolve_reference(path)
-            if (
-                existing is None
-                or self.reference_payload(existing) != self.reference_payload(unit)
-            ):
+            if existing is None or self.reference_payload(
+                existing
+            ) != self.reference_payload(unit):
                 raise RawSegmentCorrupt(
                     f"logical Raw reference conflicts with segment: {unit.raw_id}"
                 )
@@ -503,9 +574,8 @@ class RawStore:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, UnicodeError, json.JSONDecodeError):
             return None
-        if (
-            not isinstance(payload, dict)
-            or not schema_matches(payload.get("schema"), RAW_REFERENCE_SCHEMA)
+        if not isinstance(payload, dict) or not schema_matches(
+            payload.get("schema"), RAW_REFERENCE_SCHEMA
         ):
             return None
         raw_id = payload.get("raw_id")
@@ -527,3 +597,27 @@ class RawStore:
 
     def __iter__(self) -> Iterator[RawUnit]:
         return self.iter_units()
+
+
+def committed_raw_watermark(raw_dir: Path) -> str:
+    """Return the committed-receipt inventory identity without Raw content."""
+
+    rows: list[dict[str, object]] = []
+    for unit in RawStore(raw_dir, mode="v2").iter_segment_units():
+        commit = unit.commit
+        if commit is None or unit.sha256 is None or unit.captured_at is None:
+            raise RawSegmentCorrupt("Raw unit has no committed receipt")
+        rows.append(
+            {
+                "raw_id": unit.raw_id,
+                "byte_range": [0, unit.length],
+                "byte_coordinate_space": "logical_raw",
+                "raw_sha256": unit.sha256,
+                "receipt_sha256": canonical_json_sha256_strict(commit.to_dict()),
+                "captured_at": unit.captured_at,
+                "host": commit.host,
+                "session_key": commit.session_key,
+                "source_line_range": [commit.after_line, commit.until_line],
+            }
+        )
+    return canonical_json_sha256_strict(rows)

@@ -4782,6 +4782,13 @@ def _health_materialization_fingerprint(raw_paths: list[Path]) -> str:
         CHRONOVISOR_ROOT / "runtime" / "ingest-read-back-runs.jsonl",
         CHRONOVISOR_ROOT / "runtime" / "ingest-read-back-failures.jsonl",
         CHRONOVISOR_ROOT / "runtime" / "ingest-read-back-repair.json",
+        CHRONOVISOR_ROOT / "runtime" / "recall-distillation" / "state.json",
+        CHRONOVISOR_ROOT / "runtime" / "recall-distillation" / "active-policy.json",
+        CHRONOVISOR_ROOT / "runtime" / "recall-distillation" / "candidate-policy.json",
+        CHRONOVISOR_ROOT
+        / "runtime"
+        / "recall-distillation"
+        / "lkg-policy.json",
     ]
     paths.extend(
         _dashboard_glob_files(

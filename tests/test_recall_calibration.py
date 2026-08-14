@@ -526,3 +526,22 @@ def test_calibration_apply_rechecks_authority_inside_effect_lock(
     assert result["reason"] == "decision authority changed before effect"
     assert calibration_file.read_bytes() == before
     assert not history_file.exists()
+
+
+def test_calibration_writers_are_hard_off_for_distillation_single_writer(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        recall_calibration, "_distillation_single_writer_active", lambda: True
+    )
+    history_file = tmp_path / "run-history.jsonl"
+    calibration_file = tmp_path / "calibration.json"
+    monkeypatch.setattr(recall_calibration, "CALIBRATION_RUN_HISTORY_FILE", history_file)
+    monkeypatch.setattr(recall_calibration, "CALIBRATION_FILE", calibration_file)
+
+    assert recall_calibration.calibrate()["status"] == "hard_off"
+    assert recall_calibration.run_due()["status"] == "hard_off"
+    assert recall_calibration.rollback_last()["status"] == "hard_off"
+    assert not history_file.exists()
+    assert not calibration_file.exists()

@@ -979,7 +979,7 @@ def test_repository_example_has_representative_local_role_map() -> None:
     assert distillation == {
         "enabled": False,
         "chunk_size": 25,
-        "max_input_bytes": 24000,
+        "max_input_bytes": 12000,
         "max_candidates": 200,
         "hard_floor_rallies": 1000,
         "hard_floor_days": 30,

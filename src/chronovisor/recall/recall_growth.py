@@ -74,6 +74,20 @@ CANARY_ADVANCE_SAMPLES = 100
 QUALITY_WINDOW = 200
 
 
+def _distillation_single_writer_active() -> bool:
+    """Keep the retired growth writer off once distillation owns Recall updates."""
+
+    try:
+        from chronovisor.recall.recall_distillation import distillation_enabled
+    except ImportError:
+        return False
+    try:
+        return bool(distillation_enabled())
+    except Exception:
+        # A broken cutover config must not reopen the retired writer.
+        return True
+
+
 def _read_json(path: Path) -> dict[str, Any]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
@@ -1471,27 +1485,19 @@ def _candidate_growth_metrics(
     }
 
 
-def run_growth_cycle(
+def _growth_cycle_inputs(
     *,
-    dry_run: bool = False,
-    state_file: Path = GROWTH_STATE_FILE,
-    history_file: Path = GROWTH_HISTORY_FILE,
-    candidate_trace_file: Path = CANDIDATE_TRACE_FILE,
-    promotion_file: Path = PROMOTION_ARTIFACT,
-    policy_history_file: Path | None = None,
-    last_known_good_file: Path | None = None,
-    compiler_trace_file: Path | None = None,
-    locked_e2e_file: Path | None = None,
-    locked_answer_eval_file: Path | None = None,
-    train_answer_eval_file: Path | None = None,
-    answer_episode_file: Path = ANSWER_EPISODE_LEDGER,
-    answer_review_ledger_file: Path = ANSWER_REVIEW_LEDGER,
-    answer_execution_ledger_file: Path = ANSWER_EXECUTION_LEDGER,
-    answer_adapter_registry: Path | Mapping[str, Any] = ANSWER_ADAPTER_REGISTRY,
-    label_inputs: dict[str, Path] | None = None,
-    now: datetime | None = None,
-) -> dict[str, Any]:
-    """Refresh supervision and advance a fail-closed autonomous rollout."""
+    dry_run: bool,
+    state_file: Path,
+    policy_history_file: Path | None,
+    last_known_good_file: Path | None,
+    compiler_trace_file: Path | None,
+    locked_e2e_file: Path | None,
+    locked_answer_eval_file: Path | None,
+    train_answer_eval_file: Path | None,
+    label_inputs: dict[str, Path] | None,
+) -> tuple[Path, Path, Path, Path, Path, Path, dict[str, Path], dict[str, Any]]:
+    """Resolve the cycle inputs and materialize its label ledger."""
 
     policy_history_file = (
         policy_history_file or state_file.parent / POLICY_HISTORY_FILE.name
@@ -1514,6 +1520,35 @@ def run_growth_cycle(
     labels = (
         build_label_ledger(**inputs) if dry_run else materialize_label_ledger(**inputs)
     )
+    return (
+        policy_history_file,
+        last_known_good_file,
+        compiler_trace_file,
+        locked_e2e_file,
+        locked_answer_eval_file,
+        train_answer_eval_file,
+        inputs,
+        labels,
+    )
+
+
+def _growth_observations(
+    *,
+    inputs: Mapping[str, Path],
+    candidate_trace_file: Path,
+    labels: Mapping[str, Any],
+) -> tuple[
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    dict[str, Any],
+    dict[str, Any],
+    dict[str, Any],
+    bool,
+    dict[str, Any],
+]:
+    """Read the existing supervision inputs used by the growth gates."""
+
     recall_rows = _read_jsonl(inputs["recall_log_file"])
     pull_rows = _read_jsonl(inputs["pull_log_file"])
     candidate_rows, candidate_chain_error = _validated_candidate_trace_rows(
@@ -1531,11 +1566,82 @@ def run_growth_cycle(
         if candidate_rows
         else 0
     )
-    processor = processor_used_metrics(recall_rows, pull_rows)
-    counts = dict(labels["counts"])
-    label_gate = bool(labels["gates"]["field_learning_allowed"])
-    subject_gate_value = labels.get("gates")
-    subject_gates = subject_gate_value if isinstance(subject_gate_value, dict) else {}
+    subject_gates = labels.get("gates")
+    return (
+        recall_rows,
+        pull_rows,
+        candidate_rows,
+        candidate,
+        processor_used_metrics(recall_rows, pull_rows),
+        dict(labels["counts"]),
+        bool(labels["gates"]["field_learning_allowed"]),
+        subject_gates if isinstance(subject_gates, dict) else {},
+    )
+
+
+def run_growth_cycle(
+    *,
+    dry_run: bool = False,
+    state_file: Path = GROWTH_STATE_FILE,
+    history_file: Path = GROWTH_HISTORY_FILE,
+    candidate_trace_file: Path = CANDIDATE_TRACE_FILE,
+    promotion_file: Path = PROMOTION_ARTIFACT,
+    policy_history_file: Path | None = None,
+    last_known_good_file: Path | None = None,
+    compiler_trace_file: Path | None = None,
+    locked_e2e_file: Path | None = None,
+    locked_answer_eval_file: Path | None = None,
+    train_answer_eval_file: Path | None = None,
+    answer_episode_file: Path = ANSWER_EPISODE_LEDGER,
+    answer_review_ledger_file: Path = ANSWER_REVIEW_LEDGER,
+    answer_execution_ledger_file: Path = ANSWER_EXECUTION_LEDGER,
+    answer_adapter_registry: Path | Mapping[str, Any] = ANSWER_ADAPTER_REGISTRY,
+    label_inputs: dict[str, Path] | None = None,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Refresh supervision and advance a fail-closed autonomous rollout."""
+
+    if not dry_run and _distillation_single_writer_active():
+        return {
+            "status": "hard_off",
+            "reason": "distillation_single_writer",
+            "dry_run": False,
+        }
+
+    (
+        policy_history_file,
+        last_known_good_file,
+        compiler_trace_file,
+        locked_e2e_file,
+        locked_answer_eval_file,
+        train_answer_eval_file,
+        inputs,
+        labels,
+    ) = _growth_cycle_inputs(
+        dry_run=dry_run,
+        state_file=state_file,
+        policy_history_file=policy_history_file,
+        last_known_good_file=last_known_good_file,
+        compiler_trace_file=compiler_trace_file,
+        locked_e2e_file=locked_e2e_file,
+        locked_answer_eval_file=locked_answer_eval_file,
+        train_answer_eval_file=train_answer_eval_file,
+        label_inputs=label_inputs,
+    )
+    (
+        recall_rows,
+        pull_rows,
+        candidate_rows,
+        candidate,
+        processor,
+        counts,
+        label_gate,
+        subject_gates,
+    ) = _growth_observations(
+        inputs=inputs,
+        candidate_trace_file=candidate_trace_file,
+        labels=labels,
+    )
     typed_graph_eval = _read_json(
         state_file.parent.parent / "typed-graph" / "evaluation.json"
     )

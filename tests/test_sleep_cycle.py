@@ -450,6 +450,38 @@ def test_run_sleep_cycle_coordinates_safe_steps(monkeypatch) -> None:
     assert payload["snapshot_after"]["status"] == "clean"
 
 
+def test_sleep_cycle_runs_distillation_as_the_only_recall_writer(monkeypatch) -> None:
+    _patch_sleep_dependencies(monkeypatch)
+    calls: list[bool] = []
+    monkeypatch.setattr(
+        "chronovisor.recall.recall_distillation.distillation_enabled", lambda: True
+    )
+    monkeypatch.setattr(
+        "chronovisor.recall.recall_distillation.run_distillation_chunk",
+        lambda **kwargs: calls.append(kwargs["dry_run"]) or {"status": "ok"},
+    )
+    monkeypatch.setattr(
+        sleep_cycle,
+        "run_growth_cycle",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("growth must stay off")),
+    )
+    monkeypatch.setattr(
+        "chronovisor.recall.recall_improvement.run_due",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("improvement must stay off")),
+    )
+    monkeypatch.setattr(
+        "chronovisor.recall.recall_calibration.run_due",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("calibration must stay off")),
+    )
+
+    payload = sleep_cycle.run_sleep_cycle(raw_limit=0, eval_limit=0, duplicate_limit=0)
+
+    assert calls == [False]
+    assert payload["recall_distillation"]["status"] == "ok"
+    for lane in ("recall_growth", "recall_improve", "recall_calibration"):
+        assert payload[lane]["reason"] == "distillation_single_writer"
+
+
 def test_sleep_cycle_always_writes_watchdog_receipt(
     tmp_path: Path,
     monkeypatch,

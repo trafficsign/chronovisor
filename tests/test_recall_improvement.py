@@ -445,7 +445,9 @@ def test_legacy_model_selectors_cannot_override_runtime_routes(
 
     assert result["models"] == ["ornith:test", "gemma:test"]
     assert route_calls == [recall_improvement.PROPOSER_RUNTIME_ROLES]
-    assert toml_reads == 0
+    # The distillation cutover reads its separate enablement flag; legacy
+    # recall-improvement model selectors remain ignored.
+    assert toml_reads == 1
 
 
 def test_module_cli_rejects_retired_models_flag() -> None:
@@ -2062,3 +2064,53 @@ def test_improvement_snapshot_surfaces_active_policy(tmp_path) -> None:
     assert snapshot["status"] == "active"
     assert snapshot["active"]["run_id"] == "r1"
     assert snapshot["history"][0]["status"] == "applied"
+
+
+def test_improvement_writers_are_hard_off_for_distillation_single_writer(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        recall_improvement, "_distillation_single_writer_active", lambda: True
+    )
+    schedule_file = tmp_path / "schedule.json"
+    active_file = tmp_path / "active-policy.json"
+    registry_file = tmp_path / "policy-registry.jsonl"
+
+    assert recall_improvement.run_improvement(
+        runs_dir=tmp_path / "runs", registry_file=registry_file
+    )["reason"] == "distillation_single_writer"
+    assert recall_improvement.run_due(schedule_file=schedule_file)["status"] == "hard_off"
+    assert recall_improvement.rollback_policy(
+        active_file=active_file, registry_file=registry_file
+    )["status"] == "hard_off"
+    assert not schedule_file.exists()
+    assert not active_file.exists()
+    assert not registry_file.exists()
+
+
+def test_improvement_evaluation_stays_available_for_distillation_single_writer(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        recall_improvement, "_distillation_single_writer_active", lambda: True
+    )
+    monkeypatch.setattr(recall_improvement, "build_dataset", lambda **_kwargs: [])
+    monkeypatch.setattr(
+        recall_improvement, "write_episode_snapshot", lambda *_args, **_kwargs: None
+    )
+    monkeypatch.setattr(
+        recall_improvement, "live_episode_summary", lambda _path: {}
+    )
+    monkeypatch.setattr(recall_improvement, "_persist_run", lambda *_args, **_kwargs: None)
+
+    result = recall_improvement.run_improvement(
+        apply=False,
+        runs_dir=tmp_path / "runs",
+        registry_file=tmp_path / "policy-registry.jsonl",
+        episodes_file=tmp_path / "episodes.jsonl",
+    )
+
+    assert result["status"] == "blocked"
+    assert result["reason"] == "no recall feedback examples available"

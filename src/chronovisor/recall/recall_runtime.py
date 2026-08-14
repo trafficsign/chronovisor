@@ -36,7 +36,11 @@ from chronovisor.core.index_store import (
 )
 from chronovisor.core.jsonl_write import append_jsonl_durable
 from chronovisor.core.recall_runtime_paths import RECALL_DIR
-from chronovisor.core.search import last_search_trace, search_existing_bm25
+from chronovisor.core.search import (
+    last_search_trace,
+    search_existing_bm25,
+    search_existing_lexical,
+)
 from chronovisor.core.search import search as run_search
 from chronovisor.core.store import (
     CHRONOVISOR_ROOT,
@@ -81,6 +85,7 @@ TYPED_GRAPH_TRACE_FILE = (
 )
 RECALL_GATE_RUNTIME_ROLE = "recall.gate"
 RECALL_QUERY_REWRITER_RUNTIME_ROLE = "recall.query_rewriter"
+_DISTILLED_FAST_PATH_MAX_MS = 180
 
 TRIVIAL_PROMPT_RE = re.compile(
     r"^\s*(はい|いいえ|うん|おう|ok|okay|yes|no|y|n|ありがとう|thanks|thx|了解|りょ)\s*[。.!！?？]*\s*$",
@@ -650,7 +655,12 @@ def evaluate_heuristic(
     return max(0.0, min(1.0, score)), reasons, matched
 
 
-def classify_non_user_prompt(prompt: str, policy: RecallPolicy | None = None) -> str:
+def classify_non_user_prompt(
+    prompt: str,
+    policy: RecallPolicy | None = None,
+    *,
+    include_feedback: bool = True,
+) -> str:
     stripped = prompt.lstrip()
     if SYSTEM_ENVELOPE_RE.match(stripped):
         return "system notification prompt"
@@ -660,7 +670,7 @@ def classify_non_user_prompt(prompt: str, policy: RecallPolicy | None = None) ->
         "[/RECALL_CONTEXT]"
     ):
         return "recall context injection"
-    if policy is None or policy.use_feedback_suppressions:
+    if include_feedback and (policy is None or policy.use_feedback_suppressions):
         feedback_reason = classify_feedback_suppressed_prompt(stripped)
         if feedback_reason:
             return feedback_reason
@@ -1744,24 +1754,34 @@ def should_skip_session_page(
         return False
 
 
-def page_summary(page_id: str) -> str:
+def page_summary_with_content_hash(page_id: str) -> tuple[str, str]:
+    """Read one selected page once and return its bounded summary plus SHA-256."""
+
     path = find_readable_page(page_id)
     if not path or not path.exists():
-        return ""
+        return "", ""
     try:
         from chronovisor.core.frontmatter import parse as parse_frontmatter
 
-        meta, body = parse_frontmatter(path.read_text(encoding="utf-8"))
+        data = path.read_bytes()
+        meta, body = parse_frontmatter(data.decode("utf-8"))
     except Exception:
-        return ""
+        return "", ""
+    content_sha256 = hashlib.sha256(data).hexdigest()
     summary = meta.get("summary")
     if isinstance(summary, str) and summary.strip():
-        return summary.strip()
+        return summary.strip(), content_sha256
     for line in body.splitlines():
         line = line.strip(" #-\t")
         if line:
-            return _one_line(line, limit=220)
-    return ""
+            return _one_line(line, limit=220), content_sha256
+    return "", content_sha256
+
+
+def page_summary(page_id: str) -> str:
+    """Return the bounded page summary used by non-fast Recall callers."""
+
+    return page_summary_with_content_hash(page_id)[0]
 
 
 def excerpt_page(page_id: str, queries: list[str], max_chars: int = 650) -> str:
@@ -2002,6 +2022,11 @@ def _fail_open_recall_budget(
     _merge_telemetry(result.evidence_features, telemetry)
     if policy.log_decisions:
         append_recall_log(request, result)
+    _capture_legacy_distillation_observation(
+        result,
+        request=request,
+        deadline_at=final_deadline_at,
+    )
     return result
 
 
@@ -2193,6 +2218,11 @@ def _finalize_recall_result(
     _merge_telemetry(result.evidence_features, telemetry)
     if policy.log_decisions:
         append_recall_log(request, result)
+    _capture_legacy_distillation_observation(
+        result,
+        request=active_request,
+        deadline_at=deadline_at,
+    )
     return result
 
 
@@ -2730,11 +2760,797 @@ def _run_post_authority_shadows(
         _stage_completed(telemetry, "processor_shadow", deadline_at)
 
 
+def _distillation_policy_value(policy: Any, name: str, default: Any = None) -> Any:
+    return policy.get(name, default) if isinstance(policy, dict) else getattr(policy, name, default)
+
+
+def _load_active_distillation_policy(request: RecallRequest) -> Any | None:
+    """Load only a published fast-path policy; invalid artifacts fail closed."""
+
+    try:
+        from chronovisor.recall import recall_distillation
+
+        select_for_session = getattr(recall_distillation, "load_policy_for_session", None)
+        if callable(select_for_session):
+            candidate = select_for_session(
+                root=CHRONOVISOR_ROOT,
+                session_id=request.session_id,
+            )
+        else:
+            candidate = recall_distillation.load_active_policy(root=CHRONOVISOR_ROOT)
+    except Exception:
+        return None
+    if candidate is None:
+        return None
+    policy_id = _distillation_policy_value(
+        candidate, "policy_id", _distillation_policy_value(candidate, "artifact_id")
+    )
+    feature_schema = _distillation_policy_value(
+        candidate, "feature_schema", _distillation_policy_value(candidate, "feature_revision")
+    )
+    threshold = _distillation_policy_value(candidate, "threshold")
+    margin = _distillation_policy_value(
+        candidate, "margin", _distillation_policy_value(candidate, "abstain_margin")
+    )
+    max_cards = _distillation_policy_value(candidate, "max_cards")
+    if (
+        not isinstance(policy_id, str)
+        or not policy_id
+        or not isinstance(feature_schema, str)
+        or not feature_schema
+        or isinstance(threshold, bool)
+        or not isinstance(threshold, int | float)
+        or not 0.0 <= float(threshold) <= 1.0
+        or isinstance(margin, bool)
+        or not isinstance(margin, int | float)
+        or not 0.0 <= float(margin) <= 1.0
+        or isinstance(max_cards, bool)
+        or not isinstance(max_cards, int)
+        or not 0 <= max_cards <= 3
+    ):
+        return None
+    try:
+        # Core owns the sealed feature/weight contract. Validate it before the
+        # policy can take the live authority path.
+        features = recall_distillation.build_fast_features({})
+        recall_distillation.score_fast_features(features, candidate)
+    except Exception:
+        return None
+    return candidate
+
+
+def _same_cwd_folder(request: RecallRequest, folder: str) -> bool:
+    normalized = folder.strip().lower()
+    if not normalized:
+        return False
+    return normalized in {part.lower() for part in Path(request.cwd).parts if part}
+
+
+def _distilled_policy_identity(distilled_policy: Any) -> tuple[str, str, float, float, int]:
+    return (
+        str(
+            _distillation_policy_value(
+                distilled_policy,
+                "policy_id",
+                _distillation_policy_value(distilled_policy, "artifact_id"),
+            )
+        ),
+        str(
+            _distillation_policy_value(
+                distilled_policy,
+                "feature_schema",
+                _distillation_policy_value(distilled_policy, "feature_revision"),
+            )
+        ),
+        float(_distillation_policy_value(distilled_policy, "threshold")),
+        float(
+            _distillation_policy_value(
+                distilled_policy,
+                "margin",
+                _distillation_policy_value(distilled_policy, "abstain_margin"),
+            )
+        ),
+        int(_distillation_policy_value(distilled_policy, "max_cards")),
+    )
+
+
+def _record_distilled_exposure(
+    result: RecallResult,
+    *,
+    request: RecallRequest,
+    policy_id: str,
+    candidate_feature_snapshot: list[dict[str, Any]],
+    candidate_pool_sources: Mapping[str, Mapping[str, str]] | None = None,
+    selected_content_hashes: Mapping[str, str] | None = None,
+    timed_out: bool | None = None,
+    error_code: str = "",
+    trace: dict[str, Any] | None = None,
+) -> None:
+    """Persist one private exposure receipt without putting bindings in the trace."""
+
+    if trace is None:
+        candidate_trace = result.evidence_features.get("distilled_fast_path")
+        trace = candidate_trace if isinstance(candidate_trace, dict) else None
+
+    def receipt_status(value: str) -> None:
+        if trace is not None:
+            trace["exposure_receipt"] = value
+
+    if not request.session_id:
+        receipt_status("skipped_no_session")
+        return
+    payload = recall_context.parse_recall_payload(result.context)
+    rendered_items = (
+        {
+            str(item.get("page_id")): json.dumps(
+                item,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            for item in payload.get("items", [])
+            if isinstance(item, dict) and isinstance(item.get("page_id"), str)
+        }
+        if isinstance(payload, dict)
+        else {}
+    )
+    candidate_ids = [item.page_id for item in result.context_items]
+    snapshot = [
+        {"page_id": item.page_id, "updated": item.updated, "score": item.score}
+        for item in result.context_items
+    ]
+    snapshot_sha256 = hashlib.sha256(
+        json.dumps(snapshot, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    try:
+        from chronovisor.recall import recall_distillation
+
+        candidate_refs = []
+        for item in result.context_items:
+            rendered_context = rendered_items.get(item.page_id)
+            source = (candidate_pool_sources or {}).get(item.page_id)
+            content_sha256 = (
+                (selected_content_hashes or {}).get(item.page_id)
+                or (source.get("content_sha256") if source else "")
+            )
+            if not rendered_context or not re.fullmatch(r"[0-9a-f]{64}", content_sha256):
+                raise OSError("selected page is unavailable")
+            candidate_refs.append(
+                {
+                    "candidate_id": item.page_id,
+                    "page_id": item.page_id,
+                    "rendered_context": rendered_context,
+                    "page_content_sha256": content_sha256,
+                    "rendered_context_sha256": hashlib.sha256(
+                        rendered_context.encode()
+                    ).hexdigest(),
+                }
+            )
+        selected_refs = {ref["candidate_id"]: ref for ref in candidate_refs}
+        candidate_pool_refs = []
+        for feature_row in candidate_feature_snapshot:
+            candidate_id = str(feature_row["candidate_id"])
+            selected_ref = selected_refs.get(candidate_id)
+            if selected_ref is not None:
+                source = (candidate_pool_sources or {}).get(candidate_id)
+                pool_content_sha256 = source.get("content_sha256") if source else ""
+                if not re.fullmatch(r"[0-9a-f]{64}", pool_content_sha256):
+                    raise OSError("candidate source is unavailable")
+                candidate_pool_refs.append(
+                    {
+                        **selected_ref,
+                        "selected": True,
+                        "page_content_sha256": pool_content_sha256,
+                    }
+                )
+                continue
+            source = (candidate_pool_sources or {}).get(candidate_id)
+            content_sha256 = source.get("content_sha256") if source else ""
+            if source is None or not re.fullmatch(r"[0-9a-f]{64}", content_sha256):
+                raise OSError("candidate source is unavailable")
+            rendered_context = json.dumps(
+                {
+                    "page_id": candidate_id,
+                    "title": source["title"],
+                    "updated": source["updated"],
+                    "snippet": source["snippet"],
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            candidate_pool_refs.append(
+                {
+                    "candidate_id": candidate_id,
+                    "selected": False,
+                    "page_id": candidate_id,
+                    "page_content_sha256": content_sha256,
+                    "rendered_context": rendered_context,
+                    "rendered_context_sha256": hashlib.sha256(
+                        rendered_context.encode()
+                    ).hexdigest(),
+                }
+            )
+        recall_distillation.record_exact_exposure(
+            decision_id=result.decision_id,
+            host=request.host,
+            session_id=request.session_id,
+            query_semantic_sha256=hashlib.sha256(request.prompt.encode("utf-8")).hexdigest(),
+            policy_id=policy_id,
+            candidate_refs=candidate_refs,
+            candidate_feature_snapshot=candidate_feature_snapshot,
+            candidate_pool_refs=candidate_pool_refs,
+            render_sha256=hashlib.sha256(result.context.encode()).hexdigest(),
+            candidate_snapshot_sha256=snapshot_sha256,
+            observed_at=datetime.now(UTC).isoformat(),
+            context_style=result.context_style or "default",
+            decision_latency_ms=max(0.0, min(60_000.0, float(result.latency_ms))),
+            timed_out=result.status in {"timeout", "degraded"},
+            root=CHRONOVISOR_ROOT,
+        )
+        receipt_status("exact_recorded")
+        return
+    except Exception:
+        pass
+    try:
+        from chronovisor.recall import recall_distillation
+
+        recall_distillation.record_exposure(
+            decision_id=result.decision_id,
+            host=request.host,
+            session_id=request.session_id,
+            prompt_hash=stable_prompt_hash(request.prompt),
+            policy_id=policy_id,
+            candidate_ids=candidate_ids,
+            candidate_snapshot_sha256=snapshot_sha256,
+            observed_at=datetime.now(UTC).isoformat(),
+            decision_latency_ms=max(0.0, min(60_000.0, float(result.latency_ms))),
+            timed_out=(
+                result.status in {"timeout", "degraded"}
+                if timed_out is None
+                else timed_out
+            ),
+            error_code=error_code,
+            root=CHRONOVISOR_ROOT,
+        )
+        receipt_status("page_recorded")
+    except Exception as exc:
+        receipt_status(f"error:{type(exc).__name__}")
+
+
+def _readonly_fast_feature_rows(
+    request: RecallRequest,
+    matched: Mapping[str, list[str]],
+    *,
+    deadline_at: float,
+) -> list[tuple[Any, dict[str, float]]]:
+    """Build the sole live/offline feature contract from the read-only index."""
+
+    _require_remaining_budget(deadline_at, "distilled fast candidates")
+    anchors, bm25 = search_existing_lexical(request.prompt, top_n=12)
+    anchor_ids = {page.page_id for page in anchors}
+    candidates: dict[str, Any] = {}
+    for page in [*anchors, *bm25]:
+        if page.superseded_by or should_filter_sensitive_result(page, request):
+            continue
+        existing = candidates.get(page.page_id)
+        if existing is None or float(page.score) > float(existing.score):
+            candidates[page.page_id] = page
+    ordered = sorted(candidates.values(), key=lambda page: float(page.score), reverse=True)
+    raw_scores = [max(0.0, float(page.score)) for page in ordered]
+    from chronovisor.recall.recall_distillation import build_fast_features
+
+    rows: list[tuple[Any, dict[str, float]]] = []
+    for index, page in enumerate(ordered):
+        _require_remaining_budget(deadline_at, "distilled fast features")
+        rows.append(
+            (
+                page,
+                build_fast_features(
+                    exact_anchor=float(page.page_id in anchor_ids),
+                    entity_overlap=min(
+                        1.0,
+                        sum(len(values) for values in matched.values()) / 4.0,
+                    ),
+                    same_session=0.0,
+                    same_task=0.0,
+                    same_cwd=_same_cwd_folder(request, str(page.folder or "")),
+                    temporal_decay=float(bool(page.updated)),
+                    superseded=float(bool(page.superseded_by)),
+                    graph_path=0.0,
+                    top1_score_norm=raw_scores[index] / (raw_scores[index] + 3.0),
+                    margin_norm=(
+                        max(0.0, raw_scores[index] - raw_scores[index + 1])
+                        / max(1.0, raw_scores[index])
+                        if index + 1 < len(raw_scores)
+                        else 1.0
+                    ),
+                ),
+            )
+        )
+    return rows
+
+
+def _fast_candidate_pool_sources(
+    rows: Iterable[tuple[Any, Mapping[str, float]]],
+) -> dict[str, dict[str, str]]:
+    """Keep bounded index metadata for private counterfactual bindings only."""
+
+    return {
+        page.page_id: {
+            "title": _one_line(str(page.title or page.page_id), limit=240),
+            "updated": _one_line(str(page.updated or ""), limit=80),
+            "snippet": _one_line(
+                str(page.snippet or page.title or page.page_id), limit=600
+            ),
+            "content_sha256": str(getattr(page, "content_sha256", "")),
+        }
+        for page, _features in rows
+    }
+
+
+def _private_candidate_pool_refs(
+    candidate_feature_snapshot: Iterable[Mapping[str, Any]],
+    candidate_pool_sources: Mapping[str, Mapping[str, str]],
+    selected_ids: set[str],
+) -> list[dict[str, Any]]:
+    """Build bounded source bindings without reading pages on the live path."""
+
+    refs: list[dict[str, Any]] = []
+    for row in candidate_feature_snapshot:
+        candidate_id = str(row["candidate_id"])
+        source = candidate_pool_sources.get(candidate_id)
+        content_sha256 = source.get("content_sha256") if source else ""
+        if source is None or not re.fullmatch(r"[0-9a-f]{64}", content_sha256):
+            raise OSError("candidate source is unavailable")
+        rendered_context = json.dumps(
+            {
+                "page_id": candidate_id,
+                "title": source["title"],
+                "updated": source["updated"],
+                "snippet": source["snippet"],
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        refs.append(
+            {
+                "candidate_id": candidate_id,
+                "selected": candidate_id in selected_ids,
+                "page_id": candidate_id,
+                "page_content_sha256": content_sha256,
+                "rendered_context": rendered_context,
+                "rendered_context_sha256": hashlib.sha256(
+                    rendered_context.encode()
+                ).hexdigest(),
+            }
+        )
+    return refs
+
+
+def _observe_shadow_distillation_policy(
+    *,
+    result: RecallResult,
+    request: RecallRequest,
+    candidate_feature_snapshot: list[dict[str, Any]],
+    candidate_pool_sources: Mapping[str, Mapping[str, str]],
+    deadline_at: float | None,
+    forced_timed_out: bool = False,
+    forced_error_code: str = "",
+) -> None:
+    """Score a sealed shadow candidate without changing the returned result."""
+
+    if not request.session_id:
+        return
+    started = time.monotonic()
+    try:
+        from chronovisor.recall import recall_distillation
+
+        load_shadow_policy = getattr(recall_distillation, "load_shadow_policy", None)
+        shadow_policy = (
+            load_shadow_policy(root=CHRONOVISOR_ROOT)
+            if callable(load_shadow_policy)
+            else {}
+        )
+        if not shadow_policy:
+            return
+        policy_id, _schema, threshold, margin, max_cards = _distilled_policy_identity(
+            shadow_policy
+        )
+    except Exception:
+        return
+    selected_ids: set[str] = set()
+    snapshot = [] if forced_error_code else candidate_feature_snapshot
+    pool_refs: list[dict[str, Any]] = []
+    timed_out = forced_timed_out
+    error_code = forced_error_code
+    if not forced_error_code:
+        try:
+            remaining_ms = _remaining_budget_ms(deadline_at) or 0
+            if remaining_ms <= 0:
+                raise RecallBudgetExhausted("shadow deadline")
+            scored: list[tuple[float, str]] = []
+            with recall_wall_clock_deadline(remaining_ms):
+                for row in snapshot:
+                    _require_remaining_budget(deadline_at, "distillation shadow score")
+                    score = float(
+                        recall_distillation.score_fast_features(
+                            row["features"], shadow_policy
+                        )
+                    )
+                    if math.isfinite(score):
+                        scored.append(
+                            (max(0.0, min(1.0, score)), str(row["candidate_id"]))
+                        )
+                scored.sort(key=lambda entry: entry[0], reverse=True)
+                if scored and scored[0][0] >= threshold and (
+                    len(scored) == 1 or scored[0][0] - scored[1][0] >= margin
+                ):
+                    selected_ids = {
+                        candidate_id
+                        for score, candidate_id in scored[: min(3, max_cards)]
+                        if score >= threshold
+                    }
+                pool_refs = _private_candidate_pool_refs(
+                    snapshot, candidate_pool_sources, selected_ids
+                )
+        except (RecallBudgetExhausted, RecallWallClockTimeout):
+            timed_out = True
+            error_code = "deadline"
+            snapshot = []
+            selected_ids = set()
+            pool_refs = []
+        except Exception:
+            error_code = "score_error"
+            snapshot = []
+            selected_ids = set()
+            pool_refs = []
+    try:
+        recall_distillation.record_shadow_observation(
+            decision_id=result.decision_id,
+            host=request.host,
+            session_id=request.session_id,
+            query_semantic_sha256=hashlib.sha256(request.prompt.encode("utf-8")).hexdigest(),
+            policy_id=policy_id,
+            selected_candidate_ids=sorted(selected_ids),
+            candidate_feature_snapshot=snapshot,
+            candidate_pool_refs=pool_refs,
+            observed_at=datetime.now(UTC).isoformat(),
+            decision_latency_ms=_elapsed_ms(started),
+            timed_out=timed_out,
+            error_code=error_code,
+            root=CHRONOVISOR_ROOT,
+        )
+    except Exception:
+        return
+
+
+def _capture_legacy_distillation_observation(
+    result: RecallResult,
+    *,
+    request: RecallRequest,
+    deadline_at: float | None,
+) -> None:
+    """Bind a legacy result for offline training without changing live Recall."""
+
+    if not request.session_id:
+        return
+    try:
+        from chronovisor.recall import recall_distillation
+
+        policy_id = recall_distillation.load_capture_policy_identity(
+            root=CHRONOVISOR_ROOT
+        )
+        load_shadow_policy = getattr(recall_distillation, "load_shadow_policy", None)
+        shadow_policy = (
+            load_shadow_policy(root=CHRONOVISOR_ROOT)
+            if callable(load_shadow_policy)
+            else {}
+        )
+        if not policy_id and not shadow_policy:
+            return
+        observation_deadline = min(
+            deadline_at if deadline_at is not None else math.inf,
+            time.monotonic() + (_DISTILLED_FAST_PATH_MAX_MS / 1000.0),
+        )
+        remaining_ms = _remaining_budget_ms(observation_deadline) or 0
+        rows: list[tuple[Any, dict[str, float]]] = []
+        capture_timed_out = remaining_ms <= 0
+        capture_error_code = "deadline" if capture_timed_out else ""
+        if not capture_timed_out:
+            try:
+                with recall_wall_clock_deadline(remaining_ms):
+                    rows = _readonly_fast_feature_rows(
+                        request,
+                        result.matched_terms,
+                        deadline_at=observation_deadline,
+                    )
+            except (RecallBudgetExhausted, RecallWallClockTimeout):
+                capture_timed_out = True
+                capture_error_code = "deadline"
+            except Exception:
+                capture_error_code = "capture_error"
+        feature_snapshot = [
+            {"candidate_id": page.page_id, "features": features}
+            for page, features in rows
+        ]
+        candidate_pool_sources = _fast_candidate_pool_sources(rows)
+        if capture_error_code:
+            feature_snapshot = []
+            candidate_pool_sources = {}
+        # The sealed receipt requires every rendered page to have its exact
+        # feature vector. Legacy semantic paths can legitimately render a page
+        # outside the read-only lexical candidate set; preserve E_t in that
+        # case and leave the optional feature snapshot empty.
+        rendered_ids = {item.page_id for item in result.context_items}
+        if rendered_ids and not rendered_ids.issubset(
+            {row["candidate_id"] for row in feature_snapshot}
+        ):
+            feature_snapshot = []
+        if policy_id:
+            _record_distilled_exposure(
+                result,
+                request=request,
+                policy_id=policy_id,
+                candidate_feature_snapshot=feature_snapshot,
+                candidate_pool_sources=(
+                    candidate_pool_sources if feature_snapshot else None
+                ),
+                timed_out=capture_timed_out,
+                error_code=(
+                    "exact_capture_error" if capture_error_code else ""
+                ),
+                trace=None,
+            )
+        if shadow_policy:
+            _observe_shadow_distillation_policy(
+                result=result,
+                request=request,
+                candidate_feature_snapshot=feature_snapshot,
+                candidate_pool_sources=candidate_pool_sources,
+                deadline_at=observation_deadline,
+                forced_timed_out=capture_timed_out,
+                forced_error_code=capture_error_code,
+            )
+    except Exception:
+        # Capture is observational only. It must never alter the answer or
+        # introduce a new failure mode in the legacy path.
+        return
+
+
+def _run_distilled_fast_path(
+    *,
+    active_request: RecallRequest,
+    policy: RecallPolicy,
+    distilled_policy: Any,
+    matched: dict[str, list[str]],
+    started: float,
+    final_deadline_at: float,
+    telemetry: dict[str, Any] | None,
+) -> RecallResult:
+    """Score only existing anchor/BM25 results, with no mutable Recall lanes."""
+
+    policy_id, feature_schema, threshold, margin, max_cards = _distilled_policy_identity(
+        distilled_policy
+    )
+    trace: dict[str, Any] = {
+        "status": "active",
+        "policy_id": policy_id,
+        "feature_schema": feature_schema,
+        "path": "readonly_anchor_bm25",
+        "fallback": "none",
+    }
+    candidate_feature_snapshot: list[dict[str, Any]] = []
+    candidate_pool_sources: dict[str, dict[str, str]] = {}
+    selected_content_hashes: dict[str, str] = {}
+    shadow_observed = False
+
+    def observe_shadow() -> None:
+        nonlocal shadow_observed
+        if shadow_observed:
+            return
+        shadow_observed = True
+        _observe_shadow_distillation_policy(
+            result=RecallResult(
+                status="ok",
+                decision="none",
+                confidence=0.0,
+                queries=[],
+                reasons=[],
+                matched_terms=matched,
+                session_id=active_request.session_id,
+                decision_id=active_request.decision_id,
+            ),
+            request=active_request,
+            candidate_feature_snapshot=candidate_feature_snapshot,
+            candidate_pool_sources=candidate_pool_sources,
+            deadline_at=fast_deadline_at,
+        )
+
+    def finish(result: RecallResult) -> RecallResult:
+        observe_shadow()
+        _record_distilled_exposure(
+            result,
+            request=active_request,
+            policy_id=policy_id,
+            candidate_feature_snapshot=candidate_feature_snapshot,
+            candidate_pool_sources=candidate_pool_sources,
+            selected_content_hashes=selected_content_hashes,
+        )
+        return result
+
+    fast_deadline_at = min(
+        final_deadline_at,
+        started + (_DISTILLED_FAST_PATH_MAX_MS / 1000.0),
+    )
+    try:
+        _stage_started(telemetry, "distilled_fast_path", fast_deadline_at)
+        remaining_ms = _require_remaining_budget(fast_deadline_at, "distilled fast path")
+        with recall_wall_clock_deadline(remaining_ms or _DISTILLED_FAST_PATH_MAX_MS):
+            rows = _readonly_fast_feature_rows(
+                active_request,
+                matched,
+                deadline_at=fast_deadline_at,
+            )
+            candidate_pool_sources = _fast_candidate_pool_sources(rows)
+            scored: list[tuple[float, Any]] = []
+            from chronovisor.recall.recall_distillation import score_fast_features
+
+            for page, features in rows:
+                _require_remaining_budget(fast_deadline_at, "distilled fast score")
+                candidate_feature_snapshot.append(
+                    {"candidate_id": page.page_id, "features": features}
+                )
+                score = float(score_fast_features(features, distilled_policy))
+                if math.isfinite(score):
+                    scored.append((max(0.0, min(1.0, score)), page))
+            scored.sort(key=lambda row: row[0], reverse=True)
+            observe_shadow()
+        _stage_completed(telemetry, "distilled_fast_path", fast_deadline_at)
+    except (RecallBudgetExhausted, RecallWallClockTimeout):
+        trace.update(status="abstained", fallback="deadline")
+        scored = []
+    except Exception:
+        trace.update(status="abstained", fallback="fast_path_error")
+        scored = []
+
+    selected = [row for row in scored if row[0] >= threshold][:max_cards]
+    if (
+        selected
+        and len(scored) > 1
+        and selected[0][0] - scored[1][0] < margin
+    ):
+        selected = []
+        trace["fallback"] = "margin"
+    if not selected:
+        if trace["fallback"] == "none":
+            trace["fallback"] = "abstain"
+        trace["candidate_count"] = len(scored)
+        return finish(RecallResult(
+            status="ok",
+            decision="none",
+            confidence=round(scored[0][0], 3) if scored else 0.0,
+            queries=[],
+            reasons=["distilled fast path abstained"],
+            matched_terms=matched,
+            session_id=active_request.session_id,
+            evidence_features={"distilled_fast_path": trace},
+            search_mode="readonly_anchor_bm25",
+            context_style=policy.context_style,
+            latency_ms=_elapsed_ms(started),
+            decision_id=active_request.decision_id,
+        ))
+
+    try:
+        remaining_ms = _require_remaining_budget(
+            fast_deadline_at, "distilled fast summary"
+        )
+        with recall_wall_clock_deadline(remaining_ms or _DISTILLED_FAST_PATH_MAX_MS):
+            items = []
+            for score, page in selected:
+                # The only page-body access on this path is this selected-card
+                # read. Reuse its actual byte digest for the exact E_t binding.
+                summary, content_sha256 = page_summary_with_content_hash(page.page_id)
+                if not re.fullmatch(r"[0-9a-f]{64}", content_sha256):
+                    raise OSError("selected page content is unavailable")
+                selected_content_hashes[page.page_id] = content_sha256
+                items.append(
+                    ContextItem(
+                        page_id=page.page_id,
+                        title=page.title,
+                        updated=page.updated,
+                        score=round(score, 4),
+                        snippets=[summary or page.title],
+                        sensitivity=page.sensitivity,
+                    )
+                )
+    except (RecallBudgetExhausted, RecallWallClockTimeout):
+        trace.update(status="abstained", fallback="deadline", candidate_count=len(scored))
+        return finish(RecallResult(
+            status="ok",
+            decision="none",
+            confidence=0.0,
+            queries=[],
+            reasons=["distilled fast path abstained"],
+            matched_terms=matched,
+            session_id=active_request.session_id,
+            evidence_features={"distilled_fast_path": trace},
+            search_mode="readonly_anchor_bm25",
+            context_style=policy.context_style,
+            latency_ms=_elapsed_ms(started),
+            decision_id=active_request.decision_id,
+        ))
+    except Exception:
+        trace.update(status="abstained", fallback="fast_path_error", candidate_count=len(scored))
+        return finish(RecallResult(
+            status="ok",
+            decision="none",
+            confidence=0.0,
+            queries=[],
+            reasons=["distilled fast path abstained"],
+            matched_terms=matched,
+            session_id=active_request.session_id,
+            evidence_features={"distilled_fast_path": trace},
+            search_mode="readonly_anchor_bm25",
+            context_style=policy.context_style,
+            latency_ms=_elapsed_ms(started),
+            decision_id=active_request.decision_id,
+        ))
+    trace["candidate_count"] = len(scored)
+    trace["selected_count"] = len(items)
+    result = RecallResult(
+        status="ok",
+        decision="search",
+        confidence=round(selected[0][0], 3),
+        queries=[active_request.prompt],
+        reasons=["distilled readonly anchor+BM25 policy"],
+        matched_terms=matched,
+        session_id=active_request.session_id,
+        context_items=items,
+        evidence_features={"distilled_fast_path": trace},
+        search_mode="readonly_anchor_bm25",
+        context_style=policy.context_style,
+        latency_ms=_elapsed_ms(started),
+        decision_id=active_request.decision_id,
+    )
+    try:
+        result.context = format_recall_context(result, policy)
+    except Exception:
+        trace.update(status="abstained", fallback="fast_path_error", candidate_count=len(scored))
+        return finish(RecallResult(
+            status="ok",
+            decision="none",
+            confidence=0.0,
+            queries=[],
+            reasons=["distilled fast path abstained"],
+            matched_terms=matched,
+            session_id=active_request.session_id,
+            evidence_features={"distilled_fast_path": trace},
+            search_mode="readonly_anchor_bm25",
+            context_style=policy.context_style,
+            latency_ms=_elapsed_ms(started),
+            decision_id=active_request.decision_id,
+        ))
+    retained = set(_retained_context_page_ids(result.context))
+    result.context_items = [
+        item for item in result.context_items if item.page_id in retained
+    ]
+    result.page_content_hashes = {
+        page_id: selected_content_hashes.get(page_id, source["content_sha256"])
+        for page_id, source in candidate_pool_sources.items()
+        if page_id in retained
+        and re.fullmatch(
+            r"[0-9a-f]{64}", selected_content_hashes.get(page_id, source["content_sha256"])
+        )
+    }
+    result.latency_ms = _elapsed_ms(started)
+    return finish(result)
+
+
 def _prepare_recall_request(
     request: RecallRequest,
     policy: RecallPolicy,
     *,
     started: float,
+    skip_feedback_suppression: bool = False,
 ) -> tuple[RecallRequest | None, list[str], RecallResult | None]:
     """Normalize the user prompt and return any deterministic early result."""
 
@@ -2761,7 +3577,11 @@ def _prepare_recall_request(
     active_request = (
         replace(request, prompt=cleaned_prompt) if stripped_reasons else request
     )
-    skip_reason = classify_non_user_prompt(active_request.prompt, policy)
+    skip_reason = classify_non_user_prompt(
+        active_request.prompt,
+        policy,
+        include_feedback=not skip_feedback_suppression,
+    )
     if not skip_reason:
         return active_request, stripped_reasons, None
 
@@ -2777,6 +3597,162 @@ def _prepare_recall_request(
     if policy.log_decisions:
         append_recall_log(request, result)
     return None, stripped_reasons, result
+
+
+def _run_active_distillation_recall(
+    request: RecallRequest,
+    policy: RecallPolicy,
+    *,
+    perform_search: bool,
+    started: float,
+    final_deadline_at: float,
+    deadline_at: float,
+    telemetry: dict[str, Any] | None,
+) -> RecallResult | None:
+    """Run the read-only serving policy, or return ``None`` for legacy Recall."""
+
+    distilled_policy = _load_active_distillation_policy(request) if perform_search else None
+    if distilled_policy is None:
+        return None
+    _stage_started(telemetry, "prepare", deadline_at)
+    active_request, stripped_reasons, early_result = _prepare_recall_request(
+        request,
+        policy,
+        started=started,
+        # The distillation policy owns its own eligibility model. Do not
+        # consult mutable feedback history on the read-only authority path.
+        skip_feedback_suppression=True,
+    )
+    if early_result is not None:
+        _stage_completed(telemetry, "prepare", deadline_at)
+        early_result.decision_id = request.decision_id
+        policy_id, _schema, _threshold, _margin, _max_cards = _distilled_policy_identity(
+            distilled_policy
+        )
+        _record_distilled_exposure(
+            early_result,
+            request=request,
+            policy_id=policy_id,
+            candidate_feature_snapshot=[],
+        )
+        return early_result
+    assert active_request is not None
+    _stage_completed(telemetry, "prepare", deadline_at)
+    score, reasons, matched = evaluate_heuristic(active_request, policy)
+    del score, reasons, stripped_reasons
+    result = _run_distilled_fast_path(
+        active_request=active_request,
+        policy=policy,
+        distilled_policy=distilled_policy,
+        matched=matched,
+        started=started,
+        final_deadline_at=final_deadline_at,
+        telemetry=telemetry,
+    )
+    _merge_telemetry(result.evidence_features, telemetry)
+    if policy.log_decisions:
+        append_recall_log(request, result)
+    if telemetry is not None:
+        telemetry.pop("_stage_timers", None)
+    return result
+
+
+def _finalize_legacy_recall_pipeline(
+    result: RecallResult,
+    *,
+    request: RecallRequest,
+    active_request: RecallRequest,
+    policy: RecallPolicy,
+    session_state: Any,
+    queries: list[str],
+    started: float,
+    final_deadline_at: float,
+    deadline_at: float,
+    telemetry: dict[str, Any] | None,
+    pre_results: list[Any],
+    reranker_metadata: dict[str, Any],
+    field_shadow_metadata: dict[str, Any],
+    post_authority: dict[str, Any],
+    processor_authority: bool,
+) -> RecallResult:
+    """Run legacy post-search observation and publication in its original order."""
+
+    evidence_features = result.evidence_features
+    _stage_started(telemetry, "evidence_reconstruction", deadline_at)
+    evidence_features["evidence_reconstruction"] = observe_evidence_reconstruction(
+        result,
+        request=active_request,
+        policy=policy,
+        deadline_at=deadline_at,
+    )
+    _stage_completed(telemetry, "evidence_reconstruction", deadline_at)
+    if post_authority:
+        remaining_ms = _remaining_budget_ms(deadline_at)
+        if remaining_ms is None or remaining_ms >= 100:
+            try:
+                with recall_wall_clock_deadline(
+                    max(25, (remaining_ms or policy.total_timeout_ms) - 25)
+                ):
+                    _run_post_authority_shadows(
+                        request=active_request,
+                        policy=policy,
+                        session_state=session_state,
+                        candidates=pre_results,
+                        evidence_features=evidence_features,
+                        reranker_metadata=reranker_metadata,
+                        field_metadata=field_shadow_metadata,
+                        post_authority=post_authority,
+                        processor_authority=processor_authority,
+                        deadline_at=deadline_at,
+                        telemetry=telemetry,
+                    )
+            except (RecallBudgetExhausted, RecallWallClockTimeout):
+                _stage_interrupted(telemetry)
+    compiler_metadata = field_shadow_metadata.get("recall_compiler")
+    if isinstance(compiler_metadata, dict):
+        compiler_ids = {
+            str(value)
+            for value in compiler_metadata.get("page_ids", [])
+            if isinstance(value, str)
+        }
+        teacher_ids = [str(item.page_id) for item in pre_results[:30]]
+        committed_ids = [item.page_id for item in result.context_items]
+        evidence_features["shadow_teacher"] = {
+            "compiler_status": str(compiler_metadata.get("status") or ""),
+            "compiler_page_ids": sorted(compiler_ids),
+            "teacher_overlap": len(compiler_ids & set(teacher_ids)),
+            "commit_overlap": len(compiler_ids & set(committed_ids)),
+            "authority": "teacher",
+        }
+        diagnostic_remaining_ms = _remaining_budget_ms(deadline_at)
+        if diagnostic_remaining_ms is None or diagnostic_remaining_ms > 0:
+            try:
+                from chronovisor.recall.recall_compiler import append_shadow_trace
+
+                append_shadow_trace(
+                    prompt=active_request.prompt,
+                    compiler=compiler_metadata,
+                    teacher_page_ids=teacher_ids,
+                    committed_page_ids=committed_ids,
+                )
+            except Exception:
+                pass
+    result.latency_ms = _elapsed_ms(started)
+    _merge_telemetry(result.evidence_features, telemetry)
+    result = _finalize_recall_result(
+        result,
+        request=request,
+        active_request=active_request,
+        policy=policy,
+        session_state=session_state,
+        queries=queries,
+        deadline_at=final_deadline_at,
+        telemetry=telemetry,
+    )
+    if telemetry is not None:
+        telemetry.pop("_stage_timers", None)
+        _merge_telemetry(result.evidence_features, telemetry)
+    return result
 
 
 def _run_recall_impl(
@@ -2814,6 +3790,18 @@ def _run_recall_impl(
     )
     deadline_at = final_deadline_at - (reserve_ms / 1000.0)
 
+    active_distillation_result = _run_active_distillation_recall(
+        request,
+        policy,
+        perform_search=perform_search,
+        started=started,
+        final_deadline_at=final_deadline_at,
+        deadline_at=deadline_at,
+        telemetry=_telemetry,
+    )
+    if active_distillation_result is not None:
+        return active_distillation_result
+
     _stage_started(_telemetry, "prepare", deadline_at)
     active_request, stripped_reasons, early_result = _prepare_recall_request(
         request,
@@ -2826,10 +3814,7 @@ def _run_recall_impl(
     assert active_request is not None
     _stage_completed(_telemetry, "prepare", deadline_at)
 
-    processor_authority = processor_authority_for_request(
-        policy,
-        active_request,
-    )
+    processor_authority = processor_authority_for_request(policy, active_request)
 
     score, reasons, matched = evaluate_heuristic(active_request, policy)
     reasons = stripped_reasons + reasons
@@ -3036,82 +4021,23 @@ def _run_recall_impl(
         error=error,
         decision_id=active_request.decision_id,
     )
-    _stage_started(_telemetry, "evidence_reconstruction", deadline_at)
-    evidence_features["evidence_reconstruction"] = observe_evidence_reconstruction(
-        result,
-        request=active_request,
-        policy=policy,
-        deadline_at=deadline_at,
-    )
-    _stage_completed(_telemetry, "evidence_reconstruction", deadline_at)
-    if post_authority:
-        remaining_ms = _remaining_budget_ms(deadline_at)
-        if remaining_ms is None or remaining_ms >= 100:
-            try:
-                with recall_wall_clock_deadline(
-                    max(25, (remaining_ms or policy.total_timeout_ms) - 25)
-                ):
-                    _run_post_authority_shadows(
-                        request=active_request,
-                        policy=policy,
-                        session_state=session_state,
-                        candidates=pre_results,
-                        evidence_features=evidence_features,
-                        reranker_metadata=reranker_metadata,
-                        field_metadata=field_shadow_metadata,
-                        post_authority=post_authority,
-                        processor_authority=processor_authority,
-                        deadline_at=deadline_at,
-                        telemetry=_telemetry,
-                    )
-            except (RecallBudgetExhausted, RecallWallClockTimeout):
-                _stage_interrupted(_telemetry)
-                pass
-    compiler_metadata = field_shadow_metadata.get("recall_compiler")
-    if isinstance(compiler_metadata, dict):
-        compiler_ids = {
-            str(value)
-            for value in compiler_metadata.get("page_ids", [])
-            if isinstance(value, str)
-        }
-        teacher_ids = [str(item.page_id) for item in pre_results[:30]]
-        committed_ids = [item.page_id for item in context_items]
-        evidence_features["shadow_teacher"] = {
-            "compiler_status": str(compiler_metadata.get("status") or ""),
-            "compiler_page_ids": sorted(compiler_ids),
-            "teacher_overlap": len(compiler_ids & set(teacher_ids)),
-            "commit_overlap": len(compiler_ids & set(committed_ids)),
-            "authority": "teacher",
-        }
-        diagnostic_remaining_ms = _remaining_budget_ms(deadline_at)
-        if diagnostic_remaining_ms is None or diagnostic_remaining_ms > 0:
-            try:
-                from chronovisor.recall.recall_compiler import append_shadow_trace
-
-                append_shadow_trace(
-                    prompt=active_request.prompt,
-                    compiler=compiler_metadata,
-                    teacher_page_ids=teacher_ids,
-                    committed_page_ids=committed_ids,
-                )
-            except Exception:
-                pass
-    result.latency_ms = _elapsed_ms(started)
-    _merge_telemetry(result.evidence_features, _telemetry)
-    result = _finalize_recall_result(
+    return _finalize_legacy_recall_pipeline(
         result,
         request=request,
         active_request=active_request,
         policy=policy,
         session_state=session_state,
         queries=queries,
-        deadline_at=final_deadline_at,
+        started=started,
+        final_deadline_at=final_deadline_at,
+        deadline_at=deadline_at,
         telemetry=_telemetry,
+        pre_results=pre_results,
+        reranker_metadata=reranker_metadata,
+        field_shadow_metadata=field_shadow_metadata,
+        post_authority=post_authority,
+        processor_authority=processor_authority,
     )
-    if _telemetry is not None:
-        _telemetry.pop("_stage_timers", None)
-        _merge_telemetry(result.evidence_features, _telemetry)
-    return result
 
 
 def run_recall(
@@ -3269,6 +4195,11 @@ def run_deterministic_fallback(
     if not is_main_thread:
         result.latency_ms = _elapsed_ms(started)
         _merge_telemetry(result.evidence_features, _telemetry)
+        _capture_legacy_distillation_observation(
+            result,
+            request=active_request,
+            deadline_at=final_deadline_at,
+        )
         return result
     try:
         remaining_ms = _require_remaining_budget(final_deadline_at, "fallback render")
@@ -3297,6 +4228,11 @@ def run_deterministic_fallback(
         result.reasons.extend(["core memory injected", "state register injected"])
     result.latency_ms = _elapsed_ms(started)
     _merge_telemetry(result.evidence_features, _telemetry)
+    _capture_legacy_distillation_observation(
+        result,
+        request=active_request,
+        deadline_at=final_deadline_at,
+    )
     return result
 
 
@@ -3306,12 +4242,15 @@ def _elapsed_ms(started: float) -> int:
 
 def append_recall_log(request: RecallRequest, result: RecallResult) -> None:
     page_bindings: list[dict[str, str]] = []
+    precomputed_hashes = getattr(result, "page_content_hashes", {})
     for item in result.context_items:
-        path = find_readable_page(item.page_id)
-        try:
-            content_sha = hashlib.sha256(path.read_bytes()).hexdigest() if path else ""
-        except OSError:
-            content_sha = ""
+        content_sha = str(precomputed_hashes.get(item.page_id) or "")
+        if not content_sha:
+            path = find_readable_page(item.page_id)
+            try:
+                content_sha = hashlib.sha256(path.read_bytes()).hexdigest() if path else ""
+            except OSError:
+                content_sha = ""
         page_bindings.append(
             {
                 "page_id": item.page_id,

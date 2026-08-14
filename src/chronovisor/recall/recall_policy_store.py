@@ -34,6 +34,17 @@ RUNS_DIR = IMPROVEMENT_DIR / "runs"
 FRONTIER_AUDIT_DIR = IMPROVEMENT_DIR / "frontier-audits"
 
 def improvement_policy_enabled() -> bool:
+    try:
+        from chronovisor.recall.recall_distillation import distillation_enabled
+    except ImportError:
+        distillation_enabled = None
+    if distillation_enabled is not None:
+        try:
+            if distillation_enabled():
+                return False
+        except Exception:
+            # A broken cutover config must not re-enable a retired policy.
+            return False
     value = os.environ.get("CHRONOVISOR_RECALL_IMPROVEMENT_POLICY")
     return value not in FALSE_VALUES
 

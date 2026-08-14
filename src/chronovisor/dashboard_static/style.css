@@ -848,6 +848,11 @@ canvas {
   font-size: 14.5px;
 }
 
+.health-group .health-distillation-status strong {
+  font-size: 10px;
+  white-space: nowrap;
+}
+
 /* ---------- knowledge mix ---------- */
 
 .knowledge-layout {

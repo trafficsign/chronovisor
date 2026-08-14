@@ -2997,6 +2997,7 @@ function renderHealth(health) {
   const quality = hardening.quality || {};
   const holds = hardening.managed_holds || {};
   const provisional = hardening.provisional_recall || {};
+  const distillation = data.recall_distillation || {};
   const research = data.research || {};
   const researchTotals = research.totals || {};
   const artifacts = hardening.decision_artifacts || {};
@@ -3038,6 +3039,16 @@ function renderHealth(health) {
     : (quality.probe?.status === "ok" ? "ok" : fmt(quality.probe?.status || "--"));
   els.healthHolds.textContent = intValue(holds.total).toLocaleString();
   els.healthProvisional.textContent = intValue(provisional.entries).toLocaleString();
+  const distillationPolicy = (value) => {
+    const id = fmt(value);
+    return id === "--" ? id : id.slice(0, 6);
+  };
+  const distillationWorker = fmt(distillation.worker_status || distillation.status);
+  const distillationRollout = fmt(distillation.rollout_status, "");
+  const distillationStage = distillationRollout && distillationRollout !== distillationWorker
+    ? `/${distillationRollout}`
+    : "";
+  els.healthRecallDistillation.textContent = `${distillationWorker}${distillationStage} · ${Math.round(numeric(distillation.rollout_percent) ? distillation.rollout_percent : 0)}% · ${distillationPolicy(distillation.active_policy_id)}/${distillationPolicy(distillation.candidate_policy_id)}/${distillationPolicy(distillation.lkg_policy_id)}`;
   els.healthLedger.textContent = fmt(ledger.status || "--");
   els.healthResearchRuns.textContent = intValue(researchTotals.runs).toLocaleString();
   els.healthResearchClaims.textContent = `${intValue(researchTotals.supported_claims).toLocaleString()}/${(

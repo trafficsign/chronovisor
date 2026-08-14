@@ -189,6 +189,24 @@ def search_existing_bm25(query: str, *, top_n: int = 20) -> list[ScoredPage]:
     return apply_filters(get_bm25().query_existing(query, top_n=top_n))
 
 
+def search_existing_anchors(query: str, *, top_n: int = 20) -> list[ScoredPage]:
+    """Read exact-anchor matches without refreshing, building, or writing."""
+
+    return apply_filters(get_bm25().anchor_query_existing(query, top_n=top_n))
+
+
+def search_existing_lexical(
+    query: str, *, top_n: int = 20
+) -> tuple[list[ScoredPage], list[ScoredPage]]:
+    """Return read-only ``(anchor, BM25)`` candidates from one projection."""
+
+    index = get_bm25()
+    return (
+        apply_filters(index.anchor_query_existing(query, top_n=top_n)),
+        apply_filters(index.query_existing(query, top_n=top_n)),
+    )
+
+
 # Semantic document projection shared by the immutable service index.
 MAX_CHUNKS_PER_PAGE = 8
 MAX_CHUNK_CHARS = 900

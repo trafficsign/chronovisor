@@ -1580,3 +1580,27 @@ def test_growth_quality_gate_uses_recent_window(tmp_path: Path) -> None:
     assert result["metrics"]["candidate"]["over_4s"] == 0
     assert result["metrics"]["processor_used"]["episodes"] == 220
     assert result["metrics"]["processor_used"]["quality_window_episodes"] == 200
+
+
+def test_growth_writer_is_hard_off_for_distillation_single_writer(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    state_file = tmp_path / "growth-state.json"
+    history_file = tmp_path / "growth-history.jsonl"
+    monkeypatch.setattr(
+        recall_growth, "_distillation_single_writer_active", lambda: True
+    )
+
+    result = recall_growth.run_growth_cycle(
+        state_file=state_file,
+        history_file=history_file,
+    )
+
+    assert result == {
+        "status": "hard_off",
+        "reason": "distillation_single_writer",
+        "dry_run": False,
+    }
+    assert not state_file.exists()
+    assert not history_file.exists()

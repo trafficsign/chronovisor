@@ -483,7 +483,7 @@ session_ttl_seconds = 604800
 # mutation; promotion remains gated by replay, shadow, and canary evidence.
 enabled = false
 chunk_size = 25
-max_input_bytes = 24000
+max_input_bytes = 12000
 max_candidates = 200
 hard_floor_rallies = 1000
 hard_floor_days = 30

@@ -2,14 +2,129 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from chronovisor.core.runtime_config import SearchEmbeddingConfig
 from chronovisor.ops import autonomy, health
 from tests.semantic_hold_support import semantic_authority
+
+
+def test_recall_distillation_kpi_uses_public_snapshot_without_raw_content(
+    tmp_path: Path, monkeypatch
+) -> None:
+    chronovisor_root = tmp_path / "wiki"
+    snapshot_module = SimpleNamespace(
+        snapshot=lambda _root: {
+            "schema": 1,
+            "status": "running",
+            "state": "backfill",
+            "rollout": 5.0,
+            "state_sha256": "a" * 64,
+            "active_policy_id": "active-policy",
+            "candidate_policy_id": "candidate-policy",
+            "lkg_policy_id": "lkg-policy",
+        }
+    )
+    monkeypatch.setattr(health, "CHRONOVISOR_ROOT", chronovisor_root)
+    monkeypatch.setitem(
+        sys.modules,
+        "chronovisor.recall.recall_distillation_store",
+        snapshot_module,
+    )
+
+    payload = health.recall_distillation_kpi()
+
+    assert payload["worker_status"] == "backfill"
+    assert payload["rollout_percent"] == 5.0
+    assert payload["active_policy_id"] == "active-policy"
+    assert payload["candidate_policy_id"] == "candidate-policy"
+    assert payload["lkg_policy_id"] == "lkg-policy"
+    assert payload["alert"] is False
+
+
+def test_recall_distillation_kpi_surfaces_tamper_without_alerting_core_recall(
+    tmp_path: Path, monkeypatch
+) -> None:
+    snapshot_module = SimpleNamespace(
+        snapshot=lambda _root: {"status": "tampered", "state": "halted", "rollout": 0}
+    )
+    monkeypatch.setattr(health, "CHRONOVISOR_ROOT", tmp_path / "wiki")
+    monkeypatch.setitem(
+        sys.modules,
+        "chronovisor.recall.recall_distillation_store",
+        snapshot_module,
+    )
+
+    payload = health.recall_distillation_kpi()
+
+    assert payload["status"] == "tampered"
+    assert payload["worker_status"] == "halted"
+    assert payload["alert"] is True
+
+
+def test_recall_distillation_kpi_reads_real_sealed_state_and_pointers(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from chronovisor.recall import recall_distillation_store as store
+
+    chronovisor_root = tmp_path / "wiki"
+    state_path = store.distillation_dir(chronovisor_root) / store.STATE_FILE
+    store.write_sealed_state(
+        state_path,
+        {
+            "status": "ready",
+            "worker_status": "idle",
+            "rollout_percent": 5,
+            "last_success_at": "2026-08-14T20:00:00Z",
+        },
+    )
+    policy_ids = []
+    for kind, marker in (("active", "a"), ("candidate", "b"), ("lkg", "c")):
+        policy_id, _, _ = store.write_immutable(
+            store.distillation_dir(chronovisor_root) / "policies",
+            {"kind": "test-policy", "marker": marker},
+            schema="chronovisor.recall-distill-policy.v1",
+        )
+        policy_ids.append(policy_id)
+        store.write_pointer(chronovisor_root, kind, policy_id)
+    monkeypatch.setattr(health, "CHRONOVISOR_ROOT", chronovisor_root)
+
+    payload = health.recall_distillation_kpi()
+
+    assert payload["status"] == "idle"
+    assert payload["worker_status"] == "idle"
+    assert payload["rollout_status"] == "ready"
+    assert payload["rollout_percent"] == 5.0
+    assert payload["active_policy_id"] == policy_ids[0][:12]
+    assert payload["candidate_policy_id"] == policy_ids[1][:12]
+    assert payload["lkg_policy_id"] == policy_ids[2][:12]
+    assert payload["alert"] is False
+
+
+def test_recall_distillation_kpi_marks_tampered_real_state_visible(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from chronovisor.recall import recall_distillation_store as store
+
+    chronovisor_root = tmp_path / "wiki"
+    state_path = store.distillation_dir(chronovisor_root) / store.STATE_FILE
+    store.write_sealed_state(state_path, {"status": "capture_only"})
+    tampered = json.loads(state_path.read_text(encoding="utf-8"))
+    tampered["status"] = "active"
+    state_path.write_text(json.dumps(tampered), encoding="utf-8")
+    monkeypatch.setattr(health, "CHRONOVISOR_ROOT", chronovisor_root)
+
+    payload = health.recall_distillation_kpi()
+
+    assert payload["status"] == "tampered"
+    assert payload["worker_status"] == "tampered"
+    assert payload["rollout_status"] == "tampered"
+    assert payload["alert"] is True
 
 
 def test_semantic_index_kpi_is_inactive_when_rollout_is_off(

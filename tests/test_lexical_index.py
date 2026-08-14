@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import os
 import sqlite3
 from pathlib import Path
 
@@ -87,7 +89,56 @@ def test_query_existing_reads_only_valid_built_projection(tmp_path: Path) -> Non
     assert not path.exists()
     index.build()
     before = path.stat().st_mtime_ns
-    assert [row.page_id for row in index.query_existing("existingtoken")] == ["page"]
+    rows = index.query_existing("existingtoken")
+    assert [row.page_id for row in rows] == ["page"]
+    assert rows[0].content_sha256 == hashlib.sha256(page.read_bytes()).hexdigest()
+    assert path.stat().st_mtime_ns == before
+
+
+def test_force_rebuild_refreshes_actual_content_digest_with_preserved_stat(
+    tmp_path: Path,
+) -> None:
+    page = tmp_path / "page.md"
+    page.write_text(
+        "---\ntitle: Page\nstatus: stable\ntype: knowledge\n---\ndigesttoken alpha\n",
+        encoding="utf-8",
+    )
+    index = LexicalIndex(path=tmp_path / "lexical.sqlite", pages=lambda: [page])
+    index.build()
+    first = index.query_existing("digesttoken")[0].content_sha256
+    stat = page.stat()
+    page.write_text(
+        "---\ntitle: Page\nstatus: stable\ntype: knowledge\n---\ndigesttoken bravo\n",
+        encoding="utf-8",
+    )
+    assert page.stat().st_size == stat.st_size
+    os.utime(page, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+
+    index.build(force=True)
+    second = index.query_existing("digesttoken")[0].content_sha256
+
+    assert first != second
+    assert second == hashlib.sha256(page.read_bytes()).hexdigest()
+
+
+def test_anchor_query_existing_reads_only_valid_built_projection(tmp_path: Path) -> None:
+    page = tmp_path / "page.md"
+    page.write_text(
+        "---\ntitle: Existing Anchor\nstatus: stable\ntype: knowledge\n"
+        "entities: [FastAnchor]\n---\nbody\n",
+        encoding="utf-8",
+    )
+    path = tmp_path / "lexical.sqlite"
+    index = LexicalIndex(path=path, pages=lambda: [page], refresh_interval_seconds=0)
+
+    assert index.anchor_query_existing("FastAnchor") == []
+    assert not path.exists()
+    index.build()
+    before = path.stat().st_mtime_ns
+
+    assert [row.page_id for row in index.anchor_query_existing("FastAnchor")] == [
+        "page"
+    ]
     assert path.stat().st_mtime_ns == before
 
 

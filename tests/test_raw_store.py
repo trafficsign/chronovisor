@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
+from chronovisor.core import raw_store as raw_store_module
 from chronovisor.core.raw_segment import (
     RawSegmentCorrupt,
     _raw_id_prefix,
@@ -23,17 +24,26 @@ def _legacy_root(tmp_path: Path) -> None:
         (tmp_path / name).write_text("legacy\n", encoding="utf-8")
 
 
-def _append(raw_dir: Path, source: Path, payload: bytes, *, host: str = "claude-code"):
+def _append(
+    raw_dir: Path,
+    source: Path,
+    payload: bytes,
+    *,
+    host: str = "claude-code",
+    raw_id: str = "save-shared.md",
+    idempotency_key: str = "shared",
+    after_line: int = 0,
+):
     return append_capture(
         raw_dir=raw_dir,
-        raw_id="save-shared.md",
-        idempotency_key="shared",
+        raw_id=raw_id,
+        idempotency_key=idempotency_key,
         host=host,
         session_key="b" * 24,
         session_id="session",
         source_file=source,
-        after_line=0,
-        until_line=1,
+        after_line=after_line,
+        until_line=after_line + 1,
         source_bytes=payload,
         record_count=1,
         now=datetime(2026, 7, 18, tzinfo=ZoneInfo("Asia/Tokyo")),
@@ -81,6 +91,61 @@ def test_store_reads_open_and_sealed_ranges_by_logical_raw_id(tmp_path: Path) ->
         == reference_bytes
     )
     assert sealed_store.resolve_reference(reference) == sealed_unit
+
+
+def test_store_decompresses_one_physical_segment_once_for_all_units(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    raw_dir = tmp_path / "raw"
+    source = tmp_path / "session.jsonl"
+    first_payload = b'{"source":"first"}\n'
+    second_payload = b'{"source":"second"}\n'
+    source.write_bytes(first_payload + second_payload)
+    first = _append(
+        raw_dir,
+        source,
+        first_payload,
+        raw_id="save-first.md",
+        idempotency_key="first",
+    )
+    second = _append(
+        raw_dir,
+        source,
+        second_payload,
+        raw_id="save-second.md",
+        idempotency_key="second",
+        after_line=1,
+    )
+    assert second.data_path == first.data_path
+    seal_segment(first.data_path, remove_open=True)
+
+    original = raw_store_module.read_sealed_range
+    calls = 0
+
+    def counted_read(path: Path, offset: int, length: int) -> bytes:
+        nonlocal calls
+        calls += 1
+        return original(path, offset, length)
+
+    monkeypatch.setattr(raw_store_module, "read_sealed_range", counted_read)
+    values = {
+        unit.raw_id: value
+        for unit, value in RawStore(raw_dir, mode="v2").iter_segment_bytes()
+    }
+    assert values == {
+        "save-first.md": first_payload,
+        "save-second.md": second_payload,
+    }
+    assert calls == 1
+
+    def corrupted_read(path: Path, offset: int, length: int) -> bytes:
+        value = bytearray(original(path, offset, length))
+        value[-2] ^= 1
+        return bytes(value)
+
+    monkeypatch.setattr(raw_store_module, "read_sealed_range", corrupted_read)
+    with pytest.raises(RawSegmentCorrupt, match="save-second.md"):
+        list(RawStore(raw_dir, mode="v2").iter_segment_bytes())
 
 
 def test_logical_reference_survives_raw_root_relocation(tmp_path: Path) -> None:

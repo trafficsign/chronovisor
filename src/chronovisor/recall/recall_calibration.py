@@ -64,6 +64,20 @@ FEATURE_KEYS = (
 )
 
 
+def _distillation_single_writer_active() -> bool:
+    """Keep the retired calibration writer off once distillation owns Recall updates."""
+
+    try:
+        from chronovisor.recall.recall_distillation import distillation_enabled
+    except ImportError:
+        return False
+    try:
+        return bool(distillation_enabled())
+    except Exception:
+        # A broken cutover config must not reopen the retired writer.
+        return True
+
+
 def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp: Path | None = None
@@ -497,6 +511,37 @@ def split_holdout(
     return rows[:split_at], rows[split_at:]
 
 
+def _calibration_input_rows(
+    *,
+    policy: CalibrationPolicy,
+    log_file: Path,
+    feedback_file: Path,
+    max_samples: int,
+    max_recomputed_features: int,
+) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+    """Load the bounded labeled input, or its unchanged early result."""
+
+    if not policy.enabled:
+        return [], {"status": "disabled", "reason": "recall calibration is disabled"}
+    rows = load_labeled_rows(
+        log_file=log_file,
+        feedback_file=feedback_file,
+        limit=max_samples,
+        max_recomputed_features=max_recomputed_features,
+    )
+    if len(rows) < policy.min_samples:
+        return rows, {
+            "status": "skipped",
+            "reason": f"not enough labeled samples ({len(rows)} < {policy.min_samples})",
+            "samples": len(rows),
+        }
+    return rows, None
+
+
+def _calibration_label_counts(rows: list[dict[str, Any]]) -> dict[int, int]:
+    return {label: sum(int(row["label"]) == label for row in rows) for label in (0, 1)}
+
+
 def calibrate(
     *,
     policy: CalibrationPolicy = DEFAULT_CALIBRATION_POLICY,
@@ -510,24 +555,22 @@ def calibrate(
     budget: Any | None = None,
     review_dir: Path | None = None,
 ) -> dict[str, Any]:
-    if not policy.enabled:
-        return {"status": "disabled", "reason": "recall calibration is disabled"}
-    rows = load_labeled_rows(
+    if not dry_run and _distillation_single_writer_active():
+        return {
+            "status": "hard_off",
+            "reason": "distillation_single_writer",
+            "dry_run": False,
+        }
+    rows, early_result = _calibration_input_rows(
+        policy=policy,
         log_file=log_file,
         feedback_file=feedback_file,
-        limit=max_samples,
+        max_samples=max_samples,
         max_recomputed_features=max_recomputed_features,
     )
-    if len(rows) < policy.min_samples:
-        return {
-            "status": "skipped",
-            "reason": f"not enough labeled samples ({len(rows)} < {policy.min_samples})",
-            "samples": len(rows),
-        }
-    label_counts = {
-        0: sum(1 for row in rows if int(row["label"]) == 0),
-        1: sum(1 for row in rows if int(row["label"]) == 1),
-    }
+    if early_result is not None:
+        return early_result
+    label_counts = _calibration_label_counts(rows)
     if min(label_counts.values()) < max(1, policy.min_class_samples):
         return {
             "status": "skipped",
@@ -1050,6 +1093,12 @@ def run_due(
     frontier_mode: str = "auto",
     budget: Any | None = None,
 ) -> dict[str, Any]:
+    if not dry_run and _distillation_single_writer_active():
+        return {
+            "status": "hard_off",
+            "reason": "distillation_single_writer",
+            "dry_run": False,
+        }
     if policy is None:
         runtime_policy = load_policy()
         policy = CalibrationPolicy(
@@ -1152,6 +1201,11 @@ def run_due(
 
 
 def rollback_last() -> dict[str, Any]:
+    if _distillation_single_writer_active():
+        return {
+            "status": "hard_off",
+            "reason": "distillation_single_writer",
+        }
     # Rollback changes an active semantic-policy artifact.  Serialize it with
     # adoption/config writers first, then with other wiki artifact mutations.
     # Select history and perform the preimage CAS inside both leases so a
