@@ -750,7 +750,7 @@ function updateDecisionSvgHarness(trace, focusEvent = null) {
     ["execution-plan-context", milestoneStates.execution_plan],
     ["plan-context", milestoneStates.execution_plan],
     ["plan-fit", actualThink === "off" ? "pending" : fitState],
-    ["plan-dispatch", milestoneStates.dispatch],
+    ["plan-dispatch", fitState],
     ["primary-challenger", laneStepState("challenger", "trigger")],
     ["single-artifact", singleModel ? milestoneStates.artifact : "pending"],
     ["challenger-agree", completedStepState("challenger", "vote")],
