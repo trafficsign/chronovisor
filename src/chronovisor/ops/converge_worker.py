@@ -146,25 +146,7 @@ def run_converge(
     from chronovisor.ops.session_sweeper import run_sweeper
     from chronovisor.recall import recall_distillation
 
-    payload: dict[str, Any] = {
-        "status": "ok",
-        "system_repairs": (
-            enqueue_due_system_repairs(limit=min(2, job_limit))
-            if run_system_repairs
-            else {"status": "skipped", "reason": "disabled_by_cli"}
-        ),
-        "background_jobs": retry_due(limit=job_limit),
-        "session_sweeper": run_sweeper(limit=session_limit),
-        "maintenance": (
-            run_maintenance_batch(
-                lint_limit=lint_limit,
-                orphan_limit=orphan_limit,
-                max_elapsed_seconds=maintenance_max_elapsed_seconds,
-            )
-            if run_maintenance
-            else {"status": "skipped", "reason": "disabled_by_cli"}
-        ),
-    }
+    payload: dict[str, Any] = {"status": "ok"}
     try:
         payload["recall_distillation"] = (
             recall_distillation.run_distillation_chunk(
@@ -180,6 +162,26 @@ def run_converge(
             "status": "error",
             "error": f"{exc.__class__.__name__}: {exc}",
         }
+    payload.update(
+        {
+            "system_repairs": (
+                enqueue_due_system_repairs(limit=min(2, job_limit))
+                if run_system_repairs
+                else {"status": "skipped", "reason": "disabled_by_cli"}
+            ),
+            "background_jobs": retry_due(limit=job_limit),
+            "session_sweeper": run_sweeper(limit=session_limit),
+            "maintenance": (
+                run_maintenance_batch(
+                    lint_limit=lint_limit,
+                    orphan_limit=orphan_limit,
+                    max_elapsed_seconds=maintenance_max_elapsed_seconds,
+                )
+                if run_maintenance
+                else {"status": "skipped", "reason": "disabled_by_cli"}
+            ),
+        }
+    )
     if run_sleep:
         from chronovisor.ops.sleep_cycle import run_sleep_cycle
 

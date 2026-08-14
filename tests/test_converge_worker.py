@@ -153,6 +153,42 @@ def test_converge_runs_one_bounded_cold_start_chunk_when_due(monkeypatch) -> Non
     assert result["status"] == "ok"
 
 
+def test_converge_starts_cold_start_before_maintenance(monkeypatch) -> None:
+    events: list[str] = []
+    monkeypatch.setattr(
+        background_jobs,
+        "retry_due",
+        lambda *, limit: events.append("background_jobs") or {"status": "ok"},
+    )
+    monkeypatch.setattr(
+        session_sweeper,
+        "run_sweeper",
+        lambda *, limit: events.append("session_sweeper") or {"status": "ok"},
+    )
+    monkeypatch.setattr(
+        self_heal,
+        "enqueue_due_system_repairs",
+        lambda *, limit: events.append("system_repairs") or {"status": "ok"},
+    )
+    monkeypatch.setattr(
+        converge_worker,
+        "run_maintenance_batch",
+        lambda **_kwargs: events.append("maintenance") or {"status": "ok"},
+    )
+    monkeypatch.setattr(recall_distillation, "distillation_enabled", lambda: True)
+    monkeypatch.setattr(recall_distillation, "cold_start_due", lambda: True)
+    monkeypatch.setattr(
+        recall_distillation,
+        "run_distillation_chunk",
+        lambda **_kwargs: events.append("distillation") or {"status": "deferred"},
+    )
+
+    converge_worker.run_converge()
+
+    assert events[0] == "distillation"
+    assert events.index("distillation") < events.index("maintenance")
+
+
 def test_converge_skips_cold_start_after_completion(monkeypatch) -> None:
     _stub_lightweight_lanes(monkeypatch)
     monkeypatch.setattr(recall_distillation, "distillation_enabled", lambda: True)
