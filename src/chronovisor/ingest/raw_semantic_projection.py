@@ -44,14 +44,14 @@ PROJECTION_BUNDLE_RECEIPT_SCHEMA = "chronovisor.raw-semantic-projection-bundle-r
 _INDEX_WIDTH = 8
 _MAX_INDEX = (10**_INDEX_WIDTH) - 1
 _TRANSCRIPT_CLAIM_RE = re.compile(
-    r"^# (?:Codex|Claude Code) Session Transcript Delta\s*$", re.MULTILINE
+    r"^# (?:Codex|Claude Code|Hermes) Session Transcript Delta\s*$", re.MULTILINE
 )
 _SAVE_TRANSACTION_MARKER_PREFIX = "<!-- chronovisor-save-transaction:"
 _SAVE_TRANSACTION_FILENAME_RE = re.compile(
-    r"^save-(?:codex|claude-code)-[0-9a-f]{24}-from[0-9]+-to[0-9]+\.md$"
+    r"^save-(?:codex|claude-code|hermes)-[0-9a-f]{24}-from[0-9]+-to[0-9]+\.md$"
 )
 _TRANSCRIPT_BLOCK_RE = re.compile(
-    r"^# (?P<host>Codex|Claude Code) Session Transcript Delta\s*$"
+    r"^# (?P<host>Codex|Claude Code|Hermes) Session Transcript Delta\s*$"
     r".*?^## Transcript Delta\s*$\s*^```json\s*$\n"
     r"(?P<payload>.*?)\n^```\s*$",
     re.MULTILINE | re.DOTALL,
@@ -78,7 +78,9 @@ class UnsupportedNativeTranscriptHostError(RawSemanticProjectionError):
     """The runtime lacks a deterministic projector for the source host."""
 
 
-SUPPORTED_NATIVE_TRANSCRIPT_HOSTS = frozenset({"codex", "claude-code", "pi"})
+SUPPORTED_NATIVE_TRANSCRIPT_HOSTS = frozenset(
+    {"codex", "claude-code", "pi", "hermes"}
+)
 
 
 @dataclass(frozen=True)
@@ -360,7 +362,14 @@ def _extract_transcript_payload(text: str) -> tuple[bytes, str] | None:
             "transcript raw contains multiple record blocks"
         )
     match = matches[0]
-    host = "claude-code" if match.group("host") == "Claude Code" else "codex"
+    host_label = match.group("host")
+    host = (
+        "claude-code"
+        if host_label == "Claude Code"
+        else "hermes"
+        if host_label == "Hermes"
+        else "codex"
+    )
     return match.group("payload").encode("utf-8"), host
 
 
@@ -1035,6 +1044,29 @@ def project_native_transcript(
             item_type, content = _pi_message_view(event)
             role, text = claude_semantic_view(item_type, content)
             event_type = item_type
+            semantic_row = {
+                "line": source_line,
+                "role": role,
+                "text": text,
+                "timestamp": timestamp,
+            }
+        elif commit.host == "hermes":
+            message = event.get("message")
+            if not isinstance(message, dict):
+                raise RawSemanticProjectionError(
+                    f"native Hermes transcript line {index + 1} has no message object"
+                )
+            role_value = message.get("role")
+            role = role_value if isinstance(role_value, str) and role_value else "unknown"
+            content = message.get("content")
+            text = (
+                content
+                if isinstance(content, str)
+                else ""
+                if content is None
+                else json.dumps(content, ensure_ascii=False, sort_keys=True)
+            )
+            event_type = "message"
             semantic_row = {
                 "line": source_line,
                 "role": role,

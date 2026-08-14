@@ -7,7 +7,12 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from chronovisor.core.raw_segment import RawSegmentCorrupt, append_capture, seal_segment
+from chronovisor.core.raw_segment import (
+    RawSegmentCorrupt,
+    _raw_id_prefix,
+    append_capture,
+    seal_segment,
+)
 from chronovisor.core.raw_store import RawStore, raw_layout_mode
 from chronovisor.ingest.raw_semantic_projection import project_native_transcript
 
@@ -231,6 +236,46 @@ def test_materialized_reference_projects_pi_transcript(tmp_path: Path) -> None:
     child = json.loads(projection.child_paths[0].read_text())
     assert child["records"][0]["role"] == "user"
     assert child["records"][0]["text"] == "remember from pi"
+
+
+def test_materialized_reference_projects_hermes_transcript(tmp_path: Path) -> None:
+    raw_dir = tmp_path / "raw"
+    source = tmp_path / "state.db"
+    source.write_bytes(b"sqlite-placeholder")
+    payload = (
+        b'{"schema":"chronovisor.hermes-message.v1","host":"hermes",'
+        b'"session":{"session_id":"session","platform":"cli",'
+        b'"provider":"provider-test","model":"gpt-test"},'
+        b'"message":{"id":7,"role":"user","content":"remember from hermes"},'
+        b'"timestamp":"2026-08-14T00:00:00+00:00"}\n'
+    )
+    _append(raw_dir, source, payload, host="hermes")
+    store = RawStore(raw_dir, mode="v2")
+    unit = store.resolve_segment("save-shared.md")
+    assert unit is not None and unit.commit is not None
+
+    reference = store.materialize_ingest(unit, tmp_path / "runtime" / "parents")
+    projection = project_native_transcript(
+        reference,
+        store.read_bytes(unit),
+        unit.commit,
+        output_dir=tmp_path / "runtime" / "artifacts",
+        max_child_bytes=32_000,
+    )
+
+    child = json.loads(projection.child_paths[0].read_text())
+    assert child["records"][0]["role"] == "user"
+    assert child["records"][0]["text"] == "remember from hermes"
+    assert projection.manifest_path is not None
+    manifest = json.loads(projection.manifest_path.read_text())
+    assert manifest["source"]["parents"][0]["receipt"]["host"] == "hermes"
+
+
+def test_hermes_raw_id_uses_the_per_session_journal_fast_path() -> None:
+    assert (
+        _raw_id_prefix("save-hermes-0123456789abcdef01234567-from1-to2.md")
+        == "hermes-0123456789abcdef01234567"
+    )
 
 
 def test_v2_parent_and_semantic_child_use_separate_physical_stores(

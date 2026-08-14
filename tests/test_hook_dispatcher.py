@@ -706,6 +706,32 @@ def test_stop_dispatch_enqueues_save_and_receipt_audit(
     ]
 
 
+def test_stop_dispatch_supports_hermes_save(monkeypatch, tmp_path, capsys) -> None:
+    config = tmp_path / "config.toml"
+    config.write_text(
+        "[hooks.stop]\nsave = true\naudit = false\ncontent_correction = false\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_CHRONOVISOR_RECORD_ENABLED", "1")
+    monkeypatch.setattr("sys.stdin", io.StringIO("{}"))
+
+    assert hook_dispatcher.main(
+        [
+            "--host", "hermes", "--event", "Stop", "--hook",
+            "--config", str(config), "--dry-run", "--format", "json",
+        ]
+    ) == 0
+    output = json.loads(capsys.readouterr().out)
+    assert output["tasks"] == [
+        {
+            "name": "hermes-save",
+            "module": "chronovisor.hosts.hermes_record",
+            "args": ["--hook", "--save"],
+            "dry_run": True,
+        }
+    ]
+
+
 def test_stop_dispatch_full_entrypoint_enqueues_only_capture_work(
     monkeypatch,
     tmp_path,

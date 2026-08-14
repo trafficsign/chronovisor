@@ -33,7 +33,7 @@ from chronovisor.recall import recall_runtime
 LOG_DIR = CHRONOVISOR_ROOT / "logs"
 RECALL_HOST_HEADROOM_MS = 250
 
-HOSTS = {"codex", "claude-code", "pi", "generic"}
+HOSTS = {"codex", "claude-code", "pi", "hermes", "generic"}
 USER_PROMPT_EVENTS = {"user-prompt-submit", "userpromptsubmit", "prompt-submit"}
 STOP_EVENTS = {"stop"}
 
@@ -114,6 +114,8 @@ def save_enabled(host: str, explicit_config: Path | None = None) -> bool:
         if host == "codex"
         else "PI_CHRONOVISOR_RECORD_ENABLED"
         if host == "pi"
+        else "HERMES_CHRONOVISOR_RECORD_ENABLED"
+        if host == "hermes"
         else "CLAUDE_CODE_CHRONOVISOR_RECORD_ENABLED"
     )
     flag = env_flag(env_name)
@@ -426,6 +428,16 @@ def stop_tasks(host: str, args: argparse.Namespace) -> list[BackgroundTask]:
                             "stdin_from_output": True,
                         }
                     ],
+                )
+            )
+        elif host == "hermes":
+            tasks.append(
+                BackgroundTask(
+                    name="hermes-save",
+                    module="chronovisor.hosts.hermes_record",
+                    args=["--hook", "--save"],
+                    env={"HERMES_CHRONOVISOR_RECORD_ENABLED": "1"},
+                    log_prefix="hermes-save",
                 )
             )
     if (

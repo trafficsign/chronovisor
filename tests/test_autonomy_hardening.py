@@ -289,6 +289,7 @@ def test_background_job_fixed_env_allowlist_matches_current_callers() -> None:
             "CHRONOVISOR_RESEARCH_RUN_ID",
             "CLAUDE_CODE_CHRONOVISOR_RECORD_ENABLED",
             "CODEX_CHRONOVISOR_RECORD_ENABLED",
+            "HERMES_CHRONOVISOR_RECORD_ENABLED",
             "OLLAMA_CALIBRATION_FILE",
             "OLLAMA_HOST",
             "OLLAMA_RESOURCE_LOCK",

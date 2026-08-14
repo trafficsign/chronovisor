@@ -28,7 +28,7 @@ RAW_TOPIC_STOPWORDS = {
     "session",
     "the",
 }
-RAW_SOURCE_PREFIXES = ("claude-code", "codex", "ingest")
+RAW_SOURCE_PREFIXES = ("claude-code", "codex", "hermes", "ingest")
 RAW_ALLOC_MAX_RETRIES = 32
 RAW_IDEMPOTENCY_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,159}$")
 RAW_KEYWORD_FORBIDDEN_CHARS = frozenset(",[]:#{}\n\r")

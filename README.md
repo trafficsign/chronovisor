@@ -92,6 +92,9 @@ flowchart LR
 - `chronovisor-mcp` serves the public memory tools.
 - `chronovisor-hook` dispatches host events. Capture is deterministic and does
   not call an LLM.
+- Hermes Stop events use the dedicated `chronovisor-hermes-record` reader for
+  profile-local `state.db` files. Raw IDs and metadata retain `hermes`
+  provenance; no Codex or Claude transcript emulation is used.
 - Ingest turns immutable raw captures into reviewed pages.
 - Search combines lexical retrieval with optional local embedding and rerank
   services. Recall decides what context is safe and useful to inject.

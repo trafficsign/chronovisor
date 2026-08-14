@@ -216,7 +216,7 @@ def format_state_context(
 
 
 def should_inject_state(host: str) -> bool:
-    return host in {"codex", "claude-code", "generic"}
+    return host in {"codex", "claude-code", "generic", "hermes"}
 
 
 def refresh_state_register(

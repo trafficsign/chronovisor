@@ -39,7 +39,7 @@ _SESSION_KEY_RE = re.compile(r"^[0-9a-f]{24}$")
 _RAW_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,239}$")
 _PART_RE = re.compile(r"-part-(\d{3})(?:\.jsonl\.(?:open|zst))$")
 _SAVE_RAW_ID_RE = re.compile(
-    r"^save-(?P<host>codex|claude-code)-(?P<session>[0-9a-f]{24})-from\d+-to\d+\.md$"
+    r"^save-(?P<host>codex|claude-code|hermes)-(?P<session>[0-9a-f]{24})-from\d+-to\d+\.md$"
 )
 
 

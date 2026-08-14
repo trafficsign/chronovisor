@@ -53,6 +53,10 @@ def test_state_register_context_is_injected_for_codex(monkeypatch) -> None:
     assert output["hookSpecificOutput"]["additionalContext"] == result.context
 
 
+def test_state_register_is_enabled_for_hermes_provenance() -> None:
+    assert state_register.should_inject_state("hermes") is True
+
+
 def test_format_state_context_marks_stale_state(tmp_path: Path) -> None:
     path = tmp_path / "current-state.md"
     path.write_text(
