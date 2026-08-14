@@ -210,8 +210,54 @@ def test_generic_installer_renders_every_supported_service_without_launchctl(
     assert launchctl_log.read_text(encoding="utf-8").splitlines() == [
         f"bootout {domain}/{label}",
         f"bootstrap {domain} {output}",
+        f"print {domain}/{label}",
         f"kickstart -k {domain}/{label}",
     ]
+
+
+def test_generic_installer_retries_bootstrap_after_async_bootout(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    uvx = _executable(tmp_path / "tools" / "uvx")
+    launchctl_log = tmp_path / "launchctl.log"
+    launchctl_state = tmp_path / "launchctl-state"
+    launchctl = tmp_path / "tools" / "launchctl"
+    launchctl.write_text(
+        """#!/bin/sh
+printf '%s\\n' \"$*\" >> \"$CHRONOVISOR_TEST_LAUNCHCTL_LOG\"
+if [ \"$1\" = bootstrap ]; then
+  count=0
+  [ -f \"$CHRONOVISOR_TEST_LAUNCHCTL_STATE\" ] && IFS= read -r count < \"$CHRONOVISOR_TEST_LAUNCHCTL_STATE\"
+  count=$((count + 1))
+  printf '%s\\n' \"$count\" > \"$CHRONOVISOR_TEST_LAUNCHCTL_STATE\"
+  [ \"$count\" -lt 3 ] && exit 37
+fi
+exit 0
+""",
+        encoding="utf-8",
+    )
+    launchctl.chmod(0o755)
+    env = os.environ | {
+        "HOME": str(home),
+        "CHRONOVISOR_UVX": str(uvx),
+        "CHRONOVISOR_PYTHON": sys.executable,
+        "CHRONOVISOR_LAUNCHCTL": str(launchctl),
+        "CHRONOVISOR_LAUNCHD_LABEL_PREFIX": "org.example.chronovisor-",
+        "CHRONOVISOR_TEST_LAUNCHCTL_LOG": str(launchctl_log),
+        "CHRONOVISOR_TEST_LAUNCHCTL_STATE": str(launchctl_state),
+    }
+
+    subprocess.run(
+        [str(ROOT / "scripts" / "install-launchd-service"), "dashboard"],
+        check=True,
+        env=env,
+    )
+
+    bootstrap_calls = [
+        line for line in launchctl_log.read_text(encoding="utf-8").splitlines()
+        if line.startswith("bootstrap ")
+    ]
+    assert len(bootstrap_calls) == 3
 
 
 def test_contract_manifest_and_production_files_have_no_personal_home() -> None:

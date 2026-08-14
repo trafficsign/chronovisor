@@ -31,5 +31,15 @@ LABEL="$("$PYTHON" -c 'import plistlib, sys; print(plistlib.load(open(sys.argv[1
 readonly LABEL
 
 "$LAUNCHCTL" bootout "$DOMAIN/$LABEL" >/dev/null 2>&1 || true
-"$LAUNCHCTL" bootstrap "$DOMAIN" "$LAUNCH_AGENT"
+attempt=0
+while [ "$attempt" -lt 20 ]; do
+  if "$LAUNCHCTL" bootstrap "$DOMAIN" "$LAUNCH_AGENT" >/dev/null 2>&1; then
+    break
+  fi
+  attempt=$((attempt + 1))
+  /bin/sleep 0.25
+done
+if ! "$LAUNCHCTL" print "$DOMAIN/$LABEL" >/dev/null 2>&1; then
+  "$LAUNCHCTL" bootstrap "$DOMAIN" "$LAUNCH_AGENT"
+fi
 "$LAUNCHCTL" kickstart -k "$DOMAIN/$LABEL"
