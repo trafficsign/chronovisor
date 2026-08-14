@@ -265,15 +265,18 @@ class _ChatResponse:
         self,
         content: str,
         *,
+        model: str = "ornith:test",
         done: bool | None = True,
         done_reason: str | None = "stop",
     ) -> None:
         self.content = content
+        self.model = model
         self.done = done
         self.done_reason = done_reason
 
     def json(self) -> dict:
         body = {
+            "model": self.model,
             "message": {
                 "role": "assistant",
                 "content": self.content,
@@ -311,6 +314,7 @@ class _ChatClient:
         self.payload = json
         return _ChatResponse(
             self.content,
+            model=json["model"],
             done=self.done,
             done_reason=self.done_reason,
         )
@@ -820,6 +824,7 @@ def test_chat_can_return_context_accounting(monkeypatch) -> None:
     assert result.eval_count == 7
     assert result.done is True
     assert result.done_reason == "stop"
+    assert result.returned_model == "ornith:test"
 
 
 def test_chat_metadata_treats_missing_done_as_incomplete(monkeypatch) -> None:

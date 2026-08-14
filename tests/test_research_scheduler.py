@@ -120,10 +120,11 @@ def test_foreground_slow_diagnostic_append_does_not_block(tmp_path, monkeypatch)
     assert time.monotonic() - started < 0.1
 
 
-def test_foreground_marker_cancels_running_research_child(tmp_path, monkeypatch) -> None:
+def test_foreground_marker_cancels_running_sleep_child(tmp_path, monkeypatch) -> None:
     _paths(tmp_path, monkeypatch)
+    monkeypatch.delenv("CHRONOVISOR_RESEARCH_CAPACITY_PROVEN", raising=False)
     with research_scheduler.research_lane(
-        "run", enabled=True, mode="explicit", purpose="explicit", needs_model=True
+        "run", enabled=True, mode="sleep", purpose="sleep", needs_model=True
     ) as lease:
         import threading
 

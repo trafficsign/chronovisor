@@ -199,8 +199,11 @@ def test_local_worker_metadata_and_transient_failure_classification(
     }
     monkeypatch.setattr(ollama, "runtime_generation_routes", lambda _roles: (route,))
 
+    lane_kwargs: list[dict[str, object]] = []
+
     @contextmanager
-    def lane(*_args: object, **_kwargs: object):
+    def lane(*_args: object, **kwargs: object):
+        lane_kwargs.append(kwargs)
         yield object()
 
     monkeypatch.setattr(research_scheduler, "research_lane", lane)
@@ -246,6 +249,8 @@ def test_local_worker_metadata_and_transient_failure_classification(
         expected_digest="d" * 64,
     )
     assert result["_route_identity"] == identity
+    assert lane_kwargs[-1]["mode"] == "sleep"
+    assert lane_kwargs[-1]["purpose"] == "sleep"
     failure["value"] = "backend_error"
     with pytest.raises(distill.DistillationDeferred):
         distill._worker_call(
@@ -266,6 +271,44 @@ def test_local_worker_metadata_and_transient_failure_classification(
             expected_route=identity,
             expected_digest="d" * 64,
         )
+
+
+def test_default_workers_keep_cold_teacher_and_counterfactual_budgets_separate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from chronovisor.core import ollama
+
+    roles = (
+        *distill.TEACHER_ROLES,
+        "recall.distill.answer_generator",
+        "recall.distill.utility_judge",
+    )
+    routes = tuple(
+        SimpleNamespace(
+            role=role,
+            provider="ollama",
+            model=f"model-{index}",
+            location="local",
+            structured_output=True,
+        )
+        for index, role in enumerate(roles)
+    )
+    monkeypatch.setattr(ollama, "runtime_generation_routes", lambda _roles: routes)
+    monkeypatch.setattr(
+        ollama,
+        "model_digests",
+        lambda models: {model: f"{index + 1:064x}" for index, model in enumerate(models)},
+    )
+
+    teachers, counterfactual = distill._default_workers(
+        distill.DistillationConfig(),
+        teacher_deadline_ms=120_000,
+        counterfactual_deadline_ms=45_000,
+    )
+
+    assert {worker.deadline_ms for worker in teachers.values()} == {120_000}
+    assert counterfactual is not None
+    assert counterfactual.deadline_ms == 45_000
 
 
 def test_rally_v1_folds_assistant_and_tool_refs_without_copying_text(

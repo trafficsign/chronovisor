@@ -20,6 +20,9 @@ WORKER_SCHEMA = "chronovisor.recall-distillation-worker.v1"
 # Keep the full initial request plus two bounded repair turns inside the fixed
 # 32K local context.  The caller may split larger evidence deterministically.
 MAX_INPUT_CHARS = 12_000
+# Includes the fixed system prompt and dynamic JSON Schema around the bounded
+# 12 KB worker input while leaving room for two repairs in the 32K context.
+MAX_SESSION_INPUT_BYTES = 18_000
 MAX_OUTPUT_CHARS = 4_000
 MAX_DEADLINE_MS = 660_000
 MAX_TEACHER_CANDIDATES = 16
@@ -339,7 +342,7 @@ def run(payload: Mapping[str, Any]) -> dict[str, Any]:
             num_predict=2_048,
             keep_alive="0",
             read_timeout_ms=deadline_ms,
-            max_input_chars=MAX_INPUT_CHARS,
+            max_input_chars=MAX_SESSION_INPUT_BYTES,
             max_output_chars=MAX_OUTPUT_CHARS,
             max_feedback_chars=512,
             max_responses=2,

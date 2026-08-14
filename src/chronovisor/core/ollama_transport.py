@@ -585,6 +585,9 @@ def _chat_unlocked(
             if isinstance(body.get("done_reason"), str)
             else None
         ),
+        returned_model=(
+            str(body["model"]) if isinstance(body.get("model"), str) else None
+        ),
     )
 
 

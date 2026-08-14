@@ -779,7 +779,7 @@ def test_ollama_adapter_preserves_chat_and_embedding_paths(monkeypatch) -> None:
     def fake_chat(messages: list[dict[str, str]], **kwargs: object):
         seen["messages"] = messages
         seen["chat"] = kwargs
-        return ollama.ChatResponse("{}", 11, 2, True, "stop")
+        return ollama.ChatResponse("{}", 11, 2, True, "stop", "gpt-oss:test")
 
     def fake_embed(
         texts: list[str], *, model: str, read_timeout_ms: int | None
@@ -812,6 +812,7 @@ def test_ollama_adapter_preserves_chat_and_embedding_paths(monkeypatch) -> None:
 
     assert chat.content == "{}"
     assert chat.usage.input_tokens == 11
+    assert chat.metadata == {"returned_model": "gpt-oss:test"}
     assert seen["messages"] == [{"role": "user", "content": "vote"}]
     assert seen["chat"] == {
         "model": "gpt-oss:test",

@@ -3,6 +3,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from chronovisor.core import ollama
+from chronovisor.decision.local_structured import preflight_structured_request
 from chronovisor.recall import recall_distillation_worker as worker
 
 
@@ -107,13 +108,25 @@ def test_worker_resolves_fixed_local_route_and_hides_input(monkeypatch) -> None:
         "num_predict": 2_048,
         "keep_alive": "0",
         "read_timeout_ms": 30_000,
-        "max_input_chars": worker.MAX_INPUT_CHARS,
+        "max_input_chars": worker.MAX_SESSION_INPUT_BYTES,
         "max_output_chars": worker.MAX_OUTPUT_CHARS,
         "max_feedback_chars": 512,
         "max_responses": 2,
         "require_returned_model": True,
     }
     assert "private raw text" not in str(result)
+
+
+def test_worker_session_ceiling_includes_fixed_schema_overhead() -> None:
+    candidate_ids = tuple(f"{index:02d}" + "x" * 158 for index in range(16))
+    preflight = preflight_structured_request(
+        "x" * worker.MAX_INPUT_CHARS,
+        worker._schema("teacher", candidate_ids=candidate_ids),
+        system=worker._system("teacher"),
+        max_input_chars=worker.MAX_SESSION_INPUT_BYTES,
+    )
+
+    assert preflight.ok
 
 
 def test_worker_rejects_overrides_and_returns_safe_failure() -> None:

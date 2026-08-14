@@ -329,7 +329,7 @@ def _worker_call(
     with research_lane(
         f"recall-distill-{request_id[:16]}",
         enabled=True,
-        mode="auto",
+        mode="sleep",
         purpose="sleep",
         needs_model=True,
     ) as lease:
@@ -386,7 +386,8 @@ def _worker_call(
 def _default_workers(
     config: DistillationConfig,
     *,
-    deadline_ms: int = 60_000,
+    teacher_deadline_ms: int = 60_000,
+    counterfactual_deadline_ms: int = 60_000,
 ) -> tuple[dict[str, Teacher], CounterfactualGenerator | None]:
     from chronovisor.core import ollama
 
@@ -431,12 +432,15 @@ def _default_workers(
                 config.max_input_bytes,
                 identities[role],
                 digests[role],
-                deadline_ms,
+                teacher_deadline_ms,
             )
             for role in TEACHER_ROLES
         },
         _WorkerCounterfactual(
-            config.max_input_bytes, identities, digests, deadline_ms
+            config.max_input_bytes,
+            identities,
+            digests,
+            counterfactual_deadline_ms,
         ),
     )
 
@@ -4490,7 +4494,9 @@ def _run_distillation_chunk_impl(
     )
     if teachers is None:
         teachers, default_counterfactual = _default_workers(
-            config, deadline_ms=45_000 if cold_start else 60_000
+            config,
+            teacher_deadline_ms=120_000 if cold_start else 60_000,
+            counterfactual_deadline_ms=45_000 if cold_start else 60_000,
         )
         if counterfactual is None:
             counterfactual = default_counterfactual
@@ -4567,7 +4573,7 @@ def _run_distillation_chunk_impl(
         available=counterfactual_probe.pending,
     )
     teacher_result = _TeacherBatchResult()
-    minimum_model_seconds = 220 if prefer_counterfactual else 55
+    minimum_model_seconds = 220 if prefer_counterfactual else 130
     model_work_available = local_teachers or counterfactual_probe.pending
     model_deferred = deadline_deferred or (
         model_work_available

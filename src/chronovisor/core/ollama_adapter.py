@@ -121,6 +121,8 @@ class OllamaAdapter:
         metadata: dict[str, Any] = {}
         if isinstance(output, ollama.GenerateResponse):
             metadata["streamed"] = output.streamed
+        elif returned_model := ollama.safe_metadata_identifier(output.returned_model):
+            metadata["returned_model"] = returned_model
         return GenerationResult(
             content=output.content,
             provider=self.provider,
