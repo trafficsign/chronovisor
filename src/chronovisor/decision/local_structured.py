@@ -41,12 +41,16 @@ SAFE_RUNTIME_ROLE_RE = re.compile(r"^[a-z][a-z0-9._-]{0,127}$")
 LOCAL_ACTIVITY_PHASES = frozenset(
     {"trigger", "load", "context", "generate", "repair", "validate", "vote"}
 )
-STRUCTURED_GENERATION_POLICY_VERSION = 10
+STRUCTURED_GENERATION_POLICY_VERSION = 11
 STRUCTURED_GENERATION_TEMPERATURE = 0
 STRUCTURED_GENERATION_SEED = 0
 _DEFAULT_STRUCTURED_MEMORY_RESERVE_GIB = 16
 _DEFAULT_RUNTIME_ROLE = "librarian.review"
-_QWEN_STRUCTURED_COMPAT_MODEL = "qwen3.8:27b-mxfp8"
+_QWEN_STRUCTURED_COMPAT_MODEL = "qwen3.8:27b-nvfp4"
+_MUSE_STRUCTURED_COMPAT_MODEL = "muse-glimmer:30b-nvfp4-dflash"
+_FORMATLESS_THINKING_MODELS = frozenset(
+    {_QWEN_STRUCTURED_COMPAT_MODEL, _MUSE_STRUCTURED_COMPAT_MODEL}
+)
 _ADAPTIVE_REASONING_CANARY_ADOPTED = True
 _BOUNDED_LOW_REASONING_LANES = frozenset({"local_repair", "read_back_repair"})
 _REASONING_LEVELS = frozenset({"low", "medium", "high"})
@@ -169,7 +173,11 @@ def structured_generation_policy() -> dict[str, Any]:
             _QWEN_STRUCTURED_COMPAT_MODEL: {
                 "initial": {"think": True, "format": None},
                 "repair": {"think": False, "format": "json_schema"},
-            }
+            },
+            _MUSE_STRUCTURED_COMPAT_MODEL: {
+                "initial": {"think": "selected", "format": None},
+                "repair": {"think": False, "format": "json_schema"},
+            },
         },
         "stream": False,
         "format": "json_schema",
@@ -2123,20 +2131,20 @@ def _default_transport(
     )
 
 
-def _qwen_structured_repair_request(
+def _formatless_thinking_repair_request(
     request: ChatRequest,
     *,
     attempt: int,
     schema: dict[str, Any],
 ) -> ChatRequest:
-    if attempt == 0 or request.model != _QWEN_STRUCTURED_COMPAT_MODEL:
+    if attempt == 0 or request.model not in _FORMATLESS_THINKING_MODELS:
         return request
     return replace(
         request,
         schema=schema,
         think=False,
         ollama_think=False,
-        think_selection_reason="qwen_structured_compat_repair",
+        think_selection_reason="formatless_thinking_repair",
     )
 
 
@@ -2466,10 +2474,11 @@ class LocalStructuredSession:
             adaptive_reasoning_adopted=_ADAPTIVE_REASONING_CANARY_ADOPTED,
         )
         qwen_compatibility = self.model == _QWEN_STRUCTURED_COMPAT_MODEL
+        formatless_thinking = self.model in _FORMATLESS_THINKING_MODELS
         effective_think: bool | str = True if qwen_compatibility else selection[0]
         effective_think_reason = (
-            "qwen_structured_compat_initial"
-            if qwen_compatibility
+            "formatless_thinking_initial"
+            if formatless_thinking
             else selection[1]
         )
         if activity_update is not None:
@@ -2492,7 +2501,7 @@ class LocalStructuredSession:
         return ChatRequest(
             model=self.model,
             messages=(),
-            schema=None if qwen_compatibility else schema,
+            schema=None if formatless_thinking else schema,
             num_ctx=effective_num_ctx,
             num_predict=_reasoning_num_predict(selection[0], self.num_predict),
             keep_alive=self.keep_alive,
@@ -2503,7 +2512,7 @@ class LocalStructuredSession:
             think=effective_think,
             ollama_think=(
                 effective_think
-                if qwen_compatibility
+                if formatless_thinking
                 or authority_profile is None
                 or authority_profile["renderer"] == "native_levels"
                 else True
@@ -2640,7 +2649,7 @@ class LocalStructuredSession:
                 request_template,
                 messages=tuple(dict(message) for message in messages),
             )
-            request = _qwen_structured_repair_request(
+            request = _formatless_thinking_repair_request(
                 request, attempt=index, schema=transport_schema
             )
             transport_output, transport_failure = self._call_transport(

@@ -215,7 +215,7 @@ class LoadGenerator:
 
     def _qwen_27b(self) -> None:
         request = {
-            "model": "qwen3.8:27b-mxfp8",
+            "model": "qwen3.8:27b-nvfp4",
             "prompt": (
                 "Chronovisorの記憶検索設計について、同期経路の安全性、"
                 "検索品質、障害時縮退、運用監査の観点から詳細に分析せよ。"

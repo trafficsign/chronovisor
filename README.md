@@ -36,10 +36,11 @@ merged manually rather than overwritten.
 
 Install the local models named by the example:
 
-`qwen3.8:27b-mxfp8` requires Ollama 0.32.12 or newer.
+`qwen3.8:27b-nvfp4` requires Ollama 0.32.12 or newer.
 
 ```sh
-ollama pull qwen3.8:27b-mxfp8
+ollama pull qwen3.8:27b-nvfp4
+ollama pull muse-glimmer:30b-nvfp4-dflash
 ollama pull gpt-oss:20b
 ollama pull gemma4:26b
 ollama pull bge-m3

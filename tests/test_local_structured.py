@@ -53,7 +53,8 @@ SCHEMA = {
         "summary": {"type": "string", "minLength": 1},
     },
 }
-QWEN_STRUCTURED_MODEL = "qwen3.8:27b-mxfp8"
+QWEN_STRUCTURED_MODEL = "qwen3.8:27b-nvfp4"
+MUSE_STRUCTURED_MODEL = "muse-glimmer:30b-nvfp4-dflash"
 
 REASONING_ROUTES = {
     "classification.primary": (
@@ -104,9 +105,9 @@ class QueueTransport:
 
 
 def test_structured_generation_policy_seals_adaptive_reasoning_authority() -> None:
-    assert STRUCTURED_GENERATION_POLICY_VERSION == 10
+    assert STRUCTURED_GENERATION_POLICY_VERSION == 11
     assert structured_generation_policy() == {
-        "version": 10,
+        "version": 11,
         "temperature": 0,
         "seed": 0,
         "think": {
@@ -167,7 +168,11 @@ def test_structured_generation_policy_seals_adaptive_reasoning_authority() -> No
             QWEN_STRUCTURED_MODEL: {
                 "initial": {"think": True, "format": None},
                 "repair": {"think": False, "format": "json_schema"},
-            }
+            },
+            MUSE_STRUCTURED_MODEL: {
+                "initial": {"think": "selected", "format": None},
+                "repair": {"think": False, "format": "json_schema"},
+            },
         },
         "stream": False,
         "format": "json_schema",
@@ -570,19 +575,31 @@ def test_first_pass_valid_uses_fixed_medium_thinking_request() -> None:
     assert '"decision"' in request.messages[0]["content"]
 
 
-def test_qwen_structured_compatibility_omits_initial_format_and_repairs_strict() -> None:
+@pytest.mark.parametrize(
+    ("model", "initial_think"),
+    [(QWEN_STRUCTURED_MODEL, True), (MUSE_STRUCTURED_MODEL, "medium")],
+)
+def test_formatless_thinking_omits_initial_format_and_repairs_strict(
+    model: str, initial_think: bool | str
+) -> None:
     transport = QueueTransport(
         '{"decision":"invalid","summary":"bad"}',
         '{"decision":"apply","summary":"ok"}',
     )
-    result = _session(transport, model=QWEN_STRUCTURED_MODEL).run("decide", SCHEMA)
+    result = _session(transport, model=model).run("decide", SCHEMA)
 
     assert result.ok is True
     assert [request.schema for request in transport.requests] == [None, SCHEMA]
-    assert [request.think for request in transport.requests] == [True, False]
-    assert [request.ollama_think for request in transport.requests] == [True, False]
+    assert [request.think for request in transport.requests] == [
+        initial_think,
+        False,
+    ]
+    assert [request.ollama_think for request in transport.requests] == [
+        initial_think,
+        False,
+    ]
     assert result.think is False
-    assert result.think_selection_reason == "qwen_structured_compat_repair"
+    assert result.think_selection_reason == "formatless_thinking_repair"
 
 
 def test_non_qwen_structured_transport_contract_is_unchanged() -> None:
@@ -712,7 +729,7 @@ def test_active_marker_is_atomic_redacted_and_removed_after_session(
     assert audit["context_tokens"] == 32_768
     assert audit["requested_num_ctx"] == 32_768
     assert isinstance(audit["required_num_ctx"], int)
-    assert audit["structured_generation_policy_version"] == 10
+    assert audit["structured_generation_policy_version"] == 11
     assert audit["structured_generation_policy_sha256"] == (
         structured_generation_policy_sha256()
     )

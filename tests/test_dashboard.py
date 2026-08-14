@@ -4209,7 +4209,7 @@ def test_snapshot_handler_returns_non_disclosing_json_error(
 def test_model_status_handler_reads_live_ollama_without_snapshot_cache(
     monkeypatch,
 ) -> None:
-    model = "muse-glimmer:30b-mxfp8-dflash"
+    model = "muse-glimmer:30b-nvfp4-dflash"
     monkeypatch.setattr(
         dashboard,
         "_cached_snapshot",
@@ -6549,10 +6549,10 @@ def test_model_status_snapshot_combines_ollama_and_config(monkeypatch) -> None:
                     "capabilities": ["embedding"],
                 },
                 {
-                    "name": "muse-glimmer:30b-mxfp8-dflash",
-                    "model": "muse-glimmer:30b-mxfp8-dflash",
+                    "name": "muse-glimmer:30b-nvfp4-dflash",
+                    "model": "muse-glimmer:30b-nvfp4-dflash",
                     "size": 13_000,
-                    "details": {"format": "gguf", "quantization_level": "MXFP4"},
+                    "details": {"format": "safetensors", "quantization_level": "NVFP4"},
                     "capabilities": ["completion"],
                 },
             ],
@@ -6570,7 +6570,7 @@ def test_model_status_snapshot_combines_ollama_and_config(monkeypatch) -> None:
         dashboard.PROPOSER_RUNTIME_ROLES[0]: "qwen3.6:35b-a3b-mxfp8",
         dashboard.PROPOSER_RUNTIME_ROLES[1]: "gemma4:26b-mxfp8",
         dashboard.DECISION_RUNTIME_ROLES[0]: "qwen3.6:35b-a3b-mxfp8",
-        dashboard.DECISION_RUNTIME_ROLES[1]: "muse-glimmer:30b-mxfp8-dflash",
+        dashboard.DECISION_RUNTIME_ROLES[1]: "muse-glimmer:30b-nvfp4-dflash",
         dashboard.DECISION_RUNTIME_ROLES[2]: "gemma4:26b-mxfp8",
     }
     monkeypatch.setattr(
@@ -6635,8 +6635,8 @@ def test_model_status_snapshot_combines_ollama_and_config(monkeypatch) -> None:
     ]
     assert by_name["bge-m3:latest"]["roles"] == ["embed"]
     assert "bge-m3" not in by_name
-    assert by_name["muse-glimmer:30b-mxfp8-dflash"]["status"] == "ready"
-    assert by_name["muse-glimmer:30b-mxfp8-dflash"]["roles"] == [
+    assert by_name["muse-glimmer:30b-nvfp4-dflash"]["status"] == "ready"
+    assert by_name["muse-glimmer:30b-nvfp4-dflash"]["roles"] == [
         "decision-challenger"
     ]
     assert by_name["qwen3.5:4b-mlx"]["status"] == "missing"

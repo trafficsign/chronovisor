@@ -774,7 +774,7 @@ def test_chat_omits_format_key_when_none(monkeypatch) -> None:
 
     result = ollama.chat(
         [{"role": "user", "content": "decide"}],
-        model="qwen3.8:27b-mxfp8",
+        model="qwen3.8:27b-nvfp4",
         format=None,
         num_ctx=32768,
         num_predict=1024,

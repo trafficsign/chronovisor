@@ -319,7 +319,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--embedding-model", default="bge-m3:latest")
     parser.add_argument("--embedding-dimensions", type=int, default=1024)
     parser.add_argument("--reranker-model", default="BAAI/bge-reranker-v2-m3")
-    parser.add_argument("--primary-model", default="qwen3.8:27b-mxfp8")
+    parser.add_argument("--primary-model", default="qwen3.8:27b-nvfp4")
     parser.add_argument("--challenger-model", default="gpt-oss:20b")
     parser.add_argument("--tie-break-model", default="gemma4:26b")
     args = parser.parse_args(argv)

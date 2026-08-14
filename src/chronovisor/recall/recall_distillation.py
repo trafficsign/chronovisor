@@ -105,7 +105,7 @@ _DISTILLATION_ROLES = {
     "recall.distill.teacher.a": {
         "capability": "generation",
         "provider": "local",
-        "model": "qwen3.8:27b-mxfp8",
+        "model": "qwen3.8:27b-nvfp4",
         "required_capabilities": ["structured_output"],
     },
     "recall.distill.teacher.b": {
@@ -123,7 +123,7 @@ _DISTILLATION_ROLES = {
     "recall.distill.answer_generator": {
         "capability": "generation",
         "provider": "local",
-        "model": "qwen3.8:27b-mxfp8",
+        "model": "qwen3.8:27b-nvfp4",
         "required_capabilities": ["structured_output"],
     },
     "recall.distill.utility_judge": {
