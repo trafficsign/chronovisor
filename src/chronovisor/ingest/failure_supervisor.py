@@ -1615,6 +1615,11 @@ def _record_operational_raw_failure(
                     failures.pop(source_file, None)
         operational_failures.pop(record.fingerprint, None)
         queued = None
+    if isinstance(queued, dict) and _packet_status(queued) == "local_quarantined":
+        # This terminal packet exhausted repair for its existing source evidence.
+        # Keep those raws deferred, but do not attach a new raw to dead work.
+        operational_failures.pop(record.fingerprint, None)
+        queued = None
     if isinstance(queued, dict) and queued.get("self_heal_queued") is True:
         packet_path = queued.get("packet_path")
         bind_raws(

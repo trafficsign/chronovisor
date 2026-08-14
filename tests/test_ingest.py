@@ -9972,6 +9972,57 @@ class TestPerRawOrchestrator:
         assert state["failures"][second_raw.name]["packet_path"] == first.packet_path
         assert list(state["operational_failures"]) == ["ingest.runtime_schema_invalid"]
 
+    def test_terminal_operational_packet_is_not_reused_for_a_different_raw(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from chronovisor.core import background_jobs
+        from chronovisor.ingest import failure_supervisor
+
+        first_raw = isolated_wiki / "raw" / "first-repeated-output.md"
+        second_raw = isolated_wiki / "raw" / "second-repeated-output.md"
+        first_raw.write_text("first source", encoding="utf-8")
+        second_raw.write_text("second source", encoding="utf-8")
+        started: list[Path] = []
+        monkeypatch.setattr(
+            background_jobs, "start_self_heal_background", started.append
+        )
+        error = "ingest generation repeated_output: same invalid page"
+
+        first = failure_supervisor.record_raw_failure(
+            raw_path=first_raw,
+            error=error,
+            raw_text="first source",
+        )
+        first_packet = Path(str(first.packet_path))
+        packet = json.loads(first_packet.read_text(encoding="utf-8"))
+        packet["status"] = "local_quarantined"
+        first_packet.write_text(json.dumps(packet), encoding="utf-8")
+
+        second = failure_supervisor.record_raw_failure(
+            raw_path=second_raw,
+            error=error,
+            raw_text="second source",
+        )
+
+        assert second.packet_path != first.packet_path
+        assert started == [first_packet, Path(str(second.packet_path))]
+        assert failure_supervisor.operational_deferred_raw_files(
+            [first_raw, second_raw]
+        ) == {
+            first_raw.name: "local_quarantined",
+            second_raw.name: "pending_local_repair",
+        }
+        state = json.loads(
+            (isolated_wiki / "runtime" / "failures" / "state.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        assert state["failures"][first_raw.name]["packet_path"] == str(first_packet)
+        assert state["failures"][second_raw.name]["packet_path"] == second.packet_path
+        assert state["operational_failures"][second.fingerprint]["packet_path"] == (
+            second.packet_path
+        )
+
     def test_operational_self_heal_launch_failure_is_durable_and_not_retried(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
