@@ -53,6 +53,21 @@ mode = "explicit"
 adapter_enabled = false
 live_egress_enabled = false
 
+[recall.distillation]
+# Offline-only. Enabling this starts bounded dataset construction; it never
+# changes the live Recall policy by itself.
+enabled = false
+chunk_size = 25
+max_input_bytes = 24000
+max_candidates = 200
+hard_floor_rallies = 1000
+hard_floor_days = 30
+hard_floor_windows = 3
+hard_floor_verified_labels = 500
+hard_floor_per_class = 100
+rollout_stages = [5, 25, 100]
+canary_min_days = 7
+
 [llm.providers.local]
 kind = "ollama"
 
@@ -183,6 +198,38 @@ model = "gemma4:26b"
 required_capabilities = ["structured_output"]
 
 [llm.roles."recall.rubric.variant"]
+capability = "generation"
+provider = "local"
+model = "gemma4:26b"
+required_capabilities = ["structured_output"]
+
+# Offline Recall distillation is local-only. These raw/high inputs must never
+# use a remote route, even if an egress opt-in exists elsewhere in this file.
+[llm.roles."recall.distill.teacher.a"]
+capability = "generation"
+provider = "local"
+model = "maxwell1500/ornith-35b:Q5_K_M"
+required_capabilities = ["structured_output"]
+
+[llm.roles."recall.distill.teacher.b"]
+capability = "generation"
+provider = "local"
+model = "gpt-oss:20b"
+required_capabilities = ["structured_output"]
+
+[llm.roles."recall.distill.teacher.c"]
+capability = "generation"
+provider = "local"
+model = "gemma4:26b"
+required_capabilities = ["structured_output"]
+
+[llm.roles."recall.distill.answer_generator"]
+capability = "generation"
+provider = "local"
+model = "maxwell1500/ornith-35b:Q5_K_M"
+required_capabilities = ["structured_output"]
+
+[llm.roles."recall.distill.utility_judge"]
 capability = "generation"
 provider = "local"
 model = "gemma4:26b"

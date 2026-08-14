@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import tomllib
 from pathlib import Path
 from urllib.request import Request
 
@@ -863,6 +864,11 @@ def test_repository_example_has_representative_local_role_map() -> None:
         "recall.policy_proposer.primary",
         "recall.policy_proposer.challenger",
         "recall.rubric.variant",
+        "recall.distill.teacher.a",
+        "recall.distill.teacher.b",
+        "recall.distill.teacher.c",
+        "recall.distill.answer_generator",
+        "recall.distill.utility_judge",
         "research.planner",
         "research.challenge",
         "research.tie_break",
@@ -951,6 +957,38 @@ def test_repository_example_has_representative_local_role_map() -> None:
     assert (
         '# role = "recall.rubric.variant"\n# data_class = "raw"' in text
     )
+    distill_roles = (
+        "recall.distill.teacher.a",
+        "recall.distill.teacher.b",
+        "recall.distill.teacher.c",
+        "recall.distill.answer_generator",
+        "recall.distill.utility_judge",
+    )
+    distill_routes = [config.roles[role] for role in distill_roles]
+    assert [route.provider_id for route in distill_routes] == ["local"] * 5
+    assert all(
+        route.required_capabilities == ("structured_output",)
+        for route in distill_routes
+    )
+    assert (
+        config.roles["recall.distill.answer_generator"].model
+        != config.roles["recall.distill.utility_judge"].model
+    )
+    assert 'raw/high inputs must never\n# use a remote route' in text
+    distillation = tomllib.loads(text)["recall"]["distillation"]
+    assert distillation == {
+        "enabled": False,
+        "chunk_size": 25,
+        "max_input_bytes": 24000,
+        "max_candidates": 200,
+        "hard_floor_rallies": 1000,
+        "hard_floor_days": 30,
+        "hard_floor_windows": 3,
+        "hard_floor_verified_labels": 500,
+        "hard_floor_per_class": 100,
+        "rollout_stages": [5, 25, 100],
+        "canary_min_days": 7,
+    }
     assert [
         config.roles[role].model
         for role in (

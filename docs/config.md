@@ -159,6 +159,39 @@ provider = "local"
 model = "gemma4:26b"
 required_capabilities = ["structured_output"]
 
+# Offline Recall distillation uses raw/high conversation inputs and is strictly
+# local-only: a remote route is forbidden even when a role/data-class egress
+# opt-in exists for another Recall role.
+[llm.roles."recall.distill.teacher.a"]
+capability = "generation"
+provider = "local"
+model = "maxwell1500/ornith-35b:Q5_K_M"
+required_capabilities = ["structured_output"]
+
+[llm.roles."recall.distill.teacher.b"]
+capability = "generation"
+provider = "local"
+model = "gpt-oss:20b"
+required_capabilities = ["structured_output"]
+
+[llm.roles."recall.distill.teacher.c"]
+capability = "generation"
+provider = "local"
+model = "gemma4:26b"
+required_capabilities = ["structured_output"]
+
+[llm.roles."recall.distill.answer_generator"]
+capability = "generation"
+provider = "local"
+model = "maxwell1500/ornith-35b:Q5_K_M"
+required_capabilities = ["structured_output"]
+
+[llm.roles."recall.distill.utility_judge"]
+capability = "generation"
+provider = "local"
+model = "gemma4:26b"
+required_capabilities = ["structured_output"]
+
 [llm.roles."research.planner"]
 capability = "generation"
 provider = "local"
@@ -445,6 +478,21 @@ semantic = true
 judge_mode = "auto"
 session_ttl_seconds = 604800
 
+[recall.distillation]
+# Offline-only. This controls bounded dataset construction, not live policy
+# mutation; promotion remains gated by replay, shadow, and canary evidence.
+enabled = false
+chunk_size = 25
+max_input_bytes = 24000
+max_candidates = 200
+hard_floor_rallies = 1000
+hard_floor_days = 30
+hard_floor_windows = 3
+hard_floor_verified_labels = 500
+hard_floor_per_class = 100
+rollout_stages = [5, 25, 100]
+canary_min_days = 7
+
 [recall.processor]
 # Keep false until pointer/rich precision and related-memory recall pass the
 # locked gate. Shadow collection never changes injection, while auto_enable
@@ -582,6 +630,15 @@ system-namespace excerpt is `system/high` and currently runs locally only:
 until generation supports separate raw-query and system-excerpt preflight, a
 remote system case is denied before any backend call even when egress opt-ins
 exist.
+
+Offline Recall distillation is separately fixed to
+`recall.distill.teacher.a`, `recall.distill.teacher.b`,
+`recall.distill.teacher.c`, `recall.distill.answer_generator`, and
+`recall.distill.utility_judge`. All five roles require structured output and
+must resolve to local providers. Their inputs are `raw/high`; remote routing
+and raw egress are forbidden rather than opt-in capable. The answer generator
+and utility judge use distinct local model identities so matched answer pairs
+and their blind utility verdict do not share one route.
 
 Deep Retrieval v1 requery generation is fixed by
 `llm.roles."research.deep_retrieval_requery"`; Decision Router model fields do
