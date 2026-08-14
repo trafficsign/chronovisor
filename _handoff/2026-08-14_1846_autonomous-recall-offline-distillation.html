@@ -61,13 +61,13 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#f3f1eb;border:1px so
 </head>
 <body>
 <script type="application/json" id="plan-meta">
-{"task_id":"plan_85e0b9241c9e4107b6bbae9aedf2eb33","created_at":"2026-08-14T18:46:47+09:00","状態":"ready","slug":"autonomous-recall-offline-distillation"}
+{"task_id":"plan_85e0b9241c9e4107b6bbae9aedf2eb33","created_at":"2026-08-14T18:46:47+09:00","状態":"blocked","slug":"autonomous-recall-offline-distillation"}
 </script>
 
 <header>
 <h1>Plan: <span id="plan-title">Chronovisor 自律Recall：オフライン教師蒸留・継続学習・高速配信</span></h1>
 <div class="meta-bar">
-<span class="badge" data-bind="状態" data-state="ready">ready</span>
+<span class="badge" data-bind="状態" data-state="blocked">blocked</span>
 <span><code data-bind="task_id">plan_85e0b9241c9e4107b6bbae9aedf2eb33</code></span>
 <span data-bind="created_at">2026-08-14T18:46:47+09:00</span>
 </div>
@@ -359,14 +359,14 @@ user query ─► BM25/anchor (+ budget内だけ semantic/graph)
 <section data-section="実行手順">
 <h2>実行手順</h2>
 <ol class="checklist">
-<li><input type="checkbox"><span><strong>P0 — Baseline と契約を凍結する。</strong> native rally/独立session-task cluster/answer-utility eligible率/期間/host、verified relevance/utility発生率、candidate recall、wrong-domain injection、strong-anchor rescue、coverage、abstain、p50/p95/timeoutをimmutable artifactへ記録する。rally-v1境界、cluster基準hard floor/power analysis、feature whitelist、closed predicate、teacher schema/input上限、order-bias上限、load skew、fixed cohort/min events/CI/window、昇格閾値、privacy preflightを固定する。</span></li>
-<li><input type="checkbox"><span><strong>P1 — Historical rally/candidate dataset を実装する。</strong> Raw v2からRallyManifestを増分生成し、assistant/tool EpisodeProjectionだけのderived FTS5を固定tokenizer/normalizer revisionで構築する。current Page/semantic/graphを使わず、Q_tより前だけのwide poolを再現可能なsnapshotとして保存する。</span></li>
+<li><input type="checkbox" checked><span><strong>P0 — Baseline と契約を凍結する。</strong> native rally/独立session-task cluster/answer-utility eligible率/期間/host、verified relevance/utility発生率、candidate recall、wrong-domain injection、strong-anchor rescue、coverage、abstain、p50/p95/timeoutをimmutable artifactへ記録する。rally-v1境界、cluster基準hard floor/power analysis、feature whitelist、closed predicate、teacher schema/input上限、order-bias上限、load skew、fixed cohort/min events/CI/window、昇格閾値、privacy preflightを固定する。</span></li>
+<li><input type="checkbox" checked><span><strong>P1 — Historical rally/candidate dataset を実装する。</strong> Raw v2からRallyManifestを増分生成し、assistant/tool EpisodeProjectionだけのderived FTS5を固定tokenizer/normalizer revisionで構築する。current Page/semantic/graphを使わず、Q_tより前だけのwide poolを再現可能なsnapshotとして保存する。</span></li>
 <li><input type="checkbox"><span><strong>P2 — Structural/outcome verifier を実装する。</strong> Raw hash/range、event index、exact path/full SHA/task UUID、receipt-bound tool/test、verified supports/contradicts/supersedes/revertsの閉じたpredicateだけでstrong positive/hard negative/uncertainを決める。</span></li>
-<li><input type="checkbox"><span><strong>P3 — 三教師とanswer-utility batchを実装する。</strong> rally/candidateをstable local rolesへ決定的に分割し、固定15% probe、original exposure E_tのadd/remove、同一generator条件のmatched A0/A1、blind order-swap judge、single-candidate attribution、strict output/input上限、route/prompt revision、local-only preflight、foreground lease、再開可能cursorを通す。</span></li>
-<li><input type="checkbox"><span><strong>P4 — Append-only dataset と rolling-origin split を実装する。</strong> hash-chain ledger、rally単位weight正規化、同一session/task/entity component、embargo、validation/locked test、future/A_t feature exclusion、offline/live feature parityを実装する。teacher-onlyは重み上限付きuntrusted train層、uncertainは完全除外として隔離する。</span></li>
+<li><input type="checkbox" checked><span><strong>P3 — 三教師とanswer-utility batchを実装する。</strong> rally/candidateをstable local rolesへ決定的に分割し、固定15% probe、original exposure E_tのadd/remove、同一generator条件のmatched A0/A1、blind order-swap judge、single-candidate attribution、strict output/input上限、route/prompt revision、local-only preflight、foreground lease、再開可能cursorを通す。</span></li>
+<li><input type="checkbox" checked><span><strong>P4 — Append-only dataset と rolling-origin split を実装する。</strong> hash-chain ledger、rally単位weight正規化、同一session/task/entity component、embargo、validation/locked test、future/A_t feature exclusion、offline/live feature parityを実装する。teacher-onlyは重み上限付きuntrusted train層、uncertainは完全除外として隔離する。</span></li>
 <li><input type="checkbox"><span><strong>P5 — 初期 student policy を作る。</strong> 既存 logistic/calibrator を新verified featuresとanswer-utility targetで再計算し、fine-tuneなしでimmutable weight/threshold artifactとLKG pointerを生成する。</span></li>
-<li><input type="checkbox"><span><strong>P6 — ライブ fast path を実装する。</strong> P6aはBM25/anchor + tiny policy + 0–3 cards/abstainでSLOを満たす。semantic/graphはshadowに置き、価値を証明した場合だけP6bのsingle-deadline並列fan-outへ進む。usage prior/negative feedback/sync model/Raw scanをauthorityから外す。</span></li>
-<li><input type="checkbox"><span><strong>P7 — 継続 job とsingle-writerを実装する。</strong> Raw watermarkからbounded chunkを処理し、24h/label thresholdでcandidateを生成する。旧growth/improvement/calibrationのactive mutation entrypointをhard offにし、新registryだけがlive policyを更新できることをテストする。</span></li>
+<li><input type="checkbox" checked><span><strong>P6 — ライブ fast path を実装する。</strong> P6aはBM25/anchor + tiny policy + 0–3 cards/abstainでSLOを満たす。semantic/graphはshadowに置き、価値を証明した場合だけP6bのsingle-deadline並列fan-outへ進む。usage prior/negative feedback/sync model/Raw scanをauthorityから外す。</span></li>
+<li><input type="checkbox" checked><span><strong>P7 — 継続 job とsingle-writerを実装する。</strong> Raw watermarkからbounded chunkを処理し、24h/label thresholdでcandidateを生成する。旧growth/improvement/calibrationのactive mutation entrypointをhard offにし、新registryだけがlive policyを更新できることをテストする。</span></li>
 <li><input type="checkbox"><span><strong>P8 — Shadow と自動 canary/rollback を完走する。</strong> locked replay → shadow → 5% → 25% → 100%をsession hashで実行し、各gate、worker health、active/candidate/LKG policy idのAPI/Dashboard表示、rollback drillを保存する。</span></li>
 <li><input type="checkbox"><span><strong>P9 — 旧経路を整理する。</strong> 100%運用と rollback drill 完了後だけ同期 gate/rewriter/judge、feedback usage-prior、Field active learning、manual review authority を削除し、docs/config/dashboard を正本へ合わせる。</span></li>
 </ol>
@@ -443,13 +443,16 @@ user query ─► BM25/anchor (+ budget内だけ semantic/graph)
 
 <section class="blockers" data-section="ブロッカー">
 <h2>ブロッカー（発生時のみ）</h2>
-<ul><li>なし</li></ul>
+<ul>
+<li>P2/P5/P8/P9は未完。P0の実測ではverified labelとexact outcomeが0件で、candidate recall・wrong-domain・strong-anchor metricも未生成。教師多数決や人手reviewで埋めず、authenticなprospective exposure/outcomeが蓄積するまでcapture-onlyで自動停止する。</li>
+<li>running Dashboard archiveは<code>1c38bc25d3ddd9387eb9c69c85da348f6ed283e2</code>、GitHub正本は<code>88f301a37811499133ff6bc0a47aa7a125fda0fd</code>で<code>drift=true</code>。push指示がないため、本worktreeの実装を本番へ反映・再起動していない。</li>
+</ul>
 </section>
 
 <section data-section="受け渡しメモ">
 <h2>受け渡しメモ（次担当へ）</h2>
 <ul>
-<li>この文書は設計合意用の <code>ready</code> plan。実装は未着手で、ユーザーとの次回議論後に P0 から開始する。</li>
+<li>P0/P1/P3/P4/P6/P7の実装とfocused検証は完了。現在は安全なcapture-onlyで、authentic outcome producer・verified dataset・candidate policyが揃うまでP2/P5/P8/P9を進めない。</li>
 <li>最重要条件は完全自立。human review を安全弁として復活させず、不確実なら abstain/昇格待ち/LKG維持で処理する。</li>
 <li>Kimi K3は2026-08-14にラリー単位案を採用推奨（conditional OK）と判定。条件は決定的rally境界、A_tのoffline-only化、同一session component、teacher input上限であり、本planへhard gateとして反映済み。</li>
 <li>初期版の新規面は <code>recall_distillation.py</code>、I/Oを分離した <code>recall_distillation_store.py</code>、focused testsに限定する。SQLite FTS以外の新DB/別サービスを作らず、既存 search/Evidence/calibration/atomic policy/sleep cycle を再利用する。</li>
@@ -464,6 +467,13 @@ user query ─► BM25/anchor (+ budget内だけ semantic/graph)
 <li><time>2026-08-14 18:46</time><span>正規 generator で plan を作成。ユーザー案、既存 Recall/Evidence/Raw/learning 調査、DeepSeek群の調査、Kimi K3 の反証を一つの自律設計へ統合。</span></li>
 <li><time>2026-08-14 19:05</time><span>実装整合レビューを反映。current index由来の未来漏洩を止めるhistorical FTS、user query/Evidence authority分離、closed predicates、cold-start hard floor、feature parity、single-writerをhard gateへ追加。</span></li>
 <li><time>2026-08-14 19:30</time><span>Kimi K3のconditional OKを受け、各ラリーを基本ケースに変更。RallyManifest、A0/A1 answer utility、session-group split、rally weight正規化、judge/order/attribution bias gateを追加。</span></li>
+<li><time>2026-08-14 19:47</time><span>実装開始。P0監査で過去のRecall exposureはpage IDからRaw atomへexact joinできないことを確認したため、過去ラリーはrelevance-only、answer utilityはprospective exact exposure receiptがあるラリーだけにfail-closed化する。</span></li>
+<li><time>2026-08-14 21:50</time><span>P0 baseline <code>ad99a7441e604f55d0ef2f366a47d3a4ddc17a5e99843a6891a01d59f6e4729e</code>をseal。Raw watermark <code>d8c05eba5c0a8416ba6fbba0c7d5f9a422e730de11bae9afad8391f6507cf0c6</code>、4,691 rally、123 session、82日、6 window、answer-utility eligible 0、verified label 0。coverage 68.33%、abstain 31.44%、p50 1,396ms、p95 3,750ms、timeout 19.82%、runtime drift=trueを記録し、P5をfail-closedで停止した。</span></li>
+<li><time>2026-08-14 21:50</time><span>P1/P3/P4/P6/P7を実装。historical FTS、三local教師batch、counterfactual、append-only/hash-chain、rolling split、180ms BM25/anchor fast path、exact/shadow receipt、single-writer、sealed rollout/rollback、health/Dashboardを接続した。authentic outcome authorityがない行はteacher-onlyのままにし、昇格へ使わない。</span></li>
+<li><time>2026-08-14 21:50</time><span>実Raw capture-only smokeを実施。初回監査で同じsealed Rawを4回再展開して約12分かかったため、物理segment一括読込とchunk内projection再利用へ修正。最終full writeは45.928秒、25 manifest、25 candidate、model call 0、hash-chain正常、capture-onlyを確認した。</span></li>
+<li><time>2026-08-14 21:50</time><span>最終隔離focused suiteは575 passed、全変更PythonのRuff、py_compile、git diff checkは成功。全体suiteは4,950 passed / 14 failed / 1 skippedで、残件は既存のarchitecture baseline、関数長、live Ollama依存の既知failure。今回追加したprivate cross-layer edgeと関数長超過は解消済み。</span></li>
+<li><time>2026-08-14 21:50</time><span>Kimi K3の初回conditional OKは設計へ反映済み。utility gateの再照会はprovider 429で完了しなかったため、未確認部分を推測で合格にせず、P2/P5/P8/P9を未checkのままblockedへ移した。</span></li>
+<li><time>2026-08-14 21:51</time><span>実装をcommit <code>17dbd42</code>（<code>feat(recall): add autonomous offline distillation</code>）として保存。push・LaunchAgent再起動・live policy切替は行っていない。</span></li>
 </ol>
 </section>
 
