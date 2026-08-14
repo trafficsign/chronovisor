@@ -61,13 +61,13 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#f3f1eb;border:1px so
 </head>
 <body>
 <script type="application/json" id="plan-meta">
-{"task_id":"plan_85e0b9241c9e4107b6bbae9aedf2eb33","created_at":"2026-08-14T18:46:47+09:00","状態":"blocked","slug":"autonomous-recall-offline-distillation"}
+{"task_id":"plan_85e0b9241c9e4107b6bbae9aedf2eb33","created_at":"2026-08-14T18:46:47+09:00","状態":"running","slug":"autonomous-recall-offline-distillation"}
 </script>
 
 <header>
 <h1>Plan: <span id="plan-title">Chronovisor 自律Recall：オフライン教師蒸留・継続学習・高速配信</span></h1>
 <div class="meta-bar">
-<span class="badge" data-bind="状態" data-state="blocked">blocked</span>
+<span class="badge" data-bind="状態" data-state="running">running</span>
 <span><code data-bind="task_id">plan_85e0b9241c9e4107b6bbae9aedf2eb33</code></span>
 <span data-bind="created_at">2026-08-14T18:46:47+09:00</span>
 </div>
@@ -446,16 +446,16 @@ user query ─► BM25/anchor
 <section class="blockers" data-section="ブロッカー">
 <h2>ブロッカー（発生時のみ）</h2>
 <ul>
-<li>P2/P4のv2実装は完了した。2026-08-15 00:10時点のlive private artifactは実Raw 4,747 rally中、manifest 3,000件、candidate snapshot 600件、teacher call 2件、uncertain label 2件、counterfactual 0件。manifest backlog 1,747件、candidate backlog 4,147件で、teacher/probe/blind-CFの固定floorは未達である。active/LKGは同じlegacy bootstrap、candidateは空のまま、設計どおり<code>capture_only</code>で停止している。</li>
-<li>本番configには<code>[recall.distillation]</code>と5つのlocal structured roleを衝突検査付きmigrationで追加したが、<code>enabled=false</code>を維持している。実装commitは<code>19b9845</code>、config migrationは<code>13eb518</code>、cold-start順序修正は<code>0328613</code>、local worker到達性修正は<code>d1c7ecf</code>。running Dashboard archiveは<code>1c38bc25d3ddd9387eb9c69c85da348f6ed283e2</code>、GitHub正本は<code>88f301a37811499133ff6bc0a47aa7a125fda0fd</code>、local HEADは<code>d1c7ecf0bcca9b1c865a0870e2cd8174b9f20fa2</code>で11 commit ahead。push指示がないため本番package・LaunchAgentを更新していない。</li>
-<li>P5はpush後のruntime identity一致と残りbackfill、teacher/probe/blind-CF floorを必要とする。P8/P9はその後のshadowと各7日・500 pairedの5%/25%/100% gate、rollback drillが必要である。push権限と実時間の観測が外部ブロッカーであり、データや時間を偽装して完了扱いしない。</li>
+<li>外部ブロッカーはない。<code>qwen3.8:27b-mxfp8</code>（digest <code>464021588235…</code>）をOllama 0.32.12へ導入し、Ornith 35Bの現行role/defaultをQwenへ交換したcommit <code>da775a7</code>をGitHub <code>main</code>へpushした。Dashboard/LAN Dashboard/Ingest Drain/Convergeの実行archiveも同commitへ更新し、runtime identityは<code>drift=false</code>である。</li>
+<li>2026-08-15 07:18時点のlive private artifactは実Raw 4,837 rally中、manifest 3,500件、candidate snapshot 700件、label ledger 3件。enable後のcold-start run <code>c73d1048…</code>は500 rally・100 candidate・3 teacher call・1 labelをatomic追加した。manifest backlog 1,337件、candidate backlog 4,137件、counterfactual 0件で、<code>capture_only</code>・<code>chronological_split_incomplete</code>・rollout 0を維持している。active/LKGは同じlegacy bootstrap <code>a0893f2e…</code>、candidate policyは空である。</li>
+<li>P5は残りbackfillとteacher/probe/blind-CFの固定floorを必要とする。P8/P9はその後のshadowと各7日・500 pairedの5%/25%/100% gate、rollback drillが必要である。Convergeと日次Sleepが自動継続中であり、データや時間を偽装して完了扱いしない。</li>
 </ul>
 </section>
 
 <section data-section="受け渡しメモ">
 <h2>受け渡しメモ（次担当へ）</h2>
 <ul>
-<li>P0–P4/P6/P7のv2実装と検証は完了。P5は固定floor未達時の自動停止まで実証済みで、teacher/probe/blind-CF backfillが揃うまでcandidateを作らない。local workerは実Ollama routeでschema-valid label、returned model、model digestを返すところまで確認済み。P8/P9はpush後の実運用gate完走まで未checkを維持する。</li>
+<li>P0–P4/P6/P7のv2実装と検証、本番push、Qwen 3.8 MLXへの交換、distillation有効化は完了。P5は固定floor未達時の自動停止まで実証済みで、teacher/probe/blind-CF backfillが揃うまでcandidateを作らない。Qwen workerとclassification primaryはthinking有効・repair 0でschema-valid JSON、returned model、model digestを返すところまで確認済み。P8/P9は実運用gate完走まで未checkを維持する。</li>
 <li>最重要条件は完全自立。human review を安全弁として復活させず、不確実なら abstain/昇格待ち/LKG維持で処理する。</li>
 <li>Kimi K3は2026-08-14にラリー単位案を採用推奨（conditional OK）と判定。条件は決定的rally境界、A_tのoffline-only化、同一session component、teacher input上限であり、本planへhard gateとして反映済み。</li>
 <li>初期版の新規面は <code>recall_distillation.py</code>、I/Oを分離した <code>recall_distillation_store.py</code>、focused testsに限定する。SQLite FTS以外の新DB/別サービスを作らず、既存 search/Evidence/calibration/atomic policy/sleep cycle を再利用する。</li>
@@ -489,6 +489,9 @@ user query ─► BM25/anchor
 <li><time>2026-08-15 00:08</time><span>実worker到達性を調査し、Sleep jobを<code>mode=auto</code>としてcapacity gateへ誤投入していた点、Ollama chatのreturned modelをadapterが捨てていた点、12KB payloadへ固定system/schema分の余白がなくpreflightで恒常rejectしていた点を確定。既存Sleep admission・foreground preemptionを維持し、returned model伝播、18KB session ceiling、cold teacher 120秒/CF 45秒の分離へ最小修正した。</span></li>
 <li><time>2026-08-15 00:09</time><span>実local route <code>gpt-oss:20b</code>でschema-valid teacher label 1件を18.559秒で取得し、route identity/model digest伝播を確認。続く実Raw cold-startは139.574秒で500 manifest・100 candidateをatomic追加し、会話foreground到来でteacherをcancelして<code>deferred</code>へ戻った。回答優先・次回再開・candidate非公開の契約どおりで、live累計はmanifest 3,000件、candidate 600件、uncertain label 2件となった。</span></li>
 <li><time>2026-08-15 00:10</time><span>local worker修正をcommit <code>d1c7ecf</code>（<code>fix(recall): unblock local distillation workers</code>）として保存。関連13 suiteは802 passed、Ruff・py_compile・diff-check成功。large-function policyの単独失敗は既存<code>LocalStructuredSession._run_impl</code> 300行 / baseline上限299行で、今回のdistillation chunkは292行と上限内。PlanはP5/P8/P9とpush後のlive gateを残して<code>blocked</code>を維持する。</span></li>
+<li><time>2026-08-15 07:10</time><span>Ollamaを0.32.12へ更新し、MLX版<code>qwen3.8:27b-mxfp8</code>（27.8B、MXFP8、digest <code>464021588235c36e23bd48a480c6c306ed1fc1e0619e97998267494a1be68de4</code>）を導入。QwenのthinkingとOllama JSON grammarの競合を実機で切り分け、初回は<code>think=true</code>・transport grammar省略・同じclient-side schema検証、修復だけ<code>think=false</code>・strict grammarへ戻す共有policy v10を実装した。実teacher workerとclassification primaryはいずれもrepair 0でschema-valid JSONを返した。</span></li>
+<li><time>2026-08-15 07:12</time><span>モデル交換とQwen structured compatibilityをcommit <code>da775a7</code>（<code>feat(models): adopt Qwen 3.8 MLX</code>）としてGitHub <code>main</code>へpush。統合suiteは488 passed、Ruff・py_compile・diff-check成功。Dashboard/LAN Dashboard/Ingest Drainを再起動し、3 archiveの<code>direct_url.json</code>が<code>da775a7</code>、materialized healthが<code>runtime_commit=expected_commit</code>・<code>drift=false</code>であることを確認した。</span></li>
+<li><time>2026-08-15 07:18</time><span>live configの<code>[recall.distillation].enabled</code>だけを<code>true</code>へ変更し、5つのroleがlocal structured、teacher 3 digestとgenerator/judge digestがdistinctであることを再検証してConvergeを起動。cold-start run <code>c73d1048…</code>は500 rally・100 candidate・3 teacher call・1 labelを追加し、seal済みstateを<code>capture_only</code>・rollout 0・candidateなし・legacy LKG維持で更新した。Planは自動backfill継続中のため<code>running</code>へ更新し、P5/P8/P9は未checkを維持する。</span></li>
 </ol>
 </section>
 
