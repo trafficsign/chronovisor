@@ -312,7 +312,7 @@ user query ─► BM25/anchor
 <h2>継続学習ループ</h2>
 <ol>
 <li>Raw commit 後、sleep cycle の既存 bounded background lane が watermark 以後の新規ラリーを少量ずつRallyManifest化する。初回backfill中だけ既存30分Convergeから5分上限の同じchunkを追加実行し、完了後は自動で日次laneだけへ戻す。</li>
-<li>初回全ラリーからraw watermark・feature revision・active model cohortへ束縛した固定chronological/grouped split-planを一度sealする。labelが増えてもsplitを振り直さず、locked-test probe/counterfactual quotaを先に満たす。日次laneとConverge laneは同じnonblocking writer lockを使い、競合時はcursorを進めずdeferする。</li>
+<li>初回全ラリーからraw watermark・feature revision・active model cohortへ束縛した固定chronological/grouped split-planを、各cohort identityにつき一度sealする。labelが増えただけではsplitを振り直さず、model digest・Raw watermark・feature revisionが変わった時だけ新cohortとして再sealする。locked-test probe/counterfactual quotaを先に満たし、日次laneとConverge laneは同じnonblocking writer lockを使い、競合時はcursorを進めずdeferする。</li>
 <li>各 cycle で point-in-time pool を作り、三教師の決定的 shard と probe を処理する。foreground Ollama lease を最優先し、teacherは次chunk取得前に譲る。in-flight generationは短い上限内で完走させるか結果を破棄し、pause/resume可能とは仮定しない。</li>
 <li>teacher-only label、probe、blind counterfactual、authentic negative-vetoをauthority別にledgerへsealする。モデル出力をverifiedへ昇格せず、失敗はその chunk だけ再開可能にし、cursor を先送りしない。</li>
 <li>24時間または preregister 済みのteacher/probe/counterfactual hard floorに達したら、probeを除いたtrain splitだけでcandidate policyを作る。validationだけでthresholdを選び、locked testは学習にも調整にも使わない。</li>
@@ -446,15 +446,16 @@ user query ─► BM25/anchor
 <section class="blockers" data-section="ブロッカー">
 <h2>ブロッカー（発生時のみ）</h2>
 <ul>
-<li>P2/P4のv2実装は完了した。P5は実Raw 4,747 rallyに対してteacher/probe/blind-CFの固定floorがまだ未生成のため、設計どおり<code>capture_only</code>で停止している。P8/P9は本番反映後のshadowおよび各7日・500 pairedの5%/25%/100% gate、rollback drillが必要であり、データや時間を偽装して完了扱いしない。</li>
-<li>実装commitは<code>19b9845</code>。running Dashboard archiveは<code>1c38bc25d3ddd9387eb9c69c85da348f6ed283e2</code>、GitHub正本は<code>88f301a37811499133ff6bc0a47aa7a125fda0fd</code>で<code>drift=true</code>。push指示がないため、本worktreeの実装を本番へ反映・再起動していない。push権限と実時間のcanary観測が現在の外部ブロッカー。</li>
+<li>P2/P4のv2実装は完了した。2026-08-15 00:10時点のlive private artifactは実Raw 4,747 rally中、manifest 3,000件、candidate snapshot 600件、teacher call 2件、uncertain label 2件、counterfactual 0件。manifest backlog 1,747件、candidate backlog 4,147件で、teacher/probe/blind-CFの固定floorは未達である。active/LKGは同じlegacy bootstrap、candidateは空のまま、設計どおり<code>capture_only</code>で停止している。</li>
+<li>本番configには<code>[recall.distillation]</code>と5つのlocal structured roleを衝突検査付きmigrationで追加したが、<code>enabled=false</code>を維持している。実装commitは<code>19b9845</code>、config migrationは<code>13eb518</code>、cold-start順序修正は<code>0328613</code>、local worker到達性修正は<code>d1c7ecf</code>。running Dashboard archiveは<code>1c38bc25d3ddd9387eb9c69c85da348f6ed283e2</code>、GitHub正本は<code>88f301a37811499133ff6bc0a47aa7a125fda0fd</code>、local HEADは<code>d1c7ecf0bcca9b1c865a0870e2cd8174b9f20fa2</code>で11 commit ahead。push指示がないため本番package・LaunchAgentを更新していない。</li>
+<li>P5はpush後のruntime identity一致と残りbackfill、teacher/probe/blind-CF floorを必要とする。P8/P9はその後のshadowと各7日・500 pairedの5%/25%/100% gate、rollback drillが必要である。push権限と実時間の観測が外部ブロッカーであり、データや時間を偽装して完了扱いしない。</li>
 </ul>
 </section>
 
 <section data-section="受け渡しメモ">
 <h2>受け渡しメモ（次担当へ）</h2>
 <ul>
-<li>P0–P4/P6/P7のv2実装と検証は完了。P5は固定floor未達時の自動停止まで実証済みで、teacher/probe/blind-CF backfillが揃うまでcandidateを作らない。P8/P9はpush後の実運用gate完走まで未checkを維持する。</li>
+<li>P0–P4/P6/P7のv2実装と検証は完了。P5は固定floor未達時の自動停止まで実証済みで、teacher/probe/blind-CF backfillが揃うまでcandidateを作らない。local workerは実Ollama routeでschema-valid label、returned model、model digestを返すところまで確認済み。P8/P9はpush後の実運用gate完走まで未checkを維持する。</li>
 <li>最重要条件は完全自立。human review を安全弁として復活させず、不確実なら abstain/昇格待ち/LKG維持で処理する。</li>
 <li>Kimi K3は2026-08-14にラリー単位案を採用推奨（conditional OK）と判定。条件は決定的rally境界、A_tのoffline-only化、同一session component、teacher input上限であり、本planへhard gateとして反映済み。</li>
 <li>初期版の新規面は <code>recall_distillation.py</code>、I/Oを分離した <code>recall_distillation_store.py</code>、focused testsに限定する。SQLite FTS以外の新DB/別サービスを作らず、既存 search/Evidence/calibration/atomic policy/sleep cycle を再利用する。</li>
@@ -484,6 +485,10 @@ user query ─► BM25/anchor
 <li><time>2026-08-14 23:18</time><span>実Raw 4,747 rallyで最終cold-start full writeを再実測。56.047秒で500 manifest、100 candidate snapshot、model call 0、manifest backlog 4,247、candidate backlog 4,647、固定split-plan/run artifact/state sealを生成し、<code>capture_only</code>・P5 fail-closedを確認した。</span></li>
 <li><time>2026-08-14 23:18</time><span>関連隔離suiteは664 passed。全変更PythonのRuff、py_compile、diff-check、新規または増大した300行関数なしを確認。全体suiteは4,986 passed / 13 failed / 1 skippedで、失敗は既知のarchitecture正本ドリフト、既存2関数の行数上限、Hermes entrypoint docstring。Recall focused範囲は全件成功。</span></li>
 <li><time>2026-08-14 23:19</time><span>v2実装をcommit <code>19b9845</code>（<code>feat(recall): complete autonomous distillation v2</code>）として保存。push・LaunchAgent再起動・live policy切替は所有者指示がないため未実施。</span></li>
+<li><time>2026-08-15 00:03</time><span>既存configを上書きしないidempotent migrationをcommit <code>13eb518</code>として保存し、live configへ5つのlocal structured roleと<code>enabled=false</code>のdistillation節を適用。Convergeの長いmaintenanceがcold-startを先送りしていたため、同じ5分bounded chunkを先頭へ移しcommit <code>0328613</code>として保存した。</span></li>
+<li><time>2026-08-15 00:08</time><span>実worker到達性を調査し、Sleep jobを<code>mode=auto</code>としてcapacity gateへ誤投入していた点、Ollama chatのreturned modelをadapterが捨てていた点、12KB payloadへ固定system/schema分の余白がなくpreflightで恒常rejectしていた点を確定。既存Sleep admission・foreground preemptionを維持し、returned model伝播、18KB session ceiling、cold teacher 120秒/CF 45秒の分離へ最小修正した。</span></li>
+<li><time>2026-08-15 00:09</time><span>実local route <code>gpt-oss:20b</code>でschema-valid teacher label 1件を18.559秒で取得し、route identity/model digest伝播を確認。続く実Raw cold-startは139.574秒で500 manifest・100 candidateをatomic追加し、会話foreground到来でteacherをcancelして<code>deferred</code>へ戻った。回答優先・次回再開・candidate非公開の契約どおりで、live累計はmanifest 3,000件、candidate 600件、uncertain label 2件となった。</span></li>
+<li><time>2026-08-15 00:10</time><span>local worker修正をcommit <code>d1c7ecf</code>（<code>fix(recall): unblock local distillation workers</code>）として保存。関連13 suiteは802 passed、Ruff・py_compile・diff-check成功。large-function policyの単独失敗は既存<code>LocalStructuredSession._run_impl</code> 300行 / baseline上限299行で、今回のdistillation chunkは292行と上限内。PlanはP5/P8/P9とpush後のlive gateを残して<code>blocked</code>を維持する。</span></li>
 </ol>
 </section>
 
