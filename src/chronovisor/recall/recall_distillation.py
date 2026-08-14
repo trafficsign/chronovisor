@@ -12,6 +12,7 @@ import signal
 import sys
 import threading
 import time
+import tomllib
 import unicodedata
 from collections import defaultdict, deque
 from collections.abc import Callable, Mapping, Sequence
@@ -27,6 +28,7 @@ from chronovisor.core import (
     pi_transcript,
     runtime_config,
 )
+from chronovisor.core.durable_state import atomic_write_bytes, sidecar_exclusive_lock
 from chronovisor.core.raw_store import (
     RawSegmentCorrupt,
     RawStore,
@@ -98,6 +100,39 @@ FORBIDDEN_LIVE_FEATURES = frozenset(
 )
 FALSE_VALUES = frozenset({"0", "false", "no", "off"})
 TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
+
+_DISTILLATION_ROLES = {
+    "recall.distill.teacher.a": {
+        "capability": "generation",
+        "provider": "local",
+        "model": "maxwell1500/ornith-35b:Q5_K_M",
+        "required_capabilities": ["structured_output"],
+    },
+    "recall.distill.teacher.b": {
+        "capability": "generation",
+        "provider": "local",
+        "model": "gpt-oss:20b",
+        "required_capabilities": ["structured_output"],
+    },
+    "recall.distill.teacher.c": {
+        "capability": "generation",
+        "provider": "local",
+        "model": "gemma4:26b",
+        "required_capabilities": ["structured_output"],
+    },
+    "recall.distill.answer_generator": {
+        "capability": "generation",
+        "provider": "local",
+        "model": "maxwell1500/ornith-35b:Q5_K_M",
+        "required_capabilities": ["structured_output"],
+    },
+    "recall.distill.utility_judge": {
+        "capability": "generation",
+        "provider": "local",
+        "model": "gemma4:26b",
+        "required_capabilities": ["structured_output"],
+    },
+}
 
 
 class DistillationError(ValueError):
@@ -423,6 +458,15 @@ class DistillationConfig:
     canary_min_days: int = 7
 
 
+def _default_distillation_config() -> dict[str, Any]:
+    defaults = dict(DistillationConfig().__dict__)
+    defaults["rollout_stages"] = list(defaults["rollout_stages"])
+    return defaults
+
+
+_DISTILLATION_CONFIG = _default_distillation_config()
+
+
 def _bool_override(value: str) -> bool:
     normalized = value.strip().lower()
     if normalized in FALSE_VALUES:
@@ -479,6 +523,106 @@ def load_distillation_config(config_path: Path | None = None) -> DistillationCon
         rollout_stages=(5, 25, 100),
         canary_min_days=positive("canary_min_days", 7),
     )
+
+
+def _migration_sections(
+    data: Mapping[str, Any],
+) -> tuple[Mapping[str, Any], Mapping[str, Any], Mapping[str, Any]]:
+    recall = data.get("recall", {})
+    llm = data.get("llm", {})
+    if not isinstance(recall, dict) or not isinstance(llm, dict):
+        raise DistillationError("distillation config parent conflicts")
+    distillation = recall.get("distillation", {})
+    roles = llm.get("roles", {})
+    if not isinstance(distillation, dict) or not isinstance(roles, dict):
+        raise DistillationError("distillation config section conflicts")
+    return recall, distillation, roles
+
+
+def _migration_additions(data: Mapping[str, Any]) -> tuple[str, ...]:
+    recall, distillation, roles = _migration_sections(data)
+    additions: list[str] = []
+    if "distillation" in recall:
+        expected = dict(_DISTILLATION_CONFIG)
+        enabled = distillation.get("enabled")
+        expected["enabled"] = enabled
+        if not isinstance(enabled, bool) or distillation != expected:
+            raise DistillationError("recall.distillation conflicts or is incomplete")
+    else:
+        additions.append("recall.distillation")
+    for name, expected in _DISTILLATION_ROLES.items():
+        if name not in roles:
+            additions.append(name)
+        elif not isinstance(roles[name], dict) or roles[name] != expected:
+            raise DistillationError(f"{name} conflicts or is incomplete")
+    return tuple(additions)
+
+
+def _migration_appendix(additions: Sequence[str]) -> bytes:
+    sections: list[str] = []
+    if "recall.distillation" in additions:
+        sections.append(
+            "\n".join(
+                ["[recall.distillation]"]
+                + [
+                    f"{name} = {json.dumps(value, ensure_ascii=False)}"
+                    for name, value in _DISTILLATION_CONFIG.items()
+                ]
+            )
+        )
+    for name, expected in _DISTILLATION_ROLES.items():
+        if name not in additions:
+            continue
+        sections.append(
+            "\n".join(
+                [f'[llm.roles."{name}"]']
+                + [
+                    f"{key} = {json.dumps(value, ensure_ascii=False)}"
+                    for key, value in expected.items()
+                ]
+            )
+        )
+    return ("\n\n".join(sections) + "\n").encode("utf-8")
+
+
+def migrate_distillation_config(
+    config_path: Path | None = None, *, apply: bool = False
+) -> dict[str, Any]:
+    """Append the exact disabled distillation configuration, or fail closed.
+
+    The result contains only stable section names; it never exposes config text.
+    """
+
+    path = runtime_config.active_config_file(config_path)
+    with sidecar_exclusive_lock(path):
+        try:
+            original = path.read_bytes()
+            parsed = tomllib.loads(original.decode("utf-8"))
+        except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+            raise DistillationError("config TOML is unavailable or invalid") from exc
+        additions = _migration_additions(parsed)
+        if not additions:
+            return {"status": "noop", "additions": []}
+        suffix = _migration_appendix(additions)
+        separator = b"" if not original or original.endswith(b"\n") else b"\n"
+        replacement = original + separator + b"\n" + suffix
+        try:
+            migrated = tomllib.loads(replacement.decode("utf-8"))
+        except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+            raise DistillationError("generated distillation config is invalid") from exc
+        if _migration_additions(migrated):
+            raise DistillationError("generated distillation config is incomplete")
+        result = {"status": "applied" if apply else "dry_run", "additions": list(additions)}
+        if not apply:
+            return result
+        atomic_write_bytes(path, replacement, backup=True)
+        try:
+            confirmed = tomllib.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+            raise DistillationError("migrated config failed read-back validation") from exc
+        if _migration_additions(confirmed):
+            raise DistillationError("migrated config read-back is incomplete")
+        return result
 
 
 def _timestamp(value: object, fallback: str) -> tuple[str, int]:
@@ -4689,6 +4833,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     preflight_parser.add_argument("--raw-dir", type=Path)
     preflight_parser.add_argument("--config", type=Path)
     preflight_parser.add_argument("--runtime-commit", default="")
+    migrate_parser = subcommands.add_parser("migrate-config")
+    migrate_parser.add_argument("--config", type=Path)
+    migrate_parser.add_argument("--apply", action="store_true")
     args = parser.parse_args(argv)
     if args.command == "preflight":
         result = preflight(
@@ -4698,6 +4845,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             runtime_commit=args.runtime_commit,
         )
         print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+    elif args.command == "migrate-config":
+        print(
+            json.dumps(
+                migrate_distillation_config(args.config, apply=args.apply),
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+        )
     return 0
 
 

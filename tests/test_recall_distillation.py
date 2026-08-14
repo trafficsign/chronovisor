@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import stat
+import tomllib
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import datetime
@@ -118,6 +119,64 @@ def test_config_is_off_by_default_and_environment_is_authoritative(
     assert not distill.distillation_enabled(configured)
     monkeypatch.setenv("CHRONOVISOR_RECALL_DISTILLATION", "true")
     assert distill.distillation_enabled(missing)
+
+
+def test_migrate_distillation_config_dry_run_apply_and_idempotence(
+    tmp_path: Path,
+) -> None:
+    config = tmp_path / "config.toml"
+    original = b'[runtime]\nsource = "keep"\n'
+    config.write_bytes(original)
+
+    dry_run = distill.migrate_distillation_config(config)
+    assert dry_run["status"] == "dry_run"
+    assert set(dry_run["additions"]) == {
+        "recall.distillation",
+        *distill._DISTILLATION_ROLES,
+    }
+    assert config.read_bytes() == original
+    assert not config.with_name("config.toml.bak").exists()
+
+    applied = distill.migrate_distillation_config(config, apply=True)
+    parsed = tomllib.loads(config.read_text(encoding="utf-8"))
+    assert applied == dry_run | {"status": "applied"}
+    assert parsed["recall"]["distillation"] == distill._DISTILLATION_CONFIG
+    assert parsed["llm"]["roles"] == distill._DISTILLATION_ROLES
+    assert config.with_name("config.toml.bak").read_bytes() == original
+    assert b"enabled = false\nchunk_size" in config.read_bytes()
+    assert b"canary_min_days = 7\n\n[llm.roles" in config.read_bytes()
+    assert distill.migrate_distillation_config(config) == {
+        "status": "noop",
+        "additions": [],
+    }
+    operator_enabled = config.read_text(encoding="utf-8").replace(
+        "enabled = false", "enabled = true", 1
+    )
+    config.write_text(operator_enabled, encoding="utf-8")
+    assert distill.migrate_distillation_config(config) == {
+        "status": "noop",
+        "additions": [],
+    }
+
+
+@pytest.mark.parametrize(
+    "contents",
+    (
+        b"[recall.distillation]\nenabled = false\n",
+        b'[llm.roles."recall.distill.teacher.a"]\nmodel = "wrong"\n',
+    ),
+)
+def test_migrate_distillation_config_rejects_partial_or_conflicting_sections(
+    tmp_path: Path, contents: bytes
+) -> None:
+    config = tmp_path / "config.toml"
+    config.write_bytes(contents)
+
+    with pytest.raises(distill.DistillationError):
+        distill.migrate_distillation_config(config, apply=True)
+
+    assert config.read_bytes() == contents
+    assert not config.with_name("config.toml.bak").exists()
 
 
 def test_local_worker_metadata_and_transient_failure_classification(
