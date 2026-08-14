@@ -83,6 +83,40 @@ def test_runtime_structured_bridge_builds_typed_request_and_preserves_metadata(
     assert seen[0][0] == "review.remote"
     assert seen[0][1].source.data_class is SourceDataClass.PAGE
     assert seen[0][1].source.sensitivity is SourceSensitivity.NORMAL
+    assert seen[0][1].format == {"type": "object"}
+
+
+def test_runtime_structured_bridge_allows_omitted_format(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[MessageGenerationRequest] = []
+
+    class Runtime:
+        def generate(
+            self, _role: str, request: MessageGenerationRequest
+        ) -> GenerationResult:
+            seen.append(request)
+            return GenerationResult("{}", "ollama", "configured")
+
+    monkeypatch.setattr(llm_config, "load_default_llm_runtime", lambda: Runtime())
+
+    ollama.runtime_structured_chat(
+        ({"role": "user", "content": "review"},),
+        runtime_role="review.local",
+        source_data_class="page",
+        source_sensitivity="normal",
+        format=None,
+        num_ctx=8192,
+        num_predict=64,
+        keep_alive="2m",
+        read_timeout_ms=60_000,
+        max_output_chars=1000,
+        temperature=0,
+        seed=0,
+        think=True,
+    )
+
+    assert seen[0].format is None
 
 
 def test_runtime_raw_bridge_builds_typed_request_and_preserves_metadata(
@@ -732,6 +766,26 @@ def test_chat_uses_fixed_structured_options_and_returns_final_content(
         "num_predict": 1024,
         "num_ctx": 32768,
     }
+
+
+def test_chat_omits_format_key_when_none(monkeypatch) -> None:
+    client = _ChatClient('{"decision":"apply"}')
+    monkeypatch.setattr(ollama, "_client", lambda: client)
+
+    result = ollama.chat(
+        [{"role": "user", "content": "decide"}],
+        model="qwen3.8:27b-mxfp8",
+        format=None,
+        num_ctx=32768,
+        num_predict=1024,
+        keep_alive="20m",
+        read_timeout_ms=120000,
+        max_output_chars=1000,
+        think=True,
+    )
+
+    assert result == '{"decision":"apply"}'
+    assert "format" not in client.payload
 
 
 def test_chat_forwards_explicit_reasoning_level(monkeypatch) -> None:

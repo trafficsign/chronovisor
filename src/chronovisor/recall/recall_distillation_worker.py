@@ -344,7 +344,7 @@ def run(payload: Mapping[str, Any]) -> dict[str, Any]:
             read_timeout_ms=deadline_ms,
             max_input_chars=MAX_SESSION_INPUT_BYTES,
             max_output_chars=MAX_OUTPUT_CHARS,
-            max_feedback_chars=512,
+            max_feedback_chars=1_024,
             max_responses=2,
             require_returned_model=True,
         )

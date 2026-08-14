@@ -261,7 +261,7 @@ class GenerationRequest:
 @dataclass(frozen=True)
 class MessageGenerationRequest:
     messages: tuple[Mapping[str, str], ...] = field(repr=False)
-    format: Mapping[str, Any] = field(repr=False)
+    format: Mapping[str, Any] | None = field(repr=False)
     source: SourceDataClassification
     num_ctx: int
     max_output_tokens: int

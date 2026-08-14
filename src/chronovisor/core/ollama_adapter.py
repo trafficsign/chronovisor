@@ -67,7 +67,7 @@ class OllamaAdapter:
         output = ollama.chat(
             [dict(message) for message in request.messages],
             model=model,
-            format=dict(request.format),
+            format=dict(request.format) if request.format is not None else None,
             num_ctx=request.num_ctx,
             num_predict=request.max_output_tokens,
             keep_alive=request.keep_alive,

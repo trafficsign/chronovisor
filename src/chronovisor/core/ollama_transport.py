@@ -496,7 +496,7 @@ def _chat_unlocked(
     *,
     client: Callable[[], httpx.Client],
     model: str,
-    format: dict[str, Any],
+    format: dict[str, Any] | None,
     num_ctx: int,
     num_predict: int,
     keep_alive: str,
@@ -532,7 +532,6 @@ def _chat_unlocked(
         "think": think,
         "shift": False,
         "truncate": False,
-        "format": format,
         "keep_alive": keep_alive,
         "options": {
             "temperature": temperature,
@@ -541,6 +540,8 @@ def _chat_unlocked(
             "num_ctx": num_ctx,
         },
     }
+    if format is not None:
+        payload["format"] = format
     timeout = httpx.Timeout(
         connect=10.0,
         read=read_timeout_ms / 1000,

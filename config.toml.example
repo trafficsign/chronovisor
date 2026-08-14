@@ -41,7 +41,7 @@ queue_size = 8
 [decision_router]
 # Production voters are selected only by the fixed classification roles below.
 # These model fields remain compatibility defaults for injected/offline routers.
-primary_model = "maxwell1500/ornith-35b:Q5_K_M"
+primary_model = "qwen3.8:27b-mxfp8"
 challenger_model = "muse-glimmer:30b-mxfp8-dflash"
 tie_break_model = "gemma4:26b"
 
@@ -125,7 +125,7 @@ model = "nvidia/Nemotron-3-Embed-1B-BF16"
 [llm.roles."librarian.review"]
 capability = "generation"
 provider = "local"
-model = "maxwell1500/ornith-35b:Q5_K_M"
+model = "qwen3.8:27b-mxfp8"
 
 [llm.roles."librarian.review.challenger"]
 capability = "generation"
@@ -135,7 +135,7 @@ model = "gpt-oss:20b"
 [llm.roles."recall.answer.runner"]
 capability = "generation"
 provider = "local"
-model = "maxwell1500/ornith-35b:Q5_K_M"
+model = "qwen3.8:27b-mxfp8"
 
 [llm.roles."recall.answer.scorer"]
 capability = "generation"
@@ -150,32 +150,32 @@ model = "ornith:9b-q4_K_M"
 [llm.roles."recall.certificate_judge.escalation"]
 capability = "generation"
 provider = "local"
-model = "maxwell1500/ornith-35b:Q5_K_M"
+model = "qwen3.8:27b-mxfp8"
 
 [llm.roles."ingest.generation"]
 capability = "generation"
 provider = "local"
-model = "maxwell1500/ornith-35b:Q5_K_M"
+model = "qwen3.8:27b-mxfp8"
 
 [llm.roles."lint.tag_repair"]
 capability = "generation"
 provider = "local"
-model = "maxwell1500/ornith-35b:Q5_K_M"
+model = "qwen3.8:27b-mxfp8"
 
 [llm.roles."lint.orphan_link"]
 capability = "generation"
 provider = "local"
-model = "maxwell1500/ornith-35b:Q5_K_M"
+model = "qwen3.8:27b-mxfp8"
 
 [llm.roles."recall.content_correction.proposer"]
 capability = "generation"
 provider = "local"
-model = "maxwell1500/ornith-35b:Q5_K_M"
+model = "qwen3.8:27b-mxfp8"
 
 [llm.roles."recall.auditor"]
 capability = "generation"
 provider = "local"
-model = "maxwell1500/ornith-35b:Q5_K_M"
+model = "qwen3.8:27b-mxfp8"
 
 [llm.roles."recall.gate"]
 capability = "generation"
@@ -190,7 +190,7 @@ model = "ornith:9b-q4_K_M"
 [llm.roles."recall.policy_proposer.primary"]
 capability = "generation"
 provider = "local"
-model = "maxwell1500/ornith-35b:Q5_K_M"
+model = "qwen3.8:27b-mxfp8"
 required_capabilities = ["structured_output"]
 
 [llm.roles."recall.policy_proposer.challenger"]
@@ -210,7 +210,7 @@ required_capabilities = ["structured_output"]
 [llm.roles."recall.distill.teacher.a"]
 capability = "generation"
 provider = "local"
-model = "maxwell1500/ornith-35b:Q5_K_M"
+model = "qwen3.8:27b-mxfp8"
 required_capabilities = ["structured_output"]
 
 [llm.roles."recall.distill.teacher.b"]
@@ -228,7 +228,7 @@ required_capabilities = ["structured_output"]
 [llm.roles."recall.distill.answer_generator"]
 capability = "generation"
 provider = "local"
-model = "maxwell1500/ornith-35b:Q5_K_M"
+model = "qwen3.8:27b-mxfp8"
 required_capabilities = ["structured_output"]
 
 [llm.roles."recall.distill.utility_judge"]
@@ -240,7 +240,7 @@ required_capabilities = ["structured_output"]
 [llm.roles."research.planner"]
 capability = "generation"
 provider = "local"
-model = "maxwell1500/ornith-35b:Q5_K_M"
+model = "qwen3.8:27b-mxfp8"
 required_capabilities = ["structured_output"]
 
 [llm.roles."research.challenge"]
@@ -258,14 +258,14 @@ required_capabilities = ["structured_output"]
 [llm.roles."research.deep_retrieval_requery"]
 capability = "generation"
 provider = "local"
-model = "maxwell1500/ornith-35b:Q5_K_M"
+model = "qwen3.8:27b-mxfp8"
 required_capabilities = ["structured_output"]
 
 # Each classification vote remains an independently replaceable single route.
 [llm.roles."classification.primary"]
 capability = "generation"
 provider = "local"
-model = "maxwell1500/ornith-35b:Q5_K_M"
+model = "qwen3.8:27b-mxfp8"
 
 [llm.roles."classification.challenger"]
 capability = "generation"
@@ -280,32 +280,32 @@ model = "gemma4:26b"
 [llm.roles."classification.anchor_set"]
 capability = "generation"
 provider = "local"
-model = "maxwell1500/ornith-35b:Q5_K_M"
+model = "qwen3.8:27b-mxfp8"
 
 [llm.roles."classification.decision"]
 capability = "generation"
 provider = "local"
-model = "maxwell1500/ornith-35b:Q5_K_M"
+model = "qwen3.8:27b-mxfp8"
 
 [llm.roles."classification.direct_decision"]
 capability = "generation"
 provider = "local"
-model = "maxwell1500/ornith-35b:Q5_K_M"
+model = "qwen3.8:27b-mxfp8"
 
 [llm.roles."classification.hierarchy"]
 capability = "generation"
 provider = "local"
-model = "maxwell1500/ornith-35b:Q5_K_M"
+model = "qwen3.8:27b-mxfp8"
 
 [llm.roles."classification.query"]
 capability = "generation"
 provider = "local"
-model = "maxwell1500/ornith-35b:Q5_K_M"
+model = "qwen3.8:27b-mxfp8"
 
 [llm.roles."classification.query_v2"]
 capability = "generation"
 provider = "local"
-model = "maxwell1500/ornith-35b:Q5_K_M"
+model = "qwen3.8:27b-mxfp8"
 
 [llm.roles."classification.anchor"]
 capability = "generation"

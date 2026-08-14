@@ -462,7 +462,7 @@ max_operations_without_audit = 3
 def test_decision_router_config_defaults_to_local_three_model_quorum() -> None:
     cfg = runtime_config.load_decision_router_config("/does/not/exist.toml")
 
-    assert cfg.primary_model == "maxwell1500/ornith-35b:Q5_K_M"
+    assert cfg.primary_model == "qwen3.8:27b-mxfp8"
     assert cfg.challenger_model == "muse-glimmer:30b-mxfp8-dflash"
     assert cfg.tie_break_model == "gemma4:26b"
     assert cfg.num_ctx == 114688

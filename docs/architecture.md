@@ -162,7 +162,7 @@ Exceptional system repair
   fixed LLM runtime role. If validation fails, it returns the exact schema errors to the same chat and
   allows at most two repair turns. Input, output, feedback, timeout, and context
   limits are fixed; exhaustion fails closed.
-- **Decision router**: asks `maxwell1500/ornith-35b:Q5_K_M` and
+- **Decision router**: asks `qwen3.8:27b-mxfp8` and
   `muse-glimmer:30b-mxfp8-dflash`
   for independent routine votes. Matching votes finish immediately. Otherwise
   `gemma4:26b` is used as a tie-breaker and any two matching votes form the

@@ -109,27 +109,27 @@ semantic_projection_max_child_bytes = 24000
 [llm.roles."ingest.generation"]
 capability = "generation"
 provider = "local"
-model = "maxwell1500/ornith-35b:Q5_K_M"
+model = "qwen3.8:27b-mxfp8"
 
 [llm.roles."lint.tag_repair"]
 capability = "generation"
 provider = "local"
-model = "maxwell1500/ornith-35b:Q5_K_M"
+model = "qwen3.8:27b-mxfp8"
 
 [llm.roles."lint.orphan_link"]
 capability = "generation"
 provider = "local"
-model = "maxwell1500/ornith-35b:Q5_K_M"
+model = "qwen3.8:27b-mxfp8"
 
 [llm.roles."recall.content_correction.proposer"]
 capability = "generation"
 provider = "local"
-model = "maxwell1500/ornith-35b:Q5_K_M"
+model = "qwen3.8:27b-mxfp8"
 
 [llm.roles."recall.auditor"]
 capability = "generation"
 provider = "local"
-model = "maxwell1500/ornith-35b:Q5_K_M"
+model = "qwen3.8:27b-mxfp8"
 
 [llm.roles."recall.gate"]
 capability = "generation"
@@ -144,7 +144,7 @@ model = "ornith:9b-q4_K_M"
 [llm.roles."recall.policy_proposer.primary"]
 capability = "generation"
 provider = "local"
-model = "maxwell1500/ornith-35b:Q5_K_M"
+model = "qwen3.8:27b-mxfp8"
 required_capabilities = ["structured_output"]
 
 [llm.roles."recall.policy_proposer.challenger"]
@@ -165,7 +165,7 @@ required_capabilities = ["structured_output"]
 [llm.roles."recall.distill.teacher.a"]
 capability = "generation"
 provider = "local"
-model = "maxwell1500/ornith-35b:Q5_K_M"
+model = "qwen3.8:27b-mxfp8"
 required_capabilities = ["structured_output"]
 
 [llm.roles."recall.distill.teacher.b"]
@@ -183,7 +183,7 @@ required_capabilities = ["structured_output"]
 [llm.roles."recall.distill.answer_generator"]
 capability = "generation"
 provider = "local"
-model = "maxwell1500/ornith-35b:Q5_K_M"
+model = "qwen3.8:27b-mxfp8"
 required_capabilities = ["structured_output"]
 
 [llm.roles."recall.distill.utility_judge"]
@@ -195,7 +195,7 @@ required_capabilities = ["structured_output"]
 [llm.roles."research.planner"]
 capability = "generation"
 provider = "local"
-model = "maxwell1500/ornith-35b:Q5_K_M"
+model = "qwen3.8:27b-mxfp8"
 required_capabilities = ["structured_output"]
 
 [llm.roles."research.challenge"]
@@ -213,7 +213,7 @@ required_capabilities = ["structured_output"]
 [llm.roles."research.deep_retrieval_requery"]
 capability = "generation"
 provider = "local"
-model = "maxwell1500/ornith-35b:Q5_K_M"
+model = "qwen3.8:27b-mxfp8"
 required_capabilities = ["structured_output"]
 
 # All research prompts are raw/high. Remote routes require the exact
@@ -252,7 +252,7 @@ required_capabilities = ["structured_output"]
 # counted as smaller-bucket evaluation evidence. The offline adoption evaluator
 # uses a separate exact-bucket mode. Production model selection comes only from
 # llm.roles.classification.primary/challenger/tie_break below.
-primary_model = "maxwell1500/ornith-35b:Q5_K_M"
+primary_model = "qwen3.8:27b-mxfp8"
 challenger_model = "muse-glimmer:30b-mxfp8-dflash"
 tie_break_model = "gemma4:26b"
 primary_keep_alive = "20m"

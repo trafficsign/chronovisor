@@ -831,6 +831,39 @@ def test_ollama_adapter_preserves_chat_and_embedding_paths(monkeypatch) -> None:
     assert seen["embed"] == (["a", "b"], "bge:test", 9000)
 
 
+def test_ollama_adapter_forwards_omitted_chat_format(monkeypatch) -> None:
+    seen: dict[str, object] = {}
+
+    def fake_chat(messages: list[dict[str, str]], **kwargs: object):
+        seen["messages"] = messages
+        seen["format"] = kwargs["format"]
+        return ollama.ChatResponse("{}", 1, 1, True, "stop", "qwen:test")
+
+    monkeypatch.setattr(ollama, "chat", fake_chat)
+    runtime = compose_ollama_runtime(generation_roles={"decision": "qwen:test"})
+
+    result = runtime.generate(
+        "decision",
+        MessageGenerationRequest(
+            messages=({"role": "user", "content": "vote"},),
+            format=None,
+            source=NORMAL_PAGE,
+            num_ctx=8192,
+            max_output_tokens=64,
+            keep_alive="10m",
+            timeout_ms=60_000,
+            max_output_chars=4000,
+            think=True,
+        ),
+    )
+
+    assert result.content == "{}"
+    assert seen == {
+        "messages": [{"role": "user", "content": "vote"}],
+        "format": None,
+    }
+
+
 def test_ollama_adapter_exposes_local_control_only_to_runtime(monkeypatch) -> None:
     adapter = OllamaAdapter()
     monkeypatch.setattr(ollama, "model_resource_lease", lambda **_kwargs: nullcontext())

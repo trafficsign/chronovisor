@@ -186,7 +186,7 @@ class LoadGenerator:
         target = (
             self._cpu_indexing
             if self.cohort == "cpu-indexing"
-            else self._ornith_35b
+            else self._qwen_27b
         )
         self.thread = threading.Thread(target=target, daemon=True)
         self.thread.start()
@@ -213,9 +213,9 @@ class LoadGenerator:
                 self.errors.append(f"{exc.__class__.__name__}: {exc}")
                 self.stop.wait(0.25)
 
-    def _ornith_35b(self) -> None:
+    def _qwen_27b(self) -> None:
         request = {
-            "model": "maxwell1500/ornith-35b:Q5_K_M",
+            "model": "qwen3.8:27b-mxfp8",
             "prompt": (
                 "Chronovisorの記憶検索設計について、同期経路の安全性、"
                 "検索品質、障害時縮退、運用監査の観点から詳細に分析せよ。"
@@ -262,7 +262,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--cohort",
-        choices=("idle", "cpu-indexing", "ornith-35b"),
+        choices=("idle", "cpu-indexing", "qwen-27b"),
         required=True,
     )
     parser.add_argument("--pairs", type=int, default=200)
