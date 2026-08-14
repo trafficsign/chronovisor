@@ -1,0 +1,433 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>Chronovisor 自律Recall：オフライン教師蒸留・継続学習・高速配信</title>
+<style>
+:root{
+  --fg:#1a1a1a; --muted:#666; --bg:#fafaf7; --accent:#2c5aa0;
+  --done:#888; --warn:#c0392b; --ok:#2e7d32; --rule:#e0e0d8;
+  --code-bg:#eee;
+}
+*{box-sizing:border-box}
+body{
+  font-family:-apple-system,'Hiragino Kaku Gothic ProN','Yu Gothic',sans-serif;
+  color:var(--fg); background:var(--bg);
+  max-width:880px; margin:2rem auto; padding:0 1.5rem;
+  line-height:1.7; font-size:15px;
+}
+header{
+  border-bottom:2px solid var(--rule); padding-bottom:1rem; margin-bottom:1.5rem;
+  position:sticky; top:0; background:var(--bg); z-index:10;
+}
+h1{font-size:1.6rem;margin:0 0 0.5rem 0}
+h2{font-size:1.15rem;margin:1.75rem 0 0.5rem 0;padding-bottom:0.25rem;border-bottom:1px solid var(--rule)}
+.meta-bar{display:flex;gap:1rem;font-size:0.85rem;color:var(--muted);flex-wrap:wrap;align-items:center}
+.meta-bar code{background:transparent;color:var(--muted)}
+.badge{
+  display:inline-block;padding:0.15rem 0.7rem;border-radius:1rem;
+  background:var(--accent);color:#fff;font-weight:600;font-size:0.8rem;
+  letter-spacing:0.02em;
+}
+.badge[data-state="ready"]{background:#16a085}
+.badge[data-state="running"]{background:#e67e22}
+.badge[data-state="done"]{background:var(--ok)}
+.badge[data-state="blocked"]{background:var(--warn)}
+section{margin:0 0 0.5rem 0}
+ul,ol{padding-left:1.5rem;margin:0.5rem 0}
+li{margin:0.25rem 0}
+ol.checklist{list-style:none;padding-left:0}
+ol.checklist li{display:flex;align-items:flex-start;gap:0.6rem;padding:0.15rem 0}
+ol.checklist input[type=checkbox]{margin-top:0.4rem;flex-shrink:0}
+ol.checklist input[type=checkbox]:checked + span{color:var(--done);text-decoration:line-through}
+section.rules{background:#f3f1eb;padding:0.5rem 1rem;border-radius:6px;font-size:0.9rem;border-left:3px solid var(--accent)}
+section.rules h2{border:none;margin-top:0.5rem}
+section.blockers ul{color:var(--warn)}
+ol.log{list-style:none;padding-left:0;font-family:'SF Mono',Menlo,monospace;font-size:0.85rem}
+ol.log li{padding:0.3rem 0;border-bottom:1px dashed var(--rule);display:flex;gap:0.75rem}
+ol.log time{color:var(--muted);flex-shrink:0;min-width:9.5rem}
+code{background:var(--code-bg);padding:0.1rem 0.35rem;border-radius:3px;font-size:0.9em;font-family:'SF Mono',Menlo,monospace}
+table{width:100%;border-collapse:collapse;margin:0.75rem 0;font-size:0.9rem}
+th,td{border:1px solid var(--rule);padding:0.45rem 0.55rem;vertical-align:top;text-align:left}
+th{background:#f3f1eb}
+pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#f3f1eb;border:1px solid var(--rule);border-radius:6px;padding:0.8rem;font-family:'SF Mono',Menlo,monospace;font-size:0.82rem;line-height:1.55}
+.decision{border-left:4px solid var(--ok);background:#edf7ee;padding:0.65rem 0.9rem;border-radius:4px}
+.small{font-size:0.86rem;color:var(--muted)}
+@media print{
+  body{font-size:11pt;max-width:none;margin:0;padding:1rem}
+  header{position:static}
+}
+</style>
+</head>
+<body>
+<script type="application/json" id="plan-meta">
+{"task_id":"plan_85e0b9241c9e4107b6bbae9aedf2eb33","created_at":"2026-08-14T18:46:47+09:00","状態":"ready","slug":"autonomous-recall-offline-distillation"}
+</script>
+
+<header>
+<h1>Plan: <span id="plan-title">Chronovisor 自律Recall：オフライン教師蒸留・継続学習・高速配信</span></h1>
+<div class="meta-bar">
+<span class="badge" data-bind="状態" data-state="ready">ready</span>
+<span><code data-bind="task_id">plan_85e0b9241c9e4107b6bbae9aedf2eb33</code></span>
+<span data-bind="created_at">2026-08-14T18:46:47+09:00</span>
+</div>
+</header>
+
+<section data-section="目的">
+<h2>目的</h2>
+<ul>
+<li>数か月分の committed Raw 会話履歴から「その時点の質問に、過去の何を出すべきだったか」を完全自動で再構成し、Recall の教師データを作る。</li>
+<li>重いローカルLLM三者はオフラインだけで使い、ライブ経路は既存の BM25・semantic・graph と小さな校正器だけにして、精度と 0.x 秒台の応答を両立する。</li>
+<li>新しい Raw が増えるたびにデータ、評価、ポリシー候補を増分更新し、時系列 holdout、shadow、canary、自動 rollback を通過したものだけを無人で昇格する。</li>
+<li>現在の「注入されたが無視された」を成功・失敗の正解として扱わず、時点整合性、構造リンク、その後の訂正・再質問・test failure・rollback など検証可能な結果から学習する。</li>
+</ul>
+</section>
+
+<section data-section="設計判断">
+<h2>設計判断（結論）</h2>
+<div class="decision">
+<strong>採用案は「オフライン三教師 + 構造検証 + 小さなライブ学生」。</strong>
+モデル合議そのものを真実にせず、Raw の provenance、時系列、exact link、後続 outcome で確定した行だけを昇格判定の正解データにする。教師だけの判断は分離したuntrusted train層で候補ポリシーへ使えるが、verified-only holdout/canaryを独立に通るまで本番ポリシーを動かさない。
+</div>
+<ul>
+<li>初期版では fine-tune しない。既存の純 Python logistic/calibrator と検索 feature を拡張し、重み・threshold・abstain margin の小さな immutable artifact を作る。</li>
+<li>三教師の主担当は query/candidate pair の固定 hash bucket で決定的にほぼ三等分する。固定 15% の probe だけを三者共通評価にし、model drift と calibration を測る。</li>
+<li>事実・index は Raw commit 後すぐ増分反映する。ランキングポリシーは turn ごとに書き換えず、24時間または十分な新規 verified label が溜まった時だけ batch 更新する。</li>
+<li>人間の確認、gold 作成、採否ボタン、明示 feedback は昇格経路に置かない。通常会話で自然発生した訂正等は outcome 証拠として使えるが、ユーザーへ評価作業を要求しない。</li>
+</ul>
+</section>
+
+<section data-section="現状と根因">
+<h2>現状と根因</h2>
+<table>
+<thead><tr><th>現状</th><th>根因</th><th>本計画での扱い</th></tr></thead>
+<tbody>
+<tr><td>無関係な転職・仕事等のカードが入る</td><td>文字列/cwd boost、usage prior、狭い候補集合が relevance の代用品になっている</td><td>wrong-task、wrong-time、superseded を hard negative にし、point-in-time の広い候補から学ぶ</td></tr>
+<tr><td>注入されても回答でほぼ使われない</td><td><code>injection_used</code>/<code>ignored</code> は曖昧で、回答品質の正解ではない</td><td>既存 feedback を学習 authority から外し、検証可能な anchor/outcome を使う</td></tr>
+<tr><td><code>recall.gate</code> が実運用で繰り返し timeout</td><td>同期 local model load/競合をライブ deadline に載せている</td><td>教師、rewrite、judge、Raw scan をライブ経路から除外し、期限内に検索だけで決定する</td></tr>
+<tr><td>改善が人手 gold/review に依存</td><td>現行 Field/Growth の authority contract が完全自立と一致しない</td><td>自動生成 label ledger、rolling-origin 評価、shadow/canary のみで昇格する</td></tr>
+<tr><td>新しい会話から継続的に学べない</td><td>Raw 増分と policy 更新の間に point-in-time dataset/cursor がない</td><td>committed Raw watermark を cursor にした再開可能な batch loop を作る</td></tr>
+</tbody>
+</table>
+</section>
+
+<section data-section="やってはいけないこと">
+<h2>やってはいけないこと（必須）</h2>
+<ul>
+<li>ライブ L2 の authoritative path から local teacher、frontier model、rewrite/judge/reranker、全 Raw scan、学習処理を呼ばない。timeout を延ばして問題を隠さない。</li>
+<li>query 時刻より後の Raw、同一 session 内で query event 以後の event、legacy から捏造した atom を候補・feature・教師入力へ混ぜない。</li>
+<li>三者一致、多数決、model confidence、ユーザーの沈黙、会話終了、単なる <code>used</code>/<code>ignored</code> を正解 label にしない。</li>
+<li>secret/credential、明確な PII、仕事・会社・顧客の非公開情報、Raw 本文を remote route へ出さない。Raw を読む教師は local-only を実行前に強制する。</li>
+<li>生 query、Raw span、prompt preview を dashboard、metrics、policy registry に複製しない。参照は raw id/range/hash と query hash に限定する。</li>
+<li>全件 abstain で誤注入率だけを良く見せない。coverage と strong-anchor rescue を同時 gate にする。</li>
+<li>候補 policy が通る前に現行経路を削除しない。まず off/shadow 化し、rollback 後も LKG へ戻せる状態を保つ。</li>
+<li>初期版で neural reranker、embedding fine-tune、vector DB、新しい orchestration framework を追加しない。既存資産で不足が実測されるまで作らない。</li>
+</ul>
+</section>
+
+<section data-section="前提・仮定">
+<h2>前提・仮定</h2>
+<ul>
+<li>正本は committed Raw v2。<code>RawStore(..., mode="v2")</code> と既存 transcript semantic projection を使い、system/developer/AGENTS injection、thinking、injected context を除外した user event を query にする。</li>
+<li>Campaign Y の <code>EpisodeProjection</code>、<code>EvidenceAtom</code>、<code>EvidenceLedger</code>、<code>RetrievalProgram</code>、Raw hash/range 検証を再利用する。ただし QueryManifest は user Raw event から別抽出し、現行契約どおり user発話を authoritative EvidenceAtom にしない。</li>
+<li>現行 BM25/anchor、semantic generation、graph/entity path、Recall candidate trace、純 Python logistic/calibrator、atomic pointer/LKG、sleep cycle、deterministic canary を再利用する。</li>
+<li>教師モデル名は固定しない。stable role <code>recall.distill.teacher.{a,b,c}</code> に local model route を割り当て、route identity・model version・prompt hash を ledger に残す。</li>
+<li>初期 backfill の件数、現在の正確性/coverage/latency は P0 で凍結する。以後の gate は同じ immutable query cohort と chronological unseen window で比較する。</li>
+</ul>
+</section>
+
+<section data-section="再利用資産">
+<h2>既存資産の再利用マップ</h2>
+<table>
+<thead><tr><th>既存資産</th><th>根拠箇所</th><th>再利用方法</th></tr></thead>
+<tbody>
+<tr><td>committed Raw v2 / semantic projection</td><td><code>core/raw_segment.py:393-631</code><br><code>core/raw_store.py:185-294</code><br><code>ingest/raw_semantic_projection.py:967-1093</code></td><td>immutable query source、receipt/hash検証、user event抽出。legacyとの二重読みを避ける</td></tr>
+<tr><td>EpisodeProjection / EvidenceAtom / EvidenceLedger</td><td><code>research/evidence_reconstruction.py:158-298,620-662,973-1006</code><br><code>research/evidence_runtime.py:337-486,679-837</code></td><td>Raw range/provenance、supports/contradicts/supersedes、as_of、fail-closed packet検証</td></tr>
+<tr><td>検索 channel</td><td><code>core/pipeline.py:305-360</code><br><code>core/search.py:967-1052</code><br><code>core/lexical_index.py:62-96,518-545</code></td><td>検索アルゴリズムとlive traceだけ再利用する。current Page/semantic/graph indexは未来更新を含むためhistorical teacher poolへ直接使わない</td></tr>
+<tr><td>Recall feature / score</td><td><code>recall/recall_runtime.py:1048-1149,1208-1426</code><br><code>recall/recall_calibration.py:290-360,500-616</code></td><td>既存のfeature builder、decision、純Python logistic、時系列holdoutを拡張する</td></tr>
+<tr><td>immutable policy / LKG</td><td><code>recall/recall_learning.py:174-275</code><br><code>recall/recall_policy_store.py:27-115</code></td><td>hash chain、seal、atomic pointer、last-known-goodの作法だけを新artifactへ適用する</td></tr>
+<tr><td>background admission</td><td><code>ops/sleep_cycle.py:637-639,937-950</code><br><code>core/ollama_lease.py:97-203</code></td><td>既存bounded laneとforeground priorityを使い、teacher用scheduler/serviceを増やさない</td></tr>
+</tbody>
+</table>
+</section>
+
+<section data-section="全体アーキテクチャ">
+<h2>全体アーキテクチャ</h2>
+<pre>                    OFFLINE / background（live deadline の外）
+
+committed Raw v2 ──► query manifest (Q_t, as_of, immutable refs)
+        │                         │
+        └──► historical atom index ─► wide candidate pool (Raw &lt; Q_t only)
+                                  │
+                  ┌───────────────┼───────────────┐
+                  ▼               ▼               ▼
+             teacher.a       teacher.b       teacher.c
+             owner 1/3       owner 1/3       owner 1/3
+                  └──── fixed 15% shared probe ────┘
+                                  │
+                      structural/outcome verifier
+                      │ verified │ uncertain │ reject
+                                  │
+                      append-only label ledger
+                                  │
+                rolling-origin train / embargo / locked test
+                                  │
+                     weight + threshold candidate
+                                  │
+                  backtest → shadow → 5% → 25% → 100%
+                                  │
+                         atomic active pointer / LKG
+
+                         LIVE（teacher-free）
+
+user query ─► BM25/anchor (+ budget内だけ semantic/graph)
+           ─► existing feature builder + active tiny policy
+           ─► 0–3 cards or abstain ─► response
+                 └── deadline: BM25 fallback; trace is offline fuel</pre>
+</section>
+
+<section data-section="データ生成">
+<h2>データの作り方</h2>
+
+<h3>0. Feasibility preflight</h3>
+<ul>
+<li>P0で archive拡張子ではなくRawの実shape/receiptを検査し、event indexと時刻を持つnative user query数、期間、host/session分布、exact structural/outcome link数、verified positive/negative発生率を数値化する。</li>
+<li>P5以降へ進むhard floorは、eligible native query 1,000件以上・30日以上・3つ以上の時系列window、verified label 500件以上・各class 100件以上、かつpower analysisが要求する件数の大きい方とする。</li>
+<li>不足時はP1–P4のcapture/backfillだけを継続し、trainer・shadow・canaryへ進まない。教師多数決、人手gold、legacyからの推測で不足を埋めない。</li>
+</ul>
+
+<h3>1. Query manifest</h3>
+<ul>
+<li>native Raw v2 の semantic projection から <code>role=user</code> かつ non-empty の event を抽出する。query id は <code>host/session_key/raw_id/event_index/raw_sha</code> の canonical hash とする。</li>
+<li>各 query に <code>as_of</code>、source event index、raw receipt、semantic text hash を保存する。本文は manifest に複製せず、教師実行時だけ private RawStore から再読する。</li>
+<li>QueryManifest は質問の正本であり evidence authority ではない。候補 Evidence は現行契約どおり assistant/tool/receipt に裏付けられた atom だけにする。</li>
+<li>同一内容の再実行は同じ id を返し、cursor は committed Raw watermark までしか進めない。</li>
+</ul>
+
+<h3>2. Historical index と point-in-time candidate snapshot</h3>
+<ul>
+<li>候補条件は <code>atom.validity.end &lt; query.time</code>、または同じ Raw/session の場合 <code>atom.event_index &lt; query.event_index</code>。同時刻は event index で裁定し、future leakage を fail-closed にする。</li>
+<li>current Page/BM25/semantic/graph index は query 後の更新を含むため、historical replay へ直接使わない。Raw/EpisodeProjection の assistant/tool atom だけから derived SQLite FTS5 index を watermark単位で決定的に構築し、atom id、validity、event index、exact path/commit/task/entity refs を保持する。</li>
+<li>候補は exact anchor、historical FTS BM25、receipt-bound relation を union し、教師用だけ top-K 100–300 を snapshot 化する。主担当教師が query から出した少数の検索語/entity cueで同じ historical index を再検索してよいが、追加候補も同じ <code>as_of</code> filter を通す。</li>
+<li>初期版に別vector DBは作らない。lexical candidate recall が P0 gate を満たさない時だけ、同じatom集合から作るimmutable offline embedding generationを追加計画する。</li>
+<li>candidate id、channel rank/score、atom/page refs、provenance、pool hash、retriever revision を保存する。候補生成と教師判定を分離し、後から同じ pool を再生可能にする。</li>
+<li>historical FTS rank/scoreはcandidate discovery用であり、そのままstudent featureにしない。student featureはoffline/liveが同じ純粋関数とschema revisionで再計算できるものだけにし、byte-identical feature parity testを通す。</li>
+<li>legacy archive、authority 不明、provenance 不一致、high-sensitive remote route は <code>unknown/reject</code> とし、学習対象へ入れない。</li>
+</ul>
+
+<h3>3. 三教師の割当</h3>
+<ul>
+<li><code>SHA-256("assignment-v1\0" + query_id + "\0" + candidate_id)</code> の固定bucketで主担当を決定的にほぼ均等化する。別の固定 <code>probe-v1</code> bucketの15%だけ他の二教師にも送る。route/model更新でbucketを変えず、許容load skewはP0で固定する。</li>
+<li>strict JSON は <code>relevant | irrelevant | uncertain</code>、最小 atom ids、短い理由、route identity、model/prompt revision を返す。入力は P0 で固定した最大bytes、最大候補数、候補ごとの最大Raw spanを越えない。parse failure は再試行せず <code>uncertain</code>。</li>
+<li>三者一致は model drift の観測値であり label authority ではない。probe の disagreement、flip rate、per-route calibration を比較し、劣化した route は自動停止できるようにする。</li>
+</ul>
+
+<h3>4. 自動確定 label</h3>
+<table>
+<thead><tr><th>区分</th><th>例</th><th>扱い</th></tr></thead>
+<tbody>
+<tr><td>strong positive</td><td><code>same_raw_session_before_index</code>、exact normalized path、full commit SHA、task UUID、candidate atomへexact joinできるtool/test receipt、verified <code>supports</code></td><td>閉じたpredicateとprovenance/時系列検証をすべて通れば学習・昇格 authority あり</td></tr>
+<tr><td>hard negative</td><td>exact project/task mismatch、wrong time、verified <code>supersedes/contradicts/reverts</code>、注入receiptとexact joinできる訂正・再質問・rollback</td><td>閉じたpredicateとoutcome receiptを検証できる場合だけauthorityあり</td></tr>
+<tr><td>teacher-only</td><td>モデルは関連/無関係と判断したが exact anchor/outcome がない</td><td>分離したuntrusted train層で重み上限付きのchallenger作成にだけ使える。validation/test/metric truthにはせず、verified-only gateなしに昇格させない</td></tr>
+<tr><td>uncertain/reject</td><td>根拠不足、教師不一致、時系列不明、provenance failure、legacy source</td><td>学習から除外。捨てずに ledger へ理由を記録</td></tr>
+</tbody>
+</table>
+<p class="small">「訂正がなかった」「返答後に会話が終わった」は positive にしない。synthetic query は regression test 専用で、昇格 authority を持たない。</p>
+<p class="small">「同じtaskらしい」「testの後にfixが来た」「toolが成功した」だけでは因果を認定しない。上のexact predicateへ落ちないものはteacher-onlyまたはuncertainにする。</p>
+
+<h3>5. 分割と漏洩防止</h3>
+<ul>
+<li>同一 session/task/entity cluster を一つの connected component として分割し、train より後に embargo、validation、さらに後ろに locked test を置く rolling-origin split とする。</li>
+<li>後続 event は label の outcome 証拠には使えるが、query 時点の candidate/feature へは絶対に戻さない。</li>
+<li>feature whitelist を固定し、query 後にしか得られない <code>used</code>、answer text、future entity、future timestamps を student input から排除する。</li>
+</ul>
+</section>
+
+<section data-section="データ契約">
+<h2>最小データ契約</h2>
+<table>
+<thead><tr><th>artifact</th><th>必須内容</th><th>保存先</th></tr></thead>
+<tbody>
+<tr><td><code>historical-index.sqlite</code></td><td>watermark/schema、SQLite/FTS5 tokenizer/query-normalizer revision、assistant/tool atom text、validity/event index、exact structural refs。Raw/EpisodeProjectionから再構築可能なderived cache</td><td rowspan="5"><code>runtime/recall-distillation/</code>（private）</td></tr>
+<tr><td><code>query-manifest.jsonl</code></td><td>query id/hash、host/session/raw/event refs、as_of、raw receipt、watermark cursor</td></tr>
+<tr><td><code>candidate-ledger.jsonl</code></td><td>query id、candidate refs、channel ranks/scores、pool/retriever hash、time-cutoff verdict</td></tr>
+<tr><td><code>label-ledger.jsonl</code></td><td>固定assignment/probe scheme、teacher votes/revisions、verified label、anchor/outcome refs、status/reason、previous-entry hash</td></tr>
+<tr><td><code>runs/&lt;run-id&gt;.json</code></td><td>source watermark、split ranges、feature schema、metrics、candidate policy hash、gate verdict</td></tr>
+<tr><td><code>policies/&lt;id&gt;.json</code></td><td>feature schema/version、weights、threshold/margin、training ledger head、metrics、seal</td><td><code>runtime/recall-distillation/policies/</code></td></tr>
+<tr><td><code>active-policy.json</code></td><td>active id、previous/LKG id、adoption run、atomic seal</td><td><code>runtime/recall-distillation/</code></td></tr>
+</tbody>
+</table>
+<ul>
+<li>JSONL は append-only hash chain。重複 id は同一 payload なら no-op、異なる payload なら停止する。</li>
+<li>historical index は正本ではなくderived cache。watermark/schema/hashが違えば再構築し、current Page/semantic/graph generationを混ぜない。</li>
+<li>policy は immutable。active pointer だけを atomic replace し、candidate 作成失敗時は live を一切変更しない。</li>
+<li>既存 <code>recall_policy_store</code> の artifact と意味を混ぜない。新registryはartifact kind/schema/namespaceが一致しないwrite/readを拒否し、同じ atomic/LKG pattern だけ再利用する。</li>
+</ul>
+</section>
+
+<section data-section="ライブ学生">
+<h2>ライブ学生と速度設計</h2>
+<ul>
+<li>新しい model service は作らず、<code>recall_runtime.py</code> の既存 <code>build_evidence_features()</code>、<code>calibrated_score()</code>、<code>decision_from_score()</code> を拡張する。</li>
+<li>feature は exact anchor、entity overlap、same session/task/cwd、temporal validity/decay、superseded、graph path、top1/top2 margin等、offline/liveの同じpure functionで再現可能なwhitelistに限定する。historical FTS固有scoreは除外し、channel rank/scoreはparity testを通ったrevisionだけ許可する。</li>
+<li>P6a の authoritative path は既存 readonly lexical index の BM25/anchor だけで開始する。student は active JSON の重みを一回計算し、threshold と margin を越えた 0–3 cards だけ返す。</li>
+<li>現行 semantic/graph pipeline は逐次かつ semantic timeout が live SLO より長いため、初期 authorityへ入れない。shadowで追加価値が実測できた時だけP6bとしてsingle deadlineの並列fan-outへ変更し、残りbudget内に完了した結果だけを加える。待たずにBM25へfallbackする。</li>
+<li>新policyでは既存 <code>usage_prior</code> weightを0、旧 <code>negative_feedback</code> stageをhard offにし、verified ledger以外からscoreを動かす経路を残さない。</li>
+<li>SLO は end-to-end p50 ≤ 400 ms、p95 &lt; 900 ms、hard deadline 1,200 ms、timeout &lt; 1%。deadline 超過を timeout 延長で解決しない。</li>
+</ul>
+</section>
+
+<section data-section="継続学習">
+<h2>継続学習ループ</h2>
+<ol>
+<li>Raw commit 後、sleep cycle の既存 bounded background lane が watermark 以後の新規 user query を少量ずつ manifest 化する。</li>
+<li>各 cycle で point-in-time pool を作り、三教師の決定的 shard と probe を処理する。foreground Ollama lease を最優先し、teacherは次chunk取得前に譲る。in-flight generationは短い上限内で完走させるか結果を破棄し、pause/resume可能とは仮定しない。</li>
+<li>structural/outcome verifier が label を確定し、ledger head と cursor を seal する。失敗はその chunk だけ再開可能にし、cursor を先送りしない。</li>
+<li>24時間または preregister 済みの最小 verified label 数に達したら candidate policy を作る。単一 event ごとに重みは変えない。</li>
+<li>rolling-origin replay を通過した candidate だけ shadow へ出す。shadow 合格後、session hash で 5% → 25% → 100% と段階昇格する。</li>
+<li>各段階で自動 gate が悪化を検出したら active pointer を LKG へ戻し、原因 run を quarantine し、学習を自動停止する。live 検索は LKG で継続する。</li>
+</ol>
+</section>
+
+<section data-section="昇格権限と評価">
+<h2>自動昇格・自動 rollback</h2>
+<table>
+<thead><tr><th>gate</th><th>合格条件</th><th>失敗時</th></tr></thead>
+<tbody>
+<tr><td>cold start</td><td>hard floor以上のnative query/期間/windowとverified label/class件数。発生率とpower analysisをP0 artifactへseal</td><td>capture-only、P5以降を開始しない</td></tr>
+<tr><td>integrity</td><td>Raw receipt/projection/hash chain 100% valid、future leakage 0、same-timestamp event cutoff 違反 0</td><td>run reject、cursor据え置き</td></tr>
+<tr><td>privacy</td><td>teacher route 100% local、remote Raw egress 0、artifact に生本文 0</td><td>即停止、candidate破棄</td></tr>
+<tr><td>locked replay</td><td>verified wrong-domain injection を incumbent 比30%以上削減、strong-anchor top-3 recall は +10pt または90%以上、他の主要 cohort は -1pt を超えて悪化しない</td><td>shadowへ進めない</td></tr>
+<tr><td>feature parity</td><td>offline/liveのfeature schema/revision一致、固定snapshotでfeature bytes 100%一致、historical-only score混入0</td><td>candidate reject</td></tr>
+<tr><td>anti-gaming</td><td>eligible query coverage が incumbent の90%以上、strong-anchor rescue 非劣化、abstain 増加は +10pt 以内</td><td>全 abstain 政策として reject</td></tr>
+<tr><td>safety</td><td>future/superseded/provenance-invalid injection 0</td><td>即 rollback、run quarantine</td></tr>
+<tr><td>latency</td><td>p50 ≤400ms、p95 &lt;900ms、hard deadline ≤1,200ms、timeout &lt;1%</td><td>昇格停止または LKG rollback</td></tr>
+<tr><td>canary</td><td>5%/25%の各段階で最低7日、P0固定のmin eligible events、CI method/windowを満たし、上記指標が連続windowで非劣化。abstain/noneもeligible query全件を分母にする</td><td>atomic rollback</td></tr>
+</tbody>
+</table>
+<p class="small">P0 で cohort 件数と信頼区間方式を凍結する。データが不足する段階は「不合格」ではなく「昇格待ち」であり、人間承認へ迂回しない。</p>
+</section>
+
+<section data-section="実装面">
+<h2>実装面（最小差分）</h2>
+<table>
+<thead><tr><th>変更先</th><th>内容</th></tr></thead>
+<tbody>
+<tr><td><code>src/chronovisor/recall/recall_distillation.py</code></td><td>contracts、closed predicates、historical candidate計算、三教師 shard/probe、rolling-origin build/evaluate、policy publicationのorchestration</td></tr>
+<tr><td><code>src/chronovisor/recall/recall_distillation_store.py</code></td><td>derived FTS、cursor、append-only hash-chain ledger、immutable run/policy、atomic pointer I/Oを分離する</td></tr>
+<tr><td><code>src/chronovisor/recall/recall_runtime.py</code></td><td>既存 feature/score/decision を拡張し active tiny policy を読む。teacher-free deadline と BM25 fallback を実装する</td></tr>
+<tr><td><code>src/chronovisor/ops/sleep_cycle.py</code></td><td>既存 Recall growth artifact lane を bounded distillation chunk job へ置換する。新しい常駐 scheduler は作らない</td></tr>
+<tr><td><code>src/chronovisor/recall/recall_field*.py</code> / <code>recall_improvement.py</code></td><td>旧 Field/feedback/frontier authority をまず観測専用にし、新経路100%採用後に削除する</td></tr>
+<tr><td><code>tests/test_recall_distillation.py</code></td><td>時点漏洩、historical index rebuild、cursor idempotency、hash chain、shard/probe、closed predicates、uncertain除外、promotion/rollback</td></tr>
+<tr><td>既存 focused tests</td><td><code>test_evidence_reconstruction.py</code>、<code>test_recall_calibration.py</code>、<code>test_recall_runtime.py</code>、<code>test_sleep_cycle.py</code>、search pipeline testsへ各境界のregressionを追加する</td></tr>
+<tr><td>既存 Evidence Reconstruction / search / calibration / policy seal</td><td>新規抽象化を作らず、Raw verification、候補 feature、pure Python logistic、atomic/LKG pattern を直接再利用する</td></tr>
+</tbody>
+</table>
+</section>
+
+<section data-section="実行手順">
+<h2>実行手順</h2>
+<ol class="checklist">
+<li><input type="checkbox"><span><strong>P0 — Baseline と契約を凍結する。</strong> native query/期間/host、verified label発生率、candidate recall、wrong-domain injection、strong-anchor rescue、coverage、abstain、p50/p95/timeoutをimmutable artifactへ記録する。hard floor、power analysis、feature whitelist、closed predicate、teacher schema/input上限、load skew、fixed cohort/min events/CI/window、昇格閾値、privacy preflightを固定する。</span></li>
+<li><input type="checkbox"><span><strong>P1 — Historical query/candidate dataset を実装する。</strong> Raw v2から別QueryManifestを増分生成し、assistant/tool EpisodeProjectionだけのderived FTS5を固定tokenizer/normalizer revisionで構築する。current Page/semantic/graphを使わず、queryより前だけのwide poolを再現可能なsnapshotとして保存する。</span></li>
+<li><input type="checkbox"><span><strong>P2 — Structural/outcome verifier を実装する。</strong> Raw hash/range、event index、exact path/full SHA/task UUID、receipt-bound tool/test、verified supports/contradicts/supersedes/revertsの閉じたpredicateだけでstrong positive/hard negative/uncertainを決める。</span></li>
+<li><input type="checkbox"><span><strong>P3 — 三教師 batch を実装する。</strong> stable local roles を決定的に三分割し、固定15% probe、strict output/input上限、route/prompt revision、local-only preflight、foreground lease、再開可能cursorを通す。</span></li>
+<li><input type="checkbox"><span><strong>P4 — Append-only dataset と rolling-origin split を実装する。</strong> hash-chain ledger、cluster dedup、embargo、validation/locked test、future feature exclusion、offline/live feature parityを実装する。teacher-onlyは重み上限付きuntrusted train層、uncertainは完全除外として隔離する。</span></li>
+<li><input type="checkbox"><span><strong>P5 — 初期 student policy を作る。</strong> 既存 logistic/calibrator を新 verified features で再計算し、fine-tuneなしで immutable weight/threshold artifact と LKG pointer を生成する。</span></li>
+<li><input type="checkbox"><span><strong>P6 — ライブ fast path を実装する。</strong> P6aはBM25/anchor + tiny policy + 0–3 cards/abstainでSLOを満たす。semantic/graphはshadowに置き、価値を証明した場合だけP6bのsingle-deadline並列fan-outへ進む。usage prior/negative feedback/sync model/Raw scanをauthorityから外す。</span></li>
+<li><input type="checkbox"><span><strong>P7 — 継続 job とsingle-writerを実装する。</strong> Raw watermarkからbounded chunkを処理し、24h/label thresholdでcandidateを生成する。旧growth/improvement/calibrationのactive mutation entrypointをhard offにし、新registryだけがlive policyを更新できることをテストする。</span></li>
+<li><input type="checkbox"><span><strong>P8 — Shadow と自動 canary/rollback を完走する。</strong> locked replay → shadow → 5% → 25% → 100%をsession hashで実行し、各gate、worker health、active/candidate/LKG policy idのAPI/Dashboard表示、rollback drillを保存する。</span></li>
+<li><input type="checkbox"><span><strong>P9 — 旧経路を整理する。</strong> 100%運用と rollback drill 完了後だけ同期 gate/rewriter/judge、feedback usage-prior、Field active learning、manual review authority を削除し、docs/config/dashboard を正本へ合わせる。</span></li>
+</ol>
+</section>
+
+<section class="rules" data-section="実行中更新ルール">
+<h2>実行中更新ルール</h2>
+<ul>
+<li>実行手順のチェックは、各手順の完了直後に更新する（まとめて更新しない）。</li>
+<li>チェックを更新したら、同時に <code>実行ログ</code> へ時刻付きで追記する。</li>
+<li>中断時は <code>状態</code>（<code>plan-meta</code> の JSON および <code>.badge</code> の <code>data-state</code>）を <code>blocked</code> にし、理由を <code>ブロッカー</code> に記入する。</li>
+</ul>
+</section>
+
+<section data-section="完了条件">
+<h2>完了条件</h2>
+<ul>
+<li>committed Raw の初期 backfill と以後の増分が、再実行しても同じ query/candidate/label ledger head を生成する。</li>
+<li>P0 hard floor以上のnative queryとverified positive/negativeが存在するか、未達ならcapture-only状態でP5以降が自動停止している。</li>
+<li>query event 以後の Raw が候補、feature、teacher input に一件も混ざらず、同時刻・cross-session・legacy・injected context の境界テストが通る。</li>
+<li>教師三者の primary load skew がP0の許容範囲内で、固定 probe の結果、route/model/prompt drift、failure が可観測になり、教師停止時も live Recall は影響を受けない。</li>
+<li>人間 review/gold/approval、remote frontier、<code>used</code>/<code>ignored</code> を必要とせず candidate policy を生成・棄却・昇格・rollback できる。</li>
+<li>locked replay と live canary が accuracy/coverage/safety/latency gate を満たし、active policy 100%切替後も LKG への一操作自動 rollback が実証される。</li>
+<li>ライブauthoritative pathから teacher/rewrite/judge/reranker/full Raw scan が消え、p50 ≤400ms、p95 &lt;900ms、hard deadline ≤1,200ms、timeout &lt;1% を満たす。</li>
+<li>future/superseded/provenance-invalid evidence の注入が0で、verified wrong-domain injection が incumbent 比30%以上低下し、strong-anchor recall と eligible coverage が非劣化である。</li>
+<li>policy artifact から source ledger head、Raw watermark、split、feature schema、teacher route revisions、全 gate verdict を再現できる。</li>
+<li>offline replayとliveで同じfeature revisionを使い、固定snapshotのstudent feature bytesが100%一致する。</li>
+<li>GitHub上の正本、runtime artifact、running process、health、Dashboard が同じ active policy id と状態を示す。</li>
+</ul>
+</section>
+
+<section data-section="検証手順">
+<h2>検証手順</h2>
+<ul>
+<li><code>CHRONOVISOR_ROOT="$(mktemp -d -t chronovisor-test)" uv run pytest -q tests/test_recall_distillation.py</code> で新規境界を隔離検証する。</li>
+<li>既存の <code>tests/test_evidence_reconstruction.py</code>、<code>tests/test_recall_log_schema.py</code>、Recall/search/calibration/policy store/sleep cycle の focused tests を実行する。</li>
+<li>Raw projection と historical index を二回 rebuild し、Raw不変性、query manifest、candidate pool、label ledger、policy artifact、active pointer source lineage の canonical digest が一致することを確認する。</li>
+<li>意図的に future atom、同時刻の後続 event、tampered Raw hash、remote teacher route、broken chain、legacy archive を投入し、すべて fail-closed になることを確認する。</li>
+<li>三教師のowner shardが決定的でload skewがP0上限内、probeが固定15%、同じinput/revisionでassignmentが一致することを確認する。</li>
+<li>cold-start hard floorの直前/直後、historical-only score混入、artifact namespace/schema mismatchを試し、trainer開始・policy read/writeが正しくfail-closedになることを確認する。</li>
+<li>chronological unseen replay で incumbent と candidate の accuracy/coverage/latency を paired 比較し、gate report を seal する。</li>
+<li>old growth/improvement/calibration writerを有効にした競合テストがfail-closedになること、new registryだけがactive pointerを書けることを確認する。</li>
+<li>live shadow で active result を変えずに candidate trace を比較し、その後 deterministic 5%/25% canary と強制 failure による LKG rollback drill を行う。</li>
+<li>push 後に必要な LaunchAgent を再起動し、archive <code>direct_url.json</code> の commit、health、live query の policy id/latency/injection provenance を照合する。push は実装実行時に所有者指示を受けて行う。</li>
+</ul>
+</section>
+
+<section data-section="観測指標">
+<h2>観測指標</h2>
+<ul>
+<li>data: raw watermark lag、query/candidate counts、pool miss、verified/teacher-only/uncertain 比率、chain integrity、future-leak rejects。</li>
+<li>teachers: assignment skew、probe agreement matrix、flip rate、parse failure、route latency、model/prompt revision、per-route calibration。</li>
+<li>quality: wrong-domain injection、strong-anchor top-k recall/rescue、superseded injection、re-ask/correction/rollback regret、coverage、abstain、0/1/2/3-card分布。</li>
+<li>live: channel latency、student decision latency、fallback率、p50/p95/max、timeout、active/candidate/LKG policy id。</li>
+<li>本文や PII は計測値へ出さず、query/candidate hash と sealed provenance reference で drill-down する。</li>
+</ul>
+</section>
+
+<section data-section="移行と削除境界">
+<h2>移行と削除境界</h2>
+<ul>
+<li>Campaign Y の Evidence Reconstruction は廃止せず、ライブの重い evidence scan からオフライン verifier/teacher evidence composer へ役割を移す。</li>
+<li>現行 Recall Field/Growth、manual reviewed artifacts、feedback usage prior は新 policy の authority から先に外す。canary前に旧active-policy writerをconfig/entrypointでhard offにしてsingle-writerを保証し、新経路が100%とrollback drillを完了するまではコードを削除しない。</li>
+<li>既存の Recall latency plan は本計画へ包含する。本計画が live fast path を採用した時点で、同期 local-model gate の高速化案は historical として終了する。</li>
+<li>P6a採用時に旧latency planの各未完項目を本計画の証拠へ対応付け、満たした項目だけcheckし、実行ログへ本plan idを追記してcloseする。未達項目を置換だけでdoneにしない。</li>
+<li>fine-tune は、verified label が十分に溜まり、logistic が locked cohort の ceiling に達した証拠が出た時だけ別計画にする。初期完了条件には含めない。</li>
+</ul>
+</section>
+
+<section class="blockers" data-section="ブロッカー">
+<h2>ブロッカー（発生時のみ）</h2>
+<ul><li>なし</li></ul>
+</section>
+
+<section data-section="受け渡しメモ">
+<h2>受け渡しメモ（次担当へ）</h2>
+<ul>
+<li>この文書は設計合意用の <code>ready</code> plan。実装は未着手で、ユーザーとの次回議論後に P0 から開始する。</li>
+<li>最重要条件は完全自立。human review を安全弁として復活させず、不確実なら abstain/昇格待ち/LKG維持で処理する。</li>
+<li>初期版の新規面は <code>recall_distillation.py</code>、I/Oを分離した <code>recall_distillation_store.py</code>、focused testsに限定する。SQLite FTS以外の新DB/別サービスを作らず、既存 search/Evidence/calibration/atomic policy/sleep cycle を再利用する。</li>
+<li>教師の具体的モデル割当は P0 probe で決めるが、artifact は model名でなく stable role + route revision を正本にする。モデル交換でデータ契約を変えない。</li>
+<li>実行中は各 P 項目の完了証拠を確認した直後に checkbox と実行ログを更新する。Exit Criteria を満たさない項目は未完のまま残す。</li>
+</ul>
+</section>
+
+<section data-section="実行ログ">
+<h2>実行ログ</h2>
+<ol class="log">
+<li><time>2026-08-14 18:46</time><span>正規 generator で plan を作成。ユーザー案、既存 Recall/Evidence/Raw/learning 調査、DeepSeek群の調査、Kimi K3 の反証を一つの自律設計へ統合。</span></li>
+<li><time>2026-08-14 19:05</time><span>実装整合レビューを反映。current index由来の未来漏洩を止めるhistorical FTS、user query/Evidence authority分離、closed predicates、cold-start hard floor、feature parity、single-writerをhard gateへ追加。</span></li>
+</ol>
+</section>
+
+</body>
+</html>
