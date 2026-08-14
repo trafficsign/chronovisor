@@ -155,21 +155,25 @@ def _schema(operation: str, *, candidate_ids: tuple[str, ...] = ()) -> dict[str,
 
 def _teacher_candidate_ids(request_input: Mapping[str, Any]) -> tuple[str, ...]:
     candidates = request_input.get("candidates")
-    if not isinstance(candidates, list) or not 1 <= len(candidates) <= MAX_TEACHER_CANDIDATES:
+    if (
+        not isinstance(candidates, list)
+        or not 1 <= len(candidates) <= MAX_TEACHER_CANDIDATES
+    ):
         raise ValueError
     candidate_ids = tuple(
         str(row.get("candidate_id") or "") if isinstance(row, Mapping) else ""
         for row in candidates
     )
-    if (
-        len(candidate_ids) != len(set(candidate_ids))
-        or any(not 0 < len(candidate_id) <= 160 for candidate_id in candidate_ids)
+    if len(candidate_ids) != len(set(candidate_ids)) or any(
+        not 0 < len(candidate_id) <= 160 for candidate_id in candidate_ids
     ):
         raise ValueError
     return candidate_ids
 
 
-def _valid_teacher_labels(value: Mapping[str, Any], candidate_ids: tuple[str, ...]) -> bool:
+def _valid_teacher_labels(
+    value: Mapping[str, Any], candidate_ids: tuple[str, ...]
+) -> bool:
     labels = value.get("labels")
     return (
         isinstance(labels, list)
@@ -193,9 +197,10 @@ def _system(operation: str) -> str:
             "evidence, do not invent facts, and return schema-valid JSON."
         )
     return (
-        "You are a local Recall utility judge. Judge only the supplied exact "
-        "exposure and answer evidence. Return uncertain when causal evidence is "
-        "missing, and return schema-valid JSON."
+        "You are a blind local Recall utility judge. Compare answer A and answer B "
+        "using only the supplied matched point-in-time evidence. Choose a, b, tie, "
+        "or uncertain without inferring which answer used the candidate. Return "
+        "schema-valid JSON."
     )
 
 
@@ -204,11 +209,19 @@ def _safe_operation(value: object) -> str:
 
 
 def _safe_role(value: object) -> str:
-    return str(value) if isinstance(value, str) and value in set().union(*_ROLE_BY_OPERATION.values()) else "invalid"
+    return (
+        str(value)
+        if isinstance(value, str) and value in set().union(*_ROLE_BY_OPERATION.values())
+        else "invalid"
+    )
 
 
 def _safe_request_id(value: object) -> str:
-    return str(value) if isinstance(value, str) and _REQUEST_ID.fullmatch(value) else "invalid"
+    return (
+        str(value)
+        if isinstance(value, str) and _REQUEST_ID.fullmatch(value)
+        else "invalid"
+    )
 
 
 def _envelope(

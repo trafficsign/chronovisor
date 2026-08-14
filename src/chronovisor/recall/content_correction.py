@@ -3425,6 +3425,53 @@ def _exact_patch_payload(mutation: PreparedPageMutation) -> list[dict[str, Any]]
     ]
 
 
+def _capture_authenticated_exact_correction_veto(
+    *,
+    event: Mapping[str, Any],
+    mutation: PreparedPageMutation,
+    apply_result: Mapping[str, Any],
+    observed_at: str,
+) -> dict[str, str]:
+    """Best-effort negative-veto capture after one exact CAS/readback success.
+
+    The distillation boundary re-reads the sealed exposure and accepts only the
+    byte hashes.  This lane must not let a telemetry failure roll back a valid
+    user correction.
+    """
+
+    decision_id = event.get("source_decision_id")
+    cas_status = apply_result.get("status")
+    if not isinstance(decision_id, str) or not decision_id:
+        return {"status": "skipped", "reason": "source_decision_missing"}
+    if cas_status not in {"applied", "already_applied"}:
+        return {"status": "skipped", "reason": "cas_not_applied"}
+    try:
+        readback_bytes = mutation.path.read_bytes()
+        from chronovisor.recall.recall_distillation import (
+            record_authenticated_exact_correction_veto,
+        )
+
+        receipt = record_authenticated_exact_correction_veto(
+            decision_id=decision_id,
+            correction_id=mutation.correction_id,
+            candidate_id=mutation.page_id,
+            page_id=mutation.page_id,
+            preimage_bytes=mutation.original,
+            postimage_bytes=mutation.updated,
+            readback_bytes=readback_bytes,
+            cas_status=cas_status,
+            observed_at=observed_at,
+            root=CHRONOVISOR_ROOT,
+        )
+    except Exception as exc:
+        return {"status": "capture_failed", "error_type": exc.__class__.__name__}
+    receipt_id = receipt.get("record_sha256") if isinstance(receipt, Mapping) else None
+    return {
+        "status": "recorded",
+        "receipt_id": receipt_id if isinstance(receipt_id, str) else "",
+    }
+
+
 def _process_exact_user_correction(
     exact: ExactUserCorrection,
     *,
@@ -3509,8 +3556,9 @@ def _process_exact_user_correction(
         "model_calls": 0,
         "policy": exact.policy_audit,
     }
+    observed_at = datetime.now(UTC).isoformat(timespec="seconds")
     audit_row = {
-        "ts": datetime.now(UTC).isoformat(timespec="seconds"),
+        "ts": observed_at,
         "kind": "content_correction",
         "key": key,
         "correction_id": mutation.correction_id,
@@ -3544,6 +3592,12 @@ def _process_exact_user_correction(
             "rollback": rollback,
             "model_calls": 0,
         }
+    negative_veto_capture = _capture_authenticated_exact_correction_veto(
+        event=event,
+        mutation=mutation,
+        apply_result=apply_result,
+        observed_at=observed_at,
+    )
     try:
         store.complete(
             key,
@@ -3552,6 +3606,7 @@ def _process_exact_user_correction(
                 "decision_authority": authority,
                 "apply": apply_result,
                 "verification": verification,
+                "negative_veto_capture": negative_veto_capture,
             },
             owner=owner,
         )
@@ -3578,6 +3633,7 @@ def _process_exact_user_correction(
         "verification": verification,
         "model_calls": 0,
         "decision_policy": exact.policy_audit,
+        "negative_veto_capture": negative_veto_capture,
     }
 
 

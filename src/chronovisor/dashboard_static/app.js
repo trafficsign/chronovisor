@@ -147,6 +147,7 @@ const els = {
   healthHolds: document.getElementById("health-holds"),
   healthProvisional: document.getElementById("health-provisional"),
   healthRecallDistillation: document.getElementById("health-recall-distillation"),
+  healthRecallDistillationDetail: document.getElementById("health-recall-distillation-detail"),
   healthLedger: document.getElementById("health-ledger"),
   healthResearchRuns: document.getElementById("health-research-runs"),
   healthResearchClaims: document.getElementById("health-research-claims"),

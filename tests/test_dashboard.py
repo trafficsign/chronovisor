@@ -5714,12 +5714,20 @@ def test_dashboard_static_renders_compact_distillation_health_status() -> None:
     renderer = (dashboard.STATIC_DIR / "app-renderer.js").read_text(encoding="utf-8")
 
     assert 'id="health-recall-distillation"' in page
+    assert 'id="health-recall-distillation-detail"' in page
     assert "healthRecallDistillation" in app
+    assert "healthRecallDistillationDetail" in app
     assert "recall_distillation" in renderer
     assert "rollout_status" in renderer
     assert "active_policy_id" in renderer
     assert "candidate_policy_id" in renderer
     assert "lkg_policy_id" in renderer
+    assert "teacher-only" in renderer
+    assert "verified truth" in renderer
+    assert "not truth" in renderer
+    assert "paired" in renderer
+    assert "feature_revision" in renderer
+    assert "hold_reason" in renderer
 
 
 def test_materialized_component_returns_stale_while_audit_refreshes(

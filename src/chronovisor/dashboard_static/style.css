@@ -853,6 +853,14 @@ canvas {
   white-space: nowrap;
 }
 
+.health-group .health-distillation-status small {
+  display: block;
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 8px;
+  line-height: 1.25;
+}
+
 /* ---------- knowledge mix ---------- */
 
 .knowledge-layout {

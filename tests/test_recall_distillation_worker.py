@@ -33,8 +33,12 @@ def _payload(**override: object) -> dict[str, object]:
 
 def test_worker_resolves_fixed_local_route_and_hides_input(monkeypatch) -> None:
     captured: dict[str, object] = {}
-    monkeypatch.setattr(worker.ollama, "runtime_generation_routes", lambda roles: (_route(roles[0]),))
-    monkeypatch.setattr(worker.ollama, "model_digests", lambda models: {models[0]: "sha256:local"})
+    monkeypatch.setattr(
+        worker.ollama, "runtime_generation_routes", lambda roles: (_route(roles[0]),)
+    )
+    monkeypatch.setattr(
+        worker.ollama, "model_digests", lambda models: {models[0]: "sha256:local"}
+    )
 
     class Session:
         def __init__(self, **kwargs) -> None:
@@ -143,15 +147,21 @@ def test_worker_rejects_nonlocal_route_before_model_call(monkeypatch) -> None:
 
 
 def test_worker_hides_structured_failure(monkeypatch) -> None:
-    monkeypatch.setattr(worker.ollama, "runtime_generation_routes", lambda roles: (_route(roles[0]),))
-    monkeypatch.setattr(worker.ollama, "model_digests", lambda models: {models[0]: "sha256:local"})
+    monkeypatch.setattr(
+        worker.ollama, "runtime_generation_routes", lambda roles: (_route(roles[0]),)
+    )
+    monkeypatch.setattr(
+        worker.ollama, "model_digests", lambda models: {models[0]: "sha256:local"}
+    )
 
     class Session:
         def __init__(self, **kwargs) -> None:
             pass
 
         def run(self, *args, **kwargs):
-            return SimpleNamespace(ok=False, value=None, failure_class="transport_timeout")
+            return SimpleNamespace(
+                ok=False, value=None, failure_class="transport_timeout"
+            )
 
     monkeypatch.setattr(worker, "LocalStructuredSession", Session)
     result = worker.run(_payload())
@@ -169,9 +179,7 @@ def test_evidence_fields_are_operation_owned() -> None:
     assert {"minimal_atom_ids", "missing_slots", "changing_claim"} <= set(
         teacher["properties"]["labels"]["items"]["required"]
     )
-    assert {"basis_atom_ids", "blind_order", "blind_choice"} <= set(
-        utility["required"]
-    )
+    assert {"basis_atom_ids", "blind_order", "blind_choice"} <= set(utility["required"])
 
 
 def test_teacher_batch_requires_one_label_per_candidate() -> None:

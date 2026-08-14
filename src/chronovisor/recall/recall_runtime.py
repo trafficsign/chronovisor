@@ -2770,14 +2770,35 @@ def _load_active_distillation_policy(request: RecallRequest) -> Any | None:
     try:
         from chronovisor.recall import recall_distillation
 
-        select_for_session = getattr(recall_distillation, "load_policy_for_session", None)
-        if callable(select_for_session):
-            candidate = select_for_session(
-                root=CHRONOVISOR_ROOT,
-                session_id=request.session_id,
-            )
+        load_observation_context = getattr(
+            recall_distillation, "load_policy_observation_context", None
+        )
+        observation_context = (
+            load_observation_context(request.session_id, root=CHRONOVISOR_ROOT)
+            if callable(load_observation_context)
+            else {}
+        )
+        served_policy = observation_context.get("served_policy") if isinstance(
+            observation_context, Mapping
+        ) else None
+        if isinstance(served_policy, dict) and served_policy:
+            # Preserve the sealed paired arms privately for a later, same-
+            # decision observation. The public Recall result never exposes it.
+            candidate = {
+                **served_policy,
+                "_distillation_observation_context": observation_context,
+            }
         else:
-            candidate = recall_distillation.load_active_policy(root=CHRONOVISOR_ROOT)
+            select_for_session = getattr(
+                recall_distillation, "load_policy_for_session", None
+            )
+            if callable(select_for_session):
+                candidate = select_for_session(
+                    root=CHRONOVISOR_ROOT,
+                    session_id=request.session_id,
+                )
+            else:
+                candidate = recall_distillation.load_active_policy(root=CHRONOVISOR_ROOT)
     except Exception:
         return None
     if candidate is None:
@@ -2812,7 +2833,9 @@ def _load_active_distillation_policy(request: RecallRequest) -> Any | None:
     try:
         # Core owns the sealed feature/weight contract. Validate it before the
         # policy can take the live authority path.
-        features = recall_distillation.build_fast_features({})
+        if feature_schema != recall_distillation.TEXT_FEATURE_REVISION:
+            return None
+        features = recall_distillation.build_text_features("", "\n")
         recall_distillation.score_fast_features(features, candidate)
     except Exception:
         return None
@@ -2854,7 +2877,78 @@ def _distilled_policy_identity(distilled_policy: Any) -> tuple[str, str, float, 
     )
 
 
+def _foreground_receipt_remaining_ms(deadline_at: float | None) -> int | None:
+    """Return a hard-stop-capable foreground receipt budget, if any."""
+
+    if deadline_at is None:
+        return None
+    if (
+        threading.current_thread() is not threading.main_thread()
+        or not hasattr(signal, "SIGALRM")
+        or not hasattr(signal, "setitimer")
+    ):
+        return 0
+    return _remaining_budget_ms(deadline_at) or 0
+
+
 def _record_distilled_exposure(
+    result: RecallResult,
+    *,
+    request: RecallRequest,
+    policy_id: str,
+    candidate_feature_snapshot: list[dict[str, Any]],
+    candidate_pool_sources: Mapping[str, Mapping[str, str]] | None = None,
+    selected_content_hashes: Mapping[str, str] | None = None,
+    timed_out: bool | None = None,
+    error_code: str = "",
+    trace: dict[str, Any] | None = None,
+    foreground_deadline_at: float | None = None,
+) -> None:
+    """Write a receipt only while its foreground hard deadline remains."""
+
+    def receipt_status(value: str) -> None:
+        if trace is not None:
+            trace["exposure_receipt"] = value
+        else:
+            candidate_trace = result.evidence_features.get("distilled_fast_path")
+            if isinstance(candidate_trace, dict):
+                candidate_trace["exposure_receipt"] = value
+
+    remaining_ms = _foreground_receipt_remaining_ms(foreground_deadline_at)
+    if remaining_ms == 0:
+        receipt_status("deferred")
+        return
+    try:
+        if remaining_ms is None:
+            _record_distilled_exposure_unbounded(
+                result,
+                request=request,
+                policy_id=policy_id,
+                candidate_feature_snapshot=candidate_feature_snapshot,
+                candidate_pool_sources=candidate_pool_sources,
+                selected_content_hashes=selected_content_hashes,
+                timed_out=timed_out,
+                error_code=error_code,
+                trace=trace,
+            )
+        else:
+            with recall_wall_clock_deadline(remaining_ms):
+                _record_distilled_exposure_unbounded(
+                    result,
+                    request=request,
+                    policy_id=policy_id,
+                    candidate_feature_snapshot=candidate_feature_snapshot,
+                    candidate_pool_sources=candidate_pool_sources,
+                    selected_content_hashes=selected_content_hashes,
+                    timed_out=timed_out,
+                    error_code=error_code,
+                    trace=trace,
+                )
+    except RecallWallClockTimeout:
+        receipt_status("deferred")
+
+
+def _record_distilled_exposure_unbounded(
     result: RecallResult,
     *,
     request: RecallRequest,
@@ -2969,7 +3063,7 @@ def _record_distilled_exposure(
                     ).hexdigest(),
                 }
             )
-        recall_distillation.record_exact_exposure(
+        receipt = recall_distillation.record_exact_exposure(
             decision_id=result.decision_id,
             host=request.host,
             session_id=request.session_id,
@@ -2984,8 +3078,12 @@ def _record_distilled_exposure(
             context_style=result.context_style or "default",
             decision_latency_ms=max(0.0, min(60_000.0, float(result.latency_ms))),
             timed_out=result.status in {"timeout", "degraded"},
+            nonblocking=True,
             root=CHRONOVISOR_ROOT,
         )
+        if isinstance(receipt, Mapping) and receipt.get("status") == "deferred":
+            receipt_status("deferred")
+            return
         receipt_status("exact_recorded")
         return
     except Exception:
@@ -2993,7 +3091,7 @@ def _record_distilled_exposure(
     try:
         from chronovisor.recall import recall_distillation
 
-        recall_distillation.record_exposure(
+        receipt = recall_distillation.record_exposure(
             decision_id=result.decision_id,
             host=request.host,
             session_id=request.session_id,
@@ -3009,8 +3107,12 @@ def _record_distilled_exposure(
                 else timed_out
             ),
             error_code=error_code,
+            nonblocking=True,
             root=CHRONOVISOR_ROOT,
         )
+        if isinstance(receipt, Mapping) and receipt.get("status") == "deferred":
+            receipt_status("deferred")
+            return
         receipt_status("page_recorded")
     except Exception as exc:
         receipt_status(f"error:{type(exc).__name__}")
@@ -3026,7 +3128,6 @@ def _readonly_fast_feature_rows(
 
     _require_remaining_budget(deadline_at, "distilled fast candidates")
     anchors, bm25 = search_existing_lexical(request.prompt, top_n=12)
-    anchor_ids = {page.page_id for page in anchors}
     candidates: dict[str, Any] = {}
     for page in [*anchors, *bm25]:
         if page.superseded_by or should_filter_sensitive_result(page, request):
@@ -3035,38 +3136,36 @@ def _readonly_fast_feature_rows(
         if existing is None or float(page.score) > float(existing.score):
             candidates[page.page_id] = page
     ordered = sorted(candidates.values(), key=lambda page: float(page.score), reverse=True)
-    raw_scores = [max(0.0, float(page.score)) for page in ordered]
-    from chronovisor.recall.recall_distillation import build_fast_features
+    from chronovisor.recall.recall_distillation import build_text_features
 
     rows: list[tuple[Any, dict[str, float]]] = []
-    for index, page in enumerate(ordered):
+    for page in ordered:
         _require_remaining_budget(deadline_at, "distilled fast features")
+        # This is intentionally the exact historical feature contract: query
+        # bytes plus the canonical index title/snippet only. It must not gain
+        # rank, session, cwd, or other live-only signals.
+        source = _fast_candidate_source(page)
+        candidate_text = f"{source['title'].strip()}\n{source['snippet'].strip()}"
         rows.append(
             (
                 page,
-                build_fast_features(
-                    exact_anchor=float(page.page_id in anchor_ids),
-                    entity_overlap=min(
-                        1.0,
-                        sum(len(values) for values in matched.values()) / 4.0,
-                    ),
-                    same_session=0.0,
-                    same_task=0.0,
-                    same_cwd=_same_cwd_folder(request, str(page.folder or "")),
-                    temporal_decay=float(bool(page.updated)),
-                    superseded=float(bool(page.superseded_by)),
-                    graph_path=0.0,
-                    top1_score_norm=raw_scores[index] / (raw_scores[index] + 3.0),
-                    margin_norm=(
-                        max(0.0, raw_scores[index] - raw_scores[index + 1])
-                        / max(1.0, raw_scores[index])
-                        if index + 1 < len(raw_scores)
-                        else 1.0
-                    ),
-                ),
+                build_text_features(request.prompt, candidate_text),
             )
         )
     return rows
+
+
+def _fast_candidate_source(page: Any) -> dict[str, str]:
+    """Return the bounded canonical text shared by live and historical rows."""
+
+    return {
+        "title": _one_line(str(page.title or page.page_id), limit=240),
+        "updated": _one_line(str(page.updated or ""), limit=80),
+        "snippet": _one_line(
+            str(page.snippet or page.title or page.page_id), limit=600
+        ),
+        "content_sha256": str(getattr(page, "content_sha256", "")),
+    }
 
 
 def _fast_candidate_pool_sources(
@@ -3075,14 +3174,7 @@ def _fast_candidate_pool_sources(
     """Keep bounded index metadata for private counterfactual bindings only."""
 
     return {
-        page.page_id: {
-            "title": _one_line(str(page.title or page.page_id), limit=240),
-            "updated": _one_line(str(page.updated or ""), limit=80),
-            "snippet": _one_line(
-                str(page.snippet or page.title or page.page_id), limit=600
-            ),
-            "content_sha256": str(getattr(page, "content_sha256", "")),
-        }
+        page.page_id: _fast_candidate_source(page)
         for page, _features in rows
     }
 
@@ -3133,6 +3225,7 @@ def _observe_shadow_distillation_policy(
     candidate_feature_snapshot: list[dict[str, Any]],
     candidate_pool_sources: Mapping[str, Mapping[str, str]],
     deadline_at: float | None,
+    observation_context: Mapping[str, Any] | None = None,
     forced_timed_out: bool = False,
     forced_error_code: str = "",
 ) -> None:
@@ -3144,17 +3237,65 @@ def _observe_shadow_distillation_policy(
     try:
         from chronovisor.recall import recall_distillation
 
-        load_shadow_policy = getattr(recall_distillation, "load_shadow_policy", None)
-        shadow_policy = (
-            load_shadow_policy(root=CHRONOVISOR_ROOT)
-            if callable(load_shadow_policy)
-            else {}
-        )
-        if not shadow_policy:
+        context = dict(observation_context or {})
+        if not context:
+            load_context = getattr(
+                recall_distillation, "load_policy_observation_context", None
+            )
+            context = (
+                load_context(request.session_id, root=CHRONOVISOR_ROOT)
+                if callable(load_context)
+                else {}
+            )
+        if context:
+            shadow_policy = context.get("candidate_policy")
+            incumbent_policy_id = str(context.get("incumbent_policy_id") or "")
+            incumbent_policy = context.get("incumbent_policy")
+            served_policy_id = str(context.get("served_policy_id") or "")
+        else:
+            # Compatibility only for callers/tests during the v2 rollout. New
+            # serving and paired observation must use the atomic context above.
+            load_shadow_policy = getattr(recall_distillation, "load_shadow_policy", None)
+            shadow_policy = (
+                load_shadow_policy(root=CHRONOVISOR_ROOT)
+                if callable(load_shadow_policy)
+                else {}
+            )
+            incumbent_policy_id = str(
+                _distillation_policy_value(
+                    shadow_policy, "shadow_incumbent_policy_id", ""
+                )
+            )
+            incumbent_policy = _distillation_policy_value(
+                shadow_policy, "shadow_incumbent_policy"
+            )
+            served_policy_id = incumbent_policy_id
+        if not isinstance(shadow_policy, Mapping) or not shadow_policy:
             return
         policy_id, _schema, threshold, margin, max_cards = _distilled_policy_identity(
             shadow_policy
         )
+        if not all(
+            re.fullmatch(r"[0-9a-f]{64}", policy_id)
+            and re.fullmatch(r"[0-9a-f]{64}", value)
+            for value in (incumbent_policy_id, served_policy_id)
+        ):
+            return
+        if incumbent_policy:
+            if not isinstance(incumbent_policy, Mapping):
+                return
+            (
+                _incumbent_id,
+                _incumbent_schema,
+                incumbent_threshold,
+                incumbent_margin,
+                incumbent_max_cards,
+            ) = _distilled_policy_identity(incumbent_policy)
+            if _incumbent_id != incumbent_policy_id:
+                return
+        else:
+            incumbent_threshold = incumbent_margin = 0.0
+            incumbent_max_cards = 0
     except Exception:
         return
     selected_ids: set[str] = set()
@@ -3162,12 +3303,15 @@ def _observe_shadow_distillation_policy(
     pool_refs: list[dict[str, Any]] = []
     timed_out = forced_timed_out
     error_code = forced_error_code
+    incumbent_selected_ids: set[str] = set()
+    paired_eligible = bool(incumbent_policy) or served_policy_id == incumbent_policy_id
     if not forced_error_code:
         try:
             remaining_ms = _remaining_budget_ms(deadline_at) or 0
             if remaining_ms <= 0:
                 raise RecallBudgetExhausted("shadow deadline")
             scored: list[tuple[float, str]] = []
+            incumbent_scored: list[tuple[float, str]] = []
             with recall_wall_clock_deadline(remaining_ms):
                 for row in snapshot:
                     _require_remaining_budget(deadline_at, "distillation shadow score")
@@ -3180,7 +3324,21 @@ def _observe_shadow_distillation_policy(
                         scored.append(
                             (max(0.0, min(1.0, score)), str(row["candidate_id"]))
                         )
+                    if incumbent_policy:
+                        incumbent_score = float(
+                            recall_distillation.score_fast_features(
+                                row["features"], incumbent_policy
+                            )
+                        )
+                        if math.isfinite(incumbent_score):
+                            incumbent_scored.append(
+                                (
+                                    max(0.0, min(1.0, incumbent_score)),
+                                    str(row["candidate_id"]),
+                                )
+                            )
                 scored.sort(key=lambda entry: entry[0], reverse=True)
+                incumbent_scored.sort(key=lambda entry: entry[0], reverse=True)
                 if scored and scored[0][0] >= threshold and (
                     len(scored) == 1 or scored[0][0] - scored[1][0] >= margin
                 ):
@@ -3188,6 +3346,29 @@ def _observe_shadow_distillation_policy(
                         candidate_id
                         for score, candidate_id in scored[: min(3, max_cards)]
                         if score >= threshold
+                    }
+                if incumbent_policy:
+                    if incumbent_scored and incumbent_scored[0][0] >= incumbent_threshold and (
+                        len(incumbent_scored) == 1
+                        or incumbent_scored[0][0] - incumbent_scored[1][0]
+                        >= incumbent_margin
+                    ):
+                        incumbent_selected_ids = {
+                            candidate_id
+                            for score, candidate_id in incumbent_scored[
+                                : min(3, incumbent_max_cards)
+                            ]
+                            if score >= incumbent_threshold
+                        }
+                elif served_policy_id == incumbent_policy_id:
+                    # A bootstrap incumbent has no v2 scorer. Its actual
+                    # legacy result is a valid comparator only when it was
+                    # the arm served for this exact request.
+                    pool_ids = {str(row["candidate_id"]) for row in snapshot}
+                    incumbent_selected_ids = {
+                        item.page_id
+                        for item in result.context_items
+                        if item.page_id in pool_ids
                     }
                 pool_refs = _private_candidate_pool_refs(
                     snapshot, candidate_pool_sources, selected_ids
@@ -3197,29 +3378,47 @@ def _observe_shadow_distillation_policy(
             error_code = "deadline"
             snapshot = []
             selected_ids = set()
+            incumbent_selected_ids = set()
             pool_refs = []
         except Exception:
             error_code = "score_error"
             snapshot = []
             selected_ids = set()
+            incumbent_selected_ids = set()
             pool_refs = []
-    try:
+    remaining_ms = _foreground_receipt_remaining_ms(deadline_at)
+    if remaining_ms == 0:
+        return
+
+    def write() -> None:
         recall_distillation.record_shadow_observation(
             decision_id=result.decision_id,
             host=request.host,
             session_id=request.session_id,
             query_semantic_sha256=hashlib.sha256(request.prompt.encode("utf-8")).hexdigest(),
             policy_id=policy_id,
+            incumbent_policy_id=incumbent_policy_id,
+            served_policy_id=served_policy_id,
+            paired_eligible=paired_eligible,
             selected_candidate_ids=sorted(selected_ids),
+            incumbent_selected_candidate_ids=sorted(incumbent_selected_ids),
             candidate_feature_snapshot=snapshot,
             candidate_pool_refs=pool_refs,
             observed_at=datetime.now(UTC).isoformat(),
             decision_latency_ms=_elapsed_ms(started),
             timed_out=timed_out,
             error_code=error_code,
+            nonblocking=True,
             root=CHRONOVISOR_ROOT,
         )
-    except Exception:
+
+    try:
+        if remaining_ms is None:
+            write()
+        else:
+            with recall_wall_clock_deadline(remaining_ms):
+                write()
+    except (RecallWallClockTimeout, Exception):
         return
 
 
@@ -3239,12 +3438,23 @@ def _capture_legacy_distillation_observation(
         policy_id = recall_distillation.load_capture_policy_identity(
             root=CHRONOVISOR_ROOT
         )
-        load_shadow_policy = getattr(recall_distillation, "load_shadow_policy", None)
-        shadow_policy = (
-            load_shadow_policy(root=CHRONOVISOR_ROOT)
-            if callable(load_shadow_policy)
+        load_context = getattr(
+            recall_distillation, "load_policy_observation_context", None
+        )
+        observation_context = (
+            load_context(request.session_id, root=CHRONOVISOR_ROOT)
+            if callable(load_context)
             else {}
         )
+        if observation_context:
+            shadow_policy = observation_context.get("candidate_policy")
+        else:
+            load_shadow_policy = getattr(recall_distillation, "load_shadow_policy", None)
+            shadow_policy = (
+                load_shadow_policy(root=CHRONOVISOR_ROOT)
+                if callable(load_shadow_policy)
+                else {}
+            )
         if not policy_id and not shadow_policy:
             return
         observation_deadline = min(
@@ -3299,6 +3509,7 @@ def _capture_legacy_distillation_observation(
                     "exact_capture_error" if capture_error_code else ""
                 ),
                 trace=None,
+                foreground_deadline_at=observation_deadline,
             )
         if shadow_policy:
             _observe_shadow_distillation_policy(
@@ -3307,6 +3518,11 @@ def _capture_legacy_distillation_observation(
                 candidate_feature_snapshot=feature_snapshot,
                 candidate_pool_sources=candidate_pool_sources,
                 deadline_at=observation_deadline,
+                observation_context=(
+                    observation_context
+                    if isinstance(observation_context, Mapping)
+                    else None
+                ),
                 forced_timed_out=capture_timed_out,
                 forced_error_code=capture_error_code,
             )
@@ -3341,32 +3557,29 @@ def _run_distilled_fast_path(
     candidate_feature_snapshot: list[dict[str, Any]] = []
     candidate_pool_sources: dict[str, dict[str, str]] = {}
     selected_content_hashes: dict[str, str] = {}
+    observation_context = _distillation_policy_value(
+        distilled_policy, "_distillation_observation_context"
+    )
     shadow_observed = False
 
-    def observe_shadow() -> None:
+    def observe_shadow(result: RecallResult) -> None:
         nonlocal shadow_observed
         if shadow_observed:
             return
         shadow_observed = True
         _observe_shadow_distillation_policy(
-            result=RecallResult(
-                status="ok",
-                decision="none",
-                confidence=0.0,
-                queries=[],
-                reasons=[],
-                matched_terms=matched,
-                session_id=active_request.session_id,
-                decision_id=active_request.decision_id,
-            ),
+            result=result,
             request=active_request,
             candidate_feature_snapshot=candidate_feature_snapshot,
             candidate_pool_sources=candidate_pool_sources,
             deadline_at=fast_deadline_at,
+            observation_context=(
+                observation_context if isinstance(observation_context, Mapping) else None
+            ),
         )
 
     def finish(result: RecallResult) -> RecallResult:
-        observe_shadow()
+        observe_shadow(result)
         _record_distilled_exposure(
             result,
             request=active_request,
@@ -3374,6 +3587,7 @@ def _run_distilled_fast_path(
             candidate_feature_snapshot=candidate_feature_snapshot,
             candidate_pool_sources=candidate_pool_sources,
             selected_content_hashes=selected_content_hashes,
+            foreground_deadline_at=fast_deadline_at,
         )
         return result
 
@@ -3403,7 +3617,6 @@ def _run_distilled_fast_path(
                 if math.isfinite(score):
                     scored.append((max(0.0, min(1.0, score)), page))
             scored.sort(key=lambda row: row[0], reverse=True)
-            observe_shadow()
         _stage_completed(telemetry, "distilled_fast_path", fast_deadline_at)
     except (RecallBudgetExhausted, RecallWallClockTimeout):
         trace.update(status="abstained", fallback="deadline")
@@ -3629,11 +3842,31 @@ def _run_active_distillation_recall(
         policy_id, _schema, _threshold, _margin, _max_cards = _distilled_policy_identity(
             distilled_policy
         )
+        observation_context = _distillation_policy_value(
+            distilled_policy, "_distillation_observation_context"
+        )
         _record_distilled_exposure(
             early_result,
             request=request,
             policy_id=policy_id,
             candidate_feature_snapshot=[],
+            foreground_deadline_at=min(
+                final_deadline_at,
+                started + (_DISTILLED_FAST_PATH_MAX_MS / 1000.0),
+            ),
+        )
+        _observe_shadow_distillation_policy(
+            result=early_result,
+            request=request,
+            candidate_feature_snapshot=[],
+            candidate_pool_sources={},
+            deadline_at=min(
+                final_deadline_at,
+                started + (_DISTILLED_FAST_PATH_MAX_MS / 1000.0),
+            ),
+            observation_context=(
+                observation_context if isinstance(observation_context, Mapping) else None
+            ),
         )
         return early_result
     assert active_request is not None

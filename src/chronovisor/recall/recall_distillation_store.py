@@ -11,7 +11,7 @@ import tempfile
 import unicodedata
 from collections.abc import Iterable, Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 from chronovisor.core.canonical_json import (
     canonical_json_bytes_strict,
@@ -31,6 +31,10 @@ POINTER_FILES = {
 
 class DistillationStoreError(ValueError):
     """A distillation artifact is malformed, unsealed, or conflicting."""
+
+
+class DistillationStoreBusy(RuntimeError):
+    """A nonblocking private-store write could not acquire its lock."""
 
 
 def _reject_reserved(payload: Mapping[str, Any], reserved: set[str]) -> None:
@@ -116,6 +120,7 @@ def write_immutable(
     *,
     schema: str,
     artifact_id: str | None = None,
+    nonblocking: bool = False,
 ) -> tuple[str, Path, dict[str, Any]]:
     _reject_reserved(payload, {"schema", "namespace", "artifact_id", "seal_sha256"})
     unsigned = {
@@ -128,21 +133,25 @@ def write_immutable(
     encoded = canonical_json_bytes_strict(artifact) + b"\n"
     path = directory / f"{identity}.json"
     directory.mkdir(parents=True, exist_ok=True)
-    try:
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    except FileExistsError as exc:
-        if path.read_bytes() != encoded:
-            raise DistillationStoreError("immutable artifact conflict") from exc
-    else:
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(encoded)
-            handle.flush()
-            os.fsync(handle.fileno())
-        directory_fd = os.open(directory, os.O_RDONLY)
+
+    def persist() -> None:
+        if path.exists():
+            if path.read_bytes() != encoded:
+                raise DistillationStoreError("immutable artifact conflict")
+        else:
+            _atomic_write(path, encoded)
+
+    if nonblocking:
+        lock = acquire_nonblocking_lock(directory / ".immutable.lock")
+        if lock is None:
+            raise DistillationStoreBusy("immutable artifact store is busy")
         try:
-            os.fsync(directory_fd)
+            persist()
         finally:
-            os.close(directory_fd)
+            release_lock(lock)
+    else:
+        with _locked(directory / ".immutable.lock"):
+            persist()
     return identity, path, verify_seal(artifact, schema=schema)
 
 
@@ -185,35 +194,70 @@ def verify_chain(path: Path) -> dict[str, Any]:
 
 
 def append_chain(path: Path, payload: Mapping[str, Any]) -> dict[str, Any]:
-    _reject_reserved(
-        payload,
-        {
-            "schema",
-            "namespace",
-            "previous_sha256",
-            "record_sha256",
-            "seal_sha256",
-        },
-    )
+    return append_chain_batch(path, (payload,))[0]
+
+
+def append_chain_batch(
+    path: Path, payloads: Iterable[Mapping[str, Any]]
+) -> list[dict[str, Any]]:
+    """Append a bounded batch with one verification, lock, and fsync."""
+
+    values = [dict(payload) for payload in payloads]
+    if not values:
+        return []
+    if len(values) > 500:
+        raise DistillationStoreError("ledger batch is too large")
+    reserved = {
+        "schema",
+        "namespace",
+        "previous_sha256",
+        "record_sha256",
+        "seal_sha256",
+    }
+    for payload in values:
+        _reject_reserved(payload, reserved)
     lock_path = path.with_suffix(path.suffix + ".lock")
     with _locked(lock_path):
         path.parent.mkdir(parents=True, exist_ok=True)
-        head = verify_chain(path)
-        unsigned = {
-            "schema": DISTILLATION_SCHEMA,
-            "namespace": "recall-distillation",
-            "previous_sha256": head["head_sha256"],
-            **payload,
-        }
-        row = {**unsigned, "record_sha256": canonical_json_sha256_strict(unsigned)}
-        encoded = canonical_json_bytes_strict(row) + b"\n"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
-        with os.fdopen(fd, "ab") as handle:
-            handle.write(encoded)
-            handle.flush()
-            os.fsync(handle.fileno())
-        return row
+        previous = str(verify_chain(path)["head_sha256"])
+        rows: list[dict[str, Any]] = []
+        encoded = bytearray()
+        for payload in values:
+            unsigned = {
+                "schema": DISTILLATION_SCHEMA,
+                "namespace": "recall-distillation",
+                "previous_sha256": previous,
+                **payload,
+            }
+            row = {
+                **unsigned,
+                "record_sha256": canonical_json_sha256_strict(unsigned),
+            }
+            rows.append(row)
+            previous = row["record_sha256"]
+            encoded.extend(canonical_json_bytes_strict(row) + b"\n")
+        try:
+            existing = path.read_bytes()
+        except FileNotFoundError:
+            existing = b""
+        _atomic_write(path, existing + encoded)
+        return rows
+
+
+def acquire_nonblocking_lock(path: Path) -> BinaryIO | None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = path.open("a+b")
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        handle.close()
+        return None
+    return handle
+
+
+def release_lock(handle: BinaryIO) -> None:
+    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    handle.close()
 
 
 def append_chain_unique(
@@ -224,6 +268,25 @@ def append_chain_unique(
     binding_field: str,
 ) -> dict[str, Any]:
     """Append once by a stable identity while holding the ledger lock."""
+
+    lock_path = path.with_suffix(path.suffix + ".lock")
+    with _locked(lock_path):
+        return append_chain_unique_locked(
+            path,
+            payload,
+            unique_field=unique_field,
+            binding_field=binding_field,
+        )
+
+
+def append_chain_unique_locked(
+    path: Path,
+    payload: Mapping[str, Any],
+    *,
+    unique_field: str,
+    binding_field: str,
+) -> dict[str, Any]:
+    """Append one unique row while the caller holds this chain's lock."""
 
     _reject_reserved(
         payload,
@@ -239,35 +302,25 @@ def append_chain_unique(
     binding = payload.get(binding_field)
     if not isinstance(identity, str) or not identity or not isinstance(binding, str):
         raise DistillationStoreError("unique ledger identity is invalid")
-    lock_path = path.with_suffix(path.suffix + ".lock")
-    with _locked(lock_path):
-        head = verify_chain(path)
-        if path.exists():
-            for line in path.read_text().splitlines():
-                row = json.loads(line)
-                if row.get(unique_field) != identity:
-                    continue
-                if row.get(binding_field) == binding:
-                    return row
-                raise DistillationStoreError("unique ledger identity conflict")
-        unsigned = {
-            "schema": DISTILLATION_SCHEMA,
-            "namespace": "recall-distillation",
-            "previous_sha256": head["head_sha256"],
-            **payload,
-        }
-        row = {**unsigned, "record_sha256": canonical_json_sha256_strict(unsigned)}
-        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
-        with os.fdopen(fd, "ab") as handle:
-            handle.write(canonical_json_bytes_strict(row) + b"\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        directory_fd = os.open(path.parent, os.O_RDONLY)
-        try:
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
-        return row
+    path.parent.mkdir(parents=True, exist_ok=True)
+    head = verify_chain(path)
+    existing = path.read_bytes() if path.exists() else b""
+    for line in existing.splitlines():
+        row = json.loads(line)
+        if row.get(unique_field) != identity:
+            continue
+        if row.get(binding_field) == binding:
+            return row
+        raise DistillationStoreError("unique ledger identity conflict")
+    unsigned = {
+        "schema": DISTILLATION_SCHEMA,
+        "namespace": "recall-distillation",
+        "previous_sha256": head["head_sha256"],
+        **payload,
+    }
+    row = {**unsigned, "record_sha256": canonical_json_sha256_strict(unsigned)}
+    _atomic_write(path, existing + canonical_json_bytes_strict(row) + b"\n")
+    return row
 
 
 def read_chain(path: Path) -> list[dict[str, Any]]:
@@ -482,7 +535,7 @@ def snapshot(chronovisor_root: Path) -> dict[str, Any]:
                     raise DistillationStoreError("pointer policy id is invalid")
                 policy = read_sealed(
                     root / "policies" / f"{policy_id}.json",
-                    schema="chronovisor.recall-distill-policy.v1",
+                    schema="chronovisor.recall-distill-policy.v2",
                 )
                 if policy.get("artifact_id") != policy_id:
                     raise DistillationStoreError("pointer policy identity mismatch")
@@ -522,6 +575,36 @@ def snapshot(chronovisor_root: Path) -> dict[str, Any]:
             for character in error_code
         ):
             error_code = "invalid_error_code"
+        labels = read_chain(root / "label-ledger.jsonl")
+        teacher_only = sum(row.get("authority") == "teacher-only" for row in labels)
+        verified_truth = sum(row.get("authority") == "verified" for row in labels)
+        probe_not_truth = 0
+        baseline_id = state.get("baseline_artifact_id")
+        if isinstance(baseline_id, str) and len(baseline_id) == 64:
+            baseline = read_sealed(
+                root / "baselines" / f"{baseline_id}.json",
+                schema="chronovisor.recall-distill-baseline.v1",
+            )
+            counts = baseline.get("counts")
+            if isinstance(counts, Mapping):
+                teacher_only = int(counts.get("teacher_only_labels") or 0)
+                verified_truth = int(counts.get("verified_truth_labels") or 0)
+                probe_not_truth = int(counts.get("locked_test_probe_pairs") or 0)
+        paired_denominator = sum(
+            row.get("kind") == "shadow-policy-observation"
+            and row.get("paired_eligible") is True
+            and row.get("stage") == rollout_status
+            and row.get("stage_started_at") == state.get("stage_started_at")
+            and row.get("qualified_run_id") == state.get("stage_run_id")
+            for row in read_chain(root / "shadow-observation-receipts.jsonl")
+        )
+        manifest_backlog = state.get("manifest_backlog", 0)
+        candidate_backlog = state.get("candidate_backlog", 0)
+        if any(
+            isinstance(value, bool) or not isinstance(value, int) or value < 0
+            for value in (manifest_backlog, candidate_backlog)
+        ):
+            raise DistillationStoreError("cold-start backlog is invalid")
         return {
             "schema": "chronovisor.recall-distillation-health.v1",
             "status": worker_status,
@@ -535,6 +618,16 @@ def snapshot(chronovisor_root: Path) -> dict[str, Any]:
             "lkg_policy_id": pointers["lkg"],
             "last_success_at": str(state.get("last_success_at") or ""),
             "error_code": error_code[:80],
+            "feature_revision": "recall-distill-text-v2",
+            "teacher_only": teacher_only,
+            "verified_truth": verified_truth,
+            "probe_not_truth": probe_not_truth,
+            "paired_denominator": paired_denominator,
+            "hold_reason": str(state.get("hold_reason") or "")[:80],
+            "cold_start_pending": bool(state.get("cold_start_pending", False)),
+            "split_plan_id": str(state.get("split_plan_id") or "")[:12],
+            "manifest_backlog": manifest_backlog,
+            "candidate_backlog": candidate_backlog,
         }
     except DistillationStoreError:
         state_path = root / STATE_FILE
@@ -552,4 +645,14 @@ def snapshot(chronovisor_root: Path) -> dict[str, Any]:
             "lkg_policy_id": "",
             "last_success_at": "",
             "error_code": "missing_state" if missing else "invalid_state",
+            "feature_revision": "recall-distill-text-v2",
+            "teacher_only": 0,
+            "verified_truth": 0,
+            "probe_not_truth": 0,
+            "paired_denominator": 0,
+            "hold_reason": "",
+            "cold_start_pending": False,
+            "split_plan_id": "",
+            "manifest_backlog": 0,
+            "candidate_backlog": 0,
         }

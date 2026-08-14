@@ -469,6 +469,99 @@ def test_unique_quoted_exact_replacement_applies_without_any_model(
     assert audit["decision_authority"]["model_calls"] == 0
 
 
+def test_exact_user_correction_captures_only_cas_readback_veto_binding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from chronovisor.recall import recall_distillation
+
+    pages = tmp_path / "pages"
+    pages.mkdir()
+    page = pages / "memory.md"
+    page.write_bytes(b"---\ntitle: Memory\n---\nInstalled RAM is 16GB.\n")
+    _patch_page_lookup(monkeypatch, pages)
+    captured: dict[str, object] = {}
+
+    def record_veto(**kwargs: object) -> dict[str, str]:
+        captured.update(kwargs)
+        return {"record_sha256": "a" * 64}
+
+    monkeypatch.setattr(
+        recall_distillation,
+        "record_authenticated_exact_correction_veto",
+        record_veto,
+    )
+    event = _event()
+    event["correction_prompt"] = (
+        "「Installed RAM is 16GB.」ではなく「Installed RAM is 32GB.」"
+    )
+    store = _store(tmp_path)
+    content_correction.enqueue_event(event, store=store)
+
+    result = content_correction.run_pending_corrections(
+        max_items=1,
+        store=store,
+        generate_fn=lambda *_args, **_kwargs: pytest.fail("exact path must not model"),
+        reviewer=lambda *_args, **_kwargs: pytest.fail("exact path must not review"),
+    )
+
+    after = page.read_bytes()
+    assert result["results"][-1]["negative_veto_capture"] == {
+        "status": "recorded",
+        "receipt_id": "a" * 64,
+    }
+    assert captured["decision_id"] == "decision-1"
+    assert captured["correction_id"]
+    assert captured["candidate_id"] == "memory"
+    assert captured["page_id"] == "memory"
+    assert b"Installed RAM is 16GB." in captured["preimage_bytes"]
+    assert b"Installed RAM is 32GB." not in captured["preimage_bytes"]
+    assert captured["postimage_bytes"] == after
+    assert captured["readback_bytes"] == after
+    assert captured["cas_status"] == "applied"
+
+
+def test_exact_user_correction_veto_capture_failure_does_not_undo_correction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from chronovisor.recall import recall_distillation
+
+    pages = tmp_path / "pages"
+    pages.mkdir()
+    page = pages / "memory.md"
+    page.write_text(
+        "---\ntitle: Memory\n---\nInstalled RAM is 16GB.\n", encoding="utf-8"
+    )
+    _patch_page_lookup(monkeypatch, pages)
+    monkeypatch.setattr(
+        recall_distillation,
+        "record_authenticated_exact_correction_veto",
+        lambda **_kwargs: (_ for _ in ()).throw(OSError("veto ledger unavailable")),
+    )
+    event = _event()
+    event["correction_prompt"] = (
+        "「Installed RAM is 16GB.」ではなく「Installed RAM is 32GB.」"
+    )
+    store = _store(tmp_path)
+    merged = content_correction.enqueue_event(event, store=store)
+
+    result = content_correction.run_pending_corrections(
+        max_items=1,
+        store=store,
+        generate_fn=lambda *_args, **_kwargs: pytest.fail("exact path must not model"),
+        reviewer=lambda *_args, **_kwargs: pytest.fail("exact path must not review"),
+    )
+
+    assert result["results"][-1]["status"] == "applied"
+    assert result["results"][-1]["negative_veto_capture"] == {
+        "status": "capture_failed",
+        "error_type": "OSError",
+    }
+    assert "Installed RAM is 32GB." in page.read_text(encoding="utf-8")
+    assert store.get(merged["item"]["key"])["status"] == "applied"
+
+
 def test_unique_quoted_retraction_applies_without_any_model(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1872,6 +1965,8 @@ def test_correction_grounding_checks_summary_and_recall_questions() -> None:
 
 
 def test_end_to_end_frontier_approved_correction(tmp_path: Path, monkeypatch) -> None:
+    from chronovisor.recall import recall_distillation
+
     pages = tmp_path / "pages"
     pages.mkdir()
     page = pages / "memory.md"
@@ -1881,6 +1976,11 @@ def test_end_to_end_frontier_approved_correction(tmp_path: Path, monkeypatch) ->
         encoding="utf-8",
     )
     _patch_page_lookup(monkeypatch, pages)
+    monkeypatch.setattr(
+        recall_distillation,
+        "record_authenticated_exact_correction_veto",
+        lambda **_kwargs: pytest.fail("frontier correction must not capture veto"),
+    )
     monkeypatch.setattr(content_correction, "PROPOSALS_DIR", tmp_path / "proposals")
     monkeypatch.setattr(
         content_correction, "CONTENT_FEEDBACK_FILE", tmp_path / "content-feedback.jsonl"

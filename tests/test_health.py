@@ -28,6 +28,12 @@ def test_recall_distillation_kpi_uses_public_snapshot_without_raw_content(
             "active_policy_id": "active-policy",
             "candidate_policy_id": "candidate-policy",
             "lkg_policy_id": "lkg-policy",
+            "feature_revision": "recall-distill-text-v2",
+            "teacher_only": 12,
+            "verified_truth": 3,
+            "probe_not_truth": 4,
+            "paired_denominator": 7,
+            "hold_reason": "verified_truth_below_floor",
         }
     )
     monkeypatch.setattr(health, "CHRONOVISOR_ROOT", chronovisor_root)
@@ -44,6 +50,12 @@ def test_recall_distillation_kpi_uses_public_snapshot_without_raw_content(
     assert payload["active_policy_id"] == "active-policy"
     assert payload["candidate_policy_id"] == "candidate-policy"
     assert payload["lkg_policy_id"] == "lkg-policy"
+    assert payload["teacher_only"] == 12
+    assert payload["verified_truth"] == 3
+    assert payload["probe_not_truth"] == 4
+    assert payload["paired_denominator"] == 7
+    assert payload["hold_reason"] == "verified_truth_below_floor"
+    assert payload["feature_revision"] == "recall-distill-text-v2"
     assert payload["alert"] is False
 
 
@@ -81,14 +93,27 @@ def test_recall_distillation_kpi_reads_real_sealed_state_and_pointers(
             "worker_status": "idle",
             "rollout_percent": 5,
             "last_success_at": "2026-08-14T20:00:00Z",
+            "hold_reason": "verified_truth_below_floor",
         },
+    )
+    store.append_chain(
+        store.distillation_dir(chronovisor_root) / "label-ledger.jsonl",
+        {"authority": "teacher-only", "assignment": {"probe": True}},
+    )
+    store.append_chain(
+        store.distillation_dir(chronovisor_root) / "label-ledger.jsonl",
+        {"authority": "verified", "assignment": {"probe": False}},
+    )
+    store.append_chain(
+        store.distillation_dir(chronovisor_root) / "shadow-observation-receipts.jsonl",
+        {"kind": "shadow-policy-observation"},
     )
     policy_ids = []
     for kind, marker in (("active", "a"), ("candidate", "b"), ("lkg", "c")):
         policy_id, _, _ = store.write_immutable(
             store.distillation_dir(chronovisor_root) / "policies",
             {"kind": "test-policy", "marker": marker},
-            schema="chronovisor.recall-distill-policy.v1",
+            schema="chronovisor.recall-distill-policy.v2",
         )
         policy_ids.append(policy_id)
         store.write_pointer(chronovisor_root, kind, policy_id)
@@ -103,6 +128,14 @@ def test_recall_distillation_kpi_reads_real_sealed_state_and_pointers(
     assert payload["active_policy_id"] == policy_ids[0][:12]
     assert payload["candidate_policy_id"] == policy_ids[1][:12]
     assert payload["lkg_policy_id"] == policy_ids[2][:12]
+    assert payload["teacher_only"] == 1
+    assert payload["verified_truth"] == 1
+    # A raw probe label and unbound observation receipt are not authority:
+    # only baseline locked-test probe pairs and stage-bound paired receipts count.
+    assert payload["probe_not_truth"] == 0
+    assert payload["paired_denominator"] == 0
+    assert payload["hold_reason"] == "verified_truth_below_floor"
+    assert payload["feature_revision"] == "recall-distill-text-v2"
     assert payload["alert"] is False
 
 

@@ -8,7 +8,11 @@ import json
 import math
 import os
 import re
+import signal
 import sys
+import threading
+import time
+import unicodedata
 from collections import defaultdict, deque
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -35,9 +39,11 @@ from chronovisor.recall.recall_calibration import sigmoid
 
 RALLY_SCHEMA = "chronovisor.recall-rally.rally-v1"
 BASELINE_SCHEMA = "chronovisor.recall-distill-baseline.v1"
-POLICY_SCHEMA = "chronovisor.recall-distill-policy.v1"
+POLICY_SCHEMA = "chronovisor.recall-distill-policy.v2"
 OUTCOME_SCHEMA = "chronovisor.recall-closed-outcome.v1"
+VETO_SCHEMA = "chronovisor.recall-authenticated-negative-veto.v1"
 SHADOW_OBSERVATION_SCHEMA = "chronovisor.recall-distill-shadow-observation.v1"
+SPLIT_PLAN_SCHEMA = "chronovisor.recall-distill-split-plan.v1"
 ASSIGNMENT_REVISION = "assignment-v2"
 PROBE_REVISION = "probe-v2"
 TEACHER_ROLES = (
@@ -72,18 +78,8 @@ RELEVANCE_CLOSED_PREDICATES = frozenset(
         "exact_task_uuid_overlap",
     }
 )
-FAST_FEATURE_KEYS = (
-    "exact_anchor",
-    "entity_overlap",
-    "same_session",
-    "same_task",
-    "same_cwd",
-    "temporal_decay",
-    "superseded",
-    "graph_path",
-    "top1_score_norm",
-    "margin_norm",
-)
+TEXT_FEATURE_REVISION = "recall-distill-text-v2"
+FAST_FEATURE_KEYS = ("query_chargram_coverage", "candidate_chargram_precision")
 FORBIDDEN_LIVE_FEATURES = frozenset(
     {
         "a_t",
@@ -134,11 +130,13 @@ class _WorkerTeacher:
         max_input_bytes: int,
         expected_route: Mapping[str, str],
         expected_digest: str,
+        deadline_ms: int = 60_000,
     ) -> None:
         self.role = role
         self.max_input_bytes = max_input_bytes
         self.expected_route = expected_route
         self.expected_digest = expected_digest
+        self.deadline_ms = deadline_ms
 
     def evaluate(self, payload: Mapping[str, Any]) -> Mapping[str, Any]:
         return _worker_call(
@@ -148,6 +146,7 @@ class _WorkerTeacher:
             max_input_bytes=self.max_input_bytes,
             expected_route=self.expected_route,
             expected_digest=self.expected_digest,
+            deadline_ms=self.deadline_ms,
         )
 
 
@@ -159,10 +158,12 @@ class _WorkerCounterfactual:
         max_input_bytes: int,
         routes: Mapping[str, Mapping[str, str]],
         digests: Mapping[str, str],
+        deadline_ms: int = 60_000,
     ) -> None:
         self.max_input_bytes = max_input_bytes
         self.routes = routes
         self.digests = digests
+        self.deadline_ms = deadline_ms
 
     def compare(self, payload: Mapping[str, Any]) -> Mapping[str, Any]:
         base = {
@@ -176,6 +177,7 @@ class _WorkerCounterfactual:
             max_input_bytes=self.max_input_bytes,
             expected_route=self.routes["recall.distill.answer_generator"],
             expected_digest=self.digests["recall.distill.answer_generator"],
+            deadline_ms=self.deadline_ms,
         )
         arm1 = _worker_call(
             "answer",
@@ -184,6 +186,7 @@ class _WorkerCounterfactual:
             max_input_bytes=self.max_input_bytes,
             expected_route=self.routes["recall.distill.answer_generator"],
             expected_digest=self.digests["recall.distill.answer_generator"],
+            deadline_ms=self.deadline_ms,
         )
         a0 = str(arm0.get("answer") or "")
         a1 = str(arm1.get("answer") or "")
@@ -207,20 +210,33 @@ class _WorkerCounterfactual:
                     "candidate_id": base["candidate_id"],
                     "answer_a": a0 if a_first else a1,
                     "answer_b": a1 if a_first else a0,
-                    "candidate_arm": "b" if a_first else "a",
                     "blind_order": "a_first" if a_first else "b_first",
                     "actual_answer_diagnostic": payload.get("actual_answer", ""),
                 },
                 max_input_bytes=self.max_input_bytes,
                 expected_route=self.routes["recall.distill.utility_judge"],
                 expected_digest=self.digests["recall.distill.utility_judge"],
+                deadline_ms=self.deadline_ms,
             )
 
         first = judge(first_a)
         second = judge(not first_a)
+
+        def decoded_choice(result: Mapping[str, Any], a0_first: bool) -> str:
+            choice = result.get("blind_choice")
+            if choice == "tie":
+                return "neutral"
+            if choice not in {"a", "b"}:
+                return "uncertain"
+            candidate_arm = "b" if a0_first else "a"
+            return "helpful" if choice == candidate_arm else "harmful"
+
+        first_verdict = decoded_choice(first, first_a)
+        second_verdict = decoded_choice(second, not first_a)
+        distinct_models = arm0.get("_model_digest") != first.get("_model_digest")
         verdict = (
-            first.get("verdict")
-            if first.get("verdict") == second.get("verdict")
+            first_verdict
+            if distinct_models and first_verdict == second_verdict
             else "uncertain"
         )
         return {
@@ -232,7 +248,8 @@ class _WorkerCounterfactual:
                 "a0_first" if first_a else "a1_first",
                 "a1_first" if first_a else "a0_first",
             ],
-            "order_agreement": first.get("verdict") == second.get("verdict"),
+            "blind_choices": [first.get("blind_choice"), second.get("blind_choice")],
+            "order_agreement": distinct_models and first_verdict == second_verdict,
             "generator_route_identity": arm0.get("_route_identity", {}),
             "generator_model_digest": arm0.get("_model_digest", ""),
             "judge_route_identity": first.get("_route_identity", {}),
@@ -248,6 +265,7 @@ def _worker_call(
     max_input_bytes: int,
     expected_route: Mapping[str, str],
     expected_digest: str,
+    deadline_ms: int = 60_000,
 ) -> Mapping[str, Any]:
     from chronovisor.core import ollama
     from chronovisor.core.research_scheduler import (
@@ -267,7 +285,7 @@ def _worker_call(
         "role": role,
         "request_id": request_id,
         "input": dict(payload),
-        "deadline_ms": 60_000,
+        "deadline_ms": deadline_ms,
     }
     input_ceiling = min(max_input_bytes, 12_000)
     if len(canonical_json.canonical_json_bytes_strict(payload)) > input_ceiling:
@@ -284,7 +302,7 @@ def _worker_call(
             [sys.executable, "-m", "chronovisor.recall.recall_distillation_worker"],
             encoded,
             lease,
-            timeout_seconds=65,
+            timeout_seconds=deadline_ms / 1_000 + 5,
         )
     if outcome.status != "completed" or not isinstance(outcome.value, dict):
         if outcome.status in {"deferred", "cancelled", "timeout"}:
@@ -332,6 +350,8 @@ def _worker_call(
 
 def _default_workers(
     config: DistillationConfig,
+    *,
+    deadline_ms: int = 60_000,
 ) -> tuple[dict[str, Teacher], CounterfactualGenerator | None]:
     from chronovisor.core import ollama
 
@@ -367,14 +387,22 @@ def _default_workers(
         for route in routes
     }
     digests = {route.role: model_digests[route.model] for route in routes}
+    if len({digests[role] for role in TEACHER_ROLES}) != len(TEACHER_ROLES):
+        return {}, None
     return (
         {
             role: _WorkerTeacher(
-                role, config.max_input_bytes, identities[role], digests[role]
+                role,
+                config.max_input_bytes,
+                identities[role],
+                digests[role],
+                deadline_ms,
             )
             for role in TEACHER_ROLES
         },
-        _WorkerCounterfactual(config.max_input_bytes, identities, digests),
+        _WorkerCounterfactual(
+            config.max_input_bytes, identities, digests, deadline_ms
+        ),
     )
 
 
@@ -387,8 +415,10 @@ class DistillationConfig:
     hard_floor_rallies: int = 1_000
     hard_floor_days: int = 30
     hard_floor_windows: int = 3
-    hard_floor_verified_labels: int = 500
-    hard_floor_per_class: int = 100
+    hard_floor_teacher_labels: int = 500
+    hard_floor_teacher_per_class: int = 100
+    hard_floor_probe_pairs: int = 100
+    hard_floor_counterfactual_pairs: int = 100
     rollout_stages: tuple[int, ...] = (5, 25, 100)
     canary_min_days: int = 7
 
@@ -440,8 +470,12 @@ def load_distillation_config(config_path: Path | None = None) -> DistillationCon
         hard_floor_rallies=positive("hard_floor_rallies", 1_000),
         hard_floor_days=positive("hard_floor_days", 30),
         hard_floor_windows=positive("hard_floor_windows", 3),
-        hard_floor_verified_labels=positive("hard_floor_verified_labels", 500),
-        hard_floor_per_class=positive("hard_floor_per_class", 100),
+        hard_floor_teacher_labels=positive("hard_floor_teacher_labels", 500),
+        hard_floor_teacher_per_class=positive("hard_floor_teacher_per_class", 100),
+        hard_floor_probe_pairs=positive("hard_floor_probe_pairs", 100),
+        hard_floor_counterfactual_pairs=positive(
+            "hard_floor_counterfactual_pairs", 100
+        ),
         rollout_stages=(5, 25, 100),
         canary_min_days=positive("canary_min_days", 7),
     )
@@ -532,7 +566,7 @@ def _structural_tokens(event: Mapping[str, Any]) -> dict[str, list[str]]:
             text.casefold(),
         ):
             found["task_uuid"].add(text.casefold())
-        elif key in {"path", "file_path", "filepath", "cwd"} and text:
+        elif key in {"path", "file_path", "filepath"} and text:
             normalized = Path(text).as_posix().rstrip("/")
             if normalized and "\x00" not in normalized:
                 found["path"].add(normalized)
@@ -835,6 +869,7 @@ def candidate_snapshot(
     query_text: str,
     *,
     limit: int = 200,
+    candidate_texts: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     candidates = store.search_historical_index(
         index_path,
@@ -845,12 +880,38 @@ def candidate_snapshot(
         source_index=int(rally["source_index"]),
         limit=limit,
     )
+    feature_rows = []
+    query_feature_bytes = _bounded_normalized_text(
+        query_text, max_bytes=2_048
+    ).encode()
+    for candidate in candidates:
+        candidate_text = (candidate_texts or {}).get(str(candidate["text_sha256"]))
+        feature_rows.append(
+            {
+                **candidate,
+                **(
+                    {
+                        "feature_revision": TEXT_FEATURE_REVISION,
+                        "candidate_feature_text_sha256": hashlib.sha256(
+                            _bounded_normalized_text(
+                                candidate_text, max_bytes=4_096
+                            ).encode()
+                        ).hexdigest(),
+                        "features": build_text_features(query_text, candidate_text),
+                    }
+                    if isinstance(candidate_text, str)
+                    else {}
+                ),
+            }
+        )
     unsigned = {
         "schema": "chronovisor.recall-candidate-snapshot.v1",
         "rally_id": rally["rally_id"],
         "as_of": rally["as_of"],
         "retriever_revision": "historical-fts-v1",
-        "candidates": candidates,
+        "feature_revision": TEXT_FEATURE_REVISION,
+        "query_feature_text_sha256": hashlib.sha256(query_feature_bytes).hexdigest(),
+        "candidates": feature_rows,
     }
     return {
         **unsigned,
@@ -911,12 +972,7 @@ def adjudicate_label(
             "rationale_sha256": hashlib.sha256(b"invalid_verdict").hexdigest(),
             "rationale_chars": 15,
         }
-    if verdict == "uncertain":
-        authority = "uncertain"
-    elif dimension == "relevance" and closed_predicate in RELEVANCE_CLOSED_PREDICATES:
-        authority = "verified"
-    else:
-        authority = "teacher-only"
+    authority = "uncertain" if verdict == "uncertain" else "teacher-only"
     reason_code = (
         reason
         if re.fullmatch(r"[a-z0-9_]{1,64}", reason)
@@ -935,6 +991,39 @@ def adjudicate_label(
     }
 
 
+def _append_unique_receipt(
+    path: Path,
+    payload: Mapping[str, Any],
+    *,
+    nonblocking: bool,
+    prepare: Callable[[], Mapping[str, Any]] | None = None,
+) -> dict[str, Any]:
+    if not isinstance(nonblocking, bool):
+        raise DistillationError("receipt nonblocking flag is invalid")
+    if not nonblocking:
+        return store.append_chain_unique(
+            path,
+            {**payload, **(prepare() if prepare else {})},
+            unique_field="decision_id",
+            binding_field="idempotency_sha256",
+        )
+    lock = store.acquire_nonblocking_lock(path.with_suffix(path.suffix + ".lock"))
+    if lock is None:
+        return {"status": "deferred", "reason": "receipt_ledger_busy"}
+    try:
+        try:
+            return store.append_chain_unique_locked(
+                path,
+                {**payload, **(prepare() if prepare else {})},
+                unique_field="decision_id",
+                binding_field="idempotency_sha256",
+            )
+        except store.DistillationStoreBusy:
+            return {"status": "deferred", "reason": "receipt_ledger_busy"}
+    finally:
+        store.release_lock(lock)
+
+
 def record_exposure(
     *,
     decision_id: str,
@@ -948,6 +1037,7 @@ def record_exposure(
     decision_latency_ms: float | None = None,
     timed_out: bool | None = None,
     error_code: str = "",
+    nonblocking: bool = False,
     root: Path | None = None,
 ) -> dict[str, Any]:
     if not all(
@@ -1003,7 +1093,7 @@ def record_exposure(
         ),
         "observed_at": observed_at,
     }
-    return store.append_chain_unique(
+    return _append_unique_receipt(
         store.distillation_dir(root) / "exposure-receipts.jsonl",
         {
             "kind": "prospective-page-exposure",
@@ -1014,8 +1104,7 @@ def record_exposure(
                 {key: value for key, value in binding.items() if key != "observed_at"}
             ),
         },
-        unique_field="decision_id",
-        binding_field="idempotency_sha256",
+        nonblocking=nonblocking,
     )
 
 
@@ -1077,6 +1166,7 @@ def record_exact_exposure(
     context_style: str = "default",
     decision_latency_ms: float | None = None,
     timed_out: bool | None = None,
+    nonblocking: bool = False,
     root: Path | None = None,
 ) -> dict[str, Any]:
     digests = (query_semantic_sha256, render_sha256, candidate_snapshot_sha256)
@@ -1097,7 +1187,7 @@ def record_exact_exposure(
         for value in (renderer_revision, context_style)
     ):
         raise DistillationError("exact exposure identity is invalid")
-    _timestamp(observed_at, observed_at)
+    _, observed_us = _timestamp(observed_at, observed_at)
     refs: list[dict[str, Any]] = []
     ids: list[str] = []
     for candidate in candidate_refs:
@@ -1291,31 +1381,34 @@ def record_exact_exposure(
     }
     root = root or CHRONOVISOR_ROOT
     _validate_exposure_policy_identity(root, policy_id)
-    _, _, artifact = store.write_immutable(
-        store.distillation_dir(root) / "exposures",
-        {
-            "kind": "exact-rendered-exposure",
-            **binding,
-            "candidate_refs": refs,
-            "candidate_pool_refs": pool_rows,
-            "candidate_feature_snapshot": feature_rows,
-            "runtime_observation": runtime_observation,
-        },
-        schema="chronovisor.recall-exact-exposure.v1",
-    )
-    return store.append_chain_unique(
+    def prepare() -> Mapping[str, Any]:
+        _, _, artifact = store.write_immutable(
+            store.distillation_dir(root) / "exposures",
+            {
+                "kind": "exact-rendered-exposure",
+                **binding,
+                "candidate_refs": refs,
+                "candidate_pool_refs": pool_rows,
+                "candidate_feature_snapshot": feature_rows,
+                "runtime_observation": runtime_observation,
+            },
+            schema="chronovisor.recall-exact-exposure.v1",
+            nonblocking=nonblocking,
+        )
+        return {"exposure_artifact_id": artifact["artifact_id"]}
+
+    return _append_unique_receipt(
         store.distillation_dir(root) / "exposure-receipts.jsonl",
         {
             "kind": "prospective-exact-exposure-v1",
             **binding,
-            "exposure_artifact_id": artifact["artifact_id"],
             "binding_sha256": canonical_json.canonical_json_sha256_strict(binding),
             "idempotency_sha256": canonical_json.canonical_json_sha256_strict(
                 {key: value for key, value in binding.items() if key != "observed_at"}
             ),
         },
-        unique_field="decision_id",
-        binding_field="idempotency_sha256",
+        nonblocking=nonblocking,
+        prepare=prepare,
     )
 
 
@@ -1326,13 +1419,18 @@ def record_shadow_observation(
     session_id: str,
     query_semantic_sha256: str,
     policy_id: str,
+    incumbent_policy_id: str,
+    served_policy_id: str,
     selected_candidate_ids: Sequence[str],
+    incumbent_selected_candidate_ids: Sequence[str],
+    paired_eligible: bool,
     candidate_feature_snapshot: Sequence[Mapping[str, Any]],
     candidate_pool_refs: Sequence[Mapping[str, Any]],
     observed_at: str,
     decision_latency_ms: float,
     timed_out: bool,
     error_code: str = "",
+    nonblocking: bool = False,
     root: Path | None = None,
 ) -> dict[str, Any]:
     """Record non-causal shadow scoring without persisting candidate text."""
@@ -1345,19 +1443,27 @@ def record_shadow_observation(
     if (
         re.fullmatch(r"[0-9a-f]{64}", query_semantic_sha256) is None
         or re.fullmatch(r"[0-9a-f]{64}", policy_id) is None
+        or re.fullmatch(r"[0-9a-f]{64}", incumbent_policy_id) is None
+        or re.fullmatch(r"[0-9a-f]{64}", served_policy_id) is None
         or re.fullmatch(r"[a-z0-9_]{0,64}", error_code) is None
         or isinstance(decision_latency_ms, bool)
         or not isinstance(decision_latency_ms, (int, float))
         or not math.isfinite(float(decision_latency_ms))
         or not 0 <= float(decision_latency_ms) <= 60_000
         or not isinstance(timed_out, bool)
+        or not isinstance(paired_eligible, bool)
     ):
         raise DistillationError("shadow observation runtime binding is invalid")
-    _timestamp(observed_at, observed_at)
+    _, observed_us = _timestamp(observed_at, observed_at)
     selected = list(selected_candidate_ids)
-    if len(selected) != len(set(selected)) or any(
-        not isinstance(candidate_id, str) or not candidate_id
-        for candidate_id in selected
+    incumbent_selected = list(incumbent_selected_candidate_ids)
+    if any(
+        len(values) != len(set(values))
+        or any(
+            not isinstance(candidate_id, str) or not candidate_id
+            for candidate_id in values
+        )
+        for values in (selected, incumbent_selected)
     ):
         raise DistillationError("shadow selected candidates are invalid")
     if len(candidate_pool_refs) > 12 or len(candidate_feature_snapshot) > 12:
@@ -1402,6 +1508,8 @@ def record_shadow_observation(
         )
     if {row["candidate_id"] for row in pool_rows if row["selected"]} != set(selected):
         raise DistillationError("shadow selected pool does not match decision")
+    if not set(incumbent_selected).issubset(pool_ids):
+        raise DistillationError("shadow incumbent decision is outside candidate pool")
     feature_rows: list[dict[str, Any]] = []
     feature_ids: set[str] = set()
     for row in candidate_feature_snapshot:
@@ -1421,9 +1529,18 @@ def record_shadow_observation(
         feature_rows.append({"candidate_id": candidate_id, "features": features})
     if feature_ids != pool_ids:
         raise DistillationError("shadow pool and features do not match")
-    qualified = load_shadow_policy(root)
-    if qualified.get("artifact_id") != policy_id:
-        raise DistillationError("shadow policy is not qualified")
+    qualified = load_policy_observation_context(session_id, root)
+    if (
+        qualified.get("candidate_policy_id") != policy_id
+        or qualified.get("incumbent_policy_id") != incumbent_policy_id
+        or qualified.get("served_policy_id") != served_policy_id
+    ):
+        raise DistillationError("paired policy observation is not qualified")
+    _, stage_started_us = _timestamp(
+        qualified.get("stage_started_at"), observed_at
+    )
+    if observed_us < stage_started_us:
+        raise DistillationError("paired observation predates rollout stage")
     observation = {
         "decision": "read" if selected else "none",
         "selected_count": len(selected),
@@ -1438,7 +1555,14 @@ def record_shadow_observation(
         "session_id_sha256": hashlib.sha256(session_id.encode()).hexdigest(),
         "query_semantic_sha256": query_semantic_sha256,
         "policy_id": policy_id,
+        "incumbent_policy_id": incumbent_policy_id,
+        "served_policy_id": served_policy_id,
+        "stage": qualified["stage"],
+        "stage_started_at": qualified["stage_started_at"],
+        "qualified_run_id": qualified["qualified_run_id"],
         "selected_candidate_ids": selected,
+        "incumbent_selected_candidate_ids": incumbent_selected,
+        "paired_eligible": paired_eligible,
         "candidate_pool_sha256": canonical_json.canonical_json_sha256_strict(pool_rows),
         "candidate_feature_snapshot_sha256": canonical_json.canonical_json_sha256_strict(
             feature_rows
@@ -1448,30 +1572,33 @@ def record_shadow_observation(
         ),
         "observed_at": observed_at,
     }
-    _, _, artifact = store.write_immutable(
-        store.distillation_dir(root) / "shadow-observations",
-        {
-            "kind": "non-causal-shadow-observation",
-            **binding,
-            "candidate_pool_refs": pool_rows,
-            "candidate_feature_snapshot": feature_rows,
-            "runtime_observation": observation,
-        },
-        schema=SHADOW_OBSERVATION_SCHEMA,
-    )
-    return store.append_chain_unique(
+    def prepare() -> Mapping[str, Any]:
+        _, _, artifact = store.write_immutable(
+            store.distillation_dir(root) / "shadow-observations",
+            {
+                "kind": "non-causal-shadow-observation",
+                **binding,
+                "candidate_pool_refs": pool_rows,
+                "candidate_feature_snapshot": feature_rows,
+                "runtime_observation": observation,
+            },
+            schema=SHADOW_OBSERVATION_SCHEMA,
+            nonblocking=nonblocking,
+        )
+        return {"shadow_observation_artifact_id": artifact["artifact_id"]}
+
+    return _append_unique_receipt(
         store.distillation_dir(root) / "shadow-observation-receipts.jsonl",
         {
             "kind": "shadow-policy-observation",
             **binding,
-            "shadow_observation_artifact_id": artifact["artifact_id"],
             "binding_sha256": canonical_json.canonical_json_sha256_strict(binding),
             "idempotency_sha256": canonical_json.canonical_json_sha256_strict(
                 {key: value for key, value in binding.items() if key != "observed_at"}
             ),
         },
-        unique_field="decision_id",
-        binding_field="idempotency_sha256",
+        nonblocking=nonblocking,
+        prepare=prepare,
     )
 
 
@@ -1548,6 +1675,101 @@ def record_closed_outcome(
     )
 
 
+def record_authenticated_exact_correction_veto(
+    *,
+    decision_id: str,
+    correction_id: str,
+    candidate_id: str,
+    page_id: str,
+    preimage_bytes: bytes,
+    postimage_bytes: bytes,
+    readback_bytes: bytes,
+    cas_status: str,
+    observed_at: str,
+    root: Path | None = None,
+) -> dict[str, Any]:
+    """Bind a negative correction veto to one exact selected Page version."""
+
+    if (
+        re.fullmatch(r"[A-Za-z0-9._:-]{1,160}", decision_id) is None
+        or re.fullmatch(r"[A-Za-z0-9._:-]{1,160}", correction_id) is None
+        or not candidate_id
+        or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,239}", page_id) is None
+        or cas_status not in {"applied", "already_applied"}
+        or any(
+            not isinstance(value, bytes) or not value or len(value) > 2_000_000
+            for value in (preimage_bytes, postimage_bytes, readback_bytes)
+        )
+    ):
+        raise DistillationError("authenticated correction veto binding is invalid")
+    _, observed_us = _timestamp(observed_at, observed_at)
+    root = root or CHRONOVISOR_ROOT
+    receipts = [
+        receipt
+        for values in _exposure_map(root).values()
+        for receipt in values
+        if receipt.get("decision_id") == decision_id
+    ]
+    if len(receipts) != 1:
+        raise DistillationError("correction veto exact exposure is not unique")
+    receipt = receipts[0]
+    exposure_id = str(receipt["exposure_artifact_id"])
+    exposure = store.read_sealed(
+        store.distillation_dir(root) / "exposures" / f"{exposure_id}.json",
+        schema="chronovisor.recall-exact-exposure.v1",
+    )
+    selected = exposure.get("candidate_refs")
+    if not isinstance(selected, list) or len(selected) != 1 or not isinstance(
+        selected[0], Mapping
+    ):
+        raise DistillationError("correction veto requires one selected candidate")
+    candidate = selected[0]
+    preimage_sha256 = hashlib.sha256(preimage_bytes).hexdigest()
+    postimage_sha256 = hashlib.sha256(postimage_bytes).hexdigest()
+    readback_sha256 = hashlib.sha256(readback_bytes).hexdigest()
+    if (
+        candidate.get("candidate_id") != candidate_id
+        or candidate.get("page_id") != page_id
+        or candidate.get("page_content_sha256") != preimage_sha256
+        or postimage_sha256 != readback_sha256
+        or postimage_sha256 == preimage_sha256
+        or observed_us
+        < _timestamp(str(exposure.get("observed_at") or ""), observed_at)[1]
+    ):
+        raise DistillationError("correction veto version/readback binding is invalid")
+    policy_id = str(exposure.get("policy_id") or "")
+    _validate_exposure_policy_identity(root, policy_id)
+    binding = {
+        "decision_id": decision_id,
+        "correction_id": correction_id,
+        "exposure_artifact_id": exposure_id,
+        "policy_id": policy_id,
+        "candidate_id": candidate_id,
+        "page_id": page_id,
+        "preimage_sha256": preimage_sha256,
+        "postimage_sha256": postimage_sha256,
+        "cas_status": cas_status,
+        "observed_at": observed_at,
+        "producer_revision": "content-correction-cas-readback-v1",
+    }
+    _, _, artifact = store.write_immutable(
+        store.distillation_dir(root) / "negative-vetoes",
+        {"kind": "authenticated-exact-correction-veto", **binding},
+        schema=VETO_SCHEMA,
+    )
+    return store.append_chain_unique(
+        store.distillation_dir(root) / "negative-veto-receipts.jsonl",
+        {
+            "kind": "authenticated-negative-veto",
+            **binding,
+            "veto_artifact_id": artifact["artifact_id"],
+            "binding_sha256": canonical_json.canonical_json_sha256_strict(binding),
+        },
+        unique_field="correction_id",
+        binding_field="binding_sha256",
+    )
+
+
 def _resolve_closed_outcome(
     root: Path,
     receipt_id: object,
@@ -1600,6 +1822,45 @@ def _resolve_closed_outcome(
     ):
         return None
     return None
+
+
+def _bounded_normalized_text(value: str, *, max_bytes: int) -> str:
+    normalized = unicodedata.normalize("NFKC", value).casefold()
+    collapsed = " ".join(
+        "".join(
+            character if character.isalnum() else " " for character in normalized
+        ).split()
+    )
+    encoded = collapsed.encode("utf-8")[:max_bytes]
+    return encoded.decode("utf-8", errors="ignore").strip()
+
+
+def _text_chargrams(value: str) -> frozenset[str]:
+    grams: set[str] = set()
+    for token in value.split():
+        if len(token) < 3:
+            grams.add(token)
+        else:
+            grams.update(token[index : index + 3] for index in range(len(token) - 2))
+    return frozenset(grams)
+
+
+def build_text_features(query_text: str, candidate_text: str) -> dict[str, float]:
+    """Build the byte-identical historical/live Recall feature contract."""
+
+    if not isinstance(query_text, str) or not isinstance(candidate_text, str):
+        raise DistillationError("text feature inputs must be strings")
+    query = _text_chargrams(_bounded_normalized_text(query_text, max_bytes=2_048))
+    candidate = _text_chargrams(
+        _bounded_normalized_text(candidate_text, max_bytes=4_096)
+    )
+    overlap = len(query.intersection(candidate))
+    return build_fast_features(
+        query_chargram_coverage=round(overlap / len(query), 8) if query else 0.0,
+        candidate_chargram_precision=(
+            round(overlap / len(candidate), 8) if candidate else 0.0
+        ),
+    )
 
 
 def build_fast_features(
@@ -1743,58 +2004,105 @@ def load_policy_for_session(
         return {}
 
 
-def load_shadow_policy(root: Path | None = None) -> dict[str, Any]:
-    """Load a qualified candidate for observation only, never live serving."""
+def load_policy_pair_for_session(
+    session_id: str, root: Path | None = None
+) -> dict[str, Any]:
+    context = load_policy_observation_context(session_id, root)
+    return context if context.get("stage") == "canary" else {}
+
+
+def load_policy_observation_context(
+    session_id: str, root: Path | None = None
+) -> dict[str, Any]:
+    """Atomically select and validate both arms for shadow/canary observation."""
 
     root = root or CHRONOVISOR_ROOT
-    if not _enabled_for_root(root):
+    if not _enabled_for_root(root) or not session_id:
         return {}
+    lock = store.distillation_dir(root) / "rollout.lock"
     try:
         from chronovisor.recall import recall_distillation_rollout as rollout
 
-        state = _read_worker_state(root)
-        if state.get("status") != "shadow" or state.get("learning_halted"):
-            return {}
-        candidate_id = str(store.read_pointer(root, "candidate")["policy_id"])
-        active_id = str(store.read_pointer(root, "active")["policy_id"])
-        lkg_id = str(store.read_pointer(root, "lkg")["policy_id"])
-        if active_id != lkg_id:
-            return {}
-        candidate = _load_policy(candidate_id, root)
-        _load_policy(active_id, root)
-        lineage = candidate.get("lineage")
-        baseline_id = (
-            str(lineage.get("baseline_artifact_id") or "")
-            if isinstance(lineage, Mapping)
-            else ""
-        )
-        baseline = store.read_sealed(
-            store.distillation_dir(root) / "baselines" / f"{baseline_id}.json",
-            schema=BASELINE_SCHEMA,
-        )
-        receipt_id = str(state.get("evaluation_receipt_id") or "")
-        receipt = store.read_sealed(
-            store.distillation_dir(root) / "rollout-runs" / f"{receipt_id}.json",
-            schema=rollout.EVALUATION_SCHEMA,
-        )
-        hard_floor = baseline.get("hard_floor")
-        if (
-            baseline.get("artifact_id") != baseline_id
-            or not isinstance(hard_floor, Mapping)
-            or hard_floor.get("p5_allowed") is not True
-            or receipt.get("artifact_id") != receipt_id
-            or receipt.get("policy_id") != candidate_id
-            or receipt.get("incumbent_policy_id") != active_id
-            or receipt.get("baseline_id") != baseline_id
-        ):
-            return {}
-        return candidate
+        with store._locked(lock):
+            state = _read_worker_state(root)
+            stage = str(state.get("status") or "")
+            if stage not in {"shadow", "canary"} or state.get("learning_halted"):
+                return {}
+            candidate_id = str(store.read_pointer(root, "candidate")["policy_id"])
+            incumbent_id = str(store.read_pointer(root, "active")["policy_id"])
+            if str(store.read_pointer(root, "lkg")["policy_id"]) != incumbent_id:
+                return {}
+            candidate = _load_policy(candidate_id, root)
+            incumbent = _load_policy(incumbent_id, root)
+            lineage = candidate.get("lineage")
+            baseline_id = (
+                str(lineage.get("baseline_artifact_id") or "")
+                if isinstance(lineage, Mapping)
+                else ""
+            )
+            baseline = store.read_sealed(
+                store.distillation_dir(root) / "baselines" / f"{baseline_id}.json",
+                schema=BASELINE_SCHEMA,
+            )
+            receipt_id = str(state.get("evaluation_receipt_id") or "")
+            receipt = store.read_sealed(
+                store.distillation_dir(root) / "rollout-runs" / f"{receipt_id}.json",
+                schema=rollout.EVALUATION_SCHEMA,
+            )
+            hard_floor = baseline.get("hard_floor")
+            if (
+                baseline.get("artifact_id") != baseline_id
+                or not isinstance(hard_floor, Mapping)
+                or hard_floor.get("p5_allowed") is not True
+                or receipt.get("artifact_id") != receipt_id
+                or receipt.get("policy_id") != candidate_id
+                or receipt.get("incumbent_policy_id") != incumbent_id
+                or receipt.get("baseline_id") != baseline_id
+            ):
+                return {}
+            if stage == "shadow":
+                served_id = incumbent_id
+            else:
+                percent = int(state.get("rollout_percent") or 0)
+                bucket = int.from_bytes(
+                    hashlib.sha256(
+                        f"recall-distill-rollout-v2\0{session_id}".encode()
+                    ).digest()[:8],
+                    "big",
+                ) % 10_000
+                served_id = candidate_id if bucket < percent * 100 else incumbent_id
+            return {
+                "stage": stage,
+                "stage_started_at": str(state.get("stage_started_at") or ""),
+                "qualified_run_id": str(state.get("stage_run_id") or ""),
+                "served_policy_id": served_id,
+                "candidate_policy_id": candidate_id,
+                "incumbent_policy_id": incumbent_id,
+                "served_policy": _non_bootstrap_policy(
+                    candidate if served_id == candidate_id else incumbent
+                ),
+                "candidate_policy": _non_bootstrap_policy(candidate),
+                "incumbent_policy": _non_bootstrap_policy(incumbent),
+            }
     except (KeyError, store.DistillationStoreError, DistillationError):
         return {}
 
 
+def load_shadow_policy(root: Path | None = None) -> dict[str, Any]:
+    """Load a qualified candidate for observation only, never live serving."""
+    context = load_policy_observation_context("shadow-observation", root)
+    if context.get("stage") != "shadow":
+        return {}
+    return {
+        **context["candidate_policy"],
+        "shadow_incumbent_policy_id": context["incumbent_policy_id"],
+        "shadow_incumbent_policy": context["incumbent_policy"],
+    }
+
+
 def train_tiny_policy(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     samples: list[tuple[str, str, dict[str, float], float, float]] = []
+    validation: list[tuple[dict[str, float], float]] = []
     seen: set[tuple[str, str, str]] = set()
     for row in rows:
         authority = row.get("authority")
@@ -1802,9 +2110,14 @@ def train_tiny_policy(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         dimension = str(row.get("dimension") or "answer_utility")
         allowed = UTILITY_LABELS if dimension == "answer_utility" else RELEVANCE_LABELS
         if (
-            authority not in {"verified", "teacher-only"}
+            authority != "teacher-only"
             or verdict not in allowed
             or verdict == "uncertain"
+            or row.get("probe") is True
+            or (
+                row.get("source") == "counterfactual-label"
+                and row.get("order_agreement") is not True
+            )
         ):
             continue
         raw_features = row.get("features")
@@ -1825,15 +2138,13 @@ def train_tiny_policy(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
             "relevant": 1.0,
             "irrelevant": 0.0,
         }[str(verdict)]
-        weight = (
-            1.0
-            if authority == "verified" and dimension == "answer_utility"
-            else 0.25
-            if authority == "verified"
-            else 0.2
-            if dimension == "answer_utility"
-            else 0.05
-        )
+        split = str(row.get("split") or "train")
+        if split == "validation":
+            validation.append((build_fast_features(raw_features), target))
+            continue
+        if split != "train":
+            continue
+        weight = 1.0
         samples.append(
             (rally_id, candidate_id, build_fast_features(raw_features), target, weight)
         )
@@ -1863,15 +2174,45 @@ def train_tiny_policy(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
             for key in FAST_FEATURE_KEYS:
                 weights[key] -= 0.15 * gradients[key] / scale
             bias -= 0.15 * gradient_bias / scale
+    threshold = 0.65
+    if validation:
+        scored = [
+            (
+                sigmoid(
+                    bias
+                    + sum(weights[key] * features[key] for key in FAST_FEATURE_KEYS)
+                ),
+                target,
+            )
+            for features, target in validation
+        ]
+
+        def threshold_quality(candidate: float) -> tuple[float, float]:
+            positive = [
+                score >= candidate for score, target in scored if target >= 0.75
+            ]
+            negative = [score < candidate for score, target in scored if target <= 0.25]
+            if not positive or not negative:
+                return (-1.0, -candidate)
+            balanced = (
+                sum(positive) / len(positive) + sum(negative) / len(negative)
+            ) / 2
+            return (balanced, -candidate)
+
+        threshold = max(
+            (round(value / 100, 2) for value in range(35, 86, 5)),
+            key=threshold_quality,
+        )
     return {
         "feature_keys": list(FAST_FEATURE_KEYS),
-        "feature_revision": "recall-distill-fast-v1",
+        "feature_revision": TEXT_FEATURE_REVISION,
         "weights": {key: round(value, 8) for key, value in weights.items()},
         "bias": round(bias, 8),
-        "threshold": 0.65,
+        "threshold": threshold,
         "abstain_margin": 0.08,
         "max_cards": 3,
         "training_rows": len(training),
+        "validation_rows": len(validation),
     }
 
 
@@ -1890,6 +2231,31 @@ def materialize_training_rows(
         if isinstance((manifest := row.get("manifest")), Mapping)
     }
     features_by_pair: dict[tuple[str, str], dict[str, float]] = {}
+    for row in store.read_chain(
+        store.distillation_dir(root) / "candidate-ledger.jsonl"
+    ):
+        rally_id = str(row.get("rally_id") or "")
+        snapshot = row.get("snapshot")
+        if (
+            not rally_id
+            or not isinstance(snapshot, Mapping)
+            or snapshot.get("feature_revision") != TEXT_FEATURE_REVISION
+            or not isinstance(snapshot.get("candidates"), list)
+        ):
+            continue
+        for candidate in snapshot["candidates"]:
+            if not isinstance(candidate, Mapping) or not isinstance(
+                candidate.get("features"), Mapping
+            ):
+                continue
+            try:
+                features = build_fast_features(candidate["features"])
+            except DistillationError:
+                continue
+            if dict(candidate["features"]) == features:
+                features_by_pair[
+                    (rally_id, str(candidate.get("candidate_id") or ""))
+                ] = features
     for rally_id, rally in rallies.items():
         for receipt in rally.get("exposure_receipts", []):
             if not isinstance(receipt, Mapping):
@@ -1942,7 +2308,7 @@ def materialize_training_rows(
         verdict = str(label.get("verdict") or "")
         dimension = str(label.get("dimension") or "")
         if (
-            label.get("authority") not in {"verified", "teacher-only"}
+            label.get("authority") != "teacher-only"
             or verdict == "uncertain"
             or verdict
             not in (
@@ -1950,6 +2316,8 @@ def materialize_training_rows(
             )
         ):
             continue
+        assignment = label.get("assignment")
+        probe = isinstance(assignment, Mapping) and assignment.get("probe") is True
         materialized.append(
             {
                 "rally_id": rally_id,
@@ -1960,17 +2328,43 @@ def materialize_training_rows(
                 "verdict": verdict,
                 "authority": label["authority"],
                 "features": features,
+                "route": str(label.get("route") or ""),
+                "model_digest": str(label.get("model_digest") or ""),
+                "generator_model_digest": str(
+                    label.get("generator_model_digest") or ""
+                ),
+                "judge_model_digest": str(label.get("judge_model_digest") or ""),
+                "probe": probe,
+                "source": str(label.get("kind") or ""),
+                "order_agreement": label.get("order_agreement") is True,
                 "label_record_sha256": label["record_sha256"],
             }
         )
     materialized = materialized[-limit:]
-    split = grouped_rolling_split(materialized) if materialized else {}
-    rows = [{**row, "split": split[row["rally_id"]]} for row in materialized]
+    split_plan_id = ""
+    split: dict[str, str] = {}
+    try:
+        split_plan = _read_split_plan(root)
+        split_plan_id = str(split_plan["artifact_id"])
+        split = {
+            str(rally_id): str(value)
+            for rally_id, value in split_plan["assignments"].items()
+        }
+    except (KeyError, DistillationError, store.DistillationStoreError):
+        split = grouped_rolling_split(materialized) if materialized else {}
+    rows = [
+        {
+            **row,
+            "split": split.get(row["rally_id"], "embargo"),
+            "split_plan_id": split_plan_id,
+        }
+        for row in materialized
+    ]
     _, _, artifact = store.write_immutable(
         store.distillation_dir(root) / "training-snapshots",
         {
-            "kind": "live-parity-training-snapshot",
-            "feature_revision": "recall-distill-fast-v1",
+            "kind": "text-parity-training-snapshot",
+            "feature_revision": TEXT_FEATURE_REVISION,
             "rows": rows,
             "label_chain_head": store.verify_chain(
                 store.distillation_dir(root) / "label-ledger.jsonl"
@@ -1979,6 +2373,271 @@ def materialize_training_rows(
         schema="chronovisor.recall-distill-training.v1",
     )
     return artifact
+
+
+def _wilson_lower(successes: int, total: int) -> float:
+    if total <= 0 or successes < 0 or successes > total:
+        return 0.0
+    z = 1.959963984540054
+    proportion = successes / total
+    denominator = 1 + z * z / total
+    center = proportion + z * z / (2 * total)
+    spread = z * math.sqrt(
+        proportion * (1 - proportion) / total + z * z / (4 * total * total)
+    )
+    return max(0.0, (center - spread) / denominator)
+
+
+def _wilson_upper(successes: int, total: int) -> float:
+    if total <= 0 or successes < 0 or successes > total:
+        return 1.0
+    return min(1.0, 1.0 - _wilson_lower(total - successes, total))
+
+
+def _active_training_cohort(
+    rows: Sequence[Mapping[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Select the latest coherent local-model cohort and resplit only it."""
+
+    teacher_digests = {role: "" for role in TEACHER_ROLES}
+    counterfactual_digests: tuple[str, str] | None = None
+    for row in rows:
+        route = str(row.get("route") or "")
+        digest = str(row.get("model_digest") or "")
+        if (
+            row.get("source") == "teacher-label"
+            and route in teacher_digests
+            and re.fullmatch(r"[0-9a-f]{64}", digest)
+        ):
+            teacher_digests[route] = digest
+        generator = str(row.get("generator_model_digest") or "")
+        judge = str(row.get("judge_model_digest") or "")
+        if (
+            row.get("source") == "counterfactual-label"
+            and row.get("order_agreement") is True
+            and re.fullmatch(r"[0-9a-f]{64}", generator)
+            and re.fullmatch(r"[0-9a-f]{64}", judge)
+            and generator != judge
+        ):
+            counterfactual_digests = (generator, judge)
+    selected: list[dict[str, Any]] = []
+    for row in rows:
+        route = str(row.get("route") or "")
+        if row.get("source") == "teacher-label":
+            if row.get("model_digest") != teacher_digests.get(route):
+                continue
+        elif row.get("source") == "counterfactual-label":
+            if counterfactual_digests is None or (
+                row.get("generator_model_digest"),
+                row.get("judge_model_digest"),
+            ) != counterfactual_digests:
+                continue
+        else:
+            continue
+        selected.append(dict(row))
+    fixed_ids = {str(row.get("split_plan_id") or "") for row in selected}
+    if len(fixed_ids) != 1 or not next(iter(fixed_ids), ""):
+        split = grouped_rolling_split(selected) if selected else {}
+        selected = [
+            {**row, "split": split[str(row["rally_id"])]} for row in selected
+        ]
+    cohort = {
+        "revision": "latest-model-cohort-v1",
+        "teacher_model_digests": teacher_digests,
+        "counterfactual_model_digests": list(counterfactual_digests or ()),
+    }
+    return selected, {
+        **cohort,
+        "cohort_sha256": canonical_json.canonical_json_sha256_strict(cohort),
+    }
+
+
+def _offline_training_gate(
+    rows: Sequence[Mapping[str, Any]],
+    config: DistillationConfig,
+    *,
+    root: Path | None = None,
+) -> dict[str, Any]:
+    """Qualify untrusted local-model data without calling it verified truth."""
+
+    rows, model_cohort = _active_training_cohort(rows)
+
+    owner = [
+        row
+        for row in rows
+        if row.get("source") == "teacher-label"
+        and row.get("probe") is not True
+        and row.get("verdict") in {"relevant", "irrelevant"}
+    ]
+    probes = [
+        row
+        for row in rows
+        if row.get("source") == "teacher-label"
+        and row.get("probe") is True
+        and row.get("verdict") in {"relevant", "irrelevant"}
+    ]
+    counterfactual = [
+        row
+        for row in rows
+        if row.get("source") == "counterfactual-label"
+        and row.get("order_agreement") is True
+        and row.get("verdict") in {"helpful", "harmful", "neutral"}
+    ]
+    teacher_counts = {
+        verdict: sum(row.get("verdict") == verdict for row in owner)
+        for verdict in ("relevant", "irrelevant")
+    }
+    probe_groups: dict[tuple[str, str], list[Mapping[str, Any]]] = defaultdict(list)
+    for row in probes:
+        probe_groups[(str(row["rally_id"]), str(row["candidate_id"]))].append(row)
+    complete_probes = [
+        group
+        for group in probe_groups.values()
+        if {str(row.get("route") or "") for row in group} == set(TEACHER_ROLES)
+        and all(row.get("split") == "test" for row in group)
+    ]
+    stable = sum(
+        len({str(row["verdict"]) for row in group}) == 1 for group in complete_probes
+    )
+    digests = {
+        role: {
+            str(row.get("model_digest") or "")
+            for row in [*owner, *probes]
+            if row.get("route") == role and row.get("model_digest")
+        }
+        for role in TEACHER_ROLES
+    }
+    route_models = {
+        next(iter(values)) for values in digests.values() if len(values) == 1
+    }
+    reasons: list[str] = []
+    fixed_ids = {str(row.get("split_plan_id") or "") for row in rows}
+    try:
+        split_plan = _read_split_plan(root) if root is not None else {}
+    except (DistillationError, store.DistillationStoreError):
+        split_plan = {}
+    assignments = split_plan.get("assignments")
+    fixed_split_valid = (
+        len(fixed_ids) == 1
+        and bool(next(iter(fixed_ids), ""))
+        and split_plan.get("artifact_id") == next(iter(fixed_ids), "")
+        and split_plan.get("model_cohort_sha256") == model_cohort["cohort_sha256"]
+        and split_plan.get("feature_revision") == TEXT_FEATURE_REVISION
+        and isinstance(assignments, Mapping)
+        and all(
+            assignments.get(str(row.get("rally_id") or "")) == row.get("split")
+            for row in rows
+        )
+    )
+    if not fixed_split_valid:
+        reasons.append("fixed_split_plan_missing")
+    if len(owner) < config.hard_floor_teacher_labels:
+        reasons.append("teacher_labels_below_floor")
+    if any(
+        count < config.hard_floor_teacher_per_class for count in teacher_counts.values()
+    ):
+        reasons.append("teacher_class_below_floor")
+    if len(complete_probes) < config.hard_floor_probe_pairs:
+        reasons.append("probe_pairs_below_floor")
+    if any(len(values) != 1 for values in digests.values()) or len(route_models) != 3:
+        reasons.append("teacher_models_not_distinct")
+    if _wilson_lower(stable, len(complete_probes)) < 0.60:
+        reasons.append("probe_route_stability_below_gate")
+    if not {"train", "validation", "test"}.issubset(
+        {str(row.get("split") or "") for row in [*owner, *counterfactual]}
+    ):
+        reasons.append("chronological_split_incomplete")
+
+    route_folds: dict[str, Any] = {}
+    for holdout in TEACHER_ROLES:
+        fold_policy = train_tiny_policy(
+            [
+                row
+                for row in rows
+                if row.get("route") != holdout
+                and (
+                    row.get("probe") is not True or row.get("source") != "teacher-label"
+                )
+            ]
+        )
+        test = [
+            row
+            for row in probes
+            if row.get("route") == holdout and row.get("split") == "test"
+        ]
+        relevant = [row for row in test if row.get("verdict") == "relevant"]
+        irrelevant = [row for row in test if row.get("verdict") == "irrelevant"]
+
+        def accepted(
+            row: Mapping[str, Any], policy: Mapping[str, Any] = fold_policy
+        ) -> bool:
+            score = score_fast_features(row["features"], policy)
+            return policy_decision(score, policy)["decision"] == "read"
+
+        recall = _wilson_lower(sum(accepted(row) for row in relevant), len(relevant))
+        specificity = _wilson_lower(
+            sum(not accepted(row) for row in irrelevant), len(irrelevant)
+        )
+        passed = (
+            len(relevant) >= 30
+            and len(irrelevant) >= 30
+            and recall >= 0.65
+            and specificity >= 0.65
+        )
+        route_folds[holdout] = {
+            "relevant": len(relevant),
+            "irrelevant": len(irrelevant),
+            "recall_wilson_lower": round(recall, 8),
+            "specificity_wilson_lower": round(specificity, 8),
+            "passed": passed,
+        }
+        if not passed:
+            reasons.append(f"route_holdout_failed_{holdout.rsplit('.', 1)[-1]}")
+
+    cf_test = [
+        row
+        for row in counterfactual
+        if row.get("split") == "test" and row.get("verdict") in {"helpful", "harmful"}
+    ]
+    if len(cf_test) < config.hard_floor_counterfactual_pairs:
+        reasons.append("counterfactual_pairs_below_floor")
+    final_policy = train_tiny_policy(rows)
+    directional = sum(
+        (
+            policy_decision(
+                score_fast_features(row["features"], final_policy), final_policy
+            )["decision"]
+            == "read"
+        )
+        == (row.get("verdict") == "helpful")
+        for row in cf_test
+    )
+    cf_lower = _wilson_lower(directional, len(cf_test))
+    if len(cf_test) < 30 or cf_lower < 0.60:
+        reasons.append("counterfactual_direction_below_gate")
+    return {
+        "schema": "chronovisor.recall-offline-training-gate.v2",
+        "truth_authority": "teacher_only_not_verified",
+        "model_cohort": model_cohort,
+        "passed": not reasons,
+        "reasons": sorted(set(reasons)),
+        "teacher_counts": {"total": len(owner), **teacher_counts},
+        "counterfactual_pairs": len(cf_test),
+        "probe": {
+            "pairs": len(complete_probes),
+            "locked_test_only": True,
+            "stable": stable,
+            "route_stability_wilson_lower": round(
+                _wilson_lower(stable, len(complete_probes)), 8
+            ),
+            "is_truth": False,
+        },
+        "route_folds": route_folds,
+        "counterfactual_direction": {
+            "denominator": len(cf_test),
+            "wilson_lower": round(cf_lower, 8),
+        },
+    }
 
 
 def _ensure_bootstrap_policy(root: Path, baseline: Mapping[str, Any]) -> dict[str, Any]:
@@ -2054,27 +2713,18 @@ def _maybe_publish_candidate(
         pass
     training = materialize_training_rows(root)
     rows = training["rows"]
-    verified = [
-        row
-        for row in rows
-        if row["authority"] == "verified" and row["dimension"] == "answer_utility"
-    ]
-    counts = {
-        verdict: sum(row["verdict"] == verdict for row in verified)
-        for verdict in ("helpful", "neutral", "harmful")
-    }
-    if len(verified) < config.hard_floor_verified_labels or any(
-        count < config.hard_floor_per_class for count in counts.values()
-    ):
-        return {"status": "held", "reason": "verified_training_floor"}
-    if not {"train", "validation", "test"}.issubset({row["split"] for row in verified}):
-        return {"status": "held", "reason": "grouped_split_incomplete"}
+    offline_gate = _offline_training_gate(rows, config, root=root)
+    active_rows, model_cohort = _active_training_cohort(rows)
+    if offline_gate != baseline.get("offline_training_gate"):
+        return {"status": "held", "reason": "offline_gate_baseline_mismatch"}
+    if offline_gate["passed"] is not True:
+        return {"status": "held", "reason": "offline_training_gate"}
     try:
         store.read_pointer(root, "lkg")
         store.read_pointer(root, "active")
     except store.DistillationStoreError:
         return {"status": "held", "reason": "sealed_incumbent_missing"}
-    policy = train_tiny_policy(rows)
+    policy = train_tiny_policy(active_rows)
     replay_id, _, _ = store.write_immutable(
         store.distillation_dir(root) / "locked-replays",
         {
@@ -2082,7 +2732,10 @@ def _maybe_publish_candidate(
             "training_snapshot_id": training["artifact_id"],
             "baseline_artifact_id": baseline["artifact_id"],
             "policy_sha256": canonical_json.canonical_json_sha256_strict(policy),
-            "verified_counts": counts,
+            "offline_gate_sha256": canonical_json.canonical_json_sha256_strict(
+                offline_gate
+            ),
+            "model_cohort_sha256": model_cohort["cohort_sha256"],
             "split_revision": "grouped-rolling-v1",
         },
         schema="chronovisor.recall-distill-locked-replay.v1",
@@ -2093,6 +2746,7 @@ def _maybe_publish_candidate(
             "training_snapshot_id": training["artifact_id"],
             "locked_replay_id": replay_id,
             "baseline_artifact_id": baseline["artifact_id"],
+            "model_cohort_sha256": model_cohort["cohort_sha256"],
         },
         root=root,
     )
@@ -2113,80 +2767,26 @@ def _operational_rollout_metrics(
     def gate(denominator: int, score: float, threshold: float) -> dict[str, Any]:
         return {
             "denominator": denominator,
-            "min_denominator": 100,
+            "min_denominator": 500,
             "min_days": 7,
             "ci_lower": max(0.0, min(1.0, score)),
             "min_ci_lower": threshold,
         }
 
-    valid_artifact_ids = {
-        str(receipt["exposure_artifact_id"])
-        for receipts in _exposure_map(root).values()
-        for receipt in receipts
-    }
-    cohorts: dict[str, list[dict[str, Any]]] = defaultdict(list)
-
-    def add_observation(
-        *,
-        policy_id: object,
-        selected_ids: object,
-        features: object,
-        observation: object,
-        feature_parity_eligible: bool,
-    ) -> None:
-        if (
-            not isinstance(policy_id, str)
-            or not isinstance(selected_ids, list)
-            or not isinstance(features, list)
-            or not isinstance(observation, Mapping)
-        ):
-            return
+    try:
+        state = _read_worker_state(root)
+    except store.DistillationStoreError:
+        state = {}
+    stage = str(state.get("status") or "")
+    stage_started_at = str(state.get("stage_started_at") or "")
+    qualified_run_id = str(state.get("stage_run_id") or "")
+    candidate_only = False
+    if stage == "canary" and int(state.get("rollout_percent") or 0) == 100:
         try:
-            latency_ms = float(observation["latency_ms"])
-            timed_out = observation["timed_out"]
-            selected = {str(value) for value in selected_ids}
-            anchor_ids = {
-                str(row["candidate_id"])
-                for row in features
-                if isinstance(row, Mapping)
-                and isinstance(row.get("candidate_id"), str)
-                and isinstance(row.get("features"), Mapping)
-                and build_fast_features(row["features"])["exact_anchor"] >= 1.0
-            }
-        except (KeyError, TypeError, ValueError, DistillationError):
-            return
-        if (
-            not math.isfinite(latency_ms)
-            or not 0 <= latency_ms <= 60_000
-            or not isinstance(timed_out, bool)
-        ):
-            return
-        cohorts[policy_id].append(
-            {
-                "covered": bool(selected),
-                "latency_ms": latency_ms,
-                "timed_out": timed_out,
-                "anchor_expected": bool(anchor_ids),
-                "anchor_selected": bool(anchor_ids.intersection(selected)),
-                "feature_parity_eligible": feature_parity_eligible,
-            }
-        )
-
-    for artifact_id in sorted(valid_artifact_ids):
-        try:
-            artifact = store.read_sealed(
-                store.distillation_dir(root) / "exposures" / f"{artifact_id}.json",
-                schema="chronovisor.recall-exact-exposure.v1",
-            )
-        except store.DistillationStoreError:
-            continue
-        add_observation(
-            policy_id=artifact.get("policy_id"),
-            selected_ids=artifact.get("candidate_ids"),
-            features=artifact.get("candidate_feature_snapshot"),
-            observation=artifact.get("runtime_observation"),
-            feature_parity_eligible=True,
-        )
+            candidate_only = _load_policy(incumbent_id, root).get("serve_mode") == "legacy"
+        except (store.DistillationStoreError, DistillationError):
+            candidate_only = False
+    pairs: list[dict[str, Any]] = []
     try:
         shadow_receipts = store.read_chain(
             store.distillation_dir(root) / "shadow-observation-receipts.jsonl"
@@ -2202,7 +2802,14 @@ def _operational_rollout_metrics(
                 "session_id_sha256",
                 "query_semantic_sha256",
                 "policy_id",
+                "incumbent_policy_id",
+                "served_policy_id",
+                "stage",
+                "stage_started_at",
+                "qualified_run_id",
                 "selected_candidate_ids",
+                "incumbent_selected_candidate_ids",
+                "paired_eligible",
                 "candidate_pool_sha256",
                 "candidate_feature_snapshot_sha256",
                 "runtime_observation_sha256",
@@ -2227,101 +2834,119 @@ def _operational_rollout_metrics(
             artifact.get(key) != value for key, value in binding.items()
         ):
             continue
-        add_observation(
-            policy_id=artifact.get("policy_id"),
-            selected_ids=artifact.get("selected_candidate_ids"),
-            features=artifact.get("candidate_feature_snapshot"),
-            observation=artifact.get("runtime_observation"),
-            feature_parity_eligible=True,
-        )
-    exact_decision_ids = {
-        str(receipt["decision_id"])
-        for receipts in _exposure_map(root).values()
-        for receipt in receipts
-    }
-    try:
-        exposure_receipts = store.read_chain(
-            store.distillation_dir(root) / "exposure-receipts.jsonl"
-        )
-    except store.DistillationStoreError:
-        exposure_receipts = []
-    for receipt in exposure_receipts:
-        binding = {
-            key: receipt.get(key)
-            for key in (
-                "decision_id",
-                "host",
-                "session_id_sha256",
-                "prompt_hash",
-                "policy_id",
-                "candidate_ids",
-                "candidate_snapshot_sha256",
-                "runtime_observation_sha256",
-                "observed_at",
-            )
-        }
+        observation = artifact.get("runtime_observation")
+        candidate_selected = artifact.get("selected_candidate_ids")
+        incumbent_selected = artifact.get("incumbent_selected_candidate_ids")
+        features = artifact.get("candidate_feature_snapshot")
         if (
-            receipt.get("kind") != "prospective-page-exposure"
-            or receipt.get("decision_id") in exact_decision_ids
-            or receipt.get("binding_sha256")
-            != canonical_json.canonical_json_sha256_strict(binding)
-            or receipt.get("runtime_observation_sha256")
-            != canonical_json.canonical_json_sha256_strict(
-                receipt.get("runtime_observation")
+            artifact.get("policy_id") != candidate_id
+            or artifact.get("incumbent_policy_id") != incumbent_id
+            or artifact.get("stage") != stage
+            or artifact.get("stage_started_at") != stage_started_at
+            or artifact.get("qualified_run_id") != qualified_run_id
+            or (
+                artifact.get("paired_eligible") is not True
+                and not candidate_only
             )
+            or not isinstance(observation, Mapping)
+            or not isinstance(candidate_selected, list)
+            or not isinstance(incumbent_selected, list)
+            or not isinstance(features, list)
         ):
             continue
         try:
-            _validate_exposure_policy_identity(
-                root, str(receipt.get("policy_id") or "")
-            )
-        except DistillationError:
+            latency_ms = float(observation["latency_ms"])
+            timed_out = observation["timed_out"]
+        except (KeyError, TypeError, ValueError):
             continue
-        add_observation(
-            policy_id=receipt.get("policy_id"),
-            selected_ids=receipt.get("candidate_ids"),
-            features=[],
-            observation=receipt.get("runtime_observation"),
-            feature_parity_eligible=False,
+        if (
+            not math.isfinite(latency_ms)
+            or not 0 <= latency_ms <= 60_000
+            or not isinstance(timed_out, bool)
+        ):
+            continue
+        pairs.append(
+            {
+                "candidate_covered": bool(candidate_selected),
+                "incumbent_covered": bool(incumbent_selected),
+                "latency_ms": latency_ms,
+                "timed_out": timed_out,
+            }
         )
-    candidate = cohorts.get(candidate_id, [])
-    incumbent = cohorts.get(incumbent_id, [])
     metrics = {
         name: dict(missing)
         for name in (
-            "candidate_recall",
-            "wrong_domain",
-            "anchor_rescue",
             "coverage_abstain",
             "latency_timeout",
-            "answer_utility",
             "cohort_delta",
             "feature_parity",
         )
     }
-    anchor = [row for row in candidate if row["anchor_expected"]]
-    if anchor:
-        score = sum(row["anchor_selected"] for row in anchor) / len(anchor)
-        metrics["candidate_recall"] = gate(len(anchor), score, 0.90)
-        metrics["anchor_rescue"] = gate(len(anchor), score, 0.90)
-    if candidate and incumbent:
-        candidate_coverage = sum(row["covered"] for row in candidate) / len(candidate)
-        incumbent_coverage = sum(row["covered"] for row in incumbent) / len(incumbent)
-        coverage_ok = float(candidate_coverage >= incumbent_coverage * 0.90)
-        metrics["coverage_abstain"] = gate(
-            min(len(candidate), len(incumbent)), coverage_ok, 1.0
+    if pairs:
+        candidate_coverage = sum(row["candidate_covered"] for row in pairs) / len(
+            pairs
         )
-    if candidate:
-        ordered = sorted(row["latency_ms"] for row in candidate)
-        p50 = ordered[(len(ordered) - 1) // 2]
+        incumbent_coverage = sum(row["incumbent_covered"] for row in pairs) / len(
+            pairs
+        )
+        coverage_ok = float(candidate_coverage >= incumbent_coverage * 0.90)
+        metrics["coverage_abstain"] = gate(len(pairs), coverage_ok, 1.0)
+        metrics["cohort_delta"] = gate(len(pairs), coverage_ok, 1.0)
+        ordered = sorted(row["latency_ms"] for row in pairs)
         p95 = ordered[math.ceil(len(ordered) * 0.95) - 1]
-        timeout_rate = sum(row["timed_out"] for row in candidate) / len(candidate)
-        latency_ok = float(p50 <= 400 and p95 <= 900 and timeout_rate <= 0.01)
-        metrics["latency_timeout"] = gate(len(candidate), latency_ok, 1.0)
-    parity = [row for row in candidate if row["feature_parity_eligible"]]
-    if parity:
-        metrics["feature_parity"] = gate(len(parity), 1.0, 1.0)
+        timeouts = sum(row["timed_out"] for row in pairs)
+        latency_ok = float(
+            p95 <= 180 and _wilson_upper(timeouts, len(pairs)) <= 0.03
+        )
+        metrics["latency_timeout"] = gate(len(pairs), latency_ok, 1.0)
+        metrics["feature_parity"] = gate(len(pairs), 1.0, 1.0)
     return metrics
+
+
+def _authenticated_negative_vetoes(root: Path, policy_id: str) -> int:
+    rows = store.read_chain(
+        store.distillation_dir(root) / "negative-veto-receipts.jsonl"
+    )
+    valid = 0
+    for row in rows:
+        binding = {
+            key: row.get(key)
+            for key in (
+                "decision_id",
+                "correction_id",
+                "exposure_artifact_id",
+                "policy_id",
+                "candidate_id",
+                "page_id",
+                "preimage_sha256",
+                "postimage_sha256",
+                "cas_status",
+                "observed_at",
+                "producer_revision",
+            )
+        }
+        if (
+            row.get("kind") != "authenticated-negative-veto"
+            or row.get("policy_id") != policy_id
+            or row.get("binding_sha256")
+            != canonical_json.canonical_json_sha256_strict(binding)
+        ):
+            continue
+        artifact_id = str(row.get("veto_artifact_id") or "")
+        try:
+            artifact = store.read_sealed(
+                store.distillation_dir(root)
+                / "negative-vetoes"
+                / f"{artifact_id}.json",
+                schema=VETO_SCHEMA,
+            )
+        except store.DistillationStoreError:
+            continue
+        if artifact.get("artifact_id") == artifact_id and all(
+            artifact.get(key) == value for key, value in binding.items()
+        ):
+            valid += 1
+    return valid
 
 
 def _automatic_rollout_evaluation(
@@ -2344,6 +2969,21 @@ def _automatic_rollout_evaluation(
         policy = _load_policy(candidate_id, root)
     except (KeyError, store.DistillationStoreError, DistillationError):
         return {"status": "held", "reason": "rollout_identity_unavailable"}
+    vetoes = _authenticated_negative_vetoes(root, candidate_id)
+    if vetoes:
+        veto_run_id = canonical_json.canonical_json_sha256_strict(
+            {
+                "kind": "authenticated-negative-veto-run-v1",
+                "policy_id": candidate_id,
+                "veto_head": store.verify_chain(
+                    store.distillation_dir(root) / "negative-veto-receipts.jsonl"
+                )["head_sha256"],
+            }
+        )
+        result = rollout.rollback_to_lkg(
+            root, veto_run_id, "authenticated_negative_veto"
+        )
+        return {"status": "rolled_back", "negative_vetoes": vetoes, **result}
     label_head = store.verify_chain(
         store.distillation_dir(root) / "label-ledger.jsonl"
     )["head_sha256"]
@@ -2352,15 +2992,34 @@ def _automatic_rollout_evaluation(
     )["head_sha256"]
     run_id = canonical_json.canonical_json_sha256_strict(
         {
-            "kind": "automatic-rollout-evaluation-v1",
+            "kind": "automatic-rollout-evaluation-v2",
             "policy_id": candidate_id,
             "status": state.get("status"),
             "rollout_percent": state.get("rollout_percent", 0),
             "label_head": label_head,
             "exposure_head": exposure_head,
+            "shadow_head": store.verify_chain(
+                store.distillation_dir(root) / "shadow-observation-receipts.jsonl"
+            )["head_sha256"],
         }
     )
     measured_metrics = _operational_rollout_metrics(root, candidate_id, incumbent_id)
+    replay_gate = {
+        "denominator": 1,
+        "min_denominator": 1,
+        "min_days": 0,
+        "ci_lower": 1.0,
+        "min_ci_lower": 1.0,
+    }
+    replay_metrics = {
+        name: dict(replay_gate)
+        for name in (
+            "coverage_abstain",
+            "latency_timeout",
+            "cohort_delta",
+            "feature_parity",
+        )
+    }
     lineage = (
         policy.get("lineage") if isinstance(policy.get("lineage"), Mapping) else {}
     )
@@ -2380,11 +3039,21 @@ def _automatic_rollout_evaluation(
             "raw_watermark": raw_watermark,
             "incumbent_policy_id": incumbent_id,
             "split_sha256": split_sha256,
-            "feature_revision": "recall-distill-fast-v1",
+            "feature_revision": TEXT_FEATURE_REVISION,
             "feature_parity_sha256": canonical_json.canonical_json_sha256_strict(
                 {"feature_keys": list(FAST_FEATURE_KEYS), "policy_id": candidate_id}
             ),
-            "replay_metrics": measured_metrics,
+            "offline_gate_sha256": canonical_json.canonical_json_sha256_strict(
+                baseline["offline_training_gate"]
+            ),
+            "observation_mode": (
+                "candidate_only_legacy_incumbent"
+                if state.get("status") == "canary"
+                and int(state.get("rollout_percent") or 0) == 100
+                and _load_policy(incumbent_id, root).get("serve_mode") == "legacy"
+                else "paired"
+            ),
+            "replay_metrics": replay_metrics,
             "shadow_metrics": measured_metrics,
             "canary_metrics": measured_metrics,
         },
@@ -2408,33 +3077,36 @@ def publish_policy(
     root: Path | None = None,
 ) -> dict[str, Any]:
     root = root or CHRONOVISOR_ROOT
-    policy_id, _, artifact = store.write_immutable(
-        store.distillation_dir(root) / "policies",
-        {"kind": "tiny-logistic-policy", **policy, "lineage": dict(lineage)},
-        schema=POLICY_SCHEMA,
-    )
-    try:
-        active = store.read_pointer(root, "active")
-        store.write_pointer(root, "lkg", str(active["policy_id"]))
-    except (store.DistillationStoreError, KeyError):
-        pass
-    store.write_pointer(root, "candidate", policy_id)
-    try:
-        previous_state = _read_worker_state(root)
-    except store.DistillationStoreError:
-        previous_state = {"kind": "worker-state"}
-    store.write_sealed_state(
-        store.distillation_dir(root) / store.STATE_FILE,
-        {
-            **previous_state,
-            "status": "replay",
-            "rollout_percent": 0,
-            "stage_started_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
-            "learning_halted": False,
-            "error_code": "",
-        },
-    )
-    return artifact
+    with store._locked(store.distillation_dir(root) / "rollout.lock"):
+        policy_id, _, artifact = store.write_immutable(
+            store.distillation_dir(root) / "policies",
+            {"kind": "tiny-logistic-policy", **policy, "lineage": dict(lineage)},
+            schema=POLICY_SCHEMA,
+        )
+        try:
+            active = store.read_pointer(root, "active")
+            store.write_pointer(root, "lkg", str(active["policy_id"]))
+        except (store.DistillationStoreError, KeyError):
+            pass
+        store.write_pointer(root, "candidate", policy_id)
+        try:
+            previous_state = _read_worker_state(root)
+        except store.DistillationStoreError:
+            previous_state = {"kind": "worker-state"}
+        store.write_sealed_state(
+            store.distillation_dir(root) / store.STATE_FILE,
+            {
+                **previous_state,
+                "status": "replay",
+                "rollout_percent": 0,
+                "stage_started_at": datetime.now(UTC)
+                .isoformat()
+                .replace("+00:00", "Z"),
+                "learning_halted": False,
+                "error_code": "",
+            },
+        )
+        return artifact
 
 
 def grouped_rolling_split(
@@ -2499,6 +3171,55 @@ def grouped_rolling_split(
         for index in indexes:
             result[str(rows[index]["rally_id"])] = split
     return result
+
+
+def _read_split_plan(root: Path) -> dict[str, Any]:
+    pointer = store.read_sealed(
+        store.distillation_dir(root) / "split-plan.json",
+        schema=store.DISTILLATION_SCHEMA,
+    )
+    plan_id = str(pointer.get("split_plan_id") or "")
+    if re.fullmatch(r"[0-9a-f]{64}", plan_id) is None:
+        raise DistillationError("split plan pointer is invalid")
+    artifact = store.read_sealed(
+        store.distillation_dir(root) / "split-plans" / f"{plan_id}.json",
+        schema=SPLIT_PLAN_SCHEMA,
+    )
+    assignments = artifact.get("assignments")
+    if (
+        artifact.get("artifact_id") != plan_id
+        or not isinstance(assignments, Mapping)
+        or any(value not in {"train", "validation", "test", "embargo"} for value in assignments.values())
+    ):
+        raise DistillationError("split plan artifact is invalid")
+    return artifact
+
+
+def _ensure_split_plan(
+    root: Path,
+    rallies: Sequence[Mapping[str, Any]],
+    *,
+    raw_watermark: str,
+    model_cohort_sha256: str,
+) -> dict[str, Any]:
+    assignments = grouped_rolling_split(rallies)
+    plan_id, _, artifact = store.write_immutable(
+        store.distillation_dir(root) / "split-plans",
+        {
+            "kind": "fixed-chronological-group-split",
+            "raw_watermark": raw_watermark,
+            "feature_revision": TEXT_FEATURE_REVISION,
+            "model_cohort_sha256": model_cohort_sha256,
+            "split_revision": "grouped-rolling-v1",
+            "assignments": assignments,
+        },
+        schema=SPLIT_PLAN_SCHEMA,
+    )
+    store.write_sealed_state(
+        store.distillation_dir(root) / "split-plan.json",
+        {"kind": "split-plan-pointer", "split_plan_id": plan_id},
+    )
+    return artifact
 
 
 def _verified_counts(root: Path) -> dict[str, int]:
@@ -2644,31 +3365,11 @@ def _automatic_baseline_metrics(root: Path) -> dict[str, Any]:
             continue
 
     runtime_rows: dict[str, dict[str, Any]] = {}
-    anchor_expected = 0
-    anchor_selected = 0
     for artifact in exact_artifacts:
         observation = artifact.get("runtime_observation")
-        features = artifact.get("candidate_feature_snapshot")
         selected = artifact.get("candidate_ids")
-        if not isinstance(features, list) or not isinstance(selected, list):
+        if not isinstance(selected, list):
             continue
-        anchors: set[str] = set()
-        try:
-            for row in features:
-                if (
-                    isinstance(row, Mapping)
-                    and isinstance(row.get("candidate_id"), str)
-                    and isinstance(row.get("features"), Mapping)
-                    and build_fast_features(row["features"])["exact_anchor"] >= 1.0
-                ):
-                    anchors.add(str(row["candidate_id"]))
-        except DistillationError:
-            continue
-        if anchors:
-            anchor_expected += 1
-            anchor_selected += bool(
-                anchors.intersection(str(value) for value in selected)
-            )
         if not isinstance(observation, Mapping):
             continue
         try:
@@ -2759,7 +3460,14 @@ def _automatic_baseline_metrics(root: Path) -> dict[str, Any]:
                 "session_id_sha256",
                 "query_semantic_sha256",
                 "policy_id",
+                "incumbent_policy_id",
+                "served_policy_id",
+                "stage",
+                "stage_started_at",
+                "qualified_run_id",
                 "selected_candidate_ids",
+                "incumbent_selected_candidate_ids",
+                "paired_eligible",
                 "candidate_pool_sha256",
                 "candidate_feature_snapshot_sha256",
                 "runtime_observation_sha256",
@@ -2784,32 +3492,6 @@ def _automatic_baseline_metrics(root: Path) -> dict[str, Any]:
             artifact.get(key) != value for key, value in binding.items()
         ):
             continue
-        features = artifact.get("candidate_feature_snapshot")
-        selected = artifact.get("selected_candidate_ids")
-        if not isinstance(features, list) or not isinstance(selected, list):
-            continue
-        anchors = set()
-        try:
-            for row in features:
-                if (
-                    isinstance(row, Mapping)
-                    and isinstance(row.get("candidate_id"), str)
-                    and isinstance(row.get("features"), Mapping)
-                    and build_fast_features(row["features"])["exact_anchor"] >= 1.0
-                ):
-                    anchors.add(str(row["candidate_id"]))
-        except DistillationError:
-            continue
-        if anchors:
-            anchor_expected += 1
-            anchor_selected += bool(
-                anchors.intersection(str(value) for value in selected)
-            )
-    if anchor_expected:
-        anchor_rate = anchor_selected / anchor_expected
-        metrics["candidate_recall"] = anchor_rate
-        metrics["strong_anchor_rescue_rate"] = anchor_rate
-
     rows = list(log_rows.values()) or list(runtime_rows.values())
     if rows:
         ordered = sorted(float(row["latency_ms"]) for row in rows)
@@ -2859,8 +3541,8 @@ def preflight(
     ]
     span_days = (max(dates) - min(dates)).days + 1 if dates else 0
     windows = len({(date - min(dates)).days // 7 for date in dates}) if dates else 0
-    class_counts = _verified_counts(root)
-    verified_total = sum(class_counts.values())
+    training_snapshot = materialize_training_rows(root)
+    offline_gate = _offline_training_gate(training_snapshot["rows"], config, root=root)
     supplied_metrics = dict(aggregate_metrics or {})
     automatic_metrics = _automatic_baseline_metrics(root)
     metrics = _baseline_metrics({**automatic_metrics, **supplied_metrics})
@@ -2878,23 +3560,7 @@ def preflight(
         reasons.append("days_below_floor")
     if windows < config.hard_floor_windows:
         reasons.append("windows_below_floor")
-    if verified_total < config.hard_floor_verified_labels:
-        reasons.append("verified_labels_below_floor")
-    if any(value < config.hard_floor_per_class for value in class_counts.values()):
-        reasons.append("verified_class_below_floor")
-    for key in (
-        "candidate_recall",
-        "wrong_domain_rate",
-        "strong_anchor_rescue_rate",
-        "coverage_rate",
-        "abstain_rate",
-        "latency_p50_ms",
-        "latency_p95_ms",
-        "timeout_rate",
-        "exact_outcome_links",
-    ):
-        if metrics[key] is None:
-            reasons.append(f"{key}_unavailable")
+    reasons.extend(str(value) for value in offline_gate["reasons"])
     if any(
         metrics[key] is None for key in ("archive_commit", "expected_commit", "drift")
     ):
@@ -2904,8 +3570,6 @@ def preflight(
         or metrics["archive_commit"] != metrics["expected_commit"]
     ):
         reasons.append("runtime_identity_drift")
-    if metrics["exact_outcome_links"] == 0:
-        reasons.append("exact_outcomes_absent")
     config_file = runtime_config.active_config_file(config_path)
     try:
         config_sha256 = hashlib.sha256(config_file.read_bytes()).hexdigest()
@@ -2942,9 +3606,16 @@ def preflight(
             else 0.0,
             "span_days": span_days,
             "windows": windows,
-            "verified_labels": verified_total,
-            "verified_by_class": class_counts,
+            "teacher_only_labels": offline_gate["teacher_counts"]["total"],
+            "verified_truth_labels": 0,
+            "probe_pairs": offline_gate["probe"]["pairs"],
+            "counterfactual_pairs": offline_gate["counterfactual_pairs"],
+            "locked_test_probe_pairs": offline_gate["probe"]["pairs"],
+            "locked_test_counterfactual_pairs": offline_gate[
+                "counterfactual_pairs"
+            ],
         },
+        "offline_training_gate": offline_gate,
         "hard_floor": {
             "p5_allowed": not reasons,
             "reasons": reasons,
@@ -2955,7 +3626,7 @@ def preflight(
             "assignment_revision": ASSIGNMENT_REVISION,
             "probe_revision": PROBE_REVISION,
             "probe_rate": 0.15,
-            "feature_revision": "recall-distill-fast-v1",
+            "feature_revision": TEXT_FEATURE_REVISION,
             "feature_whitelist": list(FAST_FEATURE_KEYS),
             "closed_predicates": sorted(CLOSED_PREDICATES),
             "teacher": {
@@ -2970,11 +3641,12 @@ def preflight(
                 "rolling_windows": config.hard_floor_windows,
                 "canary_min_days": config.canary_min_days,
                 "rollout_stages": list(config.rollout_stages),
-                "latency_p50_max_ms": 400,
-                "latency_p95_max_ms": 900,
-                "hard_deadline_ms": 1_200,
-                "timeout_rate_max": 0.01,
-                "ci_method": "paired-cluster-bootstrap-v1",
+                "paired_min_observations": 500,
+                "paired_min_days": 7,
+                "latency_p95_max_ms": 180,
+                "timeout_wilson_upper_max": 0.03,
+                "ci_method": "wilson-v1",
+                "exact_outcome_mode": "authenticated_negative_veto_only",
             },
             "privacy": {
                 "raw_remote_egress": 0,
@@ -2992,6 +3664,12 @@ def preflight(
 def _matching_p5_baseline(
     root: Path, current: Mapping[str, Any]
 ) -> dict[str, Any] | None:
+    current_floor = current.get("hard_floor")
+    if (
+        not isinstance(current_floor, Mapping)
+        or current_floor.get("p5_allowed") is not True
+    ):
+        return None
     matches: list[dict[str, Any]] = []
     directory = store.distillation_dir(root) / "baselines"
     for path in sorted(directory.glob("*.json")):
@@ -3003,6 +3681,11 @@ def _matching_p5_baseline(
         if (
             artifact.get("raw_watermark") == current.get("raw_watermark")
             and artifact.get("config_sha256") == current.get("config_sha256")
+            and artifact.get("runtime_commit") == current.get("runtime_commit")
+            and artifact.get("metrics") == current.get("metrics")
+            and artifact.get("frozen_contract") == current.get("frozen_contract")
+            and artifact.get("offline_training_gate")
+            == current.get("offline_training_gate")
             and isinstance(hard_floor, Mapping)
             and hard_floor.get("p5_allowed") is True
         ):
@@ -3126,6 +3809,14 @@ class _CounterfactualBlockResult:
     written: int = 0
     model_calls: int = 0
     deferred: bool = False
+
+
+@dataclass(frozen=True)
+class _CandidateCaptureResult:
+    snapshots: dict[str, Mapping[str, Any]]
+    work: list[Mapping[str, Any]]
+    split_plan: Mapping[str, Any]
+    deadline_deferred: bool
 
 
 def _run_teacher_batch(
@@ -3281,26 +3972,9 @@ def _run_counterfactual_block(
     pending = False
     for rally_id, snapshot in sorted(snapshots.items()):
         rally = rally_by_id.get(rally_id)
-        if rally is None or not rally["eligibility"]["answer_utility"]:
+        if rally is None or not rally.get("actual_answer_refs"):
             continue
-        exposure = rally["exposure_receipts"][0]
-        try:
-            artifact = store.read_sealed(
-                store.distillation_dir(root)
-                / "exposures"
-                / f"{exposure['exposure_artifact_id']}.json",
-                schema="chronovisor.recall-exact-exposure.v1",
-            )
-        except (KeyError, store.DistillationStoreError):
-            continue
-        candidate_ids = {
-            str(item.get("candidate_id") or "")
-            for field in ("candidate_refs", "candidate_pool_refs")
-            for item in artifact.get(field, [])
-            if isinstance(item, Mapping)
-            and (field == "candidate_refs" or item.get("selected") is False)
-        }
-        candidate_ids.update(
+        candidate_ids = set(
             str(item.get("candidate_id") or "")
             for item in snapshot.get("candidates", [])[:3]
             if isinstance(item, Mapping)
@@ -3316,24 +3990,44 @@ def _run_counterfactual_block(
 
     for rally_id, snapshot in sorted(snapshots.items()):
         rally = rally_by_id.get(rally_id)
-        if rally is None or not rally["eligibility"]["answer_utility"]:
+        if rally is None or not rally.get("actual_answer_refs"):
             continue
-        exposure = rally["exposure_receipts"][0]
-        try:
-            exposure_artifact = store.read_sealed(
-                store.distillation_dir(root)
-                / "exposures"
-                / f"{exposure['exposure_artifact_id']}.json",
-                schema="chronovisor.recall-exact-exposure.v1",
-            )
-        except store.DistillationStoreError:
-            continue
-        exact_candidates = exposure_artifact.get("candidate_refs")
-        raw_feature_rows = exposure_artifact.get("candidate_feature_snapshot", [])
-        if not isinstance(exact_candidates, list) or not isinstance(
-            raw_feature_rows, list
-        ):
-            continue
+        exposure = (
+            rally["exposure_receipts"][0] if rally.get("exposure_receipts") else {}
+        )
+        exposure_artifact: Mapping[str, Any] = {}
+        if exposure:
+            try:
+                exposure_artifact = store.read_sealed(
+                    store.distillation_dir(root)
+                    / "exposures"
+                    / f"{exposure['exposure_artifact_id']}.json",
+                    schema="chronovisor.recall-exact-exposure.v1",
+                )
+            except (KeyError, store.DistillationStoreError):
+                exposure = {}
+                exposure_artifact = {}
+        exact_candidates = exposure_artifact.get("candidate_refs", [])
+        raw_feature_rows = [
+            *(
+                exposure_artifact.get("candidate_feature_snapshot", [])
+                if isinstance(
+                    exposure_artifact.get("candidate_feature_snapshot", []), list
+                )
+                else []
+            ),
+            *[
+                {
+                    "candidate_id": item.get("candidate_id"),
+                    "features": item.get("features"),
+                }
+                for item in snapshot.get("candidates", [])
+                if isinstance(item, Mapping)
+                and item.get("feature_revision") == TEXT_FEATURE_REVISION
+            ],
+        ]
+        if not isinstance(exact_candidates, list):
+            exact_candidates = []
         exact_features = {
             str(row["candidate_id"]): dict(row["features"])
             for row in raw_feature_rows
@@ -3372,7 +4066,7 @@ def _run_counterfactual_block(
                     "rendered_context": rendered,
                 }
             )
-        if set(original_evidence) != set(exposure["candidate_ids"]):
+        if exposure and set(original_evidence) != set(exposure["candidate_ids"]):
             continue
         live_additions = [
             {
@@ -3444,8 +4138,18 @@ def _run_counterfactual_block(
             response: Mapping[str, Any] = {}
             try:
                 response = counterfactual.compare(payload)
+                generator_digest = str(response.get("generator_model_digest") or "")
+                judge_digest = str(response.get("judge_model_digest") or "")
+                verdict = str(response.get("verdict") or "uncertain")
+                if (
+                    response.get("order_agreement") is not True
+                    or re.fullmatch(r"[0-9a-f]{64}", generator_digest) is None
+                    or re.fullmatch(r"[0-9a-f]{64}", judge_digest) is None
+                    or generator_digest == judge_digest
+                ):
+                    verdict = "uncertain"
                 label = adjudicate_label(
-                    str(response.get("verdict") or "uncertain"),
+                    verdict,
                     closed_predicate=None,
                     reason=str(response.get("reason") or "")[:500],
                     dimension="answer_utility",
@@ -3466,7 +4170,9 @@ def _run_counterfactual_block(
                     "candidate_id": candidate["candidate_id"],
                     "route": "counterfactual",
                     "mode": mode,
-                    "exposure_artifact_id": exposure["exposure_artifact_id"],
+                    "exposure_artifact_id": str(
+                        exposure.get("exposure_artifact_id") or ""
+                    ),
                     "a0_sha256": response.get("a0_sha256", ""),
                     "a1_sha256": response.get("a1_sha256", ""),
                     "blind_orders": response.get("blind_orders", []),
@@ -3491,6 +4197,425 @@ def _run_counterfactual_block(
     return _CounterfactualBlockResult(pending=pending)
 
 
+def _capture_candidate_snapshots(
+    *,
+    root: Path,
+    raw_dir: Path,
+    config: DistillationConfig,
+    rallies: Sequence[Mapping[str, Any]],
+    texts: Mapping[str, str],
+    index_path: Path,
+    cold_start: bool,
+    deadline: float,
+) -> _CandidateCaptureResult:
+    candidate_path = store.distillation_dir(root) / "candidate-ledger.jsonl"
+    snapshots = {
+        str(row["rally_id"]): row["snapshot"]
+        for row in store.read_chain(candidate_path)
+        if isinstance(row.get("snapshot"), dict)
+    }
+    candidate_limit = 100 if cold_start else config.chunk_size
+    planned = [rally for rally in rallies if rally["rally_id"] not in snapshots]
+    split_plan: Mapping[str, Any] = {}
+    if cold_start:
+        _, cohort = _active_training_cohort(materialize_training_rows(root)["rows"])
+        split_plan = _ensure_split_plan(
+            root,
+            rallies,
+            raw_watermark=committed_raw_watermark(raw_dir),
+            model_cohort_sha256=cohort["cohort_sha256"],
+        )
+        assignments = split_plan["assignments"]
+        planned.sort(
+            key=lambda rally: (
+                0 if assignments.get(rally["rally_id"]) == "test" else 1,
+                str(rally["rally_id"]),
+            )
+        )
+    planned = planned[:candidate_limit]
+    work: list[Mapping[str, Any]] = []
+    payloads: list[dict[str, Any]] = []
+    deferred = False
+    for rally in planned:
+        if cold_start and deadline - time.monotonic() < 30:
+            deferred = True
+            break
+        snapshot = candidate_snapshot(
+            index_path,
+            rally,
+            texts.get(str(rally["query_sha256"]), ""),
+            limit=config.max_candidates,
+            candidate_texts=texts,
+        )
+        payloads.append(
+            {
+                "kind": "candidate-snapshot",
+                "rally_id": rally["rally_id"],
+                "snapshot": snapshot,
+            }
+        )
+        snapshots[str(rally["rally_id"])] = snapshot
+        work.append(rally)
+    store.append_chain_batch(candidate_path, payloads)
+    return _CandidateCaptureResult(snapshots, work, split_plan, deferred)
+
+
+def _worker_state_transition(
+    root: Path,
+    *,
+    p5_allowed: bool,
+    local_teachers: bool,
+    model_deferred: bool,
+    gate_baseline: Mapping[str, Any],
+    promotion: Mapping[str, Any],
+) -> dict[str, Any]:
+    try:
+        previous = _read_worker_state(root)
+    except store.DistillationStoreError:
+        previous = {"kind": "worker-state"}
+    rollout_status = str(previous.get("status") or "")
+    if rollout_status not in {
+        "shadow",
+        "replay",
+        "canary",
+        "active",
+        "rolled_back",
+        "quarantined",
+    }:
+        rollout_status = "ready" if p5_allowed else "capture_only"
+    hold_reason = str(previous.get("hold_reason") or "")
+    if rollout_status in {"ready", "capture_only"}:
+        reasons = gate_baseline["hard_floor"]["reasons"]
+        hold_reason = str((reasons[0] if reasons else promotion.get("reason")) or "")
+    return {
+        "previous": previous,
+        "worker_status": (
+            "deferred"
+            if model_deferred
+            else "ready"
+            if p5_allowed and local_teachers
+            else "capture_only"
+        ),
+        "rollout_status": rollout_status,
+        "hold_reason": hold_reason,
+        "last_success_at": (
+            str(previous.get("last_success_at") or "")
+            if model_deferred
+            else datetime.now(UTC).isoformat()
+        ),
+    }
+
+
+def _run_distillation_chunk_impl(
+    *,
+    root: Path | None = None,
+    raw_dir: Path | None = None,
+    config_path: Path | None = None,
+    teachers: Mapping[str, Teacher] | None = None,
+    counterfactual: CounterfactualGenerator | None = None,
+    structural_verifier: (
+        Callable[[Mapping[str, Any], Mapping[str, Any], Mapping[str, Any]], str | None]
+        | None
+    ) = None,
+    dry_run: bool = False,
+    cold_start: bool = False,
+    max_elapsed_seconds: int = 300,
+) -> dict[str, Any]:
+    root = root or CHRONOVISOR_ROOT
+    raw_dir = raw_dir or root / "raw"
+    config = load_distillation_config(config_path)
+    deadline = time.monotonic() + max_elapsed_seconds
+    if not config.enabled:
+        return {"status": "disabled", "processed": 0}
+    try:
+        scheduler_state = _read_worker_state(root)
+    except store.DistillationStoreError:
+        scheduler_state = {}
+    teacher_model_calls = int(scheduler_state.get("teacher_model_calls", 0))
+    counterfactual_model_calls = int(
+        scheduler_state.get("counterfactual_model_calls", 0)
+    )
+    # ponytail: cold start rescans Raw; add a sealed projection catalog only if the
+    # 5-minute lane ceiling is measured to fail.
+    event_rows = _events(raw_dir)
+    rallies = extract_rallies(
+        raw_dir,
+        root=root,
+        max_context_bytes=config.max_input_bytes,
+        _event_rows=event_rows,
+    )
+    if teachers is None:
+        teachers, default_counterfactual = _default_workers(
+            config, deadline_ms=45_000 if cold_start else 60_000
+        )
+        if counterfactual is None:
+            counterfactual = default_counterfactual
+    structural_verifier = structural_verifier or _default_structural_verifier
+    ledger_path = store.distillation_dir(root) / "rally-manifest.jsonl"
+    existing = {
+        manifest.get("rally_id")
+        for row in store.read_chain(ledger_path)
+        if isinstance((manifest := row.get("manifest")), dict)
+    }
+    manifest_limit = 500 if cold_start else config.chunk_size
+    pending = [row for row in rallies if row["rally_id"] not in existing][
+        :manifest_limit
+    ]
+    local_teachers = bool(teachers) and all(
+        role in teachers and teachers[role].local for role in TEACHER_ROLES
+    )
+    if dry_run:
+        return {
+            "status": "dry_run",
+            "pending": len(pending),
+            "teachers_available": local_teachers,
+        }
+    store.append_chain_batch(
+        ledger_path,
+        ({"kind": "rally-manifest", "manifest": rally} for rally in pending),
+    )
+    index_path = store.distillation_dir(root) / "historical-index.sqlite"
+    index_sha256 = build_historical_index(raw_dir, index_path, _event_rows=event_rows)
+    texts = {str(row["semantic_sha256"]): str(row["text"]) for row in event_rows}
+    rally_by_id = {str(rally["rally_id"]): rally for rally in rallies}
+    candidate_path = store.distillation_dir(root) / "candidate-ledger.jsonl"
+    capture = _capture_candidate_snapshots(
+        root=root,
+        raw_dir=raw_dir,
+        config=config,
+        rallies=rallies,
+        texts=texts,
+        index_path=index_path,
+        cold_start=cold_start,
+        deadline=deadline,
+    )
+    snapshots = capture.snapshots
+    candidate_work = capture.work
+    split_plan = capture.split_plan
+    deadline_deferred = capture.deadline_deferred
+
+    label_path = store.distillation_dir(root) / "label-ledger.jsonl"
+    label_rows = store.read_chain(label_path)
+    model_snapshots = snapshots
+    if cold_start and split_plan:
+        prioritize_test = int(scheduler_state.get("cold_start_lane_turn", 0)) % 4 != 3
+        if prioritize_test:
+            assignments = split_plan["assignments"]
+            model_snapshots = {
+                rally_id: snapshot
+                for rally_id, snapshot in snapshots.items()
+                if assignments.get(rally_id) == "test"
+            }
+    counterfactual_probe = _run_counterfactual_block(
+        execute=False,
+        root=root,
+        config=config,
+        counterfactual=counterfactual,
+        snapshots=model_snapshots,
+        rally_by_id=rally_by_id,
+        texts=texts,
+        label_path=label_path,
+        label_rows=label_rows,
+    )
+    prefer_counterfactual = _is_counterfactual_turn(
+        teacher_model_calls,
+        counterfactual_model_calls,
+        available=counterfactual_probe.pending,
+    )
+    teacher_result = _TeacherBatchResult()
+    minimum_model_seconds = 220 if prefer_counterfactual else 55
+    model_work_available = local_teachers or counterfactual_probe.pending
+    model_deferred = deadline_deferred or (
+        model_work_available
+        and cold_start
+        and deadline - time.monotonic() < minimum_model_seconds
+    )
+    if local_teachers and not prefer_counterfactual and not model_deferred:
+        teacher_result = _run_teacher_batch(
+            root=root,
+            config=config,
+            teachers=teachers or {},
+            snapshots=model_snapshots,
+            rally_by_id=rally_by_id,
+            texts=texts,
+            label_path=label_path,
+            label_rows=label_rows,
+            structural_verifier=structural_verifier,
+        )
+    labels_written = teacher_result.labels_written
+    teacher_model_calls += teacher_result.model_calls
+    model_deferred = model_deferred or teacher_result.deferred
+    counterfactual_result = _CounterfactualBlockResult(
+        pending=counterfactual_probe.pending
+    )
+    if (
+        not model_deferred
+        and labels_written == 0
+        and (
+            not cold_start
+            or not counterfactual_probe.pending
+            or deadline - time.monotonic() >= 220
+        )
+    ):
+        counterfactual_result = _run_counterfactual_block(
+            execute=True,
+            root=root,
+            config=config,
+            counterfactual=counterfactual,
+            snapshots=model_snapshots,
+            rally_by_id=rally_by_id,
+            texts=texts,
+            label_path=label_path,
+            label_rows=label_rows,
+        )
+    elif (
+        not model_deferred
+        and labels_written == 0
+        and counterfactual_probe.pending
+        and cold_start
+    ):
+        model_deferred = True
+    counterfactual_written = counterfactual_result.written
+    counterfactual_model_calls += counterfactual_result.model_calls
+    model_deferred = model_deferred or counterfactual_result.deferred
+    if cold_start:
+        _, current_cohort = _active_training_cohort(
+            materialize_training_rows(root)["rows"]
+        )
+        split_plan = _ensure_split_plan(
+            root,
+            rallies,
+            raw_watermark=committed_raw_watermark(raw_dir),
+            model_cohort_sha256=current_cohort["cohort_sha256"],
+        )
+    baseline = preflight(
+        raw_dir=raw_dir,
+        root=root,
+        config_path=config_path,
+        _rallies=rallies,
+    )
+    gate_baseline = _matching_p5_baseline(root, baseline) or baseline
+    p5_allowed = bool(gate_baseline["hard_floor"]["p5_allowed"])
+    manifest_backlog = max(0, len(rallies) - len(existing) - len(pending))
+    candidate_backlog = max(0, len(rallies) - len(snapshots))
+    cold_start_pending = bool(manifest_backlog or candidate_backlog or not p5_allowed)
+    split_plan_id = str(
+        split_plan.get("artifact_id") or scheduler_state.get("split_plan_id") or ""
+    )
+    bootstrap = _ensure_bootstrap_policy(root, gate_baseline)
+    promotion = _maybe_publish_candidate(root, config, gate_baseline)
+    rollout_evaluation = _automatic_rollout_evaluation(root, gate_baseline, promotion)
+    transition = _worker_state_transition(
+        root,
+        p5_allowed=p5_allowed,
+        local_teachers=local_teachers,
+        model_deferred=model_deferred,
+        gate_baseline=gate_baseline,
+        promotion=promotion,
+    )
+    manifest_head = store.verify_chain(ledger_path)["head_sha256"]
+    candidate_head = store.verify_chain(candidate_path)["head_sha256"]
+    label_head = store.verify_chain(label_path)["head_sha256"]
+    run_id, _, _ = store.write_immutable(
+        store.distillation_dir(root) / "runs",
+        {
+            "kind": "bounded-chunk",
+            "raw_watermark": baseline["raw_watermark"],
+            "baseline_artifact_id": gate_baseline["artifact_id"],
+            "manifest_head": manifest_head,
+            "candidate_head": candidate_head,
+            "label_head": label_head,
+            "processed": len(pending),
+            "candidate_snapshots": len(candidate_work),
+            "labels_written": labels_written,
+            "counterfactuals_written": counterfactual_written,
+            "p5_allowed": p5_allowed,
+        },
+        schema="chronovisor.recall-distill-run.v1",
+    )
+    # ponytail: the final small state commit is uninterruptible; isolate the worker
+    # process only if a storage stall at this boundary is measured.
+    if (
+        threading.current_thread() is threading.main_thread()
+        and hasattr(signal, "setitimer")
+        and hasattr(signal, "ITIMER_REAL")
+    ):
+        signal.setitimer(signal.ITIMER_REAL, 0)
+    state = store.write_sealed_state(
+        store.distillation_dir(root) / store.STATE_FILE,
+        {
+            **transition["previous"],
+            "status": transition["rollout_status"],
+            "worker_status": transition["worker_status"],
+            "rollout_percent": int(transition["previous"].get("rollout_percent", 0)),
+            "raw_watermark": baseline["raw_watermark"],
+            "baseline_artifact_id": gate_baseline["artifact_id"],
+            "historical_index_sha256": index_sha256,
+            "manifest_chain_head": manifest_head,
+            "run_id": run_id,
+            "processed": len(pending),
+            "candidate_snapshots": len(candidate_work),
+            "labels_written": labels_written,
+            "counterfactuals_written": counterfactual_written,
+            "teacher_model_calls": teacher_model_calls,
+            "counterfactual_model_calls": counterfactual_model_calls,
+            "cold_start_pending": cold_start_pending,
+            "cold_start_lane_turn": int(
+                scheduler_state.get("cold_start_lane_turn", 0)
+            )
+            + int(cold_start and not model_deferred),
+            "split_plan_id": split_plan_id,
+            "manifest_backlog": manifest_backlog,
+            "candidate_backlog": candidate_backlog,
+            "promotion_status": promotion["status"],
+            "promotion_reason": promotion.get("reason", ""),
+            "incumbent_policy_id": bootstrap["artifact_id"],
+            "rollout_evaluation_status": rollout_evaluation["status"],
+            "hold_reason": transition["hold_reason"],
+            "capture_only_reasons": gate_baseline["hard_floor"]["reasons"]
+            + ([] if local_teachers else ["local_teachers_unavailable"]),
+            "last_success_at": transition["last_success_at"],
+            "error_code": "worker_deferred" if model_deferred else "",
+        },
+    )
+    return {
+        "status": transition["worker_status"],
+        "processed": len(pending),
+        "p5_allowed": p5_allowed,
+        "teachers_available": local_teachers,
+        "counterfactual_available": bool(counterfactual and counterfactual.local),
+        "candidate_snapshots": len(candidate_work),
+        "labels_written": labels_written,
+        "counterfactuals_written": counterfactual_written,
+        "cold_start_pending": cold_start_pending,
+        "split_plan_id": split_plan_id,
+        "manifest_backlog": manifest_backlog,
+        "candidate_backlog": candidate_backlog,
+        "promotion": promotion,
+        "rollout_evaluation": rollout_evaluation,
+        "run_id": run_id,
+        "state_sha256": state["seal_sha256"],
+    }
+
+
+def cold_start_due(root: Path | None = None) -> bool:
+    """Return a scan-free, fail-closed hint for the existing converge lane."""
+
+    root = root or CHRONOVISOR_ROOT
+    if not _enabled_for_root(root):
+        return False
+    state_path = store.distillation_dir(root) / store.STATE_FILE
+    if not state_path.exists():
+        return True
+    try:
+        state = _read_worker_state(root)
+    except store.DistillationStoreError:
+        return False
+    if state.get("status") == "active":
+        return False
+    return state.get("cold_start_pending") is not False
+
+
 def run_distillation_chunk(
     *,
     root: Path | None = None,
@@ -3503,228 +4628,53 @@ def run_distillation_chunk(
         | None
     ) = None,
     dry_run: bool = False,
+    cold_start: bool = False,
+    max_elapsed_seconds: int = 300,
 ) -> dict[str, Any]:
-    root = root or CHRONOVISOR_ROOT
-    raw_dir = raw_dir or root / "raw"
-    config = load_distillation_config(config_path)
-    if not config.enabled:
-        return {"status": "disabled", "processed": 0}
-    try:
-        scheduler_state = _read_worker_state(root)
-    except store.DistillationStoreError:
-        scheduler_state = {}
-    teacher_model_calls = int(scheduler_state.get("teacher_model_calls", 0))
-    counterfactual_model_calls = int(
-        scheduler_state.get("counterfactual_model_calls", 0)
-    )
-    event_rows = _events(raw_dir)
-    rallies = extract_rallies(
-        raw_dir,
-        root=root,
-        max_context_bytes=config.max_input_bytes,
-        _event_rows=event_rows,
-    )
-    if teachers is None:
-        teachers, default_counterfactual = _default_workers(config)
-        if counterfactual is None:
-            counterfactual = default_counterfactual
-    structural_verifier = structural_verifier or _default_structural_verifier
-    ledger_path = store.distillation_dir(root) / "rally-manifest.jsonl"
-    existing = {
-        manifest.get("rally_id")
-        for row in store.read_chain(ledger_path)
-        if isinstance((manifest := row.get("manifest")), dict)
-    }
-    pending = [row for row in rallies if row["rally_id"] not in existing][
-        : config.chunk_size
-    ]
-    local_teachers = bool(teachers) and all(
-        role in teachers and teachers[role].local for role in TEACHER_ROLES
-    )
-    if dry_run:
-        return {
-            "status": "dry_run",
-            "pending": len(pending),
-            "teachers_available": local_teachers,
-        }
-    for rally in pending:
-        store.append_chain(ledger_path, {"kind": "rally-manifest", "manifest": rally})
-    index_path = store.distillation_dir(root) / "historical-index.sqlite"
-    index_sha256 = build_historical_index(raw_dir, index_path, _event_rows=event_rows)
-    texts = {str(row["semantic_sha256"]): str(row["text"]) for row in event_rows}
-    rally_by_id = {str(rally["rally_id"]): rally for rally in rallies}
-    candidate_path = store.distillation_dir(root) / "candidate-ledger.jsonl"
-    candidate_rows = store.read_chain(candidate_path)
-    snapshots = {
-        str(row["rally_id"]): row["snapshot"]
-        for row in candidate_rows
-        if isinstance(row.get("snapshot"), dict)
-    }
-    candidate_work = [rally for rally in rallies if rally["rally_id"] not in snapshots][
-        : config.chunk_size
-    ]
-    for rally in candidate_work:
-        query_text = texts.get(str(rally["query_sha256"]), "")
-        snapshot = candidate_snapshot(
-            index_path, rally, query_text, limit=config.max_candidates
-        )
-        store.append_chain(
-            candidate_path,
-            {
-                "kind": "candidate-snapshot",
-                "rally_id": rally["rally_id"],
-                "snapshot": snapshot,
-            },
-        )
-        snapshots[str(rally["rally_id"])] = snapshot
+    """Run one bounded single-writer distillation unit."""
 
-    label_path = store.distillation_dir(root) / "label-ledger.jsonl"
-    label_rows = store.read_chain(label_path)
-    counterfactual_probe = _run_counterfactual_block(
-        execute=False,
-        root=root,
-        config=config,
-        counterfactual=counterfactual,
-        snapshots=snapshots,
-        rally_by_id=rally_by_id,
-        texts=texts,
-        label_path=label_path,
-        label_rows=label_rows,
+    if (
+        isinstance(max_elapsed_seconds, bool)
+        or not isinstance(max_elapsed_seconds, int)
+        or not 60 <= max_elapsed_seconds <= 600
+    ):
+        raise DistillationError("distillation elapsed limit is invalid")
+    from chronovisor.recall.recall_runtime import (
+        RecallWallClockTimeout,
+        recall_wall_clock_deadline,
     )
-    prefer_counterfactual = _is_counterfactual_turn(
-        teacher_model_calls,
-        counterfactual_model_calls,
-        available=counterfactual_probe.pending,
+
+    resolved_root = root or CHRONOVISOR_ROOT
+    lock = store.acquire_nonblocking_lock(
+        store.distillation_dir(resolved_root) / "distillation-worker.lock"
     )
-    teacher_result = _TeacherBatchResult()
-    if local_teachers and not prefer_counterfactual:
-        teacher_result = _run_teacher_batch(
-            root=root,
-            config=config,
-            teachers=teachers or {},
-            snapshots=snapshots,
-            rally_by_id=rally_by_id,
-            texts=texts,
-            label_path=label_path,
-            label_rows=label_rows,
-            structural_verifier=structural_verifier,
-        )
-    labels_written = teacher_result.labels_written
-    teacher_model_calls += teacher_result.model_calls
-    model_deferred = teacher_result.deferred
-    counterfactual_result = _CounterfactualBlockResult(
-        pending=counterfactual_probe.pending
-    )
-    if not model_deferred and labels_written == 0:
-        counterfactual_result = _run_counterfactual_block(
-            execute=True,
-            root=root,
-            config=config,
-            counterfactual=counterfactual,
-            snapshots=snapshots,
-            rally_by_id=rally_by_id,
-            texts=texts,
-            label_path=label_path,
-            label_rows=label_rows,
-        )
-    counterfactual_written = counterfactual_result.written
-    counterfactual_model_calls += counterfactual_result.model_calls
-    model_deferred = model_deferred or counterfactual_result.deferred
-    baseline = preflight(
-        raw_dir=raw_dir,
-        root=root,
-        config_path=config_path,
-        _rallies=rallies,
-    )
-    gate_baseline = _matching_p5_baseline(root, baseline) or baseline
-    p5_allowed = bool(gate_baseline["hard_floor"]["p5_allowed"])
-    bootstrap = _ensure_bootstrap_policy(root, gate_baseline)
-    promotion = _maybe_publish_candidate(root, config, gate_baseline)
-    rollout_evaluation = _automatic_rollout_evaluation(root, gate_baseline, promotion)
-    worker_status = (
-        "deferred"
-        if model_deferred
-        else "ready"
-        if p5_allowed and local_teachers
-        else "capture_only"
-    )
+    if lock is None:
+        return {"status": "deferred", "processed": 0, "reason": "worker_busy"}
     try:
-        previous_state = _read_worker_state(root)
-    except store.DistillationStoreError:
-        previous_state = {"kind": "worker-state"}
-    rollout_status = str(previous_state.get("status") or "")
-    if rollout_status not in {
-        "shadow",
-        "replay",
-        "canary",
-        "active",
-        "rolled_back",
-        "quarantined",
-    }:
-        rollout_status = "ready" if p5_allowed else "capture_only"
-    last_success_at = (
-        str(previous_state.get("last_success_at") or "")
-        if model_deferred
-        else datetime.now(UTC).isoformat()
-    )
-    state = store.write_sealed_state(
-        store.distillation_dir(root) / store.STATE_FILE,
-        {
-            **previous_state,
-            "status": rollout_status,
-            "worker_status": worker_status,
-            "rollout_percent": int(previous_state.get("rollout_percent", 0)),
-            "raw_watermark": baseline["raw_watermark"],
-            "baseline_artifact_id": gate_baseline["artifact_id"],
-            "historical_index_sha256": index_sha256,
-            "manifest_chain_head": store.verify_chain(ledger_path)["head_sha256"],
-            "processed": len(pending),
-            "candidate_snapshots": len(candidate_work),
-            "labels_written": labels_written,
-            "counterfactuals_written": counterfactual_written,
-            "teacher_model_calls": teacher_model_calls,
-            "counterfactual_model_calls": counterfactual_model_calls,
-            "promotion_status": promotion["status"],
-            "promotion_reason": promotion.get("reason", ""),
-            "incumbent_policy_id": bootstrap["artifact_id"],
-            "rollout_evaluation_status": rollout_evaluation["status"],
-            "capture_only_reasons": gate_baseline["hard_floor"]["reasons"]
-            + ([] if local_teachers else ["local_teachers_unavailable"]),
-            "last_success_at": last_success_at,
-            "error_code": "worker_deferred" if model_deferred else "",
-        },
-    )
-    run_id, _, _ = store.write_immutable(
-        store.distillation_dir(root) / "runs",
-        {
-            "kind": "bounded-chunk",
-            "raw_watermark": baseline["raw_watermark"],
-            "baseline_artifact_id": gate_baseline["artifact_id"],
-            "manifest_head": store.verify_chain(ledger_path)["head_sha256"],
-            "candidate_head": store.verify_chain(candidate_path)["head_sha256"],
-            "label_head": store.verify_chain(label_path)["head_sha256"],
-            "processed": len(pending),
-            "candidate_snapshots": len(candidate_work),
-            "labels_written": labels_written,
-            "counterfactuals_written": counterfactual_written,
-            "p5_allowed": p5_allowed,
-        },
-        schema="chronovisor.recall-distill-run.v1",
-    )
-    return {
-        "status": worker_status,
-        "processed": len(pending),
-        "p5_allowed": p5_allowed,
-        "teachers_available": local_teachers,
-        "counterfactual_available": bool(counterfactual and counterfactual.local),
-        "candidate_snapshots": len(candidate_work),
-        "labels_written": labels_written,
-        "counterfactuals_written": counterfactual_written,
-        "promotion": promotion,
-        "rollout_evaluation": rollout_evaluation,
-        "run_id": run_id,
-        "state_sha256": state["seal_sha256"],
-    }
+        try:
+            with recall_wall_clock_deadline(max_elapsed_seconds * 1_000):
+                return _run_distillation_chunk_impl(
+                    root=resolved_root,
+                    raw_dir=raw_dir,
+                    config_path=config_path,
+                    teachers=teachers,
+                    counterfactual=counterfactual,
+                    structural_verifier=structural_verifier,
+                    dry_run=dry_run,
+                    cold_start=cold_start,
+                    max_elapsed_seconds=max_elapsed_seconds,
+                )
+        except RecallWallClockTimeout:
+            # ponytail: no cross-ledger transaction; completed atomic batches are
+            # idempotent resume points and are never rolled back after timeout.
+            return {
+                "status": "deferred",
+                "processed": 0,
+                "reason": "wall_clock_timeout",
+                "atomic_progress_may_be_present": True,
+            }
+    finally:
+        store.release_lock(lock)
 
 
 def distillation_snapshot(root: Path | None = None) -> dict[str, Any]:

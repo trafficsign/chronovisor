@@ -3049,6 +3049,8 @@ function renderHealth(health) {
     ? `/${distillationRollout}`
     : "";
   els.healthRecallDistillation.textContent = `${distillationWorker}${distillationStage} · ${Math.round(numeric(distillation.rollout_percent) ? distillation.rollout_percent : 0)}% · ${distillationPolicy(distillation.active_policy_id)}/${distillationPolicy(distillation.candidate_policy_id)}/${distillationPolicy(distillation.lkg_policy_id)}`;
+  const hold = fmt(distillation.hold_reason, "");
+  els.healthRecallDistillationDetail.textContent = `teacher-only ${intValue(distillation.teacher_only)} · verified truth ${intValue(distillation.verified_truth)} · probe ${intValue(distillation.probe_not_truth)} (not truth) · paired ${intValue(distillation.paired_denominator)} · ${fmt(distillation.feature_revision, "feature unavailable")}${hold ? ` · hold ${hold}` : ""}`;
   els.healthLedger.textContent = fmt(ledger.status || "--");
   els.healthResearchRuns.textContent = intValue(researchTotals.runs).toLocaleString();
   els.healthResearchClaims.textContent = `${intValue(researchTotals.supported_claims).toLocaleString()}/${(

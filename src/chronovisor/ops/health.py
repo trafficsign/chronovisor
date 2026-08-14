@@ -29,6 +29,28 @@ def _read_jsonl(path: Path, *, limit: int = 500) -> list[dict[str, Any]]:
     return read_jsonl(path, limit=limit)
 
 
+def _recall_distillation_fallback(
+    status: str, *, alert: bool, error: str = ""
+) -> dict[str, Any]:
+    return {
+        "status": status,
+        "worker_status": status,
+        "rollout_status": status,
+        "rollout_percent": 0.0,
+        "active_policy_id": None,
+        "candidate_policy_id": None,
+        "lkg_policy_id": None,
+        "feature_revision": "",
+        "teacher_only": 0,
+        "verified_truth": 0,
+        "probe_not_truth": 0,
+        "paired_denominator": 0,
+        "hold_reason": "",
+        "alert": alert,
+        **({"error": error} if error else {}),
+    }
+
+
 def recall_distillation_kpi() -> dict[str, Any]:
     """Expose the distillation worker's public, privacy-safe status.
 
@@ -41,38 +63,15 @@ def recall_distillation_kpi() -> dict[str, Any]:
     try:
         from chronovisor.recall.recall_distillation_store import snapshot
     except ImportError:
-        return {
-            "status": "unavailable",
-            "worker_status": "unavailable",
-            "rollout_percent": 0.0,
-            "active_policy_id": None,
-            "candidate_policy_id": None,
-            "lkg_policy_id": None,
-            "alert": False,
-        }
+        return _recall_distillation_fallback("unavailable", alert=False)
     try:
         value = snapshot(CHRONOVISOR_ROOT)
     except (OSError, ValueError, TypeError, json.JSONDecodeError):
-        return {
-            "status": "unavailable",
-            "worker_status": "unavailable",
-            "rollout_percent": 0.0,
-            "active_policy_id": None,
-            "candidate_policy_id": None,
-            "lkg_policy_id": None,
-            "alert": False,
-        }
+        return _recall_distillation_fallback("unavailable", alert=False)
     if not isinstance(value, dict):
-        return {
-            "status": "invalid",
-            "worker_status": "invalid",
-            "rollout_percent": 0.0,
-            "active_policy_id": None,
-            "candidate_policy_id": None,
-            "lkg_policy_id": None,
-            "alert": True,
-            "error": "invalid_snapshot",
-        }
+        return _recall_distillation_fallback(
+            "invalid", alert=True, error="invalid_snapshot"
+        )
     status = str(value.get("status") or "invalid")
     state = value.get("worker_status", value.get("state"))
     worker_status = str(

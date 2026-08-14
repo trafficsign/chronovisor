@@ -144,6 +144,7 @@ def run_converge(
     from chronovisor.core.background_jobs import retry_due
     from chronovisor.ingest.self_heal import enqueue_due_system_repairs
     from chronovisor.ops.session_sweeper import run_sweeper
+    from chronovisor.recall import recall_distillation
 
     payload: dict[str, Any] = {
         "status": "ok",
@@ -164,6 +165,21 @@ def run_converge(
             else {"status": "skipped", "reason": "disabled_by_cli"}
         ),
     }
+    try:
+        payload["recall_distillation"] = (
+            recall_distillation.run_distillation_chunk(
+                cold_start=True,
+                max_elapsed_seconds=300,
+            )
+            if recall_distillation.distillation_enabled()
+            and recall_distillation.cold_start_due()
+            else {"status": "skipped", "reason": "cold_start_not_due"}
+        )
+    except Exception as exc:
+        payload["recall_distillation"] = {
+            "status": "error",
+            "error": f"{exc.__class__.__name__}: {exc}",
+        }
     if run_sleep:
         from chronovisor.ops.sleep_cycle import run_sleep_cycle
 

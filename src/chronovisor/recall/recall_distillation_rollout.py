@@ -15,8 +15,8 @@ from chronovisor.core.canonical_json import canonical_json_sha256_strict
 from chronovisor.core.store import CHRONOVISOR_ROOT
 from chronovisor.recall import recall_distillation_store as store
 
-POLICY_SCHEMA = "chronovisor.recall-distill-policy.v1"
-EVALUATION_SCHEMA = "chronovisor.recall-distill-rollout-evaluation.v1"
+POLICY_SCHEMA = "chronovisor.recall-distill-policy.v2"
+EVALUATION_SCHEMA = "chronovisor.recall-distill-rollout-evaluation.v2"
 QUARANTINE_SCHEMA = "chronovisor.recall-distill-quarantine.v1"
 _STAGES = (5, 25, 100)
 _HEX = re.compile(r"[0-9a-f]{64}\Z")
@@ -43,7 +43,10 @@ def _policy(root: Path, policy_id: object) -> str:
     keys = artifact.get("feature_keys")
     weights = artifact.get("weights")
     revision = artifact.get("feature_revision")
-    from chronovisor.recall.recall_distillation import FAST_FEATURE_KEYS
+    from chronovisor.recall.recall_distillation import (
+        FAST_FEATURE_KEYS,
+        TEXT_FEATURE_REVISION,
+    )
 
     if (
         not isinstance(keys, list)
@@ -51,13 +54,26 @@ def _policy(root: Path, policy_id: object) -> str:
         or not isinstance(weights, Mapping)
         or set(weights) != set(FAST_FEATURE_KEYS)
         or not isinstance(revision, str)
-        or revision != "recall-distill-fast-v1"
+        or revision != TEXT_FEATURE_REVISION
     ):
         raise RolloutError("policy feature schema is invalid")
-    numeric = [artifact.get("bias"), artifact.get("threshold"), artifact.get("abstain_margin"), *weights.values()]
-    if not all(isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value)) for value in numeric):
+    numeric = [
+        artifact.get("bias"),
+        artifact.get("threshold"),
+        artifact.get("abstain_margin"),
+        *weights.values(),
+    ]
+    if not all(
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(float(value))
+        for value in numeric
+    ):
         raise RolloutError("policy numeric schema is invalid")
-    if not 0.0 <= float(artifact["threshold"]) <= 1.0 or not 0.0 <= float(artifact["abstain_margin"]) <= 1.0:
+    if (
+        not 0.0 <= float(artifact["threshold"]) <= 1.0
+        or not 0.0 <= float(artifact["abstain_margin"]) <= 1.0
+    ):
         raise RolloutError("policy threshold schema is invalid")
     if (
         isinstance(artifact.get("max_cards"), bool)
@@ -165,11 +181,15 @@ def _baseline(root: Path, evaluation: Mapping[str, Any]) -> None:
     except store.DistillationStoreError as exc:
         raise RolloutError("evaluation baseline is invalid") from exc
     hard_floor = artifact.get("hard_floor")
+    offline_gate = artifact.get("offline_training_gate")
     if (
         artifact.get("artifact_id") != baseline_id
         or artifact.get("raw_watermark") != evaluation["raw_watermark"]
         or not isinstance(hard_floor, Mapping)
         or hard_floor.get("p5_allowed") is not True
+        or not isinstance(offline_gate, Mapping)
+        or canonical_json_sha256_strict(offline_gate)
+        != evaluation["offline_gate_sha256"]
     ):
         raise RolloutError("evaluation baseline is not P5 eligible")
 
@@ -216,12 +236,8 @@ def _gate(value: object, *, observation_required: bool, observed_days: int) -> s
 
 
 _METRICS = (
-    "candidate_recall",
-    "wrong_domain",
-    "anchor_rescue",
     "coverage_abstain",
     "latency_timeout",
-    "answer_utility",
     "cohort_delta",
     "feature_parity",
 )
@@ -233,13 +249,19 @@ def _metrics_gate(
     if not isinstance(value, Mapping) or set(value) != set(_METRICS):
         raise RolloutError("named rollout metrics are incomplete")
     results = [
-        _gate(value[name], observation_required=observation_required, observed_days=observed_days)
+        _gate(
+            value[name],
+            observation_required=observation_required,
+            observed_days=observed_days,
+        )
         for name in _METRICS
     ]
     return "fail" if "fail" in results else "hold" if "hold" in results else "pass"
 
 
-def _evaluation(root: Path, evaluation: Mapping[str, Any]) -> tuple[str, str, dict[str, Any]]:
+def _evaluation(
+    root: Path, evaluation: Mapping[str, Any]
+) -> tuple[str, str, dict[str, Any]]:
     if set(evaluation) != {"run_id", "evaluation_artifact_id"}:
         raise RolloutError("evaluation reference schema is not closed")
     run_id = evaluation.get("run_id")
@@ -258,21 +280,48 @@ def _evaluation(root: Path, evaluation: Mapping[str, Any]) -> tuple[str, str, di
     if artifact.get("artifact_id") != artifact_id or artifact.get("run_id") != run_id:
         raise RolloutError("evaluation artifact identity mismatch")
     required = {
-        "schema", "namespace", "artifact_id", "seal_sha256", "kind", "run_id", "policy_id", "baseline_id", "raw_watermark",
-        "incumbent_policy_id", "split_sha256", "feature_revision",
-        "feature_parity_sha256", "replay_metrics", "shadow_metrics", "canary_metrics",
+        "schema",
+        "namespace",
+        "artifact_id",
+        "seal_sha256",
+        "kind",
+        "run_id",
+        "policy_id",
+        "baseline_id",
+        "raw_watermark",
+        "incumbent_policy_id",
+        "split_sha256",
+        "feature_revision",
+        "feature_parity_sha256",
+        "offline_gate_sha256",
+        "observation_mode",
+        "replay_metrics",
+        "shadow_metrics",
+        "canary_metrics",
     }
     if set(artifact) != required:
         raise RolloutError("evaluation schema is not closed")
     policy_id = artifact.get("policy_id")
     if not isinstance(policy_id, str) or _HEX.fullmatch(policy_id) is None:
         raise RolloutError("evaluation policy id is invalid")
-    for key in ("baseline_id", "raw_watermark", "incumbent_policy_id", "split_sha256", "feature_parity_sha256"):
+    for key in (
+        "baseline_id",
+        "raw_watermark",
+        "incumbent_policy_id",
+        "split_sha256",
+        "feature_parity_sha256",
+        "offline_gate_sha256",
+    ):
         if not isinstance(artifact[key], str) or _HEX.fullmatch(artifact[key]) is None:
             raise RolloutError(f"evaluation {key} is invalid")
     revision = artifact["feature_revision"]
     if not isinstance(revision, str) or _REVISION.fullmatch(revision) is None:
         raise RolloutError("evaluation feature revision is invalid")
+    if artifact["observation_mode"] not in {
+        "paired",
+        "candidate_only_legacy_incumbent",
+    }:
+        raise RolloutError("evaluation observation mode is invalid")
     for gate, observed in (
         (artifact["replay_metrics"], 0),
         (artifact["shadow_metrics"], 7),
@@ -291,6 +340,7 @@ def _evaluation(root: Path, evaluation: Mapping[str, Any]) -> tuple[str, str, di
         "split_sha256": artifact["split_sha256"],
         "feature_revision": revision,
         "feature_parity_sha256": artifact["feature_parity_sha256"],
+        "offline_gate_sha256": artifact["offline_gate_sha256"],
     }
     return run_id, policy_id, {**receipt, "metrics": artifact}
 
@@ -348,6 +398,7 @@ def _advance(
                 "candidate_policy_id": policy_id,
                 "lkg_policy_id": lkg_policy_id or _lkg(root, state),
                 "last_run_id": run_id,
+                "stage_run_id": run_id,
                 "evaluation_receipt_id": receipt_id,
                 "stage_started_at": now.isoformat().replace("+00:00", "Z"),
                 "hold_reason": "",
@@ -359,7 +410,9 @@ def _advance(
     return _result(updated, changed=True)
 
 
-def _rollback_locked(root: Path, state: Mapping[str, Any], run_id: str, reason: str) -> dict[str, Any]:
+def _rollback_locked(
+    root: Path, state: Mapping[str, Any], run_id: str, reason: str
+) -> dict[str, Any]:
     lkg = _lkg(root, state)
     candidate_id = str(state.get("candidate_policy_id") or "")
     try:
@@ -445,6 +498,19 @@ def evaluate_and_advance(
         if bound["incumbent_policy_id"] != _pointer_policy(chronovisor_root, "active"):
             raise RolloutError("evaluation incumbent policy does not match active")
         _baseline(chronovisor_root, bound)
+        status = str(state.get("status") or "")
+        percent = int(state.get("rollout_percent") or 0)
+        if bound["observation_mode"] == "candidate_only_legacy_incumbent":
+            incumbent = store.read_sealed(
+                store.distillation_dir(chronovisor_root)
+                / "policies"
+                / f"{bound['incumbent_policy_id']}.json",
+                schema=POLICY_SCHEMA,
+            )
+            if status != "canary" or percent != 100 or incumbent.get(
+                "serve_mode"
+            ) != "legacy":
+                raise RolloutError("candidate-only observation mode is not allowed")
         replay = _metrics_gate(
             bound["replay_metrics"], observation_required=False, observed_days=0
         )
@@ -454,22 +520,39 @@ def evaluate_and_advance(
             schema=EVALUATION_SCHEMA,
             artifact_id=run_id,
         )
-        status = str(state.get("status") or "")
-        percent = int(state.get("rollout_percent") or 0)
         if status in {"ready", "replay", "capture_only"}:
             if replay == "hold":
-                return _hold(chronovisor_root, state, run_id, receipt_id, "replay_insufficient")
+                return _hold(
+                    chronovisor_root, state, run_id, receipt_id, "replay_insufficient"
+                )
             if replay == "fail":
-                return _rollback_locked(chronovisor_root, state, run_id, "replay_ci_failed")
+                return _rollback_locked(
+                    chronovisor_root, state, run_id, "replay_ci_failed"
+                )
             return _advance(
-                chronovisor_root, state, run_id, policy_id, "shadow", 0, receipt_id, timestamp
+                chronovisor_root,
+                state,
+                run_id,
+                policy_id,
+                "shadow",
+                0,
+                receipt_id,
+                timestamp,
             )
         if status == "shadow":
             if not state.get("evaluation_receipt_id"):
                 if replay == "hold":
-                    return _hold(chronovisor_root, state, run_id, receipt_id, "replay_insufficient")
+                    return _hold(
+                        chronovisor_root,
+                        state,
+                        run_id,
+                        receipt_id,
+                        "replay_insufficient",
+                    )
                 if replay == "fail":
-                    return _rollback_locked(chronovisor_root, state, run_id, "replay_ci_failed")
+                    return _rollback_locked(
+                        chronovisor_root, state, run_id, "replay_ci_failed"
+                    )
                 return _advance(
                     chronovisor_root,
                     state,
@@ -486,22 +569,51 @@ def evaluate_and_advance(
                 observed_days=_stage_days(state, timestamp),
             )
             if shadow == "hold":
-                return _hold(chronovisor_root, state, run_id, receipt_id, "shadow_insufficient")
+                return _hold(
+                    chronovisor_root, state, run_id, receipt_id, "shadow_insufficient"
+                )
             if shadow == "fail":
-                return _rollback_locked(chronovisor_root, state, run_id, "shadow_ci_failed")
+                return _rollback_locked(
+                    chronovisor_root, state, run_id, "shadow_ci_failed"
+                )
             return _advance(
-                chronovisor_root, state, run_id, policy_id, "canary", 5, receipt_id, timestamp
+                chronovisor_root,
+                state,
+                run_id,
+                policy_id,
+                "canary",
+                5,
+                receipt_id,
+                timestamp,
             )
         if status == "canary" and percent in _STAGES:
-            canary = _metrics_gate(
-                bound["canary_metrics"],
-                observation_required=True,
-                observed_days=_stage_days(state, timestamp),
-            )
+            observation_mode = bound["observation_mode"]
+            if observation_mode == "candidate_only_legacy_incumbent":
+                results = [
+                    _gate(
+                        bound["canary_metrics"][name],
+                        observation_required=True,
+                        observed_days=_stage_days(state, timestamp),
+                    )
+                    for name in ("latency_timeout", "feature_parity")
+                ]
+                canary = (
+                    "fail" if "fail" in results else "hold" if "hold" in results else "pass"
+                )
+            else:
+                canary = _metrics_gate(
+                    bound["canary_metrics"],
+                    observation_required=True,
+                    observed_days=_stage_days(state, timestamp),
+                )
             if canary == "hold":
-                return _hold(chronovisor_root, state, run_id, receipt_id, "canary_insufficient")
+                return _hold(
+                    chronovisor_root, state, run_id, receipt_id, "canary_insufficient"
+                )
             if canary == "fail":
-                return _rollback_locked(chronovisor_root, state, run_id, "canary_ci_failed")
+                return _rollback_locked(
+                    chronovisor_root, state, run_id, "canary_ci_failed"
+                )
             if percent == 100:
                 lkg = _lkg(chronovisor_root, state)
                 staged = _write_state(
@@ -520,8 +632,12 @@ def evaluate_and_advance(
                     ),
                 )
                 try:
-                    store.write_pointer(chronovisor_root, "active", policy_id, adopted_from=lkg)
-                    store.write_pointer(chronovisor_root, "lkg", policy_id, adopted=True)
+                    store.write_pointer(
+                        chronovisor_root, "active", policy_id, adopted_from=lkg
+                    )
+                    store.write_pointer(
+                        chronovisor_root, "lkg", policy_id, adopted=True
+                    )
                     store.clear_pointer(chronovisor_root, "candidate")
                 except (OSError, store.DistillationStoreError):
                     return _result(staged, changed=True)
@@ -574,7 +690,10 @@ def select_policy_id(root: Path | None, session_id: str) -> str:
     try:
         state = _state(chronovisor_root)
         lkg = _lkg(chronovisor_root, state)
-        if state.get("learning_halted") or state.get("status") in {"rolled_back", "quarantined"}:
+        if state.get("learning_halted") or state.get("status") in {
+            "rolled_back",
+            "quarantined",
+        }:
             return lkg
         status = str(state.get("status") or "")
         percent = int(state.get("rollout_percent") or 0)
@@ -586,10 +705,15 @@ def select_policy_id(root: Path | None, session_id: str) -> str:
         if status != "canary" or percent not in _STAGES:
             return lkg
         candidate = _pointer_policy(chronovisor_root, "candidate")
-        bucket = int.from_bytes(
-            hashlib.sha256(f"recall-distill-rollout-v2\0{session_id}".encode()).digest()[:8],
-            "big",
-        ) % 10_000
+        bucket = (
+            int.from_bytes(
+                hashlib.sha256(
+                    f"recall-distill-rollout-v2\0{session_id}".encode()
+                ).digest()[:8],
+                "big",
+            )
+            % 10_000
+        )
         return candidate if bucket < percent * 100 else lkg
     except (RolloutError, store.DistillationStoreError, ValueError):
         try:
