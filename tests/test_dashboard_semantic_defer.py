@@ -352,6 +352,66 @@ def test_projection_parent_resolution_rejects_unbound_receipt_and_symlink(
     assert dashboard._projection_parent_name(raw_dir, source_parent) is None
 
 
+@pytest.mark.parametrize("host", ["codex", "claude-code", "hermes", "pi"])
+def test_projection_parent_resolution_supports_native_hosts(
+    tmp_path: Path,
+    host: str,
+) -> None:
+    from chronovisor.ops import dashboard
+
+    raw_dir = tmp_path / "raw"
+    raw_dir.mkdir()
+    session_key = "a" * 24
+    parent_bytes = b"source"
+    idempotency_key = f"{host}-{session_key}-from3-to4"
+    parent_name = f"save-{idempotency_key}.md"
+    (raw_dir / parent_name).write_bytes(parent_bytes)
+
+    assert (
+        dashboard._projection_parent_name(
+            raw_dir,
+            {
+                "raw_sha256": hashlib.sha256(parent_bytes).hexdigest(),
+                "receipt": {
+                    "host": host,
+                    "session_key": session_key,
+                    "after_line": 3,
+                    "until_line": 4,
+                    "idempotency_key": idempotency_key,
+                },
+            },
+        )
+        == parent_name
+    )
+
+
+def test_pending_raw_roots_collapse_projection_fanout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from chronovisor.ops import dashboard
+
+    projection_id = "a" * 64
+    parent_name = "save-pi-" + "b" * 24 + "-from1-to2.md"
+    child_names = {
+        f"semantic-{projection_id}-child-00000001-{'c' * 64}.md",
+        f"semantic-{projection_id}-child-00000002-{'d' * 64}.md",
+    }
+    unmapped_child = f"semantic-{'e' * 64}-child-00000001-{'f' * 64}.md"
+    monkeypatch.setattr(
+        dashboard,
+        "_projection_parent_raw_names_by_child",
+        lambda _raw_dir, names: {
+            name: {parent_name} for name in names.intersection(child_names)
+        },
+    )
+
+    assert dashboard._pending_raw_root_names(
+        tmp_path,
+        {parent_name, *child_names, unmapped_child},
+    ) == {parent_name, unmapped_child}
+
+
 def test_projection_parent_resolution_reuses_one_raw_store_snapshot(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

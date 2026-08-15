@@ -1260,6 +1260,10 @@ def _projection_parent_name(
 ) -> str | None:
     """Resolve one manifest parent without trusting its path-like fields."""
 
+    from chronovisor.ingest.raw_semantic_projection import (
+        SUPPORTED_NATIVE_TRANSCRIPT_HOSTS,
+    )
+
     receipt = source_parent.get("receipt")
     if not isinstance(receipt, dict):
         return None
@@ -1270,7 +1274,7 @@ def _projection_parent_name(
     idempotency_key = receipt.get("idempotency_key")
     expected_sha256 = source_parent.get("raw_sha256")
     if (
-        host not in {"codex", "claude-code"}
+        host not in SUPPORTED_NATIVE_TRANSCRIPT_HOSTS
         or not isinstance(session_key, str)
         or re.fullmatch(r"[0-9a-f]{24}", session_key) is None
         or isinstance(after_line, bool)
@@ -1388,6 +1392,21 @@ def _projection_parent_raw_names_by_child(
             if parent_names:
                 parents_by_child[child_name] = set(parent_names)
     return parents_by_child
+
+
+def _pending_raw_root_names(raw_dir: Path, pending_raw_names: set[str]) -> set[str]:
+    """Collapse unresolved semantic children to their verified source Raw names."""
+
+    child_names = {
+        name
+        for name in pending_raw_names
+        if SEMANTIC_PROJECTION_CHILD_RE.fullmatch(name) is not None
+    }
+    parents_by_child = _projection_parent_raw_names_by_child(raw_dir, child_names)
+    roots = pending_raw_names - child_names
+    for child_name in child_names:
+        roots.update(parents_by_child.get(child_name, {child_name}))
+    return roots
 
 
 def _projection_save_states(
@@ -4931,12 +4950,42 @@ def build_snapshot() -> dict[str, Any]:
     )
     from chronovisor.ingest.raw_replay import is_raw_retracted
 
-    pending = sum(
-        1
+    pending_raw_names = {
+        raw_path.name
         for raw_path in raw_paths
         if raw_path.name not in processed_raw_names
         and raw_path.name not in deferred_statuses
         and not is_raw_retracted(raw_path)
+    }
+    pending_projection_ids = {
+        match.group("projection")
+        for name in pending_raw_names
+        if (match := SEMANTIC_PROJECTION_CHILD_RE.fullmatch(name)) is not None
+    }
+    pending_manifest_paths = [
+        path
+        for projection_id in pending_projection_ids
+        for path in (
+            raw_dir / f"semantic-{projection_id}.manifest.json",
+            artifact_dir / f"semantic-{projection_id}.manifest.json",
+        )
+    ]
+    pending_view = _materialized_component(
+        "pending-roots",
+        fingerprint=_component_source_fingerprint(
+            "pending-roots",
+            pending_manifest_paths,
+            identities=list(pending_raw_names),
+        ),
+        builder=lambda: {
+            "count": len(_pending_raw_root_names(raw_dir, pending_raw_names)),
+        },
+    )
+    pending_value = pending_view.get("count")
+    pending = (
+        min(pending_value, len(pending_raw_names))
+        if isinstance(pending_value, int) and not isinstance(pending_value, bool)
+        else len(pending_raw_names)
     )
     semantic_deferred_names = sorted(
         raw_file
@@ -4957,7 +5006,7 @@ def build_snapshot() -> dict[str, Any]:
         "count": len(operational_deferred_names),
         "samples": operational_deferred_names[:5],
     }
-    status["raw_outstanding"] = pending + len(deferred_statuses)
+    status["raw_outstanding"] = len(pending_raw_names) + len(deferred_statuses)
 
     local_consensus = _safe_snapshot_component(
         "local_consensus",
