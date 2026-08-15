@@ -42,13 +42,15 @@ def _is_user_claude_session(path: Path) -> bool:
 
 
 def _is_user_pi_session(path: Path) -> bool:
-    """Exclude Pi subagent run transcripts from memory capture.
-
-    Main Pi sessions live directly under ``~/.pi/agent/sessions/**`` as
-    ``<timestamp>_<uuid>.jsonl``; subagent runs nest deeper as
-    ``<session>/<agent>/run-0/session.jsonl``.
-    """
-    return path.name != "session.jsonl"
+    """Exclude Pi fork and subagent transcripts from memory capture."""
+    if path.name == "session.jsonl" or "run-0" in path.parts:
+        return False
+    try:
+        with path.open(encoding="utf-8") as handle:
+            first = json.loads(handle.readline())
+    except (OSError, json.JSONDecodeError):
+        return False
+    return first.get("type") == "session" and not first.get("parentSession")
 
 
 def _pending_pi(path: Path) -> bool:

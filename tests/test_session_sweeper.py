@@ -15,7 +15,13 @@ from pathlib import Path
 from chronovisor.ops import session_sweeper
 
 
-def _write_pi_session(path: Path, *, lines: int = 3, session_id: str = "abc") -> None:
+def _write_pi_session(
+    path: Path,
+    *,
+    lines: int = 3,
+    session_id: str = "abc",
+    parent_session: str | None = None,
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as handle:
         handle.write(
@@ -26,6 +32,7 @@ def _write_pi_session(path: Path, *, lines: int = 3, session_id: str = "abc") ->
                     "id": session_id,
                     "cwd": "/tmp",
                     "timestamp": "2026-08-13T00:00:00Z",
+                    "parentSession": parent_session,
                 }
             )
             + "\n"
@@ -100,8 +107,21 @@ def test_is_user_pi_session_accepts_main_and_rejects_subagent_runs(
         / "run-0"
         / "session.jsonl"
     )
+    nested_fork = sub.with_name("2026-08-13T00-01-00-000Z_sub.jsonl")
+    top_level_fork = main.with_name("2026-08-13T00-02-00-000Z_fork.jsonl")
+    _write_pi_session(main)
+    _write_pi_session(sub, session_id="sub")
+    _write_pi_session(nested_fork, session_id="nested-fork")
+    _write_pi_session(
+        top_level_fork,
+        session_id="fork",
+        parent_session="/tmp/parent.jsonl",
+    )
+
     assert session_sweeper._is_user_pi_session(main) is True
     assert session_sweeper._is_user_pi_session(sub) is False
+    assert session_sweeper._is_user_pi_session(nested_fork) is False
+    assert session_sweeper._is_user_pi_session(top_level_fork) is False
 
 
 def test_pending_pi_reflects_save_state_cursor(tmp_path: Path, monkeypatch) -> None:
@@ -137,16 +157,25 @@ def test_discover_pending_includes_pi_and_skips_subagent_runs(
         / "run-0"
         / "session.jsonl"
     )
+    fork = root / "--Users-x--" / "2026-08-13T00-01-00-000Z_fork.jsonl"
     _write_pi_session(main, lines=3)
     _write_pi_session(sub, lines=2, session_id="sub")
+    _write_pi_session(
+        fork,
+        lines=2,
+        session_id="fork",
+        parent_session=str(main),
+    )
     _age(main)
     _age(sub)
+    _age(fork)
     _isolate_roots(tmp_path, monkeypatch, pi_root=root)
 
     pending = session_sweeper.discover_pending(idle_seconds=300)
 
     assert ("pi", main) in pending
     assert all(host != "pi" or path != sub for host, path in pending)
+    assert all(host != "pi" or path != fork for host, path in pending)
 
 
 def test_discover_pending_skips_fresh_pi_sessions(tmp_path: Path, monkeypatch) -> None:
