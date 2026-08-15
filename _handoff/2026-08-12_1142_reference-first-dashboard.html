@@ -54,13 +54,13 @@ ol.log time{color:var(--muted);flex-shrink:0;min-width:10rem}
 </head>
 <body>
 <script type="application/json" id="plan-meta">
-{"task_id":"plan_2868fe2d6f324487a9ce819da3303b20","created_at":"2026-08-12T11:42:08+09:00","状態":"running","slug":"reference-first-dashboard"}
+{"task_id":"plan_2868fe2d6f324487a9ce819da3303b20","created_at":"2026-08-12T11:42:08+09:00","状態":"done","slug":"reference-first-dashboard"}
 </script>
 
 <header>
 <h1>Plan: Reference-first Chronovisor Dashboard</h1>
 <div class="meta-bar">
-<span class="badge" data-bind="状態" data-state="running">running</span>
+<span class="badge" data-bind="状態" data-state="done">done</span>
 <span><code data-bind="task_id">plan_2868fe2d6f324487a9ce819da3303b20</code></span>
 <span data-bind="created_at">2026-08-12T11:42:08+09:00</span>
 <span>source task <code>019ff054-97a2-7302-96be-b9fb4d859667</code></span>
@@ -307,6 +307,7 @@ launchctl kickstart -k gui/$(id -u)/com.trafficsign.chronovisor-dashboard
 <li><time>2026-08-15 15:43</time><span>ユーザーの実画面で再発を確認し Plan を再オープン。live active marker は <code>think=true</code> / <code>formatless_thinking_initial</code> / context 131072 だが、<code>/api/local-consensus</code> は同じ lane を <code>think=—</code> と投影し、renderer が reasoning node / path を1本も選べないことを一次データで再現。既存 fixture / Node VM はこの backend→実DOM 結合を通していなかった。</span></li>
 <li><time>2026-08-15 15:55</time><span>Phase 14 / 15 完了。Qwen互換の transport <code>true</code> と実際に選択した reasoning budget <code>medium</code> を <code>ChatRequest.ollama_think</code> / <code>ChatRequest.think</code> に分離し、legacy marker の <code>true</code> もDashboard境界で保守的に <code>medium</code> へ投影。A–Fの6入力を backend snapshot→実 <code>index.html</code>→実renderer→headless Chromeへ通すテストを追加した。</span></li>
 <li><time>2026-08-15 16:06</time><span>実障害と同じ Aケース <code>context=131072 / think=true / Qwen primary / Generate</code> を再生し、131K→MEDIUM→Fit→Dispatch→Primary Generate が実線で連続することをDOM computed style・SVG path length・1586×992 screenshotで確認。6 laneの到達rail / branchも全検査し、page error 0。対象suiteは <code>254 passed</code>。隔離full suiteは <code>4997 passed / 17 failed / 1 skipped</code> で、17件は未変更HEADでも再現する既存baseline / repair prompt / entrypoint driftと確認した。</span></li>
+<li><time>2026-08-15 16:08</time><span>Phase 16 完了。意図した6ファイルだけを <code>fab0e73</code>（<code>fix(dashboard): preserve qwen reasoning trace path</code>）へcommit。push / runtime restartは今回明示されていないため実施せず、Planをlocal完了の <code>done</code> に閉じた。</span></li>
 </ol>
 </section>
 
@@ -316,7 +317,7 @@ launchctl kickstart -k gui/$(id -u)/com.trafficsign.chronovisor-dashboard
 <li><input type="checkbox" checked><span><strong>Phase 13 — live不整合を固定。</strong> active marker、API payload、実DOMを同一 request id で照合し、contextは選択済みなのに reasoningだけ欠ける入力を保存可能な回帰条件として確定する。</span></li>
 <li><input type="checkbox" checked><span><strong>Phase 14 — 6 lane実ページ harness。</strong> INGEST / RECALL / AUDIT / IMPROVE / REPAIR / TYPED GRAPH の各入力を実 <code>index.html</code> と実rendererへ流し、選択context・reasoning・lane・到達済みpathの連続性を headless Chrome のDOMで検査する。</span></li>
 <li><input type="checkbox" checked><span><strong>Phase 15 — root fix。</strong> formatless thinking の transport bool とreasoning budgetの意味を共有境界で正規化し、API / replay / live markerの証拠を失わず4候補の正しいnode / pathへ接続する。</span></li>
-<li><input type="checkbox"><span><strong>Phase 16 — acceptance。</strong> backend・renderer・6 lane browser harness・既存Dashboard suiteを通し、隔離full suiteの失敗は未変更HEADとの差分を判定する。実ローカルページのDOM / screenshot / consoleを確認して意図した差分だけcommitする。</span></li>
+<li><input type="checkbox" checked><span><strong>Phase 16 — acceptance。</strong> backend・renderer・6 lane browser harness・既存Dashboard suiteを通し、隔離full suiteの失敗は未変更HEADとの差分を判定する。実ローカルページのDOM / screenshot / consoleを確認して意図した差分だけcommitする。</span></li>
 </ol>
 </section>
 
