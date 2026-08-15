@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>Plan</title>
+<style>
+:root{
+  --fg:#1a1a1a; --muted:#666; --bg:#fafaf7; --accent:#2c5aa0;
+  --done:#888; --warn:#c0392b; --ok:#2e7d32; --rule:#e0e0d8;
+  --code-bg:#eee;
+}
+*{box-sizing:border-box}
+body{
+  font-family:-apple-system,'Hiragino Kaku Gothic ProN','Yu Gothic',sans-serif;
+  color:var(--fg); background:var(--bg);
+  max-width:880px; margin:2rem auto; padding:0 1.5rem;
+  line-height:1.7; font-size:15px;
+}
+header{
+  border-bottom:2px solid var(--rule); padding-bottom:1rem; margin-bottom:1.5rem;
+  position:sticky; top:0; background:var(--bg); z-index:10;
+}
+h1{font-size:1.6rem;margin:0 0 0.5rem 0}
+h2{font-size:1.15rem;margin:1.75rem 0 0.5rem 0;padding-bottom:0.25rem;border-bottom:1px solid var(--rule)}
+.meta-bar{display:flex;gap:1rem;font-size:0.85rem;color:var(--muted);flex-wrap:wrap;align-items:center}
+.meta-bar code{background:transparent;color:var(--muted)}
+.badge{
+  display:inline-block;padding:0.15rem 0.7rem;border-radius:1rem;
+  background:var(--accent);color:#fff;font-weight:600;font-size:0.8rem;
+  letter-spacing:0.02em;
+}
+.badge[data-state="ready"]{background:#16a085}
+.badge[data-state="running"]{background:#e67e22}
+.badge[data-state="done"]{background:var(--ok)}
+.badge[data-state="blocked"]{background:var(--warn)}
+section{margin:0 0 0.5rem 0}
+ul,ol{padding-left:1.5rem;margin:0.5rem 0}
+li{margin:0.25rem 0}
+ol.checklist{list-style:none;padding-left:0}
+ol.checklist li{display:flex;align-items:flex-start;gap:0.6rem;padding:0.15rem 0}
+ol.checklist input[type=checkbox]{margin-top:0.4rem;flex-shrink:0}
+ol.checklist input[type=checkbox]:checked + span{color:var(--done);text-decoration:line-through}
+section.rules{background:#f3f1eb;padding:0.5rem 1rem;border-radius:6px;font-size:0.9rem;border-left:3px solid var(--accent)}
+section.rules h2{border:none;margin-top:0.5rem}
+section.blockers ul{color:var(--warn)}
+ol.log{list-style:none;padding-left:0;font-family:'SF Mono',Menlo,monospace;font-size:0.85rem}
+ol.log li{padding:0.3rem 0;border-bottom:1px dashed var(--rule);display:flex;gap:0.75rem}
+ol.log time{color:var(--muted);flex-shrink:0;min-width:9.5rem}
+code{background:var(--code-bg);padding:0.1rem 0.35rem;border-radius:3px;font-size:0.9em;font-family:'SF Mono',Menlo,monospace}
+@media print{
+  body{font-size:11pt;max-width:none;margin:0;padding:1rem}
+  header{position:static}
+}
+</style>
+</head>
+<body>
+<script type="application/json" id="plan-meta">
+{"task_id":"plan_0953b1163cdb4d11902bed74d2dfae12","created_at":"2026-08-15T16:37:22+09:00","状態":"done","slug":"decision-trace-connected-paths"}
+</script>
+
+<header>
+<h1>Plan: <span id="plan-title">Decision Trace の経路切断と Ollama 誤表示を解消する</span></h1>
+<div class="meta-bar">
+<span class="badge" data-bind="状態" data-state="done">done</span>
+<span><code data-bind="task_id">plan_0953b1163cdb4d11902bed74d2dfae12</code></span>
+<span data-bind="created_at">2026-08-15T16:37:22+09:00</span>
+</div>
+</header>
+
+<section data-section="目的">
+<h2>目的</h2>
+<ul><li>Trigger 時点でも選択予定の context window と reasoning を表示して経路を連続させ、Ollama の live 状態を top card に同期する。6入力を実ブラウザで再現する回帰基盤を残し、配備後の live UI まで確認する。</li></ul>
+</section>
+
+<section data-section="やってはいけないこと">
+<h2>やってはいけないこと（必須）</h2>
+<ul>
+<li>無関係な dirty worktree を変更・commit しない。</li>
+<li>実行中の one-shot worker を途中で強制終了しない。</li>
+<li>テスト合格前に完了扱いしない。</li>
+</ul>
+</section>
+
+<section data-section="前提・仮定">
+<h2>前提・仮定</h2>
+<ul>
+<li>対象 branch は <code>main</code>、GitHub の push 済み commit を配備境界とする。</li>
+<li>Dashboard の横方向全体は scroll container で到達可能であることを実 Chrome で確認する。</li>
+</ul>
+</section>
+
+<section data-section="実行手順">
+<h2>実行手順</h2>
+<ol class="checklist">
+<li><input type="checkbox" checked><span>Trigger marker の生成順序と Ollama card の live 更新経路を特定し、共有経路で根本修正する。</span></li>
+<li><input type="checkbox" checked><span>自動整形で広がった無関係な差分を除去し、必要最小限の差分にする。</span></li>
+<li><input type="checkbox" checked><span>6入力の実 Chrome 再現テストと関連回帰テストを完走する。</span></li>
+<li><input type="checkbox" checked><span>変更を commit し、先行 commit を含む <code>main</code> を push する。</span></li>
+<li><input type="checkbox" checked><span>関連サービスを安全に再起動し、runtime commit・health・live UI を確認する。</span></li>
+</ol>
+</section>
+
+<section class="rules" data-section="実行中更新ルール">
+<h2>実行中更新ルール</h2>
+<ul>
+<li>実行手順のチェックは、各手順の完了直後に更新する（まとめて更新しない）。</li>
+<li>チェックを更新したら、同時に <code>実行ログ</code> へ時刻付きで追記する。</li>
+<li>中断時は <code>状態</code>（<code>plan-meta</code> の JSON および <code>.badge</code> の <code>data-state</code>）を <code>blocked</code> にし、理由を <code>ブロッカー</code> に記入する。</li>
+</ul>
+</section>
+
+<section data-section="完了条件">
+<h2>完了条件</h2>
+<ul>
+<li>Trigger で <code>Context --</code> / <code>selected -</code> が発生せず、context・reasoning・dispatch の選択線が連続する。</li>
+<li>Ollama が利用可能な場合、top card が stale snapshot に戻らず <code>online</code> を維持する。</li>
+<li>6ケースが幅 1050px の実 Chrome で右端まで到達可能かつ期待経路を表示する。</li>
+<li>push 済み commit が runtime に反映され、health とブラウザ console に新規エラーがない。</li>
+</ul>
+</section>
+
+<section data-section="検証手順">
+<h2>検証手順</h2>
+<ul>
+<li><code>uv run pytest -q tests/test_local_structured.py tests/test_dashboard.py tests/test_dashboard_reference_fixture.py</code></li>
+<li><code>uv run ruff check</code>（変更対象）と <code>git diff --check</code></li>
+<li>runtime archive / process / health endpoint / live DOM / browser console の照合</li>
+</ul>
+</section>
+
+<section class="blockers" data-section="ブロッカー">
+<h2>ブロッカー（発生時のみ）</h2>
+<ul><li>なし</li></ul>
+</section>
+
+<section data-section="受け渡しメモ">
+<h2>受け渡しメモ（次担当へ）</h2>
+<ul><li>完了時に commit SHA、テスト結果、再起動対象、live UI の確認結果を報告する。</li></ul>
+</section>
+
+<section data-section="実行ログ">
+<h2>実行ログ</h2>
+<ol class="log">
+<li><time>2026-08-15 16:37</time><span>Trigger 前に resource plan を確定して marker に planned context / reasoning を載せる修正と、live model status を top card へ同期する修正を実装。各失敗再現テストが修正後に合格。</span></li>
+<li><time>2026-08-15 16:42</time><span>自動整形による無関係な差分を除去。差分を実装2ファイル・回帰テスト3ファイルの必要変更へ限定し、ruff / JavaScript syntax / git diff check が合格。</span></li>
+<li><time>2026-08-15 16:47</time><span>対象3スイートを完走し 254 passed。6ケース実Chrome、Trigger planned selection、Ollama live/stale card、Save History の hermetic offline 条件を確認。</span></li>
+<li><time>2026-08-15 16:55</time><span>live初回表示でOllama cardがofflineのまま残る追加再現を確認。fast snapshotに軽量なOllama runtime truthを含める1箇所の修正を追加し、再度254 passed。</span></li>
+<li><time>2026-08-15 17:09</time><span>修正 commit <code>f3ffd541</code> と追加修正 <code>824ff391</code> を先行 commit ごと <code>origin/main</code> へ push。</span></li>
+<li><time>2026-08-15 17:09</time><span>Dashboard / LAN Dashboard / Ingest Drain / Semantic を再起動。Dashboard health は <code>ok</code>・<code>drift=false</code>、live API は Trigger から 65K / medium を保持し、幅1050pxのChrome静止画で連続線とOllama onlineを確認。ブラウザconsoleに新規errorなし。</span></li>
+</ol>
+</section>
+
+</body>
+</html>
