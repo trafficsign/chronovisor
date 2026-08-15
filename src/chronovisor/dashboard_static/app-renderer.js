@@ -11,7 +11,7 @@ function shortName(value) {
 
 function decisionTraceModelLabel(value) {
   const base = fmt(value, "not configured").split("/").at(-1).split(":")[0];
-  const family = base.split(/[-_]/)[0].replace(/\d+$/u, "");
+  const family = base.split(/[-_]/)[0].replace(/(?<![.])\d+$/u, "");
   return family ? `${family[0].toUpperCase()}${family.slice(1)}` : "Not configured";
 }
 
