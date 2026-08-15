@@ -2847,6 +2847,8 @@ def _decision_trace_think_label(row: Mapping[str, Any] | None) -> str:
     mode = row.get("think")
     if mode is False:
         return "off"
+    if mode is True:
+        return "medium"
     if not isinstance(mode, str) or not mode:
         return "—"
     return mode

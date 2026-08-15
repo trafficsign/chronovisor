@@ -579,16 +579,17 @@ def test_first_pass_valid_uses_fixed_medium_thinking_request() -> None:
 
 
 @pytest.mark.parametrize(
-    ("model", "initial_think", "initial_schema"),
+    ("model", "initial_think", "initial_ollama_think", "initial_schema"),
     [
-        (QWEN_STRUCTURED_MODEL, True, None),
-        (MUSE_STRUCTURED_MODEL, "medium", None),
-        ("gemma4:26b", "medium", SCHEMA),
+        (QWEN_STRUCTURED_MODEL, "medium", True, None),
+        (MUSE_STRUCTURED_MODEL, "medium", "medium", None),
+        ("gemma4:26b", "medium", "medium", SCHEMA),
     ],
 )
 def test_all_model_repairs_use_strict_schema_without_thinking(
     model: str,
-    initial_think: bool | str,
+    initial_think: str,
+    initial_ollama_think: bool | str,
     initial_schema: dict[str, Any] | None,
 ) -> None:
     transport = QueueTransport(
@@ -607,7 +608,7 @@ def test_all_model_repairs_use_strict_schema_without_thinking(
         False,
     ]
     assert [request.ollama_think for request in transport.requests] == [
-        initial_think,
+        initial_ollama_think,
         False,
     ]
     assert result.think is False
@@ -626,7 +627,8 @@ def test_qwen_structured_compatibility_keeps_client_validation_fail_closed() -> 
     assert result.ok is False
     assert result.failure_class == "repair_exhausted"
     assert transport.requests[0].schema is None
-    assert transport.requests[0].think is True
+    assert transport.requests[0].think == "medium"
+    assert transport.requests[0].ollama_think is True
 
 
 def test_schema_valid_semantic_error_repairs_in_the_same_session() -> None:

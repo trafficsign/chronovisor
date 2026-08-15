@@ -2490,7 +2490,8 @@ class LocalStructuredSession:
         )
         qwen_compatibility = self.model == _QWEN_STRUCTURED_COMPAT_MODEL
         formatless_thinking = self.model in _FORMATLESS_THINKING_MODELS
-        effective_think: bool | str = True if qwen_compatibility else selection[0]
+        selected_think = selection[0]
+        transport_think: bool | str = True if qwen_compatibility else selected_think
         effective_think_reason = (
             "formatless_thinking_initial"
             if formatless_thinking
@@ -2500,7 +2501,7 @@ class LocalStructuredSession:
             activity_update(
                 "load",
                 0,
-                effective_think,
+                selected_think,
                 effective_think_reason,
                 effective_num_ctx,
                 observed_num_ctx,
@@ -2508,7 +2509,7 @@ class LocalStructuredSession:
             activity_update(
                 "context",
                 0,
-                effective_think,
+                selected_think,
                 effective_think_reason,
                 effective_num_ctx,
                 observed_num_ctx,
@@ -2524,9 +2525,9 @@ class LocalStructuredSession:
             max_output_chars=self.max_output_chars,
             temperature=STRUCTURED_GENERATION_TEMPERATURE,
             seed=STRUCTURED_GENERATION_SEED,
-            think=effective_think,
+            think=selected_think,
             ollama_think=(
-                effective_think
+                transport_think
                 if formatless_thinking
                 or authority_profile is None
                 or authority_profile["renderer"] == "native_levels"

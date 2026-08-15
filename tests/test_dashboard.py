@@ -1023,6 +1023,13 @@ def test_processing_role_projection_covers_dashboard_lanes() -> None:
     assert dashboard._processing_model_step("recall", "chat") == "primary"
 
 
+def test_decision_trace_keeps_transport_boolean_on_the_reasoning_path() -> None:
+    assert dashboard._decision_trace_think_label({"think": False}) == "off"
+    assert dashboard._decision_trace_think_label({"think": True}) == "medium"
+    assert dashboard._decision_trace_think_label({"think": "high"}) == "high"
+    assert dashboard._decision_trace_think_label({}) == "—"
+
+
 def test_decision_trace_projects_live_phase_and_completed_vote(monkeypatch) -> None:
     monkeypatch.setattr(
         dashboard,

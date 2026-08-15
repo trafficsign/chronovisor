@@ -54,13 +54,13 @@ ol.log time{color:var(--muted);flex-shrink:0;min-width:10rem}
 </head>
 <body>
 <script type="application/json" id="plan-meta">
-{"task_id":"plan_2868fe2d6f324487a9ce819da3303b20","created_at":"2026-08-12T11:42:08+09:00","状態":"done","slug":"reference-first-dashboard"}
+{"task_id":"plan_2868fe2d6f324487a9ce819da3303b20","created_at":"2026-08-12T11:42:08+09:00","状態":"running","slug":"reference-first-dashboard"}
 </script>
 
 <header>
 <h1>Plan: Reference-first Chronovisor Dashboard</h1>
 <div class="meta-bar">
-<span class="badge" data-bind="状態" data-state="done">done</span>
+<span class="badge" data-bind="状態" data-state="running">running</span>
 <span><code data-bind="task_id">plan_2868fe2d6f324487a9ce819da3303b20</code></span>
 <span data-bind="created_at">2026-08-12T11:42:08+09:00</span>
 <span>source task <code>019ff054-97a2-7302-96be-b9fb4d859667</code></span>
@@ -304,6 +304,19 @@ launchctl kickstart -k gui/$(id -u)/com.trafficsign.chronovisor-dashboard
 <li><time>2026-08-12 17:58</time><span>停止前までの追加 visual feedback を全反映。未到達 path / guide の色・opacity・dash を単一値へ統一し、Context は直交busと退避labelへ簡素化、選択値だけorange、Fit Gateのstatus / PASSを分離、Execution Plan内枠を削除。Artifact / Decisionは他の完了nodeと同じring / core / glow、現処理nodeとincoming railだけをorange pulseとし、zero-height SVG pathを消していたfilterをCSS drop-shadowへ置換。Eventsは通常flowでsummary下へ展開し、1586 / 680 / 375pxでfeedがbar / panel内、body overflow 0。隔離rootで Dashboard <code>108 passed</code>、Node syntax、Ruff、<code>git diff --check</code>合格。最新 live / active / repair / agreed / events PNGを1586×992で保存。</span></li>
 <li><time>2026-08-12 18:10</time><span>Phase 11 完了。ユーザーのpush許可に基づき <code>460fe7f00bfbde531711a330ccb150f4886f9237</code> を <code>origin/main</code> へpushし、Dashboardだけをrestart。実行中archive <code>PAOY_abFMQi7vaoQdcmpt</code> の <code>direct_url.json</code> commitが同SHA、HTTP <code>/</code> / <code>/api/activity</code> / <code>/api/local-consensus</code> / <code>/api/health</code> が200、healthは <code>drift=false</code> / expected commit一致。GitHub Actions quality <code>31580762157</code>、Python 3.14 <code>31580762233</code>、Security <code>31580762246</code> は全てsuccess。</span></li>
 <li><time>2026-08-12 18:10</time><span>Phase 12 完了。本番を1586×992 / DPR 1で実測し、active Challenger Generateとincoming railがorange実線＋arrow、future railだけが点線、全pending / skipped pathの computed styleが <code>rgb(125,137,146) / opacity .66 / dash 4 5</code> の1種類、選択65Kがorange、Context guide 4、上段3 milestone、Artifact / Decision各1、Plan内枠0、body / vertical overflow 0を確認。Events展開はsummary下かつbar / panel内、680 / 375pxでもbody overflow 0。page Runtime exception 0（in-app browser注入scriptのCSP entryはpage code外）を確認し、本番PNGを <code>_handoff/evidence/2026-08-12-reference-dashboard-final-production.png</code> に保存。Planを <code>done</code> に閉じた。</span></li>
+<li><time>2026-08-15 15:43</time><span>ユーザーの実画面で再発を確認し Plan を再オープン。live active marker は <code>think=true</code> / <code>formatless_thinking_initial</code> / context 131072 だが、<code>/api/local-consensus</code> は同じ lane を <code>think=—</code> と投影し、renderer が reasoning node / path を1本も選べないことを一次データで再現。既存 fixture / Node VM はこの backend→実DOM 結合を通していなかった。</span></li>
+<li><time>2026-08-15 15:55</time><span>Phase 14 / 15 完了。Qwen互換の transport <code>true</code> と実際に選択した reasoning budget <code>medium</code> を <code>ChatRequest.ollama_think</code> / <code>ChatRequest.think</code> に分離し、legacy marker の <code>true</code> もDashboard境界で保守的に <code>medium</code> へ投影。A–Fの6入力を backend snapshot→実 <code>index.html</code>→実renderer→headless Chromeへ通すテストを追加した。</span></li>
+<li><time>2026-08-15 16:06</time><span>実障害と同じ Aケース <code>context=131072 / think=true / Qwen primary / Generate</code> を再生し、131K→MEDIUM→Fit→Dispatch→Primary Generate が実線で連続することをDOM computed style・SVG path length・1586×992 screenshotで確認。6 laneの到達rail / branchも全検査し、page error 0。対象suiteは <code>254 passed</code>。隔離full suiteは <code>4997 passed / 17 failed / 1 skipped</code> で、17件は未変更HEADでも再現する既存baseline / repair prompt / entrypoint driftと確認した。</span></li>
+</ol>
+</section>
+
+<section data-section="2026-08-15再発修正">
+<h2>2026-08-15 再発修正</h2>
+<ol class="checklist">
+<li><input type="checkbox" checked><span><strong>Phase 13 — live不整合を固定。</strong> active marker、API payload、実DOMを同一 request id で照合し、contextは選択済みなのに reasoningだけ欠ける入力を保存可能な回帰条件として確定する。</span></li>
+<li><input type="checkbox" checked><span><strong>Phase 14 — 6 lane実ページ harness。</strong> INGEST / RECALL / AUDIT / IMPROVE / REPAIR / TYPED GRAPH の各入力を実 <code>index.html</code> と実rendererへ流し、選択context・reasoning・lane・到達済みpathの連続性を headless Chrome のDOMで検査する。</span></li>
+<li><input type="checkbox" checked><span><strong>Phase 15 — root fix。</strong> formatless thinking の transport bool とreasoning budgetの意味を共有境界で正規化し、API / replay / live markerの証拠を失わず4候補の正しいnode / pathへ接続する。</span></li>
+<li><input type="checkbox"><span><strong>Phase 16 — acceptance。</strong> backend・renderer・6 lane browser harness・既存Dashboard suiteを通し、隔離full suiteの失敗は未変更HEADとの差分を判定する。実ローカルページのDOM / screenshot / consoleを確認して意図した差分だけcommitする。</span></li>
 </ol>
 </section>
 

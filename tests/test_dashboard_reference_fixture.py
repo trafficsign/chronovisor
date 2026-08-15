@@ -2,10 +2,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 import struct
 import subprocess
+import threading
 from html.parser import HTMLParser
+from http.server import ThreadingHTTPServer
 from pathlib import Path
+
+from chronovisor.ops import dashboard
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = ROOT / "tests/fixtures/dashboard_decision_trace_states.json"
@@ -898,3 +903,362 @@ process.stdout.write(JSON.stringify(Object.fromEntries(
         "agree": "error",
         "quorum": "error",
     }
+
+
+def test_six_processing_inputs_keep_real_dashboard_paths_connected(
+    monkeypatch, tmp_path: Path
+) -> None:
+    cases = [
+        {**case, "lane_context_tokens": [131_072, None, None]}
+        if case["id"] == "A"
+        else case
+        for case in json.loads(FIXTURE.read_text(encoding="utf-8"))["cases"][:6]
+    ]
+    roles = {
+        "ingest": "ingest_reconciliation",
+        "recall": "recall_auto_apply",
+        "audit": "content_correction_classification",
+        "improve": "model_eval",
+        "repair": "local_repair",
+        "typed_graph": "relation_extract",
+    }
+    models = {
+        "primary": "qwen3.8:27b-axq4",
+        "challenger": "challenger:model",
+        "tie_break": "tie:model",
+    }
+    monkeypatch.setattr(dashboard, "_decision_trace_models", lambda: dict(models))
+
+    payload = []
+    for case_index, case in enumerate(cases):
+        request = str(case_index + 1) * 64
+        role = roles[case["workflow"]]
+        activities = []
+        history = []
+        active_phases = {"A": "generate", "B": "validate", "D": "vote"}
+        for lane_index, lane in enumerate(dashboard._DECISION_TRACE_ROLES):
+            state = case["lane_states"][lane_index]
+            tokens = case["lane_context_tokens"][lane_index]
+            think = case["lane_think"][lane_index]
+            observed = {
+                "request_sha256": request,
+                "role": f"{role}:{lane}",
+                "model": models[lane],
+                "think": True if case["id"] == "A" and lane == "primary" else think,
+                "required_context_tokens": tokens,
+                "requested_context_tokens": tokens,
+                "context_tokens": tokens,
+            }
+            timestamp = f"2026-08-15T00:00:0{lane_index + 1}Z"
+            if state == "active":
+                activities.append(
+                    {
+                        **observed,
+                        "phase": active_phases[case["id"]],
+                        "attempt": 0,
+                        "elapsed_seconds": case["elapsed_seconds"],
+                        "started_at": timestamp,
+                        "updated_at": timestamp,
+                    }
+                )
+            elif state in {"done", "error"}:
+                history.append(
+                    {
+                        **observed,
+                        "kind": "session",
+                        "timestamp": timestamp,
+                        "ok": state == "done",
+                        "first_pass_valid": state == "done",
+                        "repair_turns": 0,
+                    }
+                )
+
+        decision = None
+        if case["state"] in {"agreed", "quarantined"}:
+            tie_used = case["branch"] in {"tie-break-agreement", "no-safe-quorum"}
+            decision = {
+                "kind": "decision",
+                "timestamp": "2026-08-15T00:00:09Z",
+                "request_sha256": request,
+                "role": role,
+                "status": case["state"],
+                "pair_agreement": case["branch"] == "pair-agreement",
+                "tie_break_used": tie_used,
+                "vote_count": 3 if tie_used else 2,
+                "valid_votes": 3 if tie_used else 2,
+                "vote_roles": list(models) if tie_used else ["primary", "challenger"],
+                "models": list(models.values()),
+            }
+            if case["state"] == "quarantined":
+                decision["quarantine_reason"] = (
+                    "local_models_did_not_reach_two_vote_quorum"
+                )
+            history.append(decision)
+
+        trace = dashboard._decision_trace_snapshot(
+            activities,
+            history,
+            decision,
+            preferred_request_sha256=request,
+        )
+        assert trace["state"] == case["state"]
+        assert [lane["state"] for lane in trace["lanes"]] == case["lane_states"]
+        assert [
+            None if lane["think"] == "—" else lane["think"]
+            for lane in trace["lanes"]
+        ] == case["lane_think"]
+        assert [lane["context_tokens"] for lane in trace["lanes"]] == case[
+            "lane_context_tokens"
+        ]
+        payload.append({"case": case, "trace": trace})
+
+    harness = """
+const fixtures = __FIXTURES__;
+const workflowKeys = fixtures.map(({ case: fixture }) => fixture.workflow);
+function browserFailure(detail) {
+  fetch("/fixture-error", {
+    method: "POST",
+    headers: { "Content-Type": "text/plain" },
+    body: String(detail).slice(0, 2000),
+  }).catch(() => {});
+}
+addEventListener("error", (event) => browserFailure(event.error?.stack || event.message));
+addEventListener("unhandledrejection", (event) => browserFailure(event.reason?.stack || event.reason));
+addEventListener("DOMContentLoaded", () => {
+  const api = window.__chronovisorDashboardTest;
+  const renderFixture = (fixture, trace, revision) => {
+    api.renderProcessingActivity({
+      generated_at: `2026-08-15T00:01:${revision}Z`,
+      revision,
+      active_count: trace.active ? 1 : 0,
+      lanes: workflowKeys.map((key) => ({
+        key,
+        label: key,
+        state: key === fixture.workflow && trace.active ? "active" : "idle",
+        current_step: key === fixture.workflow ? fixture.processing_stage : null,
+        steps: [],
+      })),
+    });
+    api.renderDecisionTraceFrame(trace);
+  };
+  const results = fixtures.map(({ case: fixture, trace }, index) => {
+    renderFixture(fixture, trace, `0${index}`);
+    const pathState = (node) => {
+      const style = getComputedStyle(node);
+      return {
+        state: node.dataset.state,
+        dash: style.strokeDasharray,
+        length: node.getTotalLength(),
+      };
+    };
+    return {
+      id: fixture.id,
+      expanded: [...document.querySelectorAll('[data-processing-lane][aria-expanded="true"]')]
+        .map((node) => node.dataset.processingLane),
+      context: document.querySelector("[data-context-option].selected")?.dataset.contextTokens,
+      reasoning: document.querySelector("[data-reasoning-key].selected")?.dataset.reasoningKey,
+      paths: Object.fromEntries([...document.querySelectorAll("[data-path-key]")]
+        .map((node) => [node.dataset.pathKey, pathState(node)])),
+      rails: Object.fromEntries([...document.querySelectorAll("[data-decision-lane]")]
+        .map((lane) => [lane.dataset.decisionLane, [...lane.querySelectorAll("[data-lane-path]")]
+          .map((node) => ({ key: node.dataset.lanePath, ...pathState(node) }))])),
+    };
+  });
+  renderFixture(fixtures[0].case, fixtures[0].trace, "59");
+  fetch("/fixture-result", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(results),
+  }).catch(browserFailure);
+});
+""".replace("__FIXTURES__", json.dumps(payload, ensure_ascii=False))
+    page = (dashboard.STATIC_DIR / "index.html").read_text(encoding="utf-8").replace(
+        '<script src="/static/app-client.js"></script>',
+        '<script src="/fixture-harness.js"></script>',
+    )
+    page_path = tmp_path / "index.html"
+    harness_path = tmp_path / "fixture-harness.js"
+    screenshot_path = tmp_path / "six-case-dashboard.png"
+    page_path.write_text(page, encoding="utf-8")
+    harness_path.write_text(harness, encoding="utf-8")
+    result_ready = threading.Event()
+    browser_results = []
+    browser_errors = []
+
+    class Handler(dashboard.DashboardHandler):
+        def do_GET(self) -> None:
+            if self.path in {"/", "/fixture-harness.js"}:
+                if self._browser_boundary_allows():
+                    dashboard._file_response(
+                        self,
+                        page_path if self.path == "/" else harness_path,
+                    )
+                return
+            super().do_GET()
+
+        def do_POST(self) -> None:
+            if self.path not in {"/fixture-error", "/fixture-result"}:
+                self.send_error(404)
+                return
+            if not self._browser_boundary_allows():
+                return
+            length = int(self.headers.get("Content-Length", "0"))
+            if not 0 < length <= 65_536:
+                self.send_error(400)
+                return
+            body = self.rfile.read(length)
+            if self.path == "/fixture-error":
+                browser_errors.append(body.decode(errors="replace"))
+            else:
+                browser_results.extend(json.loads(body))
+                result_ready.set()
+            self.send_response(204)
+            self.end_headers()
+
+        def log_message(self, _format: str, *_args: object) -> None:
+            return
+
+    chrome = next(
+        (
+            candidate
+            for candidate in (
+                shutil.which("google-chrome"),
+                shutil.which("chromium"),
+                shutil.which("chromium-browser"),
+                "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            )
+            if candidate and Path(candidate).is_file()
+        ),
+        None,
+    )
+    assert chrome is not None, "headless Chrome is required for Dashboard DOM tests"
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+    process = None
+    browser_exit = None
+    received = False
+    try:
+        process = subprocess.Popen(
+            [
+                chrome,
+                "--headless=new",
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-gpu",
+                "--disable-background-networking",
+                "--disable-component-update",
+                "--no-first-run",
+                "--force-prefers-reduced-motion=reduce",
+                "--window-size=1586,992",
+                f"--screenshot={screenshot_path}",
+                f"--user-data-dir={tmp_path / 'chrome-profile'}",
+                f"http://127.0.0.1:{server.server_port}/",
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        received = result_ready.wait(60)
+        if received and process.poll() is None:
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
+        browser_exit = process.poll()
+    finally:
+        if process is not None:
+            process.terminate()
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=2)
+        server.shutdown()
+        server.server_close()
+        server_thread.join(timeout=2)
+
+    stderr = process.stderr.read()[-4000:] if process and process.stderr else ""
+    diagnostics = json.dumps(
+        {
+            "browser_exit": browser_exit,
+            "browser_stderr": stderr,
+            "browser_errors": browser_errors,
+            "browser_results": browser_results,
+        },
+        indent=2,
+    )
+    assert received, diagnostics
+    assert not browser_errors, diagnostics
+    assert len(browser_results) == 6, diagnostics
+    assert screenshot_path.is_file() and screenshot_path.stat().st_size > 0
+
+    branches = {
+        "A": [],
+        "B": ["primary-challenger"],
+        "C": [
+            "primary-challenger",
+            "challenger-agree",
+            "pair-artifact-join",
+            "artifact-seal",
+            "seal-decision",
+        ],
+        "D": ["primary-challenger", "challenger-agree", "pair-tie_break"],
+        "E": [
+            "primary-challenger",
+            "challenger-agree",
+            "pair-tie_break",
+            "tie_break-quorum",
+            "quorum-artifact-join",
+            "artifact-seal",
+            "seal-decision",
+        ],
+        "F": [
+            "primary-challenger",
+            "challenger-agree",
+            "pair-tie_break",
+            "tie_break-quorum",
+            "quorum-hold",
+        ],
+    }
+    active_rail_counts = {"A": 3, "B": 4, "D": 5}
+    by_id = {result["id"]: result for result in browser_results}
+    for case in cases:
+        result = by_id[case["id"]]
+        assert result["expanded"] == [case["workflow"]]
+        selected_index = (
+            case["lane_states"].index("active")
+            if "active" in case["lane_states"]
+            else max(
+                index
+                for index, state in enumerate(case["lane_states"])
+                if state == "done"
+            )
+        )
+        assert result["context"] == str(case["lane_context_tokens"][selected_index])
+        assert result["reasoning"] == case["lane_think"][selected_index]
+
+        reached_paths = [
+            "execution-plan-context",
+            "plan-context",
+            f"reasoning-{case['lane_think'][selected_index]}",
+            "plan-fit",
+            "plan-dispatch",
+            *branches[case["id"]],
+        ]
+        for path_key in reached_paths:
+            path = result["paths"][path_key]
+            assert path["state"] in {"active", "done", "error"}
+            assert path["dash"] in {"none", ""}
+            assert path["length"] > 0
+
+        for lane_index, lane in enumerate(dashboard._DECISION_TRACE_ROLES):
+            state = case["lane_states"][lane_index]
+            if state not in {"active", "done"}:
+                continue
+            count = active_rail_counts.get(case["id"], 5) if state == "active" else 5
+            for rail in result["rails"][lane][:count]:
+                assert rail["state"] in {"active", "done", "error"}
+                assert rail["dash"] in {"none", ""}
+                assert rail["length"] > 0
