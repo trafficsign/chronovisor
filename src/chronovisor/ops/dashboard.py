@@ -4854,6 +4854,7 @@ def build_fast_snapshot() -> dict[str, Any]:
     status = runtime_status.read_status()
     if not isinstance(status, dict):
         status = {}
+    ollama = _ollama_snapshot()
     runtime_events = runtime_status.read_events(limit=runtime_status.MAX_EVENTS)
     failures = _runtime_failure_snapshot(runtime_events)
     return {
@@ -4863,7 +4864,7 @@ def build_fast_snapshot() -> dict[str, Any]:
         **failures,
         "local_consensus": status.get("local_consensus") or {},
         "frontier_repair": status.get("frontier_repair") or {},
-        "ollama": {},
+        "ollama": ollama,
         "model_status": {},
         "self_heal": {},
         "recall": {},

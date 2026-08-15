@@ -5592,6 +5592,11 @@ def test_fast_snapshot_reads_status_without_building_archive_components(
     )
     monkeypatch.setattr(
         dashboard,
+        "_ollama_snapshot",
+        lambda: {"available": True, "models": [{"name": "qwen:test"}]},
+    )
+    monkeypatch.setattr(
+        dashboard,
         "_save_history_snapshot",
         lambda *args, **kwargs: (_ for _ in ()).throw(
             AssertionError("fast snapshot must not scan save history")
@@ -5610,6 +5615,10 @@ def test_fast_snapshot_reads_status_without_building_archive_components(
     assert snapshot["status"]["pending"] == 3
     assert snapshot["events"] == [{"kind": "event"}]
     assert snapshot["metrics"] == [{"kind": "metric"}]
+    assert snapshot["ollama"] == {
+        "available": True,
+        "models": [{"name": "qwen:test"}],
+    }
     assert snapshot["save_history"] == {}
     assert snapshot["librarian"] == {}
     assert snapshot["_dashboard"] == {"detail_state": "loading"}
