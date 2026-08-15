@@ -75,8 +75,25 @@ def _pending_claude(path: Path) -> bool:
     return bool(claude_code_record.extract_transcript_slice(path, after_line=after).records)
 
 
+def _pending_hermes(state_db: Path, *, idle_seconds: int = 300) -> bool:
+    from chronovisor.raw import hermes_record
+
+    return bool(
+        hermes_record.pending_session_ids(
+            state_db,
+            state_file=hermes_record.DEFAULT_STATE_FILE,
+            idle_seconds=idle_seconds,
+        )
+    )
+
+
 def discover_pending(*, idle_seconds: int = 300) -> list[tuple[str, Path]]:
-    from chronovisor.raw import claude_code_record, codex_record, pi_record
+    from chronovisor.raw import (
+        claude_code_record,
+        codex_record,
+        hermes_record,
+        pi_record,
+    )
 
     cutoff = time.time() - max(0, idle_seconds)
     candidates: list[tuple[str, Path]] = []
@@ -95,6 +112,12 @@ def discover_pending(*, idle_seconds: int = 300) -> list[tuple[str, Path]]:
             except OSError:
                 continue
             candidates.append((host, path))
+    # Hermes keeps every session inside one SQLite state.db, so the database
+    # itself is a single candidate; subagent filtering and the per-session
+    # idle cutoff live inside hermes_record.pending_session_ids.
+    hermes_db = hermes_record.hermes_state_db()
+    if hermes_db.exists() and _pending_hermes(hermes_db, idle_seconds=idle_seconds):
+        candidates.append(("hermes", hermes_db))
     candidates.sort(key=lambda pair: pair[1].stat().st_mtime)
     return candidates
 
@@ -118,6 +141,14 @@ def _run_one(host: str, path: Path) -> dict[str, Any]:
             session_id=None, session_file=str(path), state_file=str(saver.DEFAULT_STATE_FILE),
             max_chars=saver.DEFAULT_MAX_CHARS, dry_run=False, save=True,
             extract_only=False, ignore_state=False, hook=False, trigger_ingest=True,
+        )
+    elif host == "hermes":
+        from chronovisor.raw import hermes_record
+
+        return hermes_record.save_pending_sessions(
+            state_db=path,
+            state_file=hermes_record.DEFAULT_STATE_FILE,
+            idle_seconds=0,  # idle cutoff already applied by discover_pending
         )
     else:
         from chronovisor.raw import claude_code_record as saver

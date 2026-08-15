@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import sys
+import time
 from io import StringIO
 from pathlib import Path
 
@@ -49,6 +50,55 @@ def _create_state_db(path: Path) -> None:
                 (10, "session-1", "user", "hello", None, None, None, 1.0, None, 1, 0),
                 (12, "session-1", "assistant", "world", None, None, None, 2.0, "private chain", 1, 0),
                 (13, "other", "user", "not ours", None, None, None, 3.0, None, 1, 0),
+            ],
+        )
+
+
+def _create_sweep_state_db(path: Path) -> None:
+    """state.db matching the real Hermes schema for pending-session discovery."""
+    now = time.time()
+    with sqlite3.connect(path) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE sessions (
+                id TEXT PRIMARY KEY,
+                source TEXT NOT NULL,
+                model TEXT,
+                cwd TEXT,
+                billing_provider TEXT,
+                profile_name TEXT,
+                message_count INTEGER DEFAULT 0,
+                started_at REAL NOT NULL,
+                ended_at REAL,
+                last_activity_at REAL
+            );
+            CREATE TABLE messages (
+                id INTEGER PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT,
+                timestamp REAL NOT NULL,
+                active INTEGER NOT NULL DEFAULT 1,
+                compacted INTEGER NOT NULL DEFAULT 0
+            );
+            """
+        )
+        conn.executemany(
+            "INSERT INTO sessions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                ("cli-old", "cli", "gpt-test", "/tmp/a", None, "default", 2, now - 2000, None, now - 2000),
+                ("cli-fresh", "cli", "gpt-test", "/tmp/b", None, "default", 2, now - 10, None, now - 10),
+                ("sub-agent", "subagent", "deepseek", "/tmp/c", None, "default", 2, now - 2000, None, now - 2000),
+            ],
+        )
+        conn.executemany(
+            "INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?, ?)",
+            [
+                (1, "cli-old", "user", "alpha", now - 2000, 1, 0),
+                (2, "cli-old", "assistant", "beta", now - 1999, 1, 0),
+                (3, "cli-fresh", "user", "gamma", now - 10, 1, 0),
+                (4, "cli-fresh", "assistant", "delta", now - 9, 1, 0),
+                (5, "sub-agent", "user", "epsilon", now - 2000, 1, 0),
             ],
         )
 
@@ -247,3 +297,131 @@ def test_hermes_raw_projects_into_semantic_children(tmp_path: Path) -> None:
     assert "hello" in projected
     assert "world" in projected
     assert '"host":"hermes"' in raw_path.read_text().replace(" ", "")
+
+
+def test_pending_session_ids_excludes_subagent_and_fresh_sessions(
+    tmp_path: Path,
+) -> None:
+    state_db = tmp_path / "state.db"
+    _create_sweep_state_db(state_db)
+    state_file = tmp_path / "hermes-save-state.json"
+
+    pending = hermes_record.pending_session_ids(
+        state_db, state_file=state_file, idle_seconds=300
+    )
+
+    # cli-old is idle and has messages; cli-fresh is too recent; sub-agent is
+    # filtered by source even though it is idle.
+    assert pending == ["cli-old"]
+
+
+def test_pending_session_ids_include_subagent_when_requested(tmp_path: Path) -> None:
+    state_db = tmp_path / "state.db"
+    _create_sweep_state_db(state_db)
+    state_file = tmp_path / "hermes-save-state.json"
+
+    pending = hermes_record.pending_session_ids(
+        state_db,
+        state_file=state_file,
+        idle_seconds=300,
+        include_subagent=True,
+    )
+
+    assert pending == ["cli-old", "sub-agent"]
+
+
+def test_pending_session_ids_advances_cursor(tmp_path: Path, monkeypatch) -> None:
+    state_db = tmp_path / "state.db"
+    _create_sweep_state_db(state_db)
+    state_file = tmp_path / "hermes-save-state.json"
+    published: list[dict[str, object]] = []
+
+    monkeypatch.setattr(
+        hermes_record,
+        "publish_transcript_capture",
+        lambda **kwargs: published.append(kwargs) or {"status": "saved"},
+    )
+    monkeypatch.setattr(hermes_record, "init_chronovisor", lambda **_kwargs: None)
+
+    hermes_record.save_session(
+        state_db=state_db,
+        session_id="cli-old",
+        state_file=state_file,
+        raw_dir=tmp_path / "raw",
+    )
+
+    pending = hermes_record.pending_session_ids(
+        state_db, state_file=state_file, idle_seconds=300
+    )
+    assert pending == []
+
+
+def test_save_pending_sessions_captures_all_and_reports_errors(
+    tmp_path: Path, monkeypatch
+) -> None:
+    state_db = tmp_path / "state.db"
+    _create_sweep_state_db(state_db)
+    state_file = tmp_path / "hermes-save-state.json"
+    published: list[dict[str, object]] = []
+
+    def fake_publish(**kwargs: object) -> dict[str, object]:
+        published.append(kwargs)
+        return {"status": "saved"}
+
+    monkeypatch.setattr(hermes_record, "publish_transcript_capture", fake_publish)
+    monkeypatch.setattr(hermes_record, "init_chronovisor", lambda **_kwargs: None)
+
+    result = hermes_record.save_pending_sessions(
+        state_db=state_db,
+        state_file=state_file,
+        raw_dir=tmp_path / "raw",
+        idle_seconds=300,
+    )
+
+    assert result["status"] == "saved"
+    assert result["host"] == "hermes"
+    assert [r["session_id"] for r in result["session_results"]] == ["cli-old"]
+    assert result["session_results"][0]["status"] == "saved"
+    assert len(published) == 1
+    assert published[0]["host"] == "hermes"
+    # A second sweep has nothing left to publish.
+    again = hermes_record.save_pending_sessions(
+        state_db=state_db,
+        state_file=state_file,
+        raw_dir=tmp_path / "raw",
+        idle_seconds=300,
+    )
+    assert again["status"] == "skipped"
+    assert again["reason"] == "no_pending_sessions"
+
+
+def test_save_pending_sessions_tolerates_session_failures(
+    tmp_path: Path, monkeypatch
+) -> None:
+    state_db = tmp_path / "state.db"
+    _create_sweep_state_db(state_db)
+    state_file = tmp_path / "hermes-save-state.json"
+
+    def boom(**kwargs: object) -> dict[str, object]:
+        raise RuntimeError("db locked")
+
+    monkeypatch.setattr(hermes_record, "publish_transcript_capture", boom)
+    monkeypatch.setattr(hermes_record, "init_chronovisor", lambda **_kwargs: None)
+
+    result = hermes_record.save_pending_sessions(
+        state_db=state_db,
+        state_file=state_file,
+        raw_dir=tmp_path / "raw",
+        idle_seconds=300,
+    )
+
+    assert result["status"] == "error"
+    assert result["session_results"][0]["status"] == "error"
+    assert "RuntimeError" in result["session_results"][0]["error"]
+
+
+def test_hermes_state_db_defaults_to_home(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("HERMES_HOME", raising=False)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+
+    assert hermes_record.hermes_state_db() == tmp_path / ".hermes" / "state.db"

@@ -87,6 +87,10 @@ class RuntimeContext:
     def pi_state_file(self) -> Path:
         return self.root / "pi-save-state.json"
 
+    @property
+    def hermes_state_file(self) -> Path:
+        return self.root / "hermes-save-state.json"
+
 
 DEFAULT_CONTEXT = RuntimeContext(resolve_root())
 CHRONOVISOR_ROOT = DEFAULT_CONTEXT.root

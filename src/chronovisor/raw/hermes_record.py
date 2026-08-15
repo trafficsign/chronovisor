@@ -7,6 +7,7 @@ import json
 import os
 import sqlite3
 import sys
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -21,10 +22,11 @@ from chronovisor.core.save_transaction import (
     save_session_key,
     save_transaction_lock,
 )
-from chronovisor.core.store import CHRONOVISOR_ROOT, RAW_DIR, init_chronovisor
+from chronovisor.core.store import DEFAULT_CONTEXT, RAW_DIR, init_chronovisor
 from chronovisor.raw.agent_save_base import read_hook_payload, save_raw
 
 HOOK_ENABLE_ENV = "HERMES_CHRONOVISOR_RECORD_ENABLED"
+DEFAULT_STATE_FILE = DEFAULT_CONTEXT.hermes_state_file
 
 
 @dataclass(frozen=True)
@@ -272,6 +274,7 @@ def save_session(
     state_file: Path,
     raw_dir: Path = RAW_DIR,
     capture_failed: bool | None = None,
+    trigger_ingest: bool = False,
 ) -> dict[str, Any]:
     """Capture every previously unpublished Hermes DB message exactly once."""
 
@@ -313,7 +316,7 @@ def save_session(
             legacy_content=build_raw_content(delta, transaction=transaction),
             legacy_session_id=f"hermes-{session_id}",
             keywords=["hermes", delta.session.platform, delta.session.model or "unknown-model"],
-            trigger_ingest=False,
+            trigger_ingest=trigger_ingest,
             legacy_publisher=save_raw,
         )
         _write_cursor(
@@ -332,6 +335,138 @@ def save_session(
             "last_message_id": delta.last_message_id,
             "record_count": len(delta.records),
         }
+
+
+def hermes_state_db() -> Path:
+    """Default Hermes state database (HERMES_HOME or ~/.hermes/state.db)."""
+    hermes_home = Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes")
+    return hermes_home / "state.db"
+
+
+def list_sessions(
+    state_db: Path, *, include_subagent: bool = False
+) -> list[dict[str, Any]]:
+    """Return Hermes session rows, oldest last-activity first."""
+    resolved = state_db.expanduser().resolve(strict=True)
+    with sqlite3.connect(f"{resolved.as_uri()}?mode=ro", uri=True) as conn:
+        conn.row_factory = sqlite3.Row
+        where = "" if include_subagent else "WHERE source <> 'subagent'"
+        rows = conn.execute(
+            f"""
+            SELECT id, source, model, billing_provider, profile_name, cwd,
+                   message_count, started_at, ended_at, last_activity_at
+            FROM sessions
+            {where}
+            ORDER BY COALESCE(last_activity_at, started_at) ASC
+            """
+        ).fetchall()
+    return [_row_dict(row) for row in rows]
+
+
+def _pending_message_count(
+    conn: sqlite3.Connection, *, session_id: str, after_message_id: int
+) -> int:
+    row = conn.execute(
+        "SELECT COUNT(*) FROM messages WHERE session_id = ? AND id > ?",
+        (session_id, after_message_id),
+    ).fetchone()
+    return int(row[0]) if row else 0
+
+
+def pending_session_ids(
+    state_db: Path,
+    *,
+    state_file: Path = DEFAULT_STATE_FILE,
+    idle_seconds: int = 300,
+    include_subagent: bool = False,
+) -> list[str]:
+    """Return Hermes session IDs that still have unpublished messages.
+
+    Skips sessions whose last activity is newer than ``idle_seconds`` (mirroring
+    the file-mtime cutoff used by the file-backed hosts) and, by default, skips
+    ``subagent`` sources (mirroring ``_is_user_pi_session``).
+    """
+    resolved = state_db.expanduser().resolve(strict=True)
+    cutoff = time.time() - max(0, idle_seconds)
+    sessions = list_sessions(resolved, include_subagent=include_subagent)
+    pending: list[str] = []
+    for session in sessions:
+        session_id = str(session["id"])
+        last_activity = session.get("last_activity_at")
+        if isinstance(last_activity, (int, float)) and last_activity > cutoff:
+            continue
+        cursor_key = save_session_key(
+            host="hermes", session_file=resolved, session_id=session_id
+        )
+        after_message_id, _after_line = _load_cursor(
+            state_file, cursor_key, legacy_session_id=session_id
+        )
+        with sqlite3.connect(f"{resolved.as_uri()}?mode=ro", uri=True) as conn:
+            count = _pending_message_count(
+                conn, session_id=session_id, after_message_id=after_message_id
+            )
+        if count > 0:
+            pending.append(session_id)
+    return pending
+
+
+def save_pending_sessions(
+    *,
+    state_db: Path,
+    state_file: Path = DEFAULT_STATE_FILE,
+    raw_dir: Path = RAW_DIR,
+    idle_seconds: int = 300,
+    include_subagent: bool = False,
+    limit: int | None = None,
+) -> dict[str, Any]:
+    """Capture every pending Hermes session in a state database, oldest first.
+
+    Session-level failures are captured per-session so one broken session never
+    blocks the rest of the database.
+    """
+    resolved = state_db.expanduser().resolve(strict=True)
+    session_ids = pending_session_ids(
+        resolved,
+        state_file=state_file,
+        idle_seconds=idle_seconds,
+        include_subagent=include_subagent,
+    )
+    if not session_ids:
+        return {
+            "status": "skipped",
+            "reason": "no_pending_sessions",
+            "host": "hermes",
+        }
+    session_results: list[dict[str, Any]] = []
+    total_records = 0
+    for session_id in session_ids:
+        if limit is not None and len(session_results) >= limit:
+            break
+        try:
+            result = save_session(
+                state_db=resolved,
+                session_id=session_id,
+                state_file=state_file,
+                raw_dir=raw_dir,
+                trigger_ingest=True,
+            )
+            record_count = result.get("record_count")
+        except Exception as exc:
+            result = {"status": "error", "error": f"{type(exc).__name__}: {exc}"}
+            record_count = 0
+        session_results.append({"session_id": session_id, **result})
+        if isinstance(record_count, int):
+            total_records += record_count
+    saved = sum(1 for r in session_results if r.get("status") == "saved")
+    errors = [r for r in session_results if r.get("status") == "error"]
+    status = "saved" if saved else ("error" if errors else "skipped")
+    return {
+        "status": status,
+        "host": "hermes",
+        "session_count": len(session_results),
+        "record_count": total_records,
+        "session_results": session_results,
+    }
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -363,12 +498,9 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({"status": "error", "error": "session_id is required"}))
         return 2
     if not isinstance(state_db_value, str) or not state_db_value:
-        hermes_home = Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes")
-        state_db_value = str(hermes_home / "state.db")
+        state_db_value = str(hermes_state_db())
     state_file = (
-        Path(args.state_file).expanduser()
-        if args.state_file
-        else CHRONOVISOR_ROOT / "hermes-save-state.json"
+        Path(args.state_file).expanduser() if args.state_file else DEFAULT_STATE_FILE
     )
     try:
         payload_failed = payload.get("failed")
