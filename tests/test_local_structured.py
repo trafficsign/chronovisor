@@ -105,9 +105,9 @@ class QueueTransport:
 
 
 def test_structured_generation_policy_seals_adaptive_reasoning_authority() -> None:
-    assert STRUCTURED_GENERATION_POLICY_VERSION == 11
+    assert STRUCTURED_GENERATION_POLICY_VERSION == 12
     assert structured_generation_policy() == {
-        "version": 11,
+        "version": 12,
         "temperature": 0,
         "seed": 0,
         "think": {
@@ -167,12 +167,15 @@ def test_structured_generation_policy_seals_adaptive_reasoning_authority() -> No
         "compatibility": {
             QWEN_STRUCTURED_MODEL: {
                 "initial": {"think": True, "format": None},
-                "repair": {"think": False, "format": "json_schema"},
             },
             MUSE_STRUCTURED_MODEL: {
                 "initial": {"think": "selected", "format": None},
-                "repair": {"think": False, "format": "json_schema"},
             },
+        },
+        "repair": {
+            "scope": "all_models",
+            "think": False,
+            "format": "json_schema",
         },
         "stream": False,
         "format": "json_schema",
@@ -576,11 +579,17 @@ def test_first_pass_valid_uses_fixed_medium_thinking_request() -> None:
 
 
 @pytest.mark.parametrize(
-    ("model", "initial_think"),
-    [(QWEN_STRUCTURED_MODEL, True), (MUSE_STRUCTURED_MODEL, "medium")],
+    ("model", "initial_think", "initial_schema"),
+    [
+        (QWEN_STRUCTURED_MODEL, True, None),
+        (MUSE_STRUCTURED_MODEL, "medium", None),
+        ("gemma4:26b", "medium", SCHEMA),
+    ],
 )
-def test_formatless_thinking_omits_initial_format_and_repairs_strict(
-    model: str, initial_think: bool | str
+def test_all_model_repairs_use_strict_schema_without_thinking(
+    model: str,
+    initial_think: bool | str,
+    initial_schema: dict[str, Any] | None,
 ) -> None:
     transport = QueueTransport(
         '{"decision":"invalid","summary":"bad"}',
@@ -589,7 +598,10 @@ def test_formatless_thinking_omits_initial_format_and_repairs_strict(
     result = _session(transport, model=model).run("decide", SCHEMA)
 
     assert result.ok is True
-    assert [request.schema for request in transport.requests] == [None, SCHEMA]
+    assert [request.schema for request in transport.requests] == [
+        initial_schema,
+        SCHEMA,
+    ]
     assert [request.think for request in transport.requests] == [
         initial_think,
         False,
@@ -599,24 +611,7 @@ def test_formatless_thinking_omits_initial_format_and_repairs_strict(
         False,
     ]
     assert result.think is False
-    assert result.think_selection_reason == "formatless_thinking_repair"
-
-
-def test_non_qwen_structured_transport_contract_is_unchanged() -> None:
-    transport = QueueTransport(
-        '{"decision":"invalid","summary":"bad"}',
-        '{"decision":"apply","summary":"ok"}',
-    )
-    result = _session(transport).run("decide", SCHEMA)
-
-    assert result.ok is True
-    assert [request.schema for request in transport.requests] == [SCHEMA, SCHEMA]
-    assert [request.think for request in transport.requests] == [
-        "medium",
-        "medium",
-    ]
-    assert result.think == "medium"
-    assert result.think_selection_reason == "capability_not_adopted"
+    assert result.think_selection_reason == "structured_repair"
 
 
 def test_qwen_structured_compatibility_keeps_client_validation_fail_closed() -> None:
@@ -729,7 +724,7 @@ def test_active_marker_is_atomic_redacted_and_removed_after_session(
     assert audit["context_tokens"] == 32_768
     assert audit["requested_num_ctx"] == 32_768
     assert isinstance(audit["required_num_ctx"], int)
-    assert audit["structured_generation_policy_version"] == 11
+    assert audit["structured_generation_policy_version"] == 12
     assert audit["structured_generation_policy_sha256"] == (
         structured_generation_policy_sha256()
     )
@@ -774,7 +769,7 @@ def test_transport_failure_clears_activity_and_records_failure(tmp_path: Path) -
     assert trace[-1]["status"] == "error"
 
 
-def test_direct_session_without_route_authority_stays_medium_for_all_repairs() -> None:
+def test_direct_session_repairs_without_thinking() -> None:
     transport = QueueTransport(
         '{"decision":"apply"}',
         '{"decision":"apply","summary":"ok"}',
@@ -788,13 +783,13 @@ def test_direct_session_without_route_authority_stays_medium_for_all_repairs() -
     ).run("repair", SCHEMA)
 
     assert result.ok is True
-    assert [request.think for request in transport.requests] == ["medium", "medium"]
+    assert [request.think for request in transport.requests] == ["medium", False]
     assert [request.think_selection_reason for request in transport.requests] == [
         "capability_not_adopted",
-        "capability_not_adopted",
+        "structured_repair",
     ]
-    assert result.think == "medium"
-    assert result.think_selection_reason == "capability_not_adopted"
+    assert result.think is False
+    assert result.think_selection_reason == "structured_repair"
     assert result.required_num_ctx == required_structured_context_tokens(
         "repair",
         SCHEMA,
@@ -817,7 +812,7 @@ def test_direct_session_without_route_authority_stays_medium_for_all_repairs() -
         )
     ],
 )
-def test_production_roles_apply_selected_reasoning_budget_to_every_turn(
+def test_production_roles_use_selected_reasoning_then_strict_repair(
     tmp_path: Path,
     runtime_role: str,
     decision_lane: str | None,
@@ -844,14 +839,13 @@ def test_production_roles_apply_selected_reasoning_budget_to_every_turn(
     ).run("decide", SCHEMA)
 
     assert result.ok is True
-    assert [request.think for request in transport.requests] == [expected] * 2
+    assert [request.think for request in transport.requests] == [expected, False]
     assert [request.num_predict for request in transport.requests] == [budget] * 2
     assert [request.ollama_think for request in transport.requests] == [
-        expected if runtime_role == "classification.challenger" else True
-    ] * 2
-    assert result.ollama_think == (
-        expected if runtime_role == "classification.challenger" else True
-    )
+        expected if runtime_role == "classification.challenger" else True,
+        False,
+    ]
+    assert result.ollama_think is False
     assert result.num_predict == budget
     audit = json.loads(
         (tmp_path / "audit" / "audit.jsonl").read_text(encoding="utf-8")
@@ -1254,8 +1248,9 @@ def test_audit_quarantine_is_compare_and_swap_guarded(tmp_path: Path) -> None:
 
 
 def test_parse_error_is_repaired_in_same_client_side_session() -> None:
+    invalid = '{"decision":"apply",'
     transport = QueueTransport(
-        '{"decision":"apply",',
+        invalid,
         '{"decision":"apply","summary":"fixed"}',
     )
 
@@ -1271,7 +1266,8 @@ def test_parse_error_is_repaired_in_same_client_side_session() -> None:
         "assistant",
         "user",
     ]
-    assert second.messages[2]["content"] == '{"decision":"apply",'
+    assert "Previous invalid JSON omitted" in second.messages[2]["content"]
+    assert invalid not in json.dumps(second.messages)
     feedback = second.messages[3]["content"]
     assert '"keyword":"parse"' in feedback
     assert '"pointer":""' in feedback
@@ -1970,9 +1966,20 @@ def test_only_whole_document_known_wrappers_are_normalized() -> None:
     channel, channel_changed = normalize_json_output(
         '<|channel|>final<|message|>{"ok":true}<|return|>'
     )
+    thinking, thinking_changed = normalize_json_output(
+        '{"ok":true}\n</think>\n\n{"ok":true}'
+    )
+    literal, literal_changed = normalize_json_output(
+        '{"summary":"literal </think> marker"}'
+    )
 
     assert (fenced, fenced_changed) == ('{"ok":true}', True)
     assert (channel, channel_changed) == ('{"ok":true}', True)
+    assert (thinking, thinking_changed) == ('{"ok":true}', True)
+    assert (literal, literal_changed) == (
+        '{"summary":"literal </think> marker"}',
+        False,
+    )
     assert (prose, prose_changed) == ('answer: {"ok":true}', False)
 
 

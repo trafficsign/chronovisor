@@ -41,7 +41,7 @@ SAFE_RUNTIME_ROLE_RE = re.compile(r"^[a-z][a-z0-9._-]{0,127}$")
 LOCAL_ACTIVITY_PHASES = frozenset(
     {"trigger", "load", "context", "generate", "repair", "validate", "vote"}
 )
-STRUCTURED_GENERATION_POLICY_VERSION = 11
+STRUCTURED_GENERATION_POLICY_VERSION = 12
 STRUCTURED_GENERATION_TEMPERATURE = 0
 STRUCTURED_GENERATION_SEED = 0
 _DEFAULT_STRUCTURED_MEMORY_RESERVE_GIB = 16
@@ -172,12 +172,15 @@ def structured_generation_policy() -> dict[str, Any]:
         "compatibility": {
             _QWEN_STRUCTURED_COMPAT_MODEL: {
                 "initial": {"think": True, "format": None},
-                "repair": {"think": False, "format": "json_schema"},
             },
             _MUSE_STRUCTURED_COMPAT_MODEL: {
                 "initial": {"think": "selected", "format": None},
-                "repair": {"think": False, "format": "json_schema"},
             },
+        },
+        "repair": {
+            "scope": "all_models",
+            "think": False,
+            "format": "json_schema",
         },
         "stream": False,
         "format": "json_schema",
@@ -2006,6 +2009,7 @@ _CHANNEL_PREFIXES = (
     "to=user<|message|>",
 )
 _CHANNEL_SUFFIXES = ("<|end|>", "<|return|>")
+_THINK_END_LINE = re.compile(r"(?:\A|\r?\n)\s*</think>\s*(?=\r?\n|\Z)", re.IGNORECASE)
 
 
 def normalize_json_output(text: str) -> tuple[str, bool]:
@@ -2027,6 +2031,12 @@ def normalize_json_output(text: str) -> tuple[str, bool]:
             normalized = normalized[: -len(suffix)].strip()
             changed = True
             break
+    think_boundaries = list(_THINK_END_LINE.finditer(normalized))
+    if think_boundaries:
+        final_output = normalized[think_boundaries[-1].end() :].strip()
+        if final_output:
+            normalized = final_output
+            changed = True
     return normalized, changed
 
 
@@ -2131,20 +2141,20 @@ def _default_transport(
     )
 
 
-def _formatless_thinking_repair_request(
+def _structured_repair_request(
     request: ChatRequest,
     *,
     attempt: int,
     schema: dict[str, Any],
 ) -> ChatRequest:
-    if attempt == 0 or request.model not in _FORMATLESS_THINKING_MODELS:
+    if attempt == 0:
         return request
     return replace(
         request,
         schema=schema,
         think=False,
         ollama_think=False,
-        think_selection_reason="formatless_thinking_repair",
+        think_selection_reason="structured_repair",
     )
 
 
@@ -2169,6 +2179,11 @@ non-mutating outcome required by the original instructions. Return JSON only.
 
 Validator errors (RFC 6901 pointers):
 {errors}
+"""
+
+_INVALID_ASSISTANT_PLACEHOLDER = """\
+[Previous invalid JSON omitted by the client. Reconstruct the complete value
+from the original request, schema, and validator errors.]
 """
 
 _OVERSIZE_ASSISTANT_PLACEHOLDER = """\
@@ -2649,7 +2664,7 @@ class LocalStructuredSession:
                 request_template,
                 messages=tuple(dict(message) for message in messages),
             )
-            request = _formatless_thinking_repair_request(
+            request = _structured_repair_request(
                 request, attempt=index, schema=transport_schema
             )
             transport_output, transport_failure = self._call_transport(
@@ -2882,7 +2897,7 @@ class LocalStructuredSession:
                     f"({feedback_bytes}>{self.max_feedback_chars})",
                     attempts,
                 )
-            messages.append({"role": "assistant", "content": raw_output})
+            messages.append({"role": "assistant", "content": _INVALID_ASSISTANT_PLACEHOLDER})
             messages.append({"role": "user", "content": repair_prompt})
 
         return self._failure("repair_exhausted", "structured session exhausted", attempts)
