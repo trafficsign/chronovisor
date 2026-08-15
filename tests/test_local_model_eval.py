@@ -485,7 +485,7 @@ def _metadata(models: list[str] | tuple[str, ...]) -> dict[str, object]:
 def test_fetch_local_model_metadata_fills_blank_quantization_from_show(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    model = "muse-glimmer:30b-nvfp4-dflash"
+    model = "muse-glimmer:30b-q4k-dynamic"
     requests: list[tuple[str, str]] = []
 
     def handler(request: httpx.Request) -> httpx.Response:

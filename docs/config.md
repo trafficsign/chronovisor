@@ -109,27 +109,27 @@ semantic_projection_max_child_bytes = 24000
 [llm.roles."ingest.generation"]
 capability = "generation"
 provider = "local"
-model = "qwen3.8:27b-nvfp4"
+model = "qwen3.8:27b-axq4"
 
 [llm.roles."lint.tag_repair"]
 capability = "generation"
 provider = "local"
-model = "qwen3.8:27b-nvfp4"
+model = "qwen3.8:27b-axq4"
 
 [llm.roles."lint.orphan_link"]
 capability = "generation"
 provider = "local"
-model = "qwen3.8:27b-nvfp4"
+model = "qwen3.8:27b-axq4"
 
 [llm.roles."recall.content_correction.proposer"]
 capability = "generation"
 provider = "local"
-model = "qwen3.8:27b-nvfp4"
+model = "qwen3.8:27b-axq4"
 
 [llm.roles."recall.auditor"]
 capability = "generation"
 provider = "local"
-model = "qwen3.8:27b-nvfp4"
+model = "qwen3.8:27b-axq4"
 
 [llm.roles."recall.gate"]
 capability = "generation"
@@ -144,19 +144,19 @@ model = "ornith:9b-q4_K_M"
 [llm.roles."recall.policy_proposer.primary"]
 capability = "generation"
 provider = "local"
-model = "qwen3.8:27b-nvfp4"
+model = "qwen3.8:27b-axq4"
 required_capabilities = ["structured_output"]
 
 [llm.roles."recall.policy_proposer.challenger"]
 capability = "generation"
 provider = "local"
-model = "gemma4:26b"
+model = "gemma4:26b-optiq4"
 required_capabilities = ["structured_output"]
 
 [llm.roles."recall.rubric.variant"]
 capability = "generation"
 provider = "local"
-model = "gemma4:26b"
+model = "gemma4:26b-optiq4"
 required_capabilities = ["structured_output"]
 
 # Offline Recall distillation uses raw/high conversation inputs and is strictly
@@ -165,7 +165,7 @@ required_capabilities = ["structured_output"]
 [llm.roles."recall.distill.teacher.a"]
 capability = "generation"
 provider = "local"
-model = "qwen3.8:27b-nvfp4"
+model = "qwen3.8:27b-axq4"
 required_capabilities = ["structured_output"]
 
 [llm.roles."recall.distill.teacher.b"]
@@ -177,25 +177,25 @@ required_capabilities = ["structured_output"]
 [llm.roles."recall.distill.teacher.c"]
 capability = "generation"
 provider = "local"
-model = "gemma4:26b"
+model = "gemma4:26b-optiq4"
 required_capabilities = ["structured_output"]
 
 [llm.roles."recall.distill.answer_generator"]
 capability = "generation"
 provider = "local"
-model = "qwen3.8:27b-nvfp4"
+model = "qwen3.8:27b-axq4"
 required_capabilities = ["structured_output"]
 
 [llm.roles."recall.distill.utility_judge"]
 capability = "generation"
 provider = "local"
-model = "gemma4:26b"
+model = "gemma4:26b-optiq4"
 required_capabilities = ["structured_output"]
 
 [llm.roles."research.planner"]
 capability = "generation"
 provider = "local"
-model = "qwen3.8:27b-nvfp4"
+model = "qwen3.8:27b-axq4"
 required_capabilities = ["structured_output"]
 
 [llm.roles."research.challenge"]
@@ -207,13 +207,13 @@ required_capabilities = ["structured_output"]
 [llm.roles."research.tie_break"]
 capability = "generation"
 provider = "local"
-model = "gemma4:26b"
+model = "gemma4:26b-optiq4"
 required_capabilities = ["structured_output"]
 
 [llm.roles."research.deep_retrieval_requery"]
 capability = "generation"
 provider = "local"
-model = "qwen3.8:27b-nvfp4"
+model = "qwen3.8:27b-axq4"
 required_capabilities = ["structured_output"]
 
 # All research prompts are raw/high. Remote routes require the exact
@@ -252,9 +252,9 @@ required_capabilities = ["structured_output"]
 # counted as smaller-bucket evaluation evidence. The offline adoption evaluator
 # uses a separate exact-bucket mode. Production model selection comes only from
 # llm.roles.classification.primary/challenger/tie_break below.
-primary_model = "qwen3.8:27b-nvfp4"
-challenger_model = "muse-glimmer:30b-nvfp4-dflash"
-tie_break_model = "gemma4:26b"
+primary_model = "qwen3.8:27b-axq4"
+challenger_model = "muse-glimmer:30b-q4k-dynamic"
+tie_break_model = "gemma4:26b-optiq4"
 primary_keep_alive = "20m"
 challenger_keep_alive = "20m"
 tie_break_keep_alive = "2m"
@@ -924,12 +924,12 @@ legacy `extractor_model`, `community_summary_model`, and
 [llm.roles."knowledge.relation_extraction"]
 capability = "generation"
 provider = "local"
-model = "gemma4:26b"
+model = "gemma4:26b-optiq4"
 
 [llm.roles."knowledge.community_summary"]
 capability = "generation"
 provider = "local"
-model = "gemma4:26b"
+model = "gemma4:26b-optiq4"
 ```
 
 Builder and community-summary budgets share the daily model-seconds ceiling.

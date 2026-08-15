@@ -34,18 +34,18 @@ The example is the smallest supported local-only configuration. It disables
 optional Web egress. Existing `~/.chronovisor/config.toml` files should be
 merged manually rather than overwritten.
 
-Install the local models named by the example:
-
-`qwen3.8:27b-nvfp4` requires Ollama 0.32.12 or newer.
+Install the registry-hosted local models named by the example:
 
 ```sh
-ollama pull qwen3.8:27b-nvfp4
-ollama pull muse-glimmer:30b-nvfp4-dflash
 ollama pull gpt-oss:20b
-ollama pull gemma4:26b
 ollama pull bge-m3
 ollama pull ornith:9b-q4_K_M
 ```
+
+The canonical `qwen3.8:27b-axq4`, `muse-glimmer:30b-q4k-dynamic`, and
+`gemma4:26b-optiq4` tags are fixed Hugging Face MLX imports rather than Ollama
+registry pulls. See [operations](docs/operations.md) for their exact revisions
+and runtime compatibility requirement.
 
 Start the MCP server from the checkout:
 

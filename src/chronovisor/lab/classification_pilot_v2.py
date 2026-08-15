@@ -27,7 +27,7 @@ V2_SCHEMA = "chronovisor.classification-method-pilot.v2"
 V2_ENGINE_VERSION = 12
 RRF_K = 60
 MAX_CANDIDATES = 128
-GROUP_STAGE_MODEL = "gemma4:26b"
+GROUP_STAGE_MODEL = "gemma4:26b-optiq4"
 GROUP_KEEP_ALIVE = "10m"
 
 

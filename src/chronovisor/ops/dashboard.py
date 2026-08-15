@@ -2717,7 +2717,7 @@ def _typed_graph_dashboard_snapshot() -> dict[str, Any]:
             "queued_pages": int(builder.get("queued_pages") or 0),
             "remaining_pages": int(builder.get("remaining_pages") or 0),
             "queue_overflow": int(builder.get("queue_overflow") or 0),
-            "model": str(builder.get("model") or "gemma4:26b"),
+            "model": str(builder.get("model") or "gemma4:26b-optiq4"),
         },
         "consensus": {
             "status": str(consensus.get("status") or "not_started"),

@@ -53,8 +53,8 @@ SCHEMA = {
         "summary": {"type": "string", "minLength": 1},
     },
 }
-QWEN_STRUCTURED_MODEL = "qwen3.8:27b-nvfp4"
-MUSE_STRUCTURED_MODEL = "muse-glimmer:30b-nvfp4-dflash"
+QWEN_STRUCTURED_MODEL = "qwen3.8:27b-axq4"
+MUSE_STRUCTURED_MODEL = "muse-glimmer:30b-q4k-dynamic"
 
 REASONING_ROUTES = {
     "classification.primary": (

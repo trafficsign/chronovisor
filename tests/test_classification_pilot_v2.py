@@ -128,11 +128,11 @@ def test_tournament_keeps_groups_small_and_runs_a_final(
     )
 
     assert calls[:4] == [
-        (32, "-group-1", "gemma4:26b"),
-        (32, "-group-2", "gemma4:26b"),
-        (32, "-group-3", "gemma4:26b"),
-        (32, "-group-4", "gemma4:26b"),
+        (32, "-group-1", "gemma4:26b-optiq4"),
+        (32, "-group-2", "gemma4:26b-optiq4"),
+        (32, "-group-3", "gemma4:26b-optiq4"),
+        (32, "-group-4", "gemma4:26b-optiq4"),
     ]
     assert calls[4] == (20, "-final", "test")
     assert result["group_stage"]["finalist_count"] == 20
-    assert result["group_stage"]["model"] == "gemma4:26b"
+    assert result["group_stage"]["model"] == "gemma4:26b-optiq4"

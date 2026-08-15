@@ -907,9 +907,9 @@ def test_repository_example_has_representative_local_role_map() -> None:
             "classification.tie_break",
         )
     ] == [
-        "qwen3.8:27b-nvfp4",
-        "muse-glimmer:30b-nvfp4-dflash",
-        "gemma4:26b",
+        "qwen3.8:27b-axq4",
+        "muse-glimmer:30b-q4k-dynamic",
+        "gemma4:26b-optiq4",
     ]
     text = example.read_text(encoding="utf-8")
     for role, data_class in (
@@ -930,7 +930,7 @@ def test_repository_example_has_representative_local_role_map() -> None:
     assert certificate_primary.model != certificate_escalation.model
     auditor = config.roles["recall.auditor"]
     assert auditor.provider_id == "local"
-    assert auditor.model == "qwen3.8:27b-nvfp4"
+    assert auditor.model == "qwen3.8:27b-axq4"
     recall_gate = config.roles["recall.gate"]
     recall_rewriter = config.roles["recall.query_rewriter"]
     assert recall_gate.provider_id == recall_rewriter.provider_id == "local"
@@ -941,8 +941,8 @@ def test_repository_example_has_representative_local_role_map() -> None:
     )
     proposer_routes = [config.roles[role] for role in proposer_roles]
     assert [route.model for route in proposer_routes] == [
-        "qwen3.8:27b-nvfp4",
-        "gemma4:26b",
+        "qwen3.8:27b-axq4",
+        "gemma4:26b-optiq4",
     ]
     assert all(
         route.required_capabilities == ("structured_output",)
@@ -952,7 +952,7 @@ def test_repository_example_has_representative_local_role_map() -> None:
         assert f'# role = "{role}"\n# data_class = "raw"' in text
     rubric_variant = config.roles["recall.rubric.variant"]
     assert rubric_variant.provider_id == "local"
-    assert rubric_variant.model == "gemma4:26b"
+    assert rubric_variant.model == "gemma4:26b-optiq4"
     assert rubric_variant.required_capabilities == ("structured_output",)
     assert (
         '# role = "recall.rubric.variant"\n# data_class = "raw"' in text
@@ -999,13 +999,13 @@ def test_repository_example_has_representative_local_role_map() -> None:
             "research.tie_break",
         )
     ] == [
-        "qwen3.8:27b-nvfp4",
+        "qwen3.8:27b-axq4",
         "gpt-oss:20b",
-        "gemma4:26b",
+        "gemma4:26b-optiq4",
     ]
     deep_retrieval_requery = config.roles["research.deep_retrieval_requery"]
     assert deep_retrieval_requery.provider_id == "local"
-    assert deep_retrieval_requery.model == "qwen3.8:27b-nvfp4"
+    assert deep_retrieval_requery.model == "qwen3.8:27b-axq4"
     assert deep_retrieval_requery.required_capabilities == ("structured_output",)
     assert (
         '# role = "research.deep_retrieval_requery"\n# data_class = "raw"'
@@ -1013,11 +1013,11 @@ def test_repository_example_has_representative_local_role_map() -> None:
     )
     ingest_generation = config.roles["ingest.generation"]
     assert ingest_generation.provider_id == "local"
-    assert ingest_generation.model == "qwen3.8:27b-nvfp4"
+    assert ingest_generation.model == "qwen3.8:27b-axq4"
     assert config.roles["lint.tag_repair"].model == ingest_generation.model
     assert config.roles["lint.orphan_link"].model == ingest_generation.model
-    assert config.roles["knowledge.relation_extraction"].model == "gemma4:26b"
-    assert config.roles["knowledge.community_summary"].model == "gemma4:26b"
+    assert config.roles["knowledge.relation_extraction"].model == "gemma4:26b-optiq4"
+    assert config.roles["knowledge.community_summary"].model == "gemma4:26b-optiq4"
     assert (
         config.roles["recall.content_correction.proposer"].model
         == ingest_generation.model

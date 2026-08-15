@@ -105,7 +105,7 @@ _DISTILLATION_ROLES = {
     "recall.distill.teacher.a": {
         "capability": "generation",
         "provider": "local",
-        "model": "qwen3.8:27b-nvfp4",
+        "model": runtime_config.DEFAULT_DECISION_PRIMARY_MODEL,
         "required_capabilities": ["structured_output"],
     },
     "recall.distill.teacher.b": {
@@ -117,19 +117,19 @@ _DISTILLATION_ROLES = {
     "recall.distill.teacher.c": {
         "capability": "generation",
         "provider": "local",
-        "model": "gemma4:26b",
+        "model": runtime_config.DEFAULT_DECISION_TIE_BREAK_MODEL,
         "required_capabilities": ["structured_output"],
     },
     "recall.distill.answer_generator": {
         "capability": "generation",
         "provider": "local",
-        "model": "qwen3.8:27b-nvfp4",
+        "model": runtime_config.DEFAULT_DECISION_PRIMARY_MODEL,
         "required_capabilities": ["structured_output"],
     },
     "recall.distill.utility_judge": {
         "capability": "generation",
         "provider": "local",
-        "model": "gemma4:26b",
+        "model": runtime_config.DEFAULT_DECISION_TIE_BREAK_MODEL,
         "required_capabilities": ["structured_output"],
     },
 }

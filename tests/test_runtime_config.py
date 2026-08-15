@@ -462,9 +462,9 @@ max_operations_without_audit = 3
 def test_decision_router_config_defaults_to_local_three_model_quorum() -> None:
     cfg = runtime_config.load_decision_router_config("/does/not/exist.toml")
 
-    assert cfg.primary_model == "qwen3.8:27b-nvfp4"
-    assert cfg.challenger_model == "muse-glimmer:30b-nvfp4-dflash"
-    assert cfg.tie_break_model == "gemma4:26b"
+    assert cfg.primary_model == "qwen3.8:27b-axq4"
+    assert cfg.challenger_model == "muse-glimmer:30b-q4k-dynamic"
+    assert cfg.tie_break_model == "gemma4:26b-optiq4"
     assert cfg.num_ctx == 114688
     assert cfg.min_num_ctx == 16384
     assert cfg.num_predict == 3072

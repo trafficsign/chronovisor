@@ -162,10 +162,10 @@ Exceptional system repair
   fixed LLM runtime role. If validation fails, it returns the exact schema errors to the same chat and
   allows at most two repair turns. Input, output, feedback, timeout, and context
   limits are fixed; exhaustion fails closed.
-- **Decision router**: asks `qwen3.8:27b-nvfp4` and
-  `muse-glimmer:30b-nvfp4-dflash`
+- **Decision router**: asks `qwen3.8:27b-axq4` and
+  `muse-glimmer:30b-q4k-dynamic`
   for independent routine votes. Matching votes finish immediately. Otherwise
-  `gemma4:26b` is used as a tie-breaker and any two matching votes form the
+  `gemma4:26b-optiq4` is used as a tie-breaker and any two matching votes form the
   quorum. The complete structured-session token budget selects the smallest
   executable configured context bucket; buckets below the lightest production
   lane envelope are omitted. The current 2KB feedback policy uses 32K, 64K,

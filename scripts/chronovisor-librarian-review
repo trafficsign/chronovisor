@@ -24,7 +24,7 @@ CHRONOVISOR_WRAPPER_DIR=$(CDPATH= cd "$(dirname "$0")" && pwd -P)
   --root "$CHRONOVISOR_ROOT" \
   --review-collection-queue \
   --limit "${CHRONOVISOR_LIBRARIAN_REVIEW_LIMIT:-5}" \
-  --review-model "${CHRONOVISOR_LIBRARIAN_REVIEW_MODEL:-gemma4:26b}" \
+  --review-model "${CHRONOVISOR_LIBRARIAN_REVIEW_MODEL:-gemma4:26b-optiq4}" \
   --review-role primary \
   --json
 

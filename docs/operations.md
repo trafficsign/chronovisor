@@ -951,8 +951,8 @@ cursor keyed by host/session/transcript tracks the last completed assistant
 line so retries do not replay already-enqueued correction turns.
 
 The local router classifies page error, outdated claim, wrong retrieval,
-assistant misquote, ambiguity, unattributed, or no correction. Ornith 35B and
-Muse Glimmer 30B (`muse-glimmer:30b-nvfp4-dflash`) must agree, or Gemma 4 26B
+assistant misquote, ambiguity, unattributed, or no correction. Qwen 3.8 27B
+and Muse Glimmer 30B (`muse-glimmer:30b-q4k-dynamic`) must agree, or Gemma 4 26B
 supplies a tie-break vote. A locally
 confirmed wrong retrieval writes `kind =
 "page_ignored"` with only its explicit `negative_pages` subset; the remaining
@@ -960,6 +960,15 @@ pages from the recall decision are not demoted. Non-page classifications do not
 mutate wiki content. Invalid structured output receives at most two targeted
 repair turns; exhaustion or disagreement is quarantined without frontier
 escalation.
+
+The three canonical MLX tags are fixed imports of
+`AutomatosX/AX-Qwen3.8-27B-MLX-AXQ-4bit-MTP@7e865596`,
+`RadixArk/Muse-Glimmer-q4k-dynamic-MLX@82fbbdf6`, and
+`mlx-community/gemma-4-26B-A4B-it-qat-OptiQ-4bit@49affa8c`.
+Ollama 0.32.12 needs the per-tensor quantization fix from upstream PR 15760;
+the production build identifies itself as `0.32.12-mixedmlx.1eeb7aad` until
+that fix ships upstream. Stock 0.32.12 can import these manifests but cannot
+execute their mixed-bit tensors safely.
 
 Normal pages plus the user-memory system pages `user-profile`, `current-state`,
 and `lessons-learned` are correctable when exact recall provenance names them.
