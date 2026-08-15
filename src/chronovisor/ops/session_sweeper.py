@@ -41,6 +41,24 @@ def _is_user_claude_session(path: Path) -> bool:
     return path.name.startswith("agent-") is False and "subagents" not in path.parts
 
 
+def _is_user_pi_session(path: Path) -> bool:
+    """Exclude Pi subagent run transcripts from memory capture.
+
+    Main Pi sessions live directly under ``~/.pi/agent/sessions/**`` as
+    ``<timestamp>_<uuid>.jsonl``; subagent runs nest deeper as
+    ``<session>/<agent>/run-0/session.jsonl``.
+    """
+    return path.name != "session.jsonl"
+
+
+def _pending_pi(path: Path) -> bool:
+    from chronovisor.raw import pi_record
+
+    state = pi_record.load_state(pi_record.DEFAULT_STATE_FILE)
+    after = pi_record.saved_line_for(state, path)
+    return bool(pi_record.extract_transcript_slice(path, after_line=after).records)
+
+
 def _pending_codex(path: Path) -> bool:
     from chronovisor.raw import codex_record
 
@@ -58,13 +76,14 @@ def _pending_claude(path: Path) -> bool:
 
 
 def discover_pending(*, idle_seconds: int = 300) -> list[tuple[str, Path]]:
-    from chronovisor.raw import claude_code_record, codex_record
+    from chronovisor.raw import claude_code_record, codex_record, pi_record
 
     cutoff = time.time() - max(0, idle_seconds)
     candidates: list[tuple[str, Path]] = []
     roots = (
         ("codex", codex_record.default_sessions_root(), _pending_codex, _is_user_codex_session),
         ("claude-code", claude_code_record.claude_code_projects_root(), _pending_claude, _is_user_claude_session),
+        ("pi", pi_record.pi_projects_root(), _pending_pi, _is_user_pi_session),
     )
     for host, root, pending, is_user_session in roots:
         if not root.exists():
@@ -91,6 +110,14 @@ def _run_one(host: str, path: Path) -> dict[str, Any]:
             max_chars=saver.DEFAULT_MAX_CHARS, timeout=saver.DEFAULT_TIMEOUT_SECONDS,
             dry_run=False, save=True, extract_only=False, ignore_state=False,
             hook=False, trigger_ingest=True,
+        )
+    elif host == "pi":
+        from chronovisor.raw import pi_record as saver
+
+        args = Namespace(
+            session_id=None, session_file=str(path), state_file=str(saver.DEFAULT_STATE_FILE),
+            max_chars=saver.DEFAULT_MAX_CHARS, dry_run=False, save=True,
+            extract_only=False, ignore_state=False, hook=False, trigger_ingest=True,
         )
     else:
         from chronovisor.raw import claude_code_record as saver
