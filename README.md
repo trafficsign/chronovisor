@@ -161,6 +161,8 @@ deployment is local-only. Cloud and hybrid routing modes are experimental.
 The codebase is actively developed with 240,000+ lines of Python, 5,000+
 tests, and enforced quality gates (ruff, mypy, import-linter).
 
+Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
+
 ## Contributing
 
 ```sh
