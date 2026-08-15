@@ -1208,12 +1208,9 @@ def test_session_trace_records_real_phases_and_terminal_result(tmp_path: Path) -
         "vote",
         "vote",
     ]
-    assert "think" not in rows[0]
-    assert "context_tokens" not in rows[0]
-    assert all(row["think"] == "medium" for row in rows[1:])
-    assert all(row["context_tokens"] == 16_384 for row in rows[1:])
-    assert "requested_num_ctx" not in rows[0]
-    assert all(row["requested_num_ctx"] == 16_384 for row in rows[1:])
+    assert all(row["think"] == "medium" for row in rows)
+    assert all(row["context_tokens"] == 16_384 for row in rows)
+    assert all(row["requested_num_ctx"] == 16_384 for row in rows)
     assert rows[-1]["kind"] == "session"
     assert rows[-1]["status"] == "done"
     assert "private prompt" not in json.dumps(rows)

@@ -935,7 +935,7 @@ def test_six_processing_inputs_keep_real_dashboard_paths_connected(
         role = roles[case["workflow"]]
         activities = []
         history = []
-        active_phases = {"A": "generate", "B": "validate", "D": "vote"}
+        active_phases = {"A": "trigger", "B": "validate", "D": "vote"}
         for lane_index, lane in enumerate(dashboard._DECISION_TRACE_ROLES):
             state = case["lane_states"][lane_index]
             tokens = case["lane_context_tokens"][lane_index]
@@ -1051,8 +1051,21 @@ addEventListener("DOMContentLoaded", () => {
         length: node.getTotalLength(),
       };
     };
+    const scroller = document.querySelector("#decision-trace-scroll");
+    const harness = document.querySelector("#decision-trace-harness");
+    scroller.scrollLeft = scroller.scrollWidth;
+    const scrollerRight = scroller.getBoundingClientRect().right;
+    const harnessRight = harness.getBoundingClientRect().right;
+    const layout = {
+      clientWidth: scroller.clientWidth,
+      scrollWidth: scroller.scrollWidth,
+      scrollLeft: scroller.scrollLeft,
+      rightReachable: harnessRight <= scrollerRight + 1,
+    };
+    scroller.scrollLeft = 0;
     return {
       id: fixture.id,
+      layout,
       expanded: [...document.querySelectorAll('[data-processing-lane][aria-expanded="true"]')]
         .map((node) => node.dataset.processingLane),
       context: document.querySelector("[data-context-option].selected")?.dataset.contextTokens,
@@ -1151,7 +1164,7 @@ addEventListener("DOMContentLoaded", () => {
                 "--disable-component-update",
                 "--no-first-run",
                 "--force-prefers-reduced-motion=reduce",
-                "--window-size=1586,992",
+                "--window-size=1050,992",
                 f"--screenshot={screenshot_path}",
                 f"--user-data-dir={tmp_path / 'chrome-profile'}",
                 f"http://127.0.0.1:{server.server_port}/",
@@ -1222,11 +1235,13 @@ addEventListener("DOMContentLoaded", () => {
             "quorum-hold",
         ],
     }
-    active_rail_counts = {"A": 3, "B": 4, "D": 5}
+    active_rail_counts = {"A": 0, "B": 4, "D": 5}
     by_id = {result["id"]: result for result in browser_results}
     for case in cases:
         result = by_id[case["id"]]
         assert result["expanded"] == [case["workflow"]]
+        assert result["layout"]["scrollWidth"] >= result["layout"]["clientWidth"]
+        assert result["layout"]["rightReachable"] is True
         selected_index = (
             case["lane_states"].index("active")
             if "active" in case["lane_states"]

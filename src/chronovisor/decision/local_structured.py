@@ -1383,8 +1383,11 @@ class LocalConsensusAuditStore:
         request_sha256: str,
         role: str,
         model: str,
+        think: bool | str | None = None,
+        think_selection_reason: str | None = None,
         required_num_ctx: int | None = None,
         requested_num_ctx: int | None = None,
+        effective_num_ctx: int | None = None,
     ) -> Iterator[_ActivityUpdate]:
         """Publish a redacted, phase-aware marker while a session executes."""
 
@@ -1478,6 +1481,12 @@ class LocalConsensusAuditStore:
                 "required_num_ctx": required_num_ctx,
                 "requested_num_ctx": requested_num_ctx,
             }
+            if think is not None:
+                record["think"] = think
+            if think_selection_reason is not None:
+                record["think_selection_reason"] = think_selection_reason
+            if effective_num_ctx is not None:
+                record["context_tokens"] = effective_num_ctx
             update("trigger", 0)
         except Exception:
             path = None
@@ -2460,6 +2469,35 @@ class LocalStructuredSession:
             return self.num_predict
         return structured_reasoning_output_reservation(self.num_predict)
 
+    def _reasoning_selection(
+        self,
+        *,
+        effective_num_ctx: int,
+        required_num_ctx: int | None,
+    ) -> tuple[bool | str, str]:
+        profile = _production_reasoning_profile(
+            self.model, self.runtime_role, self.reasoning_authority
+        )
+        selected_think, selection_reason = _structured_think_selection(
+            self.model,
+            num_ctx=effective_num_ctx,
+            required_num_ctx=required_num_ctx,
+            num_predict=self._output_reservation(),
+            runtime_role=self.runtime_role,
+            decision_lane=self.decision_lane,
+            task_impact=self.task_impact,
+            supported_reasoning_levels=(
+                _ADAPTIVE_REASONING_LEVELS if profile is not None else ()
+            ),
+            adaptive_reasoning_adopted=_ADAPTIVE_REASONING_CANARY_ADOPTED,
+        )
+        return (
+            selected_think,
+            "formatless_thinking_initial"
+            if self.model in _FORMATLESS_THINKING_MODELS
+            else selection_reason,
+        )
+
     def _reasoning_request_template(
         self,
         *,
@@ -2470,33 +2508,14 @@ class LocalStructuredSession:
         activity_update: _ActivityUpdate | None,
     ) -> ChatRequest:
         observed_num_ctx = self.num_ctx if requested_num_ctx is None else requested_num_ctx
-        profile = _production_reasoning_profile(
-            self.model, self.runtime_role, self.reasoning_authority
-        )
         authority_profile = _reasoning_authority_profile(self.model, self.runtime_role)
-        reserved_num_predict = self._output_reservation()
-        selection = _structured_think_selection(
-            self.model,
-            num_ctx=effective_num_ctx,
+        selected_think, effective_think_reason = self._reasoning_selection(
+            effective_num_ctx=effective_num_ctx,
             required_num_ctx=required_num_ctx,
-            num_predict=reserved_num_predict,
-            runtime_role=self.runtime_role,
-            decision_lane=self.decision_lane,
-            task_impact=self.task_impact,
-            supported_reasoning_levels=(
-                _ADAPTIVE_REASONING_LEVELS if profile is not None else ()
-            ),
-            adaptive_reasoning_adopted=_ADAPTIVE_REASONING_CANARY_ADOPTED,
         )
         qwen_compatibility = self.model == _QWEN_STRUCTURED_COMPAT_MODEL
         formatless_thinking = self.model in _FORMATLESS_THINKING_MODELS
-        selected_think = selection[0]
         transport_think: bool | str = True if qwen_compatibility else selected_think
-        effective_think_reason = (
-            "formatless_thinking_initial"
-            if formatless_thinking
-            else selection[1]
-        )
         if activity_update is not None:
             activity_update(
                 "load",
@@ -2519,7 +2538,7 @@ class LocalStructuredSession:
             messages=(),
             schema=None if formatless_thinking else schema,
             num_ctx=effective_num_ctx,
-            num_predict=_reasoning_num_predict(selection[0], self.num_predict),
+            num_predict=_reasoning_num_predict(selected_think, self.num_predict),
             keep_alive=self.keep_alive,
             read_timeout_ms=self.read_timeout_ms,
             max_output_chars=self.max_output_chars,
@@ -2967,12 +2986,59 @@ class LocalStructuredSession:
                             "route_configuration_invalid",
                             "route_configuration_invalid",
                         )
+        can_execute = (
+            not format_schema_error
+            and preflight_failure is None
+            and route_failure is None
+        )
+        resource_request: _StructuredResourceRequest | None = None
+        resource_request_error: _StructuredResourceError | None = None
+        if (
+            can_execute
+            and self._uses_default_transport
+            and self._runtime_location != "remote"
+            and route_provider == "ollama"
+            and not self.resource_managed
+        ):
+            try:
+                resource_request = _default_transport_resource_request(
+                    model=self.model,
+                    configured_num_ctx=self.num_ctx,
+                    prompt=prompt,
+                    schema=schema,
+                    system=system,
+                    num_predict=self._output_reservation(),
+                    max_output_chars=self.max_output_chars,
+                    max_feedback_chars=self.max_feedback_chars,
+                    min_num_ctx_override=self.resource_min_num_ctx,
+                    max_num_ctx_override=self.resource_max_num_ctx,
+                    memory_reserve_gib_override=(self.resource_memory_reserve_gib),
+                )
+            except _StructuredResourceError as exc:
+                resource_request_error = exc
+        planned_num_ctx = (
+            resource_request.requested_num_ctx
+            if resource_request is not None
+            else self.num_ctx
+            if can_execute and resource_request_error is None
+            else None
+        )
+        planned_think: bool | str | None = None
+        planned_think_reason: str | None = None
+        if planned_num_ctx is not None:
+            planned_think, planned_think_reason = self._reasoning_selection(
+                effective_num_ctx=planned_num_ctx,
+                required_num_ctx=required_num_ctx,
+            )
         with self.audit_store.activity(
             request_sha256=request_sha256,
             role=self.role,
             model=self.model or self.runtime_role,
+            think=planned_think,
+            think_selection_reason=planned_think_reason,
             required_num_ctx=required_num_ctx,
-            requested_num_ctx=None,
+            requested_num_ctx=planned_num_ctx,
+            effective_num_ctx=planned_num_ctx,
         ) as activity_update:
             observed_request: dict[str, Any] = {}
 
@@ -3017,6 +3083,11 @@ class LocalStructuredSession:
                 result = preflight_failure
             elif route_failure is not None:
                 result = route_failure
+            elif resource_request_error is not None:
+                result = self._failure(
+                    resource_request_error.failure_class,
+                    str(resource_request_error),
+                )
             elif (
                 not self._uses_default_transport
                 or self._runtime_location == "remote"
@@ -3033,38 +3104,22 @@ class LocalStructuredSession:
                 else:
                     result = self._run_impl(prompt, schema, **run_kwargs)
             else:
+                assert resource_request is not None
                 try:
-                    resource_request = _default_transport_resource_request(
+                    with _default_transport_resource_broker(
                         model=self.model,
-                        configured_num_ctx=self.num_ctx,
-                        prompt=prompt,
-                        schema=schema,
-                        system=system,
-                        num_predict=self._output_reservation(),
-                        max_output_chars=self.max_output_chars,
-                        max_feedback_chars=self.max_feedback_chars,
-                        min_num_ctx_override=self.resource_min_num_ctx,
-                        max_num_ctx_override=self.resource_max_num_ctx,
-                        memory_reserve_gib_override=(self.resource_memory_reserve_gib),
-                    )
+                        request=resource_request,
+                        lease_timeout_ms=self.resource_lease_timeout_ms,
+                    ) as admitted_num_ctx:
+                        result = self._run_impl(
+                            prompt,
+                            schema,
+                            num_ctx=admitted_num_ctx,
+                            requested_num_ctx=resource_request.requested_num_ctx,
+                            **run_kwargs,
+                        )
                 except _StructuredResourceError as exc:
                     result = self._failure(exc.failure_class, str(exc))
-                else:
-                    try:
-                        with _default_transport_resource_broker(
-                            model=self.model,
-                            request=resource_request,
-                            lease_timeout_ms=self.resource_lease_timeout_ms,
-                        ) as admitted_num_ctx:
-                            result = self._run_impl(
-                                prompt,
-                                schema,
-                                num_ctx=admitted_num_ctx,
-                                requested_num_ctx=resource_request.requested_num_ctx,
-                                **run_kwargs,
-                            )
-                    except _StructuredResourceError as exc:
-                        result = self._failure(exc.failure_class, str(exc))
             result = replace(
                 result,
                 think=observed_request.get("think"),

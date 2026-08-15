@@ -2786,22 +2786,53 @@ const sandbox = {{
 vm.createContext(sandbox);
 vm.runInContext({json.dumps(renderer + hooks)}, sandbox);
 sandbox.__test.renderLiveModelStatus(
-  {{ model_status: {{ models: [{{ status: "loaded" }}], summary: {{}} }} }},
+  {{
+    model_status: {{
+      available: true,
+      models: [{{ status: "loaded" }}],
+      summary: {{ loaded: 1, installed: 3 }},
+    }},
+    ollama: {{ available: true, models: [{{ name: "qwen:test" }}] }},
+  }},
   [{{ phase: "generate" }}],
 );
+const afterLive = {{
+  state: sandbox.els.ollama.textContent,
+  detail: sandbox.els.ollamaSub.textContent,
+}};
 sandbox.__test.render({{
   status: {{}},
-  model_status: {{ models: [{{ status: "ready" }}], summary: {{}} }},
+  model_status: {{
+    available: false,
+    models: [{{ status: "ready" }}],
+    summary: {{ loaded: 0, installed: 0 }},
+  }},
+  ollama: {{ available: false, models: [] }},
 }});
-process.stdout.write(JSON.stringify(sandbox.__test.seen));
+const afterStaleRender = {{
+  state: sandbox.els.ollama.textContent,
+  detail: sandbox.els.ollamaSub.textContent,
+}};
+process.stdout.write(JSON.stringify({{
+  seen: sandbox.__test.seen,
+  afterLive,
+  afterStaleRender,
+}}));
 """
 
     completed = _run_node_scenario(scenario)
 
-    assert json.loads(completed.stdout) == [
-        {"status": "loaded", "activity": "generate"},
-        {"status": "loaded", "activity": "generate"},
-    ]
+    assert json.loads(completed.stdout) == {
+        "seen": [
+            {"status": "loaded", "activity": "generate"},
+            {"status": "loaded", "activity": "generate"},
+        ],
+        "afterLive": {"state": "online", "detail": "1 loaded · 3 installed"},
+        "afterStaleRender": {
+            "state": "online",
+            "detail": "1 loaded · 3 installed",
+        },
+    }
 
 
 def test_live_consensus_survives_later_stale_full_render() -> None:
@@ -7113,6 +7144,7 @@ def test_save_history_snapshot_combines_raw_drain_and_log(
 
     monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", chronovisor_root)
     monkeypatch.setattr(dashboard, "ACTIVITY_FILE", activity_file)
+    monkeypatch.setattr(dashboard, "_operational_deferred_raw_statuses", lambda _paths: {})
 
     raw_names = [
         "20260701-120000-codex-dashboard-save-history-aaaaaaaa.md",
@@ -7242,6 +7274,7 @@ def test_save_history_snapshot_reconciles_processed_orchestrator_state(
         "ACTIVITY_FILE",
         chronovisor_root / "runtime" / "activity.jsonl",
     )
+    monkeypatch.setattr(dashboard, "_operational_deferred_raw_statuses", lambda _paths: {})
 
     history = dashboard._save_history_snapshot(days=1, today=date(2026, 7, 4))
     day = history["days"][0]
@@ -7283,6 +7316,7 @@ def test_save_history_excludes_generated_semantic_projection_children(
         "ACTIVITY_FILE",
         chronovisor_root / "runtime" / "activity.jsonl",
     )
+    monkeypatch.setattr(dashboard, "_operational_deferred_raw_statuses", lambda _paths: {})
 
     history = dashboard._save_history_snapshot(days=1, today=date(2026, 7, 4))
 
@@ -7331,6 +7365,7 @@ def test_save_history_expands_fragment_group_status_and_processed_wins(
         "ACTIVITY_FILE",
         chronovisor_root / "runtime" / "activity.jsonl",
     )
+    monkeypatch.setattr(dashboard, "_operational_deferred_raw_statuses", lambda _paths: {})
 
     failed_history = dashboard._save_history_snapshot(days=1, today=date(2026, 7, 4))
     assert failed_history["totals"]["failed_bytes"] == 6
@@ -7365,6 +7400,7 @@ def test_save_history_snapshot_empty_wiki(tmp_path: Path, monkeypatch) -> None:
         "ACTIVITY_FILE",
         tmp_path / "wiki" / "runtime" / "activity.jsonl",
     )
+    monkeypatch.setattr(dashboard, "_operational_deferred_raw_statuses", lambda _paths: {})
 
     history = dashboard._save_history_snapshot(days=2, today=date(2026, 7, 4))
 
@@ -7393,6 +7429,7 @@ def test_save_history_only_includes_segment_detail_for_recent_chart_window(
         "ACTIVITY_FILE",
         chronovisor_root / "runtime" / "activity.jsonl",
     )
+    monkeypatch.setattr(dashboard, "_operational_deferred_raw_statuses", lambda _paths: {})
 
     history = dashboard._save_history_snapshot(days=31, today=date(2026, 7, 31))
     by_date = {row["date"]: row for row in history["days"]}

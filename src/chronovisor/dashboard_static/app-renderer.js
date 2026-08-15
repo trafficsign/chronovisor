@@ -3213,9 +3213,14 @@ function renderModelStatus(modelStatus, runtimeFailures, activities = []) {
 function renderLiveModelStatus(snapshot, activities) {
   latestLiveModelSnapshot = {
     model_status: snapshot?.model_status || {},
+    ollama: snapshot?.ollama || {},
     runtime_failures: snapshot?.runtime_failures || [],
     activities: Array.isArray(activities) ? activities : [],
   };
+  renderOllamaMetric(
+    latestLiveModelSnapshot.model_status,
+    latestLiveModelSnapshot.ollama,
+  );
   renderModelStatus(
     latestLiveModelSnapshot.model_status,
     latestLiveModelSnapshot.runtime_failures,
@@ -3540,6 +3545,18 @@ function renderLocalConsensusSummary(status) {
     : `${intValue(decisionSummary.total)} routine · ${intValue(decisionSummary.pair_agreement)} pair · ${intValue(decisionSummary.tie_break_used)} tie · ${intValue(decisionSummary.unresolved_quarantine)} quarantined · ${vetoSummary} · ${intValue(evaluationSummary.total)} eval · ${intValue(policyCounts.shadow)} shadow / ${intValue(policyCounts.enabled)} enabled`;
 }
 
+function renderOllamaMetric(modelStatus, ollama) {
+  const summary = modelStatus?.summary || {};
+  const models = Array.isArray(ollama?.models) ? ollama.models : [];
+  const model = models.find((item) => !String(item.name || item.model || "").includes("embed"))
+    || models[0]
+    || {};
+  els.ollama.textContent = modelStatus?.available || ollama?.available ? "online" : "offline";
+  els.ollamaSub.textContent = summary.installed !== undefined
+    ? `${intValue(summary.loaded)} loaded · ${intValue(summary.installed)} installed`
+    : model.name || model.model || "no model";
+}
+
 function render(snapshot) {
   const snapshotStatus = snapshot.status || {};
   const snapshotConsensus = snapshot.local_consensus || snapshotStatus.local_consensus || {};
@@ -3551,11 +3568,8 @@ function render(snapshot) {
   latestRenderedStatus = status;
   const metrics = snapshot.metrics || [];
   const batch = status.batch || {};
-  const ollama = snapshot.ollama || {};
+  const ollama = latestLiveModelSnapshot?.ollama || snapshot.ollama || {};
   const modelStatus = latestLiveModelSnapshot?.model_status || snapshot.model_status || {};
-  const modelSummary = modelStatus.summary || {};
-  const models = ollama.models || [];
-  const model = models.find((item) => !String(item.name || item.model || "").includes("embed")) || models[0] || {};
 
   setState(status.state);
   const ready = intValue(status.pending);
@@ -3574,10 +3588,7 @@ function render(snapshot) {
   els.batchSub.textContent = batch.total
     ? `${batch.succeeded || 0} ok / ${batch.deferred || 0} deferred / ${batch.continued || 0} continued / ${batch.failed || 0} fail`
     : "waiting";
-  els.ollama.textContent = modelStatus.available || ollama.available ? "online" : "offline";
-  els.ollamaSub.textContent = modelSummary.installed !== undefined
-    ? `${intValue(modelSummary.loaded)} loaded · ${intValue(modelSummary.installed)} installed`
-    : model.name || model.model || "no model";
+  renderOllamaMetric(modelStatus, ollama);
   els.currentRaw.textContent = status.current_raw ? shortName(status.current_raw) : "waiting";
   els.currentOp.textContent = status.current_op ? fmt(status.current_op) : fmt(status.stage || "idle");
   renderWorkStatus(status);
