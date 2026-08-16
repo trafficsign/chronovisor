@@ -120,7 +120,7 @@ DECISION_RUNTIME_ROLES = (
 )
 # Live runtime status is overlaid at response time; expensive cold aggregates
 # only need this bounded active refresh cadence.
-SNAPSHOT_ACTIVE_CACHE_SECONDS = 30.0
+SNAPSHOT_ACTIVE_CACHE_SECONDS = 300.0
 SNAPSHOT_IDLE_CACHE_SECONDS = 60.0
 SNAPSHOT_FINGERPRINT_AUDIT_SECONDS = 1.0
 SAVE_HISTORY_SEGMENT_DETAIL_DAYS = 30
@@ -5232,7 +5232,7 @@ def build_snapshot() -> dict[str, Any]:
 def _snapshot_fixed_source_paths() -> tuple[Path, ...]:
     # Directory identities are the immediate coarse signal. Append/in-place
     # cold inputs that do not move a directory entry are intentionally bounded
-    # by the 30s active / 60s idle snapshot TTL instead of triggering rebuilds.
+    # by the active / idle snapshot TTL instead of triggering rebuilds.
     # Local Consensus live markers stay excluded. Its bounded decision audit
     # is tracked because invalid votes feed model failure telemetry.
     return (

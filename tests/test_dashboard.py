@@ -5298,7 +5298,7 @@ def test_cached_snapshot_refreshes_on_semantic_runtime_epoch_change(
     assert calls == 2
 
 
-def test_cached_snapshot_uses_30_second_cold_ttl_while_active(
+def test_cached_snapshot_uses_five_minute_cold_ttl_while_active(
     tmp_path: Path, monkeypatch
 ) -> None:
     _reset_snapshot_fingerprint_cache()
@@ -5336,7 +5336,7 @@ def test_cached_snapshot_uses_30_second_cold_ttl_while_active(
     monkeypatch.setattr(dashboard.time, "monotonic", lambda: clock[0])
 
     assert dashboard._cached_snapshot()["serial"] == 1
-    assert dashboard.SNAPSHOT_ACTIVE_CACHE_SECONDS == 30.0
+    assert dashboard.SNAPSHOT_ACTIVE_CACHE_SECONDS == 300.0
     clock[0] += dashboard.SNAPSHOT_ACTIVE_CACHE_SECONDS - 0.001
     assert dashboard._cached_snapshot()["serial"] == 1
     clock[0] += 0.001
