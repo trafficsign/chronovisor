@@ -1632,6 +1632,7 @@ def test_anomaly_worker_gpt_oss_reserves_bounded_reasoning_budget(
 
     assert observed["num_predict"] == 1_800
     assert observed["think"] == "low"
+    assert observed["keep_alive"] == "30s"
 
 
 def _remote_anomaly_runtime(monkeypatch: pytest.MonkeyPatch, backend_calls: list):

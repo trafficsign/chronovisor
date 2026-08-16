@@ -210,7 +210,7 @@ def run(payload: Mapping[str, Any]) -> dict[str, Any]:
         format=_schema(slugs),
         num_ctx=8_192,
         num_predict=num_predict,
-        keep_alive="0",
+        keep_alive="30s",
         read_timeout_ms=read_timeout_ms,
         max_output_chars=6_000,
         temperature=0,
