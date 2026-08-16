@@ -13,3 +13,6 @@ def test_periodic_review_reconciles_current_scope_before_model_review() -> None:
 
     assert full_sweep < primary_review
     assert "--full-sweep \\\n  --json \\\n  >/dev/null" in wrapper
+    assert "--review-model" not in wrapper
+    assert "--review-role primary" in wrapper
+    assert "--review-role challenger" in wrapper
