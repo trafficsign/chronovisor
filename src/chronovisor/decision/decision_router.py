@@ -3798,20 +3798,40 @@ class DecisionRouter:
                         result.votes,
                         "local_policy_resolution_lacks_two_vote_quorum",
                     )
-            # Heavy decision runners are batch resources, not services. Release
-            # every runner that actually voted before returning authority to
-            # the caller. The protected Recall runner is not one of these
-            # configured roles and remains resident. Single-runner plans have
-            # already evicted between votes; the attempted-event set prevents a
-            # redundant second unload.
             attempted_evictions = {
                 str(event.get("model") or "") for event in eviction_events
             }
-            for model in dict.fromkeys(
-                vote.model
-                for vote in result.votes
-                if vote.role in self._local_roles
+            voted_local_models = tuple(
+                dict.fromkeys(
+                    vote.model
+                    for vote in result.votes
+                    if vote.role in self._local_roles
+                )
+            )
+            post_decision_plan: ollama.ModelResidencyPlan | None = None
+            eviction_candidates = voted_local_models
+            if (
+                result.ok
+                and self.live_resource_control
+                and residency_plan.max_resident_models > 1
             ):
+                # Reuse warm runners only while a fresh macOS pressure and
+                # Ollama footprint probe still preserves the configured memory
+                # reserve. The next decision repeats the same admission check.
+                post_decision_plan = self._residency_plan(selected_num_ctx)
+                allowed = set(
+                    self._local_models[: post_decision_plan.max_resident_models]
+                )
+                resident = set(post_decision_plan.resident_models)
+                incompatible = set(post_decision_plan.initial_eviction_models)
+                unsafe = incompatible | (set(self._local_models) - allowed)
+                eviction_candidates = tuple(
+                    model
+                    for model in self._local_models
+                    if model in unsafe
+                    and (model in resident or model in voted_local_models)
+                )
+            for model in eviction_candidates:
                 if model in attempted_evictions:
                     continue
                 self._evict_model(model, eviction_events)
@@ -3820,6 +3840,17 @@ class DecisionRouter:
                 "required_num_ctx": required_num_ctx,
                 "evictions": list(eviction_events),
             }
+            if post_decision_plan is not None:
+                residency["post_decision"] = post_decision_plan.audit_record()
+                residency["retained_models"] = [
+                    model
+                    for model in post_decision_plan.resident_models
+                    if model
+                    in self._local_models[
+                        : post_decision_plan.max_resident_models
+                    ]
+                    and model not in post_decision_plan.initial_eviction_models
+                ]
             result = replace(
                 result,
                 num_ctx=selected_num_ctx,

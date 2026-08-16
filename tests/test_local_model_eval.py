@@ -428,7 +428,7 @@ def test_live_eval_resets_surviving_runners_and_wires_exact_mode(
     )
 
     assert result["cases"][0]["evaluated_context_buckets"] == [16_384]
-    assert observed_reuse_modes == [False]
+    assert observed_reuse_modes == [False, False]
     assert events[:3] == [
         ("unload", "ornith:test"),
         ("unload", "gpt-oss:test"),
@@ -437,8 +437,6 @@ def test_live_eval_resets_surviving_runners_and_wires_exact_mode(
     assert events[3:] == [
         ("chat", "ornith:test"),
         ("chat", "gpt-oss:test"),
-        ("unload", "ornith:test"),
-        ("unload", "gpt-oss:test"),
     ]
 
 

@@ -1417,18 +1417,14 @@ def test_disagreement_runs_tie_break_and_selects_matching_existing_vote(
         "gpt-oss:test",
         "gemma:test",
     ]
-    assert [request.think for request in transport.requests] == [
-        False,
-        False,
-        False,
-    ]
+    assert [request.think for request in transport.requests] == ["medium"] * 3
     assert [
         request.think_selection_reason for request in transport.requests
-    ] == ["capability_not_adopted"] * 3
+    ] == ["adaptive_canary_not_adopted"] * 3
     audits = [vote.audit_record()["session"] for vote in result.votes]
-    assert [audit["think"] for audit in audits] == [False] * 3
+    assert [audit["think"] for audit in audits] == ["medium"] * 3
     assert [audit["think_selection_reason"] for audit in audits] == [
-        "capability_not_adopted"
+        "adaptive_canary_not_adopted"
     ] * 3
     assert all(audit["context_tokens"] == 16_384 for audit in audits)
     assert all(audit["requested_num_ctx"] == 16_384 for audit in audits)
@@ -1448,52 +1444,43 @@ def test_disagreement_runs_tie_break_and_selects_matching_existing_vote(
 @pytest.mark.parametrize(
     (
         "role",
-        "decision_lane",
         "digest",
-        "expected_think",
-        "expected_reason",
-        "expected_num_predict",
         "expected_ollama_think",
     ),
     [
-        (role, decision_lane, digest, think, reason, budget, ollama_think)
-        for role, digest, ollama_think in (
+        (
+            role,
+            digest,
+            "medium" if native_levels else True,
+        )
+        for role, digest, native_levels in (
             (
                 "primary",
-                "062d753f197f4b1d9b5e82c4c2fa19e6f39293628e8638ceac287ca517c6fca8",
-                True,
+                "09eba04b154c7a50fdc04104d0e5f0d9d535df5ffef7105529a4b001711d3bac",
+                False,
             ),
             (
                 "challenger",
-                "14bd0cb8d43fddcf8f637f3efe14b4888e97cc47ca4558dbb78ce56ce0448a37",
-                None,
+                "76f57f0eaee1605340e376f868f01410a0677e9d318dfcec1d73fedfa165dcfa",
+                True,
             ),
             (
                 "tie_break",
-                "5571076f3d70050487b26b341705799e0ab29b808164f90d20d4cf84f699d251",
-                True,
+                "45ae882f90f8a0fd0b59a49cec62b0b3368545a7a60342af3e867bdcc46ae271",
+                False,
             ),
-        )
-        for decision_lane, think, reason, budget in (
-            ("local_repair", "low", "bounded_repair_low", 170),
-            (None, "medium", "medium_default", 256),
-            ("recall_auto_apply", "high", "high_impact", 341),
         )
     ],
 )
-def test_production_reasoning_authority_selects_verified_levels_for_every_role(
+def test_production_reasoning_authority_keeps_medium_until_canary(
     role: str,
-    decision_lane: str | None,
     digest: str,
-    expected_think: str,
-    expected_reason: str,
-    expected_num_predict: int,
     expected_ollama_think: bool | str,
 ) -> None:
     models = {
-        "primary": "maxwell1500/ornith-35b:Q5_K_M",
-        "challenger": "muse-glimmer:30b-mxfp8-dflash",
-        "tie_break": "gemma4:26b",
+        "primary": "qwen3.8:27b-axq4",
+        "challenger": "muse-glimmer:30b-q4k-dynamic",
+        "tie_break": "gemma4:26b-optiq4",
     }
     model = models[role]
     transport = ModelTransport({model: [_payload("apply")]})
@@ -1515,7 +1502,10 @@ def test_production_reasoning_authority_selects_verified_levels_for_every_role(
             "endpoint_sha256": "e" * 64,
             "revision": None,
             "ollama": {
-                "engine": {"name": "ollama", "version": "0.32.8"},
+                "engine": {
+                    "name": "ollama",
+                    "version": "0.32.12-mixedmlx.1eeb7aad",
+                },
                 "digest": digest,
                 "quantization_level": "test",
             },
@@ -1531,20 +1521,22 @@ def test_production_reasoning_authority_selects_verified_levels_for_every_role(
         schema=SCHEMA,
         system=None,
         agreement_key=None,
-        decision_lane=decision_lane,
+        decision_lane="recall_auto_apply",
         ingest_repair_contract=None,
         source=None,
     )
 
     assert vote.valid is True
-    assert transport.requests[0].think == expected_think
-    assert transport.requests[0].num_predict == expected_num_predict
-    assert transport.requests[0].ollama_think == (
-        expected_think if expected_ollama_think is None else expected_ollama_think
+    assert transport.requests[0].think == "medium"
+    assert transport.requests[0].num_predict == 256
+    assert transport.requests[0].ollama_think == expected_ollama_think
+    assert transport.requests[0].think_selection_reason == (
+        "adaptive_canary_not_adopted"
     )
-    assert transport.requests[0].think_selection_reason == expected_reason
-    assert vote.result.audit_record()["think"] == expected_think
-    assert vote.result.audit_record()["think_selection_reason"] == expected_reason
+    assert vote.result.audit_record()["think"] == "medium"
+    assert vote.result.audit_record()["think_selection_reason"] == (
+        "adaptive_canary_not_adopted"
+    )
 
 
 @pytest.mark.parametrize(
@@ -1555,9 +1547,9 @@ def test_production_reasoning_authority_fails_closed_on_digest_mismatch(
     role: str,
 ) -> None:
     models = {
-        "primary": "maxwell1500/ornith-35b:Q5_K_M",
-        "challenger": "muse-glimmer:30b-mxfp8-dflash",
-        "tie_break": "gemma4:26b",
+        "primary": "qwen3.8:27b-axq4",
+        "challenger": "muse-glimmer:30b-q4k-dynamic",
+        "tie_break": "gemma4:26b-optiq4",
     }
     model = models[role]
     transport = ModelTransport({model: [_payload("apply")]})
@@ -1579,7 +1571,10 @@ def test_production_reasoning_authority_fails_closed_on_digest_mismatch(
             "endpoint_sha256": "e" * 64,
             "revision": None,
             "ollama": {
-                "engine": {"name": "ollama", "version": "0.32.8"},
+                "engine": {
+                    "name": "ollama",
+                    "version": "0.32.12-mixedmlx.1eeb7aad",
+                },
                 "digest": "0" * 64,
                 "quantization_level": "test",
             },
@@ -1601,10 +1596,16 @@ def test_production_reasoning_authority_fails_closed_on_digest_mismatch(
     )
 
     assert vote.valid is True
-    assert transport.requests[0].think is False
+    assert transport.requests[0].think == "medium"
     assert transport.requests[0].num_predict == 256
-    assert transport.requests[0].ollama_think is False
-    assert transport.requests[0].think_selection_reason == "capability_not_adopted"
+    assert transport.requests[0].ollama_think == {
+        "primary": True,
+        "challenger": "medium",
+        "tie_break": True,
+    }[role]
+    assert transport.requests[0].think_selection_reason == (
+        "adaptive_canary_not_adopted"
+    )
 
 
 def _request_context_authority_router(
@@ -1614,9 +1615,9 @@ def _request_context_authority_router(
     num_predict: int = 256,
 ) -> DecisionRouter:
     models = {
-        "primary": "maxwell1500/ornith-35b:Q5_K_M",
-        "challenger": "muse-glimmer:30b-mxfp8-dflash",
-        "tie_break": "gemma4:26b",
+        "primary": "qwen3.8:27b-axq4",
+        "challenger": "muse-glimmer:30b-q4k-dynamic",
+        "tie_break": "gemma4:26b-optiq4",
     }
     router = DecisionRouter(
         config=_config(
@@ -1636,8 +1637,11 @@ def _request_context_authority_router(
         "endpoint_sha256": "e" * 64,
         "revision": None,
         "ollama": {
-            "engine": {"name": "ollama", "version": "0.32.8"},
-            "digest": "062d753f197f4b1d9b5e82c4c2fa19e6f39293628e8638ceac287ca517c6fca8",
+            "engine": {
+                "name": "ollama",
+                "version": "0.32.12-mixedmlx.1eeb7aad",
+            },
+            "digest": "09eba04b154c7a50fdc04104d0e5f0d9d535df5ffef7105529a4b001711d3bac",
             "quantization_level": "test",
         },
     }
@@ -1671,7 +1675,10 @@ def _request_context_authority_router(
             "runtime_role_mapping",
             {
                 "ollama": {
-                    "engine": {"name": "ollama", "version": "0.32.8"},
+                    "engine": {
+                        "name": "ollama",
+                        "version": "0.32.12-mixedmlx.1eeb7aad",
+                    },
                     "digest": "0" * 64,
                 }
             },
@@ -1680,8 +1687,8 @@ def _request_context_authority_router(
             "runtime_role_mapping",
             {
                 "ollama": {
-                    "engine": {"name": "ollama", "version": "0.32.9"},
-                    "digest": "062d753f197f4b1d9b5e82c4c2fa19e6f39293628e8638ceac287ca517c6fca8",
+                    "engine": {"name": "ollama", "version": "0.32.13"},
+                    "digest": "09eba04b154c7a50fdc04104d0e5f0d9d535df5ffef7105529a4b001711d3bac",
                 }
             },
         ),

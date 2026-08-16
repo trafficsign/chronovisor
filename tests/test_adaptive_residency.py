@@ -103,6 +103,9 @@ def _plan(
     resident_models: tuple[str, ...] = (),
     calibrated_models: tuple[str, ...] = MODELS,
     initial_eviction_models: tuple[str, ...] = (),
+    pressure_forced_single: bool = False,
+    compressed_bytes: int = 0,
+    swap_used_bytes: int = 0,
 ) -> ollama.ModelResidencyPlan:
     estimated_bytes = tuple(value * ollama.GIB for value in estimates)
     return ollama.ModelResidencyPlan(
@@ -118,6 +121,9 @@ def _plan(
         calibrated_models=calibrated_models,
         source="test",
         initial_eviction_models=initial_eviction_models,
+        pressure_forced_single=pressure_forced_single,
+        compressed_bytes=compressed_bytes,
+        swap_used_bytes=swap_used_bytes,
     )
 
 
@@ -926,6 +932,17 @@ def test_non_fitting_tie_does_not_block_an_agreeing_pair(
         "model_resource_lease",
         lambda **_kwargs: nullcontext(),
     )
+    plans = iter(
+        (
+            _plan(2, capacity_bytes=20 * ollama.GIB, estimates=(8, 10, 22)),
+            _plan(
+                2,
+                capacity_bytes=20 * ollama.GIB,
+                estimates=(8, 10, 22),
+                resident_models=(PRIMARY, CHALLENGER),
+            ),
+        )
+    )
 
     result = DecisionRouter(
         config=_config(),
@@ -933,11 +950,7 @@ def test_non_fitting_tie_does_not_block_an_agreeing_pair(
         audit_root=tmp_path / "audit",
         resolve_adoption=False,
         record_replay=False,
-        residency_planner=lambda _models, **_kwargs: _plan(
-            2,
-            capacity_bytes=20 * ollama.GIB,
-            estimates=(8, 10, 22),
-        ),
+        residency_planner=lambda _models, **_kwargs: next(plans),
         model_observer=lambda model: (8 * ollama.GIB, 16_384),
         model_unloader=lambda model: events.append(("unload", model)) or True,
         live_resource_control=True,
@@ -945,12 +958,10 @@ def test_non_fitting_tie_does_not_block_an_agreeing_pair(
 
     assert result.ok is True
     assert [vote.model for vote in result.votes] == [PRIMARY, CHALLENGER]
-    assert events == [
-        ("chat", PRIMARY, 2),
-        ("chat", CHALLENGER, 2),
-        ("unload", PRIMARY),
-        ("unload", CHALLENGER),
-    ]
+    assert events == [("chat", PRIMARY, 2), ("chat", CHALLENGER, 2)]
+    assert result.residency is not None
+    assert result.residency["evictions"] == []
+    assert result.residency["retained_models"] == [PRIMARY, CHALLENGER]
 
 
 def test_non_fitting_tie_quarantines_only_after_pair_disagrees(
@@ -1135,6 +1146,16 @@ def test_two_residents_keep_smaller_pair_model_for_calibrated_tie_break(
     def unload(model: str) -> bool:
         events.append(("unload", model))
         return True
+    plans = iter(
+        (
+            _plan(2, capacity_bytes=20 * ollama.GIB),
+            _plan(
+                2,
+                capacity_bytes=20 * ollama.GIB,
+                resident_models=(PRIMARY, TIE_BREAK),
+            ),
+        )
+    )
 
     result = DecisionRouter(
         config=_config(),
@@ -1142,10 +1163,7 @@ def test_two_residents_keep_smaller_pair_model_for_calibrated_tie_break(
         audit_root=tmp_path / "audit",
         resolve_adoption=False,
         record_replay=False,
-        residency_planner=lambda _models, **_kwargs: _plan(
-            2,
-            capacity_bytes=20 * ollama.GIB,
-        ),
+        residency_planner=lambda _models, **_kwargs: next(plans),
         model_observer=lambda model: (8 * ollama.GIB, 16_384),
         model_unloader=unload,
         live_resource_control=True,
@@ -1158,15 +1176,14 @@ def test_two_residents_keep_smaller_pair_model_for_calibrated_tie_break(
         ("chat", CHALLENGER, 2),
         ("unload", CHALLENGER),
         ("chat", TIE_BREAK, 2),
-        ("unload", PRIMARY),
         ("unload", TIE_BREAK),
     ]
     assert result.residency is not None
     assert result.residency["evictions"] == [
         {"model": CHALLENGER, "verified": True},
-        {"model": PRIMARY, "verified": True},
         {"model": TIE_BREAK, "verified": True},
     ]
+    assert result.residency["retained_models"] == [PRIMARY]
 
 
 def test_tie_substitution_keeps_the_same_two_gib_upshift_headroom(
@@ -1211,7 +1228,7 @@ def test_tie_substitution_keeps_the_same_two_gib_upshift_headroom(
 
 
 @pytest.mark.parametrize("max_resident_models", [2, 3])
-def test_multi_resident_pair_agreement_releases_runners_after_decision(
+def test_multi_resident_pair_agreement_retains_safe_warm_runners(
     max_resident_models: int,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1233,6 +1250,15 @@ def test_multi_resident_pair_agreement_releases_runners_after_decision(
     def unload(model: str) -> bool:
         events.append(("unload", model))
         return True
+    plans = iter(
+        (
+            _plan(max_resident_models),
+            _plan(
+                max_resident_models,
+                resident_models=(PRIMARY, CHALLENGER),
+            ),
+        )
+    )
 
     result = DecisionRouter(
         config=_config(),
@@ -1240,7 +1266,7 @@ def test_multi_resident_pair_agreement_releases_runners_after_decision(
         audit_root=tmp_path / "audit",
         resolve_adoption=False,
         record_replay=False,
-        residency_planner=lambda _models, **_kwargs: _plan(max_resident_models),
+        residency_planner=lambda _models, **_kwargs: next(plans),
         model_observer=lambda model: (8 * ollama.GIB, 16_384),
         model_unloader=unload,
         live_resource_control=True,
@@ -1248,20 +1274,61 @@ def test_multi_resident_pair_agreement_releases_runners_after_decision(
 
     assert result.ok is True
     assert [vote.model for vote in result.votes] == [PRIMARY, CHALLENGER]
+    assert events == [("chat", PRIMARY, 2), ("chat", CHALLENGER, 2)]
+    assert result.residency is not None
+    assert result.residency["evictions"] == []
+    assert result.residency["retained_models"] == [PRIMARY, CHALLENGER]
+
+
+def test_post_decision_pressure_reprobe_evicts_extra_warm_runner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[tuple[Any, ...]] = []
+    transport = EventTransport(
+        {PRIMARY: [_payload("apply")], CHALLENGER: [_payload("apply")]},
+        events,
+    )
+    monkeypatch.setattr(ollama, "model_resource_lease", lambda **_kwargs: nullcontext())
+    plans = iter(
+        (
+            _plan(3),
+            _plan(
+                1,
+                resident_models=(PRIMARY, CHALLENGER),
+                pressure_forced_single=True,
+                compressed_bytes=40 * ollama.GIB,
+                swap_used_bytes=8 * ollama.GIB,
+            ),
+        )
+    )
+
+    result = DecisionRouter(
+        config=_config(),
+        transport=transport,
+        audit_root=tmp_path / "audit",
+        resolve_adoption=False,
+        record_replay=False,
+        residency_planner=lambda _models, **_kwargs: next(plans),
+        model_observer=lambda model: (8 * ollama.GIB, 16_384),
+        model_unloader=lambda model: events.append(("unload", model)) or True,
+        live_resource_control=True,
+    ).decide("prompt", SCHEMA)
+
+    assert result.ok is True
     assert events == [
         ("chat", PRIMARY, 2),
         ("chat", CHALLENGER, 2),
-        ("unload", PRIMARY),
         ("unload", CHALLENGER),
     ]
     assert result.residency is not None
-    assert result.residency["evictions"] == [
-        {"model": PRIMARY, "verified": True},
-        {"model": CHALLENGER, "verified": True},
-    ]
+    assert result.residency["retained_models"] == [PRIMARY]
+    assert result.residency["post_decision"]["pressure_forced_single"] is True
+    assert result.residency["post_decision"]["compressed_bytes"] == 40 * ollama.GIB
+    assert result.residency["post_decision"]["swap_used_bytes"] == 8 * ollama.GIB
 
 
-def test_three_residents_run_tie_break_then_release_all_runners(
+def test_three_residents_run_tie_break_then_retain_safe_warm_runners(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1279,6 +1346,7 @@ def test_three_residents_run_tie_break_then_release_all_runners(
         "model_resource_lease",
         lambda **_kwargs: nullcontext(),
     )
+    plans = iter((_plan(3), _plan(3, resident_models=MODELS)))
 
     result = DecisionRouter(
         config=_config(),
@@ -1286,7 +1354,7 @@ def test_three_residents_run_tie_break_then_release_all_runners(
         audit_root=tmp_path / "audit",
         resolve_adoption=False,
         record_replay=False,
-        residency_planner=lambda _models, **_kwargs: _plan(3),
+        residency_planner=lambda _models, **_kwargs: next(plans),
         model_observer=lambda model: (8 * ollama.GIB, 16_384),
         model_unloader=lambda model: events.append(("unload", model)) or True,
         live_resource_control=True,
@@ -1298,16 +1366,10 @@ def test_three_residents_run_tie_break_then_release_all_runners(
         ("chat", PRIMARY, 2),
         ("chat", CHALLENGER, 2),
         ("chat", TIE_BREAK, 2),
-        ("unload", PRIMARY),
-        ("unload", CHALLENGER),
-        ("unload", TIE_BREAK),
     ]
     assert result.residency is not None
-    assert result.residency["evictions"] == [
-        {"model": PRIMARY, "verified": True},
-        {"model": CHALLENGER, "verified": True},
-        {"model": TIE_BREAK, "verified": True},
-    ]
+    assert result.residency["evictions"] == []
+    assert result.residency["retained_models"] == list(MODELS)
 
 
 def test_three_resident_plan_evicts_incompatible_runner_before_first_vote(
@@ -1331,6 +1393,16 @@ def test_three_resident_plan_evicts_incompatible_runner_before_first_vote(
     def unload(model: str) -> bool:
         events.append(("unload", model))
         return True
+    plans = iter(
+        (
+            _plan(
+                3,
+                resident_models=(TIE_BREAK,),
+                initial_eviction_models=(TIE_BREAK,),
+            ),
+            _plan(3, resident_models=(PRIMARY, CHALLENGER)),
+        )
+    )
 
     result = DecisionRouter(
         config=_config(),
@@ -1338,11 +1410,7 @@ def test_three_resident_plan_evicts_incompatible_runner_before_first_vote(
         audit_root=tmp_path / "audit",
         resolve_adoption=False,
         record_replay=False,
-        residency_planner=lambda _models, **_kwargs: _plan(
-            3,
-            resident_models=(TIE_BREAK,),
-            initial_eviction_models=(TIE_BREAK,),
-        ),
+        residency_planner=lambda _models, **_kwargs: next(plans),
         model_observer=lambda model: (8 * ollama.GIB, 16_384),
         model_unloader=unload,
         live_resource_control=True,
@@ -1353,12 +1421,9 @@ def test_three_resident_plan_evicts_incompatible_runner_before_first_vote(
         ("unload", TIE_BREAK),
         ("chat", PRIMARY, 2),
         ("chat", CHALLENGER, 2),
-        ("unload", PRIMARY),
-        ("unload", CHALLENGER),
     ]
     assert result.residency is not None
     assert result.residency["evictions"] == [
         {"model": TIE_BREAK, "verified": True},
-        {"model": PRIMARY, "verified": True},
-        {"model": CHALLENGER, "verified": True},
     ]
+    assert result.residency["retained_models"] == [PRIMARY, CHALLENGER]

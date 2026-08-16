@@ -41,7 +41,7 @@ SAFE_RUNTIME_ROLE_RE = re.compile(r"^[a-z][a-z0-9._-]{0,127}$")
 LOCAL_ACTIVITY_PHASES = frozenset(
     {"trigger", "load", "context", "generate", "repair", "validate", "vote"}
 )
-STRUCTURED_GENERATION_POLICY_VERSION = 13
+STRUCTURED_GENERATION_POLICY_VERSION = 14
 STRUCTURED_GENERATION_TEMPERATURE = 0
 STRUCTURED_GENERATION_SEED = 0
 _DEFAULT_STRUCTURED_MEMORY_RESERVE_GIB = 16
@@ -51,37 +51,41 @@ _MUSE_STRUCTURED_COMPAT_MODEL = "muse-glimmer:30b-q4k-dynamic"
 _FORMATLESS_THINKING_MODELS = frozenset(
     {_QWEN_STRUCTURED_COMPAT_MODEL, _MUSE_STRUCTURED_COMPAT_MODEL}
 )
-_ADAPTIVE_REASONING_CANARY_ADOPTED = True
+_ADAPTIVE_REASONING_CANARY_ADOPTED = False
 _BOUNDED_LOW_REASONING_LANES = frozenset({"local_repair", "read_back_repair"})
+_NO_REASONING_LANES = frozenset({"content_correction_review"})
 _REASONING_LEVELS = frozenset({"low", "medium", "high"})
 _ADAPTIVE_REASONING_LEVELS = ("low", "medium", "high")
 _ADAPTIVE_REASONING_AUTHORITIES = (
     {
         "runtime_role": "classification.primary",
-        "model": "maxwell1500/ornith-35b:Q5_K_M",
+        "model": "qwen3.8:27b-axq4",
         "model_digest": (
-            "062d753f197f4b1d9b5e82c4c2fa19e6f39293628e8638ceac287ca517c6fca8"
+            "09eba04b154c7a50fdc04104d0e5f0d9d535df5ffef7105529a4b001711d3bac"
         ),
         "renderer": "boolean",
     },
     {
         "runtime_role": "classification.challenger",
-        "model": "muse-glimmer:30b-mxfp8-dflash",
+        "model": "muse-glimmer:30b-q4k-dynamic",
         "model_digest": (
-            "14bd0cb8d43fddcf8f637f3efe14b4888e97cc47ca4558dbb78ce56ce0448a37"
+            "76f57f0eaee1605340e376f868f01410a0677e9d318dfcec1d73fedfa165dcfa"
         ),
         "renderer": "native_levels",
     },
     {
         "runtime_role": "classification.tie_break",
-        "model": "gemma4:26b",
+        "model": "gemma4:26b-optiq4",
         "model_digest": (
-            "5571076f3d70050487b26b341705799e0ab29b808164f90d20d4cf84f699d251"
+            "45ae882f90f8a0fd0b59a49cec62b0b3368545a7a60342af3e867bdcc46ae271"
         ),
         "renderer": "boolean",
     },
 )
-_ADAPTIVE_REASONING_ENGINE = {"name": "ollama", "version": "0.32.8"}
+_ADAPTIVE_REASONING_ENGINE = {
+    "name": "ollama",
+    "version": "0.32.12-mixedmlx.1eeb7aad",
+}
 _REASONING_OUTPUT_BUDGET_PROFILE = {
     "low": (2, 3),
     "medium": (1, 1),
@@ -145,10 +149,11 @@ def structured_generation_policy() -> dict[str, Any]:
         "temperature": STRUCTURED_GENERATION_TEMPERATURE,
         "seed": STRUCTURED_GENERATION_SEED,
         "think": {
-            "default": False,
-            "fallback": False,
+            "default": "medium",
+            "fallback": "medium",
             "levels": ["low", "medium", "high"],
             "bounded_low_lanes": sorted(_BOUNDED_LOW_REASONING_LANES),
+            "disabled_lanes": sorted(_NO_REASONING_LANES),
             "adaptive_canary_adopted": _ADAPTIVE_REASONING_CANARY_ADOPTED,
             "adaptive_authority": [
                 {
@@ -199,7 +204,7 @@ def _structured_think_selection(
     supported_reasoning_levels: Sequence[str] | None = None,
     adaptive_reasoning_adopted: bool = False,
 ) -> tuple[bool | str, str]:
-    """Select one verified reasoning level, otherwise disable reasoning."""
+    """Select one verified reasoning level, otherwise preserve medium."""
 
     valid_ints = (num_ctx, required_num_ctx, num_predict)
     if (
@@ -219,22 +224,24 @@ def _structured_think_selection(
         or task_impact not in {"normal", "high"}
         or not isinstance(adaptive_reasoning_adopted, bool)
     ):
-        return False, "invalid_selection_input"
+        return "medium", "invalid_selection_input"
+    if decision_lane in _NO_REASONING_LANES:
+        return False, "quality_equivalent_no_reasoning"
     if not adaptive_reasoning_adopted:
-        return False, "adaptive_canary_not_adopted"
+        return "medium", "adaptive_canary_not_adopted"
     if supported_reasoning_levels is None:
-        return False, "capability_unknown"
+        return "medium", "capability_unknown"
     if isinstance(supported_reasoning_levels, (str, bytes)) or not isinstance(
         supported_reasoning_levels, Sequence
     ):
-        return False, "capability_invalid"
+        return "medium", "capability_invalid"
     if not all(isinstance(level, str) for level in supported_reasoning_levels):
-        return False, "capability_invalid"
+        return "medium", "capability_invalid"
     if not supported_reasoning_levels:
-        return False, "capability_not_adopted"
+        return "medium", "capability_not_adopted"
     supported = frozenset(supported_reasoning_levels)
     if not supported.issubset(_REASONING_LEVELS):
-        return False, "capability_invalid"
+        return "medium", "capability_invalid"
     if task_impact == "high":
         if "high" not in supported:
             return "medium", "high_not_supported"
@@ -2493,13 +2500,7 @@ class LocalStructuredSession:
             ),
             adaptive_reasoning_adopted=_ADAPTIVE_REASONING_CANARY_ADOPTED,
         )
-        return (
-            selected_think,
-            "formatless_thinking_initial"
-            if selected_think is not False
-            and self.model in _FORMATLESS_THINKING_MODELS
-            else selection_reason,
-        )
+        return selected_think, selection_reason
 
     def _reasoning_request_template(
         self,
