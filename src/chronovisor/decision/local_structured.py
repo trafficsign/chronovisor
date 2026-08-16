@@ -41,7 +41,7 @@ SAFE_RUNTIME_ROLE_RE = re.compile(r"^[a-z][a-z0-9._-]{0,127}$")
 LOCAL_ACTIVITY_PHASES = frozenset(
     {"trigger", "load", "context", "generate", "repair", "validate", "vote"}
 )
-STRUCTURED_GENERATION_POLICY_VERSION = 12
+STRUCTURED_GENERATION_POLICY_VERSION = 13
 STRUCTURED_GENERATION_TEMPERATURE = 0
 STRUCTURED_GENERATION_SEED = 0
 _DEFAULT_STRUCTURED_MEMORY_RESERVE_GIB = 16
@@ -145,8 +145,8 @@ def structured_generation_policy() -> dict[str, Any]:
         "temperature": STRUCTURED_GENERATION_TEMPERATURE,
         "seed": STRUCTURED_GENERATION_SEED,
         "think": {
-            "default": "medium",
-            "fallback": "medium",
+            "default": False,
+            "fallback": False,
             "levels": ["low", "medium", "high"],
             "bounded_low_lanes": sorted(_BOUNDED_LOW_REASONING_LANES),
             "adaptive_canary_adopted": _ADAPTIVE_REASONING_CANARY_ADOPTED,
@@ -171,7 +171,7 @@ def structured_generation_policy() -> dict[str, Any]:
         },
         "compatibility": {
             _QWEN_STRUCTURED_COMPAT_MODEL: {
-                "initial": {"think": True, "format": None},
+                "initial": {"think": "selected_boolean", "format": None},
             },
             _MUSE_STRUCTURED_COMPAT_MODEL: {
                 "initial": {"think": "selected", "format": None},
@@ -198,8 +198,8 @@ def _structured_think_selection(
     task_impact: str | None = None,
     supported_reasoning_levels: Sequence[str] | None = None,
     adaptive_reasoning_adopted: bool = False,
-) -> tuple[str, str]:
-    """Select one verified reasoning level, otherwise preserve medium."""
+) -> tuple[bool | str, str]:
+    """Select one verified reasoning level, otherwise disable reasoning."""
 
     valid_ints = (num_ctx, required_num_ctx, num_predict)
     if (
@@ -219,22 +219,22 @@ def _structured_think_selection(
         or task_impact not in {"normal", "high"}
         or not isinstance(adaptive_reasoning_adopted, bool)
     ):
-        return "medium", "invalid_selection_input"
+        return False, "invalid_selection_input"
     if not adaptive_reasoning_adopted:
-        return "medium", "adaptive_canary_not_adopted"
+        return False, "adaptive_canary_not_adopted"
     if supported_reasoning_levels is None:
-        return "medium", "capability_unknown"
+        return False, "capability_unknown"
     if isinstance(supported_reasoning_levels, (str, bytes)) or not isinstance(
         supported_reasoning_levels, Sequence
     ):
-        return "medium", "capability_invalid"
+        return False, "capability_invalid"
     if not all(isinstance(level, str) for level in supported_reasoning_levels):
-        return "medium", "capability_invalid"
+        return False, "capability_invalid"
     if not supported_reasoning_levels:
-        return "medium", "capability_not_adopted"
+        return False, "capability_not_adopted"
     supported = frozenset(supported_reasoning_levels)
     if not supported.issubset(_REASONING_LEVELS):
-        return "medium", "capability_invalid"
+        return False, "capability_invalid"
     if task_impact == "high":
         if "high" not in supported:
             return "medium", "high_not_supported"
@@ -298,7 +298,9 @@ def production_reasoning_authority_matches(
     return _production_reasoning_profile(model, runtime_role, authority) is not None
 
 
-def _reasoning_num_predict(level: str, configured_num_predict: int) -> int:
+def _reasoning_num_predict(level: bool | str, configured_num_predict: int) -> int:
+    if level is False:
+        return configured_num_predict
     numerator, denominator = _REASONING_OUTPUT_BUDGET_PROFILE[level]
     return max(1, configured_num_predict * numerator // denominator)
 
@@ -329,7 +331,7 @@ def structured_think_mode(
     task_impact: str | None = None,
     supported_reasoning_levels: Sequence[str] | None = None,
     adaptive_reasoning_adopted: bool = False,
-) -> str:
+) -> bool | str:
     """Return the explicit Ollama reasoning mode sealed by the policy."""
 
     return _structured_think_selection(
@@ -2494,7 +2496,8 @@ class LocalStructuredSession:
         return (
             selected_think,
             "formatless_thinking_initial"
-            if self.model in _FORMATLESS_THINKING_MODELS
+            if selected_think is not False
+            and self.model in _FORMATLESS_THINKING_MODELS
             else selection_reason,
         )
 
@@ -2515,7 +2518,9 @@ class LocalStructuredSession:
         )
         qwen_compatibility = self.model == _QWEN_STRUCTURED_COMPAT_MODEL
         formatless_thinking = self.model in _FORMATLESS_THINKING_MODELS
-        transport_think: bool | str = True if qwen_compatibility else selected_think
+        transport_think: bool | str = (
+            bool(selected_think) if qwen_compatibility else selected_think
+        )
         if activity_update is not None:
             activity_update(
                 "load",
@@ -2550,7 +2555,7 @@ class LocalStructuredSession:
                 if formatless_thinking
                 or authority_profile is None
                 or authority_profile["renderer"] == "native_levels"
-                else True
+                else bool(selected_think)
             ),
             think_selection_reason=effective_think_reason,
             required_num_ctx=required_num_ctx,

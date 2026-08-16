@@ -5522,6 +5522,8 @@ def _cached_snapshot(*, allow_stale: bool = False) -> dict[str, Any]:
                 if _snapshot_is_active(cached)
                 else SNAPSHOT_IDLE_CACHE_SECONDS
             )
+            if allow_stale and now - observed_built_at < max_age:
+                return cached
             if (
                 _SNAPSHOT_CACHE.get("fingerprint") == fingerprint
                 and now - observed_built_at < max_age
@@ -6392,6 +6394,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 _file_response(self, target)
             else:
                 self.send_error(HTTPStatus.NOT_FOUND)
+        except (BrokenPipeError, ConnectionError, OSError):
+            return
         except Exception:
             if path.startswith("/api/"):
                 _json_response(

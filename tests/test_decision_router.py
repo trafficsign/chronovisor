@@ -1418,15 +1418,15 @@ def test_disagreement_runs_tie_break_and_selects_matching_existing_vote(
         "gemma:test",
     ]
     assert [request.think for request in transport.requests] == [
-        "medium",
-        "medium",
-        "medium",
+        False,
+        False,
+        False,
     ]
     assert [
         request.think_selection_reason for request in transport.requests
     ] == ["capability_not_adopted"] * 3
     audits = [vote.audit_record()["session"] for vote in result.votes]
-    assert [audit["think"] for audit in audits] == ["medium"] * 3
+    assert [audit["think"] for audit in audits] == [False] * 3
     assert [audit["think_selection_reason"] for audit in audits] == [
         "capability_not_adopted"
     ] * 3
@@ -1601,11 +1601,9 @@ def test_production_reasoning_authority_fails_closed_on_digest_mismatch(
     )
 
     assert vote.valid is True
-    assert transport.requests[0].think == "medium"
+    assert transport.requests[0].think is False
     assert transport.requests[0].num_predict == 256
-    assert transport.requests[0].ollama_think == (
-        "medium" if role == "challenger" else True
-    )
+    assert transport.requests[0].ollama_think is False
     assert transport.requests[0].think_selection_reason == "capability_not_adopted"
 
 

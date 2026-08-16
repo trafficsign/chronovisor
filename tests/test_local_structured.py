@@ -105,14 +105,14 @@ class QueueTransport:
 
 
 def test_structured_generation_policy_seals_adaptive_reasoning_authority() -> None:
-    assert STRUCTURED_GENERATION_POLICY_VERSION == 12
+    assert STRUCTURED_GENERATION_POLICY_VERSION == 13
     assert structured_generation_policy() == {
-        "version": 12,
+        "version": 13,
         "temperature": 0,
         "seed": 0,
         "think": {
-            "default": "medium",
-            "fallback": "medium",
+            "default": False,
+            "fallback": False,
             "levels": ["low", "medium", "high"],
             "bounded_low_lanes": ["local_repair", "read_back_repair"],
             "adaptive_canary_adopted": True,
@@ -166,7 +166,7 @@ def test_structured_generation_policy_seals_adaptive_reasoning_authority() -> No
         },
         "compatibility": {
             QWEN_STRUCTURED_MODEL: {
-                "initial": {"think": True, "format": None},
+                "initial": {"think": "selected_boolean", "format": None},
             },
             MUSE_STRUCTURED_MODEL: {
                 "initial": {"think": "selected", "format": None},
@@ -180,9 +180,9 @@ def test_structured_generation_policy_seals_adaptive_reasoning_authority() -> No
         "stream": False,
         "format": "json_schema",
     }
-    assert structured_think_mode("gpt-oss:20b", num_ctx=32_768) == "medium"
-    assert structured_think_mode("muse-glimmer:30b", num_ctx=65_536) == "medium"
-    assert structured_think_mode("ornith:35b", num_ctx=114_688) == "medium"
+    assert structured_think_mode("gpt-oss:20b", num_ctx=32_768) is False
+    assert structured_think_mode("muse-glimmer:30b", num_ctx=65_536) is False
+    assert structured_think_mode("ornith:35b", num_ctx=114_688) is False
     assert structured_reasoning_output_reservation(3_072) == 4_096
     with pytest.raises(ValueError, match="exceeds runtime limit"):
         structured_reasoning_output_reservation(98_305)
@@ -228,7 +228,7 @@ def test_structured_think_mode_falls_back_for_capability_and_headroom() -> None:
         "task_impact": "normal",
         "adaptive_reasoning_adopted": True,
     }
-    assert structured_think_mode(**common) == "medium"
+    assert structured_think_mode(**common) is False
     assert structured_think_mode(
         **common, supported_reasoning_levels=("low", "medium")
     ) == "medium"
@@ -239,7 +239,7 @@ def test_structured_think_mode_falls_back_for_capability_and_headroom() -> None:
     assert structured_think_mode(
         **{**common, "adaptive_reasoning_adopted": False},
         supported_reasoning_levels=("low", "medium", "high"),
-    ) == "medium"
+    ) is False
 
 
 def test_transport_format_schema_does_not_weaken_client_validation() -> None:
@@ -554,7 +554,7 @@ def test_activity_marker_tracks_redacted_structured_phase(tmp_path: Path) -> Non
     assert list(store.active_dir.glob("*.json")) == []
 
 
-def test_first_pass_valid_uses_fixed_medium_thinking_request() -> None:
+def test_first_pass_valid_disables_unadopted_reasoning() -> None:
     transport = QueueTransport('{"decision":"apply","summary":"ok"}')
 
     result = _session(transport).run(
@@ -571,7 +571,7 @@ def test_first_pass_valid_uses_fixed_medium_thinking_request() -> None:
     assert request.num_predict == 256
     assert request.temperature == 0
     assert request.seed == 0
-    assert request.think == "medium"
+    assert request.think is False
     assert request.schema == SCHEMA
     assert request.messages[0]["role"] == "system"
     assert "untrusted data" in request.messages[0]["content"]
@@ -581,14 +581,14 @@ def test_first_pass_valid_uses_fixed_medium_thinking_request() -> None:
 @pytest.mark.parametrize(
     ("model", "initial_think", "initial_ollama_think", "initial_schema"),
     [
-        (QWEN_STRUCTURED_MODEL, "medium", True, None),
-        (MUSE_STRUCTURED_MODEL, "medium", "medium", None),
-        ("gemma4:26b", "medium", "medium", SCHEMA),
+        (QWEN_STRUCTURED_MODEL, False, False, None),
+        (MUSE_STRUCTURED_MODEL, False, False, None),
+        ("gemma4:26b", False, False, SCHEMA),
     ],
 )
 def test_all_model_repairs_use_strict_schema_without_thinking(
     model: str,
-    initial_think: str,
+    initial_think: bool | str,
     initial_ollama_think: bool | str,
     initial_schema: dict[str, Any] | None,
 ) -> None:
@@ -627,8 +627,8 @@ def test_qwen_structured_compatibility_keeps_client_validation_fail_closed() -> 
     assert result.ok is False
     assert result.failure_class == "repair_exhausted"
     assert transport.requests[0].schema is None
-    assert transport.requests[0].think == "medium"
-    assert transport.requests[0].ollama_think is True
+    assert transport.requests[0].think is False
+    assert transport.requests[0].ollama_think is False
 
 
 def test_schema_valid_semantic_error_repairs_in_the_same_session() -> None:
@@ -697,7 +697,7 @@ def test_active_marker_is_atomic_redacted_and_removed_after_session(
         }
         assert marker["phase"] == "generate"
         assert marker["attempt"] == 0
-        assert marker["think"] == "medium"
+        assert marker["think"] is False
         assert marker["think_selection_reason"] == "capability_not_adopted"
         assert marker["context_tokens"] == 32_768
         return '{"decision":"apply","summary":"ok"}'
@@ -719,20 +719,20 @@ def test_active_marker_is_atomic_redacted_and_removed_after_session(
     audit_text = (audit_root / "audit.jsonl").read_text(encoding="utf-8")
     assert secret not in audit_text
     audit = json.loads(audit_text)
-    assert audit["think"] == "medium"
-    assert audit["ollama_think"] == "medium"
+    assert audit["think"] is False
+    assert audit["ollama_think"] is False
     assert audit["num_predict"] == 2_048
     assert audit["think_selection_reason"] == "capability_not_adopted"
     assert audit["context_tokens"] == 32_768
     assert audit["requested_num_ctx"] == 32_768
     assert isinstance(audit["required_num_ctx"], int)
-    assert audit["structured_generation_policy_version"] == 12
+    assert audit["structured_generation_policy_version"] == 13
     assert audit["structured_generation_policy_sha256"] == (
         structured_generation_policy_sha256()
     )
-    assert result.ollama_think == "medium"
+    assert result.ollama_think is False
     assert result.num_predict == 2_048
-    assert result.audit_record()["ollama_think"] == "medium"
+    assert result.audit_record()["ollama_think"] is False
     assert result.audit_record()["num_predict"] == 2_048
     summary = json.loads((audit_root / "summary.json").read_text(encoding="utf-8"))
     assert summary["sessions"]["first_pass_valid"] == 1
@@ -752,7 +752,7 @@ def test_transport_failure_clears_activity_and_records_failure(tmp_path: Path) -
     assert result.failure_class == "transport_error"
     assert list((audit_root / "active").glob("*.json")) == []
     audit = json.loads((audit_root / "audit.jsonl").read_text(encoding="utf-8"))
-    assert audit["think"] == "medium"
+    assert audit["think"] is False
     summary = json.loads((audit_root / "summary.json").read_text(encoding="utf-8"))
     assert summary["sessions"]["failures"] == {"transport_error": 1}
     trace = [
@@ -785,7 +785,7 @@ def test_direct_session_repairs_without_thinking() -> None:
     ).run("repair", SCHEMA)
 
     assert result.ok is True
-    assert [request.think for request in transport.requests] == ["medium", False]
+    assert [request.think for request in transport.requests] == [False, False]
     assert [request.think_selection_reason for request in transport.requests] == [
         "capability_not_adopted",
         "structured_repair",
@@ -933,7 +933,7 @@ def test_reasoning_authority_fails_closed_on_runtime_identity_drift(
     ).run("repair", SCHEMA)
 
     assert result.ok is True
-    assert transport.requests[0].think == "medium"
+    assert transport.requests[0].think is False
     assert result.think_selection_reason == "capability_not_adopted"
 
 
@@ -967,7 +967,7 @@ def test_reasoning_authority_fails_closed_on_route_identity_drift(
     ).run("repair", SCHEMA)
 
     assert result.ok is True
-    assert transport.requests[0].think == "medium"
+    assert transport.requests[0].think is False
     assert transport.requests[0].num_predict == 256
     assert result.think_selection_reason == "capability_not_adopted"
 
@@ -1208,7 +1208,7 @@ def test_session_trace_records_real_phases_and_terminal_result(tmp_path: Path) -
         "vote",
         "vote",
     ]
-    assert all(row["think"] == "medium" for row in rows)
+    assert all(row["think"] is False for row in rows)
     assert all(row["context_tokens"] == 16_384 for row in rows)
     assert all(row["requested_num_ctx"] == 16_384 for row in rows)
     assert rows[-1]["kind"] == "session"
@@ -1999,7 +1999,7 @@ def test_reasoning_protocol_prefix_is_normalized_for_any_model() -> None:
     assert result.attempts[0].output_sha256 == hashlib.sha256(
         normalized.encode("utf-8")
     ).hexdigest()
-    assert transport.requests[0].think == "medium"
+    assert transport.requests[0].think is False
 
 
 def test_fixed_reasoning_protocol_prefix_is_normalized_for_any_model() -> None:
@@ -2018,7 +2018,7 @@ def test_fixed_reasoning_protocol_prefix_is_normalized_for_any_model() -> None:
     assert result.attempts[0].output_sha256 == hashlib.sha256(
         normalized.encode("utf-8")
     ).hexdigest()
-    assert transport.requests[0].think == "medium"
+    assert transport.requests[0].think is False
 
 
 @pytest.mark.parametrize(

@@ -5569,6 +5569,33 @@ def test_cached_snapshot_serves_stale_while_refreshing_in_background(
     assert calls == 1
 
 
+def test_cached_snapshot_stale_mode_honors_ttl_during_source_churn(
+    monkeypatch,
+) -> None:
+    dashboard._SNAPSHOT_CACHE.update(
+        {
+            "built_at": 100.0,
+            "fingerprint": None,
+            "snapshot": {
+                "serial": 1,
+                "status": {"state": "running", "batch": {"active": True}},
+            },
+            "refreshing": False,
+        }
+    )
+    monkeypatch.setattr(dashboard.time, "monotonic", lambda: 101.0)
+    monkeypatch.setattr(
+        dashboard, "_snapshot_source_fingerprint", lambda: ("changing",)
+    )
+    monkeypatch.setattr(
+        dashboard.threading,
+        "Thread",
+        lambda **_kwargs: pytest.fail("fresh stale-mode cache must not refresh"),
+    )
+
+    assert dashboard._cached_snapshot(allow_stale=True)["serial"] == 1
+
+
 def test_fast_snapshot_reads_status_without_building_archive_components(
     monkeypatch,
 ) -> None:
