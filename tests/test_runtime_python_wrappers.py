@@ -43,7 +43,7 @@ def test_exactly_six_production_uvx_wrappers_use_shared_runtime_resolution() -> 
 def test_each_uvx_call_uses_resolved_python_immediately_and_before_from() -> None:
     for name in UVX_WRAPPERS:
         wrapper = _text(name)
-        expected_calls = 3 if name == "chronovisor-librarian-review" else 1
+        expected_calls = 1
 
         assert wrapper.count(RUNTIME_COMMAND) == expected_calls
         assert wrapper.count("--from") == expected_calls

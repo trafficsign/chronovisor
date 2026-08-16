@@ -8,7 +8,7 @@ set -eu
 CHRONOVISOR_WRAPPER_DIR=$(CDPATH= cd "$(dirname "$0")" && pwd -P)
 . "$CHRONOVISOR_WRAPPER_DIR/chronovisor-runtime-env"
 
-"$CHRONOVISOR_UVX" --python "$CHRONOVISOR_PYTHON" \
+exec "$CHRONOVISOR_UVX" --python "$CHRONOVISOR_PYTHON" \
   --refresh-package chronovisor \
   --from "$RUNTIME_SOURCE" \
   chronovisor-librarian \
@@ -16,23 +16,3 @@ CHRONOVISOR_WRAPPER_DIR=$(CDPATH= cd "$(dirname "$0")" && pwd -P)
   --full-sweep \
   --json \
   >/dev/null
-
-"$CHRONOVISOR_UVX" --python "$CHRONOVISOR_PYTHON" \
-  --refresh-package chronovisor \
-  --from "$RUNTIME_SOURCE" \
-  chronovisor-librarian \
-  --root "$CHRONOVISOR_ROOT" \
-  --review-collection-queue \
-  --limit "${CHRONOVISOR_LIBRARIAN_REVIEW_LIMIT:-5}" \
-  --review-role primary \
-  --json
-
-exec "$CHRONOVISOR_UVX" --python "$CHRONOVISOR_PYTHON" \
-  --refresh-package chronovisor \
-  --from "$RUNTIME_SOURCE" \
-  chronovisor-librarian \
-  --root "$CHRONOVISOR_ROOT" \
-  --review-collection-queue \
-  --limit "${CHRONOVISOR_LIBRARIAN_CHALLENGE_LIMIT:-5}" \
-  --review-role challenger \
-  --json
