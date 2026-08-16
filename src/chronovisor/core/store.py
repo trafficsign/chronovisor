@@ -376,13 +376,9 @@ def init_chronovisor(context: RuntimeContext | None = None) -> None:
                 directory.chmod(0o700)
             return
         if startup.layout == "okf_v0_2":
-            from chronovisor.core.page_mutation import chronovisor_mutation_lock
-
             for directory in (raw_dir, pages_dir, system_dir):
                 directory.mkdir(parents=True, exist_ok=True, mode=0o700)
                 directory.chmod(0o700)
-            with chronovisor_mutation_lock(pages_dir=pages_dir):
-                pass
             return
 
         canonical_paths = (
