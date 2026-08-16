@@ -1613,7 +1613,8 @@ def test_anomaly_worker_gpt_oss_reserves_bounded_reasoning_budget(
         lambda _models: {"gpt-oss:20b": "sha256:model"},
     )
 
-    def structured_chat(*_args: object, **kwargs: object):
+    def structured_chat(*args: object, **kwargs: object):
+        observed["messages"] = args[0]
         observed.update(kwargs)
         return ollama.ChatResponse(
             content=json.dumps(
@@ -1633,6 +1634,10 @@ def test_anomaly_worker_gpt_oss_reserves_bounded_reasoning_budget(
     assert observed["num_predict"] == 1_800
     assert observed["think"] == "low"
     assert observed["keep_alive"] == "30s"
+    prompt = json.loads(observed["messages"][1]["content"])
+    assert "decision, suggested_collection_slug, rationale, and evidence" in " ".join(
+        prompt["policy"]["rules"]
+    )
 
 
 def _remote_anomaly_runtime(monkeypatch: pytest.MonkeyPatch, backend_calls: list):

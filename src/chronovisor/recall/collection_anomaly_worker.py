@@ -41,6 +41,9 @@ POLICY = {
         "Prefer no_issue when the current collection is reasonably defensible.",
         "Use review_recommended only when the proposed collection is materially better.",
         "Use insufficient_evidence rather than guessing.",
+        "Return exactly one JSON object with only decision, suggested_collection_slug, rationale, and evidence.",
+        "decision must be no_issue, review_recommended, or insufficient_evidence.",
+        "suggested_collection_slug must be empty or match an available collection slug.",
     ],
     "mutation_capability": False,
 }
