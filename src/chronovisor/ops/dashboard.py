@@ -5458,10 +5458,12 @@ def _build_snapshot_cache(
                 cached = _SNAPSHOT_CACHE.get("snapshot")
                 if (
                     isinstance(cached, dict)
-                    and _SNAPSHOT_CACHE.get("fingerprint") == fingerprint
                     and float(_SNAPSHOT_CACHE.get("built_at") or 0.0)
                     != observed_built_at
                 ):
+                    # Another caller published while this one waited for the
+                    # single-flight lock. Reuse that newer snapshot even when
+                    # its multi-component build observed source churn.
                     _SNAPSHOT_CACHE["refreshing"] = False
                     return cached
             snapshot = build_snapshot()
@@ -5508,6 +5510,20 @@ def _refresh_snapshot_cache(
 
 def _cached_snapshot(*, allow_stale: bool = False) -> dict[str, Any]:
     """Single-flight expensive snapshots and reuse unchanged idle results."""
+
+    if allow_stale:
+        with _SNAPSHOT_CACHE_LOCK:
+            now = time.monotonic()
+            observed_built_at = float(_SNAPSHOT_CACHE.get("built_at") or 0.0)
+            cached = _SNAPSHOT_CACHE.get("snapshot")
+            if isinstance(cached, dict):
+                max_age = (
+                    SNAPSHOT_ACTIVE_CACHE_SECONDS
+                    if _snapshot_is_active(cached)
+                    else SNAPSHOT_IDLE_CACHE_SECONDS
+                )
+                if now - observed_built_at < max_age:
+                    return cached
 
     # Probe before the snapshot cache lock. The fingerprint cache has its own
     # condition and no code path holds both locks, avoiding lock-order cycles.

@@ -5585,7 +5585,9 @@ def test_cached_snapshot_stale_mode_honors_ttl_during_source_churn(
     )
     monkeypatch.setattr(dashboard.time, "monotonic", lambda: 101.0)
     monkeypatch.setattr(
-        dashboard, "_snapshot_source_fingerprint", lambda: ("changing",)
+        dashboard,
+        "_snapshot_source_fingerprint",
+        lambda: pytest.fail("fresh stale-mode cache must not probe sources"),
     )
     monkeypatch.setattr(
         dashboard.threading,
@@ -5594,6 +5596,27 @@ def test_cached_snapshot_stale_mode_honors_ttl_during_source_churn(
     )
 
     assert dashboard._cached_snapshot(allow_stale=True)["serial"] == 1
+
+
+def test_snapshot_build_coalesces_after_source_churn(monkeypatch) -> None:
+    dashboard._SNAPSHOT_CACHE.update(
+        {
+            "built_at": 2.0,
+            "fingerprint": None,
+            "snapshot": {"serial": 1, "status": {"state": "running"}},
+            "refreshing": True,
+        }
+    )
+    monkeypatch.setattr(
+        dashboard,
+        "build_snapshot",
+        lambda: pytest.fail("waiting callers must reuse the published snapshot"),
+    )
+
+    snapshot = dashboard._build_snapshot_cache(("old",), observed_built_at=1.0)
+
+    assert snapshot["serial"] == 1
+    assert dashboard._SNAPSHOT_CACHE["refreshing"] is False
 
 
 def test_fast_snapshot_reads_status_without_building_archive_components(
