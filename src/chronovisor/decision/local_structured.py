@@ -41,7 +41,7 @@ SAFE_RUNTIME_ROLE_RE = re.compile(r"^[a-z][a-z0-9._-]{0,127}$")
 LOCAL_ACTIVITY_PHASES = frozenset(
     {"trigger", "load", "context", "generate", "repair", "validate", "vote"}
 )
-STRUCTURED_GENERATION_POLICY_VERSION = 14
+STRUCTURED_GENERATION_POLICY_VERSION = 15
 STRUCTURED_GENERATION_TEMPERATURE = 0
 STRUCTURED_GENERATION_SEED = 0
 _DEFAULT_STRUCTURED_MEMORY_RESERVE_GIB = 16
@@ -53,7 +53,9 @@ _FORMATLESS_THINKING_MODELS = frozenset(
 )
 _ADAPTIVE_REASONING_CANARY_ADOPTED = False
 _BOUNDED_LOW_REASONING_LANES = frozenset({"local_repair", "read_back_repair"})
-_NO_REASONING_LANES = frozenset({"content_correction_review"})
+_NO_REASONING_LANES = frozenset(
+    {"content_correction_review", "ingest_reconciliation"}
+)
 _REASONING_LEVELS = frozenset({"low", "medium", "high"})
 _ADAPTIVE_REASONING_LEVELS = ("low", "medium", "high")
 _ADAPTIVE_REASONING_AUTHORITIES = (

@@ -108,9 +108,9 @@ class QueueTransport:
 
 
 def test_structured_generation_policy_seals_adaptive_reasoning_authority() -> None:
-    assert STRUCTURED_GENERATION_POLICY_VERSION == 14
+    assert STRUCTURED_GENERATION_POLICY_VERSION == 15
     assert structured_generation_policy() == {
-        "version": 14,
+        "version": 15,
         "temperature": 0,
         "seed": 0,
         "think": {
@@ -118,7 +118,10 @@ def test_structured_generation_policy_seals_adaptive_reasoning_authority() -> No
             "fallback": "medium",
             "levels": ["low", "medium", "high"],
             "bounded_low_lanes": ["local_repair", "read_back_repair"],
-            "disabled_lanes": ["content_correction_review"],
+            "disabled_lanes": [
+                "content_correction_review",
+                "ingest_reconciliation",
+            ],
             "adaptive_canary_adopted": False,
             "adaptive_authority": [
                 {
@@ -255,14 +258,17 @@ def test_structured_think_mode_falls_back_for_capability_and_headroom() -> None:
     ) == "medium"
 
 
-def test_content_correction_review_uses_quality_equivalent_no_reasoning() -> None:
+@pytest.mark.parametrize(
+    "decision_lane", ["content_correction_review", "ingest_reconciliation"]
+)
+def test_quality_equivalent_lane_uses_no_reasoning(decision_lane: str) -> None:
     assert structured_think_mode(
         "local:test",
         num_ctx=16_384,
         required_num_ctx=8_000,
         num_predict=2_048,
         runtime_role="classification.primary",
-        decision_lane="content_correction_review",
+        decision_lane=decision_lane,
         task_impact="normal",
         supported_reasoning_levels=("low", "medium", "high"),
         adaptive_reasoning_adopted=True,
@@ -771,7 +777,7 @@ def test_active_marker_is_atomic_redacted_and_removed_after_session(
     assert audit["context_tokens"] == 32_768
     assert audit["requested_num_ctx"] == 32_768
     assert isinstance(audit["required_num_ctx"], int)
-    assert audit["structured_generation_policy_version"] == 14
+    assert audit["structured_generation_policy_version"] == 15
     assert audit["structured_generation_policy_sha256"] == (
         structured_generation_policy_sha256()
     )
