@@ -128,6 +128,7 @@ SAVE_HISTORY_MAX_SEGMENTS_PER_DAY = 64
 DASHBOARD_MATERIALIZED_SCHEMA = "chronovisor.ops.dashboard-component.v1"
 DASHBOARD_COMPONENT_AUDIT_SECONDS = 300.0
 DASHBOARD_HEALTH_AUDIT_SECONDS = 60.0
+DASHBOARD_HEALTH_MIN_REFRESH_SECONDS = DASHBOARD_COMPONENT_AUDIT_SECONDS
 DASHBOARD_LOCAL_CONSENSUS_AUDIT_SECONDS = 300.0
 PROCESSING_ACTIVITY_POLL_SECONDS = 0.25
 PROCESSING_ACTIVITY_HEARTBEAT_SECONDS = 10.0
@@ -286,6 +287,7 @@ def _materialized_component(
     fingerprint: str,
     builder: Any,
     audit_seconds: float = DASHBOARD_COMPONENT_AUDIT_SECONDS,
+    min_refresh_seconds: float = 0.0,
 ) -> dict[str, Any]:
     """Reuse an integrity-bound derived view until inputs change or audit is due."""
 
@@ -301,11 +303,15 @@ def _materialized_component(
                 _MATERIALIZED_COMPONENTS[cache_key] = payload
         if payload is not None:
             age = max(0.0, now - float(payload.get("built_at_epoch") or 0.0))
-            if payload.get("fingerprint") == fingerprint and age < audit_seconds:
-                value = payload.get("value")
-                if isinstance(value, dict):
-                    return value
             value = payload.get("value")
+            if isinstance(value, dict) and age < min_refresh_seconds:
+                return value
+            if (
+                isinstance(value, dict)
+                and payload.get("fingerprint") == fingerprint
+                and age < audit_seconds
+            ):
+                return value
             if isinstance(value, dict):
                 stale_value = value
                 start_refresh = cache_key not in _MATERIALIZED_COMPONENT_REFRESHING
@@ -5209,6 +5215,7 @@ def build_snapshot() -> dict[str, Any]:
                 fingerprint=_health_materialization_fingerprint(raw_paths),
                 builder=health_snapshot,
                 audit_seconds=DASHBOARD_HEALTH_AUDIT_SECONDS,
+                min_refresh_seconds=DASHBOARD_HEALTH_MIN_REFRESH_SECONDS,
             ),
         ),
         "paths": {

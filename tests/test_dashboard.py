@@ -5876,6 +5876,37 @@ def test_materialized_component_returns_stale_while_audit_refreshes(
     assert calls == 2
 
 
+def test_materialized_component_throttles_changed_source_refresh(
+    tmp_path: Path, monkeypatch
+) -> None:
+    chronovisor_root = tmp_path / "wiki"
+    monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", chronovisor_root)
+    clock = [100.0]
+    monkeypatch.setattr(dashboard.time, "time", lambda: clock[0])
+    calls = 0
+
+    def build() -> dict:
+        nonlocal calls
+        calls += 1
+        return {"serial": calls}
+
+    assert dashboard._materialized_component(
+        "throttled-view",
+        fingerprint="a" * 64,
+        builder=build,
+        min_refresh_seconds=60,
+    ) == {"serial": 1}
+    clock[0] += 30
+
+    assert dashboard._materialized_component(
+        "throttled-view",
+        fingerprint="b" * 64,
+        builder=build,
+        min_refresh_seconds=60,
+    ) == {"serial": 1}
+    assert calls == 1
+
+
 def test_cached_snapshot_rebuilds_after_a_source_changes_during_build(
     tmp_path: Path, monkeypatch
 ) -> None:
