@@ -254,7 +254,7 @@ FRONTIER_REVIEW_SCHEMA: dict[str, Any] = {
     "properties": {
         "decision": {
             "type": "string",
-            "enum": ["approved", "rejected", "needs_retry"],
+            "enum": ["approved", "rejected", "quarantined", "needs_retry"],
         },
         "confidence": {"type": "number", "minimum": 0, "maximum": 1},
         "summary": {"type": "string"},

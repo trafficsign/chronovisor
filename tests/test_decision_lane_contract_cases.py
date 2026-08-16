@@ -177,7 +177,7 @@ def test_contract_cases_cover_every_model_backed_lane_independently() -> None:
     assert min(counts.values()) == CASES_PER_MODEL_BACKED_LANE
     assert counts["content_correction_classification"] == 6
     assert len({case.case_id for case in cases}) == len(cases)
-    assert all(case.case_id.startswith("lane-contract-v27:") for case in cases)
+    assert all(case.case_id.startswith("lane-contract-v28:") for case in cases)
 
 
 def test_background_graph_contracts_are_separate_from_adopted_fleet() -> None:
@@ -402,8 +402,8 @@ def test_content_review_contracts_distinguish_three_nonapproval_evidence_states(
 def test_lane_contract_case_source_version_tracks_the_resealed_cases() -> None:
     assert LANE_CONTRACT_POLICY_VERSION == 10
     assert INGEST_REPAIR_OPTION_POLICY_VERSION == 2
-    assert LANE_CONTRACT_CASE_VERSION == 27
-    assert LANE_CONTRACT_SOURCE == "deterministic_lane_contract_v27"
+    assert LANE_CONTRACT_CASE_VERSION == 28
+    assert LANE_CONTRACT_SOURCE == "deterministic_lane_contract_v28"
     assert set(model_backed_lane_names()).issubset(LANE_PROMPT_POLICY_VERSIONS)
     assert set(LANE_PROMPT_POLICY_VERSIONS) - set(model_backed_lane_names()) == set(
         background_decision_lane_contract_cases()
@@ -2141,13 +2141,13 @@ def test_ingest_preflight_scopes_a_shared_tag_option_to_one_filename() -> None:
 def test_canonical_manifest_seals_all_effective_requests_and_outcomes() -> None:
     manifest = decision_lane_contract_case_manifest()
     assert manifest["total_cases"] == 100
-    assert manifest["total_contract_cases"] == 106
+    assert manifest["total_contract_cases"] == 108
     assert len(manifest["lanes"]) == 19
     assert manifest["quorum_safety_policy_version"] == QUORUM_SAFETY_POLICY_VERSION
     assert manifest["quorum_veto_cases_per_policy_lane"] == (
         QUORUM_VETO_CASES_PER_POLICY_LANE
     )
-    assert manifest["quorum_veto_case_count"] == 6
+    assert manifest["quorum_veto_case_count"] == 8
     assert len(decision_lane_contract_case_manifest_sha256()) == 64
     assert all(
         lane["case_count"] >= CASES_PER_MODEL_BACKED_LANE
@@ -2157,7 +2157,7 @@ def test_canonical_manifest_seals_all_effective_requests_and_outcomes() -> None:
     )
 
 
-def test_quorum_veto_policy_cases_cover_five_bypasses_and_ingest_veto() -> None:
+def test_quorum_veto_policy_cases_cover_each_bypass_and_ingest_veto() -> None:
     cases = quorum_veto_lane_contract_cases()
     by_lane = {case.lane: case for case in cases}
 
@@ -2165,8 +2165,8 @@ def test_quorum_veto_policy_cases_cover_five_bypasses_and_ingest_veto() -> None:
         *TIE_BREAK_MUTATING_MAJORITY_LANES,
         "ingest_reconciliation",
     }
-    assert len(cases) == 6
-    assert all(case.case_id.startswith("quorum-veto-v27:") for case in cases)
+    assert len(cases) == 8
+    assert all(case.case_id.startswith("quorum-veto-v28:") for case in cases)
     assert all(len(case.as_dict()["case_sha256"]) == 64 for case in cases)
     for lane in TIE_BREAK_MUTATING_MAJORITY_LANES:
         case = by_lane[lane]

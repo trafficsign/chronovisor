@@ -40,6 +40,7 @@ from chronovisor.decision.decision_router import (
     default_agreement_value,
 )
 from chronovisor.decision.decision_schema_manifest import (
+    RAW_REPLAY_RECONCILIATION_SCHEMA,
     decision_signature_value,
     production_decision_schemas,
 )
@@ -1062,11 +1063,11 @@ def test_content_review_repairs_schema_valid_incomplete_mutation_echo() -> None:
         candidate.row
         for candidate in contract_candidates()
         if candidate.row["decision_lane"] == "content_correction_review"
-        and str(candidate.row["contract_id"]).endswith(":4")
+        and str(candidate.row["contract_id"]).endswith(":1")
     )
     expected = dict(row["expected"])
     incomplete = json.loads(json.dumps(expected))
-    incomplete["approved_mutations"] = incomplete["approved_mutations"][:1]
+    incomplete["approved_mutations"] = []
     transport = ModelTransport(
         {
             "ornith:test": [json.dumps(incomplete), json.dumps(expected)],
@@ -3471,6 +3472,46 @@ def test_local_repair_accepts_exact_target_named_by_two_votes() -> None:
                 "notes": None,
             },
         ),
+        (
+            "raw_replay_reconciliation",
+            RAW_REPLAY_RECONCILIATION_SCHEMA,
+            "raw replay reconciliation candidate",
+            {
+                "decision": "accept_processed",
+                "confidence": 0.9,
+                "reason": "accepted",
+            },
+            {
+                "decision": "quarantine",
+                "confidence": 0.9,
+                "reason": "quarantined",
+            },
+        ),
+        (
+            "recall_improvement",
+            FRONTIER_DECISION_SCHEMA,
+            "recall improvement candidate",
+            {
+                "decision": "approved",
+                "summary": "approved",
+                "tests_run": ["test-1"],
+                "commit": None,
+                "committed": False,
+                "pushed": False,
+                "risk": None,
+                "notes": None,
+            },
+            {
+                "decision": "rejected",
+                "summary": "rejected",
+                "tests_run": ["test-2"],
+                "commit": None,
+                "committed": False,
+                "pushed": False,
+                "risk": None,
+                "notes": None,
+            },
+        ),
     ],
 )
 def test_conservative_veto_is_bypassed_for_lane_policy(
@@ -3498,7 +3539,7 @@ def test_conservative_veto_is_bypassed_for_lane_policy(
     assert result.conservative_veto_fired is True
     assert result.conservative_veto_bypassed_by_lane_policy is True
     assert result.dissent_effect_class == "conservative"
-    assert result.value["decision"] == "approved"
+    assert result.value["decision"] == approved_payload["decision"]
     assert len(result.votes) == 3
 
 

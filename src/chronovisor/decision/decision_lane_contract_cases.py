@@ -54,7 +54,7 @@ from chronovisor.decision.graph_decisions import (
 )
 
 CASES_PER_MODEL_BACKED_LANE = 5
-LANE_CONTRACT_CASE_ID_VERSION = 27
+LANE_CONTRACT_CASE_ID_VERSION = 28
 BACKGROUND_LANE_CONTRACT_CASE_VERSION = 2
 QUORUM_VETO_CASES_PER_POLICY_LANE = 1
 
@@ -137,7 +137,9 @@ def quorum_veto_lane_contract_cases() -> tuple[QuorumVetoLaneContractCase, ...]:
         "lint_tag_repair",
         "metadata_backfill",
         "orphan_link",
+        "raw_replay_reconciliation",
         "recall_auto_apply",
+        "recall_improvement",
         "search_label",
     )
     cases = tuple(
@@ -158,7 +160,7 @@ def quorum_veto_lane_contract_cases() -> tuple[QuorumVetoLaneContractCase, ...]:
             ),
         ),
     )
-    if len(cases) != 6 or len({case.lane for case in cases}) != len(cases):
+    if len(cases) != 8 or len({case.lane for case in cases}) != len(cases):
         raise ValueError("quorum veto lane contract coverage is incomplete")
     return cases
 
@@ -639,7 +641,7 @@ def _content_review_cases() -> list[tuple[str, str | None, dict[str, Any]]]:
             },
         },
         {
-            "decision": "approved",
+            "decision": "quarantined",
             "candidate_pages": ["profile-a", "profile-b"],
             "mutation_pages": [
                 (

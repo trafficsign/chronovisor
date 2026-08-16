@@ -431,9 +431,9 @@ must be supplied to both the compiler and every fresh or resumed evaluator
 invocation. A config change is a new evaluation identity, never a resumable
 continuation. An artifact that authorizes the current runtime must use artifact
 schema 12, evaluator policy 21, decision-semantics policy 12, quorum-safety
-policy 2, action-signature policy 5, effective-request-fingerprint policy 4,
+policy 3, action-signature policy 5, effective-request-fingerprint policy 4,
 structured-generation policy 3, lane-contract registry policy 10,
-lane-contract case policy 27 with source `deterministic_lane_contract_v27`,
+lane-contract case policy 28 with source `deterministic_lane_contract_v28`,
 residency policy 2, and `num_predict = 3072`. Older artifacts sealed under
 quorum-v1 or lane-contract-v26 remain historical evidence but cannot authorize
 current execution. Evaluator policy 21 seals explicit deterministic seed 0,
@@ -456,8 +456,8 @@ the registry version into every model request, because that would invalidate
 all 19 lanes. Increment the registry policy itself only when the registry or
 artifact identity contract changes. The current deterministic manifest contains
 100 model-backed canonical cases spanning all 19 model-backed lanes and all
-four executable context buckets, plus six quorum-veto policy fixtures: one for
-each of the five bypass lanes and one that preserves the ingest veto. Previous
+four executable context buckets, plus eight quorum-veto policy fixtures: one
+for each of the seven bypass lanes and one that preserves the ingest veto. Previous
 replay rows are included only when their independent
 provenance, contract identity, expected effect, and action signature all match
 the current policy. During compilation only, non-deterministic historical rows

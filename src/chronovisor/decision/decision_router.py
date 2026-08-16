@@ -87,7 +87,7 @@ _DECISION_RUNTIME_ROLES = (
 _ROLE_NAMES = ("primary", "challenger", "tie_break")
 AUDIT_ROLE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,79}$")
 DECISION_SEMANTICS_POLICY_VERSION = 12
-QUORUM_SAFETY_POLICY_VERSION = 2
+QUORUM_SAFETY_POLICY_VERSION = 3
 DECISION_REQUEST_FINGERPRINT_VERSION = 4
 # These lane contracts authorize only additive or reversible effects. Any
 # membership change is a quorum-safety policy change and MUST be accompanied by
@@ -96,9 +96,11 @@ DECISION_REQUEST_FINGERPRINT_VERSION = 4
 TIE_BREAK_MUTATING_MAJORITY_LANES = frozenset(
     {
         "lint_tag_repair",
-        "recall_auto_apply",
-        "orphan_link",
         "metadata_backfill",
+        "orphan_link",
+        "raw_replay_reconciliation",
+        "recall_auto_apply",
+        "recall_improvement",
         "search_label",
     }
 )
@@ -368,7 +370,10 @@ def _decision_mutates_durable_state(
         "summary",
         "approved_mutations",
         "semantic_checks",
-    } and decision_enum == {"approved", "rejected", "needs_retry"}:
+    } and decision_enum in (
+        {"approved", "rejected", "needs_retry"},
+        {"approved", "rejected", "quarantined", "needs_retry"},
+    ):
         return bool(
             decision == "approved"
             and isinstance(value.get("approved_mutations"), list)
