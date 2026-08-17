@@ -212,9 +212,7 @@ def test_contract_cases_bind_to_the_exact_live_lane_envelope() -> None:
         prompt_policy_version = LANE_PROMPT_POLICY_VERSIONS[case.lane]
         assert f'policy="{prompt_policy_version}"' in prompt
         assert f'lane="{case.lane}"' in prompt
-        assert (
-            f"CHRONOVISOR_LANE_CONTRACT_POLICY={prompt_policy_version}" in system
-        )
+        assert f"CHRONOVISOR_LANE_CONTRACT_POLICY={prompt_policy_version}" in system
         assert f"CHRONOVISOR_LANE={case.lane}" in system
         assert case.prompt in prompt
 
@@ -417,10 +415,10 @@ def test_lane_contract_case_source_version_tracks_the_resealed_cases() -> None:
         if lane
         not in {
             "ingest_reconciliation",
-                "raw_replay_reconciliation",
-                "recall_auto_apply",
-                "autonomy_retention",
-            }
+            "raw_replay_reconciliation",
+            "recall_auto_apply",
+            "autonomy_retention",
+        }
     } == {8}
 
 
@@ -1209,9 +1207,10 @@ def test_quoted_top_level_key_change_is_an_identity_mutation() -> None:
     assert identity["mode"] == "distinct"
     assert identity["previous_identity_fields"] == '{"title":"Stable identity"}'
     assert identity["proposed_identity_fields"] == ""
-    assert identity["previous_frontmatter_sha256"] == hashlib.sha256(
-        b'---\n"title": Stable identity\n---\n'
-    ).hexdigest()
+    assert (
+        identity["previous_frontmatter_sha256"]
+        == hashlib.sha256(b'---\n"title": Stable identity\n---\n').hexdigest()
+    )
     assert _frontmatter_field_keys(
         previous,
         span_start=len("---\n"),
@@ -2141,13 +2140,13 @@ def test_ingest_preflight_scopes_a_shared_tag_option_to_one_filename() -> None:
 def test_canonical_manifest_seals_all_effective_requests_and_outcomes() -> None:
     manifest = decision_lane_contract_case_manifest()
     assert manifest["total_cases"] == 100
-    assert manifest["total_contract_cases"] == 108
+    assert manifest["total_contract_cases"] == 109
     assert len(manifest["lanes"]) == 19
     assert manifest["quorum_safety_policy_version"] == QUORUM_SAFETY_POLICY_VERSION
     assert manifest["quorum_veto_cases_per_policy_lane"] == (
         QUORUM_VETO_CASES_PER_POLICY_LANE
     )
-    assert manifest["quorum_veto_case_count"] == 8
+    assert manifest["quorum_veto_case_count"] == 9
     assert len(decision_lane_contract_case_manifest_sha256()) == 64
     assert all(
         lane["case_count"] >= CASES_PER_MODEL_BACKED_LANE
@@ -2165,7 +2164,7 @@ def test_quorum_veto_policy_cases_cover_each_bypass_and_ingest_veto() -> None:
         *TIE_BREAK_MUTATING_MAJORITY_LANES,
         "ingest_reconciliation",
     }
-    assert len(cases) == 8
+    assert len(cases) == 9
     assert all(case.case_id.startswith("quorum-veto-v28:") for case in cases)
     assert all(len(case.as_dict()["case_sha256"]) == 64 for case in cases)
     for lane in TIE_BREAK_MUTATING_MAJORITY_LANES:

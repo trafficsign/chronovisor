@@ -2560,16 +2560,16 @@ def test_baseline_labels_repository_contract_hash_semantics(
     schema = hashes["production_schema_manifest"]
     signature = hashes["production_signature_manifest"]
     assert authority["lane_contract_case_manifest_sha256"] == (
-        "9f2dec1803ba65f9c294feeaa1e9247f8389a0d0db8ecf6bd2d21918dcb24cb5"
+        "e26976b496b9272d6c2e5aecd3639f29898adb9730343b05615f7669e0ea422c"
     )
     assert schema["canonical_mapping_sha256"]["sha256"] == (
-        "938aceee8b448a3d1cee0403d15a2de847eedb19a99d1a94663ef23b0f37f91b"
+        "e83ea1675494d831585ad74ec3dcadcd1cb05ffb97af9ee15582b62140aeaf52"
     )
     assert schema["artifact_validator_sorted_rows_sha256"]["sha256"] == (
-        "3845e9cf4f8aed838b3c1febf50dd4667cd2d0bf275c29cc8b08635dbeafd5f7"
+        "5f90038ec7916e4bf16b82119b94453d911c6d7ef3015269c2c1393bb34ef47b"
     )
     assert signature["sha256"] == (
-        "6f9b30220ada8a8351af5cbd8cc66528d390c4bdff570b26c6f7c9fe628c7716"
+        "d9068759e3e5f247a78980161856c4967e2296544820cf5638536720619191dd"
     )
     assert hashes == current["contract_hashes"]
 
@@ -2900,9 +2900,9 @@ def test_current_exception_ledger_seed_and_schema_inventory_are_exact(
             "production_to_lab_dynamic_sites",
             "compatibility_contracts",
         )
-        } == {
-            "exceptions": 44,
-            "cross_domain_sites": 1415,
+    } == {
+        "exceptions": 44,
+        "cross_domain_sites": 1415,
         "production_to_lab_edges": 0,
         "production_to_lab_static_sites": 0,
         "production_to_lab_dynamic_sites": 0,

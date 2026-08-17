@@ -131,6 +131,10 @@ bytes proposed below. Apply this decision table in order:
    actually comes from the target page (not just an assistant misquote), the
    exact replacement resolves the feedback, unrelated content and temporal
    scope are preserved, and every target belongs to recall provenance.
+4. Choose quarantined when all semantic checks pass but multiple independent
+   candidate pages carry the same false claim with separate prepared mutations.
+   A multi-page same-error correction is too broad for autonomous approval but
+   not wrong enough to reject.
 Inspect every candidate page, not only mutation targets. Reject a patch that
 leaves another candidate's same active false claim unresolved. For needs_retry,
 set checks that cannot be completed from the supplied evidence to false while
@@ -397,16 +401,13 @@ def _classification_mutation_projection(
         "updated_utf8_bytes": len(mutation.updated),
         "already_applied": mutation.already_applied,
         "replacement_count": replacement_count,
-        "replacement_manifest_sha256": _canonical_json_sha256(
-            replacement_manifest
-        ),
+        "replacement_manifest_sha256": _canonical_json_sha256(replacement_manifest),
         "replacement_detail_budget_bytes": replacement_detail_budget_bytes,
         "replacement_detail_count": len(projected_replacements),
         "replacement_details_truncated": (
             len(projected_replacements) != replacement_count
         ),
-        "omitted_replacement_count": replacement_count
-        - len(projected_replacements),
+        "omitted_replacement_count": replacement_count - len(projected_replacements),
         "included_replacement_indexes": [
             int(item["index"]) for item in projected_replacements
         ],
@@ -425,9 +426,7 @@ def _classification_mutation_projections(
 
     if len(mutations) > MAX_CANDIDATE_PAGES:
         raise PageMutationError("classification mutation projection exceeds page limit")
-    detail_budget = CLASSIFICATION_MUTATION_DETAIL_TOTAL_BYTES // max(
-        1, len(mutations)
-    )
+    detail_budget = CLASSIFICATION_MUTATION_DETAIL_TOTAL_BYTES // max(1, len(mutations))
     projections = [
         _classification_mutation_projection(
             mutation,

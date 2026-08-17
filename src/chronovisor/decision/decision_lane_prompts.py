@@ -516,6 +516,11 @@ Apply this decision table in order:
    choose `supersede_left` because LEFT is the side being deprecated.
 3. If RIGHT is wholly contained in LEFT and has no distinct event or fact,
    choose `supersede_right` because RIGHT is the side being deprecated.
+For rules 2–3, compare the snapshot contents directly. If the contained
+snapshot introduces no fact or event absent from the containing snapshot,
+the condition is met. Do not require the evidence summary to restate the
+absence of distinct events — only an affirmative distinct-event signal in the
+snapshots blocks supersede.
 4. Otherwise choose `keep_both` for genuinely complementary, distinct, or
    uncertain readable evidence.
 Never request deletion or a body merge. Do not ask a human. Return JSON matching
@@ -670,8 +675,6 @@ def _deterministic_ingest_repair_preflight(
         "replacement_operations": replacements,
         "semantic_tag_options": semantic_tag_options,
     }
-
-
 
 
 def _shared_text_parts(value: str, *, raw_content: str | None) -> list[dict[str, Any]]:
@@ -1808,11 +1811,12 @@ secret-store access. Apply the repair-option rules above when relevant.
 def build_orphan_link_review_prompt(candidate: dict[str, Any]) -> str:
     return f"""\
 You are the final autonomous reviewer for a Chronovisor orphan-link disposition.
-First check evidence availability. If a proposed link lacks either source or
-target preimage/excerpt, or any evidence status says missing or unreadable,
-choose `needs_retry`; absence of required evidence is not a substantive
-rejection. With complete evidence, reject only an affirmatively unsupported
-disposition.
+First check evidence availability. For proposal_kind=link only: if the
+proposed link lacks either source or target preimage/excerpt, or any evidence
+status says missing or unreadable, choose `needs_retry`; absence of required
+evidence is not a substantive rejection. For proposal_kind=no_link or
+proposal_kind=retry, source evidence is not required. With complete evidence,
+reject only an affirmatively unsupported disposition.
 For proposal_kind=link, approve only if SOURCE naturally benefits from linking
 to TARGET. For proposal_kind=no_link, approve only if the supplied candidates
 support the conclusion that no safe link should be created. For

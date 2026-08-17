@@ -134,6 +134,7 @@ def quorum_veto_lane_contract_cases() -> tuple[QuorumVetoLaneContractCase, ...]:
     """Bind all and only the approved lane-scoped veto policy decisions."""
 
     bypass_lanes = (
+        "entity_backfill",
         "lint_tag_repair",
         "metadata_backfill",
         "orphan_link",
@@ -160,7 +161,7 @@ def quorum_veto_lane_contract_cases() -> tuple[QuorumVetoLaneContractCase, ...]:
             ),
         ),
     )
-    if len(cases) != 8 or len({case.lane for case in cases}) != len(cases):
+    if len(cases) != 9 or len({case.lane for case in cases}) != len(cases):
         raise ValueError("quorum veto lane contract coverage is incomplete")
     return cases
 
@@ -1596,20 +1597,11 @@ def _metadata_backfill_cases() -> list[tuple[str, str | None, dict[str, Any]]]:
     ]
     typed_metadata = {
         "Model residency": "updated: 2026-08-11\n",
-        "JSON repair": (
-            "features: !!set\n"
-            "  ? gamma\n"
-            "  ? alpha\n"
-            "  ? beta\n"
-        ),
+        "JSON repair": ("features: !!set\n  ? gamma\n  ? alpha\n  ? beta\n"),
     }
     rows = []
     for title, body, summary, question, decision, extra_details in definitions:
-        before = (
-            f"---\ntitle: {title}\n"
-            f"{typed_metadata.get(title, '')}"
-            f"---\n{body}\n"
-        )
+        before = f"---\ntitle: {title}\n{typed_metadata.get(title, '')}---\n{body}\n"
         after = frontmatter.patch(
             before,
             {
@@ -2699,9 +2691,7 @@ def _recall_rubric_calibration_cases() -> list[tuple[str, str | None, dict[str, 
     ]
 
 
-def _recall_answer_adjudication_cases() -> list[
-    tuple[str, str | None, dict[str, Any]]
-]:
+def _recall_answer_adjudication_cases() -> list[tuple[str, str | None, dict[str, Any]]]:
     definitions = [
         ("approved", "search_label_candidate", True, True, True, True),
         ("rejected", "gold_entry", False, True, True, True),
@@ -2710,9 +2700,14 @@ def _recall_answer_adjudication_cases() -> list[
         ("approved", "scorer_calibration_case", True, True, True, True),
     ]
     rows = []
-    for index, (decision, kind, complete, independent, preregistered, safe) in enumerate(
-        definitions, 1
-    ):
+    for index, (
+        decision,
+        kind,
+        complete,
+        independent,
+        preregistered,
+        safe,
+    ) in enumerate(definitions, 1):
         subject_sha = f"{index:064x}"
         evidence = {
             "subject_kind": kind,
@@ -2973,9 +2968,7 @@ def decision_lane_contract_case_manifest() -> dict[str, Any]:
         "cases_per_lane": CASES_PER_MODEL_BACKED_LANE,
         "total_cases": sum(int(row["case_count"]) for row in lanes.values()),
         "quorum_safety_policy_version": QUORUM_SAFETY_POLICY_VERSION,
-        "quorum_veto_cases_per_policy_lane": (
-            QUORUM_VETO_CASES_PER_POLICY_LANE
-        ),
+        "quorum_veto_cases_per_policy_lane": (QUORUM_VETO_CASES_PER_POLICY_LANE),
         "quorum_veto_case_count": len(quorum_veto_lane_contract_cases()),
         "quorum_veto_cases": [
             case.as_dict() for case in quorum_veto_lane_contract_cases()
@@ -2984,8 +2977,8 @@ def decision_lane_contract_case_manifest() -> dict[str, Any]:
     }
     if manifest["total_cases"] < 19 * CASES_PER_MODEL_BACKED_LANE:
         raise ValueError("canonical lane contract case manifest is under-covered")
-    manifest["total_contract_cases"] = (
-        int(manifest["total_cases"]) + int(manifest["quorum_veto_case_count"])
+    manifest["total_contract_cases"] = int(manifest["total_cases"]) + int(
+        manifest["quorum_veto_case_count"]
     )
     if manifest["quorum_veto_case_count"] < 6:
         raise ValueError("quorum veto policy case manifest is under-covered")

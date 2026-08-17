@@ -87,7 +87,7 @@ _DECISION_RUNTIME_ROLES = (
 _ROLE_NAMES = ("primary", "challenger", "tie_break")
 AUDIT_ROLE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,79}$")
 DECISION_SEMANTICS_POLICY_VERSION = 12
-QUORUM_SAFETY_POLICY_VERSION = 3
+QUORUM_SAFETY_POLICY_VERSION = 4
 DECISION_REQUEST_FINGERPRINT_VERSION = 4
 # These lane contracts authorize only additive or reversible effects. Any
 # membership change is a quorum-safety policy change and MUST be accompanied by
@@ -95,6 +95,7 @@ DECISION_REQUEST_FINGERPRINT_VERSION = 4
 # cannot silently retain the old policy.
 TIE_BREAK_MUTATING_MAJORITY_LANES = frozenset(
     {
+        "entity_backfill",
         "lint_tag_repair",
         "metadata_backfill",
         "orphan_link",
@@ -1570,9 +1571,15 @@ class DecisionRouter:
         try:
             self.excluded_roles = frozenset(excluded_roles)
         except TypeError as exc:
-            raise ValueError("excluded_roles must contain canonical route roles") from exc
-        if len(self.excluded_roles) > 1 or not self.excluded_roles.issubset(_ROLE_NAMES):
-            raise ValueError("excluded_roles must contain at most one canonical route role")
+            raise ValueError(
+                "excluded_roles must contain canonical route roles"
+            ) from exc
+        if len(self.excluded_roles) > 1 or not self.excluded_roles.issubset(
+            _ROLE_NAMES
+        ):
+            raise ValueError(
+                "excluded_roles must contain at most one canonical route role"
+            )
         self._active_roles = tuple(
             role for role in _ROLE_NAMES if role not in self.excluded_roles
         )
@@ -1734,11 +1741,14 @@ class DecisionRouter:
         # a decision that was already reached safely.
         self.observe_runtime = self.live_resource_control or model_observer is not None
         self.model_unloader = model_unloader or ollama.unload_named_model
-        self.artifact_replay = bool(
-            artifact_replay
-            if artifact_replay is not None
-            else transport is None and require_adopted
-        ) and not self.excluded_roles
+        self.artifact_replay = (
+            bool(
+                artifact_replay
+                if artifact_replay is not None
+                else transport is None and require_adopted
+            )
+            and not self.excluded_roles
+        )
         if decision_artifact_root is None:
             from chronovisor.core import store
 
@@ -1757,18 +1767,12 @@ class DecisionRouter:
             if resolved_audit is not None and not resolved_audit.is_relative_to(
                 chronovisor_root
             ):
-                decision_artifact_root = (
-                    resolved_audit.parent / "decision-artifacts"
-                )
+                decision_artifact_root = resolved_audit.parent / "decision-artifacts"
             else:
                 decision_artifact_root = default_store_root(chronovisor_root)
-        self.decision_artifact_store = DecisionArtifactStore(
-            decision_artifact_root
-        )
+        self.decision_artifact_store = DecisionArtifactStore(decision_artifact_root)
 
-    def authority_router(
-        self, *, refresh: bool = False
-    ) -> dict[str, Any]:
+    def authority_router(self, *, refresh: bool = False) -> dict[str, Any]:
         """Return ordered safe route provenance for one authority epoch."""
 
         if self._route_provenance_snapshot is not None and not refresh:
@@ -1844,7 +1848,9 @@ class DecisionRouter:
         return {
             "source": self.policy.source,
             "error": error,
-            "routes": [dict(route_rows[role]) for role in _ROLE_NAMES if role in route_rows],
+            "routes": [
+                dict(route_rows[role]) for role in _ROLE_NAMES if role in route_rows
+            ],
         }
 
     def _vote_route_provenance(self, role: str) -> dict[str, Any]:
@@ -1890,7 +1896,9 @@ class DecisionRouter:
 
         authority, authority_error = current_semantic_authority(
             decision_lane,
-            **({"router": self} if self.policy.source == "runtime_role_mapping" else {}),
+            **(
+                {"router": self} if self.policy.source == "runtime_role_mapping" else {}
+            ),
         )
         if authority_error is not None or authority is None:
             raise DecisionArtifactError(
@@ -1989,20 +1997,14 @@ class DecisionRouter:
             role = row.get("role")
             route_provenance = row.get("route_provenance")
             returned_model = row.get("returned_model")
-            if (
-                not isinstance(model, str)
-                or not isinstance(role, str)
-            ):
+            if not isinstance(model, str) or not isinstance(role, str):
                 continue
             route = self.routes.get(role)
             if (
                 expected_models.get(role) != model
                 or route is None
                 or route_provenance != provenance_by_role.get(role)
-                or (
-                    route.location == "remote"
-                    and returned_model != route.model
-                )
+                or (route.location == "remote" and returned_model != route.model)
                 or (
                     self.policy.source == "runtime_role_mapping"
                     and route.provider != provider
@@ -2034,8 +2036,7 @@ class DecisionRouter:
         if (
             len(votes) < self.config.quorum
             or len({vote.role for vote in votes}) < self.config.quorum
-            or len({(vote.provider, vote.model) for vote in votes})
-            < self.config.quorum
+            or len({(vote.provider, vote.model) for vote in votes}) < self.config.quorum
         ):
             raise DecisionArtifactError(
                 "canonical decision quorum proof does not satisfy current policy"
@@ -2115,10 +2116,10 @@ class DecisionRouter:
         )
 
     def _adoption_requirement_error(self) -> str | None:
-        if (
-            not self.require_adopted
-            or self.policy.source in {"adopted_artifact", "runtime_role_mapping"}
-        ):
+        if not self.require_adopted or self.policy.source in {
+            "adopted_artifact",
+            "runtime_role_mapping",
+        }:
             return None
         if not self._adoption_artifact_nominated:
             return "adoption_artifact_required:not_nominated"
@@ -2181,9 +2182,8 @@ class DecisionRouter:
         source: object | None,
     ) -> DecisionVote:
         route_provenance = self._vote_route_provenance(role)
-        if (
-            route_provenance.get("location") == "remote"
-            and not route_provenance.get("revision")
+        if route_provenance.get("location") == "remote" and not route_provenance.get(
+            "revision"
         ):
             return DecisionVote(
                 role=role,
@@ -2325,17 +2325,21 @@ class DecisionRouter:
             return required, selected
         authority = self.authority_router()
         routes = authority.get("routes")
-        if authority.get("error") or not isinstance(routes, list) or not any(
-            isinstance(route, Mapping)
-            and isinstance(route.get("model"), str)
-            and isinstance(route.get("role"), str)
-            and route["role"].removeprefix("classification.") in self._active_roles
-            and production_reasoning_authority_matches(
-                route["model"],
-                route["role"],
-                route,
+        if (
+            authority.get("error")
+            or not isinstance(routes, list)
+            or not any(
+                isinstance(route, Mapping)
+                and isinstance(route.get("model"), str)
+                and isinstance(route.get("role"), str)
+                and route["role"].removeprefix("classification.") in self._active_roles
+                and production_reasoning_authority_matches(
+                    route["model"],
+                    route["role"],
+                    route,
+                )
+                for route in routes
             )
-            for route in routes
         ):
             return required, selected
         try:
@@ -2671,9 +2675,7 @@ class DecisionRouter:
         valid_count = sum(vote.valid for vote in votes)
         if valid_count < self.config.quorum:
             return self._quarantined(votes, "fewer_than_two_valid_local_votes")
-        return self._quarantined(
-            votes, "local_models_did_not_reach_two_vote_quorum"
-        )
+        return self._quarantined(votes, "local_models_did_not_reach_two_vote_quorum")
 
     @staticmethod
     def _classification_noop_consensus(
@@ -3608,10 +3610,7 @@ class DecisionRouter:
             )
 
         def execute() -> DecisionRouterResult:
-            if (
-                self.live_resource_control
-                and not self._defer_local_control_until_tie
-            ):
+            if self.live_resource_control and not self._defer_local_control_until_tie:
                 with ollama.model_resource_lease(exclusive=True):
                     return self._decide_locked(
                         prompt,
@@ -3671,9 +3670,7 @@ class DecisionRouter:
             return True
         estimate = plan.estimate(model)
         return bool(
-            plan.capacity_bytes > 0
-            and estimate > 0
-            and estimate <= plan.capacity_bytes
+            plan.capacity_bytes > 0 and estimate > 0 and estimate <= plan.capacity_bytes
         )
 
     def _authoritative_route_failure(
@@ -3692,8 +3689,7 @@ class DecisionRouter:
         if set(pair_roles) & self._local_roles and plan.max_resident_models < 1:
             return False
         return all(
-            self._model_fits(role, self.routes[role].model, plan)
-            for role in pair_roles
+            self._model_fits(role, self.routes[role].model, plan) for role in pair_roles
         )
 
     def _request_plan(
@@ -3770,6 +3766,7 @@ class DecisionRouter:
             schema,
             effective_system,
         )
+
         def finalize(result: DecisionRouterResult) -> DecisionRouterResult:
             if result.ok:
                 try:
@@ -3851,9 +3848,7 @@ class DecisionRouter:
                     model
                     for model in post_decision_plan.resident_models
                     if model
-                    in self._local_models[
-                        : post_decision_plan.max_resident_models
-                    ]
+                    in self._local_models[: post_decision_plan.max_resident_models]
                     and model not in post_decision_plan.initial_eviction_models
                 ]
             result = replace(
@@ -3898,9 +3893,7 @@ class DecisionRouter:
                         "status": result.status,
                         "failure_class": result.failure_class,
                         "quarantine_reason": result.quarantine_reason,
-                        "conservative_veto_fired": (
-                            result.conservative_veto_fired
-                        ),
+                        "conservative_veto_fired": (result.conservative_veto_fired),
                         "conservative_veto_bypassed_by_lane_policy": (
                             result.conservative_veto_bypassed_by_lane_policy
                         ),
@@ -3952,6 +3945,7 @@ class DecisionRouter:
                         record_local_replay_case,
                         replay_semantic_effect,
                     )
+
                     replay_path = self.replay_path
                     if replay_path is None:
                         if self.audit_root is not None:
@@ -4058,9 +4052,7 @@ class DecisionRouter:
 
         resident = set(residency_plan.resident_models)
         initial_eviction_set = set(residency_plan.initial_eviction_models)
-        active_models = tuple(
-            self.routes[role].model for role in self._active_roles
-        )
+        active_models = tuple(self.routes[role].model for role in self._active_roles)
         if residency_plan.max_resident_models == 1:
             initial_eviction_set.update(
                 model for model in active_models[1:] if model in resident
