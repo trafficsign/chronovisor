@@ -41,7 +41,7 @@ SAFE_RUNTIME_ROLE_RE = re.compile(r"^[a-z][a-z0-9._-]{0,127}$")
 LOCAL_ACTIVITY_PHASES = frozenset(
     {"trigger", "load", "context", "generate", "repair", "validate", "vote"}
 )
-STRUCTURED_GENERATION_POLICY_VERSION = 15
+STRUCTURED_GENERATION_POLICY_VERSION = 16
 STRUCTURED_GENERATION_TEMPERATURE = 0
 STRUCTURED_GENERATION_SEED = 0
 _DEFAULT_STRUCTURED_MEMORY_RESERVE_GIB = 16
@@ -53,9 +53,7 @@ _FORMATLESS_THINKING_MODELS = frozenset(
 )
 _ADAPTIVE_REASONING_CANARY_ADOPTED = False
 _BOUNDED_LOW_REASONING_LANES = frozenset({"local_repair", "read_back_repair"})
-_NO_REASONING_LANES = frozenset(
-    {"content_correction_review", "ingest_reconciliation"}
-)
+_NO_REASONING_LANES = frozenset({"content_correction_review", "ingest_reconciliation"})
 _REASONING_LEVELS = frozenset({"low", "medium", "high"})
 _ADAPTIVE_REASONING_LEVELS = ("low", "medium", "high")
 _ADAPTIVE_REASONING_AUTHORITIES = (
@@ -151,8 +149,8 @@ def structured_generation_policy() -> dict[str, Any]:
         "temperature": STRUCTURED_GENERATION_TEMPERATURE,
         "seed": STRUCTURED_GENERATION_SEED,
         "think": {
-            "default": "medium",
-            "fallback": "medium",
+            "default": "low",
+            "fallback": "low",
             "levels": ["low", "medium", "high"],
             "bounded_low_lanes": sorted(_BOUNDED_LOW_REASONING_LANES),
             "disabled_lanes": sorted(_NO_REASONING_LANES),
@@ -206,7 +204,7 @@ def _structured_think_selection(
     supported_reasoning_levels: Sequence[str] | None = None,
     adaptive_reasoning_adopted: bool = False,
 ) -> tuple[bool | str, str]:
-    """Select one verified reasoning level, otherwise preserve medium."""
+    """Select one verified reasoning level, otherwise preserve low."""
 
     valid_ints = (num_ctx, required_num_ctx, num_predict)
     if (
@@ -230,20 +228,20 @@ def _structured_think_selection(
     if decision_lane in _NO_REASONING_LANES:
         return False, "quality_equivalent_no_reasoning"
     if not adaptive_reasoning_adopted:
-        return "medium", "adaptive_canary_not_adopted"
+        return "low", "adaptive_canary_not_adopted"
     if supported_reasoning_levels is None:
-        return "medium", "capability_unknown"
+        return "low", "capability_unknown"
     if isinstance(supported_reasoning_levels, (str, bytes)) or not isinstance(
         supported_reasoning_levels, Sequence
     ):
-        return "medium", "capability_invalid"
+        return "low", "capability_invalid"
     if not all(isinstance(level, str) for level in supported_reasoning_levels):
-        return "medium", "capability_invalid"
+        return "low", "capability_invalid"
     if not supported_reasoning_levels:
-        return "medium", "capability_not_adopted"
+        return "low", "capability_not_adopted"
     supported = frozenset(supported_reasoning_levels)
     if not supported.issubset(_REASONING_LEVELS):
-        return "medium", "capability_invalid"
+        return "low", "capability_invalid"
     if task_impact == "high":
         if "high" not in supported:
             return "medium", "high_not_supported"
@@ -253,8 +251,8 @@ def _structured_think_selection(
     if decision_lane in _BOUNDED_LOW_REASONING_LANES:
         if "low" in supported:
             return "low", "bounded_repair_low"
-        return "medium", "low_not_supported"
-    return "medium", "medium_default"
+        return "low", "low_not_supported"
+    return "low", "low_default"
 
 
 def _reasoning_authority_profile(
@@ -2513,7 +2511,9 @@ class LocalStructuredSession:
         required_num_ctx: int | None,
         activity_update: _ActivityUpdate | None,
     ) -> ChatRequest:
-        observed_num_ctx = self.num_ctx if requested_num_ctx is None else requested_num_ctx
+        observed_num_ctx = (
+            self.num_ctx if requested_num_ctx is None else requested_num_ctx
+        )
         authority_profile = _reasoning_authority_profile(self.model, self.runtime_role)
         selected_think, effective_think_reason = self._reasoning_selection(
             effective_num_ctx=effective_num_ctx,
@@ -2925,10 +2925,14 @@ class LocalStructuredSession:
                     f"({feedback_bytes}>{self.max_feedback_chars})",
                     attempts,
                 )
-            messages.append({"role": "assistant", "content": _INVALID_ASSISTANT_PLACEHOLDER})
+            messages.append(
+                {"role": "assistant", "content": _INVALID_ASSISTANT_PLACEHOLDER}
+            )
             messages.append({"role": "user", "content": repair_prompt})
 
-        return self._failure("repair_exhausted", "structured session exhausted", attempts)
+        return self._failure(
+            "repair_exhausted", "structured session exhausted", attempts
+        )
 
     def run(
         self,

@@ -108,14 +108,14 @@ class QueueTransport:
 
 
 def test_structured_generation_policy_seals_adaptive_reasoning_authority() -> None:
-    assert STRUCTURED_GENERATION_POLICY_VERSION == 15
+    assert STRUCTURED_GENERATION_POLICY_VERSION == 16
     assert structured_generation_policy() == {
-        "version": 15,
+        "version": 16,
         "temperature": 0,
         "seed": 0,
         "think": {
-            "default": "medium",
-            "fallback": "medium",
+            "default": "low",
+            "fallback": "low",
             "levels": ["low", "medium", "high"],
             "bounded_low_lanes": ["local_repair", "read_back_repair"],
             "disabled_lanes": [
@@ -212,8 +212,8 @@ def test_structured_generation_policy_seals_adaptive_reasoning_authority() -> No
             {"decision_lane": "local_repair", "runtime_role": "classification.primary"},
             "low",
         ),
-        ({"runtime_role": "classification.primary"}, "medium"),
-        ({"runtime_role": "classification.tie_break"}, "medium"),
+        ({"runtime_role": "classification.primary"}, "low"),
+        ({"runtime_role": "classification.tie_break"}, "low"),
         (
             {"runtime_role": "classification.primary", "task_impact": "high"},
             "high",
@@ -223,15 +223,18 @@ def test_structured_generation_policy_seals_adaptive_reasoning_authority() -> No
 def test_structured_think_mode_selects_verified_candidate_levels(
     overrides: dict[str, object], expected: str
 ) -> None:
-    assert structured_think_mode(
-        "local:test",
-        num_ctx=16_384,
-        required_num_ctx=8_000,
-        num_predict=2_048,
-        supported_reasoning_levels=("low", "medium", "high"),
-        adaptive_reasoning_adopted=True,
-        **{"task_impact": "normal", **overrides},
-    ) == expected
+    assert (
+        structured_think_mode(
+            "local:test",
+            num_ctx=16_384,
+            required_num_ctx=8_000,
+            num_predict=2_048,
+            supported_reasoning_levels=("low", "medium", "high"),
+            adaptive_reasoning_adopted=True,
+            **{"task_impact": "normal", **overrides},
+        )
+        == expected
+    )
 
 
 def test_structured_think_mode_falls_back_for_capability_and_headroom() -> None:
@@ -244,35 +247,45 @@ def test_structured_think_mode_falls_back_for_capability_and_headroom() -> None:
         "task_impact": "normal",
         "adaptive_reasoning_adopted": True,
     }
-    assert structured_think_mode(**common) == "medium"
-    assert structured_think_mode(
-        **common, supported_reasoning_levels=("low", "medium")
-    ) == "medium"
-    assert structured_think_mode(
-        **{**common, "num_ctx": 9_000},
-        supported_reasoning_levels=("medium", "high"),
-    ) == "medium"
-    assert structured_think_mode(
-        **{**common, "adaptive_reasoning_adopted": False},
-        supported_reasoning_levels=("low", "medium", "high"),
-    ) == "medium"
+    assert structured_think_mode(**common) == "low"
+    assert (
+        structured_think_mode(**common, supported_reasoning_levels=("low", "medium"))
+        == "low"
+    )
+    assert (
+        structured_think_mode(
+            **{**common, "num_ctx": 9_000},
+            supported_reasoning_levels=("medium", "high"),
+        )
+        == "low"
+    )
+    assert (
+        structured_think_mode(
+            **{**common, "adaptive_reasoning_adopted": False},
+            supported_reasoning_levels=("low", "medium", "high"),
+        )
+        == "low"
+    )
 
 
 @pytest.mark.parametrize(
     "decision_lane", ["content_correction_review", "ingest_reconciliation"]
 )
 def test_quality_equivalent_lane_uses_no_reasoning(decision_lane: str) -> None:
-    assert structured_think_mode(
-        "local:test",
-        num_ctx=16_384,
-        required_num_ctx=8_000,
-        num_predict=2_048,
-        runtime_role="classification.primary",
-        decision_lane=decision_lane,
-        task_impact="normal",
-        supported_reasoning_levels=("low", "medium", "high"),
-        adaptive_reasoning_adopted=True,
-    ) is False
+    assert (
+        structured_think_mode(
+            "local:test",
+            num_ctx=16_384,
+            required_num_ctx=8_000,
+            num_predict=2_048,
+            runtime_role="classification.primary",
+            decision_lane=decision_lane,
+            task_impact="normal",
+            supported_reasoning_levels=("low", "medium", "high"),
+            adaptive_reasoning_adopted=True,
+        )
+        is False
+    )
 
 
 def test_transport_format_schema_does_not_weaken_client_validation() -> None:
@@ -554,7 +567,7 @@ def test_custom_transport_requires_explicit_synthetic_model() -> None:
     with pytest.raises(ValueError, match="injected transport requires"):
         LocalStructuredSession(
             runtime_role="review.test",
-            transport=QueueTransport('{}'),
+            transport=QueueTransport("{}"),
         )
 
 
@@ -601,10 +614,10 @@ def test_first_pass_valid_uses_fixed_medium_thinking_request() -> None:
     request = transport.requests[0]
     assert request.model == "local:test"
     assert request.num_ctx == 16_384
-    assert request.num_predict == 256
+    assert request.num_predict == 170
     assert request.temperature == 0
     assert request.seed == 0
-    assert request.think == "medium"
+    assert request.think == "low"
     assert request.schema == SCHEMA
     assert request.messages[0]["role"] == "system"
     assert "untrusted data" in request.messages[0]["content"]
@@ -632,9 +645,9 @@ def test_content_correction_review_skips_initial_reasoning() -> None:
 @pytest.mark.parametrize(
     ("model", "initial_think", "initial_ollama_think", "initial_schema"),
     [
-        (QWEN_STRUCTURED_MODEL, "medium", True, None),
-        (MUSE_STRUCTURED_MODEL, "medium", "medium", None),
-        ("gemma4:26b", "medium", "medium", SCHEMA),
+        (QWEN_STRUCTURED_MODEL, "low", True, None),
+        (MUSE_STRUCTURED_MODEL, "low", "low", None),
+        ("gemma4:26b", "low", "low", SCHEMA),
     ],
 )
 def test_all_model_repairs_use_strict_schema_without_thinking(
@@ -678,7 +691,7 @@ def test_qwen_structured_compatibility_keeps_client_validation_fail_closed() -> 
     assert result.ok is False
     assert result.failure_class == "repair_exhausted"
     assert transport.requests[0].schema is None
-    assert transport.requests[0].think == "medium"
+    assert transport.requests[0].think == "low"
     assert transport.requests[0].ollama_think is True
 
 
@@ -748,7 +761,7 @@ def test_active_marker_is_atomic_redacted_and_removed_after_session(
         }
         assert marker["phase"] == "generate"
         assert marker["attempt"] == 0
-        assert marker["think"] == "medium"
+        assert marker["think"] == "low"
         assert marker["think_selection_reason"] == "adaptive_canary_not_adopted"
         assert marker["context_tokens"] == 32_768
         return '{"decision":"apply","summary":"ok"}'
@@ -770,21 +783,21 @@ def test_active_marker_is_atomic_redacted_and_removed_after_session(
     audit_text = (audit_root / "audit.jsonl").read_text(encoding="utf-8")
     assert secret not in audit_text
     audit = json.loads(audit_text)
-    assert audit["think"] == "medium"
-    assert audit["ollama_think"] == "medium"
-    assert audit["num_predict"] == 2_048
+    assert audit["think"] == "low"
+    assert audit["ollama_think"] == "low"
+    assert audit["num_predict"] == 1_365
     assert audit["think_selection_reason"] == "adaptive_canary_not_adopted"
     assert audit["context_tokens"] == 32_768
     assert audit["requested_num_ctx"] == 32_768
     assert isinstance(audit["required_num_ctx"], int)
-    assert audit["structured_generation_policy_version"] == 15
+    assert audit["structured_generation_policy_version"] == 16
     assert audit["structured_generation_policy_sha256"] == (
         structured_generation_policy_sha256()
     )
-    assert result.ollama_think == "medium"
-    assert result.num_predict == 2_048
-    assert result.audit_record()["ollama_think"] == "medium"
-    assert result.audit_record()["num_predict"] == 2_048
+    assert result.ollama_think == "low"
+    assert result.num_predict == 1_365
+    assert result.audit_record()["ollama_think"] == "low"
+    assert result.audit_record()["num_predict"] == 1_365
     summary = json.loads((audit_root / "summary.json").read_text(encoding="utf-8"))
     assert summary["sessions"]["first_pass_valid"] == 1
     assert summary["sessions"]["repaired"] == 0
@@ -803,7 +816,7 @@ def test_transport_failure_clears_activity_and_records_failure(tmp_path: Path) -
     assert result.failure_class == "transport_error"
     assert list((audit_root / "active").glob("*.json")) == []
     audit = json.loads((audit_root / "audit.jsonl").read_text(encoding="utf-8"))
-    assert audit["think"] == "medium"
+    assert audit["think"] == "low"
     summary = json.loads((audit_root / "summary.json").read_text(encoding="utf-8"))
     assert summary["sessions"]["failures"] == {"transport_error": 1}
     trace = [
@@ -812,12 +825,8 @@ def test_transport_failure_clears_activity_and_records_failure(tmp_path: Path) -
         .read_text(encoding="utf-8")
         .splitlines()
     ]
-    assert [row["phase"] for row in trace if row["kind"] == "phase"][-1] == (
-        "generate"
-    )
-    assert not any(
-        row["kind"] == "phase" and row["phase"] == "vote" for row in trace
-    )
+    assert [row["phase"] for row in trace if row["kind"] == "phase"][-1] == ("generate")
+    assert not any(row["kind"] == "phase" and row["phase"] == "vote" for row in trace)
     assert trace[-1]["kind"] == "session"
     assert trace[-1]["status"] == "error"
 
@@ -836,7 +845,7 @@ def test_direct_session_repairs_without_thinking() -> None:
     ).run("repair", SCHEMA)
 
     assert result.ok is True
-    assert [request.think for request in transport.requests] == ["medium", False]
+    assert [request.think for request in transport.requests] == ["low", False]
     assert [request.think_selection_reason for request in transport.requests] == [
         "adaptive_canary_not_adopted",
         "structured_repair",
@@ -877,22 +886,20 @@ def test_production_roles_use_medium_until_canary_then_strict_repair(
     ).run("decide", SCHEMA)
 
     assert result.ok is True
-    assert [request.think for request in transport.requests] == ["medium", False]
-    assert [request.num_predict for request in transport.requests] == [3_072] * 2
+    assert [request.think for request in transport.requests] == ["low", False]
+    assert [request.num_predict for request in transport.requests] == [2_048, 2_048]
     assert [request.ollama_think for request in transport.requests] == [
-        "medium" if runtime_role == "classification.challenger" else True,
+        "low" if runtime_role == "classification.challenger" else True,
         False,
     ]
     assert transport.requests[0].think_selection_reason == (
         "adaptive_canary_not_adopted"
     )
     assert result.ollama_think is False
-    assert result.num_predict == 3_072
-    audit = json.loads(
-        (tmp_path / "audit" / "audit.jsonl").read_text(encoding="utf-8")
-    )
+    assert result.num_predict == 2_048
+    audit = json.loads((tmp_path / "audit" / "audit.jsonl").read_text(encoding="utf-8"))
     assert audit["ollama_think"] == result.ollama_think
-    assert audit["num_predict"] == 3_072
+    assert audit["num_predict"] == 2_048
 
 
 @pytest.mark.parametrize(("ollama_think", "expected"), [(None, "medium"), (True, True)])
@@ -984,7 +991,7 @@ def test_reasoning_authority_fails_closed_on_runtime_identity_drift(
     ).run("repair", SCHEMA)
 
     assert result.ok is True
-    assert transport.requests[0].think == "medium"
+    assert transport.requests[0].think == "low"
     assert result.think_selection_reason == "adaptive_canary_not_adopted"
 
 
@@ -1018,8 +1025,8 @@ def test_reasoning_authority_fails_closed_on_route_identity_drift(
     ).run("repair", SCHEMA)
 
     assert result.ok is True
-    assert transport.requests[0].think == "medium"
-    assert transport.requests[0].num_predict == 256
+    assert transport.requests[0].think == "low"
+    assert transport.requests[0].num_predict == 170
     assert result.think_selection_reason == "adaptive_canary_not_adopted"
 
 
@@ -1066,7 +1073,7 @@ def test_reasoning_authority_is_detached_from_external_mutation() -> None:
     result = session.run("repair", SCHEMA)
 
     assert result.ok is True
-    assert transport.requests[0].think == "medium"
+    assert transport.requests[0].think == "low"
     assert result.think_selection_reason == "adaptive_canary_not_adopted"
 
 
@@ -1259,7 +1266,7 @@ def test_session_trace_records_real_phases_and_terminal_result(tmp_path: Path) -
         "vote",
         "vote",
     ]
-    assert all(row["think"] == "medium" for row in rows)
+    assert all(row["think"] == "low" for row in rows)
     assert all(row["context_tokens"] == 16_384 for row in rows)
     assert all(row["requested_num_ctx"] == 16_384 for row in rows)
     assert rows[-1]["kind"] == "session"
@@ -1500,9 +1507,9 @@ def test_output_cap_fails_closed_after_two_oversize_repairs(tmp_path: Path) -> N
     transport = QueueTransport("x" * 101, "y" * 101, "z" * 101)
     audit_root = tmp_path / "audit"
 
-    result = _session(
-        transport, audit_root=audit_root, max_output_chars=100
-    ).run("decide", SCHEMA)
+    result = _session(transport, audit_root=audit_root, max_output_chars=100).run(
+        "decide", SCHEMA
+    )
 
     assert result.ok is False
     assert result.failure_class == "repair_exhausted"
@@ -1517,12 +1524,8 @@ def test_output_cap_fails_closed_after_two_oversize_repairs(tmp_path: Path) -> N
         .read_text(encoding="utf-8")
         .splitlines()
     ]
-    assert [row["phase"] for row in trace if row["kind"] == "phase"][-1] == (
-        "validate"
-    )
-    assert not any(
-        row["kind"] == "phase" and row["phase"] == "vote" for row in trace
-    )
+    assert [row["phase"] for row in trace if row["kind"] == "phase"][-1] == ("validate")
+    assert not any(row["kind"] == "phase" and row["phase"] == "vote" for row in trace)
 
 
 def test_initial_input_byte_cap_fails_before_call(tmp_path: Path) -> None:
@@ -1741,7 +1744,9 @@ def test_default_transport_reuses_larger_resident_context_without_eviction(
 ) -> None:
     audit_root = tmp_path / "audit"
     _install_default_local_runtime(monkeypatch, model="configured:test")
-    monkeypatch.setenv("CHRONOVISOR_OLLAMA_RESOURCE_LOCK", str(tmp_path / "resource.lock"))
+    monkeypatch.setenv(
+        "CHRONOVISOR_OLLAMA_RESOURCE_LOCK", str(tmp_path / "resource.lock")
+    )
     planner_calls: list[dict[str, Any]] = []
     chat_contexts: list[int] = []
 
@@ -1805,7 +1810,9 @@ def test_default_transport_reuses_larger_resident_context_without_eviction(
 def test_default_transport_oversize_input_has_no_runner_side_effects(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("CHRONOVISOR_OLLAMA_RESOURCE_LOCK", str(tmp_path / "resource.lock"))
+    monkeypatch.setenv(
+        "CHRONOVISOR_OLLAMA_RESOURCE_LOCK", str(tmp_path / "resource.lock")
+    )
     planner_calls: list[object] = []
     unload_calls: list[object] = []
     chat_calls: list[object] = []
@@ -1892,7 +1899,9 @@ def test_default_transport_holds_exclusive_lease_across_all_repair_turns(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _install_default_local_runtime(monkeypatch)
-    monkeypatch.setenv("CHRONOVISOR_OLLAMA_RESOURCE_LOCK", str(tmp_path / "resource.lock"))
+    monkeypatch.setenv(
+        "CHRONOVISOR_OLLAMA_RESOURCE_LOCK", str(tmp_path / "resource.lock")
+    )
     large_entered = threading.Event()
     release_large = threading.Event()
     small_entered = threading.Event()
@@ -2047,10 +2056,11 @@ def test_reasoning_protocol_prefix_is_normalized_for_any_model() -> None:
     assert result.ok is True
     assert result.value == {"decision": "apply", "summary": "reasoned"}
     assert result.attempts[0].normalized is True
-    assert result.attempts[0].output_sha256 == hashlib.sha256(
-        normalized.encode("utf-8")
-    ).hexdigest()
-    assert transport.requests[0].think == "medium"
+    assert (
+        result.attempts[0].output_sha256
+        == hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+    )
+    assert transport.requests[0].think == "low"
 
 
 def test_fixed_reasoning_protocol_prefix_is_normalized_for_any_model() -> None:
@@ -2066,10 +2076,11 @@ def test_fixed_reasoning_protocol_prefix_is_normalized_for_any_model() -> None:
     assert result.ok is True
     assert result.value == {"decision": "apply", "summary": "reasoned"}
     assert result.attempts[0].normalized is True
-    assert result.attempts[0].output_sha256 == hashlib.sha256(
-        normalized.encode("utf-8")
-    ).hexdigest()
-    assert transport.requests[0].think == "medium"
+    assert (
+        result.attempts[0].output_sha256
+        == hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+    )
+    assert transport.requests[0].think == "low"
 
 
 @pytest.mark.parametrize(
