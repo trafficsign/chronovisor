@@ -43,6 +43,7 @@ from chronovisor.core.llm_security import (
 from chronovisor.core.nemotron_adapter import NemotronEmbeddingBackend
 from chronovisor.core.ollama_adapter import OllamaAdapter
 from chronovisor.core.ollama_transport import OLLAMA_URL
+from chronovisor.core.omlx_adapter import OMLXAdapter
 from chronovisor.core.openai_compatible_adapter import compose_openai_compatible_adapter
 from chronovisor.core.provider_profiles import (
     CURATED_PROFILE_IDS,
@@ -295,6 +296,15 @@ def _provider(provider_id: str, value: object) -> ProviderDefinition:
                 generation=True, embedding=True, structured_output=True
             ),
         )
+    if kind == "omlx":
+        _exact_keys(table, {"kind"})
+        return ProviderDefinition(
+            provider_id,
+            kind,
+            BackendCapabilities(
+                generation=True, embedding=True, structured_output=True
+            ),
+        )
     if kind == "local-transformers":
         _exact_keys(table, {"kind", "backend", "device", "max_length", "batch_size"})
         backend_value = table.get("backend", "transformers")
@@ -526,6 +536,8 @@ def build_llm_runtime(
         provider = config.providers[provider_id]
         if provider.kind == "ollama":
             backends[provider_id] = OllamaAdapter()
+        elif provider.kind == "omlx":
+            backends[provider_id] = OMLXAdapter()
         elif provider.kind == "local-transformers":
             if provider.reranker_config is None:
                 raise _fail()
