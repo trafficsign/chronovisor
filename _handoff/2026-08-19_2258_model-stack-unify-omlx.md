@@ -73,10 +73,11 @@ oMLX server (localhost:8000, OpenAI互換, x-api-key)
 
 ## 未決 / 注意
 
-- Muse 16.4 t/s(現 Ollama 20.9 より遅い)は統一の代償として許容。底上げ余地:
-  `mlx-community/Muse-Glimmer-30B-OptiQ-4bit`(混合 bit、oMLX 内蔵 mlx_lm 0.31.3 で理論上ロード可)への差し替え比較。
-- Muse DFlash2 は oMLX 未対応(imcoai/z-lab の DFlash2 ドラフターは実在するが、oMLX の
-  Muse target 検証パスは DFlash v1 止まり。llama.cpp PR #27342 は Qwen のみ実測)。
+- Muse 16.4 t/s は**0.6.3rc1 で解消済み**: Muse + DFlash2 = **24.1**(v1 20.2 / 0.6.2 16.4 / Ollama 20.9)。
+  rc1 クリーン実測: Qwen 45.8 / Gemma 140.8 / Muse+DFlash2 24.1。**0.6.3 をデプロイ対象にする。**
+  (注意: 初回の rc1 計測は Ollama 常駐 = swap 10GB の汚染で誤診した。クリーン必須。)
+- **Muse DFlash2 は 0.6.3rc1 で実動**が確定(z-lab/Muse-Glimmer-30B-DFlash2 drafter)。
+  draft は v1(assistant)と DFlash2 の両方が使える。デフォルトは DFlash2 を推奨。
 - **検証済み(2026-08-19)**: ornith(登録・ウォーム 0.6s)と bge-m3(/v1/embeddings 1024d)は oMLX で動作。
   → 実稼働中の全 5 モデルが oMLX でサービス可能 = モデル側のゲートは全部クリア。
   残りは Chronovisor 接続実装(下記)と Ollama 退役のみ。

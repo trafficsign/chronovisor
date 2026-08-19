@@ -19,12 +19,18 @@ OpenAI 互換 API)** から提供する。`ollama_adapter.py` 相当の **`omlx_
 
 | config上の名前(旧) | oMLX モデル ID | 役割 | 実測 |
 | --- | --- | --- | --- |
-| qwen3.8:27b-axq4 | `Qwen3.8-27B-4bit` | ingest / decision.primary / audit / planner | DFlash2, 43.8 t/s |
-| gemma4:26b-optiq4 | `gemma-4-26b-a4b-it-4bit` | decision.tie_break / research.tie_break | DFlash v1, 112.4 t/s |
-| muse-glimmer:30b-q4k-dynamic | `Muse-Glimmer-30B-4bit` | decision.challenger | DFlash v1, 16.4 t/s |
-| ornith:9b-q4_K_M | `Ornith-1.0-9B-OptiQ-6bit` | recall.gate / recall.processor judge | ウォーム 0.6s |
+| qwen3.8:27b-axq4 | `Qwen3.8-27B-4bit` | ingest / decision.primary / audit / planner | DFlash2, 45.8 t/s(rc1) |
+| gemma4:26b-optiq4 | `gemma-4-26b-a4b-it-4bit` | decision.tie_break / research.tie_break | DFlash v1, 140.8 t/s(rc1) |
+| muse-glimmer:30b-q4k-dynamic | `Muse-Glimmer-30B-4bit` | decision.challenger | **DFlash2(rc1)24.1** / v1 20.2 t/s |
+| ornith:9b-q4_K_M | **`Ornith-1.5-9B-MLX-4bit`** | recall.gate / recall.processor judge | ウォーム ~0.2s(1.0 と同じ。誤発火も改善傾向) |
 | bge-m3:latest | `bge-m3-mlx-fp16` | [embedding] 埋め込み | /v1/embeddings 1024d・正規化 |
 | (gpt-oss:20b) | — | research.challenge 等 6 割当 | **不使用**(削除対象、挙動影響なし) |
+
+**バージョン**: デプロイ対象は **oMLX 0.6.3(rc1 で検証済み、クリーン実測: Qwen 45.8 / Gemma 140.8 /
+Muse+DFlash2 24.1)**。0.6.3rc1 で Muse の DFlash2 drafter(z-lab/Muse-Glimmer-30B-DFlash2)が
+実動する。Muse の model_settings の `dflash_draft_model` は **`z-lab/Muse-Glimmer-30B-DFlash2` を
+デフォルト推奨**(v1 の `meta-models/Muse-Glimmer-30B-assistant` はフォールバック)。
+Ornith は **1.5(MLX-4bit)を採用**(1.0-OptiQ-6bit は残していてよい/削除可)。
 
 Ollama 非依存(変更不要): `nvidia/Nemotron-3-Embed-1B-BF16`(semantic-service / Unix socket)、
 `BAAI/bge-reranker-v2-m3`(プロセス内 transformers / MPS)。
@@ -92,7 +98,8 @@ Ollama 非依存(変更不要): `nvidia/Nemotron-3-Embed-1B-BF16`(semantic-servi
 
 ## 5. 注意・制約(実測で判明)
 
-1. **DFlash エンジンは同時 1 つのみアクティブ**。非 pinned なら自動スワップ(実測 OK)。**`is_pinned: true` DFlash モデルは他モデルのロードをブロック** — pinned 使用は慎重に。Chronovisor の既存リース(直列化)は維持・活用が必須
+1. **DFlash エンジンは同時 1 つのみアクティブ**。非 pinned なら自動スワップ(実測 OK)。**`is_pinned: true` DFlash モデルは他モデルのロードをブロック** — pinned 使用は慎重に。Chronovisor の既存リース(直列化)は維持・活用が必須(D Flash 有効モデルが 5 つに増えるため重要度↑)
+1b. **Muse + DFlash2 は 0.6.3 で実動**(rc1 クリーン実測 24.1 tok/s)。`dflash_draft_model` を `z-lab/Muse-Glimmer-30B-DFlash2` に設定すれば Muse target でも投機が効く。
 2. **未知パラメータは黙って無視される**(keep_alive/num_ctx top-level think 等)。写像漏れが無音 = 動作違いになるので、テストで挙動を固定すること
 3. 思考抑制は `chat_template_kwargs.enable_thinking: false`(トップレベル enable_thinking は効かない)
 4. 埋め込みは 1024 次元・正規化済み(既存 bge-m3 と同じ次元。Ollama 版の前処理(prefix)は不要前提で確認)
