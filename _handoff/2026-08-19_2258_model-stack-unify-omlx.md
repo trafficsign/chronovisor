@@ -49,7 +49,7 @@ oMLX server (localhost:8000, OpenAI互換, x-api-key)
 | gemma4:26b-optiq4 | decision.tie_break / research.tie_break | Ollama | ✅ 実施済み(gemma-4-26b-a4b-it-4bit + DFlash, 112.4) |
 | muse-glimmer:30b-q4k-dynamic | decision.challenger | Ollama | ✅ 実施済み(Muse-30B-4bit + DFlash v1, 16.4) |
 | **ornith:9b-q4_K_M** | recall.gate(1.5s 判定)/ recall.processor judge / 低遅延クリティカル | Ollama | ✅ **有望**: Ornith-1.0-9B(Qwen3.5 ベース)の MLX quant あり + oMLX は Qwen3.5-9B を DFlash drafter 付きで対応。要計測 |
-| **gpt-oss:20b** | research.challenge(明示モードのみ) | Ollama | ⚠️ MLX 4bit quant あり(majentik/gpt-oss-20b-TurboQuant-MLX-4bit) だが oMLX DFlash レジストリ外。素朴ロード要検証、または支持モデルへの振替 |
+| **gpt-oss:20b** | research.challenge / librarian.review.challenger / classification.anchor 等 6 役割(実config) | Ollama | ⛔ **実使用ゼロ(移行不要)**。challenger は muse-glimmer に切替済み。ログ実生成 0、登場は adopted_artifact 簿記のみ |
 | **bge-m3:latest** | [embedding] 埋め込み(Ollama API 経由) | Ollama | ⚠️ mlx-community/bge-m3-mlx-fp16 + oMLX の /v1/embeddings + mlx_embeddings 同梱までは確認。BERT 埋め込みの実際の登録・提供可否は未検証 |
 
 **Ollama 非依存 = 統一対象外(独立して継続):**
@@ -77,10 +77,11 @@ oMLX server (localhost:8000, OpenAI互換, x-api-key)
   `mlx-community/Muse-Glimmer-30B-OptiQ-4bit`(混合 bit、oMLX 内蔵 mlx_lm 0.31.3 で理論上ロード可)への差し替え比較。
 - Muse DFlash2 は oMLX 未対応(imcoai/z-lab の DFlash2 ドラフターは実在するが、oMLX の
   Muse target 検証パスは DFlash v1 止まり。llama.cpp PR #27342 は Qwen のみ実測)。
-- 移行対象の残り 3 モデル(ornith / gpt-oss / bge-m3)は oMLX への実装確認待ち:
+- 移行対象の残り 2 モデル(ornith / bge-m3)は oMLX への実装確認待ち:
   - ornith:計測必須(recall.gate は 1.5s タイムアウトの低遅延パス)
-  - gpt-oss:oMLX DFlash レジストリ外。素朴ロード試行 or 役割振替の判断
   - bge-m3:oMLX の BERT 埋め込み提供可否を実証する必要あり
+- gpt-oss:20b は不使用確定(実生成ゼロ・Muse へ切替済み)のため移行不要。
+  config の orphan 割当 6 箇所の整理のみ残課題(挙動影響なし)。
 - Chronovisor 側は Ollama 固有設定が多い(keep_alive / num_ctx / coordinate_ollama /
   adaptive_residency / ollama_lease)ため、oMLX へのパラメータ写像の設計が本格作業。
 - oMLX の 3 モデル同時リクエストのキューイング挙動、全モデル常駐 vs 遅延ロードは要検証。
