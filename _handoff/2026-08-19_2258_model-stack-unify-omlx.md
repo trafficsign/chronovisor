@@ -48,9 +48,9 @@ oMLX server (localhost:8000, OpenAI互換, x-api-key)
 | qwen3.8:27b-axq4 | ingest / decision.primary / audit / research.planner / recall escalation | Ollama | ✅ 実施済み(Qwen3.8-27B-4bit + DFlash2, 43.8) |
 | gemma4:26b-optiq4 | decision.tie_break / research.tie_break | Ollama | ✅ 実施済み(gemma-4-26b-a4b-it-4bit + DFlash, 112.4) |
 | muse-glimmer:30b-q4k-dynamic | decision.challenger | Ollama | ✅ 実施済み(Muse-30B-4bit + DFlash v1, 16.4) |
-| **ornith:9b-q4_K_M** | recall.gate(1.5s 判定)/ recall.processor judge / 低遅延クリティカル | Ollama | ✅ **有望**: Ornith-1.0-9B(Qwen3.5 ベース)の MLX quant あり + oMLX は Qwen3.5-9B を DFlash drafter 付きで対応。要計測 |
+| **ornith:9b-q4_K_M** | recall.gate(1.5s 判定)/ recall.processor judge / 低遅延クリティカル | Ollama | ✅ **検証済み(2026-08-19)**: Ornith-1.0-9B-OptiQ-6bit が oMLX でロード、ウォーム 0.6s(gate 1.5s 以内)。DFlash 設定済み |
 | **gpt-oss:20b** | research.challenge / librarian.review.challenger / classification.anchor 等 6 役割(実config) | Ollama | ⛔ **実使用ゼロ(移行不要)**。challenger は muse-glimmer に切替済み。ログ実生成 0、登場は adopted_artifact 簿記のみ |
-| **bge-m3:latest** | [embedding] 埋め込み(Ollama API 経由) | Ollama | ⚠️ mlx-community/bge-m3-mlx-fp16 + oMLX の /v1/embeddings + mlx_embeddings 同梱までは確認。BERT 埋め込みの実際の登録・提供可否は未検証 |
+| **bge-m3:latest** | [embedding] 埋め込み(Ollama API 経由) | Ollama | ✅ **検証済み(2026-08-19)**: bge-m3-mlx-fp16 が /v1/embeddings で 200、**1024 次元・正規化済み** |
 
 **Ollama 非依存 = 統一対象外(独立して継続):**
 - nvidia/Nemotron-3-Embed-1B-BF16 … [search.embedding] semantic-service(Unix socket / MPS)
@@ -77,16 +77,19 @@ oMLX server (localhost:8000, OpenAI互換, x-api-key)
   `mlx-community/Muse-Glimmer-30B-OptiQ-4bit`(混合 bit、oMLX 内蔵 mlx_lm 0.31.3 で理論上ロード可)への差し替え比較。
 - Muse DFlash2 は oMLX 未対応(imcoai/z-lab の DFlash2 ドラフターは実在するが、oMLX の
   Muse target 検証パスは DFlash v1 止まり。llama.cpp PR #27342 は Qwen のみ実測)。
-- 移行対象の残り 2 モデル(ornith / bge-m3)は oMLX への実装確認待ち:
-  - ornith:計測必須(recall.gate は 1.5s タイムアウトの低遅延パス)
-  - bge-m3:oMLX の BERT 埋め込み提供可否を実証する必要あり
+- **検証済み(2026-08-19)**: ornith(登録・ウォーム 0.6s)と bge-m3(/v1/embeddings 1024d)は oMLX で動作。
+  → 実稼働中の全 5 モデルが oMLX でサービス可能 = モデル側のゲートは全部クリア。
+  残りは Chronovisor 接続実装(下記)と Ollama 退役のみ。
 - gpt-oss:20b は不使用確定(実生成ゼロ・Muse へ切替済み)のため移行不要。
   config の orphan 割当 6 箇所の整理のみ残課題(挙動影響なし)。
 - Chronovisor 側は Ollama 固有設定が多い(keep_alive / num_ctx / coordinate_ollama /
   adaptive_residency / ollama_lease)ため、oMLX へのパラメータ写像の設計が本格作業。
+- 注意(運用時観察):oMLX の同時リクエスト/3 先生と ornith・bge-m3 の同居時の遅延、
+  ウォーム/コールド差、DFlash 稼働(ornith)は本番稼働で確認。
+  検証時の ornith ウォーム 0.6s は Ollama 常駐のまま計測(退役後はさらに余裕。)
 - oMLX の 3 モデル同時リクエストのキューイング挙動、全モデル常駐 vs 遅延ロードは要検証。
 - 付随ツール: `~/projects/sandbox/tools/{omlx_3model_bench.sh, reconstruct_ollama_mlx.py,
-  rename_axquant_to_mlx.py, ocr_vision.swift}`、スキル `dflash2-mlx-mac`。
+  rename_axquant_to_mlx.py, ocr_vision.swift, register_omlx_ornith_bge3.py}`、スキル `dflash2-mlx-mac`。
 
 ## 関連
 
