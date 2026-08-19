@@ -15,6 +15,21 @@
 - ⏳ 残り:**本番 `~/.chronovisor/config.toml` の provider 切替**(roles を omlx に + モデルID 書換)+
   サービス再起動での確認 → その後 Ollama 退役。実装以降の手順: 下記 §4.3 / DoD。
 
+## 0c. 本番カットオーバー試行結果(2026-08-20) — 未成立 → ロールバック
+
+- 実施: config を omlx 切替(41 role)+ エージェント再起動 + push(remote HEAD に反映)。
+- **結果: ingest worker が「ingest ランタイム待ち」のまま進行せず → カットオーバー未成立と判断し、
+  config をバックアップから Ollama へ復元・再起動でロールバック完了。**
+- 発見した真因(注): 停滞の直接原因は omlx 切替ではなく、**当該日のクリーンベンチ
+  (SIGSTOP + ollama bootout)の副次損傷**で、ingest の子 Python が `ollama-resource.lock` /
+  `ingest-orchestrator.lock` を掴んだまま待機(自己デッドロック)。**ロック保持者を kill して再起動で解除済み。**
+- **残る統合ギャップ(本番適用の真の障壁)**: ingest / decision の「ランタイム獲得・リース・
+  residency」は Ollama 結合(keep_alive / adaptive_residency / ollama-resource lock 連携)。
+  OMLXAdapter の `resident_models→{}` / `unload→False` だけではこの結合を満たせない。
+  → アダプタ実装は完成だが、**本番適用にはこの結合を解く統合作業が別途必要**(Codex 復活後 or 専用セッション)。
+- 教訓(スキル/メンテ): クリーンベンチの SIGSTOP 運用は学校のロック状態を壊し得る。
+  停止は「launchd でサービス一括停止 → 計測 → 一括復帰」へ変更し、ロック保持者は lsof で確認。
+
 ---
 
 ## 0. ゴール
