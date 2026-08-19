@@ -1,9 +1,19 @@
 # Codex 引き継ぎブリーフ: Chronovisor の LLM バックエンドを Ollama → oMLX へ切り替え
 
-状態: **READY FOR IMPLEMENTATION**(モデル側検証は全て完了)
+状態: **REPO-IMPLEMENTED**(2026-08-20、Hermes が実装。Codex 復活までの暫定)
+→ 本番カットオーバー(production config の provider 切替 + サービス再起動)が残作業。
 作成: 2026-08-20 / Hermes(oMLX 実測・検証済み)
-実装者: Codex
+実装者: Hermes(Codex 復活までの暫定担当)
 前提プラン: `_handoff/2026-08-19_2258_model-stack-unify-omlx.md`
+
+## 0b. 実装状況(2026-08-20)
+
+- ✅ `src/chronovisor/core/omlx_adapter.py` 新規(OMLXAdapter / 写像は本ブリーフ §2 の実測どおり)
+- ✅ `src/chronovisor/core/llm_config.py` に provider kind `omlx` 追加(gen+embed+structured)
+- ✅ `tests/test_omlx_adapter.py` 新規 13 件 + `test_llm_config/llm_runtime/ollama` 合計 174 件 green
+- ✅ `scripts/check_local_omlx_e2e.py` 新規、実サーバーで **PASS**(gen 6 役割 + gate 1.34s + embed 1024d)
+- ⏳ 残り:**本番 `~/.chronovisor/config.toml` の provider 切替**(roles を omlx に + モデルID 書換)+
+  サービス再起動での確認 → その後 Ollama 退役。実装以降の手順: 下記 §4.3 / DoD。
 
 ---
 
