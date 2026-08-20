@@ -1,5 +1,7 @@
 """Ollama API facade and temporary structured-runtime migration bridge."""
 
+import hashlib
+import json
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
@@ -127,6 +129,43 @@ def runtime_generation_routes(
         )
     except (LLMConfigError, LLMRuntimeError) as exc:
         raise RuntimeBridgeError(_runtime_bridge_category(exc)) from None
+
+
+def runtime_generation_route_fingerprints(
+    routes: Sequence[RuntimeGenerationRoute],
+) -> dict[str, str]:
+    """Bind local model cohorts without requiring every provider to be Ollama."""
+
+    if any(route.location != "local" for route in routes):
+        raise RuntimeBridgeError("route_configuration_invalid")
+    ollama_models = [route.model for route in routes if route.provider == "ollama"]
+    observed = model_digests(ollama_models) if ollama_models else {}
+    fingerprints: dict[str, str] = {}
+    for route in routes:
+        if route.provider == "ollama":
+            fingerprint = observed.get(route.model, "")
+        elif route.revision:
+            fingerprint = hashlib.sha256(
+                json.dumps(
+                    [
+                        "runtime-generation-route-v1",
+                        route.provider,
+                        route.model,
+                        route.location,
+                        route.protocol,
+                        route.endpoint_sha256,
+                        route.revision,
+                    ],
+                    ensure_ascii=True,
+                    separators=(",", ":"),
+                ).encode()
+            ).hexdigest()
+        else:
+            fingerprint = ""
+        if not fingerprint:
+            raise RuntimeBridgeError("route_configuration_invalid")
+        fingerprints[route.role] = fingerprint
+    return fingerprints
 
 
 def source_data_classification(data_class: str, sensitivity: str) -> object:

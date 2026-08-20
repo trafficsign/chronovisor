@@ -311,6 +311,50 @@ def test_default_workers_keep_cold_teacher_and_counterfactual_budgets_separate(
     assert counterfactual.deadline_ms == 45_000
 
 
+def test_default_workers_accept_revision_pinned_local_omlx_routes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from chronovisor.core import ollama
+
+    roles = (
+        *distill.TEACHER_ROLES,
+        "recall.distill.answer_generator",
+        "recall.distill.utility_judge",
+    )
+    models = ("qwen", "muse", "gemma", "qwen", "gemma")
+    revisions = ("qwen-rev", "muse-rev", "gemma-rev", "qwen-rev", "gemma-rev")
+    routes = tuple(
+        ollama.RuntimeGenerationRoute(
+            role=role,
+            provider="omlx",
+            model=model,
+            location="local",
+            structured_output=True,
+            protocol="openai-compatible",
+            endpoint_sha256="e" * 64,
+            revision=revision,
+        )
+        for role, model, revision in zip(roles, models, revisions, strict=True)
+    )
+    monkeypatch.setattr(ollama, "runtime_generation_routes", lambda _roles: routes)
+    monkeypatch.setattr(
+        ollama,
+        "model_digests",
+        lambda _models: (_ for _ in ()).throw(AssertionError("Ollama queried")),
+    )
+
+    teachers, counterfactual = distill._default_workers(distill.DistillationConfig())
+
+    assert len(teachers) == 3
+    assert counterfactual is not None
+    assert len({worker.expected_digest for worker in teachers.values()}) == 3
+    assert all(len(worker.expected_digest) == 64 for worker in teachers.values())
+    assert (
+        teachers["recall.distill.teacher.a"].expected_digest
+        == counterfactual.digests["recall.distill.answer_generator"]
+    )
+
+
 def test_rally_v1_folds_assistant_and_tool_refs_without_copying_text(
     tmp_path: Path,
 ) -> None:

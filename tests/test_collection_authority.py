@@ -279,6 +279,79 @@ def test_remote_collection_crosswalk_never_touches_local_ollama_controls(
     assert "model_digests" not in entry
 
 
+def test_local_omlx_crosswalk_never_touches_ollama_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from chronovisor.core import ollama
+    from chronovisor.recall.classification_anchor_worker import (
+        PROMPT_SHA256,
+        WORKER_SCHEMA,
+    )
+
+    page_uid = _uids(1, start=225)[0]
+    _page(tmp_path / "pages" / "omlx-topic" / "note.md", page_uid)
+    state = CollectionRegistry(
+        tmp_path,
+        uid_factory=iter(_uids(10, start=230)).__next__,
+    ).sync_from_pages()["registry"]
+    routes = (
+        ollama.RuntimeGenerationRoute(
+            "classification.anchor.primary", "omlx", "model-a", "local", True
+        ),
+        ollama.RuntimeGenerationRoute(
+            "classification.anchor.challenger", "omlx", "model-b", "local", True
+        ),
+    )
+    monkeypatch.setattr(ollama, "runtime_generation_routes", lambda _roles: routes)
+    monkeypatch.setattr(
+        ollama,
+        "model_digests",
+        lambda _models: pytest.fail("oMLX route queried Ollama metadata"),
+    )
+
+    def call_worker(*, payload, purpose, timeout_seconds=720.0):
+        del purpose, timeout_seconds
+        route = next(row for row in routes if row.role == payload["runtime_role"])
+        result = (
+            {"central_subject": "oMLX", "secondary_subjects": [], "rationale": "ok"}
+            if payload["operation"] == "extract"
+            else {
+                "primary_anchor_id": "cvo:anchor:0001",
+                "secondary_anchor_ids": [],
+                "rationale": "ok",
+            }
+        )
+        return {
+            "schema": WORKER_SCHEMA,
+            "prompt_sha256": PROMPT_SHA256,
+            "model": route.model,
+            "model_digest": None,
+            "route_identity": {
+                "role": route.role,
+                "provider": route.provider,
+                "model": route.model,
+                "location": route.location,
+            },
+            "result": result,
+        }
+
+    monkeypatch.setattr(
+        collection_authority,
+        "_call_crosswalk_anchor_worker",
+        call_worker,
+    )
+
+    result = ensure_autonomous_crosswalk(tmp_path, state=state, use_models=True)
+    runtime = read_sealed_json(Path(result["path"]))
+    entry = next(row for row in runtime["entries"] if row["slug"] == "omlx-topic")
+
+    assert result["model_calls"] == 4
+    assert entry["review_required"] is False
+    assert "model_digests" not in entry
+    assert [row["model_digest"] for row in entry["evidence"]] == [None, None]
+
+
 def test_collection_capsule_defaults_unknown_sensitivity_high(tmp_path: Path) -> None:
     page_uid = _uids(1, start=315)[0]
     _page(tmp_path / "pages" / "sensitive-topic" / "note.md", page_uid)

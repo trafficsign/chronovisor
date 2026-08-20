@@ -166,12 +166,13 @@ _CASES = (
 def _consensus_routes(
     *,
     location: str = "remote",
+    provider: str | None = None,
     models: tuple[str, str, str] = ("model-a", "model-b", "model-c"),
 ) -> tuple[Any, ...]:
     return tuple(
         classification_model_worker.ollama.RuntimeGenerationRoute(
             role=role,
-            provider="ollama" if location == "local" else "remote",
+            provider=provider or ("ollama" if location == "local" else "remote"),
             model=model,
             location=location,
             structured_output=True,
@@ -472,6 +473,30 @@ def test_consensus_routes_fetch_local_digests_once(
         "sha256:model-b",
         "sha256:model-c",
     ]
+
+
+def test_consensus_routes_accept_local_omlx_without_ollama_digests(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    routes = _consensus_routes(location="local", provider="omlx")
+    monkeypatch.setattr(
+        classification_runtime.ollama,
+        "runtime_generation_routes",
+        lambda roles: routes if roles == CONSENSUS_RUNTIME_ROLES else (),
+    )
+    monkeypatch.setattr(
+        classification_runtime.ollama,
+        "model_digests",
+        lambda _models: pytest.fail("oMLX route queried Ollama metadata"),
+    )
+
+    contract = classification_runtime.resolve_consensus_runtime_routes()
+
+    assert [route["model_digest"] for route in contract] == [None, None, None]
+    assert (
+        classification_runtime.resolve_consensus_runtime_routes(list(contract))
+        == contract
+    )
 
 
 @pytest.mark.parametrize(

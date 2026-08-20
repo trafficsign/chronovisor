@@ -401,17 +401,12 @@ def _default_workers(
     except Exception:
         return {}, None
     if tuple(route.role for route in routes) != roles or any(
-        route.provider != "ollama"
-        or route.location != "local"
-        or not route.structured_output
-        for route in routes
+        route.location != "local" or not route.structured_output for route in routes
     ):
         return {}, None
     try:
-        model_digests = ollama.model_digests([route.model for route in routes])
+        digests = ollama.runtime_generation_route_fingerprints(routes)
     except Exception:
-        return {}, None
-    if any(not model_digests.get(route.model) for route in routes):
         return {}, None
     identities = {
         route.role: {
@@ -422,7 +417,6 @@ def _default_workers(
         }
         for route in routes
     }
-    digests = {route.role: model_digests[route.model] for route in routes}
     if len({digests[role] for role in TEACHER_ROLES}) != len(TEACHER_ROLES):
         return {}, None
     return (

@@ -1600,10 +1600,7 @@ def _run_collection_review_worker(
         enabled=True,
         mode="on",
         purpose="explicit",
-        needs_model=(
-            route_identity["provider"] == "ollama"
-            and route_identity["location"] == "local"
-        ),
+        needs_model=route_identity["location"] == "local",
     ) as lease:
         outcome = run_cancellable_command(
             [sys.executable, "-m", "chronovisor.librarian.collection_anomaly_worker"],
@@ -2557,8 +2554,15 @@ def _propose_collection_crosswalk(
             or extracted.get("prompt_sha256") != PROMPT_SHA256
             or extracted.get("model") != route.model
             or extracted.get("route_identity") != route_identity
-            or (route.location == "local" and not extracted.get("model_digest"))
-            or (route.location != "local" and extracted.get("model_digest") is not None)
+            or (
+                route.provider == "ollama"
+                and route.location == "local"
+                and not extracted.get("model_digest")
+            )
+            or (
+                (route.provider != "ollama" or route.location != "local")
+                and extracted.get("model_digest") is not None
+            )
             or not isinstance(extracted.get("result"), Mapping)
         ):
             continue
@@ -2660,7 +2664,11 @@ def ensure_autonomous_crosswalk(
         }
         for route in routes
     ]
-    local_routes = [route for route in routes if route.location == "local"]
+    local_routes = [
+        route
+        for route in routes
+        if route.provider == "ollama" and route.location == "local"
+    ]
     local_model_digests = (
         ollama.model_digests([route.model for route in local_routes])
         if local_routes

@@ -159,6 +159,35 @@ def test_worker_rejects_nonlocal_route_before_model_call(monkeypatch) -> None:
     assert result["route_identity"] == {}
 
 
+def test_worker_resolves_revision_pinned_local_omlx_without_ollama(
+    monkeypatch,
+) -> None:
+    role = "recall.distill.teacher.a"
+    route = ollama.RuntimeGenerationRoute(
+        role=role,
+        provider="omlx",
+        model="qwen",
+        location="local",
+        structured_output=True,
+        protocol="openai-compatible",
+        endpoint_sha256="e" * 64,
+        revision="qwen-rev",
+    )
+    monkeypatch.setattr(
+        worker.ollama, "runtime_generation_routes", lambda _roles: (route,)
+    )
+    monkeypatch.setattr(
+        worker.ollama,
+        "model_digests",
+        lambda _models: (_ for _ in ()).throw(AssertionError("Ollama queried")),
+    )
+
+    resolved, fingerprint = worker._resolve_local_route(role)
+
+    assert resolved == route
+    assert len(fingerprint) == 64
+
+
 def test_worker_hides_structured_failure(monkeypatch) -> None:
     monkeypatch.setattr(
         worker.ollama, "runtime_generation_routes", lambda roles: (_route(roles[0]),)

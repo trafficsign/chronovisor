@@ -82,9 +82,9 @@ def resolve_structured_route(
     if requested_model not in (None, "") and str(requested_model) != route.model:
         raise ClassificationError("classification runtime model changed")
     requested_digest = payload.get("model_digest")
-    if route.location != "local":
+    if route.provider != "ollama" or route.location != "local":
         if requested_digest not in (None, ""):
-            raise ClassificationError("remote route rejects local model digest")
+            raise ClassificationError("route rejects Ollama model digest")
         return route, None, sensitivity
     digest = (
         local_model_digests
@@ -134,14 +134,18 @@ def resolve_consensus_runtime_routes(
                 or not str(row["model"]).strip()
                 or row.get("location") not in {"local", "remote"}
                 or (
-                    row.get("location") == "local"
+                    row.get("provider") == "ollama"
+                    and row.get("location") == "local"
                     and (
                         not isinstance(row.get("model_digest"), str)
                         or not str(row["model_digest"]).strip()
                     )
                 )
                 or (
-                    row.get("location") == "remote"
+                    (
+                        row.get("provider") != "ollama"
+                        or row.get("location") != "local"
+                    )
                     and row.get("model_digest") is not None
                 )
             ):
@@ -167,7 +171,11 @@ def resolve_consensus_runtime_routes(
     ] != [route_identity(route) for route in routes]:
         raise ClassificationError("classification runtime route contract changed")
 
-    local_routes = [route for route in routes if route.location == "local"]
+    local_routes = [
+        route
+        for route in routes
+        if route.provider == "ollama" and route.location == "local"
+    ]
     local_digests = (
         ollama.model_digests([route.model for route in local_routes])
         if local_routes

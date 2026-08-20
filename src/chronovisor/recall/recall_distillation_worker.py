@@ -291,17 +291,9 @@ def _parse(payload: Mapping[str, Any]) -> tuple[str, str, str, int, Mapping[str,
 
 def _resolve_local_route(role: str) -> tuple[ollama.RuntimeGenerationRoute, str]:
     route = ollama.runtime_generation_routes((role,))[0]
-    if (
-        route.role != role
-        or route.provider != "ollama"
-        or route.location != "local"
-        or not route.structured_output
-    ):
+    if route.role != role or route.location != "local" or not route.structured_output:
         raise ValueError
-    digest = ollama.model_digests([route.model]).get(route.model, "")
-    if not isinstance(digest, str) or not digest:
-        raise ValueError
-    return route, digest
+    return route, ollama.runtime_generation_route_fingerprints((route,))[role]
 
 
 def run(payload: Mapping[str, Any]) -> dict[str, Any]:
