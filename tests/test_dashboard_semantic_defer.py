@@ -585,7 +585,7 @@ def test_snapshot_separates_semantic_and_operational_holds_once(
     monkeypatch.setattr(runtime_status, "read_events", lambda limit: [])
     monkeypatch.setattr(dashboard, "_drain_history", lambda limit: [])
     monkeypatch.setattr(dashboard, "_recent_log_events", lambda limit: [])
-    monkeypatch.setattr(dashboard, "_ollama_snapshot", lambda: {})
+    monkeypatch.setattr(dashboard, "_local_model_snapshot", lambda: {})
     monkeypatch.setattr(dashboard, "_model_status_snapshot", lambda _ollama: {})
     monkeypatch.setattr(
         dashboard,

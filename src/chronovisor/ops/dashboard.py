@@ -37,6 +37,7 @@ from chronovisor.core.ollama import (
     ingest_model,
     runtime_generation_routes,
 )
+from chronovisor.core.omlx_adapter import OMLX_API_KEY, OMLX_BASE_URL
 from chronovisor.core.runtime_config import (
     load_reranker_config,
     load_search_embedding_config,
@@ -427,10 +428,70 @@ def _ollama_tags_snapshot() -> dict[str, Any]:
         return {"available": False, "models": [], "error": str(exc)}
 
 
+def _omlx_snapshot() -> dict[str, Any]:
+    try:
+        resp = httpx.get(
+            f"{OMLX_BASE_URL}/models/status",
+            headers={"x-api-key": OMLX_API_KEY},
+            timeout=1.5,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        models = data.get("models", [])
+        if not isinstance(models, list):
+            models = []
+        models = [
+            {
+                **row,
+                "name": row.get("id"),
+                "model": row.get("id"),
+                "size": row.get("actual_size") or row.get("estimated_size"),
+                "size_vram": (
+                    row.get("actual_size") or row.get("resident_estimated_size")
+                    if row.get("loaded")
+                    else 0
+                ),
+                "context_length": row.get("max_context_window")
+                or row.get("model_context_length"),
+                "processor": row.get("engine_type"),
+                "details": {
+                    "format": "MLX",
+                    "context_length": row.get("max_context_window")
+                    or row.get("model_context_length"),
+                },
+            }
+            for row in models
+            if isinstance(row, dict)
+        ]
+        return {"available": True, "provider": "omlx", "models": models}
+    except Exception as exc:
+        return {
+            "available": False,
+            "provider": "omlx",
+            "models": [],
+            "error": str(exc),
+        }
+
+
+def _local_model_snapshot() -> dict[str, Any]:
+    try:
+        config = llm_config.load_llm_config()
+        configured_kinds = {
+            config.providers[route.provider_id].kind
+            for route in config.roles.values()
+            if route.provider_id in config.providers
+        }
+    except Exception:
+        configured_kinds = set()
+    if "omlx" in configured_kinds:
+        return _omlx_snapshot()
+    return {**_ollama_snapshot(), "provider": "ollama"}
+
+
 def _model_name(row: dict[str, Any] | None) -> str:
     if not isinstance(row, dict):
         return ""
-    for key in ("model", "name"):
+    for key in ("model", "name", "id"):
         value = row.get(key)
         if isinstance(value, str) and value.strip():
             return value.strip()
@@ -454,6 +515,14 @@ def _add_model_role(roles: dict[str, set[str]], model: str | None, role: str) ->
     roles.setdefault(model, set()).add(role)
 
 
+def _is_local_model_route(route: Any) -> bool:
+    location = getattr(route, "location", None)
+    return (
+        getattr(route, "provider", None) in {"ollama", "omlx"}
+        and getattr(location, "value", location) == "local"
+    )
+
+
 def _decision_runtime_routes() -> tuple[Any, ...]:
     routes = runtime_generation_routes(DECISION_RUNTIME_ROLES)
     if tuple(route.role for route in routes) != DECISION_RUNTIME_ROLES or any(
@@ -474,8 +543,7 @@ def _configured_model_roles() -> dict[str, set[str]]:
             if (
                 route.role == AUDITOR_RUNTIME_ROLE
                 and route.structured_output
-                and route.provider == "ollama"
-                and route.location == "local"
+                and _is_local_model_route(route)
             ):
                 _add_model_role(roles, route.model, "audit")
     except Exception:
@@ -500,8 +568,7 @@ def _configured_model_roles() -> dict[str, set[str]]:
                 if (
                     route.role == role
                     and route.structured_output
-                    and route.provider == "ollama"
-                    and route.location == "local"
+                    and _is_local_model_route(route)
                 ):
                     _add_model_role(roles, route.model, label)
     except Exception:
@@ -513,8 +580,7 @@ def _configured_model_roles() -> dict[str, set[str]]:
             if (
                 route.role == role
                 and route.structured_output
-                and route.provider == "ollama"
-                and route.location == "local"
+                and _is_local_model_route(route)
             ):
                 _add_model_role(roles, route.model, "improve")
     except Exception:
@@ -527,7 +593,7 @@ def _configured_model_roles() -> dict[str, set[str]]:
             decision_routes,
             strict=True,
         ):
-            if route.provider == "ollama" and route.location == "local":
+            if _is_local_model_route(route):
                 _add_model_role(roles, route.model, label)
     except Exception:
         pass
@@ -536,10 +602,7 @@ def _configured_model_roles() -> dict[str, set[str]]:
         embedding_route = llm_config.load_default_llm_runtime().resolve_embedding(
             "knowledge.embedding"
         )
-        if (
-            embedding_route.provider == "ollama"
-            and embedding_route.location.value == "local"
-        ):
+        if _is_local_model_route(embedding_route):
             _add_model_role(roles, embedding_route.model, "embed")
     except Exception:
         pass
@@ -553,7 +616,7 @@ def _configured_model_roles() -> dict[str, set[str]]:
                 "search.semantic.incremental",
             ):
                 route = runtime.resolve_embedding(role)
-                if route.provider == "ollama" and route.location.value == "local":
+                if _is_local_model_route(route):
                     _add_model_role(roles, route.model, "search-embed")
     except Exception:
         pass
@@ -564,10 +627,7 @@ def _configured_model_roles() -> dict[str, set[str]]:
             rerank_route = llm_config.load_default_llm_runtime().resolve_rerank(
                 "search.rerank"
             )
-            if (
-                rerank_route.provider == "ollama"
-                and rerank_route.location.value == "local"
-            ):
+            if _is_local_model_route(rerank_route):
                 _add_model_role(roles, rerank_route.model, "rerank")
     except Exception:
         pass
@@ -629,6 +689,7 @@ def _configured_runtime_backend(provider: Any) -> tuple[str, str] | None:
         return None
     return {
         "ollama": ("ollama", "local"),
+        "omlx": ("omlx", "local"),
         "local-transformers": ("local-reranker", "local"),
         "nemotron": ("nemotron", "local"),
     }.get(kind)
@@ -793,10 +854,22 @@ def _runtime_failure_snapshot(
     }
 
 
-def _model_status_snapshot(ollama: dict[str, Any] | None = None) -> dict[str, Any]:
-    running_snapshot = ollama or _ollama_snapshot()
-    installed_snapshot = _ollama_tags_snapshot()
-    running_models = running_snapshot.get("models", [])
+def _model_status_snapshot(runtime: dict[str, Any] | None = None) -> dict[str, Any]:
+    runtime_snapshot = runtime or _local_model_snapshot()
+    provider = str(runtime_snapshot.get("provider") or "ollama")
+    installed_snapshot = (
+        runtime_snapshot if provider == "omlx" else _ollama_tags_snapshot()
+    )
+    all_runtime_models = runtime_snapshot.get("models", [])
+    running_models = (
+        [
+            row
+            for row in all_runtime_models
+            if isinstance(row, dict) and row.get("loaded")
+        ]
+        if provider == "omlx" and isinstance(all_runtime_models, list)
+        else all_runtime_models
+    )
     installed_models = installed_snapshot.get("models", [])
     if not isinstance(running_models, list):
         running_models = []
@@ -860,6 +933,7 @@ def _model_status_snapshot(ollama: dict[str, Any] | None = None) -> dict[str, An
         rows.append(
             {
                 "name": name,
+                "provider": provider,
                 "status": status,
                 "installed": installed is not None,
                 "running": running is not None,
@@ -903,11 +977,12 @@ def _model_status_snapshot(ollama: dict[str, Any] | None = None) -> dict[str, An
     )
     return {
         "available": bool(
-            running_snapshot.get("available") or installed_snapshot.get("available")
+            runtime_snapshot.get("available") or installed_snapshot.get("available")
         ),
-        "running_available": bool(running_snapshot.get("available")),
+        "provider": provider,
+        "running_available": bool(runtime_snapshot.get("available")),
         "installed_available": bool(installed_snapshot.get("available")),
-        "error": running_snapshot.get("error") or installed_snapshot.get("error"),
+        "error": runtime_snapshot.get("error") or installed_snapshot.get("error"),
         "models": rows,
         "summary": {
             "installed": sum(1 for row in rows if row["installed"]),
@@ -4854,7 +4929,7 @@ def _health_materialization_fingerprint(raw_paths: list[Path]) -> str:
     )
 
 
-def _model_status_materialization_fingerprint(ollama: dict[str, Any]) -> str:
+def _model_status_materialization_fingerprint(runtime: dict[str, Any]) -> str:
     paths = [
         CHRONOVISOR_ROOT / "config.toml",
         CHRONOVISOR_ROOT / "runtime" / "model-lab" / "active-policy.json",
@@ -4864,7 +4939,7 @@ def _model_status_materialization_fingerprint(ollama: dict[str, Any]) -> str:
         runtime_status.EVENTS_FILE,
     ]
     model_identity = hashlib.sha256(
-        _canonical_json_bytes(ollama.get("models") or [])
+        _canonical_json_bytes(runtime.get("models") or [])
     ).hexdigest()
     return _component_source_fingerprint(
         "model-status",
@@ -4879,7 +4954,7 @@ def build_fast_snapshot() -> dict[str, Any]:
     status = runtime_status.read_status()
     if not isinstance(status, dict):
         status = {}
-    ollama = _ollama_snapshot()
+    local_runtime = _local_model_snapshot()
     runtime_events = runtime_status.read_events(limit=runtime_status.MAX_EVENTS)
     failures = _runtime_failure_snapshot(runtime_events)
     return {
@@ -4889,7 +4964,8 @@ def build_fast_snapshot() -> dict[str, Any]:
         **failures,
         "local_consensus": status.get("local_consensus") or {},
         "frontier_repair": status.get("frontier_repair") or {},
-        "ollama": ollama,
+        "local_runtime": local_runtime,
+        "ollama": local_runtime if local_runtime.get("provider") == "ollama" else {},
         "model_status": {},
         "self_heal": {},
         "recall": {},
@@ -5106,13 +5182,13 @@ def build_snapshot() -> dict[str, Any]:
     runtime_events = runtime_status.read_events(limit=runtime_status.MAX_EVENTS)
     failures = _runtime_failure_snapshot(runtime_events)
     events = (runtime_events[-120:] + _recent_log_events(limit=80))[-160:]
-    ollama = _ollama_snapshot()
+    local_runtime = _local_model_snapshot()
     model_status = _safe_snapshot_component(
         "model_status",
         lambda: _materialized_component(
             "model-status",
-            fingerprint=_model_status_materialization_fingerprint(ollama),
-            builder=lambda: _model_status_snapshot(ollama),
+            fingerprint=_model_status_materialization_fingerprint(local_runtime),
+            builder=lambda: _model_status_snapshot(local_runtime),
             audit_seconds=DASHBOARD_HEALTH_AUDIT_SECONDS,
         ),
         {"available": False, "models": [], "summary": {}},
@@ -5153,7 +5229,8 @@ def build_snapshot() -> dict[str, Any]:
             "triage_failure_count": orch_state.get("triage_failure_count", 0),
         },
         "raw_archive": raw_archive,
-        "ollama": ollama,
+        "local_runtime": local_runtime,
+        "ollama": local_runtime if local_runtime.get("provider") == "ollama" else {},
         "model_status": model_status,
         **failures,
         "librarian": _safe_snapshot_component(
@@ -6397,15 +6474,20 @@ class DashboardHandler(BaseHTTPRequestHandler):
             elif path == "/api/cortex/events":
                 self._cortex_events_response(parsed.query)
             elif path == "/api/model-status":
-                ollama = _ollama_snapshot()
+                local_runtime = _local_model_snapshot()
                 failures = _runtime_failure_snapshot(
                     runtime_status.read_events(limit=runtime_status.MAX_EVENTS)
                 )
                 _json_response(
                     self,
                     {
-                        "model_status": _model_status_snapshot(ollama),
-                        "ollama": ollama,
+                        "model_status": _model_status_snapshot(local_runtime),
+                        "local_runtime": local_runtime,
+                        "ollama": (
+                            local_runtime
+                            if local_runtime.get("provider") == "ollama"
+                            else {}
+                        ),
                         **failures,
                     },
                 )

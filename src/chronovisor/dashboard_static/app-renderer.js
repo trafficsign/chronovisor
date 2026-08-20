@@ -3139,7 +3139,7 @@ function renderModelStatus(modelStatus, runtimeFailures, activities = []) {
   els.modelMissing.textContent = String(missing);
   els.modelCaption.textContent = data.available
     ? `${formatBytes(summary.loaded_size_bytes)} loaded · ${formatBytes(summary.installed_size_bytes)} installed`
-    : shortName(data.error || "Ollama offline");
+    : shortName(data.error || "Local runtime offline");
   renderRuntimeFailures(runtimeFailures);
 
   els.modelGrid.innerHTML = "";
@@ -3202,7 +3202,7 @@ function renderModelStatus(modelStatus, runtimeFailures, activities = []) {
       if (row.expires_at) metaPieces.push(`until ${timeLabel(row.expires_at)}`);
       const meta = document.createElement("div");
       meta.className = "model-meta";
-      meta.textContent = metaPieces.join(" · ") || "configured outside local Ollama";
+      meta.textContent = metaPieces.join(" · ") || `${row.provider || "local"} configured model`;
       meta.title = meta.textContent;
 
       item.append(main, roleWrap, meta);
@@ -3213,13 +3213,14 @@ function renderModelStatus(modelStatus, runtimeFailures, activities = []) {
 function renderLiveModelStatus(snapshot, activities) {
   latestLiveModelSnapshot = {
     model_status: snapshot?.model_status || {},
+    local_runtime: snapshot?.local_runtime || snapshot?.ollama || {},
     ollama: snapshot?.ollama || {},
     runtime_failures: snapshot?.runtime_failures || [],
     activities: Array.isArray(activities) ? activities : [],
   };
-  renderOllamaMetric(
+  renderLocalRuntimeMetric(
     latestLiveModelSnapshot.model_status,
-    latestLiveModelSnapshot.ollama,
+    latestLiveModelSnapshot.local_runtime,
   );
   renderModelStatus(
     latestLiveModelSnapshot.model_status,
@@ -3545,13 +3546,13 @@ function renderLocalConsensusSummary(status) {
     : `${intValue(decisionSummary.total)} routine · ${intValue(decisionSummary.pair_agreement)} pair · ${intValue(decisionSummary.tie_break_used)} tie · ${intValue(decisionSummary.unresolved_quarantine)} quarantined · ${vetoSummary} · ${intValue(evaluationSummary.total)} eval · ${intValue(policyCounts.shadow)} shadow / ${intValue(policyCounts.enabled)} enabled`;
 }
 
-function renderOllamaMetric(modelStatus, ollama) {
+function renderLocalRuntimeMetric(modelStatus, runtime) {
   const summary = modelStatus?.summary || {};
-  const models = Array.isArray(ollama?.models) ? ollama.models : [];
+  const models = Array.isArray(runtime?.models) ? runtime.models : [];
   const model = models.find((item) => !String(item.name || item.model || "").includes("embed"))
     || models[0]
     || {};
-  els.ollama.textContent = modelStatus?.available || ollama?.available ? "online" : "offline";
+  els.ollama.textContent = modelStatus?.available || runtime?.available ? "online" : "offline";
   els.ollamaSub.textContent = summary.installed !== undefined
     ? `${intValue(summary.loaded)} loaded · ${intValue(summary.installed)} installed`
     : model.name || model.model || "no model";
@@ -3568,7 +3569,10 @@ function render(snapshot) {
   latestRenderedStatus = status;
   const metrics = snapshot.metrics || [];
   const batch = status.batch || {};
-  const ollama = latestLiveModelSnapshot?.ollama || snapshot.ollama || {};
+  const localRuntime = latestLiveModelSnapshot?.local_runtime
+    || snapshot.local_runtime
+    || snapshot.ollama
+    || {};
   const modelStatus = latestLiveModelSnapshot?.model_status || snapshot.model_status || {};
 
   setState(status.state);
@@ -3588,7 +3592,7 @@ function render(snapshot) {
   els.batchSub.textContent = batch.total
     ? `${batch.succeeded || 0} ok / ${batch.deferred || 0} deferred / ${batch.continued || 0} continued / ${batch.failed || 0} fail`
     : "waiting";
-  renderOllamaMetric(modelStatus, ollama);
+  renderLocalRuntimeMetric(modelStatus, localRuntime);
   els.currentRaw.textContent = status.current_raw ? shortName(status.current_raw) : "waiting";
   els.currentOp.textContent = status.current_op ? fmt(status.current_op) : fmt(status.stage || "idle");
   renderWorkStatus(status);

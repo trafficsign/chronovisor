@@ -4088,7 +4088,9 @@ def test_build_snapshot_combines_runtime_and_queue(tmp_path: Path, monkeypatch) 
         orchestrator, "STATE_FILE", chronovisor_root / ".orchestrator_state.json"
     )
     monkeypatch.setattr(
-        dashboard, "_ollama_snapshot", lambda: {"available": False, "models": []}
+        dashboard,
+        "_local_model_snapshot",
+        lambda: {"available": False, "provider": "ollama", "models": []},
     )
     monkeypatch.setattr(
         dashboard,
@@ -4244,7 +4246,7 @@ def test_snapshot_handler_returns_non_disclosing_json_error(
     assert canary not in response.text
 
 
-def test_model_status_handler_reads_live_ollama_without_snapshot_cache(
+def test_model_status_handler_reads_live_runtime_without_snapshot_cache(
     monkeypatch,
 ) -> None:
     model = "muse-glimmer:30b-nvfp4-dflash"
@@ -4255,9 +4257,10 @@ def test_model_status_handler_reads_live_ollama_without_snapshot_cache(
     )
     monkeypatch.setattr(
         dashboard,
-        "_ollama_snapshot",
+        "_local_model_snapshot",
         lambda: {
             "available": True,
+            "provider": "ollama",
             "models": [{"name": model, "size_vram": 35_000}],
         },
     )
@@ -4293,6 +4296,7 @@ def test_model_status_handler_reads_live_ollama_without_snapshot_cache(
     assert response.status_code == 200
     assert muse["status"] == "loaded"
     assert muse["running"] is True
+    assert payload["local_runtime"]["provider"] == "ollama"
 
 
 def test_dashboard_private_client_scope_rejects_public_addresses() -> None:
@@ -5640,11 +5644,12 @@ def test_fast_snapshot_reads_status_without_building_archive_components(
     monkeypatch.setattr(
         runtime_status, "read_metrics", lambda limit: [{"kind": "metric"}]
     )
-    monkeypatch.setattr(
-        dashboard,
-        "_ollama_snapshot",
-        lambda: {"available": True, "models": [{"name": "qwen:test"}]},
-    )
+    runtime = {
+        "available": True,
+        "provider": "ollama",
+        "models": [{"name": "qwen:test"}],
+    }
+    monkeypatch.setattr(dashboard, "_local_model_snapshot", lambda: runtime)
     monkeypatch.setattr(
         dashboard,
         "_save_history_snapshot",
@@ -5665,10 +5670,8 @@ def test_fast_snapshot_reads_status_without_building_archive_components(
     assert snapshot["status"]["pending"] == 3
     assert snapshot["events"] == [{"kind": "event"}]
     assert snapshot["metrics"] == [{"kind": "metric"}]
-    assert snapshot["ollama"] == {
-        "available": True,
-        "models": [{"name": "qwen:test"}],
-    }
+    assert snapshot["local_runtime"] == runtime
+    assert snapshot["ollama"] == runtime
     assert snapshot["save_history"] == {}
     assert snapshot["librarian"] == {}
     assert snapshot["_dashboard"] == {"detail_state": "loading"}
@@ -6069,7 +6072,9 @@ def test_build_snapshot_surfaces_frontier_human_required(
         orchestrator, "STATE_FILE", chronovisor_root / ".orchestrator_state.json"
     )
     monkeypatch.setattr(
-        dashboard, "_ollama_snapshot", lambda: {"available": False, "models": []}
+        dashboard,
+        "_local_model_snapshot",
+        lambda: {"available": False, "provider": "ollama", "models": []},
     )
     monkeypatch.setattr(
         dashboard,
@@ -6425,6 +6430,7 @@ def test_runtime_failure_projects_invalid_votes_safely_by_timestamp_and_bounds(
     ("kind", "profile_id", "event_provider", "capability"),
     [
         ("ollama", None, "ollama", "generation"),
+        ("omlx", None, "omlx", "generation"),
         ("openai", "remote-profile", "remote-profile", "generation"),
         ("local-transformers", None, "local-reranker", "rerank"),
     ],
@@ -6609,8 +6615,9 @@ def test_model_fleet_runtime_failure_renderer_uses_text_only() -> None:
     assert "snapshot.runtime_failures" in renderer
     assert "failures = _runtime_failure_snapshot(" in route
     assert "**failures" in route
-    assert "ollama = _ollama_snapshot()" in route
-    assert '"model_status": _model_status_snapshot(ollama)' in route
+    assert "local_runtime = _local_model_snapshot()" in route
+    assert '"model_status": _model_status_snapshot(local_runtime)' in route
+    assert '"local_runtime": local_runtime' in route
     assert "_cached_snapshot" not in route
     assert "W7 CANARY" not in page + app + renderer
 
@@ -6741,7 +6748,7 @@ def test_model_status_snapshot_combines_ollama_and_config(monkeypatch) -> None:
         lambda: SimpleNamespace(enabled=False, model="BAAI/bge-reranker-v2-m3"),
     )
 
-    snapshot = dashboard._model_status_snapshot()
+    snapshot = dashboard._model_status_snapshot(dashboard._ollama_snapshot())
     by_name = {row["name"]: row for row in snapshot["models"]}
 
     assert snapshot["summary"]["installed"] == 4
@@ -6771,6 +6778,62 @@ def test_model_status_snapshot_combines_ollama_and_config(monkeypatch) -> None:
     assert by_name["qwen3.5:4b-mlx"]["roles"] == ["gate", "rewrite"]
 
 
+def test_model_status_snapshot_reads_five_configured_omlx_models(monkeypatch) -> None:
+    models = {
+        "Qwen3.8-27B-4bit": (False, 16_000, 262_144),
+        "Muse-Glimmer-30B-4bit": (True, 20_000, 131_072),
+        "gemma-4-26b-a4b-it-4bit": (False, 15_000, 262_144),
+        "Ornith-1.5-9B-MLX-4bit": (True, 5_000, 262_144),
+        "bge-m3-mlx-fp16": (True, 1_000, 8_194),
+    }
+    monkeypatch.setattr(
+        dashboard,
+        "_configured_model_roles",
+        lambda: {name: {"ingest"} for name in models},
+    )
+    observed: dict[str, Any] = {}
+
+    def get(url: str, **kwargs: Any):
+        observed.update(url=url, **kwargs)
+        return dashboard.httpx.Response(
+            200,
+            request=dashboard.httpx.Request("GET", url),
+            json={
+                "models": [
+                    {
+                        "id": name,
+                        "loaded": loaded,
+                        "actual_size": size if loaded else None,
+                        "estimated_size": size,
+                        "resident_estimated_size": size,
+                        "max_context_window": context,
+                        "engine_type": "embedding" if name.startswith("bge") else "vlm",
+                    }
+                    for name, (loaded, size, context) in models.items()
+                ]
+            },
+        )
+
+    monkeypatch.setattr(dashboard.httpx, "get", get)
+
+    runtime = dashboard._omlx_snapshot()
+    snapshot = dashboard._model_status_snapshot(runtime)
+    by_name = {row["name"]: row for row in snapshot["models"]}
+
+    assert observed["url"].endswith("/v1/models/status")
+    assert observed["headers"] == {"x-api-key": dashboard.OMLX_API_KEY}
+    assert snapshot["provider"] == "omlx"
+    assert snapshot["summary"]["all_installed"] == 5
+    assert snapshot["summary"]["installed"] == 5
+    assert snapshot["summary"]["configured"] == 5
+    assert snapshot["summary"]["loaded"] == 3
+    assert snapshot["summary"]["missing"] == 0
+    assert set(by_name) == set(models)
+    assert by_name["Qwen3.8-27B-4bit"]["status"] == "ready"
+    assert by_name["Muse-Glimmer-30B-4bit"]["status"] == "loaded"
+    assert by_name["bge-m3-mlx-fp16"]["context_length"] == 8_194
+
+
 def test_configured_model_roles_use_runtime_router_triplet(monkeypatch) -> None:
     monkeypatch.setattr(
         dashboard,
@@ -6796,7 +6859,7 @@ def test_configured_model_roles_use_runtime_router_triplet(monkeypatch) -> None:
         return tuple(
             ollama.RuntimeGenerationRoute(
                 role=role,
-                provider="ollama",
+                provider="omlx",
                 model=model,
                 location="local",
                 structured_output=True,
@@ -6818,7 +6881,7 @@ def test_configured_model_roles_use_runtime_router_triplet(monkeypatch) -> None:
             resolve_embedding=lambda role: (
                 resolved.append(role)
                 or SimpleNamespace(
-                    provider="ollama",
+                    provider="omlx",
                     model="route-selected-knowledge",
                     location=SimpleNamespace(value="local"),
                 )
@@ -6855,7 +6918,7 @@ def test_configured_model_roles_use_runtime_router_triplet(monkeypatch) -> None:
             resolve_embedding=lambda role: (
                 resolved.append(role)
                 or SimpleNamespace(
-                    provider="ollama",
+                    provider="omlx",
                     model=(
                         "route-selected-knowledge"
                         if role == "knowledge.embedding"
@@ -6888,7 +6951,7 @@ def test_configured_model_roles_use_runtime_router_triplet(monkeypatch) -> None:
             resolve_embedding=lambda role: (
                 resolved.append(role)
                 or SimpleNamespace(
-                    provider="ollama",
+                    provider="omlx",
                     model=(
                         "route-selected-knowledge"
                         if role == "knowledge.embedding"
@@ -6900,7 +6963,7 @@ def test_configured_model_roles_use_runtime_router_triplet(monkeypatch) -> None:
             resolve_rerank=lambda role: (
                 resolved.append(role)
                 or SimpleNamespace(
-                    provider="ollama",
+                    provider="omlx",
                     model="route-selected-reranker",
                     location=SimpleNamespace(value="local"),
                 )
