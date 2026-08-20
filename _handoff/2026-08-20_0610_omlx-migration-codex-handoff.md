@@ -1,7 +1,7 @@
 # Codex 引き継ぎブリーフ: Chronovisor の LLM バックエンドを Ollama → oMLX へ切り替え
 
-状態: **REVALIDATED / CUTOVER-PENDING**(2026-08-20、Codex が誤判定を訂正し受入完了)
-→ GitHub-backed runtime への push、本番 config の provider 切替、サービス再起動が残作業。
+状態: **CUTOVER-COMPLETE / KNOWN SCHEDULER LIMIT**(2026-08-20 21:43 JST)
+→ GitHub-backed runtime、production config、Ollama 退役まで完了。並行 gate SLA だけ既知制約として残す。
 作成: 2026-08-20 / Hermes(oMLX 実測・検証済み)
 実装者: Hermes(Codex 復活までの暫定担当)
 前提プラン: `_handoff/2026-08-19_2258_model-stack-unify-omlx.md`
@@ -25,8 +25,7 @@ Qwen3.8-27B-4bit + DFlash2 が 16,384 / 32,768(cold) / 65,536 token をそれぞ
 - gate は serial では 0.708 秒だが、15,024-token Qwen prefill と同時では 9.33 秒。
   oMLX に request priority / preemption はなく、1.5 秒 SLA の production canary は未完了。
 
-現在の production config は安全のため Ollama のまま。LaunchAgent は GitHub remote から
-package を取得するので、ローカル修正を push せず config だけ切り替えてはならない。
+production config と GitHub-backed runtime は oMLX へ切替済み。最終証拠は §0d を参照。
 
 ## 0b. 実装状況(2026-08-20)
 
@@ -35,8 +34,23 @@ package を取得するので、ローカル修正を push せず config だけ�
 - ✅ `tests/test_omlx_adapter.py` 15 件 + focused suite 合計 213 件 green
 - ✅ `scripts/check_local_omlx_e2e.py`、実サーバーで **PASS**
   (Qwen 4 role + Muse + Gemma + gate 0.708s + embed 1024d)
-- ⏳ 残り:**本番 `~/.chronovisor/config.toml` の provider 切替**(roles を omlx に + モデルID 書換)+
-  サービス再起動での確認 → その後 Ollama 退役。実装以降の手順: 下記 §4.3 / DoD。
+- ✅ 本番 `~/.chronovisor/config.toml`、GitHub-backed services、Ollama 退役まで完了。残件は
+  background prefill と同時の gate 1.5 秒 SLA、および既存 broad-suite 不一致のみ。
+
+## 0d. 最終 cutover 証拠(2026-08-20 21:43 JST)
+
+- oMLX cutover code: `a97fa170df88bc8d8d1146117537167d8b548585`。本記録を含む最終 `main` で
+  dashboard health の `commit_id` / `expected_commit` は一致し `drift=false`。semantic archive も
+  最終 `main`、`ready=true`。
+- production 44 role: 41 oMLX + local reranker 1 + Nemotron semantic 2。decision は
+  Qwen / Muse / Gemma、librarian / research は Qwen / Muse。distillation は Qwen / Muse / Gemma の
+  pinned revision fingerprint 3 本で稼働可能。
+- Ollama LaunchAgent は disabled + bootout、port 11434 / process なし。rollback config は
+  `~/.chronovisor/config.toml.bak-before-omlx-cutover-20260820-6175212`。
+- Ollama 停止下の clean E2E は全 role PASS。Qwen 4 role、Muse、Gemma、Ornith gate 0.553 秒、
+  bge-m3 2 x 1024d。ingest liveness は `ready` / `alert=false` / pending 1773。
+- 強制停止で実行中 DFlash request を abort した直後だけ model-switch 409 が failure cache に入った。
+  admin model reload 後は再び全 role PASS。更新時は共有 lease 解放後に agent を停止する。
 
 ## 0c. 本番カットオーバー試行結果(2026-08-20) — 未成立 → ロールバック
 
@@ -212,8 +226,8 @@ Ollama 非依存(変更不要): `nvidia/Nemotron-3-Embed-1B-BF16`(semantic-servi
 - [ ] background teacher 実行中の recall.gate <= 1.5s(現状 9.33s)
 - [x] focused suite 213 passed
 - [ ] 広い関連 suite の既存不一致 12件を別タスクで解消(880 passed / 12 failed)
-- [ ] 検証した意味のある単位で commit(push は明示依頼時のみ)
-- [ ] 明示的な push 後、本番 cutover と role provenance を確認
+- [x] 検証した意味のある単位で commit、明示依頼に基づき push
+- [x] push 後、本番 cutover、runtime archive / role provenance、Ollama 退役を確認
 
 ## 7. 参考
 

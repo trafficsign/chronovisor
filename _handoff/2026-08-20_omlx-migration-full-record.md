@@ -82,16 +82,27 @@ oMLX の現在のモデル設定は teacher 3モデルで DFlash ON、
   12件はいずれも今回変更していない既存 ingest/decision の期待値不一致
   (repair placeholder、reasoning canary、residency planning)として分離した。
 
-### 現在のデプロイ境界
+### 最終 cutover 結果(2026-08-20 21:43 JST)
 
-- 停止した 10 LaunchAgent は試験終了 trap で全て復旧した。
-- `~/.chronovisor/config.toml` は安全のため現在も Ollama。oMLX 全 role の検証済み config は
-  `/tmp/chronovisor-cfg-omlx.toml` にある。
-- 常駐 wrapper は GitHub remote から毎回 package を取得するため、ローカル commit だけでは
-  修正版が本番に入らない。**明示的な push 後**に config 切替、LaunchAgent restart、
-  service health / ingest progress / role provenance を確認して初めて完全 cutover とする。
-- cutover canary では background ingest 中の gate latency も再測定し、1.5 秒を hard gate とするなら
-  background inference の停止または別実行基盤が必要。
+- oMLX cutover code は `a97fa170df88bc8d8d1146117537167d8b548585` で GitHub `main` へ入った。
+  本記録を含む最終 `main` へ dashboard / LAN / ingest / librarian / converge / soak /
+  library-evidence / semantic の実行 archive を更新し、dashboard `/api/health` は
+  `commit_id == expected_commit`、`drift=false`。
+- `~/.chronovisor/config.toml` の 44 role は **41 oMLX + 1 local reranker + 2 Nemotron semantic**。
+  decision は Qwen / Muse / Gemma、librarian と research は Qwen / Muse で独立性を維持した。
+- Recall の classification / collection crosswalk に残っていた Ollama digest 取得を provider-aware にし、
+  distillation は oMLX の pinned Hugging Face revision から 64-hex model fingerprint を生成する。
+  Ollama 停止下で classification 3 route、review 2 route、teacher 3 route、counterfactual を解決できた。
+- `com.trafficsign.ollama-mixed-mlx` は launchd で **disabled + bootout**。port 11434 と Ollama process は 0。
+  rollback は `~/.chronovisor/config.toml.bak-before-omlx-cutover-20260820-6175212`。
+- Ollama 停止・background agent 停止の clean E2E は Qwen / Muse / Gemma / Ornith / bge-m3 が
+  **PASS (0 failures)**。gate wall 0.553 秒、embedding 2 x 1024d。semantic は `ready=true`、
+  ingest liveness は 21:43 時点で `ready` / `alert=false` / `pending_raws=1773`。
+- 実行中 ingest を強制終了すると、client abort と file lease 解放の間に短いずれが生じ、次の DFlash
+  model load が 409 で failure cache に入った。admin model reload 後は全 role PASS。今後の停止・更新は
+  **共有 lease の解放を待ってから**行う。通常の role 実行は既存 lease で直列化済み。
+- 未解決なのは既報の scheduler 制約のみ。15,024-token prefill と同時の gate は 9.33 秒なので、
+  1.5 秒を hard gate とするなら background inference の停止または別実行基盤が必要。
 
 ---
 
