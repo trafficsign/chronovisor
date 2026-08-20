@@ -134,6 +134,27 @@ oMLX 0.6.3rc1・Qwen3.8-27B-4bit・max_tokens=4 で境界測定(M4 Max):
 - `[decision_router]`: num_ctx=114688 / min_num_ctx=16384 / read_timeout_ms=660000
 - → **ingest も decision も oMLX の実用限界(~10K tok)を超える。両レーンとも oMLX 移行不可。**
 
+## 8b. 実 unit での本番パス検証(決定打・2026-08-20)
+
+- サーバーをクリーン起動 → config を一時 omlx に切替 → 実 pending unit 1 件を
+  `run_pending_ingest(force=True, max_units=1)` で実行(220s バウンド、実行後に config 復元)。
+- **結果: `triggered=True, proc=0, failed=1, failure=ingest.runtime_backend_error`(221.0s)**
+- OMLXAdapter.generate をラップして実ペイロード計測:
+  - **payload: Qwen3.8-27B-4bit, messages=2, chars=36,245 ≈ 12K トークン**
+  - (生ファイルは ~2KB だが、システムメッセージ+構造化コンテキストで **12K トークンに膨張**)
+- **oMLX は Qwen をロードして(server RSS 18.6GB)処理を開始したが、220 秒で応答なし**。
+- → 「窓が小さい」でも「完全ハング」でもなく、**oMLX の prefill/エンジンは
+  ~12K トークンという中規模入力でも実用不能な速度**。既知上流 Issue(#2179 prefill guard /
+  #2624 engine wedge 家族)と整合。
+- **決定**: ingest・decision とも oMLX 0.6.3rc1 では**不可(実データで確定)**。
+
+### ユーザー提示ダッシュボードとの整合(重要な解釈)
+- ダッシュボードの「CONTEXT WINDOW: 32K/65K/98K/131K」「required 35K → selected 65K」は
+  **Chronovisor の構造化セッションが現行 Ollama で使うコンテキスト実績**であり、
+  「ワークロードが 35K〜131K トークンを要求する」ことの証拠。**oMLX の達成ではない**。
+- 「131K が光ってた」= Ollama バックエンドで 131K バケットを実際に選択した実績。
+  逆に言うと、**このワークロード規模(35K 起点)は oMLX の実用限界(~12K)の約 3 倍**。
+
 ## 9. 結論: 運用方針(Ollama 二本立て)
 
 - **Ollama**: テキスト LLM 全レーン(ingest / decision / challenger)— 大コンテキスト必須のため継続。
