@@ -82,29 +82,57 @@ LAN endpoint, first configure `[dashboard_lan]` as shown in
 [configuration](config.md), using one exact private IPv4 address. Wildcard,
 loopback, public, and hostname binds fail closed.
 
-Create a local certificate with an IP subjectAltName and a private key, then
-store the password as a scrypt digest through the prompt (the password is never
-placed in argv, TOML, or logs):
+Create a private LAN root CA once, then use it to sign the server certificate.
+Installing the root certificate once lets iOS and iPadOS trust renewed server
+certificates without replacing the trust anchor. Store the password as a scrypt
+digest through the prompt (the password is never placed in argv, TOML, or logs):
 
 ```sh
-install -d -m 700 ~/.chronovisor/runtime
+umask 077
+install -d -m 700 ~/.chronovisor/runtime ~/.chronovisor/pki
 LAN_IP=192.168.50.20
-openssl req -x509 -newkey rsa:3072 -sha256 -nodes -days 397 \
-  -keyout ~/.chronovisor/runtime/dashboard-lan.key \
-  -out ~/.chronovisor/runtime/dashboard-lan.crt \
+test ! -e ~/.chronovisor/pki/chronovisor-lan-root-ca.key
+test ! -e ~/.chronovisor/runtime/dashboard-lan.key
+openssl genrsa -out ~/.chronovisor/pki/chronovisor-lan-root-ca.key 3072
+openssl req -x509 -new -sha256 -days 3650 \
+  -key ~/.chronovisor/pki/chronovisor-lan-root-ca.key \
+  -out ~/.chronovisor/pki/chronovisor-lan-root-ca.crt \
+  -subj "/CN=Chronovisor LAN Root CA/O=Chronovisor Local" \
+  -addext "basicConstraints=critical,CA:TRUE,pathlen:0" \
+  -addext "keyUsage=critical,keyCertSign,cRLSign" \
+  -addext "subjectKeyIdentifier=hash"
+openssl genrsa -out ~/.chronovisor/runtime/dashboard-lan.key 3072
+openssl req -new -sha256 \
+  -key ~/.chronovisor/runtime/dashboard-lan.key \
+  -out ~/.chronovisor/runtime/dashboard-lan.csr \
   -subj "/CN=$LAN_IP" \
   -addext "subjectAltName=IP:$LAN_IP" \
   -addext "basicConstraints=critical,CA:FALSE" \
   -addext "keyUsage=critical,digitalSignature,keyEncipherment" \
   -addext "extendedKeyUsage=serverAuth"
-chmod 600 ~/.chronovisor/runtime/dashboard-lan.key
+openssl x509 -req -sha256 -days 397 -copy_extensions copy \
+  -in ~/.chronovisor/runtime/dashboard-lan.csr \
+  -CA ~/.chronovisor/pki/chronovisor-lan-root-ca.crt \
+  -CAkey ~/.chronovisor/pki/chronovisor-lan-root-ca.key \
+  -CAcreateserial \
+  -out ~/.chronovisor/runtime/dashboard-lan.crt
+openssl x509 -in ~/.chronovisor/pki/chronovisor-lan-root-ca.crt \
+  -outform DER \
+  -out ~/.chronovisor/runtime/chronovisor-lan-root-ca.cer
+rm -f ~/.chronovisor/runtime/dashboard-lan.csr
+chmod 600 ~/.chronovisor/pki/chronovisor-lan-root-ca.key \
+  ~/.chronovisor/runtime/dashboard-lan.key
+chmod 644 ~/.chronovisor/pki/chronovisor-lan-root-ca.crt \
+  ~/.chronovisor/runtime/chronovisor-lan-root-ca.cer \
+  ~/.chronovisor/runtime/dashboard-lan.crt
 chronovisor-dashboard --set-lan-credentials --username admin
 scripts/install-lan-dashboard-service
 ```
 
-Verify and trust that exact certificate fingerprint on each intended client
-before browsing to `https://<private-ip>:8766/`; never click through a
-certificate warning. The
+Keep the root CA private key on the Mac. Transfer only
+`chronovisor-lan-root-ca.cer` to each intended client, install it, enable full
+SSL trust, and verify its fingerprint before browsing to
+`https://<private-ip>:8766/`; never click through a certificate warning. The
 LAN handler accepts only private/link-local clients, requires exact `Host` and
 same-origin HTTPS/WebSocket requests, rate-limits failed logins, and promotes a
 successful Basic login to a bounded 12-hour in-memory Secure/HttpOnly session.
