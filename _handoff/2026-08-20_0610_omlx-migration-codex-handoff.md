@@ -53,6 +53,28 @@
   選択肢: ①上流(z-lab)へ再現報告 & 次リリース待ち ②model_settings 等で入力上限を稼働側で抑える調査
   ③アダプタ側で大入力を分割送信する暫定回避(本質解ではない)。Ollama 完全退役はハング解消後。
 
+## 0c3. 大入力の境界を実測(決定版・2026-08-20)
+
+**結論: oMLX 0.6.3rc1 は「~10K トークン超の入力」を実用時間内に処理できない。DFlash 有無・
+コンテキスト窓設定は無関係。→ Chronovisor の ingest(32K〜256K)・decision(16K〜114K)は
+両方 oMLX 射程外。Ollama との「二本立て」が現実解。**
+
+- 実測(M4 Max・Qwen3.8-27B-4bit・max_tokens=4):
+  - 4K chars(≈1.3K tok): OK 12s / 10K chars(≈3.3K tok): OK 9.7s(ウォーム)
+  - 30K chars(≈10-18K tok): **90s+ 無応答** / 120K chars(≈40K tok): **180-240s 無応答**
+  - DFlash ON/OFF で挙動不変(問題は prefill/サーバー側で decode 加速の DFlash は無関係)
+  - `sampling.max_context_window` を 32768→131072 に上げても **40K tok は 180s+ 無応答**
+    = コンテキスト窓設定では解決しない(サーバー処理の実質限界/潜在バグ)
+- **config 実要件との突合**: `[ingest] num_ctx=32768, max_num_ctx=262144` /
+  `[decision_router] num_ctx=114688, min_num_ctx=16384` → いずれも oMLX 実用限界を超える。
+  → **decision レーンも oMLX 移行不可**(前述の「decision は oMLX へ」は取り消し)。
+- **運用指針(二本立て)**: テキスト LLM レーンは Ollama 継続。oMLX は
+  **gate(Ornith・小コンテキスト)・embedding(bge-m3)など小入力レーンのみ**先行移行が可能。
+  価値は限定的(これらは元々 Ollama でも満足性能)。「全部 oMLX 統一」は
+  **oMLX が大コンテキスト処理を実装/修正(上流)して初めて成立**。
+- 環境復元済み: settings.json(max_context_window=32768)・model_settings(DFlash ON)はセッション前状態に復元。
+  oMLX 0.6.2 退避コピーはディスク上から消えており、比較テストには再ダウンロードが必要。
+
 ---
 
 ## 0. ゴール
