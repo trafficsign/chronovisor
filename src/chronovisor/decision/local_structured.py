@@ -49,7 +49,13 @@ _DEFAULT_RUNTIME_ROLE = "librarian.review"
 _QWEN_STRUCTURED_COMPAT_MODEL = "qwen3.8:27b-axq4"
 _MUSE_STRUCTURED_COMPAT_MODEL = "muse-glimmer:30b-q4k-dynamic"
 _FORMATLESS_THINKING_MODELS = frozenset(
-    {_QWEN_STRUCTURED_COMPAT_MODEL, _MUSE_STRUCTURED_COMPAT_MODEL}
+    {
+        _QWEN_STRUCTURED_COMPAT_MODEL,
+        _MUSE_STRUCTURED_COMPAT_MODEL,
+        "Qwen3.8-27B-4bit",
+        "Muse-Glimmer-30B-4bit",
+        "gemma-4-26b-a4b-it-4bit",
+    }
 )
 _ADAPTIVE_REASONING_CANARY_ADOPTED = False
 _BOUNDED_LOW_REASONING_LANES = frozenset({"local_repair", "read_back_repair"})

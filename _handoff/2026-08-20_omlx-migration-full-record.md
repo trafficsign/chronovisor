@@ -1,4 +1,4 @@
-# oMLX 移行 全記録(2026-08-20 版)
+# oMLX 移行 全記録(2026-08-20 追補訂正版)
 
 本ドキュメントは、Mac Studio M4 Max でのローカル LLM 運用の
 **Ollama → oMLX(MLX ネイティブ)完全移行**プロジェクトの全検証・実装・
@@ -8,7 +8,90 @@
   - `_handoff/2026-08-19_2258_model-stack-unify-omlx.md`(計画書)
   - `_handoff/2026-08-20_0610_omlx-migration-codex-handoff.md`(Codex 引き継ぎブリーフ、0c/0c2/0c3 節が本記録の要約)
   - `dflash2-mlx-mac` スキル(Hermes)
-- 更新: 2026-08-20
+- 更新: 2026-08-20(Codex 再検証追補)
+
+> **現在の結論:** oMLX 0.6.3rc1 + Qwen DFlash2 は 64K-token 入力まで
+> server completion する。旧結論「約 10K token 超は利用不能」は撤回した。
+> §7〜§12 は誤判定へ至った履歴としてのみ残し、運用判断には本節と計画書の
+> 「再開実行フェーズ」を使う。
+
+---
+
+## 0. 2026-08-20 再検証による結論訂正
+
+### 訂正結果
+
+- 旧プローブの `SMALL` / `BIG` は文字列反復回数を token 数と誤認していた。
+  target tokenizer で測ると、旧 `SMALL` は **15,052 token** であり、oMLX server log 上は
+  **93.15 秒で正常完了**していた。短い client timeout を server failure と扱ったのが誤判定の主因。
+- oMLX 同梱 tokenizer で chat template 適用後の総 token 数を厳密に構成し、Chronovisor と
+  Ollama の常駐処理を止めた clean・serial 条件で次を確認した。
+
+| 正確な総入力 token | server `total_time` | wall time | 結果 |
+|---:|---:|---:|---|
+| 16,384 | 69.34s | 69.41s | HTTP 200 / 4 tokens / stop |
+| 32,768(cold) | 149.40s | 153.63s | HTTP 200 / 4 tokens / stop |
+| 65,536 | 339.98s | 340.28s | HTTP 200 / 4 tokens / stop |
+
+したがって、DFlash2 の decode 高速化とは別に prefill は長時間を要するものの、
+**大入力を処理できない／engine が wedge する、という旧結論は成立しない**。
+
+### 常駐処理による汚染
+
+ユーザー指摘どおり、Chronovisor と Ollama の常駐処理は測定を明確に遅くしていた。
+停止前は Ollama Qwen runner 約 14.9GB、oMLX 約 24GB、semantic-service 約 58% CPU、
+dashboard 群約 4GB、swap 約 9.6GB を観測した。同じ入力の比較は次のとおり。
+
+| 入力 | 常駐あり | clean | 短縮 |
+|---:|---:|---:|---:|
+| 16,384 token | 99.28s | 69.34s | 30.2% |
+| 32,768 token | 184.34s | 149.40s | 19.0% |
+
+競合は旧誤判定を悪化させたが、clean でも 64K prefill は約 340 秒かかるため、
+長文遅延の全てを常駐処理だけで説明することはできない。
+
+### Chronovisor 経路の根因と最小修正
+
+1. `OMLXAdapter` が文字列の `think="low"` を黙って捨て、Qwen の既定の無制限 thinking を
+   有効にしていた。文字列は oMLX の `reasoning_effort` へ、bool は
+   `chat_template_kwargs.enable_thinking` へ写像し、reasoning 契約を持たない raw prompt は
+   thinking を明示的に無効化した。
+2. oMLX の DFlash engine は同時 1 つ。DFlash モデルだけを既存の cross-process resource lease で
+   直列化し、Ornith は DFlash OFF + pinned として gate を独立常駐させた。
+3. この rc1 の DFlash engine は strict JSON Schema を実施できず best-effort へ落ちる。
+   Qwen / Muse / Gemma の oMLX ID を既存の formatless-first + client validation 経路へ追加した。
+4. e2e スクリプトが challenger / tie-break の CLI 引数を使わず、全生成 role を Qwen にしていた。
+   Muse と Gemma を実際の role に割り当て、gate の wall time 1.5 秒条件も検査するよう修正した。
+
+oMLX の現在のモデル設定は teacher 3モデルで DFlash ON、
+`Ornith-1.5-9B-MLX-4bit` は DFlash OFF + pinned。
+
+### 実データと全 role の受入証拠
+
+- 実 pending raw から 962-byte の unit を選び、oMLX 経由で
+  `files_processed=1`、`files_failed=0`、`processor=omlx`、post-ingest lint OK。
+  wall 127.6 秒で `runtime_backend_error` は発生しなかった。
+- clean 条件の Chronovisor runtime e2e は Qwen 4 role、Muse challenger、Gemma tie-break、
+  Ornith gate、bge-m3 embedding が全て成功。HTTP 409 は 0 件、gate は wall **0.708 秒**、
+  embedding は **2 x 1024d**。
+- ただし 15,024-token Qwen prefill と同時実行した gate は wall **9.33 秒**
+  (server 8.89 秒)まで伸びた。oMLX の Chat Completions API と scheduler に request priority /
+  preemption はないため、1.5 秒 SLA は idle・serial 条件でのみ成立する。既存の foreground admission は
+  新しい background job の開始を抑えるが、実行中の prefill は中断しない。
+- focused suite は **213 passed**。より広い関連 suite は **880 passed / 12 failed**で、
+  12件はいずれも今回変更していない既存 ingest/decision の期待値不一致
+  (repair placeholder、reasoning canary、residency planning)として分離した。
+
+### 現在のデプロイ境界
+
+- 停止した 10 LaunchAgent は試験終了 trap で全て復旧した。
+- `~/.chronovisor/config.toml` は安全のため現在も Ollama。oMLX 全 role の検証済み config は
+  `/tmp/chronovisor-cfg-omlx.toml` にある。
+- 常駐 wrapper は GitHub remote から毎回 package を取得するため、ローカル commit だけでは
+  修正版が本番に入らない。**明示的な push 後**に config 切替、LaunchAgent restart、
+  service health / ingest progress / role provenance を確認して初めて完全 cutover とする。
+- cutover canary では background ingest 中の gate latency も再測定し、1.5 秒を hard gate とするなら
+  background inference の停止または別実行基盤が必要。
 
 ---
 
@@ -62,23 +145,25 @@
 - DFlash エンジンは**同時 1 つ**(pinned は他をブロック、非 pinned は自動スワップ)。
   `is_pinned: true` の DFlash モデル使用は慎重に。
 - 未知パラメータ(keep_alive / num_ctx / トップレベル think)は黙殺 → 写像ミスが無音になる罠。
-- 思考制御は `chat_template_kwargs.enable_thinking` でのみ効く(gate の think=false に必須)。
+- bool の思考制御は `chat_template_kwargs.enable_thinking`、文字列レベルは
+  `reasoning_effort` へ写像する。
 - Muse の空 content は思考モデル仕様(reasoning_content のみ返す)で実害なし。
 
 ## 5. 実装物(コード)とコミット
 
-- `src/chronovisor/core/omlx_adapter.py`(280 行): **OMLXAdapter**。
+- `src/chronovisor/core/omlx_adapter.py`(327 行): **OMLXAdapter**。
   provider="omlx" / RouteLocation.LOCAL。
   - generate() → POST /v1/chat/completions(Content-Type: application/json 必須)
   - embed() → POST /v1/embeddings
-  - think → `chat_template_kwargs:{"enable_thinking":bool}`
+  - bool think → `chat_template_kwargs:{"enable_thinking":bool}`、string think → `reasoning_effort`
+  - DFlash model の生成だけを cross-process exclusive lease で直列化
   - num_ctx/keep_alive は送らない(黙殺されるため honest に drop)
   - エラー allowlist(http_401/429/5xx/invalid_request)へ分類
   - reasoning-only フォールバック、`unload()` は no-op(False を正直報告)
 - `src/chronovisor/core/llm_config.py`: kind "omlx" 分岐を 2 箇所(`_provider()` / `build_llm_runtime`)。
-- `tests/test_omlx_adapter.py`(300 行): 13 件新規(MockTransport)。
-- `scripts/check_local_omlx_e2e.py`(167 行): 実サーバー相手 e2e(6 役割生成+gate+埋め込み)。
-- テスト実績: `pytest` **174 件全パス・回帰ゼロ**、e2e PASS。
+- `tests/test_omlx_adapter.py`(377 行): 15 件(MockTransport)。
+- `scripts/check_local_omlx_e2e.py`(164 行): 実サーバー相手 e2e(6 役割生成+gate+埋め込み)。
+- 今回の focused test 実績: `pytest` **213 passed**、実モデル e2e PASS。
 - コミット(chronovisor/main、全て push 済み):
   - `42f9318` 計画・`8fcd3e3` モデル棚卸・`15ca044` gpt-oss 除外・`c172080` ornith/bge 検証
   - `f6c2b08` Codex ブリーフ・`3952988` rc1 検証(Muse DFlash2)・`5af6bc8` decision 思考レベル低
@@ -93,7 +178,7 @@
   (エージェントは毎回 Git remote からインストール、push 前に旧コードだったため)→ push 解決。
 - それでも ingest が「待ち」のまま → 一時 config を Ollama に復元。
 
-## 7. 学校停滞の調査と真因(2 回目・ここが核心)
+## 7. 旧調査記録(2 回目・大入力不可という結論は撤回)
 
 **症状**: 06:43 以降、ingest がバッチを 1 件も消化せず「待ち」。ロールバック後も同じ。
 
@@ -115,7 +200,7 @@
 - **誤診の訂正(正直な記録)**: 1 回目はこれを「リース/residency の Ollama 結合ギャップ」と
   誤診した。真因は oMLX の大入力処理限界。ブリーフ 0c2/0c3 で訂正済み。
 
-## 8. 大入力境界の実測(決定版・2026-08-20)
+## 8. 旧大入力境界判定(文字数推定のため撤回)
 
 oMLX 0.6.3rc1・Qwen3.8-27B-4bit・max_tokens=4 で境界測定(M4 Max):
 
@@ -134,7 +219,7 @@ oMLX 0.6.3rc1・Qwen3.8-27B-4bit・max_tokens=4 で境界測定(M4 Max):
 - `[decision_router]`: num_ctx=114688 / min_num_ctx=16384 / read_timeout_ms=660000
 - → **ingest も decision も oMLX の実用限界(~10K tok)を超える。両レーンとも oMLX 移行不可。**
 
-## 8b. 実 unit での本番パス検証(決定打・2026-08-20)
+## 8b. 旧実 unit 検証(短い外部 timeout のため決定打ではない)
 
 - サーバーをクリーン起動 → config を一時 omlx に切替 → 実 pending unit 1 件を
   `run_pending_ingest(force=True, max_units=1)` で実行(220s バウンド、実行後に config 復元)。
@@ -155,7 +240,7 @@ oMLX 0.6.3rc1・Qwen3.8-27B-4bit・max_tokens=4 で境界測定(M4 Max):
 - 「131K が光ってた」= Ollama バックエンドで 131K バケットを実際に選択した実績。
   逆に言うと、**このワークロード規模(35K 起点)は oMLX の実用限界(~12K)の約 3 倍**。
 
-## 9. 結論: 運用方針(Ollama 二本立て)
+## 9. 旧結論(Ollama 二本立て案・撤回)
 
 - **Ollama**: テキスト LLM 全レーン(ingest / decision / challenger)— 大コンテキスト必須のため継続。
 - **oMLX**: gate(Ornith・小入力)・embedding(bge-m3)など**小入力レーンのみ**先行移行可能。
@@ -163,7 +248,7 @@ oMLX 0.6.3rc1・Qwen3.8-27B-4bit・max_tokens=4 で境界測定(M4 Max):
 - 「**全部 MLX 統一**」は方針として維持。**oMLX が大コンテキスト処理を実装/修正した後に再挑戦。**
   (上流未報告: ユーザー判断で z-lab へのレポートは出さない。)
 
-## 10. 上流 Issue マッピング(jundot/omlx・既知バグクラス)
+## 10. 旧 Issue マッピング(今回の原因との対応は未立証)
 
 今回の症状と一致する既存 Issue(調査日 2026-08-20、state は未確認):
 
@@ -181,7 +266,7 @@ oMLX 0.6.3rc1・Qwen3.8-27B-4bit・max_tokens=4 で境界測定(M4 Max):
 → **次版リリースノートで #2179 / #2624 / #2701 / #2909 のクローズ/修正を確認できたら
 「大コンテキスト対応が入った」の判定に使う。**
 
-## 11. 最終状態(2026-08-20)
+## 11. 旧時点の状態(再検証前)
 
 - **学校**: config = Ollama(検証済みの既知状態)。14 エージェント生存。
   ingest status=ready、pending=約 1788(消化中・低速)。
@@ -197,7 +282,7 @@ oMLX 0.6.3rc1・Qwen3.8-27B-4bit・max_tokens=4 で境界測定(M4 Max):
     ocr_vision.swift, omlx_3model_bench.sh, register_omlx_ornith_bge3.py}`
   - 境界テスト用プローブは本記録 §14 に掲載(ツール化は保留)
 
-## 12. 今後の動き方
+## 12. 旧提案(再検証前)
 
 1. **oMLX 更新の見張り**: リリースが出たら §14 の境界プローブを流し、
    §10 の Issue クローズと併せて「大コンテキスト対応」を判定。
@@ -209,14 +294,17 @@ oMLX 0.6.3rc1・Qwen3.8-27B-4bit・max_tokens=4 で境界測定(M4 Max):
 1. **クリーン計測必須**: swap >9GB だと全数値が無意味。Ollama 47GB の同居は不可。
    計測は「Ollama 停止(bootout)→計測→load 復帰」で。SIGSTOP は学校のロックを壊し得るので
    **launchd 一括停止方式に変更**。ロック保持者は lsof で確認。
-2. **oMLX の大入力**は「ハング」ではなく「実用時間外」— バウンド 15s だと誤判する。
-   大小2点(小=通る基準・大=目標)で測れ。
+2. **oMLX の大入力**は文字数で推定せず、target tokenizer による正確な chat-template 後の
+   token 数と server completion log で判定する。client timeout だけを failure としない。
 3. **launchd エージェントは毎回 Git remote からインストール** → ローカル commit は push まで効かない。
 4. 症状の「待ち」は provider/原因を見誤りやすい: config ロールバックではサーバー状態は戻らない
    (oMLX は再起動しない限り詰まったまま)。
 5. 既知バグは上流に既にあることが多い → 深追いの前に Issue 検索を。
 
 ## 14. 付録: 境界テストプローブ(再利用用)
+
+> **使用禁止:** 以下は誤判定を生んだ旧プローブであり、token 境界試験には使わない。
+> 再試験では target tokenizer で 16,384 / 32,768 / 65,536 token を厳密に構成する。
 
 ```bash
 # oMLX が新しいバージョンになったら、これを流して大小2点で判定する

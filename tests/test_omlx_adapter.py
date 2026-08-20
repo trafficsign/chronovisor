@@ -4,13 +4,20 @@ from __future__ import annotations
 
 import json
 import tomllib
+from contextlib import nullcontext
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
 import httpx
 import pytest
 
-from chronovisor.core.llm_config import LLMConfigError, build_llm_runtime, parse_llm_config
+from chronovisor.core import omlx_adapter
+from chronovisor.core.llm_config import (
+    LLMConfigError,
+    build_llm_runtime,
+    parse_llm_config,
+)
 from chronovisor.core.llm_runtime import (
     EmbeddingRequest,
     GenerationRequest,
@@ -24,6 +31,24 @@ from chronovisor.core.llm_runtime import (
 from chronovisor.core.omlx_adapter import OMLXAdapter
 
 NORMAL_PAGE = SourceDataClassification(SourceDataClass.PAGE, SourceSensitivity.NORMAL)
+
+
+@pytest.fixture(autouse=True)
+def _mock_models_do_not_use_dflash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings_path = tmp_path / "model_settings.json"
+    settings_path.write_text(
+        json.dumps(
+            {
+                "models": {
+                    "m": {"dflash_enabled": False},
+                    "Ornith-1.5-9B-MLX-4bit": {"dflash_enabled": False},
+                }
+            }
+        )
+    )
+    monkeypatch.setattr(omlx_adapter, "OMLX_MODEL_SETTINGS_PATH", settings_path)
 
 
 def _chat_json(content: str = "ok", *, reasoning: str | None = None) -> dict[str, object]:
@@ -49,7 +74,7 @@ def _json(request: httpx.Request) -> dict[str, Any]:
     return json.loads(request.content)
 
 
-def _minimal_message_request(*, think: bool = False) -> MessageGenerationRequest:
+def _minimal_message_request(*, think: bool | str = False) -> MessageGenerationRequest:
     return MessageGenerationRequest(
         messages=({"role": "user", "content": "x"},),
         format=None,
@@ -99,6 +124,21 @@ def test_generate_maps_parameters_and_drops_unsupported() -> None:
     assert "num_ctx" not in body
     assert "keep_alive" not in body
     assert urlparse(str(captured[0]["url"])).path.startswith("/v1/chat/completions")
+
+
+def test_generate_maps_reasoning_level_to_omlx_controls() -> None:
+    captured: list[dict[str, Any]] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        captured.append(_json(request))
+        return httpx.Response(200, json=_chat_json(), request=request)
+
+    OMLXAdapter(transport=httpx.MockTransport(handle)).generate(
+        _minimal_message_request(think="low"), model="m"
+    )
+
+    assert captured[0]["reasoning_effort"] == "low"
+    assert captured[0]["chat_template_kwargs"] == {"enable_thinking": True}
 
 
 def test_generate_sends_x_api_key_header() -> None:
@@ -156,6 +196,9 @@ def test_generate_maps_json_string_to_json_object() -> None:
     )
     OMLXAdapter(transport=httpx.MockTransport(handle)).generate(request, model="m")
     assert captured[0]["json"]["response_format"] == {"type": "json_object"}
+    assert captured[0]["json"]["chat_template_kwargs"] == {
+        "enable_thinking": False
+    }
 
 
 def test_generate_normalizes_response() -> None:
@@ -256,6 +299,41 @@ def test_adapter_exposes_local_location_and_lease() -> None:
     assert adapter.location is RouteLocation.LOCAL
     with adapter.resource_lease(exclusive=False):
         pass
+
+
+def test_dflash_generation_uses_exclusive_lease_only_when_enabled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings_path = tmp_path / "model_settings.json"
+    settings_path.write_text(
+        json.dumps(
+            {
+                "models": {
+                    "teacher": {"dflash_enabled": True},
+                    "gate": {"dflash_enabled": False},
+                }
+            }
+        )
+    )
+    leases: list[tuple[bool, int | None]] = []
+    monkeypatch.setattr(omlx_adapter, "OMLX_MODEL_SETTINGS_PATH", settings_path)
+    monkeypatch.setattr(
+        omlx_adapter,
+        "model_resource_lease",
+        lambda *, exclusive, timeout_ms=None: (
+            leases.append((exclusive, timeout_ms)) or nullcontext()
+        ),
+    )
+    adapter = OMLXAdapter(
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, json=_chat_json(), request=request)
+        )
+    )
+
+    adapter.generate(_minimal_message_request(), model="teacher")
+    adapter.generate(_minimal_message_request(), model="gate")
+
+    assert leases == [(True, 1000)]
 
 
 def test_config_parses_omlx_provider_and_builds_runtime() -> None:

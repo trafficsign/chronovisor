@@ -1,17 +1,40 @@
 # Codex 引き継ぎブリーフ: Chronovisor の LLM バックエンドを Ollama → oMLX へ切り替え
 
-状態: **REPO-IMPLEMENTED**(2026-08-20、Hermes が実装。Codex 復活までの暫定)
-→ 本番カットオーバー(production config の provider 切替 + サービス再起動)が残作業。
+状態: **REVALIDATED / CUTOVER-PENDING**(2026-08-20、Codex が誤判定を訂正し受入完了)
+→ GitHub-backed runtime への push、本番 config の provider 切替、サービス再起動が残作業。
 作成: 2026-08-20 / Hermes(oMLX 実測・検証済み)
 実装者: Hermes(Codex 復活までの暫定担当)
 前提プラン: `_handoff/2026-08-19_2258_model-stack-unify-omlx.md`
+
+## 0a. Codex 再検証の訂正結論(2026-08-20)
+
+**0c2 / 0c3 の「oMLX は約 10K token 超を処理できない」という結論は撤回。**
+旧プローブは文字列反復回数を token 数と誤認し、短い client timeout を server failure とした。
+target tokenizer で chat-template 後の総 token 数を厳密に作った clean・serial 試験では、
+Qwen3.8-27B-4bit + DFlash2 が 16,384 / 32,768(cold) / 65,536 token をそれぞれ
+69.34 / 149.40 / 339.98 秒で server completion した。
+
+- 実 ingest unit: `files_processed=1`、`files_failed=0`、`processor=omlx`、wall 127.6 秒。
+- 実 runtime e2e: Qwen 4 role、Muse challenger、Gemma tie-break、Ornith gate、bge-m3 が成功。
+  HTTP 409 は 0、gate wall 0.708 秒、embedding 1024d。
+- 根因修正: string think → `reasoning_effort`、raw prompt の thinking OFF、DFlash model の
+  cross-process lease、oMLX 3 teacher の formatless-first + client validation。
+- oMLX 設定: teacher 3モデルは DFlash ON、Ornith 1.5 は DFlash OFF + pinned。
+- 常駐 Chronovisor / Ollama を止めると 16K は 30.2%、32K は 19.0%短縮した。
+  競合は実在するが、clean でも 64K prefill は約 340 秒かかる。
+- gate は serial では 0.708 秒だが、15,024-token Qwen prefill と同時では 9.33 秒。
+  oMLX に request priority / preemption はなく、1.5 秒 SLA の production canary は未完了。
+
+現在の production config は安全のため Ollama のまま。LaunchAgent は GitHub remote から
+package を取得するので、ローカル修正を push せず config だけ切り替えてはならない。
 
 ## 0b. 実装状況(2026-08-20)
 
 - ✅ `src/chronovisor/core/omlx_adapter.py` 新規(OMLXAdapter / 写像は本ブリーフ §2 の実測どおり)
 - ✅ `src/chronovisor/core/llm_config.py` に provider kind `omlx` 追加(gen+embed+structured)
-- ✅ `tests/test_omlx_adapter.py` 新規 13 件 + `test_llm_config/llm_runtime/ollama` 合計 174 件 green
-- ✅ `scripts/check_local_omlx_e2e.py` 新規、実サーバーで **PASS**(gen 6 役割 + gate 1.34s + embed 1024d)
+- ✅ `tests/test_omlx_adapter.py` 15 件 + focused suite 合計 213 件 green
+- ✅ `scripts/check_local_omlx_e2e.py`、実サーバーで **PASS**
+  (Qwen 4 role + Muse + Gemma + gate 0.708s + embed 1024d)
 - ⏳ 残り:**本番 `~/.chronovisor/config.toml` の provider 切替**(roles を omlx に + モデルID 書換)+
   サービス再起動での確認 → その後 Ollama 退役。実装以降の手順: 下記 §4.3 / DoD。
 
@@ -30,7 +53,7 @@
 - 教訓(スキル/メンテ): クリーンベンチの SIGSTOP 運用は学校のロック状態を壊し得る。
   停止は「launchd でサービス一括停止 → 計測 → 一括復帰」へ変更し、ロック保持者は lsof で確認。
 
-## 0c2. カットオーバー再試行(2026-08-20 午前)— 真因の特定とロールバック(重要)
+## 0c2. 旧カットオーバー診断(大入力ハング判定は撤回)
 
 **前回 0c の「統合ギャップ = リース/residency の Ollama 結合」は誤診。真因は oMLX 側。**
 
@@ -53,7 +76,7 @@
   選択肢: ①上流(z-lab)へ再現報告 & 次リリース待ち ②model_settings 等で入力上限を稼働側で抑える調査
   ③アダプタ側で大入力を分割送信する暫定回避(本質解ではない)。Ollama 完全退役はハング解消後。
 
-## 0c3. 大入力の境界を実測(決定版・2026-08-20)
+## 0c3. 旧境界判定(文字数推定のため撤回)
 
 **結論: oMLX 0.6.3rc1 は「~10K トークン超の入力」を実用時間内に処理できない。DFlash 有無・
 コンテキスト窓設定は無関係。→ Chronovisor の ingest(32K〜256K)・decision(16K〜114K)は
@@ -115,8 +138,11 @@ Ollama 非依存(変更不要): `nvidia/Nemotron-3-Embed-1B-BF16`(semantic-servi
   - `max_tokens` ✓ / `temperature` ✓ / `seed` ✓ / `messages` ✓
   - **`keep_alive`・`num_ctx`・`think`・`enable_thinking`(トップレベル)は全て無視される**(422 にならず黙殺)。写像ミスが無音で起きる
   - **思考制御は `chat_template_kwargs: {"enable_thinking": false}` で効く**(実測: ornith の Thinking Process が抑制された)← recall.gate の think=false はこれに写像
-  - `response_format: {"type":"json_object"}` … **未確認**(要実装時プローブ、ornith で素早く試せる)
-- **DFlash エンジンは同時 1 つのみアクティブ**(現ビルド)。非 pinned モデルは自動スワップで切替可(実測: Qwen→ornith→Qwen すべて成功)。**`is_pinned: true` の DFlash モデルが他モデルのロードをブロックする**(実測で遭遇、ornith は現在非 pinned)。
+  - 文字列 reasoning level はトップレベル `reasoning_effort` へ写像する。
+  - DFlash engine の `response_format` strict schema は未対応で best-effort に落ちるため、
+    formatless-first + client validation を使う。
+- **DFlash エンジンは同時 1 つのみアクティブ**(現ビルド)。teacher は既存 lease で直列化し、
+  Ornith は DFlash OFF + pinned として別 engine で常駐する。
 
 ## 3. 対象コード(リポジトリ = ~/projects/personal/chronovisor)
 
@@ -139,7 +165,7 @@ Ollama 非依存(変更不要): `nvidia/Nemotron-3-Embed-1B-BF16`(semantic-servi
   - **`think`(=False のケース: recall.gate) → `chat_template_kwargs: {"enable_thinking": false}`**(実測済み)
   - `num_ctx` → oMLX には送らない(無視される)。許容: モデル側デフォルト ctx 依存か、`model_settings.json` での設定へ移行
   - `keep_alive` → 送らない。常駐制御は oMLX(`model_settings.is_pinned`)+ Chronovisor リースに委譲
-  - `format` / structured_output → 実装時に `response_format` プローブで確認
+  - `format` / structured_output → DFlash teacher は formatless-first + client validation
   - エラー写像: httpx タイムアウト/接続 → `SafeBackendError("timeout"/"transport_error", transient=True)`(OllamaAdapter と同型)
 - `embed(request, *, model)` → `POST /v1/embeddings`。`EmbeddingResult(vectors=tuple(tuple(...)), provider="omlx", model=...)`
 - `resource_lease(...)` → `ollama_lease.model_resource_lease` を再利用(プロバイダ中立)
@@ -173,18 +199,21 @@ Ollama 非依存(変更不要): `nvidia/Nemotron-3-Embed-1B-BF16`(semantic-servi
 2. **未知パラメータは黙って無視される**(keep_alive/num_ctx top-level think 等)。写像漏れが無音 = 動作違いになるので、テストで挙動を固定すること
 3. 思考抑制は `chat_template_kwargs.enable_thinking: false`(トップレベル enable_thinking は効かない)
 4. 埋め込みは 1024 次元・正規化済み(既存 bge-m3 と同じ次元。Ollama 版の前処理(prefix)は不要前提で確認)
-5. `response_format: json_object` は未確認。実装時に ornith を使って 1 プローブで確定
+5. DFlash teacher の strict `response_format` は未対応。formatless-first + client validation を維持
 6. Ollama 非依存サービス(Nemotron / reranker)は変更しない
 
 ## 6. 完了条件(Definition of Done)
 
-- [ ] `check_local_omlx_e2e.py` が green
-- [ ] adapter 単体テスト(写像含む)追加・green
-- [ ] 3 先生 + ornith の切り替え生成が Chronovisor 経由で通る(手動スモーク 1 回以上)
-- [ ] 埋め込み(分類/検索)が oMLX 経由で通る
-- [ ] recall.gate 実測レイテンシ <= 1.5s
-- [ ] 関連テストスイート regression なし
+- [x] `check_local_omlx_e2e.py` が green
+- [x] adapter 単体テスト(写像含む)追加・green
+- [x] 3 先生 + ornith の切り替え生成が Chronovisor 経由で通る(手動スモーク 1 回以上)
+- [x] 埋め込み(分類/検索)が oMLX 経由で通る
+- [x] recall.gate の idle・serial 実測 <= 1.5s(0.708s)
+- [ ] background teacher 実行中の recall.gate <= 1.5s(現状 9.33s)
+- [x] focused suite 213 passed
+- [ ] 広い関連 suite の既存不一致 12件を別タスクで解消(880 passed / 12 failed)
 - [ ] 検証した意味のある単位で commit(push は明示依頼時のみ)
+- [ ] 明示的な push 後、本番 cutover と role provenance を確認
 
 ## 7. 参考
 

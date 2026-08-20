@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import time
 import tomllib
 
 from chronovisor.core.llm_config import build_llm_runtime, parse_llm_config
@@ -37,9 +38,11 @@ EMBEDDING_ROLES = ("classification.embedding",)
 
 
 def build_config(args: argparse.Namespace) -> dict[str, object]:
-    roles: dict[str, tuple[str, str]] = {}
-    for role in GENERATION_ROLES:
-        roles[role] = ("generation", args.generation_model)
+    roles = {
+        role: ("generation", args.generation_model) for role in GENERATION_ROLES
+    }
+    roles["classification.challenger"] = ("generation", args.challenger_model)
+    roles["classification.tie_break"] = ("generation", args.tie_break_model)
     roles["recall.gate"] = ("generation", args.gate_model)
     roles["recall.processor.judge"] = ("generation", args.gate_model)
     for role in EMBEDDING_ROLES:
@@ -95,7 +98,7 @@ def main() -> int:
         print(f"[gen] {role}", flush=True)
         try:
             result = runtime.generate(role, request)
-        except Exception as exc:  # noqa: BLE001 - report and continue
+        except Exception as exc:
             print(f"  ERROR: {exc}", flush=True)
             failures += 1
             continue
@@ -121,13 +124,18 @@ def main() -> int:
     )
     print("[gen] recall.gate (low-latency)", flush=True)
     try:
+        started = time.monotonic()
         result = runtime.generate("recall.gate", request)
+        elapsed = time.monotonic() - started
         print(
             f"  {result.provider}/{result.model}: {result.content!r} "
-            f"tt={result.metadata.get('total_time')}",
+            f"tt={result.metadata.get('total_time')} wall={elapsed:.3f}s",
             flush=True,
         )
-    except Exception as exc:  # noqa: BLE001
+        if elapsed > 1.5:
+            print("  ERROR: recall.gate exceeded 1.5s", flush=True)
+            failures += 1
+    except Exception as exc:
         print(f"  ERROR: {exc}", flush=True)
         failures += 1
 
@@ -141,7 +149,7 @@ def main() -> int:
         print(f"[embed] {role}", flush=True)
         try:
             result = runtime.embed(role, request)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             print(f"  ERROR: {exc}", flush=True)
             failures += 1
             continue

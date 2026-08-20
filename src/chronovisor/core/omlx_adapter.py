@@ -8,9 +8,10 @@ parameter mapping:
 - ``max_tokens``           <- ``max_output_tokens``
 - ``temperature``          <- ``temperature``
 - ``seed``                 <- ``seed`` (when present)
-- ``chat_template_kwargs`` <- ``think`` for message requests.  oMLX only
-  honors thinking control via ``chat_template_kwargs.enable_thinking``;
-  top-level ``think`` / ``enable_thinking`` are silently ignored.
+- ``chat_template_kwargs.enable_thinking`` <- boolean ``think`` and
+  ``reasoning_effort`` <- string reasoning levels for message requests.
+  Raw prompt requests explicitly disable thinking because their runtime type
+  has no reasoning contract.
 - ``response_format``      <- ``format`` (``"json"`` -> ``json_object``,
   mapping -> best-effort ``json_schema``)
 - NOT sent: ``num_ctx``, ``keep_alive``.  oMLX silently ignores unknown
@@ -26,9 +27,11 @@ models block other DFlash loads), so cross-process serialization via
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 from collections.abc import Mapping
-from contextlib import AbstractContextManager
+from contextlib import AbstractContextManager, nullcontext
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -51,6 +54,9 @@ from chronovisor.core.ollama_lease import model_resource_lease
 
 OMLX_BASE_URL = os.environ.get("OMLX_BASE_URL", "http://127.0.0.1:8000/v1")
 OMLX_API_KEY = os.environ.get("OMLX_API_KEY", "omlx-local")
+OMLX_MODEL_SETTINGS_PATH = Path(
+    os.environ.get("OMLX_MODEL_SETTINGS_PATH", "~/.omlx/model_settings.json")
+).expanduser()
 _OMLX_AUTH_HEADER = "x-api-key"
 
 
@@ -68,20 +74,31 @@ class OMLXAdapter:
     def generate(self, request: GenerationInput, *, model: str) -> GenerationResult:
         payload = self._request_payload(request, model=model)
         try:
-            with httpx.Client(
-                base_url=OMLX_BASE_URL, transport=self._transport
-            ) as client:
-                response = client.post(
-                    "/chat/completions",
-                    json=payload,
-                    headers={"Content-Type": "application/json", _OMLX_AUTH_HEADER: OMLX_API_KEY},
-                    timeout=(
-                        None
-                        if request.timeout_ms is None
-                        else request.timeout_ms / 1000
-                    ),
-                )
-        except httpx.TimeoutException:
+            # ponytail: one DFlash engine per oMLX server; replace this global
+            # lease only if oMLX gains native per-engine request queueing.
+            lease = (
+                model_resource_lease(exclusive=True, timeout_ms=request.timeout_ms)
+                if self._uses_dflash(model)
+                else nullcontext()
+            )
+            with lease:
+                with httpx.Client(
+                    base_url=OMLX_BASE_URL, transport=self._transport
+                ) as client:
+                    response = client.post(
+                        "/chat/completions",
+                        json=payload,
+                        headers={
+                            "Content-Type": "application/json",
+                            _OMLX_AUTH_HEADER: OMLX_API_KEY,
+                        },
+                        timeout=(
+                            None
+                            if request.timeout_ms is None
+                            else request.timeout_ms / 1000
+                        ),
+                    )
+        except (TimeoutError, httpx.TimeoutException):
             raise SafeBackendError("timeout", transient=True) from None
         except httpx.TransportError:
             raise SafeBackendError("transport_error", transient=True) from None
@@ -151,7 +168,9 @@ class OMLXAdapter:
             if request.system is not None:
                 messages.append({"role": "system", "content": request.system})
             messages.append({"role": "user", "content": request.prompt})
-            think = None
+            # GenerationRequest has no reasoning contract.  oMLX chat models
+            # otherwise use their template default, which can be unbounded.
+            think = False
             temperature = request.temperature
             seed = request.seed
         payload: dict[str, object] = {"model": model, "messages": messages}
@@ -166,14 +185,30 @@ class OMLXAdapter:
         )
         if format_value is not None:
             payload["response_format"] = self._response_format(format_value)
-        if isinstance(think, bool):
+        if isinstance(think, (bool, str)):
             kwargs: dict[str, object] = {}
             existing = payload.get("chat_template_kwargs")
             if isinstance(existing, dict):
                 kwargs.update(existing)
-            kwargs["enable_thinking"] = think
+            kwargs["enable_thinking"] = think is not False
             payload["chat_template_kwargs"] = kwargs
+            if isinstance(think, str):
+                payload["reasoning_effort"] = think
         return payload
+
+    @staticmethod
+    def _uses_dflash(model: str) -> bool:
+        """Conservatively serialize models unless settings explicitly disable DFlash."""
+
+        try:
+            settings = json.loads(OMLX_MODEL_SETTINGS_PATH.read_text())
+            model_settings = settings["models"][model]
+        except (OSError, ValueError, KeyError, TypeError):
+            return True
+        return not (
+            isinstance(model_settings, dict)
+            and model_settings.get("dflash_enabled") is False
+        )
 
     @staticmethod
     def _response_format(value: Mapping[str, Any] | str) -> dict[str, object]:

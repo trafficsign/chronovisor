@@ -647,6 +647,9 @@ def test_content_correction_review_skips_initial_reasoning() -> None:
     [
         (QWEN_STRUCTURED_MODEL, "low", True, None),
         (MUSE_STRUCTURED_MODEL, "low", "low", None),
+        ("Qwen3.8-27B-4bit", "low", "low", None),
+        ("Muse-Glimmer-30B-4bit", "low", "low", None),
+        ("gemma-4-26b-a4b-it-4bit", "low", "low", None),
         ("gemma4:26b", "low", "low", SCHEMA),
     ],
 )

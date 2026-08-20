@@ -1,6 +1,6 @@
 # 計画: ローカルLLMスタックの oMLX 統一(3モデル)
 
-状態: **PLAN(方向性確定 / 実装詳細は未着手)**
+状態: **EXECUTING(2026-08-20 Codex 再開 / corrected acceptance)**
 作成: 2026-08-19 / Hermes 相談セッション(実測済み)
 実装者(想定): ①退役・常駐化 = Hermes / ②Chronovisor 付け替え = Codex
 
@@ -97,3 +97,43 @@ oMLX server (localhost:8000, OpenAI互換, x-api-key)
 - 本スレッドの実測・協議(Hermes、2026-08-19)
 - r/LocalLLaMA スレッド「DFlash 2 available for Qwen 3.8 27B and Muse Glimmer」
 - llama.cpp PR #27342(spec: add DFlash2 support / Apple M5 Pro 実測あり・未マージ)
+
+## 再開実行フェーズ(2026-08-20 Codex)
+
+前回の「oMLX は約 10K token 超を処理できない」という判定は撤回する。付録プローブは
+`SMALL=15,000 tokens` / `BIG=120,000 tokens` で、15,052-token 要求は server log 上
+93.15 秒で完了していた。インストール済み 0.6.3rc1 も DFlash2 を 32K context まで実測済み。
+以後は文字数推定を使わず、target tokenizer の実 token 数と server completion log を正本にする。
+
+### Checklist
+
+- [x] 誤った token 見積もりと timeout 判定を実 tokenizer / server log / upstream 実測で訂正
+- [x] 実 ingest unit の structured-output 再生成と DFlash engine 競合を分離再現
+- [x] DFlash model 呼び出しを既存 cross-process resource lease へ通す最小修正
+- [x] oMLX で schema-safe な生成経路を成立させ、実 ingest unit を 1 件完了
+- [x] Qwen DFlash2 の正確な 16K / 32K / 64K token 境界試験を clean・serial 条件で完了
+- [x] decision / recall.gate / embedding の Chronovisor 経由スモークを完了
+- [x] focused tests green(213 passed)
+- [ ] 広い関連 suite の既存不一致 12件を別タスクで解消(880 passed / 12 failed)
+- [ ] local cutover 後に service health・ingest progress・role provenance を確認
+- [x] 計画と全記録を最終証拠へ更新し、この変更単位を commit(push は明示依頼時のみ)
+
+### Acceptance evidence(2026-08-20)
+
+- exact-token clean probe(Qwen3.8-27B-4bit + DFlash2):
+  16,384=69.34s、32,768 cold=149.40s、65,536=339.98s、全件 HTTP 200 / stop。
+- 実 ingest unit: `files_processed=1`、`files_failed=0`、`processor=omlx`、wall 127.6s。
+- runtime e2e: Qwen / Muse / Gemma / Ornith / bge-m3 が PASS、HTTP 409=0、
+  gate wall=0.708s、embedding=2 x 1024d。
+- concurrent ceiling: 15,024-token Qwen prefill 中の gate は wall=9.33s。
+  oMLX に request priority / preemption はなく、production 1.5s SLA は未達。
+- 常駐停止効果: 16K は 99.28→69.34s、32K は 184.34→149.40s。
+- 停止した 10 LaunchAgent は trap で復旧。production config は Ollama のまま。
+- 常駐 runtime は GitHub remote を読むため、Exit Criteria 4 は明示的な push 後に実施する。
+
+### Exit Criteria
+
+1. 実 ingest unit が `files_processed >= 1` で完了し、`runtime_backend_error` を出さない。
+2. Qwen+DFlash2 が 32K-token cold prompt を server completion まで処理する。
+3. teacher / challenger / gate / embedding が競合による HTTP 409 なしで Chronovisor 経由成功する。
+4. config を oMLX にした状態で対象 service が生存し、Ollama fallback を使用しない。
