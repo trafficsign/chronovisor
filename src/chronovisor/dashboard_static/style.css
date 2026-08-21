@@ -3065,7 +3065,7 @@ canvas {
   position: relative;
   z-index: 2;
   box-sizing: border-box;
-  height: 802px;
+  height: auto;
   min-height: 0;
   margin-top: 10px;
   padding: 12px 16px;
@@ -3103,11 +3103,11 @@ canvas {
 
 .decision-trace-scroll {
   width: 100%;
-  overflow-x: auto;
-  height: 607px;
+  overflow-x: hidden;
+  height: auto;
   overflow-y: hidden;
   outline: none;
-  scrollbar-gutter: stable;
+  scrollbar-gutter: auto;
 }
 
 .decision-trace-scroll:focus-visible {
@@ -3116,9 +3116,9 @@ canvas {
 
 .decision-trace-harness {
   display: block;
-  width: 1400px;
+  width: 100%;
   max-width: none;
-  height: 607px;
+  height: auto;
   color: #62717d;
   font-family: var(--font-mono);
   font-size: 10px;
@@ -3600,7 +3600,7 @@ canvas {
 }
 
 .decision-trace-panel:has(.decision-events[open]) {
-  height: 930px;
+  height: auto;
 }
 
 .decision-transition-state {
@@ -3693,13 +3693,21 @@ canvas {
     height: 802px;
   }
 
+  .decision-trace-scroll {
+    height: 607px;
+    overflow-x: auto;
+    scrollbar-gutter: stable;
+  }
+
   .processing-lane,
   .processing-lane.active {
     grid-template-columns: 150px minmax(680px, 1fr);
   }
 
   .decision-trace-harness {
+    width: 1400px;
     max-width: none;
+    height: 607px;
   }
 }
 

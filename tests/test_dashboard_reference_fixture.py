@@ -521,7 +521,7 @@ def test_dashboard_reference_keeps_selection_and_bucket_truth() -> None:
     assert "opacity: 0.66;" in pending_repair_style
     assert "filter: none;" in pending_repair_style
     assert style.count("height: 1030px;") == 3
-    assert style.count("height: 802px;") == 3
+    assert style.count("height: 802px;") == 2
     assert style.count("height: 607px;") == 2
     assert "trace-check" not in page
     assert ".trace-check" not in style
@@ -644,7 +644,7 @@ def test_dashboard_reference_keeps_selection_and_bucket_truth() -> None:
     ) in style
     assert (
         ".decision-trace-panel:has(.decision-events[open]) {\n"
-        "  height: 930px;"
+        "  height: auto;"
     ) in style
     event_feed_style = style.split(
         ".decision-events .decision-transition-feed {", 1
@@ -1054,13 +1054,16 @@ addEventListener("DOMContentLoaded", () => {
     const scroller = document.querySelector("#decision-trace-scroll");
     const harness = document.querySelector("#decision-trace-harness");
     scroller.scrollLeft = scroller.scrollWidth;
-    const scrollerRight = scroller.getBoundingClientRect().right;
-    const harnessRight = harness.getBoundingClientRect().right;
+    const scrollerBounds = scroller.getBoundingClientRect();
+    const harnessBounds = harness.getBoundingClientRect();
+    const scrollerRight = scrollerBounds.right;
+    const harnessRight = harnessBounds.right;
     const layout = {
       clientWidth: scroller.clientWidth,
       scrollWidth: scroller.scrollWidth,
       scrollLeft: scroller.scrollLeft,
       rightReachable: harnessRight <= scrollerRight + 1,
+      fitsWidth: Math.abs(harnessBounds.width - scrollerBounds.width) <= 1,
     };
     scroller.scrollLeft = 0;
     return {
@@ -1240,8 +1243,9 @@ addEventListener("DOMContentLoaded", () => {
     for case in cases:
         result = by_id[case["id"]]
         assert result["expanded"] == [case["workflow"]]
-        assert result["layout"]["scrollWidth"] >= result["layout"]["clientWidth"]
+        assert result["layout"]["scrollWidth"] == result["layout"]["clientWidth"]
         assert result["layout"]["rightReachable"] is True
+        assert result["layout"]["fitsWidth"] is True
         selected_index = (
             case["lane_states"].index("active")
             if "active" in case["lane_states"]
