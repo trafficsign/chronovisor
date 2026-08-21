@@ -2222,70 +2222,70 @@ def _model_activities() -> list[dict[str, Any]]:
     return activities
 
 
-_PROCESSING_LANES: tuple[tuple[str, str, tuple[tuple[str, str], ...]], ...] = (
+_PROCESSING_LANES: tuple[tuple[str, str, tuple[tuple[str, str, str], ...]], ...] = (
     (
         "ingest",
         "Ingest",
         (
-            ("raw", "Raw"),
-            ("triage", "Triage"),
-            ("generate", "Generate"),
-            ("consensus", "Consensus"),
-            ("apply", "Apply"),
+            ("raw", "Raw", "trigger"),
+            ("triage", "Triage", "context"),
+            ("generate", "Generate", "generate"),
+            ("consensus", "Consensus", "vote"),
+            ("apply", "Apply", "vote"),
         ),
     ),
     (
         "recall",
         "Recall",
         (
-            ("search", "Search"),
-            ("rerank", "Rerank"),
-            ("primary", "Primary"),
-            ("challenger", "Challenger"),
-            ("tie_break", "Tie-break"),
-            ("commit", "Commit"),
+            ("search", "Search", "context"),
+            ("rerank", "Rerank", "context"),
+            ("primary", "Primary", "generate"),
+            ("challenger", "Challenger", "validate"),
+            ("tie_break", "Tie-break", "vote"),
+            ("commit", "Commit", "vote"),
         ),
     ),
     (
         "audit",
         "Audit",
         (
-            ("select", "Select"),
-            ("inspect", "Inspect"),
-            ("consensus", "Consensus"),
-            ("report", "Report"),
+            ("select", "Select", "trigger"),
+            ("inspect", "Inspect", "context"),
+            ("consensus", "Consensus", "vote"),
+            ("report", "Report", "vote"),
         ),
     ),
     (
         "improve",
         "Improve",
         (
-            ("discover", "Discover"),
-            ("generate", "Generate"),
-            ("verify", "Verify"),
-            ("apply", "Apply"),
+            ("discover", "Discover", "trigger"),
+            ("generate", "Generate", "generate"),
+            ("verify", "Verify", "validate"),
+            ("apply", "Apply", "vote"),
         ),
     ),
     (
         "repair",
         "Repair",
         (
-            ("detect", "Detect"),
-            ("local_fix", "Local fix"),
-            ("verify", "Verify"),
-            ("escalate", "Escalate"),
+            ("detect", "Detect", "trigger"),
+            ("local_fix", "Local fix", "generate"),
+            ("verify", "Verify", "validate"),
+            ("escalate", "Escalate", "vote"),
         ),
     ),
     (
         "typed_graph",
         "Typed Graph",
         (
-            ("discover", "Discover"),
-            ("extract", "Extract"),
-            ("verify", "Verify"),
-            ("consolidate", "Consolidate"),
-            ("evaluate", "Evaluate"),
-            ("promote", "Promote"),
+            ("discover", "Discover", "trigger"),
+            ("extract", "Extract", "generate"),
+            ("verify", "Verify", "validate"),
+            ("consolidate", "Consolidate", "validate"),
+            ("evaluate", "Evaluate", "validate"),
+            ("promote", "Promote", "vote"),
         ),
     ),
 )
@@ -2344,23 +2344,18 @@ def _processing_model_step(pipeline: str, operation: object) -> str:
     return "inspect"
 
 
-def _processing_trace_phase(step: object) -> str:
+def _processing_trace_phase(pipeline: str, step: object) -> str:
     key = str(step or "")
-    if key in {"search", "triage", "inspect", "rerank"}:
-        return "context"
-    if key in {
-        "generate",
-        "primary",
-        "challenger",
-        "tie_break",
-        "extract",
-        "local_fix",
-    }:
-        return "generate"
-    if key in {"consensus", "verify", "evaluate"}:
-        return "validate"
-    if key in {"apply", "commit", "report", "escalate", "consolidate", "promote"}:
-        return "vote"
+    for lane_key, _label, definitions in _PROCESSING_LANES:
+        if lane_key == pipeline:
+            return next(
+                (
+                    phase
+                    for step_key, _step_label, phase in definitions
+                    if step_key == key
+                ),
+                "trigger",
+            )
     return "trigger"
 
 
@@ -2373,9 +2368,9 @@ def _processing_component_label(component: object) -> str:
 
 
 def _processing_step_rows(
-    definitions: tuple[tuple[str, str], ...], current_step: str | None
+    definitions: tuple[tuple[str, str, str], ...], current_step: str | None
 ) -> list[dict[str, str]]:
-    keys = [key for key, _label in definitions]
+    keys = [key for key, _label, _phase in definitions]
     active_index = keys.index(current_step) if current_step in keys else -1
     return [
         {
@@ -2389,7 +2384,7 @@ def _processing_step_rows(
                 else "pending"
             ),
         }
-        for index, (key, label) in enumerate(definitions)
+        for index, (key, label, _phase) in enumerate(definitions)
     ]
 
 
@@ -3933,7 +3928,7 @@ def _processing_lane_trace(
         return None
 
     current_step = str(lane["current_step"])
-    phase = _processing_trace_phase(current_step)
+    phase = _processing_trace_phase(pipeline, current_step)
     identity = ":".join(
         str(value or "")
         for value in (
@@ -3966,7 +3961,7 @@ def _processing_lane_trace(
             "request_sha256": request_sha256,
             "role": pipeline,
             "model": model,
-            "phase": _processing_trace_phase(step.get("key")),
+            "phase": _processing_trace_phase(pipeline, step.get("key")),
             "status": str(step.get("status") or "active"),
             "source": "processing_activity",
             "pipeline": pipeline,

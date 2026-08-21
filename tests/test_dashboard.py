@@ -1871,6 +1871,99 @@ def test_decision_trace_pipeline_tabs_project_all_live_processing_lanes(
     assert failed["events"][-1]["status"] == "error"
 
 
+def test_processing_lane_trace_covers_every_declared_stage() -> None:
+    expected = {
+        "ingest": {
+            "raw": "trigger",
+            "triage": "context",
+            "generate": "generate",
+            "consensus": "vote",
+            "apply": "vote",
+        },
+        "recall": {
+            "search": "context",
+            "rerank": "context",
+            "primary": "generate",
+            "challenger": "validate",
+            "tie_break": "vote",
+            "commit": "vote",
+        },
+        "audit": {
+            "select": "trigger",
+            "inspect": "context",
+            "consensus": "vote",
+            "report": "vote",
+        },
+        "improve": {
+            "discover": "trigger",
+            "generate": "generate",
+            "verify": "validate",
+            "apply": "vote",
+        },
+        "repair": {
+            "detect": "trigger",
+            "local_fix": "generate",
+            "verify": "validate",
+            "escalate": "vote",
+        },
+        "typed_graph": {
+            "discover": "trigger",
+            "extract": "generate",
+            "verify": "validate",
+            "consolidate": "validate",
+            "evaluate": "validate",
+            "promote": "vote",
+        },
+    }
+    declared = {
+        pipeline: {step: phase for step, _label, phase in definitions}
+        for pipeline, _label, definitions in dashboard._PROCESSING_LANES
+    }
+
+    assert declared == expected
+    assert sum(len(steps) for steps in declared.values()) == 29
+    assert dashboard._processing_trace_phase("ingest", "unknown") == "trigger"
+    assert dashboard._processing_trace_phase("unknown", "raw") == "trigger"
+
+    for pipeline, _label, definitions in dashboard._PROCESSING_LANES:
+        phase_indexes = [
+            dashboard._DECISION_TRACE_PHASES.index(phase)
+            for _step, _step_label, phase in definitions
+        ]
+        assert phase_indexes == sorted(phase_indexes)
+        for current_step, _step_label, expected_phase in definitions:
+            trace = dashboard._processing_lane_trace(
+                pipeline,
+                {
+                    "state": "active",
+                    "current_step": current_step,
+                    "model": f"{pipeline}:model",
+                    "role": f"{pipeline} worker",
+                    "started_at": "2026-08-22T06:54:48+09:00",
+                    "updated_at": "2026-08-22T06:54:49+09:00",
+                    "work_item": f"{pipeline}-{current_step}",
+                    "recent": False,
+                    "steps": dashboard._processing_step_rows(definitions, current_step),
+                },
+            )
+            assert trace is not None
+            primary = next(lane for lane in trace["lanes"] if lane["key"] == "primary")
+            current_index = dashboard._DECISION_TRACE_PHASES.index(expected_phase)
+
+            assert primary["phase"] == expected_phase
+            assert primary["observed_phases"] == list(
+                dashboard._DECISION_TRACE_PHASES[: current_index + 1]
+            )
+            assert [step["status"] for step in primary["steps"]] == [
+                *(["done"] * current_index),
+                "active",
+                *(
+                    ["pending"]
+                    * (len(dashboard._DECISION_TRACE_PHASES) - current_index - 1)
+                ),
+            ]
+
+
 def test_decision_trace_pin_survives_the_gap_between_lane_markers() -> None:
     pinned_request = "4" * 64
     other_request = "5" * 64
