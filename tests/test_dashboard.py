@@ -2801,7 +2801,12 @@ const afterLive = {{
   detail: sandbox.els.ollamaSub.textContent,
 }};
 sandbox.__test.render({{
-  status: {{}},
+  status: {{
+    pending: 12,
+    source_raw_pending: 9,
+    semantic_deferred: {{ count: 1 }},
+    operational_deferred: {{ count: 2 }},
+  }},
   model_status: {{
     available: false,
     models: [{{ status: "ready" }}],
@@ -2812,6 +2817,8 @@ sandbox.__test.render({{
 const afterStaleRender = {{
   state: sandbox.els.ollama.textContent,
   detail: sandbox.els.ollamaSub.textContent,
+  runnable: sandbox.els.pending.textContent,
+  runnableDetail: sandbox.els.pendingSub.textContent,
 }};
 process.stdout.write(JSON.stringify({{
   seen: sandbox.__test.seen,
@@ -2831,6 +2838,8 @@ process.stdout.write(JSON.stringify({{
         "afterStaleRender": {
             "state": "online",
             "detail": "1 loaded · 3 installed",
+            "runnable": "12",
+            "runnableDetail": "9 source raws · 3 held",
         },
     }
 
@@ -4058,6 +4067,7 @@ def test_build_snapshot_combines_runtime_and_queue(tmp_path: Path, monkeypatch) 
     (chronovisor_root / "pages").mkdir()
     (chronovisor_root / "system").mkdir()
     (raw_dir / "r1.md").write_text("raw")
+    (raw_dir / "r2.md").write_text("raw")
 
     monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", chronovisor_root)
     monkeypatch.setattr(dashboard, "init_chronovisor", lambda: None)
@@ -4105,6 +4115,9 @@ def test_build_snapshot_combines_runtime_and_queue(tmp_path: Path, monkeypatch) 
         dashboard,
         "_frontier_preflight_snapshot",
         lambda: {"ok": True, "checked_at": "2026-06-01T12:00:00"},
+    )
+    monkeypatch.setattr(
+        dashboard, "_pending_raw_root_names", lambda _raw_dir, _names: {"source.md"}
     )
     monkeypatch.setattr(
         dashboard,
@@ -4187,10 +4200,12 @@ def test_build_snapshot_combines_runtime_and_queue(tmp_path: Path, monkeypatch) 
 
     snapshot = dashboard.build_snapshot()
 
-    assert snapshot["status"]["pending"] == 1
+    assert snapshot["status"]["pending"] == 2
+    assert snapshot["status"]["source_raw_pending"] == 1
     assert snapshot["status"]["state"] == "running"
     assert snapshot["events"]
     assert snapshot["metrics"][0]["pending_after"] == 1
+    assert snapshot["metrics"][-1]["pending_after"] == 2
     assert snapshot["self_heal"]["status"] == "resolved"
     assert snapshot["self_heal"]["counts"]["resolved"] == 1
     assert snapshot["self_heal"]["latest"]["raw_file"] == "broken.md"
@@ -5365,6 +5380,7 @@ def test_snapshot_live_status_overlay_is_non_mutating_and_preserves_cold_fields(
             "decision_policies": {"lanes": {"ingest": "enabled"}},
             "semantic_deferred": {"count": 2, "samples": ["semantic.md"]},
             "operational_deferred": {"count": 1, "samples": ["blocked.md"]},
+            "source_raw_pending": 6,
             "raw_outstanding": 10,
         },
         "events": [{"kind": "cold"}],

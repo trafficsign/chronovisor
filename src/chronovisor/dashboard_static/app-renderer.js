@@ -3581,7 +3581,9 @@ function render(snapshot) {
   const operationalDeferred = intValue(status.operational_deferred?.count);
   const held = semanticDeferred + operationalDeferred;
   els.pending.textContent = fmt(ready);
-  els.pendingSub.textContent = ready === 1 ? "1 Raw ready for processing" : `${ready} Raw ready for processing`;
+  els.pendingSub.textContent = numeric(status.source_raw_pending)
+    ? `${intValue(status.source_raw_pending)} source raws · ${held} held`
+    : `${ready} work units ready`;
   els.held.textContent = fmt(held);
   els.heldSub.textContent = `${semanticDeferred} semantic · ${operationalDeferred} operational`;
   const stageValue = fmt(status.stage, "idle");

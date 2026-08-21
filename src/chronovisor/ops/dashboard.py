@@ -5072,7 +5072,7 @@ def build_snapshot() -> dict[str, Any]:
         },
     )
     pending_value = pending_view.get("count")
-    pending = (
+    source_raw_pending = (
         min(pending_value, len(pending_raw_names))
         if isinstance(pending_value, int) and not isinstance(pending_value, bool)
         else len(pending_raw_names)
@@ -5087,7 +5087,9 @@ def build_snapshot() -> dict[str, Any]:
         for raw_file, reason in deferred_statuses.items()
         if reason != "semantic_no_quorum"
     )
+    pending = len(pending_raw_names)
     status = _canonicalize_runtime_status(cached_status, orch_state, pending=pending)
+    status["source_raw_pending"] = source_raw_pending
     status["semantic_deferred"] = {
         "count": len(semantic_deferred_names),
         "samples": semantic_deferred_names[:5],
@@ -5673,6 +5675,7 @@ _COLD_STATUS_DERIVED_KEYS = (
     "decision_policies",
     "semantic_deferred",
     "operational_deferred",
+    "source_raw_pending",
     "raw_outstanding",
 )
 
