@@ -73,7 +73,12 @@ On macOS 13 and later, these installers render their source plists outside
 `~/Library/LaunchAgents`, rebuild `~/Applications/Chronovisor.app`, and refresh
 only the selected service through `SMAppService`. Each process remains
 independently supervised, while System Settings shows one `Chronovisor.app`
-Background Item. To inspect or rebuild the bundle directly:
+Background Item. The bundle refuses ad-hoc signing and defaults to the local
+`Chronovisor Local Code Signing` identity; set
+`CHRONOVISOR_CODESIGN_IDENTITY` to use a different installed identity. Use the
+service installers above for live updates so the signed bundle is safely
+re-enrolled. The low-level commands are useful for first-time registration and
+inspection:
 
 ```sh
 scripts/chronovisor-macos-services build

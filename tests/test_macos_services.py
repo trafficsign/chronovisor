@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import plistlib
 from importlib.machinery import SourceFileLoader
 from importlib.util import module_from_spec, spec_from_loader
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -78,3 +80,85 @@ def test_retired_experiments_are_not_bundled() -> None:
         "library-evidence",
         "soak",
     }
+
+
+def test_signing_requires_a_real_identity(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = _module()
+    monkeypatch.delenv(module.SIGNING_IDENTITY_ENV, raising=False)
+
+    assert module._signing_identity() == "Chronovisor Local Code Signing"
+    assert module._signing_identity("Developer ID Application: Example") == (
+        "Developer ID Application: Example"
+    )
+    with pytest.raises(ValueError, match="non-ad-hoc"):
+        module._signing_identity("-")
+    with pytest.raises(RuntimeError, match="signed ad-hoc"):
+        module._signature_authority("Signature=adhoc")
+    assert module._signature_authority(
+        "Authority=Chronovisor Local Code Signing\n"
+    ) == "Chronovisor Local Code Signing"
+
+
+def test_app_metadata_uses_bundled_icon(tmp_path: Path) -> None:
+    module = _module()
+    app = tmp_path / module.APP_NAME
+    (app / "Contents").mkdir(parents=True)
+
+    module._write_info_plist(app)
+
+    payload = plistlib.loads((app / "Contents" / "Info.plist").read_bytes())
+    assert payload["CFBundleIconFile"] == "Chronovisor.icns"
+    assert module.ICON_SOURCE.is_file()
+
+
+def test_refresh_reenrolls_after_replacing_signed_bundle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _module()
+    app = tmp_path / module.APP_NAME
+    app.mkdir()
+    events: list[str] = []
+
+    monkeypatch.setattr(
+        module,
+        "_managed_service",
+        lambda _app, _suffix: ("service.plist", "service.label"),
+    )
+    monkeypatch.setattr(
+        module,
+        "_manager",
+        lambda _app, command, *_args: (
+            events.append(command)
+            or SimpleNamespace(returncode=0, stdout="", stderr="")
+        ),
+    )
+    monkeypatch.setattr(
+        module,
+        "build_app",
+        lambda *_args: events.append("build") or {},
+    )
+    monkeypatch.setattr(
+        module.time,
+        "sleep",
+        lambda seconds: events.append(f"sleep:{seconds}"),
+    )
+    monkeypatch.setattr(
+        module.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stderr=""),
+    )
+
+    result = module.refresh_service(tmp_path, app, "dashboard")
+
+    assert result["status"] == "ok"
+    assert events == [
+        "unregister-one",
+        "sleep:3",
+        "build",
+        "register-one",
+        "sleep:2",
+        "unregister-one",
+        "sleep:3",
+        "register-one",
+    ]

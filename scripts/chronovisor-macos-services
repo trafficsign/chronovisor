@@ -17,8 +17,11 @@ from typing import Any
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 MANAGER_SOURCE = PROJECT_ROOT / "macos" / "ChronovisorServiceManager.swift"
+ICON_SOURCE = PROJECT_ROOT / "macos" / "Chronovisor.icns"
 APP_NAME = "Chronovisor.app"
 APP_IDENTIFIER = "com.trafficsign.chronovisor"
+DEFAULT_SIGNING_IDENTITY = "Chronovisor Local Code Signing"
+SIGNING_IDENTITY_ENV = "CHRONOVISOR_CODESIGN_IDENTITY"
 BUNDLE_PROGRAM = "Contents/MacOS/Chronovisor"
 SERVICE_SUFFIXES = (
     "converge",
@@ -116,6 +119,7 @@ def _write_info_plist(app: Path) -> None:
         "CFBundleDisplayName": "Chronovisor",
         "CFBundleExecutable": "Chronovisor",
         "CFBundleIdentifier": APP_IDENTIFIER,
+        "CFBundleIconFile": ICON_SOURCE.name,
         "CFBundleInfoDictionaryVersion": "6.0",
         "CFBundleName": "Chronovisor",
         "CFBundlePackageType": "APPL",
@@ -129,9 +133,34 @@ def _write_info_plist(app: Path) -> None:
     )
 
 
-def build_app(home: Path, destination: Path) -> dict[str, Any]:
+def _signing_identity(explicit: str | None = None) -> str:
+    identity = (
+        explicit
+        if explicit is not None
+        else os.environ.get(SIGNING_IDENTITY_ENV, DEFAULT_SIGNING_IDENTITY)
+    ).strip()
+    if not identity or identity == "-":
+        raise ValueError("Chronovisor.app requires a non-ad-hoc signing identity")
+    return identity
+
+
+def _signature_authority(details: str) -> str:
+    if "Signature=adhoc" in details:
+        raise RuntimeError("Chronovisor.app was signed ad-hoc")
+    for line in details.splitlines():
+        if line.startswith("Authority="):
+            return line.removeprefix("Authority=")
+    raise RuntimeError("Chronovisor.app has no signing authority")
+
+
+def build_app(
+    home: Path,
+    destination: Path,
+    signing_identity: str | None = None,
+) -> dict[str, Any]:
     if destination.name != APP_NAME:
         raise ValueError(f"app destination must end with {APP_NAME}")
+    identity = _signing_identity(signing_identity)
     swiftc = shutil.which("swiftc") or shutil.which("xcrun")
     codesign = shutil.which("codesign")
     if swiftc is None or codesign is None:
@@ -143,9 +172,12 @@ def build_app(home: Path, destination: Path) -> dict[str, Any]:
         app = Path(temporary) / APP_NAME
         executable = app / "Contents" / "MacOS" / "Chronovisor"
         agents = app / "Contents" / "Library" / "LaunchAgents"
+        resources = app / "Contents" / "Resources"
         executable.parent.mkdir(parents=True)
         agents.mkdir(parents=True)
+        resources.mkdir(parents=True)
         _write_info_plist(app)
+        shutil.copy2(ICON_SOURCE, resources / ICON_SOURCE.name)
         bundled_services: list[str] = []
         for suffix in SERVICE_SUFFIXES:
             try:
@@ -185,7 +217,7 @@ def build_app(home: Path, destination: Path) -> dict[str, Any]:
                 "--force",
                 "--deep",
                 "--sign",
-                "-",
+                identity,
                 "--identifier",
                 APP_IDENTIFIER,
                 str(app),
@@ -195,6 +227,13 @@ def build_app(home: Path, destination: Path) -> dict[str, Any]:
         subprocess.run(
             [codesign, "--verify", "--deep", "--strict", str(app)], check=True
         )
+        signature = subprocess.run(
+            [codesign, "-dvvv", str(app)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        authority = _signature_authority(signature.stdout + signature.stderr)
         staged = destination.with_name(f".{APP_NAME}.new")
         if staged.exists():
             shutil.rmtree(staged)
@@ -210,6 +249,7 @@ def build_app(home: Path, destination: Path) -> dict[str, Any]:
         "app": str(destination),
         "services": bundled_services,
         "retired": list(RETIRED_SUFFIXES),
+        "signing_authority": authority,
     }
 
 
@@ -225,20 +265,32 @@ def _manager(
     )
 
 
-def refresh_service(home: Path, app: Path, suffix: str) -> dict[str, Any]:
-    build_app(home, app)
+def refresh_service(
+    home: Path,
+    app: Path,
+    suffix: str,
+    signing_identity: str | None = None,
+) -> dict[str, Any]:
+    previous_plist: str | None = None
+    if app.is_dir():
+        previous_plist, _ = _managed_service(app, suffix)
+        unregister = _manager(app, "unregister-one", previous_plist)
+        if unregister.returncode != 0:
+            return {
+                "status": "error",
+                "service": suffix,
+                "phase": "unregister",
+                "detail": unregister.stdout.strip() or unregister.stderr.strip(),
+            }
+        # smd commits removal asynchronously even after unregister returns.
+        time.sleep(3)
+    try:
+        build_app(home, app, signing_identity)
+    except Exception:
+        if previous_plist is not None:
+            _manager(app, "register-one", previous_plist)
+        raise
     plist_name, label = _managed_service(app, suffix)
-    unregister = _manager(app, "unregister-one", plist_name)
-    if unregister.returncode != 0:
-        return {
-            "status": "error",
-            "service": suffix,
-            "phase": "unregister",
-            "detail": unregister.stdout.strip() or unregister.stderr.strip(),
-        }
-    # macOS can reject an immediate unregister/register pair while smd is
-    # still committing the removal.
-    time.sleep(2)
     register = _manager(app, "register-one", plist_name)
     if register.returncode != 0:
         _manager(app, "open-settings")
@@ -248,6 +300,28 @@ def refresh_service(home: Path, app: Path, suffix: str) -> dict[str, Any]:
             "phase": "register",
             "detail": register.stdout.strip() or register.stderr.strip(),
         }
+    if previous_plist is not None:
+        # launchd can retain the replaced bundle's lightweight code
+        # requirement until it sees one enrollment against the stable bundle.
+        time.sleep(2)
+        reenroll = _manager(app, "unregister-one", plist_name)
+        if reenroll.returncode != 0:
+            return {
+                "status": "error",
+                "service": suffix,
+                "phase": "reenroll-unregister",
+                "detail": reenroll.stdout.strip() or reenroll.stderr.strip(),
+            }
+        time.sleep(3)
+        register = _manager(app, "register-one", plist_name)
+        if register.returncode != 0:
+            _manager(app, "open-settings")
+            return {
+                "status": "error",
+                "service": suffix,
+                "phase": "reenroll-register",
+                "detail": register.stdout.strip() or register.stderr.strip(),
+            }
     kickstart = subprocess.run(
         [
             "/bin/launchctl",
@@ -285,6 +359,7 @@ def main() -> int:
     parser.add_argument("service", nargs="?", choices=SERVICE_SUFFIXES)
     parser.add_argument("--home", type=Path, default=Path.home())
     parser.add_argument("--app", type=Path)
+    parser.add_argument("--signing-identity")
     args = parser.parse_args()
     home = args.home.expanduser().resolve()
     app = (
@@ -293,12 +368,23 @@ def main() -> int:
         else home / "Applications" / APP_NAME
     )
     if args.command == "build":
-        print(json.dumps(build_app(home, app), ensure_ascii=False, indent=2))
+        print(
+            json.dumps(
+                build_app(home, app, args.signing_identity),
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
         return 0
     if args.command == "refresh":
         if args.service is None:
             parser.error("refresh requires a service")
-        payload = refresh_service(home, app, args.service)
+        payload = refresh_service(
+            home,
+            app,
+            args.service,
+            args.signing_identity,
+        )
         print(json.dumps(payload, ensure_ascii=False, indent=2))
         return 0 if payload["status"] == "ok" else 1
     if args.service is not None:
