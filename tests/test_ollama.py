@@ -638,6 +638,7 @@ def test_generate_publishes_redacted_model_activity(tmp_path, monkeypatch) -> No
     assert observed["component"] == __name__
     assert observed["caller"] == "test_generate_publishes_redacted_model_activity"
     assert observed["pipeline"] == "audit"
+    assert observed["status"] == "active"
     assert (
         marker_bytes
         == (json.dumps(observed, ensure_ascii=False, sort_keys=True) + "\n").encode()
@@ -654,6 +655,29 @@ def test_generate_publishes_redacted_model_activity(tmp_path, monkeypatch) -> No
     )
     assert recent["activity_id"] == observed["activity_id"]
     assert recent["finished_at"]
+    assert recent["status"] == "done"
+
+
+def test_model_activity_records_failure_without_swallowing_it(
+    tmp_path, monkeypatch
+) -> None:
+    chronovisor_root = tmp_path / "wiki"
+    monkeypatch.setattr(ollama, "CHRONOVISOR_ROOT", chronovisor_root)
+    monkeypatch.setattr(
+        ollama,
+        "_generate_unlocked",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+
+    with pytest.raises(RuntimeError, match="boom"):
+        ollama.generate("secret prompt", model="ornith:test")
+
+    recent = json.loads(
+        (
+            chronovisor_root / "runtime" / "model-activity" / "recent" / "audit.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert recent["status"] == "error"
 
 
 def test_model_activity_uses_live_root_when_entered(tmp_path, monkeypatch) -> None:

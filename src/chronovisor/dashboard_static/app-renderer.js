@@ -998,6 +998,13 @@ function decisionConsoleText(event, trace) {
   const speed = numeric(generation.tokens_per_second)
     ? `${generation.tokens_per_second.toFixed(1)} tok/s`
     : "";
+  if (event?.source === "processing_activity") {
+    const pipeline = fmt(event.pipeline, trace?.task_role || "processing").replace(/_/g, " ");
+    const state = event.kind === "session"
+      ? event.status === "error" ? "failed" : "completed"
+      : fmt(event.label, event.phase || "active");
+    return [pipeline, fmt(event.detail, model), state].filter(Boolean).join(" · ");
+  }
   if (event?.kind === "session") {
     const result = event.status === "error"
       ? `session failed at ${fmt(event.phase, "runtime")}`

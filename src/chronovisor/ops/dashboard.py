@@ -2181,6 +2181,7 @@ def _model_activities() -> list[dict[str, Any]]:
                     "updated_at": row.get("updated_at"),
                     "pid": pid,
                     "thread_id": row.get("thread_id"),
+                    "status": row.get("status") or "active",
                     "elapsed_seconds": age_seconds,
                     "recent": False,
                 }
@@ -2212,6 +2213,7 @@ def _model_activities() -> list[dict[str, Any]]:
                     "finished_at": row.get("finished_at"),
                     "pid": row.get("pid"),
                     "thread_id": row.get("thread_id"),
+                    "status": row.get("status"),
                     "elapsed_seconds": _activity_age_seconds(row.get("started_at")),
                     "recent": True,
                 }
@@ -2340,6 +2342,26 @@ def _processing_model_step(pipeline: str, operation: object) -> str:
     if pipeline == "repair":
         return "local_fix"
     return "inspect"
+
+
+def _processing_trace_phase(step: object) -> str:
+    key = str(step or "")
+    if key in {"search", "triage", "inspect", "rerank"}:
+        return "context"
+    if key in {
+        "generate",
+        "primary",
+        "challenger",
+        "tie_break",
+        "extract",
+        "local_fix",
+    }:
+        return "generate"
+    if key in {"consensus", "verify", "evaluate"}:
+        return "validate"
+    if key in {"apply", "commit", "report", "escalate", "consolidate", "promote"}:
+        return "vote"
+    return "trigger"
 
 
 def _processing_component_label(component: object) -> str:
@@ -2494,6 +2516,7 @@ def _build_processing_activity_snapshot() -> dict[str, Any]:
             "work_item": latest.get("activity_id"),
             "active_jobs": len(visible_rows),
             "recent": not live_rows,
+            "status": latest.get("status"),
         }
 
     repair_active = bool(
@@ -2536,6 +2559,7 @@ def _build_processing_activity_snapshot() -> dict[str, Any]:
                 "work_item": (active or {}).get("work_item"),
                 "active_jobs": int((active or {}).get("active_jobs") or 0),
                 "recent": bool((active or {}).get("recent")),
+                "status": (active or {}).get("status"),
                 "detail": (
                     _typed_graph_lane_detail(typed_graph)
                     if key == "typed_graph"
@@ -3095,6 +3119,9 @@ def _decision_trace_events(
         if kind == "session" and status == "error":
             phase = last_phase_by_lane.get(lane, "trigger")
         label = phase_labels[phase]
+        processing_activity = row.get("source") == "processing_activity"
+        if processing_activity and isinstance(row.get("label"), str):
+            label = str(row["label"])[:80]
         if kind == "session":
             label = "Vote accepted" if status == "done" else "Session failed"
         elif kind == "decision_artifact_replay":
@@ -3136,6 +3163,10 @@ def _decision_trace_events(
         generation = _decision_trace_generation(row.get("generation"))
         if generation is not None:
             event["generation"] = generation
+        if processing_activity:
+            event["source"] = "processing_activity"
+            event["pipeline"] = str(row.get("pipeline") or "")[:40]
+            event["detail"] = str(row.get("detail") or "")[:160]
         events.append(event)
     return events[-_DECISION_TRACE_EVENT_LIMIT:]
 
@@ -3888,6 +3919,118 @@ def _decision_trace_snapshot(
     }
 
 
+def _processing_lane_trace(
+    pipeline: str,
+    lane: Mapping[str, Any],
+    *,
+    observed_at: object = None,
+) -> dict[str, Any] | None:
+    """Project one observed processing lane into the shared trace schema."""
+
+    if lane.get("state") != "active" or not lane.get("current_step"):
+        return None
+    if lane.get("recent") and lane.get("status") not in {"done", "error"}:
+        return None
+
+    current_step = str(lane["current_step"])
+    phase = _processing_trace_phase(current_step)
+    identity = ":".join(
+        str(value or "")
+        for value in (
+            pipeline,
+            lane.get("work_item"),
+            lane.get("started_at"),
+            lane.get("model"),
+            lane.get("role"),
+        )
+    )
+    request_sha256 = hashlib.sha256(identity.encode("utf-8")).hexdigest()
+    started_at = lane.get("started_at") or lane.get("updated_at") or observed_at
+    updated_at = lane.get("updated_at") or started_at
+    role = str(lane.get("role") or pipeline)[:160]
+    model = str(lane.get("model") or "local worker")[:160]
+    activity = {
+        "request_sha256": request_sha256,
+        "role": pipeline,
+        "model": model,
+        "phase": phase,
+        "started_at": started_at,
+        "updated_at": updated_at,
+        "elapsed_seconds": _activity_age_seconds(started_at),
+    }
+    events = [
+        {
+            "event_id": f"processing-{request_sha256[:16]}-{step.get('key')}",
+            "timestamp": started_at if index == 0 else updated_at,
+            "kind": "phase",
+            "request_sha256": request_sha256,
+            "role": pipeline,
+            "model": model,
+            "phase": _processing_trace_phase(step.get("key")),
+            "status": str(step.get("status") or "active"),
+            "source": "processing_activity",
+            "pipeline": pipeline,
+            "label": str(step.get("label") or step.get("key") or "Processing"),
+            "detail": role,
+        }
+        for index, step in enumerate(lane.get("steps") or [])
+        if step.get("status") in {"done", "active"}
+    ]
+    terminal_status = str(lane.get("status") or "")
+    history: list[dict[str, Any]] = []
+    if lane.get("recent") and terminal_status in {"done", "error"}:
+        history.append(
+            {
+                "kind": "session",
+                "timestamp": updated_at,
+                "request_sha256": request_sha256,
+                "role": pipeline,
+                "model": model,
+                "ok": terminal_status == "done",
+                "failure_class": (
+                    "model_activity_failed" if terminal_status == "error" else None
+                ),
+            }
+        )
+        events.append(
+            {
+                "event_id": f"processing-{request_sha256[:16]}-session",
+                "timestamp": updated_at,
+                "kind": "session",
+                "request_sha256": request_sha256,
+                "role": pipeline,
+                "model": model,
+                "phase": phase,
+                "status": terminal_status,
+                "source": "processing_activity",
+                "pipeline": pipeline,
+                "detail": role,
+            }
+        )
+        active_rows: list[dict[str, Any]] = []
+    else:
+        active_rows = [activity]
+
+    trace = _decision_trace_snapshot(
+        active_rows,
+        history,
+        None,
+        events,
+        preferred_request_sha256=request_sha256,
+    )
+    trace["source"] = "processing_activity"
+    trace["started_at"] = started_at
+    trace["summary"] = f"{pipeline.replace('_', ' ').title()} · {role}"
+    primary = next((item for item in trace["lanes"] if item["key"] == "primary"), None)
+    if primary is not None:
+        primary["observed_phases"] = [
+            step["key"]
+            for step in primary["steps"]
+            if step["status"] in {"done", "active", "error"}
+        ]
+    return trace
+
+
 def _local_consensus_snapshot(
     limit: int = 40,
     *,
@@ -3997,19 +4140,20 @@ def _local_consensus_snapshot(
         None,
     )
 
+    processing_trace: dict[str, Any] | None = None
     if preferred_pipeline is not None:
-        pipeline_rows = [
+        live_pipeline_rows = [
             row
             for row in activities
             if _processing_pipeline_for_role(row.get("role")) == preferred_pipeline
             and row.get("request_sha256")
         ]
+        pipeline_rows = live_pipeline_rows
         if not pipeline_rows:
             pipeline_rows = [
                 row
                 for row in [*history, *trace_events]
-                if _processing_pipeline_for_role(row.get("role"))
-                == preferred_pipeline
+                if _processing_pipeline_for_role(row.get("role")) == preferred_pipeline
                 and row.get("request_sha256")
             ]
 
@@ -4024,6 +4168,26 @@ def _local_consensus_snapshot(
         preferred_request_sha256 = (
             str(selected.get("request_sha256")) if selected is not None else None
         )
+        if not live_pipeline_rows:
+            with contextlib.suppress(Exception):
+                processing = _processing_activity_snapshot()
+                selected_lane = next(
+                    (
+                        row
+                        for row in processing.get("lanes") or []
+                        if row.get("key") == preferred_pipeline
+                        and row.get("state") == "active"
+                    ),
+                    None,
+                )
+                if selected_lane is not None and (
+                    not selected_lane.get("recent") or preferred_request_sha256 is None
+                ):
+                    processing_trace = _processing_lane_trace(
+                        preferred_pipeline,
+                        selected_lane,
+                        observed_at=processing.get("generated_at"),
+                    )
 
     def build_trace(preferred: str | None = None) -> dict[str, Any]:
         return _decision_trace_snapshot(
@@ -4042,7 +4206,9 @@ def _local_consensus_snapshot(
             for row in [*activities, *history, *trace_events]
         )
     )
-    if preferred_pipeline is not None and preferred_request_sha256 is None:
+    if processing_trace is not None:
+        decision_trace = processing_trace
+    elif preferred_pipeline is not None and preferred_request_sha256 is None:
         label = next(
             label
             for key, label, _steps in _PROCESSING_LANES
@@ -4079,7 +4245,8 @@ def _local_consensus_snapshot(
             decision_trace = None
 
     snapshot = {
-        "active": bool(activities),
+        "active": bool(activities)
+        or bool(decision_trace and decision_trace.get("active")),
         "count": len(activities),
         "activities": activities,
         "latest": activities[-1] if activities else None,

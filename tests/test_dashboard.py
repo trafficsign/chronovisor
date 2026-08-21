@@ -1793,6 +1793,84 @@ def test_decision_trace_pipeline_tabs_select_concurrent_workflows(
     assert empty["decision_trace"]["summary"] == "No Typed Graph decision yet"
 
 
+def test_decision_trace_pipeline_tabs_project_all_live_processing_lanes(
+    tmp_path: Path, monkeypatch
+) -> None:
+    steps = {
+        "ingest": "generate",
+        "recall": "rerank",
+        "audit": "inspect",
+        "improve": "generate",
+        "repair": "local_fix",
+        "typed_graph": "extract",
+    }
+    lanes = [
+        {
+            "key": pipeline,
+            "state": "active",
+            "current_step": current_step,
+            "model": f"{pipeline}:model",
+            "role": f"{pipeline} worker",
+            "started_at": "2026-08-21T23:00:00+09:00",
+            "updated_at": "2026-08-21T23:00:01+09:00",
+            "work_item": f"{pipeline}-work",
+            "recent": False,
+            "steps": [
+                {"key": current_step, "label": current_step.title(), "status": "active"}
+            ],
+        }
+        for pipeline, current_step in steps.items()
+    ]
+    monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", tmp_path)
+    monkeypatch.setattr(dashboard, "_local_consensus_activities", lambda: [])
+    monkeypatch.setattr(dashboard, "_read_json_file", lambda _path: {})
+    old_ingest = {
+        "kind": "session",
+        "timestamp": "2026-08-21T22:00:00+09:00",
+        "request_sha256": "f" * 64,
+        "role": "ingest_review",
+        "model": "old:model",
+        "ok": True,
+    }
+    monkeypatch.setattr(
+        dashboard,
+        "_read_jsonl_file",
+        lambda path, *, limit: [old_ingest] if path.name == "audit.jsonl" else [],
+    )
+    monkeypatch.setattr(
+        dashboard,
+        "_processing_activity_snapshot",
+        lambda: {"generated_at": "2026-08-21T23:00:01+09:00", "lanes": lanes},
+    )
+
+    traces = {
+        pipeline: dashboard._local_consensus_snapshot(preferred_pipeline=pipeline)[
+            "decision_trace"
+        ]
+        for pipeline in steps
+    }
+
+    assert set(traces) == set(steps)
+    assert all(trace["active"] for trace in traces.values())
+    assert all(trace["source"] == "processing_activity" for trace in traces.values())
+    assert all(trace["request_sha256"] for trace in traces.values())
+    assert traces["ingest"]["request_sha256"] != old_ingest["request_sha256"]
+    assert all(trace["event_count"] == 1 for trace in traces.values())
+    assert all(
+        trace["events"][0]["source"] == "processing_activity"
+        for trace in traces.values()
+    )
+
+    failed_lane = next(row for row in lanes if row["key"] == "repair")
+    failed_lane.update(recent=True, status="error")
+    failed = dashboard._local_consensus_snapshot(preferred_pipeline="repair")[
+        "decision_trace"
+    ]
+    assert failed["active"] is False
+    assert failed["state"] == "quarantined"
+    assert failed["events"][-1]["status"] == "error"
+
+
 def test_decision_trace_pin_survives_the_gap_between_lane_markers() -> None:
     pinned_request = "4" * 64
     other_request = "5" * 64

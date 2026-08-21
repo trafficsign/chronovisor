@@ -62,6 +62,7 @@ def model_activity(
     active_dir = root / "runtime" / "model-activity" / "active"
     marker_path = active_dir / f"{activity_id}.json"
     marker_created = False
+    status = "done"
     logger = logging.getLogger(facade_module)
     try:
         active_dir.mkdir(parents=True, exist_ok=True)
@@ -79,6 +80,7 @@ def model_activity(
                 "model": model,
                 "pid": os.getpid(),
                 "thread_id": threading.get_ident(),
+                "status": "active",
                 "started_at": started_at,
                 "updated_at": started_at,
             },
@@ -88,6 +90,9 @@ def model_activity(
         logger.debug("could not publish model activity marker", exc_info=True)
     try:
         yield
+    except BaseException:
+        status = "error"
+        raise
     finally:
         if marker_created:
             with suppress(OSError):
@@ -110,6 +115,7 @@ def model_activity(
                         "model": model,
                         "pid": os.getpid(),
                         "thread_id": threading.get_ident(),
+                        "status": status,
                         "started_at": started_at,
                         "updated_at": finished_at,
                         "finished_at": finished_at,
