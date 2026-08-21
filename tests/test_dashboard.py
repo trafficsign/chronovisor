@@ -5677,6 +5677,20 @@ def test_fast_snapshot_reads_status_without_building_archive_components(
     assert snapshot["_dashboard"] == {"detail_state": "loading"}
 
 
+def test_local_runtime_fields_keep_ollama_alias_provider_specific() -> None:
+    ollama_runtime = {"provider": "ollama", "models": []}
+    omlx_runtime = {"provider": "omlx", "models": []}
+
+    assert dashboard._local_runtime_fields(ollama_runtime) == {
+        "local_runtime": ollama_runtime,
+        "ollama": ollama_runtime,
+    }
+    assert dashboard._local_runtime_fields(omlx_runtime) == {
+        "local_runtime": omlx_runtime,
+        "ollama": {},
+    }
+
+
 def test_materialized_component_survives_process_memory_reset_and_rejects_tamper(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -6617,7 +6631,7 @@ def test_model_fleet_runtime_failure_renderer_uses_text_only() -> None:
     assert "**failures" in route
     assert "local_runtime = _local_model_snapshot()" in route
     assert '"model_status": _model_status_snapshot(local_runtime)' in route
-    assert '"local_runtime": local_runtime' in route
+    assert "**_local_runtime_fields(local_runtime)" in route
     assert "_cached_snapshot" not in route
     assert "W7 CANARY" not in page + app + renderer
 

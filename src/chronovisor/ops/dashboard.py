@@ -488,6 +488,15 @@ def _local_model_snapshot() -> dict[str, Any]:
     return {**_ollama_snapshot(), "provider": "ollama"}
 
 
+def _local_runtime_fields(runtime: dict[str, Any]) -> dict[str, Any]:
+    """Expose the provider-neutral snapshot and its legacy Ollama alias together."""
+
+    return {
+        "local_runtime": runtime,
+        "ollama": runtime if runtime.get("provider") == "ollama" else {},
+    }
+
+
 def _model_name(row: dict[str, Any] | None) -> str:
     if not isinstance(row, dict):
         return ""
@@ -4964,8 +4973,7 @@ def build_fast_snapshot() -> dict[str, Any]:
         **failures,
         "local_consensus": status.get("local_consensus") or {},
         "frontier_repair": status.get("frontier_repair") or {},
-        "local_runtime": local_runtime,
-        "ollama": local_runtime if local_runtime.get("provider") == "ollama" else {},
+        **_local_runtime_fields(local_runtime),
         "model_status": {},
         "self_heal": {},
         "recall": {},
@@ -5229,8 +5237,7 @@ def build_snapshot() -> dict[str, Any]:
             "triage_failure_count": orch_state.get("triage_failure_count", 0),
         },
         "raw_archive": raw_archive,
-        "local_runtime": local_runtime,
-        "ollama": local_runtime if local_runtime.get("provider") == "ollama" else {},
+        **_local_runtime_fields(local_runtime),
         "model_status": model_status,
         **failures,
         "librarian": _safe_snapshot_component(
@@ -6482,12 +6489,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     self,
                     {
                         "model_status": _model_status_snapshot(local_runtime),
-                        "local_runtime": local_runtime,
-                        "ollama": (
-                            local_runtime
-                            if local_runtime.get("provider") == "ollama"
-                            else {}
-                        ),
+                        **_local_runtime_fields(local_runtime),
                         **failures,
                     },
                 )

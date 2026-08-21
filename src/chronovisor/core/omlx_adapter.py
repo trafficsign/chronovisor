@@ -82,22 +82,11 @@ class OMLXAdapter:
                 else nullcontext()
             )
             with lease:
-                with httpx.Client(
-                    base_url=OMLX_BASE_URL, transport=self._transport
-                ) as client:
-                    response = client.post(
-                        "/chat/completions",
-                        json=payload,
-                        headers={
-                            "Content-Type": "application/json",
-                            _OMLX_AUTH_HEADER: OMLX_API_KEY,
-                        },
-                        timeout=(
-                            None
-                            if request.timeout_ms is None
-                            else request.timeout_ms / 1000
-                        ),
-                    )
+                response = self._post(
+                    "/chat/completions",
+                    payload,
+                    timeout_ms=request.timeout_ms,
+                )
         except (TimeoutError, httpx.TimeoutException):
             raise SafeBackendError("timeout", transient=True) from None
         except httpx.TransportError:
@@ -106,19 +95,11 @@ class OMLXAdapter:
 
     def embed(self, request: EmbeddingRequest, *, model: str) -> EmbeddingResult:
         try:
-            with httpx.Client(
-                base_url=OMLX_BASE_URL, transport=self._transport
-            ) as client:
-                response = client.post(
-                    "/embeddings",
-                    json={"model": model, "input": list(request.texts)},
-                    headers={"Content-Type": "application/json", _OMLX_AUTH_HEADER: OMLX_API_KEY},
-                    timeout=(
-                        None
-                        if request.timeout_ms is None
-                        else request.timeout_ms / 1000
-                    ),
-                )
+            response = self._post(
+                "/embeddings",
+                {"model": model, "input": list(request.texts)},
+                timeout_ms=request.timeout_ms,
+            )
         except httpx.TimeoutException:
             raise SafeBackendError("timeout", transient=True) from None
         except httpx.TransportError:
@@ -186,15 +167,28 @@ class OMLXAdapter:
         if format_value is not None:
             payload["response_format"] = self._response_format(format_value)
         if isinstance(think, (bool, str)):
-            kwargs: dict[str, object] = {}
-            existing = payload.get("chat_template_kwargs")
-            if isinstance(existing, dict):
-                kwargs.update(existing)
-            kwargs["enable_thinking"] = think is not False
-            payload["chat_template_kwargs"] = kwargs
+            payload["chat_template_kwargs"] = {"enable_thinking": think is not False}
             if isinstance(think, str):
                 payload["reasoning_effort"] = think
         return payload
+
+    def _post(
+        self,
+        path: str,
+        payload: Mapping[str, object],
+        *,
+        timeout_ms: int | None,
+    ) -> httpx.Response:
+        with httpx.Client(base_url=OMLX_BASE_URL, transport=self._transport) as client:
+            return client.post(
+                path,
+                json=payload,
+                headers={
+                    "Content-Type": "application/json",
+                    _OMLX_AUTH_HEADER: OMLX_API_KEY,
+                },
+                timeout=None if timeout_ms is None else timeout_ms / 1000,
+            )
 
     @staticmethod
     def _uses_dflash(model: str) -> bool:
