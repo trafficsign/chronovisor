@@ -511,7 +511,7 @@ def test_dashboard_reference_keeps_selection_and_bucket_truth() -> None:
         < page.index('data-plan-value="context-selection"')
     )
     assert (
-        '.processing-lane[aria-expanded="false"] .processing-track {\n'
+        '.processing-lane[aria-selected="false"] .processing-track {\n'
         "  visibility: hidden;"
     ) in style
     pending_repair_style = style.split(
@@ -1018,6 +1018,7 @@ def test_six_processing_inputs_keep_real_dashboard_paths_connected(
     harness = """
 const fixtures = __FIXTURES__;
 const workflowKeys = fixtures.map(({ case: fixture }) => fixture.workflow);
+const selectedPipelines = [];
 function browserFailure(detail) {
   fetch("/fixture-error", {
     method: "POST",
@@ -1027,6 +1028,9 @@ function browserFailure(detail) {
 }
 addEventListener("error", (event) => browserFailure(event.error?.stack || event.message));
 addEventListener("unhandledrejection", (event) => browserFailure(event.reason?.stack || event.reason));
+addEventListener("chronovisor:processing-lane-select", (event) => {
+  selectedPipelines.push(event.detail?.pipeline || "");
+});
 addEventListener("DOMContentLoaded", () => {
   const api = window.__chronovisorDashboardTest;
   const renderFixture = (fixture, trace, revision) => {
@@ -1075,7 +1079,7 @@ addEventListener("DOMContentLoaded", () => {
     return {
       id: fixture.id,
       layout,
-      expanded: [...document.querySelectorAll('[data-processing-lane][aria-expanded="true"]')]
+      selected: [...document.querySelectorAll('[data-processing-lane][aria-selected="true"]')]
         .map((node) => node.dataset.processingLane),
       context: document.querySelector("[data-context-option].selected")?.dataset.contextTokens,
       reasoning: document.querySelector("[data-reasoning-key].selected")?.dataset.reasoningKey,
@@ -1087,6 +1091,17 @@ addEventListener("DOMContentLoaded", () => {
     };
   });
   renderFixture(fixtures[0].case, fixtures[0].trace, "59");
+  document.querySelector('[data-processing-lane="recall"]').click();
+  results[0].tabClick = {
+    event: selectedPipelines.at(-1),
+    selected: document.querySelector('[data-processing-lane][aria-selected="true"]')
+      ?.dataset.processingLane,
+    tabCount: document.querySelectorAll('[data-processing-lane][role="tab"]').length,
+    panelRole: document.querySelector("#decision-trace-panel")?.getAttribute("role"),
+  };
+  document.querySelector(
+    `[data-processing-lane="${fixtures[0].case.workflow}"]`
+  ).click();
   fetch("/fixture-result", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -1248,7 +1263,7 @@ addEventListener("DOMContentLoaded", () => {
     by_id = {result["id"]: result for result in browser_results}
     for case in cases:
         result = by_id[case["id"]]
-        assert result["expanded"] == [case["workflow"]]
+        assert result["selected"] == [case["workflow"]]
         assert result["layout"]["scrollWidth"] == result["layout"]["clientWidth"]
         assert result["layout"]["rightReachable"] is True
         assert result["layout"]["fitsWidth"] is True
@@ -1288,3 +1303,10 @@ addEventListener("DOMContentLoaded", () => {
                 assert rail["state"] in {"active", "done", "error"}
                 assert rail["dash"] in {"none", ""}
                 assert rail["length"] > 0
+
+    assert by_id[cases[0]["id"]]["tabClick"] == {
+        "event": "recall",
+        "selected": "recall",
+        "tabCount": 6,
+        "panelRole": "tabpanel",
+    }

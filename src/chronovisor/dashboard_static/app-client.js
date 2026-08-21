@@ -15,6 +15,7 @@ let decisionRefreshInFlight = false;
 let modelStatusRefreshInFlight = false;
 let nextDecisionRefreshDelayMs = IDLE_DECISION_REFRESH_DELAY_MS;
 let decisionTracePinnedRequest = "";
+let decisionTraceSelectedPipeline = "";
 let processingRefreshInFlight = false;
 let processingEventSource = null;
 
@@ -151,7 +152,10 @@ async function refreshDecisionTrace() {
     DECISION_REFRESH_TIMEOUT_MS
   );
   try {
-    const query = decisionTracePinnedRequest
+    const selectedPipeline = decisionTraceSelectedPipeline;
+    const query = selectedPipeline
+      ? `?pipeline=${encodeURIComponent(selectedPipeline)}`
+      : decisionTracePinnedRequest
       ? `?next=active&request_sha256=${encodeURIComponent(decisionTracePinnedRequest)}`
       : "?next=active";
     const response = await fetch("/api/local-consensus" + query, {
@@ -160,8 +164,9 @@ async function refreshDecisionTrace() {
     });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const consensus = (await response.json()).local_consensus || {};
+    if (selectedPipeline !== decisionTraceSelectedPipeline) return;
     const trace = consensus.decision_trace || {};
-    if (trace.request_sha256) {
+    if (!selectedPipeline && trace.request_sha256) {
       decisionTracePinnedRequest = String(trace.request_sha256);
     }
     renderLiveConsensus(consensus);
@@ -176,6 +181,14 @@ async function refreshDecisionTrace() {
     decisionRefreshInFlight = false;
   }
 }
+
+window.addEventListener("chronovisor:processing-lane-select", (event) => {
+  const pipeline = String(event.detail?.pipeline || "");
+  if (!pipeline) return;
+  decisionTraceSelectedPipeline = pipeline;
+  decisionTracePinnedRequest = "";
+  void refreshDecisionTrace();
+});
 
 async function decisionTraceRefreshLoop() {
   try {

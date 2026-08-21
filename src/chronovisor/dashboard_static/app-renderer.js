@@ -151,6 +151,7 @@ function setState(state) {
 const latestProcessingLanes = new Map();
 let latestDecisionTrace = {};
 let selectedProcessingLaneKey = "";
+let pinnedProcessingLaneKey = "";
 let latestProcessingGeneratedAtMs = null;
 let latestProcessingRevision = "";
 
@@ -227,15 +228,31 @@ function processingLaneForTrace(trace) {
 
 function updateProcessingTraceSelection(trace = latestDecisionTrace) {
   latestDecisionTrace = trace || {};
-  selectedProcessingLaneKey = processingLaneForTrace(latestDecisionTrace);
-  els.processingLanes.querySelectorAll(".processing-lane").forEach((row) => {
-    const expanded = Boolean(
-      latestDecisionTrace.request_sha256
-      && row.dataset.processingLane === selectedProcessingLaneKey
-    );
-    row.setAttribute("aria-expanded", String(expanded));
-    row.tabIndex = expanded ? 0 : -1;
+  const rows = [...els.processingLanes.querySelectorAll(".processing-lane")];
+  selectedProcessingLaneKey = (
+    pinnedProcessingLaneKey && latestProcessingLanes.has(pinnedProcessingLaneKey)
+      ? pinnedProcessingLaneKey
+      : processingLaneForTrace(latestDecisionTrace) || rows[0]?.dataset.processingLane || ""
+  );
+  rows.forEach((row) => {
+    const selected = row.dataset.processingLane === selectedProcessingLaneKey;
+    row.setAttribute("aria-selected", String(selected));
+    row.tabIndex = selected ? 0 : -1;
+    if (selected) els.decisionTracePanel?.setAttribute("aria-labelledby", row.id);
   });
+}
+
+function selectProcessingLane(key, focus = false) {
+  if (!latestProcessingLanes.has(key)) return false;
+  pinnedProcessingLaneKey = key;
+  updateProcessingTraceSelection();
+  const row = els.processingLanes.querySelector(`[data-processing-lane="${key}"]`);
+  if (focus) row?.focus();
+  window.dispatchEvent(new window.CustomEvent(
+    "chronovisor:processing-lane-select",
+    { detail: { pipeline: key } },
+  ));
+  return true;
 }
 
 function renderProcessingActivity(activity) {
@@ -262,8 +279,9 @@ function renderProcessingActivity(activity) {
     latestProcessingLanes.set(key, lane);
     const row = existing.get(key) || document.createElement("section");
     row.dataset.processingLane = key;
+    row.id = `processing-lane-tab-${key}`;
     row.className = `processing-lane ${lane.state === "active" ? "active" : "idle"}`;
-    row.setAttribute("role", "button");
+    row.setAttribute("role", "tab");
     row.setAttribute("aria-controls", "decision-trace-panel");
 
     let label = row.querySelector(".processing-lane-label");
@@ -286,15 +304,27 @@ function renderProcessingActivity(activity) {
       row.appendChild(meta);
     }
     if (!row.dataset.traceKeyboardBound) {
-      const expand = () => {
-        if (row.dataset.processingLane !== selectedProcessingLaneKey) return;
-        row.setAttribute("aria-expanded", "true");
-      };
-      row.addEventListener("click", expand);
+      row.addEventListener("click", () => selectProcessingLane(row.dataset.processingLane));
       row.addEventListener("keydown", (event) => {
-        if (event.key !== "Enter" && event.key !== " ") return;
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          selectProcessingLane(row.dataset.processingLane);
+          return;
+        }
+        const tabs = [...els.processingLanes.querySelectorAll('[role="tab"]')];
+        const offset = ["ArrowRight", "ArrowDown"].includes(event.key)
+          ? 1
+          : ["ArrowLeft", "ArrowUp"].includes(event.key) ? -1 : 0;
+        const target = event.key === "Home"
+          ? tabs[0]
+          : event.key === "End"
+            ? tabs.at(-1)
+            : offset
+              ? tabs[(tabs.indexOf(row) + offset + tabs.length) % tabs.length]
+              : null;
+        if (!target) return;
         event.preventDefault();
-        expand();
+        selectProcessingLane(target.dataset.processingLane, true);
       });
       row.dataset.traceKeyboardBound = "true";
     }
@@ -1354,6 +1384,9 @@ function renderDecisionTraceFrame(trace, focusEvent = null) {
       traceState === "agreed" || traceState === "ready" ? "Ready" : traceState === "quarantined" ? "Held" : "Locked";
     setWorkState(stateKind);
   } else {
+    els.workSummary.textContent = "Waiting · 0 / 3";
+    els.workDetail.textContent = fmt(trace.summary, "No local decision yet");
+    els.workUpdated.textContent = `${fmt(trace.task_role, "idle")} · no decision`;
     els.decisionBadge.textContent = "WAITING";
     els.decisionModelCalls.textContent = "0";
     els.decisionQuorum.textContent = "0 / 2";
@@ -1527,6 +1560,7 @@ window.__chronovisorDashboardTest = Object.assign(window.__chronovisorDashboardT
   decisionTraceBlank,
   mergeDecisionTraceSnapshot,
   processingLaneForTrace,
+  selectProcessingLane,
   renderDecisionTraceFrame,
   renderProcessingActivity,
 });

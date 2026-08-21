@@ -2950,6 +2950,7 @@ canvas {
   border-radius: 0;
   background: transparent;
   box-shadow: none;
+  cursor: pointer;
 }
 
 .processing-lane:focus-visible {
@@ -2989,9 +2990,13 @@ canvas {
   color: #a9abff;
 }
 
-.processing-lane[aria-expanded="true"] .processing-lane-label::before {
+.processing-lane[aria-selected="true"] .processing-lane-label::before {
   content: "▼";
   color: #898dff;
+}
+
+.processing-lane[aria-selected="true"] .processing-lane-label {
+  color: #a9abff;
 }
 
 .processing-lane.active .processing-lane-label::after {
@@ -3003,7 +3008,7 @@ canvas {
   align-items: center;
 }
 
-.processing-lane[aria-expanded="false"] .processing-track {
+.processing-lane[aria-selected="false"] .processing-track {
   visibility: hidden;
 }
 

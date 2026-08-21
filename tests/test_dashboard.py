@@ -1693,6 +1693,54 @@ def test_decision_trace_handoff_skips_completed_requests(
     assert handoff["decision_trace"]["active"] is True
 
 
+def test_decision_trace_pipeline_tabs_select_concurrent_workflows(
+    tmp_path: Path, monkeypatch
+) -> None:
+    roles = {
+        "ingest": "ingest_review:primary",
+        "recall": "recall_auto_apply:primary",
+        "audit": "content_correction_classification:primary",
+        "improve": "model_eval:primary",
+        "repair": "local_repair:primary",
+        "typed_graph": "relation_extract:primary",
+    }
+    requests = {
+        pipeline: str(index) * 64
+        for index, pipeline in enumerate(roles, start=1)
+    }
+    activities = [
+        {
+            "request_sha256": requests[pipeline],
+            "role": role,
+            "phase": "generate",
+            "started_at": f"2026-08-12T00:00:0{index}Z",
+            "updated_at": f"2026-08-12T00:00:1{index}Z",
+        }
+        for index, (pipeline, role) in enumerate(roles.items(), start=1)
+    ]
+    monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", tmp_path)
+    monkeypatch.setattr(dashboard, "_local_consensus_activities", lambda: activities)
+    monkeypatch.setattr(dashboard, "_read_json_file", lambda _path: {})
+    monkeypatch.setattr(dashboard, "_read_jsonl_file", lambda _path, *, limit: [])
+
+    selected = {
+        pipeline: dashboard._local_consensus_snapshot(
+            preferred_pipeline=pipeline
+        )["decision_trace"]["request_sha256"]
+        for pipeline in roles
+    }
+
+    assert selected == requests
+
+    activities.clear()
+    empty = dashboard._local_consensus_snapshot(preferred_pipeline="typed_graph")
+
+    assert empty["selected_pipeline"] == "typed_graph"
+    assert empty["decision_trace"]["request_sha256"] is None
+    assert empty["decision_trace"]["task_role"] == "typed_graph"
+    assert empty["decision_trace"]["summary"] == "No Typed Graph decision yet"
+
+
 def test_decision_trace_pin_survives_the_gap_between_lane_markers() -> None:
     pinned_request = "4" * 64
     other_request = "5" * 64
@@ -2682,9 +2730,10 @@ def test_decision_trace_poll_pins_until_terminal_render() -> None:
     client = (dashboard.STATIC_DIR / "app-client.js").read_text(encoding="utf-8")
     refresh = "async function refreshDecisionTrace()" + client.split(
         "async function refreshDecisionTrace()", 1
-    )[1].split("async function decisionTraceRefreshLoop", 1)[0]
+    )[1].split('window.addEventListener("chronovisor:processing-lane-select"', 1)[0]
     pinned_request = "1" * 64
     newer_request = "2" * 64
+    pipeline_request = "3" * 64
     scenario = f"""
 const vm = require("node:vm");
 const urls = [];
@@ -2693,6 +2742,7 @@ const responses = [
   {{ decision_trace: {{ request_sha256: "{pinned_request}", state: "active" }} }},
   {{ decision_trace: {{ request_sha256: "{pinned_request}", state: "agreed" }} }},
   {{ decision_trace: {{ request_sha256: "{newer_request}", state: "active" }} }},
+  {{ decision_trace: {{ request_sha256: "{pipeline_request}", state: "active" }} }},
 ];
 const sandbox = {{
   AbortController,
@@ -2708,6 +2758,7 @@ vm.createContext(sandbox);
 vm.runInContext(
   `let decisionRefreshInFlight = false;
 let decisionTracePinnedRequest = "";
+let decisionTraceSelectedPipeline = "";
 let nextDecisionRefreshDelayMs = 0;
 const DECISION_REFRESH_TIMEOUT_MS = 2500;
 const ACTIVE_DECISION_REFRESH_DELAY_MS = 800;
@@ -2715,7 +2766,14 @@ const IDLE_DECISION_REFRESH_DELAY_MS = 2500;
 const renderLiveConsensus = (consensus) => rendered.push(consensus.decision_trace.state);
 const refreshLiveModelStatus = () => Promise.resolve();\n`
   + {json.dumps(refresh)}
-  + `\nthis.__test = {{ refreshDecisionTrace, pin: () => decisionTracePinnedRequest }};`,
+  + `\nthis.__test = {{
+    refreshDecisionTrace,
+    pin: () => decisionTracePinnedRequest,
+    select: (pipeline) => {{
+      decisionTraceSelectedPipeline = pipeline;
+      decisionTracePinnedRequest = "";
+    }},
+  }};`,
   sandbox,
 );
 (async () => {{
@@ -2724,10 +2782,13 @@ const refreshLiveModelStatus = () => Promise.resolve();\n`
   await sandbox.__test.refreshDecisionTrace();
   const terminalPin = sandbox.__test.pin();
   await sandbox.__test.refreshDecisionTrace();
+  const newerPin = sandbox.__test.pin();
+  sandbox.__test.select("recall");
+  await sandbox.__test.refreshDecisionTrace();
   process.stdout.write(JSON.stringify({{
     urls,
     rendered,
-    pins: [activePin, terminalPin, sandbox.__test.pin()],
+    pins: [activePin, terminalPin, newerPin, sandbox.__test.pin()],
   }}));
 }})();
 """
@@ -2739,9 +2800,10 @@ const refreshLiveModelStatus = () => Promise.resolve();\n`
             "/api/local-consensus?next=active",
             f"/api/local-consensus?next=active&request_sha256={pinned_request}",
             f"/api/local-consensus?next=active&request_sha256={pinned_request}",
+            "/api/local-consensus?pipeline=recall",
         ],
-        "rendered": ["active", "agreed", "active"],
-        "pins": [pinned_request, pinned_request, newer_request],
+        "rendered": ["active", "agreed", "active", "active"],
+        "pins": [pinned_request, pinned_request, newer_request, ""],
     }
 
 
@@ -5543,6 +5605,7 @@ def test_local_consensus_route_stays_on_direct_live_path() -> None:
 
     assert "_local_consensus_snapshot(" in local_consensus_route
     assert "preferred_request_sha256=preferred_request_sha256" in local_consensus_route
+    assert "preferred_pipeline=preferred_pipeline" in local_consensus_route
     assert 'next_active=next_trace == "active"' in local_consensus_route
     assert "_cached_snapshot" not in local_consensus_route
     assert (

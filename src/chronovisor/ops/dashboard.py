@@ -3857,6 +3857,7 @@ def _local_consensus_snapshot(
     limit: int = 40,
     *,
     preferred_request_sha256: str | None = None,
+    preferred_pipeline: str | None = None,
     next_active: bool = False,
 ) -> dict[str, Any]:
     """Return live local review truth plus a redacted bounded audit tail."""
@@ -3961,6 +3962,34 @@ def _local_consensus_snapshot(
         None,
     )
 
+    if preferred_pipeline is not None:
+        pipeline_rows = [
+            row
+            for row in activities
+            if _processing_pipeline_for_role(row.get("role")) == preferred_pipeline
+            and row.get("request_sha256")
+        ]
+        if not pipeline_rows:
+            pipeline_rows = [
+                row
+                for row in [*history, *trace_events]
+                if _processing_pipeline_for_role(row.get("role"))
+                == preferred_pipeline
+                and row.get("request_sha256")
+            ]
+
+        def observed_epoch(row: Mapping[str, Any]) -> float:
+            for key in ("updated_at", "started_at", "timestamp"):
+                epoch, _normalized = _failure_timestamp(row.get(key))
+                if epoch is not None:
+                    return epoch
+            return 0.0
+
+        selected = max(pipeline_rows, key=observed_epoch, default=None)
+        preferred_request_sha256 = (
+            str(selected.get("request_sha256")) if selected is not None else None
+        )
+
     def build_trace(preferred: str | None = None) -> dict[str, Any]:
         return _decision_trace_snapshot(
             activities,
@@ -3978,8 +4007,20 @@ def _local_consensus_snapshot(
             for row in [*activities, *history, *trace_events]
         )
     )
-    decision_trace = build_trace(preferred_request_sha256)
-    if next_active and (
+    if preferred_pipeline is not None and preferred_request_sha256 is None:
+        label = next(
+            label
+            for key, label, _steps in _PROCESSING_LANES
+            if key == preferred_pipeline
+        )
+        decision_trace = {
+            **_decision_trace_snapshot([], [], None),
+            "task_role": preferred_pipeline,
+            "summary": f"No {label} decision yet",
+        }
+    else:
+        decision_trace = build_trace(preferred_request_sha256)
+    if next_active and preferred_pipeline is None and (
         preferred_request_sha256 is None
         or not preferred_present
         or decision_trace["state"] in {"agreed", "quarantined", "ready"}
@@ -4013,6 +4054,8 @@ def _local_consensus_snapshot(
     }
     if decision_trace is not None:
         snapshot["decision_trace"] = decision_trace
+    if preferred_pipeline is not None:
+        snapshot["selected_pipeline"] = preferred_pipeline
     return snapshot
 
 
@@ -6380,12 +6423,23 @@ class DashboardHandler(BaseHTTPRequestHandler):
             elif path == "/api/local-consensus":
                 params = dict(parse_qsl(parsed.query, keep_blank_values=False))
                 preferred_request_sha256 = params.get("request_sha256")
+                preferred_pipeline = params.get("pipeline")
                 next_trace = params.get("next")
                 if (
                     preferred_request_sha256 is not None
                     and re.fullmatch(r"[0-9a-f]{64}", preferred_request_sha256) is None
                 ):
                     self.send_error(HTTPStatus.BAD_REQUEST, "Invalid request_sha256")
+                    return
+                if preferred_pipeline is not None and preferred_pipeline not in {
+                    key for key, _label, _steps in _PROCESSING_LANES
+                }:
+                    self.send_error(HTTPStatus.BAD_REQUEST, "Invalid pipeline")
+                    return
+                if preferred_pipeline is not None and (
+                    preferred_request_sha256 is not None or next_trace is not None
+                ):
+                    self.send_error(HTTPStatus.BAD_REQUEST, "Conflicting trace selection")
                     return
                 if next_trace not in {None, "active"}:
                     self.send_error(HTTPStatus.BAD_REQUEST, "Invalid next")
@@ -6397,6 +6451,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                         # Never make it wait for the full dashboard materialization.
                         "local_consensus": _local_consensus_snapshot(
                             preferred_request_sha256=preferred_request_sha256,
+                            preferred_pipeline=preferred_pipeline,
                             next_active=next_trace == "active",
                         )
                     },
