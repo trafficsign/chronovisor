@@ -1070,6 +1070,7 @@ addEventListener("DOMContentLoaded", () => {
     return {
       id: fixture.id,
       layout,
+      selectionEvent: selectedPipelines.at(-1),
       selected: [...document.querySelectorAll('[data-processing-lane][aria-selected="true"]')]
         .map((node) => node.dataset.processingLane),
       context: document.querySelector("[data-context-option].selected")?.dataset.contextTokens,
@@ -1255,6 +1256,7 @@ addEventListener("DOMContentLoaded", () => {
     for case in cases:
         result = by_id[case["id"]]
         assert result["selected"] == [case["workflow"]]
+        assert result["selectionEvent"] == case["workflow"]
         assert result["layout"]["scrollWidth"] == result["layout"]["clientWidth"]
         assert result["layout"]["rightReachable"] is True
         assert result["layout"]["fitsWidth"] is True

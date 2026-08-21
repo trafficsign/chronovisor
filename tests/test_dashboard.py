@@ -2700,7 +2700,14 @@ const document = {{
   visibilityState: "visible",
 }};
 const els = {{ processingLanes, processingPanel: {{ dataset: {{}} }} }};
-const window = {{ matchMedia: () => ({{ matches: false }}) }};
+const selectionEvents = [];
+const window = {{
+  matchMedia: () => ({{ matches: false }}),
+  CustomEvent: class {{
+    constructor(type, init = {{}}) {{ this.type = type; this.detail = init.detail; }}
+  }},
+  dispatchEvent: (event) => selectionEvents.push(event.detail?.pipeline || ""),
+}};
 const sandbox = {{ window, document, els, STAGE_METRIC_LABELS: {{}} }};
 vm.createContext(sandbox);
 vm.runInContext({json.dumps(renderer)}, sandbox);
@@ -2735,6 +2742,7 @@ process.stdout.write(JSON.stringify({{
   acceptedOldPoll,
   acceptedDuplicate,
   acceptedBetween,
+  selectionEvents,
   revision: document.body.dataset.processingRevision,
   lanes: processingLanes.querySelectorAll(".processing-lane").map((row) => ({{
     key: row.dataset.processingLane,
@@ -2751,6 +2759,7 @@ process.stdout.write(JSON.stringify({{
         "acceptedOldPoll": False,
         "acceptedDuplicate": False,
         "acceptedBetween": False,
+        "selectionEvents": ["ingest"],
         "revision": "stream-new",
         "lanes": [
             {"key": key, "state": "processing-lane active"}
