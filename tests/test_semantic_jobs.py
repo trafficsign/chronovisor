@@ -79,6 +79,18 @@ def test_rebuild_request_coalesces_with_running_rebuild(tmp_path: Path) -> None:
     assert job_status(path=path)["counts"] == {"leased": 1}
 
 
+def test_claim_next_can_prefer_current_drift(tmp_path: Path) -> None:
+    path = tmp_path / "jobs.sqlite"
+    older = enqueue_page("already-current", path=path)
+    drifted = enqueue_page("currently-drifted", path=path)
+
+    assert claim_next(page_ids=("missing",), path=path) is None
+    leased = claim_next(page_ids=("currently-drifted",), path=path)
+    assert leased is not None and leased.job_id == drifted
+    next_job = claim_next(path=path)
+    assert next_job is not None and next_job.job_id == older
+
+
 def test_old_completed_jobs_are_pruned(tmp_path: Path) -> None:
     path = tmp_path / "jobs.sqlite"
     job_id = enqueue_page("page", path=path)

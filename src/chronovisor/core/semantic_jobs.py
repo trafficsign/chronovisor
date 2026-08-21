@@ -179,6 +179,7 @@ def enqueue_rebuild(*, path: Path = SEMANTIC_JOBS_DB) -> str:
 def claim_next(
     *,
     kinds: tuple[str, ...] = ("page",),
+    page_ids: tuple[str, ...] = (),
     lease_seconds: int = 900,
     path: Path = SEMANTIC_JOBS_DB,
 ) -> SemanticJob | None:
@@ -198,16 +199,20 @@ def claim_next(
             (now, now),
         )
         placeholders = ",".join("?" for _ in kinds)
+        page_filter = ""
+        if page_ids:
+            page_filter = f" AND page_id IN ({','.join('?' for _ in page_ids)})"
         row = connection.execute(
             f"""
             SELECT * FROM jobs
             WHERE status = 'pending' AND next_attempt_at <= ?
               AND kind IN ({placeholders})
+              {page_filter}
             ORDER BY CASE kind WHEN 'rebuild' THEN 1 ELSE 0 END,
                      created_at, job_id
             LIMIT 1
             """,
-            (now, *kinds),
+            (now, *kinds, *page_ids),
         ).fetchone()
         if row is None:
             connection.commit()

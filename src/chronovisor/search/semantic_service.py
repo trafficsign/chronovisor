@@ -26,6 +26,7 @@ from typing import Any, cast
 
 import numpy as np
 
+from chronovisor.core import runtime_status
 from chronovisor.core.link_fix import atomic_write
 from chronovisor.core.llm_config import load_default_llm_runtime
 from chronovisor.core.llm_runtime import (
@@ -191,6 +192,9 @@ class QueryBatcher:
 
 
 def _ingest_is_active() -> bool:
+    llm = runtime_status.read_status().get("llm")
+    if not isinstance(llm, dict) or llm.get("active") is not True:
+        return False
     lock_path = CHRONOVISOR_ROOT / "runtime" / "ingest-orchestrator.lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -843,6 +847,7 @@ class SemanticServiceState:
 
     def _worker_loop(self) -> None:
         _set_background_qos()
+        priority_page_ids: tuple[str, ...] = ()
         while not self._stopped.wait(1.0):
             self._unload_idle_cpu()
             self._reload_if_pointer_changed()
@@ -858,6 +863,7 @@ class SemanticServiceState:
                 drifted = _drifted_page_ids(status)
                 if drifted:
                     enqueue_pages(drifted)
+                priority_page_ids = tuple(drifted)
                 self._last_drift_scan = time.monotonic()
             if time.monotonic() - self._last_job_prune >= 3_600:
                 prune_completed_jobs()
@@ -868,7 +874,13 @@ class SemanticServiceState:
             kinds = (
                 ("page", "rebuild") if self.config.incremental_enabled else ("rebuild",)
             )
-            job = claim_next(kinds=kinds)
+            job = None
+            if priority_page_ids:
+                job = claim_next(kinds=kinds, page_ids=priority_page_ids)
+                if job is None:
+                    priority_page_ids = ()
+            if job is None:
+                job = claim_next(kinds=kinds)
             if job is None:
                 continue
             try:

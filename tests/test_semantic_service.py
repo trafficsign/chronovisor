@@ -33,6 +33,7 @@ from chronovisor.search.semantic_service import (
     ServiceBusy,
     _drifted_page_ids,
     _Handler,
+    _ingest_is_active,
     _safe_service_error,
 )
 
@@ -63,6 +64,34 @@ def test_drifted_page_ids_are_deduplicated_across_states() -> None:
             "deleted_page_ids": ["gone"],
         }
     ) == ["changed", "gone", "new", "shared"]
+
+
+def test_ingest_only_pauses_semantic_work_during_generation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    monkeypatch.setattr(semantic_service, "CHRONOVISOR_ROOT", tmp_path)
+    monkeypatch.setattr(
+        semantic_service.runtime_status,
+        "read_status",
+        lambda: {"llm": {"active": False}},
+    )
+    assert _ingest_is_active() is False
+
+    monkeypatch.setattr(
+        semantic_service.runtime_status,
+        "read_status",
+        lambda: {"llm": {"active": True}},
+    )
+    monkeypatch.setattr(
+        semantic_service.fcntl,
+        "flock",
+        lambda _fd, flags: (
+            (_ for _ in ()).throw(BlockingIOError())
+            if flags & semantic_service.fcntl.LOCK_NB
+            else None
+        ),
+    )
+    assert _ingest_is_active() is True
 
 
 def test_service_errors_expose_only_safe_categories() -> None:
