@@ -4554,8 +4554,9 @@ def test_dashboard_lan_requires_basic_then_uses_secure_bounded_session(
     assert challenge.status_code == 401
     assert rejected.status_code == 401
     assert saturated.status_code == 429
-    assert accepted.status_code == 303
-    assert accepted.headers["location"] == "/"
+    assert accepted.status_code == 200
+    assert "Chronovisor Observatory" in accepted.text
+    assert "location" not in accepted.headers
     assert "Secure" in accepted.headers["set-cookie"]
     assert "HttpOnly" in accepted.headers["set-cookie"]
     assert "SameSite=Strict" in accepted.headers["set-cookie"]
@@ -4635,7 +4636,8 @@ def test_dashboard_lan_tls_server_and_private_key_permissions(
         server.server_close()
         thread.join(timeout=2)
 
-    assert response.status_code == 303
+    assert response.status_code == 200
+    assert "set-cookie" in response.headers
 
     key.chmod(0o644)
     with pytest.raises(RuntimeError, match="0600"):
@@ -4712,7 +4714,7 @@ def test_dashboard_tls_slow_handshake_does_not_block_and_handler_slots_recover(
             follow_redirects=False,
             timeout=1,
         )
-        assert response.status_code == 303
+        assert response.status_code == 200
         assert server.dashboard_handler_slots.acquire(blocking=False)
         assert not server.dashboard_handler_slots.acquire(blocking=False)
         rejected = socket.create_connection((host, port), timeout=2)

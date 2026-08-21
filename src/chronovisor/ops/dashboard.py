@@ -5965,6 +5965,13 @@ def _dashboard_bind_host_is_private(host: str) -> bool:
 class DashboardHandler(BaseHTTPRequestHandler):
     server_version = "LLMWikiDashboard/0.1"
 
+    def end_headers(self) -> None:
+        session_cookie = getattr(self, "_dashboard_session_cookie", None)
+        if session_cookie:
+            self.send_header("Set-Cookie", session_cookie)
+            self._dashboard_session_cookie = None
+        super().end_headers()
+
     def _is_loopback(self) -> bool:
         return _private_client_scope(self.client_address[0]) == "loopback"
 
@@ -6082,16 +6089,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if len(sessions) >= DASHBOARD_SESSION_LIMIT:
                 sessions.pop(min(sessions, key=lambda token: sessions[token]))
             sessions[token] = now + DASHBOARD_SESSION_MAX_AGE_SECONDS
-        self.send_response(HTTPStatus.SEE_OTHER)
-        self.send_header("Location", "/")
-        self.send_header(
-            "Set-Cookie",
+        self._dashboard_session_cookie = (
             f"{DASHBOARD_SESSION_COOKIE}={token}; Path=/; "
-            f"Max-Age={DASHBOARD_SESSION_MAX_AGE_SECONDS}; Secure; HttpOnly; SameSite=Strict",
+            f"Max-Age={DASHBOARD_SESSION_MAX_AGE_SECONDS}; Secure; HttpOnly; SameSite=Strict"
         )
-        self.send_header("Cache-Control", "no-store")
-        _send_security_headers(self)
-        self.end_headers()
 
     def _lan_authorized(self) -> bool:
         if self._session_authorized():
@@ -6115,7 +6116,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if self.headers.get("Upgrade", "").casefold() == "websocket":
             return True
         self._establish_session()
-        return False
+        return True
 
     def _acquire_stream_slot(self) -> bool:
         if not self._lan_enabled():
