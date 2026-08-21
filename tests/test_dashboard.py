@@ -1145,6 +1145,58 @@ def test_decision_trace_active_validation_marks_generation_done(monkeypatch) -> 
     assert trace["overall"][3]["status"] == "active"
 
 
+def test_decision_trace_projects_only_bounded_generation_counters(monkeypatch) -> None:
+    monkeypatch.setattr(
+        dashboard,
+        "_decision_trace_models",
+        lambda: {
+            "primary": "primary:model",
+            "challenger": "challenger:model",
+            "tie_break": "tie:model",
+        },
+    )
+    request = "a" * 64
+    generation = {
+        "output_tokens": 64,
+        "max_output_tokens": 512,
+        "generation_seconds": 1.25,
+        "tokens_per_second": 51.2,
+        "token_count_exact": False,
+        "content": "never expose me",
+    }
+    trace = dashboard._decision_trace_snapshot(
+        [
+            {
+                "request_sha256": request,
+                "role": "ingest_review:primary",
+                "model": "primary:model",
+                "phase": "generate",
+                "generation": generation,
+            }
+        ],
+        [],
+        None,
+        [
+            {
+                "event_id": "generate",
+                "kind": "phase",
+                "timestamp": "2026-07-15T12:00:00Z",
+                "request_sha256": request,
+                "role": "ingest_review:primary",
+                "model": "primary:model",
+                "phase": "generate",
+                "status": "active",
+                "generation": generation,
+            }
+        ],
+    )
+
+    expected = {key: value for key, value in generation.items() if key != "content"}
+    assert trace["lanes"][0]["generation"] == expected
+    assert trace["events"][0]["generation"] == expected
+    assert "content" not in json.dumps(trace)
+
+
 def test_decision_trace_exposes_only_ordered_events_for_current_request(
     monkeypatch,
 ) -> None:
@@ -2454,6 +2506,9 @@ def test_dashboard_static_labels_routine_review_as_local_consensus() -> None:
     assert 'id="decision-outcome-next"' in page
     assert 'id="decision-transition-state"' in page
     assert 'id="decision-transition-feed"' in page
+    assert 'id="decision-generation-meter"' in page
+    assert 'id="decision-generation-track"' in page
+    assert 'id="decision-generation-speed"' in page
     assert 'id="lan-share-button"' in page
     assert "Runnable Work" in page
     assert 'id="held-value"' in page
@@ -3734,6 +3789,50 @@ process.stdout.write(JSON.stringify({{
     }
     assert result["observed"]["generate"] == result["observed"]["context"]
     assert result["laneModes"] == ["medium", "low", "off"]
+
+
+def test_decision_console_formats_observed_runtime_facts() -> None:
+    renderer_path = dashboard.STATIC_DIR / "app-renderer.js"
+    scenario = f"""
+const fs = require("node:fs");
+const vm = require("node:vm");
+const sandbox = {{ window: {{ matchMedia: () => ({{ matches: false }}) }} }};
+vm.createContext(sandbox);
+vm.runInContext(
+  fs.readFileSync({json.dumps(str(renderer_path))}, "utf8")
+    + "\\nthis.__test = {{ decisionConsoleText }};",
+  sandbox,
+);
+const trace = {{
+  quorum_flow: true,
+  tie_break_used: false,
+  valid_votes: 2,
+  summary: "2/2 pair agreement",
+  outcome: {{ reason: "Safe output" }},
+}};
+const events = [
+  {{ phase: "trigger", lane: "primary", model: "Qwen", label: "Triggered" }},
+  {{ phase: "context", lane: "primary", required_context_tokens: 32352, context_tokens: 65536 }},
+  {{ phase: "generate", lane: "primary", think: "off" }},
+  {{ kind: "session", phase: "vote", lane: "primary", status: "done", generation: {{ output_tokens: 384, tokens_per_second: 42.5, token_count_exact: true }} }},
+  {{ kind: "session", phase: "generate", lane: "challenger", status: "error" }},
+  {{ kind: "decision", phase: "decision", status: "done", label: "Decision approved" }},
+];
+process.stdout.write(JSON.stringify(events.map(
+  (event) => sandbox.__test.decisionConsoleText(event, trace),
+)));
+"""
+
+    result = json.loads(_run_node_scenario(scenario).stdout)
+
+    assert result == [
+        "dispatch primary → Qwen",
+        "context required 32K → selected 64K",
+        "direct generation · reasoning bypassed",
+        "primary · 384 tok · 42.5 tok/s · vote accepted",
+        "challenger · session failed at generate",
+        "Decision approved · quorum 2/2 · Safe output",
+    ]
 
 
 def test_decision_trace_timeline_is_granular_forward_only_and_bounded() -> None:

@@ -142,9 +142,36 @@ _VALIDATION_KEYWORDS = {
     "uniqueItems",
 }
 _KNOWN_SCHEMA_KEYWORDS = _ANNOTATION_KEYWORDS | _VALIDATION_KEYWORDS
-_ActivityUpdate = Callable[
-    [str, int | None, bool | str | None, str | None, int | None, int | None], None
-]
+_ActivityUpdate = Callable[..., None]
+_GenerationProgress = Callable[[Mapping[str, Any], str, int], None]
+
+
+def _bounded_generation_progress(value: object) -> dict[str, Any]:
+    """Keep only bounded counters; never persist streamed model text."""
+
+    if not isinstance(value, Mapping):
+        return {}
+    progress: dict[str, Any] = {}
+    for key in ("output_tokens", "max_output_tokens"):
+        item = value.get(key)
+        if (
+            isinstance(item, int)
+            and not isinstance(item, bool)
+            and 0 <= item <= MAX_OUTPUT_TOKENS
+        ):
+            progress[key] = item
+    for key in ("generation_seconds", "tokens_per_second"):
+        item = value.get(key)
+        if (
+            isinstance(item, (int, float))
+            and not isinstance(item, bool)
+            and math.isfinite(float(item))
+            and 0 <= float(item) <= 1_000_000
+        ):
+            progress[key] = round(float(item), 3)
+    if isinstance(value.get("token_count_exact"), bool):
+        progress["token_count_exact"] = value["token_count_exact"]
+    return progress
 
 
 def structured_generation_policy() -> dict[str, Any]:
@@ -471,6 +498,7 @@ class ChatRequest:
     think_selection_reason: str | None = None
     required_num_ctx: int | None = None
     requested_num_ctx: int | None = None
+    progress_callback: Callable[[dict[str, Any]], None] | None = None
 
 
 @dataclass(frozen=True)
@@ -1245,6 +1273,9 @@ class LocalConsensusAuditStore:
         ):
             if row.get(key) is not None:
                 event[key] = row[key]
+        generation = _bounded_generation_progress(row.get("generation"))
+        if generation:
+            event["generation"] = generation
         return event
 
     def append(self, record: Mapping[str, Any]) -> None:
@@ -1417,6 +1448,7 @@ class LocalConsensusAuditStore:
             think_selection_reason: str | None = None,
             effective_num_ctx: int | None = None,
             selected_num_ctx: int | None = None,
+            generation: Mapping[str, Any] | None = None,
         ) -> None:
             nonlocal last_transition
             if path is None or phase not in LOCAL_ACTIVITY_PHASES:
@@ -1432,7 +1464,9 @@ class LocalConsensusAuditStore:
                     else int(record.get("attempt") or 0)
                 )
                 current = (phase, normalized_attempt)
-                if last_transition == current:
+                generation_progress = _bounded_generation_progress(generation)
+                is_transition = last_transition != current
+                if not is_transition and not generation_progress:
                     return
                 record["phase"] = phase
                 record["updated_at"] = _utc_timestamp()
@@ -1445,6 +1479,10 @@ class LocalConsensusAuditStore:
                     record["context_tokens"] = effective_num_ctx
                 if selected_num_ctx is not None:
                     record["requested_num_ctx"] = selected_num_ctx
+                if generation_progress:
+                    record["generation"] = generation_progress
+                elif is_transition and phase in {"generate", "repair"}:
+                    record.pop("generation", None)
                 self._atomic_write(
                     path,
                     json.dumps(
@@ -1455,18 +1493,19 @@ class LocalConsensusAuditStore:
                     )
                     + "\n",
                 )
-                self.record_transition(
-                    request_sha256=request_sha256,
-                    role=role,
-                    model=model,
-                    phase=phase,
-                    attempt=normalized_attempt,
-                    think=record.get("think"),
-                    think_selection_reason=record.get("think_selection_reason"),
-                    required_num_ctx=record.get("required_num_ctx"),
-                    requested_num_ctx=record.get("requested_num_ctx"),
-                    effective_num_ctx=record.get("context_tokens"),
-                )
+                if is_transition:
+                    self.record_transition(
+                        request_sha256=request_sha256,
+                        role=role,
+                        model=model,
+                        phase=phase,
+                        attempt=normalized_attempt,
+                        think=record.get("think"),
+                        think_selection_reason=record.get("think_selection_reason"),
+                        required_num_ctx=record.get("required_num_ctx"),
+                        requested_num_ctx=record.get("requested_num_ctx"),
+                        effective_num_ctx=record.get("context_tokens"),
+                    )
                 last_transition = current
             except Exception:
                 # Progress telemetry must never affect the local decision.
@@ -1524,6 +1563,7 @@ class LocalConsensusAuditStore:
         required_num_ctx: int | None = None,
         requested_num_ctx: int | None = None,
         effective_num_ctx: int | None = None,
+        generation_progress: Mapping[str, Any] | None = None,
     ) -> None:
         record = {
             "kind": "session",
@@ -1553,6 +1593,9 @@ class LocalConsensusAuditStore:
             record["ollama_think"] = result.ollama_think
         if result.num_predict is not None:
             record["num_predict"] = result.num_predict
+        generation = _bounded_generation_progress(generation_progress)
+        if generation:
+            record["generation"] = generation
         self.append(record)
 
 
@@ -2162,6 +2205,7 @@ def _default_transport(
         temperature=request.temperature,
         seed=request.seed,
         think=request.think if request.ollama_think is None else request.ollama_think,
+        progress_callback=request.progress_callback,
     )
 
 
@@ -2649,6 +2693,7 @@ class LocalStructuredSession:
         required_num_ctx: int | None = None,
         activity_update: _ActivityUpdate | None = None,
         request_observer: Callable[[ChatRequest, str, int], None] | None = None,
+        generation_progress: _GenerationProgress | None = None,
     ) -> LocalStructuredResult:
         effective_num_ctx = self.num_ctx if num_ctx is None else num_ctx
         preflight_failure, schema_copy, messages = self._prepare_initial_request(
@@ -2701,11 +2746,19 @@ class LocalStructuredSession:
             request = _structured_repair_request(
                 request, attempt=index, schema=transport_schema
             )
+            call_phase = "generate" if index == 0 else "repair"
+            if generation_progress is not None:
+                request = replace(
+                    request,
+                    progress_callback=lambda event, phase=call_phase, attempt=index: (
+                        generation_progress(event, phase, attempt)
+                    ),
+                )
             transport_output, transport_failure = self._call_transport(
                 request,
                 attempts,
                 request_observer,
-                phase="generate" if index == 0 else "repair",
+                phase=call_phase,
                 attempt=index,
             )
             if transport_failure is not None:
@@ -3059,12 +3112,15 @@ class LocalStructuredSession:
             effective_num_ctx=planned_num_ctx,
         ) as activity_update:
             observed_request: dict[str, Any] = {}
+            observed_generation: dict[str, Any] = {}
 
             def _observe_request(
                 request: ChatRequest,
                 phase: str,
                 attempt: int,
             ) -> None:
+                if phase in {"generate", "repair"}:
+                    observed_generation.clear()
                 observed_request["think"] = request.think
                 observed_request["ollama_think"] = (
                     request.think
@@ -3087,6 +3143,16 @@ class LocalStructuredSession:
                     request.requested_num_ctx,
                 )
 
+            def _observe_generation(
+                event: Mapping[str, Any], phase: str, attempt: int
+            ) -> None:
+                progress = _bounded_generation_progress(event)
+                if not progress:
+                    return
+                observed_generation.clear()
+                observed_generation.update(progress)
+                activity_update(phase, attempt, generation=progress)
+
             run_kwargs = {
                 "system": system,
                 "format_schema": format_schema_copy,
@@ -3094,6 +3160,7 @@ class LocalStructuredSession:
                 "required_num_ctx": required_num_ctx,
                 "activity_update": activity_update,
                 "request_observer": _observe_request,
+                "generation_progress": _observe_generation,
             }
             if format_schema_error:
                 result = self._failure("schema_invalid", format_schema_error)
@@ -3163,6 +3230,7 @@ class LocalStructuredSession:
                     required_num_ctx=required_num_ctx,
                     requested_num_ctx=observed_request.get("requested_num_ctx"),
                     effective_num_ctx=observed_request.get("effective_num_ctx"),
+                    generation_progress=observed_generation,
                 )
             except Exception:
                 # Observability must never turn a valid local decision into a failure.

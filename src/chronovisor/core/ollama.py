@@ -233,6 +233,7 @@ def runtime_structured_chat(
     temperature: int | float,
     seed: int,
     think: bool | str,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> ChatResponse:
     """Run one structured turn through the cached provider-neutral runtime."""
 
@@ -277,6 +278,7 @@ def runtime_structured_chat(
                 temperature=temperature,
                 seed=seed,
                 think=think,
+                progress_callback=progress_callback,
             ),
         )
     except RuntimeBridgeError:

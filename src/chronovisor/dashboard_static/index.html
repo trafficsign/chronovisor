@@ -276,13 +276,32 @@
           </svg>
         </div>
 
-        <div class="decision-transition-bar" aria-label="Observed decision transitions">
-          <span class="decision-transition-state" id="decision-transition-state">LIVE · waiting</span>
-          <strong class="decision-transition-detail" id="decision-transition-detail">Waiting for observed work</strong>
-          <details class="decision-events">
-            <summary>Events <span id="decision-event-count">0</span><span aria-hidden="true">⌄</span></summary>
-            <ol class="decision-transition-feed" id="decision-transition-feed"></ol>
-          </details>
+        <div class="decision-transition-bar" aria-label="Local decision console">
+          <div class="decision-console-chrome">
+            <span class="decision-console-lights" aria-hidden="true"><i></i><i></i><i></i></span>
+            <span class="decision-console-title">LOCAL DECISION CONSOLE</span>
+            <span class="decision-transition-state" id="decision-transition-state" aria-live="polite">LIVE · waiting</span>
+            <span class="decision-console-count">EVENTS <b id="decision-event-count">0</b></span>
+          </div>
+          <div class="decision-console-command">
+            <span aria-hidden="true">chronovisor<span class="decision-console-prompt">$</span></span>
+            <strong class="decision-transition-detail" id="decision-transition-detail">Waiting for observed work</strong>
+          </div>
+          <ol class="decision-transition-feed" id="decision-transition-feed" aria-label="Observed decision transitions"></ol>
+          <div class="decision-generation-meter" id="decision-generation-meter" hidden>
+            <div class="decision-generation-head">
+              <span id="decision-generation-model">LOCAL MODEL</span>
+              <span id="decision-generation-reasoning">DIRECT</span>
+            </div>
+            <div class="decision-generation-track" role="progressbar" id="decision-generation-track" aria-label="Generation token budget">
+              <i id="decision-generation-fill"></i>
+            </div>
+            <div class="decision-generation-stats">
+              <span id="decision-generation-tokens">-- tok</span>
+              <span id="decision-generation-speed">-- tok/s</span>
+              <span id="decision-generation-time">--</span>
+            </div>
+          </div>
         </div>
 
         <div class="decision-summary work-overview" id="work-overview" aria-live="polite">

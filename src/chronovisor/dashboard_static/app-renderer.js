@@ -984,6 +984,97 @@ function decisionEventText(event) {
   return `${lane} · ${fmt(event?.label, event?.phase || "transition")}${suffix}`;
 }
 
+function decisionConsoleText(event, trace) {
+  const lane = event?.lane
+    ? event.lane === "tie_break"
+      ? "tie-break"
+      : event.lane
+    : "system";
+  const model = shortName(event?.model || "local model");
+  const generation = event?.generation || {};
+  const tokens = numeric(generation.output_tokens)
+    ? `${generation.token_count_exact ? "" : "~"}${generation.output_tokens} tok`
+    : "";
+  const speed = numeric(generation.tokens_per_second)
+    ? `${generation.tokens_per_second.toFixed(1)} tok/s`
+    : "";
+  if (event?.kind === "session") {
+    const result = event.status === "error"
+      ? `session failed at ${fmt(event.phase, "runtime")}`
+      : "vote accepted";
+    return [lane, tokens, speed, result].filter(Boolean).join(" · ");
+  }
+  if (event?.phase === "trigger") return `dispatch ${lane} → ${model}`;
+  if (event?.phase === "load") return `load ${model}`;
+  if (event?.phase === "context") {
+    const required = Number(event.required_context_tokens || 0);
+    const selected = Number(event.context_tokens || event.requested_context_tokens || 0);
+    const requiredLabel = required ? `${Math.ceil(required / 1024)}K` : "auto";
+    const selectedLabel = selected ? `${Math.round(selected / 1024)}K` : "auto";
+    return `context required ${requiredLabel} → selected ${selectedLabel}`;
+  }
+  if (event?.phase === "generate") {
+    const think = fmt(event.think, "—").toLowerCase();
+    return think === "off"
+      ? "direct generation · reasoning bypassed"
+      : `reasoning ${think} · generation started`;
+  }
+  if (event?.phase === "repair") {
+    return `repair JSON · retry ${Number(event.attempt || 0)}`;
+  }
+  if (event?.phase === "validate") return "validate structured output";
+  if (event?.phase === "vote") return `${lane} · vote ready`;
+  if (event?.phase === "decision") {
+    const target = trace?.quorum_flow === false ? 1 : trace?.tie_break_used ? 3 : 2;
+    const votes = Number.isInteger(trace?.valid_votes)
+      ? `${Math.min(trace.valid_votes, target)}/${target}`
+      : "sealed";
+    return `${fmt(event.label, "decision sealed")} · quorum ${votes} · ${fmt(trace?.outcome?.reason, trace?.summary)}`;
+  }
+  return decisionEventText(event);
+}
+
+function renderDecisionGeneration(trace) {
+  const lane = (trace?.lanes || []).find(
+    (item) => item.state === "active" && ["generate", "repair"].includes(item.phase)
+  );
+  els.decisionGenerationMeter.hidden = !lane;
+  if (!lane) return;
+  const liveEvent = [...(trace?.events || [])].reverse().find(
+    (event) => event.lane === lane.key && ["generate", "repair"].includes(event.phase)
+  );
+  const generation = {
+    ...(liveEvent?.generation || {}),
+    ...(lane.generation || {}),
+  };
+  const output = numeric(generation.output_tokens) ? generation.output_tokens : 0;
+  const maximum = numeric(generation.max_output_tokens)
+    ? generation.max_output_tokens
+    : 0;
+  const speed = numeric(generation.tokens_per_second)
+    ? generation.tokens_per_second
+    : 0;
+  const seconds = numeric(generation.generation_seconds)
+    ? generation.generation_seconds
+    : 0;
+  const think = fmt(liveEvent?.think ?? lane.think, "—").toUpperCase();
+  const percent = maximum ? Math.min(100, (output / maximum) * 100) : 0;
+  els.decisionGenerationModel.textContent = shortName(liveEvent?.model || lane.model);
+  els.decisionGenerationReasoning.textContent = think === "OFF"
+    ? "DIRECT · NO REASONING"
+    : `REASONING · ${think}`;
+  els.decisionGenerationTokens.textContent = output
+    ? `${generation.token_count_exact ? "" : "~"}${output.toLocaleString()} tok${maximum ? ` / ${maximum.toLocaleString()}` : ""}`
+    : "warming up";
+  els.decisionGenerationSpeed.textContent = speed ? `${speed.toFixed(1)} tok/s` : "-- tok/s";
+  els.decisionGenerationTime.textContent = seconds ? `${seconds.toFixed(1)}s` : "awaiting first token";
+  els.decisionGenerationFill.style.width = maximum ? `${Math.max(2, percent)}%` : "24%";
+  els.decisionGenerationTrack.classList.toggle("indeterminate", !maximum || !output);
+  els.decisionGenerationTrack.setAttribute("aria-valuemin", "0");
+  els.decisionGenerationTrack.setAttribute("aria-valuemax", String(maximum || 1));
+  els.decisionGenerationTrack.setAttribute("aria-valuenow", String(output));
+}
+
 function decisionTimelineSteps(trace) {
   const events = Array.isArray(trace?.events) ? trace.events : [];
   if (!events.length && Array.isArray(trace?.overall) && trace.overall.length) {
@@ -1048,32 +1139,60 @@ function decisionTimelineCurrent(steps) {
   return { position: index + 1, label: steps[index]?.label || "Waiting" };
 }
 
-function renderDecisionTransitionFeed(events, focusEvent = null) {
-  const rows = Array.isArray(events) ? events : [];
-  const visible = rows.slice(-5);
+function renderDecisionTransitionFeed(trace, focusEvent = null) {
+  const rows = Array.isArray(trace?.events) ? trace.events : [];
+  const visible = [...rows];
   if (
     focusEvent
     && !visible.some((event) => event.event_id === focusEvent.event_id)
   ) {
     visible.unshift(focusEvent);
   }
+  const pinned = (
+    els.decisionTransitionFeed.scrollHeight
+    - els.decisionTransitionFeed.scrollTop
+    - els.decisionTransitionFeed.clientHeight
+  ) < 24;
   els.decisionTransitionFeed.textContent = "";
   els.decisionEventCount.textContent = String(rows.length);
   const latest = focusEvent || rows.at(-1);
   els.decisionTransitionDetail.textContent = latest
-    ? decisionEventText(latest)
+    ? decisionConsoleText(latest, trace)
     : "Waiting for observed work";
-  visible.slice(-6).forEach((event) => {
+  visible.forEach((event) => {
     const item = document.createElement("li");
     item.className = "decision-transition-event";
+    item.dataset.phase = fmt(event.phase, "transition");
+    item.dataset.status = fmt(event.status, "active");
     item.classList.toggle(
       "current",
-      Boolean(focusEvent && event.event_id === focusEvent.event_id)
+      Boolean(
+        focusEvent
+          ? event.event_id === focusEvent.event_id
+          : trace?.active && event.event_id === rows.at(-1)?.event_id
+      )
     );
-    item.textContent = decisionEventText(event);
-    item.title = `${timeLabel(event.timestamp)} · ${decisionEventText(event)}`;
-    els.decisionTransitionFeed.appendChild(item);
+    const timestamp = document.createElement("time");
+    timestamp.textContent = timeLabel(event.timestamp);
+    const prompt = document.createElement("span");
+    prompt.className = "decision-console-mark";
+    prompt.textContent = event.status === "error"
+      ? "×"
+      : event.phase === "trigger"
+        ? "$"
+        : event.phase === "repair"
+          ? "↻"
+          : event.phase === "generate" && trace?.active
+            ? "›"
+            : "✓";
+    const message = document.createElement("span");
+    message.textContent = decisionConsoleText(event, trace);
+    item.append(timestamp, prompt, message);
+    item.title = `${timeLabel(event.timestamp)} · ${message.textContent}`;
+    els.decisionTransitionFeed.append(item);
   });
+  renderDecisionGeneration(trace);
+  if (pinned) els.decisionTransitionFeed.scrollTop = els.decisionTransitionFeed.scrollHeight;
 }
 
 function decisionTraceBlank(target) {
@@ -1111,6 +1230,7 @@ function decisionTraceBlank(target) {
     required_context_tokens: null,
     requested_context_tokens: null,
     context_tokens: null,
+    generation: null,
     steps: (lane.steps || []).map((step) => ({ ...step, status: "pending" })),
   }));
   return trace;
@@ -1157,7 +1277,7 @@ function applyDecisionTransition(current, target, event) {
   if (!lane || !targetLane) return frame;
   Object.assign(lane, {
     label: targetLane.label,
-    model: targetLane.model,
+    model: event.model || targetLane.model,
     phase: event.phase,
   });
   if (event.think !== undefined) {
@@ -1167,6 +1287,9 @@ function applyDecisionTransition(current, target, event) {
     .forEach((key) => {
       if (Number(event[key] || 0) > 0) lane[key] = Number(event[key]);
     });
+  if (["generate", "repair"].includes(event.phase) && targetLane.generation) {
+    lane.generation = cloneDecisionTrace(targetLane.generation);
+  }
 
   const phase = event.phase === "repair" ? "validate" : event.phase;
   const observedPhases = new Set(
@@ -1286,6 +1409,7 @@ function decisionTraceObservedFrame(target) {
     if (Number(targetLane.context_tokens || 0) > 0) {
       observed.context_tokens = Number(targetLane.context_tokens);
     }
+    observedLane.generation = cloneDecisionTrace(targetLane.generation);
     const activePhase = targetLane.phase === "repair" ? "validate" : targetLane.phase;
     const activeIndex = DECISION_LANE_PHASES.indexOf(activePhase);
     const observedPhases = new Set(targetLane.observed_phases || []);
@@ -1428,7 +1552,7 @@ function finishDecisionTracePlayback() {
     ? decisionTraceObservedFrame(decisionTracePlayback.target)
     : cloneDecisionTrace(decisionTracePlayback.target);
   renderDecisionTraceFrame(decisionTracePlayback.current);
-  renderDecisionTransitionFeed(decisionTracePlayback.target?.events);
+  renderDecisionTransitionFeed(decisionTracePlayback.target);
   setDecisionTransitionState(decisionTracePlayback.target);
 }
 
@@ -1452,7 +1576,7 @@ function playNextDecisionTransition() {
     event
   );
   renderDecisionTraceFrame(decisionTracePlayback.current, event);
-  renderDecisionTransitionFeed(decisionTracePlayback.current?.events, event);
+  renderDecisionTransitionFeed(decisionTracePlayback.current, event);
   setDecisionTransitionState(decisionTracePlayback.target, "catching-up");
   decisionTracePlayback.timer = window.setTimeout(playNextDecisionTransition, 300);
 }
@@ -1497,7 +1621,7 @@ function renderDecisionTrace(consensus) {
       : cloneDecisionTrace(target);
     events.forEach((event) => decisionTracePlayback.seen.add(event.event_id));
     renderDecisionTraceFrame(decisionTracePlayback.current);
-    renderDecisionTransitionFeed(events);
+    renderDecisionTransitionFeed(target);
     setDecisionTransitionState(target);
     return;
   }
@@ -1527,7 +1651,7 @@ function renderDecisionTrace(consensus) {
       && document.visibilityState !== "hidden"
     ) {
       renderDecisionTraceFrame(decisionTracePlayback.current);
-      renderDecisionTransitionFeed(decisionTracePlayback.current.events);
+      renderDecisionTransitionFeed(decisionTracePlayback.current);
       playNextDecisionTransition();
     } else {
       finishDecisionTracePlayback();
@@ -1548,7 +1672,7 @@ function renderDecisionTrace(consensus) {
       ? decisionTraceObservedFrame(target)
       : cloneDecisionTrace(target);
     renderDecisionTraceFrame(decisionTracePlayback.current);
-    renderDecisionTransitionFeed(events);
+    renderDecisionTransitionFeed(decisionTracePlayback.current);
     setDecisionTransitionState(target);
   }
 }

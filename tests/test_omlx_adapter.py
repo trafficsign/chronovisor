@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import tomllib
 from contextlib import nullcontext
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -213,6 +214,83 @@ def test_generate_normalizes_response() -> None:
     assert result.metadata["total_time"] == 1.5
 
 
+def test_generate_streams_redacted_progress_and_reassembles_response() -> None:
+    captured: list[dict[str, Any]] = []
+    updates: list[dict[str, Any]] = []
+    chunks = [
+        {"model": "m", "choices": [{"delta": {"role": "assistant"}}]},
+        {"model": "m", "choices": [{"delta": {"reasoning_content": "plan"}}]},
+        {"model": "m", "choices": [{"delta": {"content": '{"ok":true}'}}]},
+        {"model": "m", "choices": [{"delta": {}, "finish_reason": "stop"}]},
+        {
+            "model": "m",
+            "choices": [],
+            "usage": {
+                "prompt_tokens": 12,
+                "completion_tokens": 4,
+                "total_tokens": 16,
+                "generation_duration": 0.5,
+                "generation_tokens_per_second": 8.0,
+            },
+        },
+    ]
+    body = "".join(f"data: {json.dumps(chunk)}\n\n" for chunk in chunks)
+    body += "data: [DONE]\n\n"
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        captured.append(_json(request))
+        return httpx.Response(
+            200,
+            content=body,
+            request=request,
+            headers={"Content-Type": "text/event-stream"},
+        )
+
+    request = replace(
+        _minimal_message_request(),
+        progress_callback=updates.append,
+    )
+    result = OMLXAdapter(transport=httpx.MockTransport(handle)).generate(
+        request, model="m"
+    )
+
+    assert captured[0]["stream"] is True
+    assert captured[0]["stream_options"] == {"include_usage": True}
+    assert result.content == '{"ok":true}'
+    assert result.completed is True
+    assert result.metadata["streamed"] is True
+    assert result.metadata["reasoning_content"] == "plan"
+    assert (result.usage.input_tokens, result.usage.output_tokens) == (12, 4)
+    assert updates[-1] == {
+        "output_tokens": 4,
+        "generation_seconds": 0.5,
+        "tokens_per_second": 8.0,
+        "token_count_exact": True,
+        "max_output_tokens": 8,
+    }
+    assert not any(
+        "content" in update or "reasoning_content" in update for update in updates
+    )
+
+
+def test_generate_marks_stream_without_done_as_incomplete() -> None:
+    body = 'data: {"model":"m","choices":[{"delta":{"content":"x"}}]}\n\n'
+    adapter = OMLXAdapter(
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, content=body, request=request)
+        )
+    )
+
+    result = adapter.generate(
+        replace(_minimal_message_request(), progress_callback=lambda _event: None),
+        model="m",
+    )
+
+    assert result.content == "x"
+    assert result.completed is False
+    assert result.metadata["streamed"] is True
+
+
 def test_generate_falls_back_to_reasoning_content() -> None:
     adapter = OMLXAdapter(
         transport=httpx.MockTransport(
@@ -360,6 +438,7 @@ model = "bge-m3-mlx-fp16"
     assert config.providers["omlx"].kind == "omlx"
     assert config.providers["omlx"].capabilities_for("x").generation is True
     assert config.providers["omlx"].capabilities_for("x").embedding is True
+    assert config.providers["omlx"].capabilities_for("x").streaming is True
     runtime = build_llm_runtime(config)
     assert runtime.resolve_generation("recall.gate").provider == "omlx"
     assert runtime.resolve_embedding("classification.embedding").provider == "omlx"

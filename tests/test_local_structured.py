@@ -454,7 +454,84 @@ def test_default_transport_routes_non_ollama_local_without_ollama_control(
     assert result.ok is True
     assert result.model == "native-local-model"
     assert len(backend.requests) == 1
+    assert callable(backend.requests[0].progress_callback)
     _assert_single_load_before_context(audit_root)
+
+
+def test_stream_progress_persists_only_bounded_counters(tmp_path: Path) -> None:
+    audit_root = tmp_path / "audit"
+    observed_active: list[dict[str, Any]] = []
+    calls = 0
+
+    def transport(request: ChatRequest) -> str:
+        nonlocal calls
+        calls += 1
+        assert request.progress_callback is not None
+        if calls == 1:
+            request.progress_callback(
+                {
+                    "output_tokens": 24,
+                    "max_output_tokens": 256,
+                    "generation_seconds": 0.5,
+                    "tokens_per_second": 48.0,
+                    "token_count_exact": False,
+                    "content": "must never be persisted",
+                }
+            )
+            observed_active.append(
+                json.loads(next((audit_root / "active").glob("*.json")).read_text())
+            )
+            return "not json"
+        observed_active.append(
+            json.loads(next((audit_root / "active").glob("*.json")).read_text())
+        )
+        request.progress_callback(
+            {
+                "output_tokens": 32,
+                "max_output_tokens": 256,
+                "generation_seconds": 0.6,
+                "tokens_per_second": 53.333,
+                "token_count_exact": True,
+                "reasoning_content": "must never be persisted",
+            }
+        )
+        return '{"decision":"apply","summary":"ok"}'
+
+    result = _session(
+        transport,
+        audit_root=audit_root,
+        role="review:primary",
+    ).run("decide", SCHEMA)
+
+    assert result.ok is True
+    assert observed_active[0]["generation"] == {
+        "output_tokens": 24,
+        "max_output_tokens": 256,
+        "generation_seconds": 0.5,
+        "tokens_per_second": 48.0,
+        "token_count_exact": False,
+    }
+    assert "generation" not in observed_active[1]
+    session = json.loads((audit_root / "audit.jsonl").read_text())
+    assert session["generation"] == {
+        "output_tokens": 32,
+        "max_output_tokens": 256,
+        "generation_seconds": 0.6,
+        "tokens_per_second": 53.333,
+        "token_count_exact": True,
+    }
+    assert "content" not in json.dumps(session)
+    trace = [
+        json.loads(line)
+        for line in (audit_root / "trace-events.jsonl").read_text().splitlines()
+    ]
+    assert [row["phase"] for row in trace if row["kind"] == "phase"].count(
+        "generate"
+    ) == 1
+    assert [row["phase"] for row in trace if row["kind"] == "phase"].count(
+        "repair"
+    ) == 1
+    assert trace[-1]["generation"] == session["generation"]
 
 
 def test_resource_managed_default_local_emits_one_load_before_context(

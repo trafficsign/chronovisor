@@ -271,6 +271,9 @@ class MessageGenerationRequest:
     temperature: int | float = 0
     seed: int = 0
     think: bool | str = False
+    progress_callback: Callable[[dict[str, Any]], None] | None = field(
+        default=None, repr=False
+    )
 
 
 GenerationInput = GenerationRequest | MessageGenerationRequest

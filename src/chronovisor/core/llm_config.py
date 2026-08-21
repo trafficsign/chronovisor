@@ -302,7 +302,10 @@ def _provider(provider_id: str, value: object) -> ProviderDefinition:
             provider_id,
             kind,
             BackendCapabilities(
-                generation=True, embedding=True, structured_output=True
+                generation=True,
+                embedding=True,
+                structured_output=True,
+                streaming=True,
             ),
         )
     if kind == "local-transformers":

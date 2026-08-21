@@ -29,7 +29,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-from collections.abc import Mapping
+import time
+from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager, nullcontext
 from pathlib import Path
 from typing import Any
@@ -73,6 +74,9 @@ class OMLXAdapter:
 
     def generate(self, request: GenerationInput, *, model: str) -> GenerationResult:
         payload = self._request_payload(request, model=model)
+        progress_callback = getattr(request, "progress_callback", None)
+        streamed = callable(progress_callback)
+        stream_complete: bool | None = None
         try:
             # ponytail: one DFlash engine per oMLX server; replace this global
             # lease only if oMLX gains native per-engine request queueing.
@@ -82,16 +86,31 @@ class OMLXAdapter:
                 else nullcontext()
             )
             with lease:
-                response = self._post(
-                    "/chat/completions",
-                    payload,
-                    timeout_ms=request.timeout_ms,
-                )
+                if streamed:
+                    response, stream_complete = self._post_stream(
+                        "/chat/completions",
+                        payload,
+                        timeout_ms=request.timeout_ms,
+                        progress_callback=progress_callback,
+                        max_output_tokens=request.max_output_tokens,
+                    )
+                else:
+                    response = self._post(
+                        "/chat/completions",
+                        payload,
+                        timeout_ms=request.timeout_ms,
+                    )
         except (TimeoutError, httpx.TimeoutException):
             raise SafeBackendError("timeout", transient=True) from None
         except httpx.TransportError:
             raise SafeBackendError("transport_error", transient=True) from None
-        return self._normalize_chat(response, model=model, request=request)
+        return self._normalize_chat(
+            response,
+            model=model,
+            request=request,
+            streamed=streamed,
+            stream_complete=stream_complete,
+        )
 
     def embed(self, request: EmbeddingRequest, *, model: str) -> EmbeddingResult:
         try:
@@ -190,6 +209,148 @@ class OMLXAdapter:
                 timeout=None if timeout_ms is None else timeout_ms / 1000,
             )
 
+    def _post_stream(
+        self,
+        path: str,
+        payload: Mapping[str, object],
+        *,
+        timeout_ms: int | None,
+        progress_callback: Callable[[dict[str, Any]], None],
+        max_output_tokens: int | None,
+    ) -> tuple[httpx.Response, bool]:
+        request_payload = {
+            **payload,
+            "stream": True,
+            "stream_options": {"include_usage": True},
+        }
+        content: list[str] = []
+        reasoning: list[str] = []
+        usage: dict[str, Any] = {}
+        finish_reason: str | None = None
+        output_chunks = 0
+        saw_done = False
+        started = time.monotonic()
+        last_emitted = started
+
+        def emit(*, exact: bool = False) -> None:
+            nonlocal last_emitted
+            now = time.monotonic()
+            output_tokens = (
+                usage.get("completion_tokens") if exact else output_chunks
+            )
+            if not isinstance(output_tokens, int) or isinstance(output_tokens, bool):
+                output_tokens = output_chunks
+                exact = False
+            generation_seconds = (
+                usage.get("generation_duration") if exact else None
+            )
+            if not isinstance(generation_seconds, (int, float)):
+                generation_seconds = max(0.0, now - started)
+            tokens_per_second = (
+                usage.get("generation_tokens_per_second") if exact else None
+            )
+            if not isinstance(tokens_per_second, (int, float)):
+                tokens_per_second = (
+                    output_tokens / generation_seconds if generation_seconds > 0 else 0.0
+                )
+            event: dict[str, Any] = {
+                "output_tokens": output_tokens,
+                "generation_seconds": round(float(generation_seconds), 3),
+                "tokens_per_second": round(float(tokens_per_second), 3),
+                "token_count_exact": exact,
+            }
+            if isinstance(max_output_tokens, int) and not isinstance(
+                max_output_tokens, bool
+            ):
+                event["max_output_tokens"] = max_output_tokens
+            try:
+                progress_callback(event)
+            except Exception:
+                pass
+            last_emitted = now
+
+        with httpx.Client(base_url=OMLX_BASE_URL, transport=self._transport) as client:
+            with client.stream(
+                "POST",
+                path,
+                json=request_payload,
+                headers={
+                    "Content-Type": "application/json",
+                    _OMLX_AUTH_HEADER: OMLX_API_KEY,
+                },
+                timeout=None if timeout_ms is None else timeout_ms / 1000,
+            ) as response:
+                if response.status_code >= 300:
+                    response.read()
+                    self._json_body(response)
+                for line in response.iter_lines():
+                    if not line.startswith("data:"):
+                        continue
+                    data = line[5:].strip()
+                    if data == "[DONE]":
+                        saw_done = True
+                        break
+                    try:
+                        event = json.loads(data)
+                    except (TypeError, json.JSONDecodeError):
+                        raise SafeBackendError(
+                            "invalid_response", transient=False
+                        ) from None
+                    if not isinstance(event, dict):
+                        raise SafeBackendError(
+                            "invalid_response", transient=False
+                        ) from None
+                    if "error" in event:
+                        raise SafeBackendError("http_5xx", transient=True)
+                    event_usage = event.get("usage")
+                    if isinstance(event_usage, dict):
+                        usage.update(event_usage)
+                    choices = event.get("choices")
+                    choice = (
+                        choices[0] if isinstance(choices, list) and choices else None
+                    )
+                    if isinstance(choice, dict):
+                        delta = choice.get("delta")
+                        emitted_text = False
+                        if isinstance(delta, dict):
+                            value = delta.get("content")
+                            if isinstance(value, str) and value:
+                                content.append(value)
+                                emitted_text = True
+                            value = delta.get("reasoning_content")
+                            if isinstance(value, str) and value:
+                                reasoning.append(value)
+                                emitted_text = True
+                        if emitted_text:
+                            output_chunks += 1
+                        value = choice.get("finish_reason")
+                        if isinstance(value, str) and value:
+                            finish_reason = value
+                    now = time.monotonic()
+                    if output_chunks and now - last_emitted >= 0.5:
+                        emit()
+
+        exact = isinstance(usage.get("completion_tokens"), int)
+        if output_chunks or exact:
+            emit(exact=exact)
+        message: dict[str, Any] = {
+            "role": "assistant",
+            "content": "".join(content),
+        }
+        if reasoning:
+            message["reasoning_content"] = "".join(reasoning)
+        normalized = httpx.Response(
+            200,
+            json={
+                "model": str(payload.get("model") or ""),
+                "choices": [
+                    {"index": 0, "message": message, "finish_reason": finish_reason}
+                ],
+                "usage": usage,
+            },
+        )
+        return normalized, bool(saw_done and finish_reason)
+
     @staticmethod
     def _uses_dflash(model: str) -> bool:
         """Conservatively serialize models unless settings explicitly disable DFlash."""
@@ -241,6 +402,8 @@ class OMLXAdapter:
         *,
         model: str,
         request: GenerationInput,
+        streamed: bool = False,
+        stream_complete: bool | None = None,
     ) -> GenerationResult:
         payload = self._json_body(response)
         choices = payload.get("choices")
@@ -259,9 +422,12 @@ class OMLXAdapter:
         metadata: dict[str, Any] = {}
         if isinstance(reasoning, str) and reasoning:
             metadata["reasoning_content"] = reasoning
-        metadata["total_time"] = payload.get("usage", {}).get("total_time")
-        metadata["model_load_duration"] = payload.get("usage", {}).get("model_load_duration")
         usage = payload.get("usage")
+        if isinstance(usage, dict):
+            metadata["total_time"] = usage.get("total_time")
+            metadata["model_load_duration"] = usage.get("model_load_duration")
+        if streamed:
+            metadata["streamed"] = True
         input_tokens: int | None = None
         output_tokens: int | None = None
         if isinstance(usage, dict):
@@ -274,7 +440,11 @@ class OMLXAdapter:
             content=content,
             provider=self.provider,
             model=model,
-            completed=bool(finish_reason is not None) or bool(content),
+            completed=(
+                bool(stream_complete)
+                if streamed
+                else bool(finish_reason is not None) or bool(content)
+            ),
             finish_reason=finish_reason if isinstance(finish_reason, str) else None,
             usage=TokenUsage(
                 input_tokens=input_tokens or 0,
@@ -306,7 +476,10 @@ def compose_omlx_runtime(
                 adapter,
                 model,
                 BackendCapabilities(
-                    generation=True, embedding=True, structured_output=True
+                    generation=True,
+                    embedding=True,
+                    structured_output=True,
+                    streaming=True,
                 ),
                 "omlx-native",
                 hashlib.sha256(OMLX_BASE_URL.encode("utf-8")).hexdigest(),

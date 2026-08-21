@@ -523,8 +523,8 @@ def test_dashboard_reference_keeps_selection_and_bucket_truth() -> None:
     reference_style = style.split("/* ---------- reference-first", 1)[1]
     processing_panel_style = reference_style.split(".processing-panel {", 1)[1].split("}", 1)[0]
     assert "height: auto;" in processing_panel_style
-    assert style.count("height: 1030px;") == 2
-    assert style.count("height: 802px;") == 2
+    assert "height: 1030px;" not in style
+    assert "height: 802px;" not in style
     assert style.count("height: 607px;") == 2
     assert "trace-check" not in page
     assert ".trace-check" not in style
@@ -599,7 +599,8 @@ def test_dashboard_reference_keeps_selection_and_bucket_truth() -> None:
     assert "filter: url(" not in active_rail_style
     assert (
         ".decision-trace-harness .decision-lane-step.active circle,\n"
-        "  .decision-trace-harness .trace-lane-rail.active {\n"
+        "  .decision-trace-harness .trace-lane-rail.active,\n"
+        "  .decision-generation-track.indeterminate i {\n"
         "    animation: none;"
     ) in style
     assert '<radialGradient id="trace-processing-core">' in page
@@ -638,31 +639,14 @@ def test_dashboard_reference_keeps_selection_and_bucket_truth() -> None:
     assert "filter: url(#trace-glow-violet);" in style.split(
         ".decision-trace-harness .active.trace-node circle,", 1
     )[1].split("}", 1)[0]
-    assert (
-        ".decision-transition-bar:has(.decision-events[open]) {\n"
-        "  flex-basis: auto;\n"
-        "  align-items: start;\n"
-        "  min-height: 240px;\n"
-        "  padding-block: 15px;"
-    ) in style
-    assert (
-        ".decision-trace-panel:has(.decision-events[open]) {\n"
-        "  height: auto;"
-    ) in style
-    event_feed_style = style.split(
-        ".decision-events .decision-transition-feed {", 1
-    )[1].split("}", 1)[0]
-    assert "position: absolute;" not in event_feed_style
-    assert "bottom:" not in event_feed_style
-    assert "margin-top: 8px;" in event_feed_style
-    assert (
-        ".decision-transition-bar:has(.decision-events[open]) {\n"
-        "    grid-template-columns: 1fr;"
-    ) in style
-    assert (
-        ".decision-events .decision-transition-feed {\n"
-        "    width: auto;"
-    ) in style
+    assert ".decision-console-chrome {\n  display: grid;" in style
+    assert ".decision-console-lights i:first-child {\n  background: #ff5f57;" in style
+    assert ".decision-transition-feed {\n  display: grid;" in style
+    assert ".decision-transition-event {\n  display: grid;" in style
+    assert ".decision-generation-meter {\n  display: grid;" in style
+    assert ".decision-generation-track.indeterminate i {" in style
+    assert "@keyframes decision-console-scan" in style
+    assert ".decision-events" not in page
     frame = renderer.split("function renderDecisionTraceFrame", 1)[1].split(
         "function setDecisionTransitionState", 1
     )[0]

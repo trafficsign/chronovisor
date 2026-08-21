@@ -2133,6 +2133,9 @@ def _local_consensus_activities() -> list[dict[str, Any]]:
                     "required_context_tokens": row.get("required_num_ctx"),
                     "requested_context_tokens": row.get("requested_num_ctx"),
                     "context_tokens": row.get("context_tokens"),
+                    "generation": _decision_trace_generation(
+                        row.get("generation")
+                    ),
                     "started_at": row.get("started_at"),
                     "updated_at": row.get("updated_at"),
                     "pid": pid,
@@ -2928,6 +2931,34 @@ _DECISION_TRACE_PHASES = ("trigger", "load", "context", "generate", "validate", 
 _DECISION_TRACE_EVENT_LIMIT = 64
 
 
+def _decision_trace_generation(value: object) -> dict[str, Any] | None:
+    """Project only bounded generation counters onto the LAN dashboard."""
+
+    if not isinstance(value, Mapping):
+        return None
+    progress: dict[str, Any] = {}
+    for key in ("output_tokens", "max_output_tokens"):
+        item = value.get(key)
+        if (
+            isinstance(item, int)
+            and not isinstance(item, bool)
+            and 0 <= item <= 1_000_000
+        ):
+            progress[key] = item
+    for key in ("generation_seconds", "tokens_per_second"):
+        item = value.get(key)
+        if (
+            isinstance(item, (int, float))
+            and not isinstance(item, bool)
+            and math.isfinite(float(item))
+            and 0 <= float(item) <= 1_000_000
+        ):
+            progress[key] = round(float(item), 3)
+    if isinstance(value.get("token_count_exact"), bool):
+        progress["token_count_exact"] = value["token_count_exact"]
+    return progress or None
+
+
 def _decision_trace_role(value: object) -> tuple[str, str, bool]:
     role = str(value or "structured")
     if role in _DECISION_TRACE_ROLES:
@@ -3102,6 +3133,9 @@ def _decision_trace_events(
             value = row.get(source)
             if isinstance(value, int) and not isinstance(value, bool) and value > 0:
                 event[target] = value
+        generation = _decision_trace_generation(row.get("generation"))
+        if generation is not None:
+            event["generation"] = generation
         events.append(event)
     return events[-_DECISION_TRACE_EVENT_LIMIT:]
 
@@ -3596,6 +3630,7 @@ def _decision_trace_lanes(
                 "detail": detail,
                 "repair_turns": repair_turns,
                 "phase": phase,
+                "generation": _decision_trace_generation((observed or {}).get("generation")),
                 "steps": _decision_trace_steps(state, phase=phase),
             }
         )
