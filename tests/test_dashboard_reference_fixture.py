@@ -510,10 +510,15 @@ def test_dashboard_reference_keeps_selection_and_bucket_truth() -> None:
         < page.index('data-path-key="plan-context"')
         < page.index('data-plan-value="context-selection"')
     )
-    assert (
-        '.processing-lane[aria-selected="false"] .processing-track {\n'
-        "  visibility: hidden;"
-    ) in style
+    unselected_track_style = style.split(
+        '.processing-lane[aria-selected="false"] .processing-track {', 1
+    )[1].split("}", 1)[0]
+    assert "opacity: 0.42;" in unselected_track_style
+    assert "visibility: hidden;" not in unselected_track_style
+    assert '.processing-lane.active[aria-selected="false"] .processing-track {' in style
+    assert "opacity: 0.72;" in style
+    assert '.processing-lane[aria-selected="true"] {' in style
+    assert "box-shadow: inset 2px 0 #898dff;" in style
     pending_repair_style = style.split(
         ".decision-trace-harness .trace-repair-loop.pending {", 1
     )[1].split("}", 1)[0]

@@ -2932,6 +2932,11 @@ canvas {
   color: #a9abff;
 }
 
+.processing-lane[aria-selected="true"] {
+  background: linear-gradient(90deg, rgba(137, 141, 255, 0.11), transparent 34%);
+  box-shadow: inset 2px 0 #898dff;
+}
+
 .processing-lane.active .processing-lane-label::after {
   background: #898dff;
   box-shadow: 0 0 8px rgba(137, 141, 255, 0.52);
@@ -2939,10 +2944,20 @@ canvas {
 
 .processing-track {
   align-items: center;
+  opacity: 1;
+  transition: opacity 0.18s var(--ease), filter 0.18s var(--ease);
 }
 
 .processing-lane[aria-selected="false"] .processing-track {
-  visibility: hidden;
+  opacity: 0.42;
+}
+
+.processing-lane.active[aria-selected="false"] .processing-track {
+  opacity: 0.72;
+}
+
+.processing-lane[aria-selected="true"] .processing-track {
+  filter: brightness(1.12);
 }
 
 .processing-track:has(.processing-step:nth-child(5):last-child) {
