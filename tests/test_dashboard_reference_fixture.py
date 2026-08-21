@@ -520,7 +520,10 @@ def test_dashboard_reference_keeps_selection_and_bucket_truth() -> None:
     assert "stroke-dasharray: 4 5;" in pending_repair_style
     assert "opacity: 0.66;" in pending_repair_style
     assert "filter: none;" in pending_repair_style
-    assert style.count("height: 1030px;") == 3
+    reference_style = style.split("/* ---------- reference-first", 1)[1]
+    processing_panel_style = reference_style.split(".processing-panel {", 1)[1].split("}", 1)[0]
+    assert "height: auto;" in processing_panel_style
+    assert style.count("height: 1030px;") == 2
     assert style.count("height: 802px;") == 2
     assert style.count("height: 607px;") == 2
     assert "trace-check" not in page
@@ -1056,6 +1059,8 @@ addEventListener("DOMContentLoaded", () => {
     scroller.scrollLeft = scroller.scrollWidth;
     const scrollerBounds = scroller.getBoundingClientRect();
     const harnessBounds = harness.getBoundingClientRect();
+    const decisionBounds = document.querySelector("#decision-trace-panel").getBoundingClientRect();
+    const saveHistoryBounds = document.querySelector("#save-history-panel").getBoundingClientRect();
     const scrollerRight = scrollerBounds.right;
     const harnessRight = harnessBounds.right;
     const layout = {
@@ -1064,6 +1069,7 @@ addEventListener("DOMContentLoaded", () => {
       scrollLeft: scroller.scrollLeft,
       rightReachable: harnessRight <= scrollerRight + 1,
       fitsWidth: Math.abs(harnessBounds.width - scrollerBounds.width) <= 1,
+      nextPanelGap: saveHistoryBounds.top - decisionBounds.bottom,
     };
     scroller.scrollLeft = 0;
     return {
@@ -1246,6 +1252,7 @@ addEventListener("DOMContentLoaded", () => {
         assert result["layout"]["scrollWidth"] == result["layout"]["clientWidth"]
         assert result["layout"]["rightReachable"] is True
         assert result["layout"]["fitsWidth"] is True
+        assert result["layout"]["nextPanelGap"] == 12
         selected_index = (
             case["lane_states"].index("active")
             if "active" in case["lane_states"]

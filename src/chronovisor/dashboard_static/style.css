@@ -2889,7 +2889,7 @@ canvas {
 
 .processing-panel {
   position: relative;
-  height: 1030px;
+  height: auto;
   min-height: 0;
   padding: 0;
   overflow: visible;
