@@ -2717,6 +2717,9 @@ def test_dashboard_reuses_decision_trace_poll_for_live_consensus_status() -> Non
     assert "setState(displayState);" in live_helper
     assert "renderLocalConsensusSummary(latestRenderedStatus);" in live_helper
     assert "renderWorkStatus(latestRenderedStatus);" in live_helper
+    assert live_helper.rindex("renderDecisionTrace(mergedConsensus);") > live_helper.index(
+        "renderWorkStatus(latestRenderedStatus);"
+    )
     assert 'fetch("/api/local-consensus"' in refresh_block
     assert "renderLiveConsensus(consensus);" in refresh_block
     assert "void refreshLiveModelStatus(consensus.activities || []);" in refresh_block

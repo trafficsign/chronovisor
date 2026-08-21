@@ -105,8 +105,10 @@ function renderLiveConsensus(consensus) {
     },
   };
   latestLiveConsensus = mergedConsensus;
-  renderDecisionTrace(mergedConsensus);
-  if (!latestRenderedStatus) return;
+  if (!latestRenderedStatus) {
+    renderDecisionTrace(mergedConsensus);
+    return;
+  }
   latestRenderedStatus = {
     ...latestRenderedStatus,
     local_consensus: mergedConsensus,
@@ -118,6 +120,7 @@ function renderLiveConsensus(consensus) {
   setState(displayState);
   renderLocalConsensusSummary(latestRenderedStatus);
   renderWorkStatus(latestRenderedStatus);
+  renderDecisionTrace(mergedConsensus);
 }
 
 async function refreshLiveModelStatus(activities) {
