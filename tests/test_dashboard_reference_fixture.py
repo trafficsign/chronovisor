@@ -646,6 +646,8 @@ def test_dashboard_reference_keeps_selection_and_bucket_truth() -> None:
     )[1].split("}", 1)[0]
     assert ".decision-console-chrome {\n  display: grid;" in style
     assert ".decision-console-lights i:first-child {\n  background: #ff5f57;" in style
+    assert "grid-template-rows: 32px 32px 142px 55px;" in style
+    assert "min-height: 261px;" in style
     assert ".decision-transition-feed {\n  display: grid;" in style
     assert ".decision-transition-event {\n  display: grid;" in style
     assert ".decision-generation-meter {\n  display: grid;" in style
